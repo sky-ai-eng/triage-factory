@@ -312,7 +312,7 @@ type Stores struct {
 
 	// GitHubPendingBinds owns github_pending_binds — one row per initiated
 	// deployment-App bind ceremony, the durable half of the CSRF pair that
-	// proves a returning installation belongs to the workspace that asked for
+	// proves a returning installation belongs to the org that asked for
 	// it. Admin-pool-only in Postgres, and forced rather than chosen: the
 	// consume finds the row by its nonce hash and learns the org from it, so
 	// the org a policy would gate on is the read's output. Not in TxStores —

@@ -103,7 +103,7 @@ type App struct {
 	// mode.
 	commitSigner *commitsigner.ControlPlane
 	// deploymentSigner is the deployment's commit signer, the account every
-	// workspace on the deployment App signs as unless it registers its own:
+	// org on the deployment App signs as unless it registers its own:
 	// TF_GITHUB_COMMIT_SIGNER_*, read at boot on a multi-mode control pod and
 	// nowhere else, so no executor holds its key. nil when none is
 	// configured, and on every other role and mode.
@@ -354,14 +354,14 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 		appLog.Info("commit signing budgets",
 			"per_org_minute", a.commitSigningBudgets.PerOrgMinute, "per_claim", a.commitSigningBudgets.PerClaim)
 		// Half a configuration refuses the boot rather than leaving every
-		// managed workspace committing unsigned with nothing saying why.
+		// managed org committing unsigned with nothing saying why.
 		if a.deploymentSigner, err = commitsigner.DeploymentSignerFromEnv(); err != nil {
 			return nil, fmt.Errorf("deployment commit signer: %w", err)
 		}
 		if a.deploymentSigner.Configured() {
 			appLog.Info("deployment commit signer", "signer", a.deploymentSigner)
 		} else if runmode.Current() == runmode.ModeLocal && deploymentSignerSet() {
-			appLog.Warn("TF_GITHUB_COMMIT_SIGNER_* is set but ignored in local mode: the deployment signer serves workspaces on the deployment App, which local mode has none of; register the org's own signer in Settings → Commit signing")
+			appLog.Warn("TF_GITHUB_COMMIT_SIGNER_* is set but ignored in local mode: the deployment signer serves organizations on the deployment App, which local mode has none of; register the org's own signer in Settings → Commit signing")
 		}
 	} else if deploymentSignerSet() {
 		appLog.Warn("TF_GITHUB_COMMIT_SIGNER_* is set but ignored on TF_ROLE=executor: an executor never holds a signing key, so forward the deployment signer to the control pods only")

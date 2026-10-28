@@ -80,7 +80,7 @@ func run(ctx context.Context, args []string) error {
 	// identity below (server, host CLI, the sidecar harness) keys hosts
 	// through it, so it must be the same answer for all of them. Applies in
 	// both modes; a value that is not a web base fails boot rather than
-	// pointing every unset workspace somewhere unresolvable.
+	// pointing every unset org somewhere unresolvable.
 	if err := ghbase.InitDefaultBaseURLFromEnv(); err != nil {
 		return fmt.Errorf("default github host: %w", err)
 	}

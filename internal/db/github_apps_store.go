@@ -142,8 +142,8 @@ type GitHubAppsStore interface {
 	// InstallationOwnerSystem reports which org holds installationID on
 	// githubHost as a LIVE installation (removed_at IS NULL), or "" when none
 	// does. It is the uniqueness gate of the bind ceremony: with one App key
-	// serving many workspaces, an installation GitHub reports is not
-	// self-evidently anybody's, and binding one that another workspace already
+	// serving many orgs, an installation GitHub reports is not
+	// self-evidently anybody's, and binding one that another org already
 	// holds would hand that account's repositories to a second tenant.
 	//
 	// Scoped by host as well as id because an installation id is unique per
@@ -153,7 +153,7 @@ type GitHubAppsStore interface {
 	//
 	// It returns the org id and nothing else, which is the whole answer a
 	// caller may have: the refusal it feeds must never name the other
-	// workspace. A removed row is not an owner — an uninstalled installation
+	// org. A removed row is not an owner — an uninstalled installation
 	// reaches nothing, and re-binding it is an ordinary new bind.
 	//
 	// This read is a check, not a guarantee. Nothing in the schema stops a
@@ -179,7 +179,7 @@ type GitHubAppsStore interface {
 	// on that host alone — so a managed row under any other spelling (a
 	// different GitHub, a case difference, a path segment, a bind from before
 	// the default was set) is bound on paper and unreachable in practice, and
-	// nothing migrates it. BYO rows are outside the question: a workspace with
+	// nothing migrates it. BYO rows are outside the question: an org with
 	// its own App keys its rows under its own configured host and is reached
 	// through its own webhook URL, so a BYO row off the default is ordinary.
 	//
@@ -263,8 +263,8 @@ type GitHubAppsStore interface {
 	// resource of its own. Admin pool in Postgres.
 	MarkInstallationRemoved(ctx context.Context, orgID, githubHost, installationID string) (*domain.OrgGitHubAppInstallation, error)
 
-	// BackfillInstallationsFromAPI is the reconcile / system-of-record for a
-	// workspace that brought its OWN App: it mints an App JWT from the org's
+	// BackfillInstallationsFromAPI is the reconcile / system-of-record for an
+	// org that brought its OWN App: it mints an App JWT from the org's
 	// App PEM (read via SecretStore.GetSystem), calls GET
 	// {apiBase}/app/installations, upserts every installation returned, and
 	// soft-removes any active row on the listed host that GitHub no longer
@@ -278,11 +278,11 @@ type GitHubAppsStore interface {
 	// cycle + UI refresh) is a separate concern.
 	//
 	// It is therefore structurally not the managed class's reconcile, and needs
-	// no class check to stay out of it: a workspace riding the deployment App
+	// no class check to stay out of it: an org riding the deployment App
 	// holds no org_github_apps row and can hold none — that table is one row per
 	// org with a UNIQUE app_id, so N orgs cannot each name the one shared App —
 	// so this method finds nothing to mint a JWT from and returns. See
-	// RefreshManagedInstallations for what such a workspace gets instead.
+	// RefreshManagedInstallations for what such an org gets instead.
 	//
 	// Reconciles for any REGISTERED App regardless of its active flag: a
 	// staged App (active=false, mid PAT→App switch) must still be able to
@@ -314,13 +314,13 @@ type GitHubAppsStore interface {
 	// value could name.
 	BackfillInstallationsFromAPI(ctx context.Context, orgID string) error
 
-	// RefreshManagedInstallations is the same reconcile for a workspace on the
-	// DEPLOYMENT App — the one App key that serves many workspaces — and the
+	// RefreshManagedInstallations is the same reconcile for an org on the
+	// DEPLOYMENT App — the one App key that serves many orgs — and the
 	// difference is the whole point: for the managed class the reconcile
 	// REFRESHES; it never DISCOVERS. It may update rows that already exist and
 	// may never create one. Discovery belongs exclusively to the bind ceremony,
 	// which is the only thing that can assert an installation is this
-	// workspace's.
+	// org's.
 	//
 	// Concretely it lists GET {apiBase}/app/installations under the deployment
 	// key, keeps only the installations this org has already bound on its own
@@ -353,34 +353,34 @@ type GitHubAppsStore interface {
 
 	// RefreshAllManagedInstallations is the cadence pass for the managed class:
 	// the same refresh as RefreshManagedInstallations, for EVERY managed
-	// workspace at once, from one listing of the deployment's GitHub rather
+	// org at once, from one listing of the deployment's GitHub rather
 	// than one per org. Under a shared key the listing is the same whoever asks, so the
 	// per-org shape spends one shared rate budget N times for N identical
-	// answers; this reads every managed workspace's bound set in one query,
+	// answers; this reads every managed org's bound set in one query,
 	// lists once, and fans the answer out to the orgs that bound each
 	// installation (db.RefreshManagedInstallationSets holds the mechanics).
 	//
 	// Same invariants as the sibling, held by the same filter: bound rows on the
-	// workspace's own host converge — account login and id, the suspension pair,
+	// org's own host converge — account login and id, the suspension pair,
 	// repository_selection — and a bound installation GitHub no longer reports
 	// is soft-removed with its reachable-repo cascade; an installation no
-	// workspace bound is never written, nor is a row on another host; a failed
-	// listing changes nothing; a managed workspace whose
+	// org bound is never written, nor is a row on another host; a failed
+	// listing changes nothing; a managed org whose
 	// base URL resolves to a GitHub other than the deployment's is skipped
 	// with its rows untouched and the mismatch carried to the returned error
-	// (db.ErrManagedWorkspaceOnOtherGitHub). A workspace on any other class
+	// (db.ErrManagedOrgOnOtherGitHub). An org on any other class
 	// is not in the read at all, so nothing here can touch a BYO org's rows.
 	//
 	// Two scopes, two methods, and the split is deliberate: the sibling's
 	// (ctx, orgID, deployment) signature is right for the Settings button — an
-	// admin refreshing their own workspace — and is not a lever any tenant can
+	// admin refreshing their own org — and is not a lever any tenant can
 	// pull to make the deployment enumerate everything. This one has no org
 	// parameter because it has no tenant caller: it runs on the poll cadence, on
 	// the brain-lease holder, and nowhere a request can reach.
 	//
-	// A deployment with no managed workspace holding a bound installation is
+	// A deployment with no managed org holding a bound installation is
 	// answered without a request. One that has some and no configured deployment
-	// App is an error, as for the sibling: a managed workspace whose shared key
+	// App is an error, as for the sibling: a managed org whose shared key
 	// has gone missing must fail where someone can see it. Claims-free by
 	// construction (the read spans orgs); admin pool in Postgres.
 	//

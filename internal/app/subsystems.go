@@ -525,10 +525,10 @@ func (a *App) newPollerManager() *poller.Manager {
 	m.ReconcileGrant = a.grantReconciler.RunOrg
 	// The managed installation set's pull-side convergence: one listing of the
 	// deployment App's installations per GitHub cycle, fanned out to the
-	// workspaces that bound each. A deployment singleton — it does not fit the
+	// orgs that bound each. A deployment singleton — it does not fit the
 	// per-org Manager.Trigger(orgID) shape the other passes take — hung off the
 	// same cycle and the same brain lease as the grant pass above. A no-op
-	// wherever no managed workspace has bound an installation; where one has and
+	// wherever no managed org has bound an installation; where one has and
 	// no deployment App is configured, an error the poller warns on every cycle.
 	m.RefreshManagedInstallations = a.grantReconciler.RunDeployment
 	// The mirror that pass writes, read back when an installation's grant

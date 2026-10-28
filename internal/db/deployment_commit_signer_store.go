@@ -70,7 +70,7 @@ type DeploymentCommitSignerStore interface {
 	// in any org, whose pushed commit GitHub last reported as not verified, or
 	// (nil, nil) when there is none. Verify re-reads that commit with its
 	// org's credential. Cross-org: the deployment signer serves every managed
-	// workspace.
+	// org.
 	NewestFailedVerificationSystem(ctx context.Context, host string, userID int64) (*domain.CommitSignature, error)
 }
 

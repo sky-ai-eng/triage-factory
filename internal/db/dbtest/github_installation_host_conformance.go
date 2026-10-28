@@ -44,7 +44,7 @@ type GitHubInstallationHostFactory func(t *testing.T) (db.GitHubAppsStore, GitHu
 //     installations, in one org as across two, so neither write takes over the
 //     other's row, and a removal or a suspension addresses one of them;
 //   - and the mirror of that, which the column is half the key of: on ONE
-//     deployment, an installation belongs to exactly one workspace, refused by a
+//     deployment, an installation belongs to exactly one org, refused by a
 //     unique index over live rows rather than by any caller's filter;
 //   - an account login is held once per org per deployment, not once per org:
 //     the same login on two hosts names two accounts, and one host still
@@ -254,7 +254,7 @@ func RunGitHubInstallationHostConformance(t *testing.T, mk GitHubInstallationHos
 	t.Run("InstallationOwnerIgnoresRemovedAndUnknown", func(t *testing.T) {
 		// An uninstalled installation reaches nothing, so it owns nothing:
 		// re-binding it is an ordinary new bind, not a collision with the
-		// workspace that once had it.
+		// org that once had it.
 		store, seed := mk(t)
 		org := seed.Org(t, seed.User(t))
 
@@ -278,15 +278,15 @@ func RunGitHubInstallationHostConformance(t *testing.T, mk GitHubInstallationHos
 	})
 
 	t.Run("SameInstallationIDOnOneHostIsRefused", func(t *testing.T) {
-		// One installation belongs to exactly one workspace per host, and the
+		// One installation belongs to exactly one org per host, and the
 		// index enforces it rather than a filter somewhere upstream. The grant is
 		// not divisible, installation.deleted fires once, the rate budget is
 		// shared, and the account owner cannot enumerate who rides their
-		// installation — two workspaces on one installation is not a state
+		// installation — two orgs on one installation is not a state
 		// anything downstream can represent.
 		//
 		// The refusal is the whole assertion, but so is what it leaves behind:
-		// the workspace that already held the installation keeps its row exactly
+		// the org that already held the installation keeps its row exactly
 		// as it was, so a rejected claim costs the incumbent nothing.
 		store, seed := mk(t)
 		owner := seed.User(t)
@@ -316,7 +316,7 @@ func RunGitHubInstallationHostConformance(t *testing.T, mk GitHubInstallationHos
 	t.Run("RemovedInstallationFreesItsIDOnThatHost", func(t *testing.T) {
 		// The uniqueness index is partial on live rows, and this is what that
 		// buys. An uninstalled installation reaches nothing and therefore holds
-		// nothing, so the id becoming another workspace's is an ordinary bind
+		// nothing, so the id becoming another org's is an ordinary bind
 		// rather than a collision — the same answer InstallationOwnerSystem
 		// already gives for a removed row.
 		store, seed := mk(t)

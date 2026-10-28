@@ -23,14 +23,14 @@ const GitHubPendingBindPruneAge = time.Hour
 
 // GitHubPendingBindStore owns github_pending_binds — one row per initiated
 // bind ceremony, the durable half of the CSRF pair that proves a returning
-// installation belongs to the workspace that asked for it.
+// installation belongs to the org that asked for it.
 //
 // The cookie carries the nonce and the row carries its hash, so neither half
 // alone completes a bind: a database read yields no usable nonce, and a stolen
-// cookie names no workspace. What the pair stops is PLANTING — an attacker
+// cookie names no org. What the pair stops is PLANTING — an attacker
 // completing an install themselves, then inducing a signed-in TF admin to load
 // our callback with their code and installation id, which would put the
-// attacker's repositories into the victim's workspace.
+// attacker's repositories into the victim's org.
 //
 // Admin-pool-only in Postgres, and that is forced rather than chosen: the
 // consume reads the row BY ITS NONCE HASH and learns the org from it, so the

@@ -623,11 +623,11 @@ services:
       TF_LINEAR_CLIENT_ID: ${TF_LINEAR_CLIENT_ID:-}
       TF_LINEAR_CLIENT_SECRET: ${TF_LINEAR_CLIENT_SECRET:-}
       TF_LINEAR_CLIENT_SECRET_FILE: ${TF_LINEAR_CLIENT_SECRET_FILE:-}
-      # Deployment GitHub App — one App key serving every workspace that has
-      # no credential of its own (optional; set all four or none). Control-
+      # Deployment GitHub App — one App key serving every organization that
+      # has no credential of its own (optional; set all four or none). Control-
       # only, like the Atlassian pair: control serves the bind ceremony and the
       # App's webhook receiver, and the leader-elected brain on control is what
-      # mints a managed workspace's installation tokens and seals them into
+      # mints a managed organization's installation tokens and seals them into
       # the per-claim bundle an executor receives — an executor never holds
       # the key. Read from the process env at boot — forwarded here or a .env
       # value is silently ignored. Each secret can also be a mounted file via
@@ -642,8 +642,8 @@ services:
       TF_GITHUB_APP_WEBHOOK_SECRET_FILE: ${TF_GITHUB_APP_WEBHOOK_SECRET_FILE:-}
       TF_GITHUB_APP_CLIENT_SECRET: ${TF_GITHUB_APP_CLIENT_SECRET:-}
       TF_GITHUB_APP_CLIENT_SECRET_FILE: ${TF_GITHUB_APP_CLIENT_SECRET_FILE:-}
-      # Deployment commit signer — the GitHub user account every workspace on
-      # the deployment App signs its agents' commits as unless it registers
+      # Deployment commit signer — the GitHub user account every organization
+      # on the deployment App signs its agents' commits as unless it registers
       # its own (optional; the login and the key together, or neither, and
       # half refuses the boot). Control-only, and never forwarded to the
       # executor below: every control pod signs, and a sandboxed run's sidecar
@@ -655,11 +655,11 @@ services:
       TF_GITHUB_COMMIT_SIGNER_KEY: ${TF_GITHUB_COMMIT_SIGNER_KEY:-}
       TF_GITHUB_COMMIT_SIGNER_KEY_FILE: ${TF_GITHUB_COMMIT_SIGNER_KEY_FILE:-}
       TF_GITHUB_COMMIT_SIGNER_EMAIL: ${TF_GITHUB_COMMIT_SIGNER_EMAIL:-}
-      # The deployment's default GitHub — the web base a workspace with no
+      # The deployment's default GitHub — the web base an organization with no
       # base URL of its own resolves to, and the GitHub the deployment App is
       # registered on. Empty means https://github.com. Plain config, not a
       # secret; the executor carries it too (below), because its per-run
-      # sidecar proxies resolve an unset workspace against the same default.
+      # sidecar proxies resolve an unset organization against the same default.
       TF_DEFAULT_GITHUB_HOST: ${TF_DEFAULT_GITHUB_HOST:-}
       # Privilege separation (docker/entrypoint.sh, see .env.example): the
       # entrypoint's exec-time drop runs on every role — control simply
@@ -807,8 +807,8 @@ services:
       # export nothing, ever.
       TF_TRACES_ENDPOINT: ${TF_TRACES_ENDPOINT:-http://tempo:4318}
       # The deployment's default GitHub (see the control pod's line). The
-      # executor's per-run sidecar proxies resolve a workspace with no base
-      # URL of its own against it, so both pods must agree on the answer.
+      # executor's per-run sidecar proxies resolve an organization with no
+      # base URL of its own against it, so both pods must agree on the answer.
       # Empty means https://github.com.
       TF_DEFAULT_GITHUB_HOST: ${TF_DEFAULT_GITHUB_HOST:-}
     # Sandbox caps + seccomp + private cgroup (the x-tf-hardening anchor) —

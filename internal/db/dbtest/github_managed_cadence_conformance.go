@@ -68,7 +68,7 @@ func managedListing(t *testing.T, items ...managedListingItem) string {
 
 // managedFakeGitHub stands up the App API the cadence pass reads, counting
 // listing walks so the suite can assert the one property the deployment-scoped
-// shape exists for: N bound workspaces cost one walk. The GHES path mount is
+// shape exists for: N bound orgs cost one walk. The GHES path mount is
 // what ghbase.APIBase derives for any base URL that is not github.com, which
 // every httptest server is.
 func managedFakeGitHub(t *testing.T, status int, body *string) (baseURL string, calls *atomic.Int64) {
@@ -94,7 +94,7 @@ func managedFakeGitHub(t *testing.T, status int, body *string) (baseURL string, 
 
 // RunGitHubManagedCadenceConformance is the shared assertion suite for
 // RefreshAllManagedInstallations — the cadence pass that converges every
-// managed workspace's installation set from one listing of the deployment
+// managed org's installation set from one listing of the deployment
 // App's installations.
 //
 // The per-org suite (RunGitHubManagedRefreshConformance) pins what a managed
@@ -146,7 +146,7 @@ func RunGitHubManagedCadenceConformance(t *testing.T, mk GitHubManagedRefreshFac
 		return out
 	}
 
-	// A managed workspace with one bound installation, listed on the given fake
+	// A managed org with one bound installation, listed on the given fake
 	// GitHub: the fixture every convergence case starts from.
 	managedOrg := func(t *testing.T, store db.GitHubAppsStore, seed GitHubManagedRefreshSeeder, base string, bound domain.OrgGitHubAppInstallation) string {
 		t.Helper()
@@ -297,9 +297,9 @@ func RunGitHubManagedCadenceConformance(t *testing.T, mk GitHubManagedRefreshFac
 		}
 	})
 
-	t.Run("OneListingForNWorkspaces", func(t *testing.T) {
+	t.Run("OneListingForNOrgs", func(t *testing.T) {
 		// The property the deployment-scoped shape exists for. Three managed
-		// workspaces, each with its own bound installation, converge from ONE
+		// orgs, each with its own bound installation, converge from ONE
 		// walk of GET /app/installations — the shared key's answer is the same
 		// whoever asks, so asking once per org would spend one rate budget
 		// three times for three identical responses.
@@ -320,7 +320,7 @@ func RunGitHubManagedCadenceConformance(t *testing.T, mk GitHubManagedRefreshFac
 			t.Fatalf("RefreshAllManagedInstallations: %v", err)
 		}
 		if got := calls.Load(); got != 1 {
-			t.Errorf("listing walked %d times for 3 managed workspaces; want exactly 1", got)
+			t.Errorf("listing walked %d times for 3 managed orgs; want exactly 1", got)
 		}
 		for id, org := range orgs {
 			rows := live(t, store, org)
@@ -371,11 +371,11 @@ func RunGitHubManagedCadenceConformance(t *testing.T, mk GitHubManagedRefreshFac
 	})
 
 	t.Run("NeverDiscovers", func(t *testing.T) {
-		// Two managed workspaces, one bound and one not, and a listing carrying
+		// Two managed orgs, one bound and one not, and a listing carrying
 		// an installation neither bound. Nothing is created anywhere: the bound
-		// workspace keeps exactly its own row, the unbound one stays empty. Under
+		// org keeps exactly its own row, the unbound one stays empty. Under
 		// a shared key the listing is every tenant's, and attributing any of it
-		// to a workspace whose admin never proved the link is the one thing this
+		// to an org whose admin never proved the link is the one thing this
 		// pass may never do.
 		store, seed := mk(t)
 		body := managedListing(t,
@@ -391,15 +391,15 @@ func RunGitHubManagedCadenceConformance(t *testing.T, mk GitHubManagedRefreshFac
 			t.Fatalf("RefreshAllManagedInstallations: %v", err)
 		}
 		if rows := seed.AllInstallationIDs(t, bound); len(rows) != 1 || rows[0] != "111" {
-			t.Errorf("bound workspace holds rows %v; want exactly [111]", rows)
+			t.Errorf("bound org holds rows %v; want exactly [111]", rows)
 		}
 		if rows := seed.AllInstallationIDs(t, unbound); len(rows) != 0 {
-			t.Errorf("unbound workspace holds rows %v; want none — a refresh creates nothing", rows)
+			t.Errorf("unbound org holds rows %v; want none — a refresh creates nothing", rows)
 		}
 	})
 
 	t.Run("ARowOnAnotherHostIsNeitherMatchedNorRemoved", func(t *testing.T) {
-		// The per-org suite's case, through the cadence: a workspace on the
+		// The per-org suite's case, through the cadence: an org on the
 		// deployment's GitHub that also holds a live row on another GitHub,
 		// whose id the listing here reuses for an unrelated installation. The
 		// row on the listed host converges; the other host's row is not
@@ -430,11 +430,11 @@ func RunGitHubManagedCadenceConformance(t *testing.T, mk GitHubManagedRefreshFac
 		}
 	})
 
-	t.Run("AWorkspaceThatMovedAfterBindingIsStillReported", func(t *testing.T) {
-		// The realistic shape of a moved workspace: its rows are on the
+	t.Run("AnOrgThatMovedAfterBindingIsStillReported", func(t *testing.T) {
+		// The realistic shape of a moved org: its rows are on the
 		// deployment's GitHub, where the bind wrote them, and its base URL now
 		// names another. Nothing it holds is on its own host, and the mismatch
-		// is still carried — a workspace drifting off the deployment's GitHub
+		// is still carried — an org drifting off the deployment's GitHub
 		// must stay visible whichever host its rows are on.
 		store, seed := mk(t)
 		body := managedListing(t, managedListingItem{ID: 111, AccountID: 1110, AccountLogin: "acme"})
@@ -445,22 +445,22 @@ func RunGitHubManagedCadenceConformance(t *testing.T, mk GitHubManagedRefreshFac
 		bind(t, store, domain.OrgGitHubAppInstallation{InstallationID: "111", OrgID: moved, AccountLogin: "acme", GitHubHost: db.EffectiveGitHubHost(base)})
 
 		err := store.RefreshAllManagedInstallations(ctx, deployment)
-		if !errors.Is(err, db.ErrManagedWorkspaceOnOtherGitHub) || !strings.Contains(err.Error(), moved) {
-			t.Fatalf("RefreshAllManagedInstallations err = %v; want ErrManagedWorkspaceOnOtherGitHub naming %s", err, moved)
+		if !errors.Is(err, db.ErrManagedOrgOnOtherGitHub) || !strings.Contains(err.Error(), moved) {
+			t.Fatalf("RefreshAllManagedInstallations err = %v; want ErrManagedOrgOnOtherGitHub naming %s", err, moved)
 		}
 		if got, ok := live(t, store, moved)["111"]; !ok || got.AccountLogin != "acme" {
-			t.Errorf("moved workspace row = %+v (live=%v); want [111 acme] untouched", got, ok)
+			t.Errorf("moved org row = %+v (live=%v); want [111 acme] untouched", got, ok)
 		}
 	})
 
-	t.Run("AWorkspaceOnAnotherGitHubIsSkipped", func(t *testing.T) {
+	t.Run("AnOrgOnAnotherGitHubIsSkipped", func(t *testing.T) {
 		// The deployment App is on one GitHub, so there is one listing. A
-		// managed workspace whose base URL resolves elsewhere — one that moved
+		// managed org whose base URL resolves elsewhere — one that moved
 		// its host after binding, since the bind refuses the shape outright —
 		// is not listed against that host with a key it has never seen. It is
 		// skipped: its rows are left exactly as they were, the mismatch is
 		// carried to the returned error naming the org and both hosts, and the
-		// workspaces on the deployment's GitHub still converge from the one
+		// orgs on the deployment's GitHub still converge from the one
 		// listing.
 		store, seed := mk(t)
 		body := managedListing(t, managedListingItem{ID: 111, AccountID: 1110, AccountLogin: "acme-renamed"})
@@ -473,8 +473,8 @@ func RunGitHubManagedCadenceConformance(t *testing.T, mk GitHubManagedRefreshFac
 		bind(t, store, domain.OrgGitHubAppInstallation{InstallationID: "999", OrgID: elsewhere, AccountLogin: "moved", GitHubHost: other})
 
 		err := store.RefreshAllManagedInstallations(ctx, deployment)
-		if !errors.Is(err, db.ErrManagedWorkspaceOnOtherGitHub) {
-			t.Fatalf("RefreshAllManagedInstallations err = %v; want ErrManagedWorkspaceOnOtherGitHub carried", err)
+		if !errors.Is(err, db.ErrManagedOrgOnOtherGitHub) {
+			t.Fatalf("RefreshAllManagedInstallations err = %v; want ErrManagedOrgOnOtherGitHub carried", err)
 		}
 		for _, want := range []string{elsewhere, other, base} {
 			if !strings.Contains(err.Error(), want) {
@@ -485,11 +485,11 @@ func RunGitHubManagedCadenceConformance(t *testing.T, mk GitHubManagedRefreshFac
 			t.Errorf("listing walked %d times; want exactly 1 — the deployment's GitHub, never the other host", got)
 		}
 		if got := live(t, store, onDefault)["111"]; got.AccountLogin != "acme-renamed" {
-			t.Errorf("on-default workspace AccountLogin = %q; want %q — the skip must not cost the others their refresh", got.AccountLogin, "acme-renamed")
+			t.Errorf("on-default org AccountLogin = %q; want %q — the skip must not cost the others their refresh", got.AccountLogin, "acme-renamed")
 		}
 		got, ok := live(t, store, elsewhere)["999"]
 		if !ok || got.AccountLogin != "moved" || got.GitHubHost != other {
-			t.Errorf("skipped workspace row = %+v (live=%v); want [999 moved %s] untouched", got, ok, other)
+			t.Errorf("skipped org row = %+v (live=%v); want [999 moved %s] untouched", got, ok, other)
 		}
 	})
 
@@ -511,9 +511,9 @@ func RunGitHubManagedCadenceConformance(t *testing.T, mk GitHubManagedRefreshFac
 		}
 	})
 
-	t.Run("NoBoundManagedWorkspaceAsksNothing", func(t *testing.T) {
-		// A deployment whose managed workspaces have bound nothing — and whose
-		// other workspaces bring their own key — has no row this pass could
+	t.Run("NoBoundManagedOrgAsksNothing", func(t *testing.T) {
+		// A deployment whose managed orgs have bound nothing — and whose
+		// other orgs bring their own key — has no row this pass could
 		// write, so there is no request to spend and no deployment App to need.
 		// The zero App here pins the ordering: the App is consulted only once
 		// there is something to list for.
@@ -530,18 +530,18 @@ func RunGitHubManagedCadenceConformance(t *testing.T, mk GitHubManagedRefreshFac
 			t.Fatalf("RefreshAllManagedInstallations with nothing bound: %v; want a no-op", err)
 		}
 		if got := calls.Load(); got != 0 {
-			t.Errorf("listing fetched %d times with no bound managed workspace; want 0", got)
+			t.Errorf("listing fetched %d times with no bound managed org; want 0", got)
 		}
 		if _, ok := live(t, store, byo)["555"]; !ok {
-			t.Error("the BYO workspace's installation is no longer live; the managed pass must not read it at all")
+			t.Error("the BYO org's installation is no longer live; the managed pass must not read it at all")
 		}
 	})
 
-	t.Run("AByoWorkspaceIsUntouched", func(t *testing.T) {
-		// The class gate is the read itself: a workspace with its own App key is
+	t.Run("AByoOrgIsUntouched", func(t *testing.T) {
+		// The class gate is the read itself: an org with its own App key is
 		// not in the managed set, so its bound installation — absent from the
 		// deployment App's listing, as it must be, since a different key lists
-		// it — is neither refreshed nor removed while the managed workspace
+		// it — is neither refreshed nor removed while the managed org
 		// beside it converges.
 		store, seed := mk(t)
 		body := managedListing(t, managedListingItem{ID: 111, AccountID: 1110, AccountLogin: "acme-renamed"})
@@ -566,7 +566,7 @@ func RunGitHubManagedCadenceConformance(t *testing.T, mk GitHubManagedRefreshFac
 	})
 
 	t.Run("AnUnconfiguredDeploymentAppIsRefused", func(t *testing.T) {
-		// A managed workspace with a bound installation and no shared key to
+		// A managed org with a bound installation and no shared key to
 		// list it with is an outage, not a quiet skip: the pass errors where an
 		// operator can see it, and the row is untouched.
 		store, seed := mk(t)

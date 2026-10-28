@@ -531,7 +531,7 @@ tests:
         severity: critical
       exp_annotations:
         summary: The deployment commit signer is not active
-        description: At least one control pod's deployment signer is not active, and the workspaces on the deployment GitHub App commit unsigned through that pod until it is. Run triagefactory commit-signer status in each control container for the reason, and triagefactory commit-signer verify to check it again once fixed. On a GitHub Enterprise Server in private mode the signer cannot be checked and stays pending.
+        description: At least one control pod's deployment signer is not active, and the organizations on the deployment GitHub App commit unsigned through that pod until it is. Run triagefactory commit-signer status in each control container for the reason, and triagefactory commit-signer verify to check it again once fixed. On a GitHub Enterprise Server in private mode the signer cannot be checked and stays pending.
 - name: DeploymentCommitSignerDown stays quiet while the signer is active
   interval: 1m
   input_series:

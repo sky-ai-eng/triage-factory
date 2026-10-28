@@ -54,7 +54,7 @@ type GitHubAppUnusableReason string
 
 const (
 	// GitHubAppMissing — GitHub reports that no App with this id exists: it
-	// was deleted on GitHub. Nothing in TF can bring it back; the workspace
+	// was deleted on GitHub. Nothing in TF can bring it back; the org
 	// needs another credential.
 	GitHubAppMissing GitHubAppUnusableReason = "missing"
 	// GitHubAppKeyRejected — the App exists but GitHub refuses the JWT signed
@@ -316,7 +316,7 @@ type UserGitHubIdentity struct {
 
 // GitHubPendingBind is one initiated bind ceremony: an admin clicked Connect,
 // TF minted a nonce, and the browser left for GitHub carrying it in a cookie.
-// The row is what the callback consumes to learn WHICH workspace the returning
+// The row is what the callback consumes to learn WHICH org the returning
 // installation belongs to — the redirect from GitHub cannot say, because its
 // installation_id is an unsigned, guessable query parameter GitHub's own
 // documentation says not to trust.

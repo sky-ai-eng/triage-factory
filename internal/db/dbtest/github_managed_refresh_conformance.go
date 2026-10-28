@@ -61,14 +61,14 @@ type GitHubManagedRefreshSeeder struct {
 type GitHubManagedRefreshFactory func(t *testing.T) (db.GitHubAppsStore, GitHubManagedRefreshSeeder)
 
 // RunGitHubManagedRefreshConformance is the shared assertion suite for
-// RefreshManagedInstallations — the reconcile of a workspace that rides the
-// DEPLOYMENT App, the one App key that serves many workspaces.
+// RefreshManagedInstallations — the reconcile of an org that rides the
+// DEPLOYMENT App, the one App key that serves many orgs.
 //
 // The invariant it exists to pin is one sentence: for the managed class the
 // reconcile REFRESHES; it never DISCOVERS. It may update rows that already
 // exist and may never create one. Discovery belongs exclusively to the bind
 // ceremony, which is the only thing that can assert an installation is this
-// workspace's — the listing cannot, because under a shared key it is every
+// org's — the listing cannot, because under a shared key it is every
 // tenant's listing.
 //
 // What that leaves the refresh doing is real and worth keeping: the account
@@ -140,7 +140,7 @@ func RunGitHubManagedRefreshConformance(t *testing.T, mk GitHubManagedRefreshFac
 	}
 
 	// bind writes the row the bind ceremony would have written, which is the
-	// only way an installation ever becomes this workspace's.
+	// only way an installation ever becomes this org's.
 	bind := func(t *testing.T, store db.GitHubAppsStore, orgID, installationID, host, login string) {
 		t.Helper()
 		if _, err := store.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
@@ -172,7 +172,7 @@ func RunGitHubManagedRefreshConformance(t *testing.T, mk GitHubManagedRefreshFac
 		// three installations and the org bound one of them; the other two must
 		// end up ABSENT — not written and then removed by the diff, never
 		// written. A row that exists at all is a claim on an installation this
-		// workspace never bound, and because the removal diff runs against this
+		// org never bound, and because the removal diff runs against this
 		// org's own set, nothing downstream would ever take it back.
 		store, seed := mk(t)
 		org := seed.Org(t, seed.User(t))
@@ -216,7 +216,7 @@ func RunGitHubManagedRefreshConformance(t *testing.T, mk GitHubManagedRefreshFac
 
 	t.Run("UninstallSoftRemovesABoundInstallation", func(t *testing.T) {
 		// Uninstall detection is the other half of what the refresh still does,
-		// and the listing is the only place a managed workspace can learn it in
+		// and the listing is the only place a managed org can learn it in
 		// local-webhook-free deployments and after a lost delivery alike. The
 		// row stays (soft-removed, so history and the reachable-repo cascade both
 		// behave), but it stops being live.
@@ -262,7 +262,7 @@ func RunGitHubManagedRefreshConformance(t *testing.T, mk GitHubManagedRefreshFac
 	})
 
 	t.Run("NothingBoundAsksGitHubNothing", func(t *testing.T) {
-		// A workspace that has not completed a bind has no row to refresh, and
+		// An org that has not completed a bind has no row to refresh, and
 		// creating one is the thing this method may never do — so there is no
 		// question for GitHub to answer and no request to spend.
 		store, seed := mk(t)
@@ -275,7 +275,7 @@ func RunGitHubManagedRefreshConformance(t *testing.T, mk GitHubManagedRefreshFac
 			t.Fatalf("RefreshManagedInstallations: %v", err)
 		}
 		if got := calls.Load(); got != 0 {
-			t.Errorf("listing fetched %d times for a workspace with nothing bound; want 0", got)
+			t.Errorf("listing fetched %d times for an org with nothing bound; want 0", got)
 		}
 		if got := seed.AllInstallationIDs(t, org); len(got) != 0 {
 			t.Errorf("org holds rows %v; want none", got)
@@ -283,8 +283,8 @@ func RunGitHubManagedRefreshConformance(t *testing.T, mk GitHubManagedRefreshFac
 	})
 
 	t.Run("ANonManagedOrgIsRefused", func(t *testing.T) {
-		// Not defensive tidiness. Run against a workspace with its own App key,
-		// this would diff that workspace's installations against a listing
+		// Not defensive tidiness. Run against an org with its own App key,
+		// this would diff that org's installations against a listing
 		// produced by a key that has never seen them — and soft-remove every one
 		// of them. The refusal is loud, and nothing is written.
 		store, seed := mk(t)
@@ -295,10 +295,10 @@ func RunGitHubManagedRefreshConformance(t *testing.T, mk GitHubManagedRefreshFac
 		bind(t, store, org, "111", db.EffectiveGitHubHost(base), "acme")
 
 		if err := store.RefreshManagedInstallations(ctx, org, deployment); err == nil {
-			t.Fatal("RefreshManagedInstallations succeeded for a BYO workspace; want a refusal")
+			t.Fatal("RefreshManagedInstallations succeeded for a BYO org; want a refusal")
 		}
 		if got := calls.Load(); got != 0 {
-			t.Errorf("listing fetched %d times for a BYO workspace; want 0", got)
+			t.Errorf("listing fetched %d times for a BYO org; want 0", got)
 		}
 		if got := liveIDs(t, store, org); len(got) != 1 || got[0] != "111" {
 			t.Errorf("live installations = %v; want [111] untouched", got)
@@ -330,7 +330,7 @@ func RunGitHubManagedRefreshConformance(t *testing.T, mk GitHubManagedRefreshFac
 
 	t.Run("AnUnconfiguredDeploymentAppIsRefused", func(t *testing.T) {
 		// The ordinary state of a deployment whose orgs all bring their own App
-		// — and an outage for one that does not. A managed workspace whose shared
+		// — and an outage for one that does not. A managed org whose shared
 		// key has gone missing must fail where someone can see it rather than
 		// quietly reconcile nothing.
 		store, seed := mk(t)
@@ -350,9 +350,9 @@ func RunGitHubManagedRefreshConformance(t *testing.T, mk GitHubManagedRefreshFac
 			t.Errorf("live installations = %v; want [111] untouched", got)
 		}
 	})
-	t.Run("AWorkspaceOnAnotherGitHubIsRefusedWithoutAsking", func(t *testing.T) {
+	t.Run("AnOrgOnAnotherGitHubIsRefusedWithoutAsking", func(t *testing.T) {
 		// The per-org refresh lists the deployment's GitHub, the one the App
-		// is on. A managed workspace whose base URL resolves elsewhere is
+		// is on. A managed org whose base URL resolves elsewhere is
 		// refused before any request — the fake counts none — with an error
 		// naming both hosts, and its rows are exactly as they were.
 		store, seed := mk(t)
@@ -364,11 +364,11 @@ func RunGitHubManagedRefreshConformance(t *testing.T, mk GitHubManagedRefreshFac
 		bind(t, store, org, "111", other, "acme")
 
 		err := store.RefreshManagedInstallations(ctx, org, deployment)
-		if !errors.Is(err, db.ErrManagedWorkspaceOnOtherGitHub) {
-			t.Fatalf("RefreshManagedInstallations err = %v; want ErrManagedWorkspaceOnOtherGitHub", err)
+		if !errors.Is(err, db.ErrManagedOrgOnOtherGitHub) {
+			t.Fatalf("RefreshManagedInstallations err = %v; want ErrManagedOrgOnOtherGitHub", err)
 		}
 		if got := calls.Load(); got != 0 {
-			t.Errorf("GitHub served %d requests for a workspace on another host; want 0", got)
+			t.Errorf("GitHub served %d requests for an org on another host; want 0", got)
 		}
 		insts, lerr := store.ListInstallationsForOrgSystem(ctx, org)
 		if lerr != nil || len(insts) != 1 || insts[0].AccountLogin != "acme" || insts[0].GitHubHost != other {
@@ -377,7 +377,7 @@ func RunGitHubManagedRefreshConformance(t *testing.T, mk GitHubManagedRefreshFac
 	})
 
 	t.Run("ARowOnAnotherHostIsNeitherMatchedNorRemoved", func(t *testing.T) {
-		// The workspace is on the deployment's GitHub and also holds a live row
+		// The org is on the deployment's GitHub and also holds a live row
 		// on another one — left there when the deployment's default moved, say.
 		// GitHub numbers installations per deployment, so the listing here can
 		// carry that row's id for an unrelated installation. Matching on the id
@@ -414,9 +414,9 @@ func RunGitHubManagedRefreshConformance(t *testing.T, mk GitHubManagedRefreshFac
 	})
 
 	t.Run("OnlyRowsOnAnotherHostAsksGitHubNothing", func(t *testing.T) {
-		// On the deployment's GitHub the workspace has bound nothing, so there
+		// On the deployment's GitHub the org has bound nothing, so there
 		// is nothing a listing could refresh — the same answer, and the same
-		// request saved, as a workspace with no rows at all.
+		// request saved, as an org with no rows at all.
 		store, seed := mk(t)
 		org := seed.Org(t, seed.User(t))
 		body := listing(acct{222, "stranger"})
