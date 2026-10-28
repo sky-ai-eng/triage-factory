@@ -157,7 +157,8 @@ Prometheus. Add a rule as another file in the rules directory, then
 
 ### Log lines
 
-These are logged once per change, so they work as log-based alerts too:
+When an alert or the dashboard points at a problem, these lines say which org
+and why:
 
 - `github connection lost` and `jira connection lost` (WARN, with `org` and
   `class`), then `<source> connection restored` or
