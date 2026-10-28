@@ -34,7 +34,7 @@ triage-factory
 bench-results/
 
 # Deployment-local compose additions and mounted secret files (see
-# docs/self-hosting/secrets.md). The install guide has an operator create
+# docs/users/self-hosting/secrets.md). The install guide has an operator create
 # both in the checkout, so they are ignored here rather than left to a
 # careful `git add`.
 compose.override.yml

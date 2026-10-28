@@ -6,7 +6,7 @@ import "context"
 // messages (+ acting user) recorded before a parked conversation's continuation
 // is re-queued as ordinary claimable work, so a crash between "message recorded"
 // and "process spawned" is recoverable by the standard boot sweep rather than
-// an ad-hoc path. See docs/for-agents/specs/horizontal-scaling/README.md §5.2.
+// an ad-hoc path. See specs/horizontal-scaling/README.md §5.2.
 //
 // It owns no writer, and that is deliberate. The queue is not a side table: it
 // is the undelivered tail of the conversation's own transcript (role='user',

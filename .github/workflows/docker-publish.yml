@@ -15,7 +15,7 @@
 # It is a call to this file rather than a copy in release.yml so the image's
 # signing identity stays docker-publish.yml@refs/tags/vX.Y.Z — Fulcio names
 # the called workflow, not its caller — which is the identity
-# docs/security/verifying-releases.md tells verifiers to require.
+# docs/users/security/verifying-releases.md tells verifiers to require.
 #
 # Multi-arch via buildx + QEMU; the alpine runtime image and the
 # static Go binary both build cleanly on amd64 + arm64 because:
@@ -31,7 +31,7 @@
 # Every published image carries an SBOM + SLSA provenance attestation
 # (buildx `sbom`/`provenance`) and a keyless cosign signature over its
 # digest (GitHub OIDC — no signing keys to manage). See "Verifying
-# releases" in docs/security/verifying-releases.md for the consumer-facing verify
+# releases" in docs/users/security/verifying-releases.md for the consumer-facing verify
 # commands.
 
 name: docker-publish

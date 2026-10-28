@@ -74,7 +74,7 @@ func runNetFromNetnsName(name string) (*netState, uint8, bool) {
 }
 
 // setupNetwork creates the netns + veth pair + addressing matching
-// the validated recipe in docs/for-agents/specs/sky-254-runsc-validation/
+// the validated recipe in specs/sky-254-runsc-validation/
 // precns-test.sh (lines 7-33). Shells out to `ip` rather than using
 // netlink Go bindings because:
 //

@@ -16,9 +16,9 @@
 // validates the narrow, numeric parameters
 // the broker accepts over its RPC, so a compromised orchestrator cannot
 // steer sandbox construction. The deployment threat model and that split
-// live in docs/security/security-overview.md; the validated runsc/egress
+// live in docs/users/security/security-overview.md; the validated runsc/egress
 // mechanics that this package mirrors in Go live in
-// docs/for-agents/specs/sky-254-runsc-validation/.
+// specs/sky-254-runsc-validation/.
 //
 // # Property B invariant
 //
@@ -49,7 +49,7 @@
 //	every real credential out of the sandbox, so the agent can reach
 //	one only through the host-side proxy/exec interface that mediates
 //	it, within the run's own authority and bounded by run wall-clock.
-//	See docs/security/security-overview.md §2.
+//	See docs/users/security/security-overview.md §2.
 //
 // T3: RCE in the agent SDK escaping the SDK process — addressed by
 //

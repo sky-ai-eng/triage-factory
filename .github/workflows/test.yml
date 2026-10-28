@@ -49,7 +49,7 @@ jobs:
             exit 0
           fi
           changed=$(git diff --name-only HEAD^1 HEAD)
-          if [ -z "$changed" ] || echo "$changed" | grep -qvE '(^docs/|^harness/|\.md$)'; then
+          if [ -z "$changed" ] || echo "$changed" | grep -qvE '(^docs/|^specs/|^harness/|\.md$)'; then
             echo "only=false" >> "$GITHUB_OUTPUT"
           else
             echo "only=true" >> "$GITHUB_OUTPUT"
@@ -154,7 +154,7 @@ jobs:
 
       - name: Docs-only change, build/test skipped
         if: steps.docs.outputs.only == 'true'
-        run: echo "All changed files are documentation (docs/** or *.md) or harness/ (tested by the harness job); skipping Go/frontend build and test steps."
+        run: echo "All changed files are documentation (docs/**, specs/** or *.md) or harness/ (tested by the harness job); skipping Go/frontend build and test steps."
 
   # The same Go suite again, in zones that are not UTC.
   #

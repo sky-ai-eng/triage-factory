@@ -14,7 +14,7 @@
 // hostile PR text. Registries on dedicated hostnames do NOT belong here;
 // they get a tunnel-lane allowlist entry instead. The decision procedure
 // and the contributor checklist live in this package's CLAUDE.md and in
-// docs/security/sandbox-egress.md.
+// docs/contributors/sandbox-egress.md.
 //
 // The engine is generic: a relay is an ordered route table (Config.Routes)
 // mapping path prefixes to upstreams, plus the env entries that aim the

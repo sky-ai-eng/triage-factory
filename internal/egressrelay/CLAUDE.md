@@ -1,6 +1,6 @@
 # internal/egressrelay — the fetch-relay egress lane
 
-This package is one of three sandbox egress lanes. `docs/security/sandbox-egress.md`
+This package is one of three sandbox egress lanes. `docs/contributors/sandbox-egress.md`
 has the full picture; this file is the working guide for anyone adding or
 changing an entry here.
 
@@ -31,7 +31,7 @@ curl -sI --max-redirs 0 <artifact URL> | grep -iE "^HTTP|^location"
   unattributable exfiltration channel for an agent whose job is reading
   hostile PR text.
 - **The tool needs a credential injected**: credential lane. Stop here and
-  read `docs/security/privilege-separation.md`.
+  read `docs/users/security/privilege-separation.md`.
 
 Go is the worked example of the second case: `proxy.golang.org` serves
 small zips inline but 302s large zips — and every toolchain — to
@@ -49,7 +49,7 @@ compromise here from becoming a supply-chain attack is that an ecosystem's
 bytes are checked again by something TF does not control: for Go, `go.sum`
 plus the checksum database, whose key ships with the toolchain, so even a
 fetch inside the run is checked; for npm and pip, the lockfile's hashes,
-checked at the first install outside TF (`docs/for-agents/specs/sandbox-backends/`
+checked at the first install outside TF (`specs/sandbox-backends/`
 §6.1 accepts that residual). An ecosystem whose installs record no hash
 that a later install checks would make Triage Factory a trusted
 supply-chain component — a strictly worse posture than no support at all.
@@ -86,7 +86,7 @@ Stop and open a design discussion instead of adding the entry.
    var, say so there — stated as a mechanism, never a version, so it
    cannot drift.
 7. **Add a row** to the inventory table in
-   `docs/security/sandbox-egress.md`.
+   `docs/contributors/sandbox-egress.md`.
 
 ## Invariants — every entry, no exceptions
 
@@ -106,7 +106,7 @@ Stop and open a design discussion instead of adding the entry.
 
 - TLS termination / MITM of agent traffic outside the tunnel lane's
   interceptor (`internal/egressproxy`), which implements the design in
-  `docs/for-agents/specs/sandbox-backends/` §6.1 and its conditions. A
+  `specs/sandbox-backends/` §6.1 and its conditions. A
   second interceptor, or one in this lane, is a design conversation.
 - Allowlisting a shared storage namespace as the "simpler" alternative.
 - Env that disables the client's own verification.

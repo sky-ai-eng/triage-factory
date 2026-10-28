@@ -49,7 +49,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PERSONAL_ACCESS_TOKEN: ${{ steps.app-token.outputs.token }}
         with:
-          path-to-document: "https://github.com/sky-ai-eng/triage-factory/blob/main/docs/CLA.md"
+          path-to-document: "https://github.com/sky-ai-eng/triage-factory/blob/main/docs/contributors/CLA.md"
           path-to-signatures: "signatures/cla.json"
           branch: "cla-signatures"
           remote-organization-name: "sky-ai-eng"

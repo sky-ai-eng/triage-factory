@@ -1,6 +1,6 @@
 // The org's commit signer: the GitHub user account agents' commits are
 // authored, committed and signed as, so GitHub marks them Verified
-// (docs/for-agents/specs/commit-signing). The section shows one of three
+// (specs/commit-signing). The section shows one of three
 // states, read from GET commit-signer and GET commit-identity:
 //
 //   - no signer, and the org's runs commit unsigned as its GitHub identity;
@@ -16,10 +16,9 @@
 // member reads the same state without them.
 
 import { useEffect, useId, useRef, useState } from 'react'
-import { AlertTriangle, Check, Copy, ExternalLink } from 'lucide-react'
+import { AlertTriangle, Check, Copy } from 'lucide-react'
 import { apiErrors, httpErrorMessage } from '../../lib/apiClient'
 import {
-  COMMIT_SIGNING_GUIDE_URL,
   createCommitSigner,
   deleteCommitSigner,
   getCommitIdentity,
@@ -184,15 +183,6 @@ export default function CommitSigningGroup({
             ))}
         </div>
       )}
-      <a
-        href={COMMIT_SIGNING_GUIDE_URL}
-        target="_blank"
-        rel="noreferrer"
-        className="inline-flex items-center gap-1 text-ui text-warm hover:underline"
-      >
-        How to create the signer account
-        <ExternalLink size={12} aria-hidden />
-      </a>
     </div>
   )
 }

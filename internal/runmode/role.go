@@ -131,9 +131,9 @@ func ParseRole(s string) (DeployRole, error) {
 	case "executor":
 		return RoleExecutor, nil
 	case "":
-		return "", fmt.Errorf("TF_ROLE is required in multi mode: multi always runs as a control+executor split, so every process — including CLI subcommands like `migrate` — must set TF_ROLE=%q or TF_ROLE=%q explicitly. The default docker-compose.yml brings up both; see docs/self-hosting/scaling.md", RoleControl, RoleExecutor)
+		return "", fmt.Errorf("TF_ROLE is required in multi mode: multi always runs as a control+executor split, so every process — including CLI subcommands like `migrate` — must set TF_ROLE=%q or TF_ROLE=%q explicitly. The default docker-compose.yml brings up both; see docs/users/self-hosting/scaling.md", RoleControl, RoleExecutor)
 	case "all":
-		return "", fmt.Errorf("TF_ROLE=all is not a deployable role: the single-process shape is local mode's (gated on TF_MODE, no role needed), and multi mode always runs as a control+executor split — set TF_ROLE=%q or TF_ROLE=%q; see docs/self-hosting/scaling.md", RoleControl, RoleExecutor)
+		return "", fmt.Errorf("TF_ROLE=all is not a deployable role: the single-process shape is local mode's (gated on TF_MODE, no role needed), and multi mode always runs as a control+executor split — set TF_ROLE=%q or TF_ROLE=%q; see docs/users/self-hosting/scaling.md", RoleControl, RoleExecutor)
 	default:
 		return "", fmt.Errorf("unknown TF_ROLE=%q (want %q or %q)", s, RoleControl, RoleExecutor)
 	}

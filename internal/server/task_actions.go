@@ -367,7 +367,7 @@ func linearUserCredentialMissingMessage(err error) string {
 // would mean acting through someone else's (possibly absent) credential. The
 // Jira ticket can drift from the TF claimant until the new claimant next
 // interacts with it — an accepted divergence in the same family as the
-// TF/GitHub drift docs/for-agents/multi-team-task-model.md already calls out,
+// TF/GitHub drift specs/multi-team-task-model.md already calls out,
 // not a bug this method needs to close.
 func (s *Server) reassignClaim(w http.ResponseWriter, r *http.Request, orgID, userID, id, targetUserID string, hesitationMs int) bool {
 	var task *domain.Task

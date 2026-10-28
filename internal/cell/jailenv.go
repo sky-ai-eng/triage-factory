@@ -12,7 +12,7 @@ import (
 
 // The in-jail paths the jail's environment names. Every backend presents
 // them at these paths, however it delivers what is behind them; the rest of
-// the jail filesystem contract is in docs/for-agents/specs/sandbox-backends/
+// the jail filesystem contract is in specs/sandbox-backends/
 // §4.1. internal/sandbox's broker-side constants for the same paths are
 // these, so the broker validates mounts against the paths the environment
 // points at.

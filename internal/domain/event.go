@@ -7,7 +7,7 @@ import (
 
 // EventType defines a specific kind of triage event that can occur.
 // Maps to the read-only `events_catalog` table (see
-// docs/data-model-target.md). Per-rule scheduling/priority lives on
+// specs/tracked-events.md). Per-rule scheduling/priority lives on
 // `event_handlers` rows now; EventType is purely the catalog entry.
 type EventType struct {
 	ID          string `json:"id"`       // e.g. "github:pr:review_requested"
@@ -46,7 +46,7 @@ type Event struct {
 
 // GitHub PR events.
 //
-// Split rule (see docs/data-model-target.md "Splitting events"):
+// Split rule:
 // event types split when a discriminator changes whether/how the situation
 // needs attention (conclusion, review type). Attributes that just narrow the
 // same situation (reviewer, check name, repo, label) stay as predicate-
@@ -270,7 +270,7 @@ func TaskMayRideClosedEntity(eventType string) bool {
 }
 
 // AllEventTypes returns the canonical seed catalog for the per-action
-// event model (see docs/data-model-target.md).
+// event model (see specs/tracked-events.md).
 //
 // SeedEventTypes persists the result of this function into events_catalog.
 func AllEventTypes() []EventType {
