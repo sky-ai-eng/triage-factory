@@ -1,39 +1,39 @@
 # Deployment GitHub App
 
-Every workspace reaches GitHub through a GitHub App. By default each workspace
-registers or imports its own from **Workspace Settings → GitHub access**. A
-**deployment GitHub App** is one App you register once for the whole
-deployment: a workspace admin presses **Connect GitHub…**, names a GitHub
+Every Triage Factory organization reaches GitHub through a GitHub App. By
+default each one registers or imports its own from **Organization → Settings →
+GitHub access**. A **deployment GitHub App** is one App you register once for
+the whole deployment: an org admin presses **Connect GitHub…**, names a GitHub
 account, confirms on GitHub, and that account's installation is bound to their
-workspace.
+organization.
 
-- **It is a default, not an override.** A workspace with its own App keeps
-  using it. Connect refuses a workspace that already holds a credential and
-  names the one to disconnect first.
-- **Leaving the variables unset changes nothing.** Every workspace keeps
-  bringing its own App.
+- **It is a default, not an override.** An organization with its own App
+  keeps using it. Connect refuses an organization that already holds a
+  credential and names the one to disconnect first.
+- **Leaving the variables unset changes nothing.** Every organization
+  keeps bringing its own App.
 - **Multi mode only.** Local mode ignores these variables.
-- **Tenancy is unchanged.** An installation belongs to at most one workspace,
-  and each workspace sees only the accounts it connected.
+- **Tenancy is unchanged.** An installation belongs to at most one
+  organization, and each organization sees only the accounts it connected.
 
 ## 1. Decide which GitHub it lives on
 
 The App is registered on the deployment's default GitHub, which is github.com
 unless `TF_DEFAULT_GITHUB_HOST` names a GitHub Enterprise Server (set before
-the first workspace was created; see [install](../install.md#3-render-the-deployment)). A
-workspace whose own GitHub base URL names a different host can't use the
+the first organization was created; see [install](../install.md#3-render-the-deployment)).
+An organization whose own GitHub base URL names a different host can't use the
 deployment App and brings its own.
 
 ## 2. Create the App
 
 Open **Settings → Developer settings → GitHub Apps → New GitHub App** on the
-account that should own it. An organization you control survives any one
-person leaving: `https://github.com/organizations/<org>/settings/apps/new`
+account that should own it. A GitHub organization you control survives any
+one person leaving: `https://github.com/organizations/<org>/settings/apps/new`
 (or the same path on your GHES host). Anything not listed keeps its default.
 
 | Field                                                      | Value                                                                                                                                                |
 | ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **GitHub App name**                                        | Unique on that GitHub. Workspace admins see it on GitHub's install page.                                                                             |
+| **GitHub App name**                                        | Unique on that GitHub. Org admins see it on GitHub's install page.                                                                                   |
 | **Homepage URL**                                           | Your `TF_PUBLIC_URL`.                                                                                                                                |
 | **Callback URL**                                           | `<TF_PUBLIC_URL>/api/github/managed/callback`, one entry, absolute.                                                                                  |
 | **Expire user authorization tokens**                       | Leave as is.                                                                                                                                         |
@@ -127,19 +127,19 @@ source checkout, `secrets/` and `compose.override.yml` are gitignored. Only
    and `/api/webhooks/github/{org_id}` from it. TF verifies every delivery's
    signature itself. Without webhooks everything still works; changes arrive
    on the next poll instead.
-3. In a workspace with no GitHub credential, **Workspace Settings → GitHub
-   access** offers **Connect GitHub…**.
+3. In an organization with no GitHub credential, **Organization → Settings →
+   GitHub access** offers **Connect GitHub…**.
 
 From there, connecting accounts, linking members' GitHub accounts and switching
-a workspace onto the deployment App are done in the app.
+an organization onto the deployment App are done in the app.
 
 ## Troubleshooting
 
-| Message                                                                          | Fix                                                                                                           |
-| -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `This deployment isn't set up to connect GitHub accounts.`                       | One of the four variables is missing or malformed on `control`; see step 5.1.                                 |
-| `…missing the “Request user authorization (OAuth) during installation” setting.` | Check that box on the App.                                                                                    |
-| `…not granted the organization members permission`                               | Add Organization → Members: Read-only, then have each installed account accept the new permissions on GitHub. |
-| `…not granted the account email addresses permission` (log)                      | Add Account → Email addresses: Read-only. Members approve it the next time they link.                         |
-| `This workspace is pointed at <host>; the deployment's GitHub App is on <host>.` | That workspace's GitHub isn't the deployment default. It brings its own App.                                  |
-| `GitHub rejected the deployment App's ID and private key` (log)                  | `TF_GITHUB_APP_ID` names a different App than the PEM. Use the App ID, not the Client ID.                     |
+| Message                                                                             | Fix                                                                                                           |
+| ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `This deployment isn't set up to connect GitHub accounts.`                          | One of the four variables is missing or malformed on `control`; see step 5.1.                                 |
+| `…missing the “Request user authorization (OAuth) during installation” setting.`    | Check that box on the App.                                                                                    |
+| `…not granted the organization members permission`                                  | Add Organization → Members: Read-only, then have each installed account accept the new permissions on GitHub. |
+| `…not granted the account email addresses permission` (log)                         | Add Account → Email addresses: Read-only. Members approve it the next time they link.                         |
+| `This organization is pointed at <host>; the deployment's GitHub App is on <host>.` | That organization's GitHub isn't the deployment default. It brings its own App.                               |
+| `GitHub rejected the deployment App's ID and private key` (log)                     | `TF_GITHUB_APP_ID` names a different App than the PEM. Use the App ID, not the Client ID.                     |

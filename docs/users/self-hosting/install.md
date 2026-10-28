@@ -65,7 +65,7 @@ rendered compose files in `compose.override.yml`, which compose merges on its
 own and `deploy` never writes.
 
 **On GitHub Enterprise Server**, set `TF_DEFAULT_GITHUB_HOST` in `.env` to your
-GHES URL (e.g. `https://ghe.example.com`) **before the first workspace is
+GHES URL (e.g. `https://ghe.example.com`) **before the first organization is
 created**. Records are keyed under the host they were created with and are
 never migrated, so if you change it later you need a completely fresh install.
 
@@ -77,8 +77,8 @@ anything, though; it only adds items `.env` is missing.
 ### Optional, deployment-wide
 
 - Invite-only deployment: `TF_PREVENT_ORG_CREATION=true`.
-- A GitHub App every workspace can connect through: [Deployment GitHub App](deployment-integrations/deployment-github-app.md).
-- A signer for those workspaces' commits: [Deployment commit signer](deployment-integrations/deployment-commit-signer.md).
+- A GitHub App every organization can connect through: [Deployment GitHub App](deployment-integrations/deployment-github-app.md).
+- A signer for those organizations' commits: [Deployment commit signer](deployment-integrations/deployment-commit-signer.md).
 - One-click Jira Cloud connect: [Deployment Jira app](deployment-integrations/deployment-jira-app.md).
 - One-click Linear install: [Deployment Linear app](deployment-integrations/deployment-linear-app.md).
 - SAML sign-in: [SSO](sso.md).
@@ -115,7 +115,7 @@ Open your public URL and sign in with GitHub. The first person creates the
 first organization (unless `TF_PREVENT_ORG_CREATION` is set), but org creation
 is free and self-hosters are not limited in number of organizations configured.
 On org creation, the app walks you through connecting GitHub, an issue tracker,
-and a model provider. Workspace setup from here on happens in the app.
+and a model provider. Organization setup from here on happens in the app.
 
 To give someone the deployment-wide admin view, see
 [Fleet console & operators](fleet-console.md).

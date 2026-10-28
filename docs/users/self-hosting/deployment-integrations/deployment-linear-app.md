@@ -1,14 +1,15 @@
 # Deployment Linear app
 
-A workspace installs Triage Factory in its Linear workspace through a Linear
-OAuth app. By default each workspace registers its own under **Workspace
-Settings → Linear OAuth app**. A **deployment Linear app** is one app you
-register once: a workspace with no app of its own clicks **Install Triage
-Factory**, approves on Linear, and has nothing to create or paste.
+An organization installs Triage Factory in its Linear workspace through a
+Linear OAuth app. By default each organization registers its own under
+**Organization → Settings → Linear OAuth app**. A **deployment Linear app** is
+one app you register once: an organization with no app of its own clicks
+**Install Triage Factory**, approves on Linear, and has nothing to create or
+paste.
 
-- **It is a default, not an override.** A workspace that registered its own
-  app keeps using it.
-- **Leaving both variables unset changes nothing.** Workspaces keep
+- **It is a default, not an override.** An organization that registered its
+  own app keeps using it.
+- **Leaving both variables unset changes nothing.** Organizations keep
   registering their own app or pasting an API key.
 - **Multi mode only.** Local mode ignores these variables.
 
@@ -17,7 +18,7 @@ Factory**, approves on Linear, and has nothing to create or paste.
 Linear recommends owning the app from a dedicated Linear workspace, so every
 admin of that workspace can manage it. Signed in there as an admin, open this
 link with `https://tfac.example.com` replaced by your `TF_PUBLIC_URL` (three
-places) and `Example%20Corp` by the developer name workspace admins should see
+places) and `Example%20Corp` by the developer name Linear workspace admins should see
 (2–80 characters, spaces as `%20`):
 
 ```text
@@ -58,21 +59,21 @@ docker compose up -d
 
 1. `docker compose logs control | grep -i "deployment linear app"` prints
    nothing. A line there names the missing variable.
-2. In a workspace with no Linear app of its own, **Workspace Settings → Linear
-   OAuth app** reads _Using this deployment's Triage Factory app_, and **Linear
+2. In an organization with no Linear app of its own, **Organization → Settings
+   → Linear OAuth app** reads _Using this deployment's Triage Factory app_, and **Linear
    connection** offers **Install Triage Factory**.
 
 ## Rotating the client secret
 
 In Linear, open the app under **Settings → Administration → API** and rotate
 its secret, then update `.env` and run `docker compose up -d` soon after.
-Issued tokens keep working and refresh with the new secret; no workspace has to
-install again.
+Issued tokens keep working and refresh with the new secret; no organization has
+to install again.
 
 ## Removing the app
 
 Connections made through the deployment app refresh only with its secret. If
-you unset the pair, those workspaces' Linear connections keep working until
-their access tokens expire (within a day), then fail until each workspace
-reconnects through its own app or a personal API key. To change the secret,
+you unset the pair, those organizations' Linear connections keep working
+until their access tokens expire (within a day), then fail until each
+organization reconnects through its own app or a personal API key. To change the secret,
 rotate it instead.

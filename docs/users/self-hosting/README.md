@@ -18,7 +18,7 @@ networks at present.
 ## Set up
 
 - [Install](install.md) — GitHub OAuth app, `triagefactory deploy init`, `deploy up`
-- [Deployment integrations](deployment-integrations/README.md) — a GitHub App, Jira and Linear apps, and a commit signer, registered once for every workspace
+- [Deployment integrations](deployment-integrations/README.md) — a GitHub App, Jira and Linear apps, and a commit signer, registered once for every organization
 - [SSO](sso.md) — SAML sign-in through GoTrue
 - [Bedrock role mode](bedrock-role-mode.md) — short-lived Bedrock credentials from a customer IAM role
 

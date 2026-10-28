@@ -55,8 +55,8 @@ at that point). A cycle that couldn't reach the source is not a success, so
 With several control pods, a standby checks only `db` and `migrations`,
 reports each poller as `"standby"`, and adds a `lease` field (`name`,
 `holder_id`, `is_holder`, `term`). See [Scaling out](scaling.md). GitHub
-webhook health is shown per workspace under **Workspace Settings → GitHub
-access**, not here.
+webhook health is shown per organization under **Organization → Settings →
+GitHub access**, not here.
 
 ### Executor `/healthz`
 
