@@ -146,7 +146,7 @@ func (d *DeploymentHealth) close() {
 // whether it did. A control pod waits on it before it signs or seals: a key the
 // deployment has never checked has no account until a check finds it, so a pod
 // that started on a new key would, until its first check, answer a managed
-// workspace as though it had no signer, and a run that asked in that second
+// org as though it had no signer, and a run that asked in that second
 // would stop signing for the rest of the run. A first tick still reading
 // GitHub at timeout carries on; the pod starts without it, as it would
 // without this wait.
@@ -209,7 +209,7 @@ func checkRetryDelay(failures int) time.Duration {
 }
 
 // observe records row as this pod's view of the signer and logs a move of its
-// status: a WARN when it is broken, since every managed workspace with no
+// status: a WARN when it is broken, since every managed org with no
 // signer of its own commits unsigned from its next signature on.
 func (d *DeploymentHealth) observe(ctx context.Context, row domain.DeploymentCommitSigner) {
 	d.mu.Lock()
@@ -221,12 +221,12 @@ func (d *DeploymentHealth) observe(ctx context.Context, row domain.DeploymentCom
 	}
 	switch row.Status {
 	case domain.CommitSignerBroken:
-		signerLog.WarnContext(ctx, "deployment commit signer is broken; managed workspaces commit unsigned until an operator fixes it",
+		signerLog.WarnContext(ctx, "deployment commit signer is broken; managed organizations commit unsigned until an operator fixes it",
 			"login", row.Login, "host", row.Host, "reason", row.StatusReason, "since", row.StatusSince)
 	case domain.CommitSignerActive:
-		signerLog.InfoContext(ctx, "deployment commit signer is active; managed workspaces sign as it", "login", row.Login, "host", row.Host)
+		signerLog.InfoContext(ctx, "deployment commit signer is active; managed organizations sign as it", "login", row.Login, "host", row.Host)
 	case domain.CommitSignerPending:
-		signerLog.InfoContext(ctx, "deployment commit signer is pending; managed workspaces sign once a check finds its key on the account",
+		signerLog.InfoContext(ctx, "deployment commit signer is pending; managed organizations sign once a check finds its key on the account",
 			"login", row.Login, "host", row.Host)
 	}
 }

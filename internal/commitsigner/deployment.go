@@ -16,7 +16,7 @@ import (
 )
 
 // The deployment signer is operator config on the control pods, in the same
-// class as the deployment App whose workspaces it signs for: an environment
+// class as the deployment App whose orgs it signs for: an environment
 // variable has no API path, so no handler can read or rewrite it, and a key
 // with no org has no row in the org-keyed secret store to live in. The
 // docker-compose.yml control service forwards all three and the executor
@@ -37,7 +37,7 @@ const (
 var DeploymentSignerEnvNames = []string{EnvDeploymentSignerLogin, EnvDeploymentSignerKey, EnvDeploymentSignerEmail}
 
 // DeploymentSigner is the deployment's commit signer: the GitHub user account
-// every workspace on the deployment App signs its agents' commits as unless it
+// every org on the deployment App signs its agents' commits as unless it
 // registers a signer of its own, and the private key that signs for it. A
 // control pod builds it from its own config and keeps the signer's health in
 // deployment_commit_signer, on the row for its key on its host.
@@ -116,7 +116,7 @@ func DeploymentSignerFromEnv() (*DeploymentSigner, error) {
 // deployment. Whitespace around each value is trimmed.
 //
 // Every other incomplete or malformed configuration is an error, because each
-// is one in which an operator believes managed workspaces sign and they would
+// is one in which an operator believes managed orgs sign and they would
 // not: a login without a key or a key without a login, an email with neither,
 // a login GitHub would not issue, a key that is not an unencrypted ed25519
 // private key, an email git would not write unchanged, and no email for a

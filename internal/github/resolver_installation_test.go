@@ -132,7 +132,7 @@ func TestInstallationFor_CollidingLoginsNeverCrossResolve(t *testing.T) {
 }
 
 // TestInstallationFor_Selection is the whole resolution matrix, and the case it
-// exists for is the middle one: a workspace with more than one installation.
+// exists for is the middle one: an org with more than one installation.
 // One is what a private BYO App produces, and while that was the only shape an
 // unnamed account had a single obvious answer; an enterprise-owned App installs
 // once per GitHub org and it stops having one. Each row fixes what a caller
@@ -189,7 +189,7 @@ func TestInstallationFor_Selection(t *testing.T) {
 
 // TestInstallationFor_AmbiguityNamesTheCount pins the one thing the ambiguity
 // error is read for. Whoever hits it is looking at a call site that forgot to
-// say which account it meant, and the count is what tells them the workspace's
+// say which account it meant, and the count is what tells them the org's
 // installations are the reason — an error that only said "ambiguous" would
 // leave them counting rows in the mirror by hand.
 func TestInstallationFor_AmbiguityNamesTheCount(t *testing.T) {

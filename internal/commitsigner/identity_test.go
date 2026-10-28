@@ -62,9 +62,9 @@ func signer(status domain.CommitSignerStatus) *domain.OrgCommitSigner {
 // bot, the deployment App's bot); a signer, in any status, replaces that
 // identity in every class, and only an active one signs.
 //
-// With no deployment signer configured, a workspace on the deployment App
+// With no deployment signer configured, an org on the deployment App
 // with no signer of its own commits as the deployment's bot, unsigned
-// (TestResolve_DeploymentSigner covers one configured). A workspace with its
+// (TestResolve_DeploymentSigner covers one configured). An org with its
 // own signer, broken included, never resolves past it.
 func TestResolve_EveryCredentialClassAndSignerStatus(t *testing.T) {
 	classes := map[domain.GitHubCredentialClass]ghclient.OrgIdentity{
@@ -205,7 +205,7 @@ func managedOrg() fakeOrgs {
 	}}
 }
 
-// TestResolve_DeploymentSigner covers a workspace on the deployment App: with
+// TestResolve_DeploymentSigner covers an org on the deployment App: with
 // no signer of its own it resolves to the deployment signer, which signs while
 // it is active and otherwise authors the commits unsigned; with a signer of its
 // own, in any status, it resolves to that signer and never to the deployment's.

@@ -185,11 +185,11 @@ func (f fakeDeploymentHealth) GetSystem(context.Context, string, string) (*domai
 	return f.row, nil
 }
 
-// TestResolveGitHub_ManagedWorkspaceSealsTheDeploymentSigner: a workspace on
+// TestResolveGitHub_ManagedOrgSealsTheDeploymentSigner: an org on
 // the deployment App with no signer of its own seals the deployment signer as
 // its identity and its public key as the run's signer, and the bundle carries
 // no line of the deployment's private key, which this control pod holds.
-func TestResolveGitHub_ManagedWorkspaceSealsTheDeploymentSigner(t *testing.T) {
+func TestResolveGitHub_ManagedOrgSealsTheDeploymentSigner(t *testing.T) {
 	private, public := signerKeys(t)
 	env := map[string]string{
 		commitsigner.EnvDeploymentSignerLogin: "TriageFactory",

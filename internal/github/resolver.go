@@ -25,11 +25,11 @@ var ErrNoGitHubCredentials = errors.New("github: no credentials resolved for org
 // more than one installation and the call named no account to choose between
 // them, or named one only by a login that more than one live installation
 // answers to. It deliberately does NOT wrap ErrNoGitHubCredentials: the
-// workspace's credential is present and working, and telling a user their GitHub is
+// org's credential is present and working, and telling a user their GitHub is
 // disconnected when the real fault is a caller that didn't say which account it
 // meant sends them to re-authorize something that was never broken.
 //
-// One installation per workspace is what a private BYO App produces, so the
+// One installation per org is what a private BYO App produces, so the
 // empty target went unnoticed for as long as that was the only shape. An
 // enterprise-owned internal App installs once per GitHub org in the
 // enterprise, and from then on "no specific account" has no answer.
@@ -293,7 +293,7 @@ type ScopedRepoResolver interface {
 //	tier 1  the org's own GitHub App installation token for the target
 //	        account — short-lived (~1h), repo-scoped, revocable.
 //	tier 2  the deployment App's installation token for the target account
-//	        — one App key serving many workspaces, its identity and key in
+//	        — one App key serving many orgs, its identity and key in
 //	        the operator's environment. Same shape as tier 1 and the same
 //	        no-PAT-fallback rule; what differs is where the signing key comes
 //	        from and that the org holds no registration row (see
@@ -800,7 +800,7 @@ func (r *resolver) activeApp(ctx context.Context, orgID string, class domain.Git
 		// arm below returns an error rather than the zero resolvedApp, and that
 		// is the no-PAT-fallback rule made structural: the managed class has no
 		// path through this function that reaches the PAT tier, whatever goes
-		// wrong. An org whose workspace never chose a PAT must not act on one
+		// wrong. An org that never chose a PAT must not act on one
 		// because the shared App had a bad afternoon.
 		base, err := host()
 		if err != nil {
@@ -1222,7 +1222,7 @@ func (r *resolver) OrgIdentityAccountFor(ctx context.Context, orgID string) (Org
 	}
 	// A managed org has no PAT tier to fall to. Its credential is the deployment
 	// App — activeApp refuses rather than borrowing a PAT — so the cached PAT
-	// login below would be an identity for a credential the workspace is not
+	// login below would be an identity for a credential the org is not
 	// acting as, stamped precisely when the shared App is unusable and nobody is
 	// looking at commit authorship. Stamp nothing instead, exactly as an
 	// unrecognised class does, and let the agent inherit ambient git config.
@@ -1316,7 +1316,7 @@ func (a accountRef) String() string {
 // for and several cannot: with exactly one there is nothing to choose between,
 // so it is returned; with more than one the call is ambiguous and the error
 // says so (ErrAmbiguousInstallation), because the fault is a caller that didn't
-// name an account rather than a workspace missing a credential. Guessing is not
+// name an account rather than an org missing a credential. Guessing is not
 // an option on offer — a token minted from the wrong account either 422s at
 // GitHub or, worse, succeeds against somebody else's repositories.
 func (r *resolver) installationFor(ctx context.Context, orgID, host string, target accountRef) (domain.OrgGitHubAppInstallation, error) {

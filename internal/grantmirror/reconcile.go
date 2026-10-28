@@ -148,9 +148,9 @@ func NewReconciler(apps db.GitHubAppsStore, mirror db.ReachableReposStore, resol
 	return &Reconciler{apps: apps, mirror: mirror, clients: resolverSource{resolver: resolver}, classes: classes, deployment: deployment}
 }
 
-// RunDeployment refreshes every managed workspace's installation set from one
+// RunDeployment refreshes every managed org's installation set from one
 // listing of the deployment App's installations. It is the managed class's
-// half of the existence reconcile RunOrg performs for a workspace that owns its
+// half of the existence reconcile RunOrg performs for an org that owns its
 // App key — split out because it is a DEPLOYMENT singleton, not a per-org pass:
 // under a shared key GET /app/installations is the same answer whoever asks, so
 // listing it once per org per cycle would spend one shared rate budget N times
@@ -170,7 +170,7 @@ func NewReconciler(apps db.GitHubAppsStore, mirror db.ReachableReposStore, resol
 //
 // The deployment App is handed to the store as given, unconfigured or not,
 // because the store is where the two states it distinguishes are visible and
-// this method cannot tell them apart: a deployment with no managed workspace
+// this method cannot tell them apart: a deployment with no managed org
 // holding a bound installation is answered as a no-op before the App is ever
 // consulted, which is every local process and every deployment whose orgs all
 // bring their own key; a deployment that HAS bound managed installations and
@@ -179,7 +179,7 @@ func NewReconciler(apps db.GitHubAppsStore, mirror db.ReachableReposStore, resol
 // on the App would silently turn the second case into the first — exactly the
 // silent staleness this pass exists to end.
 //
-// It never discovers: an installation no workspace bound has no row to write
+// It never discovers: an installation no org bound has no row to write
 // to. It runs once per GitHub poll cycle, on the brain-lease holder only,
 // which is the poller's own gate (the same one RunOrg inherits) and not a
 // second mechanism here.
@@ -193,8 +193,8 @@ func (r *Reconciler) RunDeployment(ctx context.Context) error {
 // RunOrg reconciles one org: first that the set of installations TF believes in
 // is the set GitHub reports, then what each of those installations can reach.
 //
-// Existence comes first for a workspace that owns its App key, and for that
-// workspace it is not optional. Every other thing that moves the mirror is
+// Existence comes first for an org that owns its App key, and for that
+// org it is not optional. Every other thing that moves the mirror is
 // event-shaped — a delivery, the Settings refresh button, the cutover preflight
 // — so without a timer an org whose deliveries do not arrive reports zero
 // installations, at which point the poll cycle reports degraded and skips
@@ -203,10 +203,10 @@ func (r *Reconciler) RunDeployment(ctx context.Context) error {
 // /app/installations is also the only thing that reports each installation's
 // repository_selection.
 //
-// A workspace on the deployment's shared App takes the second half only: with
-// one key serving every workspace, the same call returns other tenants'
+// An org on the deployment's shared App takes the second half only: with
+// one key serving every org, the same call returns other tenants'
 // installations, so which of them belong here is a fact the bind asserts and a
-// refresh may never invent. The grant half then runs over what that workspace
+// refresh may never invent. The grant half then runs over what that org
 // has already bound, and creates nothing.
 //
 // Per-installation failures do not abort the pass — one account's expired
@@ -248,22 +248,22 @@ func (r *Reconciler) RunOrg(ctx context.Context, orgID string) error {
 			return nil
 		}
 	}
-	// A managed workspace takes neither of those steps, and the two skips are not
+	// A managed org takes neither of those steps, and the two skips are not
 	// the same decision.
 	//
 	// Skipping the DISCOVERY is the point rather than an optimization: with one
-	// key serving every workspace, GET /app/installations returns other tenants'
+	// key serving every org, GET /app/installations returns other tenants'
 	// installations, and which of them belong here is a fact only the bind
-	// asserts. (The registration read would answer nil regardless — such a
-	// workspace holds no org_github_apps row and can hold none, that table being
+	// asserts. (The registration read would answer nil regardless — such an
+	// org holds no org_github_apps row and can hold none, that table being
 	// one row per org with a UNIQUE app_id, so N orgs cannot each name the one
 	// shared App.)
 	//
 	// Skipping the REFRESH here is not the point; it is only the wrong scope.
 	// The managed installation set still converges by pull, in RunDeployment,
-	// which lists the shared App once per cycle for every managed workspace at
+	// which lists the shared App once per cycle for every managed org at
 	// once and runs ahead of this per-org loop — so by the time this pass reads
-	// the workspace's installations below, a suspension GitHub has lifted is
+	// the org's installations below, a suspension GitHub has lifted is
 	// already cleared and a renamed account already carries its new login.
 
 	// An org on the PAT tier has no grant to mirror at all: its reach is the
@@ -375,8 +375,8 @@ func (r *Reconciler) reconcileInstallation(ctx context.Context, orgID string, cl
 		})
 	}
 
-	// The org's own class, not a literal: the same installation loop serves a
-	// workspace on its own App and one on the deployment's, and the class is what
+	// The org's own class, not a literal: the same installation loop serves an
+	// org on its own App and one on the deployment's, and the class is what
 	// the reads key on.
 	return r.mirror.ReplaceForInstallationSystem(ctx, orgID, class, inst.GitHubHost, inst.InstallationID, entries)
 }

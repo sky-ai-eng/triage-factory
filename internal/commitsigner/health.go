@@ -55,7 +55,7 @@ const (
 // In multi mode the org's cycle also makes the post-push check of the commits
 // its runs signed as the deployment signer, with the org's credential, since
 // each is in one of its repositories; a failure breaks the deployment signer
-// for every managed workspace. Its periodic check belongs to no org, and every
+// for every managed org. Its periodic check belongs to no org, and every
 // control pod makes it (DeploymentHealth).
 type HealthChecker struct {
 	Stores db.Stores
@@ -210,7 +210,7 @@ func (h *HealthChecker) checkPushes(ctx context.Context, signer domain.OrgCommit
 // checkDeploymentPushes is the post-push check of the commits orgID's runs
 // signed as the deployment signer. A failure that still says something about
 // the signer as this pod is configured with it breaks it for every managed
-// workspace, with GitHub's reason.
+// org, with GitHub's reason.
 func (h *HealthChecker) checkDeploymentPushes(ctx context.Context, orgID string) {
 	d := h.Deployment
 	if !d.Configured() {
@@ -250,7 +250,7 @@ func (h *HealthChecker) checkDeploymentPushes(ctx context.Context, orgID string)
 				continue
 			}
 			if broken != nil {
-				signerLog.WarnContext(ctx, "deployment commit signer is broken; managed workspaces commit unsigned until an operator fixes it",
+				signerLog.WarnContext(ctx, "deployment commit signer is broken; managed organizations commit unsigned until an operator fixes it",
 					"check", CheckPostPush, "org", orgID, "commit", sig.CommitSHA, "reason", broken.StatusReason, "was", row.Status)
 				row = broken
 			}

@@ -182,7 +182,7 @@ func (r *Refresher) RunOrg(ctx context.Context, orgID string, force bool) (bool,
 		// cycle runs, with the same never-empty-on-failure posture. Running it
 		// here rather than duplicating the enumeration is what keeps the two
 		// tiers' answers written by one writer apiece. Both App classes take it:
-		// what differs between a workspace on its own App and one on the
+		// what differs between an org on its own App and one on the
 		// deployment's is which installations the pass may create, which is the
 		// reconcile's own decision and not a second refresh shape.
 		if err := r.grant(ctx, orgID); err != nil {

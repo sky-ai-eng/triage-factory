@@ -779,7 +779,7 @@ func TestResolver_Tier1_EmptyTargetSingleInstall(t *testing.T) {
 
 // An ambiguous empty target with multiple installs can't pick an installation.
 // App XOR PAT — an active-App org errors rather than borrowing the (stale) PAT
-// — and the error says ambiguous rather than no-credentials, since a workspace
+// — and the error says ambiguous rather than no-credentials, since an org
 // told its GitHub is disconnected re-authorizes a connection that was fine.
 func TestResolver_EmptyTargetMultiInstall_Errors(t *testing.T) {
 	gh := newGHTestServer(t)

@@ -109,7 +109,7 @@ func signerOffReason(res Result, mode domain.CommitSigningMode) string {
 	switch res.Refusal {
 	case RefusalSignerRemoved:
 		if mode == domain.CommitSigningDeployment {
-			return "this workspace no longer signs as the deployment's signing account"
+			return "this organization no longer signs as the deployment's signing account"
 		}
 		return "an org admin removed the signer"
 	case RefusalSignerChanged:

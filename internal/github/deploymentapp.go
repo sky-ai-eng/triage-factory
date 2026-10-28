@@ -13,7 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 )
 
-// Tier 2 — the deployment App. One App key serving many workspaces, its
+// Tier 2 — the deployment App. One App key serving many orgs, its
 // identity and key in the operator's environment rather than in any org's
 // secret store (see githubapp.DeploymentApp for why the environment).
 //
@@ -41,13 +41,13 @@ import (
 //
 // Like ErrUnknownCredentialClass it deliberately does NOT wrap
 // ErrNoGitHubCredentials. "GitHub is not configured" is a claim about the
-// workspace, and every one of these faults is a claim about the DEPLOYMENT: the
-// workspace did nothing wrong and has nothing to reconnect, so sending its
+// org, and every one of these faults is a claim about the DEPLOYMENT: the
+// org did nothing wrong and has nothing to reconnect, so sending its
 // admin to re-authorize would be sending them to fix somebody else's .env.
 //
 // What it never means is "fall back". A managed org's resolution mints from the
 // deployment App or fails — never from a PAT, which would be a credential the
-// workspace did not choose.
+// org did not choose.
 var ErrDeploymentAppUnavailable = errors.New("github: the deployment app is unavailable")
 
 // ErrDeploymentAppOtherGitHub is the cause wrapped when a managed-class org's
@@ -56,9 +56,9 @@ var ErrDeploymentAppUnavailable = errors.New("github: the deployment app is unav
 // call: preflighting the deployment's key against a GitHub that has never seen
 // it would fail with a 401 that reads like a bad key, and cache that failure
 // against the deployment App itself. The bind ceremony refuses the same
-// workspace with the same fact, so this arm is reached only by an org whose
+// org with the same fact, so this arm is reached only by an org whose
 // base URL moved after it bound.
-var ErrDeploymentAppOtherGitHub = errors.New("github: the workspace is pointed at a GitHub the deployment app is not on")
+var ErrDeploymentAppOtherGitHub = errors.New("github: the organization is pointed at a GitHub the deployment app is not on")
 
 // deploymentAppTTL is how long a clean preflight answer serves. The answer
 // moves when the operator rotates the App's key or its granted permissions
@@ -111,7 +111,7 @@ type deploymentAppEntry struct {
 // One answer, not one per host. The App's identity is established BY a call to
 // a particular GitHub, and the deployment App is registered on exactly one —
 // the deployment's default (ghbase.DefaultBaseURL), which is also the GitHub
-// every managed org is on, since the bind refuses a workspace pointed anywhere
+// every managed org is on, since the bind refuses an org pointed anywhere
 // else. So there is one GitHub to ask and one verdict to hold; an org whose
 // host is not that GitHub is refused by resolve without a flight rather than
 // given a per-host entry that could only ever cache a failure.
@@ -189,7 +189,7 @@ func (s *deploymentAppSource) resolve(ctx context.Context, base string) (*deploy
 		if host == "" {
 			host = "no GitHub URL"
 		}
-		return nil, fmt.Errorf("%w: %w: workspace on %s, deployment app on %s",
+		return nil, fmt.Errorf("%w: %w: organization on %s, deployment app on %s",
 			ErrDeploymentAppUnavailable, ErrDeploymentAppOtherGitHub, host, deploymentHost)
 	}
 	apiBase := ghbase.APIBase(deploymentHost)

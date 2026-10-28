@@ -80,7 +80,7 @@ docker compose up -d
 ## 5. Check it took
 
 Within a minute `control` logs
-`deployment commit signer is active; managed workspaces sign as it`. If it logs
+`deployment commit signer is active; managed organizations sign as it`. If it logs
 `deployment commit signer is pending` followed by
 `the deployment commit signer's key is not among the account's signing keys`,
 step 3 is missing, or GitHub hasn't listed the new key yet (allow a minute).

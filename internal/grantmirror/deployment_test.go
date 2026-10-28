@@ -50,7 +50,7 @@ func (c *countingApps) RefreshAllManagedInstallations(_ context.Context, app git
 
 func TestRunDeployment_HandsTheStoreTheAppAsGiven(t *testing.T) {
 	// Unconfigured included. The store is the only place that can tell "no
-	// managed workspace has bound anything" (a no-op, the App never consulted)
+	// managed org has bound anything" (a no-op, the App never consulted)
 	// from "managed installations are bound and there is no App to list them
 	// with" (an outage); a guard here on the App would fold the second into
 	// the first and hide it.
@@ -69,13 +69,13 @@ func TestRunDeployment_HandsTheStoreTheAppAsGiven(t *testing.T) {
 }
 
 func TestRunDeployment_BoundManagedInstallationsWithNoAppIsAnOutage(t *testing.T) {
-	// End to end against the real store: a managed workspace with a bound
+	// End to end against the real store: a managed org with a bound
 	// installation on a deployment whose shared key has gone missing fails
 	// where someone can see it, and a deployment with nothing bound does not
 	// mind that it has no key.
 	ctx := context.Background()
 	gh := newDeploymentGH(t)
-	stores, org := newManagedWorkspace(t, gh.srv.URL)
+	stores, org := newManagedOrg(t, gh.srv.URL)
 	classes := fakeClasses{class: domain.GitHubCredentialClassManagedApp}
 	resolver := github.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, nil)
 	r := NewReconciler(stores.GitHubApps, stores.ReachableRepos, resolver, classes, githubapp.DeploymentApp{})
@@ -117,7 +117,7 @@ func TestRunDeployment_ARenameResolvesMintingAgain(t *testing.T) {
 	ctx := context.Background()
 	gh := newDeploymentGH(t)
 	app := testDeploymentApp(t)
-	stores, org := newManagedWorkspace(t, gh.srv.URL)
+	stores, org := newManagedOrg(t, gh.srv.URL)
 	bindInstallation(t, stores, org, gh.srv.URL, "456", "1000", "acme")
 	gh.setListing(t, listedInstallation{ID: 456, AccountID: 1000, Login: "acme-renamed"})
 
@@ -156,7 +156,7 @@ func TestRunDeployment_ALostUnsuspendUnblocksTheGrantPass(t *testing.T) {
 	ctx := context.Background()
 	gh := newDeploymentGH(t)
 	app := testDeploymentApp(t)
-	stores, org := newManagedWorkspace(t, gh.srv.URL)
+	stores, org := newManagedOrg(t, gh.srv.URL)
 	bindInstallation(t, stores, org, gh.srv.URL, "456", "1000", "acme")
 	if _, err := stores.GitHubApps.SetInstallationSuspension(ctx, org, gh.srv.URL, "456", time.Now().Add(-time.Hour), "owner"); err != nil {
 		t.Fatalf("suspend the installation: %v", err)
@@ -289,12 +289,12 @@ func testDeploymentApp(t *testing.T) githubapp.DeploymentApp {
 	return githubapp.DeploymentApp{AppID: 987, PrivateKey: key, WebhookSecret: "wh", ClientSecret: "cs"}
 }
 
-// newManagedWorkspace opens a migrated in-memory store bundle holding one org
+// newManagedOrg opens a migrated in-memory store bundle holding one org
 // on the managed class, pointed at the fake GitHub.
-func newManagedWorkspace(t *testing.T, baseURL string) (db.Stores, string) {
+func newManagedOrg(t *testing.T, baseURL string) (db.Stores, string) {
 	t.Helper()
 	// The fake GitHub is the deployment's GitHub: the deployment App is on it,
-	// which is the only GitHub a managed workspace can be on.
+	// which is the only GitHub a managed org can be on.
 	ghbase.SetDefaultBaseURLForTest(t, baseURL)
 	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
