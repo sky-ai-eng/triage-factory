@@ -2,6 +2,7 @@ package delegate
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -51,9 +52,9 @@ func TestSetupLinear_RunRootAndTools(t *testing.T) {
 	if want := "Linear issue: ENG-7"; cfg.scope != want {
 		t.Errorf("scope = %q, want %q", cfg.scope, want)
 	}
-	for _, want := range []string{"triagefactory exec linear issue view", "triagefactory exec gh"} {
-		if !strings.Contains(cfg.sources.tools, want) {
-			t.Errorf("tools section is missing %q", want)
+	for _, want := range []string{"linear", "github"} {
+		if !slices.Contains(cfg.sources.kinds, want) {
+			t.Errorf("sources = %q, want %s documented", cfg.sources.kinds, want)
 		}
 	}
 }

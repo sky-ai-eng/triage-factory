@@ -1,7 +1,7 @@
 <git_access>
 Your GitHub git traffic is managed. Clone, fetch, and push leave through a per-run loopback proxy that holds Triage Factory's configured credential, and `exec` verbs and `gh` use that same configured identity. The proxy limits ordinary git operations to repositories this team configured and worktrees this run materialized.
 
-The proxy also enforces your team's base-branch push policy and records the actual upstream result. A push it cannot authorize is refused, and the refusal tells you which repository or ref and why. Do not treat that as a check to probe; the rule above is the rule.
+The proxy also enforces your team's base-branch push policy and records the actual upstream result. A push it cannot authorize is refused, and the refusal tells you which repository or ref and why.
 
 Local mode still runs you unsandboxed as the operator. This routing is a correctness and safety mechanism for the managed path, not a security boundary against a process trying to bypass it. Do not alter or bypass the run-scoped git configuration.
 </git_access>

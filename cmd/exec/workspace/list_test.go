@@ -49,17 +49,18 @@ func TestListWorkspaces_GitHubRunAllowed(t *testing.T) {
 	}
 }
 
-func TestListWorkspaces_AvailableFiltersOutMaterialized(t *testing.T) {
+// TestListWorkspaces_AvailableKeepsMaterializedRepos: a repo the run already
+// has a checkout of stays in `available`, because `add` is keyed per checkout —
+// the base branch beside a PR checkout is still an add away.
+func TestListWorkspaces_AvailableKeepsMaterializedRepos(t *testing.T) {
 	stores, database := newTestDB(t)
 	seedJiraConversation(t, database, "r1", "SKY-1")
 	seedRepository(t, database, "owner", "alpha", "https://x", "main")
 	seedRepository(t, database, "owner", "beta", "https://x", "main")
-	seedRepository(t, database, "owner", "gamma", "https://x", "main")
 
-	// Materialize one of the three.
 	if _, _, err := sqlitestore.New(database.Conn).ConversationWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.ConversationWorktree{
 		ConversationID: "r1", RepositoryID: repoRowID(t, database, "owner", "beta"),
-		Path: "/tmp/wt/beta", Ref: "default",
+		Path: "/tmp/wt/beta", Ref: "pr-7",
 	}); err != nil {
 		t.Fatalf("seed materialized: %v", err)
 	}
@@ -69,59 +70,18 @@ func TestListWorkspaces_AvailableFiltersOutMaterialized(t *testing.T) {
 		t.Fatalf("listWorkspaces: %v", err)
 	}
 
-	// available = configured - materialized.
 	availSet := make(map[string]struct{}, len(out.Available))
 	for _, a := range out.Available {
 		availSet[a.Repo] = struct{}{}
 	}
-	if _, ok := availSet["owner/beta"]; ok {
-		t.Errorf("owner/beta should not appear in available (it's already materialized): %+v", out.Available)
-	}
-	for _, want := range []string{"owner/alpha", "owner/gamma"} {
+	for _, want := range []string{"owner/alpha", "owner/beta"} {
 		if _, ok := availSet[want]; !ok {
 			t.Errorf("expected %q in available, got %+v", want, out.Available)
 		}
 	}
-
-	// materialized has the one we seeded.
-	if len(out.Materialized) != 1 || out.Materialized[0].Repo != "owner/beta" {
-		t.Errorf("materialized = %+v, want one entry for owner/beta", out.Materialized)
-	}
-	if out.Materialized[0].Path != "/tmp/wt/beta" || out.Materialized[0].Ref != "default" {
-		t.Errorf("materialized entry mismatch: %+v", out.Materialized[0])
-	}
-}
-
-// TestListWorkspaces_ARetiredRowsCheckoutIsNotItsNamesakes: a checkout and a
-// tracked repository are one repository only when they reference one registry
-// row, so the namesake of a retired row the run holds a checkout of is still
-// available to add.
-func TestListWorkspaces_ARetiredRowsCheckoutIsNotItsNamesakes(t *testing.T) {
-	stores, database := newTestDB(t)
-	ctx := context.Background()
-	seedJiraConversation(t, database, "r1", "SKY-1")
-	dead := seedRepository(t, database, "owner", "beta", "https://x", "main")
-	if _, _, err := sqlitestore.New(database.Conn).ConversationWorktrees.Insert(ctx, runmode.LocalDefaultOrgID, domain.ConversationWorktree{
-		ConversationID: "r1", RepositoryID: dead, Path: "/tmp/wt/beta", Ref: "default",
-	}); err != nil {
-		t.Fatalf("seed materialized: %v", err)
-	}
-	if err := dbtest.RetireRepo(ctx, sqlitestore.New(database.Conn).Repos, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, "owner/beta"); err != nil {
-		t.Fatalf("retire owner/beta: %v", err)
-	}
-	if live := seedRepository(t, database, "owner", "beta", "https://y", "main"); live == dead {
-		t.Fatalf("the namesake resolved to the retired row %s; want a row of its own", dead)
-	}
-
-	out, err := listWorkspaces(hostFor(stores, "r1"))
-	if err != nil {
-		t.Fatalf("listWorkspaces: %v", err)
-	}
-	if len(out.Available) != 1 || out.Available[0].Repo != "owner/beta" {
-		t.Errorf("available = %+v, want the live owner/beta — the run's checkout is of another repository", out.Available)
-	}
-	if len(out.Materialized) != 1 || out.Materialized[0].Path != "/tmp/wt/beta" {
-		t.Errorf("materialized = %+v, want the retired repository's checkout", out.Materialized)
+	if len(out.Materialized) != 1 || out.Materialized[0].Repo != "owner/beta" ||
+		out.Materialized[0].Path != "/tmp/wt/beta" || out.Materialized[0].Ref != "pr-7" {
+		t.Errorf("materialized = %+v, want the one owner/beta PR checkout", out.Materialized)
 	}
 }
 
@@ -161,10 +121,6 @@ func TestListWorkspaces_ScopedToRun(t *testing.T) {
 	}
 	if len(out.Materialized) != 0 {
 		t.Errorf("r1 materialized = %+v, expected empty (r2's row leaked)", out.Materialized)
-	}
-	// owner/shared should be available for r1 since r1 hasn't materialized it.
-	if len(out.Available) != 1 || out.Available[0].Repo != "owner/shared" {
-		t.Errorf("r1 available = %+v, want one entry for owner/shared", out.Available)
 	}
 }
 

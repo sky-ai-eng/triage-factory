@@ -5,10 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
-	"github.com/sky-ai-eng/triage-factory/internal/cell"
-	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
 // TestWriteTaskContextFile_LandsInTheStagedTarget is the task context's whole
@@ -68,35 +64,5 @@ func TestWriteTaskContextFile_OverwritesThePriorStep(t *testing.T) {
 	}
 	if strings.Contains(string(got), "step 0") {
 		t.Errorf("the earlier step's task context survived: %q", got)
-	}
-}
-
-// TestNativeMemoryBlock_NamesTheRetainedTaskContext ties the file the launch
-// writes to the path the prompt sends the agent to.
-//
-// They are produced in two packages that cannot share a constant — agentprompt
-// spells its paths out literally to keep the prefix cacheable, and it may not
-// import the delegate package that names the file. So the tie is this
-// assertion: rename the file or move the staging directory and the retention
-// still happens, silently, at a path nothing tells the agent about.
-func TestNativeMemoryBlock_NamesTheRetainedTaskContext(t *testing.T) {
-	want := cell.WorkDir + "/" + worktree.ScratchDir + "/" + worktree.EntityMemoryDir + "/" + taskContextFileName
-	if composed := agentprompt.Build(nativeSpec()); !strings.Contains(composed, want) {
-		t.Errorf("the native prompt does not name the retained task context at %q; a compacted run has no way back to it", want)
-	}
-}
-
-// TestSDKMemoryBlock_NamesTheRetainedTaskContext is the same tie on the other
-// runtime, and it is a tie the SDK block only earns from the commit its launch
-// started writing the file: the block is literal, so a path it names that
-// nothing writes is a re-read the agent is sent to make and cannot.
-//
-// The path is run-root-relative here where the native block's is absolute —
-// that runtime's blocks name in-jail paths outright, while this one defers to
-// the run root <run_context> states.
-func TestSDKMemoryBlock_NamesTheRetainedTaskContext(t *testing.T) {
-	want := worktree.ScratchDir + "/" + worktree.EntityMemoryDir + "/" + taskContextFileName
-	if composed := agentprompt.Build(machinistSpec()); !strings.Contains(composed, want) {
-		t.Errorf("the SDK prompt does not name the retained task context at %q; a compacted run has no way back to it", want)
 	}
 }

@@ -219,6 +219,21 @@ func TestNativeLaunch_StampsBlockTwoOnTheRow(t *testing.T) {
 	}
 }
 
+// TestNativeLaunch_ToolsAreTheNativeComposition: a native run's <tools> section
+// is the composition for its runtime, not the SDK's.
+func TestNativeLaunch_ToolsAreTheNativeComposition(t *testing.T) {
+	f := newLaunchFixture(t, "native-tools")
+	kinds := []string{"github", "jira"}
+	text := f.s.buildNativeLaunchText(context.Background(), f.task(t), "triage the ticket", runConfig{
+		orgID:   runmode.LocalDefaultOrgID,
+		teamID:  runmode.LocalDefaultTeamID,
+		sources: sourceDocs{kinds: kinds},
+	}, "", "")
+	if want := agentprompt.ToolsReferenceForSources(agentprompt.RuntimeNative, kinds); !strings.Contains(text.systemBlock, want) {
+		t.Errorf("the native block does not carry the native tools section;\n%s", text.systemBlock)
+	}
+}
+
 // TestNativeReclaim_ReplaysTheStampedBlockByteForByte is the ticket. A native
 // conversation woken after a park keeps the transcript it built, so a block 2
 // composed afresh would change the model's own instructions mid-conversation —
@@ -463,7 +478,7 @@ func (f *launchFixture) runNative(t *testing.T, mission string) engagementDispos
 		claimID:        f.conv.ClaimID,
 		blueprintRunID: f.br.ID,
 		runRoot:        f.worktree,
-		sources:        sourceDocs{tools: agentprompt.GitHubToolsReference()},
+		sources:        sourceDocs{kinds: []string{"github"}},
 	}, time.Now(), "claude-sonnet-4-6", "manual", runmode.LocalDefaultUserID)
 }
 
@@ -475,7 +490,7 @@ func (f *launchFixture) nativeLaunchText(t *testing.T, mission, knowledge, repla
 	return f.s.buildNativeLaunchText(context.Background(), f.task(t), mission, runConfig{
 		orgID:   runmode.LocalDefaultOrgID,
 		teamID:  runmode.LocalDefaultTeamID,
-		sources: sourceDocs{tools: agentprompt.GitHubToolsReference()},
+		sources: sourceDocs{kinds: []string{"github"}},
 	}, knowledge, replayed)
 }
 

@@ -325,3 +325,17 @@ func TestCaptureWorkspaceGit_CleanTreeStillCarriesHead(t *testing.T) {
 		t.Errorf("clean tree produced a patch: %q", delta.Patch)
 	}
 }
+
+// TestCaptureWorkspaceGit_BranchNamedLikeAPath: a branch that shares its name
+// with a directory in the checkout still bundles its local-only commits.
+func TestCaptureWorkspaceGit_BranchNamedLikeAPath(t *testing.T) {
+	wtDir := captureWorktree(t, "branch-named-like-a-path")
+	gitIn(t, wtDir, "checkout", "-q", "-b", "nested")
+	delta, err := CaptureWorkspaceGit(context.Background(), wtDir)
+	if err != nil {
+		t.Fatalf("CaptureWorkspaceGit: %v", err)
+	}
+	if delta.Branch != "nested" || len(delta.Bundle) == 0 {
+		t.Errorf("delta = branch %q, bundle of %d bytes; want branch nested and a bundle", delta.Branch, len(delta.Bundle))
+	}
+}

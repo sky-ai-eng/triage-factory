@@ -16,16 +16,17 @@ import (
 //     team's tracked set, the same gate `workspace add` applies. Empty list
 //     means the team tracks no repos (delegated agents shouldn't ever see
 //     this since the spawner gates on profile readiness, but the shape
-//     stays consistent).
-//   - materialized: repos the agent has already `workspace add`'d for
-//     this run, with the absolute worktree path and the ref the worktree
-//     was materialized for ("default", "pr-<N>", or "ref-<branch>").
+//     stays consistent). A repo the run already has a checkout of stays
+//     here: `add` is keyed per checkout, so the base branch beside a PR
+//     checkout is still an `add` away.
+//   - materialized: the checkouts this run has, with the absolute
+//     worktree path and the ref each was materialized for ("default",
+//     "pr-<N>", or "ref-<branch>").
 //
 // Two-section structure (rather than a flat list with a `materialized`
 // boolean) keeps the field shape per entry uniform — available entries
-// don't carry a path, materialized entries carry path + ref — and makes
-// the "what could I add vs. what have I added" split obvious to a reader
-// skimming the JSON.
+// don't carry a path, materialized entries carry path + ref — and keeps a
+// repo listed once in "available" however many checkouts of it exist.
 type listOutput struct {
 	Available    []listAvailable    `json:"available"`
 	Materialized []listMaterialized `json:"materialized"`
@@ -102,12 +103,8 @@ func listWorkspaces(host agenthost.Client) (listOutput, error) {
 		return listOutput{}, fmt.Errorf("workspace list: resolve run root: %w", err)
 	}
 
-	// Keyed by registry row id: a ledger row and a tracked row are the same
-	// repository when they reference the same row, whatever each spells it.
-	materializedSet := make(map[string]struct{}, len(rows))
 	materialized := make([]listMaterialized, 0, len(rows))
 	for _, r := range rows {
-		materializedSet[r.RepositoryID] = struct{}{}
 		materialized = append(materialized, listMaterialized{
 			Repo: r.RepoID,
 			Path: agenthost.AgentViewPath(hostRoot, agentRoot, r.Path),
@@ -115,20 +112,17 @@ func listWorkspaces(host agenthost.Client) (listOutput, error) {
 		})
 	}
 
-	// Available = tracked-and-profilable minus already-materialized.
+	// Available = tracked-and-profilable, whether or not the run already has
+	// a checkout of it: hiding a materialized repo reads as "nothing more to
+	// add here" to an agent that needs a second checkout of it.
 	// Skeleton rows in repositories (tracked but not yet profiled —
 	// clone_url is empty) are filtered out:
 	// `workspace add` would reject them later with "no clone URL on
 	// its profile" anyway, so surfacing them here as discoverable
 	// options would just send the agent toward unusable choices.
-	// Materialized filter keeps the list framed as "what's still
-	// unmaterialized," matching the agent's mental model.
 	available := make([]listAvailable, 0, len(tracked))
 	for _, p := range tracked {
 		if p.CloneURL == "" {
-			continue
-		}
-		if _, alreadyAdded := materializedSet[p.ID]; alreadyAdded {
 			continue
 		}
 		available = append(available, listAvailable{

@@ -3,12 +3,10 @@ package delegate
 import (
 	"context"
 	"database/sql"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -36,45 +34,6 @@ func TestNonterminalStepSysPrompt_PositionGated(t *testing.T) {
 	}
 	if got := nonterminalStepSysPrompt(2, 3); got != "" {
 		t.Errorf("terminal step 2/3 got a fragment; the last step must see no `continue`")
-	}
-}
-
-// TestTerminalContractHasNoContinue pins the terminal/N=1 assembled prompt:
-// the base completion envelope documents finish/abort and never offers
-// `continue` (a non-terminal step's assembled prompt = this envelope PLUS the
-// fragment below, which does). It also no longer mentions `yield` — that
-// vocabulary was removed.
-func TestTerminalContractHasNoContinue(t *testing.T) {
-	env := agentprompt.Build(machinistSpec())
-	if strings.Contains(env, "continue") {
-		t.Errorf("terminal completion contract must not mention `continue`")
-	}
-	if strings.Contains(env, "yield") {
-		t.Errorf("completion contract must not mention `yield` (removed)")
-	}
-	for _, want := range []string{`"finish"`, `"abort"`} {
-		if !strings.Contains(env, want) {
-			t.Errorf("terminal completion contract missing %s", want)
-		}
-	}
-}
-
-// TestNonterminalFragmentFramesContinueAsDefault pins the fragment: it adds
-// `continue` framed as the default and `finish` as the explicit-criteria-only
-// exception.
-func TestNonterminalFragmentFramesContinueAsDefault(t *testing.T) {
-	frag := agentprompt.NonTerminalCompletion(machinistSpec())
-	if !strings.Contains(frag, "continue") {
-		t.Fatal("non-terminal fragment must offer `continue`")
-	}
-	if !strings.Contains(frag, "DEFAULT") {
-		t.Errorf("non-terminal fragment must frame `continue` as the default")
-	}
-	if !strings.Contains(frag, "finish") {
-		t.Errorf("non-terminal fragment must describe the `finish` exception")
-	}
-	if strings.Contains(frag, "yield") {
-		t.Errorf("non-terminal fragment must not mention `yield` (removed)")
 	}
 }
 

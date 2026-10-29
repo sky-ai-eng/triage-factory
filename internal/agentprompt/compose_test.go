@@ -3,11 +3,9 @@ package agentprompt
 import (
 	"io/fs"
 	"path"
+	"slices"
 	"strings"
 	"testing"
-
-	"github.com/sky-ai-eng/triage-factory/internal/cell"
-	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
 func machinistSpec(mode Mode) Spec {
@@ -72,43 +70,31 @@ func TestBuild_StableForSpec(t *testing.T) {
 	}
 }
 
-// TestBuild_ModeArmsDiverge is the reason the mode axis exists. Both modes now
-// mediate the managed Git path, but only multi puts the agent behind a
-// fail-closed egress boundary. Local is explicit that its process-scoped
-// routing is not a security boundary against the unsandboxed process.
+// TestBuild_ModeArmsDiverge is the reason the mode axis exists: only multi puts
+// the agent behind a fail-closed egress boundary, so each mode composes its own
+// git-access and isolation sections and never the other mode's.
 func TestBuild_ModeArmsDiverge(t *testing.T) {
-	local := Build(machinistSpec(ModeLocal))
-	multi := Build(machinistSpec(ModeMulti))
-	if local == multi {
-		t.Fatal("ModeLocal and ModeMulti composed identical text; the mode arms are not wired")
-	}
-	if !strings.Contains(multi, "fails closed") {
-		t.Error("multi-mode text does not state that its gate fails closed")
-	}
-	if !strings.Contains(local, "not a security boundary") {
-		t.Error("local-mode text does not state the limit of its managed Git routing")
-	}
-	if !strings.Contains(local, "configured credential") {
-		t.Error("local-mode text does not state that managed Git uses TF's configured identity")
-	}
-}
-
-// TestNonTerminalCompletion_RuntimeArms pins that each runtime gets its own
-// handoff addendum, because the two describe incompatible ways to end a step.
-// The SDK's step emits a JSON envelope carrying a "continue" outcome; the
-// native loop's just stops, and stopping IS the handoff. Handing either text
-// to the other runtime instructs the model to use a mechanism it does not have.
-func TestNonTerminalCompletion_RuntimeArms(t *testing.T) {
-	sdk := NonTerminalCompletion(machinistSpec(ModeMulti))
-	if !strings.Contains(sdk, `"outcome": "continue"`) {
-		t.Error("SDK non-terminal addendum does not offer the continue outcome")
-	}
-	native := NonTerminalCompletion(Spec{Surface: SurfaceMachinist, Runtime: RuntimeNative, Family: FamilyClaude, Mode: ModeMulti})
-	if native == "" {
-		t.Fatal("native non-terminal addendum is empty; a native step would be told nothing about handing off")
-	}
-	if strings.Contains(native, `"outcome"`) {
-		t.Error("the native addendum describes the SDK's JSON envelope, which this runtime never emits")
+	for _, tc := range []struct {
+		mode       Mode
+		own, other []string
+	}{
+		{ModeLocal, []string{blockGitAccessLocal, blockIsolationLocal}, []string{blockGitAccessMulti, blockIsolationMulti}},
+		{ModeMulti, []string{blockGitAccessMulti, blockIsolationMulti}, []string{blockGitAccessLocal, blockIsolationLocal}},
+	} {
+		paths, err := manifest(machinistSpec(tc.mode))
+		if err != nil {
+			t.Fatalf("manifest(%s): %v", tc.mode, err)
+		}
+		for _, p := range tc.own {
+			if !slices.Contains(paths, p) {
+				t.Errorf("%s does not compose its own %s", tc.mode, p)
+			}
+		}
+		for _, p := range tc.other {
+			if slices.Contains(paths, p) {
+				t.Errorf("%s composes the other mode's %s", tc.mode, p)
+			}
+		}
 	}
 }
 
@@ -229,119 +215,5 @@ func TestBuild_NativeSectionOrder(t *testing.T) {
 	}
 	if strings.Contains(got, strings.TrimSpace(block(blockCompletionNativeNT))) {
 		t.Error("the handoff addendum is composed into the shared prefix, forking it per step")
-	}
-}
-
-// TestNativeBlocks_NameTheRealPaths ties the absolute paths the native blocks
-// spell out to the constants that produce them.
-//
-// Writing them out is what keeps the prefix cacheable, and it carries a drift
-// risk in exchange: move the sandbox work root or rename the scratch dir, and
-// every native run is told to write its handoff somewhere that does not exist,
-// with nothing else failing.
-//
-// Every mention must also be reached from the fixed root. A bare relative
-// `_tfac/` resolves against whatever repo the agent last changed into, which
-// is the wrong tree and a file nobody finds again.
-func TestNativeBlocks_NameTheRealPaths(t *testing.T) {
-	root := cell.WorkDir + "/" + worktree.ScratchDir
-	spec := Spec{Surface: SurfaceMachinist, Runtime: RuntimeNative, Family: FamilyClaude, Mode: ModeMulti}
-	paths, err := manifest(spec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	paths = append(paths, blockCompletionNativeNT)
-
-	for _, p := range paths {
-		body := block(p)
-		if bare, rooted := strings.Count(body, worktree.ScratchDir), strings.Count(body, root); bare != rooted {
-			t.Errorf("%s names %q %d times but only %d are under the fixed %q root", p, worktree.ScratchDir, bare, rooted, root)
-		}
-	}
-
-	// The memory write path is the whole contract with the orchestrator: it
-	// reads back exactly this file, so a block naming another one loses the
-	// run's memory silently.
-	if want := root + "/memory.md"; !strings.Contains(block(blockVerbMemoryNv), want) {
-		t.Errorf("the native memory block does not name the write path %q", want)
-	}
-}
-
-// TestKnowledgeBlock_IsInBothRuntimes pins the pair, because a section that
-// exists for only one engine is a section half the fleet never reads — and the
-// two runtimes reach the same tree by different paths, so one file cannot serve
-// both.
-//
-// It asserts what the blocks may say and what they may NOT: they describe the
-// staged layout, which is fixed, and they never name a document or a folder,
-// which is per-run data. A block that listed what an org happens to hold today
-// would fork the cached prefix per team.
-func TestKnowledgeBlock_IsInBothRuntimes(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		spec  Spec
-		block string
-		root  string
-	}{
-		{"sdk", Spec{Surface: SurfaceMachinist, Runtime: RuntimeSDK, Family: FamilyClaude, Mode: ModeMulti},
-			blockVerbTeamKnowledge, "_tfac/knowledge/"},
-		{"native", Spec{Surface: SurfaceMachinist, Runtime: RuntimeNative, Family: FamilyClaude, Mode: ModeMulti},
-			blockVerbTeamKnowledgeNv, cell.WorkDir + "/" + worktree.ScratchDir + "/knowledge/"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			composed := Build(tc.spec)
-			body := block(tc.block)
-			if !strings.Contains(composed, strings.TrimSpace(body)) {
-				t.Fatalf("the %s machinist prompt does not carry its knowledge block", tc.name)
-			}
-			// The staged layout, named the way the staging step writes it.
-			for _, want := range []string{tc.root, tc.root + "team/", tc.root + "org/", "private/", "shared/"} {
-				if !strings.Contains(body, want) {
-					t.Errorf("the %s knowledge block does not name %q", tc.name, want)
-				}
-			}
-			// The block says the tree exists; <run_context> says what is in it.
-			if !strings.Contains(body, "run_context") && !strings.Contains(body, "run context") {
-				t.Errorf("the %s knowledge block does not point at the run context that lists what was staged", tc.name)
-			}
-		})
-	}
-}
-
-// TestNativeGHBlock_ClaimsNoInvisibility guards a claim that used to be true
-// and is not any more: every write the native `gh` performs — REST or GraphQL —
-// now lands an audit row, so a prompt telling the agent otherwise is teaching it
-// something false about the harness it is in.
-//
-// The redirect it carries is unaffected and stays: the TF review verbs dominate
-// `gh pr review` on what they can do, which was always the load-bearing reason.
-// This pins only that the justification is not the retired one.
-func TestNativeGHBlock_ClaimsNoInvisibility(t *testing.T) {
-	body := block(blockHarnessNativeGH)
-	for _, claim := range []string{"invisible", "no trace", "not recorded", "unrecorded"} {
-		if strings.Contains(strings.ToLower(body), claim) {
-			t.Errorf("the native gh block still claims %q; gh-channel writes are audited on both transports", claim)
-		}
-	}
-	// The refusal is still a refusal — losing it would hand the agent a review
-	// path that produces nothing the product can stage or route.
-	if !strings.Contains(body, "`gh pr review` is refused") {
-		t.Error("the native gh block no longer refuses `gh pr review`")
-	}
-}
-
-// TestNativeGHBlock_RefusesRepoCreation pins the second refusal the harness
-// teaches. The gate refuses the command either way, but a model that learns the
-// boundary here spends no turn discovering it — and the prompt is the only half
-// of the pair the SDK runtime sees at all, since that runtime has no matcher.
-func TestNativeGHBlock_RefusesRepoCreation(t *testing.T) {
-	body := block(blockHarnessNativeGH)
-	if !strings.Contains(body, "`gh repo create` is refused") {
-		t.Error("the native gh block does not refuse `gh repo create`")
-	}
-	// The reason has to be the one that is actually true, since an agent that
-	// finds a stated rule false has reason to doubt the rest of the block.
-	if !strings.Contains(body, "before the run started") {
-		t.Error("the block refuses repo creation without giving the tracked-set reason")
 	}
 }

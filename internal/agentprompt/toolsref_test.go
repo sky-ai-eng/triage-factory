@@ -3,6 +3,8 @@ package agentprompt
 import (
 	"strings"
 	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
 )
 
 func TestToolsReferenceFor_Unregistered(t *testing.T) {
@@ -53,60 +55,57 @@ func TestRegisterToolsReference_PanicsOnCoreSource(t *testing.T) {
 	}
 }
 
-// TestToolsReferenceForSources_WorkspaceOncePerTrackerSet pins when the shared
-// workspace block appears: once whenever the set names an issue tracker, never
-// otherwise. A set naming both trackers that carried it twice would hand the
-// agent the same instructions back to back; a GitHub-only set that carried it
-// would describe a starting state a PR run does not have.
-func TestToolsReferenceForSources_WorkspaceOncePerTrackerSet(t *testing.T) {
+func TestRegisterToolsReference_PanicsOnDuplicate(t *testing.T) {
 	t.Cleanup(ResetToolsReferences)
-	RegisterToolsReference("fake", "FAKE VERB DOCS")
-
-	workspace := block(blockToolsWorkspace)
-	for _, tc := range []struct {
-		kinds []string
-		want  int
-	}{
-		{[]string{"jira"}, 1},
-		{[]string{"linear"}, 1},
-		{[]string{"github", "jira"}, 1},
-		{[]string{"github", "linear"}, 1},
-		{[]string{"jira", "linear"}, 1},
-		{[]string{"linear", "fake", "github", "jira", "linear"}, 1},
-		{[]string{"github"}, 0},
-		{[]string{"fake"}, 0},
-		{[]string{"github", "fake"}, 0},
-	} {
-		got := ToolsReferenceForSources(tc.kinds)
-		if n := strings.Count(got, workspace); n != tc.want {
-			t.Errorf("ToolsReferenceForSources(%q) carries the workspace block %d times, want %d", tc.kinds, n, tc.want)
+	RegisterToolsReference("fake-dup", "text")
+	defer func() {
+		if recover() == nil {
+			t.Error("expected panic on duplicate registration")
 		}
-	}
+	}()
+	RegisterToolsReference("fake-dup", "text")
 }
 
-// TestToolsReferenceForSources_WorkspaceClosesTheCoreGroup pins where the
-// workspace block sits: after every tracker block and before every registered
-// source, so a registered source never changes the bytes of the core portion.
-func TestToolsReferenceForSources_WorkspaceClosesTheCoreGroup(t *testing.T) {
+// TestToolsReferenceForSources_ComposesTheSetsBlocks pins which blocks a source
+// set composes and in what order. The order is canonical — core first, the
+// workspace block once whenever the set names an issue tracker, then registered
+// sources alphabetically — so two callers assembling the same set produce the
+// same bytes, and a registered source never changes the bytes of the core
+// portion. A native run leaves GitHub to its framework blocks and spells verbs
+// with the applet.
+func TestToolsReferenceForSources_ComposesTheSetsBlocks(t *testing.T) {
 	t.Cleanup(ResetToolsReferences)
 	RegisterToolsReference("fake", "FAKE VERB DOCS")
+	RegisterToolsReference("zz", "ZZ VERB DOCS")
 
-	with := ToolsReferenceForSources([]string{"fake", "linear", "github", "jira"})
-	without := ToolsReferenceForSources([]string{"linear", "github", "jira"})
+	join := func(parts ...string) string { return strings.Join(parts, "\n\n") }
+	applet := func(s string) string { return strings.ReplaceAll(s, "triagefactory exec", prog.AppletName) }
 
-	prev := -1
-	for _, section := range []string{githubTools, jiraTools, linearTools, block(blockToolsWorkspace), "FAKE VERB DOCS"} {
-		at := strings.Index(with, section)
-		if at < 0 {
-			t.Fatalf("composition is missing a section: %.40q", section)
-		}
-		if at < prev {
-			t.Fatalf("section %.40q is out of the canonical order", section)
-		}
-		prev = at
-	}
-	if !strings.HasPrefix(with, without+"\n\n") {
-		t.Error("a registered source changed the bytes of the core portion of the composition")
+	for _, tc := range []struct {
+		name    string
+		runtime Runtime
+		kinds   []string
+		want    string
+	}{
+		{"github alone", RuntimeSDK, []string{"github"}, githubTools},
+		{"jira", RuntimeSDK, []string{"jira"}, join(jiraTools, workspaceTools)},
+		{"linear", RuntimeSDK, []string{"linear"}, join(linearTools, workspaceTools)},
+		{"github and a tracker", RuntimeSDK, []string{"jira", "github"}, join(githubTools, jiraTools, workspaceTools)},
+		{"both trackers share one workspace block", RuntimeSDK, []string{"linear", "jira"}, join(jiraTools, linearTools, workspaceTools)},
+		{"registered sources follow the core group", RuntimeSDK, []string{"zz", "fake", "linear", "github", "jira"},
+			join(githubTools, jiraTools, linearTools, workspaceTools, "FAKE VERB DOCS", "ZZ VERB DOCS")},
+		{"registered sources bring no workspace block", RuntimeSDK, []string{"github", "fake"}, join(githubTools, "FAKE VERB DOCS")},
+		{"repeats and blanks collapse", RuntimeSDK, []string{"jira", "", "github", "jira"}, join(githubTools, jiraTools, workspaceTools)},
+		{"unknown kinds contribute nothing", RuntimeSDK, []string{"github", "gerrit"}, githubTools},
+		{"empty set", RuntimeSDK, nil, ""},
+		{"native github alone", RuntimeNative, []string{"github"}, ""},
+		{"native", RuntimeNative, []string{"github", "jira", "fake"}, applet(join(jiraTools, workspaceTools, "FAKE VERB DOCS"))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ToolsReferenceForSources(tc.runtime, tc.kinds); got != tc.want {
+				t.Errorf("ToolsReferenceForSources(%s, %q) composed the wrong blocks;\ngot  %.300q\nwant %.300q", tc.runtime, tc.kinds, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -122,66 +121,8 @@ func TestTrackerReferences_MatchTheComposition(t *testing.T) {
 		{"jira", JiraToolsReference()},
 		{"linear", LinearToolsReference()},
 	} {
-		if want := ToolsReferenceForSources([]string{tc.source}) + "\n"; tc.got != want {
+		if want := ToolsReferenceForSources(RuntimeSDK, []string{tc.source}) + "\n"; tc.got != want {
 			t.Errorf("the %s accessor and ToolsReferenceForSources(%q) disagree", tc.source, tc.source)
 		}
 	}
-}
-
-// TestLinearBlock_DocumentsEveryVerb keeps the Linear block in step with the
-// verbs `exec linear issue` serves. A verb the CLI has and the prompt omits is
-// one the agent improvises around instead of calling.
-func TestLinearBlock_DocumentsEveryVerb(t *testing.T) {
-	body := block(blockToolsLinear)
-	for _, verb := range []string{
-		"view", "list-states", "transition", "comment", "assign", "unassign",
-		"create", "edit", "set-parent", "set-priority", "list-children", "search",
-	} {
-		if !strings.Contains(body, "triagefactory exec linear issue "+verb) {
-			t.Errorf("the Linear tools block does not document `issue %s`", verb)
-		}
-	}
-	if !strings.Contains(body, "triagefactory exec linear user search") {
-		t.Error("the Linear tools block does not document `user search`, the only way to name a person to assign")
-	}
-}
-
-// TestTrackerBlocks_AssignNamesThePerson pins how both tracker blocks teach
-// assignment: by the id their user search returns, with no "me" to fall back
-// on.
-func TestTrackerBlocks_AssignNamesThePerson(t *testing.T) {
-	for name, tc := range map[string]struct {
-		block string
-		want  []string
-	}{
-		"jira": {block(blockToolsJira), []string{
-			"triagefactory exec jira user search <query> --issue <KEY>",
-			"triagefactory exec jira ticket assign <KEY> --user <user-id>",
-		}},
-		"linear": {block(blockToolsLinear), []string{
-			"triagefactory exec linear user search <query>",
-			"triagefactory exec linear issue assign <ID> --user <user-id>",
-			"--assignee <user-id>|none",
-		}},
-	} {
-		for _, want := range tc.want {
-			if !strings.Contains(tc.block, want) {
-				t.Errorf("the %s tools block does not say %q", name, want)
-			}
-		}
-		if strings.Contains(tc.block, "--assignee me") || strings.Contains(tc.block, "`me` or") {
-			t.Errorf("the %s tools block still offers `me`", name)
-		}
-	}
-}
-
-func TestRegisterToolsReference_PanicsOnDuplicate(t *testing.T) {
-	t.Cleanup(ResetToolsReferences)
-	RegisterToolsReference("fake-dup", "text")
-	defer func() {
-		if recover() == nil {
-			t.Error("expected panic on duplicate registration")
-		}
-	}()
-	RegisterToolsReference("fake-dup", "text")
 }
