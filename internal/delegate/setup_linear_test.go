@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -52,7 +53,7 @@ func TestSetupLinear_RunRootAndTools(t *testing.T) {
 		t.Errorf("scope = %q, want %q", cfg.scope, want)
 	}
 	for _, want := range []string{"triagefactory exec linear issue view", "triagefactory exec gh"} {
-		if !strings.Contains(cfg.sources.tools, want) {
+		if !strings.Contains(cfg.sources.tools(agentprompt.RuntimeSDK), want) {
 			t.Errorf("tools section is missing %q", want)
 		}
 	}

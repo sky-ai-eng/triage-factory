@@ -20,7 +20,7 @@ const (
 // has Jira gets the Jira verbs, because the PR may reference a ticket and the
 // entity that triggered the run says nothing about what the agent will need.
 func TestToolsReferenceForSources_IsAboutTheOrgNotTheTrigger(t *testing.T) {
-	got := agentprompt.ToolsReferenceForSources([]string{"github", "jira"})
+	got := agentprompt.ToolsReferenceForSources(agentprompt.RuntimeSDK, []string{"github", "jira"})
 
 	if !strings.Contains(got, ghVerb) {
 		t.Error("github verbs missing")
@@ -34,7 +34,7 @@ func TestToolsReferenceForSources_IsAboutTheOrgNotTheTrigger(t *testing.T) {
 // Documenting Jira to an org with no Jira invites a wasted turn on a verb that
 // cannot resolve a credential.
 func TestToolsReferenceForSources_OmitsWhatTheOrgCannotReach(t *testing.T) {
-	got := agentprompt.ToolsReferenceForSources([]string{"github"})
+	got := agentprompt.ToolsReferenceForSources(agentprompt.RuntimeSDK, []string{"github"})
 
 	if !strings.Contains(got, ghVerb) {
 		t.Error("github verbs missing")
@@ -55,7 +55,7 @@ func TestToolsReferenceForSources_OmitsWhatTheOrgCannotReach(t *testing.T) {
 // agent materializes a checkout and then needs the gh verbs to open a pull
 // request from it.
 func TestToolsReferenceForSources_LinearRunKeepsGitHub(t *testing.T) {
-	got := agentprompt.ToolsReferenceForSources([]string{"linear", "github"})
+	got := agentprompt.ToolsReferenceForSources(agentprompt.RuntimeSDK, []string{"linear", "github"})
 
 	if !strings.Contains(got, ghVerb) {
 		t.Error("github verbs missing from a Linear run's composition")
@@ -74,13 +74,29 @@ func TestToolsReferenceForSources_LinearRunKeepsGitHub(t *testing.T) {
 	}
 }
 
+// TestToolsReferenceForSources_NativeLeavesGitHubToItsBlocks: a native run's
+// framework blocks document GitHub, so its section carries only the other
+// sources, spelled with the `tfac` applet the native blocks teach.
+func TestToolsReferenceForSources_NativeLeavesGitHubToItsBlocks(t *testing.T) {
+	if got := agentprompt.ToolsReferenceForSources(agentprompt.RuntimeNative, []string{"github"}); got != "" {
+		t.Errorf("a native section for GitHub alone = %q, want empty", got)
+	}
+	got := agentprompt.ToolsReferenceForSources(agentprompt.RuntimeNative, []string{"github", "jira"})
+	if !strings.Contains(got, "`tfac jira ticket view <KEY>`") || !strings.Contains(got, "`tfac workspace list`") {
+		t.Errorf("the native section does not spell the Jira and workspace verbs with tfac:\n%s", got)
+	}
+	if strings.Contains(got, "triagefactory exec") || strings.Contains(got, "gh pr") {
+		t.Errorf("the native section carries the SDK prefix or GitHub's verbs:\n%s", got)
+	}
+}
+
 // TestToolsReferenceForSources_IsCanonicalAndDeduplicated pins the ordering
 // contract. Callers union a resolved set with the run's own source, so the same
 // set arrives in different orders and with repeats — and two runs composing the
 // same set must produce the same bytes, or a cached prefix stops being cached.
 func TestToolsReferenceForSources_IsCanonicalAndDeduplicated(t *testing.T) {
-	a := agentprompt.ToolsReferenceForSources([]string{"jira", "github", "jira"})
-	b := agentprompt.ToolsReferenceForSources([]string{"github", "jira"})
+	a := agentprompt.ToolsReferenceForSources(agentprompt.RuntimeSDK, []string{"jira", "github", "jira"})
+	b := agentprompt.ToolsReferenceForSources(agentprompt.RuntimeSDK, []string{"github", "jira"})
 
 	if a != b {
 		t.Error("composition depends on the caller's order or repeats; a union of the same set must be one prefix")
@@ -92,13 +108,13 @@ func TestToolsReferenceForSources_IsCanonicalAndDeduplicated(t *testing.T) {
 		t.Error("github does not lead; the canonical order is core-first")
 	}
 
-	want := agentprompt.ToolsReferenceForSources([]string{"github", "jira", "linear"})
+	want := agentprompt.ToolsReferenceForSources(agentprompt.RuntimeSDK, []string{"github", "jira", "linear"})
 	for _, kinds := range [][]string{
 		{"linear", "jira", "github"},
 		{"jira", "linear", "github", "linear"},
 		{"github", "linear", "", "jira", "github"},
 	} {
-		if got := agentprompt.ToolsReferenceForSources(kinds); got != want {
+		if got := agentprompt.ToolsReferenceForSources(agentprompt.RuntimeSDK, kinds); got != want {
 			t.Errorf("ToolsReferenceForSources(%q) differs from the canonical github, jira, linear composition", kinds)
 		}
 	}
@@ -113,7 +129,7 @@ func TestToolsReferenceForSources_IsCanonicalAndDeduplicated(t *testing.T) {
 // legitimately be outside this build (an ee source in a core-only deployment),
 // and a run must not fail over a name it cannot document.
 func TestToolsReferenceForSources_SkipsUnknownKinds(t *testing.T) {
-	got := agentprompt.ToolsReferenceForSources([]string{"github", "gerrit", "", "phabricator"})
+	got := agentprompt.ToolsReferenceForSources(agentprompt.RuntimeSDK, []string{"github", "gerrit", "", "phabricator"})
 
 	if !strings.Contains(got, ghVerb) {
 		t.Error("github verbs missing")
@@ -121,7 +137,7 @@ func TestToolsReferenceForSources_SkipsUnknownKinds(t *testing.T) {
 	if strings.Contains(got, "gerrit") || strings.Contains(got, "phabricator") {
 		t.Error("an unregistered kind reached the output")
 	}
-	if got != agentprompt.ToolsReferenceForSources([]string{"github"}) {
+	if got != agentprompt.ToolsReferenceForSources(agentprompt.RuntimeSDK, []string{"github"}) {
 		t.Error("a skipped kind changed the composition, e.g. with a trailing separator")
 	}
 }
@@ -129,7 +145,7 @@ func TestToolsReferenceForSources_SkipsUnknownKinds(t *testing.T) {
 // TestToolsReferenceForSources_EmptyIsEmpty, so a caller that resolved nothing
 // renders an empty <tools> section rather than a stray separator.
 func TestToolsReferenceForSources_EmptyIsEmpty(t *testing.T) {
-	if got := agentprompt.ToolsReferenceForSources(nil); got != "" {
+	if got := agentprompt.ToolsReferenceForSources(agentprompt.RuntimeSDK, nil); got != "" {
 		t.Errorf("ToolsReferenceForSources(nil) = %q, want empty", got)
 	}
 }

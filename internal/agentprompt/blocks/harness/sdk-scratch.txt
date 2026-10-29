@@ -1,5 +1,5 @@
 <scratch>
-Write any intermediate files — pipe destinations, redirect targets, downloaded archives, extracted logs, diagnostic dumps — to `_tfac/` in your run root, by the absolute path <run_context> names. Create subdirectories as needed.
+Write any intermediate files — pipe destinations, redirect targets, downloaded archives, extracted logs, diagnostic dumps — to `_tfac/` in your run root, by the absolute path <run_context> names; it sits outside every checkout. Create subdirectories as needed.
 
 When redirecting command output, do not append `2>&1` — the `&` is read as a command separator and forces an approval prompt that stalls your run. Use a plain `> file` (captures stdout, which is what you want), or pipe straight to the next command (`<cmd> | wc -l`); both run without prompting.
 
