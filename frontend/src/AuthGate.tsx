@@ -137,8 +137,8 @@ function MultiAuthGate({ children }: { children: React.ReactNode }) {
   }
   // Zero-membership users land on the unified onboarding entry — a
   // single "create your org / wait for an invite" page. There's no
-  // policy branch here: the page itself enables or disables the create
-  // affordance based on me.org_creation_enabled (TF_PREVENT_ORG_CREATION).
+  // policy branch here: the page itself offers or withholds the create
+  // affordance based on me.can_create_org.
   // Signup provisions nothing, so this is the steady-state first-run
   // landing, not a rare error state.
   if (auth.orgs.length === 0) {

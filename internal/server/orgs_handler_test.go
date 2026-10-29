@@ -425,3 +425,114 @@ func assertRowExists(t *testing.T, r *authRig, query string, arg any, label stri
 		t.Fatalf("%s row missing: %v", label, err)
 	}
 }
+
+// TestOrgCreate_CanCreateOrgMatchesRoute pins the creation rule from both
+// sides: for each kind of caller, POST /api/orgs answers what /api/me's
+// can_create_org predicts. A GitHub session creates; an SSO session is told to
+// sign in with GitHub; a deployment with creation turned off and an API token
+// are refused as FORBIDDEN.
+func TestOrgCreate_CanCreateOrgMatchesRoute(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+
+	type caller struct{ sid, bearer string }
+	cases := []struct {
+		name       string
+		enabled    bool
+		caller     func(r *authRig) caller
+		wantStatus int
+		wantReason string
+	}{
+		{
+			name:    "github session",
+			enabled: true,
+			caller: func(r *authRig) caller {
+				return caller{sid: r.signIn(r.seedUser())}
+			},
+			wantStatus: http.StatusCreated,
+		},
+		{
+			name:    "sso session",
+			enabled: true,
+			caller: func(r *authRig) caller {
+				samlAuth := uuid.New()
+				r.h.SeedAuthUser(r.t, samlAuth.String(), samlAuth.String()+"@auth.test")
+				resp := r.driveSSOCallbackClaims(validClaimsFor(samlAuth), uuid.NewString())
+				if resp.StatusCode != http.StatusFound {
+					r.t.Fatalf("sso callback status = %d; want 302", resp.StatusCode)
+				}
+				return caller{sid: r.sidFromResp(resp)}
+			},
+			wantStatus: http.StatusForbidden,
+			wantReason: "GITHUB_SIGN_IN_REQUIRED",
+		},
+		{
+			name:    "creation disabled",
+			enabled: false,
+			caller: func(r *authRig) caller {
+				return caller{sid: r.signIn(r.seedUser())}
+			},
+			wantStatus: http.StatusForbidden,
+			wantReason: "FORBIDDEN",
+		},
+		{
+			name:    "api token",
+			enabled: true,
+			caller: func(r *authRig) caller {
+				userID := r.seedUser()
+				orgID, _ := r.seedOrg(userID, "token-holder-"+userID.String()[:8])
+				_, plaintext := r.mintToken(userID, orgID, "probe")
+				return caller{bearer: plaintext}
+			},
+			wantStatus: http.StatusForbidden,
+			wantReason: "FORBIDDEN",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runmode.SetOrgCreationEnabledForTest(t, tc.enabled)
+			r := newAuthRig(t)
+			c := tc.caller(r)
+
+			me := r.tokensJSON("GET", "/api/me", nil, c.sid, c.bearer)
+			if me.Code != http.StatusOK {
+				t.Fatalf("/api/me status = %d, want 200: %s", me.Code, me.Body.String())
+			}
+			var meBody struct {
+				OrgCreationEnabled bool `json:"org_creation_enabled"`
+				CanCreateOrg       bool `json:"can_create_org"`
+			}
+			if err := json.Unmarshal(me.Body.Bytes(), &meBody); err != nil {
+				t.Fatalf("decode /api/me: %v", err)
+			}
+			if meBody.OrgCreationEnabled != tc.enabled {
+				t.Errorf("org_creation_enabled = %v, want %v", meBody.OrgCreationEnabled, tc.enabled)
+			}
+			wantCan := tc.wantStatus == http.StatusCreated
+			if meBody.CanCreateOrg != wantCan {
+				t.Errorf("can_create_org = %v, want %v", meBody.CanCreateOrg, wantCan)
+			}
+
+			name := "Rule Probe " + uuid.NewString()[:8]
+			got := r.tokensJSON("POST", "/api/orgs", map[string]string{"name": name}, c.sid, c.bearer)
+			if tc.wantStatus == http.StatusCreated {
+				if got.Code != http.StatusCreated {
+					t.Fatalf("create status = %d, want 201: %s", got.Code, got.Body.String())
+				}
+				return
+			}
+			assertFault(t, got, tc.wantStatus, tc.wantReason)
+			if tc.wantReason == "GITHUB_SIGN_IN_REQUIRED" {
+				if msg := errorItems(t, got)[0].Message; msg != "Sign in with GitHub to create an organization." {
+					t.Errorf("message = %q", msg)
+				}
+			}
+			var cnt int
+			if err := r.h.AdminDB.QueryRow(`SELECT count(*) FROM public.orgs WHERE name = $1`, name).Scan(&cnt); err != nil {
+				t.Fatalf("count orgs: %v", err)
+			}
+			if cnt != 0 {
+				t.Errorf("orgs created = %d despite the refusal, want 0", cnt)
+			}
+		})
+	}
+}

@@ -16,6 +16,17 @@ const authState = vi.hoisted(() => ({
 }))
 vi.mock('../contexts/AuthContext', () => ({ useAuth: () => authState.value }))
 
+// The deployment's GitHub, from /api/config. github.com unless a test says
+// otherwise.
+const deployment = vi.hoisted(() => ({ githubHost: 'https://github.com' }))
+vi.mock('../hooks/useDeploymentConfig', () => ({
+  useDeploymentConfig: () => ({
+    config: { deployment_mode: 'multi', default_github_host: deployment.githubHost },
+    loading: false,
+    error: null,
+  }),
+}))
+
 // Mock the discovery I/O; keep the rest of apiClient real.
 const api = vi.hoisted(() => ({ apiJSON: vi.fn() }))
 vi.mock('../lib/apiClient', async (importOriginal) => {
@@ -39,6 +50,7 @@ beforeEach(() => {
   navigateMock.mockReset()
   api.apiJSON.mockReset()
   authState.value = { status: 'unauth', error: null }
+  deployment.githubHost = 'https://github.com'
   vi.stubGlobal('location', { href: '' })
 })
 
@@ -139,5 +151,18 @@ describe('Login (identifier-first, TFAC-427)', () => {
     renderAt('/login?error=login_cancelled')
     expect(screen.getByText(/sign-in was cancelled/i)).toBeInTheDocument()
     expect(githubBtn()).toBeInTheDocument()
+  })
+
+  it('on github.com, says nothing about which GitHub sign-in uses', () => {
+    renderAt()
+    expect(screen.queryByText(/signs you in with your account on/i)).not.toBeInTheDocument()
+  })
+
+  it('on a GitHub Enterprise Server, names the host sign-in uses', () => {
+    deployment.githubHost = 'https://ghe.example.com'
+    renderAt()
+    expect(
+      screen.getByText('Signs you in with your account on ghe.example.com.'),
+    ).toBeInTheDocument()
   })
 })

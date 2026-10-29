@@ -16,13 +16,13 @@ import (
 
 // GitHubCom is the public github.com web base — the literal, for the sites
 // that mean github.com specifically whatever the deployment's default is: the
-// GoTrue GitHub OAuth login provider, the api.github.com mount, the
-// codeload/uploads hosts. Everything that means "the deployment's GitHub"
-// reads DefaultBaseURL instead.
+// api.github.com mount, the codeload/uploads hosts. Everything that means "the
+// deployment's GitHub" reads DefaultBaseURL instead, GitHub sign-in included.
 const GitHubCom = "https://github.com"
 
 // EnvDefaultBaseURL names the deployment's default GitHub: the GitHub the
-// deployment App lives on, and the URL setup offers an org choosing its own.
+// deployment App lives on, the GitHub people sign in with, and the URL setup
+// offers an org choosing its own.
 // Optional; unset means GitHubCom. Plain config, not a secret, in the same
 // class as the port — read once at boot by InitDefaultBaseURLFromEnv.
 const EnvDefaultBaseURL = "TF_DEFAULT_GITHUB_HOST"
@@ -92,6 +92,21 @@ func ParseDefaultBaseURL(raw string) (string, error) {
 		return "", fmt.Errorf("%s=%q is not a GitHub web base: want an http(s) URL with a host and no credentials, query, or fragment (e.g. https://ghe.example.com)", EnvDefaultBaseURL, raw)
 	}
 	return base, nil
+}
+
+// NamesGitHubCom reports whether raw is a web base whose host is github.com,
+// in any spelling a base URL accepts: another case, a trailing slash, http, or
+// an explicit port. Empty or unparseable names no host and answers false. It
+// is the test for a TF_DEFAULT_GITHUB_HOST that sets github.com explicitly,
+// which multi mode refuses: the bundled compose passes the variable to GoTrue,
+// whose GitHub provider builds a /api/v3 API URL for any host but the default.
+func NamesGitHubCom(raw string) bool {
+	base, ok := NormalizeBaseURL(raw)
+	if !ok {
+		return false
+	}
+	u, err := url.Parse(base)
+	return err == nil && u.Hostname() == "github.com"
 }
 
 // CanonicalBaseURL returns the spelling a GitHub or Jira base URL is stored and

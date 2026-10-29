@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -84,6 +85,41 @@ func (s *Server) handleOrgGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, orgJSON{ID: org.ID, Name: org.Name, Role: role})
 }
 
+// The rules orgCreationBlocked reports, one per refusal POST /api/orgs makes
+// before it reads a body.
+const (
+	orgCreateBlockedDisabled = "disabled" // TF_PREVENT_ORG_CREATION
+	orgCreateBlockedToken    = "token"    // no session: an API token, sealed to one org
+	orgCreateBlockedSSO      = "sso"      // a session signed in through SSO, not GitHub
+)
+
+// orgCreationBlocked reports which rule refuses the caller an org of their
+// own, or "" when none does. It is the single answer to "may this caller
+// create an org": /api/me reports it as can_create_org, and the route refuses
+// every rule it reports, so the onboarding page and the route cannot disagree.
+//
+// A founder must sign in with GitHub because the sign-in is what links their
+// GitHub account on the deployment's GitHub host, and connecting the
+// deployment GitHub App during setup refuses an admin with no such link. An SSO
+// session carries none.
+//
+// Local mode has one org and is never refused.
+func orgCreationBlocked(ctx context.Context) string {
+	if runmode.Current() == runmode.ModeLocal {
+		return ""
+	}
+	if !runmode.OrgCreationEnabled() {
+		return orgCreateBlockedDisabled
+	}
+	if SessionFrom(ctx) == nil {
+		return orgCreateBlockedToken
+	}
+	if httpx.SignInProviderFrom(ctx) != "" {
+		return orgCreateBlockedSSO
+	}
+	return ""
+}
+
 // handleOrgCreate is the "Start your Factory" create-org action —
 // the destination of the onboarding entry's CTA in both modes. What it
 // does is create the tenant a user works in; the modes differ only in
@@ -103,10 +139,12 @@ func (s *Server) handleOrgGet(w http.ResponseWriter, r *http.Request) {
 //
 // POST /api/orgs  body: { "name": "<display name>" } (multi mode)
 //
-// Any authed user may create an org — the data model already allows a
-// user to own multiple. Returns 403 when org creation is disabled on the
-// instance (defense-in-depth behind the UI gate); local is never gated,
-// since refusing there would leave the install with no org at all.
+// A session signed in with GitHub may create an org — the data model
+// already allows a user to own multiple. Returns 403 when org creation is
+// disabled on the instance (defense-in-depth behind the UI gate), and 403
+// GITHUB_SIGN_IN_REQUIRED for a session signed in through SSO (see
+// orgCreationBlocked); local is never gated, since refusing there would
+// leave the install with no org at all.
 func (s *Server) handleOrgCreate(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
 		s.createLocalOrg(w, r)
@@ -122,7 +160,7 @@ func (s *Server) handleOrgCreate(w http.ResponseWriter, r *http.Request) {
 	// Defense-in-depth behind the UI gate: the onboarding CTA is hidden
 	// when org creation is prevented, but the endpoint must refuse too.
 	if !runmode.OrgCreationEnabled() {
-		forbidden(w, "org creation is disabled on this instance")
+		forbidden(w, "Organization creation is disabled on this instance.")
 		return
 	}
 
@@ -145,6 +183,21 @@ func (s *Server) handleOrgCreate(w http.ResponseWriter, r *http.Request) {
 	if sess == nil {
 		orgsLog.Error("org create: no session in context, route missing withsession")
 		writeUnauth(w)
+		return
+	}
+	switch orgCreationBlocked(r.Context()) {
+	case "":
+	case orgCreateBlockedSSO:
+		httpx.WriteErrors(w, http.StatusForbidden, httpx.ErrorItem{
+			Reason:  httpx.ReasonGitHubSignInRequired,
+			Message: "Sign in with GitHub to create an organization.",
+		})
+		return
+	default:
+		// The disabled and token rules answered above with responses of their
+		// own. Any other rule still refuses here, so the route never accepts a
+		// caller /api/me reports as unable to create an org.
+		forbidden(w, "You cannot create an organization.")
 		return
 	}
 	userID, err := uuid.Parse(claims.Subject)

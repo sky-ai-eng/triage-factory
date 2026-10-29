@@ -25,10 +25,9 @@ func NormalizeGitHubHost(host string) string { return ghbase.CanonicalBaseURL(ho
 // (what the stores key on). An empty setting is an org with no GitHub, whose
 // host is empty and matches no row.
 //
-// The GoTrue GitHub OAuth login identity is the one host-keyed row that does
-// NOT resolve through here: that provider is github.com whatever the
-// deployment default is, so the login claim binds under ghbase.GitHubCom
-// literally.
+// The GoTrue GitHub OAuth login identity does NOT resolve through here: it is
+// not about an org, and binds under the deployment default
+// (ghbase.DefaultBaseURL), the GitHub that sign-in runs against.
 //
 // The derivation itself is domain.GitHubHost, which is also the scope GitHub
 // entities are keyed under; this name is the identity stores' spelling of it.

@@ -54,6 +54,11 @@ const (
 	// through that org's identity provider" — /api/me carries where to start.
 	ReasonSSORequired = "SSO_REQUIRED"
 
+	// Creating an organization needs a session signed in with GitHub, and this
+	// one was signed in through SSO. Its own code because the fix is neither a
+	// permission nor a setting but signing out and back in with GitHub.
+	ReasonGitHubSignInRequired = "GITHUB_SIGN_IN_REQUIRED"
+
 	// 422-class: well-formed but semantically invalid for this data.
 	ReasonOutOfRange   = "OUT_OF_RANGE"
 	ReasonCrossTeamRef = "CROSS_TEAM_REF"

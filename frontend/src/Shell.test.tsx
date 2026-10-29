@@ -86,6 +86,7 @@ function me(teams: MeResponse['teams'], isOperator = false): MeResponse {
     teams,
     active_org_id: 'o1',
     org_creation_enabled: true,
+    can_create_org: true,
     is_operator: isOperator,
   }
 }

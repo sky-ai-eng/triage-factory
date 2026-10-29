@@ -718,12 +718,15 @@ export interface EventSchema {
   fields: FieldSchema[]
 }
 
-/** GET /api/config response. One-shot read at FE boot — AuthGate uses
- *  deployment_mode to choose between the local keychain-capture flow
- *  and the multi-mode OAuth flow. Per-user identity that used to live
- *  here (github_username, jira_*) moved to /api/me. */
+/** GET /api/config response: deployment facts readable before sign-in.
+ *  AuthGate uses deployment_mode to choose between the local
+ *  keychain-capture flow and the multi-mode OAuth flow. */
 export interface DeploymentConfig {
   deployment_mode: 'local' | 'multi'
+  /** The deployment's GitHub web base (TF_DEFAULT_GITHUB_HOST, or
+   *  `https://github.com`): the GitHub that "Sign in with GitHub" uses. The
+   *  login page names it when it is not github.com. */
+  default_github_host: string
 }
 
 /** AuthOrg is one membership row in MeResponse.orgs. Standalone export
@@ -807,6 +810,12 @@ export interface MeResponse {
    *  by the server (both modes) — true in local mode (N=1, never renders
    *  onboarding). */
   org_creation_enabled: boolean
+  /** Whether this caller may create an org: creation is enabled, the
+   *  credential is a session (not an API token), and the session signed in
+   *  with GitHub rather than SSO. The answer POST /api/orgs gives, so
+   *  onboarding offers the form exactly when the route accepts it. Always
+   *  sent; true in local mode. */
+  can_create_org: boolean
   /** Whether this identity is a deployment operator (TFAC-589) — the org-less
    *  flag managed by `triagefactory operator`. Composes with the FeatureFleet
    *  entitlement to gate the Fleet console nav item + page. Always sent (both

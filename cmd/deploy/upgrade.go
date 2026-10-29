@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/envfile"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 )
 
 const (
@@ -148,6 +149,17 @@ func upgrade(ctx context.Context, h *host, b Bundle, o upgradeOptions) error {
 	if lost := lostValues(envBase, dir); len(lost) > 0 {
 		h.report(check{fail, "Environment", "missing: " + strings.Join(lost, ", ")})
 		return fmt.Errorf("%s does not set %s, which this deployment already uses, and a generated value would break it: Postgres keeps the password it was initialized with, and only the original keys read what they encrypted or signed. Put the deployment's values back in %s, then run upgrade again. Nothing was changed", envFile, strings.Join(lost, ", "), envFile)
+	}
+	// The binary refuses to boot in multi mode with an explicit github.com
+	// here, so catching it after the drain would leave the stack down. Compose
+	// takes the environment deploy runs in over .env, and so does this.
+	defaultHost := h.getenv(ghbase.EnvDefaultBaseURL)
+	if defaultHost == "" {
+		defaultHost = envValues(envBase).get(ghbase.EnvDefaultBaseURL)
+	}
+	if ghbase.NamesGitHubCom(defaultHost) {
+		h.report(check{fail, "Environment", ghbase.EnvDefaultBaseURL + "=" + defaultHost})
+		return fmt.Errorf("%s sets %s to github.com, which %s refuses to boot with because GoTrue builds the wrong API URL for an explicit github.com. Remove it (unset means github.com), then run upgrade again. Nothing was changed", envFile, ghbase.EnvDefaultBaseURL, b.Version)
 	}
 	// upgrade takes no input flags: without a terminal to ask on, a value
 	// only the operator can supply has to be in .env already.

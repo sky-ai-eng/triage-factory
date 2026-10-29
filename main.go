@@ -84,6 +84,9 @@ func run(ctx context.Context, args []string) error {
 	if err := ghbase.InitDefaultBaseURLFromEnv(); err != nil {
 		return fmt.Errorf("default github host: %w", err)
 	}
+	if err := checkDefaultGitHubHostForSignIn(runmode.Current(), os.Getenv(ghbase.EnvDefaultBaseURL)); err != nil {
+		return fmt.Errorf("default github host: %w", err)
+	}
 
 	// Local-mode OS sandbox posture (TF_LOCAL_SANDBOX). Resolved right after
 	// the mode because it is a function of it: on is the default for local
@@ -230,4 +233,20 @@ func logBootLine() {
 		return
 	}
 	bootLog.Info("boot", "uid", os.Getuid(), "CapEff", capinfo.Describe(names))
+}
+
+// checkDefaultGitHubHostForSignIn refuses a multi-mode deployment that sets
+// TF_DEFAULT_GITHUB_HOST to github.com explicitly (ghbase.NamesGitHubCom).
+// The bundled compose passes the variable to GoTrue as its GitHub provider's
+// URL, and GoTrue appends /api/v3 to any URL whose API host is not
+// api.github.com, so an explicit github.com breaks GitHub sign-in. Unset
+// already means github.com, to both. A GitHub Enterprise Server serves its
+// REST API under /api/v3, and so does GHE.com on <tenant>.ghe.com, although
+// its docs name only api.<tenant>.ghe.com; neither is refused. Local mode has
+// no GoTrue.
+func checkDefaultGitHubHostForSignIn(mode runmode.Mode, raw string) error {
+	if mode != runmode.ModeMulti || !ghbase.NamesGitHubCom(raw) {
+		return nil
+	}
+	return fmt.Errorf("leave %s unset for github.com: it is passed to GoTrue, which builds the wrong API URL for an explicit github.com", ghbase.EnvDefaultBaseURL)
 }

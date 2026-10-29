@@ -1862,40 +1862,51 @@ func TestAuthFlow_LoginClaim_DecidesTheAccountByGitHubID(t *testing.T) {
 	}
 }
 
-// TestAuthFlow_LoginClaim_KeysUnderGitHubComWhateverTheDefault pins the one
-// host-keyed row that does NOT follow the deployment's default GitHub. The
-// GoTrue GitHub OAuth login provider is github.com whatever
-// TF_DEFAULT_GITHUB_HOST names, so the identity row the login claim mirrors
-// binds under https://github.com by construction — never under the default a
-// GHES self-hoster set for their orgs.
-func TestAuthFlow_LoginClaim_KeysUnderGitHubComWhateverTheDefault(t *testing.T) {
-	ghbase.SetDefaultBaseURLForTest(t, "https://ghe.example.com")
-	r := newAuthRig(t)
+// TestAuthFlow_LoginClaim_KeysUnderTheDeploymentHost pins the host the login
+// claim mirrors a GitHub sign-in under: the deployment's GitHub, which GoTrue's
+// GitHub provider signs people in against. Unset is github.com; a GitHub
+// Enterprise Server default puts the link on that server, where the deployment
+// GitHub App lives.
+func TestAuthFlow_LoginClaim_KeysUnderTheDeploymentHost(t *testing.T) {
+	for _, tc := range []struct {
+		name, setDefault, wantHost string
+	}{
+		{"default unset", "", ghbase.GitHubCom},
+		{"enterprise server", "https://ghe.example.com", "https://ghe.example.com"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ghbase.SetDefaultBaseURLForTest(t, tc.setDefault)
+			r := newAuthRig(t)
 
-	userID := r.seedUser()
-	resp, _ := r.driveCallback(userID)
-	if resp.StatusCode != http.StatusFound {
-		t.Fatalf("callback status=%d, want 302", resp.StatusCode)
-	}
+			userID := r.seedUser()
+			resp, _ := r.driveCallback(userID)
+			if resp.StatusCode != http.StatusFound {
+				t.Fatalf("callback status=%d, want 302", resp.StatusCode)
+			}
 
-	login := "test-user-" + userID.String()[:8]
-	var hosts []string
-	rows, err := r.h.AdminDB.Query(`
-		SELECT github_base_url FROM user_github_identities
-		 WHERE login = $1 AND source = 'login_claim'
-	`, login)
-	if err != nil {
-		t.Fatalf("query user_github_identities: %v", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var h string
-		if err := rows.Scan(&h); err != nil {
-			t.Fatalf("scan: %v", err)
-		}
-		hosts = append(hosts, h)
-	}
-	if len(hosts) != 1 || hosts[0] != ghbase.GitHubCom {
-		t.Errorf("login-claim identity hosts = %v; want exactly [%q] — the GoTrue GitHub provider is github.com whatever the deployment default is", hosts, ghbase.GitHubCom)
+			login := "test-user-" + userID.String()[:8]
+			var hosts []string
+			rows, err := r.h.AdminDB.Query(`
+				SELECT github_base_url FROM user_github_identities
+				 WHERE login = $1 AND source = 'login_claim'
+			`, login)
+			if err != nil {
+				t.Fatalf("query user_github_identities: %v", err)
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var h string
+				if err := rows.Scan(&h); err != nil {
+					t.Fatalf("scan: %v", err)
+				}
+				hosts = append(hosts, h)
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatalf("rows: %v", err)
+			}
+			if len(hosts) != 1 || hosts[0] != tc.wantHost {
+				t.Errorf("login-claim identity hosts = %v; want exactly [%q]", hosts, tc.wantHost)
+			}
+		})
 	}
 }

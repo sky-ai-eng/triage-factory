@@ -1680,7 +1680,7 @@ const userIdentityStep: WizardStep = {
       : 'Connect your GitHub, or paste a personal access token, to finish.'
   },
   persist: async ({ state, orgId, isLocal, patch }) => {
-    // Already bound (Connect return, or a github.com login_claim) — nothing to
+    // Already bound (Connect return, or a GitHub sign-in's login_claim) — nothing to
     // do; Continue just finishes.
     if (state.userIdentityConnected) return
     if (!isLocal) throw new Error('Connect your GitHub to finish.')

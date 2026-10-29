@@ -19,6 +19,7 @@ const me: MeResponse = {
   orgs: [],
   teams: [],
   org_creation_enabled: true,
+  can_create_org: true,
   is_operator: false,
 }
 

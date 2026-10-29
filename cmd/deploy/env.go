@@ -207,8 +207,10 @@ func ask(h *host, lines *bufio.Reader, in input) (string, error) {
 
 func printOAuthInstructions(h *host, publicURL string) {
 	fmt.Fprintf(h.stdout, `
-Users sign in through a GitHub OAuth app. Create one now at
-https://github.com/settings/developers ("New OAuth App") with:
+Users sign in through a GitHub OAuth app on the deployment's GitHub. Create
+one now at https://github.com/settings/developers ("New OAuth App"), or at the
+same page on your GitHub Enterprise Server if you will set
+TF_DEFAULT_GITHUB_HOST, with:
   Homepage URL:                %s
   Authorization callback URL:  %s/auth/v1/callback
 

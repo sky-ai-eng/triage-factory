@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 import { useAuth } from '../contexts/AuthContext'
 import { apiJSON } from '../lib/apiClient'
+import { useDeploymentConfig } from '../hooks/useDeploymentConfig'
 import BrandMark from '../components/BrandMark'
 
 /**
@@ -15,6 +16,10 @@ import BrandMark from '../components/BrandMark'
  * deployment has no SSO configured yet, so the first admin signs in via GitHub
  * and sets SSO up for everyone else. Discovery never reveals org identity: it
  * answers only "SSO available + where to start" or "not".
+ *
+ * GitHub sign-in runs against the deployment's GitHub. On a deployment whose
+ * GitHub is not github.com (a GitHub Enterprise Server), the button says which
+ * host's account it signs in with.
  *
  * If the user is already authed (e.g. someone bookmarked /login but has a valid
  * session), redirect straight to /. AuthGate then routes them into their org.
@@ -31,10 +36,23 @@ interface DiscoverResponse {
 // network/5xx never tells a user with SSO that they have none.
 type Notice = null | 'no-sso' | 'error'
 
+/** githubSignInHost is the hostname GitHub sign-in uses when it is not
+ *  github.com, or null on github.com (and before /api/config answers). */
+function githubSignInHost(base: string | undefined): string | null {
+  if (!base || base === 'https://github.com') return null
+  try {
+    return new URL(base).hostname
+  } catch {
+    return base
+  }
+}
+
 export default function Login() {
   const auth = useAuth()
   const location = useLocation()
   const navigate = useNavigate()
+  const { config } = useDeploymentConfig()
+  const githubHost = githubSignInHost(config?.default_github_host)
 
   const [email, setEmail] = useState('')
   const [checking, setChecking] = useState(false)
@@ -232,6 +250,12 @@ export default function Login() {
           </svg>
           Sign in with GitHub
         </button>
+
+        {githubHost && (
+          <p className="text-ui text-ink-3 leading-relaxed text-center">
+            Signs you in with your account on {githubHost}.
+          </p>
+        )}
 
         <p className="text-reported text-ink-3 leading-relaxed">
           By signing in, you authorize Triage Factory to read your GitHub identity. Repository

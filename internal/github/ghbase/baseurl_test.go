@@ -125,6 +125,29 @@ func TestParseDefaultBaseURL(t *testing.T) {
 	}
 }
 
+// TestNamesGitHubCom: every spelling of a github.com web base is github.com,
+// and nothing else is, including an empty value, a GHES host and a GHE.com
+// tenant.
+func TestNamesGitHubCom(t *testing.T) {
+	for raw, want := range map[string]bool{
+		"https://github.com":        true,
+		"https://GitHub.com/":       true,
+		" https://github.com ":      true,
+		"http://github.com":         true,
+		"https://github.com:443":    true,
+		"":                          false,
+		"github.com":                false,
+		"https://api.github.com":    false,
+		"https://ghe.example.com":   false,
+		"https://acme.ghe.com":      false,
+		"https://github.com.evil.x": false,
+	} {
+		if got := NamesGitHubCom(raw); got != want {
+			t.Errorf("NamesGitHubCom(%q) = %v, want %v", raw, got, want)
+		}
+	}
+}
+
 // TestInitDefaultBaseURL_RefusesAChangeOfMind mirrors runmode.Init: a repeat
 // with the same value is a no-op, a repeat with a different value is an error
 // that leaves the resolved default alone.
