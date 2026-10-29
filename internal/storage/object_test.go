@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +16,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -101,6 +107,104 @@ func TestObjectStorage_PreservesBasePath(t *testing.T) {
 	}
 	if want := "/storage/v1/s3/wb/org/obj"; gotPath != want {
 		t.Fatalf("request path = %q; want %q (base path must reach the wire)", gotPath, want)
+	}
+}
+
+// TestObjectStorage_TracesUnderParent checks that the S3 client sends through
+// telemetry.TracedTransport: a Put made under a span records s3.http children
+// of it, and the object key appears in none of their attributes, because a
+// knowledge key carries team-authored folder and file names.
+//
+// It also checks the property SigV4 depends on with tracing on: traceparent
+// reaches the wire but is not one of the headers the request was signed over.
+// A verifier recomputes the signature from SignedHeaders only, so a header
+// added after signing cannot invalidate it. TestObjectStorage_Conformance
+// cannot show this, because its SeaweedFS runs in allow-all mode and ignores
+// signatures.
+func TestObjectStorage_TracesUnderParent(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	t.Cleanup(func() {
+		otel.SetTracerProvider(noop.NewTracerProvider())
+		otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator())
+	})
+
+	type sent struct{ authorization, traceparent string }
+	var (
+		mu       sync.Mutex
+		requests []sent
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests = append(requests, sent{r.Header.Get("Authorization"), r.Header.Get("traceparent")})
+		mu.Unlock()
+		w.Header().Set("ETag", `"stub"`)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	// Built after the provider is installed: otelhttp resolves its tracer and
+	// propagator when the transport is constructed.
+	store, err := newObjectStorage(ObjectConfig{
+		Endpoint:  srv.URL,
+		Bucket:    "kb",
+		AccessKey: "ak",
+		SecretKey: "sk",
+		Region:    "us-east-1",
+	})
+	if err != nil {
+		t.Fatalf("newObjectStorage: %v", err)
+	}
+
+	ctx, parent := otel.Tracer("test").Start(context.Background(), "workspace.snapshot.put")
+	putErr := store.Put(ctx, "org/teams/t1/kb/private/secret-folder/notes.md", strings.NewReader("hi"))
+	parent.End()
+	if putErr != nil {
+		t.Fatalf("Put: %v", putErr)
+	}
+
+	children := 0
+	for _, span := range recorder.Ended() {
+		if span.Name() != "s3.http" {
+			continue
+		}
+		children++
+		if span.Parent().SpanID() != parent.SpanContext().SpanID() {
+			t.Errorf("s3.http parent = %s, want the calling span %s", span.Parent().SpanID(), parent.SpanContext().SpanID())
+		}
+		for _, kv := range span.Attributes() {
+			if kv.Key == "url.full" || kv.Key == "url.path" {
+				t.Errorf("s3.http carries %s (%q)", kv.Key, kv.Value.String())
+			}
+			if strings.Contains(kv.Value.String(), "secret-folder") {
+				t.Errorf("attribute %s carries the object key (%q)", kv.Key, kv.Value.String())
+			}
+		}
+	}
+	if children == 0 {
+		t.Fatal("Put recorded no s3.http span")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(requests) == 0 {
+		t.Fatal("the stub received no request")
+	}
+	for i, req := range requests {
+		if req.traceparent == "" {
+			t.Errorf("request %d carried no traceparent", i)
+		}
+		_, rest, ok := strings.Cut(req.authorization, "SignedHeaders=")
+		if !ok {
+			t.Fatalf("request %d Authorization has no SignedHeaders: %q", i, req.authorization)
+		}
+		signed, _, _ := strings.Cut(rest, ",")
+		for _, h := range strings.Split(signed, ";") {
+			if h == "traceparent" || h == "tracestate" || h == "baggage" {
+				t.Errorf("request %d was signed over %s; otelhttp sets it after signing, so the signature would not verify", i, h)
+			}
+		}
 	}
 }
 

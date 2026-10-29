@@ -42,11 +42,12 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 )
 
 // httpClient bounds every call here. A gate that hangs is a gate that refuses
 // late, and the caller is a browser waiting on a redirect.
-var httpClient = &http.Client{Timeout: 15 * time.Second}
+var httpClient = telemetry.TracedHTTPClient(15*time.Second, "github")
 
 // maxInstallationPages bounds the association walk. The timeout above bounds
 // one request; nothing bounded the LOOP, so a host that answers every page with

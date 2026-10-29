@@ -20,6 +20,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 )
 
 // Avatar proxy. User/member avatars come from OAuth metadata (users.avatar_url
@@ -158,7 +159,9 @@ func newAvatarHTTPClient() *http.Client {
 		IdleConnTimeout:       90 * time.Second,
 	}
 	return &http.Client{
-		Transport: transport,
+		// The guarded transport stays the base, so every dial — redirect
+		// hops included — still passes the Control guard.
+		Transport: telemetry.TracedTransport(transport, "avatar"),
 		Timeout:   avatarFetchTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= avatarMaxRedirects {

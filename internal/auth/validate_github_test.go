@@ -11,7 +11,7 @@ import (
 )
 
 // The tests in this package that stand up an httptest.Server run without
-// t.Parallel. httpClient and the Linear client both send through
+// t.Parallel. The package's clients and the Linear client all send through
 // http.DefaultTransport's connection pool, and httptest.Server.Close calls
 // CloseIdleConnections on that pool, so one test's cleanup can break a pooled
 // connection another test's request is using.
@@ -92,11 +92,11 @@ func TestCaptureGitHubIdentityRequiresVerifiedPrimaryEmail(t *testing.T) {
 // stubGitHubAPI points the package's shared client at a transport that answers
 // the two account endpoints and records the URLs they were asked for. Its
 // callers run without t.Parallel: the transport is package-global, so no other
-// test may send through httpClient while it is swapped.
+// test may send through githubHTTPClient while it is swapped.
 func stubGitHubAPI(t *testing.T, seen *[]string) {
 	t.Helper()
-	prev := httpClient.Transport
-	httpClient.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+	prev := githubHTTPClient.Transport
+	githubHTTPClient.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		*seen = append(*seen, r.URL.String())
 		body := `{"id":583231,"login":"octocat"}`
 		if strings.HasSuffix(r.URL.Path, "/user/emails") {
@@ -109,7 +109,7 @@ func stubGitHubAPI(t *testing.T, seen *[]string) {
 			Request:    r,
 		}, nil
 	})
-	t.Cleanup(func() { httpClient.Transport = prev })
+	t.Cleanup(func() { githubHTTPClient.Transport = prev })
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

@@ -28,6 +28,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/sessions"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -45,7 +46,7 @@ var _ = tfdb.Claims{}
 // The request context still cancels earlier on client disconnect; this
 // is the upper bound when the context happens to be Background (e.g.
 // reaper, future async revoke).
-var gotrueHTTPClient = &http.Client{Timeout: 30 * time.Second}
+var gotrueHTTPClient = telemetry.TracedHTTPClient(30*time.Second, "gotrue")
 
 // gotrueSSOClient drives the SP-initiated SAML start (POST /sso). Unlike
 // gotrueHTTPClient it must NOT follow redirects: GoTrue answers /sso with a 303
@@ -55,7 +56,8 @@ var gotrueHTTPClient = &http.Client{Timeout: 30 * time.Second}
 // it (which would have TF GET login.microsoftonline.com from inside the
 // network). Same bounded timeout rationale as gotrueHTTPClient.
 var gotrueSSOClient = &http.Client{
-	Timeout: 30 * time.Second,
+	Timeout:   30 * time.Second,
+	Transport: telemetry.TracedTransport(nil, "gotrue"),
 	CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	},

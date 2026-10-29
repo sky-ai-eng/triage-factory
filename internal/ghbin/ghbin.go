@@ -40,6 +40,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/ghpin"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 )
 
 // ErrUnsupportedPlatform is returned when the running GOOS/GOARCH has no pinned
@@ -54,6 +55,10 @@ var downloadBase = ghpin.DownloadBase
 // fetchTimeout bounds one download. The asset is ~10-15 MB compressed; a stalled
 // fetch must not pin a run's setup indefinitely.
 const fetchTimeout = 3 * time.Minute
+
+// downloadClient carries no Timeout of its own: fetchTimeout bounds the
+// download through its context.
+var downloadClient = &http.Client{Transport: telemetry.TracedTransport(nil, "github")}
 
 // maxExtractBytes caps what a single archive member may expand to. The gh
 // binary is under 50 MB; the cap exists so a swapped-out archive can't fill the
@@ -220,7 +225,7 @@ func download(ctx context.Context, asset ghpin.Asset) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ghbin: build request for %s: %w", url, err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := downloadClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("ghbin: fetch %s: %w", url, err)
 	}

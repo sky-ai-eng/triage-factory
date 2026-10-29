@@ -24,6 +24,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
@@ -774,7 +775,7 @@ type manifestConversionResponse struct {
 	WebhookSecret string `json:"webhook_secret"`
 }
 
-var manifestHTTPClient = &http.Client{Timeout: 30 * time.Second}
+var manifestHTTPClient = telemetry.TracedHTTPClient(30*time.Second, "github")
 
 func exchangeManifestCode(ctx context.Context, conversionURL string) (*manifestConversionResponse, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, conversionURL, nil)
