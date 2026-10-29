@@ -210,6 +210,36 @@ func TestRun_CleanCheckoutHasNoPatchMember(t *testing.T) {
 	}
 }
 
+// TestRun_CheckoutWithNothingUnpushedHasNoBundleMember: a checkout whose
+// commits are all on remote-tracking refs (a review that committed nothing, a
+// branch just pushed) writes no bundle member, because git's refusal of an
+// empty bundle comes after it has written the bundle's signature. A sibling
+// with an unpushed commit still carries its bundle.
+func TestRun_CheckoutWithNothingUnpushedHasNoBundleMember(t *testing.T) {
+	dir := t.TempDir()
+	seed := filepath.Join(dir, "seed")
+	git(t, dir, "init", "-q", "-b", "main", seed)
+	git(t, seed, "-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-q", "--allow-empty", "-m", "seed")
+	bare := filepath.Join(dir, "bare.git")
+	git(t, dir, "clone", "-q", "--bare", seed, bare)
+	root := filepath.Join(dir, "run")
+	for _, slug := range []string{"pushed", "local"} {
+		git(t, dir, "clone", "-q", bare, filepath.Join(root, "o", "r", slug))
+	}
+	git(t, filepath.Join(root, "o", "r", "local"), "-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-q", "--allow-empty", "-m", "unpushed")
+
+	man, members := runCapture(t, root, "o/r/pushed", "o/r/local")
+	if man.Checkouts[0].HasBundle {
+		t.Error("a checkout with nothing unpushed reported a bundle")
+	}
+	if _, ok := members[worktree.CaptureBundleMember("o/r/pushed")]; ok {
+		t.Error("a checkout with nothing unpushed wrote a bundle member")
+	}
+	if !man.Checkouts[1].HasBundle || members[worktree.CaptureBundleMember("o/r/local")] == "" {
+		t.Errorf("unpushed commit: has_bundle %v, member of %d bytes; want a bundle", man.Checkouts[1].HasBundle, len(members[worktree.CaptureBundleMember("o/r/local")]))
+	}
+}
+
 // TestRun_ScratchPathTooLongForTheStreamIsSkipped: a path the agent made under
 // _tfac that cannot be named in the stream costs the snapshot that one file,
 // reported as unreadable, and not the capture.
