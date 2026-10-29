@@ -2,11 +2,16 @@ package marketplacestats
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 // fakeStore is a narrow db.MarketplaceStore test double: it embeds the nil
@@ -118,6 +123,124 @@ func TestAggregator_RunOrg_ErrorDoesNotArmTTL(t *testing.T) {
 	}
 	if got := store.callCount(); got != 2 {
 		t.Errorf("store called %d times; want 2 (failed attempt + retry)", got)
+	}
+}
+
+// traceRecorder is installed on the OTel global once for the package: the job
+// cycle tracer resolves through the global delegate, which binds to the first
+// provider installed, so a recorder installed per test would capture nothing
+// after the first.
+var (
+	traceOnce     sync.Once
+	traceRecorder = tracetest.NewSpanRecorder()
+)
+
+// recordSpans returns a function reporting the spans ended since it was
+// called.
+func recordSpans(t *testing.T) func() []sdktrace.ReadOnlySpan {
+	t.Helper()
+	traceOnce.Do(func() {
+		otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(traceRecorder)))
+	})
+	start := len(traceRecorder.Ended())
+	return func() []sdktrace.ReadOnlySpan { return traceRecorder.Ended()[start:] }
+}
+
+// cycleSpans is the systemjob.cycle spans among spans.
+func cycleSpans(spans []sdktrace.ReadOnlySpan) []sdktrace.ReadOnlySpan {
+	var out []sdktrace.ReadOnlySpan
+	for _, s := range spans {
+		if s.Name() == "systemjob.cycle" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// spanAttr is the string value of key on s, and whether s carries it.
+func spanAttr(s sdktrace.ReadOnlySpan, key string) (string, bool) {
+	for _, kv := range s.Attributes() {
+		if string(kv.Key) == key {
+			return kv.Value.AsString(), true
+		}
+	}
+	return "", false
+}
+
+// TestAggregator_RunOrg_SpansOnlyARecompute pins that the span opens after
+// the TTL gate: a recompute is one root carrying the job and org, and a
+// TTL skip, which touches nothing, exports no trace at all.
+func TestAggregator_RunOrg_SpansOnlyARecompute(t *testing.T) {
+	a := NewAggregator(&fakeStore{})
+
+	spans := recordSpans(t)
+	if _, err := a.RunOrg(t.Context(), "org-a"); err != nil {
+		t.Fatalf("RunOrg: %v", err)
+	}
+	cycles := cycleSpans(spans())
+	if len(cycles) != 1 {
+		t.Fatalf("%d systemjob.cycle spans for one recompute; want 1", len(cycles))
+	}
+	s := cycles[0]
+	if job, _ := spanAttr(s, "job"); job != "marketplace_aggregator" {
+		t.Errorf("job = %q; want marketplace_aggregator", job)
+	}
+	if org, _ := spanAttr(s, "org.id"); org != "org-a" {
+		t.Errorf("org.id = %q; want org-a", org)
+	}
+	if outcome, ok := spanAttr(s, "outcome"); ok {
+		t.Errorf("outcome = %q on a recompute; want none", outcome)
+	}
+	if s.Status().Code == codes.Error {
+		t.Error("a successful recompute carries an error status")
+	}
+
+	skipped := recordSpans(t)
+	if _, err := a.RunOrg(t.Context(), "org-a"); err != nil {
+		t.Fatalf("second RunOrg: %v", err)
+	}
+	if n := len(cycleSpans(skipped())); n != 0 {
+		t.Errorf("%d systemjob.cycle spans for a TTL skip; want 0", n)
+	}
+}
+
+// TestAggregator_RunOrg_StoreErrorSpan pins that a failed recompute marks its
+// span an error, while a recompute cut off by shutdown is an anticipated stop.
+func TestAggregator_RunOrg_StoreErrorSpan(t *testing.T) {
+	cases := []struct {
+		name        string
+		err         error
+		cancelled   bool
+		wantOutcome string
+		wantError   bool
+	}{
+		{name: "failed", err: errors.New("recompute failed"), wantError: true},
+		{name: "shutdown", err: context.Canceled, cancelled: true, wantOutcome: "shutdown"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a := NewAggregator(&fakeStore{err: c.err})
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if c.cancelled {
+				cancel()
+			}
+
+			spans := recordSpans(t)
+			if _, err := a.RunOrg(ctx, "org-a"); err == nil {
+				t.Fatal("RunOrg with a failing store returned nil error")
+			}
+			cycles := cycleSpans(spans())
+			if len(cycles) != 1 {
+				t.Fatalf("%d systemjob.cycle spans for one recompute; want 1", len(cycles))
+			}
+			if outcome, _ := spanAttr(cycles[0], "outcome"); outcome != c.wantOutcome {
+				t.Errorf("outcome = %q; want %q", outcome, c.wantOutcome)
+			}
+			if gotError := cycles[0].Status().Code == codes.Error; gotError != c.wantError {
+				t.Errorf("error status = %v; want %v", gotError, c.wantError)
+			}
+		})
 	}
 }
 

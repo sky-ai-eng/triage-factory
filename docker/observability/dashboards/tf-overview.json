@@ -182,31 +182,31 @@
         "type": "tempo",
         "uid": "tf-tempo"
       },
-      "description": "Scorer, repo profiler, and project classifier cycles. All three share this span name \u2014 open a row and read the `job` attribute to see which. Click a row to open that trace's waterfall.",
+      "description": "One row per background job cycle, each for one org (`org.id`). `job` names the job: `scorer`, `profiler`, `reconciler`, `reach_refresher`, or `marketplace_aggregator`. `outcome` is set only where a job reports one. `wrote` and `no_write` say whether a reach refresh changed the mirror: most `no_write` rows are cycles that found nothing to do (a TTL skip), but an enumeration the refresher declined to write is one too. `nothing_to_score` is a scorer cycle that found nothing to do, `no_model` a scorer cycle skipped because the org has no background-jobs model, and `shutdown` a cycle cut off by a stop. A failed cycle has status `error`. `marketplace_aggregator` appears only when it recomputes; a cycle inside its TTL records nothing. Click a Span ID to open the cycle's trace; the filter icon keeps one job.",
       "fieldConfig": {
         "defaults": {
           "custom": {
             "align": "auto",
-            "filterable": false
+            "filterable": true
           }
         },
         "overrides": [
           {
             "matcher": {
               "id": "byName",
-              "options": "Trace ID"
+              "options": "Trace Service"
             },
             "properties": [
               {
-                "id": "custom.width",
-                "value": 130
+                "id": "custom.hidden",
+                "value": true
               }
             ]
           },
           {
             "matcher": {
               "id": "byName",
-              "options": "Service"
+              "options": "Trace Name"
             },
             "properties": [
               {
@@ -224,6 +224,30 @@
               {
                 "id": "custom.hidden",
                 "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Span ID"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Start time"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 175
               }
             ]
           }
@@ -248,10 +272,10 @@
           },
           "filters": [],
           "limit": 20,
-          "query": "{ name = \"systemjob.cycle\" }",
+          "query": "{ name = \"systemjob.cycle\" } | select(span.job, span.outcome, span.org.id, span:status)",
           "queryType": "traceql",
           "refId": "A",
-          "tableType": "traces"
+          "tableType": "spans"
         }
       ],
       "title": "System job cycles",
