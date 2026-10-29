@@ -137,9 +137,14 @@ func TestBridgePush_ThroughRealProxy_RefusesProtectedRef(t *testing.T) {
 
 	commands := pkt("de1e7e5 abc123 refs/heads/main\x00report-status\n") + flush
 	cfg := bridgeConfig{upstreamHost: "ghe.example.com", proxyURL: proxyURL, proxyToken: "run-token"}
-	err := bridge(cfg, "git-receive-pack '/acme/widgets.git'", strings.NewReader(commands+"PACK"), &bytes.Buffer{})
-	if err == nil {
-		t.Fatal("a base-branch push over the bridge succeeded, want the ref gate to refuse it")
+	// The gate refuses inside the receive-pack report, the way git reads a
+	// rejection, so the bridge relays it rather than failing the session.
+	var stdout bytes.Buffer
+	if err := bridge(cfg, "git-receive-pack '/acme/widgets.git'", strings.NewReader(commands+"PACK"), &stdout); err != nil {
+		t.Fatalf("bridge: %v, want the refusal relayed as a report", err)
+	}
+	if !strings.Contains(stdout.String(), "ng refs/heads/main") {
+		t.Fatalf("stdout = %q, want the gate's ng report for refs/heads/main", stdout.String())
 	}
 
 	select {
