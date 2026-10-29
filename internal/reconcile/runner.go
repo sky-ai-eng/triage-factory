@@ -3,6 +3,9 @@ package reconcile
 import (
 	"context"
 	"sync"
+
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // Runner reconciles one org's non-terminal artifacts against GitHub as a
@@ -81,13 +84,19 @@ func (r *Runner) run(ctx context.Context) {
 		r.mu.Unlock()
 	}()
 
+	// After the single-flight guard — see the scorer's twin.
+	ctx, span := telemetry.StartJobCycle(ctx, "reconciler", r.orgID)
+	defer span.End()
+
 	if err := r.reconciler.ReconcileOrg(ctx, r.orgID); err != nil {
 		if ctx.Err() != nil {
 			// Shutting down: Stop() cancelled ctx and it propagated out through a
 			// DB call as context.Canceled — not a real failure. Mirrors the
 			// profiler runner's guard.
+			span.SetAttributes(telemetry.Outcome("shutdown"))
 			return
 		}
-		reconcileLog.Error("reconcile cycle failed", "org", r.orgID, "error", err)
+		span.SetStatus(codes.Error, "reconcile cycle")
+		reconcileLog.ErrorContext(ctx, "reconcile cycle failed", "org", r.orgID, "error", err)
 	}
 }
