@@ -1,5 +1,48 @@
 # Changelog
 
+## [1.17.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.16.3...v1.17.0) (2026-10-29)
+
+
+### Features
+
+* **commitsigner:** sign commit digests on the control plane, from any control pod (TFAC-1195) ([#1321](https://github.com/sky-ai-eng/triage-factory/issues/1321)) ([aefa64d](https://github.com/sky-ai-eng/triage-factory/commit/aefa64def9c41a781be64b5ec9e6501c9d44efb0))
+* **commitsigner:** sign local runs' commits as the org's signer (TFAC-1196) ([#1326](https://github.com/sky-ai-eng/triage-factory/issues/1326)) ([faebec5](https://github.com/sky-ai-eng/triage-factory/commit/faebec5d001a3c933177e02cbe4c58fc68365623))
+* **commitsigner:** sign managed workspaces' commits as the deployment signer (TFAC-1200) ([#1333](https://github.com/sky-ai-eng/triage-factory/issues/1333)) ([e1c53f1](https://github.com/sky-ai-eng/triage-factory/commit/e1c53f118827d49d5b0e5f98e016d9eb9368c1a4))
+* **commitsigner:** sign multi-mode runs' commits on the control plane (TFAC-1198) ([#1331](https://github.com/sky-ai-eng/triage-factory/issues/1331)) ([727cd37](https://github.com/sky-ai-eng/triage-factory/commit/727cd379178c1804214a7b2cf8601f38a84edfa1))
+* **commitsigner:** stop signing as a signer whose commits stop verifying (TFAC-1199) ([#1332](https://github.com/sky-ai-eng/triage-factory/issues/1332)) ([e4b5582](https://github.com/sky-ai-eng/triage-factory/commit/e4b55829ed37600d23aa8e370c447231f731a15c))
+* **commitsign:** sign commits with SSHSIG and compute the signed commit's id (TFAC-1192) ([#1317](https://github.com/sky-ai-eng/triage-factory/issues/1317)) ([9f30768](https://github.com/sky-ai-eng/triage-factory/commit/9f30768424144af085c615f8c5cb1b9a9ef9a8ff))
+* **compose:** pull the signed release image by default; build from source via compose.dev.yml (TFAC-1212) ([#1337](https://github.com/sky-ai-eng/triage-factory/issues/1337)) ([ede3c72](https://github.com/sky-ai-eng/triage-factory/commit/ede3c727f0970857ec6e96154a0ef0e633014f56))
+* **db:** store commit signers and signatures, and resolve a run's commit identity (TFAC-1193) ([#1318](https://github.com/sky-ai-eng/triage-factory/issues/1318)) ([fc123ad](https://github.com/sky-ai-eng/triage-factory/commit/fc123adf64c9abe9c88d04a0868916e3392470ba))
+* **deploy:** render a verified, release-pinned compose deployment from the binary (TFAC-1213) ([#1338](https://github.com/sky-ai-eng/triage-factory/issues/1338)) ([e239a9e](https://github.com/sky-ai-eng/triage-factory/commit/e239a9ebc4081b25199519685808fdb3ccc6dc38))
+* **deploy:** start and upgrade a rendered deployment (TFAC-1214) ([#1339](https://github.com/sky-ai-eng/triage-factory/issues/1339)) ([b25a5d9](https://github.com/sky-ai-eng/triage-factory/commit/b25a5d9c4018b3d0fabb5ba7a3674ea2dd5880e0))
+* **frontend:** mount the fleet console at a top-level /fleet in multi mode (TFAC-1220) ([#1342](https://github.com/sky-ai-eng/triage-factory/issues/1342)) ([e58e50d](https://github.com/sky-ai-eng/triage-factory/commit/e58e50d78d4cda9c1c079fb0000be60a1395e33f))
+* **github:** link a member's GitHub identity through the deployment App (TFAC-1104) ([#1329](https://github.com/sky-ai-eng/triage-factory/issues/1329)) ([6908db4](https://github.com/sky-ai-eng/triage-factory/commit/6908db4a7ca69f9613ef3bcf2f8319fec9b0bcb5))
+* **github:** multi workspaces use a GitHub App, never a token (TFAC-1205) ([#1327](https://github.com/sky-ai-eng/triage-factory/issues/1327)) ([83b028a](https://github.com/sky-ai-eng/triage-factory/commit/83b028a428f173189aa1b21cdb4212b1dcad7083))
+* **jira:** say why a user's connection stopped working on Connect Jira (TFAC-1203) ([#1325](https://github.com/sky-ai-eng/triage-factory/issues/1325)) ([a72f15a](https://github.com/sky-ai-eng/triage-factory/commit/a72f15a3c5ca03a901084c89bc693cfee171fa00))
+* **observability:** alert when the deployment Jira app's shared quota runs low (TFAC-1219) ([#1343](https://github.com/sky-ai-eng/triage-factory/issues/1343)) ([1942ae1](https://github.com/sky-ai-eng/triage-factory/commit/1942ae1d3862420f0f0a919f360b6be2735ff24a))
+* **observability:** ship the suggested alerts as Prometheus rules (TFAC-1217) ([#1341](https://github.com/sky-ai-eng/triage-factory/issues/1341)) ([25e7ceb](https://github.com/sky-ai-eng/triage-factory/commit/25e7ceba4b0bed8b8323c637b62846911fd29525))
+* **orgs:** require a GitHub sign-in to create an organization, and sign in on the deployment's GitHub (TFAC-1223) ([#1352](https://github.com/sky-ai-eng/triage-factory/issues/1352)) ([79e75bd](https://github.com/sky-ai-eng/triage-factory/commit/79e75bdce6c413e460cd42084088eb4df9230ef0))
+* **server:** register, verify and rotate an org's commit signer (TFAC-1194) ([#1320](https://github.com/sky-ai-eng/triage-factory/issues/1320)) ([215ee55](https://github.com/sky-ai-eng/triage-factory/commit/215ee55613edba773c8ae0a0b13b81cdc2f1f989))
+* **settings:** add the Commit signing section and the signer-account guide (TFAC-1197) ([#1330](https://github.com/sky-ai-eng/triage-factory/issues/1330)) ([9e74671](https://github.com/sky-ai-eng/triage-factory/commit/9e74671dcb85da0a40ad32527c92725bc5bbb617))
+* **shell:** toggle the rail with Cmd/Ctrl+B (TFAC-1202) ([#1323](https://github.com/sky-ai-eng/triage-factory/issues/1323)) ([e920129](https://github.com/sky-ai-eng/triage-factory/commit/e9201293e7095c7ed86db078df42096e83b94acf))
+* **storage:** store team knowledge and workspace snapshots in separate buckets, with per-role keys (TFAC-1221) ([#1346](https://github.com/sky-ai-eng/triage-factory/issues/1346)) ([9bb617f](https://github.com/sky-ai-eng/triage-factory/commit/9bb617f4ac922af9c000a24792330592778b7970))
+
+
+### Bug Fixes
+
+* **agentprompt:** keep delegated agents from committing workflow changes ([#1355](https://github.com/sky-ai-eng/triage-factory/issues/1355)) ([9267897](https://github.com/sky-ai-eng/triage-factory/commit/92678973ecfd3af81ebb600f5314908b1b6fc3fa))
+* **delegate:** stamp the org's commit identity and co-author trailer on a cold resume (TFAC-1206) ([#1358](https://github.com/sky-ai-eng/triage-factory/issues/1358)) ([126fd8c](https://github.com/sky-ai-eng/triage-factory/commit/126fd8c72ccfac07ae095b97e2fd7c4f163df8bf))
+* **event-handlers:** answer predicate value faults 422 and refuse repeated or empty list entries (TFAC-1122) ([#1345](https://github.com/sky-ai-eng/triage-factory/issues/1345)) ([1f3daf9](https://github.com/sky-ai-eng/triage-factory/commit/1f3daf94a1748d85fbb9b5ea2267e6a61a33d927))
+* **githooks:** commit as "Triage Factory" when an org has no identity ([#1328](https://github.com/sky-ai-eng/triage-factory/issues/1328)) ([4feeb07](https://github.com/sky-ai-eng/triage-factory/commit/4feeb0718f59cf4fa219401257ca3ce4a0b1d393))
+* **gitproxy:** report push refusals to git, and guide a PR run to a second checkout (TFAC-1228) ([#1353](https://github.com/sky-ai-eng/triage-factory/issues/1353)) ([3b83c32](https://github.com/sky-ai-eng/triage-factory/commit/3b83c326b60200e20e2f3d45022f18c019896d2b))
+* **jira:** refresh a user's OAuth credential with the app that issued it (TFAC-1201) ([#1322](https://github.com/sky-ai-eng/triage-factory/issues/1322)) ([be106a6](https://github.com/sky-ai-eng/triage-factory/commit/be106a67b307ce72dba172c8af1c7aad7bafebae))
+* **linear:** say why a user's connection stopped working on the Connect Linear page (TFAC-1204) ([#1324](https://github.com/sky-ai-eng/triage-factory/issues/1324)) ([3104cbb](https://github.com/sky-ai-eng/triage-factory/commit/3104cbb6d073fae57867b78d0b67c264dd32db7b))
+* **operator:** refuse the operator CLI in local mode (TFAC-1210) ([#1336](https://github.com/sky-ai-eng/triage-factory/issues/1336)) ([3b69188](https://github.com/sky-ai-eng/triage-factory/commit/3b691888cab43188e05c9c9d9203db93a94540d5))
+* **pricing:** map four new LiteLLM providers as unsupported ([#1347](https://github.com/sky-ai-eng/triage-factory/issues/1347)) ([c3a514d](https://github.com/sky-ai-eng/triage-factory/commit/c3a514da57532ff55bab7528ecd9cb0e4afc65db))
+* **routing:** stop the terminal checker's gauges with the brain (TFAC-1218) ([#1344](https://github.com/sky-ai-eng/triage-factory/issues/1344)) ([bc8f3c4](https://github.com/sky-ai-eng/triage-factory/commit/bc8f3c41be8243c9e3818ba1ce5a5a4343366408))
+* **snapshot:** decide an empty bundle before git bundle writes into the capture stream (TFAC-1227) ([#1354](https://github.com/sky-ai-eng/triage-factory/issues/1354)) ([bebd6b3](https://github.com/sky-ai-eng/triage-factory/commit/bebd6b3a4f6eef412ab041bdcef1bb35c17190c6))
+* **sources:** refuse every Jira and Linear client resolution for a turned-off source (TFAC-1222) ([#1349](https://github.com/sky-ai-eng/triage-factory/issues/1349)) ([81c49a5](https://github.com/sky-ai-eng/triage-factory/commit/81c49a5ba0eb715211541f09c045a03372d51ed6))
+
 ## [1.16.3](https://github.com/sky-ai-eng/triage-factory/compare/v1.16.2...v1.16.3) (2026-10-26)
 
 
