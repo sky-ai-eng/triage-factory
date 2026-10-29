@@ -13,4 +13,3 @@ Gotchas:
 - Workflow states are defined per team, so state names differ between teams. `list-states <ID>` lists the states of that issue's team; `transition --state` takes one of those names or a state id.
 - `search` filters on a fixed vocabulary: team, state names, assignee (a user id, or `none`), and a result cap. There is no raw query passthrough like Jira's JQL; narrow anything further from the results it returns.
 - Every write acts as the org's Linear identity (a Linear app user, or the owner of the configured API key), not as a person. Comments, transitions, and created issues are attributed to it. `assign` never falls back to it: it requires `--user`, and there is no `me` for `--user` or `--assignee`.
-- For multi-line `--body` or `--description` arguments, use the same heredoc pattern as GitHub tools.

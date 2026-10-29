@@ -227,13 +227,13 @@ func TestRunContext_OmitsAbsentFacts(t *testing.T) {
 	}
 }
 
-// TestBlueprintStepNonterminalPrompt_PointsAtTheHandoffFolder is the handoff
-// addendum's half of the fixed-path contract (the composed framework prompt and
-// the tools docs cover the rest): the step it hands off to reads a folder the
-// orchestrator names, and finds this step's notes already in it.
-func TestBlueprintStepNonterminalPrompt_PointsAtTheHandoffFolder(t *testing.T) {
+// TestBlueprintStepNonterminalPrompt_PointsAtTheMemoryContract: the handoff
+// addendum names the memory file as the handoff by pointing at the
+// <entity_memory> contract, which owns the handoff folder's path, rather than
+// restating it.
+func TestBlueprintStepNonterminalPrompt_PointsAtTheMemoryContract(t *testing.T) {
 	addendum := agentprompt.NonTerminalCompletion(machinistSpec())
-	if !strings.Contains(addendum, "_tfac/entity-memory/this-task/") {
-		t.Error("expected the handoff addendum to point the agent at _tfac/entity-memory/this-task/")
+	if !strings.Contains(addendum, "<entity_memory>") {
+		t.Error("expected the handoff addendum to point the agent at the <entity_memory> contract")
 	}
 }

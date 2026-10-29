@@ -317,7 +317,8 @@ func isZeroOID(s string) bool {
 // Authorize gate wired). Unlike the observe-only serveReceivePack, it buffers
 // the leading pkt-line command block and validates every ref update BEFORE
 // forwarding: a delete, or a ref outside allowedRefs, rejects the WHOLE push
-// (single stream — can't partially forward) with a 403 and no upstream call.
+// (single stream — can't partially forward) with no upstream call, answered by
+// refusePush.
 // A command block that overflows the capture cap before its flush-pkt fails
 // closed. On success it reconstructs the body (buffered block + the still-
 // unread packfile) and proxies it, then reports each ref + the upstream's
@@ -340,18 +341,29 @@ func (s *Server) serveReceivePackGated(w http.ResponseWriter, r *http.Request, o
 	}
 
 	allowed := refSet(allowedRefs)
-	for _, c := range parseGateCommands(block) {
+	cmds := parseGateCommands(block)
+	refusals := make([]string, len(cmds))
+	refused := false
+	for i, c := range cmds {
+		var reason string
 		switch {
 		case c.isDelete:
-			s.recordDenial(DeniedGitOp{Owner: owner, Repo: repo, Ref: c.ref, Op: gitOpPush, Reason: "ref-delete"})
-			http.Error(w, "gitproxy: ref delete not allowed", http.StatusForbidden)
-			return
+			reason, refusals[i] = "ref-delete", "gitproxy: ref delete not allowed"
 		case !allowed[c.ref]:
-			reason, msg := refDenial(c.ref, owner+"/"+repo, allowedRefs, decision.ProtectedRefs)
-			s.recordDenial(DeniedGitOp{Owner: owner, Repo: repo, Ref: c.ref, Op: gitOpPush, Reason: reason})
-			http.Error(w, msg, http.StatusForbidden)
-			return
+			reason, refusals[i] = refDenial(c.ref, owner+"/"+repo, allowedRefs, decision.ProtectedRefs)
+		default:
+			continue
 		}
+		// One denial per push, naming its first refused ref: the push is one
+		// act, and a `git push --tags` would otherwise record a row per tag.
+		if !refused {
+			s.recordDenial(DeniedGitOp{Owner: owner, Repo: repo, Ref: c.ref, Op: gitOpPush, Reason: reason})
+		}
+		refused = true
+	}
+	if refused {
+		refusePush(w, r, block, cmds, refusals)
+		return
 	}
 
 	// Every command authorized (or the push had no commands — a capability
@@ -377,18 +389,18 @@ func (s *Server) serveReceivePackGated(w http.ResponseWriter, r *http.Request, o
 	s.recordReceivePack(repoPath, block, rr)
 }
 
-// refDenial builds the audit reason + 403 body for one rejected ref. Three
-// situations reach this point and they have three different remedies, so they
-// get three messages rather than the one flat string every refusal used to
-// collapse to:
+// refDenial builds the audit reason and the message git shows for one rejected
+// ref. Three situations reach this point and they have three different
+// remedies, so they get three messages:
 //
 //   - The ref is protected — the repo's base/default branch, which the team's
 //     base-branch push policy refuses. Name it, and name both ways out: the
 //     branch-plus-PR path the agent can take right now, and the policy a team
 //     admin can change.
-//   - The run has no pushable branch here at all (empty allowlist): the repo is
-//     authorized for read but no worktree of it is recorded for this run, so
-//     push authority hasn't been earned yet.
+//   - The run has no pushable branch here at all (empty allowlist): no
+//     checkout of the repo recorded for this run is on a branch it may push —
+//     `workspace add` leaves one detached — so push authority hasn't been
+//     earned yet.
 //   - The ref simply isn't the branch this run's worktree is on.
 //
 // Wording mirrors the repo-level deny builders in internal/delegate
@@ -403,12 +415,72 @@ func refDenial(ref, repoID string, allowedRefs, protectedRefs []string) (reason,
 	}
 	if len(allowedRefs) == 0 {
 		return "ref-no-pushable-branch", fmt.Sprintf(
-			"gitproxy: no branch of %s is pushable in this run: push authority comes from a worktree TF materialized for the run, and none is recorded. If you just ran 'workspace add %s', retry once the checkout has landed.",
+			"gitproxy: no branch of %s is pushable in this run: a push must come from a checkout 'workspace add %s' made, on a branch you created there, and none of this run's checkouts is on one. Create your branch in that checkout with git switch -c <branch> and push from there; a checkout made with git worktree add or git clone cannot push.",
 			repoID, repoID)
 	}
 	return "ref-not-allowed", fmt.Sprintf(
-		"gitproxy: ref %s is not pushable in %s: this run may push only %s (the branch its worktree is checked out on). Push from that checkout, or create your branch there first.",
-		ref, repoID, strings.Join(allowedRefs, ", "))
+		"gitproxy: ref %s is not pushable in %s: this run may push only %s (the branch each of its checkouts is on). A checkout made with git worktree add or git clone cannot push; for a new branch, run 'workspace add %s' for a checkout of the base branch and create the branch there.",
+		ref, repoID, strings.Join(allowedRefs, ", "), repoID)
+}
+
+// sideBandChunk is the most band data one side-band pkt-line carries: the
+// 1000-byte packet limit of plain side-band, less the length field and the band
+// byte. It is also within side-band-64k's limit, so one size serves both.
+const sideBandChunk = 1000 - pktLineLenWidth - 1
+
+// refusePush answers a push the gate refused, with one outcome per command:
+// refusals[i] is command i's refusal, empty when the command was allowed and
+// is refused only because the push is refused whole.
+//
+// The answer is a receive-pack report inside a 200 whenever the client asked
+// for one, as GitHub answers a protected-branch refusal, because that is the
+// only refusal git shows: it prints `! [remote rejected] <ref> (<reason>)`,
+// while the body of a failed POST is dropped and a 403 reaches the agent as
+// "RPC failed; HTTP 403" with no reason. A client that asked for no report
+// would read any 200 as success, so it gets the 403.
+func refusePush(w http.ResponseWriter, r *http.Request, block []byte, cmds []gateCommand, refusals []string) {
+	caps := parsePushCapabilities(block)
+	if !caps.reportStatus {
+		first := slices.IndexFunc(refusals, func(msg string) bool { return msg != "" })
+		http.Error(w, refusals[first], http.StatusForbidden)
+		return
+	}
+	// Read the rest of the push before answering. A chunked push is still
+	// uploading, and answering mid-upload closes the connection under the
+	// client before it reads the report.
+	_, _ = io.Copy(io.Discard, r.Body)
+
+	var report bytes.Buffer
+	writePktLine(&report, "unpack ok\n")
+	for i, c := range cmds {
+		msg := refusals[i]
+		if msg == "" {
+			msg = "gitproxy: not pushed, because another ref in this push was refused"
+		}
+		writePktLine(&report, "ng "+c.ref+" "+msg+"\n")
+	}
+	report.WriteString("0000")
+
+	body := report.Bytes()
+	if caps.sideBand {
+		var muxed bytes.Buffer
+		for len(body) > 0 {
+			n := min(len(body), sideBandChunk)
+			writePktLine(&muxed, string(append([]byte{sideBandData}, body[:n]...)))
+			body = body[n:]
+		}
+		muxed.WriteString("0000")
+		body = muxed.Bytes()
+	}
+	w.Header().Set("Content-Type", "application/x-git-receive-pack-result")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+}
+
+// writePktLine appends payload to b as one pkt-line.
+func writePktLine(b *bytes.Buffer, payload string) {
+	fmt.Fprintf(b, "%04x%s", len(payload)+pktLineLenWidth, payload)
 }
 
 // readCommandBlock reads the leading pkt-line command block of a receive-pack

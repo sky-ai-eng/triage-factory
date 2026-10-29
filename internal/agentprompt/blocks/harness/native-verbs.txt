@@ -1,14 +1,24 @@
 <triagefactory_verbs>
 `tfac` covers the things `gh` cannot do or that need Triage Factory to be involved. Run `tfac --help`, or `--help` on any subcommand, for the full surface.
+A `tfac gh` verb acts on the repository of the checkout you run it from; from `/work` itself, which is inside no checkout, pass `--repo <owner>/<repo>`.
+`pr create`, `add-review-comment` and `finalize-review` take `--body-file <path>` in place of `--body`: use it for anything multi-line or containing backticks, since it avoids shell quoting entirely.
+Any other multi-line value, such as a Jira or Linear `--body` or `--description`, goes in a quoted heredoc:
+```
+--body "$(cat <<'EOF'
+Text across several lines.
+EOF
+)"
+```
 
-**Opening a pull request.** `tfac gh pr create --title <T> --body-file <path> --base <branch>`, after the branch is pushed.
-Write the body to a file under `/work/_tfac/` and pass `--body-file`; it avoids shell quoting entirely.
+**Opening a pull request.** `tfac gh pr create --title <T> --body-file <path> --base <branch>`, after the branch is pushed; a head that is not on the remote is refused.
+Write the body to a file under `/work/_tfac/`.
 The pull request opens as a draft and the verb prints its number and url; do not call it again for the same branch.
+A human marks it ready; `gh pr ready` does the same, and you use it only when your mission explicitly asks for a pull request that is ready to review.
 
 **Reviewing a pull request.** Three verbs, in order:
 
 1. `tfac gh pr start-review <pr_number>` — begins a review and prints a handle. Add `--fresh` to discard a half-finished review and start over.
-2. `tfac gh pr add-review-comment <handle> --file <path> --line <N> --severity <blocker|major|minor|clean> --body <text>` — one call per finding. Use `--body-file <path>` for anything multi-line or containing backticks; it avoids shell quoting entirely. `--severity` renders a badge on the posted comment, and omitting it drops the badge silently. `comment-update` and `comment-delete` take the id this returns.
+2. `tfac gh pr add-review-comment <handle> --file <path> --line <N> --severity <blocker|major|minor|clean> --body <text>` — one call per finding. `--severity` renders a badge on the posted comment, and omitting it drops the badge silently. `comment-update` and `comment-delete` take the id this returns; re-pass `--severity` on an update, or the badge is lost. Keep a review under about 100 inline comments: past that, comments may not carry over faithfully into the approval view.
 3. `tfac gh pr finalize-review <handle> --event <approve|comment|request_changes> --body <summary>` — ends the review. Start the summary with a `##` heading.
 
 Comments anchor to the commit your checkout of that pull request is on, wherever you run the verb from, so review the code you actually have in front of you.
@@ -22,10 +32,6 @@ Read the response rather than assuming, and do not call it twice.
 **Investigating CI.** `tfac gh actions list-runs --pr <N>` lists a PR's recent workflow runs;
 `tfac gh actions download-logs <run_id>` downloads and extracts a run's full log archive,
 naming the extraction directory as `dest_dir` in its JSON result — Read/Grep the files there (one top-level directory per job).
-These replace `gh run view` and `gh run download`, which cannot fetch job or log data from this sandbox.
-
-**Working with issue trackers.** `tfac jira ticket view|search|create|comment|transition|assign|set-priority` covers Jira.
-If your organization has not connected a tracker these return a clear error — do not build a plan around filing a ticket unless your mission actually references one.
 
 **Recalling what past runs learned.** `tfac memory load --source <github|jira|slack> --id <id>` returns
 what previous runs recorded about a *different* entity than your own (ids look like `owner/repo#12`, `PROJ-45`).

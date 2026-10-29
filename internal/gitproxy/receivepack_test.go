@@ -209,11 +209,11 @@ func TestResponseRecorder_CapturesFirstFinalStatus(t *testing.T) {
 	})
 }
 
-// TestRefDenial covers the three situations a rejected ref can be in, which
-// used to collapse to one flat "ref not allowed" string. The point of the
-// split is the remedy: a protected ref means "open a PR (or ask an admin to
-// change the policy)", an empty allowlist means "your worktree isn't recorded
-// yet", and a foreign ref means "push from the checkout you have".
+// TestRefDenial covers the three situations a rejected ref can be in. The
+// point of the split is the remedy: a protected ref means "open a PR (or ask
+// an admin to change the policy)", an empty allowlist means "create your
+// branch in the checkout workspace add made", and a foreign ref means "push
+// the branch your checkout is on".
 func TestRefDenial(t *testing.T) {
 	cases := []struct {
 		name          string
@@ -234,7 +234,7 @@ func TestRefDenial(t *testing.T) {
 			wantContains:  []string{"refs/heads/main", "protected branch", "acme/api", "pull request", "team admin"},
 		},
 		{
-			name:         "no pushable branch points at the missing worktree",
+			name:         "no pushable branch points at branching in a workspace add checkout",
 			ref:          "refs/heads/agent/x",
 			allowedRefs:  nil,
 			wantReason:   "ref-no-pushable-branch",

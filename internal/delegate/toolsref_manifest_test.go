@@ -51,8 +51,8 @@ func TestSourceDocsFor_UsableSourcesAreDocumented(t *testing.T) {
 	got := s.sourceDocsFor(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "conv-m1", eventsource.KindGitHub)
 
 	for _, want := range []string{"exec gh", "exec jira", "exec linear", "SLACK VERB DOCS"} {
-		if !strings.Contains(got.tools, want) {
-			t.Errorf("tools = %q, want it to document %q", got.tools, want)
+		if !strings.Contains(got.tools(agentprompt.RuntimeSDK), want) {
+			t.Errorf("tools = %q, want it to document %q", got.tools(agentprompt.RuntimeSDK), want)
 		}
 	}
 	if !strings.HasPrefix(got.notes, "Linear: unavailable this run") || strings.Contains(got.notes, "\n") {
@@ -76,12 +76,12 @@ func TestSourceDocsFor_DisabledSourceIsLeftOut(t *testing.T) {
 	})
 	got := s.sourceDocsFor(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "conv-m2", eventsource.KindJira)
 
-	if !strings.Contains(got.tools, "exec gh") {
-		t.Errorf("tools = %q, want the github verbs regardless", got.tools)
+	if !strings.Contains(got.tools(agentprompt.RuntimeSDK), "exec gh") {
+		t.Errorf("tools = %q, want the github verbs regardless", got.tools(agentprompt.RuntimeSDK))
 	}
 	for _, absent := range []string{"exec jira", "exec linear", "SLACK VERB DOCS"} {
-		if strings.Contains(got.tools, absent) {
-			t.Errorf("tools = %q, want %q left out", got.tools, absent)
+		if strings.Contains(got.tools(agentprompt.RuntimeSDK), absent) {
+			t.Errorf("tools = %q, want %q left out", got.tools(agentprompt.RuntimeSDK), absent)
 		}
 	}
 	lines := strings.Split(got.notes, "\n")
@@ -124,10 +124,10 @@ func TestSourceDocsFor_NoManifest_FallsThrough(t *testing.T) {
 	s := manifestSpawner(t, nil)
 	got := s.sourceDocsFor(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "conv-m4", eventsource.KindJira)
 
-	if !strings.Contains(got.tools, "exec gh") {
-		t.Errorf("tools = %q, want the github verbs", got.tools)
+	if !strings.Contains(got.tools(agentprompt.RuntimeSDK), "exec gh") {
+		t.Errorf("tools = %q, want the github verbs", got.tools(agentprompt.RuntimeSDK))
 	}
-	if strings.Contains(got.tools, "SLACK VERB DOCS") {
-		t.Errorf("tools = %q, want no slack docs without an answer naming it", got.tools)
+	if strings.Contains(got.tools(agentprompt.RuntimeSDK), "SLACK VERB DOCS") {
+		t.Errorf("tools = %q, want no slack docs without an answer naming it", got.tools(agentprompt.RuntimeSDK))
 	}
 }
