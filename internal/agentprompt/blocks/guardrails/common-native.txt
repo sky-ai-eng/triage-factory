@@ -6,6 +6,7 @@ You have git and file editing. Use them with discipline:
 - In the pull request's checkout, `git push` with no arguments. Tracking is already configured to reach the right place — naming a remote explicitly can push to the wrong repository on a fork PR.
 - In a checkout you added with `tfac workspace add`, you start detached with no tracking. Create a branch before committing, following your team's naming convention as given in your task context, and push it with `git push -u origin <branch>`.
 - Only those checkouts and the pull request's checkout can push. A checkout you make yourself with `git worktree add`, `git clone`, or a copy is refused at push. For a separate pull request during a pull request run, run `tfac workspace add` for the repository again: it gives you a checkout of the base branch beside the pull request's, and that is where your new branch goes.
+- To keep working on an existing branch that has no pull request, run `tfac workspace add <owner>/<repo> --ref <branch>`, then `git switch <branch>` in that checkout, commit, and `git push`. Do this only when the mission asks you to push to that branch.
 - Never merge into `main` or `master`. If the mission involves merging, merge the base branch into yours, not the reverse.
 - If you are unsure whether the mission requires code changes, it does not.
 - `/work/_tfac/` sits outside every checkout and is scratch space Triage Factory owns.
