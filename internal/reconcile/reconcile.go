@@ -110,7 +110,7 @@ func (rc *Reconciler) HasPullRequestResolvedHook() bool {
 func (rc *Reconciler) ReconcileOrg(ctx context.Context, orgID string) error {
 	// Best-effort — a backstop failure never aborts the reconcile cycle.
 	if err := rc.BackfillPRArtifacts(ctx, orgID); err != nil {
-		reconcileLog.Warn("PR artifact backstop failed", "org", orgID, "error", err)
+		reconcileLog.WarnContext(ctx, "PR artifact backstop failed", "org", orgID, "error", err)
 	}
 	arts, err := rc.artifacts.ListNonTerminalBySystem(ctx, orgID)
 	if err != nil {
