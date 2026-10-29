@@ -429,23 +429,17 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		extraEnv = append(extraEnv, opts.localGit.sshBridgeEnv()...)
 	}
 
-	// A cold resume starts a new process, so a run whose org's signer is
-	// active signs here as runAgent's does, with the identity resolved now.
-	// Only a run that signs takes the identity: git can sign only a commit
-	// whose committer is the signer.
-	//
-	// TODO(TFAC-1206): stamp the identity and the co-author trailer on every
-	// resume, as runAgent does; a run whose org has no active signer commits
-	// here under the sandbox's placeholder identity or the operator's git
-	// config.
+	// A cold resume starts a new process, which commits and signs as runAgent's
+	// does: the commit identity and co-author trailer are stamped on baseOpts
+	// below, and a run whose org's signer is active signs. The identity is
+	// resolved now rather than captured at run start, unlike the values in
+	// ResumeOptions: a signing run must sign as the signer that is current, and
+	// git can sign only a commit whose committer is that signer. The unsigned
+	// identity follows the same rule, so there is one rule for both.
 	commitIdentity, signer := s.resolveCommitIdentity(ctx, orgID, triggerType, creatorUserID)
 	commitSigning := s.prepareLocalCommitSigning(ctx, orgID, conversationID, opts.claimID, signer)
 	defer commitSigning.Close()
 	extraEnv = append(extraEnv, commitSigning.env()...)
-	var gitUserName, gitUserEmail string
-	if commitSigning != nil {
-		gitUserName, gitUserEmail = commitIdentity.Name, commitIdentity.Email
-	}
 
 	// A resume gets the same isolation the initial invocation had — the
 	// namespace is per-invocation, like the gh channel above, so a cold resume
@@ -493,8 +487,6 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		ClaimID:              opts.claimID,
 		RecordSandboxActuals: s.recordSandboxActuals,
 		GHChannel:            ghChannel,
-		GitUserName:          gitUserName,
-		GitUserEmail:         gitUserEmail,
 		GitConfigPairs:       append(opts.localGit.configPairs(ghChannel), commitSigning.configPairs()...),
 		LocalSandbox:         localSbx.runSpec(),
 		// Re-mount the step skill this run's original claim staged, when it's
@@ -505,6 +497,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		// reads the same handoff it started with rather than a freshly rendered one.
 		MemorySourcePath: stagedEntityMemorySource(conversationID),
 	}
+	stampCommitIdentity(&baseOpts, commitIdentity)
 	sink := newConversationSink(s, orgID, conversationID, opts.claimID, triggerType, creatorUserID)
 
 	// Off-allowlist tool calls route the same way the initial run does: a
