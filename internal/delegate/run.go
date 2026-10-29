@@ -24,6 +24,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -417,7 +418,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	systemBlock := composeConversationSystemBlock(
 		mission,
 		runContext(cfg.scope, agentRunRoot, agentPRCheckout, branchTemplate, runURL, cfg.sources.notes, knowledge),
-		cfg.sources.tools,
+		cfg.sources.tools(agentprompt.RuntimeSDK),
 		cfg.appendSysPrompt,
 	)
 	systemPrompt := sdkSystemPrompt(systemBlock, agentBin)

@@ -599,13 +599,19 @@ func cloneHostBase(cloneURL string) string {
 }
 
 // sourceDocs is what a run is told about the sources it can and cannot reach:
-// the <tools> section documenting the verbs of every source it can use, and
-// one <run_context> line per source it cannot, saying why. Both are composed
-// from one source manifest, so a run is never documented a source its notes
-// call unavailable.
+// the sources whose verbs its <tools> section documents, and one <run_context>
+// line per source it cannot reach, saying why. Both are composed from one
+// source manifest, so a run is never documented a source its notes call
+// unavailable.
 type sourceDocs struct {
-	tools string
+	kinds []string
 	notes string
+}
+
+// tools renders the <tools> section for the runtime that reads it, which
+// decides how the verbs are spelled and whether GitHub's are repeated there.
+func (d sourceDocs) tools(runtime agentprompt.Runtime) string {
+	return agentprompt.ToolsReferenceForSources(runtime, d.kinds)
 }
 
 // sourceDocsFor composes a run's sourceDocs from its source manifest: the
@@ -644,10 +650,10 @@ type sourceDocs struct {
 func (s *Spawner) sourceDocsFor(ctx context.Context, orgID, creatorUserID, conversationID, ownSource string) sourceDocs {
 	manifest := s.runSourceManifest(ctx, orgID, creatorUserID, conversationID)
 	if manifest == nil {
-		return sourceDocs{tools: agentprompt.ToolsReferenceForSources([]string{eventsource.KindGitHub, ownSource})}
+		return sourceDocs{kinds: []string{eventsource.KindGitHub, ownSource}}
 	}
 	return sourceDocs{
-		tools: agentprompt.ToolsReferenceForSources(append(manifest.UsableKinds(), eventsource.KindGitHub)),
+		kinds: append(manifest.UsableKinds(), eventsource.KindGitHub),
 		notes: strings.Join(agenthost.SourceNotes(manifest), "\n"),
 	}
 }

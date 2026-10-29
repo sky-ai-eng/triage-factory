@@ -77,7 +77,7 @@ func TestToolsReferenceForSources_WorkspaceOncePerTrackerSet(t *testing.T) {
 		{[]string{"fake"}, 0},
 		{[]string{"github", "fake"}, 0},
 	} {
-		got := ToolsReferenceForSources(tc.kinds)
+		got := ToolsReferenceForSources(RuntimeSDK, tc.kinds)
 		if n := strings.Count(got, workspace); n != tc.want {
 			t.Errorf("ToolsReferenceForSources(%q) carries the workspace block %d times, want %d", tc.kinds, n, tc.want)
 		}
@@ -91,8 +91,8 @@ func TestToolsReferenceForSources_WorkspaceClosesTheCoreGroup(t *testing.T) {
 	t.Cleanup(ResetToolsReferences)
 	RegisterToolsReference("fake", "FAKE VERB DOCS")
 
-	with := ToolsReferenceForSources([]string{"fake", "linear", "github", "jira"})
-	without := ToolsReferenceForSources([]string{"linear", "github", "jira"})
+	with := ToolsReferenceForSources(RuntimeSDK, []string{"fake", "linear", "github", "jira"})
+	without := ToolsReferenceForSources(RuntimeSDK, []string{"linear", "github", "jira"})
 
 	prev := -1
 	for _, section := range []string{githubTools, jiraTools, linearTools, block(blockToolsWorkspace), "FAKE VERB DOCS"} {
@@ -122,7 +122,7 @@ func TestTrackerReferences_MatchTheComposition(t *testing.T) {
 		{"jira", JiraToolsReference()},
 		{"linear", LinearToolsReference()},
 	} {
-		if want := ToolsReferenceForSources([]string{tc.source}) + "\n"; tc.got != want {
+		if want := ToolsReferenceForSources(RuntimeSDK, []string{tc.source}) + "\n"; tc.got != want {
 			t.Errorf("the %s accessor and ToolsReferenceForSources(%q) disagree", tc.source, tc.source)
 		}
 	}

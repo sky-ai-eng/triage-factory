@@ -10,4 +10,3 @@ Workflows:
 Gotchas:
 - Server/DC vs Cloud differences (parent linking, description format, user ids) are handled internally — you don't need to worry about them.
 - Every write acts as the org's Jira account, not as a person. `assign` never falls back to it: it requires `--user`.
-- For multi-line `--body` or `--description` arguments, use the same heredoc pattern as GitHub tools.

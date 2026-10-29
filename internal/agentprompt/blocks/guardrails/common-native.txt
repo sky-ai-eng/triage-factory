@@ -9,5 +9,4 @@ You have git and file editing. Use them with discipline:
 - To keep working on an existing branch that has no pull request, add it with `tfac workspace add <owner>/<repo> --ref <branch>`, then `git switch <branch>`, commit, and `git push`. Do this only when the mission asks you to push to that branch.
 - Never merge into `main` or `master`. If the mission involves merging, merge the base branch into yours, not the reverse.
 - If you are unsure whether the mission requires code changes, it does not.
-- `/work/_tfac/` sits outside every checkout and is scratch space Triage Factory owns.
 </guardrails>

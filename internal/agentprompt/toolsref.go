@@ -6,10 +6,10 @@ import (
 )
 
 // The tools reference is agent-facing prompt text that varies on the run's
-// entity sources rather than on any Spec axis — a Jira run sees the Jira verbs,
-// a Slack-thread run sees the Slack verbs, and both see GitHub's. So it is not
-// a manifest section: the caller picks the set and appends it as the <tools>
-// section of the per-run tail, which the harness blocks point at.
+// entity sources — a Jira run sees the Jira verbs, a Slack-thread run sees the
+// Slack verbs. So it is not a manifest section: the caller picks the set and
+// appends it as the <tools> section of the per-run tail, which the harness
+// blocks point at.
 //
 // Core's sets are embedded from the same blocks tree as everything else.
 // Non-core sources register at init, which is the whole reason the registry
@@ -41,8 +41,8 @@ func GitHubToolsReference() string { return githubReference }
 
 // JiraToolsReference is the agent-facing docs for the `exec jira` verb family
 // plus the per-run workspace materialization every codebase-less run needs:
-// what ToolsReferenceForSources composes for a set naming Jira alone, with a
-// trailing newline.
+// what ToolsReferenceForSources composes for an SDK run's set naming Jira
+// alone, with a trailing newline.
 func JiraToolsReference() string { return jiraReference }
 
 // LinearToolsReference is the agent-facing docs for the `exec linear` verb
@@ -72,8 +72,8 @@ var coreToolsReferenceSources = map[string]bool{
 // "jira", "linear") — a wiring bug that must fail at boot, not silently
 // degrade a run's tool docs. Registered text is literal, like the embedded
 // blocks: write `triagefactory exec <verb>` (the prompt builder points it at
-// the run's binary), and name a per-run fact by pointing at the section of the
-// prompt that carries it.
+// the run's binary, or at the `tfac` applet in a native run), and name a
+// per-run fact by pointing at the section of the prompt that carries it.
 func RegisterToolsReference(source, text string) {
 	if source == "" {
 		panic("agentprompt.RegisterToolsReference: source must not be empty")
@@ -115,7 +115,14 @@ func RegisterToolsReference(source, text string) {
 // by core sources alone, so placing it inside the core group means a
 // registered source's presence never moves it: the core portion of the
 // section is byte-identical whatever ee has registered.
-func ToolsReferenceForSources(kinds []string) string {
+//
+// The runtime decides two things. A native run's framework blocks already
+// document GitHub — the real `gh` and the `tfac gh` verbs — and every block is
+// in its prompt whatever the set, so its section leaves the GitHub block out
+// rather than say it twice. And a native run invokes verbs through the `tfac`
+// applet its blocks teach, so its section spells them that way; an SDK run's
+// `triagefactory exec` is resolved to a binary path by the caller.
+func ToolsReferenceForSources(runtime Runtime, kinds []string) string {
 	seen := make(map[string]bool, len(kinds))
 	var core, registered []string
 	for _, k := range kinds {
@@ -138,7 +145,9 @@ func ToolsReferenceForSources(kinds []string) string {
 	for _, k := range core {
 		switch k {
 		case "github":
-			parts = append(parts, githubTools)
+			if runtime != RuntimeNative {
+				parts = append(parts, githubTools)
+			}
 		case "jira":
 			parts = append(parts, jiraTools)
 			tracker = true
@@ -153,8 +162,16 @@ func ToolsReferenceForSources(kinds []string) string {
 	for _, k := range registered {
 		parts = append(parts, strings.TrimSpace(toolsReferenceRegistry[k]))
 	}
-	return strings.Join(parts, "\n\n")
+	out := strings.Join(parts, "\n\n")
+	if runtime == RuntimeNative {
+		out = strings.ReplaceAll(out, "triagefactory exec", nativeVerbPrefix)
+	}
+	return out
 }
+
+// nativeVerbPrefix is how a native run invokes `triagefactory exec`: the
+// applet the jail puts on PATH, under which `exec` is implicit.
+const nativeVerbPrefix = "tfac"
 
 // ToolsReferenceFor returns the registered tools-reference text for source
 // and whether one exists.
