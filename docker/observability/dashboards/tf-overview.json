@@ -182,7 +182,7 @@
         "type": "tempo",
         "uid": "tf-tempo"
       },
-      "description": "One row per org's Linear poll cycle. Click a row to open that trace's waterfall. A cycle that stopped short says why in its `outcome` attribute: `unconfigured` (no Linear credential or workspace, or no rule in it), `no_armed_teams`, `disabled` (the source is turned off), or `rate_limited`.",
+      "description": "One row per org's Linear poll cycle. Click a row to open that trace's waterfall. A cycle that stopped short says why in its `outcome` attribute: `unconfigured` (no Linear credential or workspace, or no rule in it), `no_armed_teams`, `disabled` (the source is turned off), `policy_unreadable` (the source's on/off setting could not be read, so the cycle skipped rather than poll), or `rate_limited`.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -1308,7 +1308,7 @@
     },
     {
       "collapsed": false,
-      "description": "The router's spans. One `route.event` root per durable-queue row, linked back to the `event.enqueue` that produced it rather than parented to it \u2014 a poll cycle emits many events and they route later, possibly on another pod. All three empty means nothing routed in the window, which for a deployment tracking no repos or projects is the correct answer, not a fault.",
+      "description": "The router's spans. One `route.event` root per durable-queue row, linked back to the `event.enqueue` that produced it rather than parented to it \u2014 a poll cycle emits many events and they route later, possibly on another pod. The three routing panels all empty means nothing routed in the window, which for a deployment tracking no repos or projects is the correct answer, not a fault. The two panels under them are the router's queue workers, which run when a task frees or a score is written, not once per routed event.",
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -1650,7 +1650,7 @@
         "type": "tempo",
         "uid": "tf-tempo"
       },
-      "description": "One row per trigger firing that waited on the firing queue, most recent first: a delegation decided while its task was busy, or one a score re-evaluation admitted, fired by the firing worker once the task is free. `Duration` is the worker's pass over the row (the live checks and the fenced run insert), not the time the row waited. A row with no `outcome` fired; open it for the `blueprint_run.id` it started, which its `route.delegate` child carries too. `task_busy` and `skipped_<reason>` are anticipated: another run went live first and the row waits again, or the row retired without firing because the task or trigger changed while it waited (`skipped_task_closed`, `skipped_claim_changed`, `skipped_trigger_disabled`, `skipped_breaker_tripped`, `skipped_already_fired`). `lease_lost` is the row passing to another holder and `cancelled` someone cancelling it through the work-queue API; neither is a failure. A failure carries an error status and is requeued. Empty means no firing waited in the window.",
+      "description": "One row per trigger firing that waited on the firing queue, most recent first: a delegation decided while its task was busy, or one a score re-evaluation admitted, fired by the firing worker once the task is free. `Duration` is the worker's pass over the row (the live checks and the fenced run insert), not the time the row waited. A row with no `outcome` and `status` `unset` fired; open it for the `blueprint_run.id` it started, which its `route.delegate` child carries too. `task_busy` and `skipped_<reason>` are anticipated: another run went live first and the row waits again, or the row retired without firing because the task or trigger changed while it waited (`skipped_task_closed`, `skipped_claim_changed`, `skipped_trigger_disabled`, `skipped_breaker_tripped`, `skipped_already_fired`). `lease_lost` is the row passing to another holder and `cancelled` someone cancelling it through the work-queue API; neither is a failure. A failure has `status` `error` and no `outcome`, and the row is tried again. Empty means no firing waited in the window.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -1730,6 +1730,18 @@
                 "value": 200
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "status"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
           }
         ]
       },
@@ -1752,7 +1764,7 @@
           },
           "filters": [],
           "limit": 50,
-          "query": "{ name = \"firing.fire\" } | select(span.outcome, span.task.id, span.trigger.id)",
+          "query": "{ name = \"firing.fire\" } | select(span.outcome, status, span.task.id, span.trigger.id)",
           "queryType": "traceql",
           "refId": "A",
           "tableType": "spans"
@@ -1766,7 +1778,7 @@
         "type": "tempo",
         "uid": "tf-tempo"
       },
-      "description": "One row per score change the router re-evaluated against the task's deferred triggers (those gated on a minimum autonomy suitability), most recent first; `Duration` is the evaluation and the transaction that admits its firings. `completed` with `rederive.planned_firings` above 0 admitted that many firings, which then appear in Deferred firings; `completed` with 0 found no trigger the new score passes. `score_moved` means a newer score landed mid-evaluation, so nothing was admitted and the row was deferred to the newer score. `score_moved`, `lease_lost` and `cancelled` are anticipated, not failures; a failure carries an error status and is requeued. Empty means no score changed in the window.",
+      "description": "One row per evaluation of a task's deferred triggers (those gated on a minimum autonomy suitability) after its score was written, most recent first. Every scoring pass queues one for each task it scored, and score writes that land while a task's row waits fold into that row. `Duration` is the evaluation and the transaction that admits its firings. `rederive.planned_firings` is how many firings the new score earned; each is admitted to the firing queue unless one for the same trigger is already waiting there, so the count can exceed the new Deferred firings rows, and most rows are `completed` with 0. `score_moved` means a newer score landed mid-evaluation, so nothing was admitted and the row was deferred to the newer score. `score_moved`, `lease_lost` and `cancelled` are anticipated, not failures; a failure has `status` `error`, and the row is tried again. Empty means nothing was scored in the window.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -1858,6 +1870,18 @@
                 "value": 190
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "status"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
           }
         ]
       },
@@ -1880,7 +1904,7 @@
           },
           "filters": [],
           "limit": 50,
-          "query": "{ name = \"rederive.evaluate\" } | select(span.outcome, span.rederive.planned_firings, span.task.id)",
+          "query": "{ name = \"rederive.evaluate\" } | select(span.outcome, status, span.rederive.planned_firings, span.task.id)",
           "queryType": "traceql",
           "refId": "A",
           "tableType": "spans"
@@ -2369,7 +2393,7 @@
     },
     {
       "collapsed": false,
-      "description": "The spans that cover a run after setup ends. Each is its own short trace rather than a child of the `engagement.setup` root, which ends at agent-live: a span exports only once it ends, so one held open across the run would be lost with it on a crash. The ones the run's executor emits link back to its setup trace, and `conversation.id` is on every one of them: search it in Explore for one run's whole story.",
+      "description": "The spans that cover a run after setup ends. None is a child of the `engagement.setup` root, which ends at agent-live: a span exports only once it ends, so one held open across the run would be lost with it on a crash. Each starts a short trace of its own, except a sandboxed run's `commit_signing.sign`, which sits inside the `relay.call` that carried it. Most link back to the run's setup trace, and every one carries `conversation.id`: search it in Explore for everything one run did after setup.",
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -2386,7 +2410,7 @@
         "type": "tempo",
         "uid": "tf-tempo"
       },
-      "description": "One row per run terminal, the moment a turn ended and TF recorded what it came to, most recent first. The span's own `Duration` is that bookkeeping (recording the result, snapshotting the workspace), not the run; the run's figures are the attributes: `agent.cost_usd`, `agent.duration_ms` (the agent's own wall clock), and `turns`. `outcome`: `concluded_<verdict>` returned a verdict; `open` parked with no conclusion, waiting on a next message; `invalid_envelope` gave a conclusion that never validated; `failed_<kind>` failed, by failure kind; `fenced` was dropped because the claim lease had lapsed, and the conversation's next claim concludes it. Native runs do not emit this span, so on a multi-mode deployment, where every delegated run is native, the panel is empty. `runtime` is not recorded on it today, so that column is blank.",
+      "description": "One row per result an SDK run's agent handed back, most recent first: the moment a turn ended and TF recorded what it came to. The span's own `Duration` is that bookkeeping (recording the result, snapshotting the workspace), not the run; the run's figures are the attributes: `agent.cost_usd`, `agent.duration_ms` (the agent's own wall clock), and `turns`. `outcome`: `concluded_<verdict>` returned a verdict; `open` parked with no conclusion, waiting on a next message; `invalid_envelope` gave a conclusion that never validated; `failed_agent_error` is the runtime reporting an error; `fenced` was dropped because the claim lease had lapsed, and the conversation's next claim concludes it. A run that fails without handing back a result (a setup, resume or stream failure) has no row here; the conversation records that failure. Native runs do not emit this span, so on a multi-mode deployment, where every delegated run is native, the panel is empty. `runtime` is not recorded on it today, so that column is blank.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -2574,7 +2598,7 @@
         "type": "tempo",
         "uid": "tf-tempo"
       },
-      "description": "One row per op a sandboxed run's sidecar relayed to its executor, most recent first: the agent's `tfac exec` verbs, and the sidecar's own questions and audit records for what the agent did through its proxies (a push to authorize, a `gh` write to record, a commit digest to sign). `relay.call` is a request the sidecar waits on; `relay.record` applies the audit record of an external write that already happened. `op` is `<namespace>.<op>`, both halves Go constants: `core.*` for TF's own ops, a provider's namespace (`slack.*`) for its verbs. `Duration` is the executor's half of one op. An error status on a `relay.record` row is a record that did not apply; the Audit pipeline row counts the ones that were lost. Empty in local mode, where verbs reach TF without a sidecar.",
+      "description": "One row per op a sandboxed run's sidecar relayed to its executor, most recent first: the agent's `tfac exec` verbs, and the sidecar's own questions and audit records for what the agent did through its proxies (a push to authorize, a `gh` write to record, a commit digest to sign). `relay.call` is a request the sidecar waits on; `relay.record` applies the audit record of an external write that already happened. `op` is `<namespace>.<op>`, both halves Go constants: `core.*` for TF's own ops, a provider's namespace (`slack.*`) for its verbs. `Duration` is the executor's half of one op. `status` `error` on a `relay.call` is an op that failed; on a `relay.record` it is a record that did not apply, either lost (the Audit pipeline row counts it) or deferred, in which case the sidecar sends it again. Empty in local mode, where verbs reach TF without a sidecar.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -2654,6 +2678,18 @@
                 "value": 200
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "status"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
           }
         ]
       },
@@ -2676,7 +2712,7 @@
           },
           "filters": [],
           "limit": 50,
-          "query": "{ name =~ \"relay\\\\.(call|record)\" } | select(span.op, span.conversation.id)",
+          "query": "{ name =~ \"relay\\\\.(call|record)\" } | select(span.op, status, span.conversation.id)",
           "queryType": "traceql",
           "refId": "A",
           "tableType": "spans"
@@ -2806,7 +2842,7 @@
         "type": "tempo",
         "uid": "tf-tempo"
       },
-      "description": "One row per push decision and per recorded push, most recent first, in both modes. `git.authorize` is the managed Git proxy asking whether a push may go through; it sits in front of the agent's `git push`, so its `Duration` is time the push stalled, and `outcome` is `allowed` or `denied_<reason>` (`denied_repo-not-tracked`, `denied_repo-not-materialized`). `git.record_push` writes a push to the audit log and carries no `outcome`: it says the record arrived and how long the write took, and the store spans under it say whether it landed. The repository is deliberately not recorded.",
+      "description": "One row per repository check and per recorded push, most recent first, in both modes. `git.authorize` is the managed Git proxy checking that the run may reach a repository. It runs on every git request the agent sends through the proxy, so a clone, fetch or push makes two or more rows (the ref advertisement, then each pack request). The request waits on it, so its `Duration` is time that git command stalled. `outcome` is `allowed` or `denied_<reason>` (`denied_repo-not-tracked`, `denied_repo-not-materialized`); `status` `error` is a check that could not be made, and the proxy refuses the request. `git.record_push` writes a push to the audit log and carries no `outcome`: it says the record arrived and how long the write took, and the store spans under it say whether it landed. The repository is deliberately not recorded.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -2886,6 +2922,18 @@
                 "value": 200
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "status"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
           }
         ]
       },
@@ -2908,13 +2956,13 @@
           },
           "filters": [],
           "limit": 50,
-          "query": "{ name =~ \"git\\\\.(authorize|record_push)\" } | select(span.outcome, span.conversation.id)",
+          "query": "{ name =~ \"git\\\\.(authorize|record_push)\" } | select(span.outcome, status, span.conversation.id)",
           "queryType": "traceql",
           "refId": "A",
           "tableType": "spans"
         }
       ],
-      "title": "Git push gate",
+      "title": "Git proxy gate",
       "type": "table"
     },
     {
@@ -2922,7 +2970,7 @@
         "type": "tempo",
         "uid": "tf-tempo"
       },
-      "description": "One row per commit signature asked for or decided, most recent first. `commit_signing.sign` is the run's side, and `mode` says where the signature was made: `local` in the TF process for a local run, `control_plane` for a sandboxed run, whose `Duration` includes the wait for a control pod's answer. `commit_signing.decide` is that control pod deciding, in a trace of its own and with no `mode`. `signer` is the kind of signer, `org` or `deployment`. `outcome` is `signed`; `refused`, with `reason` saying why (`claim_budget` and `org_minute_budget` are the signing budgets, `signer_changed`, `signer_removed` and `signer_inactive` the signer, `claim_inactive` an engagement that no longer holds its claim); or `unanswered`, no answer in time, and the run is told to try again. Empty when the org signs no commits.",
+      "description": "One row per commit signature asked for or decided, most recent first. `commit_signing.sign` is the run's side, and `mode` says where the signature was made: `local` in the TF process for a local run, `control_plane` for a sandboxed run, whose `Duration` includes the wait for a control pod's answer. `commit_signing.decide` is that control pod deciding, in a trace of its own and with no `mode`. `signer` is the kind of signer, `org` or `deployment`. `outcome` is `signed`; `refused`, with `reason` saying why; or `unanswered`, no answer reached the run in time and it is told to try again. A decide row records a request it could not answer as `refused` with `reason` `unanswered`. The other reasons: `claim_budget` and `org_minute_budget` are the signing budgets; `signer_changed`, `signer_removed`, `signer_inactive` and `not_signing` are the signer; `claim_inactive` is an engagement that no longer holds its claim; `committer_mismatch` is a commit whose committer is not the run's signer; `not_a_commit` is a tag or push certificate. `status` `error` is a request or decision that could not be made or stored. Empty when the org signs no commits.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -3050,6 +3098,18 @@
                 "value": 240
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "status"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
           }
         ]
       },
@@ -3072,7 +3132,7 @@
           },
           "filters": [],
           "limit": 50,
-          "query": "{ name =~ \"commit_signing\\\\.(sign|decide)\" } | select(span.outcome, span.signer, span.mode, span.reason, span.conversation.id)",
+          "query": "{ name =~ \"commit_signing\\\\.(sign|decide)\" } | select(span.outcome, status, span.signer, span.mode, span.reason, span.conversation.id)",
           "queryType": "traceql",
           "refId": "A",
           "tableType": "spans"
@@ -3815,7 +3875,7 @@
     },
     {
       "collapsed": false,
-      "description": "Requests TF makes to GitHub, Jira, Slack's Web API, and the LLM providers, by how each one ended, and the connection state each org's poll cycles record for GitHub and Jira. Scraped from each pod's :9464 and summed across pods; tf_upstream_up is exported by the pod holding the background brain only. Every org brings its own upstream, so one org failing is usually that org's own GitHub Enterprise Server, Jira Data Center, or credential; many orgs failing against the same upstream at once is the fleet-wide case the UpstreamFailingFleetWide and UpstreamDownFleetWide rules alert on. `org_id` is the org a request was made for, and is empty for a request made for no org.",
+      "description": "Requests TF makes to GitHub, Jira, Slack's Web API, and the LLM providers, by how each one ended, and the connection state each org's poll cycles record for GitHub and Jira. Scraped from each pod's :9464 and summed across pods; tf_upstream_up is exported by the pod holding the background brain only. Every org brings its own upstream, so one org failing is usually that org's own GitHub Enterprise Server, Jira Data Center, or credential; many orgs failing against the same upstream at once is the fleet-wide case the UpstreamFailingFleetWide and UpstreamDownFleetWide rules alert on. `org_id` is the org a request was made for, and is empty for a request made for no org. The two wait panels at the bottom of the row are built from traces instead, so they are empty with tracing off.",
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -4431,7 +4491,7 @@
         "type": "prometheus",
         "uid": "tf-prometheus"
       },
-      "description": "Seconds spent asleep per second, deployment-wide, by kind of wait. `github.ratelimit.await` is a GitHub call held back because its rate-limit budget is spent; `github.ratelimit.backoff` and `jira.retry.backoff` are the wait before a retry. These are inline waits of up to five minutes for GitHub and 30 seconds for Jira, and without them a call waiting out a limit looks identical to slow HTTP. A value of 1 is, on average, one call asleep at every moment. A wait counts once it ends. For one wait and the call it held up, use the table beside this one.",
+      "description": "Seconds spent asleep per second, deployment-wide, by kind of wait. `github.ratelimit.await` is a GitHub call held back because its rate-limit budget is spent; `github.ratelimit.backoff` and `jira.retry.backoff` are the wait before a retry. These are inline waits of up to five minutes for GitHub and 30 seconds for Jira, and without them a call waiting out a limit looks identical to slow HTTP. A value of 1 is, on average, one call asleep at every moment. A wait counts once it ends. GitHub and Jira only: Linear and Slack start no span for a wait, and their rate-limit waits are counted, with GitHub's and Jira's, in tf_upstream_rate_limit_wait_seconds_total. For one wait and the call it held up, use the table beside this one.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -4520,7 +4580,7 @@
         "type": "tempo",
         "uid": "tf-tempo"
       },
-      "description": "One row per wait, most recent first; `Duration` is the time spent asleep. `github.ratelimit.await` holds a GitHub call until its spent budget resets: `waited`, or `refused` when the reset is more than five minutes off and the call fails as rate-limited instead. `github.ratelimit.backoff` and `jira.retry.backoff` are the wait before a retry: `attempt` is the attempt that failed, so 3 is a call's third wait, and `disposition` is why, `rate_limited` or `transient` for GitHub and `throttled` or `transport_error` for Jira. `cancelled` on any of them is the caller leaving mid-wait. None of these is an error status. Open a row for the call or poll cycle the wait sat inside. Empty is the healthy state.",
+      "description": "One row per wait, most recent first; `Duration` is the time spent asleep. `github.ratelimit.await` holds a GitHub call until its spent budget resets: `waited`, or `refused` when the reset is more than five minutes off and the call fails as rate-limited instead. `github.ratelimit.backoff` and `jira.retry.backoff` are the wait before a retry: `attempt` is the attempt that failed, so 3 is a call's third wait, and `disposition` is why, `rate_limited` or `transient` for GitHub and `throttled` or `transport_error` for Jira. `cancelled` on any of them is the caller leaving mid-wait. None of these is an error status. Open a row for the call or poll cycle the wait sat inside. GitHub and Jira only: Linear and Slack start no span for a wait. Empty is the healthy state.",
       "fieldConfig": {
         "defaults": {
           "custom": {
