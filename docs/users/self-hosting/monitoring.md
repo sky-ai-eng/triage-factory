@@ -201,11 +201,13 @@ without putting your own proxy and auth in front. Prometheus labels each target
 `tf_service="control"` or `"executor"`. Config is in
 [`docker/observability/`](../../../docker/observability/).
 
-Grafana opens on the **Triage Factory — Overview** dashboard: recent poll
-cycles, slow API requests and errored spans; request rate, errors and p95
-latency by span (click an exemplar dot to open its trace); per-pod runtime;
-event routing; run setup phases; workspace snapshots; dropped audit records;
-and upstream connections. Dashboards are read-only, provisioned from
+Grafana opens on the **Triage Factory — Overview** dashboard: recent GitHub,
+Jira and Linear poll cycles, slow API requests and errored spans; request rate,
+errors and p95 latency by span (click an exemplar dot to open its trace);
+per-pod runtime; event routing, deferred firings and score re-evaluations; run
+setup phases; run completions and in-run agent activity; workspace snapshots;
+dropped audit records; and upstream connections and rate-limit waits.
+Dashboards are read-only, provisioned from
 `docker/observability/dashboards/`. Use **Export → Save as copy** to
 experiment, or edit the JSON to change one.
 

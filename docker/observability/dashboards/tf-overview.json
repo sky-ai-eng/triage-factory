@@ -71,7 +71,7 @@
       },
       "gridPos": {
         "h": 7,
-        "w": 8,
+        "w": 6,
         "x": 0,
         "y": 1
       },
@@ -151,8 +151,8 @@
       },
       "gridPos": {
         "h": 7,
-        "w": 8,
-        "x": 8,
+        "w": 6,
+        "x": 6,
         "y": 1
       },
       "id": 3,
@@ -175,6 +175,86 @@
         }
       ],
       "title": "Jira poll cycles",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "tf-tempo"
+      },
+      "description": "One row per org's Linear poll cycle. Click a row to open that trace's waterfall. A cycle that stopped short says why in its `outcome` attribute: `unconfigured` (no Linear credential or workspace, or no rule in it), `no_armed_teams`, `disabled` (the source is turned off), or `rate_limited`.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace ID"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 130
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Service"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 12,
+        "y": 1
+      },
+      "id": 44,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tf-tempo"
+          },
+          "filters": [],
+          "limit": 20,
+          "query": "{ name = \"poll.linear.org\" }",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "traces"
+        }
+      ],
+      "title": "Linear poll cycles",
       "type": "table"
     },
     {
@@ -231,8 +311,8 @@
       },
       "gridPos": {
         "h": 7,
-        "w": 8,
-        "x": 16,
+        "w": 6,
+        "x": 18,
         "y": 1
       },
       "id": 4,
@@ -1566,13 +1646,257 @@
       "type": "timeseries"
     },
     {
+      "datasource": {
+        "type": "tempo",
+        "uid": "tf-tempo"
+      },
+      "description": "One row per trigger firing that waited on the firing queue, most recent first: a delegation decided while its task was busy, or one a score re-evaluation admitted, fired by the firing worker once the task is free. `Duration` is the worker's pass over the row (the live checks and the fenced run insert), not the time the row waited. A row with no `outcome` fired; open it for the `blueprint_run.id` it started, which its `route.delegate` child carries too. `task_busy` and `skipped_<reason>` are anticipated: another run went live first and the row waits again, or the row retired without firing because the task or trigger changed while it waited (`skipped_task_closed`, `skipped_claim_changed`, `skipped_trigger_disabled`, `skipped_breaker_tripped`, `skipped_already_fired`). `lease_lost` is the row passing to another holder and `cancelled` someone cancelling it through the work-queue API; neither is a failure. A failure carries an error status and is requeued. Empty means no firing waited in the window.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Service"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Span ID"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Start time"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 175
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "outcome"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 200
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 60
+      },
+      "id": 45,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tf-tempo"
+          },
+          "filters": [],
+          "limit": 50,
+          "query": "{ name = \"firing.fire\" } | select(span.outcome, span.task.id, span.trigger.id)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Deferred firings",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "tf-tempo"
+      },
+      "description": "One row per score change the router re-evaluated against the task's deferred triggers (those gated on a minimum autonomy suitability), most recent first; `Duration` is the evaluation and the transaction that admits its firings. `completed` with `rederive.planned_firings` above 0 admitted that many firings, which then appear in Deferred firings; `completed` with 0 found no trigger the new score passes. `score_moved` means a newer score landed mid-evaluation, so nothing was admitted and the row was deferred to the newer score. `score_moved`, `lease_lost` and `cancelled` are anticipated, not failures; a failure carries an error status and is requeued. Empty means no score changed in the window.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Service"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Span ID"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Start time"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 175
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "outcome"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 130
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "rederive.planned_firings"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 190
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 60
+      },
+      "id": 46,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tf-tempo"
+          },
+          "filters": [],
+          "limit": 50,
+          "query": "{ name = \"rederive.evaluate\" } | select(span.outcome, span.rederive.planned_firings, span.task.id)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Score re-evaluations",
+      "type": "table"
+    },
+    {
       "collapsed": false,
       "description": "One `engagement.setup` root per claim attempt, from the claim to agent-live. What follows agent-live is punctual spans linked back to it rather than children, because a span exports only once it ends and the streaming period is unbounded. Local mode takes a shorter path \u2014 no broker, sidecar, or credential spans exist there at all \u2014 and their absence is the path not taken, never a fault.",
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 60
+        "y": 68
       },
       "id": 22,
       "panels": [],
@@ -1707,7 +2031,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 61
+        "y": 69
       },
       "id": 23,
       "options": {
@@ -1784,7 +2108,7 @@
         "h": 9,
         "w": 24,
         "x": 0,
-        "y": 69
+        "y": 77
       },
       "id": 24,
       "options": {
@@ -1874,7 +2198,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 78
+        "y": 86
       },
       "id": 25,
       "options": {
@@ -2012,7 +2336,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 78
+        "y": 86
       },
       "id": 26,
       "options": {
@@ -2045,12 +2369,726 @@
     },
     {
       "collapsed": false,
+      "description": "The spans that cover a run after setup ends. Each is its own short trace rather than a child of the `engagement.setup` root, which ends at agent-live: a span exports only once it ends, so one held open across the run would be lost with it on a crash. The ones the run's executor emits link back to its setup trace, and `conversation.id` is on every one of them: search it in Explore for one run's whole story.",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 94
+      },
+      "id": 47,
+      "panels": [],
+      "title": "Delegated runs \u2014 after agent-live",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "tf-tempo"
+      },
+      "description": "One row per run terminal, the moment a turn ended and TF recorded what it came to, most recent first. The span's own `Duration` is that bookkeeping (recording the result, snapshotting the workspace), not the run; the run's figures are the attributes: `agent.cost_usd`, `agent.duration_ms` (the agent's own wall clock), and `turns`. `outcome`: `concluded_<verdict>` returned a verdict; `open` parked with no conclusion, waiting on a next message; `invalid_envelope` gave a conclusion that never validated; `failed_<kind>` failed, by failure kind; `fenced` was dropped because the claim lease had lapsed, and the conversation's next claim concludes it. Native runs do not emit this span, so on a multi-mode deployment, where every delegated run is native, the panel is empty. `runtime` is not recorded on it today, so that column is blank.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Service"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Span ID"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Start time"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 175
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "outcome"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 200
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "runtime"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "agent.cost_usd"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "custom.width",
+                "value": 130
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "agent.duration_ms"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              },
+              {
+                "id": "custom.width",
+                "value": 150
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "count"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "turns"
+              },
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "conversation.id"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 240
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 95
+      },
+      "id": 48,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tf-tempo"
+          },
+          "filters": [],
+          "limit": 50,
+          "query": "{ name = \"engagement.complete\" } | select(span.outcome, span.runtime, span.agent.cost_usd, span.agent.duration_ms, span.count, span.conversation.id)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Run completions",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "tf-tempo"
+      },
+      "description": "One row per op a sandboxed run's sidecar relayed to its executor, most recent first: the agent's `tfac exec` verbs, and the sidecar's own questions and audit records for what the agent did through its proxies (a push to authorize, a `gh` write to record, a commit digest to sign). `relay.call` is a request the sidecar waits on; `relay.record` applies the audit record of an external write that already happened. `op` is `<namespace>.<op>`, both halves Go constants: `core.*` for TF's own ops, a provider's namespace (`slack.*`) for its verbs. `Duration` is the executor's half of one op. An error status on a `relay.record` row is a record that did not apply; the Audit pipeline row counts the ones that were lost. Empty in local mode, where verbs reach TF without a sidecar.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Service"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Name"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 190
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Span ID"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Start time"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 175
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "op"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 200
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 103
+      },
+      "id": 49,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tf-tempo"
+          },
+          "filters": [],
+          "limit": 50,
+          "query": "{ name =~ \"relay\\\\.(call|record)\" } | select(span.op, span.conversation.id)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Agent exec verbs",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "tf-tempo"
+      },
+      "description": "One row per tool-permission prompt a run raised, most recent first. `Duration` is the time the run waited on a person, the one stretch a run's own accounting leaves out, so nothing else TF records shows it. `outcome`: `answered_allow` or `answered_deny` is a person deciding; `timeout` is the whole window running out; `absent` is the early deny for a prompt nobody was watching. The tool's name is deliberately not recorded. Fills only from local mode: native runs never prompt, so the bundled multi stack leaves it empty.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Service"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Span ID"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Start time"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 175
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "outcome"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 140
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 103
+      },
+      "id": 50,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tf-tempo"
+          },
+          "filters": [],
+          "limit": 50,
+          "query": "{ name = \"permission.prompt\" } | select(span.outcome, span.conversation.id)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Permission prompts \u2014 the human wait",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "tf-tempo"
+      },
+      "description": "One row per push decision and per recorded push, most recent first, in both modes. `git.authorize` is the managed Git proxy asking whether a push may go through; it sits in front of the agent's `git push`, so its `Duration` is time the push stalled, and `outcome` is `allowed` or `denied_<reason>` (`denied_repo-not-tracked`, `denied_repo-not-materialized`). `git.record_push` writes a push to the audit log and carries no `outcome`: it says the record arrived and how long the write took, and the store spans under it say whether it landed. The repository is deliberately not recorded.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Service"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Name"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 190
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Span ID"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Start time"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 175
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "outcome"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 200
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 103
+      },
+      "id": 51,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tf-tempo"
+          },
+          "filters": [],
+          "limit": 50,
+          "query": "{ name =~ \"git\\\\.(authorize|record_push)\" } | select(span.outcome, span.conversation.id)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Git push gate",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "tf-tempo"
+      },
+      "description": "One row per commit signature asked for or decided, most recent first. `commit_signing.sign` is the run's side, and `mode` says where the signature was made: `local` in the TF process for a local run, `control_plane` for a sandboxed run, whose `Duration` includes the wait for a control pod's answer. `commit_signing.decide` is that control pod deciding, in a trace of its own and with no `mode`. `signer` is the kind of signer, `org` or `deployment`. `outcome` is `signed`; `refused`, with `reason` saying why (`claim_budget` and `org_minute_budget` are the signing budgets, `signer_changed`, `signer_removed` and `signer_inactive` the signer, `claim_inactive` an engagement that no longer holds its claim); or `unanswered`, no answer in time, and the run is told to try again. Empty when the org signs no commits.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Service"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Name"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 190
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Span ID"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Start time"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 175
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "outcome"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "signer"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "mode"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 130
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "reason"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 170
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "conversation.id"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 240
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 111
+      },
+      "id": 53,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tf-tempo"
+          },
+          "filters": [],
+          "limit": 50,
+          "query": "{ name =~ \"commit_signing\\\\.(sign|decide)\" } | select(span.outcome, span.signer, span.mode, span.reason, span.conversation.id)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Commit signing",
+      "type": "table"
+    },
+    {
+      "collapsed": false,
       "description": "Every park and every non-failed terminal writes the run's workspace to the blob store, and the status flip that follows is serialized behind that write \u2014 so a stop that sat in WORKING for a minute is answerable here. One punctual `workspace.snapshot` trace per snapshot, linked back to its engagement, with three children naming where the time went: `capture` (the git delta + transcript read), `archive` (the tar walk + gzip), `put` (the blob write). Coverage is both modes \u2014 tracing is gated solely on TF_TRACES_ENDPOINT, and local mode emits this family in full. The capture phase is the one that differs by mode: local runs it in-process, multi routes it through the privileged capture child, which is span-free by standing decision \u2014 the executor-side `capture` span IS its measurement. `runtime` rides on every span because the members are not runtime-agnostic: only a delegated SDK run snapshots a session transcript, so transcript sizes are SDK-run data, never a property of all snapshots.",
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 86
+        "y": 119
       },
       "id": 31,
       "panels": [],
@@ -2185,7 +3223,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 87
+        "y": 120
       },
       "id": 32,
       "options": {
@@ -2262,7 +3300,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 95
+        "y": 128
       },
       "id": 33,
       "options": {
@@ -2402,7 +3440,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 95
+        "y": 128
       },
       "id": 34,
       "options": {
@@ -2518,7 +3556,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 95
+        "y": 128
       },
       "id": 35,
       "options": {
@@ -2549,7 +3587,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 103
+        "y": 136
       },
       "id": 27,
       "panels": [],
@@ -2589,7 +3627,7 @@
         "h": 8,
         "w": 6,
         "x": 0,
-        "y": 104
+        "y": 137
       },
       "id": 28,
       "options": {
@@ -2675,7 +3713,7 @@
         "h": 8,
         "w": 9,
         "x": 6,
-        "y": 104
+        "y": 137
       },
       "id": 29,
       "options": {
@@ -2730,7 +3768,7 @@
         "h": 8,
         "w": 9,
         "x": 15,
-        "y": 104
+        "y": 137
       },
       "id": 30,
       "options": {
@@ -2782,7 +3820,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 112
+        "y": 145
       },
       "id": 36,
       "panels": [],
@@ -2842,7 +3880,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 113
+        "y": 146
       },
       "id": 37,
       "options": {
@@ -2930,7 +3968,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 113
+        "y": 146
       },
       "id": 38,
       "options": {
@@ -3018,7 +4056,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 113
+        "y": 146
       },
       "id": 39,
       "options": {
@@ -3107,7 +4145,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 121
+        "y": 154
       },
       "id": 40,
       "options": {
@@ -3163,7 +4201,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 121
+        "y": 154
       },
       "id": 41,
       "options": {
@@ -3263,7 +4301,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 129
+        "y": 162
       },
       "id": 42,
       "options": {
@@ -3352,7 +4390,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 129
+        "y": 162
       },
       "id": 43,
       "options": {
@@ -3387,6 +4425,236 @@
       ],
       "title": "Hand-backs by outcome",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tf-prometheus"
+      },
+      "description": "Seconds spent asleep per second, deployment-wide, by kind of wait. `github.ratelimit.await` is a GitHub call held back because its rate-limit budget is spent; `github.ratelimit.backoff` and `jira.retry.backoff` are the wait before a retry. These are inline waits of up to five minutes for GitHub and 30 seconds for Jira, and without them a call waiting out a limit looks identical to slow HTTP. A value of 1 is, on average, one call asleep at every moment. A wait counts once it ends. For one wait and the call it held up, use the table beside this one.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 6,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 170
+      },
+      "id": 54,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Mean",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tf-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum by (span_name) (rate(traces_spanmetrics_latency_sum{span_name=~\"github\\\\.ratelimit\\\\.(await|backoff)|jira\\\\.retry\\\\.backoff\"}[$__rate_interval]))",
+          "legendFormat": "{{span_name}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Time spent waiting on upstream limits",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "tf-tempo"
+      },
+      "description": "One row per wait, most recent first; `Duration` is the time spent asleep. `github.ratelimit.await` holds a GitHub call until its spent budget resets: `waited`, or `refused` when the reset is more than five minutes off and the call fails as rate-limited instead. `github.ratelimit.backoff` and `jira.retry.backoff` are the wait before a retry: `attempt` is the attempt that failed, so 3 is a call's third wait, and `disposition` is why, `rate_limited` or `transient` for GitHub and `throttled` or `transport_error` for Jira. `cancelled` on any of them is the caller leaving mid-wait. None of these is an error status. Open a row for the call or poll cycle the wait sat inside. Empty is the healthy state.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Service"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Name"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 190
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Span ID"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Start time"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 175
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "outcome"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "attempt"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "disposition"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 150
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 170
+      },
+      "id": 55,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tf-tempo"
+          },
+          "filters": [],
+          "limit": 50,
+          "query": "{ name =~ \"github\\\\.ratelimit\\\\.(await|backoff)|jira\\\\.retry\\\\.backoff\" } | select(span.outcome, span.attempt, span.disposition)",
+          "queryType": "traceql",
+          "refId": "A",
+          "spss": 10,
+          "tableType": "spans"
+        }
+      ],
+      "title": "Rate-limit and retry waits",
+      "type": "table"
     }
   ],
   "refresh": "30s",
