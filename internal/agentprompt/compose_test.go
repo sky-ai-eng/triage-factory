@@ -308,6 +308,23 @@ func TestKnowledgeBlock_IsInBothRuntimes(t *testing.T) {
 	}
 }
 
+// TestGuardrails_LeaveWorkflowsToAHuman pins the workflow rule in both
+// runtimes. It is how the agent learns of the restriction before GitHub rejects
+// the whole push, and what asks it to hold back when the credential could push
+// a workflow change.
+func TestGuardrails_LeaveWorkflowsToAHuman(t *testing.T) {
+	for _, name := range []string{blockGuardrailsCommon, blockGuardrailsCommonNv} {
+		body := block(name)
+		// The path the rule covers, and the part of GitHub's refusal that is the
+		// same for an App, a PAT and an OAuth token.
+		for _, want := range []string{"`.github/workflows/`", "`to create or update workflow`"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s does not name %s", name, want)
+			}
+		}
+	}
+}
+
 // TestNativeGHBlock_ClaimsNoInvisibility guards a claim that used to be true
 // and is not any more: every write the native `gh` performs — REST or GraphQL —
 // now lands an audit row, so a prompt telling the agent otherwise is teaching it
