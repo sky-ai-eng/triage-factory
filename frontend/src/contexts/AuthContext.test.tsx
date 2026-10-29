@@ -23,7 +23,14 @@ const barred: AuthOrg = {
 }
 
 function me(orgs: AuthOrg[]): MeResponse {
-  return { id: 'u1', orgs, teams: [], org_creation_enabled: true, is_operator: false }
+  return {
+    id: 'u1',
+    orgs,
+    teams: [],
+    org_creation_enabled: true,
+    can_create_org: true,
+    is_operator: false,
+  }
 }
 
 // The /api/me answer the stub serves next: a body, or a failure status, or a

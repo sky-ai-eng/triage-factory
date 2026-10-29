@@ -16,13 +16,13 @@ import (
 
 // GitHubCom is the public github.com web base — the literal, for the sites
 // that mean github.com specifically whatever the deployment's default is: the
-// GoTrue GitHub OAuth login provider, the api.github.com mount, the
-// codeload/uploads hosts. Everything that means "the deployment's GitHub"
-// reads DefaultBaseURL instead.
+// api.github.com mount, the codeload/uploads hosts. Everything that means "the
+// deployment's GitHub" reads DefaultBaseURL instead, GitHub sign-in included.
 const GitHubCom = "https://github.com"
 
 // EnvDefaultBaseURL names the deployment's default GitHub: the GitHub the
-// deployment App lives on, and the URL setup offers an org choosing its own.
+// deployment App lives on, the GitHub people sign in with, and the URL setup
+// offers an org choosing its own.
 // Optional; unset means GitHubCom. Plain config, not a secret, in the same
 // class as the port — read once at boot by InitDefaultBaseURLFromEnv.
 const EnvDefaultBaseURL = "TF_DEFAULT_GITHUB_HOST"

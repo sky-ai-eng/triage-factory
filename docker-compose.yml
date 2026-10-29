@@ -328,6 +328,13 @@ services:
       # *not* the TF callback handler (which D7 sets per-request via the
       # `redirect_to` query param on /authorize).
       GOTRUE_EXTERNAL_GITHUB_REDIRECT_URI: ${TF_PUBLIC_URL}/auth/v1/callback
+      # GitHub sign-in runs against the deployment's GitHub, so a founder's
+      # account is linked on the host the deployment App lives on. Empty keeps
+      # GoTrue's github.com defaults, and must stay empty for github.com:
+      # GoTrue appends /api/v3 to any URL whose API host isn't api.github.com,
+      # which is why multi mode refuses to boot with TF_DEFAULT_GITHUB_HOST set
+      # to github.com.
+      GOTRUE_EXTERNAL_GITHUB_URL: ${TF_DEFAULT_GITHUB_HOST:-}
     ports:
       # Exposed so the host-side TF binary can reach JWKS and so GitHub
       # OAuth callbacks can land. D7's reverse proxy moves this behind TF.
@@ -656,8 +663,9 @@ services:
       TF_GITHUB_COMMIT_SIGNER_KEY_FILE: ${TF_GITHUB_COMMIT_SIGNER_KEY_FILE:-}
       TF_GITHUB_COMMIT_SIGNER_EMAIL: ${TF_GITHUB_COMMIT_SIGNER_EMAIL:-}
       # The deployment's default GitHub — the web base an organization with no
-      # base URL of its own resolves to, and the GitHub the deployment App is
-      # registered on. Empty means https://github.com. Plain config, not a
+      # base URL of its own resolves to, the GitHub the deployment App is
+      # registered on, and the GitHub sign-in uses (gotrue, above). Empty means
+      # https://github.com, and must stay empty for it. Plain config, not a
       # secret; the executor carries it too (below), because its per-run
       # sidecar proxies resolve an unset organization against the same default.
       TF_DEFAULT_GITHUB_HOST: ${TF_DEFAULT_GITHUB_HOST:-}

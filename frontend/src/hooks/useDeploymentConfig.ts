@@ -18,8 +18,9 @@ function loadConfig(): Promise<DeploymentConfig> {
 }
 
 /** useDeploymentConfig fetches /api/config on every mount with in-flight
- *  dedup. The response carries only deployment_mode — AuthGate's
- *  pre-login signal for which login flow to render. */
+ *  dedup. The response carries the deployment facts readable before
+ *  sign-in: deployment_mode (AuthGate's signal for which login flow to
+ *  render) and default_github_host (the GitHub sign-in uses). */
 export function useDeploymentConfig(): {
   config: DeploymentConfig | null
   loading: boolean

@@ -24,6 +24,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	tfdb "github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/sessions"
@@ -514,7 +515,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	// org creation is a deliberate user action (the onboarding "Start your
 	// Factory" CTA → the create-org flow), so the callback never mints a tenant.
 	// Whether that screen's create affordance is enabled is governed separately
-	// by runmode.OrgCreationEnabled() (TF_PREVENT_ORG_CREATION).
+	// by orgCreationBlocked (TF_PREVENT_ORG_CREATION, and a GitHub sign-in).
 	if !defaultOrg.Valid {
 		defaultOrg, err = s.lookupEarliestMembership(r.Context(), s.db, userUUID, state.ProviderID)
 		if err != nil {
@@ -877,11 +878,18 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		Teams       []teamRow `json:"teams"`
 		ActiveOrgID string    `json:"active_org_id,omitempty"`
 		// OrgCreationEnabled surfaces the instance's TF_PREVENT_ORG_CREATION
-		// toggle (inverted) so the frontend onboarding entry can decide
-		// whether to enable the "create your org" affordance or show the
-		// invite-only "ask your admin" state, without a second round trip.
-		// Not omitempty — false is a meaningful value the gate must see.
+		// toggle (inverted) so the onboarding entry can tell an invite-only
+		// deployment ("ask your admin") from a caller who cannot create an
+		// org on one that allows it, without a second round trip. Not
+		// omitempty — false is a meaningful value the gate must see.
 		OrgCreationEnabled bool `json:"org_creation_enabled"`
+		// CanCreateOrg is whether THIS caller may create an org: the
+		// deployment setting above, a session rather than an API token, and
+		// a session signed in with GitHub rather than SSO. It is the answer
+		// POST /api/orgs gives (orgCreationBlocked), so the onboarding page
+		// offers the form exactly when the route would accept it. Not
+		// omitempty — false is meaningful.
+		CanCreateOrg bool `json:"can_create_org"`
 		// IsOperator reports whether this identity is a deployment operator
 		// (TFAC-589) — the org-less flag the fleet-console nav gate reads
 		// (together with the FeatureFleet entitlement). Deployment config, not
@@ -922,6 +930,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 			// renders the onboarding entry, so the value is moot; report
 			// the permissive default for shape consistency.
 			OrgCreationEnabled: true,
+			CanCreateOrg:       true,
 			// The single local user is implicitly the operator (there is no
 			// one else); FeatureFleet is still unlicensed locally, so the
 			// console stays dark — this only makes core operability legible.
@@ -978,6 +987,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	resp.Teams = []teamRow{}
 	resp.Email = claims.Email
 	resp.OrgCreationEnabled = runmode.OrgCreationEnabled()
+	resp.CanCreateOrg = orgCreationBlocked(r.Context()) == ""
 	// Deployment-operator flag: whether a grant is bound to the principal, or
 	// one of its login identities holds a pending grant's address verified —
 	// the same read the fleet gate makes, so the flag and the console agree.
@@ -1619,7 +1629,11 @@ func resolveOrCreatePrincipal(ctx context.Context, conn *sql.DB, authUserID uuid
 
 		// GitHub-INTEGRATION binding (which github account the agent acts as) — a
 		// separate axis from the login identity. Only a real GitHub login mirrors it
-		// (source='login_claim'); a SAML login writes none. Keyed on the principal.
+		// (source='login_claim'); a SAML login writes none. Keyed on the principal
+		// and the deployment's GitHub host, which is the GitHub GoTrue's GitHub
+		// provider signs people in against (docker-compose.yml passes
+		// TF_DEFAULT_GITHUB_HOST to it), so the founder of an org holds a link on
+		// the host the deployment GitHub App lives on.
 		//
 		// The mirror is a convenience default, so it yields to a binding the user
 		// made themselves: the conflict arm refreshes only a row the mirror wrote.
@@ -1642,7 +1656,7 @@ func resolveOrCreatePrincipal(ctx context.Context, conn *sql.DB, authUserID uuid
 			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO public.user_github_identities
 					(user_id, github_base_url, login, github_user_id, email, source, verified_at, created_at, updated_at)
-				VALUES ($1, 'https://github.com', $2, NULLIF($3, ''), NULLIF($4, ''), 'login_claim', now(), now(), now())
+				VALUES ($1, $5, $2, NULLIF($3, ''), NULLIF($4, ''), 'login_claim', now(), now(), now())
 				ON CONFLICT (user_id, github_base_url) DO UPDATE
 				   SET login       = EXCLUDED.login,
 				       github_user_id = CASE
@@ -1658,7 +1672,7 @@ func resolveOrCreatePrincipal(ctx context.Context, conn *sql.DB, authUserID uuid
 				                       WHEN `+loginClaimAccountChanged+` OR user_github_identities.login IS DISTINCT FROM EXCLUDED.login THEN NULL
 				                       ELSE user_github_identities.dashboard_backfilled_at END
 				 WHERE user_github_identities.source = 'login_claim'
-			`, principalID, ghUsername, providerSubject, githubEmail); err != nil {
+			`, principalID, ghUsername, providerSubject, githubEmail, ghbase.DefaultBaseURL()); err != nil {
 				return fmt.Errorf("upsert github login identity: %w", err)
 			}
 		}

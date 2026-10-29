@@ -44,6 +44,7 @@ function me(): MeResponse {
     orgs: [org('org-a', 'Alpha'), org('org-b', 'Beta'), org('org-c', 'Gamma')],
     teams: [],
     org_creation_enabled: true,
+    can_create_org: true,
     is_operator: false,
   }
   if (sessionOrg && !barredIds.has(sessionOrg)) body.active_org_id = sessionOrg

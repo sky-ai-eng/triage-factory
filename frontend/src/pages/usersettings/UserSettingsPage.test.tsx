@@ -34,6 +34,7 @@ const auth = vi.hoisted(() => ({
     ],
     teams: [],
     org_creation_enabled: true,
+    can_create_org: true,
     is_operator: false,
   },
   refresh: vi.fn().mockResolvedValue(undefined),

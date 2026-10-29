@@ -37,8 +37,11 @@ both). The binary's version is the version of the deployment it renders.
 
 ## 2. Create the GitHub OAuth app (sign-in)
 
-People sign in to Triage Factory with GitHub. At
-<https://github.com/settings/developers> → **New OAuth App**:
+People sign in to Triage Factory with GitHub, on the deployment's GitHub:
+github.com, or your GitHub Enterprise Server when you set
+`TF_DEFAULT_GITHUB_HOST` (step 3). Register the app on that GitHub, at
+<https://github.com/settings/developers> or
+`https://<your GitHub Enterprise Server>/settings/developers` → **New OAuth App**:
 
 - **Homepage URL:** your public URL, e.g. `https://tfac.example.com`
 - **Authorization callback URL:** `<public URL>/auth/v1/callback`
@@ -66,8 +69,11 @@ own and `deploy` never writes.
 
 **On GitHub Enterprise Server**, set `TF_DEFAULT_GITHUB_HOST` in `.env` to your
 GHES URL (e.g. `https://ghe.example.com`) **before the first organization is
-created**. Records are keyed under the host they were created with and are
-never migrated, so if you change it later you need a completely fresh install.
+created**. Sign-in uses that server too, so the OAuth app from step 2 must be
+registered there. Records are keyed under the host they were created with and
+are never migrated, so if you change it later you need a completely fresh
+install. On github.com, leave it unset: multi mode refuses to boot with it set
+to `https://github.com`.
 
 Back up `.env`. Losing `TF_SECRET_ENCRYPTION_KEY` makes every stored
 integration credential unreadable, and losing `POSTGRES_PASSWORD` locks

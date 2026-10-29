@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
@@ -82,6 +83,9 @@ func run(ctx context.Context, args []string) error {
 	// both modes; a value that is not a web base fails boot rather than
 	// pointing every unset org somewhere unresolvable.
 	if err := ghbase.InitDefaultBaseURLFromEnv(); err != nil {
+		return fmt.Errorf("default github host: %w", err)
+	}
+	if err := checkDefaultGitHubHostForSignIn(runmode.Current(), os.Getenv(ghbase.EnvDefaultBaseURL)); err != nil {
 		return fmt.Errorf("default github host: %w", err)
 	}
 
@@ -230,4 +234,21 @@ func logBootLine() {
 		return
 	}
 	bootLog.Info("boot", "uid", os.Getuid(), "CapEff", capinfo.Describe(names))
+}
+
+// checkDefaultGitHubHostForSignIn refuses a multi-mode deployment that sets
+// TF_DEFAULT_GITHUB_HOST to github.com explicitly. The bundled compose passes
+// the variable to GoTrue as its GitHub provider's URL, and GoTrue appends
+// /api/v3 to any URL whose API host is not api.github.com, so an explicit
+// github.com breaks GitHub sign-in. Unset already means github.com, to both.
+// Local mode has no GoTrue.
+func checkDefaultGitHubHostForSignIn(mode runmode.Mode, raw string) error {
+	if mode != runmode.ModeMulti || strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	base, err := ghbase.ParseDefaultBaseURL(raw)
+	if err != nil || base != ghbase.GitHubCom {
+		return nil
+	}
+	return fmt.Errorf("leave %s unset for github.com: it is passed to GoTrue, which builds the wrong API URL for an explicit github.com", ghbase.EnvDefaultBaseURL)
 }

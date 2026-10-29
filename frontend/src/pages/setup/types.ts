@@ -227,8 +227,8 @@ export interface WizardState {
   //
   // Whether a host-verified login is already bound for the active org's host.
   // Satisfies the User step (the in-flow mirror of the RequireGitHubIdentity
-  // gate). A github.com GoTrue login already has one (login_claim), so the step
-  // resumes complete in that common case.
+  // gate). A GitHub sign-in already has one on the deployment's GitHub
+  // (login_claim), so the step resumes complete for an org on that host.
   userIdentityConnected: boolean
   // The bound login, when connected (for the confirmation + collapsed summary).
   userIdentityLogin: string

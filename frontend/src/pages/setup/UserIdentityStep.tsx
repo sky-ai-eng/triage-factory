@@ -28,7 +28,7 @@ const GitHubMark = () => (
 export function UserIdentityStep({ state, patch, orgId, isLocal, error }: StepContext) {
   const host = state.userIdentityHost || 'GitHub'
 
-  // Already bound (a github.com login_claim, a prior Connect, or this session's
+  // Already bound (a GitHub sign-in's login_claim, a prior Connect, or this session's
   // capture) — just confirm it; the wizard's Continue finishes.
   if (state.userIdentityConnected) {
     return (

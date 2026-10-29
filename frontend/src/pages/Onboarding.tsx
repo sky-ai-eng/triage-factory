@@ -1,23 +1,26 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { useAuth } from '../contexts/AuthContext'
-import { apiJSON, HttpError } from '../lib/apiClient'
+import { apiJSON, httpErrorMessage } from '../lib/apiClient'
 
 /**
  * Onboarding is the unified entry for an authenticated user with zero
  * org memberships — the steady-state first-run landing in multi mode
  * (signup provisions nothing; org creation is a deliberate action).
  *
- * One page, two affordances, gated by a single instance flag
- * (`me.org_creation_enabled`, the inverse of TF_PREVENT_ORG_CREATION):
+ * One page, three states, read off /me:
  *
- *   - creation allowed (default) → "Create your organization": a single
- *     org-name field + the "Start your Factory" CTA, plus a passive "or
- *     wait for an invite" note. Submitting POSTs /api/orgs (create with
- *     default settings), then refreshes /me — the membership-appears effect
- *     below routes into the /setup wizard.
- *   - creation prevented → the invite-only state: "ask your admin",
- *     no create affordance.
+ *   - `can_create_org` → "Create your organization": a single org-name
+ *     field + the "Start your Factory" CTA, plus a passive "or wait for an
+ *     invite" note. Submitting POSTs /api/orgs (create with default
+ *     settings), then refreshes /me — the membership-appears effect below
+ *     routes into the /setup wizard.
+ *   - `!org_creation_enabled` (TF_PREVENT_ORG_CREATION) → the invite-only
+ *     state: "ask your admin", no create affordance.
+ *   - creation enabled but not for this session → it signed in through
+ *     SSO, and organizations are created by people signed in with GitHub.
+ *     The page says so; its Log out button leads back to /login, where
+ *     "Sign in with GitHub" is.
  *
  * Local mode never mounts AuthContext, so this is multi-mode only.
  */
@@ -55,11 +58,7 @@ export default function Onboarding() {
       // re-enable the form for a retry. (refresh() below folds its own
       // failures into auth status and never throws, so it can't be
       // misreported as a create failure.)
-      setCreateError(
-        err instanceof HttpError && err.status === 403
-          ? 'Organization creation is disabled on this instance.'
-          : 'Failed to create organization. Please try again.',
-      )
+      setCreateError(httpErrorMessage(err, 'Failed to create organization. Please try again.'))
       setCreating(false)
       return
     }
@@ -101,8 +100,8 @@ export default function Onboarding() {
 
   // This page lives outside MultiAuthGate and manages its own auth
   // observations, so it handles loading/error/unauth itself rather than
-  // flashing the create-enabled UI before me (and org_creation_enabled)
-  // are known.
+  // flashing the create-enabled UI before me (and can_create_org) is
+  // known.
   if (auth.status === 'loading') {
     return (
       <div className="min-h-screen bg-ground flex items-center justify-center">
@@ -135,12 +134,11 @@ export default function Onboarding() {
   }
 
   const accountLabel = auth.me.display_name || auth.me.email || 'this account'
-  const canCreate = auth.me.org_creation_enabled
 
   return (
     <div className="min-h-screen bg-ground flex items-center justify-center p-4">
       <div className="w-full max-w-md backdrop-blur-xl bg-raised border border-line-1 rounded-2xl p-8 space-y-6 shadow-float shadow-black/[0.04]">
-        {canCreate ? (
+        {auth.me.can_create_org ? (
           <>
             <div className="space-y-1.5">
               <h1 className="text-[22px] font-semibold text-ink-1 tracking-tight">
@@ -189,6 +187,20 @@ export default function Onboarding() {
               refresh.
             </p>
           </>
+        ) : auth.me.org_creation_enabled ? (
+          <div className="space-y-1.5">
+            <h1 className="text-[22px] font-semibold text-ink-1 tracking-tight">
+              Welcome to Triage Factory
+            </h1>
+            <p className="text-body text-ink-3 leading-relaxed">
+              You&apos;re signed in as{' '}
+              <span className="text-ink-2 font-medium">{accountLabel}</span>.
+            </p>
+            <p className="text-body text-ink-3 leading-relaxed">
+              Organizations are created by people signed in with GitHub. Log out, then choose Sign
+              in with GitHub to create one, or wait for an invite to an existing organization.
+            </p>
+          </div>
         ) : (
           <div className="space-y-1.5">
             <h1 className="text-[22px] font-semibold text-ink-1 tracking-tight">

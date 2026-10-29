@@ -82,9 +82,15 @@ func TestHandleMe_LocalMode_SynthesizesSentinelResponse(t *testing.T) {
 			Name string `json:"name"`
 			Role string `json:"role"`
 		} `json:"orgs"`
+		OrgCreationEnabled bool `json:"org_creation_enabled"`
+		CanCreateOrg       bool `json:"can_create_org"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
 		t.Fatalf("decode body: %v", err)
+	}
+	if !body.OrgCreationEnabled || !body.CanCreateOrg {
+		t.Errorf("org_creation_enabled = %v, can_create_org = %v; want both true in local mode",
+			body.OrgCreationEnabled, body.CanCreateOrg)
 	}
 	if body.ID != runmode.LocalDefaultUserID {
 		t.Errorf("id = %q, want %q", body.ID, runmode.LocalDefaultUserID)

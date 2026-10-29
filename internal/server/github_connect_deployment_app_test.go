@@ -38,8 +38,19 @@ func newConnectRig(t *testing.T, gh *fakeGitHub) *connectRig {
 	rig := newBindRig(t, gh)
 	member := rig.seedUser()
 	rig.addMember(t, member)
-	resp, _ := rig.driveCallback(member)
-	return &connectRig{bindRig: rig, member: member, memberSID: rig.sidFromResp(resp)}
+	return &connectRig{bindRig: rig, member: member, memberSID: rig.signInThroughSSO(t, member)}
+}
+
+// signInThroughSSO signs user in through an SSO connection and returns the
+// sid. A GitHub sign-in links the account on the deployment's GitHub, so an
+// SSO sign-in is how a member arrives with no link there.
+func (r *bindRig) signInThroughSSO(t *testing.T, user uuid.UUID) string {
+	t.Helper()
+	resp := r.driveSSOCallbackClaims(validClaimsFor(user), uuid.NewString())
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("sso callback status = %d; want 302", resp.StatusCode)
+	}
+	return r.sidFromResp(resp)
 }
 
 // addMember makes user a plain member of the rig's org.
@@ -355,8 +366,7 @@ func TestDeploymentAppConnect_Refusals(t *testing.T) {
 		cookie, state := rig.connectStarted(t, rig.memberSID, rig.returnTo())
 		other := rig.seedUser()
 		rig.addMember(t, other)
-		resp, _ := rig.driveCallback(other)
-		out := rig.serveManagedCallback(t, rig.sidFromResp(resp), connectQuery(state), cookie)
+		out := rig.serveManagedCallback(t, rig.signInThroughSSO(t, other), connectQuery(state), cookie)
 		if out.Code != http.StatusFound || !strings.Contains(out.Header().Get("Location"), "error=state") {
 			t.Errorf("status=%d location=%q, want a redirect with error=state", out.Code, out.Header().Get("Location"))
 		}
