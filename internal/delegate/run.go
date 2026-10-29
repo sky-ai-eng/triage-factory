@@ -80,7 +80,8 @@ func errorResultSummary(result, subtype string) string {
 // The identity is commitsigner.Resolver's: the org's commit signer when it has
 // one, in any status, else the App's bot or the PAT's owner. The second value
 // is the whole resolution, whose Mode says whether the run signs as that
-// signer. A run's identity is fixed here, when it starts.
+// signer. It is resolved here each time a run's process starts: at launch,
+// and again at a cold resume, which starts a new process.
 //
 // Returns the zero CommitIdentity (stamp nothing) when no org identity
 // resolves — no signer, no App, no stored PAT login, or neither stores nor a
@@ -175,6 +176,23 @@ func (s *Spawner) commitIdentityFor(ctx context.Context, orgID string, org ghcli
 	}
 	id, _ := githooks.ResolveCommitIdentity(domain.GitHubAccount{Login: org.Name, ID: org.AccountID}, org.Email, manual, coAuthor)
 	return id
+}
+
+// stampCommitIdentity puts a run's commit identity on the SDK process it
+// launches: the identity as the author and committer, and the co-author
+// trailer, when there is one, in the env var the prepare-commit-msg hook reads.
+// The env var is namespaced (not GIT_*) so it is never ambient git identity.
+// A zero identity stamps nothing, and the process commits under ambient git
+// config: the local sandbox's placeholder when the sandbox is on, the
+// operator's own when it is off.
+//
+// runAgent and ResumeWithMessage both stamp through it, so a cold resume
+// commits as the launch it continues does.
+func stampCommitIdentity(opts *agentproc.RunOptions, id githooks.CommitIdentity) {
+	opts.GitUserName, opts.GitUserEmail = id.Name, id.Email
+	if id.CoAuthorTrailer != "" {
+		opts.ExtraEnv = append(opts.ExtraEnv, "TRIAGE_FACTORY_GIT_COAUTHOR_TRAILER="+id.CoAuthorTrailer)
+	}
 }
 
 // runAgent is the generic agent execution loop. Works for any task type.
@@ -469,21 +487,15 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		// review passes) name their directory through this.
 		"TRIAGE_FACTORY_WORKSPACE_KEY=" + namespace,
 	}
-	// Resolve the org's GitHub commit identity once for this run (TFAC-452). The
-	// org identity authors + commits every agent commit (injected as
-	// user.name/user.email via baseOpts below); a manual run
-	// whose delegating human differs additionally co-attributes them through the
-	// prepare-commit-msg hook, fed by this namespaced env var. A zero identity
-	// (resolver/stores unwired, or no org identity resolves) leaves git config
-	// ambient — no fabricated identity. One resolution feeds both
-	// the GitHub-PR and Jira-branch paths; it carries across blueprint steps via
-	// the copied creator/trigger. The env var is namespaced (not GIT_*) so it's
-	// never ambient git identity and the jail env's path translation passes it
-	// through unchanged.
+	// Resolve the org's GitHub commit identity once for this run, stamped on
+	// baseOpts below (stampCommitIdentity). The org identity authors + commits
+	// every agent commit; a manual run whose delegating human differs
+	// additionally co-attributes them through the prepare-commit-msg hook. A
+	// zero identity (resolver/stores unwired, or no org identity resolves)
+	// leaves git config ambient — no fabricated identity. One resolution feeds
+	// both the GitHub-PR and Jira-branch paths; it carries across blueprint
+	// steps via the copied creator/trigger.
 	commitIdentity, signer := s.resolveCommitIdentity(ctx, orgID, triggerType, creatorUserID)
-	if commitIdentity.CoAuthorTrailer != "" {
-		extraEnv = append(extraEnv, "TRIAGE_FACTORY_GIT_COAUTHOR_TRAILER="+commitIdentity.CoAuthorTrailer)
-	}
 	// An org whose signer is active when the run starts has the run's commits
 	// signed as it: git config naming the ssh-sign shim, the allowed-signers
 	// file it checks the run's own commits against, and what the run's daemon
@@ -600,15 +612,12 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		// the path the run tree's `_tfac/entity-memory` symlink points to. Empty in
 		// local mode, where that path is the real directory.
 		MemorySourcePath: cfg.memorySourcePath,
-		// Org commit identity (TFAC-452): empty when none resolved → ambient git
-		// config inherited (today's behavior).
-		GitUserName:    commitIdentity.Name,
-		GitUserEmail:   commitIdentity.Email,
-		GitConfigPairs: append(cfg.localGit.configPairs(ghChannel), commitSigning.configPairs()...),
+		GitConfigPairs:   append(cfg.localGit.configPairs(ghChannel), commitSigning.configPairs()...),
 		// Local mount namespace. nil in multi mode (the gVisor jail is the
 		// isolation there) and whenever the operator opted out.
 		LocalSandbox: localSbx.runSpec(),
 	}
+	stampCommitIdentity(&baseOpts, commitIdentity)
 
 	// The first user message this launch sends, composed onto the options and
 	// recorded through the sink's own insert door. Last before the launch, so

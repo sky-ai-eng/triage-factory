@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -183,5 +185,73 @@ func TestPrepareLocalCommitSigning_RunsThatDoNotSign(t *testing.T) {
 			t.Error("a run that does not sign got signing config")
 		}
 		c.Close()
+	})
+}
+
+// A launch and a cold resume stamp the commit identity the same way, through
+// stampCommitIdentity: the org's identity whether or not the org signs, and on
+// a manual run whose delegating human is not the org's account, that human's
+// co-author trailer.
+func TestStampCommitIdentity(t *testing.T) {
+	const trailer = "TRIAGE_FACTORY_GIT_COAUTHOR_TRAILER=Co-authored-by: alice <alice@users.noreply.github.com>"
+	noSigner := func(t *testing.T) *Spawner {
+		s := NewSpawner(nil, db.Stores{}, ghclient.NewClient("https://fallback", "tok"), nil, "m")
+		s.SetRunCredentialResolvers(&fakeResolver{orgLogin: "acme-bot"}, nil, nil)
+		s.SetStores(db.Stores{Users: fakeUsers{login: "alice"}})
+		return s
+	}
+	withSigner := func(active bool) func(*testing.T) *Spawner {
+		return func(t *testing.T) *Spawner {
+			s, stores, _ := signingSpawner(t, active)
+			stores.Users = fakeUsers{login: "alice"}
+			s.SetStores(stores)
+			return s
+		}
+	}
+	const botEmail = "acme-bot@users.noreply.github.com"
+	const signerEmail = "583231+octocat@users.noreply.github.com"
+	cases := []struct {
+		name        string
+		spawner     func(*testing.T) *Spawner
+		triggerType string
+		creator     string
+		wantName    string
+		wantEmail   string
+		wantTrailer bool
+	}{
+		{"no signer, event run", noSigner, "event", "", "acme-bot", botEmail, false},
+		{"no signer, manual run", noSigner, "manual", "user-1", "acme-bot", botEmail, true},
+		{"pending signer, manual run", withSigner(false), "manual", "user-1", "Acme", signerEmail, true},
+		{"active signer, event run", withSigner(true), "event", "", "Acme", signerEmail, false},
+		{"active signer, manual run", withSigner(true), "manual", "user-1", "Acme", signerEmail, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := tc.spawner(t)
+			id, _ := s.resolveCommitIdentity(context.Background(), runmode.LocalDefaultOrgID, tc.triggerType, tc.creator)
+			opts := agentproc.RunOptions{ExtraEnv: []string{"TRIAGE_FACTORY_CONVERSATION_ID=conv-1"}}
+			stampCommitIdentity(&opts, id)
+			if opts.GitUserName != tc.wantName || opts.GitUserEmail != tc.wantEmail {
+				t.Errorf("git identity = (%q, %q), want (%q, %q)", opts.GitUserName, opts.GitUserEmail, tc.wantName, tc.wantEmail)
+			}
+			if got := slices.Contains(opts.ExtraEnv, trailer); got != tc.wantTrailer {
+				t.Errorf("env = %v, carries the trailer: %v, want %v", opts.ExtraEnv, got, tc.wantTrailer)
+			}
+			if !slices.Contains(opts.ExtraEnv, "TRIAGE_FACTORY_CONVERSATION_ID=conv-1") {
+				t.Errorf("env = %v, lost the entries it was stamped onto", opts.ExtraEnv)
+			}
+		})
+	}
+
+	t.Run("no org identity stamps nothing", func(t *testing.T) {
+		s := NewSpawner(nil, db.Stores{}, ghclient.NewClient("https://fallback", "tok"), nil, "m")
+		s.SetRunCredentialResolvers(&fakeResolver{}, nil, nil)
+		s.SetStores(db.Stores{Users: fakeUsers{login: "alice"}})
+		id, _ := s.resolveCommitIdentity(context.Background(), runmode.LocalDefaultOrgID, "manual", "user-1")
+		var opts agentproc.RunOptions
+		stampCommitIdentity(&opts, id)
+		if opts.GitUserName != "" || opts.GitUserEmail != "" || len(opts.ExtraEnv) != 0 {
+			t.Errorf("stamped %+v with no org identity", opts)
+		}
 	})
 }
