@@ -212,14 +212,16 @@ func bundleLocalCommitsTo(ctx context.Context, wtPath, branch string, w io.Write
 	if rev == "" {
 		rev = "HEAD"
 	}
-	local, err := gitCapture(ctx, wtPath, nil, "rev-list", "--max-count=1", rev, "--not", "--remotes")
+	// The trailing "--" keeps a branch named like a path in the checkout (a
+	// `docs` branch beside a docs/ directory) from failing as ambiguous.
+	local, err := gitCapture(ctx, wtPath, nil, "rev-list", "--max-count=1", rev, "--not", "--remotes", "--")
 	if err != nil {
 		return false, fmt.Errorf("git rev-list: %w", err)
 	}
 	if len(bytes.TrimSpace(local)) == 0 {
 		return false, nil
 	}
-	if err := gitCaptureTo(ctx, wtPath, nil, w, "bundle", "create", "-", rev, "--not", "--remotes"); err != nil {
+	if err := gitCaptureTo(ctx, wtPath, nil, w, "bundle", "create", "-", rev, "--not", "--remotes", "--"); err != nil {
 		return false, fmt.Errorf("git bundle: %w", err)
 	}
 	return true, nil
