@@ -233,8 +233,8 @@ func checkAppClientSecret(ctx context.Context, apiBase, clientID, clientSecret s
 	req.Header.Set("User-Agent", "triage-factory-githubapp")
 	req.Header.Set("Content-Type", "application/json")
 
-	// Reuse the package's GitHub HTTP client (a plain 30s-timeout client defined
-	// in github_app_register.go) — fine for this one-shot probe.
+	// Reuse the package's GitHub HTTP client (the traced 30s-timeout client
+	// defined in github_app_register.go) — fine for this one-shot probe.
 	resp, err := manifestHTTPClient.Do(req)
 	if err != nil {
 		return clientSecretUnknown

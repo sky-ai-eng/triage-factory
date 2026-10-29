@@ -147,14 +147,14 @@ func TestAvatarFetcher_FetchAndCache(t *testing.T) {
 	f := newAvatarFetcher()
 	f.client = ts.Client()
 
-	img, err := f.fetch(ts.URL)
+	img, err := f.fetch(context.Background(), ts.URL)
 	if err != nil {
 		t.Fatalf("first fetch: %v", err)
 	}
 	if img.contentType != "image/png" || !bytes.Equal(img.data, want) {
 		t.Fatalf("fetched %d bytes ct=%q, want %d bytes image/png", len(img.data), img.contentType, len(want))
 	}
-	if _, err := f.fetch(ts.URL); err != nil {
+	if _, err := f.fetch(context.Background(), ts.URL); err != nil {
 		t.Fatalf("second fetch: %v", err)
 	}
 	if got := atomic.LoadInt32(&hits); got != 1 {
@@ -175,10 +175,10 @@ func TestAvatarFetcher_NegativeCache(t *testing.T) {
 	f := newAvatarFetcher()
 	f.client = ts.Client()
 
-	if _, err := f.fetch(ts.URL); err == nil {
+	if _, err := f.fetch(context.Background(), ts.URL); err == nil {
 		t.Fatal("first fetch: want error on upstream 500")
 	}
-	if _, err := f.fetch(ts.URL); err == nil {
+	if _, err := f.fetch(context.Background(), ts.URL); err == nil {
 		t.Fatal("second fetch: want cached error")
 	}
 	if got := atomic.LoadInt32(&hits); got != 1 {
@@ -197,7 +197,7 @@ func TestAvatarFetcher_RejectsOversize(t *testing.T) {
 
 	f := newAvatarFetcher()
 	f.client = ts.Client()
-	if _, err := f.fetch(ts.URL); err == nil {
+	if _, err := f.fetch(context.Background(), ts.URL); err == nil {
 		t.Fatal("want error on oversize avatar")
 	}
 }

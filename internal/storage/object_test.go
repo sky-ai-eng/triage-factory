@@ -2,10 +2,13 @@ package storage
 
 import (
 	"context"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -113,7 +116,9 @@ func TestObjectStorage_PreservesBasePath(t *testing.T) {
 // TestObjectStorage_TracesUnderParent checks that the S3 client sends through
 // telemetry.TracedTransport: a Put made under a span records s3.http children
 // of it, and the object key appears in none of their attributes, because a
-// knowledge key carries team-authored folder and file names.
+// knowledge key carries team-authored folder and file names. It runs once per
+// credential branch of newObjectStorage, since the default chain resolves the
+// SDK's HTTP client through LoadDefaultConfig and static keys do not.
 //
 // It also checks the property SigV4 depends on with tracing on: traceparent
 // reaches the wire but is not one of the headers the request was signed over.
@@ -121,90 +126,128 @@ func TestObjectStorage_PreservesBasePath(t *testing.T) {
 // added after signing cannot invalidate it. TestObjectStorage_Conformance
 // cannot show this, because its SeaweedFS runs in allow-all mode and ignores
 // signatures.
+//
+// It replaces the global tracer provider and propagator, so it must not run in
+// parallel with another test that reads them.
 func TestObjectStorage_TracesUnderParent(t *testing.T) {
-	recorder := tracetest.NewSpanRecorder()
-	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
-	otel.SetTextMapPropagator(propagation.TraceContext{})
 	t.Cleanup(func() {
 		otel.SetTracerProvider(noop.NewTracerProvider())
 		otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator())
 	})
-
-	type sent struct{ authorization, traceparent string }
-	var (
-		mu       sync.Mutex
-		requests []sent
-	)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		requests = append(requests, sent{r.Header.Get("Authorization"), r.Header.Get("traceparent")})
-		mu.Unlock()
-		w.Header().Set("ETag", `"stub"`)
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	// Built after the provider is installed: otelhttp resolves its tracer and
-	// propagator when the transport is constructed.
-	store, err := newObjectStorage(ObjectConfig{
-		Endpoint:  srv.URL,
-		Bucket:    "kb",
-		AccessKey: "ak",
-		SecretKey: "sk",
-		Region:    "us-east-1",
-	})
-	if err != nil {
-		t.Fatalf("newObjectStorage: %v", err)
-	}
-
-	ctx, parent := otel.Tracer("test").Start(context.Background(), "workspace.snapshot.put")
-	putErr := store.Put(ctx, "org/teams/t1/kb/private/secret-folder/notes.md", strings.NewReader("hi"))
-	parent.End()
-	if putErr != nil {
-		t.Fatalf("Put: %v", putErr)
-	}
-
-	children := 0
-	for _, span := range recorder.Ended() {
-		if span.Name() != "s3.http" {
-			continue
-		}
-		children++
-		if span.Parent().SpanID() != parent.SpanContext().SpanID() {
-			t.Errorf("s3.http parent = %s, want the calling span %s", span.Parent().SpanID(), parent.SpanContext().SpanID())
-		}
-		for _, kv := range span.Attributes() {
-			if kv.Key == "url.full" || kv.Key == "url.path" {
-				t.Errorf("s3.http carries %s (%q)", kv.Key, kv.Value.String())
+	for _, tc := range []struct {
+		name       string
+		staticKeys bool
+	}{
+		{name: "static keys", staticKeys: true},
+		{name: "default credential chain", staticKeys: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := ObjectConfig{Bucket: "kb", Region: "us-east-1"}
+			if tc.staticKeys {
+				cfg.AccessKey, cfg.SecretKey = "ak", "sk"
+			} else {
+				// The env provider answers first. The config files point at
+				// nothing, so a developer's own AWS profile can't change the
+				// outcome, and AWS_CA_BUNDLE is always set, so the client
+				// LoadDefaultConfig builds carries a root pool, the case
+				// tracedHTTPClient has to preserve.
+				dir := t.TempDir()
+				none := filepath.Join(dir, "none")
+				bundle := filepath.Join(dir, "ca.pem")
+				ca := httptest.NewTLSServer(http.NotFoundHandler())
+				ca.Close()
+				if err := os.WriteFile(bundle, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca.Certificate().Raw}), 0o600); err != nil {
+					t.Fatalf("write CA bundle: %v", err)
+				}
+				for k, v := range map[string]string{
+					"AWS_ACCESS_KEY_ID":           "ak",
+					"AWS_SECRET_ACCESS_KEY":       "sk",
+					"AWS_SESSION_TOKEN":           "",
+					"AWS_PROFILE":                 "",
+					"AWS_CONFIG_FILE":             none,
+					"AWS_SHARED_CREDENTIALS_FILE": none,
+					"AWS_CA_BUNDLE":               bundle,
+				} {
+					t.Setenv(k, v)
+				}
 			}
-			if strings.Contains(kv.Value.String(), "secret-folder") {
-				t.Errorf("attribute %s carries the object key (%q)", kv.Key, kv.Value.String())
-			}
-		}
-	}
-	if children == 0 {
-		t.Fatal("Put recorded no s3.http span")
-	}
 
-	mu.Lock()
-	defer mu.Unlock()
-	if len(requests) == 0 {
-		t.Fatal("the stub received no request")
-	}
-	for i, req := range requests {
-		if req.traceparent == "" {
-			t.Errorf("request %d carried no traceparent", i)
-		}
-		_, rest, ok := strings.Cut(req.authorization, "SignedHeaders=")
-		if !ok {
-			t.Fatalf("request %d Authorization has no SignedHeaders: %q", i, req.authorization)
-		}
-		signed, _, _ := strings.Cut(rest, ",")
-		for _, h := range strings.Split(signed, ";") {
-			if h == "traceparent" || h == "tracestate" || h == "baggage" {
-				t.Errorf("request %d was signed over %s; otelhttp sets it after signing, so the signature would not verify", i, h)
+			recorder := tracetest.NewSpanRecorder()
+			otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
+			otel.SetTextMapPropagator(propagation.TraceContext{})
+
+			type sent struct{ authorization, traceparent string }
+			var (
+				mu       sync.Mutex
+				requests []sent
+			)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				requests = append(requests, sent{r.Header.Get("Authorization"), r.Header.Get("traceparent")})
+				mu.Unlock()
+				w.Header().Set("ETag", `"stub"`)
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer srv.Close()
+			cfg.Endpoint = srv.URL
+
+			// Built after the provider is installed: otelhttp resolves its
+			// tracer and propagator when the transport is constructed.
+			store, err := newObjectStorage(cfg)
+			if err != nil {
+				t.Fatalf("newObjectStorage: %v", err)
 			}
-		}
+
+			ctx, parent := otel.Tracer("test").Start(context.Background(), "workspace.snapshot.put")
+			putErr := store.Put(ctx, "org/teams/t1/kb/private/secret-folder/notes.md", strings.NewReader("hi"))
+			parent.End()
+			if putErr != nil {
+				t.Fatalf("Put: %v", putErr)
+			}
+
+			children := 0
+			for _, span := range recorder.Ended() {
+				if span.Name() != "s3.http" {
+					continue
+				}
+				children++
+				if span.Parent().SpanID() != parent.SpanContext().SpanID() {
+					t.Errorf("s3.http parent = %s, want the calling span %s", span.Parent().SpanID(), parent.SpanContext().SpanID())
+				}
+				for _, kv := range span.Attributes() {
+					if kv.Key == "url.full" || kv.Key == "url.path" {
+						t.Errorf("s3.http carries %s (%q)", kv.Key, kv.Value.String())
+					}
+					if strings.Contains(kv.Value.String(), "secret-folder") {
+						t.Errorf("attribute %s carries the object key (%q)", kv.Key, kv.Value.String())
+					}
+				}
+			}
+			if children == 0 {
+				t.Fatal("Put recorded no s3.http span")
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if len(requests) == 0 {
+				t.Fatal("the stub received no request")
+			}
+			for i, req := range requests {
+				if req.traceparent == "" {
+					t.Errorf("request %d carried no traceparent", i)
+				}
+				_, rest, ok := strings.Cut(req.authorization, "SignedHeaders=")
+				if !ok {
+					t.Fatalf("request %d Authorization has no SignedHeaders: %q", i, req.authorization)
+				}
+				signed, _, _ := strings.Cut(rest, ",")
+				for _, h := range strings.Split(signed, ";") {
+					if h == "traceparent" || h == "tracestate" || h == "baggage" {
+						t.Errorf("request %d was signed over %s; otelhttp sets it after signing, so the signature would not verify", i, h)
+					}
+				}
+			}
+		})
 	}
 }
 
