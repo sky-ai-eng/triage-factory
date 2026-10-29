@@ -182,7 +182,7 @@
         "type": "tempo",
         "uid": "tf-tempo"
       },
-      "description": "One row per background job cycle, each for one org (`org.id`). `job` names the job: `scorer`, `profiler`, `reconciler`, `reach_refresher`, or `marketplace_aggregator`. `no_write` and `nothing_to_score` rows are cycles that found nothing to do; `no_model` is a scorer cycle skipped because the org has no background-jobs model, and `shutdown` is a cycle cut off by a stop. An empty `outcome` is a cycle that ran its work \u2014 a failed one shows as the span's error status, not an outcome. `marketplace_aggregator` appears only when it recomputes; a cycle inside its TTL records nothing. Click a Span ID to open the cycle's trace; the filter icon keeps one job.",
+      "description": "One row per background job cycle, each for one org (`org.id`). `job` names the job: `scorer`, `profiler`, `reconciler`, `reach_refresher`, or `marketplace_aggregator`. `outcome` is set only where a job reports one. `wrote` and `no_write` say whether a reach refresh changed the mirror: most `no_write` rows are cycles that found nothing to do (a TTL skip), but an enumeration the refresher declined to write is one too. `nothing_to_score` is a scorer cycle that found nothing to do, `no_model` a scorer cycle skipped because the org has no background-jobs model, and `shutdown` a cycle cut off by a stop. A failed cycle has status `error`. `marketplace_aggregator` appears only when it recomputes; a cycle inside its TTL records nothing. Click a Span ID to open the cycle's trace; the filter icon keeps one job.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -272,7 +272,7 @@
           },
           "filters": [],
           "limit": 20,
-          "query": "{ name = \"systemjob.cycle\" } | select(span.job, span.outcome, span.org.id)",
+          "query": "{ name = \"systemjob.cycle\" } | select(span.job, span.outcome, span.org.id, span:status)",
           "queryType": "traceql",
           "refId": "A",
           "tableType": "spans"
