@@ -94,6 +94,21 @@ func ParseDefaultBaseURL(raw string) (string, error) {
 	return base, nil
 }
 
+// NamesGitHubCom reports whether raw is a web base whose host is github.com,
+// in any spelling a base URL accepts: another case, a trailing slash, http, or
+// an explicit port. Empty or unparseable names no host and answers false. It
+// is the test for a TF_DEFAULT_GITHUB_HOST that sets github.com explicitly,
+// which multi mode refuses: the bundled compose passes the variable to GoTrue,
+// whose GitHub provider builds a /api/v3 API URL for any host but the default.
+func NamesGitHubCom(raw string) bool {
+	base, ok := NormalizeBaseURL(raw)
+	if !ok {
+		return false
+	}
+	u, err := url.Parse(base)
+	return err == nil && u.Hostname() == "github.com"
+}
+
 // CanonicalBaseURL returns the spelling a GitHub or Jira base URL is stored and
 // compared under: surrounding whitespace and trailing slashes trimmed, and the
 // scheme and authority (host and port) lowercased, because both compare

@@ -95,8 +95,8 @@ const (
 
 // orgCreationBlocked reports which rule refuses the caller an org of their
 // own, or "" when none does. It is the single answer to "may this caller
-// create an org", read by the route that refuses and by /api/me's
-// can_create_org, so the onboarding page and the route cannot disagree.
+// create an org": /api/me reports it as can_create_org, and the route refuses
+// every rule it reports, so the onboarding page and the route cannot disagree.
 //
 // A founder must sign in with GitHub because the sign-in is what links their
 // GitHub account on the deployment's GitHub host, and connecting the
@@ -160,7 +160,7 @@ func (s *Server) handleOrgCreate(w http.ResponseWriter, r *http.Request) {
 	// Defense-in-depth behind the UI gate: the onboarding CTA is hidden
 	// when org creation is prevented, but the endpoint must refuse too.
 	if !runmode.OrgCreationEnabled() {
-		forbidden(w, "org creation is disabled on this instance")
+		forbidden(w, "Organization creation is disabled on this instance.")
 		return
 	}
 
@@ -185,11 +185,19 @@ func (s *Server) handleOrgCreate(w http.ResponseWriter, r *http.Request) {
 		writeUnauth(w)
 		return
 	}
-	if orgCreationBlocked(r.Context()) == orgCreateBlockedSSO {
+	switch orgCreationBlocked(r.Context()) {
+	case "":
+	case orgCreateBlockedSSO:
 		httpx.WriteErrors(w, http.StatusForbidden, httpx.ErrorItem{
 			Reason:  httpx.ReasonGitHubSignInRequired,
 			Message: "Sign in with GitHub to create an organization.",
 		})
+		return
+	default:
+		// The disabled and token rules answered above with responses of their
+		// own. Any other rule still refuses here, so the route never accepts a
+		// caller /api/me reports as unable to create an org.
+		forbidden(w, "You cannot create an organization.")
 		return
 	}
 	userID, err := uuid.Parse(claims.Subject)

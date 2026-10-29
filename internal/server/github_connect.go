@@ -33,9 +33,9 @@ import (
 //   - App installation token (internal/githubapp) is *access* — read/write
 //     the org's repos. It authenticates as the app against the org, so it
 //     carries no person.
-//   - GoTrue "Sign in with GitHub" is *login* — it mints a TF session, and
-//     is structurally pinned to github.com (the social provider can't target
-//     GHES, and under Entra SAML there's no GitHub leg at all).
+//   - GoTrue "Sign in with GitHub" is *login* — it mints a TF session on the
+//     deployment's GitHub (TF_DEFAULT_GITHUB_HOST), which need not be the
+//     org's host, and under Entra SAML there's no GitHub leg at all.
 //   - This handler is *identity* — a one-time consent that answers whoami
 //     against the org's actual host (github.com OR a GHES host), writing
 //     user_github_identities with source='connect_oauth'.

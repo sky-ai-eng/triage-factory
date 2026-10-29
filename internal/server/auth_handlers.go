@@ -1438,7 +1438,7 @@ func distinctNonEmpty(vs []string) []string {
 // axis: which GitHub account the agent acts as. A GitHub login mirrors that as
 // a convenience binding (source='login_claim'); a SAML login writes none (an
 // SSO user binds GitHub later via PAT/Connect). An Entra assertion can carry a
-// preferred_username that is a UPN/email, not a github.com handle, so mirroring
+// preferred_username that is a UPN/email, not a GitHub handle, so mirroring
 // it would mint a bogus identity — hence the gate.
 func resolveOrCreatePrincipal(ctx context.Context, conn *sql.DB, authUserID uuid.UUID, claims *verify.Claims, emailTrusted bool, ssoProviderID string) (uuid.UUID, error) {
 	isSSO := ssoProviderID != ""

@@ -321,8 +321,8 @@ services:
       # the password-signup path.
       GOTRUE_MAILER_AUTOCONFIRM: "true"
       GOTRUE_EXTERNAL_GITHUB_ENABLED: "true"
-      GOTRUE_EXTERNAL_GITHUB_CLIENT_ID: ${GH_CLIENT_ID:?missing GH_CLIENT_ID (see .env.example step 1)}
-      GOTRUE_EXTERNAL_GITHUB_SECRET: ${GH_CLIENT_SECRET:?missing GH_CLIENT_SECRET (see .env.example step 1)}
+      GOTRUE_EXTERNAL_GITHUB_CLIENT_ID: ${GH_CLIENT_ID:?missing GH_CLIENT_ID (see .env.example, GitHub OAuth app)}
+      GOTRUE_EXTERNAL_GITHUB_SECRET: ${GH_CLIENT_SECRET:?missing GH_CLIENT_SECRET (see .env.example, GitHub OAuth app)}
       # GitHub's own redirect target — must match the OAuth app's
       # authorized-callback config exactly. This is GoTrue's /callback,
       # *not* the TF callback handler (which D7 sets per-request via the

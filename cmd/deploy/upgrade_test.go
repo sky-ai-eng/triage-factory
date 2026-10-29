@@ -280,6 +280,18 @@ func TestUpgrade_Refusals(t *testing.T) {
 			wantErr: ".env does not set POSTGRES_PASSWORD, which this deployment already uses",
 		},
 		{
+			name: "a default GitHub host set to github.com",
+			arrange: func(t *testing.T, _ *fakeHost, _ *Bundle, dir string) {
+				p := filepath.Join(dir, envFile)
+				raw, err := os.ReadFile(p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				mustWrite(t, p, string(raw)+"\nTF_DEFAULT_GITHUB_HOST=https://github.com\n")
+			},
+			wantErr: ".env sets TF_DEFAULT_GITHUB_HOST to github.com",
+		},
+		{
 			name: "a .env that is gone",
 			arrange: func(t *testing.T, _ *fakeHost, _ *Bundle, dir string) {
 				mustRemove(t, filepath.Join(dir, envFile))

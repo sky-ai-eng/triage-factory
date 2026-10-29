@@ -430,7 +430,7 @@ func assertRowExists(t *testing.T, r *authRig, query string, arg any, label stri
 // sides: for each kind of caller, POST /api/orgs answers what /api/me's
 // can_create_org predicts. A GitHub session creates; an SSO session is told to
 // sign in with GitHub; a deployment with creation turned off and an API token
-// are refused as FORBIDDEN, as they were before the GitHub rule.
+// are refused as FORBIDDEN.
 func TestOrgCreate_CanCreateOrgMatchesRoute(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 
