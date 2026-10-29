@@ -3,6 +3,9 @@ package reachcache
 import (
 	"context"
 	"sync"
+
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // Runner drives the reachable-mirror refresh for a single org as a background
@@ -100,10 +103,25 @@ func (r *Runner) run(ctx context.Context) {
 		r.mu.Unlock()
 	}()
 
-	if _, err := r.cycle(ctx, r.orgID, force); err != nil {
+	// After the single-flight guard — see the scorer's twin. A cycle that
+	// skips still gets its span: the skip is decided by DB reads (credential
+	// class, host, mirror state), which are worth seeing.
+	ctx, span := telemetry.StartJobCycle(ctx, "reach_refresher", r.orgID)
+	defer span.End()
+
+	wrote, err := r.cycle(ctx, r.orgID, force)
+	if err != nil {
 		if ctx.Err() != nil {
+			span.SetAttributes(telemetry.Outcome("shutdown"))
 			return // shutting down
 		}
+		span.SetStatus(codes.Error, "refresh reachable cache")
 		reachLog.ErrorContext(ctx, "reachable-cache refresh failed", "org", r.orgID, "error", err)
+		return
+	}
+	if wrote {
+		span.SetAttributes(telemetry.Outcome("wrote"))
+	} else {
+		span.SetAttributes(telemetry.Outcome("no_write"))
 	}
 }

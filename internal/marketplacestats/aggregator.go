@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // ttl is generous by design — "daily-ish freshness is plenty" per the
@@ -58,7 +60,17 @@ func (a *Aggregator) RunOrg(ctx context.Context, orgID string) (bool, error) {
 	}
 	a.mu.Unlock()
 
+	// After the TTL gate, unlike the other jobs' runner-level spans: a
+	// skipped cycle is one map lookup, so its span would be an empty trace.
+	ctx, span := telemetry.StartJobCycle(ctx, "marketplace_aggregator", orgID)
+	defer span.End()
+
 	if err := a.store.RecomputeStatsSystem(ctx, orgID); err != nil {
+		if ctx.Err() != nil {
+			span.SetAttributes(telemetry.Outcome("shutdown"))
+		} else {
+			span.SetStatus(codes.Error, "recompute stats")
+		}
 		return false, err
 	}
 

@@ -2,10 +2,16 @@ package reachcache
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 // The Manager's job is per-org isolation and single flight, and single flight is
@@ -169,4 +175,89 @@ func TestRunnerClearsItsRunningFlag(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Error("the runner still reports itself running after its cycle returned")
+}
+
+// traceRecorder is installed on the OTel global once for the package: the job
+// cycle tracer resolves through the global delegate, which binds to the first
+// provider installed, so a recorder installed per test would capture nothing
+// after the first.
+var (
+	traceOnce     sync.Once
+	traceRecorder = tracetest.NewSpanRecorder()
+)
+
+// recordSpans returns a function reporting the spans ended since it was
+// called.
+func recordSpans(t *testing.T) func() []sdktrace.ReadOnlySpan {
+	t.Helper()
+	traceOnce.Do(func() {
+		otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(traceRecorder)))
+	})
+	start := len(traceRecorder.Ended())
+	return func() []sdktrace.ReadOnlySpan { return traceRecorder.Ended()[start:] }
+}
+
+// spanAttr is the string value of key on s, and whether s carries it.
+func spanAttr(s sdktrace.ReadOnlySpan, key string) (string, bool) {
+	for _, kv := range s.Attributes() {
+		if string(kv.Key) == key {
+			return kv.Value.AsString(), true
+		}
+	}
+	return "", false
+}
+
+// Every cycle is the root of its own trace, skip or not, so the grant mirror's
+// GitHub calls have a parent to hang from. A pass that declined to write is a
+// success with its own outcome; only a failed refresh carries an error status.
+func TestRunnerCycleSpan(t *testing.T) {
+	cases := []struct {
+		name        string
+		wrote       bool
+		err         error
+		cancelled   bool
+		wantOutcome string
+		wantError   bool
+	}{
+		{name: "wrote", wrote: true, wantOutcome: "wrote"},
+		{name: "no write", wantOutcome: "no_write"},
+		{name: "failed", err: errors.New("enumerate installations"), wantError: true},
+		{name: "shutdown", err: context.Canceled, cancelled: true, wantOutcome: "shutdown"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			// A per-case org, because an earlier test's runner can still end a
+			// span inside this window.
+			orgID := "org-span-" + c.name
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if c.cancelled {
+				cancel()
+			}
+			spans := recordSpans(t)
+			newRunner(func(context.Context, string, bool) (bool, error) {
+				return c.wrote, c.err
+			}, orgID).run(ctx)
+
+			var cycles []sdktrace.ReadOnlySpan
+			for _, s := range spans() {
+				if org, _ := spanAttr(s, "org.id"); s.Name() == "systemjob.cycle" && org == orgID {
+					cycles = append(cycles, s)
+				}
+			}
+			if len(cycles) != 1 {
+				t.Fatalf("%d systemjob.cycle spans for one cycle; want 1", len(cycles))
+			}
+			s := cycles[0]
+			if job, _ := spanAttr(s, "job"); job != "reach_refresher" {
+				t.Errorf("job = %q; want reach_refresher", job)
+			}
+			if outcome, _ := spanAttr(s, "outcome"); outcome != c.wantOutcome {
+				t.Errorf("outcome = %q; want %q", outcome, c.wantOutcome)
+			}
+			if gotError := s.Status().Code == codes.Error; gotError != c.wantError {
+				t.Errorf("error status = %v; want %v", gotError, c.wantError)
+			}
+		})
+	}
 }

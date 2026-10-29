@@ -110,7 +110,7 @@ func (rc *Reconciler) HasPullRequestResolvedHook() bool {
 func (rc *Reconciler) ReconcileOrg(ctx context.Context, orgID string) error {
 	// Best-effort — a backstop failure never aborts the reconcile cycle.
 	if err := rc.BackfillPRArtifacts(ctx, orgID); err != nil {
-		reconcileLog.Warn("PR artifact backstop failed", "org", orgID, "error", err)
+		reconcileLog.WarnContext(ctx, "PR artifact backstop failed", "org", orgID, "error", err)
 	}
 	arts, err := rc.artifacts.ListNonTerminalBySystem(ctx, orgID)
 	if err != nil {
@@ -196,14 +196,14 @@ func (rc *Reconciler) BackfillPRArtifacts(ctx context.Context, orgID string) err
 	for _, owner := range ownerUnion(nodeIDsByOwner, nil) {
 		client, err := rc.resolver.ClientFor(ctx, orgID, owner)
 		if err != nil {
-			reconcileLog.Warn("backstop: resolve github client failed; skipping owner this pass",
+			reconcileLog.WarnContext(ctx, "backstop: resolve github client failed; skipping owner this pass",
 				"org", orgID, "owner", owner, "error", err)
 			continue
 		}
 		ids := sortedKeys(nodeIDsByOwner[owner])
 		snaps, err := client.RefreshPRs(ctx, ids, false)
 		if err != nil {
-			reconcileLog.Warn("backstop: fetch PRs failed; skipping owner this pass",
+			reconcileLog.WarnContext(ctx, "backstop: fetch PRs failed; skipping owner this pass",
 				"org", orgID, "owner", owner, "count", len(ids), "error", err)
 			continue
 		}
@@ -211,7 +211,7 @@ func (rc *Reconciler) BackfillPRArtifacts(ctx context.Context, orgID string) err
 			act := byNodeID[nodeID]
 			snap, ok := snaps[nodeID]
 			if !ok {
-				reconcileLog.Warn("backstop: PR not found by its node id; skipping PR this pass",
+				reconcileLog.WarnContext(ctx, "backstop: PR not found by its node id; skipping PR this pass",
 					"org", orgID, "target", act.Target, "node_id", nodeID)
 				continue
 			}
@@ -232,7 +232,7 @@ func (rc *Reconciler) pullRequestOwner(ctx context.Context, orgID string, act do
 		row, err := rc.entityRepository(ctx, orgID, act.EntityID)
 		switch {
 		case err != nil:
-			reconcileLog.Warn("backstop: read the PR's repository failed; fetching under the owner the row recorded",
+			reconcileLog.WarnContext(ctx, "backstop: read the PR's repository failed; fetching under the owner the row recorded",
 				"org", orgID, "target", act.Target, "entity", act.EntityID, "error", err)
 		case row != nil:
 			return row.Owner, true
@@ -262,7 +262,7 @@ func (rc *Reconciler) entityRepository(ctx context.Context, orgID, entityID stri
 func (rc *Reconciler) recordBackfilledPR(ctx context.Context, orgID, host string, act domain.ExternalAction, snap domain.PRSnapshot) {
 	target := domain.PullRequestTarget(snap.Repo, snap.Number)
 	if _, _, _, ok := domain.ParsePRTarget(target); !ok {
-		reconcileLog.Warn("backstop: PR snapshot names no repository and number; skipping PR this pass",
+		reconcileLog.WarnContext(ctx, "backstop: PR snapshot names no repository and number; skipping PR this pass",
 			"org", orgID, "target", act.Target, "node_id", act.NodeID)
 		return
 	}
@@ -275,7 +275,7 @@ func (rc *Reconciler) recordBackfilledPR(ctx context.Context, orgID, host string
 	if rc.entities != nil {
 		entity, err := rc.entities.GetByExternalIDSystem(ctx, orgID, domain.ArtifactProviderGitHub, host, act.NodeID)
 		if err != nil {
-			reconcileLog.Warn("backstop: read the PR's entity failed; recording the artifact unlinked",
+			reconcileLog.WarnContext(ctx, "backstop: read the PR's entity failed; recording the artifact unlinked",
 				"org", orgID, "target", target, "error", err)
 		} else if entity != nil {
 			art.EntityID, art.Target = entity.ID, entity.SourceID
@@ -283,12 +283,12 @@ func (rc *Reconciler) recordBackfilledPR(ctx context.Context, orgID, host string
 	}
 	inserted, err := rc.artifacts.InsertArtifactIfAbsentSystem(ctx, orgID, art)
 	if err != nil {
-		reconcileLog.Warn("backstop: record PR artifact failed",
+		reconcileLog.WarnContext(ctx, "backstop: record PR artifact failed",
 			"org", orgID, "target", target, "error", err)
 		return
 	}
 	if inserted {
-		reconcileLog.Info("backstop: recorded PR artifact from its pr_created row",
+		reconcileLog.InfoContext(ctx, "backstop: recorded PR artifact from its pr_created row",
 			"org", orgID, "target", target, "recorded_as", act.Target, "conversation", act.ConversationID)
 	}
 }
@@ -338,7 +338,7 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 			pr, err := db.ResolveArtifactPullRequest(ctx, orgID, a, reads.entity, reads.repository)
 			if err != nil {
 				if !errors.Is(err, db.ErrArtifactNamesNoPullRequest) {
-					reconcileLog.Warn("resolve artifact's pull request failed; skipping it this cycle",
+					reconcileLog.WarnContext(ctx, "resolve artifact's pull request failed; skipping it this cycle",
 						"org", orgID, "artifact", a.ID, "error", err)
 				}
 				continue
@@ -350,7 +350,7 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 		case domain.ArtifactKindBranch:
 			ref, ok, err := branchProbe(ctx, orgID, a, reads.repository)
 			if err != nil {
-				reconcileLog.Warn("resolve branch artifact's repository failed; skipping it this cycle",
+				reconcileLog.WarnContext(ctx, "resolve branch artifact's repository failed; skipping it this cycle",
 					"org", orgID, "artifact", a.ID, "error", err)
 				continue
 			}
@@ -369,7 +369,7 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 	for _, owner := range ownerUnion(prNodeIDsByOwner, branchRefsByOwner) {
 		client, err := rc.resolver.ClientFor(ctx, orgID, owner)
 		if err != nil {
-			reconcileLog.Warn("resolve github client failed; skipping owner this cycle",
+			reconcileLog.WarnContext(ctx, "resolve github client failed; skipping owner this cycle",
 				"org", orgID, "owner", owner, "error", err)
 			continue
 		}
@@ -378,7 +378,7 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 			// not CI — the lighter discovery fragment still carries both.
 			snaps, err := client.RefreshPRs(ctx, ids, false)
 			if err != nil {
-				reconcileLog.Warn("refresh PRs failed", "org", orgID, "owner", owner, "count", len(ids), "error", err)
+				reconcileLog.WarnContext(ctx, "refresh PRs failed", "org", orgID, "owner", owner, "count", len(ids), "error", err)
 			} else {
 				for k, v := range snaps {
 					snapshots[k] = v
@@ -388,7 +388,7 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 		if refs := branchRefsByOwner[owner]; len(refs) > 0 {
 			ex, err := client.BranchesExist(ctx, refs)
 			if err != nil {
-				reconcileLog.Warn("branch existence check failed", "org", orgID, "owner", owner, "count", len(refs), "error", err)
+				reconcileLog.WarnContext(ctx, "branch existence check failed", "org", orgID, "owner", owner, "count", len(refs), "error", err)
 			} else {
 				for k, v := range ex {
 					branchExists[k] = v
@@ -420,7 +420,7 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 		}
 		updated, err := rc.applyTransition(writeCtx, orgID, a, newState)
 		if err != nil {
-			reconcileLog.Warn("apply artifact transition failed",
+			reconcileLog.WarnContext(ctx, "apply artifact transition failed",
 				"org", orgID, "artifact", a.ID, "kind", a.Kind, "from", a.State, "to", newState, "error", err)
 			continue
 		}
@@ -467,7 +467,7 @@ func (rc *Reconciler) applyTransition(ctx context.Context, orgID string, a domai
 		return domain.Artifact{}, err
 	}
 	rc.broadcast(orgID, updated)
-	reconcileLog.Info("artifact reconciled",
+	reconcileLog.InfoContext(ctx, "artifact reconciled",
 		"org", orgID, "artifact", a.ID, "kind", a.Kind, "from", a.State, "to", newState)
 	return updated, nil
 }
