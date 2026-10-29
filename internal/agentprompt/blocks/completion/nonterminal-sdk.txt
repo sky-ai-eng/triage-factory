@@ -7,7 +7,7 @@ This changes only how your run ends. Your terminal JSON envelope (see the comple
 
 - "finish" — end the ENTIRE blueprint early and close the task. This is the rare exception. Only emit `finish` if THIS step's own instructions defined explicit criteria for ending the whole workflow early AND those criteria are now met (e.g. "if there's nothing to review, finish here"). Absent such criteria in your instructions, never decide on your own that the blueprint is over — emit `continue` instead.
 
-- "abort" — stop the blueprint; leave the task open for a human. Use when a precondition failed, the situation is ambiguous or unsafe, or you cannot safely proceed. Carry a "reason".
+- "abort" — as the completion contract defines it; it also stops the blueprint, so no later step runs.
 
 HANDOFF — the memory file you write before finishing (see the <entity_memory> contract) IS your handoff to the next step.
 

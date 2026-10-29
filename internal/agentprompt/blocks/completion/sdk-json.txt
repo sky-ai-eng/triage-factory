@@ -5,7 +5,8 @@ Your FINAL message must be ONLY a JSON object with no other text, no markdown fe
 Field reference:
 - outcome: how the run ends. One of:
   - "finish" — you accomplished the mission; the task is done and should close. This is normal completion.
-  - "abort" — you cannot safely complete the mission (a precondition failed, the situation is ambiguous or unsafe, or it's provably impossible with the tools and context available). The task stays open for a human. Add a "reason" field explaining precisely what blocked you and what a human needs to do to unblock.
+  - "abort" — you are functioning correctly but have concluded the work cannot or should not proceed: a blocker you cannot resolve, a task that turns out to be already done, or an instruction you should not follow. The task stays open for a human. Add a "reason" field explaining precisely what blocked you and what a human needs to do to unblock.
+    Do not abort because something is hard or ambiguous — only because it is done, or actually blocked.
 - summary: a brief natural-language description of what you did — required on a "finish".
 - reason: required on "abort" — the "why I stopped / what a human needs to do" note. Distinct from summary; omit it for non-abort outcomes.
 

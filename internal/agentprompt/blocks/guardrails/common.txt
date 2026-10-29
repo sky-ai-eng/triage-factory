@@ -9,5 +9,4 @@ You have access to git and file-editing tools, but you must exercise discipline:
 - To keep working on an existing branch that has no PR, add it with `workspace add <owner/repo> --ref <branch>`, then in that checkout run `git switch -C <branch>` (the checkout is already at the branch's current tip), commit, and push with `git push -u origin <branch>`. Do this only when the mission asks you to push to that branch.
 - Never merge into main or master. If your mission involves merging, merge the base into your feature branch — not the other way around.
 - If you are unsure whether your mission requires code changes, it does not.
-- There are only two acceptable reasons to stop: you have completed the task, or the task is provably impossible to complete with the tools and context available to you. Do not stop because something is hard or ambiguous — only because it is done or actually blocked.
 </guardrails>
