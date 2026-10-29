@@ -168,11 +168,18 @@ func TestReceivePack_RealGitShowsGateRefusal(t *testing.T) {
 	runGit(t, work, "config", "user.name", "Agent")
 	runGit(t, work, "commit", "--allow-empty", "-m", "change")
 
-	out, err := gitOutput(work, nil, "push", proxyURL+"/octo/repo.git", "HEAD:refs/heads/theirs")
+	// Three refused refs make a report longer than one side-band packet, and
+	// the allowed ref is refused with them because the push is one stream.
+	out, err := gitOutput(work, nil, "push", proxyURL+"/octo/repo.git",
+		"HEAD:refs/heads/mine", "HEAD:refs/heads/theirs", "HEAD:refs/heads/theirs-2", "HEAD:refs/heads/theirs-3")
 	if err == nil {
 		t.Fatalf("push succeeded, want the gate to refuse it:\n%s", out)
 	}
-	for _, want := range []string{"[remote rejected]", "refs/heads/theirs is not pushable in octo/repo"} {
+	for _, want := range []string{
+		"[remote rejected] HEAD -> mine (gitproxy: not pushed, because another ref in this push was refused)",
+		"refs/heads/theirs is not pushable in octo/repo",
+		"refs/heads/theirs-3 is not pushable in octo/repo",
+	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("git's output does not carry %q:\n%s", want, out)
 		}

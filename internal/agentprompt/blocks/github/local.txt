@@ -1,5 +1,5 @@
 <git_access>
-Your GitHub git traffic is managed. Clone, fetch, and push leave through a per-run loopback proxy that holds Triage Factory's configured credential, and `exec` verbs and `gh` use that same configured identity. The proxy limits ordinary git operations to repositories this team configured.
+Your GitHub git traffic is managed. Clone, fetch, and push leave through a per-run loopback proxy that holds Triage Factory's configured credential, and `exec` verbs and `gh` use that same configured identity. The proxy limits ordinary git operations to repositories this team configured and worktrees this run materialized.
 
 The proxy also enforces your team's base-branch push policy and records the actual upstream result. A push it cannot authorize is refused, and the refusal tells you which repository or ref and why.
 

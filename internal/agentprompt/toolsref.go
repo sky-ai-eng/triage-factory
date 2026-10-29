@@ -3,6 +3,8 @@ package agentprompt
 import (
 	"slices"
 	"strings"
+
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
 )
 
 // The tools reference is agent-facing prompt text that varies on the run's
@@ -164,14 +166,10 @@ func ToolsReferenceForSources(runtime Runtime, kinds []string) string {
 	}
 	out := strings.Join(parts, "\n\n")
 	if runtime == RuntimeNative {
-		out = strings.ReplaceAll(out, "triagefactory exec", nativeVerbPrefix)
+		out = strings.ReplaceAll(out, "triagefactory exec", prog.AppletName)
 	}
 	return out
 }
-
-// nativeVerbPrefix is how a native run invokes `triagefactory exec`: the
-// applet the jail puts on PATH, under which `exec` is implicit.
-const nativeVerbPrefix = "tfac"
 
 // ToolsReferenceFor returns the registered tools-reference text for source
 // and whether one exists.

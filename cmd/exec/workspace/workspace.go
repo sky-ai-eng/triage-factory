@@ -55,9 +55,10 @@ Usage notes:
     a copy cannot. To open a separate pull request from a PR run, 'add' the
     repo again for a checkout of its base branch beside the PR's, and branch
     there.
-  - 'add' is idempotent per checkout: repeating it with the same repo and the
-    same --ref/--pr (or none) prints the existing path without re-creating.
-    A different checkout of a repo you already have is created beside it.
+  - 'add' is idempotent per checkout: an add for a checkout you already have
+    prints the existing path without re-creating. A bare add and
+    '--ref <base branch>' are the same checkout. A different checkout of a
+    repo you already have is created beside it.
   - '--ref' and '--pr' are mutually exclusive.
   - 'add' rejects unconfigured / untracked repos; use 'list' to enumerate
     options before guessing.`

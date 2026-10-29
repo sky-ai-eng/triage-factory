@@ -345,15 +345,21 @@ func (s *Server) serveReceivePackGated(w http.ResponseWriter, r *http.Request, o
 	refusals := make([]string, len(cmds))
 	refused := false
 	for i, c := range cmds {
+		var reason string
 		switch {
 		case c.isDelete:
-			s.recordDenial(DeniedGitOp{Owner: owner, Repo: repo, Ref: c.ref, Op: gitOpPush, Reason: "ref-delete"})
-			refusals[i], refused = "gitproxy: ref delete not allowed", true
+			reason, refusals[i] = "ref-delete", "gitproxy: ref delete not allowed"
 		case !allowed[c.ref]:
-			reason, msg := refDenial(c.ref, owner+"/"+repo, allowedRefs, decision.ProtectedRefs)
-			s.recordDenial(DeniedGitOp{Owner: owner, Repo: repo, Ref: c.ref, Op: gitOpPush, Reason: reason})
-			refusals[i], refused = msg, true
+			reason, refusals[i] = refDenial(c.ref, owner+"/"+repo, allowedRefs, decision.ProtectedRefs)
+		default:
+			continue
 		}
+		// One denial per push, naming its first refused ref: the push is one
+		// act, and a `git push --tags` would otherwise record a row per tag.
+		if !refused {
+			s.recordDenial(DeniedGitOp{Owner: owner, Repo: repo, Ref: c.ref, Op: gitOpPush, Reason: reason})
+		}
+		refused = true
 	}
 	if refused {
 		refusePush(w, r, block, cmds, refusals)
@@ -385,16 +391,16 @@ func (s *Server) serveReceivePackGated(w http.ResponseWriter, r *http.Request, o
 
 // refDenial builds the audit reason and the message git shows for one rejected
 // ref. Three situations reach this point and they have three different
-// remedies, so they get three messages rather than the one flat string every
-// refusal used to collapse to:
+// remedies, so they get three messages:
 //
 //   - The ref is protected — the repo's base/default branch, which the team's
 //     base-branch push policy refuses. Name it, and name both ways out: the
 //     branch-plus-PR path the agent can take right now, and the policy a team
 //     admin can change.
-//   - The run has no pushable branch here at all (empty allowlist): the repo is
-//     authorized for read but no worktree of it is recorded for this run, so
-//     push authority hasn't been earned yet.
+//   - The run has no pushable branch here at all (empty allowlist): no
+//     checkout of the repo recorded for this run is on a branch it may push —
+//     `workspace add` leaves one detached — so push authority hasn't been
+//     earned yet.
 //   - The ref simply isn't the branch this run's worktree is on.
 //
 // Wording mirrors the repo-level deny builders in internal/delegate
@@ -409,7 +415,7 @@ func refDenial(ref, repoID string, allowedRefs, protectedRefs []string) (reason,
 	}
 	if len(allowedRefs) == 0 {
 		return "ref-no-pushable-branch", fmt.Sprintf(
-			"gitproxy: no branch of %s is pushable in this run: push authority comes from a worktree TF materialized for the run, and none is recorded. If you just ran 'workspace add %s', retry once the checkout has landed.",
+			"gitproxy: no branch of %s is pushable in this run: a push must come from a checkout 'workspace add %s' made, on a branch you created there, and none of this run's checkouts is on one. Create your branch in that checkout with git switch -c <branch> and push from there; a checkout made with git worktree add or git clone cannot push.",
 			repoID, repoID)
 	}
 	return "ref-not-allowed", fmt.Sprintf(
