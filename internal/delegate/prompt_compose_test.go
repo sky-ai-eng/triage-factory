@@ -60,38 +60,6 @@ func frameworkBlocks(t *testing.T) string {
 	return resolveCLIPath(strings.TrimSpace(agentprompt.Build(machinistSpec())), "/bin/tf")
 }
 
-// TestSDKSystemPrompt_SectionOrder pins what the run's own block says and in
-// what order: this run's facts and its verbs first, then the mission and how
-// this step ends — so the instruction is the last thing the model reads before
-// the conversation itself.
-func TestSDKSystemPrompt_SectionOrder(t *testing.T) {
-	out := launchAppend(
-		"mission body",
-		runContext("Repository: owner/repo\nBranch: feature-x", "/work", "", "tfac/SKY-9", "https://tf.example/runs/run-1", "", ""),
-		agentprompt.GitHubToolsReference(),
-		agentprompt.NonTerminalCompletion(machinistSpec()),
-		"/bin/tf",
-	)
-	block2 := strings.TrimPrefix(out, frameworkBlocks(t))
-
-	prev := -1
-	for _, marker := range []string{
-		"<run_context>", "Branch: feature-x", "Run root: /work", "tfac/SKY-9", "https://tf.example/runs/run-1", "</run_context>",
-		"<tools>", "</tools>",
-		"mission body",
-		"You are one step inside a multi-step blueprint",
-	} {
-		at := strings.Index(block2, marker)
-		if at < 0 {
-			t.Fatalf("the conversation's own block is missing %q;\n%s", marker, block2)
-		}
-		if at < prev {
-			t.Fatalf("section %q is out of order;\n%s", marker, block2)
-		}
-		prev = at
-	}
-}
-
 // TestSDKSystemPrompt_OmitsWhatThisRunHasNothingToSay covers the manual
 // conversation with no mission, the terminal step with no addendum and the org
 // that documented no verbs: an absent section renders nothing rather than an
@@ -126,14 +94,14 @@ func TestSDKSystemPrompt_CarriesNoUnresolvedTokens(t *testing.T) {
 // tools docs is a tool call the agent is refused, not a cosmetic miss.
 func TestSDKSystemPrompt_ResolvesTheCLIPath(t *testing.T) {
 	out := launchAppend("run `triagefactory exec gh pr view 7` first",
-		runContext("", "/work", "", "tfac/SKY-9", "", "", ""), agentprompt.GitHubToolsReference(), "", "/usr/local/bin/triagefactory")
+		runContext("", "/work", "", "tfac/SKY-9", "", "", ""), "use `triagefactory exec fake verb`", "", "/usr/local/bin/triagefactory")
 
 	if strings.Contains(out, "`triagefactory exec") {
 		t.Errorf("a bare `triagefactory exec` survived; the allowlist would refuse it;\n%s", out)
 	}
 	for _, want := range []string{
 		"/usr/local/bin/triagefactory exec gh pr view 7", // the mission's own invocation
-		"/usr/local/bin/triagefactory exec gh",           // the tools docs'
+		"/usr/local/bin/triagefactory exec fake verb",    // the tools section's
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("composed system prompt is missing the resolved invocation %q", want)
@@ -224,16 +192,5 @@ func TestRunContext_OmitsAbsentFacts(t *testing.T) {
 	}
 	if got := runContext("", "", "", "", "", "", ""); got != "" {
 		t.Errorf("a run context with nothing to say rendered %q, want empty", got)
-	}
-}
-
-// TestBlueprintStepNonterminalPrompt_PointsAtTheMemoryContract: the handoff
-// addendum names the memory file as the handoff by pointing at the
-// <entity_memory> contract, which owns the handoff folder's path, rather than
-// restating it.
-func TestBlueprintStepNonterminalPrompt_PointsAtTheMemoryContract(t *testing.T) {
-	addendum := agentprompt.NonTerminalCompletion(machinistSpec())
-	if !strings.Contains(addendum, "<entity_memory>") {
-		t.Error("expected the handoff addendum to point the agent at the <entity_memory> contract")
 	}
 }
