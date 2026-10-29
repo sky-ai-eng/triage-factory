@@ -505,7 +505,7 @@ services:
   #   ./triagefactory jwk-init --write-env .env
   #   docker compose up -d
   control:
-    image: ghcr.io/sky-ai-eng/triage-factory:v1.16.3 # x-release-please-version
+    image: ghcr.io/sky-ai-eng/triage-factory:v1.17.0 # x-release-please-version
     # Auto-restart on any exit. Load-bearing for the fleet's identity-
     # supersession fence (TFAC-586): a process that boots off a duplicated
     # tf-data volume exits with code 3 by design (see the volume-identity
@@ -721,7 +721,7 @@ services:
   # snapshots, the KB blob store) lives in the backing services.
   executor:
     # The same image as control; both pins move together on each release.
-    image: ghcr.io/sky-ai-eng/triage-factory:v1.16.3 # x-release-please-version
+    image: ghcr.io/sky-ai-eng/triage-factory:v1.17.0 # x-release-please-version
     # See the `control` service's identical restart policy comment —
     # same identity-supersession crash-loop-is-the-alarm rationale applies
     # to every role, executors included.
