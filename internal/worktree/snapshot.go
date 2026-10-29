@@ -190,9 +190,8 @@ func captureWorkspaceGitMetadata(ctx context.Context, wtPath string) (*GitDelta,
 
 // bundleLocalCommits writes a `git bundle` of <rev> --not --remotes — the
 // commits the agent made that aren't on any remote-tracking ref yet — and
-// returns its bytes. Returns (nil, nil) when git refuses to create an empty
-// bundle: the tip is already published, so there are no local-only commits to
-// carry and the bare reproduces the committed state unaided.
+// returns its bytes. Returns (nil, nil) when there are no such commits: the tip
+// is already published, so the bare reproduces the committed state unaided.
 func bundleLocalCommits(ctx context.Context, wtPath, branch string) ([]byte, error) {
 	var out bytes.Buffer
 	ok, err := bundleLocalCommitsTo(ctx, wtPath, branch, &out)
@@ -202,15 +201,25 @@ func bundleLocalCommits(ctx context.Context, wtPath, branch string) ([]byte, err
 	return out.Bytes(), nil
 }
 
+// bundleLocalCommitsTo is bundleLocalCommits writing to w, reporting whether
+// it wrote a bundle. Emptiness is decided by rev-list before `git bundle` runs,
+// because `git bundle` writes its signature to stdout before it refuses an
+// empty bundle: on a streaming w those bytes would already be a capture member
+// the manifest then says is absent. A `git bundle` failure after the precheck
+// is an error.
 func bundleLocalCommitsTo(ctx context.Context, wtPath, branch string, w io.Writer) (bool, error) {
 	rev := branch
 	if rev == "" {
 		rev = "HEAD"
 	}
+	local, err := gitCapture(ctx, wtPath, nil, "rev-list", "--max-count=1", rev, "--not", "--remotes")
+	if err != nil {
+		return false, fmt.Errorf("git rev-list: %w", err)
+	}
+	if len(bytes.TrimSpace(local)) == 0 {
+		return false, nil
+	}
 	if err := gitCaptureTo(ctx, wtPath, nil, w, "bundle", "create", "-", rev, "--not", "--remotes"); err != nil {
-		if strings.Contains(err.Error(), "empty bundle") {
-			return false, nil
-		}
 		return false, fmt.Errorf("git bundle: %w", err)
 	}
 	return true, nil

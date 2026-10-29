@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/cmd/snapshotcapture"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
@@ -187,6 +188,55 @@ func TestValidScratchRel(t *testing.T) {
 		if validScratchRel(bad) {
 			t.Errorf("accepted %q", bad)
 		}
+	}
+}
+
+// TestCaptureTreeInJail_CheckoutWithNothingUnpushed runs the jail's own capture
+// body over a tree whose first checkout has every commit on a remote-tracking
+// ref, and unpacks what it streamed: the stream must hold exactly the members
+// the manifest announces.
+func TestCaptureTreeInJail_CheckoutWithNothingUnpushed(t *testing.T) {
+	setupGitTestEnv(t)
+	dir := t.TempDir()
+	seed := filepath.Join(dir, "seed")
+	gitT(t, "", "init", "-q", "-b", "main", seed)
+	gitT(t, seed, "commit", "-q", "--allow-empty", "-m", "seed")
+	bare := filepath.Join(dir, "bare.git")
+	gitT(t, "", "clone", "-q", "--bare", seed, bare)
+	root := filepath.Join(dir, "run")
+	w := snapshotWrite{wtPath: root}
+	for _, slug := range []string{"pushed", "local"} {
+		co := snapshotCheckout{repoID: "o/r", slug: slug, rel: "o/r/" + slug, path: filepath.Join(root, "o", "r", slug)}
+		gitT(t, "", "clone", "-q", bare, co.path)
+		w.checkouts = append(w.checkouts, co)
+	}
+	gitT(t, w.checkouts[1].path, "commit", "-q", "--allow-empty", "-m", "unpushed")
+
+	orig := captureViaSandbox
+	t.Cleanup(func() { captureViaSandbox = orig })
+	captureViaSandbox = func(ctx context.Context, p sandbox.CaptureParams) ([]byte, error) {
+		stream, err := os.OpenFile(filepath.Join(p.StagingDir, sandbox.CaptureStreamFile), os.O_WRONLY, 0)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = stream.Close() }()
+		var man bytes.Buffer
+		if err := snapshotcapture.Run(ctx, p.Root, p.Checkouts, stream, &man); err != nil {
+			return nil, err
+		}
+		return man.Bytes(), nil
+	}
+
+	captured := &capturedSnapshot{}
+	defer captured.release()
+	if err := captureTreeInJail(context.Background(), w, captured); err != nil {
+		t.Fatalf("captureTreeInJail: %v", err)
+	}
+	if got := captured.checkouts[0].state.BundlePath; got != "" {
+		t.Errorf("checkout with nothing unpushed has bundle %s", got)
+	}
+	if captured.checkouts[1].state.BundlePath == "" {
+		t.Error("checkout with an unpushed commit has no bundle")
 	}
 }
 
