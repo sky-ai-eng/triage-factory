@@ -1,3 +1,4 @@
+# probe: can this session's GitHub credential push a workflow change? (throwaway branch)
 name: sso-e2e
 
 # Runs the SSO end-to-end suite (e2e/sso/run.sh): the multi-mode stack with a
