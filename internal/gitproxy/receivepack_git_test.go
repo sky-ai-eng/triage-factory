@@ -133,6 +133,58 @@ func TestReceivePack_RealGitRefusal(t *testing.T) {
 	}
 }
 
+// TestReceivePack_RealGitShowsGateRefusal pushes a ref the gate does not
+// allow with a real git client: git must print the gate's own explanation as a
+// remote rejection, nothing may reach the upstream, and the refusal is audited.
+func TestReceivePack_RealGitShowsGateRefusal(t *testing.T) {
+	root := t.TempDir()
+	bare := filepath.Join(root, "octo", "repo.git")
+	work := t.TempDir()
+	backend := filepath.Join(gitExecPath(t), "git-http-backend")
+	if _, err := os.Stat(backend); err != nil {
+		t.Skipf("git-http-backend not present at %s: %v", backend, err)
+	}
+	runGit(t, "", "init", "--bare", "--initial-branch=main", bare)
+	runGit(t, bare, "config", "http.receivepack", "true")
+	upstream := httptest.NewServer(&cgi.Handler{
+		Path: backend,
+		Env:  []string{"GIT_PROJECT_ROOT=" + root, "GIT_HTTP_EXPORT_ALL=1", "REMOTE_USER=tester"},
+	})
+	defer upstream.Close()
+
+	sink := newDenialSink()
+	_, proxyURL := startGatedProxy(t,
+		func(context.Context, string, string) (gitproxy.Token, error) {
+			return gitproxy.Token{Value: "ghs_tok"}, nil
+		},
+		upstream.URL,
+		func(context.Context, string, string) (gitproxy.Decision, error) {
+			return gitproxy.Decision{Allowed: true, AllowedRefs: []string{"refs/heads/mine"}}, nil
+		},
+		sink.record)
+
+	runGit(t, "", "init", "--initial-branch=main", work)
+	runGit(t, work, "config", "user.email", "agent@example.test")
+	runGit(t, work, "config", "user.name", "Agent")
+	runGit(t, work, "commit", "--allow-empty", "-m", "change")
+
+	out, err := gitOutput(work, nil, "push", proxyURL+"/octo/repo.git", "HEAD:refs/heads/theirs")
+	if err == nil {
+		t.Fatalf("push succeeded, want the gate to refuse it:\n%s", out)
+	}
+	for _, want := range []string{"[remote rejected]", "refs/heads/theirs is not pushable in octo/repo"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("git's output does not carry %q:\n%s", want, out)
+		}
+	}
+	if refs := runGit(t, bare, "for-each-ref"); refs != "" {
+		t.Errorf("the upstream received refs: %s", refs)
+	}
+	if d := sink.next(t); d.Reason != "ref-not-allowed" || d.Ref != "refs/heads/theirs" {
+		t.Errorf("denial = %+v, want ref-not-allowed for refs/heads/theirs", d)
+	}
+}
+
 func gitExecPath(t *testing.T) string {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {

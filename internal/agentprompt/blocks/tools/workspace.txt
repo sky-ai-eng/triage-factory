@@ -4,14 +4,14 @@ A run on a Jira or Linear issue starts with no codebase. Your initial cwd is the
 
 Discovery:
 - `triagefactory exec workspace list` — JSON inventory with two sections:
-  - `available`: repos your team tracks that you could `add` but haven't yet, each with a `description` field (one-line upstream metadata, e.g. "Core API service") that's your strongest disambiguation signal when the issue alone isn't conclusive
+  - `available`: repos your team tracks that you can `add`, including any you already have a checkout of, each with a `description` field (one-line upstream metadata, e.g. "Core API service") that's your strongest disambiguation signal when the issue alone isn't conclusive
   - `materialized`: worktrees you've already added for this run, with their absolute paths and the checkout each landed on
   Run this first when the issue text doesn't make the target repo obvious. The `available` section is your universe of options; `add` rejects anything outside it.
 
 Materialize (two separate Bash calls — do NOT chain with `cd "$(...)"`; the permission allowlist matches per-call and a `cd` wrapping a substitution is rejected as an unrecognized command shape, even though each piece on its own would pass):
-1. `triagefactory exec workspace add <owner>/<repo>` — clones (or reuses the bare cache) and checks out the repo's default branch, DETACHED, then prints the absolute worktree path on stdout. `--ref <branch>` checks out an existing branch instead; `--pr <N>` checks out PR #N's head (fork-aware). Idempotent: a second `add` for the same repo prints the existing path without re-creating, so re-running on retry is safe.
+1. `triagefactory exec workspace add <owner>/<repo>` — clones (or reuses the bare cache) and checks out the repo's default branch, DETACHED, then prints the absolute worktree path on stdout. `--ref <branch>` checks out an existing branch instead; `--pr <N>` checks out PR #N's head (fork-aware). Idempotent per checkout: a second `add` with the same repo and the same `--ref` or `--pr` (or neither) prints the existing path without re-creating, so re-running on retry is safe; a different checkout of a repo you already have is created beside it.
 2. In the next Bash call, `cd <printed-path>` — once you're inside the worktree you have a real git checkout: gh subcommands resolve via `.git/config` (no `--repo` needed), and you can use the full git/build/test toolchain.
-3. Before committing, create your own working branch, named following your team's branch naming convention as <run_context> gives it (adapt the suffix to the work): `git checkout -b <your-branch>`. Push it with `git push -u origin <your-branch>`. The exact name is yours to choose — push the branch you're on, never a base or protected one.
+3. Before committing, create your own working branch, named following your team's branch naming convention as <run_context> gives it (adapt the suffix to the work): `git checkout -b <your-branch>`. Push it with `git push -u origin <your-branch>`. The exact name is yours to choose — push the branch you're on, never a base or protected one. Only checkouts `add` made can push: one you make yourself with `git worktree add`, `git clone`, or a copy is refused at push.
 
 If the issue spans multiple repos, repeat the pattern for each — they materialize as siblings under the run-root.
 

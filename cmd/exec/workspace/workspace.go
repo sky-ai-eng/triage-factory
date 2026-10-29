@@ -38,7 +38,8 @@ const HelpText = `Workspace Commands:
 Discovery:
   Run 'workspace list' first when you're not sure which repo to materialize.
   Output has two sections:
-    - "available": repos your team tracks that you could materialize via 'add'
+    - "available": repos your team tracks that you can materialize via 'add',
+      including repos you already have a checkout of
     - "materialized": worktrees you've already added for this run, with
       absolute paths and the checkout each landed on
 
@@ -49,8 +50,14 @@ Usage notes:
     gate authorizes whatever branch your checkout is on (base/protected refs
     are still refused). Your team's branch-name convention is suggested in
     the run's envelope.
-  - 'add' is idempotent per (run, repo): a second 'add' for the same repo
-    prints the existing path without re-creating.
+  - Only checkouts 'add' made, and the pull request checkout a PR run starts
+    with, can push. A checkout made with 'git worktree add', 'git clone', or
+    a copy cannot. To open a separate pull request from a PR run, 'add' the
+    repo again for a checkout of its base branch beside the PR's, and branch
+    there.
+  - 'add' is idempotent per checkout: repeating it with the same repo and the
+    same --ref/--pr (or none) prints the existing path without re-creating.
+    A different checkout of a repo you already have is created beside it.
   - '--ref' and '--pr' are mutually exclusive.
   - 'add' rejects unconfigured / untracked repos; use 'list' to enumerate
     options before guessing.`
