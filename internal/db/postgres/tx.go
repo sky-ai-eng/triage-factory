@@ -88,8 +88,9 @@ func (s *Store) SystemWithTx(ctx context.Context, orgID string, fn func(db.Syste
 
 	err := db.InTx(ctx, s.admin, func(tx *sql.Tx) error {
 		return fn(db.SystemTxStores{
-			EventQueue: newEventQueueStore(tx),
-			Ext:        db.BuildStoreExtensions(db.DialectPostgres, s.app, tx),
+			EventQueue:    newEventQueueStore(tx),
+			Notifications: newNotificationStore(s.app, tx),
+			Ext:           db.BuildStoreExtensions(db.DialectPostgres, s.app, tx),
 		})
 	})
 	if err != nil {
@@ -383,6 +384,9 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// the rest of the transaction; the admin half stays pinned to s.admin
 		// like OrgEventSources'.
 		OrgCommitSigners: newOrgCommitSignerStore(tx, s.admin),
+		// Notifications: reads and marks on the claims tx; system writes on
+		// s.admin.
+		Notifications: newNotificationStore(tx, s.admin),
 		// Opaque extension bundles (the Enterprise Edition SSO stores) built
 		// from the same (app=tx, admin=s.admin) handles, so their app/admin
 		// pool split is identical to core's own stores — the login-time reads

@@ -506,6 +506,10 @@ type Stores struct {
 	// a signed-in user.
 	CommitSignatures CommitSignatureStore
 
+	// Notifications owns notifications and notification_marks. Split-pool in
+	// Postgres: system writes on admin, reads and marks under claims.
+	Notifications NotificationStore
+
 	// DeploymentCommitSigners owns the deployment_commit_signer table — the
 	// health of the deployment's commit signer, whose login and key are
 	// control-pod config. Postgres only, admin pool: the SQLite impl is a stub
@@ -618,6 +622,7 @@ type TxStores struct {
 	RateLimitReadings        RateLimitReadingStore
 	ModelAvailability        ModelAvailabilityStore
 	OrgCommitSigners         OrgCommitSignerStore
+	Notifications            NotificationStore
 
 	// Ext carries opaque store bundles built by registered
 	// StoreExtension factories (see storeext.go), tx-bound to the same
@@ -640,6 +645,10 @@ type SystemTxStores struct {
 	// the transaction, so the event commits with the write it reports and
 	// the caller fans it out once the transaction commits.
 	EventQueue EventQueueStore
+
+	// Notifications' ...System writes join the transaction, so one raise's
+	// writes commit together.
+	Notifications NotificationStore
 
 	// Ext carries the opaque store bundles built by registered
 	// StoreExtension factories (see storeext.go) from the app pool and the

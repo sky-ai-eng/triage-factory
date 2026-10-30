@@ -200,6 +200,7 @@ func New(conn *sql.DB) db.Stores {
 		// OrgCommitSigners is split-pool in Postgres; SQLite collapses to the
 		// one connection (N=1, no RLS) and asserts the local org instead.
 		OrgCommitSigners: newOrgCommitSignerStore(conn),
+		Notifications:    newNotificationStore(conn),
 		// CommitSignatures is admin-pool only in Postgres; SQLite collapses
 		// to the one connection, where the local daemon records each
 		// signature it makes.

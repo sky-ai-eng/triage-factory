@@ -6700,6 +6700,120 @@ REVOKE ALL ON public.user_api_tokens FROM anon, authenticated, service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.user_api_tokens TO tf_app;
 
 
+-- notifications: one occurrence of a condition (resolved by the system) or a
+-- notice (expires) for one audience. kind has no FK: the registry is code.
+-- See specs/durable-notifications.md.
+CREATE TABLE public.notifications (
+    id              uuid DEFAULT gen_random_uuid() NOT NULL,
+    org_id          uuid NOT NULL,
+    origin          text NOT NULL,
+    lifecycle       text NOT NULL,
+    kind            text NOT NULL,
+    key             text NOT NULL,
+    audience_scope  text NOT NULL,
+    audience_role   text,
+    team_id         uuid,
+    user_id         uuid,
+    source          text,
+    priority        text NOT NULL,
+    dismissible     boolean NOT NULL,
+    title           text NOT NULL,
+    body            text DEFAULT ''::text NOT NULL,
+    actions         jsonb DEFAULT '[]'::jsonb NOT NULL,
+    params          jsonb DEFAULT '{}'::jsonb NOT NULL,
+    first_seen_at   timestamp with time zone NOT NULL,
+    last_seen_at    timestamp with time zone NOT NULL,
+    seen_count      integer DEFAULT 1 NOT NULL,
+    escalated_at    timestamp with time zone NOT NULL,
+    resolved_at     timestamp with time zone,
+    resolved_reason text,
+    expires_at      timestamp with time zone,
+    CONSTRAINT notifications_origin_check CHECK ((origin = ANY (ARRAY['system'::text, 'event'::text]))),
+    CONSTRAINT notifications_kind_check CHECK ((kind <> ''::text)),
+    CONSTRAINT notifications_priority_check CHECK ((priority = ANY (ARRAY['urgent'::text, 'high'::text, 'low'::text]))),
+    CONSTRAINT notifications_seen_count_check CHECK ((seen_count >= 1)),
+    CONSTRAINT notifications_resolved_reason_check CHECK ((resolved_reason = ANY (ARRAY['cleared'::text, 'source_off'::text, 'audience_removed'::text]))),
+    CONSTRAINT notifications_audience_check CHECK ((
+        ((audience_scope = 'org'::text) AND (audience_role = ANY (ARRAY['members'::text, 'admins'::text])) AND (team_id IS NULL) AND (user_id IS NULL))
+        OR ((audience_scope = 'team'::text) AND (audience_role = ANY (ARRAY['members'::text, 'admins'::text])) AND (team_id IS NOT NULL) AND (user_id IS NULL))
+        OR ((audience_scope = 'user'::text) AND (audience_role IS NULL) AND (team_id IS NULL) AND (user_id IS NOT NULL))
+    )),
+    CONSTRAINT notifications_lifecycle_check CHECK ((
+        ((lifecycle = 'condition'::text) AND (expires_at IS NULL))
+        OR ((lifecycle = 'notice'::text) AND (expires_at IS NOT NULL))
+    )),
+    CONSTRAINT notifications_notice_check CHECK (((lifecycle = 'condition'::text) OR (dismissible AND (resolved_at IS NULL)))),
+    CONSTRAINT notifications_resolved_check CHECK (((resolved_at IS NULL) = (resolved_reason IS NULL)))
+);
+
+ALTER TABLE ONLY public.notifications
+    ADD CONSTRAINT notifications_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.notifications
+    ADD CONSTRAINT notifications_id_org_id_key UNIQUE (id, org_id);
+
+ALTER TABLE ONLY public.notifications
+    ADD CONSTRAINT notifications_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.notifications
+    ADD CONSTRAINT notifications_team_id_org_id_fkey FOREIGN KEY (team_id, org_id) REFERENCES public.teams(id, org_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.notifications
+    ADD CONSTRAINT notifications_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+-- The open occurrence a raise coalesces into.
+CREATE UNIQUE INDEX notifications_open_occurrence_idx ON public.notifications USING btree (org_id, origin, kind, key, audience_scope, (COALESCE(audience_role, ''::text)), (COALESCE(team_id, '00000000-0000-0000-0000-000000000000'::uuid)), (COALESCE(user_id, '00000000-0000-0000-0000-000000000000'::uuid))) WHERE (resolved_at IS NULL);
+
+CREATE INDEX notifications_list_idx ON public.notifications USING btree (org_id, resolved_at, priority, escalated_at, id);
+
+ALTER TABLE public.notifications ENABLE ROW LEVEL SECURITY;
+
+-- "May read". Team rows are also readable by org admins ("All teams"). No
+-- write policy: every write is a system write.
+CREATE POLICY notifications_select ON public.notifications FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (
+    ((audience_scope = 'org'::text) AND (((audience_role = 'members'::text)) OR ((audience_role = 'admins'::text) AND tf.user_is_org_admin(org_id))))
+    OR ((audience_scope = 'team'::text) AND (tf.user_is_org_admin(org_id)
+        OR ((audience_role = 'members'::text) AND tf.user_in_team(team_id))
+        OR ((audience_role = 'admins'::text) AND tf.user_is_team_admin(team_id))))
+    OR ((audience_scope = 'user'::text) AND (user_id = tf.current_user_id()))
+)));
+
+REVOKE ALL ON public.notifications FROM PUBLIC;
+REVOKE ALL ON public.notifications FROM anon, authenticated, service_role;
+
+GRANT SELECT ON TABLE public.notifications TO tf_app;
+
+
+-- notification_marks: one person's read/dismissed stamps on a notification.
+CREATE TABLE public.notification_marks (
+    notification_id uuid NOT NULL,
+    user_id         uuid NOT NULL,
+    org_id          uuid NOT NULL,
+    read_at         timestamp with time zone,
+    dismissed_at    timestamp with time zone
+);
+
+ALTER TABLE ONLY public.notification_marks
+    ADD CONSTRAINT notification_marks_pkey PRIMARY KEY (notification_id, user_id);
+
+ALTER TABLE ONLY public.notification_marks
+    ADD CONSTRAINT notification_marks_notification_id_org_id_fkey FOREIGN KEY (notification_id, org_id) REFERENCES public.notifications(id, org_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.notification_marks
+    ADD CONSTRAINT notification_marks_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+ALTER TABLE public.notification_marks ENABLE ROW LEVEL SECURITY;
+
+-- Own marks only, on a notification notifications_select admits.
+CREATE POLICY notification_marks_all ON public.notification_marks USING (((user_id = tf.current_user_id()) AND (org_id = tf.current_org_id()) AND (EXISTS ( SELECT 1
+   FROM public.notifications n
+  WHERE ((n.id = notification_marks.notification_id) AND (n.org_id = notification_marks.org_id)))))) WITH CHECK (((user_id = tf.current_user_id()) AND (org_id = tf.current_org_id()) AND (EXISTS ( SELECT 1
+   FROM public.notifications n
+  WHERE ((n.id = notification_marks.notification_id) AND (n.org_id = notification_marks.org_id))))));
+
+REVOKE ALL ON public.notification_marks FROM PUBLIC;
+REVOKE ALL ON public.notification_marks FROM anon, authenticated, service_role;
+
+GRANT SELECT, INSERT, UPDATE ON TABLE public.notification_marks TO tf_app;
+
+
 -- Unified spend view: one row-per-spend shape UNION-ing the messages ledger
 -- (delegated conversations) and headless system jobs onto a single category
 -- axis. Delegations split manual (per-user) from autonomous; system jobs are
