@@ -25,13 +25,15 @@ import type { StepContext } from './types'
 export function LinearAccessStep({ state, patch, orgId, hold, isLocal }: StepContext) {
   const [settingUpApp, setSettingUpApp] = useState(false)
   // With an app to install, Install is the step's one main action and the
-  // alternatives wait behind a link. Local state, so a remount closes them.
+  // alternatives wait behind a link. Local state, so a remount closes them,
+  // except over a typed key: Continue binds it, so it never hides.
   const [showAlternatives, setShowAlternatives] = useState(false)
+  const alternativesOpen = showAlternatives || state.org.linear_api_key !== ''
   const connecting = !state.linearConnected
   const installAvailable = state.linearInstallAvailable
-  const showKeyField = !installAvailable || showAlternatives
-  const offerAlternatives = connecting && installAvailable && !showAlternatives
-  const offerOwnApp = connecting && installAvailable && showAlternatives && !!orgId
+  const showKeyField = !installAvailable || alternativesOpen
+  const offerAlternatives = connecting && installAvailable && !alternativesOpen
+  const offerOwnApp = connecting && installAvailable && alternativesOpen && !!orgId
   const offerApp = connecting && !installAvailable && !!orgId
 
   const appCard = orgId && (

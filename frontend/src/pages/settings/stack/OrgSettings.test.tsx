@@ -67,6 +67,38 @@ describe('OrgSettings — Linear connection', () => {
     expect(screen.queryByRole('button', { name: 'Connect' })).not.toBeInTheDocument()
   })
 
+  it('keeps a typed key and its Connect when an app becomes available', async () => {
+    seed({ linearInstallAvailable: false })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: unknown) =>
+        String(input) === '/api/orgs/org-1/linear/app'
+          ? Promise.resolve({
+              ok: true,
+              ...jsonBody({
+                app: null,
+                install_available: true,
+                using_deployment_default: true,
+                create_url: '',
+                redirect_uris: [],
+              }),
+            })
+          : Promise.resolve({ ok: false, status: 404, ...jsonBody({}) }),
+      ),
+    )
+    await openLinearSection()
+    await userEvent.type(screen.getByPlaceholderText('lin_api_…'), 'lin_api_typed')
+    // Opening the app section reads the deployment's app, which makes Install
+    // available under the key already typed.
+    await userEvent.click(screen.getByRole('button', { name: /^Linear OAuth app/ }))
+    expect(
+      await screen.findByRole('button', { name: 'Install Triage Factory' }),
+    ).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('lin_api_…')).toHaveValue('lin_api_typed')
+    expect(screen.getByRole('button', { name: 'Connect' })).toBeEnabled()
+    expect(keyLink()).not.toBeInTheDocument()
+  })
+
   it('shows the key field and footer with no link when no app resolves', async () => {
     seed({ linearInstallAvailable: false })
     await openLinearSection()

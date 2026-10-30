@@ -75,6 +75,16 @@ describe('LinearOAuthAppCard', () => {
     expect(screen.getByPlaceholderText("Your Linear OAuth app's client ID")).toHaveValue('')
   })
 
+  it('shows no form while its read is in flight', () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => new Promise(() => {})),
+    )
+    render(<LinearOAuthAppCard orgId="org-1" />)
+    expect(screen.queryByPlaceholderText("Your Linear OAuth app's client ID")).toBeNull()
+    expect(screen.queryByText(/Register a Linear OAuth app/)).toBeNull()
+  })
+
   it('opens on the form with openForm, with no Cancel', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, ...jsonBody(deploymentStatus()) }))
     render(<LinearOAuthAppCard orgId="org-1" openForm />)

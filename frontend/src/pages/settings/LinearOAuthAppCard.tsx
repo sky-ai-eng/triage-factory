@@ -160,14 +160,19 @@ export default function LinearOAuthAppCard({
     }
   }
 
+  // Nothing to choose until the read answers: before it, a deployment-app org
+  // would see the form only to have it fold behind the button. A failed read
+  // still shows the form, so saving works.
+  const loaded = status !== null || loadFailed
   const hasOverride = !!status?.app
   const onDeploymentApp = !hasOverride && !!status?.using_deployment_default
-  const showForm = replacing || (!hasOverride && (!onDeploymentApp || registering || openForm))
+  const showForm =
+    loaded && (replacing || (!hasOverride && (!onDeploymentApp || registering || openForm)))
   const redirectURIs = status?.redirect_uris ?? []
 
   return (
     <div className="space-y-5">
-      {!onDeploymentApp && (
+      {loaded && !onDeploymentApp && (
         <p className="text-body leading-relaxed text-ink-3">
           Register a Linear OAuth app so a Linear workspace admin can install Triage Factory as an
           app. Triage Factory then works in Linear as its own app user instead of through

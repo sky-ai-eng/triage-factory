@@ -192,6 +192,35 @@ describe('LinearAccessStep — an app to install', () => {
     ).not.toBeInTheDocument()
   })
 
+  it('keeps a typed key in view across a remount, since Continue binds it', () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve({ ok: false, status: 404, ...jsonBody({}) })),
+    )
+    const base = initialWizardState()
+    render(
+      <LinearAccessStep
+        state={{
+          ...base,
+          tracker: 'linear',
+          linearInstallAvailable: true,
+          org: { ...base.org, linear_api_key: 'lin_api_typed' },
+        }}
+        patch={() => {}}
+        orgId={LOCAL_DEFAULT_ORG_ID}
+        teamId="default"
+        isLocal
+        advance={() => {}}
+        hold={(work) => work()}
+      />,
+    )
+    expect(screen.getByPlaceholderText('lin_api_…')).toHaveValue('lin_api_typed')
+    expect(
+      screen.getByRole('checkbox', { name: /Also use this API key as my own Linear identity/ }),
+    ).toBeInTheDocument()
+    expect(alternatives()).not.toBeInTheDocument()
+  })
+
   it('offers the reuse checkbox in local mode only once the key field shows', async () => {
     renderStep(true)
     const reuse = () =>

@@ -308,7 +308,13 @@ export default function OrgSettings({
       setSavingKey('linear-connect', false)
     }
   }
-  const linearKeyHidden = !linearRebinding && draft.linearInstallAvailable && !linearShowKey
+  // A typed key keeps the form: hiding it would drop the Save and the discard
+  // guard with the key still in the draft.
+  const linearKeyHidden =
+    !linearRebinding &&
+    draft.linearInstallAvailable &&
+    !linearShowKey &&
+    draft.org.linear_api_key === ''
 
   // The StepContext every /setup body consumes — the live draft + patch, with
   // advance a no-op (Settings has no linear flow; selfAdvancing pickers just
