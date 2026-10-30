@@ -35,8 +35,7 @@ one person leaving: `https://github.com/organizations/<org>/settings/apps/new`
 | ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **GitHub App name**                                        | Unique on that GitHub. Org admins see it on GitHub's install page.                                                                                   |
 | **Homepage URL**                                           | Your `TF_PUBLIC_URL`.                                                                                                                                |
-| **Callback URL**                                           | `<TF_PUBLIC_URL>/api/github/managed/callback`, one entry, absolute.                                                                                  |
-| **Expire user authorization tokens**                       | Leave as is.                                                                                                                                         |
+| **Redirect URI**                                           | `<TF_PUBLIC_URL>/api/github/managed/callback`, absolute. It must stay the first entry.                                                               |
 | **Request user authorization (OAuth) during installation** | **Checked.** This is how TF learns who completed an installation. It greys out **Setup URL**; leave that blank and **Redirect on update** unchecked. |
 | **Enable Device Flow**                                     | Unchecked.                                                                                                                                           |
 | **Webhook → Active**                                       | Checked.                                                                                                                                             |
@@ -133,6 +132,34 @@ source checkout, `secrets/` and `compose.override.yml` are gitignored. Only
 From there, connecting accounts, linking members' GitHub accounts and switching
 an organization onto the deployment App are done in the app.
 
+## Optional: sign people in through the App
+
+By default, people sign in with the GitHub OAuth app from
+[install step 2](../install.md#2-create-the-github-oauth-app-sign-in), and
+whoever connects an organization approves Triage Factory on GitHub twice: once
+for the OAuth app at sign-in, and again for the App at **Connect GitHub…**. The
+App can handle sign-in instead. The approval at sign-in is then the only one,
+and **Connect GitHub…** doesn't ask again.
+
+1. On the App's settings page, under **Identifying and authorizing users**,
+   press **Add redirect URI** and add `<TF_PUBLIC_URL>/auth/v1/callback`.
+   Keep `/api/github/managed/callback` first: GitHub sends people to the first
+   entry when they finish installing the App.
+2. Check that the App can be installed on **Any account**. GitHub refuses a
+   private App's sign-in to anyone outside the account that owns it.
+3. Set `GH_CLIENT_ID` to the App's **Client ID** (on its **General** page) and
+   `GH_CLIENT_SECRET` to the same client secret as
+   `TF_GITHUB_APP_CLIENT_SECRET`. On a new deployment, pass them to
+   `deploy init` as `--github-client-id` and `--github-client-secret-file`. On
+   a running one, set them in `.env` and run `docker compose up -d`.
+
+People keep their accounts when you switch, because sign-in matches them by
+their GitHub account. Anyone who hasn't approved the App yet sees GitHub's
+approval page for it at their next sign-in.
+
+When you rotate the App's client secret, update `GH_CLIENT_SECRET` and
+`TF_GITHUB_APP_CLIENT_SECRET` together.
+
 ## Troubleshooting
 
 | Message                                                                             | Fix                                                                                                           |
@@ -143,3 +170,4 @@ an organization onto the deployment App are done in the app.
 | `…not granted the account email addresses permission` (log)                         | Add Account → Email addresses: Read-only. Members approve it the next time they link.                         |
 | `This organization is pointed at <host>; the deployment's GitHub App is on <host>.` | That organization's GitHub isn't the deployment default. It brings its own App.                               |
 | `GitHub rejected the deployment App's ID and private key` (log)                     | `TF_GITHUB_APP_ID` names a different App than the PEM. Use the App ID, not the Client ID.                     |
+| Sign-in ends on GitHub's 404 page, `This is not the web page you are looking for.`  | Sign-in runs through a private App. On the App's **Advanced** page, press **Make public**.                    |
