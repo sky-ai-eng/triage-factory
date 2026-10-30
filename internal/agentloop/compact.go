@@ -180,6 +180,8 @@ func (e *Engine) compactWarm(ctx context.Context, params Params, spent *spend) e
 	// no pending window for a crash to leave half-entered.
 	reqRow := unansweredCompactionRequest(rows)
 	if reqRow != nil && warmAttemptSettled(*reqRow) {
+		e.info("compaction request already had its warm attempt; making the forced-shape call",
+			"conversation", params.ConversationID, "reason", reqRow.Metadata["compaction_failure"])
 		return e.compactCold(ctx, params, spent)
 	}
 	if reqRow == nil {
