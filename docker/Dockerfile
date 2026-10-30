@@ -185,7 +185,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 # --- stage 4: runtime -------------------------------------------------------
 
-FROM alpine:3.24.2 AS runtime
+FROM alpine:3.24.3 AS runtime
 
 # - iptables / iproute2: sandbox netns + NAT POSTROUTING setup
 # - ca-certificates: outbound TLS from the TF process (GitHub, Jira,
