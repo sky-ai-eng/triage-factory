@@ -981,6 +981,7 @@ func (s *Spawner) processCompletion(
 	ctx, span := s.startPunctual(ctx, conversationID, "engagement.complete",
 		telemetry.OrgID(orgID),
 		telemetry.TaskID(task.ID),
+		telemetry.Runtime(domain.ConversationRuntimeSDK),
 		telemetry.AgentCostUSD(completion.CostUSD),
 		telemetry.AgentDuration(int64(completion.DurationMs)),
 		telemetry.Count(completion.NumTurns))
@@ -988,6 +989,11 @@ func (s *Spawner) processCompletion(
 	// the terminal classification runs.
 	terminal := "open"
 	defer func() {
+		// Fenced means nothing was recorded, whichever write the fence
+		// refused, so it overrides whatever this exit had classified.
+		if fenced {
+			terminal = "fenced"
+		}
 		span.SetAttributes(telemetry.Outcome(terminal))
 		span.End()
 	}()
@@ -1013,7 +1019,6 @@ func (s *Spawner) processCompletion(
 	// lease lapses, and whoever picks the conversation up re-concludes it —
 	// one re-drive, against a write this engagement could not stand behind.
 	if leaseFenced(ctx) {
-		terminal = "fenced"
 		delegateLog.Warn("dropping a completion produced as the claim lease fenced; the conversation returns to the queue",
 			"conversation", conversationID, "claim_id", claimID, "org_id", orgID)
 		return true, true

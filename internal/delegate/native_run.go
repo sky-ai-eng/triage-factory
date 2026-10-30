@@ -24,6 +24,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
@@ -777,6 +778,26 @@ func (s *Spawner) recordNativeResult(
 	result agentloop.Result,
 	mirror *memoryMirror,
 ) (disp engagementDisposition) {
+	// The engagement's terminal span, processCompletion's on the other
+	// runtime: the same attributes, with the loop's own accounting as the
+	// run's figures. Every exit below names its outcome, except a fenced one:
+	// the fence can refuse a write inside any of the helpers below, and
+	// whichever write it refused, nothing was recorded.
+	ctx, span := s.startPunctual(ctx, conversationID, "engagement.complete",
+		telemetry.OrgID(orgID),
+		telemetry.TaskID(task.ID),
+		telemetry.Runtime(domain.ConversationRuntimeNative),
+		telemetry.AgentCostUSD(result.CostUSD),
+		telemetry.AgentDuration(int64(result.DurationMs)),
+		telemetry.Count(result.NumTurns))
+	var terminal string
+	defer func() {
+		if disp.fenced {
+			terminal = "fenced"
+		}
+		span.SetAttributes(telemetry.Outcome(terminal))
+		span.End()
+	}()
 	// A fenced engagement holds no claim, so its watchdog has nothing left to
 	// stop.
 	defer func() {
@@ -830,14 +851,17 @@ func (s *Spawner) recordNativeResult(
 		// tool call this cancel cut off — so handing the claim back with a
 		// snapshot of the tree is all a successor needs to carry on.
 		if shutdownCancelled(ctx) {
+			terminal = "shutdown"
 			return engagementDisposition{fenced: s.handBackOnShutdown(ctx, park, ""), handedBack: true}
 		}
 		// Nor is a provider that went silent. The watchdog stopped the call,
 		// not the work, so the conversation is handed back on the upstream
 		// schedule exactly as a provider that kept failing is.
 		if upstreamStalled(ctx) {
+			terminal = "upstream_unavailable"
 			return s.leaveOnUpstream(ctx, park, "", cfg.upstreamHandBacks, "the model provider sent nothing within its deadline", creatorUserID)
 		}
+		terminal = "open"
 		return engagementDisposition{fenced: s.parkConversationOpen(ctx, park, "")}
 
 	case agentloop.ResultFailed:
@@ -851,6 +875,7 @@ func (s *Spawner) recordNativeResult(
 		if leaseFenced(ctx) {
 			return engagementDisposition{fenced: true}
 		}
+		terminal = domain.StatusFailed + "_" + string(result.FailureKind)
 		mirror.settle(ctx)
 		reason := "native agent loop failed"
 		if result.Err != nil {
@@ -869,6 +894,7 @@ func (s *Spawner) recordNativeResult(
 		if leaseFenced(ctx) {
 			return engagementDisposition{fenced: true}
 		}
+		terminal = "upstream_unavailable"
 		lastErr := "model provider unavailable"
 		if result.Err != nil {
 			lastErr = result.Err.Error()
@@ -893,6 +919,7 @@ func (s *Spawner) recordNativeResult(
 		if leaseFenced(ctx) {
 			return engagementDisposition{fenced: true}
 		}
+		terminal = "jail_lost"
 		var lost *agentloop.ToolHostLostError
 		if !errors.As(result.Err, &lost) {
 			lost = &agentloop.ToolHostLostError{Reason: "the sandbox stopped unexpectedly", Err: result.Err}
@@ -916,6 +943,7 @@ func (s *Spawner) recordNativeResult(
 		if leaseFenced(ctx) {
 			return engagementDisposition{fenced: true}
 		}
+		terminal = "open"
 		return engagementDisposition{fenced: s.parkConversationOpen(ctx, liveParkContext{
 			orgID:          orgID,
 			conversationID: conversationID,
@@ -970,6 +998,7 @@ func (s *Spawner) recordNativeResult(
 	// what it has to say in the summary.
 	outcome := string(result.Outcome)
 	outcomeReason := result.OutcomeReason
+	terminal = "concluded_" + outcome
 
 	// The verdict parks the conversation `open` with the conclusion stamped:
 	// the step is concluded, the conversation is not, and the blueprint run
@@ -980,7 +1009,8 @@ func (s *Spawner) recordNativeResult(
 	//
 	// costUSD is zero here on purpose, and it is not a gap: the native
 	// runtime settles cost per assistant row at call time, so the ledger is
-	// already complete. Passing a lump would double-count.
+	// already complete. Passing a lump would double-count, result.CostUSD
+	// included: that is the same rows' sum, carried for the span alone.
 	bgCtx := context.WithoutCancel(ctx)
 	s.releaseActivity(conversationID, cfg.claimID)
 	updated, err := s.conversations.CompleteForClaimSystem(bgCtx, orgID, conversationID, cfg.claimID, domain.StatusOpen, 0, result.DurationMs, result.NumTurns, result.ResultSummary, outcome, outcomeReason, "")

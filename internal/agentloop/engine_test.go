@@ -1624,6 +1624,73 @@ func TestRun_CostIsStampedPerAssistantRowAndNullWhenUnpriceable(t *testing.T) {
 	}
 }
 
+// TestRun_CostUSDIsTheEngagementsLedgerSpend: the Result reports what this
+// engagement's rows record — every priced call it made, an unpriceable one
+// adding nothing — and nothing a previous engagement on the conversation
+// spent.
+func TestRun_CostUSDIsTheEngagementsLedgerSpend(t *testing.T) {
+	earlier := 5.0
+	tr := newMemTranscript(
+		domain.Message{Role: "user", Content: "the mission"},
+		domain.Message{Role: "assistant", Content: "an earlier engagement's turn", CostUSD: &earlier},
+		pendingUser("go on"),
+	)
+	seeded := len(tr.snapshot())
+	usage := inference.Usage{PromptTokens: 1000, OutputTokens: 200}
+	p := &scriptedProvider{turns: []scriptedTurn{
+		{calls: []domain.ToolCall{{ID: "c1", Name: "bash", Input: map[string]any{"cmd": "ls"}}}, usage: usage},
+		{calls: []domain.ToolCall{{ID: "c2", Name: "bash", Input: map[string]any{"cmd": "pwd"}}}, usage: usage,
+			model: "a-model-no-datasheet-carries"},
+		{text: "done", usage: inference.Usage{PromptTokens: 1500, OutputTokens: 50}},
+	}}
+	e := newTestEngine(tr, p, newScriptedToolHost())
+
+	got := e.Run(context.Background(), testParams())
+	if got.Kind != ResultConcluded {
+		t.Fatalf("disposition = %v (err: %v)", got.Kind, got.Err)
+	}
+	var priced int
+	for _, r := range tr.snapshot() {
+		if r.ID > seeded && r.Role == "assistant" && r.CostUSD != nil {
+			priced++
+		}
+	}
+	if priced != 2 {
+		t.Fatalf("priced assistant rows = %d, want 2 (the third call's model is unpriceable)", priced)
+	}
+	want := tr.ledgerSpend(seeded)
+	if want <= 0 {
+		t.Fatalf("the engagement's rows carry no cost (%v); the fixture must price its calls", want)
+	}
+	if math.Abs(got.CostUSD-want) > 1e-12 {
+		t.Errorf("CostUSD = %v, want %v, the sum of this engagement's rows", got.CostUSD, want)
+	}
+}
+
+// TestRun_CostUSDRidesANonConcludedExit: the figure is stamped once for every
+// exit, so an engagement that parks reports what it spent getting there.
+func TestRun_CostUSDRidesANonConcludedExit(t *testing.T) {
+	tr := newMemTranscript(pendingUser("go"))
+	usage := inference.Usage{PromptTokens: 1000, OutputTokens: 200}
+	p := &scriptedProvider{turns: []scriptedTurn{
+		{calls: []domain.ToolCall{{ID: "c1", Name: "bash", Input: map[string]any{"cmd": "ls"}}}, usage: usage},
+		{text: "I won't do that.", finish: "refusal", usage: usage},
+	}}
+	e := newTestEngine(tr, p, newScriptedToolHost())
+
+	got := e.Run(context.Background(), testParams())
+	if got.Kind != ResultParked {
+		t.Fatalf("disposition = %v (err: %v), want parked on the decline", got.Kind, got.Err)
+	}
+	want := tr.ledgerSpend(0)
+	if want <= 0 {
+		t.Fatalf("the engagement's rows carry no cost (%v); the fixture must price its calls", want)
+	}
+	if math.Abs(got.CostUSD-want) > 1e-12 {
+		t.Errorf("parked CostUSD = %v, want %v, the sum of the two calls it made", got.CostUSD, want)
+	}
+}
+
 // TestRun_TokenColumnsAreDisjoint pins the convention every reader of these
 // columns assumes: the four sum to the prompt exactly once. The neutral usage
 // counts prompt tokens inclusive of its cache buckets, so stamping it verbatim

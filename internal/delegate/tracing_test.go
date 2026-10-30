@@ -3,6 +3,7 @@ package delegate
 import (
 	"context"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -11,10 +12,14 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/storage"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -362,6 +367,174 @@ func TestPunctualSpanWithoutAnEngagementIsUnlinked(t *testing.T) {
 	}
 	if v := spanAttr(t, got[0], "conversation.id").AsString(); v != "run-orphan" {
 		t.Errorf("conversation.id = %q, want run-orphan", v)
+	}
+}
+
+// completionSpanFor is the one engagement.complete span conversationID's
+// terminal emitted.
+func completionSpanFor(t *testing.T, spans []sdktrace.ReadOnlySpan, conversationID string) sdktrace.ReadOnlySpan {
+	t.Helper()
+	var mine []sdktrace.ReadOnlySpan
+	for _, s := range spansNamed(spans, "engagement.complete") {
+		if spanAttr(t, s, "conversation.id").AsString() == conversationID {
+			mine = append(mine, s)
+		}
+	}
+	if len(mine) != 1 {
+		t.Fatalf("engagement.complete spans for %s = %d, want exactly 1 per terminal", conversationID, len(mine))
+	}
+	return mine[0]
+}
+
+// TestNativeTerminalEmitsEngagementComplete: the native runtime's terminal
+// emits the same span the SDK's does, so a deployment that runs every
+// delegation native still has one row per result. Every exit names its
+// outcome, none of them is an error status, and the run's figures are the
+// loop's own accounting.
+func TestNativeTerminalEmitsEngagementComplete(t *testing.T) {
+	cases := []struct {
+		name   string
+		cause  error // the claim context's cancellation cause; nil leaves it live
+		fenced bool  // the store refuses the claim-fenced terminal
+		res    agentloop.Result
+		want   string
+	}{
+		{name: "concluded", res: agentloop.Result{Kind: agentloop.ResultConcluded, Outcome: domain.ConversationOutcomeContinue, ResultSummary: "done"},
+			want: "concluded_continue"},
+		{name: "failed", res: agentloop.Result{Kind: agentloop.ResultFailed, FailureKind: domain.ConversationFailureAgentError, Err: errors.New("model call refused")},
+			want: "failed_agent_error"},
+		{name: "parked", res: agentloop.Result{Kind: agentloop.ResultParked}, want: "open"},
+		{name: "stopped", res: agentloop.Result{Kind: agentloop.ResultCancelled, Err: context.Canceled}, want: "open"},
+		{name: "lease fenced", cause: errClaimSelfFenced, res: agentloop.Result{Kind: agentloop.ResultConcluded, Outcome: domain.ConversationOutcomeFinish},
+			want: "fenced"},
+		{name: "park refused by the claim fence", fenced: true, res: agentloop.Result{Kind: agentloop.ResultParked}, want: "fenced"},
+		{name: "failure refused by the claim fence", fenced: true, res: agentloop.Result{Kind: agentloop.ResultFailed, FailureKind: domain.ConversationFailureAgentError, Err: errors.New("model call refused")},
+			want: "fenced"},
+		{name: "conclusion refused by the claim fence", fenced: true, res: agentloop.Result{Kind: agentloop.ResultConcluded, Outcome: domain.ConversationOutcomeFinish},
+			want: "fenced"},
+		{name: "claim released mid-flight", res: agentloop.Result{Kind: agentloop.ResultFailed, Err: fmt.Errorf("insert row: %w", db.ErrClaimReleased)},
+			want: "fenced"},
+		{name: "shutdown", cause: errDispatcherShutdown, res: agentloop.Result{Kind: agentloop.ResultCancelled, Err: context.Canceled},
+			want: "shutdown"},
+		{name: "upstream stalled", cause: errUpstreamStalled, res: agentloop.Result{Kind: agentloop.ResultCancelled, Err: context.Canceled},
+			want: "upstream_unavailable"},
+		{name: "upstream unavailable", res: agentloop.Result{Kind: agentloop.ResultUpstreamUnavailable, Err: errors.New("503 from the provider")},
+			want: "upstream_unavailable"},
+		{name: "jail lost", res: agentloop.Result{Kind: agentloop.ResultToolHostLost, Err: &agentloop.ToolHostLostError{Reason: "the sandbox stopped unexpectedly"}},
+			want: "jail_lost"},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			paths.SetForTest(t, t.TempDir())
+			setupGitTestEnv(t)
+			s, database, conversationID, taskID := setupAdvanceFixture(t, fmt.Sprintf("native-complete-%d", i))
+			blobs, err := storage.NewWorkspace()
+			if err != nil {
+				t.Fatalf("storage.NewWorkspace: %v", err)
+			}
+			s.SetStorage(blobs)
+			markNative(t, database, conversationID)
+			claimID := markEngaged(t, database, conversationID)
+			namespace := blueprintRunIDForConversation(t, database, conversationID)
+			task := loadTask(t, s, taskID)
+			if tc.fenced {
+				s.conversations = &fencedConversationStore{ConversationStore: s.conversations}
+			}
+
+			read := recordSpans(t)
+			_, done := s.beginEngagement(context.Background(), &domain.Conversation{
+				ID: conversationID, OrgID: runmode.LocalDefaultOrgID, TaskID: taskID, Runtime: domain.ConversationRuntimeNative,
+			})
+			defer done()
+			setup := s.engagementSpanContext(conversationID)
+
+			ctx := context.Background()
+			if tc.cause != nil {
+				var cancel context.CancelCauseFunc
+				ctx, cancel = context.WithCancelCause(ctx)
+				cancel(tc.cause)
+			}
+			res := tc.res
+			res.CostUSD, res.DurationMs, res.NumTurns = 0.4217, 81234, 7
+			disp := s.recordNativeResult(ctx, runmode.LocalDefaultOrgID, conversationID, task,
+				runConfig{orgID: runmode.LocalDefaultOrgID, claimID: claimID, blueprintRunID: namespace},
+				namespace, t.TempDir(), "manual", runmode.LocalDefaultUserID, time.Now(), res, nil)
+			if disp.fenced != (tc.want == "fenced") {
+				t.Fatalf("disposition fenced = %v, but the case expects outcome %q", disp.fenced, tc.want)
+			}
+
+			span := completionSpanFor(t, read(), conversationID)
+			if got := spanAttr(t, span, "outcome").AsString(); got != tc.want {
+				t.Errorf("outcome = %q, want %q", got, tc.want)
+			}
+			if got := spanAttr(t, span, "runtime").AsString(); got != domain.ConversationRuntimeNative {
+				t.Errorf("runtime = %q, want %q", got, domain.ConversationRuntimeNative)
+			}
+			if got := spanAttr(t, span, "agent.cost_usd").AsFloat64(); got != res.CostUSD {
+				t.Errorf("agent.cost_usd = %v, want the Result's %v", got, res.CostUSD)
+			}
+			if got := spanAttr(t, span, "agent.duration_ms").AsInt64(); got != int64(res.DurationMs) {
+				t.Errorf("agent.duration_ms = %d, want the Result's %d", got, res.DurationMs)
+			}
+			if got := spanAttr(t, span, "count").AsInt64(); got != int64(res.NumTurns) {
+				t.Errorf("count = %d, want the Result's %d turns", got, res.NumTurns)
+			}
+			if got := spanAttr(t, span, "task.id").AsString(); got != task.ID {
+				t.Errorf("task.id = %q, want %q", got, task.ID)
+			}
+			if got := spanAttr(t, span, "org.id").AsString(); got != runmode.LocalDefaultOrgID {
+				t.Errorf("org.id = %q, want %q", got, runmode.LocalDefaultOrgID)
+			}
+			if span.Status().Code == codes.Error {
+				t.Errorf("status = error (%q); every terminal is a disposition, read from the outcome attribute", span.Status().Description)
+			}
+			if links := span.Links(); len(links) != 1 || links[0].SpanContext.SpanID() != setup.SpanID() {
+				t.Errorf("links = %v, want one back to the engagement's setup span %v", links, setup.SpanID())
+			}
+		})
+	}
+}
+
+// TestSDKTerminalNamesItsRuntime: the SDK terminal carries runtime too, so
+// one panel tells the two apart, and a conclusion the claim fence refused is
+// fenced on this runtime as on the native one.
+func TestSDKTerminalNamesItsRuntime(t *testing.T) {
+	cases := []struct {
+		name   string
+		body   string
+		fenced bool
+		want   string
+	}{
+		{name: "concluded", body: `{"outcome":"finish","summary":"shipped it"}`, want: "concluded_finish"},
+		{name: "terminal refused by the claim fence", body: `{"outcome":"finish","summary":"shipped it"}`, fenced: true, want: "fenced"},
+		{name: "idle park refused by the claim fence", body: "just thinking out loud, no envelope here", fenced: true, want: "fenced"},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, database, conversationID, taskID := setupAdvanceFixture(t, fmt.Sprintf("sdk-complete-%d", i))
+			claimID := holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID)
+			if tc.fenced {
+				s.conversations = &fencedConversationStore{ConversationStore: s.conversations}
+			}
+			bpr := blueprintRunIDForConversation(t, database, conversationID)
+
+			read := recordSpans(t)
+			completion := res(tc.body)
+			completion.CostUSD, completion.DurationMs, completion.NumTurns = 0.137, 4200, 3
+			s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, claimID,
+				loadTask(t, s, taskID), completion, t.TempDir(), nil, "", "event", "")
+
+			span := completionSpanFor(t, read(), conversationID)
+			if got := spanAttr(t, span, "runtime").AsString(); got != domain.ConversationRuntimeSDK {
+				t.Errorf("runtime = %q, want %q", got, domain.ConversationRuntimeSDK)
+			}
+			if got := spanAttr(t, span, "outcome").AsString(); got != tc.want {
+				t.Errorf("outcome = %q, want %q", got, tc.want)
+			}
+			if got := spanAttr(t, span, "agent.cost_usd").AsFloat64(); got != completion.CostUSD {
+				t.Errorf("agent.cost_usd = %v, want %v", got, completion.CostUSD)
+			}
+		})
 	}
 }
 

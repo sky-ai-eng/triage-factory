@@ -117,7 +117,7 @@ func warmCacheLive(rows []domain.Message) bool {
 // previous engagement left, and queued input stays queued through it. A
 // warm-cache resume (a fast retry) defers to the loop's own trip instead of
 // paying a full-price re-read the warm path exists to avoid.
-func (e *Engine) compactOnResume(ctx context.Context, params Params) error {
+func (e *Engine) compactOnResume(ctx context.Context, params Params, spent *spend) error {
 	rows, err := e.Transcript.ListForAssembly(ctx, params.OrgID, params.ConversationID)
 	if err != nil {
 		return err
@@ -128,7 +128,7 @@ func (e *Engine) compactOnResume(ctx context.Context, params Params) error {
 	if warmCacheLive(rows) {
 		return nil
 	}
-	return e.compactCold(ctx, params)
+	return e.compactCold(ctx, params, spent)
 }
 
 // compactWindowFull is the reactive arm's dispatcher: warm semantics while
@@ -139,15 +139,15 @@ func (e *Engine) compactOnResume(ctx context.Context, params Params) error {
 // mid-generation at the wall. The two differ only in whether a partial
 // message came back with the news; what they say about the transcript, and
 // therefore the remedy, is identical.
-func (e *Engine) compactWindowFull(ctx context.Context, params Params) error {
+func (e *Engine) compactWindowFull(ctx context.Context, params Params, spent *spend) error {
 	rows, err := e.Transcript.ListForAssembly(ctx, params.OrgID, params.ConversationID)
 	if err != nil {
 		return err
 	}
 	if warmCacheLive(rows) {
-		return e.compactWarm(ctx, params)
+		return e.compactWarm(ctx, params, spent)
 	}
-	return e.compactCold(ctx, params)
+	return e.compactCold(ctx, params, spent)
 }
 
 // compactWarm runs the model's own summarize turn on the hot cache.
@@ -160,7 +160,7 @@ func (e *Engine) compactWindowFull(ctx context.Context, params Params) error {
 // forced-shape call rather than re-asking — a model that ignored the request
 // once will likely ignore it again, and a retry burns latency on a cache
 // that is about to be invalidated anyway.
-func (e *Engine) compactWarm(ctx context.Context, params Params) error {
+func (e *Engine) compactWarm(ctx context.Context, params Params, spent *spend) error {
 	rows, err := e.Transcript.ListForAssembly(ctx, params.OrgID, params.ConversationID)
 	if err != nil {
 		return err
@@ -206,7 +206,7 @@ func (e *Engine) compactWarm(ctx context.Context, params Params) error {
 	if err != nil {
 		if errors.Is(err, inference.ErrContextOverflow) {
 			// The ask itself did not fit; the cache is forfeit regardless now.
-			return e.compactCold(ctx, params)
+			return e.compactCold(ctx, params, spent)
 		}
 		return err
 	}
@@ -227,9 +227,10 @@ func (e *Engine) compactWarm(ctx context.Context, params Params) error {
 			costUSD, failReason); err != nil {
 			return fmt.Errorf("settle failed compaction attempt: %w", err)
 		}
+		spent.add(costUSD)
 		e.info("warm compaction attempt failed; handing off to the forced-shape call",
 			"conversation", params.ConversationID, "reason", failReason)
-		return e.compactCold(ctx, params)
+		return e.compactCold(ctx, params, spent)
 	}
 
 	// Success: the reply is a genuine transcript event — persist it like any
@@ -239,6 +240,7 @@ func (e *Engine) compactWarm(ctx context.Context, params Params) error {
 	if err != nil {
 		return err
 	}
+	spent.add(replyRow.CostUSD)
 	span := append(compactionSpan(rows), replyRow.ID)
 	return e.commitCompaction(ctx, params, nil, summary, span)
 }
@@ -246,7 +248,7 @@ func (e *Engine) compactWarm(ctx context.Context, params Params) error {
 // compactCold is the forced-shape call: nothing inherited, nothing that can
 // fail on format. A dedicated system prompt, the cheapest enabled model, and
 // exactly one tool the call is forced to use — the schema is the parse.
-func (e *Engine) compactCold(ctx context.Context, params Params) error {
+func (e *Engine) compactCold(ctx context.Context, params Params, spent *spend) error {
 	rows, err := e.Transcript.ListForAssembly(ctx, params.OrgID, params.ConversationID)
 	if err != nil {
 		return err
@@ -314,7 +316,11 @@ func (e *Engine) compactCold(ctx context.Context, params Params) error {
 	}
 
 	span := compactionSpan(rows)
-	return e.commitCompaction(ctx, params, replyRow, summary, span)
+	if err := e.commitCompaction(ctx, params, replyRow, summary, span); err != nil {
+		return err
+	}
+	spent.add(replyRow.CostUSD)
+	return nil
 }
 
 // commitCompaction composes the result row and commits the whole compaction

@@ -55,6 +55,20 @@ func (e *Engine) persistAssistant(ctx context.Context, params Params, completion
 	return row, nil
 }
 
+// spend is one engagement's running cost, the figure Result.CostUSD reports.
+// Each write that lands a priced row adds that row's cost once the write has
+// succeeded, so the total tracks what the ledger holds rather than what was
+// attempted.
+type spend float64
+
+// add counts one row's cost. A NULL cost is an unpriceable call and adds
+// nothing, the way SUM skips it.
+func (s *spend) add(cost *float64) {
+	if cost != nil {
+		*s += spend(*cost)
+	}
+}
+
 // modelForRow prefers the model the provider reported serving over the one
 // requested: an inference profile or an alias can resolve to a concrete id,
 // and the ledger should record what was actually billed.
