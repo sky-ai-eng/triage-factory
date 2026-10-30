@@ -8,6 +8,8 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
@@ -28,6 +30,39 @@ func TestTracedTransportPassesThroughOutsideATrace(t *testing.T) {
 	if got := <-seen; got != "" {
 		t.Errorf("upstream saw traceparent %q on a parentless request, want none", got)
 	}
+}
+
+// TestTracedTransportRecordsMetricsOutsideATrace covers what the span rule
+// must not take with it. Tracing is off by default while multi mode serves
+// metrics by default, so with no valid span anywhere, a rule that also
+// skipped otelhttp's metrics would flatline every outbound latency series.
+func TestTracedTransportRecordsMetricsOutsideATrace(t *testing.T) {
+	_, srv, seen := tracedTransportFixture(t)
+	prevMeter := otel.GetMeterProvider()
+	t.Cleanup(func() { otel.SetMeterProvider(prevMeter) })
+	reader := sdkmetric.NewManualReader()
+	otel.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+
+	getThroughTracedTransport(t, context.Background(), srv)
+	<-seen
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "http.client.request.duration" {
+				continue
+			}
+			hist, ok := m.Data.(metricdata.Histogram[float64])
+			if !ok || len(hist.DataPoints) == 0 || hist.DataPoints[0].Count != 1 {
+				t.Fatalf("http.client.request.duration = %+v, want one recorded request", m.Data)
+			}
+			return
+		}
+	}
+	t.Fatal("a parentless request recorded no http.client.request.duration")
 }
 
 // TestTracedTransportTracesInsideATrace is the other half: under a

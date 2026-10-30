@@ -19,15 +19,7 @@ import (
 // the whole reason the instrumentation sits at the driver, and the type
 // system can't check it.
 func TestOpenTracedNestsStatementSpansUnderCaller(t *testing.T) {
-	recorder := tracetest.NewSpanRecorder()
-	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
-	t.Cleanup(func() { otel.SetTracerProvider(noop.NewTracerProvider()) })
-
-	handle, err := OpenTraced("sqlite", filepath.Join(t.TempDir(), "trace.db"), PoolLocal)
-	if err != nil {
-		t.Fatalf("OpenTraced: %v", err)
-	}
-	defer handle.Close()
+	recorder, handle := openTracedForTest(t)
 
 	ctx, parent := otel.Tracer("db/test").Start(context.Background(), "caller")
 	if _, err := handle.ExecContext(ctx, `CREATE TABLE t (id INTEGER PRIMARY KEY)`); err != nil {
@@ -67,15 +59,7 @@ func TestOpenTracedNestsStatementSpansUnderCaller(t *testing.T) {
 // TestOpenTracedSuppressesPingSpans covers the option that keeps /readyz
 // from drowning the backend.
 func TestOpenTracedSuppressesPingSpans(t *testing.T) {
-	recorder := tracetest.NewSpanRecorder()
-	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
-	t.Cleanup(func() { otel.SetTracerProvider(noop.NewTracerProvider()) })
-
-	handle, err := OpenTraced("sqlite", filepath.Join(t.TempDir(), "ping.db"), PoolLocal)
-	if err != nil {
-		t.Fatalf("OpenTraced: %v", err)
-	}
-	defer handle.Close()
+	recorder, handle := openTracedForTest(t)
 
 	ctx, parent := otel.Tracer("db/test").Start(context.Background(), "caller")
 	if err := handle.PingContext(ctx); err != nil {
@@ -99,12 +83,12 @@ func TestOpenTracedRecordsNothingOutsideATrace(t *testing.T) {
 
 	exerciseTracedHandle(t, context.Background(), handle)
 
-	if n := len(recorder.Started()); n != 0 {
+	if started := recorder.Started(); len(started) != 0 {
 		var names []string
-		for _, s := range recorder.Ended() {
+		for _, s := range started {
 			names = append(names, s.Name())
 		}
-		t.Fatalf("parentless statements started %d spans %v, want 0; each would export as its own root trace", n, names)
+		t.Fatalf("parentless statements started %d spans %v, want 0; each would export as its own root trace", len(started), names)
 	}
 }
 
@@ -145,7 +129,7 @@ func openTracedForTest(t *testing.T) (*tracetest.SpanRecorder, *sql.DB) {
 	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
 	t.Cleanup(func() { otel.SetTracerProvider(noop.NewTracerProvider()) })
 
-	handle, err := OpenTraced("sqlite", filepath.Join(t.TempDir(), "filter.db"), PoolLocal)
+	handle, err := OpenTraced("sqlite", filepath.Join(t.TempDir(), "trace.db"), PoolLocal)
 	if err != nil {
 		t.Fatalf("OpenTraced: %v", err)
 	}

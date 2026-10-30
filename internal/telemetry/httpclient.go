@@ -1,11 +1,13 @@
 package telemetry
 
 import (
+	"context"
 	"net/http"
 	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/embedded"
 )
 
 // TracedTransport wraps an outbound RoundTripper so every request made
@@ -25,23 +27,44 @@ import (
 // path that builds its request differently — including direct-Do calls
 // that skip a client's usual request helper.
 //
-// A request whose ctx carries no span passes straight through: no span and
-// no traceparent header. A client span exists only inside a trace a TF
-// stage root opened, so a call from an untraced background pass never
-// becomes a one-span trace of its own. The test is IsValid, not IsSampled:
-// an unsampled parent's children are the sampler's to drop.
+// A request whose ctx carries no span gets no span and no traceparent
+// header. A client span exists only inside a trace a TF stage root opened,
+// so a call from an untraced background pass never becomes a one-span
+// trace of its own. The test is IsValid, not IsSampled: an unsampled
+// parent's children are the sampler's to drop.
 func TracedTransport(base http.RoundTripper, upstream string) http.RoundTripper {
 	name := upstream + ".http"
 	if base == nil {
 		base = sharedTransport
 	}
 	return otelhttp.NewTransport(base,
-		otelhttp.WithTracerProvider(ScrubbedTracerProvider()),
+		otelhttp.WithTracerProvider(childOnlyProvider{inner: ScrubbedTracerProvider()}),
 		otelhttp.WithSpanNameFormatter(func(string, *http.Request) string { return name }),
-		otelhttp.WithFilter(func(r *http.Request) bool {
-			return trace.SpanContextFromContext(r.Context()).IsValid()
-		}),
 	)
+}
+
+// childOnlyProvider applies the rule above at the tracer rather than
+// through otelhttp.WithFilter, because a filtered request also skips
+// otelhttp's client metrics. With tracing off, which is the default, no
+// ctx carries a valid span, so a filter would stop every outbound latency
+// series. Returning the ctx's own span leaves nothing for the propagator
+// to inject, and the request still reaches RecordMetrics.
+type childOnlyProvider struct {
+	embedded.TracerProvider
+	inner trace.TracerProvider
+}
+
+func (p childOnlyProvider) Tracer(name string, opts ...trace.TracerOption) trace.Tracer {
+	return childOnlyTracer{Tracer: p.inner.Tracer(name, opts...)}
+}
+
+type childOnlyTracer struct{ trace.Tracer }
+
+func (t childOnlyTracer) Start(ctx context.Context, name string, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
+	if !trace.SpanContextFromContext(ctx).IsValid() {
+		return ctx, trace.SpanFromContext(ctx)
+	}
+	return t.Tracer.Start(ctx, name, opts...)
 }
 
 // TracedHTTPClient is the convenience form for the common case: a
