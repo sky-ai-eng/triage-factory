@@ -75,5 +75,3 @@ a separate deployment.
 
 - [Security overview](security-overview.md)
 - [Self-hosting](../self-hosting/install.md)
-- [`specs/multi-tenant-architecture.html`](../../../specs/multi-tenant-architecture.html):
-  the original multi-tenant design; not kept current

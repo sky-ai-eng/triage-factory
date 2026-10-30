@@ -13,7 +13,7 @@ import (
 // NEVER pass Stores to a handler. Handlers depend only on the
 // specific interfaces they consume (db.ScoreStore, db.TaskStore, …).
 // The bundle exists for main.go wiring and for the WithTx wrapper —
-// nothing else. See specs/sky-246-d2-store-abstraction.html §5.
+// nothing else.
 //
 // A single-row Insert/Update/Upsert returns the row it persisted, off
 // RETURNING on the write statement, sharing the point read's column list and
