@@ -1,11 +1,14 @@
 package db
 
 import (
+	"context"
 	"database/sql"
+	"database/sql/driver"
 
 	"github.com/XSAM/otelsql"
 	"go.opentelemetry.io/otel/attribute"
 	semconv "go.opentelemetry.io/otel/semconv/v1.34.0"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // PoolAdmin, PoolApp, and PoolLocal name the connection pools a TF process
@@ -58,16 +61,23 @@ func RegisterPoolMetrics(handle *sql.DB, driverName, pool string) error {
 func tracedDriverOptions(driverName, pool string) []otelsql.Option {
 	return []otelsql.Option{
 		otelsql.WithAttributes(append(dbSystemAttrs(driverName), poolKey.String(pool))...),
-		// The four below are all "this would drown out the real spans, or
-		// mislead": a span per /readyz ping, an event per result row, an
-		// error status for driver.ErrSkip (a routine "I don't implement
-		// that fast path" negotiation), and pool bookkeeping that attaches
-		// to no caller's trace.
+		// The four flags below are all "this would drown out the real
+		// spans, or mislead": a span per /readyz ping, an event per result
+		// row, an error status for driver.ErrSkip (a routine "I don't
+		// implement that fast path" negotiation), and pool bookkeeping
+		// that attaches to no caller's trace. SpanFilter drops a statement
+		// whose ctx carries no span, because roots are TF's pipeline
+		// stages and every idle scan-loop tick would otherwise export as a
+		// one-span trace of its own (IsValid, not IsSampled: dropping an
+		// unsampled parent's children is the sampler's call).
 		otelsql.WithSpanOptions(otelsql.SpanOptions{
 			Ping:                 false,
 			RowsNext:             false,
 			DisableErrSkip:       true,
 			OmitConnResetSession: true,
+			SpanFilter: func(ctx context.Context, _ otelsql.Method, _ string, _ []driver.NamedValue) bool {
+				return trace.SpanContextFromContext(ctx).IsValid()
+			},
 		}),
 	}
 }

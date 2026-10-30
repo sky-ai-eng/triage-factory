@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 
@@ -86,5 +87,99 @@ func TestOpenTracedSuppressesPingSpans(t *testing.T) {
 		if s.Name() == "sql.conn.ping" {
 			t.Error("a ping produced a span; /readyz pings would out-number every other span in the process")
 		}
+	}
+}
+
+// TestOpenTracedRecordsNothingOutsideATrace covers the rule that a
+// statement span exists only inside a trace something else opened. Every
+// scan-loop tick runs on a ctx with no span, and without the filter each
+// of its statements exports as a one-span trace of its own.
+func TestOpenTracedRecordsNothingOutsideATrace(t *testing.T) {
+	recorder, handle := openTracedForTest(t)
+
+	exerciseTracedHandle(t, context.Background(), handle)
+
+	if n := len(recorder.Started()); n != 0 {
+		var names []string
+		for _, s := range recorder.Ended() {
+			names = append(names, s.Name())
+		}
+		t.Fatalf("parentless statements started %d spans %v, want 0; each would export as its own root trace", n, names)
+	}
+}
+
+// TestOpenTracedRecordsEveryStatementInsideATrace is the other half of
+// the filter: the same calls under a caller's span keep every span they
+// had, parented to it. The commit is the case worth naming — otelsql
+// tests it against the ctx BeginTx was given, so a filter that read the
+// wrong ctx would drop it silently.
+func TestOpenTracedRecordsEveryStatementInsideATrace(t *testing.T) {
+	recorder, handle := openTracedForTest(t)
+
+	ctx, parent := otel.Tracer("db/test").Start(context.Background(), "caller")
+	exerciseTracedHandle(t, ctx, handle)
+	parent.End()
+
+	parented := map[string]bool{}
+	for _, s := range recorder.Ended() {
+		if s.Parent().SpanID() == parent.SpanContext().SpanID() {
+			parented[s.Name()] = true
+		}
+	}
+	for _, want := range []string{
+		"sql.conn.exec",
+		"sql.conn.query",
+		"sql.rows",
+		"sql.conn.begin_tx",
+		"sql.tx.commit",
+	} {
+		if !parented[want] {
+			t.Errorf("no %s span parented to the caller's span", want)
+		}
+	}
+}
+
+func openTracedForTest(t *testing.T) (*tracetest.SpanRecorder, *sql.DB) {
+	t.Helper()
+	recorder := tracetest.NewSpanRecorder()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
+	t.Cleanup(func() { otel.SetTracerProvider(noop.NewTracerProvider()) })
+
+	handle, err := OpenTraced("sqlite", filepath.Join(t.TempDir(), "filter.db"), PoolLocal)
+	if err != nil {
+		t.Fatalf("OpenTraced: %v", err)
+	}
+	t.Cleanup(func() { handle.Close() })
+	return recorder, handle
+}
+
+// exerciseTracedHandle runs one of each statement shape a store issues: a
+// bare exec, a query whose rows are iterated, and a committed transaction.
+func exerciseTracedHandle(t *testing.T, ctx context.Context, handle *sql.DB) {
+	t.Helper()
+	if _, err := handle.ExecContext(ctx, `CREATE TABLE t (id INTEGER PRIMARY KEY)`); err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+
+	rows, err := handle.QueryContext(ctx, `SELECT id FROM t`)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	for rows.Next() {
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+	rows.Close()
+
+	tx, err := handle.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO t (id) VALUES (1)`); err != nil {
+		t.Fatalf("tx exec: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
 	}
 }
