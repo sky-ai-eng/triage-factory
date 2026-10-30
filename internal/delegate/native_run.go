@@ -24,6 +24,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
@@ -777,6 +778,21 @@ func (s *Spawner) recordNativeResult(
 	result agentloop.Result,
 	mirror *memoryMirror,
 ) (disp engagementDisposition) {
+	// The engagement's terminal span, processCompletion's on the other
+	// runtime: the same attributes, with the loop's own accounting as the
+	// run's figures. Every exit below names its outcome.
+	ctx, span := s.startPunctual(ctx, conversationID, "engagement.complete",
+		telemetry.OrgID(orgID),
+		telemetry.TaskID(task.ID),
+		telemetry.Runtime(domain.ConversationRuntimeNative),
+		telemetry.AgentCostUSD(result.CostUSD),
+		telemetry.AgentDuration(int64(result.DurationMs)),
+		telemetry.Count(result.NumTurns))
+	var terminal string
+	defer func() {
+		span.SetAttributes(telemetry.Outcome(terminal))
+		span.End()
+	}()
 	// A fenced engagement holds no claim, so its watchdog has nothing left to
 	// stop.
 	defer func() {
@@ -799,6 +815,7 @@ func (s *Spawner) recordNativeResult(
 	// the refusal IS the record, and writing a terminal here is exactly what
 	// the fence exists to prevent.
 	if result.Err != nil && errors.Is(result.Err, db.ErrClaimReleased) {
+		terminal = "fenced"
 		delegateLog.Error("engagement fenced out mid-flight; a successor owns the conversation",
 			"conversation", conversationID, "claim", cfg.claimID, "error", result.Err)
 		return engagementDisposition{fenced: true}
@@ -810,6 +827,7 @@ func (s *Spawner) recordNativeResult(
 		// must not be recorded the same way: ownership is gone, so this
 		// engagement writes nothing.
 		if leaseFenced(ctx) {
+			terminal = "fenced"
 			delegateLog.Info("engagement fenced by its claim lease; the conversation awaits takeover",
 				"conversation", conversationID, "claim", cfg.claimID)
 			return engagementDisposition{fenced: true}
@@ -830,14 +848,17 @@ func (s *Spawner) recordNativeResult(
 		// tool call this cancel cut off — so handing the claim back with a
 		// snapshot of the tree is all a successor needs to carry on.
 		if shutdownCancelled(ctx) {
+			terminal = "shutdown"
 			return engagementDisposition{fenced: s.handBackOnShutdown(ctx, park, ""), handedBack: true}
 		}
 		// Nor is a provider that went silent. The watchdog stopped the call,
 		// not the work, so the conversation is handed back on the upstream
 		// schedule exactly as a provider that kept failing is.
 		if upstreamStalled(ctx) {
+			terminal = "upstream_unavailable"
 			return s.leaveOnUpstream(ctx, park, "", cfg.upstreamHandBacks, "the model provider sent nothing within its deadline", creatorUserID)
 		}
+		terminal = "open"
 		return engagementDisposition{fenced: s.parkConversationOpen(ctx, park, "")}
 
 	case agentloop.ResultFailed:
@@ -849,8 +870,10 @@ func (s *Spawner) recordNativeResult(
 		// lease fence can land after that check. A fenced engagement records
 		// no terminal, failures included.
 		if leaseFenced(ctx) {
+			terminal = "fenced"
 			return engagementDisposition{fenced: true}
 		}
+		terminal = domain.StatusFailed + "_" + string(result.FailureKind)
 		mirror.settle(ctx)
 		reason := "native agent loop failed"
 		if result.Err != nil {
@@ -867,8 +890,10 @@ func (s *Spawner) recordNativeResult(
 		// from the call that failed. Once it is spent the conversation parks
 		// for a person, the way a stop does.
 		if leaseFenced(ctx) {
+			terminal = "fenced"
 			return engagementDisposition{fenced: true}
 		}
+		terminal = "upstream_unavailable"
 		lastErr := "model provider unavailable"
 		if result.Err != nil {
 			lastErr = result.Err.Error()
@@ -891,8 +916,10 @@ func (s *Spawner) recordNativeResult(
 		// on this host. The conversation goes on in a new cell while the jail
 		// budget lasts.
 		if leaseFenced(ctx) {
+			terminal = "fenced"
 			return engagementDisposition{fenced: true}
 		}
+		terminal = "jail_lost"
 		var lost *agentloop.ToolHostLostError
 		if !errors.As(result.Err, &lost) {
 			lost = &agentloop.ToolHostLostError{Reason: "the sandbox stopped unexpectedly", Err: result.Err}
@@ -914,8 +941,10 @@ func (s *Spawner) recordNativeResult(
 		// resumable either way, so the snapshot must exist by the time the
 		// status commits — parkConversationOpen owns that ordering.
 		if leaseFenced(ctx) {
+			terminal = "fenced"
 			return engagementDisposition{fenced: true}
 		}
+		terminal = "open"
 		return engagementDisposition{fenced: s.parkConversationOpen(ctx, liveParkContext{
 			orgID:          orgID,
 			conversationID: conversationID,
@@ -938,6 +967,7 @@ func (s *Spawner) recordNativeResult(
 	// the claim would land a full conclusion anyway. Drop it: the session and
 	// the tree survive, and whoever takes the conversation over concludes it.
 	if leaseFenced(ctx) {
+		terminal = "fenced"
 		delegateLog.Warn("dropping a conclusion produced as the claim lease fenced; the conversation returns to the queue",
 			"conversation", conversationID, "claim", cfg.claimID)
 		return engagementDisposition{fenced: true}
@@ -970,6 +1000,7 @@ func (s *Spawner) recordNativeResult(
 	// what it has to say in the summary.
 	outcome := string(result.Outcome)
 	outcomeReason := result.OutcomeReason
+	terminal = "concluded_" + outcome
 
 	// The verdict parks the conversation `open` with the conclusion stamped:
 	// the step is concluded, the conversation is not, and the blueprint run
@@ -980,12 +1011,14 @@ func (s *Spawner) recordNativeResult(
 	//
 	// costUSD is zero here on purpose, and it is not a gap: the native
 	// runtime settles cost per assistant row at call time, so the ledger is
-	// already complete. Passing a lump would double-count.
+	// already complete. Passing a lump would double-count, result.CostUSD
+	// included: that is the same rows' sum, carried for the span alone.
 	bgCtx := context.WithoutCancel(ctx)
 	s.releaseActivity(conversationID, cfg.claimID)
 	updated, err := s.conversations.CompleteForClaimSystem(bgCtx, orgID, conversationID, cfg.claimID, domain.StatusOpen, 0, result.DurationMs, result.NumTurns, result.ResultSummary, outcome, outcomeReason, "")
 	if err != nil {
 		if errors.Is(err, db.ErrClaimReleased) {
+			terminal = "fenced"
 			delegateLog.Error("engagement fenced out at conclusion; a successor owns the conversation",
 				"conversation", conversationID, "claim", cfg.claimID)
 			return engagementDisposition{fenced: true}

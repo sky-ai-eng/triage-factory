@@ -266,6 +266,13 @@ type Result struct {
 	FailureKind   domain.ConversationFailureKind
 	NumTurns      int
 	DurationMs    int
+	// CostUSD is this engagement's spend: the cost of every priced row it
+	// wrote, so it equals SUM(messages.cost_usd) over them, and an unpriceable
+	// call adds nothing, as it adds nothing to that sum. Every Kind carries
+	// it, because a parked or failed engagement paid for its calls as much as
+	// a concluded one. It is a report of what the rows already record, never
+	// a figure to record again.
+	CostUSD float64
 	// ParkNotice is the user-visible reason a guard parked the engagement.
 	ParkNotice string
 	// Err carries the underlying cause on ResultFailed,
@@ -349,8 +356,14 @@ type Logger interface {
 // compaction as live input) → drain (the only door input enters through) →
 // guards (before every call, not every turn) → assemble → credentials →
 // stream → persist → stop-reason handling → tool dispatch → would-stop.
-func (e *Engine) Run(ctx context.Context, params Params) Result {
+func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 	started := time.Now()
+
+	// The engagement's spend, in this frame because the Engine is shared
+	// across engagements. Stamped by one deferred assignment so every exit
+	// carries it, whichever Result it returns.
+	var spent spend
+	defer func() { result.CostUSD = float64(spent) }()
 
 	// Policy into the jail, before anything can dispatch a tool. One frame,
 	// once per engagement — the host holds it for the life of the connection.
@@ -367,7 +380,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 	// repair → compact → drain → call, so the summarize call reads exactly
 	// what the previous engagement left and queued input stays queued
 	// through it.
-	if err := e.compactOnResume(ctx, params); err != nil {
+	if err := e.compactOnResume(ctx, params, &spent); err != nil {
 		if ctx.Err() != nil {
 			return e.cancelled(ctx, started, 0)
 		}
@@ -428,7 +441,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 			return e.failed(ctx, started, turn, fmt.Errorf("list rows for compaction trip: %w", err))
 		}
 		if e.compactionDue(params, preRows) {
-			if err := e.compactWarm(ctx, params); err != nil {
+			if err := e.compactWarm(ctx, params, &spent); err != nil {
 				if ctx.Err() != nil {
 					return e.cancelled(ctx, started, turn)
 				}
@@ -501,7 +514,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 			// this call exactly once.
 			if errors.Is(err, inference.ErrContextOverflow) && !reactiveCompacted {
 				reactiveCompacted = true
-				if cerr := e.compactWindowFull(ctx, params); cerr == nil {
+				if cerr := e.compactWindowFull(ctx, params, &spent); cerr == nil {
 					continue
 				} else if ctx.Err() != nil {
 					return e.cancelled(ctx, started, turn)
@@ -547,6 +560,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		if err != nil {
 			return e.failed(ctx, started, turn, fmt.Errorf("persist assistant message: %w", err))
 		}
+		spent.add(assistantRow.CostUSD)
 		lastText = assistantRow.Content
 		calls := assistantRow.ToolCalls
 
@@ -636,7 +650,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 			}
 			e.warn("model call stopped at the context window wall; compacting",
 				"conversation", params.ConversationID, "model", params.Model, "max_tokens", maxTokens)
-			if err := e.compactWindowFull(ctx, params); err != nil {
+			if err := e.compactWindowFull(ctx, params, &spent); err != nil {
 				if ctx.Err() != nil {
 					return e.cancelled(ctx, started, turn)
 				}

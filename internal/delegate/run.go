@@ -981,6 +981,7 @@ func (s *Spawner) processCompletion(
 	ctx, span := s.startPunctual(ctx, conversationID, "engagement.complete",
 		telemetry.OrgID(orgID),
 		telemetry.TaskID(task.ID),
+		telemetry.Runtime(domain.ConversationRuntimeSDK),
 		telemetry.AgentCostUSD(completion.CostUSD),
 		telemetry.AgentDuration(int64(completion.DurationMs)),
 		telemetry.Count(completion.NumTurns))
@@ -1202,6 +1203,7 @@ func (s *Spawner) processCompletion(
 	s.releaseActivity(conversationID, claimID)
 	completedRow, completeErr := s.conversations.CompleteForClaimSystem(bgCtx, orgID, conversationID, claimID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, resultSummary, outcome, outcomeReason, string(failureKind))
 	if errors.Is(completeErr, db.ErrClaimReleased) {
+		terminal = "fenced"
 		// A successor owns the conversation, so this result is not the run's
 		// disposition — it is the output of an engagement that lost its
 		// claim. Recording it would overwrite live work with a stale

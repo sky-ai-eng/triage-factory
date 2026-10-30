@@ -204,6 +204,19 @@ func (t *memTranscript) snapshot() []domain.Message {
 	return append([]domain.Message(nil), t.rows...)
 }
 
+// ledgerSpend is SUM(cost_usd) over the rows with an id above afterID — the
+// figure an engagement that started after row afterID has to report. A NULL
+// cost adds nothing, as it adds nothing to the store's sum.
+func (t *memTranscript) ledgerSpend(afterID int) float64 {
+	var sum float64
+	for _, r := range t.snapshot() {
+		if r.ID > afterID && r.CostUSD != nil {
+			sum += *r.CostUSD
+		}
+	}
+	return sum
+}
+
 // find returns the first row matching pred, or nil.
 func (t *memTranscript) find(pred func(domain.Message) bool) *domain.Message {
 	for _, r := range t.snapshot() {

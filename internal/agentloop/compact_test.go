@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -493,6 +494,63 @@ func TestColdResume_CompactsBeforeTheFirstCall(t *testing.T) {
 	queued := tr.find(func(m domain.Message) bool { return strings.Contains(m.Content, "queued overnight") })
 	if queued == nil || !isDelivered(*queued) || queued.Seq == nil || *queued.Seq <= float64(resultRow.ID) {
 		t.Fatalf("queued row = %+v, want delivered after the result row %d", queued, resultRow.ID)
+	}
+}
+
+// TestCompaction_CostCountsTowardTheEngagementsSpend: a summarize call is one
+// of the engagement's calls, so Result.CostUSD includes it on every path that
+// prices one — the warm reply, a failed warm attempt settled on its request
+// row, and the forced-shape reply — and still equals the ledger's sum.
+func TestCompaction_CostCountsTowardTheEngagementsSpend(t *testing.T) {
+	usage := inference.Usage{PromptTokens: 2000, OutputTokens: 300}
+	priced := func(turn scriptedTurn) scriptedTurn {
+		turn.usage = usage
+		return turn
+	}
+	recent, old := time.Now().UTC(), time.Now().UTC().Add(-time.Hour)
+	cases := map[string]struct {
+		at    time.Time
+		turns []scriptedTurn
+	}{
+		"warm": {recent, []scriptedTurn{
+			priced(summaryReply("everything that happened")),
+			priced(scriptedTurn{text: "done"}),
+		}},
+		"warm attempt fails, forced shape": {recent, []scriptedTurn{
+			priced(scriptedTurn{calls: []domain.ToolCall{{ID: "zombie-call", Name: "bash", Input: map[string]any{"cmd": "ls"}}}}),
+			priced(forcedReply("cold analysis", "cold summary")),
+			priced(scriptedTurn{text: "done"}),
+		}},
+		"cold resume": {old, []scriptedTurn{
+			priced(forcedReply("resume analysis", "resume summary")),
+			priced(scriptedTurn{text: "done"}),
+		}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			tr := newMemTranscript(
+				domain.Message{Role: "user", Content: "the mission", CreatedAt: tc.at},
+				usedAssistant("worked a lot", overThreshold, tc.at),
+				pendingUser("keep going"),
+			)
+			seeded := len(tr.snapshot())
+			engine := newTestEngine(tr, &scriptedProvider{turns: tc.turns}, newScriptedToolHost())
+
+			result := engine.Run(context.Background(), testParams())
+			if result.Kind != ResultConcluded {
+				t.Fatalf("result = %+v, want concluded", result)
+			}
+			final := tr.find(func(m domain.Message) bool { return m.Role == "assistant" && m.Content == "done" })
+			if final == nil || final.CostUSD == nil {
+				t.Fatalf("final turn = %+v, want a priced assistant row", final)
+			}
+			if result.CostUSD <= *final.CostUSD {
+				t.Errorf("CostUSD = %v, no more than the final turn's %v: the compaction call's cost is missing", result.CostUSD, *final.CostUSD)
+			}
+			if want := tr.ledgerSpend(seeded); math.Abs(result.CostUSD-want) > 1e-12 {
+				t.Errorf("CostUSD = %v, want %v, the sum of this engagement's rows", result.CostUSD, want)
+			}
+		})
 	}
 }
 
