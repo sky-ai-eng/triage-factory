@@ -48,6 +48,14 @@ github.com, or your GitHub Enterprise Server when you set
 
 Keep the **Client ID**, and save a new **Client secret** to a file for step 3.
 
+**Optional:** with a [deployment GitHub App](deployment-integrations/deployment-github-app.md),
+people can sign in through the App instead, so whoever sets up an organization
+approves Triage Factory on GitHub once rather than twice. Skip the OAuth app,
+register the App (its steps 1 to 3), follow its
+[sign-in section](deployment-integrations/deployment-github-app.md#optional-sign-people-in-through-the-app),
+and give step 3 the App's Client ID and client secret. Without a deployment
+App, the OAuth app is required.
+
 ## 3. Render the deployment
 
 ```sh
