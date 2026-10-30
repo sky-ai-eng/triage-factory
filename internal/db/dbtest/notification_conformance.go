@@ -264,7 +264,7 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 				t.Fatal(err)
 			}
 			AssertCountOnlyList(t, "ListForViewer", len(counted), countTotal, 3)
-			if _, _, err := s.ListForViewer(ctx, f.OrgID, f.Viewer, db.NotificationListFilter{Status: "bogus"}, db.ListOpts{}); !errors.Is(err, db.ErrInvalidNotificationFilter) {
+			if _, _, err := s.ListForViewer(ctx, f.OrgID, f.Viewer, db.NotificationListFilter{Status: "bogus"}, db.ListOpts{Limit: 50}); !errors.Is(err, db.ErrInvalidNotificationFilter) {
 				t.Errorf("bad status: err = %v", err)
 			}
 		})
