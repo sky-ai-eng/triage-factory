@@ -446,6 +446,8 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// GetSystem runs on the admin pool for the identity resolution that
 		// carries no request claims.
 		OrgCommitSigners: newOrgCommitSignerStore(app, admin),
+		// Notifications: system writes on admin, reads and marks on app.
+		Notifications: newNotificationStore(app, admin),
 		// CommitSignatures is admin-pool only: its writers are a run's
 		// daemon, its orchestrator and the control pods, none of them acting
 		// for a signed-in user.
@@ -574,6 +576,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		RateLimitReadings:        newRateLimitReadingStore(tx, tx),
 		ModelAvailability:        newModelAvailabilityStore(tx),
 		OrgCommitSigners:         newOrgCommitSignerStore(tx, tx),
+		Notifications:            newNotificationStore(tx, tx),
 		Ext:                      db.BuildStoreExtensions("postgres", tx, tx),
 	}
 }

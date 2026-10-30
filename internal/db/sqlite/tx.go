@@ -65,8 +65,9 @@ func (s *Store) SystemWithTx(ctx context.Context, orgID string, fn func(db.Syste
 	}
 	err := db.InTx(ctx, s.conn, func(tx *sql.Tx) error {
 		return fn(db.SystemTxStores{
-			EventQueue: newEventQueueStore(tx),
-			Ext:        db.BuildStoreExtensions(db.DialectSQLite, tx, tx),
+			EventQueue:    newEventQueueStore(tx),
+			Notifications: newNotificationStore(tx),
+			Ext:           db.BuildStoreExtensions(db.DialectSQLite, tx, tx),
 		})
 	})
 	if err != nil {
@@ -176,6 +177,7 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		RateLimitReadings:        newRateLimitReadingStore(tx),
 		ModelAvailability:        newModelAvailabilityStore(tx),
 		OrgCommitSigners:         newOrgCommitSignerStore(tx),
+		Notifications:            newNotificationStore(tx),
 		Ext:                      db.BuildStoreExtensions(db.DialectSQLite, tx, tx),
 	}
 }
