@@ -20,7 +20,7 @@ var (
 	ErrNoSuchNotification = errors.New("db: no such notification")
 
 	// ErrNotificationNotDismissible is SetMarks' refusal to dismiss a
-	// non-dismissible row. The API maps it to 422.
+	// non-dismissible row.
 	ErrNotificationNotDismissible = errors.New("db: notification is not dismissible")
 
 	ErrInvalidNotification         = errors.New("db: invalid notification")
@@ -205,8 +205,8 @@ func compactJSON(raw json.RawMessage, empty string) (json.RawMessage, error) {
 	return json.RawMessage(b.Bytes()), nil
 }
 
-// NotificationListFilter: a zero field does not filter. An empty slice is a
-// zero field, so a route refuses an explicitly empty list before calling.
+// NotificationListFilter: a zero field, including an empty slice, does not
+// filter.
 type NotificationListFilter struct {
 	Status     domain.NotificationStatus
 	Dismissed  *bool
@@ -263,6 +263,32 @@ const (
 	NotificationDismissedSQL = `(n.dismissible AND m.dismissed_at IS NOT NULL AND m.dismissed_at > n.escalated_at)`
 )
 
+// NotificationStateClauses renders f's placeholder-free predicates: status,
+// dismissed and unread.
+func NotificationStateClauses(f NotificationListFilter) []string {
+	var out []string
+	switch f.Status {
+	case domain.NotificationOpen:
+		out = append(out, `n.resolved_at IS NULL`)
+	case domain.NotificationResolved:
+		out = append(out, `n.resolved_at IS NOT NULL`)
+	}
+	if f.Dismissed != nil {
+		out = append(out, notOrSQL(*f.Dismissed, NotificationDismissedSQL))
+	}
+	if f.Unread != nil {
+		out = append(out, notOrSQL(!*f.Unread, NotificationReadSQL))
+	}
+	return out
+}
+
+func notOrSQL(want bool, expr string) string {
+	if want {
+		return expr
+	}
+	return `NOT ` + expr
+}
+
 func NotificationOrderSQL() string {
 	return ` ORDER BY ` + NotificationPriorityRankSQL("n.priority") + ` DESC, n.escalated_at DESC, n.id DESC`
 }
@@ -307,55 +333,64 @@ func NotificationAudiencesJSON(audiences []domain.NotificationAudience) (string,
 	return string(b), nil
 }
 
-// ScanNotification reads the 24-column projection both dialects emit
-// (nullable text COALESCEd to ”).
-func ScanNotification(scan func(...any) error) (domain.Notification, error) {
-	var (
-		n                   domain.Notification
-		actions, params     []byte
-		resolvedAt, expires sql.NullTime
-	)
-	err := scan(&n.ID, &n.OrgID, &n.Origin, &n.Lifecycle, &n.Kind, &n.Key,
-		&n.Audience.Scope, &n.Audience.Role, &n.Audience.TeamID, &n.Audience.UserID,
-		&n.Source, &n.Priority, &n.Dismissible, &n.Title, &n.Body, &actions, &params,
-		&n.FirstSeenAt, &n.LastSeenAt, &n.SeenCount, &n.EscalatedAt,
-		&resolvedAt, &n.ResolvedReason, &expires)
-	if err != nil {
-		return domain.Notification{}, err
-	}
-	finishNotification(&n, actions, params, resolvedAt, expires)
-	return n, nil
+// notificationRow holds the 24-column projection both dialects emit, with
+// nullable text COALESCEd to the empty string, while it is scanned.
+type notificationRow struct {
+	n                   domain.Notification
+	actions, params     []byte
+	resolvedAt, expires sql.NullTime
 }
 
-// ScanNotificationView reads the 24 notification columns, the viewer's marks
+func (r *notificationRow) dest() []any {
+	n := &r.n
+	return []any{&n.ID, &n.OrgID, &n.Origin, &n.Lifecycle, &n.Kind, &n.Key,
+		&n.Audience.Scope, &n.Audience.Role, &n.Audience.TeamID, &n.Audience.UserID,
+		&n.Source, &n.Priority, &n.Dismissible, &n.Title, &n.Body, &r.actions, &r.params,
+		&n.FirstSeenAt, &n.LastSeenAt, &n.SeenCount, &n.EscalatedAt,
+		&r.resolvedAt, &n.ResolvedReason, &r.expires}
+}
+
+func (r *notificationRow) finish() domain.Notification {
+	n := r.n
+	n.Actions = json.RawMessage(r.actions)
+	n.Params = json.RawMessage(r.params)
+	n.FirstSeenAt = n.FirstSeenAt.UTC()
+	n.LastSeenAt = n.LastSeenAt.UTC()
+	n.EscalatedAt = n.EscalatedAt.UTC()
+	n.ResolvedAt = utcTimePtr(r.resolvedAt)
+	n.ExpiresAt = utcTimePtr(r.expires)
+	return n
+}
+
+func ScanNotification(scan func(...any) error) (domain.Notification, error) {
+	var r notificationRow
+	if err := scan(r.dest()...); err != nil {
+		return domain.Notification{}, err
+	}
+	return r.finish(), nil
+}
+
+// ScanNotificationView reads the notification projection, the viewer's marks
 // row (all NULL when absent), then the read and dismissed booleans.
 func ScanNotificationView(scan func(...any) error) (domain.NotificationView, error) {
 	var (
+		r                         notificationRow
 		v                         domain.NotificationView
-		actions, params           []byte
-		resolvedAt, expires       sql.NullTime
 		markID, markUser, markOrg sql.NullString
 		readAt, dismissedAt       sql.NullTime
 	)
-	n := &v.Notification
-	err := scan(&n.ID, &n.OrgID, &n.Origin, &n.Lifecycle, &n.Kind, &n.Key,
-		&n.Audience.Scope, &n.Audience.Role, &n.Audience.TeamID, &n.Audience.UserID,
-		&n.Source, &n.Priority, &n.Dismissible, &n.Title, &n.Body, &actions, &params,
-		&n.FirstSeenAt, &n.LastSeenAt, &n.SeenCount, &n.EscalatedAt,
-		&resolvedAt, &n.ResolvedReason, &expires,
-		&markID, &markUser, &markOrg, &readAt, &dismissedAt,
-		&v.Read, &v.Dismissed)
+	err := scan(append(r.dest(), &markID, &markUser, &markOrg, &readAt, &dismissedAt, &v.Read, &v.Dismissed)...)
 	if err != nil {
 		return domain.NotificationView{}, err
 	}
-	finishNotification(n, actions, params, resolvedAt, expires)
+	v.Notification = r.finish()
 	if markID.Valid {
 		v.Marks = &domain.NotificationMarks{
 			NotificationID: markID.String,
 			UserID:         markUser.String,
 			OrgID:          markOrg.String,
-			ReadAt:         utcPtr(readAt),
-			DismissedAt:    utcPtr(dismissedAt),
+			ReadAt:         utcTimePtr(readAt),
+			DismissedAt:    utcTimePtr(dismissedAt),
 		}
 	}
 	return v, nil
@@ -369,24 +404,6 @@ func ScanNotificationMarks(scan func(...any) error) (domain.NotificationMarks, e
 	if err := scan(&m.NotificationID, &m.UserID, &m.OrgID, &readAt, &dismissedAt); err != nil {
 		return domain.NotificationMarks{}, err
 	}
-	m.ReadAt, m.DismissedAt = utcPtr(readAt), utcPtr(dismissedAt)
+	m.ReadAt, m.DismissedAt = utcTimePtr(readAt), utcTimePtr(dismissedAt)
 	return m, nil
-}
-
-func finishNotification(n *domain.Notification, actions, params []byte, resolvedAt, expires sql.NullTime) {
-	n.Actions = json.RawMessage(actions)
-	n.Params = json.RawMessage(params)
-	n.FirstSeenAt = n.FirstSeenAt.UTC()
-	n.LastSeenAt = n.LastSeenAt.UTC()
-	n.EscalatedAt = n.EscalatedAt.UTC()
-	n.ResolvedAt = utcPtr(resolvedAt)
-	n.ExpiresAt = utcPtr(expires)
-}
-
-func utcPtr(t sql.NullTime) *time.Time {
-	if !t.Valid {
-		return nil
-	}
-	u := t.Time.UTC()
-	return &u
 }

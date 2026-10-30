@@ -53,14 +53,15 @@ func (s *notificationStore) UpsertOpenSystem(ctx context.Context, o db.Notificat
 	a := o.Audience
 	if o.Lifecycle == domain.NotificationNotice {
 		// An expired notice still holds the open-occurrence index; delete it
-		// so the insert opens a new notice instead of reviving it.
+		// so the insert opens a new notice instead of reviving it. Statement
+		// time, not now(): inside a transaction now() is its start.
 		if _, err := s.admin.ExecContext(ctx, `
 			DELETE FROM notifications
 			WHERE org_id = $1 AND origin = $2 AND kind = $3 AND key = $4 AND audience_scope = $5
 			  AND audience_role IS NOT DISTINCT FROM $6::text
 			  AND team_id IS NOT DISTINCT FROM $7::uuid
 			  AND user_id IS NOT DISTINCT FROM $8::uuid
-			  AND resolved_at IS NULL AND expires_at <= now()`,
+			  AND resolved_at IS NULL AND expires_at <= clock_timestamp()`,
 			o.OrgID, o.Origin, o.Kind, o.Key, a.Scope,
 			nullIfEmpty(string(a.Role)), nullIfEmpty(a.TeamID), nullIfEmpty(a.UserID)); err != nil {
 			return db.NotificationUpsert{}, err
@@ -70,14 +71,20 @@ func (s *notificationStore) UpsertOpenSystem(ctx context.Context, o db.Notificat
 	if o.ExpiresAt != nil {
 		expiresAt = *o.ExpiresAt
 	}
+	// One clock read per statement: every stamp the write sets is the same
+	// instant (NotificationUpsertOf relies on it), and two raises in one
+	// transaction get different instants, which now() would not.
 	n, err := db.ScanNotification(s.admin.QueryRowContext(ctx, `
+		WITH clock AS (SELECT clock_timestamp() AS at)
 		INSERT INTO notifications AS n (
 			org_id, origin, lifecycle, kind, key,
 			audience_scope, audience_role, team_id, user_id,
 			source, priority, dismissible, title, body, actions, params,
 			first_seen_at, last_seen_at, seen_count, escalated_at, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::uuid, $9::uuid, $10, $11, $12, $13, $14, $15::jsonb, $16::jsonb,
-			now(), now(), 1, now(), $17)
+		SELECT $1::uuid, $2::text, $3::text, $4::text, $5::text, $6::text, $7::text, $8::uuid, $9::uuid,
+			$10::text, $11::text, $12::boolean, $13::text, $14::text, $15::jsonb, $16::jsonb,
+			clock.at, clock.at, 1, clock.at, $17::timestamptz
+		FROM clock
 		ON CONFLICT (org_id, origin, kind, key, audience_scope,
 			COALESCE(audience_role, ''),
 			COALESCE(team_id, '00000000-0000-0000-0000-000000000000'::uuid),
@@ -212,32 +219,15 @@ func (s *notificationStore) ListForOrg(ctx context.Context, orgID, userID string
 	}
 	where, args := pgNotificationFilters(pgNotificationReadable, []any{orgID, userID}, f.NotificationListFilter)
 	if len(f.TeamIDIn) > 0 {
-		args = append(args, pgUUIDArray(f.TeamIDIn))
+		// Dropping a malformed id narrows the filter; it never widens it.
+		args = append(args, pgUUIDArray(filterValidUUIDs(f.TeamIDIn)))
 		where += fmt.Sprintf(` AND n.team_id = ANY($%d::uuid[])`, len(args))
 	}
 	return s.list(ctx, where, args, opts)
 }
 
 func pgNotificationFilters(base string, args []any, f db.NotificationListFilter) (string, []any) {
-	clauses := []string{base}
-	mark := func(want bool, expr string) string {
-		if want {
-			return expr
-		}
-		return `NOT ` + expr
-	}
-	switch f.Status {
-	case domain.NotificationOpen:
-		clauses = append(clauses, `n.resolved_at IS NULL`)
-	case domain.NotificationResolved:
-		clauses = append(clauses, `n.resolved_at IS NOT NULL`)
-	}
-	if f.Dismissed != nil {
-		clauses = append(clauses, mark(*f.Dismissed, db.NotificationDismissedSQL))
-	}
-	if f.Unread != nil {
-		clauses = append(clauses, mark(!*f.Unread, db.NotificationReadSQL))
-	}
+	clauses := append([]string{base}, db.NotificationStateClauses(f)...)
 	if len(f.PriorityIn) > 0 {
 		vals := make([]string, len(f.PriorityIn))
 		for i, p := range f.PriorityIn {
@@ -294,6 +284,9 @@ func (s *notificationStore) list(ctx context.Context, where string, args []any, 
 }
 
 func (s *notificationStore) GetForViewer(ctx context.Context, orgID, userID, id string) (*domain.NotificationView, error) {
+	if !isValidUUID(id) {
+		return nil, nil
+	}
 	v, err := db.ScanNotificationView(s.q.QueryRowContext(ctx, `
 		SELECT `+pgNotificationViewCols+`
 		FROM notifications n
@@ -313,13 +306,16 @@ func (s *notificationStore) SetMarks(ctx context.Context, orgID, userID, id stri
 	if err := db.ValidateNotificationMarksPatch(p); err != nil {
 		return domain.NotificationMarks{}, err
 	}
+	if !isValidUUID(id) {
+		return domain.NotificationMarks{}, db.ErrNoSuchNotification
+	}
 	readSet, readOn := p.Read != nil, p.Read != nil && *p.Read
 	dismissSet, dismissOn := p.Dismissed != nil, p.Dismissed != nil && *p.Dismissed
 	m, err := db.ScanNotificationMarks(s.q.QueryRowContext(ctx, `
 		INSERT INTO notification_marks AS m (notification_id, user_id, org_id, read_at, dismissed_at)
 		SELECT n.id, $2::uuid, n.org_id,
-		       CASE WHEN $4::boolean THEN now() END,
-		       CASE WHEN $6::boolean THEN now() END
+		       CASE WHEN $4::boolean THEN clock_timestamp() END,
+		       CASE WHEN $6::boolean THEN clock_timestamp() END
 		FROM notifications n
 		WHERE `+pgNotificationReadable+` AND n.id = $3::uuid
 		  AND (n.dismissible OR NOT $6::boolean)
@@ -353,12 +349,13 @@ func (s *notificationStore) marksMiss(ctx context.Context, orgID, userID, id str
 
 func (s *notificationStore) MarkRead(ctx context.Context, orgID, userID string, ids []string) ([]domain.NotificationMarks, error) {
 	out := []domain.NotificationMarks{}
+	ids = filterValidUUIDs(ids)
 	if len(ids) == 0 {
 		return out, nil
 	}
 	rows, err := s.q.QueryContext(ctx, `
 		INSERT INTO notification_marks AS m (notification_id, user_id, org_id, read_at)
-		SELECT n.id, $2::uuid, n.org_id, now()
+		SELECT n.id, $2::uuid, n.org_id, clock_timestamp()
 		FROM notifications n
 		WHERE `+pgNotificationReadable+` AND n.id = ANY($3::uuid[])
 		ON CONFLICT (notification_id, user_id) DO UPDATE SET read_at = EXCLUDED.read_at

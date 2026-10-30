@@ -216,25 +216,7 @@ func (s *notificationStore) ListForOrg(ctx context.Context, orgID, userID string
 }
 
 func sqliteNotificationFilters(base string, args []any, f db.NotificationListFilter) (string, []any, error) {
-	clauses := []string{base}
-	mark := func(want bool, expr string) string {
-		if want {
-			return expr
-		}
-		return `NOT ` + expr
-	}
-	switch f.Status {
-	case domain.NotificationOpen:
-		clauses = append(clauses, `n.resolved_at IS NULL`)
-	case domain.NotificationResolved:
-		clauses = append(clauses, `n.resolved_at IS NOT NULL`)
-	}
-	if f.Dismissed != nil {
-		clauses = append(clauses, mark(*f.Dismissed, db.NotificationDismissedSQL))
-	}
-	if f.Unread != nil {
-		clauses = append(clauses, mark(!*f.Unread, db.NotificationReadSQL))
-	}
+	clauses := append([]string{base}, db.NotificationStateClauses(f)...)
 	if len(f.PriorityIn) > 0 {
 		vals, err := json.Marshal(f.PriorityIn)
 		if err != nil {

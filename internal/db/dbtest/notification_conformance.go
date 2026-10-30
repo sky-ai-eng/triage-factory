@@ -300,26 +300,39 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 		if _, err := setMarks(t, f, other.ID, db.NotificationMarksPatch{Read: &yes}); !errors.Is(err, db.ErrNoSuchNotification) {
 			t.Errorf("mark another user's row: err = %v", err)
 		}
+		if _, err := setMarks(t, f, "not-a-uuid", db.NotificationMarksPatch{Read: &yes}); !errors.Is(err, db.ErrNoSuchNotification) {
+			t.Errorf("mark a malformed id: err = %v", err)
+		}
+		if get(t, f, "not-a-uuid") != nil {
+			t.Errorf("GetForViewer(malformed id) found a row")
+		}
 		f.As(t, f.Viewer, func(s db.NotificationStore) {
-			got, err := s.MarkRead(ctx, f.OrgID, f.Viewer, []string{fixed.ID, other.ID})
+			got, err := s.MarkRead(ctx, f.OrgID, f.Viewer, []string{fixed.ID, other.ID, "not-a-uuid"})
 			if err != nil || len(got) != 1 || got[0].NotificationID != fixed.ID || got[0].ReadAt == nil {
 				t.Errorf("MarkRead = %+v, %v; want only the readable row", got, err)
 			}
 		})
 	})
 
-	t.Run("system_tx_rolls_back", func(t *testing.T) {
+	t.Run("system_tx", func(t *testing.T) {
 		f := mk(t)
 		var id string
 		boom := errors.New("boom")
 		err := f.Stores.Tx.SystemWithTx(ctx, f.OrgID, func(tx db.SystemTxStores) error {
-			u, err := tx.Notifications.UpsertOpenSystem(ctx, db.NotificationOccurrence{
+			o := db.NotificationOccurrence{
 				OrgID: f.OrgID, Origin: domain.NotificationOriginSystem, Lifecycle: domain.NotificationCondition,
 				Kind: "test.kind", Key: "tx", Priority: domain.NotificationHigh, Title: "t",
 				Audience: domain.NotificationAudience{Scope: domain.NotificationScopeOrg, Role: domain.NotificationRoleMembers},
-			})
+			}
+			if _, err := tx.Notifications.UpsertOpenSystem(ctx, o); err != nil {
+				return err
+			}
+			u, err := tx.Notifications.UpsertOpenSystem(ctx, o)
 			if err != nil {
 				return err
+			}
+			if u.Opened || u.Escalated {
+				t.Errorf("second raise in one transaction = %+v; want a plain bump", u)
 			}
 			id = u.Notification.ID
 			return boom
