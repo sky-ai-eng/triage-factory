@@ -11,15 +11,15 @@ TF has two ways to tell a person something, and neither fits a condition that is
 - **Toasts** are ephemeral and connection-scoped. A condition that recurs every poll cycle would fire a toast every cycle, and a person who was not looking never learns it happened.
 - **The event bus and websocket** are internal pub/sub and UI invalidation. They are not a policy-aware feed.
 
-So nothing answers: *this team's configuration has been broken for three weeks — who is told, and where do they see it?* The known cases are the `TODO(TFAC-878)` markers in the code and the consumers listed in the ticket and its comments (see **First consumers**).
+So nothing answers: _this team's configuration has been broken for three weeks — who is told, and where do they see it?_ The known cases are the `TODO(TFAC-878)` markers in the code and the consumers listed in the ticket and its comments (see **First consumers**).
 
 ## Principles
 
 1. **A notification is an occurrence of a condition.** It is open while the condition is true, the system resolves it when the condition stops being true, and a recurrence while it is open coalesces into the same row (first seen, last seen, count). A **notice** — something that happened once and leaves no state behind — is the one-shot case: nothing resolves it, it expires.
-2. **Kinds are code, not catalog.** A kind is a Go value registered next to its definition. Nothing in V1 reads or writes `events`, `events_catalog`, `event_handlers`, or the event queue, and nothing is added to the events catalog for a notification's sake.
-3. **The kind carries everything; a call site passes only facts.** Audience, priority, dismissibility, copy, links, actions, coalescing, websocket delivery and failure handling are declared once on the kind or implemented once in `internal/notify`. A producer integrates with one or two lines.
-4. **Audience is resolved at read time from the row, and re-resolved on every write.** No per-recipient rows are written. A new admin sees the org's open admin notifications; a removed member stops seeing a team's.
-5. **The system resolves; people read and dismiss.** Resolution is never a user action. Read and dismissed are per-person marks.
+2. **Kinds are defined in code.** A kind is a Go value registered next to its definition. Nothing in V1 reads or writes `events`, `events_catalog`, `event_handlers`, or the event queue, and nothing is added to the events catalog for a notification's sake.
+3. **The kind definition carries everything of importance.** Audience, priority, dismissibility, copy, links, actions, coalescing, websocket delivery and failure handling are declared once on the kind or implemented once in `internal/notify`. A producer integrates with one or two lines.
+4. **Audience is resolved at read time from the row and re-resolved on every write.** No per-recipient rows are written. A new admin sees the org's open admin notifications; a removed member stops seeing a team's.
+5. **The system resolves; people read and dismiss.** Resolution is never a user action. Read and dismissed are per-person marks no matter what the scope of the notification is.
 
 ## Why not event handlers (V1)
 
@@ -29,37 +29,37 @@ Event-driven notifications remain the plan for user-configured rules on events t
 
 ## Vocabulary
 
-| Term | Meaning |
-|---|---|
-| **Kind** | A registered notification type, e.g. `linear.team_unreadable`. Its name is stored on rows and never renamed. |
-| **Key** | The occurrence's identity within its kind, built from ids (never names) — e.g. the Linear team id. |
+| Term           | Meaning                                                                                                                              |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| **Kind**       | A registered notification type, e.g. `linear.team_unreadable`. Its name is stored on rows and never renamed.                         |
+| **Key**        | The occurrence's identity within its kind, built from ids (never names) — e.g. the Linear team id.                                   |
 | **Occurrence** | One row: one kind + key, for one audience, from opening to resolution. A condition that resolves and comes back is a new occurrence. |
-| **Audience** | Who a row is for: `org` / `team` / `user` scope, with role `members` or `admins` for org and team. |
-| **Lifecycle** | `condition` (the system resolves it) or `notice` (it expires). |
-| **Origin** | `system` (a code-defined kind, V1) or `event` (a notify handler on an event, later). |
-| **Marks** | One person's `read_at` / `dismissed_at` on a row. |
+| **Audience**   | Who a row is for: `org` / `team` / `user` scope, with role `members` or `admins` for org and team.                                   |
+| **Lifecycle**  | `condition` (the system resolves it) or `notice` (it expires).                                                                       |
+| **Origin**     | `system` (a code-defined kind, V1) or `event` (a notify handler on an event, later).                                                 |
+| **Marks**      | One person's `read_at` / `dismissed_at` on a row.                                                                                    |
 
 ## Decisions
 
-| # | Decision | Reason |
-|---|---|---|
-| 1 | Dismissal is **per person**. | A shared dismiss can only hide a condition that is still true — the condition resolves itself when fixed — so one person's "later" would hide it from everyone. |
-| 2 | **Dismissibility is a property of the kind.** A kind about something TF requires (GitHub; the background-jobs model) is not dismissible and stays until the system resolves it. A kind about something an org may legitimately stop caring about (Jira, Linear, mirrors, drift) is dismissible. Notices are always dismissible. | "We are moving off Jira" is a legitimate answer; "we are not using GitHub" is not. Mirrors the line `eventsource` draws between disableable and required sources. |
-| 3 | **Turning a source off or disconnecting its credential resolves that source's open conditions.** | A turned-off source does not poll, so nothing else would ever resolve them, and they no longer apply. |
-| 4 | **Org admins do not inherit team-scoped notifications.** They can read them (an "All teams" view), but they are not sent them. A producer that needs org admins told names them as an audience. | Inheriting every team's notifications in a large org trains admins to clear the page unread, including the org-level urgent ones only they can fix. Every team has at least one admin (`guard_team_admins`), so no team notification is undeliverable. |
-| 5 | **Notices are in scope**, under three rules: a notice is only for something that leaves no state behind (a suspended prompt is a condition, not a notice); a notice must carry an action; notices default to `low` and expire after 14 days. | TFAC-518 needs them; the rules keep the page from becoming a feed. |
-| 6 | **Three priorities, each defined by what it does** (see **Priority**). | A level with no distinct behavior is not a level. |
-| 7 | **A full page**, reached from a rail row; no drawer in V1. | A drawer cannot hold the filters, history and actions the page needs. |
-| 8 | **Copy is rendered by the server at write time** and refreshed on every re-raise. | Headless clients and later out-of-app delivery need the text; a re-raised condition keeps its names current. |
-| 9 | **`origin` ships in V1** although V1 only writes `system`. | The Postgres baseline is still editable; adding the column now is cheaper than later. |
+| #   | Decision                                                                                                                                                                                                                                                                                                                        | Reason                                                                                                                                                                                                                                                 |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1   | Dismissal is **per person**.                                                                                                                                                                                                                                                                                                    | A shared dismiss can only hide a condition that is still true — the condition resolves itself when fixed — so one person's "later" would hide it from everyone.                                                                                        |
+| 2   | **Dismissibility is a property of the kind.** A kind about something TF requires (GitHub; the background-jobs model) is not dismissible and stays until the system resolves it. A kind about something an org may legitimately stop caring about (Jira, Linear, mirrors, drift) is dismissible. Notices are always dismissible. | "We are moving off Jira" is a legitimate answer; "we are not using GitHub" is not. Mirrors the line `eventsource` draws between disableable and required sources.                                                                                      |
+| 3   | **Turning a source off or disconnecting its credential resolves that source's open conditions.**                                                                                                                                                                                                                                | A turned-off source does not poll, so nothing else would ever resolve them, and they no longer apply.                                                                                                                                                  |
+| 4   | **Org admins do not inherit team-scoped notifications.** They can read them (an "All teams" view), but they are not sent them. A producer that needs org admins told names them as an audience.                                                                                                                                 | Inheriting every team's notifications in a large org trains admins to clear the page unread, including the org-level urgent ones only they can fix. Every team has at least one admin (`guard_team_admins`), so no team notification is undeliverable. |
+| 5   | **Notices are in scope**, under three rules: a notice is only for something that leaves no state behind (a suspended prompt is a condition, not a notice); a notice must carry an action; notices default to `low` and expire after 14 days.                                                                                    | TFAC-518 needs them; the rules keep the page from becoming a feed.                                                                                                                                                                                     |
+| 6   | **Three priorities, each defined by what it does** (see **Priority**).                                                                                                                                                                                                                                                          | A level with no distinct behavior is not a level.                                                                                                                                                                                                      |
+| 7   | **A full page**, reached from a rail row; no drawer in V1.                                                                                                                                                                                                                                                                      | A drawer cannot hold the filters, history and actions the page needs.                                                                                                                                                                                  |
+| 8   | **Copy is rendered by the server at write time** and refreshed on every re-raise.                                                                                                                                                                                                                                               | Headless clients and later out-of-app delivery need the text; a re-raised condition keeps its names current.                                                                                                                                           |
+| 9   | **`origin` ships in V1** although V1 only writes `system`.                                                                                                                                                                                                                                                                      | The Postgres baseline is still editable; adding the column now is cheaper than later.                                                                                                                                                                  |
 
 ## Priority
 
-| Priority | Badge (rail `alert`) | Shell banner | Meaning |
-|---|---|---|---|
-| `urgent` | yes | yes, while open and not dismissed | Work has stopped for this audience: polling stopped, every task blocked. |
-| `high` | yes | no | Something is degraded and nothing else says so: a project produces no work, a mirror does not write. |
-| `low` | no | no | Information; nothing is broken. |
+| Priority | Badge (rail `alert`) | Shell banner                      | Meaning                                                                                              |
+| -------- | -------------------- | --------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `urgent` | yes                  | yes, while open and not dismissed | Work has stopped for this audience: polling stopped, every task blocked.                             |
+| `high`   | yes                  | no                                | Something is degraded and nothing else says so: a project produces no work, a mirror does not write. |
+| `low`    | no                   | no                                | Information; nothing is broken.                                                                      |
 
 A kind's priority is a function of its params, so one kind can be `urgent` for one cause and `high` for another (e.g. memory generation failing because no model is configured vs. a provider backing off). A raise that increases an open row's priority sets `escalated_at`, which makes the row unread again and brings it back for anyone who dismissed it. A decrease does neither.
 
@@ -67,11 +67,11 @@ A kind's priority is a function of its params, so one kind can be `urgent` for o
 
 This is the part that has to stay small. Every consumer uses one of three verbs on a kind value, chosen by how the producer learns the truth:
 
-| Verb | Use when | Behavior |
-|---|---|---|
-| `Set(ctx, orgID, p, active bool)` | The producer evaluates a yes/no each time it looks. | `true` opens or bumps the occurrence for `p`'s key; `false` resolves it. Idempotent — **call it on every evaluation, not only on a change**, so a failed write corrects itself on the next one. |
-| `Sync(ctx, orgID, active []P)` | The producer evaluates a whole set in one pass. | Opens or bumps every member of `active`; resolves every open occurrence of the kind in the org whose key is not in it. **Only on a complete pass** — a pass that could not reach the upstream calls nothing. |
-| `Post(ctx, orgID, p)` | Notices. | Opens the notice, or bumps an unexpired one with the same key and extends its expiry. |
+| Verb                              | Use when                                            | Behavior                                                                                                                                                                                                     |
+| --------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `Set(ctx, orgID, p, active bool)` | The producer evaluates a yes/no each time it looks. | `true` opens or bumps the occurrence for `p`'s key; `false` resolves it. Idempotent — **call it on every evaluation, not only on a change**, so a failed write corrects itself on the next one.              |
+| `Sync(ctx, orgID, active []P)`    | The producer evaluates a whole set in one pass.     | Opens or bumps every member of `active`; resolves every open occurrence of the kind in the org whose key is not in it. **Only on a complete pass** — a pass that could not reach the upstream calls nothing. |
+| `Post(ctx, orgID, p)`             | Notices.                                            | Opens the notice, or bumps an unexpired one with the same key and extends its expiry.                                                                                                                        |
 
 `Condition[P]` has `Set` and `Sync`; `Notice[P]` has `Post`. The compiler rejects the wrong verb. None of them returns a value: a failure is logged and counted in `tf_notify_write_failures_total{kind}` inside `notify`, and never fails the work that raised it.
 
@@ -131,17 +131,17 @@ var LinearTeamUnreadable = notify.Condition(notify.ConditionSpec[LinearTeam]{
 })
 ```
 
-| Spec field | Condition | Notice | Notes |
-|---|---|---|---|
-| `Name` | ✓ | ✓ | Stable; stored on rows. |
-| `Source` | optional | optional | An event-source kind. `ClearSource` resolves a condition by it. |
-| `Priority` | ✓ | ✓ | `func(P) Priority`; `notify.Always(p)` for a constant. Notices default to `Low`. |
-| `Dismissible` | ✓ | — | Notices are always dismissible. |
-| `TTL` | — | ✓ | 14 days unless the kind says otherwise. |
-| `Key` | ✓ | ✓ | Ids only. |
-| `Audience` | ✓ | ✓ | Composed from the constructors below. |
-| `Render` | ✓ | ✓ | `func(P, Recipient) Content`. Receives the audience being rendered, so a team row can carry an action an org row does not. |
-| `Example` | ✓ | ✓ | A representative `P`, used by the kinds conformance test and a dev page that renders every kind. |
+| Spec field    | Condition | Notice   | Notes                                                                                                                      |
+| ------------- | --------- | -------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `Name`        | ✓         | ✓        | Stable; stored on rows.                                                                                                    |
+| `Source`      | optional  | optional | An event-source kind. `ClearSource` resolves a condition by it.                                                            |
+| `Priority`    | ✓         | ✓        | `func(P) Priority`; `notify.Always(p)` for a constant. Notices default to `Low`.                                           |
+| `Dismissible` | ✓         | —        | Notices are always dismissible.                                                                                            |
+| `TTL`         | —         | ✓        | 14 days unless the kind says otherwise.                                                                                    |
+| `Key`         | ✓         | ✓        | Ids only.                                                                                                                  |
+| `Audience`    | ✓         | ✓        | Composed from the constructors below.                                                                                      |
+| `Render`      | ✓         | ✓        | `func(P, Recipient) Content`. Receives the audience being rendered, so a team row can carry an action an org row does not. |
+| `Example`     | ✓         | ✓        | A representative `P`, used by the kinds conformance test and a dev page that renders every kind.                           |
 
 **Where kinds live.** `internal/notify/kinds`, one file per source, so every audience and every line of copy is reviewed in one place. `kinds` imports `notify` and `domain`, never a producer package. `ee/` defines its kinds in its own packages with the same constructors; core never imports them.
 
@@ -184,42 +184,42 @@ Postgres changes go into the baseline; SQLite gets a forward migration. Both beh
 
 ### `notifications`
 
-| Column | Type | Notes |
-|---|---|---|
-| `id` | uuid | |
-| `org_id` | uuid | |
-| `origin` | text | `system` \| `event`. V1 writes `system`. |
-| `lifecycle` | text | `condition` \| `notice`. CHECK: `notice` ⇔ `expires_at IS NOT NULL`. |
-| `kind` | text | No FK; the registry is code. |
-| `key` | text | |
-| `audience_scope` | text | `org` \| `team` \| `user` |
-| `audience_role` | text NULL | `members` \| `admins` for org/team; NULL for user. CHECK on the shape. |
-| `team_id` | uuid NULL | Set iff scope is `team`. FK `teams`. |
-| `user_id` | uuid NULL | Set iff scope is `user`. FK `users`. |
-| `source` | text NULL | Event-source kind, for `ClearSource`. |
-| `priority` | text | `urgent` \| `high` \| `low` |
-| `dismissible` | boolean | Copied from the kind, so the read side and the marks PATCH never need the registry. |
-| `title`, `body` | text | Plain text. Never rendered as markup — it can contain externally authored names. |
-| `actions` | jsonb | At most two; the first is primary. |
-| `params` | jsonb | The kind's `P`: ids and display values. Never shown. |
-| `first_seen_at`, `last_seen_at` | timestamptz | |
-| `seen_count` | integer | |
-| `escalated_at` | timestamptz | `first_seen_at` until the priority first increases. |
-| `resolved_at` | timestamptz NULL | |
-| `resolved_reason` | text NULL | `cleared` \| `source_off` \| `audience_removed` |
-| `expires_at` | timestamptz NULL | Notices only. |
+| Column                          | Type             | Notes                                                                               |
+| ------------------------------- | ---------------- | ----------------------------------------------------------------------------------- |
+| `id`                            | uuid             |                                                                                     |
+| `org_id`                        | uuid             |                                                                                     |
+| `origin`                        | text             | `system` \| `event`. V1 writes `system`.                                            |
+| `lifecycle`                     | text             | `condition` \| `notice`. CHECK: `notice` ⇔ `expires_at IS NOT NULL`.                |
+| `kind`                          | text             | No FK; the registry is code.                                                        |
+| `key`                           | text             |                                                                                     |
+| `audience_scope`                | text             | `org` \| `team` \| `user`                                                           |
+| `audience_role`                 | text NULL        | `members` \| `admins` for org/team; NULL for user. CHECK on the shape.              |
+| `team_id`                       | uuid NULL        | Set iff scope is `team`. FK `teams`.                                                |
+| `user_id`                       | uuid NULL        | Set iff scope is `user`. FK `users`.                                                |
+| `source`                        | text NULL        | Event-source kind, for `ClearSource`.                                               |
+| `priority`                      | text             | `urgent` \| `high` \| `low`                                                         |
+| `dismissible`                   | boolean          | Copied from the kind, so the read side and the marks PATCH never need the registry. |
+| `title`, `body`                 | text             | Plain text. Never rendered as markup — it can contain externally authored names.    |
+| `actions`                       | jsonb            | At most two; the first is primary.                                                  |
+| `params`                        | jsonb            | The kind's `P`: ids and display values. Never shown.                                |
+| `first_seen_at`, `last_seen_at` | timestamptz      |                                                                                     |
+| `seen_count`                    | integer          |                                                                                     |
+| `escalated_at`                  | timestamptz      | `first_seen_at` until the priority first increases.                                 |
+| `resolved_at`                   | timestamptz NULL |                                                                                     |
+| `resolved_reason`               | text NULL        | `cleared` \| `source_off` \| `audience_removed`                                     |
+| `expires_at`                    | timestamptz NULL | Notices only.                                                                       |
 
 Indexes: a partial unique index on the open occurrence — `(org_id, origin, kind, key, audience_scope, coalesce(audience_role,''), coalesce(team_id, <nil uuid>), coalesce(user_id, <nil uuid>)) WHERE resolved_at IS NULL` — and a list index on `(org_id, resolved_at, priority, escalated_at, id)`.
 
 ### `notification_marks`
 
-| Column | Type | Notes |
-|---|---|---|
-| `notification_id` | uuid | FK, `ON DELETE CASCADE` |
-| `user_id` | uuid | |
-| `org_id` | uuid | For RLS. |
-| `read_at` | timestamptz NULL | |
-| `dismissed_at` | timestamptz NULL | Refused (422 `INVALID_FIELD`) when the row is not dismissible. |
+| Column            | Type             | Notes                                                          |
+| ----------------- | ---------------- | -------------------------------------------------------------- |
+| `notification_id` | uuid             | FK, `ON DELETE CASCADE`                                        |
+| `user_id`         | uuid             |                                                                |
+| `org_id`          | uuid             | For RLS.                                                       |
+| `read_at`         | timestamptz NULL |                                                                |
+| `dismissed_at`    | timestamptz NULL | Refused (422 `INVALID_FIELD`) when the row is not dismissible. |
 
 Primary key `(notification_id, user_id)`. Rows exist only for notifications someone has acted on.
 
@@ -241,14 +241,14 @@ A brain-side GC deletes rows 30 days after resolution, and notices once expired.
 
 The inbox is viewer-relative, so it lives under `/api/me` and answers for the org the credential carries.
 
-| Route | Purpose |
-|---|---|
-| `POST /api/me/notifications/list` | The caller's inbox. Filters: `status` (`open` \| `resolved`), `dismissed` (bool), `unread` (bool), `priority_in`, `scope_in` (`org` \| `team` \| `user`). An absent filter does not filter. Standard paging; `page_size: 0` is the badge count. |
-| `GET /api/me/notifications/{id}` | One notification the caller may read, with the caller's marks. 404 otherwise. |
-| `PATCH /api/me/notifications/{id}` | The caller's marks: `{"read": bool, "dismissed": bool}`. `false` clears. |
-| `POST /api/me/notifications/mark-read` | `{"ids": [...]}` — the rows the client actually rendered, so a row that arrived after rendering is not marked. Multi-row transition, hence a verb route. |
-| `POST /api/me/notifications/{id}/actions/{action_id}` | Run a declared invoke action. No body. 403 when the caller lacks the action's permission; 404 for an unknown action id or an unreadable row. |
-| `POST /api/orgs/{org_id}/notifications/list` | Org admins: every notification in the org, team rows included (the "All teams" view). Same filters plus `team_id_in`. Items carry the caller's marks. |
+| Route                                                 | Purpose                                                                                                                                                                                                                                         |
+| ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /api/me/notifications/list`                     | The caller's inbox. Filters: `status` (`open` \| `resolved`), `dismissed` (bool), `unread` (bool), `priority_in`, `scope_in` (`org` \| `team` \| `user`). An absent filter does not filter. Standard paging; `page_size: 0` is the badge count. |
+| `GET /api/me/notifications/{id}`                      | One notification the caller may read, with the caller's marks. 404 otherwise.                                                                                                                                                                   |
+| `PATCH /api/me/notifications/{id}`                    | The caller's marks: `{"read": bool, "dismissed": bool}`. `false` clears.                                                                                                                                                                        |
+| `POST /api/me/notifications/mark-read`                | `{"ids": [...]}` — the rows the client actually rendered, so a row that arrived after rendering is not marked. Multi-row transition, hence a verb route.                                                                                        |
+| `POST /api/me/notifications/{id}/actions/{action_id}` | Run a declared invoke action. No body. 403 when the caller lacks the action's permission; 404 for an unknown action id or an unreadable row.                                                                                                    |
+| `POST /api/orgs/{org_id}/notifications/list`          | Org admins: every notification in the org, team rows included (the "All teams" view). Same filters plus `team_id_in`. Items carry the caller's marks.                                                                                           |
 
 The badge is `status=open, dismissed=false, unread=true, priority_in=[urgent, high], page_size=0`. The banner is `status=open, dismissed=false, priority_in=[urgent]`.
 
@@ -260,15 +260,30 @@ An item:
   "kind": "linear.team_unreadable",
   "lifecycle": "condition",
   "priority": "high",
-  "audience": {"scope": "team", "role": "admins", "team_id": "…"},
+  "audience": { "scope": "team", "role": "admins", "team_id": "…" },
   "title": "Linear team ENG can't be read",
   "body": "…",
   "dismissible": true,
-  "first_seen_at": "…", "last_seen_at": "…", "seen_count": 412,
-  "resolved_at": null, "resolved_reason": null, "expires_at": null,
+  "first_seen_at": "…",
+  "last_seen_at": "…",
+  "seen_count": 412,
+  "resolved_at": null,
+  "resolved_reason": null,
+  "expires_at": null,
   "actions": [
-    {"id": "open_settings", "type": "link", "label": "Open Linear settings", "href": "/orgs/…/org?tab=linear"},
-    {"id": "untrack", "type": "invoke", "label": "Stop tracking ENG", "confirm": "…", "allowed": true}
+    {
+      "id": "open_settings",
+      "type": "link",
+      "label": "Open Linear settings",
+      "href": "/orgs/…/org?tab=linear"
+    },
+    {
+      "id": "untrack",
+      "type": "invoke",
+      "label": "Stop tracking ENG",
+      "confirm": "…",
+      "allowed": true
+    }
   ],
   "read": false,
   "dismissed": false
@@ -302,16 +317,16 @@ The same calls, tables (SQLite) and page. Local is N=1: the one user is the reci
 
 ## First consumers
 
-| Kind | Source | Audience | Priority | Dismissible | Verb and site | Actions |
-|---|---|---|---|---|---|---|
-| `github.app_unusable` | github | org admins | urgent | no | `Set` on every reconcile (`internal/poller/manager.go`, beside `logAppUsabilityChange`) | Link: GitHub access settings |
-| `linear.team_unreadable` | linear | org admins + admins of TF teams tracking it | high | yes | `Sync` on a complete visibility pass (`holdLinearUnreadableTeams`; never on outcome `failed`) | Link: Linear settings; invoke "Stop tracking" on team rows |
-| `jira.discovery_failing` | jira | admins of teams tracking the project | high | yes | `Sync` from `discoverJira` on a complete pass | Link: the project's status rules |
-| `jira.mirror_failing` | jira | team admins | high | yes | `Set` in `runJiraMirror` and the claim guard (`syncJiraClaim`) | Link: the team's Jira status rules |
-| `linear.mirror_failing` | linear | team admins | high | yes | `Set` in `runLinearMirror` and `applyLinearClaim` | Link: the team's Linear rules |
-| `memory.generation_failing` | — | org admins | urgent for `no_model`, high otherwise | no | `Sync` from the memory provisioner over the `error_kind`s currently failing across the org's attempts, after its debounce | Link: background-jobs model setting; invoke "Retry now" (rings `memory_owed`) |
-| `jira.status_drift` | jira | team admins | high | yes | `Sync` from a detection pass that does not exist yet | Link: the rule or handler editor |
-| `routing.automation_conflict` | — | admins of the losing teams | low | (notice) | `Post` in the router where the conflict is decided | Link: the losing team's trigger |
+| Kind                          | Source | Audience                                    | Priority                              | Dismissible | Verb and site                                                                                                             | Actions                                                                       |
+| ----------------------------- | ------ | ------------------------------------------- | ------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `github.app_unusable`         | github | org admins                                  | urgent                                | no          | `Set` on every reconcile (`internal/poller/manager.go`, beside `logAppUsabilityChange`)                                   | Link: GitHub access settings                                                  |
+| `linear.team_unreadable`      | linear | org admins + admins of TF teams tracking it | high                                  | yes         | `Sync` on a complete visibility pass (`holdLinearUnreadableTeams`; never on outcome `failed`)                             | Link: Linear settings; invoke "Stop tracking" on team rows                    |
+| `jira.discovery_failing`      | jira   | admins of teams tracking the project        | high                                  | yes         | `Sync` from `discoverJira` on a complete pass                                                                             | Link: the project's status rules                                              |
+| `jira.mirror_failing`         | jira   | team admins                                 | high                                  | yes         | `Set` in `runJiraMirror` and the claim guard (`syncJiraClaim`)                                                            | Link: the team's Jira status rules                                            |
+| `linear.mirror_failing`       | linear | team admins                                 | high                                  | yes         | `Set` in `runLinearMirror` and `applyLinearClaim`                                                                         | Link: the team's Linear rules                                                 |
+| `memory.generation_failing`   | —      | org admins                                  | urgent for `no_model`, high otherwise | no          | `Sync` from the memory provisioner over the `error_kind`s currently failing across the org's attempts, after its debounce | Link: background-jobs model setting; invoke "Retry now" (rings `memory_owed`) |
+| `jira.status_drift`           | jira   | team admins                                 | high                                  | yes         | `Sync` from a detection pass that does not exist yet                                                                      | Link: the rule or handler editor                                              |
+| `routing.automation_conflict` | —      | admins of the losing teams                  | low                                   | (notice)    | `Post` in the router where the conflict is decided                                                                        | Link: the losing team's trigger                                               |
 
 Debounce is each producer's responsibility, using evidence it already has (the attempts ledger, consecutive cycles). `notify` coalesces; it does not wait.
 
