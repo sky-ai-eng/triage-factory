@@ -780,7 +780,9 @@ func (s *Spawner) recordNativeResult(
 ) (disp engagementDisposition) {
 	// The engagement's terminal span, processCompletion's on the other
 	// runtime: the same attributes, with the loop's own accounting as the
-	// run's figures. Every exit below names its outcome.
+	// run's figures. Every exit below names its outcome, except a fenced one:
+	// the fence can refuse a write inside any of the helpers below, and
+	// whichever write it refused, nothing was recorded.
 	ctx, span := s.startPunctual(ctx, conversationID, "engagement.complete",
 		telemetry.OrgID(orgID),
 		telemetry.TaskID(task.ID),
@@ -790,6 +792,9 @@ func (s *Spawner) recordNativeResult(
 		telemetry.Count(result.NumTurns))
 	var terminal string
 	defer func() {
+		if disp.fenced {
+			terminal = "fenced"
+		}
 		span.SetAttributes(telemetry.Outcome(terminal))
 		span.End()
 	}()
@@ -815,7 +820,6 @@ func (s *Spawner) recordNativeResult(
 	// the refusal IS the record, and writing a terminal here is exactly what
 	// the fence exists to prevent.
 	if result.Err != nil && errors.Is(result.Err, db.ErrClaimReleased) {
-		terminal = "fenced"
 		delegateLog.Error("engagement fenced out mid-flight; a successor owns the conversation",
 			"conversation", conversationID, "claim", cfg.claimID, "error", result.Err)
 		return engagementDisposition{fenced: true}
@@ -827,7 +831,6 @@ func (s *Spawner) recordNativeResult(
 		// must not be recorded the same way: ownership is gone, so this
 		// engagement writes nothing.
 		if leaseFenced(ctx) {
-			terminal = "fenced"
 			delegateLog.Info("engagement fenced by its claim lease; the conversation awaits takeover",
 				"conversation", conversationID, "claim", cfg.claimID)
 			return engagementDisposition{fenced: true}
@@ -870,7 +873,6 @@ func (s *Spawner) recordNativeResult(
 		// lease fence can land after that check. A fenced engagement records
 		// no terminal, failures included.
 		if leaseFenced(ctx) {
-			terminal = "fenced"
 			return engagementDisposition{fenced: true}
 		}
 		terminal = domain.StatusFailed + "_" + string(result.FailureKind)
@@ -890,7 +892,6 @@ func (s *Spawner) recordNativeResult(
 		// from the call that failed. Once it is spent the conversation parks
 		// for a person, the way a stop does.
 		if leaseFenced(ctx) {
-			terminal = "fenced"
 			return engagementDisposition{fenced: true}
 		}
 		terminal = "upstream_unavailable"
@@ -916,7 +917,6 @@ func (s *Spawner) recordNativeResult(
 		// on this host. The conversation goes on in a new cell while the jail
 		// budget lasts.
 		if leaseFenced(ctx) {
-			terminal = "fenced"
 			return engagementDisposition{fenced: true}
 		}
 		terminal = "jail_lost"
@@ -941,7 +941,6 @@ func (s *Spawner) recordNativeResult(
 		// resumable either way, so the snapshot must exist by the time the
 		// status commits — parkConversationOpen owns that ordering.
 		if leaseFenced(ctx) {
-			terminal = "fenced"
 			return engagementDisposition{fenced: true}
 		}
 		terminal = "open"
@@ -967,7 +966,6 @@ func (s *Spawner) recordNativeResult(
 	// the claim would land a full conclusion anyway. Drop it: the session and
 	// the tree survive, and whoever takes the conversation over concludes it.
 	if leaseFenced(ctx) {
-		terminal = "fenced"
 		delegateLog.Warn("dropping a conclusion produced as the claim lease fenced; the conversation returns to the queue",
 			"conversation", conversationID, "claim", cfg.claimID)
 		return engagementDisposition{fenced: true}
@@ -1018,7 +1016,6 @@ func (s *Spawner) recordNativeResult(
 	updated, err := s.conversations.CompleteForClaimSystem(bgCtx, orgID, conversationID, cfg.claimID, domain.StatusOpen, 0, result.DurationMs, result.NumTurns, result.ResultSummary, outcome, outcomeReason, "")
 	if err != nil {
 		if errors.Is(err, db.ErrClaimReleased) {
-			terminal = "fenced"
 			delegateLog.Error("engagement fenced out at conclusion; a successor owns the conversation",
 				"conversation", conversationID, "claim", cfg.claimID)
 			return engagementDisposition{fenced: true}

@@ -989,6 +989,11 @@ func (s *Spawner) processCompletion(
 	// the terminal classification runs.
 	terminal := "open"
 	defer func() {
+		// Fenced means nothing was recorded, whichever write the fence
+		// refused, so it overrides whatever this exit had classified.
+		if fenced {
+			terminal = "fenced"
+		}
 		span.SetAttributes(telemetry.Outcome(terminal))
 		span.End()
 	}()
@@ -1014,7 +1019,6 @@ func (s *Spawner) processCompletion(
 	// lease lapses, and whoever picks the conversation up re-concludes it —
 	// one re-drive, against a write this engagement could not stand behind.
 	if leaseFenced(ctx) {
-		terminal = "fenced"
 		delegateLog.Warn("dropping a completion produced as the claim lease fenced; the conversation returns to the queue",
 			"conversation", conversationID, "claim_id", claimID, "org_id", orgID)
 		return true, true
@@ -1203,7 +1207,6 @@ func (s *Spawner) processCompletion(
 	s.releaseActivity(conversationID, claimID)
 	completedRow, completeErr := s.conversations.CompleteForClaimSystem(bgCtx, orgID, conversationID, claimID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, resultSummary, outcome, outcomeReason, string(failureKind))
 	if errors.Is(completeErr, db.ErrClaimReleased) {
-		terminal = "fenced"
 		// A successor owns the conversation, so this result is not the run's
 		// disposition — it is the output of an engagement that lost its
 		// claim. Recording it would overwrite live work with a stale

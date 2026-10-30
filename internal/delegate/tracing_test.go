@@ -407,6 +407,9 @@ func TestNativeTerminalEmitsEngagementComplete(t *testing.T) {
 		{name: "stopped", res: agentloop.Result{Kind: agentloop.ResultCancelled, Err: context.Canceled}, want: "open"},
 		{name: "lease fenced", cause: errClaimSelfFenced, res: agentloop.Result{Kind: agentloop.ResultConcluded, Outcome: domain.ConversationOutcomeFinish},
 			want: "fenced"},
+		{name: "park refused by the claim fence", fenced: true, res: agentloop.Result{Kind: agentloop.ResultParked}, want: "fenced"},
+		{name: "failure refused by the claim fence", fenced: true, res: agentloop.Result{Kind: agentloop.ResultFailed, FailureKind: domain.ConversationFailureAgentError, Err: errors.New("model call refused")},
+			want: "fenced"},
 		{name: "conclusion refused by the claim fence", fenced: true, res: agentloop.Result{Kind: agentloop.ResultConcluded, Outcome: domain.ConversationOutcomeFinish},
 			want: "fenced"},
 		{name: "claim released mid-flight", res: agentloop.Result{Kind: agentloop.ResultFailed, Err: fmt.Errorf("insert row: %w", db.ErrClaimReleased)},
@@ -453,9 +456,12 @@ func TestNativeTerminalEmitsEngagementComplete(t *testing.T) {
 			}
 			res := tc.res
 			res.CostUSD, res.DurationMs, res.NumTurns = 0.4217, 81234, 7
-			s.recordNativeResult(ctx, runmode.LocalDefaultOrgID, conversationID, task,
+			disp := s.recordNativeResult(ctx, runmode.LocalDefaultOrgID, conversationID, task,
 				runConfig{orgID: runmode.LocalDefaultOrgID, claimID: claimID, blueprintRunID: namespace},
 				namespace, t.TempDir(), "manual", runmode.LocalDefaultUserID, time.Now(), res, nil)
+			if disp.fenced != (tc.want == "fenced") {
+				t.Fatalf("disposition fenced = %v, but the case expects outcome %q", disp.fenced, tc.want)
+			}
 
 			span := completionSpanFor(t, read(), conversationID)
 			if got := spanAttr(t, span, "outcome").AsString(); got != tc.want {
@@ -495,11 +501,13 @@ func TestNativeTerminalEmitsEngagementComplete(t *testing.T) {
 func TestSDKTerminalNamesItsRuntime(t *testing.T) {
 	cases := []struct {
 		name   string
+		body   string
 		fenced bool
 		want   string
 	}{
-		{name: "concluded", want: "concluded_finish"},
-		{name: "terminal refused by the claim fence", fenced: true, want: "fenced"},
+		{name: "concluded", body: `{"outcome":"finish","summary":"shipped it"}`, want: "concluded_finish"},
+		{name: "terminal refused by the claim fence", body: `{"outcome":"finish","summary":"shipped it"}`, fenced: true, want: "fenced"},
+		{name: "idle park refused by the claim fence", body: "just thinking out loud, no envelope here", fenced: true, want: "fenced"},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -511,7 +519,7 @@ func TestSDKTerminalNamesItsRuntime(t *testing.T) {
 			bpr := blueprintRunIDForConversation(t, database, conversationID)
 
 			read := recordSpans(t)
-			completion := res(`{"outcome":"finish","summary":"shipped it"}`)
+			completion := res(tc.body)
 			completion.CostUSD, completion.DurationMs, completion.NumTurns = 0.137, 4200, 3
 			s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, claimID,
 				loadTask(t, s, taskID), completion, t.TempDir(), nil, "", "event", "")
