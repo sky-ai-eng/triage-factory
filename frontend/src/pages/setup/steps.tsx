@@ -1,7 +1,9 @@
 // The wizard's step registry — one atomic action per stack entry. The
-// ORGANIZATION steps (GitHub URL → GitHub access method (local only; multi is
-// always App) → [App: source → account type → register | PAT: token → clone
-// protocol (local only)] → GitHub poll interval →
+// ORGANIZATION steps (GitHub (multi with a deployment App only: Connect, or
+// "use your own GitHub App" for the steps after it) → GitHub URL → GitHub
+// access method (local only; multi is always App) → [App: source → account
+// type → register | PAT: token → clone protocol (local only)] → GitHub poll
+// interval →
 // Trackers → [Jira URL → Jira access → Jira poll interval, shown only when Jira
 // is the chosen/connected tracker | Linear access → Linear poll interval, the
 // same for Linear] → org max model tier → Claude credentials
@@ -33,6 +35,7 @@
 // either performs the connect or is a no-op advance.
 
 import {
+  GitHubConnectStep,
   GitHubUrlStep,
   GitHubModeStep,
   GitHubAppSourceStep,
@@ -44,6 +47,7 @@ import {
   GitHubCloneStep,
   DEFAULT_GITHUB_URL,
 } from './GitHubStep'
+import { deploymentAppConnected } from './githubDeploymentApp'
 import TrackersStep from './TrackersStep'
 import { JiraUrlStep, JiraModeStep, JiraAccessStep } from './JiraStep'
 import { LinearAccessStep } from './LinearStep'
@@ -126,6 +130,9 @@ export const initialWizardState = (): WizardState => ({
   githubAppSlug: '',
   githubAppStatus: null,
   githubAppManaged: false,
+  githubDeploymentAppAvailable: false,
+  githubAppAccounts: [],
+  githubOwnApp: false,
   githubAppInstalled: false,
   githubAppInstallCount: 0,
   isLocal: false,
@@ -441,17 +448,57 @@ async function gateModelPick(orgId: string | null, key: string): Promise<void> {
   )
 }
 
-// Step · GitHub URL (mandatory, first org step). The base-URL reachability
-// gate: Continue probes the host (URL-only, no creds) and, on success, saves
-// the base URL and marks it confirmed; an unreachable host rejects, bouncing
-// Continue and painting the box red (the body reads ctx.error). Owns the single
-// org load (loadOrg), which seeds shared state for every later org step.
+// Step · GitHub (multi mode, first org step when the deployment has an App).
+// The deployment App is the main path: the admin names a GitHub account and
+// the connect flow does the rest on GitHub's pages, returning to Settings,
+// which the setup gate turns into /setup. Nothing to persist here — the bind
+// is the connect flow's — so Continue only checks the outcome: an account
+// connected, or the admin chose their own App, which brings back the steps
+// below. Shown for an org already on the deployment App too (with zero
+// accounts it still needs Connect), but not for one with an App of its own.
+// No load: loadGitHubAppInstall, the install step's, seeds everything it reads.
+const githubConnectVisible = (s: WizardState) =>
+  !s.isLocal && (s.githubAppManaged || (s.githubDeploymentAppAvailable && !s.githubAppRegistered))
+
+const githubConnectStep: WizardStep = {
+  id: 'org-github-connect',
+  section: 'org',
+  title: 'GitHub',
+  visible: githubConnectVisible,
+  isComplete: (s) => deploymentAppConnected(s) || s.githubOwnApp,
+  validate: (s) =>
+    deploymentAppConnected(s) || s.githubOwnApp
+      ? null
+      : 'Connect a GitHub account to continue, or use your own GitHub App.',
+  persist: async () => {},
+  collapsedSummary: (s) =>
+    deploymentAppConnected(s)
+      ? `Deployment App · ${s.githubAppAccounts.join(', ')}`
+      : s.githubOwnApp
+        ? 'Your own GitHub App'
+        : 'Not connected',
+  render: (ctx) => <GitHubConnectStep {...ctx} />,
+}
+
+// onDeploymentApp: the GitHub section is the connect step alone. The own-App
+// steps add !onDeploymentApp to their visibility, so they appear only once the
+// admin picks their own App, and never beside the deployment App.
+const onDeploymentApp = (s: WizardState) => githubConnectVisible(s) && !s.githubOwnApp
+
+// Step · GitHub URL (mandatory; the first org step unless the connect step
+// precedes it). Hidden on the deployment App, whose bind sets the host itself.
+// The base-URL reachability gate: Continue probes the host (URL-only, no
+// creds) and, on success, saves the base URL and marks it confirmed; an
+// unreachable host rejects, bouncing Continue and painting the box red (the
+// body reads ctx.error). Owns the single org load (loadOrg), which seeds
+// shared state for every later org step, and runs even while the step is hidden.
 // isComplete is satisfied by a confirmed URL OR an already-connected org (which
 // implies one), so a returning connected org resumes past it.
 const githubUrlStep: WizardStep = {
   id: 'org-github-url',
   section: 'org',
   title: 'GitHub URL',
+  visible: (s) => !onDeploymentApp(s),
   advanceOnEnter: true,
   load: loadOrg,
   isComplete: (s) => s.githubReady || s.githubUrlConfirmed,
@@ -528,7 +575,7 @@ const githubAppSourceStep: WizardStep = {
   id: 'org-github-app-source',
   section: 'org',
   title: 'App source',
-  visible: (s) => s.githubAccessTab === 'app',
+  visible: (s) => s.githubAccessTab === 'app' && !onDeploymentApp(s),
   selfAdvancing: true,
   isComplete: (s) => s.githubAppSource !== null || s.githubAppRegistered,
   persist: async () => {},
@@ -557,7 +604,8 @@ const githubAccountStep: WizardStep = {
   id: 'org-github-account',
   section: 'org',
   title: 'App account type',
-  visible: (s) => s.githubAccessTab === 'app' && s.githubAppSource !== 'existing',
+  visible: (s) =>
+    s.githubAccessTab === 'app' && s.githubAppSource !== 'existing' && !onDeploymentApp(s),
   selfAdvancing: true,
   isComplete: () => true,
   persist: async () => {},
@@ -583,7 +631,8 @@ const githubAppStep: WizardStep = {
   id: 'org-github-app',
   section: 'org',
   title: 'GitHub App',
-  visible: (s) => s.githubAccessTab === 'app' && s.githubAppSource !== 'existing',
+  visible: (s) =>
+    s.githubAccessTab === 'app' && s.githubAppSource !== 'existing' && !onDeploymentApp(s),
   // Fetch the App status up front, with every other step's load, so the panel
   // has it before the step is ever opened. Best-effort: a failure just leaves
   // the panel to load it itself, exactly as it does in Settings.
@@ -613,7 +662,10 @@ const githubAppImportStep: WizardStep = {
   section: 'org',
   title: 'Connect your App',
   visible: (s) =>
-    s.githubAccessTab === 'app' && s.githubAppSource === 'existing' && !s.githubAppRegistered,
+    s.githubAccessTab === 'app' &&
+    s.githubAppSource === 'existing' &&
+    !s.githubAppRegistered &&
+    !onDeploymentApp(s),
   selfAdvancing: true,
   isComplete: (s) => s.githubAppRegistered,
   persist: async () => {},
@@ -657,6 +709,8 @@ export async function loadGitHubAppInstall(ctx: LoadContext): Promise<Partial<Wi
       githubAppStaged: !!app && !app.active,
       githubAppSlug: app?.slug ?? '',
       githubAppManaged: status.using_deployment_default,
+      githubDeploymentAppAvailable: status.deployment_app_available,
+      githubAppAccounts: status.installations.map((i) => i.account_login),
       githubAppInstalled: n > 0,
       githubAppInstallCount: n,
     }
@@ -695,7 +749,7 @@ const githubAppInstallStep: WizardStep = {
   id: 'org-github-app-install',
   section: 'org',
   title: 'Install the App',
-  visible: (s) => s.githubAccessTab === 'app',
+  visible: (s) => s.githubAccessTab === 'app' && !onDeploymentApp(s),
   load: loadGitHubAppInstall,
   isComplete: (s) => s.githubAppInstalled && !s.githubAppStaged,
   persist: async ({ state, orgId, patch }) => {
@@ -1855,6 +1909,7 @@ const linearUserAccessStep: WizardStep = {
 // the host inserts a divider above the first step of each section. The
 // Jira-projects step is conditionally omitted via its `visible` predicate.
 export const WIZARD_STEPS: WizardStep[] = [
+  githubConnectStep,
   githubUrlStep,
   githubModeStep,
   githubAppSourceStep,

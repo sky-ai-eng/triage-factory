@@ -28,6 +28,23 @@ beforeEach(() => {
   toasts.toast.error.mockReset()
 })
 
+describe('ConnectGitHubAccount · defaultOpen', () => {
+  it('renders the form at once, with no Cancel', () => {
+    render(<ConnectGitHubAccount orgId="org-1" label="Connect GitHub…" defaultOpen />)
+    expect(screen.getByRole('textbox')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Connect' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Connect GitHub…' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument()
+  })
+
+  it('starts closed without it, and offers Cancel once revealed', () => {
+    render(<ConnectGitHubAccount orgId="org-1" label="Connect GitHub…" />)
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Connect GitHub…' }))
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeInTheDocument()
+  })
+})
+
 describe('ConnectGitHubAccount · a refused start', () => {
   it('toasts the message when beforeStart ran first', async () => {
     ghMocks.startManagedGitHubConnectAccount.mockRejectedValue(

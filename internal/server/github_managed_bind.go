@@ -372,7 +372,7 @@ var (
 		status:  http.StatusAccepted,
 		heading: "Install request sent",
 		message: "GitHub sent your install request to an owner of that account. " +
-			"Once they approve it, connect again from organization settings.",
+			"Once they approve it, connect GitHub again.",
 	}
 )
 
@@ -1495,15 +1495,18 @@ func (s *Server) renderBindPage(w http.ResponseWriter, status int, orgID, headin
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 
-	backURL, backLabel := "/", "Back to Triage Factory"
+	// The page is reached from Settings and from the setup wizard alike, so the
+	// label names neither: for an org still in setup, the setup gate turns the
+	// Settings link into /setup.
+	backURL := "/"
 	if orgID != "" {
-		backURL, backLabel = settingsRedirectPath(orgID)+"#github-app", "Back to Settings"
+		backURL = settingsRedirectPath(orgID) + "#github-app"
 	}
 	if err := bindOutcomeTemplate.Execute(w, bindOutcomeData{
 		Heading:   heading,
 		Message:   message,
 		BackURL:   backURL,
-		BackLabel: backLabel,
+		BackLabel: "Back to Triage Factory",
 	}); err != nil {
 		githubAppLog.Error("render bind outcome page failed", "error", err)
 	}

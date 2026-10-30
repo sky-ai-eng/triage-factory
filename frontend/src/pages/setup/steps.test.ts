@@ -4,10 +4,11 @@ import {
   persistOrgFields,
   bedrockFormError,
   linearActive,
+  loadGitHubAppInstall,
   loadOrg,
   WIZARD_STEPS,
 } from './steps'
-import { isStepVisible, resumeIndex } from './resume'
+import { isStepVisible, nextVisibleIndex, prevVisibleIndex, resumeIndex } from './resume'
 import { jsonBody } from '../../test/apiResponse'
 import type { WizardState } from './types'
 
@@ -769,5 +770,116 @@ describe('setup — GitHub access method by mode', () => {
     const ctx = { orgId: ORG_ID, teamId: 'default' }
     expect((await loadOrg({ ...ctx, isLocal: false })).githubAccessTab).toBe('app')
     expect((await loadOrg({ ...ctx, isLocal: true })).githubAccessTab).toBe('pat')
+  })
+})
+
+// Multi mode with a deployment App opens the GitHub section on one step,
+// Connect, with the own-App flow one link away. Without a deployment App, or
+// in local mode, the section is unchanged.
+describe('setup — GitHub through the deployment App', () => {
+  beforeEach(() => vi.restoreAllMocks())
+
+  const githubIds = (state: WizardState) =>
+    WIZARD_STEPS.filter((s) => s.id.startsWith('org-github') && isStepVisible(s, state)).map(
+      (s) => s.id,
+    )
+  const connect = WIZARD_STEPS.find((s) => s.id === 'org-github-connect')!
+  const at = WIZARD_STEPS.indexOf(connect)
+  const fresh = (over: Partial<WizardState> = {}): WizardState => ({
+    ...initialWizardState(),
+    isLocal: false,
+    githubAccessTab: 'app',
+    githubDeploymentAppAvailable: true,
+    ...over,
+  })
+
+  it('opens on the connect step, with the URL and App steps hidden', () => {
+    const state = fresh()
+    expect(githubIds(state)).toEqual(['org-github-connect', 'org-github-poller'])
+    expect(resumeIndex(WIZARD_STEPS, state)).toBe(at)
+  })
+
+  it('lands "use your own GitHub App" on the URL step, and Back returns to Connect', () => {
+    const state = fresh({ githubOwnApp: true })
+    const next = nextVisibleIndex(WIZARD_STEPS, state, at)
+    expect(WIZARD_STEPS[next].id).toBe('org-github-url')
+    expect(prevVisibleIndex(WIZARD_STEPS, state, next)).toBe(at)
+    expect(githubIds(state)).toEqual([
+      'org-github-connect',
+      'org-github-url',
+      'org-github-app-source',
+      'org-github-account',
+      'org-github-app',
+      'org-github-app-install',
+      'org-github-poller',
+    ])
+  })
+
+  it('keeps the own-App flow, with no connect step, for an org with its own App', () => {
+    const ids = githubIds(fresh({ githubAppRegistered: true }))
+    expect(ids).not.toContain('org-github-connect')
+    expect(ids.slice(0, 2)).toEqual(['org-github-url', 'org-github-app-source'])
+  })
+
+  it('keeps today’s flow with no deployment App, and in local mode', () => {
+    const none = githubIds(fresh({ githubDeploymentAppAvailable: false }))
+    expect(none).not.toContain('org-github-connect')
+    expect(none.slice(0, 2)).toEqual(['org-github-url', 'org-github-app-source'])
+    const local = githubIds(fresh({ isLocal: true, githubAccessTab: null }))
+    expect(local).not.toContain('org-github-connect')
+    expect(local.slice(0, 2)).toEqual(['org-github-url', 'org-github-mode'])
+  })
+
+  it('is complete once an account is connected, and names it', () => {
+    const state = fresh({
+      githubAppManaged: true,
+      githubAppInstalled: true,
+      githubAppInstallCount: 1,
+      githubAppAccounts: ['acme-corp'],
+    })
+    expect(connect.isComplete(state)).toBe(true)
+    expect(connect.validate?.(state)).toBeNull()
+    expect(connect.collapsedSummary(state)).toBe('Deployment App · acme-corp')
+    expect(githubIds(state)).toEqual(['org-github-connect', 'org-github-poller'])
+  })
+
+  it('stays incomplete on the deployment App with no account, and Continue says what to do', () => {
+    const message = 'Connect a GitHub account to continue, or use your own GitHub App.'
+    const managed = fresh({ githubAppManaged: true })
+    expect(isStepVisible(connect, managed)).toBe(true)
+    expect(connect.isComplete(managed)).toBe(false)
+    expect(connect.validate?.(managed)).toBe(message)
+    expect(connect.validate?.(fresh())).toBe(message)
+  })
+
+  it('summarizes the own-App choice', () => {
+    const state = fresh({ githubOwnApp: true })
+    expect(connect.isComplete(state)).toBe(true)
+    expect(connect.collapsedSummary(state)).toBe('Your own GitHub App')
+  })
+
+  it('seeds the deployment App and its accounts from the App status', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        ...jsonBody({
+          app: null,
+          installations: [{ installation_id: '1', account_login: 'acme-corp' }],
+          using_deployment_default: true,
+          deployment_app_available: true,
+          webhook_health: null,
+          connect_callback_url: '',
+        }),
+      }),
+    )
+    const slice = await loadGitHubAppInstall({ orgId: ORG_ID, teamId: 'default', isLocal: false })
+    expect(slice).toMatchObject({
+      githubAppManaged: true,
+      githubDeploymentAppAvailable: true,
+      githubAppAccounts: ['acme-corp'],
+      githubAppInstalled: true,
+    })
   })
 })

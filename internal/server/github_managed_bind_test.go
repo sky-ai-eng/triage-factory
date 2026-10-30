@@ -2520,3 +2520,31 @@ func TestManagedBind_LocalModeIs404(t *testing.T) {
 		}
 	}
 }
+
+// TestManagedBind_OutcomePageReadsFromSetupAndSettings: the outcome page is
+// reached from Settings and from the setup wizard, so neither its back link
+// nor the install-request message names Settings. The link itself still
+// targets Settings, which the setup gate turns into /setup for an org still in
+// setup.
+func TestManagedBind_OutcomePageReadsFromSetupAndSettings(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	rec := httptest.NewRecorder()
+	(&Server{}).renderBindOutcome(rec, "org-x", refuseInstallPending)
+
+	if rec.Code != http.StatusAccepted {
+		t.Errorf("status = %d, want 202", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`href="/orgs/org-x/settings#github-app"`,
+		"Back to Triage Factory",
+		"Once they approve it, connect GitHub again.",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("outcome page does not contain %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "Settings<") || strings.Contains(body, "organization settings") {
+		t.Errorf("outcome page still points the reader at Settings:\n%s", body)
+	}
+}
