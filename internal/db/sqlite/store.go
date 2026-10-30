@@ -1,9 +1,7 @@
 // Package sqlite is the SQLite-backed implementation of the
 // per-resource store interfaces declared in package db. Local-mode
 // installs of triagefactory wire this implementation at startup
-// (multi-mode wires internal/db/postgres). See the D2 spec
-// at specs/sky-246-d2-store-abstraction.html for the full
-// design.
+// (multi-mode wires internal/db/postgres).
 package sqlite
 
 import (

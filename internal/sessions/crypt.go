@@ -3,8 +3,7 @@
 // public.sessions CRUD that wraps them.
 //
 // Local mode never imports this package — sessions only exist in
-// multi-mode (cookie-bearer auth backed by GoTrue). See
-// specs/multi-tenant-architecture.html §4 + §13 D7.
+// multi-mode (cookie-bearer auth backed by GoTrue).
 package sessions
 
 import (

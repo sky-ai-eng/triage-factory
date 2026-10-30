@@ -356,6 +356,5 @@ proxy, git proxy TBD, SKY-303 IPC).
 
 ---
 
-See `specs/multi-tenant-architecture.html` §6 for the high-level
-architectural framing. See the SKY-254 ticket for the implementation
-plan and acceptance criteria.
+See the SKY-254 ticket for the implementation plan and acceptance
+criteria.

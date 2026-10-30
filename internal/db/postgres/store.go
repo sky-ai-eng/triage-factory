@@ -1,9 +1,8 @@
 // Package postgres is the Postgres-backed implementation of the
 // per-resource store interfaces declared in package db. Multi-tenant
 // installs of triagefactory wire this implementation at startup
-// (local-mode wires internal/db/sqlite). See the D2 spec at
-// specs/sky-246-d2-store-abstraction.html for the full design,
-// and the D3 schema at internal/db/migrations-postgres/.
+// (local-mode wires internal/db/sqlite). The schema is
+// internal/db/migrations-postgres/.
 //
 // # Two-connection design
 //

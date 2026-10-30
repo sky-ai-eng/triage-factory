@@ -1,4 +1,4 @@
-# Backend surface cleanup — audit and target contract
+# Backend surface cleanup — target contract
 
 The HTTP surface is the primary way both the SPA and AI agents drive
 Triage Factory. An agent navigating an API discovers it the same way a
@@ -14,8 +14,7 @@ Status: Completed.
 
 ## 1. The target contract
 
-Five rules. Every new route follows them from day one; existing routes
-converge per the remediation order in §4.
+Six rules, and every route follows them.
 
 ### R1 — One intent per route
 
