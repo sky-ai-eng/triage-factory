@@ -10,7 +10,7 @@ import (
 )
 
 func TestFSStorage_Conformance(t *testing.T) {
-	runConformance(t, newFSStorage(t.TempDir()))
+	runConformance(t, context.Background(), newFSStorage(t.TempDir()))
 }
 
 func TestFSStorage_RejectsBadKeys(t *testing.T) {
@@ -32,7 +32,7 @@ func TestFSStorage_NestedKeyCreatesDirs(t *testing.T) {
 	if err := store.Put(ctx, key, strings.NewReader("ok")); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	if got := string(mustGet(t, store, key)); got != "ok" {
+	if got := string(mustGet(t, ctx, store, key)); got != "ok" {
 		t.Fatalf("Get(%q) = %q; want %q", key, got, "ok")
 	}
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 	"go.opentelemetry.io/otel"
@@ -34,8 +35,30 @@ import (
 // pgtest.Image. Same tag the compose stack pins.
 const seaweedImage = "chrislusf/seaweedfs:4.36"
 
+// TestObjectStorage_Conformance runs the backend contract against a SeaweedFS
+// that checks SigV4 signatures, with tracing on, as in a deployment that sets
+// TF_TRACES_ENDPOINT. Every call runs under a parent span, as it does in
+// production, so each request carries a traceparent that otelhttp sets after
+// signing. The suite passing is the proof that the header leaves the signature
+// valid.
+//
+// It replaces the global tracer provider and propagator, so it must not run in
+// parallel with another test that reads them.
 func TestObjectStorage_Conformance(t *testing.T) {
 	endpoint, accessKey, secretKey := startSeaweedFS(t)
+
+	// Installed before any store is built: otelhttp resolves its tracer and
+	// propagator when the transport is constructed.
+	recorder := tracetest.NewSpanRecorder()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	t.Cleanup(func() {
+		otel.SetTracerProvider(noop.NewTracerProvider())
+		otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator())
+	})
+	ctx, parent := otel.Tracer("test").Start(context.Background(), "conformance")
+	defer parent.End()
+
 	cfg := ObjectConfig{
 		Endpoint:  endpoint,
 		Bucket:    "tf-conformance",
@@ -48,7 +71,22 @@ func TestObjectStorage_Conformance(t *testing.T) {
 		t.Fatalf("newObjectStorage: %v", err)
 	}
 	createBucket(t, store)
-	runConformance(t, store)
+
+	// A gateway that stopped checking signatures would pass everything below,
+	// so first confirm it refuses a request signed with the wrong secret, to
+	// a bucket that exists.
+	wrong := cfg
+	wrong.SecretKey = "not-" + secretKey
+	wrongKey, err := newObjectStorage(wrong)
+	if err != nil {
+		t.Fatalf("newObjectStorage (wrong secret): %v", err)
+	}
+	var apiErr smithy.APIError
+	if err := wrongKey.Put(ctx, "org-1/probe", strings.NewReader("x")); !errors.As(err, &apiErr) || apiErr.ErrorCode() != "SignatureDoesNotMatch" {
+		t.Fatalf("Put with the wrong secret = %v; want SignatureDoesNotMatch (the gateway is not checking signatures)", err)
+	}
+
+	runConformance(t, ctx, store)
 
 	// The knowledge bucket is versioned, where a delete leaves a delete marker
 	// and an overwrite keeps the old version. The backend must not tell the
@@ -66,7 +104,19 @@ func TestObjectStorage_Conformance(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("enable versioning: %v", err)
 	}
-	t.Run("versioned", func(t *testing.T) { runConformance(t, vstore) })
+	t.Run("versioned", func(t *testing.T) { runConformance(t, ctx, vstore) })
+
+	// A traced request is one otelhttp injected a traceparent into, so this is
+	// what makes the passes above a test of that header.
+	traced := 0
+	for _, span := range recorder.Ended() {
+		if span.Name() == "s3.http" && span.Parent().SpanID() == parent.SpanContext().SpanID() {
+			traced++
+		}
+	}
+	if traced == 0 {
+		t.Fatal("no s3.http span recorded under the suite's parent; no request carried a traceparent")
+	}
 }
 
 func createBucket(t *testing.T, store *objectStorage) {
@@ -253,10 +303,10 @@ func TestObjectStorage_TracesUnderParent(t *testing.T) {
 
 // startSeaweedFS boots a throwaway SeaweedFS and returns its S3 endpoint URL
 // plus a credential pair. It runs `weed mini` — the all-in-one single-process
-// cluster (master+volume+filer+S3) built for fast startup — with no identity
-// config, so the S3 gateway is in allow-all mode and the returned keys are
-// accepted but unchecked (the conformance suite tests round-trip behavior, not
-// auth enforcement; the compose stack runs with an s3.json identity instead).
+// cluster (master+volume+filer+S3) built for fast startup — with one s3.json
+// identity holding the returned keys, so the gateway checks every request's
+// SigV4 signature, as the compose stack's does. The identity is not limited to
+// a bucket, because the suite creates its buckets and sets versioning itself.
 // Like pgtest, it skips cleanly when Docker is unavailable — the SQLite/local
 // suite stays green on machines with no daemon — but a reachable-but-broken
 // daemon fails loudly rather than skipping a real regression into a green pass.
@@ -265,16 +315,20 @@ func startSeaweedFS(t *testing.T) (endpoint, accessKey, secretKey string) {
 	testcontainers.SkipIfProviderIsNotHealthy(t)
 
 	ctx := context.Background()
-	// Any non-empty pair works: allow-all mode ignores the SigV4 signature, and
-	// newObjectStorage only requires that both halves are set.
 	const user, pass = "tfaccesskey", "tfsecretkey"
+	identity := fmt.Sprintf(`{"identities":[{"name":"tf","credentials":[{"accessKey":%q,"secretKey":%q}],"actions":["Admin"]}]}`, user, pass)
 	req := testcontainers.ContainerRequest{
 		Image:        seaweedImage,
 		ExposedPorts: []string{"8333/tcp"},
-		Cmd:          []string{"mini", "-dir=/data"},
+		Cmd:          []string{"mini", "-dir=/data", "-s3.config=/etc/tf-s3.json"},
+		Files: []testcontainers.ContainerFile{{
+			Reader:            strings.NewReader(identity),
+			ContainerFilePath: "/etc/tf-s3.json",
+			FileMode:          0o644,
+		}},
 		// Gate on the S3 gateway itself answering on 8333 (the master/filer
-		// come up first): any non-5xx status means it's serving — ListBuckets
-		// returns 200 in allow-all mode.
+		// come up first): any non-5xx status means it's serving — the
+		// unsigned probe gets a 403 AccessDenied.
 		WaitingFor: wait.ForHTTP("/").
 			WithPort("8333/tcp").
 			WithStatusCodeMatcher(func(status int) bool { return status >= 200 && status < 500 }).
