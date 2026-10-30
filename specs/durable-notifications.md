@@ -301,11 +301,13 @@ One invalidation ping, `notifications_updated`, with no payload. It is sent when
 
 The audience is resolved at emit time, as in `internal/knowledgeevent`: an `org`/`members` row is one org-scoped envelope; every other row fans out one envelope per user id. A resolution failure drops the envelope (the client refetches on its next ping or navigation) rather than widening it. The client refetches the badge count, the banner query, and the page's list if it is open.
 
+Every producer can send the ping from the process it runs in. `notify.Install` takes the app's hub, and in multi mode every pod builds the websocket backplane (`internal/app/backplane.go`), so a broadcast on any pod reaches sockets on every control pod. The mirrors run where delegations are minted: the router's firing path on the brain and the task-actions handler, both on control pods. `announceTaskPlacement` already broadcasts `task_updated` through the spawner's hub just before it starts them. The claim guards run in the API handler.
+
 ## UI requirements
 
-The visual design is done separately and from scratch; the existing toast UI is not a reference. What the surfaces must hold:
+The visual design is TFAC-1239, under the UI V1 epic. It starts from scratch; the existing toast UI is not a reference. What the surfaces must hold:
 
-- **Rail row** "Notifications" in the work section, in both modes, using the rail's `alert` mark for the badge count. (The `alert` field exists for exactly this: "a thing that happened and needs somebody".)
+- **Rail row** "Notifications" in the work section, in both modes, using the rail's `alert` mark for the badge count. (The `alert` field exists for exactly this: "a thing that happened and needs somebody".) Its position within the section is TFAC-1239's call.
 - **Page** at `/orgs/:org_id/notifications` (local: `/notifications`). Default view: open and not dismissed, sorted by priority, then `escalated_at` newest first. Filters: status, dismissed, priority, scope ("Org", "My teams", "You"; org admins also "All teams"). Each item shows its priority, its scope ("Org", "Team Infra", "You"), title and body, how long the condition has been true (from `first_seen_at`), when it was last seen, its actions, and dismiss when dismissible. Resolved items show when and why they resolved. Items are addressable by URL so the banner, the arrival pop and later emails can link to one.
 - **Read**: the page marks the items it renders as read (`mark-read` with their ids).
 - **Urgent banner** across the shell for open, undismissed urgent rows, linking to the item (or to the page when there are several).
@@ -328,7 +330,7 @@ The same calls, tables (SQLite) and page. Local is N=1: the one user is the reci
 | `jira.status_drift`           | jira   | team admins                                 | high                                  | yes         | `Sync` from a detection pass that does not exist yet                                                                      | Link: the rule or handler editor                                              |
 | `routing.automation_conflict` | —      | admins of the losing teams                  | low                                   | (notice)    | `Post` in the router where the conflict is decided                                                                        | Link: the losing team's trigger                                               |
 
-Debounce is each producer's responsibility, using evidence it already has (the attempts ledger, consecutive cycles). `notify` coalesces; it does not wait.
+Debounce is each producer's responsibility, using evidence it already has (the attempts ledger, consecutive cycles). `notify` coalesces; it does not wait. Each consumer's ticket sets its producer's thresholds.
 
 ## Phases
 
@@ -352,7 +354,7 @@ User-configured notifications on events that already exist for automation: a `no
 
 ## Open questions
 
-1. **The urgent banner for a non-dismissible condition** — does it stay at full size after the person has read it, or collapse? (UI.)
-2. **Websocket pings from executor-side producers.** Confirm the spawner's mirrors have a hub (and backplane) to send through in multi mode, or route their pings through the brain.
-3. **Debounce thresholds** for each producer — decided in each consumer's ticket.
-4. **Rail row position** within the work section. (UI.)
+Both are UI design questions, tracked in TFAC-1239:
+
+1. **The urgent banner for a non-dismissible condition.** Does it stay at full size after the person has read it, or collapse?
+2. **Rail row position** within the work section.
