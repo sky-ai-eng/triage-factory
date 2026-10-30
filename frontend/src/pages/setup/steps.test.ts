@@ -353,9 +353,9 @@ describe('setup — the Linear tracker', () => {
     const typed = { ...state, org: { ...state.org, linear_api_key: 'lin_api_x' } }
     expect(access.validate?.(typed)).toBeNull()
     expect(access.isComplete({ ...state, linearConnected: true })).toBe(true)
-    // With an app to install, the step names both ways in.
-    expect(access.validate?.({ ...state, linearInstallAvailable: true })).toMatch(
-      /Install Triage Factory in Linear, or paste a Linear API key/,
+    // With an app to install, the step points at Install, then the key.
+    expect(access.validate?.({ ...state, linearInstallAvailable: true })).toBe(
+      'Install Triage Factory in Linear to connect, or use a personal API key instead.',
     )
   })
 

@@ -6,7 +6,9 @@
 // saved, a Linear workspace admin can install Triage Factory from the Linear
 // connection section. When the deployment has a Linear app of its own, Install
 // already works and an app of the org's own is an optional override, so the
-// card says so and offers no creation link.
+// card says so and keeps the form behind a button, with no creation link.
+// `openForm` skips that button for a caller whose own button was already the
+// deliberate click (the setup wizard's "Set up your own Linear app").
 //
 // Self-contained (an action section, no Save footer): it owns its status fetch,
 // the draft fields, the summary and the remove. `onStatus` tells the parent
@@ -64,9 +66,11 @@ function CopyField({ label, value }: { label: string; value: string }) {
 export default function LinearOAuthAppCard({
   orgId,
   onStatus,
+  openForm = false,
 }: {
   orgId: string
   onStatus?: (status: LinearAppStatus) => void
+  openForm?: boolean
 }) {
   const [status, setStatusState] = useState<LinearAppStatus | null>(null)
   const [clientId, setClientId] = useState('')
@@ -74,6 +78,7 @@ export default function LinearOAuthAppCard({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [replacing, setReplacing] = useState(false)
+  const [registering, setRegistering] = useState(false)
   const [loadFailed, setLoadFailed] = useState(false)
 
   const setStatus = (s: LinearAppStatus) => {
@@ -127,6 +132,7 @@ export default function LinearOAuthAppCard({
       setClientId('')
       setClientSecret('')
       setReplacing(false)
+      setRegistering(false)
       toast.success('Linear app saved')
       return
     }
@@ -154,15 +160,19 @@ export default function LinearOAuthAppCard({
     }
   }
 
+  // Nothing to choose until the read answers: before it, a deployment-app org
+  // would see the form only to have it fold behind the button. A failed read
+  // still shows the form, so saving works.
+  const loaded = status !== null || loadFailed
   const hasOverride = !!status?.app
-  const showForm = !hasOverride || replacing
-  const redirectURIs = status?.redirect_uris ?? []
-
   const onDeploymentApp = !hasOverride && !!status?.using_deployment_default
+  const showForm =
+    loaded && (replacing || (!hasOverride && (!onDeploymentApp || registering || openForm)))
+  const redirectURIs = status?.redirect_uris ?? []
 
   return (
     <div className="space-y-5">
-      {!onDeploymentApp && (
+      {loaded && !onDeploymentApp && (
         <p className="text-body leading-relaxed text-ink-3">
           Register a Linear OAuth app so a Linear workspace admin can install Triage Factory as an
           app. Triage Factory then works in Linear as its own app user instead of through
@@ -197,9 +207,21 @@ export default function LinearOAuthAppCard({
       {onDeploymentApp && (
         <div className="rounded-2xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/40 px-4 py-3 text-ui text-ink-2">
           Using this deployment&rsquo;s Triage Factory app, so a Linear workspace admin can install
-          Triage Factory without registering one. Register your own below only if you need to; it
-          then replaces the deployment&rsquo;s app for this organization.
+          Triage Factory without registering one.{' '}
+          {showForm
+            ? 'Register your own below only if you need to'
+            : 'Use your own Linear app only if you need one'}
+          ; it then replaces the deployment&rsquo;s app for this organization.
         </div>
+      )}
+      {onDeploymentApp && !showForm && (
+        <button
+          type="button"
+          onClick={() => setRegistering(true)}
+          className="rounded-xl border border-[var(--color-line-1)] px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:text-ink-1"
+        >
+          Use your own Linear app instead…
+        </button>
       )}
 
       {showForm && (
@@ -284,11 +306,12 @@ export default function LinearOAuthAppCard({
             >
               {busy ? 'Saving…' : hasOverride ? 'Replace app' : 'Save app'}
             </button>
-            {hasOverride && replacing && (
+            {((hasOverride && replacing) || (registering && !openForm)) && (
               <button
                 type="button"
                 onClick={() => {
                   setReplacing(false)
+                  setRegistering(false)
                   setClientId('')
                   setClientSecret('')
                   setError(null)

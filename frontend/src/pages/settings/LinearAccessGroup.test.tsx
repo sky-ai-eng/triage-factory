@@ -69,6 +69,23 @@ describe('LinearAccessGroup install path', () => {
     expect(screen.getByPlaceholderText('lin_api_…')).toBeInTheDocument()
   })
 
+  it('leaves Install alone when the key field is hidden', () => {
+    render(
+      <LinearAccessGroup
+        value={{ linear_api_key: '' }}
+        onChange={() => {}}
+        connected={false}
+        installAvailable
+        orgId="org-1"
+        bare
+        showKeyField={false}
+      />,
+    )
+    expect(screen.getByRole('button', { name: 'Install Triage Factory' })).toBeInTheDocument()
+    expect(screen.queryByText('Or paste a personal API key')).not.toBeInTheDocument()
+    expect(screen.queryByPlaceholderText('lin_api_…')).not.toBeInTheDocument()
+  })
+
   it('offers no Install when no app resolves', () => {
     render(
       <LinearAccessGroup

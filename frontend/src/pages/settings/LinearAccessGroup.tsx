@@ -43,6 +43,10 @@ import { useLinearSwitchWarning } from './linearSwitchWarning'
  *
  * bare (default false) drops the carded `<Section>` chrome and uses the flush
  * glass field material, for the setup wizard and the Settings stack.
+ *
+ * showKeyField (default true) false leaves the unconnected group as Install
+ * alone, for a container that keeps the key behind a link of its own while an
+ * app resolves (the setup wizard, Settings).
  */
 export default function LinearAccessGroup({
   value,
@@ -58,6 +62,7 @@ export default function LinearAccessGroup({
   onDisconnected,
   hold,
   bare = false,
+  showKeyField = true,
 }: {
   value: { linear_api_key: string }
   onChange: (patch: { linear_api_key: string }) => void
@@ -82,6 +87,7 @@ export default function LinearAccessGroup({
    *  removing. */
   hold?: (work: () => Promise<void>) => Promise<void>
   bare?: boolean
+  showKeyField?: boolean
 }) {
   const field = bare ? glassInputClass : inputClass
   const installed = connected && authMethod === 'app_install'
@@ -235,34 +241,38 @@ export default function LinearAccessGroup({
                 in Linear as its own app user, which holds no one&rsquo;s personal key and takes no
                 seat. Private teams have to be shared with the app on its page in Linear.
               </p>
-              <p className="pt-1 text-reported font-medium uppercase tracking-wide text-ink-3">
-                Or paste a personal API key
-              </p>
+              {showKeyField && (
+                <p className="pt-1 text-reported font-medium uppercase tracking-wide text-ink-3">
+                  Or paste a personal API key
+                </p>
+              )}
             </div>
           )}
-          <Field label="API key">
-            <input
-              type="password"
-              placeholder="lin_api_…"
-              autoComplete="off"
-              value={value.linear_api_key}
-              onChange={(e) => onChange({ linear_api_key: e.target.value })}
-              className={field}
-            />
-            <p className="mt-1.5 text-reported leading-snug text-ink-3">
-              Create a personal API key in Linear under{' '}
-              <a
-                href="https://linear.app/settings/account/security"
-                target="_blank"
-                rel="noreferrer"
-                className="text-warm hover:underline"
-              >
-                Settings → Account → Security &amp; Access
-              </a>{' '}
-              with Read and Write access. Triage Factory polls and acts in Linear as the person the
-              key belongs to.
-            </p>
-          </Field>
+          {showKeyField && (
+            <Field label="API key">
+              <input
+                type="password"
+                placeholder="lin_api_…"
+                autoComplete="off"
+                value={value.linear_api_key}
+                onChange={(e) => onChange({ linear_api_key: e.target.value })}
+                className={field}
+              />
+              <p className="mt-1.5 text-reported leading-snug text-ink-3">
+                Create a personal API key in Linear under{' '}
+                <a
+                  href="https://linear.app/settings/account/security"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-warm hover:underline"
+                >
+                  Settings → Account → Security &amp; Access
+                </a>{' '}
+                with Read and Write access. Triage Factory polls and acts in Linear as the person
+                the key belongs to.
+              </p>
+            </Field>
+          )}
         </div>
       ) : (
         <div className="space-y-2">

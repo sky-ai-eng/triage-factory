@@ -1,7 +1,7 @@
 // The Linear OAuth app card: it links to Linear's pre-filled creation page,
 // lists the redirect URIs to register, says when the deployment's app already
-// serves the org, and reports the server's refusal to remove an app a
-// live install depends on.
+// serves the org and keeps the form behind a button then, and reports the
+// server's refusal to remove an app a live install depends on.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 
@@ -40,22 +40,61 @@ describe('LinearOAuthAppCard', () => {
     expect(screen.getByLabelText('redirect URI 1')).toHaveValue(uris[0])
     expect(screen.getByLabelText('redirect URI 2')).toHaveValue(uris[1])
     expect(onStatus).toHaveBeenCalledWith(expect.objectContaining({ install_available: false }))
+    expect(screen.queryByRole('button', { name: /Use your own Linear app instead/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull()
   })
 
-  it("on the deployment app, says so and still offers an app of the org's own", async () => {
-    const onStatus = vi.fn()
+  const deploymentStatus = () => {
     const onDeployment = status({ install_available: true, using_deployment_default: true })
     delete (onDeployment as Record<string, unknown>).create_url
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, ...jsonBody(onDeployment) }))
+    return onDeployment
+  }
+
+  it("on the deployment app, says so and keeps an app of the org's own behind a button", async () => {
+    const onStatus = vi.fn()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, ...jsonBody(deploymentStatus()) }))
     render(<LinearOAuthAppCard orgId="org-1" onStatus={onStatus} />)
 
     expect(
-      await screen.findByText(/Using this deployment.s Triage Factory app/),
+      await screen.findByText(/Use your own Linear app only if you need one/),
     ).toBeInTheDocument()
-    expect(screen.queryByRole('link', { name: /Create the app in Linear/ })).toBeNull()
-    expect(screen.getByPlaceholderText("Your Linear OAuth app's client ID")).toBeInTheDocument()
-    expect(screen.getByLabelText('redirect URI 1')).toHaveValue(uris[0])
+    expect(screen.queryByPlaceholderText("Your Linear OAuth app's client ID")).toBeNull()
     expect(onStatus).toHaveBeenCalledWith(expect.objectContaining({ install_available: true }))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Use your own Linear app instead…' }))
+    expect(screen.getByText(/Register your own below only if you need to/)).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /Create the app in Linear/ })).toBeNull()
+    expect(screen.getByLabelText('redirect URI 1')).toHaveValue(uris[0])
+    const clientId = screen.getByPlaceholderText("Your Linear OAuth app's client ID")
+    fireEvent.change(clientId, { target: { value: 'lin-client' } })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByPlaceholderText("Your Linear OAuth app's client ID")).toBeNull()
+    // Cancel drops the draft: reopened, the field starts empty.
+    fireEvent.click(screen.getByRole('button', { name: 'Use your own Linear app instead…' }))
+    expect(screen.getByPlaceholderText("Your Linear OAuth app's client ID")).toHaveValue('')
+  })
+
+  it('shows no form while its read is in flight', () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => new Promise(() => {})),
+    )
+    render(<LinearOAuthAppCard orgId="org-1" />)
+    expect(screen.queryByPlaceholderText("Your Linear OAuth app's client ID")).toBeNull()
+    expect(screen.queryByText(/Register a Linear OAuth app/)).toBeNull()
+  })
+
+  it('opens on the form with openForm, with no Cancel', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, ...jsonBody(deploymentStatus()) }))
+    render(<LinearOAuthAppCard orgId="org-1" openForm />)
+
+    expect(
+      await screen.findByText(/Register your own below only if you need to/),
+    ).toBeInTheDocument()
+    expect(screen.getByPlaceholderText("Your Linear OAuth app's client ID")).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Use your own Linear app instead/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull()
   })
 
   it('saves the pasted credentials and reports the install as available', async () => {
@@ -123,7 +162,11 @@ describe('LinearOAuthAppCard', () => {
     )
     render(<LinearOAuthAppCard orgId="org-1" />)
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Remove' }))
+    expect(await screen.findByText('Linear app configured')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Replace' })).toBeInTheDocument()
+    expect(screen.queryByPlaceholderText("Your Linear OAuth app's client ID")).toBeNull()
+    expect(screen.queryByRole('button', { name: /Use your own Linear app instead/ })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }))
     await waitFor(() =>
       expect(screen.getByRole('alert')).toHaveTextContent('disconnect the installed app first'),
     )
