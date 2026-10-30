@@ -1,6 +1,9 @@
 // The GitHub backbone, split into atomic stack entries (GitHub is the backbone,
 // so it's never grouped with the trackers):
 //
+//   GitHubConnectStep     — multi with a deployment App only: Connect through
+//                           the deployment App, or "use your own GitHub App",
+//                           which opens the steps below.
 //   GitHubUrlStep         — the base-URL field. Continue runs the URL-only
 //                           reachability probe; an unreachable host bounces
 //                           Continue and turns the box red.
@@ -26,10 +29,12 @@ import GitHubAccessGroup from '../settings/GitHubAccessGroup'
 import GitHubAppPanel from '../settings/GitHubAppPanel'
 import GitHubAppImportForm from '../settings/GitHubAppImportForm'
 import { GitHubAppInstallView } from '../settings/GitHubAppInstallView'
+import ConnectGitHubAccount from '../settings/ConnectGitHubAccount'
 import { useGitHubAppInstall } from '../../hooks/useGitHubAppInstall'
 import { UrlField, ChoiceCards, ReuseCredentialCheckbox } from './parts'
 import type { StepContext, GitHubAccessMode, GitHubAppSource, WizardState } from './types'
 import { appImportedPatch } from './githubAppImported'
+import { deploymentAppConnected } from './githubDeploymentApp'
 
 export const DEFAULT_GITHUB_URL = 'https://github.com'
 
@@ -41,6 +46,71 @@ function SwitchNotice({ children }: { children: React.ReactNode }) {
   return (
     <div className="rounded-xl border border-warm/20 bg-warm/[0.08] px-4 py-2.5 text-ui leading-relaxed text-warm dark:text-warm">
       {children}
+    </div>
+  )
+}
+
+// GitHubConnectStep body — the deployment App's Connect. Unconnected, the
+// account field is open from the start, and under it is the way to an App of
+// the org's own: the link records the choice and advances, and the URL step is
+// next. Connected, it lists the accounts and offers another. It has no
+// disconnect and no "use your own": leaving the deployment App is Settings'
+// Disconnect. Connect leaves the page; the connect flow returns to Settings,
+// which the setup gate turns back into /setup.
+export function GitHubConnectStep({ orgId, state, patch, advance }: StepContext) {
+  if (!orgId) {
+    return <p className="text-ui italic text-ink-3">Resolving your organization…</p>
+  }
+  if (deploymentAppConnected(state)) {
+    return (
+      <div className="space-y-5">
+        <div className="space-y-1.5">
+          <h2 className="text-[19px] font-medium tracking-tight text-ink-1">GitHub is connected</h2>
+          <p className="text-body leading-relaxed text-ink-3">
+            Triage Factory connects through this deployment&rsquo;s GitHub App, on these accounts:
+          </p>
+        </div>
+        <ul className="space-y-1">
+          {state.githubAppAccounts.map((login) => (
+            <li
+              key={login}
+              className="rounded-xl border border-line-1 bg-raised px-3 py-2 text-ui text-ink-1"
+            >
+              {login}
+            </li>
+          ))}
+        </ul>
+        <ConnectGitHubAccount orgId={orgId} label="Connect another account…" />
+      </div>
+    )
+  }
+  return (
+    <div className="space-y-5">
+      <div className="space-y-1.5">
+        <h2 className="text-[19px] font-medium tracking-tight text-ink-1">Connect GitHub</h2>
+        <p className="text-body leading-relaxed text-ink-3">
+          This deployment has a GitHub App ready, so there&rsquo;s nothing to register. Name the
+          GitHub organization whose repositories Triage Factory should watch, and GitHub handles the
+          rest.
+        </p>
+      </div>
+      <ConnectGitHubAccount orgId={orgId} label="Connect GitHub…" defaultOpen />
+      <div className="space-y-1 border-t border-line-1 pt-4">
+        <button
+          type="button"
+          onClick={() => {
+            patch({ githubOwnApp: true })
+            advance?.()
+          }}
+          className="text-body text-warm hover:underline"
+        >
+          Use your own GitHub App instead
+        </button>
+        <p className="text-reported leading-relaxed text-ink-3">
+          For GitHub Enterprise Server or a ghe.com subdomain, or when your organization needs an
+          App it owns.
+        </p>
+      </div>
     </div>
   )
 }
@@ -159,13 +229,6 @@ const SOURCE_CARDS: { kind: GitHubAppSource; title: string; detail: string }[] =
 // plus heading — reused by the wizard's source step and the Settings switch flow.
 // onChoose receives the kind directly so callers route on the argument (not a
 // not-yet-flushed state read).
-//
-// TODO(TFAC-948): the wizard never offers the deployment App's Connect. Only
-// the Settings empty state does, and that surface sits behind the setup-complete
-// gate, so an org with no GitHub credential — every fresh one on a
-// deployment with a deployment App — cannot reach it. The step needs Connect
-// beside these two cards, offered when the status read reports
-// deployment_app_available.
 export function GitHubAppSourcePicker({
   selected,
   onChoose,

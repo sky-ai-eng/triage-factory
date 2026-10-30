@@ -210,7 +210,7 @@ var (
 		code:   "state_mismatch",
 		status: http.StatusBadRequest,
 		message: "That GitHub response doesn't belong to the connection you started. " +
-			"Start again from organization settings.",
+			"Connect GitHub again.",
 	}
 
 	// The named account does not exist on GitHub. Account existence is public
@@ -231,7 +231,7 @@ var (
 		code:   "account_mismatch",
 		status: http.StatusConflict,
 		message: "GitHub connected %s, but you asked to connect %s. " +
-			"Start again from organization settings and install on the account you named.",
+			"Connect GitHub again and install on the account you named.",
 	}
 
 	// No record, expired, already consumed, or a session that isn't the one
@@ -242,7 +242,7 @@ var (
 		code:   "link_expired",
 		status: http.StatusBadRequest,
 		message: "That connection didn't finish in time, or was already used. " +
-			"Start again from organization settings.",
+			"Connect GitHub again.",
 	}
 
 	// GitHub returned no installation to connect. Distinct from the stale
@@ -253,7 +253,7 @@ var (
 		code:   "no_installation",
 		status: http.StatusBadRequest,
 		message: "GitHub didn't say which installation to connect. " +
-			"Start again from organization settings.",
+			"Connect GitHub again.",
 	}
 
 	// An API token tried to complete a ceremony. See the gate for why this
@@ -372,7 +372,7 @@ var (
 		status:  http.StatusAccepted,
 		heading: "Install request sent",
 		message: "GitHub sent your install request to an owner of that account. " +
-			"Once they approve it, connect again from organization settings.",
+			"Once they approve it, connect GitHub again.",
 	}
 )
 
@@ -1495,15 +1495,18 @@ func (s *Server) renderBindPage(w http.ResponseWriter, status int, orgID, headin
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 
-	backURL, backLabel := "/", "Back to Triage Factory"
+	// The page is reached from Settings and from the setup wizard alike, so the
+	// label names neither: for an org still in setup, the setup gate turns the
+	// Settings link into /setup.
+	backURL := "/"
 	if orgID != "" {
-		backURL, backLabel = settingsRedirectPath(orgID)+"#github-app", "Back to Settings"
+		backURL = settingsRedirectPath(orgID) + "#github-app"
 	}
 	if err := bindOutcomeTemplate.Execute(w, bindOutcomeData{
 		Heading:   heading,
 		Message:   message,
 		BackURL:   backURL,
-		BackLabel: backLabel,
+		BackLabel: "Back to Triage Factory",
 	}); err != nil {
 		githubAppLog.Error("render bind outcome page failed", "error", err)
 	}

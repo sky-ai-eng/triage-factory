@@ -135,6 +135,17 @@ export interface WizardState {
   // bound installations, counted in githubAppInstallCount, of which zero is an
   // ordinary state that Settings has to render as one. Default false.
   githubAppManaged: boolean
+  // Whether the deployment offers a deployment App for this org to connect
+  // through — a fact about the deployment, read from the App status. Decides
+  // whether the GitHub section opens on Connect. Always false in local mode.
+  githubDeploymentAppAvailable: boolean
+  // The logins of the GitHub accounts the org's installations are on, from the
+  // App status — the connect step's list and collapsed summary.
+  githubAppAccounts: string[]
+  // The admin chose "Use your own GitHub App instead" on the connect step,
+  // which brings back the own-App steps. Session-only: never persisted, so a
+  // reload offers Connect again.
+  githubOwnApp: boolean
   // Whether the org's registered App is installed on ≥1 GitHub account — the
   // gate for the "Install the App" step, distinct from githubReady (which
   // registration alone satisfies). Seeded from the installation mirror on load
@@ -361,6 +372,11 @@ export interface WizardStep {
   // the host renders a retry in its place rather than risk persisting over
   // state it never read.
   load?: (ctx: LoadContext) => Promise<Partial<WizardState>>
+
+  // The id of another step whose load() this step depends on, for a step that
+  // stands in for that one while it is hidden. A failure of that load counts
+  // as this step's own: the host shows the retry here and Continue refuses.
+  loadFrom?: string
 
   // Whether this step applies at all under the current state. A step whose
   // predicate returns false is omitted entirely — no collapsed bar, skipped by

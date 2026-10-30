@@ -5,7 +5,9 @@
 // way: GitHub will ask to install if it has to, and the person confirms as
 // themselves. beforeStart, when given, runs first and can call the whole thing
 // off; the own-App card uses it to confirm and tear its App down before the
-// ceremony starts.
+// ceremony starts. defaultOpen skips the reveal: the form renders at once, with
+// no Cancel to fold it back, for a page where connecting is the whole point
+// (the setup wizard's GitHub step).
 import { useState } from 'react'
 import { toast } from '../../components/Toast/toastStore'
 import { startManagedGitHubConnectAccount } from '../../lib/githubApp'
@@ -15,18 +17,20 @@ export default function ConnectGitHubAccount({
   label,
   primary = false,
   disabled = false,
+  defaultOpen = false,
   beforeStart,
 }: {
   orgId: string
   label: string
   primary?: boolean
   disabled?: boolean
+  defaultOpen?: boolean
   // Runs after the account is entered and before the ceremony starts. A
   // false return cancels quietly; a throw is shown inline. A start that fails
   // after it returned true is shown inline and as a toast.
   beforeStart?: (account: string) => Promise<boolean>
 }) {
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState(defaultOpen)
   const [account, setAccount] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -104,22 +108,24 @@ export default function ConnectGitHubAccount({
       <div className="flex items-center gap-2">
         <button
           type="submit"
-          disabled={busy || !account.trim()}
+          disabled={disabled || busy || !account.trim()}
           className="rounded-full bg-warm px-5 py-2 text-body font-medium text-warm-ink transition-colors hover:bg-warm/90 disabled:opacity-40"
         >
           {busy ? 'Connecting…' : 'Connect'}
         </button>
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => {
-            setOpen(false)
-            setError(null)
-          }}
-          className="rounded-full px-4 py-2 text-body text-ink-3 transition-colors hover:text-ink-1"
-        >
-          Cancel
-        </button>
+        {!defaultOpen && (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              setOpen(false)
+              setError(null)
+            }}
+            className="rounded-full px-4 py-2 text-body text-ink-3 transition-colors hover:text-ink-1"
+          >
+            Cancel
+          </button>
+        )}
       </div>
     </form>
   )

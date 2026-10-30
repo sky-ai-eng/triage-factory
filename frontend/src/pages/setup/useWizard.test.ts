@@ -46,3 +46,51 @@ describe('useWizard — hold', () => {
     expect(persist).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('useWizard — loadFrom', () => {
+  // A step standing in for a hidden one inherits that step's load failure:
+  // the retry shows on it and Continue refuses, as on the step that failed.
+  it('treats the named step’s failed load as the active step’s own', async () => {
+    const persist = vi.fn().mockResolvedValue(undefined)
+    const owner: WizardStep = {
+      ...step('owner', vi.fn()),
+      visible: () => false,
+      load: () => Promise.reject(new Error('offline')),
+    }
+    const standIn: WizardStep = { ...step('stand-in', persist), loadFrom: 'owner' }
+    const steps = [standIn, owner, step('next', vi.fn())]
+    const identity = { orgId: 'org-1', teamId: 'team-1', isLocal: true }
+    const { result } = renderHook(() => useWizard(steps, identity, initialWizardState, () => {}))
+    await waitFor(() => expect(result.current.phase).toBe('ready'))
+
+    expect(result.current.activeIndex).toBe(0)
+    expect(result.current.activeLoadFailed).toBe(true)
+    act(() => result.current.advance())
+    expect(persist).not.toHaveBeenCalled()
+    expect(result.current.activeIndex).toBe(0)
+  })
+})
+
+describe('useWizard — loadFrom alongside a load of its own', () => {
+  it('still counts the step’s own failed load', async () => {
+    const persist = vi.fn().mockResolvedValue(undefined)
+    const owner: WizardStep = {
+      ...step('owner', vi.fn()),
+      visible: () => false,
+      load: () => Promise.resolve({}),
+    }
+    const both: WizardStep = {
+      ...step('both', persist),
+      loadFrom: 'owner',
+      load: () => Promise.reject(new Error('offline')),
+    }
+    const steps = [both, owner, step('next', vi.fn())]
+    const identity = { orgId: 'org-1', teamId: 'team-1', isLocal: true }
+    const { result } = renderHook(() => useWizard(steps, identity, initialWizardState, () => {}))
+    await waitFor(() => expect(result.current.phase).toBe('ready'))
+
+    expect(result.current.activeLoadFailed).toBe(true)
+    act(() => result.current.advance())
+    expect(persist).not.toHaveBeenCalled()
+  })
+})

@@ -9,6 +9,9 @@ export function appImportedPatch(result: GitHubAppImportResult): Partial<WizardS
   const app = result.app
   return {
     githubAppSource: 'existing',
+    // The import moves the org to its own App's credential class, so it is no
+    // longer on the deployment App, whatever the wizard loaded.
+    githubAppManaged: false,
     githubAppRegistered: !!app,
     // active=false ⇒ staged (imported while an org PAT is live; the PAT stays the
     // live credential until cutover). active=true ⇒ immediately live.
