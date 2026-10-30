@@ -18,6 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/sky-ai-eng/triage-factory/internal/secretenv"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 )
 
 // The deployment's object-store endpoint and region, shared by every bucket.
@@ -191,12 +192,38 @@ func newObjectStorage(cfg ObjectConfig) (*objectStorage, error) {
 	client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
 		o.BaseEndpoint = aws.String(cfg.Endpoint)
 		o.UsePathStyle = true
+		o.HTTPClient = tracedHTTPClient(o.HTTPClient)
 	})
 	return &objectStorage{
 		client:   client,
 		uploader: transfermanager.New(client),
 		bucket:   cfg.Bucket,
 	}, nil
+}
+
+// tracedHTTPClient returns the SDK's HTTP client with its transport wrapped in
+// telemetry.TracedTransport, so every S3 request, each multipart part
+// included, is an s3.http span under the span that made the call. When an
+// s3.Options func runs, the SDK has already resolved c to a BuildableClient
+// carrying the defaults-mode tuning and, on the default credential chain, any
+// AWS_CA_BUNDLE root pool. Freeze builds the *http.Client the SDK would have
+// used, including its rule of following only 307 and 308 redirects, and only
+// that client's transport changes.
+//
+// otelhttp sets its trace headers after SigV4 signing, so they are not in
+// SignedHeaders and the signature still verifies.
+func tracedHTTPClient(c s3.HTTPClient) s3.HTTPClient {
+	b, ok := c.(*awshttp.BuildableClient)
+	if !ok {
+		return c
+	}
+	built, ok := b.Freeze().(*http.Client)
+	if !ok {
+		return c
+	}
+	traced := *built
+	traced.Transport = telemetry.TracedTransport(built.Transport, "s3")
+	return &traced
 }
 
 func (o *objectStorage) Put(ctx context.Context, key string, r io.Reader) error {

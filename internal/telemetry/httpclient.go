@@ -13,7 +13,7 @@ import (
 // connection pool on the first request after a system suspend
 // (sharedTransport).
 //
-// upstream ("github", "jira", "slack", "llm") becomes the span name as
+// upstream (for example "github", "gotrue" or "s3") becomes the span name as
 // "<upstream>.http" — one name per client, since otelhttp's default of
 // "HTTP GET" makes every outbound call indistinguishable and the obvious
 // fix, naming the span after the URL, is what scrub.go exists to prevent.

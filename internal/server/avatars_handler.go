@@ -20,6 +20,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 )
 
 // Avatar proxy. User/member avatars come from OAuth metadata (users.avatar_url
@@ -158,7 +159,9 @@ func newAvatarHTTPClient() *http.Client {
 		IdleConnTimeout:       90 * time.Second,
 	}
 	return &http.Client{
-		Transport: transport,
+		// The guarded transport stays the base, so every dial — redirect
+		// hops included — still passes the Control guard.
+		Transport: telemetry.TracedTransport(transport, "avatar"),
 		Timeout:   avatarFetchTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= avatarMaxRedirects {
@@ -276,11 +279,12 @@ func (f *avatarFetcher) cachePut(key string, img *fetchedAvatar) {
 }
 
 // fetch returns the avatar at rawURL, from cache when fresh. A miss runs one
-// fetch (deduped across concurrent callers for the same URL) on a detached,
-// timeout-bounded context so a single client disconnecting can't cancel the
-// shared fetch. Both success and failure are cached. Returns
-// errAvatarUnavailable for a cached failure.
-func (f *avatarFetcher) fetch(rawURL string) (*fetchedAvatar, error) {
+// fetch (deduped across concurrent callers for the same URL) on a
+// timeout-bounded context detached from ctx's cancellation, so a single client
+// disconnecting can't cancel the shared fetch, while the fetch's span still
+// parents under the caller that started it. Both success and failure are
+// cached. Returns errAvatarUnavailable for a cached failure.
+func (f *avatarFetcher) fetch(ctx context.Context, rawURL string) (*fetchedAvatar, error) {
 	if img, hit, failed := f.cacheGet(rawURL); hit {
 		if failed {
 			return nil, errAvatarUnavailable
@@ -296,7 +300,7 @@ func (f *avatarFetcher) fetch(rawURL string) (*fetchedAvatar, error) {
 			}
 			return img, nil
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), avatarFetchTimeout)
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), avatarFetchTimeout)
 		defer cancel()
 		img, ferr := f.doFetch(ctx, rawURL)
 		if ferr != nil {
@@ -434,7 +438,7 @@ func (h *avatarsHandler) handleAvatar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	img, err := h.fetcher.fetch(avatarURL)
+	img, err := h.fetcher.fetch(r.Context(), avatarURL)
 	if err != nil {
 		// Expected failure mode (unreachable host, non-image body, SSRF
 		// reject). fetch() already logged the specific cause (Warn for an SSRF

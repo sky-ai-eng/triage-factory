@@ -14,10 +14,19 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
-var httpClient = &http.Client{Timeout: 10 * time.Second}
+// One client per upstream rather than one for the package, because the span
+// name is the upstream: an operator filtering on github.http should see a
+// token check beside every other GitHub call. ValidateLinear has none of its
+// own; it sends through linear.Client, which is traced already.
+var (
+	githubHTTPClient    = telemetry.TracedHTTPClient(10*time.Second, "github")
+	jiraHTTPClient      = telemetry.TracedHTTPClient(10*time.Second, "jira")
+	anthropicHTTPClient = telemetry.TracedHTTPClient(10*time.Second, "llm")
+)
 
 // ErrGitHubHostUnreachable wraps the network-level failure of a call to a
 // GitHub host (DNS, dial, TLS, timeout) — the case where TF's backend
@@ -139,7 +148,7 @@ func ValidateGitHub(ctx context.Context, baseURL, pat string) (*GitHubUser, erro
 	req.Header.Set("Authorization", "Bearer "+pat)
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 
-	resp, err := httpClient.Do(req)
+	resp, err := githubHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrGitHubHostUnreachable, err)
 	}
@@ -187,7 +196,7 @@ func CaptureGitHubIdentity(ctx context.Context, baseURL, token string) (*GitHubU
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 
-	resp, err := httpClient.Do(req)
+	resp, err := githubHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrGitHubHostUnreachable, err)
 	}
@@ -236,7 +245,7 @@ func ValidateJira(ctx context.Context, cfg jira.Config) (*JiraUser, error) {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
 
-	resp, err := httpClient.Do(req)
+	resp, err := jiraHTTPClient.Do(req)
 	if err != nil {
 		// Wrap the network failure in the sentinel so callers can errors.Is
 		// it apart from an auth/permission rejection (the host answered) —
@@ -352,7 +361,7 @@ func ValidateAnthropicAPIKey(ctx context.Context, key string) error {
 	req.Header.Set("x-api-key", key)
 	req.Header.Set("anthropic-version", anthropicAPIVersion)
 
-	resp, err := httpClient.Do(req)
+	resp, err := anthropicHTTPClient.Do(req)
 	if err != nil {
 		// A dial/TLS/timeout failure — the host never answered. Surface the
 		// "couldn't reach" state, not "bad key", so the UI doesn't tell the user

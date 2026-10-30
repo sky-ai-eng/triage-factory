@@ -16,10 +16,9 @@ import (
 // against fsStorage on a temp dir; object_test.go runs it against
 // objectStorage on a throwaway SeaweedFS container. Anything backend-specific
 // (filesystem traversal rejection, env parsing) lives in the per-backend
-// test files, not here.
-func runConformance(t *testing.T, store Storage) {
+// test files, not here. Every call is made under ctx.
+func runConformance(t *testing.T, ctx context.Context, store Storage) {
 	t.Helper()
-	ctx := context.Background()
 
 	t.Run("round trip + exists", func(t *testing.T) {
 		key := "org-1/run-1/note.txt"
@@ -31,7 +30,7 @@ func runConformance(t *testing.T, store Storage) {
 		if err != nil || !ok {
 			t.Fatalf("Exists after Put = %v, %v; want true, nil", ok, err)
 		}
-		if got := mustGet(t, store, key); !bytes.Equal(got, want) {
+		if got := mustGet(t, ctx, store, key); !bytes.Equal(got, want) {
 			t.Fatalf("Get round-trip = %q; want %q", got, want)
 		}
 	})
@@ -44,7 +43,7 @@ func runConformance(t *testing.T, store Storage) {
 		if err := store.Put(ctx, key, bytes.NewReader([]byte("second-and-longer"))); err != nil {
 			t.Fatalf("Put second: %v", err)
 		}
-		if got := mustGet(t, store, key); string(got) != "second-and-longer" {
+		if got := mustGet(t, ctx, store, key); string(got) != "second-and-longer" {
 			t.Fatalf("Get after overwrite = %q; want %q", got, "second-and-longer")
 		}
 	})
@@ -219,9 +218,9 @@ func runConformance(t *testing.T, store Storage) {
 	})
 }
 
-func mustGet(t *testing.T, store Storage, key string) []byte {
+func mustGet(t *testing.T, ctx context.Context, store Storage, key string) []byte {
 	t.Helper()
-	rc, err := store.Get(context.Background(), key)
+	rc, err := store.Get(ctx, key)
 	if err != nil {
 		t.Fatalf("Get %q: %v", key, err)
 	}

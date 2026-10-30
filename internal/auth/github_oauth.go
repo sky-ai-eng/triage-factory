@@ -52,7 +52,7 @@ func ExchangeGitHubOAuthCode(ctx context.Context, webBase, clientID, clientSecre
 	// parse and unambiguous about the error shape.
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := httpClient.Do(req)
+	resp, err := githubHTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrGitHubHostUnreachable, err)
 	}

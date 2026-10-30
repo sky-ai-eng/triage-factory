@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/jiraoauth"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -24,8 +25,8 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { retu
 // fakeAtlassian answers the three Atlassian calls the Connect callback makes:
 // the code exchange, accessible-resources, and /myself on the api.atlassian.com
 // gateway. The minter is pointed at it directly; the gateway URL is fixed, so
-// requests to api.atlassian.com through the default transport are routed to it
-// for the test's duration.
+// the requests ValidateJira sends to api.atlassian.com are routed to it for the
+// test's duration.
 func fakeAtlassian(t *testing.T, s *Server) {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -48,15 +49,13 @@ func fakeAtlassian(t *testing.T, s *Server) {
 	if err != nil {
 		t.Fatalf("parse fake atlassian url: %v", err)
 	}
-	orig := http.DefaultTransport
-	http.DefaultTransport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+	auth.SetJiraTransportForTest(t, roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Host == "api.atlassian.com" {
 			r = r.Clone(r.Context())
 			r.URL.Scheme, r.URL.Host, r.Host = target.Scheme, target.Host, ""
 		}
-		return orig.RoundTrip(r)
-	})
-	t.Cleanup(func() { http.DefaultTransport = orig })
+		return http.DefaultTransport.RoundTrip(r)
+	}))
 }
 
 // saveJiraApp stores the org's own Atlassian app, as an admin does.

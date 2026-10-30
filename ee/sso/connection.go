@@ -30,6 +30,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/secretenv"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
@@ -43,7 +44,7 @@ const envServiceRoleToken = "TF_GOTRUE_SERVICE_ROLE_TOKEN"
 // ssoHTTPClient bounds the GoTrue admin call so a hung GoTrue can't wedge a
 // request. GoTrue is in-network (compose service), so this is the upper
 // bound for the abnormal case.
-var ssoHTTPClient = &http.Client{Timeout: 30 * time.Second}
+var ssoHTTPClient = telemetry.TracedHTTPClient(30*time.Second, "gotrue")
 
 // ssoConnectionHandler serves /api/sso/connection — the org-admin SSO
 // connection lifecycle. requireOrg for the active org, ClaimsFrom for the

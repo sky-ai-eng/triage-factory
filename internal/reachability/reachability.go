@@ -23,6 +23,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 )
 
 // probeTimeout caps a single reachability probe. Short on purpose: a reachable
@@ -42,7 +44,8 @@ const userAgent = "triage-factory-reachability"
 // and it could flip the verdict based on where the redirect leads rather than
 // whether the host the operator entered is reachable.
 var client = &http.Client{
-	Timeout: probeTimeout,
+	Timeout:   probeTimeout,
+	Transport: telemetry.TracedTransport(nil, "reachability"),
 	CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	},
