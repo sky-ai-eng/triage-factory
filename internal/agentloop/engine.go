@@ -36,7 +36,9 @@ type Transcript interface {
 	// SettleCompactionRequest records a discarded warm compaction attempt on
 	// the request row: the failed call's usage and cost (its reply is never
 	// inserted, but its dollars are real and the ledger is messages alone),
-	// and the failure reason for observability.
+	// and the failure reason under metadata "compaction_failure", which also
+	// marks the request's warm attempt as made. It overwrites, so a request
+	// is settled at most once.
 	SettleCompactionRequest(ctx context.Context, orgID, conversationID string, requestID, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens int, costUSD *float64, reason string) error
 }
 

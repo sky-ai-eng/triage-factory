@@ -1151,12 +1151,18 @@ type ConversationStore interface {
 	// "compaction_failure". costUSD nil leaves the column NULL (unpriceable
 	// model), never 0.
 	//
+	// A request row is settled at most once. The write overwrites the row's
+	// usage and cost rather than adding to them, so a second settle would
+	// drop the first attempt's cost from the ledger; the caller makes a warm
+	// attempt only on a request with no "compaction_failure" recorded, and
+	// the request may be one an earlier engagement inserted.
+	//
 	// Returns the settled message row (requestID), sharing Messages' column
 	// list and scanner. ErrNoSuchMessage if requestID names no row on this
 	// conversation — unreachable once the fence passes on Postgres (the
-	// caller only ever names a request row its own earlier insert produced),
-	// kept because the write is still id-keyed against a value it did not
-	// itself resolve.
+	// caller only ever names a request row it read from or inserted into this
+	// conversation's transcript), kept because the write is still id-keyed
+	// against a value it did not itself resolve.
 	SettleCompactionRequestForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, requestID, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens int, costUSD *float64, reason string) (*domain.Message, error)
 
 	// CompleteForClaimSystem records an engagement's ending (status + narrative

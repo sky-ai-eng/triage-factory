@@ -607,6 +607,137 @@ func TestCompactionReentry_RequestWithNoReply(t *testing.T) {
 	})
 }
 
+// TestCompactionReentry_SettledRequestGoesStraightToForcedShape: a standing
+// request that already carries a failed warm attempt has had its one warm
+// attempt. Re-entry on a live cache makes the forced-shape call and nothing
+// else, and the first attempt's settlement stays on the row as it was.
+func TestCompactionReentry_SettledRequestGoesStraightToForcedShape(t *testing.T) {
+	in, out, cacheRead, cacheCreation := 20000, 500, 120000, 10000
+	cost := 0.077
+	tr := newMemTranscript(
+		domain.Message{Role: "user", Content: "the mission"},
+		usedAssistant("prior work", overThreshold, time.Now().UTC()),
+		domain.Message{
+			Role: "user", Subtype: domain.MessageSubtypeInjectionCompactionRequest, Content: warmCompactionRequest,
+			InputTokens: &in, OutputTokens: &out, CacheReadTokens: &cacheRead, CacheCreationTokens: &cacheCreation,
+			CostUSD:  &cost,
+			Metadata: map[string]any{"compaction_failure": compactionFailToolCalls},
+		},
+	)
+	provider := &scriptedProvider{turns: []scriptedTurn{
+		forcedReply("a", "s"),
+		{text: "done"},
+	}}
+	engine := newTestEngine(tr, provider, newScriptedToolHost())
+
+	if result := engine.Run(context.Background(), testParams()); result.Kind != ResultConcluded {
+		t.Fatalf("result = %+v, want concluded", result)
+	}
+	if len(provider.requests) != 2 {
+		t.Fatalf("provider calls = %d, want forced + final", len(provider.requests))
+	}
+	if first := provider.requests[0]; first.SystemPrompt != coldCompactionSystemPrompt {
+		t.Fatalf("first call's system prompt = %.40q..., want the forced-shape call", first.SystemPrompt)
+	}
+
+	req := tr.find(func(m domain.Message) bool { return m.Subtype == domain.MessageSubtypeInjectionCompactionRequest })
+	if req == nil {
+		t.Fatal("request row missing")
+	}
+	if req.CostUSD == nil || *req.CostUSD != cost {
+		t.Errorf("request cost = %v, want the first attempt's %v unchanged", req.CostUSD, cost)
+	}
+	for name, got := range map[string]struct {
+		p    *int
+		want int
+	}{
+		"input":          {req.InputTokens, in},
+		"output":         {req.OutputTokens, out},
+		"cache read":     {req.CacheReadTokens, cacheRead},
+		"cache creation": {req.CacheCreationTokens, cacheCreation},
+	} {
+		if got.p == nil || *got.p != got.want {
+			t.Errorf("request %s tokens = %v, want %d unchanged", name, got.p, got.want)
+		}
+	}
+	if req.Metadata["compaction_failure"] != compactionFailToolCalls {
+		t.Errorf("failure reason = %v, want %q unchanged", req.Metadata["compaction_failure"], compactionFailToolCalls)
+	}
+}
+
+// TestCompactionReentry_AFailedWarmAttemptIsNotRepeated: engagement 1's warm
+// attempt fails and its forced-shape call finds the provider unavailable,
+// which leaves the request settled and uncommitted. Engagement 2 claims while
+// the cache is still live, so it reaches compaction through the loop's trip:
+// it makes no warm call, and engagement 1's cost stays in the ledger.
+func TestCompactionReentry_AFailedWarmAttemptIsNotRepeated(t *testing.T) {
+	tr := newMemTranscript(
+		domain.Message{Role: "user", Content: "the mission"},
+		usedAssistant("worked a lot", overThreshold, time.Now().UTC()),
+	)
+	seeded := len(tr.snapshot())
+	usage := inference.Usage{PromptTokens: 150000, OutputTokens: 500, CacheReadTokens: 120000, CacheCreationTokens: 10000}
+	isRequest := func(m domain.Message) bool { return m.Subtype == domain.MessageSubtypeInjectionCompactionRequest }
+
+	unavailable := scriptedTurn{err: errors.New("503 service unavailable")}
+	first := &scriptedProvider{
+		turns: []scriptedTurn{{
+			calls: []domain.ToolCall{{ID: "zombie-call", Name: "bash", Input: map[string]any{"cmd": "ls"}}},
+			usage: usage,
+		}},
+		repeat: &unavailable,
+	}
+	e1 := newTestEngine(tr, first, newScriptedToolHost())
+	e1.Retry = RetryPolicy{MaxAttempts: 2, Sleep: func(context.Context, time.Duration) error { return nil }}
+
+	r1 := e1.Run(context.Background(), testParams())
+	if r1.Kind != ResultUpstreamUnavailable {
+		t.Fatalf("engagement 1 = %v (err %v), want ResultUpstreamUnavailable", r1.Kind, r1.Err)
+	}
+	req := tr.find(isRequest)
+	if req == nil || req.CostUSD == nil || req.Metadata["compaction_failure"] != compactionFailToolCalls {
+		t.Fatalf("request row after engagement 1 = %+v, want the failed attempt settled on it", req)
+	}
+	settled := *req.CostUSD
+
+	rows, err := tr.ListForAssembly(context.Background(), "org", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !warmCacheLive(rows) {
+		t.Fatal("engagement 2 must claim on a live cache, or it compacts on resume instead of at the trip")
+	}
+	forced := forcedReply("a", "s")
+	forced.usage = usage
+	second := &scriptedProvider{turns: []scriptedTurn{
+		forced,
+		{text: "done", usage: inference.Usage{PromptTokens: 2000, OutputTokens: 300}},
+	}}
+	r2 := newTestEngine(tr, second, newScriptedToolHost()).Run(context.Background(), testParams())
+	if r2.Kind != ResultConcluded {
+		t.Fatalf("engagement 2 = %+v, want concluded", r2)
+	}
+
+	// A warm attempt would be a third call, ahead of these two, carrying the
+	// working system prompt.
+	if len(second.requests) != 2 {
+		t.Fatalf("engagement 2 provider calls = %d, want forced + final", len(second.requests))
+	}
+	if second.requests[0].SystemPrompt != coldCompactionSystemPrompt {
+		t.Errorf("engagement 2's first call's system prompt = %.40q..., want the forced-shape call", second.requests[0].SystemPrompt)
+	}
+
+	if req := tr.find(isRequest); req == nil || req.CostUSD == nil || *req.CostUSD != settled {
+		t.Errorf("request row after engagement 2 = %+v, want engagement 1's settled cost %v kept", req, settled)
+	}
+	if math.Abs(r1.CostUSD-settled) > 1e-12 {
+		t.Errorf("engagement 1 CostUSD = %v, want its settled attempt's %v", r1.CostUSD, settled)
+	}
+	if want, got := r1.CostUSD+r2.CostUSD, tr.ledgerSpend(seeded); math.Abs(got-want) > 1e-12 {
+		t.Errorf("ledger = %v, want %v, the sum of both engagements' spend", got, want)
+	}
+}
+
 // TestIsHumanInput_StopNoteIsNotHuman pins the vocabulary invariant for the
 // stop-note row, which has two producers: the loop's own park decisions and
 // a user pressing stop. Both write a role=user row, and neither is somebody

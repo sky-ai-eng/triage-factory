@@ -166,14 +166,22 @@ func (e *Engine) compactWarm(ctx context.Context, params Params, spent *spend) e
 		return err
 	}
 
-	// Re-entry after a crash (a delivered request with no reply) reuses the
-	// standing ask; otherwise insert one. Inserted DELIVERED, not pending:
-	// the row is in the transcript atomically, other pending input stays
-	// queued through the compaction (the solo-flush contract — bundling it
-	// into the summarize call would compact it into the summary instead of
-	// letting it survive as live input), and there is no pending window for
-	// a crash to leave half-entered.
+	// Re-entry finds a delivered request with no reply standing in the
+	// transcript, in one of two states. Unsettled, it is a crash between the
+	// ask and any reply, and the warm attempt reuses it rather than minting a
+	// second ask. Settled, the warm attempt was already made — answered
+	// badly, its cost settled on the row, and the forced-shape call after it
+	// never committed — so the one attempt is spent and the forced-shape call
+	// is what remains. With no standing request, insert one. Inserted
+	// DELIVERED, not pending: the row is in the transcript atomically, other
+	// pending input stays queued through the compaction (the solo-flush
+	// contract — bundling it into the summarize call would compact it into
+	// the summary instead of letting it survive as live input), and there is
+	// no pending window for a crash to leave half-entered.
 	reqRow := unansweredCompactionRequest(rows)
+	if reqRow != nil && warmAttemptSettled(*reqRow) {
+		return e.compactCold(ctx, params, spent)
+	}
 	if reqRow == nil {
 		row := domain.Message{
 			ConversationID: params.ConversationID,
@@ -376,6 +384,17 @@ func unansweredCompactionRequest(rows []domain.Message) *domain.Message {
 		}
 	}
 	return nil
+}
+
+// warmAttemptSettled reports whether a compaction request already carries a
+// failed warm attempt: the reason SettleCompactionRequest merges into its
+// metadata in the same write that records the attempt's cost. A request is
+// settled at most once, because the settle overwrites the row's usage and
+// cost — a second settle would drop the first attempt's dollars from the
+// ledger.
+func warmAttemptSettled(req domain.Message) bool {
+	_, ok := req.Metadata["compaction_failure"]
+	return ok
 }
 
 // judgeWarmReply classifies a warm attempt: the extracted summary on
