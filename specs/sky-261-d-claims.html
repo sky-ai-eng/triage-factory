@@ -1,0 +1,880 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SKY-261 — D-Claims: task claim flow (user XOR agent) + run actor</title>
+<style>
+:root {
+  --bg: #030712;
+  --fg: #f8fafc;
+  --surface: rgba(17, 24, 39, 0.30);
+  --surface-2: rgba(31, 41, 55, 0.50);
+  --surface-floating: rgba(3, 7, 18, 0.80);
+  --border: #1f2937;
+  --border-2: #1e293b;
+  --border-3: #374151;
+  --muted: #94a3b8;
+  --muted-2: #6b7280;
+  --muted-3: #4b5563;
+  --accent: #22d3ee;
+  --accent-2: #06b6d4;
+  --violet: #a78bfa;
+  --violet-2: #8b5cf6;
+  --purple: #a855f7;
+  --pink: #f472b6;
+  --green: #22c55e;
+  --green-2: #4ade80;
+  --amber: #fbbf24;
+  --red: #ef4444;
+  --red-2: #f87171;
+  --radius: 8px;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, "Cascadia Mono", monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+.mono, code, pre { font-family: var(--mono); }
+code { background: rgba(31, 41, 55, 0.5); padding: 1px 5px; border-radius: 3px; font-size: 0.92em; }
+a { color: var(--accent); text-underline-offset: 4px; }
+a:hover { text-decoration: underline; }
+
+.topbar {
+  position: sticky; top: 0; z-index: 40;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-floating);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.topbar__inner {
+  margin: 0 auto; max-width: 1100px;
+  padding: 0 24px; height: 56px;
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 12px; color: var(--muted);
+}
+.topbar__brand { display: flex; align-items: center; gap: 12px; }
+.topbar__brand .dot {
+  width: 8px; height: 8px; border-radius: 9999px;
+  background: linear-gradient(to bottom right, var(--accent-2), var(--purple));
+  box-shadow: 0 0 12px rgba(6, 182, 212, 0.6);
+}
+.topbar__brand strong { color: var(--fg); font-weight: 600; font-size: 13px; }
+.topbar__crumb { color: var(--muted-2); }
+.topbar__meta { display: flex; gap: 8px; align-items: center; }
+.pill { font-size: 11px; padding: 2px 10px; border-radius: 9999px; font-family: var(--mono); }
+.pill--draft { background: rgba(251, 191, 36, 0.20); color: var(--amber); border: 1px solid rgba(251, 191, 36, 0.30); }
+.pill--size  { background: rgba(139, 92, 246, 0.20); color: var(--violet); border: 1px solid rgba(139, 92, 246, 0.30); }
+
+.hero { margin: 0 auto; max-width: 1100px; padding: 56px 24px 24px; }
+.hero h1 {
+  font-size: 30px; font-weight: 200; letter-spacing: -0.02em;
+  margin: 0 0 12px;
+  background: linear-gradient(to right, var(--accent), var(--violet), var(--pink));
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.hero .sub { color: var(--muted-2); font-family: var(--mono); font-size: 12px; margin-bottom: 16px; }
+.hero p.lede { color: var(--muted); font-size: 15px; margin: 0; max-width: 760px; }
+.hero__meta {
+  display: flex; gap: 10px; margin-top: 18px; flex-wrap: wrap;
+  font-family: var(--mono); font-size: 12px;
+}
+.hero__meta .meta-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 11px; border-radius: 9999px;
+  background: var(--surface); border: 1px solid var(--border);
+  color: var(--muted);
+}
+.hero__meta .meta-pill strong { color: var(--fg); font-weight: 500; }
+
+main {
+  margin: 0 auto; max-width: 1100px;
+  padding: 0 24px 96px;
+  display: grid; grid-template-columns: 200px 1fr; gap: 32px;
+}
+nav.toc { position: sticky; top: 80px; height: fit-content; padding: 16px 0; }
+.toc ol { list-style: none; padding: 0; margin: 0; counter-reset: item; }
+.toc li { font-size: 12px; margin-bottom: 4px; counter-increment: item; }
+.toc a {
+  display: block; padding: 6px 12px; border-radius: 6px;
+  color: var(--muted); text-decoration: none;
+  border-left: 2px solid transparent; transition: all 150ms;
+}
+.toc a:hover { color: var(--fg); background: var(--surface); border-left-color: var(--accent); text-decoration: none; }
+.toc a::before { content: counter(item, decimal-leading-zero) "  "; color: var(--muted-3); font-family: var(--mono); }
+
+article { min-width: 0; }
+section.block { margin-bottom: 48px; scroll-margin-top: 80px; }
+section.block > h2 { font-size: 22px; font-weight: 300; margin: 0 0 4px; letter-spacing: -0.01em; }
+section.block > .lede { color: var(--muted); font-size: 14px; margin: 0 0 24px; max-width: 760px; }
+section.block h3 { font-size: 14px; font-weight: 600; margin: 28px 0 10px; color: var(--fg); }
+.section-label { font-size: 10px; color: var(--muted-3); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 8px; }
+
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; margin-bottom: 16px; }
+.callout {
+  background: var(--surface); border: 1px solid var(--border);
+  border-left: 3px solid var(--accent); border-radius: var(--radius);
+  padding: 14px 18px; margin: 14px 0;
+  font-size: 13px; color: var(--muted);
+}
+.callout strong { color: var(--fg); }
+.callout--warn { border-left-color: var(--amber); }
+.callout--good { border-left-color: var(--green-2); }
+.callout--red  { border-left-color: var(--red-2); }
+
+pre.code {
+  background: rgba(3, 7, 18, 0.60); border: 1px solid var(--border);
+  border-radius: 6px; padding: 14px 16px;
+  font-size: 12px; line-height: 1.6; overflow-x: auto;
+  color: #cbd5e1; margin: 0;
+}
+pre.code .kw  { color: var(--violet); }
+pre.code .str { color: var(--green-2); }
+pre.code .num { color: var(--amber); }
+pre.code .com { color: var(--muted-3); }
+pre.code .fn  { color: var(--accent); }
+
+table.matrix { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 12px; }
+table.matrix thead th {
+  text-align: left; padding: 8px 12px; font-weight: 500;
+  font-size: 11px; color: var(--muted-2);
+  text-transform: uppercase; letter-spacing: 0.05em;
+  border-bottom: 1px solid var(--border);
+}
+table.matrix tbody td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.matrix tbody tr:hover { background: var(--surface-2); }
+table.matrix code { font-size: 11px; }
+
+ul.tight { padding-left: 20px; margin: 6px 0; }
+ul.tight li { margin-bottom: 4px; }
+
+.tag {
+  display: inline-block; font-family: var(--mono); font-size: 11px;
+  padding: 1px 7px; border-radius: 4px;
+  background: rgba(139, 92, 246, 0.15); color: var(--violet);
+  border: 1px solid rgba(139, 92, 246, 0.25);
+}
+.tag--cyan  { background: rgba(6, 182, 212, 0.15); color: var(--accent); border-color: rgba(6, 182, 212, 0.30); }
+.tag--green { background: rgba(34, 197, 94, 0.15); color: var(--green-2); border-color: rgba(34, 197, 94, 0.30); }
+.tag--red   { background: rgba(239, 68, 68, 0.15); color: var(--red-2); border-color: rgba(239, 68, 68, 0.30); }
+.tag--amber { background: rgba(251, 191, 36, 0.15); color: var(--amber); border-color: rgba(251, 191, 36, 0.30); }
+.tag--pink  { background: rgba(244, 114, 182, 0.15); color: var(--pink); border-color: rgba(244, 114, 182, 0.30); }
+
+.schema-table {
+  background: var(--surface); border: 1px solid var(--border-3);
+  border-radius: 8px; padding: 0; overflow: hidden;
+  font-family: var(--mono); font-size: 11px; line-height: 1.7;
+}
+.schema-table h5 {
+  margin: 0; padding: 8px 14px;
+  background: var(--surface-2); border-bottom: 1px solid var(--border);
+  font-size: 12px; font-weight: 600; color: var(--fg);
+  text-transform: lowercase; letter-spacing: 0.04em;
+}
+.schema-table h5 .h-meta { font-size: 10px; color: var(--muted-2); margin-left: 8px; text-transform: none; }
+.schema-table ul { list-style: none; padding: 8px 0; margin: 0; }
+.schema-table li { padding: 2px 14px; color: var(--muted); }
+.schema-table li .col-name { color: var(--fg); }
+.schema-table li.shared    { color: var(--muted); }
+.schema-table li.added     { background: rgba(6, 182, 212, 0.10); border-left: 2px solid var(--accent); padding-left: 12px; color: var(--accent); }
+.schema-table li.added-user { background: rgba(244, 114, 182, 0.10); border-left: 2px solid var(--pink); padding-left: 12px; color: var(--pink); }
+.schema-table li.derived   { background: rgba(167, 139, 250, 0.10); border-left: 2px solid var(--violet); padding-left: 12px; color: var(--violet); }
+.schema-table li.absent    { color: var(--muted-3); font-style: italic; }
+
+.schema-pair { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin: 16px 0 12px; }
+
+.phase-flow {
+  display: flex; align-items: stretch; gap: 8px;
+  margin: 18px 0 8px; flex-wrap: wrap;
+}
+.phase {
+  flex: 1; min-width: 180px;
+  background: var(--surface); border: 1px solid var(--border-3);
+  border-radius: var(--radius); padding: 12px 14px; position: relative;
+}
+.phase .phase-label {
+  font-family: var(--mono); font-size: 10px;
+  color: var(--accent);
+  background: rgba(6, 182, 212, 0.10);
+  border: 1px solid rgba(6, 182, 212, 0.30);
+  padding: 1px 7px; border-radius: 4px;
+  display: inline-block; margin-bottom: 6px;
+}
+.phase .phase-title { font-size: 13px; font-weight: 600; color: var(--fg); margin-bottom: 4px; }
+.phase .phase-body { font-size: 12px; color: var(--muted); line-height: 1.5; }
+.phase + .phase::before {
+  content: "→"; color: var(--muted-3);
+  position: absolute; left: -12px; top: 50%; transform: translateY(-50%);
+}
+
+.axes-grid {
+  display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px;
+  margin: 16px 0;
+}
+.axes-cell {
+  background: var(--surface); border: 1px solid var(--border-3);
+  border-radius: var(--radius); padding: 12px 14px;
+}
+.axes-cell.axes-cell--status   { border-left: 2px solid var(--violet); }
+.axes-cell.axes-cell--claim    { border-left: 2px solid var(--accent); }
+.axes-cell.axes-cell--actor    { border-left: 2px solid var(--pink); }
+.axes-cell h6 {
+  margin: 0 0 6px; font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--muted-2);
+}
+.axes-cell .col {
+  font-family: var(--mono); font-size: 12px;
+  color: var(--fg); font-weight: 500;
+}
+.axes-cell .ctx {
+  font-size: 11px; color: var(--muted); margin-top: 8px; line-height: 1.5;
+}
+
+.steps { counter-reset: step; padding-left: 0; list-style: none; }
+.steps > li {
+  counter-increment: step; position: relative;
+  padding: 10px 0 14px 40px;
+  border-bottom: 1px dashed var(--border);
+}
+.steps > li:last-child { border-bottom: none; }
+.steps > li::before {
+  content: counter(step, decimal-leading-zero);
+  position: absolute; left: 0; top: 10px;
+  font-family: var(--mono); font-size: 11px;
+  color: var(--accent);
+  background: rgba(6, 182, 212, 0.08);
+  border: 1px solid rgba(6, 182, 212, 0.30);
+  padding: 2px 7px; border-radius: 4px;
+}
+.steps > li > .step-title { font-weight: 500; color: var(--fg); display: block; margin-bottom: 2px; }
+.steps > li > .step-body  { color: var(--muted); font-size: 13px; }
+
+footer {
+  margin: 0 auto; max-width: 1100px;
+  padding: 24px 24px 64px;
+  font-size: 11px; color: var(--muted-3);
+  font-family: var(--mono);
+  border-top: 1px solid var(--border);
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar__inner">
+    <div class="topbar__brand">
+      <span class="dot"></span>
+      <strong>Triage Factory</strong>
+      <span class="topbar__crumb">/ specs / SKY-261</span>
+    </div>
+    <div class="topbar__meta">
+      <span class="pill pill--size">SIZE · M</span>
+      <span class="pill pill--draft">DRAFT v0.9</span>
+    </div>
+  </div>
+</div>
+
+<header class="hero">
+  <div class="sub">SKY-261 · sequenced after SKY-259 (shipped) · unblocks SKY-264 D-Predicate · finishes wiring SKY-260 D-Agent</div>
+  <h1>D-Claims: task claim flow + run actor</h1>
+  <p class="lede">Three nullable FKs. <code>tasks.claimed_by_agent_id</code> and <code>tasks.claimed_by_user_id</code> are mutually exclusive (CHECK) — together they form the "currently responsible" axis. <code>runs.actor_agent_id</code> is the immutable audit pointer stamped by the spawner. Status stays orthogonal but narrowed: it tracks genuine lifecycle (queued / snoozed / done / dismissed), with <code>'claimed'</code> and <code>'delegated'</code> dropped as denormalizations now that the claim columns carry responsibility. The "queue view" is a derived filter on unclaimed-and-active rows. No column on <code>event_handlers</code> — in v1 the kind discriminator is enough; v2 multi-agent picks its own shape.</p>
+  <div class="hero__meta">
+    <span class="meta-pill"><strong>SCOPE</strong> · 1 PG + 1 SQLite migration · router + spawner + delegate/claim/takeover handlers · Board's per-member filter</span>
+    <span class="meta-pill"><strong>XOR</strong> · <code>CHECK (claimed_by_agent_id IS NULL OR claimed_by_user_id IS NULL)</code></span>
+    <span class="meta-pill"><strong>STICKY CLAIMS</strong> · claim cols stay populated past close for audit; status disambiguates active vs historical</span>
+  </div>
+</header>
+
+<main>
+
+<nav class="toc">
+  <ol>
+    <li><a href="#phasing">Phasing</a></li>
+    <li><a href="#why">Why now</a></li>
+    <li><a href="#axes">Three orthogonal axes</a></li>
+    <li><a href="#shape">Schema delta</a></li>
+    <li><a href="#flow">State transitions</a></li>
+    <li><a href="#migration">Migration design</a></li>
+    <li><a href="#handlers">Router · spawner · claim handlers</a></li>
+    <li><a href="#api">API + frontend</a></li>
+    <li><a href="#out-of-scope">Out of scope</a></li>
+    <li><a href="#steps">Steps</a></li>
+    <li><a href="#risks">Risks</a></li>
+    <li><a href="#acceptance">Acceptance</a></li>
+  </ol>
+</nav>
+
+<article>
+
+<!-- ===================================================== -->
+<section class="block" id="phasing">
+  <div class="section-label">§0</div>
+  <h2>Phasing</h2>
+  <p class="lede">One PR. Schema lands first, then the three claim handlers (trigger-create / user-delegate / user-takeover / user-claim) all write into the new columns, then the Board's per-member filter exposes the symmetry to users.</p>
+
+  <div class="phase-flow">
+    <div class="phase">
+      <span class="phase-label">A</span>
+      <div class="phase-title">Schema</div>
+      <div class="phase-body">Three nullable FK columns: <code>tasks.claimed_by_agent_id</code>, <code>tasks.claimed_by_user_id</code>, <code>runs.actor_agent_id</code>. XOR CHECK on the two task columns. Parity prereq: <code>UNIQUE (id, org_id)</code> on <code>agents</code>.</div>
+    </div>
+    <div class="phase">
+      <span class="phase-label">B</span>
+      <div class="phase-title">Claim handlers</div>
+      <div class="phase-body">Router stamps agent claim on trigger match. User-delegate handler stamps agent claim on swipe / drag. User-claim handler stamps user claim on a queued task. Takeover flips agent → user. Spawner stamps run actor at spawn. Five callsites, one column family.</div>
+    </div>
+    <div class="phase">
+      <span class="phase-label">C</span>
+      <div class="phase-title">Board filter parity</div>
+      <div class="phase-body">Per-member filter chip — bot or any user — gives the same view shape: "tasks they're currently responsible for + tasks they've worked on." Two clauses, same query path, parameterized by member kind.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="why">
+  <div class="section-label">§1</div>
+  <h2>Why now</h2>
+  <p class="lede">SKY-260 shipped the <code>agents</code> table but left the FK columns on tasks + runs as TODOs (<code>bootstrap.go:37-38</code>, <code>migrations-postgres/202605120003_agents.sql:12-14</code>). SKY-259 unified rule + trigger into one handler table. This ticket finishes the wiring with a state model that's symmetric across users and the bot.</p>
+
+  <table class="matrix">
+    <thead><tr><th style="width: 30%;">Win</th><th>Concrete shape</th></tr></thead>
+    <tbody>
+      <tr><td>Closes the half-wired state</td><td>The agents migration's prologue calls out three FK columns "added by D-Claims / SKY-261." After this PR, no schema-comments-as-TODOs remain in that section.</td></tr>
+      <tr><td>Board gets per-member filter parity</td><td>Filter chip for any team member (human OR bot), same query shape: <em>tasks they currently own + tasks they've ever acted on</em>. User and bot become symmetric at the UI level even though their schema columns differ.</td></tr>
+      <tr><td>Run audit becomes complete</td><td>Today's "who ran this" is derivable only while the trigger row exists. After this PR <code>run.actor_agent_id</code> is stamped at spawn and survives all downstream config edits + deletions.</td></tr>
+      <tr><td>State model gets orthogonal</td><td>Today "claimed" is partly a status, partly inferred from trigger presence, partly invisible. After this PR there are three independent axes — lifecycle (status), responsibility (claim cols), audit (run.actor) — each answering a different question.</td></tr>
+      <tr><td>Unblocks SKY-264</td><td>The <code>author_in</code> predicate (D-Predicate) wants to compare "the acting agent" against the entity's GitHub author. The agent identity has to be on the task before D-Predicate can read it.</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="axes">
+  <div class="section-label">§2</div>
+  <h2>Three orthogonal axes</h2>
+  <p class="lede">The thing that makes the rest of this spec clean: status, responsibility, and audit live on different columns and never need to encode each other. The "queue view" is a derived filter of the first two; the third is write-once.</p>
+
+  <div class="axes-grid">
+    <div class="axes-cell axes-cell--status">
+      <h6>1. Lifecycle (existing)</h6>
+      <div class="col">tasks.status</div>
+      <div class="ctx">Macro-states: <code>queued</code>, <code>snoozed</code>, <code>done</code>, <code>dismissed</code>. <code>'claimed'</code> and <code>'delegated'</code> are dropped in this PR — both were denormalizations of responsibility, which now lives on the claim cols. Does NOT enumerate "user-claimed-but-not-closed" — that's a claim-col concern.</div>
+    </div>
+    <div class="axes-cell axes-cell--claim">
+      <h6>2. Responsibility (new)</h6>
+      <div class="col">tasks.claimed_by_*_id<br><span style="color: var(--muted-2); font-size: 11px;">XOR — at most one</span></div>
+      <div class="ctx">Who currently owns the work. NULL/NULL = unclaimed (in the queue). Set when a bot or human commits. Sticky past close — preserves "who finished this" for audit.</div>
+    </div>
+    <div class="axes-cell axes-cell--actor">
+      <h6>3. Audit (new)</h6>
+      <div class="col">runs.actor_agent_id</div>
+      <div class="ctx">Per-run, immutable, "who actually ran this." Stamped by the spawner at run start. Survives all downstream config edits + handler deletion.</div>
+    </div>
+  </div>
+
+  <div class="callout callout--good">
+    <strong>The queue view is a derived filter, not a status value.</strong> "What's in the queue" = <code>WHERE claimed_by_agent_id IS NULL AND claimed_by_user_id IS NULL AND status NOT IN ('done', 'dismissed', 'snoozed')</code>. Team-scoped via the existing <code>team_id</code> + visibility/RLS. A user claiming a queued task is a claim-column transition, not a status change. This is what makes the "user claims without involving the bot" case clean — no new status enum value needed.
+  </div>
+
+  <div class="callout callout--good">
+    <strong>Bot-disabled-team handling.</strong> v0.9 spec acceptance: <code>team_agents.enabled = false</code> turns off auto-delegation AND refuses explicit user-delegate gestures. Three call sites enforce this: <code>router.tryAutoDelegate</code> silently skips trigger auto-fire; <code>handleSwipe</code> delegate branch returns 409; <code>factory_delegate</code> returns 409. The auto-trigger-fire case keeps the task in the team queue unclaimed — a human can still swipe-claim it for themselves; only the bot is gated. Local-mode N=1 always has the flag on (BootstrapLocalAgent default); the data-layer guard is load-bearing for multi-tenant when an admin toggles the bot off.
+  </div>
+
+  <div class="callout callout--good">
+    <strong>Run creator/actor pairing.</strong> v0.9: <code>runs.creator_user_id</code> drops NOT NULL; trigger-spawned runs land NULL creator + <code>trigger_type='event'</code>, manual runs keep non-NULL creator + <code>trigger_type='manual'</code>. A CHECK pairs the two fields so the seeder can't lie. <code>runs.actor_agent_id</code> stays nullable (deliberate divergence from the spec's literal "NOT NULL"): the <code>ON DELETE SET NULL</code> policy for graceful degradation when an agent row is deleted in a future multi-agent world requires nullable, and the bootstrap-fatal startup (also new in v0.9) guarantees the agent row exists before any run is created on healthy installs.
+  </div>
+
+  <div class="callout callout--good">
+    <strong>Bootstrap is fatal at startup.</strong> v0.9: <code>BootstrapLocalAgent</code> failure flips from <code>log.Printf</code> to <code>log.Fatalf</code>. Pre-D-Claims the row wasn't load-bearing; post-D-Claims it is (stampAgentClaim, drain claim_changed guard, runs.actor_agent_id stamping all depend on a real agent). The INSERT is idempotent so re-runs are safe; the only legitimate failure mode is a DB connection issue, which <code>Migrate()</code> already fatals on. Continuing past a bootstrap failure produces a silently-broken auto-delegation state — fatal at startup is the loud failure mode you want.
+  </div>
+
+  <div class="callout callout--good">
+    <strong>Audit log = state-change log, not gesture log.</strong> v0.8 audit contract: <code>swipe_events</code> records completed state changes, not attempted gestures. For responsibility-axis actions (claim, delegate) the handler runs the guarded claim mutation FIRST; the audit row only writes if the mutation accepts. A refused gesture (different user owns it, claim race lost) returns 409 with no audit row, no status flip, no snooze clear. For lifecycle-axis actions (dismiss, snooze, complete) the action IS the state change, so <code>RecordSwipe</code> writes audit + lifecycle in one tx as before. If the audit insert fails AFTER a successful claim mutation, the state change holds and we log the audit miss — better an audit gap than a 500 on a committed state change. This contract resolves the long-standing "RecordSwipe at the top mutates state for refused gestures" reviewer flag.
+  </div>
+
+  <div class="callout callout--good">
+    <strong>Snooze is queue-only.</strong> The v0.7 invariant: <code>status='snoozed' ↔ claimed_by_agent_id IS NULL AND claimed_by_user_id IS NULL</code>. A snoozed task is a deferred unclaimed-queue entry — nothing more. Any claim-axis transition (auto-trigger fire, swipe-claim, swipe-delegate, factory drop, user→bot handoff) atomically wakes the task in the same UPDATE: <code>SET ..., snooze_until = NULL, status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END</code>. The inverse — <code>SnoozeTask</code> on a claimed task — refuses with 409 and the audit row rolls back as part of the same tx, so the user sees no state change. Users wanting to defer work on a claimed task must explicitly requeue first. Cuts the snoozed-and-claimed incoherent state out of the model entirely, which closes the gap between drain/re-derive (both correctly skip snoozed) and the immediate auto-trigger fire path (used to silently fire on snoozed tasks).
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="shape">
+  <div class="section-label">§3</div>
+  <h2>Schema delta</h2>
+  <p class="lede">Three new columns. One CHECK constraint. One parity prerequisite. No status enum changes, no <code>event_handlers</code> changes.</p>
+
+  <div class="schema-pair">
+    <div class="schema-table">
+      <h5>event_handlers <span class="h-meta">— unchanged</span></h5>
+      <ul>
+        <li class="shared"><span class="col-name">id, org_id, kind, ...</span></li>
+        <li class="absent">— no claim column; <code>kind</code> already discriminates</li>
+      </ul>
+    </div>
+    <div class="schema-table">
+      <h5>tasks <span class="h-meta">— two claim cols + XOR</span></h5>
+      <ul>
+        <li class="shared"><span class="col-name">id, org_id, status, ...</span></li>
+        <li class="added"><span class="col-name">claimed_by_agent_id</span> <span style="color: var(--muted-3);">UUID NULL · FK agents(id, org_id)</span></li>
+        <li class="added-user"><span class="col-name">claimed_by_user_id</span> <span style="color: var(--muted-3);">UUID NULL · FK users(id)</span></li>
+      </ul>
+    </div>
+    <div class="schema-table">
+      <h5>runs <span class="h-meta">— audit</span></h5>
+      <ul>
+        <li class="shared"><span class="col-name">id, org_id, task_id, ...</span></li>
+        <li class="added"><span class="col-name">actor_agent_id</span> <span style="color: var(--muted-3);">UUID NULL · FK agents(id, org_id)</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>XOR CHECK on tasks</h3>
+
+<pre class="code"><span class="kw">ALTER TABLE</span> tasks <span class="kw">ADD CONSTRAINT</span> tasks_claim_xor
+  <span class="kw">CHECK</span> (claimed_by_agent_id <span class="kw">IS NULL OR</span> claimed_by_user_id <span class="kw">IS NULL</span>);</pre>
+
+  <p>"At most one is set." Both NULL = unclaimed (in the queue). Exactly one set = claimed by that entity. Both set = forbidden. This is the schema-level guarantee that backstops the application's claim-transition logic.</p>
+
+  <h3>FK targets</h3>
+  <ul class="tight">
+    <li><code>claimed_by_agent_id</code> + <code>actor_agent_id</code>: <code>(agent_id, org_id) REFERENCES agents(id, org_id) ON DELETE SET NULL</code> in Postgres (composite, after the parity prereq lands). Plain <code>REFERENCES agents(id) ON DELETE SET NULL</code> in SQLite (<code>ALTER TABLE ADD COLUMN</code> can't carry a composite FK; at N=1 there's one org so cross-org leakage is structurally impossible).</li>
+    <li><code>claimed_by_user_id</code>: <code>REFERENCES users(id) ON DELETE SET NULL</code>. Users aren't org-scoped via composite-PK (the users table doesn't have <code>(id, org_id)</code> uniqueness — membership lives in <code>org_memberships</code>); RLS gates cross-org access at runtime.</li>
+  </ul>
+
+  <h3>Parity prereq on <code>agents</code></h3>
+  <p>SKY-260 built <code>agents</code> with <code>(id) PRIMARY KEY + UNIQUE(org_id)</code> (rationale at <code>migrations-postgres/202605120003_agents.sql:16-24</code>: "we never compose <code>(agent_id, org_id)</code> at the caller"). D-Claims is when that rationale stops holding.</p>
+
+<pre class="code"><span class="kw">ALTER TABLE</span> agents <span class="kw">ADD CONSTRAINT</span> agents_id_org_unique <span class="kw">UNIQUE</span> (id, org_id);
+<span class="com">-- SQLite parity:</span>
+<span class="kw">CREATE UNIQUE INDEX IF NOT EXISTS</span> agents_id_org_unique <span class="kw">ON</span> agents (id, org_id);</pre>
+
+  <div class="callout">
+    <strong>No status enum changes.</strong> The team-scoped queue framing collapses "queued" from "user-specific lifecycle state" to "derived filter on unclaimed-and-active." Adding a status like <code>'in_progress'</code> or <code>'user_claimed'</code> would be redundant — the claim columns already encode that, and the queue view filters them out automatically. See arch doc decision <code>task-state-axes</code>.
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="flow">
+  <div class="section-label">§4</div>
+  <h2>State transitions</h2>
+  <p class="lede">Every transition is small and explicit. The XOR CHECK is the safety net. Status never moves on claim or delegate — those gestures change responsibility (claim cols) only. Status only moves on genuine lifecycle changes: snooze, done, dismiss.</p>
+
+  <table class="matrix">
+    <thead><tr>
+      <th style="width: 26%;">Transition</th>
+      <th style="width: 18%;">claimed_by_agent_id</th>
+      <th style="width: 18%;">claimed_by_user_id</th>
+      <th style="width: 18%;">tasks.status</th>
+      <th>run.actor_agent_id</th>
+    </tr></thead>
+    <tbody>
+      <tr>
+        <td>Rule match (lands in queue)</td>
+        <td>NULL</td>
+        <td>NULL</td>
+        <td>queued</td>
+        <td>— (no run)</td>
+      </tr>
+      <tr>
+        <td>Trigger match (auto-delegate)</td>
+        <td><strong>org agent</strong></td>
+        <td>NULL</td>
+        <td>queued (unchanged)</td>
+        <td>org agent (stamped at spawn)</td>
+      </tr>
+      <tr>
+        <td>User claims queued task themselves</td>
+        <td>NULL</td>
+        <td><strong>user</strong></td>
+        <td>queued (unchanged)</td>
+        <td>— (no run yet)</td>
+      </tr>
+      <tr>
+        <td>User drags queued task → bot</td>
+        <td><strong>org agent</strong></td>
+        <td>NULL</td>
+        <td>queued (unchanged)</td>
+        <td>org agent (stamped at spawn)</td>
+      </tr>
+      <tr>
+        <td>User takes over a bot-running task</td>
+        <td>NULL (cleared)</td>
+        <td><strong>user (set)</strong></td>
+        <td>queued (unchanged)</td>
+        <td>org agent (unchanged — immutable)</td>
+      </tr>
+      <tr>
+        <td>User snoozes / completes / dismisses</td>
+        <td>unchanged (sticky)</td>
+        <td>unchanged (sticky)</td>
+        <td>→ snoozed / done / dismissed</td>
+        <td>unchanged</td>
+      </tr>
+      <tr>
+        <td>Agent deleted (cascade)</td>
+        <td>NULL (SET NULL)</td>
+        <td>unchanged</td>
+        <td>unchanged</td>
+        <td>NULL on existing runs (SET NULL)</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout--good">
+    <strong>Sticky claims past close.</strong> When a task closes (<code>status='done'</code> or <code>'dismissed'</code>), the claim columns are not cleared. They become the audit answer to "who was responsible when this finished?" Lifecycle's <code>status</code> + <code>closed_at</code> + <code>close_reason</code> tell the lifecycle story; <code>claimed_by_*</code> tell the responsibility story; <code>runs.actor_agent_id</code> tells the execution story. Three answers, three axes.
+  </div>
+
+  <div class="callout callout--warn">
+    <strong>Takeover clears agent claim, sets user claim — same transaction.</strong> The XOR CHECK requires this be atomic. The existing takeover handler (which today flips run.status to <code>taken_over</code> + writes <code>takeover_path</code>) gains two extra UPDATE clauses on the task row in the same SQL statement.
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="migration">
+  <div class="section-label">§5</div>
+  <h2>Migration design</h2>
+  <p class="lede">Forward-only, one migration per backend. Parity unique on agents, three nullable columns, one XOR CHECK, two partial indexes. All new columns default to NULL on existing rows — the CHECK is trivially satisfied.</p>
+
+  <h3>Postgres</h3>
+
+<pre class="code"><span class="com">-- (1) Agents parity: composite UNIQUE so the agent-id FKs can be composite.</span>
+<span class="kw">ALTER TABLE</span> agents <span class="kw">ADD CONSTRAINT</span> agents_id_org_unique <span class="kw">UNIQUE</span> (id, org_id);
+
+<span class="com">-- (2) tasks.claimed_by_agent_id</span>
+<span class="kw">ALTER TABLE</span> tasks
+  <span class="kw">ADD COLUMN</span> claimed_by_agent_id <span class="kw">UUID</span>,
+  <span class="kw">ADD CONSTRAINT</span> tasks_claimed_agent_fkey
+    <span class="kw">FOREIGN KEY</span> (claimed_by_agent_id, org_id)
+    <span class="kw">REFERENCES</span> agents (id, org_id) <span class="kw">ON DELETE SET NULL</span>;
+
+<span class="com">-- (3) tasks.claimed_by_user_id</span>
+<span class="kw">ALTER TABLE</span> tasks
+  <span class="kw">ADD COLUMN</span> claimed_by_user_id <span class="kw">UUID REFERENCES</span> users(id) <span class="kw">ON DELETE SET NULL</span>;
+
+<span class="com">-- (4) XOR CHECK</span>
+<span class="kw">ALTER TABLE</span> tasks <span class="kw">ADD CONSTRAINT</span> tasks_claim_xor
+  <span class="kw">CHECK</span> (claimed_by_agent_id <span class="kw">IS NULL OR</span> claimed_by_user_id <span class="kw">IS NULL</span>);
+
+<span class="com">-- (5) Partial indexes for the Board filter's hot reads</span>
+<span class="kw">CREATE INDEX</span> tasks_claimed_agent_idx <span class="kw">ON</span> tasks(claimed_by_agent_id)
+  <span class="kw">WHERE</span> claimed_by_agent_id <span class="kw">IS NOT NULL</span>;
+<span class="kw">CREATE INDEX</span> tasks_claimed_user_idx <span class="kw">ON</span> tasks(claimed_by_user_id)
+  <span class="kw">WHERE</span> claimed_by_user_id <span class="kw">IS NOT NULL</span>;
+
+<span class="com">-- (6) runs.actor_agent_id (audit)</span>
+<span class="kw">ALTER TABLE</span> runs
+  <span class="kw">ADD COLUMN</span> actor_agent_id <span class="kw">UUID</span>,
+  <span class="kw">ADD CONSTRAINT</span> runs_actor_agent_fkey
+    <span class="kw">FOREIGN KEY</span> (actor_agent_id, org_id)
+    <span class="kw">REFERENCES</span> agents (id, org_id) <span class="kw">ON DELETE SET NULL</span>;
+<span class="kw">CREATE INDEX</span> runs_actor_agent_idx <span class="kw">ON</span> runs(actor_agent_id)
+  <span class="kw">WHERE</span> actor_agent_id <span class="kw">IS NOT NULL</span>;</pre>
+
+  <p>No RLS changes — the existing tasks + runs policies already gate on <code>org_id = tf.current_org_id()</code>; the new columns inherit row-level RLS.</p>
+
+  <h3>SQLite</h3>
+  <p>The three new columns go on via plain <code>ADD COLUMN</code> with inline column-level <code>REFERENCES</code>. To enforce the XOR <code>CHECK</code> on <code>tasks</code>, SQLite requires rebuilding the <code>tasks</code> table, as described below.</p>
+
+<pre class="code"><span class="com">-- (1) Agents parity index.</span>
+<span class="kw">CREATE UNIQUE INDEX IF NOT EXISTS</span> agents_id_org_unique <span class="kw">ON</span> agents (id, org_id);
+
+<span class="com">-- (2)-(4) Three ADD COLUMN statements with inline plain FKs.</span>
+<span class="kw">ALTER TABLE</span> tasks <span class="kw">ADD COLUMN</span> claimed_by_agent_id <span class="kw">TEXT</span>
+  <span class="kw">REFERENCES</span> agents (id) <span class="kw">ON DELETE SET NULL</span>;
+<span class="kw">ALTER TABLE</span> tasks <span class="kw">ADD COLUMN</span> claimed_by_user_id <span class="kw">TEXT</span>
+  <span class="kw">REFERENCES</span> users (id) <span class="kw">ON DELETE SET NULL</span>;
+<span class="kw">ALTER TABLE</span> runs <span class="kw">ADD COLUMN</span> actor_agent_id <span class="kw">TEXT</span>
+  <span class="kw">REFERENCES</span> agents (id) <span class="kw">ON DELETE SET NULL</span>;
+
+<span class="com">-- (5) XOR CHECK. SQLite supports ALTER TABLE ADD CHECK in 3.37+ via the
+-- standard rebuild-with-new-constraint dance (the 12-step or via ALTER
+-- TABLE ... ADD CHECK if available); pick whichever the codebase's
+-- existing migrations use for tasks.</span>
+<span class="kw">PRAGMA</span> foreign_keys=<span class="kw">OFF</span>;
+<span class="com">-- rebuild tasks with the added CHECK constraint</span>
+<span class="kw">CREATE TABLE</span> tasks_new (... <span class="com">/* original cols + new claim cols + new CHECK */</span> ...);
+<span class="kw">INSERT INTO</span> tasks_new <span class="kw">SELECT</span> ... <span class="kw">FROM</span> tasks;
+<span class="kw">DROP TABLE</span> tasks;
+<span class="kw">ALTER TABLE</span> tasks_new <span class="kw">RENAME TO</span> tasks;
+<span class="kw">PRAGMA</span> foreign_keys=<span class="kw">ON</span>;
+
+<span class="com">-- (6) Partial indexes — same as Postgres.</span>
+<span class="kw">CREATE INDEX IF NOT EXISTS</span> tasks_claimed_agent_idx <span class="kw">ON</span> tasks(claimed_by_agent_id)
+  <span class="kw">WHERE</span> claimed_by_agent_id <span class="kw">IS NOT NULL</span>;
+<span class="kw">CREATE INDEX IF NOT EXISTS</span> tasks_claimed_user_idx <span class="kw">ON</span> tasks(claimed_by_user_id)
+  <span class="kw">WHERE</span> claimed_by_user_id <span class="kw">IS NOT NULL</span>;
+<span class="kw">CREATE INDEX IF NOT EXISTS</span> runs_actor_agent_idx <span class="kw">ON</span> runs(actor_agent_id)
+  <span class="kw">WHERE</span> actor_agent_id <span class="kw">IS NOT NULL</span>;</pre>
+
+  <div class="callout callout--warn">
+    <strong>SQLite tasks rebuild for the CHECK.</strong> SQLite can't add a table-level CHECK constraint without rebuilding the table. The standard 12-step dance applies, with <code>-- +goose NO TRANSACTION</code> for the <code>PRAGMA foreign_keys</code> flip. Runs doesn't need a rebuild (no CHECK).
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="handlers">
+  <div class="section-label">§6</div>
+  <h2>Router · spawner · claim handlers</h2>
+  <p class="lede">Five write sites for the new columns, all going through the same column family. Each is a small addition to existing flows.</p>
+
+  <h3>1. Router — trigger match stamps agent claim at task creation</h3>
+<pre class="code"><span class="com">// internal/routing/router.go — in task construction.</span>
+<span class="kw">var</span> claimedAgentID <span class="kw">string</span>
+<span class="kw">if</span> handler.Kind == domain.EventHandlerKindTrigger {
+    a, err := r.stores.Agents.GetForOrg(ctx, orgID)
+    <span class="kw">if</span> err == <span class="kw">nil</span> &amp;&amp; a != <span class="kw">nil</span> {
+        claimedAgentID = a.ID
+    }
+}
+task := <span class="kw">&amp;</span>domain.Task{
+    OrgID:            orgID,
+    EntityID:         entityID,
+    EventType:        evt.EventType,
+    DedupKey:         derivedDedupKey,
+    PrimaryEventID:   evt.ID,
+    ClaimedByAgentID: claimedAgentID,  <span class="com">// "" if rule, agent.ID if trigger</span>
+}</pre>
+
+  <h3>2. Spawner — stamps run.actor_agent_id at run start</h3>
+<pre class="code"><span class="com">// internal/delegate/spawner.go — inside Delegate, where runs row is INSERTed.</span>
+actorAgentID := task.ClaimedByAgentID
+<span class="kw">if</span> actorAgentID == <span class="str">""</span> {
+    <span class="com">// User-claimed task (user-claim ran via "run this prompt now" UI) or
+    // a rule-task with no claim that's being one-off delegated — fall
+    // back to org's agent.</span>
+    <span class="kw">if</span> a, err := s.stores.Agents.GetForOrg(ctx, task.OrgID); err == <span class="kw">nil</span> &amp;&amp; a != <span class="kw">nil</span> {
+        actorAgentID = a.ID
+    }
+}
+<span class="com">// INSERT runs(..., actor_agent_id) VALUES (..., $N)</span></pre>
+
+  <h3>3. User-delegate handler — drag-to-bot / "Delegate"</h3>
+  <p>The HTTP handler that handles "delegate this task to the bot" (swipe-right / drag-to-Agent-column / factory drop on runs-tray) stamps the agent claim BEFORE attempting the spawn. Status is not touched — the task remains <code>'queued'</code> on the lifecycle axis; only the claim col flips. A failed spawn doesn't unstamp the claim: commitment is real even when execution didn't fire, and the Board renders a "delegate failed, retry" affordance on the bot-claimed card.</p>
+<pre class="code"><span class="kw">UPDATE</span> tasks
+   <span class="kw">SET</span> claimed_by_agent_id = $1,        <span class="com">-- org's agent.id</span>
+       claimed_by_user_id  = <span class="kw">NULL</span>     <span class="com">-- XOR safety; usually already NULL</span>
+ <span class="kw">WHERE</span> id = $2 <span class="kw">AND</span> org_id = $3
+   <span class="kw">AND</span> status <span class="kw">NOT IN</span> (<span class="str">'done'</span>, <span class="str">'dismissed'</span>, <span class="str">'snoozed'</span>);</pre>
+
+  <h3>4. User-claim handler — "I'll take this myself"</h3>
+  <p>A new endpoint (or extension of an existing claim/take action — TBD with the UI). Pure claim-col write, no status change:</p>
+<pre class="code"><span class="kw">UPDATE</span> tasks
+   <span class="kw">SET</span> claimed_by_user_id  = $1,        <span class="com">-- current user.id</span>
+       claimed_by_agent_id = <span class="kw">NULL</span>
+ <span class="kw">WHERE</span> id = $2 <span class="kw">AND</span> org_id = $3
+   <span class="kw">AND</span> claimed_by_agent_id <span class="kw">IS NULL</span>   <span class="com">-- safety: don't steal from the bot</span>
+   <span class="kw">AND</span> claimed_by_user_id  <span class="kw">IS NULL</span>;  <span class="com">-- safety: don't steal from another user</span></pre>
+
+  <h3>5. Takeover handler — user grabs an active bot run</h3>
+  <p>The existing takeover flow (which moves the worktree, flips <code>runs.status = 'taken_over'</code>) extends with the task-claim flip:</p>
+<pre class="code"><span class="kw">UPDATE</span> tasks
+   <span class="kw">SET</span> claimed_by_agent_id = <span class="kw">NULL</span>,    <span class="com">-- bot loses claim</span>
+       claimed_by_user_id  = $1         <span class="com">-- takeover user.id</span>
+ <span class="kw">WHERE</span> id = $2 <span class="kw">AND</span> org_id = $3
+   <span class="kw">AND</span> claimed_by_agent_id <span class="kw">IS NOT NULL</span>; <span class="com">-- only if bot currently claims</span>
+<span class="com">-- runs.actor_agent_id stays — that run was run by the bot. Audit truth.</span></pre>
+
+  <div class="callout">
+    <strong>Credentials still come from the keychain in local v1.</strong> The spawner stamps <code>actor_agent_id</code> for audit but doesn't yet resolve GitHub credentials through the agent row. Threading <code>agent.github_app_installation_id</code> / <code>agent.github_pat_user_id</code> into credential resolution is the natural follow-up — out of scope here.
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="api">
+  <div class="section-label">§7</div>
+  <h2>API + frontend</h2>
+  <p class="lede">The headline UX deliverable is the per-member Board filter — same view shape for the bot and any human teammate.</p>
+
+  <h3>Board's per-member filter</h3>
+  <p>Filter chips at the top of the Board, one per team member (including the bot). Clicking a chip parameterizes the same SQL shape:</p>
+
+<pre class="code"><span class="com">-- "Tasks for member X" — same query, two parameter sets.</span>
+<span class="kw">SELECT</span> ... <span class="kw">FROM</span> tasks t
+<span class="kw">WHERE</span> t.org_id = $org_id <span class="kw">AND</span> t.team_id = $team_id
+  <span class="kw">AND</span> (
+    <span class="com">-- Currently responsible (active only)</span>
+    (t.status <span class="kw">NOT IN</span> (<span class="str">'done'</span>, <span class="str">'dismissed'</span>, <span class="str">'snoozed'</span>) <span class="kw">AND</span> (
+      (<span class="str">$kind</span> = <span class="str">'user'</span>  <span class="kw">AND</span> t.claimed_by_user_id  = $member_id) <span class="kw">OR</span>
+      (<span class="str">$kind</span> = <span class="str">'agent'</span> <span class="kw">AND</span> t.claimed_by_agent_id = $member_id)
+    ))
+    <span class="kw">OR</span>
+    <span class="com">-- Has ever acted on (all time, including closed)</span>
+    (<span class="str">$kind</span> = <span class="str">'user'</span>  <span class="kw">AND</span> (
+       t.creator_user_id    = $member_id <span class="kw">OR</span>
+       t.claimed_by_user_id  = $member_id))
+    <span class="kw">OR</span>
+    (<span class="str">$kind</span> = <span class="str">'agent'</span> <span class="kw">AND</span> (
+       t.claimed_by_agent_id = $member_id <span class="kw">OR</span>
+       <span class="kw">EXISTS</span> (<span class="kw">SELECT</span> 1 <span class="kw">FROM</span> runs r
+               <span class="kw">WHERE</span> r.task_id = t.id <span class="kw">AND</span> r.actor_agent_id = $member_id)))
+  );</pre>
+
+  <p>The two clauses ("currently responsible" + "has ever acted on") compose into "everything this member has touched." User and bot are symmetric in shape — the parameters change, the structure doesn't.</p>
+
+  <h3>Task + run DTOs</h3>
+  <ul class="tight">
+    <li>Task DTO gains <code>claimed_by_agent_id?: string | null</code>, <code>claimed_by_user_id?: string | null</code>, and JOIN-resolved display fields (<code>claimed_by_agent_name</code>, <code>claimed_by_user_name</code>) for the Board's Agent column.</li>
+    <li>Run DTO gains <code>actor_agent_id?: string | null</code> + <code>actor_agent_name?: string</code>. <code>AgentCard.tsx</code> renders "Ran as: {name}" when populated.</li>
+  </ul>
+
+  <h3>What does NOT change in the UI</h3>
+  <ul class="tight">
+    <li>No new "claim this trigger" editor checkbox. Trigger configuration is unchanged — the auto-claim is implicit in <code>kind='trigger'</code>.</li>
+    <li>No new agent-picker. v1 has one agent per org; the Board's bot chip reads the org's only agent.</li>
+    <li>No task-status enum surface change. Status badges read the existing values.</li>
+  </ul>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="out-of-scope">
+  <div class="section-label">§8</div>
+  <h2>Out of scope</h2>
+  <ul class="tight">
+    <li><strong><code>event_handlers.claimed_by_agent_id</code></strong> — deliberately deferred to v2. In v1, <code>kind='trigger'</code> + <code>UNIQUE(org_id)</code> on agents encodes the entire claim configuration. Adding a per-handler claim column now bets on one of three plausible v2 shapes (per-handler explicit / per-team derived via <code>team_agents</code> / per-prompt) before we have multi-agent requirements.</li>
+    <li><strong>Spawner credential routing through <code>agents</code>.</strong> Today the spawner reads the keychain; after this PR it still does. Threading <code>agent.github_app_installation_id</code> / <code>agent.github_pat_user_id</code> into credential resolution is the natural follow-up but a behavior change worth its own ticket.</li>
+    <li><strong>Multi-agent-per-org.</strong> v1 has <code>UNIQUE(org_id)</code> on agents — one bot per org.</li>
+    <li><strong>Per-member Board filter UI + JOIN-resolved claim display names.</strong> The schema + handlers in this PR write claim columns + actor pointers; the chip UX and the agent/user-name lookup that lights up the Board's Agent column are a follow-up FE PR. Scope cut deliberate — this PR is the load-bearing schema + state-machine work, the UX layer comes next.</li>
+    <li><strong>Cross-team filter / multi-team Board.</strong> SKY-262 (D-TeamDefault) shipped the team-scoped queue: every task now has <code>team_id</code> NOT NULL and the Board's queue view is a team-scoped derived filter. Rendering work from teams the caller doesn't belong to (cross-team admin overviews) is a separate UX call.</li>
+    <li><strong>Denormalized <code>agent_display_name</code> on runs</strong> — if an agent is deleted, the display name disappears too. Add later if audit retention becomes a hard requirement.</li>
+    <li><strong>Filter chips + sorting controls themselves.</strong> The Board query in §7 is the load-bearing part; chip UX (which chips show, ordering, persistence) is a cosmetic follow-up.</li>
+  </ul>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="steps">
+  <div class="section-label">§9</div>
+  <h2>Implementation steps</h2>
+
+  <ol class="steps">
+    <li>
+      <span class="step-title">Domain types</span>
+      <span class="step-body">Add <code>ClaimedByAgentID string</code> + <code>ClaimedByUserID string</code> to <code>domain.Task</code>. Add <code>ActorAgentID string</code> to <code>domain.AgentRun</code>. Empty-string-as-NULL convention.</span>
+    </li>
+    <li>
+      <span class="step-title">Postgres migration</span>
+      <span class="step-body">New <code>NNN_d_claims.sql</code>: agents UNIQUE, three ADD COLUMNs with composite FKs (and user-FK plain), XOR CHECK, three partial indexes. No RLS changes.</span>
+    </li>
+    <li>
+      <span class="step-title">SQLite migration</span>
+      <span class="step-body">New <code>NNN_d_claims.sql</code> with goose <code>NO TRANSACTION</code> directive: agents UNIQUE INDEX, three ADD COLUMNs, tasks rebuild for the XOR CHECK, three partial indexes.</span>
+    </li>
+    <li>
+      <span class="step-title">Store reads + writes + JOINs</span>
+      <span class="step-body">Task store INSERT + GET include both claim columns. Run store INSERT includes actor. Board's task-list query LEFT JOINs <code>agents</code> + <code>users</code> for display-name resolution. Conformance suite gains round-trip tests on the new columns.</span>
+    </li>
+    <li>
+      <span class="step-title">Router copy-forward</span>
+      <span class="step-body"><code>internal/routing/router.go</code> — at task construction, derive <code>claimedAgentID</code> from <code>handler.Kind == EventHandlerKindTrigger ? Agents.GetForOrg(orgID).ID : ""</code>.</span>
+    </li>
+    <li>
+      <span class="step-title">Spawner stamps actor</span>
+      <span class="step-body"><code>internal/delegate/spawner.go</code> — <code>Delegate</code> reads <code>task.ClaimedByAgentID</code>, falls back to <code>Agents.GetForOrg</code> if empty, INSERTs into <code>runs.actor_agent_id</code>.</span>
+    </li>
+    <li>
+      <span class="step-title">User-delegate handler</span>
+      <span class="step-body">In the swipe / drag-to-bot / delegate endpoint, the existing status flip extends to write <code>claimed_by_agent_id</code> in the same UPDATE. Same statement as today plus two columns.</span>
+    </li>
+    <li>
+      <span class="step-title">User-claim endpoint</span>
+      <span class="step-body">New <code>POST /api/tasks/{id}/claim</code> (or extension of the swipe endpoint, depending on UI gesture). Sets <code>claimed_by_user_id = current_user</code>, conditioned on both claim cols currently being NULL.</span>
+    </li>
+    <li>
+      <span class="step-title">Takeover handler extension</span>
+      <span class="step-body"><code>internal/delegate/spawner.go</code>'s takeover path — the existing UPDATE on runs gains a sibling UPDATE on tasks that clears agent claim + sets user claim in the same transaction. <code>runs.actor_agent_id</code> stays untouched (audit immutability).</span>
+    </li>
+    <li>
+      <span class="step-title">Board per-member filter</span>
+      <span class="step-body">FE: filter-chip UI for team members (bot + each human teammate). BE: parameterized query per §7. Chips read the team's member list (already available via the team_agents + memberships lookups).</span>
+    </li>
+    <li>
+      <span class="step-title">Tests</span>
+      <span class="step-body">Conformance: task round-trip of both claim cols; run round-trip of actor. Router test: trigger match stamps agent claim. Spawner test: actor stamping matrix (claimed / unclaimed / no-task / no-agent). User-claim, user-delegate, takeover handler tests pin the state-machine transitions + the XOR CHECK rejection paths. Board-filter integration test asserts parity between user and bot result sets for a synthetic scenario.</span>
+    </li>
+    <li>
+      <span class="step-title">Fix doc comments</span>
+      <span class="step-body">Update <code>bootstrap.go:37-38</code> (narrow scope of "spawner reads keychain" TODO; point at follow-up). Update <code>migrations-postgres/202605120003_agents.sql:12-14</code> + <code>migrations-sqlite/202605120001_agents.sql:14</code> (claim columns shipped; rewrite as historical context, note that event_handlers column is deferred to v2).</span>
+    </li>
+    <li>
+      <span class="step-title">Tests + lint + ship</span>
+      <span class="step-body"><code>go test ./... &amp;&amp; ./scripts/lint.sh &amp;&amp; cd frontend &amp;&amp; npm run build &amp;&amp; cd .. &amp;&amp; go build</code>. Smoke test the full state machine: queue → trigger fires → still queued + bot-claimed → close (claim sticks); queue → user claims → still queued + user-claimed; queue → user delegates → still queued + bot-claimed; bot run → takeover → user-claim flips, run preserved.</span>
+    </li>
+  </ol>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="risks">
+  <div class="section-label">§10</div>
+  <h2>Risks</h2>
+  <table class="matrix">
+    <thead><tr><th style="width: 30%;">Risk</th><th>Mitigation</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Concurrent claim attempts — two users (or user + auto-trigger) try to claim the same queued task at the same moment.</td>
+        <td>Each claim handler's UPDATE includes guard clauses (<code>WHERE claim cols currently NULL</code>) and a check of the number of rows affected. Lost races return a 409 with "task already claimed." The XOR CHECK is the schema-level backstop against simultaneous double-write.</td>
+      </tr>
+      <tr>
+        <td>v2 multi-agent picks a shape that doesn't fit "task claim is just the org's agent" (e.g., per-team via <code>team_agents</code>, or per-prompt).</td>
+        <td>The resolution lives in one function in the router. v2 rewrites that function — anywhere from per-team derivation to per-handler explicit — and the downstream task column absorbs the result unchanged. The column shape is robust to all plausible v2 designs because it stores the resolved answer, not the resolution mechanism.</td>
+      </tr>
+      <tr>
+        <td>SQLite's <code>ADD COLUMN ... REFERENCES</code> creates plain (single-column) FKs on the three new columns; cross-org integrity rests on application code only in SQLite.</td>
+        <td>At N=1 in local mode there's exactly one <code>org_id</code> value in the entire database; cross-org leakage is structurally impossible. The composite-FK promotion is part of the broader SQLite child-FK parity sweep deferred from SKY-259 — bounded, optional, not load-bearing.</td>
+      </tr>
+      <tr>
+        <td>The SQLite tasks rebuild for the XOR CHECK is the largest table-mod in this migration; risk of data loss on an interrupted upgrade.</td>
+        <td>Goose runs each migration in its own transaction by default; the explicit <code>NO TRANSACTION</code> directive only wraps the <code>PRAGMA foreign_keys</code> flip, and the table-rebuild itself is inside <code>BEGIN/COMMIT</code> manually. Standard SQLite-rebuild pattern, used elsewhere in the codebase (e.g., SKY-259's event_handlers migration). Bootstrap-shape test confirms post-migration row count matches pre-migration.</td>
+      </tr>
+      <tr>
+        <td>If <code>Agents.GetForOrg</code> returns nil (bot not bootstrapped), trigger matches still create tasks but with <code>claimed_by_agent_id = NULL</code> — looks like a rule match to downstream consumers.</td>
+        <td>Acceptable. Bootstrap creates the local-mode agent at first launch; the nil case is a transient seam between DB init and agent bootstrap. The Board's Agent column shows "—" in that window; once the agent row exists, subsequent triggers stamp correctly. Multi-mode installs that complete the founder flow always have an agent row before any task fires.</td>
+      </tr>
+      <tr>
+        <td>Sticky claims past close mean an old closed task that referenced a deleted user retains a NULL <code>claimed_by_user_id</code> (SET NULL behavior) and the Board renders "—" in its "claimed by" column.</td>
+        <td>By design. The display name is JOIN-resolved; if the user row is gone, there's no name to show. If audit retention past user deletion ever becomes a hard requirement, denormalize the display name onto the task at claim time — out of scope here.</td>
+      </tr>
+      <tr>
+        <td>Takeover's two-table UPDATE (runs + tasks) needs to be atomic — partial failure leaves the bot's claim cleared but the takeover not recorded on the run, or vice versa.</td>
+        <td>Both UPDATEs go in the same Go transaction. The existing takeover handler already uses a transaction for the runs-side work (worktree move + run.status flip); the tasks-side UPDATE joins that transaction.</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="acceptance">
+  <div class="section-label">§11</div>
+  <h2>Acceptance</h2>
+  <ul class="tight">
+    <li><span class="tag tag--green">PASS</span> Fresh install + upgrade: tasks + runs gain the new columns; both default to NULL on all existing rows. XOR CHECK passes trivially.</li>
+    <li><span class="tag tag--green">PASS</span> Trigger match: task has <code>claimed_by_agent_id = org's agent</code>, <code>claimed_by_user_id = NULL</code>; resulting run has <code>actor_agent_id = org's agent</code>.</li>
+    <li><span class="tag tag--green">PASS</span> Rule match: task has both claim cols NULL; status = queued; appears in the queue view.</li>
+    <li><span class="tag tag--green">PASS</span> User claims a queued task: <code>claimed_by_user_id = user</code>, <code>claimed_by_agent_id = NULL</code>, status unchanged. Task drops out of the queue view. No run spawned.</li>
+    <li><span class="tag tag--green">PASS</span> User drags queued task → bot: <code>claimed_by_agent_id = org's agent</code>, status unchanged (stays <code>'queued'</code>), run spawns with <code>actor_agent_id = org's agent</code>.</li>
+    <li><span class="tag tag--green">PASS</span> User takes over an active bot run: <code>claimed_by_agent_id</code> → NULL, <code>claimed_by_user_id</code> → user (atomic); <code>runs.actor_agent_id</code> unchanged.</li>
+    <li><span class="tag tag--green">PASS</span> Task close (any path): claim columns sticky — preserve the responsibility audit alongside <code>closed_at</code> + <code>close_reason</code>.</li>
+    <li><span class="tag tag--green">PASS</span> Per-member Board filter: same query shape returns sensible result sets for both user and bot chips in a synthetic scenario (mixed rule, trigger, user-claim, takeover history).</li>
+    <li><span class="tag tag--green">PASS</span> XOR CHECK rejection: direct SQL attempt to set both claim cols on the same row fails with the CHECK error.</li>
+    <li><span class="tag tag--green">PASS</span> Concurrent claim race: two simultaneous claim attempts on the same task; one succeeds, the other returns 409. No corrupt state, no XOR violation.</li>
+    <li><span class="tag tag--cyan">TEST</span> Conformance: round-trip of claim cols on Task; round-trip of actor on AgentRun.</li>
+    <li><span class="tag tag--cyan">TEST</span> Router + spawner + handler tests pin every transition in §4's state-transition matrix.</li>
+    <li><span class="tag tag--cyan">TEST</span> Migration shape test: agents UNIQUE(id, org_id), three new columns, XOR CHECK present, partial indexes present.</li>
+    <li><span class="tag">DOC</span> <code>bootstrap.go</code> + agents migrations' TODO comments updated. Architecture doc decision <code>task-state-axes</code> (this PR's framing) referenced; <code>agent-identity</code> marked "task + run claim flow shipped; per-handler claim deferred to v2 with rationale."</li>
+  </ul>
+</section>
+
+</article>
+</main>
+
+<footer>
+  SKY-261 · D-Claims · v0.9 · 2026-05-12
+</footer>
+</body>
+</html>

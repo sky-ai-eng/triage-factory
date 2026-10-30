@@ -1,0 +1,1193 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SKY-264 — D-Predicate: author_is_self → author_in</title>
+<style>
+:root {
+  --bg: #030712;
+  --fg: #f8fafc;
+  --surface: rgba(17, 24, 39, 0.30);
+  --surface-2: rgba(31, 41, 55, 0.50);
+  --surface-floating: rgba(3, 7, 18, 0.80);
+  --border: #1f2937;
+  --border-2: #1e293b;
+  --border-3: #374151;
+  --muted: #94a3b8;
+  --muted-2: #6b7280;
+  --muted-3: #4b5563;
+  --accent: #22d3ee;
+  --accent-2: #06b6d4;
+  --accent-3: #0e7490;
+  --violet: #a78bfa;
+  --violet-2: #8b5cf6;
+  --purple: #a855f7;
+  --pink: #f472b6;
+  --green: #22c55e;
+  --green-2: #4ade80;
+  --amber: #fbbf24;
+  --red: #ef4444;
+  --red-2: #f87171;
+  --radius: 8px;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, "Cascadia Mono", monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+.mono, code, pre { font-family: var(--mono); }
+code { background: rgba(31, 41, 55, 0.5); padding: 1px 5px; border-radius: 3px; font-size: 0.92em; }
+a { color: var(--accent); text-underline-offset: 4px; }
+a:hover { text-decoration: underline; }
+
+.topbar {
+  position: sticky; top: 0; z-index: 40;
+  width: 100%;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-floating);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.topbar__inner {
+  margin: 0 auto; max-width: 1100px;
+  padding: 0 24px;
+  height: 56px;
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 12px;
+  color: var(--muted);
+}
+.topbar__brand { display: flex; align-items: center; gap: 12px; }
+.topbar__brand .dot {
+  width: 8px; height: 8px; border-radius: 9999px;
+  background: linear-gradient(to bottom right, var(--accent-2), var(--purple));
+  box-shadow: 0 0 12px rgba(6, 182, 212, 0.6);
+}
+.topbar__brand strong { color: var(--fg); font-weight: 600; font-size: 13px; }
+.topbar__crumb { color: var(--muted-2); }
+.topbar__meta { display: flex; gap: 8px; align-items: center; }
+.pill {
+  font-size: 11px;
+  padding: 2px 10px;
+  border-radius: 9999px;
+  font-family: var(--mono);
+}
+.pill--draft { background: rgba(251, 191, 36, 0.20); color: var(--amber); border: 1px solid rgba(251, 191, 36, 0.30); }
+.pill--size  { background: rgba(139, 92, 246, 0.20); color: var(--violet); border: 1px solid rgba(139, 92, 246, 0.30); }
+
+.hero {
+  margin: 0 auto; max-width: 1100px;
+  padding: 56px 24px 24px;
+}
+.hero h1 {
+  font-size: 30px; font-weight: 200; letter-spacing: -0.02em;
+  margin: 0 0 12px;
+  background: linear-gradient(to right, var(--accent), var(--violet), var(--pink));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.hero .sub { color: var(--muted-2); font-family: var(--mono); font-size: 12px; margin-bottom: 16px; }
+.hero p.lede { color: var(--muted); font-size: 15px; margin: 0; max-width: 760px; }
+.hero__meta {
+  display: flex; gap: 10px; margin-top: 18px; flex-wrap: wrap;
+  font-family: var(--mono); font-size: 12px;
+}
+.hero__meta .meta-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 11px; border-radius: 9999px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.hero__meta .meta-pill strong { color: var(--fg); font-weight: 500; }
+
+main {
+  margin: 0 auto; max-width: 1100px;
+  padding: 0 24px 96px;
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 32px;
+}
+nav.toc {
+  position: sticky; top: 80px;
+  height: fit-content;
+  font-size: 12px;
+  color: var(--muted-2);
+}
+nav.toc ol { list-style: none; padding: 0; margin: 0; counter-reset: toc; }
+nav.toc li { counter-increment: toc; padding: 4px 0; }
+nav.toc li::before {
+  content: "§" counter(toc) "  ";
+  font-family: var(--mono);
+  color: var(--muted-3);
+}
+nav.toc a { color: var(--muted); text-decoration: none; }
+nav.toc a:hover { color: var(--fg); }
+
+article { min-width: 0; }
+.section-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  margin-bottom: 6px;
+}
+h2 { font-size: 22px; font-weight: 300; margin: 0 0 14px; letter-spacing: -0.01em; }
+h3 { font-size: 16px; font-weight: 500; margin: 28px 0 10px; color: var(--fg); }
+h4 { font-size: 13px; font-weight: 600; margin: 18px 0 6px; color: var(--fg); }
+
+.block { margin-bottom: 56px; }
+.block p { color: var(--muted); margin: 0 0 12px; }
+.block p.lede { color: var(--muted); font-size: 15px; max-width: 760px; }
+.block ul { color: var(--muted); margin: 0 0 12px; padding-left: 20px; }
+.block ul li { margin-bottom: 6px; }
+.block ul li strong { color: var(--fg); }
+
+.callout {
+  margin: 16px 0;
+  padding: 14px 16px;
+  background: rgba(34, 211, 238, 0.06);
+  border: 1px solid rgba(34, 211, 238, 0.25);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  font-size: 13px;
+  color: var(--muted);
+}
+.callout strong { color: var(--fg); }
+.callout--amber {
+  background: rgba(251, 191, 36, 0.06);
+  border-color: rgba(251, 191, 36, 0.25);
+  border-left-color: var(--amber);
+}
+.callout--green {
+  background: rgba(34, 197, 94, 0.06);
+  border-color: rgba(34, 197, 94, 0.25);
+  border-left-color: var(--green-2);
+}
+.callout--red {
+  background: rgba(239, 68, 68, 0.06);
+  border-color: rgba(239, 68, 68, 0.25);
+  border-left-color: var(--red-2);
+}
+
+pre.code, .code-block {
+  background: var(--surface-2);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  overflow-x: auto;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--fg);
+  margin: 12px 0;
+}
+pre.code .c { color: var(--muted-3); }       /* comment */
+pre.code .k { color: var(--violet); }         /* keyword */
+pre.code .s { color: var(--green-2); }        /* string */
+pre.code .n { color: var(--accent); }         /* name */
+pre.code .del { color: var(--red-2); }        /* deletion */
+pre.code .ins { color: var(--green-2); }      /* insertion */
+pre.code .hi  { background: rgba(34, 211, 238, 0.08); display: block; margin: 0 -14px; padding: 0 14px; }
+
+table.matrix {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 14px 0;
+  font-size: 12px;
+}
+table.matrix th, table.matrix td {
+  text-align: left;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+table.matrix th {
+  color: var(--muted-2);
+  font-weight: 500;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  border-bottom: 1px solid var(--border-3);
+}
+table.matrix td { color: var(--muted); }
+table.matrix td.mono { font-family: var(--mono); color: var(--fg); }
+table.matrix td.dim  { color: var(--muted-3); font-family: var(--mono); }
+
+/* Phase flow */
+.phase-flow {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  margin: 18px 0 8px;
+  flex-wrap: wrap;
+}
+.phase {
+  flex: 1; min-width: 180px;
+  background: var(--surface);
+  border: 1px solid var(--border-3);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  position: relative;
+}
+.phase .phase-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--accent);
+  background: rgba(6, 182, 212, 0.10);
+  border: 1px solid rgba(6, 182, 212, 0.30);
+  padding: 1px 7px;
+  border-radius: 4px;
+  display: inline-block;
+  margin-bottom: 6px;
+}
+.phase .phase-title { font-size: 13px; font-weight: 600; color: var(--fg); margin-bottom: 4px; }
+.phase .phase-body { font-size: 12px; color: var(--muted); line-height: 1.5; }
+.phase + .phase::before {
+  content: "→";
+  color: var(--muted-3);
+  position: absolute;
+  left: -12px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+/* Side-by-side code diff */
+.diff-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin: 14px 0;
+}
+.diff-pair .diff-side h5 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted-2);
+}
+.diff-pair .diff-side--before h5 { color: var(--red-2); }
+.diff-pair .diff-side--after  h5 { color: var(--green-2); }
+
+/* Two-up panel */
+.two-panel {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin: 14px 0;
+}
+.two-panel .panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+}
+.two-panel .panel h4 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted-2);
+}
+.two-panel .panel .panel-sub { font-size: 11px; color: var(--muted-3); margin-bottom: 8px; font-family: var(--mono); }
+
+/* Identity flow: keychain → users.github_username → predicate match */
+.flow-chain {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  margin: 16px 0;
+  flex-wrap: wrap;
+}
+.flow-node {
+  flex: 1; min-width: 180px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  position: relative;
+}
+.flow-node .flow-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted-2);
+  margin-bottom: 6px;
+}
+.flow-node .flow-name { font-size: 13px; font-weight: 600; color: var(--fg); margin-bottom: 4px; }
+.flow-node .flow-detail { font-size: 11px; color: var(--muted); font-family: var(--mono); }
+.flow-node--source { border-left: 3px solid var(--violet); }
+.flow-node--store  { border-left: 3px solid var(--accent); }
+.flow-node--use    { border-left: 3px solid var(--green-2); }
+.flow-node + .flow-node::before {
+  content: "→";
+  color: var(--muted-3);
+  position: absolute;
+  left: -12px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+/* Mock UI cards */
+.ui-mock {
+  background: rgba(248, 250, 252, 0.04);
+  border: 1px solid var(--border-3);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin: 12px 0;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.ui-mock .ui-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted-3);
+  margin-bottom: 10px;
+  font-weight: 500;
+}
+.ui-mock .ui-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
+.ui-mock .ui-label { color: var(--muted); min-width: 140px; }
+.ui-mock .ui-toggle {
+  display: inline-flex; align-items: center; gap: 8px;
+}
+.ui-mock .ui-toggle .switch {
+  width: 32px; height: 18px; border-radius: 9999px;
+  background: var(--accent-2);
+  position: relative; display: inline-block;
+}
+.ui-mock .ui-toggle .switch::after {
+  content: ""; width: 14px; height: 14px; border-radius: 50%;
+  background: var(--fg);
+  position: absolute; top: 2px; right: 2px;
+}
+.ui-mock .ui-toggle .switch--off { background: var(--border-3); }
+.ui-mock .ui-toggle .switch--off::after { left: 2px; right: auto; }
+.ui-mock .ui-textfield {
+  background: var(--surface-2);
+  border: 1px solid var(--border-3);
+  border-radius: 4px;
+  padding: 6px 10px;
+  color: var(--fg);
+  flex: 1;
+}
+.ui-mock .ui-hint { color: var(--muted-3); font-size: 11px; padding-top: 2px; }
+
+.steps { counter-reset: step; padding-left: 0; list-style: none; }
+.steps > li {
+  counter-increment: step;
+  position: relative;
+  padding: 10px 0 14px 40px;
+  border-bottom: 1px dashed var(--border);
+}
+.steps > li:last-child { border-bottom: none; }
+.steps > li::before {
+  content: counter(step, decimal-leading-zero);
+  position: absolute; left: 0; top: 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--accent);
+  background: rgba(6, 182, 212, 0.08);
+  border: 1px solid rgba(6, 182, 212, 0.30);
+  padding: 2px 7px;
+  border-radius: 4px;
+}
+.steps > li > .step-title { font-weight: 500; color: var(--fg); display: block; margin-bottom: 2px; }
+.steps > li > .step-body  { color: var(--muted); font-size: 13px; }
+
+footer {
+  margin: 0 auto; max-width: 1100px;
+  padding: 24px 24px 64px;
+  font-size: 11px; color: var(--muted-3);
+  font-family: var(--mono);
+  border-top: 1px solid var(--border);
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar__inner">
+    <div class="topbar__brand">
+      <span class="dot"></span>
+      <strong>Triage Factory</strong>
+      <span class="topbar__crumb">/ specs / SKY-264 D-Predicate</span>
+    </div>
+    <div class="topbar__meta">
+      <span class="pill pill--size">SIZE · S</span>
+      <span class="pill pill--draft">DRAFT v0.1</span>
+    </div>
+  </div>
+</div>
+
+<header class="hero">
+  <div class="sub">SKY-264 · child of SKY-242 · follows SKY-261 (D-Claims, shipped)</div>
+  <h1>D-Predicate — replace <code>author_is_self</code> with <code>author_in</code></h1>
+  <p class="lede">"Self" has no canonical referent on a team-shared rule. Hard-cut the self-reference predicates (<code>author_is_self</code>, <code>reviewer_is_self</code>) to handle allowlists (<code>author_in: ["aidan"]</code>, <code>reviewer_in: [...]</code>). Local mode captures the user's GitHub login from the keychain at bootstrap; multi mode will capture it from Supabase OAuth (SKY-251). Case-insensitive match at compare time.</p>
+  <div class="hero__meta">
+    <span class="meta-pill"><strong>SCOPE</strong> · 1 schema column + predicate-registry sweep + data migration + FE form variant</span>
+    <span class="meta-pill"><strong>HARD CUT</strong> · no deprecation window</span>
+    <span class="meta-pill"><strong>UNBLOCKS</strong> · team-shared rules/triggers stop being a one-user-only feature</span>
+  </div>
+</header>
+
+<main>
+
+<nav class="toc">
+  <ol>
+    <li><a href="#phasing">Phasing</a></li>
+    <li><a href="#why">Why now</a></li>
+    <li><a href="#shape">Predicate shape change</a></li>
+    <li><a href="#affected">Affected event types</a></li>
+    <li><a href="#identity">Identity capture</a></li>
+    <li><a href="#schema">Schema delta</a></li>
+    <li><a href="#migration">Data migration</a></li>
+    <li><a href="#matcher">Matcher contract</a></li>
+    <li><a href="#frontend">Frontend UX</a></li>
+    <li><a href="#api">API surface</a></li>
+    <li><a href="#out-of-scope">Out of scope</a></li>
+    <li><a href="#steps">Steps</a></li>
+    <li><a href="#risks">Risks</a></li>
+    <li><a href="#acceptance">Acceptance</a></li>
+  </ol>
+</nav>
+
+<article>
+
+<!-- ===================================================== -->
+<section class="block" id="phasing">
+  <div class="section-label">§0</div>
+  <h2>Phasing</h2>
+  <p class="lede">Four phases, one PR. Schema + identity capture first, then registry + matcher, then the JSON migration, then FE.</p>
+
+  <div class="phase-flow">
+    <div class="phase">
+      <span class="phase-label">A</span>
+      <div class="phase-title">Schema + bootstrap</div>
+      <div class="phase-body">Add <code>users.github_username</code> on both backends. Local-mode bootstrap reads <code>creds.GitHubUsername</code> from the keychain and upserts the synthetic user row on every boot.</div>
+    </div>
+    <div class="phase">
+      <span class="phase-label">B</span>
+      <div class="phase-title">Registry + matcher</div>
+      <div class="phase-body">Swap <code>AuthorIsSelf *bool</code> for <code>AuthorIn []string</code> (and <code>ReviewerIsSelf</code> → <code>ReviewerIn</code>) on every GitHub event type. Matcher does lowercase-at-compare.</div>
+    </div>
+    <div class="phase">
+      <span class="phase-label">C</span>
+      <div class="phase-title">Data migration</div>
+      <div class="phase-body">Rewrite existing <code>event_handlers.scope_predicate_json</code> rows: <code>{"author_is_self":true}</code> → <code>{"author_in":["&lt;creator.github_username&gt;"]}</code>. Go-side rewrite inside the goose migration.</div>
+    </div>
+    <div class="phase">
+      <span class="phase-label">D</span>
+      <div class="phase-title">Frontend</div>
+      <div class="phase-body">New <code>/api/config</code> endpoint exposes <code>deployment_mode</code> + <code>team_size</code>. Rule/Trigger editor renders a toggle when N=1, a handle-list field when N≥2. Both serialize to <code>author_in</code>.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="why">
+  <div class="section-label">§1</div>
+  <h2>Why now</h2>
+  <p class="lede">SKY-261 made rules and triggers team-scoped. A predicate that says "<code>author_is_self: true</code>" was already ambiguous on a team — whose self? — and now there's no defensible answer because the row may have been authored by user A but is in force for user B.</p>
+
+  <table class="matrix">
+    <thead><tr><th style="width: 24%;">Context</th><th>What "<code>author_is_self</code>" means today</th><th>Problem</th></tr></thead>
+    <tbody>
+      <tr><td>Local mode (N=1)</td><td class="mono">creds.GitHubUsername (keychain)</td><td class="dim">Works. There's only ever one user.</td></tr>
+      <tr><td>Multi mode, rule owned by user A</td><td class="mono">user A's github_username</td><td>If user B has the rule applied to their team's tasks, "self" still means A — surprising.</td></tr>
+      <tr><td>Multi mode, system trigger</td><td class="mono">undefined</td><td>System triggers have no creator. The predicate either silently never fires or panics.</td></tr>
+      <tr><td>Multi mode, shared team rule</td><td class="mono">undefined</td><td>"Self" relative to the team is N-valued, not 1-valued.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <strong>Reframe:</strong> the predicate should name <em>who</em> it cares about, not say "me." A team rule that wants "any PR authored by anyone on Platform" needs the allowlist. A solo rule "any PR I opened" is just an allowlist of size 1. Same primitive, both cases.
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="shape">
+  <div class="section-label">§2</div>
+  <h2>Predicate shape change</h2>
+  <p class="lede">Side-by-side, before and after, for the canonical case: PR review requested, filtered to PRs the user opened.</p>
+
+  <div class="diff-pair">
+    <div class="diff-side diff-side--before">
+      <h5>Before — self-reference</h5>
+<pre class="code"><span class="c">// event_handlers.scope_predicate_json</span>
+{
+  <span class="n">"author_is_self"</span>: <span class="k">true</span>,
+  <span class="n">"is_draft"</span>: <span class="k">false</span>
+}
+
+<span class="c">// matched against</span>
+{
+  <span class="n">"author"</span>: <span class="s">"AidanAllchin"</span>,
+  <span class="n">"author_is_self"</span>: <span class="k">true</span>,
+  <span class="c">// ↑ computed at emission</span>
+  <span class="c">//   from creds.GitHubUsername</span>
+}</pre>
+    </div>
+    <div class="diff-side diff-side--after">
+      <h5>After — allowlist</h5>
+<pre class="code"><span class="c">// event_handlers.scope_predicate_json</span>
+{
+  <span class="n">"author_in"</span>: [<span class="s">"AidanAllchin"</span>],
+  <span class="n">"is_draft"</span>: <span class="k">false</span>
+}
+
+<span class="c">// matched against</span>
+{
+  <span class="n">"author"</span>: <span class="s">"AidanAllchin"</span>
+  <span class="c">// ↑ no derived field;</span>
+  <span class="c">//   the predicate decides</span>
+  <span class="c">//   who counts as "self"</span>
+}</pre>
+    </div>
+  </div>
+
+  <div class="callout callout--green">
+    <strong>Two simplifications fall out:</strong>
+    <ul style="margin-top: 8px;">
+      <li>Events shrink: drop the <code>AuthorIsSelf bool</code> field from every event metadata struct. The emitter no longer needs to know who the active user is.</li>
+      <li>System triggers stop being a special case. A trigger shipped by us in <code>seed.go</code> with <code>author_in: []</code> no longer depends on an undefined "self" concept; under the current matcher semantics, an empty allowlist means no author filter (matches all), not match-none.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="affected">
+  <div class="section-label">§3</div>
+  <h2>Affected event types</h2>
+  <p class="lede">Mechanical sweep across <code>internal/domain/events/github.go</code>. Every event with <code>AuthorIsSelf</code> or <code>ReviewerIsSelf</code> on the metadata side gets the matching predicate field swapped.</p>
+
+  <table class="matrix">
+    <thead>
+      <tr>
+        <th style="width: 28%;">Event type</th>
+        <th>Predicate before</th>
+        <th>Predicate after</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td class="mono">github:pr:review_requested</td><td class="dim">author_is_self</td><td class="mono">author_in</td></tr>
+      <tr><td class="mono">github:pr:review_request_removed</td><td class="dim">author_is_self</td><td class="mono">author_in</td></tr>
+      <tr><td class="mono">github:pr:review_submitted</td><td class="dim">author_is_self, reviewer_is_self</td><td class="mono">author_in, reviewer_in</td></tr>
+      <tr><td class="mono">github:pr:review_changes_requested</td><td class="dim">author_is_self, reviewer_is_self</td><td class="mono">author_in, reviewer_in</td></tr>
+      <tr><td class="mono">github:pr:review_approved</td><td class="dim">author_is_self, reviewer_is_self</td><td class="mono">author_in, reviewer_in</td></tr>
+      <tr><td class="mono">github:pr:review_commented</td><td class="dim">author_is_self, reviewer_is_self</td><td class="mono">author_in, reviewer_in</td></tr>
+      <tr><td class="mono">github:pr:review_dismissed</td><td class="dim">author_is_self, reviewer_is_self</td><td class="mono">author_in, reviewer_in</td></tr>
+      <tr><td class="mono">github:pr:ci_check_failed</td><td class="dim">author_is_self</td><td class="mono">author_in</td></tr>
+      <tr><td class="mono">github:pr:ci_check_passed</td><td class="dim">author_is_self</td><td class="mono">author_in</td></tr>
+      <tr><td class="mono">github:pr:label_added</td><td class="dim">author_is_self</td><td class="mono">author_in</td></tr>
+      <tr><td class="mono">github:pr:label_removed</td><td class="dim">author_is_self</td><td class="mono">author_in</td></tr>
+      <tr><td class="mono">github:pr:new_commits</td><td class="dim">author_is_self</td><td class="mono">author_in</td></tr>
+      <tr><td class="mono">github:pr:conflicts</td><td class="dim">author_is_self</td><td class="mono">author_in</td></tr>
+      <tr><td class="mono">github:pr:ready_for_review</td><td class="dim">author_is_self</td><td class="mono">author_in</td></tr>
+      <tr><td class="mono">github:pr:opened</td><td class="dim">author_is_self</td><td class="mono">author_in</td></tr>
+      <tr><td class="mono">github:pr:merged</td><td class="dim">author_is_self</td><td class="mono">author_in</td></tr>
+      <tr><td class="mono">github:pr:closed</td><td class="dim">author_is_self</td><td class="mono">author_in</td></tr>
+      <tr><td class="mono">github:pr:mentioned</td><td class="dim">author_is_self</td><td class="mono">author_in</td></tr>
+    </tbody>
+  </table>
+
+  <p style="margin-top: 12px;">Total: <strong>18 event types</strong>, 18 <code>author_in</code> swaps + 5 <code>reviewer_in</code> swaps. All mechanical — same shape on every struct, same matcher helper.</p>
+
+  <div class="callout callout--amber">
+    <strong>Out of scope:</strong> Jira's <code>assignee_is_self</code>, <code>reporter_is_self</code>, <code>commenter_is_self</code>. Same conceptual problem, different identity store (Atlassian account ID, not GitHub login) and different multi-mode capture path (Atlassian OAuth, not Supabase). Tracked as a sibling under SKY-242: <a href="https://linear.app/sky-ai-eng/issue/SKY-270">SKY-270</a> (D-Predicate-Jira).
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="identity">
+  <div class="section-label">§4</div>
+  <h2>Identity capture</h2>
+  <p class="lede">The matcher needs <em>one piece of data</em>: each user's GitHub login. Already captured in local mode; deferred for multi.</p>
+
+  <h3>Local mode — captured to the users row (DB is canonical)</h3>
+  <div class="flow-chain">
+    <div class="flow-node flow-node--source">
+      <div class="flow-label">source</div>
+      <div class="flow-name">PAT setup / Settings save</div>
+      <div class="flow-detail">auth.ValidateGitHub returns Login</div>
+    </div>
+    <div class="flow-node flow-node--store">
+      <div class="flow-label">stored</div>
+      <div class="flow-name">users.github_username</div>
+      <div class="flow-detail">synthetic user row<br/>(id = runmode.LocalDefaultUserID)</div>
+    </div>
+    <div class="flow-node flow-node--use">
+      <div class="flow-label">used by</div>
+      <div class="flow-name">predicate matcher · poller</div>
+      <div class="flow-detail">lowercase compare against<br/>event.Author</div>
+    </div>
+  </div>
+
+  <div class="callout callout--green">
+    <strong>Keychain no longer stores the username.</strong> Username isn't a secret — it's on every PR. Capturing it in the keychain was a historical accident from the PAT setup flow. With this PR, the keychain holds only the PAT (the actual credential); the DB users row holds the identity. Same shape as multi mode → no schema or storage divergence between modes.
+  </div>
+
+  <h3>Three capture call sites — all write the users row directly</h3>
+
+  <ol>
+    <li><strong>Setup wizard</strong> (<code>internal/auth/setup_*.go</code>): after <code>auth.ValidateGitHub</code> returns <code>ghUser.Login</code>, write Login to <code>users.github_username</code> instead of into the keychain Credentials struct.</li>
+    <li><strong>Settings handler</strong> (<code>internal/server/settings.go:247</code>): same — after <code>ValidateGitHub</code> succeeds, write to the users row. Don't write to <code>creds.GitHubUsername</code> (that field is being removed).</li>
+    <li><strong>Repos handler / <code>onGitHubChanged</code> callback</strong>: re-resolves Login via <code>ValidateGitHub</code> if the PAT changed; writes to users row.</li>
+  </ol>
+
+  <p>All three call a shared helper <code>SetLocalUserGitHubIdentity(db, login string) error</code> that does the <code>UPDATE users</code> against the synthetic row. Idempotent on identical input.</p>
+
+  <h3>One-shot migration for existing installs</h3>
+
+  <p>Existing local installs have the username in the keychain (<code>TRIAGE_FACTORY_GITHUB_USERNAME</code>). At boot, after the schema migration runs, a one-shot backfill function fires:</p>
+
+<pre class="code"><span class="k">func</span> migrateLocalUserGitHubIdentity(database *sql.DB) <span class="k">error</span> {
+    <span class="k">if</span> runmode.Current() != runmode.ModeLocal { <span class="k">return</span> <span class="k">nil</span> }
+    <span class="c">// If DB already has a value, the migration has run before. No-op.</span>
+    <span class="k">var</span> existing sql.NullString
+    scanErr := database.QueryRow(
+        <span class="s">`SELECT github_username FROM users WHERE id = ?`</span>,
+        runmode.LocalDefaultUserID,
+    ).Scan(&amp;existing)
+    <span class="k">switch</span> {
+    <span class="k">case</span> scanErr == <span class="k">nil</span>:
+        <span class="c">// Row and column exist; continue below.</span>
+    <span class="k">case</span> errors.Is(scanErr, sql.ErrNoRows):
+        <span class="k">return</span> <span class="k">nil</span> <span class="c">// synthetic local user row not present yet; nothing to migrate</span>
+    <span class="k">case</span> strings.Contains(scanErr.Error(), <span class="s">"no such column"</span>):
+        <span class="k">return</span> <span class="k">nil</span> <span class="c">// schema ordering drift; keep legacy value and let a later run migrate it</span>
+    <span class="k">default</span>:
+        <span class="k">return</span> scanErr
+    }
+    <span class="k">if</span> existing.Valid &amp;&amp; existing.String != <span class="s">""</span> { <span class="k">return</span> <span class="k">nil</span> }
+
+    <span class="c">// Read legacy keychain location.</span>
+    legacyLogin, err := auth.LoadLegacyGitHubUsername() <span class="c">// reads TRIAGE_FACTORY_GITHUB_USERNAME</span>
+    <span class="k">if</span> err != <span class="k">nil</span> || legacyLogin == <span class="s">""</span> { <span class="k">return</span> <span class="k">nil</span> }
+
+    <span class="c">// Write to DB, then clear the legacy keychain entry only if the synthetic row exists.</span>
+    result, err := database.Exec(
+        <span class="s">`UPDATE users SET github_username = ? WHERE id = ?`</span>,
+        legacyLogin, runmode.LocalDefaultUserID,
+    )
+    <span class="k">if</span> err != <span class="k">nil</span> { <span class="k">return</span> err }
+    rowsAffected, err := result.RowsAffected()
+    <span class="k">if</span> err != <span class="k">nil</span> { <span class="k">return</span> err }
+    <span class="k">if</span> rowsAffected == 0 { <span class="k">return</span> <span class="k">nil</span> }
+
+    <span class="k">return</span> auth.DeleteLegacyGitHubUsername()
+}</pre>
+
+  <p>After this runs once per install, the keychain no longer stores the username. New PATs saved post-upgrade go through the new capture path (setup wizard / settings handler write directly to DB).</p>
+
+  <h3>State transitions handled</h3>
+
+  <ul>
+    <li><strong>Fresh install</strong> — setup wizard writes Login to DB at first PAT save. Migration backfill is a no-op (legacy keychain entry doesn't exist).</li>
+    <li><strong>Upgrade from pre-SKY-264</strong> — schema migration adds the column NULL; backfill function reads legacy keychain entry, writes to DB, deletes keychain entry. One-shot.</li>
+    <li><strong>User cleared keychain via OS keychain UI</strong> — DB row still has username (we don't blank it). Predicates keep working. User re-auths to re-populate the PAT; <code>ValidateGitHub</code> re-resolves Login → settings handler rewrites DB. No restart needed.</li>
+    <li><strong>User swaps to a different GitHub account via Settings</strong> — <code>ValidateGitHub</code> returns the new Login; settings handler writes the new value to DB. No restart needed.</li>
+    <li><strong>User has no PAT configured yet</strong> — DB column is NULL. FE Variant-A toggle disables (see §8).</li>
+  </ul>
+
+  <div class="callout">
+    <strong>No fallback when NULL.</strong> If <code>users.github_username</code> is NULL <em>and</em> the user tries to render a "match my PRs" toggle, the FE shows a one-line "GitHub identity not yet captured — configure GitHub on Settings page" hint and disables the toggle. We don't pre-fill a plausible-but-wrong value like the OS username.
+  </div>
+
+  <h3>Multi mode — deferred to <a href="https://linear.app/sky-ai-eng/issue/SKY-271">SKY-271</a></h3>
+  <p>The right capture path in multi mode depends on auth context that doesn't exist yet (<a href="https://linear.app/sky-ai-eng/issue/SKY-251">SKY-251</a> hasn't landed) and varies by deployment topology — hosted-SaaS against github.com/GHEC vs self-deploy against the customer's GHE. Candidate flows include SCIM-directory intersect when the customer has GHE SCIM enabled against a shared IdP, GitHub App user-to-server OAuth as a "Connect GitHub" action, an org-members picker with email/name fuzzy match, and PAT paste as a fallback. <a href="https://linear.app/sky-ai-eng/issue/SKY-271">SKY-271</a> tracks the design once SKY-251's session/IdP shape is settled.</p>
+
+  <p>This spec ships the column + the local-mode capture. Multi-mode writes are guarded behind <code>runmode.Current() == "local"</code> at the bootstrap call site so we don't accidentally write to a real user's row in multi mode. NULL is a supported steady state in multi mode — predicates that need the user's own identity disable cleanly until SKY-271 ships.</p>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="schema">
+  <div class="section-label">§5</div>
+  <h2>Schema delta</h2>
+  <p class="lede">One Postgres migration. SQLite already has the column from <a href="https://linear.app/sky-ai-eng/issue/SKY-269">SKY-269</a>'s <code>202605120003_local_tenancy.sql</code>, so no SQLite work is needed — the two-backend story still holds, this PR just closes the Postgres gap.</p>
+
+  <div class="two-panel">
+    <div class="panel">
+      <h4>SQLite</h4>
+      <div class="panel-sub">migrations-sqlite/YYYYMMDDNNNN_users_github_username.sql</div>
+<pre class="code"><span class="c">-- +goose Up</span>
+<span class="k">ALTER TABLE</span> users <span class="k">ADD COLUMN</span> github_username <span class="k">TEXT</span>;
+
+<span class="c">-- No index — predicate matching reads the
+-- users row directly via user_id at rule-eval
+-- time, not via username lookup. The list is
+-- short (N=1 local, ~tens multi).</span>
+
+<span class="c">-- +goose Down</span>
+<span class="k">SELECT</span> <span class="s">'down not supported'</span>;</pre>
+    </div>
+
+    <div class="panel">
+      <h4>Postgres</h4>
+      <div class="panel-sub">migrations-postgres/YYYYMMDDNNNN_users_github_username.sql</div>
+<pre class="code"><span class="c">-- +goose Up</span>
+<span class="k">ALTER TABLE</span> users <span class="k">ADD COLUMN</span> github_username <span class="k">TEXT</span>;
+
+<span class="c">-- +goose Down</span>
+<span class="k">SELECT</span> <span class="s">'down not supported'</span>;</pre>
+    </div>
+  </div>
+
+  <div class="callout">
+    <strong>No UNIQUE constraint.</strong> Two team members could theoretically have the same GitHub login bound to different user rows (rare bug condition during onboarding). We don't want a UNIQUE to refuse the second OAuth callback. Authoritative dedup happens at the auth layer, not the schema.
+  </div>
+
+  <h3>Boot wiring</h3>
+  <p>Two functions, both called from <code>main.go</code> server startup after <code>config.Init</code>, before the HTTP server starts listening:</p>
+
+  <ol>
+    <li><strong><code>migrateLocalUserGitHubIdentity(db)</code></strong> (see §4) — one-shot keychain → DB backfill + keychain deletion. No-op on installs where the DB already has a value.</li>
+    <li><strong>Poller wiring</strong> — poller startup reads username from <code>users.github_username</code> via the users store (not from <code>creds.GitHubUsername</code>, which is gone). If NULL: poller short-circuits the same way it does today when the PAT is missing.</li>
+  </ol>
+
+  <p>Steady-state writes happen at the capture call sites (setup wizard, settings handler, repos handler), not at boot.</p>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="migration">
+  <div class="section-label">§6</div>
+  <h2>Data migration</h2>
+  <p class="lede">Rewrite every existing <code>event_handlers.scope_predicate_json</code> row that contains the deprecated keys. Go-side, inside the goose migration's <code>-- +goose StatementBegin</code> block, so we get JSON manipulation on both dialects without SQLite-version constraints.</p>
+
+  <h3>Rewrite rule</h3>
+  <table class="matrix">
+    <thead>
+      <tr><th style="width: 38%;">Before (predicate JSON)</th><th style="width: 38%;">After</th><th>Notes</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="mono">{"author_is_self":true}</td>
+        <td class="mono">{"author_in":["&lt;creator.github_username&gt;"]}</td>
+        <td class="dim">creator is event_handlers.creator_user_id; lookup users.github_username; if NULL, drop the field entirely (rule no longer self-scoped)</td>
+      </tr>
+      <tr>
+        <td class="mono">{"author_is_self":false}</td>
+        <td class="mono">{}</td>
+        <td class="dim">"not me" was rarely the intent; closer reading is "no filter on author". Drop the field.</td>
+      </tr>
+      <tr>
+        <td class="mono">{"reviewer_is_self":true}</td>
+        <td class="mono">{"reviewer_in":["&lt;creator.github_username&gt;"]}</td>
+        <td class="dim">same as author_is_self path</td>
+      </tr>
+      <tr>
+        <td class="mono">{"reviewer_is_self":false}</td>
+        <td class="mono">{}</td>
+        <td class="dim">drop</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Migration shape</h3>
+<pre class="code"><span class="c">-- +goose Up</span>
+<span class="c">-- +goose StatementBegin</span>
+
+<span class="c">-- Loop in Go (called from migrations.go RunMigrations after
+-- goose Up): SELECT id, creator_user_id, scope_predicate_json
+-- FROM event_handlers; for each row, decode JSON, rewrite,
+-- UPDATE if changed. Single transaction.</span>
+
+<span class="c">-- +goose StatementEnd</span></pre>
+
+  <div class="callout callout--amber">
+    <strong>Drift edge case:</strong> if a row was created by a user whose <code>github_username</code> is NULL at migration time (user existed pre-this-PR; backfill happened on previous boot but for a <em>different</em> user; or username never captured) — drop the <code>author_is_self</code> field. The rule becomes "match any author" rather than "match nobody." That's a permissive failure mode, surfaced via a migration warning log: <code>[migrate] handler 0123: dropped author_is_self predicate, creator's github_username was NULL</code>. User can fix by editing the rule.
+  </div>
+
+  <div class="callout callout--green">
+    <strong>Local mode is fine.</strong> The bootstrap write happens at every boot, so by the time the migration runs in production, the synthetic user row has its <code>github_username</code> populated. We sequence: schema migration → bootstrap write → data migration. (Or: bootstrap-then-migrate, since the data migration is one-shot.)
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="matcher">
+  <div class="section-label">§7</div>
+  <h2>Matcher contract</h2>
+  <p class="lede">One helper, lowercase at compare time, no allocation per call.</p>
+
+  <h3>Helper</h3>
+<pre class="code"><span class="c">// stringInSliceFold returns true iff the slice contains s
+// under ASCII case-insensitive comparison. nil/empty slice
+// returns false (the predicate field was not set; matcher
+// reads "no filter" not "match nothing" — caller decides).</span>
+<span class="k">func</span> stringInSliceFold(slice []<span class="k">string</span>, s <span class="k">string</span>) <span class="k">bool</span> {
+    <span class="k">if</span> len(slice) == 0 { <span class="k">return</span> <span class="k">true</span> }   <span class="c">// no filter</span>
+    <span class="k">for</span> _, v := <span class="k">range</span> slice {
+        <span class="k">if</span> strings.EqualFold(v, s) { <span class="k">return</span> <span class="k">true</span> }
+    }
+    <span class="k">return</span> <span class="k">false</span>
+}</pre>
+
+  <div class="callout">
+    <strong>Empty slice = no filter</strong>, mirroring how the nil-pointer predicates behaved before (a missing <code>author_is_self</code> field was "don't filter on author"). An empty <code>author_in: []</code> from the FE means "I haven't added anyone yet" — also no filter. If the user wants "match nobody," they delete the rule.
+  </div>
+
+  <h3>Per-event Matches function (example)</h3>
+  <div class="diff-pair">
+    <div class="diff-side diff-side--before">
+      <h5>Before</h5>
+<pre class="code"><span class="k">func</span> (p <span class="n">Predicate</span>) Matches(m <span class="n">Metadata</span>) <span class="k">bool</span> {
+    <span class="k">return</span> <span class="del">boolEq(p.AuthorIsSelf, m.AuthorIsSelf)</span> &&
+        strEq(p.Author, m.Author) &&
+        strEq(p.Repo, m.Repo) &&
+        boolEq(p.IsDraft, m.IsDraft) &&
+        hasLabel(p.HasLabel, m.Labels)
+}</pre>
+    </div>
+    <div class="diff-side diff-side--after">
+      <h5>After</h5>
+<pre class="code"><span class="k">func</span> (p <span class="n">Predicate</span>) Matches(m <span class="n">Metadata</span>) <span class="k">bool</span> {
+    <span class="k">return</span> <span class="ins">stringInSliceFold(p.AuthorIn, m.Author)</span> &&
+        strEq(p.Author, m.Author) &&
+        strEq(p.Repo, m.Repo) &&
+        boolEq(p.IsDraft, m.IsDraft) &&
+        hasLabel(p.HasLabel, m.Labels)
+}</pre>
+    </div>
+  </div>
+
+  <h3>What the event metadata loses</h3>
+  <p>The <code>AuthorIsSelf bool</code> field disappears from every event metadata struct. The emitter (tracker / diff) no longer needs to know the active user's login at emission time — that knowledge moves to the predicate, where it belongs. <strong>Net code: events package shrinks.</strong></p>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="frontend">
+  <div class="section-label">§8</div>
+  <h2>Frontend UX</h2>
+  <p class="lede">One predicate field, two form variants. Local / one-person teams see a toggle; multi-person teams see a handle-list.</p>
+
+  <h3>Variant A — N=1 (local or solo team)</h3>
+  <div class="ui-mock">
+    <div class="ui-title">Rule editor · predicate · github:pr:review_requested</div>
+    <div class="ui-row">
+      <span class="ui-label">Match my PRs only</span>
+      <span class="ui-toggle"><span class="switch"></span><span style="color: var(--fg);">on</span></span>
+    </div>
+    <div class="ui-row">
+      <span class="ui-label">Match draft PRs</span>
+      <span class="ui-toggle"><span class="switch switch--off"></span><span style="color: var(--muted-2);">off</span></span>
+    </div>
+    <div class="ui-row">
+      <span class="ui-label">&nbsp;</span>
+      <span class="ui-hint">"my PRs" = author is <strong style="color: var(--accent);">AidanAllchin</strong> (captured from GitHub)</span>
+    </div>
+  </div>
+
+  <p style="margin-top: 4px;">Serialization: toggle ON → <code>author_in: ["AidanAllchin"]</code>. Toggle OFF → field omitted. The user never sees <code>author_in</code>; it's a boolean to them.</p>
+
+  <h3>Variant B — N≥2 (multi-person team)</h3>
+  <div class="ui-mock">
+    <div class="ui-title">Rule editor · predicate · github:pr:review_requested</div>
+    <div class="ui-row">
+      <span class="ui-label">Match PRs authored by</span>
+      <span style="flex: 1; display: flex; flex-wrap: wrap; gap: 4px;">
+        <span style="background: rgba(34, 211, 238, 0.15); border: 1px solid rgba(34, 211, 238, 0.40); color: var(--fg); padding: 2px 8px 2px 8px; border-radius: 9999px; font-size: 11px;">Aidan Allchin · AidanAllchin <span style="color: var(--muted-2); margin-left: 4px;">×</span></span>
+        <span style="background: rgba(34, 211, 238, 0.15); border: 1px solid rgba(34, 211, 238, 0.40); color: var(--fg); padding: 2px 8px 2px 8px; border-radius: 9999px; font-size: 11px;">Jess Park · jess-platform <span style="color: var(--muted-2); margin-left: 4px;">×</span></span>
+        <span style="background: rgba(168, 85, 247, 0.12); border: 1px solid rgba(168, 85, 247, 0.40); color: var(--fg); padding: 2px 8px 2px 8px; border-radius: 9999px; font-size: 11px;">dependabot[bot] <span style="color: var(--muted-2); margin-left: 4px;">×</span></span>
+      </span>
+    </div>
+    <div class="ui-row">
+      <span class="ui-label">&nbsp;</span>
+      <span class="ui-textfield" style="flex: 1;">▾ search team or type a handle…</span>
+    </div>
+    <div class="ui-row" style="margin-left: 140px; gap: 10px;">
+      <span style="flex: 1;">
+        <div style="background: var(--surface-floating); border: 1px solid var(--border-3); border-radius: 6px; padding: 6px; font-size: 11px;">
+          <div style="padding: 4px 8px; display: flex; align-items: center; justify-content: space-between;"><span><input type="checkbox" disabled style="margin-right: 6px;" />Kevin Bow · <span style="color: var(--accent);">kbow</span></span></div>
+          <div style="padding: 4px 8px; display: flex; align-items: center; justify-content: space-between;"><span><input type="checkbox" disabled style="margin-right: 6px;" />Sarah Lin · <span style="color: var(--accent);">slin-eng</span></span></div>
+          <div style="padding: 4px 8px; display: flex; align-items: center; justify-content: space-between; opacity: 0.5;"><span><input type="checkbox" disabled style="margin-right: 6px;" />Mike Chen · <span style="color: var(--muted-3);">no GitHub identity</span></span></div>
+          <div style="padding: 4px 8px; border-top: 1px dashed var(--border-3); margin-top: 2px; color: var(--violet);">+ Add "dependabot[bot]" as external handle</div>
+        </div>
+      </span>
+    </div>
+    <div class="ui-row">
+      <span class="ui-label">Match draft PRs</span>
+      <span class="ui-toggle"><span class="switch switch--off"></span><span style="color: var(--muted-2);">off</span></span>
+    </div>
+  </div>
+
+  <p style="margin-top: 4px;">Searchable multi-select. Each selected user/handle renders as a chip with display name + GitHub login; clicking <code>×</code> removes. The dropdown lists team members (rows from <code>/api/team/members</code>); members whose <code>github_username</code> is NULL appear disabled with a "no GitHub identity" hint. Typing a string that doesn't match any team member surfaces an "Add as external handle" option (for bots like <code>dependabot[bot]</code> or contractors not on the team). Selecting a team member writes <em>their</em> <code>github_username</code> to <code>author_in</code> (not the display name). Wire shape: <code>author_in: ["AidanAllchin", "jess-platform", "dependabot[bot]"]</code>.</p>
+
+  <h3>Degraded state — github_username not captured</h3>
+  <div class="ui-mock">
+    <div class="ui-title">Rule editor · predicate · github:pr:review_requested</div>
+    <div class="ui-row">
+      <span class="ui-label">Match my PRs only</span>
+      <span class="ui-toggle"><span class="switch switch--off" style="opacity: 0.5;"></span><span style="color: var(--muted-3);">disabled</span></span>
+    </div>
+    <div class="ui-row">
+      <span class="ui-label">&nbsp;</span>
+      <span class="ui-hint" style="color: var(--amber);">GitHub identity not yet captured. Re-auth on the Settings page to enable this filter.</span>
+    </div>
+  </div>
+
+  <p style="margin-top: 4px;">Toggle disabled, hint links to <code>/settings#github</code>. In multi mode (Variant B), the user can still pick other team members from the dropdown even if their own identity is not captured — the disabled state only blocks the "match my own PRs" shortcut.</p>
+
+  <div class="callout">
+    <strong>Stale chips after team membership changes.</strong> A user is removed from the team — their chip stays in any rule that referenced them (it's a literal string in <code>author_in</code>, not an FK). The chip renders with a muted style and a "no longer on team" tooltip. The rule keeps firing for their author events. To remove, the user clicks <code>×</code> explicitly. This matches the principle that <code>author_in</code> is a literal allowlist, not a live reference.
+  </div>
+
+  <div class="callout">
+    <strong>No save-time GitHub API validation.</strong> Team-member rows came from the OAuth-backed users table, so they're already valid GitHub handles. External handles are user-typed strings we accept as-is — the matcher does case-insensitive compare; typos won't match anything and surface when the rule doesn't fire.
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="api">
+  <div class="section-label">§9</div>
+  <h2>API surface</h2>
+  <p class="lede">Two new endpoints. One tells the FE which variant to render; the other backs the searchable dropdown in Variant B.</p>
+
+  <h3><code>GET /api/config</code></h3>
+<pre class="code">{
+  <span class="n">"deployment_mode"</span>: <span class="s">"local"</span>,   <span class="c">// or "multi"</span>
+  <span class="n">"team_size"</span>: <span class="s">1</span>,             <span class="c">// active user's team headcount</span>
+  <span class="n">"current_user"</span>: {
+    <span class="n">"id"</span>: <span class="s">"00000000-0000-0000-0000-000000000001"</span>,
+    <span class="n">"github_username"</span>: <span class="s">"AidanAllchin"</span> <span class="c">// or null</span>
+  }
+}</pre>
+
+  <p>FE rules:</p>
+  <ul>
+    <li><code>team_size === 1</code> → render Variant A (toggle).</li>
+    <li><code>team_size &gt; 1</code> → render Variant B (searchable multi-select).</li>
+    <li><code>current_user.github_username === null</code> → render Variant A as <em>disabled</em>; Variant B still works (user can pick other team members or type external handles).</li>
+  </ul>
+
+  <p>Local mode always returns <code>deployment_mode: "local"</code>, <code>team_size: 1</code>, and the synthetic user row. Multi mode computes <code>team_size</code> from <code>memberships</code> for the active user's team (any team they belong to; if they're on multiple, take the max — UI conservatism).</p>
+
+  <h3><code>GET /api/team/members</code></h3>
+<pre class="code">{
+  <span class="n">"members"</span>: [
+    { <span class="n">"user_id"</span>: <span class="s">"…"</span>, <span class="n">"display_name"</span>: <span class="s">"Aidan Allchin"</span>,
+      <span class="n">"github_username"</span>: <span class="s">"AidanAllchin"</span>,    <span class="c">// or null</span>
+      <span class="n">"is_current_user"</span>: <span class="k">true</span> },
+    { <span class="n">"user_id"</span>: <span class="s">"…"</span>, <span class="n">"display_name"</span>: <span class="s">"Jess Park"</span>,
+      <span class="n">"github_username"</span>: <span class="s">"jess-platform"</span>,
+      <span class="n">"is_current_user"</span>: <span class="k">false</span> },
+    { <span class="n">"user_id"</span>: <span class="s">"…"</span>, <span class="n">"display_name"</span>: <span class="s">"Mike Chen"</span>,
+      <span class="n">"github_username"</span>: <span class="k">null</span>,                <span class="c">// hasn't completed OAuth backfill</span>
+      <span class="n">"is_current_user"</span>: <span class="k">false</span> }
+  ]
+}</pre>
+
+  <p>Returns the membership roster scoped to the active user's team. Used by Variant B's dropdown. Local-mode response is a single-entry array containing the synthetic user.</p>
+
+  <p><strong>Caching:</strong> short FE cache (60s) is fine — a new team member joining mid-session doesn't need to immediately appear in the rule editor. The websocket can invalidate the cache on memberships changes if that becomes annoying, but v1 ships without that wiring.</p>
+
+  <div class="callout callout--amber">
+    <strong>Why two endpoints, not one.</strong> <code>/api/config</code> is a one-shot read at FE boot (deployment shape doesn't change). Membership rosters are mutable during a session (joins/leaves). Conflating them would force re-fetching the entire config blob to refresh the dropdown, or worse, force a websocket invalidation on something that's mostly static.
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="out-of-scope">
+  <div class="section-label">§10</div>
+  <h2>Out of scope</h2>
+  <ul>
+    <li><strong>Jira <code>*_is_self</code> predicates.</strong> Same conceptual fix, different identity store. Sibling ticket once Atlassian OAuth lands.</li>
+    <li><strong>Validation against GitHub's API at save time.</strong> Handle typos surface at match time.</li>
+    <li><strong>Team-membership-aware "anyone on my team" shortcut.</strong> A future ergonomic improvement (<code>author_in_team: true</code>) — not needed v1 because the user can manually list the team.</li>
+    <li><strong>Live websocket invalidation of <code>/api/team/members</code> cache.</strong> v1 ships with a 60s FE-side cache. New team member appears in the dropdown on next cache miss; this is fine. Websocket plumbing for memberships changes can wait.</li>
+    <li><strong>Migration of seed triggers in <code>seed.go</code>.</strong> They ship disabled and use <code>author_is_self</code> as a hint to the user. We rewrite the seed to use <code>author_in: []</code> with a comment explaining the user needs to fill it in. (System triggers are reference examples, not auto-firing.)</li>
+    <li><strong>Reviewer team memberships.</strong> <code>review_requested</code> on a team-level reviewer is a separate scenario already handled by tracker enrichment; out of scope here.</li>
+  </ul>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="steps">
+  <div class="section-label">§11</div>
+  <h2>Steps</h2>
+
+  <ol class="steps">
+    <li>
+      <span class="step-title">Schema: add <code>users.github_username TEXT</code></span>
+      <div class="step-body">One Postgres migration. SQLite already has it from SKY-269. No constraints. Down is no-op.</div>
+    </li>
+    <li>
+      <span class="step-title">One-shot keychain → DB migration on boot</span>
+      <div class="step-body"><code>main.go</code> calls <code>migrateLocalUserGitHubIdentity(db)</code> after <code>config.Init</code>. Reads legacy <code>TRIAGE_FACTORY_GITHUB_USERNAME</code> keychain entry, writes to users row, deletes the keychain entry. No-op if DB already has a value (idempotent across reboots) or if the legacy entry doesn't exist (fresh installs).</div>
+    </li>
+    <li>
+      <span class="step-title">Capture sites: write users.github_username directly</span>
+      <div class="step-body">Refactor three call sites to call a shared <code>SetLocalUserGitHubIdentity(db, login)</code> helper instead of writing <code>creds.GitHubUsername</code>:
+        <ul style="margin-top: 6px;">
+          <li><code>internal/auth/setup_*.go</code> — first-run wizard after PAT validates.</li>
+          <li><code>internal/server/settings.go:247</code> — Settings page PAT save.</li>
+          <li><code>internal/server/repos_handler.go</code> — repos handler PAT-change branch.</li>
+        </ul>
+        Each call site already has <code>ghUser.Login</code> in scope from the <code>auth.ValidateGitHub</code> response. Tests: pin all three with mock auth + assert users row updated.
+      </div>
+    </li>
+    <li>
+      <span class="step-title">Keychain cleanup: remove username field</span>
+      <div class="step-body">In <code>internal/auth/keychain.go</code>: remove <code>keyGitHubUsername</code> constant, <code>GitHubUsername</code> field on <code>Credentials</code> struct, save/load/clear references. Add <code>LoadLegacyGitHubUsername()</code> + <code>DeleteLegacyGitHubUsername()</code> for the one-shot migration to call (these read/delete the legacy key but never write it). Test: confirm <code>auth.SaveGitHub</code> after the refactor doesn't touch the legacy key.</div>
+    </li>
+    <li>
+      <span class="step-title">Poller refactor: read username from users row</span>
+      <div class="step-body">Refactor <code>internal/poller/manager.go</code> to take a <code>UsersStore</code> (or just <code>github_username string</code>) at construction. Replace the <code>creds.GitHubUsername</code> read with a DB lookup against the synthetic user row at startup. Same short-circuit behavior when value is empty (poller skips). The <code>onGitHubChanged</code> callback already restarts the poller on credential change, so account swaps still work.</div>
+    </li>
+    <li>
+      <span class="step-title">Registry: swap <code>AuthorIsSelf</code> → <code>AuthorIn</code> on 18 event types</span>
+      <div class="step-body">Drop <code>AuthorIsSelf bool</code> from metadata structs. Replace <code>AuthorIsSelf *bool</code> with <code>AuthorIn []string</code> on predicate structs. Same for <code>ReviewerIsSelf</code> → <code>ReviewerIn</code> (5 event types).</div>
+    </li>
+    <li>
+      <span class="step-title">Matcher: <code>stringInSliceFold</code> helper + wire into every <code>Matches</code> function</span>
+      <div class="step-body">Add to <code>internal/domain/events/match_helpers.go</code>. Replace each <code>boolEq(p.AuthorIsSelf, m.AuthorIsSelf)</code> call site with <code>stringInSliceFold(p.AuthorIn, m.Author)</code>.</div>
+    </li>
+    <li>
+      <span class="step-title">Tracker: stop computing <code>author_is_self</code> at emission</span>
+      <div class="step-body">Drop the <code>AuthorIsSelf: …</code> assignments throughout <code>internal/tracker/diff.go</code>. Tracker no longer needs access to <code>creds.GitHubUsername</code> — simplifies the diff layer.</div>
+    </li>
+    <li>
+      <span class="step-title">Data migration: rewrite existing <code>scope_predicate_json</code> rows</span>
+      <div class="step-body">Go-side rewrite inside the same goose migration as the schema change, in StatementBegin/End block, scheduled to run after the schema + bootstrap. Logs each rewrite at INFO; logs each drop-due-to-NULL at WARN.</div>
+    </li>
+    <li>
+      <span class="step-title">API: <code>GET /api/config</code></span>
+      <div class="step-body">New handler in <code>internal/server/config_handler.go</code>. Returns deployment_mode, team_size, current_user with github_username. Local mode returns synthetic values; multi computes from memberships.</div>
+    </li>
+    <li>
+      <span class="step-title">API: <code>GET /api/team/members</code></span>
+      <div class="step-body">New handler in <code>internal/server/team_handler.go</code>. Returns the roster for the active user's team: <code>user_id, display_name, github_username, is_current_user</code>. Local mode returns a single-entry array with the synthetic user. Test: multi-mode response includes NULL <code>github_username</code> rows.</div>
+    </li>
+    <li>
+      <span class="step-title">FE: form variant component</span>
+      <div class="step-body">New <code>AuthorInField.tsx</code>. Fetches <code>/api/config</code> + <code>/api/team/members</code> at mount via a cached hook. Renders Variant A (toggle) when <code>team_size === 1</code>, Variant B (searchable multi-select with chips + external-handle fallback) when <code>team_size &gt; 1</code>. Both serialize to <code>{ author_in: string[] | undefined }</code>. Dropdown rows for members with NULL github_username render disabled with a tooltip.</div>
+    </li>
+    <li>
+      <span class="step-title">FE: wire into Rule and Trigger editors</span>
+      <div class="step-body">Replace existing AuthorIsSelf toggle in <code>frontend/src/components/rules/</code> and <code>frontend/src/components/triggers/</code>. Round-trip test: edit existing rule → save → re-open → form state matches saved state.</div>
+    </li>
+    <li>
+      <span class="step-title">Seed: update <code>seed.go</code> reference triggers</span>
+      <div class="step-body">Replace <code>"author_is_self": true</code> in seed JSON with <code>"author_in": []</code> plus a comment explaining the user fills in their own handle when enabling.</div>
+    </li>
+    <li>
+      <span class="step-title">Cleanup: rip remaining <code>AuthorIsSelf</code> / <code>ReviewerIsSelf</code> mentions</span>
+      <div class="step-body">grep for <code>author_is_self</code> / <code>reviewer_is_self</code> / <code>AuthorIsSelf</code> / <code>ReviewerIsSelf</code> across the repo — zero hits expected post-migration except in docs that explain the historical change.</div>
+    </li>
+  </ol>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="risks">
+  <div class="section-label">§12</div>
+  <h2>Risks</h2>
+
+  <table class="matrix">
+    <thead><tr><th style="width: 30%;">Risk</th><th>Mitigation</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><strong>Migration silently drops user rules.</strong> If a user has a rule with <code>author_is_self: true</code> and their <code>github_username</code> is NULL at migration time, the field is dropped → rule becomes "match any author."</td>
+        <td>WARN-level log per dropped predicate identifies the handler ID. Document in release notes. Add a post-migration toast in the FE on first boot ("N rules were degraded during upgrade — review here.")</td>
+      </tr>
+      <tr>
+        <td><strong>Tracker still emits old field name on the wire.</strong> Pollers in flight when the binary upgrades could write old-shape JSON.</td>
+        <td>Not actually a risk: events are in-process structs, not wire JSON. The DB never stores <code>events.metadata_json</code> with <code>author_is_self</code> — it stores it with <code>author</code>. The matcher already reads <code>author</code>; the deprecated bool was a convenience field.</td>
+      </tr>
+      <tr>
+        <td><strong>Case mismatch surprises users.</strong> User types <code>"aidanallchin"</code>, GitHub emits <code>"AidanAllchin"</code>.</td>
+        <td>Lowercase-at-compare via <code>strings.EqualFold</code>. Both sides handled. FE preserves casing for display round-trip.</td>
+      </tr>
+      <tr>
+        <td><strong>Empty allowlist semantics drift.</strong> Is <code>"author_in": []</code> "no filter" or "match nobody"?</td>
+        <td>Pin "no filter." Same semantics as nil-pointer predicates today. Documented in the helper. UI emits <code>undefined</code> rather than <code>[]</code> when the user has typed nothing, but matcher handles both identically.</td>
+      </tr>
+      <tr>
+        <td><strong>Stale FE caches predicate UI from before the change.</strong> User loads the app on an old SPA bundle, sees the toggle, submits old shape.</td>
+        <td>Embedded SPA — every Go-binary upgrade refreshes the bundle. Acceptable; not handling separate FE/BE versioning here.</td>
+      </tr>
+      <tr>
+        <td><strong>Multi-mode rollout coupling.</strong> Multi installs need <code>github_username</code> populated by OAuth (SKY-251), which hasn't shipped.</td>
+        <td>This PR ships the column and the local-mode bootstrap. Multi-mode write site is left as a TODO in the auth handler stub (SKY-251 owns it). No production multi installs exist yet, so no degraded UX in practice.</td>
+      </tr>
+      <tr>
+        <td><strong>Keychain → DB migration runs before schema column exists.</strong> Migration ordering bug could leave a partial state.</td>
+        <td>Strict ordering in <code>main.go</code>: <code>db.Migrate</code> (schema migration applies first) → <code>migrateLocalUserGitHubIdentity</code> → poller start. Migration function is idempotent and a no-op if the column read returns "no such column" (defensive — shouldn't trigger since schema ran first, but the function guards anyway).</td>
+      </tr>
+      <tr>
+        <td><strong>Poller starts before keychain → DB migration.</strong> Poller would read NULL from DB, short-circuit, then the migration writes the value but the poller doesn't pick it up until restart.</td>
+        <td>Same ordering rule: migration runs <em>before</em> poller start. Also, the existing <code>onGitHubChanged</code> callback already restarts the poller on credential change — even if ordering breaks, a subsequent settings save fixes it without manual restart.</td>
+      </tr>
+      <tr>
+        <td><strong>Legacy keychain entry left behind on upgrade.</strong> If the migration fails after DB write but before <code>DeleteLegacyGitHubUsername</code>, the keychain entry stays.</td>
+        <td>Harmless. Nothing reads from <code>TRIAGE_FACTORY_GITHUB_USERNAME</code> after the keychain refactor — the constant + field are removed from the Credentials struct, so the entry is orphaned but not interfering. Migration re-runs on next boot will detect "DB has value" and skip; next manual settings save will overwrite the keychain entry's whole record anyway.</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="acceptance">
+  <div class="section-label">§13</div>
+  <h2>Acceptance</h2>
+
+  <h3>Local mode</h3>
+  <ul>
+    <li>Fresh install → setup wizard validates PAT → writes Login to DB. Confirmable via <code>sqlite3 ~/.triagefactory/triagefactory.db "SELECT github_username FROM users"</code>. No <code>TRIAGE_FACTORY_GITHUB_USERNAME</code> entry created in the keychain.</li>
+    <li>Existing install pre-upgrade with rule using <code>author_is_self: true</code> → one-shot migration reads legacy keychain entry → writes to DB → deletes keychain entry → data migration rewrites predicate. Rule fires for events from the captured user.</li>
+    <li>Keychain inspection (<code>security find-generic-password -s TRIAGE_FACTORY_GITHUB_USERNAME</code> on macOS) returns "not found" after upgrade completes.</li>
+    <li>Rule editor in local mode renders Variant A (toggle), toggle reads "Match my PRs only," hint shows the captured login.</li>
+    <li>If <code>users.github_username</code> is NULL (no PAT configured yet), Variant-A toggle is disabled with the configure-GitHub hint.</li>
+    <li>Settings page PAT swap to a different GitHub account → <code>ValidateGitHub</code> → <code>SetLocalUserGitHubIdentity</code> writes new value → no restart required → predicates pick up new identity on next event.</li>
+    <li>Poller startup reads username from users row, not from keychain. Confirmable: the poller's log line shows the captured user.</li>
+  </ul>
+
+  <h3>Multi mode (where applicable, no production installs yet)</h3>
+  <ul>
+    <li>Rule editor in a multi-person team renders Variant B (searchable multi-select).</li>
+    <li>Dropdown lists all team members; rows for members with NULL <code>github_username</code> render disabled with the "no GitHub identity" hint.</li>
+    <li>Selecting a team member writes <em>their</em> <code>github_username</code> (not display name) into <code>author_in</code>.</li>
+    <li>Typing a non-matching string surfaces an "Add as external handle" affordance; selecting it adds the literal string to <code>author_in</code>.</li>
+    <li>Selected chips round-trip: save rule → reload editor → identical chip set rendered.</li>
+    <li>Predicate matches case-insensitively: rule <code>["aidanallchin"]</code> fires on event with author <code>"AidanAllchin"</code>.</li>
+    <li>Removing a user from the team after they're chip-referenced in a rule: the rule still fires on their author events; chip renders muted with "no longer on team" tooltip.</li>
+  </ul>
+
+  <h3>Registry + matcher</h3>
+  <ul>
+    <li><code>grep -r 'AuthorIsSelf\|author_is_self\|ReviewerIsSelf\|reviewer_is_self'</code> over the repo returns zero hits in <code>internal/</code> after the PR (matches in <code>docs/</code> explaining the historical change are fine).</li>
+    <li>Matcher unit tests: empty/nil <code>AuthorIn</code> → "no filter" (matches); non-empty mismatch → no match; case differences → match.</li>
+    <li>Tracker no longer takes <code>creds.GitHubUsername</code> as a "set author_is_self" parameter — the field is gone from <code>tracker.Refresh*</code> signatures.</li>
+  </ul>
+
+  <h3>Data migration</h3>
+  <ul>
+    <li>Fixture row: <code>{"author_is_self": true}</code> + valid creator with <code>github_username = "alice"</code> → rewritten to <code>{"author_in": ["alice"]}</code>.</li>
+    <li>Fixture row: <code>{"author_is_self": true}</code> + creator with NULL username → field dropped, WARN log emitted.</li>
+    <li>Fixture row: <code>{"author_is_self": false}</code> → field dropped (no warning).</li>
+    <li>Idempotent: re-running the migration on already-rewritten data is a no-op (find no <code>author_is_self</code> keys → don't update).</li>
+  </ul>
+
+  <h3>FE</h3>
+  <ul>
+    <li><code>/api/config</code> response shape pinned by a server test.</li>
+    <li>Variant A serializes toggle-ON to <code>author_in: [&lt;login&gt;]</code>.</li>
+    <li>Variant B serializes the selected multi-select chips to <code>author_in: string[]</code>, using team members' <code>github_username</code> values and any added external handles as literal strings.</li>
+    <li>Disabled state renders with the re-auth hint and a link to <code>/settings#github</code>.</li>
+  </ul>
+</section>
+
+</article>
+</main>
+
+<footer>
+  SKY-264 D-Predicate · draft v0.1 · 2026-05-12 · authored alongside the SKY-242 multi-tenant epic
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,1188 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SKY-246 — D2: Store layer abstraction</title>
+<style>
+:root {
+  --bg: #030712;
+  --fg: #f8fafc;
+  --surface: rgba(17, 24, 39, 0.30);
+  --surface-2: rgba(31, 41, 55, 0.50);
+  --surface-floating: rgba(3, 7, 18, 0.80);
+  --border: #1f2937;
+  --border-2: #1e293b;
+  --border-3: #374151;
+  --muted: #94a3b8;
+  --muted-2: #6b7280;
+  --muted-3: #4b5563;
+  --accent: #22d3ee;
+  --accent-2: #06b6d4;
+  --accent-3: #0e7490;
+  --violet: #a78bfa;
+  --violet-2: #8b5cf6;
+  --purple: #a855f7;
+  --pink: #f472b6;
+  --green: #22c55e;
+  --green-2: #4ade80;
+  --amber: #fbbf24;
+  --red: #ef4444;
+  --red-2: #f87171;
+  --radius: 8px;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, "Cascadia Mono", monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+.mono, code, pre { font-family: var(--mono); }
+code { background: rgba(31, 41, 55, 0.5); padding: 1px 5px; border-radius: 3px; font-size: 0.92em; }
+a { color: var(--accent); text-underline-offset: 4px; }
+a:hover { text-decoration: underline; }
+
+.topbar {
+  position: sticky; top: 0; z-index: 40;
+  width: 100%;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-floating);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.topbar__inner {
+  margin: 0 auto; max-width: 1100px;
+  padding: 0 24px;
+  height: 56px;
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 12px;
+  color: var(--muted);
+}
+.topbar__brand { display: flex; align-items: center; gap: 12px; }
+.topbar__brand .dot {
+  width: 8px; height: 8px; border-radius: 9999px;
+  background: linear-gradient(to bottom right, var(--violet-2), var(--accent-2));
+  box-shadow: 0 0 12px rgba(139, 92, 246, 0.6);
+}
+.topbar__brand strong { color: var(--fg); font-weight: 600; font-size: 13px; }
+.topbar__crumb { color: var(--muted-2); }
+.topbar__meta { display: flex; gap: 8px; align-items: center; }
+.pill {
+  font-size: 11px;
+  padding: 2px 10px;
+  border-radius: 9999px;
+  font-family: var(--mono);
+}
+.pill--draft { background: rgba(251, 191, 36, 0.20); color: var(--amber); border: 1px solid rgba(251, 191, 36, 0.30); }
+.pill--size  { background: rgba(139, 92, 246, 0.20); color: var(--violet); border: 1px solid rgba(139, 92, 246, 0.30); }
+
+.hero {
+  margin: 0 auto; max-width: 1100px;
+  padding: 56px 24px 24px;
+}
+.hero h1 {
+  font-size: 30px; font-weight: 200; letter-spacing: -0.02em;
+  margin: 0 0 12px;
+  background: linear-gradient(to right, var(--accent), var(--violet), var(--pink));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.hero .sub { color: var(--muted-2); font-family: var(--mono); font-size: 12px; margin-bottom: 16px; }
+.hero p.lede { color: var(--muted); font-size: 15px; margin: 0; max-width: 820px; }
+.hero__meta {
+  display: flex; gap: 10px; margin-top: 18px; flex-wrap: wrap;
+  font-family: var(--mono); font-size: 12px;
+}
+.hero__meta .meta-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 11px; border-radius: 9999px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.hero__meta .meta-pill strong { color: var(--fg); font-weight: 500; }
+
+main {
+  margin: 0 auto; max-width: 1100px;
+  padding: 0 24px 96px;
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 32px;
+}
+nav.toc {
+  position: sticky; top: 80px;
+  height: fit-content;
+  padding: 16px 0;
+}
+.toc ol { list-style: none; padding: 0; margin: 0; counter-reset: item; }
+.toc li {
+  font-size: 12px;
+  margin-bottom: 4px;
+  counter-increment: item;
+}
+.toc a {
+  display: block;
+  padding: 6px 12px;
+  border-radius: 6px;
+  color: var(--muted);
+  text-decoration: none;
+  border-left: 2px solid transparent;
+  transition: all 150ms;
+}
+.toc a:hover { color: var(--fg); background: var(--surface); border-left-color: var(--violet); text-decoration: none; }
+.toc a::before { content: counter(item, decimal-leading-zero) "  "; color: var(--muted-3); font-family: var(--mono); }
+.toc-group {
+  font-size: 10px;
+  color: var(--muted-3);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  padding: 12px 12px 6px;
+  margin-top: 8px;
+}
+
+article { min-width: 0; }
+section.block {
+  margin-bottom: 48px;
+  scroll-margin-top: 80px;
+}
+section.block > h2 {
+  font-size: 22px;
+  font-weight: 300;
+  margin: 0 0 4px;
+  letter-spacing: -0.01em;
+}
+section.block > .lede {
+  color: var(--muted);
+  font-size: 14px;
+  margin: 0 0 24px;
+  max-width: 800px;
+}
+section.block h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 28px 0 10px;
+  color: var(--fg);
+}
+section.block h4 {
+  font-size: 12px;
+  font-weight: 600;
+  margin: 20px 0 6px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.section-label {
+  font-size: 10px;
+  color: var(--muted-3);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-bottom: 8px;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  margin-bottom: 16px;
+}
+.callout {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  margin: 14px 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+.callout strong { color: var(--fg); }
+.callout--warn { border-left-color: var(--amber); }
+.callout--bad  { border-left-color: var(--red); }
+.callout--good { border-left-color: var(--green-2); }
+.callout--violet { border-left-color: var(--violet); }
+
+pre.code {
+  background: rgba(3, 7, 18, 0.60);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 14px 16px;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-x: auto;
+  color: #cbd5e1;
+  margin: 0 0 12px;
+}
+pre.code .kw  { color: var(--violet); }
+pre.code .str { color: var(--green-2); }
+pre.code .num { color: var(--amber); }
+pre.code .com { color: var(--muted-3); }
+pre.code .fn  { color: var(--accent); }
+pre.code .typ { color: var(--pink); }
+
+.steps { counter-reset: step; padding-left: 0; list-style: none; }
+.steps > li {
+  counter-increment: step;
+  position: relative;
+  padding: 10px 0 14px 40px;
+  border-bottom: 1px dashed var(--border);
+}
+.steps > li:last-child { border-bottom: none; }
+.steps > li::before {
+  content: counter(step, decimal-leading-zero);
+  position: absolute; left: 0; top: 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--violet);
+  background: rgba(139, 92, 246, 0.08);
+  border: 1px solid rgba(139, 92, 246, 0.30);
+  padding: 2px 7px;
+  border-radius: 4px;
+}
+.steps > li > .step-title { font-weight: 500; color: var(--fg); display: block; margin-bottom: 2px; }
+.steps > li > .step-body  { color: var(--muted); font-size: 13px; }
+
+table.matrix {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+table.matrix thead th {
+  text-align: left;
+  padding: 8px 12px;
+  font-weight: 500;
+  font-size: 11px;
+  color: var(--muted-2);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-bottom: 1px solid var(--border);
+}
+table.matrix tbody td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+table.matrix tbody tr:hover { background: var(--surface-2); }
+table.matrix .col-key { color: var(--muted); white-space: nowrap; font-family: var(--mono); }
+
+ul.tight { padding-left: 20px; margin: 6px 0; }
+ul.tight li { margin-bottom: 4px; }
+
+.tag {
+  display: inline-block; font-family: var(--mono); font-size: 11px;
+  padding: 1px 7px; border-radius: 4px;
+  background: rgba(139, 92, 246, 0.15);
+  color: var(--violet);
+  border: 1px solid rgba(139, 92, 246, 0.25);
+}
+.tag--cyan  { background: rgba(6, 182, 212, 0.15); color: var(--accent); border-color: rgba(6, 182, 212, 0.30); }
+.tag--green { background: rgba(34, 197, 94, 0.15); color: var(--green-2); border-color: rgba(34, 197, 94, 0.30); }
+.tag--amber { background: rgba(251, 191, 36, 0.15); color: var(--amber); border-color: rgba(251, 191, 36, 0.30); }
+.tag--red   { background: rgba(239, 68, 68, 0.15); color: var(--red-2); border-color: rgba(239, 68, 68, 0.30); }
+
+.stores-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.store-chip {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+}
+.store-chip strong { color: var(--fg); display: block; font-size: 13px; margin-bottom: 2px; }
+.store-chip .dim { color: var(--muted-3); font-size: 11px; }
+.store-chip.scoped strong { color: var(--accent); }
+.store-chip.global strong { color: var(--violet); }
+.store-chip.session strong { color: var(--pink); }
+
+footer {
+  margin: 0 auto; max-width: 1100px;
+  padding: 24px 24px 64px;
+  font-size: 11px; color: var(--muted-3);
+  font-family: var(--mono);
+  border-top: 1px solid var(--border);
+}
+
+.legend { display: flex; gap: 12px; font-size: 11px; color: var(--muted); margin: 8px 0 16px; flex-wrap: wrap; }
+.legend > span { display: inline-flex; align-items: center; gap: 6px; }
+.legend .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar__inner">
+    <div class="topbar__brand">
+      <span class="dot"></span>
+      <strong>Triage Factory</strong>
+      <span class="topbar__crumb">/ specs / SKY-246 D2</span>
+    </div>
+    <div class="topbar__meta">
+      <span class="pill pill--size">SIZE · L</span>
+      <span class="pill pill--draft">DRAFT v1.0</span>
+    </div>
+  </div>
+</div>
+
+<header class="hero">
+  <div class="sub">SKY-246 · child of SKY-242 · v1 critical-path · gates everything from D5 onward</div>
+  <h1>D2 — Store layer abstraction</h1>
+  <p class="lede">Replace direct <code>internal/db</code> function calls with per-resource interfaces backed by SQLite (<code>internal/db/sqlite/</code>) and Postgres (<code>internal/db/postgres/</code>). Every store ships with <strong>both</strong> backends implemented in this ticket — no stubs, no phase-1 wrappers, no follow-up cleanup. D3 already merged the Postgres schema; we can write real Postgres impls now and we will.</p>
+  <div class="hero__meta">
+    <span class="meta-pill"><strong>SCOPE</strong> · refactor + dual-backend implementation</span>
+    <span class="meta-pill"><strong>DEPS</strong> · SKY-245 (D1) · SKY-247 (D3)</span>
+    <span class="meta-pill"><strong>BLOCKS</strong> · SKY-249 D5 · SKY-251 D7 · SKY-253 D9</span>
+    <span class="meta-pill"><strong>EFFORT</strong> · 2–3 weeks across 6 wave PRs</span>
+  </div>
+</header>
+
+<main>
+
+<nav class="toc">
+  <div class="toc-group">Spec</div>
+  <ol>
+    <li><a href="#why">Why per-resource</a></li>
+    <li><a href="#layout">Package layout</a></li>
+    <li><a href="#stores">Store inventory</a></li>
+    <li><a href="#interface">Interface example</a></li>
+    <li><a href="#bundle">Stores bundle &amp; DI</a></li>
+    <li><a href="#tx">Transactions &amp; RLS plumbing</a></li>
+    <li><a href="#scoping">Org/user scoping rules</a></li>
+    <li><a href="#dual-backend">Both backends, day one</a></li>
+    <li><a href="#seeder">System prompt seeder</a></li>
+    <li><a href="#testing">Testing &amp; mocks</a></li>
+    <li><a href="#lint">Lint enforcement</a></li>
+  </ol>
+  <div class="toc-group">Plan</div>
+  <ol start="12">
+    <li><a href="#order">Wave order</a></li>
+    <li><a href="#steps">Implementation steps</a></li>
+    <li><a href="#risks">Risks</a></li>
+    <li><a href="#acceptance">Acceptance</a></li>
+  </ol>
+</nav>
+
+<article>
+
+<!-- ===================================================== -->
+<section class="block" id="why">
+  <div class="section-label">§1</div>
+  <h2>Why per-resource interfaces</h2>
+  <p class="lede">Two questions: <em>why interfaces at all</em>, and <em>why split per resource instead of one big <code>Store</code></em>.</p>
+
+  <h3>Why interfaces at all</h3>
+  <ul class="tight">
+    <li><strong>Two backends.</strong> SQLite (local) and Postgres (multi). Today every callsite imports <code>internal/db</code> directly and calls package-level functions like <code>db.FindOrCreateTask(database, ...)</code>. Adding a Postgres path means either (a) <code>if/else</code> inside every function — combinatorial mess — or (b) an interface boundary that picks one implementation at startup. (b) is the only sane shape.</li>
+    <li><strong>RLS context plumbing.</strong> Postgres wants <code>SELECT set_config('request.jwt.claims', '{...}', true)</code> per transaction so RLS policies see the right user/org. That belongs in the storage layer, not in every handler.</li>
+    <li><strong>Testing.</strong> Today every handler test boots a real SQLite. Per-resource interfaces + mockery-generated mocks give us fast in-memory handler tests; conformance suites still exercise real backends.</li>
+  </ul>
+
+  <h3>Why per-resource (not one big <code>Store</code>)</h3>
+  <ul class="tight">
+    <li><strong>Standard Go.</strong> <code>io.Reader</code>, <code>http.Handler</code>, <code>fmt.Stringer</code> — small, focused interfaces accepted at consumer sites. <em>"Accept interfaces, return structs."</em> A monolithic <code>Store</code> with 190 methods isn't an interface; it's a typed bag.</li>
+    <li><strong>Handler dependencies stay honest.</strong> A handler that only reads tasks accepts <code>db.TaskStore</code>. Its mockery-generated mock has 16 methods, not 190. Reviewing a PR, you can see exactly which resources a handler touches by its constructor signature.</li>
+    <li><strong>Migrate wave by wave.</strong> Land <code>PromptStore</code> first, get both backends matching, ship it. Then <code>RuleStore</code>. Each store is its own self-contained refactor; the build stays green between waves.</li>
+  </ul>
+
+  <div class="callout callout--violet">
+    <strong>This is mechanical, not architectural.</strong> The interfaces exist already, in spirit — every <code>db.X</code> function is a method-in-waiting. We're rearranging code, not designing new abstractions.
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="layout">
+  <div class="section-label">§2</div>
+  <h2>Package layout</h2>
+
+<pre class="code">internal/db/
+├── db.go                  <span class="com">// Open(), OpenAt() — unchanged</span>
+├── store.go               <span class="com">// Stores bundle, TxStores, TxRunner interface, sentinel errors</span>
+├── tasks.go               <span class="com">// TaskStore interface + value types (was: SQL helpers)</span>
+├── runs.go                <span class="com">// RunStore interface (was: agent.go + run_worktrees.go)</span>
+├── entities.go            <span class="com">// EntityStore interface</span>
+├── ...                    <span class="com">// one per resource, 22 total</span>
+│
+├── sqlite/
+│   ├── store.go           <span class="com">// New(conn) → db.Stores wired with SQLite impls</span>
+│   ├── tx.go              <span class="com">// WithTx — plain BEGIN/COMMIT, asserts orgID == LocalDefaultOrg</span>
+│   ├── queryer.go         <span class="com">// queryer interface (Exec/Query/QueryRow over *sql.DB or *sql.Tx)</span>
+│   ├── tasks.go           <span class="com">// SQLite SQL (moved verbatim from old internal/db/tasks.go)</span>
+│   ├── runs.go
+│   └── ...
+│
+├── postgres/
+│   ├── store.go           <span class="com">// New(adminConn, appConn) → db.Stores wired with Postgres impls</span>
+│   ├── tx.go              <span class="com">// WithTx — BEGIN, set_config jwt.claims, COMMIT</span>
+│   ├── queryer.go         <span class="com">// queryer interface (parallel to sqlite)</span>
+│   ├── tasks.go           <span class="com">// Postgres SQL (RLS-aware, composite-FK-safe)</span>
+│   ├── runs.go
+│   └── ...
+│
+├── mocks/                 <span class="com">// mockery-generated, one mock per interface</span>
+│   ├── TaskStore.go
+│   ├── RunStore.go
+│   └── ...
+│
+├── dbtest/
+│   └── conformance.go     <span class="com">// RunTaskStoreConformance(t, mk) — shared across backends</span>
+│
+├── migrations-sqlite/     <span class="com">// unchanged (D1)</span>
+├── migrations-postgres/   <span class="com">// unchanged (D3)</span>
+├── migrations.go          <span class="com">// unchanged</span>
+└── pgtest/                <span class="com">// unchanged (D3)</span></pre>
+
+  <div class="callout">
+    <strong>Old <code>internal/db/&lt;resource&gt;.go</code> files are repurposed, not deleted.</strong> Each wave rewrites the resource's parent file from "SQL helpers in package <code>db</code>" into "interface declaration + value types in package <code>db</code>." The SQL bodies move to <code>internal/db/sqlite/&lt;resource&gt;.go</code>. The Postgres bodies are written fresh from D3's schema.
+  </div>
+
+  <div class="callout callout--violet">
+    <strong>Why everything stays under <code>internal/db/</code>:</strong> the abstraction is still "the database layer" — splitting by dialect is an implementation detail, not a new conceptual layer. Keeps the mental model simple and avoids a new top-level package.
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="stores">
+  <div class="section-label">§3</div>
+  <h2>Store inventory</h2>
+  <p class="lede">22 interfaces, classified by scoping rule. Method counts come from <code>grep '^func [A-Z]' internal/db/*.go</code> over the current code (~187 funcs total). New stores added for multi-tenant tickets are flagged.</p>
+
+  <div class="legend">
+    <span><span class="swatch" style="background: var(--accent);"></span> Org-scoped (every method takes <code>orgID</code>)</span>
+    <span><span class="swatch" style="background: var(--violet);"></span> Global / system (no org dimension)</span>
+    <span><span class="swatch" style="background: var(--pink);"></span> Session/user-scoped</span>
+  </div>
+
+  <h3>Org-scoped (18)</h3>
+  <div class="stores-grid">
+    <div class="store-chip scoped"><strong>TaskStore</strong>FindOrCreate, Bump, Close, GetByID, lists<span class="dim">~16 methods</span></div>
+    <div class="store-chip scoped"><strong>RunStore</strong>Create, Complete, MarkAwaiting, Cancel, run_messages, run_artifacts, run_worktrees<span class="dim">~28 methods (largest)</span></div>
+    <div class="store-chip scoped"><strong>EntityStore</strong>FindOrCreate, GetBySource, UpdateSnapshotCASSystem, Close<span class="dim">~14 methods</span></div>
+    <div class="store-chip scoped"><strong>EventStore</strong>Insert, ListForEntity, Catalog ops<span class="dim">~9 methods</span></div>
+    <div class="store-chip scoped"><strong>PromptStore</strong>CRUD, SeedOrUpdateSystemPrompt<span class="dim">~11 methods</span></div>
+    <div class="store-chip scoped"><strong>ProjectStore</strong>CRUD<span class="dim">~5 methods</span></div>
+    <div class="store-chip scoped"><strong>MemoryStore</strong>Upsert, ListForEntity, ListForRun<span class="dim">~4 methods</span></div>
+    <div class="store-chip scoped"><strong>KBStore</strong>project_knowledge CRUD + OCC<span class="dim">~5 methods (new D3)</span></div>
+    <div class="store-chip scoped"><strong>RuleStore</strong>task_rules + prompt_triggers + prompt_stats<span class="dim">~17 methods</span></div>
+    <div class="store-chip scoped"><strong>CuratorStore</strong>session, sink, pending_context<span class="dim">~21 methods</span></div>
+    <div class="store-chip scoped"><strong>ReviewStore</strong>pending reviews, submitted markers<span class="dim">~12 methods</span></div>
+    <div class="store-chip scoped"><strong>RepoStore</strong>github + jira repo configs<span class="dim">~9 methods</span></div>
+    <div class="store-chip scoped"><strong>PendingPRStore</strong>pending_prs queue<span class="dim">~9 methods</span></div>
+    <div class="store-chip scoped"><strong>PendingFiringStore</strong>pending_firings queue<span class="dim">~9 methods</span></div>
+    <div class="store-chip scoped"><strong>SwipeStore</strong>swipe history<span class="dim">~4 methods</span></div>
+    <div class="store-chip scoped"><strong>ScoreStore</strong>AI scoring state<span class="dim">~4 methods</span></div>
+    <div class="store-chip scoped"><strong>FactoryStore</strong>cross-cut factory views<span class="dim">~6 methods</span></div>
+    <div class="store-chip scoped"><strong>SecretStore</strong>PutOrgSecret, GetOrgSecret, Delete<span class="dim">3 methods (semantics by D5)</span></div>
+  </div>
+
+  <h3>Global / system (3)</h3>
+  <div class="stores-grid">
+    <div class="store-chip global"><strong>OrgStore</strong>Create, GetByID, ListAll, ListForUser<span class="dim">~5 methods (new D3)</span></div>
+    <div class="store-chip global"><strong>UserStore</strong>UpsertFromOAuth, GetByID<span class="dim">~3 methods (new D7)</span></div>
+    <div class="store-chip global"><strong>DashboardStore</strong>read-only summaries<span class="dim">~2 methods</span></div>
+  </div>
+
+  <h3>Session/user-scoped (2)</h3>
+  <div class="stores-grid">
+    <div class="store-chip session"><strong>SessionStore</strong>Insert, GetByID, Revoke, Refresh<span class="dim">~7 methods (new D7)</span></div>
+    <div class="store-chip session"><strong>MembershipStore</strong>(orgID, userID) — List, Add, Remove, RoleOf<span class="dim">~6 methods (new D3)</span></div>
+  </div>
+
+  <div class="callout">
+    <strong>Coverage gate:</strong> <code>grep '^func [A-Z]' internal/db/*.go | wc -l</code> equals the sum of interface method counts in this section (within rounding of helper unexports). If they diverge, a resource is missing.
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="interface">
+  <div class="section-label">§4</div>
+  <h2>Interface example</h2>
+  <p class="lede"><code>TaskStore</code> in detail. The pattern repeats for every other store.</p>
+
+  <h3><code>internal/db/tasks.go</code> — interface only</h3>
+<pre class="code"><span class="kw">package</span> db
+
+<span class="kw">import</span> (
+  <span class="str">"context"</span>
+  <span class="str">"time"</span>
+
+  <span class="str">"github.com/sky-ai-eng/triage-factory/internal/domain"</span>
+)
+
+<span class="com">//go:generate mockery --name=TaskStore --output=./mocks --case=underscore --with-expecter</span>
+
+<span class="com">// TaskStore is the persistence boundary for tasks. orgID arguments are</span>
+<span class="com">// always required — local mode passes the literal LocalDefaultOrg,</span>
+<span class="com">// multi mode passes the request's org UUID. SQLite impl asserts</span>
+<span class="com">// orgID == LocalDefaultOrg; Postgres impl includes org_id in WHERE</span>
+<span class="com">// clauses as defense in depth and relies on RLS via SET LOCAL claims</span>
+<span class="com">// (set by WithTx).</span>
+<span class="kw">type</span> <span class="typ">TaskStore</span> <span class="kw">interface</span> {
+  FindOrCreate(ctx context.<span class="typ">Context</span>, orgID, entityID, eventType, dedupKey, primaryEventID <span class="kw">string</span>, defaultPriority <span class="kw">float64</span>) (*domain.<span class="typ">Task</span>, <span class="kw">bool</span>, <span class="kw">error</span>)
+  FindOrCreateAt(ctx context.<span class="typ">Context</span>, orgID, entityID, eventType, dedupKey, primaryEventID <span class="kw">string</span>, defaultPriority <span class="kw">float64</span>, createdAt time.<span class="typ">Time</span>) (*domain.<span class="typ">Task</span>, <span class="kw">bool</span>, <span class="kw">error</span>)
+  Bump(ctx context.<span class="typ">Context</span>, orgID, taskID, eventID <span class="kw">string</span>) <span class="kw">error</span>
+  Close(ctx context.<span class="typ">Context</span>, orgID, taskID, closeReason, closeEventType <span class="kw">string</span>) <span class="kw">error</span>
+  CloseAllForEntity(ctx context.<span class="typ">Context</span>, orgID, entityID, closeReason <span class="kw">string</span>) (<span class="kw">int</span>, <span class="kw">error</span>)
+  SetStatus(ctx context.<span class="typ">Context</span>, orgID, taskID, status <span class="kw">string</span>) <span class="kw">error</span>
+  RecordEvent(ctx context.<span class="typ">Context</span>, orgID, taskID, eventID, kind <span class="kw">string</span>) <span class="kw">error</span>
+  GetByID(ctx context.<span class="typ">Context</span>, orgID, taskID <span class="kw">string</span>) (*domain.<span class="typ">Task</span>, <span class="kw">error</span>)
+  ListActiveByEntity(ctx context.<span class="typ">Context</span>, orgID, entityID <span class="kw">string</span>) ([]domain.<span class="typ">Task</span>, <span class="kw">error</span>)
+  ListActiveByEntityAndType(ctx context.<span class="typ">Context</span>, orgID, entityID, eventType <span class="kw">string</span>) ([]domain.<span class="typ">Task</span>, <span class="kw">error</span>)
+  Queued(ctx context.<span class="typ">Context</span>, orgID <span class="kw">string</span>) ([]domain.<span class="typ">Task</span>, <span class="kw">error</span>)
+  ByStatus(ctx context.<span class="typ">Context</span>, orgID, status <span class="kw">string</span>) ([]domain.<span class="typ">Task</span>, <span class="kw">error</span>)
+  CountConsecutiveFailedRuns(ctx context.<span class="typ">Context</span>, orgID, entityID, promptID <span class="kw">string</span>) (<span class="kw">int</span>, <span class="kw">error</span>)
+  ActiveTaskRefsForEntities(ctx context.<span class="typ">Context</span>, orgID <span class="kw">string</span>, entityIDs []<span class="kw">string</span>) ([]<span class="typ">PendingTaskRef</span>, <span class="kw">error</span>)
+  EntityIDsWithActiveTasks(ctx context.<span class="typ">Context</span>, orgID, source <span class="kw">string</span>) (<span class="kw">map</span>[<span class="kw">string</span>]<span class="kw">struct</span>{}, <span class="kw">error</span>)
+}
+
+<span class="com">// PendingTaskRef stays here — value type returned by stores.</span>
+<span class="kw">type</span> <span class="typ">PendingTaskRef</span> <span class="kw">struct</span> {
+  TaskID, EntityID, EventType <span class="kw">string</span>
+}</pre>
+
+  <h3><code>internal/db/sqlite/tasks.go</code> — SQL moved verbatim from old <code>internal/db/tasks.go</code></h3>
+<pre class="code"><span class="kw">package</span> sqlite
+
+<span class="kw">import</span> (
+  <span class="str">"context"</span>
+  <span class="str">"database/sql"</span>
+  <span class="str">"fmt"</span>
+
+  <span class="str">"github.com/sky-ai-eng/triage-factory/internal/db"</span>
+  <span class="str">"github.com/sky-ai-eng/triage-factory/internal/domain"</span>
+)
+
+<span class="kw">type</span> <span class="typ">taskStore</span> <span class="kw">struct</span> { q <span class="typ">queryer</span> }
+
+<span class="kw">func</span> <span class="fn">newTaskStore</span>(q <span class="typ">queryer</span>) db.<span class="typ">TaskStore</span> { <span class="kw">return</span> &<span class="typ">taskStore</span>{q: q} }
+
+<span class="kw">var</span> _ db.<span class="typ">TaskStore</span> = (*<span class="typ">taskStore</span>)(<span class="kw">nil</span>)  <span class="com">// compile-time check</span>
+
+<span class="kw">func</span> (s *<span class="typ">taskStore</span>) <span class="fn">FindOrCreate</span>(ctx context.<span class="typ">Context</span>, orgID, entityID, eventType, dedupKey, primaryEventID <span class="kw">string</span>, defaultPriority <span class="kw">float64</span>) (*domain.<span class="typ">Task</span>, <span class="kw">bool</span>, <span class="kw">error</span>) {
+  <span class="kw">if</span> orgID != db.<span class="typ">LocalDefaultOrg</span> {
+    <span class="kw">return nil</span>, <span class="kw">false</span>, fmt.<span class="fn">Errorf</span>(<span class="str">"sqlite store: orgID must be %q in local mode, got %q"</span>, db.<span class="typ">LocalDefaultOrg</span>, orgID)
+  }
+  <span class="com">// Body is the literal SQL from old internal/db/tasks.go::FindOrCreateTask,</span>
+  <span class="com">// rebound to use s.q.QueryRowContext / s.q.ExecContext.</span>
+  <span class="com">// ... ~30 lines of SQLite SQL ...</span>
+}</pre>
+
+  <h3><code>internal/db/postgres/tasks.go</code> — written fresh against D3's schema</h3>
+<pre class="code"><span class="kw">package</span> postgres
+
+<span class="kw">type</span> <span class="typ">taskStore</span> <span class="kw">struct</span> { q <span class="typ">queryer</span> }
+
+<span class="kw">var</span> _ db.<span class="typ">TaskStore</span> = (*<span class="typ">taskStore</span>)(<span class="kw">nil</span>)
+
+<span class="kw">func</span> (s *<span class="typ">taskStore</span>) <span class="fn">GetByID</span>(ctx context.<span class="typ">Context</span>, orgID, taskID <span class="kw">string</span>) (*domain.<span class="typ">Task</span>, <span class="kw">error</span>) {
+  <span class="com">// RLS enforces org_id matches the JWT claim set in WithTx.</span>
+  <span class="com">// The WHERE clause is defense in depth + lets non-tx callers</span>
+  <span class="com">// (rare; mostly admin paths) still scope.</span>
+  row := s.q.<span class="fn">QueryRowContext</span>(ctx,
+    <span class="str">`SELECT id, entity_id, event_type, ... FROM tasks WHERE id = $1 AND org_id = $2`</span>,
+    taskID, orgID)
+  <span class="kw">var</span> t domain.<span class="typ">Task</span>
+  <span class="kw">if</span> err := <span class="fn">scanTask</span>(row, &t); err != <span class="kw">nil</span> {
+    <span class="kw">if</span> errors.<span class="fn">Is</span>(err, sql.<span class="typ">ErrNoRows</span>) { <span class="kw">return nil</span>, <span class="kw">nil</span> }
+    <span class="kw">return nil</span>, err
+  }
+  <span class="kw">return</span> &t, <span class="kw">nil</span>
+}
+
+<span class="kw">func</span> (s *<span class="typ">taskStore</span>) <span class="fn">FindOrCreate</span>(ctx context.<span class="typ">Context</span>, orgID, entityID, eventType, dedupKey, primaryEventID <span class="kw">string</span>, defaultPriority <span class="kw">float64</span>) (*domain.<span class="typ">Task</span>, <span class="kw">bool</span>, <span class="kw">error</span>) {
+  <span class="com">// Use ON CONFLICT (entity_id, event_type, dedup_key) WHERE status = 'active'</span>
+  <span class="com">// — matches D3's partial unique index in migrations-postgres.</span>
+  <span class="com">// org_id is in the INSERT row + the WHERE on the conflict resolution path.</span>
+  <span class="com">// ...</span>
+}</pre>
+
+  <h3>queryer abstraction</h3>
+<pre class="code"><span class="com">// internal/db/sqlite/queryer.go (parallel in postgres)</span>
+<span class="kw">package</span> sqlite
+
+<span class="kw">type</span> <span class="typ">queryer</span> <span class="kw">interface</span> {
+  ExecContext(ctx context.<span class="typ">Context</span>, query <span class="kw">string</span>, args ...<span class="kw">any</span>) (sql.<span class="typ">Result</span>, <span class="kw">error</span>)
+  QueryContext(ctx context.<span class="typ">Context</span>, query <span class="kw">string</span>, args ...<span class="kw">any</span>) (*sql.<span class="typ">Rows</span>, <span class="kw">error</span>)
+  QueryRowContext(ctx context.<span class="typ">Context</span>, query <span class="kw">string</span>, args ...<span class="kw">any</span>) *sql.<span class="typ">Row</span>
+}</pre>
+
+  <p>Both <code>*sql.DB</code> and <code>*sql.Tx</code> satisfy <code>queryer</code> — same store code runs inside or outside a transaction.</p>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="bundle">
+  <div class="section-label">§5</div>
+  <h2>Stores bundle &amp; DI</h2>
+  <p class="lede">One bundled struct constructed at startup. Handlers depend on individual interfaces.</p>
+
+  <h3><code>internal/db/store.go</code></h3>
+<pre class="code"><span class="kw">package</span> db
+
+<span class="kw">import</span> (
+  <span class="str">"context"</span>
+  <span class="str">"errors"</span>
+)
+
+<span class="com">// LocalDefaultOrg is the synthetic org-context value local-mode callers</span>
+<span class="com">// pass everywhere a real orgID is expected. Mirrors runmode.LocalDefaultOrg.</span>
+<span class="kw">const</span> LocalDefaultOrg = <span class="str">"default"</span>
+
+<span class="com">// Sentinel errors returned by store impls.</span>
+<span class="kw">var</span> (
+  ErrNotApplicableInLocal = errors.<span class="fn">New</span>(<span class="str">"db: operation not applicable in local mode"</span>)
+  ErrCuratorInFlight       = errors.<span class="fn">New</span>(<span class="str">"curator request in flight"</span>)
+  ErrPendingPRAlreadyQueued = errors.<span class="fn">New</span>(<span class="str">"pending PR already queued for human approval"</span>)
+  <span class="com">// ... existing sentinels migrate here from old db/*.go files</span>
+)
+
+<span class="com">// Stores bundles every per-resource interface. Used at startup and at the</span>
+<span class="com">// tx wrapper. NEVER pass this to a handler — handlers take only the specific</span>
+<span class="com">// interfaces they consume.</span>
+<span class="kw">type</span> <span class="typ">Stores</span> <span class="kw">struct</span> {
+  Tasks            <span class="typ">TaskStore</span>
+  Runs             <span class="typ">RunStore</span>
+  Entities         <span class="typ">EntityStore</span>
+  Events           <span class="typ">EventStore</span>
+  Prompts          <span class="typ">PromptStore</span>
+  Projects         <span class="typ">ProjectStore</span>
+  Memory           <span class="typ">MemoryStore</span>
+  KB               <span class="typ">KBStore</span>
+  Rules            <span class="typ">RuleStore</span>
+  Curator          <span class="typ">CuratorStore</span>
+  Reviews          <span class="typ">ReviewStore</span>
+  Repos            <span class="typ">RepoStore</span>
+  PendingPRs       <span class="typ">PendingPRStore</span>
+  PendingFirings   <span class="typ">PendingFiringStore</span>
+  Swipes           <span class="typ">SwipeStore</span>
+  Scores           <span class="typ">ScoreStore</span>
+  Factory          <span class="typ">FactoryStore</span>
+  Secrets          <span class="typ">SecretStore</span>
+  Orgs             <span class="typ">OrgStore</span>
+  Memberships      <span class="typ">MembershipStore</span>
+  Users            <span class="typ">UserStore</span>
+  Sessions         <span class="typ">SessionStore</span>
+  Dashboard        <span class="typ">DashboardStore</span>
+
+  Tx <span class="typ">TxRunner</span>  <span class="com">// transaction wrapper (see §6)</span>
+}</pre>
+
+  <h3><code>main.go</code> wiring</h3>
+<pre class="code"><span class="kw">import</span> (
+  <span class="str">"github.com/sky-ai-eng/triage-factory/internal/db"</span>
+  <span class="str">"github.com/sky-ai-eng/triage-factory/internal/db/postgres"</span>
+  <span class="str">"github.com/sky-ai-eng/triage-factory/internal/db/sqlite"</span>
+  <span class="str">"github.com/sky-ai-eng/triage-factory/internal/runmode"</span>
+)
+
+<span class="kw">var</span> stores db.<span class="typ">Stores</span>
+<span class="kw">switch</span> runmode.<span class="fn">Current</span>() {
+<span class="kw">case</span> runmode.Local:
+  database, err := db.<span class="fn">Open</span>()
+  <span class="com">// ... handle err ...</span>
+  stores = sqlite.<span class="fn">New</span>(database)
+<span class="kw">case</span> runmode.Multi:
+  adminConn, err := postgres.<span class="fn">OpenAdmin</span>(cfg.PG.AdminDSN)  <span class="com">// supabase_admin / superuser</span>
+  appConn,   _   := postgres.<span class="fn">OpenApp</span>(cfg.PG.AppDSN)       <span class="com">// authenticator + tf_app</span>
+  stores = postgres.<span class="fn">New</span>(adminConn, appConn)
+}
+<span class="com">// Pass stores.Tasks, stores.Runs, etc. to specific handlers.</span></pre>
+
+  <div class="callout">
+    <strong>Why two Postgres connection pools at startup:</strong> deploy-time operations (running <code>goose</code> migrations, seeding <code>system_prompt_versions</code>) write to roles that are REVOKEd from <code>tf_app</code> per D3. They run on the admin connection. Request traffic runs on <code>tf_app</code>. Local mode is single-conn; SQLite has no role concept. The bundle's <code>Tx</code> wrapper for request handlers always uses the app pool — admin-only operations call <code>postgres.New</code>'s helpers directly during startup.
+  </div>
+
+  <h3>Handler constructor pattern</h3>
+<pre class="code"><span class="com">// Before</span>
+<span class="kw">type</span> <span class="typ">tasksHandler</span> <span class="kw">struct</span> { db *sql.<span class="typ">DB</span> }
+
+<span class="com">// After — ONLY the stores this handler actually uses</span>
+<span class="kw">type</span> <span class="typ">tasksHandler</span> <span class="kw">struct</span> {
+  tasks    db.<span class="typ">TaskStore</span>
+  entities db.<span class="typ">EntityStore</span>   <span class="com">// because tasksHandler renders entity titles</span>
+  tx       db.<span class="typ">TxRunner</span>      <span class="com">// only handlers that do multi-store writes</span>
+}</pre>
+
+  <div class="callout callout--warn">
+    <strong>Anti-pattern, linted against:</strong> a handler taking <code>db.Stores</code> as a constructor arg. Defeats the purpose. See §11 for the CI check.
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="tx">
+  <div class="section-label">§6</div>
+  <h2>Transactions &amp; RLS plumbing</h2>
+  <p class="lede">Any handler that mutates rows in two stores atomically (creating a run + emitting an event, closing a task + recording the close event) needs a transaction. <code>WithTx</code> is the closure pattern.</p>
+
+  <h3>Interface</h3>
+<pre class="code"><span class="com">// internal/db/store.go</span>
+<span class="kw">type</span> <span class="typ">TxStores</span> <span class="kw">struct</span> {
+  <span class="com">// Same fields as Stores, each tx-bound.</span>
+  Tasks    <span class="typ">TaskStore</span>
+  Runs     <span class="typ">RunStore</span>
+  Entities <span class="typ">EntityStore</span>
+  <span class="com">// ...</span>
+}
+
+<span class="com">// TxRunner runs fn inside a single DB transaction. Postgres impl</span>
+<span class="com">// additionally calls SELECT set_config('request.jwt.claims', $1, true)</span>
+<span class="com">// so RLS policies see the right claims for this tx. SQLite impl ignores</span>
+<span class="com">// orgID/userID (asserts orgID == LocalDefaultOrg).</span>
+<span class="kw">type</span> <span class="typ">TxRunner</span> <span class="kw">interface</span> {
+  WithTx(ctx context.<span class="typ">Context</span>, orgID, userID <span class="kw">string</span>, fn <span class="kw">func</span>(<span class="typ">TxStores</span>) <span class="kw">error</span>) <span class="kw">error</span>
+}</pre>
+
+  <h3>SQLite impl</h3>
+<pre class="code"><span class="com">// internal/db/sqlite/tx.go</span>
+<span class="kw">func</span> (s *<span class="typ">Store</span>) <span class="fn">WithTx</span>(ctx context.<span class="typ">Context</span>, orgID, userID <span class="kw">string</span>, fn <span class="kw">func</span>(db.<span class="typ">TxStores</span>) <span class="kw">error</span>) <span class="kw">error</span> {
+  <span class="kw">if</span> orgID != db.<span class="typ">LocalDefaultOrg</span> {
+    <span class="kw">return</span> fmt.<span class="fn">Errorf</span>(<span class="str">"sqlite WithTx: orgID must be %q, got %q"</span>, db.<span class="typ">LocalDefaultOrg</span>, orgID)
+  }
+  tx, err := s.conn.<span class="fn">BeginTx</span>(ctx, <span class="kw">nil</span>)
+  <span class="kw">if</span> err != <span class="kw">nil</span> { <span class="kw">return</span> err }
+  <span class="kw">defer</span> tx.<span class="fn">Rollback</span>()  <span class="com">// no-op after commit</span>
+
+  txStores := db.<span class="typ">TxStores</span>{
+    Tasks:    <span class="fn">newTaskStore</span>(tx),
+    Runs:     <span class="fn">newRunStore</span>(tx),
+    Entities: <span class="fn">newEntityStore</span>(tx),
+    <span class="com">// ... all 22 stores wired against the tx</span>
+  }
+  <span class="kw">if</span> err := <span class="fn">fn</span>(txStores); err != <span class="kw">nil</span> { <span class="kw">return</span> err }
+  <span class="kw">return</span> tx.<span class="fn">Commit</span>()
+}</pre>
+
+  <h3>Postgres impl</h3>
+<pre class="code"><span class="com">// internal/db/postgres/tx.go</span>
+<span class="kw">func</span> (s *<span class="typ">Store</span>) <span class="fn">WithTx</span>(ctx context.<span class="typ">Context</span>, orgID, userID <span class="kw">string</span>, fn <span class="kw">func</span>(db.<span class="typ">TxStores</span>) <span class="kw">error</span>) <span class="kw">error</span> {
+  tx, err := s.app.<span class="fn">BeginTx</span>(ctx, <span class="kw">nil</span>)
+  <span class="kw">if</span> err != <span class="kw">nil</span> { <span class="kw">return</span> err }
+  <span class="kw">defer</span> tx.<span class="fn">Rollback</span>()
+
+  <span class="com">// Set the JWT claims that RLS policies + tf.current_user_id() /</span>
+  <span class="com">// tf.current_org_id() helpers read from. set_config(..., true)</span>
+  <span class="com">// scopes to this tx — does not leak to other pool connections.</span>
+  claims, err := json.<span class="fn">Marshal</span>(<span class="kw">map</span>[<span class="kw">string</span>]<span class="kw">any</span>{
+    <span class="str">"sub"</span>:    userID,
+    <span class="str">"org_id"</span>: orgID,
+  })
+  <span class="kw">if</span> err != <span class="kw">nil</span> { <span class="kw">return</span> err }
+  <span class="kw">if</span> _, err := tx.<span class="fn">ExecContext</span>(ctx,
+    <span class="str">`SELECT set_config('request.jwt.claims', $1, true)`</span>, <span class="kw">string</span>(claims)); err != <span class="kw">nil</span> {
+    <span class="kw">return</span> err
+  }
+
+  txStores := db.<span class="typ">TxStores</span>{ <span class="com">/* same wiring, all stores against tx */</span> }
+  <span class="kw">if</span> err := <span class="fn">fn</span>(txStores); err != <span class="kw">nil</span> { <span class="kw">return</span> err }
+  <span class="kw">return</span> tx.<span class="fn">Commit</span>()
+}</pre>
+
+  <h3>Caller pattern</h3>
+<pre class="code"><span class="kw">err</span> := h.tx.<span class="fn">WithTx</span>(ctx, orgID, userID, <span class="kw">func</span>(t db.<span class="typ">TxStores</span>) <span class="kw">error</span> {
+  run, err := t.Runs.<span class="fn">Create</span>(ctx, orgID, ...)
+  <span class="kw">if</span> err != <span class="kw">nil</span> { <span class="kw">return</span> err }
+  <span class="kw">return</span> t.Events.<span class="fn">Insert</span>(ctx, orgID, ...)
+})</pre>
+
+  <div class="callout">
+    <strong>Where <code>orgID</code> and <code>userID</code> come from in D2:</strong> handlers in local mode pass <code>db.LocalDefaultOrg</code> and a synthetic local user constant. D7 introduces request-scoped auth context (<code>authctx.ClaimsFromContext(ctx)</code>) and rewrites handlers to extract claims from <code>ctx</code>. The <code>TxRunner</code> signature accepts them explicitly in D2 so the call sites are visible — D7 just changes where they come from, not the shape of <code>WithTx</code>.
+  </div>
+
+  <p><strong>Why <code>WithTx</code> isn't owned by individual stores:</strong> a handler that does "create run + emit event + bump counter" needs one transaction across three stores. If each store opened its own tx, you'd get partial-state on a mid-way failure. The handler knows the atomicity boundary; the storage layer doesn't. <code>WithTx</code> is that boundary.</p>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="scoping">
+  <div class="section-label">§7</div>
+  <h2>Org/user scoping rules</h2>
+
+  <table class="matrix">
+    <thead><tr><th style="width: 22%;">Resource</th><th style="width: 18%;">Scoping in v1</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td class="col-key">orgs</td><td>Global</td><td>Registry — no orgID param. <code>ListAll()</code> for system loops (seeder); <code>ListForUser(userID)</code> for the user's accessible orgs.</td></tr>
+      <tr><td class="col-key">memberships</td><td>(orgID, userID)</td><td>Both required.</td></tr>
+      <tr><td class="col-key">users</td><td>Global</td><td>Identity table. Cross-org by definition.</td></tr>
+      <tr><td class="col-key">sessions</td><td>userID</td><td>Sessions are per-user, not per-org.</td></tr>
+      <tr><td class="col-key">tasks / runs / entities / events</td><td>orgID</td><td><code>org_id</code> denormalized on every row. RLS in Postgres; assert in SQLite.</td></tr>
+      <tr><td class="col-key">prompts</td><td>orgID</td><td>Composite PK <code>(org_id, id)</code> per D3 — system prompts live per-org.</td></tr>
+      <tr><td class="col-key">projects / project_knowledge</td><td>orgID</td><td>KB stays attached to projects; <code>org_id</code> denormalized.</td></tr>
+      <tr><td class="col-key">memories</td><td>orgID</td><td>Materialized into worktrees; agent never crosses orgs.</td></tr>
+      <tr><td class="col-key">task_rules / prompt_triggers</td><td>orgID</td><td>System rules are seeded into each org (per D3's per-org prompts).</td></tr>
+      <tr><td class="col-key">curator state</td><td>orgID</td><td>Curator sessions belong to orgs even though they're user-facing.</td></tr>
+      <tr><td class="col-key">reviews / pending_prs / pending_firings</td><td>orgID</td><td>Materialization queues for the agent path.</td></tr>
+      <tr><td class="col-key">swipes / scores</td><td>orgID</td><td>UI swipe history + AI scoring state.</td></tr>
+      <tr><td class="col-key">events_catalog</td><td>Global</td><td>System registry seeded at migration time.</td></tr>
+      <tr><td class="col-key">org_secrets (Vault)</td><td>orgID</td><td>D5 wires the OS-keychain ↔ Vault split semantically.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Visibility columns (schema in D3, surface deferred to v2)</h3>
+  <p>D3 shipped <code>tasks</code>, <code>runs</code>, <code>memories</code>, <code>rules</code>, and <code>prompts</code> with a <code>visibility</code> column (<code>'private' | 'team' | 'org'</code>) and a nullable <code>team_id</code>. v1 store impls hardcode <code>visibility = 'private'</code> on inserts and ignore <code>team_id</code> on reads. v2 flips toggles in the UI without a schema migration.</p>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="dual-backend">
+  <div class="section-label">§8</div>
+  <h2>Both backends, day one</h2>
+  <p class="lede">No stubs, no <code>panic("D3 fills this")</code>, no phase-1 wrappers. The whole point of doing this after D3 lands is that we can write real Postgres impls now.</p>
+
+  <h3>What changes per backend</h3>
+  <ul class="tight">
+    <li><strong>SQLite</strong>: SQL is <em>moved verbatim</em> from existing <code>internal/db/&lt;resource&gt;.go</code> into <code>internal/db/sqlite/&lt;resource&gt;.go</code>. Method signatures grow <code>ctx</code> + <code>orgID</code> (+ <code>userID</code> where relevant). Each method asserts <code>orgID == db.LocalDefaultOrg</code> at the top.</li>
+    <li><strong>Postgres</strong>: SQL is <em>written fresh</em> against D3's schema. Reads include <code>org_id = $N</code> in <code>WHERE</code> as defense in depth (RLS also enforces). Writes set <code>org_id</code> explicitly. Vault calls use the <code>vault_put_org_secret</code> / <code>vault_get_org_secret</code> / <code>vault_delete_org_secret</code> SECURITY DEFINER helpers from D3. OCC uses the D3 <code>update_project_knowledge</code> function (raises SQLSTATE 40001). Composite FKs from D3 enforce cross-tenant integrity; tests assert SQLSTATE 23503 on cross-org refs.</li>
+  </ul>
+
+  <h3>Multi-only stores in SQLite</h3>
+  <p>Stores that exist solely for multi-tenant features (Org, Membership, User, Session) still need SQLite impls. Three response patterns:</p>
+  <ul class="tight">
+    <li><strong>Synthetic default.</strong> <code>OrgStore.GetByID(ctx, "default")</code> returns <code>{ID: "default", Name: "Local"}</code>. <code>OrgStore.ListAll(ctx)</code> returns one entry. <code>MembershipStore.RoleOf(ctx, "default", localUserID)</code> returns <code>"owner"</code>.</li>
+    <li><strong>Sentinel error.</strong> <code>SessionStore.Insert(...)</code> in SQLite returns <code>db.ErrNotApplicableInLocal</code>. The auth path is gated behind <code>runmode.Current() == Multi</code>, so this is a safety net for code that escapes that gate.</li>
+    <li><strong>No-op silently.</strong> <code>MembershipStore.Add(...)</code> in SQLite returns nil — nothing to add to, and the caller (org admin UI in D14) is multi-only anyway.</li>
+  </ul>
+
+  <h3>SQLite-only paths in Postgres</h3>
+  <p>None. Anything SQLite does, Postgres does the same shape. The reverse direction (Postgres-only) is what produces the multi-only sentinel handling above.</p>
+
+  <div class="callout callout--good">
+    <strong>"Every function written in both languages" is a hard rule.</strong> Conformance suite (§10) is the gate — every interface method has a test that runs against both backends. If a SQLite impl is missing, the build fails at <code>var _ db.TaskStore = (*taskStore)(nil)</code>. If a Postgres impl is missing, the pgtest conformance run fails. No "we'll add Postgres later."
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="seeder">
+  <div class="section-label">§9</div>
+  <h2>System prompt seeder</h2>
+  <p class="lede">The seeder ran on the request connection against a single global prompts table pre-D3. D3 changed both: prompts are per-org (composite PK <code>(org_id, id)</code>), and <code>system_prompt_versions</code> is REVOKEd from <code>tf_app</code>. D2 re-shapes the seeder to use stores + a per-org loop.</p>
+
+  <h3>The new shape</h3>
+<pre class="code"><span class="com">// main.go, after migrations + before serving traffic</span>
+<span class="kw">func</span> <span class="fn">seedSystemPrompts</span>(ctx context.<span class="typ">Context</span>, adminStores db.<span class="typ">Stores</span>) <span class="kw">error</span> {
+  orgs, err := adminStores.Orgs.<span class="fn">ListAll</span>(ctx)
+  <span class="kw">if</span> err != <span class="kw">nil</span> { <span class="kw">return</span> err }
+  <span class="kw">for</span> _, org := <span class="kw">range</span> orgs {
+    <span class="kw">for</span> _, p := <span class="kw">range</span> shippedSystemPrompts {
+      <span class="kw">if</span> err := adminStores.Prompts.<span class="fn">SeedOrUpdate</span>(ctx, org.ID, p); err != <span class="kw">nil</span> {
+        <span class="kw">return</span> fmt.<span class="fn">Errorf</span>(<span class="str">"seed %s into org %s: %w"</span>, p.ID, org.ID, err)
+      }
+    }
+  }
+  <span class="kw">return nil</span>
+}</pre>
+
+  <h3>Backend differences</h3>
+  <ul class="tight">
+    <li><strong>SQLite</strong>: <code>OrgStore.ListAll</code> returns one synthetic <code>{"default"}</code> entry; <code>PromptStore.SeedOrUpdate</code> writes to <code>prompts</code> + <code>system_prompt_versions</code> on the single connection. Behavior matches today.</li>
+    <li><strong>Postgres</strong>: <code>OrgStore.ListAll</code> queries <code>orgs</code> on the admin connection (RLS is bypassed for <code>supabase_admin</code>). <code>PromptStore.SeedOrUpdate</code> writes via the admin <code>tf_app</code>-equivalent role that retains <code>system_prompt_versions</code> write privileges. Hash-based skip (<code>SeedOrUpdateSystemPrompt</code> from existing code) prevents re-write on identical content.</li>
+  </ul>
+
+  <p>Bootstrap path for the first org (D7 ships first-org creation): immediately after creating the org, call <code>seedSystemPrompts(ctx, adminStores)</code> filtered to that one org. Same code path, scoped argument — no second seeder.</p>
+
+  <div class="callout">
+    <strong>Failure modes if mis-wired:</strong> seeder run on the <code>tf_app</code> request pool → SQLSTATE 42501 (insufficient privilege) — pinned by <code>TestSystemPromptSeeding_DeployActorOnly</code>. Per-org loop missing → first org has prompts, subsequent orgs have empty <code>prompts</code> table → handler returns no system prompts → loud at any usage site. Both fail fast and obviously.
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="testing">
+  <div class="section-label">§10</div>
+  <h2>Testing &amp; mocks</h2>
+
+  <h3>Three layers</h3>
+  <ol class="tight">
+    <li><strong>Conformance suite</strong> in <code>internal/db/dbtest/</code> — shared test bodies, parametrized over impl. Each interface method gets test coverage that runs against both backends. Acceptance gate: identical assertions pass against both.</li>
+    <li><strong>Mockery-generated mocks</strong> in <code>internal/db/mocks/</code> — handler tests inject these. No database. CI verifies <code>go generate ./...</code> produces no diff.</li>
+    <li><strong>End-to-end black-box</strong> in <code>internal/server/server_test.go</code> — boots a real server, hits HTTP, asserts JSON. SQLite-backed for speed; one Postgres run in CI to catch dialect drift.</li>
+  </ol>
+
+  <h3>Mockery config (<code>internal/db/.mockery.yaml</code>)</h3>
+<pre class="code">with-expecter: true
+dir: internal/db/mocks
+filename: <span class="str">"{{.InterfaceName}}.go"</span>
+outpkg: mocks
+case: underscore
+all: <span class="kw">true</span>
+recursive: <span class="kw">false</span>
+inpackage: <span class="kw">false</span>
+packages:
+  github.com/sky-ai-eng/triage-factory/internal/db:
+    interfaces:
+      TaskStore: {}
+      RunStore: {}
+      EntityStore: {}
+      <span class="com"># ... all 22 interfaces + TxRunner</span></pre>
+
+  <p>Each interface file has the <code>//go:generate mockery</code> directive at the top. <code>go generate ./internal/db/...</code> regenerates. CI runs the same and asserts <code>git diff --exit-code internal/db/mocks/</code>.</p>
+
+  <h3>Conformance harness</h3>
+<pre class="code"><span class="com">// internal/db/dbtest/conformance.go</span>
+<span class="kw">package</span> dbtest
+
+<span class="kw">func</span> <span class="fn">RunTaskStoreConformance</span>(t *testing.<span class="typ">T</span>, mk <span class="kw">func</span>(t *testing.<span class="typ">T</span>) (db.<span class="typ">TaskStore</span>, <span class="kw">string</span>)) {
+  <span class="com">// mk returns (store, orgID) — sqlite gives LocalDefaultOrg, postgres gives a fresh org UUID</span>
+  t.<span class="fn">Run</span>(<span class="str">"FindOrCreate_idempotent"</span>, <span class="kw">func</span>(t *testing.<span class="typ">T</span>) {
+    s, org := <span class="fn">mk</span>(t)
+    a, created, err := s.<span class="fn">FindOrCreate</span>(ctx, org, ...)
+    require.<span class="fn">NoError</span>(t, err); require.<span class="fn">True</span>(t, created)
+    b, created2, _ := s.<span class="fn">FindOrCreate</span>(ctx, org, ...)
+    require.<span class="fn">False</span>(t, created2)
+    require.<span class="fn">Equal</span>(t, a.ID, b.ID)
+  })
+  <span class="com">// ... shared assertions per method</span>
+}
+
+<span class="com">// internal/db/sqlite/tasks_test.go</span>
+<span class="kw">func</span> <span class="fn">TestTaskStore_SQLite</span>(t *testing.<span class="typ">T</span>) {
+  dbtest.<span class="fn">RunTaskStoreConformance</span>(t, <span class="fn">sqliteFactory</span>)
+}
+
+<span class="com">// internal/db/postgres/tasks_test.go</span>
+<span class="kw">func</span> <span class="fn">TestTaskStore_Postgres</span>(t *testing.<span class="typ">T</span>) {
+  dbtest.<span class="fn">RunTaskStoreConformance</span>(t, <span class="fn">pgFactory</span>)  <span class="com">// uses pgtest.WithUser harness</span>
+}</pre>
+
+  <h3>Handler tests with mocks</h3>
+<pre class="code"><span class="kw">func</span> <span class="fn">TestTasksHandler_SwipeUpdatesStatus</span>(t *testing.<span class="typ">T</span>) {
+  tasks := mocks.<span class="fn">NewTaskStore</span>(t)
+  tasks.EXPECT().<span class="fn">SetStatus</span>(mock.Anything, <span class="str">"default"</span>, <span class="str">"task-123"</span>, <span class="str">"closed"</span>).Return(<span class="kw">nil</span>)
+  h := &<span class="typ">tasksHandler</span>{tasks: tasks}
+  <span class="com">// ... call handler, assert response</span>
+}</pre>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="lint">
+  <div class="section-label">§11</div>
+  <h2>Lint enforcement</h2>
+  <p class="lede">A refactor like this only sticks if drift can't sneak in. Two rules; both go strict by wave 4.</p>
+
+  <h3>Rule 1: Only impl packages access raw SQL</h3>
+  <p>The old <code>internal/db</code> package-level functions (<code>db.FindOrCreateTask</code>, etc.) are <em>deleted</em> by the end of D2. The replacement check is that no file under <code>internal/server/</code>, <code>internal/delegate/</code>, <code>internal/poller/</code>, <code>internal/curator/</code>, <code>internal/ai/</code>, <code>internal/tracker/</code>, or any other non-impl package imports <code>database/sql</code> directly — only <code>internal/db</code>, <code>internal/db/sqlite</code>, <code>internal/db/postgres</code>, <code>internal/db/dbtest</code>, and <code>internal/db/pgtest</code> may.</p>
+
+<pre class="code"><span class="com"># .golangci.yml</span>
+linters:
+  enable:
+    - forbidigo
+linters-settings:
+  forbidigo:
+    forbid:
+      - p: <span class="str">'^sql\.Open$'</span>
+        msg: <span class="str">'use db.Open / db.OpenAt instead of raw sql.Open'</span>
+      - p: <span class="str">'^sql\.DB$'</span>
+        msg: <span class="str">'depend on db store interfaces, not raw *sql.DB'</span>
+issues:
+  exclude-rules:
+    - path: <span class="str">'internal/db/.*'</span>
+    - path: <span class="str">'main\.go'</span>
+    - path: <span class="str">'cmd/.*'</span></pre>
+
+  <p>Path exclusions are intentionally permissive for the <code>internal/db/</code> tree; everything inside that tree may use raw SQL freely. Everything outside it must go through interfaces.</p>
+
+  <h3>Rule 2: Handlers can't take <code>db.Stores</code></h3>
+  <p>Grep-based CI check (<code>scripts/lint-stores.sh</code>):</p>
+<pre class="code"><span class="com">#!/usr/bin/env bash</span>
+<span class="kw">set</span> -euo pipefail
+<span class="kw">if</span> grep -rnE <span class="str">'db\.Stores'</span> internal/server/ internal/delegate/ internal/poller/ \
+   --include=<span class="str">'*.go'</span> | grep -v <span class="str">'_test\.go'</span>; <span class="kw">then</span>
+  <span class="kw">echo</span> <span class="str">"FAIL: depend on specific db.TaskStore / db.RunStore / etc., not the bundle"</span>
+  <span class="kw">exit</span> 1
+<span class="kw">fi</span></pre>
+
+  <p>The bundle is for <code>main.go</code> startup wiring only.</p>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="order">
+  <div class="section-label">§12</div>
+  <h2>Wave order</h2>
+  <p class="lede">22 stores. Don't migrate them all at once. Six waves, each independently mergeable.</p>
+
+  <h3>Wave 0 — skeleton</h3>
+  <ul class="tight">
+    <li>Create <code>internal/db/sqlite/</code> and <code>internal/db/postgres/</code> packages with empty <code>Store</code> structs.</li>
+    <li>Define <code>db.Stores</code> bundle, <code>db.TxStores</code>, <code>db.TxRunner</code>. All store fields are interfaces with no methods yet (waves 1–4 add methods).</li>
+    <li><code>sqlite.New(conn)</code> and <code>postgres.New(admin, app)</code> compile and return valid bundles whose Tx wrappers work end-to-end (begin/commit, claims set).</li>
+    <li>Wire bundle in <code>main.go</code> via <code>runmode.Current()</code> dispatch.</li>
+    <li>Mockery config lands. Conformance scaffold (<code>internal/db/dbtest/</code>) lands.</li>
+  </ul>
+
+  <h3>Wave 1 — leaf stores</h3>
+  <p>PromptStore, RuleStore, SecretStore, DashboardStore, ScoreStore, SwipeStore. Narrow surfaces. Both backends implemented. Conformance scaffold proven end-to-end on these.</p>
+
+  <h3>Wave 2 — read paths</h3>
+  <p>EntityStore, EventStore, ProjectStore, KBStore, RepoStore, FactoryStore. Higher volume but mostly reads.</p>
+
+  <h3>Wave 3a — Tasks</h3>
+  <p>TaskStore. Touched by ~30 callsites. The PendingTaskRef + EntityIDsWithActiveTasks shapes need careful translation in Postgres (composite indexes + RLS).</p>
+
+  <h3>Wave 3b — Runs</h3>
+  <p>RunStore alone. ~28 methods. Touches delegate spawner, run_messages, run_artifacts, run_worktrees. Estimated 5–7 day PR. If it grows beyond that, split internally by method group (lifecycle / message-stream / artifact-write).</p>
+
+  <h3>Wave 3c — Memory + Curator + Reviews</h3>
+  <p>MemoryStore, CuratorStore, ReviewStore. Touches the delegate path (memory) and the agent loop (curator + reviews).</p>
+
+  <h3>Wave 4 — multi-only auth stores</h3>
+  <p>OrgStore, MembershipStore, UserStore, SessionStore, PendingPRStore, PendingFiringStore. SQLite impls return synthetic local-mode values or <code>ErrNotApplicableInLocal</code>; Postgres impls real. Final wave; forbidigo path exemptions are removed.</p>
+
+  <div class="callout">
+    <strong>Wave dependencies:</strong> Wave 0 unblocks 1. Waves 1, 2, 3a, 3b, 3c can run in parallel after Wave 0 (different resources, different callsites; build stays green between merges). Wave 4 must follow Wave 1 because the seeder consumes <code>OrgStore.ListAll</code> + <code>PromptStore.SeedOrUpdate</code> together.
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="steps">
+  <div class="section-label">§13</div>
+  <h2>Implementation steps</h2>
+
+  <ol class="steps">
+    <li>
+      <span class="step-title">Wave 0 — skeleton PR</span>
+      <span class="step-body">Empty packages, empty bundle, <code>WithTx</code> wired with claims plumbing, mockery config, conformance scaffold. <code>main.go</code> picks the right backend via <code>runmode.Current()</code> + Postgres admin/app two-conn setup. Build passes; no functional change.</span>
+    </li>
+    <li>
+      <span class="step-title">System prompt seeder reshape</span>
+      <span class="step-body">Rewrite <code>seedDefaultPrompts</code> in <code>main.go</code> to iterate <code>OrgStore.ListAll</code> → <code>PromptStore.SeedOrUpdate</code> per org. SQLite returns one synthetic org; Postgres queries <code>orgs</code>. Both run on the admin connection bundle. Ships in Wave 1 alongside PromptStore.</span>
+    </li>
+    <li>
+      <span class="step-title">Wave 1 — leaf stores</span>
+      <span class="step-body">Define interfaces (PromptStore, RuleStore, SecretStore, DashboardStore, ScoreStore, SwipeStore). Move SQLite SQL into <code>internal/db/sqlite/&lt;resource&gt;.go</code>. Write Postgres SQL fresh against D3 schema. Wire bundle. Refactor affected handlers + non-server callsites to take the interface. Conformance tests for each. <code>go generate</code> mocks.</span>
+    </li>
+    <li>
+      <span class="step-title">Add lint rule + exemption baseline</span>
+      <span class="step-body">After wave 1 lands, add the forbidigo + <code>scripts/lint-stores.sh</code> checks. Exempt every path that hasn't been converted yet (waves 2/3/4 paths). Each subsequent wave removes its exemption.</span>
+    </li>
+    <li>
+      <span class="step-title">Wave 2 — read paths</span>
+      <span class="step-body">EntityStore, EventStore, ProjectStore, KBStore, RepoStore, FactoryStore. Same recipe.</span>
+    </li>
+    <li>
+      <span class="step-title">Wave 3a — TaskStore</span>
+      <span class="step-body">Move task SQL, write Postgres parallel. ~30 callsites; compile errors will surface all of them. Special attention to <code>ActiveTaskRefsForEntities</code> (batches via <code>entityIDInChunkSize</code> in SQLite — Postgres can drop the chunking or keep it for parity).</span>
+    </li>
+    <li>
+      <span class="step-title">Wave 3b — RunStore</span>
+      <span class="step-body">Largest. Move agent.go + run_worktrees.go SQL. Postgres impl handles run_messages, run_artifacts, takeover/release transitions, run_worktrees lifecycle. Coordinate with delegate spawner refactor (drop direct <code>*sql.DB</code> field, take <code>db.RunStore</code> + <code>db.TxRunner</code>).</span>
+    </li>
+    <li>
+      <span class="step-title">Wave 3c — Memory + Curator + Reviews</span>
+      <span class="step-body">MemoryStore, CuratorStore, ReviewStore. Curator's <code>onEventRecorded</code> callback (currently a package-level <code>var</code> in <code>internal/db/events.go</code>) needs a home — move to <code>EventStore</code> as a method <code>SetOnRecorded(fn)</code> or pass through ctx; pick whichever is cleaner once the wave starts.</span>
+    </li>
+    <li>
+      <span class="step-title">Wave 4 — multi-only stores</span>
+      <span class="step-body">OrgStore, MembershipStore, UserStore, SessionStore, PendingPRStore, PendingFiringStore. SQLite impls return defaults or <code>ErrNotApplicableInLocal</code>. Postgres impls real, RLS-aware. Remove all remaining forbidigo exemptions.</span>
+    </li>
+    <li>
+      <span class="step-title">Final cleanup</span>
+      <span class="step-body">Verify <code>grep -rE '^func [A-Z]' internal/db/*.go</code> returns zero results — all SQL has moved. The parent <code>internal/db/&lt;resource&gt;.go</code> files now hold only interfaces and value types. Verify forbidigo clean with no exemptions for non-impl packages.</span>
+    </li>
+  </ol>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="risks">
+  <div class="section-label">§14</div>
+  <h2>Risks</h2>
+
+  <table class="matrix">
+    <thead><tr><th style="width: 28%;">Risk</th><th>Mitigation</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Refactor takes longer than estimate; multi-tenant work blocks behind it</td>
+        <td>Six waves means downstream tickets unblock incrementally. Wave 1 unblocks D5 (SecretStore semantics). Wave 4 unblocks D7 (Sessions). D3 is already merged so the schema isn't a blocker.</td>
+      </tr>
+      <tr>
+        <td>Behavior drift between old <code>internal/db.X</code> and new SQLite impls</td>
+        <td>SQLite SQL is moved <em>verbatim</em>, not rewritten. Conformance harness runs both backends against the same assertions; if the SQLite behavior changed in transit, the test fails. The existing test suite that already exercises <code>internal/db.X</code> functions stays in place during each wave, just rewired to call through the store.</td>
+      </tr>
+      <tr>
+        <td>Postgres impls have correctness bugs not caught by the conformance suite</td>
+        <td>Conformance tests assert behavior on the happy path; the pgtest harness already covers RLS isolation, cross-org FK rejection, OCC, vault auth. Postgres-specific edge cases (SQLSTATE assertions, RLS bypass for admin) live in backend-specific test files alongside the conformance run.</td>
+      </tr>
+      <tr>
+        <td>Adding ctx + orgID + userID args breaks every callsite</td>
+        <td>That's the point. Compile errors surface every site at once; IDE rename handles most. Bundle the rename per-wave so the build doesn't stay broken across waves.</td>
+      </tr>
+      <tr>
+        <td>Mockery + interface method additions cause stale mocks</td>
+        <td>CI step: <code>go generate ./... && git diff --exit-code internal/db/mocks/</code>. Compile-time check at the top of each impl: <code>var _ db.TaskStore = (*taskStore)(nil)</code> fails the moment the interface gains a method that the impl doesn't have.</td>
+      </tr>
+      <tr>
+        <td>Wave 3b (Runs) is genuinely large — ~28 methods, touches delegate spawner</td>
+        <td>If the PR grows beyond 5–7 days of work, split RunStore internally by method group: lifecycle (Create/Complete/Cancel/Release) → message stream (Append/List) → artifacts (Insert/GetPrimary) → worktrees (Create/Update/List). Each subgroup is a half-day PR.</td>
+      </tr>
+      <tr>
+        <td>Two Postgres connection pools at startup is operationally heavier</td>
+        <td>Documented in §5 with rationale (deploy-time vs request-time roles per D3 grants). Local mode is single-conn. The split matches Postgres best practice for role-separated apps (Supabase, AWS RDS IAM auth all do this).</td>
+      </tr>
+      <tr>
+        <td>Package-level callbacks like <code>onEventRecorded</code> don't translate cleanly to per-impl stores</td>
+        <td>Wave 3c (which owns EventStore) decides the shape — either a setter on the store, a constructor parameter, or a ctx-carried hook. Pick the one that doesn't leak into the interface signature; if all three do, the cleanest is constructor-injected.</td>
+      </tr>
+      <tr>
+        <td>Non-server packages (delegate, poller, tracker, etc.) also need to migrate, not just server</td>
+        <td>The lint rule (§11) explicitly covers them. Each wave's refactor includes all callers, not just <code>internal/server/</code>. <code>grep -lE 'database/sql' internal/{delegate,poller,tracker,curator,ai}/*.go</code> goes empty by wave 4.</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="acceptance">
+  <div class="section-label">§15</div>
+  <h2>Acceptance</h2>
+
+  <h3>Code structure</h3>
+  <ul class="tight">
+    <li><span class="tag tag--green">PASS</span> Every interface in §3 lives in <code>internal/db/&lt;resource&gt;.go</code>.</li>
+    <li><span class="tag tag--green">PASS</span> Every interface has both a SQLite impl (<code>internal/db/sqlite/&lt;resource&gt;.go</code>) AND a Postgres impl (<code>internal/db/postgres/&lt;resource&gt;.go</code>). No stubs, no panics.</li>
+    <li><span class="tag tag--green">PASS</span> <code>db.Stores</code> bundle exists and is constructed once in <code>main.go</code> via <code>runmode.Current()</code> dispatch.</li>
+    <li><span class="tag tag--green">PASS</span> <code>grep -rE '^func [A-Z]' internal/db/*.go</code> returns zero results outside <code>internal/db/sqlite/</code> and <code>internal/db/postgres/</code>.</li>
+  </ul>
+
+  <h3>Lint</h3>
+  <ul class="tight">
+    <li><span class="tag tag--green">PASS</span> <code>golangci-lint run</code> clean with no path exemptions for any non-impl package.</li>
+    <li><span class="tag tag--green">PASS</span> <code>scripts/lint-stores.sh</code> clean — no <code>db.Stores</code> field or param outside <code>main.go</code>.</li>
+    <li><span class="tag tag--green">PASS</span> <code>go generate ./... && git diff --exit-code internal/db/mocks/</code> produces no diff (mocks up-to-date).</li>
+  </ul>
+
+  <h3>Tests</h3>
+  <ul class="tight">
+    <li><span class="tag tag--green">PASS</span> All existing tests pass — handler tests use mocks, end-to-end tests use real backends.</li>
+    <li><span class="tag tag--green">PASS</span> Conformance suite in <code>internal/db/dbtest/</code> exists with one <code>RunXxxConformance</code> per interface. SQLite + Postgres test files in their respective impl packages both invoke it.</li>
+    <li><span class="tag tag--green">PASS</span> CI runs the full conformance suite against both backends. Postgres uses the <code>pgtest</code> testcontainer harness; skips cleanly when Docker isn't available.</li>
+  </ul>
+
+  <h3>Behavior</h3>
+  <ul class="tight">
+    <li><span class="tag tag--green">PASS</span> <code>./triagefactory</code> in local mode behaves identically to pre-D2: poll a repo, take in a PR, swipe a task, run an agent.</li>
+    <li><span class="tag tag--green">PASS</span> <code>TF_MODE=multi</code> with a fresh Postgres: orgs created, system prompts seeded into each org's namespace, RLS enforces cross-org isolation per pgtest assertions, request handlers serve through <code>tf_app</code> with claims set by <code>WithTx</code>.</li>
+  </ul>
+
+  <h3>Out of scope</h3>
+  <ul class="tight">
+    <li>Request-scoped auth context (<code>authctx.ClaimsFromContext</code>) — D7 wires that; D2 callers pass <code>orgID</code> + <code>userID</code> explicitly to <code>WithTx</code>.</li>
+    <li>Schema changes — D3 owns those.</li>
+    <li>Vault semantics for SecretStore — D5 wires the OS-keychain ↔ Vault split; D2 just provides the interface and a working Postgres impl that calls the D3 vault wrappers.</li>
+    <li>UI changes — none.</li>
+  </ul>
+</section>
+
+</article>
+</main>
+
+<footer>
+  SKY-246 · D2 · Store layer abstraction · v1.0 · 2026-05-10
+</footer>
+</body>
+</html>

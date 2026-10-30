@@ -1,0 +1,804 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SKY-259 — event_handlers unification</title>
+<style>
+:root {
+  --bg: #030712;
+  --fg: #f8fafc;
+  --surface: rgba(17, 24, 39, 0.30);
+  --surface-2: rgba(31, 41, 55, 0.50);
+  --surface-floating: rgba(3, 7, 18, 0.80);
+  --border: #1f2937;
+  --border-2: #1e293b;
+  --border-3: #374151;
+  --muted: #94a3b8;
+  --muted-2: #6b7280;
+  --muted-3: #4b5563;
+  --accent: #22d3ee;
+  --accent-2: #06b6d4;
+  --violet: #a78bfa;
+  --violet-2: #8b5cf6;
+  --purple: #a855f7;
+  --pink: #f472b6;
+  --green: #22c55e;
+  --green-2: #4ade80;
+  --amber: #fbbf24;
+  --red: #ef4444;
+  --red-2: #f87171;
+  --radius: 8px;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, "Cascadia Mono", monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+.mono, code, pre { font-family: var(--mono); }
+code { background: rgba(31, 41, 55, 0.5); padding: 1px 5px; border-radius: 3px; font-size: 0.92em; }
+a { color: var(--accent); text-underline-offset: 4px; }
+a:hover { text-decoration: underline; }
+
+.topbar {
+  position: sticky; top: 0; z-index: 40;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-floating);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.topbar__inner {
+  margin: 0 auto; max-width: 1100px;
+  padding: 0 24px; height: 56px;
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 12px; color: var(--muted);
+}
+.topbar__brand { display: flex; align-items: center; gap: 12px; }
+.topbar__brand .dot {
+  width: 8px; height: 8px; border-radius: 9999px;
+  background: linear-gradient(to bottom right, var(--accent-2), var(--purple));
+  box-shadow: 0 0 12px rgba(6, 182, 212, 0.6);
+}
+.topbar__brand strong { color: var(--fg); font-weight: 600; font-size: 13px; }
+.topbar__crumb { color: var(--muted-2); }
+.topbar__meta { display: flex; gap: 8px; align-items: center; }
+.pill { font-size: 11px; padding: 2px 10px; border-radius: 9999px; font-family: var(--mono); }
+.pill--draft { background: rgba(251, 191, 36, 0.20); color: var(--amber); border: 1px solid rgba(251, 191, 36, 0.30); }
+.pill--size  { background: rgba(139, 92, 246, 0.20); color: var(--violet); border: 1px solid rgba(139, 92, 246, 0.30); }
+
+.hero { margin: 0 auto; max-width: 1100px; padding: 56px 24px 24px; }
+.hero h1 {
+  font-size: 30px; font-weight: 200; letter-spacing: -0.02em;
+  margin: 0 0 12px;
+  background: linear-gradient(to right, var(--accent), var(--violet), var(--pink));
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.hero .sub { color: var(--muted-2); font-family: var(--mono); font-size: 12px; margin-bottom: 16px; }
+.hero p.lede { color: var(--muted); font-size: 15px; margin: 0; max-width: 760px; }
+.hero__meta {
+  display: flex; gap: 10px; margin-top: 18px; flex-wrap: wrap;
+  font-family: var(--mono); font-size: 12px;
+}
+.hero__meta .meta-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 11px; border-radius: 9999px;
+  background: var(--surface); border: 1px solid var(--border);
+  color: var(--muted);
+}
+.hero__meta .meta-pill strong { color: var(--fg); font-weight: 500; }
+
+main {
+  margin: 0 auto; max-width: 1100px;
+  padding: 0 24px 96px;
+  display: grid; grid-template-columns: 200px 1fr; gap: 32px;
+}
+nav.toc { position: sticky; top: 80px; height: fit-content; padding: 16px 0; }
+.toc ol { list-style: none; padding: 0; margin: 0; counter-reset: item; }
+.toc li { font-size: 12px; margin-bottom: 4px; counter-increment: item; }
+.toc a {
+  display: block; padding: 6px 12px; border-radius: 6px;
+  color: var(--muted); text-decoration: none;
+  border-left: 2px solid transparent; transition: all 150ms;
+}
+.toc a:hover { color: var(--fg); background: var(--surface); border-left-color: var(--accent); text-decoration: none; }
+.toc a::before { content: counter(item, decimal-leading-zero) "  "; color: var(--muted-3); font-family: var(--mono); }
+
+article { min-width: 0; }
+section.block { margin-bottom: 48px; scroll-margin-top: 80px; }
+section.block > h2 { font-size: 22px; font-weight: 300; margin: 0 0 4px; letter-spacing: -0.01em; }
+section.block > .lede { color: var(--muted); font-size: 14px; margin: 0 0 24px; max-width: 760px; }
+section.block h3 { font-size: 14px; font-weight: 600; margin: 28px 0 10px; color: var(--fg); }
+.section-label { font-size: 10px; color: var(--muted-3); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 8px; }
+
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; margin-bottom: 16px; }
+.callout {
+  background: var(--surface); border: 1px solid var(--border);
+  border-left: 3px solid var(--accent); border-radius: var(--radius);
+  padding: 14px 18px; margin: 14px 0;
+  font-size: 13px; color: var(--muted);
+}
+.callout strong { color: var(--fg); }
+.callout--warn { border-left-color: var(--amber); }
+.callout--good { border-left-color: var(--green-2); }
+
+pre.code {
+  background: rgba(3, 7, 18, 0.60); border: 1px solid var(--border);
+  border-radius: 6px; padding: 14px 16px;
+  font-size: 12px; line-height: 1.6; overflow-x: auto;
+  color: #cbd5e1; margin: 0;
+}
+pre.code .kw  { color: var(--violet); }
+pre.code .str { color: var(--green-2); }
+pre.code .num { color: var(--amber); }
+pre.code .com { color: var(--muted-3); }
+pre.code .fn  { color: var(--accent); }
+
+table.matrix { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 12px; }
+table.matrix thead th {
+  text-align: left; padding: 8px 12px; font-weight: 500;
+  font-size: 11px; color: var(--muted-2);
+  text-transform: uppercase; letter-spacing: 0.05em;
+  border-bottom: 1px solid var(--border);
+}
+table.matrix tbody td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.matrix tbody tr:hover { background: var(--surface-2); }
+
+ul.tight { padding-left: 20px; margin: 6px 0; }
+ul.tight li { margin-bottom: 4px; }
+
+.tag {
+  display: inline-block; font-family: var(--mono); font-size: 11px;
+  padding: 1px 7px; border-radius: 4px;
+  background: rgba(139, 92, 246, 0.15); color: var(--violet);
+  border: 1px solid rgba(139, 92, 246, 0.25);
+}
+.tag--cyan  { background: rgba(6, 182, 212, 0.15); color: var(--accent); border-color: rgba(6, 182, 212, 0.30); }
+.tag--green { background: rgba(34, 197, 94, 0.15); color: var(--green-2); border-color: rgba(34, 197, 94, 0.30); }
+.tag--red   { background: rgba(239, 68, 68, 0.15); color: var(--red-2); border-color: rgba(239, 68, 68, 0.30); }
+.tag--amber { background: rgba(251, 191, 36, 0.15); color: var(--amber); border-color: rgba(251, 191, 36, 0.30); }
+
+/* --- table-as-card visual (for the "before / after" schema panels) --- */
+.schema-table {
+  background: var(--surface); border: 1px solid var(--border-3);
+  border-radius: 8px; padding: 0; overflow: hidden;
+  font-family: var(--mono); font-size: 11px; line-height: 1.7;
+}
+.schema-table h5 {
+  margin: 0; padding: 8px 14px;
+  background: var(--surface-2); border-bottom: 1px solid var(--border);
+  font-size: 12px; font-weight: 600; color: var(--fg);
+  text-transform: lowercase; letter-spacing: 0.04em;
+}
+.schema-table h5 .h-meta { font-size: 10px; color: var(--muted-2); margin-left: 8px; text-transform: none; }
+.schema-table ul { list-style: none; padding: 8px 0; margin: 0; }
+.schema-table li { padding: 2px 14px; color: var(--muted); }
+.schema-table li .col-name { color: var(--fg); }
+.schema-table li.shared    { color: var(--muted); }
+.schema-table li.rule-only { background: rgba(34, 197, 94, 0.08); border-left: 2px solid var(--green-2); padding-left: 12px; }
+.schema-table li.trig-only { background: rgba(244, 114, 182, 0.08); border-left: 2px solid var(--pink); padding-left: 12px; }
+.schema-table li.kind      { background: rgba(6, 182, 212, 0.10); border-left: 2px solid var(--accent); padding-left: 12px; color: var(--accent); }
+
+.schema-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 16px 0 12px; }
+.schema-pair--single { grid-template-columns: 1fr; max-width: 480px; margin-left: auto; margin-right: auto; }
+
+/* Phase flow */
+.phase-flow {
+  display: flex; align-items: stretch; gap: 8px;
+  margin: 18px 0 8px; flex-wrap: wrap;
+}
+.phase {
+  flex: 1; min-width: 180px;
+  background: var(--surface); border: 1px solid var(--border-3);
+  border-radius: var(--radius); padding: 12px 14px; position: relative;
+}
+.phase .phase-label {
+  font-family: var(--mono); font-size: 10px;
+  color: var(--accent);
+  background: rgba(6, 182, 212, 0.10);
+  border: 1px solid rgba(6, 182, 212, 0.30);
+  padding: 1px 7px; border-radius: 4px;
+  display: inline-block; margin-bottom: 6px;
+}
+.phase .phase-title { font-size: 13px; font-weight: 600; color: var(--fg); margin-bottom: 4px; }
+.phase .phase-body { font-size: 12px; color: var(--muted); line-height: 1.5; }
+.phase + .phase::before {
+  content: "→"; color: var(--muted-3);
+  position: absolute; left: -12px; top: 50%; transform: translateY(-50%);
+}
+
+/* Routing diagram */
+.routing-pair {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+  margin: 14px 0 20px;
+}
+.routing-side {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 16px;
+}
+.routing-side h5 {
+  margin: 0 0 12px; font-size: 12px;
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+.routing-side--before h5 { color: var(--red-2); }
+.routing-side--after  h5 { color: var(--green-2); }
+.flow-box {
+  background: var(--surface-2); border: 1px solid var(--border-3);
+  border-radius: 6px; padding: 8px 12px;
+  font-family: var(--mono); font-size: 11px; line-height: 1.5;
+  color: var(--muted);
+}
+.flow-box .b-title { color: var(--fg); font-weight: 600; }
+.flow-arrow { text-align: center; color: var(--muted-3); font-family: var(--mono); margin: 4px 0; }
+
+.steps { counter-reset: step; padding-left: 0; list-style: none; }
+.steps > li {
+  counter-increment: step; position: relative;
+  padding: 10px 0 14px 40px;
+  border-bottom: 1px dashed var(--border);
+}
+.steps > li:last-child { border-bottom: none; }
+.steps > li::before {
+  content: counter(step, decimal-leading-zero);
+  position: absolute; left: 0; top: 10px;
+  font-family: var(--mono); font-size: 11px;
+  color: var(--accent);
+  background: rgba(6, 182, 212, 0.08);
+  border: 1px solid rgba(6, 182, 212, 0.30);
+  padding: 2px 7px; border-radius: 4px;
+}
+.steps > li > .step-title { font-weight: 500; color: var(--fg); display: block; margin-bottom: 2px; }
+.steps > li > .step-body  { color: var(--muted); font-size: 13px; }
+
+footer {
+  margin: 0 auto; max-width: 1100px;
+  padding: 24px 24px 64px;
+  font-size: 11px; color: var(--muted-3);
+  font-family: var(--mono);
+  border-top: 1px solid var(--border);
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar__inner">
+    <div class="topbar__brand">
+      <span class="dot"></span>
+      <strong>Triage Factory</strong>
+      <span class="topbar__crumb">/ specs / SKY-259</span>
+    </div>
+    <div class="topbar__meta">
+      <span class="pill pill--size">SIZE · L</span>
+      <span class="pill pill--draft">DRAFT v0.1</span>
+    </div>
+  </div>
+</div>
+
+<header class="hero">
+  <div class="sub">SKY-259 · sequenced after SKY-269 (shipped) · blocks SKY-261 D-Claims</div>
+  <h1>event_handlers unification</h1>
+  <p class="lede">Collapse <code>task_rules</code> + <code>prompt_triggers</code> into one <code>event_handlers</code> table with a <code>kind ∈ ('rule','trigger')</code> discriminator. The semantics already converged after the team/agent reframe — rule and trigger are the same primitive with an "auto-claim?" knob. Two tables / two stores / two RLS policies / two router queries become one of each.</p>
+  <div class="hero__meta">
+    <span class="meta-pill"><strong>SCOPE</strong> · 1 PG + 1 SQLite migration + new EventHandlerStore + router rewrite + FE swap to <code>/api/event-handlers</code></span>
+    <span class="meta-pill"><strong>NO COMPAT LAYER</strong> · old tables + old endpoints dropped in this PR</span>
+    <span class="meta-pill"><strong>UNBLOCKS</strong> · SKY-261 (D-Claims) can add <code>claimed_by_agent_id</code> to one table instead of two</span>
+  </div>
+</header>
+
+<main>
+
+<nav class="toc">
+  <ol>
+    <li><a href="#phasing">Phasing</a></li>
+    <li><a href="#why">Why now</a></li>
+    <li><a href="#shape">Schema delta</a></li>
+    <li><a href="#routing">Routing collapse</a></li>
+    <li><a href="#migration">Migration design</a></li>
+    <li><a href="#store">EventHandlerStore</a></li>
+    <li><a href="#api">API + frontend</a></li>
+    <li><a href="#out-of-scope">Out of scope</a></li>
+    <li><a href="#steps">Steps</a></li>
+    <li><a href="#risks">Risks</a></li>
+    <li><a href="#acceptance">Acceptance</a></li>
+  </ol>
+</nav>
+
+<article>
+
+<!-- ===================================================== -->
+<section class="block" id="phasing">
+  <div class="section-label">§0</div>
+  <h2>Phasing</h2>
+  <p class="lede">One PR, three phases that all ship together. Splitting the migration from the store rewrite would leave an in-between commit with old code reading dropped tables; splitting the API rewrite from the FE swap would break the in-tree frontend on the same commit. The whole unification is one atomic change.</p>
+
+  <div class="phase-flow">
+    <div class="phase">
+      <span class="phase-label">A</span>
+      <div class="phase-title">Schema</div>
+      <div class="phase-body"><code>event_handlers</code> table both backends. Backfill from <code>task_rules</code> + <code>prompt_triggers</code>, then <code>DROP</code> both in the same migration. Forward-only — there's no rollback to half-undo to.</div>
+    </div>
+    <div class="phase">
+      <span class="phase-label">B</span>
+      <div class="phase-title">Store + router</div>
+      <div class="phase-body">New <code>EventHandlerStore</code>. Router collapses two-phase matching into one query. Spawner reads <code>prompt_id</code> off the row when <code>kind='trigger'</code>. Old <code>TaskRuleStore</code> + <code>TriggerStore</code> deleted.</div>
+    </div>
+    <div class="phase">
+      <span class="phase-label">C</span>
+      <div class="phase-title">API + FE swap</div>
+      <div class="phase-body">New <code>/api/event-handlers</code> with <code>?kind=rule</code> / <code>?kind=trigger</code> filter. Two existing FE pages keep their split UX, both call the unified endpoint. Old <code>/api/task-rules</code> + <code>/api/triggers</code> routes deleted.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="why">
+  <div class="section-label">§1</div>
+  <h2>Why now</h2>
+  <p class="lede">The post-SKY-269 schema is settled enough that this is purely an internal refactor. Doing it before D-Claims (SKY-261) means adding the claim-FK columns to one table instead of two.</p>
+
+  <table class="matrix">
+    <thead><tr><th style="width: 30%;">Win</th><th>Concrete shape</th></tr></thead>
+    <tbody>
+      <tr><td>Router collapse</td><td>One <code>SELECT ... FROM event_handlers WHERE event_type = ? AND enabled = TRUE</code> instead of <code>GetEnabledForEvent</code> on task_rules + <code>GetActiveForEvent</code> on prompt_triggers. <strong>2 queries → 1 query</strong> per event.</td></tr>
+      <tr><td>RLS surface halved</td><td>Four policies (insert/update/select/delete) instead of eight. The system-row + admin-only-on-org-visibility patterns we ironed out across SKY-246/260 only need to be applied once.</td></tr>
+      <tr><td>D-Claims simplification</td><td><code>auto_claim_by_agent_id</code> column lives on one table. Router's "stamp claim on trigger fire" branch becomes "stamp claim when <code>auto_claim_by_agent_id IS NOT NULL</code>" — orthogonal to the unification.</td></tr>
+      <tr><td>Rule ↔ trigger promotion</td><td>"Promote this rule to a trigger" becomes one atomic UPDATE through a dedicated <code>POST /api/event-handlers/{id}/promote</code> endpoint. Today it's a row delete on one table + row insert on another, with no atomicity guarantee.</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="shape">
+  <div class="section-label">§2</div>
+  <h2>Schema delta</h2>
+  <p class="lede">Two tables, mostly overlapping, into one with per-kind nullables + CHECK constraints. The column matrix below is the unified shape — green-highlighted columns are rule-only, pink-highlighted are trigger-only, cyan-highlighted is the new discriminator.</p>
+
+  <div class="schema-pair">
+    <div class="schema-table">
+      <h5>task_rules <span class="h-meta">— today</span></h5>
+      <ul>
+        <li class="shared"><span class="col-name">id, org_id, team_id, visibility, creator_user_id, source</span></li>
+        <li class="shared"><span class="col-name">event_type, scope_predicate_json, enabled, name</span></li>
+        <li class="shared"><span class="col-name">created_at, updated_at</span></li>
+        <li class="rule-only"><span class="col-name">default_priority</span> <span style="color: var(--muted-3);">REAL · 0.5</span></li>
+        <li class="rule-only"><span class="col-name">sort_order</span> <span style="color: var(--muted-3);">INT · 0 (UI ordering)</span></li>
+      </ul>
+    </div>
+    <div class="schema-table">
+      <h5>prompt_triggers <span class="h-meta">— today</span></h5>
+      <ul>
+        <li class="shared"><span class="col-name">id, org_id, team_id, visibility, creator_user_id, source</span></li>
+        <li class="shared"><span class="col-name">event_type, scope_predicate_json, enabled</span></li>
+        <li class="shared"><span class="col-name">created_at, updated_at</span></li>
+        <li class="trig-only"><span class="col-name">prompt_id</span> <span style="color: var(--muted-3);">TEXT · FK prompts.id</span></li>
+        <li class="trig-only"><span class="col-name">trigger_type</span> <span style="color: var(--muted-3);">TEXT · 'event'</span></li>
+        <li class="trig-only"><span class="col-name">breaker_threshold</span> <span style="color: var(--muted-3);">INT · 4</span></li>
+        <li class="trig-only"><span class="col-name">min_autonomy_suitability</span> <span style="color: var(--muted-3);">REAL · 0.0</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <div style="text-align: center; color: var(--muted-3); font-family: var(--mono); margin: 12px 0;">↓ unify ↓</div>
+
+  <div class="schema-pair schema-pair--single">
+    <div class="schema-table">
+      <h5>event_handlers <span class="h-meta">— after this PR</span></h5>
+      <ul>
+        <li class="kind"><span class="col-name">kind</span> <span style="color: var(--muted-3);">TEXT · 'rule' | 'trigger' · CHECK</span></li>
+        <li class="shared"><span class="col-name">id, org_id, team_id, visibility, creator_user_id, source</span></li>
+        <li class="shared"><span class="col-name">event_type, scope_predicate_json, enabled, name</span></li>
+        <li class="shared"><span class="col-name">created_at, updated_at</span></li>
+        <li class="rule-only"><span class="col-name">default_priority</span> <span style="color: var(--muted-3);">REAL · nullable · rule-only</span></li>
+        <li class="rule-only"><span class="col-name">sort_order</span> <span style="color: var(--muted-3);">INT · nullable · rule-only</span></li>
+        <li class="trig-only"><span class="col-name">prompt_id</span> <span style="color: var(--muted-3);">TEXT · nullable · trigger-only · FK</span></li>
+        <li class="trig-only"><span class="col-name">breaker_threshold</span> <span style="color: var(--muted-3);">INT · nullable · trigger-only</span></li>
+        <li class="trig-only"><span class="col-name">min_autonomy_suitability</span> <span style="color: var(--muted-3);">REAL · nullable · trigger-only</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>CHECK constraints (the per-kind shape gate)</h3>
+<pre class="code"><span class="kw">ALTER TABLE</span> event_handlers <span class="kw">ADD CONSTRAINT</span> event_handlers_rule_shape
+  <span class="kw">CHECK</span> (
+    kind <span class="kw">&lt;&gt;</span> <span class="str">'rule'</span> <span class="kw">OR</span> (
+      prompt_id <span class="kw">IS NULL</span>
+      <span class="kw">AND</span> breaker_threshold <span class="kw">IS NULL</span>
+      <span class="kw">AND</span> min_autonomy_suitability <span class="kw">IS NULL</span>
+      <span class="kw">AND</span> default_priority <span class="kw">IS NOT NULL</span>
+      <span class="kw">AND</span> name <span class="kw">IS NOT NULL</span>
+    )
+  );
+
+<span class="kw">ALTER TABLE</span> event_handlers <span class="kw">ADD CONSTRAINT</span> event_handlers_trigger_shape
+  <span class="kw">CHECK</span> (
+    kind <span class="kw">&lt;&gt;</span> <span class="str">'trigger'</span> <span class="kw">OR</span> (
+      prompt_id <span class="kw">IS NOT NULL</span>
+      <span class="kw">AND</span> breaker_threshold <span class="kw">IS NOT NULL</span>
+      <span class="kw">AND</span> min_autonomy_suitability <span class="kw">IS NOT NULL</span>
+      <span class="kw">AND</span> default_priority <span class="kw">IS NULL</span>
+      <span class="kw">AND</span> sort_order <span class="kw">IS NULL</span>
+    )
+  );</pre>
+
+  <div class="callout">
+    <strong>One row per logical handler</strong> — promotion ("turn this rule into a trigger") becomes UPDATE the kind + populate the trigger-only fields + clear the rule-only ones. The CHECK constraints validate the transition atomically.
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="routing">
+  <div class="section-label">§3</div>
+  <h2>Routing collapse</h2>
+  <p class="lede">The router today fires two store queries per event (rules then triggers). Post-unification it's one query and a single matcher loop.</p>
+
+  <div class="routing-pair">
+    <div class="routing-side routing-side--before">
+      <h5>Before · 2 queries per event</h5>
+      <div class="flow-box"><span class="b-title">event:</span> github:pr:ci_check_failed</div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-box">stores.TaskRules.<span class="b-title">GetEnabledForEvent</span>(orgID, event_type)</div>
+      <div class="flow-arrow">↓ for each match</div>
+      <div class="flow-box">create unclaimed task</div>
+      <div class="flow-arrow" style="margin-top: 8px;">— then —</div>
+      <div class="flow-box">stores.Triggers.<span class="b-title">GetActiveForEvent</span>(orgID, event_type)</div>
+      <div class="flow-arrow">↓ for each match</div>
+      <div class="flow-box">spawner.<span class="b-title">tryAutoDelegate</span>(task, trigger)</div>
+    </div>
+    <div class="routing-side routing-side--after">
+      <h5>After · 1 query</h5>
+      <div class="flow-box"><span class="b-title">event:</span> github:pr:ci_check_failed</div>
+      <div class="flow-arrow">↓</div>
+      <div class="flow-box">stores.EventHandlers.<span class="b-title">GetEnabledForEvent</span>(orgID, event_type)</div>
+      <div class="flow-arrow">↓ for each match, switch on row.Kind</div>
+      <div class="flow-box">
+        <span class="b-title">kind='rule'</span> → create unclaimed task<br>
+        <span class="b-title">kind='trigger'</span> → create task (claimed by team's agent post-D-Claims) + dispatch
+      </div>
+    </div>
+  </div>
+
+  <div class="callout callout--good">
+    <strong>The order today is rule-first / trigger-second.</strong> Post-unification we preserve it by ordering the matcher loop by <code>kind</code> (rules before triggers) — same semantics, same observable behavior. The DB query returns both in one round trip.
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="migration">
+  <div class="section-label">§4</div>
+  <h2>Migration design</h2>
+  <p class="lede">Forward-only on both backends, single migration per backend: create the new table, backfill from both old tables, drop the old tables. No staged rollout — the store rewrite, router rewrite, and FE swap all land in the same PR, so nothing reads the old tables by the time the DROP runs.</p>
+
+  <h3>Postgres</h3>
+
+<pre class="code"><span class="com">-- (1) Create event_handlers with the unified shape.</span>
+<span class="kw">CREATE TABLE</span> event_handlers (
+  id                       <span class="kw">UUID PRIMARY KEY DEFAULT</span> gen_random_uuid(),
+  org_id                   <span class="kw">UUID NOT NULL REFERENCES</span> orgs(id) <span class="kw">ON DELETE CASCADE</span>,
+  creator_user_id          <span class="kw">UUID REFERENCES</span> users(id) <span class="kw">ON DELETE CASCADE</span>,
+  team_id                  <span class="kw">UUID REFERENCES</span> teams(id) <span class="kw">ON DELETE SET NULL</span>,
+  visibility               <span class="kw">TEXT NOT NULL DEFAULT</span> <span class="str">'team'</span> <span class="kw">CHECK</span> (visibility <span class="kw">IN</span> (<span class="str">'private'</span>,<span class="str">'team'</span>,<span class="str">'org'</span>)),
+  kind                     <span class="kw">TEXT NOT NULL CHECK</span> (kind <span class="kw">IN</span> (<span class="str">'rule'</span>, <span class="str">'trigger'</span>)),
+  event_type               <span class="kw">TEXT NOT NULL REFERENCES</span> events_catalog(id) <span class="kw">ON DELETE RESTRICT</span>,
+  scope_predicate_json     <span class="kw">JSONB</span>,
+  enabled                  <span class="kw">BOOLEAN NOT NULL DEFAULT TRUE</span>,
+  source                   <span class="kw">TEXT NOT NULL DEFAULT</span> <span class="str">'user'</span>,
+  name                     <span class="kw">TEXT</span>,                                  <span class="com">-- nullable; required for rules via CHECK</span>
+  <span class="com">-- rule-only fields:</span>
+  default_priority         <span class="kw">REAL</span>,
+  sort_order               <span class="kw">INT</span>,
+  <span class="com">-- trigger-only fields:</span>
+  prompt_id                <span class="kw">TEXT</span>,
+  breaker_threshold        <span class="kw">INT</span>,
+  min_autonomy_suitability <span class="kw">REAL</span>,
+  created_at               <span class="kw">TIMESTAMPTZ NOT NULL DEFAULT</span> now(),
+  updated_at               <span class="kw">TIMESTAMPTZ NOT NULL DEFAULT</span> now(),
+  <span class="kw">UNIQUE</span> (id, org_id),
+  <span class="kw">FOREIGN KEY</span> (prompt_id, org_id) <span class="kw">REFERENCES</span> prompts(id, org_id) <span class="kw">ON DELETE CASCADE</span>,
+  <span class="com">-- Per-kind shape CHECKs as shown in §2.</span>
+  ...
+);
+
+<span class="com">-- (2) Backfill from task_rules.</span>
+<span class="kw">INSERT INTO</span> event_handlers (id, org_id, creator_user_id, team_id, visibility,
+                            kind, event_type, scope_predicate_json, enabled, source,
+                            name, default_priority, sort_order,
+                            created_at, updated_at)
+<span class="kw">SELECT</span> id, org_id, creator_user_id, team_id, visibility,
+       <span class="str">'rule'</span>, event_type, scope_predicate_json, enabled, source,
+       name, default_priority, sort_order,
+       created_at, updated_at
+<span class="kw">FROM</span> task_rules;
+
+<span class="com">-- (3) Backfill from prompt_triggers.</span>
+<span class="kw">INSERT INTO</span> event_handlers (id, org_id, creator_user_id, team_id, visibility,
+                            kind, event_type, scope_predicate_json, enabled, source,
+                            prompt_id, breaker_threshold, min_autonomy_suitability,
+                            created_at, updated_at)
+<span class="kw">SELECT</span> id, org_id, creator_user_id, team_id, visibility,
+       <span class="str">'trigger'</span>, event_type, scope_predicate_json, enabled, source,
+       prompt_id, breaker_threshold, min_autonomy_suitability,
+       created_at, updated_at
+<span class="kw">FROM</span> prompt_triggers;
+
+<span class="com">-- (4) RLS on event_handlers — same pattern as task_rules' post-SKY-247
+-- shape: split insert/update/delete policies, system-row branch on
+-- update for visibility='org'. Mechanical port from task_rules.</span>
+...
+
+<span class="com">-- (5) Drop the old tables. By the time this migration runs the store
+-- + router + FE in the same PR no longer reference them. CASCADE on the
+-- prompt_triggers FK to prompts (no other inbound refs to either).</span>
+<span class="kw">DROP TABLE</span> task_rules;
+<span class="kw">DROP TABLE</span> prompt_triggers;</pre>
+
+  <h3>SQLite</h3>
+  <p>Same shape minus the RLS section, and with one prerequisite step: add a unique index on <code>prompts (id, org_id)</code> so the composite FK can target it (SQLite, like Postgres, requires the FK column order to match an existing unique index or constraint on the parent).</p>
+
+<pre class="code"><span class="com">-- (0) Parity prerequisite: SKY-269 added org_id columns via ALTER but
+-- didn't add the composite UNIQUE constraints Postgres has on every
+-- parent table that fields composite FKs. Audit confirmed: 8 parent
+-- tables are missing UNIQUE(id, org_id) in SQLite vs Postgres. Eight
+-- one-line indexes close the schema-shape gap with zero data risk —
+-- id is already PK-unique on every table, so (id, org_id) is trivially
+-- unique on existing data.
+--
+-- These indexes are the precondition for composite FKs. event_handlers
+-- (this PR) uses one; future tables can declare composite FKs without
+-- per-table prep. The 25+ existing child-table plain FKs are not
+-- rebuilt in this PR — see §9 risk row for scope rationale.</span>
+<span class="kw">CREATE UNIQUE INDEX IF NOT EXISTS</span> prompts_id_org_unique           <span class="kw">ON</span> prompts (id, org_id);
+<span class="kw">CREATE UNIQUE INDEX IF NOT EXISTS</span> projects_id_org_unique          <span class="kw">ON</span> projects (id, org_id);
+<span class="kw">CREATE UNIQUE INDEX IF NOT EXISTS</span> entities_id_org_unique          <span class="kw">ON</span> entities (id, org_id);
+<span class="kw">CREATE UNIQUE INDEX IF NOT EXISTS</span> events_id_org_unique            <span class="kw">ON</span> events (id, org_id);
+<span class="kw">CREATE UNIQUE INDEX IF NOT EXISTS</span> tasks_id_org_unique             <span class="kw">ON</span> tasks (id, org_id);
+<span class="kw">CREATE UNIQUE INDEX IF NOT EXISTS</span> runs_id_org_unique              <span class="kw">ON</span> runs (id, org_id);
+<span class="kw">CREATE UNIQUE INDEX IF NOT EXISTS</span> pending_reviews_id_org_unique   <span class="kw">ON</span> pending_reviews (id, org_id);
+<span class="kw">CREATE UNIQUE INDEX IF NOT EXISTS</span> curator_requests_id_org_unique  <span class="kw">ON</span> curator_requests (id, org_id);
+
+<span class="com">-- (1) event_handlers with composite FK matching Postgres.</span>
+<span class="kw">CREATE TABLE</span> event_handlers (
+  ...
+  <span class="kw">FOREIGN KEY</span> (prompt_id, org_id) <span class="kw">REFERENCES</span> prompts (id, org_id) <span class="kw">ON DELETE CASCADE</span>
+);
+
+<span class="com">-- (2)+(3) Same backfill INSERTs as Postgres, then DROP both old tables.</span>
+<span class="kw">DROP TABLE</span> task_rules;
+<span class="kw">DROP TABLE</span> prompt_triggers;</pre>
+
+  <p>The migration runs with <code>PRAGMA foreign_keys=OFF</code> around the DROP step (standard goose-managed dance) so the legacy <code>task_rules.prompt_id</code> + <code>prompt_triggers.prompt_id</code> FKs don't complicate the table drop.</p>
+
+  <div class="callout callout--good">
+    <strong>Composite-FK parity, scoped pragmatically.</strong> Eight parent indexes close the schema-shape gap for free. New tables (this PR + future) can declare composite FKs natively. The 25+ existing SQLite child FKs that target plain <code>parent(id)</code> stay as-is in this PR — rewriting them requires SQLite's full table-rebuild dance per child, with no behavioral payoff at N=1 (single org means the plain FK already gives single-tenant integrity). A future child-FK parity sweep is bounded, optional, and not load-bearing for the unification.
+  </div>
+
+  <div class="callout callout--warn">
+    <strong>ID preservation:</strong> both backfills copy <code>id</code> verbatim. A shipped system rule with id <code>abc...</code> in task_rules stays <code>abc...</code> in event_handlers. Anything outside this PR that references handler IDs (run rows via FK, audit logs) keeps working without rewrites.
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="store">
+  <div class="section-label">§5</div>
+  <h2>EventHandlerStore</h2>
+  <p class="lede">One interface replaces <code>TaskRuleStore</code> + <code>TriggerStore</code>. Methods accept a <code>kind</code> filter where the caller distinguishes; the router's hot path doesn't.</p>
+
+<pre class="code"><span class="kw">type</span> EventHandlerStore <span class="kw">interface</span> {
+  <span class="com">// Seed inserts the v1 shipped handlers (system rules + system triggers
+  // together) if they aren't already present. Idempotent.</span>
+  Seed(ctx context.Context, orgID <span class="kw">string</span>) error
+
+  <span class="com">// Read paths.</span>
+  List(ctx context.Context, orgID <span class="kw">string</span>, kind <span class="kw">string</span>) ([]domain.EventHandler, error) <span class="com">// kind="" returns both</span>
+  Get(ctx context.Context, orgID, id <span class="kw">string</span>) (*domain.EventHandler, error)
+  GetEnabledForEvent(ctx context.Context, orgID, eventType <span class="kw">string</span>) ([]domain.EventHandler, error) <span class="com">// the router's one query</span>
+  ListForPrompt(ctx context.Context, orgID, promptID <span class="kw">string</span>) ([]domain.EventHandler, error)
+
+  <span class="com">// Write paths — kind required for Create / Promote; mutable fields
+  // are per-kind so the handler endpoints can route by URL prefix.</span>
+  Create(ctx context.Context, orgID <span class="kw">string</span>, h domain.EventHandler) error
+  Update(ctx context.Context, orgID <span class="kw">string</span>, h domain.EventHandler) error
+  SetEnabled(ctx context.Context, orgID, id <span class="kw">string</span>, enabled <span class="kw">bool</span>) error
+  Delete(ctx context.Context, orgID, id <span class="kw">string</span>) error
+  Reorder(ctx context.Context, orgID <span class="kw">string</span>, ids []<span class="kw">string</span>) error <span class="com">// rule-only — UI ordering</span>
+}</pre>
+
+  <p>Domain shape:</p>
+
+<pre class="code"><span class="kw">type</span> EventHandler <span class="kw">struct</span> {
+  ID                       <span class="kw">string</span>
+  Kind                     <span class="kw">string</span>   <span class="com">// "rule" | "trigger"</span>
+  EventType                <span class="kw">string</span>
+  ScopePredicateJSON       *<span class="kw">string</span>
+  Enabled                  <span class="kw">bool</span>
+  Source                   <span class="kw">string</span>   <span class="com">// "system" | "user"</span>
+  Name                     <span class="kw">string</span>   <span class="com">// rule: required; trigger: derived from prompt name in UI</span>
+  <span class="com">// kind="rule":</span>
+  DefaultPriority          *<span class="kw">float64</span>
+  SortOrder                *<span class="kw">int</span>
+  <span class="com">// kind="trigger":</span>
+  PromptID                 <span class="kw">string</span>
+  BreakerThreshold         *<span class="kw">int</span>
+  MinAutonomySuitability   *<span class="kw">float64</span>
+  CreatedAt, UpdatedAt     time.Time
+}</pre>
+
+  <p>The old <code>domain.TaskRule</code> and <code>domain.PromptTrigger</code> types are <strong>deleted</strong> in this PR. Anywhere that used them now consumes <code>domain.EventHandler</code> directly; the per-kind fields are nullable and the caller narrows on <code>Kind</code>. No adapter shim — the compiler enforces the migration.</p>
+
+  <div class="callout">
+    <strong>Why a single store + kind filter rather than two stores backed by one table:</strong> consumers like the router only ever want "all handlers matching this event," not a kind-partitioned slice. Two stores would duplicate the SQL bodies and force every new field to be added in two places. The kind filter is rarely used (only by the handler shims) and adds one CHECK at the SQL level.
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="api">
+  <div class="section-label">§6</div>
+  <h2>API + frontend</h2>
+  <p class="lede">One unified endpoint family <code>/api/event-handlers</code> replaces <code>/api/task-rules</code> + <code>/api/triggers</code>. The kind is passed as a query param on reads and a body field on writes — there's no URL-prefix split because there's no longer a backend split to mirror. The two existing FE pages keep their split UX (the rules tab vs the triggers tab is still useful for users) — they both point at the unified endpoint with the right <code>kind</code> filter.</p>
+
+  <table class="matrix">
+    <thead><tr><th style="width: 44%;">Endpoint</th><th>Maps to</th></tr></thead>
+    <tbody>
+      <tr><td><code>GET /api/event-handlers?kind=rule</code></td><td><code>EventHandlers.List(orgID, kind="rule")</code> — unfiltered <code>kind=</code> returns both</td></tr>
+      <tr><td><code>POST /api/event-handlers</code></td><td><code>EventHandlers.Create(orgID, h)</code> — <code>h.kind</code> required, validated against per-kind shape</td></tr>
+      <tr><td><code>PUT /api/event-handlers/{id}</code></td><td><code>EventHandlers.Update(...)</code> — kind is immutable here; promotion is a separate POST</td></tr>
+      <tr><td><code>POST /api/event-handlers/{id}/promote</code></td><td>rule → trigger transition: validates incoming trigger-only fields, runs the single-UPDATE shape swap</td></tr>
+      <tr><td><code>POST /api/event-handlers/reorder</code></td><td><code>EventHandlers.Reorder(orgID, ids)</code> — rule-only (server rejects if any id is a trigger)</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Frontend changes (in this PR)</h3>
+  <ul class="tight">
+    <li>Two existing page components stay split. <code>RulesPage.tsx</code> hits <code>/api/event-handlers?kind=rule</code>; <code>TriggersPage.tsx</code> hits <code>?kind=trigger</code>. Same shape they have today — just one fetch URL change each.</li>
+    <li>One shared <code>useEventHandlers(kind)</code> hook replaces the existing <code>useTaskRules</code> + <code>useTriggers</code> hooks. The query-cache key uses the kind so both pages cache independently and a write on one doesn't invalidate the other.</li>
+    <li>Create/update payloads gain the explicit <code>kind</code> field. Forms stay split — the rules form posts <code>{kind: "rule", ...}</code>; trigger form posts <code>{kind: "trigger", ...}</code>.</li>
+    <li>Types (<code>frontend/src/types.ts</code>): existing <code>TaskRule</code> and <code>PromptTrigger</code> become <code>EventHandler</code> with discriminated-union narrowing on <code>kind</code>. Both page components consume the narrowed view via a type guard helper.</li>
+  </ul>
+
+  <div class="callout callout--good">
+    <strong>Frontend stays split by UX, unified at the API.</strong> Users still see two tabs (rules manage human-triage queues; triggers configure auto-delegation). The backend no longer pretends they're different things — and a future "unified handler config" page is a free move whenever the FE wants to take it.
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="out-of-scope">
+  <div class="section-label">§7</div>
+  <h2>Out of scope</h2>
+  <ul class="tight">
+    <li><strong>Unified FE page.</strong> The split UX stays — rules tab + triggers tab. A future "all event handlers" page is a free move once the FE wants it; not in this PR.</li>
+    <li><strong><code>claimed_by_agent_id</code> column.</strong> D-Claims (SKY-261) adds this. Unification + claims in one PR would balloon the review surface; SKY-261 lands on the unified table afterward.</li>
+    <li><strong>Vocab change.</strong> "rule" and "trigger" stay as the user-facing nouns. The unification is purely backend; users still create rules and create triggers.</li>
+    <li><strong>Per-prompt default trigger</strong> — the ticket's "I wonder if we could share prompt_id and just make it a default" suggestion. Filed as a follow-up; not in this PR.</li>
+  </ul>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="steps">
+  <div class="section-label">§8</div>
+  <h2>Implementation steps</h2>
+
+  <ol class="steps">
+    <li>
+      <span class="step-title">Domain type</span>
+      <span class="step-body"><code>internal/domain/event_handler.go</code> — <code>EventHandler</code> struct + <code>From()</code> adapters from <code>TaskRule</code> / <code>PromptTrigger</code>.</span>
+    </li>
+    <li>
+      <span class="step-title">Store interface</span>
+      <span class="step-body"><code>internal/db/event_handlers_store.go</code> — <code>EventHandlerStore</code> interface + <code>ShippedEventHandlers</code> list combining <code>ShippedTaskRules</code> + <code>ShippedPromptTriggers</code> from SKY-246.</span>
+    </li>
+    <li>
+      <span class="step-title">Postgres migration</span>
+      <span class="step-body">New <code>NNN_event_handlers.sql</code> with the unified table + CHECK constraints + RLS + backfill INSERTs + <code>DROP TABLE task_rules; DROP TABLE prompt_triggers;</code>. Mechanical port of the existing task_rules + prompt_triggers RLS policies onto the unified table.</span>
+    </li>
+    <li>
+      <span class="step-title">SQLite migration</span>
+      <span class="step-body">Add 8 <code>CREATE UNIQUE INDEX ... ON parent (id, org_id)</code> statements first — one each on <code>prompts</code>, <code>projects</code>, <code>entities</code>, <code>events</code>, <code>tasks</code>, <code>runs</code>, <code>pending_reviews</code>, <code>curator_requests</code> — closing the composite-FK precondition gap with Postgres. Then create the unified table with the composite FK to <code>prompts</code>, backfill from both old tables, drop them. FK pragma disabled around the DROP step. RLS absent (multi-mode only).</span>
+    </li>
+    <li>
+      <span class="step-title">SQLite + Postgres impls</span>
+      <span class="step-body"><code>internal/db/{sqlite,postgres}/event_handlers.go</code>. Pattern: every method that exists on TaskRuleStore + every method on TriggerStore, unified into one impl that branches on <code>kind</code> where the SQL shape differs. Postgres uses the admin/app pool split established by SKY-246.</span>
+    </li>
+    <li>
+      <span class="step-title">Conformance suite</span>
+      <span class="step-body"><code>internal/db/dbtest/event_handler_conformance.go</code> — merge the existing <code>task_rule_conformance.go</code> + <code>trigger_conformance.go</code> suites, parameterizing per kind where the test diverges.</span>
+    </li>
+    <li>
+      <span class="step-title">Router rewrite</span>
+      <span class="step-body"><code>internal/routing/router.go</code> — <code>handleEvent</code> goes from two store calls to one. The matched handlers are processed in <code>kind</code> order (rules first, triggers second) to preserve the existing observable shape.</span>
+    </li>
+    <li>
+      <span class="step-title">HTTP handler rewrite</span>
+      <span class="step-body">New <code>internal/server/event_handlers_handler.go</code>. Delete <code>task_rules_handler.go</code> + <code>triggers_handler.go</code>. New routes registered in <code>server.go</code>; old routes removed.</span>
+    </li>
+    <li>
+      <span class="step-title">Frontend swap</span>
+      <span class="step-body">Replace <code>useTaskRules</code> + <code>useTriggers</code> with one <code>useEventHandlers(kind)</code> hook. Rename the two existing pages' fetch URLs to <code>/api/event-handlers?kind=...</code>. Update <code>frontend/src/types.ts</code> with the discriminated <code>EventHandler</code> union and a type-narrow helper. UX (split tabs) unchanged.</span>
+    </li>
+    <li>
+      <span class="step-title">Replace Stores fields</span>
+      <span class="step-body"><code>internal/db/store.go</code> — <code>TaskRules</code> + <code>Triggers</code> removed entirely, replaced with <code>EventHandlers EventHandlerStore</code>. Old store files + interfaces deleted. The router, the seed path, and tests all migrate to the new field name.</span>
+    </li>
+    <li>
+      <span class="step-title">Sweep callers</span>
+      <span class="step-body">Compiler does most of the work — every callsite of the deleted types/methods fails the build until rewritten. <code>main.go</code>'s seed path calls <code>EventHandlers.Seed</code>; old <code>ShippedTaskRules</code> + <code>ShippedPromptTriggers</code> lists fold into <code>ShippedEventHandlers</code> (preserving their distinct namespace UUIDs).</span>
+    </li>
+    <li>
+      <span class="step-title">Tests + lint + ship</span>
+      <span class="step-body"><code>go test ./... && ./scripts/lint.sh && cd frontend && npm run build && cd .. && go build</code>. Two new bootstrap-shape tests pinning the backfill (<code>TestMigrate_BackfillsTaskRulesIntoEventHandlers</code> + same for triggers). One test pinning the <code>DROP</code> half (<code>TestMigrate_DropsTaskRulesAndPromptTriggers</code> — schema-introspection assert). Local end-to-end smoke against a tmpdir HOME.</span>
+    </li>
+  </ol>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="risks">
+  <div class="section-label">§9</div>
+  <h2>Risks</h2>
+  <table class="matrix">
+    <thead><tr><th style="width: 30%;">Risk</th><th>Mitigation</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Big migration; first PR after SKY-269 lands with the same dev team in flight — merge conflicts with SKY-261 work.</td>
+        <td>SKY-261 hasn't started; sequencing this first means it inherits the unified table. Conflict surface is the spec doc + the agent test fixtures, both small.</td>
+      </tr>
+      <tr>
+        <td>Backfill copies row data but a subtle column mismatch (e.g. timezone handling on Postgres vs SQLite for <code>created_at</code>) could silently drop a field.</td>
+        <td>Bootstrap-shape tests assert row-for-row equivalence between source tables and <code>event_handlers</code> (per-column, all rows) before the DROP runs in a separate test fixture that pauses the migration mid-flight.</td>
+      </tr>
+      <tr>
+        <td>System-row patterns differ slightly between task_rules + prompt_triggers (different namespace UUIDs in <code>ShippedTaskRule.UUIDFor</code> vs <code>ShippedPromptTrigger.UUIDFor</code>).</td>
+        <td>Preserve both. The unified <code>ShippedEventHandlers</code> list assembles them with their existing derivations, so deterministic IDs survive across the migration without remapping.</td>
+      </tr>
+      <tr>
+        <td>The CHECK constraints reject mid-promote writes if the application tries to set kind='trigger' but hasn't yet populated all trigger-only fields.</td>
+        <td>Promote is an explicit POST endpoint (<code>/api/event-handlers/{id}/promote</code>), not a generic <code>PUT kind=</code> swap. The handler validates the target shape before issuing one atomic UPDATE that populates trigger fields and clears rule fields together.</td>
+      </tr>
+      <tr>
+        <td>The router today processes rules and triggers in two separate matcher loops; collapsing into one might hide a subtle ordering invariant.</td>
+        <td>Audit before merge: list every place the router compares "what fired" between the two passes. Today's behavior pins "rules fire first, then triggers fire against the resulting tasks." Preserve by ordering the unified matcher loop by <code>kind</code>.</td>
+      </tr>
+      <tr>
+        <td>Dropping the old tables in the same migration means no escape valve if a consumer outside this PR (a Go test, an unmigrated callsite) still hits the old table at runtime.</td>
+        <td>Compiler catches Go callers — the old stores + types are deleted, so anything unswept fails the build. For the SQL layer: <code>grep -r 'task_rules\|prompt_triggers' internal/</code> after the rewrite must return only the migration file itself.</td>
+      </tr>
+      <tr>
+        <td>SQLite parent-index sweep (8 new <code>UNIQUE (id, org_id)</code> indexes) touches tables outside the unification's strict scope — could collide with concurrent work on those tables.</td>
+        <td>Indexes are additive and idempotent (<code>IF NOT EXISTS</code>); they don't change existing column semantics or rebuild tables. Existing child FKs continue to target plain <code>parent(id)</code>. Conflict surface is the migration file's text only.</td>
+      </tr>
+      <tr>
+        <td>Adding parent unique indexes but not rewriting child FKs to composite leaves a half-fix: SQLite still lets a child row's <code>org_id</code> differ from the parent's <code>org_id</code> in principle.</td>
+        <td>At N=1 there's only one <code>org_id</code> value in the entire database (the local sentinel), so divergence is structurally impossible. The full child-FK rewrite is a deferred parity sweep, not load-bearing for local-mode correctness.</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="acceptance">
+  <div class="section-label">§10</div>
+  <h2>Acceptance</h2>
+  <ul class="tight">
+    <li><span class="tag tag--green">PASS</span> Fresh install: <code>event_handlers</code> populated with the shipped rules + triggers (combined count = <code>len(ShippedEventHandlers)</code>, derived from the existing two lists at compile time).</li>
+    <li><span class="tag tag--green">PASS</span> Upgrade install: every pre-migration <code>task_rules</code> + <code>prompt_triggers</code> row appears in <code>event_handlers</code> with the same id, same content, correct kind. After the migration runs, both old tables are gone — schema introspection confirms.</li>
+    <li><span class="tag tag--green">PASS</span> Router fires both rules and triggers from a single <code>GetEnabledForEvent</code> call, preserving the rules-before-triggers order via kind sort.</li>
+    <li><span class="tag tag--green">PASS</span> CHECK constraints reject mis-shaped writes (kind='rule' with prompt_id set, kind='trigger' with default_priority set, etc.).</li>
+    <li><span class="tag tag--green">PASS</span> <code>/api/event-handlers</code> endpoints round-trip CRUD; both FE pages render correctly against the unified backend.</li>
+    <li><span class="tag tag--green">PASS</span> No remaining references to <code>task_rules</code> or <code>prompt_triggers</code> in the codebase outside the migration file: <code>grep -r 'task_rules\|prompt_triggers' internal/ frontend/src/ | grep -v migrations</code> returns empty.</li>
+    <li><span class="tag tag--cyan">TEST</span> Conformance suite covers rule-only + trigger-only + per-kind CHECK rejection + promote endpoint.</li>
+    <li><span class="tag tag--cyan">TEST</span> Migration backfill tests pin the rule + trigger row preservation paths and assert post-DROP schema state.</li>
+    <li><span class="tag">DOC</span> Architecture doc decision <code>rule-vs-trigger-semantics</code> updated from "consolidation pending" to "consolidation shipped."</li>
+  </ul>
+</section>
+
+</article>
+</main>
+
+<footer>
+  SKY-259 · event_handlers unification · v0.1 · 2026-05-11
+</footer>
+</body>
+</html>

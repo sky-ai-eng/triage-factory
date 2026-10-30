@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Triage Factory — Browser Takeover (live steering spike)</title>
+<style>
+/* ============================================================
+   Design language — inherited from where-tf-is-going.html
+   liquid glass + Her (warm peach) + Transcendence (particle
+   field) + Halo Reach (thin geometric HUD).
+   Warm = the human / "act as yourself". Cool = the bot / machine.
+   ============================================================ */
+:root {
+  --space-0: #06070b;
+  --space-1: #0a0a15;
+  --space-2: #100c1c;
+  --ink:     #f3eee7;
+  --ink-dim: #c5bfb6;
+  --ink-mut: #8b8590;
+  --ink-low: #5a5560;
+
+  --peach:    #ffb288;
+  --peach-2:  #ff8b6b;
+  --peach-3:  #ffd9bf;
+  --cyan:     #7dd3fc;
+  --cyan-2:   #a5e9ff;
+  --cyan-3:   #38bdf8;
+  --violet:   #a78bfa;
+  --violet-2: #c4b5fd;
+  --green:    #4ade80;
+
+  --glass:    rgba(22, 18, 34, 0.42);
+  --glass-2:  rgba(28, 22, 42, 0.62);
+  --glass-edge: rgba(255, 255, 255, 0.08);
+  --hairline:   rgba(125, 211, 252, 0.14);
+  --hairline-warm: rgba(255, 178, 136, 0.18);
+  --hairline-violet: rgba(167, 139, 250, 0.2);
+
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --display: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  background: var(--space-0);
+  color: var(--ink);
+  font-family: var(--display);
+  font-weight: 300;
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  letter-spacing: 0.005em;
+}
+
+.cosmos {
+  position: fixed; inset: 0; z-index: -2;
+  background:
+    radial-gradient(ellipse 60% 40% at 70% 20%, rgba(255, 139, 107, 0.16), transparent 60%),
+    radial-gradient(ellipse 50% 50% at 20% 80%, rgba(167, 139, 250, 0.13), transparent 65%),
+    radial-gradient(ellipse 80% 60% at 50% 110%, rgba(56, 189, 248, 0.08), transparent 70%),
+    linear-gradient(180deg, #06070b 0%, #0a0816 50%, #08070d 100%);
+}
+.stars { position: fixed; inset: 0; z-index: -1; overflow: hidden; pointer-events: none; }
+.stars::before, .stars::after {
+  content: ""; position: absolute; inset: 0;
+  background-image:
+    radial-gradient(1px 1px at 12% 18%, rgba(255,255,255,0.6), transparent),
+    radial-gradient(1px 1px at 28% 72%, rgba(255,255,255,0.4), transparent),
+    radial-gradient(1px 1px at 46% 34%, rgba(255,255,255,0.5), transparent),
+    radial-gradient(1px 1px at 62% 84%, rgba(255,255,255,0.35), transparent),
+    radial-gradient(1px 1px at 80% 12%, rgba(255,255,255,0.55), transparent),
+    radial-gradient(1px 1px at 92% 56%, rgba(255,255,255,0.4), transparent),
+    radial-gradient(1px 1px at 8% 50%, rgba(255,255,255,0.3), transparent),
+    radial-gradient(1px 1px at 54% 8%, rgba(255,255,255,0.4), transparent),
+    radial-gradient(1px 1px at 36% 92%, rgba(255,255,255,0.35), transparent),
+    radial-gradient(1px 1px at 72% 38%, rgba(255,255,255,0.5), transparent);
+  animation: drift 120s linear infinite;
+  opacity: 0.5;
+}
+.stars::after { animation-duration: 200s; animation-direction: reverse; opacity: 0.25; transform: scale(1.4); }
+@keyframes drift { from { transform: translateY(0) scale(1); } to { transform: translateY(-100px) scale(1); } }
+
+/* Chrome */
+.chrome {
+  position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
+  z-index: 50; display: flex; align-items: center; gap: 14px;
+  padding: 8px 18px;
+  background: var(--glass-2);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  border: 1px solid var(--hairline); border-radius: 999px;
+  box-shadow: 0 1px 0 inset rgba(255,255,255,0.06), 0 10px 40px -10px rgba(0,0,0,0.4);
+  font-family: var(--mono); font-size: 11px; color: var(--ink-mut); letter-spacing: 0.08em;
+}
+.chrome__dot { width: 6px; height: 6px; border-radius: 50%; background: var(--peach); box-shadow: 0 0 12px var(--peach); animation: heartbeat 3s ease-in-out infinite; }
+@keyframes heartbeat { 0%, 100% { opacity: 0.7; } 50% { opacity: 1; } }
+.chrome__sep { color: var(--ink-low); }
+.chrome__draft { padding: 2px 10px; border-radius: 999px; background: rgba(255,178,136,0.12); color: var(--peach-3); border: 1px solid var(--hairline-warm); font-size: 10px; }
+
+/* Layout */
+main { max-width: 1180px; margin: 0 auto; padding: 120px 32px 80px; }
+section { margin-bottom: 130px; scroll-margin-top: 100px; }
+
+.eyebrow {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.22em;
+  text-transform: uppercase; color: var(--cyan); margin-bottom: 14px;
+  display: flex; align-items: center; gap: 10px;
+}
+.eyebrow::before { content: ""; display: inline-block; width: 28px; height: 1px; background: linear-gradient(to right, transparent, var(--cyan)); }
+.eyebrow .num { color: var(--ink-low); font-size: 10px; letter-spacing: 0.1em; }
+
+h2 { font-family: var(--display); font-weight: 200; font-size: 38px; letter-spacing: -0.02em; line-height: 1.1; margin-bottom: 18px; }
+h2 em { font-style: normal; background: linear-gradient(120deg, var(--peach), var(--violet-2) 60%, var(--cyan-2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.lede { font-weight: 300; font-size: 17px; color: var(--ink-dim); max-width: 680px; margin-bottom: 36px; line-height: 1.6; }
+.lede strong { color: var(--ink); font-weight: 500; }
+
+/* Glass */
+.glass {
+  position: relative; background: var(--glass);
+  backdrop-filter: blur(28px) saturate(150%); -webkit-backdrop-filter: blur(28px) saturate(150%);
+  border: 1px solid var(--hairline); border-radius: 18px;
+  box-shadow: 0 1px 0 inset rgba(255,255,255,0.08), 0 0 0 1px rgba(255,255,255,0.02) inset, 0 30px 60px -30px rgba(0,0,0,0.5);
+  padding: 28px; transition: border-color 400ms ease, transform 400ms ease;
+}
+.glass:hover { border-color: rgba(125, 211, 252, 0.25); }
+.glass--warm { border-color: var(--hairline-warm); }
+.glass--warm:hover { border-color: rgba(255, 178, 136, 0.32); }
+.glass::before, .glass::after, .glass > .bracket {
+  content: ""; position: absolute; width: 14px; height: 14px;
+  border: 1px solid var(--cyan); opacity: 0.5; pointer-events: none;
+}
+.glass::before { top: 8px; left: 8px; border-right: none; border-bottom: none; }
+.glass::after  { bottom: 8px; right: 8px; border-left: none; border-top: none; }
+.glass > .bracket--tr { top: 8px; right: 8px; border-left: none; border-bottom: none; }
+.glass > .bracket--bl { bottom: 8px; left: 8px; border-right: none; border-top: none; }
+.glass--warm::before, .glass--warm::after, .glass--warm > .bracket { border-color: var(--peach); }
+
+/* Hero */
+.hero { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 60px; align-items: center; margin-bottom: 150px; min-height: 500px; }
+.hero__hook { font-family: var(--mono); font-size: 12px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--peach-3); margin-bottom: 18px; }
+.hero__title { font-family: var(--display); font-weight: 100; font-size: 60px; letter-spacing: -0.035em; line-height: 1.02; margin-bottom: 24px; }
+.hero__title em { font-style: normal; background: linear-gradient(120deg, var(--peach) 0%, var(--peach-3) 30%, var(--violet-2) 65%, var(--cyan-2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.hero__sub { font-size: 18px; color: var(--ink-dim); font-weight: 300; max-width: 500px; line-height: 1.55; margin-bottom: 32px; }
+.hero__meta { display: flex; gap: 12px; flex-wrap: wrap; font-family: var(--mono); font-size: 11px; color: var(--ink-mut); letter-spacing: 0.06em; }
+.hero__meta span { padding: 6px 12px; border: 1px solid var(--hairline); border-radius: 999px; background: var(--glass); backdrop-filter: blur(10px); }
+
+.orb-stage { position: relative; height: 460px; display: flex; align-items: center; justify-content: center; }
+.orb { position: relative; width: 320px; height: 320px; border-radius: 50%; }
+.orb__halo { position: absolute; inset: -80px; border-radius: 50%; background: radial-gradient(circle, rgba(255,178,136,0.18) 0%, rgba(167,139,250,0.10) 40%, transparent 70%); filter: blur(30px); animation: pulse 6s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 0.7; transform: scale(1); } 50% { opacity: 1; transform: scale(1.08); } }
+.orb__ring { position: absolute; inset: 0; border-radius: 50%; border: 1px solid transparent; }
+.orb__ring--1 { border-color: rgba(255, 178, 136, 0.18); animation: spin 40s linear infinite; background: conic-gradient(from 0deg, transparent 70%, rgba(255,178,136,0.4) 85%, transparent 100%); -webkit-mask: radial-gradient(transparent 55%, #000 56%, #000 58%, transparent 59%); mask: radial-gradient(transparent 55%, #000 56%, #000 58%, transparent 59%); }
+.orb__ring--2 { inset: 28px; border-color: rgba(167, 139, 250, 0.18); animation: spin 60s linear infinite reverse; background: conic-gradient(from 90deg, transparent 60%, rgba(167,139,250,0.45) 75%, transparent 90%); -webkit-mask: radial-gradient(transparent 55%, #000 56%, #000 58%, transparent 59%); mask: radial-gradient(transparent 55%, #000 56%, #000 58%, transparent 59%); }
+.orb__ring--3 { inset: 60px; border-color: rgba(125, 211, 252, 0.20); animation: spin 25s linear infinite; background: conic-gradient(from 180deg, transparent 75%, rgba(125,211,252,0.5) 87%, transparent 100%); -webkit-mask: radial-gradient(transparent 53%, #000 54%, #000 58%, transparent 59%); mask: radial-gradient(transparent 53%, #000 54%, #000 58%, transparent 59%); }
+@keyframes spin { to { transform: rotate(360deg); } }
+.orb__body { position: absolute; inset: 88px; border-radius: 50%; background: radial-gradient(circle at 35% 32%, rgba(255,255,255,0.4) 0%, rgba(255,178,136,0.85) 18%, rgba(255,139,107,0.7) 38%, rgba(167,139,250,0.55) 68%, rgba(56,30,90,0.7) 100%); box-shadow: inset 0 0 40px rgba(255,178,136,0.4), inset 0 -10px 30px rgba(56,30,90,0.5), 0 0 60px rgba(255,178,136,0.3), 0 0 120px rgba(167,139,250,0.15); animation: breathe 8s ease-in-out infinite; }
+@keyframes breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.04); } }
+.orb__core { position: absolute; inset: 130px; border-radius: 50%; background: radial-gradient(circle at 40% 40%, rgba(255,255,255,0.9), rgba(255,217,191,0.6) 40%, transparent 70%); animation: pulse 4s ease-in-out infinite; }
+.orb-stage::after { content: ""; position: absolute; inset: -40px; background-image: radial-gradient(1px 1px at 20% 30%, rgba(255,178,136,0.6), transparent), radial-gradient(1px 1px at 85% 25%, rgba(167,139,250,0.7), transparent), radial-gradient(1px 1px at 75% 80%, rgba(125,211,252,0.7), transparent), radial-gradient(1px 1px at 15% 75%, rgba(255,217,191,0.6), transparent); animation: drift 60s linear infinite, pulse 8s ease-in-out infinite; pointer-events: none; }
+
+/* The matrix — Cloud/DC x service/user */
+.matrix { display: grid; grid-template-columns: 168px 1fr 1fr; gap: 1px; background: rgba(255,255,255,0.05); border: 1px solid var(--hairline); border-radius: 16px; overflow: hidden; }
+.matrix__corner, .matrix__colhead, .matrix__rowhead, .matrix__cell { background: #0b0a16; padding: 20px 22px; }
+.matrix__corner { background: #08070f; }
+.matrix__colhead { display: flex; flex-direction: column; gap: 5px; font-family: var(--mono); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; }
+.matrix__colhead--service { color: var(--cyan-2); }
+.matrix__colhead--user { color: var(--peach-3); }
+.matrix__colhead small { font-family: var(--display); text-transform: none; letter-spacing: 0; font-size: 12px; color: var(--ink-mut); font-weight: 300; }
+.matrix__rowhead { display: flex; flex-direction: column; justify-content: center; gap: 5px; font-family: var(--display); font-weight: 300; font-size: 19px; }
+.matrix__rowhead .sub { font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-mut); }
+.matrix__rowhead .tag { align-self: flex-start; margin-top: 6px; font-family: var(--mono); font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--peach-3); background: rgba(255,178,136,0.12); border: 1px solid var(--hairline-warm); padding: 2px 8px; border-radius: 999px; }
+.matrix__cell { display: flex; flex-direction: column; gap: 9px; }
+.matrix__cell--service { box-shadow: inset 0 0 50px rgba(125,211,252,0.05); }
+.matrix__cell--user { box-shadow: inset 0 0 50px rgba(255,178,136,0.05); }
+.matrix__mech { font-size: 14px; color: var(--ink); line-height: 1.5; }
+.matrix__mech strong { font-weight: 600; }
+.matrix__mech code, .matrix__note code { font-family: var(--mono); font-size: 12px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08); padding: 1px 6px; border-radius: 4px; }
+.matrix__note { font-family: var(--mono); font-size: 11px; line-height: 1.55; letter-spacing: 0.01em; }
+.matrix__cell--service .matrix__note { color: rgba(125,211,252,0.72); }
+.matrix__cell--user .matrix__note { color: rgba(255,178,136,0.74); }
+.matrix__ok { color: var(--green); }
+.matrix-foot { font-family: var(--mono); font-size: 11px; color: var(--ink-mut); margin-top: 22px; line-height: 1.7; letter-spacing: 0.03em; }
+.matrix-foot strong { color: var(--peach-3); font-weight: 500; }
+.matrix-foot span.x { color: var(--peach-2); }
+.notes { list-style: none; margin-top: 16px; }
+.notes li { position: relative; padding: 10px 0 10px 24px; border-top: 1px solid rgba(255,255,255,0.05); font-size: 13px; color: var(--ink-dim); line-height: 1.6; }
+.notes li:first-child { border-top: none; }
+.notes li::before { content: "›"; color: var(--cyan-3); font-family: var(--mono); position: absolute; left: 4px; top: 10px; }
+.notes li strong { color: var(--ink); font-weight: 500; }
+.notes li code { font-family: var(--mono); font-size: 12px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.06); padding: 1px 5px; border-radius: 4px; color: var(--cyan-2); }
+.notes li .lbl { font-family: var(--mono); font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-mut); margin-right: 8px; border: 1px solid rgba(255,255,255,0.08); padding: 1px 7px; border-radius: 999px; white-space: nowrap; }
+.notes li .lbl--warm { color: var(--peach-3); border-color: var(--hairline-warm); }
+.notes li .lbl--cool { color: var(--cyan-2); border-color: var(--hairline); }
+
+/* Duo panels — resolver entry points / identity vs credential */
+.duo { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.duo__panel .door__tag { font-family: var(--mono); font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--ink-mut); margin-bottom: 8px; }
+.duo__panel h3 { font-family: var(--display); font-weight: 300; font-size: 22px; margin-bottom: 14px; letter-spacing: -0.01em; }
+.duo__panel h3 .c { color: var(--cyan-2); } .duo__panel h3 .w { color: var(--peach-3); }
+.duo__sig { display: block; font-family: var(--mono); font-size: 12.5px; color: var(--ink); background: rgba(6,5,14,0.6); border: 1px solid var(--hairline); border-radius: 8px; padding: 11px 13px; margin-bottom: 16px; line-height: 1.5; word-break: break-word; }
+.glass--warm .duo__sig { border-color: var(--hairline-warm); }
+.duo__sig .fn { color: var(--cyan-2); } .glass--warm .duo__sig .fn { color: var(--peach-3); }
+.duo__sig .com { color: var(--ink-low); font-style: italic; }
+.duo__panel ul { list-style: none; }
+.duo__panel li { position: relative; padding: 9px 0 9px 22px; border-top: 1px solid rgba(255,255,255,0.05); font-size: 13.5px; color: var(--ink-dim); line-height: 1.55; }
+.duo__panel li:first-child { border-top: none; }
+.duo__panel li::before { content: "›"; color: var(--cyan-3); font-family: var(--mono); position: absolute; left: 3px; top: 9px; }
+.glass--warm .duo__panel li::before { color: var(--peach); }
+.duo__panel li strong { color: var(--ink); font-weight: 500; }
+.duo__panel code { font-family: var(--mono); font-size: 12px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.06); padding: 1px 5px; border-radius: 4px; color: var(--ink); }
+
+.punchline { margin-top: 26px; text-align: center; font-family: var(--display); font-weight: 200; font-size: 23px; letter-spacing: -0.01em; color: var(--ink); }
+.punchline em { font-style: normal; background: linear-gradient(120deg, var(--peach), var(--cyan-2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+
+/* Findings list */
+.findings { display: grid; gap: 14px; }
+.finding { display: grid; grid-template-columns: 40px 1fr; gap: 18px; align-items: start; padding: 20px 24px; }
+.finding__mark { font-family: var(--mono); font-size: 18px; line-height: 1; padding-top: 2px; }
+.finding__mark--flip { color: var(--peach-2); }
+.finding__mark--ok { color: var(--green); }
+.finding__mark--new { color: var(--violet-2); }
+.finding h4 { font-family: var(--display); font-weight: 400; font-size: 16px; color: var(--ink); margin-bottom: 5px; }
+.finding p { font-size: 13.5px; color: var(--ink-dim); line-height: 1.6; }
+.finding code { font-family: var(--mono); font-size: 12px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.06); padding: 1px 5px; border-radius: 4px; color: var(--cyan-2); }
+.finding strong { color: var(--ink); font-weight: 500; }
+
+/* Parity (local = N=1) */
+.parity { display: grid; grid-template-columns: 1fr 80px 1fr; gap: 0; align-items: stretch; }
+.parity__col .door__tag { font-family: var(--mono); font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--ink-mut); margin-bottom: 18px; }
+.parity__col h3 { font-family: var(--display); font-weight: 300; font-size: 24px; margin-bottom: 4px; }
+.parity__rows { display: grid; gap: 10px; font-family: var(--mono); font-size: 12px; margin-top: 16px; }
+.parity__row { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 12px; padding: 11px 14px; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); border-radius: 6px; }
+.parity__row .key { color: var(--ink-mut); letter-spacing: 0.05em; }
+.parity__row .val { color: var(--peach-3); font-weight: 500; text-align: right; }
+.parity__col--multi .parity__row .val { color: var(--cyan-2); }
+.parity__equals { display: flex; align-items: center; justify-content: center; }
+.parity__equals-mark { font-family: var(--display); font-weight: 100; font-size: 48px; color: var(--ink-dim); background: var(--glass-2); backdrop-filter: blur(20px); border: 1px solid var(--hairline); border-radius: 999px; width: 64px; height: 64px; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 30px rgba(255,255,255,0.04); }
+
+/* Q&A accordion */
+.qa { display: grid; gap: 12px; }
+.qa__item { cursor: pointer; padding: 22px 26px; transition: border-color 300ms ease; }
+.qa__q { display: flex; align-items: center; gap: 16px; }
+.qa__q .n { font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em; color: var(--cyan); flex-shrink: 0; }
+.qa__q .t { font-family: var(--display); font-weight: 300; font-size: 18px; color: var(--ink); flex: 1; letter-spacing: -0.01em; }
+.qa__q .tog { font-family: var(--mono); font-size: 18px; color: var(--peach); flex-shrink: 0; transition: transform 300ms ease; }
+.qa__item.is-open .qa__q .tog { transform: rotate(45deg); }
+.qa__a { max-height: 0; overflow: hidden; transition: max-height 500ms ease; }
+.qa__item.is-open .qa__a { max-height: 520px; }
+.qa__a-inner { padding-top: 16px; font-size: 14px; color: var(--ink-dim); line-height: 1.65; }
+.qa__a-inner strong { color: var(--ink); font-weight: 500; }
+.qa__a-inner code { font-family: var(--mono); font-size: 12px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.06); padding: 1px 5px; border-radius: 4px; color: var(--cyan-2); }
+.qa__a-inner .verdict { display: inline-block; margin-top: 12px; font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; color: var(--peach-3); border-left: 2px solid var(--peach); padding-left: 12px; }
+
+/* Kanban — proposed scope */
+.lane { margin-top: 36px; }
+.lane:first-of-type { margin-top: 0; }
+.lane__label { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 16px; gap: 16px; }
+.lane__name { font-family: var(--mono); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-mut); display: flex; align-items: center; gap: 10px; }
+.lane__name::before { content: ""; display: inline-block; width: 22px; height: 1px; background: linear-gradient(to right, transparent, currentColor); }
+.lane--foundation .lane__name { color: rgba(74, 222, 128, 0.7); }
+.lane__count { font-family: var(--mono); font-size: 10px; color: var(--ink-low); letter-spacing: 0.08em; }
+.kanban { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 16px; }
+.ticket { padding: 18px; background: var(--glass); backdrop-filter: blur(20px); border: 1px solid var(--hairline); border-radius: 12px; cursor: pointer; transition: all 300ms ease; position: relative; }
+.ticket:hover { border-color: rgba(255,178,136,0.3); transform: translateY(-2px); }
+.ticket__id { font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em; color: var(--ink-mut); margin-bottom: 6px; }
+.ticket__title { font-family: var(--display); font-weight: 400; font-size: 15px; color: var(--ink); margin-bottom: 12px; line-height: 1.3; }
+.ticket__status { display: inline-block; font-family: var(--mono); font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; padding: 3px 8px; border-radius: 999px; border: 1px solid currentColor; }
+.ticket__status--near { color: var(--peach); background: rgba(255,178,136,0.08); }
+.ticket__status--saas { color: var(--cyan); background: rgba(125,211,252,0.06); }
+.ticket__status--core { color: var(--violet-2); background: rgba(167,139,250,0.08); }
+.ticket__one { margin-top: 12px; font-size: 12.5px; color: var(--ink-mut); max-height: 0; overflow: hidden; transition: max-height 400ms ease; line-height: 1.6; }
+.ticket.is-open .ticket__one { max-height: 260px; }
+.ticket__one strong { color: var(--ink-dim); font-weight: 500; }
+.ticket__one code { font-family: var(--mono); font-size: 11px; color: var(--cyan-2); }
+.ticket--done { padding: 14px 16px; background: rgba(34, 197, 94, 0.025); border-color: rgba(34, 197, 94, 0.16); cursor: default; }
+.ticket--done:hover { transform: none; border-color: rgba(34, 197, 94, 0.32); }
+.ticket--done .ticket__check { position: absolute; top: 12px; right: 14px; font-family: var(--mono); font-size: 11px; color: var(--green); opacity: 0.7; }
+.ticket--done .ticket__title { font-size: 13px; margin-bottom: 6px; color: var(--ink-dim); }
+
+/* Callout */
+.callout { margin-top: 8px; padding: 32px; text-align: center; background: linear-gradient(135deg, rgba(255,178,136,0.06), rgba(167,139,250,0.06)); }
+.callout p { font-family: var(--display); font-weight: 200; font-size: 25px; letter-spacing: -0.01em; max-width: 680px; margin: 0 auto; line-height: 1.4; }
+.callout p em { font-style: normal; background: linear-gradient(120deg, var(--peach), var(--violet-2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.callout small { display: block; font-family: var(--mono); font-size: 11px; color: var(--ink-mut); letter-spacing: 0.06em; margin-top: 14px; }
+
+/* Footer */
+footer.coda { text-align: center; padding: 70px 32px 60px; font-family: var(--mono); font-size: 11px; color: var(--ink-low); letter-spacing: 0.08em; border-top: 1px solid rgba(255,255,255,0.04); margin-top: 60px; }
+footer.coda a { color: var(--cyan); text-decoration: none; margin: 0 8px; }
+footer.coda a:hover { color: var(--cyan-2); }
+
+/* Responsive */
+@media (max-width: 900px) {
+  .hero { grid-template-columns: 1fr; min-height: auto; gap: 32px; }
+  .hero__title { font-size: 44px; }
+  .orb-stage { height: 320px; } .orb { width: 240px; height: 240px; } .orb__body { inset: 64px; } .orb__core { inset: 96px; }
+  .matrix { grid-template-columns: 1fr; }
+  .matrix__corner { display: none; }
+  .matrix__colhead { border-top: 1px solid var(--hairline); }
+  .duo { grid-template-columns: 1fr; }
+  .parity { grid-template-columns: 1fr; } .parity__equals { padding: 20px 0; }
+  .kanban { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<div class="cosmos"></div>
+<div class="stars"></div>
+
+<div class="chrome">
+  <span class="chrome__dot"></span>
+  <span>triagefactory</span>
+  <span class="chrome__sep">/</span>
+  <span>takeover</span>
+  <span class="chrome__sep">/</span>
+  <span class="chrome__draft">LIVE-STEERING SPIKE · 2026-06-07</span>
+</div>
+
+<main>
+
+  <!-- ===================================================== HERO ===================================================== -->
+  <section class="hero">
+    <div>
+      <div class="hero__hook">delegation takeover · steering spike</div>
+      <h1 class="hero__title">Take the wheel.<br><em>Without leaving the room.</em></h1>
+      <p class="hero__sub">Today a takeover <strong>ejects</strong> the agent to your terminal — a one-way door out of Triage Factory. The spike proves we can watch, pause, message, and resume a live agent <em>in the browser</em> — and that local and multi-mode ride the exact same rail.</p>
+      <div class="hero__meta">
+        <span>interrupt in 8ms</span>
+        <span>steer the live process</span>
+        <span>resume = the backstop</span>
+        <span>local = multi</span>
+      </div>
+    </div>
+    <div class="orb-stage">
+      <div class="orb">
+        <div class="orb__halo"></div>
+        <div class="orb__ring orb__ring--1"></div>
+        <div class="orb__ring orb__ring--2"></div>
+        <div class="orb__ring orb__ring--3"></div>
+        <div class="orb__body"></div>
+        <div class="orb__core"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================================================== 01 · TODAY ===================================================== -->
+  <section>
+    <div class="eyebrow"><span class="num">01</span><span>What takeover is today</span></div>
+    <h2>Not a wipe — <em>a one-way door.</em></h2>
+    <p class="lede">The mental model of "takeover destroys the run" is a version behind. Today's takeover already <strong>preserves and resumes</strong>: it moves the worktree somewhere durable, copies the Claude session so <code>claude --resume</code> attaches, and hands you a command. The real gap is narrower and sharper — <strong>there's no way back in.</strong></p>
+    <div class="findings">
+      <div class="glass finding">
+        <div class="finding__mark finding__mark--ok">&check;</div>
+        <div><h4>It already preserves the work</h4><p>The worktree is <em>moved</em> to <code>~/.triagefactory/takeovers/</code>, not deleted; the session JSONL is copied and re-encoded so <code>--resume</code> finds it; the run lands in a terminal <code>taken_over</code> status with a held-takeovers banner and a <code>triagefactory resume</code> shortcut. Startup cleanup even fails <em>safe</em>.</p></div>
+      </div>
+      <div class="glass glass--warm finding">
+        <div class="finding__mark finding__mark--flip">&#10562;</div>
+        <div><h4>But it's an exit, not a cockpit</h4><p><code>taken_over</code> is terminal. Once you eject, you live in your terminal forever — there is no transition back into Triage Factory. You lose the board, the live stream, the team context. That's the part users feel, and the part this redesign kills.</p></div>
+      </div>
+      <div class="glass finding">
+        <div class="finding__mark finding__mark--flip">&#9888;</div>
+        <div><h4>The destructive path is a different button</h4><p>The "wipes everything" behavior is <strong>Cancel</strong> (SIGKILL + worktree delete), not Takeover. Three operations exist today — Cancel (abandon), Takeover (eject + preserve), Release (tear down a held takeover) — and none let a human steer <em>in place</em>.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================================================== 02 · FALSE DICHOTOMY ===================================================== -->
+  <section>
+    <div class="eyebrow"><span class="num">02</span><span>The question we set out to decide</span></div>
+    <h2>The fork <em>wasn't real.</em></h2>
+    <p class="lede">We framed it as two architectures: <strong>A</strong>, pause-and-respawn (re-run <code>--resume</code> per message), versus <strong>B</strong>, a long-lived process you talk to. The Agent SDK that Triage Factory already embeds (<code>wrapper.mjs</code>, pinned <code>claude-agent-sdk@0.2.137</code>) collapses the choice.</p>
+    <div class="duo">
+      <div class="glass duo__panel">
+        <div class="door__tag">the catch</div>
+        <h3><span class="c">pause needs the live plane</span></h3>
+        <code class="duo__sig"><span class="com">// only in streaming-input mode:</span><br>query.<span class="fn">interrupt</span>() · <span class="fn">streamInput</span>() · <span class="fn">setPermissionMode</span>()<br><span class="com">// wrapper.mjs:86 passes a plain string &rarr; none of these</span></code>
+        <ul>
+          <li><code>interrupt()</code> — the basis of user-initiated <strong>pause</strong> — exists <em>only</em> in streaming-input mode.</li>
+          <li>Today the wrapper hands the SDK a string prompt, so TF has no interrupt — only SIGKILL.</li>
+          <li>So even "Model A with pause" needs the streaming bridge. There is no cheap pause.</li>
+        </ul>
+      </div>
+      <div class="glass glass--warm duo__panel">
+        <div class="door__tag">the payoff</div>
+        <h3><span class="w">the bridge is the whole plane</span></h3>
+        <code class="duo__sig"><span class="com">// once prompt is an AsyncIterable you also get:</span><br><span class="fn">streamInput</span> · <span class="fn">interrupt</span> · <span class="fn">canUseTool</span> · <span class="fn">getContextUsage</span> · <span class="fn">readFile</span> · <span class="fn">rewindFiles</span></code>
+        <ul>
+          <li>The moment you switch modes for pause, you also get send-message, permissions, context metering, even file-rewind.</li>
+          <li>The SDK ships a <code>readFile()</code> documented <em>"for the remote sidebar viewer"</em> — browser steering is a first-class use case.</li>
+          <li>And live steering is <strong>cheaper per message</strong> than respawn — see next.</li>
+        </ul>
+      </div>
+    </div>
+    <p class="punchline">A vs B was a false choice. <em>Live is the path; resume is the safety net.</em></p>
+  </section>
+
+  <!-- ===================================================== 03 · WHAT THE SPIKE PROVED ===================================================== -->
+  <section>
+    <div class="eyebrow"><span class="num">03</span><span>Measured, not assumed</span></div>
+    <h2>Every assertion <em>passed.</em></h2>
+    <p class="lede">Run against the exact SDK build TF ships, authenticating the same way <code>wrapper.mjs</code> does — local Claude login, no API key. Total spend across the whole spike ≈ <strong>$0.08</strong>. Scripts and a full write-up live on <code>aa/takeover-spike</code>.</p>
+    <div class="findings">
+      <div class="glass finding"><div class="finding__mark finding__mark--ok">&check;</div><div><h4>Interrupt is instant and clean</h4><p><code>interrupt()</code> resolved in <strong>8ms</strong>, stopping the agent after 1 of 10 files — no SIGKILL, no torn state.</p></div></div>
+      <div class="glass glass--warm finding"><div class="finding__mark finding__mark--ok">&check;</div><div><h4>You can steer the live process</h4><p>After interrupt, <code>streamInput()</code> delivered a new instruction into the <em>same</em> process and the agent obeyed — <code>input=10, cache_read=13469</code>, zero replay.</p></div></div>
+      <div class="glass finding"><div class="finding__mark finding__mark--ok">&check;</div><div><h4>Resume recovers everything, cold</h4><p>A <em>fresh</em> process (<code>resume: sessionId</code>, same cwd) recalled the task, the interrupt point, and the steering message verbatim — same session id. The "resume later / crash / restart" story holds.</p></div></div>
+      <div class="glass finding"><div class="finding__mark finding__mark--ok">&check;</div><div><h4>Permissions round-trip to the browser</h4><p><code>canUseTool</code> fired with tool + input; an async deny was honored as an error result. A risky <code>rm -f</code> was gated; a trivial <code>echo</code> auto-passed — so the UI only prompts for <strong>consequential</strong> actions.</p></div></div>
+      <div class="glass finding"><div class="finding__mark finding__mark--new">$</div><div><h4>Cheap inside a burst — and the cache is server-side</h4><p>While a run is actively churning, each turn pays only the delta (~18 input tokens; history served as <code>cache_read</code>) ≈ <strong>$0.0045/turn</strong>, no respawn. But the prompt cache lives on Anthropic's clock — a warm-but-idle process doesn't hold it open. Telemetry shows mixed TTLs: the stable prefix (~13K tokens) in a <strong>1-hour</strong> cache, the growing tail in the <strong>5-minute</strong> default. So past ~5 min idle, warm and resume pay the same tail rebuild — staying warm then buys latency, not tokens.</p></div></div>
+      <div class="glass finding"><div class="finding__mark finding__mark--flip">&#9888;</div><div><h4>Two shapes the Go side must learn</h4><p>An interrupt surfaces as a <code>result</code> with <code>subtype: error_during_execution</code> (must not be read as failure), and a streaming process emits <strong>N</strong> init+result envelopes — <code>run.go</code> returns on the <em>first</em> today.</p></div></div>
+    </div>
+  </section>
+
+  <!-- ===================================================== 04 · ARCHITECTURE ===================================================== -->
+  <section>
+    <div class="eyebrow"><span class="num">04</span><span>One plane, two layers</span></div>
+    <h2>A warm process. <em>A cool backstop.</em></h2>
+    <p class="lede"><strong>There's no "steered" run — just a run.</strong> Every one executes as a long-lived streaming process, so any of them can take a message or be interrupted at any moment, and any of them can run fully autonomously and never get one. The split isn't human-vs-bot — it's <em>working vs idle</em>: warm while the agent is doing work, hibernated to a durable resume the moment it goes quiet.</p>
+    <div class="duo">
+      <div class="glass glass--warm duo__panel">
+        <div class="door__tag">warm · the live run</div>
+        <h3><span class="w">live process</span> · the hot path</h3>
+        <ul>
+          <li><code>wrapper.mjs</code> becomes a bidirectional bridge: AsyncIterable prompt; stdin carries a control protocol (<code>user_message · interrupt · permission_response · set_mode</code>); stdout streams the envelopes TF already parses.</li>
+          <li><code>canUseTool</code> emits a permission request on stdout and awaits the browser's answer on stdin.</li>
+          <li><strong>Every</strong> run runs this way — autonomous or attended; a message may arrive, or never. No per-message replay inside a burst; interrupt in milliseconds.</li>
+        </ul>
+      </div>
+      <div class="glass duo__panel">
+        <div class="door__tag">cool · the machine remembers</div>
+        <h3><span class="c">resume-by-session</span> · the backstop</h3>
+        <ul>
+          <li>Already proven: <code>resume: sessionId</code> reloads the full transcript from the on-disk JSONL.</li>
+          <li>Covers crash, server restart, and <strong>idle hibernation</strong> — when the agent goes quiet (yielded, or just not working), close the process and free the slot; respawn from <code>session_id</code> + worktree on the next trigger, human or system.</li>
+          <li>This is "Model A's" mechanism — demoted from per-message hot path to the recovery + capacity layer. Same path whether a human message or an autonomous continuation wakes the run.</li>
+        </ul>
+      </div>
+    </div>
+    <div class="glass" style="margin-top:28px;">
+      <span class="bracket bracket--tr"></span><span class="bracket bracket--bl"></span>
+      <div style="font-family:var(--mono);font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:var(--ink-mut);margin-bottom:14px;">What today's architecture can't do yet — the real work</div>
+      <ul class="notes">
+        <li><span class="lbl">dispatcher</span>The single inline run dispatcher executes steps synchronously — a process parked between turns would freeze the queue. Runs must execute <strong>off-dispatcher</strong> (the yield/resume goroutine already does) but stay <em>alive</em> while working (yield exits the process today).</li>
+        <li><span class="lbl">registry</span>The spawner tracks only <code>runID &rarr; CancelFunc</code>. The live path needs <code>runID &rarr; { process, stdin, interrupt }</code> surviving across HTTP turns.</li>
+        <li><span class="lbl">parser</span><code>stream.go</code> must loop over N envelopes and label interrupts explicitly — the bridge <em>called</em> interrupt, so it never has to guess from <code>error_during_execution</code>.</li>
+        <li><span class="lbl lbl--cool">multi</span>Multi-mode needs a persistent bidirectional channel into the per-org gVisor sandbox. The browser&harr;TF websocket hop is identical to local — only the process's location differs. Horizontal scale (N pods) is a further step, deferred — see below.</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ===================================================== 05 · UNIFICATION ===================================================== -->
+  <section>
+    <div class="eyebrow"><span class="num">05</span><span>The point of doing this now</span></div>
+    <h2>Local <em>is</em> multi, at N=1.</h2>
+    <p class="lede">The reason to scope this before multi-mode hardens: browser steering is <strong>one</strong> control surface for both modes. The browser talks to TF over the websocket it already has; TF talks to the process. Only <em>where the process runs</em> changes.</p>
+    <div class="parity">
+      <div class="parity__col">
+        <div class="door__tag">local</div>
+        <h3>your laptop</h3>
+        <div class="parity__rows">
+          <div class="parity__row"><span class="key">browser &harr; TF</span><span class="val">/api/ws</span></div>
+          <div class="parity__row"><span class="key">TF &harr; process</span><span class="val">stdin / stdout</span></div>
+          <div class="parity__row"><span class="key">process runs in</span><span class="val">/tmp worktree</span></div>
+          <div class="parity__row"><span class="key">control plane</span><span class="val">the bridge</span></div>
+        </div>
+      </div>
+      <div class="parity__equals"><div class="parity__equals-mark">=</div></div>
+      <div class="parity__col parity__col--multi">
+        <div class="door__tag">multi</div>
+        <h3>hosted org</h3>
+        <div class="parity__rows">
+          <div class="parity__row"><span class="key">browser &harr; TF</span><span class="val">/api/ws</span></div>
+          <div class="parity__row"><span class="key">TF &harr; process</span><span class="val">stdin / stdout</span></div>
+          <div class="parity__row"><span class="key">process runs in</span><span class="val">gVisor sandbox</span></div>
+          <div class="parity__row"><span class="key">control plane</span><span class="val">the bridge</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="glass" style="margin-top:28px;">
+      <span class="bracket bracket--tr"></span><span class="bracket bracket--bl"></span>
+      <div style="font-family:var(--mono);font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:var(--ink-mut);margin-bottom:14px;">And the same split scales out &mdash; TFAC-71, deferred</div>
+      <p style="font-size:14px;color:var(--ink-dim);line-height:1.7;max-width:820px;">Past one executor, a live run is a <strong style="color:var(--ink);font-weight:500;">sticky, host-bound resource</strong> — it pins to one pod, exactly like a curator session. The warm/cool split <em>is</em> the placement model: the <span style="color:var(--peach-3)">warm</span> process homes to an executor (sharded by <code>org,repo</code>), and the <span style="color:var(--cyan-2)">cool</span> resume layer — built on the portable workspace snapshot (TFAC-23) — is what lets it <strong style="color:var(--ink);font-weight:500;">re-home on any pod</strong>. Control ops (message / interrupt / resume) join the planned conversion of cancel&middot;takeover&middot;resume from the in-memory <code>s.cancels</code> map to <strong style="color:var(--ink);font-weight:500;">DB-signaled operations to the owning executor</strong>; output fans out via Postgres <code>LISTEN/NOTIFY</code> so any pod serves any browser. Hibernation un-pins the run and reclaims one of the &asymp;256 sandbox slots per host — the drain/rebalance primitive, for free.</p>
+      <p style="font-size:13px;color:var(--ink-mut);line-height:1.6;max-width:820px;margin-top:12px;">Not a launch blocker — single-executor multi-mode ships first. The only thing it asks of <em>this</em> build: route control through a thin indirection that's in-process today and DB-signaled later, and record run&rarr;executor ownership even at N=1 — so scale-out is a step, not a rewrite.</p>
+    </div>
+  </section>
+
+  <!-- ===================================================== 06 · PATH FORWARD ===================================================== -->
+  <section>
+    <div class="eyebrow"><span class="num">06</span><span>The path forward</span></div>
+    <h2>Bridge first. <em>Eject last.</em></h2>
+    <p class="lede">Six phases, local before multi. Browser permissions are <strong>in</strong> the first cut. Eject-to-terminal is <strong>removed entirely</strong> — once you can steer in the browser, the terminal escape hatch and its machinery (held-takeovers, Release, <code>triagefactory resume</code>) go away. Tap a card for the gist.</p>
+
+    <div class="lane lane--foundation">
+      <div class="lane__label"><span class="lane__name">local · the rail</span><span class="lane__count">P1 – P5</span></div>
+      <div class="kanban">
+        <div class="ticket"><div class="ticket__id">P1 · foundation</div><div class="ticket__title">Interactive wrapper.mjs bridge + Go long-lived run API</div><span class="ticket__status ticket__status--core">backbone</span><div class="ticket__one"><strong>Gist:</strong> Productionize the spike bridge — AsyncIterable prompt, stdin control protocol, <code>interrupt</code> / <code>streamInput</code>, <code>canUseTool</code> &rarr; stdout/stdin. Go gains a persistent-run API; <code>stream.go</code> learns N envelopes + explicit interrupt labeling. No UI.</div></div>
+        <div class="ticket"><div class="ticket__id">P2 · lifecycle</div><div class="ticket__title">Process registry + dispatcher decoupling + hibernate-on-idle</div><span class="ticket__status ticket__status--core">backbone</span><div class="ticket__one"><strong>Gist:</strong> <code>runID &rarr; liveproc</code> surviving across turns; runs execute off the single dispatcher but stay alive while working; hibernate when the agent goes idle — uniform, no "steered" mode and no new status. Route control through a thin indirection and record run&rarr;executor ownership now, so TFAC-71 scale-out stays additive.</div></div>
+        <div class="ticket"><div class="ticket__id">P3 · transport</div><div class="ticket__title">Server endpoints + websocket events</div><span class="ticket__status ticket__status--near">api</span><div class="ticket__one"><strong>Gist:</strong> Generalize <code>respond</code> &rarr; free-form steer; pause/interrupt; attach/resume; new WS event types incl. <code>permission_request</code>. The org-scoped hub already supports it.</div></div>
+        <div class="ticket"><div class="ticket__id">P4 · surface</div><div class="ticket__title">RunDetail steering console</div><span class="ticket__status ticket__status--near">ui</span><div class="ticket__one"><strong>Gist:</strong> Build a composer into RunDetail; a pause/interrupt button; render allow / deny / always-allow permission prompts; a context-usage meter via <code>getContextUsage()</code>. Replaces TakeoverModal.</div></div>
+        <div class="ticket"><div class="ticket__id">P5 · cleanup</div><div class="ticket__title">Remove eject-to-terminal</div><span class="ticket__status ticket__status--near">subtraction</span><div class="ticket__one"><strong>Gist:</strong> Rip out CopyForTakeover / Release / held-takeovers banner / <code>triagefactory resume</code> / session materialization. Redefine "takeover" = attach-and-steer; migrate the <code>taken_over</code> status. Sequenced after P4 so users are never left without a takeover.</div></div>
+      </div>
+    </div>
+
+    <div class="lane">
+      <div class="lane__label"><span class="lane__name">multi · later</span><span class="lane__count">P6 + nicety</span></div>
+      <div class="kanban">
+        <div class="ticket"><div class="ticket__id">P6 · multi-mode</div><div class="ticket__title">gVisor bidirectional channel</div><span class="ticket__status ticket__status--saas">hosted · last</span><div class="ticket__one"><strong>Gist:</strong> A persistent stdin/stdout proxy into the per-org sandbox (today's capture is one-shot). Designed-for in the P1 protocol so nothing is re-architected; built last, after local steering is solid.</div></div>
+        <div class="ticket"><div class="ticket__id">opt · niceties</div><div class="ticket__title">Rewind &amp; remote file viewer</div><span class="ticket__status ticket__status--saas">optional</span><div class="ticket__one"><strong>Gist:</strong> <code>rewindFiles()</code> "undo the agent's changes" (needs <code>enableFileCheckpointing</code>) and <code>readFile()</code> in-console file viewing — both fall out of the SDK once the bridge exists.</div></div>
+      </div>
+    </div>
+  </section>
+
+  <div class="callout glass">
+    <span class="bracket bracket--tr"></span><span class="bracket bracket--bl"></span>
+    <p>Takeover stops being the way out. <em>It becomes the way in.</em></p>
+    <small>watch · pause · message · resume — in the browser, local and multi alike</small>
+  </div>
+
+</main>
+
+<footer class="coda">
+  spike output · branch aa/takeover-spike · findings in spike/takeover/FINDINGS.md · drafted 2026-06-07
+</footer>
+
+<script>
+// Ticket cards — expand the gist (Q&A accordion kept for parity with house template)
+document.querySelectorAll('.qa__item').forEach(item => { item.addEventListener('click', () => item.classList.toggle('is-open')); });
+document.querySelectorAll('.ticket:not(.ticket--done)').forEach(t => { t.addEventListener('click', () => t.classList.toggle('is-open')); });
+</script>
+
+</body>
+</html>

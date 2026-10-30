@@ -1,0 +1,848 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SKY-269 — D-LocalParity: synthetic tenancy rows in SQLite</title>
+<style>
+:root {
+  --bg: #030712;
+  --fg: #f8fafc;
+  --surface: rgba(17, 24, 39, 0.30);
+  --surface-2: rgba(31, 41, 55, 0.50);
+  --surface-floating: rgba(3, 7, 18, 0.80);
+  --border: #1f2937;
+  --border-2: #1e293b;
+  --border-3: #374151;
+  --muted: #94a3b8;
+  --muted-2: #6b7280;
+  --muted-3: #4b5563;
+  --accent: #22d3ee;
+  --accent-2: #06b6d4;
+  --accent-3: #0e7490;
+  --violet: #a78bfa;
+  --violet-2: #8b5cf6;
+  --purple: #a855f7;
+  --pink: #f472b6;
+  --green: #22c55e;
+  --green-2: #4ade80;
+  --amber: #fbbf24;
+  --red: #ef4444;
+  --red-2: #f87171;
+  --radius: 8px;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, "Cascadia Mono", monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+.mono, code, pre { font-family: var(--mono); }
+code { background: rgba(31, 41, 55, 0.5); padding: 1px 5px; border-radius: 3px; font-size: 0.92em; }
+a { color: var(--accent); text-underline-offset: 4px; }
+a:hover { text-decoration: underline; }
+
+.topbar {
+  position: sticky; top: 0; z-index: 40;
+  width: 100%;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-floating);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.topbar__inner {
+  margin: 0 auto; max-width: 1100px;
+  padding: 0 24px;
+  height: 56px;
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 12px;
+  color: var(--muted);
+}
+.topbar__brand { display: flex; align-items: center; gap: 12px; }
+.topbar__brand .dot {
+  width: 8px; height: 8px; border-radius: 9999px;
+  background: linear-gradient(to bottom right, var(--accent-2), var(--purple));
+  box-shadow: 0 0 12px rgba(6, 182, 212, 0.6);
+}
+.topbar__brand strong { color: var(--fg); font-weight: 600; font-size: 13px; }
+.topbar__crumb { color: var(--muted-2); }
+.topbar__meta { display: flex; gap: 8px; align-items: center; }
+.pill {
+  font-size: 11px;
+  padding: 2px 10px;
+  border-radius: 9999px;
+  font-family: var(--mono);
+}
+.pill--draft { background: rgba(251, 191, 36, 0.20); color: var(--amber); border: 1px solid rgba(251, 191, 36, 0.30); }
+.pill--size  { background: rgba(139, 92, 246, 0.20); color: var(--violet); border: 1px solid rgba(139, 92, 246, 0.30); }
+
+.hero {
+  margin: 0 auto; max-width: 1100px;
+  padding: 56px 24px 24px;
+}
+.hero h1 {
+  font-size: 30px; font-weight: 200; letter-spacing: -0.02em;
+  margin: 0 0 12px;
+  background: linear-gradient(to right, var(--accent), var(--violet), var(--pink));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.hero .sub { color: var(--muted-2); font-family: var(--mono); font-size: 12px; margin-bottom: 16px; }
+.hero p.lede { color: var(--muted); font-size: 15px; margin: 0; max-width: 760px; }
+.hero__meta {
+  display: flex; gap: 10px; margin-top: 18px; flex-wrap: wrap;
+  font-family: var(--mono); font-size: 12px;
+}
+.hero__meta .meta-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 11px; border-radius: 9999px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.hero__meta .meta-pill strong { color: var(--fg); font-weight: 500; }
+
+main {
+  margin: 0 auto; max-width: 1100px;
+  padding: 0 24px 96px;
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 32px;
+}
+nav.toc {
+  position: sticky; top: 80px;
+  height: fit-content;
+  padding: 16px 0;
+}
+.toc ol { list-style: none; padding: 0; margin: 0; counter-reset: item; }
+.toc li {
+  font-size: 12px;
+  margin-bottom: 4px;
+  counter-increment: item;
+}
+.toc a {
+  display: block;
+  padding: 6px 12px;
+  border-radius: 6px;
+  color: var(--muted);
+  text-decoration: none;
+  border-left: 2px solid transparent;
+  transition: all 150ms;
+}
+.toc a:hover { color: var(--fg); background: var(--surface); border-left-color: var(--accent); text-decoration: none; }
+.toc a::before { content: counter(item, decimal-leading-zero) "  "; color: var(--muted-3); font-family: var(--mono); }
+
+article { min-width: 0; }
+section.block {
+  margin-bottom: 48px;
+  scroll-margin-top: 80px;
+}
+section.block > h2 {
+  font-size: 22px;
+  font-weight: 300;
+  margin: 0 0 4px;
+  letter-spacing: -0.01em;
+}
+section.block > .lede {
+  color: var(--muted);
+  font-size: 14px;
+  margin: 0 0 24px;
+  max-width: 760px;
+}
+section.block h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 28px 0 10px;
+  color: var(--fg);
+}
+.section-label {
+  font-size: 10px;
+  color: var(--muted-3);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-bottom: 8px;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  margin-bottom: 16px;
+}
+.callout {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  margin: 14px 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+.callout strong { color: var(--fg); }
+.callout--warn { border-left-color: var(--amber); }
+.callout--good { border-left-color: var(--green-2); }
+
+pre.code {
+  background: rgba(3, 7, 18, 0.60);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 14px 16px;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-x: auto;
+  color: #cbd5e1;
+  margin: 0;
+}
+pre.code .kw  { color: var(--violet); }
+pre.code .str { color: var(--green-2); }
+pre.code .num { color: var(--amber); }
+pre.code .com { color: var(--muted-3); }
+pre.code .fn  { color: var(--accent); }
+pre.code .del { color: var(--red-2); }
+pre.code .add { color: var(--green-2); }
+
+table.matrix {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+table.matrix thead th {
+  text-align: left;
+  padding: 8px 12px;
+  font-weight: 500;
+  font-size: 11px;
+  color: var(--muted-2);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-bottom: 1px solid var(--border);
+}
+table.matrix tbody td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+table.matrix tbody tr:hover { background: var(--surface-2); }
+table.matrix .col-key { color: var(--muted); white-space: nowrap; font-family: var(--mono); }
+
+ul.tight { padding-left: 20px; margin: 6px 0; }
+ul.tight li { margin-bottom: 4px; }
+
+.tag {
+  display: inline-block; font-family: var(--mono); font-size: 11px;
+  padding: 1px 7px; border-radius: 4px;
+  background: rgba(139, 92, 246, 0.15);
+  color: var(--violet);
+  border: 1px solid rgba(139, 92, 246, 0.25);
+}
+.tag--cyan  { background: rgba(6, 182, 212, 0.15); color: var(--accent); border-color: rgba(6, 182, 212, 0.30); }
+.tag--green { background: rgba(34, 197, 94, 0.15); color: var(--green-2); border-color: rgba(34, 197, 94, 0.30); }
+.tag--red   { background: rgba(239, 68, 68, 0.15); color: var(--red-2); border-color: rgba(239, 68, 68, 0.30); }
+.tag--amber { background: rgba(251, 191, 36, 0.15); color: var(--amber); border-color: rgba(251, 191, 36, 0.30); }
+
+/* Hierarchy diagram — matches arch doc */
+.hierarchy { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px 0; }
+.hier-row { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+.hier-node {
+  background: var(--surface-2);
+  border: 1px solid var(--border-3);
+  border-radius: 6px;
+  padding: 8px 12px;
+  min-width: 110px;
+  text-align: center;
+  transition: all 150ms;
+}
+.hier-node:hover { border-color: var(--accent); }
+.hier-node .h-label { font-size: 10px; color: var(--muted-2); text-transform: uppercase; letter-spacing: 0.05em; }
+.hier-node .h-name { font-size: 13px; font-weight: 600; color: var(--fg); margin-top: 2px; }
+.hier-node .h-meta { font-size: 10px; color: var(--muted); margin-top: 4px; font-family: var(--mono); }
+.hier-node--org { border-color: rgba(6, 182, 212, 0.40); background: rgba(6, 182, 212, 0.08); }
+.hier-node--team { border-color: rgba(139, 92, 246, 0.40); background: rgba(139, 92, 246, 0.08); }
+.hier-node--user { border-color: rgba(244, 114, 182, 0.40); background: rgba(244, 114, 182, 0.08); }
+.hier-node--agent { border-color: rgba(34, 197, 94, 0.40); background: rgba(34, 197, 94, 0.08); }
+.hier-node--ghost { border-style: dashed; opacity: 0.45; }
+.hier-edge { width: 1px; height: 14px; background: var(--border-3); }
+
+/* Three-panel comparison */
+.three-panel {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 12px;
+  margin: 14px 0 24px;
+}
+.three-panel .panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+}
+.three-panel .panel h4 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted-2);
+}
+.three-panel .panel .panel-sub { font-size: 11px; color: var(--muted-3); margin-bottom: 8px; font-family: var(--mono); }
+
+/* Phase flow */
+.phase-flow {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  margin: 18px 0 8px;
+  flex-wrap: wrap;
+}
+.phase {
+  flex: 1; min-width: 180px;
+  background: var(--surface);
+  border: 1px solid var(--border-3);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  position: relative;
+}
+.phase .phase-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--accent);
+  background: rgba(6, 182, 212, 0.10);
+  border: 1px solid rgba(6, 182, 212, 0.30);
+  padding: 1px 7px;
+  border-radius: 4px;
+  display: inline-block;
+  margin-bottom: 6px;
+}
+.phase .phase-title { font-size: 13px; font-weight: 600; color: var(--fg); margin-bottom: 4px; }
+.phase .phase-body { font-size: 12px; color: var(--muted); line-height: 1.5; }
+.phase + .phase::before {
+  content: "→";
+  color: var(--muted-3);
+  position: absolute;
+  left: -12px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+/* Side-by-side code diff */
+.diff-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin: 14px 0;
+}
+.diff-pair .diff-side h5 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted-2);
+}
+.diff-pair .diff-side--before h5 { color: var(--red-2); }
+.diff-pair .diff-side--after  h5 { color: var(--green-2); }
+
+/* Schema delta table */
+.schema-delta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin: 14px 0 24px;
+}
+.schema-col {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+.schema-col h4 {
+  margin: 0 0 12px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted-2);
+}
+.schema-col ul { list-style: none; padding: 0; margin: 0; font-family: var(--mono); font-size: 12px; }
+.schema-col li { padding: 4px 8px; border-radius: 4px; color: var(--muted); margin-bottom: 2px; }
+.schema-col li.new { background: rgba(34, 197, 94, 0.10); color: var(--green-2); border-left: 2px solid var(--green-2); padding-left: 10px; }
+.schema-col li.altered { color: var(--amber); }
+
+/* ID box tree */
+.id-tree {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.9;
+  color: var(--muted);
+}
+.id-tree .id-row { display: grid; grid-template-columns: 220px 1fr; align-items: baseline; gap: 12px; }
+.id-tree .id-name { color: var(--accent); }
+.id-tree .id-val { color: var(--green-2); }
+.id-tree .id-comment { color: var(--muted-3); font-size: 11px; }
+.id-tree .indent { padding-left: 16px; border-left: 1px dashed var(--border-3); margin-left: 8px; }
+
+.steps { counter-reset: step; padding-left: 0; list-style: none; }
+.steps > li {
+  counter-increment: step;
+  position: relative;
+  padding: 10px 0 14px 40px;
+  border-bottom: 1px dashed var(--border);
+}
+.steps > li:last-child { border-bottom: none; }
+.steps > li::before {
+  content: counter(step, decimal-leading-zero);
+  position: absolute; left: 0; top: 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--accent);
+  background: rgba(6, 182, 212, 0.08);
+  border: 1px solid rgba(6, 182, 212, 0.30);
+  padding: 2px 7px;
+  border-radius: 4px;
+}
+.steps > li > .step-title { font-weight: 500; color: var(--fg); display: block; margin-bottom: 2px; }
+.steps > li > .step-body  { color: var(--muted); font-size: 13px; }
+
+footer {
+  margin: 0 auto; max-width: 1100px;
+  padding: 24px 24px 64px;
+  font-size: 11px; color: var(--muted-3);
+  font-family: var(--mono);
+  border-top: 1px solid var(--border);
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar__inner">
+    <div class="topbar__brand">
+      <span class="dot"></span>
+      <strong>Triage Factory</strong>
+      <span class="topbar__crumb">/ specs / SKY-269 D-LocalParity</span>
+    </div>
+    <div class="topbar__meta">
+      <span class="pill pill--size">SIZE · M</span>
+      <span class="pill pill--draft">DRAFT v0.1</span>
+    </div>
+  </div>
+</div>
+
+<header class="hero">
+  <div class="sub">SKY-269 · child of SKY-242 · sequenced between SKY-260 (shipped) and SKY-259 (next)</div>
+  <h1>D-LocalParity — synthetic tenancy rows in SQLite</h1>
+  <p class="lede">Make <strong>local mode = multi mode at N=1</strong> true at the schema layer, not just the routing layer. Local SQLite gains <code>orgs / teams / users / memberships / org_memberships</code> tables — exactly one row each, deterministic UUIDs — so every FK from a resource table resolves the same way both backends do. <code>assertLocalOrg</code> shrinks from "convention enforced at every store method" to "structural via <code>WHERE org_id = ?</code>."</p>
+  <div class="hero__meta">
+    <span class="meta-pill"><strong>SCOPE</strong> · 1 SQLite migration + store sweep + bootstrap row inserts</span>
+    <span class="meta-pill"><strong>NO BEHAVIORAL CHANGE</strong> for local users</span>
+    <span class="meta-pill"><strong>UNBLOCKS</strong> · SKY-259 (event_handlers), SKY-261 (D-Claims), SKY-264 (D-Predicate)</span>
+  </div>
+</header>
+
+<main>
+
+<nav class="toc">
+  <ol>
+    <li><a href="#phasing">Phasing</a></li>
+    <li><a href="#why">Why now</a></li>
+    <li><a href="#shape">Local vs multi at N=1</a></li>
+    <li><a href="#schema">Schema delta</a></li>
+    <li><a href="#identity">Synthetic identity</a></li>
+    <li><a href="#stores">Store-impl transition</a></li>
+    <li><a href="#existing">Existing installs</a></li>
+    <li><a href="#out-of-scope">Out of scope</a></li>
+    <li><a href="#steps">Steps</a></li>
+    <li><a href="#risks">Risks</a></li>
+    <li><a href="#acceptance">Acceptance</a></li>
+  </ol>
+</nav>
+
+<article>
+
+<!-- ===================================================== -->
+<section class="block" id="phasing">
+  <div class="section-label">§0</div>
+  <h2>Phasing</h2>
+  <p class="lede">Four phases, one PR. The schema work in A+B is the load-bearing part; C is a mechanical store sweep; D is cleanup.</p>
+
+  <div class="phase-flow">
+    <div class="phase">
+      <span class="phase-label">A</span>
+      <div class="phase-title">Tenancy tables + synthetic rows</div>
+      <div class="phase-body">Migration creates <code>orgs/teams/users/memberships/org_memberships</code> + inserts the one row of each. Deterministic UUIDs.</div>
+    </div>
+    <div class="phase">
+      <span class="phase-label">B</span>
+      <div class="phase-title">Resource-table columns</div>
+      <div class="phase-body">Add <code>org_id</code> / <code>team_id</code> / <code>creator_user_id</code> to every existing resource table. Backfill to the synthetic IDs.</div>
+    </div>
+    <div class="phase">
+      <span class="phase-label">C</span>
+      <div class="phase-title">Store sweep</div>
+      <div class="phase-body">SQLite store impls query the new columns; <code>assertLocalOrg</code> shrinks to a defensive check at the runtime layer.</div>
+    </div>
+    <div class="phase">
+      <span class="phase-label">D</span>
+      <div class="phase-title">Drop special-cases</div>
+      <div class="phase-body">"NULL in local" comments on agents/team_agents go away. FKs get added back where they were dropped.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="why">
+  <div class="section-label">§1</div>
+  <h2>Why now</h2>
+  <p class="lede">Every downstream multi-mode ticket has been writing the same kind of "in SQLite this FK doesn't have a target" workaround. The cost keeps adding up.</p>
+
+  <table class="matrix">
+    <thead><tr><th style="width: 22%;">Ticket</th><th>What it had to dodge</th></tr></thead>
+    <tbody>
+      <tr><td><a href="https://linear.app/sky-ai-eng/issue/SKY-260">SKY-260</a> (shipped)</td><td><code>agents.org_id</code> has no FK locally; <code>agents.github_pat_user_id</code> permanently NULL because there's no users row to point at.</td></tr>
+      <tr><td><a href="https://linear.app/sky-ai-eng/issue/SKY-259">SKY-259</a> (next)</td><td>Unified <code>event_handlers</code> wants FKs to users/teams/agents. Without users/teams locally, the SQLite migration has to drop the FKs.</td></tr>
+      <tr><td><a href="https://linear.app/sky-ai-eng/issue/SKY-261">SKY-261</a> (after)</td><td><code>tasks.claimed_by_user_id</code> and <code>runs.creator_user_id</code> FK targets don't exist locally.</td></tr>
+      <tr><td><a href="https://linear.app/sky-ai-eng/issue/SKY-264">SKY-264</a> (D-Predicate)</td><td><code>users.github_username</code> would have to live in the settings row locally — separate code path from multi.</td></tr>
+      <tr><td colspan="2" style="font-style: italic; color: var(--muted-3);">+ <code>assertLocalOrg</code> drift: every new SQLite store has to remember to add it. Structural <code>WHERE org_id = ?</code> removes the convention.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    The team-as-unit reframe locked "local mode = multi mode at N=1" as a load-bearing invariant. Today it's true at the routing-code level but not at the schema level. This PR closes that gap.
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="shape">
+  <div class="section-label">§2</div>
+  <h2>Local vs multi at N=1</h2>
+  <p class="lede">Same tree, different cardinality.</p>
+
+  <div class="three-panel">
+    <div class="panel">
+      <h4>Multi (hosted, N≥1)</h4>
+      <div class="panel-sub">already shipped — SKY-247 baseline</div>
+      <div class="hierarchy">
+        <div class="hier-row">
+          <div class="hier-node hier-node--org"><div class="h-label">org</div><div class="h-name">Acme</div></div>
+          <div class="hier-node hier-node--org"><div class="h-label">org</div><div class="h-name">Globex</div></div>
+        </div>
+        <div class="hier-edge"></div>
+        <div class="hier-row">
+          <div class="hier-node hier-node--team"><div class="h-label">team</div><div class="h-name">Platform</div></div>
+          <div class="hier-node hier-node--team"><div class="h-label">team</div><div class="h-name">Mobile</div></div>
+          <div class="hier-node hier-node--team"><div class="h-label">team</div><div class="h-name">Eng</div></div>
+        </div>
+        <div class="hier-edge"></div>
+        <div class="hier-row">
+          <div class="hier-node hier-node--user"><div class="h-label">user</div><div class="h-name">aidan@</div></div>
+          <div class="hier-node hier-node--user"><div class="h-label">user</div><div class="h-name">jess@</div></div>
+          <div class="hier-node hier-node--agent"><div class="h-label">agent</div><div class="h-name">Acme Bot</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h4>Local <em>today</em> (N=1)</h4>
+      <div class="panel-sub">runtime constants only — no rows</div>
+      <div class="hierarchy">
+        <div class="hier-row">
+          <div class="hier-node hier-node--org hier-node--ghost"><div class="h-label">org</div><div class="h-name">"default"</div><div class="h-meta">runtime const</div></div>
+        </div>
+        <div class="hier-edge"></div>
+        <div class="hier-row">
+          <div class="hier-node hier-node--team hier-node--ghost"><div class="h-label">team</div><div class="h-name">"default"</div><div class="h-meta">runtime const</div></div>
+        </div>
+        <div class="hier-edge"></div>
+        <div class="hier-row">
+          <div class="hier-node hier-node--user hier-node--ghost"><div class="h-label">user</div><div class="h-name">(none)</div><div class="h-meta">implicit</div></div>
+          <div class="hier-node hier-node--agent"><div class="h-label">agent</div><div class="h-name">Local Bot</div><div class="h-meta">FK NULL</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h4>Local <em>after</em> this PR (N=1)</h4>
+      <div class="panel-sub">real rows, same shape as multi</div>
+      <div class="hierarchy">
+        <div class="hier-row">
+          <div class="hier-node hier-node--org"><div class="h-label">org</div><div class="h-name">Local</div><div class="h-meta">1 row</div></div>
+        </div>
+        <div class="hier-edge"></div>
+        <div class="hier-row">
+          <div class="hier-node hier-node--team"><div class="h-label">team</div><div class="h-name">Default</div><div class="h-meta">1 row</div></div>
+        </div>
+        <div class="hier-edge"></div>
+        <div class="hier-row">
+          <div class="hier-node hier-node--user"><div class="h-label">user</div><div class="h-name">You</div><div class="h-meta">1 row</div></div>
+          <div class="hier-node hier-node--agent"><div class="h-label">agent</div><div class="h-name">Local Bot</div><div class="h-meta">FK valid</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="callout callout--good">
+    <strong>What the user sees:</strong> nothing. Same UI, same workflow, same data. The change is structural: the constant <code>runmode.LocalDefaultOrgID</code> and the new <code>orgs.id</code> row carry the <em>same byte string</em>, so handlers keep passing the constant and the DB resolves it directly via <code>WHERE org_id = ?</code>. No startup-time lookup; no behavioral change.
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="schema">
+  <div class="section-label">§3</div>
+  <h2>Schema delta</h2>
+  <p class="lede">Five new tables; every existing resource table gains three columns.</p>
+
+  <div class="schema-delta">
+    <div class="schema-col">
+      <h4>Today (SQLite)</h4>
+      <ul>
+        <li>prompts</li>
+        <li>projects</li>
+        <li>entities</li>
+        <li>entity_links</li>
+        <li>events</li>
+        <li>events_catalog</li>
+        <li>task_rules</li>
+        <li>prompt_triggers</li>
+        <li>tasks</li>
+        <li>task_events</li>
+        <li>runs</li>
+        <li>run_artifacts / run_messages / run_memory</li>
+        <li>swipe_events</li>
+        <li>agents <span class="tag">SKY-260</span></li>
+        <li>team_agents <span class="tag">SKY-260</span></li>
+        <li class="altered">… and ~12 more.</li>
+      </ul>
+    </div>
+    <div class="schema-col">
+      <h4>After this PR</h4>
+      <ul>
+        <li class="new">+ orgs</li>
+        <li class="new">+ teams</li>
+        <li class="new">+ users</li>
+        <li class="new">+ org_memberships</li>
+        <li class="new">+ memberships</li>
+        <li class="altered">every resource table: + org_id, team_id, creator_user_id columns + FKs</li>
+        <li class="altered">agents: + FK to orgs(id) on org_id (column already exists, no FK target)</li>
+        <li class="altered">team_agents: + FK to teams(id) on team_id (same)</li>
+        <li>—</li>
+        <li style="opacity: 0.5;">RLS: <strong>not</strong> ported. SQLite has no RLS engine.</li>
+        <li style="opacity: 0.5;">auth.users FK: <strong>not</strong> ported. No GoTrue in local.</li>
+        <li style="opacity: 0.5;">role enums: <strong>not</strong> ported. <code>TEXT CHECK IN(...)</code> instead.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="identity">
+  <div class="section-label">§4</div>
+  <h2>Synthetic identity</h2>
+  <p class="lede">Five deterministic UUIDs, derived once. The migration inserts each row with a hardcoded value; the corresponding <code>runmode</code> constant returns the same string. Re-runs are byte-identical.</p>
+
+  <div class="id-tree">
+    <div class="id-row">
+      <span class="id-name">runmode.LocalDefaultOrgID</span>
+      <span><span class="id-val">"00000000-0000-0000-0000-000000000001"</span> <span class="id-comment">→ orgs.id</span></span>
+    </div>
+    <div class="indent">
+      <div class="id-row">
+        <span class="id-name">runmode.LocalDefaultTeamID</span>
+        <span><span class="id-val">"00000000-0000-0000-0000-000000000010"</span> <span class="id-comment">→ teams.id</span></span>
+      </div>
+      <div class="id-row">
+        <span class="id-name">runmode.LocalDefaultUserID</span>
+        <span><span class="id-val">"00000000-0000-0000-0000-000000000100"</span> <span class="id-comment">→ users.id</span></span>
+      </div>
+      <div class="indent">
+        <div class="id-row">
+          <span class="id-name">+ org_memberships</span>
+          <span><span class="id-val">(user, org, 'owner')</span></span>
+        </div>
+        <div class="id-row">
+          <span class="id-name">+ memberships</span>
+          <span><span class="id-val">(user, team, 'admin')</span></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="callout">
+    <strong>Why nil-shape UUIDs (00000000-...000N) instead of <code>uuid.NewSHA1</code>?</strong> Visibility. A nil-shape UUID is instantly recognizable in logs as "the synthetic local row" rather than as a random tenant. The risk — collision with a real multi-mode UUID — is zero (gen_random_uuid() never produces these). Same shape choice as Postgres conventions for sentinel UUIDs.
+  </div>
+
+  <div class="callout callout--warn">
+    <strong>Drift hazard:</strong> the Go constants and the SQL migration's <code>INSERT</code> literals must stay byte-identical. Mitigation: a one-line unit test in <code>internal/db/bootstrap_test.go</code> that asserts <code>SELECT id FROM orgs</code> after bootstrap equals <code>runmode.LocalDefaultOrgID</code>, repeated for the other four sentinels. If a future edit drifts one side, the test fails loudly rather than producing silently-broken FKs at runtime.
+  </div>
+
+  <div class="callout">
+    <strong>Existing constants:</strong> <code>runmode.LocalDefaultOrg = "default"</code> (the string) is renamed but the export name stays — it just returns the UUID string instead. Same for <code>db.LocalDefaultTeamID</code>. Old callers don't compile-break; their value just changes shape. The arch doc + memory entry are updated.
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="stores">
+  <div class="section-label">§5</div>
+  <h2>Store-impl transition</h2>
+  <p class="lede">Most SQLite store methods replace <code>assertLocalOrg(orgID)</code> + bare SELECT with <code>WHERE org_id = ?</code>. Behavior unchanged because there's still only one org row.</p>
+
+  <div class="diff-pair">
+    <div class="diff-side diff-side--before">
+      <h5>Before — assertion-as-convention</h5>
+<pre class="code"><span class="kw">func</span> (s *taskRuleStore) <span class="fn">List</span>(ctx context.Context, orgID <span class="kw">string</span>) ([]domain.TaskRule, error) {
+  <span class="kw">if</span> err := <span class="fn">assertLocalOrg</span>(orgID); err != <span class="kw">nil</span> {
+    <span class="kw">return</span> <span class="kw">nil</span>, err
+  }
+  rows, err := s.q.<span class="fn">QueryContext</span>(ctx, `
+    <span class="kw">SELECT</span> ` + taskRuleColumns + `
+    <span class="kw">FROM</span> task_rules
+    <span class="kw">ORDER BY</span> sort_order <span class="kw">ASC</span>
+  `)
+  <span class="com">// ...</span>
+}</pre>
+    </div>
+    <div class="diff-side diff-side--after">
+      <h5>After — structural via column</h5>
+<pre class="code"><span class="kw">func</span> (s *taskRuleStore) <span class="fn">List</span>(ctx context.Context, orgID <span class="kw">string</span>) ([]domain.TaskRule, error) {
+  rows, err := s.q.<span class="fn">QueryContext</span>(ctx, `
+    <span class="kw">SELECT</span> ` + taskRuleColumns + `
+    <span class="kw">FROM</span> task_rules
+    <span class="kw">WHERE</span> org_id = ?
+    <span class="kw">ORDER BY</span> sort_order <span class="kw">ASC</span>
+  `, orgID)
+  <span class="com">// ...</span>
+}</pre>
+    </div>
+  </div>
+
+  <p>Conformance suites pass unchanged — they were schema-blind by design. The Postgres impls are untouched (they already had <code>WHERE org_id = ?</code>).</p>
+
+  <h3>What stays of <code>assertLocalOrg</code></h3>
+  <p>One central defense-in-depth check at the runtime layer rather than per-method: a small wrapper at the top of <code>main.go</code>'s startup path that verifies <code>runmode.LocalDefaultOrgID</code> is present in <code>orgs</code> + matches the constant. If it's missing or has drifted, the binary refuses to boot. Inside store methods, the <code>WHERE org_id = ?</code> is the gate.</p>
+
+  <h3>Bootstrap function shape</h3>
+  <p>Existing <code>db.BootstrapLocalAgent</code> in <code>internal/db/bootstrap.go</code> stays (inserts the agents + team_agents rows). New sibling <code>db.BootstrapLocalTenancy</code> inserts the five tenancy rows, runs first. Both idempotent via <code>INSERT OR IGNORE</code>; both invoked from <code>main.go</code> after migrations.</p>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="existing">
+  <div class="section-label">§6</div>
+  <h2>Existing installs (v1.10.1 → after-this)</h2>
+  <p class="lede">Forward-only, idempotent, invisible. Three pieces line up:</p>
+  <ul class="tight">
+    <li><strong>Migration inserts the synthetic rows.</strong> Same migration that creates the tables INSERTs the five sentinel rows, gated on <code>NOT EXISTS</code>. Re-runs on already-populated installs are no-ops.</li>
+    <li><strong>Migration backfills every resource table.</strong> <code>ALTER TABLE prompts ADD COLUMN org_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'</code> etc. for every resource. SQLite ALTER TABLE permits NOT NULL with a DEFAULT, which is what makes the backfill atomic with the column add.</li>
+    <li><strong>Existing rows get the synthetic IDs by default.</strong> No data movement, no orphans. After backfill the DEFAULT is unnecessary but harmless to leave on (the application always sets the column explicitly via the SQLite store impls post-PR).</li>
+  </ul>
+  <p>The startup bootstrap is then a no-op on migrated installs — the rows are already there. Net result for a v1.10.1 user upgrading past this PR: five new rows, three new columns per resource, zero behavioral change.</p>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="out-of-scope">
+  <div class="section-label">§7</div>
+  <h2>Out of scope</h2>
+  <ul class="tight">
+    <li><strong>RLS in SQLite.</strong> No RLS engine; the structural <code>WHERE org_id = ?</code> + the startup-time tenancy assertion are the local-mode defense in depth.</li>
+    <li><strong>Auth in local mode.</strong> Still implicit single user. No sessions table, no JWTs, no GoTrue. <code>users.id</code> is just a row, not an authenticated identity.</li>
+    <li><strong>Multi-user local mode.</strong> Not a feature. If a local user wants multi-user, that's a hosted-deployment thing.</li>
+    <li><strong>Local-to-hosted export.</strong> Architecture doc says local users don't migrate to multi. Parallel schema makes a future export feasible if we ever build it, but this PR doesn't.</li>
+    <li><strong>Migration of pre-runner installs.</strong> Refused with <code>ErrPreRunnerInstall</code> as today — SKY-245's gate stays in place.</li>
+  </ul>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="steps">
+  <div class="section-label">§8</div>
+  <h2>Implementation steps</h2>
+
+  <ol class="steps">
+    <li>
+      <span class="step-title">New SQLite migration <code>202605120003_local_tenancy.sql</code></span>
+      <span class="step-body">Create the five tenancy tables. INSERT five sentinel rows. ALTER every resource table to add <code>org_id</code> / <code>team_id</code> / <code>creator_user_id</code> columns with NOT NULL DEFAULT (synthetic UUIDs). Add CHECK constraints where Postgres has them.</span>
+    </li>
+    <li>
+      <span class="step-title">runmode constants</span>
+      <span class="step-body">Change <code>LocalDefaultOrg = "default"</code> → <code>LocalDefaultOrgID = "00000000-...000001"</code> (rename or alias). Add <code>LocalDefaultTeamID</code>, <code>LocalDefaultUserID</code>. Old <code>db.LocalDefaultTeamID</code> can stay as a back-compat alias if any callers persist past the sweep.</span>
+    </li>
+    <li>
+      <span class="step-title">db.BootstrapLocalTenancy</span>
+      <span class="step-body">Idempotent INSERT-or-IGNORE on the five rows. Called from <code>main.go</code> after <code>db.Migrate</code> + before <code>BootstrapLocalAgent</code>.</span>
+    </li>
+    <li>
+      <span class="step-title">SQLite store sweep</span>
+      <span class="step-body">Every method that currently calls <code>assertLocalOrg(orgID)</code> swaps for a <code>WHERE org_id = ?</code> clause. <code>assertLocalOrg</code> itself either deletes or shrinks to a defense-in-depth top-of-bootstrap check.</span>
+    </li>
+    <li>
+      <span class="step-title">Wire agents/team_agents FKs</span>
+      <span class="step-body">SQLite agents/team_agents tables get real FK to orgs/teams. The "always NULL in local" comments on <code>agents.github_pat_user_id</code> change to "FK to users(id), the synthetic local user" — and the local-install bootstrap can now populate it.</span>
+    </li>
+    <li>
+      <span class="step-title">Tests + conformance</span>
+      <span class="step-body">Conformance suites should pass unchanged — they're schema-blind. Add <code>TestBootstrapLocalTenancy_FreshInstall</code> + <code>_Idempotent</code> + <code>_PreservesUserChanges</code> mirroring the existing agent bootstrap tests. Plus <code>TestBootstrapLocalTenancy_ConstantsMatchRows</code> as the anti-drift assertion (constant string == row's <code>id</code> for all five sentinels).</span>
+    </li>
+    <li>
+      <span class="step-title">Build + test + lint + ship</span>
+      <span class="step-body">Per the standard memory'd flow (frontend first, then go build, then go test, then lint).</span>
+    </li>
+  </ol>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="risks">
+  <div class="section-label">§9</div>
+  <h2>Risks</h2>
+  <table class="matrix">
+    <thead><tr><th style="width: 30%;">Risk</th><th>Mitigation</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Renaming <code>LocalDefaultOrg = "default"</code> to a UUID string breaks any in-the-wild local DB whose existing rows already reference the literal <code>"default"</code>.</td>
+        <td>No existing rows do — the constant is only used in code paths that pass it through assertLocalOrg, never as a foreign-key value stored anywhere. Audit confirms zero stored references before this PR ships. Keep the old constant name + value as a back-compat alias for one release if paranoid.</td>
+      </tr>
+      <tr>
+        <td>SQLite ALTER TABLE ADD COLUMN NOT NULL DEFAULT '00000000-...' applied to a million-row table is slow.</td>
+        <td>Largest local install ~10k rows in practice. Migration completes in &lt;1s. Existing migration runner doesn't impose a deadline.</td>
+      </tr>
+      <tr>
+        <td>FK constraints on existing rows fail because (e.g.) a swipe_events row references a creator_user_id that doesn't exist.</td>
+        <td>The DEFAULT clauses point at synthetic IDs that the same migration INSERTs first. No row can fail the FK at backfill time. New rows are FK-enforced going forward.</td>
+      </tr>
+      <tr>
+        <td>D-Predicate (SKY-264) was going to live in settings.row.github_username — does this preempt that decision?</td>
+        <td>Yes, deliberately. <code>users.github_username</code> works on both backends after this PR, so the settings.row dance becomes unnecessary. Update SKY-264 to reflect.</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="acceptance">
+  <div class="section-label">§10</div>
+  <h2>Acceptance</h2>
+  <ul class="tight">
+    <li><span class="tag tag--green">PASS</span> Fresh install: <code>orgs(1)</code> + <code>teams(1)</code> + <code>users(1)</code> + <code>memberships(1)</code> + <code>org_memberships(1)</code>. All five rows carry the deterministic sentinel UUIDs.</li>
+    <li><span class="tag tag--green">PASS</span> v1.10.1 → after-this upgrade: same row counts after one boot. Existing resource rows have <code>org_id</code> / <code>team_id</code> / <code>creator_user_id</code> backfilled to the sentinels.</li>
+    <li><span class="tag tag--green">PASS</span> <code>agents.org_id</code> and <code>team_agents.team_id</code> have real FK constraints to the new tables.</li>
+    <li><span class="tag tag--green">PASS</span> <code>assertLocalOrg</code> callers reduced to 0 (or a small handful gating only at startup).</li>
+    <li><span class="tag tag--cyan">TEST</span> All conformance suites pass unchanged on the SQLite side.</li>
+    <li><span class="tag tag--cyan">TEST</span> Bootstrap tests pin idempotency + the v1.10.1 backfill path.</li>
+    <li><span class="tag">CODE</span> No new <code>"NULL in local"</code> comments in the tree.</li>
+    <li><span class="tag">DOC</span> Architecture doc decision <code>local-equals-multi-n1</code> updated from "true at routing layer" to "true at routing + schema layer."</li>
+  </ul>
+</section>
+
+</article>
+</main>
+
+<footer>
+  SKY-269 · D-LocalParity · synthetic tenancy rows in SQLite · v0.1 · 2026-05-11
+</footer>
+</body>
+</html>

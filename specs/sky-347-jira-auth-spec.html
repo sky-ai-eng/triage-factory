@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Triage Factory — Jira Auth (SKY-347 spike)</title>
+<style>
+/* ============================================================
+   Design language — inherited from where-tf-is-going.html
+   liquid glass + Her (warm peach) + Transcendence (particle
+   field) + Halo Reach (thin geometric HUD).
+   Warm = the human / "act as yourself". Cool = the bot / machine.
+   ============================================================ */
+:root {
+  --space-0: #06070b;
+  --space-1: #0a0a15;
+  --space-2: #100c1c;
+  --ink:     #f3eee7;
+  --ink-dim: #c5bfb6;
+  --ink-mut: #8b8590;
+  --ink-low: #5a5560;
+
+  --peach:    #ffb288;
+  --peach-2:  #ff8b6b;
+  --peach-3:  #ffd9bf;
+  --cyan:     #7dd3fc;
+  --cyan-2:   #a5e9ff;
+  --cyan-3:   #38bdf8;
+  --violet:   #a78bfa;
+  --violet-2: #c4b5fd;
+  --green:    #4ade80;
+
+  --glass:    rgba(22, 18, 34, 0.42);
+  --glass-2:  rgba(28, 22, 42, 0.62);
+  --glass-edge: rgba(255, 255, 255, 0.08);
+  --hairline:   rgba(125, 211, 252, 0.14);
+  --hairline-warm: rgba(255, 178, 136, 0.18);
+  --hairline-violet: rgba(167, 139, 250, 0.2);
+
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --display: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  background: var(--space-0);
+  color: var(--ink);
+  font-family: var(--display);
+  font-weight: 300;
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  letter-spacing: 0.005em;
+}
+
+.cosmos {
+  position: fixed; inset: 0; z-index: -2;
+  background:
+    radial-gradient(ellipse 60% 40% at 70% 20%, rgba(255, 139, 107, 0.16), transparent 60%),
+    radial-gradient(ellipse 50% 50% at 20% 80%, rgba(167, 139, 250, 0.13), transparent 65%),
+    radial-gradient(ellipse 80% 60% at 50% 110%, rgba(56, 189, 248, 0.08), transparent 70%),
+    linear-gradient(180deg, #06070b 0%, #0a0816 50%, #08070d 100%);
+}
+.stars { position: fixed; inset: 0; z-index: -1; overflow: hidden; pointer-events: none; }
+.stars::before, .stars::after {
+  content: ""; position: absolute; inset: 0;
+  background-image:
+    radial-gradient(1px 1px at 12% 18%, rgba(255,255,255,0.6), transparent),
+    radial-gradient(1px 1px at 28% 72%, rgba(255,255,255,0.4), transparent),
+    radial-gradient(1px 1px at 46% 34%, rgba(255,255,255,0.5), transparent),
+    radial-gradient(1px 1px at 62% 84%, rgba(255,255,255,0.35), transparent),
+    radial-gradient(1px 1px at 80% 12%, rgba(255,255,255,0.55), transparent),
+    radial-gradient(1px 1px at 92% 56%, rgba(255,255,255,0.4), transparent),
+    radial-gradient(1px 1px at 8% 50%, rgba(255,255,255,0.3), transparent),
+    radial-gradient(1px 1px at 54% 8%, rgba(255,255,255,0.4), transparent),
+    radial-gradient(1px 1px at 36% 92%, rgba(255,255,255,0.35), transparent),
+    radial-gradient(1px 1px at 72% 38%, rgba(255,255,255,0.5), transparent);
+  animation: drift 120s linear infinite;
+  opacity: 0.5;
+}
+.stars::after { animation-duration: 200s; animation-direction: reverse; opacity: 0.25; transform: scale(1.4); }
+@keyframes drift { from { transform: translateY(0) scale(1); } to { transform: translateY(-100px) scale(1); } }
+
+/* Chrome */
+.chrome {
+  position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
+  z-index: 50; display: flex; align-items: center; gap: 14px;
+  padding: 8px 18px;
+  background: var(--glass-2);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  border: 1px solid var(--hairline); border-radius: 999px;
+  box-shadow: 0 1px 0 inset rgba(255,255,255,0.06), 0 10px 40px -10px rgba(0,0,0,0.4);
+  font-family: var(--mono); font-size: 11px; color: var(--ink-mut); letter-spacing: 0.08em;
+}
+.chrome__dot { width: 6px; height: 6px; border-radius: 50%; background: var(--peach); box-shadow: 0 0 12px var(--peach); animation: heartbeat 3s ease-in-out infinite; }
+@keyframes heartbeat { 0%, 100% { opacity: 0.7; } 50% { opacity: 1; } }
+.chrome__sep { color: var(--ink-low); }
+.chrome__draft { padding: 2px 10px; border-radius: 999px; background: rgba(255,178,136,0.12); color: var(--peach-3); border: 1px solid var(--hairline-warm); font-size: 10px; }
+
+/* Layout */
+main { max-width: 1180px; margin: 0 auto; padding: 120px 32px 80px; }
+section { margin-bottom: 130px; scroll-margin-top: 100px; }
+
+.eyebrow {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.22em;
+  text-transform: uppercase; color: var(--cyan); margin-bottom: 14px;
+  display: flex; align-items: center; gap: 10px;
+}
+.eyebrow::before { content: ""; display: inline-block; width: 28px; height: 1px; background: linear-gradient(to right, transparent, var(--cyan)); }
+.eyebrow .num { color: var(--ink-low); font-size: 10px; letter-spacing: 0.1em; }
+
+h2 { font-family: var(--display); font-weight: 200; font-size: 38px; letter-spacing: -0.02em; line-height: 1.1; margin-bottom: 18px; }
+h2 em { font-style: normal; background: linear-gradient(120deg, var(--peach), var(--violet-2) 60%, var(--cyan-2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.lede { font-weight: 300; font-size: 17px; color: var(--ink-dim); max-width: 680px; margin-bottom: 36px; line-height: 1.6; }
+.lede strong { color: var(--ink); font-weight: 500; }
+
+/* Glass */
+.glass {
+  position: relative; background: var(--glass);
+  backdrop-filter: blur(28px) saturate(150%); -webkit-backdrop-filter: blur(28px) saturate(150%);
+  border: 1px solid var(--hairline); border-radius: 18px;
+  box-shadow: 0 1px 0 inset rgba(255,255,255,0.08), 0 0 0 1px rgba(255,255,255,0.02) inset, 0 30px 60px -30px rgba(0,0,0,0.5);
+  padding: 28px; transition: border-color 400ms ease, transform 400ms ease;
+}
+.glass:hover { border-color: rgba(125, 211, 252, 0.25); }
+.glass--warm { border-color: var(--hairline-warm); }
+.glass--warm:hover { border-color: rgba(255, 178, 136, 0.32); }
+.glass::before, .glass::after, .glass > .bracket {
+  content: ""; position: absolute; width: 14px; height: 14px;
+  border: 1px solid var(--cyan); opacity: 0.5; pointer-events: none;
+}
+.glass::before { top: 8px; left: 8px; border-right: none; border-bottom: none; }
+.glass::after  { bottom: 8px; right: 8px; border-left: none; border-top: none; }
+.glass > .bracket--tr { top: 8px; right: 8px; border-left: none; border-bottom: none; }
+.glass > .bracket--bl { bottom: 8px; left: 8px; border-right: none; border-top: none; }
+.glass--warm::before, .glass--warm::after, .glass--warm > .bracket { border-color: var(--peach); }
+
+/* Hero */
+.hero { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 60px; align-items: center; margin-bottom: 150px; min-height: 500px; }
+.hero__hook { font-family: var(--mono); font-size: 12px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--peach-3); margin-bottom: 18px; }
+.hero__title { font-family: var(--display); font-weight: 100; font-size: 60px; letter-spacing: -0.035em; line-height: 1.02; margin-bottom: 24px; }
+.hero__title em { font-style: normal; background: linear-gradient(120deg, var(--peach) 0%, var(--peach-3) 30%, var(--violet-2) 65%, var(--cyan-2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.hero__sub { font-size: 18px; color: var(--ink-dim); font-weight: 300; max-width: 500px; line-height: 1.55; margin-bottom: 32px; }
+.hero__meta { display: flex; gap: 12px; flex-wrap: wrap; font-family: var(--mono); font-size: 11px; color: var(--ink-mut); letter-spacing: 0.06em; }
+.hero__meta span { padding: 6px 12px; border: 1px solid var(--hairline); border-radius: 999px; background: var(--glass); backdrop-filter: blur(10px); }
+
+.orb-stage { position: relative; height: 460px; display: flex; align-items: center; justify-content: center; }
+.orb { position: relative; width: 320px; height: 320px; border-radius: 50%; }
+.orb__halo { position: absolute; inset: -80px; border-radius: 50%; background: radial-gradient(circle, rgba(255,178,136,0.18) 0%, rgba(167,139,250,0.10) 40%, transparent 70%); filter: blur(30px); animation: pulse 6s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 0.7; transform: scale(1); } 50% { opacity: 1; transform: scale(1.08); } }
+.orb__ring { position: absolute; inset: 0; border-radius: 50%; border: 1px solid transparent; }
+.orb__ring--1 { border-color: rgba(255, 178, 136, 0.18); animation: spin 40s linear infinite; background: conic-gradient(from 0deg, transparent 70%, rgba(255,178,136,0.4) 85%, transparent 100%); -webkit-mask: radial-gradient(transparent 55%, #000 56%, #000 58%, transparent 59%); mask: radial-gradient(transparent 55%, #000 56%, #000 58%, transparent 59%); }
+.orb__ring--2 { inset: 28px; border-color: rgba(167, 139, 250, 0.18); animation: spin 60s linear infinite reverse; background: conic-gradient(from 90deg, transparent 60%, rgba(167,139,250,0.45) 75%, transparent 90%); -webkit-mask: radial-gradient(transparent 55%, #000 56%, #000 58%, transparent 59%); mask: radial-gradient(transparent 55%, #000 56%, #000 58%, transparent 59%); }
+.orb__ring--3 { inset: 60px; border-color: rgba(125, 211, 252, 0.20); animation: spin 25s linear infinite; background: conic-gradient(from 180deg, transparent 75%, rgba(125,211,252,0.5) 87%, transparent 100%); -webkit-mask: radial-gradient(transparent 53%, #000 54%, #000 58%, transparent 59%); mask: radial-gradient(transparent 53%, #000 54%, #000 58%, transparent 59%); }
+@keyframes spin { to { transform: rotate(360deg); } }
+.orb__body { position: absolute; inset: 88px; border-radius: 50%; background: radial-gradient(circle at 35% 32%, rgba(255,255,255,0.4) 0%, rgba(255,178,136,0.85) 18%, rgba(255,139,107,0.7) 38%, rgba(167,139,250,0.55) 68%, rgba(56,30,90,0.7) 100%); box-shadow: inset 0 0 40px rgba(255,178,136,0.4), inset 0 -10px 30px rgba(56,30,90,0.5), 0 0 60px rgba(255,178,136,0.3), 0 0 120px rgba(167,139,250,0.15); animation: breathe 8s ease-in-out infinite; }
+@keyframes breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.04); } }
+.orb__core { position: absolute; inset: 130px; border-radius: 50%; background: radial-gradient(circle at 40% 40%, rgba(255,255,255,0.9), rgba(255,217,191,0.6) 40%, transparent 70%); animation: pulse 4s ease-in-out infinite; }
+.orb-stage::after { content: ""; position: absolute; inset: -40px; background-image: radial-gradient(1px 1px at 20% 30%, rgba(255,178,136,0.6), transparent), radial-gradient(1px 1px at 85% 25%, rgba(167,139,250,0.7), transparent), radial-gradient(1px 1px at 75% 80%, rgba(125,211,252,0.7), transparent), radial-gradient(1px 1px at 15% 75%, rgba(255,217,191,0.6), transparent); animation: drift 60s linear infinite, pulse 8s ease-in-out infinite; pointer-events: none; }
+
+/* The matrix — Cloud/DC x service/user */
+.matrix { display: grid; grid-template-columns: 168px 1fr 1fr; gap: 1px; background: rgba(255,255,255,0.05); border: 1px solid var(--hairline); border-radius: 16px; overflow: hidden; }
+.matrix__corner, .matrix__colhead, .matrix__rowhead, .matrix__cell { background: #0b0a16; padding: 20px 22px; }
+.matrix__corner { background: #08070f; }
+.matrix__colhead { display: flex; flex-direction: column; gap: 5px; font-family: var(--mono); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; }
+.matrix__colhead--service { color: var(--cyan-2); }
+.matrix__colhead--user { color: var(--peach-3); }
+.matrix__colhead small { font-family: var(--display); text-transform: none; letter-spacing: 0; font-size: 12px; color: var(--ink-mut); font-weight: 300; }
+.matrix__rowhead { display: flex; flex-direction: column; justify-content: center; gap: 5px; font-family: var(--display); font-weight: 300; font-size: 19px; }
+.matrix__rowhead .sub { font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-mut); }
+.matrix__rowhead .tag { align-self: flex-start; margin-top: 6px; font-family: var(--mono); font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--peach-3); background: rgba(255,178,136,0.12); border: 1px solid var(--hairline-warm); padding: 2px 8px; border-radius: 999px; }
+.matrix__cell { display: flex; flex-direction: column; gap: 9px; }
+.matrix__cell--service { box-shadow: inset 0 0 50px rgba(125,211,252,0.05); }
+.matrix__cell--user { box-shadow: inset 0 0 50px rgba(255,178,136,0.05); }
+.matrix__mech { font-size: 14px; color: var(--ink); line-height: 1.5; }
+.matrix__mech strong { font-weight: 600; }
+.matrix__mech code, .matrix__note code { font-family: var(--mono); font-size: 12px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08); padding: 1px 6px; border-radius: 4px; }
+.matrix__note { font-family: var(--mono); font-size: 11px; line-height: 1.55; letter-spacing: 0.01em; }
+.matrix__cell--service .matrix__note { color: rgba(125,211,252,0.72); }
+.matrix__cell--user .matrix__note { color: rgba(255,178,136,0.74); }
+.matrix__ok { color: var(--green); }
+.matrix-foot { font-family: var(--mono); font-size: 11px; color: var(--ink-mut); margin-top: 22px; line-height: 1.7; letter-spacing: 0.03em; }
+.matrix-foot strong { color: var(--peach-3); font-weight: 500; }
+.matrix-foot span.x { color: var(--peach-2); }
+.notes { list-style: none; margin-top: 16px; }
+.notes li { position: relative; padding: 10px 0 10px 24px; border-top: 1px solid rgba(255,255,255,0.05); font-size: 13px; color: var(--ink-dim); line-height: 1.6; }
+.notes li:first-child { border-top: none; }
+.notes li::before { content: "›"; color: var(--cyan-3); font-family: var(--mono); position: absolute; left: 4px; top: 10px; }
+.notes li strong { color: var(--ink); font-weight: 500; }
+.notes li code { font-family: var(--mono); font-size: 12px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.06); padding: 1px 5px; border-radius: 4px; color: var(--cyan-2); }
+.notes li .lbl { font-family: var(--mono); font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-mut); margin-right: 8px; border: 1px solid rgba(255,255,255,0.08); padding: 1px 7px; border-radius: 999px; white-space: nowrap; }
+.notes li .lbl--warm { color: var(--peach-3); border-color: var(--hairline-warm); }
+.notes li .lbl--cool { color: var(--cyan-2); border-color: var(--hairline); }
+
+/* Duo panels — resolver entry points / identity vs credential */
+.duo { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.duo__panel .door__tag { font-family: var(--mono); font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--ink-mut); margin-bottom: 8px; }
+.duo__panel h3 { font-family: var(--display); font-weight: 300; font-size: 22px; margin-bottom: 14px; letter-spacing: -0.01em; }
+.duo__panel h3 .c { color: var(--cyan-2); } .duo__panel h3 .w { color: var(--peach-3); }
+.duo__sig { display: block; font-family: var(--mono); font-size: 12.5px; color: var(--ink); background: rgba(6,5,14,0.6); border: 1px solid var(--hairline); border-radius: 8px; padding: 11px 13px; margin-bottom: 16px; line-height: 1.5; word-break: break-word; }
+.glass--warm .duo__sig { border-color: var(--hairline-warm); }
+.duo__sig .fn { color: var(--cyan-2); } .glass--warm .duo__sig .fn { color: var(--peach-3); }
+.duo__sig .com { color: var(--ink-low); font-style: italic; }
+.duo__panel ul { list-style: none; }
+.duo__panel li { position: relative; padding: 9px 0 9px 22px; border-top: 1px solid rgba(255,255,255,0.05); font-size: 13.5px; color: var(--ink-dim); line-height: 1.55; }
+.duo__panel li:first-child { border-top: none; }
+.duo__panel li::before { content: "›"; color: var(--cyan-3); font-family: var(--mono); position: absolute; left: 3px; top: 9px; }
+.glass--warm .duo__panel li::before { color: var(--peach); }
+.duo__panel li strong { color: var(--ink); font-weight: 500; }
+.duo__panel code { font-family: var(--mono); font-size: 12px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.06); padding: 1px 5px; border-radius: 4px; color: var(--ink); }
+
+.punchline { margin-top: 26px; text-align: center; font-family: var(--display); font-weight: 200; font-size: 23px; letter-spacing: -0.01em; color: var(--ink); }
+.punchline em { font-style: normal; background: linear-gradient(120deg, var(--peach), var(--cyan-2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+
+/* Findings list */
+.findings { display: grid; gap: 14px; }
+.finding { display: grid; grid-template-columns: 40px 1fr; gap: 18px; align-items: start; padding: 20px 24px; }
+.finding__mark { font-family: var(--mono); font-size: 18px; line-height: 1; padding-top: 2px; }
+.finding__mark--flip { color: var(--peach-2); }
+.finding__mark--ok { color: var(--green); }
+.finding__mark--new { color: var(--violet-2); }
+.finding h4 { font-family: var(--display); font-weight: 400; font-size: 16px; color: var(--ink); margin-bottom: 5px; }
+.finding p { font-size: 13.5px; color: var(--ink-dim); line-height: 1.6; }
+.finding code { font-family: var(--mono); font-size: 12px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.06); padding: 1px 5px; border-radius: 4px; color: var(--cyan-2); }
+.finding strong { color: var(--ink); font-weight: 500; }
+
+/* Parity (local = N=1) */
+.parity { display: grid; grid-template-columns: 1fr 80px 1fr; gap: 0; align-items: stretch; }
+.parity__col .door__tag { font-family: var(--mono); font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase; color: var(--ink-mut); margin-bottom: 18px; }
+.parity__col h3 { font-family: var(--display); font-weight: 300; font-size: 24px; margin-bottom: 4px; }
+.parity__rows { display: grid; gap: 10px; font-family: var(--mono); font-size: 12px; margin-top: 16px; }
+.parity__row { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 12px; padding: 11px 14px; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); border-radius: 6px; }
+.parity__row .key { color: var(--ink-mut); letter-spacing: 0.05em; }
+.parity__row .val { color: var(--peach-3); font-weight: 500; text-align: right; }
+.parity__col--multi .parity__row .val { color: var(--cyan-2); }
+.parity__equals { display: flex; align-items: center; justify-content: center; }
+.parity__equals-mark { font-family: var(--display); font-weight: 100; font-size: 48px; color: var(--ink-dim); background: var(--glass-2); backdrop-filter: blur(20px); border: 1px solid var(--hairline); border-radius: 999px; width: 64px; height: 64px; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 30px rgba(255,255,255,0.04); }
+
+/* Q&A accordion */
+.qa { display: grid; gap: 12px; }
+.qa__item { cursor: pointer; padding: 22px 26px; transition: border-color 300ms ease; }
+.qa__q { display: flex; align-items: center; gap: 16px; }
+.qa__q .n { font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em; color: var(--cyan); flex-shrink: 0; }
+.qa__q .t { font-family: var(--display); font-weight: 300; font-size: 18px; color: var(--ink); flex: 1; letter-spacing: -0.01em; }
+.qa__q .tog { font-family: var(--mono); font-size: 18px; color: var(--peach); flex-shrink: 0; transition: transform 300ms ease; }
+.qa__item.is-open .qa__q .tog { transform: rotate(45deg); }
+.qa__a { max-height: 0; overflow: hidden; transition: max-height 500ms ease; }
+.qa__item.is-open .qa__a { max-height: 520px; }
+.qa__a-inner { padding-top: 16px; font-size: 14px; color: var(--ink-dim); line-height: 1.65; }
+.qa__a-inner strong { color: var(--ink); font-weight: 500; }
+.qa__a-inner code { font-family: var(--mono); font-size: 12px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.06); padding: 1px 5px; border-radius: 4px; color: var(--cyan-2); }
+.qa__a-inner .verdict { display: inline-block; margin-top: 12px; font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; color: var(--peach-3); border-left: 2px solid var(--peach); padding-left: 12px; }
+
+/* Kanban — proposed scope */
+.lane { margin-top: 36px; }
+.lane:first-of-type { margin-top: 0; }
+.lane__label { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 16px; gap: 16px; }
+.lane__name { font-family: var(--mono); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-mut); display: flex; align-items: center; gap: 10px; }
+.lane__name::before { content: ""; display: inline-block; width: 22px; height: 1px; background: linear-gradient(to right, transparent, currentColor); }
+.lane--foundation .lane__name { color: rgba(74, 222, 128, 0.7); }
+.lane__count { font-family: var(--mono); font-size: 10px; color: var(--ink-low); letter-spacing: 0.08em; }
+.kanban { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 16px; }
+.ticket { padding: 18px; background: var(--glass); backdrop-filter: blur(20px); border: 1px solid var(--hairline); border-radius: 12px; cursor: pointer; transition: all 300ms ease; position: relative; }
+.ticket:hover { border-color: rgba(255,178,136,0.3); transform: translateY(-2px); }
+.ticket__id { font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em; color: var(--ink-mut); margin-bottom: 6px; }
+.ticket__title { font-family: var(--display); font-weight: 400; font-size: 15px; color: var(--ink); margin-bottom: 12px; line-height: 1.3; }
+.ticket__status { display: inline-block; font-family: var(--mono); font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; padding: 3px 8px; border-radius: 999px; border: 1px solid currentColor; }
+.ticket__status--near { color: var(--peach); background: rgba(255,178,136,0.08); }
+.ticket__status--saas { color: var(--cyan); background: rgba(125,211,252,0.06); }
+.ticket__status--core { color: var(--violet-2); background: rgba(167,139,250,0.08); }
+.ticket__one { margin-top: 12px; font-size: 12.5px; color: var(--ink-mut); max-height: 0; overflow: hidden; transition: max-height 400ms ease; line-height: 1.6; }
+.ticket.is-open .ticket__one { max-height: 260px; }
+.ticket__one strong { color: var(--ink-dim); font-weight: 500; }
+.ticket__one code { font-family: var(--mono); font-size: 11px; color: var(--cyan-2); }
+.ticket--done { padding: 14px 16px; background: rgba(34, 197, 94, 0.025); border-color: rgba(34, 197, 94, 0.16); cursor: default; }
+.ticket--done:hover { transform: none; border-color: rgba(34, 197, 94, 0.32); }
+.ticket--done .ticket__check { position: absolute; top: 12px; right: 14px; font-family: var(--mono); font-size: 11px; color: var(--green); opacity: 0.7; }
+.ticket--done .ticket__title { font-size: 13px; margin-bottom: 6px; color: var(--ink-dim); }
+
+/* Callout */
+.callout { margin-top: 8px; padding: 32px; text-align: center; background: linear-gradient(135deg, rgba(255,178,136,0.06), rgba(167,139,250,0.06)); }
+.callout p { font-family: var(--display); font-weight: 200; font-size: 25px; letter-spacing: -0.01em; max-width: 680px; margin: 0 auto; line-height: 1.4; }
+.callout p em { font-style: normal; background: linear-gradient(120deg, var(--peach), var(--violet-2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.callout small { display: block; font-family: var(--mono); font-size: 11px; color: var(--ink-mut); letter-spacing: 0.06em; margin-top: 14px; }
+
+/* Footer */
+footer.coda { text-align: center; padding: 70px 32px 60px; font-family: var(--mono); font-size: 11px; color: var(--ink-low); letter-spacing: 0.08em; border-top: 1px solid rgba(255,255,255,0.04); margin-top: 60px; }
+footer.coda a { color: var(--cyan); text-decoration: none; margin: 0 8px; }
+footer.coda a:hover { color: var(--cyan-2); }
+
+/* Responsive */
+@media (max-width: 900px) {
+  .hero { grid-template-columns: 1fr; min-height: auto; gap: 32px; }
+  .hero__title { font-size: 44px; }
+  .orb-stage { height: 320px; } .orb { width: 240px; height: 240px; } .orb__body { inset: 64px; } .orb__core { inset: 96px; }
+  .matrix { grid-template-columns: 1fr; }
+  .matrix__corner { display: none; }
+  .matrix__colhead { border-top: 1px solid var(--hairline); }
+  .duo { grid-template-columns: 1fr; }
+  .parity { grid-template-columns: 1fr; } .parity__equals { padding: 20px 0; }
+  .kanban { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<div class="cosmos"></div>
+<div class="stars"></div>
+
+<div class="chrome">
+  <span class="chrome__dot"></span>
+  <span>triagefactory</span>
+  <span class="chrome__sep">/</span>
+  <span>jira auth</span>
+  <span class="chrome__sep">/</span>
+  <span class="chrome__draft">SKY-347 SPIKE · 2026-06-04</span>
+</div>
+
+<main>
+
+  <!-- ===================================================== HERO ===================================================== -->
+  <section class="hero">
+    <div>
+      <div class="hero__hook">sky-347 · atlassian auth spike</div>
+      <h1 class="hero__title">Poll as the bot.<br><em>Act as yourself.</em></h1>
+      <p class="hero__sub">Jira authentication, settled. A service identity that polls and runs autonomous work; a per-user credential that makes every human action show up as the human. Two backends — self-hosted Data Center and Atlassian Cloud — behind one resolver.</p>
+      <div class="hero__meta">
+        <span>data center first · cloud follows</span>
+        <span>service + per-user</span>
+        <span>mandatory binding · no bot fallback</span>
+      </div>
+    </div>
+    <div class="orb-stage">
+      <div class="orb">
+        <div class="orb__halo"></div>
+        <div class="orb__ring orb__ring--1"></div>
+        <div class="orb__ring orb__ring--2"></div>
+        <div class="orb__ring orb__ring--3"></div>
+        <div class="orb__body"></div>
+        <div class="orb__core"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================================================== 01 · MATRIX ===================================================== -->
+  <section>
+    <div class="eyebrow"><span class="num">01</span><span>The landscape, accurately</span></div>
+    <h2>Two backends, two principals, <em>four cells.</em></h2>
+    <p class="lede">"OAuth a service account" is half-right — it describes the backend we're <em>not</em> shipping first. The real picture is a 2&times;2: each backend authenticates a <strong>service identity</strong> (polling + autonomous bot work) and a <strong>per-user identity</strong> (actions a human takes) by different mechanisms. Cool is the bot; warm is the human.</p>
+
+    <div class="matrix">
+      <div class="matrix__corner"></div>
+      <div class="matrix__colhead matrix__colhead--service">Service identity<small>polls · runs autonomous work</small></div>
+      <div class="matrix__colhead matrix__colhead--user">Per-user identity<small>acts as the human</small></div>
+
+      <div class="matrix__rowhead">
+        Atlassian Cloud
+        <span class="sub">*.atlassian.net · REST v3</span>
+      </div>
+      <div class="matrix__cell matrix__cell--service">
+        <div class="matrix__mech">Bot account + <strong>API token</strong> &rarr; <code>Basic</code> auth. <strong>No developer console.</strong></div>
+        <div class="matrix__note">Atlassian's "service account" feature issues an API token, not OAuth — the simplest service path on Cloud. (A bot 3LO grant is the fallback if org policy blocks token creation.) 2LO client-credentials for general REST isn't available — don't design around it.</div>
+      </div>
+      <div class="matrix__cell matrix__cell--user">
+        <div class="matrix__mech"><strong>OAuth 2.0 (3LO)</strong> &rarr; <code>Bearer</code> via <code>api.atlassian.com/ex/jira/{cloud_id}</code>. One-click "Connect Jira."</div>
+        <div class="matrix__note">Yields identity <em>and</em> a rotating credential in one step — and reads the user's own <code>accountId</code>, the cleanest mapping when Cloud hides emails. Through TF's <em>first-party</em> app, the customer registers nothing.</div>
+      </div>
+
+      <div class="matrix__rowhead">
+        Data Center
+        <span class="sub">self-hosted · REST v2</span>
+        <span class="tag">first customer</span>
+      </div>
+      <div class="matrix__cell matrix__cell--service">
+        <div class="matrix__mech">Service user + <strong>PAT</strong> &rarr; <code>Bearer</code> (DC &ge; 8.14).</div>
+        <div class="matrix__note"><span class="matrix__ok">&check; works in TF today.</span> The client already speaks Bearer + v2 against a direct host URL.</div>
+      </div>
+      <div class="matrix__cell matrix__cell--user">
+        <div class="matrix__mech">Per-user <strong>PAT</strong> &rarr; <code>Bearer</code>, one per human.</div>
+        <div class="matrix__note">The DC tax. No clean REST impersonation for a service PAT; OAuth 1.0a "act-as" is legacy + insecure. A per-user PAT is the honest path.</div>
+      </div>
+    </div>
+
+    <p class="matrix-foot">
+      <strong>Confine per-user PATs to where DC forces them.</strong> The risk is the per-user multiplicity, not a token as such — one static bot secret is fine; many long-lived per-human secrets aren't. On Cloud, keep the user side on OAuth (rotating, revocable); a bot API token for the single service identity is the low-friction default.<br>
+      <span class="x">&times;</span> Connect &amp; Forge ruled out (per ticket). <span class="x">&times;</span> 2LO client-credentials: not viable. <span class="x">&times;</span> DC OAuth 1.0a: avoid.
+    </p>
+
+    <div class="glass" style="margin-top:28px;">
+      <span class="bracket bracket--tr"></span><span class="bracket bracket--bl"></span>
+      <div style="font-family:var(--mono);font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:var(--ink-mut);margin-bottom:14px;">Cloud, without the developer console</div>
+      <p style="font-size:14px;color:var(--ink-dim);line-height:1.7;max-width:780px;">Default Cloud onboarding touches <strong style="color:var(--ink);font-weight:500;">nothing</strong> at developer.atlassian.com. The <span style="color:var(--cyan-2)">service</span> identity is a bot <strong style="color:var(--ink);font-weight:500;">API token</strong> (Basic, no app); the <span style="color:var(--peach-3)">user</span> side is OAuth through TF's <strong style="color:var(--ink);font-weight:500;">first-party app</strong> — every org's users authorize one shared app and register nothing. The two are orthogonal: the service choice needs no app <em>ever</em>; only the user side needs one to exist.</p>
+      <ul class="notes">
+        <li><span class="lbl lbl--cool">whose app</span><strong>First-party (hosted, default)</strong> vs <strong>per-org (override)</strong>. Per-org registration — customer pastes <code>client_id</code>/<code>client_secret</code> — survives only as the override, no longer the default.</li>
+        <li><span class="lbl lbl--warm">flagged, not centered</span>Self-hosted TF talking to <em>Cloud</em> Jira can't put its callback on our first-party app, so it falls back to a per-org app (or per-user API tokens). The uncommon corner — worth a line, not a load-bearing case.</li>
+        <li><span class="lbl">policy</span>An org admin can disable API-token creation. If so, the service side falls back to an OAuth bot grant — so API-token service is the <em>default</em> Cloud service path, not the only one.</li>
+        <li><span class="lbl">transport</span>Mixing means two transports on one Cloud site at once: service calls go <code>Basic</code> to <code>{site}.atlassian.net</code>, user calls go <code>Bearer</code> to the <code>api.atlassian.com</code> gateway. The client picks scheme <em>and</em> base-URL per principal, not per deployment.</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ===================================================== 02 · THE REFRAME ===================================================== -->
+  <section>
+    <div class="eyebrow"><span class="num">02</span><span>What the spike overturned</span></div>
+    <h2>Cloud-first was <em>backwards.</em></h2>
+    <p class="lede">SKY-347 was written assuming Cloud OAuth first, with Data Center "likely v2" in the non-goals. The first customer self-hosts Jira Data Center inside an isolated VPC. That inverts the priority — and surfaces two findings about the code as it stands today.</p>
+
+    <div class="findings">
+      <div class="glass glass--warm finding">
+        <div class="finding__mark finding__mark--flip">&#10562;</div>
+        <div>
+          <h4>The DC / Cloud priority flips</h4>
+          <p>Data Center isn't a v2 deferral — it's the v1 first-customer path, and the cheap one: a service-user PAT is exactly what <code>jira.Client</code> already does. Cloud OAuth becomes the <strong>SaaS-tier follow-on</strong>, de-riskable against a test site but off the first-customer critical path. SKY-347 <strong>blocks SKY-410</strong> (onboarding rework), so this reordering unblocks real work.</p>
+        </div>
+      </div>
+      <div class="glass finding">
+        <div class="finding__mark finding__mark--flip">&#9888;</div>
+        <div>
+          <h4>The client is Bearer + v2 only</h4>
+          <p>Every request sets <code>Authorization: Bearer</code> against <code>{baseURL}/rest/api/2/…</code> (<code>internal/jira/client.go</code>, <code>auth.ValidateJira</code>). So a DC PAT connects — but a <strong>Cloud API token will 401</strong>, because Cloud wants <code>Basic base64(email:token)</code>, not Bearer. Cloud support needs a pluggable auth scheme + v3, not just a new URL.</p>
+        </div>
+      </div>
+      <div class="glass finding">
+        <div class="finding__mark finding__mark--flip">&#9888;</div>
+        <div>
+          <h4>Today, the bot acts as a human</h4>
+          <p>The org-level Jira credential is currently a person's <em>personal</em> PAT — so every autonomous transition TF makes is stamped in Jira history as that person. That's the credential-borrowing anti-pattern this ticket exists to kill, just inverted. <strong>First fix is cheap:</strong> provision a dedicated bot user and put <em>its</em> PAT at the org level.</p>
+        </div>
+      </div>
+      <div class="glass finding">
+        <div class="finding__mark finding__mark--ok">&check;</div>
+        <div>
+          <h4>The identity half is already built</h4>
+          <p><code>GetJiraIdentity</code> exists, <code>/api/me</code> already returns <code>jira_*</code> fields, and the team roster carries <code>JiraAccountID</code> ("null when member hasn't connected Jira"). SKY-397's <code>user_jira_identities</code> table + store + exposure look landed or nearly. The read-mapping problem is solved.</p>
+        </div>
+      </div>
+      <div class="glass finding">
+        <div class="finding__mark finding__mark--new">+</div>
+        <div>
+          <h4>What's genuinely net-new</h4>
+          <p>Per-user <strong>credential</strong> storage; a <code>RequireJiraIdentity</code> gate; the Cloud per-org OAuth flow; and the DC per-user-PAT bind flow. Everything else is composition over what's there.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================================================== 03 · TWO ACTORS / RESOLVER ===================================================== -->
+  <section>
+    <div class="eyebrow"><span class="num">03</span><span>Who makes the write</span></div>
+    <h2>Two actors. <em>One rule.</em></h2>
+    <p class="lede">Per-user auth is <strong>mandatory</strong> — every user binds their own credential before taking a Jira action, with no "bot acts on their behalf" fallback. That splits the resolver into two provenance-keyed entry points. The service identity never stands in for a human; a human action never silently becomes the bot.</p>
+
+    <div class="duo">
+      <div class="glass duo__panel">
+        <div class="door__tag">cool · the machine</div>
+        <h3><span class="c">JiraClientForSystem</span>(org)</h3>
+        <code class="duo__sig"><span class="com">// polling · autonomous delegation · scorer</span><br><span class="fn">client</span> := resolver.ForSystem(org)<br><span class="com">// service credential only — never borrows a user</span></code>
+        <ul>
+          <li>Drives the poller and any agent-initiated transition or comment.</li>
+          <li>Attributed to the <strong>bot</strong> in Jira history — which is exactly what you want for audit.</li>
+          <li>Source: the org's dedicated service account (DC PAT / Cloud bot token).</li>
+        </ul>
+      </div>
+      <div class="glass glass--warm duo__panel">
+        <div class="door__tag">warm · the human</div>
+        <h3><span class="w">JiraClientForUser</span>(org, user)</h3>
+        <code class="duo__sig"><span class="com">// claim on /board · user-authored comment</span><br><span class="fn">client</span> := resolver.ForUser(org, user)<br><span class="com">// user's own credential — guaranteed by the gate</span></code>
+        <ul>
+          <li>Every user-initiated write. Attributed to <strong>that human</strong> in Jira history.</li>
+          <li>Credential guaranteed present by <code>RequireJiraIdentity</code>; if somehow absent, <strong>block the action</strong> — never substitute the bot.</li>
+          <li>Source: the user's OAuth grant (Cloud) or personal PAT (DC).</li>
+        </ul>
+      </div>
+    </div>
+
+    <p class="punchline">Not a fallback chain. <em>A provenance switch.</em></p>
+    <p class="matrix-foot" style="text-align:center;">This rewrites SKY-347 scope&nbsp;#5: the user credential isn't the <em>last tier of a chain</em> — for a user action it's <strong>required</strong>, and degrading to the service account is a bug, not a fallback. One user flow can legitimately emit both: you claim a card &rarr; <em>your</em> transition; the agent it spawns opens a PR &rarr; the <em>bot's</em> writes. That's the <code style="font-family:var(--mono);font-size:12px;color:var(--cyan-2)">runs.actor</code> split working.</p>
+  </section>
+
+  <!-- ===================================================== 04 · IDENTITY VS CREDENTIAL ===================================================== -->
+  <section>
+    <div class="eyebrow"><span class="num">04</span><span>Why Jira costs more than GitHub</span></div>
+    <h2>GitHub forces identity. <em>Jira forces a credential.</em></h2>
+    <p class="lede">We already force per-user binding — <code style="font-family:var(--mono);font-size:13px;color:var(--cyan-2)">RequireGitHubIdentity</code> hard-gates the app in multi mode and fail-closes on a transient check. But it captures a <strong>name</strong>. Jira's mandate is heavier: to attribute a write to a human, TF must <em>act as</em> them — a credential at rest, not just a string.</p>
+
+    <div class="duo">
+      <div class="glass duo__panel">
+        <div class="door__tag">github · the precedent</div>
+        <h3>Binds an <span class="c">identity</span></h3>
+        <ul>
+          <li>The connect flow captures your <strong>username</strong> &rarr; <code>user_github_identities</code>.</li>
+          <li>The org App / PAT still does all the API work. TF <strong>never acts as you</strong> on GitHub; writes are bot-attributed by design.</li>
+          <li>Storage held: an identifier. No per-user secret.</li>
+        </ul>
+      </div>
+      <div class="glass glass--warm duo__panel">
+        <div class="door__tag">jira · the mandate</div>
+        <h3>Binds a <span class="w">credential</span></h3>
+        <ul>
+          <li>User-initiated writes are attributed to the user &rarr; TF <strong>acts as</strong> them.</li>
+          <li>That requires a per-user credential at rest: an OAuth refresh token (Cloud) or a PAT (DC), keyed <code>(user_id, jira_base_url)</code>.</li>
+          <li>Storage held: a <strong>secret</strong> — net-new custody beyond SKY-397's identity table, and real vault surface in multi mode.</li>
+        </ul>
+      </div>
+    </div>
+
+    <p class="punchline">Same gate. <em>Heavier payload.</em></p>
+  </section>
+
+  <!-- ===================================================== 05 · LOCAL = N=1 ===================================================== -->
+  <section>
+    <div class="eyebrow"><span class="num">05</span><span>How local mode holds the shape</span></div>
+    <h2>Two slots, always — <em>local just shares the value.</em></h2>
+    <p class="lede">The model is two credential slots: org/service and per-user. That's true at every N. In multi mode they're distinct — a bot user plus each human's grant. At N=1 the single user fills both with the same token. No special-casing; <strong>local is multi at N=1.</strong></p>
+
+    <div class="parity">
+      <div class="glass glass--warm parity__col">
+        <span class="bracket bracket--tr"></span><span class="bracket bracket--bl"></span>
+        <div class="door__tag">local · sqlite + keychain</div>
+        <h3>Your laptop</h3>
+        <div class="parity__rows">
+          <div class="parity__row"><span class="key">org / service slot</span><span class="val">your PAT</span></div>
+          <div class="parity__row"><span class="key">per-user slot</span><span class="val">your PAT</span></div>
+          <div class="parity__row"><span class="key">binding</span><span class="val">affirm reuse</span></div>
+          <div class="parity__row"><span class="key">autonomous writes</span><span class="val">show as you</span></div>
+        </div>
+      </div>
+      <div class="parity__equals"><div class="parity__equals-mark">=</div></div>
+      <div class="glass parity__col parity__col--multi">
+        <span class="bracket bracket--tr"></span><span class="bracket bracket--bl"></span>
+        <div class="door__tag">multi · postgres + vault</div>
+        <h3>Hosted</h3>
+        <div class="parity__rows">
+          <div class="parity__row"><span class="key">org / service slot</span><span class="val">bot user</span></div>
+          <div class="parity__row"><span class="key">per-user slot</span><span class="val">each grant</span></div>
+          <div class="parity__row"><span class="key">binding</span><span class="val">gate-enforced</span></div>
+          <div class="parity__row"><span class="key">autonomous writes</span><span class="val">show as bot</span></div>
+        </div>
+      </div>
+    </div>
+    <p class="matrix-foot" style="text-align:center;">Rather than a literal second paste, local mode offers an <strong>"reuse my org PAT as my identity"</strong> affirmation — you still explicitly bind, satisfying "always require it," without retyping.</p>
+  </section>
+
+  <!-- ===================================================== 06 · SPIKE QUESTIONS ===================================================== -->
+  <section>
+    <div class="eyebrow"><span class="num">06</span><span>The ticket's open questions</span></div>
+    <h2>Four questions, <em>answered.</em></h2>
+    <p class="lede">SKY-347 listed four things to validate before the work is implementable. Here they are.</p>
+
+    <div class="qa">
+      <div class="glass qa__item">
+        <div class="qa__q"><span class="n">Q1</span><span class="t">Which Atlassian auth model fits TF's bot-identity needs?</span><span class="tog">+</span></div>
+        <div class="qa__a"><div class="qa__a-inner">
+          It splits by backend, not by a single choice. <strong>Data Center (first customer):</strong> a service-user PAT for the bot, a per-user PAT for each human. <strong>Cloud (SaaS):</strong> one per-org OAuth 2.0 (3LO) app — a bot-user grant for the service identity, real-user grants for each human. <code>2LO</code> client-credentials for general Jira REST is not available; Connect and Forge are ruled out.
+          <span class="verdict">verdict · PAT on DC, 3LO on Cloud. No single mechanism spans both.</span>
+        </div></div>
+      </div>
+      <div class="glass qa__item">
+        <div class="qa__q"><span class="n">Q2</span><span class="t">Is there a per-org registration flow — a GitHub-App-manifest equivalent?</span><span class="tog">+</span></div>
+        <div class="qa__a"><div class="qa__a-inner">
+          No. Atlassian has nothing like the GitHub App manifest auto-create. On <strong>Cloud</strong>, an org admin manually creates an OAuth 2.0 app in <code>developer.atlassian.com</code> and pastes <code>client_id</code> / <code>client_secret</code> into TF — that's the worst case, and it's the only case. On <strong>DC</strong> there's no app registration at all: PATs are minted in user profile settings.
+          <span class="verdict">verdict · manual app creation on Cloud; nothing to register on DC.</span>
+        </div></div>
+      </div>
+      <div class="glass qa__item">
+        <div class="qa__q"><span class="n">Q3</span><span class="t">What's the site-authorization shape?</span><span class="tog">+</span></div>
+        <div class="qa__a"><div class="qa__a-inner">
+          Cloud 3LO returns a <code>cloud_id</code> per authorized site; one app can be authorized across many sites, and tokens are routed through <code>api.atlassian.com/ex/jira/{cloud_id}</code>. So <code>org_jira_site_authorizations(cloud_id, …)</code> is a <strong>Cloud-only</strong> table. DC has no <code>cloud_id</code> — the base URL <em>is</em> the host, so multi-site there is just multiple host URLs.
+          <span class="verdict">verdict · cloud_id is real, and Cloud-only. DC addresses hosts directly.</span>
+        </div></div>
+      </div>
+      <div class="glass qa__item">
+        <div class="qa__q"><span class="n">Q4</span><span class="t">Does this need to handle Data Center, or just Cloud?</span><span class="tog">+</span></div>
+        <div class="qa__a"><div class="qa__a-inner">
+          Data Center, first. The first enterprise customer runs self-hosted Jira DC inside the same isolated VPC as their corp git — so DC is not the deferrable case the ticket assumed, it's the v1 case. The good news is it's mostly already working (Bearer + v2). Cloud OAuth is the genuinely new build, scoped as the SaaS-tier follow-on.
+          <span class="verdict">verdict · DC is v1 and nearly done; Cloud OAuth is the follow-on.</span>
+        </div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================================================== 07 · PROPOSED SCOPE ===================================================== -->
+  <section>
+    <div class="eyebrow"><span class="num">07</span><span>Candidate Linear issues</span></div>
+    <h2>The work, <em>ready to file.</em></h2>
+    <p class="lede">Sub-tickets under SKY-347, tagged by tier. <span style="color:var(--peach-3)">DC · near-term</span> unblocks the first customer; <span style="color:var(--cyan-2)">Cloud · SaaS</span> is the Cloud follow-on; <span style="color:var(--violet-2)">cross-cutting</span> serves both. Click a card for the one-liner.</p>
+
+    <div class="lane lane--foundation">
+      <div class="lane__label"><div class="lane__name">Foundation in place</div><div class="lane__count">identity half · SKY-397</div></div>
+      <div class="kanban">
+        <div class="ticket ticket--done">
+          <div class="ticket__check">&check;</div>
+          <div class="ticket__id">SKY-397 · D-Identity-Schema (Jira)</div>
+          <div class="ticket__title">host-scoped <code style="font-family:var(--mono);font-size:11px;color:var(--ink-mut)">user_jira_identities</code> + store + /api/me exposure — the read-mapping half. Landed / near.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="lane">
+      <div class="lane__label"><div class="lane__name">Proposed scope</div><div class="lane__count">9 candidates · the new work</div></div>
+      <div class="kanban">
+
+        <div class="ticket">
+          <div class="ticket__id">sub · client auth refactor</div>
+          <div class="ticket__title">Pluggable Jira client auth + API version</div>
+          <span class="ticket__status ticket__status--core">cross-cutting</span>
+          <div class="ticket__one"><strong>What:</strong> Give <code>jira.Client</code> a <code>{deployment, auth, apiVersion, gateway}</code> instead of a bare PAT. Bearer (DC PAT / Cloud OAuth), Basic (Cloud token), v2/v3, and the <code>api.atlassian.com</code> gateway. Unblocks any Cloud connection.</div>
+        </div>
+
+        <div class="ticket">
+          <div class="ticket__id">sub · dedicated service account</div>
+          <div class="ticket__title">Move the org credential off a human PAT</div>
+          <span class="ticket__status ticket__status--near">DC · near-term</span>
+          <div class="ticket__one"><strong>What:</strong> Provision a bot user; put <em>its</em> PAT at the org level so autonomous writes stop being stamped as a person. Mostly ops + a customer-facing doc step. The cheapest correctness win.</div>
+        </div>
+
+        <div class="ticket">
+          <div class="ticket__id">sub · cloud api-token service</div>
+          <div class="ticket__title">API-token service onboarding (no app)</div>
+          <span class="ticket__status ticket__status--saas">Cloud · SaaS</span>
+          <div class="ticket__one"><strong>What:</strong> Point the Cloud service identity at a bot account + <code>API token</code> (Basic, REST v3) — no developer console. The default low-friction Cloud service path; an OAuth bot grant is the fallback when org policy blocks token creation.</div>
+        </div>
+
+        <div class="ticket">
+          <div class="ticket__id">sub · per-user credential store</div>
+          <div class="ticket__title">Custody a per-user Jira secret</div>
+          <span class="ticket__status ticket__status--core">cross-cutting</span>
+          <div class="ticket__one"><strong>What:</strong> Store keyed <code>(user_id, jira_base_url)</code> — PAT (DC) or OAuth refresh (Cloud). Net-new beyond SKY-397's identity table. Keychain (local) / Vault (multi); revoke on user removal.</div>
+        </div>
+
+        <div class="ticket">
+          <div class="ticket__id">sub · RequireJiraIdentity gate</div>
+          <div class="ticket__title">Mandatory per-user binding</div>
+          <span class="ticket__status ticket__status--core">cross-cutting</span>
+          <div class="ticket__one"><strong>What:</strong> Mirror <code>RequireGitHubIdentity</code> — hard-gate the app when the org has Jira configured. <code>/api/me</code> exposes a has-credential signal; FE redirects to a connect/paste page; fail-closed.</div>
+        </div>
+
+        <div class="ticket">
+          <div class="ticket__id">sub · DC per-user PAT bind</div>
+          <div class="ticket__title">Paste-and-validate a personal PAT</div>
+          <span class="ticket__status ticket__status--near">DC · near-term</span>
+          <div class="ticket__one"><strong>What:</strong> Settings flow where a user pastes a personal DC PAT; TF validates via <code>/myself</code>, captures identity, stores the credential per-user. The DC half of "act as yourself."</div>
+        </div>
+
+        <div class="ticket">
+          <div class="ticket__id">sub · write-actor resolver</div>
+          <div class="ticket__title">Provenance-routed Jira writes</div>
+          <span class="ticket__status ticket__status--core">cross-cutting</span>
+          <div class="ticket__one"><strong>What:</strong> <code>ForSystem</code> (service only) vs <code>ForUser</code> (user cred, required). Route every Jira mutation by actor; block — never bot-substitute — when a user cred is absent. Corrects SKY-347 #5.</div>
+        </div>
+
+        <div class="ticket">
+          <div class="ticket__id">sub · cloud first-party OAuth app</div>
+          <div class="ticket__title">First-party 3LO app for user grants</div>
+          <span class="ticket__status ticket__status--saas">Cloud · SaaS</span>
+          <div class="ticket__one"><strong>What:</strong> Ship one multi-tenant TF OAuth app so Cloud users connect in one click and the customer registers nothing; capture identity + a rotating, revocable per-user credential. <code>org_jira_apps(client_id, client_secret_ref…)</code> + per-org override (customer-supplied creds) is the same flow, kept as the fallback for self-hosted-TF-vs-Cloud or app-mandate enterprises. Refresh-token rotation lives here.</div>
+        </div>
+
+        <div class="ticket">
+          <div class="ticket__id">sub · cloud multi-site</div>
+          <div class="ticket__title">Per-cloud_id site authorizations</div>
+          <span class="ticket__status ticket__status--saas">Cloud · SaaS</span>
+          <div class="ticket__one"><strong>What:</strong> <code>org_jira_site_authorizations(cloud_id…)</code>; poller iterates per authorized site. Cloud-only — DC has no cloud_id. Safe to defer behind the OAuth app.</div>
+        </div>
+
+      </div>
+    </div>
+
+    <div class="callout glass" style="margin-top:48px;">
+      <span class="bracket bracket--tr"></span><span class="bracket bracket--bl"></span>
+      <p>The bot polls and runs autonomous work. <em>Every human action is the human.</em></p>
+      <small>service account · per-user credential · jira history attributes work to whoever actually did it</small>
+    </div>
+  </section>
+
+</main>
+
+<footer class="coda">
+  spike output for
+  <a href="https://linear.app/sky-ai-eng/issue/SKY-347">SKY-347</a>
+  ·
+  parent
+  <a href="https://linear.app/sky-ai-eng/issue/SKY-242">SKY-242</a>
+  ·
+  identity sibling
+  <a href="https://linear.app/sky-ai-eng/issue/SKY-397">SKY-397</a>
+  ·
+  drafted 2026-06-04
+</footer>
+
+<script>
+// Q&A accordion — independent toggles
+document.querySelectorAll('.qa__item').forEach(item => {
+  item.addEventListener('click', () => item.classList.toggle('is-open'));
+});
+// Ticket cards — expand the one-liner
+document.querySelectorAll('.ticket:not(.ticket--done)').forEach(t => {
+  t.addEventListener('click', () => t.classList.toggle('is-open'));
+});
+</script>
+
+</body>
+</html>
