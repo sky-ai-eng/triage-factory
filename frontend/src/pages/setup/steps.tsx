@@ -459,9 +459,14 @@ async function gateModelPick(orgId: string | null, key: string): Promise<void> {
 // No load: loadGitHubAppInstall, the install step's, seeds everything it reads.
 // It does depend on loadOrg, though, which the URL step owns and every later
 // org step's save needs; with the URL step hidden, a loadOrg failure shows its
-// retry here (loadFrom).
+// retry here (loadFrom). For the same reason the step is not complete until
+// that load succeeded: resume then opens on it, retry and all, rather than
+// skipping a connected org to a later step whose save refuses.
 const githubConnectVisible = (s: WizardState) =>
   !s.isLocal && (s.githubAppManaged || (s.githubDeploymentAppAvailable && !s.githubAppRegistered))
+
+// An account is connected, or the admin chose their own App.
+const githubConnectChosen = (s: WizardState) => deploymentAppConnected(s) || s.githubOwnApp
 
 const githubConnectStep: WizardStep = {
   id: 'org-github-connect',
@@ -469,9 +474,9 @@ const githubConnectStep: WizardStep = {
   title: 'GitHub',
   visible: githubConnectVisible,
   loadFrom: 'org-github-url',
-  isComplete: (s) => deploymentAppConnected(s) || s.githubOwnApp,
+  isComplete: (s) => s.orgLoaded && githubConnectChosen(s),
   validate: (s) =>
-    deploymentAppConnected(s) || s.githubOwnApp
+    githubConnectChosen(s)
       ? null
       : 'Connect a GitHub account to continue, or use your own GitHub App.',
   persist: async () => {},

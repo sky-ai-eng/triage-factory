@@ -210,7 +210,7 @@ var (
 		code:   "state_mismatch",
 		status: http.StatusBadRequest,
 		message: "That GitHub response doesn't belong to the connection you started. " +
-			"Start again from organization settings.",
+			"Connect GitHub again.",
 	}
 
 	// The named account does not exist on GitHub. Account existence is public
@@ -231,7 +231,7 @@ var (
 		code:   "account_mismatch",
 		status: http.StatusConflict,
 		message: "GitHub connected %s, but you asked to connect %s. " +
-			"Start again from organization settings and install on the account you named.",
+			"Connect GitHub again and install on the account you named.",
 	}
 
 	// No record, expired, already consumed, or a session that isn't the one
@@ -242,7 +242,7 @@ var (
 		code:   "link_expired",
 		status: http.StatusBadRequest,
 		message: "That connection didn't finish in time, or was already used. " +
-			"Start again from organization settings.",
+			"Connect GitHub again.",
 	}
 
 	// GitHub returned no installation to connect. Distinct from the stale
@@ -253,7 +253,7 @@ var (
 		code:   "no_installation",
 		status: http.StatusBadRequest,
 		message: "GitHub didn't say which installation to connect. " +
-			"Start again from organization settings.",
+			"Connect GitHub again.",
 	}
 
 	// An API token tried to complete a ceremony. See the gate for why this

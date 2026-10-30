@@ -10,6 +10,7 @@ import {
 } from './steps'
 import { isStepVisible, nextVisibleIndex, prevVisibleIndex, resumeIndex } from './resume'
 import { jsonBody } from '../../test/apiResponse'
+import { appImportedPatch } from './githubAppImported'
 import type { WizardState } from './types'
 
 // The org save is FIELD-SCOPED: a step's persist names exactly the fields its
@@ -787,11 +788,18 @@ describe('setup — GitHub through the deployment App', () => {
   const at = WIZARD_STEPS.indexOf(connect)
   const fresh = (over: Partial<WizardState> = {}): WizardState => ({
     ...initialWizardState(),
+    orgLoaded: true,
     isLocal: false,
     githubAccessTab: 'app',
     githubDeploymentAppAvailable: true,
     ...over,
   })
+  const connected: Partial<WizardState> = {
+    githubAppManaged: true,
+    githubAppInstalled: true,
+    githubAppInstallCount: 1,
+    githubAppAccounts: ['acme-corp'],
+  }
 
   it('opens on the connect step, with the URL and App steps hidden', () => {
     const state = fresh()
@@ -831,12 +839,7 @@ describe('setup — GitHub through the deployment App', () => {
   })
 
   it('is complete once an account is connected, and names it', () => {
-    const state = fresh({
-      githubAppManaged: true,
-      githubAppInstalled: true,
-      githubAppInstallCount: 1,
-      githubAppAccounts: ['acme-corp'],
-    })
+    const state = fresh(connected)
     expect(connect.isComplete(state)).toBe(true)
     expect(connect.validate?.(state)).toBeNull()
     expect(connect.collapsedSummary(state)).toBe('Deployment App · acme-corp')
@@ -850,6 +853,32 @@ describe('setup — GitHub through the deployment App', () => {
     expect(connect.isComplete(managed)).toBe(false)
     expect(connect.validate?.(managed)).toBe(message)
     expect(connect.validate?.(fresh())).toBe(message)
+  })
+
+  // The URL step owns the org load and is hidden here, so a connected org whose
+  // org load failed must still resume on the connect step, where the retry
+  // shows, rather than on a later step whose save refuses.
+  it('resumes a connected org on the connect step when the org load failed', () => {
+    const state = fresh({ ...connected, orgLoaded: false })
+    expect(connect.isComplete(state)).toBe(false)
+    expect(resumeIndex(WIZARD_STEPS, state)).toBe(at)
+  })
+
+  it('leaves the connect step once an imported App takes the org off the deployment App', () => {
+    const state = {
+      ...fresh({ githubAppManaged: true, githubOwnApp: true }),
+      ...appImportedPatch({
+        app: { slug: 'acme-app', owner_type: 'org', active: true },
+        installations: [{ account_login: 'acme-corp' }],
+      } as Parameters<typeof appImportedPatch>[0]),
+    }
+    expect(isStepVisible(connect, state)).toBe(false)
+  })
+
+  it('names only steps that load in loadFrom', () => {
+    for (const step of WIZARD_STEPS.filter((s) => s.loadFrom)) {
+      expect(WIZARD_STEPS.find((s) => s.id === step.loadFrom)?.load).toBeTypeOf('function')
+    }
   })
 
   it('summarizes the own-App choice', () => {

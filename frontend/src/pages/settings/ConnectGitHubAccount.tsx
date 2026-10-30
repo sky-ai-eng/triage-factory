@@ -108,7 +108,7 @@ export default function ConnectGitHubAccount({
       <div className="flex items-center gap-2">
         <button
           type="submit"
-          disabled={busy || !account.trim()}
+          disabled={disabled || busy || !account.trim()}
           className="rounded-full bg-warm px-5 py-2 text-body font-medium text-warm-ink transition-colors hover:bg-warm/90 disabled:opacity-40"
         >
           {busy ? 'Connecting…' : 'Connect'}

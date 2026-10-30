@@ -37,6 +37,12 @@ describe('ConnectGitHubAccount · defaultOpen', () => {
     expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument()
   })
 
+  it('holds the open form while disabled', () => {
+    render(<ConnectGitHubAccount orgId="org-1" label="Connect GitHub…" defaultOpen disabled />)
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'acme' } })
+    expect(screen.getByRole('button', { name: 'Connect' })).toBeDisabled()
+  })
+
   it('starts closed without it, and offers Cancel once revealed', () => {
     render(<ConnectGitHubAccount orgId="org-1" label="Connect GitHub…" />)
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument()

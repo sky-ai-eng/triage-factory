@@ -149,9 +149,11 @@ export function useWizard(
     }
   }, [steps, makeInitialState, orgId, teamId, isLocal, reloadNonce])
 
-  // A step's load failed, counting the load it depends on (loadFrom) as its own.
+  // A step's load failed: its own, or the one it depends on (loadFrom).
   const loadFailed = useCallback(
-    (step: WizardStep) => loadStatus[step.loadFrom ?? step.id] === 'error',
+    (step: WizardStep) =>
+      loadStatus[step.id] === 'error' ||
+      (step.loadFrom !== undefined && loadStatus[step.loadFrom] === 'error'),
     [loadStatus],
   )
 

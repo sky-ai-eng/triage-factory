@@ -2547,4 +2547,14 @@ func TestManagedBind_OutcomePageReadsFromSetupAndSettings(t *testing.T) {
 	if strings.Contains(body, "Settings<") || strings.Contains(body, "organization settings") {
 		t.Errorf("outcome page still points the reader at Settings:\n%s", body)
 	}
+
+	// The refusals a ceremony started from setup can end in say to connect
+	// again rather than to go to Settings, which the setup gate keeps closed.
+	for _, refusal := range []bindRefusal{
+		refuseStateMismatch, refuseAccountMismatch, refuseStaleCeremony, refuseNoInstallation,
+	} {
+		if strings.Contains(refusal.message, "organization settings") {
+			t.Errorf("%s still sends the reader to organization settings: %q", refusal.code, refusal.message)
+		}
+	}
 }

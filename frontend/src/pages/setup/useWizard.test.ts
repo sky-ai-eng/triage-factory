@@ -70,3 +70,27 @@ describe('useWizard — loadFrom', () => {
     expect(result.current.activeIndex).toBe(0)
   })
 })
+
+describe('useWizard — loadFrom alongside a load of its own', () => {
+  it('still counts the step’s own failed load', async () => {
+    const persist = vi.fn().mockResolvedValue(undefined)
+    const owner: WizardStep = {
+      ...step('owner', vi.fn()),
+      visible: () => false,
+      load: () => Promise.resolve({}),
+    }
+    const both: WizardStep = {
+      ...step('both', persist),
+      loadFrom: 'owner',
+      load: () => Promise.reject(new Error('offline')),
+    }
+    const steps = [both, owner, step('next', vi.fn())]
+    const identity = { orgId: 'org-1', teamId: 'team-1', isLocal: true }
+    const { result } = renderHook(() => useWizard(steps, identity, initialWizardState, () => {}))
+    await waitFor(() => expect(result.current.phase).toBe('ready'))
+
+    expect(result.current.activeLoadFailed).toBe(true)
+    act(() => result.current.advance())
+    expect(persist).not.toHaveBeenCalled()
+  })
+})
