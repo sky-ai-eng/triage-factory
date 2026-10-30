@@ -94,6 +94,15 @@ describe('LinearAccessStep — no app to install yet', () => {
     )
 
     expect(screen.queryByRole('button', { name: 'Install Triage Factory' })).not.toBeInTheDocument()
+    expect(screen.getByPlaceholderText('lin_api_…')).toBeInTheDocument()
+    expect(
+      screen.getByRole('checkbox', { name: /Also use this API key as my own Linear identity/ }),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', {
+        name: 'Use a personal API key or your own Linear app instead',
+      }),
+    ).not.toBeInTheDocument()
     await userEvent.click(
       screen.getByRole('button', { name: /Install Triage Factory as an app instead/ }),
     )
@@ -108,11 +117,108 @@ describe('LinearAccessStep — no app to install yet', () => {
 
     await waitFor(() => expect(patch).toHaveBeenCalledWith({ linearInstallAvailable: true }))
   })
+})
 
-  it('offers no app setup once an app resolves', () => {
+describe('LinearAccessStep — an app to install', () => {
+  const appPath = `/api/orgs/${LOCAL_DEFAULT_ORG_ID}/linear/app`
+  const renderStep = (isLocal: boolean) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: unknown) => {
+        if (String(input) === appPath) {
+          return Promise.resolve({
+            ok: true,
+            ...jsonBody({
+              app: null,
+              install_available: true,
+              using_deployment_default: true,
+              create_url: '',
+              redirect_uris: [],
+            }),
+          })
+        }
+        return Promise.resolve({ ok: false, status: 404, ...jsonBody({}) })
+      }),
+    )
     render(
       <LinearAccessStep
         state={{ ...initialWizardState(), tracker: 'linear', linearInstallAvailable: true }}
+        patch={() => {}}
+        orgId={LOCAL_DEFAULT_ORG_ID}
+        teamId="default"
+        isLocal={isLocal}
+        advance={() => {}}
+        hold={(work) => work()}
+      />,
+    )
+  }
+  const alternatives = () =>
+    screen.queryByRole('button', { name: 'Use a personal API key or your own Linear app instead' })
+
+  it('shows Install and the link, and nothing else', () => {
+    renderStep(false)
+    expect(screen.getByRole('button', { name: 'Install Triage Factory' })).toBeInTheDocument()
+    expect(alternatives()).toBeInTheDocument()
+    expect(screen.queryByPlaceholderText('lin_api_…')).not.toBeInTheDocument()
+    expect(screen.queryByText('Or paste a personal API key')).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Set up your own Linear app' }),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: /Install Triage Factory as an app instead/ }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('reveals the key field and an app of your own together, and drops the link', async () => {
+    renderStep(false)
+    await userEvent.click(alternatives()!)
+    expect(screen.getByPlaceholderText('lin_api_…')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Set up your own Linear app' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Install Triage Factory' })).toBeInTheDocument()
+    expect(alternatives()).not.toBeInTheDocument()
+  })
+
+  it('opens the app card from "Set up your own Linear app"', async () => {
+    renderStep(false)
+    await userEvent.click(alternatives()!)
+    await userEvent.click(screen.getByRole('button', { name: 'Set up your own Linear app' }))
+    expect(
+      await screen.findByPlaceholderText("Your Linear OAuth app's client ID"),
+    ).toBeInTheDocument()
+    // The button was the deliberate click, so the card opens on its form.
+    expect(screen.getByText(/Register your own below only if you need to/)).toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: /Use your own Linear app instead/ }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('offers the reuse checkbox in local mode only once the key field shows', async () => {
+    renderStep(true)
+    const reuse = () =>
+      screen.queryByRole('checkbox', { name: /Also use this API key as my own Linear identity/ })
+    expect(reuse()).not.toBeInTheDocument()
+    await userEvent.click(alternatives()!)
+    expect(reuse()).toBeInTheDocument()
+  })
+})
+
+describe('LinearAccessStep — connected', () => {
+  it('shows the connection alone, with no alternatives to reveal', () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve({ ok: false, status: 404, ...jsonBody({}) })),
+    )
+    render(
+      <LinearAccessStep
+        state={{
+          ...initialWizardState(),
+          tracker: 'linear',
+          linearInstallAvailable: true,
+          linearConnected: true,
+          linearAuthMethod: 'app_install',
+          linearBoundAs: 'Triage Factory',
+          linearWorkspaceUrlKey: 'acme',
+        }}
         patch={() => {}}
         orgId={LOCAL_DEFAULT_ORG_ID}
         teamId="default"
@@ -121,9 +227,16 @@ describe('LinearAccessStep — no app to install yet', () => {
         hold={(work) => work()}
       />,
     )
-    expect(screen.getByRole('button', { name: 'Install Triage Factory' })).toBeInTheDocument()
+    expect(screen.getByText('Installed as Triage Factory in linear.app/acme')).toBeInTheDocument()
     expect(
-      screen.queryByRole('button', { name: /Install Triage Factory as an app instead/ }),
+      screen.queryByRole('button', {
+        name: 'Use a personal API key or your own Linear app instead',
+      }),
     ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Set up your own Linear app' }),
+    ).not.toBeInTheDocument()
+    expect(screen.queryByPlaceholderText('lin_api_…')).not.toBeInTheDocument()
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
   })
 })

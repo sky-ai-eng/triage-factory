@@ -182,6 +182,29 @@ export function ReuseCredentialCheckbox({
   )
 }
 
+// InsteadLink is the way off a step's one main action: a divider, a link that
+// opens the do-it-yourself path, and a line saying who that path is for. The
+// GitHub connect and Linear access steps, and Settings' Linear connection,
+// render it under the action it is the alternative to.
+export function InsteadLink({
+  label,
+  hint,
+  onClick,
+}: {
+  label: string
+  hint: string
+  onClick: () => void
+}) {
+  return (
+    <div className="space-y-1 border-t border-line-1 pt-4">
+      <button type="button" onClick={onClick} className="text-body text-warm hover:underline">
+        {label}
+      </button>
+      <p className="text-reported leading-relaxed text-ink-3">{hint}</p>
+    </div>
+  )
+}
+
 // SectionDivider labels a group of steps ("Organization settings" / "Team
 // settings (first team)"). Rendered as the group's heading so the collapsed
 // stack stays screen-reader navigable by section.

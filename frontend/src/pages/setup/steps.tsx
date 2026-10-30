@@ -1206,10 +1206,11 @@ export const linearActive = (s: WizardState) => s.tracker === 'linear' && s.line
 // Step · Linear access (visible only when Linear is the chosen tracker). The
 // whole of Linear's org connection in one step: no URL to probe (Linear has
 // one host). Two ways to complete it. When a Linear OAuth app resolves, the
-// group offers Install first — a navigation through Linear's consent page that
-// returns here with the org connected, which completes the step on reload. A
-// personal API key is the alternative: Continue binds it via connectLinear,
-// which validates the key against Linear before it stores anything. The
+// step's one main action is Install — a navigation through Linear's consent
+// page that returns here with the org connected, which completes the step on
+// reload. A personal API key is the alternative, behind a link while an app
+// resolves: Continue binds it via connectLinear, which validates the key
+// against Linear before it stores anything. The
 // disconnect stays inside LinearAccessGroup. Mandatory while Linear is
 // selected, invisible (and so non-blocking) otherwise.
 const linearAccessStep: WizardStep = {
@@ -1223,7 +1224,7 @@ const linearAccessStep: WizardStep = {
     s.linearConnected || s.org.linear_api_key.trim() !== ''
       ? null
       : s.linearInstallAvailable
-        ? 'Install Triage Factory in Linear, or paste a Linear API key to connect.'
+        ? 'Install Triage Factory in Linear to connect, or use a personal API key instead.'
         : 'Paste a Linear API key to connect.',
   persist: async ({ state, orgId, patch }) => {
     if (state.linearConnected) return

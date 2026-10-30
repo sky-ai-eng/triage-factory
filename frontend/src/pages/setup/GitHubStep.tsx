@@ -31,7 +31,7 @@ import GitHubAppImportForm from '../settings/GitHubAppImportForm'
 import { GitHubAppInstallView } from '../settings/GitHubAppInstallView'
 import ConnectGitHubAccount from '../settings/ConnectGitHubAccount'
 import { useGitHubAppInstall } from '../../hooks/useGitHubAppInstall'
-import { UrlField, ChoiceCards, ReuseCredentialCheckbox } from './parts'
+import { UrlField, ChoiceCards, ReuseCredentialCheckbox, InsteadLink } from './parts'
 import type { StepContext, GitHubAccessMode, GitHubAppSource, WizardState } from './types'
 import { appImportedPatch } from './githubAppImported'
 import { deploymentAppConnected } from './githubDeploymentApp'
@@ -95,22 +95,14 @@ export function GitHubConnectStep({ orgId, state, patch, advance }: StepContext)
         </p>
       </div>
       <ConnectGitHubAccount orgId={orgId} label="Connect GitHub…" defaultOpen />
-      <div className="space-y-1 border-t border-line-1 pt-4">
-        <button
-          type="button"
-          onClick={() => {
-            patch({ githubOwnApp: true })
-            advance?.()
-          }}
-          className="text-body text-warm hover:underline"
-        >
-          Use your own GitHub App instead
-        </button>
-        <p className="text-reported leading-relaxed text-ink-3">
-          For GitHub Enterprise Server or a ghe.com subdomain, or when your organization needs an
-          App it owns.
-        </p>
-      </div>
+      <InsteadLink
+        label="Use your own GitHub App instead"
+        hint="For GitHub Enterprise Server or a ghe.com subdomain, or when your organization needs an App it owns."
+        onClick={() => {
+          patch({ githubOwnApp: true })
+          advance?.()
+        }}
+      />
     </div>
   )
 }

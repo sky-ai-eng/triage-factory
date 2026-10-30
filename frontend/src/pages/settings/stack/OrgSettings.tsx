@@ -81,7 +81,7 @@ import { disconnectGitHubPAT, disconnectJira } from '../orgCredentials'
 import { connectAnthropic, disconnectLLM, CLAUDE_SOURCE_OPTIONS } from '../anthropicConnect'
 import { connectBedrock, bedrockPayloadFromForm } from '../bedrockConnect'
 import { ClaudeProviderCards, AnthropicKeyField, BedrockFields } from '../../setup/ClaudeStep'
-import { ChoiceCards } from '../../setup/parts'
+import { ChoiceCards, InsteadLink } from '../../setup/parts'
 import GitHubAccessControl from './GitHubAccessControl'
 import SSOSettings from './SSOSettings'
 import SettingsSection from './SettingsSection'
@@ -112,6 +112,9 @@ export default function OrgSettings({
   // The Linear sibling: the connected section re-opened to bind a replacement
   // key in place.
   const [linearRebinding, setLinearRebinding] = useState(false)
+  // With an app to install, the unconnected section is Install alone and the
+  // key waits behind a link; this is that link pressed.
+  const [linearShowKey, setLinearShowKey] = useState(false)
   // A replacement key may not read the private teams the current one does;
   // the Save names them before binding.
   const linearSwitch = useLinearSwitchWarning()
@@ -268,6 +271,44 @@ export default function OrgSettings({
   if (!loaded) {
     return <div className="px-1 py-3 text-body text-ink-3">Loading organization settings…</div>
   }
+
+  // The unconnected Linear connection section's Save.
+  const linearConnect = async (): Promise<boolean> => {
+    if (!orgId) {
+      toast.error('No organization context — reload and try again.')
+      return false
+    }
+    setSavingKey('linear-connect', true)
+    try {
+      if (linearRebinding && !(await linearSwitch.confirmSwitch(orgId, 'key'))) {
+        return false
+      }
+      // Same call for a first bind and a replacement: the key is
+      // validated against Linear before anything is stored, so a bad
+      // one 422s with the org still on the key it had.
+      const result = await connectLinear(orgId, draft.org.linear_api_key)
+      if (!result.ok) {
+        toast.error(result.error)
+        return false
+      }
+      const connected = {
+        linearConnected: true,
+        linearWorkspaceUrlKey: result.access.workspace_url_key,
+        linearBoundAs: boundAsName(result.access),
+        linearAuthMethod: result.access.auth_method,
+        linearLastError: '',
+      }
+      setDraft((d) => ({ ...d, ...connected, org: { ...d.org, linear_api_key: '' } }))
+      setBaseline((b) => ({ ...b, ...connected }))
+      toast.success(linearRebinding ? 'Linear key replaced' : 'Linear connected')
+      setLinearRebinding(false)
+      setLinearShowKey(false)
+      return true
+    } finally {
+      setSavingKey('linear-connect', false)
+    }
+  }
+  const linearKeyHidden = !linearRebinding && draft.linearInstallAvailable && !linearShowKey
 
   // The StepContext every /setup body consumes — the live draft + patch, with
   // advance a no-op (Settings has no linear flow; selfAdvancing pickers just
@@ -703,11 +744,12 @@ export default function OrgSettings({
       )}
 
       {/* ── Linear connection ── The Jira section's shape: unconnected (or
-          rebinding), a form whose Save performs the bind, with Install offered
-          first when an app resolves; connected, a status line carrying the
-          inline Disconnect and, for a key, "Replace key", which re-opens the
-          form against the still-connected org so a rotation never starts with
-          a disconnect. */}
+          rebinding), a form whose Save performs the bind; when an app
+          resolves, Install alone, an action section until "Use a personal API
+          key instead" turns it into that form. Connected, a status line
+          carrying the inline Disconnect and, for a key, "Replace key", which
+          re-opens the form against the still-connected org so a rotation
+          never starts with a disconnect. */}
       {draft.linearConnected && !linearRebinding ? (
         <SettingsSection
           title="Linear connection"
@@ -760,47 +802,19 @@ export default function OrgSettings({
               ? `Connected · linear.app/${baseline.linearWorkspaceUrlKey}`
               : 'Not connected'
           }
-          saveLabel={linearRebinding ? 'Replace key' : 'Connect'}
-          dirty={draft.org.linear_api_key.trim() !== ''}
-          saveDisabled={draft.org.linear_api_key.trim() === ''}
-          saving={isSaving('linear-connect')}
-          onSave={async () => {
-            if (!orgId) {
-              toast.error('No organization context — reload and try again.')
-              return false
-            }
-            setSavingKey('linear-connect', true)
-            try {
-              if (linearRebinding && !(await linearSwitch.confirmSwitch(orgId, 'key'))) {
-                return false
-              }
-              // Same call for a first bind and a replacement: the key is
-              // validated against Linear before anything is stored, so a bad
-              // one 422s with the org still on the key it had.
-              const result = await connectLinear(orgId, draft.org.linear_api_key)
-              if (!result.ok) {
-                toast.error(result.error)
-                return false
-              }
-              const connected = {
-                linearConnected: true,
-                linearWorkspaceUrlKey: result.access.workspace_url_key,
-                linearBoundAs: boundAsName(result.access),
-                linearAuthMethod: result.access.auth_method,
-                linearLastError: '',
-              }
-              setDraft((d) => ({ ...d, ...connected, org: { ...d.org, linear_api_key: '' } }))
-              setBaseline((b) => ({ ...b, ...connected }))
-              toast.success(linearRebinding ? 'Linear key replaced' : 'Linear connected')
-              setLinearRebinding(false)
-              return true
-            } finally {
-              setSavingKey('linear-connect', false)
-            }
-          }}
+          {...(linearKeyHidden
+            ? {}
+            : {
+                saveLabel: linearRebinding ? 'Replace key' : 'Connect',
+                dirty: draft.org.linear_api_key.trim() !== '',
+                saveDisabled: draft.org.linear_api_key.trim() === '',
+                saving: isSaving('linear-connect'),
+                onSave: linearConnect,
+              })}
           onCancel={() => {
             revertOrg(['linear_api_key'])
             setLinearRebinding(false)
+            setLinearShowKey(false)
           }}
         >
           <LinearAccessGroup
@@ -811,7 +825,15 @@ export default function OrgSettings({
             lastError={draft.linearLastError}
             orgId={orgId}
             bare
+            showKeyField={!linearKeyHidden}
           />
+          {linearKeyHidden && (
+            <InsteadLink
+              label="Use a personal API key instead"
+              hint="A key acts as the person it belongs to."
+              onClick={() => setLinearShowKey(true)}
+            />
+          )}
         </SettingsSection>
       )}
 
