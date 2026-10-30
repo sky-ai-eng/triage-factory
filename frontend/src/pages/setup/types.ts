@@ -373,6 +373,11 @@ export interface WizardStep {
   // state it never read.
   load?: (ctx: LoadContext) => Promise<Partial<WizardState>>
 
+  // The id of another step whose load() this step depends on, for a step that
+  // stands in for that one while it is hidden. A failure of that load counts
+  // as this step's own: the host shows the retry here and Continue refuses.
+  loadFrom?: string
+
   // Whether this step applies at all under the current state. A step whose
   // predicate returns false is omitted entirely — no collapsed bar, skipped by
   // resume and by Continue/Back navigation, and excluded from the "all steps

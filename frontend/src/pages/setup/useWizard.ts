@@ -149,12 +149,18 @@ export function useWizard(
     }
   }, [steps, makeInitialState, orgId, teamId, isLocal, reloadNonce])
 
+  // A step's load failed, counting the load it depends on (loadFrom) as its own.
+  const loadFailed = useCallback(
+    (step: WizardStep) => loadStatus[step.loadFrom ?? step.id] === 'error',
+    [loadStatus],
+  )
+
   const advance = useCallback(
     (onWillNavigate?: () => void) => {
       const step = steps[activeIndex]
       if (!step || busyRef.current) return
       // Don't persist a step whose existing state we failed to read.
-      if (loadStatus[step.id] === 'error') return
+      if (loadFailed(step)) return
       // Read off stateRef, not the render-bound `state` closure: a selfAdvancing
       // step calls patch() then advance() in the same handler, so `state` here is
       // still pre-patch while stateRef.current already carries the choice. (For a
@@ -198,7 +204,7 @@ export function useWizard(
       // advance reads stateRef.current (kept in sync on every render + in patch),
       // not the `state` closure, so it needn't recreate on every keystroke.
     },
-    [steps, activeIndex, loadStatus, orgId, teamId, isLocal, patch, onFinish],
+    [steps, activeIndex, loadFailed, orgId, teamId, isLocal, patch, onFinish],
   )
 
   const back = useCallback(() => {
@@ -264,7 +270,7 @@ export function useWizard(
     isStepComplete,
     busy,
     error,
-    activeLoadFailed: !!activeStep && loadStatus[activeStep.id] === 'error',
+    activeLoadFailed: !!activeStep && loadFailed(activeStep),
     canFinish: allComplete(steps, state),
     // The last step is the one with no visible step after it — not necessarily
     // the final array slot, since the trailing region may include an omitted

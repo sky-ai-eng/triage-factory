@@ -8,6 +8,7 @@ import { act, render, renderHook, screen, fireEvent, waitFor } from '@testing-li
 import { GitHubConnectStep } from './GitHubStep'
 import { initialWizardState, WIZARD_STEPS } from './steps'
 import { useWizard } from './useWizard'
+import { jsonBody } from '../../test/apiResponse'
 import type { WizardState } from './types'
 
 const ORG = 'org-1'
@@ -85,18 +86,33 @@ describe('GitHubConnectStep — connected', () => {
 })
 
 describe('the connect step in the wizard', () => {
-  // Every load fails, so the wizard runs on the state below alone.
+  // The org load (the hidden URL step's) answers; every other load fails, so
+  // the wizard runs on the state below plus that slice.
   const makeInitialState = () => deploymentAppState()
+  const identity = { orgId: ORG, teamId: 'default', isLocal: false }
+  const orgLoadAnswers = () =>
+    vi.fn(async (url: string) => {
+      if (url === `/api/orgs/${ORG}/settings`) {
+        return { ok: true, status: 200, ...jsonBody({ version: 1, github_base_url: '' }) }
+      }
+      if (url === '/api/integrations/status') {
+        return { ok: true, status: 200, ...jsonBody({ github_ready: false }) }
+      }
+      if (url === `/api/orgs/${ORG}/linear/access`) {
+        return { ok: true, status: 200, ...jsonBody({ connected: false }) }
+      }
+      throw new Error('offline')
+    })
+  const connectAt = WIZARD_STEPS.findIndex((s) => s.id === 'org-github-connect')
 
   it('refuses Continue until connected, then the link reaches the URL step and Back returns', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')))
-    const identity = { orgId: ORG, teamId: 'default', isLocal: false }
+    vi.stubGlobal('fetch', orgLoadAnswers())
     const { result } = renderHook(() =>
       useWizard(WIZARD_STEPS, identity, makeInitialState, () => {}),
     )
     await waitFor(() => expect(result.current.phase).toBe('ready'))
-    const connectAt = WIZARD_STEPS.findIndex((s) => s.id === 'org-github-connect')
     expect(result.current.activeIndex).toBe(connectAt)
+    expect(result.current.activeLoadFailed).toBe(false)
 
     act(() => result.current.advance())
     expect(result.current.error).toBe(
@@ -113,6 +129,31 @@ describe('the connect step in the wizard', () => {
     act(() => {
       result.current.back()
     })
+    expect(result.current.activeIndex).toBe(connectAt)
+  })
+
+  // The URL step owns the org load but is hidden here, so its failure has to
+  // surface on the connect step, or the first sign of it is a later save
+  // refusing with nothing on screen to retry.
+  it('shows a failed org load on the connect step, refuses Continue, and retries', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')))
+    const { result } = renderHook(() =>
+      useWizard(WIZARD_STEPS, identity, makeInitialState, () => {}),
+    )
+    await waitFor(() => expect(result.current.phase).toBe('ready'))
+    expect(result.current.activeIndex).toBe(connectAt)
+    expect(result.current.activeLoadFailed).toBe(true)
+
+    act(() => {
+      result.current.patch({ githubOwnApp: true })
+      result.current.advance()
+    })
+    expect(result.current.activeIndex).toBe(connectAt)
+
+    vi.stubGlobal('fetch', orgLoadAnswers())
+    act(() => result.current.retry())
+    await waitFor(() => expect(result.current.phase).toBe('ready'))
+    await waitFor(() => expect(result.current.activeLoadFailed).toBe(false))
     expect(result.current.activeIndex).toBe(connectAt)
   })
 })

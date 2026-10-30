@@ -457,6 +457,9 @@ async function gateModelPick(orgId: string | null, key: string): Promise<void> {
 // below. Shown for an org already on the deployment App too (with zero
 // accounts it still needs Connect), but not for one with an App of its own.
 // No load: loadGitHubAppInstall, the install step's, seeds everything it reads.
+// It does depend on loadOrg, though, which the URL step owns and every later
+// org step's save needs; with the URL step hidden, a loadOrg failure shows its
+// retry here (loadFrom).
 const githubConnectVisible = (s: WizardState) =>
   !s.isLocal && (s.githubAppManaged || (s.githubDeploymentAppAvailable && !s.githubAppRegistered))
 
@@ -465,6 +468,7 @@ const githubConnectStep: WizardStep = {
   section: 'org',
   title: 'GitHub',
   visible: githubConnectVisible,
+  loadFrom: 'org-github-url',
   isComplete: (s) => deploymentAppConnected(s) || s.githubOwnApp,
   validate: (s) =>
     deploymentAppConnected(s) || s.githubOwnApp
