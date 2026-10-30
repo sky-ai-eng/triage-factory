@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // notificationStore: N=1, so org and team rows are sent to the local user
@@ -166,6 +168,30 @@ func (s *notificationStore) resolve(ctx context.Context, orgID string, reason do
 		out = append(out, n)
 	}
 	return out, rows.Err()
+}
+
+// RecipientsSystem: N=1, so an org or active team audience is the local user.
+func (s *notificationStore) RecipientsSystem(ctx context.Context, orgID string, a domain.NotificationAudience) ([]string, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	if err := a.Validate(); err != nil {
+		return nil, fmt.Errorf("%w: %v", db.ErrInvalidNotification, err)
+	}
+	switch a.Scope {
+	case domain.NotificationScopeUser:
+		return []string{a.UserID}, nil
+	case domain.NotificationScopeTeam:
+		var n int
+		err := s.q.QueryRowContext(ctx, `SELECT 1 FROM teams WHERE id = ? AND deleted_at IS NULL`, a.TeamID).Scan(&n)
+		if errors.Is(err, sql.ErrNoRows) {
+			return []string{}, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("list notification recipients: %w", err)
+		}
+	}
+	return []string{runmode.LocalDefaultUserID}, nil
 }
 
 func (s *notificationStore) DeleteRetiredSystem(ctx context.Context, now time.Time) (int64, error) {

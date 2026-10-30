@@ -70,6 +70,33 @@ func (s *linearTeamRulesStore) TracksTeamSystem(ctx context.Context, teamID, wor
 	return true, nil
 }
 
+func (s *linearTeamRulesStore) TrackingTeamIDsSystem(ctx context.Context, orgID, workspaceID, linearTeamID string) ([]string, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT DISTINCT r.team_id
+		FROM linear_team_rules r
+		JOIN teams t ON t.id = r.team_id
+		WHERE t.deleted_at IS NULL
+		  AND r.linear_workspace_id = ? AND r.linear_workspace_id <> '' AND r.linear_team_id = ?
+		ORDER BY 1 ASC
+	`, workspaceID, linearTeamID)
+	if err != nil {
+		return nil, fmt.Errorf("list teams tracking linear team: %w", err)
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan linear_team_rules.team_id: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 func listLinearTeamRules(ctx context.Context, q queryer, teamID, workspaceID string) ([]domain.LinearTeamRules, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT `+linearRuleCols+`

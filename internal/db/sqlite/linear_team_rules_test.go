@@ -2,6 +2,7 @@ package sqlite_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
@@ -28,6 +29,11 @@ func TestLinearTeamRulesStore_SQLite(t *testing.T) {
 			OrgID:       runmode.LocalDefaultOrgID,
 			TeamID:      runmode.LocalDefaultTeamID,
 			OtherTeamID: otherTeamID,
+			ArchiveTeam: func(t *testing.T, teamID string) {
+				if _, err := conn.Exec(`UPDATE teams SET deleted_at = ? WHERE id = ?`, time.Now().UTC(), teamID); err != nil {
+					t.Fatalf("archive team: %v", err)
+				}
+			},
 		}
 	})
 }

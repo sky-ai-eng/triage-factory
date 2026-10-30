@@ -314,6 +314,41 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 		})
 	})
 
+	t.Run("recipients", func(t *testing.T) {
+		f := mk(t)
+		recipients := func(a domain.NotificationAudience) []string {
+			t.Helper()
+			got, err := f.Stores.Notifications.RecipientsSystem(ctx, f.OrgID, a)
+			if err != nil {
+				t.Fatalf("RecipientsSystem(%+v): %v", a, err)
+			}
+			return got
+		}
+		for _, c := range []struct {
+			name string
+			a    domain.NotificationAudience
+			want []string
+		}{
+			{"org admins", domain.NotificationAudience{Scope: domain.NotificationScopeOrg, Role: domain.NotificationRoleAdmins}, []string{f.Viewer}},
+			{"team admins", domain.NotificationAudience{Scope: domain.NotificationScopeTeam, Role: domain.NotificationRoleAdmins, TeamID: f.Team}, []string{f.Viewer}},
+			{"team members", domain.NotificationAudience{Scope: domain.NotificationScopeTeam, Role: domain.NotificationRoleMembers, TeamID: f.Team}, []string{f.Viewer}},
+			{"archived team", domain.NotificationAudience{Scope: domain.NotificationScopeTeam, Role: domain.NotificationRoleAdmins, TeamID: f.ArchivedTeam}, []string{}},
+			{"user", domain.NotificationAudience{Scope: domain.NotificationScopeUser, UserID: f.Other}, []string{f.Other}},
+		} {
+			if got := recipients(c.a); !slices.Equal(got, c.want) {
+				t.Errorf("%s: RecipientsSystem = %#v, want %#v", c.name, got, c.want)
+			}
+		}
+		// N=1 has no other member to list; the viewer is in every org's.
+		members := recipients(domain.NotificationAudience{Scope: domain.NotificationScopeOrg, Role: domain.NotificationRoleMembers})
+		if !slices.Contains(members, f.Viewer) || !slices.IsSorted(members) {
+			t.Errorf("org members: RecipientsSystem = %v, want a sorted list holding %s", members, f.Viewer)
+		}
+		if _, err := f.Stores.Notifications.RecipientsSystem(ctx, f.OrgID, domain.NotificationAudience{Scope: domain.NotificationScopeTeam}); !errors.Is(err, db.ErrInvalidNotification) {
+			t.Errorf("RecipientsSystem(malformed audience) = %v, want ErrInvalidNotification", err)
+		}
+	})
+
 	t.Run("system_tx", func(t *testing.T) {
 		f := mk(t)
 		var id string

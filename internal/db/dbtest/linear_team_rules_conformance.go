@@ -12,11 +12,13 @@ import (
 // LinearTeamRulesFixture is what a backend hands RunLinearTeamRulesConformance:
 // the store, plus an org holding two teams so the suite can prove a write to
 // one team leaves the other's rows alone. Both teams must start with no rows.
+// ArchiveTeam archives one of them.
 type LinearTeamRulesFixture struct {
 	Store       db.LinearTeamRulesStore
 	OrgID       string
 	TeamID      string
 	OtherTeamID string
+	ArchiveTeam func(t *testing.T, teamID string)
 }
 
 // LinearTeamRulesFactory builds a fresh fixture per subtest.
@@ -86,7 +88,7 @@ func linearTeamIDs(rules []domain.LinearTeamRules) []string {
 // db.LinearTeamRulesStore: replace-set semantics (an absent id's row is
 // deleted, a present one upserted, another team's rows untouched), ordering,
 // the stored set ReplaceForTeam returns, the optional in_review rule, the org
-// union, TracksTeamSystem, the per-rule complete-or-empty CHECKs, and every
+// union, TracksTeamSystem, TrackingTeamIDsSystem, the per-rule complete-or-empty CHECKs, and every
 // read and write confined to the workspace it is given. RLS is the Postgres
 // backend's own test.
 func RunLinearTeamRulesConformance(t *testing.T, factory LinearTeamRulesFactory) {
@@ -391,6 +393,46 @@ func RunLinearTeamRulesConformance(t *testing.T, factory LinearTeamRulesFactory)
 			if got != c.want {
 				t.Errorf("TracksTeamSystem(%s, %s) = %v, want %v", c.teamID, c.linearTeamID, got, c.want)
 			}
+		}
+	})
+
+	t.Run("TrackingTeamIDsSystem_SkipsArchivedTeams", func(t *testing.T) {
+		f := factory(t)
+		for _, team := range []string{f.TeamID, f.OtherTeamID} {
+			if _, err := f.Store.ReplaceForTeam(ctx, team, linearWorkspace, []domain.LinearTeamRules{
+				armedLinearRules("lt-a", "AAA"), unarmedLinearRules("lt-b", "BBB"),
+			}); err != nil {
+				t.Fatalf("seed %s: %v", team, err)
+			}
+		}
+		both := []string{f.TeamID, f.OtherTeamID}
+		if both[1] < both[0] {
+			both[0], both[1] = both[1], both[0]
+		}
+		tracking := func(workspace, linearTeamID string) []string {
+			t.Helper()
+			got, err := f.Store.TrackingTeamIDsSystem(ctx, f.OrgID, workspace, linearTeamID)
+			if err != nil {
+				t.Fatalf("TrackingTeamIDsSystem(%q, %s): %v", workspace, linearTeamID, err)
+			}
+			return got
+		}
+		// Watched and unarmed is tracked too.
+		for _, lt := range []string{"lt-a", "lt-b"} {
+			if got := tracking(linearWorkspace, lt); !reflect.DeepEqual(got, both) {
+				t.Errorf("TrackingTeamIDsSystem(%s) = %v, want %v", lt, got, both)
+			}
+		}
+		for _, c := range []struct{ workspace, linearTeamID string }{
+			{linearWorkspace, "lt-missing"}, {"ws-other", "lt-a"}, {"", "lt-a"},
+		} {
+			if got := tracking(c.workspace, c.linearTeamID); got == nil || len(got) != 0 {
+				t.Errorf("TrackingTeamIDsSystem(%q, %s) = %#v, want an empty non-nil slice", c.workspace, c.linearTeamID, got)
+			}
+		}
+		f.ArchiveTeam(t, f.OtherTeamID)
+		if got := tracking(linearWorkspace, "lt-a"); !reflect.DeepEqual(got, []string{f.TeamID}) {
+			t.Errorf("TrackingTeamIDsSystem after archiving the other team = %v, want only %s", got, f.TeamID)
 		}
 	})
 
