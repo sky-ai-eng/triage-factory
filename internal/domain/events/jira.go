@@ -36,11 +36,62 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 // the project keeps receiving its events under the new key, and a predicate
 // on the project keeps matching them.
 //
-// TODO(TFAC-878): a status, priority or issue type deleted in Jira after a
-// predicate names it, or a status a project's workflow drops, leaves a filter
-// that matches nothing and a trigger that silently stops firing. Only the ids
-// a save adds are checked, so nothing notices. Reporting the drift needs the
-// durable notification channel.
+// Only the ids a save adds are checked, so an id can go stale afterwards: a
+// status, priority or issue type deleted in Jira, a status a project's
+// workflow drops, or a project the team stops tracking leaves a filter that
+// never matches it. The drift pass (internal/jiradrift) reads the same
+// catalogs as the save and tells the team's admins.
+
+// JiraCatalog is a Jira catalog whose values a predicate field names by id.
+type JiraCatalog string
+
+const (
+	// JiraStatusCatalog is the statuses of the workflows of the projects the
+	// handler's team tracks.
+	JiraStatusCatalog JiraCatalog = "status"
+	// JiraIssueTypeCatalog is the issue types of the projects the handler's
+	// team tracks.
+	JiraIssueTypeCatalog JiraCatalog = "issue_type"
+	// JiraPriorityCatalog is the Jira instance's priorities.
+	JiraPriorityCatalog JiraCatalog = "priority"
+)
+
+// jiraCatalogFields is every Jira predicate field that names catalog values,
+// in the order the catalogs are checked and reported.
+var jiraCatalogFields = []struct {
+	field   string
+	catalog JiraCatalog
+}{
+	{"status_id_in", JiraStatusCatalog},
+	{"new_status_id_in", JiraStatusCatalog},
+	{"old_status_id_in", JiraStatusCatalog},
+	{"issue_type_id_in", JiraIssueTypeCatalog},
+	{"priority_id_in", JiraPriorityCatalog},
+	{"new_priority_id_in", JiraPriorityCatalog},
+	{"old_priority_id_in", JiraPriorityCatalog},
+}
+
+// JiraCatalogFields returns the Jira predicate fields that name c's values.
+func JiraCatalogFields(c JiraCatalog) []string {
+	var out []string
+	for _, f := range jiraCatalogFields {
+		if f.catalog == c {
+			out = append(out, f.field)
+		}
+	}
+	return out
+}
+
+// JiraCatalogOf returns the catalog a Jira predicate field names values from,
+// and false for a field that names none.
+func JiraCatalogOf(field string) (JiraCatalog, bool) {
+	for _, f := range jiraCatalogFields {
+		if f.field == field {
+			return f.catalog, true
+		}
+	}
+	return "", false
+}
 
 // -----------------------------------------------------------------------------
 // issue:assigned — issue was assigned (possibly to someone else; predicates

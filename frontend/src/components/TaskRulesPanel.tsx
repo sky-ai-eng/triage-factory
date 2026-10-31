@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import { X, Plus, GripVertical } from 'lucide-react'
 import * as Switch from '@radix-ui/react-switch'
@@ -28,14 +28,19 @@ import { sourceCannotFireNote, sourceKindOf } from '../lib/eventSources'
 interface TaskRulesPanelProps {
   open: boolean
   onClose: () => void
+  // openRuleId opens that rule's editor once the rules have loaded, as a link
+  // to it asks. Each linked id opens once, so a refetch after a save does not
+  // open it again.
+  openRuleId?: string | null
 }
 
-export default function TaskRulesPanel({ open, onClose }: TaskRulesPanelProps) {
+export default function TaskRulesPanel({ open, onClose, openRuleId }: TaskRulesPanelProps) {
   const [rules, setRules] = useState<RuleHandler[]>([])
   const [loading, setLoading] = useState(false)
   const [editingRule, setEditingRule] = useState<RuleHandler | null>(null)
   const [creating, setCreating] = useState(false)
   const [refreshKey, setRefreshKey] = useState(0)
+  const openedLink = useRef<string | null>(null)
 
   // distance:5 activation constraint means a drag only starts after 5px of
   // pointer movement. Normal toggle/button clicks are press-and-release with
@@ -58,9 +63,14 @@ export default function TaskRulesPanel({ open, onClose }: TaskRulesPanelProps) {
     // would submit a partial order.
     apiListAll<RuleHandler>('/api/event-handlers/list', { kind: 'rule' })
       .then((loaded) => {
-        if (!cancelled) {
-          setRules(loaded)
-          setLoading(false)
+        if (cancelled) return
+        setRules(loaded)
+        setLoading(false)
+        if (openRuleId && openedLink.current !== openRuleId) {
+          openedLink.current = openRuleId
+          const linked = loaded.find((r) => r.id === openRuleId)
+          if (linked) setEditingRule(linked)
+          else toast.error('That task rule no longer exists, or belongs to a team you are not on.')
         }
       })
       .catch(() => {
@@ -70,7 +80,7 @@ export default function TaskRulesPanel({ open, onClose }: TaskRulesPanelProps) {
     return () => {
       cancelled = true
     }
-  }, [open, refreshKey])
+  }, [open, refreshKey, openRuleId])
 
   const refresh = useCallback(() => setRefreshKey((k) => k + 1), [])
 

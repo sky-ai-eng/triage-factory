@@ -30,6 +30,11 @@ func (routes) Trigger(triggerID string) Href {
 	return Href{route: promptsRoute, query: url.Values{"trigger": {triggerID}}}
 }
 
+// TaskRule is a task rule, open in the rule editor on the triage page.
+func (routes) TaskRule(ruleID string) Href {
+	return Href{route: triageRoute, query: url.Values{"rule": {ruleID}}}
+}
+
 // TeamJiraRules is the Jira status rules of the team teamID names: in multi
 // mode its team page, opened on the Jira source; in local mode, whose one team
 // is configured on /settings, that page. teamID may be empty only in local
@@ -64,6 +69,7 @@ type route struct {
 var (
 	orgSettingsRoute     = newRoute("org_settings", "/org?tab=settings", "/settings")
 	promptsRoute         = newRoute("prompts", "/prompts", "/prompts")
+	triageRoute          = newRoute("triage", "/triage", "/triage")
 	teamJiraRulesRoute   = newTeamRoute("team_jira_rules", "/team?source=jira", "/settings")
 	teamLinearRulesRoute = newTeamRoute("team_linear_rules", "/team?source=linear", "/settings")
 )

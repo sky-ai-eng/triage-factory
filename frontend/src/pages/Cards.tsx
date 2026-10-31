@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { motion, useMotionValue, useTransform, AnimatePresence } from 'motion/react'
 import type { PanInfo } from 'motion/react'
 import { Tooltip } from '../ui/tooltip/Tooltip'
-import { useNavigate } from 'react-router'
+import { useNavigate, useSearchParams } from 'react-router'
 import type { Task, WSEvent } from '../types'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useOrgHref } from '../hooks/useOrgHref'
@@ -44,6 +44,23 @@ export default function Cards() {
   const [undoTask, setUndoTask] = useState<{ id: string; action: string } | null>(null)
   const [showPromptPicker, setShowPromptPicker] = useState(false)
   const [rulesOpen, setRulesOpen] = useState(false)
+  // A notification links to a task rule as ?rule=…: the rules panel opens on
+  // that rule's editor, and the link is dropped when the panel closes.
+  const [params, setParams] = useSearchParams()
+  const linkedRule = params.get('rule')
+  const rulesPanelOpen = rulesOpen || linkedRule !== null
+  const closeRules = useCallback(() => {
+    setRulesOpen(false)
+    setParams(
+      (prev) => {
+        const next = new URLSearchParams(prev)
+        next.delete('rule')
+        return next
+      },
+      { replace: true },
+    )
+  }, [setParams])
+  const toggleRules = () => (rulesPanelOpen ? closeRules() : setRulesOpen(true))
   const hasFetched = useRef(false)
   const navigate = useNavigate()
   const orgHref = useOrgHref()
@@ -246,9 +263,9 @@ export default function Cards() {
         <div className="flex items-center gap-2 relative">
           <TeamScopeSelect value={teamFilter} onChange={setTeamFilter} />
           <button
-            onClick={() => setRulesOpen((o) => !o)}
+            onClick={toggleRules}
             className={`flex items-center gap-1.5 text-ui font-medium px-3 py-1.5 rounded-full border transition-colors ${
-              rulesOpen
+              rulesPanelOpen
                 ? 'bg-warm/10 text-warm border-warm/20'
                 : 'text-ink-3 border-line-1 hover:text-ink-2'
             }`}
@@ -258,7 +275,7 @@ export default function Cards() {
             <span>Rules</span>
           </button>
         </div>
-        <TaskRulesPanel open={rulesOpen} onClose={() => setRulesOpen(false)} />
+        <TaskRulesPanel open={rulesPanelOpen} onClose={closeRules} openRuleId={linkedRule} />
       </div>
     )
   }
@@ -273,9 +290,9 @@ export default function Cards() {
           </p>
           <TeamScopeSelect value={teamFilter} onChange={setTeamFilter} />
           <button
-            onClick={() => setRulesOpen((o) => !o)}
+            onClick={toggleRules}
             className={`flex items-center gap-1.5 text-ui font-medium px-3 py-1.5 rounded-full border transition-colors ${
-              rulesOpen
+              rulesPanelOpen
                 ? 'bg-warm/10 text-warm border-warm/20'
                 : 'text-ink-3 border-line-1 hover:text-ink-2'
             }`}
@@ -378,7 +395,7 @@ export default function Cards() {
         }}
       />
 
-      <TaskRulesPanel open={rulesOpen} onClose={() => setRulesOpen(false)} />
+      <TaskRulesPanel open={rulesPanelOpen} onClose={closeRules} openRuleId={linkedRule} />
     </>
   )
 }

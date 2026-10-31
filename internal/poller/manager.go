@@ -102,6 +102,12 @@ type Manager struct {
 	// rather than leaking an event.
 	EventSources db.OrgEventSourceStore
 
+	// EventHandlers is the task rules and triggers the Jira drift check reads,
+	// beside the status rules, to find filters naming Jira values that are
+	// gone. nil disables the check, rules and handlers alike (tests, and any
+	// embedder that hasn't wired it).
+	EventHandlers db.EventHandlerStore
+
 	// GrantMirror is the App-installation grant mirror ReconcileGrant writes.
 	// A cycle reads it for one thing: when an installation's grant cannot be
 	// read from GitHub, which tracked repositories that grant held when it was
@@ -164,6 +170,9 @@ type Manager struct {
 	// cycles per project. A Tracker lives one cycle, so the counts live here
 	// and every Tracker is handed them; memory only, like the cursor above.
 	jiraDiscovery tracker.JiraDiscoveryStreaks
+
+	// jiraDrift is when each org's Jira drift was last checked.
+	jiraDrift jiraDriftClock
 
 	// heartbeatMu guards lastGithubTick/lastJiraTick — stamped at every
 	// wake of runGitHubCycle/runJiraCycle regardless of whether any org
@@ -528,11 +537,12 @@ func (m *Manager) loadJiraRules(ctx context.Context, orgID, site string) (rules 
 }
 
 // StopAll stops all running polling loops without restarting, and starts the
-// Jira discovery counts over: whatever runs the loops next has not seen the
-// cycles in between.
+// Jira discovery counts and drift clock over: whatever runs the loops next has
+// not seen the cycles in between.
 func (m *Manager) StopAll() {
 	m.stopAll()
 	m.jiraDiscovery.Reset()
+	m.jiraDrift.reset()
 }
 
 // Restart is a convenience alias for RestartAll.
@@ -1648,6 +1658,9 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 		if rulesRead {
 			tr.NoJiraDiscovery(ctx)
 		}
+		if rulesRead && len(rules) == 0 {
+			m.noJiraDrift(ctx, orgID)
+		}
 	}
 	if !configured || len(rules) == 0 {
 		// An anticipated skip, not a failure: an org with no Jira config
@@ -1683,9 +1696,13 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 		// empty re-read is a failed one, and the cycle keeps the rules it
 		// already has rather than polling with none.
 		if reloaded, _ := m.loadJiraRules(ctx, orgID, scope); len(reloaded) > 0 {
+			rules = reloaded
 			projects = toTrackerJiraRules(reloaded)
 		}
 	}
+	// Watched projects are checked too: a rule needs no arming to name a
+	// status, and a team's filters may name a watched project's.
+	m.checkJiraDrift(ctx, client, orgID, rules, now)
 	// A set of only watched projects was refreshed above and has nothing for
 	// discovery to ask. "The cycle asked nothing" and "the cycle declined to
 	// poll" are different facts, so the skip is stated here rather than left
