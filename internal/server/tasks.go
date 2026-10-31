@@ -1582,7 +1582,10 @@ func (t txTeardownStores) UpsertDeliverable(ctx context.Context, orgID string, a
 	return err
 }
 
+// RecordExternalAction files act as the person's who closed the task: this
+// adapter runs the teardown their close drives.
 func (t txTeardownStores) RecordExternalAction(ctx context.Context, orgID string, act domain.ExternalAction) error {
+	act.PerformedBy = domain.PerformedByPerson
 	return t.tx.ExternalActions.Record(ctx, orgID, act)
 }
 

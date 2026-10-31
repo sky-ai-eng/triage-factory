@@ -10,6 +10,7 @@ const action = (over: Partial<ActivityAction>): ActivityAction => ({
   action: 'pr_created',
   target: 'org/repo#1',
   url: 'https://example.test/1',
+  performed_by: 'agent',
   credential: 'github_app',
   occurred_at: '2026-06-25T00:00:00Z',
   ...over,

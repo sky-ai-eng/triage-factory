@@ -20,7 +20,7 @@ import (
 //   - Where the action flips a deliverable in a WithTx (approve → open, submit →
 //     submitted, close → closed, dismiss → dismissed), the caller composes the
 //     Record INTO that same tx (tx.ExternalActions.Record(...)) via
-//     domain.DeliverableAction, so the audit row commits or rolls back atomically
+//     personDeliverableAction, so the audit row commits or rolls back atomically
 //     with the flip and the two can't disagree.
 //   - Where the action is a pure GitHub mutation with no critical flip (the PR
 //     title/body edit, the dashboard board-drag draft toggle — their only DB
@@ -40,6 +40,15 @@ func githubCredentialForPullRequest(ctx context.Context, resolver ghclient.Resol
 		return domain.CredentialGitHubApp
 	}
 	return ghclient.CredentialForRepo(ctx, resolver, orgID, pr.Owner, pr.Repo)
+}
+
+// personDeliverableAction is domain.DeliverableAction for a person's act on a
+// deliverable: every approval-lifecycle write these handlers make is made for
+// the person calling them, so each row names a person as its performer.
+func personDeliverableAction(art *domain.Deliverable, userID, action, from, to, credential string) domain.ExternalAction {
+	act := domain.DeliverableAction(art, userID, action, from, to, credential)
+	act.PerformedBy = domain.PerformedByPerson
+	return act
 }
 
 // recordExternalActionBestEffort records act in its own claims-set tx (app pool),

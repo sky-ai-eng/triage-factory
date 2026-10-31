@@ -9,9 +9,10 @@
 // The body lives in its own package because both ends of a task's life run it:
 // a person closing the card, through the server's tx-bound app-pool adapter
 // with that person as the actor, and the event cascade closing it for them,
-// through the spawner's admin-pool adapter with no actor at all. Only the pool
-// and the actor differ; the decision about which deliverables are unresolved and
-// what retiring one means is the same decision, so it is written once.
+// through the spawner's admin-pool adapter with no actor at all. Only the pool,
+// the actor and who the audit rows name as performing the close differ; the
+// decision about which deliverables are unresolved and what retiring one means
+// is the same decision, so it is written once.
 package deliverableteardown
 
 import (
@@ -38,7 +39,8 @@ type Stores interface {
 	// UpsertDeliverable writes back one deliverable whose state this teardown flipped.
 	UpsertDeliverable(ctx context.Context, orgID string, a domain.Deliverable) error
 	// RecordExternalAction appends the audit row for a GitHub write this
-	// teardown is about to make.
+	// teardown is about to make. The adapter sets the row's PerformedBy: the
+	// person whose close it runs for, or TF itself.
 	RecordExternalAction(ctx context.Context, orgID string, act domain.ExternalAction) error
 	// Entity and Repository are the point reads (db.EntityStore.Get,
 	// db.RepositoryStore.Get) a draft PR's pull request is resolved through:

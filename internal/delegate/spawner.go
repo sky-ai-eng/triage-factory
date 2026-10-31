@@ -1815,7 +1815,10 @@ func (d systemTeardown) UpsertDeliverable(ctx context.Context, orgID string, a d
 	return err
 }
 
+// RecordExternalAction files act as TF's own: this adapter runs the teardown
+// an event closing the task drives, which no person asked for.
 func (d systemTeardown) RecordExternalAction(ctx context.Context, orgID string, act domain.ExternalAction) error {
+	act.PerformedBy = domain.PerformedBySystem
 	return d.s.externalActions.RecordSystem(ctx, orgID, act)
 }
 

@@ -3277,8 +3277,8 @@ func TestBaseline_HostAndScopeRefuseEmpty(t *testing.T) {
 		{
 			name:       "external_actions.scope",
 			constraint: "external_actions_scope_check",
-			insert: `INSERT INTO external_actions (org_id, provider, scope, action, target, credential, dedup_key)
-			         VALUES ($1, 'github', $2, 'comment', 'acme/api#1', 'github_app', $3)`,
+			insert: `INSERT INTO external_actions (org_id, provider, scope, action, target, credential, dedup_key, performed_by)
+			         VALUES ($1, 'github', $2, 'comment', 'acme/api#1', 'github_app', $3, 'agent')`,
 			args: func(v string) []any { return []any{orgID, v, "comment:" + v} },
 		},
 		{

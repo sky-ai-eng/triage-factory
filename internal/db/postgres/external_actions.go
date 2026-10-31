@@ -51,7 +51,7 @@ const pgExternalActionColumns = `
 	COALESCE(to_state, ''), COALESCE(conversation_id::text, ''),
 	COALESCE(actor_user_id::text, ''), credential, dedup_key,
 	COALESCE(detail_json, ''), COALESCE(node_id, ''), COALESCE(entity_id::text, ''),
-	COALESCE(repository_id::text, ''), occurred_at
+	COALESCE(repository_id::text, ''), performed_by, occurred_at
 `
 
 func (s *externalActionStore) Record(ctx context.Context, orgID string, e domain.ExternalAction) error {
@@ -79,23 +79,26 @@ func (s *externalActionStore) record(ctx context.Context, q queryer, orgID strin
 	if err := db.RequireExternalObjectScope(e.Scope); err != nil {
 		return err
 	}
+	if err := db.RequirePerformedBy(e.PerformedBy); err != nil {
+		return err
+	}
 	_, err := q.ExecContext(ctx, `
 		INSERT INTO external_actions
 			(id, org_id, team_id, provider, action, target, external_id, url,
 			 from_state, to_state, conversation_id, actor_user_id, credential, dedup_key, detail_json, scope,
-			 node_id, entity_id, repository_id)
+			 node_id, entity_id, repository_id, performed_by)
 		VALUES (
 			COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()), $2, NULLIF($3, '')::uuid,
 			$4, $5, $6, NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, ''),
 			NULLIF($11, '')::uuid, NULLIF($12, '')::uuid, $13,
 			COALESCE(NULLIF($14, ''), gen_random_uuid()::text), NULLIF($15, ''), $16,
-			NULLIF($17, ''), NULLIF($18, '')::uuid, NULLIF($19, '')::uuid
+			NULLIF($17, ''), NULLIF($18, '')::uuid, NULLIF($19, '')::uuid, $20
 		)
 		ON CONFLICT (org_id, scope, dedup_key) DO NOTHING
 	`,
 		e.ID, orgID, e.TeamID, e.Provider, e.Action, e.Target, e.ExternalID, e.URL,
 		e.FromState, e.ToState, e.ConversationID, e.ActorUserID, e.Credential, e.DedupKey, e.DetailJSON, e.Scope,
-		e.NodeID, e.EntityID, e.RepositoryID,
+		e.NodeID, e.EntityID, e.RepositoryID, e.PerformedBy,
 	)
 	return err
 }
@@ -257,6 +260,6 @@ func scanExternalAction(sc rowScanner, e *domain.ExternalAction) error {
 		&e.ID, &e.OrgID, &e.TeamID, &e.Provider, &e.Scope, &e.Action, &e.Target,
 		&e.ExternalID, &e.URL, &e.FromState, &e.ToState, &e.ConversationID,
 		&e.ActorUserID, &e.Credential, &e.DedupKey, &e.DetailJSON, &e.NodeID, &e.EntityID,
-		&e.RepositoryID, &e.OccurredAt,
+		&e.RepositoryID, &e.PerformedBy, &e.OccurredAt,
 	)
 }
