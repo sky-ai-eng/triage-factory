@@ -60,6 +60,11 @@ func CausedByRunPush(ctx context.Context, r *Router, orgID string, evt domain.Ev
 // causedByRunActionOnEntity matches an event when the run's agent took the
 // action actions names for the event's type on the event's entity: a pr_merged
 // row explains github:pr:merged, a pr_closed row github:pr:closed.
+//
+// TODO(TFAC-1284): any matching row counts, so after the run closes the pull
+// request and a person reopens it, the person's next close matches the run's
+// earlier row and is deferred instead of stopping the run. A merge happens
+// once and is not affected.
 func causedByRunActionOnEntity(actions map[string]string) runCauseMatcher {
 	return func(ctx context.Context, r *Router, orgID string, evt domain.Event, entityID, blueprintRunID string) (bool, error) {
 		action, ok := actions[evt.EventType]
@@ -78,6 +83,10 @@ func causedByRunActionOnEntity(actions map[string]string) runCauseMatcher {
 // issue_transitioned row on the event's entity moved it to the status the
 // event says it finished in, ignoring case. Only the newest counts: a run
 // that moved the issue to done and then back has not caused its completion.
+//
+// TODO(TFAC-1284): the newest row may predate the issue's last reopen, so a
+// person moving a reopened issue back to done matches the run's earlier move
+// and is deferred instead of stopping the run.
 func causedByRunTransition(ctx context.Context, r *Router, orgID string, evt domain.Event, entityID, blueprintRunID string) (bool, error) {
 	final := completionFinalStatus(evt)
 	if final == "" || entityID == "" {
