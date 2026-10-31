@@ -236,27 +236,39 @@ func TestTouch_ReadThenWrite_EndsProduced(t *testing.T) {
 
 // TestFunnel_JiraTransition_RecordsProduced: a Jira transition leaves the
 // issue's entity produced as soon as the write lands, with no end-of-run pass,
-// and a read of another issue in the same run leaves that one touched.
+// and a read of another issue in the same run leaves that one touched, across
+// both write paths.
 func TestFunnel_JiraTransition_RecordsProduced(t *testing.T) {
-	jira := startFakeJira(t)
-	conn, stores, info := newJiraRecordingStoresConn(t, jira.URL, true)
-	client := NewLocal(stores, info)
-	ctx := context.Background()
-
-	if err := client.JiraTransitionTo(ctx, "SKY-1", "Done"); err != nil {
-		t.Fatalf("JiraTransitionTo: %v", err)
-	}
-	if issue, err := client.JiraGetIssue(ctx, "SKY-2"); err != nil || issue == nil {
-		t.Fatalf("JiraGetIssue: issue=%v err=%v", issue, err)
-	}
-
-	for key, want := range map[string]string{"SKY-1": domain.MemoryRoleProduced, "SKY-2": domain.MemoryRoleTouched} {
-		ent, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "jira", jira.URL, key)
-		if err != nil || ent == nil {
-			t.Fatalf("%s: entity missing: ent=%v err=%v", key, ent, err)
+	for _, eventTriggered := range []bool{true, false} {
+		name := "manual"
+		if eventTriggered {
+			name = "event-triggered"
 		}
-		if role := touchRole(t, conn, info.ConversationID, ent.ID); role != want {
-			t.Errorf("%s link role = %q, want %q", key, role, want)
-		}
+		t.Run(name, func(t *testing.T) {
+			jira := startFakeJira(t)
+			conn, stores, info := newJiraRecordingStoresConn(t, jira.URL, eventTriggered)
+			if !eventTriggered {
+				info.UserID = runmode.LocalDefaultUserID
+			}
+			client := NewLocal(stores, info)
+			ctx := context.Background()
+
+			if err := client.JiraTransitionTo(ctx, "SKY-1", "Done"); err != nil {
+				t.Fatalf("JiraTransitionTo: %v", err)
+			}
+			if issue, err := client.JiraGetIssue(ctx, "SKY-2"); err != nil || issue == nil {
+				t.Fatalf("JiraGetIssue: issue=%v err=%v", issue, err)
+			}
+
+			for key, want := range map[string]string{"SKY-1": domain.MemoryRoleProduced, "SKY-2": domain.MemoryRoleTouched} {
+				ent, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "jira", jira.URL, key)
+				if err != nil || ent == nil {
+					t.Fatalf("%s: entity missing: ent=%v err=%v", key, ent, err)
+				}
+				if role := touchRole(t, conn, info.ConversationID, ent.ID); role != want {
+					t.Errorf("%s link role = %q, want %q", key, role, want)
+				}
+			}
+		})
 	}
 }

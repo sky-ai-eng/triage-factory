@@ -149,7 +149,7 @@ func deletesUnrecordedComment(ctx context.Context, stores db.Stores, info Conver
 // appends act (if non-nil) in the SAME write — admin pool for event-triggered
 // runs, a synthetic-claims tx for manual ones — logs (never fails) a write
 // error, and records the conversation's link to the act's entity once the write
-// settles (recordTouchInfo). Both entity resolutions run before the write and
+// settles (recordActionMemoryLink). Both entity resolutions run before the write and
 // outside its transaction (see recordEntityTouch).
 //
 // a is nil for an audit-only write that produces no deliverable to compose
@@ -292,7 +292,7 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 			"conversation", info.ConversationID, "kind", kind, "target", target, "error", err)
 	}
 	// Link the conversation to the act's entity outside the audit write.
-	recordTouchInfo(ctx, stores, info, act, about)
+	recordActionMemoryLink(ctx, stores, info, act, about)
 	// Same placement, same reason: an admin-pool write, so it must run after
 	// withWriteInfo's tx has settled.
 	stampPRAttribution(ctx, stores, info, a)
@@ -546,7 +546,7 @@ func runMayRecordAgainst(ctx context.Context, stores db.Stores, info Conversatio
 // (conversation_id, entity_id, role='touched') row. It is the addressed-read
 // path's (Runtime.RecordReadTouch); the write funnel resolves its action's
 // entity before the write (resolveActionReferences), links the audit row to it,
-// and records the entity's row once the write settles (recordTouchInfo), as
+// and records the entity's row once the write settles (recordActionMemoryLink), as
 // produced when the action names the object it changed.
 //
 // Best-effort throughout: a resolve or record failure is logged, counted
@@ -566,15 +566,15 @@ func recordEntityTouch(ctx context.Context, stores db.Stores, info ConversationI
 		memoryentities.CountSkippedLink(ctx, info.OrgID, domain.MemoryRoleTouched, c.provider, err)
 		return ""
 	}
-	recordTouchRow(ctx, stores, info, c.provider, id, domain.MemoryRoleTouched)
+	recordMemoryLink(ctx, stores, info, c.provider, id, domain.MemoryRoleTouched)
 	return id
 }
 
-// recordTouchRow writes the (conversation, entity, role) row for an entity a
+// recordMemoryLink writes the (conversation, entity, role) row for an entity a
 // coordinate of provider resolved to; an empty id is a skipped coordinate and
 // writes nothing. The store keeps the higher of role and any role the pair
 // already holds.
-func recordTouchRow(ctx context.Context, stores db.Stores, info ConversationInfo, provider, id, role string) {
+func recordMemoryLink(ctx context.Context, stores db.Stores, info ConversationInfo, provider, id, role string) {
 	if id == "" || stores.TaskMemory == nil {
 		return
 	}
@@ -794,31 +794,31 @@ func targetRepository(target string) (owner, repo string, ok bool) {
 	return owner, repo, true
 }
 
-// recordTouchInfo links the conversation to the entity the external action is
-// about (resolveActionReferences), with the role writeRole gives the action:
-// produced for an action that names the object it changed, touched for any
-// other. The funnel runs only after the write landed, so the link is recorded
-// as the change lands. A nil action (an audit-only write
-// with no external action) links nothing; an action whose entity did not
-// resolve is counted as a skipped link of its role. See recordEntityTouch for
-// the best-effort + outside-the-tx contract.
-func recordTouchInfo(ctx context.Context, stores db.Stores, info ConversationInfo, act *domain.ExternalAction, about resolvedEntity) {
+// recordActionMemoryLink links the conversation to the entity the external
+// action is about (resolveActionReferences), with the role actionMemoryRole
+// gives the action: produced for an action that names the object it changed,
+// touched for any other. The funnel runs only after the write landed, so the
+// link is recorded as the change lands. A nil action (an audit-only write with
+// no external action) links nothing; an action whose entity did not resolve is
+// counted as a skipped link of its role. See recordEntityTouch for the
+// best-effort + outside-the-tx contract.
+func recordActionMemoryLink(ctx context.Context, stores db.Stores, info ConversationInfo, act *domain.ExternalAction, about resolvedEntity) {
 	if act == nil || !about.attempted {
 		return
 	}
-	role := writeRole(*act)
+	role := actionMemoryRole(*act)
 	if about.err != nil {
 		memoryentities.CountSkippedLink(ctx, info.OrgID, role, act.Provider, about.err)
 		return
 	}
-	recordTouchRow(ctx, stores, info, act.Provider, about.entityID, role)
+	recordMemoryLink(ctx, stores, info, act.Provider, about.entityID, role)
 }
 
-// writeRole is the memory role a funnel write gives the entity its action is
-// about: produced when the action names the object it changed
-// (domain.ObjectID), touched otherwise — a refusal, a failure, a catch-all
-// row, or one whose object's identity did not resolve.
-func writeRole(act domain.ExternalAction) string {
+// actionMemoryRole is the memory role a funnel write gives the entity its
+// action is about: produced when the action names the object it changed
+// (domain.ObjectID), touched otherwise — a refusal, a failure, a catch-all row,
+// or one whose object's identity did not resolve.
+func actionMemoryRole(act domain.ExternalAction) string {
 	if _, ok := domain.ObjectID(act); ok {
 		return domain.MemoryRoleProduced
 	}
