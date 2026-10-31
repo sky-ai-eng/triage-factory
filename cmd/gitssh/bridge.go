@@ -10,7 +10,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/gitproxy"
 )
 
 // The two remote commands git runs over ssh for a fetch and a push. Anything

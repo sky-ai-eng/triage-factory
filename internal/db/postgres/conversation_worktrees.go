@@ -6,9 +6,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/sky-ai-eng/triage-factory/internal/ctlbus"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/ctlbus"
 )
 
 // conversationWorktreeStore is the Postgres impl of db.ConversationWorktreeStore. SQL

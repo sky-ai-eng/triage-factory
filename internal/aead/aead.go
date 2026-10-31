@@ -4,13 +4,13 @@
 // heavier package's transitive deps.
 //
 // Two callers share it:
-//   - internal/sessions — the at-rest envelope for GoTrue access +
+//   - internal/auth/sessions — the at-rest envelope for GoTrue access +
 //     refresh tokens in public.sessions (multi mode only).
 //   - internal/db/postgres — the at-rest envelope for org/user
 //     integration secrets in public.org_secrets. Factoring
 //     the primitive out here is what lets the Postgres secret store
 //     encrypt app-side without internal/db/postgres importing
-//     internal/sessions.
+//     internal/auth/sessions.
 //
 // The env-var names themselves stay with their consumers (sessions owns
 // TF_SESSION_ENCRYPTION_KEY / TF_COOKIE_SECRET; the secret store owns
@@ -33,7 +33,7 @@ import (
 
 // Key is a 32-byte fixed-size key. AES-256 takes a 32-byte key; the
 // same type also serves callers that want a 32-byte HMAC-SHA256 secret
-// (the cookie-signing secret in internal/sessions) — same loader/decoder
+// (the cookie-signing secret in internal/auth/sessions) — same loader/decoder
 // code, semantically distinct callers.
 type Key [32]byte
 

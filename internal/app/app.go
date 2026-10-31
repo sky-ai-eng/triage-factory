@@ -26,40 +26,40 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/cell"
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
-	"github.com/sky-ai-eng/triage-factory/internal/credprovision"
+	"github.com/sky-ai-eng/triage-factory/internal/cred/credprovision"
+	"github.com/sky-ai-eng/triage-factory/internal/cred/llmcred"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventbus"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/ingest"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/poller"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
-	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
-	"github.com/sky-ai-eng/triage-factory/internal/grantmirror"
-	"github.com/sky-ai-eng/triage-factory/internal/ingest"
+	"github.com/sky-ai-eng/triage-factory/internal/github/githubapp"
+	"github.com/sky-ai-eng/triage-factory/internal/github/grantmirror"
+	"github.com/sky-ai-eng/triage-factory/internal/github/reachcache"
 	"github.com/sky-ai-eng/triage-factory/internal/instance"
 	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/lease"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
-	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/modelprobe"
 	"github.com/sky-ai-eng/triage-factory/internal/marketplacestats"
-	"github.com/sky-ai-eng/triage-factory/internal/memoryprovision"
-	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
-	"github.com/sky-ai-eng/triage-factory/internal/modelprobe"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/wsbackplane"
 	"github.com/sky-ai-eng/triage-factory/internal/placement"
-	"github.com/sky-ai-eng/triage-factory/internal/poller"
-	"github.com/sky-ai-eng/triage-factory/internal/reachcache"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
-	"github.com/sky-ai-eng/triage-factory/internal/repoprofile"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
-	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
+	"github.com/sky-ai-eng/triage-factory/internal/systemjob/memoryprovision"
+	"github.com/sky-ai-eng/triage-factory/internal/systemjob/repoprofile"
+	"github.com/sky-ai-eng/triage-factory/internal/systemjob/scorer"
+	"github.com/sky-ai-eng/triage-factory/internal/systemjob/systemllm"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/workmetrics"
-	"github.com/sky-ai-eng/triage-factory/internal/wsbackplane"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -162,7 +162,7 @@ type App struct {
 	runSecrets    agentproc.SecretsReader
 	modelFor      func(ctx context.Context, orgID, teamID string) (domain.TeamModels, error)
 
-	// llmResolver is the shared LLM-credential resolver (internal/llmcred,
+	// llmResolver is the shared LLM-credential resolver (internal/cred/llmcred,
 	// TFAC-616): every Bedrock/Anthropic resolution the brain does flows
 	// through it, minting short-lived STS session creds for role-mode orgs
 	// and passing stored material through otherwise. Non-nil only in multi
@@ -176,7 +176,7 @@ type App struct {
 	llmRecorder *systemllm.Recorder
 
 	// Subsystems.
-	scorer     *ai.Manager
+	scorer     *scorer.Manager
 	profiler   *repoprofile.Manager
 	reconciler *reconcile.Manager
 	// reconcilerCore is the shared Reconciler the Manager and the Tier-2

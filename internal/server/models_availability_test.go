@@ -17,11 +17,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
-	"github.com/sky-ai-eng/triage-factory/internal/modelprobe"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/modelprobe"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
-	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
+	"github.com/sky-ai-eng/triage-factory/internal/systemjob/systemllm"
 )
 
 // probeSecrets is an agentproc.SecretsReader over a map keyed "org/key" — the
@@ -518,7 +518,7 @@ func TestModelAvailability_Postgres_IsPerOrg(t *testing.T) {
 // cannedProber answers with a fixed verdict. It stands in for the transport, so
 // a route test establishes what the handler DOES with a verdict without
 // spending a request or spawning the agent runtime — what each transport
-// concludes is internal/modelprobe's own question.
+// concludes is internal/llm/modelprobe's own question.
 type cannedProber struct {
 	res modelprobe.Result
 	err error

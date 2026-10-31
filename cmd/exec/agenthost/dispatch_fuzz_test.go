@@ -79,7 +79,7 @@ const fuzzDispatchBudget = 45 * time.Second
 // reaches the fuzzing harness and is recorded as a finding instead of a log
 // line.
 //
-// Two outcomes, the same contract internal/ghwrite's GraphQL fuzzer asserts: no
+// Two outcomes, the same contract internal/ghcli/ghwrite's GraphQL fuzzer asserts: no
 // input panics, and no input hangs. Correctness of any individual verb is not
 // what this asserts — the table tests do that.
 func FuzzHandleConn(f *testing.F) {

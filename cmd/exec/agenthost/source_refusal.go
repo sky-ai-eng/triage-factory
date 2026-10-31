@@ -5,12 +5,12 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
+	"github.com/sky-ai-eng/triage-factory/internal/cred/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
 	linearclient "github.com/sky-ai-eng/triage-factory/internal/linear"
-	"github.com/sky-ai-eng/triage-factory/internal/linearoauth"
+	"github.com/sky-ai-eng/triage-factory/internal/linear/linearoauth"
 )
 
 // The two refusal keys that are not manifest reasons: what a verb learns only

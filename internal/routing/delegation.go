@@ -11,7 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
-	"github.com/sky-ai-eng/triage-factory/internal/toast"
+	"github.com/sky-ai-eng/triage-factory/internal/wsevent/toast"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"

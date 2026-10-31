@@ -161,7 +161,7 @@ var reservedSourcePrefixes = map[string]bool{
 }
 
 // routedPrefixes is the set of event-source prefixes the router consumes —
-// the membership RouterBound reports and internal/ingest gates its durable
+// the membership RouterBound reports and internal/eventing/ingest gates its durable
 // outbox enqueue on. Seeded with the built-in github/jira/linear sources (routed
 // natively, no hooks); RegisterSource adds each registered source's prefix.
 // Same startup-write / steady-state-read contract as sourceRegistry.
@@ -198,7 +198,7 @@ func RegisterSource(source string, hooks SourceHooks) {
 
 // RouterBound reports whether the router consumes eventType — true for the
 // built-in github:/jira:/linear: sources and for every registered source. This is
-// the durability boundary: internal/ingest enqueues router-bound events
+// the durability boundary: internal/eventing/ingest enqueues router-bound events
 // into the durable outbox and leaves everything else (system:*, webhook:*)
 // bus-only.
 func RouterBound(eventType string) bool {

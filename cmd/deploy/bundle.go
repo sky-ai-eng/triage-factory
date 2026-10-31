@@ -15,7 +15,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/sky-ai-eng/triage-factory/internal/envfile"
+	"github.com/sky-ai-eng/triage-factory/cmd/internal/envfile"
 )
 
 // The deployment directory's layout. deploy renders the bundle's files and

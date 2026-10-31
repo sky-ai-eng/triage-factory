@@ -8,11 +8,11 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/sky-ai-eng/triage-factory/internal/ctlbus"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/memoryprovision"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/ctlbus"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/systemjob/memoryprovision"
 )
 
 // doorbellConversations records what the provisioner asked its store for, which
@@ -201,7 +201,7 @@ func TestApp_MemoryOwed_EmptyOrgIsRefused(t *testing.T) {
 //
 // The dispatch hands on whatever arrived, so the refusal lives at the consumer
 // (memoryprovision.Manager.Nudge), exactly as the trigger case's does in
-// ai.Manager.Trigger. This pins the outcome through the real path rather than
+// scorer.Manager.Trigger. This pins the outcome through the real path rather than
 // the placement: nothing scans, in either form.
 func TestApp_HandleCtlMessage_MemoryOwedWithNoOrgIsDropped(t *testing.T) {
 	a, conv := newDoorbellApp(t, runmode.RoleAll) // the holder, so the gate is not what refuses

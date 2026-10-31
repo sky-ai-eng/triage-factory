@@ -175,14 +175,14 @@ func ParseInstallCredential(raw string) (InstallCredential, error) {
 }
 
 // InstallTokenSource mints the app user's access token from an org's install
-// envelope. internal/linearoauth's TokenCache implements it. An org with no
+// envelope. internal/linear/linearoauth's TokenCache implements it. An org with no
 // usable install is ErrNoLinearSystemCredential.
 type InstallTokenSource interface {
 	AccessTokenForOrg(ctx context.Context, orgID string) (accessToken string, expiresAt time.Time, err error)
 }
 
 // UserTokenSource mints the access token of a user's Connect credential for a
-// workspace. internal/linearoauth's UserTokenCache implements it. A user with
+// workspace. internal/linear/linearoauth's UserTokenCache implements it. A user with
 // no usable Connect credential is ErrNoLinearUserCredential, and so is one the
 // source cannot mint a token for because it kept changing during the refresh:
 // connecting again fixes both. Two causes are named by their own sentinels,

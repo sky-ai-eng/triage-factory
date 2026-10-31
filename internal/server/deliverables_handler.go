@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentmeta"
-	"github.com/sky-ai-eng/triage-factory/internal/conversationevent"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/deliverableteardown"
@@ -17,6 +16,7 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/wsevent/conversationevent"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 

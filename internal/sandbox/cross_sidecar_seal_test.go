@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
-	"github.com/sky-ai-eng/triage-factory/internal/credseal"
+	"github.com/sky-ai-eng/triage-factory/internal/cred/credbundle"
+	"github.com/sky-ai-eng/triage-factory/internal/cred/credseal"
 )
 
 // TestCrossSidecarSealedBundleIsolation is the executable form of the first

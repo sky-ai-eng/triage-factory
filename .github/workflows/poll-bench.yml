@@ -18,10 +18,10 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
-      - 'internal/poller/**'
-      - 'internal/tracker/**'
+      - 'internal/eventing/poller/**'
+      - 'internal/eventing/tracker/**'
       - 'internal/github/**'
-      - 'internal/pollbench/**'
+      - 'cmd/internal/pollbench/**'
       - 'cmd/pollbench/**'
       - 'scripts/poll-bench.sh'
       - '.github/workflows/poll-bench.yml'

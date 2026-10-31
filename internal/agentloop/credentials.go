@@ -5,7 +5,7 @@ import (
 
 	"github.com/maximhq/bifrost/core/schemas"
 
-	"github.com/sky-ai-eng/triage-factory/internal/inference"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/inference"
 )
 
 // EnvCredentials is a Credentials implementation over a per-call env-map

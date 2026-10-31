@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/modelaccess"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/modelaccess"
 )
 
 // checkModelProviders is the credential admission gate for the models a

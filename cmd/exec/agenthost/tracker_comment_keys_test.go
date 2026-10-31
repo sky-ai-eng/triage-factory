@@ -6,7 +6,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
+	"github.com/sky-ai-eng/triage-factory/internal/ghcli/ghwrite"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 

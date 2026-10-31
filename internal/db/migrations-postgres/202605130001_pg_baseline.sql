@@ -5855,7 +5855,7 @@ REVOKE ALL ON public.poll_readiness FROM anon, authenticated, service_role;
 -- and org_settings is a whole-row write behind a `version` token.
 -- kind carries no FK — it names a registry entry this build may not carry, so
 -- such a row is inert; the application decides which sources may be disabled
--- (internal/eventsource.Disableable). disabled_by carries none either: the
+-- (internal/eventing/eventsource.Disableable). disabled_by carries none either: the
 -- who-did-what trail lives in access_changes and a deleted admin must not
 -- rewrite policy. base_url and poll_interval are NULL when no override is
 -- recorded, never "use a default"; base_url is refused for a source with no
@@ -6757,7 +6757,7 @@ CREATE INDEX user_api_tokens_user_org_idx ON public.user_api_tokens (user_id, or
 ALTER TABLE public.user_api_tokens ENABLE ROW LEVEL SECURITY;
 
 -- The sessions shape: a row is the user's own credential, so the predicate is
--- the owner and nothing else. internal/apitokens runs on the admin pool (token
+-- the owner and nothing else. internal/auth/apitokens runs on the admin pool (token
 -- lookup happens before any claims exist), so these policies defend the
 -- app-pool surface a later "list my tokens" reader would use, exactly as
 -- sessions' do.

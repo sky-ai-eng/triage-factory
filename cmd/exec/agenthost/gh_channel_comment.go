@@ -7,7 +7,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
+	"github.com/sky-ai-eng/triage-factory/internal/ghcli/ghwrite"
 )
 
 // RecordGHChannelWrite records one write the real-`gh` channel forwarded: the

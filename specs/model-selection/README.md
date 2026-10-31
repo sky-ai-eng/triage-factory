@@ -212,14 +212,14 @@ differently, enforced at different times, and fail differently. One decides
   conversation) is **not v1**. It is not primarily a cache-invalidation
   problem:
   - Assistant rows carry `ReasoningDetails` with Anthropic's
-    cryptographic **signatures**, which `internal/inference/assembly.go`
+    cryptographic **signatures**, which `internal/llm/inference/assembly.go`
     replays on every subsequent turn. Those cannot be handed to another
     vendor, and it is not established that they can be handed *back* to
     Anthropic after a foreign turn intervened. Tool-call id formats differ
     too. The requirement this creates is *"the transcript stays assemblable
     across a provider switch,"* which constrains the message schema.
   - The sealed per-claim credential bundle carries **one** LLM env map
-    (`bundle.LLM`, `internal/credprovision`). Per-message switching means
+    (`bundle.LLM`, `internal/cred/credprovision`). Per-message switching means
     either the bundle carries every enabled provider's material — widening
     what one compromised sidecar holds — or claims re-seal mid-conversation.
     Both are real work; neither is free.
@@ -273,7 +273,7 @@ differently, enforced at different times, and fail differently. One decides
 ## 2. Constraints discovered
 
 Numbers below are from the committed
-`internal/inference/pricing_datasheet.json`; §6 has the commands.
+`internal/llm/inference/pricing_datasheet.json`; §6 has the commands.
 
 ### 2.1 Model ids are opaque strings. Never parse them.
 
@@ -320,7 +320,7 @@ unapplied by `computeTextCost`).
 
 ### 2.2 The catalog already exists and is richer than assumed
 
-`internal/inference/pricing_datasheet.json` is not a pricing table. It is a
+`internal/llm/inference/pricing_datasheet.json` is not a pricing table. It is a
 **2,406-model multi-vendor catalog**, a filtered mirror of LiteLLM's
 `model_prices_and_context_window.json`, refreshed daily by
 `.github/workflows/refresh-pricing.yml`. Per model it carries vendor
@@ -485,7 +485,7 @@ Every `Aliases:` assignment in bifrost's source populates a
 `ListModelsPipeline` *from* `key.Aliases`. The map is read-only input.
 
 **TF does not currently supply one.** `buildKey` in
-`internal/inference/account.go` populates `ID / Name / Value / Models /
+`internal/llm/inference/account.go` populates `ID / Name / Value / Models /
 Weight` and stops, never setting `Aliases`. Wiring it is the one plumbing
 gap on the inference side.
 
@@ -567,7 +567,7 @@ claude-haiku-4-5-20251001` both work — concrete ids, dated and undated,
 are CLI-valid on subscription auth — and an invalid id fails with a
 legible error naming the model, not a hang.
 
-`internal/systemllm` already has the split R11 needs: direct API calls in
+`internal/systemjob/systemllm` already has the split R11 needs: direct API calls in
 multi mode, SDK subprocess in local. Only the multi-mode half changes.
 
 *Amended 2026-08-24.* The CLI verification above (concrete ids are valid
@@ -584,7 +584,7 @@ catalog's concrete ids. See §7's amendment.
 - **Prompt caching economics.** 526 of the 1,366 gated models support it.
   Without it, TF's entire cacheable-prefix design — `agentprompt.Build`'s
   byte-identical guarantee, the breakpoints in
-  `internal/inference/cachecontrol.go` — buys nothing, and the same run
+  `internal/llm/inference/cachecontrol.go` — buys nothing, and the same run
   costs several times more. This is not a gate, but the user must see it
   before choosing.
 - **Gemini has two caching modes, and only one fits TF's shape.**
@@ -937,10 +937,10 @@ Every one of these holds the old three-word vocabulary:
 | `prompts` table | `model` | per-step override, `""` = inherit |
 | `internal/server/prompts` | `allowedModelOverrides` | validation list |
 | `internal/promptseed` | seeded `Model:` | ships `"haiku"` |
-| `internal/ai/scorer.go` | `SystemJobModel` / `SystemJobModelDirect` | the one place that already resolves |
-| `internal/ai/pricing.go` | alias rows in `pricing` | `"sonnet"` frozen at Sonnet-4.5-era prices |
+| `internal/systemjob/scorer/scorer.go` | `SystemJobModel` / `SystemJobModelDirect` | the one place that already resolves |
+| `internal/systemjob/scorer/pricing.go` | alias rows in `pricing` | `"sonnet"` frozen at Sonnet-4.5-era prices |
 
-The `internal/ai/pricing.go` alias rows are worth calling out: they encode
+The `internal/systemjob/scorer/pricing.go` alias rows are worth calling out: they encode
 what `"sonnet"` meant when they were written. They are reached only by the
 approximate (`~`-prefixed) footer path today, so they are not actively
 mis-billing — but they are exactly the drift this design exists to remove,
@@ -962,7 +962,7 @@ including the baseline's `max_llm_model_tier`).
 python3 - <<'EOF'
 import json
 from collections import Counter
-d = json.load(open('internal/inference/pricing_datasheet.json'))
+d = json.load(open('internal/llm/inference/pricing_datasheet.json'))
 def win(v): return v.get('max_input_tokens') or v.get('max_tokens') or 0
 
 tools = [k for k,v in d.items()
@@ -982,7 +982,7 @@ EOF
 ```
 
 Provenance for the snapshot itself is in
-`internal/inference/pricing_provenance.json` (upstream repo, pinned
+`internal/llm/inference/pricing_provenance.json` (upstream repo, pinned
 commit, fetch date, filter).
 
 ---
@@ -1016,7 +1016,7 @@ drift:
 
 Availability is **not** one of them. The probe has two transports, and they
 are the two conversation runtimes' own: an in-process call over
-`internal/inference` (what `agentloop` builds per call for the **native**
+`internal/llm/inference` (what `agentloop` builds per call for the **native**
 engine) and the **SDK** subprocess. Either way it spends the request through
 the same client a delegated run does, so it tests that run's credential path
 rather than a parallel one — and what it asks, and what the answer means, are
@@ -1053,7 +1053,7 @@ deployment's environment had already answered.
 
 What follows:
 
-- **Two registries, one package.** `internal/modelcatalog` keeps its name
+- **Two registries, one package.** `internal/llm/modelcatalog` keeps its name
   and widens its job to "the models TF offers, under each execution
   vocabulary it offers them in": the native registry (the datasheet join,
   unchanged) beside per-SDK lists (`sdk_models.json`, keyed by SDK id —

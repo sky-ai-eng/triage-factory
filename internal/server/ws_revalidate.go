@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/sky-ai-eng/triage-factory/internal/sessions"
+	"github.com/sky-ai-eng/triage-factory/internal/auth/sessions"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -17,7 +17,7 @@ import (
 // NOTIFY or this pod's LISTEN connection being mid-reconnect. The timer
 // is the guarantee; the NOTIFY (SetWSBackplane's PublishKick) is only the
 // latency optimization. Env-tunable via
-// TF_WS_SESSION_REVALIDATE_SECONDS (internal/wsbackplane.RevalidateIntervalFromEnv).
+// TF_WS_SESSION_REVALIDATE_SECONDS (internal/pgnotify/wsbackplane.RevalidateIntervalFromEnv).
 const DefaultSessionRevalidateInterval = 60 * time.Second
 
 // RunSessionRevalidation runs the kick backstop until ctx is cancelled:

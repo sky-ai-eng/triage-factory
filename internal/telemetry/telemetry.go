@@ -38,7 +38,7 @@
 // Conventions for tracing a subsystem:
 //
 //   - Get a tracer from the global provider, named for the Go package that
-//     owns the spans (otel.Tracer("internal/poller")). No package needs to
+//     owns the spans (otel.Tracer("internal/eventing/poller")). No package needs to
 //     know whether tracing is on: disabled means the no-op provider, and a
 //     no-op span costs an interface call.
 //   - Name spans noun.verb or subsystem.stage in OTel dot form

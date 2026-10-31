@@ -1,7 +1,7 @@
 name: refresh-pricing
 
 # Keeps the native-loop inference package's vendored model-pricing snapshot
-# fresh (internal/inference/pricing_datasheet.json + pricing_provenance.json).
+# fresh (internal/llm/inference/pricing_datasheet.json + pricing_provenance.json).
 # Prices move on the upstream's cadence, not ours, so a weekly bump would let
 # them drift for days; this runs daily.
 #
@@ -12,8 +12,8 @@ name: refresh-pricing
 #
 # Two safety nets sit between fast-moving upstream data and the frozen formula:
 #   - the verification gate (go test -run
-#     'TestPricing|TestCostForUsage|TestComputeTextCost' over internal/inference
-#     and internal/modelcatalog) runs HERE, before any PR: malformed JSON, a
+#     'TestPricing|TestCostForUsage|TestComputeTextCost' over internal/llm/inference
+#     and internal/llm/modelcatalog) runs HERE, before any PR: malformed JSON, a
 #     model TF offers losing its row or a rate it bills on, a cache rate
 #     inconsistent with its input rate, or a broken cost formula fails it, and
 #     we open a tracking issue instead of a PR. It checks no specific price — a
@@ -24,7 +24,7 @@ name: refresh-pricing
 #     underpricing.
 #
 # A third gate lives inside the script itself, ahead of both of these: pricing
-# ELIGIBILITY (internal/inference/provider_map.json). It refuses to write
+# ELIGIBILITY (internal/llm/inference/provider_map.json). It refuses to write
 # anything — non-zero exit, job fails raw, no PR, no tracking issue — when an
 # upstream entry that already passes the mode/tool-support/context-window bar
 # carries a litellm_provider this repo has never mapped to a bifrost provider.
@@ -88,7 +88,7 @@ jobs:
       - name: Verify (pricing gate)
         id: gate
         run: |
-          if go test ./internal/inference/ ./internal/modelcatalog/ -run 'TestPricing|TestCostForUsage|TestComputeTextCost' > /tmp/gate.log 2>&1; then
+          if go test ./internal/llm/inference/ ./internal/llm/modelcatalog/ -run 'TestPricing|TestCostForUsage|TestComputeTextCost' > /tmp/gate.log 2>&1; then
             echo "ok=1" >> "$GITHUB_OUTPUT"
           else
             echo "ok=0" >> "$GITHUB_OUTPUT"
@@ -107,7 +107,7 @@ jobs:
           BODY_FILE=$(mktemp)
           {
             echo "The daily pricing refresh produced a snapshot that fails the verification gate."
-            echo "The gate checks no specific price, so a price change alone cannot cause this. A model TF offers lost its row or a rate TF bills on, a cache rate no longer matches its model's input rate, or the snapshot no longer parses. If upstream's data is wrong, the refresh should wait for the upstream fix; if a gate assumption no longer holds, update it in internal/modelcatalog/pricing_gate_test.go. A failing TestComputeTextCost test uses synthetic prices, so it is a cost-formula bug on main rather than anything in this snapshot."
+            echo "The gate checks no specific price, so a price change alone cannot cause this. A model TF offers lost its row or a rate TF bills on, a cache rate no longer matches its model's input rate, or the snapshot no longer parses. If upstream's data is wrong, the refresh should wait for the upstream fix; if a gate assumption no longer holds, update it in internal/llm/modelcatalog/pricing_gate_test.go. A failing TestComputeTextCost test uses synthetic prices, so it is a cost-formula bug on main rather than anything in this snapshot."
             echo
             echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             echo
@@ -182,8 +182,8 @@ jobs:
           ELIGIBLE_COUNT: ${{ steps.eligible.outputs.count }}
           ELIGIBLE_BY_PROVIDER: ${{ steps.eligible.outputs.by_provider }}
         run: |
-          SHA="$(jq -r .commit internal/inference/pricing_provenance.json)"
-          FETCHED="$(jq -r .fetched internal/inference/pricing_provenance.json)"
+          SHA="$(jq -r .commit internal/llm/inference/pricing_provenance.json)"
+          FETCHED="$(jq -r .fetched internal/llm/inference/pricing_provenance.json)"
           RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           # Quoted heredocs for the static prose (so backticks stay literal),
           # printf for the lines that carry this run's values.
@@ -201,7 +201,7 @@ jobs:
             printf '| Refreshed by | [`refresh-pricing` run %s](%s) |\n' "$GITHUB_RUN_ID" "$RUN_URL"
             cat <<'EOF'
 
-          The verification gate (`go test ./internal/inference ./internal/modelcatalog -run 'TestPricing|TestCostForUsage|TestComputeTextCost'`) passed on this snapshot in the workflow run before this PR was updated. It checks the cost formula and that the rows TF bills from are complete and consistent, not what they cost, so review the price diff below.
+          The verification gate (`go test ./internal/llm/inference ./internal/llm/modelcatalog -run 'TestPricing|TestCostForUsage|TestComputeTextCost'`) passed on this snapshot in the workflow run before this PR was updated. It checks the cost formula and that the rows TF bills from are complete and consistent, not what they cost, so review the price diff below.
           EOF
             if [ -n "$DRIFT" ]; then
               printf '\n> [!WARNING]\n> **Schema drift:** upstream publishes per-token/cache cost field(s) `computeTextCost` does not read: `%s`.\n' "$DRIFT"
@@ -212,7 +212,7 @@ jobs:
               fi
             fi
             printf '\n### Eligible models (%s)\n\n' "$ELIGIBLE_COUNT"
-            printf 'Entries in this snapshot that pass the pricing-eligibility gate — chat + tool support, >=64k input window, priced, and mapped in `internal/inference/provider_map.json` to a bifrost provider TF supports. Not yet filtered to what TF names in a catalog (that lands with the model-catalog work) — this is the raw "could be offered" signal.\n\n'
+            printf 'Entries in this snapshot that pass the pricing-eligibility gate — chat + tool support, >=64k input window, priced, and mapped in `internal/llm/inference/provider_map.json` to a bifrost provider TF supports. Not yet filtered to what TF names in a catalog (that lands with the model-catalog work) — this is the raw "could be offered" signal.\n\n'
             if [ -n "$ELIGIBLE_BY_PROVIDER" ]; then
               printf 'By provider: `%s`\n\n' "$ELIGIBLE_BY_PROVIDER"
             fi
@@ -248,6 +248,6 @@ jobs:
           commit-message: 'chore(inference): refresh model pricing snapshot'
           title: 'chore(inference): refresh model pricing snapshot'
           add-paths: |
-            internal/inference/pricing_datasheet.json
-            internal/inference/pricing_provenance.json
+            internal/llm/inference/pricing_datasheet.json
+            internal/llm/inference/pricing_provenance.json
           body: ${{ steps.prbody.outputs.body }}

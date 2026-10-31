@@ -56,7 +56,7 @@ var transientBackoffBase = 1 * time.Second
 // ErrRateLimited is returned when a GitHub rate-limit budget is exhausted:
 // retries for a transient 429/secondary-403 ran out, or a known
 // remaining-budget reset wouldn't land within maxRateLimitWait. It lets
-// internal/poller / internal/tracker distinguish "stop and resume later" from
+// internal/eventing/poller / internal/eventing/tracker distinguish "stop and resume later" from
 // a genuine API failure — the poller-side resume logic is a separate ticket
 // (TFAC-569's parent epic), this type is only the signal.
 type ErrRateLimited struct {

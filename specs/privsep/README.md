@@ -176,7 +176,7 @@ screenshot capture — it must also route through the broker (phase PS-P5).
 
 Stays on the orchestrator (unprivileged): the proxies
 (`internal/agentproc/proxies.go`), credential resolution
-(`internal/agentproc/credentials.go`, `internal/githubapp`), the agent-host
+(`internal/agentproc/credentials.go`, `internal/github/githubapp`), the agent-host
 socket (`cmd/exec/agenthost/`), the live driver, OCI-spec *data* assembly.
 
 ---

@@ -8,7 +8,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
 )
 
 // onDeploymentApp moves the fixture's org onto the deployment App with no

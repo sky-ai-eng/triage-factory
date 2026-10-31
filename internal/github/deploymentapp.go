@@ -10,7 +10,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
-	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
+	"github.com/sky-ai-eng/triage-factory/internal/github/githubapp"
 )
 
 // Tier 2 — the deployment App. One App key serving many orgs, its

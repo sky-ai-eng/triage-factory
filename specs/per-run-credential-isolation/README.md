@@ -187,7 +187,7 @@ reap-on-every-exit-path) in isolation. (M)
 
 **Phase 2 — Per-run keys + proxy relocation.** The sidecar mints its X25519
 keypair and publishes the per-run pubkey; the brain
-(`internal/credprovision`) seals to the per-run pubkey instead of
+(`internal/cred/credprovision`) seals to the per-run pubkey instead of
 `instances.pubkey`; the sidecar unseals its own bundle and runs the LLM/git/
 egress proxies, binding the veth IP and reporting URLs + placeholder tokens
 back for OCI env injection. The orchestrator stops unsealing and stops holding
@@ -229,7 +229,7 @@ executors.*
    footprint pressure at high density; per-org is the pre-analyzed fallback.
 3. **Unseal authority** — per-run keypair born in the sidecar (§4.3),
    superseding TFAC-614's per-instance sealing key for run credentials. The
-   sealed-box primitive (`internal/credseal`) already accepts a per-run
+   sealed-box primitive (`internal/cred/credseal`) already accepts a per-run
    recipient; only the key-management plumbing changes.
 4. **Phase 0 is a standalone bug fix** — the agenthost bundle-conversion lands
    independent of the sidecar because it is release-blocking for multi-mode

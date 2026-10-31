@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/inference"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/inference"
 	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 

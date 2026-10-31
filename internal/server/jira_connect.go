@@ -15,7 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
-	"github.com/sky-ai-eng/triage-factory/internal/jiraoauth"
+	"github.com/sky-ai-eng/triage-factory/internal/jira/jiraoauth"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
@@ -486,7 +486,7 @@ func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
 // Connect flow (github_connect.go). It binds the signed-in user's Atlassian
 // Cloud account via OAuth consent and stores a ROTATING refresh token as the
 // durable per-user credential; short-lived access tokens are minted from it on
-// demand (internal/jiraoauth). Unlike GitHub Connect — which captures identity
+// demand (internal/jira/jiraoauth). Unlike GitHub Connect — which captures identity
 // and discards the token — Jira Connect captures access, so the refresh token is
 // retained (Jira's user level must act as the user).
 //

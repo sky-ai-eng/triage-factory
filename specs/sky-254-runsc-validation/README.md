@@ -159,7 +159,7 @@ tight. If any of these five invariants is violated, Property B breaks:
 2. **Proxies bind on non-routable IPs reachable only from the specific
    sandbox.** The veth-IP approach (e.g. `192.168.99.1`) gives us this
    for free — the IP is only routable from inside the netns that has the
-   matching veth interface. `internal/llmproxy.Config.AllowNonLoopback`
+   matching veth interface. `internal/proxy/llmproxy.Config.AllowNonLoopback`
    gates this: the proxy refuses to bind on a non-loopback interface
    unless the caller has consciously opted in (the veth-IP case).
 

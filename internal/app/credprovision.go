@@ -1,7 +1,7 @@
 package app
 
 import (
-	"github.com/sky-ai-eng/triage-factory/internal/credprovision"
+	"github.com/sky-ai-eng/triage-factory/internal/cred/credprovision"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 

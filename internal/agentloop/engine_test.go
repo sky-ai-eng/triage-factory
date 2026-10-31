@@ -11,7 +11,7 @@ import (
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/inference"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/inference"
 )
 
 func TestRun_ImplicitCompletionConcludesWithFinalText(t *testing.T) {

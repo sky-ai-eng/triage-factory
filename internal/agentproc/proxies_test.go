@@ -16,11 +16,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/egressproxy"
-	"github.com/sky-ai-eng/triage-factory/internal/egressrelay"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
-	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
-	"github.com/sky-ai-eng/triage-factory/internal/llmproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/egressproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/egressrelay"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/gitproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/llmproxy"
 )
 
 // TestProxyConfigFromCreds_AnthropicDirect pins the resolver → proxy

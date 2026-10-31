@@ -207,7 +207,7 @@ type Resolver interface {
 // UserAccessTokenSource mints a short-lived Cloud OAuth access token for a
 // user, handling refresh-token rotation write-back internally. It is the seam
 // the resolver's AuthMethodCloudOAuth branch delegates to — implemented by
-// internal/jiraoauth, wired in at construction so internal/jira doesn't import
+// internal/jira/jiraoauth, wired in at construction so internal/jira doesn't import
 // the OAuth/HTTP machinery (and there's no import cycle: jiraoauth imports jira,
 // not the reverse). A nil source means OAuth minting isn't wired (the system
 // resolver used by background board-mirror callers, where ForUser-OAuth never
@@ -264,7 +264,7 @@ func NewResolver(secrets db.SecretStore, orgs db.OrgsStore, gate SourceGate) Res
 }
 
 // NewResolverWithOAuth builds a Resolver that can mint per-user Cloud OAuth
-// access tokens via the given source (internal/jiraoauth). Everything else is
+// access tokens via the given source (internal/jira/jiraoauth). Everything else is
 // identical to NewResolver; only the AuthMethodCloudOAuth branch of ForUser
 // depends on the source.
 func NewResolverWithOAuth(secrets db.SecretStore, orgs db.OrgsStore, gate SourceGate, oauth UserAccessTokenSource) Resolver {

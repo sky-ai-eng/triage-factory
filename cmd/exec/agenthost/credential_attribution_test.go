@@ -7,7 +7,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
+	"github.com/sky-ai-eng/triage-factory/internal/ghcli/ghwrite"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 )
 

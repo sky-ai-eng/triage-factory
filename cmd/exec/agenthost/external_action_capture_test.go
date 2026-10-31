@@ -16,7 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
+	"github.com/sky-ai-eng/triage-factory/internal/ghcli/ghwrite"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -319,7 +319,7 @@ func TestCapture_GithubReaction_RecordsDeliverablelessAction(t *testing.T) {
 	}
 	a := acts[0]
 	// Target and ExternalID are what the same reaction records when it arrives
-	// through the raw gh channel (internal/ghwrite classifies the reactions path
+	// through the raw gh channel (internal/ghcli/ghwrite classifies the reactions path
 	// to owner/repo + the comment id), so one act reads one way either way.
 	if a.Action != domain.ActionReactionAdded || a.Provider != domain.ProviderGitHub ||
 		a.Credential != domain.CredentialGitHubApp || a.Target != "octo/repo" ||

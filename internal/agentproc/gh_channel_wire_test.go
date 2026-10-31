@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/ghchannel"
+	"github.com/sky-ai-eng/triage-factory/internal/ghcli/ghchannel"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
 
@@ -26,9 +26,9 @@ import (
 // properties the channel exists for: the org's credential reaches GitHub, and
 // it never reaches the subprocess.
 //
-// The sibling wire tests in internal/ghinjector pin what gh sends. These pin how
+// The sibling wire tests in internal/ghcli/ghinjector pin what gh sends. These pin how
 // local mode wires it. Both skip when the pinned binary is absent; CI stages it
-// from the same pin (docker/Dockerfile, kept in lockstep with internal/ghpin).
+// from the same pin (docker/Dockerfile, kept in lockstep with internal/ghcli/ghpin).
 
 const wirePinnedGH = "/opt/tf/bin/gh"
 
@@ -44,7 +44,7 @@ func wireGHBinary(t *testing.T) string {
 }
 
 // wireBinDir stages the pinned binary as "gh" in a TF-owned directory, standing
-// in for what internal/ghbin provisions at runtime.
+// in for what internal/ghcli/ghbin provisions at runtime.
 func wireBinDir(t *testing.T) string {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "tf-bin")

@@ -15,7 +15,7 @@ import (
 // local mode (role=all) it always runs. This pins that gate at the level where
 // the decision is actually made, so the pass cannot acquire a second, weaker one.
 //
-// The complementary halves live where the other two facts do: internal/poller
+// The complementary halves live where the other two facts do: internal/eventing/poller
 // proves the reconcile runs inside the cycle and in both modes, and
 // roleplan_test's exclusion guard proves an executor builds no poller at all.
 func TestGrantMirrorReconcile_LeaderGate(t *testing.T) {

@@ -3,7 +3,7 @@ package reconcile
 import "sync"
 
 // Manager owns per-org reconcile Runners, mirroring the scorer / profiler /
-// classifier managers (internal/ai/manager.go). Each org gets its own Runner —
+// classifier managers (internal/systemjob/scorer/manager.go). Each org gets its own Runner —
 // its own trigger channel, its own single-flight cycle gate — so a slow
 // reconcile cycle on one tenant (many open PRs, a slow GitHub) doesn't
 // head-of-line-block another tenant's freshness.

@@ -8,7 +8,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
+	"github.com/sky-ai-eng/triage-factory/internal/ghcli/ghwrite"
 )
 
 // TestCapture_GHWriteDenied_RecordsEveryRefusal pins the refusal row: one per

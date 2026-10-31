@@ -247,7 +247,7 @@ type RunOptions struct {
 
 	// LLMResolver, when non-nil, resolves the org's LLM env map instead of
 	// Run's built-in raw-secret resolution — the seam the brain wires to
-	// internal/llmcred so a role-mode Bedrock org mints short-lived STS
+	// internal/cred/llmcred so a role-mode Bedrock org mints short-lived STS
 	// session credentials (there is no raw key to read). It is consulted
 	// ONLY on the resolve-from-secrets path: a run carrying a sealed bundle
 	// on ctx (the executor) still reads bundle.LLM, unchanged. The map's

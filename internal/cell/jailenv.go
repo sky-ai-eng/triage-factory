@@ -5,8 +5,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/sky-ai-eng/triage-factory/internal/egressrelay"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/egressrelay"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 

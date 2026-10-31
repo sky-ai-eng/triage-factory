@@ -86,7 +86,7 @@ func runCheckPush(host agenthost.Client, stores db.Stores, args []string, refsIn
 		if !isBranch || !protected[branch] {
 			continue
 		}
-		// Wording tracks the git proxy's ref-level denial (internal/gitproxy
+		// Wording tracks the git proxy's ref-level denial (internal/proxy/gitproxy
 		// refDenial) so the same mistake reads the same way in either mode.
 		fmt.Fprintf(os.Stderr,
 			"triagefactory: refusing to push %s — %s is a protected branch on %s (its base/default branch) and this team's base-branch push policy refuses pushes to it. Commit to a new branch and open a pull request instead. A team admin can change the policy in Settings → Team.\n",

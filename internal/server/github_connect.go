@@ -19,7 +19,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
-	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
+	"github.com/sky-ai-eng/triage-factory/internal/github/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
@@ -30,7 +30,7 @@ import (
 // Why this exists separately from everything else GitHub-shaped: TF touches
 // GitHub through three credentials that must not be conflated.
 //
-//   - App installation token (internal/githubapp) is *access* — read/write
+//   - App installation token (internal/github/githubapp) is *access* — read/write
 //     the org's repos. It authenticates as the app against the org, so it
 //     carries no person.
 //   - GoTrue "Sign in with GitHub" is *login* — it mints a TF session on the

@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/ctlbus"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/ctlbus"
 )
 
 // credRequestProvisionTimeout bounds a single cred_request handler's
@@ -175,7 +175,7 @@ func (a *App) handleCtlMessage(msg ctlbus.Message) {
 		// notifications. credRequestProvisionTimeout caps it well inside
 		// the executor's own 2-minute awaiting-credentials deadline, so a
 		// timeout here just costs one deferred pass — the backstop sweep
-		// (internal/credprovision.RunAwaitingSweep) retries it. Unlike
+		// (internal/cred/credprovision.RunAwaitingSweep) retries it. Unlike
 		// a.dispatchManagerTrigger's fire-and-forget Trigger() channel
 		// send, ProvisionForConversation does real work and its error is worth
 		// logging.

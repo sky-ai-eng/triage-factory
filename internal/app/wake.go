@@ -4,8 +4,8 @@ import (
 	"context"
 
 	"github.com/sky-ai-eng/triage-factory/internal/pgnotify"
-	"github.com/sky-ai-eng/triage-factory/internal/wakebus"
-	"github.com/sky-ai-eng/triage-factory/internal/wsbackplane"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/wakebus"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/wsbackplane"
 )
 
 // startWakeListener starts this process's tf_wake LISTEN connection

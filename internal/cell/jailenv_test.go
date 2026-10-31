@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/egressrelay"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/egressrelay"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 

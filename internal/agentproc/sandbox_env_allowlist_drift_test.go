@@ -7,9 +7,9 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/cell"
-	"github.com/sky-ai-eng/triage-factory/internal/egressrelay"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
-	"github.com/sky-ai-eng/triage-factory/internal/llmproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/egressrelay"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/llmproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 

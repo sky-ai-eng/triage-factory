@@ -37,17 +37,17 @@ func (s *Server) acquireKeyedLock(ctx context.Context, mu *sync.Map, salt int64,
 //	8 — this file                                 (org id, session)
 //	9 — this file                                 (github host + installation
 //	    id, session; githubInstallationBindLockSalt)
-//	10 — internal/linearoauth                     (org id, session;
+//	10 — internal/linear/linearoauth                     (org id, session;
 //	    CredentialLockSalt)
 //	11 — this file                                (org id, session;
 //	    jiraCredentialLockSalt)
-//	12 — internal/linearoauth                     (org id:user id, session;
+//	12 — internal/linear/linearoauth                     (org id:user id, session;
 //	    UserCredentialLockSalt)
 //	0x43484944 ("CHID") — ee/slack/store/pg                   (org id, xact;
 //	    exclusive to move, shared to the writes that spell a channel id;
 //	    channelMoveLockSalt)
 //	0x53454154 ("SEAT") — internal/db/postgres/auth_events.go (seat period, xact)
-//	0x544f4b4e ("TOKN") — internal/apitokens                  (user:org, xact)
+//	0x544f4b4e ("TOKN") — internal/auth/apitokens                  (user:org, xact)
 //	0x54534554 ("TSET") — internal/db/postgres/teams.go       (team id, xact;
 //	    teamSettingsLockSalt)
 //

@@ -68,7 +68,7 @@ type Delegator interface {
 // EventPublisher is the bus-publish seam the router uses to mirror the
 // per-event routing disposition sentinel (TFAC-593) onto the event bus, so
 // an async event source (e.g. Slack) can learn synchronously-unavailable
-// routing outcomes. Same minimal shape as internal/tracker's Publisher and
+// routing outcomes. Same minimal shape as internal/eventing/tracker's Publisher and
 // delegate.Spawner's EventPublisher; the plain *eventbus.Bus satisfies it
 // directly.
 type EventPublisher interface {

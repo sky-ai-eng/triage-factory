@@ -9,7 +9,7 @@ import (
 )
 
 // Runner reconciles one org's non-terminal deliverables against GitHub as a
-// background process, mirroring the scorer's Runner (internal/ai/runner.go). It
+// background process, mirroring the scorer's Runner (internal/systemjob/scorer/runner.go). It
 // exposes a Trigger the system:poll: subscriber signals after a GitHub poll
 // completes; a single-flight gate collapses overlapping triggers so a long cycle
 // never stacks.

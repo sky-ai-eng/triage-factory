@@ -115,8 +115,8 @@ Files you'll almost certainly need. **Verify each before editing** — line numb
 | `internal/db/db.go`                | Schema. All table definitions live in `CREATE TABLE` statements here.                                                                               |
 | `internal/db/event_types.go`       | Registered event types (CI failure, PR new commits, etc.).                                                                                          |
 | `internal/db/prompts.go`           | Existing prompt DB helpers — template for new `prompt_triggers` helpers.                                                                            |
-| `internal/tracker/tracker.go`      | Event emission and `CreateEvent` — the hook point for SKY-147.                                                                                      |
-| `internal/tracker/diff.go`         | Snapshot-to-snapshot diff logic. SKY-140 and SKY-144 both edit this. CI failure emission was around lines 48-60 at writing time.                    |
+| `internal/eventing/tracker/tracker.go`      | Event emission and `CreateEvent` — the hook point for SKY-147.                                                                                      |
+| `internal/eventing/tracker/diff.go`         | Snapshot-to-snapshot diff logic. SKY-140 and SKY-144 both edit this. CI failure emission was around lines 48-60 at writing time.                    |
 | `internal/github/status.go`        | GitHub API client. Around line 91 is where check runs are fetched — see SKY-144 for what's already in the response that we're currently discarding. |
 | `internal/delegate/spawner.go`     | Delegation entry point. `parseAgentResult` was around line 522 at writing time; completion handling around line 363.                                |
 | `internal/worktree/worktree.go`    | Worktree lifecycle. `MakeRunRoot`, cleanup, `RemoveClaudeProjectDir`.                                                                                |

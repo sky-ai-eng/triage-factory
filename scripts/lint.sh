@@ -265,7 +265,7 @@ go_group() {
   # Egress interception TLS: the interceptor verifies a registry once for every
   # toolchain in the jail, and each of them then sees a valid certificate, so a
   # weakened check there would weaken all of them without any noticing. Every
-  # tls.Config the package builds lives in internal/egressproxy/tlsconfig.go,
+  # tls.Config the package builds lives in internal/proxy/egressproxy/tlsconfig.go,
   # and no other non-test file may build one; no file of the package, tests
   # included, may mention InsecureSkipVerify at all
   # (specs/sandbox-backends/ §6.1, condition 8). The
@@ -279,21 +279,21 @@ go_group() {
     red "egress interception TLS guard: could not resolve the tracked Go file list — guard NOT verified"
     rc=1
   else
-    tls_all=$(printf '%s\n' "$tls_all" | grep '^internal/egressproxy/[^/]*\.go$')
+    tls_all=$(printf '%s\n' "$tls_all" | grep '^internal/proxy/egressproxy/[^/]*\.go$')
     status=$?
     tls_src=$(printf '%s\n' "$tls_all" | grep -v '_test\.go$')
     if (( status > 1 )); then
       red "egress interception TLS guard: could not filter the Go file list — guard NOT verified"
       rc=1
-    elif ! printf '%s\n' "$tls_src" | grep -qx 'internal/egressproxy/tlsconfig.go'; then
-      red "egress interception TLS guard: internal/egressproxy/tlsconfig.go is not in the file list — guard NOT verified"
+    elif ! printf '%s\n' "$tls_src" | grep -qx 'internal/proxy/egressproxy/tlsconfig.go'; then
+      red "egress interception TLS guard: internal/proxy/egressproxy/tlsconfig.go is not in the file list — guard NOT verified"
       rc=1
     else
       tls_offenders=$( {
         printf '%s\n' "$tls_all" | xargs awk '/InsecureSkipVerify/ { print FILENAME ": mentions InsecureSkipVerify" }'
         printf '%s\n' "$tls_src" | xargs awk '
           /^[ \t]*\/\// { next }
-          FILENAME != "internal/egressproxy/tlsconfig.go" && /tls\.Config[ \t]*\{|new\(tls\.Config\)|var[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]+\*?tls\.Config/ {
+          FILENAME != "internal/proxy/egressproxy/tlsconfig.go" && /tls\.Config[ \t]*\{|new\(tls\.Config\)|var[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]+\*?tls\.Config/ {
             print FILENAME ": builds a tls.Config outside tlsconfig.go" }'
       } | sort -u)
       status=$?
@@ -301,7 +301,7 @@ go_group() {
         red "egress interception TLS guard: scan exited $status — guard NOT verified (see the error above)"
         rc=1
       elif [[ -n "$tls_offenders" ]]; then
-        red "egress interception TLS guard: every tls.Config in internal/egressproxy belongs in tlsconfig.go, and none may skip verification:"
+        red "egress interception TLS guard: every tls.Config in internal/proxy/egressproxy belongs in tlsconfig.go, and none may skip verification:"
         echo "$tls_offenders"
         rc=1
       else
