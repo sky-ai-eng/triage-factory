@@ -265,6 +265,10 @@ type DeliverableStore interface {
 	// RLS policy would see its artifacts with none of their deliverables, which
 	// the org lens shows them. org_id and team_id stay bound. Identical to a
 	// plain org read in SQLite.
+	//
+	// TODO(TFAC-1285): once deliverables_select admits org admins, this read
+	// moves to the app pool as ListArtifactMatchesByTeam and the route's gate
+	// stops being its only enforcement.
 	ListArtifactMatchesByTeamSystem(ctx context.Context, orgID, teamID string, entityIDs, reviewIDs []string) ([]domain.Deliverable, error)
 
 	// ListArtifactMatchesByOrgSystem is ListArtifactMatchesByTeamSystem over
