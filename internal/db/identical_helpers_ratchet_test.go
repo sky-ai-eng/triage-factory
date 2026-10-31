@@ -18,7 +18,9 @@ import (
 // rather than shared, given on the tier's constant. Every tier is guarded the
 // same way. An entry that drifts between the dialects fails, and a newly copied
 // helper with no entry fails, so a one-sided edit or a silent copy is caught
-// immediately. Only tierPure is expected to shrink.
+// immediately. Only tierPure is expected to shrink. No name exempts a helper
+// from either check, and a name does not decide its tier; what the function
+// does decides it.
 //
 // The boundary between the tiers is what may be shared. Go code over values
 // that are already scanned can be: PendingRow and its consumers live in
@@ -40,11 +42,10 @@ const (
 	// loop that runs a query through the dialect's queryer and scans each row
 	// (queryTasksCtx, collectURLRewrites). Scanners are per-dialect by
 	// decision, so one can take driver-specific NULL handling without first
-	// undoing a shared abstraction. Scanners that differ between the dialects
-	// already do so for that reason: Postgres scanDeliverable scans straight
-	// into strings, while SQLite's scans sql.NullString and unwraps it. An
-	// identical scanner is expected to stay listed; it is not part of the
-	// shrinking set.
+	// undoing a shared abstraction. Some scanners already differ for that
+	// reason: Postgres scanDeliverable scans straight into strings, while
+	// SQLite's scans sql.NullString and unwraps it. An identical scanner is
+	// expected to stay listed; it is not part of the shrinking set.
 	tierScanner
 
 	// tierSQLFragment composes SQL text (liveTopLevelConversationSQL,
@@ -76,29 +77,57 @@ const (
 	// suites assert both backends answer alike about a concluded row, an ended
 	// row and a subagent row.
 	tierSQLFragment
+
+	// tierConstructor builds a dialect's own store type (newEventStore,
+	// newScoreStore). Its text matches only because both dialects spell the
+	// type and its fields alike; each copy names a different package-local
+	// type, so there is nothing to share. It is not part of the shrinking set,
+	// and it leaves the ratchet once one dialect's store gains a field the
+	// other's lacks.
+	tierConstructor
 )
 
+// helperTiers is every tier with its name and the one-line guidance the
+// failures give for filing a helper under it. String, known and
+// helperTierChoices all read this table.
+var helperTiers = []struct {
+	tier     helperTier
+	name     string
+	guidance string
+}{
+	{tierPure, "tierPure", "pure Go; the shrinking set, so sharing it is the expected fix"},
+	{tierScanner, "tierScanner", "reads driver rows; per-dialect by decision"},
+	{tierSQLFragment, "tierSQLFragment", "composes SQL text; per-dialect by decision"},
+	{tierConstructor, "tierConstructor", "builds the dialect's own store type; nothing to share"},
+}
+
 func (t helperTier) String() string {
-	switch t {
-	case tierPure:
-		return "tierPure"
-	case tierScanner:
-		return "tierScanner"
-	case tierSQLFragment:
-		return "tierSQLFragment"
+	for _, d := range helperTiers {
+		if d.tier == t {
+			return d.name
+		}
 	}
 	return fmt.Sprintf("helperTier(%d)", int(t))
 }
 
 func (t helperTier) known() bool {
-	return t == tierPure || t == tierScanner || t == tierSQLFragment
+	for _, d := range helperTiers {
+		if d.tier == t {
+			return true
+		}
+	}
+	return false
 }
 
-// helperTierChoices is the part of the new-helper failure that names where to
-// file the helper.
-const helperTierChoices = "tierPure (pure Go; the shrinking set, so sharing it is the expected fix), " +
-	"tierScanner (reads driver rows; per-dialect by decision), " +
-	"tierSQLFragment (composes SQL text; per-dialect by decision)"
+// helperTierChoices names every tier with its guidance, for the failures that
+// ask where to file a helper.
+func helperTierChoices() string {
+	choices := make([]string, len(helperTiers))
+	for i, d := range helperTiers {
+		choices[i] = d.name + " (" + d.guidance + ")"
+	}
+	return strings.Join(choices, ", ")
+}
 
 // identicalHelperRatchet maps every top-level helper whose complete func
 // declaration (excluding its doc comment) is currently byte-identical in sqlite
@@ -166,6 +195,15 @@ var identicalHelperRatchet = map[string]helperTier{
 	"taskMemoryPendingSQL":        tierSQLFragment,
 	"workspaceKeyMembersSQL":      tierSQLFragment,
 	"workspaceKeyUnclaimedSQL":    tierSQLFragment,
+
+	"newCommitSignatureStore":   tierConstructor,
+	"newConversationQueueStore": tierConstructor,
+	"newDashboardStore":         tierConstructor,
+	"newEventStore":             tierConstructor,
+	"newFactoryReadStore":       tierConstructor,
+	"newModelAvailabilityStore": tierConstructor,
+	"newScoreStore":             tierConstructor,
+	"newTeamActivityStore":      tierConstructor,
 }
 
 func TestRatchet_IdenticalDialectHelpersStayConverged(t *testing.T) {
@@ -191,46 +229,60 @@ func TestIdenticalHelperViolations(t *testing.T) {
 		return topLevelFuncSource{path: path, source: body}
 	}
 	sqlite := map[string]topLevelFuncSource{
-		"pureHelper":  src("sqlite/a.go", "func pureHelper() {}"),
-		"scanThing":   src("sqlite/a.go", "func scanThing() { sqlite }"),
-		"thingSQL":    src("sqlite/a.go", "func thingSQL() { sqlite }"),
-		"copiedAgain": src("sqlite/a.go", "func copiedAgain() {}"),
-		"newStore":    src("sqlite/a.go", "func newStore() {}"),
+		"convergedHelper": src("sqlite/a.go", "func convergedHelper() {}"),
+		"pureThing":       src("sqlite/a.go", "func pureThing() { sqlite }"),
+		"scanThing":       src("sqlite/a.go", "func scanThing() { sqlite }"),
+		"thingSQL":        src("sqlite/a.go", "func thingSQL() { sqlite }"),
+		"newThingStore":   src("sqlite/a.go", "func newThingStore() { sqlite }"),
+		"oneSided":        src("sqlite/a.go", "func oneSided() {}"),
+		"copiedAgain":     src("sqlite/a.go", "func copiedAgain() {}"),
+		"newStore":        src("sqlite/a.go", "func newStore() {}"),
 	}
 	postgres := map[string]topLevelFuncSource{
-		"pureHelper":  src("postgres/a.go", "func pureHelper() {}"),
-		"scanThing":   src("postgres/a.go", "func scanThing() { postgres }"),
-		"thingSQL":    src("postgres/a.go", "func thingSQL() { postgres }"),
-		"copiedAgain": src("postgres/a.go", "func copiedAgain() {}"),
-		"newStore":    src("postgres/a.go", "func newStore() {}"),
+		"convergedHelper": src("postgres/a.go", "func convergedHelper() {}"),
+		"pureThing":       src("postgres/a.go", "func pureThing() { postgres }"),
+		"scanThing":       src("postgres/a.go", "func scanThing() { postgres }"),
+		"thingSQL":        src("postgres/a.go", "func thingSQL() { postgres }"),
+		"newThingStore":   src("postgres/a.go", "func newThingStore() { postgres }"),
+		"copiedAgain":     src("postgres/a.go", "func copiedAgain() {}"),
+		"newStore":        src("postgres/a.go", "func newStore() {}"),
 	}
 	ratchet := map[string]helperTier{
-		"pureHelper": tierPure,
-		"scanThing":  tierScanner,
-		"thingSQL":   tierSQLFragment,
-		"goneHelper": tierPure,
-		"untiered":   0,
+		"convergedHelper": tierPure,
+		"pureThing":       tierPure,
+		"scanThing":       tierScanner,
+		"thingSQL":        tierSQLFragment,
+		"newThingStore":   tierConstructor,
+		"goneHelper":      tierPure,
+		"oneSided":        tierScanner,
+		"untiered":        0,
 	}
 
 	got := strings.Join(identicalHelperViolations(ratchet, sqlite, postgres), "\n")
 	for _, want := range []string{
-		"tierScanner helper scanThing drifted",
-		"tierSQLFragment helper thingSQL drifted",
-		"stale ratchet entry goneHelper (tierPure)",
+		"identical tierPure helper pureThing drifted",
+		"identical tierScanner helper scanThing drifted",
+		"identical tierSQLFragment helper thingSQL drifted",
+		"identical tierConstructor helper newThingStore drifted",
+		"stale ratchet entry goneHelper (tierPure): in neither dialect",
+		"stale ratchet entry oneSided (tierScanner): only sqlite has it — restore it in postgres",
 		"ratchet entry untiered has helperTier(0)",
+		// A name prefix exempts nothing: an identical newStore with no entry
+		// fails like any other helper.
+		"new byte-identical dialect helper newStore",
 		"new byte-identical dialect helper copiedAgain",
-		"tierPure (pure Go; the shrinking set",
-		"tierScanner (reads driver rows",
-		"tierSQLFragment (composes SQL text",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("violations missing %q; got:\n%s", want, got)
 		}
 	}
-	for _, unwanted := range []string{"pureHelper", "newStore"} {
-		if strings.Contains(got, unwanted) {
-			t.Errorf("violations name %s, which is converged or exempt; got:\n%s", unwanted, got)
+	for _, d := range helperTiers {
+		if want := d.name + " (" + d.guidance + ")"; !strings.Contains(got, want) {
+			t.Errorf("new-helper failure does not name %s; got:\n%s", d.name, got)
 		}
+	}
+	if strings.Contains(got, "convergedHelper") {
+		t.Errorf("violations name convergedHelper, which is listed and converged; got:\n%s", got)
 	}
 }
 
@@ -242,15 +294,25 @@ func identicalHelperViolations(ratchet map[string]helperTier, sqlite, postgres m
 		if !tier.known() {
 			violations = append(violations, fmt.Sprintf(
 				"ratchet entry %s has %s — file it under one of %s",
-				name, tier, helperTierChoices))
+				name, tier, helperTierChoices()))
 			continue
 		}
 		sqliteFunc, sqliteOK := sqlite[name]
 		postgresFunc, postgresOK := postgres[name]
-		if !sqliteOK || !postgresOK {
+		switch {
+		case !sqliteOK && !postgresOK:
 			violations = append(violations, fmt.Sprintf(
-				"stale ratchet entry %s (%s): sqlite present=%t, postgres present=%t — if it moved to shared code or was deleted, delete the entry; if it was renamed, rename the entry",
-				name, tier, sqliteOK, postgresOK))
+				"stale ratchet entry %s (%s): in neither dialect — delete the entry if the helper moved to shared code or was removed, or rename it to follow the helper",
+				name, tier))
+			continue
+		case !sqliteOK || !postgresOK:
+			present, missing := "sqlite", "postgres"
+			if !sqliteOK {
+				present, missing = missing, present
+			}
+			violations = append(violations, fmt.Sprintf(
+				"stale ratchet entry %s (%s): only %s has it — restore it in %s, or record why the dialects stopped sharing it before removing it from the ratchet",
+				name, tier, present, missing))
 			continue
 		}
 		if sqliteFunc.source != postgresFunc.source {
@@ -261,17 +323,14 @@ func identicalHelperViolations(ratchet map[string]helperTier, sqlite, postgres m
 	}
 
 	for name, sqliteFunc := range sqlite {
-		// Same-named constructors wire package-local implementations; they are
-		// not candidates for sharing even when their one-line bodies happen to
-		// match.
-		if _, listed := ratchet[name]; listed || strings.HasPrefix(name, "new") {
+		if _, listed := ratchet[name]; listed {
 			continue
 		}
 		postgresFunc, ok := postgres[name]
 		if ok && sqliteFunc.source == postgresFunc.source {
 			violations = append(violations, fmt.Sprintf(
 				"new byte-identical dialect helper %s in %s and %s — share it, or add it to identicalHelperRatchet under its tier: %s",
-				name, sqliteFunc.path, postgresFunc.path, helperTierChoices))
+				name, sqliteFunc.path, postgresFunc.path, helperTierChoices()))
 		}
 	}
 

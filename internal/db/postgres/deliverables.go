@@ -556,9 +556,8 @@ func scanDeliverableRows(rows *sql.Rows) ([]domain.Deliverable, error) {
 	return out, rows.Err()
 }
 
-// scanDeliverable fills a from one row. rowScanner (defined in repos.go)
-// unifies *sql.Row and *sql.Rows so this serves both the single-row Upsert
-// RETURNING and the list paths.
+// scanDeliverable fills a from one row. It takes a rowScanner so it serves both
+// the single-row Upsert RETURNING and the list paths.
 func scanDeliverable(sc rowScanner, a *domain.Deliverable) error {
 	return sc.Scan(
 		&a.ID, &a.ConversationID, &a.OrgID, &a.TeamID, &a.Provider, &a.Kind, &a.Scope, &a.Target,
