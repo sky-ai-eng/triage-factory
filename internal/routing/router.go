@@ -172,6 +172,10 @@ type Router struct {
 // nil-safe — review_requested / mentioned visibility routing degrades to
 // handler-team visibility (the pre-ticket behavior) when missing or when an
 // event carries no identity.
+//
+// TODO(TFAC-1283): take a RouterDeps struct instead of positional arguments,
+// and refuse a missing required store here. Today which arguments may be nil
+// is only this comment, and a nil required store panics at its first use.
 func NewRouter(prompts dbpkg.PromptStore, blueprints dbpkg.BlueprintStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, users dbpkg.UsersStore, tasks dbpkg.TaskStore, conversations dbpkg.ConversationStore, entities dbpkg.EntityStore, firings dbpkg.PendingFiringsStore, events dbpkg.EventStore, externalActions dbpkg.ExternalActionStore, orgs dbpkg.OrgsStore, teams dbpkg.TeamsStore, teamRepos dbpkg.TeamGitHubReposStore, jiraRules dbpkg.JiraStatusRulesStore, linearRules dbpkg.LinearTeamRulesStore, githubGroups dbpkg.TeamGitHubGroupsStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
 	return &Router{
 		prompts:         prompts,
