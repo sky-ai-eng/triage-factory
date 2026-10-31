@@ -105,6 +105,13 @@ type ExternalAction struct {
 	// autonomous system action (an event-triggered bot conversation, the Jira
 	// board mirror).
 	ActorUserID string `json:"actor_user_id,omitempty"`
+	// PerformedBy says who performed the act — one of the PerformedBy*
+	// consts. It is what tells a run's agent's own action apart from a
+	// person's approval of that run's deliverable or TF's teardown of it:
+	// both carry the run's ConversationID, and ActorUserID is set on a
+	// person's row and on a manual run's agent row alike. Required on every
+	// write; the writer sets it, and nothing defaults it.
+	PerformedBy string `json:"performed_by"`
 	// Credential names the org credential used — one of the Credential* consts.
 	Credential string `json:"credential"`
 	// DedupKey is the natural per-action key. A branch push carries a deterministic
@@ -393,6 +400,30 @@ const (
 	ActionSlackReactionAdded = "slack_reaction_added"
 )
 
+// Who performed an external action (ExternalAction.PerformedBy). Closed: the
+// column's CHECK holds it to these three.
+const (
+	// PerformedByAgent is a run's agent: every write its exec verbs, its gh
+	// channel and its git path make, and every refusal of one of them.
+	PerformedByAgent = "agent"
+	// PerformedByPerson is a person acting through TF: an approval, edit,
+	// dismissal or rejection of a run's deliverable, a board drag, a task
+	// close.
+	PerformedByPerson = "person"
+	// PerformedBySystem is TF acting on its own: the board mirrors and the
+	// teardown an event-driven task close runs.
+	PerformedBySystem = "system"
+)
+
+// IsPerformedBy reports whether v is one of the PerformedBy* values.
+func IsPerformedBy(v string) bool {
+	switch v {
+	case PerformedByAgent, PerformedByPerson, PerformedBySystem:
+		return true
+	}
+	return false
+}
+
 // Org-credential identities an external action can be performed under. The
 // ingestion gate keys on this: an org credential is recorded, an individual
 // user's own credential is excluded.
@@ -547,14 +578,16 @@ type ExternalActionListOpts struct {
 
 // DeliverableAction builds the external_actions row for a deliverable-backed GitHub
 // write. ConversationID is the drafting conversation (art.ConversationID),
-// actorUserID is the human who authorized it (empty for an autonomous one),
+// performedBy says who made the write (a person's approval, or TF's own
+// teardown: both build their rows here, so the caller names it), actorUserID
+// is the human who authorized it (empty for an autonomous one),
 // team_id is the deliverable's team, and the object coordinates come from the
 // deliverable: the entity it is about (art.EntityID), or, for a branch, the
 // registry row its key names. from/to carry the lifecycle transition
 // (draft→open, pending→submitted, …). credential is the org credential the
 // write is made under, classified by the caller before it opens whatever
 // transaction this row lands in.
-func DeliverableAction(art *Deliverable, actorUserID, action, from, to, credential string) ExternalAction {
+func DeliverableAction(art *Deliverable, performedBy, actorUserID, action, from, to, credential string) ExternalAction {
 	// A PR deliverable carries its html_url; a review deliverable carries none (its
 	// target is the PR), so fall back to the PR web URL from the target on the
 	// deliverable's host — the audit row links somewhere rather than render
@@ -578,6 +611,7 @@ func DeliverableAction(art *Deliverable, actorUserID, action, from, to, credenti
 		ToState:        to,
 		ConversationID: art.ConversationID,
 		ActorUserID:    actorUserID,
+		PerformedBy:    performedBy,
 		Credential:     credential,
 	}
 	if act.EntityID == "" {

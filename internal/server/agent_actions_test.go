@@ -40,17 +40,20 @@ func TestHandleAgentActions(t *testing.T) {
 		Target: "octo/repo#42", ExternalID: "777",
 		URL:        "https://github.com/octo/repo/pull/42#discussion_r777",
 		Credential: domain.CredentialGitHubApp, DetailJSON: `{"in_reply_to":555}`,
+		PerformedBy: domain.PerformedByAgent,
 	})
 	seedConversationAction(t, s, conversationID, domain.ExternalAction{
 		Provider: domain.ProviderGitHub, Action: domain.ActionGHChannelWrite,
 		Target: "octo/repo", Credential: domain.CredentialGitHubPAT,
-		DetailJSON: `{"method":"PUT","path":"/repos/octo/repo/pulls/42/merge","http_status":404,"attempted":"pr_merged"}`,
+		DetailJSON:  `{"method":"PUT","path":"/repos/octo/repo/pulls/42/merge","http_status":404,"attempted":"pr_merged"}`,
+		PerformedBy: domain.PerformedByAgent,
 	})
 	// A second conversation's action, to pin the scoping.
 	other := seedSteerConversation(t, s.db, "otheracts", dbtest.SeedConcluded)
 	seedConversationAction(t, s, other, domain.ExternalAction{
 		Provider: domain.ProviderGitHub, Action: domain.ActionBranchPushed,
 		Target: "octo/repo", Credential: domain.CredentialGitHubApp,
+		PerformedBy: domain.PerformedByAgent,
 	})
 
 	page := decodeList[map[string]any](t, doJSON(t, s, http.MethodPost,
@@ -130,6 +133,7 @@ func TestHandleAgentActions_CorruptDetails(t *testing.T) {
 	seedConversationAction(t, s, conversationID, domain.ExternalAction{
 		Provider: domain.ProviderGitHub, Action: domain.ActionGHChannelWrite,
 		Target: "octo/repo", Credential: domain.CredentialGitHubApp,
+		PerformedBy: domain.PerformedByAgent,
 	})
 	if _, err := s.db.Exec(`UPDATE external_actions SET detail_json='{not valid json' WHERE conversation_id=?`, conversationID); err != nil {
 		t.Fatalf("corrupt detail: %v", err)

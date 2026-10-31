@@ -473,33 +473,31 @@ func onlyConflict(t *testing.T, rec *notifytest.Recorder, taskID string) kinds.C
 }
 
 // TestAuthorCentric_TwoTeams_LoserWithoutAnImmediateTrigger pins which teams
-// lose, the author being on two teams that each have a trigger. A team with
-// auto-delegation or its bot off lost nothing: its trigger could not have run
-// either. A team whose trigger is deferred lost, ranked before the winner or
-// after it, because the winner's claim keeps the post-scoring pass from ever
-// evaluating it.
+// lose, the author being on two teams that each have a trigger, the second of
+// which fires nothing now. A team with auto-delegation or its bot off lost
+// nothing: its trigger could not have run either. A team whose trigger is
+// deferred lost, because the winner's claim keeps the post-scoring pass from
+// ever evaluating it. (Ranked first, a deferred team holds the walk instead:
+// ranked_walk_test.go.)
 func TestAuthorCentric_TwoTeams_LoserWithoutAnImmediateTrigger(t *testing.T) {
 	for _, c := range []struct {
 		name string
-		// sideline changes one team so that it fires nothing now.
+		// sideline changes the team ranked second so that it fires nothing
+		// now.
 		sideline func(t *testing.T, database *sql.DB, team, trigger string)
-		// first sidelines the team ranked first rather than second, so the
-		// other one wins.
-		first bool
-		loses bool
+		loses    bool
 	}{
 		{"auto-delegation off", func(t *testing.T, database *sql.DB, team, _ string) {
 			if _, err := database.Exec(`UPDATE team_settings SET auto_delegate_enabled = 0 WHERE team_id = ?`, team); err != nil {
 				t.Fatalf("turn auto-delegation off: %v", err)
 			}
-		}, false, false},
+		}, false},
 		{"bot off", func(t *testing.T, database *sql.DB, team, _ string) {
 			if _, err := database.Exec(`UPDATE team_agents SET enabled = 0 WHERE team_id = ?`, team); err != nil {
 				t.Fatalf("turn the bot off: %v", err)
 			}
-		}, false, false},
-		{"deferred trigger", deferTriggerFor, false, true},
-		{"deferred trigger ranked first", deferTriggerFor, true, true},
+		}, false},
+		{"deferred trigger", deferTriggerFor, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			database := newTestDB(t)
@@ -515,7 +513,7 @@ func TestAuthorCentric_TwoTeams_LoserWithoutAnImmediateTrigger(t *testing.T) {
 			seedImmediateTrigger(t, database, teamB, domain.EventGitHubPRCICheckFailed, "ci-b")
 			// Equal priority, so the team with the lower id ranks first.
 			loser, loserTrigger, winner := teamB, "trig-ci-b", teamA
-			if (minStr(teamA, teamB) == teamB) != c.first {
+			if minStr(teamA, teamB) == teamB {
 				loser, loserTrigger, winner = teamA, "trig-ci-a", teamB
 			}
 			c.sideline(t, database, loser, loserTrigger)

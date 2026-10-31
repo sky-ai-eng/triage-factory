@@ -450,7 +450,7 @@ func (ah *deliverablesHandler) handleDeliverablePRUpdate(w http.ResponseWriter, 
 	// the snapshot refresh below (which is itself best-effort and skipped when
 	// details don't parse). No state transition — it's an in-place title/body edit.
 	recordExternalActionBestEffort(r.Context(), ah.tx, orgID, userID,
-		domain.DeliverableAction(art, userID, domain.ActionPREdited, "", "",
+		domain.DeliverableAction(art, domain.PerformedByPerson, userID, domain.ActionPREdited, "", "",
 			ghclient.CredentialForRepo(r.Context(), ah.ghResolver, orgID, owner, repo)))
 
 	// Refresh the deliverable's mutable snapshot to the new title/body; proposed
@@ -799,7 +799,7 @@ func (ah *deliverablesHandler) handleDeliverableApprove(w http.ResponseWriter, r
 			return e
 		}
 		return tx.ExternalActions.Record(cleanupCtx, orgID,
-			domain.DeliverableAction(art, userID, domain.ActionPRMarkedReady, domain.DeliverableStatePRDraft, domain.DeliverableStatePROpen, credential))
+			domain.DeliverableAction(art, domain.PerformedByPerson, userID, domain.ActionPRMarkedReady, domain.DeliverableStatePRDraft, domain.DeliverableStatePROpen, credential))
 	}); err != nil {
 		deliverablesLog.Warn("flip PR deliverable to open + record action failed", "deliverable", art.ID, "error", err)
 	}
@@ -906,7 +906,7 @@ func (ah *deliverablesHandler) handleDeliverableDismiss(w http.ResponseWriter, r
 			return e
 		}
 		return tx.ExternalActions.Record(r.Context(), orgID,
-			domain.DeliverableAction(art, userID, domain.ActionPRClosed, domain.DeliverableStatePRDraft, domain.DeliverableStatePRClosed, credential))
+			domain.DeliverableAction(art, domain.PerformedByPerson, userID, domain.ActionPRClosed, domain.DeliverableStatePRDraft, domain.DeliverableStatePRClosed, credential))
 	}); err != nil {
 		internalError(w, "deliverables", err)
 		return
@@ -1057,7 +1057,7 @@ func (ah *deliverablesHandler) handleDeliverableReject(w http.ResponseWriter, r 
 			return e
 		}
 		if e := tx.ExternalActions.Record(cleanupCtx, orgID,
-			domain.DeliverableAction(art, userID, domain.ActionPRClosed, domain.DeliverableStatePRDraft, domain.DeliverableStatePRClosed, credential)); e != nil {
+			domain.DeliverableAction(art, domain.PerformedByPerson, userID, domain.ActionPRClosed, domain.DeliverableStatePRDraft, domain.DeliverableStatePRClosed, credential)); e != nil {
 			return e
 		}
 		return tx.ExternalActions.Record(cleanupCtx, orgID,
@@ -1144,6 +1144,7 @@ func branchDeletedAction(art *domain.Deliverable, userID, repositoryID, repoPath
 		ActorUserID:    userID,
 		Credential:     credential,
 		DetailJSON:     string(detail),
+		PerformedBy:    domain.PerformedByPerson,
 	}
 }
 

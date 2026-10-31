@@ -357,9 +357,10 @@ func TestReDeriveWorker_Snoozed_AdmitsNothing(t *testing.T) {
 }
 
 // TestReDeriveWorker_CrossTeamTrigger_AdmitsOnlyTheVisibleTeams pins the
-// cross-team isolation: a task created for team A with team B holding its
-// own deferred trigger on the same event type and predicate must not get a
-// firing for team B's trigger.
+// cross-team isolation: a task owned by team A, with team B holding its own
+// deferred trigger on the same event type and predicate, must not get a firing
+// for team B's trigger. The walk's routing, recomputed from the event, is the
+// owner's alone.
 func TestReDeriveWorker_CrossTeamTrigger_AdmitsOnlyTheVisibleTeams(t *testing.T) {
 	database := newTestDB(t)
 	taskID, _ := setupReDeriveScenario(t, database, 0.6)
@@ -403,12 +404,11 @@ func TestReDeriveWorker_CrossTeamTrigger_AdmitsOnlyTheVisibleTeams(t *testing.T)
 	requireReDeriveDone(t, database, taskID)
 }
 
-// TestReDeriveWorker_TeamNotInVisibilitySet_AdmitsNothing pins the leak the
-// visibility gate closes: a team with auto-delegation fully enabled and a
-// deferred trigger matching the stored event must not get a firing against
-// — nor consolidate ownership of — a task whose visibility set doesn't
-// include it. Every other gate is open here, so only the task_teams
-// membership check can stop it.
+// TestReDeriveWorker_TeamNotInVisibilitySet_AdmitsNothing: a team with
+// auto-delegation fully enabled and a deferred trigger matching the stored
+// event must not get a firing against — nor consolidate ownership of — a task
+// another team owns and it cannot see. Every other gate is open here, so only
+// the walk's routing, which names the owner alone, can stop it.
 func TestReDeriveWorker_TeamNotInVisibilitySet_AdmitsNothing(t *testing.T) {
 	database := newTestDB(t)
 	stores := sqlitestore.New(database)
@@ -481,42 +481,20 @@ func TestReDeriveWorker_TeamNotInVisibilitySet_AdmitsNothing(t *testing.T) {
 	requireReDeriveDone(t, database, task.ID)
 }
 
-func TestReDeriveWorker_ZeroThresholdTrigger_IsNotReDerived(t *testing.T) {
+// TestReDeriveWorker_ImmediateTrigger_WasDecidedAtEventTime: with no deferred
+// trigger matched, the event-time walk held nothing and decided every
+// trigger, so the post-scoring pass leaves an immediate trigger alone whatever
+// became of it then. The immediate triggers it does decide are the ones a
+// hold kept waiting (ranked_walk_test.go).
+func TestReDeriveWorker_ImmediateTrigger_WasDecidedAtEventTime(t *testing.T) {
 	database := newTestDB(t)
+	taskID, _ := setupReDeriveScenario(t, database, 0)
+	scoreTask(t, database, taskID, 0.9)
 
-	entity2, _, _ := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/repo#2", "", "pr", "Test PR 2", "https://github.com/owner/repo/pull/2")
-	entityID := entity2.ID
-	meta := events.GitHubPRCICheckFailedMetadata{
-		Author: "aidan", CheckName: "lint", Repo: "owner/repo",
-	}
-	metaJSON, _ := json.Marshal(meta)
-	eventID, _ := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
-		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entityID,
-		DedupKey: "lint", MetadataJSON: string(metaJSON),
-	})
-	task, _, _ := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, entityID, domain.EventGitHubPRCICheckFailed, "lint", eventID, 0.5)
-
-	createTestPrompt(t, database, domain.Prompt{ID: "p2", Name: "Test2", Body: "Do", Source: "user"})
-
-	// Trigger with min_autonomy_suitability=0 (immediate fire, not deferred)
-	createTriggerForTestRouting(t, database, domain.EventHandler{
-		ID: "t-zero", Kind: domain.EventHandlerKindTrigger,
-		BlueprintID: "p2", TriggerType: domain.TriggerTypeEvent,
-		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: intPtr(4),
-		MinAutonomySuitability: floatPtr(0.0), Enabled: true,
-	})
-
-	scoreTask(t, database, task.ID, 0.9)
 	drainReDeriveOnce(t, reDeriveRouter(t, database, nil))
 
-	// A zero-threshold trigger is HandleEvent's to fire; the re-derive
-	// leaves it alone.
-	requireNoFirings(t, database, task.ID)
-	requireReDeriveDone(t, database, task.ID)
-	got, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, task.ID)
-	if got.Status != "queued" {
-		t.Errorf("expected queued (zero-threshold trigger skipped), got %s", got.Status)
-	}
+	requireNoFirings(t, database, taskID)
+	requireReDeriveDone(t, database, taskID)
 }
 
 func TestReDeriveWorker_PredicateMismatch_AdmitsNothing(t *testing.T) {

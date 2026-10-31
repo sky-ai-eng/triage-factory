@@ -455,7 +455,8 @@ type denial struct {
 
 // recordDenied writes the commit_sign_denied audit row for a refusal that is a
 // security signal. Nothing was signed, so it is written under CredentialNone,
-// about the signer's account on its host. Best-effort, like every audit row a
+// about the signer's account on its host, and performed by the agent, whose
+// attempt it refuses. Best-effort, like every audit row a
 // gate writes: the refusal is already decided, and does not depend on this
 // row.
 func recordDenied(ctx context.Context, stores db.Stores, d denial) {
@@ -477,6 +478,7 @@ func recordDenied(ctx context.Context, stores db.Stores, d denial) {
 		Credential:     domain.CredentialNone,
 		DetailJSON:     string(raw),
 		DedupKey:       d.dedupKey,
+		PerformedBy:    domain.PerformedByAgent,
 	}
 	if d.conversationID != "" {
 		if d.reason == deniedBudgetExhausted {

@@ -263,6 +263,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 			Target: renameOldSlug + "#19", RepositoryID: gheRepo.ID, ExternalID: "19",
 			URL:        TestOtherGitHubHost + "/" + renameOldSlug + "/pull/19",
 			Credential: domain.CredentialGitHubApp, DedupKey: gheActionKey,
+			PerformedBy: domain.PerformedByAgent,
 		}); err != nil {
 			t.Fatalf("seed ghe action: %v", err)
 		}
@@ -419,6 +420,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 				Target: domain.PullRequestTarget(renameOldSlug, number), EntityID: entityID, ExternalID: fmt.Sprint(number),
 				URL:        fmt.Sprintf("%s/%s/pull/%d", host, renameOldSlug, number),
 				Credential: domain.CredentialGitHubApp, DedupKey: key,
+				PerformedBy: domain.PerformedByAgent,
 			}); err != nil {
 				t.Fatalf("seed action on %s: %v", host, err)
 			}
@@ -883,6 +885,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 			Target: renameNewSlug, RepositoryID: bare.ID, ExternalID: earlyRef,
 			URL:        "https://github.com/" + renameNewSlug + "/tree/early",
 			Credential: domain.CredentialGitHubApp, DedupKey: earlyPushKey,
+			PerformedBy: domain.PerformedByAgent,
 		}); err != nil {
 			t.Fatalf("seed the early push's ledger row: %v", err)
 		}
@@ -1424,7 +1427,8 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 		Target: renameOldSlug + "#18", EntityID: entity.ID, ExternalID: "18",
 		URL:        "https://github.com/" + renameOldSlug + "/pull/18",
 		Credential: domain.CredentialGitHubApp, DedupKey: movedActionKey,
-		DetailJSON: `{"method":"POST","path":"/repos/` + renameOldSlug + `/pulls"}`,
+		DetailJSON:  `{"method":"POST","path":"/repos/` + renameOldSlug + `/pulls"}`,
+		PerformedBy: domain.PerformedByAgent,
 	}); err != nil {
 		t.Fatalf("seed moved action: %v", err)
 	}
@@ -1433,6 +1437,7 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 		Target: renameNeighbourSlug + "#4", EntityID: neighbourEntity.ID, ExternalID: "4",
 		URL:        "https://github.com/" + renameNeighbourSlug + "/pull/4",
 		Credential: domain.CredentialGitHubApp, DedupKey: neighbourActionKey,
+		PerformedBy: domain.PerformedByAgent,
 	}); err != nil {
 		t.Fatalf("seed neighbour action: %v", err)
 	}
@@ -1558,6 +1563,7 @@ func recordRepoDeliverables(t *testing.T, s db.Stores, orgID, teamID string, rep
 		},
 	} {
 		act.TeamID, act.Provider, act.Scope, act.Credential = teamID, domain.ProviderGitHub, TestGitHubHost, domain.CredentialGitHubApp
+		act.PerformedBy = domain.PerformedByAgent
 		if err := s.ExternalActions.RecordSystem(ctx, orgID, act); err != nil {
 			t.Fatalf("seed ledger row %s: %v", act.DedupKey, err)
 		}

@@ -12,6 +12,7 @@ import (
 
 	"github.com/zalando/go-keyring"
 
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
@@ -275,6 +276,65 @@ func TestDeliverableApprove(t *testing.T) {
 	// Approval writes no memory: the conversation's row is the agent's own
 	// account of what it tried, and a verdict about a deliverable is not that.
 	assertAgentMemoryUntouched(t, srv, conversationID)
+}
+
+// TestDeliverableApprove_LedgerNamesWhoPerformedEachAct pins performed_by on
+// the two writers that share one conversation's ledger: the run's agent,
+// through the agenthost funnel, and the person approving the run's draft PR.
+// Both rows carry the conversation's id and, on a manual run, the same actor,
+// so performed_by is the only column that tells them apart.
+func TestDeliverableApprove_LedgerNamesWhoPerformedEachAct(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	mux := newAppAPIMux()
+	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42, "node_id": "PR_node", "state": "open", "draft": true, "title": "Proposed title", "body": "Proposed body"})
+	})
+	mux.HandleFunc("POST /api/graphql", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"markPullRequestReadyForReview": map[string]any{"pullRequest": map[string]any{"isDraft": false}}}})
+	})
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+
+	artID, conversationID, _ := seedDraftPRDeliverableWithConversation(t, srv, "performer", "acme", "api", 42)
+	stores := sqlitestore.New(srv.db)
+	agenthost.RecordExternalWrite(context.Background(), stores, agenthost.ConversationInfo{
+		OrgID:          runmode.LocalDefaultOrgID,
+		UserID:         runmode.LocalDefaultUserID,
+		ConversationID: conversationID,
+		TeamID:         runmode.LocalDefaultTeamID,
+	}, nil, &domain.ExternalAction{
+		Provider:   domain.ProviderGitHub,
+		Action:     domain.ActionCommentPosted,
+		Target:     "acme/api#42",
+		Credential: domain.CredentialGitHubApp,
+	})
+
+	rec := doJSON(t, srv, http.MethodPost, "/api/deliverables/"+artID+"/approve", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("approve = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	actions, _, err := stores.ExternalActions.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID, domain.ExternalActionListOpts{})
+	if err != nil {
+		t.Fatalf("ListByConversation: %v", err)
+	}
+	want := map[string]string{
+		domain.ActionCommentPosted: domain.PerformedByAgent,
+		domain.ActionPRMarkedReady: domain.PerformedByPerson,
+	}
+	if len(actions) != len(want) {
+		t.Fatalf("conversation's actions = %+v, want one %s and one %s", actions, domain.ActionCommentPosted, domain.ActionPRMarkedReady)
+	}
+	for _, a := range actions {
+		if a.PerformedBy != want[a.Action] {
+			t.Errorf("%s row performed_by = %q, want %q", a.Action, a.PerformedBy, want[a.Action])
+		}
+		if a.ActorUserID != runmode.LocalDefaultUserID {
+			t.Errorf("%s row actor = %q, want the local user on both rows", a.Action, a.ActorUserID)
+		}
+	}
 }
 
 // TestDeliverableApprove_ClosesOnlyWhileTheTaskIsStillTheRunsToClose pins the

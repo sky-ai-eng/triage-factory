@@ -362,6 +362,7 @@ type actionJSON struct {
 	ToState        string          `json:"to_state,omitempty"`
 	ConversationID string          `json:"conversation_id,omitempty"`
 	ActorUserID    string          `json:"actor_user_id,omitempty"`
+	PerformedBy    string          `json:"performed_by"`
 	Credential     string          `json:"credential"`
 	Details        json.RawMessage `json:"details,omitempty"`
 	OccurredAt     time.Time       `json:"occurred_at"`
@@ -391,6 +392,7 @@ func toActionJSON(a domain.ExternalAction) actionJSON {
 		ToState:        a.ToState,
 		ConversationID: a.ConversationID,
 		ActorUserID:    a.ActorUserID,
+		PerformedBy:    a.PerformedBy,
 		Credential:     a.Credential,
 		Details:        details,
 		OccurredAt:     a.OccurredAt,

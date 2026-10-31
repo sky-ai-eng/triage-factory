@@ -28,6 +28,7 @@ func RunExternalActionReferenceConformance(t *testing.T, mk ExternalActionNodeID
 			Target:         target,
 			ConversationID: f.ConversationID,
 			Credential:     domain.CredentialGitHubApp,
+			PerformedBy:    domain.PerformedByAgent,
 		}
 	}
 

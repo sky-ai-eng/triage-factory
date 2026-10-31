@@ -112,6 +112,10 @@ function TransitionChip({ from, to }: { from: string; to: string }) {
 // org feed; "human" when a human authorized it but the name isn't resolved (the
 // team feed); "bot" for an autonomous system action (no actor — an
 // event-triggered run, the Jira mirror).
+//
+// TODO(TFAC-1264): this reads actor_user_id, which a manual run's agent rows
+// carry too, so the agent's acts render as the person's. Read performed_by:
+// an agent row with an actor is the agent, authorized by that person.
 function ActorChip({ name, actorUserID }: { name?: string; actorUserID?: string }) {
   const isHuman = !!name || !!actorUserID
   const label = name || (actorUserID ? 'human' : 'bot')
