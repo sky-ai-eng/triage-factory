@@ -60,6 +60,12 @@ type LinearTeamRulesStore interface {
 	// JiraStatusRulesStore.TracksJiraProjectSystem.
 	TracksTeamSystem(ctx context.Context, teamID, workspaceID, linearTeamID string) (bool, error)
 
+	// TrackingTeamIDsSystem returns the distinct, sorted ids of the org's
+	// active teams with a row for linearTeamID in workspaceID: the teams a
+	// notification about that Linear team is for. Archived teams are left out,
+	// because nothing is sent to one. Admin pool.
+	TrackingTeamIDsSystem(ctx context.Context, orgID, workspaceID, linearTeamID string) ([]string, error)
+
 	// ReplaceForTeam makes rules the team's whole set in workspaceID in one
 	// transaction: the team's rows in that workspace whose linear_team_id is
 	// absent from rules are deleted, the rest are upserted and stamped with

@@ -172,6 +172,38 @@ func (s *notificationStore) resolve(ctx context.Context, reason domain.Notificat
 	return out, rows.Err()
 }
 
+// RecipientsSystem reads pgNotificationSent the other way round: the
+// memberships it tests, listed.
+func (s *notificationStore) RecipientsSystem(ctx context.Context, orgID string, a domain.NotificationAudience) ([]string, error) {
+	if err := a.Validate(); err != nil {
+		return nil, fmt.Errorf("%w: %v", db.ErrInvalidNotification, err)
+	}
+	var (
+		query string
+		args  []any
+	)
+	switch a.Scope {
+	case domain.NotificationScopeOrg:
+		query = `SELECT DISTINCT om.user_id::text FROM org_memberships om
+			WHERE om.org_id = $1 AND ($2 = 'members' OR om.role IN ('owner', 'admin'))
+			ORDER BY 1`
+		args = []any{orgID, a.Role}
+	case domain.NotificationScopeTeam:
+		query = `SELECT DISTINCT tm.user_id::text FROM memberships tm JOIN teams t ON t.id = tm.team_id
+			WHERE t.org_id = $1 AND tm.team_id = $2::uuid AND t.deleted_at IS NULL
+			  AND ($3 = 'members' OR tm.role = 'admin')
+			ORDER BY 1`
+		args = []any{orgID, a.TeamID, a.Role}
+	default:
+		return []string{a.UserID}, nil
+	}
+	rows, err := s.admin.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list notification recipients: %w", err)
+	}
+	return scanIDs(rows, "notification recipient")
+}
+
 func (s *notificationStore) DeleteRetiredSystem(ctx context.Context, now time.Time) (int64, error) {
 	res, err := s.admin.ExecContext(ctx, `
 		DELETE FROM notifications

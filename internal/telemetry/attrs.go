@@ -59,6 +59,7 @@ const (
 	keySigningMode    = attribute.Key("mode")
 	keyBudget         = attribute.Key("budget")
 	keySigned         = attribute.Key("signed")
+	keyKind           = attribute.Key("kind")
 )
 
 // Opaque row identifiers, the backbone of the set. Each is the id and
@@ -212,3 +213,9 @@ func Budget(name string) attribute.KeyValue       { return keyBudget.String(name
 
 // Signed is whether a pushed commit was signed, "true" or "false".
 func Signed(signed bool) attribute.KeyValue { return keySigned.String(strconv.FormatBool(signed)) }
+
+// NotificationKind is a registered notification kind's name
+// ("linear.team_unreadable"), a Go value declared in internal/notify/kinds or
+// an extension's own package, or "clear_source" for a ClearSource call; never
+// text a tenant wrote.
+func NotificationKind(name string) attribute.KeyValue { return keyKind.String(name) }

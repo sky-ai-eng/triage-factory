@@ -8,6 +8,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/instance"
 	"github.com/sky-ai-eng/triage-factory/internal/memoryprovision"
+	"github.com/sky-ai-eng/triage-factory/internal/notify"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/promptseed"
 	"github.com/sky-ai-eng/triage-factory/internal/ratelimits"
@@ -178,6 +179,10 @@ func (a *App) startBrain(term int64) {
 	// deletes nothing. Recovering a dead executor's claims is not the brain's
 	// job: every dispatcher takes over expired claims on its own pass.
 	go instance.RunRegistryGC(brainCtx, a.stores.Instances, instance.RegistryGCStaleAfter, instance.RegistryGCInterval)
+	// Notification retention: deletes rows resolved past their retention and
+	// notices past their expiry, across orgs. One sweeper, like the expiry
+	// sweep below; every server role writes the rows.
+	go notify.RunRetentionGC(brainCtx, a.stores.Notifications, notify.RetentionGCInterval)
 	// Rate-limit reading expiry: deletes every org's readings past their
 	// reset. The route already leaves them out; one sweeper is enough, and
 	// the readings themselves are written by every serving process's flusher

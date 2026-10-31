@@ -40,6 +40,7 @@ var approvedKeys = []string{
 	"event.id",
 	"event.type",
 	"job",
+	"kind",
 	"mode",
 	"op",
 	"org.id",
@@ -78,6 +79,7 @@ func TestAttributeHelpersEmitOnlyApprovedKeys(t *testing.T) {
 		SnapshotBundleBytes(1024), SnapshotPatchBytes(512),
 		SnapshotTranscriptBytes(2048), SnapshotRawBytes(8192), SnapshotWaitedMs(250),
 		Signer("org"), SigningMode("control_plane"), Budget("per_claim"), Signed(true),
+		NotificationKind("linear.team_unreadable"),
 		AgentCostUSD(0.42), AgentDuration(9000),
 		WorkKind("event_queue"), Reason("budget_exhausted"),
 	}
@@ -123,6 +125,7 @@ func TestEveryAttributeHelperIsCovered(t *testing.T) {
 		"AgentCostUSD":     true, "AgentDuration": true,
 		"WorkKind": true, "Reason": true,
 		"Signer": true, "SigningMode": true, "Budget": true, "Signed": true,
+		"NotificationKind": true,
 	}
 	sort.Strings(declared)
 	for _, name := range declared {

@@ -73,7 +73,7 @@ This is the part that has to stay small. Every consumer uses one of three verbs 
 | `Sync(ctx, orgID, active []P)`    | The producer evaluates a whole set in one pass.     | Opens or bumps every member of `active`; resolves every open occurrence of the kind in the org whose key is not in it. **Only on a complete pass** — a pass that could not reach the upstream calls nothing. |
 | `Post(ctx, orgID, p)`             | Notices.                                            | Opens the notice, or bumps an unexpired one with the same key and extends its expiry.                                                                                                                        |
 
-`Condition[P]` has `Set` and `Sync`; `Notice[P]` has `Post`. The compiler rejects the wrong verb. None of them returns a value: a failure is logged and counted in `tf_notify_write_failures_total{kind}` inside `notify`, and never fails the work that raised it.
+`notify.Condition` returns a `*ConditionKind[P]`, which has `Set` and `Sync`; `notify.Notice` returns a `*NoticeKind[P]`, which has `Post`. The compiler rejects the wrong verb. None of them returns a value: a failure is logged and counted in `tf_notify_write_failures_total{kind}` inside `notify`, and never fails the work that raised it.
 
 ### Call sites
 
@@ -131,17 +131,17 @@ var LinearTeamUnreadable = notify.Condition(notify.ConditionSpec[LinearTeam]{
 })
 ```
 
-| Spec field    | Condition | Notice   | Notes                                                                                                                      |
-| ------------- | --------- | -------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `Name`        | ✓         | ✓        | Stable; stored on rows.                                                                                                    |
-| `Source`      | optional  | optional | An event-source kind. `ClearSource` resolves a condition by it.                                                            |
-| `Priority`    | ✓         | ✓        | `func(P) Priority`; `notify.Always(p)` for a constant. Notices default to `Low`.                                           |
-| `Dismissible` | ✓         | —        | Notices are always dismissible.                                                                                            |
-| `TTL`         | —         | ✓        | 14 days unless the kind says otherwise.                                                                                    |
-| `Key`         | ✓         | ✓        | Ids only.                                                                                                                  |
-| `Audience`    | ✓         | ✓        | Composed from the constructors below.                                                                                      |
-| `Render`      | ✓         | ✓        | `func(P, Recipient) Content`. Receives the audience being rendered, so a team row can carry an action an org row does not. |
-| `Example`     | ✓         | ✓        | A representative `P`, used by the kinds conformance test and a dev page that renders every kind.                           |
+| Spec field    | Condition | Notice   | Notes                                                                                                                             |
+| ------------- | --------- | -------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `Name`        | ✓         | ✓        | Stable; stored on rows.                                                                                                           |
+| `Source`      | optional  | optional | An event-source kind. `ClearSource` resolves a condition by it.                                                                   |
+| `Priority`    | ✓         | ✓        | `notify.Always(p)` for a constant; `notify.PriorityOf(func(P) Priority)` when it depends on the params. Notices default to `Low`. |
+| `Dismissible` | ✓         | —        | Notices are always dismissible.                                                                                                   |
+| `TTL`         | —         | ✓        | Required: `notify.DefaultNoticeTTL` (14 days) unless the kind has a reason for another.                                           |
+| `Key`         | ✓         | ✓        | Ids only.                                                                                                                         |
+| `Audience`    | ✓         | ✓        | Composed from the constructors below.                                                                                             |
+| `Render`      | ✓         | ✓        | `func(P, Recipient) Content`. Receives the audience being rendered, so a team row can carry an action an org row does not.        |
+| `Example`     | ✓         | ✓        | A representative `P`, used by the kinds conformance test and a dev page that renders every kind.                                  |
 
 **Where kinds live.** `internal/notify/kinds`, one file per source, so every audience and every line of copy is reviewed in one place. `kinds` imports `notify` and `domain`, never a producer package. `ee/` defines its kinds in its own packages with the same constructors; core never imports them.
 
@@ -315,7 +315,7 @@ The visual design is TFAC-1239, under the UI V1 epic. It starts from scratch; th
 
 ## Local mode
 
-The same calls, tables (SQLite) and page. Local is N=1: the one user is the recipient of every audience, there is no RLS, and the audience constructors resolve to that user.
+The same calls, tables (SQLite) and page. Local is N=1: the one user is the recipient of every audience, there is no RLS, and the audience constructors resolve to that user: a kind with several audiences writes one user-scoped row.
 
 ## First consumers
 

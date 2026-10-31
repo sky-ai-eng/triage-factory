@@ -66,6 +66,13 @@ type NotificationStore interface {
 	// with that source.
 	ResolveSourceSystem(ctx context.Context, orgID, source string) ([]domain.Notification, error)
 
+	// RecipientsSystem returns the distinct, sorted ids of the users a row
+	// with audience a in orgID is sent to: ListForViewer's "is sent"
+	// predicate read the other way round, so a websocket ping reaches exactly
+	// the inboxes the row appears in. An archived team's audience is nobody.
+	// Admin pool, read fresh per emission.
+	RecipientsSystem(ctx context.Context, orgID string, a domain.NotificationAudience) ([]string, error)
+
 	// DeleteRetiredSystem deletes, across orgs, rows resolved more than
 	// NotificationResolvedRetention before now and notices expired at now.
 	DeleteRetiredSystem(ctx context.Context, now time.Time) (int64, error)

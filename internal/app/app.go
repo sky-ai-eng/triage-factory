@@ -443,6 +443,7 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 	}
 	a.buildInfra()                                 // event bus (SetEventBus only when a server exists)
 	a.buildWSBackplane()                           // multi-mode cross-pod fan-out for wsHub (TFAC-584); no-op in local mode
+	a.buildNotify()                                // durable notifications' verbs write from here on
 	if err = a.buildRunCredentials(); err != nil { // ghResolver / runSecrets / modelFor / llmResolver
 		return nil, err
 	}
