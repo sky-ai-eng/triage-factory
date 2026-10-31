@@ -4,8 +4,12 @@ import type { ListRequest } from '../lib/apiClient'
 import { usePagedList } from '../hooks/usePagedList'
 import { ObjectRow } from './ObjectRow'
 import { ActionRow } from './ActionRow'
-import { PROVIDER_LABEL } from './deliverableMeta'
-import { OBJECT_KINDS, OBJECT_KIND_META, OBJECT_PROVIDERS } from './objectMeta'
+import {
+  OBJECT_KINDS,
+  OBJECT_PROVIDERS,
+  PROVIDER_LABEL,
+  metaForObjectKind,
+} from './deliverableMeta'
 import { ACTION_OPTIONS, ACTION_PROVIDERS } from './actionMeta'
 
 // ActivityFeed is the EE /usage governance surface, with TWO lenses on the
@@ -281,7 +285,7 @@ export default function ActivityFeed({
             onChange={(v) => setFilter('objectKind', v)}
             options={[
               { value: 'all', label: 'All' },
-              ...OBJECT_KINDS.map((k) => ({ value: k, label: OBJECT_KIND_META[k].label })),
+              ...OBJECT_KINDS.map((k) => ({ value: k, label: metaForObjectKind(k).label })),
             ]}
           />
         ) : (

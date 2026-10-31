@@ -157,15 +157,16 @@ func (r *usageRig) activityReq(caller, teamID, body string) *http.Request {
 
 // artifactSeed is what seedArtifacts staged, for the assertions to name.
 type artifactSeed struct {
-	branch, pr, issue domain.ObjectRef
-	prDeliverableID   string
+	branch, pr, issue, review            domain.ObjectRef
+	prDeliverableID, reviewDeliverableID string
 }
 
 // seedArtifacts stages the ledger the artifacts feeds read. Three runs push
 // one branch, two on teamA and one on teamB; one teamA run opens a pull
 // request, which has a newer and an older deliverable on teamA; one teamB
-// run transitions a Jira issue. TF's own row on the pull request and a
-// refused push on teamA must not show.
+// run transitions a Jira issue; and a person's approval posts a teamA run's
+// staged review, which has its review deliverable. TF's own row on the pull
+// request and a refused push on teamA must not show.
 func (r *usageRig) seedArtifacts(t *testing.T) artifactSeed {
 	t.Helper()
 	ctx := t.Context()
@@ -225,6 +226,12 @@ func (r *usageRig) seedArtifacts(t *testing.T) artifactSeed {
 	record(r.teamB, b1, push)
 	prRow := record(r.teamA, a1, opened)
 	issueRow := record(r.teamB, b1, transitioned)
+	reviewRow := record(r.teamA, a2, domain.ExternalAction{
+		Provider: domain.ProviderGitHub, Scope: host, Action: domain.ActionReviewSubmitted, Target: "octo/api#7",
+		ExternalID: "901", EntityID: pr.ID, RepositoryID: repo.ID, ActorUserID: r.member,
+		PerformedBy: domain.PerformedByPerson, ObjectKind: domain.ObjectKindReview,
+		ObjectKey: domain.GitHubReviewObjectKey("901"),
+	})
 	system := opened
 	system.Action, system.PerformedBy = domain.ActionPRClosed, domain.PerformedBySystem
 	record(r.teamA, a1, system)
@@ -242,6 +249,11 @@ func (r *usageRig) seedArtifacts(t *testing.T) artifactSeed {
 	}
 	deliverable(domain.DeliverableStatePRClosed, base)
 	newest := deliverable(domain.DeliverableStatePROpen, base.Add(time.Minute))
+	posted := uuid.NewString()
+	pgtest.MustExec(t, r.h.AdminDB, `
+		INSERT INTO deliverables (id, org_id, team_id, conversation_id, provider, scope, kind, target, state, dedup_key, external_id, entity_id)
+		VALUES ($1, $2, $3, $4, 'github', $5, 'review', 'octo/api#7', 'submitted', $6, '901', $7)
+	`, posted, r.orgID, r.teamA, a2, host, uuid.NewString(), pr.ID)
 
 	ref := func(a domain.ExternalAction) domain.ObjectRef {
 		id, ok := domain.ObjectID(a)
@@ -250,7 +262,10 @@ func (r *usageRig) seedArtifacts(t *testing.T) artifactSeed {
 		}
 		return domain.ObjectRef(id)
 	}
-	return artifactSeed{branch: ref(branchRow), pr: ref(prRow), issue: ref(issueRow), prDeliverableID: newest}
+	return artifactSeed{
+		branch: ref(branchRow), pr: ref(prRow), issue: ref(issueRow), review: ref(reviewRow),
+		prDeliverableID: newest, reviewDeliverableID: posted,
+	}
 }
 
 // TestUsageArtifactsActivityHandler_Postgres pins the artifacts feeds: the
@@ -318,8 +333,8 @@ func TestUsageArtifactsActivityHandler_Postgres(t *testing.T) {
 			rec := httptest.NewRecorder()
 			r.uh.handleUsageTeamArtifacts(rec, r.activityReq(caller, r.teamA, ""))
 			out := decodeList[objectActivityJSON](t, rec)
-			if len(out.Items) != 2 || out.Total() != 2 {
-				t.Fatalf("teamA feed = %d items / total %d, want 2/2 (the branch and the PR): %+v", len(out.Items), out.Total(), out.Items)
+			if len(out.Items) != 3 || out.Total() != 3 {
+				t.Fatalf("teamA feed = %d items / total %d, want 3/3 (the branch, the PR, the review): %+v", len(out.Items), out.Total(), out.Items)
 			}
 			if strings.Contains(rec.Body.String(), `"teams"`) {
 				t.Errorf("team feed carried teams: %s", rec.Body.String())
@@ -336,6 +351,16 @@ func TestUsageArtifactsActivityHandler_Postgres(t *testing.T) {
 				p.Deliverable.Kind != domain.DeliverableKindPullRequest || p.Deliverable.State != domain.DeliverableStatePROpen {
 				t.Errorf("teamA PR deliverable = %+v, want the newest one %s (open)", p.Deliverable, seed.prDeliverableID)
 			}
+			// The review a person's approval posted is the run's object, and
+			// it is its review deliverable.
+			rv := got[seed.review]
+			if rv.ObjectKind != domain.ObjectKindReview || rv.LastAction != domain.ActionReviewSubmitted || rv.RunCount != 1 {
+				t.Errorf("teamA review = %+v, want the posted review from its one run", rv)
+			}
+			if rv.Deliverable == nil || rv.Deliverable.ID != seed.reviewDeliverableID ||
+				rv.Deliverable.Kind != domain.DeliverableKindReview || rv.Deliverable.State != domain.DeliverableStateReviewSubmitted {
+				t.Errorf("teamA review deliverable = %+v, want %s (submitted)", rv.Deliverable, seed.reviewDeliverableID)
+			}
 		}
 	})
 
@@ -344,11 +369,12 @@ func TestUsageArtifactsActivityHandler_Postgres(t *testing.T) {
 		rec := httptest.NewRecorder()
 		r.uh.handleUsageOrgArtifacts(rec, r.activityReq(r.orgAdmin, "", ""))
 		out := decodeList[orgObjectActivityJSON](t, rec)
-		if len(out.Items) != 3 || out.Total() != 3 {
-			t.Fatalf("org feed = %d items / total %d, want 3/3: %+v", len(out.Items), out.Total(), out.Items)
+		if len(out.Items) != 4 || out.Total() != 4 {
+			t.Fatalf("org feed = %d items / total %d, want 4/4: %+v", len(out.Items), out.Total(), out.Items)
 		}
-		// LastAt descending: the issue (5h) before the PR (4h) before the branch (3h).
-		want := []domain.ObjectRef{seed.issue, seed.pr, seed.branch}
+		// LastAt descending: the review (6h), the issue (5h), the PR (4h), the
+		// branch (3h).
+		want := []domain.ObjectRef{seed.review, seed.issue, seed.pr, seed.branch}
 		for i, it := range out.Items {
 			if it.ObjectID != want[i] {
 				t.Errorf("item %d = %q, want %q", i, it.ObjectID, want[i])
@@ -389,7 +415,7 @@ func TestUsageArtifactsActivityHandler_Postgres(t *testing.T) {
 		for body, want := range map[string]domain.ObjectRef{
 			`{"object_kind":"branch"}`:                           seed.branch,
 			`{"provider":"jira"}`:                                seed.issue,
-			`{"since":"2026-06-10T13:30:00Z"}`:                   seed.issue,
+			`{"since":"2026-06-10T14:30:00Z"}`:                   seed.review,
 			`{"until":"2026-06-10T12:30:00Z"}`:                   seed.branch,
 			`{"object_kind":"pull_request","provider":"github"}`: seed.pr,
 		} {
@@ -436,7 +462,7 @@ func TestUsageArtifactsActivityHandler_Postgres(t *testing.T) {
 		license()
 		seen := map[domain.ObjectRef]bool{}
 		token := ""
-		for page := 0; page < 3; page++ {
+		for page := 0; page < 4; page++ {
 			body := `{"page_size":2}`
 			if token != "" {
 				body = `{"page_size":2,"page_token":"` + token + `"}`
@@ -444,8 +470,8 @@ func TestUsageArtifactsActivityHandler_Postgres(t *testing.T) {
 			rec := httptest.NewRecorder()
 			r.uh.handleUsageOrgArtifacts(rec, r.activityReq(r.orgAdmin, "", body))
 			out := decodeList[orgObjectActivityJSON](t, rec)
-			if out.Total() != 3 {
-				t.Fatalf("page %d total = %d, want 3", page, out.Total())
+			if out.Total() != 4 {
+				t.Fatalf("page %d total = %d, want 4", page, out.Total())
 			}
 			for _, it := range out.Items {
 				if seen[it.ObjectID] {
@@ -457,13 +483,13 @@ func TestUsageArtifactsActivityHandler_Postgres(t *testing.T) {
 				break
 			}
 		}
-		if len(seen) != 3 {
-			t.Errorf("paged %d objects, want 3", len(seen))
+		if len(seen) != 4 {
+			t.Errorf("paged %d objects, want 4", len(seen))
 		}
 		rec := httptest.NewRecorder()
 		r.uh.handleUsageOrgArtifacts(rec, r.activityReq(r.orgAdmin, "", `{"page_size":0}`))
-		if out := decodeList[orgObjectActivityJSON](t, rec); len(out.Items) != 0 || out.Total() != 3 {
-			t.Errorf("count-only read = %d items / total %d, want 0/3", len(out.Items), out.Total())
+		if out := decodeList[orgObjectActivityJSON](t, rec); len(out.Items) != 0 || out.Total() != 4 {
+			t.Errorf("count-only read = %d items / total %d, want 0/4", len(out.Items), out.Total())
 		}
 	})
 }

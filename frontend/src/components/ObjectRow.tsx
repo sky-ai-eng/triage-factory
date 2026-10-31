@@ -3,7 +3,7 @@ import type { ActivityObject } from '../types'
 import { VerbPill } from './ActionRow'
 import { StateBadge } from './DeliverableRow'
 import { metaForAction } from './actionMeta'
-import { metaForObjectKind } from './objectMeta'
+import { metaForObjectKind, rowTone } from './deliverableMeta'
 
 // ObjectRow renders one item of the activity feed's Objects lens: an object
 // the scope's runs changed, once however many runs changed it. It reads as
@@ -38,11 +38,7 @@ export function ObjectRow({ object, note }: { object: ActivityObject; note?: Rea
     </>
   )
 
-  const rowClass = `flex w-full items-center gap-2 rounded-[4px] border px-2 py-1.5 text-left transition-colors ${
-    deliverable
-      ? 'border-warm/40 bg-warm/[0.06] hover:bg-warm/10'
-      : 'border-line-1 bg-tint-1 hover:bg-tint-3'
-  }`
+  const rowClass = `flex w-full items-center gap-2 rounded-[4px] border px-2 py-1.5 text-left transition-colors ${rowTone(!!deliverable)}`
 
   // The aria-label replaces the row's content for a screen reader, so it
   // spells out everything the row shows.
