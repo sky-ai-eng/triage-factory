@@ -15,7 +15,6 @@ pub mod errors;
 pub mod find;
 pub mod grep;
 pub mod image;
-pub mod init;
 pub mod jsdiff;
 pub mod jsnum;
 pub mod jsstring;

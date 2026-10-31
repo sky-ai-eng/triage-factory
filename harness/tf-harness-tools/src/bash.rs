@@ -407,9 +407,20 @@ fn supervise(
 /// killed. A stopped process can neither fork nor exit, so the stopped set is
 /// the whole tree when the passes end; killing as it walked would hand each
 /// killed parent's children to PID 1, out of the walk's reach.
+///
+/// Children die before their parents and the process group last. A parent's
+/// death can orphan a process group, and the kernel continues the stopped
+/// members of a newly orphaned group; each must already have its SIGKILL
+/// pending by then, or it runs again and can fork before the signal lands.
+/// A process is walked after its parent, so the reverse of the order they
+/// were stopped in puts every child first.
+///
+/// A daemon that double-forked out of the command is no longer in its tree
+/// and is not killed here. Like a job left running in the background, it
+/// ends with the jail.
 pub fn kill_command_tree(pid: i32) {
     let proc = Path::new("/proc");
-    let mut stopped: HashSet<i32> = HashSet::new();
+    let mut stopped: Vec<i32> = Vec::new();
     for _ in 0..MAX_STOP_PASSES {
         let found: Vec<i32> = walk_tree(proc, pid)
             .processes
@@ -421,13 +432,13 @@ pub fn kill_command_tree(pid: i32) {
         }
         for p in found {
             unsafe { libc::kill(p, libc::SIGSTOP) };
-            stopped.insert(p);
+            stopped.push(p);
         }
     }
-    kill_process_tree(pid);
-    for p in stopped {
+    for &p in stopped.iter().rev() {
         unsafe { libc::kill(p, libc::SIGKILL) };
     }
+    kill_process_tree(pid);
 }
 
 /// Sum resident memory, in bytes, across the process tree rooted at `pid`.
@@ -487,7 +498,10 @@ fn walk_tree(proc: &Path, root: i32) -> Tree {
         if seen.len() > MAX_WALKED_IDS {
             break;
         }
-        let tgid = thread_group(proc, id).unwrap_or(id);
+        // An id with no status is gone, and contributes nothing.
+        let Some(tgid) = thread_group(proc, id) else {
+            continue;
+        };
         let (sized, listed) = accounted.entry(tgid).or_insert_with(|| {
             tree.processes.push(tgid);
             (false, false)
@@ -771,13 +785,6 @@ pub fn execute(
             if libc::signal(libc::SIGXFSZ, libc::SIG_DFL) == libc::SIG_ERR {
                 return Err(std::io::Error::last_os_error());
             }
-            // The command's orphans are handed to its shell rather than to
-            // PID 1, so a double-forked daemon stays in the tree the budget
-            // measures and the kill walks for as long as the shell runs.
-            // Best-effort: without it only that daemon escapes, which is no
-            // reason to refuse the command.
-            #[cfg(target_os = "linux")]
-            libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
             Ok(())
         });
     }

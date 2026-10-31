@@ -140,7 +140,6 @@ fn run_serve(args: &[String]) {
             .unwrap_or_else(|_| "/".to_string())
     });
 
-    tf_harness_tools::init::fork_reaper_if_pid1();
     if let Err(err) = tf_harness_tools::serve::connect_and_serve(&socket, &cwd) {
         eprintln!("serve: {err}");
         std::process::exit(1);
