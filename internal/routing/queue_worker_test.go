@@ -13,7 +13,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // testExecutorID is the owner every test router claims under. The claim
@@ -30,15 +29,11 @@ const testExecutorID = "test-router"
 // nil → the team↔repo gate fails open.
 func newQueueWorkerRouter(t *testing.T, database *sql.DB) *Router {
 	t.Helper()
-	st := sqlitestore.New(database)
 	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, seedHandlerFKTargets(t, database)); err != nil {
 		t.Fatalf("seed event handlers: %v", err)
 	}
 	seedMatchAllCIRule(t, database, runmode.LocalDefaultTeamID)
-	r := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.ExternalActions, st.Orgs, st.Teams, nil, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
-	r.SetEventQueue(st.EventQueue)
-	r.SetExecutorID(testExecutorID, 1)
-	return r
+	return newTestRouter(testRouterDeps(database))
 }
 
 // enqueueCIFailed durably enqueues a ci_check_failed event for entityID
@@ -232,11 +227,9 @@ func TestEventQueue_SurvivesRestart(t *testing.T) {
 // handlers are already seeded — a second router on the same file.
 func newQueueWorkerRouterNoSeed(t *testing.T, database *sql.DB) *Router {
 	t.Helper()
-	st := sqlitestore.New(database)
-	r := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.ExternalActions, st.Orgs, st.Teams, nil, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
-	r.SetEventQueue(st.EventQueue)
-	r.SetExecutorID(testExecutorID+"-2", 2)
-	return r
+	deps := testRouterDeps(database)
+	deps.ExecutorID, deps.BootEpoch = testExecutorID+"-2", 2
+	return newTestRouter(deps)
 }
 
 // TestEventQueue_ExpiredLease_RoutesAfterOwnerReplaced is the acceptance
@@ -529,7 +522,7 @@ func TestProcessQueuedEvent_LeaseLostBeforeRenewal_WritesNothing(t *testing.T) {
 	database := newTestDB(t)
 	r := newQueueWorkerRouter(t, database)
 	st := sqlitestore.New(database)
-	r.SetEventQueue(leaseLosingQueue{st.EventQueue})
+	r.eventQueue = leaseLosingQueue{st.EventQueue}
 
 	entityID := newEntity(t, database, "owner/repo#lost")
 	enqueueCIFailed(t, database, entityID)
@@ -569,7 +562,7 @@ func TestProcessQueuedEvent_MarkDoneLoses_SuccessorReplayIsNoOp(t *testing.T) {
 	database := newTestDB(t)
 	r := newQueueWorkerRouter(t, database)
 	st := sqlitestore.New(database)
-	r.SetEventQueue(markDoneLeaseLosingQueue{EventQueueStore: st.EventQueue, t: t, database: database})
+	r.eventQueue = markDoneLeaseLosingQueue{EventQueueStore: st.EventQueue, t: t, database: database}
 
 	entityID := newEntity(t, database, "owner/repo#markdone-lost")
 	enqueueCIFailed(t, database, entityID)
@@ -584,7 +577,7 @@ func TestProcessQueuedEvent_MarkDoneLoses_SuccessorReplayIsNoOp(t *testing.T) {
 	}
 
 	// The successor reclaims and replays.
-	r.SetEventQueue(st.EventQueue)
+	r.eventQueue = st.EventQueue
 	if err := r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("successor drain: %v", err)
 	}

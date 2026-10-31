@@ -121,8 +121,6 @@ func TestBodyUpdated_PollToRule(t *testing.T) {
 			}
 			// A fresh router discovers the edit without an in-memory signal.
 			router := reviewRouter(database)
-			router.SetEventQueue(st.EventQueue)
-			router.SetExecutorID(testExecutorID, 1)
 			router.drainEventQueue(ctx)
 			check(1, 0)
 			if _, err := database.Exec(`INSERT INTO event_handlers

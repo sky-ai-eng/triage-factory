@@ -15,7 +15,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // Universal same-task absorption: a trigger firing whose OWN task already
@@ -217,13 +216,14 @@ func bumpTaskViaRealUpsert(t *testing.T, router *Router, task *domain.Task, trig
 }
 
 // newAbsorbTestRouter builds a Router wired for the absorption gate tests,
-// sharing the same store construction every test below needs.
+// sharing the same store construction every test below needs. No Agents
+// store, so no team's bot switch is read and a firing stamps no agent claim.
 func newAbsorbTestRouter(database *sql.DB, conversations db.ConversationStore, stub *injectingStubDelegator) *Router {
-	st := sqlitestore.New(database)
-	return NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil,
-		testTaskStore(database), conversations, st.Entities, st.PendingFirings,
-		st.Events, st.ExternalActions, st.Orgs, st.Teams, nil, nil, nil, nil,
-		stub, noopScorer{}, websocket.NewHub())
+	deps := testRouterDeps(database)
+	deps.Agents = nil
+	deps.Conversations = conversations
+	deps.Spawner = stub
+	return newTestRouter(deps)
 }
 
 // TestTryAutoDelegate_SameTask_InjectsIntoActiveRun is the ticket's primary
@@ -584,10 +584,10 @@ func TestTryAutoDelegate_SameTask_StageToNonResumableRun_NoOrphanedRow(t *testin
 	}
 
 	spawner := delegate.NewSpawner(database, sqlitestore.New(database), nil, nil, "m")
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil,
-		testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings,
-		sqlitestore.New(database).Events, sqlitestore.New(database).ExternalActions, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil,
-		spawner, noopScorer{}, websocket.NewHub())
+	deps := testRouterDeps(database)
+	deps.Agents = nil
+	deps.Spawner = spawner
+	router := newTestRouter(deps)
 
 	if !mustAutoDelegate(t, router, task, trigger, entityID, secondEventID, "") {
 		t.Error("expected tryAutoDelegate to report handled via the normal deferral (enqueueBusyFiring)")
@@ -644,15 +644,14 @@ func TestTryAutoDelegate_SameTask_StampsAgentClaimOnInjectedTask(t *testing.T) {
 		t.Fatalf("record second event: %v", err)
 	}
 
-	st := sqlitestore.New(database)
 	stub := &injectingStubDelegator{outcome: delegate.InjectDeliveredLocal}
 	// Agents wired (real store, a seeded agent to resolve) so agentID
 	// resolves to something non-empty; teamAgents left nil so the
 	// bot-disabled-team gate degrades to "proceed" and doesn't interfere.
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), st.Agents, nil, nil,
-		testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings,
-		st.Events, st.ExternalActions, st.Orgs, st.Teams, nil, nil, nil, nil,
-		stub, noopScorer{}, websocket.NewHub())
+	deps := testRouterDeps(database)
+	deps.TeamAgents = nil
+	deps.Spawner = stub
+	router := newTestRouter(deps)
 
 	mustAutoDelegate(t, router, task, trigger, entityID, secondEventID, "")
 
@@ -866,9 +865,9 @@ func TestTryAutoDelegate_LiveManualConversation_AbsorbsTheEvent(t *testing.T) {
 
 	st := sqlitestore.New(database)
 	stub := &injectingStubDelegator{outcome: delegate.InjectDeliveredLocal}
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database),
-		st.Agents, st.TeamAgents, nil, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings,
-		st.Events, st.ExternalActions, st.Orgs, st.Teams, nil, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
+	deps := testRouterDeps(database)
+	deps.Spawner = stub
+	router := newTestRouter(deps)
 	bumpTaskViaRealUpsert(t, router, task, trigger, entityID, secondEventID)
 
 	injectedConversationID := ""

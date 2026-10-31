@@ -513,7 +513,9 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 		}
 	}
 	if a.plan.brain {
-		a.buildRouting() // ingestor + poller manager + event router
+		if err = a.buildRouting(); err != nil { // ingestor + poller manager + event router
+			return nil, err
+		}
 	}
 	a.wire()                  // connect the cycles (spawner↔router, config-change hooks)
 	a.registerSubscribers()   // event-bus subscribers (brain only)

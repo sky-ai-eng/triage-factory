@@ -17,17 +17,15 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 const linearTestWorkspace = "ws-acme"
 
 // linearRouter is gateRouter with the Linear team-rules store wired.
 func linearRouter(database *sql.DB) *Router {
-	st := sqlitestore.New(database)
-	return NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, st.Users,
-		testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.ExternalActions,
-		st.Orgs, st.Teams, st.TeamGitHubRepos, st.JiraStatusRules, st.LinearTeamRules, nil, nil, noopScorer{}, websocket.NewHub())
+	deps := gateRouterDeps(database)
+	deps.LinearRules = sqlitestore.New(database).LinearTeamRules
+	return newTestRouter(deps)
 }
 
 func linearStateRef(name string) domain.LinearStateRef {
@@ -460,7 +458,6 @@ func TestHandleEvent_TurnedOffLinear_RecordsButCreatesNoTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	router := linearRouter(database)
-	router.SetEventSourceGate(sqlitestore.New(database).OrgEventSources)
 	router.HandleEvent(ctx, linearEvent(domain.EventLinearIssueAssigned, entity.ID, "lt-eng", "lu-alice"))
 
 	active, err := testTaskStore(database).FindActiveByEntity(ctx, runmode.LocalDefaultOrgID, entity.ID)

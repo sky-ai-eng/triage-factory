@@ -16,7 +16,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // newGateDB spins up a migrated SQLite test DB with the event_handler FK
@@ -78,14 +77,17 @@ func ciEvent(t *testing.T, entityID, repo string) domain.Event {
 	}
 }
 
+// gateRouter is a router with the GitHub and Jira tracking gates wired.
 func gateRouter(database *sql.DB) *Router {
+	return newTestRouter(gateRouterDeps(database))
+}
+
+// gateRouterDeps is gateRouter's RouterDeps, for a test that varies more.
+func gateRouterDeps(database *sql.DB) RouterDeps {
 	st := sqlitestore.New(database)
-	// Users wired so author-centric owner resolution (the PR author → team
-	// ladder) runs — the gate operates on the visibility set either way, but
-	// wiring it lets the CI tests assert a real owner instead of a NULL one.
-	return NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, st.Users,
-		testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.ExternalActions,
-		st.Orgs, st.Teams, st.TeamGitHubRepos, st.JiraStatusRules, nil, nil, nil, noopScorer{}, websocket.NewHub())
+	deps := testRouterDeps(database)
+	deps.TeamRepos, deps.JiraRules = st.TeamGitHubRepos, st.JiraStatusRules
+	return deps
 }
 
 // TestGate_DisjointRepos_DropsUntrackingTeam is acceptance #1: two teams
@@ -248,7 +250,6 @@ func TestGate_MatchesTheEntitysRepositoryByID(t *testing.T) {
 // escape hatches the gate must honor regardless of tracking state.
 func TestGate_EscapeHatches(t *testing.T) {
 	dbh := newGateDB(t)
-	st := sqlitestore.New(dbh)
 	// A gate-active router whose teamRepos store tracks *nothing*, so any
 	// allow result must come from an escape hatch, not from tracking.
 	r := gateRouter(dbh)
@@ -269,7 +270,7 @@ func TestGate_EscapeHatches(t *testing.T) {
 
 	// (2) teamRepos + jiraRules unwired (nil) → pre-ticket behavior, never
 	// drops, for either source.
-	rNil := NewRouter(nil, nil, nil, nil, nil, nil, nil, st.Conversations, st.Entities, st.PendingFirings, st.Events, st.ExternalActions, st.Orgs, st.Teams, nil, nil, nil, nil, nil, noopScorer{}, nil)
+	rNil := newTestRouter(testRouterDeps(dbh)) // no tracking gate wired
 	if !rNil.handlerScopeMatchesEvent(context.Background(), githubEvt, domain.EventHandler{TeamID: "some-real-team"}, teamScopeCache{}) {
 		t.Error("nil teamRepos store should skip the GitHub gate")
 	}

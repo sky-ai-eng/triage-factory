@@ -17,7 +17,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // stubDelegator records every Delegate call and creates a real
@@ -233,12 +232,12 @@ func setupDrainScenarioN(t *testing.T, database *sql.DB, suffix string) (entityI
 }
 
 // drainRouter builds a router over the database with the given firings
-// store and delegator, and an executor identity so the claim has an owner.
+// store and delegator.
 func drainRouter(database *sql.DB, firings dbpkg.PendingFiringsStore, spawner Delegator) *Router {
-	st := sqlitestore.New(database)
-	r := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), st.Conversations, st.Entities, firings, st.Events, st.ExternalActions, st.Orgs, st.Teams, nil, nil, nil, nil, spawner, noopScorer{}, websocket.NewHub())
-	r.SetExecutorID("firing-worker-test", 1)
-	return r
+	deps := testRouterDeps(database)
+	deps.Firings = firings
+	deps.Spawner = spawner
+	return newTestRouter(deps)
 }
 
 // enqueueFiring admits a firing for the chain directly, the way the router's

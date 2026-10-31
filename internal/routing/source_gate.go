@@ -135,24 +135,9 @@ func (g *sourceGate) invalidate(orgID string) {
 	g.mu.Unlock()
 }
 
-// SetEventSourceGate wires the store the router reads org event-source policy
-// from, post-construction like SetEventQueue and for the same reason: it is a
-// late-bound dependency and NewRouter's signature is already wide.
-//
-// A router with no gate never drops, which is what the ~30 test constructions
-// that route events without one rely on. Production wiring is not optional —
-// internal/app calls this before the drain worker starts, because this is the
-// single funnel every source's events cross, and the poll-cycle skip beside it
-// guarantees something different (no API calls, not no tasks).
-func (r *Router) SetEventSourceGate(store dbpkg.OrgEventSourceStore) {
-	r.sourceGate = newSourceGate(store)
-}
-
 // InvalidateSourceGate drops one org's cached event-source policy. Called by
 // the admin write on the pod that runs the brain, and by the tf_ctl dispatcher
 // on behalf of a write that landed on another pod.
 func (r *Router) InvalidateSourceGate(orgID string) {
-	if r.sourceGate != nil {
-		r.sourceGate.invalidate(orgID)
-	}
+	r.sourceGate.invalidate(orgID)
 }

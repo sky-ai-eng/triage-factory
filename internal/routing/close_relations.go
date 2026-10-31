@@ -562,9 +562,7 @@ func (r *Router) runTerminatingClose(ctx context.Context, orgID string, evt doma
 		routerLog.InfoContext(ctx, "closed task", "task_id", taskID, "on_event", evt.EventType, "reason", reason)
 		r.stopConversationsOnClosedTask(orgID, taskID, res.ActiveConversationIDs[taskID])
 		// Behind the stop, never beside it — see closeTaskWithAudit.
-		if r.spawner != nil {
-			r.spawner.TeardownTaskDeliverablesSystem(ctx, orgID, taskID)
-		}
+		r.spawner.TeardownTaskDeliverablesSystem(ctx, orgID, taskID)
 	}
 	if evt.EventType == domain.EventSystemEntityCloseOwed {
 		// Worth a line every time: the obligation firing means a close was
@@ -844,9 +842,6 @@ func keepReassign(poolType string) func(domain.Event, closeContext, closeTarget)
 // close finds no active task and never walks back here), and now there is
 // nothing left for it to repair.
 func (r *Router) stopConversationsOnClosedTask(orgID, taskID string, conversationIDs []string) {
-	if r.spawner == nil {
-		return
-	}
 	for _, id := range conversationIDs {
 		if err := r.spawner.StopConversationAndCancelBlueprint(orgID, id, "", delegate.StopCauseTaskClosed); err != nil {
 			routerLog.Error("stop conversation on task close failed", "conversation", id, "task_id", taskID, "error", err)
@@ -891,8 +886,6 @@ func (r *Router) closeTaskWithAudit(ctx context.Context, orgID, taskID, closingE
 	// Behind the stop, never beside it: the stop parks each conversation and
 	// releases its claim, so the teardown operates on settled conversations
 	// rather than racing a live agent that can still land a fresh draft PR.
-	if r.spawner != nil {
-		r.spawner.TeardownTaskDeliverablesSystem(ctx, orgID, taskID)
-	}
+	r.spawner.TeardownTaskDeliverablesSystem(ctx, orgID, taskID)
 	return nil
 }

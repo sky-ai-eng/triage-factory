@@ -423,7 +423,7 @@ func openBlobStores(plan subsystemPlan) (workspaces, knowledge storage.Storage, 
 // event router. The poller/tracker emit through the ingestor (github:/jira:
 // events are durably enqueued so the router can't drop them under burst),
 // and the router drains the event_queue rather than the lossy in-memory bus.
-func (a *App) buildRouting() {
+func (a *App) buildRouting() error {
 	// eventWake is a best-effort, coalescing nudge to the router's drain
 	// worker; a dropped wake only delays a drain to the worker's floor scan,
 	// never loses an event.
@@ -453,27 +453,46 @@ func (a *App) buildRouting() {
 	// Event router — records events, creates/bumps tasks, auto-delegates on
 	// matching triggers, runs inline close checks. It drains the durable
 	// event_queue (not the bus); the ingestor enqueues there at emit time.
-	a.router = routing.NewRouter(a.stores.Prompts, a.stores.Blueprints, a.stores.EventHandlers, a.stores.Agents, a.stores.TeamAgents, a.stores.Users, a.stores.Tasks, a.stores.Conversations, a.stores.Entities, a.stores.PendingFirings, a.stores.Events, a.stores.ExternalActions, a.stores.Orgs, a.stores.Teams, a.stores.TeamGitHubRepos, a.stores.JiraStatusRules, a.stores.LinearTeamRules, a.stores.TeamGitHubGroups, a.spawner, a.scorer, a.wsHub)
-	a.router.SetEventQueue(a.stores.EventQueue)
-	// The event-source pause. This is the single funnel every source's events
-	// cross, so it is where a paused source stops minting tasks — poll-driven
-	// and push-driven alike. Not optional in production, unlike the poller
-	// skip beside it: the answer is cached per org behind a short TTL and
-	// invalidated by the admin write (in process, or over the tf_ctl relay).
-	a.router.SetEventSourceGate(a.stores.OrgEventSources)
-	// The re-derive worker claims the re-evaluation rows the score store
-	// admits with every scores write.
-	a.router.SetTaskReDerive(a.stores.TaskReDerive)
-	// Mirror the per-event routing disposition sentinel onto the bus
-	// (TFAC-593) so an async event source (e.g. Slack) can learn
-	// synchronously-unavailable routing outcomes. The bus is built in
-	// buildInfra, which runs before buildRouting.
-	a.router.SetEventPublisher(a.bus)
-	// Ownership-scoped boot recovery (TFAC-578): the router's event_queue
-	// self-sweep needs the same persistent instance-registry identity the
-	// spawner's conversation-queue self-sweep already uses (registerInstance
-	// minted it at boot, above).
-	a.router.SetExecutorID(a.identity.ID, a.bootEpoch)
+	router, err := routing.NewRouter(routing.RouterDeps{
+		Prompts:         a.stores.Prompts,
+		Blueprints:      a.stores.Blueprints,
+		Handlers:        a.stores.EventHandlers,
+		Agents:          a.stores.Agents,
+		TeamAgents:      a.stores.TeamAgents,
+		Users:           a.stores.Users,
+		Tasks:           a.stores.Tasks,
+		Conversations:   a.stores.Conversations,
+		Entities:        a.stores.Entities,
+		Firings:         a.stores.PendingFirings,
+		Events:          a.stores.Events,
+		EventQueue:      a.stores.EventQueue,
+		ExternalActions: a.stores.ExternalActions,
+		Orgs:            a.stores.Orgs,
+		Teams:           a.stores.Teams,
+		TeamRepos:       a.stores.TeamGitHubRepos,
+		JiraRules:       a.stores.JiraStatusRules,
+		LinearRules:     a.stores.LinearTeamRules,
+		GitHubGroups:    a.stores.TeamGitHubGroups,
+		ReDerive:        a.stores.TaskReDerive,
+		// The event-source pause: the answer is cached per org behind a short
+		// TTL and invalidated by the admin write (in process, or over the
+		// tf_ctl relay).
+		EventSources: a.stores.OrgEventSources,
+		Spawner:      a.spawner,
+		Scorer:       a.scorer,
+		WS:           a.wsHub,
+		// The bus is built in buildInfra, which runs before buildRouting.
+		Publisher: a.bus,
+		// The same persistent instance-registry identity the spawner claims
+		// under (registerInstance minted it at boot).
+		ExecutorID: a.identity.ID,
+		BootEpoch:  a.bootEpoch,
+	})
+	if err != nil {
+		return fmt.Errorf("build event router: %w", err)
+	}
+	a.router = router
+	return nil
 }
 
 // scorerCallbacks is how the scorer reaches the UI: a broadcast when a cycle

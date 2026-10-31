@@ -12,7 +12,6 @@ import (
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -30,10 +29,9 @@ import (
 // which the checker needs to know which Jira statuses count as done.
 func newCheckerRouter(t *testing.T, database *sql.DB) *Router {
 	t.Helper()
-	st := sqlitestore.New(database)
-	return NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database),
-		nil, nil, nil, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.ExternalActions,
-		st.Orgs, st.Teams, nil, st.JiraStatusRules, nil, nil, nil, noopScorer{}, websocket.NewHub())
+	deps := testRouterDeps(database)
+	deps.JiraRules = sqlitestore.New(database).JiraStatusRules
+	return newTestRouter(deps)
 }
 
 // seedDivergentEntity is the state the checker counts: an entity whose

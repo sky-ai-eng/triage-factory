@@ -189,7 +189,6 @@ func TestFiringWorker_EndsThePriorConversation(t *testing.T) {
 
 	firingEventID := recordFenceEvent(t, database, entityID).ID
 	enqueueFiring(t, database, entityID, taskID, "t-fence", firingEventID)
-	router.SetExecutorID("firing-worker-test", 1)
 	drainOnce(t, router)
 
 	endedAt, reason := conversationBoundary(t, database, concluded)

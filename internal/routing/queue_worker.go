@@ -72,14 +72,8 @@ const (
 // Single worker, claiming in batches interleaved across orgs — exactly
 // one process may run this at a time, which is what makes it a brain
 // component rather than a replica-safe one. Returns when ctx is
-// cancelled. A nil EventQueueStore (SetEventQueue never called) makes this
-// a logged no-op rather than a panicking goroutine.
+// cancelled.
 func (r *Router) RunEventQueue(ctx context.Context, wake <-chan struct{}, scanInterval, pruneInterval, pruneAge time.Duration) {
-	if r.eventQueue == nil {
-		routerLog.Warn("event-queue worker not started: no EventQueueStore wired")
-		return
-	}
-
 	scan := time.NewTicker(scanInterval)
 	defer scan.Stop()
 	prune := time.NewTicker(pruneInterval)
@@ -135,8 +129,7 @@ func (r *Router) drainEventQueue(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil // clean stop, not a claim failure
 		}
-		executorID, bootEpoch := r.executorIdentity()
-		batch, err := r.eventQueue.Claim(ctx, workitem.Owner{ID: executorID, Epoch: bootEpoch}, eventClaimBatch)
+		batch, err := r.eventQueue.Claim(ctx, workitem.Owner{ID: r.executorID, Epoch: r.bootEpoch}, eventClaimBatch)
 		if batch.Cancelled+batch.Parked > 0 {
 			routerLog.Info("event-queue claim settled rows", "cancelled", batch.Cancelled, "parked", batch.Parked)
 		}

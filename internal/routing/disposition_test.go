@@ -15,7 +15,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // erroringHandlerStore wraps a real EventHandlerStore and forces
@@ -86,9 +85,10 @@ func TestHandleEvent_EntitlementGated_PublishesFrozen(t *testing.T) {
 	entitlements.GateEventSource("github", testGateFeature)
 	t.Cleanup(entitlements.Reset)
 
-	router := reviewRouter(database)
 	pub := &fakeDispositionPublisher{}
-	router.SetEventPublisher(pub)
+	deps := testRouterDeps(database)
+	deps.Publisher = pub
+	router := newTestRouter(deps)
 
 	entityID := reviewEntity(t, database, "owner/repo#frozen")
 	emitCI(router, entityID, "aidan")
@@ -123,9 +123,10 @@ func TestHandleEvent_NoHandlerMatched_PublishesTasklessNoHandler(t *testing.T) {
 	// No event_handlers seeded at all (shipped triggers ship disabled and
 	// this fixture doesn't call Seed), so nothing can match.
 
-	router := reviewRouter(database)
 	pub := &fakeDispositionPublisher{}
-	router.SetEventPublisher(pub)
+	deps := testRouterDeps(database)
+	deps.Publisher = pub
+	router := newTestRouter(deps)
 
 	entityID := reviewEntity(t, database, "owner/repo#nohandler")
 	emitCI(router, entityID, "aidan")
@@ -154,9 +155,10 @@ func TestHandleEvent_NoOwnerResolved_PublishesTasklessNoOwner(t *testing.T) {
 	seedUserOnTeam(t, database, runmode.LocalDefaultTeamID, "aidan") // the local user
 	seedSystemCIRule(t, database, runmode.LocalDefaultTeamID)        // not applies_to_unowned
 
-	router := reviewRouter(database)
 	pub := &fakeDispositionPublisher{}
-	router.SetEventPublisher(pub)
+	deps := testRouterDeps(database)
+	deps.Publisher = pub
+	router := newTestRouter(deps)
 
 	entityID := reviewEntity(t, database, "owner/repo#stranger")
 	emitCI(router, entityID, "stranger") // not a TF user — no owner resolves
@@ -186,9 +188,10 @@ func TestHandleEvent_MatchingHandler_PublishesTaskCreatedThenBumped(t *testing.T
 	enableTeamAutoDelegate(t, database, runmode.LocalDefaultTeamID)
 
 	stub := &stubDelegator{db: database}
-	router := firingRouter(database, stub)
 	pub := &fakeDispositionPublisher{}
-	router.SetEventPublisher(pub)
+	deps := firingRouterDeps(database, stub)
+	deps.Publisher = pub
+	router := newTestRouter(deps)
 
 	entityID := reviewEntity(t, database, "owner/repo#createdthenbumped")
 	emitCI(router, entityID, "aidan")
@@ -232,31 +235,6 @@ func TestHandleEvent_MatchingHandler_PublishesTaskCreatedThenBumped(t *testing.T
 	}
 }
 
-// TestHandleEvent_NilPublisher_NoPanicNoBehaviorChange pins the nil-guard:
-// a router with no publisher wired (the default — most existing tests
-// never call SetEventPublisher) routes exactly as before, no panic.
-func TestHandleEvent_NilPublisher_NoPanicNoBehaviorChange(t *testing.T) {
-	database := newTestDB(t)
-	seedHandlerFKTargets(t, database)
-	setReviewHost(t, database)
-	seedUserOnTeam(t, database, runmode.LocalDefaultTeamID, "aidan")
-	seedSystemCIRule(t, database, runmode.LocalDefaultTeamID)
-
-	entityID := reviewEntity(t, database, "owner/repo#nilpub")
-	emitCI(reviewRouter(database), entityID, "aidan") // no SetEventPublisher call
-
-	active, err := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrgID, entityID)
-	if err != nil {
-		t.Fatalf("list active tasks: %v", err)
-	}
-	if len(active) != 1 {
-		t.Fatalf("expected 1 task, got %d — nil publisher must not change routing behavior", len(active))
-	}
-	if teamIDValue(&active[0]) != runmode.LocalDefaultTeamID {
-		t.Errorf("owner = %q, want %q", teamIDValue(&active[0]), runmode.LocalDefaultTeamID)
-	}
-}
-
 // TestHandleEvent_HandlerQueryError_PublishesError pins the fix for a
 // review finding: a event_handlers query failure must not be reported as
 // "taskless_no_handler" (which reads as "legitimately not configured") —
@@ -268,13 +246,11 @@ func TestHandleEvent_HandlerQueryError_PublishesError(t *testing.T) {
 	seedUserOnTeam(t, database, runmode.LocalDefaultTeamID, "aidan")
 
 	st := sqlitestore.New(database)
-	router := NewRouter(
-		testPromptStore(database), testBlueprintStore(database), erroringHandlerStore{st.EventHandlers}, nil, nil, st.Users,
-		testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.ExternalActions,
-		st.Orgs, st.Teams, nil, nil, nil, st.TeamGitHubGroups, nil, noopScorer{}, websocket.NewHub(),
-	)
 	pub := &fakeDispositionPublisher{}
-	router.SetEventPublisher(pub)
+	deps := testRouterDeps(database)
+	deps.Handlers = erroringHandlerStore{st.EventHandlers}
+	deps.Publisher = pub
+	router := newTestRouter(deps)
 
 	entityID := reviewEntity(t, database, "owner/repo#handlererr")
 	emitCI(router, entityID, "aidan")
@@ -309,13 +285,11 @@ func TestHandleEvent_TaskUpsertError_PublishesError(t *testing.T) {
 	seedSystemCIRule(t, database, runmode.LocalDefaultTeamID)
 
 	st := sqlitestore.New(database)
-	router := NewRouter(
-		testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, st.Users,
-		erroringTaskStore{st.Tasks}, st.Conversations, st.Entities, st.PendingFirings, st.Events, st.ExternalActions,
-		st.Orgs, st.Teams, nil, nil, nil, st.TeamGitHubGroups, nil, noopScorer{}, websocket.NewHub(),
-	)
 	pub := &fakeDispositionPublisher{}
-	router.SetEventPublisher(pub)
+	deps := testRouterDeps(database)
+	deps.Tasks = erroringTaskStore{st.Tasks}
+	deps.Publisher = pub
+	router := newTestRouter(deps)
 
 	entityID := reviewEntity(t, database, "owner/repo#upserterr")
 	emitCI(router, entityID, "aidan")
@@ -358,13 +332,10 @@ func TestHandleEvent_BecameAtomicSuppression_PublishesTasklessNotError(t *testin
 	}
 	seedSystemRule(t, database, runmode.LocalDefaultTeamID, domain.EventJiraIssueBecameAtomic)
 
-	router := NewRouter(
-		testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil,
-		testTaskStore(database), stores.Conversations, stores.Entities, stores.PendingFirings, stores.Events, stores.ExternalActions,
-		stores.Orgs, stores.Teams, nil, nil, nil, nil, nil, noopScorer{}, websocket.NewHub(),
-	)
 	pub := &fakeDispositionPublisher{}
-	router.SetEventPublisher(pub)
+	deps := testRouterDeps(database)
+	deps.Publisher = pub
+	router := newTestRouter(deps)
 
 	meta := events.JiraIssueBecameAtomicMetadata{IssueKey: "SKY-dispsuppress"}
 	metaJSON, _ := json.Marshal(meta)
@@ -446,9 +417,11 @@ func TestHandleEvent_MultipleTeams_TriggersFiredCountsOnlyCommitted(t *testing.T
 	metaJSON, _ := json.Marshal(meta)
 
 	stub := &stubDelegator{db: database}
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), stores.Agents, stores.TeamAgents, nil, testTaskStore(database), stores.Conversations, stores.Entities, stores.PendingFirings, stores.Events, stores.ExternalActions, stores.Orgs, stores.Teams, nil, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
 	pub := &fakeDispositionPublisher{}
-	router.SetEventPublisher(pub)
+	deps := testRouterDeps(database)
+	deps.Spawner = stub
+	deps.Publisher = pub
+	router := newTestRouter(deps)
 
 	router.HandleEvent(context.Background(), domain.Event{
 		EventType: domain.EventJiraIssueAvailable, EntityID: &entity.ID,

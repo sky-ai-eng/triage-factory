@@ -13,7 +13,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // Author-centric routing tests. These exercise the owning-team
@@ -902,10 +901,14 @@ func TestAuthorCentric_TwoTeams_WatcherDoesNotStealOwnership(t *testing.T) {
 // plus a stub delegator, for tests that exercise the auto-fire +
 // owner-consolidation path end to end.
 func firingRouter(database *sql.DB, stub *stubDelegator) *Router {
-	st := sqlitestore.New(database)
-	return NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database),
-		st.Agents, st.TeamAgents, st.Users, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.ExternalActions,
-		st.Orgs, st.Teams, nil, nil, nil, st.TeamGitHubGroups, stub, noopScorer{}, websocket.NewHub())
+	return newTestRouter(firingRouterDeps(database, stub))
+}
+
+// firingRouterDeps is firingRouter's RouterDeps, for a test that varies more.
+func firingRouterDeps(database *sql.DB, stub *stubDelegator) RouterDeps {
+	deps := testRouterDeps(database)
+	deps.Spawner = stub
+	return deps
 }
 
 // enableTeamAutoDelegate opts each team fully into auto-delegation: a

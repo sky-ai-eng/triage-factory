@@ -13,8 +13,7 @@ import (
 )
 
 // testPromptStore returns a real SQLite-backed PromptStore for test
-// fixtures. Tests pass this to NewRouter so prompt-loading code
-// paths exercise the same store interface production uses.
+// fixtures.
 func testPromptStore(database *sql.DB) db.PromptStore {
 	if database == nil {
 		return nil
@@ -43,8 +42,7 @@ func testTaskStore(database *sql.DB) db.TaskStore {
 }
 
 // testBlueprintStore returns a SQLite-backed BlueprintStore for routing
-// tests. NewRouter takes the blueprint store immediately after the prompt
-// store (triggers fire blueprints, not prompts).
+// tests.
 func testBlueprintStore(database *sql.DB) db.BlueprintStore {
 	if database == nil {
 		return nil

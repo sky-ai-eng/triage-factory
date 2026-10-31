@@ -3,7 +3,7 @@ package routing
 import (
 	"context"
 	"fmt"
-	"sync"
+	"strings"
 
 	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
@@ -91,54 +91,35 @@ type EventPublisher interface {
 //     filter — opens.
 //  8. Runs inline close checks for the event type
 type Router struct {
-	prompts       dbpkg.PromptStore
-	blueprints    dbpkg.BlueprintStore // resolves a trigger's blueprint → first step prompt for the per-(entity, prompt) breaker
-	handlers      dbpkg.EventHandlerStore
-	agents        dbpkg.AgentStore
-	teamAgents    dbpkg.TeamAgentStore        // read team_agents.enabled before auto-firing triggers
-	users         dbpkg.UsersStore            // reverse identity lookups (GitHub login, Jira account, Linear user → TF users) for owner routing
-	tasks         dbpkg.TaskStore             // task lifecycle, dedup, claims, breaker
-	conversations dbpkg.ConversationStore     // lookup active runs for the task-close cancel cascade
-	entities      dbpkg.EntityStore           // closed-entity guard + entity-terminating close cascade
-	firings       dbpkg.PendingFiringsStore   // per-task firing queue the firing worker claims from; its unsettled read is half the gate
-	events        dbpkg.EventStore            // admin-pool RecordSystem + GetMetadataSystem for the background subscriber
-	eventQueue    dbpkg.EventQueueStore       // durable router queue the drain worker claims from; set post-construction via SetEventQueue (nil → worker is a no-op)
-	orgs          dbpkg.OrgsStore             // per-org iteration for the terminal-state checker and the org-settings reads of team routing; required (the checker dereferences it directly)
-	teams         dbpkg.TeamsStore            // per-team auto_delegate_enabled kill-switch read post-internal/config deletion
-	teamRepos     dbpkg.TeamGitHubReposStore  // team↔repo tracking gate; nil-safe — gate is skipped (no filtering) when unset
-	jiraRules     dbpkg.JiraStatusRulesStore  // team↔project tracking gate; nil-safe — Jira gate skipped when unset
-	linearRules   dbpkg.LinearTeamRulesStore  // team↔Linear-team tracking gate; nil-safe — Linear gate skipped when unset
-	githubGroups  dbpkg.TeamGitHubGroupsStore // github-team→TF-team mapping; resolves review_requested / mentioned team visibility. nil-safe — that routing degrades to handler-team visibility when unset
-	rederive      dbpkg.TaskReDeriveStore     // score re-evaluation queue the re-derive worker claims from; set post-construction via SetTaskReDerive (nil → worker is a no-op)
-	spawner       Delegator
-	scorer        Scorer
-	ws            *websocket.Hub
-	publisher     EventPublisher // nil-safe; set post-construction via SetEventPublisher — mirrors the per-event routing disposition sentinel onto the bus (TFAC-593)
-	// externalActions is the ledger the close phase reads to tell whether a
-	// task's own run caused the event closing it. Required.
+	// One field per RouterDeps field, which documents each. The workers'
+	// doorbells below are the router's own.
+	prompts         dbpkg.PromptStore
+	blueprints      dbpkg.BlueprintStore
+	handlers        dbpkg.EventHandlerStore
+	agents          dbpkg.AgentStore
+	teamAgents      dbpkg.TeamAgentStore
+	users           dbpkg.UsersStore
+	tasks           dbpkg.TaskStore
+	conversations   dbpkg.ConversationStore
+	entities        dbpkg.EntityStore
+	firings         dbpkg.PendingFiringsStore
+	events          dbpkg.EventStore
+	eventQueue      dbpkg.EventQueueStore
 	externalActions dbpkg.ExternalActionStore
-	// sourceGate answers whether an org has paused an event source. nil-safe;
-	// set post-construction via SetEventSourceGate — a router without one
-	// never drops. See source_gate.go.
-	sourceGate *sourceGate
-
-	// executorID/bootEpoch are this process's persistent instance-registry
-	// identity, set post-construction via SetExecutorID before RunEventQueue
-	// starts. Stamped as the lease owner onto every event_queue row this
-	// router claims (mirroring delegate.Spawner's executorID/bootEpoch for
-	// runs): provenance for the reclaim log line, never the write fence,
-	// which is the lease generation. A claim refuses an empty owner, so a
-	// test that drains sets an identity too.
-	//
-	// Guarded by executorMu, mirroring delegate.Spawner's executorID/
-	// bootEpoch + s.mu: today SetExecutorID only ever runs once at startup
-	// before RunEventQueue's goroutine starts, so the lock is a no-op in
-	// practice, but it keeps the pattern symmetric with the spawner and
-	// keeps a future second call site (e.g. a hot-reload path) from
-	// becoming a real data race.
-	executorMu sync.Mutex
-	executorID string
-	bootEpoch  int64
+	orgs            dbpkg.OrgsStore
+	teams           dbpkg.TeamsStore
+	teamRepos       dbpkg.TeamGitHubReposStore
+	jiraRules       dbpkg.JiraStatusRulesStore
+	linearRules     dbpkg.LinearTeamRulesStore
+	githubGroups    dbpkg.TeamGitHubGroupsStore
+	rederive        dbpkg.TaskReDeriveStore
+	sourceGate      *sourceGate // built over RouterDeps.EventSources; see source_gate.go
+	spawner         Delegator
+	scorer          Scorer
+	ws              *websocket.Hub
+	publisher       EventPublisher
+	executorID      string
+	bootEpoch       int64
 
 	// firingWake is the firing worker's doorbell: a conversation terminal
 	// sends on it (WakeFirings) so the task's next firing is claimed at once
@@ -152,56 +133,182 @@ type Router struct {
 	rederiveWake chan struct{}
 }
 
-// NewRouter creates a Router. teamAgents is nil-safe — callers wired
-// before that behavior existed can pass nil; the bot-disabled-team check
-// degrades to "always enabled" in that case (the prior
-// behavior). users is nil-safe too — the identity-based owner routing
-// resolves nobody when it is missing.
-// orgs is required — the terminal-state checker iterates it per org and
-// dereferences it directly, so a nil orgs is a startup wiring bug that
-// panics there, not a degraded mode.
-// externalActions is required the same way — the close phase reads the
-// ledger to tell a closing event the task's own run caused, and dereferences
-// it directly, so a nil one panics at the first such close rather than
-// closing the task under the run.
-// teamRepos is nil-safe for task routing — with it missing, the team↔repo
-// gate drops no rule or trigger, as though every team tracked every
-// repository — and fails closed for notify rules, which then match no GitHub
-// event. jiraRules and linearRules are nil-safe the same way for the
-// team↔project and team↔Linear-team gates. githubGroups is
-// nil-safe — review_requested / mentioned visibility routing degrades to
-// handler-team visibility (the pre-ticket behavior) when missing or when an
-// event carries no identity.
-//
-// TODO(TFAC-1283): take a RouterDeps struct instead of positional arguments,
-// and refuse a missing required store here. Today which arguments may be nil
-// is only this comment, and a nil required store panics at its first use.
-func NewRouter(prompts dbpkg.PromptStore, blueprints dbpkg.BlueprintStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, users dbpkg.UsersStore, tasks dbpkg.TaskStore, conversations dbpkg.ConversationStore, entities dbpkg.EntityStore, firings dbpkg.PendingFiringsStore, events dbpkg.EventStore, externalActions dbpkg.ExternalActionStore, orgs dbpkg.OrgsStore, teams dbpkg.TeamsStore, teamRepos dbpkg.TeamGitHubReposStore, jiraRules dbpkg.JiraStatusRulesStore, linearRules dbpkg.LinearTeamRulesStore, githubGroups dbpkg.TeamGitHubGroupsStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
+// RouterDeps is everything a Router is built from. A field is either required,
+// and NewRouter refuses a RouterDeps without it, or nil-safe, and its doc says
+// what the router does without it. Production wires every field.
+type RouterDeps struct {
+	// Prompts reads the name of the prompt a tripped breaker reports in its
+	// toast. Required.
+	Prompts dbpkg.PromptStore
+	// Blueprints resolves a trigger's blueprint to its first step's prompt,
+	// which the per-(entity, prompt) breaker keys on, and reads the blueprint
+	// runs the close-deferral sweep waits on. Required.
+	Blueprints dbpkg.BlueprintStore
+	// Handlers is the event_handlers store: the rules and triggers an event
+	// matches, and the trigger a queued firing names. Required.
+	Handlers dbpkg.EventHandlerStore
+	// Agents resolves the org's agent, which a fired run records as its actor
+	// and a task's claim names. Nil-safe: an auto-fire records no actor and
+	// stamps no agent claim, and no team's bot switch (TeamAgents) is read.
+	Agents dbpkg.AgentStore
+	// TeamAgents reads team_agents.enabled, the per-team bot switch an
+	// auto-fire and an automation-conflict notice check. Nil-safe: every
+	// team's bot reads as enabled.
+	TeamAgents dbpkg.TeamAgentStore
+	// Users is the reverse identity lookup (GitHub login, Jira account, Linear
+	// user → TF users) the owner ladders and requested-party routing resolve
+	// through. Nil-safe: no identity resolves to a member, so ownership falls
+	// to the ladder's other tiers and a requested party routes to the
+	// handler's own team.
+	Users dbpkg.UsersStore
+	// Tasks is task lifecycle: dedup, claims, closes and the breaker. Required.
+	Tasks dbpkg.TaskStore
+	// Conversations finds a task's live conversation: the busy half of the
+	// task gate, and the conversation an additive event folds into. Required.
+	Conversations dbpkg.ConversationStore
+	// Entities is the closed-entity guard, the structural owner tier and the
+	// entity-terminating close cascade. Required.
+	Entities dbpkg.EntityStore
+	// Firings is the per-task firing queue a busy task's trigger is admitted
+	// onto and the firing worker claims from. Required.
+	Firings dbpkg.PendingFiringsStore
+	// Events records each routed event and reads back the ones a queued unit
+	// names. Required.
+	Events dbpkg.EventStore
+	// EventQueue is the durable queue the drain worker (RunEventQueue) claims
+	// events from. Required.
+	EventQueue dbpkg.EventQueueStore
+	// ExternalActions is the ledger the close phase reads to tell whether a
+	// task's own run caused the event closing it. Required.
+	ExternalActions dbpkg.ExternalActionStore
+	// Orgs is per-org iteration for the terminal-state checker and the org
+	// settings team routing reads (hosts, the background jobs model).
+	// Required.
+	Orgs dbpkg.OrgsStore
+	// Teams reads a team's auto_delegate_enabled switch, the teams an
+	// identity's users belong to for owner routing, and the winning team's
+	// name for an automation-conflict notice. Required.
+	Teams dbpkg.TeamsStore
+	// TeamRepos is the team↔repository tracking gate. Nil-safe: for task
+	// routing the gate drops no rule or trigger, as though every team tracked
+	// every repository; for notify rules it fails closed, so they match no
+	// GitHub event.
+	TeamRepos dbpkg.TeamGitHubReposStore
+	// JiraRules is the team↔project tracking gate and the source of the
+	// terminal-state checker's Jira done statuses. Nil-safe the way TeamRepos
+	// is, for Jira events, and the checker reads no Jira entity as terminal.
+	JiraRules dbpkg.JiraStatusRulesStore
+	// LinearRules is the team↔Linear-team tracking gate and the source of the
+	// terminal-state checker's Linear done states. Nil-safe the way TeamRepos
+	// is, for Linear events, and the checker reads no Linear entity as
+	// terminal.
+	LinearRules dbpkg.LinearTeamRulesStore
+	// GitHubGroups maps a GitHub team to TF teams, resolving review_requested /
+	// mentioned team visibility. Nil-safe: an event naming a GitHub team routes
+	// to the handler's own team.
+	GitHubGroups dbpkg.TeamGitHubGroupsStore
+	// ReDerive is the score re-evaluation queue the re-derive worker
+	// (RunReDeriveQueue) claims from. Required.
+	ReDerive dbpkg.TaskReDeriveStore
+	// EventSources is the org event-source policy store the router's pause
+	// gate reads, so a source an org admin turned off mints no tasks. Required:
+	// this is the one funnel every source's events cross.
+	EventSources dbpkg.OrgEventSourceStore
+	// Spawner starts, stops and injects into delegated runs. Required.
+	Spawner Delegator
+	// Scorer is kicked per org each time a routed event creates or bumps a
+	// task. Required.
+	Scorer Scorer
+	// WS is the hub the router broadcasts task changes and toasts on.
+	// Required.
+	WS *websocket.Hub
+	// Publisher is the bus the router mirrors each event's routing disposition
+	// sentinel onto, so an async event source such as Slack can learn the
+	// outcome. Required.
+	Publisher EventPublisher
+	// ExecutorID is this process's persistent instance-registry identity,
+	// stamped as the lease owner on every event_queue, pending_firings and
+	// task_rederive_queue row the router's workers claim: provenance for the
+	// reclaim log line, never the write fence, which is the lease generation.
+	// Required, because a claim refuses an empty owner.
+	ExecutorID string
+	// BootEpoch is ExecutorID's boot epoch, stamped beside it. Any value,
+	// zero included.
+	BootEpoch int64
+}
+
+// missing names every required field d leaves unset, in field order.
+func (d RouterDeps) missing() []string {
+	required := []struct {
+		name string
+		set  bool
+	}{
+		{"Prompts", d.Prompts != nil},
+		{"Blueprints", d.Blueprints != nil},
+		{"Handlers", d.Handlers != nil},
+		{"Tasks", d.Tasks != nil},
+		{"Conversations", d.Conversations != nil},
+		{"Entities", d.Entities != nil},
+		{"Firings", d.Firings != nil},
+		{"Events", d.Events != nil},
+		{"EventQueue", d.EventQueue != nil},
+		{"ExternalActions", d.ExternalActions != nil},
+		{"Orgs", d.Orgs != nil},
+		{"Teams", d.Teams != nil},
+		{"ReDerive", d.ReDerive != nil},
+		{"EventSources", d.EventSources != nil},
+		{"Spawner", d.Spawner != nil},
+		{"Scorer", d.Scorer != nil},
+		{"WS", d.WS != nil},
+		{"Publisher", d.Publisher != nil},
+		{"ExecutorID", d.ExecutorID != ""},
+	}
+	var out []string
+	for _, f := range required {
+		if !f.set {
+			out = append(out, f.name)
+		}
+	}
+	return out
+}
+
+// NewRouter builds a Router from deps, refusing one that leaves a required
+// field unset. The error names every missing field at once.
+func NewRouter(deps RouterDeps) (*Router, error) {
+	if missing := deps.missing(); len(missing) > 0 {
+		return nil, fmt.Errorf("routing: RouterDeps missing required %s", strings.Join(missing, ", "))
+	}
 	return &Router{
-		prompts:         prompts,
-		blueprints:      blueprints,
-		handlers:        handlers,
-		agents:          agents,
-		teamAgents:      teamAgents,
-		users:           users,
-		tasks:           tasks,
-		conversations:   conversations,
-		entities:        entities,
-		firings:         firings,
-		events:          events,
-		externalActions: externalActions,
-		orgs:            orgs,
-		teams:           teams,
-		teamRepos:       teamRepos,
-		jiraRules:       jiraRules,
-		linearRules:     linearRules,
-		githubGroups:    githubGroups,
-		spawner:         spawner,
-		scorer:          scorer,
-		ws:              ws,
+		prompts:         deps.Prompts,
+		blueprints:      deps.Blueprints,
+		handlers:        deps.Handlers,
+		agents:          deps.Agents,
+		teamAgents:      deps.TeamAgents,
+		users:           deps.Users,
+		tasks:           deps.Tasks,
+		conversations:   deps.Conversations,
+		entities:        deps.Entities,
+		firings:         deps.Firings,
+		events:          deps.Events,
+		eventQueue:      deps.EventQueue,
+		externalActions: deps.ExternalActions,
+		orgs:            deps.Orgs,
+		teams:           deps.Teams,
+		teamRepos:       deps.TeamRepos,
+		jiraRules:       deps.JiraRules,
+		linearRules:     deps.LinearRules,
+		githubGroups:    deps.GitHubGroups,
+		rederive:        deps.ReDerive,
+		sourceGate:      newSourceGate(deps.EventSources),
+		spawner:         deps.Spawner,
+		scorer:          deps.Scorer,
+		ws:              deps.WS,
+		publisher:       deps.Publisher,
+		executorID:      deps.ExecutorID,
+		bootEpoch:       deps.BootEpoch,
 		firingWake:      make(chan struct{}, 1),
 		rederiveWake:    make(chan struct{}, 1),
-	}
+	}, nil
 }
 
 // breakerPromptID resolves the prompt id the auto-delegate breaker keys on
@@ -211,9 +318,9 @@ func NewRouter(prompts dbpkg.PromptStore, blueprints dbpkg.BlueprintStore, handl
 // blueprints every shipped trigger uses. Returns "" when the blueprint or its
 // steps can't be resolved (CountConsecutiveFailedConversationsSystem then matches no
 // runs → breaker never trips, the safe default that doesn't block
-// auto-delegation on a transient read error). nil-safe on the store.
+// auto-delegation on a transient read error).
 func (r *Router) breakerPromptID(ctx context.Context, orgID, blueprintID string) string {
-	if r.blueprints == nil || blueprintID == "" {
+	if blueprintID == "" {
 		return ""
 	}
 	steps, err := r.blueprints.ListStepsSystem(ctx, orgID, blueprintID)
@@ -223,66 +330,13 @@ func (r *Router) breakerPromptID(ctx context.Context, orgID, blueprintID string)
 	return steps[0].StepPromptID
 }
 
-// SetEventQueue wires the durable router queue post-
-// construction, mirroring the spawner.SetFiringWaker pattern. The drain
-// worker (RunEventQueue) claims from this store; the ingestor enqueues to
-// it. Kept off NewRouter's already-wide signature — it's a late-bound dep
-// only the worker needs, and leaving it nil makes RunEventQueue a no-op so
-// the ~30 existing test constructions don't have to thread it.
-func (r *Router) SetEventQueue(q dbpkg.EventQueueStore) {
-	r.eventQueue = q
-}
-
-// SetEventPublisher wires the bus publisher the router mirrors the
-// per-event routing disposition sentinel onto (TFAC-593), same
-// post-construction injection pattern as SetEventQueue — the bus is built
-// before the router in app composition, but the setter keeps
-// internal/routing decoupled from internal/eventbus's concrete type. Safe
-// to call once at startup; nil publisher (the default) disables the bus
-// mirror entirely — routing behavior is unaffected either way.
-func (r *Router) SetEventPublisher(p EventPublisher) {
-	r.publisher = p
-}
-
-// SetTaskReDerive wires the score re-evaluation queue post-construction,
-// same injection as SetEventQueue. The re-derive worker (RunReDeriveQueue)
-// claims from this store; the score store admits into it. Kept off
-// NewRouter's signature for the same reason: only the worker needs it, and
-// leaving it nil makes RunReDeriveQueue a no-op so the many existing test
-// constructions don't have to thread it.
-func (r *Router) SetTaskReDerive(s dbpkg.TaskReDeriveStore) {
-	r.rederive = s
-}
-
-// SetExecutorID wires this router's persistent instance-registry identity
-// (TFAC-577), mirroring delegate.Spawner.SetExecutorID. Call once at startup,
-// before RunEventQueue starts; tests that never call this keep the
-// zero-value ("", 0) identity.
-func (r *Router) SetExecutorID(id string, bootEpoch int64) {
-	r.executorMu.Lock()
-	defer r.executorMu.Unlock()
-	r.executorID = id
-	r.bootEpoch = bootEpoch
-}
-
-// executorIdentity returns the current (executorID, bootEpoch) pair under
-// lock — the read side of SetExecutorID, mirroring
-// delegate.Spawner.executorIdentity. Read per claim by drainEventQueue.
-func (r *Router) executorIdentity() (string, int64) {
-	r.executorMu.Lock()
-	defer r.executorMu.Unlock()
-	return r.executorID, r.bootEpoch
-}
-
 // autoDelegateEnabledForTeam returns the team's auto_delegate_enabled
 // kill switch. TeamsStore.GetSettingsSystem returns
 // domain.DefaultTeamSettings() on missing rows, so a missing team
 // settings row reads as false (the schema default; multi-mode's "new
 // teams require explicit opt-in" rule). The local-mode sentinel team's
 // baseline seed flips this to true, preserving the local-first
-// happy-path behavior. Nil teams store (test wiring) or empty team
-// degrades to false — safer than the prior "fail open and silently
-// auto-delegate" behavior the deleted internal/config had.
+// happy-path behavior. An empty team reads as false too.
 //
 // A store failure returns (false, err) rather than a bare false. Both
 // callers still decline to fire — an unreadable switch is never treated as
@@ -290,7 +344,7 @@ func (r *Router) executorIdentity() (string, int64) {
 // couldn't find out," which is the difference between an event that is
 // finished and one that deserves another attempt.
 func (r *Router) autoDelegateEnabledForTeam(ctx context.Context, teamID string) (bool, error) {
-	if r.teams == nil || teamID == "" {
+	if teamID == "" {
 		return false, nil
 	}
 	settings, err := r.teams.GetSettingsSystem(ctx, teamID)

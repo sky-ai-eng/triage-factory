@@ -78,14 +78,8 @@ func (r *Router) WakeReDerive() {
 // drain on every wake and every scan tick. Single worker, claiming in batches
 // interleaved across orgs — exactly one process may run this at a time,
 // which is what makes it a brain component rather than a replica-safe one.
-// Returns when ctx is cancelled. A nil TaskReDeriveStore makes this a logged
-// no-op rather than a panicking goroutine.
+// Returns when ctx is cancelled.
 func (r *Router) RunReDeriveQueue(ctx context.Context, scanInterval time.Duration) {
-	if r.rederive == nil {
-		routerLog.Warn("rederive-queue worker not started: no TaskReDeriveStore wired")
-		return
-	}
-
 	scan := time.NewTicker(scanInterval)
 	defer scan.Stop()
 
@@ -121,8 +115,7 @@ func (r *Router) drainReDeriveQueue(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil // clean stop, not a claim failure
 		}
-		executorID, bootEpoch := r.executorIdentity()
-		batch, err := r.rederive.Claim(ctx, workitem.Owner{ID: executorID, Epoch: bootEpoch}, reDeriveClaimBatch)
+		batch, err := r.rederive.Claim(ctx, workitem.Owner{ID: r.executorID, Epoch: r.bootEpoch}, reDeriveClaimBatch)
 		if batch.Cancelled+batch.Parked > 0 {
 			routerLog.Info("rederive-queue claim settled rows", "cancelled", batch.Cancelled, "parked", batch.Parked)
 		}

@@ -181,16 +181,14 @@ func (r *Router) routeEvent(ctx context.Context, evt domain.Event, judgedAt *int
 	// requeues an errored event, so a transient read costs a retry, while
 	// answering "not paused" on a failed read would mint the tasks the pause
 	// exists to prevent.
-	if r.sourceGate != nil {
-		paused, err := r.sourceGate.disabled(ctx, orgID, eventsource.KindOf(evt.EventType))
-		if err != nil {
-			disp.Disposition = events.DispositionError
-			return fmt.Errorf("resolve event source policy: %w", err)
-		}
-		if paused {
-			disp.Disposition = events.DispositionSourceDisabled
-			return nil
-		}
+	paused, err := r.sourceGate.disabled(ctx, orgID, eventsource.KindOf(evt.EventType))
+	if err != nil {
+		disp.Disposition = events.DispositionError
+		return fmt.Errorf("resolve event source policy: %w", err)
+	}
+	if paused {
+		disp.Disposition = events.DispositionSourceDisabled
+		return nil
 	}
 
 	// Entity-lifecycle gate — system events and already-closed entities create
@@ -345,15 +343,12 @@ func (r *Router) routeEvent(ctx context.Context, evt domain.Event, judgedAt *int
 }
 
 // publishDisposition is HandleEvent's single deferred publish point for the
-// per-event routing disposition sentinel (TFAC-593). Nil-guards the
-// publisher and drops OwnershipUnrouted event types (system:* sentinels) so
-// the router never sentinels its own sentinel. Best-effort past that: a
-// marshal failure is logged and dropped, never fails routing — the outcome
-// it describes already landed in the DB before this runs.
+// per-event routing disposition sentinel (TFAC-593). Drops OwnershipUnrouted
+// event types (system:* sentinels) so the router never sentinels its own
+// sentinel. Best-effort past that: a marshal failure is logged and dropped,
+// never fails routing — the outcome it describes already landed in the DB
+// before this runs.
 func (r *Router) publishDisposition(orgID string, disp events.SystemRoutingDispositionMetadata) {
-	if r.publisher == nil {
-		return
-	}
 	if ownershipModelForEvent(disp.EventType) == events.OwnershipUnrouted {
 		return
 	}
@@ -1069,13 +1064,8 @@ func deferredTrigger(trigger domain.EventHandler) bool {
 // orgHasNoBackgroundModel reports whether the org's background jobs have no
 // model to run on (systemllm.ErrNoModel), which means the scorer skips every
 // cycle and no task of the org gets a score. An unreadable settings row is an
-// error, not an answer. A router with no org store has nothing to read, so it
-// answers false: its deferred triggers wait for a score as they would on a
-// configured org.
+// error, not an answer.
 func (r *Router) orgHasNoBackgroundModel(ctx context.Context, orgID string) (bool, error) {
-	if r.orgs == nil {
-		return false, nil
-	}
 	settings, err := r.orgs.GetSettingsSystem(ctx, orgID)
 	if err != nil {
 		return false, fmt.Errorf("read org settings for the background jobs model: %w", err)
@@ -1093,13 +1083,11 @@ func (r *Router) postAutomationConflict(ctx context.Context, orgID string, task 
 		return
 	}
 	won := kinds.ConflictTeam{TeamID: winner}
-	if r.teams != nil {
-		team, err := r.teams.GetSystem(ctx, orgID, winner)
-		if err != nil {
-			routerLog.Warn("automation conflict: winning team's name unreadable", "team", winner, "task_id", task.ID, "error", err)
-		} else if team != nil {
-			won.Name = team.Name
-		}
+	team, err := r.teams.GetSystem(ctx, orgID, winner)
+	if err != nil {
+		routerLog.Warn("automation conflict: winning team's name unreadable", "team", winner, "task_id", task.ID, "error", err)
+	} else if team != nil {
+		won.Name = team.Name
 	}
 	subject := task.EntitySourceID
 	if subject == "" {

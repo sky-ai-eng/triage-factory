@@ -15,7 +15,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 	_ "modernc.org/sqlite"
 )
 
@@ -90,11 +89,11 @@ func seedLocalBot(t *testing.T, database *sql.DB) {
 func reDeriveRouter(t *testing.T, database *sql.DB, spawner Delegator) *Router {
 	t.Helper()
 	seedLocalBot(t, database)
-	st := sqlitestore.New(database)
-	r := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), st.Agents, st.TeamAgents, nil, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.ExternalActions, st.Orgs, st.Teams, nil, nil, nil, nil, spawner, noopScorer{}, websocket.NewHub())
-	r.SetTaskReDerive(st.TaskReDerive)
-	r.SetExecutorID("rederive-worker-test", 1)
-	return r
+	deps := testRouterDeps(database)
+	if spawner != nil {
+		deps.Spawner = spawner
+	}
+	return newTestRouter(deps)
 }
 
 // drainReDeriveOnce runs one full drain pass of the re-derive worker

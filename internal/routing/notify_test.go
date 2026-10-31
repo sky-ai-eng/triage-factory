@@ -16,7 +16,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // seedNotifyRule inserts an enabled, match-all notify rule on eventType for
@@ -193,10 +192,9 @@ func TestNotify_RaisesOnlyOnceRoutingSucceeds(t *testing.T) {
 	seedNotifyRule(t, database, runmode.LocalDefaultTeamID, domain.EventGitHubPRCICheckFailed, domain.NotifyAudienceCreator)
 	seedMatchAllCIRule(t, database, runmode.LocalDefaultTeamID)
 
-	st := sqlitestore.New(database)
-	failing := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, st.Users,
-		erroringTaskStore{testTaskStore(database)}, st.Conversations, st.Entities, st.PendingFirings, st.Events, st.ExternalActions,
-		st.Orgs, st.Teams, st.TeamGitHubRepos, st.JiraStatusRules, nil, nil, nil, noopScorer{}, websocket.NewHub())
+	failingDeps := gateRouterDeps(database)
+	failingDeps.Tasks = erroringTaskStore{testTaskStore(database)}
+	failing := newTestRouter(failingDeps)
 	if err := failing.HandleEvent(ctx, ciEvent(t, entityID, "owner/repo")); err == nil {
 		t.Fatal("route with a failing task store = nil; want the upsert's error")
 	}
