@@ -1186,13 +1186,6 @@ func (r JiraProjectStatusRules) InProgressContains(status JiraStatusRef) bool {
 	return containsStatus(r.InProgressMembers, status)
 }
 
-// InReviewContains reports whether status is a member of the InReview rule.
-// The rule is optional, and an unmapped one has no members, so this is false
-// everywhere for a project that never mapped it.
-func (r JiraProjectStatusRules) InReviewContains(status JiraStatusRef) bool {
-	return containsStatus(r.InReviewMembers, status)
-}
-
 // DoneContains reports whether status is a member of the Done rule.
 func (r JiraProjectStatusRules) DoneContains(status JiraStatusRef) bool {
 	return containsStatus(r.DoneMembers, status)

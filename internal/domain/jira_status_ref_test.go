@@ -156,12 +156,6 @@ func TestJiraProjectStatusRules_Armed(t *testing.T) {
 	if !armed.Armed() {
 		t.Error("leaving the in-review rule unmapped should not change armed")
 	}
-	if !withReview.InReviewContains(domain.JiraStatusRef{Name: "Code Review"}) {
-		t.Error("in-review membership should match a name-only ref like its siblings")
-	}
-	if armed.InReviewContains(domain.JiraStatusRef{Name: "Code Review"}) {
-		t.Error("an unmapped in-review rule contains nothing")
-	}
 }
 
 // StatusMatchSets is the split a terminal-candidate query matches on: a ref
