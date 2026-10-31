@@ -197,7 +197,7 @@ func (r *Router) routeEvent(ctx context.Context, evt domain.Event, judgedAt *int
 	// nothing. A terminating event is gated here while its entity is STILL
 	// active (it is what closes the entity, in the close phase below), so it
 	// passes; only later stragglers on the now-closed entity drop.
-	entityID, ok, err := r.routableEntity(ctx, orgID, evt)
+	entity, ok, err := r.routableEntity(ctx, orgID, evt)
 	if err != nil {
 		disp.Disposition = events.DispositionError
 		return fmt.Errorf("resolve entity: %w", err)
@@ -206,6 +206,7 @@ func (r *Router) routeEvent(ctx context.Context, evt domain.Event, judgedAt *int
 		disp.Disposition = events.DispositionTasklessUnroutable
 		return nil
 	}
+	entityID := entity.ID
 	disp.EntityID = entityID
 
 	// Close phase — runs unconditionally, before routing, and independent of
@@ -258,12 +259,17 @@ func (r *Router) routeEvent(ctx context.Context, evt domain.Event, judgedAt *int
 	// set.
 	scopeCache := map[string]bool{}
 
-	// Match event_handlers (rules + triggers) for this event.
-	matchedRules, matchedTriggers, err := r.matchHandlers(ctx, orgID, evt, scopeCache)
+	// Match event_handlers (rules, triggers and notify rules) for this event.
+	matchedRules, matchedTriggers, matchedNotify, err := r.matchHandlers(ctx, orgID, evt, scopeCache)
 	if err != nil {
 		disp.Disposition = events.DispositionError
 		return fmt.Errorf("match handlers: %w", err)
 	}
+
+	// Notify rules tell people about the event whether or not it makes a
+	// task, and never fail routing: the event's obligation is its tasks.
+	r.raiseNotifications(ctx, orgID, evt, *entity, matchedNotify)
+
 	if len(matchedRules) == 0 && len(matchedTriggers) == 0 {
 		// Nothing matched — event is recorded but no task created.
 		disp.Disposition = events.DispositionTasklessNoHandler
@@ -356,7 +362,7 @@ func (r *Router) publishDisposition(orgID string, disp events.SystemRoutingDispo
 }
 
 // routableEntity is the entity-lifecycle gate that precedes the close + route
-// phases. It returns the active entity's id with ok=true when the event should
+// phases. It returns the active entity with ok=true when the event should
 // proceed; ok=false when it should not:
 //   - a system event (no entity context) creates nothing;
 //   - an event on an already-closed entity is recorded but spawns nothing — a
@@ -371,34 +377,40 @@ func (r *Router) publishDisposition(orgID string, disp events.SystemRoutingDispo
 // legitimate ok=false cases (no entity context, dangling reference, closed
 // entity) — so the caller can tell "nothing to route to" from "couldn't find
 // out" rather than reporting the latter as the former.
-func (r *Router) routableEntity(ctx context.Context, orgID string, evt domain.Event) (entityID string, ok bool, err error) {
+func (r *Router) routableEntity(ctx context.Context, orgID string, evt domain.Event) (*domain.Entity, bool, error) {
 	if evt.EntityID == nil {
-		return "", false, nil
+		return nil, false, nil
 	}
-	entityID = *evt.EntityID
+	entityID := *evt.EntityID
 
 	entity, err := r.entities.GetSystem(ctx, orgID, entityID)
 	if err != nil {
 		routerLog.Error("failed to load entity", "entity_id", entityID, "error", err)
-		return "", false, err
+		return nil, false, err
 	}
 	if entity == nil {
 		// Dangling reference — surprising, but not a query failure; treated
 		// like "nothing to route to."
 		routerLog.Error("entity not found", "entity_id", entityID)
-		return "", false, nil
+		return nil, false, nil
 	}
 	if entity.State != "active" {
-		return "", false, nil
+		return nil, false, nil
 	}
-	return entityID, true, nil
+	return entity, true, nil
 }
 
 // matchHandlers queries the enabled event_handlers for the event type and
 // returns those whose scope predicate matches AND whose team tracks the
 // event's entity (the team↔scope gate), split by kind. One query,
-// kind-discriminated locally — preserves the rules-before-triggers order via
-// the store's kind-ASC ORDER BY.
+// kind-discriminated locally — preserves the rules-before-triggers order the
+// store reads them in.
+//
+// A notify rule passes the gate only when teamScopeVerdict shows the team
+// tracks the entity: every answer it cannot prove, a read error included, is
+// "does not track", where rules and triggers read it as "tracks". A
+// notification about an entity the team does not track is a disclosure, and a
+// missed one costs nothing a later event cannot tell the person.
 //
 // Predicates are matched against the event's current view (events.Current):
 // a handler filter names the ids the source uses now, and an event recorded
@@ -408,7 +420,7 @@ func (r *Router) routableEntity(ctx context.Context, orgID string, evt domain.Ev
 // current view — and the caller must not read that as "queried fine, zero
 // handlers matched" (which would misreport an internal error as a legitimate
 // "nothing configured" outcome).
-func (r *Router) matchHandlers(ctx context.Context, orgID string, evt domain.Event, scopeCache map[string]bool) (matchedRules, matchedTriggers []domain.EventHandler, err error) {
+func (r *Router) matchHandlers(ctx context.Context, orgID string, evt domain.Event, scopeCache map[string]bool) (matchedRules, matchedTriggers, matchedNotify []domain.EventHandler, err error) {
 	ctx, span := tracer.Start(ctx, "route.match")
 	defer span.End()
 
@@ -416,14 +428,17 @@ func (r *Router) matchHandlers(ctx context.Context, orgID string, evt domain.Eve
 	if err != nil {
 		span.SetStatus(codes.Error, "query event_handlers")
 		routerLog.ErrorContext(ctx, "failed to query event_handlers", "event_type", evt.EventType, "error", err)
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	metadataJSON, err := events.Current(ctx, orgID, evt.EventType, evt.MetadataJSON)
 	if err != nil {
 		span.SetStatus(codes.Error, "resolve event metadata")
 		routerLog.ErrorContext(ctx, "failed to resolve event metadata", "event_type", evt.EventType, "error", err)
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
+	// The strict verdict per team, for notify rules: a separate memo from
+	// scopeCache, which holds the fail-open answer.
+	strict := map[string]bool{}
 
 	// scopeCache memoizes the team↔scope (e.g. team↔repo) gate per team for this
 	// one event, so a team with several matching handlers does a single tracking
@@ -443,6 +458,12 @@ func (r *Router) matchHandlers(ctx context.Context, orgID string, evt domain.Eve
 		if !matched {
 			continue
 		}
+		if h.Kind == domain.EventHandlerKindNotify {
+			if r.notifyScopeAllows(ctx, evt, h.TeamID, strict) {
+				matchedNotify = append(matchedNotify, h)
+			}
+			continue
+		}
 		// Team↔scope gate (repos / Jira projects): a team's
 		// handler only fires for events whose entity the team tracks. Dropped
 		// here so the team never enters the visibility set, its triggers never
@@ -458,8 +479,28 @@ func (r *Router) matchHandlers(ctx context.Context, orgID string, evt domain.Eve
 			matchedTriggers = append(matchedTriggers, h)
 		}
 	}
-	span.SetAttributes(telemetry.Count(len(matchedRules) + len(matchedTriggers)))
-	return matchedRules, matchedTriggers, nil
+	span.SetAttributes(telemetry.Count(len(matchedRules) + len(matchedTriggers) + len(matchedNotify)))
+	return matchedRules, matchedTriggers, matchedNotify, nil
+}
+
+// notifyScopeAllows is the notify rules' team↔scope gate: teamScopeVerdict,
+// memoized per team in cache, with every undecided answer a "no". A team of
+// none is a "no" too: every handler names one, so a row without is not one to
+// trust.
+func (r *Router) notifyScopeAllows(ctx context.Context, evt domain.Event, teamID string, cache map[string]bool) bool {
+	if teamID == "" {
+		return false
+	}
+	if allowed, ok := cache[teamID]; ok {
+		return allowed
+	}
+	tracks, err := r.teamScopeVerdict(ctx, evt, teamID)
+	if err != nil {
+		routerLog.WarnContext(ctx, "notify gate undecided; not notifying", "team_id", teamID, "event_type", evt.EventType, "error", err)
+	}
+	allowed := err == nil && tracks
+	cache[teamID] = allowed
+	return allowed
 }
 
 // eventRouting is the resolved team-routing for an event: which team owns the

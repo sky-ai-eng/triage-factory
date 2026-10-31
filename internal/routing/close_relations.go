@@ -10,13 +10,15 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/notify"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
 // This file is the close phase: the single, declared mechanism by which an
-// event resolves existing tasks. It replaces the old hardcoded close subsystem
+// event resolves existing tasks, and the event notifications open about the
+// same entity. It replaces the old hardcoded close subsystem
 // (a per-event-type switch + a separate entity-wide cascade). Every close —
 // "ci_check_passed closes ci_check_failed", "a submitted review satisfies the
 // reviewer's request", "pr_merged closes everything" — is one closeRelation,
@@ -40,9 +42,28 @@ import (
 // what picks the mechanism.
 
 // closeContext is the per-firing value a relation's prepare step computes once
-// and its keep predicate consumes per task (a reviewer dedup key, the new
+// and its keep predicate consumes per target (a reviewer dedup key, the new
 // assignee's owning teams). Opaque to the driver.
 type closeContext any
+
+// closeTarget is what a relation's keep decides on: an active task on the
+// entity, or an open event notification about it. A relation closes both with
+// one prepare and one keep, so "CI passed" resolves the CI-failed
+// notification on exactly the gate that closes the CI-failed task.
+type closeTarget struct {
+	eventType string
+	dedupKey  string
+	// ownerTeam is a task's owning team; a notification has none.
+	ownerTeam string
+}
+
+func taskTarget(t domain.Task) closeTarget {
+	return closeTarget{eventType: t.EventType, dedupKey: t.DedupKey, ownerTeam: teamIDValue(&t)}
+}
+
+func notificationTarget(n notify.EventTarget) closeTarget {
+	return closeTarget{eventType: n.EventType, dedupKey: n.DedupKey}
+}
 
 // closeRelation declares that one or more events close some set of active tasks
 // on the same entity. Conditions stay in Go (snapshot/identity-coupled, not a
@@ -50,9 +71,9 @@ type closeContext any
 type closeRelation struct {
 	// onEvents are the event types that trigger this close.
 	onEvents []string
-	// closes are the target event types whose active tasks this relation
-	// closes. A typed close lists one type; an entity-wide close lists the
-	// entity's full task-event family.
+	// closes are the target event types whose active tasks, and open event
+	// notifications, this relation closes. A typed close lists one type; an
+	// entity-wide close lists the entity's full task-event family.
 	closes []string
 	// prepare runs once per firing, after target tasks are found to exist.
 	// ok=false skips the whole relation (the snapshot / identity gate); the
@@ -61,9 +82,10 @@ type closeRelation struct {
 	// obligation, so the event replays rather than skipping the close for
 	// good. nil prepare = proceed with a nil context.
 	prepare func(ctx context.Context, r *Router, orgID string, evt domain.Event, entityID string) (closeContext, bool, error)
-	// keep decides per task whether it actually closes (dedup-key narrowing,
-	// member-aware skip). nil keep = close every active task of a target type.
-	keep func(evt domain.Event, ctx closeContext, t domain.Task) bool
+	// keep decides per target whether it actually closes (dedup-key
+	// narrowing, member-aware skip). nil keep = close every active task and
+	// open notification of a target type.
+	keep func(evt domain.Event, ctx closeContext, t closeTarget) bool
 	// terminatesEntity also flips the entity to closed, in the same
 	// transaction as the tasks close (stop polling / straggler tasks). This
 	// is what makes an event "entity-terminating" — there is no separate
@@ -344,7 +366,9 @@ func linearCloseTypesExcept(terminator string) []string {
 
 // runCloses applies every typed (non-terminating) close relation matching
 // evt: it closes the active tasks the event resolves and reports whether any
-// closed, which drives the tasks_updated broadcast. Terminating relations
+// closed, which drives the tasks_updated broadcast. It resolves the event
+// notifications the same relation closes beside them, outside the routing
+// obligation: a notification never fails routing. Terminating relations
 // never reach here — HandleEvent routes them through the entity store's
 // single guarded transaction instead, so a terminating event's tasks and
 // its entity flip commit together rather than one transaction per task.
@@ -381,7 +405,8 @@ func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, 
 			}
 			targets = append(targets, ts...)
 		}
-		if len(targets) == 0 {
+		notes := r.openEventNotifications(ctx, orgID, entityID, rel.closes)
+		if len(targets) == 0 && len(notes) == 0 {
 			continue
 		}
 
@@ -408,9 +433,16 @@ func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, 
 		// well as typed "auto_closed_by_event" ones; the reason field, not the
 		// presence of this column, distinguishes the two. (Non-event closes —
 		// run_completed, user_* — leave it NULL, and those don't pass through here.)
+		var resolve []notify.EventTarget
+		for _, n := range notes {
+			if rel.keep == nil || rel.keep(evt, cctx, notificationTarget(n)) {
+				resolve = append(resolve, n)
+			}
+		}
+		notify.ResolveEvents(ctx, orgID, entityID, resolve)
 		for i := range targets {
 			t := targets[i]
-			if rel.keep != nil && !rel.keep(evt, cctx, t) {
+			if rel.keep != nil && !rel.keep(evt, cctx, taskTarget(t)) {
 				continue
 			}
 			if err := r.closeTaskWithAudit(ctx, orgID, t.ID, evt.ID, reason, evt.EventType); err != nil {
@@ -472,6 +504,7 @@ func (r *Router) runTerminatingClose(ctx context.Context, orgID string, evt doma
 			"entity_id", entityID, "on_event", evt.EventType)
 		return false, nil
 	}
+	notify.ResolveEvents(ctx, orgID, entityID, r.openEventNotifications(ctx, orgID, entityID, rel.closes))
 	for _, taskID := range res.ClosedTaskIDs {
 		routerLog.InfoContext(ctx, "closed task", "task_id", taskID, "on_event", evt.EventType, "reason", reason)
 		r.stopConversationsOnClosedTask(orgID, taskID, res.ActiveConversationIDs[taskID])
@@ -491,6 +524,18 @@ func (r *Router) runTerminatingClose(ctx context.Context, orgID string, evt doma
 		r.broadcastTasksUpdated(orgID)
 	}
 	return true, nil
+}
+
+// openEventNotifications is the open event conditions about entityID of the
+// given types. Resolving them is best effort, as raising them is: a failed
+// read is logged and leaves them open, dismissible, until the entity closes.
+func (r *Router) openEventNotifications(ctx context.Context, orgID, entityID string, eventTypes []string) []notify.EventTarget {
+	got, err := notify.OpenEventConditions(ctx, orgID, entityID, eventTypes)
+	if err != nil {
+		routerLog.WarnContext(ctx, "close: open event notifications unreadable; leaving them open", "entity_id", entityID, "error", err)
+		return nil
+	}
+	return got
 }
 
 // --- relation hooks ---------------------------------------------------------
@@ -581,9 +626,9 @@ func prepareReviewerKey(_ context.Context, _ *Router, _ string, evt domain.Event
 	return keys, true, nil
 }
 
-func keepDedupKey(_ domain.Event, ctx closeContext, t domain.Task) bool {
+func keepDedupKey(_ domain.Event, ctx closeContext, t closeTarget) bool {
 	keys, _ := ctx.([]string)
-	return slices.Contains(keys, t.DedupKey)
+	return slices.Contains(keys, t.dedupKey)
 }
 
 // prepareReviewResolved gates review_changes_requested closes: the reviewer
@@ -633,12 +678,12 @@ func prepareRemovedReviewerKeys(_ context.Context, _ *Router, _ string, evt doma
 // keepReviewRequestRemoved closes the review_requested task keyed to the
 // removed reviewer (prepareRemovedReviewerKeys); a legacy removal with no
 // dedup_key closes every review_requested task (pre-ticket behavior).
-func keepReviewRequestRemoved(evt domain.Event, ctx closeContext, t domain.Task) bool {
+func keepReviewRequestRemoved(evt domain.Event, ctx closeContext, t closeTarget) bool {
 	if evt.DedupKey == "" {
 		return true
 	}
 	keys, _ := ctx.([]string)
-	return slices.Contains(keys, t.DedupKey)
+	return slices.Contains(keys, t.dedupKey)
 }
 
 // prepareJiraReassign resolves the new assignee's owning team(s) for the
@@ -691,17 +736,20 @@ func (r *Router) newAssigneeTeamSet(ctx context.Context, orgID string, evt domai
 	return set, nil
 }
 
-// keepReassign is the per-task half of a reassignment close. The per-assignee
-// assigned task survives only while still owned by the new assignee's team;
-// the source's pool task (poolType) always retires once the issue is assigned
-// (its owner is the tracking team, so a match would be coincidental).
-func keepReassign(poolType string) func(domain.Event, closeContext, domain.Task) bool {
-	return func(_ domain.Event, ctx closeContext, t domain.Task) bool {
-		if t.EventType == poolType {
+// keepReassign is the per-target half of a reassignment close. The
+// per-assignee assigned task survives only while still owned by the new
+// assignee's team; the source's pool task (poolType) always retires once the
+// issue is assigned (its owner is the tracking team, so a match would be
+// coincidental). A notification has no owner, so the old assignment's always
+// resolves, and the same event raises one for the new assignment when a rule
+// matches it.
+func keepReassign(poolType string) func(domain.Event, closeContext, closeTarget) bool {
+	return func(_ domain.Event, ctx closeContext, t closeTarget) bool {
+		if t.eventType == poolType {
 			return true
 		}
 		newOwnerTeams, _ := ctx.(map[string]struct{})
-		if owner := teamIDValue(&t); owner != "" {
+		if owner := t.ownerTeam; owner != "" {
 			if _, ok := newOwnerTeams[owner]; ok {
 				return false // still assigned to its owning team — not a reassignment-away
 			}

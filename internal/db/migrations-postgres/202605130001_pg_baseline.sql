@@ -614,6 +614,9 @@ CREATE TABLE public.event_handlers (
     blueprint_id text,
     breaker_threshold integer,
     min_autonomy_suitability real,
+    -- Notify-only: who a notify rule tells, its creator ('creator') or its
+    -- team's members ('team'). NULL for rules and triggers.
+    notify_audience text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     -- As on prompts and blueprints: user_modified is the shipped-content sync's
@@ -621,7 +624,11 @@ CREATE TABLE public.event_handlers (
     -- (org_id, team_id, system_slug) occupied so sync never resurrects the row.
     user_modified boolean DEFAULT false NOT NULL,
     deleted_at timestamp with time zone,
-    CONSTRAINT event_handlers_kind_check CHECK ((kind = ANY (ARRAY['rule'::text, 'trigger'::text]))),
+    CONSTRAINT event_handlers_kind_check CHECK ((kind = ANY (ARRAY['rule'::text, 'trigger'::text, 'notify'::text]))),
+    -- A notify rule is a person's or a team's, never shipped content, and tells
+    -- its audience about an event without touching tasks.
+    CONSTRAINT event_handlers_notify_shape CHECK (((kind <> 'notify'::text) OR ((blueprint_id IS NULL) AND (breaker_threshold IS NULL) AND (min_autonomy_suitability IS NULL) AND (default_priority IS NULL) AND (sort_order IS NULL) AND (name IS NOT NULL) AND (notify_audience = ANY (ARRAY['creator'::text, 'team'::text])) AND (source <> 'system'::text) AND (NOT applies_to_unowned)))),
+    CONSTRAINT event_handlers_notify_audience_kind CHECK (((kind = 'notify'::text) = (notify_audience IS NOT NULL))),
     CONSTRAINT event_handlers_rule_shape CHECK (((kind <> 'rule'::text) OR ((blueprint_id IS NULL) AND (breaker_threshold IS NULL) AND (min_autonomy_suitability IS NULL) AND (name IS NOT NULL) AND (default_priority IS NOT NULL) AND (sort_order IS NOT NULL)))),
     -- source is app-validated, not CHECK-constrained, so new provenance values are
     -- addable without DDL. The creator pairing below tolerates any non-system source.
@@ -2733,10 +2740,13 @@ CREATE POLICY entity_links_all ON public.entity_links USING (((org_id = tf.curre
 ALTER TABLE public.event_handlers ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY event_handlers_delete ON public.event_handlers FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
+-- A notify rule whose audience is the team is a team admin's to write; a
+-- personal one is its creator's, or a team admin's. The server checks the same
+-- before it writes.
+CREATE POLICY event_handlers_delete ON public.event_handlers FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id) AND ((kind <> 'notify'::text) OR tf.user_is_team_admin(team_id) OR ((notify_audience = 'creator'::text) AND (creator_user_id = tf.current_user_id())))));
 
 
-CREATE POLICY event_handlers_insert ON public.event_handlers FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND tf.user_can_write_team(team_id)));
+CREATE POLICY event_handlers_insert ON public.event_handlers FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND tf.user_can_write_team(team_id) AND ((kind <> 'notify'::text) OR tf.user_is_team_admin(team_id) OR ((notify_audience = 'creator'::text) AND (creator_user_id = tf.current_user_id())))));
 
 
 CREATE POLICY event_handlers_select ON public.event_handlers FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND ((creator_user_id = tf.current_user_id()) OR (EXISTS ( SELECT 1
@@ -2744,7 +2754,7 @@ CREATE POLICY event_handlers_select ON public.event_handlers FOR SELECT USING ((
   WHERE ((m.user_id = tf.current_user_id()) AND (m.team_id = event_handlers.team_id)))))));
 
 
-CREATE POLICY event_handlers_update ON public.event_handlers FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
+CREATE POLICY event_handlers_update ON public.event_handlers FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id) AND ((kind <> 'notify'::text) OR tf.user_is_team_admin(team_id) OR ((notify_audience = 'creator'::text) AND (creator_user_id = tf.current_user_id()))))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id) AND ((kind <> 'notify'::text) OR tf.user_is_team_admin(team_id) OR ((notify_audience = 'creator'::text) AND (creator_user_id = tf.current_user_id())))));
 
 
 ALTER TABLE public.events ENABLE ROW LEVEL SECURITY;
@@ -6742,6 +6752,8 @@ CREATE TABLE public.notifications (
     resolved_at     timestamp with time zone,
     resolved_reason text,
     expires_at      timestamp with time zone,
+    -- The entity an event row is about; set exactly on origin = 'event' rows.
+    entity_id       uuid,
     CONSTRAINT notifications_origin_check CHECK ((origin = ANY (ARRAY['system'::text, 'event'::text]))),
     CONSTRAINT notifications_kind_check CHECK ((kind <> ''::text)),
     CONSTRAINT notifications_priority_check CHECK ((priority = ANY (ARRAY['urgent'::text, 'high'::text, 'low'::text]))),
@@ -6757,7 +6769,8 @@ CREATE TABLE public.notifications (
         OR ((lifecycle = 'notice'::text) AND (expires_at IS NOT NULL))
     )),
     CONSTRAINT notifications_notice_check CHECK (((lifecycle = 'condition'::text) OR (dismissible AND (resolved_at IS NULL)))),
-    CONSTRAINT notifications_resolved_check CHECK (((resolved_at IS NULL) = (resolved_reason IS NULL)))
+    CONSTRAINT notifications_resolved_check CHECK (((resolved_at IS NULL) = (resolved_reason IS NULL))),
+    CONSTRAINT notifications_entity_check CHECK (((origin = 'event'::text) = (entity_id IS NOT NULL)))
 );
 
 ALTER TABLE ONLY public.notifications
@@ -6772,6 +6785,8 @@ ALTER TABLE ONLY public.notifications
     ADD CONSTRAINT notifications_team_id_org_id_fkey FOREIGN KEY (team_id, org_id) REFERENCES public.teams(id, org_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.notifications
     ADD CONSTRAINT notifications_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.notifications
+    ADD CONSTRAINT notifications_entity_id_org_id_fkey FOREIGN KEY (entity_id, org_id) REFERENCES public.entities(id, org_id) ON DELETE CASCADE;
 
 -- The open occurrence a raise coalesces into.
 CREATE UNIQUE INDEX notifications_open_occurrence_idx ON public.notifications USING btree (org_id, origin, kind, key, audience_scope, (COALESCE(audience_role, ''::text)), (COALESCE(team_id, '00000000-0000-0000-0000-000000000000'::uuid)), (COALESCE(user_id, '00000000-0000-0000-0000-000000000000'::uuid))) WHERE (resolved_at IS NULL);
@@ -6781,6 +6796,9 @@ CREATE INDEX notifications_list_idx ON public.notifications USING btree (org_id,
 -- The orgs with an open condition of a kind, across the deployment: what a
 -- producer whose evaluation set can lose an org re-evaluates.
 CREATE INDEX notifications_open_kind_idx ON public.notifications USING btree (kind, origin, org_id) WHERE ((lifecycle = 'condition'::text) AND (resolved_at IS NULL));
+
+-- An entity's open event rows: what the close phase resolves.
+CREATE INDEX notifications_open_entity_idx ON public.notifications USING btree (org_id, entity_id, kind) WHERE ((entity_id IS NOT NULL) AND (resolved_at IS NULL));
 
 ALTER TABLE public.notifications ENABLE ROW LEVEL SECURITY;
 

@@ -35,6 +35,12 @@ func (routes) TaskRule(ruleID string) Href {
 	return Href{route: triageRoute, query: url.Values{"rule": {ruleID}}}
 }
 
+// NotifyRule is a notify rule, open in the notify rules editor on the triage
+// page.
+func (routes) NotifyRule(ruleID string) Href {
+	return Href{route: triageRoute, query: url.Values{"notify_rule": {ruleID}}}
+}
+
 // TeamJiraRules is the Jira status rules of the team teamID names: in multi
 // mode its team page, opened on the Jira source; in local mode, whose one team
 // is configured on /settings, that page. teamID may be empty only in local

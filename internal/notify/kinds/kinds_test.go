@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/notify"
-	_ "github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 )
 
 // TestKindsConformance renders every registered kind's Example for every
@@ -27,5 +27,27 @@ func TestKindsConformance(t *testing.T) {
 				t.Errorf("%s: for %+v (local %v), a write would be refused: %v", k.Name(), ex.Recipient, ex.Local, ex.Err)
 			}
 		}
+	}
+}
+
+// TestEventConformance holds the event rendering to the same checks, for a
+// team row, a personal row and local mode's one user. A personal row links to
+// its rule and a team row does not, since a team member may not be the one
+// who can edit it.
+func TestEventConformance(t *testing.T) {
+	exs := kinds.Event.Examples()
+	if len(exs) != 3 {
+		t.Fatalf("got %d examples; want a team row, a personal row and local mode's", len(exs))
+	}
+	for _, ex := range exs {
+		if strings.TrimSpace(ex.Content.Title) == "" {
+			t.Errorf("an empty title for %+v", ex.Recipient)
+		}
+		if ex.Err != nil {
+			t.Errorf("for %+v (local %v), a write would be refused: %v", ex.Recipient, ex.Local, ex.Err)
+		}
+	}
+	if team, personal := len(exs[0].Content.Actions), len(exs[1].Content.Actions); team != 1 || personal != 2 {
+		t.Errorf("team row has %d actions and personal row %d; want the entity link, and the rule link on the personal row", team, personal)
 	}
 }

@@ -27,6 +27,9 @@ func ValidateEventHandlerForCreate(h *domain.EventHandler) error {
 		if h.BlueprintID != "" || h.BreakerThreshold != nil || h.MinAutonomySuitability != nil {
 			return errors.New("event_handlers Create: rule must not populate trigger-only fields")
 		}
+		if h.Audience != "" {
+			return errors.New("event_handlers Create: rule must not populate notify-only fields")
+		}
 	case domain.EventHandlerKindTrigger:
 		if h.BlueprintID == "" {
 			return errors.New("event_handlers Create: trigger requires blueprint_id")
@@ -37,11 +40,27 @@ func ValidateEventHandlerForCreate(h *domain.EventHandler) error {
 		if h.DefaultPriority != nil || h.SortOrder != nil || h.Name != "" {
 			return errors.New("event_handlers Create: trigger must not populate rule-only fields")
 		}
+		if h.Audience != "" {
+			return errors.New("event_handlers Create: trigger must not populate notify-only fields")
+		}
 		if h.TriggerType == "" {
 			h.TriggerType = domain.TriggerTypeEvent
 		}
 		if h.TriggerType != domain.TriggerTypeEvent {
 			return fmt.Errorf("event_handlers Create: unsupported trigger_type %q", h.TriggerType)
+		}
+	case domain.EventHandlerKindNotify:
+		if h.Name == "" {
+			return errors.New("event_handlers Create: notify rule requires name")
+		}
+		if h.Audience != domain.NotifyAudienceCreator && h.Audience != domain.NotifyAudienceTeam {
+			return fmt.Errorf("event_handlers Create: notify rule audience %q is not %q or %q", h.Audience, domain.NotifyAudienceCreator, domain.NotifyAudienceTeam)
+		}
+		if h.DefaultPriority != nil || h.SortOrder != nil || h.BlueprintID != "" || h.BreakerThreshold != nil || h.MinAutonomySuitability != nil {
+			return errors.New("event_handlers Create: notify rule must not populate rule- or trigger-only fields")
+		}
+		if h.AppliesToUnowned {
+			return errors.New("event_handlers Create: notify rule cannot apply to unowned entities")
 		}
 	default:
 		return fmt.Errorf("event_handlers Create: unknown kind %q", h.Kind)

@@ -1370,6 +1370,7 @@ func (s *Server) routes() {
 	s.api("GET /api/event-handlers/{id}", eh.handleEventHandlerGet)
 	s.apiMutating("POST /api/event-handlers/rules", eh.handleEventHandlerCreateRule)
 	s.apiMutating("POST /api/event-handlers/triggers", eh.handleEventHandlerCreateTrigger)
+	s.apiMutating("POST /api/event-handlers/notify", eh.handleEventHandlerCreateNotify)
 	s.apiMutating("PUT /api/event-handlers/reorder", eh.handleEventHandlerReorder)
 	s.apiMutating("PATCH /api/event-handlers/{id}", eh.handleEventHandlerUpdate)
 	s.apiMutating("DELETE /api/event-handlers/{id}", eh.handleEventHandlerDelete)

@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // EventHandler unifies the former TaskRule + PromptTrigger domain types
 // into one primitive. The kind discriminator selects per-kind behavior:
@@ -15,6 +18,10 @@ import "time"
 //	                 required. default_priority, sort_order must be nil.
 //	                 A trigger always fires a blueprint (length >= 1); a
 //	                 single prompt is just a 1-step blueprint.
+//	kind="notify"  — tells its audience about a matching event through a
+//	                 notification, and creates no task. name and audience
+//	                 are required; every rule- and trigger-only field must
+//	                 be nil. Always user-authored.
 //
 // The CHECK constraints on event_handlers enforce the shape pair at the
 // SQL level; both backends rely on it.
@@ -60,7 +67,10 @@ type EventHandler struct {
 	// surface it (it's a seed/idempotency key, not request data); the
 	// per-team copy keys on (org_id, team_id, system_slug). omitempty so it
 	// stays absent from team-handler responses that never set it.
-	SystemSlug string    `json:"system_slug,omitempty"`
+	SystemSlug string `json:"system_slug,omitempty"`
+	// CreatorUserID is the user who authored a user-source handler, empty for
+	// a shipped one. A personal notify rule tells this user.
+	CreatorUserID string    `json:"creator_user_id,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
 	// UserModified is the shipped-content sync's "never clobber a user edit"
@@ -72,8 +82,8 @@ type EventHandler struct {
 	// regardless. Always false for user-authored (non-system_slug) rows.
 	UserModified bool `json:"user_modified"`
 
-	// Rule-only (nil for triggers).
-	Name            string   `json:"name"`             // required for rules
+	// Rule and notify (nil for triggers).
+	Name            string   `json:"name"`             // required for rules and notify rules
 	DefaultPriority *float64 `json:"default_priority"` // 0.0–1.0
 	SortOrder       *int     `json:"sort_order"`
 
@@ -82,12 +92,32 @@ type EventHandler struct {
 	TriggerType            string   `json:"trigger_type"` // V1: only "event"
 	BreakerThreshold       *int     `json:"breaker_threshold"`
 	MinAutonomySuitability *float64 `json:"min_autonomy_suitability"`
+
+	// Notify-only (empty for rules and triggers): who the rule tells,
+	// NotifyAudienceCreator or NotifyAudienceTeam.
+	Audience string `json:"audience,omitempty"`
 }
 
 // EventHandler kinds.
 const (
 	EventHandlerKindRule    = "rule"
 	EventHandlerKindTrigger = "trigger"
+	EventHandlerKindNotify  = "notify"
+)
+
+// NotifyRuleSource reports whether a notify rule may be written on eventType:
+// a GitHub, Jira or Linear event, whose tracked-set gate core owns and can
+// answer strictly. An extension's source gate narrows and may fail open,
+// which is acceptable for a task and a disclosure for a notification.
+func NotifyRuleSource(eventType string) bool {
+	return strings.HasPrefix(eventType, "github:") || strings.HasPrefix(eventType, "jira:") || strings.HasPrefix(eventType, "linear:")
+}
+
+// Notify rule audiences. A personal rule tells its creator, while they are a
+// member of the rule's team; a team rule tells the team's members.
+const (
+	NotifyAudienceCreator = "creator"
+	NotifyAudienceTeam    = "team"
 )
 
 // EventHandler sources. Mirrors prompts.source — system rows are
