@@ -1,8 +1,7 @@
 // Package entityscope resolves entities for callers that hold an org and an
-// object's key but not the org's settings: the exec recording funnel, exec
-// memory load, and the produced-entity attach a conversation's memory owes. Of
-// says which scope the object is keyed under; Resolve finds or creates its
-// entity there under the identity rule.
+// object's key but not the org's settings: the exec recording funnel and exec
+// memory load. Of says which scope the object is keyed under; Resolve finds or
+// creates its entity there under the identity rule.
 package entityscope
 
 import (

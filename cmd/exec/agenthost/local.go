@@ -1420,8 +1420,8 @@ func (c *LocalClient) recordJiraComment(ctx context.Context, client *jiraclient.
 		return
 	}
 	// Deduped on the issue and the comment id, so the key only rides along as
-	// the target — but that target is what the produced-entity attach and the
-	// touch resolve against.
+	// the target — but that target is what the funnel resolves the comment's
+	// entity against.
 	current := domain.NormalizeJiraKey(ref.Key)
 	a := domain.Deliverable{
 		Kind:        domain.DeliverableKindComment,

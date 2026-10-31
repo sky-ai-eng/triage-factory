@@ -12,11 +12,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// The TFAC-623 touch-capture tests prove the durable (conversation_id, entity_id,
-// role='touched') rows land for both halves of the touched-entity rule: the
-// write funnel (every org-credential write) and the addressed reads. The
-// LocalClient is the one seam the multi daemon dispatches through, so proving
-// it here covers both the sandbox and local-mode paths.
+// These tests prove the durable conversation_memory_entities rows land for both
+// halves of the rule: the write funnel (every org-credential write) records
+// produced for a write that names the object it changed, and the addressed reads
+// record touched. The LocalClient is the one seam the multi daemon dispatches
+// through, so proving it here covers both the sandbox and local-mode paths.
 
 // touchRole reads conversation_memory_entities.role for (conversationID, entityID) directly — the
 // store interface exposes no role-returning read. "" when no row exists.
@@ -61,10 +61,11 @@ func startFakeGitHubGetPR(t *testing.T, fail bool) *httptest.Server {
 	return srv
 }
 
-// TestFunnel_GithubWrite_RecordsEntityTouch pins Part 1: a standalone GitHub
-// comment write (which flows through RecordExternalWrite) persists a durable
-// touch row on the PR entity it addressed, across both write paths.
-func TestFunnel_GithubWrite_RecordsEntityTouch(t *testing.T) {
+// TestFunnel_GithubWrite_RecordsProduced: a GitHub comment write (which flows
+// through RecordExternalWrite) names the comment it posted, so it persists a
+// durable produced row on the PR entity the comment is on, across both write
+// paths.
+func TestFunnel_GithubWrite_RecordsProduced(t *testing.T) {
 	for _, eventTriggered := range []bool{true, false} {
 		name := "manual"
 		if eventTriggered {
@@ -80,13 +81,13 @@ func TestFunnel_GithubWrite_RecordsEntityTouch(t *testing.T) {
 
 			ent, err := stores.Entities.GetBySource(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", "octo/repo#1")
 			if err != nil || ent == nil {
-				t.Fatalf("touched entity missing: ent=%v err=%v", ent, err)
+				t.Fatalf("produced entity missing: ent=%v err=%v", ent, err)
 			}
 			if ent.Kind != "pr" {
 				t.Errorf("entity kind = %q, want pr", ent.Kind)
 			}
-			if role := touchRole(t, conn, info.ConversationID, ent.ID); role != domain.MemoryRoleTouched {
-				t.Errorf("touch role = %q, want %q", role, domain.MemoryRoleTouched)
+			if role := touchRole(t, conn, info.ConversationID, ent.ID); role != domain.MemoryRoleProduced {
+				t.Errorf("link role = %q, want %q", role, domain.MemoryRoleProduced)
 			}
 		})
 	}
@@ -209,10 +210,10 @@ func TestReadTouch_JiraGetIssue_FailedRead_NoTouch(t *testing.T) {
 	}
 }
 
-// TestTouch_ReadThenWrite_StaysTouched pins the precedence: a read touch
-// followed by a write to the SAME entity stays role='touched' (both writers use
-// MemoryRoleTouched; write-side role upgrades are a sibling ticket's concern).
-func TestTouch_ReadThenWrite_StaysTouched(t *testing.T) {
+// TestTouch_ReadThenWrite_EndsProduced pins the precedence: a read touch
+// followed by a write to the SAME entity ends role='produced', the higher of
+// the two roles.
+func TestTouch_ReadThenWrite_EndsProduced(t *testing.T) {
 	gh := startFakeGitHubGetPR(t, false)
 	conn, stores, info, client := newGithubRecordingClientConn(t, gh.URL, true)
 	ctx := context.Background()
@@ -228,7 +229,46 @@ func TestTouch_ReadThenWrite_StaysTouched(t *testing.T) {
 	if err != nil || ent == nil {
 		t.Fatalf("entity missing: ent=%v err=%v", ent, err)
 	}
-	if role := touchRole(t, conn, info.ConversationID, ent.ID); role != domain.MemoryRoleTouched {
-		t.Errorf("touch role = %q, want %q (a read touch + a write to the same entity stays touched)", role, domain.MemoryRoleTouched)
+	if role := touchRole(t, conn, info.ConversationID, ent.ID); role != domain.MemoryRoleProduced {
+		t.Errorf("link role = %q, want %q (a read touch then a write to the same entity ends produced)", role, domain.MemoryRoleProduced)
+	}
+}
+
+// TestFunnel_JiraTransition_RecordsProduced: a Jira transition leaves the
+// issue's entity produced as soon as the write lands, with no end-of-run pass,
+// and a read of another issue in the same run leaves that one touched, across
+// both write paths.
+func TestFunnel_JiraTransition_RecordsProduced(t *testing.T) {
+	for _, eventTriggered := range []bool{true, false} {
+		name := "manual"
+		if eventTriggered {
+			name = "event-triggered"
+		}
+		t.Run(name, func(t *testing.T) {
+			jira := startFakeJira(t)
+			conn, stores, info := newJiraRecordingStoresConn(t, jira.URL, eventTriggered)
+			if !eventTriggered {
+				info.UserID = runmode.LocalDefaultUserID
+			}
+			client := NewLocal(stores, info)
+			ctx := context.Background()
+
+			if err := client.JiraTransitionTo(ctx, "SKY-1", "Done"); err != nil {
+				t.Fatalf("JiraTransitionTo: %v", err)
+			}
+			if issue, err := client.JiraGetIssue(ctx, "SKY-2"); err != nil || issue == nil {
+				t.Fatalf("JiraGetIssue: issue=%v err=%v", issue, err)
+			}
+
+			for key, want := range map[string]string{"SKY-1": domain.MemoryRoleProduced, "SKY-2": domain.MemoryRoleTouched} {
+				ent, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "jira", jira.URL, key)
+				if err != nil || ent == nil {
+					t.Fatalf("%s: entity missing: ent=%v err=%v", key, ent, err)
+				}
+				if role := touchRole(t, conn, info.ConversationID, ent.ID); role != want {
+					t.Errorf("%s link role = %q, want %q", key, role, want)
+				}
+			}
+		})
 	}
 }

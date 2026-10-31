@@ -644,11 +644,9 @@ func isSlugChar(r rune) bool {
 }
 
 // attachConversationMemoryEntities makes a terminated conversation's memory reachable
-// from every entity it materially engaged. The rule itself lives in
-// internal/memoryentities, where it is reachable by anything that writes a
-// conversation's memory row; this is the spawner's stores bound to it. Orgs is
-// what resolves a produced entity's scope from the org's settings.
+// from its task's entity. The rule itself lives in internal/memoryentities, where
+// it is reachable by anything that writes a conversation's memory row; this is
+// the spawner's memory store bound to it.
 func (s *Spawner) attachConversationMemoryEntities(ctx context.Context, orgID, conversationID, primaryEntityID string) {
-	stores := db.Stores{TaskMemory: s.taskMemory, Deliverables: s.deliverables, Entities: s.entities, Orgs: s.orgs}
-	memoryentities.Attach(ctx, stores, orgID, conversationID, primaryEntityID)
+	memoryentities.Attach(ctx, s.taskMemory, orgID, conversationID, primaryEntityID)
 }

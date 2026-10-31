@@ -705,11 +705,12 @@ func TestCapture_ExecVerbsRideTheAPIProxyNotTheGHChannel(t *testing.T) {
 // acceptance: the raw `gh api .../comments/{id}/replies` an agent reached for
 // must leave the same audit row as `exec gh pr comment-reply`, down to the
 // external id, the discussion deep link, and the in_reply_to detail — and it
-// must mint the same entity touch, which a repo-level target could not.
+// must leave the same produced link on the pull request's entity, which a
+// repo-level target could not.
 func TestCapture_GHChannelReply_IsIndistinguishableFromTheVerbRow(t *testing.T) {
 	ctx := context.Background()
 
-	// Each half runs against its own store, so the row and the touch below are
+	// Each half runs against its own store, so the row and the link below are
 	// unambiguously that half's work rather than a leftover of the other's.
 	gh := startFakeGitHubComments(t)
 	_, verbStores, _, verbClient := newGithubRecordingClientConn(t, gh.URL, true)
@@ -750,21 +751,14 @@ func TestCapture_GHChannelReply_IsIndistinguishableFromTheVerbRow(t *testing.T) 
 		t.Errorf("raw row = %+v, want the PR-shaped target and the reply id", raw)
 	}
 
-	// The PR-shaped target is what re-enables the touch; a repo-level one is
-	// skipped by the touch rule, which is why this write used to leave none.
+	// The PR-shaped target is what links the entity; a repo-level one resolves
+	// to no entity.
 	ent, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "github", "https://github.com", "octo/repo#1")
 	if err != nil || ent == nil {
 		t.Fatalf("GetBySource(github, octo/repo#1): ent=%v err=%v", ent, err)
 	}
-	var touches int
-	if err := conn.QueryRow(
-		`SELECT COUNT(*) FROM conversation_memory_entities WHERE conversation_id = ? AND entity_id = ? AND role = 'touched'`,
-		info.ConversationID, ent.ID,
-	).Scan(&touches); err != nil {
-		t.Fatalf("count touches: %v", err)
-	}
-	if touches == 0 {
-		t.Error("the raw gh reply minted no entity touch")
+	if role := touchRole(t, conn, info.ConversationID, ent.ID); role != domain.MemoryRoleProduced {
+		t.Errorf("the raw gh reply left link role %q on the pull request, want %q", role, domain.MemoryRoleProduced)
 	}
 }
 

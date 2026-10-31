@@ -51,8 +51,9 @@ func startMovedIssueJira(t *testing.T) *httptest.Server {
 
 // TestLocalClient_JiraWriteOnAnOldKey_ResolvesTheExistingEntity: an agent
 // writing to the key an issue has left records against the issue's current
-// key and its existing entity — deliverables keyed on its id, the touch on the
-// entity that already carries it — and creates nothing keyed by the old key.
+// key and its existing entity — deliverables keyed on its id, the produced link
+// on the entity that already carries it — and creates nothing keyed by the old
+// key.
 func TestLocalClient_JiraWriteOnAnOldKey_ResolvesTheExistingEntity(t *testing.T) {
 	jira := startMovedIssueJira(t)
 	conn, stores, info := newJiraRecordingStoresConn(t, jira.URL, true)
@@ -83,8 +84,8 @@ func TestLocalClient_JiraWriteOnAnOldKey_ResolvesTheExistingEntity(t *testing.T)
 			t.Errorf("%s deliverable entity = %q, want the existing entity %s", a.Kind, a.EntityID, existing.ID)
 		}
 	}
-	if role := touchRole(t, conn, info.ConversationID, existing.ID); role != domain.MemoryRoleTouched {
-		t.Errorf("touch role on the existing entity = %q, want touched", role)
+	if role := touchRole(t, conn, info.ConversationID, existing.ID); role != domain.MemoryRoleProduced {
+		t.Errorf("link role on the existing entity = %q, want produced", role)
 	}
 	var n int
 	if err := conn.QueryRow(`SELECT COUNT(*) FROM entities WHERE source = 'jira'`).Scan(&n); err != nil {
