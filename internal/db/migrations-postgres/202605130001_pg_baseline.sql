@@ -1488,6 +1488,13 @@ CREATE TABLE public.tasks (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     claimed_by_agent_id uuid,
     claimed_by_user_id uuid,
+    -- A close owed to the task and held until the blueprint run whose own
+    -- action caused the closing event ends: the closing event, and that run.
+    -- Written by the router's close phase, cleared by its deferral sweep, and
+    -- read only while the task is active.
+    close_deferred_event_id uuid,
+    close_deferred_blueprint_run_id uuid,
+    CONSTRAINT tasks_close_deferral_paired CHECK (((close_deferred_event_id IS NULL) = (close_deferred_blueprint_run_id IS NULL))),
     CONSTRAINT tasks_claim_xor CHECK (((claimed_by_agent_id IS NULL) OR (claimed_by_user_id IS NULL))),
     CONSTRAINT tasks_claimed_requires_team CHECK ((((claimed_by_user_id IS NULL) AND (claimed_by_agent_id IS NULL)) OR (team_id IS NOT NULL))),
     -- Assigning a task, to a person or to the bot, IS the stage marker: the
@@ -2169,6 +2176,10 @@ CREATE INDEX idx_tasks_org_status ON public.tasks USING btree (org_id, status);
 CREATE INDEX idx_tasks_org_status_priority ON public.tasks USING btree (org_id, status, priority_score DESC);
 
 
+-- The deferral sweep's read: the few tasks holding a deferred close.
+CREATE INDEX idx_tasks_close_deferred ON public.tasks USING btree (org_id, id) WHERE (close_deferred_event_id IS NOT NULL);
+
+
 CREATE INDEX conversations_actor_agent_idx ON public.conversations USING btree (actor_agent_id) WHERE (actor_agent_id IS NOT NULL);
 
 CREATE INDEX idx_conversations_parent ON public.conversations USING btree (parent_conversation_id) WHERE (parent_conversation_id IS NOT NULL);
@@ -2662,6 +2673,10 @@ ALTER TABLE ONLY public.tasks
 
 ALTER TABLE ONLY public.tasks
     ADD CONSTRAINT tasks_primary_event_id_org_id_fkey FOREIGN KEY (primary_event_id, org_id) REFERENCES public.events(id, org_id);
+
+
+ALTER TABLE ONLY public.tasks
+    ADD CONSTRAINT tasks_close_deferred_event_id_org_id_fkey FOREIGN KEY (close_deferred_event_id, org_id) REFERENCES public.events(id, org_id);
 
 
 ALTER TABLE ONLY public.tasks
@@ -3847,6 +3862,9 @@ ALTER TABLE ONLY public.pending_firings
 
 ALTER TABLE ONLY public.conversations
     ADD CONSTRAINT conversations_blueprint_run_fkey FOREIGN KEY (blueprint_run_id, org_id) REFERENCES public.blueprint_runs(id, org_id);
+
+ALTER TABLE ONLY public.tasks
+    ADD CONSTRAINT tasks_close_deferred_blueprint_run_id_org_id_fkey FOREIGN KEY (close_deferred_blueprint_run_id, org_id) REFERENCES public.blueprint_runs(id, org_id);
 
 -- Composite (blueprint_run_id, org_id) FK so a cross-org reference is impossible;
 -- RLS WITH CHECK only validates org_id. ON DELETE SET NULL is scoped to

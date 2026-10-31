@@ -113,6 +113,7 @@ var identicalHelperRatchet = []string{
 	"scanReachableRepos",
 	"scanSpendRow",
 	"scanTaskBareRow",
+	"scanTaskCloseDeferral",
 	"scanTaskFields",
 	"scanTaskFromRow",
 	"scanTaskMemories",

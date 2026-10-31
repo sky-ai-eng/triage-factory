@@ -149,4 +149,15 @@ type ExternalActionStore interface {
 	// pool (BYPASSRLS): the tracker holds no claims, and the row belongs to
 	// whichever team's run posted the comment.
 	PresentPostedCommentKeysSystem(ctx context.Context, orgID, scope string, keys []string) (map[string]bool, error)
+
+	// ListAgentActionsForBlueprintRunSystem returns orgID's rows of one
+	// action that a run's agent performed (performed_by 'agent') in any of
+	// blueprintRunID's step conversations, newest first (occurred_at DESC,
+	// id DESC). It is what the router's close phase reads to find out
+	// whether the event closing a task was caused by the task's own run: the
+	// push whose commit CI passed on, the merge, the transition to done. A
+	// person's approval or TF's teardown carries the run's conversation too,
+	// and is left out by performed_by. Admin pool (BYPASSRLS): the router
+	// holds no claims.
+	ListAgentActionsForBlueprintRunSystem(ctx context.Context, orgID, blueprintRunID, action string) ([]domain.ExternalAction, error)
 }

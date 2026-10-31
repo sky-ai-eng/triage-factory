@@ -83,6 +83,11 @@ func (a *App) startBrain(term int64) {
 	// inside its completion. The scorer's completion callback wakes it; the
 	// scan tick is the floor. Same single-worker discipline.
 	go a.router.RunReDeriveQueue(brainCtx, routing.DefaultReDeriveScanInterval)
+	// Close-deferral sweep: applies the closes the router held on tasks
+	// whose own run caused the closing event, once that run has ended, and
+	// drops them when the run completed and its own ending closes the task.
+	// One sweeper across every org, like the workers above.
+	go a.router.RunCloseDeferralSweep(brainCtx, routing.DefaultCloseDeferralSweepInterval)
 	// Terminal-state invariant checker: read-only. Counts the entities the
 	// poll's enforcement should have closed and did not — active with a
 	// terminal snapshot, past the grace, no close in flight — and the tasks

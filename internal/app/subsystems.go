@@ -464,6 +464,9 @@ func (a *App) buildRouting() {
 	// The re-derive worker claims the re-evaluation rows the score store
 	// admits with every scores write.
 	a.router.SetTaskReDerive(a.stores.TaskReDerive)
+	// The close phase reads the ledger to tell a closing event the task's own
+	// run caused, whose close it holds until the run ends.
+	a.router.SetExternalActions(a.stores.ExternalActions)
 	// Mirror the per-event routing disposition sentinel onto the bus
 	// (TFAC-593) so an async event source (e.g. Slack) can learn
 	// synchronously-unavailable routing outcomes. The bus is built in

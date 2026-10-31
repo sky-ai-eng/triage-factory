@@ -114,6 +114,10 @@ type Router struct {
 	scorer        Scorer
 	ws            *websocket.Hub
 	publisher     EventPublisher // nil-safe; set post-construction via SetEventPublisher — mirrors the per-event routing disposition sentinel onto the bus (TFAC-593)
+	// externalActions is the ledger the close phase reads to tell whether a
+	// task's own run caused the event closing it; set post-construction via
+	// SetExternalActions. nil → no close is ever deferred.
+	externalActions dbpkg.ExternalActionStore
 	// sourceGate answers whether an org has paused an event source. nil-safe;
 	// set post-construction via SetEventSourceGate — a router without one
 	// never drops. See source_gate.go.
@@ -240,6 +244,14 @@ func (r *Router) SetEventPublisher(p EventPublisher) {
 // constructions don't have to thread it.
 func (r *Router) SetTaskReDerive(s dbpkg.TaskReDeriveStore) {
 	r.rederive = s
+}
+
+// SetExternalActions wires the ledger the close phase reads to defer the
+// close of a task whose own run caused the closing event (close_deferral.go),
+// post-construction like SetEventQueue so the existing test constructions
+// need not thread it. Left nil, every task an event closes closes at once.
+func (r *Router) SetExternalActions(s dbpkg.ExternalActionStore) {
+	r.externalActions = s
 }
 
 // SetExecutorID wires this router's persistent instance-registry identity

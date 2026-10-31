@@ -747,6 +747,39 @@ type TaskStore interface {
 	// by a typed sibling close produce identical rows.
 	CloseWithConversationCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (closed bool, activeConversationIDs []string, err error)
 
+	// DeferCloseSystem holds the close eventID owes an active task until
+	// blueprintRunID, the task's run whose own action caused the event, ends
+	// (see domain.TaskCloseDeferral). It overwrites a deferral the task
+	// already holds: a later event the same run caused replaces the earlier
+	// one. It writes nothing else — no close, no audit row, no cancel intent —
+	// so the task reads exactly as if the event had not arrived yet.
+	//
+	// Returns the deferral it stored, or nil when the task is not active
+	// (closed between the router's read and this write), which leaves the row
+	// untouched. Only the router's close phase calls it; EntityStore.
+	// CloseTerminalSystem stamps the same columns inside its own transaction.
+	// Admin pool.
+	DeferCloseSystem(ctx context.Context, orgID, taskID, eventID, blueprintRunID string) (*domain.TaskCloseDeferral, error)
+
+	// ListActiveCloseDeferralsSystem returns every deferral held by an active
+	// task, in every org, ordered by org then task id: the router's deferral
+	// sweep reads it once per pass. A deferral left on a task that closed by
+	// another path is never returned. Admin pool, org-wide by design: the
+	// sweep is one brain loop over all orgs, and the partial index on the
+	// deferral columns keeps it to the rows that hold one.
+	ListActiveCloseDeferralsSystem(ctx context.Context) ([]domain.TaskCloseDeferral, error)
+
+	// ClearCloseDeferralSystem clears the task's deferral when it still names
+	// eventID — a compare-and-clear on the event the sweep read, so a
+	// deferral DeferCloseSystem overwrote in between survives for the next
+	// pass. It does not look at the task's status. cleared reports whether
+	// the compare matched.
+	//
+	// Exempt from the returned-row rule: what it leaves is a row with no
+	// deferral, and the one fact the caller acts on is whether the compare
+	// matched.
+	ClearCloseDeferralSystem(ctx context.Context, orgID, taskID, eventID string) (cleared bool, err error)
+
 	// RecordEventSystem mirrors RecordEvent's exemption — see its doc
 	// comment.
 	RecordEventSystem(ctx context.Context, orgID, taskID, eventID, kind string) error

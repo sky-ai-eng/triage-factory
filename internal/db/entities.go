@@ -225,6 +225,9 @@ type TerminalCloseResult struct {
 	// were active on it when the transaction stamped their cancel intent —
 	// the set the caller's post-commit stop acts on.
 	ActiveConversationIDs map[string][]string
+	// DeferredTaskIDs are the tasks this call left open with the close held
+	// (domain.TaskCloseDeferral), in the order they were stamped.
+	DeferredTaskIDs []string
 }
 
 type EntityStore interface {
@@ -656,7 +659,16 @@ type EntityStore interface {
 	// read. closeTypes narrows which task types close: the terminating
 	// event's own type is excluded by its relation so the lifecycle task it
 	// mints afterwards survives; a type with no open task is a no-op.
-	CloseTerminalSystem(ctx context.Context, orgID, entityID string, expected *int64, closeTypes []string, closeReason, closeEventType, closingEventID string) (TerminalCloseResult, error)
+	//
+	// deferTo maps the tasks whose own blueprint run caused the event to that
+	// run. A task in it that the close set names is not closed: it gets the
+	// deferral TaskStore.DeferCloseSystem writes (closingEventID and its run)
+	// and nothing else — no flip, no audit row, no cancel intent — in the
+	// same transaction that closes the others, and is reported in
+	// DeferredTaskIDs. The entity closes whether or not any task deferred.
+	// When the guard misses, nothing is stamped either. A nil deferTo defers
+	// nothing.
+	CloseTerminalSystem(ctx context.Context, orgID, entityID string, expected *int64, closeTypes []string, closeReason, closeEventType, closingEventID string, deferTo map[string]string) (TerminalCloseResult, error)
 
 	// ClearSnapshotsForSourceSystem blanks snapshot_json for every ACTIVE
 	// entity of one source in one org, bumping poll_seq on each row, and

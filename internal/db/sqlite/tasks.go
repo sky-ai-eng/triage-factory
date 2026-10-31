@@ -1111,6 +1111,85 @@ func closeTaskWithCancelIntent(ctx context.Context, q queryer, taskID, closeReas
 	return true, conversationIDs, nil
 }
 
+// sqliteTaskCloseDeferralColumns is the projection of a task's deferred
+// close, in the order scanTaskCloseDeferral reads it. DeferCloseSystem's
+// RETURNING and ListActiveCloseDeferralsSystem's SELECT both project it.
+const sqliteTaskCloseDeferralColumns = `org_id, id, close_deferred_event_id, close_deferred_blueprint_run_id`
+
+func scanTaskCloseDeferral(scan func(...any) error) (domain.TaskCloseDeferral, error) {
+	var d domain.TaskCloseDeferral
+	err := scan(&d.OrgID, &d.TaskID, &d.EventID, &d.BlueprintRunID)
+	return d, err
+}
+
+func (s *taskStore) DeferCloseSystem(ctx context.Context, orgID, taskID, eventID, blueprintRunID string) (*domain.TaskCloseDeferral, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	return deferTaskClose(ctx, s.q, taskID, eventID, blueprintRunID)
+}
+
+// deferTaskClose is DeferCloseSystem's body on a connection the caller
+// chooses, so the terminating close stamps its deferred tasks inside its own
+// transaction with the same statement.
+func deferTaskClose(ctx context.Context, q queryer, taskID, eventID, blueprintRunID string) (*domain.TaskCloseDeferral, error) {
+	d, err := scanTaskCloseDeferral(q.QueryRowContext(ctx, `
+		UPDATE tasks
+		   SET close_deferred_event_id = ?, close_deferred_blueprint_run_id = ?
+		 WHERE id = ? AND status NOT IN ('done', 'dismissed')
+		RETURNING `+sqliteTaskCloseDeferralColumns,
+		eventID, blueprintRunID, taskID).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &d, nil
+}
+
+func (s *taskStore) ListActiveCloseDeferralsSystem(ctx context.Context) ([]domain.TaskCloseDeferral, error) {
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT `+sqliteTaskCloseDeferralColumns+`
+		  FROM tasks
+		 WHERE close_deferred_event_id IS NOT NULL
+		   AND status NOT IN ('done', 'dismissed')
+		 ORDER BY org_id, id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.TaskCloseDeferral
+	for rows.Next() {
+		d, err := scanTaskCloseDeferral(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+func (s *taskStore) ClearCloseDeferralSystem(ctx context.Context, orgID, taskID, eventID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE tasks
+		   SET close_deferred_event_id = NULL, close_deferred_blueprint_run_id = NULL
+		 WHERE id = ? AND close_deferred_event_id = ?
+	`, taskID, eventID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 func (s *taskStore) SetStatus(ctx context.Context, orgID, taskID, status string) (domain.Task, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return domain.Task{}, err

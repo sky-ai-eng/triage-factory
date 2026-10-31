@@ -37,6 +37,7 @@ func newQueueWorkerRouter(t *testing.T, database *sql.DB) *Router {
 	seedMatchAllCIRule(t, database, runmode.LocalDefaultTeamID)
 	r := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.Orgs, st.Teams, nil, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
 	r.SetEventQueue(st.EventQueue)
+	r.SetExternalActions(st.ExternalActions)
 	r.SetExecutorID(testExecutorID, 1)
 	return r
 }
@@ -235,6 +236,7 @@ func newQueueWorkerRouterNoSeed(t *testing.T, database *sql.DB) *Router {
 	st := sqlitestore.New(database)
 	r := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.Orgs, st.Teams, nil, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
 	r.SetEventQueue(st.EventQueue)
+	r.SetExternalActions(st.ExternalActions)
 	r.SetExecutorID(testExecutorID+"-2", 2)
 	return r
 }
