@@ -51,8 +51,32 @@ const pgExternalActionColumns = `
 	COALESCE(to_state, ''), COALESCE(conversation_id::text, ''),
 	COALESCE(actor_user_id::text, ''), credential, dedup_key,
 	COALESCE(detail_json, ''), COALESCE(node_id, ''), COALESCE(entity_id::text, ''),
-	COALESCE(repository_id::text, ''), performed_by, occurred_at
+	COALESCE(repository_id::text, ''), performed_by, COALESCE(object_kind, ''), COALESCE(object_key, ''),
+	occurred_at
 `
+
+// pgActionObjectIDSQL is the SQL twin of domain.ObjectID, written against an
+// external_actions alias `ea`: the identity of the object the row changed, as
+// the same "<object_kind>|<id part>" string, or NULL where domain.ObjectID
+// answers false (no object_kind, an unknown kind, or a kind whose identifying
+// columns are empty). The kind literals mirror the domain.ObjectKind* consts;
+// the dual-dialect conformance suite holds the two definitions to each other,
+// row by row for every kind. A GitHub issue is identified by its entity and a
+// Jira or Linear one by its key, so the issue arms split on provider.
+//
+// TODO(TFAC-1260): only the conformance suite reads it until the artifacts
+// read groups a run's rows by it.
+const pgActionObjectIDSQL = `
+	CASE
+	  WHEN ea.object_kind = 'pull_request' OR (ea.object_kind = 'issue' AND ea.provider = 'github')
+	    THEN ea.object_kind || '|' || ea.entity_id::text
+	  WHEN ea.object_kind = 'repository'
+	    THEN ea.object_kind || '|' || ea.repository_id::text
+	  WHEN ea.object_kind IN ('branch', 'label', 'release', 'workflow', 'workflow_run')
+	    THEN ea.object_kind || '|' || ea.repository_id::text || '|' || NULLIF(ea.object_key, '')
+	  WHEN ea.object_kind IN ('issue', 'review', 'comment', 'message')
+	    THEN ea.object_kind || '|' || NULLIF(ea.scope, '') || '|' || NULLIF(ea.object_key, '')
+	END`
 
 func (s *externalActionStore) Record(ctx context.Context, orgID string, e domain.ExternalAction) error {
 	return s.record(ctx, s.q, orgID, e)
@@ -86,19 +110,20 @@ func (s *externalActionStore) record(ctx context.Context, q queryer, orgID strin
 		INSERT INTO external_actions
 			(id, org_id, team_id, provider, action, target, external_id, url,
 			 from_state, to_state, conversation_id, actor_user_id, credential, dedup_key, detail_json, scope,
-			 node_id, entity_id, repository_id, performed_by)
+			 node_id, entity_id, repository_id, performed_by, object_kind, object_key)
 		VALUES (
 			COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()), $2, NULLIF($3, '')::uuid,
 			$4, $5, $6, NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, ''),
 			NULLIF($11, '')::uuid, NULLIF($12, '')::uuid, $13,
 			COALESCE(NULLIF($14, ''), gen_random_uuid()::text), NULLIF($15, ''), $16,
-			NULLIF($17, ''), NULLIF($18, '')::uuid, NULLIF($19, '')::uuid, $20
+			NULLIF($17, ''), NULLIF($18, '')::uuid, NULLIF($19, '')::uuid, $20,
+			NULLIF($21, ''), NULLIF($22, '')
 		)
 		ON CONFLICT (org_id, scope, dedup_key) DO NOTHING
 	`,
 		e.ID, orgID, e.TeamID, e.Provider, e.Action, e.Target, e.ExternalID, e.URL,
 		e.FromState, e.ToState, e.ConversationID, e.ActorUserID, e.Credential, e.DedupKey, e.DetailJSON, e.Scope,
-		e.NodeID, e.EntityID, e.RepositoryID, e.PerformedBy,
+		e.NodeID, e.EntityID, e.RepositoryID, e.PerformedBy, e.ObjectKind, e.ObjectKey,
 	)
 	return err
 }
@@ -260,6 +285,6 @@ func scanExternalAction(sc rowScanner, e *domain.ExternalAction) error {
 		&e.ID, &e.OrgID, &e.TeamID, &e.Provider, &e.Scope, &e.Action, &e.Target,
 		&e.ExternalID, &e.URL, &e.FromState, &e.ToState, &e.ConversationID,
 		&e.ActorUserID, &e.Credential, &e.DedupKey, &e.DetailJSON, &e.NodeID, &e.EntityID,
-		&e.RepositoryID, &e.PerformedBy, &e.OccurredAt,
+		&e.RepositoryID, &e.PerformedBy, &e.ObjectKind, &e.ObjectKey, &e.OccurredAt,
 	)
 }

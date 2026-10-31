@@ -91,13 +91,13 @@ func TestClassify_TableShapes(t *testing.T) {
 			name:   "reaction on a review comment",
 			method: "POST",
 			path:   "/repos/acme/widgets/pulls/comments/5/reactions",
-			want:   Shape{Action: domain.ActionReactionAdded, Owner: "acme", Repo: "widgets", ExternalID: "5"},
+			want:   Shape{Action: domain.ActionReactionAdded, Owner: "acme", Repo: "widgets", ExternalID: "5", ReactsTo: domain.GitHubReviewComment},
 		},
 		{
 			name:   "reaction removed from a comment",
 			method: "DELETE",
 			path:   "/repos/acme/widgets/issues/comments/5/reactions/99",
-			want:   Shape{Action: domain.ActionReactionRemoved, Owner: "acme", Repo: "widgets", ExternalID: "5"},
+			want:   Shape{Action: domain.ActionReactionRemoved, Owner: "acme", Repo: "widgets", ExternalID: "5", ReactsTo: domain.GitHubIssueComment},
 		},
 		{
 			// The issue-level removal addresses the object by number, so it is

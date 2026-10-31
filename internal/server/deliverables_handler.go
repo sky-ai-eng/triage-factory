@@ -1129,7 +1129,7 @@ func retireBranchDeliverable(ctx context.Context, tx db.TxStores, orgID, convers
 // actor the rejecting human, the team the deliverable's.
 func branchDeletedAction(art *domain.Deliverable, userID, repositoryID, repoPath, headRef, branch, url, credential string) domain.ExternalAction {
 	detail, _ := json.Marshal(map[string]string{"branch": branch})
-	return domain.ExternalAction{
+	act := domain.ExternalAction{
 		TeamID:         art.TeamID,
 		Provider:       domain.ProviderGitHub,
 		Scope:          art.Scope,
@@ -1146,6 +1146,8 @@ func branchDeletedAction(art *domain.Deliverable, userID, repositoryID, repoPath
 		DetailJSON:     string(detail),
 		PerformedBy:    domain.PerformedByPerson,
 	}
+	act.SetObject(domain.ObjectKindBranch, headRef)
+	return act
 }
 
 // pingConversationsResolved announces that a deliverable resolution changed the

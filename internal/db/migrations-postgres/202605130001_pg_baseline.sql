@@ -466,6 +466,18 @@ CREATE TABLE public.access_change_log (
 -- person's approval of a run's deliverable carries that run's conversation_id,
 -- and actor_user_id is set on a manual run's agent rows too, so this column is
 -- what tells them apart. No default: every writer names the performer.
+--
+-- object_kind and object_key name the object the act changed, set exactly
+-- when the act landed a change, NULL on a refusal, a failure and a catch-all
+-- row. The kind's identifying columns are read together (domain.ObjectID):
+-- entity_id for a pull request or a GitHub issue, repository_id for a
+-- repository, repository_id + object_key for a branch (the ref), a label (its
+-- name), a release, a workflow or a workflow run (GitHub's id), and scope +
+-- object_key for a Jira or Linear issue, a review, a comment and a Slack
+-- message (the object's key). A Slack message's key names its channel's
+-- registry row, so it moves the way entity_id and repository_id do: a channel
+-- move absorbing one registry row into another re-points it onto the
+-- surviving row.
 CREATE TABLE public.external_actions (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
@@ -490,6 +502,11 @@ CREATE TABLE public.external_actions (
     repository_id uuid,
     performed_by text NOT NULL
         CONSTRAINT external_actions_performed_by_check CHECK (performed_by IN ('agent', 'person', 'system')),
+    object_kind text
+        CONSTRAINT external_actions_object_kind_check CHECK (object_kind IN (
+            'pull_request', 'issue', 'repository', 'branch', 'label', 'release',
+            'workflow', 'workflow_run', 'review', 'comment', 'message')),
+    object_key text,
     occurred_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
@@ -2048,6 +2065,12 @@ CREATE INDEX idx_external_actions_conversation ON public.external_actions USING 
 -- ledger rows they move by entity_id; a repository's rename by repository_id.
 CREATE INDEX idx_external_actions_entity ON public.external_actions USING btree (entity_id) WHERE (entity_id IS NOT NULL);
 CREATE INDEX idx_external_actions_repository ON public.external_actions USING btree (repository_id) WHERE (repository_id IS NOT NULL);
+
+
+-- The rows that changed one keyed object, found by its key within a scope.
+-- TODO(TFAC-1265): nothing reads by it until the tracker's comment check
+-- looks TF's own comments up by key.
+CREATE INDEX idx_external_actions_object_key ON public.external_actions USING btree (org_id, scope, object_key) WHERE (object_key IS NOT NULL);
 
 
 CREATE UNIQUE INDEX idx_deliverables_dedup ON public.deliverables USING btree (org_id, scope, dedup_key);

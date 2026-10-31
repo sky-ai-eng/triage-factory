@@ -97,6 +97,12 @@ type Shape struct {
 	// in, so the comment's deliverable is keyed on the pair.
 	Comment domain.GitHubCommentSpace
 
+	// ReactsTo is the numbering of the comment a reaction lands on, for a
+	// reaction whose path addresses a comment by its own id; ExternalID is
+	// then that comment's number. Empty for a reaction to a pull request or
+	// an issue, and for every act that is not a reaction.
+	ReactsTo domain.GitHubCommentSpace
+
 	// Subject is the node id a GraphQL request named for the object it acted on,
 	// standing in for the coordinates a REST path would have carried. Empty for
 	// every REST shape, and for a GraphQL request whose response located the
@@ -526,8 +532,10 @@ func classifyPulls(s Shape, method string, rest []string) (Shape, bool) {
 			s.Comment = domain.GitHubReviewComment
 		case len(rest) == 3 && rest[2] == "reactions" && method == "POST":
 			s.Action = domain.ActionReactionAdded
+			s.ReactsTo = domain.GitHubReviewComment
 		case len(rest) == 4 && rest[2] == "reactions" && method == "DELETE":
 			s.Action = domain.ActionReactionRemoved
+			s.ReactsTo = domain.GitHubReviewComment
 		default:
 			return Shape{}, false
 		}
@@ -616,8 +624,10 @@ func classifyIssues(s Shape, method string, rest []string) (Shape, bool) {
 			s.Comment = domain.GitHubIssueComment
 		case len(rest) == 3 && rest[2] == "reactions" && method == "POST":
 			s.Action = domain.ActionReactionAdded
+			s.ReactsTo = domain.GitHubIssueComment
 		case len(rest) == 4 && rest[2] == "reactions" && method == "DELETE":
 			s.Action = domain.ActionReactionRemoved
+			s.ReactsTo = domain.GitHubIssueComment
 		default:
 			return Shape{}, false
 		}

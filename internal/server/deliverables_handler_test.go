@@ -1148,14 +1148,19 @@ func TestDeliverableReject_PR(t *testing.T) {
 	if len(acts) == 1 && (acts[0].RepositoryID != repo.ID || acts[0].EntityID != "") {
 		t.Errorf("branch_deleted references (entity %q, repository %q), want repository %s", acts[0].EntityID, acts[0].RepositoryID, repo.ID)
 	}
+	// The object is the branch, by its ref, as a push to it names it.
+	if len(acts) == 1 && (acts[0].ObjectKind != domain.ObjectKindBranch || acts[0].ObjectKey != "refs/heads/feature/x") {
+		t.Errorf("branch_deleted names (%q, %q), want (branch, refs/heads/feature/x)", acts[0].ObjectKind, acts[0].ObjectKey)
+	}
 	closedActs, _, err := sqlitestore.New(srv.db).ExternalActions.ListByOrgSystem(context.Background(), runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Action: domain.ActionPRClosed})
 	if err != nil {
 		t.Fatalf("list actions: %v", err)
 	}
 	if len(closedActs) != 1 {
 		t.Errorf("pr_closed audit rows = %d, want 1", len(closedActs))
-	} else if closedActs[0].EntityID != pr.EntityID {
-		t.Errorf("pr_closed references entity %q, want the PR deliverable's %q", closedActs[0].EntityID, pr.EntityID)
+	} else if closedActs[0].EntityID != pr.EntityID || closedActs[0].ObjectKind != domain.ObjectKindPullRequest {
+		t.Errorf("pr_closed references entity %q naming %q, want the PR deliverable's %q naming pull_request",
+			closedActs[0].EntityID, closedActs[0].ObjectKind, pr.EntityID)
 	}
 
 	assertAgentMemoryUntouched(t, srv, conversationID)

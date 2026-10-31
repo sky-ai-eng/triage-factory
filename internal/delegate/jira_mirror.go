@@ -345,7 +345,7 @@ func (s *Spawner) recordMirrorAction(ctx context.Context, orgID, entityID, scope
 			scope = domain.ExternalObjectScope(domain.ProviderJira, set)
 		}
 	}
-	err := s.externalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
+	act := domain.ExternalAction{
 		TeamID:      teamID,
 		Provider:    domain.ProviderJira,
 		Scope:       scope,
@@ -358,7 +358,11 @@ func (s *Spawner) recordMirrorAction(ctx context.Context, orgID, entityID, scope
 		ToState:     to,
 		Credential:  domain.CredentialJiraOrg,
 		PerformedBy: domain.PerformedBySystem,
-	})
+	}
+	// The issue, by its site and id; an entity that has not learned its id
+	// names no object.
+	act.SetObject(domain.ObjectKindIssue, domain.IssueObjectKey(domain.ProviderJira, scope, issueID))
+	err := s.externalActions.RecordSystem(ctx, orgID, act)
 	if err != nil {
 		jiraLog.Warn("mirror: external-action recording failed (Jira move already applied)",
 			"issue", issueKey, "action", action, "error", err)

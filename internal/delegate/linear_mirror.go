@@ -289,7 +289,7 @@ func (s *Spawner) recordLinearMirrorTransition(ctx context.Context, orgID, teamI
 	if s.externalActions == nil {
 		return
 	}
-	err := s.externalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
+	act := domain.ExternalAction{
 		TeamID:      teamID,
 		Provider:    domain.ProviderLinear,
 		Scope:       e.Scope,
@@ -302,7 +302,9 @@ func (s *Spawner) recordLinearMirrorTransition(ctx context.Context, orgID, teamI
 		ToState:     to,
 		Credential:  domain.CredentialLinearOrg,
 		PerformedBy: domain.PerformedBySystem,
-	})
+	}
+	act.SetObject(domain.ObjectKindIssue, domain.IssueObjectKey(domain.ProviderLinear, e.Scope, e.ExternalID))
+	err := s.externalActions.RecordSystem(ctx, orgID, act)
 	if err != nil {
 		linearLog.Warn("mirror: external-action recording failed (Linear move already applied)",
 			"issue", e.SourceID, "error", err)

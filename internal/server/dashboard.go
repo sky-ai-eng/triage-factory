@@ -416,6 +416,7 @@ func (dh *dashboardHandler) handleDashboardPRUpdate(w http.ResponseWriter, r *ht
 		EntityID:    pr.entity.ID,
 		PerformedBy: domain.PerformedByPerson,
 	}
+	draftRecord.SetObject(domain.ObjectKindPullRequest, "")
 	recordExternalActionBestEffort(r.Context(), dh.tx, orgID, userID, draftRecord)
 
 	// Patch the local entity snapshot to match the state we just pushed to

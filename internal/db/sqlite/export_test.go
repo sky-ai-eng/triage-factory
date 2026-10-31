@@ -15,3 +15,7 @@ var PRCreatedWithoutDeliverableQueryForTest = prCreatedWithoutDeliverableQuery
 // PresentExternalIDsQueryForTest exposes the review-id lookup's statement up
 // to its IN list so the query-plan test can EXPLAIN what the store runs.
 var PresentExternalIDsQueryForTest = presentExternalIDsQuery
+
+// ActionObjectIDSQLForTest exposes the SQL twin of domain.ObjectID so the
+// ledger conformance suite can hold the two to each other.
+const ActionObjectIDSQLForTest = sqliteActionObjectIDSQL
