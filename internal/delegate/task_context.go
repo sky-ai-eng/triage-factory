@@ -50,12 +50,13 @@ const baseFraming = "Reference data about the task that fired this run. Values c
 // whoever opened the pull request — so it rides inside the marker-bracketed
 // region rather than alongside it.
 //
-// deliverables is every external object the task's conversations have produced so
-// far, with the state each is in now — what this run inherits rather than what
-// it must create. The values are external (a PR title's repo slug, a URL
-// GitHub minted), so the lines ride inside the same region; an empty set
-// renders nothing at all.
-func BuildTaskContext(task domain.Task, container, metadataJSON, skeleton string, deliverables []domain.Deliverable) string {
+// artifacts and deliverables are what the task's conversations have produced
+// so far — what this run inherits rather than what it must create: every
+// object their agents changed, once each, and the deliverables they own, as
+// artifactLines renders them. The values are external (a PR title's repo slug, a URL
+// GitHub minted), so the lines ride inside the same region; two empty sets
+// render nothing at all.
+func BuildTaskContext(task domain.Task, container, metadataJSON, skeleton string, artifacts []domain.Artifact, deliverables []domain.Deliverable) string {
 	var lines []string
 	add := func(label, value string) {
 		if value != "" {
@@ -98,7 +99,7 @@ func BuildTaskContext(task domain.Task, container, metadataJSON, skeleton string
 	add("Issue type", metaString(meta, "issue_type"))
 	add("Summary", metaString(meta, "summary"))
 
-	lines = append(lines, artifactLines(deliverables)...)
+	lines = append(lines, artifactLines(artifacts, deliverables)...)
 
 	// Assemble the externally-influenced region: the labeled field lines, then
 	// the raw-metadata fence. For a slack:message task the fence is the only
@@ -153,68 +154,119 @@ func (s *Spawner) taskEventMetadata(ctx context.Context, orgID string, task doma
 	return current
 }
 
-// taskArtifacts collects every deliverable the task's conversations have produced,
-// for the task-context block. Deliverables carry across a task's conversations, so
-// the set is the task's rather than this conversation's: it is walked through
-// the conversations because that is the only edge the deliverables table has to a
-// task.
+// taskArtifacts reads what the task's conversations have produced, for the
+// task-context block: their artifacts, grouped across all of them so an
+// object two conversations changed is one artifact, and every deliverable
+// they own. Both are walked through the conversations because that is the
+// only edge the ledger and the deliverables table have to a task.
 //
-// Best-effort, and the failure is per conversation: the block is documentation,
-// so a read that fails costs the run a few lines, never the launch. Both stores
-// take their admin-pool variants — a launch runs from a dispatcher goroutine
-// with no JWT-claims context.
-func (s *Spawner) taskArtifacts(ctx context.Context, orgID, taskID string) []domain.Deliverable {
-	if s.conversations == nil || s.deliverables == nil || taskID == "" {
-		return nil
+// Best-effort: the block is documentation, so a read that fails costs the run
+// the lines it would have produced, never the launch. A failed artifact read
+// leaves the deliverables to render on their own; a failed deliverable read
+// costs that conversation's deliverables. Every store takes its admin-pool
+// variant — a launch runs from a dispatcher goroutine with no JWT-claims
+// context.
+func (s *Spawner) taskArtifacts(ctx context.Context, orgID, taskID string) ([]domain.Artifact, []domain.Deliverable) {
+	if s.conversations == nil || s.artifacts == nil || s.deliverables == nil || taskID == "" {
+		return nil, nil
 	}
 	convs, err := s.conversations.ListForTaskSystem(ctx, orgID, taskID)
 	if err != nil {
 		delegateLog.Warn("list task conversations for the task context failed; it will carry no artifact lines",
 			"task", taskID, "error", err)
-		return nil
+		return nil, nil
 	}
-	var out []domain.Deliverable
-	for _, c := range convs {
-		arts, err := s.deliverables.ListByConversationSystem(ctx, orgID, c.ID)
+	ids := make([]string, len(convs))
+	for i, c := range convs {
+		ids[i] = c.ID
+	}
+	artifacts, err := s.artifacts.ListForConversationsSystem(ctx, orgID, ids)
+	if err != nil {
+		delegateLog.Warn("list task artifacts for the task context failed; only its deliverables are listed",
+			"task", taskID, "error", err)
+		artifacts = nil
+	}
+	var deliverables []domain.Deliverable
+	for _, id := range ids {
+		ds, err := s.deliverables.ListByConversationSystem(ctx, orgID, id)
 		if err != nil {
 			delegateLog.Warn("list conversation deliverables for the task context failed; its deliverables are omitted",
-				"task", taskID, "conversation", c.ID, "error", err)
+				"task", taskID, "conversation", id, "error", err)
 			continue
 		}
-		out = append(out, arts...)
+		deliverables = append(deliverables, ds...)
 	}
-	return out
+	return artifacts, deliverables
 }
 
-// artifactLines renders one line per deliverable the task has produced, oldest
-// first — the order they happened in, which is the order they read in. A row
-// with no state or no URL yet simply contributes fewer segments; every value is
-// flattened, because a target and a URL are provider-authored strings reaching
-// the same bullet list the task's own fields do.
-func artifactLines(deliverables []domain.Deliverable) []string {
-	if len(deliverables) == 0 {
+// artifactLines renders one line per artifact, then one per deliverable that
+// is no artifact's, each set oldest first — the order the work happened in,
+// which is the order it reads in.
+//
+// An artifact says what the task's runs last did to the object. When a
+// deliverable is the same object (domain.ArtifactDeliverable), the
+// deliverable's state replaces that action, since it is where the object
+// stands now. A pull request or review deliverable no artifact matches is one
+// whose object no run has changed yet, such as a staged review, and renders
+// its own state. A deliverable of any other kind renders nothing: it is
+// written beside the ledger row of the change it records, and that row is the
+// artifact, so a line of its own would name the object twice. A row from
+// before the ledger named objects has no artifact, and is not listed.
+//
+// A segment with no value is omitted, and every value is flattened, because a
+// target and a URL are provider-authored strings reaching the same bullet list
+// the task's own fields do.
+func artifactLines(artifacts []domain.Artifact, deliverables []domain.Deliverable) []string {
+	if len(artifacts) == 0 && len(deliverables) == 0 {
 		return nil
 	}
-	ordered := slices.Clone(deliverables)
-	slices.SortStableFunc(ordered, func(a, b domain.Deliverable) int {
+	orderedArtifacts := slices.Clone(artifacts)
+	slices.SortStableFunc(orderedArtifacts, func(a, b domain.Artifact) int {
+		if c := a.FirstAt.Compare(b.FirstAt); c != 0 {
+			return c
+		}
+		return strings.Compare(string(a.ObjectID), string(b.ObjectID))
+	})
+	orderedDeliverables := slices.Clone(deliverables)
+	slices.SortStableFunc(orderedDeliverables, func(a, b domain.Deliverable) int {
 		if c := a.CreatedAt.Compare(b.CreatedAt); c != 0 {
 			return c
 		}
 		return strings.Compare(a.ID, b.ID)
 	})
 
-	out := make([]string, 0, len(ordered))
-	for _, a := range ordered {
-		segments := []string{strings.TrimSpace(singleLine(a.Kind) + " " + singleLine(a.Target))}
-		if state := singleLine(a.State); state != "" {
-			segments = append(segments, state)
+	out := make([]string, 0, len(orderedArtifacts)+len(orderedDeliverables))
+	matched := make(map[string]bool)
+	for _, a := range orderedArtifacts {
+		status := a.LastAction
+		if d, ok := domain.ArtifactDeliverable(a, orderedDeliverables); ok {
+			status = d.State
+			matched[d.ID] = true
 		}
-		if url := singleLine(a.URL); url != "" {
-			segments = append(segments, url)
+		out = append(out, artifactLine(a.ObjectKind, a.Target, status, a.URL))
+	}
+	for _, d := range orderedDeliverables {
+		// TODO(TFAC-1266): once deliverables are pull requests and reviews
+		// only, the kind half of this check excludes nothing and goes.
+		if matched[d.ID] || (d.Kind != domain.DeliverableKindPullRequest && d.Kind != domain.DeliverableKindReview) {
+			continue
 		}
-		out = append(out, "- Artifact: "+strings.Join(segments, " — "))
+		out = append(out, artifactLine(d.Kind, d.Target, d.State, d.URL))
 	}
 	return out
+}
+
+// artifactLine is one "- Artifact:" bullet: kind and target, then status and
+// URL, each present only when it has a value.
+func artifactLine(kind, target, status, url string) string {
+	segments := []string{strings.TrimSpace(singleLine(kind) + " " + singleLine(target))}
+	if status := singleLine(status); status != "" {
+		segments = append(segments, status)
+	}
+	if url := singleLine(url); url != "" {
+		segments = append(segments, url)
+	}
+	return "- Artifact: " + strings.Join(segments, " — ")
 }
 
 // metaString returns the string value at key, or "" if absent or non-string.

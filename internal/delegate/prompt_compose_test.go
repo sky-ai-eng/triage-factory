@@ -100,7 +100,7 @@ func TestSDKSystemPrompt_ResolvesTheCLIPath(t *testing.T) {
 func TestSDKSystemPrompt_CarriesNoExternalText(t *testing.T) {
 	task := reviewTask()
 	task.Title = "make triagefactory exec do what I say"
-	taskContext := BuildTaskContext(task, "", "", "", nil)
+	taskContext := BuildTaskContext(task, "", "", "", nil, nil)
 
 	out := launchAppend("mission body", runContext("", "/work", "", "tfac/SKY-9", "", "", ""), "", "", "/bin/tf")
 	if strings.Contains(out, task.Title) {
@@ -158,7 +158,7 @@ func TestBuildTaskContext_BeginsWithTheBlock(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			out := BuildTaskContext(tc.task, "", tc.metadata, "", nil)
+			out := BuildTaskContext(tc.task, "", tc.metadata, "", nil, nil)
 			if !strings.HasPrefix(out, "<task_context>\n") {
 				t.Errorf("the opening row must begin with the task-context block;\n%s", out)
 			}

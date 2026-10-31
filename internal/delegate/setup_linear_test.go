@@ -66,7 +66,7 @@ func TestBuildTaskContext_Linear(t *testing.T) {
 		EntitySource:   "linear",
 		EntitySourceID: "ENG-7",
 	}
-	got := BuildTaskContext(task, "", "", "", nil)
+	got := BuildTaskContext(task, "", "", "", nil, nil)
 	if !strings.Contains(got, "- Issue: ENG-7") {
 		t.Errorf("expected the issue line;\n%s", got)
 	}
