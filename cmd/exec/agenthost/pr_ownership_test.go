@@ -161,9 +161,9 @@ func TestStampPROwnership_NoTeamOnConversation(t *testing.T) {
 
 // TestStampPROwnership_WithAction covers the exec-verb path, where the funnel
 // receives the deliverable AND its audit action together. githubAction copies the
-// deliverable's target and url, so both the touch pass and the stamp want the same
-// entity; the stamp reuses what the touch resolved rather than running a second
-// FindOrCreate. Both effects still have to land.
+// deliverable's target and url, so both the memory link and the stamp want the
+// same entity; the stamp reuses what the link resolved rather than running a
+// second FindOrCreate. Both effects still have to land.
 func TestStampPROwnership_WithAction(t *testing.T) {
 	ctx := context.Background()
 	conn, stores, info, _ := prOwnershipFixture(t)
@@ -175,6 +175,7 @@ func TestStampPROwnership_WithAction(t *testing.T) {
 		Target:   a.Target,
 		URL:      a.URL,
 	}
+	act.SetObject(domain.ObjectKindPullRequest, "")
 	recordExternalWrite(ctx, stores, info, &a, act, domain.EntityContainer{}, botOpenedPRIdentity)
 
 	ent := prEntity(t, stores)
@@ -184,16 +185,9 @@ func TestStampPROwnership_WithAction(t *testing.T) {
 	if got := ownerOf(t, stores, ent.ID); got != info.TeamID {
 		t.Errorf("owning team = %q, want %q", got, info.TeamID)
 	}
-	// The reuse must not have cost the touch row the action pass writes.
-	var touches int
-	if err := conn.QueryRow(
-		`SELECT COUNT(*) FROM conversation_memory_entities WHERE conversation_id = ? AND entity_id = ? AND role = 'touched'`,
-		info.ConversationID, ent.ID,
-	).Scan(&touches); err != nil {
-		t.Fatalf("count touches: %v", err)
-	}
-	if touches == 0 {
-		t.Error("reusing the touch's resolution lost the touch row")
+	// The reuse must not have cost the produced link the action writes.
+	if role := touchRole(t, conn, info.ConversationID, ent.ID); role != domain.MemoryRoleProduced {
+		t.Errorf("link role = %q, want %q (reusing the stamp's resolution lost the link)", role, domain.MemoryRoleProduced)
 	}
 }
 

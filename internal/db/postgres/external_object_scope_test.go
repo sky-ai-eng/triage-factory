@@ -158,6 +158,13 @@ func TestExternalActionObject_Postgres(t *testing.T) {
 	dbtest.RunExternalActionObjectConformance(t, pgExternalActionFixture(pgtest.Shared(t)))
 }
 
+// TestExternalActionCommentKeys_Postgres runs the shared conformance suite for
+// the tracker's read of which comments TF posted against the Postgres
+// backend, on the node-id suite's fixture.
+func TestExternalActionCommentKeys_Postgres(t *testing.T) {
+	dbtest.RunExternalActionCommentKeysConformance(t, pgExternalActionFixture(pgtest.Shared(t)))
+}
+
 // pgExternalActionFixture builds a fresh org per subtest with a team and a
 // conversation in it, both pools wired against AdminDB.
 func pgExternalActionFixture(h *pgtest.Harness) dbtest.ExternalActionNodeIDFactory {
@@ -189,4 +196,31 @@ func pgExternalActionFixture(h *pgtest.Harness) dbtest.ExternalActionNodeIDFacto
 			},
 		}
 	}
+}
+
+// TestArtifacts_Postgres runs the shared artifact conformance suite against
+// the Postgres backend, both pools wired against AdminDB like the suites
+// above.
+func TestArtifacts_Postgres(t *testing.T) {
+	h := pgtest.Shared(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	dbtest.RunArtifactConformance(t, func(t *testing.T) dbtest.ArtifactFixture {
+		t.Helper()
+		h.Reset(t)
+		orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "artifacts")
+		return dbtest.ArtifactFixture{
+			Stores: stores,
+			OrgID:  orgID,
+			TeamID: teamID,
+			NewConversation: func(t *testing.T) string {
+				return seedPgDeliverableConversation(t, h, orgID, teamID, userID)
+			},
+			SetOccurredAt: func(t *testing.T, actionID string, at time.Time) {
+				t.Helper()
+				if _, err := h.AdminDB.Exec(`UPDATE external_actions SET occurred_at = $2 WHERE id = $1`, actionID, at); err != nil {
+					t.Fatalf("set occurred_at of %s: %v", actionID, err)
+				}
+			},
+		}
+	})
 }

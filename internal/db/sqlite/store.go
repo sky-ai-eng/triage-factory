@@ -143,6 +143,7 @@ func New(conn *sql.DB) db.Stores {
 		// one connection (N=1, no RLS). Append-only audit log of org-credential
 		// external writes. See TFAC-483.
 		ExternalActions: newExternalActionStore(conn),
+		Artifacts:       newArtifactStore(conn),
 		// Spend is app-pool (RLS-scoped) in Postgres; SQLite collapses to the one
 		// connection (N=1, no RLS). Read-only view over llm_spend. See TFAC-472.
 		Spend: newSpendStore(conn),

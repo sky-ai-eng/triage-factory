@@ -35,9 +35,9 @@ type NewComment struct {
 	Author    string // display name; on GitHub, the login
 	AuthorID  string
 	CreatedAt string
-	// ByTF is set when TF posted the comment. An agent's comment is recorded
-	// as a `comment` deliverable keyed on the comment's id, and ByTF is whether
-	// that deliverable exists. It is matched on the id rather than the author
+	// ByTF is set when TF posted the comment. A comment TF posts is recorded
+	// in the ledger with the comment's key as its object key, and ByTF is
+	// whether that row exists. It is matched on the id rather than the author
 	// because a personal credential comments as the person who owns it.
 	ByTF bool
 	// Mentions are the users and teams a GitHub comment @-mentions
@@ -87,10 +87,10 @@ func commentedAt(c NewComment, issueUpdatedAt string) string {
 	return issueUpdatedAt
 }
 
-// markTFComments sets ByTF on each comment TF posted: each with a `comment`
-// deliverable in scope under the key the agent's comment verbs record it with,
-// which key spells from the comment's id. A comment key spells as "" has no
-// key to look for, and is taken as a person's.
+// markTFComments sets ByTF on each comment TF posted: each whose key, which
+// key spells from the comment's id, is the object key of a comment the ledger
+// records TF posting in scope. A comment key spells as "" has no key to look
+// for, and is taken as a person's.
 func (t *Tracker) markTFComments(ctx context.Context, scope string, comments []NewComment, key func(commentID string) string) error {
 	keys := make([]string, 0, len(comments))
 	for _, c := range comments {
@@ -101,7 +101,7 @@ func (t *Tracker) markTFComments(ctx context.Context, scope string, comments []N
 	if len(keys) == 0 {
 		return nil
 	}
-	present, err := t.deliverables.PresentDedupKeysSystem(ctx, t.orgID, scope, keys)
+	present, err := t.externalActions.PresentPostedCommentKeysSystem(ctx, t.orgID, scope, keys)
 	if err != nil {
 		return err
 	}
@@ -113,8 +113,8 @@ func (t *Tracker) markTFComments(ctx context.Context, scope string, comments []N
 	return nil
 }
 
-// issueCommentKey spells the key a comment on a Jira or Linear issue is
-// recorded under. resource is the issue's deliverable resource
+// issueCommentKey spells the object key the ledger records a comment on a
+// Jira or Linear issue under. resource is the issue's resource
 // (domain.EntityResource); with none there is no key.
 func issueCommentKey(provider, resource string) func(string) string {
 	return func(commentID string) string {

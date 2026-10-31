@@ -95,7 +95,7 @@ func TestRefreshGitHub_ReEnableAfterPauseEmitsNothing(t *testing.T) {
 	}
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, org)
 	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", ghclient.NewClient(srv.URL, "tok"), domain.GitHubAccount{}, nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestRefreshGitHub_PauseWithoutClearWouldEmit(t *testing.T) {
 	}
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, org)
 	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", ghclient.NewClient(srv.URL, "tok"), domain.GitHubAccount{}, nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestRefreshJira_ReEnableAfterPauseEmitsNothing(t *testing.T) {
 	}
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, org)
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
 	rules := registeredRules(t, stores.JiraProjects, "https://jira.example.com", JiraRules{{Key: "SKY", DoneMembers: jiraRefs("Done")}})
 	if _, err := tr.RefreshJira(ctx, "https://jira.example.com", client, srv.URL, rules); err != nil {
@@ -311,7 +311,7 @@ func TestRefreshGitHub_ReEnable_KnownEntitySilentNewEntityDiscovered(t *testing.
 	}
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, org)
 	resolver := fakeReviewerResolver{users: map[string]bool{"carol": true}}
 	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", ghclient.NewClient(srv.URL, "tok"), domain.GitHubAccount{}, []string{"octo/repo"}, resolver); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)

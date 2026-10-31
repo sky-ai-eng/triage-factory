@@ -85,6 +85,13 @@ func TestExternalActionObject_SQLite(t *testing.T) {
 	dbtest.RunExternalActionObjectConformance(t, sqliteExternalActionFixture)
 }
 
+// TestExternalActionCommentKeys_SQLite runs the shared conformance suite for
+// the tracker's read of which comments TF posted against the SQLite backend,
+// on the node-id suite's fixture.
+func TestExternalActionCommentKeys_SQLite(t *testing.T) {
+	dbtest.RunExternalActionCommentKeysConformance(t, sqliteExternalActionFixture)
+}
+
 // sqliteExternalActionFixture is a fresh in-memory DB with the local org's
 // team and a conversation in it.
 func sqliteExternalActionFixture(t *testing.T) dbtest.ExternalActionNodeIDFixture {
@@ -113,4 +120,29 @@ func sqliteExternalActionFixture(t *testing.T) dbtest.ExternalActionNodeIDFixtur
 			return id.String, id.Valid
 		},
 	}
+}
+
+// TestArtifacts_SQLite runs the shared artifact conformance suite against the
+// SQLite backend, a fresh in-memory DB per subtest.
+func TestArtifacts_SQLite(t *testing.T) {
+	dbtest.RunArtifactConformance(t, func(t *testing.T) dbtest.ArtifactFixture {
+		t.Helper()
+		conn := openSQLiteForTest(t)
+		return dbtest.ArtifactFixture{
+			Stores: sqlitestore.New(conn),
+			OrgID:  runmode.LocalDefaultOrgID,
+			TeamID: runmode.LocalDefaultTeamID,
+			NewConversation: func(t *testing.T) string {
+				return seedDeliverableConversationWithID(t, conn, uuid.NewString())
+			},
+			SetOccurredAt: func(t *testing.T, actionID string, at time.Time) {
+				t.Helper()
+				// The shape the column's CURRENT_TIMESTAMP default writes.
+				if _, err := conn.Exec(`UPDATE external_actions SET occurred_at = ? WHERE id = ?`,
+					at.UTC().Format(time.DateTime), actionID); err != nil {
+					t.Fatalf("set occurred_at of %s: %v", actionID, err)
+				}
+			},
+		}
+	})
 }

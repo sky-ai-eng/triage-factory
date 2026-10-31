@@ -343,6 +343,9 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// RecordSystem + ListByOrgSystem inside WithTx route outside the tx — same
 		// autonomous-commit shape Deliverables / Events use for their admin halves.
 		ExternalActions: newExternalActionStore(tx, s.admin),
+		// Artifacts: the request-path reads run on the claims tx, the
+		// ...System ones on s.admin, like ExternalActions above.
+		Artifacts: newArtifactStore(tx, s.admin),
 		// Spend: app half is the claims-set tx (ListSpend / SpendByCategory run
 		// under the surrounding claims, so the security_invoker view's base-table
 		// RLS scopes them to the requesting user); admin half stays pinned to

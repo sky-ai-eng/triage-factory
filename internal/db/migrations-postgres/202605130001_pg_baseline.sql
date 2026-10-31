@@ -2068,15 +2068,20 @@ CREATE INDEX idx_external_actions_team_occurred ON public.external_actions USING
 CREATE INDEX idx_external_actions_conversation ON public.external_actions USING btree (conversation_id);
 
 
+-- A conversation's rows in one org, in time order: the conversation's action
+-- list and its artifact reads filter on both columns. The single-column index
+-- above serves the conversation foreign key's ON DELETE SET NULL.
+CREATE INDEX idx_external_actions_org_conversation_occurred ON public.external_actions USING btree (org_id, conversation_id, occurred_at);
+
+
 -- An entity's rename, merge and fold, and a Slack channel's move, select the
 -- ledger rows they move by entity_id; a repository's rename by repository_id.
 CREATE INDEX idx_external_actions_entity ON public.external_actions USING btree (entity_id) WHERE (entity_id IS NOT NULL);
 CREATE INDEX idx_external_actions_repository ON public.external_actions USING btree (repository_id) WHERE (repository_id IS NOT NULL);
 
 
--- The rows that changed one keyed object, found by its key within a scope.
--- TODO(TFAC-1265): nothing reads by it until the tracker's comment check
--- looks TF's own comments up by key.
+-- The rows that changed one keyed object, found by its key within a scope:
+-- the tracker's read of which comments TF posted.
 CREATE INDEX idx_external_actions_object_key ON public.external_actions USING btree (org_id, scope, object_key) WHERE (object_key IS NOT NULL);
 
 

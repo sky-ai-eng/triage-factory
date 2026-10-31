@@ -27,10 +27,11 @@ type NewReview struct {
 	Paths []string
 	// ByTF is set when TF submitted the review, or when the review is a reply
 	// TF posted in a review thread: a COMMENTED review each of whose comments
-	// TF recorded as a `comment` deliverable. A submitted review's deliverable
-	// carries the review's id once it is posted, and a reply's deliverable is
-	// keyed on the comment's id, so both are matched on ids rather than on the
-	// author, who under a personal credential is the person who owns it.
+	// the ledger records TF posting. A submitted review's deliverable carries
+	// the review's id once it is posted, and a reply's ledger row names the
+	// comment's id in its object key, so both are matched on ids rather than
+	// on the author, who under a personal credential is the person who owns
+	// it.
 	ByTF bool
 	// Mentions are the users and teams the review's body @-mentions.
 	Mentions []string
@@ -42,9 +43,9 @@ type NewReview struct {
 type NewReviewComment struct {
 	ID       int64
 	Mentions []string
-	// ByTF is set when TF recorded the comment as a `comment` deliverable. A
-	// reply TF posted while the credential's owner had a review pending joins
-	// that review, so it can be TF's in a review that is not.
+	// ByTF is set when the ledger records TF posting the comment. A reply TF
+	// posted while the credential's owner had a review pending joins that
+	// review, so it can be TF's in a review that is not.
 	ByTF bool
 }
 
@@ -178,7 +179,7 @@ func (t *Tracker) markTFReviews(ctx context.Context, scope string, read []ghclie
 	if err != nil {
 		return err
 	}
-	posted, err := t.deliverables.PresentDedupKeysSystem(ctx, t.orgID, scope, commentKeys)
+	posted, err := t.externalActions.PresentPostedCommentKeysSystem(ctx, t.orgID, scope, commentKeys)
 	if err != nil {
 		return err
 	}

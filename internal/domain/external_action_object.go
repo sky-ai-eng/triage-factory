@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -37,14 +38,16 @@ const (
 	ObjectKindMessage     = "message"
 )
 
+var objectKinds = []string{
+	ObjectKindPullRequest, ObjectKindIssue, ObjectKindRepository, ObjectKindBranch,
+	ObjectKindLabel, ObjectKindRelease, ObjectKindWorkflow, ObjectKindWorkflowRun,
+	ObjectKindReview, ObjectKindComment, ObjectKindMessage,
+}
+
 // ObjectKinds is the closed object_kind vocabulary, in the order the column's
 // CHECK spells it.
 func ObjectKinds() []string {
-	return []string{
-		ObjectKindPullRequest, ObjectKindIssue, ObjectKindRepository, ObjectKindBranch,
-		ObjectKindLabel, ObjectKindRelease, ObjectKindWorkflow, ObjectKindWorkflowRun,
-		ObjectKindReview, ObjectKindComment, ObjectKindMessage,
-	}
+	return slices.Clone(objectKinds)
 }
 
 // actionObjectKinds maps every action that lands a change to the kind of
@@ -174,14 +177,46 @@ func GitHubEntityObjectKind(entityKind string) string {
 	return ""
 }
 
+var refusalOrFailureActions = []string{
+	ActionGitDenied, ActionEgressDenied, ActionGHWriteDenied, ActionCommitSignDenied, ActionBranchPushFailed,
+}
+
+// RefusalOrFailureActions is the actions that record a write that was refused
+// or failed. The ledger's list reads build their refusal filter from it, so
+// the filter and IsRefusalOrFailure cannot disagree.
+func RefusalOrFailureActions() []string {
+	return slices.Clone(refusalOrFailureActions)
+}
+
 // IsRefusalOrFailure reports whether action records a write that was refused
 // or failed: nothing landed, and the row names no object.
 func IsRefusalOrFailure(action string) bool {
-	switch action {
-	case ActionGitDenied, ActionEgressDenied, ActionGHWriteDenied, ActionCommitSignDenied, ActionBranchPushFailed:
-		return true
+	return slices.Contains(refusalOrFailureActions, action)
+}
+
+// ActionsNamingNoObject is every action ActionObjectKind gives no kind: the
+// refusals and failures, the catch-alls, and the actions that never land.
+// The artifact reads exclude their rows whatever the rows carry, so a writer
+// that named an object on one cannot make it an artifact.
+func ActionsNamingNoObject() []string {
+	var out []string
+	for _, action := range ExternalActionTypes() {
+		if ActionObjectKind(action) == "" {
+			out = append(out, action)
+		}
 	}
-	return false
+	return out
+}
+
+// IsObjectID reports whether s has the shape ObjectID renders: a known object
+// kind, a "|", and a non-empty id part. It says nothing about whether any row
+// carries it.
+func IsObjectID(s string) bool {
+	kind, rest, ok := strings.Cut(s, "|")
+	if !ok || rest == "" {
+		return false
+	}
+	return slices.Contains(objectKinds, kind)
 }
 
 // objectKindKeyed reports whether an object of kind is identified with an

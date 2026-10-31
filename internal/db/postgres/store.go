@@ -370,6 +370,9 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// ListPRCreatedWithoutDeliverableSystem (the reconciler's PR backstop).
 		// Append-only audit log of org-credential external writes. See TFAC-483.
 		ExternalActions: newExternalActionStore(app, admin),
+		// Artifacts reads the ledger: app for the request-path reads under
+		// claims, admin for the ...System ones.
+		Artifacts: newArtifactStore(app, admin),
 		// Spend holds both pools: app for ListSpend + SpendByCategory (the
 		// llm_spend view is security_invoker, so reading it under tf_app applies
 		// the base tables' RLS — team-scoped runs + org-scoped system),
@@ -566,6 +569,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		SystemLLMRuns:            newSystemLLMRunStore(tx),
 		AccessChangeLog:          newAccessChangeLogStore(tx),
 		ExternalActions:          newExternalActionStore(tx, tx),
+		Artifacts:                newArtifactStore(tx, tx),
 		Spend:                    newSpendStore(tx, tx),
 		AuthEvents:               newAuthEventStore(tx),
 		Marketplace:              newMarketplaceStore(tx, tx),

@@ -18,66 +18,27 @@ import (
 
 var attachLog = logging.Component("memoryentities")
 
-// Attach makes a conversation's memory reachable from every entity the work
-// materially engaged: the primary (task) entity, plus every entity it produced
-// (the entities the conversation's deliverables are about). Touched entities are
-// recorded durably at verb time by the exec funnel; role precedence in
-// RecordEntityTouchSystem (primary > produced > touched) converges all three
-// sets, so this needs no ordering care against those mid-run writes — a
-// touched row upgrades to produced here, and the primary entity ends primary
-// even if it was also touched or produced.
+// Attach makes a conversation's memory reachable from its task's entity, the
+// primary one. The other entities the work engaged are linked at verb time by
+// the exec funnel: produced for the entity a landed change is about, touched
+// for one the run read. Role precedence in RecordEntityTouchSystem (primary >
+// produced > touched) converges the three, so this needs no ordering care
+// against those mid-run writes — the primary entity ends primary even if it was
+// also touched or produced.
 //
-// Best-effort and non-fatal throughout: it runs after the conversation_memory
-// upsert has already landed, so a join-row failure is logged and skipped, never
-// aborts the caller. A produced link skipped that way, or because the deliverable
-// carries no entity, is also counted (CountSkippedLink).
+// Best-effort and non-fatal: it runs after the conversation_memory upsert has
+// already landed, so a join-row failure is logged and skipped, never aborts the
+// caller.
 //
-// The primary attach is unconditional even though the upsert is not — the join
-// row is what a later memory write on this conversation becomes reachable
-// through, and writing it costs nothing when there is no memory yet. A
-// produced entity is the one its deliverable was recorded against
-// (domain.Deliverable.EntityID): the exec funnel resolves, and creates where none
-// exists yet, the entity each deliverable is about before it writes the row, so a
-// pull request the agent just opened has its stub already. A branch is about
-// no entity and is skipped; any other deliverable without one is one whose
-// entity did not resolve when it was written, which was logged then.
-//
-// A nil store is an absent capability, not an error, and the two cases are not
-// the same: a nil TaskMemory is nowhere to write, so nothing is attached at all
-// — not even the primary row. A nil Deliverables store costs only the produced
-// pass; the primary row still lands.
-func Attach(ctx context.Context, stores db.Stores, orgID, conversationID, primaryEntityID string) {
-	taskMemory, deliverables := stores.TaskMemory, stores.Deliverables
+// The attach is unconditional even though the upsert is not — the join row is
+// what a later memory write on this conversation becomes reachable through, and
+// writing it costs nothing when there is no memory yet. A nil taskMemory is an
+// absent capability, nowhere to write, and attaches nothing.
+func Attach(ctx context.Context, taskMemory db.TaskMemoryStore, orgID, conversationID, primaryEntityID string) {
 	if taskMemory == nil {
 		return
 	}
-	// primary — the task's entity always carries the conversation's memory.
 	if err := taskMemory.RecordEntityTouchSystem(ctx, orgID, conversationID, primaryEntityID, domain.MemoryRolePrimary); err != nil {
 		attachLog.Warn("attach primary entity to conversation memory failed", "conversation", conversationID, "entity", primaryEntityID, "error", err)
-	}
-
-	if deliverables == nil {
-		return
-	}
-	// produced — every external object the agent created/mutated, through
-	// the entities the conversation's deliverables are about. A listing failure
-	// leaves the upsert + primary row intact.
-	arts, err := deliverables.ListByConversationSystem(ctx, orgID, conversationID)
-	if err != nil {
-		attachLog.Warn("list deliverables for produced-entity attach failed", "conversation", conversationID, "error", err)
-		return
-	}
-	for _, a := range arts {
-		if a.Provider == domain.ProviderGit {
-			continue
-		}
-		if a.EntityID == "" {
-			CountSkippedLink(ctx, orgID, domain.MemoryRoleProduced, a.Provider, nil)
-			continue
-		}
-		if err := taskMemory.RecordEntityTouchSystem(ctx, orgID, conversationID, a.EntityID, domain.MemoryRoleProduced); err != nil {
-			attachLog.Warn("attach produced entity to conversation memory failed", "conversation", conversationID, "entity", a.EntityID, "error", err)
-			CountSkippedLink(ctx, orgID, domain.MemoryRoleProduced, a.Provider, err)
-		}
 	}
 }

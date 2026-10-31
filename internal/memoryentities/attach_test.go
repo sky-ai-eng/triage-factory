@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -170,49 +169,11 @@ func memoryConversationIDs(t *testing.T, database *sql.DB, entityID string) map[
 	return out
 }
 
-// seedDeliverable upserts a deliverable attributed to conversationID so the produced
-// pass sees it.
-func seedDeliverable(t *testing.T, database *sql.DB, conversationID string, a domain.Deliverable) {
-	t.Helper()
-	stores := sqlitestore.New(database)
-	a.ConversationID = conversationID
-	a.OrgID = runmode.LocalDefaultOrgID
-	a.TeamID = runmode.LocalDefaultTeamID
-	if a.Scope == "" {
-		// The org's current scope for the provider, as the exec funnel stamps it.
-		set, err := stores.Orgs.GetSettingsSystem(context.Background(), runmode.LocalDefaultOrgID)
-		if err != nil {
-			t.Fatalf("read org settings: %v", err)
-		}
-		a.Scope = domain.ExternalObjectScope(a.Provider, set)
-	}
-	if _, err := stores.Deliverables.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a); err != nil {
-		t.Fatalf("seed deliverable %s/%s: %v", a.Kind, a.State, err)
-	}
-}
-
-// seedProducedPR upserts a PR deliverable attributed to conversationID, linked
-// to the pull request's entity the way the exec funnel records it: the entity
-// found by the PR's key, or a stub created for it.
-func seedProducedPR(t *testing.T, database *sql.DB, conversationID, repoPath string, number int, url string) {
-	t.Helper()
-	nodeID := fmt.Sprintf("PR_%s_%d", repoPath, number)
-	ent, _, err := sqlitestore.New(database).Entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID,
-		"github", testScope("github"), domain.PullRequestTarget(repoPath, number), nodeID, "pr", "", url)
-	if err != nil {
-		t.Fatalf("resolve the produced PR's entity: %v", err)
-	}
-	pr := domain.NewPullRequestDeliverable(repoPath, number, nodeID, "head", "main", url, "produced PR", "", false)
-	pr.EntityID = ent.ID
-	seedDeliverable(t, database, conversationID, pr)
-}
-
-// attachAll calls Attach with the full store bundle — what both production
-// callers hand it.
+// attachAll calls Attach with the memory store both production callers hand
+// it.
 func attachAll(t *testing.T, database *sql.DB, orgID, conversationID, primaryEntityID string) {
 	t.Helper()
-	stores := sqlitestore.New(database)
-	Attach(context.Background(), stores, orgID, conversationID, primaryEntityID)
+	Attach(context.Background(), sqlitestore.New(database).TaskMemory, orgID, conversationID, primaryEntityID)
 }
 
 // --- tests ---
@@ -254,277 +215,14 @@ func TestAttach_PrimaryAlwaysWritten(t *testing.T) {
 	}
 }
 
-// TestAttach_ProducedEntityIsTheDeliverables: a produced-PR deliverable attaches
-// the entity it was recorded against with role=produced, which carries the
-// conversation's memory through the join.
-func TestAttach_ProducedEntityIsTheDeliverables(t *testing.T) {
-	database := newTestDB(t)
-	seedConversation(t, database, "r-prod")
-	ctx := context.Background()
-	entA := primaryEntity(t, database, "r-prod")
-
-	if _, err := sqlitestore.New(database).TaskMemory.UpsertAgentMemorySystem(ctx, runmode.LocalDefaultOrgID, "r-prod", "", "narrative", domain.MemorySourceAgent); err != nil {
-		t.Fatalf("upsert memory: %v", err)
-	}
-	seedProducedPR(t, database, "r-prod", "o/r", 4242, "https://github.com/o/r/pull/4242")
-
-	attachAll(t, database, runmode.LocalDefaultOrgID, "r-prod", entA.ID)
-
-	entB := entityBySource(t, database, "github", "o/r#4242")
-	if entB == nil {
-		t.Fatal("the produced PR's entity is missing")
-	}
-	if role := roleFor(t, database, "r-prod", entB.ID); role != domain.MemoryRoleProduced {
-		t.Errorf("produced role = %q, want %q", role, domain.MemoryRoleProduced)
-	}
-	if !memoryConversationIDs(t, database, entB.ID)["r-prod"] {
-		t.Error("produced entity does not reach the conversation's memory through the join")
-	}
-}
-
-// TestAttach_DeliverableFromAnotherScopeAttachesNothing: a PR deliverable recorded on
-// a GitHub host the org is no longer on, linked to no entity, names a pull
-// request there, not the same-numbered one on the current host: the attach
-// reads the entity a deliverable was recorded against and never resolves one
-// from its target, so it mints and attaches nothing.
-func TestAttach_DeliverableFromAnotherScopeAttachesNothing(t *testing.T) {
-	database := newTestDB(t)
-	seedConversation(t, database, "r-elsewhere")
-	ctx := context.Background()
-	entA := primaryEntity(t, database, "r-elsewhere")
-
-	if _, err := sqlitestore.New(database).TaskMemory.UpsertAgentMemorySystem(ctx, runmode.LocalDefaultOrgID, "r-elsewhere", "", "narrative", domain.MemorySourceAgent); err != nil {
-		t.Fatalf("upsert memory: %v", err)
-	}
-	pr := domain.NewPullRequestDeliverable("o/r", 77, "node", "head", "main", "https://ghe.example.com/o/r/pull/77", "elsewhere", "", false)
-	pr.Scope = "https://ghe.example.com"
-	seedDeliverable(t, database, "r-elsewhere", pr)
-
-	attachAll(t, database, runmode.LocalDefaultOrgID, "r-elsewhere", entA.ID)
-
-	if ent := entityBySource(t, database, "github", "o/r#77"); ent != nil {
-		t.Errorf("a deliverable from another host minted an entity on the current one: %+v", ent)
-	}
-	var n int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM conversation_memory_entities WHERE conversation_id = ?`, "r-elsewhere").Scan(&n); err != nil {
-		t.Fatalf("count join rows: %v", err)
-	}
-	if n != 1 {
-		t.Errorf("join rows = %d, want only the primary", n)
-	}
-}
-
-// TestAttach_RepoLevelTargetsSkipped: deliverables that map to no entity — a git
-// branch push (unmapped provider) and a github repo-level target with no '#N'
-// — mint no entity and write no produced row. Only the primary row lands.
-func TestAttach_RepoLevelTargetsSkipped(t *testing.T) {
-	database := newTestDB(t)
-	seedConversation(t, database, "r-skip")
-	ctx := context.Background()
-	entA := primaryEntity(t, database, "r-skip")
-
-	if _, err := sqlitestore.New(database).TaskMemory.UpsertAgentMemorySystem(ctx, runmode.LocalDefaultOrgID, "r-skip", "", "narrative", domain.MemorySourceAgent); err != nil {
-		t.Fatalf("upsert memory: %v", err)
-	}
-	// Branch push → provider "git", target "o/r": unmapped provider.
-	branch, ok := domain.NewBranchDeliverable("o/r", "refs/heads/feature", "sha123", true)
-	if !ok {
-		t.Fatal("NewBranchDeliverable returned ok=false")
-	}
-	seedDeliverable(t, database, "r-skip", branch)
-	// A github deliverable with a bare repo-level target (no '#N') → ParsePRTarget
-	// ok=false.
-	seedDeliverable(t, database, "r-skip", domain.Deliverable{
-		Provider: domain.ProviderGitHub,
-		Kind:     domain.DeliverableKindPullRequest,
-		Target:   "o/r",
-		State:    domain.DeliverableStatePROpen,
-		DedupKey: domain.ObjectKey(domain.ProviderGitHub, domain.DeliverableKindPullRequest, "o/r", ""),
-	})
-
-	attachAll(t, database, runmode.LocalDefaultOrgID, "r-skip", entA.ID)
-
-	if ent := entityBySource(t, database, domain.ProviderGit, "o/r"); ent != nil {
-		t.Errorf("branch push should mint no entity, got %+v", ent)
-	}
-	if ent := entityBySource(t, database, domain.ProviderGitHub, "o/r"); ent != nil {
-		t.Errorf("repo-level github target should mint no entity, got %+v", ent)
-	}
-	// The only join row is the primary — the skipped targets add nothing.
-	var n int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM conversation_memory_entities WHERE conversation_id = ?`, "r-skip").Scan(&n); err != nil {
-		t.Fatalf("count join rows: %v", err)
-	}
-	if n != 1 {
-		t.Errorf("join rows = %d, want 1 (primary only)", n)
-	}
-}
-
-// TestAttach_JiraDeliverableAttachesItsEntity: a Jira deliverable attaches the
-// issue's entity it was recorded against, whatever key its target spells, and
-// leaves the entity where it is. One linked to no entity — its issue did not
-// resolve when it was written — attaches and mints nothing, and is the one
-// link the attach owed and could not write, so it is counted.
-func TestAttach_JiraDeliverableAttachesItsEntity(t *testing.T) {
-	skips := linkSkips(t)
-	database := newTestDB(t)
-	site := testScope("jira")
-	seedConversation(t, database, "r-jira")
-	ctx := context.Background()
-	entA := primaryEntity(t, database, "r-jira")
-	moved, _, err := sqlitestore.New(database).Entities.FindOrCreateJiraSystem(ctx, runmode.LocalDefaultOrgID, site, "NEW-7", "10007", dbseed.JiraIssueProject("NEW-7"), "Moved", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	jiraDeliverable := func(issueID, target, entityID string) domain.Deliverable {
-		return domain.Deliverable{
-			Provider: domain.ProviderJira, Kind: domain.DeliverableKindIssue, Target: target,
-			State:    domain.DeliverableStateIssueUpdated,
-			Scope:    site,
-			DedupKey: domain.ObjectKey(domain.ProviderJira, domain.DeliverableKindIssue, domain.JiraIssueResource(site, issueID), ""),
-			EntityID: entityID,
-		}
-	}
-	seedDeliverable(t, database, "r-jira", jiraDeliverable("10007", "OLD-7", moved.ID))
-	seedDeliverable(t, database, "r-jira", jiraDeliverable("10009", "OPS-9", ""))
-
-	attachAll(t, database, runmode.LocalDefaultOrgID, "r-jira", entA.ID)
-
-	if role := roleFor(t, database, "r-jira", moved.ID); role != domain.MemoryRoleProduced {
-		t.Errorf("moved issue's role = %q, want produced", role)
-	}
-	if got := entityBySource(t, database, "jira", "NEW-7"); got == nil || got.ID != moved.ID {
-		t.Errorf("NEW-7 = %+v, want the entity left under its current key", got)
-	}
-	for _, key := range []string{"OLD-7", "OPS-9"} {
-		if ent := entityBySource(t, database, "jira", key); ent != nil {
-			t.Errorf("%s minted an entity: %+v", key, ent)
-		}
-	}
-	var n int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM conversation_memory_entities WHERE conversation_id = ?`, "r-jira").Scan(&n); err != nil {
-		t.Fatalf("count join rows: %v", err)
-	}
-	if n != 2 {
-		t.Errorf("join rows = %d, want 2 (primary and the moved issue)", n)
-	}
-	assertSkips(t, skips, map[skipKey]int64{{domain.MemoryRoleProduced, "jira", skipNoEntity}: 1})
-}
-
-// TestAttach_CountsAFailedWrite: a produced link whose join-row write fails is
-// counted as an error, and the primary row still lands.
-func TestAttach_CountsAFailedWrite(t *testing.T) {
-	skips := linkSkips(t)
-	database := newTestDB(t)
-	seedConversation(t, database, "r-write")
-	entA := primaryEntity(t, database, "r-write")
-	seedProducedPR(t, database, "r-write", "o/r", 77, "https://github.com/o/r/pull/77")
-
-	failing := sqlitestore.New(database)
-	failing.TaskMemory = producedWriteFails{TaskMemoryStore: failing.TaskMemory}
-	Attach(context.Background(), failing, runmode.LocalDefaultOrgID, "r-write", entA.ID)
-
-	if role := roleFor(t, database, "r-write", entA.ID); role != domain.MemoryRolePrimary {
-		t.Errorf("primary role = %q, want %q despite the failed write", role, domain.MemoryRolePrimary)
-	}
-	assertSkips(t, skips, map[skipKey]int64{{domain.MemoryRoleProduced, "github", skipError}: 1})
-}
-
-// producedWriteFails fails the produced role's join-row write; every other
-// method delegates to the embedded real store.
-type producedWriteFails struct {
-	db.TaskMemoryStore
-}
-
-func (f producedWriteFails) RecordEntityTouchSystem(ctx context.Context, orgID, conversationID, entityID, role string) error {
-	if role == domain.MemoryRoleProduced {
-		return errors.New("join row write failed")
-	}
-	return f.TaskMemoryStore.RecordEntityTouchSystem(ctx, orgID, conversationID, entityID, role)
-}
-
-// TestAttach_ListFailureLeavesPrimaryIntact: when the deliverable listing fails,
-// the produced pass is skipped but the memory upsert and the primary row
-// survive — the attach is best-effort and never aborts its caller.
-func TestAttach_ListFailureLeavesPrimaryIntact(t *testing.T) {
-	database := newTestDB(t)
-	seedConversation(t, database, "r-fail")
-	ctx := context.Background()
-	stores := sqlitestore.New(database)
-	entA := primaryEntity(t, database, "r-fail")
-
-	if _, err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, runmode.LocalDefaultOrgID, "r-fail", "", "narrative", domain.MemorySourceAgent); err != nil {
-		t.Fatalf("upsert memory: %v", err)
-	}
-
-	failing := stores
-	failing.Deliverables = failingDeliverableStore{DeliverableStore: stores.Deliverables}
-	Attach(ctx, failing, runmode.LocalDefaultOrgID, "r-fail", entA.ID)
-
-	if role := roleFor(t, database, "r-fail", entA.ID); role != domain.MemoryRolePrimary {
-		t.Errorf("primary role = %q, want %q despite the listing failure", role, domain.MemoryRolePrimary)
-	}
-	if !memoryConversationIDs(t, database, entA.ID)["r-fail"] {
-		t.Error("memory upsert lost when deliverable listing failed")
-	}
-}
-
-// failingDeliverableStore fails ListByConversationSystem (the only method the produced pass
-// calls); every other method delegates to the embedded real store.
-type failingDeliverableStore struct {
-	db.DeliverableStore
-}
-
-func (failingDeliverableStore) ListByConversationSystem(context.Context, string, string) ([]domain.Deliverable, error) {
-	return nil, errors.New("deliverable listing failed")
-}
-
-// TestAttach_AbsentDeliverablesSkipProducedPass: a caller holding no deliverable
-// store cannot read produced entities, and says so by passing nil. The
-// primary row still lands — it needs no deliverable store — so the
-// conversation's memory stays reachable from its task's entity.
-func TestAttach_AbsentDeliverablesSkipProducedPass(t *testing.T) {
-	database := newTestDB(t)
-	seedConversation(t, database, "r-nil")
-	ctx := context.Background()
-	stores := sqlitestore.New(database)
-	entA := primaryEntity(t, database, "r-nil")
-
-	if _, err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, runmode.LocalDefaultOrgID, "r-nil", "", "narrative", domain.MemorySourceAgent); err != nil {
-		t.Fatalf("upsert memory: %v", err)
-	}
-	// A deliverable whose entity the produced pass WOULD attach had the store
-	// been present.
-	seedProducedPR(t, database, "r-nil", "o/r", 9, "https://github.com/o/r/pull/9")
-
-	partial := stores
-	partial.Deliverables = nil
-	Attach(ctx, partial, runmode.LocalDefaultOrgID, "r-nil", entA.ID)
-
-	if role := roleFor(t, database, "r-nil", entA.ID); role != domain.MemoryRolePrimary {
-		t.Errorf("primary role = %q, want %q", role, domain.MemoryRolePrimary)
-	}
-	var n int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM conversation_memory_entities WHERE conversation_id = ?`, "r-nil").Scan(&n); err != nil {
-		t.Fatalf("count join rows: %v", err)
-	}
-	if n != 1 {
-		t.Errorf("join rows = %d, want 1 (primary only)", n)
-	}
-}
-
 // TestAttach_NilTaskMemoryWritesNothing: with no memory store there is nowhere
-// to write at all, and the produced pass must not run either.
+// to write at all.
 func TestAttach_NilTaskMemoryWritesNothing(t *testing.T) {
 	database := newTestDB(t)
 	seedConversation(t, database, "r-nomem")
-	stores := sqlitestore.New(database)
 	entA := primaryEntity(t, database, "r-nomem")
-	seedProducedPR(t, database, "r-nomem", "o/r", 11, "https://github.com/o/r/pull/11")
 
-	noMemory := stores
-	noMemory.TaskMemory = nil
-	Attach(context.Background(), noMemory, runmode.LocalDefaultOrgID, "r-nomem", entA.ID)
+	Attach(context.Background(), nil, runmode.LocalDefaultOrgID, "r-nomem", entA.ID)
 
 	var n int
 	if err := database.QueryRow(`SELECT COUNT(*) FROM conversation_memory_entities WHERE conversation_id = ?`, "r-nomem").Scan(&n); err != nil {
@@ -535,9 +233,9 @@ func TestAttach_NilTaskMemoryWritesNothing(t *testing.T) {
 	}
 }
 
-// TestAttach_Precedence: a pre-existing touched row upgrades to produced on the
-// produced PR, and the primary entity wins over both a prior touched row and a
-// produced deliverable pointing at it.
+// TestAttach_Precedence: the primary entity ends primary over the produced and
+// touched rows the exec funnel wrote for it mid-run, and the attach leaves the
+// produced row of another entity as it is.
 func TestAttach_Precedence(t *testing.T) {
 	database := newTestDB(t)
 	seedConversation(t, database, "r-prec")
@@ -545,24 +243,22 @@ func TestAttach_Precedence(t *testing.T) {
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
 
-	// Primary P is itself a PR that the agent also produced and had already
-	// touched mid-run — it must still end primary.
+	// Primary P is itself a PR the agent touched and then changed mid-run.
 	entP := makeEntity(t, database, "github", "o/r#100", "pr")
 	entB := makeEntity(t, database, "github", "o/r#200", "pr")
 
 	if _, err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, org, "r-prec", "", "narrative", domain.MemorySourceAgent); err != nil {
 		t.Fatalf("upsert memory: %v", err)
 	}
-	// Mid-run touches recorded before termination.
-	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, org, "r-prec", entP.ID, domain.MemoryRoleTouched); err != nil {
-		t.Fatalf("pre-touch P: %v", err)
+	for _, link := range []struct{ entityID, role string }{
+		{entP.ID, domain.MemoryRoleTouched},
+		{entP.ID, domain.MemoryRoleProduced},
+		{entB.ID, domain.MemoryRoleProduced},
+	} {
+		if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, org, "r-prec", link.entityID, link.role); err != nil {
+			t.Fatalf("record %s link: %v", link.role, err)
+		}
 	}
-	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, org, "r-prec", entB.ID, domain.MemoryRoleTouched); err != nil {
-		t.Fatalf("pre-touch B: %v", err)
-	}
-	// Both entities appear as produced deliverables.
-	seedProducedPR(t, database, "r-prec", "o/r", 100, "https://github.com/o/r/pull/100")
-	seedProducedPR(t, database, "r-prec", "o/r", 200, "https://github.com/o/r/pull/200")
 
 	attachAll(t, database, org, "r-prec", entP.ID)
 
@@ -570,14 +266,15 @@ func TestAttach_Precedence(t *testing.T) {
 		t.Errorf("P role = %q, want %q (primary wins over touched+produced)", role, domain.MemoryRolePrimary)
 	}
 	if role := roleFor(t, database, "r-prec", entB.ID); role != domain.MemoryRoleProduced {
-		t.Errorf("B role = %q, want %q (touched upgrades to produced)", role, domain.MemoryRoleProduced)
+		t.Errorf("B role = %q, want %q", role, domain.MemoryRoleProduced)
 	}
 }
 
 // TestAttach_MotivatingCase is the read-path acceptance for the motivating
-// case: a Slack-thread-triggered conversation (primary A) that opens a PR (produced B)
-// and touches an issue (C) leaves its narrative reachable from all three, with
-// roles {A: primary, B: produced, C: touched}.
+// case: a Slack-thread-triggered conversation (primary A) that opened a PR
+// (produced B) and read an issue (C), both linked mid-run by the exec funnel,
+// leaves its narrative reachable from all three, with roles {A: primary,
+// B: produced, C: touched}.
 func TestAttach_MotivatingCase(t *testing.T) {
 	database := newTestDB(t)
 	seedConversation(t, database, "r-507")
@@ -586,23 +283,20 @@ func TestAttach_MotivatingCase(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 
 	entA := makeEntity(t, database, "slack", domain.SlackSourceID("C0125", "1700000000.000100"), "thread")
+	entB := makeEntity(t, database, "github", "o/r#77", "pr")
 	entC := makeEntity(t, database, "jira", "SKY-9", "issue")
 
 	if _, err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, org, "r-507", "", "the run narrative", domain.MemorySourceAgent); err != nil {
 		t.Fatalf("upsert memory: %v", err)
 	}
-	// C touched mid-run; B produced via a deliverable.
+	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, org, "r-507", entB.ID, domain.MemoryRoleProduced); err != nil {
+		t.Fatalf("produce B: %v", err)
+	}
 	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, org, "r-507", entC.ID, domain.MemoryRoleTouched); err != nil {
 		t.Fatalf("touch C: %v", err)
 	}
-	seedProducedPR(t, database, "r-507", "o/r", 77, "https://github.com/o/r/pull/77")
 
 	attachAll(t, database, org, "r-507", entA.ID)
-
-	entB := entityBySource(t, database, "github", "o/r#77")
-	if entB == nil {
-		t.Fatal("produced PR entity B was not created")
-	}
 
 	for name, id := range map[string]string{"A": entA.ID, "B": entB.ID, "C": entC.ID} {
 		mems, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, org, id, runmode.LocalDefaultTeamID)

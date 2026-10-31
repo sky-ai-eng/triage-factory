@@ -77,3 +77,21 @@ func TestRecordEntityTouch_CountsALinkItCouldNotWrite(t *testing.T) {
 		t.Errorf("memory.entity_links_skipped = %v, want %v", got, want)
 	}
 }
+
+// TestFunnel_CountsAProducedLinkItCouldNotWrite: a Jira transition whose issue
+// read named no project finds no entity and cannot create one, so the produced
+// link the write owed is counted under the produced role.
+func TestFunnel_CountsAProducedLinkItCouldNotWrite(t *testing.T) {
+	skips := linkSkips(t)
+	jira := startMovedIssueJira(t)
+	_, stores, info := newJiraRecordingStoresConn(t, jira.URL, true)
+
+	if err := NewLocal(stores, info).JiraTransitionTo(context.Background(), "NEW-7", "Done"); err != nil {
+		t.Fatalf("JiraTransitionTo: %v", err)
+	}
+
+	want := map[string]int64{domain.MemoryRoleProduced + "/jira/no_entity": 1}
+	if got := skips(); !maps.Equal(got, want) {
+		t.Errorf("memory.entity_links_skipped = %v, want %v", got, want)
+	}
+}
