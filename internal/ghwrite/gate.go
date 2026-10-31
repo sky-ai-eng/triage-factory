@@ -34,7 +34,7 @@ import (
 // the title and body the agent proposed so a human can see what changed before
 // it was opened, and is idempotent on the number. A pull request opened raw
 // through gh's porcelain arrives as a GraphQL create whose response names only
-// the node id and url, so the artifact it leaves behind has no draft flag, no
+// the node id and url, so the deliverable it leaves behind has no draft flag, no
 // title, and no body — a row that reads as already open, on which nothing can
 // be approved and from which nothing can be diffed. Marking a pull request
 // READY is deliberately not here: it is not destructive, a mission may ask for
@@ -128,7 +128,7 @@ type Refusal struct {
 //
 // pr_reverted sits beside pr_created because it is a create wearing another
 // name: the revert mutation opens a new pull request, and one opened that way
-// leaves the same blind artifact a raw create does.
+// leaves the same blind deliverable a raw create does.
 var gatedActions = map[string]string{
 	domain.ActionReviewSubmitted: GateReasonReview,
 	domain.ActionRepoCreated:     GateReasonRepoCreate,

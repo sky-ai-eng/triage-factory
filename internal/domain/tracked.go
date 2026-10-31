@@ -195,8 +195,8 @@ type TimelineEvent struct {
 // ReviewState captures one reviewer's latest review.
 type ReviewState struct {
 	// ID is the review's GraphQL node id, when known. Populated by the PR
-	// refresh path so the artifact reconciler (TFAC-464) can match a pending
-	// review artifact (keyed on this id) to its submitted/dismissed state.
+	// refresh path so the deliverable reconciler (TFAC-464) can match a pending
+	// review deliverable (keyed on this id) to its submitted/dismissed state.
 	// Empty on snapshots from before the field existed and on paths that
 	// don't request it; the review-transition diff keys on Author+State and
 	// never reads ID, so its absence is inert there.

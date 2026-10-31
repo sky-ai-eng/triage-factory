@@ -115,14 +115,14 @@ type Stores struct {
 	// a request handler.
 	Conversations ConversationStore
 
-	// Artifacts owns the artifacts table — the durable,
+	// Deliverables owns the deliverables table — the durable,
 	// conversation-attributed, polymorphic record of everything a conversation
 	// produces externally (branch, PR, review, issue, comment). Deduped per
 	// (org_id, scope, dedup_key) so all of TFAC-454's capture writers UPSERT to
 	// one row. App pool in Postgres (team-scoped RLS via team_id, like
 	// conversations); consumers are the exec choke point + reconciliation
 	// (writers) and conversation-detail / C2 (readers). See TFAC-455.
-	Artifacts ArtifactStore
+	Deliverables DeliverableStore
 
 	// Entities owns the entities table — the long-lived source
 	// objects (PR, Jira issue) every event/task/conversation hangs off. App
@@ -377,7 +377,7 @@ type Stores struct {
 	// approval/board handlers, under claims, org-scoped RLS) and ListByTeam,
 	// admin for RecordSystem (event-triggered runs + the Jira mirror, no claims),
 	// ListByOrgSystem (the org-wide governance read) and
-	// ListPRCreatedWithoutArtifactSystem (the reconciler's PR backstop).
+	// ListPRCreatedWithoutDeliverableSystem (the reconciler's PR backstop).
 	// Append-only — both
 	// Record paths ON CONFLICT DO NOTHING. SQLite is N=1 and unscoped. See
 	// TFAC-483.
@@ -463,7 +463,7 @@ type Stores struct {
 
 	// Permissions owns the conversation_permissions table — the durable
 	// record of every tool-approval prompt a conversation raised and how it
-	// was answered. Split-pool in Postgres like Artifacts: the pending read
+	// was answered. Split-pool in Postgres like Deliverables: the pending read
 	// is app-pool under RLS (the policy composes through the conversation,
 	// mirroring claims), every write is admin-pool (the writers are delegate
 	// goroutines with no JWT-claims context, and tf_app holds no write
@@ -586,7 +586,7 @@ type TxStores struct {
 	TeamActivity             TeamActivityStore
 	TeamPRs                  TeamPRStore
 	Conversations            ConversationStore
-	Artifacts                ArtifactStore
+	Deliverables             DeliverableStore
 	Entities                 EntityStore
 	Repos                    RepositoryStore
 	PendingFirings           PendingFiringsStore

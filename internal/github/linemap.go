@@ -8,7 +8,7 @@ import (
 // Forward diff line-mapping primitive (TFAC-497).
 //
 // A staged review comment is anchored to the commit it was authored against
-// (ReviewArtifactComment.CommitSHA) on a new-side line number in that commit's
+// (ReviewDeliverableComment.CommitSHA) on a new-side line number in that commit's
 // frame. When the reviewed PR advances to a newer head, we must answer, per
 // comment: does its (path, line[, start_line]) still point at the same code?
 //

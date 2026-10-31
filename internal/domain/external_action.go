@@ -13,7 +13,7 @@ import (
 // from→to for a transition.
 //
 // This is event-grain and immutable, distinct from the mutable, object-grain
-// Artifact (which records an object's current state and upserts in place). The
+// Deliverable (which records an object's current state and upserts in place). The
 // gate for what lands here is the CREDENTIAL identity used at write time — an
 // org-scoped credential is in, an individual user's own credential is out (the
 // Jira claim/swipe/done/requeue flows, already attributed natively in Jira).
@@ -38,7 +38,7 @@ import (
 //
 // Wherever the action carries a DB state change (the server approval flips), the
 // row is written in the SAME transaction as that change, so the log can't diverge
-// from the action. The bot funnels record alongside the artifact upsert under the
+// from the action. The bot funnels record alongside the deliverable upsert under the
 // same pool routing. Empty optional strings serialize to SQL NULL (like
 // AccessChange). OrgID + ID + OccurredAt are populated on read; Record takes
 // orgID separately and lets the column DEFAULTs stamp id + occurred_at. See
@@ -46,16 +46,16 @@ import (
 type ExternalAction struct {
 	ID    string `json:"id"`
 	OrgID string `json:"org_id"`
-	// TeamID is the action's team (denormalized from the conversation/artifact). Empty for
+	// TeamID is the action's team (denormalized from the conversation/deliverable). Empty for
 	// an action with no team context (a dashboard board-drag on an org-wide PR) →
 	// SQL NULL. Backs the team-scoped read.
 	TeamID string `json:"team_id,omitempty"`
-	// Provider is the external system: github | jira (the Artifact provider
-	// consts). A branch push is a github action even though its artifact provider
+	// Provider is the external system: github | jira (the Deliverable provider
+	// consts). A branch push is a github action even though its deliverable provider
 	// is "git".
 	Provider string `json:"provider"`
-	// Scope is the provider namespace the acted-on object lives in, as on an
-	// Artifact (ExternalObjectScope): the GitHub host, the Jira site, the
+	// Scope is the provider namespace the acted-on object lives in, as on a
+	// Deliverable (ExternalObjectScope): the GitHub host, the Jira site, the
 	// Linear workspace id, SlackScope, NetworkScope. Target and DedupKey are
 	// only unique inside it. Required on every write.
 	Scope string `json:"scope"`
@@ -120,7 +120,7 @@ type ExternalAction struct {
 	DetailJSON string `json:"detail_json,omitempty"`
 	// NodeID is the GraphQL node id of the object the action created. Only a
 	// pr_created row from the create verb carries one: it is how the
-	// reconciler's backstop matches the row to the pull request's artifact,
+	// reconciler's backstop matches the row to the pull request's deliverable,
 	// since a node id survives a repository rename and the target does not.
 	// Part of the record of the act, so written once. It is a column rather
 	// than a detail_json key because the Actions feed renders every detail key
@@ -166,7 +166,7 @@ const (
 	// review_started — start-review writes nothing.
 	//
 	// Dismissal is two different acts sharing a word, and only one of them is
-	// here. Abandoning a TF-staged draft is a local state flip on an artifact
+	// here. Abandoning a TF-staged draft is a local state flip on a deliverable
 	// that never reached GitHub, and records no external action. Dismissing a
 	// SUBMITTED review clears its approval or change-request standing on GitHub
 	// under the org credential — an ordinary write, and one an agent can aim at
@@ -226,8 +226,8 @@ const (
 	// report-status — branch protection, a ruleset, a pre-receive hook — or
 	// a fatal error the remote sent instead of a report; nothing landed).
 	// Recorded by the git proxy's outcome capture so the audit log never
-	// omits an attempted external write, while the branch artifact is
-	// deliberately NOT written (artifacts track only work that exists).
+	// omits an attempted external write, while the branch deliverable is
+	// deliberately NOT written (deliverables track only work that exists).
 	// detail_json carries {sha, new, http_status, reason, remote_message},
 	// the last two only when the response reported them. No natural key
 	// (each act's key is its own; see ExternalAction.DedupKey): each failed
@@ -244,7 +244,7 @@ const (
 
 	// Outbound network connection refused by the sandbox's gating egress proxy
 	// (an off-allowlist host, a non-443 port, a hostname resolving only to
-	// internal addresses). Provider is ArtifactProviderNetwork, target is the
+	// internal addresses). Provider is ProviderNetwork, target is the
 	// CONNECT authority (host:port), detail_json carries {target, reason}.
 	// Repeated denials collapse per (conversation, host) — see
 	// EgressDenialDedupKey — because the signal is that this conversation was
@@ -465,8 +465,8 @@ func ExternalActionTypes() []string {
 // row.
 //
 // repository is the pushed repository's registry row id, which both observers
-// key the branch artifact on (BranchArtifactRepositoryID), or, for a push to a
-// repository with no registry row, the name its artifact was recorded under:
+// key the branch deliverable on (BranchDeliverableRepositoryID), or, for a push to a
+// repository with no registry row, the name its deliverable was recorded under:
 // with no row there is no id, and a name keeps two such repositories apart.
 // An id holds no '/', so the two never collide.
 //
@@ -523,7 +523,7 @@ func RelayedRecordDedupKey(conversationID, recordKey string, n int) string {
 
 // ExternalActionListOpts bounds + filters a list read for the action-log feeds.
 // The zero value lists every action (newest first) with no filter or paging.
-// Mirrors ArtifactListOpts.
+// Mirrors DeliverableListOpts.
 type ExternalActionListOpts struct {
 	// Limit caps rows returned (0 = no limit; the feed passes a page size).
 	Limit int
@@ -545,19 +545,19 @@ type ExternalActionListOpts struct {
 	Until time.Time
 }
 
-// ArtifactAction builds the external_actions row for an artifact-backed GitHub
+// DeliverableAction builds the external_actions row for a deliverable-backed GitHub
 // write. ConversationID is the drafting conversation (art.ConversationID),
 // actorUserID is the human who authorized it (empty for an autonomous one),
-// team_id is the artifact's team, and the object coordinates come from the
-// artifact: the entity it is about (art.EntityID), or, for a branch, the
+// team_id is the deliverable's team, and the object coordinates come from the
+// deliverable: the entity it is about (art.EntityID), or, for a branch, the
 // registry row its key names. from/to carry the lifecycle transition
 // (draft→open, pending→submitted, …). credential is the org credential the
 // write is made under, classified by the caller before it opens whatever
 // transaction this row lands in.
-func ArtifactAction(art *Artifact, actorUserID, action, from, to, credential string) ExternalAction {
-	// A PR artifact carries its html_url; a review artifact carries none (its
+func DeliverableAction(art *Deliverable, actorUserID, action, from, to, credential string) ExternalAction {
+	// A PR deliverable carries its html_url; a review deliverable carries none (its
 	// target is the PR), so fall back to the PR web URL from the target on the
-	// artifact's host — the audit row links somewhere rather than render
+	// deliverable's host — the audit row links somewhere rather than render
 	// non-clickable.
 	url := art.URL
 	if url == "" {
@@ -567,7 +567,7 @@ func ArtifactAction(art *Artifact, actorUserID, action, from, to, credential str
 	}
 	act := ExternalAction{
 		TeamID:         art.TeamID,
-		Provider:       ArtifactProviderGitHub,
+		Provider:       ProviderGitHub,
 		Scope:          art.Scope,
 		Action:         action,
 		Target:         art.Target,
@@ -581,7 +581,7 @@ func ArtifactAction(art *Artifact, actorUserID, action, from, to, credential str
 		Credential:     credential,
 	}
 	if act.EntityID == "" {
-		act.RepositoryID, _ = BranchArtifactRepositoryID(*art)
+		act.RepositoryID, _ = BranchDeliverableRepositoryID(*art)
 	}
 	return act
 }

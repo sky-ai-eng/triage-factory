@@ -3,11 +3,11 @@ import { render, screen, fireEvent, within, cleanup } from '@testing-library/rea
 import { MemoryRouter } from 'react-router'
 import RunStation, { type StationActions } from './RunStation'
 import type { Conversation } from '../../types'
-import { jsonBody } from '../../test/apiResponse'
+import { listBody } from '../../test/apiResponse'
 
 // The dock is the surface this suite is about: whether the composer input is
 // offered (and what stands in its place when it isn't), and how the approval
-// affordance routes over the unresolved artifact set.
+// affordance routes over the unresolved deliverable set.
 function station(over: Partial<Conversation>, actions: Partial<StationActions> = {}) {
   const conversation = {
     ID: 'r1',
@@ -16,7 +16,7 @@ function station(over: Partial<Conversation>, actions: Partial<StationActions> =
     Model: 'claude-opus-5',
     StartedAt: '2026-07-30T00:00:00Z',
     ResultSummary: '',
-    artifact_count: 0,
+    deliverable_count: 0,
     ...over,
   } as Conversation
   return render(
@@ -102,28 +102,28 @@ describe('RunStation dock approval affordance', () => {
   })
 
   it('routes a lone unresolved item straight to its editor — no list detour', () => {
-    const onOpenArtifact = vi.fn()
+    const onOpenDeliverable = vi.fn()
     station(
       {
         Status: 'running',
-        artifact_count: 1,
-        has_unresolved_artifacts: true,
+        deliverable_count: 1,
+        has_unresolved_deliverables: true,
         unresolved_pr_count: 1,
         unresolved_review_count: 0,
-        pending_artifact_ids: ['pr1'],
+        pending_deliverable_ids: ['pr1'],
       },
-      { onOpenArtifact },
+      { onOpenDeliverable },
     )
     fireEvent.click(screen.getByRole('button', { name: /open pr/i }))
-    expect(onOpenArtifact).toHaveBeenCalledWith('pr', 'pr1')
+    expect(onOpenDeliverable).toHaveBeenCalledWith('pr', 'pr1')
   })
 
-  it('raises the artifact-list popover for a mixed set and forwards a row pick', async () => {
+  it('raises the deliverable-list popover for a mixed set and forwards a row pick', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({
         ok: true,
-        ...jsonBody([
+        ...listBody([
           {
             id: 'pr1',
             kind: 'pull_request',
@@ -149,17 +149,17 @@ describe('RunStation dock approval affordance', () => {
         ]),
       }),
     )
-    const onOpenArtifact = vi.fn()
+    const onOpenDeliverable = vi.fn()
     station(
       {
         Status: 'running',
-        artifact_count: 2,
-        has_unresolved_artifacts: true,
+        deliverable_count: 2,
+        has_unresolved_deliverables: true,
         unresolved_pr_count: 1,
         unresolved_review_count: 1,
-        pending_artifact_ids: ['pr1', 'rv1'],
+        pending_deliverable_ids: ['pr1', 'rv1'],
       },
-      { onOpenArtifact },
+      { onOpenDeliverable },
     )
 
     fireEvent.click(screen.getByRole('button', { name: /review 2 items/i }))
@@ -168,7 +168,7 @@ describe('RunStation dock approval affordance', () => {
     // one too), so scope the row pick to the dialog.
     const dialog = await screen.findByRole('dialog')
     fireEvent.click(await within(dialog).findByRole('button', { name: /open pull request/i }))
-    expect(onOpenArtifact).toHaveBeenCalledWith('pr', 'pr1')
+    expect(onOpenDeliverable).toHaveBeenCalledWith('pr', 'pr1')
   })
 })
 

@@ -47,7 +47,7 @@ func NormalizeJiraKey(key string) string {
 	return strings.ToUpper(strings.TrimSpace(key))
 }
 
-// EntityRefForExternal maps an external write/artifact coordinate to the
+// EntityRefForExternal maps an external write/deliverable coordinate to the
 // entity it concerns, less the scope, which the caller resolves for the org
 // (entityscope.Of): Source is the entities.source column (== provider for the
 // mapped providers), SourceID is the natural key (== target, except for Jira,
@@ -60,7 +60,7 @@ func NormalizeJiraKey(key string) string {
 //
 // It is the single home of the (provider, target) → entity mapping shared by
 // the exec-funnel touch resolver (resolveTouchedEntityInfo) and the
-// conversation-end produced-artifact attach (memoryentities.Attach). GitHub
+// conversation-end produced-deliverable attach (memoryentities.Attach). GitHub
 // targets must parse as owner/repo#N; Jira targets are issue keys; Linear
 // targets are issue identifiers; Slack targets are a SlackSourceID
 // channel/root_ts.
@@ -80,14 +80,14 @@ func NormalizeJiraKey(key string) string {
 // give the poller an issue-aware enrichment path).
 func EntityRefForExternal(provider, target, externalID string) (ref EntityRef, kind string, ok bool) {
 	switch provider {
-	case ArtifactProviderGitHub:
+	case ProviderGitHub:
 		// owner/repo#N is a PR entity; a bare owner/repo is a repo-level
 		// action (a branch push's shape too) and maps to no entity.
 		if _, _, _, parsed := ParsePRTarget(target); !parsed {
 			return EntityRef{}, "", false
 		}
 		return EntityRef{Source: provider, SourceID: target, ExternalID: externalID}, "pr", true
-	case ArtifactProviderJira:
+	case ProviderJira:
 		// Normalized rather than passed through: this is the single seam
 		// every touched/produced Jira entity resolves through, so folding
 		// here is what makes a non-canonical source_id unrepresentable no
@@ -97,7 +97,7 @@ func EntityRefForExternal(provider, target, externalID string) (ref EntityRef, k
 			return EntityRef{}, "", false
 		}
 		return EntityRef{Source: provider, SourceID: key, ExternalID: externalID}, "issue", true
-	case ArtifactProviderLinear:
+	case ProviderLinear:
 		// The identifier is the key a person reads and the UUID is the
 		// identity; an identifier alone can name another issue once the one it
 		// named moved, so nothing is resolved without the UUID.
@@ -106,7 +106,7 @@ func EntityRefForExternal(provider, target, externalID string) (ref EntityRef, k
 			return EntityRef{}, "", false
 		}
 		return EntityRef{Source: provider, SourceID: identifier, ExternalID: externalID}, "issue", true
-	case ArtifactProviderSlack:
+	case ProviderSlack:
 		if target == "" {
 			return EntityRef{}, "", false
 		}
@@ -121,7 +121,7 @@ func EntityRefForExternal(provider, target, externalID string) (ref EntityRef, k
 // provider: a Jira issue's {site}/browse/{KEY}, the same link the poller
 // stamps. "" for every other source, whose callers supply the url they have.
 func EntityURL(source, scope, sourceID string) string {
-	if source == ArtifactProviderJira && scope != "" && sourceID != "" {
+	if source == ProviderJira && scope != "" && sourceID != "" {
 		return JiraIssueURL(scope, sourceID)
 	}
 	return ""

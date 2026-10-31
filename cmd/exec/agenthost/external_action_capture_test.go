@@ -21,13 +21,13 @@ import (
 )
 
 // The TFAC-483 capture tests prove the bot funnels append the right
-// external_actions audit row alongside the artifact upsert — the finer-grained
-// action discriminator the artifact's state can't carry, the org credential, the
+// external_actions audit row alongside the deliverable upsert — the finer-grained
+// action discriminator the deliverable's state can't carry, the org credential, the
 // conversation + actor attribution, and the branch hook+proxy dedup. The
 // LocalClient is the one seam the multi daemon dispatches through, so this
 // covers both modes.
 
-// newCaptureStores builds a real SQLite store bundle (Artifacts + ExternalActions
+// newCaptureStores builds a real SQLite store bundle (Deliverables + ExternalActions
 // + Tx live) with a seeded conversation, no Jira credential needed (the
 // branch path and the injected-error paths don't call out). eventTriggered
 // picks the write path:
@@ -83,7 +83,7 @@ func listExternalActions(t *testing.T, stores db.Stores) []domain.ExternalAction
 
 // TestCapture_JiraActions_RecordExternalActions pins that a Jira create and a
 // transition each append one external_actions row with the right action (finer
-// than the artifact's created/updated state), the org Jira credential, the
+// than the deliverable's created/updated state), the org Jira credential, the
 // conversation + actor attribution, and the transition's to_state — across
 // both write paths.
 func TestCapture_JiraActions_RecordExternalActions(t *testing.T) {
@@ -106,7 +106,7 @@ func TestCapture_JiraActions_RecordExternalActions(t *testing.T) {
 					t.Fatalf("want 1 action, got %d: %+v", len(acts), acts)
 				}
 				a := acts[0]
-				if a.Action != domain.ActionIssueCreated || a.Provider != domain.ArtifactProviderJira ||
+				if a.Action != domain.ActionIssueCreated || a.Provider != domain.ProviderJira ||
 					a.Credential != domain.CredentialJiraOrg || a.Target != "SKY-1" || a.ConversationID != info.ConversationID ||
 					a.TeamID != runmode.LocalDefaultTeamID {
 					t.Errorf("create action mismatch: %+v", a)
@@ -153,16 +153,16 @@ func TestCapture_BranchPush_RecordsActionAndDedupsTwin(t *testing.T) {
 			ctx := context.Background()
 			repoID := registerRepo(t, stores, "octo", "repo", "1")
 
-			branch, ok := domain.NewBranchArtifact("octo/repo", "refs/heads/feat", "abc123", true)
+			branch, ok := domain.NewBranchDeliverable("octo/repo", "refs/heads/feat", "abc123", true)
 			if !ok {
-				t.Fatal("NewBranchArtifact returned ok=false")
+				t.Fatal("NewBranchDeliverable returned ok=false")
 			}
 			// The hook fires, then the proxy backstop observes the same push.
-			if _, err := client.UpsertArtifact(ctx, branch); err != nil {
-				t.Fatalf("hook UpsertArtifact: %v", err)
+			if _, err := client.UpsertDeliverable(ctx, branch); err != nil {
+				t.Fatalf("hook UpsertDeliverable: %v", err)
 			}
-			if _, err := client.UpsertArtifact(ctx, branch); err != nil {
-				t.Fatalf("proxy UpsertArtifact (twin): %v", err)
+			if _, err := client.UpsertDeliverable(ctx, branch); err != nil {
+				t.Fatalf("proxy UpsertDeliverable (twin): %v", err)
 			}
 
 			acts := listExternalActions(t, stores)
@@ -170,7 +170,7 @@ func TestCapture_BranchPush_RecordsActionAndDedupsTwin(t *testing.T) {
 				t.Fatalf("branch twin did not collapse: want 1 action, got %d: %+v", len(acts), acts)
 			}
 			a := acts[0]
-			if a.Action != domain.ActionBranchPushed || a.Provider != domain.ArtifactProviderGitHub ||
+			if a.Action != domain.ActionBranchPushed || a.Provider != domain.ProviderGitHub ||
 				a.Credential != domain.CredentialGitHubApp || a.Target != "octo/repo" ||
 				a.ExternalID != "refs/heads/feat" {
 				t.Errorf("branch action mismatch: %+v", a)
@@ -182,17 +182,17 @@ func TestCapture_BranchPush_RecordsActionAndDedupsTwin(t *testing.T) {
 				t.Errorf("branch dedup_key = %q, want %q", a.DedupKey, want)
 			}
 			// A genuinely new push (new sha) is recorded distinctly.
-			next, _ := domain.NewBranchArtifact("octo/repo", "refs/heads/feat", "def456", false)
-			if _, err := client.UpsertArtifact(ctx, next); err != nil {
-				t.Fatalf("new-push UpsertArtifact: %v", err)
+			next, _ := domain.NewBranchDeliverable("octo/repo", "refs/heads/feat", "def456", false)
+			if _, err := client.UpsertDeliverable(ctx, next); err != nil {
+				t.Fatalf("new-push UpsertDeliverable: %v", err)
 			}
 			if got := len(listExternalActions(t, stores)); got != 2 {
 				t.Errorf("a new push (new sha) should append: want 2 actions, got %d", got)
 			}
 			registerRepo(t, stores, "octo", "other", "2")
-			other, _ := domain.NewBranchArtifact("octo/other", "refs/heads/feat", "abc123", true)
-			if _, err := client.UpsertArtifact(ctx, other); err != nil {
-				t.Fatalf("other-repository UpsertArtifact: %v", err)
+			other, _ := domain.NewBranchDeliverable("octo/other", "refs/heads/feat", "abc123", true)
+			if _, err := client.UpsertDeliverable(ctx, other); err != nil {
+				t.Fatalf("other-repository UpsertDeliverable: %v", err)
 			}
 			if got := len(listExternalActions(t, stores)); got != 3 {
 				t.Errorf("the same ref and sha in another repository should append: want 3 actions, got %d", got)
@@ -202,11 +202,11 @@ func TestCapture_BranchPush_RecordsActionAndDedupsTwin(t *testing.T) {
 }
 
 // TestCapture_BranchPush_AnchorsURLToOrgHost pins that the host-side sink
-// re-anchors a branch artifact's web link to the org's own GitHub host. The URL
+// re-anchors a branch deliverable's web link to the org's own GitHub host. The URL
 // is synthesized against github.com where the host can't be known (the sandbox
 // pre-push hook, the domain constructor), so without this an org on GHES/GHEC
-// would get a dead github.com "open branch" link. Both the artifact URL and the
-// branch-push audit action's deep link (built from the same artifact) are
+// would get a dead github.com "open branch" link. Both the deliverable URL and the
+// branch-push audit action's deep link (built from the same deliverable) are
 // corrected.
 func TestCapture_BranchPush_AnchorsURLToOrgHost(t *testing.T) {
 	stores, info := newCaptureStores(t, false)
@@ -214,18 +214,18 @@ func TestCapture_BranchPush_AnchorsURLToOrgHost(t *testing.T) {
 	client.SetGitHubResolver(fakeGitHubResolver{baseURL: "https://ghe.example.com", token: "org-pat"})
 	registerRepo(t, stores, "octo", "repo", "1")
 
-	branch, ok := domain.NewBranchArtifact("octo/repo", "refs/heads/feat/x", "abc123", true)
+	branch, ok := domain.NewBranchDeliverable("octo/repo", "refs/heads/feat/x", "abc123", true)
 	if !ok {
-		t.Fatal("NewBranchArtifact returned ok=false")
+		t.Fatal("NewBranchDeliverable returned ok=false")
 	}
 	// The constructor can't know the org host, so it builds no link...
 	if branch.URL != "" {
 		t.Fatalf("precondition: constructor URL = %q, want none", branch.URL)
 	}
 
-	stored, err := client.UpsertArtifact(context.Background(), branch)
+	stored, err := client.UpsertDeliverable(context.Background(), branch)
 	if err != nil {
-		t.Fatalf("UpsertArtifact: %v", err)
+		t.Fatalf("UpsertDeliverable: %v", err)
 	}
 	// ...and the sink sets it on the org's GHES host, segments preserved.
 	if stored.URL != "https://ghe.example.com/octo/repo/tree/feat/x" {
@@ -243,7 +243,7 @@ func TestCapture_BranchPush_AnchorsURLToOrgHost(t *testing.T) {
 
 // TestCapture_GithubReply_RecordsCommentAction pins that a review-thread reply
 // is captured as a comment_posted external action beside its own comment
-// artifact, with the in_reply_to context in detail_json.
+// deliverable, with the in_reply_to context in detail_json.
 func TestCapture_GithubReply_RecordsCommentAction(t *testing.T) {
 	for _, eventTriggered := range []bool{true, false} {
 		name := "manual"
@@ -261,10 +261,10 @@ func TestCapture_GithubReply_RecordsCommentAction(t *testing.T) {
 			if replyID != 777 {
 				t.Fatalf("reply id = %d, want 777", replyID)
 			}
-			// The reply's own comment artifact.
-			arts := listConversationArtifacts(t, stores, info.ConversationID)
-			if len(arts) != 1 || arts[0].DedupKey != domain.GitHubCommentDedupKey(domain.GitHubReviewComment, 777) {
-				t.Errorf("a review-thread reply should record its own comment artifact, got %+v", arts)
+			// The reply's own comment deliverable.
+			arts := listConversationDeliverables(t, stores, info.ConversationID)
+			if len(arts) != 1 || arts[0].DedupKey != domain.GitHubCommentKey(domain.GitHubReviewComment, 777) {
+				t.Errorf("a review-thread reply should record its own comment deliverable, got %+v", arts)
 			}
 			// And exactly one external action beside it.
 			acts := listExternalActions(t, stores)
@@ -272,7 +272,7 @@ func TestCapture_GithubReply_RecordsCommentAction(t *testing.T) {
 				t.Fatalf("want 1 action, got %d: %+v", len(acts), acts)
 			}
 			a := acts[0]
-			if a.Action != domain.ActionCommentPosted || a.Provider != domain.ArtifactProviderGitHub ||
+			if a.Action != domain.ActionCommentPosted || a.Provider != domain.ProviderGitHub ||
 				a.Credential != domain.CredentialGitHubApp || a.Target != "octo/repo#1" ||
 				a.ExternalID != "777" || a.ConversationID != info.ConversationID {
 				t.Errorf("reply action mismatch: %+v", a)
@@ -288,21 +288,21 @@ func TestCapture_GithubReply_RecordsCommentAction(t *testing.T) {
 	}
 }
 
-// TestCapture_GithubReaction_RecordsArtifactlessAction pins that reacting to a
-// comment leaves a row. Like its reply sibling above it produces no artifact —
+// TestCapture_GithubReaction_RecordsDeliverablelessAction pins that reacting to a
+// comment leaves a row. Like its reply sibling above it produces no deliverable —
 // an emoji is not an object with a lifecycle — so the audit log is the only
 // place the act can appear, and the verb wrote nothing at all until now while
 // the same reaction arriving as a raw REST call was recorded and the Slack
 // equivalent had been recorded all along.
-func TestCapture_GithubReaction_RecordsArtifactlessAction(t *testing.T) {
+func TestCapture_GithubReaction_RecordsDeliverablelessAction(t *testing.T) {
 	gh := startFakeGitHubComments(t)
 	stores, info, client := newGithubRecordingClient(t, gh.URL, false)
 
 	if err := client.GithubReactToComment(context.Background(), "octo", "repo", 555, "+1"); err != nil {
 		t.Fatalf("GithubReactToComment: %v", err)
 	}
-	if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 0 {
-		t.Errorf("a reaction should produce no artifact, got %+v", arts)
+	if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 0 {
+		t.Errorf("a reaction should produce no deliverable, got %+v", arts)
 	}
 	acts := listExternalActions(t, stores)
 	if len(acts) != 1 {
@@ -312,7 +312,7 @@ func TestCapture_GithubReaction_RecordsArtifactlessAction(t *testing.T) {
 	// Target and ExternalID are what the same reaction records when it arrives
 	// through the raw gh channel (internal/ghwrite classifies the reactions path
 	// to owner/repo + the comment id), so one act reads one way either way.
-	if a.Action != domain.ActionReactionAdded || a.Provider != domain.ArtifactProviderGitHub ||
+	if a.Action != domain.ActionReactionAdded || a.Provider != domain.ProviderGitHub ||
 		a.Credential != domain.CredentialGitHubApp || a.Target != "octo/repo" ||
 		a.ExternalID != "555" || a.ConversationID != info.ConversationID {
 		t.Errorf("reaction action mismatch: %+v", a)
@@ -325,7 +325,7 @@ func TestCapture_GithubReaction_RecordsArtifactlessAction(t *testing.T) {
 // TestCapture_GithubReviewCommentEditDelete_RecordsReviewCommentAction pins
 // that editing/deleting a PUBLISHED review comment via the pulls/comments
 // fallback is captured as a review_comment_edited / review_comment_deleted
-// action. The run did not post the comment, so neither leaves an artifact.
+// action. The run did not post the comment, so neither leaves a deliverable.
 // (Pending-draft churn edits human-side via the server staging path and is
 // unrecorded, so reaching this branch is published-by-construction.)
 func TestCapture_GithubReviewCommentEditDelete_RecordsReviewCommentAction(t *testing.T) {
@@ -371,15 +371,15 @@ func TestCapture_GithubReviewCommentEditDelete_RecordsReviewCommentAction(t *tes
 				if err := client.GithubUpdateComment(context.Background(), "octo", "repo", 999, "edit a review comment"); err != nil {
 					t.Fatalf("GithubUpdateComment: %v", err)
 				}
-				if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 0 {
-					t.Errorf("an edit of a comment the run did not post left artifacts %+v, want none", arts)
+				if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 0 {
+					t.Errorf("an edit of a comment the run did not post left deliverables %+v, want none", arts)
 				}
 				acts := listExternalActions(t, stores)
 				if len(acts) != 1 {
 					t.Fatalf("want 1 action, got %d: %+v", len(acts), acts)
 				}
 				a := acts[0]
-				if a.Action != domain.ActionReviewCommentEdited || a.Provider != domain.ArtifactProviderGitHub ||
+				if a.Action != domain.ActionReviewCommentEdited || a.Provider != domain.ProviderGitHub ||
 					a.Credential != domain.CredentialGitHubApp || a.Target != "octo/repo" ||
 					a.ExternalID != "999" || a.URL != "" || a.ConversationID != info.ConversationID {
 					t.Errorf("review-comment edit action mismatch: %+v", a)
@@ -399,15 +399,15 @@ func TestCapture_GithubReviewCommentEditDelete_RecordsReviewCommentAction(t *tes
 				if err := client.GithubDeleteComment(context.Background(), "octo", "repo", 999); err != nil {
 					t.Fatalf("GithubDeleteComment: %v", err)
 				}
-				if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 0 {
-					t.Errorf("a delete of a comment the run did not post left artifacts %+v, want none", arts)
+				if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 0 {
+					t.Errorf("a delete of a comment the run did not post left deliverables %+v, want none", arts)
 				}
 				acts := listExternalActions(t, stores)
 				if len(acts) != 1 {
 					t.Fatalf("want 1 action, got %d: %+v", len(acts), acts)
 				}
 				a := acts[0]
-				if a.Action != domain.ActionReviewCommentDeleted || a.Provider != domain.ArtifactProviderGitHub ||
+				if a.Action != domain.ActionReviewCommentDeleted || a.Provider != domain.ProviderGitHub ||
 					a.Credential != domain.CredentialGitHubApp || a.Target != "octo/repo" ||
 					a.ExternalID != "999" || a.URL != "" || a.ConversationID != info.ConversationID {
 					t.Errorf("review-comment delete action mismatch: %+v", a)
@@ -434,7 +434,7 @@ func TestCapture_GithubStandaloneCommentEditDelete_StillRecordsCommentAction(t *
 		if len(acts) != 1 {
 			t.Fatalf("want 1 action, got %d: %+v", len(acts), acts)
 		}
-		if a := acts[0]; a.Action != domain.ActionCommentEdited || a.Provider != domain.ArtifactProviderGitHub {
+		if a := acts[0]; a.Action != domain.ActionCommentEdited || a.Provider != domain.ProviderGitHub {
 			t.Errorf("standalone edit action mismatch: %+v", a)
 		}
 	})
@@ -450,7 +450,7 @@ func TestCapture_GithubStandaloneCommentEditDelete_StillRecordsCommentAction(t *
 		if len(acts) != 1 {
 			t.Fatalf("want 1 action, got %d: %+v", len(acts), acts)
 		}
-		if a := acts[0]; a.Action != domain.ActionCommentDeleted || a.Provider != domain.ArtifactProviderGitHub {
+		if a := acts[0]; a.Action != domain.ActionCommentDeleted || a.Provider != domain.ProviderGitHub {
 			t.Errorf("standalone delete action mismatch: %+v", a)
 		}
 	})
@@ -458,7 +458,7 @@ func TestCapture_GithubStandaloneCommentEditDelete_StillRecordsCommentAction(t *
 
 // TestCapture_EventPath_RecordFailure_DoesNotFailAction pins the event-path
 // best-effort contract: a forced RecordSystem failure is swallowed (the action
-// row is absent) while the artifact still lands and the call returns success —
+// row is absent) while the deliverable still lands and the call returns success —
 // the external write already took effect, so recording must never fail it.
 func TestCapture_EventPath_RecordFailure_DoesNotFailAction(t *testing.T) {
 	jira := startFakeJira(t)
@@ -469,9 +469,9 @@ func TestCapture_EventPath_RecordFailure_DoesNotFailAction(t *testing.T) {
 	if err := client.JiraTransitionTo(context.Background(), "SKY-9", "Done"); err != nil {
 		t.Fatalf("transition must not fail when action recording fails: %v", err)
 	}
-	// The artifact (the separate admin write) still committed.
-	if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 1 {
-		t.Errorf("artifact should persist despite the action-record failure, got %d", len(arts))
+	// The deliverable (the separate admin write) still committed.
+	if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 1 {
+		t.Errorf("deliverable should persist despite the action-record failure, got %d", len(arts))
 	}
 }
 
@@ -541,7 +541,7 @@ func TestCapture_EgressDenied_RecordsOneRowPerConversationAndHost(t *testing.T) 
 			gh = a
 		}
 	}
-	if gh.Action != domain.ActionEgressDenied || gh.Provider != domain.ArtifactProviderNetwork ||
+	if gh.Action != domain.ActionEgressDenied || gh.Provider != domain.ProviderNetwork ||
 		gh.Credential != domain.CredentialNone {
 		t.Errorf("egress row mismatch: %+v", gh)
 	}
@@ -559,7 +559,7 @@ func TestCapture_EgressDenied_RecordsOneRowPerConversationAndHost(t *testing.T) 
 // TestCapture_GHChannelWrite_RecordsEveryAttempt pins the gh-channel write
 // audit: each mutating REST call is its own row (no dedup — a retried edit and a
 // refused one are distinct events), and a non-2xx is recorded exactly like a
-// success. The refused write is the whole point: the artifact path drops it, so
+// success. The refused write is the whole point: the deliverable path drops it, so
 // without this row an off-scope write leaves no trace at all.
 func TestCapture_GHChannelWrite_RecordsEveryAttempt(t *testing.T) {
 	stores, info := newCaptureStores(t, true)
@@ -579,7 +579,7 @@ func TestCapture_GHChannelWrite_RecordsEveryAttempt(t *testing.T) {
 	}
 	var refused domain.ExternalAction
 	for _, a := range acts {
-		if a.Provider != domain.ArtifactProviderGitHub || a.Credential != domain.CredentialGitHubApp {
+		if a.Provider != domain.ProviderGitHub || a.Credential != domain.CredentialGitHubApp {
 			t.Errorf("gh channel row mismatch: %+v", a)
 		}
 		if a.ConversationID != info.ConversationID {
@@ -1028,9 +1028,9 @@ func TestCapture_GraphQLOverCapStillLandsAnAttributedRow(t *testing.T) {
 	}
 }
 
-// TestCapture_GithubReviewDismiss_RecordsArtifactlessAction covers the last
+// TestCapture_GithubReviewDismiss_RecordsDeliverablelessAction covers the last
 // exec-gh verb that reached GitHub under the org credential and left nothing
-// behind — neither an artifact (correctly: the act produces no object this
+// behind — neither a deliverable (correctly: the act produces no object this
 // conversation owns) nor an audit row (not correctly: the log of record is
 // supposed to have no fourth state where a write simply happened invisibly).
 //
@@ -1038,7 +1038,7 @@ func TestCapture_GraphQLOverCapStillLandsAnAttributedRow(t *testing.T) {
 // state flip, not an org-credential write". That is true of abandoning a
 // TF-staged draft and false of this verb, which PUTs to GitHub's dismissals
 // endpoint and can clear the standing of a review a person left.
-func TestCapture_GithubReviewDismiss_RecordsArtifactlessAction(t *testing.T) {
+func TestCapture_GithubReviewDismiss_RecordsDeliverablelessAction(t *testing.T) {
 	gh := startFakeGitHubComments(t)
 	stores, info, client := newGithubRecordingClient(t, gh.URL, true)
 
@@ -1046,8 +1046,8 @@ func TestCapture_GithubReviewDismiss_RecordsArtifactlessAction(t *testing.T) {
 		t.Fatalf("GithubDismissReview: %v", err)
 	}
 
-	if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 0 {
-		t.Errorf("dismissing someone else's review should produce no artifact, got %+v", arts)
+	if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 0 {
+		t.Errorf("dismissing someone else's review should produce no deliverable, got %+v", arts)
 	}
 	acts := listExternalActions(t, stores)
 	if len(acts) != 1 {

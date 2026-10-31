@@ -15,7 +15,7 @@ import (
 
 // startFakeGitHubPRCreate stands a minimal GitHub REST backend for the pulls
 // create verb: POST /repos/{o}/{r}/pulls → {number, html_url, node_id}. The PR
-// path records a `pull_request` artifact at the LocalClient seam on success, so
+// path records a `pull_request` deliverable at the LocalClient seam on success, so
 // this proves the recording for both the sandbox (daemon) and local-mode CLI in
 // one place. The returned pointer receives the body of the last create request
 // as GitHub saw it.
@@ -39,11 +39,11 @@ func startFakeGitHubPRCreate(t *testing.T) (*httptest.Server, *string) {
 	return srv, &sentBody
 }
 
-// TestLocalClient_GithubCreatePR_RecordsArtifact pins that opening a draft PR
-// lands one `pull_request` artifact carrying the draft state, the PR number,
+// TestLocalClient_GithubCreatePR_RecordsDeliverable pins that opening a draft PR
+// lands one `pull_request` deliverable carrying the draft state, the PR number,
 // node_id, and the proposed snapshot (the agent's title/body), deduped on
 // github:pull_request:owner/repo#<number> — across both write paths.
-func TestLocalClient_GithubCreatePR_RecordsArtifact(t *testing.T) {
+func TestLocalClient_GithubCreatePR_RecordsDeliverable(t *testing.T) {
 	for _, eventTriggered := range []bool{true, false} {
 		name := "manual"
 		if eventTriggered {
@@ -64,24 +64,24 @@ func TestLocalClient_GithubCreatePR_RecordsArtifact(t *testing.T) {
 				t.Fatalf("create result mismatch: number=%d url=%q node=%q", number, htmlURL, nodeID)
 			}
 
-			arts := listConversationArtifacts(t, stores, info.ConversationID)
+			arts := listConversationDeliverables(t, stores, info.ConversationID)
 			if len(arts) != 1 {
-				t.Fatalf("want 1 artifact, got %d: %+v", len(arts), arts)
+				t.Fatalf("want 1 deliverable, got %d: %+v", len(arts), arts)
 			}
 			a := arts[0]
-			if a.Provider != domain.ArtifactProviderGitHub || a.Kind != domain.ArtifactKindPullRequest ||
+			if a.Provider != domain.ProviderGitHub || a.Kind != domain.DeliverableKindPullRequest ||
 				a.Target != "octo/repo#42" || a.ExternalID != "42" ||
 				a.URL != "https://github.com/octo/repo/pull/42" ||
-				a.State != domain.ArtifactStatePRDraft || a.DedupKey != domain.PullRequestDedupKey("PR_kwDOABCD") {
-				t.Errorf("PR artifact mismatch: %+v", a)
+				a.State != domain.DeliverableStatePRDraft || a.DedupKey != domain.PullRequestDedupKey("PR_kwDOABCD") {
+				t.Errorf("PR deliverable mismatch: %+v", a)
 			}
 			if a.ConversationID != info.ConversationID || a.TeamID != runmode.LocalDefaultTeamID {
 				t.Errorf("attribution mismatch: run=%q team=%q", a.ConversationID, a.TeamID)
 			}
 
-			d, derr := domain.ParsePRArtifactDetails(a.DetailsJSON)
+			d, derr := domain.ParsePRDeliverableDetails(a.DetailsJSON)
 			if derr != nil {
-				t.Fatalf("ParsePRArtifactDetails: %v", derr)
+				t.Fatalf("ParsePRDeliverableDetails: %v", derr)
 			}
 			if d.NodeID != "PR_kwDOABCD" || d.HeadBranch != "feature/x" || d.Base != "main" {
 				t.Errorf("details coords mismatch: %+v", d)
@@ -96,10 +96,10 @@ func TestLocalClient_GithubCreatePR_RecordsArtifact(t *testing.T) {
 				t.Errorf("snapshot should start equal to proposed: %+v vs %+v", d.Snapshot, d.Proposed)
 			}
 
-			// The node id is also on the artifact's column and the pr_created
+			// The node id is also on the deliverable's column and the pr_created
 			// row: the reconciler's backstop matches the two by it.
 			if a.NodeID != "PR_kwDOABCD" {
-				t.Errorf("artifact node_id = %q, want PR_kwDOABCD", a.NodeID)
+				t.Errorf("deliverable node_id = %q, want PR_kwDOABCD", a.NodeID)
 			}
 			acts := listExternalActions(t, stores)
 			if len(acts) != 1 {
@@ -113,11 +113,11 @@ func TestLocalClient_GithubCreatePR_RecordsArtifact(t *testing.T) {
 	}
 }
 
-// TestLocalClient_GithubCreatePR_FailedArtifactRowCarriesNodeID pins that when
-// the artifact write fails, the pr_created row that lands alone still carries
+// TestLocalClient_GithubCreatePR_FailedDeliverableRowCarriesNodeID pins that when
+// the deliverable write fails, the pr_created row that lands alone still carries
 // the PR's node id. That row is all the reconciler's backstop has to find the
 // PR by, on both trigger types.
-func TestLocalClient_GithubCreatePR_FailedArtifactRowCarriesNodeID(t *testing.T) {
+func TestLocalClient_GithubCreatePR_FailedDeliverableRowCarriesNodeID(t *testing.T) {
 	for _, eventTriggered := range []bool{true, false} {
 		name := "manual"
 		if eventTriggered {
@@ -126,7 +126,7 @@ func TestLocalClient_GithubCreatePR_FailedArtifactRowCarriesNodeID(t *testing.T)
 		t.Run(name, func(t *testing.T) {
 			gh, _ := startFakeGitHubPRCreate(t)
 			conn, stores, info, client := newGithubRecordingClientConn(t, gh.URL, eventTriggered)
-			refuseArtifactWrites(t, conn)
+			refuseDeliverableWrites(t, conn)
 
 			if _, _, _, err := client.GithubCreatePR(
 				context.Background(), "octo", "repo", "feature/x", "main", "t", "b", true,
@@ -134,8 +134,8 @@ func TestLocalClient_GithubCreatePR_FailedArtifactRowCarriesNodeID(t *testing.T)
 				t.Fatalf("GithubCreatePR: %v", err)
 			}
 
-			if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 0 {
-				t.Fatalf("artifacts = %+v, want none: the write was refused", arts)
+			if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 0 {
+				t.Fatalf("deliverables = %+v, want none: the write was refused", arts)
 			}
 			acts := listExternalActions(t, stores)
 			if len(acts) != 1 || acts[0].Action != domain.ActionPRCreated || acts[0].NodeID != "PR_kwDOABCD" {
@@ -146,13 +146,13 @@ func TestLocalClient_GithubCreatePR_FailedArtifactRowCarriesNodeID(t *testing.T)
 }
 
 // TestLocalClient_GithubCreatePR_RecordingFailure_DoesNotFailAction pins the
-// best-effort contract: an artifacts write that errors is swallowed (logged) and
+// best-effort contract: a deliverables write that errors is swallowed (logged) and
 // the PR create — already applied on GitHub — still returns success.
 func TestLocalClient_GithubCreatePR_RecordingFailure_DoesNotFailAction(t *testing.T) {
 	gh, _ := startFakeGitHubPRCreate(t)
 	_, _, client := newGithubRecordingClient(t, gh.URL, true)
-	rec := &erroringArtifacts{}
-	client.stores.Artifacts = rec
+	rec := &erroringDeliverables{}
+	client.stores.Deliverables = rec
 	// The runtime is derived from stores at construction, so a post-construction
 	// swap of the recorder must rebuild it (the DB effects route through c.rt).
 	client.rt = newDirectRuntime(client.stores, client.info)

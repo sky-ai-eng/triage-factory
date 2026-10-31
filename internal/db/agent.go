@@ -257,8 +257,8 @@ type ConversationListFilter struct {
 
 	// Attention keeps only the conversations waiting on a human: one holding
 	// an unanswered permission prompt, or one that is not live and still
-	// holds an unresolved artifact (a draft PR / a finalized pending review —
-	// domain.HasUnresolvedArtifacts). False narrows nothing, the same shape
+	// holds an unresolved deliverable (a draft PR / a finalized pending review —
+	// domain.HasUnresolvedDeliverables). False narrows nothing, the same shape
 	// TaskListFilter.OnlyUnclaimed has.
 	//
 	// Derived, never stored: it is the product's "YOUR MOVE" counted per
@@ -479,7 +479,7 @@ type ConversationStore interface {
 	// one PR event. Relevance is entity-, review-, or checkout-level; EventID
 	// excludes a conversation whose same-task additive path already recorded
 	// the event as injected. A pending review matches when its draft is about
-	// the PR entity (artifacts.entity_id), whatever name the draft's target
+	// the PR entity (deliverables.entity_id), whatever name the draft's target
 	// spells. A checkout matches when its ledger row references the base
 	// repository's registry row with the PR's ref, or the base's or head's
 	// row with the head branch's ref. Matching by row id is what keeps the
@@ -576,7 +576,7 @@ type ConversationStore interface {
 	HasLiveConversationForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error)
 
 	// ListForTaskSystem mirrors ListForTask on the admin pool, with org_id
-	// bound by argument. The artifact reconciler's task closure consumes it —
+	// bound by argument. The deliverable reconciler's task closure consumes it —
 	// a pull request resolved on GitHub has no requesting user to open a
 	// claims transaction as.
 	ListForTaskSystem(ctx context.Context, orgID, taskID string) ([]domain.Conversation, error)
@@ -633,7 +633,7 @@ type ConversationStore interface {
 	// "injection:compaction-result", "injection:memory",
 	// "injection:task-context" and "stop-note" — plus two values owned where
 	// they are written, the staged-injection stores' "injection:system-note"
-	// and the artifact feedback row's "system_note".
+	// and the deliverable feedback row's "system_note".
 	//
 	// InsertMessage/InsertMessageSystem/Messages/MessagesForConversations below serve
 	// today's readers (the SDK runtime's live stream, the UI transcript
@@ -1327,7 +1327,7 @@ type ConversationStore interface {
 
 	// LastAgentActivityAtSystem returns the created_at of the conversation's most
 	// recent non-user messages row (role <> 'user') — the "agent last
-	// ran" watermark the artifact-change feedback ledger derives
+	// ran" watermark the deliverable-change feedback ledger derives
 	// against. ok=false (zero time) when the conversation has no agent messages
 	// yet, so the caller falls back to the conversation's start. User messages
 	// are excluded so a just-recorded resume message can't poison the

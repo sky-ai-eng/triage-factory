@@ -28,7 +28,7 @@ const (
 // that the empty optional columns (org/user/session/ip/ua/detail — a pre-auth
 // failure) land as SQL NULL. TFAC-76.
 func TestAuthEventStore_SQLite_RoundTripAndNulls(t *testing.T) {
-	conn := newSQLiteForArtifactTest(t)
+	conn := newSQLiteForDeliverableTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 
@@ -86,7 +86,7 @@ func TestAuthEventStore_SQLite_RoundTripAndNulls(t *testing.T) {
 // that ListByUserSystem scopes to the requested user (excluding NULL-user rows).
 // TFAC-76.
 func TestAuthEventStore_SQLite_ListScoping(t *testing.T) {
-	conn := newSQLiteForArtifactTest(t)
+	conn := newSQLiteForDeliverableTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 
@@ -135,7 +135,7 @@ func TestAuthEventStore_SQLite_ListScoping(t *testing.T) {
 // same logical content produce two distinct rows (server-generated uuid ids) —
 // the audit log never collapses repeated authentication outcomes. TFAC-76.
 func TestAuthEventStore_SQLite_AppendOnly(t *testing.T) {
-	conn := newSQLiteForArtifactTest(t)
+	conn := newSQLiteForDeliverableTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 
@@ -162,7 +162,7 @@ func TestAuthEventStore_SQLite_AppendOnly(t *testing.T) {
 // reached, a returning claimant is always admitted, and the period is an
 // independent bucket.
 func TestAuthEventStore_SQLite_SeatClaims(t *testing.T) {
-	conn := newSQLiteForArtifactTest(t)
+	conn := newSQLiteForDeliverableTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 	authUserC := "66666666-6666-6666-6666-666666666666"
@@ -208,7 +208,7 @@ func TestAuthEventStore_SQLite_SeatClaims(t *testing.T) {
 // paging — over a _time_format=sqlite conn so a bound Since/Until compares
 // against created_at correctly. TFAC-76.
 func TestAuthEventStore_SQLite_FiltersAndPaging(t *testing.T) {
-	conn := newSQLiteForArtifactTestTimed(t)
+	conn := newSQLiteForDeliverableTestTimed(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 

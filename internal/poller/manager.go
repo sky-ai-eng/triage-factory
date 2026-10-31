@@ -46,7 +46,7 @@ type Manager struct {
 	eventQueue   db.EventQueueStore
 	users        db.UsersStore            // source of the local user's host-scoped GitHub identity
 	repos        db.RepositoryStore       // configured-repo names for GitHub poller startup
-	artifacts    db.ArtifactStore         // the comments TF posted, which the tracker emits no commented event for
+	deliverables db.DeliverableStore      // the comments TF posted, which the tracker emits no commented event for
 	orgs         db.OrgsStore             // enumerate active orgs at each poll tick + per-org settings (GitHub/Jira base URLs, poll intervals)
 	jiraRules    db.JiraStatusRulesStore  // per-team Jira project rules; discovery polls the org-wide union (every team's rules)
 	jiraProjects db.JiraProjectStore      // the Jira project registry the rules reference; refreshed from Jira before each cycle's discovery
@@ -190,7 +190,7 @@ type Manager struct {
 	lastLinearSuccess map[string]time.Time
 }
 
-func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepositoryStore, artifacts db.ArtifactStore, eventQueue db.EventQueueStore, orgs db.OrgsStore, jiraRules db.JiraStatusRulesStore, jiraProjects db.JiraProjectStore, linearRules db.LinearTeamRulesStore, githubGroups db.TeamGitHubGroupsStore, secrets db.SecretStore, apps db.GitHubAppsStore, connections db.PollReadinessStore, resolver ghclient.Resolver, linearResolver linear.Resolver) *Manager {
+func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepositoryStore, deliverables db.DeliverableStore, eventQueue db.EventQueueStore, orgs db.OrgsStore, jiraRules db.JiraStatusRulesStore, jiraProjects db.JiraProjectStore, linearRules db.LinearTeamRulesStore, githubGroups db.TeamGitHubGroupsStore, secrets db.SecretStore, apps db.GitHubAppsStore, connections db.PollReadinessStore, resolver ghclient.Resolver, linearResolver linear.Resolver) *Manager {
 	return &Manager{
 		database:       database,
 		pub:            pub,
@@ -199,7 +199,7 @@ func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, ta
 		eventQueue:     eventQueue,
 		users:          users,
 		repos:          repos,
-		artifacts:      artifacts,
+		deliverables:   deliverables,
 		orgs:           orgs,
 		jiraRules:      jiraRules,
 		jiraProjects:   jiraProjects,
@@ -220,7 +220,7 @@ func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, ta
 // (struct of method holders + store references) so per-cycle
 // allocation is fine.
 func (m *Manager) trackerForOrg(orgID string) *tracker.Tracker {
-	return tracker.New(m.database, m.pub, m.tasks, m.entities, m.repos, m.jiraProjects, m.artifacts, m.eventQueue, orgID).
+	return tracker.New(m.database, m.pub, m.tasks, m.entities, m.repos, m.jiraProjects, m.deliverables, m.eventQueue, orgID).
 		WithJiraDiscoveryStreaks(&m.jiraDiscovery)
 }
 

@@ -366,7 +366,7 @@ func Declared(kind string) bool {
 //
 // GitHub is not, and that is a product fact rather than a caution: repositories,
 // pull requests, the git channel a delegated run pushes through, and every
-// artifact a run produces are GitHub. An org with GitHub turned off is an org
+// deliverable a run produces are GitHub. An org with GitHub turned off is an org
 // where nothing works, so the switch would only ever be a way to break a
 // deployment silently — an admin who wants that outcome is looking for uninstall.
 //

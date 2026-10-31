@@ -25,7 +25,7 @@ import (
 //   - admin: SpendByCategorySystem. The org-wide aggregate a claims-less system
 //     caller needs — the TFAC-477 safety cap reads it from a Spawner.Delegate
 //     goroutine with no tf.current_org_id(), where an app-pool read would see
-//     nothing. Mirrors the app/admin split on artifactStore (ListByConversation /
+//     nothing. Mirrors the app/admin split on deliverableStore (ListByConversation /
 //     ListByConversationSystem).
 //
 // org_id stays in every WHERE as defense in depth alongside RLS on both pools.

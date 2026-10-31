@@ -363,7 +363,7 @@ func TestRuntime_EgressDenialRelaysToOrchestrator(t *testing.T) {
 // TestRuntime_GHInjectorRelaysWriteAudit pins the gh channel's second audit
 // half: a mutating REST call through the injector relays a record_gh_write
 // carrying method, path, and the upstream's status — including a non-2xx, which
-// the artifact observation path drops entirely — plus, for a shape whose
+// the deliverable observation path drops entirely — plus, for a shape whose
 // response names a created object, that object's id and link. This process is
 // the only one that ever sees a response body, so what it declines to carry is
 // unrecoverable downstream.

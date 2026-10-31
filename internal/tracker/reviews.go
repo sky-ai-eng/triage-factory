@@ -27,8 +27,8 @@ type NewReview struct {
 	Paths []string
 	// ByTF is set when TF submitted the review, or when the review is a reply
 	// TF posted in a review thread: a COMMENTED review each of whose comments
-	// TF recorded as a `comment` artifact. A submitted review's artifact
-	// carries the review's id once it is posted, and a reply's artifact is
+	// TF recorded as a `comment` deliverable. A submitted review's deliverable
+	// carries the review's id once it is posted, and a reply's deliverable is
 	// keyed on the comment's id, so both are matched on ids rather than on the
 	// author, who under a personal credential is the person who owns it.
 	ByTF bool
@@ -42,7 +42,7 @@ type NewReview struct {
 type NewReviewComment struct {
 	ID       int64
 	Mentions []string
-	// ByTF is set when TF recorded the comment as a `comment` artifact. A
+	// ByTF is set when TF recorded the comment as a `comment` deliverable. A
 	// reply TF posted while the credential's owner had a review pending joins
 	// that review, so it can be TF's in a review that is not.
 	ByTF bool
@@ -171,21 +171,21 @@ func (t *Tracker) markTFReviews(ctx context.Context, scope string, read []ghclie
 	for i, r := range read {
 		ids[i] = strconv.FormatInt(r.ID, 10)
 		for _, c := range r.Comments {
-			commentKeys = append(commentKeys, domain.GitHubCommentDedupKey(domain.GitHubReviewComment, c.ID))
+			commentKeys = append(commentKeys, domain.GitHubCommentKey(domain.GitHubReviewComment, c.ID))
 		}
 	}
-	submitted, err := t.artifacts.PresentExternalIDsSystem(ctx, t.orgID, scope, domain.ArtifactProviderGitHub, domain.ArtifactKindReview, ids)
+	submitted, err := t.deliverables.PresentExternalIDsSystem(ctx, t.orgID, scope, domain.ProviderGitHub, domain.DeliverableKindReview, ids)
 	if err != nil {
 		return err
 	}
-	posted, err := t.artifacts.PresentDedupKeysSystem(ctx, t.orgID, scope, commentKeys)
+	posted, err := t.deliverables.PresentDedupKeysSystem(ctx, t.orgID, scope, commentKeys)
 	if err != nil {
 		return err
 	}
 	for i, r := range read {
 		fresh[i].ByTF = submitted[ids[i]] || isTFReply(r, posted)
 		for j, c := range r.Comments {
-			fresh[i].Comments[j].ByTF = posted[domain.GitHubCommentDedupKey(domain.GitHubReviewComment, c.ID)]
+			fresh[i].Comments[j].ByTF = posted[domain.GitHubCommentKey(domain.GitHubReviewComment, c.ID)]
 		}
 	}
 	return nil
@@ -199,7 +199,7 @@ func isTFReply(r ghclient.PRReview, posted map[string]bool) bool {
 		return false
 	}
 	for _, c := range r.Comments {
-		if !posted[domain.GitHubCommentDedupKey(domain.GitHubReviewComment, c.ID)] {
+		if !posted[domain.GitHubCommentKey(domain.GitHubReviewComment, c.ID)] {
 			return false
 		}
 	}

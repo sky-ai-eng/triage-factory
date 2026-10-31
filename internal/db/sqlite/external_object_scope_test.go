@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
@@ -12,7 +13,7 @@ import (
 )
 
 // TestExternalObjectScope_SQLite runs the shared scope conformance suite for
-// artifacts and the audit ledger against the SQLite backend, a fresh in-memory
+// deliverables and the audit ledger against the SQLite backend, a fresh in-memory
 // DB per subtest.
 func TestExternalObjectScope_SQLite(t *testing.T) {
 	dbtest.RunExternalObjectScopeConformance(t, func(t *testing.T) (db.Stores, string, string) {
@@ -21,21 +22,38 @@ func TestExternalObjectScope_SQLite(t *testing.T) {
 	})
 }
 
-// TestCommentArtifacts_SQLite runs the shared comment-artifact conformance
+// TestCommentDeliverables_SQLite runs the shared comment-deliverable conformance
 // suite against the SQLite backend, a fresh in-memory DB per subtest.
-func TestCommentArtifacts_SQLite(t *testing.T) {
-	dbtest.RunCommentArtifactConformance(t, func(t *testing.T) (db.Stores, string, string) {
+func TestCommentDeliverables_SQLite(t *testing.T) {
+	dbtest.RunCommentDeliverableConformance(t, func(t *testing.T) (db.Stores, string, string) {
 		t.Helper()
 		return sqlitestore.New(openSQLiteForTest(t)), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
 	})
 }
 
-// TestArtifactUpsert_SQLite runs the shared artifact upsert conformance suite
+// TestDeliverableUpsert_SQLite runs the shared deliverable upsert conformance suite
 // against the SQLite backend, a fresh in-memory DB per subtest.
-func TestArtifactUpsert_SQLite(t *testing.T) {
-	dbtest.RunArtifactUpsertConformance(t, func(t *testing.T) (db.Stores, string, string) {
+func TestDeliverableUpsert_SQLite(t *testing.T) {
+	dbtest.RunDeliverableUpsertConformance(t, func(t *testing.T) (db.Stores, string, string) {
 		t.Helper()
 		return sqlitestore.New(openSQLiteForTest(t)), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
+	})
+}
+
+// TestDeliverableConversationList_SQLite runs the shared conversation-scoped
+// deliverable list conformance suite against the SQLite backend.
+func TestDeliverableConversationList_SQLite(t *testing.T) {
+	dbtest.RunDeliverableConversationListConformance(t, func(t *testing.T) dbtest.DeliverableListFixture {
+		t.Helper()
+		conn := openSQLiteForTest(t)
+		return dbtest.DeliverableListFixture{
+			Stores: sqlitestore.New(conn),
+			OrgID:  runmode.LocalDefaultOrgID,
+			TeamID: runmode.LocalDefaultTeamID,
+			NewConversation: func(t *testing.T) string {
+				return seedDeliverableConversationWithID(t, conn, uuid.NewString())
+			},
+		}
 	})
 }
 
@@ -61,7 +79,7 @@ func sqliteExternalActionFixture(t *testing.T) dbtest.ExternalActionNodeIDFixtur
 		Stores:         sqlitestore.New(conn),
 		OrgID:          runmode.LocalDefaultOrgID,
 		TeamID:         runmode.LocalDefaultTeamID,
-		ConversationID: seedArtifactConversation(t, conn),
+		ConversationID: seedDeliverableConversation(t, conn),
 		BackdateAction: func(t *testing.T, actionID string, age time.Duration) {
 			t.Helper()
 			// datetime('now', ...) renders the 'YYYY-MM-DD HH:MM:SS' shape

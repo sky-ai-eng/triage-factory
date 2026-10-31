@@ -58,17 +58,17 @@ func TestRecordEntityTouch_CountsALinkItCouldNotWrite(t *testing.T) {
 	stores, info := newCaptureStores(t, true)
 	ctx := context.Background()
 
-	if id := recordEntityTouch(ctx, stores, info, entityCoordinate{provider: domain.ArtifactProviderJira, target: "OPS-9", externalID: "10009"}); id != "" {
+	if id := recordEntityTouch(ctx, stores, info, entityCoordinate{provider: domain.ProviderJira, target: "OPS-9", externalID: "10009"}); id != "" {
 		t.Fatalf("touch resolved %q, want no entity without the issue's project", id)
 	}
 	withProject := entityCoordinate{
-		provider: domain.ArtifactProviderJira, target: "OPS-10", externalID: "10010",
+		provider: domain.ProviderJira, target: "OPS-10", externalID: "10010",
 		container: domain.EntityContainer{JiraProject: dbseed.JiraIssueProject("OPS-10")},
 	}
 	if id := recordEntityTouch(ctx, stores, info, withProject); id == "" {
 		t.Fatal("touch carrying its project resolved no entity")
 	}
-	if id := recordEntityTouch(ctx, stores, info, entityCoordinate{provider: domain.ArtifactProviderGitHub, target: "o/r"}); id != "" {
+	if id := recordEntityTouch(ctx, stores, info, entityCoordinate{provider: domain.ProviderGitHub, target: "o/r"}); id != "" {
 		t.Fatalf("repo-level touch resolved %q, want nothing", id)
 	}
 

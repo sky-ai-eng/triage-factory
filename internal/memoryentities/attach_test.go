@@ -170,9 +170,9 @@ func memoryConversationIDs(t *testing.T, database *sql.DB, entityID string) map[
 	return out
 }
 
-// seedArtifact upserts an artifact attributed to conversationID so the produced
+// seedDeliverable upserts a deliverable attributed to conversationID so the produced
 // pass sees it.
-func seedArtifact(t *testing.T, database *sql.DB, conversationID string, a domain.Artifact) {
+func seedDeliverable(t *testing.T, database *sql.DB, conversationID string, a domain.Deliverable) {
 	t.Helper()
 	stores := sqlitestore.New(database)
 	a.ConversationID = conversationID
@@ -186,12 +186,12 @@ func seedArtifact(t *testing.T, database *sql.DB, conversationID string, a domai
 		}
 		a.Scope = domain.ExternalObjectScope(a.Provider, set)
 	}
-	if _, err := stores.Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a); err != nil {
-		t.Fatalf("seed artifact %s/%s: %v", a.Kind, a.State, err)
+	if _, err := stores.Deliverables.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a); err != nil {
+		t.Fatalf("seed deliverable %s/%s: %v", a.Kind, a.State, err)
 	}
 }
 
-// seedProducedPR upserts a PR artifact attributed to conversationID, linked
+// seedProducedPR upserts a PR deliverable attributed to conversationID, linked
 // to the pull request's entity the way the exec funnel records it: the entity
 // found by the PR's key, or a stub created for it.
 func seedProducedPR(t *testing.T, database *sql.DB, conversationID, repoPath string, number int, url string) {
@@ -202,9 +202,9 @@ func seedProducedPR(t *testing.T, database *sql.DB, conversationID, repoPath str
 	if err != nil {
 		t.Fatalf("resolve the produced PR's entity: %v", err)
 	}
-	pr := domain.NewPullRequestArtifact(repoPath, number, nodeID, "head", "main", url, "produced PR", "", false)
+	pr := domain.NewPullRequestDeliverable(repoPath, number, nodeID, "head", "main", url, "produced PR", "", false)
 	pr.EntityID = ent.ID
-	seedArtifact(t, database, conversationID, pr)
+	seedDeliverable(t, database, conversationID, pr)
 }
 
 // attachAll calls Attach with the full store bundle — what both production
@@ -254,10 +254,10 @@ func TestAttach_PrimaryAlwaysWritten(t *testing.T) {
 	}
 }
 
-// TestAttach_ProducedEntityIsTheArtifacts: a produced-PR artifact attaches
+// TestAttach_ProducedEntityIsTheDeliverables: a produced-PR deliverable attaches
 // the entity it was recorded against with role=produced, which carries the
 // conversation's memory through the join.
-func TestAttach_ProducedEntityIsTheArtifacts(t *testing.T) {
+func TestAttach_ProducedEntityIsTheDeliverables(t *testing.T) {
 	database := newTestDB(t)
 	seedConversation(t, database, "r-prod")
 	ctx := context.Background()
@@ -282,12 +282,12 @@ func TestAttach_ProducedEntityIsTheArtifacts(t *testing.T) {
 	}
 }
 
-// TestAttach_ArtifactFromAnotherScopeAttachesNothing: a PR artifact recorded on
+// TestAttach_DeliverableFromAnotherScopeAttachesNothing: a PR deliverable recorded on
 // a GitHub host the org is no longer on, linked to no entity, names a pull
 // request there, not the same-numbered one on the current host: the attach
-// reads the entity an artifact was recorded against and never resolves one
+// reads the entity a deliverable was recorded against and never resolves one
 // from its target, so it mints and attaches nothing.
-func TestAttach_ArtifactFromAnotherScopeAttachesNothing(t *testing.T) {
+func TestAttach_DeliverableFromAnotherScopeAttachesNothing(t *testing.T) {
 	database := newTestDB(t)
 	seedConversation(t, database, "r-elsewhere")
 	ctx := context.Background()
@@ -296,14 +296,14 @@ func TestAttach_ArtifactFromAnotherScopeAttachesNothing(t *testing.T) {
 	if _, err := sqlitestore.New(database).TaskMemory.UpsertAgentMemorySystem(ctx, runmode.LocalDefaultOrgID, "r-elsewhere", "", "narrative", domain.MemorySourceAgent); err != nil {
 		t.Fatalf("upsert memory: %v", err)
 	}
-	pr := domain.NewPullRequestArtifact("o/r", 77, "node", "head", "main", "https://ghe.example.com/o/r/pull/77", "elsewhere", "", false)
+	pr := domain.NewPullRequestDeliverable("o/r", 77, "node", "head", "main", "https://ghe.example.com/o/r/pull/77", "elsewhere", "", false)
 	pr.Scope = "https://ghe.example.com"
-	seedArtifact(t, database, "r-elsewhere", pr)
+	seedDeliverable(t, database, "r-elsewhere", pr)
 
 	attachAll(t, database, runmode.LocalDefaultOrgID, "r-elsewhere", entA.ID)
 
 	if ent := entityBySource(t, database, "github", "o/r#77"); ent != nil {
-		t.Errorf("an artifact from another host minted an entity on the current one: %+v", ent)
+		t.Errorf("a deliverable from another host minted an entity on the current one: %+v", ent)
 	}
 	var n int
 	if err := database.QueryRow(`SELECT COUNT(*) FROM conversation_memory_entities WHERE conversation_id = ?`, "r-elsewhere").Scan(&n); err != nil {
@@ -314,7 +314,7 @@ func TestAttach_ArtifactFromAnotherScopeAttachesNothing(t *testing.T) {
 	}
 }
 
-// TestAttach_RepoLevelTargetsSkipped: artifacts that map to no entity — a git
+// TestAttach_RepoLevelTargetsSkipped: deliverables that map to no entity — a git
 // branch push (unmapped provider) and a github repo-level target with no '#N'
 // — mint no entity and write no produced row. Only the primary row lands.
 func TestAttach_RepoLevelTargetsSkipped(t *testing.T) {
@@ -327,27 +327,27 @@ func TestAttach_RepoLevelTargetsSkipped(t *testing.T) {
 		t.Fatalf("upsert memory: %v", err)
 	}
 	// Branch push → provider "git", target "o/r": unmapped provider.
-	branch, ok := domain.NewBranchArtifact("o/r", "refs/heads/feature", "sha123", true)
+	branch, ok := domain.NewBranchDeliverable("o/r", "refs/heads/feature", "sha123", true)
 	if !ok {
-		t.Fatal("NewBranchArtifact returned ok=false")
+		t.Fatal("NewBranchDeliverable returned ok=false")
 	}
-	seedArtifact(t, database, "r-skip", branch)
-	// A github artifact with a bare repo-level target (no '#N') → ParsePRTarget
+	seedDeliverable(t, database, "r-skip", branch)
+	// A github deliverable with a bare repo-level target (no '#N') → ParsePRTarget
 	// ok=false.
-	seedArtifact(t, database, "r-skip", domain.Artifact{
-		Provider: domain.ArtifactProviderGitHub,
-		Kind:     domain.ArtifactKindPullRequest,
+	seedDeliverable(t, database, "r-skip", domain.Deliverable{
+		Provider: domain.ProviderGitHub,
+		Kind:     domain.DeliverableKindPullRequest,
 		Target:   "o/r",
-		State:    domain.ArtifactStatePROpen,
-		DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderGitHub, domain.ArtifactKindPullRequest, "o/r", ""),
+		State:    domain.DeliverableStatePROpen,
+		DedupKey: domain.ObjectKey(domain.ProviderGitHub, domain.DeliverableKindPullRequest, "o/r", ""),
 	})
 
 	attachAll(t, database, runmode.LocalDefaultOrgID, "r-skip", entA.ID)
 
-	if ent := entityBySource(t, database, domain.ArtifactProviderGit, "o/r"); ent != nil {
+	if ent := entityBySource(t, database, domain.ProviderGit, "o/r"); ent != nil {
 		t.Errorf("branch push should mint no entity, got %+v", ent)
 	}
-	if ent := entityBySource(t, database, domain.ArtifactProviderGitHub, "o/r"); ent != nil {
+	if ent := entityBySource(t, database, domain.ProviderGitHub, "o/r"); ent != nil {
 		t.Errorf("repo-level github target should mint no entity, got %+v", ent)
 	}
 	// The only join row is the primary — the skipped targets add nothing.
@@ -360,12 +360,12 @@ func TestAttach_RepoLevelTargetsSkipped(t *testing.T) {
 	}
 }
 
-// TestAttach_JiraArtifactAttachesItsEntity: a Jira artifact attaches the
+// TestAttach_JiraDeliverableAttachesItsEntity: a Jira deliverable attaches the
 // issue's entity it was recorded against, whatever key its target spells, and
 // leaves the entity where it is. One linked to no entity — its issue did not
 // resolve when it was written — attaches and mints nothing, and is the one
 // link the attach owed and could not write, so it is counted.
-func TestAttach_JiraArtifactAttachesItsEntity(t *testing.T) {
+func TestAttach_JiraDeliverableAttachesItsEntity(t *testing.T) {
 	skips := linkSkips(t)
 	database := newTestDB(t)
 	site := testScope("jira")
@@ -376,17 +376,17 @@ func TestAttach_JiraArtifactAttachesItsEntity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	jiraArtifact := func(issueID, target, entityID string) domain.Artifact {
-		return domain.Artifact{
-			Provider: domain.ArtifactProviderJira, Kind: domain.ArtifactKindIssue, Target: target,
-			State:    domain.ArtifactStateIssueUpdated,
+	jiraDeliverable := func(issueID, target, entityID string) domain.Deliverable {
+		return domain.Deliverable{
+			Provider: domain.ProviderJira, Kind: domain.DeliverableKindIssue, Target: target,
+			State:    domain.DeliverableStateIssueUpdated,
 			Scope:    site,
-			DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindIssue, domain.JiraIssueResource(site, issueID), ""),
+			DedupKey: domain.ObjectKey(domain.ProviderJira, domain.DeliverableKindIssue, domain.JiraIssueResource(site, issueID), ""),
 			EntityID: entityID,
 		}
 	}
-	seedArtifact(t, database, "r-jira", jiraArtifact("10007", "OLD-7", moved.ID))
-	seedArtifact(t, database, "r-jira", jiraArtifact("10009", "OPS-9", ""))
+	seedDeliverable(t, database, "r-jira", jiraDeliverable("10007", "OLD-7", moved.ID))
+	seedDeliverable(t, database, "r-jira", jiraDeliverable("10009", "OPS-9", ""))
 
 	attachAll(t, database, runmode.LocalDefaultOrgID, "r-jira", entA.ID)
 
@@ -443,7 +443,7 @@ func (f producedWriteFails) RecordEntityTouchSystem(ctx context.Context, orgID, 
 	return f.TaskMemoryStore.RecordEntityTouchSystem(ctx, orgID, conversationID, entityID, role)
 }
 
-// TestAttach_ListFailureLeavesPrimaryIntact: when the artifact listing fails,
+// TestAttach_ListFailureLeavesPrimaryIntact: when the deliverable listing fails,
 // the produced pass is skipped but the memory upsert and the primary row
 // survive — the attach is best-effort and never aborts its caller.
 func TestAttach_ListFailureLeavesPrimaryIntact(t *testing.T) {
@@ -458,32 +458,32 @@ func TestAttach_ListFailureLeavesPrimaryIntact(t *testing.T) {
 	}
 
 	failing := stores
-	failing.Artifacts = failingArtifactStore{ArtifactStore: stores.Artifacts}
+	failing.Deliverables = failingDeliverableStore{DeliverableStore: stores.Deliverables}
 	Attach(ctx, failing, runmode.LocalDefaultOrgID, "r-fail", entA.ID)
 
 	if role := roleFor(t, database, "r-fail", entA.ID); role != domain.MemoryRolePrimary {
 		t.Errorf("primary role = %q, want %q despite the listing failure", role, domain.MemoryRolePrimary)
 	}
 	if !memoryConversationIDs(t, database, entA.ID)["r-fail"] {
-		t.Error("memory upsert lost when artifact listing failed")
+		t.Error("memory upsert lost when deliverable listing failed")
 	}
 }
 
-// failingArtifactStore fails ListByConversationSystem (the only method the produced pass
+// failingDeliverableStore fails ListByConversationSystem (the only method the produced pass
 // calls); every other method delegates to the embedded real store.
-type failingArtifactStore struct {
-	db.ArtifactStore
+type failingDeliverableStore struct {
+	db.DeliverableStore
 }
 
-func (failingArtifactStore) ListByConversationSystem(context.Context, string, string) ([]domain.Artifact, error) {
-	return nil, errors.New("artifact listing failed")
+func (failingDeliverableStore) ListByConversationSystem(context.Context, string, string) ([]domain.Deliverable, error) {
+	return nil, errors.New("deliverable listing failed")
 }
 
-// TestAttach_AbsentArtifactsSkipProducedPass: a caller holding no artifact
+// TestAttach_AbsentDeliverablesSkipProducedPass: a caller holding no deliverable
 // store cannot read produced entities, and says so by passing nil. The
-// primary row still lands — it needs no artifact store — so the
+// primary row still lands — it needs no deliverable store — so the
 // conversation's memory stays reachable from its task's entity.
-func TestAttach_AbsentArtifactsSkipProducedPass(t *testing.T) {
+func TestAttach_AbsentDeliverablesSkipProducedPass(t *testing.T) {
 	database := newTestDB(t)
 	seedConversation(t, database, "r-nil")
 	ctx := context.Background()
@@ -493,12 +493,12 @@ func TestAttach_AbsentArtifactsSkipProducedPass(t *testing.T) {
 	if _, err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, runmode.LocalDefaultOrgID, "r-nil", "", "narrative", domain.MemorySourceAgent); err != nil {
 		t.Fatalf("upsert memory: %v", err)
 	}
-	// An artifact whose entity the produced pass WOULD attach had the store
+	// A deliverable whose entity the produced pass WOULD attach had the store
 	// been present.
 	seedProducedPR(t, database, "r-nil", "o/r", 9, "https://github.com/o/r/pull/9")
 
 	partial := stores
-	partial.Artifacts = nil
+	partial.Deliverables = nil
 	Attach(ctx, partial, runmode.LocalDefaultOrgID, "r-nil", entA.ID)
 
 	if role := roleFor(t, database, "r-nil", entA.ID); role != domain.MemoryRolePrimary {
@@ -537,7 +537,7 @@ func TestAttach_NilTaskMemoryWritesNothing(t *testing.T) {
 
 // TestAttach_Precedence: a pre-existing touched row upgrades to produced on the
 // produced PR, and the primary entity wins over both a prior touched row and a
-// produced artifact pointing at it.
+// produced deliverable pointing at it.
 func TestAttach_Precedence(t *testing.T) {
 	database := newTestDB(t)
 	seedConversation(t, database, "r-prec")
@@ -560,7 +560,7 @@ func TestAttach_Precedence(t *testing.T) {
 	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, org, "r-prec", entB.ID, domain.MemoryRoleTouched); err != nil {
 		t.Fatalf("pre-touch B: %v", err)
 	}
-	// Both entities appear as produced artifacts.
+	// Both entities appear as produced deliverables.
 	seedProducedPR(t, database, "r-prec", "o/r", 100, "https://github.com/o/r/pull/100")
 	seedProducedPR(t, database, "r-prec", "o/r", 200, "https://github.com/o/r/pull/200")
 
@@ -591,7 +591,7 @@ func TestAttach_MotivatingCase(t *testing.T) {
 	if _, err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, org, "r-507", "", "the run narrative", domain.MemorySourceAgent); err != nil {
 		t.Fatalf("upsert memory: %v", err)
 	}
-	// C touched mid-run; B produced via an artifact.
+	// C touched mid-run; B produced via a deliverable.
 	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, org, "r-507", entC.ID, domain.MemoryRoleTouched); err != nil {
 		t.Fatalf("touch C: %v", err)
 	}

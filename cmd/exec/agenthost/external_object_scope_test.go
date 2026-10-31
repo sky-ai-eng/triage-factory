@@ -10,7 +10,7 @@ import (
 
 // TestRecordExternalWrite_StampsTheOrgScopePerProvider pins the exec funnel's
 // scope rule: every row it records — whatever provider, and whichever door
-// (the shared funnel, a branch push through UpsertArtifact) — is recorded in
+// (the shared funnel, a branch push through UpsertDeliverable) — is recorded in
 // the org's current scope for its provider, and a scope the caller put on the
 // row is overwritten rather than trusted, the same as the run identity.
 func TestRecordExternalWrite_StampsTheOrgScopePerProvider(t *testing.T) {
@@ -40,31 +40,31 @@ func TestRecordExternalWrite_StampsTheOrgScopePerProvider(t *testing.T) {
 		OrgID: runmode.LocalDefaultOrgID, UserID: runmode.LocalDefaultUserID,
 		TeamID: runmode.LocalDefaultTeamID, ConversationID: "conv-scope",
 	}
-	RecordExternalWrite(ctx, stores, info, &domain.Artifact{
-		Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindComment,
+	RecordExternalWrite(ctx, stores, info, &domain.Deliverable{
+		Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindComment,
 		Scope:  "https://elsewhere.example.com",
-		Target: "octo/api#1", ExternalID: "c-1", State: domain.ArtifactStateCommentPosted,
-		DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderGitHub, domain.ArtifactKindComment, "c-1", ""),
+		Target: "octo/api#1", ExternalID: "c-1", State: domain.DeliverableStateCommentPosted,
+		DedupKey: domain.ObjectKey(domain.ProviderGitHub, domain.DeliverableKindComment, "c-1", ""),
 	}, &domain.ExternalAction{
-		Provider: domain.ArtifactProviderGitHub, Scope: "https://elsewhere.example.com",
+		Provider: domain.ProviderGitHub, Scope: "https://elsewhere.example.com",
 		Action: domain.ActionCommentPosted, Target: "octo/api#1", Credential: domain.CredentialGitHubApp,
 	})
 	RecordExternalWrite(ctx, stores, info, nil, &domain.ExternalAction{
-		Provider: domain.ArtifactProviderJira, Action: domain.ActionIssueCommentPosted,
+		Provider: domain.ProviderJira, Action: domain.ActionIssueCommentPosted,
 		Target: "ENG-1", Credential: domain.CredentialJiraOrg,
 	})
 	RecordExternalWrite(ctx, stores, info, nil, egressDeniedAction("conv-scope", "pypi.org:443", "off-allowlist"))
-	branch, ok := domain.NewBranchArtifact("octo/api", "refs/heads/fix", "abc123", true)
+	branch, ok := domain.NewBranchDeliverable("octo/api", "refs/heads/fix", "abc123", true)
 	if !ok {
-		t.Fatal("NewBranchArtifact refused a valid ref")
+		t.Fatal("NewBranchDeliverable refused a valid ref")
 	}
-	if _, err := NewLocal(stores, info).UpsertArtifact(ctx, branch); err != nil {
-		t.Fatalf("UpsertArtifact: %v", err)
+	if _, err := NewLocal(stores, info).UpsertDeliverable(ctx, branch); err != nil {
+		t.Fatalf("UpsertDeliverable: %v", err)
 	}
 
 	byProvider := map[string]string{}
-	for _, a := range listConversationArtifacts(t, stores, "conv-scope") {
-		byProvider["artifact:"+a.Provider] = a.Scope
+	for _, a := range listConversationDeliverables(t, stores, "conv-scope") {
+		byProvider["deliverable:"+a.Provider] = a.Scope
 	}
 	actions, _, err := stores.ExternalActions.ListByConversation(ctx, runmode.LocalDefaultOrgID, "conv-scope", domain.ExternalActionListOpts{})
 	if err != nil {
@@ -74,12 +74,12 @@ func TestRecordExternalWrite_StampsTheOrgScopePerProvider(t *testing.T) {
 		byProvider["action:"+a.Provider+":"+a.Action] = a.Scope
 	}
 	for key, provider := range map[string]string{
-		"artifact:github": domain.ArtifactProviderGitHub,
-		"artifact:git":    domain.ArtifactProviderGit,
-		"action:github:" + domain.ActionCommentPosted:    domain.ArtifactProviderGitHub,
-		"action:github:" + domain.ActionBranchPushed:     domain.ArtifactProviderGitHub,
-		"action:jira:" + domain.ActionIssueCommentPosted: domain.ArtifactProviderJira,
-		"action:network:" + domain.ActionEgressDenied:    domain.ArtifactProviderNetwork,
+		"deliverable:github":                             domain.ProviderGitHub,
+		"deliverable:git":                                domain.ProviderGit,
+		"action:github:" + domain.ActionCommentPosted:    domain.ProviderGitHub,
+		"action:github:" + domain.ActionBranchPushed:     domain.ProviderGitHub,
+		"action:jira:" + domain.ActionIssueCommentPosted: domain.ProviderJira,
+		"action:network:" + domain.ActionEgressDenied:    domain.ProviderNetwork,
 	} {
 		got, recorded := byProvider[key]
 		if !recorded {

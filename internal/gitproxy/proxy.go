@@ -229,10 +229,10 @@ type Config struct {
 	// after the upstream responds — for EVERY outcome, with the final status
 	// and the ref's report-status line read into the PushedRef. The wiring is
 	// what branches on the outcome: an accepted ref (PushedRef.Succeeded)
-	// upserts the branch artifact (same constructor + dedup key as the
+	// upserts the branch deliverable (same constructor + dedup key as the
 	// pre-push hook, so a normal hook+push never double-records), while a
 	// refused one (a 403/404/422/5xx, or an "ng" ref inside a 200 — nothing
-	// landed) must record only an audit-log failure row, never an artifact.
+	// landed) must record only an audit-log failure row, never a deliverable.
 	//
 	// Because every push transits this proxy — `git push --no-verify` skips
 	// client-side hooks but not the network layer — this is multi mode's
@@ -287,8 +287,8 @@ type Config struct {
 //
 // Status and Rejected together are the outcome discriminator the wiring
 // branches on (see Succeeded). It is pure data — no domain dependency — so the
-// proxy stays free of the artifact model; the wiring layer maps it to a branch
-// artifact / audit row.
+// proxy stays free of the deliverable model; the wiring layer maps it to a branch
+// deliverable / audit row.
 type PushedRef struct {
 	Repo          string
 	Ref           string
@@ -302,7 +302,7 @@ type PushedRef struct {
 
 // Succeeded reports whether the upstream accepted this ref: a 2xx final
 // status the report-status did not refuse it under. Only a succeeded push may
-// become an artifact; a refused one is audit-log material only.
+// become a deliverable; a refused one is audit-log material only.
 func (p PushedRef) Succeeded() bool {
 	return p.Status >= 200 && p.Status < 300 && !p.Rejected
 }

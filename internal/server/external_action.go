@@ -15,12 +15,12 @@ import (
 // drafting conversation is conversation_id (who proposed the change); the approving/dragging human
 // is actor_user_id (who authorized it).
 //
-// Two shapes, by whether the action also flips an artifact's state:
+// Two shapes, by whether the action also flips a deliverable's state:
 //
-//   - Where the action flips an artifact in a WithTx (approve → open, submit →
+//   - Where the action flips a deliverable in a WithTx (approve → open, submit →
 //     submitted, close → closed, dismiss → dismissed), the caller composes the
 //     Record INTO that same tx (tx.ExternalActions.Record(...)) via
-//     domain.ArtifactAction, so the audit row commits or rolls back atomically
+//     domain.DeliverableAction, so the audit row commits or rolls back atomically
 //     with the flip and the two can't disagree.
 //   - Where the action is a pure GitHub mutation with no critical flip (the PR
 //     title/body edit, the dashboard board-drag draft toggle — their only DB
@@ -30,12 +30,12 @@ import (
 //     the snapshot path early-returns) and never fails the user's applied edit.
 
 // githubCredentialForPullRequest is ghclient.CredentialForRepo for the
-// repository an artifact's pull request is in (artifactPullRequest), under the
+// repository a deliverable's pull request is in (deliverablePullRequest), under the
 // name GitHub serves it now — the coordinates every approval-lifecycle write
 // addresses. A pull request that could not be resolved (nil), or whose
 // repository's registry row is retired, names no repository a write is made
 // in, and is attributed to the App, as an unclassifiable repository is.
-func githubCredentialForPullRequest(ctx context.Context, resolver ghclient.Resolver, orgID string, pr *db.ArtifactPullRequest) string {
+func githubCredentialForPullRequest(ctx context.Context, resolver ghclient.Resolver, orgID string, pr *db.DeliverablePullRequest) string {
 	if pr == nil || pr.Retired {
 		return domain.CredentialGitHubApp
 	}

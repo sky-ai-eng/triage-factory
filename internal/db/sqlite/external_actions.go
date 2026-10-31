@@ -151,36 +151,36 @@ func (s *externalActionStore) ListByConversation(ctx context.Context, orgID, con
 	return out, total, err
 }
 
-// prCreatedWithoutArtifactQuery is ListPRCreatedWithoutArtifactSystem's
+// prCreatedWithoutDeliverableQuery is ListPRCreatedWithoutDeliverableSystem's
 // statement, binding org_id, action, the time bound and scope in that order.
 // The time bound compares occurred_at directly, unlike the feeds' datetime()
 // form: a function around the column keeps it from narrowing the index, and
 // this read runs every reconcile cycle.
-const prCreatedWithoutArtifactQuery = `
+const prCreatedWithoutDeliverableQuery = `
 	SELECT ` + externalActionColumns + `
 	  FROM external_actions ea
 	 WHERE ea.org_id = ? AND ea.action = ? AND ea.occurred_at >= ?
 	   AND ea.scope = ? AND ea.node_id IS NOT NULL AND ea.conversation_id IS NOT NULL
 	   AND NOT EXISTS (
-	       SELECT 1 FROM artifacts a
+	       SELECT 1 FROM deliverables a
 	        WHERE a.org_id = ea.org_id AND a.scope = ea.scope AND a.node_id = ea.node_id
 	   )
 	 ORDER BY ea.occurred_at, ea.id
 `
 
-// ListPRCreatedWithoutArtifactSystem is the PR backstop's read (see the
+// ListPRCreatedWithoutDeliverableSystem is the PR backstop's read (see the
 // interface). occurred_at holds offset-free UTC text ('YYYY-MM-DD HH:MM:SS'
 // from the column default, with a fractional part on rows the UTC
 // normalization rewrote), so a bound rendered in the default's layout orders
 // against both shapes as text.
-func (s *externalActionStore) ListPRCreatedWithoutArtifactSystem(ctx context.Context, orgID, scope string, since time.Time) ([]domain.ExternalAction, error) {
+func (s *externalActionStore) ListPRCreatedWithoutDeliverableSystem(ctx context.Context, orgID, scope string, since time.Time) ([]domain.ExternalAction, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
 	if err := db.RequireExternalObjectScope(scope); err != nil {
 		return nil, err
 	}
-	rows, err := s.q.QueryContext(ctx, prCreatedWithoutArtifactQuery,
+	rows, err := s.q.QueryContext(ctx, prCreatedWithoutDeliverableQuery,
 		orgID, domain.ActionPRCreated, since.UTC().Format(time.DateTime), scope)
 	if err != nil {
 		return nil, err
@@ -190,7 +190,7 @@ func (s *externalActionStore) ListPRCreatedWithoutArtifactSystem(ctx context.Con
 
 // appendExternalActionFilters appends opts' optional provider/action/actor/time
 // predicates, the newest-first ORDER BY, and LIMIT/OFFSET to a SELECT whose WHERE
-// is already open. Time bounds wrap both sides in datetime() — the spend/artifact
+// is already open. Time bounds wrap both sides in datetime() — the spend/deliverable
 // store pattern — so a bound time.Time compares correctly against the
 // CURRENT_TIMESTAMP-formatted occurred_at regardless of the driver's bind
 // serialization.

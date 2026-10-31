@@ -24,7 +24,7 @@ import {
 import type { Tone } from './board/cardStyle'
 
 // Presentation for the external-action audit log's Actions lens (TFAC-483) —
-// the sibling of artifactMeta.ts for the action discriminator. A data/helpers
+// the sibling of deliverableMeta.ts for the action discriminator. A data/helpers
 // module (no components) so importing it into ActionRow keeps React Fast Refresh
 // happy. Mirrors the backend domain.Action* consts; an unmodeled server value
 // falls through to FALLBACK_ACTION_META at the render layer (forward-compat).
@@ -34,7 +34,7 @@ export interface ActionMeta {
   // label is the humanized verb shown on the row ("PR opened", "Issue
   // transitioned").
   label: string
-  // text is the icon's tint class (matches artifactMeta's per-kind tint).
+  // text is the icon's tint class (matches deliverableMeta's per-kind tint).
   text: string
   // tone colors the verb pill via the card tone vocabulary.
   tone: Tone
@@ -266,7 +266,7 @@ export const ACTION_META: Record<string, ActionMeta> = {
     text: 'text-ink-3',
     tone: 'problem',
   },
-  // The push the upstream turned down — nothing landed, so no branch artifact
+  // The push the upstream turned down — nothing landed, so no branch deliverable
   // exists and this row is the only trace of the attempt. 'problem' rather than
   // the denials' 'attention' below: those are Triage Factory declining to do
   // something, this is work the agent believed it had done and had not.
@@ -481,7 +481,7 @@ export const ACTION_OPTIONS = Object.keys(ACTION_META).map((value) => ({
 // the sandbox egress denial spends no credential at all, because nothing left
 // the box. It is in the filter for exactly that reason. A refused connection is
 // the row an operator most wants to isolate, and it is the only one no other
-// provider value can reach. ('git'/'linear', which the artifacts feed carries,
-// stay out: a branch push is a github action even though its artifact is a git
+// provider value can reach. ('git'/'linear', which the deliverables feed carries,
+// stay out: a branch push is a github action even though its deliverable is a git
 // one, and nothing writes to Linear.)
 export const ACTION_PROVIDERS = ['github', 'jira', 'slack', 'network'] as const

@@ -126,7 +126,7 @@ func TestResolveConversationIdentity_ManualConversation(t *testing.T) {
 		t.Errorf("ConversationID = %q, want m1", ident.ConversationID)
 	}
 	// TeamID rides off conversations.team_id (TFAC-458) — the local-mode ConversationInfo
-	// source the capture writers stamp artifacts.team_id from. Create lands
+	// source the capture writers stamp deliverables.team_id from. Create lands
 	// every local conversation on the sole team.
 	if ident.TeamID != runmode.LocalDefaultTeamID {
 		t.Errorf("TeamID = %q, want %q", ident.TeamID, runmode.LocalDefaultTeamID)

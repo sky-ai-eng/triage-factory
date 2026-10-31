@@ -26,11 +26,11 @@ func prOwnershipFixture(t *testing.T) (*sql.DB, db.Stores, ConversationInfo, str
 	return conn, stores, info, otherTeam
 }
 
-// botOpenedPR is the artifact the recording funnel receives when the agent
+// botOpenedPR is the deliverable the recording funnel receives when the agent
 // opens a PR through the exec verb (recordGithubPR), the one door that mints
 // one.
-func botOpenedPR() domain.Artifact {
-	return domain.NewPullRequestArtifact(
+func botOpenedPR() domain.Deliverable {
+	return domain.NewPullRequestDeliverable(
 		"octo/repo", 42, "PR_kwDOABCD", "feature/x", "main",
 		"https://github.com/octo/repo/pull/42", "Fix the thing", "Body", true,
 	)
@@ -56,12 +56,12 @@ func prEntity(t *testing.T, stores db.Stores) *domain.Entity {
 	return ent
 }
 
-// TestStampPROwnership_ArtifactFirst covers the ordinary ordering: the run
+// TestStampPROwnership_DeliverableFirst covers the ordinary ordering: the run
 // opens the PR before any poll has seen it. The funnel mints the entity on the
 // PR's natural key and stamps the commissioning team, so the PR is owned before
 // its first CI event exists — which is the whole point, since the PR's author
 // is a bot that resolves to no TF user.
-func TestStampPROwnership_ArtifactFirst(t *testing.T) {
+func TestStampPROwnership_DeliverableFirst(t *testing.T) {
 	_, stores, info, _ := prOwnershipFixture(t)
 	a := botOpenedPR()
 
@@ -77,7 +77,7 @@ func TestStampPROwnership_ArtifactFirst(t *testing.T) {
 }
 
 // TestStampPROwnership_EntityFirst covers the reverse ordering: a poll cycle
-// discovered the PR before the run's artifact write landed. The stamp has to
+// discovered the PR before the run's deliverable write landed. The stamp has to
 // back-fill the row that already exists rather than needing to create it —
 // otherwise the ownership signal is lost to a race the caller cannot control.
 func TestStampPROwnership_EntityFirst(t *testing.T) {
@@ -154,8 +154,8 @@ func TestStampPROwnership_NoTeamOnConversation(t *testing.T) {
 }
 
 // TestStampPROwnership_WithAction covers the exec-verb path, where the funnel
-// receives the artifact AND its audit action together. githubAction copies the
-// artifact's target and url, so both the touch pass and the stamp want the same
+// receives the deliverable AND its audit action together. githubAction copies the
+// deliverable's target and url, so both the touch pass and the stamp want the same
 // entity; the stamp reuses what the touch resolved rather than running a second
 // FindOrCreate. Both effects still have to land.
 func TestStampPROwnership_WithAction(t *testing.T) {
@@ -164,7 +164,7 @@ func TestStampPROwnership_WithAction(t *testing.T) {
 
 	a := botOpenedPR()
 	act := &domain.ExternalAction{
-		Provider: domain.ArtifactProviderGitHub,
+		Provider: domain.ProviderGitHub,
 		Action:   domain.ActionPRCreated,
 		Target:   a.Target,
 		URL:      a.URL,
@@ -193,8 +193,8 @@ func TestStampPROwnership_WithAction(t *testing.T) {
 
 // TestStampPROwnership_ActionTargetsElsewhere is why the reuse is guarded on the
 // coordinates rather than assuming the pair always agree. If an action ever
-// names a different object than the artifact beside it, ownership must follow
-// the ARTIFACT — that is the PR that was opened — and the touch must still
+// names a different object than the deliverable beside it, ownership must follow
+// the DELIVERABLE — that is the PR that was opened — and the touch must still
 // follow the action.
 func TestStampPROwnership_ActionTargetsElsewhere(t *testing.T) {
 	ctx := context.Background()
@@ -202,7 +202,7 @@ func TestStampPROwnership_ActionTargetsElsewhere(t *testing.T) {
 
 	a := botOpenedPR() // octo/repo#42
 	act := &domain.ExternalAction{
-		Provider: domain.ArtifactProviderGitHub,
+		Provider: domain.ProviderGitHub,
 		Action:   domain.ActionPRCreated,
 		Target:   "octo/repo#7",
 		URL:      "https://github.com/octo/repo/pull/7",
@@ -211,10 +211,10 @@ func TestStampPROwnership_ActionTargetsElsewhere(t *testing.T) {
 
 	owned := prEntity(t, stores)
 	if owned == nil {
-		t.Fatal("no entity for the artifact's PR")
+		t.Fatal("no entity for the deliverable's PR")
 	}
 	if got := ownerOf(t, stores, owned.ID); got != info.TeamID {
-		t.Errorf("artifact's PR owner = %q, want %q", got, info.TeamID)
+		t.Errorf("deliverable's PR owner = %q, want %q", got, info.TeamID)
 	}
 
 	other, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "github", "https://github.com", "octo/repo#7")
@@ -222,16 +222,16 @@ func TestStampPROwnership_ActionTargetsElsewhere(t *testing.T) {
 		t.Fatalf("the action's own entity was not resolved: ent=%v err=%v", other, err)
 	}
 	if got := ownerOf(t, stores, other.ID); got != "" {
-		t.Errorf("the action's PR was stamped %q; ownership must follow the artifact", got)
+		t.Errorf("the action's PR was stamped %q; ownership must follow the deliverable", got)
 	}
 }
 
-// TestStampPROwnership_ReviewArtifactDoesNotClaimOwnership guards the narrowest
+// TestStampPROwnership_ReviewDeliverableDoesNotClaimOwnership guards the narrowest
 // and most consequential edge: a submitted review carries the same
 // owner/repo#N target as the PR it reviews. Reviewing another team's PR must
 // never transfer that PR to the reviewing team, so the stamp keys on the
-// artifact kind, not on the target shape.
-func TestStampPROwnership_ReviewArtifactDoesNotClaimOwnership(t *testing.T) {
+// deliverable kind, not on the target shape.
+func TestStampPROwnership_ReviewDeliverableDoesNotClaimOwnership(t *testing.T) {
 	ctx := context.Background()
 	_, stores, info, _ := prOwnershipFixture(t)
 
@@ -241,10 +241,10 @@ func TestStampPROwnership_ReviewArtifactDoesNotClaimOwnership(t *testing.T) {
 		t.Fatalf("seed entity: %v", err)
 	}
 
-	a := domain.NewReviewArtifact("octo/repo", 42, "PR_kwDO42", "headsha", info.ConversationID)
-	a.State, a.ExternalID = domain.ArtifactStateReviewSubmitted, "9001"
+	a := domain.NewReviewDeliverable("octo/repo", 42, "PR_kwDO42", "headsha", info.ConversationID)
+	a.State, a.ExternalID = domain.DeliverableStateReviewSubmitted, "9001"
 	a.URL = "https://github.com/octo/repo/pull/42#pullrequestreview-9001"
-	// Same owner/repo#N target the PR artifact carries — the kind is the only
+	// Same owner/repo#N target the PR deliverable carries — the kind is the only
 	// thing separating them, which is exactly what this asserts.
 	if a.Target != "octo/repo#42" {
 		t.Fatalf("review target = %q, want the PR's natural key", a.Target)

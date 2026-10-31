@@ -13,9 +13,9 @@ import {
   retryingAt,
   workStartedAt,
 } from '../../lib/conversationStatus'
-import { artifactSetKey } from '../../lib/approval'
+import { deliverableSetKey } from '../../lib/approval'
 import { compactNum, tint, type StationState } from './stationStyle'
-import ArtifactList from '../ArtifactList'
+import DeliverableList from '../DeliverableList'
 import ActionList from '../ActionList'
 
 interface Props {
@@ -23,12 +23,12 @@ interface Props {
   messages: Message[]
   state: StationState
   now: number
-  /** Open an artifact's approval overlay (PR / review) — wired up the page to
+  /** Open a deliverable's approval overlay (PR / review) — wired up the page to
    *  RunDetail's overlay state. */
-  onOpenArtifact?: (kind: 'review' | 'pr', artifactId: string) => void
+  onOpenDeliverable?: (kind: 'review' | 'pr', deliverableId: string) => void
   /** Re-pull the conversation projection after an in-place dismiss in the
-   *  Artifacts list (the list refetches its own rows). */
-  onArtifactResolved?: () => void
+   *  Deliverables list (the list refetches its own rows). */
+  onDeliverableResolved?: () => void
 }
 
 // TelemetryRail — the instruments etched into the machine's housing, flanking
@@ -40,8 +40,8 @@ export function TelemetryRail({
   messages,
   state,
   now,
-  onOpenArtifact,
-  onArtifactResolved,
+  onOpenDeliverable,
+  onDeliverableResolved,
 }: Props) {
   // The token rollups ride the conversation row (the detail read SUMs them per
   // conversation), so the rail shows the same authoritative numbers the usage
@@ -160,28 +160,28 @@ export function TelemetryRail({
         )}
       </Section>
 
-      {/* Artifacts — everything the conversation produced (branch / PR /
+      {/* Deliverables — everything the conversation produced (branch / PR /
           review / issue / comment), with its unresolved rows sorted first and
           dismissable in place; PR/review rows open their approval overlays,
-          the rest link out. Gated on artifact_count (free on the
+          the rest link out. Gated on deliverable_count (free on the
           conversation) so a conversation that produced
           nothing skips both the section and its fetch — matching the board
           card's affordance, which hides at 0. */}
-      {(conversation.artifact_count ?? 0) > 0 && (
-        <Section label="Artifacts">
-          <ArtifactList
+      {(conversation.deliverable_count ?? 0) > 0 && (
+        <Section label="Deliverables">
+          <DeliverableList
             conversationId={conversation.ID}
-            pendingArtifactIds={conversation.pending_artifact_ids}
-            refreshKey={artifactSetKey(conversation)}
-            onOpenApproval={onOpenArtifact}
-            onResolved={onArtifactResolved}
+            pendingDeliverableIds={conversation.pending_deliverable_ids}
+            refreshKey={deliverableSetKey(conversation)}
+            onOpenApproval={onOpenDeliverable}
+            onResolved={onDeliverableResolved}
           />
         </Section>
       )}
 
       {/* Actions — every external write this conversation made,
-          artifact-bearing or not.
-          Unlike Artifacts above, this section is NOT gated on a count: an empty
+          deliverable-bearing or not.
+          Unlike Deliverables above, this section is NOT gated on a count: an empty
           Actions list is an answer ("this conversation touched nothing outside
           the box"),
           where a hidden one is indistinguishable from a surface that was never

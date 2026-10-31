@@ -84,7 +84,7 @@ func TestBodyUpdated_PollToRule(t *testing.T) {
 				}
 			}))
 			t.Cleanup(srv.Close)
-			tr := tracker.New(database, bodyTestPublisher{}, st.Tasks, st.Entities, st.Repos, st.JiraProjects, st.Artifacts, st.EventQueue, org)
+			tr := tracker.New(database, bodyTestPublisher{}, st.Tasks, st.Entities, st.Repos, st.JiraProjects, st.Deliverables, st.EventQueue, org)
 			gh := ghclient.NewClient(srv.URL, "test-token")
 			jira := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "test-token"))
 			poll := func(next string) {

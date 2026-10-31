@@ -43,9 +43,9 @@ type SubmittedReview struct {
 }
 
 // GetReview fetches a review by its GraphQL node id in ANY state (submitted or
-// dismissed included), via node(id:) — the handle the artifact stores as
+// dismissed included), via node(id:) — the handle the deliverable stores as
 // ExternalID. It backs the reconciler's review-divergence note: the agent's
-// drafted review (the artifact's Proposed snapshot) is diffed against what
+// drafted review (the deliverable's Proposed snapshot) is diffed against what
 // actually landed here.
 //
 // Returns (nil, nil) when the id doesn't resolve to a review (deleted, or a node

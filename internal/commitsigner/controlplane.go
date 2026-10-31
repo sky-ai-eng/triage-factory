@@ -468,7 +468,7 @@ func recordDenied(ctx context.Context, stores db.Stores, d denial) {
 	}
 	raw, _ := json.Marshal(detail)
 	act := domain.ExternalAction{
-		Provider:       domain.ArtifactProviderGitHub,
+		Provider:       domain.ProviderGitHub,
 		Scope:          domain.GitHubHost(d.signerHost),
 		Action:         domain.ActionCommitSignDenied,
 		Target:         signerLogin(ctx, stores.OrgCommitSigners, d.orgID, d.signerUserID),

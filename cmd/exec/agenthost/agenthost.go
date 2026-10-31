@@ -65,7 +65,7 @@ const ProtocolVersion = 1
 // ConversationInfo is what LookupConversation returns. Carries the routing-relevant
 // fields a subcommand needs to know about its own run — orgID for
 // every per-row read, userID for the synthetic-claims tx path, ConversationID
-// for the foreign-key columns on writes, TeamID for the artifact
+// for the foreign-key columns on writes, TeamID for the deliverable
 // writers' NOT-NULL team_id stamp, and IsEventTriggered for any
 // caller that still wants to branch on routing shape (most don't,
 // since the routing decision is collapsed into the Client methods
@@ -75,7 +75,7 @@ const ProtocolVersion = 1
 // the schema level, but the CHECK constraint requires it non-NULL for every
 // team-visibility conversation, which delegation always is). The capture
 // writers (TFAC-459 Jira, TFAC-460 pre-push, GitHub-native rework) stamp
-// artifacts.team_id off it (NOT NULL per TFAC-455 F1), so it must be
+// deliverables.team_id off it (NOT NULL per TFAC-455 F1), so it must be
 // populated on every construction path: the spawner reads it off the
 // conversation row (no task hop), and the local resolver carries it from
 // ConversationIdentity. Empty only on synthetic ConversationInfos that don't back a real
@@ -136,7 +136,7 @@ var ErrUnknownMethod = errors.New("agenthost: unknown method")
 var ErrProtocolVersion = errors.New("agenthost: protocol version mismatch")
 
 // ErrReviewAlreadyFinalized is returned by FinalizeReviewDraft when the run's
-// review artifact already carries a ready sentinel (details_json.review_event is
+// review deliverable already carries a ready sentinel (details_json.review_event is
 // set) — i.e. the agent already called finalize-review once. exec turns it into
 // the "do not call finalize-review again, your work on this review is complete"
 // message that stops agents looping on the hand-off. It crosses the IPC boundary
@@ -216,7 +216,7 @@ type Client interface {
 	// --- review draft finalization (gh pr finalize-review) ---
 	//
 	// FinalizeReviewDraft finalizes the conversation's fully TF-side `review` draft: it
-	// locates the conversation's review artifact, stages body + event, snapshots the
+	// locates the conversation's review deliverable, stages body + event, snapshots the
 	// agent's draft (body + event + the locally staged inline comments) into
 	// details.proposed, and sets the ready sentinel (details_json.review_event).
 	//
@@ -236,13 +236,13 @@ type Client interface {
 	// with no GitHub write. The host reads the pull request's node id, which the
 	// draft is keyed on. It clears the staged comments and the body/event ready
 	// sentinel (and the write-once Proposed snapshot) back to an empty pending
-	// draft, keeping the artifact row, its handle, and its pinned head SHA so the
+	// draft, keeping the deliverable row, its handle, and its pinned head SHA so the
 	// agent can restart the review cleanly. Returns the draft's handle and that
 	// preserved head SHA (so the CLI can echo the same commit_sha a normal
 	// start-review prints), or ("", "") when the conversation has no draft for that PR (the
 	// caller falls through to a normal start-review). Post-494 there is no GitHub
 	// pending review to delete and no identity / anti-hijack logic — the draft
-	// lives entirely in the artifact.
+	// lives entirely in the deliverable.
 	ResetReviewDraft(ctx context.Context, owner, repo string, number int) (reviewID, commitSHA string, err error)
 
 	// ReviewDraftTarget returns the pull request this conversation's review
@@ -297,9 +297,9 @@ type Client interface {
 	// invoking this (materializeWorkspace's ordering).
 	CreateWorkspaceCheckout(ctx context.Context, owner, repo, ref string, prNumber int) (string, error)
 
-	// --- artifacts (capture writers: pre-push hook, ...) ---
+	// --- deliverables (capture writers: pre-push hook, ...) ---
 	//
-	// UpsertArtifact records one durable run artifact (a pushed branch, or a
+	// UpsertDeliverable records one durable run deliverable (a pushed branch, or a
 	// review draft the host composes) at the host-side choke point. The
 	// caller supplies the polymorphic fields (Provider/Kind/Target/State/
 	// DedupKey/...); the client stamps conversation_id/org_id/team_id off the conversation
@@ -308,7 +308,7 @@ type Client interface {
 	// like the pending-PR writer. Returns the stored row; best-effort
 	// callers (the pre-push hook) ignore it. Over the sandbox's socket it
 	// records a branch and refuses every other kind (Server). See TFAC-460.
-	UpsertArtifact(ctx context.Context, a domain.Artifact) (domain.Artifact, error)
+	UpsertDeliverable(ctx context.Context, a domain.Deliverable) (domain.Deliverable, error)
 
 	// --- jira (exec jira ticket ...) ---
 	//
@@ -408,14 +408,14 @@ type Client interface {
 	// --- review draft staging (gh pr start-review / add-review-comment) ---
 	//
 	// A review is staged entirely TF-side (TFAC-494) — start-review records a
-	// conversation-scoped `review` artifact and add-review-comment appends to its
+	// conversation-scoped `review` deliverable and add-review-comment appends to its
 	// details.staged_comments, both pure local writes with zero GitHub calls. The
 	// review never occupies GitHub's one-per-identity pending-review slot during
 	// the draft window; the atomic create+submit happens at approval. These bridge
 	// those writes host-side so the sandbox (no DB) routes them through the daemon,
-	// exactly like UpsertArtifact. owner/repo#number name the pull request: the
+	// exactly like UpsertDeliverable. owner/repo#number name the pull request: the
 	// host reads its node id from GitHub, which the draft is keyed on, and builds
-	// the artifact target; reviewID is the local handle (the artifact id)
+	// the deliverable target; reviewID is the local handle (the deliverable id)
 	// start-review returns.
 	//
 	// GithubCreatePendingReview returns the local review handle; the comments param
@@ -441,7 +441,7 @@ type Client interface {
 	// comment on this conversation's TF-side review draft, addressed by the stable TF-local
 	// comment id add-review-comment minted (a non-numeric id, distinct from the
 	// REST numeric ids GithubUpdate/DeleteComment take). They rewrite the matching
-	// entry in the review artifact's details.staged_comments — a pure local write,
+	// entry in the review deliverable's details.staged_comments — a pure local write,
 	// no GitHub call until the review submits at approval. These are the staged
 	// counterpart of the comment-update / comment-delete REST path; the CLI picks
 	// between them by try-parsing the id as an int. UpdateStagedReviewComment's

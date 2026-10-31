@@ -93,7 +93,7 @@ func TestRefreshGitHub_RESTDiscovery_SeedsEntityAndConditionalSkips(t *testing.T
 	bus := eventbus.New()
 	t.Cleanup(bus.Close)
 
-	tr := New(database, busPublisher{bus: bus}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
+	tr := New(database, busPublisher{bus: bus}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 
 	// Cycle 1: REST 200 → the PR becomes an entity. username="" exercises

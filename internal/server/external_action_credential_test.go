@@ -83,7 +83,7 @@ func TestCredentialForRepo(t *testing.T) {
 // or whose repository's row is retired, names no repository to classify.
 func TestGithubCredentialForPullRequest(t *testing.T) {
 	pat := identityResolver{identity: ghclient.IdentityPAT}
-	pr := &db.ArtifactPullRequest{RepositoryID: "repo-1", Owner: "octo", Repo: "repo", Number: 7}
+	pr := &db.DeliverablePullRequest{RepositoryID: "repo-1", Owner: "octo", Repo: "repo", Number: 7}
 	if got := githubCredentialForPullRequest(t.Context(), pat, "org", pr); got != domain.CredentialGitHubPAT {
 		t.Errorf("credential = %q, want github_pat", got)
 	}

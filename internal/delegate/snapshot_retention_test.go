@@ -19,7 +19,7 @@ import (
 )
 
 // TestProcessCompletion_DraftPRDoesNotPark: a completed step that queued a draft
-// PR does not park. The artifact is an async sidecar — the step completes with
+// PR does not park. The deliverable is an async sidecar — the step completes with
 // its real outcome (continue) rather than waiting on a human — and like every
 // completed terminal it snapshots on the way out.
 func TestProcessCompletion_DraftPRDoesNotPark(t *testing.T) {
@@ -28,7 +28,7 @@ func TestProcessCompletion_DraftPRDoesNotPark(t *testing.T) {
 	wireBlobStore(t, s)
 	bpr := blueprintRunIDForConversation(t, database, conversationID)
 
-	seedDraftPRArtifact(t, s, conversationID)
+	seedDraftPRDeliverable(t, s, conversationID)
 
 	task := loadTask(t, s, taskID)
 	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
@@ -44,7 +44,7 @@ func TestProcessCompletion_DraftPRDoesNotPark(t *testing.T) {
 }
 
 // TestProcessCompletion_PlainAbortWritesSnapshot: a plain abort (completed +
-// outcome=abort, no queued artifact) snapshots its workspace at the terminal
+// outcome=abort, no queued deliverable) snapshots its workspace at the terminal
 // write but returns parked=false — the worktree is torn down by the cleanup
 // defers and cold rehydrate from the snapshot is the resume path.
 func TestProcessCompletion_PlainAbortWritesSnapshot(t *testing.T) {

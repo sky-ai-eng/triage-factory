@@ -48,7 +48,7 @@ func TestCapture_GHWriteDenied_RecordsEveryRefusal(t *testing.T) {
 		if a.Action != domain.ActionGHWriteDenied {
 			t.Errorf("action = %q, want gh_write_denied", a.Action)
 		}
-		if a.Provider != domain.ArtifactProviderGitHub || a.Credential != domain.CredentialGitHubApp {
+		if a.Provider != domain.ProviderGitHub || a.Credential != domain.CredentialGitHubApp {
 			t.Errorf("refusal row mismatch: %+v", a)
 		}
 		if a.ConversationID != info.ConversationID {

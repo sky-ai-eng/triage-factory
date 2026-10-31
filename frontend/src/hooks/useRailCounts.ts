@@ -42,7 +42,7 @@ const HINT_DEBOUNCE_MS = 1000
  *    the whole of `running` and half of `needs`.
  *  - `permission_request` / `permission_resolved` — the other half of `needs`.
  *  - `conversations_updated` — a write that moved a conversation between the
- *    sets without touching its status (an artifact resolved by a person or
+ *    sets without touching its status (a deliverable resolved by a person or
  *    retired by the reconciler).
  */
 const HINTS = new Set<WSEvent['type']>([
@@ -78,7 +78,7 @@ function runningCountBody() {
 
 /** The rail's `needs`: the server-side "YOUR MOVE" predicate — an unanswered
  *  permission prompt, or a not-live conversation still holding an unresolved
- *  artifact. Derived there rather than here because it is a question about
+ *  deliverable. Derived there rather than here because it is a question about
  *  every conversation the viewer can see, and the client holds none of them. */
 function needsCountBody() {
   return { attention: true, page_size: 0 }

@@ -1408,7 +1408,7 @@ func TestParseGraphQLRequest_CycleAroundARealMutationIsStillNamed(t *testing.T) 
 
 // TestComment_NamesTheNumberingOfEveryCommentAct pins Shape.Comment across both
 // transports: each act that posts, edits or deletes a comment names which of
-// GitHub's two numberings the comment is in, since its artifact is keyed on the
+// GitHub's two numberings the comment is in, since its deliverable is keyed on the
 // pair, and a reaction to a comment, which leaves the comment as it was, names
 // none.
 func TestComment_NamesTheNumberingOfEveryCommentAct(t *testing.T) {

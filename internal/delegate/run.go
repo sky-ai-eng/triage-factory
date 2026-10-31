@@ -2,7 +2,7 @@
 // terminal completion into the right DB state — record the parsed outcome,
 // finalize the conversation row, and snapshot a voluntarily-aborted
 // conversation for resume. A queued draft PR / pending review is an async
-// sidecar artifact that never parks the conversation — the step completes with
+// sidecar deliverable that never parks the conversation — the step completes with
 // its real outcome and the orchestrator advances. Shared between the initial
 // Delegate path and the resume-with-message flow. The concluded-vs-open turn
 // classification and the
@@ -233,7 +233,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// defer below reads it to KEEP the session JSONL on disk as the warm
 	// resume cache — the same thing the isBlueprintStep skip beside it does.
 	// Captured by reference by the deferred closures, so they observe its
-	// final value at return. A completed run does not park: a queued artifact
+	// final value at return. A completed run does not park: a queued deliverable
 	// is a sidecar, not a reason to hold the run open.
 	var parked bool
 
@@ -426,7 +426,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	branchTemplate := s.resolveBranchTemplate(context.WithoutCancel(ctx), task)
 	runURL := s.runURLFor(orgID, conversationID)
 	publishedRunURL := s.publishedRunURLFor(orgID, conversationID)
-	artifacts := s.taskArtifacts(context.WithoutCancel(ctx), orgID, task.ID)
+	deliverables := s.taskArtifacts(context.WithoutCancel(ctx), orgID, task.ID)
 
 	// The two channels this launch composes, split by who authored what. TF's
 	// own words — the framework blocks, the mission, this run's facts, the verb
@@ -440,7 +440,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		cfg.appendSysPrompt,
 	)
 	systemPrompt := sdkSystemPrompt(systemBlock, agentBin)
-	taskContext := BuildTaskContext(task, cfg.container(), metadataJSON, cfg.prSkeleton, artifacts)
+	taskContext := BuildTaskContext(task, cfg.container(), metadataJSON, cfg.prSkeleton, deliverables)
 
 	// The task context's retention, on the same terms as the native path: the
 	// row carrying these bytes is compacted like any other, and this file is the
@@ -913,7 +913,7 @@ func openingContentBlocks(rows []domain.Message) ([]agentproc.ContentBlock, erro
 //     conversation `open` with the conclusion stamped (a conversation never
 //     concludes; its blueprint run, which the orchestrator advances or
 //     closes off this verdict, does). A queued review/PR is an async sidecar
-//     artifact and changes nothing here; the step records its real outcome.
+//     deliverable and changes nothing here; the step records its real outcome.
 //   - no conclusion (prose / nothing) → the run is open, not a termination:
 //     park it open (snapshot + flip + keep the warm worktree) and return.
 //     Every backend hands its no-conclusion turn here with the process
@@ -952,7 +952,7 @@ func openingContentBlocks(rows []domain.Message) ([]agentproc.ContentBlock, erro
 // as the warm resume cache. A verdict, a failure or an invalid envelope
 // (including a verdict that produced a draft PR / pending review) returns
 // false — the step has given the only answer it is going to, the blueprint
-// acts on it, and the artifact is a resolvable sidecar, not a reason to keep
+// acts on it, and the deliverable is a resolvable sidecar, not a reason to keep
 // the tree warm.
 //
 // claimID names the engagement that produced this result, so its terminal
@@ -1161,12 +1161,12 @@ func (s *Spawner) processCompletion(
 	bgCtx := context.WithoutCancel(ctx)
 
 	// A queued draft PR / pending review NO LONGER parks the run. The
-	// artifact was already recorded by the exec choke point and is an async
+	// deliverable was already recorded by the exec choke point and is an async
 	// sidecar: a human resolves it independently and it never blocks step
 	// progression. So there's no external-action coercion and no approval park
 	// here — the step completes with its real outcome (continue advances,
 	// finish terminates) per blueprintDecisionForStepConversation, and the approval state is
-	// derived downstream from the unresolved-artifact set (has_unresolved_artifacts).
+	// derived downstream from the unresolved-deliverable set (has_unresolved_deliverables).
 
 	// Every verdict snapshots its workspace — while the worktree and session
 	// transcript are still on disk — then lets the cleanup defers tear the

@@ -10,7 +10,7 @@ import type { ArtifactTotals, PendingTotals } from './cardModel'
 // four of them are terminal the moment they are written. Only two shapes can
 // ever await a human: a DRAFT pull request, and a PENDING review with the
 // ready sentinel set. That is a domain fact, not a policy — see
-// `HasUnresolvedArtifacts`. A kind carrying one of them draws warm.
+// `HasUnresolvedDeliverables`. A kind carrying one of them draws warm.
 //
 // The strip is a record, so it opens the run page rather than answering
 // anything in place. It sits at the card's right edge because it is a target

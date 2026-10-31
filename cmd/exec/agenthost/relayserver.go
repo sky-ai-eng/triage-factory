@@ -162,7 +162,7 @@ func (s *RelayServer) SetProxyCreds(pc *ProxyCredentials) { s.proxyCreds = pc }
 
 // SetGitHubCredential records which GitHub credential this run's writes act
 // under, so every audit row served here — the relayed gh-channel writes and
-// refusals, the git denials, the branch push composed into an artifact upsert —
+// refusals, the git denials, the branch push composed into a deliverable upsert —
 // names the credential that made them.
 //
 // Injected late for the same reason SetProxyCreds is, and from the same place:
@@ -464,12 +464,12 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		}
 		return nil, nil
 
-	case opListConversationArtifacts:
-		arts, err := s.rt.ListConversationArtifacts(ctx)
+	case opListConversationDeliverables:
+		arts, err := s.rt.ListConversationDeliverables(ctx)
 		if err != nil {
 			return nil, err
 		}
-		return json.Marshal(listConversationArtifactsResult{Artifacts: arts})
+		return json.Marshal(listConversationDeliverablesResult{Deliverables: arts})
 
 	case opOrgJiraBase:
 		url, err := s.rt.OrgJiraBaseURL(ctx)
@@ -478,23 +478,23 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		}
 		return json.Marshal(orgJiraBaseResult{URL: url})
 
-	case opUpsertArtifact:
-		var a upsertArtifactArgs
+	case opUpsertDeliverable:
+		var a upsertDeliverableArgs
 		if err := json.Unmarshal(args, &a); err != nil {
 			return nil, err
 		}
-		stored, err := s.rt.UpsertArtifact(ctx, a.Artifact)
+		stored, err := s.rt.UpsertDeliverable(ctx, a.Deliverable)
 		if err != nil {
 			return nil, err
 		}
-		return json.Marshal(upsertArtifactResult{Artifact: stored})
+		return json.Marshal(upsertDeliverableResult{Deliverable: stored})
 
 	case opUpdateReviewDetails:
 		var a updateReviewDetailsArgs
 		if err := json.Unmarshal(args, &a); err != nil {
 			return nil, err
 		}
-		updated, err := s.rt.UpdateReviewDetailsIfPending(ctx, a.ArtifactID, a.DetailsJSON)
+		updated, err := s.rt.UpdateReviewDetailsIfPending(ctx, a.DeliverableID, a.DetailsJSON)
 		if err != nil {
 			return nil, err
 		}
@@ -508,7 +508,7 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		// Relayed as a CALL, never a record: the sidecar's auto-post path blocks
 		// on the claim's answer — publishing without knowing whether it won the
 		// CAS is exactly the double-submit this guards.
-		moved, err := s.rt.TransitionReviewState(ctx, a.ArtifactID, a.From, a.To, a.ExternalID, a.URL, a.DetailsJSON)
+		moved, err := s.rt.TransitionReviewState(ctx, a.DeliverableID, a.From, a.To, a.ExternalID, a.URL, a.DetailsJSON)
 		if err != nil {
 			return nil, err
 		}
@@ -530,19 +530,19 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		}
 		return json.Marshal(res)
 
-	case opArtifactPullRequest:
-		var a artifactPullRequestArgs
+	case opDeliverablePullRequest:
+		var a deliverablePullRequestArgs
 		if err := json.Unmarshal(args, &a); err != nil {
 			return nil, err
 		}
 		// The entity and registry rows live behind the stores the sidecar does
-		// not hold; the artifact is looked up among the run's own, from the
+		// not hold; the deliverable is looked up among the run's own, from the
 		// orchestrator's ConversationInfo.
-		pr, err := s.rt.ArtifactPullRequest(ctx, a.ArtifactID)
+		pr, err := s.rt.DeliverablePullRequest(ctx, a.DeliverableID)
 		if err != nil {
 			return nil, err
 		}
-		return json.Marshal(artifactPullRequestResult{
+		return json.Marshal(deliverablePullRequestResult{
 			RepositoryID: pr.RepositoryID,
 			Owner:        pr.Owner,
 			Repo:         pr.Repo,
@@ -903,7 +903,7 @@ func graphQLFactsFromWire(w *agentproc.GraphQLWriteFacts) *ghwrite.GraphQLFacts 
 //
 // No op here sets a timeout of its own. ctx carries DispatchRecord's cap
 // (relayWriteTimeout), which bounds everything that runs on it — the push's
-// artifact upsert, the read touch, the gh write's lookups — and the recording
+// deliverable upsert, the read touch, the gh write's lookups — and the recording
 // funnel the ops end in writes on its own detached budget (recordWriteBudget).
 func (s *RelayServer) dispatchCoreRecord(ctx context.Context, op string, args json.RawMessage) error {
 	switch op {
@@ -1002,7 +1002,7 @@ func (s *RelayServer) dispatchCoreRecord(ctx context.Context, op string, args js
 		if a.Action != nil {
 			a.Action.DedupKey = ""
 		}
-		s.rt.Record(ctx, a.Artifact, a.Action, a.EntityContainer)
+		s.rt.Record(ctx, a.Deliverable, a.Action, a.EntityContainer)
 
 	case opRecordReadTouch:
 		var a recordReadTouchArgs

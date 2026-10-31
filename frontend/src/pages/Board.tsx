@@ -9,7 +9,7 @@ import {
   isPermissionTerminalStatus,
   isTerminalStatus,
 } from '../lib/conversationStatus'
-import { approvalCounts, hasUnresolvedArtifacts } from '../lib/approval'
+import { approvalCounts, hasUnresolvedDeliverables } from '../lib/approval'
 import {
   summarizePermissionInput,
   type PendingPermission,
@@ -189,7 +189,7 @@ function loadCollapsed(userID: string): CollapseMap {
 }
 
 // The two gestures that end a task, each gated behind the resolve-all
-// confirmation when the task still carries unresolved artifacts: ending a
+// confirmation when the task still carries unresolved deliverables: ending a
 // task is what tears them down.
 type EndAction = 'complete' | 'dismiss'
 
@@ -230,7 +230,7 @@ export default function Board() {
   // Agent conversation state — every task's newest (or active-step)
   // conversation, keyed by task id. A card reads its run from here whatever
   // lane it is in: a queued task carries the conversation a requeue handed
-  // back with it, and its artifacts along with it.
+  // back with it, and its deliverables along with it.
   const [conversations, setConversations] = useState<Record<string, Conversation>>({})
   const conversationsRef = useRef(conversations)
   useEffect(() => {
@@ -372,8 +372,8 @@ export default function Board() {
 
   // Resolve-all confirmation: the two gestures that END a task —
   // drag-to-Done from In Progress (complete) and from Queued (dismiss) —
-  // force-resolve every unresolved artifact and cancel a live conversation.
-  // When the target task has unresolved artifacts we stash the intended
+  // force-resolve every unresolved deliverable and cancel a live conversation.
+  // When the target task has unresolved deliverables we stash the intended
   // action here and gate the request behind the confirmation modal.
   const [confirmResolve, setConfirmResolve] = useState<{
     taskId: string
@@ -456,7 +456,7 @@ export default function Board() {
   // Agent conversations for the given tasks — every task on the board on a
   // refresh, one task on a transcript tick. A queued task can be carrying the
   // conversation a requeue handed back with it, along with that
-  // conversation's artifacts, so the Queued lane is enriched like the other
+  // conversation's deliverables, so the Queued lane is enriched like the other
   // two. ONE aggregated call returns every task's conversations, replacing
   // a per-task serial loop of 2–3 round-trips each.
   const enrich = useCallback(
@@ -841,10 +841,10 @@ export default function Board() {
                 .catch(() => {})
             }
           }
-        } else if (event.type === 'artifact_updated') {
-          // Reconciler: an artifact this conversation produced changed state
+        } else if (event.type === 'deliverable_updated') {
+          // Reconciler: a deliverable this conversation produced changed state
           // on GitHub. The conversation's own status is unchanged — only its
-          // artifact-derived surface (the strip, the frame) — so refetch
+          // deliverable-derived surface (the strip, the frame) — so refetch
           // the conversation, with NO optimistic Status write (unlike conversation_update).
           apiJSON<Conversation>(`/api/agent/conversations/${event.conversation_id}`)
             .then((fullConversation) => {
@@ -966,7 +966,7 @@ export default function Board() {
   // A status write on the task. Complete (drag-to-Done from In Progress)
   // keeps the card in Done; dismiss (drag-to-Done from Queued) closes it
   // unworked; in_progress is how a card comes back out of Done. Ending the
-  // task force-resolves every unresolved artifact server-side and cancels a
+  // task force-resolves every unresolved deliverable server-side and cancels a
   // live conversation; we only confirm first.
   const patchStatus = useCallback(
     async (taskId: string, status: 'done' | 'dismissed' | 'in_progress', failure: string) => {
@@ -1010,7 +1010,7 @@ export default function Board() {
   // drop into Queued, and the picker's unassign. It asks only when a run is in
   // flight, because that is the one thing the gesture destroys: the requeue
   // stops it. With nothing running the move is reversible by re-claiming, so
-  // it fires without a word. The artifacts are not in question either way —
+  // it fires without a word. The deliverables are not in question either way —
   // a requeue hands them back to the queue with the task.
   const requestRequeue = useCallback(
     (taskId: string) => {
@@ -1025,7 +1025,7 @@ export default function Board() {
   )
 
   // requestResolveAll gates a task-ending gesture behind the confirmation
-  // modal when the task's conversation still has unresolved artifacts.
+  // modal when the task's conversation still has unresolved deliverables.
   // Returns true when it deferred to the modal (the caller must NOT fire its
   // own request); false when there's nothing to resolve and the caller should
   // proceed directly.
@@ -1036,7 +1036,7 @@ export default function Board() {
   const requestResolveAll = useCallback(
     (taskId: string, action: EndAction): boolean => {
       const conversation = conversations[taskId]
-      if (!conversation || !hasUnresolvedArtifacts(conversation)) return false
+      if (!conversation || !hasUnresolvedDeliverables(conversation)) return false
       const c = approvalCounts(conversation)
       setConfirmResolve({
         taskId,
@@ -1212,7 +1212,7 @@ export default function Board() {
 
       if (sourceCol === 'queued') {
         // Queued → Done: dismiss. Ending the task is what tears its
-        // artifacts down, and a task can be carrying a draft PR back in the
+        // deliverables down, and a task can be carrying a draft PR back in the
         // queue, so the gate that guards completing guards this too.
         if (targetCol === 'done') {
           if (requestResolveAll(taskId, 'dismiss')) return
@@ -1238,7 +1238,7 @@ export default function Board() {
       }
 
       // Any → Done: complete (preserves the card in Done; distinct from queued →
-      // done which dismisses). Ending the task IS what resolves its artifacts,
+      // done which dismisses). Ending the task IS what resolves its deliverables,
       // so this gesture keeps the confirmation.
       if (targetCol === 'done') {
         if (requestResolveAll(taskId, 'complete')) return

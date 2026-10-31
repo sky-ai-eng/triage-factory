@@ -249,7 +249,7 @@ func linearProxyClient(t *testing.T, linearURL string, eventTriggered bool) (*Lo
 	t.Helper()
 	stores, info := newCaptureStores(t, eventTriggered)
 	// The org's Linear workspace, which connecting Linear always records: it is
-	// the scope every Linear artifact and audit row is written under.
+	// the scope every Linear deliverable and audit row is written under.
 	if _, err := stores.Orgs.SetLinearWorkspace(context.Background(), info.OrgID, "linear-workspace-uuid", "acme"); err != nil {
 		t.Fatalf("set linear workspace: %v", err)
 	}
@@ -544,11 +544,11 @@ func TestLinearVerbs_BadCallsFailBeforeCallingLinear(t *testing.T) {
 	}
 }
 
-// TestLinearVerbs_RecordArtifacts pins the audit trail: each write lands one
-// artifacts row keyed on the issue's UUID (the comment's anchored on its id)
+// TestLinearVerbs_RecordDeliverables pins the audit trail: each write lands one
+// deliverables row keyed on the issue's UUID (the comment's anchored on its id)
 // and one external action under the org's Linear identity, across both write
 // paths; reads record nothing.
-func TestLinearVerbs_RecordArtifacts(t *testing.T) {
+func TestLinearVerbs_RecordDeliverables(t *testing.T) {
 	for _, eventTriggered := range []bool{true, false} {
 		name := "manual"
 		if eventTriggered {
@@ -562,8 +562,8 @@ func TestLinearVerbs_RecordArtifacts(t *testing.T) {
 			if _, err := lc.LinearGetIssue(ctx, "ENG-7"); err != nil {
 				t.Fatalf("LinearGetIssue: %v", err)
 			}
-			if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 0 {
-				t.Fatalf("a read recorded %d artifact(s)", len(arts))
+			if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 0 {
+				t.Fatalf("a read recorded %d deliverable(s)", len(arts))
 			}
 			if _, err := lc.LinearTransition(ctx, "ENG-7", "Done"); err != nil {
 				t.Fatalf("LinearTransition: %v", err)
@@ -575,35 +575,35 @@ func TestLinearVerbs_RecordArtifacts(t *testing.T) {
 				t.Fatalf("LinearCreateIssue: %v", err)
 			}
 
-			byKey := map[string]domain.Artifact{}
-			for _, a := range listConversationArtifacts(t, stores, info.ConversationID) {
+			byKey := map[string]domain.Deliverable{}
+			for _, a := range listConversationDeliverables(t, stores, info.ConversationID) {
 				byKey[a.DedupKey] = a
 			}
-			issueKey := domain.ArtifactDedupKey(domain.ArtifactProviderLinear, domain.ArtifactKindIssue, fakeLinearIssueUUID, "")
-			commentKey := domain.ArtifactDedupKey(domain.ArtifactProviderLinear, domain.ArtifactKindComment, fakeLinearIssueUUID, fakeLinearCommentID)
-			createdKey := domain.ArtifactDedupKey(domain.ArtifactProviderLinear, domain.ArtifactKindIssue, fakeLinearCreated, "")
+			issueKey := domain.ObjectKey(domain.ProviderLinear, domain.DeliverableKindIssue, fakeLinearIssueUUID, "")
+			commentKey := domain.ObjectKey(domain.ProviderLinear, domain.DeliverableKindComment, fakeLinearIssueUUID, fakeLinearCommentID)
+			createdKey := domain.ObjectKey(domain.ProviderLinear, domain.DeliverableKindIssue, fakeLinearCreated, "")
 			if len(byKey) != 3 {
-				t.Fatalf("artifacts = %v, want exactly %s, %s, %s", byKey, issueKey, commentKey, createdKey)
+				t.Fatalf("deliverables = %v, want exactly %s, %s, %s", byKey, issueKey, commentKey, createdKey)
 			}
-			if a := byKey[issueKey]; a.Provider != domain.ArtifactProviderLinear || a.Kind != domain.ArtifactKindIssue ||
-				a.Target != "ENG-7" || a.ExternalID != fakeLinearIssueUUID || a.State != domain.ArtifactStateIssueUpdated ||
+			if a := byKey[issueKey]; a.Provider != domain.ProviderLinear || a.Kind != domain.DeliverableKindIssue ||
+				a.Target != "ENG-7" || a.ExternalID != fakeLinearIssueUUID || a.State != domain.DeliverableStateIssueUpdated ||
 				!strings.HasPrefix(a.URL, "https://linear.app/acme/issue/ENG-7") {
-				t.Errorf("issue artifact = %+v", a)
+				t.Errorf("issue deliverable = %+v", a)
 			}
 			// The comment was posted naming the issue in lower case; its row
 			// carries the identifier Linear answered with.
-			if a := byKey[commentKey]; a.Kind != domain.ArtifactKindComment || a.Target != "ENG-7" ||
-				a.ExternalID != fakeLinearCommentID || a.State != domain.ArtifactStateCommentPosted {
-				t.Errorf("comment artifact = %+v", a)
+			if a := byKey[commentKey]; a.Kind != domain.DeliverableKindComment || a.Target != "ENG-7" ||
+				a.ExternalID != fakeLinearCommentID || a.State != domain.DeliverableStateCommentPosted {
+				t.Errorf("comment deliverable = %+v", a)
 			}
-			if a := byKey[createdKey]; a.Target != "ENG-8" || a.State != domain.ArtifactStateIssueCreated {
-				t.Errorf("created artifact = %+v", a)
+			if a := byKey[createdKey]; a.Target != "ENG-8" || a.State != domain.DeliverableStateIssueCreated {
+				t.Errorf("created deliverable = %+v", a)
 			}
 
 			acts := listExternalActions(t, stores)
 			got := map[string]domain.ExternalAction{}
 			for _, a := range acts {
-				if a.Credential != domain.CredentialLinearOrg || a.Provider != domain.ArtifactProviderLinear || a.ConversationID != info.ConversationID {
+				if a.Credential != domain.CredentialLinearOrg || a.Provider != domain.ProviderLinear || a.ConversationID != info.ConversationID {
 					t.Errorf("action %+v is not attributed to the org's Linear identity on this conversation", a)
 				}
 				got[a.Action] = a
@@ -625,7 +625,7 @@ func TestLinearVerbs_RecordArtifacts(t *testing.T) {
 }
 
 // TestLinearAssign_RecordsTheAssignee pins an assign's audit trail: the issue's
-// artifact and its external action name the person assigned, by id and name,
+// deliverable and its external action name the person assigned, by id and name,
 // under the org's Linear identity.
 func TestLinearAssign_RecordsTheAssignee(t *testing.T) {
 	ctx := context.Background()
@@ -636,9 +636,9 @@ func TestLinearAssign_RecordsTheAssignee(t *testing.T) {
 	}
 	names := []string{`"id":"` + fakeLinearPersonID + `"`, `"name":"Ana Lyst"`}
 
-	arts := listConversationArtifacts(t, stores, info.ConversationID)
-	if len(arts) != 1 || arts[0].ExternalID != fakeLinearIssueUUID || arts[0].State != domain.ArtifactStateIssueUpdated {
-		t.Fatalf("artifacts = %+v, want ENG-7's one issue row", arts)
+	arts := listConversationDeliverables(t, stores, info.ConversationID)
+	if len(arts) != 1 || arts[0].ExternalID != fakeLinearIssueUUID || arts[0].State != domain.DeliverableStateIssueUpdated {
+		t.Fatalf("deliverables = %+v, want ENG-7's one issue row", arts)
 	}
 	acts := listExternalActions(t, stores)
 	if len(acts) != 1 || acts[0].Action != domain.ActionIssueAssigned || acts[0].Credential != domain.CredentialLinearOrg {
@@ -646,7 +646,7 @@ func TestLinearAssign_RecordsTheAssignee(t *testing.T) {
 	}
 	for _, want := range names {
 		if !strings.Contains(arts[0].DetailsJSON, want) {
-			t.Errorf("artifact details %q do not name the assignee (%s)", arts[0].DetailsJSON, want)
+			t.Errorf("deliverable details %q do not name the assignee (%s)", arts[0].DetailsJSON, want)
 		}
 		if !strings.Contains(acts[0].DetailJSON, want) {
 			t.Errorf("action details %q do not name the assignee (%s)", acts[0].DetailJSON, want)
@@ -680,7 +680,7 @@ func TestLinearVerbs_TouchTheIssuesEntity(t *testing.T) {
 		{fakeLinearIssueUUID, "ENG-7"},
 		{fakeLinearCreated, "ENG-8"},
 	} {
-		ent, err := stores.Entities.GetByExternalIDSystem(ctx, runmode.LocalDefaultOrgID, domain.ArtifactProviderLinear, testScope("linear"), tc.uuid)
+		ent, err := stores.Entities.GetByExternalIDSystem(ctx, runmode.LocalDefaultOrgID, domain.ProviderLinear, testScope("linear"), tc.uuid)
 		if err != nil || ent == nil {
 			t.Fatalf("entity for %s: %v, %v", tc.identifier, ent, err)
 		}

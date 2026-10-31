@@ -20,7 +20,7 @@ import (
 const (
 	// skipNoEntity: no entity carries the object, and the writer cannot create
 	// one. A Linear or Jira entity is created only with its team or project,
-	// which an artifact does not record and a touch has only when the response
+	// which a deliverable does not record and a touch has only when the response
 	// it read named it.
 	skipNoEntity = "no_entity"
 	// skipError: resolving the entity or its scope, or writing the link,

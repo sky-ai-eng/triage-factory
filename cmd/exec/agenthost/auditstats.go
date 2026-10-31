@@ -23,7 +23,7 @@ import (
 // exist for its placement (a local-mode run has no relay at all, so its only
 // reachable stage is the write) and is counted at the stage that finally lost
 // it, never at two. The write stage counts what it lost rather than the record
-// that carried it: a record whose artifact and then its action-alone fallback
+// that carried it: a record whose deliverable and then its action-alone fallback
 // both fail counts twice there, once under each.
 const (
 	// dropStageRelaySend — the sidecar gave the record up without the
@@ -107,12 +107,12 @@ func recordAuditDrops(ctx context.Context, stage, op string, n int64) {
 }
 
 // recordDropOp names what the write funnel was recording, for a drop at the
-// write stage: the artifact's kind, or — for an audit-only write, which carries
-// no artifact — the action's discriminator. Both are closed domain
+// write stage: the deliverable's kind, or — for an audit-only write, which carries
+// no deliverable — the action's discriminator. Both are closed domain
 // vocabularies minted by TF itself, which is what makes either safe as a label;
 // the target they were written against is a repo path and stays out, the same
 // line the artifact.record span draws.
-func recordDropOp(a *domain.Artifact, act *domain.ExternalAction) string {
+func recordDropOp(a *domain.Deliverable, act *domain.ExternalAction) string {
 	switch {
 	case a != nil && a.Kind != "":
 		return a.Kind

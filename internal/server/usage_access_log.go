@@ -18,7 +18,7 @@ import (
 // surface on the Usage page. It reads the already-captured access_change_log
 // (TFAC-471): who changed org/team memberships, roles, ownership, and
 // credentials, and when. This is the SECOND audit surface (the bot-activity /
-// artifacts feed is the other) and answers a distinct question — who changed the
+// deliverables feed is the other) and answers a distinct question — who changed the
 // org's *access*, not what the agent did externally.
 //
 // The data + store are core (access_change_log lives in the baseline schema); the

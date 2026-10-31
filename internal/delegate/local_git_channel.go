@@ -176,7 +176,7 @@ func (s *Spawner) startLocalGitChannel(ctx context.Context, orgID string, task d
 			"conversation", info.ConversationID, "task", task.ID, "error", err)
 	}
 	// Only a PAT is pinned: the App is what an unset credential already reads
-	// as, and leaving it unset keeps the per-artifact classification in play.
+	// as, and leaving it unset keeps the per-deliverable classification in play.
 	if ghclient.TokenIdentity(ctx, resolver, orgID, owner) == ghclient.IdentityPAT {
 		auditHost.SetGitHubCredential(domain.CredentialGitHubPAT)
 	}

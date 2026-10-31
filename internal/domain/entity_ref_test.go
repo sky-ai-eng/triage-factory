@@ -3,7 +3,7 @@ package domain
 import "testing"
 
 // TestEntityRefForExternal pins the (provider, target) → entity natural-key
-// mapping shared by the exec-touch resolver and the conversation-end produced-artifact
+// mapping shared by the exec-touch resolver and the conversation-end produced-deliverable
 // attach: GitHub targets must parse as owner/repo#N (repo-level coordinates
 // map to nothing) and carry the pull request's node id when one is given, Jira targets are issue keys and need the issue's id, Linear
 // targets are issue identifiers and need the issue's UUID, Slack targets are a
@@ -26,37 +26,37 @@ func TestEntityRefForExternal(t *testing.T) {
 	}{
 		{
 			name:     "github PR target → pr entity",
-			provider: ArtifactProviderGitHub, target: "octo/repo#18",
-			wantOK: true, wantSource: ArtifactProviderGitHub, wantKind: "pr",
+			provider: ProviderGitHub, target: "octo/repo#18",
+			wantOK: true, wantSource: ProviderGitHub, wantKind: "pr",
 		},
 		{
 			name:     "github PR target with its node id → pr entity carrying it",
-			provider: ArtifactProviderGitHub, target: "octo/repo#18", externalID: "PR_kwDO18",
-			wantOK: true, wantSource: ArtifactProviderGitHub, wantKind: "pr",
+			provider: ProviderGitHub, target: "octo/repo#18", externalID: "PR_kwDO18",
+			wantOK: true, wantSource: ProviderGitHub, wantKind: "pr",
 		},
 		{
 			// A bare owner/repo is repo-level — a branch push's shape too.
 			name:     "github repo-level target skipped",
-			provider: ArtifactProviderGitHub, target: "octo/repo",
+			provider: ProviderGitHub, target: "octo/repo",
 		},
 		{
 			name:     "github empty target skipped",
-			provider: ArtifactProviderGitHub, target: "",
+			provider: ProviderGitHub, target: "",
 		},
 		{
 			name:     "jira issue key → issue entity",
-			provider: ArtifactProviderJira, target: "SKY-123", externalID: "10042",
-			wantOK: true, wantSource: ArtifactProviderJira, wantKind: "issue",
+			provider: ProviderJira, target: "SKY-123", externalID: "10042",
+			wantOK: true, wantSource: ProviderJira, wantKind: "issue",
 		},
 		{
 			// A key alone can name another issue once the one it named moved,
 			// so nothing is resolved — or minted — without the id.
 			name:     "jira key without an issue id skipped",
-			provider: ArtifactProviderJira, target: "SKY-123",
+			provider: ProviderJira, target: "SKY-123",
 		},
 		{
 			name:     "jira empty target skipped",
-			provider: ArtifactProviderJira, target: "", externalID: "10042",
+			provider: ProviderJira, target: "", externalID: "10042",
 		},
 		{
 			// The defect this folding closes: Jira accepts a lower-case key on
@@ -64,59 +64,59 @@ func TestEntityRefForExternal(t *testing.T) {
 			// minted verbatim here is one the poller can never match a refresh
 			// back to — silently, since nothing about the call fails.
 			name:     "jira lower-case key folded to canonical",
-			provider: ArtifactProviderJira, target: "sky-123", externalID: "10042",
+			provider: ProviderJira, target: "sky-123", externalID: "10042",
 			wantOK: true, wantSourceID: "SKY-123",
-			wantSource: ArtifactProviderJira, wantKind: "issue",
+			wantSource: ProviderJira, wantKind: "issue",
 		},
 		{
 			name:     "jira mixed-case key with padding folded",
-			provider: ArtifactProviderJira, target: "  Sky-123 ", externalID: "10042",
+			provider: ProviderJira, target: "  Sky-123 ", externalID: "10042",
 			wantOK: true, wantSourceID: "SKY-123",
-			wantSource: ArtifactProviderJira, wantKind: "issue",
+			wantSource: ProviderJira, wantKind: "issue",
 		},
 		{
 			// Skipped on the folded value, not the raw one — otherwise a
 			// whitespace-only target mints an entity keyed on "".
 			name:     "jira whitespace-only target skipped",
-			provider: ArtifactProviderJira, target: "   ", externalID: "10042",
+			provider: ProviderJira, target: "   ", externalID: "10042",
 		},
 		{
 			// GitHub natural keys stay verbatim: repo and owner names are
 			// case-sensitive, so folding them would break the mapping rather
 			// than repair it.
 			name:     "github mixed-case target left verbatim",
-			provider: ArtifactProviderGitHub, target: "Octo/Repo#18",
-			wantOK: true, wantSource: ArtifactProviderGitHub, wantKind: "pr",
+			provider: ProviderGitHub, target: "Octo/Repo#18",
+			wantOK: true, wantSource: ProviderGitHub, wantKind: "pr",
 		},
 		{
 			name:     "slack source id → message entity",
-			provider: ArtifactProviderSlack, target: SlackSourceID("C0125", "1700000000.000100"),
-			wantOK: true, wantSource: ArtifactProviderSlack, wantKind: "message",
+			provider: ProviderSlack, target: SlackSourceID("C0125", "1700000000.000100"),
+			wantOK: true, wantSource: ProviderSlack, wantKind: "message",
 		},
 		{
 			name:     "slack empty target skipped",
-			provider: ArtifactProviderSlack, target: "",
+			provider: ProviderSlack, target: "",
 		},
 		{
 			name:     "linear issue identifier → issue entity",
-			provider: ArtifactProviderLinear, target: "ENG-42", externalID: "2a7e6b0c-uuid",
-			wantOK: true, wantSource: ArtifactProviderLinear, wantKind: "issue",
+			provider: ProviderLinear, target: "ENG-42", externalID: "2a7e6b0c-uuid",
+			wantOK: true, wantSource: ProviderLinear, wantKind: "issue",
 		},
 		{
 			// An identifier alone can name another issue once the one it named
 			// moved team, so nothing is resolved — or minted — without the UUID.
 			name:     "linear identifier without an issue uuid skipped",
-			provider: ArtifactProviderLinear, target: "ENG-42",
+			provider: ProviderLinear, target: "ENG-42",
 		},
 		{
 			name:     "linear empty target skipped",
-			provider: ArtifactProviderLinear, target: "  ", externalID: "2a7e6b0c-uuid",
+			provider: ProviderLinear, target: "  ", externalID: "2a7e6b0c-uuid",
 		},
 		{
 			// PR-shaped target under an unmapped provider — proves the skip is
 			// on the provider (default arm), not the target shape.
 			name:     "unmapped provider skipped",
-			provider: ArtifactProviderGit, target: "octo/repo#9",
+			provider: ProviderGit, target: "octo/repo#9",
 		},
 	}
 
@@ -134,7 +134,7 @@ func TestEntityRefForExternal(t *testing.T) {
 				return
 			}
 			wantExternalID := tc.externalID
-			if tc.provider == ArtifactProviderSlack {
+			if tc.provider == ProviderSlack {
 				wantExternalID = ""
 			}
 			if ref.ExternalID != wantExternalID {

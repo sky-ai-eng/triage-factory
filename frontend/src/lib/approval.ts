@@ -2,8 +2,8 @@ import type { Conversation } from '../types'
 
 // Derived-approval helpers. A conversation never parks for
 // approval; the "needs approval" state is a *view* over the
-// conversation's unresolved-artifact set, projected onto the conversation as has_unresolved_artifacts
-// + pending_artifact_ids + the per-kind counts. These helpers keep the
+// conversation's unresolved-deliverable set, projected onto the conversation as has_unresolved_deliverables
+// + pending_deliverable_ids + the per-kind counts. These helpers keep the
 // count-aware labels and the resolve-all copy in one place so the dock, the board
 // card, and the confirmation modal stay in lockstep.
 
@@ -13,17 +13,17 @@ export interface ApprovalCounts {
   total: number
 }
 
-// artifactSetKey derives a cheap change-key for a conversation's artifact set from the
+// deliverableSetKey derives a cheap change-key for a conversation's deliverable set from the
 // projections that ride the conversation row (websocket-fresh), so an always-mounted
-// ArtifactList can refetch when the set changes shape — a live conversation minting a
+// DeliverableList can refetch when the set changes shape — a live conversation minting a
 // new PR, a resolve landing from another surface or tab — without polling.
-export function artifactSetKey(conversation: Conversation): string {
-  return `${conversation.artifact_count ?? 0}:${(conversation.pending_artifact_ids ?? []).join(',')}`
+export function deliverableSetKey(conversation: Conversation): string {
+  return `${conversation.deliverable_count ?? 0}:${(conversation.pending_deliverable_ids ?? []).join(',')}`
 }
 
 // approvalCounts reads the conversation projection's per-kind unresolved counts. Absent
-// fields (the server's transient-failure guard, or a conversation with no artifacts) read
-// as 0 — a card only surfaces approval affordances when has_unresolved_artifacts
+// fields (the server's transient-failure guard, or a conversation with no deliverables) read
+// as 0 — a card only surfaces approval affordances when has_unresolved_deliverables
 // is true, where the counts are guaranteed present.
 export function approvalCounts(conversation: Conversation): ApprovalCounts {
   const pr = conversation.unresolved_pr_count ?? 0
@@ -31,26 +31,26 @@ export function approvalCounts(conversation: Conversation): ApprovalCounts {
   return { pr, review, total: pr + review }
 }
 
-// hasUnresolvedArtifacts is the single predicate every approval surface keys
+// hasUnresolvedDeliverables is the single predicate every approval surface keys
 // off — approval is never a conversation status. The flag is three-valued: the
 // server emits an explicit true/false only when the answer is definitive (the
-// artifact set was read), and OMITS it (undefined) under its transient-failure
+// deliverable set was read), and OMITS it (undefined) under its transient-failure
 // guard. So honor the authoritative boolean directly when present — a definitive
 // `false` means "none", full stop — and fall back to the id set / counts only
 // when it's undefined (older projections / the transient window).
-export function hasUnresolvedArtifacts(conversation: Conversation | null | undefined): boolean {
+export function hasUnresolvedDeliverables(conversation: Conversation | null | undefined): boolean {
   if (!conversation) return false
-  if (conversation.has_unresolved_artifacts === false) return false
-  if (conversation.has_unresolved_artifacts === true) return true
+  if (conversation.has_unresolved_deliverables === false) return false
+  if (conversation.has_unresolved_deliverables === true) return true
   // undefined → re-derive from whatever the projection did carry.
-  if ((conversation.pending_artifact_ids?.length ?? 0) > 0) return true
+  if ((conversation.pending_deliverable_ids?.length ?? 0) > 0) return true
   const { total } = approvalCounts(conversation)
   return total > 0
 }
 
 // approvalAction is the trailing verb on the "your move" affordance — count-aware:
 // a single item opens its editor directly ("Open PR" / "Review"), and any
-// plural / mixed set opens the conversation's artifact list to choose from ("Review N
+// plural / mixed set opens the conversation's deliverable list to choose from ("Review N
 // items"). Used by the RunStation dock and the board card so both read
 // identically.
 export function approvalAction({ pr, review, total }: ApprovalCounts): string {
@@ -83,7 +83,7 @@ export function resolveAllSummary(pr: number, review: number, isLive: boolean): 
   const body =
     parts.length > 0
       ? parts.join(' and ').replace(/^./, (c) => c.toUpperCase())
-      : 'Resolve all open artifacts'
+      : 'Resolve all open deliverables'
   const live = isLive ? ' The in-progress run will be cancelled.' : ''
   return `${body}? Pushed branches are kept.${live}`
 }

@@ -731,7 +731,7 @@ func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, to
 			// Queued, not awaited: the request already transited, and the
 			// orchestrator holds the DB that turns it into an audit row.
 			// Every mutating REST call rides this, including the refused ones the
-			// artifact path drops. The created object's coordinates ride along
+			// deliverable path drops. The created object's coordinates ride along
 			// for the shapes that make one — this process is the only one that
 			// ever sees a response body, so nothing downstream could recover
 			// them.
@@ -1129,7 +1129,7 @@ func (r *credRuntime) gitProxyConfig(upstream string) *agentproc.GitProxyConfig 
 		},
 		RecordPush: func(_ context.Context, push gitproxy.PushedRef) {
 			// Relay the completed push up so the orchestrator records the
-			// branch artifact / push-failed row. The pre-push hook stands down
+			// branch deliverable / push-failed row. The pre-push hook stands down
 			// in this sandbox (StartRunProxies sets PushCaptureProxy), so this
 			// relay is the sole push-capture path on the executor — without it
 			// no executor push reaches the audit log.

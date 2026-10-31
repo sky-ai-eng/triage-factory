@@ -5,7 +5,7 @@ import { resolveAllSummary } from '../lib/approval'
 
 interface Props {
   open: boolean
-  /** Unresolved draft-PR count, from the conversation projection's unresolved-artifact
+  /** Unresolved draft-PR count, from the conversation projection's unresolved-deliverable
    *  derivation (the same set the backend teardown force-resolves). */
   prCount: number
   /** Unresolved ready-review count, same source. */
@@ -23,7 +23,7 @@ interface Props {
 }
 
 // ResolveAllConfirm is the second gesture's gate (TFAC-384 §4): dragging a task
-// to Done or back to the queue *force-resolves every unresolved artifact* (the
+// to Done or back to the queue *force-resolves every unresolved deliverable* (the
 // generalized teardown) and, if the conversation is live, cancels it. Because that closes
 // real GitHub draft PRs and discards pending reviews, it's destructive enough to
 // confirm — parameterized by the actual set ("Close 2 draft PRs and discard 1
@@ -88,7 +88,7 @@ export default function ResolveAllConfirm({
             onClick={(e) => e.stopPropagation()}
           >
             <h2 id={titleId} className="text-body font-semibold tracking-tight text-ink-1">
-              Resolve open artifacts?
+              Resolve open deliverables?
             </h2>
             <p id={descId} className="mt-2 text-card-title leading-relaxed text-ink-2">
               {resolveAllSummary(prCount, reviewCount, isLive)}

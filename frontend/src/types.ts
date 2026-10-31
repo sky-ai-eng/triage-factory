@@ -290,43 +290,42 @@ export interface Conversation {
   WorktreePath?: string
   // Derived approval signal. Conversations never park for
   // approval; the "needs approval" state is a *view*
-  // over the conversation's unresolved-artifact set. A card surfaces in the approval
-  // column whenever has_unresolved_artifacts is true — whether the conversation is live
+  // over the conversation's unresolved-deliverable set. A card surfaces in the approval
+  // column whenever has_unresolved_deliverables is true — whether the conversation is live
   // or terminal — and re-derives back to in-progress (live) / done (terminal)
-  // once the last artifact is resolved. These four fields replace the legacy
-  // single-kind `pending_kind` / `pending_artifact_id` overlay discriminators.
+  // once the last deliverable is resolved.
   //
   // The server emits them only when the answer is *definitive* (the conversation has no
-  // artifacts, or its artifact set was read successfully); on a transient
+  // deliverables, or its deliverable set was read successfully); on a transient
   // read failure they're OMITTED rather than reported as a misleading false, so
   // consumers treat absence as "unknown" and re-derive on the next refresh.
-  has_unresolved_artifacts?: boolean
-  // pending_artifact_ids is the set of unresolved approvable artifact ids — every
+  has_unresolved_deliverables?: boolean
+  // pending_deliverable_ids is the set of unresolved approvable deliverable ids — every
   // draft PR first (in slice order), then every ready review — the per-item
   // resolve UI lists one card per id. Each is editable through its kind's
-  // sub-resource (PATCH /api/artifacts/{id}/pr | /review) and approvable
-  // (POST /api/artifacts/{id}/approve); a draft PR is abandoned with
-  // POST /api/artifacts/{id}/dismiss (branch kept) or POST …/reject (branch
+  // sub-resource (PATCH /api/deliverables/{id}/pr | /review) and approvable
+  // (POST /api/deliverables/{id}/approve); a draft PR is abandoned with
+  // POST /api/deliverables/{id}/dismiss (branch kept) or POST …/reject (branch
   // deleted from the upstream too), a review with PATCH …/review
   // {state:"dismissed"}. [] (not undefined) when nothing is unresolved but the
   // set was read; undefined under the transient-failure guard.
-  pending_artifact_ids?: string[]
+  pending_deliverable_ids?: string[]
   // Per-kind counts of the unresolved set, for count-aware labels ("N ready",
   // "Review N items →") and the resolve-all confirmation copy. unresolved_pr_count
-  // draft PRs + unresolved_review_count ready reviews === pending_artifact_ids.length.
+  // draft PRs + unresolved_review_count ready reviews === pending_deliverable_ids.length.
   unresolved_pr_count?: number
   unresolved_review_count?: number
-  // artifact_count is the number of artifacts this conversation produced (the
+  // deliverable_count is the number of deliverables this conversation produced (the
   // conversationResponse projection — branch / PR / review / issue / comment, the
   // primary gating one included), without a per-card fetch.
-  artifact_count?: number
-  // artifact_counts is the same set by kind — what the run WROTE, which the
+  deliverable_count?: number
+  // deliverable_counts is the same set by kind — what the run WROTE, which the
   // board card's footer strip states kind by kind. Emitted under the same
-  // definitive-only guard as has_unresolved_artifacts and off the same
-  // artifact set, so the strip's totals and its warm marks never disagree;
+  // definitive-only guard as has_unresolved_deliverables and off the same
+  // deliverable set, so the strip's totals and its warm marks never disagree;
   // {} for a conversation that produced nothing, absent under the transient
   // guard.
-  artifact_counts?: Partial<Record<ArtifactKind, number>>
+  deliverable_counts?: Partial<Record<DeliverableKind, number>>
   // actor_agent_id / actor_agent_name identify the bot that executed this
   // conversation (conversations.actor_agent_id), denormalized from
   // agents.display_name via a JOIN on the conversation read projections. The card
@@ -394,22 +393,22 @@ export interface Conversation {
   ended_reason?: string
 }
 
-// ArtifactKind is the closed set of artifact discriminators the backend emits
-// (internal/domain/artifact.go). Kept a strict union — not widened with
+// DeliverableKind is the closed set of deliverable discriminators the backend emits
+// (internal/domain/deliverable.go). Kept a strict union — not widened with
 // `| string`, which would collapse the whole type to `string` and erase the
 // narrowing. A server value outside this set is handled defensively at the
 // render layer (a fallback icon/label), it just isn't part of the documented
 // contract.
-export type ArtifactKind = 'branch' | 'pull_request' | 'review' | 'issue' | 'comment' | 'message'
+export type DeliverableKind = 'branch' | 'pull_request' | 'review' | 'issue' | 'comment' | 'message'
 
-// Artifact mirrors the GET /api/agent/conversations/{id}/artifacts wire shape
-// (internal/server/agent.go artifactJSON, TFAC-465). One row per real external
+// Deliverable mirrors an item of the POST /api/agent/conversations/{id}/deliverables/list wire shape
+// (internal/server/agent.go deliverableJSON). One row per real external
 // object a conversation produced. `state` is meaningful only read with `kind` (see
-// internal/domain/artifact.go — 'pending' aliases across kinds). `details` is
+// internal/domain/deliverable.go — 'pending' aliases across kinds). `details` is
 // the parsed kind-specific payload (or null when absent/unparseable).
-export interface Artifact {
+export interface Deliverable {
   id: string
-  kind: ArtifactKind
+  kind: DeliverableKind
   provider: string
   state: string
   target: string
@@ -419,12 +418,12 @@ export interface Artifact {
   created_at: string
 }
 
-// ActivityArtifact is the activity feed's Objects-lens row shape (TFAC-483): an
-// Artifact plus the owning team's id + name. The team fields are populated ONLY
-// by the org-wide feed (POST /api/orgs/{id}/usage/artifacts/list) so a cross-team
+// ActivityDeliverable is the activity feed's Objects-lens row shape (TFAC-483): a
+// Deliverable plus the owning team's id + name. The team fields are populated ONLY
+// by the org-wide feed (POST /api/orgs/{id}/usage/deliverables/list) so a cross-team
 // row shows which team's bot acted; the team-scoped feed omits them (it's already
-// one team). Mirrors internal/server activityArtifactJSON.
-export interface ActivityArtifact extends Artifact {
+// one team). Mirrors internal/server activityDeliverableJSON.
+export interface ActivityDeliverable extends Deliverable {
   team_id?: string
   team_name?: string
 }
@@ -1259,16 +1258,16 @@ export type WSEvent =
         request_id?: string
       }
     }
-  // Artifact reconciliation (TFAC-464): an artifact a conversation produced
+  // Deliverable reconciliation (TFAC-464): a deliverable a conversation produced
   // changed state on GitHub (PR merged/closed, branch deleted, review
   // submitted). The conversation's own status is unchanged — consumers refetch
-  // to pick up its artifact-derived surface (pending kind / approval card).
+  // to pick up its deliverable-derived surface (pending kind / approval card).
   // Distinct from conversation_update precisely so it never feeds the Board's
   // optimistic status write.
   | {
-      type: 'artifact_updated'
+      type: 'deliverable_updated'
       conversation_id: string
-      data: { artifact_id: string; state: string }
+      data: { deliverable_id: string; state: string }
     }
   | {
       // P3 steering: a conversation surfaced a tool-permission prompt
@@ -1280,7 +1279,7 @@ export type WSEvent =
       conversation_id: string
       // Just the id: the prompt itself is read from
       // GET /api/agent/conversations/{id}/permissions, so this frame is a
-      // refetch trigger like artifact_updated rather than the only path to the
+      // refetch trigger like deliverable_updated rather than the only path to the
       // state. That is what makes a refresh, a second tab, and a cold load able
       // to reconstruct a prompt the frame fired once for and never repeated.
       data: { tool_call_id: string }
@@ -1314,7 +1313,7 @@ export type WSEvent =
   // surface following ONE conversation and carries its new status, this one
   // says a SET went stale. The pair is exactly `task_updated` / `tasks_updated`.
   // Emitted where a write moves a conversation between the shell rail's sets
-  // without touching its status — a human resolving an artifact, the
+  // without touching its status — a human resolving a deliverable, the
   // reconciler retiring one because GitHub moved.
   | { type: 'conversations_updated'; data: Record<string, never> }
   // The org's reachable-repo mirror was refreshed. Payload-free: the

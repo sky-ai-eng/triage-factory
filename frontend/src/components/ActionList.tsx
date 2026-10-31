@@ -4,15 +4,15 @@ import { usePagedList } from '../hooks/usePagedList'
 import { ActionRow } from './ActionRow'
 
 // ActionList — every external write one conversation performed, newest first. The
-// sibling of ArtifactList, and the other half of "what did this conversation do".
+// sibling of DeliverableList, and the other half of "what did this conversation do".
 //
 // The two lists answer different questions and neither subsumes the other.
-// Artifacts are the OBJECTS a conversation owns and the state they are in now — a PR, a
+// Deliverables are the OBJECTS a conversation owns and the state they are in now — a PR, a
 // review, a branch — which is what an approval surface needs. Actions are the
 // WRITES it made, including every one that leaves no object behind: a reply on
 // a review thread, a merge the upstream refused, a push the gate turned down, a
 // host the sandbox blocked. A conversation whose only external act was a reply produces
-// no artifact at all, and before this list that conversation's record read as empty.
+// no deliverable at all, and before this list that conversation's record read as empty.
 //
 // Reads POST /api/agent/conversations/{id}/actions/list, which is team-scoped
 // through the conversation. It used to answer a hardcoded 200 newest rows and admit so

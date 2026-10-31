@@ -35,7 +35,7 @@ function conversation(over: Partial<Conversation>): Conversation {
     StartedAt: new Date(T0).toISOString(),
     ClaimedAt: new Date(T0).toISOString(),
     ResultSummary: '',
-    artifact_count: 0,
+    deliverable_count: 0,
     ...over,
   } as Conversation
 }
@@ -97,7 +97,7 @@ function mockFetch(transcript?: Promise<Message[]>) {
       next_page_token: next,
     })
     const pageToken = params?.get('page_token') ?? null
-    const body: unknown = path.endsWith('/artifacts/refresh')
+    const body: unknown = path.endsWith('/deliverables/refresh')
       ? { updated: 0 }
       : path.endsWith('/messages')
         ? sinceID !== null
@@ -108,9 +108,11 @@ function mockFetch(transcript?: Promise<Message[]>) {
               // returns, and a test that later appends to the server's rows must
               // not be mutating the transcript React is rendering.
               transcriptPage(transcript ?? [...serverMessages], firstPageOlderToken)
-        : path.endsWith('/artifacts') || path.endsWith('/actions')
-          ? []
-          : serverConversation
+        : path.endsWith('/deliverables/list')
+          ? { items: [], next_page_token: '', total_count: 0 }
+          : path.endsWith('/actions')
+            ? []
+            : serverConversation
     return Promise.resolve({ ok: true, status: 200, ...jsonBody(body) })
   })
   vi.stubGlobal('fetch', fetchMock)
@@ -612,11 +614,11 @@ describe('useConversationDetail transcript reconciliation', () => {
     await tick()
     expect(sinceRequests(fetchMock)).toEqual([])
     expect(transcript()).toBe('first')
-    // The artifact half of the same tick is untouched — only the transcript
+    // The deliverable half of the same tick is untouched — only the transcript
     // repair is gated on the conversation being live.
-    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/artifacts/refresh'))).toBe(
-      true,
-    )
+    expect(
+      fetchMock.mock.calls.some(([url]) => String(url).endsWith('/deliverables/refresh')),
+    ).toBe(true)
   })
 
   it('repairs the last row when the frame carrying it is dropped as the conversation settles', async () => {

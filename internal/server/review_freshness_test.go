@@ -18,7 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// reviewFreshnessOut is the slice of the review artifact's `details` payload
+// reviewFreshnessOut is the slice of the review deliverable's `details` payload
 // the freshness tests assert on.
 type reviewFreshnessOut struct {
 	CommitsSinceFinalize *int `json:"commits_since_finalize"`
@@ -31,23 +31,23 @@ type reviewFreshnessOut struct {
 	} `json:"comments"`
 }
 
-// seedFinalizedReviewAt seeds a finalized review-draft artifact with a stamped
+// seedFinalizedReviewAt seeds a finalized review-draft deliverable with a stamped
 // finalize-time head and one inline comment on a.go anchored to that head at
-// the given line. Returns the artifact id. The owner must be "acme"
+// the given line. Returns the deliverable id. The owner must be "acme"
 // so the App resolver (acmeInstall) matches.
 func seedFinalizedReviewAt(t *testing.T, s *Server, suffix string, number int, finalizeHead string, line int) string {
 	t.Helper()
-	artID, _, _ := seedReviewArtifactWithConversation(t, s, suffix, "acme", "api", number, "COMMENT")
-	art := getArtifact(t, s, artID)
-	d, _ := domain.ParseReviewArtifactDetails(art.DetailsJSON)
+	artID, _, _ := seedReviewDeliverableWithConversation(t, s, suffix, "acme", "api", number, "COMMENT")
+	art := getDeliverable(t, s, artID)
+	d, _ := domain.ParseReviewDeliverableDetails(art.DetailsJSON)
 	d.FinalizedHeadSHA = finalizeHead
 	d.FinalizedBaseSHA = "base0" // the finalize-time base tip (for the finalize-frame diff)
 	l := line
-	d.StagedComments = []domain.ReviewArtifactComment{
+	d.StagedComments = []domain.ReviewDeliverableComment{
 		{ID: "c_1", Path: "a.go", Line: &l, Body: domain.SeverityBadgeMarkdown(domain.SeverityMajor) + "nit: rename", CommitSHA: finalizeHead},
 	}
-	art.DetailsJSON = domain.MarshalReviewArtifactDetails(d)
-	if _, err := sqlitestore.New(s.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(s.db).Orgs, runmode.LocalDefaultOrgID, *art)); err != nil {
+	art.DetailsJSON = domain.MarshalReviewDeliverableDetails(d)
+	if _, err := sqlitestore.New(s.db).Deliverables.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(s.db).Orgs, runmode.LocalDefaultOrgID, *art)); err != nil {
 		t.Fatalf("seed finalized review: %v", err)
 	}
 	return artID
@@ -83,10 +83,10 @@ func freshnessAppStub(t *testing.T, s *Server, liveHead string, aheadBy int, com
 	seedApp(t, s, stub, acmeInstall())
 }
 
-// getReviewFreshness GETs the review artifact and decodes the freshness slice.
+// getReviewFreshness GETs the review deliverable and decodes the freshness slice.
 func getReviewFreshness(t *testing.T, s *Server, artID string) reviewFreshnessOut {
 	t.Helper()
-	rec := doJSON(t, s, http.MethodGet, "/api/artifacts/"+artID, nil)
+	rec := doJSON(t, s, http.MethodGet, "/api/deliverables/"+artID, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("get = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -99,10 +99,10 @@ func getReviewFreshness(t *testing.T, s *Server, artID string) reviewFreshnessOu
 	return envelope.Details
 }
 
-// TestArtifactDiff_ReviewServesFinalizeFrame pins that a review with a stored
+// TestDeliverableDiff_ReviewServesFinalizeFrame pins that a review with a stored
 // finalize frame renders FinalizedBaseSHA...FinalizedHeadSHA (the finalize-time
 // PR diff) via the compare endpoint, and does NOT fetch the live PR diff (TFAC-500).
-func TestArtifactDiff_ReviewServesFinalizeFrame(t *testing.T) {
+func TestDeliverableDiff_ReviewServesFinalizeFrame(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	const finalizeDiff = "diff --git a/a.go b/a.go\n--- a/a.go\n+++ b/a.go\n@@ -1 +1 @@\n-x\n+y\n"
@@ -124,7 +124,7 @@ func TestArtifactDiff_ReviewServesFinalizeFrame(t *testing.T) {
 	seedApp(t, srv, stub, acmeInstall())
 	artID := seedFinalizedReviewAt(t, srv, "rframe", 7, "headA", 3)
 
-	rec := doJSON(t, srv, http.MethodGet, "/api/artifacts/"+artID+"/diff", nil)
+	rec := doJSON(t, srv, http.MethodGet, "/api/deliverables/"+artID+"/diff", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("diff = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -136,10 +136,10 @@ func TestArtifactDiff_ReviewServesFinalizeFrame(t *testing.T) {
 	}
 }
 
-// TestArtifactDiff_FramelessReviewServesLiveDiff pins the fallback: a review with
+// TestDeliverableDiff_FramelessReviewServesLiveDiff pins the fallback: a review with
 // no stored finalize frame (comment-less or pre-TFAC-500) renders the live PR diff,
 // not a compare.
-func TestArtifactDiff_FramelessReviewServesLiveDiff(t *testing.T) {
+func TestDeliverableDiff_FramelessReviewServesLiveDiff(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	var liveHit bool
@@ -160,10 +160,10 @@ func TestArtifactDiff_FramelessReviewServesLiveDiff(t *testing.T) {
 	stub := httptest.NewServer(mux)
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
-	// seedReviewArtifactWithConversation records no finalize frame → frameless.
-	artID, _, _ := seedReviewArtifactWithConversation(t, srv, "rlive", "acme", "api", 7, "COMMENT")
+	// seedReviewDeliverableWithConversation records no finalize frame → frameless.
+	artID, _, _ := seedReviewDeliverableWithConversation(t, srv, "rlive", "acme", "api", 7, "COMMENT")
 
-	rec := doJSON(t, srv, http.MethodGet, "/api/artifacts/"+artID+"/diff", nil)
+	rec := doJSON(t, srv, http.MethodGet, "/api/deliverables/"+artID+"/diff", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("diff = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -201,21 +201,21 @@ func TestReviewRefresh_RemapsAndDrops(t *testing.T) {
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 
-	artID, _, _ := seedReviewArtifactWithConversation(t, srv, "rref", "acme", "api", 7, "COMMENT")
-	art := getArtifact(t, srv, artID)
-	d, _ := domain.ParseReviewArtifactDetails(art.DetailsJSON)
+	artID, _, _ := seedReviewDeliverableWithConversation(t, srv, "rref", "acme", "api", 7, "COMMENT")
+	art := getDeliverable(t, srv, artID)
+	d, _ := domain.ParseReviewDeliverableDetails(art.DetailsJSON)
 	d.FinalizedHeadSHA, d.FinalizedBaseSHA = "finA", "base0"
 	la, lb := 3, 2
-	d.StagedComments = []domain.ReviewArtifactComment{
+	d.StagedComments = []domain.ReviewDeliverableComment{
 		{ID: "c_a", Path: "a.go", Line: &la, Body: "shifts", CommitSHA: "finA"},
 		{ID: "c_b", Path: "b.go", Line: &lb, Body: "outdated", CommitSHA: "finA"},
 	}
-	art.DetailsJSON = domain.MarshalReviewArtifactDetails(d)
-	if _, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(srv.db).Orgs, runmode.LocalDefaultOrgID, *art)); err != nil {
+	art.DetailsJSON = domain.MarshalReviewDeliverableDetails(d)
+	if _, err := sqlitestore.New(srv.db).Deliverables.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(srv.db).Orgs, runmode.LocalDefaultOrgID, *art)); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
-	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/review/refresh", nil)
+	rec := doJSON(t, srv, http.MethodPost, "/api/deliverables/"+artID+"/review/refresh", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("refresh = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -229,7 +229,7 @@ func TestReviewRefresh_RemapsAndDrops(t *testing.T) {
 		t.Errorf("refresh summary = %+v, want moved 1 / dropped 1 / head headB", out)
 	}
 
-	d2, _ := domain.ParseReviewArtifactDetails(getArtifact(t, srv, artID).DetailsJSON)
+	d2, _ := domain.ParseReviewDeliverableDetails(getDeliverable(t, srv, artID).DetailsJSON)
 	if len(d2.StagedComments) != 1 || d2.StagedComments[0].ID != "c_a" {
 		t.Fatalf("staged comments = %+v, want only the survivor c_a", d2.StagedComments)
 	}
@@ -274,17 +274,17 @@ func refreshOutdatedStub(t *testing.T, srv *Server, submitBody *map[string]any) 
 // summary body.
 func seedOutdatedOnlyReview(t *testing.T, srv *Server, suffix, body string) string {
 	t.Helper()
-	artID, _, _ := seedReviewArtifactWithConversation(t, srv, suffix, "acme", "api", 7, "COMMENT")
-	art := getArtifact(t, srv, artID)
-	d, _ := domain.ParseReviewArtifactDetails(art.DetailsJSON)
+	artID, _, _ := seedReviewDeliverableWithConversation(t, srv, suffix, "acme", "api", 7, "COMMENT")
+	art := getDeliverable(t, srv, artID)
+	d, _ := domain.ParseReviewDeliverableDetails(art.DetailsJSON)
 	d.ReviewBody = body
 	d.FinalizedHeadSHA, d.FinalizedBaseSHA = "finA", "base0"
 	lb := 2
-	d.StagedComments = []domain.ReviewArtifactComment{
+	d.StagedComments = []domain.ReviewDeliverableComment{
 		{ID: "c_b", Path: "b.go", Line: &lb, Body: "outdated", CommitSHA: "finA"},
 	}
-	art.DetailsJSON = domain.MarshalReviewArtifactDetails(d)
-	if _, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(srv.db).Orgs, runmode.LocalDefaultOrgID, *art)); err != nil {
+	art.DetailsJSON = domain.MarshalReviewDeliverableDetails(d)
+	if _, err := sqlitestore.New(srv.db).Deliverables.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(srv.db).Orgs, runmode.LocalDefaultOrgID, *art)); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	return artID
@@ -303,16 +303,16 @@ func TestReviewRefresh_DropsLastCommentThenSubmitsUnpinned(t *testing.T) {
 	refreshOutdatedStub(t, srv, &submitBody)
 	artID := seedOutdatedOnlyReview(t, srv, "rdropall", "## Review\nsummary only")
 
-	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/review/refresh", nil)
+	rec := doJSON(t, srv, http.MethodPost, "/api/deliverables/"+artID+"/review/refresh", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("refresh = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	d, _ := domain.ParseReviewArtifactDetails(getArtifact(t, srv, artID).DetailsJSON)
+	d, _ := domain.ParseReviewDeliverableDetails(getDeliverable(t, srv, artID).DetailsJSON)
 	if len(d.StagedComments) != 0 || d.FinalizedHeadSHA != "headB" {
 		t.Fatalf("after refresh: comments=%+v head=%q, want none / headB", d.StagedComments, d.FinalizedHeadSHA)
 	}
 
-	rec = doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
+	rec = doJSON(t, srv, http.MethodPost, "/api/deliverables/"+artID+"/approve", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("approve = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -338,11 +338,11 @@ func TestReviewRefresh_RefusesToEmptyBodylessReview(t *testing.T) {
 	refreshOutdatedStub(t, srv, &submitBody)
 	artID := seedOutdatedOnlyReview(t, srv, "rnobody", "")
 
-	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/review/refresh", nil)
+	rec := doJSON(t, srv, http.MethodPost, "/api/deliverables/"+artID+"/review/refresh", nil)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("refresh = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
-	d, _ := domain.ParseReviewArtifactDetails(getArtifact(t, srv, artID).DetailsJSON)
+	d, _ := domain.ParseReviewDeliverableDetails(getDeliverable(t, srv, artID).DetailsJSON)
 	if len(d.StagedComments) != 1 || d.FinalizedHeadSHA != "finA" {
 		t.Errorf("refused refresh persisted: comments=%+v head=%q, want the draft untouched at finA", d.StagedComments, d.FinalizedHeadSHA)
 	}
@@ -392,7 +392,7 @@ func TestReviewApprove_ShiftedSinceRefreshPinsLiveHead(t *testing.T) {
 		&submitBody)
 	artID := seedFinalizedReviewAt(t, srv, "rshift", 7, "headA", 3)
 
-	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
+	rec := doJSON(t, srv, http.MethodPost, "/api/deliverables/"+artID+"/approve", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("approve = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -406,7 +406,7 @@ func TestReviewApprove_ShiftedSinceRefreshPinsLiveHead(t *testing.T) {
 	if c, _ := comments[0].(map[string]any); c["line"] != float64(5) {
 		t.Errorf("submit comment line = %v, want 5 (3 shifted by two added lines)", c["line"])
 	}
-	d, _ := domain.ParseReviewArtifactDetails(getArtifact(t, srv, artID).DetailsJSON)
+	d, _ := domain.ParseReviewDeliverableDetails(getDeliverable(t, srv, artID).DetailsJSON)
 	if d.FinalizedHeadSHA != "headB" || len(d.StagedComments) != 1 || d.StagedComments[0].CommitSHA != "headB" {
 		t.Errorf("stamped frame = head %q comments %+v, want the row to describe the headB frame it posted", d.FinalizedHeadSHA, d.StagedComments)
 	}
@@ -425,18 +425,18 @@ func TestReviewApprove_OutdatedSinceRefreshRefuses(t *testing.T) {
 		&submitBody)
 	artID := seedFinalizedReviewAt(t, srv, "rstale", 7, "headA", 3)
 
-	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
+	rec := doJSON(t, srv, http.MethodPost, "/api/deliverables/"+artID+"/approve", nil)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("approve = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
 	if submitBody != nil {
 		t.Errorf("GitHub review POST was made with %v, want none", submitBody)
 	}
-	got := getArtifact(t, srv, artID)
-	if got.State != domain.ArtifactStateReviewPending {
+	got := getDeliverable(t, srv, artID)
+	if got.State != domain.DeliverableStateReviewPending {
 		t.Errorf("state = %q, want pending (claim released)", got.State)
 	}
-	d, _ := domain.ParseReviewArtifactDetails(got.DetailsJSON)
+	d, _ := domain.ParseReviewDeliverableDetails(got.DetailsJSON)
 	if d.FinalizedHeadSHA != "headA" || len(d.StagedComments) != 1 || d.StagedComments[0].CommitSHA != "headA" {
 		t.Errorf("refused approve moved the draft: head %q comments %+v, want untouched at headA", d.FinalizedHeadSHA, d.StagedComments)
 	}
@@ -452,7 +452,7 @@ func TestReviewApprove_CurrentHeadSkipsCompare(t *testing.T) {
 	approveDriftStub(t, srv, "headA", "", "", &submitBody)
 	artID := seedFinalizedReviewAt(t, srv, "rcurr", 7, "headA", 3)
 
-	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
+	rec := doJSON(t, srv, http.MethodPost, "/api/deliverables/"+artID+"/approve", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("approve = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -477,21 +477,21 @@ func TestReviewRefresh_Guards(t *testing.T) {
 
 	// Unfinalized: clear the ready sentinel.
 	unfin := seedFinalizedReviewAt(t, srv, "runfin", 7, "headA", 3)
-	art := getArtifact(t, srv, unfin)
-	d, _ := domain.ParseReviewArtifactDetails(art.DetailsJSON)
+	art := getDeliverable(t, srv, unfin)
+	d, _ := domain.ParseReviewDeliverableDetails(art.DetailsJSON)
 	d.ReviewEvent = ""
-	art.DetailsJSON = domain.MarshalReviewArtifactDetails(d)
-	if _, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(srv.db).Orgs, runmode.LocalDefaultOrgID, *art)); err != nil {
+	art.DetailsJSON = domain.MarshalReviewDeliverableDetails(d)
+	if _, err := sqlitestore.New(srv.db).Deliverables.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(srv.db).Orgs, runmode.LocalDefaultOrgID, *art)); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+unfin+"/review/refresh", nil); rec.Code != http.StatusConflict {
+	if rec := doJSON(t, srv, http.MethodPost, "/api/deliverables/"+unfin+"/review/refresh", nil); rec.Code != http.StatusConflict {
 		t.Errorf("refresh of unfinalized review = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
 
 	// Submitted (terminal).
 	sub := seedFinalizedReviewAt(t, srv, "rsub", 7, "headA", 3)
-	execSQL(t, srv.db, `UPDATE artifacts SET state = ? WHERE id = ?`, domain.ArtifactStateReviewSubmitted, sub)
-	if rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+sub+"/review/refresh", nil); rec.Code != http.StatusConflict {
+	execSQL(t, srv.db, `UPDATE deliverables SET state = ? WHERE id = ?`, domain.DeliverableStateReviewSubmitted, sub)
+	if rec := doJSON(t, srv, http.MethodPost, "/api/deliverables/"+sub+"/review/refresh", nil); rec.Code != http.StatusConflict {
 		t.Errorf("refresh of submitted review = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
 }
@@ -574,11 +574,11 @@ func TestReviewFreshness_NoAnchorComment(t *testing.T) {
 	freshnessAppStub(t, srv, "headA", 0, "", "") // no drift; compare must not be hit
 	artID := seedFinalizedReviewAt(t, srv, "rnoanchor", 7, "headA", 3)
 	// Null out the staged comment's line anchor.
-	art := getArtifact(t, srv, artID)
-	d, _ := domain.ParseReviewArtifactDetails(art.DetailsJSON)
+	art := getDeliverable(t, srv, artID)
+	d, _ := domain.ParseReviewDeliverableDetails(art.DetailsJSON)
 	d.StagedComments[0].Line = nil
-	art.DetailsJSON = domain.MarshalReviewArtifactDetails(d)
-	if _, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(srv.db).Orgs, runmode.LocalDefaultOrgID, *art)); err != nil {
+	art.DetailsJSON = domain.MarshalReviewDeliverableDetails(d)
+	if _, err := sqlitestore.New(srv.db).Deliverables.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(srv.db).Orgs, runmode.LocalDefaultOrgID, *art)); err != nil {
 		t.Fatalf("null line: %v", err)
 	}
 

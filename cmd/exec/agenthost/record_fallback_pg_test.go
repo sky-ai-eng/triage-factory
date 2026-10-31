@@ -12,12 +12,12 @@ import (
 )
 
 // TestRecordExternalWrite_Postgres_CrossTeamKeepsTheLedgerRow pins that a
-// ledger row survives an artifact write RLS refuses. Artifacts are keyed
+// ledger row survives a deliverable write RLS refuses. Deliverables are keyed
 // org-wide but updated team-scoped, so a manual run in team B acting on a
 // comment team A's run recorded cannot update A's row under its user's claims.
-// The refused upsert must not take the ledger row with it, A's artifact must be
+// The refused upsert must not take the ledger row with it, A's deliverable must be
 // left as it was, and the same holds for a branch push, whose ledger row is
-// composed inside the artifact upsert.
+// composed inside the deliverable upsert.
 func TestRecordExternalWrite_Postgres_CrossTeamKeepsTheLedgerRow(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -56,53 +56,53 @@ func TestRecordExternalWrite_Postgres_CrossTeamKeepsTheLedgerRow(t *testing.T) {
 	}
 
 	t.Run("comment", func(t *testing.T) {
-		key := domain.GitHubCommentDedupKey(domain.GitHubIssueComment, 7)
-		owned, err := stores.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
-			ConversationID: convA, TeamID: teamA, Provider: domain.ArtifactProviderGitHub,
-			Kind: domain.ArtifactKindComment, Scope: scope, Target: "octo/api#3", ExternalID: "7",
-			NodeID: "IC_kw7", State: domain.ArtifactStateCommentPosted, DedupKey: key,
+		key := domain.GitHubCommentKey(domain.GitHubIssueComment, 7)
+		owned, err := stores.Deliverables.UpsertSystem(ctx, orgID, domain.Deliverable{
+			ConversationID: convA, TeamID: teamA, Provider: domain.ProviderGitHub,
+			Kind: domain.DeliverableKindComment, Scope: scope, Target: "octo/api#3", ExternalID: "7",
+			NodeID: "IC_kw7", State: domain.DeliverableStateCommentPosted, DedupKey: key,
 		})
 		if err != nil {
 			t.Fatalf("seed team A's comment: %v", err)
 		}
 
-		RecordExternalWrite(ctx, stores, infoB, &domain.Artifact{
-			Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindComment,
-			ExternalID: "7", State: domain.ArtifactStateCommentDeleted, DedupKey: key,
+		RecordExternalWrite(ctx, stores, infoB, &domain.Deliverable{
+			Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindComment,
+			ExternalID: "7", State: domain.DeliverableStateCommentDeleted, DedupKey: key,
 		}, &domain.ExternalAction{
-			Provider: domain.ArtifactProviderGitHub, Action: domain.ActionCommentDeleted,
+			Provider: domain.ProviderGitHub, Action: domain.ActionCommentDeleted,
 			Target: "octo/api", ExternalID: "7", Credential: domain.CredentialGitHubApp,
 		})
 
 		if rows := ledgerFor(convB); len(rows) != 1 || rows[0].Action != domain.ActionCommentDeleted || rows[0].TeamID != teamB {
 			t.Errorf("team B's ledger rows = %+v, want its one comment_deleted row", rows)
 		}
-		got, err := stores.Artifacts.GetByNodeIDSystem(ctx, orgID, scope, "IC_kw7")
+		got, err := stores.Deliverables.GetByNodeIDSystem(ctx, orgID, scope, "IC_kw7")
 		if err != nil || got == nil {
 			t.Fatalf("read team A's comment: %v, %v", got, err)
 		}
-		if got.ID != owned.ID || got.State != domain.ArtifactStateCommentPosted || got.TeamID != teamA {
+		if got.ID != owned.ID || got.State != domain.DeliverableStateCommentPosted || got.TeamID != teamA {
 			t.Errorf("team A's comment = %+v, want it left as team A recorded it", got)
 		}
 	})
 
 	t.Run("branch push", func(t *testing.T) {
-		branch, ok := domain.NewBranchArtifact("octo/api", "refs/heads/shared", "abc123", true)
+		branch, ok := domain.NewBranchDeliverable("octo/api", "refs/heads/shared", "abc123", true)
 		if !ok {
-			t.Fatal("NewBranchArtifact refused the fixture branch")
+			t.Fatal("NewBranchDeliverable refused the fixture branch")
 		}
 		seed := branch
 		seed.ConversationID, seed.TeamID, seed.Scope = convA, teamA, scope
-		if _, err := stores.Artifacts.UpsertSystem(ctx, orgID, seed); err != nil {
+		if _, err := stores.Deliverables.UpsertSystem(ctx, orgID, seed); err != nil {
 			t.Fatalf("seed team A's branch: %v", err)
 		}
 
-		pushed, ok := domain.NewBranchArtifact("octo/api", "refs/heads/shared", "def456", false)
+		pushed, ok := domain.NewBranchDeliverable("octo/api", "refs/heads/shared", "def456", false)
 		if !ok {
-			t.Fatal("NewBranchArtifact refused the pushed branch")
+			t.Fatal("NewBranchDeliverable refused the pushed branch")
 		}
-		if _, err := newDirectRuntime(stores, infoB).UpsertArtifact(ctx, pushed); err == nil {
-			t.Fatal("UpsertArtifact = nil error, want team B refused team A's branch row")
+		if _, err := newDirectRuntime(stores, infoB).UpsertDeliverable(ctx, pushed); err == nil {
+			t.Fatal("UpsertDeliverable = nil error, want team B refused team A's branch row")
 		}
 		var pushes []domain.ExternalAction
 		for _, r := range ledgerFor(convB) {

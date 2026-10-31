@@ -447,7 +447,7 @@ CREATE TABLE public.access_change_log (
 -- GitHub host, the Jira site, the Linear workspace id. target and dedup_key are
 -- only unique inside it. node_id is the GraphQL node id of the object the
 -- action created, which only the create verb's pr_created row carries: the
--- reconciler's PR backstop matches the row to its artifact by it, since a
+-- reconciler's PR backstop matches the row to its deliverable by it, since a
 -- rename never changes it. Written once, like the rest of the record.
 -- entity_id is the entity the act was about (the pull request or issue, the
 -- Jira or Linear issue, the Slack thread), and repository_id the registry row of
@@ -1072,11 +1072,11 @@ CREATE TABLE public.repositories (
 -- in, the value an entity of that provider is scoped under
 -- (domain.ExternalObjectScope): the GitHub host, the Jira site, the Linear
 -- workspace id; target and dedup_key are only unique inside it. dedup_key names
--- the object by an id and never by a name (domain.ArtifactDedupKey): a pull
+-- the object by an id and never by a name (domain.ObjectKey): a pull
 -- request by its GraphQL node id, a review draft by its pull request's node id
 -- and its conversation, a branch by its repository's registry row id and its
 -- ref, so a repository given a freed name records its own rows. entity_id is
--- the entity the artifact is about (the pull request a pull request, review or
+-- the entity the deliverable is about (the pull request a pull request, review or
 -- comment row is on, the Jira or Linear issue, the Slack thread; NULL for a
 -- branch, which has none), and target is that entity's key, a display value
 -- every rename moves by entity_id. team_id is denormalized from the conversation
@@ -1085,7 +1085,7 @@ CREATE TABLE public.repositories (
 -- carries so a GraphQL delete naming the comment by node id alone finds its
 -- row, and a pull request row so the reconciler's backstop finds it from its
 -- pr_created audit row. A comment row exists only for a comment TF posted.
-CREATE TABLE public.artifacts (
+CREATE TABLE public.deliverables (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     conversation_id uuid,
     org_id uuid NOT NULL,
@@ -1093,7 +1093,7 @@ CREATE TABLE public.artifacts (
     provider text NOT NULL,
     kind text NOT NULL,
     scope text NOT NULL
-        CONSTRAINT artifacts_scope_check CHECK (scope <> ''),
+        CONSTRAINT deliverables_scope_check CHECK (scope <> ''),
     target text NOT NULL,
     external_id text,
     url text,
@@ -1788,8 +1788,8 @@ ALTER TABLE ONLY public.external_actions
     ADD CONSTRAINT external_actions_pkey PRIMARY KEY (id);
 
 
-ALTER TABLE ONLY public.artifacts
-    ADD CONSTRAINT artifacts_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.deliverables
+    ADD CONSTRAINT deliverables_pkey PRIMARY KEY (id);
 
 
 ALTER TABLE ONLY public.conversation_memory
@@ -2041,29 +2041,29 @@ CREATE INDEX idx_external_actions_entity ON public.external_actions USING btree 
 CREATE INDEX idx_external_actions_repository ON public.external_actions USING btree (repository_id) WHERE (repository_id IS NOT NULL);
 
 
-CREATE UNIQUE INDEX idx_artifacts_dedup ON public.artifacts USING btree (org_id, scope, dedup_key);
+CREATE UNIQUE INDEX idx_deliverables_dedup ON public.deliverables USING btree (org_id, scope, dedup_key);
 
 
-CREATE INDEX idx_artifacts_team_created ON public.artifacts USING btree (team_id, created_at DESC);
+CREATE INDEX idx_deliverables_team_created ON public.deliverables USING btree (team_id, created_at DESC);
 
 
-CREATE INDEX idx_artifacts_org_created ON public.artifacts USING btree (org_id, created_at DESC);
+CREATE INDEX idx_deliverables_org_created ON public.deliverables USING btree (org_id, created_at DESC);
 
 
-CREATE INDEX idx_artifacts_conversation ON public.artifacts USING btree (conversation_id);
+CREATE INDEX idx_deliverables_conversation ON public.deliverables USING btree (conversation_id);
 
 
-CREATE INDEX idx_artifacts_node_id ON public.artifacts USING btree (org_id, scope, node_id) WHERE (node_id IS NOT NULL);
+CREATE INDEX idx_deliverables_node_id ON public.deliverables USING btree (org_id, scope, node_id) WHERE (node_id IS NOT NULL);
 
 
--- A rename moves the targets of an entity's artifacts, and the coherence feed
+-- A rename moves the targets of an entity's deliverables, and the coherence feed
 -- finds a pull request's review drafts, by entity_id.
-CREATE INDEX idx_artifacts_entity ON public.artifacts USING btree (entity_id) WHERE (entity_id IS NOT NULL);
+CREATE INDEX idx_deliverables_entity ON public.deliverables USING btree (entity_id) WHERE (entity_id IS NOT NULL);
 
 
 -- The GitHub poll tells a review TF submitted from a person's by whether a
--- review artifact carries the review's numeric id as its external_id.
-CREATE INDEX idx_artifacts_external_id ON public.artifacts USING btree (org_id, scope, kind, external_id) WHERE (external_id IS NOT NULL);
+-- review deliverable carries the review's numeric id as its external_id.
+CREATE INDEX idx_deliverables_external_id ON public.deliverables USING btree (org_id, scope, kind, external_id) WHERE (external_id IS NOT NULL);
 
 
 CREATE INDEX idx_conversation_memory_conversation ON public.conversation_memory USING btree (conversation_id);
@@ -2443,24 +2443,24 @@ ALTER TABLE ONLY public.external_actions
     ADD CONSTRAINT external_actions_repository_id_org_id_fkey FOREIGN KEY (repository_id, org_id) REFERENCES public.repositories(id, org_id) ON DELETE SET NULL (repository_id);
 
 
-ALTER TABLE ONLY public.artifacts
-    ADD CONSTRAINT artifacts_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.deliverables
+    ADD CONSTRAINT deliverables_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
 
--- SET NULL keeps the artifact after its conversation is purged. A composite
+-- SET NULL keeps the deliverable after its conversation is purged. A composite
 -- (conversation_id, org_id) ref could not, since org_id is NOT NULL.
-ALTER TABLE ONLY public.artifacts
-    ADD CONSTRAINT artifacts_conversation_id_fkey FOREIGN KEY (conversation_id) REFERENCES public.conversations(id) ON DELETE SET NULL;
+ALTER TABLE ONLY public.deliverables
+    ADD CONSTRAINT deliverables_conversation_id_fkey FOREIGN KEY (conversation_id) REFERENCES public.conversations(id) ON DELETE SET NULL;
 
 
-ALTER TABLE ONLY public.artifacts
-    ADD CONSTRAINT artifacts_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE SET NULL;
+ALTER TABLE ONLY public.deliverables
+    ADD CONSTRAINT deliverables_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE SET NULL;
 
 
--- SET NULL (entity_id) keeps the artifact, unlinked, if its entity is deleted;
+-- SET NULL (entity_id) keeps the deliverable, unlinked, if its entity is deleted;
 -- a merge of duplicate entities re-points it first.
-ALTER TABLE ONLY public.artifacts
-    ADD CONSTRAINT artifacts_entity_id_org_id_fkey FOREIGN KEY (entity_id, org_id) REFERENCES public.entities(id, org_id) ON DELETE SET NULL (entity_id);
+ALTER TABLE ONLY public.deliverables
+    ADD CONSTRAINT deliverables_entity_id_org_id_fkey FOREIGN KEY (entity_id, org_id) REFERENCES public.entities(id, org_id) ON DELETE SET NULL (entity_id);
 
 
 ALTER TABLE ONLY public.conversation_memory
@@ -2930,21 +2930,21 @@ ALTER TABLE public.external_actions ENABLE ROW LEVEL SECURITY;
 CREATE POLICY external_actions_all ON public.external_actions USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
 
 
-ALTER TABLE public.artifacts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.deliverables ENABLE ROW LEVEL SECURITY;
 
--- Team-scoped via team_id; artifacts carry no private/org visibility columns.
-
-
-CREATE POLICY artifacts_delete ON public.artifacts FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
+-- Team-scoped via team_id; deliverables carry no private/org visibility columns.
 
 
-CREATE POLICY artifacts_insert ON public.artifacts FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
+CREATE POLICY deliverables_delete ON public.deliverables FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
 
 
-CREATE POLICY artifacts_select ON public.artifacts FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_in_team(team_id)));
+CREATE POLICY deliverables_insert ON public.deliverables FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
 
 
-CREATE POLICY artifacts_update ON public.artifacts FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
+CREATE POLICY deliverables_select ON public.deliverables FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_in_team(team_id)));
+
+
+CREATE POLICY deliverables_update ON public.deliverables FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
 
 
 ALTER TABLE public.conversation_memory ENABLE ROW LEVEL SECURITY;
@@ -3385,11 +3385,11 @@ GRANT ALL ON TABLE public.external_actions TO service_role;
 GRANT SELECT,INSERT ON TABLE public.external_actions TO tf_app;
 
 
-GRANT ALL ON TABLE public.artifacts TO postgres;
-GRANT ALL ON TABLE public.artifacts TO anon;
-GRANT ALL ON TABLE public.artifacts TO authenticated;
-GRANT ALL ON TABLE public.artifacts TO service_role;
-GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.artifacts TO tf_app;
+GRANT ALL ON TABLE public.deliverables TO postgres;
+GRANT ALL ON TABLE public.deliverables TO anon;
+GRANT ALL ON TABLE public.deliverables TO authenticated;
+GRANT ALL ON TABLE public.deliverables TO service_role;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.deliverables TO tf_app;
 
 
 GRANT ALL ON TABLE public.conversation_memory TO postgres;
@@ -5271,7 +5271,7 @@ REVOKE ALL ON public.slack_event_deliveries FROM anon, authenticated, service_ro
 -- caches display names, since Slack event payloads carry only the channel ID.
 -- id is the channel's identity in TF, and every reference to a channel holds
 -- it: a team's tracking row, a thread entity (entities.slack_channel_id), a
--- slack:message handler's channel_in filter, a Slack message artifact's dedup
+-- slack:message handler's channel_in filter, a Slack message deliverable's dedup
 -- key. channel_id is the ID Slack gives the channel now. It can change
 -- (slack_channel_id_changes below), and following the change rewrites this one
 -- column here. It is unique per org rather
@@ -5377,7 +5377,7 @@ GRANT SELECT, INSERT, DELETE ON public.team_slack_channels TO tf_app;
 -- event — a private channel shared through Slack Connect moves from its G… ID to
 -- a C… one). Following the change (the Slack store's MoveSystem) rewrites the
 -- registry row's channel_id, and the display values that spell the ID (thread
--- keys and permalinks, Slack artifact keys, the audit ledger's links), in one
+-- keys and permalinks, Slack deliverable keys, the audit ledger's links), in one
 -- transaction. References hold the registry row and need nothing. It records
 -- the change here, because some copies of the old ID come from outside: event
 -- metadata is immutable, so a run on a task recorded before the change is told
@@ -6884,7 +6884,7 @@ GRANT USAGE ON SCHEMA public, tf TO tf_system;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.conversations TO tf_system;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.messages TO tf_system;
 GRANT USAGE, SELECT ON SEQUENCE public.messages_id_seq TO tf_system;
-GRANT SELECT, INSERT, UPDATE ON TABLE public.artifacts TO tf_system;
+GRANT SELECT, INSERT, UPDATE ON TABLE public.deliverables TO tf_system;
 -- UPDATE backs the claim-time record's upsert: its ON CONFLICT DO UPDATE
 -- needs the privilege even when the row is new.
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.conversation_worktrees TO tf_system;
@@ -6932,7 +6932,7 @@ GRANT SELECT ON TABLE public.placement_overrides TO tf_system;
 GRANT SELECT, UPDATE ON TABLE public.blueprint_runs TO tf_system;
 GRANT SELECT ON TABLE public.blueprints TO tf_system;
 GRANT SELECT ON TABLE public.blueprint_steps TO tf_system;
--- The terminal-on-last close asks whether the run behind a resolved artifact is
+-- The terminal-on-last close asks whether the run behind a resolved deliverable is
 -- still the task's newest. EXECUTE is the whole grant it needs: the function is
 -- SECURITY DEFINER and reads blueprint_runs as its owner.
 GRANT EXECUTE ON FUNCTION tf.blueprint_run_is_newest_for_task(p_id uuid, p_task_id uuid, p_org_id uuid) TO tf_system;

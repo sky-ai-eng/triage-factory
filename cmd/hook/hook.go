@@ -1,7 +1,7 @@
 // Package hook implements the internal git-hook callbacks the TF-controlled
 // git hooks (F2's hooks dir) invoke around an agent's raw git operations:
 // `hook record-push` (A·3, TFAC-460), which records each pushed branch as a
-// durable artifact, and `hook check-push`, which answers whether the team's
+// durable deliverable, and `hook check-push`, which answers whether the team's
 // base-branch push policy permits the push about to happen — the only verb
 // here that can refuse, and local mode's enforcement point for that policy.
 //

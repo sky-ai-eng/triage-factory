@@ -11,11 +11,11 @@ import (
 )
 
 // ExternalObjectScopeFactory hands RunExternalObjectScopeConformance the store
-// bundle, the org every call is for, and a team the artifacts can hang off
-// (artifacts.team_id is required). Each call is a fresh, empty org.
+// bundle, the org every call is for, and a team the deliverables can hang off
+// (deliverables.team_id is required). Each call is a fresh, empty org.
 type ExternalObjectScopeFactory func(t *testing.T) (s db.Stores, orgID, teamID string)
 
-// RunExternalObjectScopeConformance covers the scope column artifacts and the
+// RunExternalObjectScopeConformance covers the scope column deliverables and the
 // audit ledger carry: a write persists it and a read returns it, a write
 // without one is refused and leaves nothing behind, and the dedup key is
 // unique only within a scope — the same key in two scopes is two objects, so
@@ -28,28 +28,28 @@ func RunExternalObjectScopeConformance(t *testing.T, mk ExternalObjectScopeFacto
 		hostA = TestGitHubHost
 		hostB = TestOtherGitHubHost
 	)
-	prArtifact := func(teamID, scope, state string) domain.Artifact {
-		return domain.Artifact{
-			TeamID: teamID, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest,
+	prDeliverable := func(teamID, scope, state string) domain.Deliverable {
+		return domain.Deliverable{
+			TeamID: teamID, Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindPullRequest,
 			Scope: scope, Target: domain.PullRequestTarget("octo/api", 7), ExternalID: "7",
 			URL:    scope + "/octo/api/pull/7",
 			NodeID: "PR_kw7", State: state, DedupKey: domain.PullRequestDedupKey("PR_kw7"),
 		}
 	}
 
-	t.Run("Artifact_upsert_persists_and_returns_the_scope", func(t *testing.T) {
+	t.Run("Deliverable_upsert_persists_and_returns_the_scope", func(t *testing.T) {
 		s, orgID, teamID := mk(t)
-		got, err := s.Artifacts.UpsertSystem(ctx, orgID, prArtifact(teamID, hostB, domain.ArtifactStatePROpen))
+		got, err := s.Deliverables.UpsertSystem(ctx, orgID, prDeliverable(teamID, hostB, domain.DeliverableStatePROpen))
 		if err != nil {
 			t.Fatalf("UpsertSystem: %v", err)
 		}
 		if got.Scope != hostB {
 			t.Errorf("returned scope = %q, want %q", got.Scope, hostB)
 		}
-		AssertWriteReturnedStoredRow(t, "UpsertSystem", got, func() (*domain.Artifact, error) {
-			return s.Artifacts.Get(ctx, orgID, got.ID)
+		AssertWriteReturnedStoredRow(t, "UpsertSystem", got, func() (*domain.Deliverable, error) {
+			return s.Deliverables.Get(ctx, orgID, got.ID)
 		})
-		listed, err := s.Artifacts.ListNonTerminalBySystem(ctx, orgID)
+		listed, err := s.Deliverables.ListNonTerminalBySystem(ctx, orgID)
 		if err != nil {
 			t.Fatalf("ListNonTerminalBySystem: %v", err)
 		}
@@ -58,13 +58,13 @@ func RunExternalObjectScopeConformance(t *testing.T, mk ExternalObjectScopeFacto
 		}
 	})
 
-	t.Run("The_same_dedup_key_in_two_scopes_is_two_artifacts", func(t *testing.T) {
+	t.Run("The_same_dedup_key_in_two_scopes_is_two_deliverables", func(t *testing.T) {
 		s, orgID, teamID := mk(t)
-		a, err := s.Artifacts.UpsertSystem(ctx, orgID, prArtifact(teamID, hostA, domain.ArtifactStatePROpen))
+		a, err := s.Deliverables.UpsertSystem(ctx, orgID, prDeliverable(teamID, hostA, domain.DeliverableStatePROpen))
 		if err != nil {
 			t.Fatalf("UpsertSystem(%s): %v", hostA, err)
 		}
-		b, err := s.Artifacts.UpsertSystem(ctx, orgID, prArtifact(teamID, hostB, domain.ArtifactStatePRDraft))
+		b, err := s.Deliverables.UpsertSystem(ctx, orgID, prDeliverable(teamID, hostB, domain.DeliverableStatePRDraft))
 		if err != nil {
 			t.Fatalf("UpsertSystem(%s): %v", hostB, err)
 		}
@@ -73,54 +73,54 @@ func RunExternalObjectScopeConformance(t *testing.T, mk ExternalObjectScopeFacto
 		}
 
 		// A second write in one scope updates that scope's row and only it.
-		again, err := s.Artifacts.UpsertSystem(ctx, orgID, prArtifact(teamID, hostA, domain.ArtifactStatePRMerged))
+		again, err := s.Deliverables.UpsertSystem(ctx, orgID, prDeliverable(teamID, hostA, domain.DeliverableStatePRMerged))
 		if err != nil {
 			t.Fatalf("UpsertSystem(%s) again: %v", hostA, err)
 		}
-		if again.ID != a.ID || again.State != domain.ArtifactStatePRMerged {
+		if again.ID != a.ID || again.State != domain.DeliverableStatePRMerged {
 			t.Errorf("second %s write = %+v, want row %s moved to merged", hostA, again, a.ID)
 		}
-		other, err := s.Artifacts.Get(ctx, orgID, b.ID)
+		other, err := s.Deliverables.Get(ctx, orgID, b.ID)
 		if err != nil || other == nil {
 			t.Fatalf("Get(%s): %v, %v", b.ID, other, err)
 		}
-		if other.State != domain.ArtifactStatePRDraft || other.Scope != hostB || other.URL != hostB+"/octo/api/pull/7" {
+		if other.State != domain.DeliverableStatePRDraft || other.Scope != hostB || other.URL != hostB+"/octo/api/pull/7" {
 			t.Errorf("%s row after a %s write = %+v, want it untouched", hostB, hostA, other)
 		}
 
 		// The insert-if-absent backstop keys on the scope as well: absent in a
 		// third scope, present in its own.
-		inserted, err := s.Artifacts.InsertArtifactIfAbsentSystem(ctx, orgID, prArtifact(teamID, "https://ghe.third.example", domain.ArtifactStatePROpen))
+		inserted, err := s.Deliverables.InsertDeliverableIfAbsentSystem(ctx, orgID, prDeliverable(teamID, "https://ghe.third.example", domain.DeliverableStatePROpen))
 		if err != nil || !inserted {
-			t.Errorf("InsertArtifactIfAbsentSystem in a new scope = %v, %v; want an insert", inserted, err)
+			t.Errorf("InsertDeliverableIfAbsentSystem in a new scope = %v, %v; want an insert", inserted, err)
 		}
-		inserted, err = s.Artifacts.InsertArtifactIfAbsentSystem(ctx, orgID, prArtifact(teamID, hostB, domain.ArtifactStatePROpen))
+		inserted, err = s.Deliverables.InsertDeliverableIfAbsentSystem(ctx, orgID, prDeliverable(teamID, hostB, domain.DeliverableStatePROpen))
 		if err != nil || inserted {
-			t.Errorf("InsertArtifactIfAbsentSystem in a scope that holds the key = %v, %v; want no insert", inserted, err)
+			t.Errorf("InsertDeliverableIfAbsentSystem in a scope that holds the key = %v, %v; want no insert", inserted, err)
 		}
-		if got, _ := s.Artifacts.Get(ctx, orgID, b.ID); got == nil || got.State != domain.ArtifactStatePRDraft {
+		if got, _ := s.Deliverables.Get(ctx, orgID, b.ID); got == nil || got.State != domain.DeliverableStatePRDraft {
 			t.Errorf("%s row after insert-if-absent = %+v, want its state kept", hostB, got)
 		}
 	})
 
-	t.Run("An_artifact_without_a_scope_is_refused", func(t *testing.T) {
+	t.Run("A_deliverable_without_a_scope_is_refused", func(t *testing.T) {
 		s, orgID, teamID := mk(t)
-		unscoped := prArtifact(teamID, "", domain.ArtifactStatePROpen)
-		if _, err := s.Artifacts.UpsertSystem(ctx, orgID, unscoped); !errors.Is(err, db.ErrExternalObjectScopeRequired) {
+		unscoped := prDeliverable(teamID, "", domain.DeliverableStatePROpen)
+		if _, err := s.Deliverables.UpsertSystem(ctx, orgID, unscoped); !errors.Is(err, db.ErrExternalObjectScopeRequired) {
 			t.Errorf("UpsertSystem with no scope: err = %v, want ErrExternalObjectScopeRequired", err)
 		}
-		if _, err := s.Artifacts.Upsert(ctx, orgID, unscoped); !errors.Is(err, db.ErrExternalObjectScopeRequired) {
+		if _, err := s.Deliverables.Upsert(ctx, orgID, unscoped); !errors.Is(err, db.ErrExternalObjectScopeRequired) {
 			t.Errorf("Upsert with no scope: err = %v, want ErrExternalObjectScopeRequired", err)
 		}
-		if _, err := s.Artifacts.InsertArtifactIfAbsentSystem(ctx, orgID, unscoped); !errors.Is(err, db.ErrExternalObjectScopeRequired) {
-			t.Errorf("InsertArtifactIfAbsentSystem with no scope: err = %v, want ErrExternalObjectScopeRequired", err)
+		if _, err := s.Deliverables.InsertDeliverableIfAbsentSystem(ctx, orgID, unscoped); !errors.Is(err, db.ErrExternalObjectScopeRequired) {
+			t.Errorf("InsertDeliverableIfAbsentSystem with no scope: err = %v, want ErrExternalObjectScopeRequired", err)
 		}
-		_, total, err := s.Artifacts.ListByOrgSystem(ctx, orgID, db.ArtifactListOpts{CountOnly: true})
+		_, total, err := s.Deliverables.ListByOrgSystem(ctx, orgID, db.DeliverableListOpts{CountOnly: true})
 		if err != nil {
 			t.Fatalf("ListByOrgSystem: %v", err)
 		}
 		if total != 0 {
-			t.Errorf("artifacts after refused writes = %d, want 0", total)
+			t.Errorf("deliverables after refused writes = %d, want 0", total)
 		}
 	})
 
@@ -128,18 +128,18 @@ func RunExternalObjectScopeConformance(t *testing.T, mk ExternalObjectScopeFacto
 		s, orgID, teamID := mk(t)
 		pr := func(key, nodeID string) string {
 			t.Helper()
-			e, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, domain.ArtifactProviderGitHub, hostA, key, nodeID, "pr", "t", "")
+			e, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, domain.ProviderGitHub, hostA, key, nodeID, "pr", "t", "")
 			if err != nil {
 				t.Fatalf("seed entity %s: %v", key, err)
 			}
 			return e.ID
 		}
 		entityID, otherID := pr("octo/api#7", "PR_kw7"), pr("octo/other#7", "PR_kw7_other")
-		review := func(repoPath, nodeID, entity, conversationID string) domain.Artifact {
+		review := func(repoPath, nodeID, entity, conversationID string) domain.Deliverable {
 			t.Helper()
-			a := domain.NewReviewArtifact(repoPath, 7, nodeID, "abc123", conversationID)
+			a := domain.NewReviewDeliverable(repoPath, 7, nodeID, "abc123", conversationID)
 			a.TeamID, a.Scope, a.EntityID = teamID, hostA, entity
-			stored, err := s.Artifacts.UpsertSystem(ctx, orgID, a)
+			stored, err := s.Deliverables.UpsertSystem(ctx, orgID, a)
 			if err != nil {
 				t.Fatalf("seed review %s: %v", conversationID, err)
 			}
@@ -150,7 +150,7 @@ func RunExternalObjectScopeConformance(t *testing.T, mk ExternalObjectScopeFacto
 		// name is still its draft: the read matches the entity, not the target.
 		renamed := review("Octo/old-api", "PR_kw7", entityID, "conv-b")
 		review("octo/other", "PR_kw7_other", otherID, "conv-c")
-		got, err := s.Artifacts.ListPendingReviewsByEntitySystem(ctx, orgID, entityID)
+		got, err := s.Deliverables.ListPendingReviewsByEntitySystem(ctx, orgID, entityID)
 		if err != nil {
 			t.Fatalf("ListPendingReviewsByEntitySystem: %v", err)
 		}
@@ -161,7 +161,7 @@ func RunExternalObjectScopeConformance(t *testing.T, mk ExternalObjectScopeFacto
 		if len(got) != 2 || !ids[own.ID] || !ids[renamed.ID] {
 			t.Errorf("pending reviews of %s = %+v, want exactly rows %s and %s", entityID, got, own.ID, renamed.ID)
 		}
-		if got, err := s.Artifacts.ListPendingReviewsByEntitySystem(ctx, orgID, ""); err != nil || len(got) != 0 {
+		if got, err := s.Deliverables.ListPendingReviewsByEntitySystem(ctx, orgID, ""); err != nil || len(got) != 0 {
 			t.Errorf("ListPendingReviewsByEntitySystem with no entity = %+v, %v; want nothing", got, err)
 		}
 	})
@@ -169,11 +169,11 @@ func RunExternalObjectScopeConformance(t *testing.T, mk ExternalObjectScopeFacto
 	t.Run("Present_dedup_keys_are_read_on_one_scope", func(t *testing.T) {
 		s, orgID, teamID := mk(t)
 		comment := func(scope, commentID string) string {
-			key := domain.ArtifactDedupKey(domain.ArtifactProviderLinear, domain.ArtifactKindComment, "uuid-1", commentID)
-			if _, err := s.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
-				TeamID: teamID, Provider: domain.ArtifactProviderLinear, Kind: domain.ArtifactKindComment,
+			key := domain.ObjectKey(domain.ProviderLinear, domain.DeliverableKindComment, "uuid-1", commentID)
+			if _, err := s.Deliverables.UpsertSystem(ctx, orgID, domain.Deliverable{
+				TeamID: teamID, Provider: domain.ProviderLinear, Kind: domain.DeliverableKindComment,
 				Scope: scope, Target: "ENG-1", ExternalID: commentID,
-				State: domain.ArtifactStateCommentPosted, DedupKey: key,
+				State: domain.DeliverableStateCommentPosted, DedupKey: key,
 			}); err != nil {
 				t.Fatalf("seed comment %s on %s: %v", commentID, scope, err)
 			}
@@ -183,20 +183,20 @@ func RunExternalObjectScopeConformance(t *testing.T, mk ExternalObjectScopeFacto
 		comment(hostB, "c-1")
 		onlyA := comment(hostA, "c-2")
 		onlyB := comment(hostB, "c-3")
-		absent := domain.ArtifactDedupKey(domain.ArtifactProviderLinear, domain.ArtifactKindComment, "uuid-1", "c-4")
+		absent := domain.ObjectKey(domain.ProviderLinear, domain.DeliverableKindComment, "uuid-1", "c-4")
 
-		got, err := s.Artifacts.PresentDedupKeysSystem(ctx, orgID, hostA, []string{both, onlyA, onlyB, absent})
+		got, err := s.Deliverables.PresentDedupKeysSystem(ctx, orgID, hostA, []string{both, onlyA, onlyB, absent})
 		if err != nil {
 			t.Fatalf("PresentDedupKeysSystem: %v", err)
 		}
 		if want := map[string]bool{both: true, onlyA: true}; !maps.Equal(got, want) {
 			t.Errorf("present on %s = %v, want %v", hostA, got, want)
 		}
-		got, err = s.Artifacts.PresentDedupKeysSystem(ctx, orgID, hostA, nil)
+		got, err = s.Deliverables.PresentDedupKeysSystem(ctx, orgID, hostA, nil)
 		if err != nil || len(got) != 0 {
 			t.Errorf("PresentDedupKeysSystem with no keys = %v, %v; want an empty set", got, err)
 		}
-		if _, err := s.Artifacts.PresentDedupKeysSystem(ctx, orgID, "", []string{both}); !errors.Is(err, db.ErrExternalObjectScopeRequired) {
+		if _, err := s.Deliverables.PresentDedupKeysSystem(ctx, orgID, "", []string{both}); !errors.Is(err, db.ErrExternalObjectScopeRequired) {
 			t.Errorf("PresentDedupKeysSystem with no scope: err = %v, want ErrExternalObjectScopeRequired", err)
 		}
 	})
@@ -205,7 +205,7 @@ func RunExternalObjectScopeConformance(t *testing.T, mk ExternalObjectScopeFacto
 		s, orgID, teamID := mk(t)
 		push := func(scope string) domain.ExternalAction {
 			return domain.ExternalAction{
-				TeamID: teamID, Provider: domain.ArtifactProviderGitHub, Scope: scope,
+				TeamID: teamID, Provider: domain.ProviderGitHub, Scope: scope,
 				Action: domain.ActionBranchPushed, Target: "octo/api", ExternalID: "refs/heads/fix",
 				Credential: domain.CredentialGitHubApp,
 				DedupKey:   domain.BranchPushDedupKey("conv-1", "repo-1", "refs/heads/fix", "abc123"),
@@ -235,7 +235,7 @@ func RunExternalObjectScopeConformance(t *testing.T, mk ExternalObjectScopeFacto
 	t.Run("An_external_action_without_a_scope_is_refused", func(t *testing.T) {
 		s, orgID, teamID := mk(t)
 		unscoped := domain.ExternalAction{
-			TeamID: teamID, Provider: domain.ArtifactProviderJira, Action: domain.ActionIssueTransitioned,
+			TeamID: teamID, Provider: domain.ProviderJira, Action: domain.ActionIssueTransitioned,
 			Target: "ENG-1", Credential: domain.CredentialJiraOrg,
 		}
 		if err := s.ExternalActions.RecordSystem(ctx, orgID, unscoped); !errors.Is(err, db.ErrExternalObjectScopeRequired) {
@@ -256,9 +256,9 @@ func RunExternalObjectScopeConformance(t *testing.T, mk ExternalObjectScopeFacto
 
 // InOrgScope returns a with its Scope set to orgID's current scope for its
 // provider (domain.ExternalObjectScope) when it names none — the scope the
-// exec funnel stamps on a write. For fixtures that seed artifacts straight
+// exec funnel stamps on a write. For fixtures that seed deliverables straight
 // through a store.
-func InOrgScope(t *testing.T, orgs db.OrgsStore, orgID string, a domain.Artifact) domain.Artifact {
+func InOrgScope(t *testing.T, orgs db.OrgsStore, orgID string, a domain.Deliverable) domain.Deliverable {
 	t.Helper()
 	if a.Scope == "" {
 		a.Scope = orgScopeFor(t, orgs, orgID, a.Provider)

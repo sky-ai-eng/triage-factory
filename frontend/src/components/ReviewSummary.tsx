@@ -23,7 +23,7 @@ interface Props {
   onRefresh: () => Promise<void>
   refreshing: boolean
   refreshError: string | null
-  // Pessimistic: these stage the body/event into the artifact and reject on
+  // Pessimistic: these stage the body/event into the deliverable and reject on
   // failure, so the editor can surface the error and stay in edit mode rather
   // than show a green "saved" over a write that didn't land.
   onUpdateBody: (body: string) => Promise<void>

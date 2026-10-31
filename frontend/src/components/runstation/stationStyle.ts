@@ -1,6 +1,6 @@
 import type { Conversation } from '../../types'
 import { chainPosition, completionKind, isActiveConversation } from '../../lib/conversationStatus'
-import { hasUnresolvedArtifacts } from '../../lib/approval'
+import { hasUnresolvedDeliverables } from '../../lib/approval'
 
 // stationStyle — the design system for the run-station HMI. It maps a
 // conversation's status to the single "light" the whole machine wears, plus
@@ -66,7 +66,7 @@ export function stationState(conversation: Conversation): StationState {
   // status. A live conversation keeps WORKING (handled above) — the dock
   // surfaces the approval affordance without recoloring the whole machine
   // mid-turn.
-  if (hasUnresolvedArtifacts(conversation)) {
+  if (hasUnresolvedDeliverables(conversation)) {
     return {
       key: 'attention',
       light: 'var(--color-warm)',

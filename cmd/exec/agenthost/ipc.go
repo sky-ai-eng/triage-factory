@@ -308,17 +308,17 @@ func (c *IPCClient) CreateWorkspaceCheckout(ctx context.Context, owner, repo, re
 	return res.Path, nil
 }
 
-// --- artifacts ---
+// --- deliverables ---
 
-// UpsertArtifact ships the polymorphic artifact to the daemon, which stamps
+// UpsertDeliverable ships the polymorphic deliverable to the daemon, which stamps
 // the run identity and upserts it host-side (admin- or app-pool per the run's
 // trigger shape). Returns the stored row. See TFAC-460.
-func (c *IPCClient) UpsertArtifact(ctx context.Context, a domain.Artifact) (domain.Artifact, error) {
-	var res upsertArtifactResult
-	if err := c.call(ctx, methodUpsertArtifact, upsertArtifactArgs{Artifact: a}, &res); err != nil {
-		return domain.Artifact{}, err
+func (c *IPCClient) UpsertDeliverable(ctx context.Context, a domain.Deliverable) (domain.Deliverable, error) {
+	var res upsertDeliverableResult
+	if err := c.call(ctx, methodUpsertDeliverable, upsertDeliverableArgs{Deliverable: a}, &res); err != nil {
+		return domain.Deliverable{}, err
 	}
-	return res.Artifact, nil
+	return res.Deliverable, nil
 }
 
 // --- jira ---

@@ -27,7 +27,7 @@ func TestStagedInjectionStore_Postgres(t *testing.T) {
 		seed := dbtest.StagedInjectionSeeder{
 			Conversation: func(t *testing.T, suffix string) string {
 				t.Helper()
-				return seedPgArtifactConversation(t, h, orgID, teamID, userID)
+				return seedPgDeliverableConversation(t, h, orgID, teamID, userID)
 			},
 			DeleteConversation: func(t *testing.T, conversationID string) {
 				t.Helper()
@@ -51,7 +51,7 @@ func TestStagedInjectionStore_Postgres_OrgScoped(t *testing.T) {
 
 	orgA, userA, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
 	otherOrg, _, _ := pgtest.SeedOrgWithUser(t, h, "bob")
-	convA := seedPgArtifactConversation(t, h, orgA, teamA, userA)
+	convA := seedPgDeliverableConversation(t, h, orgA, teamA, userA)
 
 	if _, err := stores.StagedInjections.AppendSystem(ctx, orgA, domain.StagedInjection{
 		ConversationID: convA, Producer: domain.StagedInjectionProducerPRNewCommits, Body: "for org A",
@@ -83,7 +83,7 @@ func TestStagedInjectionStore_Postgres_ReturnedRow_AppPool(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
-	conversationID := seedPgArtifactConversation(t, h, orgID, teamID, userID)
+	conversationID := seedPgDeliverableConversation(t, h, orgID, teamID, userID)
 
 	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 		store := pgstore.NewForTx(tx, pgtest.SecretKey).StagedInjections

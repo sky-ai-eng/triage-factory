@@ -40,11 +40,11 @@ func linePtr(n int) *int { return &n }
 // GitHub regardless of which one triggered it.
 func TestSubmitStaged_PayloadAndLink(t *testing.T) {
 	sub := &recordingSubmitter{}
-	details := domain.ReviewArtifactDetails{
+	details := domain.ReviewDeliverableDetails{
 		HeadSHA:     "start_review_head",
 		ReviewBody:  "## Review",
 		ReviewEvent: "COMMENT",
-		StagedComments: []domain.ReviewArtifactComment{
+		StagedComments: []domain.ReviewDeliverableComment{
 			{Path: "a.go", Line: linePtr(3), Body: "nit", CommitSHA: "finalize_head"},
 			{Path: "b.go", Line: linePtr(9), StartLine: linePtr(7), Body: "range", CommitSHA: "finalize_head"},
 		},
@@ -92,11 +92,11 @@ func TestSubmitStaged_PayloadAndLink(t *testing.T) {
 // GitHub refuses a pin that is not the live head, and with no positions to
 // protect the only pin that cannot go stale is the one GitHub fills in itself.
 func TestSubmitStaged_CommentlessSendsNoPin(t *testing.T) {
-	for name, details := range map[string]domain.ReviewArtifactDetails{
+	for name, details := range map[string]domain.ReviewDeliverableDetails{
 		"pure approve": {HeadSHA: "start_review_head", ReviewEvent: "APPROVE"},
 		"body-only, refreshed past the start head": {
 			HeadSHA: "start_review_head", FinalizedHeadSHA: "refresh_head",
-			ReviewEvent: "COMMENT", ReviewBody: "looks fine", StagedComments: []domain.ReviewArtifactComment{},
+			ReviewEvent: "COMMENT", ReviewBody: "looks fine", StagedComments: []domain.ReviewDeliverableComment{},
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -124,10 +124,10 @@ func TestSubmitStaged_UnanchoredCommentFailsBeforeGitHub(t *testing.T) {
 	sub := &recordingSubmitter{}
 	_, err := SubmitStaged(context.Background(), sub, SubmitInput{
 		Owner: "octo", Repo: "repo", Number: 7,
-		Details: domain.ReviewArtifactDetails{
+		Details: domain.ReviewDeliverableDetails{
 			HeadSHA:        "h",
 			ReviewEvent:    "COMMENT",
-			StagedComments: []domain.ReviewArtifactComment{{Path: "a.go", Body: "floating"}},
+			StagedComments: []domain.ReviewDeliverableComment{{Path: "a.go", Body: "floating"}},
 		},
 	})
 	var unanchored *UnanchoredCommentError
@@ -150,10 +150,10 @@ func TestSubmitStaged_LegacyUnanchoredCommentsPinToStartHead(t *testing.T) {
 	sub := &recordingSubmitter{}
 	if _, err := SubmitStaged(context.Background(), sub, SubmitInput{
 		Owner: "octo", Repo: "repo", Number: 7,
-		Details: domain.ReviewArtifactDetails{
+		Details: domain.ReviewDeliverableDetails{
 			HeadSHA:     "start_review_head",
 			ReviewEvent: "COMMENT",
-			StagedComments: []domain.ReviewArtifactComment{
+			StagedComments: []domain.ReviewDeliverableComment{
 				{Path: "a.go", Line: linePtr(3), Body: "legacy"},
 				{Path: "b.go", Line: linePtr(4), Body: "also legacy"},
 			},
@@ -176,10 +176,10 @@ func TestSubmitStaged_DivergentAnchorsRefused(t *testing.T) {
 	sub := &recordingSubmitter{}
 	_, err := SubmitStaged(context.Background(), sub, SubmitInput{
 		Owner: "octo", Repo: "repo", Number: 7,
-		Details: domain.ReviewArtifactDetails{
+		Details: domain.ReviewDeliverableDetails{
 			HeadSHA:     "start_review_head",
 			ReviewEvent: "COMMENT",
-			StagedComments: []domain.ReviewArtifactComment{
+			StagedComments: []domain.ReviewDeliverableComment{
 				{Path: "a.go", Line: linePtr(3), Body: "old frame", CommitSHA: "head_one"},
 				{Path: "b.go", Line: linePtr(4), Body: "new frame", CommitSHA: "head_two"},
 			},
@@ -203,7 +203,7 @@ func TestSubmitStaged_SubmitFailurePropagates(t *testing.T) {
 	boom := errors.New("502 bad gateway")
 	res, err := SubmitStaged(context.Background(), &recordingSubmitter{err: boom}, SubmitInput{
 		Owner: "octo", Repo: "repo", Number: 7,
-		Details: domain.ReviewArtifactDetails{HeadSHA: "h", ReviewEvent: "COMMENT", ReviewBody: "b"},
+		Details: domain.ReviewDeliverableDetails{HeadSHA: "h", ReviewEvent: "COMMENT", ReviewBody: "b"},
 	})
 	if !errors.Is(err, boom) {
 		t.Errorf("err = %v, want the GitHub error propagated", err)
@@ -217,10 +217,10 @@ func TestSubmitStaged_SubmitFailurePropagates(t *testing.T) {
 // identity arm is the reason the setting exists: an App-backed review posts as a
 // bot, a PAT-backed one posts as the person who lent the token.
 func TestPostureSubmits(t *testing.T) {
-	blocker := []domain.ReviewArtifactComment{
+	blocker := []domain.ReviewDeliverableComment{
 		{Path: "a.go", Body: domain.SeverityBadgeMarkdown(domain.SeverityBlocker) + "this breaks auth"},
 	}
-	minor := []domain.ReviewArtifactComment{
+	minor := []domain.ReviewDeliverableComment{
 		{Path: "a.go", Body: domain.SeverityBadgeMarkdown(domain.SeverityMinor) + "nit"},
 	}
 
@@ -229,7 +229,7 @@ func TestPostureSubmits(t *testing.T) {
 		posture  string
 		identity ghclient.Identity
 		event    string
-		comments []domain.ReviewArtifactComment
+		comments []domain.ReviewDeliverableComment
 		want     bool
 	}{
 		{"draft never posts, even under an App", domain.ReviewPostureDraft, ghclient.IdentityApp, "COMMENT", nil, false},

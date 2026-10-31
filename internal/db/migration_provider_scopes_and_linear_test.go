@@ -25,11 +25,11 @@ const (
 // The migration computes every scope it writes in SQL from the org's stored
 // base URLs, and every later read and write computes the same value in Go:
 // domain.EntityScope for an entity, EffectiveGitHubHost for a repository and a
-// team mapping, domain.ExternalObjectScope for an artifact
+// team mapping, domain.ExternalObjectScope for a deliverable
 // and an audit-ledger row. If the two disagreed, every pre-existing row would
 // sit under a scope no read asks for: the poller would mint a second entity
 // beside each one, the tracked set would read empty, and the next capture of
-// an object would mint a second artifact. So each case stages one row of each
+// an object would mint a second deliverable. So each case stages one row of each
 // kind under one org configuration, migrates, and requires every stored value
 // to equal what the Go side answers.
 func TestMigrate_ProviderScopesMatchGo(t *testing.T) {
@@ -54,8 +54,8 @@ func TestMigrate_ProviderScopesMatchGo(t *testing.T) {
 		{name: "jira with another scheme", jiraBase: ptr("ftp://jira.example.com")},
 	}
 	providers := []string{
-		domain.ArtifactProviderGitHub, domain.ArtifactProviderGit, domain.ArtifactProviderJira,
-		domain.ArtifactProviderLinear, domain.ArtifactProviderSlack, domain.ArtifactProviderNetwork,
+		domain.ProviderGitHub, domain.ProviderGit, domain.ProviderJira,
+		domain.ProviderLinear, domain.ProviderSlack, domain.ProviderNetwork,
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -474,10 +474,10 @@ func TestMigrate_ExternalObjectScopeKeysDedupWithinAScope(t *testing.T) {
 		name, sql string
 		unique    bool
 	}{
-		{"an artifact under the same key in another scope", `
+		{"a deliverable under the same key in another scope", `
 			INSERT INTO artifacts (id, team_id, provider, scope, kind, target, state, dedup_key)
 			VALUES ('a3', 'team-1', 'github', 'https://ghe.example.com', 'pull_request', 'octo/api#1', 'open', 'github:pull_request:octo/api#1')`, false},
-		{"an artifact under the same key in the same scope", `
+		{"a deliverable under the same key in the same scope", `
 			INSERT INTO artifacts (id, team_id, provider, scope, kind, target, state, dedup_key)
 			VALUES ('a4', 'team-1', 'github', 'https://github.com', 'pull_request', 'octo/api#1', 'open', 'github:pull_request:octo/api#1')`, true},
 		{"an action under the same key in another scope", `
@@ -762,12 +762,12 @@ func TestMigrate_ConversationVerdictParksOpen(t *testing.T) {
 	}
 }
 
-// Among the artifact rows written before the migration, a GitHub comment row
+// Among the deliverable rows written before the migration, a GitHub comment row
 // with no target was left by an edit or a delete of a comment TF had not
 // posted, and is deleted, so a comment row existing means TF posted the
 // comment. The rows the posting verbs wrote stay, and so does every targetless
 // row of another provider or kind.
-func TestMigrate_ArtifactCommentIdentityKeepsOnlyCommentsTFPosted(t *testing.T) {
+func TestMigrate_DeliverableCommentIdentityKeepsOnlyCommentsTFPosted(t *testing.T) {
 	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
 	seedProviderScopesOrg(t, database)
 
@@ -1104,20 +1104,20 @@ func TestMigrate_ProviderScopesRecordJiraIssueIDs(t *testing.T) {
 	mustExec(t, database, `UPDATE entities SET external_id = '10002' WHERE id = 'e-no-id'`)
 }
 
-// Pull request, review and branch artifacts are re-keyed on ids: a pull
+// Pull request, review and branch deliverables are re-keyed on ids: a pull
 // request on the node id its row's details carry, a review on its pull
-// request's node id, read off the pull request's artifact or its entity, and a
+// request's node id, read off the pull request's deliverable or its entity, and a
 // branch on its repository's registry row, names compared case-insensitively.
 // A row with nothing to resolve keeps its key, and one pull request recorded
 // under two names of its repository merges onto the older row.
-func TestMigrate_ProviderScopesKeyArtifactsOnIDs(t *testing.T) {
+func TestMigrate_ProviderScopesKeyDeliverablesOnIDs(t *testing.T) {
 	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
 	seedProviderScopesOrg(t, database)
 	mustExec(t, database, `INSERT INTO repositories (id, owner, repo, source) VALUES ('repo-api', 'octo', 'api', 'github')`)
 	// A polled pull request, whose entity takes its node id from its snapshot.
 	mustExec(t, database, `INSERT INTO entities (id, source, source_id, kind, snapshot_json)
 		VALUES ('e-pr-9', 'github', 'octo/api#9', 'pr', '{"node_id":"PR_9","number":9}')`)
-	artifact := func(id, provider, kind, target, externalID, key, details, createdAt string) {
+	deliverable := func(id, provider, kind, target, externalID, key, details, createdAt string) {
 		t.Helper()
 		mustExec(t, database, `
 			INSERT INTO artifacts (id, team_id, provider, kind, target, external_id, state, dedup_key, details_json, created_at)
@@ -1125,16 +1125,16 @@ func TestMigrate_ProviderScopesKeyArtifactsOnIDs(t *testing.T) {
 			id, provider, kind, target, externalID, key, details, createdAt)
 	}
 	const day1, day2 = "2026-01-01 00:00:00", "2026-02-01 00:00:00"
-	artifact("pr-3", "github", "pull_request", "octo/api#3", "3", "github:pull_request:octo/api#3", `{"node_id":"PR_3"}`, day1)
+	deliverable("pr-3", "github", "pull_request", "octo/api#3", "3", "github:pull_request:octo/api#3", `{"node_id":"PR_3"}`, day1)
 	// One pull request recorded under its repository's old name and its new.
-	artifact("pr-7-old", "github", "pull_request", "octo/old-api#7", "7", "github:pull_request:octo/old-api#7", `{"node_id":"PR_7"}`, day1)
-	artifact("pr-7-new", "github", "pull_request", "octo/api#7", "7", "github:pull_request:octo/api#7", `{"node_id":"PR_7"}`, day2)
-	artifact("pr-5", "github", "pull_request", "octo/api#5", "5", "github:pull_request:octo/api#5", `{"head_branch":"x"}`, day1)
-	artifact("rv-3", "github", "review", "Octo/API#3", "", "github:review:Octo/API#3:conv-a", `{"number":3}`, day1)
-	artifact("rv-9", "github", "review", "octo/api#9", "", "github:review:octo/api#9:conv-b", `{"number":9}`, day1)
-	artifact("rv-11", "github", "review", "octo/api#11", "", "github:review:octo/api#11:conv-c", `{"number":11}`, day1)
-	artifact("br-api", "git", "branch", "Octo/API", "refs/heads/octo/api-fix", "git:branch:Octo/API:refs/heads/octo/api-fix", `{"sha":"a"}`, day1)
-	artifact("br-gone", "git", "branch", "octo/gone", "refs/heads/fix", "git:branch:octo/gone:refs/heads/fix", `{"sha":"b"}`, day1)
+	deliverable("pr-7-old", "github", "pull_request", "octo/old-api#7", "7", "github:pull_request:octo/old-api#7", `{"node_id":"PR_7"}`, day1)
+	deliverable("pr-7-new", "github", "pull_request", "octo/api#7", "7", "github:pull_request:octo/api#7", `{"node_id":"PR_7"}`, day2)
+	deliverable("pr-5", "github", "pull_request", "octo/api#5", "5", "github:pull_request:octo/api#5", `{"head_branch":"x"}`, day1)
+	deliverable("rv-3", "github", "review", "Octo/API#3", "", "github:review:Octo/API#3:conv-a", `{"number":3}`, day1)
+	deliverable("rv-9", "github", "review", "octo/api#9", "", "github:review:octo/api#9:conv-b", `{"number":9}`, day1)
+	deliverable("rv-11", "github", "review", "octo/api#11", "", "github:review:octo/api#11:conv-c", `{"number":11}`, day1)
+	deliverable("br-api", "git", "branch", "Octo/API", "refs/heads/octo/api-fix", "git:branch:Octo/API:refs/heads/octo/api-fix", `{"sha":"a"}`, day1)
+	deliverable("br-gone", "git", "branch", "octo/gone", "refs/heads/fix", "git:branch:octo/gone:refs/heads/fix", `{"sha":"b"}`, day1)
 
 	migrateProviderScopes(t, database)
 
@@ -1172,13 +1172,13 @@ func TestMigrate_ProviderScopesKeyArtifactsOnIDs(t *testing.T) {
 	}
 }
 
-// Every artifact is linked to the entity it is about: the one carrying the
+// Every deliverable is linked to the entity it is about: the one carrying the
 // provider id its key names, else the one its target names, and its target
-// takes that entity's key. A branch has none. A Jira artifact keyed on an
+// takes that entity's key. A branch has none. A Jira deliverable keyed on an
 // issue key, or a Jira comment keyed on its comment id alone, is re-keyed on
 // the issue's site and id, and one issue recorded under both shapes keeps the
 // older row.
-func TestMigrate_ProviderScopesLinkArtifactsToEntities(t *testing.T) {
+func TestMigrate_ProviderScopesLinkDeliverablesToEntities(t *testing.T) {
 	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
 	seedProviderScopesOrg(t, database)
 	const site = "https://acme.atlassian.net"
@@ -1195,7 +1195,7 @@ func TestMigrate_ProviderScopesLinkArtifactsToEntities(t *testing.T) {
 	jiraIssue("e-sky-1", "SKY-1", `{"id":"10001","key":"SKY-1","project_id":"100"}`)
 	jiraIssue("e-sky-2", "SKY-2", `{"key":"SKY-2"}`)
 	jiraIssue("e-ops-1", "OPS-1", `{"id":"10007","key":"OPS-1","project_id":"200"}`)
-	artifact := func(id, provider, kind, target, key, details, createdAt string) {
+	deliverable := func(id, provider, kind, target, key, details, createdAt string) {
 		t.Helper()
 		mustExec(t, database, `
 			INSERT INTO artifacts (id, team_id, provider, kind, target, state, dedup_key, details_json, created_at)
@@ -1204,16 +1204,16 @@ func TestMigrate_ProviderScopesLinkArtifactsToEntities(t *testing.T) {
 	}
 	const day1, day2 = "2026-01-01 00:00:00", "2026-02-01 00:00:00"
 	resource := domain.JiraIssueResource(site, "10001")
-	artifact("pr-9", "github", "pull_request", "octo/api#9", "github:pull_request:octo/api#9", `{"node_id":"PR_9"}`, day1)
-	artifact("gh-comment", "github", "comment", "Octo/API#9", "github:comment:555", "", day1)
-	artifact("branch", "git", "branch", "octo/gone", "git:branch:octo/gone:refs/heads/fix", "", day1)
-	artifact("issue-legacy", "jira", "issue", "SKY-1", "jira:issue:SKY-1", "", day1)
-	artifact("issue-keyed", "jira", "issue", "SKY-1", domain.ArtifactDedupKey("jira", "issue", resource, ""), "", day2)
-	artifact("comment-legacy", "jira", "comment", "SKY-1", "jira:comment:20311", "", day1)
-	artifact("comment-no-id", "jira", "comment", "SKY-2", "jira:comment:20312", "", day1)
+	deliverable("pr-9", "github", "pull_request", "octo/api#9", "github:pull_request:octo/api#9", `{"node_id":"PR_9"}`, day1)
+	deliverable("gh-comment", "github", "comment", "Octo/API#9", "github:comment:555", "", day1)
+	deliverable("branch", "git", "branch", "octo/gone", "git:branch:octo/gone:refs/heads/fix", "", day1)
+	deliverable("issue-legacy", "jira", "issue", "SKY-1", "jira:issue:SKY-1", "", day1)
+	deliverable("issue-keyed", "jira", "issue", "SKY-1", domain.ObjectKey("jira", "issue", resource, ""), "", day2)
+	deliverable("comment-legacy", "jira", "comment", "SKY-1", "jira:comment:20311", "", day1)
+	deliverable("comment-no-id", "jira", "comment", "SKY-2", "jira:comment:20312", "", day1)
 	// Recorded under the key the issue had before it moved, keyed on its id.
-	artifact("issue-moved", "jira", "issue", "SKY-7",
-		domain.ArtifactDedupKey("jira", "issue", domain.JiraIssueResource(site, "10007"), ""), "", day1)
+	deliverable("issue-moved", "jira", "issue", "SKY-7",
+		domain.ObjectKey("jira", "issue", domain.JiraIssueResource(site, "10007"), ""), "", day1)
 
 	migrateProviderScopes(t, database)
 
@@ -1221,10 +1221,10 @@ func TestMigrate_ProviderScopesLinkArtifactsToEntities(t *testing.T) {
 		"pr-9":           {"e-pr-9", "octo/api#9", domain.PullRequestDedupKey("PR_9")},
 		"gh-comment":     {"e-pr-9", "octo/api#9", "github:comment:555"},
 		"branch":         {"", "octo/gone", "git:branch:octo/gone:refs/heads/fix"},
-		"issue-legacy":   {"e-sky-1", "SKY-1", domain.ArtifactDedupKey("jira", "issue", resource, "")},
-		"comment-legacy": {"e-sky-1", "SKY-1", domain.ArtifactDedupKey("jira", "comment", resource, "20311")},
+		"issue-legacy":   {"e-sky-1", "SKY-1", domain.ObjectKey("jira", "issue", resource, "")},
+		"comment-legacy": {"e-sky-1", "SKY-1", domain.ObjectKey("jira", "comment", resource, "20311")},
 		"comment-no-id":  {"e-sky-2", "SKY-2", "jira:comment:20312"},
-		"issue-moved":    {"e-ops-1", "OPS-1", domain.ArtifactDedupKey("jira", "issue", domain.JiraIssueResource(site, "10007"), "")},
+		"issue-moved":    {"e-ops-1", "OPS-1", domain.ObjectKey("jira", "issue", domain.JiraIssueResource(site, "10007"), "")},
 	} {
 		var entity, target, key string
 		if err := database.QueryRow(`SELECT COALESCE(entity_id, ''), target, dedup_key FROM artifacts WHERE id = ?`, id).

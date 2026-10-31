@@ -342,12 +342,12 @@ func (s *Spawner) recordMirrorAction(ctx context.Context, orgID, entityID, scope
 	}
 	if scope == "" && s.orgs != nil {
 		if set, err := s.orgs.GetSettingsSystem(ctx, orgID); err == nil {
-			scope = domain.ExternalObjectScope(domain.ArtifactProviderJira, set)
+			scope = domain.ExternalObjectScope(domain.ProviderJira, set)
 		}
 	}
 	err := s.externalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
 		TeamID:     teamID,
-		Provider:   domain.ArtifactProviderJira,
+		Provider:   domain.ProviderJira,
 		Scope:      scope,
 		Action:     action,
 		Target:     issueKey,

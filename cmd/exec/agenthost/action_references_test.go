@@ -28,7 +28,7 @@ func TestRecordExternalWrite_LinksTheActionToWhatItWasAbout(t *testing.T) {
 				t.Helper()
 				act.DedupKey = key
 				if act.Provider == "" {
-					act.Provider, act.Credential = domain.ArtifactProviderGitHub, domain.CredentialGitHubApp
+					act.Provider, act.Credential = domain.ProviderGitHub, domain.CredentialGitHubApp
 				}
 				RecordExternalWrite(ctx, stores, info, nil, &act)
 			}

@@ -28,15 +28,15 @@ import (
 //     sidecar holds no db.Stores and opens no DB connection.
 //
 // The split is deliberately at OP granularity, not store-method granularity:
-// a write funnel that composes an artifact upsert + an external-action append
-// inside one SyntheticClaimsWithTx (UpsertArtifact, Record) relays as ONE op,
+// a write funnel that composes a deliverable upsert + an external-action append
+// inside one SyntheticClaimsWithTx (UpsertDeliverable, Record) relays as ONE op,
 // so the transaction stays orchestrator-side — a tx closure cannot cross the
 // wire. Pure reads relay one-for-one.
 type Runtime interface {
 	Info() ConversationInfo
 
 	// Reads.
-	ListConversationArtifacts(ctx context.Context) ([]domain.Artifact, error)
+	ListConversationDeliverables(ctx context.Context) ([]domain.Deliverable, error)
 	GetConversation(ctx context.Context) (*domain.Conversation, error)
 	GetTask(ctx context.Context, taskID string) (*domain.Task, error)
 	// ListRepos lists the repositories the run's team tracks — the set
@@ -85,26 +85,26 @@ type Runtime interface {
 	// descriptive only, never the real App-vs-PAT tier.
 	ReviewPosture(ctx context.Context, owner, repo string) (ReviewPostureResolution, error)
 
-	// ArtifactPullRequest returns the pull request the run's own artifact
-	// artifactID is about, as GitHub addresses it now
-	// (db.ResolveArtifactPullRequest): its repository is read by id, through
-	// the artifact's entity, so a rename since the artifact was recorded is
-	// followed and a retired repository is reported as retired. An artifact
+	// DeliverablePullRequest returns the pull request the run's own deliverable
+	// deliverableID is about, as GitHub addresses it now
+	// (db.ResolveDeliverablePullRequest): its repository is read by id, through
+	// the deliverable's entity, so a rename since the deliverable was recorded is
+	// followed and a retired repository is reported as retired. A deliverable
 	// that is not the conversation's is refused.
-	ArtifactPullRequest(ctx context.Context, artifactID string) (db.ArtifactPullRequest, error)
+	DeliverablePullRequest(ctx context.Context, deliverableID string) (db.DeliverablePullRequest, error)
 
 	// Writes.
 	InsertConversationWorktree(ctx context.Context, row domain.ConversationWorktree) (inserted bool, winningPath string, err error)
 	DeleteConversationWorktree(ctx context.Context, repositoryID, ref string) error
-	UpsertArtifact(ctx context.Context, a domain.Artifact) (domain.Artifact, error)
+	UpsertDeliverable(ctx context.Context, a domain.Deliverable) (domain.Deliverable, error)
 	// UpdateReviewDetailsIfPending persists a review draft's mutated
 	// details_json, guarded on the draft still being state=pending. Returns
 	// false when the draft was resolved (submitted/dismissed) since it was read
 	// — the writer surfaces the lost race instead of resurrecting the resolved
-	// review, which the unconditional UpsertArtifact (state last-writer-wins)
+	// review, which the unconditional UpsertDeliverable (state last-writer-wins)
 	// would do with its stale in-memory pending state.
-	UpdateReviewDetailsIfPending(ctx context.Context, artifactID, detailsJSON string) (bool, error)
-	// TransitionReviewState is the review artifact's compare-and-swap: the row
+	UpdateReviewDetailsIfPending(ctx context.Context, deliverableID, detailsJSON string) (bool, error)
+	// TransitionReviewState is the review deliverable's compare-and-swap: the row
 	// moves from → to only while it still holds `from`, optionally stamping the
 	// resolved review's coordinates in the same write. It is the claim primitive
 	// the auto-posting posture takes BEFORE calling GitHub — a finalized draft is
@@ -112,7 +112,7 @@ type Runtime interface {
 	// submit the same review, so exactly one of them has to win a CAS or the
 	// review posts twice. Returns false when the race was lost (or the row is
 	// gone), never an error.
-	TransitionReviewState(ctx context.Context, artifactID, from, to, externalID, url, detailsJSON string) (bool, error)
+	TransitionReviewState(ctx context.Context, deliverableID, from, to, externalID, url, detailsJSON string) (bool, error)
 	// Record is the void, best-effort external-write funnel (RecordExternalWrite):
 	// a recording failure is logged host-side and never fails the agent's
 	// already-applied action, so it needs no error return. container is what
@@ -120,7 +120,7 @@ type Runtime interface {
 	// issue's team, a Jira issue's project — and zero for every other write:
 	// the write's touch creates the issue's entity when TF has none, and a
 	// Linear or Jira entity is created only with its container.
-	Record(ctx context.Context, a *domain.Artifact, act *domain.ExternalAction, container domain.EntityContainer)
+	Record(ctx context.Context, a *domain.Deliverable, act *domain.ExternalAction, container domain.EntityContainer)
 
 	// RecordReadTouch persists a durable conversation→entity touch for an addressed read
 	// (a verb targeting one entity by id/key/ts): it resolves-or-creates the
@@ -214,7 +214,7 @@ type ExtensionRuntime interface {
 	Relay(ctx context.Context, namespace, op string, args, out any) error
 	RelayNotify(ctx context.Context, namespace, op string, args any)
 	ProviderCredential(ctx context.Context, namespace string) (json.RawMessage, error)
-	Record(ctx context.Context, a *domain.Artifact, act *domain.ExternalAction, container domain.EntityContainer)
+	Record(ctx context.Context, a *domain.Deliverable, act *domain.ExternalAction, container domain.EntityContainer)
 	RecordReadTouch(ctx context.Context, provider, target, externalID string, container domain.EntityContainer, url string)
 }
 
@@ -234,9 +234,9 @@ const (
 	opListConversationWorktrees        = "list_conversation_worktrees"
 	opInsertConversationWorktree       = "insert_conversation_worktree"
 	opDeleteConversationWorktree       = "delete_conversation_worktree"
-	opListConversationArtifacts        = "list_conversation_artifacts"
+	opListConversationDeliverables     = "list_conversation_deliverables"
 	opOrgJiraBase                      = "org_jira_base"
-	opUpsertArtifact                   = "upsert_artifact"
+	opUpsertDeliverable                = "upsert_deliverable"
 	opUpdateReviewDetails              = "update_review_details_if_pending"
 	opTransitionReviewState            = "transition_review_state"
 	opRecordExternalWrite              = "record_external_write"
@@ -245,7 +245,7 @@ const (
 	opCheckEntitlement                 = "check_entitlement"
 	opSourceDisabled                   = "source_disabled"
 	opReviewPosture                    = "review_posture"
-	opArtifactPullRequest              = "artifact_pull_request"
+	opDeliverablePullRequest           = "deliverable_pull_request"
 	// opCreateWorkspaceCheckout materializes a `workspace add` checkout. Unlike
 	// the other core ops it is FS-bearing: the sidecar relays it because it owns
 	// neither the shared bare cache nor the run-root; the orchestrator serves it.
@@ -253,11 +253,11 @@ const (
 )
 
 // updateReviewDetailsArgs / updateReviewDetailsResult are the
-// update_review_details_if_pending op's payloads — the draft's artifact id +
+// update_review_details_if_pending op's payloads — the draft's deliverable id +
 // its rewritten details_json, and whether the guarded write landed.
 type updateReviewDetailsArgs struct {
-	ArtifactID  string `json:"artifact_id"`
-	DetailsJSON string `json:"details_json"`
+	DeliverableID string `json:"deliverable_id"`
+	DetailsJSON   string `json:"details_json"`
 }
 
 type updateReviewDetailsResult struct {
@@ -268,12 +268,12 @@ type updateReviewDetailsResult struct {
 // transition_review_state op's payloads — the CAS's from/to states plus the
 // optional coordinate stamp, and whether this caller won the transition.
 type transitionReviewStateArgs struct {
-	ArtifactID  string `json:"artifact_id"`
-	From        string `json:"from"`
-	To          string `json:"to"`
-	ExternalID  string `json:"external_id,omitempty"`
-	URL         string `json:"url,omitempty"`
-	DetailsJSON string `json:"details_json,omitempty"`
+	DeliverableID string `json:"deliverable_id"`
+	From          string `json:"from"`
+	To            string `json:"to"`
+	ExternalID    string `json:"external_id,omitempty"`
+	URL           string `json:"url,omitempty"`
+	DetailsJSON   string `json:"details_json,omitempty"`
 }
 
 type transitionReviewStateResult struct {
@@ -325,16 +325,16 @@ type reviewPostureArgs struct {
 	Repo  string `json:"repo"`
 }
 
-// artifactPullRequestArgs / artifactPullRequestResult are the
-// artifact_pull_request op's payloads: one of the run's artifacts, and the
-// pull request it is about (db.ArtifactPullRequest). The conversation the
-// artifact must belong to is bound orchestrator-side, so the wire carries only
+// deliverablePullRequestArgs / deliverablePullRequestResult are the
+// deliverable_pull_request op's payloads: one of the run's deliverables, and the
+// pull request it is about (db.DeliverablePullRequest). The conversation the
+// deliverable must belong to is bound orchestrator-side, so the wire carries only
 // the id.
-type artifactPullRequestArgs struct {
-	ArtifactID string `json:"artifact_id"`
+type deliverablePullRequestArgs struct {
+	DeliverableID string `json:"deliverable_id"`
 }
 
-type artifactPullRequestResult struct {
+type deliverablePullRequestResult struct {
 	RepositoryID string `json:"repository_id"`
 	Owner        string `json:"owner"`
 	Repo         string `json:"repo"`
@@ -342,10 +342,10 @@ type artifactPullRequestResult struct {
 	Retired      bool   `json:"retired"`
 }
 
-// listConversationArtifactsResult / orgJiraBaseResult / recordExternalWriteArgs are the
+// listConversationDeliverablesResult / orgJiraBaseResult / recordExternalWriteArgs are the
 // relay payloads that don't already exist as an IPC arg/result in protocol.go.
-type listConversationArtifactsResult struct {
-	Artifacts []domain.Artifact `json:"artifacts"`
+type listConversationDeliverablesResult struct {
+	Deliverables []domain.Deliverable `json:"deliverables"`
 }
 
 type orgJiraBaseResult struct {
@@ -364,8 +364,8 @@ type repoSlugResult struct {
 }
 
 type recordExternalWriteArgs struct {
-	Artifact *domain.Artifact       `json:"artifact,omitempty"`
-	Action   *domain.ExternalAction `json:"action,omitempty"`
+	Deliverable *domain.Deliverable    `json:"deliverable,omitempty"`
+	Action      *domain.ExternalAction `json:"action,omitempty"`
 	domain.EntityContainer
 }
 
@@ -401,7 +401,7 @@ type directRuntime struct {
 	ghResolver ghclient.Resolver
 
 	// ghCredential is the credential the branch-push row this runtime composes
-	// into an artifact upsert is stamped with. Set through
+	// into a deliverable upsert is stamped with. Set through
 	// LocalClient.SetGitHubCredential — from the sidecar's report on an
 	// executor, from the resolved tier on every other placement. Empty falls
 	// back to the resolver below, and to the App when even that can't answer.
@@ -437,16 +437,16 @@ func (r *directRuntime) githubResolver() ghclient.Resolver {
 
 func (r *directRuntime) Info() ConversationInfo { return r.info }
 
-// ListConversationArtifacts respects the pool split: event-triggered runs read
+// ListConversationDeliverables respects the pool split: event-triggered runs read
 // admin-pool (no JWT claims); manual runs read under the kicking-off user's
 // synthetic claims. Mirrors withWriteInfo for the read side.
-func (r *directRuntime) ListConversationArtifacts(ctx context.Context) ([]domain.Artifact, error) {
+func (r *directRuntime) ListConversationDeliverables(ctx context.Context) ([]domain.Deliverable, error) {
 	if r.info.IsEventTriggered {
-		return r.stores.Artifacts.ListByConversationSystem(ctx, r.info.OrgID, r.info.ConversationID)
+		return r.stores.Deliverables.ListByConversationSystem(ctx, r.info.OrgID, r.info.ConversationID)
 	}
-	var out []domain.Artifact
+	var out []domain.Deliverable
 	err := r.stores.Tx.SyntheticClaimsWithReadTx(ctx, r.info.OrgID, r.info.UserID, func(ts db.TxStores) error {
-		a, e := ts.Artifacts.ListByConversation(ctx, r.info.OrgID, r.info.ConversationID)
+		a, _, e := ts.Deliverables.ListByConversation(ctx, r.info.OrgID, r.info.ConversationID, db.Unwindowed)
 		out = a
 		return e
 	})
@@ -593,20 +593,20 @@ func (r *directRuntime) ReviewPosture(ctx context.Context, owner, repo string) (
 	return out, nil
 }
 
-// ArtifactPullRequest finds the artifact among the conversation's own, through
-// the same read ListConversationArtifacts serves, so the id names nothing
+// DeliverablePullRequest finds the deliverable among the conversation's own, through
+// the same read ListConversationDeliverables serves, so the id names nothing
 // outside this run.
-func (r *directRuntime) ArtifactPullRequest(ctx context.Context, artifactID string) (db.ArtifactPullRequest, error) {
-	arts, err := r.ListConversationArtifacts(ctx)
+func (r *directRuntime) DeliverablePullRequest(ctx context.Context, deliverableID string) (db.DeliverablePullRequest, error) {
+	arts, err := r.ListConversationDeliverables(ctx)
 	if err != nil {
-		return db.ArtifactPullRequest{}, err
+		return db.DeliverablePullRequest{}, err
 	}
 	for _, a := range arts {
-		if a.ID == artifactID {
-			return db.ResolveArtifactPullRequest(ctx, r.info.OrgID, a, r.stores.Entities.GetSystem, r.stores.Repos.GetSystem)
+		if a.ID == deliverableID {
+			return db.ResolveDeliverablePullRequest(ctx, r.info.OrgID, a, r.stores.Entities.GetSystem, r.stores.Repos.GetSystem)
 		}
 	}
-	return db.ArtifactPullRequest{}, fmt.Errorf("artifact %s is not one of this conversation's", artifactID)
+	return db.DeliverablePullRequest{}, fmt.Errorf("deliverable %s is not one of this conversation's", deliverableID)
 }
 
 func (r *directRuntime) InsertConversationWorktree(ctx context.Context, row domain.ConversationWorktree) (bool, string, error) {
@@ -641,77 +641,77 @@ func (r *directRuntime) DeleteConversationWorktree(ctx context.Context, reposito
 	)
 }
 
-// UpsertArtifact stamps the run identity and the org's current scope
+// UpsertDeliverable stamps the run identity and the org's current scope
 // (stampScopeInfo) onto a, links it to the entity it is about
-// (resolveArtifactEntity: a review draft's pull request; a branch has none)
+// (resolveDeliverableEntity: a review draft's pull request; a branch has none)
 // and upserts it, composing the branch-push external action into the SAME
 // write. Event-triggered runs route admin-pool; manual
 // runs wrap in the kicking-off user's synthetic claims. Returns the stored
 // row. Each write is retried on a retryable error like the recording funnel's
 // (withRecordRetry) — the upsert is idempotent and the push row's dedup key is
 // deterministic — but on the caller's own context, since the caller is waiting
-// for the result. When the artifact write fails, the action is written on its own
-// (recordActionAlone) before the artifact's error is returned, so a push whose
-// artifact could not be recorded still leaves its ledger row. Inside a relayed
-// record the artifact's failure is also the record's (dropRelayedArtifact).
+// for the result. When the deliverable write fails, the action is written on its own
+// (recordActionAlone) before the deliverable's error is returned, so a push whose
+// deliverable could not be recorded still leaves its ledger row. Inside a relayed
+// record the deliverable's failure is also the record's (dropRelayedDeliverable).
 //
 // A branch is keyed here, on the registry row its target names (keyBranch),
 // and its push row takes its repository from that key. The key a branch
 // arrives with is discarded: on an executor it was built by the sidecar,
 // which must not be able to file a push under a repository of its choosing,
 // as resolveActionReferences keeps every other act from naming one.
-func (r *directRuntime) UpsertArtifact(ctx context.Context, a domain.Artifact) (domain.Artifact, error) {
+func (r *directRuntime) UpsertDeliverable(ctx context.Context, a domain.Deliverable) (domain.Deliverable, error) {
 	a.OrgID = r.info.OrgID
 	a.TeamID = r.info.TeamID
 	a.ConversationID = r.info.ConversationID
-	if a.Kind == domain.ArtifactKindBranch {
+	if a.Kind == domain.DeliverableKindBranch {
 		a.DedupKey = ""
 	}
 	if err := withRecordRetry(ctx, func() error { return stampScopeInfo(ctx, r.stores, r.info.OrgID, &a, nil) }); err != nil {
 		r.dropBranchPush(ctx, a, r.branchPushAction(ctx, a), err)
-		return domain.Artifact{}, err
+		return domain.Deliverable{}, err
 	}
 	keyErr := r.keyBranch(ctx, &a)
 	act := r.branchPushAction(ctx, a)
 	if keyErr != nil {
-		dropRelayedArtifact(ctx, a, keyErr)
+		dropRelayedDeliverable(ctx, a, keyErr)
 		r.recordBranchPushAlone(ctx, a, act)
-		return domain.Artifact{}, keyErr
+		return domain.Deliverable{}, keyErr
 	}
-	resolveArtifactEntity(ctx, r.stores, r.info, &a, domain.EntityContainer{})
+	resolveDeliverableEntity(ctx, r.stores, r.info, &a, domain.EntityContainer{})
 	if r.info.IsEventTriggered {
-		var stored domain.Artifact
+		var stored domain.Deliverable
 		err := withRecordRetry(ctx, func() error {
 			var e error
-			stored, e = r.stores.Artifacts.UpsertSystem(ctx, r.info.OrgID, a)
+			stored, e = r.stores.Deliverables.UpsertSystem(ctx, r.info.OrgID, a)
 			return e
 		})
 		if err != nil {
-			dropRelayedArtifact(ctx, a, err)
+			dropRelayedDeliverable(ctx, a, err)
 			r.recordBranchPushAlone(ctx, a, act)
-			return domain.Artifact{}, err
+			return domain.Deliverable{}, err
 		}
 		if rerr := withRecordRetry(ctx, func() error { return recordActionSystemInfo(ctx, r.stores, r.info, act) }); rerr != nil {
 			r.dropBranchPush(ctx, a, act, rerr)
 		}
 		return stored, nil
 	}
-	var out domain.Artifact
-	var artifactErr error
+	var out domain.Deliverable
+	var deliverableErr error
 	err := withRecordRetry(ctx, func() error {
 		return r.stores.Tx.SyntheticClaimsWithTx(ctx, r.info.OrgID, r.info.UserID, func(ts db.TxStores) error {
-			artifactErr = nil
-			stored, uerr := ts.Artifacts.Upsert(ctx, r.info.OrgID, a)
+			deliverableErr = nil
+			stored, uerr := ts.Deliverables.Upsert(ctx, r.info.OrgID, a)
 			if uerr != nil {
-				artifactErr = uerr
+				deliverableErr = uerr
 				return uerr
 			}
 			out = stored
 			return recordActionTx(ctx, ts, r.info.OrgID, act)
 		})
 	})
-	if artifactErr != nil {
-		dropRelayedArtifact(ctx, a, artifactErr)
+	if deliverableErr != nil {
+		dropRelayedDeliverable(ctx, a, deliverableErr)
 		r.recordBranchPushAlone(ctx, a, act)
 	} else if err != nil {
 		r.dropBranchPush(ctx, a, act, err)
@@ -719,13 +719,13 @@ func (r *directRuntime) UpsertArtifact(ctx context.Context, a domain.Artifact) (
 	return out, err
 }
 
-// keyBranch keys branch artifact a on the registry row its target, an
+// keyBranch keys branch deliverable a on the registry row its target, an
 // owner/repo, names on a's scope, the org's current GitHub host. It returns
 // errNoRegistryRow when no live row has that name, and the read's error when
 // the registry could not be read; either way a is left with no key. Any other
-// artifact is left as it is.
-func (r *directRuntime) keyBranch(ctx context.Context, a *domain.Artifact) error {
-	if a.Kind != domain.ArtifactKindBranch {
+// deliverable is left as it is.
+func (r *directRuntime) keyBranch(ctx context.Context, a *domain.Deliverable) error {
+	if a.Kind != domain.DeliverableKindBranch {
 		return nil
 	}
 	a.DedupKey = ""
@@ -748,22 +748,22 @@ func (r *directRuntime) keyBranch(ctx context.Context, a *domain.Artifact) error
 	return nil
 }
 
-// branchPushAction builds the branch-push row of a, nil for an artifact that
+// branchPushAction builds the branch-push row of a, nil for a deliverable that
 // is not a branch, on a's scope: a branch's scope is the org's GitHub host,
 // which is the push's too.
-func (r *directRuntime) branchPushAction(ctx context.Context, a domain.Artifact) *domain.ExternalAction {
+func (r *directRuntime) branchPushAction(ctx context.Context, a domain.Deliverable) *domain.ExternalAction {
 	act := branchPushActionInfo(a, r.info, r.githubCredential(ctx, a))
 	if act != nil {
 		act.Scope = a.Scope
-		act.DetailJSON = withPushSigner(act.DetailJSON, pushSigner(ctx, r.stores, r.info.OrgID, domain.ParseBranchArtifactSHA(a.DetailsJSON), r.sealedSigner))
+		act.DetailJSON = withPushSigner(act.DetailJSON, pushSigner(ctx, r.stores, r.info.OrgID, domain.ParseBranchDeliverableSHA(a.DetailsJSON), r.sealedSigner))
 	}
 	return act
 }
 
-// recordBranchPushAlone writes the branch-push row of an artifact whose own
-// write failed, best-effort. A nil act (an artifact that is not a branch) has
+// recordBranchPushAlone writes the branch-push row of a deliverable whose own
+// write failed, best-effort. A nil act (a deliverable that is not a branch) has
 // nothing to write.
-func (r *directRuntime) recordBranchPushAlone(ctx context.Context, a domain.Artifact, act *domain.ExternalAction) {
+func (r *directRuntime) recordBranchPushAlone(ctx context.Context, a domain.Deliverable, act *domain.ExternalAction) {
 	if act == nil {
 		return
 	}
@@ -773,9 +773,9 @@ func (r *directRuntime) recordBranchPushAlone(ctx context.Context, a domain.Arti
 }
 
 // dropBranchPush accounts for a branch-push row that was not written, cause
-// being the error that lost it. A nil act (an artifact that is not a branch)
+// being the error that lost it. A nil act (a deliverable that is not a branch)
 // lost no row.
-func (r *directRuntime) dropBranchPush(ctx context.Context, a domain.Artifact, act *domain.ExternalAction, cause error) {
+func (r *directRuntime) dropBranchPush(ctx context.Context, a domain.Deliverable, act *domain.ExternalAction, cause error) {
 	if act == nil {
 		return
 	}
@@ -784,15 +784,15 @@ func (r *directRuntime) dropBranchPush(ctx context.Context, a domain.Artifact, a
 		"conversation", r.info.ConversationID, "target", a.Target, "error", cause)
 }
 
-// dropRelayedArtifact accounts for an artifact that a relayed record — a
+// dropRelayedDeliverable accounts for a deliverable that a relayed record — a
 // sidecar's record_push — failed to write, cause being the error that lost it.
-// There the artifact is the record's loss like the ledger row beside it, as it
+// There the deliverable is the record's loss like the ledger row beside it, as it
 // is in the recording funnel: held until the record's outcome is known, and
 // deferring the record when another attempt can land it, so the sidecar's
-// resend retries the artifact too. Every other caller of UpsertArtifact is
+// resend retries the deliverable too. Every other caller of UpsertDeliverable is
 // waiting on its result and gets the error back to handle, so outside a
 // relayed record this does nothing.
-func dropRelayedArtifact(ctx context.Context, a domain.Artifact, cause error) {
+func dropRelayedDeliverable(ctx context.Context, a domain.Deliverable, cause error) {
 	if relayedRecordFrom(ctx) == nil {
 		return
 	}
@@ -800,22 +800,22 @@ func dropRelayedArtifact(ctx context.Context, a domain.Artifact, cause error) {
 }
 
 // githubCredential names the credential to stamp on the branch-push row for
-// artifact a. A credential reported by whoever holds it wins outright — on an
+// deliverable a. A credential reported by whoever holds it wins outright — on an
 // executor that is the sidecar, and nothing this process can read would confirm
 // or contradict it.
 //
 // The resolver fallback exists for one caller: the local-mode pre-push hook,
-// which upserts a branch artifact in a process that never resolved a gh client,
+// which upserts a branch deliverable in a process that never resolved a gh client,
 // so nothing has classified the tier by the time the row is built. It is asked
-// only for a branch artifact — the sole kind that yields an action here — and
+// only for a branch deliverable — the sole kind that yields an action here — and
 // answers from the same resolver that minted the token the push authenticated
 // with. Failure is silent and reads as the App: a push that already landed must
 // not be held up, or logged twice, over how its row is labeled.
-func (r *directRuntime) githubCredential(ctx context.Context, a domain.Artifact) string {
+func (r *directRuntime) githubCredential(ctx context.Context, a domain.Deliverable) string {
 	if r.ghCredential != "" {
 		return r.ghCredential
 	}
-	if a.Kind != domain.ArtifactKindBranch {
+	if a.Kind != domain.DeliverableKindBranch {
 		return domain.CredentialGitHubApp
 	}
 	owner, repo, ok := strings.Cut(a.Target, "/")
@@ -834,16 +834,16 @@ func (r *directRuntime) githubCredential(ctx context.Context, a domain.Artifact)
 }
 
 // UpdateReviewDetailsIfPending routes the guarded draft write through the same
-// event-vs-manual pool split UpsertArtifact uses: event-triggered runs write
+// event-vs-manual pool split UpsertDeliverable uses: event-triggered runs write
 // admin-pool (no JWT claims); manual runs write under the kicking-off user's
 // synthetic claims.
-func (r *directRuntime) UpdateReviewDetailsIfPending(ctx context.Context, artifactID, detailsJSON string) (bool, error) {
+func (r *directRuntime) UpdateReviewDetailsIfPending(ctx context.Context, deliverableID, detailsJSON string) (bool, error) {
 	if r.info.IsEventTriggered {
-		return r.stores.Artifacts.UpdateReviewDetailsIfPendingSystem(ctx, r.info.OrgID, artifactID, detailsJSON)
+		return r.stores.Deliverables.UpdateReviewDetailsIfPendingSystem(ctx, r.info.OrgID, deliverableID, detailsJSON)
 	}
 	var updated bool
 	err := r.stores.Tx.SyntheticClaimsWithTx(ctx, r.info.OrgID, r.info.UserID, func(ts db.TxStores) error {
-		u, e := ts.Artifacts.UpdateReviewDetailsIfPending(ctx, r.info.OrgID, artifactID, detailsJSON)
+		u, e := ts.Deliverables.UpdateReviewDetailsIfPending(ctx, r.info.OrgID, deliverableID, detailsJSON)
 		updated = u
 		return e
 	})
@@ -855,20 +855,20 @@ func (r *directRuntime) UpdateReviewDetailsIfPending(ctx context.Context, artifa
 // the admin pool (no JWT claims); manual runs claim under the kicking-off user's
 // synthetic claims — the same pool the approve handler races on, which is what
 // makes the two callers contend for one row rather than pass each other.
-func (r *directRuntime) TransitionReviewState(ctx context.Context, artifactID, from, to, externalID, url, detailsJSON string) (bool, error) {
+func (r *directRuntime) TransitionReviewState(ctx context.Context, deliverableID, from, to, externalID, url, detailsJSON string) (bool, error) {
 	if r.info.IsEventTriggered {
-		return r.stores.Artifacts.TransitionReviewStateSystem(ctx, r.info.OrgID, artifactID, from, to, externalID, url, detailsJSON)
+		return r.stores.Deliverables.TransitionReviewStateSystem(ctx, r.info.OrgID, deliverableID, from, to, externalID, url, detailsJSON)
 	}
 	var moved bool
 	err := r.stores.Tx.SyntheticClaimsWithTx(ctx, r.info.OrgID, r.info.UserID, func(ts db.TxStores) error {
-		m, e := ts.Artifacts.TransitionReviewState(ctx, r.info.OrgID, artifactID, from, to, externalID, url, detailsJSON)
+		m, e := ts.Deliverables.TransitionReviewState(ctx, r.info.OrgID, deliverableID, from, to, externalID, url, detailsJSON)
 		moved = m
 		return e
 	})
 	return moved, err
 }
 
-func (r *directRuntime) Record(ctx context.Context, a *domain.Artifact, act *domain.ExternalAction, container domain.EntityContainer) {
+func (r *directRuntime) Record(ctx context.Context, a *domain.Deliverable, act *domain.ExternalAction, container domain.EntityContainer) {
 	recordExternalWrite(ctx, r.stores, r.info, a, act, container)
 }
 
@@ -996,12 +996,12 @@ func newRelayRuntime(conn relayConn, info ConversationInfo, held HeldBundle) *re
 
 func (r *relayRuntime) Info() ConversationInfo { return r.info }
 
-func (r *relayRuntime) ListConversationArtifacts(ctx context.Context) ([]domain.Artifact, error) {
-	var res listConversationArtifactsResult
-	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opListConversationArtifacts, emptyArgs{}, &res); err != nil {
+func (r *relayRuntime) ListConversationDeliverables(ctx context.Context) ([]domain.Deliverable, error) {
+	var res listConversationDeliverablesResult
+	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opListConversationDeliverables, emptyArgs{}, &res); err != nil {
 		return nil, err
 	}
-	return res.Artifacts, nil
+	return res.Deliverables, nil
 }
 
 func (r *relayRuntime) GetConversation(ctx context.Context) (*domain.Conversation, error) {
@@ -1092,12 +1092,12 @@ func (r *relayRuntime) ReviewPosture(ctx context.Context, owner, repo string) (R
 	return res, nil
 }
 
-func (r *relayRuntime) ArtifactPullRequest(ctx context.Context, artifactID string) (db.ArtifactPullRequest, error) {
-	var res artifactPullRequestResult
-	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opArtifactPullRequest, artifactPullRequestArgs{ArtifactID: artifactID}, &res); err != nil {
-		return db.ArtifactPullRequest{}, err
+func (r *relayRuntime) DeliverablePullRequest(ctx context.Context, deliverableID string) (db.DeliverablePullRequest, error) {
+	var res deliverablePullRequestResult
+	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opDeliverablePullRequest, deliverablePullRequestArgs{DeliverableID: deliverableID}, &res); err != nil {
+		return db.DeliverablePullRequest{}, err
 	}
-	return db.ArtifactPullRequest{
+	return db.DeliverablePullRequest{
 		RepositoryID: res.RepositoryID,
 		Owner:        res.Owner,
 		Repo:         res.Repo,
@@ -1118,38 +1118,38 @@ func (r *relayRuntime) DeleteConversationWorktree(ctx context.Context, repositor
 	return r.conn.call(ctx, agentproc.RelayNamespaceCore, opDeleteConversationWorktree, deleteConversationWorktreeByRepoRefArgs{RepositoryID: repositoryID, Ref: ref}, nil)
 }
 
-func (r *relayRuntime) UpsertArtifact(ctx context.Context, a domain.Artifact) (domain.Artifact, error) {
-	var res upsertArtifactResult
-	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opUpsertArtifact, upsertArtifactArgs{Artifact: a}, &res); err != nil {
-		return domain.Artifact{}, err
+func (r *relayRuntime) UpsertDeliverable(ctx context.Context, a domain.Deliverable) (domain.Deliverable, error) {
+	var res upsertDeliverableResult
+	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opUpsertDeliverable, upsertDeliverableArgs{Deliverable: a}, &res); err != nil {
+		return domain.Deliverable{}, err
 	}
-	return res.Artifact, nil
+	return res.Deliverable, nil
 }
 
-func (r *relayRuntime) UpdateReviewDetailsIfPending(ctx context.Context, artifactID, detailsJSON string) (bool, error) {
+func (r *relayRuntime) UpdateReviewDetailsIfPending(ctx context.Context, deliverableID, detailsJSON string) (bool, error) {
 	var res updateReviewDetailsResult
-	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opUpdateReviewDetails, updateReviewDetailsArgs{ArtifactID: artifactID, DetailsJSON: detailsJSON}, &res); err != nil {
+	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opUpdateReviewDetails, updateReviewDetailsArgs{DeliverableID: deliverableID, DetailsJSON: detailsJSON}, &res); err != nil {
 		return false, err
 	}
 	return res.Updated, nil
 }
 
-func (r *relayRuntime) TransitionReviewState(ctx context.Context, artifactID, from, to, externalID, url, detailsJSON string) (bool, error) {
+func (r *relayRuntime) TransitionReviewState(ctx context.Context, deliverableID, from, to, externalID, url, detailsJSON string) (bool, error) {
 	var res transitionReviewStateResult
 	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opTransitionReviewState, transitionReviewStateArgs{
-		ArtifactID: artifactID, From: from, To: to, ExternalID: externalID, URL: url, DetailsJSON: detailsJSON,
+		DeliverableID: deliverableID, From: from, To: to, ExternalID: externalID, URL: url, DetailsJSON: detailsJSON,
 	}, &res); err != nil {
 		return false, err
 	}
 	return res.Moved, nil
 }
 
-func (r *relayRuntime) Record(_ context.Context, a *domain.Artifact, act *domain.ExternalAction, container domain.EntityContainer) {
+func (r *relayRuntime) Record(_ context.Context, a *domain.Deliverable, act *domain.ExternalAction, container domain.EntityContainer) {
 	// Queued, not awaited: the external write already landed upstream, so the
 	// audit record must never block the op that follows it (mirrors the void
 	// RecordExternalWrite). The run's record sender delivers it in order and
 	// resends it until the orchestrator has applied it.
-	r.conn.record(agentproc.RelayNamespaceCore, opRecordExternalWrite, recordExternalWriteArgs{Artifact: a, Action: act, EntityContainer: container})
+	r.conn.record(agentproc.RelayNamespaceCore, opRecordExternalWrite, recordExternalWriteArgs{Deliverable: a, Action: act, EntityContainer: container})
 }
 
 func (r *relayRuntime) RecordReadTouch(_ context.Context, provider, target, externalID string, container domain.EntityContainer, url string) {

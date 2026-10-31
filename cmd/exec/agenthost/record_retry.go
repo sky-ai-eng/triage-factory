@@ -16,7 +16,7 @@ import (
 // failure another attempt can get past (db.IsRetryable).
 //
 // A retry is safe because every write in the funnel is idempotent across
-// attempts. The artifact is an upsert. The ledger row's dedup key is fixed
+// attempts. The deliverable is an upsert. The ledger row's dedup key is fixed
 // before the first attempt (mintActionDedupKey), so an attempt whose commit
 // landed but whose acknowledgement was lost is followed by one that conflicts
 // and does nothing, rather than by a second row.

@@ -106,7 +106,7 @@ type Server struct {
 	teamKB         kbstore.KB
 	teamKBNotifier *knowledgeevent.Notifier
 	spawner        *delegate.Spawner
-	// reconciler backs the Tier-2 conversation-scoped artifact refresh
+	// reconciler backs the Tier-2 conversation-scoped deliverable refresh
 	// endpoint — the same Reconciler the background Tier-1 Manager runs. Wired
 	// via SetReconciler after construction; nil until then, so the endpoint
 	// 503s rather than panicking if a request races startup.
@@ -1054,13 +1054,13 @@ func (s *Server) routes() {
 	// console.
 	s.api("GET /api/orgs/{org_id}/usage/ops", uh.handleUsageOrgOps)
 	// Activity feed (EE, FeatureGovernance): the team/org Actions
-	// (external-action audit log) + Objects (artifact history) lenses — same
+	// (external-action audit log) + Objects (deliverable history) lenses — same
 	// scope gates as the spend reads above, plus the entitlement (unlicensed →
 	// 404). Two resources, two routes each: the row shapes and the filter
 	// vocabularies differ, so one address cannot honestly serve both.
-	s.apiMutating("POST /api/teams/{team_id}/usage/artifacts/list", uh.handleUsageTeamArtifacts)
+	s.apiMutating("POST /api/teams/{team_id}/usage/deliverables/list", uh.handleUsageTeamDeliverables)
 	s.apiMutating("POST /api/teams/{team_id}/usage/actions/list", uh.handleUsageTeamActions)
-	s.apiMutating("POST /api/orgs/{org_id}/usage/artifacts/list", uh.handleUsageOrgArtifacts)
+	s.apiMutating("POST /api/orgs/{org_id}/usage/deliverables/list", uh.handleUsageOrgDeliverables)
 	s.apiMutating("POST /api/orgs/{org_id}/usage/actions/list", uh.handleUsageOrgActions)
 	// Per-team daily spend cap — org-admin-set, EE/governance-gated (the
 	// handlers 404 when unlicensed). The GET lists every active team + its cap
@@ -1164,7 +1164,7 @@ func (s *Server) routes() {
 	// route per value is how one gesture grows arms with different required
 	// fields, different authz and different response shapes. Each verb below
 	// earns its own route by carrying an effect a field write cannot express:
-	// an external Jira write, a spawned run, artifact teardown, an audit
+	// an external Jira write, a spawned run, deliverable teardown, an audit
 	// reversal.
 	s.apiMutating("PATCH /api/tasks/{id}", s.handleTaskPatch)
 	s.apiMutating("POST /api/tasks/{id}/claim", s.handleTaskClaim)
@@ -1175,10 +1175,10 @@ func (s *Server) routes() {
 	ag := &agentHandler{tx: s.tx, ws: s.ws, spawner: func() *delegate.Spawner { return s.spawner }, reconciler: func() *reconcile.Reconciler { return s.reconciler }}
 	s.api("GET /api/agent/conversations/{conversationID}", ag.handleAgentStatus)
 	s.api("GET /api/agent/conversations/{conversationID}/messages", ag.handleMessages)
-	// Conversation-scoped artifact read: the conversation's artifacts across
+	// Conversation-scoped deliverable read: the conversation's deliverables across
 	// every kind, team-scoped via the conversation. Backs the conversation
 	// detail surface.
-	s.api("GET /api/agent/conversations/{conversationID}/artifacts", ag.handleAgentArtifacts)
+	s.apiMutating("POST /api/agent/conversations/{conversationID}/deliverables/list", ag.handleAgentDeliverables)
 	// Conversation-scoped external-action read — the audit log filtered to
 	// this conversation. Its sibling above answers "what objects does this
 	// conversation own"; this answers "what did it do", including the writes
@@ -1194,10 +1194,10 @@ func (s *Server) routes() {
 	// here, so a refresh / second tab / cold load reconstructs it.
 	s.api("GET /api/agent/conversations/{conversationID}/permissions", ag.handleAgentPermissions)
 	s.apiMutating("POST /api/agent/conversations/{conversationID}/permissions/{toolCallID}", ag.handleAgentPermission)
-	// Tier-2 conversation-scoped artifact reconcile: the conversation view
+	// Tier-2 conversation-scoped deliverable reconcile: the conversation view
 	// polls this while open to refresh that conversation's non-terminal
-	// artifacts against GitHub.
-	s.apiMutating("POST /api/agent/conversations/{conversationID}/artifacts/refresh", ag.handleArtifactRefresh)
+	// deliverables against GitHub.
+	s.apiMutating("POST /api/agent/conversations/{conversationID}/deliverables/refresh", ag.handleDeliverableRefresh)
 	s.apiMutating("POST /api/agent/conversations/list", ag.handleConversations)
 
 	// Websocket: wrapped via s.api so the handshake sees claims in
@@ -1305,15 +1305,15 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/jira/stock/claim", s.handleJiraStockClaim)
 	s.apiMutating("POST /api/jira/stock/done", s.handleJiraStockDone)
 
-	// Artifact-id-addressed endpoints back both the GitHub-native PR preview
+	// Deliverable-id-addressed endpoints back both the GitHub-native PR preview
 	// and the review preview (kind-dispatched inside the handlers). A review
-	// lives on GitHub rather than locally: GET serves the artifact + its live
+	// lives on GitHub rather than locally: GET serves the deliverable + its live
 	// pending-review comments, PATCH stages body/event, the comment routes
 	// edit/delete inline comments on that pending review, approve submits it,
-	// and dismiss resolves a single artifact. The task-level resolve-all runs
+	// and dismiss resolves a single deliverable. The task-level resolve-all runs
 	// once, when the task itself ends (drag-to-Done / dismiss), through
-	// teardownTaskArtifacts.
-	ah := &artifactsHandler{
+	// teardownTaskDeliverables.
+	ah := &deliverablesHandler{
 		tx: s.tx, ws: s.ws, ghResolver: s.ghResolver,
 		spawner:    func() *delegate.Spawner { return s.spawner },
 		reconciler: func() *reconcile.Reconciler { return s.reconciler },
@@ -1326,21 +1326,21 @@ func (s *Server) routes() {
 	}
 	// One read for every kind; the writes are kind-scoped sub-resources, so a
 	// review-shaped body can never reach the PR write path.
-	s.api("GET /api/artifacts/{id}", ah.handleArtifactGet)
-	s.apiMutating("PATCH /api/artifacts/{id}/pr", ah.handleArtifactPRUpdate)
-	s.apiMutating("PATCH /api/artifacts/{id}/review", ah.handleArtifactReviewUpdate)
-	s.api("GET /api/artifacts/{id}/diff", ah.handleArtifactDiff)
-	s.apiMutating("POST /api/artifacts/{id}/approve", ah.handleArtifactApprove)
+	s.api("GET /api/deliverables/{id}", ah.handleDeliverableGet)
+	s.apiMutating("PATCH /api/deliverables/{id}/pr", ah.handleDeliverablePRUpdate)
+	s.apiMutating("PATCH /api/deliverables/{id}/review", ah.handleDeliverableReviewUpdate)
+	s.api("GET /api/deliverables/{id}/diff", ah.handleDeliverableDiff)
+	s.apiMutating("POST /api/deliverables/{id}/approve", ah.handleDeliverableApprove)
 	// Pull requests only: closing one is a real GitHub write. A review is
 	// abandoned through PATCH …/review {state:"dismissed"}.
-	s.apiMutating("POST /api/artifacts/{id}/dismiss", ah.handleArtifactDismiss)
+	s.apiMutating("POST /api/deliverables/{id}/dismiss", ah.handleDeliverableDismiss)
 	// Dismiss's irreversible sibling: the head branch is deleted from the
 	// upstream as well. Its own verb because the branch delete is the one PR
 	// write that cannot be undone, so the client confirms it explicitly.
-	s.apiMutating("POST /api/artifacts/{id}/reject", ah.handleArtifactReject)
-	s.apiMutating("POST /api/artifacts/{id}/review/refresh", ah.handleReviewRefresh)
-	s.apiMutating("PATCH /api/artifacts/{id}/comments/{commentId}", ah.handleArtifactCommentUpdate)
-	s.apiMutating("DELETE /api/artifacts/{id}/comments/{commentId}", ah.handleArtifactCommentDelete)
+	s.apiMutating("POST /api/deliverables/{id}/reject", ah.handleDeliverableReject)
+	s.apiMutating("POST /api/deliverables/{id}/review/refresh", ah.handleReviewRefresh)
+	s.apiMutating("PATCH /api/deliverables/{id}/comments/{commentId}", ah.handleDeliverableCommentUpdate)
+	s.apiMutating("DELETE /api/deliverables/{id}/comments/{commentId}", ah.handleDeliverableCommentDelete)
 
 	fh := &factoryHandler{tx: s.tx}
 	s.api("GET /api/factory/snapshot", fh.handleFactorySnapshot)
@@ -1989,7 +1989,7 @@ func (s *Server) kickReachRefresh(orgID string, force bool) {
 	s.reachTrigger(orgID, force)
 }
 
-// SetReconciler registers the shared artifact Reconciler that backs the Tier-2
+// SetReconciler registers the shared deliverable Reconciler that backs the Tier-2
 // conversation-scoped refresh endpoint — the same instance the background
 // Tier-1 Manager runs, so a foreground refresh and a background cycle apply
 // the identical reconcile path. Nil until wired; the endpoint 503s until then.

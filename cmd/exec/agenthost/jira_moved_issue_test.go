@@ -51,7 +51,7 @@ func startMovedIssueJira(t *testing.T) *httptest.Server {
 
 // TestLocalClient_JiraWriteOnAnOldKey_ResolvesTheExistingEntity: an agent
 // writing to the key an issue has left records against the issue's current
-// key and its existing entity — artifacts keyed on its id, the touch on the
+// key and its existing entity — deliverables keyed on its id, the touch on the
 // entity that already carries it — and creates nothing keyed by the old key.
 func TestLocalClient_JiraWriteOnAnOldKey_ResolvesTheExistingEntity(t *testing.T) {
 	jira := startMovedIssueJira(t)
@@ -72,15 +72,15 @@ func TestLocalClient_JiraWriteOnAnOldKey_ResolvesTheExistingEntity(t *testing.T)
 	}
 
 	resource := domain.JiraIssueResource(site, "10007")
-	for _, a := range listConversationArtifacts(t, stores, info.ConversationID) {
+	for _, a := range listConversationDeliverables(t, stores, info.ConversationID) {
 		if a.Target != "NEW-7" {
-			t.Errorf("%s artifact target = %q, want the issue's current key", a.Kind, a.Target)
+			t.Errorf("%s deliverable target = %q, want the issue's current key", a.Kind, a.Target)
 		}
-		if !strings.HasPrefix(a.DedupKey, domain.ArtifactDedupKey(domain.ArtifactProviderJira, a.Kind, resource, "")) {
-			t.Errorf("%s artifact dedup key = %q, want it keyed on %s", a.Kind, a.DedupKey, resource)
+		if !strings.HasPrefix(a.DedupKey, domain.ObjectKey(domain.ProviderJira, a.Kind, resource, "")) {
+			t.Errorf("%s deliverable dedup key = %q, want it keyed on %s", a.Kind, a.DedupKey, resource)
 		}
 		if a.EntityID != existing.ID {
-			t.Errorf("%s artifact entity = %q, want the existing entity %s", a.Kind, a.EntityID, existing.ID)
+			t.Errorf("%s deliverable entity = %q, want the existing entity %s", a.Kind, a.EntityID, existing.ID)
 		}
 	}
 	if role := touchRole(t, conn, info.ConversationID, existing.ID); role != domain.MemoryRoleTouched {
@@ -144,13 +144,13 @@ func TestLocalClient_MemoryLoad_OldJiraKeyFindsTheEntity(t *testing.T) {
 	}
 }
 
-// TestServer_SandboxUpsertArtifact_RecordsBranchesOnly pins the sandbox's
-// artifact door: over the socket it records a branch and refuses every other
-// kind. An artifact is linked to the entity its key names, and that
-// resolution follows the target onto the entity, so a Jira issue artifact the
+// TestServer_SandboxUpsertDeliverable_RecordsBranchesOnly pins the sandbox's
+// deliverable door: over the socket it records a branch and refuses every other
+// kind. A deliverable is linked to the entity its key names, and that
+// resolution follows the target onto the entity, so a Jira issue deliverable the
 // sandbox composed, keyed on an existing issue's id under a key of its own
 // choosing, would rename that issue's entity.
-func TestServer_SandboxUpsertArtifact_RecordsBranchesOnly(t *testing.T) {
+func TestServer_SandboxUpsertDeliverable_RecordsBranchesOnly(t *testing.T) {
 	const site = "https://jira.example.test"
 	_, stores, info := newJiraRecordingStoresConn(t, site, true)
 	ctx := context.Background()
@@ -173,32 +173,32 @@ func TestServer_SandboxUpsertArtifact_RecordsBranchesOnly(t *testing.T) {
 	sandbox := Dial(sockPath)
 	t.Cleanup(func() { _ = sandbox.Close() })
 
-	forged := domain.Artifact{
-		Provider: domain.ArtifactProviderJira,
-		Kind:     domain.ArtifactKindIssue,
+	forged := domain.Deliverable{
+		Provider: domain.ProviderJira,
+		Kind:     domain.DeliverableKindIssue,
 		Target:   "EVIL-9",
-		State:    domain.ArtifactStateIssueUpdated,
-		DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindIssue, domain.JiraIssueResource(site, "10001"), ""),
+		State:    domain.DeliverableStateIssueUpdated,
+		DedupKey: domain.ObjectKey(domain.ProviderJira, domain.DeliverableKindIssue, domain.JiraIssueResource(site, "10001"), ""),
 	}
-	if _, err := sandbox.UpsertArtifact(ctx, forged); err == nil {
-		t.Fatal("the sandbox recorded a Jira issue artifact; want it refused")
+	if _, err := sandbox.UpsertDeliverable(ctx, forged); err == nil {
+		t.Fatal("the sandbox recorded a Jira issue deliverable; want it refused")
 	}
-	issue, err := stores.Entities.GetByExternalIDSystem(ctx, info.OrgID, domain.ArtifactProviderJira, site, "10001")
+	issue, err := stores.Entities.GetByExternalIDSystem(ctx, info.OrgID, domain.ProviderJira, site, "10001")
 	if err != nil || issue == nil || issue.SourceID != "ABC-1" {
 		t.Fatalf("issue entity after the refused write = %+v, %v; want it still keyed ABC-1", issue, err)
 	}
-	if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 0 {
-		t.Fatalf("artifacts after the refused write = %+v, want none", arts)
+	if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 0 {
+		t.Fatalf("deliverables after the refused write = %+v, want none", arts)
 	}
 
-	branch, ok := domain.NewBranchArtifact("octo/repo", "refs/heads/feature/x", "abc123", true)
+	branch, ok := domain.NewBranchDeliverable("octo/repo", "refs/heads/feature/x", "abc123", true)
 	if !ok {
-		t.Fatal("build branch artifact")
+		t.Fatal("build branch deliverable")
 	}
-	if _, err := sandbox.UpsertArtifact(ctx, branch); err != nil {
-		t.Fatalf("UpsertArtifact (branch): %v", err)
+	if _, err := sandbox.UpsertDeliverable(ctx, branch); err != nil {
+		t.Fatalf("UpsertDeliverable (branch): %v", err)
 	}
-	if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 1 || arts[0].Kind != domain.ArtifactKindBranch {
-		t.Fatalf("artifacts after the branch = %+v, want the one branch", arts)
+	if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 1 || arts[0].Kind != domain.DeliverableKindBranch {
+		t.Fatalf("deliverables after the branch = %+v, want the one branch", arts)
 	}
 }

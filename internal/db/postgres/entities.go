@@ -464,14 +464,14 @@ func (s *entityStore) FindOrCreateLinearSystem(ctx context.Context, orgID, scope
 	if err := db.ValidateLinearEntityCreate(identifier, issueID, linearTeamID); err != nil {
 		return nil, false, err
 	}
-	return findOrCreateEntity(ctx, s.admin, orgID, domain.ArtifactProviderLinear, scope, identifier, issueID, domain.EntityContainer{LinearTeamID: linearTeamID}, "issue", title, url)
+	return findOrCreateEntity(ctx, s.admin, orgID, domain.ProviderLinear, scope, identifier, issueID, domain.EntityContainer{LinearTeamID: linearTeamID}, "issue", title, url)
 }
 
 func (s *entityStore) FindOrCreateJiraSystem(ctx context.Context, orgID, scope, key, issueID string, project domain.JiraProjectRef, title, url string) (*domain.Entity, bool, error) {
 	if err := db.ValidateJiraEntityCreate(key, issueID, project); err != nil {
 		return nil, false, err
 	}
-	return findOrCreateEntity(ctx, s.admin, orgID, domain.ArtifactProviderJira, scope, key, issueID, domain.EntityContainer{JiraProject: project}, "issue", title, url)
+	return findOrCreateEntity(ctx, s.admin, orgID, domain.ProviderJira, scope, key, issueID, domain.EntityContainer{JiraProject: project}, "issue", title, url)
 }
 
 // findOrCreateEntity is the identity rule's find-or-create. container is what
@@ -500,14 +500,14 @@ func findOrCreateEntity(ctx context.Context, q queryer, orgID, source, scope, so
 		return existing, false, nil
 	}
 	linearTeamID := container.LinearTeamID
-	if source == domain.ArtifactProviderLinear && linearTeamID == "" {
+	if source == domain.ProviderLinear && linearTeamID == "" {
 		return nil, false, fmt.Errorf("%w: %s in %s", db.ErrEntityLinearTeamRequired, sourceID, scope)
 	}
-	if source == domain.ArtifactProviderJira && container.JiraProject.ID == "" {
+	if source == domain.ProviderJira && container.JiraProject.ID == "" {
 		return nil, false, fmt.Errorf("%w: %s in %s", db.ErrEntityJiraProjectRequired, sourceID, scope)
 	}
 	var repoRef domain.RepoRef
-	if source == domain.ArtifactProviderGitHub {
+	if source == domain.ProviderGitHub {
 		if repoRef, err = db.GitHubEntityRepoRef(scope, sourceID); err != nil {
 			return nil, false, err
 		}
@@ -520,12 +520,12 @@ func findOrCreateEntity(ctx context.Context, q queryer, orgID, source, scope, so
 	err = inTx(ctx, q, func(tx queryer) error {
 		var repositoryID, jiraProjectID string
 		switch source {
-		case domain.ArtifactProviderGitHub:
+		case domain.ProviderGitHub:
 			var err error
 			if repositoryID, err = getOrCreateRepositoryID(ctx, tx, orgID, repoRef); err != nil {
 				return fmt.Errorf("resolve repository of %s: %w", sourceID, err)
 			}
-		case domain.ArtifactProviderJira:
+		case domain.ProviderJira:
 			p := container.JiraProject
 			project, err := findOrCreateJiraProject(ctx, tx, orgID, scope, p.ID, p.Key, p.Name)
 			if err != nil {
@@ -663,7 +663,7 @@ func (s *entityStore) RenameSystem(ctx context.Context, orgID, source, scope, ex
 			}
 			return fmt.Errorf("rename entity %s -> %s: %w", row.key, newKey, err)
 		}
-		if err := moveEntityArtifactTargets(ctx, tx, orgID, row.id); err != nil {
+		if err := moveEntityDeliverableTargets(ctx, tx, orgID, row.id); err != nil {
 			return err
 		}
 		if err := rewriteEntityActionURLs(ctx, tx, orgID, row.id, row.url, url); err != nil {
@@ -678,20 +678,20 @@ func (s *entityStore) RenameSystem(ctx context.Context, orgID, source, scope, ex
 	return out, nil
 }
 
-// moveEntityArtifactTargets sets the target of every artifact about the
-// entity (artifacts.entity_id) to the entity's key, as the row stands: an
-// artifact's target is its entity's key, whichever provider recorded it, so
+// moveEntityDeliverableTargets sets the target of every deliverable about the
+// entity (deliverables.entity_id) to the entity's key, as the row stands: a
+// deliverable's target is its entity's key, whichever provider recorded it, so
 // every write that moves a key (a rename, a merge, a fold, a repository's or a
 // Slack channel's move) ends with this. The dedup key names the object by an
 // id and does not move.
-func moveEntityArtifactTargets(ctx context.Context, q queryer, orgID, entityID string) error {
+func moveEntityDeliverableTargets(ctx context.Context, q queryer, orgID, entityID string) error {
 	if _, err := q.ExecContext(ctx, `
-		UPDATE artifacts a SET target = e.source_id, updated_at = now()
+		UPDATE deliverables a SET target = e.source_id, updated_at = now()
 		  FROM entities e
 		 WHERE e.org_id = $1 AND e.id = $2
 		   AND a.org_id = $1 AND a.entity_id = e.id AND a.target <> e.source_id`,
 		orgID, entityID); err != nil {
-		return fmt.Errorf("move the targets of entity %s's artifacts: %w", entityID, err)
+		return fmt.Errorf("move the targets of entity %s's deliverables: %w", entityID, err)
 	}
 	return nil
 }
@@ -892,7 +892,7 @@ func (s *entityStore) MergeDuplicateEntitiesSystem(ctx context.Context, orgID, e
 				return fmt.Errorf("survivor takes live state: %w", err)
 			}
 		}
-		if err := moveEntityArtifactTargets(ctx, q, orgID, survivor.ID); err != nil {
+		if err := moveEntityDeliverableTargets(ctx, q, orgID, survivor.ID); err != nil {
 			return err
 		}
 		kept, dropped := db.DuplicateEntityMergedKeys(survivor, loser)
@@ -948,7 +948,7 @@ func (s *entityStore) FoldStubEntitySystem(ctx context.Context, orgID, stubID, i
 		if _, err := q.ExecContext(ctx, `DELETE FROM entities WHERE org_id = $1 AND id = $2`, orgID, stub.ID); err != nil {
 			return fmt.Errorf("delete folded stub: %w", err)
 		}
-		if err := moveEntityArtifactTargets(ctx, q, orgID, into.ID); err != nil {
+		if err := moveEntityDeliverableTargets(ctx, q, orgID, into.ID); err != nil {
 			return err
 		}
 		return rewriteEntityActionURLs(ctx, q, orgID, into.ID, stub.URL, into.URL)
@@ -979,7 +979,7 @@ func moveEntityReferences(ctx context.Context, q queryer, orgID, loserID, surviv
 		orgID, loserID, db.DuplicateEntityMergedCloseReason); err != nil {
 		return fmt.Errorf("cancel duplicate tasks' runs: %w", err)
 	}
-	for _, table := range []string{"tasks", "events", "event_queue", "pending_firings", "artifacts", "external_actions"} {
+	for _, table := range []string{"tasks", "events", "event_queue", "pending_firings", "deliverables", "external_actions"} {
 		if _, err := q.ExecContext(ctx,
 			`UPDATE `+table+` SET entity_id = $1 WHERE org_id = $2 AND entity_id = $3`,
 			survivorID, orgID, loserID); err != nil {

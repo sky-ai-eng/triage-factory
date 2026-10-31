@@ -41,7 +41,7 @@ func newReviewTestTracker(t *testing.T) (*Tracker, db.Stores) {
 	t.Helper()
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
-	return New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, runmode.LocalDefaultOrgID), stores
+	return New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.EventQueue, runmode.LocalDefaultOrgID), stores
 }
 
 func review(id int64, author, state, submittedAt string, comments ...ghclient.PRReviewComment) ghclient.PRReview {
@@ -167,8 +167,8 @@ func TestGitHubNewReviews_LateSubmittedPendingReview(t *testing.T) {
 	}
 }
 
-// A review TF submitted, matched on its review artifact's external id, and a
-// thread reply TF posted, matched on its comment's artifact, are TF's. A
+// A review TF submitted, matched on its review deliverable's external id, and a
+// thread reply TF posted, matched on its comment's deliverable, are TF's. A
 // person's reply, and a review with one of TF's comments among a person's,
 // are not.
 func TestGitHubNewReviews_MarksTFReviewsAndReplies(t *testing.T) {
@@ -176,17 +176,17 @@ func TestGitHubNewReviews_MarksTFReviewsAndReplies(t *testing.T) {
 	ctx := context.Background()
 	org, team := runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
 
-	submitted := domain.NewReviewArtifact("octo/repo", 7, "PR_kwDO7", "sha", "conv-1")
-	submitted.TeamID, submitted.Scope, submitted.State, submitted.ExternalID = team, reviewTestHost, domain.ArtifactStateReviewSubmitted, "101"
-	if _, err := stores.Artifacts.UpsertSystem(ctx, org, submitted); err != nil {
-		t.Fatalf("seed review artifact: %v", err)
+	submitted := domain.NewReviewDeliverable("octo/repo", 7, "PR_kwDO7", "sha", "conv-1")
+	submitted.TeamID, submitted.Scope, submitted.State, submitted.ExternalID = team, reviewTestHost, domain.DeliverableStateReviewSubmitted, "101"
+	if _, err := stores.Deliverables.UpsertSystem(ctx, org, submitted); err != nil {
+		t.Fatalf("seed review deliverable: %v", err)
 	}
 	for _, id := range []int64{701, 801} {
-		reply := domain.Artifact{TeamID: team, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindComment,
-			Scope: reviewTestHost, Target: "octo/repo#7", State: domain.ArtifactStateCommentPosted,
-			DedupKey: domain.GitHubCommentDedupKey(domain.GitHubReviewComment, id)}
-		if _, err := stores.Artifacts.UpsertSystem(ctx, org, reply); err != nil {
-			t.Fatalf("seed comment artifact %d: %v", id, err)
+		reply := domain.Deliverable{TeamID: team, Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindComment,
+			Scope: reviewTestHost, Target: "octo/repo#7", State: domain.DeliverableStateCommentPosted,
+			DedupKey: domain.GitHubCommentKey(domain.GitHubReviewComment, id)}
+		if _, err := stores.Deliverables.UpsertSystem(ctx, org, reply); err != nil {
+			t.Fatalf("seed comment deliverable %d: %v", id, err)
 		}
 	}
 
@@ -215,11 +215,11 @@ func TestGitHubNewReviews_MarksTFReviewsAndReplies(t *testing.T) {
 	}
 }
 
-// failingReviewArtifacts fails the review-id lookup.
-type failingReviewArtifacts struct{ db.ArtifactStore }
+// failingReviewDeliverables fails the review-id lookup.
+type failingReviewDeliverables struct{ db.DeliverableStore }
 
-func (failingReviewArtifacts) PresentExternalIDsSystem(context.Context, string, string, string, string, []string) (map[string]bool, error) {
-	return nil, errors.New("artifact store down")
+func (failingReviewDeliverables) PresentExternalIDsSystem(context.Context, string, string, string, string, []string) (map[string]bool, error) {
+	return nil, errors.New("deliverable store down")
 }
 
 // A failed read, of the reviews or of which are TF's, keeps prev's marker and
@@ -230,7 +230,7 @@ func TestGitHubNewReviews_FailedReadKeepsPrevMarker(t *testing.T) {
 	}}}
 	for name, setup := range map[string]func(tr *Tracker, r *fakeReviewReader){
 		"review read":    func(_ *Tracker, r *fakeReviewReader) { r.err = errors.New("graphql down") },
-		"tf attribution": func(tr *Tracker, _ *fakeReviewReader) { tr.artifacts = failingReviewArtifacts{tr.artifacts} },
+		"tf attribution": func(tr *Tracker, _ *fakeReviewReader) { tr.deliverables = failingReviewDeliverables{tr.deliverables} },
 	} {
 		t.Run(name, func(t *testing.T) {
 			tr, _ := newReviewTestTracker(t)
@@ -348,10 +348,10 @@ func TestRefreshGitHub_EmitsOneEventPerReview(t *testing.T) {
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
-	reply := domain.Artifact{TeamID: runmode.LocalDefaultTeamID, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindComment,
-		Scope: reviewTestHost, Target: "octo/repo#7", State: domain.ArtifactStateCommentPosted,
-		DedupKey: domain.GitHubCommentDedupKey(domain.GitHubReviewComment, 4004)}
-	if _, err := stores.Artifacts.UpsertSystem(ctx, org, reply); err != nil {
+	reply := domain.Deliverable{TeamID: runmode.LocalDefaultTeamID, Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindComment,
+		Scope: reviewTestHost, Target: "octo/repo#7", State: domain.DeliverableStateCommentPosted,
+		DedupKey: domain.GitHubCommentKey(domain.GitHubReviewComment, 4004)}
+	if _, err := stores.Deliverables.UpsertSystem(ctx, org, reply); err != nil {
 		t.Fatalf("seed TF's reply: %v", err)
 	}
 	entityID := seedReviewedPR(t, stores, domain.PRSnapshot{
@@ -361,7 +361,7 @@ func TestRefreshGitHub_EmitsOneEventPerReview(t *testing.T) {
 	})
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
@@ -421,7 +421,7 @@ func TestRefreshGitHub_SnapshotWithoutMarker(t *testing.T) {
 	})
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.EventQueue, org)
 	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, ghclient.NewClient(srv.URL, "tok"), domain.GitHubAccount{}, nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}

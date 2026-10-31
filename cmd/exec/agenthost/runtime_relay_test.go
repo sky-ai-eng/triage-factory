@@ -73,29 +73,29 @@ func TestRelayRuntime_RoundTripsCoreOps(t *testing.T) {
 	// A write op relays as one op (the tx stays orchestrator-side) and lands in
 	// the store; the stored row — with its minted id and the org bound from the
 	// orchestrator's ConversationInfo — comes back.
-	art := domain.Artifact{
-		Provider:   domain.ArtifactProviderGitHub,
-		Kind:       domain.ArtifactKindComment,
+	art := domain.Deliverable{
+		Provider:   domain.ProviderGitHub,
+		Kind:       domain.DeliverableKindComment,
 		Target:     "octo/repo#7",
 		ExternalID: "123",
-		State:      domain.ArtifactStateCommentPosted,
-		DedupKey:   domain.ArtifactDedupKey(domain.ArtifactProviderGitHub, domain.ArtifactKindComment, "123", ""),
+		State:      domain.DeliverableStateCommentPosted,
+		DedupKey:   domain.ObjectKey(domain.ProviderGitHub, domain.DeliverableKindComment, "123", ""),
 	}
-	stored, err := rt.UpsertArtifact(ctx, art)
+	stored, err := rt.UpsertDeliverable(ctx, art)
 	if err != nil {
-		t.Fatalf("UpsertArtifact relay: %v", err)
+		t.Fatalf("UpsertDeliverable relay: %v", err)
 	}
 	if stored.ID == "" {
-		t.Fatal("expected a stored artifact id back from the relay")
+		t.Fatal("expected a stored deliverable id back from the relay")
 	}
 	if stored.OrgID != info.OrgID {
 		t.Fatalf("stored org = %q, want %q (bound from ConversationInfo, not the args)", stored.OrgID, info.OrgID)
 	}
 
 	// A read op relays and returns the just-written row.
-	arts, err := rt.ListConversationArtifacts(ctx)
+	arts, err := rt.ListConversationDeliverables(ctx)
 	if err != nil {
-		t.Fatalf("ListConversationArtifacts relay: %v", err)
+		t.Fatalf("ListConversationDeliverables relay: %v", err)
 	}
 	found := false
 	for _, a := range arts {
@@ -104,7 +104,7 @@ func TestRelayRuntime_RoundTripsCoreOps(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("relayed UpsertArtifact did not land in the store (got %d artifacts)", len(arts))
+		t.Fatalf("relayed UpsertDeliverable did not land in the store (got %d deliverables)", len(arts))
 	}
 
 	// A pure read op relays and returns the store's answer (team-tracks gate,
@@ -129,7 +129,7 @@ func TestRelayRuntime_RecordReadTouch_RoundTrips(t *testing.T) {
 	rt := newRelayRuntime(directDispatchConn{srv: srv}, info, nil)
 	ctx := context.Background()
 
-	rt.RecordReadTouch(ctx, domain.ArtifactProviderGitHub, "octo/repo#7", "", domain.EntityContainer{}, "")
+	rt.RecordReadTouch(ctx, domain.ProviderGitHub, "octo/repo#7", "", domain.EntityContainer{}, "")
 
 	ent, err := stores.Entities.GetBySource(ctx, info.OrgID, "github", "https://github.com", "octo/repo#7")
 	if err != nil || ent == nil {
@@ -153,24 +153,24 @@ func TestRelayRuntime_LinearTouchCarriesTheTeam(t *testing.T) {
 	rt := newRelayRuntime(directDispatchConn{srv: srv}, info, nil)
 	ctx := context.Background()
 
-	rt.RecordReadTouch(ctx, domain.ArtifactProviderLinear, "ENG-1", "uuid-read", domain.EntityContainer{LinearTeamID: "team-eng"}, "")
-	rt.Record(ctx, &domain.Artifact{
-		Provider: domain.ArtifactProviderLinear, Kind: domain.ArtifactKindIssue,
-		Target: "OPS-2", ExternalID: "uuid-write", State: domain.ArtifactStateIssueCreated,
-		DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderLinear, domain.ArtifactKindIssue, "uuid-write", ""),
+	rt.RecordReadTouch(ctx, domain.ProviderLinear, "ENG-1", "uuid-read", domain.EntityContainer{LinearTeamID: "team-eng"}, "")
+	rt.Record(ctx, &domain.Deliverable{
+		Provider: domain.ProviderLinear, Kind: domain.DeliverableKindIssue,
+		Target: "OPS-2", ExternalID: "uuid-write", State: domain.DeliverableStateIssueCreated,
+		DedupKey: domain.ObjectKey(domain.ProviderLinear, domain.DeliverableKindIssue, "uuid-write", ""),
 	}, &domain.ExternalAction{
-		Provider: domain.ArtifactProviderLinear, Action: domain.ActionIssueCreated,
+		Provider: domain.ProviderLinear, Action: domain.ActionIssueCreated,
 		Target: "OPS-2", ExternalID: "uuid-write", Credential: domain.CredentialLinearOrg,
 	}, domain.EntityContainer{LinearTeamID: "team-ops"})
-	rt.RecordReadTouch(ctx, domain.ArtifactProviderLinear, "ENG-3", "uuid-teamless", domain.EntityContainer{}, "")
+	rt.RecordReadTouch(ctx, domain.ProviderLinear, "ENG-3", "uuid-teamless", domain.EntityContainer{}, "")
 
 	for uuid, team := range map[string]string{"uuid-read": "team-eng", "uuid-write": "team-ops"} {
-		ent, err := stores.Entities.GetByExternalIDSystem(ctx, info.OrgID, domain.ArtifactProviderLinear, testScope("linear"), uuid)
+		ent, err := stores.Entities.GetByExternalIDSystem(ctx, info.OrgID, domain.ProviderLinear, testScope("linear"), uuid)
 		if err != nil || ent == nil || ent.LinearTeamID != team {
 			t.Errorf("entity for %s = %+v err=%v, want one in %s", uuid, ent, err, team)
 		}
 	}
-	if ent, err := stores.Entities.GetByExternalIDSystem(ctx, info.OrgID, domain.ArtifactProviderLinear, testScope("linear"), "uuid-teamless"); err != nil || ent != nil {
+	if ent, err := stores.Entities.GetByExternalIDSystem(ctx, info.OrgID, domain.ProviderLinear, testScope("linear"), "uuid-teamless"); err != nil || ent != nil {
 		t.Errorf("a teamless Linear touch created %+v (err=%v), want nothing", ent, err)
 	}
 }
@@ -189,20 +189,20 @@ func TestRelayRuntime_JiraTouchCarriesTheProject(t *testing.T) {
 	eng := domain.EntityContainer{JiraProject: domain.JiraProjectRef{ID: "10100", Key: "ENG", Name: "Engineering"}}
 	ops := domain.EntityContainer{JiraProject: domain.JiraProjectRef{ID: "10200", Key: "OPS"}}
 
-	rt.RecordReadTouch(ctx, domain.ArtifactProviderJira, "ENG-1", "20001", eng, "")
+	rt.RecordReadTouch(ctx, domain.ProviderJira, "ENG-1", "20001", eng, "")
 	resource := domain.JiraIssueResource(site, "20002")
-	rt.Record(ctx, &domain.Artifact{
-		Provider: domain.ArtifactProviderJira, Kind: domain.ArtifactKindIssue,
-		Target: "OPS-2", ExternalID: "20002", State: domain.ArtifactStateIssueCreated,
-		DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindIssue, resource, ""),
+	rt.Record(ctx, &domain.Deliverable{
+		Provider: domain.ProviderJira, Kind: domain.DeliverableKindIssue,
+		Target: "OPS-2", ExternalID: "20002", State: domain.DeliverableStateIssueCreated,
+		DedupKey: domain.ObjectKey(domain.ProviderJira, domain.DeliverableKindIssue, resource, ""),
 	}, &domain.ExternalAction{
-		Provider: domain.ArtifactProviderJira, Action: domain.ActionIssueCreated,
+		Provider: domain.ProviderJira, Action: domain.ActionIssueCreated,
 		Target: "OPS-2", Credential: domain.CredentialJiraOrg,
 	}, ops)
-	rt.RecordReadTouch(ctx, domain.ArtifactProviderJira, "ENG-3", "20003", domain.EntityContainer{}, "")
+	rt.RecordReadTouch(ctx, domain.ProviderJira, "ENG-3", "20003", domain.EntityContainer{}, "")
 
 	for issueID, want := range map[string]domain.JiraProjectRef{"20001": eng.JiraProject, "20002": ops.JiraProject} {
-		ent, err := stores.Entities.GetByExternalIDSystem(ctx, info.OrgID, domain.ArtifactProviderJira, site, issueID)
+		ent, err := stores.Entities.GetByExternalIDSystem(ctx, info.OrgID, domain.ProviderJira, site, issueID)
 		if err != nil || ent == nil {
 			t.Fatalf("entity for %s = %+v err=%v, want one", issueID, ent, err)
 		}
@@ -211,7 +211,7 @@ func TestRelayRuntime_JiraTouchCarriesTheProject(t *testing.T) {
 			t.Errorf("project of %s = %+v err=%v, want %s under %s on %s", issueID, project, err, want.Key, want.ID, site)
 		}
 	}
-	if ent, err := stores.Entities.GetByExternalIDSystem(ctx, info.OrgID, domain.ArtifactProviderJira, site, "20003"); err != nil || ent != nil {
+	if ent, err := stores.Entities.GetByExternalIDSystem(ctx, info.OrgID, domain.ProviderJira, site, "20003"); err != nil || ent != nil {
 		t.Errorf("a projectless Jira touch created %+v (err=%v), want nothing", ent, err)
 	}
 }
@@ -231,16 +231,16 @@ func TestRelayServer_BindsOrgFromConversationInfoNotArgs(t *testing.T) {
 	bogus.OrgID = "attacker-controlled-org"
 	rt := newRelayRuntime(directDispatchConn{srv: srv}, bogus, nil)
 
-	stored, err := rt.UpsertArtifact(context.Background(), domain.Artifact{
-		Provider:   domain.ArtifactProviderGitHub,
-		Kind:       domain.ArtifactKindComment,
+	stored, err := rt.UpsertDeliverable(context.Background(), domain.Deliverable{
+		Provider:   domain.ProviderGitHub,
+		Kind:       domain.DeliverableKindComment,
 		Target:     "octo/repo#9",
 		ExternalID: "9",
-		State:      domain.ArtifactStateCommentPosted,
-		DedupKey:   domain.ArtifactDedupKey(domain.ArtifactProviderGitHub, domain.ArtifactKindComment, "9", ""),
+		State:      domain.DeliverableStateCommentPosted,
+		DedupKey:   domain.ObjectKey(domain.ProviderGitHub, domain.DeliverableKindComment, "9", ""),
 	})
 	if err != nil {
-		t.Fatalf("UpsertArtifact relay: %v", err)
+		t.Fatalf("UpsertDeliverable relay: %v", err)
 	}
 	if stored.OrgID != info.OrgID {
 		t.Fatalf("write bound the org from the sidecar's runtime (%q); it MUST bind from the orchestrator's ConversationInfo (%q)",
@@ -263,7 +263,7 @@ func (tooLargeConn) record(string, string, any) {}
 // with the size refusal beneath it.
 func TestSaveReviewDraftDetails_TooLargeKeepsTheSizeRefusal(t *testing.T) {
 	c := &LocalClient{rt: newRelayRuntime(tooLargeConn{}, ConversationInfo{OrgID: "org", ConversationID: "conv"}, nil)}
-	err := c.saveReviewDraftDetails(context.Background(), "art-1", domain.ReviewArtifactDetails{ReviewBody: "body"})
+	err := c.saveReviewDraftDetails(context.Background(), "art-1", domain.ReviewDeliverableDetails{ReviewBody: "body"})
 	if !errors.Is(err, sidecarproto.ErrFrameTooLarge) {
 		t.Fatalf("saveReviewDraftDetails = %v; want the size refusal beneath it", err)
 	}

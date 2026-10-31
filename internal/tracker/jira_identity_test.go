@@ -203,7 +203,7 @@ func newJiraIdentityFixture(t *testing.T, issues ...*fakeJiraIssue) *jiraIdentit
 func (fx *jiraIdentityFixture) cycle(t *testing.T, site string, rules JiraRules) []domain.Event {
 	t.Helper()
 	pub := &recordingPublisher{}
-	tr := New(fx.db, pub, fx.stores.Tasks, fx.stores.Entities, fx.stores.Repos, fx.stores.JiraProjects, fx.stores.Artifacts, fx.stores.EventQueue, runmode.LocalDefaultOrgID)
+	tr := New(fx.db, pub, fx.stores.Tasks, fx.stores.Entities, fx.stores.Repos, fx.stores.JiraProjects, fx.stores.Deliverables, fx.stores.EventQueue, runmode.LocalDefaultOrgID)
 	rules = registeredRules(t, fx.stores.JiraProjects, site, rules)
 	if _, err := tr.RefreshJira(context.Background(), site, fx.client, site, rules); err != nil {
 		t.Fatalf("RefreshJira: %v", err)
@@ -270,7 +270,7 @@ func decodeMeta[T any](t *testing.T, evt domain.Event) T {
 
 // TestRefreshJira_MoveBetweenConfiguredProjects: an issue moved from one
 // configured project to another is the same entity under its new key. Diffing
-// never pauses, its tasks stay on it, its url and its artifacts' targets follow
+// never pauses, its tasks stay on it, its url and its deliverables' targets follow
 // it, and the move is key_changed, emitted before anything else the cycle
 // diffs — never unreachable, never a second entity.
 func TestRefreshJira_MoveBetweenConfiguredProjects(t *testing.T) {
@@ -284,14 +284,14 @@ func TestRefreshJira_MoveBetweenConfiguredProjects(t *testing.T) {
 		t.Fatalf("entity = %+v, want it created carrying the issue id", before)
 	}
 	taskID := fx.seedTask(t, before.ID)
-	art, err := fx.stores.Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, domain.Artifact{
-		TeamID: runmode.LocalDefaultTeamID, Provider: domain.ArtifactProviderJira, Kind: domain.ArtifactKindIssue,
-		Scope: before.Scope, Target: "ENG-1", ExternalID: "10001", State: domain.ArtifactStateIssueUpdated,
-		DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindIssue, domain.JiraIssueResource(jiraSite, "10001"), ""),
+	art, err := fx.stores.Deliverables.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, domain.Deliverable{
+		TeamID: runmode.LocalDefaultTeamID, Provider: domain.ProviderJira, Kind: domain.DeliverableKindIssue,
+		Scope: before.Scope, Target: "ENG-1", ExternalID: "10001", State: domain.DeliverableStateIssueUpdated,
+		DedupKey: domain.ObjectKey(domain.ProviderJira, domain.DeliverableKindIssue, domain.JiraIssueResource(jiraSite, "10001"), ""),
 		EntityID: before.ID,
 	})
 	if err != nil {
-		t.Fatalf("seed artifact: %v", err)
+		t.Fatalf("seed deliverable: %v", err)
 	}
 
 	fx.jira.update(func() {
@@ -332,8 +332,8 @@ func TestRefreshJira_MoveBetweenConfiguredProjects(t *testing.T) {
 	if task, err := fx.stores.Tasks.GetSystem(context.Background(), runmode.LocalDefaultOrgID, taskID); err != nil || task == nil || task.EntityID != before.ID || task.Status != "queued" {
 		t.Errorf("task = %+v err=%v, want it still on the entity and open", task, err)
 	}
-	if a, err := fx.stores.Artifacts.Get(context.Background(), runmode.LocalDefaultOrgID, art.ID); err != nil || a.Target != "OPS-7" || a.DedupKey != art.DedupKey {
-		t.Errorf("artifact = %+v err=%v, want its target moved and its key kept", a, err)
+	if a, err := fx.stores.Deliverables.Get(context.Background(), runmode.LocalDefaultOrgID, art.ID); err != nil || a.Target != "OPS-7" || a.DedupKey != art.DedupKey {
+		t.Errorf("deliverable = %+v err=%v, want its target moved and its key kept", a, err)
 	}
 
 	if evts := fx.cycle(t, jiraSite, engAndOps()); len(evts) != 0 {

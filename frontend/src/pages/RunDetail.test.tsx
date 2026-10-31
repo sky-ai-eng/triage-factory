@@ -11,7 +11,7 @@ const conversation = {
   Model: 'claude-opus-5',
   StartedAt: '2026-09-22T00:00:00Z',
   ResultSummary: '',
-  artifact_count: 0,
+  deliverable_count: 0,
   stop_requested_at: '2026-09-22T00:00:05Z',
 } as Conversation
 

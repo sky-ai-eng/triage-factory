@@ -6,6 +6,8 @@ import (
 
 	"github.com/zalando/go-keyring"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -25,6 +27,14 @@ func TestMovedRoutes_OldPathsAreGone(t *testing.T) {
 
 	org := "/api/orgs/" + runmode.LocalDefaultOrgID
 	team := runmode.LocalDefaultTeamID
+	// A real conversation and deliverable, so an id-addressed old path that
+	// were still mounted would answer for them rather than 404 on the lookup.
+	conversationID := seedSteerConversation(t, s.db, "moved", dbtest.SeedConcluded)
+	deliverable := seedConversationDeliverable(t, s, conversationID, domain.Deliverable{
+		Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindComment,
+		Target: "octo/repo#1", State: domain.DeliverableStateCommentPosted,
+		DedupKey: domain.GitHubCommentKey(domain.GitHubIssueComment, 1),
+	})
 
 	for _, c := range []struct{ method, path string }{
 		// The org-create route: local provisioning is POST /api/orgs.
@@ -62,6 +72,10 @@ func TestMovedRoutes_OldPathsAreGone(t *testing.T) {
 		// The two team-roster reads, now one list route on the team.
 		{http.MethodGet, "/api/team/members"},
 		{http.MethodGet, "/api/teams/" + team + "/members"},
+		// The artifacts table's routes, now addressed as deliverables.
+		{http.MethodGet, "/api/artifacts/" + deliverable.ID},
+		{http.MethodGet, "/api/agent/conversations/" + conversationID + "/artifacts"},
+		{http.MethodPost, "/api/agent/conversations/" + conversationID + "/artifacts/refresh"},
 	} {
 		rec := doJSON(t, s, c.method, c.path, map[string]any{})
 		if rec.Code != http.StatusNotFound {
