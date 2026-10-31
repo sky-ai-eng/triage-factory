@@ -315,7 +315,7 @@ export interface Conversation {
   // draft PRs + unresolved_review_count ready reviews === pending_deliverable_ids.length.
   unresolved_pr_count?: number
   unresolved_review_count?: number
-  // artifact_count is the number of objects this conversation's agent changed,
+  // artifact_count is the number of objects this conversation changed,
   // read from the external-action ledger; artifact_counts is the same set by
   // object kind ({} when it changed nothing) — what the board card's footer
   // strip states kind by kind. See ConversationArtifact.
@@ -430,7 +430,7 @@ export type ObjectKind =
 
 // ConversationArtifact mirrors an item of
 // POST /api/agent/conversations/{id}/artifacts/list (internal/server/agent.go
-// artifactJSON): one object the conversation's agent changed, however many
+// artifactJSON): one object the conversation changed, however many
 // actions it took on it. It says what the run did (last_action, action_count),
 // not the object's current state. object_id is opaque and safe in a URL; it
 // is the value the actions list's object_id filter takes. deliverable is the

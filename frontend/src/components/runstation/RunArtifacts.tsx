@@ -12,7 +12,7 @@ import { artifactSetKey } from '../../lib/approval'
 import { dismissDeliverable } from '../../lib/deliverables'
 import { useWebSocket } from '../../hooks/useWebSocket'
 import { toast } from '../Toast/toastStore'
-import { DeliverableRow, DismissDeliverableButton } from '../DeliverableRow'
+import { DeliverableRow, DismissDeliverableButton, StateBadge } from '../DeliverableRow'
 import {
   awaitsDecision,
   metaForKind,
@@ -25,7 +25,7 @@ import ActionList from '../ActionList'
 import { RailSection } from './RailSection'
 
 // RunArtifacts — the Run page rail's Artifacts section: what this
-// conversation's agent changed, with the work waiting on a person marked.
+// conversation changed, with the work waiting on a person marked.
 //
 // Three reads, in this order on screen:
 //  1. Deliverables no artifact names — a staged review, which is a
@@ -251,6 +251,14 @@ function ArtifactRow({
               </a>
             ) : (
               <span className="min-w-0 truncate font-mono text-reported text-ink-2">{target}</span>
+            )}
+            {/* Where the deliverable stands now, which the last action does
+                not say: a draft the reconciler saw merged on GitHub reads
+                merged here. */}
+            {deliverable && (
+              <span className="ml-auto">
+                <StateBadge state={deliverable.state} />
+              </span>
             )}
           </div>
           <div className="mt-0.5 flex items-baseline gap-1.5 font-mono text-label text-ink-3">

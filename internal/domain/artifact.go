@@ -2,10 +2,22 @@ package domain
 
 import "time"
 
-// Artifact is one object a run's agent changed, read from the ledger: the
-// external_actions rows of a conversation with performed_by = 'agent' that
-// name an object (ObjectID), grouped by that object. It describes what the
-// run did to the object, not the object's current state. It is not stored.
+// ArtifactPerformers is who performs the rows a run's artifacts are read
+// from: its agent, and a person. Every person row that names a conversation
+// is a person acting on that conversation's own deliverables — approving,
+// editing, dismissing or rejecting a draft pull request, posting a staged
+// review, closing the task — so the review a person's approval posts is the
+// run's artifact, and so is the close of a draft the run opened. TF's own
+// rows (the board mirrors, an event-driven teardown) are not the run's work.
+func ArtifactPerformers() []string {
+	return []string{PerformedByAgent, PerformedByPerson}
+}
+
+// Artifact is one object a run changed, read from the ledger: the
+// external_actions rows of a conversation performed by one of
+// ArtifactPerformers that name an object (ObjectID), grouped by that object.
+// It describes what the run did to the object, not the object's current
+// state. It is not stored.
 //
 // Target and URL are display values. For a kind identified by EntityID (a
 // pull request, a GitHub issue) they are the entity's current key and url,

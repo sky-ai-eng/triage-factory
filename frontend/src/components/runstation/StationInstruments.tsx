@@ -159,7 +159,7 @@ export function TelemetryRail({
         )}
       </Section>
 
-      {/* Artifacts — the objects this conversation's agent changed, with the
+      {/* Artifacts — the objects this conversation changed, with the
           deliverables waiting on a person highlighted. Renders only once it
           has something to show. */}
       <RunArtifacts

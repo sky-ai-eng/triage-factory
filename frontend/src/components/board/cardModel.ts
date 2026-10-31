@@ -190,7 +190,7 @@ function lifecycleOf(task: Task, run: Conversation | undefined): Lifecycle {
   return 'idle'
 }
 
-// The strip's four kinds, read off the objects the run's agent changed. Every
+// The strip's four kinds, read off the objects the run changed. Every
 // other object kind has no mark on the strip; a run that changed one still
 // has its artifact on the run page.
 //

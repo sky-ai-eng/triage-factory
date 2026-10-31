@@ -143,6 +143,8 @@ describe('RunArtifacts', () => {
     const prRow = pr.closest('li')!
     expect(prRow.firstElementChild!.className).toContain(rowTone(true))
     expect(within(prRow).getByText('PR edited')).toBeInTheDocument()
+    // The deliverable's state, which the last action does not carry.
+    expect(within(prRow).getByText('draft')).toBeInTheDocument()
     expect(within(prRow).getByText('×3')).toBeInTheDocument()
     expect(within(prRow).getByRole('button', { name: 'Dismiss pull request' })).toBeInTheDocument()
 

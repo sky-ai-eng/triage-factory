@@ -17,6 +17,12 @@ func ArtifactExcludedActionsSQL() string {
 	return sqlStringLiterals(domain.ActionsNamingNoObject())
 }
 
+// ArtifactPerformersSQL is domain.ArtifactPerformers as a list of SQL string
+// literals, for the artifact reads' `performed_by IN (...)`.
+func ArtifactPerformersSQL() string {
+	return sqlStringLiterals(domain.ArtifactPerformers())
+}
+
 func sqlStringLiterals(values []string) string {
 	quoted := make([]string, len(values))
 	for i, v := range values {
@@ -36,12 +42,13 @@ func RequireArtifactOffsetPage(opts ListOpts) error {
 
 // ArtifactStore reads a run's artifacts from the external_actions ledger. It
 // owns no table. An artifact group is the rows of one org that name a
-// conversation the read asks for, have performed_by = 'agent', and name an
-// object (the dialect's SQL twin of domain.ObjectID is non-NULL), grouped by
-// that object id. A person's and TF's own rows never form an artifact, and
-// neither does a row of an action that names no object (a refusal, a
-// failure, a catch-all; ArtifactExcludedActionsSQL), whatever object it
-// carries. Rows whose conversation was purged (conversation_id NULL) answer for
+// conversation the read asks for, are performed by one of
+// domain.ArtifactPerformers (the agent, or a person acting on the run's
+// deliverables), and name an object (the dialect's SQL twin of
+// domain.ObjectID is non-NULL), grouped by that object id. TF's own rows
+// never form an artifact, and neither does a row of an action that names no
+// object (a refusal, a failure, a catch-all; ArtifactExcludedActionsSQL),
+// whatever object it carries. Rows whose conversation was purged (conversation_id NULL) answer for
 // no conversation. See domain.Artifact for the fields and the display rule.
 //
 // The app-pool methods run under the caller's claims in Postgres, where the

@@ -383,7 +383,7 @@ type Stores struct {
 	// TFAC-483.
 	ExternalActions ExternalActionStore
 
-	// Artifacts reads a run's artifacts — the objects its agent changed —
+	// Artifacts reads a run's artifacts — the objects it changed —
 	// from the external_actions ledger, grouped per object. Owns no table.
 	// App pool in Postgres for the request-path reads, admin for the
 	// ...System ones. SQLite is N=1 and unscoped.

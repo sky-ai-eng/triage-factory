@@ -1187,8 +1187,8 @@ func (s *Server) routes() {
 	// that produce no object at all (a review-thread reply, a refused merge, a
 	// denied push).
 	s.apiMutating("POST /api/agent/conversations/{conversationID}/actions/list", ag.handleAgentActions)
-	// Conversation-scoped artifact read — the objects this conversation's
-	// agent changed, read from the same ledger as the action list above and
+	// Conversation-scoped artifact read — the objects this conversation
+	// changed, read from the same ledger as the action list above and
 	// grouped per object.
 	s.apiMutating("POST /api/agent/conversations/{conversationID}/artifacts/list", ag.handleAgentArtifacts)
 	// The one conversation-level stop. A second address for it is how `open`

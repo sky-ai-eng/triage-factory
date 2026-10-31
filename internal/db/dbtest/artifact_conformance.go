@@ -205,12 +205,9 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 		}
 	})
 
-	t.Run("Person_system_refusal_and_object_less_rows_form_no_artifact", func(t *testing.T) {
+	t.Run("System_refusal_and_object_less_rows_form_no_artifact", func(t *testing.T) {
 		s := setup(t)
 		conv := s.f.NewConversation(t)
-		person := pullRequest(s, domain.ActionPREdited)
-		person.PerformedBy = domain.PerformedByPerson
-		record(t, s, conv, person, at(1))
 		system := pullRequest(s, domain.ActionPRClosed)
 		system.PerformedBy = domain.PerformedBySystem
 		record(t, s, conv, system, at(2))
@@ -246,12 +243,51 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 			t.Errorf("CountByConversations = %v, want no entry for the conversation", counts)
 		}
 
-		// The agent's own row on the same pull request is the artifact, and the
-		// person's, TF's and the catch-all's rows do not count toward it.
+		// The agent's own row on the same pull request is the artifact, and
+		// TF's and the catch-all's rows do not count toward it.
 		record(t, s, conv, pullRequest(s, domain.ActionPRCreated), at(8))
 		got, _ := list(t, s, conv, db.Unwindowed)
 		if len(got) != 1 || got[0].ActionCount != 1 || got[0].LastAction != domain.ActionPRCreated {
 			t.Errorf("after the agent's row: %+v, want one artifact of one pr_created row", got)
+		}
+	})
+
+	t.Run("A_persons_rows_on_the_runs_deliverables_are_its_artifacts", func(t *testing.T) {
+		s := setup(t)
+		conv := s.f.NewConversation(t)
+		record(t, s, conv, pullRequest(s, domain.ActionPRCreated), at(1))
+		// A person's approval of the run's draft joins the agent's artifact.
+		ready := pullRequest(s, domain.ActionPRMarkedReady)
+		ready.PerformedBy = domain.PerformedByPerson
+		record(t, s, conv, ready, at(2))
+		// The review a person's approval posts is an artifact of its own.
+		review := domain.ExternalAction{
+			Provider: domain.ProviderGitHub, Scope: TestGitHubHost, Action: domain.ActionReviewSubmitted,
+			Target: "octo/api#7", EntityID: s.pr.ID, PerformedBy: domain.PerformedByPerson,
+			ObjectKind: domain.ObjectKindReview, ObjectKey: domain.GitHubReviewObjectKey("4242"),
+		}
+		record(t, s, conv, review, at(3))
+
+		got, total := list(t, s, conv, db.Unwindowed)
+		if len(got) != 2 || total != 2 {
+			t.Fatalf("read %d artifacts (total %d), want 2: %+v", len(got), total, got)
+		}
+		byKind := map[string]domain.Artifact{}
+		for _, a := range got {
+			byKind[a.ObjectKind] = a
+		}
+		if pr := byKind[domain.ObjectKindPullRequest]; pr.ActionCount != 2 || pr.LastAction != domain.ActionPRMarkedReady {
+			t.Errorf("pull request artifact = %+v, want two rows ending in pr_marked_ready", pr)
+		}
+		if rv, ok := byKind[domain.ObjectKindReview]; !ok || rv.ObjectID != objectRef(t, review) || rv.LastAction != domain.ActionReviewSubmitted {
+			t.Errorf("review artifact = %+v (found %v), want the posted review", rv, ok)
+		}
+		counts, err := s.f.Stores.Artifacts.CountByConversations(ctx, s.f.OrgID, []string{conv})
+		if err != nil {
+			t.Fatalf("CountByConversations: %v", err)
+		}
+		if c := counts[conv]; c[domain.ObjectKindReview] != 1 || c[domain.ObjectKindPullRequest] != 1 {
+			t.Errorf("CountByConversations = %v, want one pull request and one review", counts)
 		}
 	})
 

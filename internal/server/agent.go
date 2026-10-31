@@ -477,7 +477,7 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 
 // artifactJSON is the wire shape of one item of POST
 // /api/agent/conversations/{conversationID}/artifacts/list: an object the
-// conversation's agent changed (domain.Artifact). Deliverable is the
+// conversation changed (domain.Artifact). Deliverable is the
 // conversation's deliverable that is the same object
 // (domain.ArtifactDeliverable), or null.
 type artifactJSON struct {
@@ -532,7 +532,7 @@ type conversationArtifactListRequest struct {
 	httpx.PageRequest
 }
 
-// handleAgentArtifacts returns the objects this conversation's agent changed,
+// handleAgentArtifacts returns the objects this conversation changed,
 // one item per object however many actions it took on it, by the latest of
 // those actions first. Each item names the conversation's deliverable that is
 // the same object, matched after the page is read. Gated as its sibling
@@ -689,7 +689,7 @@ func conversationResponse(conv *domain.Conversation, deliverableCount int, arts 
 		"blueprint_step_index": conv.BlueprintStepIndex,
 		"blueprint_step_count": progress.StepCount,
 		"blueprint_run_status": string(progress.Status),
-		// The objects the conversation's agent changed, in all and by object
+		// The objects the conversation changed, in all and by object
 		// kind, read from the ledger. {} for a conversation that changed
 		// nothing.
 		"artifact_count":  artifactTotal(artifactCounts),

@@ -418,7 +418,10 @@ const (
 	PerformedByAgent = "agent"
 	// PerformedByPerson is a person acting through TF: an approval, edit,
 	// dismissal or rejection of a run's deliverable, a board drag, a task
-	// close.
+	// close. A person row that names a conversation acts on that
+	// conversation's own deliverables, which is what makes it part of the
+	// run's artifacts (ArtifactPerformers); a person's act on anything else
+	// names no conversation.
 	PerformedByPerson = "person"
 	// PerformedBySystem is TF acting on its own: the board mirrors and the
 	// teardown an event-driven task close runs.
