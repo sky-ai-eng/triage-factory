@@ -179,6 +179,9 @@ func (s *Server) saveTeamLinearTeams(ctx context.Context, orgID, userID, teamID 
 	// the org's current Linear workspace, which is also the one the write
 	// stamps: rows saved under another workspace are neither shown, carried
 	// nor pruned.
+	// TODO(TFAC-1271): it is read outside the write transaction, so a write
+	// that commits between this read and that transaction is reverted by the
+	// rules carried from it, and neither caller is told.
 	prev, workspaceID, err := s.storedLinearTeams(ctx, orgID, userID, teamID)
 	if err != nil {
 		return nil, err

@@ -189,6 +189,9 @@ func (s *Server) handleTeamJiraProjectsPut(w http.ResponseWriter, r *http.Reques
 	// The pre-image: what this team has stored right now. It is what an absent
 	// rule is carried from, what the gates grandfather, and what the poller
 	// restart decision is compared against.
+	// TODO(TFAC-1271): it is read outside the write transaction, so a write
+	// that commits between this read and that transaction is reverted by the
+	// rules carried from it, and neither caller is told.
 	prev, site, err := s.storedJiraProjects(r.Context(), orgID, userID, teamID)
 	if err != nil {
 		internalError(w, "settings/team/jira-projects", err)
