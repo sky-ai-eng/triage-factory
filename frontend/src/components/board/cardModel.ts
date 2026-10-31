@@ -58,7 +58,7 @@ export interface CardModel {
   /** The agent's live line while working: its current action, or the setup
    *  phase or the queue wait that stands in for one. */
   command?: string
-  deliverables?: ArtifactTotals
+  artifacts?: ArtifactTotals
   pending?: PendingTotals
   /** How long the run has been going, or ran for. Runs only. */
   elapsed?: string
@@ -148,7 +148,7 @@ export function deriveCard(
     // what got handled, and "what happened" is half of that.
     event: eventOf(task),
     command,
-    deliverables: artifactTotals(conversation),
+    artifacts: artifactTotals(conversation),
     pending: pendingTotals(conversation),
     elapsed,
     age,

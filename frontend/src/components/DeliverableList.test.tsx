@@ -314,7 +314,10 @@ describe('DeliverableList', () => {
     expect(screen.getByText('first-page-row')).toBeInTheDocument()
     expect(fetchMock).toHaveBeenLastCalledWith(
       '/api/agent/conversations/r1/deliverables/list',
-      expect.objectContaining({ method: 'POST', body: JSON.stringify({ page_token: 'tok-2' }) }),
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ page_size: 200, page_token: 'tok-2' }),
+      }),
     )
     expect(screen.queryByRole('button', { name: /Load more/ })).not.toBeInTheDocument()
   })

@@ -622,7 +622,7 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 
 	// Fetch relays: one per egressrelay catalog entry, each on its own
 	// port of hostVethIP. The relays exist for registries that serve
-	// deliverables via redirects into shared multi-tenant storage hostnames
+	// artifacts via redirects into shared multi-tenant storage hostnames
 	// (proxy.golang.org → storage.googleapis.com), which the CONNECT-only
 	// egress proxy above can never admit — see internal/egressrelay's
 	// package doc and CLAUDE.md. Which ecosystems get a relay, their route

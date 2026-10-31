@@ -483,7 +483,7 @@ func TestBuildTaskContext_ArtifactWithoutURLOmitsTheSegment(t *testing.T) {
 
 func TestBuildTaskContext_NoArtifactsRendersNoLine(t *testing.T) {
 	// The first conversation on a task inherits nothing, which is the common
-	// case: the block must be byte-identical to the pre-deliverable contract.
+	// case: the block must be byte-identical to the pre-artifact contract.
 	task := domain.Task{
 		Title:          "implement the thing",
 		EventType:      domain.EventJiraIssueAssigned,

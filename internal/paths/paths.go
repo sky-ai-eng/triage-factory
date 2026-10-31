@@ -179,7 +179,7 @@ func TeamKBDir(orgID, teamID string) string {
 // --- Class 2: host-global persistent (NEVER org-scoped) ------------------
 
 // ToolchainRoot is the base for image-baked, host-global toolchain
-// deliverables — the Agent SDK install and the sandbox rootfs cache. It
+// artifacts — the Agent SDK install and the sandbox rootfs cache. It
 // resolves TF_TOOLCHAIN_ROOT if set, else falls back to StateRoot.
 //
 // The fallback preserves the historical layout: with the env unset

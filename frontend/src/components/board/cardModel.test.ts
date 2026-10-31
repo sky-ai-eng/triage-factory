@@ -66,7 +66,7 @@ describe('deriveCard lifecycle', () => {
     // The scorer's summary, as on every card: the run's account never
     // reaches it.
     expect(m.summary).toBe('Two readers hit the cgroup file at once.')
-    expect(m.deliverables).toEqual({ branch: 1, pulls: 1 })
+    expect(m.artifacts).toEqual({ branch: 1, pulls: 1 })
     expect(m.pending).toEqual({ pulls: 1 })
   })
 

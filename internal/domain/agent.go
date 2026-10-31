@@ -227,7 +227,7 @@ const (
 	MessageSubtypeInjectionNewSandbox = "injection:new-sandbox"
 	// MessageSubtypeInjectionNudge marks a row the machinery wrote to keep a
 	// conversation moving rather than to tell it something it did not know:
-	// the would-stop note a hook asks for (the deliverable contract), and the
+	// the would-stop note a hook asks for (the artifact contract), and the
 	// continuation note a launch resuming a surviving session opens with.
 	MessageSubtypeInjectionNudge = "injection:nudge"
 	// MessageSubtypeInjectionOutputLimit marks the notice written when a

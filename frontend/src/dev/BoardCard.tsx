@@ -132,7 +132,7 @@ export function BoardCard() {
               age="4h ago"
               summary="Two readers hit the cgroup file at once and the second gets a partial line."
               event={EV.ci}
-              deliverables={{ branch: 1, pulls: 1 }}
+              artifacts={{ branch: 1, pulls: 1 }}
               pending={{ pulls: 1 }}
               href="/runs/c0"
               assigneeSlot={picker(queued)}
@@ -162,7 +162,7 @@ export function BoardCard() {
               command="Reading internal/delegate/teardown.go"
               summary="Worktrees left by crashed runs pile up under the state root."
               event={EV.commits}
-              deliverables={{ branch: 1, comment: 2 }}
+              artifacts={{ branch: 1, comment: 2 }}
               href="/runs/c1"
               chain={{ done: 1, total: 3 }}
               assigneeSlot={picker(working)}
@@ -204,7 +204,7 @@ export function BoardCard() {
               elapsed="4:12"
               summary="The mutex fix needs proving under load before it ships: fifty runs of the sampler, none of them splitting a line."
               event={EV.changes}
-              deliverables={{ branch: 1, pulls: 1, comment: 3 }}
+              artifacts={{ branch: 1, pulls: 1, comment: 3 }}
               href="/runs/c3"
               assigneeSlot={picker(done, true)}
             />

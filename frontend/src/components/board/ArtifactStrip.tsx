@@ -24,18 +24,18 @@ import type { ArtifactTotals, PendingTotals } from './cardModel'
 const ORDER: Array<keyof ArtifactTotals> = ['branch', 'pulls', 'review', 'comment']
 
 export function ArtifactStrip({
-  deliverables,
+  artifacts,
   pending,
   href,
   style,
 }: {
-  deliverables?: ArtifactTotals
+  artifacts?: ArtifactTotals
   pending?: PendingTotals
   /** The run page. Renders a link; without it the strip is a plain readout. */
   href?: string
   style?: CSSProperties
 }) {
-  const has = deliverables ?? {}
+  const has = artifacts ?? {}
   const open: Record<string, number | undefined> = pending ?? {}
   const kinds = ORDER.filter((k) => (has[k] ?? 0) > 0)
   if (kinds.length === 0) return null
@@ -72,7 +72,7 @@ export function ArtifactStrip({
   // to be wired makes the affordance a property of the integration rather than
   // of the control.
   return href ? (
-    <Link to={href} title="Open the run's deliverables" style={{ ...base, cursor: 'pointer' }}>
+    <Link to={href} title="Open the run's artifacts" style={{ ...base, cursor: 'pointer' }}>
       {body}
     </Link>
   ) : (

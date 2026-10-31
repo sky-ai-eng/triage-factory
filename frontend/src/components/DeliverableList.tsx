@@ -47,6 +47,11 @@ interface Props {
   refreshKey?: string
 }
 
+// The largest page the route serves. The approval rows sort to the top of what
+// is loaded, so the bigger the first page the less likely a draft PR or a ready
+// review sits behind "Load more".
+const PAGE_REQUEST = { page_size: 200 }
+
 export default function DeliverableList({
   conversationId,
   onOpenApproval,
@@ -86,7 +91,7 @@ export default function DeliverableList({
     if (!conversationId) return
     // Only a page that actually arrived flips `loaded`, so a failed first load
     // falls to the error branch rather than to the empty state.
-    load({}).then((page) => {
+    load(PAGE_REQUEST).then((page) => {
       if (page && !cancelled) setLoaded(true)
     })
     return () => {
@@ -127,7 +132,7 @@ export default function DeliverableList({
       // Resolution is async + non-blocking: it touches only the GitHub object +
       // deliverable row, never the conversation. Reload in place (the row flips to its
       // resolved state) and let the owner re-derive the projection.
-      await load({})
+      await load(PAGE_REQUEST)
       onResolved?.()
     } catch (err) {
       toast.error(httpErrorMessage(err, 'Could not dismiss the deliverable.'))
@@ -145,7 +150,9 @@ export default function DeliverableList({
   // has — they were true a moment ago, and blanking an always-mounted list on
   // a transient error defeats the point of refreshKey — and the next
   // set-shape change retries.
-  if (error && !loaded) {
+  // The hook keeps its last error until a load succeeds, so a load in flight
+  // (the next conversation's) shows as loading rather than as that error.
+  if (error && !loaded && !loading) {
     return <p className="text-secondary leading-relaxed text-alarm">{error}</p>
   }
   if (!loaded) {

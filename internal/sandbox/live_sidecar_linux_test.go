@@ -9,7 +9,7 @@
 // broker uses, and drives LaunchSidecar end to end.
 //
 // One harness (startLiveRun) backs three negatives that all need real per-run
-// deliverables rather than a stand-in: the eviction proof (eviction_linux_test.go,
+// artifacts rather than a stand-in: the eviction proof (eviction_linux_test.go,
 // which reads the sidecar's per-run uid band out of /proc) and the cross-sidecar
 // socket + memory negatives (cross_sidecar_negatives_linux_test.go). Each run
 // gets a real gVisor sandbox (Wrap → real netns/subnet index) and a real
@@ -204,7 +204,7 @@ func installInProcessSidecarHarness() (func(), error) {
 
 // --- the two-run harness ---
 
-// liveRun bundles the two real live deliverables one run owns for this suite: its
+// liveRun bundles the two real live artifacts one run owns for this suite: its
 // gVisor sandbox (Wrap) and its credential-sidecar process (LaunchSidecar at
 // SidecarUID(SubnetIdx)). The sandbox is Wrapped but not Started by startLiveRun
 // — the eviction and memory negatives need only the sidecar process and the
@@ -258,7 +258,7 @@ func startLiveRun(t *testing.T, ctx context.Context, conversationID string, cust
 	return lr
 }
 
-// teardown closes the run's deliverables in the load-bearing order: sidecar first
+// teardown closes the run's artifacts in the load-bearing order: sidecar first
 // (frees the per-run uid), then the run, then the sandbox (releases the subnet
 // index the uid is derived from). Idempotent via the handles' own once-guards.
 func (lr *liveRun) teardown() {

@@ -767,7 +767,7 @@ const maxStreamLineBytes = 64 * 1024 * 1024
 // Reader choice: a bounded readLine loop instead of bufio.Scanner
 // because each NDJSON line is one whole stream event, and a single
 // tool_result event (a Read of a big file, large Bash output, a fat
-// structured deliverable) can easily exceed Scanner's old 1 MB per-token
+// structured artifact) can easily exceed Scanner's old 1 MB per-token
 // ceiling. When that ceiling was hit the run aborted with no terminal
 // `result` captured, even though the subprocess kept emitting valid
 // JSON we just couldn't fit. The new bound (maxStreamLineBytes) is

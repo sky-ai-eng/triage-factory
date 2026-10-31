@@ -88,7 +88,7 @@ export interface TaskCardProps {
   command?: string
   /** A blocked run. Its presence removes the activity row. */
   permission?: { command: string; count: number; onAllow?: () => void; onDeny?: () => void }
-  deliverables?: ArtifactTotals
+  artifacts?: ArtifactTotals
   pending?: PendingTotals
   /** How long the run has been going. Runs only. */
   elapsed?: string
@@ -337,7 +337,7 @@ export function TaskCard({
   event,
   command,
   permission,
-  deliverables,
+  artifacts,
   pending,
   elapsed,
   age,
@@ -582,14 +582,14 @@ export function TaskCard({
 
       {settled ? (
         // A finished run has nothing to report and one duration to state, so
-        // the row and the footer collapse into each other: deliverables take the
+        // the row and the footer collapse into each other: artifacts take the
         // left, and "Ran for" carries the arrow at the right. One line where
         // there were two, and the elapsed clock stops being a live figure and
         // becomes the sentence's own subject. A task ended with no run to view
         // states its age instead.
         <div className="tc-foot">
           <span style={{ display: 'flex', minWidth: 0 }}>
-            <ArtifactStrip deliverables={deliverables} pending={pending} href={href} />
+            <ArtifactStrip artifacts={artifacts} pending={pending} href={href} />
           </span>
           {href ? (
             <ActivityRow
@@ -606,12 +606,12 @@ export function TaskCard({
           )}
         </div>
       ) : (
-        (time || deliverables) && (
+        (time || artifacts) && (
           <div className="tc-foot">
             <span className="tc-readout" title={queued ? ageTitle : undefined}>
               {time}
             </span>
-            <ArtifactStrip deliverables={deliverables} pending={pending} href={href} />
+            <ArtifactStrip artifacts={artifacts} pending={pending} href={href} />
           </div>
         )
       )}

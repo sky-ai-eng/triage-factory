@@ -227,8 +227,8 @@ func (ag *agentHandler) handleDeliverableRefresh(w http.ResponseWriter, r *http.
 	writeJSON(w, http.StatusOK, map[string]any{"updated": len(updated)})
 }
 
-// deliverableJSON is the wire shape of one conversation deliverable for
-// GET /api/agent/conversations/{conversationID}/deliverables — the conversation's deliverables as the board /
+// deliverableJSON is the wire shape of one conversation deliverable in the items of
+// POST /api/agent/conversations/{conversationID}/deliverables/list — the conversation's deliverables as the board /
 // RunDetail UI (TFAC-470) consumes them, across every kind (branch /
 // pull_request / review / issue / comment). details is the PARSED details_json
 // (the kind-specific payload as a JSON object, or null when absent/unparseable)
@@ -303,11 +303,11 @@ type conversationDeliverableListRequest struct {
 }
 
 // handleAgentDeliverables returns the deliverables a conversation produced — branch, PR,
-// review, issue, comment — newest first (A·6, TFAC-465), one page at a time. It
-// reads the conversation first under request claims, so a conversation the
-// caller's team can't see is a 404 (RLS scopes both reads), never a leak; a
-// member of the owning team gets the list. Backs the conversation detail
-// surface (TFAC-470); team-level aggregation is TFAC-449 C2, not here.
+// review, issue, comment — newest first, one page at a time. It reads the
+// conversation first under request claims, so a conversation the caller's team
+// can't see is a 404 (RLS scopes both reads), never a leak; a member of the
+// owning team gets the list. Backs the conversation detail surface; team-level
+// aggregation is the usage feed, not here.
 //
 // POST /api/agent/conversations/{conversationID}/deliverables/list
 func (ag *agentHandler) handleAgentDeliverables(w http.ResponseWriter, r *http.Request) {

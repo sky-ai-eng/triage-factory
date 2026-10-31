@@ -271,21 +271,24 @@ func (s *deliverableStore) Get(ctx context.Context, orgID, id string) (*domain.D
 }
 
 func (s *deliverableStore) ListByConversation(ctx context.Context, orgID, conversationID string, opts db.ListOpts) ([]domain.Deliverable, int, error) {
-	var total int
-	if err := s.q.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM deliverables WHERE org_id = $1 AND conversation_id = $2
-	`, orgID, conversationID).Scan(&total); err != nil {
-		return nil, 0, err
-	}
-	if opts.CountOnly {
-		return []domain.Deliverable{}, total, nil
-	}
 	query := `SELECT ` + pgDeliverableColumns + `
 		FROM deliverables
 		WHERE org_id = $1 AND conversation_id = $2
 		ORDER BY created_at DESC, id DESC`
 	args := []any{orgID, conversationID}
-	if opts.Limit > 0 {
+	// An unwindowed read holds every row, so its length is the total and no
+	// count runs.
+	windowed := opts.Limit > 0 || opts.CountOnly
+	var total int
+	if windowed {
+		if err := s.q.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM deliverables WHERE org_id = $1 AND conversation_id = $2
+		`, orgID, conversationID).Scan(&total); err != nil {
+			return nil, 0, err
+		}
+		if opts.CountOnly {
+			return []domain.Deliverable{}, total, nil
+		}
 		query += ` LIMIT $3 OFFSET $4`
 		args = append(args, opts.Limit, opts.Offset)
 	}
@@ -294,6 +297,9 @@ func (s *deliverableStore) ListByConversation(ctx context.Context, orgID, conver
 		return nil, 0, err
 	}
 	out, err := scanDeliverableRows(rows)
+	if !windowed {
+		total = len(out)
+	}
 	return out, total, err
 }
 

@@ -78,7 +78,7 @@ const mergeGateTag = `<system-note kind="merge-gate">`
 //
 // It points at the opening message rather than at "what the user asked for":
 // there is no user present, and a model's sense of what was asked is a vibe,
-// while the opening turn is a specific deliverable in its context that
+// while the opening turn is a specific artifact in its context that
 // demonstrably does or does not carry the instruction — and demonstrably does
 // not carry one that arrived in a PR comment.
 //

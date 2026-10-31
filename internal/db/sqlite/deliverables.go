@@ -257,21 +257,24 @@ func (s *deliverableStore) ListByConversation(ctx context.Context, orgID, conver
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, 0, err
 	}
-	var total int
-	if err := s.q.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM deliverables WHERE org_id = ? AND conversation_id = ?
-	`, orgID, conversationID).Scan(&total); err != nil {
-		return nil, 0, err
-	}
-	if opts.CountOnly {
-		return []domain.Deliverable{}, total, nil
-	}
 	query := `SELECT ` + deliverableColumns + `
 		FROM deliverables
 		WHERE org_id = ? AND conversation_id = ?
 		ORDER BY created_at DESC, id DESC`
 	args := []any{orgID, conversationID}
-	if opts.Limit > 0 {
+	// An unwindowed read holds every row, so its length is the total and no
+	// count runs.
+	windowed := opts.Limit > 0 || opts.CountOnly
+	var total int
+	if windowed {
+		if err := s.q.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM deliverables WHERE org_id = ? AND conversation_id = ?
+		`, orgID, conversationID).Scan(&total); err != nil {
+			return nil, 0, err
+		}
+		if opts.CountOnly {
+			return []domain.Deliverable{}, total, nil
+		}
 		query += ` LIMIT ? OFFSET ?`
 		args = append(args, opts.Limit, opts.Offset)
 	}
@@ -280,6 +283,9 @@ func (s *deliverableStore) ListByConversation(ctx context.Context, orgID, conver
 		return nil, 0, err
 	}
 	out, err := scanDeliverableRows(rows)
+	if !windowed {
+		total = len(out)
+	}
 	return out, total, err
 }
 

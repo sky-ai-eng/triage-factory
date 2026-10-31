@@ -121,7 +121,7 @@ func clientSigV4Input(r *http.Request, payloadHash string) sigV4Input {
 
 // recomputeSigV4 independently rebuilds the canonical request and
 // string-to-sign for in, derives the signing key from secret, and
-// returns all three deliverables so tests can assert on intermediates as
+// returns all three artifacts so tests can assert on intermediates as
 // well as the final signature.
 func recomputeSigV4(t *testing.T, in sigV4Input, auth sigV4AuthParts, amzDate, secret string) (canonicalRequest, stringToSign, signature string) {
 	t.Helper()
