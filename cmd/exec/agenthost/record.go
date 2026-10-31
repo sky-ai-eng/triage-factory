@@ -190,6 +190,13 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 	if act != nil {
 		stampActionIdentityInfo(act, info)
 		mintActionDedupKey(ctx, info, act)
+		// The object is the writer's to name, but only one its action can
+		// name: a relayed row cannot have a refusal claim it changed something,
+		// or carry a kind the column's CHECK would refuse along with the
+		// deliverable written beside it.
+		if !domain.ActionNamesKind(act.Action, act.ObjectKind) {
+			act.ObjectKind, act.ObjectKey = "", ""
+		}
 	}
 	ctx, cancel := recordContext(ctx)
 	defer cancel()
