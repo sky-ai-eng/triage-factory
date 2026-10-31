@@ -78,8 +78,10 @@ This is the part that has to stay small. Every consumer uses one of three verbs 
 ### Call sites
 
 ```go
-// internal/poller — every reconcile, not only on a change
-kinds.GitHubAppUnusable.Set(ctx, orgID, kinds.GitHubApp{AppID: after.AppID, Reason: after.UnusableReason}, after.Unusable())
+// internal/poller — every reconcile, not only on a change; zero or one member,
+// so the occurrence of an App the org no longer holds (replaced, or given up
+// for the deployment App) resolves
+kinds.GitHubAppUnusable.Sync(ctx, orgID, unusable)
 
 // internal/tracker/linear.go — a complete visibility pass
 kinds.LinearTeamUnreadable.Sync(ctx, orgID, unreadable)
@@ -321,7 +323,7 @@ The same calls, tables (SQLite) and page. Local is N=1: the one user is the reci
 
 | Kind                          | Source | Audience                                    | Priority                              | Dismissible | Verb and site                                                                                                             | Actions                                                                       |
 | ----------------------------- | ------ | ------------------------------------------- | ------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| `github.app_unusable`         | github | org admins                                  | urgent                                | no          | `Set` on every reconcile (`internal/poller/manager.go`, beside `logAppUsabilityChange`)                                   | Link: GitHub access settings                                                  |
+| `github.app_unusable`         | github | org admins                                  | urgent                                | no          | `Sync` on every reconcile (`internal/poller/manager.go`, beside `logAppUsabilityChange`); an active App only               | Link: GitHub access settings                                                  |
 | `linear.team_unreadable`      | linear | org admins + admins of TF teams tracking it | high                                  | yes         | `Sync` on a complete visibility pass (`holdLinearUnreadableTeams`; never on outcome `failed`)                             | Link: Linear settings; invoke "Stop tracking" on team rows                    |
 | `jira.discovery_failing`      | jira   | admins of teams tracking the project        | high                                  | yes         | `Sync` from `discoverJira` on a complete pass                                                                             | Link: the project's status rules                                              |
 | `jira.mirror_failing`         | jira   | team admins                                 | high                                  | yes         | `Set` in `runJiraMirror` and the claim guard (`syncJiraClaim`)                                                            | Link: the team's Jira status rules                                            |
