@@ -383,6 +383,12 @@ type Stores struct {
 	// TFAC-483.
 	ExternalActions ExternalActionStore
 
+	// Artifacts reads a run's artifacts — the objects its agent changed —
+	// from the external_actions ledger, grouped per object. Owns no table.
+	// App pool in Postgres for the request-path reads, admin for the
+	// ...System ones. SQLite is N=1 and unscoped.
+	Artifacts ArtifactStore
+
 	// Spend is the read-only aggregation over the llm_spend view — the unified
 	// shape that UNION-ALLs delegation conversations + system_llm_runs onto
 	// the category axis (TFAC-472). App pool in Postgres: the view is
@@ -611,6 +617,7 @@ type TxStores struct {
 	SystemLLMRuns            SystemLLMRunStore
 	AccessChangeLog          AccessChangeLogStore
 	ExternalActions          ExternalActionStore
+	Artifacts                ArtifactStore
 	Spend                    SpendStore
 	AuthEvents               AuthEventStore
 	StagedInjections         StagedInjectionStore

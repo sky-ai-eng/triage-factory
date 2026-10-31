@@ -61,7 +61,7 @@ func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request
 
 // writeConversationResource reads the conversation resource exactly as
 // handleAgentStatus does — the point read plus its display enrichment
-// (deliverable counts, blueprint step count, resumability) — and writes it as
+// (deliverable and artifact counts, blueprint step count, resumability) — and writes it as
 // the response. Shared with handleAgentStop/handleMessage so a mutating verb
 // route answers with the resource it just changed rather than a status stub
 // naming only the field that verb happens to touch.
@@ -78,6 +78,10 @@ func (ag *agentHandler) writeConversationResource(w http.ResponseWriter, r *http
 			return nil
 		}
 		counts, e := tx.Deliverables.CountByConversation(r.Context(), orgID, []string{conv.ID})
+		if e != nil {
+			return e
+		}
+		artifactCounts, e := tx.Artifacts.CountByConversations(r.Context(), orgID, []string{conv.ID})
 		if e != nil {
 			return e
 		}
@@ -109,7 +113,7 @@ func (ag *agentHandler) writeConversationResource(w http.ResponseWriter, r *http
 				progress = runs[conv.BlueprintRunID]
 			}
 		}
-		resp = conversationResponse(conv, counts[conv.ID], arts, progress, "")
+		resp = conversationResponse(conv, counts[conv.ID], arts, artifactCounts[conv.ID], progress, "")
 		return nil
 	}); err != nil {
 		internalError(w, "agent", err)
@@ -366,10 +370,21 @@ func (ag *agentHandler) handleAgentDeliverables(w http.ResponseWriter, r *http.R
 
 // conversationActionListRequest is the body of POST
 // /api/agent/conversations/{conversationID}/actions/list. The conversation is
-// the path id and the read has no filters of its own, so the body is paging
-// alone.
+// the path id. ObjectID keeps the rows that changed one object (an
+// artifact's object_id); Refused keeps the refused and failed writes. Both
+// are optional and may be given together.
 type conversationActionListRequest struct {
+	ObjectID string `json:"object_id"`
+	Refused  bool   `json:"refused"`
+
 	httpx.PageRequest
+}
+
+// conversationActionFilters is the canonical filter set the page token is
+// fingerprinted over.
+type conversationActionFilters struct {
+	ObjectID string `json:"object_id"`
+	Refused  bool   `json:"refused"`
 }
 
 // handleAgentActions returns the external actions this conversation performed — the
@@ -409,7 +424,11 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var v httpx.Validation
-	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(struct{}{}), 0)
+	if req.ObjectID != "" && !domain.IsObjectID(req.ObjectID) {
+		v.Invalid("object_id", "must be an object id, as an artifact's object_id spells it")
+	}
+	filters := conversationActionFilters{ObjectID: req.ObjectID, Refused: req.Refused}
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(filters), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
@@ -429,7 +448,10 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 			return nil
 		}
 		actions, total, e = tx.ExternalActions.ListByConversation(r.Context(), orgID, conversationID,
-			domain.ExternalActionListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
+			domain.ExternalActionListOpts{
+				Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly,
+				ObjectID: filters.ObjectID, Refused: filters.Refused,
+			})
 		return e
 	}); err != nil {
 		internalError(w, "agent", err)
@@ -443,6 +465,130 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 	out := make([]actionJSON, len(actions))
 	for i, a := range actions {
 		out[i] = toActionJSON(a)
+	}
+	httpx.WriteList(w, page, out, total)
+}
+
+// artifactJSON is the wire shape of one item of POST
+// /api/agent/conversations/{conversationID}/artifacts/list: an object the
+// conversation's agent changed (domain.Artifact). Deliverable is the
+// conversation's deliverable that is the same object (domain.ArtifactDeliverable),
+// or null.
+type artifactJSON struct {
+	ObjectID    string                   `json:"object_id"`
+	ObjectKind  string                   `json:"object_kind"`
+	Provider    string                   `json:"provider"`
+	Scope       string                   `json:"scope"`
+	Target      string                   `json:"target"`
+	URL         string                   `json:"url"`
+	EntityID    string                   `json:"entity_id,omitempty"`
+	LastAction  string                   `json:"last_action"`
+	ActionCount int                      `json:"action_count"`
+	FirstAt     time.Time                `json:"first_at"`
+	LastAt      time.Time                `json:"last_at"`
+	Deliverable *artifactDeliverableJSON `json:"deliverable"`
+}
+
+// artifactDeliverableJSON names the deliverable an artifact matched: enough
+// to address it and read where it stands, with the deliverable's own read
+// for the rest.
+type artifactDeliverableJSON struct {
+	ID    string `json:"id"`
+	Kind  string `json:"kind"`
+	State string `json:"state"`
+}
+
+func toArtifactJSON(a domain.Artifact, deliverables []domain.Deliverable) artifactJSON {
+	out := artifactJSON{
+		ObjectID:    a.ObjectID,
+		ObjectKind:  a.ObjectKind,
+		Provider:    a.Provider,
+		Scope:       a.Scope,
+		Target:      a.Target,
+		URL:         a.URL,
+		EntityID:    a.EntityID,
+		LastAction:  a.LastAction,
+		ActionCount: a.ActionCount,
+		FirstAt:     a.FirstAt,
+		LastAt:      a.LastAt,
+	}
+	if d, ok := domain.ArtifactDeliverable(a, deliverables); ok {
+		out.Deliverable = &artifactDeliverableJSON{ID: d.ID, Kind: d.Kind, State: d.State}
+	}
+	return out
+}
+
+// conversationArtifactListRequest is the body of POST
+// /api/agent/conversations/{conversationID}/artifacts/list. The conversation
+// is the path id and the read has no filters of its own, so the body is
+// paging alone.
+type conversationArtifactListRequest struct {
+	httpx.PageRequest
+}
+
+// handleAgentArtifacts returns the objects this conversation's agent changed,
+// one item per object however many actions it took on it, by the latest of
+// those actions first. Each item names the conversation's deliverable that is
+// the same object, matched after the page is read. Gated as its sibling
+// handleAgentActions is: the conversation is read first under request claims,
+// so one the caller cannot see is a 404.
+//
+// POST /api/agent/conversations/{conversationID}/artifacts/list
+func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	conversationID, ok := conversationIDOr404(w, r)
+	if !ok {
+		return
+	}
+
+	var req conversationArtifactListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(struct{}{}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
+	var (
+		conv         *domain.Conversation
+		artifacts    []domain.Artifact
+		deliverables []domain.Deliverable
+		total        int
+	)
+	if err := ag.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		conv, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
+		if e != nil || conv == nil {
+			return e
+		}
+		artifacts, total, e = tx.Artifacts.ListByConversation(r.Context(), orgID, conversationID,
+			db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
+		if e != nil || len(artifacts) == 0 {
+			return e
+		}
+		// Every deliverable, not a page of them: the match decides which
+		// item names which, and the one that matches is as likely to be
+		// past any window.
+		deliverables, _, e = tx.Deliverables.ListByConversation(r.Context(), orgID, conversationID, db.Unwindowed)
+		return e
+	}); err != nil {
+		internalError(w, "agent", err)
+		return
+	}
+	if conv == nil {
+		notFound(w, "conversation")
+		return
+	}
+
+	out := make([]artifactJSON, len(artifacts))
+	for i, a := range artifacts {
+		out[i] = toArtifactJSON(a, deliverables)
 	}
 	httpx.WriteList(w, page, out, total)
 }
@@ -464,6 +610,9 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 //     conversation; the list path batches every conversation in one query — N+1 avoidance).
 //   - arts is the conversation's deliverable set, which the caller reads best-effort (only
 //     for conversations that have any deliverable, so a conversation with none costs no list).
+//   - artifactCounts is the conversation's artifacts by object kind, from
+//     Artifacts.CountByConversations (batched like deliverableCount; nil for
+//     a conversation with none).
 //   - progress is the owning blueprint run's plan length and status, from
 //     Blueprints.RunProgress (batched the same way). Zero values when the
 //     conversation has no blueprint, and when the caller could not resolve one
@@ -498,7 +647,7 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 // purpose: that route's client is the run station, whose live transcript
 // already shows the call this line would summarize, and buying it there would
 // add a query to a polled route for a field it does not render.
-func conversationResponse(conv *domain.Conversation, deliverableCount int, arts []domain.Deliverable, progress db.RunProgress, currentAction string) map[string]any {
+func conversationResponse(conv *domain.Conversation, deliverableCount int, arts []domain.Deliverable, artifactCounts map[string]int, progress db.RunProgress, currentAction string) map[string]any {
 	out := map[string]any{
 		"ID":            conv.ID,
 		"TaskID":        conv.TaskID,
@@ -533,6 +682,11 @@ func conversationResponse(conv *domain.Conversation, deliverableCount int, arts 
 		"blueprint_step_count": progress.StepCount,
 		"blueprint_run_status": string(progress.Status),
 		"deliverable_count":    deliverableCount,
+		// The objects the conversation's agent changed, in all and by object
+		// kind, read from the ledger. {} for a conversation that changed
+		// nothing.
+		"artifact_count":  artifactTotal(artifactCounts),
+		"artifact_counts": artifactCountsOrEmpty(artifactCounts),
 		// The token rollups the conversation read already SUMs, alongside the cost /
 		// duration / turns ones above. snake_case like every key added since
 		// the legacy PascalCase set froze. Plain ints — 0 for a conversation that never
@@ -612,6 +766,23 @@ func conversationResponse(conv *domain.Conversation, deliverableCount int, arts 
 		out["pending_deliverable_ids"] = domain.UnresolvedDeliverableIDs(arts)
 	}
 	return out
+}
+
+// artifactTotal sums an artifact count by kind.
+func artifactTotal(byKind map[string]int) int {
+	n := 0
+	for _, c := range byKind {
+		n += c
+	}
+	return n
+}
+
+// artifactCountsOrEmpty is byKind, or {} rather than null when it is nil.
+func artifactCountsOrEmpty(byKind map[string]int) map[string]int {
+	if byKind == nil {
+		return map[string]int{}
+	}
+	return byKind
 }
 
 // transcriptPageSize bounds one GET …/messages read. It is the route's
@@ -1120,6 +1291,8 @@ func (ag *agentHandler) handleAgentPermissions(w http.ResponseWriter, r *http.Re
 //
 //   - deliverable_count for every conversation: one CountByConversation (conversationID→count; a conversation with no
 //     deliverables is absent → 0).
+//   - artifact_count and artifact_counts for every conversation: one
+//     Artifacts.CountByConversations (conversation → object kind → count).
 //   - has_unresolved_deliverables for the conversations that have deliverables: one ListByConversations
 //     over just those conversation ids (count>0), grouped per conversation. The derivation needs
 //     the actual deliverables, but a conversation with none can't have an unresolved one, so
@@ -1145,6 +1318,10 @@ func enrichConversations(ctx context.Context, tx db.TxStores, orgID string, conv
 		conversationIDs[i] = convs[i].ID
 	}
 	counts, err := tx.Deliverables.CountByConversation(ctx, orgID, conversationIDs)
+	if err != nil {
+		return nil, err
+	}
+	artifactCounts, err := tx.Artifacts.CountByConversations(ctx, orgID, conversationIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -1210,7 +1387,7 @@ func enrichConversations(ctx context.Context, tx db.TxStores, orgID string, conv
 	out := make([]map[string]any, len(convs))
 	for i := range convs {
 		out[i] = conversationResponse(&convs[i], counts[convs[i].ID], artsByConv[convs[i].ID],
-			progress[convs[i].BlueprintRunID],
+			artifactCounts[convs[i].ID], progress[convs[i].BlueprintRunID],
 			currentAction(toolCalls[convs[i].ID], convs[i].WorktreePath))
 	}
 	return out, nil

@@ -351,21 +351,26 @@ func resolveDeliverableTeamNames(ctx context.Context, tx db.TxStores, orgID stri
 // org-wide feed (so an org-admin row shows which team's bot acted and who
 // authorized it) and are omitted (omitempty) on the team-scoped feed.
 type actionJSON struct {
-	ID             string          `json:"id"`
-	Provider       string          `json:"provider"`
-	Scope          string          `json:"scope"`
-	Action         string          `json:"action"`
-	Target         string          `json:"target"`
-	ExternalID     string          `json:"external_id,omitempty"`
-	URL            string          `json:"url,omitempty"`
-	FromState      string          `json:"from_state,omitempty"`
-	ToState        string          `json:"to_state,omitempty"`
-	ConversationID string          `json:"conversation_id,omitempty"`
-	ActorUserID    string          `json:"actor_user_id,omitempty"`
-	PerformedBy    string          `json:"performed_by"`
-	Credential     string          `json:"credential"`
-	Details        json.RawMessage `json:"details,omitempty"`
-	OccurredAt     time.Time       `json:"occurred_at"`
+	ID             string `json:"id"`
+	Provider       string `json:"provider"`
+	Scope          string `json:"scope"`
+	Action         string `json:"action"`
+	Target         string `json:"target"`
+	ExternalID     string `json:"external_id,omitempty"`
+	URL            string `json:"url,omitempty"`
+	FromState      string `json:"from_state,omitempty"`
+	ToState        string `json:"to_state,omitempty"`
+	ConversationID string `json:"conversation_id,omitempty"`
+	ActorUserID    string `json:"actor_user_id,omitempty"`
+	PerformedBy    string `json:"performed_by"`
+	// ObjectKind and ObjectID (domain.ObjectID) name the object the action
+	// changed. A row that names no object has neither, and one whose kind's
+	// identifying columns are empty has no ObjectID.
+	ObjectKind string          `json:"object_kind,omitempty"`
+	ObjectID   string          `json:"object_id,omitempty"`
+	Credential string          `json:"credential"`
+	Details    json.RawMessage `json:"details,omitempty"`
+	OccurredAt time.Time       `json:"occurred_at"`
 	// org feed only:
 	TeamID    string `json:"team_id,omitempty"`
 	TeamName  string `json:"team_name,omitempty"`
@@ -380,6 +385,7 @@ func toActionJSON(a domain.ExternalAction) actionJSON {
 	if a.DetailJSON != "" && json.Valid([]byte(a.DetailJSON)) {
 		details = json.RawMessage(a.DetailJSON)
 	}
+	objectID, _ := domain.ObjectID(a)
 	return actionJSON{
 		ID:             a.ID,
 		Provider:       a.Provider,
@@ -393,6 +399,8 @@ func toActionJSON(a domain.ExternalAction) actionJSON {
 		ConversationID: a.ConversationID,
 		ActorUserID:    a.ActorUserID,
 		PerformedBy:    a.PerformedBy,
+		ObjectKind:     a.ObjectKind,
+		ObjectID:       objectID,
 		Credential:     a.Credential,
 		Details:        details,
 		OccurredAt:     a.OccurredAt,

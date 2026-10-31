@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -63,9 +64,6 @@ const pgExternalActionColumns = `
 // the dual-dialect conformance suite holds the two definitions to each other,
 // row by row for every kind. A GitHub issue is identified by its entity and a
 // Jira or Linear one by its key, so the issue arms split on provider.
-//
-// TODO(TFAC-1260): only the conformance suite reads it until the artifacts
-// read groups a run's rows by it.
 const pgActionObjectIDSQL = `
 	CASE
 	  WHEN ea.object_kind = 'pull_request' OR (ea.object_kind = 'issue' AND ea.provider = 'github')
@@ -136,7 +134,7 @@ func (s *externalActionStore) ListByOrgSystem(ctx context.Context, orgID string,
 	if opts.CountOnly {
 		return []domain.ExternalAction{}, total, nil
 	}
-	query := `SELECT ` + pgExternalActionColumns + ` FROM external_actions WHERE org_id = $1`
+	query := `SELECT ` + pgExternalActionColumns + ` FROM external_actions ea WHERE org_id = $1`
 	query, args := appendPgExternalActionFilters(query, []any{orgID}, opts)
 	rows, err := s.admin.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -154,7 +152,7 @@ func (s *externalActionStore) ListByTeam(ctx context.Context, orgID, teamID stri
 	if opts.CountOnly {
 		return []domain.ExternalAction{}, total, nil
 	}
-	query := `SELECT ` + pgExternalActionColumns + ` FROM external_actions WHERE org_id = $1 AND team_id = $2`
+	query := `SELECT ` + pgExternalActionColumns + ` FROM external_actions ea WHERE org_id = $1 AND team_id = $2`
 	query, args := appendPgExternalActionFilters(query, []any{orgID, teamID}, opts)
 	rows, err := s.q.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -177,7 +175,7 @@ func (s *externalActionStore) ListByConversation(ctx context.Context, orgID, con
 	if opts.CountOnly {
 		return []domain.ExternalAction{}, total, nil
 	}
-	query := `SELECT ` + pgExternalActionColumns + ` FROM external_actions WHERE org_id = $1 AND conversation_id = $2::uuid`
+	query := `SELECT ` + pgExternalActionColumns + ` FROM external_actions ea WHERE org_id = $1 AND conversation_id = $2::uuid`
 	query, args := appendPgExternalActionFilters(query, []any{orgID, conversationID}, opts)
 	rows, err := s.q.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -231,7 +229,9 @@ func appendPgExternalActionFilters(query string, args []any, opts domain.Externa
 }
 
 // appendPgExternalActionPredicates is the filter half alone — no ordering, no
-// window — so the count and the page apply exactly the same predicate.
+// window — so the count and the page apply exactly the same predicate. The
+// statement names external_actions as `ea`, which the object-id filter's
+// expression reads.
 func appendPgExternalActionPredicates(query string, args []any, opts domain.ExternalActionListOpts) (string, []any) {
 	if opts.Provider != "" {
 		args = append(args, opts.Provider)
@@ -244,6 +244,19 @@ func appendPgExternalActionPredicates(query string, args []any, opts domain.Exte
 	if opts.ActorUserID != "" {
 		args = append(args, opts.ActorUserID)
 		query += fmt.Sprintf(" AND actor_user_id = $%d", len(args))
+	}
+	if opts.ObjectID != "" {
+		args = append(args, opts.ObjectID)
+		query += fmt.Sprintf(" AND (%s) = $%d", pgActionObjectIDSQL, len(args))
+	}
+	if opts.Refused {
+		refusals := domain.RefusalOrFailureActions()
+		placeholders := make([]string, len(refusals))
+		for i, action := range refusals {
+			args = append(args, action)
+			placeholders[i] = fmt.Sprintf("$%d", len(args))
+		}
+		query += " AND action IN (" + strings.Join(placeholders, ", ") + ")"
 	}
 	if !opts.Since.IsZero() {
 		args = append(args, opts.Since)
@@ -259,7 +272,7 @@ func appendPgExternalActionPredicates(query string, args []any, opts domain.Exte
 // countPgExternalActions runs the page's predicate as a COUNT on the pool the
 // page will read from, so the two can't come from different snapshots.
 func countPgExternalActions(ctx context.Context, q queryer, where string, base []any, opts domain.ExternalActionListOpts) (int, error) {
-	query, args := appendPgExternalActionPredicates(`SELECT COUNT(*) FROM external_actions WHERE `+where, base, opts)
+	query, args := appendPgExternalActionPredicates(`SELECT COUNT(*) FROM external_actions ea WHERE `+where, base, opts)
 	var n int
 	err := q.QueryRowContext(ctx, query, args...).Scan(&n)
 	return n, err

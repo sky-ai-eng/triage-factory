@@ -580,6 +580,11 @@ type ExternalActionListOpts struct {
 	Provider    string
 	Action      string
 	ActorUserID string
+	// ObjectID keeps the rows whose ObjectID equals it. Empty means no filter.
+	ObjectID string
+	// Refused keeps the rows whose action is a refusal or failure
+	// (RefusalOrFailureActions). False means no filter.
+	Refused bool
 	// Since / Until bound occurred_at to the half-open window [Since, Until).
 	// Each side applies only when non-zero, so the zero value is unbounded.
 	Since time.Time
