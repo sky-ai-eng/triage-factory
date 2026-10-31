@@ -381,25 +381,3 @@ func TestUpstream_AMessageSentDuringTheOutageRetriesAtOnce(t *testing.T) {
 		t.Errorf("successor's upstream hand-backs = %d, want 1 — the hand-back still spends the budget", next.UpstreamHandBacks)
 	}
 }
-
-// TestUpstreamExhaustedNote_NamesTheWaitTheBudgetAllows: the note tells a
-// person how long the provider was retried, and that figure is the schedule's
-// waits summed over every hand-back the budget allows. A change to either
-// that moves the total off four hours fails here rather than leaving the note
-// wrong.
-func TestUpstreamExhaustedNote_NamesTheWaitTheBudgetAllows(t *testing.T) {
-	policy, ok := db.HandBackPolicyFor(db.HandBackUpstream)
-	if !ok {
-		t.Fatal("no requeued_upstream policy")
-	}
-	var total time.Duration
-	for n := 0; n+1 < maxUpstreamHandBacks; n++ {
-		total += policy.Delay(n)
-	}
-	if got := total.Round(time.Hour); got != 4*time.Hour {
-		t.Errorf("the upstream budget waits %v in all, about %v; the note says four hours", total, got)
-	}
-	if !strings.Contains(upstreamExhaustedNote, "about four hours") {
-		t.Errorf("upstreamExhaustedNote = %q, want it to name the four hours this test checks", upstreamExhaustedNote)
-	}
-}

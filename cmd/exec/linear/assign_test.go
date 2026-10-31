@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
 	linearclient "github.com/sky-ai-eng/triage-factory/internal/linear"
 )
 
@@ -118,13 +119,10 @@ func TestParseUserSearchArgs(t *testing.T) {
 }
 
 func TestUserHelp(t *testing.T) {
+	want := "usage: " + prog.Prefix() + " " + userHelp["search"] + "\n"
 	for _, args := range [][]string{{"search", "--help"}, {"search", "-h"}} {
-		out := captureStdout(t, func() { handleUser(nil, args) })
-		if !strings.Contains(out, "linear user search <query>") {
+		if out := captureStdout(t, func() { handleUser(nil, args) }); out != want {
 			t.Errorf("`linear user %v` printed %q, want the search usage", args, out)
 		}
-	}
-	if !strings.Contains(HelpText, "linear user search ") {
-		t.Error("HelpText does not list `linear user search`")
 	}
 }

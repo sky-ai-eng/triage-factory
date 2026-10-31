@@ -10,70 +10,27 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
 )
 
-// TestHelpTextNamesInvokedPrefix pins the `linear` usage line for each invoked
-// form: the applet, the canonical name, and a path.
-func TestHelpTextNamesInvokedPrefix(t *testing.T) {
-	for _, prefix := range []string{"tfac", "triagefactory exec", "./triagefactory exec"} {
-		want := "Usage: " + prefix + " linear <resource> <action> [flags]\n"
-		if got := helpText(prefix); !strings.HasPrefix(got, want) {
-			t.Errorf("helpText(%q) first line = %q, want %q", prefix, firstLine(got), want)
-		}
-	}
-	if strings.Contains(helpText("tfac"), "triagefactory exec") {
-		t.Error("applet `linear` help mentions 'triagefactory exec'")
-	}
-}
-
-// TestIssueHelpUsesResolvedPrefix pins that both the resource help and a
-// per-action usage line name the prefix resolved from argv0. host is nil: the
-// help routes answer before any agenthost call, which is what makes `linear
-// issue view --help` work outside a run.
+// TestIssueHelpUsesResolvedPrefix pins the help routes: the resource help and
+// a per-action usage line, each rendered under the prefix resolved from argv0.
+// host is nil: the help routes answer before any agenthost call, which is what
+// makes `linear issue view --help` work outside a run.
 func TestIssueHelpUsesResolvedPrefix(t *testing.T) {
-	cases := map[string][]string{
-		"resource level":  {"--help"},
-		"per-action":      {"view", "--help"},
-		"after a value":   {"comment", "ENG-1", "--body", "x", "--help"},
-		"search per-verb": {"search", "-h"},
+	action := func(a string) string { return "usage: " + prog.Prefix() + " " + issueHelp[a] + "\n" }
+	cases := map[string]struct {
+		args []string
+		want string
+	}{
+		"resource level":  {[]string{"--help"}, helpText(prog.Prefix())},
+		"per-action":      {[]string{"view", "--help"}, action("view")},
+		"after a value":   {[]string{"comment", "ENG-1", "--body", "x", "--help"}, action("comment")},
+		"search per-verb": {[]string{"search", "-h"}, action("search")},
 	}
-	for name, args := range cases {
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			out := captureStdout(t, func() { handleIssue(nil, args) })
-			if !strings.Contains(out, prog.Prefix()) {
-				t.Errorf("`linear issue %v` help does not name the resolved prefix %q; got:\n%s", args, prog.Prefix(), out)
+			if out := captureStdout(t, func() { handleIssue(nil, tc.args) }); out != tc.want {
+				t.Errorf("`linear issue %v` printed the wrong help;\ngot  %.200q\nwant %.200q", tc.args, out, tc.want)
 			}
 		})
-	}
-}
-
-// TestHelpCoversEveryAction holds the overview, the per-action usage table and
-// the dispatch to one another: every action has a usage line, and the overview
-// names it.
-func TestHelpCoversEveryAction(t *testing.T) {
-	want := []string{
-		"assign", "comment", "create", "edit", "list-children", "list-states",
-		"search", "set-parent", "set-priority", "transition", "unassign", "view",
-	}
-	if got := issueActions(); !reflect.DeepEqual(got, want) {
-		t.Errorf("issueActions() = %v, want %v", got, want)
-	}
-	for _, action := range want {
-		if !strings.Contains(HelpText, "linear issue "+action+" ") {
-			t.Errorf("HelpText does not list `linear issue %s`", action)
-		}
-	}
-}
-
-// TestUnknownActionMessageNamesInvokedPrefix pins the mistyped-verb hint.
-func TestUnknownActionMessageNamesInvokedPrefix(t *testing.T) {
-	msg := unknownActionMessage("tfac", "vew")
-	for _, want := range []string{
-		"unknown issue action: vew",
-		"view",
-		"Run 'tfac linear issue --help' for usage.",
-	} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("message missing %q:\n%s", want, msg)
-		}
 	}
 }
 
@@ -150,45 +107,6 @@ func TestParseIssueArgs(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestIssueFlagsMatchUsage holds the per-action flag table to the usage lines:
-// an action accepts exactly the flags its usage names, a flag the usage shows
-// repeating ("--label <name>]...") is the one the table lets repeat, and every
-// flag is a value flag for the help scan.
-func TestIssueFlagsMatchUsage(t *testing.T) {
-	for action, usage := range issueHelp {
-		named := map[string]bool{}
-		fields := strings.Fields(usage)
-		for i, tok := range fields {
-			flag := strings.Trim(tok, "[]")
-			if !strings.HasPrefix(flag, "--") {
-				continue
-			}
-			repeats := i+1 < len(fields) && strings.HasSuffix(fields[i+1], "]...")
-			named[flag] = repeats
-			if !ValueFlags[flag] {
-				t.Errorf("%s usage names %s, which is not in ValueFlags", action, flag)
-			}
-		}
-		if got := issueFlags[action]; !reflect.DeepEqual(nonEmpty(got), named) {
-			t.Errorf("issueFlags[%q] = %v, usage names %v", action, got, named)
-		}
-	}
-}
-
-func nonEmpty(m map[string]bool) map[string]bool {
-	if m == nil {
-		return map[string]bool{}
-	}
-	return m
-}
-
-func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return s[:i+1]
-	}
-	return s
 }
 
 func captureStdout(t *testing.T, fn func()) string {

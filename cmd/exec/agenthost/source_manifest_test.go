@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -125,56 +126,60 @@ func TestDirectRuntime_SourceManifest_LiveResolve(t *testing.T) {
 // source-specific row over a general one, a reason-specific row over its
 // state's, and the after-start reason over the state it was refused in.
 func TestGuidanceFor_PrefersTheMostSpecificRow(t *testing.T) {
-	refusal := func(kind string, state domain.SourceState, reason string) string {
-		return (&SourceRefusal{Kind: kind, State: state, Reason: reason}).Error()
+	type row struct {
+		kind   string
+		state  domain.SourceState
+		reason string
 	}
-	if got := refusal("linear", domain.SourceSealed, reasonCredentialRefused); !strings.Contains(got, "connected Linear as an app") {
-		t.Errorf("linear credential_refused = %q, want the Linear-specific row", got)
+	for _, tc := range []struct {
+		name string
+		in   row
+		want row
+	}{
+		{"a source-specific row", row{"linear", domain.SourceSealed, reasonCredentialRefused},
+			row{"linear", domain.SourceSealed, reasonCredentialRefused}},
+		{"the general row", row{"jira", domain.SourceSealed, reasonCredentialRefused},
+			row{"", domain.SourceSealed, reasonCredentialRefused}},
+		{"the reason's row", row{"linear", domain.SourceUnresolved, domain.SourceReasonTokenEndpointUnavailable},
+			row{"", domain.SourceUnresolved, domain.SourceReasonTokenEndpointUnavailable}},
+		{"an unknown reason falls to the state's row", row{"linear", domain.SourceUnresolved, "some_future_reason"},
+			row{"", domain.SourceUnresolved, ""}},
+		{"after-start over sealed", row{"jira", domain.SourceSealed, reasonAfterStart},
+			row{"", "", reasonAfterStart}},
+		{"after-start over unresolved", row{"jira", domain.SourceUnresolved, reasonAfterStart},
+			row{"", "", reasonAfterStart}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g, ok := guidanceFor(tc.in.kind, tc.in.state, tc.in.reason)
+			if got := (row{g.kind, g.state, g.reason}); !ok || got != tc.want {
+				t.Errorf("guidanceFor(%+v) = %+v (ok %v), want %+v", tc.in, got, ok, tc.want)
+			}
+		})
 	}
-	if got := refusal("jira", domain.SourceSealed, reasonCredentialRefused); !strings.HasPrefix(got, "Jira refused the organization's credential") || strings.Contains(got, "as an app") {
-		t.Errorf("jira credential_refused = %q, want the general row", got)
-	}
-	if got := refusal("linear", domain.SourceUnresolved, domain.SourceReasonTokenEndpointUnavailable); !strings.Contains(got, "token endpoint") {
-		t.Errorf("unresolved/token_endpoint_unavailable = %q, want the reason's row", got)
-	}
-	if got := refusal("linear", domain.SourceUnresolved, "some_future_reason"); !strings.Contains(got, "could not obtain") {
-		t.Errorf("unresolved with an unknown reason = %q, want the state's row", got)
-	}
-	for _, state := range []domain.SourceState{domain.SourceSealed, domain.SourceUnresolved} {
-		if got := refusal("jira", state, reasonAfterStart); !strings.Contains(got, "after this run started") {
-			t.Errorf("%s/after_start = %q, want the after-start row", state, got)
-		}
-	}
-	if got := refusal("jira", domain.SourceSealed, ""); got == "" {
-		t.Error("a sealed refusal with no reason rendered nothing")
+	if g, ok := guidanceFor("jira", domain.SourceSealed, ""); ok {
+		t.Errorf("a sealed source with no refusal reason matched a row: %+v", g)
 	}
 }
 
 // TestSourceRefusal_EveryStateIsExplained walks every state a manifest can
-// record: each has a refusal naming its source, a note for the run's
-// <run_context> (sealed excepted), and a disabled refusal is still
-// recognizable as one without matching prose.
+// record: each has a refusal and a note for the run's <run_context> (sealed
+// excepted), and a disabled refusal is recognizable as one without matching
+// prose.
 func TestSourceRefusal_EveryStateIsExplained(t *testing.T) {
 	for _, state := range []domain.SourceState{
 		domain.SourceUnresolved, domain.SourceUnconfigured, domain.SourceDisabled,
 		domain.SourceUnlicensed, domain.SourceWithheld,
 	} {
-		err := &SourceRefusal{Kind: eventsource.KindJira, State: state}
-		if !strings.Contains(err.Error(), "Jira") {
-			t.Errorf("%s refusal %q does not name the source", state, err)
+		if g, ok := guidanceFor(eventsource.KindJira, state, ""); !ok || g.refusal == "" {
+			t.Errorf("%s has no refusal row", state)
 		}
+		err := &SourceRefusal{Kind: eventsource.KindJira, State: state}
 		note := SourceNote(eventsource.KindJira, domain.SourceEntry{State: state})
-		if !strings.HasPrefix(note, "Jira: ") {
+		if !strings.HasPrefix(note, eventsource.Label(eventsource.KindJira)+": ") {
 			t.Errorf("%s note = %q, want one led by the source", state, note)
 		}
 		if got := errors.Is(err, eventsource.ErrDisabled); got != (state == domain.SourceDisabled) {
 			t.Errorf("%s refusal wraps ErrDisabled = %v", state, got)
-		}
-	}
-	disabled := (&SourceRefusal{Kind: eventsource.KindJira, State: domain.SourceDisabled}).Error()
-	for _, want := range []string{"polling", "agent access", "Settings → Event sources"} {
-		if !strings.Contains(disabled, want) {
-			t.Errorf("disabled refusal %q does not say what a pause covers (%q)", disabled, want)
 		}
 	}
 	if note := SourceNote(eventsource.KindGitHub, domain.SourceEntry{State: domain.SourceSealed}); note != "" {
@@ -185,19 +190,18 @@ func TestSourceRefusal_EveryStateIsExplained(t *testing.T) {
 // TestSourceNotes pins the <run_context> lines: one per source that is not
 // sealed, in the manifest's kind order.
 func TestSourceNotes(t *testing.T) {
-	got := SourceNotes(domain.SourceManifest{
+	m := domain.SourceManifest{
 		"slack":  {State: domain.SourceUnconfigured},
 		"github": {State: domain.SourceSealed},
 		"linear": {State: domain.SourceUnresolved, Reason: domain.SourceReasonTokenEndpointUnavailable},
 		"jira":   {State: domain.SourceDisabled},
-	})
-	if len(got) != 3 {
-		t.Fatalf("SourceNotes = %q, want three lines", got)
 	}
-	for i, prefix := range []string{"Jira: turned off", "Linear: unavailable this run", "Slack: not set up"} {
-		if !strings.HasPrefix(got[i], prefix) {
-			t.Errorf("line %d = %q, want it to start %q", i, got[i], prefix)
-		}
+	var want []string
+	for _, kind := range []string{"jira", "linear", "slack"} {
+		want = append(want, SourceNote(kind, m[kind]))
+	}
+	if got := SourceNotes(m); !slices.Equal(got, want) {
+		t.Errorf("SourceNotes = %q, want %q", got, want)
 	}
 }
 

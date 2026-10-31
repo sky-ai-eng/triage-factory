@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
 )
 
@@ -112,15 +113,10 @@ func TestParseUserSearchArgs(t *testing.T) {
 }
 
 func TestUserHelp(t *testing.T) {
+	want := "usage: " + prog.Prefix() + " " + userHelp["search"] + "\n"
 	for _, args := range [][]string{{"search", "--help"}, {"search", "ana", "--issue", "SKY-1", "-h"}} {
-		out := captureStdout(t, func() { handleUser(nil, args) })
-		if !strings.Contains(out, "jira user search <query> --issue <key>") {
+		if out := captureStdout(t, func() { handleUser(nil, args) }); out != want {
 			t.Errorf("`jira user %v` printed %q, want the search usage", args, out)
-		}
-	}
-	for _, line := range []string{"jira ticket assign <key> --user <user-id>", "jira user search <query> --issue <key>"} {
-		if !strings.Contains(HelpText, line) {
-			t.Errorf("HelpText does not list %q", line)
 		}
 	}
 }

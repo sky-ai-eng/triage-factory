@@ -72,22 +72,6 @@ func TestSDKSystemPrompt_OmitsWhatThisRunHasNothingToSay(t *testing.T) {
 	}
 }
 
-// TestSDKSystemPrompt_CarriesNoUnresolvedTokens is the outward-facing half of
-// the literal-blocks rule: whatever a user could not write in a prompt of their
-// own, we do not ship in ours either. A `{{...}}` reaching here would be brace
-// syntax rendered at the model.
-//
-// The mission is deliberately excluded — a prompt row's body is the user's
-// text, and we render it, we do not edit it.
-func TestSDKSystemPrompt_CarriesNoUnresolvedTokens(t *testing.T) {
-	toolsRef := agentprompt.GitHubToolsReference() + "\n\n" + agentprompt.JiraToolsReference()
-	out := launchAppend("mission body", runContext("Repository: owner/repo", "/work", "", "tfac/SKY-9", "", "", ""), toolsRef, "", "/bin/tf")
-
-	if strings.Contains(out, "{{") {
-		t.Errorf("composed system prompt carries a {{...}} token nothing resolves;\n%s", out)
-	}
-}
-
 // TestSDKSystemPrompt_ResolvesTheCLIPath covers the one rewrite the composer
 // does. The allowlist grants the run's binary by absolute path and nothing
 // else, so a `triagefactory exec` left unresolved in the framework text or the

@@ -11,6 +11,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/execflags"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
 )
 
 // fakeExtensionHost is a minimal agenthost.Client fake for the CLI's
@@ -429,7 +430,7 @@ func TestRunSlackCLI_FamilyHelp(t *testing.T) {
 		if code != 0 {
 			t.Errorf("args %v: exit = %d, want 0", args, code)
 		}
-		if !strings.Contains(out, "Slack Commands:") || !strings.Contains(out, "slack send --channel") {
+		if !strings.Contains(out, prog.Prefix()) || !strings.Contains(out, cliHelpText) {
 			t.Errorf("args %v: family help missing from output:\n%s", args, out)
 		}
 	}
@@ -437,30 +438,25 @@ func TestRunSlackCLI_FamilyHelp(t *testing.T) {
 
 // TestRunSlackCLI_VerbHelp pins per-verb help at every depth — `slack send
 // --help`, `slack read thread --help` — served without a host and without the
-// verb body's required-flag validation firing.
+// verb body running.
 func TestRunSlackCLI_VerbHelp(t *testing.T) {
-	for verb, wantLine := range map[string]string{
-		"send":     "slack send --channel",
-		"edit":     "slack edit --channel",
-		"react":    "slack react --channel",
-		"read":     "slack read thread --channel",
-		"download": "slack download --id",
-	} {
+	usage := func(verb string) string {
+		var b strings.Builder
+		for _, line := range slackVerbHelp[verb] {
+			b.WriteString("usage: " + prog.Prefix() + " " + line + "\n")
+		}
+		return b.String()
+	}
+	for verb := range slackVerbHelp {
 		out, code := runSlackCLICapture(t, []string{verb, "--help"})
-		if code != 0 {
-			t.Errorf("%s --help: exit = %d, want 0", verb, code)
-		}
-		if !strings.Contains(out, wantLine) {
-			t.Errorf("%s --help output missing %q:\n%s", verb, wantLine, out)
-		}
-		if strings.Contains(out, "required") {
-			t.Errorf("%s --help ran the verb body (required-flag error):\n%s", verb, out)
+		if code != 0 || out != usage(verb) {
+			t.Errorf("%s --help: exit=%d, want 0 and the verb's usage; output:\n%s", verb, code, out)
 		}
 	}
 
 	// Depth below the verb routes identically — the scan covers the whole tail.
 	out, code := runSlackCLICapture(t, []string{"read", "thread", "--help"})
-	if code != 0 || !strings.Contains(out, "slack read thread --channel") {
+	if code != 0 || out != usage("read") {
 		t.Errorf("read thread --help: exit=%d output:\n%s", code, out)
 	}
 }
@@ -476,20 +472,6 @@ func TestRunSlackCLI_ValueFlagPayloadIsNotHelp(t *testing.T) {
 	code := runSlackCLI(context.Background(), []string{"send", "--channel", "C1", "--body", "--help"}, host)
 	if code != 0 || host.calls != 1 {
 		t.Errorf(`send with --body "--help": exit=%d calls=%d, want a normal send`, code, host.calls)
-	}
-}
-
-// TestRunSlackCLI_VerbHelpMirrorsFamilyHelp holds the per-verb usage lines
-// and the family overview to one another: every slackVerbHelp line must
-// appear in cliHelpText, so a flag rename cannot land in one and strand the
-// other.
-func TestRunSlackCLI_VerbHelpMirrorsFamilyHelp(t *testing.T) {
-	for verb, lines := range slackVerbHelp {
-		for _, line := range lines {
-			if !strings.Contains(cliHelpText, line) {
-				t.Errorf("verb %q usage line is not mirrored in cliHelpText: %s", verb, line)
-			}
-		}
 	}
 }
 

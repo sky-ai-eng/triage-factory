@@ -902,7 +902,7 @@ func TestLinearVerbs_CredentialFailuresExplainThemselves(t *testing.T) {
 				w.WriteHeader(http.StatusUnauthorized)
 				_, _ = w.Write([]byte(`{"errors":[{"message":"Authentication required","extensions":{"code":"AUTHENTICATION_ERROR"}}]}`))
 			},
-			want:    "Linear refused the organization's credential",
+			want:    (&SourceRefusal{Kind: eventsource.KindLinear, State: domain.SourceSealed, Reason: reasonCredentialRefused}).Error(),
 			wantErr: linearclient.ErrUnauthorized,
 		},
 	}
