@@ -229,6 +229,9 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// is a system service with no per-user identity, and its
 		// completions admit firings on the same footing the router does.
 		TaskReDerive: newTaskReDeriveStore(admin),
+		// PRMergeability wires admin: the poll and the probe worker are
+		// system services with no per-user identity.
+		PRMergeability: newPRMergeabilityStore(admin),
 		// Events wires both pools: app for request-handler
 		// equivalents (stock carry-over, factory drag-to-delegate) and
 		// admin for background goroutines without JWT-claims context
@@ -490,6 +493,7 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		s.stores.EventQueue.(db.WorkKindHandle),
 		s.stores.PendingFirings.(db.WorkKindHandle),
 		s.stores.TaskReDerive.(db.WorkKindHandle),
+		s.stores.PRMergeability.(db.WorkKindHandle),
 	}
 	return s.stores
 }

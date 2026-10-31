@@ -46,7 +46,7 @@ func TestRunJiraCycleForOrg_NothingArmedResolvesDiscoveryFailing(t *testing.T) {
 			kinds.JiraDiscoveryFailing.Set(context.Background(), org, kinds.JiraProject{JiraProjectID: "jp-sky", ProjectKey: "SKY"}, true)
 			m := &Manager{
 				database: database, pub: &capturingPublisher{},
-				tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue,
+				tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue, mergeability: stores.PRMergeability,
 				orgs: stores.Orgs, users: stores.Users, secrets: jiraSecrets{},
 				jiraRules:    c.rules(stores.JiraStatusRules),
 				jiraProjects: stores.JiraProjects,

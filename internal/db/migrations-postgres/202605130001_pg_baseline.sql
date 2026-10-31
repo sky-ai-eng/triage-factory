@@ -4568,6 +4568,129 @@ GRANT ALL ON SEQUENCE public.task_rederive_queue_id_seq TO service_role;
 GRANT SELECT,USAGE ON SEQUENCE public.task_rederive_queue_id_seq TO tf_app;
 
 
+-- A pull request's mergeability, read only by the probe worker and stored
+-- here rather than in the entity's snapshot. One row per GitHub pull request
+-- entity the worker has an answer for: the last known answer (never UNKNOWN),
+-- the head it was read at, and when. The probe worker is the only writer of
+-- the three, and github:pr:conflicts / github:pr:conflicts_resolved are
+-- emitted from the row's transitions in the transaction that writes it. The
+-- poll deletes the rows of entities no longer active.
+--
+-- Admin-pool wired with org_id bound per statement; the policy below is
+-- defense-in-depth.
+CREATE TABLE public.pull_request_mergeability (
+    entity_id           uuid NOT NULL,
+    org_id              uuid NOT NULL,
+    mergeable           text NULL CHECK (mergeable IN ('MERGEABLE','CONFLICTING')),
+    mergeable_head_sha  text NULL,
+    checked_at          timestamp with time zone NULL
+);
+
+ALTER TABLE ONLY public.pull_request_mergeability
+    ADD CONSTRAINT pull_request_mergeability_pkey PRIMARY KEY (entity_id);
+
+ALTER TABLE ONLY public.pull_request_mergeability
+    ADD CONSTRAINT pull_request_mergeability_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.pull_request_mergeability
+    ADD CONSTRAINT pull_request_mergeability_entity_id_org_id_fkey FOREIGN KEY (entity_id, org_id) REFERENCES public.entities(id, org_id) ON DELETE CASCADE;
+
+ALTER TABLE public.pull_request_mergeability ENABLE ROW LEVEL SECURITY;
+CREATE POLICY pull_request_mergeability_all ON public.pull_request_mergeability
+    USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)))
+    WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+
+GRANT ALL ON TABLE public.pull_request_mergeability TO postgres;
+GRANT ALL ON TABLE public.pull_request_mergeability TO anon;
+GRANT ALL ON TABLE public.pull_request_mergeability TO authenticated;
+GRANT ALL ON TABLE public.pull_request_mergeability TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.pull_request_mergeability TO tf_app;
+
+
+-- The queue of pull requests whose mergeability is due to be read, as a work
+-- kind on the shared work-item block (internal/db/workitem; the kind is
+-- workkinds.PRMergeabilityProbes), keyed on the entity id while a row is
+-- ready, leased or parked. The four columns after the block are this kind's
+-- own: the pull request, why it was admitted, when it may first be read, and
+-- how many UNKNOWN answers came before it.
+--
+-- Admin-pool wired with org_id bound per statement; the
+-- pr_mergeability_probes_all policy below is defense-in-depth, and it is FOR
+-- ALL because admission's conflict arm and every guarded write are UPDATEs.
+--
+CREATE TABLE public.pr_mergeability_probes (
+    id                   bigint NOT NULL,
+    org_id               uuid NOT NULL,
+    status               TEXT NOT NULL CHECK (status IN ('ready','leased','done','parked','cancelled')),
+    attempt              INTEGER NOT NULL DEFAULT 0,
+    max_attempts         INTEGER NOT NULL,
+    next_attempt_at      TIMESTAMPTZ NULL,
+    lease_generation     BIGINT NOT NULL DEFAULT 0,
+    lease_owner          TEXT NULL,
+    lease_epoch          BIGINT NULL,
+    leased_at            TIMESTAMPTZ NULL,
+    lease_expires_at     TIMESTAMPTZ NULL,
+    cancel_requested_at  TIMESTAMPTZ NULL,
+    cancel_requested_by  TEXT NULL,
+    cancel_reason        TEXT NULL,
+    last_error           TEXT NULL,
+    last_outcome         TEXT NULL,
+    unique_key           TEXT NULL,
+    superseded_by        BIGINT NULL,
+    first_enqueued_at    TIMESTAMPTZ NOT NULL,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    done_at              TIMESTAMPTZ NULL,
+    entity_id            uuid NOT NULL,
+    reason               TEXT NOT NULL,
+    probe_after          TIMESTAMPTZ NOT NULL,
+    unknown_reads        INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE SEQUENCE public.pr_mergeability_probes_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+ALTER SEQUENCE public.pr_mergeability_probes_id_seq OWNED BY public.pr_mergeability_probes.id;
+
+ALTER TABLE ONLY public.pr_mergeability_probes ALTER COLUMN id SET DEFAULT nextval('public.pr_mergeability_probes_id_seq'::regclass);
+
+ALTER TABLE ONLY public.pr_mergeability_probes
+    ADD CONSTRAINT pr_mergeability_probes_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.pr_mergeability_probes
+    ADD CONSTRAINT pr_mergeability_probes_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.pr_mergeability_probes
+    ADD CONSTRAINT pr_mergeability_probes_entity_id_org_id_fkey FOREIGN KEY (entity_id, org_id) REFERENCES public.entities(id, org_id) ON DELETE CASCADE;
+
+-- The work-item indexes as workitem.IndexDDL renders them for this kind,
+-- naming the table through its schema like every other statement here; a
+-- test asserts each is present.
+CREATE INDEX IF NOT EXISTS idx_pr_mergeability_probes_ready_next ON public.pr_mergeability_probes (next_attempt_at, id) WHERE status = 'ready';
+CREATE INDEX IF NOT EXISTS idx_pr_mergeability_probes_ready_cancel ON public.pr_mergeability_probes (id) WHERE status = 'ready' AND cancel_requested_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_pr_mergeability_probes_leased_expiry ON public.pr_mergeability_probes (lease_expires_at) WHERE status = 'leased';
+CREATE INDEX IF NOT EXISTS idx_pr_mergeability_probes_parked ON public.pr_mergeability_probes (org_id, id) WHERE status = 'parked';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_pr_mergeability_probes_unique_key ON public.pr_mergeability_probes (org_id, unique_key) WHERE unique_key IS NOT NULL AND status IN ('ready','leased','parked');
+
+ALTER TABLE public.pr_mergeability_probes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY pr_mergeability_probes_all ON public.pr_mergeability_probes
+    USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)))
+    WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+
+GRANT ALL ON TABLE public.pr_mergeability_probes TO postgres;
+GRANT ALL ON TABLE public.pr_mergeability_probes TO anon;
+GRANT ALL ON TABLE public.pr_mergeability_probes TO authenticated;
+GRANT ALL ON TABLE public.pr_mergeability_probes TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.pr_mergeability_probes TO tf_app;
+
+GRANT ALL ON SEQUENCE public.pr_mergeability_probes_id_seq TO postgres;
+GRANT ALL ON SEQUENCE public.pr_mergeability_probes_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.pr_mergeability_probes_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.pr_mergeability_probes_id_seq TO service_role;
+GRANT SELECT,USAGE ON SEQUENCE public.pr_mergeability_probes_id_seq TO tf_app;
+
+
 -- Per-org Atlassian OAuth (3LO) app registration for the per-user "Connect
 -- Jira" flow; an org with no row falls back to the deployment app.
 -- client_secret_ref is an org_secrets key pointer, written via SecretStore.

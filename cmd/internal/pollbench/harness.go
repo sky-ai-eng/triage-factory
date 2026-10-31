@@ -15,7 +15,9 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/mergeability"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/poller"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/github/githubapp"
@@ -37,7 +39,8 @@ type RunConfig struct {
 	MaxCycles int
 }
 
-// CycleMetrics is what one driven poll cycle cost.
+// CycleMetrics is what one driven poll cycle cost: the poll and the
+// mergeability probe pass after it.
 type CycleMetrics struct {
 	Label      string
 	Wall       time.Duration
@@ -78,11 +81,12 @@ type Result struct {
 	SanityErrors []string
 }
 
-// countingPublisher is the tracker.Publisher for the bench. Counting happens
-// synchronously in Publish — unlike a bus subscription there is no buffer to
-// overflow, so event counts are exact even at stress shape. The bench
-// deliberately stops at the tracker boundary: routing/task creation is not
-// part of what a poll cycle costs.
+// countingPublisher is the tracker.Publisher for the bench, and the probe
+// worker's. Counting happens synchronously in Publish — unlike a bus
+// subscription there is no buffer to overflow, so event counts are exact
+// even at stress shape. The bench deliberately stops at the tracker and probe
+// worker boundary: routing/task creation is not part of what a poll cycle
+// costs.
 type countingPublisher struct {
 	mu     sync.Mutex
 	total  int
@@ -102,10 +106,11 @@ func (p *countingPublisher) Publish(_ context.Context, evt domain.Event) {
 	p.mu.Unlock()
 }
 
-// PublishPreEnqueued is the tracker's post-commit fan-out for the events
-// it enqueued itself (the diff arms' snapshot-CAS emit). Counted the same
-// way — from the bench's perspective an emitted event is an emitted event,
-// whichever side of the durable write it arrives on.
+// PublishPreEnqueued is the post-commit fan-out for the events the tracker
+// and the probe worker enqueued themselves (the diff arms' snapshot-CAS emit,
+// a probe's answer). Counted the same way — from the bench's perspective an
+// emitted event is an emitted event, whichever side of the durable write it
+// arrives on.
 func (p *countingPublisher) PublishPreEnqueued(ctx context.Context, evt domain.Event) {
 	p.Publish(ctx, evt)
 }
@@ -228,8 +233,20 @@ func Run(cfg RunConfig) (*Result, error) {
 		client: ghclient.NewClient(srv.URL(), "bench-pat"),
 		base:   srv.URL(),
 	}
+	// The probe worker drains the probes each cycle's poll admitted. A probe
+	// is not ripe until well after its admission; the harness stands in for
+	// that wait by moving every ready probe's probe_after into the past
+	// before the pass.
+	prober := mergeability.NewWorker(stores.PRMergeability, stores.Orgs, resolver, pub, workitem.Owner{ID: "pollbench", Epoch: 1})
+	probe := func() error {
+		if _, err := database.ExecContext(ctx, `UPDATE pr_mergeability_probes SET probe_after = strftime('%Y-%m-%d %H:%M:%f','now','-1 seconds') WHERE status = 'ready'`); err != nil {
+			return fmt.Errorf("ripen probes: %w", err)
+		}
+		return prober.Drain(ctx)
+	}
+
 	mgr := poller.NewManager(database, pub,
-		stores.Users, stores.Tasks, stores.Entities, stores.Repos, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.Orgs,
+		stores.Users, stores.Tasks, stores.Entities, stores.Repos, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, stores.Orgs,
 		stores.JiraStatusRules, stores.JiraProjects, stores.LinearTeamRules, stores.TeamGitHubGroups, stores.Secrets, stores.GitHubApps, stores.PollReadiness,
 		resolver, nil)
 
@@ -282,6 +299,7 @@ func Run(cfg RunConfig) (*Result, error) {
 
 		start := time.Now()
 		mgr.PollGitHubOnce(ctx, orgID)
+		probeErr := probe()
 		wall := time.Since(start)
 
 		var msAfter runtime.MemStats
@@ -299,6 +317,10 @@ func Run(cfg RunConfig) (*Result, error) {
 		}
 		for _, e := range unexpected {
 			res.SanityErrors = append(res.SanityErrors, fmt.Sprintf("cycle %s: unexpected poll error: %s", label, e))
+		}
+		if probeErr != nil {
+			m.Errors = append(m.Errors, "mergeability: "+probeErr.Error())
+			res.SanityErrors = append(res.SanityErrors, fmt.Sprintf("cycle %s: mergeability probe pass: %v", label, probeErr))
 		}
 		res.Cycles = append(res.Cycles, m)
 		return m

@@ -1102,53 +1102,6 @@ func TestDiff_NewCommits_EmptyPrev_NoEvent(t *testing.T) {
 	}
 }
 
-func TestDiff_Conflicts(t *testing.T) {
-	prev := basePRSnapshot()
-	prev.Mergeable = "MERGEABLE"
-	curr := basePRSnapshot()
-	curr.Mergeable = "CONFLICTING"
-
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testRepositoryID, testSelf, nil, nil, nil)
-	if findEvent(evts, domain.EventGitHubPRConflicts) == nil {
-		t.Error("expected pr:conflicts event")
-	}
-}
-
-func TestDiff_Conflicts_AlreadyConflicting_NoEvent(t *testing.T) {
-	prev := basePRSnapshot()
-	prev.Mergeable = "CONFLICTING"
-	curr := basePRSnapshot()
-	curr.Mergeable = "CONFLICTING"
-
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testRepositoryID, testSelf, nil, nil, nil)
-	if findEvent(evts, domain.EventGitHubPRConflicts) != nil {
-		t.Error("should not re-emit conflicts when already conflicting")
-	}
-}
-
-func TestDiff_ConflictsResolved(t *testing.T) {
-	for _, tc := range []struct {
-		prev, curr string
-		want       bool
-	}{
-		{"CONFLICTING", "MERGEABLE", true},
-		{"MERGEABLE", "MERGEABLE", false},
-	} {
-		t.Run(tc.prev+" to "+tc.curr, func(t *testing.T) {
-			prev, curr := basePRSnapshot(), basePRSnapshot()
-			prev.Mergeable, curr.Mergeable = tc.prev, tc.curr
-			curr.UpdatedAt = "2026-04-25T18:30:00Z" // present, but not the resolution's time
-			evt := findEvent(DiffPRSnapshots(prev, curr, testEntityID, testRepositoryID, testSelf, nil, nil, nil), domain.EventGitHubPRConflictsResolved)
-			if (evt != nil) != tc.want {
-				t.Fatalf("conflicts_resolved = %v, want present=%v", evt, tc.want)
-			}
-			if evt != nil && !evt.OccurredAt.IsZero() {
-				t.Errorf("conflicts_resolved OccurredAt = %v, want zero (no honest source time)", evt.OccurredAt)
-			}
-		})
-	}
-}
-
 // --- Metadata: Labels snapshot on every event -------------------------------
 
 func TestDiff_AllPREvents_CarryLabels(t *testing.T) {
@@ -1678,23 +1631,6 @@ func TestDiffPRSnapshots_LabelEventsCarryUpdatedAtAsSourceTime(t *testing.T) {
 	evts := DiffPRSnapshots(prev, curr, testEntityID, testRepositoryID, testSelf, nil, nil, nil)
 	assertOccurredAt(t, findEvent(evts, domain.EventGitHubPRLabelAdded),
 		time.Date(2026, 4, 25, 18, 30, 0, 0, time.UTC))
-}
-
-func TestDiffPRSnapshots_ConflictsHasNoSourceTime(t *testing.T) {
-	prev := domain.PRSnapshot{Number: 1, Repo: "o/r", State: "OPEN", Mergeable: "MERGEABLE"}
-	curr := domain.PRSnapshot{
-		Number: 1, Repo: "o/r", State: "OPEN",
-		Mergeable: "CONFLICTING",
-		UpdatedAt: "2026-04-25T18:30:00Z", // present, but should be ignored
-	}
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testRepositoryID, testSelf, nil, nil, nil)
-	conflicts := findEvent(evts, domain.EventGitHubPRConflicts)
-	if conflicts == nil {
-		t.Fatalf("expected pr:conflicts event")
-	}
-	if !conflicts.OccurredAt.IsZero() {
-		t.Errorf("pr:conflicts should leave OccurredAt zero (no honest source time), got %v", conflicts.OccurredAt)
-	}
 }
 
 func TestDiffJiraSnapshots_StatusChangeUsesUpdatedAtAsSourceTime(t *testing.T) {

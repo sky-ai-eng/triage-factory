@@ -303,7 +303,7 @@ func (s *Server) handleTeams(w http.ResponseWriter) {
 	]`))
 }
 
-// --- GraphQL: nodes(ids:) batch refresh --------------------------------------
+// --- GraphQL: nodes(ids:) batch refresh and mergeability probe -------------
 
 func (s *Server) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -314,8 +314,9 @@ func (s *Server) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Variables.IDs) == 0 {
 		// The only GraphQL the multi-mode poll path issues is the nodes(ids:)
-		// refresh; anything else (e.g. the local-mode dashboard-backfill
-		// search) reaching here is a harness bug — count it visibly.
+		// refresh and the probe worker's nodes(ids:) mergeability read;
+		// anything else (e.g. the local-mode dashboard-backfill search)
+		// reaching here is a harness bug — count it visibly.
 		s.mu.Lock()
 		s.counters.Other++
 		s.mu.Unlock()
@@ -328,6 +329,9 @@ func (s *Server) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	s.counters.GraphQL++
 	s.mu.Unlock()
 
+	// The probe's document names its operation; every PR answers with the
+	// mergeability it has settled on, as GitHub does once it has computed it.
+	mergeability := strings.Contains(req.Query, "query PRMergeability(")
 	nodes := make([]any, 0, len(req.Variables.IDs))
 	for _, id := range req.Variables.IDs {
 		loc, ok := s.ds.byNodeID[id]
@@ -336,7 +340,12 @@ func (s *Server) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		repo := s.ds.Repos[loc[0]]
-		nodes = append(nodes, gqlPRJSON(repo, repo.PRs[loc[1]]))
+		pr := repo.PRs[loc[1]]
+		if mergeability {
+			nodes = append(nodes, map[string]any{"id": pr.NodeID, "mergeable": pr.Mergeable, "headRefOid": pr.HeadSHA})
+			continue
+		}
+		nodes = append(nodes, gqlPRJSON(repo, pr))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -392,7 +401,6 @@ func gqlPRJSON(repo Repo, pr PR) map[string]any {
 		"state":          "OPEN",
 		"isDraft":        false,
 		"merged":         false,
-		"mergeable":      pr.Mergeable,
 		"headRefName":    pr.HeadRef,
 		"baseRefName":    pr.BaseRef,
 		"url":            fmt.Sprintf("https://github.example.com/%s/pull/%d", full, pr.Number),

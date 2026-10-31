@@ -33,6 +33,7 @@ func Run(t *testing.T, mk Factory) {
 	t.Run("ExpiryInsideDeferPredicate", func(t *testing.T) { testExpiryInsideDeferPredicate(t, mk) })
 	t.Run("SingleTxLockOrderingWithCancel", func(t *testing.T) { testLockOrderingWithCancel(t, mk) })
 	t.Run("AdmitUnderRowLock", func(t *testing.T) { testAdmitUnderRowLock(t, mk) })
+	t.Run("CompleteAndAdmit", func(t *testing.T) { testCompleteAndAdmit(t, mk) })
 	t.Run("UniqueForever", func(t *testing.T) { testUniqueForever(t, mk) })
 	t.Run("UniqueNone", func(t *testing.T) { testUniqueNone(t, mk) })
 	t.Run("Backoff", func(t *testing.T) { testBackoff(t) })

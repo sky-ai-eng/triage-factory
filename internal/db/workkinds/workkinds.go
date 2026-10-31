@@ -255,3 +255,86 @@ func TaskReDerive(d workitem.Dialect) workitem.Kind {
 		Observer: workmetrics.Observe(TaskReDeriveName),
 	}
 }
+
+// The mergeability probe kind's identity on the work-kind registry, declared
+// beside the Kind for the same reason the others are. No row is ripe until
+// PRMergeabilityProbeDelay after its admission, and a retry not until
+// PRMergeabilityUnknownRetryDelay after the read that answered UNKNOWN, so
+// the oldest ready row is that old in a queue that is draining; two minutes
+// is a backlog the worker is not keeping up with.
+const (
+	PRMergeabilityProbesName                 = "pr_mergeability_probes"
+	PRMergeabilityProbesLabel                = "Mergeability probes"
+	PRMergeabilityProbesOldestReadyObjective = 2 * time.Minute
+)
+
+// Probe timing. A read right after a push mostly answers UNKNOWN, because
+// GitHub starts computing mergeability on the read, so an admission waits
+// PRMergeabilityProbeDelay before it is probed; the wait also collapses a
+// burst of admissions for one pull request into one probe. An UNKNOWN answer
+// is read again PRMergeabilityUnknownRetryDelay later, at most
+// PRMergeabilityMaxUnknownReads times, after which the sweep reaches the pull
+// request.
+const (
+	PRMergeabilityProbeDelay        = 15 * time.Second
+	PRMergeabilityUnknownRetryDelay = 30 * time.Second
+	PRMergeabilityMaxUnknownReads   = 10
+)
+
+// PRMergeabilityProbes is the queue of pull requests whose mergeability is due
+// to be read, as a work kind: one row per (pull request, admission) whose
+// read has not completed. The probe worker is its only consumer and the only
+// writer of pull_request_mergeability.
+//
+// SingleTx: a probe's effect is the pull_request_mergeability row and the
+// conflict events its transition implies, which the completion's closure
+// writes, so the answer, the events and the done flip commit together. A
+// completion whose lease another holder took rolls all of it back, and the
+// other holder reads again. An UNKNOWN answer completes through
+// workitem.CompleteAndAdmit, whose successor is the retry.
+//
+// UniqueWhileUnsettled keyed on the entity id (PRMergeabilityProbeKey): an
+// admission while a probe is ready, leased or parked for the same pull
+// request collapses into it.
+//
+// The claim filter holds a row back until its probe_after; next_attempt_at
+// stays the package's, for backoff after a failed read.
+//
+// Timing and budget are the re-evaluation queue's: a unit is one GraphQL
+// read for a batch of pull requests and one small transaction per answer.
+// Fairness interleaves at batch granularity; the worker claims per org.
+// Frozen is empty: the kind's columns are immutable after admission, so the
+// store reads them by id after the claim.
+func PRMergeabilityProbes(d workitem.Dialect) workitem.Kind {
+	return workitem.Kind{
+		Table:   "pr_mergeability_probes",
+		Dialect: d,
+		Policy: workitem.Policy{
+			MaxAttempts:  5,
+			Lease:        60 * time.Second,
+			RenewEvery:   20 * time.Second,
+			UnitDeadline: 30 * time.Second,
+			Fairness:     true,
+		},
+		Unique:      workitem.UniqueWhileUnsettled,
+		Strategy:    workitem.SingleTx,
+		Columns:     []string{"entity_id", "reason", "probe_after", "unknown_reads"},
+		ClaimFilter: PRMergeabilityProbesClaimFilter(d),
+		Observer:    workmetrics.Observe(PRMergeabilityProbesName),
+	}
+}
+
+// PRMergeabilityProbesClaimFilter holds a probe back until its probe_after,
+// read against the database's clock in the same spelling the package's own
+// timing uses. SQLite stores probe_after in the block's timestamp shape, so
+// the comparison is text against text.
+func PRMergeabilityProbesClaimFilter(d workitem.Dialect) string {
+	if d == workitem.Postgres {
+		return "t.probe_after <= statement_timestamp()"
+	}
+	return "t.probe_after <= strftime('%Y-%m-%d %H:%M:%f','now')"
+}
+
+// PRMergeabilityProbeKey is the unique key a probe is admitted under: one per
+// pull request entity while one is unsettled.
+func PRMergeabilityProbeKey(entityID string) string { return entityID }

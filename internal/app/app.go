@@ -36,6 +36,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventbus"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/ingest"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/mergeability"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/poller"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/github/githubapp"
@@ -198,7 +199,10 @@ type App struct {
 	pollerMgr        *poller.Manager
 	spawner          *delegate.Spawner
 	router           *routing.Router
-	srv              *server.Server
+	// mergeability is the probe worker: the only reader of pull request
+	// mergeability, started with the brain.
+	mergeability *mergeability.Worker
+	srv          *server.Server
 
 	// teamKB is the process-wide team knowledge-base seam (kbstore.New): the
 	// knowledge bucket in multi, plain files under the state root in local.

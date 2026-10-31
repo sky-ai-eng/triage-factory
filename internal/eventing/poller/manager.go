@@ -43,7 +43,10 @@ type Manager struct {
 	// their transitions to, in the same transaction as the snapshot CAS
 	// those transitions were diffed against. Held here only to construct
 	// the per-org Tracker — the poller itself never touches the queue.
-	eventQueue   db.EventQueueStore
+	eventQueue db.EventQueueStore
+	// mergeability is where each cycle's tracker admits the mergeability
+	// probes its pull requests are due; held only to construct the Tracker.
+	mergeability db.PRMergeabilityStore
 	users        db.UsersStore       // source of the local user's host-scoped GitHub identity
 	repos        db.RepositoryStore  // configured-repo names for GitHub poller startup
 	deliverables db.DeliverableStore // the reviews TF submitted, which the tracker emits no review event for
@@ -202,13 +205,14 @@ type Manager struct {
 	lastLinearSuccess map[string]time.Time
 }
 
-func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepositoryStore, deliverables db.DeliverableStore, externalActions db.ExternalActionStore, eventQueue db.EventQueueStore, orgs db.OrgsStore, jiraRules db.JiraStatusRulesStore, jiraProjects db.JiraProjectStore, linearRules db.LinearTeamRulesStore, githubGroups db.TeamGitHubGroupsStore, secrets db.SecretStore, apps db.GitHubAppsStore, connections db.PollReadinessStore, resolver ghclient.Resolver, linearResolver linear.Resolver) *Manager {
+func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepositoryStore, deliverables db.DeliverableStore, externalActions db.ExternalActionStore, eventQueue db.EventQueueStore, mergeability db.PRMergeabilityStore, orgs db.OrgsStore, jiraRules db.JiraStatusRulesStore, jiraProjects db.JiraProjectStore, linearRules db.LinearTeamRulesStore, githubGroups db.TeamGitHubGroupsStore, secrets db.SecretStore, apps db.GitHubAppsStore, connections db.PollReadinessStore, resolver ghclient.Resolver, linearResolver linear.Resolver) *Manager {
 	return &Manager{
 		database:        database,
 		pub:             pub,
 		tasks:           tasks,
 		entities:        entities,
 		eventQueue:      eventQueue,
+		mergeability:    mergeability,
 		users:           users,
 		repos:           repos,
 		deliverables:    deliverables,
@@ -233,7 +237,7 @@ func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, ta
 // (struct of method holders + store references) so per-cycle
 // allocation is fine.
 func (m *Manager) trackerForOrg(orgID string) *tracker.Tracker {
-	return tracker.New(m.database, m.pub, m.tasks, m.entities, m.repos, m.jiraProjects, m.deliverables, m.externalActions, m.eventQueue, orgID).
+	return tracker.New(m.database, m.pub, m.tasks, m.entities, m.repos, m.jiraProjects, m.deliverables, m.externalActions, m.eventQueue, m.mergeability, orgID).
 		WithJiraDiscoveryStreaks(&m.jiraDiscovery)
 }
 

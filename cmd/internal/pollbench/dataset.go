@@ -45,9 +45,8 @@ type DatasetConfig struct {
 	InflightPct float64
 
 	// ConflictPct is the fraction of PRs whose GraphQL mergeable state is
-	// CONFLICTING. Each one emits a github:pr:conflicts event on the first
-	// full refresh (REST discovery has no mergeable field, so the seeded
-	// snapshot's empty value diffs against it).
+	// CONFLICTING. Each one emits a github:pr:conflicts event from its first
+	// mergeability probe, which finds no stored answer to compare against.
 	ConflictPct float64
 
 	// Seed drives all randomness. Same seed + same config → same dataset.
@@ -88,7 +87,7 @@ type PR struct {
 	HeadSHA        string
 	CreatedAt      string
 	UpdatedAt      string
-	Mergeable      string // GraphQL only: MERGEABLE / CONFLICTING
+	Mergeable      string // the mergeability probe's answer: MERGEABLE / CONFLICTING
 	Additions      int
 	Deletions      int
 	ChangedFiles   int
@@ -282,8 +281,9 @@ func (d *Dataset) RepoNames() []string {
 
 // ExpectedColdEvents computes the number of events one full cold-start sync
 // must emit. Discovery seeds each PR's snapshot from the REST listing (no
-// CI, no reviews, no mergeable state); the same cycle's GraphQL refresh then
-// diffs the full snapshot against that seed, emitting:
+// CI, no reviews); the same cycle's GraphQL refresh then diffs the full
+// snapshot against that seed, and the probe pass after it reads every new
+// PR's mergeability, emitting:
 //
 //   - one ci_check_failed / ci_check_passed per COMPLETED check run
 //     (in-flight checks have no conclusion yet → no event),

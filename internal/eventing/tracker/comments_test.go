@@ -771,7 +771,7 @@ func TestRefreshLinear_FailedCommentReadIsRetried(t *testing.T) {
 func TestMarkTFComments_ReadsOnlyItsScope(t *testing.T) {
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
-	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, runmode.LocalDefaultOrgID)
+	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, runmode.LocalDefaultOrgID)
 	fx := &linearFixture{tr: tr, stores: stores, workspace: "ws-other"}
 	fx.postedByTF(t, 1, "c-1")
 

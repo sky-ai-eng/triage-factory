@@ -18,6 +18,66 @@ import (
 // arriving afterwards waits behind this transaction and is observed by the
 // holder's next operation.
 func Complete(ctx context.Context, conn *sql.DB, k Kind, r Receipt, fn func(tx *sql.Tx) error) error {
+	return k.complete(ctx, conn, r, fn, nil)
+}
+
+// CompleteAndAdmit is Complete for a unit whose outcome may be that the same
+// obligation is owed again later: fn runs under the row lock as Complete's
+// does and returns the successor's columns, or nil when nothing is owed
+// again; the row flips done; and the successor, when there is one, is
+// admitted under the receipt's own unique key, all in one transaction. It
+// returns the successor's id, or zero when fn returned nil.
+//
+// The order is what makes it work. Under UniqueWhileUnsettled the leased row
+// holds the key until the flip, so an admission made inside fn would collapse
+// into the row being completed and the obligation would vanish with it; an
+// admission made after Complete returns is a second transaction, and a crash
+// between the two leaves the row done with no successor. Admitting after the
+// flip and before the commit leaves neither gap.
+//
+// A UniqueForever key is never released, so a kind in that mode is refused.
+// The successor is deduplicated only if another unsettled row holds the key,
+// which the uniqueness index ruled out while this row held it, so a
+// deduplication is an error and the whole transaction rolls back.
+func CompleteAndAdmit(ctx context.Context, conn *sql.DB, k Kind, r Receipt, fn func(tx *sql.Tx) (map[string]any, error)) (int64, error) {
+	if k.Unique == UniqueForever {
+		return 0, fmt.Errorf("workitem: %s holds its keys forever, so a completion cannot admit a successor under one", k.Table)
+	}
+	if fn == nil {
+		return 0, fmt.Errorf("workitem: %s complete has no closure", k.Table)
+	}
+	var (
+		cols      map[string]any
+		successor int64
+	)
+	err := k.complete(ctx, conn, r, func(tx *sql.Tx) error {
+		var err error
+		cols, err = fn(tx)
+		return err
+	}, func(tx *sql.Tx) error {
+		if cols == nil {
+			return nil
+		}
+		id, deduplicated, err := k.admit(ctx, tx, r.OrgID, r.UniqueKey, cols)
+		if err != nil {
+			return err
+		}
+		if deduplicated {
+			return fmt.Errorf("workitem: %s successor for row %d deduplicated against row %d, which the completed row's lock should have ruled out", k.Table, r.ItemID, id)
+		}
+		successor = id
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return successor, nil
+}
+
+// complete is both SingleTx completions: fn, the terminal flip, and then
+// after, when there is one, all under the row lock taken first. A settled
+// cancellation runs neither closure.
+func (k Kind) complete(ctx context.Context, conn *sql.DB, r Receipt, fn, after func(tx *sql.Tx) error) error {
 	if err := k.Validate(); err != nil {
 		return err
 	}
@@ -46,7 +106,13 @@ func Complete(ctx context.Context, conn *sql.DB, k Kind, r Receipt, fn func(tx *
 		if err := fn(tx); err != nil {
 			return fmt.Errorf("workitem: %s complete closure: %w", k.Table, err)
 		}
-		return k.flipDone(ctx, tx, r)
+		if err := k.flipDone(ctx, tx, r); err != nil {
+			return err
+		}
+		if after == nil {
+			return nil
+		}
+		return after(tx)
 	})
 	if err != nil {
 		k.reportLost(r, OpComplete, err)

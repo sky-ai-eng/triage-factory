@@ -46,6 +46,7 @@ func testRouterDeps(database *sql.DB) RouterDeps {
 		LinearRules:     tracksEveryLinearTeam{st.LinearTeamRules},
 		GitHubGroups:    st.TeamGitHubGroups,
 		ReDerive:        st.TaskReDerive,
+		Mergeability:    st.PRMergeability,
 		EventSources:    st.OrgEventSources,
 		Spawner:         refusingDelegator{},
 		Scorer:          noopScorer{},

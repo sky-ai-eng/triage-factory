@@ -134,8 +134,8 @@ var closeRelations = []closeRelation{
 		causedByRun: CausedByRunPush,
 	},
 	// The merge conflicts cleared → close the entity's conflicts task, but
-	// only while the snapshot still says MERGEABLE. A run's push that resolved
-	// them holds the close until that run ends.
+	// only while the pull request's stored mergeability still says MERGEABLE.
+	// A run's push that resolved them holds the close until that run ends.
 	{
 		onEvents:    []string{domain.EventGitHubPRConflictsResolved},
 		closes:      []string{domain.EventGitHubPRConflicts},
@@ -601,7 +601,7 @@ func (r *Router) openEventNotifications(ctx context.Context, orgID, entityID str
 // --- relation hooks ---------------------------------------------------------
 
 // prSnapshotForEntity loads + parses an entity's PR snapshot. The closes that
-// read the snapshot (CI green, review resolution, conflicts resolution) share it.
+// read the snapshot (CI green, review resolution) share it.
 //
 // A store error is err: the gate could not be evaluated, and the event
 // replays. A missing entity is ok=false — nothing to gate on, and a missing
@@ -646,15 +646,16 @@ func prepareCIPassed(ctx context.Context, r *Router, orgID string, _ domain.Even
 	return nil, true, nil
 }
 
-// prepareConflictsResolved gates conflicts closes on the snapshot still
-// reading MERGEABLE, so a resolution routed after the pull request conflicted
-// again closes nothing.
+// prepareConflictsResolved gates conflicts closes on the pull request's
+// stored mergeability still reading MERGEABLE, so a resolution routed after
+// the pull request conflicted again closes nothing. A store error is err, and
+// the event replays; a pull request with no row has no answer to close on.
 func prepareConflictsResolved(ctx context.Context, r *Router, orgID string, _ domain.Event, entityID string) (closeContext, bool, error) {
-	snap, ok, err := r.prSnapshotForEntity(ctx, orgID, entityID)
-	if err != nil || !ok {
-		return nil, false, err
+	row, err := r.mergeability.GetSystem(ctx, orgID, entityID)
+	if err != nil {
+		return nil, false, fmt.Errorf("read mergeability of entity %s: %w", entityID, err)
 	}
-	return nil, snap.Mergeable == "MERGEABLE", nil
+	return nil, row != nil && row.Mergeable == domain.MergeableMergeable, nil
 }
 
 // reviewerFromMeta pulls the reviewer every typed review event carries: the

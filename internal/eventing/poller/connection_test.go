@@ -219,7 +219,7 @@ func newConnectionFixture(t *testing.T, srv *githubConnServer, repos ...string) 
 	pub := &eventRecorder{}
 	m := &Manager{
 		database: database, pub: pub,
-		tasks: stores.Tasks, entities: stores.Entities, eventQueue: stores.EventQueue,
+		tasks: stores.Tasks, entities: stores.Entities, eventQueue: stores.EventQueue, mergeability: stores.PRMergeability,
 		repos: stores.Repos, orgs: stores.Orgs, users: stores.Users,
 		connections: stores.PollReadiness,
 		resolver:    &fakeResolver{client: ghclient.NewClient(srv.srv.URL, "pat")},
@@ -568,7 +568,7 @@ func TestJiraCycle_OnlyAPauseClearsTheState(t *testing.T) {
 			}
 			m := &Manager{
 				database: database, pub: &eventRecorder{},
-				tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue,
+				tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue, mergeability: stores.PRMergeability,
 				orgs: stores.Orgs, users: stores.Users, secrets: stores.Secrets,
 				jiraRules: stores.JiraStatusRules, connections: stores.PollReadiness,
 				EventSources: sources,

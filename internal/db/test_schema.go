@@ -54,6 +54,18 @@ func SetLocalGitHubURLForTest(db *sql.DB, url string) error {
 	return err
 }
 
+// BootstrapSchemaAtForTest restores the schema the SQLite migrations leave at
+// version, with nothing seeded, for a test that writes the rows an older
+// install holds and then runs Migrate to watch the upgrade carry them over.
+// Same connection requirements as BootstrapSchemaForTest. Tests-only.
+func BootstrapSchemaAtForTest(db *sql.DB, version int64) error {
+	image, err := migratedImageAt(version)
+	if err != nil {
+		return err
+	}
+	return restoreImage(db, image)
+}
+
 // BootstrapTenantlessSchemaForTest is BootstrapSchemaForTest without the
 // synthetic local tenant: db ends up exactly as Migrate leaves an empty
 // database — schema, goose_db_version, events_catalog, and no org, team

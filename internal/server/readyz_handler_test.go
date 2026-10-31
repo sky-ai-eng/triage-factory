@@ -18,7 +18,7 @@ import (
 func newTestPollerManager(t *testing.T, s *Server) *poller.Manager {
 	t.Helper()
 	return poller.NewManager(s.db, nil, s.allStores.Users, s.allStores.Tasks, s.allStores.Entities,
-		s.allStores.Repos, s.allStores.Deliverables, s.allStores.ExternalActions, s.allStores.EventQueue, s.allStores.Orgs, s.allStores.JiraStatusRules, s.allStores.JiraProjects, s.allStores.LinearTeamRules,
+		s.allStores.Repos, s.allStores.Deliverables, s.allStores.ExternalActions, s.allStores.EventQueue, s.allStores.PRMergeability, s.allStores.Orgs, s.allStores.JiraStatusRules, s.allStores.JiraProjects, s.allStores.LinearTeamRules,
 		s.allStores.TeamGitHubGroups, s.allStores.Secrets, s.allStores.GitHubApps, s.allStores.PollReadiness, nil, nil)
 }
 

@@ -83,7 +83,7 @@ func TestRunJiraCycleForOrg_RefreshesARenamedProjectBeforeDiscovery(t *testing.T
 
 	m := &Manager{
 		database: database, pub: &capturingPublisher{},
-		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue,
+		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue, mergeability: stores.PRMergeability,
 		orgs: stores.Orgs, users: stores.Users, secrets: jiraSecrets{},
 		jiraRules: stores.JiraStatusRules, jiraProjects: stores.JiraProjects,
 		EventSources: stores.OrgEventSources,
@@ -177,7 +177,7 @@ func TestRunJiraCycleForOrg_ResolvesAnUnresolvedProjectByKey(t *testing.T) {
 
 	m := &Manager{
 		database: database, pub: &capturingPublisher{},
-		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue,
+		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue, mergeability: stores.PRMergeability,
 		orgs: stores.Orgs, users: stores.Users, secrets: jiraSecrets{},
 		jiraRules: stores.JiraStatusRules, jiraProjects: stores.JiraProjects,
 		EventSources: stores.OrgEventSources,
@@ -240,7 +240,7 @@ func TestRunJiraCycleForOrg_RefreshesAWatchedProject(t *testing.T) {
 
 	m := &Manager{
 		database: database, pub: &capturingPublisher{},
-		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue,
+		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue, mergeability: stores.PRMergeability,
 		orgs: stores.Orgs, users: stores.Users, secrets: jiraSecrets{},
 		jiraRules: stores.JiraStatusRules, jiraProjects: stores.JiraProjects,
 		EventSources: stores.OrgEventSources,

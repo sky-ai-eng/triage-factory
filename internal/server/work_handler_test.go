@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -851,15 +852,19 @@ func parkLocalFiring(t *testing.T, database *sql.DB, title string) int64 {
 }
 
 // TestWorkHandler_RegistryListsEveryKindAndRedrivesAParkedFiring pins the
-// registry: the store bundle carries the event queue, the firing queue and
-// the re-evaluation queue in that order, the catalogue lists all three with
-// the controls each declares, a parked firing lists with its cause and
-// subject, and a redrive puts it back to ready.
+// registry: the store bundle carries the event queue, the firing queue, the
+// re-evaluation queue and the mergeability probe queue in that order, the
+// catalogue lists all four with the controls each declares, a parked firing
+// lists with its cause and subject, and a redrive puts it back to ready.
 func TestWorkHandler_RegistryListsEveryKindAndRedrivesAParkedFiring(t *testing.T) {
 	_, database := localEventQueueKind(t)
 	kinds := sqlitestore.New(database).WorkKinds
-	if len(kinds) != 3 || kinds[0].Name() != workkinds.EventQueueName || kinds[1].Name() != workkinds.PendingFiringsName || kinds[2].Name() != workkinds.TaskReDeriveName {
-		t.Fatalf("registry = %v, want event_queue, pending_firings, task_rederive_queue", kinds)
+	names := make([]string, len(kinds))
+	for i, k := range kinds {
+		names[i] = k.Name()
+	}
+	if want := []string{workkinds.EventQueueName, workkinds.PendingFiringsName, workkinds.TaskReDeriveName, workkinds.PRMergeabilityProbesName}; !slices.Equal(names, want) {
+		t.Fatalf("registry = %v, want %v", names, want)
 	}
 	parkedID := parkLocalFiring(t, database, "Fix the flaky test")
 	h := localWorkRig(t, kinds...)
@@ -872,8 +877,8 @@ func TestWorkHandler_RegistryListsEveryKindAndRedrivesAParkedFiring(t *testing.T
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(body.Kinds) != 3 || body.Kinds[1].Kind != workkinds.PendingFiringsName || body.Kinds[1].Label != workkinds.PendingFiringsLabel {
-		t.Fatalf("catalogue = %+v, want all three kinds", body.Kinds)
+	if len(body.Kinds) != 4 || body.Kinds[1].Kind != workkinds.PendingFiringsName || body.Kinds[1].Label != workkinds.PendingFiringsLabel {
+		t.Fatalf("catalogue = %+v, want all four kinds", body.Kinds)
 	}
 	if body.Kinds[2].Kind != workkinds.TaskReDeriveName || body.Kinds[2].Label != workkinds.TaskReDeriveLabel {
 		t.Errorf("third kind = %+v, want the re-evaluation queue", body.Kinds[2])
