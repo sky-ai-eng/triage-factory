@@ -116,21 +116,54 @@ type TeamsStore interface {
 	// to the same impl. Same defaults-on-ErrNoRows contract.
 	GetSettingsSystem(ctx context.Context, teamID string) (domain.TeamSettings, error)
 
-	// UpdateSettings upserts the team's settings row. JiraProjects is
-	// persisted verbatim as the denormalized fast path; callers that
-	// also want the per-project rules to stay in sync must call
-	// JiraStatusRulesStore.ReplaceForTeam alongside (the existing
-	// config.Save() flow does both). Postgres routes through the app
-	// pool (team_settings_update RLS gates by team admin). It writes
-	// MaxDailyCostUSD too, but the team-settings handler reaches this via
-	// read-modify-write and never sets that field from its request body, so a
-	// team-admin save round-trips the org-admin-configured cap untouched — it is
-	// *changed* only by SetDailyCostCapSystem.
+	// UpdateSettings upserts the columns of the team's settings row that the
+	// team-settings PATCH owns. It does not write JiraProjects, LinearTeams or
+	// MaxDailyCostUSD, whatever updates carries for them: the two display
+	// orders belong to the tracked-set writes (SetJiraProjectOrder,
+	// SetLinearTeamOrder) and the cap to the org admin
+	// (SetDailyCostCapSystem). A row it creates takes their schema defaults.
+	// So a caller that read the row and writes it back cannot restore another
+	// writer's column as its read found it. Postgres routes through the app
+	// pool (team_settings_update RLS gates by team admin).
 	//
 	// Returns the persisted settings, read off RETURNING on the write
 	// statement itself rather than from a follow-up SELECT and projecting
-	// GetSettings' column list and scanner.
+	// GetSettings' column list and scanner, so the three columns it does not
+	// write come back as they are stored.
 	UpdateSettings(ctx context.Context, teamID string, updates domain.TeamSettings) (domain.TeamSettings, error)
+
+	// SetJiraProjectOrder upserts only team_settings.jira_projects: the
+	// team's tracked Jira projects in display order, as jira_projects
+	// registry row ids. The per-project rules are JiraStatusRulesStore's,
+	// which the tracked-set write replaces in the same transaction. A row it
+	// creates takes every other column's schema default. Postgres routes
+	// through the app pool (team_settings_insert / team_settings_update RLS
+	// gate by team admin).
+	//
+	// Returns the whole persisted row, from RETURNING: the write touches one
+	// column of a row the caller may never have read.
+	SetJiraProjectOrder(ctx context.Context, teamID string, jiraProjectIDs []string) (domain.TeamSettings, error)
+
+	// SetLinearTeamOrder is SetJiraProjectOrder for team_settings.linear_teams:
+	// the team's tracked Linear teams in display order, as Linear team ids,
+	// whose rules are LinearTeamRulesStore's.
+	SetLinearTeamOrder(ctx context.Context, teamID string, linearTeamIDs []string) (domain.TeamSettings, error)
+
+	// LockSettings takes the lock a write that builds on what the team has
+	// stored holds, from before its read until it commits. Two such writes to
+	// one team therefore run one after the other, and the second reads what
+	// the first stored. Its holders are the team-settings PATCH, which writes
+	// back every field its body does not name as it read them, and the writes
+	// to the team's tracked Jira projects and Linear teams, which carry every
+	// rule a body leaves out from what they read.
+	//
+	// The lock belongs to the transaction, so it is called on a
+	// transaction's stores (db.TxStores); both impls refuse any other.
+	// Postgres takes an advisory lock keyed by the team, which needs
+	// no row to exist, since a team has no team_settings row until its first
+	// save. SQLite takes nothing: its write transaction begins IMMEDIATE and
+	// already holds the database's write lock.
+	LockSettings(ctx context.Context, teamID string) error
 
 	// SetDailyCostCapSystem upserts ONLY team_settings.max_daily_cost_usd for
 	// teamID — the org-admin per-team daily LLM spend cap (TFAC-482, the team-
