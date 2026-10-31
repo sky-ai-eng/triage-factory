@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -124,6 +125,12 @@ func TestNotifications_Postgres_SentAndReadable(t *testing.T) {
 		if acts := it.Actions; len(acts) != 1 || acts[0].Allowed == nil || *acts[0].Allowed {
 			t.Errorf("team row actions for an org admin outside the team = %+v; want untrack not allowed", acts)
 		}
+	}
+	// The org spelled in capitals is the same org, and its rows' actions are
+	// checked against it.
+	upper := r.list(r.ownerSid, "", "/api/orgs/"+strings.ToUpper(r.orgID.String())+"/notifications/list", nil)
+	if upper.Total() != 2 {
+		t.Errorf("All teams addressed in capitals = %d rows, want 2", upper.Total())
 	}
 	narrowed := r.list(r.ownerSid, "", r.orgNotifications, map[string]any{"team_id_in": []string{r.infra.String()}})
 	if narrowed.Total() != 1 || narrowed.Items[0].ID != r.teamRowID {

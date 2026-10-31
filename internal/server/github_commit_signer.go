@@ -107,7 +107,7 @@ func toCommitSignerJSON(s domain.OrgCommitSigner) commitSignerJSON {
 	}
 }
 
-func nilIfEmpty(s string) *string {
+func nilIfEmpty[T ~string](s T) *T {
 	if s == "" {
 		return nil
 	}

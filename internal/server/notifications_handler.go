@@ -57,13 +57,6 @@ type notificationJSON struct {
 	Dismissed      bool                               `json:"dismissed"`
 }
 
-func nullIfEmpty[T ~string](s T) *T {
-	if s == "" {
-		return nil
-	}
-	return &s
-}
-
 // notificationItems renders views for the caller. Call it outside any
 // transaction: an action's allowed asks the caller's permissions, and local
 // mode's database has one connection.
@@ -81,7 +74,7 @@ func notificationItems(r *http.Request, caller *notify.Caller, views []domain.No
 			Lifecycle: v.Lifecycle,
 			Priority:  v.Priority,
 			Audience: notificationAudienceJSON{
-				Scope: a.Scope, Role: nullIfEmpty(a.Role), TeamID: nullIfEmpty(a.TeamID), UserID: nullIfEmpty(a.UserID),
+				Scope: a.Scope, Role: nilIfEmpty(a.Role), TeamID: nilIfEmpty(a.TeamID), UserID: nilIfEmpty(a.UserID),
 			},
 			Title:          v.Title,
 			Body:           v.Body,
@@ -90,7 +83,7 @@ func notificationItems(r *http.Request, caller *notify.Caller, views []domain.No
 			LastSeenAt:     v.LastSeenAt,
 			SeenCount:      v.SeenCount,
 			ResolvedAt:     v.ResolvedAt,
-			ResolvedReason: nullIfEmpty(v.ResolvedReason),
+			ResolvedReason: nilIfEmpty(v.ResolvedReason),
 			ExpiresAt:      v.ExpiresAt,
 			Actions:        actions,
 			Read:           v.Read,
@@ -101,8 +94,8 @@ func notificationItems(r *http.Request, caller *notify.Caller, views []domain.No
 }
 
 // writeNotificationItem renders one view for the caller as a 200.
-func (s *Server) writeNotificationItem(w http.ResponseWriter, r *http.Request, orgID, userID string, v domain.NotificationView) {
-	items, err := notificationItems(r, notify.NewCaller(s.az, orgID, userID), []domain.NotificationView{v})
+func writeNotificationItem(w http.ResponseWriter, r *http.Request, caller *notify.Caller, v domain.NotificationView) {
+	items, err := notificationItems(r, caller, []domain.NotificationView{v})
 	if err != nil {
 		internalError(w, "notifications", err)
 		return
@@ -181,8 +174,11 @@ type notificationOrgListRequest struct {
 }
 
 // notificationListFilterKey is the canonicalized filter set a page token is
-// fingerprinted against.
+// fingerprinted against. It names the list and the org too, since the inbox
+// and the All-teams list share their filters but not their rows.
 type notificationListFilterKey struct {
+	List       string                        `json:"list"`
+	OrgID      string                        `json:"org_id"`
 	Status     domain.NotificationStatus     `json:"status"`
 	Dismissed  *bool                         `json:"dismissed"`
 	Unread     *bool                         `json:"unread"`
@@ -208,7 +204,8 @@ func parseNotificationFilter(v *httpx.Validation, status *string, dismissed, unr
 }
 
 // parseNotificationEnums reads an _in filter over a closed vocabulary, sorted
-// and deduplicated so two spellings of one set are one query.
+// and deduplicated so two spellings of one set are one query. It reports the
+// first unknown value only, so the response does not grow with the body.
 func parseNotificationEnums[T ~string](v *httpx.Validation, field string, raw []string, vocabulary []T) []T {
 	if raw == nil {
 		return nil
@@ -225,7 +222,7 @@ func parseNotificationEnums[T ~string](v *httpx.Validation, field string, raw []
 	for _, s := range raw {
 		if !slices.Contains(vocabulary, T(s)) {
 			v.Invalid(field, fmt.Sprintf("%s: %q is not one of %s", field, s, strings.Join(names, ", ")))
-			continue
+			return nil
 		}
 		out = append(out, T(s))
 	}
@@ -250,6 +247,7 @@ func (s *Server) handleNotificationList(w http.ResponseWriter, r *http.Request) 
 	var v httpx.Validation
 	f := parseNotificationFilter(&v, req.Status, req.Dismissed, req.Unread, req.PriorityIn, req.ScopeIn)
 	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(notificationListFilterKey{
+		List: "inbox", OrgID: orgID,
 		Status: f.Status, Dismissed: f.Dismissed, Unread: f.Unread, PriorityIn: f.PriorityIn, ScopeIn: f.ScopeIn,
 	}), 0)
 	if v.Flush(w, http.StatusBadRequest) {
@@ -286,6 +284,10 @@ func (s *Server) handleOrgNotificationList(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
+	// The path spells the org as the caller typed it, and the rows carry its
+	// canonical form, which their actions are checked against. RequireOrgAdmin
+	// has parsed it.
+	orgID = uuid.MustParse(orgID).String()
 	var req notificationOrgListRequest
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
@@ -302,7 +304,8 @@ func (s *Server) handleOrgNotificationList(w http.ResponseWriter, r *http.Reques
 			id, err := uuid.Parse(raw)
 			if err != nil {
 				v.Invalid("team_id_in", fmt.Sprintf("team_id_in: %q is not a valid team id", raw))
-				continue
+				f.TeamIDIn = nil
+				break
 			}
 			f.TeamIDIn = append(f.TeamIDIn, id.String())
 		}
@@ -310,6 +313,7 @@ func (s *Server) handleOrgNotificationList(w http.ResponseWriter, r *http.Reques
 		f.TeamIDIn = slices.Compact(f.TeamIDIn)
 	}
 	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(notificationListFilterKey{
+		List: "org", OrgID: orgID,
 		Status: f.Status, Dismissed: f.Dismissed, Unread: f.Unread, PriorityIn: f.PriorityIn, ScopeIn: f.ScopeIn,
 		TeamIDIn: f.TeamIDIn,
 	}), 0)
@@ -368,7 +372,7 @@ func (s *Server) handleNotificationGet(w http.ResponseWriter, r *http.Request) {
 		notFound(w, "notification")
 		return
 	}
-	s.writeNotificationItem(w, r, orgID, userID, *view)
+	writeNotificationItem(w, r, notify.NewCaller(s.az, orgID, userID), *view)
 }
 
 // notificationMarksPatchRequest is the body of PATCH
@@ -379,17 +383,14 @@ type notificationMarksPatchRequest struct {
 	Dismissed json.RawMessage `json:"dismissed"`
 }
 
-// patchMark reads one mark of a marks PATCH: nil when absent.
+// patchMark reads one mark of a marks PATCH: nil when absent, and false when
+// null, which PatchBool returns for a clear.
 func patchMark(v *httpx.Validation, raw json.RawMessage, field string) *bool {
 	on, st := httpx.PatchBool(v, raw, field)
-	switch st {
-	case httpx.PatchSet:
-		return &on
-	case httpx.PatchClear:
-		off := false
-		return &off
+	if st == httpx.PatchAbsent {
+		return nil
 	}
-	return nil
+	return &on
 }
 
 // handleNotificationMarksPatch writes the caller's own marks on a row they may
@@ -450,13 +451,12 @@ func (s *Server) handleNotificationMarksPatch(w http.ResponseWriter, r *http.Req
 		internalError(w, "notifications", err)
 		return
 	case view == nil:
-		// The marks write found the row under these claims, so the read
-		// after it in the same transaction does too.
-		internalError(w, "notifications", fmt.Errorf("notification %s unreadable after its marks write", id))
+		// A notice that expired between the write and the read is gone.
+		notFound(w, "notification")
 		return
 	}
 	s.pingMarksChanged(orgID, userID)
-	s.writeNotificationItem(w, r, orgID, userID, *view)
+	writeNotificationItem(w, r, notify.NewCaller(s.az, orgID, userID), *view)
 }
 
 // maxMarkReadIDs bounds a mark-read call at the largest page a client can
@@ -490,11 +490,14 @@ func (s *Server) handleNotificationMarkRead(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var v httpx.Validation
-	if len(req.IDs) == 0 {
+	switch {
+	case len(req.IDs) == 0:
 		v.Missing("ids")
-	}
-	if len(req.IDs) > maxMarkReadIDs {
+	case len(req.IDs) > maxMarkReadIDs:
 		v.OutOfRange("ids", fmt.Sprintf("at most %d ids per call", maxMarkReadIDs))
+	}
+	if v.Flush(w, http.StatusBadRequest) {
+		return
 	}
 	ids := make([]string, 0, len(req.IDs))
 	for i, raw := range req.IDs {
@@ -533,24 +536,9 @@ func (s *Server) handleNotificationMarkRead(w http.ResponseWriter, r *http.Reque
 // invoke
 // --------------------------------------------------------------------
 
-// notificationActionFault is an invoke handler's refusal, answered with its
-// status and items. Any other error a handler returns is a 500.
-type notificationActionFault struct {
-	status int
-	items  []httpx.ErrorItem
-}
-
-func (f *notificationActionFault) Error() string {
-	msgs := make([]string, len(f.items))
-	for i, it := range f.items {
-		msgs[i] = it.Message
-	}
-	return fmt.Sprintf("notification action refused (%d): %s", f.status, strings.Join(msgs, "; "))
-}
-
 // handleNotificationAction runs a row's invoke action as the caller and
 // returns the row as they now see it, resolved when the action fixed the
-// condition. The route takes no body.
+// condition. The route takes no body. An error from the handler is a 500.
 //
 // POST /api/me/notifications/{id}/actions/{action_id}
 func (s *Server) handleNotificationAction(w http.ResponseWriter, r *http.Request) {
@@ -589,8 +577,8 @@ func (s *Server) handleNotificationAction(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	var fault *notificationActionFault
-	switch err := notify.NewCaller(s.az, orgID, userID).RunAction(r.Context(), view.Notification, r.PathValue("action_id")); {
+	caller := notify.NewCaller(s.az, orgID, userID)
+	switch err := caller.RunAction(r.Context(), view.Notification, r.PathValue("action_id")); {
 	case errors.Is(err, notify.ErrNoSuchAction):
 		notFound(w, "notification action")
 		return
@@ -599,9 +587,6 @@ func (s *Server) handleNotificationAction(w http.ResponseWriter, r *http.Request
 		return
 	case errors.Is(err, notify.ErrConditionResolved):
 		conflict(w, "the condition has resolved, so its actions no longer apply")
-		return
-	case errors.As(err, &fault):
-		httpx.WriteErrors(w, fault.status, fault.items...)
 		return
 	case err != nil:
 		internalError(w, "notifications", err)
@@ -618,5 +603,5 @@ func (s *Server) handleNotificationAction(w http.ResponseWriter, r *http.Request
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	s.writeNotificationItem(w, r, orgID, userID, *view)
+	writeNotificationItem(w, r, caller, *view)
 }

@@ -501,13 +501,9 @@ func TestNotificationAction(t *testing.T) {
 		t.Errorf("after an unfixed invoke: %+v", it)
 	}
 
-	// A handler's refusal is answered as it says; any other error is a 500.
-	refusal = &notificationActionFault{status: http.StatusConflict, items: []httpx.ErrorItem{{Reason: httpx.ReasonTeamArchived, Message: "archived"}}}
-	if code, body := invoke(id, "fix", map[string]any{}); code != http.StatusConflict || !strings.Contains(string(body), httpx.ReasonTeamArchived) {
-		t.Errorf("handler refusal = %d %s", code, body)
-	}
+	// An empty object is no body; a handler's error is a 500.
 	refusal = errors.New("store down")
-	if code, _ := invoke(id, "fix", nil); code != http.StatusInternalServerError {
+	if code, _ := invoke(id, "fix", map[string]any{}); code != http.StatusInternalServerError {
 		t.Errorf("handler error = %d, want 500", code)
 	}
 	refusal = nil
@@ -557,9 +553,19 @@ func TestOrgNotificationList_Local(t *testing.T) {
 	s, _ := newNotificationsServer(t)
 	localNotification(t, s, "a")
 
-	if got := listNotifications(t, s, orgNotificationsList(), nil); got.Total() != 1 {
-		t.Errorf("org list = %d rows, want 1", got.Total())
+	localNotification(t, s, "b")
+
+	all := listNotifications(t, s, orgNotificationsList(), map[string]any{"page_size": 1})
+	if all.Total() != 2 || all.NextPageToken == "" {
+		t.Fatalf("org list = %d rows, token %q; want 2 and a next page", all.Total(), all.NextPageToken)
 	}
+	// The two lists share their filters, not their rows, so neither takes
+	// the other's page token.
+	assertFault(t, doJSON(t, s, http.MethodPost, meNotifications+"/list", map[string]any{"page_size": 1, "page_token": all.NextPageToken}),
+		http.StatusBadRequest, httpx.ReasonInvalidParam)
+	inbox := listNotifications(t, s, meNotifications+"/list", map[string]any{"page_size": 1})
+	assertFault(t, doJSON(t, s, http.MethodPost, orgNotificationsList(), map[string]any{"page_size": 1, "page_token": inbox.NextPageToken}),
+		http.StatusBadRequest, httpx.ReasonInvalidParam)
 	// Local rows are the user's, so a team narrow matches none of them.
 	if got := listNotifications(t, s, orgNotificationsList(), map[string]any{"team_id_in": []string{runmode.LocalDefaultTeamID}}); got.Total() != 0 {
 		t.Errorf("org list narrowed to a team = %d rows, want 0", got.Total())
