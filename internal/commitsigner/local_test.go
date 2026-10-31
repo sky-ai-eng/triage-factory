@@ -10,7 +10,7 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
-	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner/gitsig"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 )
@@ -76,14 +76,14 @@ func TestLocalSign_SignsAndRecords(t *testing.T) {
 	if res.Outcome != OutcomeSigned {
 		t.Fatalf("Sign = %+v, want signed", res)
 	}
-	want, err := commitsign.Sign(f.key, payload)
+	want, err := gitsig.Sign(f.key, payload)
 	if err != nil {
-		t.Fatalf("commitsign.Sign: %v", err)
+		t.Fatalf("gitsig.Sign: %v", err)
 	}
 	if res.Signature != string(want) {
 		t.Errorf("signature is not the org key's:\n%s\nwant\n%s", res.Signature, want)
 	}
-	sha := commitsign.CommitID(commitsign.SignedCommit(payload, want))
+	sha := gitsig.CommitID(gitsig.SignedCommit(payload, want))
 	if res.CommitSHA != sha {
 		t.Errorf("CommitSHA = %s, want %s", res.CommitSHA, sha)
 	}
@@ -99,7 +99,7 @@ func TestLocalSign_SignsAndRecords(t *testing.T) {
 	if row.ConversationID != f.conversationID || row.ClaimID != f.claimID || row.BootEpoch != 1 {
 		t.Errorf("stored engagement = %s %s %d", row.ConversationID, row.ClaimID, row.BootEpoch)
 	}
-	if row.Digest != commitsign.DigestOf(payload).String() {
+	if row.Digest != gitsig.DigestOf(payload).String() {
 		t.Errorf("stored digest = %s", row.Digest)
 	}
 
@@ -141,7 +141,7 @@ func TestLocalSign_AcrossARotation(t *testing.T) {
 	if after.Outcome != OutcomeSigned {
 		t.Fatalf("Sign after the rotation = %+v", after)
 	}
-	want, _ := commitsign.Sign(newKey, payload)
+	want, _ := gitsig.Sign(newKey, payload)
 	if after.Signature != string(want) || f.row(t, after.SignatureID).PublicKey != newPublic {
 		t.Errorf("after the rotation the signature is not the new key's")
 	}
@@ -162,7 +162,7 @@ func TestLocalSign_RefusesBeforeSigning(t *testing.T) {
 					req.Signer.Name + " <" + req.Signer.Email + "> 1700000000 +0000\n\nv1\n")
 			},
 			check: func(t *testing.T, _ *fixture, res Result) {
-				if res.Object != commitsign.ObjectTag {
+				if res.Object != gitsig.ObjectTag {
 					t.Errorf("Object = %q, want tag", res.Object)
 				}
 			},
@@ -174,7 +174,7 @@ func TestLocalSign_RefusesBeforeSigning(t *testing.T) {
 				req.Payload = commitPayload("Mallory <mallory@example.com>")
 			},
 			check: func(t *testing.T, f *fixture, res Result) {
-				if res.Committer != (commitsign.Identity{Name: "Mallory", Email: "mallory@example.com"}) {
+				if res.Committer != (gitsig.Identity{Name: "Mallory", Email: "mallory@example.com"}) {
 					t.Errorf("Committer = %+v", res.Committer)
 				}
 				d := f.denials(t)

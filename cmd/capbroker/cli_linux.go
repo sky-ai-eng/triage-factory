@@ -12,9 +12,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/capinfo"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
-	"github.com/sky-ai-eng/triage-factory/internal/procname"
+	"github.com/sky-ai-eng/triage-factory/internal/procinfo"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
@@ -55,7 +54,7 @@ func runBroker(args []string) error {
 		return err
 	}
 
-	procname.SetTitle("tf-cap-broker")
+	procinfo.SetTitle("tf-cap-broker")
 	logging.SetProcess("cap-broker")
 
 	l, err := listen(*socketPath)
@@ -190,7 +189,7 @@ func validateOrchestratorGIDFlag(gid int) error {
 // without. A var so the protocol tests, which run the broker as an
 // unprivileged user, can stand in for a privileged one.
 var requireBrokerCapabilities = func() error {
-	names, err := capinfo.Effective()
+	names, err := procinfo.EffectiveCaps()
 	if err != nil {
 		return fmt.Errorf("capbroker: read own capabilities: %w", err)
 	}
@@ -222,14 +221,14 @@ func requireSysResource(names []string) error {
 // code" into "read the logs" — cross-check against `ps` /
 // `/proc/<pid>/status` rather than trusting that the split is real.
 func logBootLine(socketPath string) {
-	names, err := capinfo.Effective()
+	names, err := procinfo.EffectiveCaps()
 	if err != nil {
 		brokerLog.Warn("boot: failed to read own effective capabilities", "error", err)
 		return
 	}
 	brokerLog.Info("boot",
 		"uid", os.Getuid(),
-		"CapEff", capinfo.Describe(names),
+		"CapEff", procinfo.DescribeCaps(names),
 		"socket", socketPath,
 	)
 }

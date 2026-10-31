@@ -7,7 +7,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/hostdisk"
+	"github.com/sky-ai-eng/triage-factory/internal/host"
 )
 
 // TestParseDispatchDiskFloorMB pins the knob's two defaults and its refusals.
@@ -56,7 +56,7 @@ func TestDispatchDiskGated(t *testing.T) {
 	}
 
 	s.SetDispatchDiskFloor(10240)
-	s.diskAvailMB = func() int { return hostdisk.Unknown }
+	s.diskAvailMB = func() int { return host.Unknown }
 	if s.dispatchDiskGated() {
 		t.Error("gated on an Unknown probe; guardrail must fail open")
 	}

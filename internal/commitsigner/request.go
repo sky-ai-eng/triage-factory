@@ -10,7 +10,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner/gitsig"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/ctlbus"
@@ -67,7 +67,7 @@ type Request struct {
 	SignerHost   string
 	SignerUserID int64
 
-	Digest commitsign.Digest
+	Digest gitsig.Digest
 }
 
 // Result is a request's answer. SignatureID names its commit_signatures row,
@@ -96,9 +96,9 @@ type Result struct {
 	// refusal ran into.
 	Limit int
 	// Committer is the committer a RefusalCommitterMismatch commit named.
-	Committer commitsign.Identity
-	// Object is what a RefusalNotACommit payload was: commitsign.ObjectTag,
-	// commitsign.ObjectPushCertificate, or "" for no object git signs.
+	Committer gitsig.Identity
+	// Object is what a RefusalNotACommit payload was: gitsig.ObjectTag,
+	// gitsig.ObjectPushCertificate, or "" for no object git signs.
 	Object string
 	// SignerStatus and SignerReason are the signer's status and its reason,
 	// for a RefusalSignerInactive of an org signer.

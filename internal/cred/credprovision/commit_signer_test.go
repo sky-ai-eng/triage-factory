@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner/gitsig"
 	"github.com/sky-ai-eng/triage-factory/internal/cred/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
@@ -46,15 +46,15 @@ func (s signingSecrets) GetSystem(_ context.Context, _, name string) (string, er
 // as the secret store holds it, and the public half the signer row names.
 func signerKeys(t *testing.T) (private []byte, public string) {
 	t.Helper()
-	key, err := commitsign.GenerateKey()
+	key, err := gitsig.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	private, err = commitsign.MarshalPrivateKey(key)
+	private, err = gitsig.MarshalPrivateKey(key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	public, err = commitsign.PublicKey(key)
+	public, err = gitsig.PublicKey(key)
 	if err != nil {
 		t.Fatal(err)
 	}

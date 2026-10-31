@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner/gitsig"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
@@ -373,15 +373,15 @@ func (s *Server) commitSignerClient(w http.ResponseWriter, ctx context.Context, 
 // half in the OpenSSH form the secret holds and the public half as GitHub
 // lists it.
 func newCommitSigningKey() (privateKey, publicKey string, err error) {
-	key, err := commitsign.GenerateKey()
+	key, err := gitsig.GenerateKey()
 	if err != nil {
 		return "", "", fmt.Errorf("generate signing key: %w", err)
 	}
-	pem, err := commitsign.MarshalPrivateKey(key)
+	pem, err := gitsig.MarshalPrivateKey(key)
 	if err != nil {
 		return "", "", fmt.Errorf("encode signing key: %w", err)
 	}
-	pub, err := commitsign.PublicKey(key)
+	pub, err := gitsig.PublicKey(key)
 	if err != nil {
 		return "", "", fmt.Errorf("encode public key: %w", err)
 	}

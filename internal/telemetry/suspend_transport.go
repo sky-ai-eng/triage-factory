@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/suspendclock"
+	"github.com/sky-ai-eng/triage-factory/internal/host"
 )
 
 // suspendThreshold is how far the suspend reading has to move between two
@@ -49,7 +49,7 @@ func freshPoolAfterSuspend(rt http.RoundTripper) http.RoundTripper {
 	if !ok {
 		return rt
 	}
-	last, ok := suspendclock.Suspended()
+	last, ok := host.Suspended()
 	if !ok {
 		return rt
 	}
@@ -58,7 +58,7 @@ func freshPoolAfterSuspend(rt http.RoundTripper) http.RoundTripper {
 
 func (t *suspendCheckingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	t.mu.Lock()
-	if seen, ok := suspendclock.Suspended(); ok {
+	if seen, ok := host.Suspended(); ok {
 		if seen-t.last >= suspendThreshold {
 			// The retired pool's idle connections are closed now. A
 			// connection still carrying a request goes back to it when that

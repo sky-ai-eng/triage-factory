@@ -22,8 +22,8 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
-	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner/gitsig"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
@@ -215,11 +215,11 @@ func localSecret(t *testing.T, s *Server, key string) string {
 // publicHalf is the public key of a stored private key, as GitHub lists it.
 func publicHalf(t *testing.T, privatePEM string) string {
 	t.Helper()
-	key, err := commitsign.ParsePrivateKey([]byte(privatePEM))
+	key, err := gitsig.ParsePrivateKey([]byte(privatePEM))
 	if err != nil {
 		t.Fatalf("parse stored signing key: %v", err)
 	}
-	pub, err := commitsign.PublicKey(key)
+	pub, err := gitsig.PublicKey(key)
 	if err != nil {
 		t.Fatalf("public half: %v", err)
 	}

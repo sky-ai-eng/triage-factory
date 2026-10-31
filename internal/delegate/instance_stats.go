@@ -6,8 +6,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/hostmem"
-	"github.com/sky-ai-eng/triage-factory/internal/hoststat"
+	"github.com/sky-ai-eng/triage-factory/internal/host"
 )
 
 // Fleet telemetry sampler cadence + retention (TFAC-589, spec §8.2). One row
@@ -90,7 +89,7 @@ func (s *Spawner) RunInstanceStatSampler(ctx context.Context, interval, retentio
 
 	// Baseline the cumulative OOM counter so the first sample's delta is 0,
 	// not the container's whole lifetime tally.
-	lastOOM := hoststat.OOMKills()
+	lastOOM := host.OOMKills()
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -129,7 +128,7 @@ func (s *Spawner) sampleInstanceStatsOnce(ctx context.Context, id string, lastOO
 	stat := domain.InstanceStat{InstanceID: id, At: time.Now().UTC()}
 
 	// CPU + load average (blocks for the CPU window).
-	hs := hoststat.Read(ctx, instanceStatCPUWindow)
+	hs := host.ReadSample(ctx, instanceStatCPUWindow)
 	stat.CPUPct = hs.CPUPct
 	stat.Load1 = hs.Load1
 
@@ -139,16 +138,16 @@ func (s *Spawner) sampleInstanceStatsOnce(ctx context.Context, id string, lastOO
 	probe := s.memAvailMB
 	s.mu.Unlock()
 	if probe != nil {
-		if avail := probe(); avail != hostmem.Unknown {
+		if avail := probe(); avail != host.Unknown {
 			stat.MemAvailableMB = &avail
 		}
 	}
 
 	// OOM kills since the last sample (cumulative counter diffed to a delta).
 	newLastOOM := lastOOM
-	if cur := hoststat.OOMKills(); cur != hoststat.Unknown {
+	if cur := host.OOMKills(); cur != host.Unknown {
 		newLastOOM = cur
-		if lastOOM != hoststat.Unknown && cur >= lastOOM {
+		if lastOOM != host.Unknown && cur >= lastOOM {
 			d := cur - lastOOM
 			stat.OOMKills = &d
 		}

@@ -22,7 +22,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/cell"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/hostmem"
+	"github.com/sky-ai-eng/triage-factory/internal/host"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
@@ -97,7 +97,7 @@ func DerivedRunCapacity(totalMB int) int {
 }
 
 // DerivedRunCapacityWithReserve applies the sizing rule to this instance's
-// total memory (hostmem.TotalMB — the cgroup limit when confined, host
+// total memory (host.MemTotalMB — the cgroup limit when confined, host
 // MemTotal otherwise) against a caller-supplied reserve:
 // runs ≈ (RAM − reserve) ÷ budget, clamped to [0, ceiling]. This is
 // advisory (boot log + over-provision warning) — the runtime protections
@@ -181,7 +181,7 @@ func (s *Spawner) dispatchMemGated() bool {
 		return false
 	}
 	avail := probe()
-	if avail == hostmem.Unknown {
+	if avail == host.Unknown {
 		return false
 	}
 	gated := avail < floor

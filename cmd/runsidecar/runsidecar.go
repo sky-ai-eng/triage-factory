@@ -73,9 +73,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/capinfo"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
-	"github.com/sky-ai-eng/triage-factory/internal/procname"
+	"github.com/sky-ai-eng/triage-factory/internal/procinfo"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )
@@ -101,7 +100,7 @@ func run(args []string) error {
 		return err
 	}
 
-	procname.SetTitle(sandbox.SidecarCommName)
+	procinfo.SetTitle(sandbox.SidecarCommName)
 	logging.SetProcess("sidecar")
 	logBootLine(*containerID)
 
@@ -210,14 +209,14 @@ func adoptSharedOriginListener() net.Listener {
 // capability set, so a security reviewer can confirm "capless, at the
 // expected per-run uid" by reading logs instead of trusting the code.
 func logBootLine(containerID string) {
-	names, err := capinfo.Effective()
+	names, err := procinfo.EffectiveCaps()
 	if err != nil {
 		sidecarLog.Warn("boot: failed to read own effective capabilities", "error", err)
 		return
 	}
 	sidecarLog.Info("boot",
 		"uid", os.Getuid(),
-		"CapEff", capinfo.Describe(names),
+		"CapEff", procinfo.DescribeCaps(names),
 		"container_id", containerID,
 	)
 }

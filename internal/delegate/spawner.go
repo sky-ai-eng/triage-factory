@@ -28,7 +28,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
-	"github.com/sky-ai-eng/triage-factory/internal/hostmem"
+	"github.com/sky-ai-eng/triage-factory/internal/host"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
@@ -501,13 +501,13 @@ type Spawner struct {
 	// tree has gone uncovered.
 	checkpointers map[string]*checkpointer
 	// memFloorMB is the dispatch memory guardrail: when available memory
-	// (hostmem.AvailableMB — cgroup-scoped when confined)
+	// (host.MemAvailableMB — cgroup-scoped when confined)
 	// drops below this, drainConversationQueue defers claims (runs stay queued)
 	// until memory recovers. Zero disables. Set once at startup via
 	// SetDispatchMemFloor; the probe is injectable for tests.
 	memFloorMB int
 	// memAvailMB probes host available memory (MiB). Defaults to
-	// hostmem.AvailableMB in NewSpawner; tests swap in a fake.
+	// host.MemAvailableMB in NewSpawner; tests swap in a fake.
 	memAvailMB func() int
 	// memGated tracks the guardrail's last observed state so the
 	// transition (and only the transition) is logged — a gated host
@@ -692,7 +692,7 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		ackWaiters:            make(map[int64]chan struct{}),
 		signalApplyWake:       make(chan struct{}, 1),
 		runSem:                make(chan struct{}, DefaultMaxConcurrentClaims),
-		memAvailMB:            hostmem.AvailableMB,
+		memAvailMB:            host.MemAvailableMB,
 		diskAvailMB:           executorDiskAvailableMB,
 		snapshotInterval:      DefaultSnapshotInterval,
 	}

@@ -13,7 +13,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/suspendclock"
+	"github.com/sky-ai-eng/triage-factory/internal/host"
 )
 
 // suspendPollInterval is how often an engagement's renewal loop reads the
@@ -82,7 +82,7 @@ func newClaimLeaseState(conv *domain.Conversation, anchor time.Time, claimCtx co
 		callTimeout: callTimeout,
 	}
 	st.lastRenewal.Store(&anchor)
-	st.suspendBase, st.suspendOK = suspendclock.Suspended()
+	st.suspendBase, st.suspendOK = host.Suspended()
 	return st
 }
 
@@ -203,7 +203,7 @@ func (s *Spawner) recoverClaimLease(ctx context.Context, st *claimLeaseState, se
 	if st.reacquired.Load() != seen {
 		return db.ClaimRenewal{}, true
 	}
-	suspended, ok := suspendclock.Suspended()
+	suspended, ok := host.Suspended()
 	if !ok || !st.suspendOK {
 		return db.ClaimRenewal{}, false
 	}

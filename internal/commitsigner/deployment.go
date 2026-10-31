@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner/gitsig"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -144,12 +144,12 @@ func ParseDeploymentSigner(getenv, getSecret func(string) string, host string) (
 			EnvDeploymentSignerLogin, login)
 	}
 	// The wrapped error names the problem without echoing any of the key.
-	key, err := commitsign.ParsePrivateKey([]byte(rawKey))
+	key, err := gitsig.ParsePrivateKey([]byte(rawKey))
 	if err != nil {
 		return nil, fmt.Errorf("commitsigner: %s is not an unencrypted ed25519 private key in OpenSSH format (generate one with ssh-keygen -t ed25519 -N ''): %w",
 			EnvDeploymentSignerKey, err)
 	}
-	pub, err := commitsign.PublicKey(key)
+	pub, err := gitsig.PublicKey(key)
 	if err != nil {
 		return nil, fmt.Errorf("commitsigner: derive the public half of %s: %w", EnvDeploymentSignerKey, err)
 	}
@@ -200,7 +200,7 @@ func CommitEmailProblem(email string) string {
 	if addr, err := mail.ParseAddress(email); err != nil || addr.Name != "" || addr.Address != email {
 		return "email must be a bare email address, such as agent@example.com"
 	}
-	if commitsign.IdentName(email) != email {
+	if gitsig.IdentName(email) != email {
 		return "email must not begin with an apostrophe, which git drops from a committer address"
 	}
 	return ""

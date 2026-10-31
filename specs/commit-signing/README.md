@@ -247,7 +247,7 @@ signer simply becomes that identity. The name is the account's profile name,
 or its login when the profile has none, as git writes it into the committer
 header: git trims whitespace and `, : ; < > " \ '` from both ends of a name and
 drops `<`, `>` and newlines anywhere, so the identity is resolved with the same
-rule (`commitsign.IdentName`) and the daemon's committer check compares the
+rule (`gitsig.IdentName`) and the daemon's committer check compares the
 string git wrote. GitHub shows a commit linked to an
 account under the account's login and avatar, and the name is what `git log`,
 blame in an editor, and other git tools show. Claude Code's commits split the
@@ -356,7 +356,7 @@ sandbox on, and in-process with it off:
 6. Record the commit id on the signature's row (§5.3).
 
 The SSH signature format (`SSHSIG`, armored as `BEGIN SSH SIGNATURE`) is not
-in `x/crypto`. TF implements it in `internal/commitsign`: the signed data is
+in `x/crypto`. TF implements it in `internal/commitsigner/gitsig`: the signed data is
 the `SSHSIG` magic, the namespace (`git`), an empty reserved field, the hash
 algorithm (`sha512`) and the digest. Its test signs with TF's implementation
 and verifies with `ssh-keygen -Y verify`.

@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner/gitsig"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -158,11 +158,11 @@ func TestCommitIdentity_ManagedOrgSignsAsTheDeploymentSigner(t *testing.T) {
 	if _, err := admin.Orgs.SetGitHubCredentialClass(ctx, org.String(), domain.GitHubCredentialClassManagedApp); err != nil {
 		t.Fatal(err)
 	}
-	key, err := commitsign.GenerateKey()
+	key, err := gitsig.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	pem, err := commitsign.MarshalPrivateKey(key)
+	pem, err := gitsig.MarshalPrivateKey(key)
 	if err != nil {
 		t.Fatal(err)
 	}

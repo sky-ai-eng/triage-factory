@@ -1,0 +1,85 @@
+package gitsig
+
+import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/pem"
+	"fmt"
+	"strings"
+
+	"golang.org/x/crypto/ssh"
+)
+
+// GenerateKey mints a signer's ed25519 key from crypto/rand.
+func GenerateKey() (ed25519.PrivateKey, error) {
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("gitsig: generate key: %w", err)
+	}
+	return key, nil
+}
+
+// MarshalPrivateKey encodes key as an unencrypted OpenSSH private key, the
+// format ssh-keygen writes and reads.
+func MarshalPrivateKey(key ed25519.PrivateKey) ([]byte, error) {
+	if len(key) != ed25519.PrivateKeySize {
+		return nil, errKeySize(key)
+	}
+	block, err := ssh.MarshalPrivateKey(key, "")
+	if err != nil {
+		return nil, fmt.Errorf("gitsig: marshal private key: %w", err)
+	}
+	return pem.EncodeToMemory(block), nil
+}
+
+// ParsePrivateKey decodes an unencrypted PEM private key, the form
+// MarshalPrivateKey writes. A key of any type but ed25519 is refused, and so
+// is one whose public half does not match its seed.
+func ParsePrivateKey(data []byte) (ed25519.PrivateKey, error) {
+	raw, err := ssh.ParseRawPrivateKey(data)
+	if err != nil {
+		return nil, fmt.Errorf("gitsig: parse private key: %w", err)
+	}
+	var key ed25519.PrivateKey
+	switch k := raw.(type) {
+	case *ed25519.PrivateKey:
+		key = *k
+	case ed25519.PrivateKey:
+		key = k
+	default:
+		return nil, fmt.Errorf("gitsig: private key is %T, want ed25519", raw)
+	}
+	// An ed25519 private key stores its public half beside the seed, and
+	// ed25519.Sign uses the stored half without deriving it, so a key whose
+	// halves disagree signs without error and nothing verifies the result.
+	if len(key) != ed25519.PrivateKeySize || !key.Equal(ed25519.NewKeyFromSeed(key.Seed())) {
+		return nil, fmt.Errorf("gitsig: private key's public half does not match its seed")
+	}
+	return key, nil
+}
+
+// PublicKey returns key's public half as "ssh-ed25519 AAAA…" with no comment:
+// the string GitHub's signing-key listing returns for it and an
+// allowed-signers line names.
+func PublicKey(key ed25519.PrivateKey) (string, error) {
+	pub, err := sshPublicKey(key)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(string(ssh.MarshalAuthorizedKey(pub)), "\n"), nil
+}
+
+func sshPublicKey(key ed25519.PrivateKey) (ssh.PublicKey, error) {
+	if len(key) != ed25519.PrivateKeySize {
+		return nil, errKeySize(key)
+	}
+	pub, err := ssh.NewPublicKey(key.Public())
+	if err != nil {
+		return nil, fmt.Errorf("gitsig: public key: %w", err)
+	}
+	return pub, nil
+}
+
+func errKeySize(key ed25519.PrivateKey) error {
+	return fmt.Errorf("gitsig: ed25519 private key is %d bytes, want %d", len(key), ed25519.PrivateKeySize)
+}

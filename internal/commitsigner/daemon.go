@@ -3,7 +3,7 @@ package commitsigner
 import (
 	"context"
 
-	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner/gitsig"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -27,7 +27,7 @@ type DaemonRefusal struct {
 	// Refusal is RefusalCommitterMismatch or RefusalNotACommit. Committer is
 	// the committer a mismatched commit named.
 	Refusal   Refusal
-	Committer commitsign.Identity
+	Committer gitsig.Identity
 
 	// DedupKey keys the commit_sign_denied row, so a refusal recorded twice
 	// writes one row.

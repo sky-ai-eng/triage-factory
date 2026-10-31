@@ -11,11 +11,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
 	"github.com/sky-ai-eng/triage-factory/ee"
 	"github.com/sky-ai-eng/triage-factory/internal/app"
-	"github.com/sky-ai-eng/triage-factory/internal/capinfo"
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
-	"github.com/sky-ai-eng/triage-factory/internal/procname"
+	"github.com/sky-ai-eng/triage-factory/internal/procinfo"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/secretenv"
 
@@ -149,7 +148,7 @@ func run(ctx context.Context, args []string) error {
 	// title/tag, just with an empty (rather than absent) capability set
 	// reported below, since they never spawn a cap-broker to compare
 	// against anyway.
-	procname.SetTitle("tf-orchestrator")
+	procinfo.SetTitle("tf-orchestrator")
 	logging.SetProcess("orchestrator")
 	logBootLine()
 
@@ -227,12 +226,12 @@ var bootLog = logging.Component("boot")
 // this Go binary's own code ever runs, so there is nothing left to
 // enumerate but the confirmation.
 func logBootLine() {
-	names, err := capinfo.Effective()
+	names, err := procinfo.EffectiveCaps()
 	if err != nil {
 		bootLog.Warn("boot: failed to read own effective capabilities", "error", err)
 		return
 	}
-	bootLog.Info("boot", "uid", os.Getuid(), "CapEff", capinfo.Describe(names))
+	bootLog.Info("boot", "uid", os.Getuid(), "CapEff", procinfo.DescribeCaps(names))
 }
 
 // checkDefaultGitHubHostForSignIn refuses a multi-mode deployment that sets

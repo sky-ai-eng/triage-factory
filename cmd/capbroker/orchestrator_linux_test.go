@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/capinfo"
+	"github.com/sky-ai-eng/triage-factory/internal/procinfo"
 )
 
 // helperProcessEnv gates TestMain's re-exec branch below — the standard
@@ -48,12 +48,12 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	if os.Getenv(capReportEnv) == "1" {
-		names, err := capinfo.Effective()
+		names, err := procinfo.EffectiveCaps()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		fmt.Printf("uid=%d CapEff=%s\n", os.Getuid(), capinfo.Describe(names))
+		fmt.Printf("uid=%d CapEff=%s\n", os.Getuid(), procinfo.DescribeCaps(names))
 		os.Exit(0)
 	}
 	os.Exit(m.Run())

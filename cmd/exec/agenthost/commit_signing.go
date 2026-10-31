@@ -11,8 +11,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner/gitsig"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
@@ -208,7 +208,7 @@ func (r *relayRuntime) signCommit(ctx context.Context, signer commitsigner.Ident
 
 	var reply agentproc.SignDigestReply
 	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, agentproc.OpSignDigest, agentproc.SignDigestArgs{
-		Digest:       commitsign.DigestOf(payload).String(),
+		Digest:       gitsig.DigestOf(payload).String(),
 		Signer:       string(signer.Mode),
 		SignerUserID: accountID,
 	}, &reply); err != nil {
@@ -238,7 +238,7 @@ func (r *relayRuntime) signCommit(ctx context.Context, signer commitsigner.Ident
 	// so a push of it can name its signer. Sent through the same record lane
 	// as the git proxy's push records, so it reaches the orchestrator before
 	// any push of the commit does.
-	res.CommitSHA = commitsign.CommitID(commitsign.SignedCommit(payload, []byte(res.Signature)))
+	res.CommitSHA = gitsig.CommitID(gitsig.SignedCommit(payload, []byte(res.Signature)))
 	r.conn.record(agentproc.RelayNamespaceCore, agentproc.OpRecordCommitSHA, agentproc.RecordCommitSHAArgs{
 		SignatureID: res.SignatureID,
 		CommitSHA:   res.CommitSHA,
@@ -308,7 +308,7 @@ func (s *RelayServer) recordSignRefusal(ctx context.Context, a agentproc.RecordS
 		SignerHost:     host,
 		SignerUserID:   accountID,
 		Refusal:        refusal,
-		Committer:      commitsign.Identity{Name: a.CommitterName, Email: a.CommitterEmail},
+		Committer:      gitsig.Identity{Name: a.CommitterName, Email: a.CommitterEmail},
 		DedupKey:       mintDedupKey(ctx, s.info),
 	})
 	return nil

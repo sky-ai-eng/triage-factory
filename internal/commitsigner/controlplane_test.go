@@ -13,7 +13,7 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
-	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner/gitsig"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
@@ -90,11 +90,11 @@ func newFixture(t *testing.T) *fixture {
 
 func newKey(t *testing.T) (ed25519.PrivateKey, string) {
 	t.Helper()
-	key, err := commitsign.GenerateKey()
+	key, err := gitsig.GenerateKey()
 	if err != nil {
 		t.Fatalf("GenerateKey: %v", err)
 	}
-	public, err := commitsign.PublicKey(key)
+	public, err := gitsig.PublicKey(key)
 	if err != nil {
 		t.Fatalf("PublicKey: %v", err)
 	}
@@ -103,7 +103,7 @@ func newKey(t *testing.T) (ed25519.PrivateKey, string) {
 
 func marshalKey(t *testing.T, key ed25519.PrivateKey) string {
 	t.Helper()
-	raw, err := commitsign.MarshalPrivateKey(key)
+	raw, err := gitsig.MarshalPrivateKey(key)
 	if err != nil {
 		t.Fatalf("MarshalPrivateKey: %v", err)
 	}
@@ -146,7 +146,7 @@ func (f *fixture) request(t *testing.T, signer domain.CommitSigningMode, bootEpo
 	row, err := f.stores.CommitSignatures.InsertSystem(context.Background(), domain.CommitSignature{
 		OrgID: f.orgID, ConversationID: f.conversationID, ClaimID: f.claimID, BootEpoch: bootEpoch,
 		Signer: signer, SignerHost: "https://github.com", SignerUserID: signerAccount,
-		Digest: commitsign.DigestOf([]byte(payload)).String(), State: domain.CommitSignatureRequested,
+		Digest: gitsig.DigestOf([]byte(payload)).String(), State: domain.CommitSignatureRequested,
 	})
 	if err != nil {
 		t.Fatalf("InsertSystem: %v", err)
@@ -161,7 +161,7 @@ func (f *fixture) signedAt(t *testing.T, at time.Time) {
 	if _, err := f.stores.CommitSignatures.InsertSystem(context.Background(), domain.CommitSignature{
 		OrgID: f.orgID, ConversationID: f.conversationID, ClaimID: f.claimID, BootEpoch: 1,
 		Signer: domain.CommitSigningOrg, SignerHost: "https://github.com", SignerUserID: signerAccount,
-		PublicKey: f.public, Digest: commitsign.DigestOf([]byte(at.String())).String(),
+		PublicKey: f.public, Digest: gitsig.DigestOf([]byte(at.String())).String(),
 		State: domain.CommitSignatureSigned, Signature: "-----BEGIN SSH SIGNATURE-----", SignedAt: &at,
 	}); err != nil {
 		t.Fatalf("InsertSystem (signed): %v", err)
@@ -234,7 +234,7 @@ func TestControlPlane_SignsARequestFromALiveClaim(t *testing.T) {
 		t.Fatal("Handle = false, want this pod to claim the request")
 	}
 	got := f.row(t, req.ID)
-	want, err := commitsign.SignDigest(f.key, commitsign.DigestOf([]byte("tree 4b825dc6\n")))
+	want, err := gitsig.SignDigest(f.key, gitsig.DigestOf([]byte("tree 4b825dc6\n")))
 	if err != nil {
 		t.Fatalf("SignDigest: %v", err)
 	}
@@ -559,12 +559,12 @@ func TestRequester_GetsItsAnswerByDoorbell(t *testing.T) {
 		PollInterval: time.Hour,
 		Timeout:      10 * time.Second,
 	}
-	digest := commitsign.DigestOf([]byte("tree end to end\n"))
+	digest := gitsig.DigestOf([]byte("tree end to end\n"))
 	res, err := r.Request(context.Background(), f.requestFor(digest))
 	if err != nil {
 		t.Fatalf("Request: %v", err)
 	}
-	want, _ := commitsign.SignDigest(f.key, digest)
+	want, _ := gitsig.SignDigest(f.key, digest)
 	if res.Outcome != OutcomeSigned || res.Signature != string(want) || res.SignatureID == "" {
 		t.Errorf("result = %+v, want the signature over the digest", res)
 	}
@@ -590,7 +590,7 @@ func TestRequester_ReadsADecisionWhoseDoorbellWasDropped(t *testing.T) {
 		PollInterval: 20 * time.Millisecond,
 		Timeout:      10 * time.Second,
 	}
-	res, err := r.Request(context.Background(), f.requestFor(commitsign.DigestOf([]byte("tree dropped done\n"))))
+	res, err := r.Request(context.Background(), f.requestFor(gitsig.DigestOf([]byte("tree dropped done\n"))))
 	if err != nil {
 		t.Fatalf("Request: %v", err)
 	}
@@ -616,7 +616,7 @@ func TestRequester_ASweepFindsADroppedRequest(t *testing.T) {
 
 	done := make(chan Result, 1)
 	go func() {
-		res, err := r.Request(context.Background(), f.requestFor(commitsign.DigestOf([]byte("tree swept\n"))))
+		res, err := r.Request(context.Background(), f.requestFor(gitsig.DigestOf([]byte("tree swept\n"))))
 		if err != nil {
 			t.Errorf("Request: %v", err)
 		}
@@ -652,7 +652,7 @@ func TestRequester_TimesOutUnanswered(t *testing.T) {
 		PollInterval: 10 * time.Millisecond,
 		Timeout:      100 * time.Millisecond,
 	}
-	res, err := r.Request(context.Background(), f.requestFor(commitsign.DigestOf([]byte("tree nobody\n"))))
+	res, err := r.Request(context.Background(), f.requestFor(gitsig.DigestOf([]byte("tree nobody\n"))))
 	if err != nil {
 		t.Fatalf("Request: %v", err)
 	}
@@ -670,7 +670,7 @@ func TestRequester_TimesOutUnanswered(t *testing.T) {
 	}
 }
 
-func (f *fixture) requestFor(digest commitsign.Digest) Request {
+func (f *fixture) requestFor(digest gitsig.Digest) Request {
 	return Request{
 		OrgID: f.orgID, ConversationID: f.conversationID, ClaimID: f.claimID, BootEpoch: 1,
 		Signer: domain.CommitSigningOrg, SignerHost: "https://github.com", SignerUserID: signerAccount,

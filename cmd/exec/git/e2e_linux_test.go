@@ -18,8 +18,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
-	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner/gitsig"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
@@ -248,7 +248,7 @@ func (r *signingRun) assertSigned(rev, publicKey string) {
 
 func marshal(t *testing.T, key ed25519.PrivateKey) string {
 	t.Helper()
-	raw, err := commitsign.MarshalPrivateKey(key)
+	raw, err := gitsig.MarshalPrivateKey(key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +257,7 @@ func marshal(t *testing.T, key ed25519.PrivateKey) string {
 
 func publicKey(t *testing.T, key ed25519.PrivateKey) string {
 	t.Helper()
-	public, err := commitsign.PublicKey(key)
+	public, err := gitsig.PublicKey(key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +266,7 @@ func publicKey(t *testing.T, key ed25519.PrivateKey) string {
 
 func newKey(t *testing.T) ed25519.PrivateKey {
 	t.Helper()
-	key, err := commitsign.GenerateKey()
+	key, err := gitsig.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}

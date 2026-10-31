@@ -8,8 +8,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/convident"
-	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner/gitsig"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -35,12 +35,12 @@ func (k keySecrets) GetSystem(_ context.Context, _, name string) (string, error)
 func TestNewLocalFromEnv_SignsWithTheHandedOffSigning(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	stores, conn := newTestDB(t)
-	key, err := commitsign.GenerateKey()
+	key, err := gitsig.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	public, _ := commitsign.PublicKey(key)
-	private, _ := commitsign.MarshalPrivateKey(key)
+	public, _ := gitsig.PublicKey(key)
+	private, _ := gitsig.MarshalPrivateKey(key)
 	stores.Secrets = keySecrets{key: string(private)}
 	ctx := context.Background()
 	if _, err := stores.OrgCommitSigners.Create(ctx, domain.OrgCommitSigner{
@@ -86,7 +86,7 @@ func TestNewLocalFromEnv_SignsWithTheHandedOffSigning(t *testing.T) {
 		if err != nil || res.Refusal != "" {
 			t.Fatalf("SignCommit = %+v, %v; want a signature", res, err)
 		}
-		if want, _ := commitsign.Sign(key, payload); res.Signature != string(want) {
+		if want, _ := gitsig.Sign(key, payload); res.Signature != string(want) {
 			t.Errorf("signature is not the org key's")
 		}
 	})

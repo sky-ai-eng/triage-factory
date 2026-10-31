@@ -7,7 +7,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/suspendclock"
+	"github.com/sky-ai-eng/triage-factory/internal/host"
 )
 
 // DefaultClaimRenewInterval, DefaultClaimSelfFenceDeadline and
@@ -268,7 +268,7 @@ func (s *Spawner) renewClaimLease(ctx context.Context, conv *domain.Conversation
 			return
 		case <-ticker.C:
 		case <-suspendTick:
-			seen, ok := suspendclock.Suspended()
+			seen, ok := host.Suspended()
 			if !ok {
 				continue
 			}
@@ -292,7 +292,7 @@ func (s *Spawner) renewClaimLease(ctx context.Context, conv *domain.Conversation
 		// is taken at the same instant, so a sleep that starts while the call
 		// is out counts against the base this renewal sets.
 		issuedAt := time.Now()
-		suspended, suspendOK := suspendclock.Suspended()
+		suspended, suspendOK := host.Suspended()
 		reacquired := st.reacquired.Load()
 		// The engagement's activity rides the renewal, so the claim row shows
 		// how long it has been idle, what it is waiting on, and how much of

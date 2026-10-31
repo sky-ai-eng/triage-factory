@@ -42,7 +42,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/cell"
-	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner/gitsig"
 	"github.com/sky-ai-eng/triage-factory/internal/cred/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/cred/credseal"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -892,11 +892,11 @@ type testSigner struct {
 
 func newTestSigner(t *testing.T) *testSigner {
 	t.Helper()
-	key, err := commitsign.GenerateKey()
+	key, err := gitsig.GenerateKey()
 	if err != nil {
 		t.Fatalf("generate the signing key: %v", err)
 	}
-	public, err := commitsign.PublicKey(key)
+	public, err := gitsig.PublicKey(key)
 	if err != nil {
 		t.Fatalf("encode the signing key: %v", err)
 	}
@@ -914,11 +914,11 @@ func (s *testSigner) DispatchCall(_ context.Context, namespace, op string, args 
 	if a.Signer != string(domain.CommitSigningOrg) || strconv.FormatInt(a.SignerUserID, 10) != testSignerAccountID {
 		return nil, fmt.Errorf("celltest: sign_digest named signer %s/%d, not the sealed one", a.Signer, a.SignerUserID)
 	}
-	digest, err := commitsign.ParseDigest(a.Digest)
+	digest, err := gitsig.ParseDigest(a.Digest)
 	if err != nil {
 		return nil, err
 	}
-	sig, err := commitsign.SignDigest(s.key, digest)
+	sig, err := gitsig.SignDigest(s.key, digest)
 	if err != nil {
 		return nil, err
 	}

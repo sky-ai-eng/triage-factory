@@ -32,7 +32,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/procname"
+	"github.com/sky-ai-eng/triage-factory/internal/procinfo"
 )
 
 // inProcessSidecarLauncher is the integration suite's stand-in for the
@@ -121,7 +121,7 @@ func (s *inProcessSidecar) Close() error {
 // pre-warms the rootfs or runs tests.
 func maybeRunSidecarSubcommand() {
 	if len(os.Args) > 1 && os.Args[1] == sidecarSubcommand {
-		procname.SetTitle(SidecarCommName)
+		procinfo.SetTitle(SidecarCommName)
 		select {} // until SIGKILLed by inProcessSidecar.Close
 	}
 }

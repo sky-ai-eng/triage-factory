@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/cell"
-	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner/gitsig"
 	"github.com/sky-ai-eng/triage-factory/internal/cred/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
@@ -61,11 +61,11 @@ func signerBundle(t *testing.T, signer *credbundle.SignerCreds) *credbundle.Bund
 
 func publicKey(t *testing.T) string {
 	t.Helper()
-	key, err := commitsign.GenerateKey()
+	key, err := gitsig.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	public, err := commitsign.PublicKey(key)
+	public, err := gitsig.PublicKey(key)
 	if err != nil {
 		t.Fatal(err)
 	}
