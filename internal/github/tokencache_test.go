@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
+	"github.com/sky-ai-eng/triage-factory/internal/github/githubapp"
 )
 
 func TestMemoryTokenCache_GuardWindow(t *testing.T) {

@@ -7,11 +7,11 @@ import (
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
+	"github.com/sky-ai-eng/triage-factory/internal/cred/llmcred"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
-	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
-	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 

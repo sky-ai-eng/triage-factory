@@ -11,7 +11,7 @@
 //     user-editable rows; the .txt in the repo is a seed, not a runtime
 //     artifact.
 //   - System job prompts. Toolless LLM calls TF makes for itself; they live
-//     next to their consumer (internal/ai for scoring, internal/repoprofile
+//     next to their consumer (internal/systemjob/scorer for scoring, internal/systemjob/repoprofile
 //     for profiling).
 //
 // The composition rules that keep the four axes below from becoming a

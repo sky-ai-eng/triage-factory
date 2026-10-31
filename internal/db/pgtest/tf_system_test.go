@@ -14,8 +14,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/wsbackplane"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/internal/wsbackplane"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -783,7 +783,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		// ws_outbox: publish + read-back + TTL reap, matching the exact
 		// statements wsbackplane.publishViaOutbox / fetchOutbox / the outbox
 		// reaper run (those specific methods are package-private; the SQL
-		// text here is copied verbatim from internal/wsbackplane/publish.go
+		// text here is copied verbatim from internal/pgnotify/wsbackplane/publish.go
 		// and reaper.go so this is still a direct grant check, not a
 		// behavioral reimplementation).
 		var outboxID int64

@@ -57,8 +57,8 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/cmd/internal/envfile"
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
-	"github.com/sky-ai-eng/triage-factory/internal/envfile"
 )
 
 // serviceRoleSubject is the fixed `sub` on the long-lived service-role admin

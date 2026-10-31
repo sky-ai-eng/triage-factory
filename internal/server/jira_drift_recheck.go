@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
-	"github.com/sky-ai-eng/triage-factory/internal/jiradrift"
+	"github.com/sky-ai-eng/triage-factory/internal/jira/jiradrift"
 	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 )
 

@@ -4,7 +4,7 @@ import (
 	"context"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/poller"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 

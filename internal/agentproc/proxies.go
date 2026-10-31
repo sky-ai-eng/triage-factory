@@ -13,11 +13,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/egressproxy"
-	"github.com/sky-ai-eng/triage-factory/internal/egressrelay"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
-	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
-	"github.com/sky-ai-eng/triage-factory/internal/llmproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/egressproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/egressrelay"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/gitproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/llmproxy"
 )
 
 // proxyTokenAnthropicPrefix shapes the per-run Anthropic token like a
@@ -624,7 +624,7 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 	// port of hostVethIP. The relays exist for registries that serve
 	// artifacts via redirects into shared multi-tenant storage hostnames
 	// (proxy.golang.org → storage.googleapis.com), which the CONNECT-only
-	// egress proxy above can never admit — see internal/egressrelay's
+	// egress proxy above can never admit — see internal/proxy/egressrelay's
 	// package doc and CLAUDE.md. Which ecosystems get a relay, their route
 	// tables, and their env pointing are all catalog data; this wiring is
 	// ecosystem-blind.
@@ -765,7 +765,7 @@ func startEgressProxyForSandbox(hostVethIP string, gh egressproxy.GitHubHosts, r
 // startFetchRelaysForSandbox starts every egressrelay catalog entry on a
 // free port of hostVethIP and returns the combined env entries, the
 // servers for the shutdown bundle, and their addresses. Ecosystem-blind by
-// design: adding a relay is a catalog edit (internal/egressrelay/catalog.go),
+// design: adding a relay is a catalog edit (internal/proxy/egressrelay/catalog.go),
 // never a change here.
 //
 // Every relay starts for every sandbox run, like the egress proxy: a run

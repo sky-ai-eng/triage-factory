@@ -14,9 +14,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/github/reachcache"
+	"github.com/sky-ai-eng/triage-factory/internal/github/reporename"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
-	"github.com/sky-ai-eng/triage-factory/internal/reachcache"
-	"github.com/sky-ai-eng/triage-factory/internal/reporename"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
@@ -32,7 +32,7 @@ import (
 // whether the org authenticates with a PAT or its own App.
 //
 // Nothing here calls GitHub. A stale or empty mirror kicks an out-of-band
-// refresh (internal/reachcache) and answers from what is on hand; on a large PAT
+// refresh (internal/github/reachcache) and answers from what is on hand; on a large PAT
 // account the enumeration this replaces is ~30 upstream pages, which is a
 // multi-second request nobody should be waiting through.
 // --------------------------------------------------------------------

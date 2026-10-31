@@ -57,7 +57,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/toast"
+	"github.com/sky-ai-eng/triage-factory/internal/wsevent/toast"
 )
 
 // ErrNoActiveConversation is the answer when there is nothing to stop: the conversation

@@ -12,7 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/sky-ai-eng/triage-factory/internal/apitokens"
+	"github.com/sky-ai-eng/triage-factory/internal/auth/apitokens"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 

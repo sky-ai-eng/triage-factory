@@ -18,7 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/notify"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
-	"github.com/sky-ai-eng/triage-factory/internal/toast"
+	"github.com/sky-ai-eng/triage-factory/internal/wsevent/toast"
 )
 
 // stockTicket is the per-row payload for the carry-over list. Bucket +

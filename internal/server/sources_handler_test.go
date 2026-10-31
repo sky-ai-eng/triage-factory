@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
-	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 

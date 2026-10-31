@@ -769,7 +769,7 @@ type ConversationQueueStore interface {
 	// MarkAwaitingCredentials parks a freshly-claimed conversation's ACTIVE claim in
 	// phase='awaiting_credentials' (the conversation row is untouched)
 	// and — Postgres only — fires the tf_ctl cred_request doorbell so the
-	// brain's credential provisioner (internal/credprovision) resolves and
+	// brain's credential provisioner (internal/cred/credprovision) resolves and
 	// seals this claim's bundle without waiting for the backstop sweep.
 	// credPubKey (base64 X25519) is the per-run sidecar public key the
 	// brain seals the bundle to — recorded here, in the same statement as

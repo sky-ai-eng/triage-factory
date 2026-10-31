@@ -80,15 +80,15 @@ A `*ConditionKind[P]` also has one read, `OpenOrgs(ctx) ([]string, error)`: the 
 ### Call sites
 
 ```go
-// internal/poller — every reconcile, not only on a change; zero or one member,
+// internal/eventing/poller — every reconcile, not only on a change; zero or one member,
 // so the occurrence of an App the org no longer holds (replaced, or given up
 // for the deployment App) resolves
 kinds.GitHubAppUnusable.Sync(ctx, orgID, unusable)
 
-// internal/tracker/linear.go — a complete visibility pass over every armed team
+// internal/eventing/tracker/linear.go — a complete visibility pass over every armed team
 kinds.LinearTeamUnreadable.Sync(ctx, orgID, unreadable)
 
-// internal/tracker/tracker.go — projects past the debounce raise; one Jira did
+// internal/eventing/tracker/tracker.go — projects past the debounce raise; one Jira did
 // not answer, or still short of the debounce, is kept rather than resolved
 kinds.JiraDiscoveryFailing.Sync(ctx, orgID, failing, keep...)
 
@@ -97,7 +97,7 @@ kinds.JiraDiscoveryFailing.Sync(ctx, orgID, failing, keep...)
 // ticket that can't reach a status the project still has, does neither
 kinds.JiraMirrorFailing.Set(ctx, orgID, kinds.JiraMirrorFor(rule, issueKey), true)
 
-// internal/memoryprovision/failing.go — every 30 seconds, in each org an attempt
+// internal/systemjob/memoryprovision/failing.go — every 30 seconds, in each org an attempt
 // has closed in since and each org MemoryGenerationFailing.OpenOrgs names; the
 // store read applies the debounce and the window
 kinds.MemoryGenerationFailing.Sync(ctx, orgID, kinds.MemoryFailuresFor(failing))
@@ -318,7 +318,7 @@ An item:
 
 One invalidation ping, `notifications_updated`, with no payload. It is sent when a row opens, escalates or resolves, and to the acting user when their own marks change (other tabs). It is **not** sent when `last_seen_at` is bumped — that happens on every evaluation and is the write rate the websocket rules exist to keep off the hub.
 
-The audience is resolved at emit time, as in `internal/knowledgeevent`: an `org`/`members` row is one org-scoped envelope; every other row fans out one envelope per user id. A resolution failure drops the envelope (the client refetches on its next ping or navigation) rather than widening it. The client refetches the badge count, the banner query, and the page's list if it is open.
+The audience is resolved at emit time, as in `internal/wsevent/knowledgeevent`: an `org`/`members` row is one org-scoped envelope; every other row fans out one envelope per user id. A resolution failure drops the envelope (the client refetches on its next ping or navigation) rather than widening it. The client refetches the badge count, the banner query, and the page's list if it is open.
 
 Every producer can send the ping from the process it runs in. `notify.Install` takes the app's hub, and in multi mode every pod builds the websocket backplane (`internal/app/backplane.go`), so a broadcast on any pod reaches sockets on every control pod. The mirrors run where delegations are minted: the router's firing path on the brain and the task-actions handler, both on control pods. `announceTaskPlacement` already broadcasts `task_updated` through the spawner's hub just before it starts them. The claim guards run in the API handler.
 
@@ -340,7 +340,7 @@ The same calls, tables (SQLite) and page. Local is N=1: the one user is the reci
 
 | Kind                          | Source | Audience                                    | Priority                                            | Dismissible | Verb and site                                                                                                                     | Actions                                                                       |
 | ----------------------------- | ------ | ------------------------------------------- | --------------------------------------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| `github.app_unusable`         | github | org admins                                  | urgent                                              | no          | `Sync` on every reconcile (`internal/poller/manager.go`, beside `logAppUsabilityChange`); an active App only                      | Link: GitHub access settings                                                  |
+| `github.app_unusable`         | github | org admins                                  | urgent                                              | no          | `Sync` on every reconcile (`internal/eventing/poller/manager.go`, beside `logAppUsabilityChange`); an active App only                      | Link: GitHub access settings                                                  |
 | `linear.team_unreadable`      | linear | org admins + admins of TF teams tracking it | high                                                | yes         | `Sync` on a complete visibility pass over every armed team (`checkLinearTeamVisibility`; never on outcome `failed`)               | Link: Linear settings; invoke "Stop tracking" on team rows                    |
 | `jira.discovery_failing`      | jira   | admins of teams whose rules arm the project | high                                                | yes         | `Sync` from `discoverJira` after 3 rejected cycles in a row; unanswered projects kept                                             | Link: the team's Jira status rules                                            |
 | `jira.mirror_failing`         | jira   | team admins                                 | high                                                | yes         | `Set` in `runJiraMirror`, `applyJiraClaim` and the stock deck's claim; a rules save resolves it                                   | Link: the team's Jira status rules                                            |
@@ -354,7 +354,7 @@ Debounce is each producer's responsibility, using evidence it already has (the a
 
 ### Jira drift
 
-Jira configuration names values Jira can take away. Detection is `internal/jiradrift`; the two kinds above are its output.
+Jira configuration names values Jira can take away. Detection is `internal/jira/jiradrift`; the two kinds above are its output.
 
 - **What drifts.** A team's status rules (`jira_project_status_rules`) name statuses of a project's workflow; a status deleted in Jira or retired from the workflow leaves a rule naming nothing. A Jira task rule's or trigger's filter names statuses, issue types and priorities by id, checked only when a save adds them; a value deleted in Jira, dropped from a workflow, or left on a project the team no longer tracks leaves a filter that never matches it.
 - **Two kinds**, because the keys and the fixes differ: `jira.status_drift` is keyed by the rule row (team + project) and fixed on the team's Jira source; `jira.predicate_drift` is keyed by the handler and fixed in its editor. One occurrence lists every gone value of its row or handler.
@@ -367,7 +367,7 @@ Jira configuration names values Jira can take away. Detection is `internal/jirad
 
 1. **Infrastructure and two consumers.** Tables, store and conformance, `notify` and `notifytest`, `kinds`, the API, the ping, the rail row, page and banner, and `github.app_unusable` + `linear.team_unreadable`. Together they exercise org and team audiences, a multi-audience key, `Set` and `Sync`, both action types, and the urgent banner.
 2. **Remaining condition consumers and notices.** `jira.discovery_failing`, both mirrors, `memory.generation_failing`, `routing.automation_conflict` (TFAC-518), and the arrival pop. Each removes its `TODO(TFAC-878)` marker.
-3. **`jira.status_drift` and `jira.predicate_drift`.** Detection in `internal/jiradrift` (see **Jira drift**).
+3. **`jira.status_drift` and `jira.predicate_drift`.** Detection in `internal/jira/jiradrift` (see **Jira drift**).
 4. **Event notifications.** Notify rules on catalog events (see **Event notifications**).
 
 ## Event notifications

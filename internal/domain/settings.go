@@ -295,7 +295,7 @@ type OrgSettings struct {
 
 	// BackgroundJobsModel is the model the two headless system jobs — the
 	// scorer and the repo profiler — run on. A key from this deployment's model
-	// universe (internal/modelcatalog), validated on write against that
+	// universe (internal/llm/modelcatalog), validated on write against that
 	// universe and against the providers the org has connected.
 	//
 	// One knob for all three, org-level: they are the same kind of work (short,

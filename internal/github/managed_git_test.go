@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
+	"github.com/sky-ai-eng/triage-factory/internal/github/githubapp"
 )
 
 type recordingManagedGitResolver struct {

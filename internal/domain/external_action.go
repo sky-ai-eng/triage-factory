@@ -301,7 +301,7 @@ const (
 
 	// The fallback for a write the agent made through the real-`gh` credential
 	// channel — a mutating REST request whose method+path the shared classifier
-	// (internal/ghwrite) does not recognize, or a recognized one the upstream
+	// (internal/ghcli/ghwrite) does not recognize, or a recognized one the upstream
 	// refused. A classified success carries its own semantic action instead (a
 	// reply is comment_posted, a merge is pr_merged), so this row means exactly
 	// "a write happened here and it has no better name yet".

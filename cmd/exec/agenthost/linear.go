@@ -8,9 +8,9 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
 	linearclient "github.com/sky-ai-eng/triage-factory/internal/linear"
-	"github.com/sky-ai-eng/triage-factory/internal/linearoauth"
+	"github.com/sky-ai-eng/triage-factory/internal/linear/linearoauth"
 )
 
 // LinearSearchMaxResults is the most issues one LinearSearch returns. A search

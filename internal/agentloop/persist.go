@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/inference"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/inference"
 )
 
 // persistAssistant writes one row per completed provider call — message

@@ -14,12 +14,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/wsbackplane"
 	"github.com/sky-ai-eng/triage-factory/internal/ratelimits"
-	"github.com/sky-ai-eng/triage-factory/internal/repoevent"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/skills"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
-	"github.com/sky-ai-eng/triage-factory/internal/wsbackplane"
+	"github.com/sky-ai-eng/triage-factory/internal/wsevent/repoevent"
 )
 
 // runStartupTasks performs the one-time boot side effects, in order:

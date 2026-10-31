@@ -12,9 +12,9 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
-	"github.com/sky-ai-eng/triage-factory/internal/knowledgeevent"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/wsevent/knowledgeevent"
 )
 
 var knowledgeLog = logging.Component("teams/kb")

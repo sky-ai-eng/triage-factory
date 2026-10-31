@@ -7,13 +7,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/sky-ai-eng/triage-factory/internal/ctlbus"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/pgnotify"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/ctlbus"
 )
 
 // credDoorbells starts a tf_ctl listener and returns a channel of the

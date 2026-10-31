@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
+	"github.com/sky-ai-eng/triage-factory/internal/cred/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 

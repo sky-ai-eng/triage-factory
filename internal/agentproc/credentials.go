@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -85,7 +85,7 @@ const (
 
 	// AWS Bedrock auth — assumed-role path. The org stores no Bedrock
 	// secret at all under this shape: the ARN is the record that an
-	// admin bound Bedrock, and internal/llmcred mints a short-lived STS
+	// admin bound Bedrock, and internal/cred/llmcred mints a short-lived STS
 	// session credential against it per run. Read here only to answer
 	// "is Bedrock configured", never to build an env map.
 	secretAWSRoleARN = "aws_role_arn"
@@ -396,7 +396,7 @@ func ResolveCredentialsForBundle(ctx context.Context, secrets SecretsReader, org
 // orgID, or the empty string when the org has configured none (local ambient).
 //
 // Exported for the one caller that has to know the provider WITHOUT resolving
-// the material: internal/llmcred, which mints STS session credentials for a
+// the material: internal/cred/llmcred, which mints STS session credentials for a
 // role-mode Bedrock org and must not mint for a run whose model is served by
 // Anthropic. Keeping the choice here rather than restating it there is what
 // stops the two from disagreeing about which provider a run is on.
@@ -441,7 +441,7 @@ func providerForRun(model string, configured map[string]bool) string {
 //
 // Bedrock counts as configured under any of its three shapes, INCLUDING role
 // mode, which stores no Bedrock secret at all — the role ARN is the record that
-// an admin bound it, and internal/llmcred mints against it per run. A caller that
+// an admin bound it, and internal/cred/llmcred mints against it per run. A caller that
 // only asked "is there a key" would read a role-mode org as unconfigured and send
 // its admin to connect something they already connected.
 func configuredProviders(ctx context.Context, secrets SecretsReader, orgID string) (map[string]bool, error) {
@@ -474,7 +474,7 @@ func configuredProviders(ctx context.Context, secrets SecretsReader, orgID strin
 
 // resolveCredentials resolves the LLM env map for a run on model. resolver, when
 // non-nil (RunOptions.LLMResolver), is the brain-side role-aware resolver
-// (internal/llmcred): it fully replaces the built-in raw-secret path so a
+// (internal/cred/llmcred): it fully replaces the built-in raw-secret path so a
 // role-mode Bedrock org mints STS session credentials rather than reading a key
 // that doesn't exist.
 func resolveCredentials(ctx context.Context, secrets SecretsReader, orgID, model string, resolver func(ctx context.Context, orgID, model string) (map[string]string, error)) (map[string]string, error) {
@@ -485,7 +485,7 @@ func resolveCredentials(ctx context.Context, secrets SecretsReader, orgID, model
 	// secret store or the role-aware resolver. The orchestrator STRUCTURALLY
 	// cannot read a run credential from ctx — there is no bundle-first branch.
 
-	// Brain-side / all-local role-aware resolution (internal/llmcred). When
+	// Brain-side / all-local role-aware resolution (internal/cred/llmcred). When
 	// wired, it owns resolution outright — it reproduces the raw-secret env
 	// map for bearer/access_keys/anthropic/local-ambient orgs byte-for-byte
 	// (it delegates to ResolveCredentialsForBundle) and mints for role orgs.
@@ -587,7 +587,7 @@ func anthropicEnv(ctx context.Context, secrets SecretsReader, orgID string) (map
 //
 // The Bedrock API key (Option E in the Claude Code docs) is a single bearer that
 // skips the AWS SigV4 chain; the access-key triple is the IAM path. Role mode
-// stores neither — internal/llmcred mints for it — so this path reports it as
+// stores neither — internal/cred/llmcred mints for it — so this path reports it as
 // unconfigured, which is correct for the only caller that can reach it: raw
 // resolution with no llmcred wired.
 //

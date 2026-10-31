@@ -13,7 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -64,7 +64,7 @@ type settingsHandler struct {
 	kickMemoryBacklog func(orgID string)
 }
 
-// bedrockRoleResolver is the slice of internal/llmcred the Bedrock role-setup
+// bedrockRoleResolver is the slice of internal/cred/llmcred the Bedrock role-setup
 // and connect-probe handlers call. *llmcred.Resolver satisfies it; tests
 // inject a fake to exercise the two probe failure classes without real AWS.
 type bedrockRoleResolver interface {

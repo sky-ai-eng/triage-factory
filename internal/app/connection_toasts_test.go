@@ -11,18 +11,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventbus"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/ingest"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
-	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
-	"github.com/sky-ai-eng/triage-factory/internal/ingest"
+	"github.com/sky-ai-eng/triage-factory/internal/github/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/internal/toast"
+	"github.com/sky-ai-eng/triage-factory/internal/systemjob/scorer"
+	"github.com/sky-ai-eng/triage-factory/internal/wsevent/toast"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -160,7 +160,7 @@ func TestScoringFailure_NoToast(t *testing.T) {
 	hub := websocket.NewHub()
 	a := &App{wsHub: hub}
 	scores := &failingScores{failed: make(chan struct{})}
-	mgr := ai.NewManager(scores, nil, nil, nil, nil, nil, nil, a.scorerCallbacks())
+	mgr := scorer.NewManager(scores, nil, nil, nil, nil, nil, nil, a.scorerCallbacks())
 	t.Cleanup(mgr.Stop)
 
 	client := dialHubTestClient(t, hub)

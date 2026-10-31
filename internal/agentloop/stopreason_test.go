@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/inference"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/inference"
 )
 
 // The turn-end allowlist battery. Every case drives the engine end to end

@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
+	"github.com/sky-ai-eng/triage-factory/internal/github/githubapp"
 )
 
 // suspensionResolver builds a resolver over one mirrored installation and a

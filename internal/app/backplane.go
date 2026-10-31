@@ -1,9 +1,9 @@
 package app
 
 import (
-	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventbus"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/wsbackplane"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/internal/wsbackplane"
 )
 
 // buildWSBackplane wires the cross-pod fan-out (TFAC-584):

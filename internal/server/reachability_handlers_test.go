@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
-	"github.com/sky-ai-eng/triage-factory/internal/reachability"
+	"github.com/sky-ai-eng/triage-factory/internal/server/reachability"
 )
 
 // postReachability drives a reachability handler directly (the handlers touch

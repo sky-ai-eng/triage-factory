@@ -1,0 +1,377 @@
+// Package jiraoauth mints short-lived Atlassian Cloud OAuth 3LO access tokens
+// for the per-user "Connect Jira" flow, mirroring internal/github/githubapp's
+// minter+cache split.
+//
+// # The flow
+//
+// A user authorizes TF's Atlassian OAuth app (3LO consent) and TF receives an
+// authorization code; ExchangeCode trades it for an {access_token,
+// refresh_token, expires_in} set. The access token is short-lived (~1h) and
+// talks to the api.atlassian.com/ex/jira/{cloud_id} gateway; the REFRESH token
+// is the durable per-user credential TF stores.
+//
+// # The rotation wrinkle
+//
+// Atlassian rotates the refresh token on EVERY refresh: each call to the token
+// endpoint with grant_type=refresh_token returns a brand-new refresh token and
+// invalidates the one just used. So a caller that refreshes must persist the
+// new refresh token back, or the next refresh fails with an invalid_grant. The
+// stateless Minter here just performs the HTTP exchanges and returns the rotated
+// token; the write-back (and access-token caching) lives in TokenCache, which
+// is the layer the resolver consumes.
+//
+// # cloud_id
+//
+// An access token isn't scoped to a site by itself — AccessibleResources lists
+// the Atlassian sites the token can reach, each with its opaque `id` (the
+// cloud_id) and `url`. The Connect callback matches the org's configured site
+// host against that list to pin the single cloud_id v1 supports.
+package jiraoauth
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+)
+
+// Atlassian OAuth 3LO endpoints (identity platform). These are global —
+// unlike the per-site REST host, the authorize/token/accessible-resources
+// endpoints are the same for every Cloud tenant.
+const (
+	authorizeEndpoint           = "https://auth.atlassian.com/authorize"
+	tokenEndpoint               = "https://auth.atlassian.com/oauth/token"
+	accessibleResourcesEndpoint = "https://api.atlassian.com/oauth/token/accessible-resources"
+)
+
+// ConnectScopes is the space-delimited 3LO scope set the Connect flow requests.
+// read/write:jira-work cover the board-claim ticket actions the per-user client
+// performs; read:jira-user covers /rest/api/3/myself, which the callback reads
+// to derive the bound account (read:me covers only api.atlassian.com/me, not
+// Jira's /myself); offline_access is REQUIRED to be issued a refresh token at
+// all (without it Atlassian returns only an access token, and there's nothing
+// durable to store).
+const ConnectScopes = "read:jira-work write:jira-work read:jira-user read:me offline_access"
+
+// ErrTokenEndpoint wraps a refusal from the Atlassian token endpoint (e.g.
+// invalid_grant on an exhausted/rotated refresh token), as distinct from an
+// endpoint that was unavailable or could not be reached. Callers can
+// errors.Is it to tell "the stored refresh token is dead, re-Connect" apart
+// from "try again".
+var ErrTokenEndpoint = errors.New("jiraoauth: token endpoint error")
+
+// The operations a StatusError names.
+const (
+	opToken     = "token request"
+	opResources = "accessible-resources request"
+)
+
+// StatusError is an answer from one of Atlassian's OAuth endpoints that is a
+// failure: a non-200 status, or the token endpoint's error member on a 200.
+// Class says whether the endpoint refused the request or was unavailable
+// (upstream.Classified), which is what decides whether retrying the same
+// request can help.
+type StatusError struct {
+	Op         string
+	StatusCode int
+	// Code is the token endpoint's OAuth error code (invalid_grant), empty
+	// when the answer carried none.
+	Code        string
+	BodyExcerpt string
+	Class       upstream.Class
+}
+
+func (e *StatusError) Error() string {
+	detail := e.BodyExcerpt
+	if e.Code != "" && !strings.Contains(detail, e.Code) {
+		detail = e.Code + ": " + detail
+	}
+	return fmt.Sprintf("jiraoauth: %s: status %d: %s", e.Op, e.StatusCode, detail)
+}
+
+// UpstreamClass implements upstream.Classified.
+func (e *StatusError) UpstreamClass() upstream.Class { return e.Class }
+
+// Unwrap makes a refusal from the token endpoint an ErrTokenEndpoint: the
+// endpoint answered and said no, which the same refresh token will hear again.
+// An unavailable or rate-limiting endpoint said nothing about the token.
+func (e *StatusError) Unwrap() error {
+	if e.Op == opToken && e.Class != upstream.Transient && e.Class != upstream.RateLimited {
+		return ErrTokenEndpoint
+	}
+	return nil
+}
+
+func newStatusError(op string, resp *http.Response, body []byte) *StatusError {
+	var oauth struct {
+		Error string `json:"error"`
+	}
+	_ = json.Unmarshal(body, &oauth)
+	return &StatusError{
+		Op:          op,
+		StatusCode:  resp.StatusCode,
+		Code:        oauthErrorCode(oauth.Error),
+		BodyExcerpt: upstream.Excerpt(body),
+		Class:       upstream.ClassifyResponse(resp.StatusCode, resp.Header, body),
+	}
+}
+
+// oauthErrorCode is s when it reads as an OAuth error code, and "" otherwise.
+// RFC 6749 limits a code to a short run of printable ASCII; anything else is
+// body text, which reaches an error message only through upstream.Excerpt.
+func oauthErrorCode(s string) string {
+	if len(s) > 64 {
+		return ""
+	}
+	for _, r := range s {
+		if r < 0x21 || r > 0x7e || r == '"' || r == '\\' {
+			return ""
+		}
+	}
+	return s
+}
+
+// transportError is err, a request that failed in transit, marked as an
+// upstream outcome unless the caller abandoned it. The mark is what tells a
+// caller the Atlassian endpoint was unreachable rather than that something on
+// this host failed.
+func transportError(ctx context.Context, err error) error {
+	if _, counted := upstream.ClassifyTransport(ctx, err); counted {
+		return &upstream.TransportError{Err: err}
+	}
+	return err
+}
+
+// Token is one minted access token, the rotated refresh token returned
+// alongside it, and the access token's expiry (computed from expires_in).
+type Token struct {
+	AccessToken  string
+	RefreshToken string
+	ExpiresAt    time.Time
+}
+
+// Resource is one Atlassian site an access token can reach, from the
+// accessible-resources lookup. ID is the cloud_id; URL is the site origin
+// (e.g. "https://acme.atlassian.net") the Connect callback matches the org's
+// configured host against.
+type Resource struct {
+	ID   string `json:"id"`
+	URL  string `json:"url"`
+	Name string `json:"name"`
+}
+
+// Minter performs the stateless Atlassian OAuth HTTP exchanges. Safe for
+// concurrent use; it holds no per-flow state (the rotation write-back +
+// caching live in TokenCache).
+type Minter struct {
+	httpClient *http.Client
+	// tokenURL / resourcesURL default to the Atlassian endpoints; tests
+	// override them to point at an httptest server. Left at the constants in
+	// production.
+	tokenURL     string
+	resourcesURL string
+	// now is injectable for tests; production leaves it nil and uses time.Now.
+	// The expiry on a minted Token is computed off it.
+	now func() time.Time
+}
+
+// NewMinter returns a Minter with a 30s-timeout HTTP client.
+func NewMinter() *Minter {
+	return &Minter{
+		httpClient:   telemetry.TracedHTTPClient(30*time.Second, "jira"),
+		tokenURL:     tokenEndpoint,
+		resourcesURL: accessibleResourcesEndpoint,
+	}
+}
+
+// NewMinterWithEndpoints is NewMinter with the token and accessible-resources
+// endpoints replaced, for tests outside this package that stand up a fake
+// Atlassian.
+func NewMinterWithEndpoints(tokenURL, resourcesURL string) *Minter {
+	m := NewMinter()
+	m.tokenURL = tokenURL
+	m.resourcesURL = resourcesURL
+	return m
+}
+
+func (m *Minter) timeNow() time.Time {
+	if m.now != nil {
+		return m.now()
+	}
+	return time.Now()
+}
+
+// AuthorizeURL builds the consent redirect the Connect start handler sends the
+// browser to. audience pins the api.atlassian.com gateway, prompt=consent
+// forces the refresh-token-issuing consent screen, and state carries the
+// caller's CSRF nonce. The scope set is ConnectScopes (offline_access included
+// so a refresh token is issued).
+func AuthorizeURL(app jira.OAuthApp, redirectURI, state string) string {
+	q := url.Values{}
+	q.Set("audience", "api.atlassian.com")
+	q.Set("client_id", app.ClientID)
+	q.Set("scope", ConnectScopes)
+	q.Set("redirect_uri", redirectURI)
+	q.Set("state", state)
+	q.Set("response_type", "code")
+	q.Set("prompt", "consent")
+	return authorizeEndpoint + "?" + q.Encode()
+}
+
+// ExchangeCode trades an authorization code for the first token set
+// (grant_type=authorization_code). redirectURI must match the one the authorize
+// redirect used.
+func (m *Minter) ExchangeCode(ctx context.Context, app jira.OAuthApp, code, redirectURI string) (Token, error) {
+	form := url.Values{}
+	form.Set("grant_type", "authorization_code")
+	form.Set("client_id", app.ClientID)
+	form.Set("client_secret", app.ClientSecret)
+	form.Set("code", code)
+	form.Set("redirect_uri", redirectURI)
+	return m.requestToken(ctx, form)
+}
+
+// Refresh trades a refresh token for a new token set
+// (grant_type=refresh_token). The returned Token.RefreshToken is the ROTATED
+// token — Atlassian invalidates the one passed in, so the caller MUST persist
+// the new one. An invalid_grant from a dead/already-rotated token is a
+// *StatusError that is also ErrTokenEndpoint.
+func (m *Minter) Refresh(ctx context.Context, app jira.OAuthApp, refreshToken string) (Token, error) {
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("client_id", app.ClientID)
+	form.Set("client_secret", app.ClientSecret)
+	form.Set("refresh_token", refreshToken)
+	return m.requestToken(ctx, form)
+}
+
+// tokenResponse is the subset of the Atlassian token endpoint response we use.
+// On a logical failure the endpoint returns a non-2xx with an `error` /
+// `error_description` body instead.
+type tokenResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	ExpiresIn    int    `json:"expires_in"`
+	Error        string `json:"error"`
+}
+
+// requestToken POSTs the form to the token endpoint and parses the result.
+// A transport failure is an *upstream.TransportError, unless the caller
+// abandoned the request; a non-200 or an `error` field is a *StatusError, and
+// a refusal is also ErrTokenEndpoint so the rotation-dead case is
+// distinguishable.
+func (m *Minter) requestToken(ctx context.Context, form url.Values) (_ Token, err error) {
+	// The OAuth round trip hides inside credential resolution: a token-cache
+	// miss ends up here doing a full refresh against Atlassian, and under
+	// the caller's span alone that time is charged to whatever the client
+	// was used for afterwards. grant_type separates a first exchange from a
+	// rotation; the form's other fields are credentials and go nowhere near
+	// a span.
+	//
+	// Named error return so the failure exits below don't each need a
+	// status line. Fixed message, not err.Error() — a failed token
+	// request's error text carries the endpoint's own error message.
+	ctx, span := tracer.Start(ctx, "jiraoauth.token_request",
+		trace.WithAttributes(telemetry.Disposition(form.Get("grant_type"))))
+	defer span.End()
+	defer func() {
+		if err != nil {
+			span.SetStatus(codes.Error, "token request failed")
+		}
+	}()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.tokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return Token{}, fmt.Errorf("jiraoauth: build token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := m.httpClient.Do(req)
+	if err != nil {
+		return Token{}, transportError(ctx, fmt.Errorf("jiraoauth: token request: %w", err))
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, rerr := upstream.ReadErrorBody(resp.Body)
+		if rerr != nil {
+			return Token{}, transportError(ctx, fmt.Errorf("jiraoauth: read token response: %w", rerr))
+		}
+		return Token{}, newStatusError(opToken, resp, body)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return Token{}, transportError(ctx, fmt.Errorf("jiraoauth: read token response: %w", err))
+	}
+	var parsed tokenResponse
+	if json.Unmarshal(body, &parsed) != nil {
+		// A body that is not a token response is described by its size, never
+		// quoted: upstream bodies do not reach a log line.
+		return Token{}, fmt.Errorf("jiraoauth: parse token response: %s", upstream.Excerpt(body))
+	}
+	if parsed.Error != "" {
+		// An error member is a refusal whatever status carried it, and a 200
+		// classifies as OK.
+		se := newStatusError(opToken, resp, body)
+		se.Class = upstream.Rejected
+		return Token{}, se
+	}
+	if parsed.AccessToken == "" {
+		return Token{}, fmt.Errorf("%w: response missing access_token", ErrTokenEndpoint)
+	}
+	if parsed.RefreshToken == "" {
+		// offline_access should always yield a refresh token; its absence means
+		// the app wasn't granted the scope, and storing an envelope with no
+		// refresh token would brick the next mint. Fail loudly.
+		return Token{}, fmt.Errorf("%w: response missing refresh_token (offline_access scope required)", ErrTokenEndpoint)
+	}
+	return Token{
+		AccessToken:  parsed.AccessToken,
+		RefreshToken: parsed.RefreshToken,
+		ExpiresAt:    m.timeNow().Add(time.Duration(parsed.ExpiresIn) * time.Second),
+	}, nil
+}
+
+// AccessibleResources lists the Atlassian sites the access token can reach
+// (GET .../accessible-resources, Bearer). The Connect callback matches the
+// org's configured site host against these to resolve the cloud_id.
+func (m *Minter) AccessibleResources(ctx context.Context, accessToken string) ([]Resource, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.resourcesURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("jiraoauth: build accessible-resources request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := m.httpClient.Do(req)
+	if err != nil {
+		return nil, transportError(ctx, fmt.Errorf("jiraoauth: accessible-resources request: %w", err))
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, rerr := upstream.ReadErrorBody(resp.Body)
+		if rerr != nil {
+			return nil, transportError(ctx, fmt.Errorf("jiraoauth: read accessible-resources response: %w", rerr))
+		}
+		return nil, newStatusError(opResources, resp, body)
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
+	var resources []Resource
+	if err := json.Unmarshal(body, &resources); err != nil {
+		return nil, fmt.Errorf("jiraoauth: parse accessible-resources: %w", err)
+	}
+	return resources, nil
+}

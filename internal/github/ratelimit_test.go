@@ -205,7 +205,7 @@ func TestPrimaryBudgetExhausted(t *testing.T) {
 // TestGet_Genuine403PassesThroughUnchanged pins that an ordinary permission
 // 403 (no Retry-After, no secondary-rate-limit text) is NOT treated as rate
 // limiting — it returns the normal *HTTPError, with its body intact, on the
-// first attempt. This is what internal/tracker's 403/404-skip discrimination
+// first attempt. This is what internal/eventing/tracker's 403/404-skip discrimination
 // (see tracker.go discoverGitHub) relies on.
 func TestGet_Genuine403PassesThroughUnchanged(t *testing.T) {
 	var calls int32

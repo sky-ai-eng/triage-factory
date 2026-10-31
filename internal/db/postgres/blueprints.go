@@ -12,8 +12,8 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/wakebus"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/internal/wakebus"
 )
 
 // blueprintStore is the Postgres impl of db.BlueprintStore. Holds two pools:

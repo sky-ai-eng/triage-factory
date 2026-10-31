@@ -13,7 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
-	"github.com/sky-ai-eng/triage-factory/internal/wakebus"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/wakebus"
 )
 
 // conversationStore is the Postgres impl of db.ConversationStore over the

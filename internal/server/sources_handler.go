@@ -8,7 +8,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/notify"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -109,7 +109,7 @@ type orgSourcePatch struct {
 //
 // Off means off. From this write the source is not polled, its events mint no
 // tasks, and no credential for it resolves for an agent — the three gates read
-// the row this route writes (internal/poller, internal/routing, and
+// the row this route writes (internal/eventing/poller, internal/routing, and
 // eventsource.Disabled at the agenthost and credential-provisioning funnels).
 // A switch that only stopped one of those would be the worst kind of control:
 // an admin who turns Jira off to take load off their instance, or to cut a

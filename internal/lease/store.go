@@ -9,7 +9,7 @@ import (
 
 // queryer is the minimal *sql.DB surface the store needs — a plain pooled
 // connection is fine for acquire/renew/read (short single-statement
-// UPDATEs/INSERTs); only the tf_ctl LISTEN side (internal/ctlbus) needs a
+// UPDATEs/INSERTs); only the tf_ctl LISTEN side (internal/pgnotify/ctlbus) needs a
 // dedicated session-mode connection.
 type queryer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)

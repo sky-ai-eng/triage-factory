@@ -18,10 +18,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
-	"github.com/sky-ai-eng/triage-factory/internal/grantmirror"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
+	"github.com/sky-ai-eng/triage-factory/internal/github/grantmirror"
+	"github.com/sky-ai-eng/triage-factory/internal/github/reachcache"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
-	"github.com/sky-ai-eng/triage-factory/internal/reachcache"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 

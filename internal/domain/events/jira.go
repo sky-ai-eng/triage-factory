@@ -39,7 +39,7 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 // Only the ids a save adds are checked, so an id can go stale afterwards: a
 // status, priority or issue type deleted in Jira, a status a project's
 // workflow drops, or a project the team stops tracking leaves a filter that
-// never matches it. The drift pass (internal/jiradrift) reads the same
+// never matches it. The drift pass (internal/jira/jiradrift) reads the same
 // catalogs as the save and tells the team's admins.
 
 // JiraCatalog is a Jira catalog whose values a predicate field names by id.

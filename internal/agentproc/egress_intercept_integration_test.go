@@ -15,7 +15,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/cabundle"
 	"github.com/sky-ai-eng/triage-factory/internal/cell"
-	"github.com/sky-ai-eng/triage-factory/internal/egressproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/egressproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 

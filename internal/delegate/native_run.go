@@ -25,8 +25,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
-	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
+	"github.com/sky-ai-eng/triage-factory/internal/wsevent/toast"
 )
 
 // toolHostDialTimeout bounds how long setup waits for the in-jail server to

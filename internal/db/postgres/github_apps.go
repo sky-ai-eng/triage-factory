@@ -11,7 +11,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
+	"github.com/sky-ai-eng/triage-factory/internal/github/githubapp"
 )
 
 // gitHubAppsStore holds two pools. app is the claims-checked request-handler

@@ -7,7 +7,7 @@ import (
 	"go.opentelemetry.io/otel"
 
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
-	"github.com/sky-ai-eng/triage-factory/internal/ctlbus"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/ctlbus"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/secretenv"
 )

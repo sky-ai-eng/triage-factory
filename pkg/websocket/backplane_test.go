@@ -13,7 +13,7 @@ import (
 )
 
 // fakeBackplane records every event Publish receives, standing in for
-// internal/wsbackplane.Backplane in unit tests that don't want a real
+// internal/pgnotify/wsbackplane.Backplane in unit tests that don't want a real
 // Postgres connection.
 type fakeBackplane struct {
 	mu        sync.Mutex

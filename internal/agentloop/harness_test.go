@@ -13,7 +13,7 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/inference"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/inference"
 )
 
 // The loop harness: an in-memory transcript, a scripted provider, and a

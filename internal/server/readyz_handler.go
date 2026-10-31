@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/poller"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/poller"
 )
 
 // readyzTimeout bounds the DB ping the "db" hard check performs — long

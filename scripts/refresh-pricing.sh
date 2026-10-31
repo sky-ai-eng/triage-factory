@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Refresh the vendored model-pricing snapshot the native-loop inference package
-# prices from (internal/inference/pricing_datasheet.json + pricing_provenance.json).
+# prices from (internal/llm/inference/pricing_datasheet.json + pricing_provenance.json).
 #
 # It re-fetches the authoritative upstream — LiteLLM's
 # model_prices_and_context_window.json, the source getbifrost.ai/datasheet
@@ -18,8 +18,8 @@
 #
 # Run daily by .github/workflows/refresh-pricing.yml. Three safety nets guard
 # the gap between fast-moving upstream data and the frozen cost formula:
-#   1. The verification gate (go test ./internal/inference
-#      ./internal/modelcatalog -run
+#   1. The verification gate (go test ./internal/llm/inference
+#      ./internal/llm/modelcatalog -run
 #      'TestPricing|TestCostForUsage|TestComputeTextCost') — malformed JSON, a
 #      model TF offers losing its row or a rate it bills on, a cache rate
 #      inconsistent with its input rate, or a broken cost formula fails it
@@ -32,7 +32,7 @@
 #      picker iff it is mode=chat with tool support, has a >=64k input window,
 #      carries both base prices (and a cache-read price if it claims caching),
 #      and its litellm_provider maps to a bifrost provider in the TF-owned
-#      internal/inference/provider_map.json (never written by this script).
+#      internal/llm/inference/provider_map.json (never written by this script).
 #      Eligibility is computed fresh each run, never written anywhere —
 #      nothing is dropped from (or added to) the datasheet over it. The
 #      refresh REFUSES (no PR) when a GATED entry (mode+tools+window, a looser
@@ -46,9 +46,9 @@ cd "$REPO_ROOT"
 
 UPSTREAM_REPO="BerriAI/litellm"
 UPSTREAM_FILE="model_prices_and_context_window.json"
-DATASHEET="internal/inference/pricing_datasheet.json"
-PROVENANCE="internal/inference/pricing_provenance.json"
-PROVIDER_MAP="internal/inference/provider_map.json"
+DATASHEET="internal/llm/inference/pricing_datasheet.json"
+PROVENANCE="internal/llm/inference/pricing_provenance.json"
+PROVIDER_MAP="internal/llm/inference/provider_map.json"
 
 command -v python3 >/dev/null 2>&1 || { echo "python3 not found on PATH" >&2; exit 1; }
 
@@ -247,4 +247,4 @@ for model, provider in eligible:
 print("PRICING_ELIGIBLE_MODELS_END")
 PY
 
-echo "Done. Verify with: go test ./internal/inference ./internal/modelcatalog -run 'TestPricing|TestCostForUsage|TestComputeTextCost'"
+echo "Done. Verify with: go test ./internal/llm/inference ./internal/llm/modelcatalog -run 'TestPricing|TestCostForUsage|TestComputeTextCost'"

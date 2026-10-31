@@ -21,7 +21,7 @@ func TestClassifyPath(t *testing.T) {
 		{"internal/db/dbtest/conformance.go", classTests},
 		{"internal/db/pgtest/harness.go", classTests},
 		{"harness/tf-harness-tools/tests/parity.rs", classTests},
-		{"internal/tracker/testdata/pr.json", classTests},
+		{"internal/eventing/tracker/testdata/pr.json", classTests},
 
 		{"README.md", classDocs},
 		{"specs/tracked-events.md", classDocs},

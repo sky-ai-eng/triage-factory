@@ -5,18 +5,18 @@ import (
 	"fmt"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/credprovision"
+	"github.com/sky-ai-eng/triage-factory/internal/cred/credprovision"
+	"github.com/sky-ai-eng/triage-factory/internal/cred/llmcred"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
-	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
+	"github.com/sky-ai-eng/triage-factory/internal/github/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
-	"github.com/sky-ai-eng/triage-factory/internal/linearoauth"
-	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
-	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
+	"github.com/sky-ai-eng/triage-factory/internal/linear/linearoauth"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
+	"github.com/sky-ai-eng/triage-factory/internal/systemjob/systemllm"
 )
 
 // buildRunCredentials wires the per-org run-credential seam shared by
@@ -51,7 +51,7 @@ import (
 func (a *App) buildRunCredentials() error {
 	if !a.local() {
 		a.runSecrets = agentproc.NewSystemSecretsReader(a.stores.Secrets)
-		// Shared LLM-credential resolver (internal/llmcred, TFAC-616): the one
+		// Shared LLM-credential resolver (internal/cred/llmcred, TFAC-616): the one
 		// seam every brain-side Bedrock/Anthropic resolution flows through.
 		// Multi mode only — local keeps the ambient path (runSecrets nil), so
 		// role mode there simply degrades to the host subscription. Env knobs

@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/envfile"
+	"github.com/sky-ai-eng/triage-factory/cmd/internal/envfile"
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 )
 

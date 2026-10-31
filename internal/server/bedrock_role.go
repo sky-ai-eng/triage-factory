@@ -12,9 +12,9 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/sky-ai-eng/triage-factory/internal/cred/llmcred"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
-	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 

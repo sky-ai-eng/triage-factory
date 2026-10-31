@@ -3,7 +3,7 @@
 How Triage Factory learns which GitHub App installations an org holds, and
 how the changes an admin makes on GitHub's side flow back in. The rules here are
 tenancy boundaries, not conventions — read this before changing
-`internal/db/github_app_backfill.go`, `internal/grantmirror`, or the bind
+`internal/db/github_app_backfill.go`, `internal/github/grantmirror`, or the bind
 ceremony in `internal/server/github_managed_bind.go`.
 
 ## Installation vs. grant

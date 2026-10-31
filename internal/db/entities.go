@@ -18,7 +18,7 @@ import (
 //
 // Audiences:
 //
-//   - Poller / tracker (internal/tracker) — FindOrCreate on every
+//   - Poller / tracker (internal/eventing/tracker) — FindOrCreate on every
 //     poll cycle, then the snapshot CAS (alone, or fused with the
 //     transitions it implies through EventQueueStore) when the snapshot
 //     diff shows a drift, and the two state+snapshot writes —
@@ -29,7 +29,7 @@ import (
 //     tasks through.
 //   - Delegation memory + resume + materialize (internal/delegate) —
 //     Get to fetch entity context attached to a task.
-//   - AI scorer (internal/ai) — Descriptions to bulk-load the
+//   - AI scorer (internal/systemjob/scorer) — Descriptions to bulk-load the
 //     flattened body text for prompt context without pulling
 //     snapshot_json.
 //   - Server panels (factory snapshot, dashboard) — Get / GetBySource /

@@ -22,10 +22,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/conversationevent"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/wsevent/conversationevent"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 

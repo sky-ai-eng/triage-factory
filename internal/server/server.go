@@ -19,25 +19,25 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
-	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventbus"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/ingest"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/poller"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
-	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
-	"github.com/sky-ai-eng/triage-factory/internal/ingest"
+	"github.com/sky-ai-eng/triage-factory/internal/github/githubapp"
+	"github.com/sky-ai-eng/triage-factory/internal/github/reachcache"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
-	"github.com/sky-ai-eng/triage-factory/internal/jiraoauth"
+	"github.com/sky-ai-eng/triage-factory/internal/jira/jiraoauth"
 	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
-	"github.com/sky-ai-eng/triage-factory/internal/knowledgeevent"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
-	"github.com/sky-ai-eng/triage-factory/internal/linearoauth"
+	"github.com/sky-ai-eng/triage-factory/internal/linear/linearoauth"
 	"github.com/sky-ai-eng/triage-factory/internal/notify"
 	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
-	"github.com/sky-ai-eng/triage-factory/internal/poller"
-	"github.com/sky-ai-eng/triage-factory/internal/reachcache"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/wsevent/knowledgeevent"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -2067,7 +2067,7 @@ func (s *Server) SetEventBus(bus *eventbus.Bus) {
 // *wsbackplane.Backplane satisfies it directly. Every CloseUserConnections
 // call site closes THIS pod's local sockets first, then calls PublishKick so
 // every OTHER control pod does the same for its own — see
-// internal/wsbackplane's PublishKick doc for why that ordering is what keeps
+// internal/pgnotify/wsbackplane's PublishKick doc for why that ordering is what keeps
 // the kick from echoing.
 type WSKicker interface {
 	PublishKick(ctx context.Context, userID, sid, orgID string, code int, reason string)

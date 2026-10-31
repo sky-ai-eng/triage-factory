@@ -2,7 +2,7 @@
 
 How a sandboxed run reaches the network, and how to add support for a new
 package ecosystem. The working guide for each lane is next to its code:
-`internal/egressproxy/CLAUDE.md` (tunnel) and `internal/egressrelay/CLAUDE.md`
+`internal/proxy/egressproxy/CLAUDE.md` (tunnel) and `internal/proxy/egressrelay/CLAUDE.md`
 (fetch relay). The design of record is
 [`specs/sandbox-backends/`](../../specs/sandbox-backends/README.md) §6.1.
 
@@ -12,7 +12,7 @@ proxies, is closed to it. A new kind of jail-facing listener is unreachable
 until it is added to `JailEndpoints` (`internal/agentproc/proxies.go`,
 `cmd/runsidecar/runtime.go`); a new fetch relay is added automatically from
 the catalog. Under every lane sits the compiled-in internal denylist
-(`internal/egressproxy/denylist.go`: cloud metadata, private ranges, the
+(`internal/proxy/egressproxy/denylist.go`: cloud metadata, private ranges, the
 sandbox pool, sibling gateways), which nothing can widen.
 
 ## The three lanes
@@ -20,7 +20,7 @@ sandbox pool, sibling gateways), which nothing can widen.
 | Lane | Mechanism | For | Add support by |
 | --- | --- | --- | --- |
 | **Tunnel** | CONNECT proxy with a hostname allowlist. TLS is terminated under a CA minted for each engagement, and registries are read-only (GET and HEAD, plus POSTs a registry lists as reads). | Registries that serve artifacts from their own or a dedicated hostname | An allowlist entry in `egressproxy.DefaultRegistries` |
-| **Fetch relay** | Host-side HTTP relay that follows redirects itself and checks every hop against the denylist | Registries that redirect artifacts into shared multi-tenant storage | A catalog entry in `internal/egressrelay/catalog.go` |
+| **Fetch relay** | Host-side HTTP relay that follows redirects itself and checks every hop against the denylist | Registries that redirect artifacts into shared multi-tenant storage | A catalog entry in `internal/proxy/egressrelay/catalog.go` |
 | **Credential** | Per-run proxies that attach a credential (git, `gh`) | Authenticated egress | Its own design and a security review; see [Privilege separation](../users/security/privilege-separation.md) |
 
 The API proxies behind `tfac exec` verbs (GitHub, Jira, Linear) are not lanes:
@@ -72,8 +72,8 @@ A tunnel entry also needs:
 ## Adding support
 
 1. Probe the ecosystem with the command above and paste the output in your PR.
-2. Tunnel: follow `internal/egressproxy/CLAUDE.md`.
-3. Fetch relay: follow `internal/egressrelay/CLAUDE.md` (catalog entry; tests
+2. Tunnel: follow `internal/proxy/egressproxy/CLAUDE.md`.
+3. Fetch relay: follow `internal/proxy/egressrelay/CLAUDE.md` (catalog entry; tests
    including the SSRF-refusal case and a `-tags live` fetch of an artifact
    that redirects; the broker env allowlist; a row in the table above).
 4. Credentialed egress: expect a security review, not a checklist.

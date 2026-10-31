@@ -1,9 +1,9 @@
 package app
 
 import (
-	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
-	"github.com/sky-ai-eng/triage-factory/internal/memoryprovision"
-	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
+	"github.com/sky-ai-eng/triage-factory/internal/cred/llmcred"
+	"github.com/sky-ai-eng/triage-factory/internal/systemjob/memoryprovision"
+	"github.com/sky-ai-eng/triage-factory/internal/systemjob/systemllm"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 

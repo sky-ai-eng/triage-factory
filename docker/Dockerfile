@@ -296,10 +296,10 @@ RUN set -eux; \
 # would have no credentials anyway. GitHub's official linux tarballs are static,
 # so this musl-alpine-jail-safe binary execs fine in the rootfs.
 #
-# The pin's source of truth is internal/ghpin — local mode fetches the same
+# The pin's source of truth is internal/ghcli/ghpin — local mode fetches the same
 # release at runtime, and a Dockerfile ARG can't read Go, so the version and the
 # two linux checksums are spelled in both places with a drift test
-# (internal/ghpin) asserting they agree. Bump BOTH sides together: pick a newer
+# (internal/ghcli/ghpin) asserting they agree. Bump BOTH sides together: pick a newer
 # tag from https://github.com/cli/cli/releases and refresh every SHA256 from that
 # release's gh_<VER>_checksums.txt. These ARGs are also what the test workflow
 # reads to stage gh for the wire tests, which drive this exact binary to pin what

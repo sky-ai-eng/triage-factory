@@ -12,7 +12,7 @@ import (
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/ingest"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/ingest"
 )
 
 // slackTitleMaxRunes bounds a Slack entity's title — enough to be

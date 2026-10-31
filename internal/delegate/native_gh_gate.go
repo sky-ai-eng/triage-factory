@@ -3,8 +3,8 @@
 //
 // Posting a review, creating a repository, and opening a pull request are
 // REFUSED, and refused again — for real — at the credential injector every
-// request on this channel passes through (internal/ghinjector, keyed on the
-// shared classifier in internal/ghwrite). For those three this file is early
+// request on this channel passes through (internal/ghcli/ghinjector, keyed on the
+// shared classifier in internal/ghcli/ghwrite). For those three this file is early
 // UX in front of an enforced policy: the same answer arrives better from a
 // matcher than from a proxy, since a refusal here costs one tool call and names
 // the redirect in the model's own terms, where the injector's arrives as a 403

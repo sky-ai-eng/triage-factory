@@ -10,7 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/inference"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/inference"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 

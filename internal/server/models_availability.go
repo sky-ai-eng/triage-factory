@@ -9,14 +9,14 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/modelaccess"
-	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
-	"github.com/sky-ai-eng/triage-factory/internal/modelprobe"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/modelaccess"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/modelprobe"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// modelProber is the slice of internal/modelprobe the test endpoints call: one
+// modelProber is the slice of internal/llm/modelprobe the test endpoints call: one
 // paid request establishing whether this org's credentials can invoke one
 // model. A narrow interface so a handler test can answer with a canned verdict
 // instead of standing up a provider.

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
 )
 
 // The catalog that ships must join. Both files are compiled in, so this failing

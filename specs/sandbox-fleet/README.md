@@ -41,7 +41,7 @@ Authoring + selection flow:
 
 Three of the four dimensions collapse onto two existing host-side components: the
 **rootfs builder** (`internal/sandbox/rootfs*.go`) and the **forward proxy**
-(`internal/llmproxy`, `internal/gitproxy`, wired via the `ConfigureProxies`
+(`internal/proxy/llmproxy`, `internal/proxy/gitproxy`, wired via the `ConfigureProxies`
 callback in `internal/sandbox/sandbox.go`). The fourth (credentials) is the one
 unsolved piece and is explicitly out of v1 — see §7.
 
@@ -214,7 +214,7 @@ toolchain nor the egress. A recipe would then be a base plus the selected
 suites, still resolving to one hash under the keying below. Today the base
 rootfs ships every suite at once and `egressproxy.DefaultRegistries` admits
 every registry they use; the registry and relay entries a suite would carry
-are already data (`egressproxy.Registry`, `internal/egressrelay/catalog.go`).
+are already data (`egressproxy.Registry`, `internal/proxy/egressrelay/catalog.go`).
 
 Keying (settled 2026-07-07, jointly with the TFAC-71 design): **two-layer,
 name → recipe → hash.** A profile binds a *named* catalog entry; the entry is

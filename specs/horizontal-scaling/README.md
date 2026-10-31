@@ -82,20 +82,20 @@ of what this design **reuses rather than builds**:
 | --- | --- | --- |
 | Durable conversation queue, `FOR UPDATE SKIP LOCKED` claim | `internal/db/postgres/conversation_queue.go` (`ClaimNextConversation`), `internal/delegate/dispatch.go` | Built (TFAC-13). Claim is already N-worker-safe; the dispatcher loop is per-process. |
 | `Delegate()` = pure DB write | `internal/delegate/delegate.go` → `BlueprintStore.CreateRunWithFirstStepSystem` | Built. Manual + auto delegation already work cross-machine unchanged — no spawner needed at the firing site. |
-| Durable event queue for router-bound events | `internal/ingest/ingest.go`, `internal/db/postgres/event_queue.go` | Built. Single drain worker; `SKIP LOCKED` claim exists. |
+| Durable event queue for router-bound events | `internal/eventing/ingest/ingest.go`, `internal/db/postgres/event_queue.go` | Built. Single drain worker; `SKIP LOCKED` claim exists. |
 | Executor-ownership stamp (the active claim's `claims.executor_id`/`boot_epoch`) | pg baseline (`claims`), stamped by `stampExecutor` (`process_registry.go`) | Written, consumed by nothing — the intended lease hook. |
 | `RunController` indirection for cancel/steer/interrupt/permission | `internal/delegate/process_registry.go` | Built (TFAC-305). In-process impl resolves `s.procs`/`s.cancels`/`s.permPending`; the seam exists precisely so a DB-signaling impl can slot in. |
 | Durable workspace snapshots + cross-host rehydrate | `internal/storage` (S3: `<org>/<blueprint_run>/workspace.tar`), `ensureWorkspace`/`workspaceRecoverable` (`resume.go`) | Built. A parked run can resume on a different machine today. |
 | Self-contained multi-mode runs | TFAC-545: per-run clone with App installation token; per-run `llmproxy`/`gitproxy`/`egressproxy` on the veth IP; agenthost socket per run | Built. **Credentials and toolchain co-locate with whichever host executes the run** — nothing about a run's execution needs the API box. |
 | Local admission control | `internal/hostmem` + `TF_DISPATCH_MEM_FLOOR_MB` (TFAC-552); `internal/hostdisk` + `TF_DISPATCH_DISK_FLOOR_MB` (TFAC-1177); `TF_MAX_CONCURRENT_CLAIMS` clamped to 256 | Built, per-process — exactly the right shape per-executor. Contract to preserve: **gating never mutates queue state**; a tight host simply stops claiming and work flows to headroom with zero coordination. |
-| Replica-safe auth | RS256 JWKS verify (`internal/auth/verify`) + DB-backed sessions (`internal/sessions`) | Built. Any API replica can serve any browser; no sticky sessions. |
+| Replica-safe auth | RS256 JWKS verify (`internal/auth/verify`) + DB-backed sessions (`internal/auth/sessions`) | Built. Any API replica can serve any browser; no sticky sessions. |
 | Replica-safe delegation fences | `blueprint_runs_event_trigger_fence` UNIQUE `(triggering_event_id, trigger_id)`; task dedup partial index; `pending_firings` dedup index | Built. Two processes firing the same event/trigger produce exactly one run. |
 | Advisory-lock precedents | `auth_provision.go`, `team_github_repos.go`, ee/slack | Built for single-operation correctness (not leadership). |
 | Poll cursors + conditional-request state in DB | `entities.snapshot_json` (the snapshot-diff baseline), repo pulls-poll-state (ETags) | Built. Poll position survives a process swap; a cold handoff re-lists as free 304s. |
 | Cost/usage accounting + quotas | `llm_spend` view, the `…/usage` reads under `/api/me`, `/api/orgs/{org_id}` and `/api/teams/{team_id}`, daily + per-team caps, `system_llm_runs` | Built (TFAC-449). The **spend** layer of the dashboard exists; the **infrastructure** layer (this spec §8) does not. |
 | Re-seedable per-org disk state | `internal/paths` under `TF_STATE_ROOT`; bounded evictable bare/worktree cache (TFAC-60) | Built per-pod. Durable copies live in Postgres + S3; everything on executor disk is cache. |
 | Readiness probe | `GET /readyz` (`internal/server/readyz_handler.go`, TFAC-573) | Built. Hard-fails DB/migrations/poller-alive → 503 for LB rotation; soft-reports poll staleness, GitHub rate budget, active runs. The split makes the poller hard-check **lease-conditional** (§8.3) — as shipped it would 503 every standby control pod. |
-| Budgeted, resumable poll cycles | TFAC-571 (GitHub) | Built, with an **in-process** resume point. A cycle cut short by `ErrRateLimited` saves a round-robin repo cursor on the poller (`Manager.ghCursor`, `internal/poller/manager.go`), so the next cycle **on that same process** resumes at the first unrefreshed repo instead of starving the tail of a large tracked set. The cursor is in-memory by TFAC-571's explicit v1 allowance: a leader handoff (or a restart) loses it and the successor starts at the head. What makes that benign is the row above, not this one — the durable per-repo ETag state means a cold re-list is mostly free 304s (§3). |
+| Budgeted, resumable poll cycles | TFAC-571 (GitHub) | Built, with an **in-process** resume point. A cycle cut short by `ErrRateLimited` saves a round-robin repo cursor on the poller (`Manager.ghCursor`, `internal/eventing/poller/manager.go`), so the next cycle **on that same process** resumes at the first unrefreshed repo instead of starving the tail of a large tracked set. The cursor is in-memory by TFAC-571's explicit v1 allowance: a leader handoff (or a restart) loses it and the successor starts at the head. What makes that benign is the row above, not this one — the durable per-repo ETag state means a cold re-list is mostly free 304s (§3). |
 
 And the inverse — what at design time **assumed exactly one process**
 (the gap list this design closes; ✅ = closed by the shipped P0s,
@@ -1289,9 +1289,9 @@ moving to somewhere privileged enough to host one.** The observation
 is that the five brain-side LLM paths split by capability surface,
 not by subsystem:
 
-- **Pure completions** — the scorer (`internal/ai/scorer.go`),
+- **Pure completions** — the scorer (`internal/systemjob/scorer/scorer.go`),
   classifier stage 1 (`internal/projectclassify`), and the repo
-  profiler (`internal/repoprofile`) are toolless: no `AllowedTools`,
+  profiler (`internal/systemjob/repoprofile`) are toolless: no `AllowedTools`,
   no `Cwd` (an empty scratch dir), no git proxy, no agenthost. Prompt
   in, JSON out. The gVisor jail exists to contain T3 — an SDK RCE
   reaching tools, files, or network — a surface these jobs never had.

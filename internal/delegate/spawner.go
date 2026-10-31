@@ -28,11 +28,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
-	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/hostmem"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/pushpolicy"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
@@ -71,7 +71,7 @@ type FiringWaker interface {
 // EventPublisher is the bus-publish seam the spawner uses to mirror run
 // lifecycle onto the event bus (TFAC-592), so an EE subscriber
 // (ExtensionAPI.Bus()) can observe run status/activity alongside the
-// websocket broadcast. Mirrors internal/tracker's Publisher shape; the
+// websocket broadcast. Mirrors internal/eventing/tracker's Publisher shape; the
 // plain *eventbus.Bus satisfies this interface directly.
 type EventPublisher interface {
 	Publish(evt domain.Event)
@@ -287,7 +287,7 @@ type Spawner struct {
 	ghResolver ghclient.Resolver                                                // per-(org, owner) GitHub client source (App token in multi, keychain PAT in local)
 	runSecrets agentproc.SecretsReader                                          // per-org LLM-credential reader (nil in local → ambient subscription; system-door reader in multi)
 	modelFor   func(context.Context, string, string) (domain.TeamModels, error) // per-(org, team) model resolver: the default a step inherits plus the set every model is held to
-	// llmResolver is the shared LLM-credential resolver (internal/llmcred,
+	// llmResolver is the shared LLM-credential resolver (internal/cred/llmcred,
 	// TFAC-616) — role-mode Bedrock orgs mint short-lived STS session creds
 	// through it. Used only where a run resolves its own credentials in
 	// process (local): the RunOptions.LLMResolver it feeds is never consulted
@@ -841,7 +841,7 @@ func (s *Spawner) SetPresenceChecker(pc PresenceChecker) {
 // status/activity onto (TFAC-592). Post-construction, same pattern as
 // SetFiringWaker — the bus is built before the spawner in app
 // composition, but the setter keeps internal/delegate decoupled from
-// internal/eventbus's concrete type. Safe to call once at startup; nil
+// internal/eventing/eventbus's concrete type. Safe to call once at startup; nil
 // publisher (the default) disables the bus mirror entirely (tests).
 func (s *Spawner) SetEventPublisher(p EventPublisher) {
 	s.mu.Lock()
@@ -951,7 +951,7 @@ func (s *Spawner) SetRunCredentialResolvers(resolver ghclient.Resolver, secrets 
 	s.modelFor = modelFor
 }
 
-// SetLLMResolver wires the shared LLM-credential resolver (internal/llmcred,
+// SetLLMResolver wires the shared LLM-credential resolver (internal/cred/llmcred,
 // TFAC-616) so a role-mode Bedrock org mints short-lived STS session creds
 // for its delegated runs on the all/local path. Set once at startup like
 // SetRunCredentialResolvers; nil in local mode (ambient) and in tests.

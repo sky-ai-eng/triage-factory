@@ -110,8 +110,8 @@ Everything that is the product is shared and identical on every backend:
 | --- | --- |
 | The native agent loop | `internal/agentloop`, in the executor process |
 | The tool host binary and its frame protocol | `harness/tf-harness-tools`, `agentloop.ToolHost` |
-| The credential sidecar and every policy it enforces: git push policy, the gh channel's refusals and audit, the exec verbs, the LLM/git/egress proxies | `cmd/runsidecar`, `internal/gitproxy`, `internal/ghinjector`, `cmd/exec/agenthost` |
-| Credential provisioning and sealing | `internal/credprovision`, `internal/credseal` |
+| The credential sidecar and every policy it enforces: git push policy, the gh channel's refusals and audit, the exec verbs, the LLM/git/egress proxies | `cmd/runsidecar`, `internal/proxy/gitproxy`, `internal/ghcli/ghinjector`, `cmd/exec/agenthost` |
+| Credential provisioning and sealing | `internal/cred/credprovision`, `internal/cred/credseal` |
 | Run-tree contents: checkouts, knowledge, memory, skills | `internal/worktree`, `internal/delegate` |
 | The workspace capture format | `internal/worktree` capture manifest |
 | The cell's network: netns, veth, the gateway rules | `internal/sandbox` `RunNetwork`, through the cap-broker |
@@ -232,7 +232,7 @@ fails one does not meet the contract.
    other address fails.
 3. **The internal denylist is unreachable** from the jail, directly or
    through the sidecar: cloud metadata, private and link-local ranges, the
-   sandbox pool, other cells' sidecars (`internal/egressproxy/denylist.go`).
+   sandbox pool, other cells' sidecars (`internal/proxy/egressproxy/denylist.go`).
 4. **Cells are isolated from each other.** One jail cannot reach another
    cell's sidecar or read another cell's run tree.
 5. **The run tree is the jail's at `/work`.** Writes from the jail land in the
@@ -296,7 +296,7 @@ the egress policy is enforced once, in TF code:
 - **The sidecar authenticates its caller with a per-run token on every
   backend.** Every listener that holds a credential already does: the LLM,
   git and egress proxies, the gh injector and the API proxies. The fetch
-  relays hold none and take no token (`internal/egressrelay/relay.go`). On
+  relays hold none and take no token (`internal/proxy/egressrelay/relay.go`). On
   gVisor and on Firecracker, network position isolates cells: each veth leads
   to one sidecar, and the jail is admitted only to its sidecar's ports. A
   backend whose jails reached their sidecars over a shared network would have
@@ -304,7 +304,7 @@ the egress policy is enforced once, in TF code:
 
 ### 6.1 TLS interception in the sidecar
 
-The tunnel lane (`internal/egressproxy`) terminates TLS for every host it
+The tunnel lane (`internal/proxy/egressproxy`) terminates TLS for every host it
 admits. A tunnel that saw only the hostname in the `CONNECT` line would leave
 two gaps:
 
@@ -575,7 +575,7 @@ localhost, carries on: that state is what a warm resume exists to keep.
 Making the values stable across engagements instead would mean keeping the
 CA's key and the proxies' per-run tokens past the engagement they were minted
 for, which §6.1 forbids for the key and the proxies' trust model
-(`internal/egressproxy`) forbids for the tokens. The agent is told by an
+(`internal/proxy/egressproxy`) forbids for the tokens. The agent is told by an
 injected notice of its own, beside `injection:executor-changed` and in place
 of `injection:new-sandbox`: the
 processes it started before the pause are still running, and any that reach

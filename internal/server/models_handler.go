@@ -8,8 +8,8 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/modelaccess"
-	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/modelaccess"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -130,7 +130,7 @@ const (
 	// It outranks every other value, INCLUDING a stored green — a credential
 	// unbound after a successful probe leaves a row that was true when written
 	// and is not true now, and the derived fact is the one that can still be
-	// checked. Least-fixable-first, the same ordering internal/eventsource
+	// checked. Least-fixable-first, the same ordering internal/eventing/eventsource
 	// uses, and the same argument modelaccess.Check already makes internally:
 	// sending someone to test a provider they never connected is sending them
 	// to do useless work.

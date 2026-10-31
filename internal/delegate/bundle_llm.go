@@ -3,10 +3,10 @@ package delegate
 import (
 	"context"
 
-	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
+	"github.com/sky-ai-eng/triage-factory/internal/cred/llmcred"
 )
 
-// bundleLLMResolver is the narrow slice of internal/llmcred the spawner uses
+// bundleLLMResolver is the narrow slice of internal/cred/llmcred the spawner uses
 // to resolve a delegated conversation's LLM material on the all/local path.
 // Declared here so tests can stub it; the production impl is *llmcred.Resolver.
 type bundleLLMResolver interface {

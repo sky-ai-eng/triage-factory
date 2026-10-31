@@ -4,7 +4,7 @@
 // The backend (POST /api/github/reachability, POST /api/jira/reachability)
 // always returns 200 with a `reachable` verdict, except a malformed URL, which
 // is a 400. See internal/server/reachability_handlers.go +
-// internal/reachability/reachability.go.
+// internal/server/reachability/reachability.go.
 
 import { apiJSON, HttpError } from './apiClient'
 

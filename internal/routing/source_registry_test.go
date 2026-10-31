@@ -537,7 +537,7 @@ func TestResolveSourceOwner_ContractShapes(t *testing.T) {
 	})
 }
 
-// TestRouterBound pins the durability predicate internal/ingest gates its
+// TestRouterBound pins the durability predicate internal/eventing/ingest gates its
 // outbox enqueue on: the built-in github:/jira: sources are always
 // router-bound, system events never are, and a registered source's prefix
 // joins the set (and leaves it again on ResetSources).

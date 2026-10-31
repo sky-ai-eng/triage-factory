@@ -14,7 +14,7 @@ import (
 //
 // Haiku is the dated spelling, which is what the vendor publishes it under and
 // what the pricing datasheet carries; Sonnet and Opus are the undated current
-// ids. A test in internal/modelcatalog pins all three to native registry keys,
+// ids. A test in internal/llm/modelcatalog pins all three to native registry keys,
 // which is what keeps a value the settings UI offers from being one the ledger
 // cannot price.
 const (
@@ -31,7 +31,7 @@ const (
 //
 // They are named here, beside the native ids, because the schema's dialect
 // defaults are written in one vocabulary or the other and a stored default has
-// to be spelled somewhere Go can see. A test in internal/modelcatalog pins each
+// to be spelled somewhere Go can see. A test in internal/llm/modelcatalog pins each
 // to the SDK registry, the same way the native ids are pinned.
 //
 // Which of the two vocabularies an enable-set is written in follows from the

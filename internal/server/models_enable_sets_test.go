@@ -17,7 +17,7 @@ import (
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -102,7 +102,7 @@ func TestTeamModelsList_NarrowsToTheEnabledSets(t *testing.T) {
 	}
 	// Named by position rather than by constant: what this exercises is set
 	// algebra over whatever this deployment offers, and pinning the alias list
-	// itself is internal/modelcatalog's job.
+	// itself is internal/llm/modelcatalog's job.
 	wide, narrow, other := keys[0], keys[1], keys[2]
 
 	read := func() []string {

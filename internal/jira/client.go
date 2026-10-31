@@ -183,7 +183,7 @@ func DataCenterPAT(baseURL, pat string) Config {
 }
 
 // ProxyPlaceholder builds a Config for a Jira client that talks to a per-run
-// credential proxy (internal/apiproxy) rather than to Jira directly: baseURL is
+// credential proxy (internal/proxy/apiproxy) rather than to Jira directly: baseURL is
 // the proxy's address and placeholder is the per-run token the proxy swaps for
 // the org's real Cloud-Basic / Data-Center-Bearer auth on the upstream hop, so
 // the client — and the process holding it — never touches a durable Jira
@@ -232,7 +232,7 @@ func CloudAPIToken(baseURL, email, token string) Config {
 // CloudOAuth builds a Config for an Atlassian Cloud OAuth 3LO access token:
 // Bearer auth, REST v3, against the api.atlassian.com gateway for the resolved
 // site (cloud_id). The access token is short-lived and minted on demand from
-// the stored refresh token (see internal/jiraoauth); this constructor just
+// the stored refresh token (see internal/jira/jiraoauth); this constructor just
 // wraps whatever access token the caller minted. The bearer scheme is shared
 // with DataCenterPAT — only the gateway BaseURL + v3 differ — so no request-
 // building code changes for the OAuth path.
@@ -1568,7 +1568,7 @@ type currentUserResponse struct {
 //
 // This is the ONE source of truth for that precedence. auth.JiraUser.StableID()
 // (what writes user_jira_identities.account_id at bind time), the snapshot
-// derivation in internal/tracker (what writes events.assignee_account_id), and
+// derivation in internal/eventing/tracker (what writes events.assignee_account_id), and
 // the claim guard below all route through it, so the value the router joins on
 // (assignee-centric owner routing) can never drift from the identity it's
 // matched against. A name-only fallback while the stored identity holds the key

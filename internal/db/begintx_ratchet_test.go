@@ -43,7 +43,7 @@ var beginTxRatchet = []string{
 	// returning an error — an operator reads the difference between a failed
 	// insert and a failed commit — so it keeps its own tx and wraps both
 	// post-begin failures where they are logged.
-	"internal/wsbackplane/publish.go",
+	"internal/pgnotify/wsbackplane/publish.go",
 }
 
 func TestRatchet_HandRolledTransactionsStayAccountedFor(t *testing.T) {

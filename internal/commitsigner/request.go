@@ -11,9 +11,9 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
-	"github.com/sky-ai-eng/triage-factory/internal/ctlbus"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/ctlbus"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 )
 

@@ -11,7 +11,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
-	"github.com/sky-ai-eng/triage-factory/internal/jiraoauth"
+	"github.com/sky-ai-eng/triage-factory/internal/jira/jiraoauth"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/zalando/go-keyring"
 )

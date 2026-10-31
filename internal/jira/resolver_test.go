@@ -564,7 +564,7 @@ func TestCanonicalHostAndKey(t *testing.T) {
 
 // fakeOAuthSource records the args ForUser hands it and returns a canned
 // token. It's the seam the AuthMethodCloudOAuth branch delegates the mint +
-// rotation write-back to (internal/jiraoauth in prod).
+// rotation write-back to (internal/jira/jiraoauth in prod).
 type fakeOAuthSource struct {
 	tok                      UserAccessToken
 	err                      error

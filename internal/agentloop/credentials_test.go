@@ -10,8 +10,8 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/inference"
-	"github.com/sky-ai-eng/triage-factory/internal/llmproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/llm/inference"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/llmproxy"
 )
 
 // TestEnvCredentials_ACancelledCallReleasesWithoutWaiting is the shape of a

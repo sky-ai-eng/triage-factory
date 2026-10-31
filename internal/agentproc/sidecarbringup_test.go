@@ -15,8 +15,8 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
-	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
-	"github.com/sky-ai-eng/triage-factory/internal/credseal"
+	"github.com/sky-ai-eng/triage-factory/internal/cred/credbundle"
+	"github.com/sky-ai-eng/triage-factory/internal/cred/credseal"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )

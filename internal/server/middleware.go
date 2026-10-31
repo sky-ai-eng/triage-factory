@@ -15,11 +15,11 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/sky-ai-eng/triage-factory/internal/apitokens"
+	"github.com/sky-ai-eng/triage-factory/internal/auth/apitokens"
+	"github.com/sky-ai-eng/triage-factory/internal/auth/sessions"
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
-	"github.com/sky-ai-eng/triage-factory/internal/sessions"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 )
 
@@ -624,7 +624,7 @@ func (s *Server) refreshSessionInline(ctx context.Context, sess *sessions.Sessio
 		// Detached background ctx with a 35s hard cap so a stuck refresh
 		// can't pin the singleflight group forever. The sessions.Lookup /
 		// UpdateJWT calls inside route through the admin pool by Store
-		// construction (see internal/sessions docstring) — no JWT
+		// construction (see internal/auth/sessions docstring) — no JWT
 		// claims required for the refresh dance.
 		fnCtx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 		defer cancel()

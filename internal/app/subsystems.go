@@ -5,26 +5,26 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/sky-ai-eng/triage-factory/internal/ai"
+	"github.com/sky-ai-eng/triage-factory/internal/cred/llmcred"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
-	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
-	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
-	"github.com/sky-ai-eng/triage-factory/internal/grantmirror"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventbus"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/ingest"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/poller"
+	"github.com/sky-ai-eng/triage-factory/internal/github/grantmirror"
+	"github.com/sky-ai-eng/triage-factory/internal/github/reachcache"
 	"github.com/sky-ai-eng/triage-factory/internal/hostmem"
-	"github.com/sky-ai-eng/triage-factory/internal/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
-	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
 	"github.com/sky-ai-eng/triage-factory/internal/marketplacestats"
-	"github.com/sky-ai-eng/triage-factory/internal/poller"
-	"github.com/sky-ai-eng/triage-factory/internal/reachcache"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
-	"github.com/sky-ai-eng/triage-factory/internal/repoprofile"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
-	"github.com/sky-ai-eng/triage-factory/internal/syslimit"
-	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
+	"github.com/sky-ai-eng/triage-factory/internal/systemjob/repoprofile"
+	"github.com/sky-ai-eng/triage-factory/internal/systemjob/scorer"
+	"github.com/sky-ai-eng/triage-factory/internal/systemjob/syslimit"
+	"github.com/sky-ai-eng/triage-factory/internal/systemjob/systemllm"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -68,7 +68,7 @@ func (a *App) buildAI() {
 	// substitute.
 	systemJobModel := systemllm.NewModelFunc(a.stores.Orgs)
 
-	a.scorer = ai.NewManager(a.stores.Scores, a.stores.Entities, a.runSecrets, llmcred.SystemEnvResolver(a.llmResolver, "tf-scorer"), a.llmRecorder, sysLimiter, systemJobModel, a.scorerCallbacks())
+	a.scorer = scorer.NewManager(a.stores.Scores, a.stores.Entities, a.runSecrets, llmcred.SystemEnvResolver(a.llmResolver, "tf-scorer"), a.llmRecorder, sysLimiter, systemJobModel, a.scorerCallbacks())
 	// SetScorerTrigger wires the brain-lease-aware relay wrapper
 	// (relay.go), not a.scorer.Trigger directly: the config-save handler
 	// that calls this may run on a standby control pod, where a.scorer
@@ -499,8 +499,8 @@ func (a *App) buildRouting() error {
 // starts and when its scores commit, and a wake for the re-derive worker. A
 // failed or partial cycle reaches no one but the log, so OnTasksSkipped and
 // OnError stay unset.
-func (a *App) scorerCallbacks() ai.RunnerCallbacks {
-	return ai.RunnerCallbacks{
+func (a *App) scorerCallbacks() scorer.RunnerCallbacks {
+	return scorer.RunnerCallbacks{
 		OnScoringStarted: func(orgID string, taskIDs []string) {
 			a.wsHub.Broadcast(websocket.Event{
 				Type:  "scoring_started",

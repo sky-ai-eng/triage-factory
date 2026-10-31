@@ -11,8 +11,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/sky-ai-eng/triage-factory/cmd/internal/envfile"
 	"github.com/sky-ai-eng/triage-factory/cmd/jwkinit"
-	"github.com/sky-ai-eng/triage-factory/internal/envfile"
 )
 
 // generatedSecrets are the values init generates, each 32 random bytes as

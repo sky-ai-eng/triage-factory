@@ -11,7 +11,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/sky-ai-eng/triage-factory/internal/envfile"
+	"github.com/sky-ai-eng/triage-factory/cmd/internal/envfile"
 )
 
 // initOptions are init's flags.

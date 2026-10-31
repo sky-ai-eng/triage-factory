@@ -10,11 +10,11 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/aead"
-	"github.com/sky-ai-eng/triage-factory/internal/apitokens"
+	"github.com/sky-ai-eng/triage-factory/internal/auth/apitokens"
+	"github.com/sky-ai-eng/triage-factory/internal/auth/sessions"
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
-	"github.com/sky-ai-eng/triage-factory/internal/sessions"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 

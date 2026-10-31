@@ -22,7 +22,7 @@ If you ever find yourself multiplying tasks by team, or making the bot a special
 
 ## What `dedup_key` actually is (grounded — do not reinvent)
 
-`dedup_key` is **set by the event emitter** (`internal/tracker/diff.go`), and today it is `""` for almost everything. It carries a value only for genuine open-set discriminators:
+`dedup_key` is **set by the event emitter** (`internal/eventing/tracker/diff.go`), and today it is `""` for almost everything. It carries a value only for genuine open-set discriminators:
 
 - `github:pr:label_added` / `label_removed` → the **label name**
 - `jira:issue:status_changed` → the **status**

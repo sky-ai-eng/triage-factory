@@ -165,7 +165,7 @@ func (c *Client) WithCredential(credential string) *Client {
 }
 
 // NewProxyClient builds a client that talks to a per-run credential proxy
-// (internal/apiproxy) rather than to GitHub directly: proxyURL is the proxy's
+// (internal/proxy/apiproxy) rather than to GitHub directly: proxyURL is the proxy's
 // bare address and placeholder is the per-run token the proxy authenticates and
 // swaps for the real credential on the upstream hop, so this client — and the
 // process holding it — never touches a durable GitHub token (Property B).

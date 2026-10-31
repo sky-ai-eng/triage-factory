@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/gitproxy"
 )
 
 // These tests are the point of the whole dispatcher: an SSH-shaped session

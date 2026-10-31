@@ -42,14 +42,14 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 
-	"github.com/sky-ai-eng/triage-factory/internal/apitokens"
+	"github.com/sky-ai-eng/triage-factory/internal/auth/apitokens"
+	"github.com/sky-ai-eng/triage-factory/internal/auth/sessions"
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
-	"github.com/sky-ai-eng/triage-factory/internal/sessions"
 )
 
 // ---------- entitlement: license the SSO feature for this test binary ----------

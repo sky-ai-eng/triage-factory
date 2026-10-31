@@ -38,7 +38,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
-	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventbus"
 )
 
 // slackLifecycleNoMatchCopy is the taskless_no_handler / taskless_no_owner

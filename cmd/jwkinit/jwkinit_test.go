@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/sky-ai-eng/triage-factory/internal/envfile"
+	"github.com/sky-ai-eng/triage-factory/cmd/internal/envfile"
 )
 
 // TestMintServiceRoleToken verifies the long-lived admin token is an RS256 JWT

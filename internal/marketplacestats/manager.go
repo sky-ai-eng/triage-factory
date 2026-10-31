@@ -3,7 +3,7 @@ package marketplacestats
 import "sync"
 
 // Manager owns per-org stats-aggregation Runners, mirroring the scorer /
-// profiler / classifier / reconciler managers (internal/ai/manager.go,
+// profiler / classifier / reconciler managers (internal/systemjob/scorer/manager.go,
 // internal/reconcile/manager.go). Each org gets its own Runner — its own
 // trigger channel, its own single-flight cycle gate — so a slow cycle on
 // one tenant doesn't head-of-line-block another's.

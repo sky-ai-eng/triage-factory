@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
+	"github.com/sky-ai-eng/triage-factory/internal/github/githubapp"
 )
 
 // tokenExpiryGuard is how long before a token's stated expiry the cache

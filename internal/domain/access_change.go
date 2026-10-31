@@ -325,7 +325,7 @@ func AccessDetailSSODomain(domain string) string {
 // the secret itself exists in one place and it is not this one.
 //
 // This builder lives in domain rather than beside the audit helpers in
-// internal/server because internal/apitokens writes the row (it composes the
+// internal/server because internal/auth/apitokens writes the row (it composes the
 // audit INSERT into the same transaction as the token write, and importing the
 // server package for a shape would be a cycle) while the audit viewer renders
 // it. Two writers, one shape.

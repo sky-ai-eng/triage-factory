@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
-	"github.com/sky-ai-eng/triage-factory/internal/toast"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventbus"
+	"github.com/sky-ai-eng/triage-factory/internal/wsevent/toast"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 

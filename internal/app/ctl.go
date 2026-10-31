@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
-	"github.com/sky-ai-eng/triage-factory/internal/ctlbus"
 	"github.com/sky-ai-eng/triage-factory/internal/pgnotify"
-	"github.com/sky-ai-eng/triage-factory/internal/wsbackplane"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/ctlbus"
+	"github.com/sky-ai-eng/triage-factory/internal/pgnotify/wsbackplane"
 )
 
 // startCtlListener starts THE tf_ctl LISTEN connection for this process:
