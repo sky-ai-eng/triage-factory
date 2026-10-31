@@ -276,11 +276,13 @@ type DeliverableStore interface {
 	ListArtifactMatchesByOrgSystem(ctx context.Context, orgID string, entityIDs, reviewIDs []string) ([]domain.Deliverable, error)
 
 	// ListNonTerminalBySystem returns every deliverable for the org whose
-	// (kind, state) is still reconcilable — PR draft|open, review pending,
-	// branch pushed (domain.IsReconcilableNonTerminal). It is the deliverable
-	// reconciler's per-cycle working set (TFAC-464), org-wide and bounded:
-	// terminal deliverables (merged/closed/submitted/dismissed/deleted) drop
-	// out, so the set shrinks as work resolves.
+	// (kind, state) is still reconcilable — PR draft|open, branch pushed
+	// (domain.IsReconcilableNonTerminal). It is the deliverable reconciler's
+	// per-cycle working set, org-wide and bounded: terminal deliverables
+	// (merged/closed/submitted/dismissed/deleted) drop out, so the set shrinks
+	// as work resolves. A pending review is not in it: it is staged TF-side and
+	// has no GitHub object to reconcile until a person's approval posts it, at
+	// which point it is already terminal.
 	//
 	// Admin-pool / org-wide in Postgres — the same BYPASSRLS, org-scoped
 	// shape the scorer's UnscoredTasks and EntityStore's

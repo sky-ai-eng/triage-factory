@@ -7,7 +7,8 @@ import { toast } from './Toast/toastStore'
 import { DeliverableRow } from './DeliverableRow'
 
 // DeliverableList — a conversation's deliverables, and the approval surface the
-// RunStation dock's popover raises. One row per deliverable: a kind icon + the
+// Run page raises. It is mounted in one place: the popover behind the
+// RunStation dock's approval button. One row per deliverable: a kind icon + the
 // target + a state badge + an external link. Paged conversation-scoped from
 // POST /api/agent/conversations/{id}/deliverables/list; the component owns its
 // own fetch so a consumer stays a one-liner, and mounts on open → lazy-fetch.
@@ -26,8 +27,8 @@ import { DeliverableRow } from './DeliverableRow'
 // The row rendering itself lives in DeliverableRow.tsx, shared with the
 // bot-activity audit feed. pull_request / review rows open their approval
 // overlays (PendingPROverlay / ReviewOverlay) by deliverable id via
-// onOpenApproval — those overlays are owned by the parent (Board / RunDetail),
-// so this list never duplicates them. Every other kind (branch / issue /
+// onOpenApproval — those overlays are owned by RunDetail, so this list never
+// duplicates them. Every other kind (branch / issue /
 // comment), and any row when no handler is wired, just links out to `url`.
 interface Props {
   conversationId: string

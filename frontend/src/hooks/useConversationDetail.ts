@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { Message, Conversation, Deliverable, Task, TranscriptPage, WSEvent } from '../types'
-import { apiJSON, apiListAll, HttpError, httpErrorMessage } from '../lib/apiClient'
+import type { Message, Conversation, Task, TranscriptPage, WSEvent } from '../types'
+import { apiJSON, HttpError, httpErrorMessage } from '../lib/apiClient'
 import { isActiveConversation, isPermissionTerminalStatus } from '../lib/conversationStatus'
 import { useWebSocket } from './useWebSocket'
 import { usePermissionQueues } from './usePermissionQueues'
@@ -15,13 +15,6 @@ export interface ConversationDetailState {
   conversation: Conversation | null
   task: Task | null
   messages: Message[]
-  /** Every deliverable this conversation produced (branch / PR / review / issue / comment),
-   *  newest first — every page POST /api/agent/conversations/{id}/deliverables/list returns.
-   *  Kept live alongside `conversation` so the approval list + resolve-all confirmation
-   *  repaint when an approve/dismiss in another tab changes the set (TFAC-384 §6).
-   *  Cross-reference conversation.pending_deliverable_ids to get the *unresolved* subset
-   *  (the ready-review predicate needs the conversation projection, not just deliverable.state). */
-  deliverables: Deliverable[]
   loading: boolean
   notFound: boolean
   error: string | null
@@ -33,10 +26,10 @@ export interface ConversationDetailState {
    *  promise settles when the POST round-trip finishes — callers may await
    *  it (e.g. to disable buttons) or fire-and-forget. */
   resolvePermission: (toolCallID: string, decision: PermissionDecisionInput) => Promise<void>
-  /** Silently re-pull the conversation row + its deliverable set (no loading flash, unlike
-   *  refetch). Used after a per-item approve/dismiss so the derived approval
-   *  surface (has_unresolved_deliverables + the list) updates in place without
-   *  blanking the whole station to a spinner mid-resolve. */
+  /** Silently re-pull the conversation row (no loading flash, unlike refetch).
+   *  Used after a per-item approve/dismiss so the derived approval surface
+   *  (has_unresolved_deliverables, pending_deliverable_ids) updates in place
+   *  without blanking the whole station to a spinner mid-resolve. */
   softRefresh: () => void
   /** True while history remains behind the held transcript. The transcript
    *  read is bounded, so a long conversation opens on its tail; this is what tells a
@@ -99,7 +92,6 @@ export function useConversationDetail(conversationID: string | undefined): Conve
   const [conversation, setConversation] = useState<Conversation | null>(null)
   const [task, setTask] = useState<Task | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
-  const [deliverables, setDeliverables] = useState<Deliverable[]>([])
   const [loading, setLoading] = useState(true)
   const [notFound, setNotFound] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -236,24 +228,11 @@ export function useConversationDetail(conversationID: string | undefined): Conve
     }
   }, [])
 
-  // Pull the conversation's deliverable set fresh. Shared by the initial load, the WS
-  // handlers, and the reconcile poll so an approve/dismiss anywhere (this tab or
-  // another) repaints the approval list. Best-effort: a transient failure leaves
-  // the prior set in place rather than blanking the surface mid-resolve. Guards
-  // on lastConversationIDRef so a slow fetch for a since-navigated-away conversation is discarded
-  // rather than clobbering the current conversation's deliverables.
-  const refetchDeliverables = useCallback((id: string) => {
-    apiListAll<Deliverable>(`/api/agent/conversations/${id}/deliverables/list`)
-      .then((data) => {
-        if (id === lastConversationIDRef.current) setDeliverables(data)
-      })
-      .catch(() => {})
-  }, [])
-
-  // softRefresh re-pulls the conversation row + deliverable set without the loading toggle
+  // softRefresh re-pulls the conversation row without the loading toggle
   // (refetch sets loading=true → the full-screen spinner). A per-item resolve
   // must update the derived approval surface in place, not flash the station.
-  // Same stale-navigation guard as refetchDeliverables.
+  // Guards on lastConversationIDRef so a slow read for a since-navigated-away
+  // conversation is discarded rather than clobbering the current one.
   const softRefresh = useCallback(() => {
     if (!conversationID) return
     const id = conversationID
@@ -262,8 +241,7 @@ export function useConversationDetail(conversationID: string | undefined): Conve
         if (id === lastConversationIDRef.current) setConversation(data)
       })
       .catch(() => {})
-    refetchDeliverables(id)
-  }, [conversationID, refetchDeliverables])
+  }, [conversationID])
 
   // Permission prompts run through the shared queue core (the same one the
   // board uses), filtered to this single conversation so the two surfaces can't diverge
@@ -341,7 +319,6 @@ export function useConversationDetail(conversationID: string | undefined): Conve
       setConversation(null)
       setTask(null)
       setMessages([])
-      setDeliverables([])
       // Nothing has been read for this conversation yet, so it is complete through
       // nothing — the load below re-establishes the watermark, and the conversation
       // row it fetches decides whether this one is owed any repair at all.
@@ -379,9 +356,6 @@ export function useConversationDetail(conversationID: string | undefined): Conve
         )
         if (cancelled) return
         setConversation(conversationData)
-        // The deliverable set drives the approval list; pull it in the same load so
-        // the cards are ready when the conversation paints (best-effort, non-blocking).
-        refetchDeliverables(conversationID)
 
         // Parallel: messages + task. The task read carries its failure rather
         // than throwing it, because the two are independent — a conversation whose task
@@ -456,18 +430,37 @@ export function useConversationDetail(conversationID: string | undefined): Conve
     return () => {
       cancelled = true
     }
-  }, [conversationID, refetchTick, dropConversation, refetchDeliverables])
+  }, [conversationID, refetchTick, dropConversation])
 
-  // Tier-2 deliverable reconciliation (TFAC-464): while the conversation view is open, poll
-  // the conversation-scoped refresh endpoint so externally-changed deliverables (a PR
-  // merged/closed on GitHub, a branch deleted, a review submitted) reflect
-  // without waiting for the background per-org cycle. The backend bounds the
-  // work to this conversation's non-terminal deliverables — a cheap no-op once they're all
-  // terminal — and broadcasts any transition as deliverable_updated, which the
-  // websocket handler below turns into a conversation refetch. On a dropped frame the
-  // {updated} count drives a defensive refetch so the view can't go stale.
-  //
-  // The same tick also repairs the transcript. A `message` frame is the only
+  // Reconcile the conversation's open deliverables against GitHub once per
+  // load, so a page opened on a run whose draft was marked ready, merged or
+  // closed out-of-band shows it without waiting for the next GitHub poll
+  // cycle. Once, not on an interval: each call is a GitHub request, and the
+  // poll cycle's own reconciler covers an open page from then on — every
+  // transition it makes arrives as a deliverable_updated frame the handler
+  // below refetches on. A transition this call makes is broadcast the same
+  // way; a nonzero `updated` also re-reads the conversation row in case that
+  // frame is dropped.
+  useEffect(() => {
+    if (!conversationID) return
+    let cancelled = false
+    apiJSON<{ updated?: number }>(
+      `/api/agent/conversations/${conversationID}/deliverables/refresh`,
+      { method: 'POST' },
+    )
+      .then((data) => {
+        if (cancelled || !data?.updated) return
+        return apiJSON<Conversation>(`/api/agent/conversations/${conversationID}`).then((row) => {
+          if (!cancelled && conversationID === lastConversationIDRef.current) setConversation(row)
+        })
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [conversationID])
+
+  // The 5s tick repairs the transcript. A `message` frame is the only
   // thing that appends a row between page loads, so anything emitted while the
   // socket was down — a reconnect, a suspended tab, a control-plane restart, or
   // a hub drop with the socket still up — would be missing until a full reload,
@@ -521,7 +514,9 @@ export function useConversationDetail(conversationID: string | undefined): Conve
     // A live conversation's row is re-read every tick too. Its claim's
     // activity stamp moves with every lease renewal and nothing broadcasts
     // that, so without the read the run station's idle readout would keep
-    // counting up from whatever stamp the page loaded with.
+    // counting up from whatever stamp the page loaded with. The same read
+    // keeps artifact_count current, which is what refreshes the Run page's
+    // artifact list while the run works.
     const refreshLiveConversation = () => {
       const current = conversationRef.current
       if (!current || !isActiveConversation(current)) return
@@ -534,32 +529,13 @@ export function useConversationDetail(conversationID: string | undefined): Conve
     const poll = () => {
       reconcileMessages()
       refreshLiveConversation()
-      apiJSON<{ updated?: number }>(
-        `/api/agent/conversations/${conversationID}/deliverables/refresh`,
-        {
-          method: 'POST',
-        },
-      )
-        .then((data) => {
-          if (cancelled || !data?.updated) return
-          // A transition landed — pull the conversation row + its deliverable set fresh in
-          // case the websocket broadcast was missed (the WS handler does the same
-          // on its event), so the derived approval surface can't go stale.
-          apiJSON<Conversation>(`/api/agent/conversations/${conversationID}`)
-            .then((data) => {
-              if (!cancelled) setConversation(data)
-            })
-            .catch(() => {})
-          if (!cancelled) refetchDeliverables(conversationID)
-        })
-        .catch(() => {})
     }
     const id = setInterval(poll, 5000)
     return () => {
       cancelled = true
       clearInterval(id)
     }
-  }, [conversationID, refetchDeliverables, foldMessageUsage])
+  }, [conversationID, foldMessageUsage])
 
   // Live updates. A `message` event appends, and folds whatever cost and token
   // usage the row carries into the held conversation's rollups so the spend and token
@@ -588,27 +564,24 @@ export function useConversationDetail(conversationID: string | undefined): Conve
           apiJSON<Conversation>(`/api/agent/conversations/${conversationID}`)
             .then((data) => {
               // Guard the async write against a navigation that landed while the
-              // fetch was in flight (same guard refetchDeliverables uses), so an
-              // old conversation's row can't clobber the new conversation's state.
+              // fetch was in flight (same guard softRefresh uses), so an old
+              // conversation's row can't clobber the new conversation's state.
               if (conversationID === lastConversationIDRef.current) setConversation(data)
             })
             .catch(() => {})
-          // A status flip can resolve the last deliverable (terminal-on-last) or
-          // surface a freshly-staged one — pull the set so the list repaints.
-          refetchDeliverables(conversationID)
         }
         if (event.type === 'deliverable_updated' && event.conversation_id === conversationID) {
-          // Reconciler (TFAC-464): a deliverable this conversation produced changed state
-          // on GitHub (or another tab approved/dismissed it). Refetch the conversation so
-          // its derived approval signal (has_unresolved_deliverables + counts)
-          // updates, and the deliverable set so the approval list repaints. The
-          // conversation's own status is unchanged, so no permission-queue drop here.
+          // A deliverable this conversation produced changed state on GitHub
+          // (the reconciler) or another tab approved/dismissed it. Refetch the
+          // conversation so its derived approval signal (has_unresolved_deliverables,
+          // counts, pending ids) updates; the lists the station mounts key their
+          // own refetch off that row. The conversation's own status is unchanged,
+          // so no permission-queue drop here.
           apiJSON<Conversation>(`/api/agent/conversations/${conversationID}`)
             .then((data) => {
               if (conversationID === lastConversationIDRef.current) setConversation(data)
             })
             .catch(() => {})
-          refetchDeliverables(conversationID)
         }
         // Both permission frames are refetch triggers, matching deliverable_updated
         // above: the socket says this conversation's pending set changed, the endpoint
@@ -620,7 +593,7 @@ export function useConversationDetail(conversationID: string | undefined): Conve
           refreshPermissions(conversationID)
         }
       },
-      [conversationID, refreshPermissions, dropConversation, refetchDeliverables, foldMessageUsage],
+      [conversationID, refreshPermissions, dropConversation, foldMessageUsage],
     ),
   )
 
@@ -628,7 +601,6 @@ export function useConversationDetail(conversationID: string | undefined): Conve
     conversation,
     task,
     messages,
-    deliverables,
     loading,
     notFound,
     error,
