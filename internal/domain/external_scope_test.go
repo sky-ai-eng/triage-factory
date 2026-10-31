@@ -43,7 +43,7 @@ func TestExternalObjectScope(t *testing.T) {
 func TestDeliverableActionCarriesTheDeliverableScope(t *testing.T) {
 	art := NewReviewDeliverable("octo/api", 7, "PR_kwDOnode", "abc", "conv-1")
 	art.Scope = "https://ghe.example.com"
-	act := DeliverableAction(&art, "user-1", ActionReviewSubmitted, DeliverableStateReviewPending, DeliverableStateReviewSubmitted, CredentialGitHubApp)
+	act := DeliverableAction(&art, PerformedByPerson, "user-1", ActionReviewSubmitted, DeliverableStateReviewPending, DeliverableStateReviewSubmitted, CredentialGitHubApp)
 	if act.Scope != art.Scope {
 		t.Errorf("action scope = %q, want the deliverable's %q", act.Scope, art.Scope)
 	}

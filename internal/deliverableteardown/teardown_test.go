@@ -175,7 +175,7 @@ func TestTeardown_ResolvesBothKinds(t *testing.T) {
 	}
 	deps := &fakeDeps{stores: stores, resolver: oneClientResolver{client: client}}
 
-	if err := Teardown(context.Background(), deps, "org", "task", "user-1"); err != nil {
+	if err := Teardown(context.Background(), deps, "org", "task", domain.PerformedByPerson, "user-1"); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
 
@@ -196,8 +196,8 @@ func TestTeardown_ResolvesBothKinds(t *testing.T) {
 		t.Fatalf("audit rows = %d, want 1 — only the PR close is an org-credential write", len(stores.recorded))
 	}
 	act := stores.recorded[0]
-	if act.Action != domain.ActionPRClosed || act.ActorUserID != "user-1" {
-		t.Errorf("audit row = (action %q, actor %q), want (pr_closed, user-1)", act.Action, act.ActorUserID)
+	if act.Action != domain.ActionPRClosed || act.ActorUserID != "user-1" || act.PerformedBy != domain.PerformedByPerson {
+		t.Errorf("audit row = (action %q, actor %q, performed by %q), want (pr_closed, user-1, person)", act.Action, act.ActorUserID, act.PerformedBy)
 	}
 	if act.FromState != domain.DeliverableStatePRDraft || act.ToState != domain.DeliverableStatePRClosed {
 		t.Errorf("audit transition = %q → %q, want draft → closed", act.FromState, act.ToState)
@@ -211,7 +211,8 @@ func TestTeardown_ResolvesBothKinds(t *testing.T) {
 
 // TestTeardown_AutonomousCloseNamesNoActor pins the System adapter's spelling:
 // an empty actor is what an event-driven close records, and it must survive the
-// row builder rather than being filled in with something.
+// row builder rather than being filled in with something. The row names TF as
+// its performer.
 func TestTeardown_AutonomousCloseNamesNoActor(t *testing.T) {
 	client, _ := closingGitHub(t)
 	stores := &fakeStores{
@@ -220,11 +221,11 @@ func TestTeardown_AutonomousCloseNamesNoActor(t *testing.T) {
 	}
 	deps := &fakeDeps{stores: stores, resolver: oneClientResolver{client: client}}
 
-	if err := Teardown(context.Background(), deps, "org", "task", ""); err != nil {
+	if err := Teardown(context.Background(), deps, "org", "task", domain.PerformedBySystem, ""); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
-	if len(stores.recorded) != 1 || stores.recorded[0].ActorUserID != "" {
-		t.Fatalf("audit rows = %+v, want exactly one naming no actor", stores.recorded)
+	if len(stores.recorded) != 1 || stores.recorded[0].ActorUserID != "" || stores.recorded[0].PerformedBy != domain.PerformedBySystem {
+		t.Fatalf("audit rows = %+v, want exactly one naming no actor, performed by the system", stores.recorded)
 	}
 }
 
@@ -244,7 +245,7 @@ func TestTeardown_ResolvedDeliverablesAreLeftAlone(t *testing.T) {
 	}
 	deps := &fakeDeps{stores: stores, resolver: oneClientResolver{client: client}}
 
-	if err := Teardown(context.Background(), deps, "org", "task", "user-1"); err != nil {
+	if err := Teardown(context.Background(), deps, "org", "task", domain.PerformedByPerson, "user-1"); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
 	if len(stores.upserted) != 0 || len(stores.recorded) != 0 || *closes != 0 {
@@ -266,7 +267,7 @@ func TestTeardown_BatchFailureClosesNothingOnGitHub(t *testing.T) {
 	}
 	deps := &fakeDeps{stores: stores, resolver: oneClientResolver{client: client}}
 
-	if err := Teardown(context.Background(), deps, "org", "task", "user-1"); err == nil {
+	if err := Teardown(context.Background(), deps, "org", "task", domain.PerformedByPerson, "user-1"); err == nil {
 		t.Fatal("Teardown returned nil; a failed batch must report so the caller can retry")
 	}
 	if *closes != 0 {
@@ -284,7 +285,7 @@ func TestTeardown_NoGitHubResolverStillFlips(t *testing.T) {
 	}
 	deps := &fakeDeps{stores: stores}
 
-	if err := Teardown(context.Background(), deps, "org", "task", "user-1"); err != nil {
+	if err := Teardown(context.Background(), deps, "org", "task", domain.PerformedByPerson, "user-1"); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
 	if len(stores.upserted) != 1 || stores.upserted[0].State != domain.DeliverableStatePRClosed {
@@ -312,7 +313,7 @@ func TestTeardown_ReadsTheResolverOnce(t *testing.T) {
 	}
 	deps := &fakeDeps{stores: stores, resolver: oneClientResolver{client: client}}
 
-	if err := Teardown(context.Background(), deps, "org", "task", "user-1"); err != nil {
+	if err := Teardown(context.Background(), deps, "org", "task", domain.PerformedByPerson, "user-1"); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
 	if deps.githubReads != 1 {
@@ -371,7 +372,7 @@ func TestTeardown_ClosesThePullRequestItsEntityNames(t *testing.T) {
 	}
 	deps := &fakeDeps{stores: stores, resolver: oneClientResolver{client: ghclient.NewClient(stub.URL, "pat")}}
 
-	if err := Teardown(context.Background(), deps, "org", "task", "user-1"); err != nil {
+	if err := Teardown(context.Background(), deps, "org", "task", domain.PerformedByPerson, "user-1"); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
 	if len(paths) != 1 || !strings.HasSuffix(paths[0], "/repos/owner/new-name/pulls/7") {

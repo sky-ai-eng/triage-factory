@@ -119,6 +119,7 @@ func seedSlackAction(t *testing.T, stores db.Stores, orgID, teamID, entityID, ta
 	if err := stores.ExternalActions.RecordSystem(context.Background(), orgID, domain.ExternalAction{
 		TeamID: teamID, Provider: domain.ProviderSlack, Scope: domain.SlackScope, Action: domain.ActionSlackMessagePosted,
 		Target: target, EntityID: entityID, URL: url, Credential: domain.CredentialSlackBot, DedupKey: dedupKey,
+		PerformedBy: domain.PerformedByAgent,
 	}); err != nil {
 		t.Fatalf("seed action %s: %v", dedupKey, err)
 	}

@@ -20,6 +20,7 @@ const action = (over: Partial<ActivityAction>): ActivityAction => ({
   provider: 'github',
   action: 'comment_posted',
   target: 'org/repo#18',
+  performed_by: 'agent',
   credential: 'github_app',
   occurred_at: '2026-08-01T00:00:00Z',
   ...over,

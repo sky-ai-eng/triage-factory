@@ -1238,6 +1238,7 @@ func recordIdentityAction(t *testing.T, s db.Stores, orgID, teamID, provider, sc
 	if err := s.ExternalActions.RecordSystem(context.Background(), orgID, domain.ExternalAction{
 		TeamID: teamID, Provider: provider, Scope: scope, Action: domain.ActionIssueCommentPosted,
 		Target: key, EntityID: entityID, URL: url, Credential: domain.CredentialNone, DedupKey: dedupKey,
+		PerformedBy: domain.PerformedByAgent,
 	}); err != nil {
 		t.Fatalf("seed action %s: %v", dedupKey, err)
 	}

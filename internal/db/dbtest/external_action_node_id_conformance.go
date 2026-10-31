@@ -58,6 +58,7 @@ func RunExternalActionNodeIDConformance(t *testing.T, mk ExternalActionNodeIDFac
 			ConversationID: f.ConversationID,
 			Credential:     domain.CredentialGitHubApp,
 			NodeID:         nodeID,
+			PerformedBy:    domain.PerformedByAgent,
 		}
 	}
 	prDeliverable := func(teamID, scope, repoPath string, number int, nodeID string) domain.Deliverable {

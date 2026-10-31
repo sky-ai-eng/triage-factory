@@ -39,6 +39,7 @@ func TestExternalActionStore_SQLite_RoundTrip(t *testing.T) {
 		Credential:     domain.CredentialGitHubApp,
 		DedupKey:       "pr_marked_ready:octo/repo#123:once",
 		DetailJSON:     `{"k":"v"}`,
+		PerformedBy:    domain.PerformedByAgent,
 	}
 	if err := stores.ExternalActions.Record(ctx, runmode.LocalDefaultOrgID, in); err != nil {
 		t.Fatalf("Record: %v", err)
@@ -64,13 +65,14 @@ func TestExternalActionStore_SQLite_RoundTrip(t *testing.T) {
 
 	// A system action: empty optionals (team/actor/from/to/external/url/detail) → NULL.
 	if err := stores.ExternalActions.RecordSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalAction{
-		OrgID:      runmode.LocalDefaultOrgID,
-		Provider:   domain.ProviderJira,
-		Scope:      "https://acme.atlassian.net",
-		Action:     domain.ActionIssueTransitioned,
-		Target:     "SKY-1",
-		Credential: domain.CredentialJiraOrg,
-		DedupKey:   "issue_transitioned:SKY-1:once",
+		OrgID:       runmode.LocalDefaultOrgID,
+		Provider:    domain.ProviderJira,
+		Scope:       "https://acme.atlassian.net",
+		Action:      domain.ActionIssueTransitioned,
+		Target:      "SKY-1",
+		Credential:  domain.CredentialJiraOrg,
+		DedupKey:    "issue_transitioned:SKY-1:once",
+		PerformedBy: domain.PerformedByAgent,
 	}); err != nil {
 		t.Fatalf("RecordSystem: %v", err)
 	}
@@ -104,6 +106,7 @@ func TestExternalActionStore_SQLite_BranchTwinDedup(t *testing.T) {
 			Provider: domain.ProviderGitHub, Scope: "https://github.com", Action: domain.ActionBranchPushed,
 			Target: "octo/repo", ExternalID: "refs/heads/feat", URL: url, ConversationID: conversationID,
 			ToState: domain.DeliverableStateBranchPushed, Credential: domain.CredentialGitHubApp, DedupKey: key,
+			PerformedBy: domain.PerformedByAgent,
 		}
 	}
 	// The hook fires first (the winner), then the proxy backstop with the same key.
@@ -133,7 +136,8 @@ func TestExternalActionStore_SQLite_BranchTwinDedup(t *testing.T) {
 	if err := stores.ExternalActions.RecordSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalAction{
 		OrgID: runmode.LocalDefaultOrgID, Provider: domain.ProviderGitHub, Scope: "https://github.com",
 		Action: domain.ActionBranchPushed, Target: "octo/repo", Credential: domain.CredentialGitHubApp,
-		DedupKey: domain.BranchPushDedupKey(conversationID, "repo-1", "refs/heads/feat", "def456"),
+		DedupKey:    domain.BranchPushDedupKey(conversationID, "repo-1", "refs/heads/feat", "def456"),
+		PerformedBy: domain.PerformedByAgent,
 	}); err != nil {
 		t.Fatalf("new-push Record: %v", err)
 	}
@@ -159,6 +163,7 @@ func TestExternalActionStore_SQLite_EmptyDedupAppendsEveryRow(t *testing.T) {
 	repeat := domain.ExternalAction{
 		OrgID: runmode.LocalDefaultOrgID, Provider: domain.ProviderGitHub, Scope: "https://github.com",
 		Action: domain.ActionPREdited, Target: "octo/repo#1", Credential: domain.CredentialGitHubApp,
+		PerformedBy: domain.PerformedByAgent,
 		// DedupKey deliberately empty — the store fills a uuid per insert.
 	}
 	for i := 0; i < 2; i++ {
@@ -216,6 +221,7 @@ func TestExternalActionStore_SQLite_ListFiltersAndPaging(t *testing.T) {
 			OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 			Provider: s.provider, Scope: "https://github.com", Action: s.action, Target: "t", ActorUserID: s.actor, ConversationID: conversationID,
 			Credential: domain.CredentialGitHubApp, DedupKey: "k" + string(rune('a'+i)),
+			PerformedBy: domain.PerformedByAgent,
 		}
 		if err := stores.ExternalActions.Record(ctx, runmode.LocalDefaultOrgID, e); err != nil {
 			t.Fatalf("seed %d: %v", i, err)
@@ -299,7 +305,8 @@ func TestExternalActionStore_SQLite_EgressDenialDedupPerConversation(t *testing.
 			OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 			Provider: domain.ProviderNetwork, Scope: domain.NetworkScope, Action: domain.ActionEgressDenied,
 			Target: target, ConversationID: conversationID, Credential: domain.CredentialNone,
-			DedupKey: domain.EgressDenialDedupKey(conversationID, target),
+			DedupKey:    domain.EgressDenialDedupKey(conversationID, target),
+			PerformedBy: domain.PerformedByAgent,
 		}
 	}
 
@@ -351,6 +358,7 @@ func TestExternalActionStore_SQLite_ListByConversation(t *testing.T) {
 			ID: id, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 			Provider: domain.ProviderGitHub, Scope: "https://github.com", Action: action, Target: "octo/repo",
 			ConversationID: conversationID, Credential: domain.CredentialGitHubApp,
+			PerformedBy: domain.PerformedByAgent,
 		}); err != nil {
 			t.Fatalf("record %s: %v", action, err)
 		}
