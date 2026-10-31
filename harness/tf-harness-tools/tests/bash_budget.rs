@@ -313,6 +313,29 @@ fn a_timeout_under_budget_still_reports_the_timeout() {
     );
 }
 
+/// A kill reaches a process the command started that moved to its own session
+/// with `setsid`, and so out of the process group the kill used to signal.
+#[test]
+fn a_kill_reaches_a_process_that_left_the_command_s_group() {
+    let cwd = tmp_cwd();
+    execute(
+        cwd.path().to_str().unwrap(),
+        &args_with_timeout("setsid sleep 30 & echo $! > escaped.pid; sleep 30", 1.0),
+        &BashOptions::default(),
+    )
+    .expect_err("the command times out");
+
+    std::thread::sleep(Duration::from_millis(200));
+    let pid = std::fs::read_to_string(cwd.path().join("escaped.pid")).unwrap();
+    let state = std::fs::read_to_string(format!("/proc/{}/stat", pid.trim()))
+        .ok()
+        .and_then(|stat| stat.rsplit(") ").next()?.chars().next());
+    assert!(
+        matches!(state, None | Some('Z') | Some('X')),
+        "the setsid'd process outlived the kill (state {state:?})"
+    );
+}
+
 /// Zero is off. A command that would breach any real budget runs to completion
 /// when none was configured, which is what keeps the one-shot CLI and the
 /// parity corpus outside this feature entirely.
