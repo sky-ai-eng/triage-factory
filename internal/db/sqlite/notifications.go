@@ -33,7 +33,7 @@ const sqliteNotificationColsTmpl = `{p}id, {p}org_id, {p}origin, {p}lifecycle, {
 	{p}audience_scope, COALESCE({p}audience_role, ''), COALESCE({p}team_id, ''), COALESCE({p}user_id, ''),
 	COALESCE({p}source, ''), {p}priority, {p}dismissible, {p}title, {p}body, {p}actions, {p}params,
 	{p}first_seen_at, {p}last_seen_at, {p}seen_count, {p}escalated_at,
-	{p}resolved_at, COALESCE({p}resolved_reason, ''), {p}expires_at`
+	{p}resolved_at, COALESCE({p}resolved_reason, ''), {p}expires_at, COALESCE({p}entity_id, '')`
 
 var (
 	sqliteNotificationCols = strings.ReplaceAll(sqliteNotificationColsTmpl, "{p}", "")
@@ -80,15 +80,15 @@ func (s *notificationStore) UpsertOpenSystem(ctx context.Context, o db.Notificat
 			id, org_id, origin, lifecycle, kind, key,
 			audience_scope, audience_role, team_id, user_id,
 			source, priority, dismissible, title, body, actions, params,
-			first_seen_at, last_seen_at, seen_count, escalated_at, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+			first_seen_at, last_seen_at, seen_count, escalated_at, expires_at, entity_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
 		ON CONFLICT (org_id, origin, kind, key, audience_scope,
 			coalesce(audience_role, ''), coalesce(team_id, ''), coalesce(user_id, ''))
 			WHERE resolved_at IS NULL
 		DO UPDATE SET
 			last_seen_at = excluded.last_seen_at,
 			seen_count   = n.seen_count + 1,
-			escalated_at = CASE WHEN `+db.NotificationPriorityRankSQL("excluded.priority")+` > `+db.NotificationPriorityRankSQL("n.priority")+`
+			escalated_at = CASE WHEN `+db.NotificationPriorityRankSQL("excluded.priority")+` > `+db.NotificationPriorityRankSQL("n.priority")+` OR ?
 			                    THEN excluded.last_seen_at ELSE n.escalated_at END,
 			priority     = excluded.priority,
 			dismissible  = excluded.dismissible,
@@ -102,7 +102,7 @@ func (s *notificationStore) UpsertOpenSystem(ctx context.Context, o db.Notificat
 		uuid.New().String(), o.OrgID, o.Origin, o.Lifecycle, o.Kind, o.Key,
 		a.Scope, nullIfEmpty(string(a.Role)), nullIfEmpty(a.TeamID), nullIfEmpty(a.UserID),
 		nullIfEmpty(o.Source), o.Priority, o.Dismissible, o.Title, o.Body, string(o.Actions), string(o.Params),
-		now, now, now, expiresAt).Scan)
+		now, now, now, expiresAt, nullIfEmpty(o.EntityID), o.Resurface).Scan)
 	if err != nil {
 		return db.NotificationUpsert{}, err
 	}
@@ -174,6 +174,37 @@ func (s *notificationStore) resolve(ctx context.Context, orgID string, reason do
 			return nil, err
 		}
 		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+func (s *notificationStore) OpenEventKeysSystem(ctx context.Context, orgID, entityID string, kinds []string) ([]db.NotificationKindKey, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	out := []db.NotificationKindKey{}
+	if len(kinds) == 0 {
+		return out, nil
+	}
+	list, err := json.Marshal(kinds)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT DISTINCT kind, key FROM notifications
+		WHERE org_id = ? AND entity_id = ? AND kind IN (SELECT value FROM json_each(?))
+		  AND origin = 'event' AND lifecycle = 'condition' AND resolved_at IS NULL
+		ORDER BY kind, key`, orgID, entityID, string(list))
+	if err != nil {
+		return nil, fmt.Errorf("list open event notifications: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k db.NotificationKindKey
+		if err := rows.Scan(&k.Kind, &k.Key); err != nil {
+			return nil, fmt.Errorf("scan open event notification: %w", err)
+		}
+		out = append(out, k)
 	}
 	return out, rows.Err()
 }

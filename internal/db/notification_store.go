@@ -46,8 +46,8 @@ type NotificationStore interface {
 	// UpsertOpenSystem inserts the occurrence, or bumps the open row with the
 	// same (org, origin, kind, key, audience): seen_count+1, last_seen_at,
 	// fresh priority/dismissible/source/copy/actions/params/expiry, and
-	// escalated_at on a priority increase. An expired notice is replaced by a
-	// new row rather than bumped.
+	// escalated_at on a priority increase or when the occurrence resurfaces.
+	// An expired notice is replaced by a new row rather than bumped.
 	UpsertOpenSystem(ctx context.Context, o NotificationOccurrence) (NotificationUpsert, error)
 
 	// ResolveSystem resolves (cleared) the open conditions of (kind, key)
@@ -70,6 +70,11 @@ type NotificationStore interface {
 	// other audiences' rows of its key open, and returns it; nil when it is
 	// not an open condition in orgID.
 	ResolveIDSystem(ctx context.Context, orgID, id string) (*domain.Notification, error)
+
+	// OpenEventKeysSystem returns the distinct (kind, key) of the open event
+	// conditions about entityID whose kind is in kinds, ordered: what an
+	// event's close phase may resolve.
+	OpenEventKeysSystem(ctx context.Context, orgID, entityID string, kinds []string) ([]NotificationKindKey, error)
 
 	// OpenConditionOrgsSystem returns the distinct, sorted ids of the orgs,
 	// across the deployment, holding an open condition of (origin, kind): the
@@ -124,6 +129,18 @@ type NotificationOccurrence struct {
 	Actions     json.RawMessage // array, at most two; nil stores []
 	Params      json.RawMessage // object; nil stores {}
 	ExpiresAt   *time.Time      // notices only
+	// EntityID is the entity an event row is about: required when Origin is
+	// event, and empty otherwise.
+	EntityID string
+	// Resurface makes a bump of an open row unread and undismissed again, as
+	// an escalation does: an event notice whose event recurred.
+	Resurface bool
+}
+
+// NotificationKindKey is one occurrence's identity within an org and origin.
+type NotificationKindKey struct {
+	Kind string
+	Key  string
 }
 
 type NotificationUpsert struct {
@@ -158,6 +175,9 @@ func ValidateNotificationOccurrence(o NotificationOccurrence) (NotificationOccur
 	}
 	if o.Kind == "" {
 		return fail("kind is required")
+	}
+	if (o.Origin == domain.NotificationOriginEvent) != (o.EntityID != "") {
+		return fail("an entity is named by an event row, and only by one")
 	}
 	if err := o.Audience.Validate(); err != nil {
 		return fail("%v", err)
@@ -351,7 +371,7 @@ func NotificationAudiencesJSON(audiences []domain.NotificationAudience) (string,
 	return string(b), nil
 }
 
-// notificationRow holds the 24-column projection both dialects emit, with
+// notificationRow holds the 25-column projection both dialects emit, with
 // nullable text COALESCEd to the empty string, while it is scanned.
 type notificationRow struct {
 	n                   domain.Notification
@@ -365,7 +385,7 @@ func (r *notificationRow) dest() []any {
 		&n.Audience.Scope, &n.Audience.Role, &n.Audience.TeamID, &n.Audience.UserID,
 		&n.Source, &n.Priority, &n.Dismissible, &n.Title, &n.Body, &r.actions, &r.params,
 		&n.FirstSeenAt, &n.LastSeenAt, &n.SeenCount, &n.EscalatedAt,
-		&r.resolvedAt, &n.ResolvedReason, &r.expires}
+		&r.resolvedAt, &n.ResolvedReason, &r.expires, &n.EntityID}
 }
 
 func (r *notificationRow) finish() domain.Notification {

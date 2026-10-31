@@ -35,6 +35,10 @@ func newEventHandlerStore(q queryer) db.EventHandlerStore {
 
 var _ db.EventHandlerStore = (*eventHandlerStore)(nil)
 
+// sqliteHandlerKindOrder orders the kinds rules, triggers, notify rules: the
+// router reads rules before triggers, and a list reads them in that order.
+const sqliteHandlerKindOrder = `CASE kind WHEN 'rule' THEN 0 WHEN 'trigger' THEN 1 ELSE 2 END`
+
 // sqliteEventHandlerColumns mirrors the Postgres projection so scan
 // helpers stay aligned. Per-kind nullable columns scan into sql.Null*
 // and map to the domain pointer fields.
@@ -42,7 +46,8 @@ const sqliteEventHandlerColumns = `id, kind, event_type, scope_predicate_json, e
        team_id, applies_to_unowned,
        name, default_priority, sort_order,
        blueprint_id, breaker_threshold, min_autonomy_suitability,
-       user_modified, created_at, updated_at`
+       user_modified, created_at, updated_at,
+       creator_user_id, notify_audience`
 
 func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string, blueprintIDsBySlug map[string]string) error {
 	if teamID == "" {
@@ -164,7 +169,7 @@ func (s *eventHandlerStore) List(ctx context.Context, orgID string, f db.EventHa
 	}
 
 	q := `SELECT ` + sqliteEventHandlerColumns + ` FROM event_handlers` + where + `
-	      ORDER BY kind ASC,
+	      ORDER BY ` + sqliteHandlerKindOrder + `,
 	               CASE WHEN kind = 'rule' THEN sort_order ELSE 0 END ASC,
 	               CASE WHEN kind = 'rule' THEN name ELSE '' END ASC,
 	               created_at DESC, id`
@@ -205,9 +210,9 @@ func (s *eventHandlerStore) GetEnabledForEvent(ctx context.Context, orgID, event
 		SELECT `+sqliteEventHandlerColumns+`
 		FROM event_handlers
 		WHERE org_id = ? AND event_type = ? AND enabled = 1 AND deleted_at IS NULL
-		ORDER BY kind ASC,
+		ORDER BY `+sqliteHandlerKindOrder+`,
 		         CASE WHEN kind = 'rule' THEN sort_order ELSE 0 END ASC,
-		         created_at DESC
+		         created_at DESC, id
 	`, orgID, eventType)
 	if err != nil {
 		return nil, err
@@ -284,6 +289,23 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h 
 			pred, h.Enabled, h.AppliesToUnowned,
 			h.BlueprintID, derefInt(h.BreakerThreshold), derefFloat(h.MinAutonomySuitability),
 			now, now))
+
+	case domain.EventHandlerKindNotify:
+		return scanEventHandlerRowSQLite(s.q.QueryRowContext(ctx, `
+			INSERT INTO event_handlers
+				(id, org_id, team_id, creator_user_id, kind, event_type,
+				 scope_predicate_json, enabled, source,
+				 name, notify_audience,
+				 created_at, updated_at)
+			VALUES (?, ?, ?, ?, 'notify', ?,
+			        ?, ?, 'user',
+			        ?, ?,
+			        ?, ?)
+			RETURNING `+sqliteEventHandlerColumns,
+			h.ID, orgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, h.EventType,
+			pred, h.Enabled,
+			h.Name, h.Audience,
+			now, now))
 	}
 	return domain.EventHandler{}, fmt.Errorf("sqlite event_handlers Create: unknown kind %q", h.Kind)
 }
@@ -329,6 +351,20 @@ func (s *eventHandlerStore) Update(ctx context.Context, orgID string, h domain.E
 			RETURNING `+sqliteEventHandlerColumns,
 			pred, h.Enabled, h.AppliesToUnowned,
 			derefInt(h.BreakerThreshold), derefFloat(h.MinAutonomySuitability),
+			contentChanged,
+			now, orgID, h.ID))
+
+	case domain.EventHandlerKindNotify:
+		return scanUpdatedEventHandlerSQLite(s.q.QueryRowContext(ctx, `
+			UPDATE event_handlers
+			SET scope_predicate_json = ?, enabled = ?,
+			    name = ?, notify_audience = ?,
+			    user_modified = user_modified OR ?,
+			    updated_at = ?
+			WHERE org_id = ? AND id = ? AND kind = 'notify' AND deleted_at IS NULL
+			RETURNING `+sqliteEventHandlerColumns,
+			pred, h.Enabled,
+			h.Name, h.Audience,
 			contentChanged,
 			now, orgID, h.ID))
 	}
@@ -381,6 +417,8 @@ func (s *eventHandlerStore) contentChanged(ctx context.Context, orgID string, h 
 	switch h.Kind {
 	case domain.EventHandlerKindRule:
 		return nameNS.String != h.Name || defPriority.Float64 != derefFloat(h.DefaultPriority), nil
+	case domain.EventHandlerKindNotify:
+		return nameNS.String != h.Name, nil
 	case domain.EventHandlerKindTrigger:
 		return int(breakerNS.Int64) != derefInt(h.BreakerThreshold) || minAutonomyNS.Float64 != derefFloat(h.MinAutonomySuitability), nil
 	}
@@ -653,6 +691,8 @@ func scanEventHandlerFromAnySQLite(scanFn func(dst ...any) error) (domain.EventH
 		blueprintID   sql.NullString
 		breakerNS     sql.NullInt64
 		minAutonomyNS sql.NullFloat64
+		creatorNS     sql.NullString
+		audienceNS    sql.NullString
 	)
 	if err := scanFn(
 		&h.ID, &h.Kind, &h.EventType, &pred, &h.Enabled, &h.Source,
@@ -660,9 +700,12 @@ func scanEventHandlerFromAnySQLite(scanFn func(dst ...any) error) (domain.EventH
 		&nameNS, &defPriority, &sortOrder,
 		&blueprintID, &breakerNS, &minAutonomyNS,
 		&h.UserModified, &h.CreatedAt, &h.UpdatedAt,
+		&creatorNS, &audienceNS,
 	); err != nil {
 		return h, err
 	}
+	h.CreatorUserID = creatorNS.String
+	h.Audience = audienceNS.String
 	if teamID.Valid {
 		h.TeamID = teamID.String
 	}

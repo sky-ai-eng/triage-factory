@@ -31,7 +31,7 @@ const pgNotificationColsTmpl = `{p}id::text, {p}org_id::text, {p}origin, {p}life
 	{p}audience_scope, COALESCE({p}audience_role, ''), COALESCE({p}team_id::text, ''), COALESCE({p}user_id::text, ''),
 	COALESCE({p}source, ''), {p}priority, {p}dismissible, {p}title, {p}body, {p}actions, {p}params,
 	{p}first_seen_at, {p}last_seen_at, {p}seen_count, {p}escalated_at,
-	{p}resolved_at, COALESCE({p}resolved_reason, ''), {p}expires_at`
+	{p}resolved_at, COALESCE({p}resolved_reason, ''), {p}expires_at, COALESCE({p}entity_id::text, '')`
 
 var (
 	pgNotificationCols = strings.ReplaceAll(pgNotificationColsTmpl, "{p}", "")
@@ -80,10 +80,10 @@ func (s *notificationStore) UpsertOpenSystem(ctx context.Context, o db.Notificat
 			org_id, origin, lifecycle, kind, key,
 			audience_scope, audience_role, team_id, user_id,
 			source, priority, dismissible, title, body, actions, params,
-			first_seen_at, last_seen_at, seen_count, escalated_at, expires_at)
+			first_seen_at, last_seen_at, seen_count, escalated_at, expires_at, entity_id)
 		SELECT $1::uuid, $2::text, $3::text, $4::text, $5::text, $6::text, $7::text, $8::uuid, $9::uuid,
 			$10::text, $11::text, $12::boolean, $13::text, $14::text, $15::jsonb, $16::jsonb,
-			clock.at, clock.at, 1, clock.at, $17::timestamptz
+			clock.at, clock.at, 1, clock.at, $17::timestamptz, $18::uuid
 		FROM clock
 		ON CONFLICT (org_id, origin, kind, key, audience_scope,
 			COALESCE(audience_role, ''),
@@ -93,7 +93,7 @@ func (s *notificationStore) UpsertOpenSystem(ctx context.Context, o db.Notificat
 		DO UPDATE SET
 			last_seen_at = EXCLUDED.last_seen_at,
 			seen_count   = n.seen_count + 1,
-			escalated_at = CASE WHEN `+db.NotificationPriorityRankSQL("EXCLUDED.priority")+` > `+db.NotificationPriorityRankSQL("n.priority")+`
+			escalated_at = CASE WHEN `+db.NotificationPriorityRankSQL("EXCLUDED.priority")+` > `+db.NotificationPriorityRankSQL("n.priority")+` OR $19::boolean
 			                    THEN EXCLUDED.last_seen_at ELSE n.escalated_at END,
 			priority     = EXCLUDED.priority,
 			dismissible  = EXCLUDED.dismissible,
@@ -107,7 +107,7 @@ func (s *notificationStore) UpsertOpenSystem(ctx context.Context, o db.Notificat
 		o.OrgID, o.Origin, o.Lifecycle, o.Kind, o.Key,
 		a.Scope, nullIfEmpty(string(a.Role)), nullIfEmpty(a.TeamID), nullIfEmpty(a.UserID),
 		nullIfEmpty(o.Source), o.Priority, o.Dismissible, o.Title, o.Body, string(o.Actions), string(o.Params),
-		expiresAt).Scan)
+		expiresAt, nullIfEmpty(o.EntityID), o.Resurface).Scan)
 	if err != nil {
 		return db.NotificationUpsert{}, err
 	}
@@ -195,6 +195,31 @@ func (s *notificationStore) OpenConditionOrgsSystem(ctx context.Context, origin 
 		return nil, fmt.Errorf("list orgs with an open condition: %w", err)
 	}
 	return scanIDs(rows, "org with an open condition")
+}
+
+// OpenEventKeysSystem reads notifications_open_entity_idx.
+func (s *notificationStore) OpenEventKeysSystem(ctx context.Context, orgID, entityID string, kinds []string) ([]db.NotificationKindKey, error) {
+	out := []db.NotificationKindKey{}
+	if len(kinds) == 0 {
+		return out, nil
+	}
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT DISTINCT kind, key FROM notifications
+		WHERE org_id = $1 AND entity_id = $2::uuid AND kind = ANY($3::text[])
+		  AND origin = 'event' AND lifecycle = 'condition' AND resolved_at IS NULL
+		ORDER BY kind, key`, orgID, entityID, kinds)
+	if err != nil {
+		return nil, fmt.Errorf("list open event notifications: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k db.NotificationKindKey
+		if err := rows.Scan(&k.Kind, &k.Key); err != nil {
+			return nil, fmt.Errorf("scan open event notification: %w", err)
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
 }
 
 // RecipientsSystem reads pgNotificationSent the other way round: the

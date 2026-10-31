@@ -59,35 +59,57 @@ func (r *Router) teamTracksEventScopeCached(ctx context.Context, evt domain.Even
 	return allowed
 }
 
-// teamTracksEventScope dispatches the tracking lookup on the event's
-// source: github: → team↔repo, jira: → team↔project, linear: →
-// team↔Linear-team, a registered event source (e.g. ee/slack) → its
-// TracksScope hook. Each
-// branch fails open when its store is unwired so the gate degrades to "no
-// drop" in pre-ticket / test wiring; any other source is ungated.
+// errScopeUndecided is the team↔scope gate's "could not tell": a store that
+// is not wired, metadata or an entity that names nothing to look up, or a
+// source with no strict gate of its own. A read error is returned as itself.
+var errScopeUndecided = errors.New("routing: the team-scope gate could not decide")
+
+// teamTracksEventScope is the team↔scope gate as task routing applies it:
+// github: → team↔repo, jira: → team↔project, linear: → team↔Linear-team, a
+// registered event source (e.g. ee/slack) → its TracksScope hook, and any
+// other source ungated. Every answer it cannot prove is "tracks": the gate only
+// narrows a set someone else computed, so failing open costs a briefly-too-wide
+// set that the next event corrects (see teamTracksEventRepo), where failing
+// closed would drop a legitimate task on a transient read error.
 func (r *Router) teamTracksEventScope(ctx context.Context, evt domain.Event, teamID string) bool {
-	switch {
-	case strings.HasPrefix(evt.EventType, "github:"):
-		if r.teamRepos == nil {
-			return true
-		}
-		return r.teamTracksEventRepo(ctx, evt, teamID)
-	case strings.HasPrefix(evt.EventType, "jira:"):
-		if r.jiraRules == nil {
-			return true
-		}
-		return r.teamTracksEventProject(ctx, evt, teamID)
-	case strings.HasPrefix(evt.EventType, "linear:"):
-		if r.linearRules == nil {
-			return true
-		}
-		return r.teamTracksEventLinearTeam(ctx, evt, teamID)
-	default:
+	if !domain.NotifyRuleSource(evt.EventType) {
 		if hooks, ok := sourceHooksFor(evt.EventType); ok {
 			return hooks.TracksScope(ctx, evt, teamID)
 		}
 		return true
 	}
+	tracks, err := r.teamScopeVerdict(ctx, evt, teamID)
+	if err != nil {
+		return true
+	}
+	return tracks
+}
+
+// teamScopeVerdict is the team↔scope gate with its uncertainty kept: tracks is
+// an answer only when err is nil. Notify matching reads it directly and
+// treats every error as "does not track", because a notification about an
+// entity the team does not track is a disclosure; teamTracksEventScope reads
+// every error as "tracks". A source core has no gate for (one
+// domain.NotifyRuleSource refuses) is undecided.
+func (r *Router) teamScopeVerdict(ctx context.Context, evt domain.Event, teamID string) (bool, error) {
+	switch {
+	case strings.HasPrefix(evt.EventType, "github:"):
+		if r.teamRepos == nil {
+			return false, fmt.Errorf("%w: no repository tracking store", errScopeUndecided)
+		}
+		return r.teamTracksEventRepo(ctx, evt, teamID)
+	case strings.HasPrefix(evt.EventType, "jira:"):
+		if r.jiraRules == nil {
+			return false, fmt.Errorf("%w: no Jira tracking store", errScopeUndecided)
+		}
+		return r.teamTracksEventProject(ctx, evt, teamID)
+	case strings.HasPrefix(evt.EventType, "linear:"):
+		if r.linearRules == nil {
+			return false, fmt.Errorf("%w: no Linear tracking store", errScopeUndecided)
+		}
+		return r.teamTracksEventLinearTeam(ctx, evt, teamID)
+	}
+	return false, fmt.Errorf("%w: %s has no strict gate", errScopeUndecided, evt.EventType)
 }
 
 // teamTracksEventRepo asks the store whether teamID tracks the repository of
@@ -96,35 +118,36 @@ func (r *Router) teamTracksEventScope(ctx context.Context, evt domain.Event, tea
 // references too, so the gate reads no name: a repository renamed since the
 // event was emitted is still the one the team tracks, and a registry row lives
 // on one GitHub host, so a team tracking acme/api on one host is not tracking
-// the acme/api of another. Fail-open on an entity that cannot be read, one
-// that names no repository, or a store error: dropping a legitimate task on a
-// transient DB blip is worse than the pre-ticket behavior, and the events
-// feeding this path come from TF's own trusted poller.
+// the acme/api of another. An entity that cannot be read, or one that names no
+// repository, is undecided.
 //
-// This is the deliberate posture split from the owning-team ladder next
-// door, where a failed read propagates instead of degrading. The gate only
-// ever REMOVES teams from a set someone else already computed, so failing
-// open costs a briefly-too-wide gate that the next event corrects; the
-// ladder's reads DECIDE the owner, and a wrong answer there sticks to the
-// entity for the rest of its life.
-func (r *Router) teamTracksEventRepo(ctx context.Context, evt domain.Event, teamID string) bool {
+// Task routing reads undecided as "tracks" (teamTracksEventScope): dropping a
+// legitimate task on a transient DB blip is worse than the pre-ticket
+// behavior, and the events feeding this path come from TF's own trusted
+// poller. That is the deliberate posture split from the owning-team ladder
+// next door, where a failed read propagates instead of degrading. The gate only
+// ever REMOVES teams from a set someone else already computed, so failing open
+// costs a briefly-too-wide gate that the next event corrects; the ladder's
+// reads DECIDE the owner, and a wrong answer there sticks to the entity for the
+// rest of its life.
+func (r *Router) teamTracksEventRepo(ctx context.Context, evt domain.Event, teamID string) (bool, error) {
 	if evt.EntityID == nil || r.entities == nil {
-		return true
+		return false, fmt.Errorf("%w: no entity to read", errScopeUndecided)
 	}
 	e, err := r.entities.GetSystem(ctx, evt.OrgID, *evt.EntityID)
 	if err != nil {
-		routerLog.Warn("team-repo gate entity read failed, allowing", "team_id", teamID, "entity_id", *evt.EntityID, "error", err)
-		return true
+		routerLog.Warn("team-repo gate entity read failed; undecided", "team_id", teamID, "entity_id", *evt.EntityID, "error", err)
+		return false, err
 	}
 	if e == nil || e.RepositoryID == "" {
-		return true
+		return false, fmt.Errorf("%w: the entity names no repository", errScopeUndecided)
 	}
 	tracks, err := r.teamRepos.TracksRepositorySystem(ctx, teamID, e.RepositoryID)
 	if err != nil {
-		routerLog.Warn("team-repo gate lookup failed, allowing", "team_id", teamID, "repository_id", e.RepositoryID, "error", err)
-		return true
+		routerLog.Warn("team-repo gate lookup failed; undecided", "team_id", teamID, "repository_id", e.RepositoryID, "error", err)
+		return false, err
 	}
-	return tracks
+	return tracks, nil
 }
 
 // githubEventHost is the GitHub host a GitHub event is about: the "host" its
@@ -157,13 +180,10 @@ func (r *Router) githubEventHost(ctx context.Context, evt domain.Event) (string,
 // internal/domain/events/jira.go) — and asks the store whether teamID tracks
 // that row on the org's current Jira site. A project key rename moves no
 // reference, so a renamed project's events match its teams whatever key they
-// carry. Fail-open on a missing / malformed id or a store error: dropping a
-// legitimate task on a transient DB blip or an unexpected metadata shape is
-// worse than the pre-ticket behavior, and the events feeding this path come
-// from TF's own trusted poller (an event recorded before the id rode the
-// metadata names none). Same deliberate split from the ladder's propagate
-// posture as teamTracksEventRepo — see there for the asymmetry that
-// justifies it.
+// carry. A missing or malformed id is undecided, and a store error is
+// returned: task routing reads both as "tracks", for the reason
+// teamTracksEventRepo gives (an event recorded before the id rode the
+// metadata names none).
 //
 // key_changed is the one event about two projects, the one the issue is in
 // now and the one it left (old_jira_project_id), and it passes for a team that
@@ -172,13 +192,13 @@ func (r *Router) githubEventHost(ctx context.Context, evt domain.Event) (string,
 // issue left; a handler filtered on old_jira_project_id_in could never fire
 // otherwise.
 // Every other Jira event routes on its project alone.
-func (r *Router) teamTracksEventProject(ctx context.Context, evt domain.Event, teamID string) bool {
+func (r *Router) teamTracksEventProject(ctx context.Context, evt domain.Event, teamID string) (bool, error) {
 	var m struct {
 		JiraProjectID    string `json:"jira_project_id"`
 		OldJiraProjectID string `json:"old_jira_project_id"`
 	}
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &m); err != nil || m.JiraProjectID == "" {
-		return true
+		return false, fmt.Errorf("%w: the event names no Jira project", errScopeUndecided)
 	}
 	projects := []string{m.JiraProjectID}
 	if evt.EventType == domain.EventJiraIssueKeyChanged && m.OldJiraProjectID != "" && m.OldJiraProjectID != m.JiraProjectID {
@@ -186,21 +206,21 @@ func (r *Router) teamTracksEventProject(ctx context.Context, evt domain.Event, t
 	}
 	settings, err := r.orgs.GetSettingsSystem(ctx, evt.OrgID)
 	if err != nil {
-		routerLog.Warn("team-project gate: org settings read failed, allowing", "team_id", teamID, "jira_project_id", m.JiraProjectID, "error", err)
-		return true
+		routerLog.Warn("team-project gate: org settings read failed; undecided", "team_id", teamID, "jira_project_id", m.JiraProjectID, "error", err)
+		return false, err
 	}
 	site := domain.EntityScope("jira", settings)
 	for _, project := range projects {
 		tracks, err := r.jiraRules.TracksJiraProjectSystem(ctx, teamID, site, project)
 		if err != nil {
-			routerLog.Warn("team-project gate lookup failed, allowing", "team_id", teamID, "jira_project_id", project, "error", err)
-			return true
+			routerLog.Warn("team-project gate lookup failed; undecided", "team_id", teamID, "jira_project_id", project, "error", err)
+			return false, err
 		}
 		if tracks {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // teamTracksEventLinearTeam reads the Linear team id off an event's metadata
@@ -208,8 +228,8 @@ func (r *Router) teamTracksEventProject(ctx context.Context, evt domain.Event, t
 // workspace. The gate keys on the UUID rather than the team key, because a key
 // can be renamed in Linear and the id cannot; and it reads only the current
 // workspace's rules, because a rule saved under another workspace names a team
-// no event from this one can carry. Fail-open on malformed metadata or a store
-// error, the posture teamTracksEventRepo documents.
+// no event from this one can carry. Malformed metadata is undecided and a
+// store error is returned, as teamTracksEventRepo describes.
 //
 // identifier_changed is the one event about two Linear teams, the one the
 // issue is in now and the one it left (old_linear_team_id), and it passes for a
@@ -225,13 +245,13 @@ func (r *Router) teamTracksEventProject(ctx context.Context, evt domain.Event, t
 // row predates that column and has nothing else to name a team, so no team can
 // be shown to track it. The event still closes the entity's tasks; the close
 // relations do not read this gate.
-func (r *Router) teamTracksEventLinearTeam(ctx context.Context, evt domain.Event, teamID string) bool {
+func (r *Router) teamTracksEventLinearTeam(ctx context.Context, evt domain.Event, teamID string) (bool, error) {
 	var m struct {
 		LinearTeamID    string `json:"linear_team_id"`
 		OldLinearTeamID string `json:"old_linear_team_id"`
 	}
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &m); err != nil {
-		return true
+		return false, fmt.Errorf("%w: unreadable Linear metadata", errScopeUndecided)
 	}
 	linearTeams := make([]string, 0, 2)
 	if m.LinearTeamID != "" {
@@ -241,25 +261,25 @@ func (r *Router) teamTracksEventLinearTeam(ctx context.Context, evt domain.Event
 		linearTeams = append(linearTeams, m.OldLinearTeamID)
 	}
 	if len(linearTeams) == 0 {
-		return false
+		return false, nil
 	}
 	settings, err := r.orgs.GetSettingsSystem(ctx, evt.OrgID)
 	if err != nil {
-		routerLog.Warn("team-linear-team gate: org settings read failed, allowing", "team_id", teamID, "linear_team_id", m.LinearTeamID, "error", err)
-		return true
+		routerLog.Warn("team-linear-team gate: org settings read failed; undecided", "team_id", teamID, "linear_team_id", m.LinearTeamID, "error", err)
+		return false, err
 	}
 	scope := domain.EntityScope("linear", settings)
 	for _, linearTeamID := range linearTeams {
 		tracks, err := r.linearRules.TracksTeamSystem(ctx, teamID, scope, linearTeamID)
 		if err != nil {
-			routerLog.Warn("team-linear-team gate lookup failed, allowing", "team_id", teamID, "linear_team_id", linearTeamID, "error", err)
-			return true
+			routerLog.Warn("team-linear-team gate lookup failed; undecided", "team_id", teamID, "linear_team_id", linearTeamID, "error", err)
+			return false, err
 		}
 		if tracks {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // trackingTeams filters an identity-derived team set — the owner ladder's
