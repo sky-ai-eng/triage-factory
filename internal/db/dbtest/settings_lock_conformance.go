@@ -15,8 +15,16 @@ type SettingsLockFactory func(t *testing.T) (stores db.Stores, orgID, userID, te
 
 // RunSettingsLockConformance pins TeamsStore.LockSettings by what its callers
 // rely on: a second write transaction on the team gets past the lock only once
-// the first has committed, and then reads what the first stored.
+// the first has committed, and then reads what the first stored; and outside a
+// transaction, where nothing would hold it, it is refused.
 func RunSettingsLockConformance(t *testing.T, mk SettingsLockFactory) {
+	t.Run("refused_outside_a_transaction", func(t *testing.T) {
+		stores, _, _, teamID := mk(t)
+		if err := stores.Teams.LockSettings(t.Context(), teamID); err == nil {
+			t.Error("LockSettings outside a transaction = nil; want a refusal")
+		}
+	})
+
 	t.Run("second_writer_waits_for_the_first_to_commit", func(t *testing.T) {
 		stores, orgID, userID, teamID := mk(t)
 		ctx := t.Context()

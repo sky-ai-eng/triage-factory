@@ -158,8 +158,8 @@ type TeamsStore interface {
 	// rule a body leaves out from what they read.
 	//
 	// The lock belongs to the transaction, so it is called on a
-	// transaction's stores (db.TxStores); the Postgres impl refuses any
-	// other. Postgres takes an advisory lock keyed by the team, which needs
+	// transaction's stores (db.TxStores); both impls refuse any other.
+	// Postgres takes an advisory lock keyed by the team, which needs
 	// no row to exist, since a team has no team_settings row until its first
 	// save. SQLite takes nothing: its write transaction begins IMMEDIATE and
 	// already holds the database's write lock.

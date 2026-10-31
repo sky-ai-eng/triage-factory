@@ -637,10 +637,17 @@ func setTeamOrderColumn(ctx context.Context, q queryer, teamID, column string, i
 	return stored, nil
 }
 
-// LockSettings takes nothing: the handle begins every write transaction
-// IMMEDIATE, so a writer already holds the database's write lock from BEGIN to
-// commit, which serializes it against every other.
-func (s *teamsStore) LockSettings(context.Context, string) error { return nil }
+// LockSettings takes nothing inside a transaction: the handle begins every
+// write transaction IMMEDIATE, so a writer already holds the database's write
+// lock from BEGIN to commit, which serializes it against every other. Outside
+// one nothing would serialize the caller's read and write, so it refuses, as
+// the Postgres impl does.
+func (s *teamsStore) LockSettings(context.Context, string) error {
+	if _, ok := s.q.(*sql.Tx); !ok {
+		return errors.New("sqlite: LockSettings needs a transaction's stores, whose transaction serializes the caller")
+	}
+	return nil
+}
 
 // SetDailyCostCapSystem upserts ONLY team_settings.max_daily_cost_usd for teamID
 // — the org-admin per-team daily spend cap (TFAC-482). SQLite is N=1 / no RLS so

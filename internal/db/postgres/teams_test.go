@@ -159,21 +159,16 @@ func TestTeamsStore_Postgres_SettingsLock(t *testing.T) {
 	})
 }
 
-// TestTeamsStore_Postgres_SettingsLock_PerTeamAndTransactional: the lock is
-// keyed by the team, so a write on another team does not wait for it, and it is
-// refused outside a transaction, where the statement taking it would also
-// release it.
-func TestTeamsStore_Postgres_SettingsLock_PerTeamAndTransactional(t *testing.T) {
+// TestTeamsStore_Postgres_SettingsLock_PerTeam: the lock is keyed by the team,
+// so a write on another team does not wait for it. SQLite has one writer at a
+// time, so this is Postgres's alone.
+func TestTeamsStore_Postgres_SettingsLock_PerTeam(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := t.Context()
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "settings-lock-scope")
 	otherTeamID := pgtest.SeedTeam(t, h, orgID, "other")
-
-	if err := stores.Teams.LockSettings(ctx, teamID); err == nil {
-		t.Error("LockSettings outside a transaction = nil; want a refusal")
-	}
 
 	locked, release := make(chan struct{}), make(chan struct{})
 	held := make(chan error, 1)
