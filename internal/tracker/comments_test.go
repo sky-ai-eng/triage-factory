@@ -351,13 +351,7 @@ func (fx *jiraCommentFixture) postedByTF(t *testing.T, commentID string) {
 	t.Helper()
 	site, _ := domain.JiraHost(jiraCommentSite)
 	key := domain.ObjectKey(domain.ProviderJira, domain.DeliverableKindComment, domain.JiraIssueResource(site, "10001"), commentID)
-	if _, err := fx.stores.Deliverables.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, domain.Deliverable{
-		TeamID: runmode.LocalDefaultTeamID, Provider: domain.ProviderJira, Kind: domain.DeliverableKindComment,
-		Scope: site, Target: "SKY-1", ExternalID: commentID,
-		State: domain.DeliverableStateCommentPosted, DedupKey: key,
-	}); err != nil {
-		t.Fatalf("record TF comment %s: %v", commentID, err)
-	}
+	recordTFComment(t, fx.stores, domain.ProviderJira, site, "SKY-1", key)
 }
 
 func (fx *jiraCommentFixture) snapshot(t *testing.T) domain.JiraSnapshot {
@@ -614,15 +608,8 @@ func (fx *linearFixture) addComments(n int, cs ...linear.Comment) {
 // `linear issue comment` verb records it with.
 func (fx *linearFixture) postedByTF(t *testing.T, n int, commentID string) {
 	t.Helper()
-	issueID := linIssue(n).ID
-	if _, err := fx.stores.Deliverables.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, domain.Deliverable{
-		TeamID: runmode.LocalDefaultTeamID, Provider: domain.ProviderLinear, Kind: domain.DeliverableKindComment,
-		Scope: fx.workspace, Target: linIssue(n).Identifier, ExternalID: commentID,
-		State:    domain.DeliverableStateCommentPosted,
-		DedupKey: domain.ObjectKey(domain.ProviderLinear, domain.DeliverableKindComment, issueID, commentID),
-	}); err != nil {
-		t.Fatalf("record TF comment %s: %v", commentID, err)
-	}
+	key := domain.ObjectKey(domain.ProviderLinear, domain.DeliverableKindComment, linIssue(n).ID, commentID)
+	recordTFComment(t, fx.stores, domain.ProviderLinear, fx.workspace, linIssue(n).Identifier, key)
 }
 
 // TestRefreshLinear_Commented covers who a Linear commented event names, and
@@ -784,7 +771,7 @@ func TestRefreshLinear_FailedCommentReadIsRetried(t *testing.T) {
 func TestMarkTFComments_ReadsOnlyItsScope(t *testing.T) {
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
-	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.EventQueue, runmode.LocalDefaultOrgID)
+	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, runmode.LocalDefaultOrgID)
 	fx := &linearFixture{tr: tr, stores: stores, workspace: "ws-other"}
 	fx.postedByTF(t, 1, "c-1")
 

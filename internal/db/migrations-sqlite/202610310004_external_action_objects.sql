@@ -14,9 +14,8 @@ ALTER TABLE external_actions ADD COLUMN object_kind TEXT
         'workflow', 'workflow_run', 'review', 'comment', 'message'));
 ALTER TABLE external_actions ADD COLUMN object_key TEXT;
 
--- The rows that changed one keyed object, found by its key within a scope.
--- TODO(TFAC-1265): nothing reads by it until the tracker's comment check
--- looks TF's own comments up by key.
+-- The rows that changed one keyed object, found by its key within a scope:
+-- the tracker's read of which comments TF posted.
 CREATE INDEX idx_external_actions_object_key ON external_actions (org_id, scope, object_key)
     WHERE object_key IS NOT NULL;
 

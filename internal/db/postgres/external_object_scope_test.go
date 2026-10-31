@@ -158,6 +158,13 @@ func TestExternalActionObject_Postgres(t *testing.T) {
 	dbtest.RunExternalActionObjectConformance(t, pgExternalActionFixture(pgtest.Shared(t)))
 }
 
+// TestExternalActionCommentKeys_Postgres runs the shared conformance suite for
+// the tracker's read of which comments TF posted against the Postgres
+// backend, on the node-id suite's fixture.
+func TestExternalActionCommentKeys_Postgres(t *testing.T) {
+	dbtest.RunExternalActionCommentKeysConformance(t, pgExternalActionFixture(pgtest.Shared(t)))
+}
+
 // pgExternalActionFixture builds a fresh org per subtest with a team and a
 // conversation in it, both pools wired against AdminDB.
 func pgExternalActionFixture(h *pgtest.Harness) dbtest.ExternalActionNodeIDFactory {

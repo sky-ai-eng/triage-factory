@@ -170,16 +170,18 @@ type DeliverableStore interface {
 	ListPendingReviewsByEntitySystem(ctx context.Context, orgID, entityID string) ([]domain.Deliverable, error)
 
 	// PresentDedupKeysSystem returns the subset of dedupKeys under which a
-	// deliverable exists in scope, as a set. The tracker reads it to tell a
-	// comment TF posted, which is recorded as a `comment` deliverable keyed on
-	// the comment's id, from one a person wrote; build a GitHub comment's key
-	// with domain.GitHubCommentKey. An empty scope is refused with
+	// deliverable exists in scope, as a set. The recording funnel reads it to
+	// tell whether a comment a delete retires has a `comment` deliverable, so
+	// the delete never creates one. An empty scope is refused with
 	// ErrExternalObjectScopeRequired.
 	//
-	// Admin pool (BYPASSRLS) in Postgres: the tracker is a background job
-	// with no claims, and the deliverable belongs to whichever team's run posted
-	// the comment. org_id stays bound as defense in depth. Identical to a
-	// plain org read in SQLite.
+	// Admin pool (BYPASSRLS) in Postgres: the funnel's system path holds no
+	// claims, and the deliverable belongs to whichever team's run posted the
+	// comment. org_id stays bound as defense in depth. Identical to a plain
+	// org read in SQLite.
+	//
+	// TODO(TFAC-1266): deleted with its one caller, deletesUnrecordedComment,
+	// once comment deliverables are no longer written.
 	PresentDedupKeysSystem(ctx context.Context, orgID, scope string, dedupKeys []string) (map[string]bool, error)
 
 	// PresentExternalIDsSystem returns the subset of externalIDs that a
@@ -190,8 +192,7 @@ type DeliverableStore interface {
 	// serves it. An empty scope is refused with
 	// ErrExternalObjectScopeRequired.
 	//
-	// Admin pool (BYPASSRLS) in Postgres, as PresentDedupKeysSystem: the
-	// tracker holds no claims, and the deliverable belongs to whichever team's
+	// Admin pool (BYPASSRLS) in Postgres: the tracker holds no claims, and the deliverable belongs to whichever team's
 	// run submitted the review. org_id stays bound as defense in depth.
 	// Identical to a plain org read in SQLite.
 	PresentExternalIDsSystem(ctx context.Context, orgID, scope, provider, kind string, externalIDs []string) (map[string]bool, error)

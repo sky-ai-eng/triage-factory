@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -210,6 +211,56 @@ func (s *externalActionStore) ListPRCreatedWithoutDeliverableSystem(ctx context.
 		return nil, err
 	}
 	return scanExternalActionRows(rows)
+}
+
+// presentCreatedObjectKeysQuery is PresentCreatedObjectKeysSystem's statement
+// up to its IN list, binding org_id, scope, the object kind and the two
+// comment actions in that order; the caller closes the list with one
+// placeholder per key.
+const presentCreatedObjectKeysQuery = `
+	SELECT DISTINCT object_key
+	  FROM external_actions
+	 WHERE org_id = ? AND scope = ? AND object_kind = ? AND action IN (?, ?)
+	   AND object_key IN (`
+
+// PresentCreatedObjectKeysSystem is the tracker's read of which comments TF
+// posted (see the interface).
+func (s *externalActionStore) PresentCreatedObjectKeysSystem(ctx context.Context, orgID, scope string, keys []string) (map[string]bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	if err := db.RequireExternalObjectScope(scope); err != nil {
+		return nil, err
+	}
+	present := map[string]bool{}
+	// ?-placeholder IN list, chunked to stay inside SQLite's variable limit.
+	for _, chunk := range chunkIDs(keys) {
+		placeholders := make([]string, len(chunk))
+		args := make([]any, 0, len(chunk)+5)
+		args = append(args, orgID, scope, domain.ObjectKindComment, domain.ActionCommentPosted, domain.ActionIssueCommentPosted)
+		for i, key := range chunk {
+			placeholders[i] = "?"
+			args = append(args, key)
+		}
+		if err := func() error {
+			rows, err := s.q.QueryContext(ctx, presentCreatedObjectKeysQuery+strings.Join(placeholders, ", ")+`)`, args...)
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var key string
+				if err := rows.Scan(&key); err != nil {
+					return err
+				}
+				present[key] = true
+			}
+			return rows.Err()
+		}(); err != nil {
+			return nil, err
+		}
+	}
+	return present, nil
 }
 
 // appendExternalActionFilters appends opts' optional provider/action/actor/time

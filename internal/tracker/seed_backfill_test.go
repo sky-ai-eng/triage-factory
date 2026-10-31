@@ -101,7 +101,7 @@ func TestRefreshGitHub_SeedCommitsItsReviewBackfill(t *testing.T) {
 	trackRepos(t, stores, org, []string{"octo/repo"})
 
 	pub := &recordingPreEnqueuedPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, org)
 
 	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", newSeedClient(t), domain.GitHubAccount{}, []string{"octo/repo"}, knownLogins{"bob": true, "carol": true}); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
@@ -165,7 +165,7 @@ func TestRefreshGitHub_SeedCASMissCommitsNothing(t *testing.T) {
 
 	pub := &recordingPreEnqueuedPublisher{}
 	queue := &failingBatchQueue{EventQueueStore: stores.EventQueue}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, queue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, queue, org)
 
 	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", newSeedClient(t), domain.GitHubAccount{}, []string{"octo/repo"}, knownLogins{"bob": true, "carol": true}); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
@@ -212,7 +212,7 @@ func TestRefreshGitHub_SeedBackfillsOnlyTheKnownReviewers(t *testing.T) {
 	trackRepos(t, stores, org, []string{"octo/repo"})
 
 	pub := &recordingPreEnqueuedPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, org)
 	// Five requested reviewers, three of them TF-known — and the unknown ones
 	// deliberately sit first, last and in the middle, so an off-by-one in the
 	// skip would show up as a wrong id rather than only a wrong count.

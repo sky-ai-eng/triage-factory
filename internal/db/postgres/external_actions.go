@@ -211,6 +211,38 @@ func (s *externalActionStore) ListPRCreatedWithoutDeliverableSystem(ctx context.
 	return scanExternalActionRows(rows)
 }
 
+// PresentCreatedObjectKeysSystem is the tracker's read of which comments TF
+// posted (see the interface), on the admin pool: the tracker holds no claims,
+// and a comment's row belongs to whichever team's run posted it. org_id stays
+// in the WHERE clause as defense in depth.
+func (s *externalActionStore) PresentCreatedObjectKeysSystem(ctx context.Context, orgID, scope string, keys []string) (map[string]bool, error) {
+	if err := db.RequireExternalObjectScope(scope); err != nil {
+		return nil, err
+	}
+	present := map[string]bool{}
+	if len(keys) == 0 {
+		return present, nil
+	}
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT DISTINCT object_key
+		  FROM external_actions
+		 WHERE org_id = $1 AND scope = $2 AND object_key = ANY($3)
+		   AND object_kind = $4 AND action IN ($5, $6)
+	`, orgID, scope, keys, domain.ObjectKindComment, domain.ActionCommentPosted, domain.ActionIssueCommentPosted)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, err
+		}
+		present[key] = true
+	}
+	return present, rows.Err()
+}
+
 // appendPgExternalActionFilters appends opts' optional provider/action/actor/time
 // predicates, the newest-first ORDER BY, and LIMIT/OFFSET to a SELECT whose WHERE
 // is already open. Placeholders number from len(args)+1 so the leading binds
