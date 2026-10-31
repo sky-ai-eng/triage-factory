@@ -164,6 +164,13 @@ All model-visible strings match pi. The differences that exist:
   both.
 - **fd's global ignore file** (`~/.config/fd/ignore`) is not read; the
   sandbox has none.
+- **`bash` summary arguments** — `bash` declares `description` and
+  `description_past`, which pi does not have; the interface shows them in
+  place of the command. `description` is required and must be at least 5
+  characters, so a call without one is refused with an argument error where
+  pi would run the command. Neither changes what the command does, and every
+  bash case in the parity corpus sends a `description` so the corpus still
+  compares the command's behavior.
 - **`bash` signal deaths** — pi returns a command whose shell died of a
   signal as a success carrying whatever it printed, because Node reports the
   exit code as `null`. Here it is a tool error: the output, then

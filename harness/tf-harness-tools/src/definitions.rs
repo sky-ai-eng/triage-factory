@@ -12,8 +12,9 @@
 //! Divergence from pi: `bash` carries `description` and `description_past`
 //! beyond pi's `{command, timeout}`. A shell command is the only argument in
 //! this set that is not legible to a person, so the model authors a summary
-//! to render in its place, and `description` is required, with a minimum
-//! length, so that it always does. Nothing here executes them. Its `timeout` is
+//! to render in its place. `description` is required, with a minimum length,
+//! so the model cannot omit it or send it empty. Nothing here executes them.
+//! Its `timeout` is
 //! described as having a default and a maximum, which pi's does not have and
 //! a configured session does (see `bash.rs`).
 
