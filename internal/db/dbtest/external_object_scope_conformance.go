@@ -115,12 +115,14 @@ func RunExternalObjectScopeConformance(t *testing.T, mk ExternalObjectScopeFacto
 		if _, err := s.Deliverables.InsertDeliverableIfAbsentSystem(ctx, orgID, unscoped); !errors.Is(err, db.ErrExternalObjectScopeRequired) {
 			t.Errorf("InsertDeliverableIfAbsentSystem with no scope: err = %v, want ErrExternalObjectScopeRequired", err)
 		}
-		_, total, err := s.Deliverables.ListByOrgSystem(ctx, orgID, db.DeliverableListOpts{CountOnly: true})
+		// The refused row is an open pull request, which the non-terminal
+		// read would return had any write landed.
+		stored, err := s.Deliverables.ListNonTerminalBySystem(ctx, orgID)
 		if err != nil {
-			t.Fatalf("ListByOrgSystem: %v", err)
+			t.Fatalf("ListNonTerminalBySystem: %v", err)
 		}
-		if total != 0 {
-			t.Errorf("deliverables after refused writes = %d, want 0", total)
+		if len(stored) != 0 {
+			t.Errorf("deliverables after refused writes = %d, want 0", len(stored))
 		}
 	})
 

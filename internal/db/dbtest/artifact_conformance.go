@@ -13,14 +13,18 @@ import (
 )
 
 // ArtifactFixture is one fresh, empty org for RunArtifactConformance: the
-// store bundle, the org every call is for, a team the ledger rows hang off,
-// a way to mint a conversation in that team, and a way to set a ledger row's
-// occurred_at to a given instant in the shape the column's default writes.
+// store bundle, the org every call is for, a team the ledger rows hang off
+// and a second team in the same org, a way to mint a conversation in the
+// first team, a way to set a ledger row's occurred_at to a given instant in
+// the shape the column's default writes, and the same for a deliverable's
+// created_at.
 type ArtifactFixture struct {
-	Stores          db.Stores
-	OrgID, TeamID   string
-	NewConversation func(t *testing.T) string
-	SetOccurredAt   func(t *testing.T, actionID string, at time.Time)
+	Stores                  db.Stores
+	OrgID, TeamID           string
+	OtherTeamID             string
+	NewConversation         func(t *testing.T) string
+	SetOccurredAt           func(t *testing.T, actionID string, at time.Time)
+	SetDeliverableCreatedAt func(t *testing.T, deliverableID string, at time.Time)
 }
 
 // ArtifactFactory builds a fresh fixture per subtest.
@@ -33,8 +37,10 @@ type ArtifactFactory func(t *testing.T) ArtifactFixture
 // refusal, a catch-all, a kind with no identifying column); the
 // entity-backed display rule across a rename; the per-kind counts and the
 // existence check; the read grouped across conversations; the action list's
-// object and refusal filters, which read the same identity; and paging
-// totals that count groups.
+// object and refusal filters, which read the same identity; paging totals
+// that count groups; the team and org reads, grouped by object across runs
+// with their run counts and teams, windowed and filtered by row; and the
+// deliverable reads that answer an artifact's match.
 func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -69,7 +75,9 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 		if a.ID == "" {
 			a.ID = uuid.NewString()
 		}
-		a.TeamID = s.f.TeamID
+		if a.TeamID == "" {
+			a.TeamID = s.f.TeamID
+		}
 		a.ConversationID = conversationID
 		if a.Credential == "" {
 			a.Credential = domain.CredentialGitHubApp
@@ -476,6 +484,278 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 		}
 		if _, _, err := s.f.Stores.Artifacts.ListByConversation(ctx, s.f.OrgID, conv, db.ListOpts{Limit: 2, After: []string{"x"}}); err == nil {
 			t.Error("a keyset window was accepted, want it refused")
+		}
+	})
+
+	// scopeList reads one scope: the team when teamID is set, else the org.
+	scopeList := func(t *testing.T, s seed, teamID string, opts db.ArtifactListOpts) ([]domain.ObjectActivity, int) {
+		t.Helper()
+		var (
+			got   []domain.ObjectActivity
+			total int
+			err   error
+		)
+		if teamID != "" {
+			got, total, err = s.f.Stores.Artifacts.ListByTeam(ctx, s.f.OrgID, teamID, opts)
+		} else {
+			got, total, err = s.f.Stores.Artifacts.ListByOrgSystem(ctx, s.f.OrgID, opts)
+		}
+		if err != nil {
+			t.Fatalf("scope read (team %q, %+v): %v", teamID, opts, err)
+		}
+		return got, total
+	}
+	pageOf := func(limit, offset int) db.ArtifactListOpts {
+		return db.ArtifactListOpts{ListOpts: db.ListOpts{Limit: limit, Offset: offset}}
+	}
+
+	t.Run("Scope_reads_group_an_object_across_runs_and_teams", func(t *testing.T) {
+		s := setup(t)
+		one, two, three := s.f.NewConversation(t), s.f.NewConversation(t), s.f.NewConversation(t)
+		record(t, s, one, branch(s, domain.ActionBranchPushed, "octo/old", ""), at(1))
+		record(t, s, one, branch(s, domain.ActionBranchPushed, "octo/old", ""), at(2))
+		record(t, s, two, branch(s, domain.ActionBranchPushed, "octo/old", ""), at(3))
+		other := branch(s, domain.ActionBranchPushed, "octo/api", TestGitHubHost+"/octo/api/tree/fix")
+		other.TeamID = s.f.OtherTeamID
+		latest := record(t, s, three, other, at(4))
+		// A row whose run was purged is the object's too, and counts no run.
+		record(t, s, "", branch(s, domain.ActionBranchDeleted, "octo/old", ""), at(0))
+
+		got, total := scopeList(t, s, "", pageOf(50, 0))
+		if len(got) != 1 || total != 1 {
+			t.Fatalf("org read = %d objects (total %d), want 1: %+v", len(got), total, got)
+		}
+		b := got[0]
+		if b.ObjectID != objectRef(t, latest) || b.ObjectKind != domain.ObjectKindBranch || b.RepositoryID != s.repo.ID {
+			t.Errorf("org object = %+v, want the branch %q", b, objectID(t, latest))
+		}
+		if b.ConversationCount != 3 || b.ActionCount != 5 || b.LastAction != domain.ActionBranchPushed {
+			t.Errorf("org counts = conversations %d, actions %d, last %q; want 3, 5, %q", b.ConversationCount, b.ActionCount, b.LastAction, domain.ActionBranchPushed)
+		}
+		if b.Target != "octo/api" || b.URL != latest.URL || !b.FirstAt.Equal(at(0)) || !b.LastAt.Equal(at(4)) {
+			t.Errorf("org display = (%q, %q, %v, %v), want the latest row's from %v to %v", b.Target, b.URL, b.FirstAt, b.LastAt, at(0), at(4))
+		}
+		wantTeams := []string{s.f.TeamID, s.f.OtherTeamID}
+		slices.Sort(wantTeams)
+		if !slices.Equal(b.TeamIDs, wantTeams) {
+			t.Errorf("org TeamIDs = %v, want %v sorted", b.TeamIDs, wantTeams)
+		}
+
+		// The team read keeps the team's rows alone.
+		mine, total := scopeList(t, s, s.f.TeamID, pageOf(50, 0))
+		if len(mine) != 1 || total != 1 || mine[0].ConversationCount != 2 || mine[0].ActionCount != 4 ||
+			!slices.Equal(mine[0].TeamIDs, []string{s.f.TeamID}) || mine[0].Target != "octo/old" {
+			t.Errorf("team read = %+v (total %d), want the branch from 2 runs and 4 rows on the team, displayed as its latest row", mine, total)
+		}
+		theirs, _ := scopeList(t, s, s.f.OtherTeamID, pageOf(50, 0))
+		if len(theirs) != 1 || theirs[0].ConversationCount != 1 || theirs[0].ActionCount != 1 ||
+			!slices.Equal(theirs[0].TeamIDs, []string{s.f.OtherTeamID}) {
+			t.Errorf("other team read = %+v, want the branch from its one run", theirs)
+		}
+		if none, total := scopeList(t, s, uuid.NewString(), pageOf(50, 0)); len(none) != 0 || total != 0 {
+			t.Errorf("a team with no rows read %d objects (total %d)", len(none), total)
+		}
+	})
+
+	t.Run("Scope_reads_skip_system_refusal_and_runless_person_rows", func(t *testing.T) {
+		s := setup(t)
+		conv := s.f.NewConversation(t)
+		system := pullRequest(s, domain.ActionPRClosed)
+		system.PerformedBy = domain.PerformedBySystem
+		record(t, s, conv, system, at(2))
+		record(t, s, conv, branch(s, domain.ActionBranchPushFailed, "octo/api", ""), at(3))
+		record(t, s, conv, pullRequest(s, domain.ActionGHChannelWrite), at(4))
+		// A person's act that names no conversation, as a dashboard draft
+		// toggle records it, is no run's work, whatever team it names.
+		toggle := pullRequest(s, domain.ActionPRMarkedReady)
+		toggle.PerformedBy, toggle.ActorUserID = domain.PerformedByPerson, uuid.NewString()
+		record(t, s, "", toggle, at(5))
+		for _, teamID := range []string{"", s.f.TeamID} {
+			if got, total := scopeList(t, s, teamID, pageOf(50, 0)); len(got) != 0 || total != 0 {
+				t.Errorf("scope %q read %d objects (total %d), want none: %+v", teamID, len(got), total, got)
+			}
+		}
+
+		// A person's act on the run's deliverable is the run's, and only it
+		// counts toward the object.
+		ready := pullRequest(s, domain.ActionPRMarkedReady)
+		ready.PerformedBy = domain.PerformedByPerson
+		record(t, s, conv, ready, at(1))
+		for _, teamID := range []string{"", s.f.TeamID} {
+			got, total := scopeList(t, s, teamID, pageOf(50, 0))
+			if len(got) != 1 || total != 1 || got[0].ActionCount != 1 || got[0].ConversationCount != 1 ||
+				got[0].LastAction != domain.ActionPRMarkedReady || !got[0].LastAt.Equal(at(1)) {
+				t.Errorf("scope %q read %+v (total %d), want the PR from the run's one person row", teamID, got, total)
+			}
+		}
+	})
+
+	t.Run("Scope_reads_window_and_filter_rows", func(t *testing.T) {
+		s := setup(t)
+		conv := s.f.NewConversation(t)
+		record(t, s, conv, branch(s, domain.ActionBranchPushed, "octo/api", ""), at(1))
+		record(t, s, conv, branch(s, domain.ActionBranchPushed, "octo/api", ""), at(3))
+		pr := record(t, s, conv, pullRequest(s, domain.ActionPRCreated), at(2))
+		issue := record(t, s, conv, domain.ExternalAction{
+			Provider: domain.ProviderJira, Scope: "https://acme.atlassian.net", Action: domain.ActionIssueTransitioned,
+			Target: "SKY-1", Credential: domain.CredentialJiraOrg,
+			ObjectKind: domain.ObjectKindIssue, ObjectKey: "jira:issue:acme-10001",
+		}, at(4))
+
+		// The window is half-open: a row at Since is in, a row at Until out.
+		got, total := scopeList(t, s, "", db.ArtifactListOpts{Since: at(2), Until: at(4), ListOpts: db.ListOpts{Limit: 50}})
+		if len(got) != 2 || total != 2 {
+			t.Fatalf("windowed read = %d objects (total %d), want the branch and the PR: %+v", len(got), total, got)
+		}
+		if got[0].ObjectKind != domain.ObjectKindBranch || got[0].ActionCount != 1 || !got[0].FirstAt.Equal(at(3)) {
+			t.Errorf("windowed branch = %+v, want its one row at %v", got[0], at(3))
+		}
+		if got[1].ObjectID != objectRef(t, pr) {
+			t.Errorf("windowed second = %q, want the PR %q", got[1].ObjectID, objectID(t, pr))
+		}
+		for name, tc := range map[string]struct {
+			opts db.ArtifactListOpts
+			want domain.ObjectRef
+		}{
+			"provider":    {db.ArtifactListOpts{Provider: domain.ProviderJira}, objectRef(t, issue)},
+			"object_kind": {db.ArtifactListOpts{ObjectKind: domain.ObjectKindPullRequest}, objectRef(t, pr)},
+			"both":        {db.ArtifactListOpts{Provider: domain.ProviderGitHub, ObjectKind: domain.ObjectKindPullRequest}, objectRef(t, pr)},
+		} {
+			tc.opts.Limit = 50
+			for _, teamID := range []string{"", s.f.TeamID} {
+				got, total := scopeList(t, s, teamID, tc.opts)
+				if len(got) != 1 || total != 1 || got[0].ObjectID != tc.want {
+					t.Errorf("%s filter (team %q) = %+v (total %d), want %q alone", name, teamID, got, total, tc.want)
+				}
+			}
+		}
+		if got, total := scopeList(t, s, "", db.ArtifactListOpts{Provider: domain.ProviderSlack, ListOpts: db.ListOpts{Limit: 50}}); len(got) != 0 || total != 0 {
+			t.Errorf("a provider no row has = %d objects (total %d), want none", len(got), total)
+		}
+	})
+
+	t.Run("Scope_reads_order_and_page_objects", func(t *testing.T) {
+		s := setup(t)
+		conv := s.f.NewConversation(t)
+		record(t, s, conv, branch(s, domain.ActionBranchPushed, "octo/api", ""), at(1))
+		record(t, s, conv, branch(s, domain.ActionBranchPushed, "octo/api", ""), at(5))
+		record(t, s, conv, pullRequest(s, domain.ActionPRCreated), at(3))
+		// Two comments last changed at one instant: ObjectID breaks the tie.
+		record(t, s, conv, comment(1), at(2))
+		record(t, s, conv, comment(2), at(2))
+
+		all, total := scopeList(t, s, "", pageOf(50, 0))
+		if len(all) != 4 || total != 4 {
+			t.Fatalf("org read = %d objects (total %d), want 4", len(all), total)
+		}
+		if all[0].ObjectKind != domain.ObjectKindBranch || all[1].ObjectKind != domain.ObjectKindPullRequest {
+			t.Errorf("order = %q, %q first, want the branch (5) then the PR (3)", all[0].ObjectKind, all[1].ObjectKind)
+		}
+		if string(all[2].ObjectID) >= string(all[3].ObjectID) {
+			t.Errorf("tied comments = %q, %q, want ascending object id", all[2].ObjectID, all[3].ObjectID)
+		}
+		first, total := scopeList(t, s, "", pageOf(3, 0))
+		second, total2 := scopeList(t, s, "", pageOf(3, 3))
+		if len(first) != 3 || len(second) != 1 || total != 4 || total2 != 4 {
+			t.Fatalf("pages = %d + %d (totals %d, %d), want 3 + 1 of 4", len(first), len(second), total, total2)
+		}
+		for i, a := range append(first, second...) {
+			if a.ObjectID != all[i].ObjectID {
+				t.Errorf("paged item %d = %q, unwindowed %q", i, a.ObjectID, all[i].ObjectID)
+			}
+		}
+		// A page past the last object has no row to carry the total, and
+		// still answers it.
+		if past, total := scopeList(t, s, "", pageOf(3, 6)); len(past) != 0 || total != 4 {
+			t.Errorf("page past the end = %d items (total %d), want 0 of 4", len(past), total)
+		}
+		count, total := scopeList(t, s, s.f.TeamID, db.ArtifactListOpts{ListOpts: db.ListOpts{CountOnly: true}})
+		if len(count) != 0 || total != 4 {
+			t.Errorf("count-only team read = %d items (total %d), want 0/4", len(count), total)
+		}
+		if _, _, err := s.f.Stores.Artifacts.ListByOrgSystem(ctx, s.f.OrgID, db.ArtifactListOpts{ListOpts: db.ListOpts{Limit: 2, After: []string{"x"}}}); err == nil {
+			t.Error("a keyset window was accepted, want it refused")
+		}
+	})
+
+	t.Run("Deliverable_match_reads_return_the_candidates_newest_first", func(t *testing.T) {
+		s := setup(t)
+		other, _, err := s.f.Stores.Entities.FindOrCreateSystem(ctx, s.f.OrgID, "github", TestGitHubHost,
+			"octo/api#9", "PR_art9", domain.EntityKindPullRequest, "Another PR", TestGitHubHost+"/octo/api/pull/9")
+		if err != nil {
+			t.Fatalf("seed second entity: %v", err)
+		}
+		n := 0
+		store := func(teamID string, d domain.Deliverable) string {
+			t.Helper()
+			n++
+			d.TeamID, d.Provider, d.Scope = teamID, domain.ProviderGitHub, TestGitHubHost
+			d.DedupKey = uuid.NewString()
+			if d.State == "" {
+				d.State = domain.DeliverableStatePROpen
+			}
+			stored, err := s.f.Stores.Deliverables.UpsertSystem(ctx, s.f.OrgID, d)
+			if err != nil {
+				t.Fatalf("seed deliverable %d: %v", n, err)
+			}
+			s.f.SetDeliverableCreatedAt(t, stored.ID, at(n))
+			return stored.ID
+		}
+		pr := func(entityID string) domain.Deliverable {
+			return domain.Deliverable{Kind: domain.DeliverableKindPullRequest, EntityID: entityID, Target: "octo/api#7"}
+		}
+		review := func(externalID string) domain.Deliverable {
+			return domain.Deliverable{Kind: domain.DeliverableKindReview, ExternalID: externalID, Target: "octo/api#7",
+				State: domain.DeliverableStateReviewSubmitted}
+		}
+		olderPR := store(s.f.TeamID, pr(s.pr.ID))
+		posted := store(s.f.TeamID, review("55"))
+		newerPR := store(s.f.TeamID, pr(s.pr.ID))
+		theirPR := store(s.f.OtherTeamID, pr(s.pr.ID))
+		store(s.f.TeamID, pr(other.ID))       // another entity
+		store(s.f.TeamID, review("56"))       // another review
+		store(s.f.TeamID, domain.Deliverable{ // a branch on the entity matches nothing
+			Kind: domain.DeliverableKindBranch, EntityID: s.pr.ID, Target: "octo/api", ExternalID: "refs/heads/fix",
+			State: domain.DeliverableStateBranchPushed,
+		})
+
+		ids := func(ds []domain.Deliverable) []string {
+			out := make([]string, len(ds))
+			for i, d := range ds {
+				out[i] = d.ID
+			}
+			return out
+		}
+		team, err := s.f.Stores.Deliverables.ListArtifactMatchesByTeamSystem(ctx, s.f.OrgID, s.f.TeamID, []string{s.pr.ID}, []string{"55"})
+		if err != nil {
+			t.Fatalf("ListArtifactMatchesByTeamSystem: %v", err)
+		}
+		if got, want := ids(team), []string{newerPR, posted, olderPR}; !slices.Equal(got, want) {
+			t.Errorf("team candidates = %v, want %v (newest first, the team's alone)", got, want)
+		}
+		org, err := s.f.Stores.Deliverables.ListArtifactMatchesByOrgSystem(ctx, s.f.OrgID, []string{s.pr.ID}, []string{"55"})
+		if err != nil {
+			t.Fatalf("ListArtifactMatchesByOrgSystem: %v", err)
+		}
+		if got, want := ids(org), []string{theirPR, newerPR, posted, olderPR}; !slices.Equal(got, want) {
+			t.Errorf("org candidates = %v, want %v", got, want)
+		}
+		reviewsOnly, err := s.f.Stores.Deliverables.ListArtifactMatchesByOrgSystem(ctx, s.f.OrgID, nil, []string{"55"})
+		if err != nil || !slices.Equal(ids(reviewsOnly), []string{posted}) {
+			t.Errorf("review-only candidates = %v, %v; want %s", ids(reviewsOnly), err, posted)
+		}
+		prsOnly, err := s.f.Stores.Deliverables.ListArtifactMatchesByTeamSystem(ctx, s.f.OrgID, s.f.TeamID, []string{s.pr.ID}, nil)
+		if err != nil || !slices.Equal(ids(prsOnly), []string{newerPR, olderPR}) {
+			t.Errorf("PR-only candidates = %v, %v; want %s, %s", ids(prsOnly), err, newerPR, olderPR)
+		}
+		if none, err := s.f.Stores.Deliverables.ListArtifactMatchesByOrgSystem(ctx, s.f.OrgID, nil, nil); err != nil || len(none) != 0 {
+			t.Errorf("no keys = %v, %v; want nothing", none, err)
+		}
+
+		// The artifact's match is the newest candidate.
+		match, ok := domain.ArtifactDeliverable(domain.Artifact{ObjectKind: domain.ObjectKindPullRequest, EntityID: s.pr.ID}, team)
+		if !ok || match.ID != newerPR {
+			t.Errorf("match = %s (%v), want the newest pull request %s", match.ID, ok, newerPR)
 		}
 	})
 }

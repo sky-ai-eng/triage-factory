@@ -10,6 +10,8 @@ import { jsonBody } from '../test/apiResponse'
 
 type Row = { id: string }
 
+const rowKey = (r: Row) => r.id
+
 /** stubPages answers each successive call to the list path with the next
  *  canned page, and records the bodies it was called with. */
 function stubPages(pages: Array<{ items: Row[]; next_page_token?: string; total_count: number }>) {
@@ -60,6 +62,49 @@ describe('usePagedList', () => {
     // under one filter set is rejected under another, so loadMore must carry
     // the filters load was given rather than re-deriving them.
     expect(bodies[1]).toEqual({ statuses: ['queued'], only_unclaimed: true, page_token: 'tok-1' })
+  })
+
+  it("with a key, puts a repeated item's later copy in its place", async () => {
+    // An offset page over an order that moved: b reappears on page 2.
+    type Versioned = Row & { v: number }
+    const pages = [
+      {
+        items: [
+          { id: 'a', v: 1 },
+          { id: 'b', v: 1 },
+        ],
+        next_page_token: 'tok',
+        total_count: 3,
+      },
+      {
+        items: [
+          { id: 'b', v: 2 },
+          { id: 'c', v: 1 },
+        ],
+        total_count: 3,
+      },
+    ]
+    let call = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve({ ok: true, ...jsonBody(pages[call++]) })),
+    )
+    const { result } = renderHook(() =>
+      usePagedList<Versioned>('/api/tasks/list', 'Could not load.', { keyOf: rowKey }),
+    )
+
+    await act(async () => {
+      await result.current.load({})
+    })
+    await act(async () => {
+      await result.current.loadMore()
+    })
+
+    expect(result.current.items).toEqual([
+      { id: 'a', v: 1 },
+      { id: 'b', v: 2 },
+      { id: 'c', v: 1 },
+    ])
   })
 
   it('does not page past the last page', async () => {

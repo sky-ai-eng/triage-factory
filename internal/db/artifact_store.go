@@ -3,7 +3,9 @@ package db
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -17,10 +19,14 @@ func ArtifactExcludedActionsSQL() string {
 	return sqlStringLiterals(domain.ActionsNamingNoObject())
 }
 
-// ArtifactPerformersSQL is domain.ArtifactPerformers as a list of SQL string
-// literals, for the artifact reads' `performed_by IN (...)`.
-func ArtifactPerformersSQL() string {
-	return sqlStringLiterals(domain.ArtifactPerformers())
+// ArtifactPerformerSQL is the artifact reads' predicate on who performed a
+// row of external_actions aliased ea: one of domain.ArtifactPerformers, and
+// for a person, a row that names a conversation. A person's row with none (a
+// dashboard draft toggle, a board drag) acts on no run's deliverable; the
+// reads scoped to a team or an org would otherwise list it as a run's.
+func ArtifactPerformerSQL() string {
+	return `ea.performed_by IN (` + sqlStringLiterals(domain.ArtifactPerformers()) + `) AND (ea.performed_by <> ` +
+		sqlStringLiterals([]string{domain.PerformedByPerson}) + ` OR ea.conversation_id IS NOT NULL)`
 }
 
 func sqlStringLiterals(values []string) string {
@@ -40,12 +46,26 @@ func RequireArtifactOffsetPage(opts ListOpts) error {
 	return nil
 }
 
+// SplitArtifactTeamIDs reads the team ids an object-activity read joins with
+// commas (uuids hold none) as a sorted slice, empty rather than nil for none.
+// Both dialects scan through it, so TeamIDs sorts the same bytewise way in
+// each whatever the database's collation.
+func SplitArtifactTeamIDs(joined string) []string {
+	if joined == "" {
+		return []string{}
+	}
+	ids := strings.Split(joined, ",")
+	slices.Sort(ids)
+	return slices.Compact(ids)
+}
+
 // ArtifactStore reads a run's artifacts from the external_actions ledger. It
 // owns no table. An artifact group is the rows of one org that name a
 // conversation the read asks for, are performed by one of
 // domain.ArtifactPerformers (the agent, or a person acting on the run's
-// deliverables), and name an object (the dialect's SQL twin of
-// domain.ObjectID is non-NULL), grouped by that object id. TF's own rows
+// deliverables, whose row names its conversation; ArtifactPerformerSQL), and
+// name an object (the dialect's SQL twin of domain.ObjectID is non-NULL),
+// grouped by that object id. TF's own rows
 // never form an artifact, and neither does a row of an action that names no
 // object (a refusal, a failure, a catch-all; ArtifactExcludedActionsSQL),
 // whatever object it carries. Rows whose conversation was purged (conversation_id NULL) answer for
@@ -83,4 +103,30 @@ type ArtifactStore interface {
 	// passes one task's conversations. An empty conversationIDs returns nil
 	// without touching the database. Admin pool.
 	ListForConversationsSystem(ctx context.Context, orgID string, conversationIDs []string) ([]domain.Artifact, error)
+
+	// ListByTeam returns one page of the objects teamID's runs changed: the
+	// artifact rows whose team_id is teamID, with any conversation or none,
+	// grouped by object alone, so an object several runs changed is one item.
+	// opts filters the rows before they are grouped. By LastAt descending,
+	// then ObjectID; the total is the number of objects. App pool.
+	ListByTeam(ctx context.Context, orgID, teamID string, opts ArtifactListOpts) ([]domain.ObjectActivity, int, error)
+
+	// ListByOrgSystem is ListByTeam over every row of the org, whatever its
+	// team. Admin pool.
+	ListByOrgSystem(ctx context.Context, orgID string, opts ArtifactListOpts) ([]domain.ObjectActivity, int, error)
+}
+
+// ArtifactListOpts filters and windows ArtifactStore.ListByTeam and
+// ListByOrgSystem. Each filter is exact-match and applies only when set.
+// They select rows, not objects: an object's ActionCount, ConversationCount,
+// TeamIDs and FirstAt count only its rows that pass them. Since and Until bound
+// occurred_at to the half-open window [Since, Until). ListOpts windows the
+// page of objects and pages by offset (RequireArtifactOffsetPage).
+type ArtifactListOpts struct {
+	Provider   string
+	ObjectKind string
+	Since      time.Time
+	Until      time.Time
+
+	ListOpts
 }

@@ -517,106 +517,47 @@ func (s *deliverableStore) ListByConversations(ctx context.Context, orgID string
 	return arts, nil
 }
 
-func (s *deliverableStore) ListByTeam(ctx context.Context, orgID, teamID string, opts db.DeliverableListOpts) ([]domain.Deliverable, int, error) {
+func (s *deliverableStore) ListArtifactMatchesByTeamSystem(ctx context.Context, orgID, teamID string, entityIDs, reviewIDs []string) ([]domain.Deliverable, error) {
+	return s.listArtifactMatches(ctx, orgID, `org_id = ? AND team_id = ?`, []any{orgID, teamID}, entityIDs, reviewIDs)
+}
+
+// ListArtifactMatchesByOrgSystem is the team read over every team: N=1, no
+// pool split.
+func (s *deliverableStore) ListArtifactMatchesByOrgSystem(ctx context.Context, orgID string, entityIDs, reviewIDs []string) ([]domain.Deliverable, error) {
+	return s.listArtifactMatches(ctx, orgID, `org_id = ?`, []any{orgID}, entityIDs, reviewIDs)
+}
+
+// listArtifactMatches is both scopes' read; where and args select the scope.
+// Each id set binds as one JSON array read through json_each, so neither
+// needs chunking against SQLite's variable limit.
+func (s *deliverableStore) listArtifactMatches(ctx context.Context, orgID, where string, args []any, entityIDs, reviewIDs []string) ([]domain.Deliverable, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return nil, 0, err
+		return nil, err
 	}
-	total, err := s.countDeliverables(ctx, `org_id = ? AND team_id = ?`, []any{orgID, teamID}, opts)
+	if len(entityIDs) == 0 && len(reviewIDs) == 0 {
+		return nil, nil
+	}
+	entities, err := json.Marshal(append([]string{}, entityIDs...))
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
-	if opts.CountOnly {
-		return []domain.Deliverable{}, total, nil
-	}
-	// Base WHERE only — the filter helper appends the optional predicates, the
-	// ORDER BY, and LIMIT/OFFSET so this and ListByOrgSystem share one builder.
-	query := `SELECT ` + deliverableColumns + ` FROM deliverables WHERE org_id = ? AND team_id = ?`
-	query, args := appendDeliverableFilters(query, []any{orgID, teamID}, opts)
-	rows, err := s.q.QueryContext(ctx, query, args...)
+	reviews, err := json.Marshal(append([]string{}, reviewIDs...))
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
-	out, err := scanDeliverableRows(rows)
-	return out, total, err
-}
-
-// appendDeliverableFilters appends opts' optional provider/kind/state/time
-// predicates, the newest-first ORDER BY, and LIMIT/OFFSET paging to a SELECT
-// whose WHERE clause is already open. Time bounds wrap both sides in datetime()
-// — exactly the spend store's pattern — so a bound time.Time compares correctly
-// against the CURRENT_TIMESTAMP-formatted created_at regardless of the driver's
-// bind serialization.
-func appendDeliverableFilters(query string, args []any, opts db.DeliverableListOpts) (string, []any) {
-	query, args = appendDeliverablePredicates(query, args, opts)
-	query += ` ORDER BY created_at DESC, id DESC`
-	if opts.Limit > 0 {
-		query += ` LIMIT ?`
-		args = append(args, opts.Limit)
-		// OFFSET only with a LIMIT — paging the newest-first feed.
-		if opts.Offset > 0 {
-			query += ` OFFSET ?`
-			args = append(args, opts.Offset)
-		}
-	}
-	return query, args
-}
-
-// appendDeliverablePredicates is the filter half alone — no ordering, no window —
-// so the count and the page apply exactly the same predicate.
-func appendDeliverablePredicates(query string, args []any, opts db.DeliverableListOpts) (string, []any) {
-	if opts.Provider != "" {
-		query += ` AND provider = ?`
-		args = append(args, opts.Provider)
-	}
-	if opts.Kind != "" {
-		query += ` AND kind = ?`
-		args = append(args, opts.Kind)
-	}
-	if opts.State != "" {
-		query += ` AND state = ?`
-		args = append(args, opts.State)
-	}
-	if !opts.Since.IsZero() {
-		query += ` AND datetime(created_at) >= datetime(?)`
-		args = append(args, opts.Since)
-	}
-	if !opts.Until.IsZero() {
-		query += ` AND datetime(created_at) < datetime(?)`
-		args = append(args, opts.Until)
-	}
-	return query, args
-}
-
-func (s *deliverableStore) countDeliverables(ctx context.Context, where string, base []any, opts db.DeliverableListOpts) (int, error) {
-	query, args := appendDeliverablePredicates(`SELECT COUNT(*) FROM deliverables WHERE `+where, base, opts)
-	var n int
-	err := s.q.QueryRowContext(ctx, query, args...).Scan(&n)
-	return n, err
-}
-
-// ListByOrgSystem is identical to a plain org read in SQLite: local mode is
-// single-tenant (N=1) with no RLS, so there is no admin/app pool split. It
-// returns ALL states (terminal included) for the bot-activity audit feed
-// (TFAC-483), in contrast to ListNonTerminalBySystem's reconciler working set.
-func (s *deliverableStore) ListByOrgSystem(ctx context.Context, orgID string, opts db.DeliverableListOpts) ([]domain.Deliverable, int, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, 0, err
-	}
-	total, err := s.countDeliverables(ctx, `org_id = ?`, []any{orgID}, opts)
+	args = append(args, domain.DeliverableKindPullRequest, string(entities), domain.DeliverableKindReview, string(reviews))
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT `+deliverableColumns+`
+		FROM deliverables
+		WHERE `+where+`
+		  AND ((kind = ? AND entity_id IN (SELECT value FROM json_each(?)))
+		    OR (kind = ? AND external_id IN (SELECT value FROM json_each(?))))
+		ORDER BY created_at DESC, id DESC
+	`, args...)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
-	if opts.CountOnly {
-		return []domain.Deliverable{}, total, nil
-	}
-	query := `SELECT ` + deliverableColumns + ` FROM deliverables WHERE org_id = ?`
-	query, args := appendDeliverableFilters(query, []any{orgID}, opts)
-	rows, err := s.q.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, 0, err
-	}
-	out, err := scanDeliverableRows(rows)
-	return out, total, err
+	return scanDeliverableRows(rows)
 }
 
 // ListNonTerminalBySystem is identical to a plain org read in SQLite: local

@@ -1,6 +1,10 @@
 package domain
 
-import "time"
+import (
+	"slices"
+	"strings"
+	"time"
+)
 
 // ArtifactPerformers is who performs the rows a run's artifacts are read
 // from: its agent, and a person. Every person row that names a conversation
@@ -47,6 +51,19 @@ type Artifact struct {
 	LastAt      time.Time
 }
 
+// ObjectActivity is one object the runs of a team or an org changed: the
+// artifact rows of the scope that name it, grouped by the object alone rather
+// than per conversation. The Artifact fields and their display rule are read
+// over that whole group. ConversationCount is the number of distinct
+// conversations among the rows (a row whose conversation was purged counts
+// toward none), and TeamIDs the distinct teams the rows name, sorted.
+type ObjectActivity struct {
+	Artifact
+
+	ConversationCount int
+	TeamIDs           []string
+}
+
 // ArtifactDeliverable returns the deliverable among deliverables that is the
 // same object as a, and false when none is. A pull request deliverable matches
 // a pull_request artifact on the same entity. A review deliverable matches a
@@ -78,4 +95,28 @@ func ArtifactDeliverable(a Artifact, deliverables []Deliverable) (Deliverable, b
 // none of these needs no deliverables.
 func ArtifactMayHaveDeliverable(a Artifact) bool {
 	return a.ObjectKind == ObjectKindPullRequest || a.ObjectKind == ObjectKindReview
+}
+
+// ArtifactDeliverableKeys returns what a deliverable carries when it is the
+// same object as one of artifacts (ArtifactDeliverable): the entity ids of
+// the pull requests and the review ids their keys name, each sorted and
+// deduplicated, for a reader to fetch only those deliverables. A key that
+// names no review id contributes none.
+func ArtifactDeliverableKeys(artifacts []Artifact) (entityIDs, reviewIDs []string) {
+	reviewPrefix := ObjectKey(ProviderGitHub, ObjectKindReview, "", "")
+	for _, a := range artifacts {
+		switch a.ObjectKind {
+		case ObjectKindPullRequest:
+			if a.EntityID != "" {
+				entityIDs = append(entityIDs, a.EntityID)
+			}
+		case ObjectKindReview:
+			if id, ok := strings.CutPrefix(a.ObjectKey, reviewPrefix); ok && GitHubReviewObjectKey(id) == a.ObjectKey {
+				reviewIDs = append(reviewIDs, id)
+			}
+		}
+	}
+	slices.Sort(entityIDs)
+	slices.Sort(reviewIDs)
+	return slices.Compact(entityIDs), slices.Compact(reviewIDs)
 }

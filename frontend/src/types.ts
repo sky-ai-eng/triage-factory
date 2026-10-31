@@ -447,27 +447,50 @@ export interface ConversationArtifact {
   action_count: number
   first_at: string
   last_at: string
-  deliverable: { id: string; kind: DeliverableKind; state: string } | null
+  deliverable: ArtifactDeliverableRef | null
 }
 
-// ActivityDeliverable is the activity feed's Objects-lens row shape (TFAC-483): a
-// Deliverable plus the owning team's id + name. The team fields are populated ONLY
-// by the org-wide feed (POST /api/orgs/{id}/usage/deliverables/list) so a cross-team
-// row shows which team's bot acted; the team-scoped feed omits them (it's already
-// one team). Mirrors internal/server activityDeliverableJSON.
-export interface ActivityDeliverable extends Deliverable {
-  team_id?: string
-  team_name?: string
+// ArtifactDeliverableRef names the deliverable that is the same object as an
+// artifact (internal/server artifactDeliverableJSON): enough to address it and
+// show where it stands.
+export interface ArtifactDeliverableRef {
+  id: string
+  kind: DeliverableKind
+  state: string
+}
+
+// ActivityObject is the activity feed's Objects-lens row shape: one object the
+// scope's runs changed, however many runs and actions changed it
+// (POST …/usage/artifacts/list, internal/server objectActivityJSON). It says
+// what the runs did (last_action, action_count, run_count), not the object's
+// current state. deliverable is the most recently created deliverable in the
+// scope that is the same object, or null. teams is present on the org feed
+// alone: the teams whose runs changed the object, sorted by id; a team whose
+// row is gone has an empty name.
+export interface ActivityObject {
+  object_id: string
+  object_kind: ObjectKind
+  provider: string
+  target: string
+  url: string
+  last_action: string
+  action_count: number
+  run_count: number
+  last_at: string
+  deliverable: ArtifactDeliverableRef | null
+  teams?: { id: string; name: string }[]
 }
 
 // ActivityAction is the activity feed's Actions-lens row shape (TFAC-483): one
 // row of the append-only external-action audit log — a single external WRITE TF
 // performed under an org credential. `action` is the discriminator (the backend
 // domain.Action* consts); `from_state`/`to_state` carry a transition; `details`
-// is the parsed per-action payload (or absent). team_id/team_name/actor_name are
-// populated ONLY by the org-wide feed (GET …/org/activity?view=actions) so a
-// cross-team row shows which team acted and who authorized it; the team feed
-// omits them. Mirrors internal/server actionJSON.
+// is the parsed per-action payload (or absent). performed_by says who acted:
+// the run's agent, a person, or TF itself; actor_user_id is the person who
+// authorized the act, which an agent row of a person's run carries too.
+// team_id/team_name are populated ONLY by the org-wide feed
+// (POST /api/orgs/{id}/usage/actions/list) so a cross-team row shows which team
+// acted; actor_name rides both feeds. Mirrors internal/server actionJSON.
 export interface ActivityAction {
   id: string
   provider: string

@@ -208,7 +208,7 @@ func TestAuthEventStore_SQLite_SeatClaims(t *testing.T) {
 // paging — over a _time_format=sqlite conn so a bound Since/Until compares
 // against created_at correctly. TFAC-76.
 func TestAuthEventStore_SQLite_FiltersAndPaging(t *testing.T) {
-	conn := newSQLiteForDeliverableTestTimed(t)
+	conn := newSQLiteForDeliverableTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 

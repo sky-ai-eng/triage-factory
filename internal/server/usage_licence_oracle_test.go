@@ -38,8 +38,8 @@ func TestUsageGovernanceGates_NoLicenceOracle_Postgres(t *testing.T) {
 		{"org_access_log", r.member, func(w http.ResponseWriter, c string) {
 			r.uh.handleUsageAccessLog(w, r.req(c, ""))
 		}},
-		{"org_deliverables", r.member, func(w http.ResponseWriter, c string) {
-			r.uh.handleUsageOrgDeliverables(w, r.activityReq(c, "", ""))
+		{"org_artifacts", r.member, func(w http.ResponseWriter, c string) {
+			r.uh.handleUsageOrgArtifacts(w, r.activityReq(c, "", ""))
 		}},
 		{"org_actions", r.member, func(w http.ResponseWriter, c string) {
 			r.uh.handleUsageOrgActions(w, r.activityReq(c, "", ""))
@@ -50,8 +50,8 @@ func TestUsageGovernanceGates_NoLicenceOracle_Postgres(t *testing.T) {
 		{"team_cap_put", r.teamAdmin, func(w http.ResponseWriter, c string) {
 			r.uh.handleUsageTeamCap(w, r.putCapReq(c, r.teamA, `{"max_daily_cost_usd": 25}`))
 		}},
-		{"team_deliverables", r.member, func(w http.ResponseWriter, c string) {
-			r.uh.handleUsageTeamDeliverables(w, r.activityReq(c, r.teamA, ""))
+		{"team_artifacts", r.member, func(w http.ResponseWriter, c string) {
+			r.uh.handleUsageTeamArtifacts(w, r.activityReq(c, r.teamA, ""))
 		}},
 		{"team_actions", r.member, func(w http.ResponseWriter, c string) {
 			r.uh.handleUsageTeamActions(w, r.activityReq(c, r.teamA, ""))
@@ -95,14 +95,14 @@ func TestUsageGovernanceGates_AdminStillSees404Unlicensed_Postgres(t *testing.T)
 		invoke func(w http.ResponseWriter)
 	}{
 		{"org_access_log", func(w http.ResponseWriter) { r.uh.handleUsageAccessLog(w, r.req(r.orgAdmin, "")) }},
-		{"org_deliverables", func(w http.ResponseWriter) {
-			r.uh.handleUsageOrgDeliverables(w, r.activityReq(r.orgAdmin, "", ""))
+		{"org_artifacts", func(w http.ResponseWriter) {
+			r.uh.handleUsageOrgArtifacts(w, r.activityReq(r.orgAdmin, "", ""))
 		}},
 		{"org_team_caps", func(w http.ResponseWriter) {
 			r.uh.handleUsageTeamCaps(w, r.activityReq(r.orgAdmin, "", ""))
 		}},
-		{"team_deliverables", func(w http.ResponseWriter) {
-			r.uh.handleUsageTeamDeliverables(w, r.activityReq(r.teamAdmin, r.teamA, ""))
+		{"team_artifacts", func(w http.ResponseWriter) {
+			r.uh.handleUsageTeamArtifacts(w, r.activityReq(r.teamAdmin, r.teamA, ""))
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

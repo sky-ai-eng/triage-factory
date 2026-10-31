@@ -7,12 +7,18 @@ import type { ListPage, ListRequest } from '../lib/apiClient'
  *  `items` accumulates: `load` replaces it with the first page, `loadMore`
  *  appends the next one. `total` is what the filters match, so a caller can
  *  render "12 of 213" without counting anything itself. */
-export interface PagedListOptions {
+export interface PagedListOptions<T = unknown> {
   /** HTTP statuses that mean "you have nothing here", not "the read failed".
    *  A list behind an admin gate answers 403 to a viewer whose role changed
    *  mid-session; rendering that as an empty panel is honest, while an error
    *  line alarms about a surface they are simply no longer entitled to. */
   emptyOnStatus?: number[]
+  /** The identity of an item, for a list whose order can move under it. An
+   *  offset page over such an order can serve an item already held; with a
+   *  key, `loadMore` puts the later copy in the held item's place instead of
+   *  appending it twice. A stable function (module-level), since it is a
+   *  dependency of `loadMore`. */
+  keyOf?: (item: T) => string
 }
 
 export interface PagedList<T> {
@@ -63,7 +69,7 @@ export interface PagedList<T> {
 export function usePagedList<T>(
   path: string,
   fallbackError: string,
-  opts: PagedListOptions = {},
+  opts: PagedListOptions<T> = {},
 ): PagedList<T> {
   const [items, setItems] = useState<T[]>([])
   const [total, setTotal] = useState<number | null>(0)
@@ -144,7 +150,7 @@ export function usePagedList<T>(
         page_token: tokenRef.current,
       })
       if (requestId !== requestIdRef.current) return
-      setItems((prev) => [...prev, ...page.items])
+      setItems((prev) => appendPage(prev, page.items, opts.keyOf))
       setTotal(page.total_count)
       setNextToken(page.next_page_token)
       tokenRef.current = page.next_page_token
@@ -160,7 +166,7 @@ export function usePagedList<T>(
         setLoading(false)
       }
     }
-  }, [path, fallbackError, opts.emptyOnStatus])
+  }, [path, fallbackError, opts.emptyOnStatus, opts.keyOf])
 
   return { items, total, loading, error, hasMore: nextToken !== '', load, loadMore, setItems }
 }
@@ -169,4 +175,17 @@ export function usePagedList<T>(
  *  as "nothing to show" rather than a failure. */
 function isEmptyStatus(err: unknown, statuses: number[] | undefined): boolean {
   return statuses !== undefined && err instanceof HttpError && statuses.includes(err.status)
+}
+
+/** appendPage adds a page to the held items. With keyOf, an item already held
+ *  is replaced in place by its later copy, which is the fresher read, and only
+ *  new items are appended. */
+function appendPage<T>(prev: T[], page: T[], keyOf?: (item: T) => string): T[] {
+  if (!keyOf) return [...prev, ...page]
+  const fresh = new Map(page.map((item) => [keyOf(item), item]))
+  const held = new Set(prev.map(keyOf))
+  return [
+    ...prev.map((item) => fresh.get(keyOf(item)) ?? item),
+    ...page.filter((item) => !held.has(keyOf(item))),
+  ]
 }

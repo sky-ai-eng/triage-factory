@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"testing"
-	"time"
 
 	_ "modernc.org/sqlite"
 
@@ -336,9 +335,8 @@ func TestDeliverableStore_SQLite_UpsertPreservesTargetOnEmpty(t *testing.T) {
 	}
 }
 
-// TestDeliverableStore_SQLite_ListByConversationAndTeam pins the two read paths
-// and their newest-first ordering + the team Limit. TFAC-455.
-func TestDeliverableStore_SQLite_ListByConversationAndTeam(t *testing.T) {
+// TestDeliverableStore_SQLite_ListByConversation pins the conversation read.
+func TestDeliverableStore_SQLite_ListByConversation(t *testing.T) {
 	conn := newSQLiteForDeliverableTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
@@ -362,21 +360,6 @@ func TestDeliverableStore_SQLite_ListByConversationAndTeam(t *testing.T) {
 		t.Errorf("ListByConversation len = %d, want 3", len(byConversation))
 	}
 
-	byTeam, _, err := stores.Deliverables.ListByTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, db.DeliverableListOpts{})
-	if err != nil {
-		t.Fatalf("ListByTeam: %v", err)
-	}
-	if len(byTeam) != 3 {
-		t.Errorf("ListByTeam len = %d, want 3", len(byTeam))
-	}
-
-	limited, _, err := stores.Deliverables.ListByTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, db.DeliverableListOpts{Limit: 2})
-	if err != nil {
-		t.Fatalf("ListByTeam limited: %v", err)
-	}
-	if len(limited) != 2 {
-		t.Errorf("ListByTeam(Limit:2) len = %d, want 2", len(limited))
-	}
 }
 
 // TestDeliverableStore_SQLite_CountByConversation pins the batched
@@ -486,12 +469,10 @@ func TestDeliverableStore_SQLite_ListByConversations(t *testing.T) {
 	}
 }
 
-// TestDeliverableStore_SQLite_ListByTeam_IncludesDetached pins the
-// audit-ledger invariant: a deliverable whose conversation was purged
-// (conversation_id NULL) is still the team's and must come back from
-// ListByTeam. Guards against a future `AND conversation_id IS NOT NULL`
-// creeping into the query. TFAC-455.
-func TestDeliverableStore_SQLite_ListByTeam_IncludesDetached(t *testing.T) {
+// TestDeliverableStore_SQLite_SurvivesConversationPurge pins the audit-ledger
+// invariant: a deliverable whose conversation was purged is detached
+// (conversation_id NULL), not deleted, and still reads back as the team's.
+func TestDeliverableStore_SQLite_SurvivesConversationPurge(t *testing.T) {
 	conn := newSQLiteForDeliverableTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
@@ -519,15 +500,12 @@ func TestDeliverableStore_SQLite_ListByTeam_IncludesDetached(t *testing.T) {
 		t.Fatalf("conversation_id should be NULL after conversation purge, got %q", nullConversation.String)
 	}
 
-	rows, _, err := stores.Deliverables.ListByTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, db.DeliverableListOpts{})
-	if err != nil {
-		t.Fatalf("ListByTeam: %v", err)
+	got, err := stores.Deliverables.Get(ctx, runmode.LocalDefaultOrgID, art.ID)
+	if err != nil || got == nil {
+		t.Fatalf("Get the detached deliverable = %v, %v", got, err)
 	}
-	if len(rows) != 1 || rows[0].ID != art.ID {
-		t.Errorf("ListByTeam dropped the detached deliverable: %+v", rows)
-	}
-	if rows[0].ConversationID != "" {
-		t.Errorf("detached row ConversationID = %q, want empty", rows[0].ConversationID)
+	if got.ConversationID != "" || got.TeamID != runmode.LocalDefaultTeamID {
+		t.Errorf("detached row = {conversation %q, team %q}, want {\"\", %s}", got.ConversationID, got.TeamID, runmode.LocalDefaultTeamID)
 	}
 }
 
@@ -616,186 +594,6 @@ func TestDeliverableStore_SQLite_ListNonTerminal(t *testing.T) {
 			t.Errorf("ListNonTerminalBySystem returned terminal/unreconcilable row %q (SQL predicate disagrees with domain.IsReconcilableNonTerminal)", k)
 		}
 	}
-}
-
-// TestDeliverableStore_SQLite_ListByOrgSystem pins the bot-activity audit feed's
-// org source (TFAC-483): it returns ALL states — terminal included (merged PR,
-// dismissed review) — in contrast to ListNonTerminalBySystem's reconciler
-// working set, newest-first, and honors the provider/kind/state/time filters and
-// the limit/offset paging from DeliverableListOpts. A _time_format=sqlite conn so
-// the bound Since/Until time.Time compares against created_at correctly.
-func TestDeliverableStore_SQLite_ListByOrgSystem(t *testing.T) {
-	conn := newSQLiteForDeliverableTestTimed(t)
-	stores := sqlitestore.New(conn)
-	ctx := context.Background()
-	conversationID := seedDeliverableConversation(t, conn)
-
-	// (provider, kind, state, created_at) across the lifecycle, including
-	// terminal rows the reconciler set would hide.
-	seeds := []struct {
-		provider, kind, state, when string
-	}{
-		{domain.ProviderGit, domain.DeliverableKindBranch, domain.DeliverableStateBranchPushed, "2026-06-01 00:00:00"},
-		{domain.ProviderGitHub, domain.DeliverableKindPullRequest, domain.DeliverableStatePROpen, "2026-06-02 00:00:00"},
-		{domain.ProviderGitHub, domain.DeliverableKindPullRequest, domain.DeliverableStatePRMerged, "2026-06-03 00:00:00"},   // terminal
-		{domain.ProviderGitHub, domain.DeliverableKindReview, domain.DeliverableStateReviewDismissed, "2026-06-04 00:00:00"}, // terminal
-		{domain.ProviderJira, domain.DeliverableKindComment, domain.DeliverableStateCommentPosted, "2026-06-05 00:00:00"},
-	}
-	for i, s := range seeds {
-		out, err := stores.Deliverables.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Deliverable{
-			ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
-			Provider: s.provider, Scope: "https://github.com", Kind: s.kind, Target: "octo/repo", State: s.state, DedupKey: "k" + string(rune('a'+i)),
-		})
-		if err != nil {
-			t.Fatalf("seed %s/%s: %v", s.kind, s.state, err)
-		}
-		// Pin created_at so the newest-first order + the time window are deterministic.
-		if _, err := conn.Exec(`UPDATE deliverables SET created_at = ? WHERE id = ?`, s.when, out.ID); err != nil {
-			t.Fatalf("set created_at: %v", err)
-		}
-	}
-
-	// No opts: every row, terminal included, newest-first.
-	all, _, err := stores.Deliverables.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, db.DeliverableListOpts{})
-	if err != nil {
-		t.Fatalf("ListByOrgSystem: %v", err)
-	}
-	if len(all) != 5 {
-		t.Fatalf("ListByOrgSystem returned %d rows, want all 5 (terminal included)", len(all))
-	}
-	states := map[string]bool{}
-	for _, a := range all {
-		states[a.State] = true
-	}
-	if !states[domain.DeliverableStatePRMerged] || !states[domain.DeliverableStateReviewDismissed] {
-		t.Errorf("feed dropped terminal rows: states=%v (want merged + dismissed present)", states)
-	}
-	// Contrast the reconciler set: it hides exactly those terminal rows.
-	nonTerminal, err := stores.Deliverables.ListNonTerminalBySystem(ctx, runmode.LocalDefaultOrgID)
-	if err != nil {
-		t.Fatalf("ListNonTerminalBySystem: %v", err)
-	}
-	if len(nonTerminal) != 2 {
-		t.Errorf("ListNonTerminalBySystem returned %d, want 2 (branch pushed + PR open) — the contrast", len(nonTerminal))
-	}
-	// Newest-first: comment (06-05) leads, branch (06-01) trails.
-	if all[0].State != domain.DeliverableStateCommentPosted || all[4].State != domain.DeliverableStateBranchPushed {
-		t.Errorf("order not newest-first: first=%q last=%q", all[0].State, all[4].State)
-	}
-
-	// Filters.
-	gh, _, err := stores.Deliverables.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, db.DeliverableListOpts{Provider: domain.ProviderGitHub})
-	if err != nil {
-		t.Fatalf("filter provider: %v", err)
-	}
-	if len(gh) != 3 {
-		t.Errorf("provider=github returned %d, want 3 (PR open + PR merged + review)", len(gh))
-	}
-	prs, _, err := stores.Deliverables.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, db.DeliverableListOpts{Kind: domain.DeliverableKindPullRequest})
-	if err != nil {
-		t.Fatalf("filter kind: %v", err)
-	}
-	if len(prs) != 2 {
-		t.Errorf("kind=pull_request returned %d, want 2 (open + merged)", len(prs))
-	}
-	merged, _, err := stores.Deliverables.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, db.DeliverableListOpts{State: domain.DeliverableStatePRMerged})
-	if err != nil {
-		t.Fatalf("filter state: %v", err)
-	}
-	if len(merged) != 1 || merged[0].State != domain.DeliverableStatePRMerged {
-		t.Errorf("state=merged returned %+v, want exactly the merged PR", merged)
-	}
-
-	// Time window [06-03, 06-05): merged (06-03) + review (06-04), excluding the
-	// open PR before it and the comment at the exclusive upper bound.
-	windowed, _, err := stores.Deliverables.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, db.DeliverableListOpts{
-		Since: time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC),
-		Until: time.Date(2026, 6, 5, 0, 0, 0, 0, time.UTC),
-	})
-	if err != nil {
-		t.Fatalf("filter window: %v", err)
-	}
-	if len(windowed) != 2 {
-		t.Fatalf("time window returned %d, want 2 (merged + review)", len(windowed))
-	}
-	if windowed[0].State != domain.DeliverableStateReviewDismissed || windowed[1].State != domain.DeliverableStatePRMerged {
-		t.Errorf("windowed order = [%q, %q], want [dismissed, merged] (newest-first)", windowed[0].State, windowed[1].State)
-	}
-
-	// Paging: page 1 (limit 2) → comment + review; page 2 (offset 2) → merged + open.
-	page1, _, err := stores.Deliverables.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, db.DeliverableListOpts{Limit: 2})
-	if err != nil {
-		t.Fatalf("page 1: %v", err)
-	}
-	page2, _, err := stores.Deliverables.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, db.DeliverableListOpts{Limit: 2, Offset: 2})
-	if err != nil {
-		t.Fatalf("page 2: %v", err)
-	}
-	if len(page1) != 2 || len(page2) != 2 {
-		t.Fatalf("paging sizes = %d, %d, want 2, 2", len(page1), len(page2))
-	}
-	if page1[0].State != domain.DeliverableStateCommentPosted || page2[0].State != domain.DeliverableStatePRMerged {
-		t.Errorf("paging boundary wrong: page1[0]=%q page2[0]=%q", page1[0].State, page2[0].State)
-	}
-}
-
-// TestDeliverableStore_SQLite_ListByTeam_Filters pins that the shared filter/paging
-// helper applies to the team-scoped path too (not just ListByOrgSystem): a
-// provider filter and an offset both narrow ListByTeam's result. TFAC-483.
-func TestDeliverableStore_SQLite_ListByTeam_Filters(t *testing.T) {
-	conn := newSQLiteForDeliverableTest(t)
-	stores := sqlitestore.New(conn)
-	ctx := context.Background()
-	conversationID := seedDeliverableConversation(t, conn)
-
-	seed := func(provider, kind, key string) {
-		if _, err := stores.Deliverables.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Deliverable{
-			ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
-			Provider: provider, Scope: "https://github.com", Kind: kind, Target: "octo/repo",
-			State: domain.DeliverableStateCommentPosted, DedupKey: key,
-		}); err != nil {
-			t.Fatalf("seed %s: %v", key, err)
-		}
-	}
-	seed(domain.ProviderGitHub, domain.DeliverableKindComment, "g1")
-	seed(domain.ProviderGitHub, domain.DeliverableKindComment, "g2")
-	seed(domain.ProviderJira, domain.DeliverableKindComment, "j1")
-
-	gh, _, err := stores.Deliverables.ListByTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, db.DeliverableListOpts{Provider: domain.ProviderGitHub})
-	if err != nil {
-		t.Fatalf("ListByTeam provider filter: %v", err)
-	}
-	if len(gh) != 2 {
-		t.Errorf("provider=github returned %d, want 2", len(gh))
-	}
-
-	// limit 2 then offset 2 walks the 3-row team feed without overlap.
-	offset, _, err := stores.Deliverables.ListByTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, db.DeliverableListOpts{Limit: 2, Offset: 2})
-	if err != nil {
-		t.Fatalf("ListByTeam offset: %v", err)
-	}
-	if len(offset) != 1 {
-		t.Errorf("limit 2 offset 2 over 3 rows returned %d, want 1", len(offset))
-	}
-}
-
-// newSQLiteForDeliverableTestTimed is newSQLiteForDeliverableTest with
-// _time_format=sqlite, so a bound time.Time (the Since/Until filters) serializes
-// to a datetime()-parseable form matching CURRENT_TIMESTAMP — the same reason
-// the spend store's SQLite test uses it. Used by the time-window filter test.
-func newSQLiteForDeliverableTestTimed(t *testing.T) *sql.DB {
-	t.Helper()
-	conn, err := sql.Open("sqlite", db.TestDSNMemory)
-	if err != nil {
-		t.Fatalf("open in-memory db: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-	conn.SetMaxOpenConns(1)
-	conn.SetMaxIdleConns(1)
-	if err := db.BootstrapSchemaForTest(conn); err != nil {
-		t.Fatalf("bootstrap schema: %v", err)
-	}
-	return conn
 }
 
 // TestDeliverableStore_SQLite_ListPendingReviewsByEntity pins the new-commits

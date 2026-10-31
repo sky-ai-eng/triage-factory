@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -25,20 +26,18 @@ var _ db.ArtifactStore = (*artifactStore)(nil)
 // sqliteArtifactRowFilter is what every artifact read adds to its own WHERE:
 // the rows of an artifact performer that name an object, of an action that
 // can name one.
-var sqliteArtifactRowFilter = ` AND ea.performed_by IN (` + db.ArtifactPerformersSQL() + `) AND ea.action NOT IN (` + db.ArtifactExcludedActionsSQL() +
+var sqliteArtifactRowFilter = ` AND ` + db.ArtifactPerformerSQL() + ` AND ea.action NOT IN (` + db.ArtifactExcludedActionsSQL() +
 	`) AND (` + sqliteActionObjectIDSQL + `) IS NOT NULL`
 
-// sqliteArtifactSelect is the Postgres impl's grouped read (see
-// pgArtifactSelect for the model). occurred_at is text here, ordered as text
-// the way the ledger's list reads order it; first_at comes out of a window
-// aggregate with no declared type, so both timestamps are scanned as text and
-// parsed.
-func sqliteArtifactSelect(where string) string {
+// sqliteArtifactCTEs is the Postgres impl's pgArtifactCTEs (see there for
+// the model). occurred_at is text here, ordered as text the way the ledger's
+// list reads order it.
+func sqliteArtifactCTEs(where string) string {
 	return `
 	WITH scoped AS (
 		SELECT ea.id, ea.org_id, ea.provider, ea.scope, ea.action, ea.target,
 		       COALESCE(ea.current_url, ea.url, '') AS url, ea.entity_id, ea.repository_id,
-		       ea.object_kind, ea.object_key, ea.occurred_at,
+		       ea.object_kind, ea.object_key, ea.occurred_at, ea.conversation_id, ea.team_id,
 		       ` + sqliteActionObjectIDSQL + ` AS object_id
 		  FROM external_actions ea
 		 WHERE ` + where + sqliteArtifactRowFilter + `
@@ -48,14 +47,41 @@ func sqliteArtifactSelect(where string) string {
 		       COUNT(*) OVER (PARTITION BY s.object_id) AS action_count,
 		       MIN(s.occurred_at) OVER (PARTITION BY s.object_id) AS first_at
 		  FROM scoped s
-	)
-	SELECT g.object_id, g.object_kind, g.provider, g.scope,
+	)`
+}
+
+// sqliteArtifactColumns is the Postgres impl's pgArtifactColumns. first_at
+// comes out of a window aggregate with no declared type, so both timestamps
+// are scanned as text and parsed.
+const sqliteArtifactColumns = `g.object_id, g.object_kind, g.provider, g.scope,
 	       COALESCE(g.entity_id, ''), COALESCE(g.repository_id, ''), COALESCE(g.object_key, ''),
 	       COALESCE(e.source_id, g.target), COALESCE(NULLIF(e.url, ''), g.url),
-	       g.action, g.action_count, g.first_at, g.occurred_at
-	  FROM grouped g
+	       g.action, g.action_count, g.first_at, g.occurred_at`
+
+const sqliteArtifactEntityJoin = `
 	  LEFT JOIN entities e ON e.id = g.entity_id AND e.org_id = g.org_id
-	       AND (g.object_kind = 'pull_request' OR (g.object_kind = 'issue' AND g.provider = 'github'))
+	       AND (g.object_kind = 'pull_request' OR (g.object_kind = 'issue' AND g.provider = 'github'))`
+
+// sqliteArtifactSelect is the Postgres impl's pgArtifactSelect.
+func sqliteArtifactSelect(where string) string {
+	return sqliteArtifactCTEs(where) + `
+	SELECT ` + sqliteArtifactColumns + `
+	  FROM grouped g` + sqliteArtifactEntityJoin + `
+	 WHERE g.rn = 1`
+}
+
+// sqliteObjectActivitySelect is the Postgres impl's pgObjectActivitySelect,
+// total included. group_concat's default separator is a comma.
+func sqliteObjectActivitySelect(where string) string {
+	return sqliteArtifactCTEs(where) + `, spread AS (
+		SELECT s.object_id, COUNT(DISTINCT s.conversation_id) AS conversation_count,
+		       COALESCE(group_concat(DISTINCT s.team_id), '') AS team_ids
+		  FROM scoped s
+		 GROUP BY s.object_id
+	)
+	SELECT ` + sqliteArtifactColumns + `, sp.conversation_count, sp.team_ids, COUNT(*) OVER () AS total
+	  FROM grouped g
+	  JOIN spread sp ON sp.object_id = g.object_id` + sqliteArtifactEntityJoin + `
 	 WHERE g.rn = 1`
 }
 
@@ -180,6 +206,117 @@ func (s *artifactStore) ListForConversationsSystem(ctx context.Context, orgID st
 	return scanSQLiteArtifacts(rows)
 }
 
+func (s *artifactStore) ListByTeam(ctx context.Context, orgID, teamID string, opts db.ArtifactListOpts) ([]domain.ObjectActivity, int, error) {
+	return s.listObjectActivity(ctx, orgID, `ea.org_id = ? AND ea.team_id = ?`, []any{orgID, teamID}, opts)
+}
+
+// ListByOrgSystem is ListByTeam over every team: N=1, no pool split.
+func (s *artifactStore) ListByOrgSystem(ctx context.Context, orgID string, opts db.ArtifactListOpts) ([]domain.ObjectActivity, int, error) {
+	return s.listObjectActivity(ctx, orgID, `ea.org_id = ?`, []any{orgID}, opts)
+}
+
+// listObjectActivity is both scopes' read: base and args select the scope's
+// rows, opts' filters narrow them, and the page is of objects.
+func (s *artifactStore) listObjectActivity(ctx context.Context, orgID, base string, args []any, opts db.ArtifactListOpts) ([]domain.ObjectActivity, int, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, 0, err
+	}
+	if err := db.RequireArtifactOffsetPage(opts.ListOpts); err != nil {
+		return nil, 0, err
+	}
+	where, args := sqliteArtifactListWhere(base, args, opts)
+	if opts.CountOnly {
+		total, err := s.countObjectActivity(ctx, where, args)
+		return []domain.ObjectActivity{}, total, err
+	}
+	query := sqliteObjectActivitySelect(where) + ` ORDER BY g.occurred_at DESC, g.object_id`
+	pageArgs := args
+	if opts.Limit > 0 {
+		query += ` LIMIT ? OFFSET ?`
+		pageArgs = append(slices.Clip(args), opts.Limit, opts.Offset)
+	}
+	out, total, err := s.scanObjectActivity(ctx, query, pageArgs)
+	if err != nil {
+		return nil, 0, err
+	}
+	// A page past the last object has no row to carry the total. The rows are
+	// closed by now, which the one-connection pool needs before another read.
+	if len(out) == 0 && opts.Offset > 0 {
+		if total, err = s.countObjectActivity(ctx, where, args); err != nil {
+			return nil, 0, err
+		}
+	}
+	return out, total, nil
+}
+
+// scanObjectActivity runs a sqliteObjectActivitySelect page and reads its
+// items and the total the rows carry.
+func (s *artifactStore) scanObjectActivity(ctx context.Context, query string, args []any) ([]domain.ObjectActivity, int, error) {
+	rows, err := s.q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := []domain.ObjectActivity{}
+	var total int
+	for rows.Next() {
+		var (
+			a                      domain.ObjectActivity
+			first, latest, teamIDs string
+		)
+		if err := rows.Scan(
+			&a.ObjectID, &a.ObjectKind, &a.Provider, &a.Scope,
+			&a.EntityID, &a.RepositoryID, &a.ObjectKey,
+			&a.Target, &a.URL,
+			&a.LastAction, &a.ActionCount, &first, &latest,
+			&a.ConversationCount, &teamIDs, &total,
+		); err != nil {
+			return nil, 0, err
+		}
+		if err := parseArtifactTimes(&a.Artifact, first, latest); err != nil {
+			return nil, 0, err
+		}
+		a.TeamIDs = db.SplitArtifactTeamIDs(teamIDs)
+		out = append(out, a)
+	}
+	return out, total, rows.Err()
+}
+
+// countObjectActivity counts the objects the rows where selects name.
+func (s *artifactStore) countObjectActivity(ctx context.Context, where string, args []any) (int, error) {
+	var total int
+	err := s.q.QueryRowContext(ctx, `
+		SELECT COUNT(DISTINCT `+sqliteActionObjectIDSQL+`)
+		  FROM external_actions ea
+		 WHERE `+where+sqliteArtifactRowFilter, args...).Scan(&total)
+	return total, err
+}
+
+// sqliteArtifactListWhere appends opts' filters to base. The time bounds
+// wrap both sides in datetime(), as the ledger's list reads do, so a bound
+// time.Time compares correctly against the CURRENT_TIMESTAMP-formatted
+// occurred_at whatever the driver's bind serialization.
+func sqliteArtifactListWhere(base string, args []any, opts db.ArtifactListOpts) (string, []any) {
+	where := base
+	if opts.Provider != "" {
+		where += ` AND ea.provider = ?`
+		args = append(args, opts.Provider)
+	}
+	if opts.ObjectKind != "" {
+		where += ` AND ea.object_kind = ?`
+		args = append(args, opts.ObjectKind)
+	}
+	if !opts.Since.IsZero() {
+		where += ` AND datetime(ea.occurred_at) >= datetime(?)`
+		args = append(args, opts.Since)
+	}
+	if !opts.Until.IsZero() {
+		where += ` AND datetime(ea.occurred_at) < datetime(?)`
+		args = append(args, opts.Until)
+	}
+	return where, args
+}
+
 func scanSQLiteArtifacts(rows *sql.Rows) ([]domain.Artifact, error) {
 	defer rows.Close()
 	out := []domain.Artifact{}
@@ -196,14 +333,22 @@ func scanSQLiteArtifacts(rows *sql.Rows) ([]domain.Artifact, error) {
 		); err != nil {
 			return nil, err
 		}
-		var err error
-		if a.FirstAt, err = parseDBDatetime(first); err != nil {
-			return nil, fmt.Errorf("parse artifact first_at %q: %w", first, err)
-		}
-		if a.LastAt, err = parseDBDatetime(latest); err != nil {
-			return nil, fmt.Errorf("parse artifact last_at %q: %w", latest, err)
+		if err := parseArtifactTimes(&a, first, latest); err != nil {
+			return nil, err
 		}
 		out = append(out, a)
 	}
 	return out, rows.Err()
+}
+
+// parseArtifactTimes sets a's FirstAt and LastAt from their text columns.
+func parseArtifactTimes(a *domain.Artifact, first, latest string) error {
+	var err error
+	if a.FirstAt, err = parseDBDatetime(first); err != nil {
+		return fmt.Errorf("parse artifact first_at %q: %w", first, err)
+	}
+	if a.LastAt, err = parseDBDatetime(latest); err != nil {
+		return fmt.Errorf("parse artifact last_at %q: %w", latest, err)
+	}
+	return nil
 }

@@ -9,10 +9,9 @@ import {
 } from 'lucide-react'
 import type { DeliverableKind, ObjectKind } from '../types'
 
-// Shared deliverable-kind presentation, factored out of DeliverableList.tsx so both
-// the conversation-scoped list and the bot-activity audit feed render rows the
-// same way — and the feed's kind filter reads the same labels. This is a
-// data/helpers module (no components), so importing it into a component file
+// Shared deliverable-kind presentation, factored out of DeliverableList.tsx so
+// every surface that renders a deliverable row renders it the same way. This is
+// a data/helpers module (no components), so importing it into a component file
 // keeps React Fast Refresh happy (the board's laneFilter.ts split for the same reason).
 
 export interface KindMeta {
@@ -37,11 +36,6 @@ export const FALLBACK_META: KindMeta = {
   label: 'deliverable',
   text: 'text-ink-3',
 }
-
-// DELIVERABLE_KINDS is the canonical kind order for the feed's kind filter — the
-// modeled union, newest-product-surface-first. Derived from KIND_META so a new
-// kind shows up in the filter the moment it's modeled.
-export const DELIVERABLE_KINDS = Object.keys(KIND_META) as DeliverableKind[]
 
 // metaForKind resolves a (possibly unmodeled) kind string to its presentation,
 // falling back for a server value outside the union.
@@ -86,14 +80,18 @@ export function awaitsDecision(kind: string, state: string): boolean {
   return false
 }
 
-// DELIVERABLE_PROVIDERS / PROVIDER_LABEL back the feed's provider filter — the
-// external systems the bot acts in (internal/domain Provider*). 'git' is
-// the push-layer provider branches carry; the rest are the API providers.
-export const DELIVERABLE_PROVIDERS = ['github', 'jira', 'slack', 'git', 'linear'] as const
+// OBJECT_KINDS is the Objects lens's kind filter order, derived from
+// OBJECT_META so a newly modeled kind shows up in the filter the moment it's
+// added.
+export const OBJECT_KINDS = Object.keys(OBJECT_META) as ObjectKind[]
 
-// PROVIDER_LABEL spans both feeds' provider vocabularies, so it carries
-// 'network' — the Actions lens's sandbox-egress provider — even though no
-// deliverable is ever filed under it.
+// OBJECT_PROVIDERS backs the Objects lens's provider filter: the systems a
+// run's change can land in. 'network' (an egress denial) and 'git' never name
+// an object.
+export const OBJECT_PROVIDERS = ['github', 'jira', 'linear', 'slack'] as const
+
+// PROVIDER_LABEL names the external systems for the activity feed's provider
+// filters (internal/domain Provider*), across both lenses' vocabularies.
 export const PROVIDER_LABEL: Record<string, string> = {
   github: 'GitHub',
   jira: 'Jira',
@@ -102,25 +100,6 @@ export const PROVIDER_LABEL: Record<string, string> = {
   linear: 'Linear',
   network: 'Network',
 }
-
-// DELIVERABLE_STATES is the distinct lifecycle-state set across every kind
-// (internal/domain DeliverableState*), backing the feed's state filter. Some values
-// alias across kinds ('pending', 'deleted'), so the set is deduped — the filter
-// matches the raw state regardless of kind.
-export const DELIVERABLE_STATES = [
-  'pushed',
-  'pending',
-  'draft',
-  'open',
-  'merged',
-  'closed',
-  'submitted',
-  'dismissed',
-  'created',
-  'updated',
-  'posted',
-  'deleted',
-] as const
 
 // rowTone is a row's border and fill: the warm highlight for work a person acts
 // on, else the quiet chrome every other row shares.

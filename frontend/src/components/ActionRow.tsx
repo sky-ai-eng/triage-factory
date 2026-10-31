@@ -1,4 +1,4 @@
-import { ArrowRight, Bot, ExternalLink, User } from 'lucide-react'
+import { ArrowRight, Bot, Cog, ExternalLink, User } from 'lucide-react'
 import type { ActivityAction } from '../types'
 import { TONE_TEXT, TONE_VAR, type Tone } from './board/cardStyle'
 import { actionDetailSummary, metaForAction } from './actionMeta'
@@ -45,7 +45,11 @@ export function ActionRow({ action, note }: { action: ActivityAction; note?: Rea
         <TransitionChip from={action.from_state} to={action.to_state} />
       )}
       {note}
-      <ActorChip name={action.actor_name} actorUserID={action.actor_user_id} />
+      <ActorChip
+        performedBy={action.performed_by}
+        name={action.actor_name}
+        actorUserID={action.actor_user_id}
+      />
     </>
   )
 
@@ -84,8 +88,9 @@ export function ActionRow({ action, note }: { action: ActivityAction; note?: Rea
 }
 
 // VerbPill — the action verb in a quiet toned pill (StateBadge's sibling, keyed
-// off the action's tone rather than a lifecycle state).
-function VerbPill({ label, tone }: { label: string; tone: Tone }) {
+// off the action's tone rather than a lifecycle state). ObjectRow shows an
+// object's last action in it too.
+export function VerbPill({ label, tone }: { label: string; tone: Tone }) {
   return (
     <span
       className={`shrink-0 rounded-[3px] px-1.5 py-0.5 font-mono text-label-sm font-semibold uppercase tracking-[0.06em] ${TONE_TEXT[tone]}`}
@@ -108,22 +113,41 @@ function TransitionChip({ from, to }: { from: string; to: string }) {
   )
 }
 
-// ActorChip — who performed the action: the resolved human display name on the
-// org feed; "human" when a human authorized it but the name isn't resolved (the
-// team feed); "bot" for an autonomous system action (no actor — an
-// event-triggered run, the Jira mirror).
-//
-// TODO(TFAC-1264): this reads actor_user_id, which a manual run's agent rows
-// carry too, so the agent's acts render as the person's. Read performed_by:
-// an agent row with an actor is the agent, authorized by that person.
-function ActorChip({ name, actorUserID }: { name?: string; actorUserID?: string }) {
-  const isHuman = !!name || !!actorUserID
-  const label = name || (actorUserID ? 'human' : 'bot')
-  const Icon = isHuman ? User : Bot
+// ActorChip — who performed the action, from performed_by: the run's agent, a
+// person, or TF itself. actor_user_id is who authorized it, which an agent row
+// of a person's run carries too, so it names the person beside the agent
+// rather than making the agent's act read as theirs. The name is resolved on
+// both feeds; when it is not, the chip says a person without naming one.
+function ActorChip({
+  performedBy,
+  name,
+  actorUserID,
+}: {
+  performedBy: ActivityAction['performed_by']
+  name?: string
+  actorUserID?: string
+}) {
+  let Icon = Bot
+  let label = 'agent'
+  let title = 'Agent action'
+  if (performedBy === 'person') {
+    Icon = User
+    label = name || 'person'
+    title = `Performed by ${name || 'a person'}`
+  } else if (performedBy === 'system') {
+    Icon = Cog
+    label = 'TF'
+    title = 'Performed by Triage Factory itself'
+  } else if (name) {
+    label = `agent · ${name}`
+    title = `Agent action, authorized by ${name}`
+  } else if (actorUserID) {
+    title = 'Agent action, authorized by a person'
+  }
   return (
     <span
       className="inline-flex max-w-[8rem] shrink-0 items-center gap-1 truncate rounded-[3px] bg-tint-3 px-1.5 py-0.5 font-mono text-label-sm text-ink-3"
-      title={isHuman ? `Authorized by ${label}` : 'Autonomous bot action'}
+      title={title}
     >
       <Icon size={9} className="shrink-0" aria-hidden />
       <span className="truncate">{label}</span>

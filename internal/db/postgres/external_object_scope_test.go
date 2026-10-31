@@ -209,9 +209,10 @@ func TestArtifacts_Postgres(t *testing.T) {
 		h.Reset(t)
 		orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "artifacts")
 		return dbtest.ArtifactFixture{
-			Stores: stores,
-			OrgID:  orgID,
-			TeamID: teamID,
+			Stores:      stores,
+			OrgID:       orgID,
+			TeamID:      teamID,
+			OtherTeamID: pgtest.SeedTeam(t, h, orgID, "artifacts-other"),
 			NewConversation: func(t *testing.T) string {
 				return seedPgDeliverableConversation(t, h, orgID, teamID, userID)
 			},
@@ -219,6 +220,12 @@ func TestArtifacts_Postgres(t *testing.T) {
 				t.Helper()
 				if _, err := h.AdminDB.Exec(`UPDATE external_actions SET occurred_at = $2 WHERE id = $1`, actionID, at); err != nil {
 					t.Fatalf("set occurred_at of %s: %v", actionID, err)
+				}
+			},
+			SetDeliverableCreatedAt: func(t *testing.T, deliverableID string, at time.Time) {
+				t.Helper()
+				if _, err := h.AdminDB.Exec(`UPDATE deliverables SET created_at = $2 WHERE id = $1`, deliverableID, at); err != nil {
+					t.Fatalf("set created_at of %s: %v", deliverableID, err)
 				}
 			},
 		}

@@ -17,90 +17,254 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// The /usage activity feeds (TFAC-483) are the EE governance surface, behind
+// The /usage activity feeds are the EE governance surface, behind
 // FeatureGovernance. There are TWO resources, and they are two routes:
 //
-//   - .../deliverables/list → the deliverables head: each object the bot produced and
-//     its CURRENT state, reconciler-maintained. Includes externally-driven
-//     transitions (a human merging a PR — not a TF action, so it never appears
-//     in the actions log).
+//   - .../artifacts/list → the objects the scope's runs changed, read from the
+//     ledger: one item per object however many runs and actions changed it,
+//     with the action that last did, how many actions and runs there were, and
+//     the deliverable that is the same object, if any.
 //   - .../actions/list → the append-only external-action audit log of record:
 //     one row per external WRITE TF performed under an org credential (the
 //     bot's GitHub/Jira mutations, the human-authorized GitHub approval
 //     lifecycle, the Jira board mirror), who/what/when/from→to. The source of
-//     truth for "what did TF do." Includes actions with no deliverable (the Jira
-//     mirror's transitions).
+//     truth for "what did TF do." Includes the rows no artifact is made of,
+//     such as TF's own, refusals and failures.
 //
-// The coverage difference between the two is intentional, and it is exactly
-// why they are separate routes now. They used to be one route multiplexed by
-// ?view=, which meant one address answering with two different row shapes and
-// two different filter vocabularies — a caller's `state=` filter silently did
-// nothing on the actions lens, and a typo'd view answered with the other
-// resource entirely.
+// The two have different item shapes and different filter vocabularies, which
+// is why they are separate routes rather than one route with a lens selector.
 //
 // Each resource has the same two scopes + gates (mirroring the spend
 // endpoints):
 //
-//   - POST /api/teams/{team_id}/usage/{deliverables,actions}/list — one team's
-//     history (team admin OR org admin), RLS/team-scoped under the caller's
-//     claims.
-//   - POST /api/orgs/{org_id}/usage/{deliverables,actions}/list — every team's history (org
-//     admin), the System cross-team read; rows carry team_id + team_name (+
-//     actor_name for actions).
+//   - POST /api/teams/{team_id}/usage/{artifacts,actions}/list — one team's
+//     history (team admin OR org admin).
+//   - POST /api/orgs/{org_id}/usage/{artifacts,actions}/list — every team's
+//     history (org admin), the System cross-team read; items carry their teams
+//     (+ actor_name for actions).
 //
 // Unlicensed builds (local mode included) 404, agreeing with the FE
 // useEntitlements gate that hides the surface entirely.
 
-// activityDeliverableJSON is the bot-activity feed's wire shape: the shared run
-// deliverable projection (deliverableJSON) plus the owning team's id + name. The team
-// fields populate ONLY the org-wide feed — so an org-admin row shows which
-// team's bot acted — and are omitted (omitempty) on the team-scoped feed, which
-// is already one team, so that response is exactly []deliverableJSON.
-type activityDeliverableJSON struct {
-	deliverableJSON
-	TeamID   string `json:"team_id,omitempty"`
-	TeamName string `json:"team_name,omitempty"`
+// objectActivityJSON is one item of the artifacts feeds: an object the
+// scope's runs changed (domain.ObjectActivity). object_id is the spelling the
+// actions lists' object_id filter takes. deliverable is the most recently
+// created deliverable in the scope that is the same object
+// (domain.ArtifactDeliverable), or null.
+type objectActivityJSON struct {
+	ObjectID          domain.ObjectRef         `json:"object_id"`
+	ObjectKind        string                   `json:"object_kind"`
+	Provider          string                   `json:"provider"`
+	Target            string                   `json:"target"`
+	URL               string                   `json:"url"`
+	LastAction        string                   `json:"last_action"`
+	ActionCount       int                      `json:"action_count"`
+	ConversationCount int                      `json:"run_count"`
+	LastAt            time.Time                `json:"last_at"`
+	Deliverable       *artifactDeliverableJSON `json:"deliverable"`
 }
 
-// deliverableActivityListRequest is the body of the deliverables-head feeds. The
-// filter names are the query params they replaced, unchanged in meaning.
-type deliverableActivityListRequest struct {
-	Provider string `json:"provider"`
-	Kind     string `json:"kind"`
-	State    string `json:"state"`
-	// Since / Until bound created_at to the half-open window [since, until).
-	// Both are RFC3339 or YYYY-MM-DD, and both default to UNBOUNDED: the feed
-	// is a full history, not a calendar month.
-	Since string `json:"since"`
-	Until string `json:"until"`
+// orgObjectActivityJSON is the org feed's item: the teams whose runs changed
+// the object, sorted by id, ride along so a cross-team item says whose bots
+// acted. The team feed is one team and carries none.
+type orgObjectActivityJSON struct {
+	objectActivityJSON
+	Teams []activityTeamJSON `json:"teams"`
+}
+
+// activityTeamJSON names a team on an org feed item. Name is empty for a team
+// whose row is gone.
+type activityTeamJSON struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+func toObjectActivityJSON(a domain.ObjectActivity, deliverables []domain.Deliverable) objectActivityJSON {
+	out := objectActivityJSON{
+		ObjectID:          a.ObjectID,
+		ObjectKind:        a.ObjectKind,
+		Provider:          a.Provider,
+		Target:            a.Target,
+		URL:               a.URL,
+		LastAction:        a.LastAction,
+		ActionCount:       a.ActionCount,
+		ConversationCount: a.ConversationCount,
+		LastAt:            a.LastAt,
+	}
+	if d, ok := domain.ArtifactDeliverable(a.Artifact, deliverables); ok {
+		out.Deliverable = &artifactDeliverableJSON{ID: d.ID, Kind: d.Kind, State: d.State}
+	}
+	return out
+}
+
+// artifactActivityListRequest is the body of the artifacts feeds. The filters
+// select ledger rows (db.ArtifactListOpts): Since / Until bound occurred_at to
+// the half-open window [since, until), RFC3339 or YYYY-MM-DD, and both default
+// to UNBOUNDED, since the feed is a full history, not a calendar month.
+type artifactActivityListRequest struct {
+	Provider   string `json:"provider"`
+	ObjectKind string `json:"object_kind"`
+	Since      string `json:"since"`
+	Until      string `json:"until"`
 
 	httpx.PageRequest
 }
 
-// resolveDeliverableActivityFilters validates the body's filters into the store's
-// opts. Every vocabulary is closed: an unrecognized value used to reach the
-// store as a literal, match nothing, and answer 200 with an empty page — a typo
-// that reads exactly like "your bot did nothing".
-func resolveDeliverableActivityFilters(v *httpx.Validation, req deliverableActivityListRequest) db.DeliverableListOpts {
-	opts := db.DeliverableListOpts{
-		Provider: strings.TrimSpace(req.Provider),
-		Kind:     strings.TrimSpace(req.Kind),
-		State:    strings.TrimSpace(req.State),
+// resolveArtifactActivityFilters validates the body's filters into the store's
+// opts. Both vocabularies are closed: an unknown value is a 400 naming the
+// field, never a filter that matches nothing and reads as "the bot did
+// nothing".
+func resolveArtifactActivityFilters(v *httpx.Validation, req artifactActivityListRequest) db.ArtifactListOpts {
+	opts := db.ArtifactListOpts{
+		Provider:   resolveActivityProvider(v, req.Provider),
+		ObjectKind: strings.TrimSpace(req.ObjectKind),
 	}
-	for _, f := range []struct {
-		name, value string
-		vocab       []string
-	}{
-		{"provider", opts.Provider, domain.Providers()},
-		{"kind", opts.Kind, domain.DeliverableKinds()},
-		{"state", opts.State, domain.DeliverableStates()},
-	} {
-		if f.value != "" && !slices.Contains(f.vocab, f.value) {
-			v.Invalid(f.name, "must be one of: "+strings.Join(f.vocab, ", "))
-		}
+	if opts.ObjectKind != "" && !slices.Contains(domain.ObjectKinds(), opts.ObjectKind) {
+		v.Invalid("object_kind", "must be one of: "+strings.Join(domain.ObjectKinds(), ", "))
 	}
 	opts.Since, opts.Until = resolveActivityWindow(v, req.Since, req.Until)
 	return opts
+}
+
+// resolveActivityProvider validates both feeds' provider filter against
+// domain.Providers.
+func resolveActivityProvider(v *httpx.Validation, raw string) string {
+	provider := strings.TrimSpace(raw)
+	if provider != "" && !slices.Contains(domain.Providers(), provider) {
+		v.Invalid("provider", "must be one of: "+strings.Join(domain.Providers(), ", "))
+	}
+	return provider
+}
+
+// artifactKeys returns what a deliverable carries when it is the same object
+// as one of items (domain.ArtifactDeliverableKeys). ok is false when there is
+// nothing to match, so the reader skips the deliverable read.
+func artifactKeys(items []domain.ObjectActivity) (entityIDs, reviewIDs []string, ok bool) {
+	artifacts := make([]domain.Artifact, len(items))
+	for i, a := range items {
+		artifacts[i] = a.Artifact
+	}
+	entityIDs, reviewIDs = domain.ArtifactDeliverableKeys(artifacts)
+	return entityIDs, reviewIDs, len(entityIDs)+len(reviewIDs) > 0
+}
+
+// handleUsageTeamArtifacts returns the objects one team's runs changed, by the
+// latest action on each first. Gate: FeatureGovernance AND (team admin OR org
+// admin). The ledger read runs under the caller's claims; the deliverables it
+// matches are read on the admin pool, bound to the team, so an org admin who
+// is on no team sees the same deliverables here that the org feed shows them.
+// The team feed carries no teams (it is one team).
+//
+// POST /api/teams/{team_id}/usage/artifacts/list
+func (h *usageHandler) handleUsageTeamArtifacts(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, teamID, ok := h.resolveTeamActivityCaller(w, r)
+	if !ok {
+		return
+	}
+	var req artifactActivityListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	opts := resolveArtifactActivityFilters(&v, req)
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(opts), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+	opts.Limit, opts.Offset, opts.CountOnly = page.Limit, page.Offset, page.CountOnly
+
+	var (
+		items        []domain.ObjectActivity
+		deliverables []domain.Deliverable
+		total        int
+	)
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		items, total, e = tx.Artifacts.ListByTeam(r.Context(), orgID, teamID, opts)
+		if e != nil {
+			return e
+		}
+		entityIDs, reviewIDs, matchable := artifactKeys(items)
+		if !matchable {
+			return nil
+		}
+		deliverables, e = tx.Deliverables.ListArtifactMatchesByTeamSystem(r.Context(), orgID, teamID, entityIDs, reviewIDs)
+		return e
+	}); err != nil {
+		internalError(w, "usage", err)
+		return
+	}
+
+	out := make([]objectActivityJSON, len(items))
+	for i, a := range items {
+		out[i] = toObjectActivityJSON(a, deliverables)
+	}
+	httpx.WriteList(w, page, out, total)
+}
+
+// handleUsageOrgArtifacts returns the objects every team's runs changed, by
+// the latest action on each first. Gate: FeatureGovernance AND org admin — a
+// cross-team read, so the ledger and the deliverables are both the System
+// reads on the admin pool. Each item names its teams, resolved through
+// Teams.GetSystem.
+//
+// POST /api/orgs/{org_id}/usage/artifacts/list
+func (h *usageHandler) handleUsageOrgArtifacts(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := h.resolveGovernedOrgAdmin(w, r)
+	if !ok {
+		return
+	}
+	var req artifactActivityListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	opts := resolveArtifactActivityFilters(&v, req)
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(opts), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+	opts.Limit, opts.Offset, opts.CountOnly = page.Limit, page.Offset, page.CountOnly
+
+	var (
+		items        []domain.ObjectActivity
+		deliverables []domain.Deliverable
+		total        int
+		teamNames    map[string]string
+	)
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		items, total, e = tx.Artifacts.ListByOrgSystem(r.Context(), orgID, opts)
+		if e != nil {
+			return e
+		}
+		var teamIDs []string
+		for _, a := range items {
+			teamIDs = append(teamIDs, a.TeamIDs...)
+		}
+		if teamNames, e = resolveTeamNames(r.Context(), tx, orgID, teamIDs); e != nil {
+			return e
+		}
+		entityIDs, reviewIDs, matchable := artifactKeys(items)
+		if !matchable {
+			return nil
+		}
+		deliverables, e = tx.Deliverables.ListArtifactMatchesByOrgSystem(r.Context(), orgID, entityIDs, reviewIDs)
+		return e
+	}); err != nil {
+		internalError(w, "usage", err)
+		return
+	}
+
+	out := make([]orgObjectActivityJSON, len(items))
+	for i, a := range items {
+		teams := make([]activityTeamJSON, len(a.TeamIDs))
+		for j, id := range a.TeamIDs {
+			teams[j] = activityTeamJSON{ID: id, Name: teamNames[id]}
+		}
+		out[i] = orgObjectActivityJSON{objectActivityJSON: toObjectActivityJSON(a, deliverables), Teams: teams}
+	}
+	httpx.WriteList(w, page, out, total)
 }
 
 // resolveActivityWindow parses the shared half-open [since, until) filter. Each
@@ -129,107 +293,6 @@ func resolveActivityWindow(v *httpx.Validation, since, until string) (time.Time,
 		v.Invalid("since", "since must be before until")
 	}
 	return sinceT, untilT
-}
-
-// handleUsageTeamDeliverables returns one team's deliverables head, newest first.
-// Gate: FeatureGovernance AND (team admin OR org admin) — the org-governance
-// lens may inspect any team's bot activity, while a team's own admin sees their
-// team's. The read uses the RLS-scoped ListByTeam under the caller's claims
-// (defense in depth alongside the role gate). The team feed omits
-// team_id/team_name (already one team).
-//
-// POST /api/teams/{team_id}/usage/deliverables/list
-func (h *usageHandler) handleUsageTeamDeliverables(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, teamID, ok := h.resolveTeamActivityCaller(w, r)
-	if !ok {
-		return
-	}
-
-	var req deliverableActivityListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
-		return
-	}
-	var v httpx.Validation
-	opts := resolveDeliverableActivityFilters(&v, req)
-	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(opts), 0)
-	if v.Flush(w, http.StatusBadRequest) {
-		return
-	}
-	opts.Limit, opts.Offset, opts.CountOnly = page.Limit, page.Offset, page.CountOnly
-
-	var (
-		arts  []domain.Deliverable
-		total int
-	)
-	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		arts, total, e = tx.Deliverables.ListByTeam(r.Context(), orgID, teamID, opts)
-		return e
-	}); err != nil {
-		internalError(w, "usage", err)
-		return
-	}
-
-	out := make([]activityDeliverableJSON, len(arts))
-	for i, a := range arts {
-		out[i] = activityDeliverableJSON{deliverableJSON: toDeliverableJSON(a)}
-	}
-	httpx.WriteList(w, page, out, total)
-}
-
-// handleUsageOrgDeliverables returns the org-wide deliverables head across every
-// team, newest first. Gate: FeatureGovernance AND org admin — a cross-team read
-// (the authorized governance intent). It uses the System aggregate
-// (ListByOrgSystem, admin pool / BYPASSRLS) because crossing teams is the point,
-// then resolves each row's team name (via Teams.GetSystem) so the feed shows
-// which team's bot acted.
-//
-// POST /api/orgs/{org_id}/usage/deliverables/list
-func (h *usageHandler) handleUsageOrgDeliverables(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := h.resolveGovernedOrgAdmin(w, r)
-	if !ok {
-		return
-	}
-
-	var req deliverableActivityListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
-		return
-	}
-	var v httpx.Validation
-	opts := resolveDeliverableActivityFilters(&v, req)
-	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(opts), 0)
-	if v.Flush(w, http.StatusBadRequest) {
-		return
-	}
-	opts.Limit, opts.Offset, opts.CountOnly = page.Limit, page.Offset, page.CountOnly
-
-	var (
-		arts      []domain.Deliverable
-		total     int
-		teamNames map[string]string
-	)
-	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		arts, total, e = tx.Deliverables.ListByOrgSystem(r.Context(), orgID, opts)
-		if e != nil {
-			return e
-		}
-		teamNames, e = resolveDeliverableTeamNames(r.Context(), tx, orgID, arts)
-		return e
-	}); err != nil {
-		internalError(w, "usage", err)
-		return
-	}
-
-	out := make([]activityDeliverableJSON, len(arts))
-	for i, a := range arts {
-		out[i] = activityDeliverableJSON{
-			deliverableJSON: toDeliverableJSON(a),
-			TeamID:          a.TeamID,
-			TeamName:        teamNames[a.TeamID],
-		}
-	}
-	httpx.WriteList(w, page, out, total)
 }
 
 // resolveTeamActivityCaller runs the shared front gate for both team-scoped
@@ -317,33 +380,6 @@ func (h *usageHandler) requireTeamOrOrgAdmin(w http.ResponseWriter, r *http.Requ
 	return false
 }
 
-// resolveDeliverableTeamNames maps each distinct team in the deliverable set to its
-// name via the ADMIN pool (Teams.GetSystem) — the org feed crosses teams the
-// caller may not belong to. Mirrors resolveSpendTeamNames; deliverable TeamID is
-// NOT NULL, so every row has a team. N+1 over the small distinct-id set is fine
-// for v1 (a page is ~50 rows, far fewer distinct teams).
-func resolveDeliverableTeamNames(ctx context.Context, tx db.TxStores, orgID string, arts []domain.Deliverable) (map[string]string, error) {
-	names := map[string]string{}
-	for _, a := range arts {
-		if a.TeamID == "" {
-			continue
-		}
-		if _, done := names[a.TeamID]; done {
-			continue
-		}
-		t, err := tx.Teams.GetSystem(ctx, orgID, a.TeamID)
-		if err != nil {
-			return nil, err
-		}
-		name := ""
-		if t != nil {
-			name = t.Name
-		}
-		names[a.TeamID] = name
-	}
-	return names, nil
-}
-
 // --- The actions feed (the external-action audit log) ---
 
 // actionJSON is the action-log feed's wire shape — one external_actions row
@@ -408,11 +444,11 @@ func toActionJSON(a domain.ExternalAction) actionJSON {
 	}
 }
 
-// actionActivityListRequest is the body of the action-log feeds. It mirrors
-// deliverableActivityListRequest (provider and the time window are identical) but
-// filters on the action discriminator and the actor user id instead of
-// kind/state — the two resources' filter vocabularies are genuinely different,
-// which is why they are two routes rather than one with a lens selector.
+// actionActivityListRequest is the body of the action-log feeds. It shares
+// provider and the time window with artifactActivityListRequest but filters on
+// the action discriminator and the actor user id instead of the object kind —
+// the two resources' filter vocabularies are genuinely different, which is why
+// they are two routes rather than one with a lens selector.
 type actionActivityListRequest struct {
 	Provider string `json:"provider"`
 	Action   string `json:"action"`
@@ -426,13 +462,9 @@ type actionActivityListRequest struct {
 
 func resolveActionActivityFilters(v *httpx.Validation, req actionActivityListRequest) domain.ExternalActionListOpts {
 	opts := domain.ExternalActionListOpts{
-		Provider:    strings.TrimSpace(req.Provider),
+		Provider:    resolveActivityProvider(v, req.Provider),
 		Action:      strings.TrimSpace(req.Action),
 		ActorUserID: strings.TrimSpace(req.Actor),
-	}
-	// Same closed-vocabulary rule as the deliverables feed.
-	if opts.Provider != "" && !slices.Contains(domain.Providers(), opts.Provider) {
-		v.Invalid("provider", "must be one of: "+strings.Join(domain.Providers(), ", "))
 	}
 	if opts.Action != "" && !slices.Contains(domain.ExternalActionTypes(), opts.Action) {
 		v.Invalid("action", "not a known action type")
@@ -447,7 +479,7 @@ func resolveActionActivityFilters(v *httpx.Validation, req actionActivityListReq
 }
 
 // handleUsageTeamActions returns one team's external-action history, newest
-// first. Same gates as the team deliverables feed. The team feed omits
+// first. Same gates as the team artifacts feed. The team feed omits
 // team_id/team_name (it's already one team) but DOES resolve the authorizing
 // actor's display name — this is the audit surface a team admin reads, so raw
 // actor UUIDs would be poor UX, and resolving over one page's small
@@ -557,20 +589,31 @@ func (h *usageHandler) handleUsageOrgActions(w http.ResponseWriter, r *http.Requ
 	httpx.WriteList(w, page, out, total)
 }
 
-// resolveActionTeamNames maps each distinct team in the action set to its name
-// via the ADMIN pool (Teams.GetSystem) — the org feed crosses teams the caller
-// may not belong to. Mirrors resolveDeliverableTeamNames. Actions with no team (a
-// dashboard board-drag, a team-less mirror) are skipped — they carry no chip.
+// resolveActionTeamNames maps each distinct team in the action set to its
+// name. Actions with no team (a dashboard board-drag, a team-less mirror) are
+// skipped — they carry no chip.
 func resolveActionTeamNames(ctx context.Context, tx db.TxStores, orgID string, actions []domain.ExternalAction) (map[string]string, error) {
-	names := map[string]string{}
+	teamIDs := make([]string, 0, len(actions))
 	for _, a := range actions {
-		if a.TeamID == "" {
+		teamIDs = append(teamIDs, a.TeamID)
+	}
+	return resolveTeamNames(ctx, tx, orgID, teamIDs)
+}
+
+// resolveTeamNames maps each distinct non-empty id of teamIDs to its team's
+// name via the ADMIN pool (Teams.GetSystem): the org feeds cross teams the
+// caller may not belong to. A team with no row maps to "". N+1 over the small
+// distinct-id set is fine: a page is ~50 rows, far fewer distinct teams.
+func resolveTeamNames(ctx context.Context, tx db.TxStores, orgID string, teamIDs []string) (map[string]string, error) {
+	names := map[string]string{}
+	for _, id := range teamIDs {
+		if id == "" {
 			continue
 		}
-		if _, done := names[a.TeamID]; done {
+		if _, done := names[id]; done {
 			continue
 		}
-		t, err := tx.Teams.GetSystem(ctx, orgID, a.TeamID)
+		t, err := tx.Teams.GetSystem(ctx, orgID, id)
 		if err != nil {
 			return nil, err
 		}
@@ -578,7 +621,7 @@ func resolveActionTeamNames(ctx context.Context, tx db.TxStores, orgID string, a
 		if t != nil {
 			name = t.Name
 		}
-		names[a.TeamID] = name
+		names[id] = name
 	}
 	return names, nil
 }
