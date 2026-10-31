@@ -14,6 +14,8 @@ import (
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -483,6 +485,7 @@ func TestHandleEvent_MultipleTeams_OneBotRun(t *testing.T) {
 
 	stub := &stubDelegator{db: database}
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), stores.Agents, stores.TeamAgents, nil, testTaskStore(database), stores.Conversations, stores.Entities, stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, nil, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
+	rec := notifytest.Record(t)
 
 	router.HandleEvent(context.Background(), domain.Event{
 		EventType: domain.EventJiraIssueAvailable, EntityID: &entity.ID,
@@ -496,6 +499,9 @@ func TestHandleEvent_MultipleTeams_OneBotRun(t *testing.T) {
 	if stub.calls != 1 {
 		t.Errorf("expected exactly 1 bot run (exclusive claim), got %d", stub.calls)
 	}
+	// A pool event is about no one person, so two teams contending for it is
+	// not the conflict the losing team's admins are told about.
+	rec.Inactive(t, runmode.LocalDefaultOrgID, kinds.AutomationConflict)
 	if active[0].ClaimedByAgentID == "" {
 		t.Error("task should be bot-claimed after the winning team fired")
 	}

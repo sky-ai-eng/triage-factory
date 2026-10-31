@@ -554,3 +554,32 @@ func TestExamples_EveryRecipientShape(t *testing.T) {
 		t.Errorf("Kinds() is missing %s", linearCondition.Name())
 	}
 }
+
+func TestTeams_Resolve(t *testing.T) {
+	teamsOf := func(p testParams) []string {
+		if p.ID == "" {
+			return nil
+		}
+		return strings.Split(p.ID, ",")
+	}
+	a := Teams(teamsOf, Admins)
+	got, err := a.resolve(context.Background(), nil, testParams{ID: "t-1,t-2,t-1"})
+	want := []Recipient{
+		{Scope: domain.NotificationScopeTeam, Role: Admins, TeamID: "t-1"},
+		{Scope: domain.NotificationScopeTeam, Role: Admins, TeamID: "t-2"},
+	}
+	if err != nil || !slices.Equal(got, want) {
+		t.Errorf("resolve = %+v, %v; want each team's admins once %+v", got, err, want)
+	}
+	for _, p := range []testParams{{}, {ID: "t-1,"}} {
+		if got, err := a.resolve(context.Background(), nil, p); err == nil {
+			t.Errorf("resolve(%q) = %+v; want a refusal for naming no team or an empty one", p.ID, got)
+		}
+	}
+	defer func() {
+		if recover() == nil {
+			t.Error("Teams accepted a role that is neither members nor admins")
+		}
+	}()
+	Teams(teamsOf, Role("owners"))
+}

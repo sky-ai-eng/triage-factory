@@ -1,3 +1,5 @@
+import { useCallback, useEffect } from 'react'
+import { useSearchParams } from 'react-router'
 import PromptsWorkspace from '../components/PromptsWorkspace'
 import TeamSwitch from '../components/TeamSwitch'
 import { useActiveTeam } from '../hooks/useTeams'
@@ -15,16 +17,48 @@ import { useActiveTeam } from '../hooks/useTeams'
 // shows exactly one team's prompts + triggers, and new rows belong to that
 // team. The switcher renders only for ≥2-team users; solo/local keeps teamId ''
 // (the server resolves the sole team).
+//
+// A notification links to one team's trigger as ?team=…&trigger=…: the page
+// switches to that team when the viewer is on it, then opens the trigger, and
+// drops both from the URL once the trigger has been read.
 export default function Prompts() {
   const activeTeam = useActiveTeam('prompts')
+  const { teamId, setTeamId, multi, ready, teams } = activeTeam
+  const [params, setParams] = useSearchParams()
+  const linkedTeam = params.get('team') ?? ''
+  const linkedTrigger = params.get('trigger')
+  const onLinkedTeam = multi && teams.some((t) => t.id === linkedTeam)
+
+  useEffect(() => {
+    if (ready && onLinkedTeam && teamId !== linkedTeam) setTeamId(linkedTeam)
+  }, [ready, onLinkedTeam, teamId, linkedTeam, setTeamId])
+
+  // Wait for the switch, so the panel opens read-only or not by the trigger's
+  // own team.
+  const openTriggerId =
+    linkedTrigger && ready && (!onLinkedTeam || teamId === linkedTeam) ? linkedTrigger : null
+
+  const clearLink = useCallback(() => {
+    setParams(
+      (prev) => {
+        const next = new URLSearchParams(prev)
+        next.delete('team')
+        next.delete('trigger')
+        return next
+      },
+      { replace: true },
+    )
+  }, [setParams])
 
   return (
     <div className="flex h-full flex-col">
       <PromptsWorkspace
-        teamId={activeTeam.teamId}
-        ready={activeTeam.ready}
+        teamId={teamId}
+        ready={ready}
+        openTriggerId={openTriggerId}
+        onTriggerOpened={clearLink}
         toolbarLeft={<h1 className="text-section font-semibold text-ink-1">Prompts</h1>}
-        toolbarRight={<TeamSwitch value={activeTeam.teamId} onChange={activeTeam.setTeamId} />}
+        toolbarRight={<TeamSwitch value={teamId} onChange={setTeamId} />}
       />
     </div>
   )

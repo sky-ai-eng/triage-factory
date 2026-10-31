@@ -1,4 +1,4 @@
-import { useState, useCallback, type ReactNode } from 'react'
+import { useState, useCallback, useEffect, type ReactNode } from 'react'
 import { AnimatePresence } from 'motion/react'
 import PromptDrawer from './PromptDrawer'
 import BindingGraph from './BindingGraph'
@@ -7,8 +7,10 @@ import TaskRuleEditor from './TaskRuleEditor'
 import TriggerConfigPanel from './TriggerConfigPanel'
 import ViewOnlyBadge from './ViewOnlyBadge'
 import { useTeamRole } from '../hooks/useTeamRole'
-import type { TriggerHandler, RuleHandler } from '../types'
-import { apiListAll } from '../lib/apiClient'
+import { toast } from './Toast/toastStore'
+import type { EventHandler, TriggerHandler, RuleHandler } from '../types'
+import { apiJSON, apiListAll, httpErrorMessage } from '../lib/apiClient'
+import { handlersBase } from '../lib/scope'
 
 // PromptsWorkspace is the single-team prompt/auto-delegation editor: the
 // BindingGraph canvas plus the drawers that create/edit prompts, triggers, and
@@ -30,6 +32,11 @@ interface PromptsWorkspaceProps {
   // tab leaves them out (the page header owns both).
   toolbarLeft?: ReactNode
   toolbarRight?: ReactNode
+  // openTriggerId opens that trigger's config panel, as a link to it asks.
+  // onTriggerOpened is called once the trigger has been read, whatever the
+  // answer, so the caller can drop the link.
+  openTriggerId?: string | null
+  onTriggerOpened?: () => void
 }
 
 export default function PromptsWorkspace({
@@ -37,6 +44,8 @@ export default function PromptsWorkspace({
   ready,
   toolbarLeft,
   toolbarRight,
+  openTriggerId,
+  onTriggerOpened,
 }: PromptsWorkspaceProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [isNew, setIsNew] = useState(false)
@@ -59,6 +68,26 @@ export default function PromptsWorkspace({
 
   // Trigger config panel state.
   const [editingTrigger, setEditingTrigger] = useState<TriggerHandler | null>(null)
+
+  useEffect(() => {
+    if (!openTriggerId) return
+    let cancelled = false
+    apiJSON<EventHandler>(`${handlersBase()}/${encodeURIComponent(openTriggerId)}`)
+      .then((h) => {
+        if (cancelled) return
+        if (h.kind === 'trigger') setEditingTrigger(h)
+        else toast.error('That link is to a task rule, not a trigger.')
+      })
+      .catch((err) => {
+        if (!cancelled) toast.error(httpErrorMessage(err, 'Could not open the linked trigger.'))
+      })
+      .finally(() => {
+        if (!cancelled) onTriggerOpened?.()
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [openTriggerId, onTriggerOpened])
 
   // Forgiving banner state.
   const [bannerEventType, setBannerEventType] = useState<string | null>(null)

@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -466,8 +467,14 @@ type eventRouting struct {
 	ownerTeam    string
 	visibleTeams []string
 	orderedTeams []string
-	teamTriggers map[string][]domain.EventHandler
-	taskPriority float64
+	// identityTeams is set when orderedTeams are the teams of the one
+	// identity the event is about — an author or assignee on several teams, or
+	// a requested party that maps to several — rather than handler teams or
+	// watchers. Only then is a second team's matched trigger a conflict its
+	// admins are told about (kinds.AutomationConflict).
+	identityTeams bool
+	teamTriggers  map[string][]domain.EventHandler
+	taskPriority  float64
 }
 
 // resolveTeamRouting computes the owner team, visibility set, firing order, and
@@ -614,10 +621,11 @@ func (r *Router) resolveOwnedRouting(ctx context.Context, orgID string, evt doma
 	}
 	vis, ownerTeam, ordered, priority, ok := ownerLadderRouting(owner, ownerSet, matchedRules, matchedTriggers)
 	return eventRouting{
-		ownerTeam:    ownerTeam,
-		visibleTeams: vis,
-		orderedTeams: ordered,
-		taskPriority: priority,
+		ownerTeam:     ownerTeam,
+		visibleTeams:  vis,
+		orderedTeams:  ordered,
+		identityTeams: owner == "" && len(ownerSet) > 0,
+		taskPriority:  priority,
 	}, ok, nil
 }
 
@@ -649,9 +657,10 @@ func (r *Router) resolveRequestedPartyRouting(ctx context.Context, orgID string,
 		return eventRouting{}, false, nil
 	}
 	return eventRouting{
-		visibleTeams: reqTeams,
-		orderedTeams: reqTeams,
-		taskPriority: maxRuleDefaultPriority(matchedRules),
+		visibleTeams:  reqTeams,
+		orderedTeams:  reqTeams,
+		identityTeams: true,
+		taskPriority:  maxRuleDefaultPriority(matchedRules),
 	}, true, nil
 }
 
@@ -774,6 +783,14 @@ func (r *Router) upsertTaskForEvent(ctx context.Context, orgID string, evt domai
 // joined error asks the caller for a replay, and the replay is fenced per
 // (event, trigger) — the siblings that already fired no-op the second time
 // through, leaving only the failed one to actually retry.
+//
+// When orderedTeams are one identity's teams, the walk is also where a
+// conflict between them is decided: the first team whose trigger commits
+// wins, and every later team with auto-delegation on and a trigger to fire
+// now loses to its claim. The losers' admins are told (postAutomationConflict).
+// A deferred trigger takes no part: it is decided after scoring, if at all. A
+// replay finds the winner's trigger already fired, commits nothing, and posts
+// nothing.
 func (r *Router) fireMatchedTriggers(ctx context.Context, orgID string, evt domain.Event, entityID string, task *domain.Task, routing eventRouting) (int, string, error) {
 	ctx, span := tracer.Start(ctx, "route.triggers", trace.WithAttributes(telemetry.TaskID(task.ID)))
 	defer span.End()
@@ -781,6 +798,8 @@ func (r *Router) fireMatchedTriggers(ctx context.Context, orgID string, evt doma
 	fired := 0
 	injectedConversationID := ""
 	var errs []error
+	winner := ""
+	var losers []kinds.ConflictLoser
 	for _, teamID := range routing.orderedTeams {
 		triggers := routing.teamTriggers[teamID]
 		if len(triggers) == 0 {
@@ -807,9 +826,13 @@ func (r *Router) fireMatchedTriggers(ctx context.Context, orgID string, evt doma
 				"team", acting, "task_id", task.ID, "event_type", evt.EventType, "matched_triggers", len(triggers))
 			continue
 		}
+		immediate, teamCommitted := "", false
 		for _, trigger := range triggers {
 			if trigger.MinAutonomySuitability != nil && *trigger.MinAutonomySuitability > 0 {
 				continue // deferred to post-scoring handler
+			}
+			if immediate == "" {
+				immediate = trigger.ID
 			}
 			committed, err := r.tryAutoDelegateTrackingInjection(ctx, orgID, task, trigger, entityID, evt.ID, acting, &injectedConversationID)
 			if err != nil {
@@ -818,9 +841,43 @@ func (r *Router) fireMatchedTriggers(ctx context.Context, orgID string, evt doma
 			}
 			if committed {
 				fired++
+				teamCommitted = true
 			}
 		}
+		switch {
+		case teamCommitted && winner == "":
+			winner = acting
+		case !teamCommitted && winner != "" && immediate != "" && routing.identityTeams:
+			losers = append(losers, kinds.ConflictLoser{TeamID: acting, TriggerID: immediate})
+		}
+	}
+	if len(losers) > 0 {
+		r.postAutomationConflict(ctx, orgID, task, winner, losers)
 	}
 	span.SetAttributes(telemetry.Count(fired))
 	return fired, injectedConversationID, errors.Join(errs...)
+}
+
+// postAutomationConflict tells the losing teams' admins that winner's
+// automation handled task. The winner's name is display only, so a failed read
+// posts without it rather than not at all.
+func (r *Router) postAutomationConflict(ctx context.Context, orgID string, task *domain.Task, winner string, losers []kinds.ConflictLoser) {
+	won := kinds.ConflictTeam{TeamID: winner}
+	if r.teams != nil {
+		team, err := r.teams.GetSystem(ctx, orgID, winner)
+		if err != nil {
+			routerLog.Warn("automation conflict: winning team's name unreadable", "team", winner, "task_id", task.ID, "error", err)
+		} else if team != nil {
+			won.Name = team.Name
+		}
+	}
+	subject := task.EntitySourceID
+	if subject == "" {
+		subject = task.Title
+	}
+	routerLog.Info("automation conflict: one team's trigger ran, others lost the claim",
+		"task_id", task.ID, "winner", winner, "losers", len(losers))
+	kinds.AutomationConflict.Post(ctx, orgID, kinds.Conflict{
+		TaskID: task.ID, EventType: task.EventType, Subject: subject, Winner: won, Losers: losers,
+	})
 }

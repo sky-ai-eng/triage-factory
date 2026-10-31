@@ -25,6 +25,12 @@ type routes struct{}
 // mode, which has no /org page, on /settings.
 func (routes) OrgSettings() Href { return Href{route: orgSettingsRoute} }
 
+// Trigger is one of a team's triggers, open in the prompts editor with that
+// team selected.
+func (routes) Trigger(teamID, triggerID string) Href {
+	return Href{route: promptsRoute, query: url.Values{"team": {teamID}, "trigger": {triggerID}}}
+}
+
 // route is a page of the SPA. multi is its path under /orgs/{org_id}; local is
 // its path in local mode's route table, "" when local mode has no such page.
 // Either may end in the query that opens the right part of the page.
@@ -34,7 +40,10 @@ type route struct {
 	local string
 }
 
-var orgSettingsRoute = newRoute("org_settings", "/org?tab=settings", "/settings")
+var (
+	orgSettingsRoute = newRoute("org_settings", "/org?tab=settings", "/settings")
+	promptsRoute     = newRoute("prompts", "/prompts", "/prompts")
+)
 
 // routeTable is every route Routes builds. Renaming a page is an edit here and
 // in frontend/src/main.tsx; TestNotifyRoutesAreSPARoutes fails until the two
@@ -64,7 +73,10 @@ func SPARoutes() []SPARoute {
 // Href is a Link's address: a page from Routes, or a page outside TF from
 // External. A write that renders the zero Href is refused.
 type Href struct {
-	route    *route
+	route *route
+	// query is what a Routes builder names on its page; every value is
+	// required, so one the params left empty refuses the write.
+	query    url.Values
 	external string
 }
 
@@ -91,13 +103,26 @@ func (h Href) id() string {
 func (h Href) render(orgID string, local bool, checkHost func(*url.URL) error) (string, error) {
 	switch {
 	case h.route != nil:
-		if !local {
-			return "/orgs/" + url.PathEscape(orgID) + h.route.multi, nil
+		page := "/orgs/" + url.PathEscape(orgID) + h.route.multi
+		if local {
+			if h.route.local == "" {
+				return "", fmt.Errorf("route %s has no page in local mode", h.route.name)
+			}
+			page = h.route.local
 		}
-		if h.route.local == "" {
-			return "", fmt.Errorf("route %s has no page in local mode", h.route.name)
+		if len(h.query) == 0 {
+			return page, nil
 		}
-		return h.route.local, nil
+		for name, values := range h.query {
+			if slices.Contains(values, "") {
+				return "", fmt.Errorf("route %s: query %s is empty", h.route.name, name)
+			}
+		}
+		sep := "?"
+		if strings.Contains(page, "?") {
+			sep = "&"
+		}
+		return page + sep + h.query.Encode(), nil
 	case h.external != "":
 		u, err := url.Parse(h.external)
 		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil {

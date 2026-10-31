@@ -14,6 +14,8 @@ import (
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -455,6 +457,7 @@ func TestReviewRequested_MultiTeamReviewer_FiresDeterministically(t *testing.T) 
 	entityID := reviewEntity(t, database, "owner/repo#multirev")
 	stub := &stubDelegator{db: database}
 	router := firingRouter(database, stub)
+	rec := notifytest.Record(t)
 	emitReviewRequested(router, entityID, "user:alice", events.GitHubPRReviewRequestedMetadata{
 		Author: "carol", Repo: "owner/repo", PRNumber: 1, RequestedLogin: "alice",
 	})
@@ -476,6 +479,13 @@ func TestReviewRequested_MultiTeamReviewer_FiresDeterministically(t *testing.T) 
 	if vis := visTeamsOf(t, database, active[0].ID); len(vis) != 2 {
 		t.Errorf("visibility = %v, want both reviewer teams", vis)
 	}
+	loser := teamB
+	if want == teamB {
+		loser = teamA
+	}
+	if c := onlyConflict(t, rec, active[0].ID); c.Winner.TeamID != want || len(c.Losers) != 1 || c.Losers[0].TeamID != loser {
+		t.Errorf("conflict = %+v; want %s's win reported to %s", c, want, loser)
+	}
 }
 
 // TestReviewRequested_SingleTeamReviewer_FiresAndOwns pins the unchanged end
@@ -495,6 +505,7 @@ func TestReviewRequested_SingleTeamReviewer_FiresAndOwns(t *testing.T) {
 	entityID := reviewEntity(t, database, "owner/repo#solorev")
 	stub := &stubDelegator{db: database}
 	router := firingRouter(database, stub)
+	rec := notifytest.Record(t)
 	emitReviewRequested(router, entityID, "user:alice", events.GitHubPRReviewRequestedMetadata{
 		Author: "carol", Repo: "owner/repo", PRNumber: 2, RequestedLogin: "alice",
 	})
@@ -512,4 +523,5 @@ func TestReviewRequested_SingleTeamReviewer_FiresAndOwns(t *testing.T) {
 	if active[0].ClaimedByAgentID == "" {
 		t.Error("task should be bot-claimed after the reviewer's team fired")
 	}
+	rec.Inactive(t, runmode.LocalDefaultOrgID, kinds.AutomationConflict)
 }
