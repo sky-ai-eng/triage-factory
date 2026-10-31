@@ -197,13 +197,7 @@ func (m *Manager) runLinearCycleForOrg(ctx context.Context, orgID string, now ti
 		return
 	}
 	_, err := m.trackerForOrg(orgID).RefreshLinear(ctx, workspaceID, client, teams)
-	// An admin can turn Linear off after this cycle's skip check, and the
-	// refresh may then raise a condition after the switch's own ClearSource
-	// ran. The switch commits before it clears, so reading it again here sees
-	// it and clears what the refresh raised.
-	if off, outcome := m.sourceDisabled(ctx, "linear", orgID); off && outcome == "disabled" {
-		notify.ClearSource(ctx, orgID, eventsource.KindLinear)
-	}
+	m.clearIfTurnedOff(ctx, orgID)
 	if err != nil {
 		var rl *linear.RateLimitError
 		if errors.As(err, &rl) {
@@ -221,6 +215,27 @@ func (m *Manager) runLinearCycleForOrg(ctx context.Context, orgID string, now ti
 		return
 	}
 	refreshed = true
+}
+
+// clearIfTurnedOff clears Linear's conditions when an admin turned Linear off
+// while the refresh ran: the refresh may have raised one after the switch's
+// own ClearSource, and a turned-off source is not polled again to resolve it.
+// The switch commits before it clears, so this read sees it. A failed read
+// clears nothing; turning the source back on and its next cycle correct what
+// is left.
+func (m *Manager) clearIfTurnedOff(ctx context.Context, orgID string) {
+	if m.EventSources == nil {
+		return
+	}
+	off, err := eventsource.Disabled(ctx, m.EventSources, orgID, eventsource.KindLinear)
+	if err != nil {
+		linearLog.WarnContext(ctx, "re-reading the off switch after the refresh failed; a notification raised as linear was turned off may stay open",
+			"org", orgID, "error", err)
+		return
+	}
+	if off {
+		notify.ClearSource(ctx, orgID, eventsource.KindLinear)
+	}
 }
 
 // toTrackerLinearRules collapses the org-wide rule union into the tracker's

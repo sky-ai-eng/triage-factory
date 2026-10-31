@@ -248,24 +248,3 @@ func (s *Server) handleOrgSourcePatch(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, eventsource.NewSource(kind, state))
 }
-
-// clearSourceIfDisconnected resolves the org's open conditions of kind's
-// source when, after a delete of something the source's access can depend on,
-// the org no longer holds a usable credential for it: what the delete removed
-// was not necessarily the credential, so the source is asked rather than
-// assumed gone. A failed read clears nothing; the source's next poll corrects
-// what it raised.
-func (s *Server) clearSourceIfDisconnected(ctx context.Context, orgID, userID, kind string) {
-	var st eventsource.State
-	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		var err error
-		st, _, err = eventsource.StateFor(ctx, tx, orgID, kind)
-		return err
-	}); err != nil {
-		serverLog.Warn("source state read after a delete failed; its notifications are left as they are", "org", orgID, "source", kind, "error", err)
-		return
-	}
-	if st != eventsource.StateAvailable {
-		notify.ClearSource(context.WithoutCancel(ctx), orgID, kind)
-	}
-}

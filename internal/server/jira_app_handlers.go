@@ -9,7 +9,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -284,7 +283,6 @@ func (s *Server) handleJiraAppDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	removed := false
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		// Read first: the delete is idempotent, so without knowing whether an
 		// override existed we'd log a removal every time an admin hits the
@@ -299,7 +297,6 @@ func (s *Server) handleJiraAppDelete(w http.ResponseWriter, r *http.Request) {
 		if app == nil {
 			return nil
 		}
-		removed = true
 		return tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
 			ActorUserID: userID,
 			Action:      domain.AccessActionCredentialRemoved,
@@ -318,9 +315,6 @@ func (s *Server) handleJiraAppDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jiraAppLog.Info("removed atlassian oauth app", "org", orgID, "user", userID)
-	if removed {
-		s.clearSourceIfDisconnected(r.Context(), orgID, userID, eventsource.KindJira)
-	}
 
 	// The row is gone; the payload now reflects whatever still resolves (the
 	// deployment app, or nothing).

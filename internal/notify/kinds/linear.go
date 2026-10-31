@@ -47,7 +47,8 @@ var LinearTeamUnreadable = notify.Condition(notify.ConditionSpec[LinearTeam]{
 		c.Actions = []notify.Action{
 			notify.Invoke("untrack", "Stop tracking "+key, notify.RequiresTeamAdmin, notify.Confirm(
 				"This team stops tracking the Linear team "+key+", and its state mappings for it are deleted. "+
-					"Unless another team tracks "+key+", Triage Factory stops following its issues and closes their tasks.")),
+					"Unless another team has "+key+"'s states mapped, Triage Factory stops holding its issues, "+
+					"so the ones it can't read can retire and their tasks close.")),
 			settings,
 		}
 		return c
