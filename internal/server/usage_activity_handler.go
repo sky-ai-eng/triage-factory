@@ -52,16 +52,16 @@ import (
 // created deliverable in the scope that is the same object
 // (domain.ArtifactDeliverable), or null.
 type objectActivityJSON struct {
-	ObjectID    domain.ObjectRef         `json:"object_id"`
-	ObjectKind  string                   `json:"object_kind"`
-	Provider    string                   `json:"provider"`
-	Target      string                   `json:"target"`
-	URL         string                   `json:"url"`
-	LastAction  string                   `json:"last_action"`
-	ActionCount int                      `json:"action_count"`
-	RunCount    int                      `json:"run_count"`
-	LastAt      time.Time                `json:"last_at"`
-	Deliverable *artifactDeliverableJSON `json:"deliverable"`
+	ObjectID          domain.ObjectRef         `json:"object_id"`
+	ObjectKind        string                   `json:"object_kind"`
+	Provider          string                   `json:"provider"`
+	Target            string                   `json:"target"`
+	URL               string                   `json:"url"`
+	LastAction        string                   `json:"last_action"`
+	ActionCount       int                      `json:"action_count"`
+	ConversationCount int                      `json:"run_count"`
+	LastAt            time.Time                `json:"last_at"`
+	Deliverable       *artifactDeliverableJSON `json:"deliverable"`
 }
 
 // orgObjectActivityJSON is the org feed's item: the teams whose runs changed
@@ -81,15 +81,15 @@ type activityTeamJSON struct {
 
 func toObjectActivityJSON(a domain.ObjectActivity, deliverables []domain.Deliverable) objectActivityJSON {
 	out := objectActivityJSON{
-		ObjectID:    a.ObjectID,
-		ObjectKind:  a.ObjectKind,
-		Provider:    a.Provider,
-		Target:      a.Target,
-		URL:         a.URL,
-		LastAction:  a.LastAction,
-		ActionCount: a.ActionCount,
-		RunCount:    a.RunCount,
-		LastAt:      a.LastAt,
+		ObjectID:          a.ObjectID,
+		ObjectKind:        a.ObjectKind,
+		Provider:          a.Provider,
+		Target:            a.Target,
+		URL:               a.URL,
+		LastAction:        a.LastAction,
+		ActionCount:       a.ActionCount,
+		ConversationCount: a.ConversationCount,
+		LastAt:            a.LastAt,
 	}
 	if d, ok := domain.ArtifactDeliverable(a.Artifact, deliverables); ok {
 		out.Deliverable = &artifactDeliverableJSON{ID: d.ID, Kind: d.Kind, State: d.State}

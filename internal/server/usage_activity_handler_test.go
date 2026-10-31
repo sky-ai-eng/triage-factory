@@ -340,11 +340,11 @@ func TestUsageArtifactsActivityHandler_Postgres(t *testing.T) {
 				t.Errorf("team feed carried teams: %s", rec.Body.String())
 			}
 			got := byObject(t, out.Items)
-			if b := got[seed.branch]; b.RunCount != 2 || b.ActionCount != 2 || b.LastAction != domain.ActionBranchPushed || b.Deliverable != nil {
+			if b := got[seed.branch]; b.ConversationCount != 2 || b.ActionCount != 2 || b.LastAction != domain.ActionBranchPushed || b.Deliverable != nil {
 				t.Errorf("teamA branch = %+v, want 2 runs of 2 pushes and no deliverable", b)
 			}
 			p := got[seed.pr]
-			if p.RunCount != 1 || p.ActionCount != 1 || p.LastAction != domain.ActionPRCreated {
+			if p.ConversationCount != 1 || p.ActionCount != 1 || p.LastAction != domain.ActionPRCreated {
 				t.Errorf("teamA PR = %+v, want the one pr_created alone, without TF's own close", p)
 			}
 			if p.Deliverable == nil || p.Deliverable.ID != seed.prDeliverableID ||
@@ -354,7 +354,7 @@ func TestUsageArtifactsActivityHandler_Postgres(t *testing.T) {
 			// The review a person's approval posted is the run's object, and
 			// it is its review deliverable.
 			rv := got[seed.review]
-			if rv.ObjectKind != domain.ObjectKindReview || rv.LastAction != domain.ActionReviewSubmitted || rv.RunCount != 1 {
+			if rv.ObjectKind != domain.ObjectKindReview || rv.LastAction != domain.ActionReviewSubmitted || rv.ConversationCount != 1 {
 				t.Errorf("teamA review = %+v, want the posted review from its one run", rv)
 			}
 			if rv.Deliverable == nil || rv.Deliverable.ID != seed.reviewDeliverableID ||
@@ -385,7 +385,7 @@ func TestUsageArtifactsActivityHandler_Postgres(t *testing.T) {
 			if it.ObjectID != seed.branch {
 				continue
 			}
-			if it.RunCount != 3 || it.ActionCount != 3 || len(it.Teams) != 2 {
+			if it.ConversationCount != 3 || it.ActionCount != 3 || len(it.Teams) != 2 {
 				t.Fatalf("org branch = %+v, want 3 runs across 2 teams", it)
 			}
 			for _, team := range it.Teams {
@@ -429,7 +429,7 @@ func TestUsageArtifactsActivityHandler_Postgres(t *testing.T) {
 		// The window selects rows: before 12:30 only the first two pushes.
 		rec := httptest.NewRecorder()
 		r.uh.handleUsageOrgArtifacts(rec, r.activityReq(r.orgAdmin, "", `{"until":"2026-06-10T11:30:00Z"}`))
-		if out := decodeList[orgObjectActivityJSON](t, rec); len(out.Items) != 1 || out.Items[0].RunCount != 2 || len(out.Items[0].Teams) != 1 {
+		if out := decodeList[orgObjectActivityJSON](t, rec); len(out.Items) != 1 || out.Items[0].ConversationCount != 2 || len(out.Items[0].Teams) != 1 {
 			t.Errorf("windowed branch = %+v, want 2 runs on one team", out.Items)
 		}
 	})

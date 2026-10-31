@@ -138,6 +138,63 @@ describe('ActivityFeed', () => {
     expect(screen.queryByTitle('Platform')).not.toBeInTheDocument()
   })
 
+  it('renders an object once when the next page serves it again', async () => {
+    // Offset paging over the latest action: a live run moved the branch up
+    // between the two reads, so page 2 repeats it.
+    const branch = object({ object_id: 'YnJhbmNo', object_kind: 'branch', target: 'org/repo' })
+    const pages = [
+      listBody([branch], 'tok-2', 3),
+      listBody([branch, object({ object_id: 'cHI0Mg', target: 'org/repo#42' })], '', 3),
+    ]
+    const fetchMock = vi.fn().mockImplementation((url: string) =>
+      Promise.resolve({
+        ok: true,
+        ...(String(url).includes('/artifacts/list') ? pages.shift() : listBody([])),
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<ActivityFeed basePath="/api/teams/t1/usage" />)
+    fireEvent.click(screen.getByRole('tab', { name: /objects/i }))
+    expect(await screen.findByText('org/repo')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /load more/i }))
+
+    expect(await screen.findByText('org/repo#42')).toBeInTheDocument()
+    expect(screen.getAllByText('org/repo')).toHaveLength(1)
+    expect(screen.getByText('2 objects')).toBeInTheDocument()
+  })
+
+  it("folds an object's teams past three into one +N chip naming them", async () => {
+    stubByLens(
+      [],
+      [
+        object({
+          object_id: 'YnJhbmNo',
+          object_kind: 'branch',
+          target: 'org/repo',
+          url: 'https://gh/tree/fix',
+          teams: [
+            { id: 't1', name: 'Platform' },
+            { id: 't2', name: 'Growth' },
+            { id: 't3', name: 'Billing' },
+            { id: 't4', name: 'Infra' },
+          ],
+        }),
+      ],
+    )
+    render(<ActivityFeed basePath="/api/orgs/o1/usage" showTeam />)
+    fireEvent.click(screen.getByRole('tab', { name: /objects/i }))
+    await screen.findByText('org/repo')
+
+    const row = screen
+      .getAllByRole('link')
+      .find((l) => l.getAttribute('href') === 'https://gh/tree/fix')
+    expect(row?.textContent).toContain('Platform')
+    expect(row?.textContent).toContain('Growth')
+    expect(row?.textContent).not.toContain('Billing')
+    expect(screen.getByTitle('Billing, Infra').textContent).toBe('+2')
+  })
+
   it('org Objects feed tags each object with every team that changed it', async () => {
     stubByLens(
       [],
@@ -281,6 +338,23 @@ describe('ActivityFeed', () => {
         action: 'pr_marked_ready',
         target: 'org/repo#2',
       }),
+      action({
+        id: 'c',
+        team_id: 't2',
+        team_name: 'Growth',
+        actor_user_id: 'u3',
+        performed_by: 'system',
+        action: 'issue_transitioned',
+        provider: 'jira',
+        target: 'SKY-3',
+      }),
+      action({
+        id: 'd',
+        team_id: 't1',
+        team_name: 'Platform',
+        actor_user_id: 'u4',
+        target: 'org/repo#4',
+      }),
     ])
 
     render(<ActivityFeed basePath="/api/orgs/o1/usage" showTeam />)
@@ -294,6 +368,11 @@ describe('ActivityFeed', () => {
     expect(screen.getByText('agent · Ada')).toBeInTheDocument()
     expect(screen.getByTitle('Agent action, authorized by Ada')).toBeInTheDocument()
     expect(screen.getByTitle('Performed by Bo')).toBeInTheDocument()
+    // TF's own row reads as TF, never as a person.
+    expect(screen.getByTitle('Performed by Triage Factory itself').textContent).toBe('TF')
+    // An agent row whose authorizer has no resolved name says a person
+    // authorized it without naming one.
+    expect(screen.getByTitle('Agent action, authorized by a person').textContent).toBe('agent')
 
     // Scope to team t1 (client-side) — the t2 row drops without a refetch.
     fireEvent.change(screen.getByLabelText('team'), { target: { value: 't1' } })

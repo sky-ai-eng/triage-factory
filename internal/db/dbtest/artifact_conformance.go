@@ -529,8 +529,8 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 		if b.ObjectID != objectRef(t, latest) || b.ObjectKind != domain.ObjectKindBranch || b.RepositoryID != s.repo.ID {
 			t.Errorf("org object = %+v, want the branch %q", b, objectID(t, latest))
 		}
-		if b.RunCount != 3 || b.ActionCount != 5 || b.LastAction != domain.ActionBranchPushed {
-			t.Errorf("org counts = runs %d, actions %d, last %q; want 3, 5, %q", b.RunCount, b.ActionCount, b.LastAction, domain.ActionBranchPushed)
+		if b.ConversationCount != 3 || b.ActionCount != 5 || b.LastAction != domain.ActionBranchPushed {
+			t.Errorf("org counts = conversations %d, actions %d, last %q; want 3, 5, %q", b.ConversationCount, b.ActionCount, b.LastAction, domain.ActionBranchPushed)
 		}
 		if b.Target != "octo/api" || b.URL != latest.URL || !b.FirstAt.Equal(at(0)) || !b.LastAt.Equal(at(4)) {
 			t.Errorf("org display = (%q, %q, %v, %v), want the latest row's from %v to %v", b.Target, b.URL, b.FirstAt, b.LastAt, at(0), at(4))
@@ -543,12 +543,12 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 
 		// The team read keeps the team's rows alone.
 		mine, total := scopeList(t, s, s.f.TeamID, pageOf(50, 0))
-		if len(mine) != 1 || total != 1 || mine[0].RunCount != 2 || mine[0].ActionCount != 4 ||
+		if len(mine) != 1 || total != 1 || mine[0].ConversationCount != 2 || mine[0].ActionCount != 4 ||
 			!slices.Equal(mine[0].TeamIDs, []string{s.f.TeamID}) || mine[0].Target != "octo/old" {
 			t.Errorf("team read = %+v (total %d), want the branch from 2 runs and 4 rows on the team, displayed as its latest row", mine, total)
 		}
 		theirs, _ := scopeList(t, s, s.f.OtherTeamID, pageOf(50, 0))
-		if len(theirs) != 1 || theirs[0].RunCount != 1 || theirs[0].ActionCount != 1 ||
+		if len(theirs) != 1 || theirs[0].ConversationCount != 1 || theirs[0].ActionCount != 1 ||
 			!slices.Equal(theirs[0].TeamIDs, []string{s.f.OtherTeamID}) {
 			t.Errorf("other team read = %+v, want the branch from its one run", theirs)
 		}
@@ -557,7 +557,7 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 		}
 	})
 
-	t.Run("Scope_reads_skip_system_and_refusal_rows", func(t *testing.T) {
+	t.Run("Scope_reads_skip_system_refusal_and_runless_person_rows", func(t *testing.T) {
 		s := setup(t)
 		conv := s.f.NewConversation(t)
 		system := pullRequest(s, domain.ActionPRClosed)
@@ -565,9 +565,27 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 		record(t, s, conv, system, at(2))
 		record(t, s, conv, branch(s, domain.ActionBranchPushFailed, "octo/api", ""), at(3))
 		record(t, s, conv, pullRequest(s, domain.ActionGHChannelWrite), at(4))
+		// A person's act that names no conversation, as a dashboard draft
+		// toggle records it, is no run's work, whatever team it names.
+		toggle := pullRequest(s, domain.ActionPRMarkedReady)
+		toggle.PerformedBy, toggle.ActorUserID = domain.PerformedByPerson, uuid.NewString()
+		record(t, s, "", toggle, at(5))
 		for _, teamID := range []string{"", s.f.TeamID} {
 			if got, total := scopeList(t, s, teamID, pageOf(50, 0)); len(got) != 0 || total != 0 {
 				t.Errorf("scope %q read %d objects (total %d), want none: %+v", teamID, len(got), total, got)
+			}
+		}
+
+		// A person's act on the run's deliverable is the run's, and only it
+		// counts toward the object.
+		ready := pullRequest(s, domain.ActionPRMarkedReady)
+		ready.PerformedBy = domain.PerformedByPerson
+		record(t, s, conv, ready, at(1))
+		for _, teamID := range []string{"", s.f.TeamID} {
+			got, total := scopeList(t, s, teamID, pageOf(50, 0))
+			if len(got) != 1 || total != 1 || got[0].ActionCount != 1 || got[0].ConversationCount != 1 ||
+				got[0].LastAction != domain.ActionPRMarkedReady || !got[0].LastAt.Equal(at(1)) {
+				t.Errorf("scope %q read %+v (total %d), want the PR from the run's one person row", teamID, got, total)
 			}
 		}
 	})
@@ -645,6 +663,11 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 			if a.ObjectID != all[i].ObjectID {
 				t.Errorf("paged item %d = %q, unwindowed %q", i, a.ObjectID, all[i].ObjectID)
 			}
+		}
+		// A page past the last object has no row to carry the total, and
+		// still answers it.
+		if past, total := scopeList(t, s, "", pageOf(3, 6)); len(past) != 0 || total != 4 {
+			t.Errorf("page past the end = %d items (total %d), want 0 of 4", len(past), total)
 		}
 		count, total := scopeList(t, s, s.f.TeamID, db.ArtifactListOpts{ListOpts: db.ListOpts{CountOnly: true}})
 		if len(count) != 0 || total != 4 {

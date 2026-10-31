@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -27,7 +28,7 @@ var _ db.ArtifactStore = (*artifactStore)(nil)
 // pgArtifactRowFilter is what every artifact read adds to its own WHERE: the
 // rows of an artifact performer that name an object, of an action that can
 // name one.
-var pgArtifactRowFilter = ` AND ea.performed_by IN (` + db.ArtifactPerformersSQL() + `) AND ea.action NOT IN (` + db.ArtifactExcludedActionsSQL() +
+var pgArtifactRowFilter = ` AND ` + db.ArtifactPerformerSQL() + ` AND ea.action NOT IN (` + db.ArtifactExcludedActionsSQL() +
 	`) AND (` + pgActionObjectIDSQL + `) IS NOT NULL`
 
 // pgArtifactCTEs opens the grouped read over the rows where selects: scoped
@@ -78,17 +79,19 @@ func pgArtifactSelect(where string) string {
 }
 
 // pgObjectActivitySelect is pgArtifactSelect plus each object's distinct
-// conversations and teams. Neither dialect takes DISTINCT inside a window
-// aggregate, so spread counts them with a GROUP BY and joins back on the
-// object id. Team ids are uuids, so a comma joins them unambiguously.
+// conversations and teams, and the number of objects in all. Neither dialect
+// takes DISTINCT inside a window aggregate, so spread counts them with a
+// GROUP BY and joins back on the object id. Team ids are uuids, so a comma
+// joins them unambiguously. The total is a window over the latest rows, which
+// is evaluated before any LIMIT, so the page carries it.
 func pgObjectActivitySelect(where string) string {
 	return pgArtifactCTEs(where) + `, spread AS (
-		SELECT s.object_id, COUNT(DISTINCT s.conversation_id) AS run_count,
+		SELECT s.object_id, COUNT(DISTINCT s.conversation_id) AS conversation_count,
 		       COALESCE(string_agg(DISTINCT s.team_id::text, ','), '') AS team_ids
 		  FROM scoped s
 		 GROUP BY s.object_id
 	)
-	SELECT ` + pgArtifactColumns + `, sp.run_count, sp.team_ids
+	SELECT ` + pgArtifactColumns + `, sp.conversation_count, sp.team_ids, COUNT(*) OVER () AS total
 	  FROM grouped g
 	  JOIN spread sp ON sp.object_id = g.object_id` + pgArtifactEntityJoin + `
 	 WHERE g.rn = 1`
@@ -220,27 +223,39 @@ func listPgObjectActivity(ctx context.Context, q queryer, base string, args []an
 		return nil, 0, err
 	}
 	where, args := pgArtifactListWhere(base, args, opts)
-	var total int
-	if err := q.QueryRowContext(ctx, `
-		SELECT COUNT(DISTINCT `+pgActionObjectIDSQL+`)
-		  FROM external_actions ea
-		 WHERE `+where+pgArtifactRowFilter, args...).Scan(&total); err != nil {
-		return nil, 0, err
-	}
 	if opts.CountOnly {
-		return []domain.ObjectActivity{}, total, nil
+		total, err := countPgObjectActivity(ctx, q, where, args)
+		return []domain.ObjectActivity{}, total, err
 	}
 	query := pgObjectActivitySelect(where) + ` ORDER BY g.occurred_at DESC, ` + pgArtifactObjectIDOrder
+	pageArgs := args
 	if opts.Limit > 0 {
-		args = append(args, opts.Limit, opts.Offset)
-		query += fmt.Sprintf(` LIMIT $%d OFFSET $%d`, len(args)-1, len(args))
+		pageArgs = append(slices.Clip(args), opts.Limit, opts.Offset)
+		query += fmt.Sprintf(` LIMIT $%d OFFSET $%d`, len(pageArgs)-1, len(pageArgs))
 	}
+	out, total, err := scanPgObjectActivity(ctx, q, query, pageArgs)
+	if err != nil {
+		return nil, 0, err
+	}
+	// A page past the last object has no row to carry the total.
+	if len(out) == 0 && opts.Offset > 0 {
+		if total, err = countPgObjectActivity(ctx, q, where, args); err != nil {
+			return nil, 0, err
+		}
+	}
+	return out, total, nil
+}
+
+// scanPgObjectActivity runs a pgObjectActivitySelect page and reads its items
+// and the total the rows carry.
+func scanPgObjectActivity(ctx context.Context, q queryer, query string, args []any) ([]domain.ObjectActivity, int, error) {
 	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer rows.Close()
 	out := []domain.ObjectActivity{}
+	var total int
 	for rows.Next() {
 		var (
 			a       domain.ObjectActivity
@@ -251,7 +266,7 @@ func listPgObjectActivity(ctx context.Context, q queryer, base string, args []an
 			&a.EntityID, &a.RepositoryID, &a.ObjectKey,
 			&a.Target, &a.URL,
 			&a.LastAction, &a.ActionCount, &a.FirstAt, &a.LastAt,
-			&a.RunCount, &teamIDs,
+			&a.ConversationCount, &teamIDs, &total,
 		); err != nil {
 			return nil, 0, err
 		}
@@ -259,6 +274,16 @@ func listPgObjectActivity(ctx context.Context, q queryer, base string, args []an
 		out = append(out, a)
 	}
 	return out, total, rows.Err()
+}
+
+// countPgObjectActivity counts the objects the rows where selects name.
+func countPgObjectActivity(ctx context.Context, q queryer, where string, args []any) (int, error) {
+	var total int
+	err := q.QueryRowContext(ctx, `
+		SELECT COUNT(DISTINCT `+pgActionObjectIDSQL+`)
+		  FROM external_actions ea
+		 WHERE `+where+pgArtifactRowFilter, args...).Scan(&total)
+	return total, err
 }
 
 // pgArtifactListWhere appends opts' filters to base, numbering each bind

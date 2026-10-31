@@ -54,14 +54,14 @@ type Artifact struct {
 // ObjectActivity is one object the runs of a team or an org changed: the
 // artifact rows of the scope that name it, grouped by the object alone rather
 // than per conversation. The Artifact fields and their display rule are read
-// over that whole group. RunCount is the number of distinct conversations
-// among the rows (a row whose conversation was purged counts toward none),
-// and TeamIDs the distinct teams the rows name, sorted.
+// over that whole group. ConversationCount is the number of distinct
+// conversations among the rows (a row whose conversation was purged counts
+// toward none), and TeamIDs the distinct teams the rows name, sorted.
 type ObjectActivity struct {
 	Artifact
 
-	RunCount int
-	TeamIDs  []string
+	ConversationCount int
+	TeamIDs           []string
 }
 
 // ArtifactDeliverable returns the deliverable among deliverables that is the

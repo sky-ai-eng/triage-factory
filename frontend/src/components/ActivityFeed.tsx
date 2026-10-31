@@ -217,7 +217,7 @@ export default function ActivityFeed({
 
   const visible = useMemo(() => {
     if (loaded === null) return null
-    let out = items
+    let out = loaded.mode === 'objects' ? uniqueObjects(items as ActivityObject[]) : items
     if (showTeam && teamFilter) {
       out = out.filter((r) => rowTeams(r).some((t) => t.id === teamFilter))
     }
@@ -464,6 +464,18 @@ function RangeTabs({ value, onChange }: { value: RangeKey; onChange: (r: RangeKe
   )
 }
 
+// uniqueObjects keeps the first row of each object. The Objects list pages
+// by offset over the latest action, so an object a live run acts on between
+// two pages moves up and can be served again by the next one.
+function uniqueObjects(rows: ActivityObject[]): ActivityObject[] {
+  const seen = new Set<string>()
+  return rows.filter((r) => {
+    if (seen.has(r.object_id)) return false
+    seen.add(r.object_id)
+    return true
+  })
+}
+
 // rowTeams is the teams a loaded row names: an action's one team, or every
 // team whose runs changed an object.
 function rowTeams(r: FeedRow): { id: string; name: string }[] {
@@ -472,20 +484,34 @@ function rowTeams(r: FeedRow): { id: string; name: string }[] {
 }
 
 // teamChips renders a row's team tags on the org feed, and nothing on the team
-// feed, which is one team.
+// feed, which is one team. Past MAX_TEAM_CHIPS the rest fold into one "+N"
+// chip naming them, so a widely shared object keeps its target readable.
 function teamChips(showTeam: boolean, r: FeedRow): React.ReactNode {
   if (!showTeam) return undefined
   const teams = rowTeams(r)
   if (teams.length === 0) return undefined
-  return teams.map((t) => <TeamChip key={t.id} name={t.name || t.id} />)
+  const shown = teams.length > MAX_TEAM_CHIPS ? teams.slice(0, MAX_TEAM_CHIPS - 1) : teams
+  const rest = teams.slice(shown.length)
+  return (
+    <>
+      {shown.map((t) => (
+        <TeamChip key={t.id} name={t.name || t.id} />
+      ))}
+      {rest.length > 0 && (
+        <TeamChip name={`+${rest.length}`} title={rest.map((t) => t.name || t.id).join(', ')} />
+      )}
+    </>
+  )
 }
 
+const MAX_TEAM_CHIPS = 3
+
 // TeamChip — a team tag on an org-feed row (which team acted).
-function TeamChip({ name }: { name: string }) {
+function TeamChip({ name, title }: { name: string; title?: string }) {
   return (
     <span
       className="max-w-[8rem] shrink-0 truncate rounded-[3px] bg-tint-3 px-1.5 py-0.5 font-mono text-label-sm text-ink-3"
-      title={name}
+      title={title ?? name}
     >
       {name}
     </span>

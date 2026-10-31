@@ -117,7 +117,7 @@ function TransitionChip({ from, to }: { from: string; to: string }) {
 // person, or TF itself. actor_user_id is who authorized it, which an agent row
 // of a person's run carries too, so it names the person beside the agent
 // rather than making the agent's act read as theirs. The name is resolved on
-// both feeds; "person" stands in when it is not.
+// both feeds; when it is not, the chip says a person without naming one.
 function ActorChip({
   performedBy,
   name,
@@ -127,21 +127,22 @@ function ActorChip({
   name?: string
   actorUserID?: string
 }) {
-  const person = name || (actorUserID ? 'person' : '')
   let Icon = Bot
   let label = 'agent'
   let title = 'Agent action'
   if (performedBy === 'person') {
     Icon = User
-    label = person || 'person'
-    title = `Performed by ${label}`
+    label = name || 'person'
+    title = `Performed by ${name || 'a person'}`
   } else if (performedBy === 'system') {
     Icon = Cog
     label = 'TF'
     title = 'Performed by Triage Factory itself'
-  } else if (person) {
-    label = `agent · ${person}`
-    title = `Agent action, authorized by ${person}`
+  } else if (name) {
+    label = `agent · ${name}`
+    title = `Agent action, authorized by ${name}`
+  } else if (actorUserID) {
+    title = 'Agent action, authorized by a person'
   }
   return (
     <span
