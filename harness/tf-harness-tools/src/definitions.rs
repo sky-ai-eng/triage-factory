@@ -43,7 +43,7 @@ pub fn tool_definition(name: &str) -> Option<Value> {
                 "properties": {
                     "command": { "description": "Bash command to execute", "type": "string" },
                     "timeout": { "description": "Timeout in seconds (optional). Without one, the command is stopped at the sandbox's default limit; a timeout above the sandbox's maximum is refused.", "type": "number" },
-                    "description": { "description": "What this command is doing, in 1-6 words and present tense: \"Reproducing the flake\", \"Vetting the sandbox package\". Describe the action, never its outcome.", "type": "string", "minLength": 5 },
+                    "description": { "description": "What this command is doing, in 1-6 words and present tense, shown to the person watching the run in place of the command: \"Reproducing the flake\", \"Vetting the sandbox package\". Describe the action, never its outcome.", "type": "string", "minLength": 5 },
                     "description_past": { "description": "The same summary in past tense, in 1-6 words: \"Ran the sampler test 50x\". You are writing it before the command runs, so describe the action, never a result you cannot know yet.", "type": "string" }
                 },
                 "required": ["command", "description"]
