@@ -16,6 +16,11 @@ var PRCreatedWithoutDeliverableQueryForTest = prCreatedWithoutDeliverableQuery
 // to its IN list so the query-plan test can EXPLAIN what the store runs.
 var PresentExternalIDsQueryForTest = presentExternalIDsQuery
 
+// PresentCreatedObjectKeysQueryForTest exposes the comment-key lookup's
+// statement up to its IN list so the query-plan test can EXPLAIN what the
+// store runs.
+var PresentCreatedObjectKeysQueryForTest = presentCreatedObjectKeysQuery
+
 // ActionObjectIDSQLForTest exposes the SQL twin of domain.ObjectID so the
 // ledger conformance suite can hold the two to each other.
 const ActionObjectIDSQLForTest = sqliteActionObjectIDSQL

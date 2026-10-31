@@ -37,7 +37,7 @@ func TestRefreshGitHub_MakesNoRequestForAnIssueEntity(t *testing.T) {
 		t.Fatalf("seed the issue entity: %v", err)
 	}
 
-	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.EventQueue, org)
+	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, org)
 	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", ghclient.NewClient(srv.URL, "tok"), domain.GitHubAccount{}, nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestRefreshGitHub_AStubThatIsAnIssueBecomesOne(t *testing.T) {
 		t.Fatalf("seed the stub: %v", err)
 	}
 
-	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.EventQueue, org)
+	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, domain.GitHubAccount{}, nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)

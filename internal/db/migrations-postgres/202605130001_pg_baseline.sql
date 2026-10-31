@@ -2067,9 +2067,8 @@ CREATE INDEX idx_external_actions_entity ON public.external_actions USING btree 
 CREATE INDEX idx_external_actions_repository ON public.external_actions USING btree (repository_id) WHERE (repository_id IS NOT NULL);
 
 
--- The rows that changed one keyed object, found by its key within a scope.
--- TODO(TFAC-1265): nothing reads by it until the tracker's comment check
--- looks TF's own comments up by key.
+-- The rows that changed one keyed object, found by its key within a scope:
+-- the tracker's read of which comments TF posted.
 CREATE INDEX idx_external_actions_object_key ON public.external_actions USING btree (org_id, scope, object_key) WHERE (object_key IS NOT NULL);
 
 

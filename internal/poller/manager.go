@@ -44,17 +44,20 @@ type Manager struct {
 	// those transitions were diffed against. Held here only to construct
 	// the per-org Tracker — the poller itself never touches the queue.
 	eventQueue   db.EventQueueStore
-	users        db.UsersStore            // source of the local user's host-scoped GitHub identity
-	repos        db.RepositoryStore       // configured-repo names for GitHub poller startup
-	deliverables db.DeliverableStore      // the comments TF posted, which the tracker emits no commented event for
-	orgs         db.OrgsStore             // enumerate active orgs at each poll tick + per-org settings (GitHub/Jira base URLs, poll intervals)
-	jiraRules    db.JiraStatusRulesStore  // per-team Jira project rules; discovery polls the org-wide union (every team's rules)
-	jiraProjects db.JiraProjectStore      // the Jira project registry the rules reference; refreshed from Jira before each cycle's discovery
-	linearRules  db.LinearTeamRulesStore  // per-team Linear team rules; discovery polls the org-wide union, merged per Linear team
-	githubGroups db.TeamGitHubGroupsStore // GitHub-team → TF-team mappings; reconciled (stale-team prune) each GitHub cycle
-	secrets      db.SecretStore           // integration creds via SecretStore (keychain in local, vault in multi)
-	apps         db.GitHubAppsStore       // per-org App installations, read per cycle to fan the poll out across them
-	resolver     ghclient.Resolver        // per-cycle, per-installation GitHub client resolution (App installation token → PAT)
+	users        db.UsersStore       // source of the local user's host-scoped GitHub identity
+	repos        db.RepositoryStore  // configured-repo names for GitHub poller startup
+	deliverables db.DeliverableStore // the reviews TF submitted, which the tracker emits no review event for
+	// externalActions is the ledger the tracker reads the comments TF posted
+	// from, which it emits no commented, mention or review event for.
+	externalActions db.ExternalActionStore
+	orgs            db.OrgsStore             // enumerate active orgs at each poll tick + per-org settings (GitHub/Jira base URLs, poll intervals)
+	jiraRules       db.JiraStatusRulesStore  // per-team Jira project rules; discovery polls the org-wide union (every team's rules)
+	jiraProjects    db.JiraProjectStore      // the Jira project registry the rules reference; refreshed from Jira before each cycle's discovery
+	linearRules     db.LinearTeamRulesStore  // per-team Linear team rules; discovery polls the org-wide union, merged per Linear team
+	githubGroups    db.TeamGitHubGroupsStore // GitHub-team → TF-team mappings; reconciled (stale-team prune) each GitHub cycle
+	secrets         db.SecretStore           // integration creds via SecretStore (keychain in local, vault in multi)
+	apps            db.GitHubAppsStore       // per-org App installations, read per cycle to fan the poll out across them
+	resolver        ghclient.Resolver        // per-cycle, per-installation GitHub client resolution (App installation token → PAT)
 	// linearResolver builds each org's Linear service client. The cycle reads
 	// only its ForSystem half: polling is attributed to the org's identity.
 	linearResolver linear.Resolver
@@ -199,26 +202,27 @@ type Manager struct {
 	lastLinearSuccess map[string]time.Time
 }
 
-func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepositoryStore, deliverables db.DeliverableStore, eventQueue db.EventQueueStore, orgs db.OrgsStore, jiraRules db.JiraStatusRulesStore, jiraProjects db.JiraProjectStore, linearRules db.LinearTeamRulesStore, githubGroups db.TeamGitHubGroupsStore, secrets db.SecretStore, apps db.GitHubAppsStore, connections db.PollReadinessStore, resolver ghclient.Resolver, linearResolver linear.Resolver) *Manager {
+func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepositoryStore, deliverables db.DeliverableStore, externalActions db.ExternalActionStore, eventQueue db.EventQueueStore, orgs db.OrgsStore, jiraRules db.JiraStatusRulesStore, jiraProjects db.JiraProjectStore, linearRules db.LinearTeamRulesStore, githubGroups db.TeamGitHubGroupsStore, secrets db.SecretStore, apps db.GitHubAppsStore, connections db.PollReadinessStore, resolver ghclient.Resolver, linearResolver linear.Resolver) *Manager {
 	return &Manager{
-		database:       database,
-		pub:            pub,
-		tasks:          tasks,
-		entities:       entities,
-		eventQueue:     eventQueue,
-		users:          users,
-		repos:          repos,
-		deliverables:   deliverables,
-		orgs:           orgs,
-		jiraRules:      jiraRules,
-		jiraProjects:   jiraProjects,
-		linearRules:    linearRules,
-		githubGroups:   githubGroups,
-		secrets:        secrets,
-		apps:           apps,
-		connections:    connections,
-		resolver:       resolver,
-		linearResolver: linearResolver,
+		database:        database,
+		pub:             pub,
+		tasks:           tasks,
+		entities:        entities,
+		eventQueue:      eventQueue,
+		users:           users,
+		repos:           repos,
+		deliverables:    deliverables,
+		externalActions: externalActions,
+		orgs:            orgs,
+		jiraRules:       jiraRules,
+		jiraProjects:    jiraProjects,
+		linearRules:     linearRules,
+		githubGroups:    githubGroups,
+		secrets:         secrets,
+		apps:            apps,
+		connections:     connections,
+		resolver:        resolver,
+		linearResolver:  linearResolver,
 	}
 }
 
@@ -229,7 +233,7 @@ func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, ta
 // (struct of method holders + store references) so per-cycle
 // allocation is fine.
 func (m *Manager) trackerForOrg(orgID string) *tracker.Tracker {
-	return tracker.New(m.database, m.pub, m.tasks, m.entities, m.repos, m.jiraProjects, m.deliverables, m.eventQueue, orgID).
+	return tracker.New(m.database, m.pub, m.tasks, m.entities, m.repos, m.jiraProjects, m.deliverables, m.externalActions, m.eventQueue, orgID).
 		WithJiraDiscoveryStreaks(&m.jiraDiscovery)
 }
 

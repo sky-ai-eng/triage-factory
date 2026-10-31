@@ -41,7 +41,7 @@ func newReviewTestTracker(t *testing.T) (*Tracker, db.Stores) {
 	t.Helper()
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
-	return New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.EventQueue, runmode.LocalDefaultOrgID), stores
+	return New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, runmode.LocalDefaultOrgID), stores
 }
 
 func review(id int64, author, state, submittedAt string, comments ...ghclient.PRReviewComment) ghclient.PRReview {
@@ -168,9 +168,9 @@ func TestGitHubNewReviews_LateSubmittedPendingReview(t *testing.T) {
 }
 
 // A review TF submitted, matched on its review deliverable's external id, and a
-// thread reply TF posted, matched on its comment's deliverable, are TF's. A
-// person's reply, and a review with one of TF's comments among a person's,
-// are not.
+// thread reply TF posted, matched on its comment's ledger row with no comment
+// deliverable written, are TF's. A person's reply, and a review with one of
+// TF's comments among a person's, are not.
 func TestGitHubNewReviews_MarksTFReviewsAndReplies(t *testing.T) {
 	tr, stores := newReviewTestTracker(t)
 	ctx := context.Background()
@@ -182,12 +182,7 @@ func TestGitHubNewReviews_MarksTFReviewsAndReplies(t *testing.T) {
 		t.Fatalf("seed review deliverable: %v", err)
 	}
 	for _, id := range []int64{701, 801} {
-		reply := domain.Deliverable{TeamID: team, Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindComment,
-			Scope: reviewTestHost, Target: "octo/repo#7", State: domain.DeliverableStateCommentPosted,
-			DedupKey: domain.GitHubCommentKey(domain.GitHubReviewComment, id)}
-		if _, err := stores.Deliverables.UpsertSystem(ctx, org, reply); err != nil {
-			t.Fatalf("seed comment deliverable %d: %v", id, err)
-		}
+		recordTFComment(t, stores, domain.ProviderGitHub, reviewTestHost, "octo/repo#7", domain.GitHubCommentKey(domain.GitHubReviewComment, id))
 	}
 
 	reader := &fakeReviewReader{pages: map[string]ghclient.PRReviewPage{
@@ -348,12 +343,7 @@ func TestRefreshGitHub_EmitsOneEventPerReview(t *testing.T) {
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
-	reply := domain.Deliverable{TeamID: runmode.LocalDefaultTeamID, Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindComment,
-		Scope: reviewTestHost, Target: "octo/repo#7", State: domain.DeliverableStateCommentPosted,
-		DedupKey: domain.GitHubCommentKey(domain.GitHubReviewComment, 4004)}
-	if _, err := stores.Deliverables.UpsertSystem(ctx, org, reply); err != nil {
-		t.Fatalf("seed TF's reply: %v", err)
-	}
+	recordTFComment(t, stores, domain.ProviderGitHub, reviewTestHost, "octo/repo#7", domain.GitHubCommentKey(domain.GitHubReviewComment, 4004))
 	entityID := seedReviewedPR(t, stores, domain.PRSnapshot{
 		ReviewCount:  1,
 		ReviewMarker: &domain.ReviewMarker{ID: 100, SubmittedAt: "2026-10-01T09:00:00Z"},
@@ -361,7 +351,7 @@ func TestRefreshGitHub_EmitsOneEventPerReview(t *testing.T) {
 	})
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
@@ -421,7 +411,7 @@ func TestRefreshGitHub_SnapshotWithoutMarker(t *testing.T) {
 	})
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, org)
 	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, ghclient.NewClient(srv.URL, "tok"), domain.GitHubAccount{}, nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
