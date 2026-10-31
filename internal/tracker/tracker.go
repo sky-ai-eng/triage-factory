@@ -561,6 +561,8 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 	for _, e := range listed {
 		// An issue entity is created by a run's write, and this poller reads
 		// pull requests only.
+		// TODO(TFAC-1276): issue entities are never refreshed, seeded or
+		// closed; polling them needs its own reads and event types.
 		if e.Scope == scope && e.Kind != domain.EntityKindIssue {
 			entities = append(entities, e)
 		}
