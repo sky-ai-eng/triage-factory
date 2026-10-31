@@ -136,18 +136,29 @@ func ActionObjectKind(action string) string {
 	return actionObjectKinds[action]
 }
 
-// ActionNamesKind reports whether a row for action may name an object of
-// kind: the kind ActionObjectKind gives, or a comment for a reaction. An
-// action that names no object (a refusal, a failure, a catch-all) may name
-// none.
-func ActionNamesKind(action, kind string) bool {
-	switch {
-	case kind == "":
+// ActionNamesKind reports whether a row provider records for action may name
+// an object of kind: the kind ActionObjectKind gives, or a comment for a
+// reaction. GitHub numbers pull requests and issues in one sequence and serves
+// both through the issue endpoints, so a GitHub action of either kind may name
+// the other. An action that names no object (a refusal, a failure, a
+// catch-all) may name none.
+func ActionNamesKind(provider, action, kind string) bool {
+	want := ActionObjectKind(action)
+	switch kind {
+	case "":
 		return false
-	case kind == ActionObjectKind(action):
+	case want:
 		return true
+	case ObjectKindComment:
+		return action == ActionReactionAdded || action == ActionReactionRemoved
 	}
-	return kind == ObjectKindComment && (action == ActionReactionAdded || action == ActionReactionRemoved)
+	return provider == ProviderGitHub && isGitHubEntityObjectKind(kind) && isGitHubEntityObjectKind(want)
+}
+
+// isGitHubEntityObjectKind reports whether kind is one GitHubEntityObjectKind
+// gives: an object a GitHub entity identifies.
+func isGitHubEntityObjectKind(kind string) bool {
+	return kind == ObjectKindPullRequest || kind == ObjectKindIssue
 }
 
 // GitHubEntityObjectKind is the object kind of a GitHub entity of kind
@@ -257,8 +268,9 @@ func GitHubReviewObjectKey(reviewID string) string {
 
 // IssueObjectKey is the object_key of the Jira or Linear issue carrying
 // (scope, externalID): ObjectKey(provider, "issue", EntityResource(...), ""),
-// the key the issue's deliverables are keyed under too. "" when there is no
-// resource to key on.
+// which is also the dedup key of the issue's deliverable. A Jira key names the
+// site (scope) and the issue id; a Linear key names the issue's UUID alone, so
+// its scope is not read. "" when there is no resource to key on.
 func IssueObjectKey(provider, scope, externalID string) string {
 	resource := EntityResource(provider, scope, externalID)
 	if resource == "" {

@@ -331,7 +331,8 @@ func linearMirrorActions(t *testing.T, database *sql.DB) []domain.ExternalAction
 	t.Helper()
 	rows, err := database.Query(`
 		SELECT action, target, COALESCE(external_id, ''), COALESCE(entity_id, ''), COALESCE(team_id, ''),
-		       scope, COALESCE(url, ''), COALESCE(from_state, ''), COALESCE(to_state, ''), credential, performed_by
+		       scope, COALESCE(url, ''), COALESCE(from_state, ''), COALESCE(to_state, ''), credential, performed_by,
+		       COALESCE(object_kind, ''), COALESCE(object_key, '')
 		  FROM external_actions WHERE provider = 'linear'`)
 	if err != nil {
 		t.Fatalf("read actions: %v", err)
@@ -340,7 +341,8 @@ func linearMirrorActions(t *testing.T, database *sql.DB) []domain.ExternalAction
 	var out []domain.ExternalAction
 	for rows.Next() {
 		var a domain.ExternalAction
-		if err := rows.Scan(&a.Action, &a.Target, &a.ExternalID, &a.EntityID, &a.TeamID, &a.Scope, &a.URL, &a.FromState, &a.ToState, &a.Credential, &a.PerformedBy); err != nil {
+		if err := rows.Scan(&a.Action, &a.Target, &a.ExternalID, &a.EntityID, &a.TeamID, &a.Scope, &a.URL, &a.FromState, &a.ToState, &a.Credential, &a.PerformedBy,
+			&a.ObjectKind, &a.ObjectKey); err != nil {
 			t.Fatalf("scan action: %v", err)
 		}
 		out = append(out, a)
@@ -381,6 +383,7 @@ func TestRunLinearMirror_TransitionsAndNeverAssigns(t *testing.T) {
 		EntityID: e.ID, TeamID: runmode.LocalDefaultTeamID, Scope: linearMirrorWorkspace,
 		URL: "https://linear.app/acme/issue/" + linearMirrorIdentifier, FromState: "Todo", ToState: "In Progress",
 		Credential: domain.CredentialLinearOrg, PerformedBy: domain.PerformedBySystem,
+		ObjectKind: domain.ObjectKindIssue, ObjectKey: "linear:issue:" + linearMirrorIssueUUID,
 	}
 	if actions[0] != want {
 		t.Errorf("action = %+v\nwant     %+v", actions[0], want)

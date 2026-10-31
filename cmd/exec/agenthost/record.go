@@ -201,7 +201,7 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 		// name: a relayed row cannot have a refusal claim it changed something,
 		// or carry a kind the column's CHECK would refuse along with the
 		// deliverable written beside it.
-		if !domain.ActionNamesKind(act.Action, act.ObjectKind) {
+		if !domain.ActionNamesKind(act.Provider, act.Action, act.ObjectKind) {
 			act.ObjectKind, act.ObjectKey = "", ""
 		}
 	}
@@ -693,6 +693,9 @@ func resolveActionReferences(ctx context.Context, stores db.Stores, info Convers
 	about := subject
 	if !subject.matches(act.Provider, act.Target) {
 		c := entityCoordinate{provider: act.Provider, target: act.Target, url: act.URL, container: container, github: github}
+		// TODO(TFAC-1254): a relayed row's object_key is the sidecar's to
+		// choose, and resolving it follows a rename, so a forged key links
+		// another issue's entity and renames it onto the row's target.
 		if scope, externalID, ok := domain.ObjectKeyEntityIdentity(act.Provider, act.ObjectKey); ok {
 			c.scope, c.externalID = scope, externalID
 		}

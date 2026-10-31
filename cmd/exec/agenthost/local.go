@@ -1357,11 +1357,12 @@ func (c *LocalClient) recordJiraIssue(ctx context.Context, client *jiraclient.Cl
 // read-back failed — records the action alone, against the key the verb named:
 // a deliverable keyed on the key could not be found again once the issue moved.
 func (c *LocalClient) recordJiraIssueRef(ctx context.Context, ref jiraclient.IssueRef, named, action, state, toState, detailsJSON string) {
-	resource := ""
+	dedupKey := ""
 	if ref.ID != "" {
-		resource = c.jiraIssueResource(ctx, ref.ID)
+		site, _ := domain.JiraHost(c.jiraSiteBase(ctx))
+		dedupKey = domain.IssueObjectKey(domain.ProviderJira, site, ref.ID)
 	}
-	if resource == "" {
+	if dedupKey == "" {
 		// Folded before it reaches the audit row's target, like every Jira key
 		// TF stores. See NormalizeJiraKey.
 		named = domain.NormalizeJiraKey(named)
@@ -1382,7 +1383,7 @@ func (c *LocalClient) recordJiraIssueRef(ctx context.Context, ref jiraclient.Iss
 		ExternalID:  ref.ID,
 		URL:         c.jiraBrowseURL(ctx, key),
 		State:       state,
-		DedupKey:    domain.ObjectKey(domain.ProviderJira, domain.DeliverableKindIssue, resource, ""),
+		DedupKey:    dedupKey,
 		DetailsJSON: detailsJSON,
 	}
 	c.upsertJiraDeliverable(ctx, &a, jiraAction(a, action, "", toState), jiraContainer(ref.Project))

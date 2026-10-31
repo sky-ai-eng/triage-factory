@@ -25,11 +25,11 @@ func RunExternalActionObjectConformance(t *testing.T, mk ExternalActionNodeIDFac
 	)
 
 	f := mk(t)
-	pr, _, err := f.Stores.Entities.FindOrCreateSystem(ctx, f.OrgID, "github", TestGitHubHost, "octo/api#7", "PR_obj7", "pr", "A PR", "")
+	pr, _, err := f.Stores.Entities.FindOrCreateSystem(ctx, f.OrgID, "github", TestGitHubHost, "octo/api#7", "PR_obj7", domain.EntityKindPullRequest, "A PR", "")
 	if err != nil {
 		t.Fatalf("seed pull request entity: %v", err)
 	}
-	issue, _, err := f.Stores.Entities.FindOrCreateSystem(ctx, f.OrgID, "github", TestGitHubHost, "octo/api#8", "I_obj8", "pr", "An issue", "")
+	issue, _, err := f.Stores.Entities.FindOrCreateSystem(ctx, f.OrgID, "github", TestGitHubHost, "octo/api#8", "I_obj8", domain.EntityKindIssue, "An issue", "")
 	if err != nil {
 		t.Fatalf("seed issue entity: %v", err)
 	}

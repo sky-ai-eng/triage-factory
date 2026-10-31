@@ -452,7 +452,7 @@ func (h *slackExecHandler) recordMessage(ctx context.Context, rt agenthost.Exten
 		ExternalID: ts,
 		URL:        permalink,
 		State:      domain.DeliverableStateMessagePosted,
-		DedupKey:   domain.ObjectKey(domain.ProviderSlack, domain.DeliverableKindMessage, domain.SlackMessageResource(channelRow, ts), ""),
+		DedupKey:   slackMessageObjectKey(channelRow, ts),
 	}
 	act := &domain.ExternalAction{
 		Provider:   domain.ProviderSlack,
@@ -462,13 +462,13 @@ func (h *slackExecHandler) recordMessage(ctx context.Context, rt agenthost.Exten
 		URL:        permalink,
 		Credential: domain.CredentialSlackBot,
 	}
-	act.SetObject(domain.ObjectKindMessage, slackMessageObjectKey(channelRow, ts))
+	act.SetObject(domain.ObjectKindMessage, a.DedupKey)
 	rt.Record(ctx, a, act, domain.EntityContainer{}, domain.GitHubIdentity{})
 }
 
-// slackMessageObjectKey is the object_key of the message ts in the channel
-// whose registry row is channelRow — the key the message's deliverable is keyed
-// on — or "" when either half is unknown.
+// slackMessageObjectKey is the key of the message ts in the channel whose
+// registry row is channelRow, the deliverable's dedup key and the action's
+// object_key alike, or "" when either half is unknown.
 func slackMessageObjectKey(channelRow, ts string) string {
 	resource := domain.SlackMessageResource(channelRow, ts)
 	if resource == "" {

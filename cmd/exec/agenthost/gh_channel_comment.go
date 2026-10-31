@@ -77,9 +77,10 @@ func ghChannelCommentDeliverable(ctx context.Context, stores db.Stores, info Con
 		a.DetailsJSON = string(detail)
 	}
 
-	if id, err := strconv.ParseInt(shape.ExternalID, 10, 64); err == nil && id > 0 {
-		a.ExternalID = strconv.FormatInt(id, 10)
-		a.DedupKey = domain.GitHubCommentKey(shape.Comment, id)
+	// Keyed as the action naming the same comment keys its object.
+	if key := githubCommentObjectKey(shape.Comment, shape.ExternalID); key != "" {
+		id, _ := strconv.ParseInt(shape.ExternalID, 10, 64)
+		a.ExternalID, a.DedupKey = strconv.FormatInt(id, 10), key
 		return a
 	}
 	if a.NodeID == "" {

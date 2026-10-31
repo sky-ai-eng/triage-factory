@@ -474,7 +474,10 @@ CREATE TABLE public.access_change_log (
 -- repository, repository_id + object_key for a branch (the ref), a label (its
 -- name), a release, a workflow or a workflow run (GitHub's id), and scope +
 -- object_key for a Jira or Linear issue, a review, a comment and a Slack
--- message (the object's key). Written once, like the rest of the record.
+-- message (the object's key). A Slack message's key names its channel's
+-- registry row, so it moves the way entity_id and repository_id do: a channel
+-- move absorbing one registry row into another re-points it onto the
+-- surviving row.
 CREATE TABLE public.external_actions (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,

@@ -668,7 +668,7 @@ func (c *LocalClient) recordLinearIssue(ctx context.Context, issue *linearclient
 		ExternalID:  issue.ID,
 		URL:         issue.URL,
 		State:       state,
-		DedupKey:    domain.ObjectKey(domain.ProviderLinear, domain.DeliverableKindIssue, issue.ID, ""),
+		DedupKey:    domain.IssueObjectKey(domain.ProviderLinear, "", issue.ID),
 		DetailsJSON: detailsJSON,
 	}
 	c.upsertLinearDeliverable(ctx, &a, linearAction(a, action, fromState, toState), issue.Team.ID)

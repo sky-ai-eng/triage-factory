@@ -136,6 +136,15 @@ func TestDashboardPRRoutes_ReachGitHubUnderTheRegistryName(t *testing.T) {
 	if got := readPRSnapshot(t, s, pr.ID); !got.IsDraft {
 		t.Error("the entity's snapshot was not patched to draft")
 	}
+	// The drag is recorded as a change to the pull request, by its entity.
+	acts, _, err := sqlitestore.New(s.db).ExternalActions.ListByOrgSystem(context.Background(), runmode.LocalDefaultOrgID,
+		domain.ExternalActionListOpts{Action: domain.ActionPRConvertedToDraft})
+	if err != nil {
+		t.Fatalf("list actions: %v", err)
+	}
+	if len(acts) != 1 || acts[0].ObjectKind != domain.ObjectKindPullRequest || acts[0].EntityID != pr.ID {
+		t.Errorf("pr_converted_to_draft rows = %+v, want one naming the pull request %s", acts, pr.ID)
+	}
 }
 
 // The handler resolves the entity before the GitHub round trip, and a poll

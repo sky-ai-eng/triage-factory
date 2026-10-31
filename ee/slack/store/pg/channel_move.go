@@ -194,6 +194,9 @@ func absorbRegistryRow(ctx context.Context, q db.Execer, orgID, channel, absorbe
 	if err := rekeyAbsorbedDeliverables(ctx, q, orgID, channel, absorbed, deliverables); err != nil {
 		return err
 	}
+	if err := rekeyAbsorbedActionObjects(ctx, q, orgID, channel, absorbed); err != nil {
+		return err
+	}
 	if out.Handlers, out.SkippedHandlers, err = moveHandlerFilters(ctx, q, orgID, absorbed, channel); err != nil {
 		return err
 	}
@@ -293,6 +296,24 @@ func rekeyAbsorbedDeliverables(ctx context.Context, q db.Execer, orgID, channel,
 			return fmt.Errorf("rekey slack deliverable %s: %w", h.id, err)
 		}
 		deliverables[h.id] = true
+	}
+	return nil
+}
+
+// rekeyAbsorbedActionObjects re-points the audit ledger's Slack message
+// objects keyed on the absorbed registry row onto the channel's row, as a fold
+// of two entities re-points entity_id onto the survivor: the message is the
+// channel's from now on, and a later act on it keys on the channel's row. A
+// message recorded under both rows before the change arrived becomes one
+// object, since an object_key, unlike a deliverable's key, is not unique.
+func rekeyAbsorbedActionObjects(ctx context.Context, q db.Execer, orgID, channel, absorbed string) error {
+	from := domain.ObjectKey(domain.ProviderSlack, domain.DeliverableKindMessage, absorbed+"/", "")
+	to := domain.ObjectKey(domain.ProviderSlack, domain.DeliverableKindMessage, channel+"/", "")
+	if _, err := q.ExecContext(ctx, `
+		UPDATE external_actions SET object_key = $5 || substr(object_key, length($4) + 1)
+		WHERE org_id = $1 AND scope = $2 AND object_kind = $3 AND starts_with(object_key, $4)
+	`, orgID, domain.SlackScope, domain.ObjectKindMessage, from, to); err != nil {
+		return fmt.Errorf("move slack message objects off the absorbed channel row: %w", err)
 	}
 	return nil
 }
