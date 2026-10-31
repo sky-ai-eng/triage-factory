@@ -62,7 +62,11 @@ func TestResumeAppend_IsTheLaunchAppendByteForByte(t *testing.T) {
 	if !strings.Contains(resumeAppend, "review the pull request and leave a summary") {
 		t.Error("the resumed turn carries no mission")
 	}
-	if !strings.Contains(resumeAppend, strings.TrimSpace(agentprompt.NonTerminalCompletion(machinistSpec()))) {
+	addendum := strings.TrimSpace(agentprompt.NonTerminalCompletion(machinistSpec()))
+	if addendum == "" {
+		t.Fatal("the SDK runtime composes no non-terminal addendum to look for")
+	}
+	if !strings.Contains(resumeAppend, addendum) {
 		t.Error("the resumed turn dropped the non-terminal step's addendum")
 	}
 }

@@ -156,8 +156,8 @@ func TestGuidanceFor_PrefersTheMostSpecificRow(t *testing.T) {
 			}
 		})
 	}
-	if got := (&SourceRefusal{Kind: "jira", State: domain.SourceSealed}).Error(); got == "" {
-		t.Error("a sealed refusal with no reason rendered nothing")
+	if g, ok := guidanceFor("jira", domain.SourceSealed, ""); ok {
+		t.Errorf("a sealed source with no refusal reason matched a row: %+v", g)
 	}
 }
 
@@ -170,10 +170,10 @@ func TestSourceRefusal_EveryStateIsExplained(t *testing.T) {
 		domain.SourceUnresolved, domain.SourceUnconfigured, domain.SourceDisabled,
 		domain.SourceUnlicensed, domain.SourceWithheld,
 	} {
-		err := &SourceRefusal{Kind: eventsource.KindJira, State: state}
-		if err.Error() == "" {
-			t.Errorf("%s has no refusal", state)
+		if g, ok := guidanceFor(eventsource.KindJira, state, ""); !ok || g.refusal == "" {
+			t.Errorf("%s has no refusal row", state)
 		}
+		err := &SourceRefusal{Kind: eventsource.KindJira, State: state}
 		note := SourceNote(eventsource.KindJira, domain.SourceEntry{State: state})
 		if !strings.HasPrefix(note, eventsource.Label(eventsource.KindJira)+": ") {
 			t.Errorf("%s note = %q, want one led by the source", state, note)

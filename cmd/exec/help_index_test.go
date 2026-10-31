@@ -73,7 +73,7 @@ func TestHelpText_NotesFollowTheManifest(t *testing.T) {
 		if !strings.Contains(out, section) {
 			t.Errorf("the %s section must stay listed — explained, not hidden", kind)
 		}
-		if note := agenthost.SourceNote(kind, sources[kind]); !strings.Contains(out, "NOTE: "+note) {
+		if note := agenthost.SourceNote(kind, sources[kind]); note == "" || !strings.Contains(out, "NOTE: "+note) {
 			t.Errorf("the %s section is missing its note %q", kind, note)
 		}
 	}
@@ -87,7 +87,8 @@ func TestHelpText_NotesFollowTheManifest(t *testing.T) {
 	}
 	sources["fakesrc"] = domain.SourceEntry{State: domain.SourceUnconfigured}
 	out = helpText("tfac", sources)
-	if !strings.Contains(out, "Fake Source Commands:") || !strings.Contains(out, "NOTE: "+agenthost.SourceNote("fakesrc", sources["fakesrc"])) {
+	note := agenthost.SourceNote("fakesrc", sources["fakesrc"])
+	if !strings.Contains(out, "Fake Source Commands:") || note == "" || !strings.Contains(out, "NOTE: "+note) {
 		t.Error("a registered family whose source is unconfigured must be listed with its note")
 	}
 }
