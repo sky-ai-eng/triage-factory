@@ -177,7 +177,7 @@ func (s *conversationWorktreeStore) GetByRepoRefSystem(ctx context.Context, orgI
 // repository's slug, joined as r.
 const worktreeColumns = `w.conversation_id, w.repository_id, r.owner || '/' || r.repo, w.path, w.ref, w.created_at`
 
-func scanWorktree(row pgRowScanner) (domain.ConversationWorktree, error) {
+func scanWorktree(row rowScanner) (domain.ConversationWorktree, error) {
 	var w domain.ConversationWorktree
 	err := row.Scan(&w.ConversationID, &w.RepositoryID, &w.RepoID, &w.Path, &w.Ref, &w.CreatedAt)
 	return w, err

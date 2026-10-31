@@ -12,126 +12,129 @@ import (
 	"testing"
 )
 
-// This file records the decision for the helpers duplicated between
-// the SQLite and Postgres stores.
-//
-// Tier A stays duplicated because its small pure-Go helpers are safe but
-// low-value to hoist. Tier B stays duplicated so a scanner can acquire real
-// driver-specific SQL/NULL behavior without first undoing a shared
-// abstraction. Both tiers are guarded here: an accidental one-sided edit
-// fails immediately, and a newly copied helper cannot silently enlarge the
-// set.
-//
-// Tier C is split on its structural boundary. PendingRow and the four pure
-// consumers of an already-scanned row live in pending_rows.go. Helpers that
-// still accept a dialect-local queryer or another local implementation type
-// remain beside their SQL and are guarded here. SQL text, placeholder syntax,
-// casts, RLS parameters, and driver NULL scanning are deliberately out of
-// scope for sharing.
-//
-// That last rule is why the liveTopLevelConversationSQL, task*SQL and
-// workspaceKey*SQL fragment builders are listed below rather than hoisted:
-// they compose SQL text, and they are identical today only because the
-// predicate they spell happens to need no placeholder, cast or json guard
-// yet. Sharing them would mean undoing the
-// abstraction the first time one dialect needs its own spelling — the same
-// reason Tier B stays duplicated. What must NOT drift is the predicate's
-// meaning, and that is pinned where it belongs: the dual-dialect conformance
-// suites assert both backends answer alike.
-//
-// The workspaceKey*SQL family is the case in evidence, and it is why the pair
-// below was ratcheted rather than shared on the strength of being identical: a
-// third member, workspaceKeyIdleSinceSQL, is NOT listed because it already
-// needs its own spelling — SQLite wraps every timestamp in datetime() to
-// normalize the mixed on-disk formats a bare MAX would order lexically. Two
-// members of one family matching while the third cannot is the shape this rule
-// describes, not a coincidence to hoist.
-//
-// EpisodeSetupFailuresSQL, EpisodeLostEngagementsSQL,
-// EpisodeUpstreamHandBacksSQL and EpisodeJailLossesSQL are ratcheted on the
-// same rule: each is a one-line selection over its dialect's
-// episodeHandBacksSQL, which already differs (Postgres casts its count), so
-// the four are identical only because the outcomes each selects need no
-// dialect spelling. Their meaning is pinned by the claim-predicate and
-// hand-back conformance suites, which read the counts off a claim in both
-// backends.
-//
-// liveTopLevelConversationSQL is ratcheted for the same reason and one more of
-// its own: it is a base other fragment builders in its dialect compose over
-// (taskLiveConversationSQL, and the live-conversation readers beside it), so a
-// shared version would pull their composition across the dialect boundary with
-// it. Its meaning is pinned the way the rest of the family's is — the
-// dual-dialect conformance suites assert both backends answer alike about a
-// concluded row, an ended row and a subagent row.
+// This file records the decision for the helpers duplicated between the SQLite
+// and Postgres stores. Each entry carries its tier, the reason it is duplicated
+// rather than shared. Every tier gets both checks: an entry that drifts between
+// the dialects fails, and a new byte-identical helper with no entry fails. No
+// name exempts a helper or decides its tier, and only tierPure is expected to
+// shrink. Go over already-scanned values can be shared (PendingRow and its
+// consumers in pending_rows.go); SQL text, placeholder syntax, casts, RLS
+// parameters and driver NULL scanning stay per-dialect.
 
-// identicalHelperRatchet is the SHRINKING section. Every name is a top-level
-// helper whose complete func declaration (excluding its doc comment) is
-// currently byte-identical in sqlite and postgres. Moving a helper to shared
-// code deletes its entry. Diverging one requires an explicit decision that it
-// acquired dialect content; merely deleting the entry to make this test pass
-// defeats the ratchet.
-//
-// TODO(TFAC-1286): the list does not record each entry's tier, so the Tier B
-// scanners and Tier C SQL fragments, duplicated by decision, are counted in
-// the shrinking set alongside the Tier A helpers that could be shared.
-var identicalHelperRatchet = []string{
-	"EpisodeJailLossesSQL",
-	"EpisodeLostEngagementsSQL",
-	"EpisodeSetupFailuresSQL",
-	"EpisodeUpstreamHandBacksSQL",
-	"buildDashboardTimeline",
-	"claimOutcomeForStatus",
-	"collectURLRewrites",
-	"derefFloat",
-	"derefInt",
-	"floatPtrFromNull",
-	"int64PtrFromNull",
-	"intPtrFromNull",
-	"liveTopLevelConversationSQL",
-	"normalizeEmail",
-	"normalizeReachable",
-	"nullBotUserID",
-	"nullIfEmpty",
-	"nullString",
-	"nullStringToPtr",
-	"observedAt",
-	"queryListedTasksCtx",
-	"queryTasksCtx",
-	"refreshInstant",
-	"reverseTaskMemories",
-	"scanAuthEvent",
-	"scanAuthEventRows",
-	"scanConnectionStatus",
-	"scanDeliverableRows",
-	"scanEntityRow",
-	"scanEvent",
-	"scanExternalAction",
-	"scanExternalActionRows",
-	"scanIntIDs",
-	"scanJiraStatusRules",
-	"scanMessageRow",
-	"scanMessageRows",
-	"scanOneExecutorClaim",
-	"scanOperator",
-	"scanOrgEventSourceRow",
-	"scanPendingBind",
-	"scanReachableRepos",
-	"scanSpendRow",
-	"scanTaskBareRow",
-	"scanTaskCloseDeferral",
-	"scanTaskFields",
-	"scanTaskFromRow",
-	"scanTaskMemories",
-	"scanTaskMemory",
-	"scanTeamRow",
-	"scanTeamSettings",
-	"scanWrittenEntity",
-	"taskLiveConversationSQL",
-	"taskMemoryAttemptSQL",
-	"taskMemoryOwedRowSQL",
-	"taskMemoryPendingSQL",
-	"workspaceKeyMembersSQL",
-	"workspaceKeyUnclaimedSQL",
+// helperTier is why a byte-identical dialect helper is duplicated.
+type helperTier int
+
+const (
+	// tierPure is a small pure-Go helper with no SQL text and no driver row
+	// (derefFloat, nullIfEmpty). It could be shared and is duplicated only
+	// because each is low-value to hoist. This is the shrinking set.
+	tierPure helperTier = iota
+
+	// tierScanner reads driver rows: a scan function, or a loop that queries
+	// and scans (queryTasksCtx, collectURLRewrites). Per-dialect by decision,
+	// so a scanner can take driver-specific NULL handling without undoing a
+	// shared abstraction; the two scanDeliverable copies already differ that
+	// way.
+	tierScanner
+
+	// tierSQLFragment composes SQL text (liveTopLevelConversationSQL,
+	// task*SQL, workspaceKey*SQL, Episode*SQL). Per-dialect by decision: each
+	// is identical only because its predicate needs no placeholder, cast or
+	// json guard yet, and siblings in the same families already diverge.
+	// liveTopLevelConversationSQL is also a base other fragments in its
+	// dialect compose over, so sharing it would pull their composition across
+	// the dialect boundary. The dual-dialect conformance suites pin what the
+	// predicates mean.
+	tierSQLFragment
+
+	// tierConstructor builds a dialect's own store type (newEventStore). The
+	// text matches, but each copy names its own package's type, so there is
+	// nothing to share.
+	tierConstructor
+)
+
+// helperTierChoices is what the new-helper failure says about where to file a
+// helper.
+const helperTierChoices = "tierPure (pure Go; the shrinking set, so sharing it is the expected fix), " +
+	"tierScanner (reads driver rows; per-dialect by decision), " +
+	"tierSQLFragment (composes SQL text; per-dialect by decision), " +
+	"tierConstructor (builds the dialect's own store type; nothing to share)"
+
+// identicalHelperRatchet maps every top-level helper whose complete func
+// declaration (excluding its doc comment) is currently byte-identical in sqlite
+// and postgres to its tier. Moving a helper to shared code deletes its entry.
+// Diverging one requires an explicit decision that it acquired dialect content;
+// merely deleting the entry to make this test pass defeats the ratchet.
+var identicalHelperRatchet = map[string]helperTier{
+	"buildDashboardTimeline": tierPure,
+	"claimOutcomeForStatus":  tierPure,
+	"derefFloat":             tierPure,
+	"derefInt":               tierPure,
+	"floatPtrFromNull":       tierPure,
+	"int64PtrFromNull":       tierPure,
+	"intPtrFromNull":         tierPure,
+	"normalizeEmail":         tierPure,
+	"normalizeReachable":     tierPure,
+	"nullBotUserID":          tierPure,
+	"nullIfEmpty":            tierPure,
+	"nullString":             tierPure,
+	"nullStringToPtr":        tierPure,
+	"observedAt":             tierPure,
+	"refreshInstant":         tierPure,
+	"reverseTaskMemories":    tierPure,
+
+	"collectURLRewrites":     tierScanner,
+	"queryListedTasksCtx":    tierScanner,
+	"queryTasksCtx":          tierScanner,
+	"scanAuthEvent":          tierScanner,
+	"scanAuthEventRows":      tierScanner,
+	"scanConnectionStatus":   tierScanner,
+	"scanDeliverableRows":    tierScanner,
+	"scanEntityRow":          tierScanner,
+	"scanEvent":              tierScanner,
+	"scanExternalAction":     tierScanner,
+	"scanExternalActionRows": tierScanner,
+	"scanIntIDs":             tierScanner,
+	"scanJiraStatusRules":    tierScanner,
+	"scanMessageRow":         tierScanner,
+	"scanMessageRows":        tierScanner,
+	"scanOneExecutorClaim":   tierScanner,
+	"scanOperator":           tierScanner,
+	"scanOrgEventSourceRow":  tierScanner,
+	"scanPendingBind":        tierScanner,
+	"scanReachableRepos":     tierScanner,
+	"scanSpendRow":           tierScanner,
+	"scanTaskBareRow":        tierScanner,
+	"scanTaskCloseDeferral":  tierScanner,
+	"scanTaskFields":         tierScanner,
+	"scanTaskFromRow":        tierScanner,
+	"scanTaskMemories":       tierScanner,
+	"scanTaskMemory":         tierScanner,
+	"scanTeamRow":            tierScanner,
+	"scanTeamSettings":       tierScanner,
+	"scanWorktree":           tierScanner,
+	"scanWrittenEntity":      tierScanner,
+
+	"EpisodeJailLossesSQL":        tierSQLFragment,
+	"EpisodeLostEngagementsSQL":   tierSQLFragment,
+	"EpisodeSetupFailuresSQL":     tierSQLFragment,
+	"EpisodeUpstreamHandBacksSQL": tierSQLFragment,
+	"liveTopLevelConversationSQL": tierSQLFragment,
+	"taskLiveConversationSQL":     tierSQLFragment,
+	"taskMemoryAttemptSQL":        tierSQLFragment,
+	"taskMemoryOwedRowSQL":        tierSQLFragment,
+	"taskMemoryPendingSQL":        tierSQLFragment,
+	"workspaceKeyMembersSQL":      tierSQLFragment,
+	"workspaceKeyUnclaimedSQL":    tierSQLFragment,
+
+	"newCommitSignatureStore":   tierConstructor,
+	"newConversationQueueStore": tierConstructor,
+	"newDashboardStore":         tierConstructor,
+	"newEventStore":             tierConstructor,
+	"newFactoryReadStore":       tierConstructor,
+	"newModelAvailabilityStore": tierConstructor,
+	"newScoreStore":             tierConstructor,
+	"newTeamActivityStore":      tierConstructor,
 }
 
 func TestRatchet_IdenticalDialectHelpersStayConverged(t *testing.T) {
@@ -145,24 +148,13 @@ func TestRatchet_IdenticalDialectHelpersStayConverged(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !sort.StringsAreSorted(identicalHelperRatchet) {
-		t.Fatal("identicalHelperRatchet must stay sorted")
-	}
-	allowed := make(map[string]bool, len(identicalHelperRatchet))
-	for _, name := range identicalHelperRatchet {
-		if allowed[name] {
-			t.Fatalf("duplicate ratchet entry: %s", name)
-		}
-		allowed[name] = true
-	}
-
 	var violations []string
-	for _, name := range identicalHelperRatchet {
+	for name := range identicalHelperRatchet {
 		sqliteFunc, sqliteOK := sqlite[name]
 		postgresFunc, postgresOK := postgres[name]
 		if !sqliteOK || !postgresOK {
 			violations = append(violations, fmt.Sprintf(
-				"stale ratchet entry %s: sqlite present=%t, postgres present=%t — if it moved to shared code, delete the entry so the ratchet shrinks",
+				"stale ratchet entry %s: sqlite present=%t, postgres present=%t — if it moved to shared code or was renamed, update the entry; if one dialect lost it, restore it there or record why before removing the entry",
 				name, sqliteOK, postgresOK))
 			continue
 		}
@@ -174,17 +166,14 @@ func TestRatchet_IdenticalDialectHelpersStayConverged(t *testing.T) {
 	}
 
 	for name, sqliteFunc := range sqlite {
-		// Same-named constructors wire package-local implementations. They were
-		// excluded from TFAC-874's 46-helper measurement and are not candidates
-		// for sharing even when their one-line bodies happen to match.
-		if strings.HasPrefix(name, "new") || allowed[name] {
+		if _, listed := identicalHelperRatchet[name]; listed {
 			continue
 		}
 		postgresFunc, ok := postgres[name]
 		if ok && sqliteFunc.source == postgresFunc.source {
 			violations = append(violations, fmt.Sprintf(
-				"new byte-identical dialect helper %s in %s and %s — share it or make the duplication an explicit ratchet decision",
-				name, sqliteFunc.path, postgresFunc.path))
+				"new byte-identical dialect helper %s in %s and %s — share it, or add it to identicalHelperRatchet under its tier: %s",
+				name, sqliteFunc.path, postgresFunc.path, helperTierChoices))
 		}
 	}
 
