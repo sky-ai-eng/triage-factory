@@ -98,10 +98,10 @@ func TestLinearTeamUnreadable_Postgres_StopTracking(t *testing.T) {
 }
 
 // TestLinearTeamUnreadable_Postgres_StopTrackingRebuildsAfterAConcurrentSave:
-// a save that commits while "Stop tracking" waits for the team's tracked-set
-// lock is kept. The action read the set before that save, finds it changed
-// once it holds the lock, and builds again from the set the save left, so OPS
-// keeps the rules the save armed it with and ENG is still the team removed.
+// a save that commits while "Stop tracking" waits for the team's settings lock
+// is kept. The action read the set before that save, finds it changed once it
+// holds the lock, and builds again from the set the save left, so OPS keeps the
+// rules the save armed it with and ENG is still the team removed.
 func TestLinearTeamUnreadable_Postgres_StopTrackingRebuildsAfterAConcurrentSave(t *testing.T) {
 	rig := newAuthRig(t)
 	owner := rig.seedUser()
@@ -136,7 +136,7 @@ func TestLinearTeamUnreadable_Postgres_StopTrackingRebuildsAfterAConcurrentSave(
 	held := make(chan error, 1)
 	go func() {
 		held <- rig.srv.tx.WithTx(ctx, org.String(), infraAdmin.String(), func(tx db.TxStores) error {
-			if err := tx.Teams.LockIssueTrackerSets(ctx, infra.String()); err != nil {
+			if err := tx.Teams.LockSettings(ctx, infra.String()); err != nil {
 				return err
 			}
 			rules, err := tx.LinearTeamRules.ListForTeam(ctx, infra.String(), "ws-test")
@@ -170,7 +170,7 @@ func TestLinearTeamUnreadable_Postgres_StopTrackingRebuildsAfterAConcurrentSave(
 	go func() {
 		invoked <- rig.tokensJSON(http.MethodPost, meNotifications+"/"+inbox.Items[0].ID+"/actions/untrack", nil, adminSid, "")
 	}()
-	waitForAdvisoryLockWaiter(t, rig.h.AdminDB)
+	waitForLockWaiter(t, rig.h.AdminDB)
 	close(release)
 	if err := <-held; err != nil {
 		t.Fatalf("the other save: %v", err)
@@ -196,14 +196,16 @@ func TestLinearTeamUnreadable_Postgres_StopTrackingRebuildsAfterAConcurrentSave(
 	}
 }
 
-// waitForAdvisoryLockWaiter returns once some session is waiting for an
-// advisory lock, failing the test if none is within ten seconds.
-func waitForAdvisoryLockWaiter(t *testing.T, admin *sql.DB) {
+// waitForLockWaiter returns once some session is waiting for a lock, failing
+// the test if none is within ten seconds. Any lock counts, so a write that
+// skips the lock it should take and waits on a row instead still gets this
+// far, and the test fails on what it stored.
+func waitForLockWaiter(t *testing.T, admin *sql.DB) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		var waiting int
-		if err := admin.QueryRow(`SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`).Scan(&waiting); err != nil {
+		if err := admin.QueryRow(`SELECT count(*) FROM pg_locks WHERE NOT granted`).Scan(&waiting); err != nil {
 			t.Fatalf("read pg_locks: %v", err)
 		}
 		if waiting > 0 {
@@ -211,5 +213,5 @@ func waitForAdvisoryLockWaiter(t *testing.T, admin *sql.DB) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("nothing waited for an advisory lock")
+	t.Fatal("nothing waited for a lock")
 }

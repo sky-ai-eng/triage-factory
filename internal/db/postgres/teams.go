@@ -651,20 +651,20 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 	return stored, nil
 }
 
-// issueTrackerSetsLockSalt namespaces LockIssueTrackerSets' per-team advisory
-// lock inside hashtextextended()'s key space, clear of the other advisory
-// locks. Value is "TRKS" as ASCII bytes — arbitrary but fixed.
-const issueTrackerSetsLockSalt = 0x54524B53
+// teamSettingsLockSalt namespaces LockSettings' per-team advisory lock inside
+// hashtextextended()'s key space, clear of the other advisory locks. Value is
+// "TSET" as ASCII bytes — arbitrary but fixed.
+const teamSettingsLockSalt = 0x54534554
 
-func (s *teamsStore) LockIssueTrackerSets(ctx context.Context, teamID string) error {
+func (s *teamsStore) LockSettings(ctx context.Context, teamID string) error {
 	// Outside a transaction the lock would be released by the statement that
 	// took it, so a caller would hold nothing while believing it held the lock.
 	tx, ok := s.app.(*sql.Tx)
 	if !ok {
-		return errors.New("postgres: LockIssueTrackerSets needs a transaction's stores, whose commit releases the lock")
+		return errors.New("postgres: LockSettings needs a transaction's stores, whose commit releases the lock")
 	}
-	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, $2))`, teamID, issueTrackerSetsLockSalt); err != nil {
-		return fmt.Errorf("lock team issue tracker sets: %w", err)
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, $2))`, teamID, teamSettingsLockSalt); err != nil {
+		return fmt.Errorf("lock team settings: %w", err)
 	}
 	return nil
 }

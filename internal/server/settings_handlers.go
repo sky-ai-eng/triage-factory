@@ -452,6 +452,13 @@ func (s *Server) handleTeamSettingsPatch(w http.ResponseWriter, r *http.Request)
 		saved      domain.TeamSettings
 	)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		// The write below stores the whole row, with every column the body
+		// does not name as this read found it, including the tracked Jira
+		// projects' and Linear teams' order. The lock makes the read wait for
+		// any other write of the row that is in flight.
+		if err := tx.Teams.LockSettings(r.Context(), teamID); err != nil {
+			return err
+		}
 		teamSet, err := tx.Teams.GetSettings(r.Context(), teamID)
 		if err != nil {
 			return fmt.Errorf("load team settings: %w", err)
@@ -492,6 +499,9 @@ func (s *Server) handleTeamSettingsPatch(w http.ResponseWriter, r *http.Request)
 				return e
 			}
 		}
+		// TODO(TFAC-1272): the cap route writes max_daily_cost_usd without
+		// LockSettings, so a cap it commits after the read above is reverted
+		// by this write, which stores the cap that read found.
 		if saved, err = tx.Teams.UpdateSettings(r.Context(), teamID, teamSet); err != nil {
 			return fmt.Errorf("save team settings: %w", err)
 		}

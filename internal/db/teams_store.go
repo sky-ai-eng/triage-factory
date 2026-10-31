@@ -132,12 +132,13 @@ type TeamsStore interface {
 	// GetSettings' column list and scanner.
 	UpdateSettings(ctx context.Context, teamID string, updates domain.TeamSettings) (domain.TeamSettings, error)
 
-	// LockIssueTrackerSets takes the lock every write to the team's tracked
-	// Jira projects or Linear teams holds, from before it reads the stored set
-	// until it commits. Two such writes to one team therefore run one after
-	// the other, and the second reads what the first stored. The Jira and
-	// Linear writes share it because each rewrites the whole team_settings
-	// row, which holds both sets' display order.
+	// LockSettings takes the lock a write that reads the team's settings row
+	// and writes it back holds, from before its read until it commits. Two
+	// such writes to one team therefore run one after the other, and the
+	// second reads what the first stored, so neither stores back a column as
+	// it was before the other's write. Its holders are the team-settings
+	// PATCH and the writes to the team's tracked Jira projects and Linear
+	// teams, which also write their rules tables under it.
 	//
 	// The lock belongs to the transaction, so it is called on a
 	// transaction's stores (db.TxStores); the Postgres impl refuses any
@@ -145,7 +146,7 @@ type TeamsStore interface {
 	// no row to exist, since a team has no team_settings row until its first
 	// save. SQLite takes nothing: its write transaction begins IMMEDIATE and
 	// already holds the database's write lock.
-	LockIssueTrackerSets(ctx context.Context, teamID string) error
+	LockSettings(ctx context.Context, teamID string) error
 
 	// SetDailyCostCapSystem upserts ONLY team_settings.max_daily_cost_usd for
 	// teamID — the org-admin per-team daily LLM spend cap (TFAC-482, the team-

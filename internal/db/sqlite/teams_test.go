@@ -479,10 +479,10 @@ func TestTeamsStore_SQLite_TeamIDsForUserInOrgSystem_ExcludesArchived(t *testing
 	}
 }
 
-// TestTeamsStore_SQLite_IssueTrackerSetsLock runs the lock's conformance suite:
+// TestTeamsStore_SQLite_SettingsLock runs the lock's conformance suite:
 // the IMMEDIATE write transaction is the lock SQLite takes.
-func TestTeamsStore_SQLite_IssueTrackerSetsLock(t *testing.T) {
-	dbtest.RunIssueTrackerSetsLockConformance(t, func(t *testing.T) (db.Stores, string, string, string) {
+func TestTeamsStore_SQLite_SettingsLock(t *testing.T) {
+	dbtest.RunSettingsLockConformance(t, func(t *testing.T) (db.Stores, string, string, string) {
 		return sqlitestore.New(openSQLiteForTest(t)), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID
 	})
 }

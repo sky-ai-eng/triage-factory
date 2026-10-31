@@ -147,39 +147,39 @@ func TestTeamsStore_Postgres_NamesForIDsSystem_EmptyInput(t *testing.T) {
 	}
 }
 
-// TestTeamsStore_Postgres_IssueTrackerSetsLock runs the lock's conformance
-// suite on the production pool split, under the claims of the team's admin.
-func TestTeamsStore_Postgres_IssueTrackerSetsLock(t *testing.T) {
+// TestTeamsStore_Postgres_SettingsLock runs the lock's conformance suite on
+// the production pool split, under the claims of the team's admin.
+func TestTeamsStore_Postgres_SettingsLock(t *testing.T) {
 	h := pgtest.Shared(t)
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
-	dbtest.RunIssueTrackerSetsLockConformance(t, func(t *testing.T) (db.Stores, string, string, string) {
+	dbtest.RunSettingsLockConformance(t, func(t *testing.T) (db.Stores, string, string, string) {
 		h.Reset(t)
-		orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "tracker-sets-lock")
+		orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "settings-lock")
 		return stores, orgID, userID, teamID
 	})
 }
 
-// TestTeamsStore_Postgres_IssueTrackerSetsLock_PerTeamAndTransactional: the
-// lock is keyed by the team, so a write on another team does not wait for it,
-// and it is refused outside a transaction, where the statement taking it would
-// also release it.
-func TestTeamsStore_Postgres_IssueTrackerSetsLock_PerTeamAndTransactional(t *testing.T) {
+// TestTeamsStore_Postgres_SettingsLock_PerTeamAndTransactional: the lock is
+// keyed by the team, so a write on another team does not wait for it, and it is
+// refused outside a transaction, where the statement taking it would also
+// release it.
+func TestTeamsStore_Postgres_SettingsLock_PerTeamAndTransactional(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := t.Context()
-	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "tracker-sets-lock-scope")
+	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "settings-lock-scope")
 	otherTeamID := pgtest.SeedTeam(t, h, orgID, "other")
 
-	if err := stores.Teams.LockIssueTrackerSets(ctx, teamID); err == nil {
-		t.Error("LockIssueTrackerSets outside a transaction = nil; want a refusal")
+	if err := stores.Teams.LockSettings(ctx, teamID); err == nil {
+		t.Error("LockSettings outside a transaction = nil; want a refusal")
 	}
 
 	locked, release := make(chan struct{}), make(chan struct{})
 	held := make(chan error, 1)
 	go func() {
 		held <- stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-			if err := tx.Teams.LockIssueTrackerSets(ctx, teamID); err != nil {
+			if err := tx.Teams.LockSettings(ctx, teamID); err != nil {
 				return err
 			}
 			close(locked)
@@ -202,7 +202,7 @@ func TestTeamsStore_Postgres_IssueTrackerSetsLock_PerTeamAndTransactional(t *tes
 	other := make(chan error, 1)
 	go func() {
 		other <- stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-			return tx.Teams.LockIssueTrackerSets(ctx, otherTeamID)
+			return tx.Teams.LockSettings(ctx, otherTeamID)
 		})
 	}()
 	select {

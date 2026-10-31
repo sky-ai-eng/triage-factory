@@ -8,17 +8,15 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
-// IssueTrackerSetsLockFactory hands RunIssueTrackerSetsLockConformance the
-// wired stores, whose Tx opens the transactions, and the org, user and team to
-// open them as. The user administers the team, as the callers that take the
-// lock do.
-type IssueTrackerSetsLockFactory func(t *testing.T) (stores db.Stores, orgID, userID, teamID string)
+// SettingsLockFactory hands RunSettingsLockConformance the wired stores,
+// whose Tx opens the transactions, and the org, user and team to open them as.
+// The user administers the team, as the callers that take the lock do.
+type SettingsLockFactory func(t *testing.T) (stores db.Stores, orgID, userID, teamID string)
 
-// RunIssueTrackerSetsLockConformance pins TeamsStore.LockIssueTrackerSets by
-// what its callers rely on: a second write transaction on the team gets past
-// the lock only once the first has committed, and then reads what the first
-// stored.
-func RunIssueTrackerSetsLockConformance(t *testing.T, mk IssueTrackerSetsLockFactory) {
+// RunSettingsLockConformance pins TeamsStore.LockSettings by what its callers
+// rely on: a second write transaction on the team gets past the lock only once
+// the first has committed, and then reads what the first stored.
+func RunSettingsLockConformance(t *testing.T, mk SettingsLockFactory) {
 	t.Run("second_writer_waits_for_the_first_to_commit", func(t *testing.T) {
 		stores, orgID, userID, teamID := mk(t)
 		ctx := t.Context()
@@ -27,7 +25,7 @@ func RunIssueTrackerSetsLockConformance(t *testing.T, mk IssueTrackerSetsLockFac
 		first := make(chan error, 1)
 		go func() {
 			first <- stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-				if err := tx.Teams.LockIssueTrackerSets(ctx, teamID); err != nil {
+				if err := tx.Teams.LockSettings(ctx, teamID); err != nil {
 					return err
 				}
 				set, err := tx.Teams.GetSettings(ctx, teamID)
@@ -57,7 +55,7 @@ func RunIssueTrackerSetsLockConformance(t *testing.T, mk IssueTrackerSetsLockFac
 		go func() {
 			var r read
 			r.err = stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-				if err := tx.Teams.LockIssueTrackerSets(ctx, teamID); err != nil {
+				if err := tx.Teams.LockSettings(ctx, teamID); err != nil {
 					return err
 				}
 				set, err := tx.Teams.GetSettings(ctx, teamID)

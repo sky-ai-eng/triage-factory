@@ -620,10 +620,10 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 	return stored, nil
 }
 
-// LockIssueTrackerSets takes nothing: the handle begins every write
-// transaction IMMEDIATE, so a writer already holds the database's write lock
-// from BEGIN to commit, which serializes it against every other.
-func (s *teamsStore) LockIssueTrackerSets(context.Context, string) error { return nil }
+// LockSettings takes nothing: the handle begins every write transaction
+// IMMEDIATE, so a writer already holds the database's write lock from BEGIN to
+// commit, which serializes it against every other.
+func (s *teamsStore) LockSettings(context.Context, string) error { return nil }
 
 // SetDailyCostCapSystem upserts ONLY team_settings.max_daily_cost_usd for teamID
 // — the org-admin per-team daily spend cap (TFAC-482). SQLite is N=1 / no RLS so

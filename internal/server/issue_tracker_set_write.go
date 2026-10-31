@@ -20,9 +20,9 @@ var errIssueTrackerSetMoved = errors.New("the team's tracked set changed after i
 
 // recheckIssueTrackerSet is the first step of a write to a team's tracked Jira
 // projects or Linear teams inside its write transaction. It takes the team's
-// lock on those sets (TeamsStore.LockIssueTrackerSets), held until the
-// transaction ends, reads the set again with read, the function prev and
-// prevScope were read with, and refuses with a 409 when either moved.
+// settings lock (TeamsStore.LockSettings), held until the transaction ends,
+// reads the set again with read, the function prev and prevScope were read
+// with, and refuses with a 409 when either moved.
 //
 // The pre-image is more than a comparison: a rule absent from the body is
 // carried from it. Storing over a set another write replaced in the meantime
@@ -33,7 +33,7 @@ func recheckIssueTrackerSet[R any](
 	read func(context.Context, db.TxStores, string, string) ([]R, string, error),
 	prev []R, prevScope string, same func(a, b R) bool, what string,
 ) error {
-	if err := tx.Teams.LockIssueTrackerSets(ctx, teamID); err != nil {
+	if err := tx.Teams.LockSettings(ctx, teamID); err != nil {
 		return err
 	}
 	now, scope, err := read(ctx, tx, orgID, teamID)
