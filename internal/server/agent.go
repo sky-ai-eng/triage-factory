@@ -383,7 +383,8 @@ type conversationActionListRequest struct {
 }
 
 // conversationActionFilters is the canonical filter set the page token is
-// fingerprinted over.
+// fingerprinted over, and what the store reads. ObjectID is the raw id the
+// wire spelling decodes to.
 type conversationActionFilters struct {
 	ObjectID string `json:"object_id"`
 	Refused  bool   `json:"refused"`
@@ -426,10 +427,14 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var v httpx.Validation
-	if req.ObjectID != "" && !domain.IsObjectID(req.ObjectID) {
-		v.Invalid("object_id", "must be an object id, as an artifact's object_id spells it")
+	filters := conversationActionFilters{Refused: req.Refused}
+	if req.ObjectID != "" {
+		id, ok := parseWireObjectID(req.ObjectID)
+		if !ok {
+			v.Invalid("object_id", "must be an object id, as an artifact's object_id spells it")
+		}
+		filters.ObjectID = id
 	}
-	filters := conversationActionFilters{ObjectID: req.ObjectID, Refused: req.Refused}
 	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(filters), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
@@ -473,9 +478,9 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 
 // artifactJSON is the wire shape of one item of POST
 // /api/agent/conversations/{conversationID}/artifacts/list: an object the
-// conversation's agent changed (domain.Artifact). Deliverable is the
-// conversation's deliverable that is the same object (domain.ArtifactDeliverable),
-// or null.
+// conversation's agent changed (domain.Artifact). ObjectID is the object id's
+// wire spelling (wireObjectID). Deliverable is the conversation's deliverable
+// that is the same object (domain.ArtifactDeliverable), or null.
 type artifactJSON struct {
 	ObjectID    string                   `json:"object_id"`
 	ObjectKind  string                   `json:"object_kind"`
@@ -502,7 +507,7 @@ type artifactDeliverableJSON struct {
 
 func toArtifactJSON(a domain.Artifact, deliverables []domain.Deliverable) artifactJSON {
 	out := artifactJSON{
-		ObjectID:    a.ObjectID,
+		ObjectID:    wireObjectID(a.ObjectID),
 		ObjectKind:  a.ObjectKind,
 		Provider:    a.Provider,
 		Scope:       a.Scope,

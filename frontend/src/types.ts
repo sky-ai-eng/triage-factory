@@ -442,9 +442,9 @@ export type ObjectKind =
 // POST /api/agent/conversations/{id}/artifacts/list (internal/server/agent.go
 // artifactJSON): one object the conversation's agent changed, however many
 // actions it took on it. It says what the run did (last_action, action_count),
-// not the object's current state. object_id is opaque; it is the value the
-// actions list's object_id filter takes. deliverable is the conversation's
-// deliverable that is the same object, or null.
+// not the object's current state. object_id is opaque and safe in a URL; it
+// is the value the actions list's object_id filter takes. deliverable is the
+// conversation's deliverable that is the same object, or null.
 export interface ConversationArtifact {
   object_id: string
   object_kind: ObjectKind
@@ -491,6 +491,7 @@ export interface ActivityAction {
   actor_user_id?: string
   performed_by: 'agent' | 'person' | 'system'
   // The object the action changed: absent on a row that names none.
+  // object_id is the same opaque value a ConversationArtifact carries.
   object_kind?: ObjectKind
   object_id?: string
   credential: string

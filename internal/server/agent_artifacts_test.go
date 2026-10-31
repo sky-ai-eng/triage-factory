@@ -1,8 +1,10 @@
 package server
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
@@ -80,7 +82,7 @@ func TestHandleAgentArtifacts_MatchesDeliverables(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s names no object", a.Action)
 		}
-		return id
+		return wireObjectID(id)
 	}
 	deliverable := func(m map[string]any) map[string]any {
 		d, _ := m["deliverable"].(map[string]any)
@@ -174,7 +176,8 @@ func TestHandleAgentActions_ObjectAndRefusedFilters(t *testing.T) {
 	seedConversationAction(t, s, conversationID, artifactRow(domain.ActionCommentPosted, domain.ObjectKindComment,
 		domain.GitHubCommentKey(domain.GitHubIssueComment, 12)))
 	seedConversationAction(t, s, conversationID, artifactRow(domain.ActionGitDenied, "", ""))
-	branchID, _ := domain.ObjectID(push)
+	rawBranchID, _ := domain.ObjectID(push)
+	branchID := wireObjectID(rawBranchID)
 
 	list := func(body map[string]any) []map[string]any {
 		t.Helper()
@@ -230,7 +233,9 @@ func TestHandleAgentActions_StrictBody(t *testing.T) {
 		{"unknown field", map[string]any{"object": "branch|x|y"}, httpx.ReasonUnknownField, "object"},
 		{"non-boolean refused", map[string]any{"refused": "yes"}, httpx.ReasonInvalidField, "refused"},
 		{"malformed object_id", map[string]any{"object_id": "not-an-object"}, httpx.ReasonInvalidField, "object_id"},
-		{"unknown object kind", map[string]any{"object_id": "widget|x"}, httpx.ReasonInvalidField, "object_id"},
+		{"raw, unencoded object_id", map[string]any{"object_id": "branch|repo|refs/heads/fix"}, httpx.ReasonInvalidField, "object_id"},
+		{"padded object_id", map[string]any{"object_id": base64.URLEncoding.EncodeToString([]byte("branch|repo|refs/heads/fix"))}, httpx.ReasonInvalidField, "object_id"},
+		{"encoded unknown object kind", map[string]any{"object_id": wireObjectID("widget|x")}, httpx.ReasonInvalidField, "object_id"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -303,4 +308,42 @@ func TestConversationResponse_ArtifactCounts(t *testing.T) {
 		t.Fatalf("listed %d conversations, want 1", len(convs))
 	}
 	check("list busy", convs[0], 2, want)
+}
+
+// TestWireObjectID pins the object id's wire spelling: it round-trips, it
+// carries none of the characters a raw id has that a URL path segment
+// cannot, and a non-canonical or non-id spelling is refused.
+func TestWireObjectID(t *testing.T) {
+	for _, raw := range []string{
+		"branch|" + fixtureUUID("repo") + "|refs/heads/feature/a+b",
+		"pull_request|" + fixtureUUID("pr"),
+		"comment|https://github.com|github:comment:review:555",
+	} {
+		wire := wireObjectID(raw)
+		if strings.ContainsAny(wire, "/|=+") {
+			t.Errorf("wireObjectID(%q) = %q, want no '/', '|', '=' or '+'", raw, wire)
+		}
+		if got, ok := parseWireObjectID(wire); !ok || got != raw {
+			t.Errorf("parseWireObjectID(%q) = (%q, %v), want (%q, true)", wire, got, ok, raw)
+		}
+	}
+	if wireObjectID("") != "" {
+		t.Errorf("wireObjectID(\"\") = %q, want \"\"", wireObjectID(""))
+	}
+	// A 14-byte id leaves two zero bits in its last character. Bumping that
+	// character sets one, which a lenient decoder would still read as the
+	// same id; only the canonical spelling is accepted.
+	canonical := wireObjectID("pull_request|x")
+	noncanonical := canonical[:len(canonical)-1] + string(canonical[len(canonical)-1]+1)
+	if _, ok := parseWireObjectID(noncanonical); ok {
+		t.Errorf("parseWireObjectID accepted the non-canonical %q for %q", noncanonical, canonical)
+	}
+	if lenient, err := base64.RawURLEncoding.DecodeString(noncanonical); err != nil || string(lenient) != "pull_request|x" {
+		t.Fatalf("fixture: a lenient decode of %q = (%q, %v), want the same id", noncanonical, lenient, err)
+	}
+	for _, bad := range []string{"", "pull_request|x", "%%%", wireObjectID("pull_request|")} {
+		if _, ok := parseWireObjectID(bad); ok {
+			t.Errorf("parseWireObjectID(%q) accepted it", bad)
+		}
+	}
 }

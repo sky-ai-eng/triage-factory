@@ -363,9 +363,10 @@ type actionJSON struct {
 	ConversationID string `json:"conversation_id,omitempty"`
 	ActorUserID    string `json:"actor_user_id,omitempty"`
 	PerformedBy    string `json:"performed_by"`
-	// ObjectKind and ObjectID (domain.ObjectID) name the object the action
-	// changed. A row that names no object has neither, and one whose kind's
-	// identifying columns are empty has no ObjectID.
+	// ObjectKind and ObjectID name the object the action changed; ObjectID is
+	// domain.ObjectID's wire spelling (wireObjectID), the value an artifact's
+	// object_id carries. A row that names no object has neither, and one
+	// whose kind's identifying columns are empty has no ObjectID.
 	ObjectKind string          `json:"object_kind,omitempty"`
 	ObjectID   string          `json:"object_id,omitempty"`
 	Credential string          `json:"credential"`
@@ -400,7 +401,7 @@ func toActionJSON(a domain.ExternalAction) actionJSON {
 		ActorUserID:    a.ActorUserID,
 		PerformedBy:    a.PerformedBy,
 		ObjectKind:     a.ObjectKind,
-		ObjectID:       objectID,
+		ObjectID:       wireObjectID(objectID),
 		Credential:     a.Credential,
 		Details:        details,
 		OccurredAt:     a.OccurredAt,
