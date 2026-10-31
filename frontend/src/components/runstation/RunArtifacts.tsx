@@ -46,7 +46,7 @@ interface Props {
 
 interface ArtifactSet {
   conversationId: string
-  /** The pull requests and reviews no artifact names. */
+  /** The deliverables no artifact names. */
   deliverables: Deliverable[]
   artifacts: ConversationArtifact[]
   refused: number
@@ -65,9 +65,7 @@ async function loadArtifactSet(conversationId: string): Promise<ArtifactSet> {
   const named = new Set(artifacts.flatMap((a) => (a.deliverable ? [a.deliverable.id] : [])))
   return {
     conversationId,
-    // Only a pull request or a review is work a person acts on. A deliverable
-    // row of any other kind records an object the artifacts already list.
-    deliverables: deliverables.filter((d) => overlayKindFor(d.kind) !== null && !named.has(d.id)),
+    deliverables: deliverables.filter((d) => !named.has(d.id)),
     artifacts,
     refused: refused.total_count ?? 0,
   }
