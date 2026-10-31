@@ -90,8 +90,9 @@ kinds.LinearTeamUnreadable.Sync(ctx, orgID, unreadable)
 // not answer, or still short of the debounce, is kept rather than resolved
 kinds.JiraDiscoveryFailing.Sync(ctx, orgID, failing, keep...)
 
-// internal/delegate/jira_mirror.go — true where the canonical is not a reachable
-// transition, false after a successful move; a transient error does neither
+// internal/delegate/jira_mirror.go — true where the canonical is no longer one of
+// the project's statuses, false after a successful move; a transient error, or a
+// ticket that can't reach a status the project still has, does neither
 kinds.JiraMirrorFailing.Set(ctx, orgID, kinds.JiraMirrorFor(rule, issueKey), true)
 
 // internal/routing — the conflict TFAC-518 surfaces
@@ -334,8 +335,8 @@ The same calls, tables (SQLite) and page. Local is N=1: the one user is the reci
 | `github.app_unusable`         | github | org admins                                  | urgent                                | no          | `Sync` on every reconcile (`internal/poller/manager.go`, beside `logAppUsabilityChange`); an active App only              | Link: GitHub access settings                                                  |
 | `linear.team_unreadable`      | linear | org admins + admins of TF teams tracking it | high                                  | yes         | `Sync` on a complete visibility pass over every armed team (`checkLinearTeamVisibility`; never on outcome `failed`)       | Link: Linear settings; invoke "Stop tracking" on team rows                    |
 | `jira.discovery_failing`      | jira   | admins of teams whose rules arm the project | high                                  | yes         | `Sync` from `discoverJira` after 3 rejected cycles in a row; unanswered projects kept                                     | Link: the team's Jira status rules                                            |
-| `jira.mirror_failing`         | jira   | team admins                                 | high                                  | yes         | `Set` in `runJiraMirror` and the claim guard (`applyJiraClaim`)                                                           | Link: the team's Jira status rules                                            |
-| `linear.mirror_failing`       | linear | team admins                                 | high                                  | yes         | `Set` in `runLinearMirror` and `applyLinearClaim`                                                                         | Link: the team's Linear rules                                                 |
+| `jira.mirror_failing`         | jira   | team admins                                 | high                                  | yes         | `Set` in `runJiraMirror`, `applyJiraClaim` and the stock deck's claim; a rules save resolves it                           | Link: the team's Jira status rules                                            |
+| `linear.mirror_failing`       | linear | team admins                                 | high                                  | yes         | `Set` in `runLinearMirror` and `applyLinearClaim`; a rules save resolves it                                               | Link: the team's Linear rules                                                 |
 | `memory.generation_failing`   | —      | org admins                                  | urgent for `no_model`, high otherwise | no          | `Sync` from the memory provisioner over the `error_kind`s currently failing across the org's attempts, after its debounce | Link: background-jobs model setting; invoke "Retry now" (rings `memory_owed`) |
 | `jira.status_drift`           | jira   | team admins                                 | high                                  | yes         | `Sync` from a detection pass that does not exist yet                                                                      | Link: the rule or handler editor                                              |
 | `routing.automation_conflict` | —      | admins of the losing teams                  | low                                   | (notice)    | `Post` in the router where the conflict is decided                                                                        | Link: the losing team's trigger                                               |

@@ -238,6 +238,7 @@ func (s *Server) saveTeamLinearTeams(ctx context.Context, orgID, userID, teamID 
 		s.MarkLinearRestarted(ctx, orgID)
 		go s.onLinearChanged(orgID)
 	}
+	resolveLinearMirrorsOnSave(context.WithoutCancel(ctx), orgID, teamID, prev, next)
 	return orderLinearTeamRules(stored, order), nil
 }
 
@@ -262,6 +263,28 @@ func (s *Server) untrackUnreadableLinearTeam(ctx context.Context, call notify.Ac
 		return keep
 	})
 	return err == nil, err
+}
+
+// resolveLinearMirrorsOnSave resolves kinds.LinearMirrorFailing for every
+// Linear team of prev the save took out of the team's set or gave another
+// in-progress canonical. The gate read a new canonical from the Linear team's
+// workflow, and a Linear team the team no longer tracks is not the team's to
+// fix; a canonical that still does not exist is raised again by its next
+// move.
+func resolveLinearMirrorsOnSave(ctx context.Context, orgID, teamID string, prev, next []domain.LinearTeamRules) {
+	kept := make(map[string]string, len(next))
+	for _, n := range next {
+		kept[n.LinearTeamID] = n.InProgressCanonical.ID
+	}
+	for _, p := range prev {
+		if p.InProgressCanonical.IsZero() {
+			continue
+		}
+		if canonical, ok := kept[p.LinearTeamID]; ok && canonical == p.InProgressCanonical.ID {
+			continue
+		}
+		kinds.LinearMirrorFailing.Set(ctx, orgID, kinds.LinearMirror{TeamID: teamID, LinearTeamID: p.LinearTeamID}, false)
+	}
 }
 
 // shapeLinearTeamWishes checks the body's shape — every id present, a Linear

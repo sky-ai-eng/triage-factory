@@ -2,13 +2,12 @@ package server
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
-	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 )
 
 // lookupLinearRuleForTask resolves the per-team Linear rule that governs the
@@ -97,9 +96,9 @@ func linearState(s linear.WorkflowState) domain.LinearStateRef {
 // the rule's in-progress canonical unless it already sits in an in-progress
 // state. A failed assign stops before the transition, as the Jira claim does.
 // Every failure is logged rather than returned: the claim has landed in TF by
-// the time this runs. The move raises or resolves kinds.LinearMirrorFailing
-// in orgID as the bot mirror's does. The issue is read by issueID, its UUID;
-// identifier only labels the log lines.
+// the time this runs. The move's outcome is recorded in orgID as the bot
+// mirror's is (delegate.NoteLinearMirrorMove). The issue is read by issueID,
+// its UUID; identifier only labels the log lines.
 func applyLinearClaim(ctx context.Context, c *linear.Client, orgID, issueID, identifier, linearUserID string, rule domain.LinearTeamRules) {
 	issue, err := c.GetIssue(ctx, issueID)
 	if err != nil {
@@ -119,14 +118,11 @@ func applyLinearClaim(ctx context.Context, c *linear.Client, orgID, issueID, ide
 		}
 	}
 	if needTransition {
-		if err := c.TransitionIssue(ctx, issue.ID, rule.InProgressCanonical.ID); err != nil {
+		err := c.TransitionIssue(ctx, issue.ID, rule.InProgressCanonical.ID)
+		delegate.NoteLinearMirrorMove(ctx, orgID, rule, identifier, err)
+		if err != nil {
 			linearLog.Error("failed to transition", "issue", identifier, "state", rule.InProgressCanonical.Name, "error", err)
-			if errors.Is(err, linear.ErrStateNotFound) {
-				kinds.LinearMirrorFailing.Set(ctx, orgID, kinds.LinearMirrorFor(rule, identifier), true)
-			}
-			return
 		}
-		kinds.LinearMirrorFailing.Set(ctx, orgID, kinds.LinearMirrorFor(rule, identifier), false)
 	}
 }
 

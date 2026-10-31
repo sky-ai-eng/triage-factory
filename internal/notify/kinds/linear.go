@@ -32,7 +32,7 @@ func LinearMirrorFor(rule domain.LinearTeamRules, identifier string) LinearMirro
 // in-progress canonical that the state does not exist, so claimed and
 // delegated issues stay where they are in Linear. It is raised only by that
 // answer, never by a transient failure, and resolved by the next successful
-// move under the rule.
+// move under the rule or a save of the team's rules that changes or drops it.
 var LinearMirrorFailing = notify.Condition(notify.ConditionSpec[LinearMirror]{
 	Name:        "linear.mirror_failing",
 	Source:      "linear",

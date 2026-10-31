@@ -102,10 +102,13 @@ func TestHref_Render(t *testing.T) {
 	if got, err := Routes.TeamLinearRules(team).render(org, true, none); err != nil || got != "/settings" {
 		t.Errorf("TeamLinearRules in local = %q, %v", got, err)
 	}
-	for _, local := range []bool{false, true} {
-		if _, err := Routes.TeamJiraRules("").render(org, local, none); err == nil || !strings.Contains(err.Error(), "names no team") {
-			t.Errorf("a team route with no team (local %v): err = %v; want it refused", local, err)
-		}
+	if _, err := Routes.TeamJiraRules("").render(org, false, none); err == nil || !strings.Contains(err.Error(), "names no team") {
+		t.Errorf("a team route with no team in multi: err = %v; want it refused", err)
+	}
+	// Local mode's one user is every row's recipient, a recipient that names
+	// no team, and its page needs none.
+	if got, err := Routes.TeamJiraRules("").render(org, true, none); err != nil || got != "/settings" {
+		t.Errorf("a team route with no team in local = %q, %v; want /settings", got, err)
 	}
 	multiOnly := Href{route: &route{name: "multi_only", multi: "/org"}}
 	if _, err := multiOnly.render(org, true, none); err == nil || !strings.Contains(err.Error(), "no page in local mode") {

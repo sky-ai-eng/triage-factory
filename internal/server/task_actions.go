@@ -14,7 +14,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/modelaccess"
-	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -827,9 +826,9 @@ func (s *Server) syncJiraClaim(r *http.Request, orgID, userID, id string, jiraUs
 // rule's in-progress canonical unless it already sits in an in-progress
 // member. A failed assign stops before the transition. Every failure is
 // logged rather than returned: the claim has landed in TF by the time this
-// runs. The transition raises or resolves kinds.JiraMirrorFailing in orgID as
-// the bot mirror's does. Jira is addressed by issue, the ticket's id; issueKey
-// only labels the log lines.
+// runs. The transition's outcome is recorded in orgID as the bot mirror's is
+// (delegate.NoteJiraMirrorMove). Jira is addressed by issue, the ticket's id;
+// issueKey only labels the log lines.
 func applyJiraClaim(ctx context.Context, c *jira.Client, orgID, issue, issueKey string, rule domain.JiraProjectStatusRules) {
 	state := c.GetClaimState(ctx, issue)
 	ipCanonical := jira.Status{ID: rule.InProgressCanonical.ID, Name: rule.InProgressCanonical.Name}
@@ -849,14 +848,11 @@ func applyJiraClaim(ctx context.Context, c *jira.Client, orgID, issue, issueKey 
 		}
 	}
 	if needTransition {
-		if err := c.TransitionTo(ctx, issue, ipCanonical); err != nil {
+		err := c.TransitionTo(ctx, issue, ipCanonical)
+		delegate.NoteJiraMirrorMove(ctx, c, orgID, rule, issueKey, err)
+		if err != nil {
 			jiraLog.Error("failed to transition", "issue", issueKey, "status", ipCanonical.Name, "error", err)
-			if errors.Is(err, jira.ErrNoTransition) {
-				kinds.JiraMirrorFailing.Set(ctx, orgID, kinds.JiraMirrorFor(rule, issueKey), true)
-			}
-			return
 		}
-		kinds.JiraMirrorFailing.Set(ctx, orgID, kinds.JiraMirrorFor(rule, issueKey), false)
 	}
 }
 
