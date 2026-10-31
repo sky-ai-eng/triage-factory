@@ -703,7 +703,7 @@ func validRepoID(id string) error {
 // turning the empty result — the write matched nothing — into
 // db.ErrNoSuchRepository. RETURNING answers "did this land" and "what does the
 // row say now" in one statement, so there is nothing left to count.
-func scanUpdatedRepository(row pgRowScanner, id string) (domain.Repository, error) {
+func scanUpdatedRepository(row rowScanner, id string) (domain.Repository, error) {
 	p, err := pgScanRepositoryFull(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Repository{}, fmt.Errorf("%w: %s", db.ErrNoSuchRepository, id)
@@ -821,10 +821,10 @@ func (s *repoStore) SetPullsPollStateSystem(ctx context.Context, orgID, id, etag
 	return err
 }
 
-// pgRowScanner is the common Scan surface of *sql.Row and *sql.Rows.
-// Needed because Get scans a single row from QueryRowContext while
-// List scans repeatedly from QueryContext.
-type pgRowScanner interface {
+// rowScanner is the common Scan surface of *sql.Row and *sql.Rows, so one
+// scanner serves a single-row read (QueryRowContext, a write's RETURNING) and
+// a list's loop over QueryContext.
+type rowScanner interface {
 	Scan(dest ...any) error
 }
 
@@ -844,7 +844,7 @@ const (
 
 // pgScanRepositoryFull reads the projection shared by Get, List, and the ref
 // lookup.
-func pgScanRepositoryFull(row pgRowScanner) (domain.Repository, error) {
+func pgScanRepositoryFull(row rowScanner) (domain.Repository, error) {
 	var p domain.Repository
 	var externalID, description, profileText, cloneURL, defaultBranch, baseBranch, cloneError, cloneErrorKind, ownerExternalID sql.NullString
 	var profiledAt, retiredAt sql.NullTime
