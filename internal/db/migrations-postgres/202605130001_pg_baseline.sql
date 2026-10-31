@@ -2061,6 +2061,12 @@ CREATE INDEX idx_external_actions_team_occurred ON public.external_actions USING
 CREATE INDEX idx_external_actions_conversation ON public.external_actions USING btree (conversation_id);
 
 
+-- A conversation's rows in one org, in time order: the conversation's action
+-- list and its artifact reads filter on both columns. The single-column index
+-- above serves the conversation foreign key's ON DELETE SET NULL.
+CREATE INDEX idx_external_actions_org_conversation_occurred ON public.external_actions USING btree (org_id, conversation_id, occurred_at);
+
+
 -- An entity's rename, merge and fold, and a Slack channel's move, select the
 -- ledger rows they move by entity_id; a repository's rename by repository_id.
 CREATE INDEX idx_external_actions_entity ON public.external_actions USING btree (entity_id) WHERE (entity_id IS NOT NULL);

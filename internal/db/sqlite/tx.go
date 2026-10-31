@@ -169,6 +169,7 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		SystemLLMRuns:            newSystemLLMRunStore(tx),
 		AccessChangeLog:          newAccessChangeLogStore(tx),
 		ExternalActions:          newExternalActionStore(tx),
+		Artifacts:                newArtifactStore(tx),
 		Spend:                    newSpendStore(tx),
 		Marketplace:              newMarketplaceStore(tx, tx),
 		ConversationPendingInput: newConversationPendingInputStore(tx),
