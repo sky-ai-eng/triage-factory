@@ -1,9 +1,10 @@
 //! Port of pi's `core/tools/bash.ts` execute path.
 //!
 //! The command runs in its own session (pi's `detached: true`), stdout and
-//! stderr stream into the OutputAccumulator, a timeout SIGKILLs the process
-//! group, and after exit the pipes get pi's 100ms idle grace so output from
-//! detached descendants isn't cut mid-write (`waitForChildProcess`).
+//! stderr stream into the OutputAccumulator, a timeout SIGKILLs every process
+//! in the command's tree ([`kill_command_tree`]), and after exit the pipes get
+//! pi's 100ms idle grace so output from detached descendants isn't cut
+//! mid-write (`waitForChildProcess`).
 //!
 //! One divergence from pi is in how a command ends: a shell that dies of a
 //! signal is an error naming the signal, where pi returns its partial output
@@ -56,7 +57,7 @@
 //! rather than closed until the process closes them: it keeps running, its
 //! later output is discarded, and the result says so.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
@@ -133,10 +134,16 @@ const MEM_HOT_DECAY_SAMPLES: usize = 5;
 const _: () = assert!(MEM_SAMPLE_INTERVAL_HOT.as_millis() < MEM_SAMPLE_INTERVAL.as_millis());
 const _: () = assert!(MEM_HOT_NUMERATOR < MEM_HOT_DENOMINATOR);
 
-/// Upper bound on processes visited in one memory sample. A tree cannot cycle,
-/// so this only backstops a pathological fan-out from turning a sampling tick
+/// Upper bound on ids visited in one walk of a command's tree. Under gVisor a
+/// process's threads are listed beside it, so this counts threads as well as
+/// processes; it backstops a pathological fan-out from turning a sampling tick
 /// into an unbounded `/proc` walk.
-const MAX_SAMPLED_PROCS: usize = 4096;
+const MAX_WALKED_IDS: usize = 4096;
+
+/// How many times a kill re-walks the stopped tree for processes forked since
+/// the last walk. A tree that is still growing after this many passes is
+/// killed as far as it was walked; the jail's ceiling stays underneath.
+const MAX_STOP_PASSES: usize = 8;
 
 const BYTES_PER_MB: u64 = 1024 * 1024;
 
@@ -384,27 +391,50 @@ fn supervise(
             None
         };
         if let Some(reason) = reason {
-            kill_process_tree(pid);
+            kill_command_tree(pid);
             return (reap(), Some(reason));
         }
     }
 }
 
-/// Sum resident memory, in bytes, across the process tree rooted at `pid`.
+/// SIGKILL every process in the command's tree, including the ones that left
+/// its process group.
 ///
-/// Children come from `/proc/<pid>/task/<tid>/children` and the resident set
-/// from field 2 of `/proc/<pid>/statm` (resident pages) — cheaper to parse
-/// than `status`, and served by gVisor's procfs for the Sentry's own tasks.
+/// The process-group kill alone misses a process that called `setsid` or
+/// `setpgid`, though the budget measured it as part of the command: it keeps
+/// running and keeps what it allocated, with nothing left counting it. So the
+/// tree is stopped, walked again until no new process appears, and only then
+/// killed. A stopped process can neither fork nor exit, so the stopped set is
+/// the whole tree when the passes end; killing as it walked would hand each
+/// killed parent's children to PID 1, out of the walk's reach.
+pub fn kill_command_tree(pid: i32) {
+    let proc = Path::new("/proc");
+    let mut stopped: HashSet<i32> = HashSet::new();
+    for _ in 0..MAX_STOP_PASSES {
+        let found: Vec<i32> = walk_tree(proc, pid)
+            .processes
+            .into_iter()
+            .filter(|p| !stopped.contains(p))
+            .collect();
+        if found.is_empty() {
+            break;
+        }
+        for p in found {
+            unsafe { libc::kill(p, libc::SIGSTOP) };
+            stopped.insert(p);
+        }
+    }
+    kill_process_tree(pid);
+    for p in stopped {
+        unsafe { libc::kill(p, libc::SIGKILL) };
+    }
+}
+
+/// Sum resident memory, in bytes, across the process tree rooted at `pid`.
 ///
 /// Shared pages count once per process that maps them, so a tree of forks
 /// sharing one heap reads high. Accepted: the over-estimate kills earlier, and
 /// the budget is policy rather than billing.
-///
-/// A process is counted once however many threads it has. gVisor's `children`
-/// file lists a child process's threads beside the process itself, and a
-/// thread's `statm` reports the whole process's resident set, so summing every
-/// listed id would count each process once per thread — a multi-threaded
-/// compiler reads several times its real size and is killed far under budget.
 ///
 /// Every read is best-effort. A process that exits mid-walk contributes
 /// nothing instead of failing the sample, which is the right direction too —
@@ -413,30 +443,67 @@ fn supervise(
 /// which is the correct inert answer: the runtime that configures a budget
 /// only ever runs on Linux.
 pub fn tree_resident_bytes(pid: i32) -> u64 {
-    tree_resident_bytes_in(Path::new("/proc"), pid)
+    walk_tree(Path::new("/proc"), pid)
+        .resident_pages
+        .saturating_mul(page_size())
 }
 
-/// [`tree_resident_bytes`] against the procfs mounted at `proc`.
-fn tree_resident_bytes_in(proc: &Path, pid: i32) -> u64 {
-    let page_size = page_size();
-    let mut total: u64 = 0;
-    let mut pending = vec![pid];
-    // Every thread id of every process already counted, the process's own id
-    // among them.
-    let mut counted: HashSet<i32> = HashSet::new();
-    let mut visited = 0usize;
-    while let Some(pid) = pending.pop() {
-        if !counted.insert(pid) {
+/// One walk of a command's process tree.
+struct Tree {
+    /// Every process in the tree, by thread-group id.
+    processes: Vec<i32>,
+    resident_pages: u64,
+}
+
+/// Walk the process tree rooted at `root` in the procfs mounted at `proc`.
+///
+/// Children come from `/proc/<id>/task/<tid>/children` and the resident set
+/// from field 2 of `/proc/<id>/statm` (resident pages), served by gVisor's
+/// procfs for the Sentry's own tasks.
+///
+/// Each process counts once however many threads it has. gVisor's `children`
+/// file lists a child process's threads beside the process itself, and a
+/// thread's `statm` reports the whole process's resident set, so summing every
+/// listed id would count each process once per thread — a multi-threaded
+/// compiler reads several times its real size and is killed far under budget.
+/// So every id is resolved to its process through the `Tgid:` line of its
+/// `status`, and a process's size is the first nonzero `statm` among its ids:
+/// one whose main thread has exited reads zero through the leader and its real
+/// size through a live thread.
+fn walk_tree(proc: &Path, root: i32) -> Tree {
+    let mut tree = Tree {
+        processes: Vec::new(),
+        resident_pages: 0,
+    };
+    let mut pending = vec![root];
+    let mut seen: HashSet<i32> = HashSet::new();
+    // Per process: whether its size has been counted, and whether its children
+    // have been listed.
+    let mut accounted: HashMap<i32, (bool, bool)> = HashMap::new();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
             continue;
         }
-        visited += 1;
-        if visited > MAX_SAMPLED_PROCS {
+        if seen.len() > MAX_WALKED_IDS {
             break;
         }
-        total = total.saturating_add(resident_pages(proc, pid).saturating_mul(page_size));
-        collect_children(proc, pid, &mut pending, &mut counted);
+        let tgid = thread_group(proc, id).unwrap_or(id);
+        let (sized, listed) = accounted.entry(tgid).or_insert_with(|| {
+            tree.processes.push(tgid);
+            (false, false)
+        });
+        if !*sized {
+            let pages = resident_pages(proc, id);
+            if pages > 0 {
+                tree.resident_pages = tree.resident_pages.saturating_add(pages);
+                *sized = true;
+            }
+        }
+        if !*listed {
+            *listed = collect_children(proc, id, &mut pending);
+        }
     }
-    total
+    tree
 }
 
 fn page_size() -> u64 {
@@ -461,17 +528,24 @@ fn resident_pages(proc: &Path, pid: i32) -> u64 {
         .unwrap_or(0)
 }
 
-/// Append `pid`'s direct children to `out`, from every thread's `children`
-/// file — a child is listed under the thread that forked it, not under the
-/// thread group — and add each of `pid`'s thread ids to `threads`.
-fn collect_children(proc: &Path, pid: i32, out: &mut Vec<i32>, threads: &mut HashSet<i32>) {
-    let Ok(tasks) = std::fs::read_dir(proc.join(pid.to_string()).join("task")) else {
-        return;
+/// The `Tgid:` line of `/proc/<id>/status`: the process a thread id belongs
+/// to. None when the id is gone or its status cannot be read.
+fn thread_group(proc: &Path, id: i32) -> Option<i32> {
+    let status = std::fs::read_to_string(proc.join(id.to_string()).join("status")).ok()?;
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("Tgid:"))
+        .and_then(|tgid| tgid.trim().parse().ok())
+}
+
+/// Append `id`'s process's direct children to `out`, from every thread's
+/// `children` file — a child is listed under the thread that forked it, not
+/// under the thread group. False when the thread list cannot be read.
+fn collect_children(proc: &Path, id: i32, out: &mut Vec<i32>) -> bool {
+    let Ok(tasks) = std::fs::read_dir(proc.join(id.to_string()).join("task")) else {
+        return false;
     };
     for task in tasks.flatten() {
-        if let Some(tid) = task.file_name().to_str().and_then(|n| n.parse().ok()) {
-            threads.insert(tid);
-        }
         let path = task.path().join("children");
         let Ok(listed) = std::fs::read_to_string(&path) else {
             continue;
@@ -482,6 +556,7 @@ fn collect_children(proc: &Path, pid: i32, out: &mut Vec<i32>, threads: &mut Has
                 .filter_map(|p| p.parse::<i32>().ok()),
         );
     }
+    true
 }
 
 struct ReaderShared {
@@ -685,7 +760,8 @@ pub fn execute(
     }
     unsafe {
         command.pre_exec(|| {
-            // pi spawns detached; a fresh session makes -pid kill the tree.
+            // pi spawns detached; a fresh session makes -pid reach every
+            // process that stays in the command's group.
             if libc::setsid() == -1 {
                 return Err(std::io::Error::last_os_error());
             }
@@ -695,6 +771,13 @@ pub fn execute(
             if libc::signal(libc::SIGXFSZ, libc::SIG_DFL) == libc::SIG_ERR {
                 return Err(std::io::Error::last_os_error());
             }
+            // The command's orphans are handed to its shell rather than to
+            // PID 1, so a double-forked daemon stays in the tree the budget
+            // measures and the kill walks for as long as the shell runs.
+            // Best-effort: without it only that daemon escapes, which is no
+            // reason to refuse the command.
+            #[cfg(target_os = "linux")]
+            libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
             Ok(())
         });
     }
@@ -1028,28 +1111,34 @@ background with its output in a file (`cmd > /tmp/cmd.log 2>&1 &`) and check on 
     }
 
     /// gVisor's procfs, as the walk meets it: the shell's `children` file lists
-    /// the child process and its threads, and every one of those ids answers
-    /// with the whole process's `task/` and `statm`.
+    /// each child process beside its threads, and every one of those ids
+    /// answers with the whole process's `task/` and `statm`. Process 2 is
+    /// reached through a thread first, and process 10, whose main thread has
+    /// exited and reads zero, through its leader first.
     #[test]
-    fn a_process_listed_with_its_threads_is_counted_once() {
+    fn each_process_is_counted_once_whichever_id_reaches_it() {
         let proc = tempfile::tempdir().unwrap();
-        let write = |rel: &str, body: &str| {
-            let path = proc.path().join(rel);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, body).unwrap();
-        };
-        write("1/statm", "500 10 0 0 0 0 0\n");
-        write("1/task/1/children", "2 5 6 ");
-        for id in ["2", "5", "6"] {
-            write(&format!("{id}/statm"), "9000 300 0 0 0 0 0\n");
-            for tid in ["2", "5", "6"] {
-                write(&format!("{id}/task/{tid}/children"), "");
+        let process = |tgid: u32, threads: &[(u32, u64)], children: &str| {
+            for (id, rss) in threads {
+                let dir = proc.path().join(id.to_string());
+                for (tid, _) in threads {
+                    let task = dir.join("task").join(tid.to_string());
+                    std::fs::create_dir_all(&task).unwrap();
+                    let listed = if *tid == tgid { children } else { "" };
+                    std::fs::write(task.join("children"), listed).unwrap();
+                }
+                std::fs::write(dir.join("status"), format!("Name:\tx\nTgid:\t{tgid}\n")).unwrap();
+                std::fs::write(dir.join("statm"), format!("9000 {rss} 0 0 0 0 0\n")).unwrap();
             }
-        }
+        };
+        process(1, &[(1, 10)], "2 5 6 11 10");
+        process(2, &[(2, 300), (5, 300), (6, 300)], "");
+        process(10, &[(10, 0), (11, 200)], "");
 
-        assert_eq!(
-            tree_resident_bytes_in(proc.path(), 1),
-            (10 + 300) * page_size()
-        );
+        let tree = walk_tree(proc.path(), 1);
+        assert_eq!(tree.resident_pages, 10 + 300 + 200);
+        let mut processes = tree.processes;
+        processes.sort();
+        assert_eq!(processes, vec![1, 2, 10]);
     }
 }

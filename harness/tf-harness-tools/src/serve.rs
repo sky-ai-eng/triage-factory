@@ -68,10 +68,12 @@
 //! * **Bash children** — `bash` runs each command in its own session
 //!   (`setsid`, via [`crate::shell`]) and [`crate::bash::execute`] waits for and
 //!   reaps it before returning. Because dispatch is synchronous and serial, no
-//!   bash child is ever alive at the moment `serve` observes EOF and exits, so
-//!   an engagement teardown leaves no orphan. The process-group kill that
-//!   backstops a runaway tree already lives in [`crate::shell::kill_process_tree`],
-//!   invoked by `bash` on timeout.
+//!   bash child is ever alive at the moment `serve` observes EOF and exits. A
+//!   command killed for its timeout or its memory budget is killed whole by
+//!   [`crate::bash::kill_command_tree`]. The processes a command leaves behind,
+//!   its killed descendants and the background jobs that outlive it, pass to
+//!   PID 1, which [`crate::init`] keeps reaping when `serve` is the jail's main
+//!   process.
 //!
 //! # Extensibility
 //!
