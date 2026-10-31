@@ -207,6 +207,48 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 		}
 	})
 
+	t.Run("open_condition_orgs", func(t *testing.T) {
+		f := mk(t)
+		s := f.Stores.Notifications
+		openIn := func(t *testing.T, origin domain.NotificationOrigin, kind string) []string {
+			t.Helper()
+			got, err := s.OpenConditionOrgsSystem(ctx, origin, kind)
+			if err != nil {
+				t.Fatalf("OpenConditionOrgsSystem(%s): %v", kind, err)
+			}
+			return got
+		}
+		system := domain.NotificationOriginSystem
+		if got := openIn(t, system, "test.open"); len(got) != 0 {
+			t.Errorf("before any raise = %v; want none", got)
+		}
+		teamAdmins := domain.NotificationAudience{Scope: domain.NotificationScopeTeam, Role: domain.NotificationRoleAdmins, TeamID: f.Team}
+		raise(t, f, db.NotificationOccurrence{Kind: "test.open", Key: "a"})
+		raise(t, f, db.NotificationOccurrence{Kind: "test.open", Key: "a", Audience: teamAdmins})
+		raise(t, f, db.NotificationOccurrence{Kind: "test.open", Key: "b"})
+		if got := openIn(t, system, "test.open"); !slices.Equal(got, []string{f.OrgID}) {
+			t.Errorf("with three open rows = %v; want the org once", got)
+		}
+
+		expires := time.Now().Add(time.Hour)
+		raise(t, f, db.NotificationOccurrence{Kind: "test.notice", Key: "n", Lifecycle: domain.NotificationNotice,
+			Dismissible: true, Priority: domain.NotificationLow, ExpiresAt: &expires})
+		if got := openIn(t, system, "test.notice"); len(got) != 0 {
+			t.Errorf("a notice = %v; want none: it is not a condition", got)
+		}
+		raise(t, f, db.NotificationOccurrence{Kind: "test.event", Key: "e", Origin: domain.NotificationOriginEvent})
+		if got := openIn(t, system, "test.event"); len(got) != 0 {
+			t.Errorf("another origin's condition = %v; want none", got)
+		}
+
+		if _, err := s.ResolveKeysNotInSystem(ctx, f.OrgID, system, "test.open", nil); err != nil {
+			t.Fatal(err)
+		}
+		if got := openIn(t, system, "test.open"); len(got) != 0 {
+			t.Errorf("once every row resolves = %v; want none", got)
+		}
+	})
+
 	t.Run("notices_expire_and_gc", func(t *testing.T) {
 		f := mk(t)
 		past, future := time.Now().Add(-time.Minute), time.Now().Add(time.Hour)

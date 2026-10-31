@@ -2,6 +2,7 @@ package notifytest_test
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/notify"
@@ -75,6 +76,25 @@ func TestRecorder_ModelsTheVerbs(t *testing.T) {
 	rec.Inactive(t, org, linearKind)
 	rec.Active(t, org, jiraKind, "j")
 	rec.Active(t, org, linearNotice, "n")
+}
+
+// OpenOrgs answers from what the verbs left open: an org whose occurrences
+// all resolved is not named. Other tests' orgs may be, so this checks its own.
+func TestRecorder_AnswersOpenOrgs(t *testing.T) {
+	notifytest.Record(t)
+	ctx := context.Background()
+	const raised, resolved = "org-open-raised", "org-open-resolved"
+
+	jiraKind.Set(ctx, raised, team{ID: "a"}, true)
+	jiraKind.Set(ctx, resolved, team{ID: "a"}, true)
+	jiraKind.Set(ctx, resolved, team{ID: "a"}, false)
+	orgs, err := jiraKind.OpenOrgs(ctx)
+	if err != nil || !slices.Contains(orgs, raised) || slices.Contains(orgs, resolved) {
+		t.Errorf("OpenOrgs = %v, %v; want %s and not %s", orgs, err, raised, resolved)
+	}
+	if !slices.IsSorted(orgs) {
+		t.Errorf("OpenOrgs = %v; want it sorted", orgs)
+	}
 }
 
 // Every recorder sees every call; the org is what keeps parallel tests apart.

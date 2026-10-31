@@ -183,6 +183,20 @@ func (s *notificationStore) resolve(ctx context.Context, reason domain.Notificat
 	return out, rows.Err()
 }
 
+// OpenConditionOrgsSystem reads notifications_open_kind_idx, which holds open
+// conditions alone, so its cost is the kind's open rows rather than every
+// open row in the deployment.
+func (s *notificationStore) OpenConditionOrgsSystem(ctx context.Context, origin domain.NotificationOrigin, kind string) ([]string, error) {
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT DISTINCT org_id::text FROM notifications
+		WHERE kind = $1 AND origin = $2 AND lifecycle = 'condition' AND resolved_at IS NULL
+		ORDER BY 1`, kind, origin)
+	if err != nil {
+		return nil, fmt.Errorf("list orgs with an open condition: %w", err)
+	}
+	return scanIDs(rows, "org with an open condition")
+}
+
 // RecipientsSystem reads pgNotificationSent the other way round: the
 // memberships it tests, listed.
 func (s *notificationStore) RecipientsSystem(ctx context.Context, orgID string, a domain.NotificationAudience) ([]string, error) {

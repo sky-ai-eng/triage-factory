@@ -58,6 +58,45 @@ func TestNotificationStore_Postgres_ClaimsConformance(t *testing.T) {
 	})
 }
 
+// TestNotificationStore_Postgres_OpenConditionOrgsAcrossOrgs: the read is the
+// deployment's, not one org's, which the one-org conformance world cannot show.
+func TestNotificationStore_Postgres_OpenConditionOrgsAcrossOrgs(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := t.Context()
+	first, _, _ := pgtest.SeedOrgWithUser(t, h, "first")
+	second, _, _ := pgtest.SeedOrgWithUser(t, h, "second")
+	quiet, _, _ := pgtest.SeedOrgWithUser(t, h, "quiet")
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	raise := func(orgID, kind string) {
+		t.Helper()
+		if _, err := stores.Notifications.UpsertOpenSystem(ctx, db.NotificationOccurrence{
+			OrgID: orgID, Origin: domain.NotificationOriginSystem, Lifecycle: domain.NotificationCondition,
+			Kind: kind, Key: "k", Priority: domain.NotificationHigh, Title: "title",
+			Audience: domain.NotificationAudience{Scope: domain.NotificationScopeOrg, Role: domain.NotificationRoleAdmins},
+		}); err != nil {
+			t.Fatalf("UpsertOpenSystem: %v", err)
+		}
+	}
+	raise(first, "test.open")
+	raise(second, "test.open")
+	raise(quiet, "test.other")
+
+	got, err := stores.Notifications.OpenConditionOrgsSystem(ctx, domain.NotificationOriginSystem, "test.open")
+	want := []string{first, second}
+	slices.Sort(want)
+	if err != nil || !slices.Equal(got, want) {
+		t.Fatalf("OpenConditionOrgsSystem = %v, %v; want %v", got, err, want)
+	}
+	if _, err := stores.Notifications.ResolveSystem(ctx, first, domain.NotificationOriginSystem, "test.open", "k"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := stores.Notifications.OpenConditionOrgsSystem(ctx, domain.NotificationOriginSystem, "test.open"); err != nil ||
+		!slices.Equal(got, []string{second}) {
+		t.Errorf("after the first org resolves = %v, %v; want only the second", got, err)
+	}
+}
+
 func TestNotificationStore_Postgres_RLS(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)

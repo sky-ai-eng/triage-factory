@@ -219,6 +219,9 @@ func TestVerbs_NoOpBeforeInstall(t *testing.T) {
 	teamCondition.Sync(ctx, "org", []testParams{{ID: "a"}})
 	testNotice.Post(ctx, "org", testParams{ID: "a"})
 	ClearSource(ctx, "org", "linear")
+	if orgs, err := teamCondition.OpenOrgs(ctx); err != nil || orgs != nil {
+		t.Errorf("OpenOrgs before Install = %v, %v; want nothing", orgs, err)
+	}
 }
 
 // Local is N=1: a kind with two audiences writes one row, for the one user,
@@ -319,6 +322,34 @@ func TestLocal_SyncResolvesWhatIsNotActive(t *testing.T) {
 	teamCondition.Sync(ctx, org, nil)
 	if got := open(rows(t, stores, org, user, teamCondition)); len(got) != 0 {
 		t.Fatalf("after Sync(nil): %+v; want nothing open", got)
+	}
+}
+
+// OpenOrgs names the org while any occurrence of the kind is open there, and
+// stops once the last one resolves.
+func TestLocal_OpenOrgs(t *testing.T) {
+	localBackend(t)
+	ctx := context.Background()
+	org, team := runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
+	openOrgs := func() []string {
+		t.Helper()
+		orgs, err := teamCondition.OpenOrgs(ctx)
+		if err != nil {
+			t.Fatalf("OpenOrgs: %v", err)
+		}
+		return orgs
+	}
+
+	if got := openOrgs(); len(got) != 0 {
+		t.Fatalf("before any raise: %v; want none", got)
+	}
+	teamCondition.Sync(ctx, org, []testParams{{ID: "a", TeamID: team}, {ID: "b", TeamID: team}})
+	if got := openOrgs(); !slices.Equal(got, []string{org}) {
+		t.Fatalf("with a and b open: %v; want the org once", got)
+	}
+	teamCondition.Sync(ctx, org, nil)
+	if got := openOrgs(); len(got) != 0 {
+		t.Fatalf("once both resolve: %v; want none", got)
 	}
 }
 

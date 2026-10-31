@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -68,7 +69,26 @@ type MemoryAttemptStore interface {
 	// attempts view — "why is this conversation's memory missing" — would
 	// read.
 	NewestAttemptForConversationSystem(ctx context.Context, orgID, conversationID string) (*domain.MemoryAttempt, error)
+
+	// FailingSystem reports what memory generation in orgID is failing with
+	// now, from the failed attempts on conversations still owing a memory that
+	// started after the org's newest generated memory. Once the first and the
+	// newest of those started at least `span` apart, the answer's Kinds are
+	// the error kinds among the ones that started within `window` before the
+	// newest, newest first, each with its newest attempt's message; before
+	// that, Kinds is empty. TasksWaiting counts the org's open tasks owing a
+	// memory either way.
+	//
+	// Attempts still running, or abandoned by a brain that stopped, are
+	// neither failures nor successes, so they move nothing.
+	//
+	// A negative span or a window that is not positive is refused.
+	FailingSystem(ctx context.Context, orgID string, span, window time.Duration) (domain.MemoryFailing, error)
 }
+
+// ErrInvalidMemoryFailingWindow is FailingSystem's refusal of a negative span
+// or a window that is not positive.
+var ErrInvalidMemoryFailingWindow = errors.New("db: a failing span is not negative and a failing window is positive")
 
 // ValidateMemoryAttemptVerdict is the door CompleteAttemptSystem's arguments
 // pass through in both dialects: the closed vocabularies plus the failed ⇔

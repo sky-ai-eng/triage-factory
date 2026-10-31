@@ -75,6 +75,8 @@ This is the part that has to stay small. Every consumer uses one of three verbs 
 
 `notify.Condition` returns a `*ConditionKind[P]`, which has `Set` and `Sync`; `notify.Notice` returns a `*NoticeKind[P]`, which has `Post`. The compiler rejects the wrong verb. None of them returns a value: a failure is logged and counted in `tf_notify_write_failures_total{kind}` inside `notify`, and never fails the work that raised it.
 
+A `*ConditionKind[P]` also has one read, `OpenOrgs(ctx) ([]string, error)`: the orgs, across the deployment, holding an open occurrence of the kind. A producer evaluates only the orgs it has a reason to look at, and an occurrence stays open until that producer evaluates its org again. So a producer whose reason to look can disappear while an occurrence is open (the memory provisioner looks at orgs owing a memory) re-evaluates every org `OpenOrgs` names on its own cadence. Unlike the verbs it returns its error, because only the caller knows what a missing answer costs. Before `Install` it returns nothing.
+
 ### Call sites
 
 ```go
@@ -94,6 +96,11 @@ kinds.JiraDiscoveryFailing.Sync(ctx, orgID, failing, keep...)
 // the project's statuses, false after a successful move; a transient error, or a
 // ticket that can't reach a status the project still has, does neither
 kinds.JiraMirrorFailing.Set(ctx, orgID, kinds.JiraMirrorFor(rule, issueKey), true)
+
+// internal/memoryprovision/failing.go — every 30 seconds, in each org an attempt
+// has closed in since and each org MemoryGenerationFailing.OpenOrgs names; the
+// store read applies the debounce and the window
+kinds.MemoryGenerationFailing.Sync(ctx, orgID, kinds.MemoryFailuresFor(failing))
 
 // internal/routing — the conflict TFAC-518 surfaces
 kinds.AutomationConflict.Post(ctx, orgID, kinds.Conflict{TaskID: task.ID, Winner: winner, Losers: losers})
@@ -187,7 +194,7 @@ rec := notifytest.Record(t)
 rec.Active(t, orgID, kinds.LinearTeamUnreadable)
 ```
 
-The recorder is installed for the test and its assertions filter by the test's own org id, so parallel tests do not see each other. A conformance test in `kinds` renders every kind's `Example` for every audience it can produce and checks: a non-empty title, at most two actions, every notice has an action, every `Link` route resolves, and no two kinds share a name.
+The recorder is installed for the test and its assertions filter by the test's own org id, so parallel tests do not see each other. It answers `OpenOrgs` from every installed recorder, so a producer test that re-evaluates those orgs can reach another test's. A conformance test in `kinds` renders every kind's `Example` for every audience it can produce and checks: a non-empty title, at most two actions, every notice has an action, every `Link` route resolves, and no two kinds share a name.
 
 ## Data model
 
@@ -220,7 +227,7 @@ Postgres changes go into the baseline; SQLite gets a forward migration. Both beh
 | `resolved_reason`               | text NULL        | `cleared` \| `source_off` \| `audience_removed`                                     |
 | `expires_at`                    | timestamptz NULL | Notices only.                                                                       |
 
-Indexes: a partial unique index on the open occurrence — `(org_id, origin, kind, key, audience_scope, coalesce(audience_role,''), coalesce(team_id, <nil uuid>), coalesce(user_id, <nil uuid>)) WHERE resolved_at IS NULL` — and a list index on `(org_id, resolved_at, priority, escalated_at, id)`.
+Indexes: a partial unique index on the open occurrence — `(org_id, origin, kind, key, audience_scope, coalesce(audience_role,''), coalesce(team_id, <nil uuid>), coalesce(user_id, <nil uuid>)) WHERE resolved_at IS NULL`, a list index on `(org_id, resolved_at, priority, escalated_at, id)`, and, in Postgres, a partial index on `(kind, origin, org_id) WHERE lifecycle = 'condition' AND resolved_at IS NULL` for `OpenOrgs`, which reads across orgs.
 
 ### `notification_marks`
 
@@ -337,7 +344,7 @@ The same calls, tables (SQLite) and page. Local is N=1: the one user is the reci
 | `jira.discovery_failing`      | jira   | admins of teams whose rules arm the project | high                                                | yes         | `Sync` from `discoverJira` after 3 rejected cycles in a row; unanswered projects kept                                             | Link: the team's Jira status rules                                            |
 | `jira.mirror_failing`         | jira   | team admins                                 | high                                                | yes         | `Set` in `runJiraMirror`, `applyJiraClaim` and the stock deck's claim; a rules save resolves it                                   | Link: the team's Jira status rules                                            |
 | `linear.mirror_failing`       | linear | team admins                                 | high                                                | yes         | `Set` in `runLinearMirror` and `applyLinearClaim`; a rules save resolves it                                                       | Link: the team's Linear rules                                                 |
-| `memory.generation_failing`   | —      | org admins                                  | urgent for `no_model`, high otherwise               | no          | `Sync` from the memory provisioner over the `error_kind`s currently failing across the org's attempts, after its debounce         | Link: background-jobs model setting; invoke "Retry now" (rings `memory_owed`) |
+| `memory.generation_failing`   | —      | org admins                                  | urgent for `no_model`, high otherwise               | no          | `Sync` in the provisioner: once failures since a generated memory span 2 min, `error_kind`s within 5 min of the newest            | Link: background-jobs model setting; invoke "Retry now" (rings `memory_owed`) |
 | `jira.status_drift`           | jira   | team admins                                 | high when a rule stops working, low otherwise       | yes         | `Sync` from the hourly drift check in the Jira cycle; `Set` from a rules save that reads the workflow                             | Link: the team's Jira status rules                                            |
 | `jira.predicate_drift`        | jira   | team admins                                 | high when the filter matches nothing, low otherwise | yes         | `Sync` from the hourly drift check; `Set` from a task rule or trigger save that changes its filter or enabled flag, and on delete | Link: the task rule (`/triage?rule=`) or trigger (`/prompts?trigger=`)        |
 | `routing.automation_conflict` | —      | admins of the losing teams                  | low                                                 | (notice)    | `Post` in `fireMatchedTriggers` for a conflict decided at event time; in `processReDerive` after the re-derive commits            | Link: the losing team's trigger                                               |

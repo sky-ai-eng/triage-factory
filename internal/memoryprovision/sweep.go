@@ -6,7 +6,8 @@ import (
 )
 
 // Run starts the manager under ctx: it arms the doorbell and spawns the
-// backstop sweep, both of which stop when ctx is cancelled — brain-owned and
+// backstop sweep and the failing-generation sync (syncLoop), all of which stop
+// when ctx is cancelled — brain-owned and
 // started/stopped with the rest of the brain exactly like
 // credprovision.RunAwaitingSweep. A nil Manager is a no-op, the same
 // nil-checked shape every other brain-unit member uses.
@@ -29,6 +30,7 @@ func (m *Manager) Run(ctx context.Context, interval time.Duration) {
 	m.base = ctx
 	m.mu.Unlock()
 	go m.sweepLoop(ctx, interval)
+	go m.syncLoop(ctx)
 }
 
 // sweepLoop settles every conversation owing a memory, on a ticker, until ctx
@@ -131,6 +133,10 @@ func (m *Manager) Nudge(orgID, conversationID string) {
 // boundary first, which is the order a person waiting would choose, and
 // running it in parallel would spend an org's whole background budget on a
 // backlog that nobody is watching all of.
+//
+// A one-org sweep, the doorbell's, ends by syncing kinds.MemoryGenerationFailing
+// for its org, even when the org owed nothing, so "Retry now" and a model save
+// show their result without waiting for syncLoop's next pass.
 func (m *Manager) sweep(ctx context.Context, backoff time.Duration, orgID string) {
 	owed, err := m.stores.Conversations.ListMemoryOwedSystem(ctx, orgID, backoff, sweepLimit)
 	if err != nil {
@@ -144,5 +150,8 @@ func (m *Manager) sweep(ctx context.Context, backoff time.Duration, orgID string
 		if err := m.Fulfil(ctx, o.OrgID, o.ConversationID); err != nil {
 			log.Warn("settling an owed memory failed", "conversation", o.ConversationID, "org", o.OrgID, "error", err)
 		}
+	}
+	if orgID != "" && ctx.Err() == nil {
+		m.syncFailing(ctx, orgID)
 	}
 }
