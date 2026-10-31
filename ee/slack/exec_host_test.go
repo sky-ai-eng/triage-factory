@@ -50,10 +50,10 @@ func (f *fakeRelayRuntime) ProviderCredential(context.Context, string) (json.Raw
 	return nil, f.credErr
 }
 
-func (f *fakeRelayRuntime) Record(context.Context, *domain.Deliverable, *domain.ExternalAction, domain.EntityContainer) {
+func (f *fakeRelayRuntime) Record(context.Context, *domain.Deliverable, *domain.ExternalAction, domain.EntityContainer, domain.GitHubIdentity) {
 }
 
-func (f *fakeRelayRuntime) RecordReadTouch(context.Context, string, string, string, domain.EntityContainer, string) {
+func (f *fakeRelayRuntime) RecordReadTouch(context.Context, string, string, string, domain.EntityContainer, domain.GitHubIdentity, string) {
 }
 
 var _ agenthost.ExtensionRuntime = (*fakeRelayRuntime)(nil)

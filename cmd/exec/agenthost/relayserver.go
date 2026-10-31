@@ -392,17 +392,6 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		}
 		return json.Marshal(repoResult{Repo: r})
 
-	case opRepoSlugByExternalID:
-		var a repoSlugByExternalIDArgs
-		if err := json.Unmarshal(args, &a); err != nil {
-			return nil, err
-		}
-		slug, err := s.rt.RepoSlugByExternalID(ctx, a.ExternalID)
-		if err != nil {
-			return nil, err
-		}
-		return json.Marshal(repoSlugResult{Slug: slug})
-
 	case opTeamTracksRepository:
 		var a repositoryIDArgs
 		if err := json.Unmarshal(args, &a); err != nil {
@@ -483,7 +472,7 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		if err := json.Unmarshal(args, &a); err != nil {
 			return nil, err
 		}
-		stored, err := s.rt.UpsertDeliverable(ctx, a.Deliverable)
+		stored, err := s.rt.UpsertDeliverable(ctx, a.Deliverable, a.GitHub)
 		if err != nil {
 			return nil, err
 		}
@@ -884,11 +873,12 @@ func graphQLFactsFromWire(w *agentproc.GraphQLWriteFacts) *ghwrite.GraphQLFacts 
 		return nil
 	}
 	return &ghwrite.GraphQLFacts{
-		Operation:   w.Operation,
-		Fields:      w.Mutations,
-		Subject:     w.Subject,
-		Unreadable:  w.Unreadable,
-		NamesReview: w.NamesReview,
+		Operation:    w.Operation,
+		Fields:       w.Mutations,
+		Subject:      w.Subject,
+		SubjectBound: w.SubjectBound,
+		Unreadable:   w.Unreadable,
+		NamesReview:  w.NamesReview,
 	}
 }
 
@@ -953,6 +943,12 @@ func (s *RelayServer) dispatchCoreRecord(ctx context.Context, op string, args js
 			Errored:        a.Errored,
 			ResponseUnread: a.ResponseUnread,
 			GraphQL:        graphQLFactsFromWire(a.GraphQL),
+			Identity: domain.GitHubIdentity{
+				RepositoryID: a.RepositoryID,
+				Repository:   a.RepositoryName,
+				NodeID:       a.ObjectNodeID,
+				Kind:         a.ObjectKind,
+			},
 		})
 
 	case agentproc.OpRecordPush:
@@ -962,14 +958,16 @@ func (s *RelayServer) dispatchCoreRecord(ctx context.Context, op string, args js
 		}
 		if s.git != nil && s.git.RecordPush != nil {
 			s.git.RecordPush(ctx, gitproxy.PushedRef{
-				Repo:          a.Repo,
-				Ref:           a.Ref,
-				NewSHA:        a.NewSHA,
-				Created:       a.Created,
-				Status:        a.Status,
-				Rejected:      a.Rejected,
-				Reason:        a.Reason,
-				RemoteMessage: a.RemoteMessage,
+				Repo:           a.Repo,
+				Ref:            a.Ref,
+				NewSHA:         a.NewSHA,
+				Created:        a.Created,
+				Status:         a.Status,
+				Rejected:       a.Rejected,
+				Reason:         a.Reason,
+				RemoteMessage:  a.RemoteMessage,
+				RepositoryID:   a.RepositoryID,
+				RepositoryName: a.RepositoryName,
 			})
 		}
 
@@ -1002,14 +1000,14 @@ func (s *RelayServer) dispatchCoreRecord(ctx context.Context, op string, args js
 		if a.Action != nil {
 			a.Action.DedupKey = ""
 		}
-		s.rt.Record(ctx, a.Deliverable, a.Action, a.EntityContainer)
+		s.rt.Record(ctx, a.Deliverable, a.Action, a.EntityContainer, a.GitHub)
 
 	case opRecordReadTouch:
 		var a recordReadTouchArgs
 		if err := json.Unmarshal(args, &a); err != nil {
 			return fmt.Errorf("agenthost: decode relayed read touch: %w", err)
 		}
-		s.rt.RecordReadTouch(ctx, a.Provider, a.Target, a.ExternalID, a.EntityContainer, a.URL)
+		s.rt.RecordReadTouch(ctx, a.Provider, a.Target, a.ExternalID, a.EntityContainer, a.GitHub, a.URL)
 
 	default:
 		return fmt.Errorf("agenthost: unsupported core relay record op %q", op)

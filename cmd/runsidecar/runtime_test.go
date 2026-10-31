@@ -12,7 +12,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -795,7 +797,7 @@ func TestRuntime_RecordPushRelaysTheRefOutcome(t *testing.T) {
 	})
 	_, rt := dialRuntimeWithHandler(t, handler)
 
-	rt.gitProxyConfig("https://github.com").RecordPush(context.Background(), gitproxy.PushedRef{
+	rt.gitProxyConfig("https://github.com", "").RecordPush(context.Background(), gitproxy.PushedRef{
 		Repo: "acme/widgets", Ref: "refs/heads/feature", NewSHA: "deadbeef", Created: true, Status: 200,
 		Rejected: true, Reason: "push declined due to repository rule violations", RemoteMessage: "error: GH013: ...",
 	})
@@ -818,5 +820,83 @@ func TestRuntime_RecordPushRelaysTheRefOutcome(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("the push record never reached the orchestrator")
+	}
+}
+
+// TestRuntime_RecordPushRelaysTheRepositoryID: the sidecar is the push's
+// observer and the only process holding its credential, so it reads GitHub's id
+// for the pushed repository with the bundle's token for it, once per run, and
+// relays it with the push: the orchestrator keys the push's rows on the
+// registry row the id names. A read that fails relays the push without one.
+func TestRuntime_RecordPushRelaysTheRepositoryID(t *testing.T) {
+	records := make(chan sidecarproto.RelayRecordBody, 4)
+	handler := sidecarproto.HandlerFunc(func(_ context.Context, kind sidecarproto.Kind, body json.RawMessage) (any, error) {
+		if kind != sidecarproto.KindRelayRecord {
+			return nil, nil
+		}
+		var rc sidecarproto.RelayRecordBody
+		if err := json.Unmarshal(body, &rc); err != nil {
+			return nil, err
+		}
+		records <- rc
+		return nil, nil
+	})
+	_, rt := dialRuntimeWithHandler(t, handler)
+
+	var mu sync.Mutex
+	var reads []string
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		reads = append(reads, r.Header.Get("Authorization")+" "+r.URL.Path)
+		mu.Unlock()
+		if r.URL.Path != "/repos/acme/old-widgets" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":4242,"full_name":"acme/widgets"}`))
+	}))
+	t.Cleanup(api.Close)
+	rt.mu.Lock()
+	rt.githubBase = "https://github.com"
+	rt.bundle = &credbundle.Bundle{GitHub: &credbundle.GitHubCreds{
+		Mode:    credbundle.GitHubModeApp,
+		BaseURL: "https://github.com",
+		RepoTokens: map[string]credbundle.RepoToken{
+			"acme/old-widgets": {Token: "ghs_push", ExpiresAt: time.Now().Add(time.Hour)},
+			"acme/gone":        {Token: "ghs_gone", ExpiresAt: time.Now().Add(time.Hour)},
+		},
+	}}
+	rt.mu.Unlock()
+
+	push := rt.gitProxyConfig("https://github.com", api.URL).RecordPush
+	relayed := func() agentproc.RecordPushArgs {
+		t.Helper()
+		select {
+		case got := <-records:
+			var a agentproc.RecordPushArgs
+			if err := json.Unmarshal(got.Args, &a); err != nil {
+				t.Fatalf("unmarshal relayed push: %v", err)
+			}
+			return a
+		case <-time.After(3 * time.Second):
+			t.Fatal("the push record never reached the orchestrator")
+			return agentproc.RecordPushArgs{}
+		}
+	}
+	for range 2 {
+		push(context.Background(), gitproxy.PushedRef{Repo: "acme/old-widgets", Ref: "refs/heads/feature", NewSHA: "deadbeef", Status: 200})
+		if a := relayed(); a.RepositoryID != "4242" || a.RepositoryName != "acme/widgets" {
+			t.Errorf("relayed push = %+v, want repository 4242 under its current name acme/widgets", a)
+		}
+	}
+	push(context.Background(), gitproxy.PushedRef{Repo: "acme/gone", Ref: "refs/heads/feature", NewSHA: "deadbeef", Status: 200})
+	if a := relayed(); a.RepositoryID != "" || a.Repo != "acme/gone" {
+		t.Errorf("relayed push after a failed read = %+v, want the push without a repository id", a)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if want := []string{"token ghs_push /repos/acme/old-widgets", "token ghs_gone /repos/acme/gone"}; !slices.Equal(reads, want) {
+		t.Errorf("reads = %q, want %q: one per repository, with the bundle's token for it", reads, want)
 	}
 }

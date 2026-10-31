@@ -68,6 +68,13 @@ type LocalClient struct {
 	// reading as it always has rather than claiming a tier nothing observed.
 	ghCredential string
 
+	// ghIdentities reads what GitHub calls the objects this client's writes
+	// and addressed reads name (githubObject), caching each answer. NewLocal
+	// builds one, and the daemon hands every request the Server's one reader,
+	// so a run reads each repository once. Set at construction and never
+	// written after, since one client can serve concurrent pushes.
+	ghIdentities *ghclient.IdentityReader
+
 	// ghClients memoizes the per-repo scoped GitHub client (+ identity) built
 	// for this run, so several gh calls in one exec subcommand (e.g. pr
 	// start-review's GetPR + GetPRDiff + GetPRFiles) mint the repo-scoped token
@@ -105,10 +112,11 @@ type LocalClient struct {
 // hands the per-socket run info here at request dispatch.
 func NewLocal(stores db.Stores, info ConversationInfo) *LocalClient {
 	return &LocalClient{
-		stores:    stores,
-		info:      info,
-		rt:        newDirectRuntime(stores, info),
-		gateWired: stores.TeamGitHubRepos != nil && stores.ConversationWorktrees != nil,
+		stores:       stores,
+		info:         info,
+		rt:           newDirectRuntime(stores, info),
+		gateWired:    stores.TeamGitHubRepos != nil && stores.ConversationWorktrees != nil,
+		ghIdentities: ghclient.NewIdentityReader(),
 	}
 }
 
@@ -486,8 +494,10 @@ func (c *LocalClient) postFinalizedReview(ctx context.Context, art *domain.Deliv
 	// CAS above, so there is nothing to compose it with). Best-effort like every
 	// other recording here — the GitHub write already landed and must not be
 	// unwound by a bookkeeping failure.
-	c.recordBotAction(ctx, githubAction(submitted, domain.ActionReviewSubmitted,
-		domain.DeliverableStateReviewPending, domain.DeliverableStateReviewSubmitted, c.githubCredential()))
+	nodeID, _ := domain.DeliverablePullRequestNodeID(*art)
+	c.recordGitHubAction(ctx, githubAction(submitted, domain.ActionReviewSubmitted,
+		domain.DeliverableStateReviewPending, domain.DeliverableStateReviewSubmitted, c.githubCredential()),
+		c.githubPullRequest(ctx, client, owner, repo, nodeID))
 
 	return ReviewFinalizeResult{Posted: true, URL: res.URL}
 }
@@ -669,7 +679,7 @@ func shortCommit(sha string) string {
 // that PR (the caller falls through to a normal start-review).
 //
 // The draft is found by its key (domain.ReviewDedupKey), the node id GitHub
-// answers for owner/repo#number (pullRequestNodeID) and this conversation's
+// answers for owner/repo#number (reviewedPullRequestIdentity) and this conversation's
 // id, so whatever name the agent spelled the repository with, the reset lands
 // on the one draft for that pull request.
 //
@@ -686,11 +696,11 @@ func shortCommit(sha string) string {
 // request-changes) sends no commit_id at all, so a stale HeadSHA can't reach
 // GitHub from either shape.
 func (c *LocalClient) ResetReviewDraft(ctx context.Context, owner, repo string, number int) (reviewID, commitSHA string, err error) {
-	prNodeID, err := c.pullRequestNodeID(ctx, owner, repo, number)
+	pr, err := c.reviewedPullRequestIdentity(ctx, owner, repo, number)
 	if err != nil {
 		return "", "", err
 	}
-	key := domain.ReviewDedupKey(prNodeID, c.info.ConversationID)
+	key := domain.ReviewDedupKey(pr.NodeID, c.info.ConversationID)
 	arts, err := c.listDeliverablesByConversation(ctx)
 	if err != nil {
 		return "", "", err
@@ -820,32 +830,31 @@ func (c *LocalClient) footer(kind string) string {
 // pool/tx branch in-process; relayRuntime relays it as one op so the tx stays
 // orchestrator-side. Returns the stored row. See TFAC-460.
 //
-// The deliverable is recorded against its repository's registry row
-// (onRegistryRow) before its branch link is anchored, so the link names the
-// repository the way the target does. A review draft and a pushed branch both
-// arrive here built under the name the agent's checkout spells, and a branch
-// takes its dedup key here, from the row's id. A branch whose row is missing
-// or unreadable is not recorded, as the runtime handles a deliverable write that
-// fails: the loss is the relayed record's when there is one, and the push
-// still leaves its ledger row.
+// This client is the deliverable's observer, so it reads what GitHub calls the
+// deliverable's repository and pull request (targetIdentity) with its own
+// credential, and the runtime keys a branch on the registry row GitHub's
+// repository id names. It is the door the local-mode pre-push hook records a
+// push through, in process or over the agent socket. A caller that read the
+// identity already passes it to UpsertDeliverableFor instead.
 func (c *LocalClient) UpsertDeliverable(ctx context.Context, a domain.Deliverable) (domain.Deliverable, error) {
+	return c.UpsertDeliverableFor(ctx, a, c.targetIdentity(ctx, a.Target))
+}
+
+// UpsertDeliverableFor is UpsertDeliverable with github, the identity the
+// deliverable's observer read (the git proxy's push capture reads its
+// repository's id where it holds the credential, and relays it). A branch
+// whose identity names no registry row the run may record against is not
+// recorded, as the runtime handles a deliverable write that fails: the loss is
+// the relayed record's when there is one, and the push still leaves its
+// ledger row.
+func (c *LocalClient) UpsertDeliverableFor(ctx context.Context, a domain.Deliverable, github domain.GitHubIdentity) (domain.Deliverable, error) {
 	if a.Kind == domain.DeliverableKindBranch {
-		// Keyed by onRegistryRow, never by its caller: in a sandbox the
-		// caller is the jail's pre-push hook.
+		// Keyed by the runtime, never by its caller: in a sandbox the caller
+		// is the jail's pre-push hook.
 		a.DedupKey = ""
 	}
-	a, err := c.onRegistryRow(ctx, a)
-	a = c.hostAnchorBranchURL(ctx, a)
-	if err != nil {
-		dropRelayedDeliverable(ctx, a, err)
-		act := branchPushActionInfo(a, c.info, c.githubCredential())
-		if act != nil {
-			act.DetailJSON = withPushSigner(act.DetailJSON, pushSigner(ctx, c.stores, c.info.OrgID, domain.ParseBranchDeliverableSHA(a.DetailsJSON), c.sealedSigner()))
-		}
-		c.recordBotAction(ctx, act)
-		return domain.Deliverable{}, err
-	}
-	return c.rt.UpsertDeliverable(ctx, a)
+	a = c.hostAnchorBranchURL(ctx, a, github.Repository)
+	return c.rt.UpsertDeliverable(ctx, a, github)
 }
 
 // hostAnchorBranchURL re-anchors a branch deliverable's web URL to the org's own
@@ -863,8 +872,10 @@ func (c *LocalClient) UpsertDeliverable(ctx context.Context, a domain.Deliverabl
 // the right host and pass through untouched. A base-resolve failure drops the
 // synthesized URL (the link goes; the record does not) rather than keep one on
 // a host nobody resolved, and a non-branch ref leaves the URL as-is rather
-// than clobber it.
-func (c *LocalClient) hostAnchorBranchURL(ctx context.Context, a domain.Deliverable) domain.Deliverable {
+// than clobber it. repository is the owner/repo GitHub answered with the
+// repository's id, which the link takes when the observer read it, so a push
+// spelled under an old name links to where the branch is now.
+func (c *LocalClient) hostAnchorBranchURL(ctx context.Context, a domain.Deliverable, repository string) domain.Deliverable {
 	if a.Kind != domain.DeliverableKindBranch {
 		return a
 	}
@@ -875,7 +886,10 @@ func (c *LocalClient) hostAnchorBranchURL(ctx context.Context, a domain.Delivera
 		a.URL = ""
 		return a
 	}
-	if u, ok := domain.BranchDeliverableWebURL(base, a.Target, a.ExternalID); ok {
+	if repository == "" {
+		repository = a.Target
+	}
+	if u, ok := domain.BranchDeliverableWebURL(base, repository, a.ExternalID); ok {
 		a.URL = u
 	}
 	return a
@@ -1060,7 +1074,7 @@ func (c *LocalClient) JiraGetIssue(ctx context.Context, key string) (_ *jiraclie
 	if issue.Fields.Project != nil {
 		project = *issue.Fields.Project
 	}
-	c.rt.RecordReadTouch(ctx, domain.ProviderJira, issue.Key, issue.ID, jiraContainer(project), "")
+	c.rt.RecordReadTouch(ctx, domain.ProviderJira, issue.Key, issue.ID, jiraContainer(project), domain.GitHubIdentity{}, "")
 	return issue, nil
 }
 
@@ -1431,7 +1445,7 @@ func (c *LocalClient) upsertJiraDeliverable(ctx context.Context, a *domain.Deliv
 	if a != nil {
 		a.Provider = domain.ProviderJira
 	}
-	c.rt.Record(ctx, a, act, container)
+	c.rt.Record(ctx, a, act, container, domain.GitHubIdentity{})
 }
 
 // jiraContainer is what a Jira issue's entity is created in: the project a
@@ -1804,7 +1818,7 @@ func (c *LocalClient) GithubGetPR(ctx context.Context, owner, repo string, numbe
 	if err != nil {
 		return nil, err
 	}
-	c.touchPR(ctx, owner, repo, number, pr.NodeID)
+	c.touchPR(ctx, client, owner, repo, number, pr.NodeID)
 	return pr, nil
 }
 
@@ -1817,7 +1831,7 @@ func (c *LocalClient) GithubGetPRDiff(ctx context.Context, owner, repo string, n
 	if err != nil {
 		return "", err
 	}
-	c.touchPR(ctx, owner, repo, number, "")
+	c.touchPR(ctx, client, owner, repo, number, "")
 	return diff, nil
 }
 
@@ -1830,7 +1844,7 @@ func (c *LocalClient) GithubGetPRFiles(ctx context.Context, owner, repo string, 
 	if err != nil {
 		return nil, err
 	}
-	c.touchPR(ctx, owner, repo, number, "")
+	c.touchPR(ctx, client, owner, repo, number, "")
 	return files, nil
 }
 
@@ -1856,7 +1870,7 @@ func (c *LocalClient) GithubGetReviewDetail(ctx context.Context, owner, repo str
 		return nil, err
 	}
 	// The PR is the addressed entity; the review is an attribute of it.
-	c.touchPR(ctx, owner, repo, number, "")
+	c.touchPR(ctx, client, owner, repo, number, "")
 	return detail, nil
 }
 
@@ -1867,13 +1881,20 @@ func (c *LocalClient) GithubGetReviewDetail(ctx context.Context, owner, repo str
 // actions download-logs) never call this — the rule is addressed → touch,
 // returned-in-a-set → never.
 //
-// nodeID is the pull request's node id when the read returned one, "" when it
-// did not. With it the touch resolves the pull request's entity under whatever
-// name of its repository the entity is stored under, so a read through
-// GitHub's redirect from a renamed repository's old name lands on the entity
-// rather than minting a second one.
-func (c *LocalClient) touchPR(ctx context.Context, owner, repo string, number int, nodeID string) {
-	c.rt.RecordReadTouch(ctx, domain.ProviderGitHub, domain.PullRequestTarget(owner+"/"+repo, number), nodeID, domain.EntityContainer{}, "")
+// The entity is resolved from GitHub's ids, never from the key: nodeID is the
+// pull request's node id when the read returned one, and its repository's id
+// is read beside it; a read that returned none has the pull request read for
+// it (githubObject). So a read through GitHub's redirect from a renamed
+// repository's old name lands on the entity rather than minting a second one,
+// and a read whose identity could not be read touches nothing.
+func (c *LocalClient) touchPR(ctx context.Context, client *ghclient.Client, owner, repo string, number int, nodeID string) {
+	var id domain.GitHubIdentity
+	if nodeID == "" {
+		id = c.githubObject(ctx, client, owner, repo, number)
+	} else {
+		id = c.githubPullRequest(ctx, client, owner, repo, nodeID)
+	}
+	c.rt.RecordReadTouch(ctx, domain.ProviderGitHub, domain.PullRequestTarget(owner+"/"+repo, number), "", domain.EntityContainer{}, id, "")
 }
 
 // RecordReadTouch is the Client-interface escape hatch for an addressed read
@@ -1883,9 +1904,15 @@ func (c *LocalClient) touchPR(ctx context.Context, owner, repo string, number in
 // relay and the local write behave identically.
 //
 // No provider id crosses this door, so a Jira coordinate through it touches
-// nothing: a Jira read records its own touch from the response it read.
+// nothing: a Jira read records its own touch from the response it read. A
+// GitHub target has its identity read here, on the side that holds the
+// credential (targetIdentity).
 func (c *LocalClient) RecordReadTouch(ctx context.Context, provider, target, url string) {
-	c.rt.RecordReadTouch(ctx, provider, target, "", domain.EntityContainer{}, url)
+	var id domain.GitHubIdentity
+	if provider == domain.ProviderGitHub {
+		id = c.targetIdentity(ctx, target)
+	}
+	c.rt.RecordReadTouch(ctx, provider, target, "", domain.EntityContainer{}, id, url)
 }
 
 // memoryLoadSources is the set of entity source values `memory load` accepts —
@@ -1949,7 +1976,7 @@ func (c *LocalClient) GithubDismissReview(ctx context.Context, owner, repo strin
 	// justification is the whole of what a reader needs, and GitHub keeps it
 	// only as timeline prose.
 	detail, _ := json.Marshal(map[string]any{"message": message})
-	c.recordBotAction(ctx, &domain.ExternalAction{
+	c.recordGitHubAction(ctx, &domain.ExternalAction{
 		Provider:   domain.ProviderGitHub,
 		Action:     domain.ActionReviewDismissed,
 		Target:     fmt.Sprintf("%s/%s#%d", owner, repo, number),
@@ -1957,7 +1984,7 @@ func (c *LocalClient) GithubDismissReview(ctx context.Context, owner, repo strin
 		URL:        c.githubPullAnchorURL(ctx, owner, repo, number, fmt.Sprintf("pullrequestreview-%d", reviewID)),
 		Credential: c.githubCredential(),
 		DetailJSON: string(detail),
-	})
+	}, c.githubObject(ctx, client, owner, repo, number))
 	return nil
 }
 
@@ -1984,7 +2011,8 @@ func (c *LocalClient) GithubCreatePR(ctx context.Context, owner, repo, head, bas
 	if err != nil {
 		return 0, "", "", err
 	}
-	c.recordGithubPR(ctx, owner, repo, head, base, title, body, number, nodeID, htmlURL, draft)
+	c.recordGithubPR(ctx, owner, repo, head, base, title, body, number, nodeID, htmlURL, draft,
+		c.githubPullRequest(ctx, client, owner, repo, nodeID))
 	return number, htmlURL, nodeID, nil
 }
 
@@ -1992,7 +2020,7 @@ func (c *LocalClient) GithubCreatePR(ctx context.Context, owner, repo, head, bas
 // deliverable, with zero GitHub writes (TFAC-494). It mints a conversation-scoped `review`
 // deliverable (state=pending, no ready sentinel, empty ExternalID; the reviewed
 // commitSHA pinned into details for the atomic submit at approval), keyed on the
-// node id GitHub answers for owner/repo#number (pullRequestNodeID), and returns
+// node id GitHub answers for owner/repo#number (reviewedPullRequestIdentity), and returns
 // the deliverable id as the local review handle the agent passes to add/finalize.
 //
 // Because the dedup key is conversation-scoped, two conversations (different teams, a re-delegate,
@@ -2002,36 +2030,39 @@ func (c *LocalClient) GithubCreatePR(ctx context.Context, owner, repo, head, bas
 // branch and ErrPendingReviewCollision. The comments param is unused (start-review
 // seeds no inline comments; the agent adds them via add-review-comment).
 func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo string, number int, commitSHA string, _ []ghclient.SubmitReviewComment) (string, error) {
-	prNodeID, err := c.pullRequestNodeID(ctx, owner, repo, number)
+	pr, err := c.reviewedPullRequestIdentity(ctx, owner, repo, number)
 	if err != nil {
 		return "", err
 	}
-	a := domain.NewReviewDeliverable(owner+"/"+repo, number, prNodeID, commitSHA, c.info.ConversationID)
-	stored, err := c.UpsertDeliverable(ctx, a)
+	a := domain.NewReviewDeliverable(owner+"/"+repo, number, pr.NodeID, commitSHA, c.info.ConversationID)
+	stored, err := c.UpsertDeliverableFor(ctx, a, pr)
 	if err != nil {
 		return "", fmt.Errorf("record review draft deliverable: %w", err)
 	}
 	return stored.ID, nil
 }
 
-// pullRequestNodeID is the node id GitHub answers for owner/repo#number, read
-// through the run's repository gate (githubClientForRepo). A review draft is
-// keyed on it and linked to the entity carrying it, so it is never one the
-// sandbox supplies: a node id beside another pull request's coordinates would
-// attach the draft to a pull request the gate never saw.
-func (c *LocalClient) pullRequestNodeID(ctx context.Context, owner, repo string, number int) (string, error) {
+// reviewedPullRequestIdentity is what GitHub answers for owner/repo#number,
+// read through the run's repository gate (githubClientForRepo). A review draft
+// is keyed on its node id and linked to the entity carrying it, so it is never
+// one the sandbox supplies: a node id beside another pull request's
+// coordinates would attach the draft to a pull request the gate never saw. A
+// number that names an issue is refused, since an issue takes no review.
+func (c *LocalClient) reviewedPullRequestIdentity(ctx context.Context, owner, repo string, number int) (domain.GitHubIdentity, error) {
 	client, err := c.githubClientForRepo(ctx, owner, repo)
 	if err != nil {
-		return "", err
+		return domain.GitHubIdentity{}, err
 	}
-	pr, err := client.GetPRBasic(ctx, owner, repo, number)
+	ctx, cancel := context.WithTimeout(ctx, identityReadTimeout)
+	defer cancel()
+	pr, err := c.identities().Object(ctx, client, owner, repo, number)
 	if err != nil {
-		return "", fmt.Errorf("read PR #%d for its node id: %w", number, err)
+		return domain.GitHubIdentity{}, fmt.Errorf("read PR #%d for its node id: %w", number, err)
 	}
-	if pr.NodeID == "" {
-		return "", fmt.Errorf("PR #%d came back without a node id; cannot key its review draft — retry", number)
+	if pr.Kind != domain.EntityKindPullRequest {
+		return domain.GitHubIdentity{}, fmt.Errorf("%s/%s#%d is an issue, not a pull request; only a pull request can be reviewed", owner, repo, number)
 	}
-	return pr.NodeID, nil
+	return pr, nil
 }
 
 // ReviewDraftTarget implements Client: the pull request this conversation's
@@ -2383,7 +2414,7 @@ func (c *LocalClient) GithubAddComment(ctx context.Context, owner, repo string, 
 	if err != nil {
 		return 0, err
 	}
-	c.recordGithubComment(ctx, owner, repo, number, posted, 0)
+	c.recordGithubComment(ctx, owner, repo, number, posted, 0, c.githubObject(ctx, client, owner, repo, number))
 	return posted.ID, nil
 }
 
@@ -2406,7 +2437,7 @@ func (c *LocalClient) GithubReplyToComment(ctx context.Context, owner, repo stri
 	// deliverable because the review was drafted and submitted as one object, a
 	// reply is posted on its own and usually into a thread on someone else's
 	// review, which TF holds no deliverable for.
-	c.recordGithubComment(ctx, owner, repo, number, reply, commentID)
+	c.recordGithubComment(ctx, owner, repo, number, reply, commentID, c.githubObject(ctx, client, owner, repo, number))
 	return reply.ID, nil
 }
 
@@ -2430,14 +2461,14 @@ func (c *LocalClient) GithubReactToComment(ctx context.Context, owner, repo stri
 	// in a request body the injector never reads, and a reaction with no content
 	// named is most of the way to unnamed.
 	detail, _ := json.Marshal(map[string]string{"emoji": emoji})
-	c.recordBotAction(ctx, &domain.ExternalAction{
+	c.recordGitHubAction(ctx, &domain.ExternalAction{
 		Provider:   domain.ProviderGitHub,
 		Action:     domain.ActionReactionAdded,
 		Target:     owner + "/" + repo,
 		ExternalID: strconv.Itoa(commentID),
 		Credential: c.githubCredential(),
 		DetailJSON: string(detail),
-	})
+	}, c.githubRepository(ctx, client, owner, repo))
 	return nil
 }
 
@@ -2454,7 +2485,8 @@ func (c *LocalClient) GithubUpdateComment(ctx context.Context, owner, repo strin
 	// staging path and never reach here, so the comment is a published one: a
 	// conversation comment, or a review comment reached through the
 	// pulls/comments fallback.
-	c.recordBotAction(ctx, githubCommentAction(owner, repo, edited, false, c.githubCredential()))
+	c.recordGitHubAction(ctx, githubCommentAction(owner, repo, edited, false, c.githubCredential()),
+		c.githubRepository(ctx, client, owner, repo))
 	return nil
 }
 
@@ -2467,7 +2499,7 @@ func (c *LocalClient) GithubDeleteComment(ctx context.Context, owner, repo strin
 	if err != nil {
 		return err
 	}
-	c.recordGithubCommentDelete(ctx, owner, repo, deleted)
+	c.recordGithubCommentDelete(ctx, owner, repo, deleted, c.githubRepository(ctx, client, owner, repo))
 	return nil
 }
 
@@ -2510,10 +2542,11 @@ func (c *LocalClient) GithubDownloadArtifact(ctx context.Context, owner, repo, p
 
 // recordGithubComment upserts the `comment` deliverable for a comment this run
 // just posted, with every coordinate the post knows. inReplyTo is the review
-// comment a thread reply answers, 0 for a conversation comment. A zero id (a
-// 2xx whose body didn't parse) has no stable key to dedup on, so recording is
+// comment a thread reply answers, 0 for a conversation comment, and github the
+// identity of the pull request or issue the comment is on. A zero id (a 2xx
+// whose body didn't parse) has no stable key to dedup on, so recording is
 // skipped with a debug breadcrumb — the comment still posted.
-func (c *LocalClient) recordGithubComment(ctx context.Context, owner, repo string, number int, posted ghclient.CommentRef, inReplyTo int) {
+func (c *LocalClient) recordGithubComment(ctx context.Context, owner, repo string, number int, posted ghclient.CommentRef, inReplyTo int, github domain.GitHubIdentity) {
 	a := newGithubCommentDeliverable(posted, domain.DeliverableStateCommentPosted)
 	if a == nil {
 		agenthostLog.Debug("github comment recorded without an id; skipping deliverable",
@@ -2522,32 +2555,27 @@ func (c *LocalClient) recordGithubComment(ctx context.Context, owner, repo strin
 	}
 	a.Provider = domain.ProviderGitHub
 	a.Target = fmt.Sprintf("%s/%s#%d", owner, repo, number)
-	// Under the registry's name, as recordGithubPR records a pull request, so
-	// the comment resolves the pull request's entity whichever spelling of
-	// its repository's name the agent used. onRegistryRow refuses only a
-	// branch.
-	*a, _ = c.onRegistryRow(ctx, *a)
 	act := githubAction(*a, domain.ActionCommentPosted, "", "", c.githubCredential())
 	if inReplyTo > 0 {
 		detail, _ := json.Marshal(map[string]any{"in_reply_to": inReplyTo})
 		a.DetailsJSON = string(detail)
 		act.DetailJSON = string(detail)
 	}
-	c.upsertGithubDeliverable(ctx, *a, act)
+	c.upsertGithubDeliverable(ctx, *a, act, github)
 }
 
 // recordGithubCommentDelete retires the deliverable of the comment ref names to
 // the deleted state, beside the delete's audit row. The delete carries the
 // comment's number but not its PR number, so it leaves the row's target for the
-// store to preserve.
-func (c *LocalClient) recordGithubCommentDelete(ctx context.Context, owner, repo string, ref ghclient.CommentRef) {
+// store to preserve; github is the identity of its repository.
+func (c *LocalClient) recordGithubCommentDelete(ctx context.Context, owner, repo string, ref ghclient.CommentRef, github domain.GitHubIdentity) {
 	act := githubCommentAction(owner, repo, ref, true, c.githubCredential())
 	a := newGithubCommentDeliverable(ref, domain.DeliverableStateCommentDeleted)
 	if a == nil {
-		c.recordBotAction(ctx, act)
+		c.recordGitHubAction(ctx, act, github)
 		return
 	}
-	c.upsertGithubDeliverable(ctx, *a, act)
+	c.upsertGithubDeliverable(ctx, *a, act, github)
 }
 
 // githubCommentAction is the audit row for an edit or a delete of the comment
@@ -2614,25 +2642,23 @@ func newGithubCommentDeliverable(ref ghclient.CommentRef, state string) *domain.
 // selects the deliverable's initial state (draft vs open); the new PR path always
 // creates drafts, but recording the param keeps the row honest if a standalone
 // caller ever opens a non-draft.
-func (c *LocalClient) recordGithubPR(ctx context.Context, owner, repo, head, base, title, body string, number int, nodeID, htmlURL string, draft bool) {
+func (c *LocalClient) recordGithubPR(ctx context.Context, owner, repo, head, base, title, body string, number int, nodeID, htmlURL string, draft bool, github domain.GitHubIdentity) {
 	if number <= 0 || nodeID == "" {
 		agenthostLog.Warn("github PR opened without a number or node id; skipping deliverable",
 			"conversation", c.info.ConversationID, "repo", owner+"/"+repo, "number", number)
 		return
 	}
-	// Under the registry's name, before the action is built from it: the
-	// action's target is what the touched entity resolves through, and the
-	// touch takes the deliverable's node id only when the two targets agree.
-	// onRegistryRow refuses only a branch, so a pull request always comes back.
-	a, _ := c.onRegistryRow(ctx, domain.NewPullRequestDeliverable(
+	// The action is built from the deliverable before the funnel links it, so
+	// the two carry one target and the action reuses the deliverable's entity.
+	a := domain.NewPullRequestDeliverable(
 		owner+"/"+repo, number, nodeID, head, base, htmlURL, title, body, draft,
-	))
+	)
 	// to=the created state (draft/open) so the feed can read "created as draft".
 	act := githubAction(a, domain.ActionPRCreated, "", a.State, c.githubCredential())
 	// The node id is what the reconciler's backstop matches this row to the
 	// deliverable by, when the deliverable write fails and the row lands alone.
 	act.NodeID = nodeID
-	c.upsertGithubDeliverable(ctx, a, act)
+	c.upsertGithubDeliverable(ctx, a, act, github)
 }
 
 // upsertGithubDeliverable stamps the provider onto a and writes it best-effort via
@@ -2641,10 +2667,11 @@ func (c *LocalClient) recordGithubPR(ctx context.Context, owner, repo, head, bas
 // applied GitHub action. act is the external-action audit row to append in the
 // SAME write as the deliverable (the audit log of record, TFAC-483) — nil when
 // this upsert carries no distinct external action (a review reuse that
-// re-records the deliverable without a new GitHub write).
-func (c *LocalClient) upsertGithubDeliverable(ctx context.Context, a domain.Deliverable, act *domain.ExternalAction) {
+// re-records the deliverable without a new GitHub write). github is what
+// GitHub answered for the write's objects (githubObject).
+func (c *LocalClient) upsertGithubDeliverable(ctx context.Context, a domain.Deliverable, act *domain.ExternalAction, github domain.GitHubIdentity) {
 	a.Provider = domain.ProviderGitHub
-	c.rt.Record(ctx, &a, act, domain.EntityContainer{})
+	c.rt.Record(ctx, &a, act, domain.EntityContainer{}, github)
 }
 
 // --- external-action recording (TFAC-483) ---
@@ -2668,7 +2695,14 @@ func (c *LocalClient) upsertGithubDeliverable(ctx context.Context, a domain.Deli
 // (RecordExternalWrite, record.go) with a nil deliverable; best-effort like every
 // other funnel here.
 func (c *LocalClient) recordBotAction(ctx context.Context, act *domain.ExternalAction) {
-	c.rt.Record(ctx, nil, act, domain.EntityContainer{})
+	c.rt.Record(ctx, nil, act, domain.EntityContainer{}, domain.GitHubIdentity{})
+}
+
+// recordGitHubAction is recordBotAction for a GitHub act, carrying github,
+// what GitHub answered for the objects it names: the act's entity and
+// repository are resolved from it alone.
+func (c *LocalClient) recordGitHubAction(ctx context.Context, act *domain.ExternalAction, github domain.GitHubIdentity) {
+	c.rt.Record(ctx, nil, act, domain.EntityContainer{}, github)
 }
 
 // RecordGitDenied appends a git_denied external-action audit row for a git op
@@ -2988,14 +3022,20 @@ func (c *LocalClient) RecordGitPushFailed(ctx context.Context, push gitproxy.Pus
 		// "unsigned": beside a ruleset's refusal, unsigned names the cause.
 		Signer string `json:"signer,omitempty"`
 	}{push.NewSHA, push.Created, push.Status, push.Reason, push.RemoteMessage, pushSigner(ctx, c.stores, c.info.OrgID, push.NewSHA, c.sealedSigner())})
-	c.recordBotAction(ctx, &domain.ExternalAction{
+	c.recordGitHubAction(ctx, &domain.ExternalAction{
 		Provider:   domain.ProviderGitHub,
 		Action:     domain.ActionBranchPushFailed,
 		Target:     push.Repo,
 		ExternalID: push.Ref,
 		Credential: c.githubCredential(),
 		DetailJSON: string(detail),
-	})
+	}, PushIdentity(push))
+}
+
+// PushIdentity is the repository identity a push's observer read and carried
+// on the push (gitproxy.PushedRef).
+func PushIdentity(push gitproxy.PushedRef) domain.GitHubIdentity {
+	return domain.GitHubIdentity{RepositoryID: push.RepositoryID, Repository: push.RepositoryName}
 }
 
 // githubAction builds the external-action row for a GitHub write from the

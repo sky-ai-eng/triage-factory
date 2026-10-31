@@ -1345,6 +1345,29 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		}
 	})
 
+	t.Run("GetByExternalIDSystem_reads_the_live_row_carrying_the_id", func(t *testing.T) {
+		s, orgID, _ := mk(t)
+		row, err := s.FindOrCreateByExternalID(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "octo", Repo: "lookup", ExternalID: "7151"})
+		if err != nil {
+			t.Fatalf("register: %v", err)
+		}
+		got, err := s.GetByExternalIDSystem(ctx, orgID, TestGitHubHost, "7151")
+		if err != nil || got == nil || got.ID != row.ID {
+			t.Fatalf("GetByExternalIDSystem = %+v err=%v, want row %s", got, err, row.ID)
+		}
+		for _, miss := range []struct{ host, id string }{{TestGitHubHost, "7152"}, {TestOtherGitHubHost, "7151"}, {TestGitHubHost, ""}, {"", "7151"}} {
+			if got, err := s.GetByExternalIDSystem(ctx, orgID, miss.host, miss.id); err != nil || got != nil {
+				t.Errorf("GetByExternalIDSystem(%q, %q) = %+v err=%v, want (nil, nil)", miss.host, miss.id, got, err)
+			}
+		}
+		if _, err := s.RetireSystem(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "octo", Repo: "lookup", ExternalID: "7151"}); err != nil {
+			t.Fatalf("retire: %v", err)
+		}
+		if got, err := s.GetByExternalIDSystem(ctx, orgID, TestGitHubHost, "7151"); err != nil || got != nil {
+			t.Errorf("GetByExternalIDSystem of a retired row = %+v err=%v, want (nil, nil)", got, err)
+		}
+	})
+
 	t.Run("FindOrCreateByExternalID_writes_the_id_onto_a_bare_row_holding_the_name", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 		bare, err := s.FindOrCreateByRefSystem(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "Acme", Repo: "Api"})

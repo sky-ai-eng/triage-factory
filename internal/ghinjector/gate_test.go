@@ -231,7 +231,10 @@ func TestGate_MergeTransitsWhateverTheSpelling(t *testing.T) {
 				t.Fatalf("status = %d, want the upstream's 200 — merging is not gated here", resp.StatusCode)
 			}
 			forwarded, decisions := g.snap()
-			if len(forwarded) != 1 {
+			// The injector's own reads, for what GitHub calls the merged pull
+			// request, follow the merge; it is the one write.
+			writes := slices.DeleteFunc(slices.Clone(forwarded), func(f string) bool { return strings.HasPrefix(f, "GET ") })
+			if len(writes) != 1 {
 				t.Fatalf("forwarded = %q, want the merge to reach GitHub", forwarded)
 			}
 			if len(decisions) != 0 {
@@ -488,8 +491,8 @@ func TestGate_UngatedWriteStillTransitsAndAudits(t *testing.T) {
 	}
 
 	forwarded, decisions := g.snap()
-	if want := []string{"POST /graphql", "GET /repos/acme/widgets/issues/comments/7"}; !slices.Equal(forwarded, want) {
-		t.Fatalf("forwarded = %q, want the comment to reach GitHub and then the injector's one read of it %q", forwarded, want)
+	if want := []string{"POST /graphql", "GET /repos/acme/widgets/issues/comments/7", "GET /repos/acme/widgets/pulls/841"}; !slices.Equal(forwarded, want) {
+		t.Fatalf("forwarded = %q, want the comment to reach GitHub and then the injector's reads of it and of the pull request it is on %q", forwarded, want)
 	}
 	if len(decisions) != 0 {
 		t.Errorf("decisions = %+v, want none — an ungated write is never asked about", decisions)

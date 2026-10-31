@@ -261,6 +261,53 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		}
 	})
 
+	// The read that learns a stub's node id also learns whether its number is
+	// a pull request or an issue, and the row takes both.
+	t.Run("AdoptGitHubIdentitySystem_fills_the_id_and_sets_the_kind", func(t *testing.T) {
+		s, orgID, _ := mk(t)
+		row, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", scope, "acme/adopt#1", "", "pr", "t", "")
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		read := func() (*domain.Entity, error) { return s.Entities.GetSystem(ctx, orgID, row.ID) }
+		adopted, err := s.Entities.AdoptGitHubIdentitySystem(ctx, orgID, row.ID, "I_1", domain.EntityKindIssue)
+		if err != nil || adopted == nil || adopted.ExternalID != "I_1" || adopted.Kind != domain.EntityKindIssue {
+			t.Fatalf("adopt = %+v err=%v, want the row carrying I_1 as an issue", adopted, err)
+		}
+		AssertWriteReturnedStoredRow(t, "AdoptGitHubIdentitySystem", *adopted, read)
+
+		if again, err := s.Entities.AdoptGitHubIdentitySystem(ctx, orgID, row.ID, "I_1", domain.EntityKindIssue); err != nil || again == nil || again.ID != row.ID {
+			t.Errorf("repeat adopt = %+v err=%v, want the row back", again, err)
+		}
+		if declined, err := s.Entities.AdoptGitHubIdentitySystem(ctx, orgID, row.ID, "PR_2", domain.EntityKindPullRequest); err != nil || declined != nil {
+			t.Errorf("adopt of a different id = %+v err=%v, want (nil, nil)", declined, err)
+		}
+		if got, _ := read(); got == nil || got.ExternalID != "I_1" || got.Kind != domain.EntityKindIssue {
+			t.Errorf("after a declined adopt the row is %+v, want I_1 kept as an issue", got)
+		}
+		if _, err := s.Entities.AdoptGitHubIdentitySystem(ctx, orgID, row.ID, "I_1", "epic"); err == nil {
+			t.Error("adopt with a kind no GitHub entity has was not refused")
+		}
+
+		other, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", scope, "acme/adopt#2", "", "pr", "t", "")
+		if err != nil {
+			t.Fatalf("create other: %v", err)
+		}
+		if got, err := s.Entities.AdoptGitHubIdentitySystem(ctx, orgID, other.ID, "I_1", domain.EntityKindIssue); !errors.Is(err, db.ErrEntityIdentityAmbiguous) || got != nil {
+			t.Errorf("adopting an id another row carries = %+v err=%v, want ErrEntityIdentityAmbiguous", got, err)
+		}
+		if _, err := s.Entities.AdoptGitHubIdentitySystem(ctx, orgID, "00000000-0000-0000-0000-00000000dead", "I_3", domain.EntityKindIssue); !errors.Is(err, sql.ErrNoRows) {
+			t.Errorf("adopt on a missing id: err=%v, want sql.ErrNoRows", err)
+		}
+		linear, _, err := s.Entities.FindOrCreateLinearSystem(ctx, orgID, scope, "ENG-9", "uuid-9", "team-eng", "t", "")
+		if err != nil {
+			t.Fatalf("create linear: %v", err)
+		}
+		if got, err := s.Entities.AdoptGitHubIdentitySystem(ctx, orgID, linear.ID, "uuid-9", domain.EntityKindIssue); err != nil || got != nil {
+			t.Errorf("adopt on a Linear row = %+v err=%v, want (nil, nil)", got, err)
+		}
+	})
+
 	t.Run("RenameSystem_rewrites_every_key_derived_value", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		const oldURL = "https://linear.app/acme/issue/ENG-4/fix-it"

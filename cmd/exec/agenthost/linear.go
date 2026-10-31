@@ -160,7 +160,7 @@ func (c *LocalClient) LinearGetIssue(ctx context.Context, issue string) (_ *line
 	}
 	// The addressed issue is the touched entity. The identifier, UUID and team
 	// come off the response, since the argument may have been either key.
-	c.rt.RecordReadTouch(ctx, domain.ProviderLinear, got.Identifier, got.ID, domain.EntityContainer{LinearTeamID: got.Team.ID}, got.URL)
+	c.rt.RecordReadTouch(ctx, domain.ProviderLinear, got.Identifier, got.ID, domain.EntityContainer{LinearTeamID: got.Team.ID}, domain.GitHubIdentity{}, got.URL)
 	return got, nil
 }
 
@@ -699,7 +699,7 @@ func (c *LocalClient) recordLinearComment(ctx context.Context, issue *linearclie
 // write touched, which the funnel's touch creates the issue's entity with.
 func (c *LocalClient) upsertLinearDeliverable(ctx context.Context, a *domain.Deliverable, act *domain.ExternalAction, linearTeamID string) {
 	a.Provider = domain.ProviderLinear
-	c.rt.Record(ctx, a, act, domain.EntityContainer{LinearTeamID: linearTeamID})
+	c.rt.Record(ctx, a, act, domain.EntityContainer{LinearTeamID: linearTeamID}, domain.GitHubIdentity{})
 }
 
 // linearAction builds the external-action row for a Linear write, under the

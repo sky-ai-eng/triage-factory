@@ -19,10 +19,12 @@ import (
 // delegate holds stores + ConversationInfo), while the sandbox path reaches it
 // through LocalClient.RecordGHChannelWrite on the side that holds the stores:
 // one function, so a write recorded from either mode leaves the same rows.
-// credential is the tier the injector attached upstream. Best-effort.
+// credential is the tier the injector attached upstream, and obs.Identity what
+// GitHub answered it for the write's objects, which the rows are linked by.
+// Best-effort.
 func RecordGHChannelWrite(ctx context.Context, stores db.Stores, info ConversationInfo, obs ghwrite.Observation, credential string) {
 	act := GHChannelWriteAction(obs, credential)
-	RecordExternalWrite(ctx, stores, info, ghChannelCommentDeliverable(ctx, stores, info, obs), act)
+	recordExternalWrite(ctx, stores, info, ghChannelCommentDeliverable(ctx, stores, info, obs), act, domain.EntityContainer{}, obs.Identity)
 }
 
 // ghChannelCommentDeliverable builds the `comment` deliverable a comment write

@@ -297,7 +297,8 @@ func TestRecordExternalWrite_TransientEntityFailureStillLinks(t *testing.T) {
 		stores.Entities = flakyEntities{EntityStore: base.Entities, f: lookups}
 
 		pr := domain.NewPullRequestDeliverable("acme/widgets", 7, "PR_kw7", "feat", "main", "https://github.com/acme/widgets/pull/7", "t", "b", true)
-		RecordExternalWrite(context.Background(), stores, info, &pr, nil)
+		recordExternalWrite(context.Background(), stores, info, &pr, nil, domain.EntityContainer{},
+			domain.GitHubIdentity{RepositoryID: "1", Repository: "acme/widgets"})
 
 		arts := listConversationDeliverables(t, base, info.ConversationID)
 		entity, err := base.Entities.GetByExternalIDSystem(context.Background(), info.OrgID, domain.ProviderGitHub, testScope("github"), "PR_kw7")
@@ -458,7 +459,7 @@ func TestRelayedRecords_RetriedRecordStaysAheadOfLaterOnes(t *testing.T) {
 		&domain.ExternalAction{
 			Provider: domain.ProviderGitHub, Action: domain.ActionCommentPosted,
 			Target: "octo/repo#1", ExternalID: "7", Credential: domain.CredentialGitHubApp,
-		}, domain.EntityContainer{})
+		}, domain.EntityContainer{}, domain.GitHubIdentity{})
 	rt.Record(context.Background(),
 		&domain.Deliverable{
 			Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindComment,
@@ -467,7 +468,7 @@ func TestRelayedRecords_RetriedRecordStaysAheadOfLaterOnes(t *testing.T) {
 		&domain.ExternalAction{
 			Provider: domain.ProviderGitHub, Action: domain.ActionCommentDeleted,
 			Target: "octo/repo", ExternalID: "7", Credential: domain.CredentialGitHubApp,
-		}, domain.EntityContainer{})
+		}, domain.EntityContainer{}, domain.GitHubIdentity{})
 
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -487,9 +488,10 @@ func TestRelayedRecords_RetriedRecordStaysAheadOfLaterOnes(t *testing.T) {
 }
 
 // pushRelayServer is a RelayServer whose git gate records a relayed push the
-// way the executor's does: through UpsertDeliverable, as a branch deliverable with
-// its ledger row composed in. The pushed repository, octo/repo, has its
-// registry row, as a run's checkout does.
+// way the executor's does: through UpsertDeliverableFor, as a branch deliverable
+// with its ledger row composed in, keyed on the repository id the push relays.
+// The pushed repository, octo/repo, has its registry row, as a run's checkout
+// does.
 func pushRelayServer(t *testing.T, stores db.Stores, info ConversationInfo) *RelayServer {
 	t.Helper()
 	registerRepo(t, stores, "octo", "repo", "1")
@@ -500,7 +502,7 @@ func pushRelayServer(t *testing.T, stores db.Stores, info ConversationInfo) *Rel
 			if !ok {
 				return
 			}
-			_, _ = host.UpsertDeliverable(ctx, art)
+			_, _ = host.UpsertDeliverableFor(ctx, art, PushIdentity(push))
 		},
 	}
 	return NewRelayServer(stores, info, git)
@@ -508,7 +510,7 @@ func pushRelayServer(t *testing.T, stores db.Stores, info ConversationInfo) *Rel
 
 func pushArgs(t *testing.T) json.RawMessage {
 	t.Helper()
-	args, err := json.Marshal(agentproc.RecordPushArgs{Repo: "octo/repo", Ref: "refs/heads/feat", NewSHA: "abc123", Created: true, Status: 200})
+	args, err := json.Marshal(agentproc.RecordPushArgs{Repo: "octo/repo", Ref: "refs/heads/feat", NewSHA: "abc123", Created: true, Status: 200, RepositoryID: "1"})
 	if err != nil {
 		t.Fatalf("marshal push: %v", err)
 	}
@@ -592,7 +594,7 @@ func TestUpsertDeliverable_DirectFailureIsTheCallersToHandle(t *testing.T) {
 	if !ok {
 		t.Fatal("NewBranchDeliverable refused the fixture branch")
 	}
-	if _, err := newDirectRuntime(stores, info).UpsertDeliverable(context.Background(), branch); err == nil {
+	if _, err := newDirectRuntime(stores, info).UpsertDeliverable(context.Background(), branch, domain.GitHubIdentity{}); err == nil {
 		t.Fatal("UpsertDeliverable = nil error, want the refused deliverable's error")
 	}
 	if got := collectDrops(t, reader); len(got) != 0 {

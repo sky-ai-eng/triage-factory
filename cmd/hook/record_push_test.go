@@ -4,6 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
@@ -11,6 +14,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	_ "modernc.org/sqlite"
 )
@@ -70,20 +75,67 @@ func registerOctoRepo(t *testing.T, stores db.Stores, host string) string {
 	return row.ID
 }
 
-func hostFor(stores db.Stores, conversationID string, eventTriggered bool) agenthost.Client {
-	return agenthost.NewLocal(stores, agenthost.ConversationInfo{
+// hostFor is the hook's in-process host client, reading GitHub through a fake
+// that answers octo/repo's identity: the hook is the push's observer, and reads
+// the repository's id with the run's credential.
+func hostFor(t *testing.T, stores db.Stores, conversationID string, eventTriggered bool) agenthost.Client {
+	t.Helper()
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v3/repos/octo/repo" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":1,"full_name":"octo/repo"}`)
+	}))
+	t.Cleanup(gh.Close)
+	host := agenthost.NewLocal(stores, agenthost.ConversationInfo{
 		OrgID:            runmode.LocalDefaultOrgID,
 		UserID:           runmode.LocalDefaultUserID,
 		TeamID:           runmode.LocalDefaultTeamID,
 		ConversationID:   conversationID,
 		IsEventTriggered: eventTriggered,
 	})
+	host.SetGitHubResolver(fakeResolver{stores: stores, apiURL: gh.URL})
+	return host
+}
+
+// fakeResolver resolves every repository's client against apiURL, a fake
+// GitHub, and answers the org's own GitHub base from its settings, as the real
+// resolver does.
+type fakeResolver struct {
+	stores db.Stores
+	apiURL string
+}
+
+func (f fakeResolver) ClientFor(context.Context, string, string) (*ghclient.Client, error) {
+	panic("ClientFor is not used by the hook")
+}
+
+func (f fakeResolver) ClientForInstallation(context.Context, string, domain.OrgGitHubAppInstallation) (*ghclient.Client, error) {
+	panic("ClientForInstallation is not used by the hook")
+}
+
+func (f fakeResolver) ClientForRepo(context.Context, string, string, string) (*ghclient.Client, error) {
+	return ghclient.NewClient(f.apiURL, "org-pat"), nil
+}
+
+func (f fakeResolver) TokenFor(context.Context, string, string) (githubapp.Token, error) {
+	panic("TokenFor is not used by the hook")
+}
+
+func (f fakeResolver) BaseURLFor(ctx context.Context, orgID string) (string, error) {
+	return db.OrgGitHubHostSystem(ctx, f.stores.Orgs, orgID)
+}
+
+func (f fakeResolver) OrgIdentityFor(context.Context, string) (string, string, bool) {
+	panic("OrgIdentityFor is not used by the hook")
 }
 
 func TestRecordPush_UpsertsBranchDeliverable(t *testing.T) {
 	stores, conversationID := newTestStores(t)
 	repoID := registerOctoRepo(t, stores, "https://github.com")
-	host := hostFor(stores, conversationID, false)
+	host := hostFor(t, stores, conversationID, false)
 
 	runRecordPush(host, []string{
 		"--remote", "https://github.com/octo/repo.git",
@@ -136,7 +188,7 @@ func TestRecordPush_UpsertsBranchDeliverable(t *testing.T) {
 func TestRecordPush_RepushUpsertsOneRow(t *testing.T) {
 	stores, conversationID := newTestStores(t)
 	registerOctoRepo(t, stores, "https://github.com")
-	host := hostFor(stores, conversationID, false)
+	host := hostFor(t, stores, conversationID, false)
 
 	runRecordPush(host, []string{"--remote", "git@github.com:octo/repo.git", "--ref", "refs/heads/main", "--sha", "aaa", "--new=true"})
 	runRecordPush(host, []string{"--remote", "git@github.com:octo/repo.git", "--ref", "refs/heads/main", "--sha", "bbb", "--new=false"})
@@ -162,7 +214,7 @@ func TestRecordPush_RepushUpsertsOneRow(t *testing.T) {
 func TestRecordPush_EventTriggeredUsesSystemPool(t *testing.T) {
 	stores, conversationID := newTestStores(t)
 	registerOctoRepo(t, stores, "https://github.com")
-	host := hostFor(stores, conversationID, true)
+	host := hostFor(t, stores, conversationID, true)
 
 	runRecordPush(host, []string{"--remote", "https://github.com/octo/repo", "--ref", "refs/heads/main", "--sha", "ccc", "--new=true"})
 
@@ -179,7 +231,7 @@ func TestRecordPush_EventTriggeredUsesSystemPool(t *testing.T) {
 // is not recorded as a branch deliverable.
 func TestRecordPush_SkipsNonBranchRef(t *testing.T) {
 	stores, conversationID := newTestStores(t)
-	host := hostFor(stores, conversationID, false)
+	host := hostFor(t, stores, conversationID, false)
 
 	runRecordPush(host, []string{"--remote", "https://github.com/octo/repo", "--ref", "refs/tags/v1.0", "--sha", "ddd", "--new=true"})
 
@@ -202,7 +254,7 @@ func TestRecordPush_GHESHostRecordsAndAnchorsURL(t *testing.T) {
 	dbtest.SeedOrgSettings(t, stores.Orgs, runmode.LocalDefaultOrgID,
 		domain.OrgSettings{GitHubBaseURL: "https://github.corp.example.com"})
 	registerOctoRepo(t, stores, "https://github.corp.example.com")
-	host := hostFor(stores, conversationID, false)
+	host := hostFor(t, stores, conversationID, false)
 
 	runRecordPush(host, []string{
 		"--remote", "https://github.corp.example.com/octo/repo.git",
@@ -231,7 +283,7 @@ func TestRecordPush_GHESOrgSkipsForeignHost(t *testing.T) {
 	stores, conversationID := newTestStores(t)
 	dbtest.SeedOrgSettings(t, stores.Orgs, runmode.LocalDefaultOrgID,
 		domain.OrgSettings{GitHubBaseURL: "https://github.corp.example.com"})
-	host := hostFor(stores, conversationID, false)
+	host := hostFor(t, stores, conversationID, false)
 
 	runRecordPush(host, []string{"--remote", "https://github.com/octo/repo", "--ref", "refs/heads/main", "--sha", "xyz", "--new=true"})
 

@@ -483,6 +483,16 @@ type RepositoryStore interface {
 	UpdateCloneStatusSystem(ctx context.Context, orgID, id, status, errMsg, errKind string) (domain.Repository, error)
 
 	GetByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef) (*domain.Repository, error)
+
+	// GetByExternalIDSystem returns the live GitHub row on host that carries
+	// externalID, GitHub's id for the repository, whatever name it is stored
+	// under, or (nil, nil) when no live row carries it: the read the exec
+	// recording funnel resolves an act's repository through, by the id the
+	// act's observer read from GitHub. A retired row answers nothing, as it
+	// answers to no name. An empty host or id answers (nil, nil). Admin pool:
+	// the funnel resolves with no JWT claims.
+	GetByExternalIDSystem(ctx context.Context, orgID, host, externalID string) (*domain.Repository, error)
+
 	UpsertSystem(ctx context.Context, orgID string, p domain.Repository) (domain.Repository, error)
 
 	// UpdateProfileSystem writes what a profiling pass learned about the

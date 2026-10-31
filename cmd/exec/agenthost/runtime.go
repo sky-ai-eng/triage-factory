@@ -49,12 +49,6 @@ type Runtime interface {
 	// surface speaks names throughout — this is where one stops being a name.
 	GetRepo(ctx context.Context, slug string) (*domain.Repository, error)
 
-	// RepoSlugByExternalID returns the "owner/repo" of the registry row that
-	// carries GitHub's repository id externalID on the org's current GitHub
-	// host, or "" when no row that holds its name carries it. It is how a name
-	// the registry does not answer to finds the row GitHub says it means.
-	RepoSlugByExternalID(ctx context.Context, externalID string) (string, error)
-
 	// TeamTracksRepository reports whether the run's team tracks the
 	// repository whose registry row is repositoryID. Every caller holds a row
 	// GetRepo resolved the agent's name to, so the name is resolved once and
@@ -96,7 +90,11 @@ type Runtime interface {
 	// Writes.
 	InsertConversationWorktree(ctx context.Context, row domain.ConversationWorktree) (inserted bool, winningPath string, err error)
 	DeleteConversationWorktree(ctx context.Context, repositoryID, ref string) error
-	UpsertDeliverable(ctx context.Context, a domain.Deliverable) (domain.Deliverable, error)
+	// UpsertDeliverable records a, and github is what GitHub answered for its
+	// repository and pull request, read by the observer that holds the run's
+	// credential (domain.GitHubIdentity): a branch is keyed on the registry
+	// row GitHub's repository id names, never on its target's name.
+	UpsertDeliverable(ctx context.Context, a domain.Deliverable, github domain.GitHubIdentity) (domain.Deliverable, error)
 	// UpdateReviewDetailsIfPending persists a review draft's mutated
 	// details_json, guarded on the draft still being state=pending. Returns
 	// false when the draft was resolved (submitted/dismissed) since it was read
@@ -119,8 +117,11 @@ type Runtime interface {
 	// the response the verb acted on says the touched issue sits in — a Linear
 	// issue's team, a Jira issue's project — and zero for every other write:
 	// the write's touch creates the issue's entity when TF has none, and a
-	// Linear or Jira entity is created only with its container.
-	Record(ctx context.Context, a *domain.Deliverable, act *domain.ExternalAction, container domain.EntityContainer)
+	// Linear or Jira entity is created only with its container. github is
+	// what GitHub answered for the objects a GitHub write names, read by the
+	// observer that made it (domain.GitHubIdentity), and zero for every other
+	// write: a GitHub entity or repository is resolved from it alone.
+	Record(ctx context.Context, a *domain.Deliverable, act *domain.ExternalAction, container domain.EntityContainer, github domain.GitHubIdentity)
 
 	// RecordReadTouch persists a durable conversation→entity touch for an addressed read
 	// (a verb targeting one entity by id/key/ts): it resolves-or-creates the
@@ -129,11 +130,12 @@ type Runtime interface {
 	// whose entities are identified by one (a Jira issue's id), and "" for the
 	// rest; a Jira read with none touches nothing. container is what the
 	// response says the issue sits in, for a Linear or Jira read, and zero for
-	// the rest, as on Record. Void and best-effort like Record — a read never fails on its
+	// the rest, as on Record, and github what GitHub answered for a GitHub
+	// read's object, as on Record. Void and best-effort like Record — a read never fails on its
 	// touch — and, like Record, relayed to the orchestrator on the sidecar so
 	// the write lands where the stores live. Set-returning reads never call it
 	// (the touched-entity rule: addressed → touch, returned-in-a-set → never).
-	RecordReadTouch(ctx context.Context, provider, target, externalID string, container domain.EntityContainer, url string)
+	RecordReadTouch(ctx context.Context, provider, target, externalID string, container domain.EntityContainer, github domain.GitHubIdentity, url string)
 
 	// MemoryLoad resolves the entity for (source, sourceID) — by externalID,
 	// the provider id the entity is identified by, when the caller resolved
@@ -214,8 +216,8 @@ type ExtensionRuntime interface {
 	Relay(ctx context.Context, namespace, op string, args, out any) error
 	RelayNotify(ctx context.Context, namespace, op string, args any)
 	ProviderCredential(ctx context.Context, namespace string) (json.RawMessage, error)
-	Record(ctx context.Context, a *domain.Deliverable, act *domain.ExternalAction, container domain.EntityContainer)
-	RecordReadTouch(ctx context.Context, provider, target, externalID string, container domain.EntityContainer, url string)
+	Record(ctx context.Context, a *domain.Deliverable, act *domain.ExternalAction, container domain.EntityContainer, github domain.GitHubIdentity)
+	RecordReadTouch(ctx context.Context, provider, target, externalID string, container domain.EntityContainer, github domain.GitHubIdentity, url string)
 }
 
 // Core DB op names — the verb-trace reads/writes served under the "core"
@@ -227,7 +229,6 @@ const (
 	opGetTask                          = "get_task"
 	opListRepos                        = "list_repos"
 	opGetRepo                          = "get_repo"
-	opRepoSlugByExternalID             = "repo_slug_by_external_id"
 	opTeamTracksRepository             = "team_tracks_repository"
 	opTaskOwnRepository                = "task_own_repository"
 	opGetConversationWorktreeByRepoRef = "get_conversation_worktree_by_repo_ref"
@@ -352,35 +353,26 @@ type orgJiraBaseResult struct {
 	URL string `json:"url"`
 }
 
-// repoSlugByExternalIDArgs / repoSlugResult are the repo_slug_by_external_id
-// op's payloads — GitHub's repository id, and the registry name carrying it
-// ("" for none). The host is the org's, bound orchestrator-side.
-type repoSlugByExternalIDArgs struct {
-	ExternalID string `json:"external_id"`
-}
-
-type repoSlugResult struct {
-	Slug string `json:"slug,omitempty"`
-}
-
 type recordExternalWriteArgs struct {
 	Deliverable *domain.Deliverable    `json:"deliverable,omitempty"`
 	Action      *domain.ExternalAction `json:"action,omitempty"`
 	domain.EntityContainer
+	GitHub domain.GitHubIdentity `json:"github,omitzero"`
 }
 
 // recordReadTouchArgs is the record_read_touch op's payload — the addressed
 // read's entity coordinates. Identity (org, run) is bound orchestrator-side
 // from the run's ConversationInfo, so the wire carries none. The IPC method of
-// the same name shares the shape and ignores ExternalID: the provider id is
-// read off a response by the daemon's own verbs, never named by the jailed
-// CLI.
+// the same name shares the shape and ignores ExternalID and GitHub: a provider
+// id is read off a response by the daemon's own verbs, never named by the
+// jailed CLI.
 type recordReadTouchArgs struct {
 	Provider   string `json:"provider"`
 	Target     string `json:"target"`
 	ExternalID string `json:"external_id,omitempty"`
 	URL        string `json:"url,omitempty"`
 	domain.EntityContainer
+	GitHub domain.GitHubIdentity `json:"github,omitzero"`
 }
 
 // --- directRuntime: the in-process impl over db.Stores ---
@@ -490,31 +482,6 @@ func (r *directRuntime) GetRepo(ctx context.Context, slug string) (*domain.Repos
 		return nil, err
 	}
 	return r.stores.Repos.GetByRefSystem(ctx, r.info.OrgID, domain.RepoRefFromSlug(host, slug))
-}
-
-// RepoSlugByExternalID scans the host's identified rows rather than reading
-// one by id: it is asked only for a name the registry does not hold, and an
-// org's repositories are few enough that the scan costs nothing a dedicated
-// read would save. A retired row answers nothing: the name it is stored under
-// is another repository's now.
-func (r *directRuntime) RepoSlugByExternalID(ctx context.Context, externalID string) (string, error) {
-	if externalID == "" {
-		return "", nil
-	}
-	host, err := r.githubHost(ctx)
-	if err != nil {
-		return "", err
-	}
-	refs, err := r.stores.Repos.ListIdentitiesSystem(ctx, r.info.OrgID, host)
-	if err != nil {
-		return "", err
-	}
-	for _, ref := range refs {
-		if ref.ExternalID == externalID && ref.Source == domain.RepoSourceGitHub && !ref.Retired {
-			return ref.Slug(), nil
-		}
-	}
-	return "", nil
 }
 
 func (r *directRuntime) TeamTracksRepository(ctx context.Context, repositoryID string) (bool, error) {
@@ -655,12 +622,13 @@ func (r *directRuntime) DeleteConversationWorktree(ctx context.Context, reposito
 // deliverable could not be recorded still leaves its ledger row. Inside a relayed
 // record the deliverable's failure is also the record's (dropRelayedDeliverable).
 //
-// A branch is keyed here, on the registry row its target names (keyBranch),
-// and its push row takes its repository from that key. The key a branch
-// arrives with is discarded: on an executor it was built by the sidecar,
-// which must not be able to file a push under a repository of its choosing,
-// as resolveActionReferences keeps every other act from naming one.
-func (r *directRuntime) UpsertDeliverable(ctx context.Context, a domain.Deliverable) (domain.Deliverable, error) {
+// A branch is keyed here, on the registry row GitHub's repository id names
+// (keyBranch), and its push row takes its repository from that key. The key a
+// branch arrives with is discarded: on an executor it was built by the
+// sidecar, which must not be able to file a push under a repository of its
+// choosing, and the id it relays is admitted only for a repository the run
+// works in (githubRepositoryRow), as for every other act.
+func (r *directRuntime) UpsertDeliverable(ctx context.Context, a domain.Deliverable, github domain.GitHubIdentity) (domain.Deliverable, error) {
 	a.OrgID = r.info.OrgID
 	a.TeamID = r.info.TeamID
 	a.ConversationID = r.info.ConversationID
@@ -671,14 +639,14 @@ func (r *directRuntime) UpsertDeliverable(ctx context.Context, a domain.Delivera
 		r.dropBranchPush(ctx, a, r.branchPushAction(ctx, a), err)
 		return domain.Deliverable{}, err
 	}
-	keyErr := r.keyBranch(ctx, &a)
+	keyErr := r.keyBranch(ctx, &a, github)
 	act := r.branchPushAction(ctx, a)
 	if keyErr != nil {
 		dropRelayedDeliverable(ctx, a, keyErr)
 		r.recordBranchPushAlone(ctx, a, act)
 		return domain.Deliverable{}, keyErr
 	}
-	resolveDeliverableEntity(ctx, r.stores, r.info, &a, domain.EntityContainer{})
+	resolveDeliverableEntity(ctx, r.stores, r.info, &a, domain.EntityContainer{}, github)
 	if r.info.IsEventTriggered {
 		var stored domain.Deliverable
 		err := withRecordRetry(ctx, func() error {
@@ -719,24 +687,25 @@ func (r *directRuntime) UpsertDeliverable(ctx context.Context, a domain.Delivera
 	return out, err
 }
 
-// keyBranch keys branch deliverable a on the registry row its target, an
-// owner/repo, names on a's scope, the org's current GitHub host. It returns
-// errNoRegistryRow when no live row has that name, and the read's error when
-// the registry could not be read; either way a is left with no key. Any other
-// deliverable is left as it is.
-func (r *directRuntime) keyBranch(ctx context.Context, a *domain.Deliverable) error {
+// keyBranch keys branch deliverable a on the registry row GitHub's repository
+// id names (githubRepositoryRow) on a's scope, the org's current GitHub host,
+// and records it under the name that row holds: its target takes the row's
+// name, so a push spelled under an old name, or a new one TF has not applied,
+// reads like every other row of the repository. The hook and
+// the git proxy observe one push and read the same id, so their twin rows
+// share the key. It returns errNoRegistryRow when no row the run may record
+// against carries the id (the observer's read failed, or the id names another
+// repository), and the read's error when the registry could not be read;
+// either way a is left with no key. Any other deliverable is left as it is.
+func (r *directRuntime) keyBranch(ctx context.Context, a *domain.Deliverable, github domain.GitHubIdentity) error {
 	if a.Kind != domain.DeliverableKindBranch {
 		return nil
 	}
 	a.DedupKey = ""
-	owner, repo, ok := targetRepository(a.Target)
-	if !ok || a.Scope == "" || r.stores.Repos == nil {
-		return fmt.Errorf("%w: %s", errNoRegistryRow, a.Target)
-	}
 	var row *domain.Repository
 	if err := withRecordRetry(ctx, func() error {
 		var e error
-		row, e = r.stores.Repos.GetByRefSystem(ctx, r.info.OrgID, domain.RepoRef{Host: a.Scope, Owner: owner, Repo: repo})
+		row, e = githubRepositoryRow(ctx, r.stores, r.info, a.Scope, github)
 		return e
 	}); err != nil {
 		return fmt.Errorf("read the registry row for %s: %w", a.Target, err)
@@ -744,6 +713,7 @@ func (r *directRuntime) keyBranch(ctx context.Context, a *domain.Deliverable) er
 	if row == nil {
 		return fmt.Errorf("%w: %s", errNoRegistryRow, a.Target)
 	}
+	a.Target = row.Slug()
 	a.DedupKey = domain.BranchDedupKey(row.ID, a.ExternalID)
 	return nil
 }
@@ -868,12 +838,12 @@ func (r *directRuntime) TransitionReviewState(ctx context.Context, deliverableID
 	return moved, err
 }
 
-func (r *directRuntime) Record(ctx context.Context, a *domain.Deliverable, act *domain.ExternalAction, container domain.EntityContainer) {
-	recordExternalWrite(ctx, r.stores, r.info, a, act, container)
+func (r *directRuntime) Record(ctx context.Context, a *domain.Deliverable, act *domain.ExternalAction, container domain.EntityContainer, github domain.GitHubIdentity) {
+	recordExternalWrite(ctx, r.stores, r.info, a, act, container, github)
 }
 
-func (r *directRuntime) RecordReadTouch(ctx context.Context, provider, target, externalID string, container domain.EntityContainer, url string) {
-	recordEntityTouch(ctx, r.stores, r.info, entityCoordinate{provider: provider, target: target, externalID: externalID, container: container, url: url})
+func (r *directRuntime) RecordReadTouch(ctx context.Context, provider, target, externalID string, container domain.EntityContainer, github domain.GitHubIdentity, url string) {
+	recordEntityTouch(ctx, r.stores, r.info, entityCoordinate{provider: provider, target: target, externalID: externalID, container: container, github: github, url: url})
 }
 
 func (r *directRuntime) MemoryLoad(ctx context.Context, source, sourceID, externalID string, limit int) (*MemoryLoadResult, error) {
@@ -1036,14 +1006,6 @@ func (r *relayRuntime) GetRepo(ctx context.Context, slug string) (*domain.Reposi
 	return res.Repo, nil
 }
 
-func (r *relayRuntime) RepoSlugByExternalID(ctx context.Context, externalID string) (string, error) {
-	var res repoSlugResult
-	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opRepoSlugByExternalID, repoSlugByExternalIDArgs{ExternalID: externalID}, &res); err != nil {
-		return "", err
-	}
-	return res.Slug, nil
-}
-
 func (r *relayRuntime) TeamTracksRepository(ctx context.Context, repositoryID string) (bool, error) {
 	var res teamTracksRepositoryResult
 	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opTeamTracksRepository, repositoryIDArgs{RepositoryID: repositoryID}, &res); err != nil {
@@ -1118,9 +1080,9 @@ func (r *relayRuntime) DeleteConversationWorktree(ctx context.Context, repositor
 	return r.conn.call(ctx, agentproc.RelayNamespaceCore, opDeleteConversationWorktree, deleteConversationWorktreeByRepoRefArgs{RepositoryID: repositoryID, Ref: ref}, nil)
 }
 
-func (r *relayRuntime) UpsertDeliverable(ctx context.Context, a domain.Deliverable) (domain.Deliverable, error) {
+func (r *relayRuntime) UpsertDeliverable(ctx context.Context, a domain.Deliverable, github domain.GitHubIdentity) (domain.Deliverable, error) {
 	var res upsertDeliverableResult
-	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opUpsertDeliverable, upsertDeliverableArgs{Deliverable: a}, &res); err != nil {
+	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opUpsertDeliverable, upsertDeliverableArgs{Deliverable: a, GitHub: github}, &res); err != nil {
 		return domain.Deliverable{}, err
 	}
 	return res.Deliverable, nil
@@ -1144,18 +1106,18 @@ func (r *relayRuntime) TransitionReviewState(ctx context.Context, deliverableID,
 	return res.Moved, nil
 }
 
-func (r *relayRuntime) Record(_ context.Context, a *domain.Deliverable, act *domain.ExternalAction, container domain.EntityContainer) {
+func (r *relayRuntime) Record(_ context.Context, a *domain.Deliverable, act *domain.ExternalAction, container domain.EntityContainer, github domain.GitHubIdentity) {
 	// Queued, not awaited: the external write already landed upstream, so the
 	// audit record must never block the op that follows it (mirrors the void
 	// RecordExternalWrite). The run's record sender delivers it in order and
 	// resends it until the orchestrator has applied it.
-	r.conn.record(agentproc.RelayNamespaceCore, opRecordExternalWrite, recordExternalWriteArgs{Deliverable: a, Action: act, EntityContainer: container})
+	r.conn.record(agentproc.RelayNamespaceCore, opRecordExternalWrite, recordExternalWriteArgs{Deliverable: a, Action: act, EntityContainer: container, GitHub: github})
 }
 
-func (r *relayRuntime) RecordReadTouch(_ context.Context, provider, target, externalID string, container domain.EntityContainer, url string) {
+func (r *relayRuntime) RecordReadTouch(_ context.Context, provider, target, externalID string, container domain.EntityContainer, github domain.GitHubIdentity, url string) {
 	// Queued, mirroring Record: the read already returned, so the touch must
 	// never block it.
-	r.conn.record(agentproc.RelayNamespaceCore, opRecordReadTouch, recordReadTouchArgs{Provider: provider, Target: target, ExternalID: externalID, URL: url, EntityContainer: container})
+	r.conn.record(agentproc.RelayNamespaceCore, opRecordReadTouch, recordReadTouchArgs{Provider: provider, Target: target, ExternalID: externalID, URL: url, EntityContainer: container, GitHub: github})
 }
 
 // MemoryLoad relays as a call (not a record): unlike the queued touch, the

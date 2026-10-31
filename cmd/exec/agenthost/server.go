@@ -96,6 +96,11 @@ type Server struct {
 	// route through proxyCreds.
 	linearResolver linearclient.Resolver
 
+	// ghIdentities is the run's cache of what GitHub calls the objects its
+	// verbs act on and read (ghclient.IdentityReader), shared by every
+	// request so a run reads each repository once.
+	ghIdentities ghclient.IdentityReader
+
 	// proxyCreds points the gh/jira/linear verbs at this run's credential-sidecar
 	// proxies — always set in multi mode, where the daemon lives in the
 	// sidecar; nil in local mode. When set, every gh/jira/linear verb builds a
@@ -409,6 +414,7 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		rt:             s.rt,
 		ghResolver:     s.ghResolver,
 		linearResolver: s.linearResolver,
+		ghIdentities:   &s.ghIdentities,
 		proxyCreds:     s.proxyCreds,
 		gateWired:      s.gateWired,
 	}

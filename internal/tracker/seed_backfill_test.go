@@ -33,9 +33,10 @@ func seedBackfillServer(t *testing.T, reviewers ...string) *httptest.Server {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/graphql"):
 			_, _ = w.Write([]byte(`{"data":{"nodes":[null]}}`))
-		case strings.Contains(r.URL.Path, "/pulls/42"):
+		case strings.Contains(r.URL.Path, "/pulls/42"), strings.Contains(r.URL.Path, "/issues/42"):
 			// The snapshot-less stub resolve Phase 2 attempts when a seed lost
-			// its CAS. Unresolvable is a skip, not a failure.
+			// its CAS, and the issue read its 404 asks. Unresolvable is a skip,
+			// not a failure.
 			http.Error(w, "not found", http.StatusNotFound)
 		case strings.HasSuffix(r.URL.Path, "/pulls"):
 			_, _ = w.Write([]byte(`[{

@@ -74,7 +74,7 @@ func TestUpsertDeliverable_FailedBranchDeliverableKeepsThePushRow(t *testing.T) 
 			if !ok {
 				t.Fatal("NewBranchDeliverable refused the fixture branch")
 			}
-			if _, err := newDirectRuntime(stores, info).UpsertDeliverable(context.Background(), branch); err == nil {
+			if _, err := newDirectRuntime(stores, info).UpsertDeliverable(context.Background(), branch, domain.GitHubIdentity{}); err == nil {
 				t.Fatal("UpsertDeliverable = nil error, want the refused deliverable's error")
 			}
 			acts := listExternalActions(t, stores)

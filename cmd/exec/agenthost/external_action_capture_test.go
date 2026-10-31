@@ -137,10 +137,11 @@ func TestCapture_JiraActions_RecordExternalActions(t *testing.T) {
 
 // TestCapture_BranchPush_RecordsActionAndDedupsTwin pins the branch capture: a
 // push records ActionBranchPushed under the github credential, about the
-// repository's registry row, with the deterministic
-// conversation:repository:ref:sha dedup key. A second observation of the SAME
-// push (the git hook+proxy twin) collapses to one action row; the same ref and
-// sha pushed to another repository is that repository's own row.
+// registry row GitHub's id for the repository names, with the deterministic
+// conversation:repository:ref:sha dedup key. The hook reads the id itself and
+// the git proxy relays the one it read, so the twin observations of the SAME
+// push collapse to one action row; the same ref and sha pushed to another
+// repository is that repository's own row.
 func TestCapture_BranchPush_RecordsActionAndDedupsTwin(t *testing.T) {
 	for _, eventTriggered := range []bool{true, false} {
 		name := "manual"
@@ -148,21 +149,28 @@ func TestCapture_BranchPush_RecordsActionAndDedupsTwin(t *testing.T) {
 			name = "event-triggered"
 		}
 		t.Run(name, func(t *testing.T) {
-			stores, info := newCaptureStores(t, eventTriggered)
-			client := NewLocal(stores, info)
+			gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !answerPRRead(w, r) {
+					t.Errorf("unexpected GitHub call: %s %s", r.Method, r.URL.Path)
+				}
+			}))
+			t.Cleanup(gh.Close)
+			stores, info, client := newGithubRecordingClient(t, gh.URL, eventTriggered)
 			ctx := context.Background()
-			repoID := registerRepo(t, stores, "octo", "repo", "1")
+			repoID := registerRepo(t, stores, "octo", "repo", testRepoID("octo/repo"))
 
 			branch, ok := domain.NewBranchDeliverable("octo/repo", "refs/heads/feat", "abc123", true)
 			if !ok {
 				t.Fatal("NewBranchDeliverable returned ok=false")
 			}
-			// The hook fires, then the proxy backstop observes the same push.
+			// The hook fires, reading the repository's id, then the proxy
+			// backstop observes the same push with the id it read.
 			if _, err := client.UpsertDeliverable(ctx, branch); err != nil {
 				t.Fatalf("hook UpsertDeliverable: %v", err)
 			}
-			if _, err := client.UpsertDeliverable(ctx, branch); err != nil {
-				t.Fatalf("proxy UpsertDeliverable (twin): %v", err)
+			read := domain.GitHubIdentity{RepositoryID: testRepoID("octo/repo"), Repository: "octo/repo"}
+			if _, err := client.UpsertDeliverableFor(ctx, branch, read); err != nil {
+				t.Fatalf("proxy UpsertDeliverableFor (twin): %v", err)
 			}
 
 			acts := listExternalActions(t, stores)
@@ -189,7 +197,7 @@ func TestCapture_BranchPush_RecordsActionAndDedupsTwin(t *testing.T) {
 			if got := len(listExternalActions(t, stores)); got != 2 {
 				t.Errorf("a new push (new sha) should append: want 2 actions, got %d", got)
 			}
-			registerRepo(t, stores, "octo", "other", "2")
+			registerRepo(t, stores, "octo", "other", testRepoID("octo/other"))
 			other, _ := domain.NewBranchDeliverable("octo/other", "refs/heads/feat", "abc123", true)
 			if _, err := client.UpsertDeliverable(ctx, other); err != nil {
 				t.Fatalf("other-repository UpsertDeliverable: %v", err)
@@ -207,12 +215,13 @@ func TestCapture_BranchPush_RecordsActionAndDedupsTwin(t *testing.T) {
 // pre-push hook, the domain constructor), so without this an org on GHES/GHEC
 // would get a dead github.com "open branch" link. Both the deliverable URL and the
 // branch-push audit action's deep link (built from the same deliverable) are
-// corrected.
+// corrected. The push arrives as the git proxy hands it over, with the
+// repository's id read where its credential is.
 func TestCapture_BranchPush_AnchorsURLToOrgHost(t *testing.T) {
 	stores, info := newCaptureStores(t, false)
 	client := NewLocal(stores, info)
 	client.SetGitHubResolver(fakeGitHubResolver{baseURL: "https://ghe.example.com", token: "org-pat"})
-	registerRepo(t, stores, "octo", "repo", "1")
+	registerRepo(t, stores, "octo", "repo", testRepoID("octo/repo"))
 
 	branch, ok := domain.NewBranchDeliverable("octo/repo", "refs/heads/feat/x", "abc123", true)
 	if !ok {
@@ -223,9 +232,9 @@ func TestCapture_BranchPush_AnchorsURLToOrgHost(t *testing.T) {
 		t.Fatalf("precondition: constructor URL = %q, want none", branch.URL)
 	}
 
-	stored, err := client.UpsertDeliverable(context.Background(), branch)
+	stored, err := client.UpsertDeliverableFor(context.Background(), branch, domain.GitHubIdentity{RepositoryID: testRepoID("octo/repo"), Repository: "octo/repo"})
 	if err != nil {
-		t.Fatalf("UpsertDeliverable: %v", err)
+		t.Fatalf("UpsertDeliverableFor: %v", err)
 	}
 	// ...and the sink sets it on the org's GHES host, segments preserved.
 	if stored.URL != "https://ghe.example.com/octo/repo/tree/feat/x" {
@@ -713,7 +722,8 @@ func TestCapture_GHChannelReply_IsIndistinguishableFromTheVerbRow(t *testing.T) 
 	}
 
 	// The same reply, made by hand through the gh channel: the injector saw the
-	// method and path, and read the created reply's id + link off the response.
+	// method and path, read the created reply's id + link off the response, and
+	// read what GitHub calls the pull request the way the verb did.
 	conn, stores, info, client := newGithubRecordingClientConn(t, gh.URL, true)
 	client.RecordGHChannelWrite(ctx, ghwrite.Observation{
 		Method:     "POST",
@@ -721,6 +731,9 @@ func TestCapture_GHChannelReply_IsIndistinguishableFromTheVerbRow(t *testing.T) 
 		Status:     201,
 		ExternalID: "777",
 		URL:        gh.URL + "/octo/repo/pull/1#discussion_r777",
+		Identity: domain.GitHubIdentity{
+			RepositoryID: testRepoID("octo/repo"), Repository: "octo/repo", NodeID: testPRNodeID(1), Kind: domain.EntityKindPullRequest,
+		},
 	})
 	rows := listExternalActions(t, stores)
 	if len(rows) != 1 {
@@ -814,8 +827,9 @@ func TestGHChannelWriteAction_GraphQLCarriesProvenanceWhereItIsAsked(t *testing.
 // TestGHChannelWriteAction_CommentRowsShareTheNumber: a comment's create, edit,
 // and delete rows carry its number in external_id whatever transport each came
 // through, and its node id in detail_json. A GraphQL write names the comment by
-// node id, which therefore never lands in external_id; where the response did
-// not return the number, the row has none.
+// node id (here in gh's form, whose input is bound to it), which therefore
+// never lands in external_id; where the response did not return the number,
+// the row has none.
 func TestGHChannelWriteAction_CommentRowsShareTheNumber(t *testing.T) {
 	const nodeID = "IC_kwShared"
 	created := GHChannelWriteAction(ghwrite.Observation{
@@ -828,14 +842,14 @@ func TestGHChannelWriteAction_CommentRowsShareTheNumber(t *testing.T) {
 		Method: "POST", Path: "/graphql", Status: 200,
 		URL:        "https://github.com/octo/repo/pull/9#issuecomment-55",
 		ExternalID: "55",
-		GraphQL:    &ghwrite.GraphQLFacts{Fields: []string{"updateIssueComment"}, Subject: nodeID},
+		GraphQL:    &ghwrite.GraphQLFacts{Fields: []string{"updateIssueComment"}, Subject: nodeID, SubjectBound: true},
 	}, domain.CredentialGitHubApp)
 	restEdited := GHChannelWriteAction(ghwrite.Observation{
 		Method: "PATCH", Path: "/repos/octo/repo/issues/comments/55", Status: 200,
 	}, domain.CredentialGitHubApp)
 	deleted := GHChannelWriteAction(ghwrite.Observation{
 		Method: "POST", Path: "/graphql", Status: 200,
-		GraphQL: &ghwrite.GraphQLFacts{Fields: []string{"deleteIssueComment"}, Subject: nodeID},
+		GraphQL: &ghwrite.GraphQLFacts{Fields: []string{"deleteIssueComment"}, Subject: nodeID, SubjectBound: true},
 	}, domain.CredentialGitHubApp)
 
 	for name, act := range map[string]*domain.ExternalAction{"create": created, "graphql edit": edited, "rest edit": restEdited} {

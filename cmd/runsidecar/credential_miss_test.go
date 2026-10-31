@@ -24,7 +24,7 @@ func TestRuntime_TokenSourcesNameTheMiss(t *testing.T) {
 	}
 	ctx := context.Background()
 	rt.githubBase = "https://github.com"
-	git := rt.gitProxyConfig("https://github.com").TokenSource
+	git := rt.gitProxyConfig("https://github.com", "").TokenSource
 	gh := rt.ghInjectorConfig("https://api.github.com", tls.Certificate{}, "", "conv", nil).TokenSource
 	api := rt.githubAPIToken
 

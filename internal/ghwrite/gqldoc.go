@@ -32,11 +32,12 @@ import "strings"
 // — and resolution touches each definition at most once, so a document cannot
 // spend this process's time by nesting or by pointing fragments at each other.
 //
-// Two other questions are answered, each by one pass over the same tokens that
-// compares names and reads nothing else — no value, no string, no position in
-// the grammar: does a given name appear anywhere in the document
-// (documentNames), and does the document alias some field to one of a set of
-// names (documentAliasesOnto)?
+// Three other questions are answered, each by one pass over the same tokens
+// that compares names and reads nothing else — no value, no string, no position
+// in the grammar: does a given name appear anywhere in the document
+// (documentNames), does the document alias some field to one of a set of names
+// (documentAliasesOnto), and does it spell a given variable
+// (documentReferencesVariable)?
 
 // gqlOperation names the three operation keywords. Only mutations are
 // audited; the other two are recognized so a document that mixes them can still
@@ -198,6 +199,28 @@ func documentNames(doc, name string) bool {
 		if tok.name(name) {
 			return true
 		}
+	}
+}
+
+// documentReferencesVariable reports whether the document spells the variable
+// $name: a `$` followed by the name, which is how a variable's definition and
+// each use of it are both written. A string is one token and never a name, so
+// the same characters inside a string or a comment do not match. A document
+// the scanner cannot tokenize answers false: the caller asks this to decide
+// whether a variable's value can be trusted, and a scan that stopped short
+// cannot show the variable is there.
+func documentReferencesVariable(doc, name string) bool {
+	sc := &gqlScanner{src: doc}
+	var prev gqlToken
+	for {
+		tok, more := sc.next()
+		if !more {
+			return false
+		}
+		if prev.punct("$") && tok.name(name) {
+			return true
+		}
+		prev = tok
 	}
 }
 

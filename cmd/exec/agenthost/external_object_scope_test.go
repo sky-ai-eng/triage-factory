@@ -58,8 +58,8 @@ func TestRecordExternalWrite_StampsTheOrgScopePerProvider(t *testing.T) {
 	if !ok {
 		t.Fatal("NewBranchDeliverable refused a valid ref")
 	}
-	if _, err := NewLocal(stores, info).UpsertDeliverable(ctx, branch); err != nil {
-		t.Fatalf("UpsertDeliverable: %v", err)
+	if _, err := NewLocal(stores, info).UpsertDeliverableFor(ctx, branch, domain.GitHubIdentity{RepositoryID: "1", Repository: "octo/api"}); err != nil {
+		t.Fatalf("UpsertDeliverableFor: %v", err)
 	}
 
 	byProvider := map[string]string{}
