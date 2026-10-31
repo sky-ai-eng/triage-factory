@@ -982,11 +982,8 @@ type JiraProjectStatusRules struct {
 	// Review" by hand lands in no lane of its own. Its members reach neither
 	// the discovery JQL nor the stock deck's buckets, which is why a status
 	// may sit in BOTH InProgressMembers and InReviewMembers — "counts as
-	// actively worked on" is true of a ticket under review.
-	//
-	// TODO(TFAC-883): nothing writes this status onto a ticket. The rule is
-	// stored and settable; whether TF should act on it, and off which signal,
-	// is still open.
+	// actively worked on" is true of a ticket under review. Nothing writes this
+	// status onto a ticket.
 	PickupMembers       []JiraStatusRef
 	InProgressMembers   []JiraStatusRef
 	InProgressCanonical JiraStatusRef
