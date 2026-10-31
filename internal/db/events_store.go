@@ -76,4 +76,14 @@ type EventStore interface {
 	// in depth and stamped onto the returned event so HandleEvent has the
 	// tenant context it needs.
 	GetSystem(ctx context.Context, orgID, eventID string) (*domain.Event, error)
+
+	// LatestForEntityTypeBeforeSystem returns entityID's newest event of
+	// eventType recorded before the event beforeEventID, or (nil, nil) when
+	// there is none or beforeEventID names no event. Any dedup_key matches.
+	// "Before" is the log's own order, created_at then id, which is when TF
+	// recorded each event, not when the source says it happened: the
+	// router's close phase compares the answer's created_at with the time
+	// a run's ledger rows were written, to decide which close a row can
+	// explain. Admin pool: the router holds no claims.
+	LatestForEntityTypeBeforeSystem(ctx context.Context, orgID, entityID, eventType, beforeEventID string) (*domain.Event, error)
 }

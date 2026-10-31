@@ -58,13 +58,10 @@ func CausedByRunPush(ctx context.Context, r *Router, orgID string, evt domain.Ev
 }
 
 // causedByRunActionOnEntity matches an event when the run's agent took the
-// action actions names for the event's type on the event's entity: a pr_merged
-// row explains github:pr:merged, a pr_closed row github:pr:closed.
-//
-// TODO(TFAC-1284): any matching row counts, so after the run closes the pull
-// request and a person reopens it, the person's next close matches the run's
-// earlier row and is deferred instead of stopping the run. A merge happens
-// once and is not affected.
+// action actions names for the event's type on the event's entity, since the
+// entity's previous event of that type: a pr_merged row explains
+// github:pr:merged, a pr_closed row github:pr:closed. A pull request merges
+// once, so a merge has no previous one and any pr_merged row on it counts.
 func causedByRunActionOnEntity(actions map[string]string) runCauseMatcher {
 	return func(ctx context.Context, r *Router, orgID string, evt domain.Event, entityID, blueprintRunID string) (bool, error) {
 		action, ok := actions[evt.EventType]
@@ -75,18 +72,16 @@ func causedByRunActionOnEntity(actions map[string]string) runCauseMatcher {
 		if err != nil {
 			return false, err
 		}
-		return slices.ContainsFunc(rows, func(a domain.ExternalAction) bool { return a.EntityID == entityID }), nil
+		rows, err = r.rowsSincePreviousEvent(ctx, orgID, evt, entityID, rows)
+		return len(rows) > 0, err
 	}
 }
 
 // causedByRunTransition matches an issue's completion when the run's newest
-// issue_transitioned row on the event's entity moved it to the status the
-// event says it finished in, ignoring case. Only the newest counts: a run
-// that moved the issue to done and then back has not caused its completion.
-//
-// TODO(TFAC-1284): the newest row may predate the issue's last reopen, so a
-// person moving a reopened issue back to done matches the run's earlier move
-// and is deferred instead of stopping the run.
+// issue_transitioned row on the event's entity, since the entity's previous
+// completion, moved it to the status the event says it finished in, ignoring
+// case. Only the newest counts: a run that moved the issue to done and then
+// back has not caused its completion.
 func causedByRunTransition(ctx context.Context, r *Router, orgID string, evt domain.Event, entityID, blueprintRunID string) (bool, error) {
 	final := completionFinalStatus(evt)
 	if final == "" || entityID == "" {
@@ -96,14 +91,52 @@ func causedByRunTransition(ctx context.Context, r *Router, orgID string, evt dom
 	if err != nil {
 		return false, err
 	}
-	// Newest first, by occurred_at then id: the first row on the entity is
-	// the run's last move of the issue.
+	rows, err = r.rowsSincePreviousEvent(ctx, orgID, evt, entityID, rows)
+	if err != nil || len(rows) == 0 {
+		return false, err
+	}
+	// Newest first, by occurred_at then id: the first row is the run's last
+	// move of the issue.
+	return strings.EqualFold(rows[0].ToState, final), nil
+}
+
+// rowsSincePreviousEvent narrows a run's ledger rows, in their order, to
+// those on entityID written after the entity's previous event of evt's type,
+// or to every row on entityID when the entity has none. A row explains at
+// most one closing event of its type on its entity, the first recorded after
+// it: once the run closed a pull request and a person reopened it, the
+// person's next close is not the run's.
+//
+// The comparison is between when TF wrote the row and when it recorded the
+// previous event, in the poll that observed that close. A row that explains
+// evt was written after a poll saw the entity open again, so at least a poll
+// cycle after that close, which is more than SQLite's whole-second ledger
+// stamps (rounded down) or skew between the database's clock and the
+// recording process's can move it. A row written
+// just before the previous close could land after it only by skew, and would
+// then defer the later close as well; it never stops a run on its own close.
+func (r *Router) rowsSincePreviousEvent(ctx context.Context, orgID string, evt domain.Event, entityID string, rows []domain.ExternalAction) ([]domain.ExternalAction, error) {
+	var onEntity []domain.ExternalAction
 	for _, a := range rows {
 		if a.EntityID == entityID {
-			return strings.EqualFold(a.ToState, final), nil
+			onEntity = append(onEntity, a)
 		}
 	}
-	return false, nil
+	// Most runs did nothing to the entity, so the events read waits for a
+	// row it could narrow.
+	if len(onEntity) == 0 {
+		return nil, nil
+	}
+	prev, err := r.events.LatestForEntityTypeBeforeSystem(ctx, orgID, entityID, evt.EventType, evt.ID)
+	if err != nil {
+		return nil, fmt.Errorf("read the previous %s on entity %s: %w", evt.EventType, entityID, err)
+	}
+	if prev == nil {
+		return onEntity, nil
+	}
+	return slices.DeleteFunc(onEntity, func(a domain.ExternalAction) bool {
+		return !a.OccurredAt.After(prev.CreatedAt)
+	}), nil
 }
 
 // completionFinalStatus is the status name a Jira or Linear completion says

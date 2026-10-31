@@ -58,6 +58,9 @@ func TestEventStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	if _, err := stores.Events.GetMetadataSystem(ctx, badOrg, "any"); err == nil {
 		t.Error("GetMetadataSystem(non-local org) should error")
 	}
+	if _, err := stores.Events.LatestForEntityTypeBeforeSystem(ctx, badOrg, "any", "any", "any"); err == nil {
+		t.Error("LatestForEntityTypeBeforeSystem(non-local org) should error")
+	}
 }
 
 // seedSQLiteEntityForEvents inserts an active GitHub PR entity for
