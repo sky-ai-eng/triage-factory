@@ -62,7 +62,12 @@ const pgEventHandlerColumns = `id, kind, event_type, scope_predicate_json::text,
        team_id, applies_to_unowned,
        name, default_priority, sort_order,
        blueprint_id, breaker_threshold, min_autonomy_suitability,
-       user_modified, created_at, updated_at`
+       user_modified, created_at, updated_at,
+       COALESCE(creator_user_id::text, ''), COALESCE(notify_audience, '')`
+
+// pgHandlerKindOrder orders the kinds rules, triggers, notify rules: the
+// router reads rules before triggers, and a list reads them in that order.
+const pgHandlerKindOrder = `CASE kind WHEN 'rule' THEN 0 WHEN 'trigger' THEN 1 ELSE 2 END`
 
 func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string, blueprintIDsBySlug map[string]string) error {
 	if s.inTx {
@@ -167,12 +172,12 @@ func (s *eventHandlerStore) List(ctx context.Context, orgID string, f db.EventHa
 		return []domain.EventHandler{}, total, nil
 	}
 
-	// Order: rules first (sort_order ASC, name ASC), then triggers
-	// (created_at DESC), with an id tiebreaker so ties can't reshuffle
-	// between pages.
+	// Order: rules first (sort_order ASC, name ASC), then triggers, then
+	// notify rules (created_at DESC), with an id tiebreaker so ties can't
+	// reshuffle between pages.
 	q := `SELECT ` + pgEventHandlerColumns + `
 	      FROM event_handlers` + where + `
-	      ORDER BY kind ASC,
+	      ORDER BY ` + pgHandlerKindOrder + `,
 	               CASE WHEN kind = 'rule' THEN sort_order ELSE 0 END ASC,
 	               CASE WHEN kind = 'rule' THEN name ELSE '' END ASC,
 	               created_at DESC, id`
@@ -221,18 +226,17 @@ func (s *eventHandlerStore) GetEnabledForEventSystem(ctx context.Context, orgID,
 }
 
 func getEnabledEventHandlers(ctx context.Context, q queryer, orgID, eventType string) ([]domain.EventHandler, error) {
-	// kind ordering: 'rule' < 'trigger' alphabetically, so a plain
-	// ORDER BY kind ASC keeps the rules-before-triggers invariant
-	// that the router relies on (same observable behavior as the
-	// pre-unification two-phase loop). sort_order then breaks ties
-	// among rules; created_at DESC orders triggers.
+	// Rules before triggers is the invariant the router relies on (same
+	// observable behavior as the pre-unification two-phase loop); notify
+	// rules come last. sort_order then breaks ties among rules; created_at
+	// DESC orders the rest.
 	rows, err := q.QueryContext(ctx, `
 		SELECT `+pgEventHandlerColumns+`
 		FROM event_handlers
 		WHERE org_id = $1 AND event_type = $2 AND enabled = TRUE AND deleted_at IS NULL
-		ORDER BY kind ASC,
+		ORDER BY `+pgHandlerKindOrder+`,
 		         CASE WHEN kind = 'rule' THEN sort_order ELSE 0 END ASC,
-		         created_at DESC
+		         created_at DESC, id
 	`, orgID, eventType)
 	if err != nil {
 		return nil, err
@@ -316,6 +320,26 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h 
 			RETURNING `+pgEventHandlerColumns,
 			h.ID, orgID, teamID, h.EventType, pred, h.Enabled, h.AppliesToUnowned,
 			h.BlueprintID, derefInt(h.BreakerThreshold), derefFloat(h.MinAutonomySuitability)))
+
+	case domain.EventHandlerKindNotify:
+		return scanEventHandlerRowPG(s.app.QueryRowContext(ctx, `
+			INSERT INTO event_handlers
+				(id, org_id, creator_user_id, team_id, kind, event_type,
+				 scope_predicate_json, enabled, source,
+				 name, notify_audience,
+				 created_at, updated_at)
+			VALUES (
+				$1, $2,
+				COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
+				$3::uuid,
+				'notify', $4,
+				$5::jsonb, $6, 'user',
+				$7, $8,
+				now(), now()
+			)
+			RETURNING `+pgEventHandlerColumns,
+			h.ID, orgID, teamID, h.EventType, pred, h.Enabled,
+			h.Name, h.Audience))
 	}
 	return domain.EventHandler{}, fmt.Errorf("postgres event_handlers Create: unknown kind %q", h.Kind)
 }
@@ -365,6 +389,19 @@ func (s *eventHandlerStore) Update(ctx context.Context, orgID string, h domain.E
 			RETURNING `+pgEventHandlerColumns,
 			pred, h.Enabled, h.AppliesToUnowned,
 			derefInt(h.BreakerThreshold), derefFloat(h.MinAutonomySuitability),
+			contentChanged,
+			orgID, h.ID))
+
+	case domain.EventHandlerKindNotify:
+		return scanUpdatedEventHandlerPG(s.app.QueryRowContext(ctx, `
+			UPDATE event_handlers
+			SET scope_predicate_json = $1::jsonb, enabled = $2,
+			    name = $3, notify_audience = $4,
+			    user_modified = user_modified OR $5,
+			    updated_at = now()
+			WHERE org_id = $6 AND id = $7 AND kind = 'notify' AND deleted_at IS NULL
+			RETURNING `+pgEventHandlerColumns,
+			pred, h.Enabled, h.Name, h.Audience,
 			contentChanged,
 			orgID, h.ID))
 	}
@@ -418,6 +455,8 @@ func (s *eventHandlerStore) contentChanged(ctx context.Context, orgID string, h 
 	switch h.Kind {
 	case domain.EventHandlerKindRule:
 		return nameNS.String != h.Name || defPriority.Float64 != derefFloat(h.DefaultPriority), nil
+	case domain.EventHandlerKindNotify:
+		return nameNS.String != h.Name, nil
 	case domain.EventHandlerKindTrigger:
 		return int(breakerNS.Int64) != derefInt(h.BreakerThreshold) || minAutonomyNS.Float64 != derefFloat(h.MinAutonomySuitability), nil
 	}
@@ -752,6 +791,7 @@ func scanEventHandlerFromAny(scanFn func(dst ...any) error) (domain.EventHandler
 		&nameNS, &defPriority, &sortOrder,
 		&blueprintID, &breakerNS, &minAutonomyNS,
 		&h.UserModified, &h.CreatedAt, &h.UpdatedAt,
+		&h.CreatorUserID, &h.Audience,
 	); err != nil {
 		return h, err
 	}

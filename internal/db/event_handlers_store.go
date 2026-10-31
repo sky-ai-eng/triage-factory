@@ -29,6 +29,8 @@ var ErrNoSuchEventHandler = errors.New("no live event handler with that id")
 //	kind="trigger" — auto-delegation; creates a task and fires a blueprint.
 //	                 Carries blueprint_id, breaker_threshold,
 //	                 min_autonomy_suitability.
+//	kind="notify"  — tells its audience about a matching event; creates no
+//	                 task. Carries name and notify_audience.
 //
 // Per-kind CHECK constraints on the event_handlers table enforce that each
 // row populates exactly its kind's required fields and leaves the other
@@ -64,7 +66,7 @@ var ErrNoSuchEventHandler = errors.New("no live event handler with that id")
 // row's provenance).
 // EventHandlerListFilter is the event-handler list's filter set.
 type EventHandlerListFilter struct {
-	// Kind is "" (both), "rule", or "trigger".
+	// Kind is "" (every kind), "rule", "trigger" or "notify".
 	Kind string
 	// TeamID scopes to one team's handlers; "" returns everything visible
 	// (solo/local, or an unfiltered view). Every handler is team-owned
@@ -117,16 +119,17 @@ type EventHandlerStore interface {
 	// List returns one page of handlers plus the unpaged total, in the order:
 	//   rules first by sort_order ASC, then name ASC,
 	//   then triggers by created_at DESC,
+	//   then notify rules by created_at DESC,
 	// with an id tiebreaker so the order is total and the pages partition it.
 	List(ctx context.Context, orgID string, f EventHandlerListFilter, opts ListOpts) ([]domain.EventHandler, int, error)
 
 	// Get returns one handler by id, or (nil, nil) if not found or soft-deleted.
 	Get(ctx context.Context, orgID string, id string) (*domain.EventHandler, error)
 
-	// GetEnabledForEvent returns enabled, non-deleted handlers (both kinds)
-	// matching event_type, ordered rule-before-trigger so the router can
-	// process them in one pass with the same observable shape as the
-	// pre-unification two-phase loop.
+	// GetEnabledForEvent returns enabled, non-deleted handlers (every kind)
+	// matching event_type, ordered rules, then triggers, then notify rules, so
+	// the router can process them in one pass with the same observable shape
+	// as the pre-unification two-phase loop.
 	GetEnabledForEvent(ctx context.Context, orgID string, eventType string) ([]domain.EventHandler, error)
 
 	// ListForBlueprint returns all non-deleted trigger handlers referencing

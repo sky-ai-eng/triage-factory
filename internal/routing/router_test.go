@@ -288,13 +288,13 @@ func TestMatchHandlers_MatchesThroughTheCurrentView(t *testing.T) {
 	metaJSON, _ := json.Marshal(events.GitHubPRCICheckFailedMetadata{Author: "old-login", AuthorID: "111", CheckName: "build", Repo: "owner/repo"})
 	evt := domain.Event{OrgID: runmode.LocalDefaultOrgID, EventType: domain.EventGitHubPRCICheckFailed, MetadataJSON: string(metaJSON)}
 
-	_, triggers, err := r.matchHandlers(context.Background(), runmode.LocalDefaultOrgID, evt, map[string]bool{})
+	_, triggers, _, err := r.matchHandlers(context.Background(), runmode.LocalDefaultOrgID, evt, teamScopeCache{})
 	if err != nil || len(triggers) != 1 || triggers[0].ID != "t-view-event" {
 		t.Errorf("matchHandlers = %+v, %v; want t-view-event matched through the view", triggers, err)
 	}
 
 	viewErr = errors.New("db down")
-	if _, _, err := r.matchHandlers(context.Background(), runmode.LocalDefaultOrgID, evt, map[string]bool{}); err == nil {
+	if _, _, _, err := r.matchHandlers(context.Background(), runmode.LocalDefaultOrgID, evt, teamScopeCache{}); err == nil {
 		t.Error("matchHandlers with a failing view = nil error; want the view's error")
 	}
 }

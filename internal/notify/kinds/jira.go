@@ -180,12 +180,13 @@ var JiraStatusDrift = notify.Condition(notify.ConditionSpec[JiraStatusRule]{
 	},
 })
 
-// JiraHandlerFilter is one Jira task rule's or trigger's filter, with the ids it
-// names that are gone.
+// JiraHandlerFilter is one Jira task rule's, trigger's or notify rule's filter,
+// with the ids it names that are gone.
 type JiraHandlerFilter struct {
 	HandlerID string `json:"handler_id"`
 	TeamID    string `json:"team_id"`
-	// HandlerKind is domain.EventHandlerKindRule or EventHandlerKindTrigger.
+	// HandlerKind is domain.EventHandlerKindRule, EventHandlerKindTrigger or
+	// EventHandlerKindNotify.
 	HandlerKind string `json:"handler_kind"`
 	RuleName    string `json:"rule_name"`  // display only; a trigger has none
 	EventType   string `json:"event_type"` // display only
@@ -200,9 +201,10 @@ type JiraHandlerFilter struct {
 	Stopped bool `json:"stopped"`
 }
 
-// JiraPredicateDrift is open while an enabled Jira task rule or trigger filters
-// on a status, issue type or priority that is gone: deleted in Jira, dropped
-// from a workflow, or left behind on a project the team stopped tracking.
+// JiraPredicateDrift is open while an enabled Jira task rule, trigger or
+// notify rule filters on a status, issue type or priority that is gone:
+// deleted in Jira, dropped from a workflow, or left behind on a project the
+// team stopped tracking.
 // Nothing about the handler changes, so it silently stops matching what the
 // id stood for. It is high while a field names nothing else, so the handler
 // matches no event, and low while it still matches the field's other values.
@@ -223,13 +225,21 @@ var JiraPredicateDrift = notify.Condition(notify.ConditionSpec[JiraHandlerFilter
 		subject := "The trigger on " + eventLabel(d.EventType)
 		stopped, working := "It can't fire until the filter is changed.", "It still fires on the filter's other values."
 		link := notify.Link("Open trigger", notify.Routes.Trigger(d.HandlerID))
-		if d.HandlerKind == domain.EventHandlerKindRule {
+		switch d.HandlerKind {
+		case domain.EventHandlerKindRule:
 			subject = "A task rule"
 			if d.RuleName != "" {
 				subject = `Task rule "` + d.RuleName + `"`
 			}
 			stopped, working = "It matches no event until the filter is changed.", "It still matches the filter's other values."
 			link = notify.Link("Open task rule", notify.Routes.TaskRule(d.HandlerID))
+		case domain.EventHandlerKindNotify:
+			subject = "A notify rule"
+			if d.RuleName != "" {
+				subject = `Notify rule "` + d.RuleName + `"`
+			}
+			stopped, working = "It tells no one until the filter is changed.", "It still matches the filter's other values."
+			link = notify.Link("Open notify rule", notify.Routes.NotifyRule(d.HandlerID))
 		}
 		var gone []string
 		if part := goneIDs(d.Statuses, "a status", "statuses", "no Jira project this team tracks has"); part != "" {

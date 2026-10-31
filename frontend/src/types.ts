@@ -326,6 +326,11 @@ export interface Conversation {
   // {} for a conversation that produced nothing, absent under the transient
   // guard.
   deliverable_counts?: Partial<Record<DeliverableKind, number>>
+  // artifact_count is the number of objects this conversation's agent changed,
+  // read from the external-action ledger; artifact_counts is the same set by
+  // object kind ({} when it changed nothing). See ConversationArtifact.
+  artifact_count?: number
+  artifact_counts?: Partial<Record<ObjectKind, number>>
   // actor_agent_id / actor_agent_name identify the bot that executed this
   // conversation (conversations.actor_agent_id), denormalized from
   // agents.display_name via a JOIN on the conversation read projections. The card
@@ -418,6 +423,43 @@ export interface Deliverable {
   created_at: string
 }
 
+// ObjectKind is the closed set of object kinds an external action can name
+// (internal/domain/external_action_object.go ObjectKinds).
+export type ObjectKind =
+  | 'pull_request'
+  | 'issue'
+  | 'repository'
+  | 'branch'
+  | 'label'
+  | 'release'
+  | 'workflow'
+  | 'workflow_run'
+  | 'review'
+  | 'comment'
+  | 'message'
+
+// ConversationArtifact mirrors an item of
+// POST /api/agent/conversations/{id}/artifacts/list (internal/server/agent.go
+// artifactJSON): one object the conversation's agent changed, however many
+// actions it took on it. It says what the run did (last_action, action_count),
+// not the object's current state. object_id is opaque and safe in a URL; it
+// is the value the actions list's object_id filter takes. deliverable is the
+// conversation's deliverable that is the same object, or null.
+export interface ConversationArtifact {
+  object_id: string
+  object_kind: ObjectKind
+  provider: string
+  scope: string
+  target: string
+  url: string
+  entity_id?: string
+  last_action: string
+  action_count: number
+  first_at: string
+  last_at: string
+  deliverable: { id: string; kind: DeliverableKind; state: string } | null
+}
+
 // ActivityDeliverable is the activity feed's Objects-lens row shape (TFAC-483): a
 // Deliverable plus the owning team's id + name. The team fields are populated ONLY
 // by the org-wide feed (POST /api/orgs/{id}/usage/deliverables/list) so a cross-team
@@ -448,6 +490,10 @@ export interface ActivityAction {
   conversation_id?: string
   actor_user_id?: string
   performed_by: 'agent' | 'person' | 'system'
+  // The object the action changed: absent on a row that names none.
+  // object_id is the same opaque value a ConversationArtifact carries.
+  object_kind?: ObjectKind
+  object_id?: string
   credential: string
   details?: unknown
   occurred_at: string
@@ -669,6 +715,9 @@ interface EventHandlerBase {
   // anyone), surfacing them to the team's board. Default off — visibility
   // otherwise rides ownership.
   applies_to_unowned: boolean
+  // creator_user_id: who authored a user-source handler; absent on a shipped
+  // one. A personal notify rule tells this user.
+  creator_user_id?: string
   created_at: string
   updated_at: string
   // source_available: whether the org can still produce events of this
@@ -697,7 +746,16 @@ export interface TriggerHandler extends EventHandlerBase {
   min_autonomy_suitability: number
 }
 
-export type EventHandler = RuleHandler | TriggerHandler
+// NotifyAudience: who a notify rule tells — its creator, or its team's members.
+export type NotifyAudience = 'creator' | 'team'
+
+export interface NotifyHandler extends EventHandlerBase {
+  kind: 'notify'
+  name: string
+  audience: NotifyAudience
+}
+
+export type EventHandler = RuleHandler | TriggerHandler | NotifyHandler
 
 export function isRule(h: EventHandler): h is RuleHandler {
   return h.kind === 'rule'

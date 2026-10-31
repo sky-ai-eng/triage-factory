@@ -231,7 +231,7 @@ func TestSourceRegistry_HandleEvent_OwnedRoutingCreatesTask(t *testing.T) {
 }
 
 // TestSourceRegistry_HandleEvent_TracksScopeFalse_DropsHandler pins wire
-// point 3 (teamTracksEventScope, team_routing.go): when the hook's
+// point 3 (scopeFor, team_routing.go): when the hook's
 // TracksScope reports false, the only matched handler is gated out before it
 // ever reaches ownership resolution, so no task is created at all — the same
 // shape as TestGate_DisjointRepos_DropsUntrackingTeam for the built-in

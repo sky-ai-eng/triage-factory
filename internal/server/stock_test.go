@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -438,4 +439,24 @@ func TestStockClaimAndDone_AddressJiraByIssueID(t *testing.T) {
 		}
 	}
 	fake.assertIssuesNamed(t, dbseed.JiraIssueID("SKY-1"), dbseed.JiraIssueID("SKY-2"))
+}
+
+// Done closes the entity without routing an event, so no close relation
+// resolves its event notifications; the resolve runs the closed-entity pass
+// for its org at once.
+func TestStockDone_ResolvesTheClosedEntitysNotifications(t *testing.T) {
+	keyring.MockInit()
+	rec := notifytest.Record(t)
+	s := newTestServer(t)
+	seedStockConfig(t, s)
+	seedStockTicket(t, s, "SKY-3")
+	fake := newJiraIssueFake(t, statusToDoID, "")
+	s.jiraResolver = &recordingJiraResolver{userClient: fake.client()}
+
+	if resp, body := postStock(t, s, "done", "e_stock_SKY-3"); body.Applied != 1 {
+		t.Fatalf("done = %d %s, want it applied", resp.Code, resp.Body.String())
+	}
+	if n := rec.ClosedEntityResolves(runmode.LocalDefaultOrgID); n != 1 {
+		t.Errorf("closed-entity resolves = %d; want 1", n)
+	}
 }

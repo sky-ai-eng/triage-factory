@@ -50,7 +50,13 @@ func (eh *eventHandlersHandler) gateHandlerWrite(w http.ResponseWriter, r *http.
 	if existing == nil {
 		return true // let the handler's own nil-check render the 404
 	}
-	return eh.az.RequireTeamWrite(w, r, orgID, userID, existing.TeamID)
+	if !eh.az.RequireTeamWrite(w, r, orgID, userID, existing.TeamID) {
+		return false
+	}
+	if existing.Kind == domain.EventHandlerKindNotify {
+		return eh.requireNotifyWrite(w, r, orgID, userID, existing.TeamID, existing.CreatorUserID, existing.Audience)
+	}
+	return true
 }
 
 // /api/event-handlers — the ordered evaluation surface task_rules and
@@ -65,6 +71,7 @@ func (eh *eventHandlersHandler) gateHandlerWrite(w http.ResponseWriter, r *http.
 //	GET    /api/event-handlers/{id}                   — single read (both kinds)
 //	POST   /api/event-handlers/rules                  — create a rule
 //	POST   /api/event-handlers/triggers               — create a trigger
+//	POST   /api/event-handlers/notify                 — create a notify rule
 //	PATCH  /api/event-handlers/{id}                   — partial update, decoded
 //	                                                    against the row's kind
 //	DELETE /api/event-handlers/{id}                   — delete (soft for shipped rows)
@@ -81,7 +88,7 @@ func (eh *eventHandlersHandler) gateHandlerWrite(w http.ResponseWriter, r *http.
 // now validated strictly — a corrupt team filter used to be dropped, which
 // widened the read to every team.
 type eventHandlerListRequest struct {
-	// Kind is "rule", "trigger", or omitted (both).
+	// Kind is "rule", "trigger", "notify", or omitted (every kind).
 	Kind   string `json:"kind"`
 	TeamID string `json:"team_id"`
 
@@ -106,8 +113,10 @@ func (eh *eventHandlersHandler) handleEventHandlersList(w http.ResponseWriter, r
 		return
 	}
 	var v httpx.Validation
-	if req.Kind != "" && req.Kind != domain.EventHandlerKindRule && req.Kind != domain.EventHandlerKindTrigger {
-		v.Invalid("kind", "kind must be 'rule', 'trigger', or omitted (returns both)")
+	switch req.Kind {
+	case "", domain.EventHandlerKindRule, domain.EventHandlerKindTrigger, domain.EventHandlerKindNotify:
+	default:
+		v.Invalid("kind", "kind must be 'rule', 'trigger', 'notify', or omitted (returns every kind)")
 	}
 	teamIDFilterField(&v, req.TeamID)
 	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(eventHandlerListFilterKey{
@@ -885,6 +894,11 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 			}
 		}
 
+	case domain.EventHandlerKindNotify:
+		if !eh.applyNotifyPatch(w, r, orgID, userID, *existing, &updated, &bad, &unproc) {
+			return
+		}
+
 	default:
 		internalError(w, "event_handlers", fmt.Errorf("event handler %s has unknown kind %q", existing.ID, existing.Kind))
 		return
@@ -1307,13 +1321,13 @@ func (eh *eventHandlersHandler) handleEventHandlerReorder(w http.ResponseWriter,
 		return
 	}
 	rules := map[string]domain.EventHandler{}
-	triggers := map[string]struct{}{}
+	others := map[string]string{} // a trigger's or notify rule's id → its kind
 	for _, h := range visible {
 		if h.Kind == domain.EventHandlerKindRule {
 			rules[h.ID] = h
 			continue
 		}
-		triggers[h.ID] = struct{}{}
+		others[h.ID] = h.Kind
 	}
 
 	var v httpx.Validation
@@ -1334,8 +1348,11 @@ func (eh *eventHandlersHandler) handleEventHandlerReorder(w http.ResponseWriter,
 			}
 			continue
 		}
-		if _, isTrigger := triggers[id]; isTrigger {
-			v.Add(httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: id + " is a trigger; only rules carry a sort order", Field: field})
+		if kind, isOther := others[id]; isOther {
+			if kind == domain.EventHandlerKindNotify {
+				kind = "notify rule"
+			}
+			v.Add(httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: id + " is a " + kind + "; only rules carry a sort order", Field: field})
 			continue
 		}
 		v.Add(httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: "no rule " + id + " is visible to you", Field: field})

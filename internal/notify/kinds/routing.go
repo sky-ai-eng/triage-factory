@@ -89,10 +89,8 @@ var AutomationConflict = notify.Notice(notify.NoticeSpec[Conflict]{
 
 // eventLabel is an event type's catalog label, quoted, for copy.
 func eventLabel(eventType string) string {
-	for _, et := range domain.AllEventTypes() {
-		if et.ID == eventType {
-			return `"` + et.Label + `"`
-		}
+	if label, ok := catalogLabel(eventType); ok {
+		return `"` + label + `"`
 	}
 	return "this event"
 }

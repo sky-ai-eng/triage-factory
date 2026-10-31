@@ -143,12 +143,15 @@ type Notification struct {
 	FirstSeenAt time.Time
 	LastSeenAt  time.Time
 	SeenCount   int
-	// EscalatedAt is FirstSeenAt until the priority first increases; marks
-	// older than it no longer count.
+	// EscalatedAt is FirstSeenAt until the priority first increases, or an
+	// event notice recurs; marks older than it no longer count.
 	EscalatedAt    time.Time
 	ResolvedAt     *time.Time
 	ResolvedReason NotificationResolvedReason
 	ExpiresAt      *time.Time
+	// EntityID is the entity an event row is about; set exactly when Origin
+	// is NotificationOriginEvent.
+	EntityID string
 }
 
 type NotificationMarks struct {

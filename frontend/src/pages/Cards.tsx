@@ -9,12 +9,13 @@ import { useOrgHref } from '../hooks/useOrgHref'
 import { useTeamFilter } from '../hooks/useTeams'
 import { usePagedList } from '../hooks/usePagedList'
 import { TASK_LIST_PATH, queueListBody } from '../lib/taskList'
-import { SlidersHorizontal } from 'lucide-react'
+import { Bell, SlidersHorizontal } from 'lucide-react'
 import EventBadge from '../components/EventBadge'
 import SourceBadge from '../components/SourceBadge'
 import RequestedReviewerBadge from '../components/RequestedReviewerBadge'
 import PromptPicker from '../components/PromptPicker'
 import TaskRulesPanel from '../components/TaskRulesPanel'
+import NotifyRulesPanel from '../components/NotifyRulesPanel'
 import TeamScopeSelect from '../components/TeamScopeSelect'
 import { apiFetch } from '../lib/apiClient'
 import { snoozeUntilFromPreset } from '../lib/snooze'
@@ -61,6 +62,39 @@ export default function Cards() {
     )
   }, [setParams])
   const toggleRules = () => (rulesPanelOpen ? closeRules() : setRulesOpen(true))
+  // Notify rules sit beside task rules, linked as ?notify_rule=… the same way.
+  const [notifyOpen, setNotifyOpen] = useState(false)
+  const linkedNotifyRule = params.get('notify_rule')
+  const notifyPanelOpen = notifyOpen || linkedNotifyRule !== null
+  const closeNotify = useCallback(() => {
+    setNotifyOpen(false)
+    setParams(
+      (prev) => {
+        const next = new URLSearchParams(prev)
+        next.delete('notify_rule')
+        return next
+      },
+      { replace: true },
+    )
+  }, [setParams])
+  const toggleNotify = () => (notifyPanelOpen ? closeNotify() : setNotifyOpen(true))
+  const notifyButton = (
+    <button
+      onClick={toggleNotify}
+      className={`flex items-center gap-1.5 text-ui font-medium px-3 py-1.5 rounded-full border transition-colors ${
+        notifyPanelOpen
+          ? 'bg-warm/10 text-warm border-warm/20'
+          : 'text-ink-3 border-line-1 hover:text-ink-2'
+      }`}
+      title="Notify rules"
+    >
+      <Bell size={14} />
+      <span>Notify</span>
+    </button>
+  )
+  const notifyPanel = (
+    <NotifyRulesPanel open={notifyPanelOpen} onClose={closeNotify} openRuleId={linkedNotifyRule} />
+  )
   const hasFetched = useRef(false)
   const navigate = useNavigate()
   const orgHref = useOrgHref()
@@ -274,8 +308,10 @@ export default function Cards() {
             <SlidersHorizontal size={14} />
             <span>Rules</span>
           </button>
+          {notifyButton}
         </div>
         <TaskRulesPanel open={rulesPanelOpen} onClose={closeRules} openRuleId={linkedRule} />
+        {notifyPanel}
       </div>
     )
   }
@@ -301,6 +337,7 @@ export default function Cards() {
             <SlidersHorizontal size={14} />
             <span>Rules</span>
           </button>
+          {notifyButton}
         </div>
 
         {/* Card stack */}
@@ -396,6 +433,7 @@ export default function Cards() {
       />
 
       <TaskRulesPanel open={rulesPanelOpen} onClose={closeRules} openRuleId={linkedRule} />
+      {notifyPanel}
     </>
   )
 }

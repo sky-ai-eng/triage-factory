@@ -360,7 +360,7 @@ func (r *Router) deferredCloseReason(ctx context.Context, orgID string, evt doma
 				continue
 			}
 		}
-		if rel.keep != nil && !rel.keep(evt, cctx, task) {
+		if rel.keep != nil && !rel.keep(evt, cctx, taskTarget(task)) {
 			continue
 		}
 		return rel.reason(), true, nil

@@ -234,7 +234,7 @@ func TestGate_MatchesTheEntitysRepositoryByID(t *testing.T) {
 		{"key spelling team A's repository, team A", ciEvent(t, keyLies, "owner/new"), teamA, false},
 		{"key spelling team A's repository, the team tracking its row", ciEvent(t, keyLies, "owner/new"), teamB, true},
 	} {
-		if got := r.teamTracksEventScope(ctx, c.evt, c.team); got != c.wantPass {
+		if got := r.scopeFor(ctx, c.evt, c.team).open; got != c.wantPass {
 			t.Errorf("%s: gate = %v, want %v", c.name, got, c.wantPass)
 		}
 	}
@@ -257,7 +257,7 @@ func TestGate_EscapeHatches(t *testing.T) {
 
 	// (1) NULL/empty-team handler (multi-mode system/org-union row) →
 	// allowed regardless of tracking. This is acceptance #6's mechanism.
-	if !r.handlerScopeMatchesEvent(context.Background(), githubEvt, domain.EventHandler{TeamID: ""}, map[string]bool{}) {
+	if !r.handlerScopeMatchesEvent(context.Background(), githubEvt, domain.EventHandler{TeamID: ""}, teamScopeCache{}) {
 		t.Error("empty-team (system) handler should skip the gate")
 	}
 
@@ -270,24 +270,24 @@ func TestGate_EscapeHatches(t *testing.T) {
 	// (2) teamRepos + jiraRules unwired (nil) → pre-ticket behavior, never
 	// drops, for either source.
 	rNil := NewRouter(nil, nil, nil, nil, nil, nil, nil, st.Conversations, st.Entities, st.PendingFirings, st.Events, st.Orgs, st.Teams, nil, nil, nil, nil, nil, noopScorer{}, nil)
-	if !rNil.handlerScopeMatchesEvent(context.Background(), githubEvt, domain.EventHandler{TeamID: "some-real-team"}, map[string]bool{}) {
+	if !rNil.handlerScopeMatchesEvent(context.Background(), githubEvt, domain.EventHandler{TeamID: "some-real-team"}, teamScopeCache{}) {
 		t.Error("nil teamRepos store should skip the GitHub gate")
 	}
-	if !rNil.handlerScopeMatchesEvent(context.Background(), jiraEvt, domain.EventHandler{TeamID: "some-real-team"}, map[string]bool{}) {
+	if !rNil.handlerScopeMatchesEvent(context.Background(), jiraEvt, domain.EventHandler{TeamID: "some-real-team"}, teamScopeCache{}) {
 		t.Error("nil jiraRules store should skip the Jira gate")
 	}
 
 	// (3) Unknown source → ungated even with a gate-active router + a real
 	// team that tracks nothing.
 	otherEvt := domain.Event{EventType: "system:poll:done", MetadataJSON: `{}`, OrgID: runmode.LocalDefaultOrgID}
-	if !r.handlerScopeMatchesEvent(context.Background(), otherEvt, domain.EventHandler{TeamID: "some-real-team"}, map[string]bool{}) {
+	if !r.handlerScopeMatchesEvent(context.Background(), otherEvt, domain.EventHandler{TeamID: "some-real-team"}, teamScopeCache{}) {
 		t.Error("non-github/jira event should skip the scope gate")
 	}
 
 	// (4) Malformed/empty project metadata on a gate-active router →
 	// fail-open (no drop), same policy as the GitHub branch.
 	emptyProjEvt := domain.Event{EventType: domain.EventJiraIssueAssigned, MetadataJSON: `{}`, OrgID: runmode.LocalDefaultOrgID}
-	if !r.handlerScopeMatchesEvent(context.Background(), emptyProjEvt, domain.EventHandler{TeamID: "some-real-team"}, map[string]bool{}) {
+	if !r.handlerScopeMatchesEvent(context.Background(), emptyProjEvt, domain.EventHandler{TeamID: "some-real-team"}, teamScopeCache{}) {
 		t.Error("jira event with no project should fail open (skip the gate)")
 	}
 }
@@ -578,7 +578,7 @@ func TestJiraGate_KeyChangedReachesBothProjectsTeams(t *testing.T) {
 	}
 	for _, tc := range cases {
 		for team, want := range tc.want {
-			if got := r.handlerScopeMatchesEvent(ctx, tc.evt, domain.EventHandler{TeamID: team}, map[string]bool{}); got != want {
+			if got := r.handlerScopeMatchesEvent(ctx, tc.evt, domain.EventHandler{TeamID: team}, teamScopeCache{}); got != want {
 				t.Errorf("%s: gate for team %s = %v, want %v", tc.name, team, got, want)
 			}
 		}
@@ -611,7 +611,7 @@ func TestJiraGate_FollowsTheProjectAcrossAKeyRename(t *testing.T) {
 	check := func(when string, evt domain.Event, want map[string]bool) {
 		t.Helper()
 		for team, w := range want {
-			if got := r.handlerScopeMatchesEvent(ctx, evt, domain.EventHandler{TeamID: team}, map[string]bool{}); got != w {
+			if got := r.handlerScopeMatchesEvent(ctx, evt, domain.EventHandler{TeamID: team}, teamScopeCache{}); got != w {
 				t.Errorf("%s: gate for team %s = %v, want %v", when, team, got, w)
 			}
 		}
