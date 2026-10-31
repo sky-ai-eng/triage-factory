@@ -366,14 +366,17 @@ func (h *slackExecHandler) react(ctx context.Context, rt agenthost.ExtensionRunt
 
 	rootTS := h.resolveMessageRootTS(ctx, caller, token, a.Channel, a.TS)
 	detail, _ := json.Marshal(map[string]string{"emoji": a.Emoji})
-	rt.Record(ctx, nil, &domain.ExternalAction{
+	act := &domain.ExternalAction{
 		Provider:   domain.ProviderSlack,
 		Action:     domain.ActionSlackReactionAdded,
 		Target:     domain.SlackSourceID(a.Channel, rootTS),
 		ExternalID: a.TS,
 		Credential: domain.CredentialSlackBot,
 		DetailJSON: string(detail),
-	}, domain.EntityContainer{})
+	}
+	// The object is the message reacted to.
+	act.SetObject(domain.ObjectKindMessage, slackMessageObjectKey(channel.Row, a.TS))
+	rt.Record(ctx, nil, act, domain.EntityContainer{})
 	return slackReactResult{}, nil
 }
 
@@ -459,7 +462,19 @@ func (h *slackExecHandler) recordMessage(ctx context.Context, rt agenthost.Exten
 		URL:        permalink,
 		Credential: domain.CredentialSlackBot,
 	}
+	act.SetObject(domain.ObjectKindMessage, slackMessageObjectKey(channelRow, ts))
 	rt.Record(ctx, a, act, domain.EntityContainer{})
+}
+
+// slackMessageObjectKey is the object_key of the message ts in the channel
+// whose registry row is channelRow — the key the message's deliverable is keyed
+// on — or "" when either half is unknown.
+func slackMessageObjectKey(channelRow, ts string) string {
+	resource := domain.SlackMessageResource(channelRow, ts)
+	if resource == "" {
+		return ""
+	}
+	return domain.ObjectKey(domain.ProviderSlack, domain.DeliverableKindMessage, resource, "")
 }
 
 // permalinkBestEffort resolves ts's shareable link; "" on any failure — a

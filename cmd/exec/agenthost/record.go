@@ -227,7 +227,7 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 	}
 	var about resolvedEntity
 	if act != nil {
-		about = resolveActionReferences(ctx, stores, info, a, act, container, subject)
+		about = resolveActionReferences(ctx, stores, info, act, container, subject)
 	}
 	if err == nil {
 		var deliverableErr error
@@ -478,28 +478,24 @@ func resolveDeliverableEntity(ctx context.Context, stores db.Stores, info Conver
 //
 // An action about the object the deliverable is about reuses subject, the
 // deliverable's entity, rather than resolving it again. Any other action resolves
-// (and creates, like the touch) its own coordinate, identified by the provider
-// id off the deliverable when it is the same provider's (a Jira deliverable's key
-// names its site and issue id, a pull request's deliverable carries its node id;
-// see domain.DeliverableEntityIdentity). A failure another attempt can get past
+// (and creates, like the touch) its own coordinate. A Jira or Linear action's
+// object key names the issue it is about, a comment's key the issue the
+// comment is on, so the coordinate is identified by the site and issue id or
+// the UUID the key carries (domain.ObjectKeyEntityIdentity), whether or not a
+// deliverable is written beside the action. A GitHub action resolves by its
+// owner/repo#N target. A failure another attempt can get past
 // is retried like the write (withRecordRetry); resolving only finds, creates or
 // renames toward what the provider answered, so a second attempt lands on what
 // a first one wrote. One that still fails is logged, and the act is recorded
 // unlinked. The resolution is returned for the touch, which records it once
 // the write settles.
-func resolveActionReferences(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Deliverable, act *domain.ExternalAction, container domain.EntityContainer, subject resolvedEntity) resolvedEntity {
+func resolveActionReferences(ctx context.Context, stores db.Stores, info ConversationInfo, act *domain.ExternalAction, container domain.EntityContainer, subject resolvedEntity) resolvedEntity {
 	act.EntityID, act.RepositoryID = "", ""
 	about := subject
 	if !subject.matches(act.Provider, act.Target) {
 		c := entityCoordinate{provider: act.Provider, target: act.Target, url: act.URL, container: container}
-		// A Jira or Linear deliverable's key names the issue every action beside it
-		// is about. A pull request deliverable's node id names one pull request, and
-		// an action about that one matched subject above, so a GitHub action
-		// here is about another object and takes nothing off the deliverable.
-		if a != nil && a.Provider == act.Provider && a.Provider != domain.ProviderGitHub {
-			if scope, externalID, ok := domain.DeliverableEntityIdentity(*a); ok {
-				c.scope, c.externalID = scope, externalID
-			}
+		if scope, externalID, ok := domain.ObjectKeyEntityIdentity(act.Provider, act.ObjectKey); ok {
+			c.scope, c.externalID = scope, externalID
 		}
 		about = resolvedEntity{attempted: true, provider: act.Provider, target: act.Target}
 		var entity *domain.Entity

@@ -125,7 +125,17 @@ type ExternalAction struct {
 	// Part of the record of the act, so written once. It is a column rather
 	// than a detail_json key because the Actions feed renders every detail key
 	// to people. Empty → SQL NULL.
-	NodeID     string    `json:"node_id,omitempty"`
+	NodeID string `json:"node_id,omitempty"`
+	// ObjectKind and ObjectKey name the object the action changed, set by the
+	// writer exactly when the action landed a change, and read together with
+	// EntityID, RepositoryID and Scope (see ObjectKinds and ObjectID).
+	// ObjectKind is one of the ObjectKind* consts, ObjectKey the key of an
+	// object identified by one (a ref, a label name, a comment's key), empty
+	// for a kind identified by EntityID or RepositoryID alone. A refusal, a
+	// failure and a catch-all row name no object. Part of the record of the
+	// act, so written once. Empty → SQL NULL.
+	ObjectKind string    `json:"object_kind,omitempty"`
+	ObjectKey  string    `json:"object_key,omitempty"`
 	OccurredAt time.Time `json:"occurred_at"`
 }
 
@@ -553,7 +563,9 @@ type ExternalActionListOpts struct {
 // registry row its key names. from/to carry the lifecycle transition
 // (draft→open, pending→submitted, …). credential is the org credential the
 // write is made under, classified by the caller before it opens whatever
-// transaction this row lands in.
+// transaction this row lands in. The row names the object action changes
+// (ActionObjectKind): the pull request, through its entity, or the submitted
+// review, through its id (the deliverable's external id).
 func DeliverableAction(art *Deliverable, actorUserID, action, from, to, credential string) ExternalAction {
 	// A PR deliverable carries its html_url; a review deliverable carries none (its
 	// target is the PR), so fall back to the PR web URL from the target on the
@@ -583,5 +595,11 @@ func DeliverableAction(art *Deliverable, actorUserID, action, from, to, credenti
 	if act.EntityID == "" {
 		act.RepositoryID, _ = BranchDeliverableRepositoryID(*art)
 	}
+	key := ""
+	kind := ActionObjectKind(action)
+	if kind == ObjectKindReview {
+		key = GitHubReviewObjectKey(art.ExternalID)
+	}
+	act.SetObject(kind, key)
 	return act
 }

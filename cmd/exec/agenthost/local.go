@@ -486,8 +486,10 @@ func (c *LocalClient) postFinalizedReview(ctx context.Context, art *domain.Deliv
 	// CAS above, so there is nothing to compose it with). Best-effort like every
 	// other recording here — the GitHub write already landed and must not be
 	// unwound by a bookkeeping failure.
-	c.recordBotAction(ctx, githubAction(submitted, domain.ActionReviewSubmitted,
-		domain.DeliverableStateReviewPending, domain.DeliverableStateReviewSubmitted, c.githubCredential()))
+	act := githubAction(submitted, domain.ActionReviewSubmitted,
+		domain.DeliverableStateReviewPending, domain.DeliverableStateReviewSubmitted, c.githubCredential())
+	act.SetObject(domain.ObjectKindReview, domain.GitHubReviewObjectKey(submitted.ExternalID))
+	c.recordBotAction(ctx, act)
 
 	return ReviewFinalizeResult{Posted: true, URL: res.URL}
 }
@@ -1949,7 +1951,7 @@ func (c *LocalClient) GithubDismissReview(ctx context.Context, owner, repo strin
 	// justification is the whole of what a reader needs, and GitHub keeps it
 	// only as timeline prose.
 	detail, _ := json.Marshal(map[string]any{"message": message})
-	c.recordBotAction(ctx, &domain.ExternalAction{
+	act := &domain.ExternalAction{
 		Provider:   domain.ProviderGitHub,
 		Action:     domain.ActionReviewDismissed,
 		Target:     fmt.Sprintf("%s/%s#%d", owner, repo, number),
@@ -1957,7 +1959,9 @@ func (c *LocalClient) GithubDismissReview(ctx context.Context, owner, repo strin
 		URL:        c.githubPullAnchorURL(ctx, owner, repo, number, fmt.Sprintf("pullrequestreview-%d", reviewID)),
 		Credential: c.githubCredential(),
 		DetailJSON: string(detail),
-	})
+	}
+	act.SetObject(domain.ObjectKindReview, domain.GitHubReviewObjectKey(act.ExternalID))
+	c.recordBotAction(ctx, act)
 	return nil
 }
 
@@ -2415,7 +2419,8 @@ func (c *LocalClient) GithubReactToComment(ctx context.Context, owner, repo stri
 	if err != nil {
 		return err
 	}
-	if err := client.ReactToComment(ctx, owner, repo, commentID, emoji); err != nil {
+	space, err := client.ReactToCommentScoped(ctx, owner, repo, commentID, emoji)
+	if err != nil {
 		return err
 	}
 	// A reaction produces no deliverable — there is no object to track the lifecycle
@@ -2430,14 +2435,18 @@ func (c *LocalClient) GithubReactToComment(ctx context.Context, owner, repo stri
 	// in a request body the injector never reads, and a reaction with no content
 	// named is most of the way to unnamed.
 	detail, _ := json.Marshal(map[string]string{"emoji": emoji})
-	c.recordBotAction(ctx, &domain.ExternalAction{
+	act := &domain.ExternalAction{
 		Provider:   domain.ProviderGitHub,
 		Action:     domain.ActionReactionAdded,
 		Target:     owner + "/" + repo,
 		ExternalID: strconv.Itoa(commentID),
 		Credential: c.githubCredential(),
 		DetailJSON: string(detail),
-	})
+	}
+	// The object is the comment reacted to, in the numbering the reaction
+	// landed in.
+	act.SetObject(domain.ObjectKindComment, domain.GitHubCommentKey(space, int64(commentID)))
+	c.recordBotAction(ctx, act)
 	return nil
 }
 
@@ -2528,6 +2537,7 @@ func (c *LocalClient) recordGithubComment(ctx context.Context, owner, repo strin
 	// branch.
 	*a, _ = c.onRegistryRow(ctx, *a)
 	act := githubAction(*a, domain.ActionCommentPosted, "", "", c.githubCredential())
+	act.SetObject(domain.ObjectKindComment, domain.GitHubCommentKey(posted.Space, int64(posted.ID)))
 	if inReplyTo > 0 {
 		detail, _ := json.Marshal(map[string]any{"in_reply_to": inReplyTo})
 		a.DetailsJSON = string(detail)
@@ -2568,7 +2578,9 @@ func githubCommentAction(owner, repo string, ref ghclient.CommentRef, deleted bo
 	if ref.ID > 0 {
 		a.ExternalID = strconv.Itoa(ref.ID)
 	}
-	return githubAction(a, action, "", "", credential)
+	act := githubAction(a, action, "", "", credential)
+	act.SetObject(domain.ObjectKindComment, domain.GitHubCommentKey(ref.Space, int64(ref.ID)))
+	return act
 }
 
 // newGithubCommentDeliverable is the `comment` deliverable one act on the comment ref
@@ -2632,6 +2644,9 @@ func (c *LocalClient) recordGithubPR(ctx context.Context, owner, repo, head, bas
 	// The node id is what the reconciler's backstop matches this row to the
 	// deliverable by, when the deliverable write fails and the row lands alone.
 	act.NodeID = nodeID
+	// Identified by the pull request's entity, which the recording funnel
+	// resolves.
+	act.SetObject(domain.ObjectKindPullRequest, "")
 	c.upsertGithubDeliverable(ctx, a, act)
 }
 
@@ -2828,6 +2843,7 @@ func ghSemanticWriteAction(shape ghwrite.Shape, obs ghwrite.Observation, credent
 		URL:        obs.URL,
 		Credential: credential,
 	}
+	act.SetObject(ghShapeObject(shape, obs.GraphQL != nil))
 	detail := map[string]any{}
 	if shape.InReplyTo > 0 {
 		detail["in_reply_to"] = shape.InReplyTo
@@ -2852,6 +2868,52 @@ func ghSemanticWriteAction(shape ghwrite.Shape, obs ghwrite.Observation, credent
 		act.DetailJSON = string(payload)
 	}
 	return act
+}
+
+// ghShapeObject names the object a classified, accepted write changed, by the
+// kind its action changes (domain.ActionObjectKind) and the key that kind is
+// identified with: a comment's numbering and number, a review's id, a label's
+// name, or GitHub's release, workflow or workflow run id, all off the shape.
+// A kind identified by the entity or the repository the row's target names
+// takes no key; the recording funnel resolves those. A shape missing what its
+// key needs names nothing, which is how a GraphQL edit or delete naming a
+// comment only by node id records no object.
+//
+// A reaction names the comment it landed on when its path addressed a
+// comment, else the pull request or issue its path numbered. A GraphQL
+// reaction names its subject by node id alone, which says neither which of
+// the two it is nor, for a comment, its number, so it names nothing.
+func ghShapeObject(shape ghwrite.Shape, graphQL bool) (kind, key string) {
+	kind = domain.ActionObjectKind(shape.Action)
+	switch shape.Action {
+	case domain.ActionReactionAdded, domain.ActionReactionRemoved:
+		switch {
+		case shape.ReactsTo != "":
+			return domain.ObjectKindComment, githubCommentObjectKey(shape.ReactsTo, shape.ExternalID)
+		case graphQL:
+			return "", ""
+		}
+	}
+	switch kind {
+	case domain.ObjectKindComment:
+		return kind, githubCommentObjectKey(shape.Comment, shape.ExternalID)
+	case domain.ObjectKindReview:
+		return kind, domain.GitHubReviewObjectKey(shape.ExternalID)
+	case domain.ObjectKindBranch, domain.ObjectKindLabel, domain.ObjectKindRelease,
+		domain.ObjectKindWorkflow, domain.ObjectKindWorkflowRun:
+		return kind, shape.ExternalID
+	}
+	return kind, ""
+}
+
+// githubCommentObjectKey is domain.GitHubCommentKey for a comment number
+// carried as text, "" for one that is not a positive integer.
+func githubCommentObjectKey(space domain.GitHubCommentSpace, id string) string {
+	n, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return ""
+	}
+	return domain.GitHubCommentKey(space, n)
 }
 
 // ghFallbackWriteAction builds the opaque row for a write with no semantic name
@@ -3017,9 +3079,10 @@ func githubAction(a domain.Deliverable, action, from, to, credential string) *do
 
 // jiraAction builds the external-action row for a Jira write, carrying the
 // deliverable's concise details (status / assignee / fields / comment snippet) into
-// the audit detail_json.
+// the audit detail_json. Its object is the issue or comment the deliverable is,
+// under the deliverable's key (issueObject).
 func jiraAction(a domain.Deliverable, action, from, to string) *domain.ExternalAction {
-	return &domain.ExternalAction{
+	act := &domain.ExternalAction{
 		Provider:   domain.ProviderJira,
 		Action:     action,
 		Target:     a.Target,
@@ -3030,6 +3093,22 @@ func jiraAction(a domain.Deliverable, action, from, to string) *domain.ExternalA
 		Credential: domain.CredentialJiraOrg,
 		DetailJSON: a.DetailsJSON,
 	}
+	act.SetObject(issueObject(a))
+	return act
+}
+
+// issueObject names the object a Jira or Linear issue or comment deliverable
+// is: its kind and its dedup key, which is the object's key
+// (jira:issue:<site/issue id>, jira:comment:<site/issue id>:<comment id>, and
+// their Linear twins on the issue's UUID). Nothing for any other kind.
+func issueObject(a domain.Deliverable) (kind, key string) {
+	switch a.Kind {
+	case domain.DeliverableKindIssue:
+		return domain.ObjectKindIssue, a.DedupKey
+	case domain.DeliverableKindComment:
+		return domain.ObjectKindComment, a.DedupKey
+	}
+	return "", ""
 }
 
 // branchPushActionInfo builds the ActionBranchPushed row for a branch deliverable,
@@ -3070,6 +3149,7 @@ func branchPushActionInfo(a domain.Deliverable, info ConversationInfo, credentia
 		DedupKey:     domain.BranchPushDedupKey(info.ConversationID, repository, a.ExternalID, sha),
 		DetailJSON:   a.DetailsJSON, // {"sha":...,"new":...}
 	}
+	act.SetObject(domain.ObjectKindBranch, a.ExternalID)
 	stampActionIdentityInfo(act, info)
 	return act
 }

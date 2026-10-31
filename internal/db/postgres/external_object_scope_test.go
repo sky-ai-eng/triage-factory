@@ -144,6 +144,13 @@ func TestExternalActionReferences_Postgres(t *testing.T) {
 	dbtest.RunExternalActionReferenceConformance(t, pgExternalActionFixture(pgtest.Shared(t)))
 }
 
+// TestExternalActionObject_Postgres runs the shared ledger object-identity
+// conformance suite against the Postgres backend, on the node-id suite's
+// fixture.
+func TestExternalActionObject_Postgres(t *testing.T) {
+	dbtest.RunExternalActionObjectConformance(t, pgExternalActionFixture(pgtest.Shared(t)))
+}
+
 // pgExternalActionFixture builds a fresh org per subtest with a team and a
 // conversation in it, both pools wired against AdminDB.
 func pgExternalActionFixture(h *pgtest.Harness) dbtest.ExternalActionNodeIDFactory {
@@ -164,6 +171,14 @@ func pgExternalActionFixture(h *pgtest.Harness) dbtest.ExternalActionNodeIDFacto
 					actionID, age.Seconds()); err != nil {
 					t.Fatalf("backdate occurred_at of %s: %v", actionID, err)
 				}
+			},
+			ObjectIDOf: func(t *testing.T, actionID string) (string, bool) {
+				t.Helper()
+				var id sql.NullString
+				if err := h.AdminDB.QueryRow(`SELECT `+pgstore.ActionObjectIDSQLForTest+` FROM external_actions ea WHERE ea.id = $1`, actionID).Scan(&id); err != nil {
+					t.Fatalf("object id of %s: %v", actionID, err)
+				}
+				return id.String, id.Valid
 			},
 		}
 	}

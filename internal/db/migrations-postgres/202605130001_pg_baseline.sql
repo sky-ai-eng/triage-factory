@@ -459,6 +459,14 @@ CREATE TABLE public.access_change_log (
 -- another row of the same object: a merge or stub fold of two entities
 -- re-points entity_id onto the survivor, and a rename absorbing a bare registry
 -- row re-points repository_id onto the renamed row.
+-- object_kind and object_key name the object the act changed, set exactly
+-- when the act landed a change, NULL on a refusal, a failure and a catch-all
+-- row. The kind's identifying columns are read together (domain.ObjectID):
+-- entity_id for a pull request or a GitHub issue, repository_id for a
+-- repository, repository_id + object_key for a branch (the ref), a label (its
+-- name), a release, a workflow or a workflow run (GitHub's id), and scope +
+-- object_key for a Jira or Linear issue, a review, a comment and a Slack
+-- message (the object's key). Written once, like the rest of the record.
 CREATE TABLE public.external_actions (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
@@ -481,6 +489,11 @@ CREATE TABLE public.external_actions (
     node_id text,
     entity_id uuid,
     repository_id uuid,
+    object_kind text
+        CONSTRAINT external_actions_object_kind_check CHECK (object_kind IN (
+            'pull_request', 'issue', 'repository', 'branch', 'label', 'release',
+            'workflow', 'workflow_run', 'review', 'comment', 'message')),
+    object_key text,
     occurred_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
@@ -2039,6 +2052,10 @@ CREATE INDEX idx_external_actions_conversation ON public.external_actions USING 
 -- ledger rows they move by entity_id; a repository's rename by repository_id.
 CREATE INDEX idx_external_actions_entity ON public.external_actions USING btree (entity_id) WHERE (entity_id IS NOT NULL);
 CREATE INDEX idx_external_actions_repository ON public.external_actions USING btree (repository_id) WHERE (repository_id IS NOT NULL);
+
+
+-- The rows that changed one keyed object, found by its key within a scope.
+CREATE INDEX idx_external_actions_object_key ON public.external_actions USING btree (org_id, scope, object_key) WHERE (object_key IS NOT NULL);
 
 
 CREATE UNIQUE INDEX idx_deliverables_dedup ON public.deliverables USING btree (org_id, scope, dedup_key);

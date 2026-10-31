@@ -18,12 +18,14 @@ import (
 // RunExternalActionNodeIDConformance: the store bundle, the org every call is
 // for, a team the rows hang off (deliverables.team_id is required), a
 // conversation in that team the ledger rows name as the one that opened their
-// pull request, and a way to move a ledger row's occurred_at into the past, in
-// the shape the column's default writes.
+// pull request, a way to move a ledger row's occurred_at into the past, in
+// the shape the column's default writes, and a way to evaluate the dialect's
+// SQL twin of domain.ObjectID for one row (ok=false where it is NULL).
 type ExternalActionNodeIDFixture struct {
 	Stores                        db.Stores
 	OrgID, TeamID, ConversationID string
 	BackdateAction                func(t *testing.T, actionID string, age time.Duration)
+	ObjectIDOf                    func(t *testing.T, actionID string) (string, bool)
 }
 
 // ExternalActionNodeIDFactory builds a fresh fixture per subtest.
