@@ -5,21 +5,24 @@ import (
 	"database/sql"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
+	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
-// testRouterDeps is a RouterDeps over database's SQLite stores with every field
-// set but the three team↔scope tracking gates (TeamRepos, JiraRules,
-// LinearRules). A wired gate drops the handlers of every team that tracks
-// nothing, which is every team in a test that seeds no tracking, so a test of
-// the gates sets them alongside the tracking it seeds. A test overrides the
-// fields it varies and builds the router with newTestRouter.
+// testRouterDeps is a RouterDeps with every field set, over database's SQLite
+// stores. The three tracking stores answer that every team tracks every
+// repository, Jira project and Linear team (see tracksEveryRepo), so a test
+// that seeds no tracking routes through the gates without being dropped by
+// them; a test of the gates sets the SQLite stores and seeds what each team
+// tracks. A test overrides the fields it varies and builds the router with
+// newTestRouter.
 func testRouterDeps(database *sql.DB) RouterDeps {
 	st := sqlitestore.New(database)
 	return RouterDeps{
@@ -38,6 +41,9 @@ func testRouterDeps(database *sql.DB) RouterDeps {
 		ExternalActions: st.ExternalActions,
 		Orgs:            st.Orgs,
 		Teams:           st.Teams,
+		TeamRepos:       tracksEveryRepo{st.TeamGitHubRepos},
+		JiraRules:       tracksEveryJiraProject{st.JiraStatusRules},
+		LinearRules:     tracksEveryLinearTeam{st.LinearTeamRules},
 		GitHubGroups:    st.TeamGitHubGroups,
 		ReDerive:        st.TaskReDerive,
 		EventSources:    st.OrgEventSources,
@@ -59,6 +65,30 @@ func newTestRouter(deps RouterDeps) *Router {
 		panic(err)
 	}
 	return r
+}
+
+// tracksEveryRepo, tracksEveryJiraProject and tracksEveryLinearTeam are the
+// tracking stores of a test that seeds no tracking: the gate's lookup answers
+// that the team tracks what the event names, and every other method is the
+// SQLite store's. The gate still decides everything before the lookup — an
+// event naming no entity, repository or project is undecided, and a Linear
+// event naming no Linear team is refused.
+type tracksEveryRepo struct{ dbpkg.TeamGitHubReposStore }
+
+func (tracksEveryRepo) TracksRepositorySystem(context.Context, string, string) (bool, error) {
+	return true, nil
+}
+
+type tracksEveryJiraProject struct{ dbpkg.JiraStatusRulesStore }
+
+func (tracksEveryJiraProject) TracksJiraProjectSystem(context.Context, string, string, string) (bool, error) {
+	return true, nil
+}
+
+type tracksEveryLinearTeam struct{ dbpkg.LinearTeamRulesStore }
+
+func (tracksEveryLinearTeam) TracksTeamSystem(context.Context, string, string, string) (bool, error) {
+	return true, nil
 }
 
 // refusingDelegator is the Spawner of a test that starts no run: Delegate
@@ -96,9 +126,6 @@ var nilSafeRouterDeps = map[string]bool{
 	"Agents":       true,
 	"TeamAgents":   true,
 	"Users":        true,
-	"TeamRepos":    true,
-	"JiraRules":    true,
-	"LinearRules":  true,
 	"GitHubGroups": true,
 	"BootEpoch":    true,
 }
@@ -108,10 +135,7 @@ var nilSafeRouterDeps = map[string]bool{
 // builds. Walking the struct means a field added later is tested as required
 // unless it is listed nil-safe above.
 func TestNewRouter_RefusesEachMissingRequiredField(t *testing.T) {
-	database := newTestDB(t)
-	st := sqlitestore.New(database)
-	full := testRouterDeps(database)
-	full.TeamRepos, full.JiraRules, full.LinearRules = st.TeamGitHubRepos, st.JiraStatusRules, st.LinearTeamRules
+	full := testRouterDeps(newTestDB(t))
 	typ := reflect.TypeOf(full)
 	for i := range typ.NumField() {
 		name := typ.Field(i).Name
@@ -159,14 +183,26 @@ func TestNewRouter_NamesEveryMissingField(t *testing.T) {
 	}
 }
 
+// TestNewRouter_RefusesATypedNil pins that a required field holding a nil
+// pointer is refused like an unset one: production wires concrete pointers, and
+// a nil one compares unequal to nil once it is in the interface.
+func TestNewRouter_RefusesATypedNil(t *testing.T) {
+	deps := testRouterDeps(newTestDB(t))
+	deps.Spawner = (*stubDelegator)(nil)
+	deps.Publisher = (*fakeDispositionPublisher)(nil)
+	_, err := NewRouter(deps)
+	if err == nil {
+		t.Fatal("NewRouter with a typed-nil Spawner and Publisher = nil error; want a refusal")
+	}
+	for _, name := range []string{"Spawner", "Publisher"} {
+		if !namesField(err, name) {
+			t.Errorf("error %q does not name the typed-nil field %s", err, name)
+		}
+	}
+}
+
 // namesField reports whether err's message lists name as a word of its own,
 // so Events is not found inside EventQueue.
 func namesField(err error, name string) bool {
-	words := strings.FieldsFunc(err.Error(), func(r rune) bool { return r == ' ' || r == ',' })
-	for _, w := range words {
-		if w == name {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(strings.FieldsFunc(err.Error(), func(r rune) bool { return r == ' ' || r == ',' }), name)
 }

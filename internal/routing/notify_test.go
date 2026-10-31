@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -135,9 +136,16 @@ func TestNotify_NoticeAndTerminatingClose(t *testing.T) {
 	}
 }
 
+// erroringTeamRepos fails the GitHub gate's lookup.
+type erroringTeamRepos struct{ dbpkg.TeamGitHubReposStore }
+
+func (erroringTeamRepos) TracksRepositorySystem(context.Context, string, string) (bool, error) {
+	return false, errors.New("boom: team_github_repos read failed")
+}
+
 // The notify gate fails closed where the task gate fails open. A rule whose
-// team does not track the entity's repository tells nobody; with no tracking
-// store wired, nothing can be shown, so a notify rule tells nobody while a
+// team does not track the entity's repository tells nobody; when the tracking
+// lookup fails, nothing can be shown, so a notify rule tells nobody while a
 // rule on the same event still makes its task.
 func TestNotify_GateFailsClosed(t *testing.T) {
 	rec := notifytest.Record(t)
@@ -158,12 +166,12 @@ func TestNotify_GateFailsClosed(t *testing.T) {
 	}
 
 	seedMatchAllCIRule(t, database, runmode.LocalDefaultTeamID)
-	r.teamRepos = nil
+	r.teamRepos = erroringTeamRepos{st.TeamGitHubRepos}
 	if err := r.HandleEvent(ctx, ciEvent(t, untracked.ID, "other/repo")); err != nil {
-		t.Fatalf("route with no tracking store: %v", err)
+		t.Fatalf("route with a failing tracking lookup: %v", err)
 	}
 	if got := rec.Events(runmode.LocalDefaultOrgID); len(got) != 0 {
-		t.Errorf("raised %+v with no tracking store; want nothing", got)
+		t.Errorf("raised %+v with a failing tracking lookup; want nothing", got)
 	}
 	if n := activeTaskCount(t, database, untracked.ID); n != 1 {
 		t.Errorf("active tasks = %d; want the rule's task, whose gate fails open", n)

@@ -298,14 +298,11 @@ func snapshotIsTerminal(entity domain.Entity, doneByProject map[string][]domain.
 // project), so any team's notion of "done" is what the poll would have closed
 // the shared entity on, and the checker has to read terminality the same way.
 //
-// Nil store (test wiring that never passes one) or a read failure yields an
-// empty map: no Jira entity is then treated as terminal, so the pass degrades
-// to GitHub-only rather than guessing at a status vocabulary it couldn't load.
+// A read failure yields an empty map: no Jira entity is then treated as
+// terminal, so the pass degrades to GitHub-only rather than guessing at a
+// status vocabulary it couldn't load.
 func (r *Router) jiraDoneStatusesByProject(ctx context.Context, orgID string) map[string][]domain.JiraStatusRef {
 	out := map[string][]domain.JiraStatusRef{}
-	if r.jiraRules == nil {
-		return out
-	}
 	settings, err := r.orgs.GetSettingsSystem(ctx, orgID)
 	if err != nil {
 		lifecycleLog.Error("terminal checker: read org settings for the jira site failed, skipping jira this pass", "org", orgID, "error", err)
@@ -335,13 +332,10 @@ func (r *Router) jiraDoneStatusesByProject(ctx context.Context, orgID string) ma
 // linearDoneStatesByTeam is jiraDoneStatusesByProject for Linear: each Linear
 // team's done states, set-unioned across every TF team that tracks it, in the
 // order the poller's toTrackerLinearRules merges them, read from the org's
-// current Linear workspace. Nil store or a read failure yields an empty map, so
-// no Linear entity reads as terminal that pass.
+// current Linear workspace. A read failure yields an empty map, so no Linear
+// entity reads as terminal that pass.
 func (r *Router) linearDoneStatesByTeam(ctx context.Context, orgID string) map[string][]domain.LinearStateRef {
 	out := map[string][]domain.LinearStateRef{}
-	if r.linearRules == nil {
-		return out
-	}
 	settings, err := r.orgs.GetSettingsSystem(ctx, orgID)
 	if err != nil {
 		lifecycleLog.Error("terminal checker: read org settings for the linear workspace failed, skipping linear this pass", "org", orgID, "error", err)

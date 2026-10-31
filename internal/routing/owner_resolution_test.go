@@ -129,13 +129,11 @@ func (s outageGitHubGroupsStore) TeamsForGitHubTeamSystem(ctx context.Context, o
 
 // identityQueueRouter is a router a test routes an event through by the drain
 // worker — the thing that decides done vs. requeued — rather than calling
-// HandleEvent directly. spawner nil keeps testRouterDeps' delegator. The
-// tracking gates stay unwired, so only the ladder's reads are under test.
+// HandleEvent directly. The tracking gates pass every team, so only the
+// ladder's reads are under test.
 func identityQueueRouter(database *sql.DB, spawner Delegator) *Router {
 	deps := testRouterDeps(database)
-	if spawner != nil {
-		deps.Spawner = spawner
-	}
+	deps.Spawner = spawner
 	return newTestRouter(deps)
 }
 
@@ -576,10 +574,10 @@ func TestOwnerResolution_TransientIdentityFailure_WatcherDoesNotCaptureOwnership
 	}
 }
 
-// TestAuthorTeams_UnwiredStores_StillDegrade pins the row of the table that
-// deliberately did NOT change: a router with no Users store is wiring, not an
-// outage, so it still resolves to "no member owner" rather than erroring.
-func TestAuthorTeams_UnwiredStores_StillDegrade(t *testing.T) {
+// TestAuthorTeams_NoUsersStore_ResolvesEmpty pins that a router with no Users
+// store resolves to "no member owner" rather than erroring: a missing store is
+// wiring, not an outage.
+func TestAuthorTeams_NoUsersStore_ResolvesEmpty(t *testing.T) {
 	database := newTestDB(t)
 	// No Users store — RouterDeps' documented degrade.
 	deps := testRouterDeps(database)
@@ -618,7 +616,7 @@ func TestAuthorTeams_UnwiredStores_StillDegrade(t *testing.T) {
 // owner set, no error, no retry. A retry could not produce a different answer.
 func TestAuthorTeams_MalformedMetadata_ResolvesEmpty(t *testing.T) {
 	database := newTestDB(t)
-	r := identityQueueRouter(database, nil)
+	r := identityQueueRouter(database, refusingDelegator{})
 
 	for _, meta := range []string{`{"author":""}`, `not json`, `{}`} {
 		teams, err := r.authorTeams(t.Context(), runmode.LocalDefaultOrgID, domain.Event{
@@ -639,7 +637,7 @@ func TestAuthorTeams_MalformedMetadata_ResolvesEmpty(t *testing.T) {
 // This is the outcome a failed mapping read used to borrow.
 func TestRequestedPartyTeams_MalformedTeamHandle_ScopedEmpty(t *testing.T) {
 	database := newTestDB(t)
-	r := identityQueueRouter(database, nil)
+	r := identityQueueRouter(database, refusingDelegator{})
 
 	meta, _ := json.Marshal(events.GitHubPRReviewRequestedMetadata{
 		Author: "carol", Repo: "owner/repo", PRNumber: 1, RequestedTeam: "no-slash",

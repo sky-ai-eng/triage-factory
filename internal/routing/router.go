@@ -3,6 +3,7 @@ package routing
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 
 	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
@@ -189,19 +190,13 @@ type RouterDeps struct {
 	// identity's users belong to for owner routing, and the winning team's
 	// name for an automation-conflict notice. Required.
 	Teams dbpkg.TeamsStore
-	// TeamRepos is the team↔repository tracking gate. Nil-safe: for task
-	// routing the gate drops no rule or trigger, as though every team tracked
-	// every repository; for notify rules it fails closed, so they match no
-	// GitHub event.
+	// TeamRepos is the team↔repository tracking gate. Required.
 	TeamRepos dbpkg.TeamGitHubReposStore
 	// JiraRules is the team↔project tracking gate and the source of the
-	// terminal-state checker's Jira done statuses. Nil-safe the way TeamRepos
-	// is, for Jira events, and the checker reads no Jira entity as terminal.
+	// terminal-state checker's Jira done statuses. Required.
 	JiraRules dbpkg.JiraStatusRulesStore
 	// LinearRules is the team↔Linear-team tracking gate and the source of the
-	// terminal-state checker's Linear done states. Nil-safe the way TeamRepos
-	// is, for Linear events, and the checker reads no Linear entity as
-	// terminal.
+	// terminal-state checker's Linear done states. Required.
 	LinearRules dbpkg.LinearTeamRulesStore
 	// GitHubGroups maps a GitHub team to TF teams, resolving review_requested /
 	// mentioned team visibility. Nil-safe: an event naming a GitHub team routes
@@ -240,36 +235,55 @@ type RouterDeps struct {
 // missing names every required field d leaves unset, in field order.
 func (d RouterDeps) missing() []string {
 	required := []struct {
-		name string
-		set  bool
+		name  string
+		value any
 	}{
-		{"Prompts", d.Prompts != nil},
-		{"Blueprints", d.Blueprints != nil},
-		{"Handlers", d.Handlers != nil},
-		{"Tasks", d.Tasks != nil},
-		{"Conversations", d.Conversations != nil},
-		{"Entities", d.Entities != nil},
-		{"Firings", d.Firings != nil},
-		{"Events", d.Events != nil},
-		{"EventQueue", d.EventQueue != nil},
-		{"ExternalActions", d.ExternalActions != nil},
-		{"Orgs", d.Orgs != nil},
-		{"Teams", d.Teams != nil},
-		{"ReDerive", d.ReDerive != nil},
-		{"EventSources", d.EventSources != nil},
-		{"Spawner", d.Spawner != nil},
-		{"Scorer", d.Scorer != nil},
-		{"WS", d.WS != nil},
-		{"Publisher", d.Publisher != nil},
-		{"ExecutorID", d.ExecutorID != ""},
+		{"Prompts", d.Prompts},
+		{"Blueprints", d.Blueprints},
+		{"Handlers", d.Handlers},
+		{"Tasks", d.Tasks},
+		{"Conversations", d.Conversations},
+		{"Entities", d.Entities},
+		{"Firings", d.Firings},
+		{"Events", d.Events},
+		{"EventQueue", d.EventQueue},
+		{"ExternalActions", d.ExternalActions},
+		{"Orgs", d.Orgs},
+		{"Teams", d.Teams},
+		{"TeamRepos", d.TeamRepos},
+		{"JiraRules", d.JiraRules},
+		{"LinearRules", d.LinearRules},
+		{"ReDerive", d.ReDerive},
+		{"EventSources", d.EventSources},
+		{"Spawner", d.Spawner},
+		{"Scorer", d.Scorer},
+		{"WS", d.WS},
+		{"Publisher", d.Publisher},
 	}
 	var out []string
 	for _, f := range required {
-		if !f.set {
+		if isNil(f.value) {
 			out = append(out, f.name)
 		}
 	}
+	if d.ExecutorID == "" {
+		out = append(out, "ExecutorID")
+	}
 	return out
+}
+
+// isNil reports whether v is nil, including a nil pointer (or other nilable
+// value) held in a non-nil interface: production wires concrete pointers, and a
+// nil *delegate.Spawner passed as a Delegator compares unequal to nil.
+func isNil(v any) bool {
+	if v == nil {
+		return true
+	}
+	switch rv := reflect.ValueOf(v); rv.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan, reflect.Interface:
+		return rv.IsNil()
+	}
+	return false
 }
 
 // NewRouter builds a Router from deps, refusing one that leaves a required

@@ -21,7 +21,7 @@ import (
 
 const linearTestWorkspace = "ws-acme"
 
-// linearRouter is gateRouter with the Linear team-rules store wired.
+// linearRouter is gateRouter with the Linear gate reading the SQLite store too.
 func linearRouter(database *sql.DB) *Router {
 	deps := gateRouterDeps(database)
 	deps.LinearRules = sqlitestore.New(database).LinearTeamRules
@@ -77,8 +77,8 @@ func (erroringLinearRules) TracksTeamSystem(context.Context, string, string, str
 // TestLinearGate covers the team↔Linear-team gate: a team that tracks the
 // event's Linear team passes, one that does not is dropped, and an event that
 // names no Linear team is dropped for every team, since none can be shown to
-// track it. Every way the gate cannot answer — no store, malformed metadata, a
-// failed read — allows, the gate's documented fail-open posture.
+// track it. Every way the gate cannot answer — malformed metadata, a failed
+// read — allows, the gate's documented fail-open posture.
 func TestLinearGate(t *testing.T) {
 	database := newGateDB(t)
 	teamA := runmode.LocalDefaultTeamID
@@ -111,11 +111,6 @@ func TestLinearGate(t *testing.T) {
 		t.Error("malformed metadata should fail open")
 	}
 
-	unwired := linearRouter(database)
-	unwired.linearRules = nil
-	if !unwired.handlerScopeMatchesEvent(ctx, evt, domain.EventHandler{TeamID: teamB}, teamScopeCache{}) {
-		t.Error("a nil linearRules store should skip the gate")
-	}
 	failing := linearRouter(database)
 	failing.linearRules = erroringLinearRules{}
 	if !failing.handlerScopeMatchesEvent(ctx, evt, domain.EventHandler{TeamID: teamB}, teamScopeCache{}) {

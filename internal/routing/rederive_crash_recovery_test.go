@@ -86,7 +86,7 @@ func TestReDeriveWorker_ReclaimsADeadHoldersRowAndEvaluatesOnce(t *testing.T) {
 	}
 	expireReDeriveLease(t, database, taskID)
 
-	r := reDeriveRouter(t, database, nil)
+	r := reDeriveRouter(t, database, refusingDelegator{})
 	drainReDeriveOnce(t, r)
 
 	firings := firingsForTask(t, database, taskID)
@@ -202,7 +202,7 @@ func TestReDeriveWorker_ReadFailureRequeuesWithBackoffAndParksOnTheFifth(t *test
 	if err := workitem.Redrive(t.Context(), h.Conn(), h.Kind(), runmode.LocalDefaultOrgID, row.id, "operator"); err != nil {
 		t.Fatalf("Redrive: %v", err)
 	}
-	drainReDeriveOnce(t, reDeriveRouter(t, database, nil))
+	drainReDeriveOnce(t, reDeriveRouter(t, database, refusingDelegator{}))
 	if firings := firingsForTask(t, database, taskID); len(firings) != 1 {
 		t.Errorf("redriven evaluation admitted %d firing(s), want 1", len(firings))
 	}

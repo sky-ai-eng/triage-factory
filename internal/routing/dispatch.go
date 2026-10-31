@@ -343,7 +343,7 @@ func (r *Router) routeEvent(ctx context.Context, evt domain.Event, judgedAt *int
 }
 
 // publishDisposition is HandleEvent's single deferred publish point for the
-// per-event routing disposition sentinel (TFAC-593). Drops OwnershipUnrouted
+// per-event routing disposition sentinel. Drops OwnershipUnrouted
 // event types (system:* sentinels) so the router never sentinels its own
 // sentinel. Best-effort past that: a marshal failure is logged and dropped,
 // never fails routing — the outcome it describes already landed in the DB

@@ -25,8 +25,8 @@ const testExecutorID = "test-router"
 // on its own — owner routing scopes it — so an explicit team-owned watch rule
 // is seeded too: it grants visibility (and thus task creation) regardless of
 // whether the event's author resolves to a TF user, which keeps these
-// queue-durability tests focused on the queue, not on identity. teamRepos is
-// nil → the team↔repo gate fails open.
+// queue-durability tests focused on the queue, not on identity. The tracking
+// gates pass every team (testRouterDeps).
 func newQueueWorkerRouter(t *testing.T, database *sql.DB) *Router {
 	t.Helper()
 	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, seedHandlerFKTargets(t, database)); err != nil {

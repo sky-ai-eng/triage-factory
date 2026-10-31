@@ -25,13 +25,11 @@ import (
 // counts, what it declines to count, and that the rows it reads are
 // byte-identical before and after a pass.
 
-// newCheckerRouter builds a router wired with the Jira status-rules store,
-// which the checker needs to know which Jira statuses count as done.
+// newCheckerRouter builds a router for the terminal-state checker, which reads
+// the Jira status rules a test seeds to know which statuses count as done.
 func newCheckerRouter(t *testing.T, database *sql.DB) *Router {
 	t.Helper()
-	deps := testRouterDeps(database)
-	deps.JiraRules = sqlitestore.New(database).JiraStatusRules
-	return newTestRouter(deps)
+	return newTestRouter(testRouterDeps(database))
 }
 
 // seedDivergentEntity is the state the checker counts: an entity whose

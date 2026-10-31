@@ -26,11 +26,8 @@ import (
 //     org-wide union by construction; the event's entity is in the union
 //     because *some* team tracks it, so gating them would always pass
 //     anyway.
-//   - The relevant tracking store unwired (nil) — callers from before the
-//     gate / tests that don't exercise it; degrades to the pre-ticket
-//     behavior where every team implicitly tracked every org-global
-//     entity. Handled per source in teamScopeVerdict, whose undecided answer
-//     the open posture reads as "tracks".
+//   - The gate cannot decide: teamScopeVerdict answers errScopeUndecided or
+//     a lookup's error, and the open posture reads either as "tracks".
 //   - Any source other than github:/jira:/linear: — its registered
 //     TracksScope hook, or ungated when it has none.
 //
@@ -74,9 +71,8 @@ func (r *Router) teamTracksEventScopeCached(ctx context.Context, evt domain.Even
 	return r.teamScopeCached(ctx, evt, teamID, cache).open
 }
 
-// errScopeUndecided is the team↔scope gate's "could not tell": a store that
-// is not wired, or metadata or an entity that names nothing to look up. A read
-// error is returned as itself.
+// errScopeUndecided is the team↔scope gate's "could not tell": metadata or an
+// entity that names nothing to look up. A read error is returned as itself.
 var errScopeUndecided = errors.New("routing: the team-scope gate could not decide")
 
 // errNoCoreGate is teamScopeVerdict's answer for a source core has no gate
@@ -112,19 +108,10 @@ func (r *Router) scopeFor(ctx context.Context, evt domain.Event, teamID string) 
 func (r *Router) teamScopeVerdict(ctx context.Context, evt domain.Event, teamID string) (bool, error) {
 	switch {
 	case strings.HasPrefix(evt.EventType, "github:"):
-		if r.teamRepos == nil {
-			return false, fmt.Errorf("%w: no repository tracking store", errScopeUndecided)
-		}
 		return r.teamTracksEventRepo(ctx, evt, teamID)
 	case strings.HasPrefix(evt.EventType, "jira:"):
-		if r.jiraRules == nil {
-			return false, fmt.Errorf("%w: no Jira tracking store", errScopeUndecided)
-		}
 		return r.teamTracksEventProject(ctx, evt, teamID)
 	case strings.HasPrefix(evt.EventType, "linear:"):
-		if r.linearRules == nil {
-			return false, fmt.Errorf("%w: no Linear tracking store", errScopeUndecided)
-		}
 		return r.teamTracksEventLinearTeam(ctx, evt, teamID)
 	}
 	return false, fmt.Errorf("%w: %s", errNoCoreGate, evt.EventType)
@@ -314,11 +301,10 @@ func (r *Router) teamTracksEventLinearTeam(ctx context.Context, evt domain.Event
 // Input order is preserved (callers pass an already-deterministic set). Shares
 // the event's scope cache with matchHandlers via teamTracksEventScopeCached, so a
 // team already gated as a handler isn't re-queried when it also appears in the
-// author's/assignee's team set. Fails open per team — an unwired tracking store,
-// malformed metadata, or a transient store error keeps the team — so the gate is
-// inert in exactly the wiring where handlerScopeMatchesEvent is (pre-config /
-// tests that don't thread the tracking stores), and local N=1 is unaffected (the
-// sole team tracks every configured repo).
+// author's/assignee's team set. Fails open per team — malformed metadata or a
+// transient store error keeps the team — exactly where handlerScopeMatchesEvent
+// does, and local N=1 is unaffected (the sole team tracks every configured
+// repo).
 func (r *Router) trackingTeams(ctx context.Context, evt domain.Event, teams []string, cache teamScopeCache) []string {
 	if len(teams) == 0 {
 		return teams

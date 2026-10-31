@@ -283,7 +283,7 @@ func TestMatchHandlers_MatchesThroughTheCurrentView(t *testing.T) {
 		MinAutonomySuitability: floatPtr(0), Enabled: true,
 		ScopePredicateJSON: &pred,
 	})
-	r := reDeriveRouter(t, database, nil)
+	r := reDeriveRouter(t, database, refusingDelegator{})
 
 	metaJSON, _ := json.Marshal(events.GitHubPRCICheckFailedMetadata{Author: "old-login", AuthorID: "111", CheckName: "build", Repo: "owner/repo"})
 	evt := domain.Event{OrgID: runmode.LocalDefaultOrgID, EventType: domain.EventGitHubPRCICheckFailed, MetadataJSON: string(metaJSON)}
