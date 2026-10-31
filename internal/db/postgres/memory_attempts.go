@@ -110,9 +110,9 @@ func (s *memoryAttemptStore) NewestAttemptForConversationSystem(ctx context.Cont
 	return &a, nil
 }
 
-func (s *memoryAttemptStore) FailingSystem(ctx context.Context, orgID string, streak int) (domain.MemoryFailing, error) {
-	if streak < 1 {
-		return domain.MemoryFailing{}, db.ErrInvalidMemoryFailingStreak
+func (s *memoryAttemptStore) FailingSystem(ctx context.Context, orgID string, span, window time.Duration) (domain.MemoryFailing, error) {
+	if span < 0 || window <= 0 {
+		return domain.MemoryFailing{}, db.ErrInvalidMemoryFailingWindow
 	}
 	var out domain.MemoryFailing
 	// The owing condition is taskMemoryOwedRowSQL, the same words the task
@@ -127,55 +127,69 @@ func (s *memoryAttemptStore) FailingSystem(ctx context.Context, orgID string, st
 		return domain.MemoryFailing{}, wrapAdminPoolPermErr(err, "conversation_memory_attempts.FailingSystem")
 	}
 
-	// The LATERAL takes each owing conversation's newest completed attempts in
-	// idx_conversation_memory_attempts_conversation's order, so the read is
-	// `streak` rows per owing conversation however long an outage has run, and
-	// idx_conversation_memory_attempts_generated answers the newest generated
-	// memory without reading the org's history.
+	// Every read below is bounded however long an outage has run: the first
+	// and newest failure are one probe each per owing conversation on
+	// idx_conversation_memory_attempts_conversation, the window is a range on
+	// it, and idx_conversation_memory_attempts_generated answers the newest
+	// generated memory without reading the org's history.
 	rows, err := s.admin.QueryContext(ctx, `
 		WITH generated AS (
 		    SELECT MAX(completed_at) AS at
 		    FROM conversation_memory_attempts
 		    WHERE org_id = $1 AND outcome = 'generated'
 		),
-		newest AS (
-		    SELECT owed.id AS conversation_id, att.id, att.started_at, att.error_kind, att.error_message,
-		           (att.outcome = 'failed' AND (g.at IS NULL OR att.completed_at > g.at)) AS failing
-		    FROM conversations owed, tasks t, generated g,
-		    LATERAL (
-		        SELECT a.id, a.started_at, a.completed_at, a.outcome, a.error_kind, a.error_message
-		        FROM conversation_memory_attempts a
-		        WHERE a.conversation_id = owed.id AND a.completed_at IS NOT NULL
-		        ORDER BY a.started_at DESC, a.id DESC
-		        LIMIT $2
-		    ) att
+		owing AS (
+		    SELECT owed.id
+		    FROM conversations owed, tasks t
 		    WHERE `+taskMemoryOwedRowSQL("t.org_id", "t.id")+`
 		      AND t.org_id = $1
 		),
-		stuck AS (
-		    SELECT conversation_id FROM newest
-		    GROUP BY conversation_id
-		    HAVING COUNT(*) FILTER (WHERE failing) = $2
+		ends AS (
+		    SELECT MIN(first.started_at) AS oldest, MAX(last.started_at) AS newest
+		    FROM owing o, generated g,
+		    LATERAL (
+		        SELECT a.started_at FROM conversation_memory_attempts a
+		        WHERE a.conversation_id = o.id AND a.outcome = 'failed'
+		          AND (g.at IS NULL OR a.started_at > g.at)
+		        ORDER BY a.started_at ASC, a.id ASC
+		        LIMIT 1
+		    ) first,
+		    LATERAL (
+		        SELECT a.started_at FROM conversation_memory_attempts a
+		        WHERE a.conversation_id = o.id AND a.outcome = 'failed'
+		          AND (g.at IS NULL OR a.started_at > g.at)
+		        ORDER BY a.started_at DESC, a.id DESC
+		        LIMIT 1
+		    ) last
+		),
+		recent AS (
+		    SELECT a.id, a.started_at, a.error_kind, a.error_message,
+		           ROW_NUMBER() OVER (
+		               PARTITION BY a.error_kind ORDER BY a.started_at DESC, a.id DESC) AS rn
+		    FROM owing o, generated g, ends e, conversation_memory_attempts a
+		    WHERE a.conversation_id = o.id AND a.outcome = 'failed'
+		      AND (g.at IS NULL OR a.started_at > g.at)
+		      AND e.newest - e.oldest >= $2::float8 * interval '1 second'
+		      AND a.started_at >= e.newest - $3::float8 * interval '1 second'
 		)
-		SELECT n.error_kind, COALESCE(n.error_message, '')
-		FROM newest n JOIN stuck USING (conversation_id)
-		ORDER BY n.started_at DESC, n.id DESC
-	`, orgID, streak)
+		SELECT error_kind, COALESCE(error_message, '')
+		FROM recent
+		WHERE rn = 1
+		ORDER BY started_at DESC, id DESC
+	`, orgID, span.Seconds(), window.Seconds())
 	if err != nil {
 		return domain.MemoryFailing{}, wrapAdminPoolPermErr(err, "conversation_memory_attempts.FailingSystem")
 	}
 	defer rows.Close()
-	var found []domain.MemoryFailingKind
 	for rows.Next() {
 		var k domain.MemoryFailingKind
 		if err := rows.Scan(&k.Kind, &k.ErrorMessage); err != nil {
 			return domain.MemoryFailing{}, err
 		}
-		found = append(found, k)
+		out.Kinds = append(out.Kinds, k)
 	}
 	if err := rows.Err(); err != nil {
 		return domain.MemoryFailing{}, err
 	}
-	out.Kinds = db.FirstOfEachMemoryFailingKind(found)
 	return out, nil
 }

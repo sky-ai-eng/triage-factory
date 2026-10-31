@@ -49,7 +49,7 @@ func (d *doorbellConversations) ListMemoryOwedSystem(_ context.Context, orgID st
 // nothing failing; the doorbell tests are about what reaches Nudge.
 type quietAttempts struct{ db.MemoryAttemptStore }
 
-func (quietAttempts) FailingSystem(context.Context, string, int) (domain.MemoryFailing, error) {
+func (quietAttempts) FailingSystem(context.Context, string, time.Duration, time.Duration) (domain.MemoryFailing, error) {
 	return domain.MemoryFailing{}, nil
 }
 

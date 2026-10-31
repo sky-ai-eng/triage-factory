@@ -269,10 +269,10 @@ type MemoryFailing struct {
 	// TasksWaiting counts the org's open tasks holding a conversation that
 	// owes a memory, whatever its attempts came to.
 	TasksWaiting int
-	// Kinds is each error kind a stuck conversation's newest attempts failed
-	// with, newest first and each kind once. A conversation is stuck when its
-	// newest attempts, as many as the read asked for, all failed after the
-	// org last generated a memory. Empty when nothing is stuck.
+	// Kinds is each error kind generation has recently failed with, newest
+	// first and each kind once: the kinds of the failed attempts since the org
+	// last generated a memory that started within the read's window before the
+	// newest of them. Empty until those failures span the read's debounce.
 	Kinds []MemoryFailingKind
 }
 

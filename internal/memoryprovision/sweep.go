@@ -2,7 +2,6 @@ package memoryprovision
 
 import (
 	"context"
-	"slices"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
@@ -140,31 +139,36 @@ func (m *Manager) Nudge(orgID, conversationID string) {
 // running it in parallel would spend an org's whole background budget on a
 // backlog that nobody is watching all of.
 //
-// After the page, each org it worked has kinds.MemoryGenerationFailing synced
-// from the attempts it just made. A one-org sweep syncs its org even when the
-// page is empty, so a re-sweep of an org that owes nothing resolves it.
+// Each org the page works has kinds.MemoryGenerationFailing synced as the page
+// goes, at most once per pageSyncEvery, and again when it ends: a page whose
+// attempts run to AttemptTimeout can take far longer than failingFor, and
+// syncing only at its end would hold the condition back for all of it. A
+// one-org sweep syncs its org even when the page is empty, so a re-sweep of an
+// org that owes nothing resolves it.
 func (m *Manager) sweep(ctx context.Context, backoff time.Duration, orgID string) {
 	owed, err := m.stores.Conversations.ListMemoryOwedSystem(ctx, orgID, backoff, sweepLimit)
 	if err != nil {
 		log.Warn("list conversations owing a memory failed; retrying next tick", "error", err)
 		return
 	}
-	var orgs []string
+	// synced is when each org this page has worked was last synced.
+	synced := map[string]time.Time{}
 	if orgID != "" {
-		orgs = append(orgs, orgID)
+		synced[orgID] = time.Time{}
 	}
 	for _, o := range owed {
 		if ctx.Err() != nil {
 			return
 		}
-		if !slices.Contains(orgs, o.OrgID) {
-			orgs = append(orgs, o.OrgID)
-		}
 		if err := m.Fulfil(ctx, o.OrgID, o.ConversationID); err != nil {
 			log.Warn("settling an owed memory failed", "conversation", o.ConversationID, "org", o.OrgID, "error", err)
 		}
+		if time.Since(synced[o.OrgID]) >= pageSyncEvery {
+			m.syncFailing(ctx, o.OrgID)
+			synced[o.OrgID] = time.Now()
+		}
 	}
-	for _, org := range orgs {
+	for org := range synced {
 		if ctx.Err() != nil {
 			return
 		}
@@ -172,25 +176,32 @@ func (m *Manager) sweep(ctx context.Context, backoff time.Duration, orgID string
 	}
 }
 
-// failingStreak is how many attempts in a row a conversation's memory must
-// fail, with no memory generated anywhere in the org since the first of them,
-// before kinds.MemoryGenerationFailing opens. That is longer than a provider
-// blip, which fails each owed conversation's attempt once however many there
-// are. While few memories are owed, the sweep retries a conversation about
-// once per AttemptBackoff, so three is a few minutes of failing. The sweep
-// works its page serially, though, so when every attempt runs to
-// AttemptTimeout and many memories are owed, each retry waits for a whole
-// page.
-const failingStreak = 3
+// failingFor is how long memory generation must keep failing before
+// kinds.MemoryGenerationFailing opens: from the first failed attempt on a
+// conversation still owing a memory, since the org last generated one, to the
+// newest. A provider blip fails every owed conversation's attempt within
+// moments, however many are owed, and never spans it; a provider that stays
+// down, or a model nobody picked, does within about three attempts.
+const failingFor = 2 * time.Minute
+
+// failingWindow is how shortly before the newest failure a kind must have
+// failed to stay open. An outage interleaves kinds, a provider's errors with
+// the backoffs they trip, and each recurs well inside it; a kind that has
+// stopped, no_model once a model is picked, resolves within it.
+const failingWindow = 5 * time.Minute
+
+// pageSyncEvery is how often a sweep syncs an org while it is still working
+// that org's conversations.
+const pageSyncEvery = 30 * time.Second
 
 // syncFailing opens kinds.MemoryGenerationFailing for each error kind the
-// org's stuck conversations are failing with and resolves the rest. A read
-// that fails syncs nothing, so an open condition is neither bumped nor
-// resolved on no evidence.
+// org's memory generation is failing with and resolves the rest. A read that
+// fails syncs nothing, so an open condition is neither bumped nor resolved on
+// no evidence.
 func (m *Manager) syncFailing(ctx context.Context, orgID string) {
 	m.syncMu.Lock()
 	defer m.syncMu.Unlock()
-	f, err := m.stores.MemoryAttempts.FailingSystem(ctx, orgID, failingStreak)
+	f, err := m.stores.MemoryAttempts.FailingSystem(ctx, orgID, failingFor, failingWindow)
 	if err != nil {
 		log.Warn("read failing memory generation failed; syncing next sweep", "org", orgID, "error", err)
 		return

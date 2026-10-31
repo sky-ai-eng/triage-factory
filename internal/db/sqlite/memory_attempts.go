@@ -102,17 +102,19 @@ func (s *memoryAttemptStore) NewestAttemptForConversationSystem(ctx context.Cont
 	return &a, nil
 }
 
-func (s *memoryAttemptStore) FailingSystem(ctx context.Context, orgID string, streak int) (domain.MemoryFailing, error) {
+func (s *memoryAttemptStore) FailingSystem(ctx context.Context, orgID string, span, window time.Duration) (domain.MemoryFailing, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return domain.MemoryFailing{}, err
 	}
-	if streak < 1 {
-		return domain.MemoryFailing{}, db.ErrInvalidMemoryFailingStreak
+	if span < 0 || window <= 0 {
+		return domain.MemoryFailing{}, db.ErrInvalidMemoryFailingWindow
 	}
 	var out domain.MemoryFailing
-	// The Postgres twin carries the reasoning. SQLite has no LATERAL, so each
-	// owing conversation's newest attempts are ranked by a window over all of
-	// its completed ones; local mode's ledger is one person's.
+	// The Postgres twin carries the reasoning. SQLite has no LATERAL, so the
+	// failures since the newest generated memory are read whole rather than
+	// probed per conversation; local mode's ledger is one person's. Times are
+	// compared through julianday(), which reads every stored format as the
+	// instant it names.
 	if err := s.q.QueryRowContext(ctx, `
 		SELECT COUNT(DISTINCT t.id)
 		FROM conversations owed, tasks t
@@ -124,46 +126,46 @@ func (s *memoryAttemptStore) FailingSystem(ctx context.Context, orgID string, st
 
 	rows, err := s.q.QueryContext(ctx, `
 		WITH generated AS (
-		    SELECT MAX(completed_at) AS at
+		    SELECT julianday(MAX(completed_at)) AS at
 		    FROM conversation_memory_attempts
 		    WHERE org_id = ? AND outcome = 'generated'
 		),
-		ranked AS (
-		    SELECT att.conversation_id, att.id, att.started_at, att.error_kind, att.error_message,
-		           (att.outcome = 'failed' AND (g.at IS NULL OR att.completed_at > g.at)) AS failing,
-		           ROW_NUMBER() OVER (
-		               PARTITION BY att.conversation_id ORDER BY att.started_at DESC, att.id DESC) AS rn
+		failed AS (
+		    SELECT att.id, att.started_at, julianday(att.started_at) AS day,
+		           att.error_kind, att.error_message
 		    FROM conversations owed, tasks t, generated g, conversation_memory_attempts att
 		    WHERE `+taskMemoryOwedRowSQL("t.org_id", "t.id")+`
 		      AND t.org_id = ?
-		      AND att.conversation_id = owed.id AND att.completed_at IS NOT NULL
+		      AND att.conversation_id = owed.id AND att.outcome = 'failed'
+		      AND (g.at IS NULL OR julianday(att.started_at) > g.at)
 		),
-		newest AS (SELECT * FROM ranked WHERE rn <= ?),
-		stuck AS (
-		    SELECT conversation_id FROM newest
-		    GROUP BY conversation_id
-		    HAVING SUM(failing) = ?
+		ends AS (SELECT MIN(day) AS oldest, MAX(day) AS newest FROM failed),
+		recent AS (
+		    SELECT f.id, f.started_at, f.error_kind, f.error_message,
+		           ROW_NUMBER() OVER (
+		               PARTITION BY f.error_kind ORDER BY f.day DESC, f.id DESC) AS rn
+		    FROM failed f, ends e
+		    WHERE (e.newest - e.oldest) * 86400.0 >= ?
+		      AND f.day >= e.newest - ? / 86400.0
 		)
-		SELECT n.error_kind, COALESCE(n.error_message, '')
-		FROM newest n
-		WHERE n.conversation_id IN (SELECT conversation_id FROM stuck)
-		ORDER BY n.started_at DESC, n.id DESC
-	`, orgID, orgID, streak, streak)
+		SELECT error_kind, COALESCE(error_message, '')
+		FROM recent
+		WHERE rn = 1
+		ORDER BY julianday(started_at) DESC, id DESC
+	`, orgID, orgID, span.Seconds(), window.Seconds())
 	if err != nil {
 		return domain.MemoryFailing{}, err
 	}
 	defer rows.Close()
-	var found []domain.MemoryFailingKind
 	for rows.Next() {
 		var k domain.MemoryFailingKind
 		if err := rows.Scan(&k.Kind, &k.ErrorMessage); err != nil {
 			return domain.MemoryFailing{}, err
 		}
-		found = append(found, k)
+		out.Kinds = append(out.Kinds, k)
 	}
 	if err := rows.Err(); err != nil {
 		return domain.MemoryFailing{}, err
 	}
-	out.Kinds = db.FirstOfEachMemoryFailingKind(found)
 	return out, nil
 }
