@@ -119,6 +119,23 @@ func TestCrossOrgHTTP_AgentActions(t *testing.T) {
 	}
 }
 
+// TestCrossOrgHTTP_AgentArtifacts is the same check for the run-scoped
+// artifact read, which reads the same ledger as the action list and is gated
+// the same way: by the run read alone.
+func TestCrossOrgHTTP_AgentArtifacts(t *testing.T) {
+	r := newAuthRig(t)
+	alice, _, orgA, sidA, sidB := setupTwoOrgSession(t, r)
+	runA := seedConversationInOrg(t, r, orgA, alice, "run-artifacts")
+
+	path := "/api/agent/conversations/" + runA + "/artifacts/list"
+	if got := r.postJSONWithSid("POST", path, sidA, map[string]any{}).StatusCode; got != http.StatusOK {
+		t.Errorf("alice POST %s = %d, want 200", path, got)
+	}
+	if got := r.postJSONWithSid("POST", path, sidB, map[string]any{}).StatusCode; got != http.StatusNotFound {
+		t.Errorf("bob POST %s = %d, want 404 (cross-org leak)", path, got)
+	}
+}
+
 // TestCrossOrgHTTP_TaskClaim covers the mutating path: bob's claim
 // gesture against alice's task should appear as "task not found" to
 // bob, not as a 200 with a state change applied, and not as a 500. The

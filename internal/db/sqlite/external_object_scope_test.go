@@ -114,3 +114,28 @@ func sqliteExternalActionFixture(t *testing.T) dbtest.ExternalActionNodeIDFixtur
 		},
 	}
 }
+
+// TestArtifacts_SQLite runs the shared artifact conformance suite against the
+// SQLite backend, a fresh in-memory DB per subtest.
+func TestArtifacts_SQLite(t *testing.T) {
+	dbtest.RunArtifactConformance(t, func(t *testing.T) dbtest.ArtifactFixture {
+		t.Helper()
+		conn := openSQLiteForTest(t)
+		return dbtest.ArtifactFixture{
+			Stores: sqlitestore.New(conn),
+			OrgID:  runmode.LocalDefaultOrgID,
+			TeamID: runmode.LocalDefaultTeamID,
+			NewConversation: func(t *testing.T) string {
+				return seedDeliverableConversationWithID(t, conn, uuid.NewString())
+			},
+			SetOccurredAt: func(t *testing.T, actionID string, at time.Time) {
+				t.Helper()
+				// The shape the column's CURRENT_TIMESTAMP default writes.
+				if _, err := conn.Exec(`UPDATE external_actions SET occurred_at = ? WHERE id = ?`,
+					at.UTC().Format(time.DateTime), actionID); err != nil {
+					t.Fatalf("set occurred_at of %s: %v", actionID, err)
+				}
+			},
+		}
+	})
+}

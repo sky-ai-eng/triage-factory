@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -174,14 +175,25 @@ func GitHubEntityObjectKind(entityKind string) string {
 	return ""
 }
 
+// RefusalOrFailureActions is the actions that record a write that was refused
+// or failed. The ledger's list reads build their refusal filter's IN list
+// from it, so the filter and IsRefusalOrFailure cannot disagree.
+func RefusalOrFailureActions() []string {
+	return []string{ActionGitDenied, ActionEgressDenied, ActionGHWriteDenied, ActionCommitSignDenied, ActionBranchPushFailed}
+}
+
 // IsRefusalOrFailure reports whether action records a write that was refused
 // or failed: nothing landed, and the row names no object.
 func IsRefusalOrFailure(action string) bool {
-	switch action {
-	case ActionGitDenied, ActionEgressDenied, ActionGHWriteDenied, ActionCommitSignDenied, ActionBranchPushFailed:
-		return true
-	}
-	return false
+	return slices.Contains(RefusalOrFailureActions(), action)
+}
+
+// IsObjectID reports whether s has the shape ObjectID renders: a known object
+// kind, a "|", and a non-empty id part. It says nothing about whether any row
+// carries it.
+func IsObjectID(s string) bool {
+	kind, rest, ok := strings.Cut(s, "|")
+	return ok && rest != "" && slices.Contains(ObjectKinds(), kind)
 }
 
 // objectKindKeyed reports whether an object of kind is identified with an

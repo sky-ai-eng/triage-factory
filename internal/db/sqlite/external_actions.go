@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -43,9 +44,6 @@ const externalActionColumns = `
 // an external_actions alias `ea` — the SQLite mirror of the Postgres twin,
 // which carries the model. The ids are TEXT here, so they concatenate without
 // a cast.
-//
-// TODO(TFAC-1260): only the conformance suite reads it until the artifacts
-// read groups a run's rows by it.
 const sqliteActionObjectIDSQL = `
 	CASE
 	  WHEN ea.object_kind = 'pull_request' OR (ea.object_kind = 'issue' AND ea.provider = 'github')
@@ -119,7 +117,7 @@ func (s *externalActionStore) ListByOrgSystem(ctx context.Context, orgID string,
 	if opts.CountOnly {
 		return []domain.ExternalAction{}, total, nil
 	}
-	query := `SELECT ` + externalActionColumns + ` FROM external_actions WHERE org_id = ?`
+	query := `SELECT ` + externalActionColumns + ` FROM external_actions ea WHERE org_id = ?`
 	query, args := appendExternalActionFilters(query, []any{orgID}, opts)
 	rows, err := s.q.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -140,7 +138,7 @@ func (s *externalActionStore) ListByTeam(ctx context.Context, orgID, teamID stri
 	if opts.CountOnly {
 		return []domain.ExternalAction{}, total, nil
 	}
-	query := `SELECT ` + externalActionColumns + ` FROM external_actions WHERE org_id = ? AND team_id = ?`
+	query := `SELECT ` + externalActionColumns + ` FROM external_actions ea WHERE org_id = ? AND team_id = ?`
 	query, args := appendExternalActionFilters(query, []any{orgID, teamID}, opts)
 	rows, err := s.q.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -165,7 +163,7 @@ func (s *externalActionStore) ListByConversation(ctx context.Context, orgID, con
 	if opts.CountOnly {
 		return []domain.ExternalAction{}, total, nil
 	}
-	query := `SELECT ` + externalActionColumns + ` FROM external_actions WHERE org_id = ? AND conversation_id = ?`
+	query := `SELECT ` + externalActionColumns + ` FROM external_actions ea WHERE org_id = ? AND conversation_id = ?`
 	query, args := appendExternalActionFilters(query, []any{orgID, conversationID}, opts)
 	rows, err := s.q.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -233,7 +231,9 @@ func appendExternalActionFilters(query string, args []any, opts domain.ExternalA
 }
 
 // appendExternalActionPredicates is the filter half alone — no ordering, no
-// window — so the count and the page apply exactly the same predicate.
+// window — so the count and the page apply exactly the same predicate. The
+// statement names external_actions as `ea`, which the object-id filter's
+// expression reads.
 func appendExternalActionPredicates(query string, args []any, opts domain.ExternalActionListOpts) (string, []any) {
 	if opts.Provider != "" {
 		query += ` AND provider = ?`
@@ -246,6 +246,17 @@ func appendExternalActionPredicates(query string, args []any, opts domain.Extern
 	if opts.ActorUserID != "" {
 		query += ` AND actor_user_id = ?`
 		args = append(args, opts.ActorUserID)
+	}
+	if opts.ObjectID != "" {
+		query += ` AND (` + sqliteActionObjectIDSQL + `) = ?`
+		args = append(args, opts.ObjectID)
+	}
+	if opts.Refused {
+		refusals := domain.RefusalOrFailureActions()
+		query += ` AND action IN (?` + strings.Repeat(`, ?`, len(refusals)-1) + `)`
+		for _, action := range refusals {
+			args = append(args, action)
+		}
 	}
 	if !opts.Since.IsZero() {
 		query += ` AND datetime(occurred_at) >= datetime(?)`
@@ -261,7 +272,7 @@ func appendExternalActionPredicates(query string, args []any, opts domain.Extern
 // countExternalActions runs the page's predicate as a COUNT on the same
 // connection, so "showing 50 of 213" cannot be assembled from two snapshots.
 func (s *externalActionStore) countExternalActions(ctx context.Context, where string, base []any, opts domain.ExternalActionListOpts) (int, error) {
-	query, args := appendExternalActionPredicates(`SELECT COUNT(*) FROM external_actions WHERE `+where, base, opts)
+	query, args := appendExternalActionPredicates(`SELECT COUNT(*) FROM external_actions ea WHERE `+where, base, opts)
 	var n int
 	err := s.q.QueryRowContext(ctx, query, args...).Scan(&n)
 	return n, err
