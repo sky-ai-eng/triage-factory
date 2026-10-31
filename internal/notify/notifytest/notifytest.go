@@ -54,6 +54,8 @@ type Recorder struct {
 	kinds map[string]sink.Kind
 	// events is org → event key → occurrence.
 	events map[string]map[sink.EventKey]EventOccurrence
+	// closedSweeps counts ResolveClosedEntities calls per org.
+	closedSweeps map[string]int
 }
 
 var installed = struct {
@@ -69,7 +71,7 @@ func Record(t testing.TB) *Recorder {
 	t.Helper()
 	r := &Recorder{
 		open: map[string]map[string]map[string]Occurrence{}, kinds: map[string]sink.Kind{},
-		events: map[string]map[sink.EventKey]EventOccurrence{},
+		events: map[string]map[sink.EventKey]EventOccurrence{}, closedSweeps: map[string]int{},
 	}
 	installed.mu.Lock()
 	if len(installed.recorders) == 0 {
@@ -133,6 +135,14 @@ func (r *Recorder) Inactive(t testing.TB, orgID string, k notify.Kind) {
 	if open := r.Open(orgID, k); len(open) > 0 {
 		t.Errorf("notifytest: %s has %v open in org %s; want nothing", k.Name(), keysOf(open), orgID)
 	}
+}
+
+// ClosedEntityResolves is how many times notify.ResolveClosedEntities ran
+// for orgID.
+func (r *Recorder) ClosedEntityResolves(orgID string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.closedSweeps[orgID]
 }
 
 // Events returns the open event occurrences in orgID, ordered by event type,
@@ -348,10 +358,16 @@ func (fanout) OpenEvents(_ context.Context, orgID, entityID string, kinds []stri
 	return out, nil
 }
 
-// ResolveClosedEntities does nothing: the recorder holds no entity state to
-// tell a closed entity by, so a test of that resolution reads the database
-// notify.Install writes through.
-func (fanout) ResolveClosedEntities(context.Context, string) {}
+// ResolveClosedEntities is counted, not modelled: the recorder holds no
+// entity state to tell a closed entity by, so a test of the resolution itself
+// reads the database notify.Install writes through.
+func (fanout) ResolveClosedEntities(_ context.Context, orgID string) {
+	for _, r := range recorders() {
+		r.mu.Lock()
+		r.closedSweeps[orgID]++
+		r.mu.Unlock()
+	}
+}
 
 func (fanout) ResolveEvents(_ context.Context, orgID string, keys []sink.EventKey) {
 	for _, r := range recorders() {

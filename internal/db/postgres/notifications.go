@@ -159,6 +159,21 @@ func (s *notificationStore) ResolveClosedEntityEventsSystem(ctx context.Context,
 		orgID)
 }
 
+// ClosedEntityEventOrgsSystem reads notifications_open_entity_idx, whose rows
+// are the open event rows alone.
+func (s *notificationStore) ClosedEntityEventOrgsSystem(ctx context.Context) ([]string, error) {
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT DISTINCT n.org_id::text FROM notifications n
+		JOIN entities e ON e.id = n.entity_id AND e.org_id = n.org_id
+		WHERE n.entity_id IS NOT NULL AND n.resolved_at IS NULL
+		  AND n.origin = 'event' AND n.lifecycle = 'condition' AND e.state <> 'active'
+		ORDER BY 1`)
+	if err != nil {
+		return nil, fmt.Errorf("list orgs with an event condition on a closed entity: %w", err)
+	}
+	return scanIDs(rows, "org with an event condition on a closed entity")
+}
+
 func (s *notificationStore) ResolveIDSystem(ctx context.Context, orgID, id string) (*domain.Notification, error) {
 	if !isValidUUID(id) {
 		return nil, nil

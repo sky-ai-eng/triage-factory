@@ -479,7 +479,9 @@ func (r *Router) matchHandlers(ctx context.Context, orgID string, evt domain.Eve
 			matchedTriggers = append(matchedTriggers, h)
 		}
 	}
-	span.SetAttributes(telemetry.Count(len(matchedRules) + len(matchedTriggers) + len(matchedNotify)))
+	// The count is what passed the gate here; a notify rule passes its gate at
+	// raise time, so it is not counted as a match.
+	span.SetAttributes(telemetry.Count(len(matchedRules) + len(matchedTriggers)))
 	return matchedRules, matchedTriggers, matchedNotify, nil
 }
 

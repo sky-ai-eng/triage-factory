@@ -2,8 +2,10 @@ package notify
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
@@ -227,5 +229,79 @@ func TestLocal_EventRowOutlivesItsLinkAndItsEntity(t *testing.T) {
 	}
 	if pings := hub.take(t); !slices.Equal(pings, []string{user}) {
 		t.Errorf("the resolve pinged %v; want the local user", pings)
+	}
+}
+
+// failingSettings is an OrgsStore whose settings read fails.
+type failingSettings struct{ db.OrgsStore }
+
+func (failingSettings) GetSettingsSystem(context.Context, string) (domain.OrgSettings, error) {
+	return domain.OrgSettings{}, errors.New("settings unreadable")
+}
+
+// An unreadable org setting is not a refused link: the host check could not
+// run, so the raise writes nothing and counts the failure rather than storing
+// the row without its link for as long as it stays open.
+func TestLocal_EventRaiseFailsOnUnreadableSettings(t *testing.T) {
+	stores, hub, _ := localBackend(t)
+	install(t, Backend{Tx: stores.Tx, Notifications: stores.Notifications, Orgs: failingSettings{stores.Orgs}, Hub: hub, Local: true})
+	failures := failureCounter(t)
+	ctx := context.Background()
+	org, user, team := runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID
+	entity, _, err := stores.Entities.FindOrCreateSystem(ctx, org, domain.ProviderGitHub, "https://github.com", "acme/widgets#20", "", "pr",
+		"Retry the webhook", "https://github.com/acme/widgets/pull/20")
+	if err != nil {
+		t.Fatalf("create entity: %v", err)
+	}
+	linked := Event(EventSpec{Render: func(p EventParams, _ Recipient) Content {
+		return Content{Title: p.EntityKey, Body: p.RuleName, Actions: []Action{
+			Link("Open", External(p.EntityURL)), Link("Edit your rule", Routes.NotifyRule(p.HandlerID))}}
+	}})
+	linked.Raise(ctx, org, EventRaise{EventType: domain.EventGitHubPRCICheckFailed, Source: "github", Entity: *entity, Condition: true,
+		Rules: []EventRule{{HandlerID: "h1", TeamID: team, Name: "Mine", Audience: domain.NotifyAudienceCreator, CreatorUserID: user}}})
+	if got := eventRowsOf(t, stores, org, user, domain.EventGitHubPRCICheckFailed); len(got) != 0 {
+		t.Errorf("rows = %+v; want none while the host check cannot run", got)
+	}
+	if got := failures()[eventLabel]; got != 1 {
+		t.Errorf("event failures = %d; want 1", got)
+	}
+}
+
+// A newly promoted brain sweeps at once: an entity closed outside the router
+// before the brain started has its conditions resolved on the first pass.
+func TestRunClosedEntitySweep_ResolvesOnStart(t *testing.T) {
+	stores, _, conn := localBackend(t)
+	ctx := context.Background()
+	org, user, team := runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID
+	if _, err := conn.Exec(`INSERT INTO org_event_sources (org_id, kind, base_url) VALUES (?, 'github', 'https://github.com')`, org); err != nil {
+		t.Fatalf("seed github host: %v", err)
+	}
+	entity, _, err := stores.Entities.FindOrCreateSystem(ctx, org, domain.ProviderGitHub, "https://github.com", "acme/widgets#21", "", "pr",
+		"Retry the webhook", "https://github.com/acme/widgets/pull/21")
+	if err != nil {
+		t.Fatalf("create entity: %v", err)
+	}
+	testEvent.Raise(ctx, org, EventRaise{EventType: domain.EventGitHubPRCICheckFailed, Source: "github", Entity: *entity, Condition: true,
+		Rules: []EventRule{{HandlerID: "h1", TeamID: team, Name: "Mine", Audience: domain.NotifyAudienceCreator, CreatorUserID: user}}})
+	if got := eventRowsOf(t, stores, org, user, domain.EventGitHubPRCICheckFailed); len(got) != 1 {
+		t.Fatalf("rows = %+v; want the condition", got)
+	}
+	if _, err := stores.Entities.CloseSystem(ctx, org, entity.ID); err != nil {
+		t.Fatalf("close entity: %v", err)
+	}
+
+	sweepCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go RunClosedEntitySweep(sweepCtx, stores.Notifications, time.Hour)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got := eventRowsOf(t, stores, org, user, domain.EventGitHubPRCICheckFailed)
+		if len(got) == 1 && got[0].ResolvedAt != nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("rows = %+v 5s after starting with an hour's interval; want the condition resolved", got)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

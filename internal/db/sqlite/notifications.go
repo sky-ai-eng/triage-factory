@@ -154,6 +154,29 @@ func (s *notificationStore) ResolveClosedEntityEventsSystem(ctx context.Context,
 			WHERE e.id = notifications.entity_id AND e.state <> 'active')`)
 }
 
+// ClosedEntityEventOrgsSystem: N=1, so the answer is the local org or nothing.
+func (s *notificationStore) ClosedEntityEventOrgsSystem(ctx context.Context) ([]string, error) {
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT DISTINCT n.org_id FROM notifications n
+		JOIN entities e ON e.id = n.entity_id
+		WHERE n.entity_id IS NOT NULL AND n.resolved_at IS NULL
+		  AND n.origin = 'event' AND n.lifecycle = 'condition' AND e.state <> 'active'
+		ORDER BY 1`)
+	if err != nil {
+		return nil, fmt.Errorf("list orgs with an event condition on a closed entity: %w", err)
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan org with an event condition on a closed entity: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 func (s *notificationStore) ResolveIDSystem(ctx context.Context, orgID, id string) (*domain.Notification, error) {
 	got, err := s.resolve(ctx, orgID, domain.NotificationResolvedCleared, `id = ?`, id)
 	if err != nil || len(got) == 0 {

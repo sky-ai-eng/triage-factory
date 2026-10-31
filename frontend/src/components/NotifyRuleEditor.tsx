@@ -61,19 +61,17 @@ export default function NotifyRuleEditor({
   }, [open, isEdit, teamsLoaded, teams, lastActingTeamId])
   // The team the rule is (or will be) on. '' is the sole team, which the
   // server resolves.
-  const teamOf = (picked: string) => picked || (teams.length === 1 ? teams[0].id : '')
-  const ruleTeam = rule ? rule.team_id : teamOf(team)
-  const isTeamAdmin = (teamId: string) => teams.find((t) => t.id === teamId)?.role === 'admin'
-  const teamAdmin = isTeamAdmin(ruleTeam)
-  // A team audience is a team admin's, so picking a team the viewer does not
-  // administer takes the choice back rather than leave a disabled option set.
-  const pickTeam = (picked: string) => {
-    setTeam(picked)
-    if (!isTeamAdmin(teamOf(picked))) setAudience('creator')
-  }
+  const ruleTeam = rule ? rule.team_id : team || (teams.length === 1 ? teams[0].id : '')
+  const teamAdmin = teams.find((t) => t.id === ruleTeam)?.role === 'admin'
+  // A team audience is a team admin's. A new rule's audience is derived from
+  // the team it is on now, however that team was picked, so a team the
+  // viewer does not administer never submits a team audience.
+  const chosenAudience: NotifyAudience = !isEdit && !teamAdmin ? 'creator' : audience
   // "Just me" is the creator: on someone else's personal rule, opened by a
-  // team admin, it is that person rather than the viewer.
-  const othersRule = rule !== null && !!rule.creator_user_id && rule.creator_user_id !== me?.id
+  // team admin, it is that person rather than the viewer. Until the viewer is
+  // known it is not someone else's.
+  const othersRule =
+    rule !== null && !!me && !!rule.creator_user_id && rule.creator_user_id !== me.id
 
   useEffect(() => {
     if (!open) return
@@ -130,7 +128,7 @@ export default function NotifyRuleEditor({
         await createNotifyRule({
           event_type: eventType,
           name: name.trim(),
-          audience,
+          audience: chosenAudience,
           team_id: team,
           ...(hasPredicate ? { scope_predicate: predicate } : {}),
         })
@@ -147,7 +145,18 @@ export default function NotifyRuleEditor({
     } finally {
       setSaving(false)
     }
-  }, [eventType, name, predicate, audience, team, isEdit, rule, originalPredicateJSON, onSaved])
+  }, [
+    eventType,
+    name,
+    predicate,
+    audience,
+    chosenAudience,
+    team,
+    isEdit,
+    rule,
+    originalPredicateJSON,
+    onSaved,
+  ])
 
   const handleDelete = useCallback(async () => {
     if (!rule) return
@@ -201,7 +210,7 @@ export default function NotifyRuleEditor({
                 disabled={!writable}
                 className="flex-1 overflow-y-auto px-6 py-4 space-y-5 min-h-0"
               >
-                {!isEdit && <TeamPicker value={team} onChange={pickTeam} label="Team" />}
+                {!isEdit && <TeamPicker value={team} onChange={setTeam} label="Team" />}
                 <div>
                   <label
                     htmlFor="notify-event-type"
@@ -262,7 +271,7 @@ export default function NotifyRuleEditor({
                       <input
                         type="radio"
                         name="notify-audience"
-                        checked={audience === 'creator'}
+                        checked={chosenAudience === 'creator'}
                         onChange={() => setAudience('creator')}
                       />
                       {othersRule ? 'Only the person who made it' : 'Just me'}
@@ -271,7 +280,7 @@ export default function NotifyRuleEditor({
                       <input
                         type="radio"
                         name="notify-audience"
-                        checked={audience === 'team'}
+                        checked={chosenAudience === 'team'}
                         disabled={!teamAdmin}
                         onChange={() => setAudience('team')}
                       />

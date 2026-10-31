@@ -84,18 +84,13 @@ var errScopeUndecided = errors.New("routing: the team-scope gate could not decid
 // for task routing, since a hook's bool cannot say it was unsure.
 var errNoCoreGate = errors.New("routing: no core team-scope gate for this source")
 
-// teamTracksEventScope is the open answer: github: → team↔repo, jira: →
-// team↔project, linear: → team↔Linear-team, a registered event source (e.g.
-// ee/slack) → its TracksScope hook, and any other source ungated. The gate only
-// narrows a set someone else computed, so failing open costs a briefly-too-wide
-// set that the next event corrects (see teamTracksEventRepo), where failing
-// closed would drop a legitimate task on a transient read error.
-func (r *Router) teamTracksEventScope(ctx context.Context, evt domain.Event, teamID string) bool {
-	return r.scopeFor(ctx, evt, teamID).open
-}
-
-// scopeFor reads teamScopeVerdict once and derives both postures from it. A
-// source with no core gate is never strict.
+// scopeFor reads teamScopeVerdict once and derives both postures from it:
+// github: → team↔repo, jira: → team↔project, linear: → team↔Linear-team, a
+// registered event source (e.g. ee/slack) → its TracksScope hook, and any
+// other source ungated. A source with no core gate is never strict. The open
+// posture only narrows a set someone else computed, so failing open costs a
+// briefly-too-wide set that the next event corrects (see teamTracksEventRepo),
+// where failing closed would drop a legitimate task on a transient read error.
 func (r *Router) scopeFor(ctx context.Context, evt domain.Event, teamID string) teamScope {
 	tracks, err := r.teamScopeVerdict(ctx, evt, teamID)
 	switch {
@@ -144,7 +139,7 @@ func (r *Router) teamScopeVerdict(ctx context.Context, evt domain.Event, teamID 
 // the acme/api of another. An entity that cannot be read, or one that names no
 // repository, is undecided.
 //
-// Task routing reads undecided as "tracks" (teamTracksEventScope): dropping a
+// Task routing reads undecided as "tracks" (scopeFor's open posture): dropping a
 // legitimate task on a transient DB blip is worse than the pre-ticket
 // behavior, and the events feeding this path come from TF's own trusted
 // poller. That is the deliberate posture split from the owning-team ladder

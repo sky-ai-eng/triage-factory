@@ -234,7 +234,7 @@ func TestGate_MatchesTheEntitysRepositoryByID(t *testing.T) {
 		{"key spelling team A's repository, team A", ciEvent(t, keyLies, "owner/new"), teamA, false},
 		{"key spelling team A's repository, the team tracking its row", ciEvent(t, keyLies, "owner/new"), teamB, true},
 	} {
-		if got := r.teamTracksEventScope(ctx, c.evt, c.team); got != c.wantPass {
+		if got := r.scopeFor(ctx, c.evt, c.team).open; got != c.wantPass {
 			t.Errorf("%s: gate = %v, want %v", c.name, got, c.wantPass)
 		}
 	}

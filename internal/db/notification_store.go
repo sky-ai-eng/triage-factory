@@ -82,6 +82,12 @@ type NotificationStore interface {
 	// close relation.
 	ResolveClosedEntityEventsSystem(ctx context.Context, orgID string) ([]domain.Notification, error)
 
+	// ClosedEntityEventOrgsSystem returns the distinct, sorted ids of the
+	// orgs, across the deployment, holding an open event condition about an
+	// entity that is no longer active: the orgs ResolveClosedEntityEventsSystem
+	// has work in.
+	ClosedEntityEventOrgsSystem(ctx context.Context) ([]string, error)
+
 	// OpenConditionOrgsSystem returns the distinct, sorted ids of the orgs,
 	// across the deployment, holding an open condition of (origin, kind): the
 	// orgs a producer whose evaluation set can lose an org re-evaluates so its

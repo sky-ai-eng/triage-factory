@@ -57,12 +57,10 @@ func notifyAudienceField(v *httpx.Validation, raw *string) (string, bool) {
 }
 
 // refuseNotifyClear records a null for a field a notify rule always holds.
-func refuseNotifyClear(v *httpx.Validation, state httpx.PatchState, field string) bool {
-	if state != httpx.PatchClear {
-		return false
+func refuseNotifyClear(v *httpx.Validation, state httpx.PatchState, field string) {
+	if state == httpx.PatchClear {
+		v.Invalid(field, field+" cannot be null on a notify rule")
 	}
-	v.Invalid(field, field+" cannot be null on a notify rule")
-	return true
 }
 
 // notifyEventTypeField refuses a known event type a notify rule cannot be

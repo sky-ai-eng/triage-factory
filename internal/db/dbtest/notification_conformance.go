@@ -345,8 +345,14 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 		if got, err := s.ResolveClosedEntityEventsSystem(ctx, f.OrgID); err != nil || len(got) != 0 {
 			t.Fatalf("ResolveClosedEntityEventsSystem with every entity active = %+v, %v; want nothing", got, err)
 		}
+		if orgs, err := s.ClosedEntityEventOrgsSystem(ctx); err != nil || slices.Contains(orgs, f.OrgID) {
+			t.Fatalf("ClosedEntityEventOrgsSystem with every entity active = %v, %v; want no %s", orgs, err, f.OrgID)
+		}
 		if _, err := f.Stores.Entities.CloseSystem(ctx, f.OrgID, closing); err != nil {
 			t.Fatalf("close entity: %v", err)
+		}
+		if orgs, err := s.ClosedEntityEventOrgsSystem(ctx); err != nil || !slices.Contains(orgs, f.OrgID) {
+			t.Fatalf("ClosedEntityEventOrgsSystem after the close = %v, %v; want %s", orgs, err, f.OrgID)
 		}
 		got, err := s.ResolveClosedEntityEventsSystem(ctx, f.OrgID)
 		if err != nil || len(got) != 2 {
@@ -365,6 +371,9 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 		}
 		if again, err := s.ResolveClosedEntityEventsSystem(ctx, f.OrgID); err != nil || len(again) != 0 {
 			t.Errorf("a second pass = %+v, %v; want nothing", again, err)
+		}
+		if orgs, err := s.ClosedEntityEventOrgsSystem(ctx); err != nil || slices.Contains(orgs, f.OrgID) {
+			t.Errorf("ClosedEntityEventOrgsSystem after the resolve = %v, %v; want no %s", orgs, err, f.OrgID)
 		}
 	})
 

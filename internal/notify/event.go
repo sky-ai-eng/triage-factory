@@ -194,20 +194,21 @@ func ResolveClosedEntities(ctx context.Context, orgID string) {
 // longest an event condition outlives an entity closed outside the router.
 const ClosedEntitySweepInterval = 10 * time.Minute
 
-// RunClosedEntitySweep runs ResolveClosedEntities for every active org when
-// it starts, then once every interval until ctx is cancelled. Brain-gated by
-// its caller: one process sweeps at a time. A nil store makes this a logged
-// no-op.
-func RunClosedEntitySweep(ctx context.Context, orgs db.OrgsStore, interval time.Duration) {
-	if orgs == nil {
-		notifyLog.Warn("closed-entity notification sweep not started: no OrgsStore wired")
+// RunClosedEntitySweep runs ResolveClosedEntities for every org holding an
+// event condition about a closed entity when it starts, then once every
+// interval until ctx is cancelled. One deployment-wide read finds those orgs,
+// so an org with nothing to resolve costs no transaction. Brain-gated by its
+// caller: one process sweeps at a time. A nil store makes this a logged no-op.
+func RunClosedEntitySweep(ctx context.Context, store db.NotificationStore, interval time.Duration) {
+	if store == nil {
+		notifyLog.Warn("closed-entity notification sweep not started: no NotificationStore wired")
 		return
 	}
 	if interval <= 0 {
 		interval = ClosedEntitySweepInterval
 	}
 	sweep := func() {
-		orgIDs, err := orgs.ListActiveSystem(ctx)
+		orgIDs, err := store.ClosedEntityEventOrgsSystem(ctx)
 		if err != nil {
 			notifyLog.Warn("closed-entity notification sweep: list orgs failed; retrying next tick", "error", err)
 			return
@@ -323,8 +324,13 @@ func (e *engine) RaiseEvent(ctx context.Context, sk any, orgID string, raw any) 
 // whose stored link is empty, or on a host the org no longer configures,
 // fails one action, and the row keeps the others rather than telling nobody.
 // A fault that is not one action's (too many, a notice left with none) still
-// refuses the row.
+// refuses the row, and so does an unreadable org setting: the host check
+// could not run, and a row written without the link would keep that gap for
+// as long as it stays open.
 func (e *engine) eventActions(ctx context.Context, lc domain.NotificationLifecycle, to Recipient, as []Action, orgID string, res *resolution) ([]storedAction, error) {
+	if _, err := res.orgSettings(ctx); err != nil {
+		return nil, err
+	}
 	check := res.checkExternal(ctx)
 	stored, err := renderActions(lc, to, as, orgID, e.b.Local, check)
 	if err == nil {
