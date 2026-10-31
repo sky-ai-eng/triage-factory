@@ -458,7 +458,7 @@ func (r *Router) claimCommitted(orgID string, task *domain.Task, actingTeamID, a
 	// store's guard requires it — so a non-empty user claim on this struct is
 	// a read that has since gone stale (a requeue between load and stamp).
 	// Leaving it would put both claim columns on one in-memory task, a state
-	// the DB's XOR forbids and the re-derive guard at rederive.go:70 reads as
+	// the DB's XOR forbids and evaluateReDerive's already-claimed guard reads as
 	// "someone owns this" for the wrong reason. syncClaimAfterCommit, the
 	// fire-path sibling, already lands both fields from its read-back.
 	task.ClaimedByUserID = ""

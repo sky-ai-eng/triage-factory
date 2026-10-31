@@ -649,10 +649,6 @@ func (s *taskStore) SetVisibilityTeamsSystem(ctx context.Context, orgID, taskID 
 	return s.SetVisibilityTeams(ctx, orgID, taskID, teamIDs)
 }
 
-func (s *taskStore) VisibilityTeamsSystem(ctx context.Context, orgID, taskID string) ([]string, error) {
-	return s.VisibilityTeams(ctx, orgID, taskID)
-}
-
 func (s *taskStore) BumpSystem(ctx context.Context, orgID, taskID, eventID string) (domain.Task, error) {
 	return s.Bump(ctx, orgID, taskID, eventID)
 }
