@@ -95,6 +95,10 @@ kinds.JiraDiscoveryFailing.Sync(ctx, orgID, failing, keep...)
 // ticket that can't reach a status the project still has, does neither
 kinds.JiraMirrorFailing.Set(ctx, orgID, kinds.JiraMirrorFor(rule, issueKey), true)
 
+// internal/memoryprovision/sweep.go — after each sweep pass, for every org it
+// worked; the store read applies the debounce
+kinds.MemoryGenerationFailing.Sync(ctx, orgID, kinds.MemoryFailuresFor(failing))
+
 // internal/routing — the conflict TFAC-518 surfaces
 kinds.AutomationConflict.Post(ctx, orgID, kinds.Conflict{TaskID: task.ID, Winner: winner, Losers: losers})
 
@@ -337,7 +341,7 @@ The same calls, tables (SQLite) and page. Local is N=1: the one user is the reci
 | `jira.discovery_failing`      | jira   | admins of teams whose rules arm the project | high                                  | yes         | `Sync` from `discoverJira` after 3 rejected cycles in a row; unanswered projects kept                                     | Link: the team's Jira status rules                                            |
 | `jira.mirror_failing`         | jira   | team admins                                 | high                                  | yes         | `Set` in `runJiraMirror`, `applyJiraClaim` and the stock deck's claim; a rules save resolves it                           | Link: the team's Jira status rules                                            |
 | `linear.mirror_failing`       | linear | team admins                                 | high                                  | yes         | `Set` in `runLinearMirror` and `applyLinearClaim`; a rules save resolves it                                               | Link: the team's Linear rules                                                 |
-| `memory.generation_failing`   | —      | org admins                                  | urgent for `no_model`, high otherwise | no          | `Sync` from the memory provisioner over the `error_kind`s currently failing across the org's attempts, after its debounce | Link: background-jobs model setting; invoke "Retry now" (rings `memory_owed`) |
+| `memory.generation_failing`   | —      | org admins                                  | urgent for `no_model`, high otherwise | no          | `Sync` after each provisioner sweep, over the `error_kind`s of conversations failing 3 attempts since the last success    | Link: background-jobs model setting; invoke "Retry now" (rings `memory_owed`) |
 | `jira.status_drift`           | jira   | team admins                                 | high                                  | yes         | `Sync` from a detection pass that does not exist yet                                                                      | Link: the rule or handler editor                                              |
 | `routing.automation_conflict` | —      | admins of the losing teams                  | low                                   | (notice)    | `Post` in the router where the conflict is decided                                                                        | Link: the losing team's trigger                                               |
 

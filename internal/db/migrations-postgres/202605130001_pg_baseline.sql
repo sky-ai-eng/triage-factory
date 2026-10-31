@@ -2075,6 +2075,11 @@ CREATE INDEX idx_conversation_memory_entities_entity ON public.conversation_memo
 CREATE INDEX idx_conversation_memory_attempts_conversation ON public.conversation_memory_attempts USING btree (conversation_id, started_at DESC, id DESC);
 
 
+-- The org's newest generated memory, which the memory provisioner's
+-- failing-generation read measures every failure against.
+CREATE INDEX idx_conversation_memory_attempts_generated ON public.conversation_memory_attempts USING btree (org_id, completed_at DESC) WHERE (outcome = 'generated'::text);
+
+
 CREATE INDEX idx_messages_conversation ON public.messages USING btree (conversation_id);
 
 

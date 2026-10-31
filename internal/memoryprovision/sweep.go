@@ -2,7 +2,10 @@ package memoryprovision
 
 import (
 	"context"
+	"slices"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 )
 
 // Run starts the manager under ctx: it arms the doorbell and spawns the
@@ -113,6 +116,11 @@ func (m *Manager) Nudge(orgID, conversationID string) {
 		if err := m.Fulfil(ctx, orgID, conversationID); err != nil {
 			log.Warn("memory doorbell: settling the owed memory failed", "conversation", conversationID, "org", orgID, "error", err)
 		}
+		// The sweep syncs only the orgs its page names, and a doorbell that
+		// settled an org's last owed memory leaves it out of every page.
+		if ctx.Err() == nil {
+			m.syncFailing(ctx, orgID)
+		}
 	}()
 }
 
@@ -131,18 +139,57 @@ func (m *Manager) Nudge(orgID, conversationID string) {
 // boundary first, which is the order a person waiting would choose, and
 // running it in parallel would spend an org's whole background budget on a
 // backlog that nobody is watching all of.
+//
+// After the page, each org it worked has kinds.MemoryGenerationFailing synced
+// from the attempts it just made. A one-org sweep syncs its org even when the
+// page is empty, so a re-sweep of an org that owes nothing resolves it.
 func (m *Manager) sweep(ctx context.Context, backoff time.Duration, orgID string) {
 	owed, err := m.stores.Conversations.ListMemoryOwedSystem(ctx, orgID, backoff, sweepLimit)
 	if err != nil {
 		log.Warn("list conversations owing a memory failed; retrying next tick", "error", err)
 		return
 	}
+	var orgs []string
+	if orgID != "" {
+		orgs = append(orgs, orgID)
+	}
 	for _, o := range owed {
 		if ctx.Err() != nil {
 			return
+		}
+		if !slices.Contains(orgs, o.OrgID) {
+			orgs = append(orgs, o.OrgID)
 		}
 		if err := m.Fulfil(ctx, o.OrgID, o.ConversationID); err != nil {
 			log.Warn("settling an owed memory failed", "conversation", o.ConversationID, "org", o.OrgID, "error", err)
 		}
 	}
+	for _, org := range orgs {
+		if ctx.Err() != nil {
+			return
+		}
+		m.syncFailing(ctx, org)
+	}
+}
+
+// failingStreak is how many attempts in a row a conversation's memory must
+// fail, with no memory generated anywhere in the org since the first of them,
+// before kinds.MemoryGenerationFailing opens. The sweep retries a conversation
+// once per AttemptBackoff, so three is a few minutes of failing: longer than a
+// provider blip, which fails each owed conversation's attempt once however
+// many there are, and short enough that an admin hears about blocked tasks
+// within minutes.
+const failingStreak = 3
+
+// syncFailing opens kinds.MemoryGenerationFailing for each error kind the
+// org's stuck conversations are failing with and resolves the rest. A read
+// that fails syncs nothing, so an open condition is neither bumped nor
+// resolved on no evidence.
+func (m *Manager) syncFailing(ctx context.Context, orgID string) {
+	f, err := m.stores.MemoryAttempts.FailingSystem(ctx, orgID, failingStreak)
+	if err != nil {
+		log.Warn("read failing memory generation failed; syncing next sweep", "org", orgID, "error", err)
+		return
+	}
+	kinds.MemoryGenerationFailing.Sync(ctx, orgID, kinds.MemoryFailuresFor(f))
 }

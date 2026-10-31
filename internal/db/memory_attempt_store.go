@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -68,6 +69,37 @@ type MemoryAttemptStore interface {
 	// attempts view — "why is this conversation's memory missing" — would
 	// read.
 	NewestAttemptForConversationSystem(ctx context.Context, orgID, conversationID string) (*domain.MemoryAttempt, error)
+
+	// FailingSystem reports what memory generation in orgID is failing with
+	// now. A conversation still owing a memory is stuck when its newest
+	// `streak` completed attempts all failed, each completing after the org's
+	// newest generated memory; the answer's Kinds are the error kinds of the
+	// stuck conversations' newest `streak` attempts, newest first, each with
+	// the newest such attempt's message. TasksWaiting counts the org's open
+	// tasks owing a memory, stuck or not.
+	//
+	// Attempts still running, or abandoned by a brain that stopped, are not
+	// counted: neither is a failure, and counting a running one as "not
+	// failed" would resolve the condition for the length of every retry.
+	//
+	// A streak below 1 is refused.
+	FailingSystem(ctx context.Context, orgID string, streak int) (domain.MemoryFailing, error)
+}
+
+// ErrInvalidMemoryFailingStreak is FailingSystem's refusal of a streak below 1.
+var ErrInvalidMemoryFailingStreak = errors.New("db: a failing streak is at least one attempt")
+
+// FirstOfEachMemoryFailingKind keeps the first entry of each kind in rows,
+// which FailingSystem reads newest first, so each kind carries its newest
+// message. Shared so the two dialects fold their rows alike.
+func FirstOfEachMemoryFailingKind(rows []domain.MemoryFailingKind) []domain.MemoryFailingKind {
+	var out []domain.MemoryFailingKind
+	for _, r := range rows {
+		if !slices.ContainsFunc(out, func(k domain.MemoryFailingKind) bool { return k.Kind == r.Kind }) {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // ValidateMemoryAttemptVerdict is the door CompleteAttemptSystem's arguments

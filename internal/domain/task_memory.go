@@ -261,3 +261,25 @@ type MemoryOwed struct {
 	TaskID   string
 	TaskOpen bool
 }
+
+// MemoryFailing is what memory generation in one org is failing with now, read
+// from the attempts ledger: the error kinds of the conversations whose memory
+// keeps failing, and how many open tasks are waiting on a memory.
+type MemoryFailing struct {
+	// TasksWaiting counts the org's open tasks holding a conversation that
+	// owes a memory, whatever its attempts came to.
+	TasksWaiting int
+	// Kinds is each error kind a stuck conversation's newest attempts failed
+	// with, newest first and each kind once. A conversation is stuck when its
+	// newest attempts, as many as the read asked for, all failed after the
+	// org last generated a memory. Empty when nothing is stuck.
+	Kinds []MemoryFailingKind
+}
+
+// MemoryFailingKind is one error kind memory generation is failing with.
+type MemoryFailingKind struct {
+	Kind MemoryAttemptErrorKind
+	// ErrorMessage is the newest such attempt's error_message: TF's wording,
+	// never an upstream body.
+	ErrorMessage string
+}

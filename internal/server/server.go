@@ -30,6 +30,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/knowledgeevent"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/linearoauth"
+	"github.com/sky-ai-eng/triage-factory/internal/notify"
 	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/reachcache"
@@ -629,6 +630,7 @@ func New(database *sql.DB, stores db.Stores) *Server {
 	// The invoke actions of notification kinds whose effect is a write this
 	// server owns.
 	kinds.LinearTeamUnreadable.HandleAction("untrack", s.untrackUnreadableLinearTeam)
+	kinds.MemoryGenerationFailing.HandleAction("retry", s.retryFailingMemoryGeneration)
 	s.routes()
 	return s
 }
@@ -1921,6 +1923,16 @@ func (s *Server) kickMemoryOwed(orgID, conversationID string) {
 		return
 	}
 	s.onMemoryOwed(orgID, conversationID)
+}
+
+// retryFailingMemoryGeneration is kinds.MemoryGenerationFailing's "Retry now":
+// the org-wide doorbell a background jobs model save rings, which re-sweeps
+// the org's owed memories ignoring the attempt backoff. The kind declares the
+// action org-admin only, and notify checks that before this runs. It reports
+// the condition unresolved, because the attempts the sweep makes decide that.
+func (s *Server) retryFailingMemoryGeneration(_ context.Context, call notify.ActionCall[kinds.MemoryFailure]) (bool, error) {
+	s.kickMemoryOwed(call.OrgID, "")
+	return false, nil
 }
 
 // SetOnJiraChanged registers a callback for Jira config changes. This restarts
