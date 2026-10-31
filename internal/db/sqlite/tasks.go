@@ -721,6 +721,7 @@ func (s *taskStore) ListOpenOnClosedEntitiesSystem(ctx context.Context, orgID st
 		JOIN entities e ON e.id = t.entity_id
 		WHERE t.status IN ('queued', 'in_progress', 'snoozed')
 		  AND e.state = 'closed'
+		  AND t.close_deferred_event_id IS NULL
 		  AND t.event_type NOT IN (`+strings.Join(placeholders, ", ")+`)
 		ORDER BY t.created_at ASC, t.id ASC
 	`, args...)

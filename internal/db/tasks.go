@@ -424,7 +424,9 @@ type TaskStore interface {
 	// mint refuses a closed entity in its own, so a row here means one of
 	// those guards was bypassed. The lifecycle task a terminating transition
 	// mints on the entity it closed (domain.TaskMayRideClosedEntity) is
-	// excluded: it is on a closed entity by design. Ordered by created_at
+	// excluded: it is on a closed entity by design, and so is a task holding
+	// a deferred close (domain.TaskCloseDeferral), which stays open on the
+	// entity its own run closed until that run ends. Ordered by created_at
 	// then id so the oldest violation is reported first. Read-only, org-bound
 	// by argument on the admin pool: the checker is a background job with no
 	// JWT claims.
@@ -756,17 +758,16 @@ type TaskStore interface {
 	//
 	// Returns the deferral it stored, or nil when the task is not active
 	// (closed between the router's read and this write), which leaves the row
-	// untouched. Only the router's close phase calls it; EntityStore.
-	// CloseTerminalSystem stamps the same columns inside its own transaction.
-	// Admin pool.
+	// untouched. Admin pool.
 	DeferCloseSystem(ctx context.Context, orgID, taskID, eventID, blueprintRunID string) (*domain.TaskCloseDeferral, error)
 
 	// ListActiveCloseDeferralsSystem returns every deferral held by an active
-	// task, in every org, ordered by org then task id: the router's deferral
-	// sweep reads it once per pass. A deferral left on a task that closed by
-	// another path is never returned. Admin pool, org-wide by design: the
-	// sweep is one brain loop over all orgs, and the partial index on the
-	// deferral columns keeps it to the rows that hold one.
+	// task in every org that is not deleted, ordered by org then task id, for
+	// the router's deferral sweep. A deferral left on a task that closed by
+	// another path is never returned, and neither is one in a deleted org,
+	// whose tasks no close should reach any more. Admin pool, org-wide by
+	// design: the sweep is one brain loop over all orgs, and the partial index
+	// on the deferral columns keeps it to the rows that hold one.
 	ListActiveCloseDeferralsSystem(ctx context.Context) ([]domain.TaskCloseDeferral, error)
 
 	// ClearCloseDeferralSystem clears the task's deferral when it still names

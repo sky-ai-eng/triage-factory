@@ -213,6 +213,17 @@ func GitHubEntityRepoRef(scope, sourceID string) (domain.RepoRef, error) {
 	return domain.RepoRef{Source: domain.RepoSourceGitHub, Host: scope, Owner: owner, Repo: repo}, nil
 }
 
+// RequireClosingEventForDeferral refuses a terminating close asked to defer
+// tasks without naming the closing event: a deferral is that event and the
+// run that caused it, and holds both or neither. Both dialects'
+// CloseTerminalSystem call it before touching the database.
+func RequireClosingEventForDeferral(deferTo map[string]string, closingEventID string) error {
+	if len(deferTo) > 0 && closingEventID == "" {
+		return errors.New("terminating close: a deferred close needs the closing event")
+	}
+	return nil
+}
+
 // TerminalCloseResult is what EntityStore.CloseTerminalSystem committed.
 type TerminalCloseResult struct {
 	// Closed reports whether the entity flipped in this call. False means the

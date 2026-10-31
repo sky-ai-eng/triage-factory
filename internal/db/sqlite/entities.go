@@ -1095,8 +1095,8 @@ func (s *entityStore) CloseTerminalSystem(ctx context.Context, orgID, entityID s
 	if err := assertLocalOrg(orgID); err != nil {
 		return db.TerminalCloseResult{}, err
 	}
-	if len(deferTo) > 0 && closingEventID == "" {
-		return db.TerminalCloseResult{}, errors.New("terminating close: a deferred close needs the closing event")
+	if err := db.RequireClosingEventForDeferral(deferTo, closingEventID); err != nil {
+		return db.TerminalCloseResult{}, err
 	}
 	res := db.TerminalCloseResult{ActiveConversationIDs: map[string][]string{}}
 	err := inTx(ctx, s.q, func(q queryer) error {

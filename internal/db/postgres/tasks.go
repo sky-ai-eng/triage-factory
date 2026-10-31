@@ -515,6 +515,7 @@ func (s *taskStore) ListOpenOnClosedEntitiesSystem(ctx context.Context, orgID st
 		WHERE t.org_id = $1
 		  AND t.status IN ('queued', 'in_progress', 'snoozed')
 		  AND e.state = 'closed'
+		  AND t.close_deferred_event_id IS NULL
 		  AND NOT (t.event_type = ANY($2))
 		ORDER BY t.created_at ASC, t.id ASC
 	`, orgID, domain.EntityTerminatingEventTypes())
@@ -1066,6 +1067,7 @@ func (s *taskStore) ListActiveCloseDeferralsSystem(ctx context.Context) ([]domai
 		  FROM tasks
 		 WHERE close_deferred_event_id IS NOT NULL
 		   AND status NOT IN ('done', 'dismissed')
+		   AND EXISTS (SELECT 1 FROM orgs o WHERE o.id = tasks.org_id AND o.deleted_at IS NULL)
 		 ORDER BY org_id, id
 	`)
 	if err != nil {

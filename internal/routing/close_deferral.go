@@ -117,9 +117,13 @@ func completionFinalStatus(evt domain.Event) string {
 
 // causingRun returns the task's running blueprint run when that run caused
 // evt, or "" when it did not: the relation declares no matcher, the task has
-// no running run, the run is stopped, or no action of its agent explains the
-// event. A run a person stopped, or one parked on a stall or a lost sandbox,
-// gets no deferral — its task closes now.
+// no running run, no action of its agent explains the event, or the run is
+// stopped. A run a person stopped, or one parked on a stall or a lost
+// sandbox, gets no deferral — its task closes now.
+//
+// The ledger match comes before the stopped check because it is the usual
+// "no": most runs on a task did not cause the event closing it, and the
+// stopped check reads the run's conversations.
 func (r *Router) causingRun(ctx context.Context, orgID string, evt domain.Event, entityID string, rel *closeRelation, taskID string) (string, error) {
 	if rel.causedByRun == nil {
 		return "", nil
@@ -128,12 +132,10 @@ func (r *Router) causingRun(ctx context.Context, orgID string, evt domain.Event,
 	if err != nil {
 		return "", fmt.Errorf("read task %s's running blueprint run: %w", taskID, err)
 	}
-	if run == nil {
+	// A run someone called off is stopped already, whatever its
+	// conversation shows while the kill lands.
+	if run == nil || run.CancelRequested {
 		return "", nil
-	}
-	stopped, err := r.blueprintRunStopped(ctx, orgID, run.ID)
-	if err != nil || stopped {
-		return "", err
 	}
 	caused, err := rel.causedByRun(ctx, r, orgID, evt, entityID, run.ID)
 	if err != nil {
@@ -142,13 +144,28 @@ func (r *Router) causingRun(ctx context.Context, orgID string, evt domain.Event,
 	if !caused {
 		return "", nil
 	}
+	stopped, err := r.newestStepConversationStopped(ctx, orgID, run.ID)
+	if err != nil || stopped {
+		return "", err
+	}
 	return run.ID, nil
 }
 
-// blueprintRunStopped reports whether the run's newest conversation (highest
-// blueprint_step_index) is stopped: failed, or parked open without its step's
-// conclusion. A run with no conversation yet is not stopped.
-func (r *Router) blueprintRunStopped(ctx context.Context, orgID, blueprintRunID string) (bool, error) {
+// blueprintRunStopped reports whether a run still marked running has stopped
+// working: someone called it off (cancel_requested, which the kill follows),
+// or its newest step conversation is.
+func (r *Router) blueprintRunStopped(ctx context.Context, orgID string, run *domain.BlueprintRun) (bool, error) {
+	if run.CancelRequested {
+		return true, nil
+	}
+	return r.newestStepConversationStopped(ctx, orgID, run.ID)
+}
+
+// newestStepConversationStopped reports whether the run's newest step
+// conversation (highest blueprint_step_index) is stopped: failed, or parked
+// open without its step's conclusion. A run with no conversation yet is not
+// stopped.
+func (r *Router) newestStepConversationStopped(ctx context.Context, orgID, blueprintRunID string) (bool, error) {
 	convs, err := r.blueprints.ConversationsForBlueprintSystem(ctx, orgID, blueprintRunID)
 	if err != nil {
 		return false, fmt.Errorf("read blueprint run %s's conversations: %w", blueprintRunID, err)
@@ -260,13 +277,10 @@ func (r *Router) sweepCloseDeferrals(ctx context.Context) {
 	}
 }
 
-// settleCloseDeferral decides one deferral by its run's state. A completed
-// run's own ending owns the task (the run_completed close, which waits on the
-// task's deliverables and tears nothing down), so the deferral is dropped. A
-// run that ended any other way, or is still running with its newest
-// conversation stopped, gets the deferred close. A run still working, or
-// between steps, is left for the next pass. closed reports whether the task
-// closed.
+// settleCloseDeferral decides one deferral by its run's state. A run that
+// ended, or is still running but stopped, gets the deferred close; a run
+// still working, or between steps, is left for the next pass. closed reports
+// whether the task closed.
 func (r *Router) settleCloseDeferral(ctx context.Context, d domain.TaskCloseDeferral) (closed bool, err error) {
 	run, err := r.blueprints.GetRunSystem(ctx, d.OrgID, d.BlueprintRunID)
 	if err != nil {
@@ -277,15 +291,15 @@ func (r *Router) settleCloseDeferral(ctx context.Context, d domain.TaskCloseDefe
 	}
 	switch run.Status {
 	case domain.BlueprintRunStatusCompleted:
-		return false, r.clearCloseDeferral(ctx, d)
+		return r.applyCloseDeferral(ctx, d, true)
 	case domain.BlueprintRunStatusAborted, domain.BlueprintRunStatusFailed, domain.BlueprintRunStatusCancelled:
-		return r.applyCloseDeferral(ctx, d)
+		return r.applyCloseDeferral(ctx, d, false)
 	case domain.BlueprintRunStatusRunning:
-		stopped, err := r.blueprintRunStopped(ctx, d.OrgID, run.ID)
+		stopped, err := r.blueprintRunStopped(ctx, d.OrgID, run)
 		if err != nil || !stopped {
 			return false, err
 		}
-		return r.applyCloseDeferral(ctx, d)
+		return r.applyCloseDeferral(ctx, d, false)
 	}
 	return false, nil
 }
@@ -293,17 +307,28 @@ func (r *Router) settleCloseDeferral(ctx context.Context, d domain.TaskCloseDefe
 // applyCloseDeferral performs the close the stored event owed the task, if
 // the relation still admits it against current state: a typed relation runs
 // its prepare and keep for this one task, and a terminating one closes it
-// with its own reason. The close is the ordinary one (closeTaskWithAudit), so
-// the stop, the cancel intent, the teardown and the audit row naming the
-// stored event are what an undeferred close writes. A relation that no longer
-// admits it (CI failing again, say) drops the deferral without closing.
-func (r *Router) applyCloseDeferral(ctx context.Context, d domain.TaskCloseDeferral) (closed bool, err error) {
+// with its own reason while its entity is still closed. The close is the
+// ordinary one (closeTaskWithAudit), so the stop, the cancel intent, the
+// teardown and the audit row naming the stored event are what an undeferred
+// close writes. A relation that no longer admits it (CI failing again, a
+// reopened pull request) drops the deferral without closing.
+//
+// runCompleted narrows that to terminating events. A completed run has
+// finished its work, so a task still open after it is waiting on a person to
+// act on a deliverable. That still works while the entity is live, so a
+// typed deferral is dropped. On a closed entity nothing can act on the task
+// any more, so the terminating close still applies, with the teardown the
+// undeferred close would have run.
+func (r *Router) applyCloseDeferral(ctx context.Context, d domain.TaskCloseDeferral, runCompleted bool) (closed bool, err error) {
 	evt, err := r.events.GetSystem(ctx, d.OrgID, d.EventID)
 	if err != nil {
 		return false, fmt.Errorf("read closing event: %w", err)
 	}
 	if evt == nil {
 		return false, fmt.Errorf("closing event %s not found", d.EventID)
+	}
+	if runCompleted && terminatingRelationFor(evt.EventType) == nil {
+		return false, r.clearCloseDeferral(ctx, d)
 	}
 	task, err := r.tasks.GetSystem(ctx, d.OrgID, d.TaskID)
 	if err != nil {
@@ -338,11 +363,19 @@ func (r *Router) applyCloseDeferral(ctx context.Context, d domain.TaskCloseDefer
 
 // deferredCloseReason finds the relation that deferred the close of task on
 // evt and asks it whether the close still holds: a terminating relation
-// always does; a typed one when its prepare and keep both admit the task.
-// admitted=false with no relation found too — the close it owed is not one
-// this build declares.
+// while the task's entity is still closed (a pull request or issue reopened
+// since is live work again); a typed one when its prepare and keep both admit
+// the task. admitted=false with no relation found too — the close it owed is
+// not one this build declares.
 func (r *Router) deferredCloseReason(ctx context.Context, orgID string, evt domain.Event, task domain.Task) (reason string, admitted bool, err error) {
 	if rel := terminatingRelationFor(evt.EventType); rel != nil {
+		entity, err := r.entities.GetSystem(ctx, orgID, task.EntityID)
+		if err != nil {
+			return "", false, fmt.Errorf("read entity %s: %w", task.EntityID, err)
+		}
+		if entity == nil || entity.State != "closed" {
+			return "", false, nil
+		}
 		return rel.reason(), true, nil
 	}
 	for ri := range closeRelations {

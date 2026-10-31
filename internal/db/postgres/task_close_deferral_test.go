@@ -33,9 +33,10 @@ func TestTaskCloseDeferral_Postgres(t *testing.T) {
 }
 
 // TestTaskCloseDeferral_Postgres_ListsEveryOrg pins the list read's scope:
-// the sweep is one loop over every org, so it reads every org's deferrals,
-// each row naming the org it belongs to. SQLite holds one org and cannot
-// show it.
+// the sweep is one loop over every org, so it reads every live org's
+// deferrals, each row naming the org it belongs to, and none of a deleted
+// org's. SQLite holds one org and has no soft delete, so it cannot show
+// either.
 func TestTaskCloseDeferral_Postgres_ListsEveryOrg(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -43,7 +44,7 @@ func TestTaskCloseDeferral_Postgres_ListsEveryOrg(t *testing.T) {
 	ctx := context.Background()
 
 	want := map[string]string{} // task id → org id
-	for range 2 {
+	for i := range 3 {
 		orgID, userID, _ := seedPgOrgUserAgent(t, h)
 		seed := newPgCloseDeferralSeeder(h.AdminDB, orgID, userID)
 		taskID := seed.Task(t)
@@ -51,6 +52,12 @@ func TestTaskCloseDeferral_Postgres_ListsEveryOrg(t *testing.T) {
 		runID, _ := seed.BlueprintAndConversation(t, taskID, "running", "")
 		if _, err := stores.Tasks.DeferCloseSystem(ctx, orgID, taskID, eventID, runID); err != nil {
 			t.Fatalf("DeferCloseSystem: %v", err)
+		}
+		if i == 2 {
+			if _, err := h.AdminDB.Exec(`UPDATE orgs SET deleted_at = now() WHERE id = $1`, orgID); err != nil {
+				t.Fatalf("soft-delete org: %v", err)
+			}
+			continue
 		}
 		want[taskID] = orgID
 	}

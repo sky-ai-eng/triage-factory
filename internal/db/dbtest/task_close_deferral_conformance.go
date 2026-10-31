@@ -268,6 +268,15 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 		if d := listed(t, stores.Tasks, deferred); d == nil || *d != want {
 			t.Errorf("listed deferral = %+v, want %+v", d, want)
 		}
+		// Open on the entity its own run closed, by design: not the stranded
+		// task the terminal-state checker counts.
+		stranded, err := stores.Tasks.ListOpenOnClosedEntitiesSystem(ctx, orgID)
+		if err != nil {
+			t.Fatalf("ListOpenOnClosedEntitiesSystem: %v", err)
+		}
+		if slices.Contains(stranded, deferred) {
+			t.Errorf("the deferred task is counted as stranded on its closed entity: %v", stranded)
+		}
 	})
 
 	t.Run("CloseTerminal_guard_miss_stamps_nothing", func(t *testing.T) {
@@ -359,14 +368,10 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 		for _, a := range rows {
 			keys = append(keys, a.DedupKey)
 		}
-		if got := slices.Sorted(slices.Values(keys)); !slices.Equal(got, slices.Sorted(slices.Values([]string{first, second}))) {
-			t.Errorf("rows = %v, want the run's two agent pushes %v", keys, []string{first, second})
-		}
-		for i := 1; i < len(rows); i++ {
-			prev, cur := rows[i-1], rows[i]
-			if cur.OccurredAt.After(prev.OccurredAt) || (cur.OccurredAt.Equal(prev.OccurredAt) && cur.ID > prev.ID) {
-				t.Errorf("rows not newest first by (occurred_at, id): %v then %v", prev, cur)
-			}
+		// Newest first, and the two pushes were written one after the other,
+		// usually inside one second: the later write leads either way.
+		if !slices.Equal(keys, []string{second, first}) {
+			t.Errorf("rows = %v, want the run's two agent pushes newest first %v", keys, []string{second, first})
 		}
 	})
 }

@@ -152,12 +152,15 @@ type ExternalActionStore interface {
 
 	// ListAgentActionsForBlueprintRunSystem returns orgID's rows of one
 	// action that a run's agent performed (performed_by 'agent') in any of
-	// blueprintRunID's step conversations, newest first (occurred_at DESC,
-	// id DESC). It is what the router's close phase reads to find out
-	// whether the event closing a task was caused by the task's own run: the
-	// push whose commit CI passed on, the merge, the transition to done. A
-	// person's approval or TF's teardown carries the run's conversation too,
-	// and is left out by performed_by. Admin pool (BYPASSRLS): the router
-	// holds no claims.
+	// blueprintRunID's step conversations, newest first: by occurred_at, and
+	// of two rows at one occurred_at the later write first (SQLite stamps
+	// whole seconds, so there the tie is real; Postgres stamps microseconds
+	// and breaks the rare tie on id). It is what the router's close phase
+	// reads to find out whether the event closing a task was caused by the
+	// task's own run: the push whose commit CI passed on, the merge, the
+	// transition to done, where "newest" decides which transition counts.
+	// performed_by keeps it to the agent's own acts: a person's approval of
+	// the run's deliverable carries the run's conversation too. Admin pool
+	// (BYPASSRLS): the router holds no claims.
 	ListAgentActionsForBlueprintRunSystem(ctx context.Context, orgID, blueprintRunID, action string) ([]domain.ExternalAction, error)
 }

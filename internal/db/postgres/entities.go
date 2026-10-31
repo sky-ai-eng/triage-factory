@@ -1171,8 +1171,8 @@ func (s *entityStore) CloseWithSnapshotCASSystem(ctx context.Context, orgID, id,
 // every task mint takes first too (lockActiveEntity), so the two serialize
 // on it rather than on each other's rows.
 func (s *entityStore) CloseTerminalSystem(ctx context.Context, orgID, entityID string, expected *int64, closeTypes []string, closeReason, closeEventType, closingEventID string, deferTo map[string]string) (db.TerminalCloseResult, error) {
-	if len(deferTo) > 0 && closingEventID == "" {
-		return db.TerminalCloseResult{}, errors.New("terminating close: a deferred close needs the closing event")
+	if err := db.RequireClosingEventForDeferral(deferTo, closingEventID); err != nil {
+		return db.TerminalCloseResult{}, err
 	}
 	res := db.TerminalCloseResult{ActiveConversationIDs: map[string][]string{}}
 	err := inTx(ctx, s.admin, func(q queryer) error {
