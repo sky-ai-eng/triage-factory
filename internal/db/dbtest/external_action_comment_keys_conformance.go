@@ -13,7 +13,7 @@ import (
 )
 
 // RunExternalActionCommentKeysConformance covers the tracker's read of which
-// comments TF posted, PresentCreatedObjectKeysSystem. It answers for the
+// comments TF posted, PresentPostedCommentKeysSystem. It answers for the
 // object key of a comment_posted or issue_comment_posted row on the scope it
 // is asked about, whoever performed it, across GitHub, Jira and Linear. It
 // does not answer for a key whose only rows are another action on the same
@@ -84,16 +84,16 @@ func RunExternalActionCommentKeysConformance(t *testing.T, mk ExternalActionNode
 		{"no_keys", hostA, nil, map[string]bool{}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := f.Stores.ExternalActions.PresentCreatedObjectKeysSystem(ctx, f.OrgID, c.scope, c.keys)
+			got, err := f.Stores.ExternalActions.PresentPostedCommentKeysSystem(ctx, f.OrgID, c.scope, c.keys)
 			if err != nil {
-				t.Fatalf("PresentCreatedObjectKeysSystem: %v", err)
+				t.Fatalf("PresentPostedCommentKeysSystem: %v", err)
 			}
 			if got == nil || !maps.Equal(got, c.want) {
 				t.Errorf("present = %v, want %v", got, c.want)
 			}
 		})
 	}
-	if _, err := f.Stores.ExternalActions.PresentCreatedObjectKeysSystem(ctx, f.OrgID, "", []string{conversation}); !errors.Is(err, db.ErrExternalObjectScopeRequired) {
-		t.Errorf("PresentCreatedObjectKeysSystem with no scope: err = %v, want ErrExternalObjectScopeRequired", err)
+	if _, err := f.Stores.ExternalActions.PresentPostedCommentKeysSystem(ctx, f.OrgID, "", []string{conversation}); !errors.Is(err, db.ErrExternalObjectScopeRequired) {
+		t.Errorf("PresentPostedCommentKeysSystem with no scope: err = %v, want ErrExternalObjectScopeRequired", err)
 	}
 }

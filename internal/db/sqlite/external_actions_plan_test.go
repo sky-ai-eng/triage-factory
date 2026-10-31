@@ -49,15 +49,15 @@ func TestExternalActionStore_SQLite_PRCreatedWithoutDeliverablePlan(t *testing.T
 	}
 }
 
-// TestExternalActionStore_SQLite_PresentCreatedObjectKeysPlan pins that the
+// TestExternalActionStore_SQLite_PresentPostedCommentKeysPlan pins that the
 // poll's read of which comments TF posted searches the ledger's object-key
 // index on the org, the scope and the keys rather than walking every row the
 // org holds on the host.
-func TestExternalActionStore_SQLite_PresentCreatedObjectKeysPlan(t *testing.T) {
+func TestExternalActionStore_SQLite_PresentPostedCommentKeysPlan(t *testing.T) {
 	conn := openSQLiteForTest(t)
-	rows, err := conn.Query(`EXPLAIN QUERY PLAN `+sqlitestore.PresentCreatedObjectKeysQueryForTest+`?, ?)`,
+	rows, err := conn.Query(`EXPLAIN QUERY PLAN `+sqlitestore.PresentPostedCommentKeysQueryForTest,
 		runmode.LocalDefaultOrgID, "https://github.com", domain.ObjectKindComment, domain.ActionCommentPosted, domain.ActionIssueCommentPosted,
-		domain.GitHubCommentKey(domain.GitHubIssueComment, 1), domain.GitHubCommentKey(domain.GitHubReviewComment, 2))
+		`["github:comment:1","github:comment:review:2"]`)
 	if err != nil {
 		t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
 	}

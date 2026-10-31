@@ -337,7 +337,7 @@ func TestGitHubNewComments_MarksTFComments(t *testing.T) {
 // failingCommentLedger fails the comment-key lookup.
 type failingCommentLedger struct{ db.ExternalActionStore }
 
-func (failingCommentLedger) PresentCreatedObjectKeysSystem(context.Context, string, string, []string) (map[string]bool, error) {
+func (failingCommentLedger) PresentPostedCommentKeysSystem(context.Context, string, string, []string) (map[string]bool, error) {
 	return nil, errors.New("ledger down")
 }
 

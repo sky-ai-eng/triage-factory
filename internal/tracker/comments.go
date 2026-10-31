@@ -101,7 +101,7 @@ func (t *Tracker) markTFComments(ctx context.Context, scope string, comments []N
 	if len(keys) == 0 {
 		return nil
 	}
-	present, err := t.externalActions.PresentCreatedObjectKeysSystem(ctx, t.orgID, scope, keys)
+	present, err := t.externalActions.PresentPostedCommentKeysSystem(ctx, t.orgID, scope, keys)
 	if err != nil {
 		return err
 	}

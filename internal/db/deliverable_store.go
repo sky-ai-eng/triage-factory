@@ -192,9 +192,10 @@ type DeliverableStore interface {
 	// serves it. An empty scope is refused with
 	// ErrExternalObjectScopeRequired.
 	//
-	// Admin pool (BYPASSRLS) in Postgres: the tracker holds no claims, and the deliverable belongs to whichever team's
-	// run submitted the review. org_id stays bound as defense in depth.
-	// Identical to a plain org read in SQLite.
+	// Admin pool (BYPASSRLS) in Postgres: the tracker holds no claims, and
+	// the deliverable belongs to whichever team's run submitted the review.
+	// org_id stays bound as defense in depth. Identical to a plain org read in
+	// SQLite.
 	PresentExternalIDsSystem(ctx context.Context, orgID, scope, provider, kind string, externalIDs []string) (map[string]bool, error)
 
 	// GetByNodeIDSystem returns the deliverable in scope carrying the GraphQL

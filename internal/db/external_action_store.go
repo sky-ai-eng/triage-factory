@@ -137,7 +137,7 @@ type ExternalActionStore interface {
 	// refused with ErrExternalObjectScopeRequired.
 	ListPRCreatedWithoutDeliverableSystem(ctx context.Context, orgID, scope string, since time.Time) ([]domain.ExternalAction, error)
 
-	// PresentCreatedObjectKeysSystem returns the subset of keys that are the
+	// PresentPostedCommentKeysSystem returns the subset of keys that are the
 	// object_key of a comment TF posted in orgID on scope: a row with
 	// object_kind 'comment' and action comment_posted or issue_comment_posted,
 	// whoever performed it. keys are comment object keys
@@ -148,5 +148,5 @@ type ExternalActionStore interface {
 	// an empty scope is refused with ErrExternalObjectScopeRequired. Admin
 	// pool (BYPASSRLS): the tracker holds no claims, and the row belongs to
 	// whichever team's run posted the comment.
-	PresentCreatedObjectKeysSystem(ctx context.Context, orgID, scope string, keys []string) (map[string]bool, error)
+	PresentPostedCommentKeysSystem(ctx context.Context, orgID, scope string, keys []string) (map[string]bool, error)
 }

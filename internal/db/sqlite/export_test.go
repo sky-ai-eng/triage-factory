@@ -12,14 +12,13 @@ var ParseDBDatetimeForTest = parseDBDatetime
 // statement so the query-plan test can EXPLAIN exactly what the store runs.
 var PRCreatedWithoutDeliverableQueryForTest = prCreatedWithoutDeliverableQuery
 
-// PresentExternalIDsQueryForTest exposes the review-id lookup's statement up
-// to its IN list so the query-plan test can EXPLAIN what the store runs.
+// PresentExternalIDsQueryForTest exposes the review-id lookup's statement so
+// the query-plan test can EXPLAIN what the store runs.
 var PresentExternalIDsQueryForTest = presentExternalIDsQuery
 
-// PresentCreatedObjectKeysQueryForTest exposes the comment-key lookup's
-// statement up to its IN list so the query-plan test can EXPLAIN what the
-// store runs.
-var PresentCreatedObjectKeysQueryForTest = presentCreatedObjectKeysQuery
+// PresentPostedCommentKeysQueryForTest exposes the comment-key lookup's
+// statement so the query-plan test can EXPLAIN what the store runs.
+var PresentPostedCommentKeysQueryForTest = presentPostedCommentKeysQuery
 
 // ActionObjectIDSQLForTest exposes the SQL twin of domain.ObjectID so the
 // ledger conformance suite can hold the two to each other.

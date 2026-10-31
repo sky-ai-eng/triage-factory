@@ -179,7 +179,7 @@ func (t *Tracker) markTFReviews(ctx context.Context, scope string, read []ghclie
 	if err != nil {
 		return err
 	}
-	posted, err := t.externalActions.PresentCreatedObjectKeysSystem(ctx, t.orgID, scope, commentKeys)
+	posted, err := t.externalActions.PresentPostedCommentKeysSystem(ctx, t.orgID, scope, commentKeys)
 	if err != nil {
 		return err
 	}

@@ -3,7 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
-	"strings"
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -213,19 +213,20 @@ func (s *externalActionStore) ListPRCreatedWithoutDeliverableSystem(ctx context.
 	return scanExternalActionRows(rows)
 }
 
-// presentCreatedObjectKeysQuery is PresentCreatedObjectKeysSystem's statement
-// up to its IN list, binding org_id, scope, the object kind and the two
-// comment actions in that order; the caller closes the list with one
-// placeholder per key.
-const presentCreatedObjectKeysQuery = `
-	SELECT DISTINCT object_key
+// presentPostedCommentKeysQuery is PresentPostedCommentKeysSystem's statement,
+// binding org_id, scope, the object kind, the two comment actions and the keys
+// as one JSON array, in that order. SQLite binds no arrays, and json_each
+// reads the list from one bind, so the statement is the same for any number
+// of keys and the object-key index is searched once per key.
+const presentPostedCommentKeysQuery = `
+	SELECT object_key
 	  FROM external_actions
 	 WHERE org_id = ? AND scope = ? AND object_kind = ? AND action IN (?, ?)
-	   AND object_key IN (`
+	   AND object_key IN (SELECT value FROM json_each(?))`
 
-// PresentCreatedObjectKeysSystem is the tracker's read of which comments TF
+// PresentPostedCommentKeysSystem is the tracker's read of which comments TF
 // posted (see the interface).
-func (s *externalActionStore) PresentCreatedObjectKeysSystem(ctx context.Context, orgID, scope string, keys []string) (map[string]bool, error) {
+func (s *externalActionStore) PresentPostedCommentKeysSystem(ctx context.Context, orgID, scope string, keys []string) (map[string]bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -233,34 +234,27 @@ func (s *externalActionStore) PresentCreatedObjectKeysSystem(ctx context.Context
 		return nil, err
 	}
 	present := map[string]bool{}
-	// ?-placeholder IN list, chunked to stay inside SQLite's variable limit.
-	for _, chunk := range chunkIDs(keys) {
-		placeholders := make([]string, len(chunk))
-		args := make([]any, 0, len(chunk)+5)
-		args = append(args, orgID, scope, domain.ObjectKindComment, domain.ActionCommentPosted, domain.ActionIssueCommentPosted)
-		for i, key := range chunk {
-			placeholders[i] = "?"
-			args = append(args, key)
-		}
-		if err := func() error {
-			rows, err := s.q.QueryContext(ctx, presentCreatedObjectKeysQuery+strings.Join(placeholders, ", ")+`)`, args...)
-			if err != nil {
-				return err
-			}
-			defer rows.Close()
-			for rows.Next() {
-				var key string
-				if err := rows.Scan(&key); err != nil {
-					return err
-				}
-				present[key] = true
-			}
-			return rows.Err()
-		}(); err != nil {
+	if len(keys) == 0 {
+		return present, nil
+	}
+	list, err := json.Marshal(keys)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx, presentPostedCommentKeysQuery,
+		orgID, scope, domain.ObjectKindComment, domain.ActionCommentPosted, domain.ActionIssueCommentPosted, string(list))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
 			return nil, err
 		}
+		present[key] = true
 	}
-	return present, nil
+	return present, rows.Err()
 }
 
 // appendExternalActionFilters appends opts' optional provider/action/actor/time
