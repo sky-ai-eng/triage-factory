@@ -213,7 +213,9 @@ fn rapid_sequential_calls_stay_paired_and_alive() {
         let req = match i % 5 {
             0 => json!({ "id": i, "tool": "read", "args": { "path": "seed.txt" } }),
             1 => json!({ "id": i, "tool": "ls", "args": { "path": &cwd } }),
-            2 => json!({ "id": i, "tool": "bash", "args": { "command": format!("echo n{i}") } }),
+            2 => {
+                json!({ "id": i, "tool": "bash", "args": { "description": "Running a test command", "command": format!("echo n{i}") } })
+            }
             3 => {
                 json!({ "id": i, "tool": "write", "args": { "path": format!("out/{i}.txt"), "content": format!("{i}") } })
             }
@@ -267,7 +269,7 @@ fn oversized_bash_output_truncates_like_direct() {
     // `seq 3000` blows the line budget and spills to a temp file. The spill
     // path is random per call, so compare with it normalized away — everything
     // else (the truncated body, the notice, the truncation details) must match.
-    let args = json!({ "command": "seq 3000" });
+    let args = json!({ "description": "Running a test command", "command": "seq 3000" });
     let resp = call(
         &mut stream,
         &json!({ "id": 1, "tool": "bash", "args": args.clone() }),
@@ -302,7 +304,7 @@ fn unknown_tool_is_a_structured_protocol_error() {
     // The connection survives a protocol error; a good request still answers.
     let ok = call(
         &mut stream,
-        &json!({ "id": 10, "tool": "bash", "args": { "command": "echo hi" } }),
+        &json!({ "id": 10, "tool": "bash", "args": { "description": "Running a test command", "command": "echo hi" } }),
     );
     assert_eq!(ok["ok"], json!(true));
 }
@@ -335,7 +337,7 @@ fn a_configured_budget_kills_a_hog_without_ending_the_engagement() {
     // output then keeps only NULs and loses the marker.
     let breach = call(
         &mut stream,
-        &json!({ "id": 2, "tool": "bash", "args": { "command": "echo starting; head -c 400M /dev/zero | tail | sleep 30" } }),
+        &json!({ "id": 2, "tool": "bash", "args": { "description": "Running a test command", "command": "echo starting; head -c 400M /dev/zero | tail | sleep 30" } }),
     );
     // An ordinary tool error — a string, not a kinded protocol object — so the
     // loop hands it to the model as an is_error result and carries on.
@@ -359,7 +361,7 @@ fn a_configured_budget_kills_a_hog_without_ending_the_engagement() {
     // server still exits cleanly on EOF.
     let after = call(
         &mut stream,
-        &json!({ "id": 3, "tool": "bash", "args": { "command": "echo alive" } }),
+        &json!({ "id": 3, "tool": "bash", "args": { "description": "Running a test command", "command": "echo alive" } }),
     );
     assert_eq!(
         after["ok"],
@@ -383,7 +385,7 @@ fn an_unconfigured_session_lets_the_same_hog_finish() {
     let mut stream = proc.accept();
     let resp = call(
         &mut stream,
-        &json!({ "id": 1, "tool": "bash", "args": { "command": "head -c 200M /dev/zero | tail | wc -c" } }),
+        &json!({ "id": 1, "tool": "bash", "args": { "description": "Running a test command", "command": "head -c 200M /dev/zero | tail | wc -c" } }),
     );
     assert_eq!(
         resp["ok"],
@@ -424,7 +426,7 @@ fn malformed_frames_never_crash_the_server() {
     // After all that hostile input the connection is still healthy.
     let ok = call(
         &mut stream,
-        &json!({ "id": 1, "tool": "bash", "args": { "command": "echo ok" } }),
+        &json!({ "id": 1, "tool": "bash", "args": { "description": "Running a test command", "command": "echo ok" } }),
     );
     assert_eq!(ok["ok"], json!(true));
 
@@ -482,7 +484,7 @@ fn client_death_mid_request_exits_the_server_cleanly() {
     // reads EOF, and it exits cleanly — no panic, no non-zero status.
     write_frame(
         &mut stream,
-        json!({ "id": 1, "tool": "bash", "args": { "command": "sleep 0.3; echo done" } })
+        json!({ "id": 1, "tool": "bash", "args": { "description": "Running a test command", "command": "sleep 0.3; echo done" } })
             .to_string()
             .as_bytes(),
     )
@@ -510,7 +512,7 @@ fn server_death_mid_request_fails_the_client_read() {
     // the client's frame read fails on EOF (the loser contract).
     write_frame(
         &mut stream,
-        json!({ "id": 1, "tool": "bash", "args": { "command": "sleep 1; echo late" } })
+        json!({ "id": 1, "tool": "bash", "args": { "description": "Running a test command", "command": "sleep 1; echo late" } })
             .to_string()
             .as_bytes(),
     )

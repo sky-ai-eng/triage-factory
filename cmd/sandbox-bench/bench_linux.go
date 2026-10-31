@@ -478,8 +478,9 @@ func runOOMTest(ctx context.Context, cfg benchConfig, getAbort func() string) er
 		go func(i int, v *handle) {
 			defer callWG.Done()
 			out, err := v.tools.Call("bash", map[string]any{
-				"command": fmt.Sprintf("node /work/tf-grow.mjs %d", allocMB),
-				"timeout": 150,
+				"command":     fmt.Sprintf("node /work/tf-grow.mjs %d", allocMB),
+				"description": "Running a benchmark command",
+				"timeout":     150,
 			})
 			tail := func(s string) string {
 				if len(s) > 1200 {
@@ -773,7 +774,7 @@ func runOneShot(ctx context.Context, cfg benchConfig, id int) error {
 		return err
 	}
 	defer h.teardown()
-	out, err := h.tools.Call("bash", map[string]any{"command": "true", "timeout": 60})
+	out, err := h.tools.Call("bash", map[string]any{"description": "Running a benchmark command", "command": "true", "timeout": 60})
 	if err != nil {
 		return err
 	}
@@ -855,14 +856,16 @@ func (h *handle) driveHeavy(ctx context.Context, cfg benchConfig) {
 	}
 	for {
 		if !h.call("bash", map[string]any{
-			"command": fmt.Sprintf("node /work/tf-build.mjs %d 4", cfg.burstSec),
-			"timeout": cfg.burstSec + 90,
+			"command":     fmt.Sprintf("node /work/tf-build.mjs %d 4", cfg.burstSec),
+			"description": "Running a benchmark command",
+			"timeout":     cfg.burstSec + 90,
 		}) {
 			return
 		}
 		if !h.call("bash", map[string]any{
-			"command": fmt.Sprintf("node /work/tf-hold.mjs %d %d", cfg.holdMB, cfg.holdSec),
-			"timeout": cfg.holdSec + 60,
+			"command":     fmt.Sprintf("node /work/tf-hold.mjs %d %d", cfg.holdMB, cfg.holdSec),
+			"description": "Running a benchmark command",
+			"timeout":     cfg.holdSec + 60,
 		}) {
 			return
 		}
@@ -881,17 +884,17 @@ func (h *handle) driveHeavy(ctx context.Context, cfg benchConfig) {
 func workloadCall(i int) (string, map[string]any) {
 	switch i % 6 {
 	case 0:
-		return "bash", map[string]any{"command": "ls -R /work | wc -l", "timeout": 60}
+		return "bash", map[string]any{"description": "Running a benchmark command", "command": "ls -R /work | wc -l", "timeout": 60}
 	case 1:
 		return "read", map[string]any{"path": "/work/src/f0010.txt"}
 	case 2:
-		return "bash", map[string]any{"command": "cp /work/src/f0001.txt /work/scratch.txt && wc -l /work/scratch.txt", "timeout": 60}
+		return "bash", map[string]any{"description": "Running a benchmark command", "command": "cp /work/src/f0001.txt /work/scratch.txt && wc -l /work/scratch.txt", "timeout": 60}
 	case 3:
 		return "grep", map[string]any{"pattern": "needle", "path": "/work/src"}
 	case 4:
 		return "write", map[string]any{"path": "/work/notes.txt", "content": strings.Repeat("benchmark heartbeat line\n", 80)}
 	default:
-		return "bash", map[string]any{"command": "sh -c 'i=0; while [ $i -lt 3 ]; do date; i=$((i+1)); done' > /work/dates.txt && wc -l /work/dates.txt", "timeout": 60}
+		return "bash", map[string]any{"description": "Running a benchmark command", "command": "sh -c 'i=0; while [ $i -lt 3 ]; do date; i=$((i+1)); done' > /work/dates.txt && wc -l /work/dates.txt", "timeout": 60}
 	}
 }
 

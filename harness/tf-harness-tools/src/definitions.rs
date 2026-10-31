@@ -12,7 +12,8 @@
 //! Divergence from pi: `bash` carries `description` and `description_past`
 //! beyond pi's `{command, timeout}`. A shell command is the only argument in
 //! this set that is not legible to a person, so the model authors a summary
-//! to render in its place. Nothing here executes them. Its `timeout` is
+//! to render in its place, and `description` is required so that it always
+//! does. Nothing here executes them. Its `timeout` is
 //! described as having a default and a maximum, which pi's does not have and
 //! a configured session does (see `bash.rs`).
 
@@ -44,7 +45,7 @@ pub fn tool_definition(name: &str) -> Option<Value> {
                     "description": { "description": "What this command is doing, in 1-6 words and present tense: \"Reproducing the flake\", \"Vetting the sandbox package\". Describe the action, never its outcome.", "type": "string" },
                     "description_past": { "description": "The same summary in past tense, in 1-6 words: \"Ran the sampler test 50x\". You are writing it before the command runs, so describe the action, never a result you cannot know yet.", "type": "string" }
                 },
-                "required": ["command"]
+                "required": ["command", "description"]
             }
         }),
         "edit" => json!({

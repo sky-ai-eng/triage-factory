@@ -283,7 +283,7 @@ fn serve_runs_in_a_runsc_jail() {
         "unexpected read content: {read}"
     );
 
-    let bash = jail.call(&json!({ "id": 2, "tool": "bash", "args": { "command": "echo jailed" } }));
+    let bash = jail.call(&json!({ "id": 2, "tool": "bash", "args": { "description": "Running a test command", "command": "echo jailed" } }));
     assert_eq!(bash["ok"], json!(true), "bash failed in jail: {bash}");
 }
 
@@ -301,7 +301,7 @@ fn proc_statm_is_readable_under_gvisor() {
     let statm = jail.call(&json!({
         "id": 1,
         "tool": "bash",
-        "args": { "command": "cat /proc/$$/statm" },
+        "args": { "description": "Running a test command", "command": "cat /proc/$$/statm" },
     }));
     assert_eq!(
         statm["ok"],
@@ -324,7 +324,7 @@ fn proc_statm_is_readable_under_gvisor() {
     let children = jail.call(&json!({
         "id": 2,
         "tool": "bash",
-        "args": { "command": "sleep 5 & cat /proc/$$/task/$$/children" },
+        "args": { "description": "Running a test command", "command": "sleep 5 & cat /proc/$$/task/$$/children" },
     }));
     assert_eq!(
         children["ok"],
@@ -364,7 +364,7 @@ fn a_configured_budget_kills_a_real_allocator_in_the_jail() {
     let breach = jail.call(&json!({
         "id": 2,
         "tool": "bash",
-        "args": { "command": "echo starting; head -c 400M /dev/zero | tail | sleep 30" },
+        "args": { "description": "Running a test command", "command": "echo starting; head -c 400M /dev/zero | tail | sleep 30" },
     }));
     assert_eq!(
         breach["ok"],
@@ -382,7 +382,7 @@ fn a_configured_budget_kills_a_real_allocator_in_the_jail() {
         "the partial output was dropped in jail: {breach}"
     );
 
-    let after = jail.call(&json!({ "id": 3, "tool": "bash", "args": { "command": "echo alive" } }));
+    let after = jail.call(&json!({ "id": 3, "tool": "bash", "args": { "description": "Running a test command", "command": "echo alive" } }));
     assert_eq!(
         after["ok"],
         json!(true),
@@ -404,6 +404,7 @@ fn a_background_process_outlives_its_call_in_the_jail() {
         "id": 1,
         "tool": "bash",
         "args": {
+            "description": "Running a test command",
             "command": "(while :; do echo tick; sleep 0.05; done) & echo $! > steady.pid; (sleep 1; echo late; touch survived) & echo launched"
         },
     }));
@@ -426,7 +427,7 @@ fn a_background_process_outlives_its_call_in_the_jail() {
     let check = jail.call(&json!({
         "id": 2,
         "tool": "bash",
-        "args": { "command": "kill -0 $(cat steady.pid) && echo steady-alive; test -e survived && echo survived" },
+        "args": { "description": "Running a test command", "command": "kill -0 $(cat steady.pid) && echo steady-alive; test -e survived && echo survived" },
     }));
     assert_eq!(
         text_of(&check),

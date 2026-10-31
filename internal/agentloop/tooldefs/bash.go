@@ -16,6 +16,11 @@ package tooldefs
 // tense is authored rather than derived: nothing transforms one into the
 // other.
 //
+// `description` is required because models skip an optional summary, and a
+// call without one renders as its command on every surface that shows what
+// a run is doing. `description_past` stays optional: a settled row without it
+// falls back to `description`, which is still a sentence.
+//
 // Nothing executes them, but the jail declares them identically all the same
 // and validates them like any other argument: a wrong-typed summary fails
 // the call rather than being quietly dropped. What the model is told and
@@ -24,7 +29,7 @@ package tooldefs
 var Bash = Tool{
 	Name:        "bash",
 	Description: "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.",
-	Params: obj([]string{"command"},
+	Params: obj([]string{"command", "description"},
 		str("command", "Bash command to execute"),
 		num("timeout", "Timeout in seconds (optional). Without one, the command is stopped at the sandbox's default limit; a timeout above the sandbox's maximum is refused."),
 		str("description", "What this command is doing, in 1-6 words and present tense: \"Reproducing the flake\", \"Vetting the sandbox package\". Describe the action, never its outcome."),

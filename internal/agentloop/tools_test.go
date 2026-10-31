@@ -174,8 +174,9 @@ func TestSandboxTools_OmitTheConfigureVerb(t *testing.T) {
 // TestBash_DeclaresItsSummaryParams pins the shape of the two params the
 // interface renders in a shell command's place. The guard above already
 // proves the jail declares them identically; this says what they have to be
-// on both sides of it — strings, and never required, so a model that authors
-// no summary still makes a valid call.
+// on both sides of it — strings, with the present tense required, because a
+// model skips an optional summary and the call then renders as its command.
+// The past tense stays optional: a settled row falls back to the present.
 func TestBash_DeclaresItsSummaryParams(t *testing.T) {
 	var bash *schemas.ChatToolFunction
 	for _, tool := range SandboxTools() {
@@ -186,20 +187,26 @@ func TestBash_DeclaresItsSummaryParams(t *testing.T) {
 	if bash == nil {
 		t.Fatalf("the %s tool is missing", tooldefs.Bash.Name)
 	}
-	for _, name := range []string{"description", "description_past"} {
-		node, ok := bash.Parameters.Properties.Get(name)
+	for _, param := range []struct {
+		name     string
+		required bool
+	}{
+		{"description", true},
+		{"description_past", false},
+	} {
+		node, ok := bash.Parameters.Properties.Get(param.name)
 		if !ok {
-			t.Fatalf("%q is absent from the schema the model reads", name)
+			t.Fatalf("%q is absent from the schema the model reads", param.name)
 		}
 		raw, err := json.Marshal(node)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if !strings.Contains(string(raw), `"type":"string"`) {
-			t.Errorf("%q is not a string: %s", name, raw)
+			t.Errorf("%q is not a string: %s", param.name, raw)
 		}
-		if slices.Contains(bash.Parameters.Required, name) {
-			t.Errorf("%q is required; an unauthored summary must still make a valid call", name)
+		if got := slices.Contains(bash.Parameters.Required, param.name); got != param.required {
+			t.Errorf("%q required = %v, want %v", param.name, got, param.required)
 		}
 	}
 }

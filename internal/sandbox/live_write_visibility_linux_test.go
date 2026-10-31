@@ -180,7 +180,7 @@ func TestLiveJail_WritesReachHostWhileRunning(t *testing.T) {
 	// A new file written by the tool host itself, and an append made by a
 	// command it runs.
 	call("write", map[string]any{"path": "new.txt", "content": "written inside\n"})
-	call("bash", map[string]any{"command": "printf 'appended inside\\n' >> existing.txt"})
+	call("bash", map[string]any{"description": "Running a test command", "command": "printf 'appended inside\\n' >> existing.txt"})
 	jailAlive()
 
 	if got := readProbeFile(t, filepath.Join(worktree, "new.txt")); got != "written inside\n" {
@@ -192,7 +192,7 @@ func TestLiveJail_WritesReachHostWhileRunning(t *testing.T) {
 
 	// A writer the agent left running holds its file open across calls; its
 	// writes must reach the host while it is still writing.
-	call("bash", map[string]any{"command": "(i=0; while [ $i -lt 600 ]; do echo line$i; i=$((i+1)); sleep 0.05; done) > bg.log 2>&1 &"})
+	call("bash", map[string]any{"description": "Running a test command", "command": "(i=0; while [ $i -lt 600 ]; do echo line$i; i=$((i+1)); sleep 0.05; done) > bg.log 2>&1 &"})
 	bg := filepath.Join(worktree, "bg.log")
 	var sizes []int64
 	deadline := time.Now().Add(15 * time.Second)

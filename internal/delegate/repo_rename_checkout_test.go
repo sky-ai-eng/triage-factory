@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentloop/tooldefs"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
@@ -242,6 +243,13 @@ func TestRepointRenamedRemotesInJail_RunsTheRewriteThroughTheToolHost(t *testing
 	cmds := host.commands()
 	if len(cmds) != 1 {
 		t.Fatalf("tool host calls = %d, want 1", len(cmds))
+	}
+	// The recording host validates nothing, and the real jail refuses a call
+	// missing any required argument.
+	for _, key := range tooldefs.Bash.Params.Required {
+		if _, ok := host.args[0][key]; !ok {
+			t.Errorf("the jail call omits %q, which the bash schema requires", key)
+		}
 	}
 	assertRemotesName(t, pr, "https://github.com/acme/app.git")
 	if out, err := exec.Command("bash", "-c", cmds[0]).CombinedOutput(); err != nil {
