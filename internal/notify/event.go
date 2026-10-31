@@ -179,6 +179,59 @@ func ResolveEvents(ctx context.Context, orgID, entityID string, targets []EventT
 	s.ResolveEvents(ctx, orgID, keys)
 }
 
+// ResolveClosedEntities resolves, for every audience, orgID's open event
+// conditions about entities that are no longer active. A close relation
+// resolves them when the event that closes the entity routes; an entity
+// closed by a path that routes none (resolved from the stock deck, its
+// repository retired) leaves them to this. A failure is logged and counted.
+func ResolveClosedEntities(ctx context.Context, orgID string) {
+	if s := sink.Load(); s != nil {
+		s.ResolveClosedEntities(ctx, orgID)
+	}
+}
+
+// ClosedEntitySweepInterval is how often RunClosedEntitySweep runs: the
+// longest an event condition outlives an entity closed outside the router.
+const ClosedEntitySweepInterval = 10 * time.Minute
+
+// RunClosedEntitySweep runs ResolveClosedEntities for every active org when
+// it starts, then once every interval until ctx is cancelled. Brain-gated by
+// its caller: one process sweeps at a time. A nil store makes this a logged
+// no-op.
+func RunClosedEntitySweep(ctx context.Context, orgs db.OrgsStore, interval time.Duration) {
+	if orgs == nil {
+		notifyLog.Warn("closed-entity notification sweep not started: no OrgsStore wired")
+		return
+	}
+	if interval <= 0 {
+		interval = ClosedEntitySweepInterval
+	}
+	sweep := func() {
+		orgIDs, err := orgs.ListActiveSystem(ctx)
+		if err != nil {
+			notifyLog.Warn("closed-entity notification sweep: list orgs failed; retrying next tick", "error", err)
+			return
+		}
+		for _, orgID := range orgIDs {
+			if ctx.Err() != nil {
+				return
+			}
+			ResolveClosedEntities(ctx, orgID)
+		}
+	}
+	sweep()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sweep()
+		}
+	}
+}
+
 // eventRow is one row an event raises: its audience and the rule it names.
 type eventRow struct {
 	to   Recipient
@@ -186,8 +239,13 @@ type eventRow struct {
 }
 
 func (e *engine) RaiseEvent(ctx context.Context, sk any, orgID string, raw any) {
-	k, r := sk.(*EventKind), raw.(EventRaise)
 	defer e.recoverPanic(eventLabel, orgID)
+	k, kindOK := sk.(*EventKind)
+	r, raiseOK := raw.(EventRaise)
+	if !kindOK || !raiseOK {
+		e.fail(eventLabel, orgID, fmt.Errorf("an event raise takes an *EventKind and an EventRaise, not %T and %T", sk, raw))
+		return
+	}
 	if r.Entity.ID == "" || r.EventType == "" {
 		e.fail(eventLabel, orgID, errors.New("an event notification needs an event type and an entity"))
 		return
@@ -222,7 +280,7 @@ func (e *engine) RaiseEvent(ctx context.Context, sk any, orgID string, raw any) 
 			EntitySource: r.Entity.Source, EntityKey: r.Entity.SourceID, EntityTitle: r.Entity.Title, EntityURL: r.Entity.URL,
 		}
 		c := k.render(p, row.to)
-		stored, err := renderActions(lifecycle, row.to, c.Actions, orgID, e.b.Local, res.checkExternal(ctx))
+		stored, err := e.eventActions(ctx, lifecycle, row.to, c.Actions, orgID, res)
 		if err != nil {
 			e.fail(eventLabel, orgID, fmt.Errorf("%s: actions for a %s row: %w", r.EventType, row.to.Scope, err))
 			return
@@ -258,6 +316,32 @@ func (e *engine) RaiseEvent(ctx context.Context, sk any, orgID string, raw any) 
 		}
 		return changed, nil
 	})
+}
+
+// eventActions renders an event row's actions. An event row's links come
+// from the entity it is about, which is data rather than code: an entity
+// whose stored link is empty, or on a host the org no longer configures,
+// fails one action, and the row keeps the others rather than telling nobody.
+// A fault that is not one action's (too many, a notice left with none) still
+// refuses the row.
+func (e *engine) eventActions(ctx context.Context, lc domain.NotificationLifecycle, to Recipient, as []Action, orgID string, res *resolution) ([]storedAction, error) {
+	check := res.checkExternal(ctx)
+	stored, err := renderActions(lc, to, as, orgID, e.b.Local, check)
+	if err == nil {
+		return stored, nil
+	}
+	kept := make([]Action, 0, len(as))
+	for _, a := range as {
+		if _, aerr := a.render(lc, to, orgID, e.b.Local, check); aerr != nil {
+			notifyLog.WarnContext(ctx, "event notification action dropped", "org", orgID, "error", aerr)
+			continue
+		}
+		kept = append(kept, a)
+	}
+	if len(kept) == len(as) {
+		return nil, err
+	}
+	return renderActions(lc, to, kept, orgID, e.b.Local, check)
 }
 
 // eventRows is who the matched rules tell. A team rule tells its team's
@@ -338,6 +422,13 @@ func (e *engine) OpenEvents(ctx context.Context, orgID, entityID string, kinds [
 		out[i] = sink.EventKey{Kind: k.Kind, Key: k.Key}
 	}
 	return out, nil
+}
+
+func (e *engine) ResolveClosedEntities(ctx context.Context, orgID string) {
+	defer e.recoverPanic(eventLabel, orgID)
+	e.commit(ctx, eventLabel, orgID, func(tx db.NotificationStore) ([]domain.Notification, error) {
+		return tx.ResolveClosedEntityEventsSystem(ctx, orgID)
+	})
 }
 
 func (e *engine) ResolveEvents(ctx context.Context, orgID string, keys []sink.EventKey) {

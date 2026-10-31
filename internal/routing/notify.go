@@ -28,15 +28,18 @@ var notifyConditionTypes = func() map[string]bool {
 	return m
 }()
 
-// raiseNotifications tells the matched notify rules' audiences about evt.
-// notify resolves who each rule tells and writes nothing on a failure, which
-// it logs and counts; routing never waits on it or fails for it.
-func (r *Router) raiseNotifications(ctx context.Context, orgID string, evt domain.Event, entity domain.Entity, matched []domain.EventHandler) {
-	if len(matched) == 0 {
-		return
-	}
+// raiseNotifications tells the audiences of the notify rules whose predicate
+// matched evt, keeping only the rules whose team the strict team↔scope gate
+// shows tracks the entity. A rule with no team is dropped too: every handler
+// names one, so a row without is not one to trust. notify resolves who each
+// rule tells and writes nothing on a failure, which it logs and counts;
+// routing never waits on it or fails for it.
+func (r *Router) raiseNotifications(ctx context.Context, orgID string, evt domain.Event, entity domain.Entity, matched []domain.EventHandler, cache teamScopeCache) {
 	rules := make([]notify.EventRule, 0, len(matched))
 	for _, h := range matched {
+		if h.TeamID == "" || !r.teamScopeCached(ctx, evt, h.TeamID, cache).strict {
+			continue
+		}
 		rules = append(rules, notify.EventRule{
 			HandlerID: h.ID, TeamID: h.TeamID, Name: h.Name,
 			Audience: h.Audience, CreatorUserID: h.CreatorUserID,

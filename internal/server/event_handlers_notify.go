@@ -32,12 +32,14 @@ type createNotifyRequest struct {
 }
 
 // patchNotifyRequest is PATCH /api/event-handlers/{id} for a notify rule:
-// absent keeps a field. event_type is immutable, as for every kind.
+// absent keeps a field, and scope_predicate: null clears the filter. enabled,
+// name and audience always hold a value, so a null for one is refused rather
+// than read as "keep". event_type is immutable, as for every kind.
 type patchNotifyRequest struct {
 	ScopePredicate json.RawMessage `json:"scope_predicate"`
-	Enabled        *bool           `json:"enabled"`
-	Name           *string         `json:"name"`
-	Audience       *string         `json:"audience"`
+	Enabled        json.RawMessage `json:"enabled"`
+	Name           json.RawMessage `json:"name"`
+	Audience       json.RawMessage `json:"audience"`
 }
 
 // notifyAudienceField validates a named audience, reporting whether it was
@@ -52,6 +54,15 @@ func notifyAudienceField(v *httpx.Validation, raw *string) (string, bool) {
 	}
 	v.Invalid("audience", `audience must be "creator" or "team"`)
 	return "", true
+}
+
+// refuseNotifyClear records a null for a field a notify rule always holds.
+func refuseNotifyClear(v *httpx.Validation, state httpx.PatchState, field string) bool {
+	if state != httpx.PatchClear {
+		return false
+	}
+	v.Invalid(field, field+" cannot be null on a notify rule")
+	return true
 }
 
 // notifyEventTypeField refuses a known event type a notify rule cannot be
@@ -171,21 +182,29 @@ func (eh *eventHandlersHandler) applyNotifyPatch(w http.ResponseWriter, r *http.
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return false
 	}
-	if req.Enabled != nil {
-		updated.Enabled = *req.Enabled
+	if enabled, state := httpx.PatchBool(bad, req.Enabled, "enabled"); state == httpx.PatchSet {
+		updated.Enabled = enabled
+	} else {
+		refuseNotifyClear(bad, state, "enabled")
 	}
 	if predicate, named := scopePredicateField(bad, unproc, req.ScopePredicate, existing.EventType, existing.ScopePredicateJSON); named {
 		updated.ScopePredicateJSON = predicate
 	}
-	if req.Name != nil {
-		if trimmed := strings.TrimSpace(*req.Name); trimmed == "" {
+	if name, state := httpx.PatchString(bad, req.Name, "name"); state == httpx.PatchSet {
+		if trimmed := strings.TrimSpace(name); trimmed == "" {
 			bad.Invalid("name", "name cannot be empty")
 		} else {
 			updated.Name = trimmed
 		}
+	} else {
+		refuseNotifyClear(bad, state, "name")
 	}
-	if audience, named := notifyAudienceField(bad, req.Audience); named && audience != "" {
-		updated.Audience = audience
+	if raw, state := httpx.PatchString(bad, req.Audience, "audience"); state == httpx.PatchSet {
+		if audience, _ := notifyAudienceField(bad, &raw); audience != "" {
+			updated.Audience = audience
+		}
+	} else {
+		refuseNotifyClear(bad, state, "audience")
 	}
 	if len(bad.Items()) > 0 {
 		// The body's own faults answer first, as for the other kinds.

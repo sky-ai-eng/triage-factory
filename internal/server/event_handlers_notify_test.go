@@ -54,11 +54,21 @@ func TestHandleEventHandlerCreateNotify_HappyPathAndPatch(t *testing.T) {
 		t.Errorf("patched %+v; want the new name, audience, filter and enabled flag", patched)
 	}
 
-	// Another kind's fields are unknown on a notify rule's PATCH.
+	// Another kind's fields are unknown on a notify rule's PATCH, and a field
+	// the rule always holds cannot be nulled; each refusal names its field.
 	for _, body := range []map[string]any{{"default_priority": 0.5}, {"applies_to_unowned": true}, {"breaker_threshold": 3}} {
 		if rec := doJSON(t, s, http.MethodPatch, "/api/event-handlers/"+got.ID, body); rec.Code != http.StatusBadRequest {
 			t.Errorf("patch %v: %d; want 400", body, rec.Code)
 		}
+	}
+	for _, field := range []string{"name", "audience", "enabled"} {
+		rec := doJSON(t, s, http.MethodPatch, "/api/event-handlers/"+got.ID, map[string]any{field: nil})
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"field":"`+field+`"`) {
+			t.Errorf("patch %s: null: %d %s; want 400 naming %s", field, rec.Code, rec.Body.String(), field)
+		}
+	}
+	if rec := doJSON(t, s, http.MethodGet, "/api/event-handlers/"+got.ID, nil); !strings.Contains(rec.Body.String(), `"audience":"team"`) {
+		t.Errorf("after the refused nulls: %s; want the rule unchanged", rec.Body.String())
 	}
 	// A notify rule carries no sort order and cannot be promoted.
 	if rec := doJSON(t, s, http.MethodPut, "/api/event-handlers/reorder", map[string]any{"ids": []string{got.ID}}); rec.Code != http.StatusUnprocessableEntity ||

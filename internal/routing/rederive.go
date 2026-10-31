@@ -119,7 +119,7 @@ func (r *Router) evaluateReDerive(ctx context.Context, orgID, taskID string) (re
 		return plan, nil
 	}
 
-	scopeCache := map[string]bool{}
+	scopeCache := teamScopeCache{}
 	matchedRules, matchedTriggers, _, err := r.matchHandlers(ctx, orgID, *evt, scopeCache)
 	if err != nil {
 		return reDerivePlan{}, fmt.Errorf("match handlers for event %s: %w", evt.ID, err)

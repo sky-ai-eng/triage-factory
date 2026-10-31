@@ -6,10 +6,10 @@ import EventBadge from './EventBadge'
 import NotifyRuleEditor from './NotifyRuleEditor'
 import type { NotifyHandler } from '../types'
 import { toast } from './Toast/toastStore'
-import { apiFetch, apiListAll, httpErrorMessage } from '../lib/apiClient'
+import { httpErrorMessage } from '../lib/apiClient'
+import { listNotifyRules, updateNotifyRule } from '../lib/notifyRules'
 import { useMe } from '../hooks/useDeploymentConfig'
 import { useTeams } from '../hooks/useTeams'
-import { handlersBase } from '../lib/scope'
 
 interface NotifyRulesPanelProps {
   open: boolean
@@ -40,7 +40,7 @@ export default function NotifyRulesPanel({ open, onClose, openRuleId }: NotifyRu
     let cancelled = false
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true)
-    apiListAll<NotifyHandler>('/api/event-handlers/list', { kind: 'notify' })
+    listNotifyRules()
       .then((loaded) => {
         if (cancelled) return
         setRules(loaded)
@@ -79,11 +79,7 @@ export default function NotifyRulesPanel({ open, onClose, openRuleId }: NotifyRu
     const prev = rule.enabled
     setRules((rs) => rs.map((r) => (r.id === rule.id ? { ...r, enabled: !prev } : r)))
     try {
-      await apiFetch(`${handlersBase()}/${encodeURIComponent(rule.id)}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled: !prev }),
-      })
+      await updateNotifyRule(rule.id, { enabled: !prev })
     } catch (err) {
       setRules((rs) => rs.map((r) => (r.id === rule.id ? { ...r, enabled: prev } : r)))
       toast.error(httpErrorMessage(err, 'Could not toggle the notify rule.'))

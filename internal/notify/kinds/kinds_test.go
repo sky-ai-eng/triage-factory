@@ -31,9 +31,9 @@ func TestKindsConformance(t *testing.T) {
 }
 
 // TestEventConformance holds the event rendering to the same checks, for a
-// team row, a personal row and local mode's one user. A personal row links to
-// its rule and a team row does not, since a team member may not be the one
-// who can edit it.
+// team row, a personal row and local mode's one user. Every row links to the
+// entity and to its rule, so a row whose entity link cannot be shown still
+// carries an action.
 func TestEventConformance(t *testing.T) {
 	exs := kinds.Event.Examples()
 	if len(exs) != 3 {
@@ -47,7 +47,9 @@ func TestEventConformance(t *testing.T) {
 			t.Errorf("for %+v (local %v), a write would be refused: %v", ex.Recipient, ex.Local, ex.Err)
 		}
 	}
-	if team, personal := len(exs[0].Content.Actions), len(exs[1].Content.Actions); team != 1 || personal != 2 {
-		t.Errorf("team row has %d actions and personal row %d; want the entity link, and the rule link on the personal row", team, personal)
+	for _, ex := range exs {
+		if n := len(ex.Content.Actions); n != 2 {
+			t.Errorf("%+v row has %d actions; want the entity link and the rule link", ex.Recipient, n)
+		}
 	}
 }

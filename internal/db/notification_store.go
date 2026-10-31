@@ -76,6 +76,12 @@ type NotificationStore interface {
 	// event's close phase may resolve.
 	OpenEventKeysSystem(ctx context.Context, orgID, entityID string, kinds []string) ([]NotificationKindKey, error)
 
+	// ResolveClosedEntityEventsSystem resolves (cleared) the org's open event
+	// conditions about entities that are no longer active, for every
+	// audience: the backstop for an entity closed by a path that runs no
+	// close relation.
+	ResolveClosedEntityEventsSystem(ctx context.Context, orgID string) ([]domain.Notification, error)
+
 	// OpenConditionOrgsSystem returns the distinct, sorted ids of the orgs,
 	// across the deployment, holding an open condition of (origin, kind): the
 	// orgs a producer whose evaluation set can lose an org re-evaluates so its

@@ -183,6 +183,10 @@ func (a *App) startBrain(term int64) {
 	// notices past their expiry, across orgs. One sweeper, like the expiry
 	// sweep below; every server role writes the rows.
 	go notify.RunRetentionGC(brainCtx, a.stores.Notifications, notify.RetentionGCInterval)
+	// Event conditions about entities closed outside the router (the stock
+	// deck, a retired repository): no close relation runs for those, so one
+	// sweeper resolves them.
+	go notify.RunClosedEntitySweep(brainCtx, a.stores.Orgs, notify.ClosedEntitySweepInterval)
 	// Rate-limit reading expiry: deletes every org's readings past their
 	// reset. The route already leaves them out; one sweeper is enough, and
 	// the readings themselves are written by every serving process's flusher

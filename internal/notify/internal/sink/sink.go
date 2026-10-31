@@ -40,6 +40,7 @@ type Sink interface {
 	RaiseEvent(ctx context.Context, k any, orgID string, raise any)
 	OpenEvents(ctx context.Context, orgID, entityID string, kinds []string) ([]EventKey, error)
 	ResolveEvents(ctx context.Context, orgID string, keys []EventKey)
+	ResolveClosedEntities(ctx context.Context, orgID string)
 }
 
 type holder struct{ s Sink }

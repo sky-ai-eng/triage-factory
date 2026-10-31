@@ -150,6 +150,15 @@ func (s *notificationStore) ResolveSourceSystem(ctx context.Context, orgID, sour
 	return s.resolve(ctx, domain.NotificationResolvedSourceOff, `org_id = $2 AND source = $3`, orgID, source)
 }
 
+func (s *notificationStore) ResolveClosedEntityEventsSystem(ctx context.Context, orgID string) ([]domain.Notification, error) {
+	return s.resolve(ctx, domain.NotificationResolvedCleared, `
+		org_id = $2 AND origin = 'event' AND entity_id IS NOT NULL
+		AND EXISTS (
+			SELECT 1 FROM entities e
+			WHERE e.id = notifications.entity_id AND e.org_id = notifications.org_id AND e.state <> 'active')`,
+		orgID)
+}
+
 func (s *notificationStore) ResolveIDSystem(ctx context.Context, orgID, id string) (*domain.Notification, error) {
 	if !isValidUUID(id) {
 		return nil, nil

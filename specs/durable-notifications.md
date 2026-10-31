@@ -386,7 +386,7 @@ People configure notifications on events that already exist for automation: "not
 | `enabled`         | Defaults to true.                                                                                             |
 | `team_id`         | The owning team, as for every handler.                                                                        |
 
-A notify rule has no priority, sort order, blueprint or `applies_to_unowned`, and TF ships none: a shipped notify rule would badge every member of every team on install. Creation is `POST /api/event-handlers/notify`; reads, `PATCH` and `DELETE` are the existing handler routes, with a notify body schema (`name`, `enabled`, `scope_predicate`, `audience`).
+A notify rule has no priority, sort order, blueprint or `applies_to_unowned`, and TF ships none: a shipped notify rule would badge every member of every team on install. Creation is `POST /api/event-handlers/notify`; reads, `PATCH` and `DELETE` are the existing handler routes, with a notify body schema (`name`, `enabled`, `scope_predicate`, `audience`). `scope_predicate: null` clears the filter; the other three always hold a value, so a `null` for one is a 400 naming it.
 
 ### Audience
 
@@ -409,11 +409,11 @@ A rule whose audience is the whole team badges every member, so it is a team adm
 
 ### Matching
 
-A notify rule matches as a rule does: an active entity, the event's current view against the predicate, the event type's entitlement. It is matched in the same pass as rules and triggers, after the close phase, whether or not any task results.
+A notify rule matches as a rule does: an active entity, the event's current view against the predicate, the event type's entitlement. Its predicate is matched in the same pass as rules and triggers, after the close phase, whether or not any task results. It raises once the event has routed: an error later in routing replays the event, and raising before it would tell people once per attempt. An entity that closed under the task mint raises nothing, the answer the lifecycle gate gives a straggler.
 
-**The tracked-set gate fails closed.** The router's team-scope gate (`teamTracksEventScope`) answers "tracks" on a read error, malformed metadata or an unwired store, which is acceptable for tasks because it only narrows a set someone else computed. For a notification, a wrong "tracks" sends a person news about an entity their team does not track, which is a disclosure. Notify matching uses the same gate's strict form: any answer the gate cannot prove is "does not track". GitHub, Jira and Linear have core's gates; an extension's source gate (`SourceHooks.TracksScope`) answers a bool that narrows and may fail open, so notify rules are refused on those event types until a source can answer strictly.
+**The tracked-set gate fails closed.** The router's team-scope gate answers "tracks" on a read error, malformed metadata or an unwired store, which is acceptable for tasks because it only narrows a set someone else computed. For a notification, a wrong "tracks" sends a person news about an entity their team does not track, which is a disclosure. The gate keeps both answers per team for one event, read from one lookup: notify rules take the strict one, where any answer the gate cannot prove is "does not track". GitHub, Jira and Linear have core's gates; an extension's source gate (`SourceHooks.TracksScope`) answers a bool that narrows and may fail open, so notify rules are refused on those event types until a source can answer strictly. A routing test holds the gated sources to the ones `domain.NotifyRuleSource` admits.
 
-A notification never fails routing. The event's routing obligation is its tasks. A failed write, or a failed read of who a rule tells, is logged and counted (`tf_notify_write_failures_total{kind="event"}`); an undecided gate is logged; and the event is not replayed for either. There is no next evaluation to correct it, which is the cost of not replaying a whole event for a notification.
+A notification never fails routing. The event's routing obligation is its tasks. A failed write, or a failed read of who a rule tells, is logged and counted (`tf_notify_write_failures_total{kind="event"}`), and the event is not replayed for either. There is no next evaluation to correct it, which is the cost of not replaying a whole event for a notification.
 
 ### Occurrences and coalescing
 
@@ -432,7 +432,8 @@ A notification never fails routing. The event's routing obligation is its tasks.
 - **Typed close relations resolve conditions on the same entity.** The relation's `prepare` gate and `keep` filter run once for both kinds of target. `keep` reads a target's event type, dedup key and owning team; a notification has no owning team, so a reassignment resolves the old assignee's "assigned" notification, and the same event raises a new one when a rule matches the new assignment.
 - **A terminating close** (merged, closed, completed, unreachable, the poll's close obligation) resolves every open event condition on the entity in the relation's close set, after the entity's transaction commits.
 - **`ClearSource`** resolves a source's event conditions with its system ones.
-- Resolution is best effort, as a raise is: a failed write is logged and counted, a failed read is logged, and neither is part of the close phase's routing obligation. A condition a failed resolve leaves open is dismissible and resolves when its entity closes.
+- **An entity closed by a path that routes no event** (resolved from the stock deck, its repository retired) has no close relation to run. A brain-gated sweep (`notify.RunClosedEntitySweep`, every `ClosedEntitySweepInterval`) resolves every org's open event conditions about entities that are not active, and the stock deck's resolve runs the same pass for its org at once.
+- Resolution is best effort, as a raise is: a failed write is logged and counted, a failed read is logged, and neither is part of the close phase's routing obligation. A relation that would only resolve notifications never fails routing either: a `prepare` error with no task to close leaves the notifications open. A condition a failed resolve leaves open is dismissible and resolves when its entity closes.
 
 ### Copy
 
@@ -440,7 +441,7 @@ One rendering for every event type (`kinds.Event`):
 
 - **Title:** the catalog label and the entity's key, e.g. `CI Check Failed: acme/widgets#18`.
 - **Body:** the entity's title, then `From your rule "…"` or `From the team rule "…"`.
-- **Actions:** a link to the entity on its source (an external link, so the host check applies), and on a personal row a link to the rule, which is how a person stops being told until per-person preferences exist.
+- **Actions:** a link to the entity on its source (an external link, so the host check applies), and a link to the rule: "Edit your rule" on a personal row, which is how a person stops being told until per-person preferences exist, and "Open the team rule" on a team row. The entity's link is data rather than code, so an event row whose link is refused (no stored URL, a host the org no longer configures) is written with its other actions instead of failing the raise.
 
 No type gets copy of its own in this phase. Where two open rows on one entity share a title (one per requested reviewer, one per label), the entity is where the reader acts on either, and a type that needs more than the label gets a renderer of its own when someone asks for it.
 

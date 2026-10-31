@@ -182,3 +182,50 @@ func TestLocal_EventRaise(t *testing.T) {
 		t.Fatalf("OpenEventConditions = %+v, %v; want the request, with its dedup key", targets, err)
 	}
 }
+
+// An event row whose entity link cannot be shown keeps its other actions
+// rather than telling nobody, and an entity closed by a path that routes no
+// event has its conditions resolved by the closed-entity pass.
+func TestLocal_EventRowOutlivesItsLinkAndItsEntity(t *testing.T) {
+	stores, hub, conn := localBackend(t)
+	ctx := context.Background()
+	org, user, team := runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID
+	if _, err := conn.Exec(`INSERT INTO org_event_sources (org_id, kind, base_url) VALUES (?, 'github', 'https://github.com')`, org); err != nil {
+		t.Fatalf("seed github host: %v", err)
+	}
+	entity, _, err := stores.Entities.FindOrCreateSystem(ctx, org, domain.ProviderGitHub, "https://github.com", "acme/widgets#19", "", "pr",
+		"Retry the webhook", "https://elsewhere.example/acme/widgets/pull/19")
+	if err != nil {
+		t.Fatalf("create entity: %v", err)
+	}
+	linked := Event(EventSpec{Render: func(p EventParams, _ Recipient) Content {
+		return Content{Title: p.EntityKey, Body: p.RuleName, Actions: []Action{
+			Link("Open", External(p.EntityURL)), Link("Edit your rule", Routes.NotifyRule(p.HandlerID))}}
+	}})
+	linked.Raise(ctx, org, EventRaise{EventType: domain.EventGitHubPRCICheckFailed, Source: "github", Entity: *entity, Condition: true,
+		Rules: []EventRule{{HandlerID: "h1", TeamID: team, Name: "Mine", Audience: domain.NotifyAudienceCreator, CreatorUserID: user}}})
+	got := eventRowsOf(t, stores, org, user, domain.EventGitHubPRCICheckFailed)
+	if len(got) != 1 {
+		t.Fatalf("rows = %+v; want the row, without the link its entity cannot give", got)
+	}
+	actions, err := decodeActions(got[0].Actions)
+	if err != nil || len(actions) != 1 || actions[0].Label != "Edit your rule" {
+		t.Errorf("actions = %+v, %v; want only the rule link", actions, err)
+	}
+	hub.take(t)
+
+	ResolveClosedEntities(ctx, org)
+	if got := eventRowsOf(t, stores, org, user, domain.EventGitHubPRCICheckFailed); len(got) != 1 || got[0].ResolvedAt != nil {
+		t.Fatalf("after a pass with the entity active = %+v; want the condition open", got)
+	}
+	if _, err := stores.Entities.CloseSystem(ctx, org, entity.ID); err != nil {
+		t.Fatalf("close entity: %v", err)
+	}
+	ResolveClosedEntities(ctx, org)
+	if got := eventRowsOf(t, stores, org, user, domain.EventGitHubPRCICheckFailed); len(got) != 1 || got[0].ResolvedAt == nil {
+		t.Errorf("after the entity closed = %+v; want the condition resolved", got)
+	}
+	if pings := hub.take(t); !slices.Equal(pings, []string{user}) {
+		t.Errorf("the resolve pinged %v; want the local user", pings)
+	}
+}

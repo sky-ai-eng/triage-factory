@@ -415,6 +415,13 @@ func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, 
 			var ok bool
 			var err error
 			if cctx, ok, err = rel.prepare(ctx, r, orgID, evt, entityID); err != nil {
+				// With no task to close there is no obligation to replay
+				// for: the notifications stay open, as an unreadable list
+				// of them leaves them.
+				if len(targets) == 0 {
+					routerLog.WarnContext(ctx, "close: prepare failed; leaving the event notifications open", "on_event", evt.EventType, "entity_id", entityID, "error", err)
+					continue
+				}
 				routerLog.Error("close: prepare failed", "on_event", evt.EventType, "entity_id", entityID, "error", err)
 				errs = append(errs, fmt.Errorf("prepare %s close: %w", evt.EventType, err))
 				continue

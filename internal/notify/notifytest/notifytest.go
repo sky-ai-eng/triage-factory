@@ -348,6 +348,11 @@ func (fanout) OpenEvents(_ context.Context, orgID, entityID string, kinds []stri
 	return out, nil
 }
 
+// ResolveClosedEntities does nothing: the recorder holds no entity state to
+// tell a closed entity by, so a test of that resolution reads the database
+// notify.Install writes through.
+func (fanout) ResolveClosedEntities(context.Context, string) {}
+
 func (fanout) ResolveEvents(_ context.Context, orgID string, keys []sink.EventKey) {
 	for _, r := range recorders() {
 		r.resolveEvents(orgID, keys)

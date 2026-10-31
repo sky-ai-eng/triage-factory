@@ -7,10 +7,11 @@ import (
 
 // Event renders what a notify rule raises, one rendering for every event type
 // in the catalog: the type's label and the entity's key as the title, the
-// entity's title and the rule as the body, and a link to the entity on its
-// source. A personal row also links to its rule, which is how the person stops
-// being told. No type has copy of its own yet; the entity is where the reader
-// acts on any of them.
+// entity's title and the rule as the body, a link to the entity on its
+// source, and a link to the rule: the person's own, which is how they stop
+// being told, or the team's. The rule link is also what a row keeps when the
+// entity's link cannot be shown. No type has copy of its own yet; the entity
+// is where the reader acts on any of them.
 var Event = notify.Event(notify.EventSpec{
 	Render: func(p notify.EventParams, to notify.Recipient) notify.Content {
 		subject := p.EntityKey
@@ -18,18 +19,24 @@ var Event = notify.Event(notify.EventSpec{
 			subject = "an issue or pull request"
 		}
 		rule := `From the team rule "` + p.RuleName + `".`
-		if !p.TeamRule {
+		ruleLink := notify.Link("Open the team rule", notify.Routes.NotifyRule(p.HandlerID))
+		if !p.TeamRule && to.Scope == domain.NotificationScopeUser {
 			rule = `From your rule "` + p.RuleName + `".`
+			ruleLink = notify.Link("Edit your rule", notify.Routes.NotifyRule(p.HandlerID))
 		}
 		body := rule
 		if p.EntityTitle != "" {
 			body = p.EntityTitle + "\n" + rule
 		}
-		actions := []notify.Action{notify.Link(openEntityLabel(p.EntitySource), notify.External(p.EntityURL))}
-		if !p.TeamRule && to.Scope == domain.NotificationScopeUser {
-			actions = append(actions, notify.Link("Edit your rule", notify.Routes.NotifyRule(p.HandlerID)))
+		label, ok := catalogLabel(p.EventType)
+		if !ok {
+			label = p.EventType
 		}
-		return notify.Content{Title: catalogLabel(p.EventType) + ": " + subject, Body: body, Actions: actions}
+		return notify.Content{
+			Title:   label + ": " + subject,
+			Body:    body,
+			Actions: []notify.Action{notify.Link(openEntityLabel(p.EntitySource), notify.External(p.EntityURL)), ruleLink},
+		}
 	},
 	Example: notify.EventParams{
 		EventID:      "00000000-0000-0000-0000-000000000001",
@@ -44,15 +51,15 @@ var Event = notify.Event(notify.EventSpec{
 	},
 })
 
-// catalogLabel is an event type's catalog label, or the type itself for one
-// the catalog does not list.
-func catalogLabel(eventType string) string {
+// catalogLabel is an event type's label in the catalog, and whether the
+// catalog lists the type.
+func catalogLabel(eventType string) (string, bool) {
 	for _, et := range domain.AllEventTypes() {
 		if et.ID == eventType {
-			return et.Label
+			return et.Label, true
 		}
 	}
-	return eventType
+	return "", false
 }
 
 // openEntityLabel names where an entity's link goes.

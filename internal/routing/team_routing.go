@@ -29,68 +29,91 @@ import (
 //   - The relevant tracking store unwired (nil) — callers from before the
 //     gate / tests that don't exercise it; degrades to the pre-ticket
 //     behavior where every team implicitly tracked every org-global
-//     entity. Handled per-source in teamTracksEventScope.
-//   - Any source other than github:/jira:/linear: — ungated (no tracking
-//     concept).
+//     entity. Handled per source in teamScopeVerdict, whose undecided answer
+//     the open posture reads as "tracks".
+//   - Any source other than github:/jira:/linear: — its registered
+//     TracksScope hook, or ungated when it has none.
 //
 // The per-event result is memoized in cache, keyed by team id. A single
 // event has one source/entity, so the repo and project lookups for a
 // given team collapse to one cache entry.
-func (r *Router) handlerScopeMatchesEvent(ctx context.Context, evt domain.Event, h domain.EventHandler, cache map[string]bool) bool {
+func (r *Router) handlerScopeMatchesEvent(ctx context.Context, evt domain.Event, h domain.EventHandler, cache teamScopeCache) bool {
 	if h.TeamID == "" {
 		return true
 	}
 	return r.teamTracksEventScopeCached(ctx, evt, h.TeamID, cache)
 }
 
-// teamTracksEventScopeCached memoizes teamTracksEventScope per team through
-// cache — a map[teamID]bool scoped to a single event. matchHandlers' per-handler
-// scope gate and the owner ladder's identity-tier gate (trackingTeams) share one
-// cache per event (created in HandleEvent), so a team referenced by both a
-// matched handler and the author's/assignee's team set costs at most one store
-// lookup per event. The empty team id is never passed here — handlerScopeMatchesEvent
-// short-circuits it, and ladder team sets never contain it.
-func (r *Router) teamTracksEventScopeCached(ctx context.Context, evt domain.Event, teamID string, cache map[string]bool) bool {
-	if allowed, ok := cache[teamID]; ok {
-		return allowed
+// teamScope is one team's answer to the team↔scope gate for one event, in the
+// two postures the router applies it in. open is task routing's: every answer
+// the gate cannot prove is "tracks". strict is the notify rules': every such
+// answer is "does not track", because a notification about an entity the team
+// does not track is a disclosure, and a missed one costs nothing a later event
+// cannot tell the person.
+type teamScope struct{ open, strict bool }
+
+// teamScopeCache memoizes teamScope per team id for a single event. matchHandlers'
+// per-handler gate, the owner ladder's identity-tier gate (trackingTeams) and
+// the notify gate share one cache per event (created in routeEvent), so a team
+// referenced by any of them costs at most one store lookup per event. The
+// empty team id is never looked up — handlerScopeMatchesEvent and the notify
+// gate short-circuit it, and ladder team sets never contain it.
+type teamScopeCache map[string]teamScope
+
+func (r *Router) teamScopeCached(ctx context.Context, evt domain.Event, teamID string, cache teamScopeCache) teamScope {
+	if s, ok := cache[teamID]; ok {
+		return s
 	}
-	allowed := r.teamTracksEventScope(ctx, evt, teamID)
-	cache[teamID] = allowed
-	return allowed
+	s := r.scopeFor(ctx, evt, teamID)
+	cache[teamID] = s
+	return s
+}
+
+// teamTracksEventScopeCached is the open answer through cache.
+func (r *Router) teamTracksEventScopeCached(ctx context.Context, evt domain.Event, teamID string, cache teamScopeCache) bool {
+	return r.teamScopeCached(ctx, evt, teamID, cache).open
 }
 
 // errScopeUndecided is the team↔scope gate's "could not tell": a store that
-// is not wired, metadata or an entity that names nothing to look up, or a
-// source with no strict gate of its own. A read error is returned as itself.
+// is not wired, or metadata or an entity that names nothing to look up. A read
+// error is returned as itself.
 var errScopeUndecided = errors.New("routing: the team-scope gate could not decide")
 
-// teamTracksEventScope is the team↔scope gate as task routing applies it:
-// github: → team↔repo, jira: → team↔project, linear: → team↔Linear-team, a
-// registered event source (e.g. ee/slack) → its TracksScope hook, and any
-// other source ungated. Every answer it cannot prove is "tracks": the gate only
+// errNoCoreGate is teamScopeVerdict's answer for a source core has no gate
+// for: a registered event source's TracksScope hook answers for it, and only
+// for task routing, since a hook's bool cannot say it was unsure.
+var errNoCoreGate = errors.New("routing: no core team-scope gate for this source")
+
+// teamTracksEventScope is the open answer: github: → team↔repo, jira: →
+// team↔project, linear: → team↔Linear-team, a registered event source (e.g.
+// ee/slack) → its TracksScope hook, and any other source ungated. The gate only
 // narrows a set someone else computed, so failing open costs a briefly-too-wide
 // set that the next event corrects (see teamTracksEventRepo), where failing
 // closed would drop a legitimate task on a transient read error.
 func (r *Router) teamTracksEventScope(ctx context.Context, evt domain.Event, teamID string) bool {
-	if !domain.NotifyRuleSource(evt.EventType) {
-		if hooks, ok := sourceHooksFor(evt.EventType); ok {
-			return hooks.TracksScope(ctx, evt, teamID)
-		}
-		return true
-	}
+	return r.scopeFor(ctx, evt, teamID).open
+}
+
+// scopeFor reads teamScopeVerdict once and derives both postures from it. A
+// source with no core gate is never strict.
+func (r *Router) scopeFor(ctx context.Context, evt domain.Event, teamID string) teamScope {
 	tracks, err := r.teamScopeVerdict(ctx, evt, teamID)
-	if err != nil {
-		return true
+	switch {
+	case err == nil:
+		return teamScope{open: tracks, strict: tracks}
+	case errors.Is(err, errNoCoreGate):
+		if hooks, ok := sourceHooksFor(evt.EventType); ok {
+			return teamScope{open: hooks.TracksScope(ctx, evt, teamID)}
+		}
+		return teamScope{open: true}
 	}
-	return tracks
+	return teamScope{open: true}
 }
 
 // teamScopeVerdict is the team↔scope gate with its uncertainty kept: tracks is
-// an answer only when err is nil. Notify matching reads it directly and
-// treats every error as "does not track", because a notification about an
-// entity the team does not track is a disclosure; teamTracksEventScope reads
-// every error as "tracks". A source core has no gate for (one
-// domain.NotifyRuleSource refuses) is undecided.
+// an answer only when err is nil. The sources it gates are the ones
+// domain.NotifyRuleSource admits notify rules on; every other source is
+// errNoCoreGate.
 func (r *Router) teamScopeVerdict(ctx context.Context, evt domain.Event, teamID string) (bool, error) {
 	switch {
 	case strings.HasPrefix(evt.EventType, "github:"):
@@ -109,7 +132,7 @@ func (r *Router) teamScopeVerdict(ctx context.Context, evt domain.Event, teamID 
 		}
 		return r.teamTracksEventLinearTeam(ctx, evt, teamID)
 	}
-	return false, fmt.Errorf("%w: %s has no strict gate", errScopeUndecided, evt.EventType)
+	return false, fmt.Errorf("%w: %s", errNoCoreGate, evt.EventType)
 }
 
 // teamTracksEventRepo asks the store whether teamID tracks the repository of
@@ -301,7 +324,7 @@ func (r *Router) teamTracksEventLinearTeam(ctx context.Context, evt domain.Event
 // inert in exactly the wiring where handlerScopeMatchesEvent is (pre-config /
 // tests that don't thread the tracking stores), and local N=1 is unaffected (the
 // sole team tracks every configured repo).
-func (r *Router) trackingTeams(ctx context.Context, evt domain.Event, teams []string, cache map[string]bool) []string {
+func (r *Router) trackingTeams(ctx context.Context, evt domain.Event, teams []string, cache teamScopeCache) []string {
 	if len(teams) == 0 {
 		return teams
 	}
@@ -508,7 +531,7 @@ func (r *Router) requestedPartyTeams(ctx context.Context, orgID string, evt doma
 //
 // Claims-free ...System lookups throughout: the router runs on the eventbus
 // goroutine with no JWT context.
-func (r *Router) authorCentricOwner(ctx context.Context, orgID string, evt domain.Event, entityID string, scopeCache map[string]bool) (owner string, ownerSet []string, err error) {
+func (r *Router) authorCentricOwner(ctx context.Context, orgID string, evt domain.Event, entityID string, scopeCache teamScopeCache) (owner string, ownerSet []string, err error) {
 	// Tier 1 — structural owner (owning_team_id override). One store query.
 	if r.entities != nil {
 		t, err := r.entities.OwningTeamForEntitySystem(ctx, orgID, entityID)
@@ -657,7 +680,7 @@ func (r *Router) authorTeams(ctx context.Context, orgID string, evt domain.Event
 //
 // Claims-free ...System lookups throughout: the router runs on the eventbus
 // goroutine with no JWT context.
-func (r *Router) assigneeCentricOwner(ctx context.Context, orgID string, evt domain.Event, entityID string, ownedTypes map[string]bool, scopeCache map[string]bool) (owner string, ownerSet []string, err error) {
+func (r *Router) assigneeCentricOwner(ctx context.Context, orgID string, evt domain.Event, entityID string, ownedTypes map[string]bool, scopeCache teamScopeCache) (owner string, ownerSet []string, err error) {
 	// Tier 1 — structural owner (owning_team_id override). One store query.
 	if r.entities != nil {
 		t, err := r.entities.OwningTeamForEntitySystem(ctx, orgID, entityID)

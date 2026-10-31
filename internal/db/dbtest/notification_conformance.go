@@ -327,6 +327,47 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 		}
 	})
 
+	t.Run("event_rows_on_closed_entities", func(t *testing.T) {
+		f := mk(t)
+		s := f.Stores.Notifications
+		closing, open := entity(t, f, "octo/closed#1"), entity(t, f, "octo/closed#2")
+		event := domain.NotificationOriginEvent
+		user := domain.NotificationAudience{Scope: domain.NotificationScopeUser, UserID: f.Viewer}
+		team := domain.NotificationAudience{Scope: domain.NotificationScopeTeam, Role: domain.NotificationRoleMembers, TeamID: f.Team}
+		expires := time.Now().Add(time.Hour)
+
+		raise(t, f, db.NotificationOccurrence{Origin: event, Kind: "ev:failed", Key: closing + "/", EntityID: closing, Audience: user, Dismissible: true})
+		raise(t, f, db.NotificationOccurrence{Origin: event, Kind: "ev:failed", Key: closing + "/", EntityID: closing, Audience: team, Dismissible: true})
+		notice := raise(t, f, db.NotificationOccurrence{Origin: event, Lifecycle: domain.NotificationNotice, Kind: "ev:commented", Key: closing + "/",
+			EntityID: closing, Audience: user, Dismissible: true, ExpiresAt: &expires}).Notification
+		raise(t, f, db.NotificationOccurrence{Origin: event, Kind: "ev:failed", Key: open + "/", EntityID: open, Audience: user, Dismissible: true})
+
+		if got, err := s.ResolveClosedEntityEventsSystem(ctx, f.OrgID); err != nil || len(got) != 0 {
+			t.Fatalf("ResolveClosedEntityEventsSystem with every entity active = %+v, %v; want nothing", got, err)
+		}
+		if _, err := f.Stores.Entities.CloseSystem(ctx, f.OrgID, closing); err != nil {
+			t.Fatalf("close entity: %v", err)
+		}
+		got, err := s.ResolveClosedEntityEventsSystem(ctx, f.OrgID)
+		if err != nil || len(got) != 2 {
+			t.Fatalf("ResolveClosedEntityEventsSystem = %+v, %v; want the closed entity's condition, both audiences", got, err)
+		}
+		for _, n := range got {
+			if n.EntityID != closing || n.ResolvedAt == nil || n.ResolvedReason != domain.NotificationResolvedCleared {
+				t.Errorf("resolved %+v; want a cleared row about %s", n, closing)
+			}
+		}
+		if kept, err := s.OpenEventKeysSystem(ctx, f.OrgID, open, []string{"ev:failed"}); err != nil || len(kept) != 1 {
+			t.Errorf("the active entity's condition = %+v, %v; want it still open", kept, err)
+		}
+		if v := get(t, f, notice.ID); v == nil || v.ResolvedAt != nil {
+			t.Errorf("the closed entity's notice = %+v; want it open until it expires", v)
+		}
+		if again, err := s.ResolveClosedEntityEventsSystem(ctx, f.OrgID); err != nil || len(again) != 0 {
+			t.Errorf("a second pass = %+v, %v; want nothing", again, err)
+		}
+	})
+
 	t.Run("notices_expire_and_gc", func(t *testing.T) {
 		f := mk(t)
 		past, future := time.Now().Add(-time.Minute), time.Now().Add(time.Hour)

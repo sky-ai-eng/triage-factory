@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // seedNotifyRule inserts an enabled, match-all notify rule on eventType for
@@ -179,5 +181,76 @@ func TestNotify_ReassignKeepsNoNotification(t *testing.T) {
 	}
 	if keep(domain.Event{}, newOwners, closeTarget{eventType: domain.EventJiraIssueAssigned, ownerTeam: "team-a"}) {
 		t.Error("an assigned task still owned by the new assignee's team is closed; want it kept")
+	}
+}
+
+// A notify rule raises once the event has routed. A failure in the task phase
+// replays the event; raising before it would tell people once per attempt.
+func TestNotify_RaisesOnlyOnceRoutingSucceeds(t *testing.T) {
+	rec := notifytest.Record(t)
+	database, r, entityID := notifyFixture(t)
+	ctx := context.Background()
+	seedNotifyRule(t, database, runmode.LocalDefaultTeamID, domain.EventGitHubPRCICheckFailed, domain.NotifyAudienceCreator)
+	seedMatchAllCIRule(t, database, runmode.LocalDefaultTeamID)
+
+	st := sqlitestore.New(database)
+	failing := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, st.Users,
+		erroringTaskStore{testTaskStore(database)}, st.Conversations, st.Entities, st.PendingFirings, st.Events,
+		st.Orgs, st.Teams, st.TeamGitHubRepos, st.JiraStatusRules, nil, nil, nil, noopScorer{}, websocket.NewHub())
+	if err := failing.HandleEvent(ctx, ciEvent(t, entityID, "owner/repo")); err == nil {
+		t.Fatal("route with a failing task store = nil; want the upsert's error")
+	}
+	if got := rec.Events(runmode.LocalDefaultOrgID); len(got) != 0 {
+		t.Fatalf("raised %+v on an attempt that failed; want nothing until the replay", got)
+	}
+
+	if err := r.HandleEvent(ctx, ciEvent(t, entityID, "owner/repo")); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if got := rec.Events(runmode.LocalDefaultOrgID); len(got) != 1 || got[0].Seen != 1 {
+		t.Errorf("after the replay: %+v; want one raise", got)
+	}
+}
+
+// A close relation with only notifications to resolve has no routing
+// obligation: a prepare that fails leaves them open and the event routes.
+func TestNotify_NotificationOnlyCloseNeverFailsRouting(t *testing.T) {
+	rec := notifytest.Record(t)
+	database, r, entityID := notifyFixture(t)
+	ctx := context.Background()
+	seedNotifyRule(t, database, runmode.LocalDefaultTeamID, domain.EventGitHubPRCICheckFailed, domain.NotifyAudienceCreator)
+	if err := r.HandleEvent(ctx, ciEvent(t, entityID, "owner/repo")); err != nil {
+		t.Fatalf("route ci_check_failed: %v", err)
+	}
+
+	prev := closeRelations
+	t.Cleanup(func() { closeRelations = prev })
+	closeRelations = []closeRelation{{
+		onEvents: []string{domain.EventGitHubPRCICheckPassed},
+		closes:   []string{domain.EventGitHubPRCICheckFailed},
+		prepare: func(context.Context, *Router, string, domain.Event, string) (closeContext, bool, error) {
+			return nil, false, errors.New("snapshot unreadable")
+		},
+	}}
+	passed := events.GitHubPRCICheckPassedMetadata{Author: "aidan", CheckName: "build", Conclusion: "success", Repo: "owner/repo"}
+	if _, err := r.runCloses(ctx, runmode.LocalDefaultOrgID, githubEvent(entityID, domain.EventGitHubPRCICheckPassed, "", passed), entityID); err != nil {
+		t.Errorf("runCloses = %v; want nil, no task waits on this close", err)
+	}
+	if got := rec.Events(runmode.LocalDefaultOrgID); len(got) != 1 {
+		t.Errorf("after a failed prepare: %+v; want the condition left open", got)
+	}
+}
+
+// The sources the routing gate decides for itself are exactly the ones a
+// notify rule may be written on: a source the create route admits but the gate
+// cannot decide would match nobody, and one the gate decides but the route
+// refuses would have a strict answer nothing reads.
+func TestNotify_CoreGateCoversNotifyRuleSources(t *testing.T) {
+	r := &Router{}
+	for _, et := range domain.AllEventTypes() {
+		_, err := r.teamScopeVerdict(context.Background(), domain.Event{EventType: et.ID}, "team")
+		if gated := !errors.Is(err, errNoCoreGate); gated != domain.NotifyRuleSource(et.ID) {
+			t.Errorf("%s: core gate = %v, NotifyRuleSource = %v", et.ID, gated, domain.NotifyRuleSource(et.ID))
+		}
 	}
 }

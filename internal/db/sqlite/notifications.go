@@ -146,6 +146,14 @@ func (s *notificationStore) ResolveSourceSystem(ctx context.Context, orgID, sour
 	return s.resolve(ctx, orgID, domain.NotificationResolvedSourceOff, `source = ?`, source)
 }
 
+func (s *notificationStore) ResolveClosedEntityEventsSystem(ctx context.Context, orgID string) ([]domain.Notification, error) {
+	return s.resolve(ctx, orgID, domain.NotificationResolvedCleared, `
+		origin = 'event' AND entity_id IS NOT NULL
+		AND EXISTS (
+			SELECT 1 FROM entities e
+			WHERE e.id = notifications.entity_id AND e.state <> 'active')`)
+}
+
 func (s *notificationStore) ResolveIDSystem(ctx context.Context, orgID, id string) (*domain.Notification, error) {
 	got, err := s.resolve(ctx, orgID, domain.NotificationResolvedCleared, `id = ?`, id)
 	if err != nil || len(got) == 0 {

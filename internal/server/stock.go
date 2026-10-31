@@ -15,6 +15,7 @@ import (
 	jiraevents "github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/notify"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
@@ -939,6 +940,9 @@ func (s *Server) stockDoneTicket(r *http.Request, b *stockBatch, entity *domain.
 		stockLog.Error("stock: close failed", "issue", issueKey, "entity", entity.ID, "error", err)
 		return stockFailed(issueKey, httpx.ReasonInternal, "could not close the ticket"+httpx.LocalDetail(err))
 	}
+	// This close routes no event, so no close relation resolves the issue's
+	// event notifications; resolve them now rather than at the next sweep.
+	notify.ResolveClosedEntities(context.WithoutCancel(r.Context()), b.orgID)
 	return stockItemResult{IssueKey: issueKey, OK: true}
 }
 
