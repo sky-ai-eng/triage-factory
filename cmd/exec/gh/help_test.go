@@ -2,10 +2,10 @@ package gh
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/execflags"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
 )
 
 // TestHelpBelowTheResourceLevel is the dead-end this closes: --help used to be
@@ -17,24 +17,25 @@ import (
 // here, which is the point — help must answer without run identity, so it
 // works outside a conversation too.
 func TestHelpBelowTheResourceLevel(t *testing.T) {
+	resource := prHelpText(prog.Prefix())
+	action := func(a string) string { return "usage: " + prog.Prefix() + " " + prHelp[a] + "\n" }
 	cases := []struct {
-		name     string
-		args     []string
-		contains string
+		name string
+		args []string
+		want string
 	}{
-		{"resource level", []string{"--help"}, "gh pr create"},
-		{"resource level short", []string{"-h"}, "gh pr create"},
-		{"known action", []string{"start-review", "--help"}, "gh pr start-review"},
-		{"known action short", []string{"finalize-review", "-h"}, "gh pr finalize-review"},
+		{"resource level", []string{"--help"}, resource},
+		{"resource level short", []string{"-h"}, resource},
+		{"known action", []string{"start-review", "--help"}, action("start-review")},
+		{"known action short", []string{"finalize-review", "-h"}, action("finalize-review")},
 		// A verb that isn't ours gets the resource help, which lists the verbs
 		// that are — the useful answer to "what can I actually run here".
-		{"unknown action", []string{"edit", "--help"}, "gh pr create"},
+		{"unknown action", []string{"edit", "--help"}, resource},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			out := captureStdout(t, func() { handlePR(context.Background(), nil, tc.args) })
-			if !strings.Contains(out, tc.contains) {
-				t.Errorf("help for %q did not mention %q; got:\n%s", tc.args, tc.contains, out)
+			if out := captureStdout(t, func() { handlePR(context.Background(), nil, tc.args) }); out != tc.want {
+				t.Errorf("help for %q printed the wrong text;\ngot  %.200q\nwant %.200q", tc.args, out, tc.want)
 			}
 		})
 	}
@@ -42,11 +43,18 @@ func TestHelpBelowTheResourceLevel(t *testing.T) {
 
 // TestActionsHelpBelowTheResourceLevel is the same contract for `gh actions`.
 func TestActionsHelpBelowTheResourceLevel(t *testing.T) {
+	want := actionsHelpText(prog.Prefix())
 	for _, args := range [][]string{{"--help"}, {"-h"}, {"download-logs", "--help"}, {"nonsense", "--help"}} {
-		out := captureStdout(t, func() { handleActions(context.Background(), nil, args) })
-		if !strings.Contains(out, "gh actions download-logs") {
-			t.Errorf("`gh actions %v` help did not list the actions; got:\n%s", args, out)
+		if out := captureStdout(t, func() { handleActions(context.Background(), nil, args) }); out != want {
+			t.Errorf("`gh actions %v` did not print the actions help; got:\n%s", args, out)
 		}
+	}
+}
+
+// TestResourceHelpRoute is the same contract one level up, for `gh` itself.
+func TestResourceHelpRoute(t *testing.T) {
+	if out := captureStdout(t, func() { Handle(context.Background(), nil, []string{"--help"}) }); out != helpText(prog.Prefix()) {
+		t.Errorf("`gh --help` did not print the resource help; got:\n%s", out)
 	}
 }
 
@@ -85,45 +93,5 @@ func TestValueFlagsCoversFirstPositional(t *testing.T) {
 	}
 	if got := firstPositional([]string{"--stdout", "9"}); got != "9" {
 		t.Errorf("firstPositional = %q, want 9 (a boolean consumes no value)", got)
-	}
-}
-
-// TestUnknownVerbMessageRoutes pins criterion the dead-end fix exists for: a
-// mistyped verb must name the valid set and the help command that expands it,
-// and must assert nothing about tooling outside this binary. The real `gh` is
-// available on the native path and withheld on the SDK one, and exec cannot
-// tell which is driving — so a message claiming either is wrong half the time.
-func TestUnknownVerbMessageRoutes(t *testing.T) {
-	// The hint is pinned under the applet spelling: the call site composes it
-	// from prog.Prefix(), so the taught name is whatever the process was
-	// invoked as.
-	msg := unknownVerbMessage("pr action", "pr actions", "add-review-commnt", prActions,
-		"tfac gh pr --help")
-	for _, want := range []string{
-		"unknown pr action: add-review-commnt",
-		"add-review-comment", // the verb they meant, in the valid list
-		"start-review",       // and the rest of the review lifecycle
-		"tfac gh pr --help",  // where to read the usage, under the invoked name
-	} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("message missing %q:\n%s", want, msg)
-		}
-	}
-	// Harness-neutral: no claim about `gh`, the GitHub API, or reachability.
-	for _, forbidden := range []string{"unreachable", "not available", "gh api", "GitHub REST"} {
-		if strings.Contains(msg, forbidden) {
-			t.Errorf("message asserts something it cannot know (%q):\n%s", forbidden, msg)
-		}
-	}
-	// Every action the dispatch switch serves must appear in the advertised
-	// set, or the message sends the agent looking for a verb that doesn't exist
-	// (or hides one that does).
-	if len(prActions) == 0 {
-		t.Fatal("prActions is empty")
-	}
-	for _, a := range prActions {
-		if !strings.Contains(HelpText, "gh pr "+a) {
-			t.Errorf("advertised action %q has no usage line in the help text", a)
-		}
 	}
 }

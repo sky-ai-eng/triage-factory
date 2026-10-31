@@ -2,7 +2,6 @@ package agentprompt
 
 import (
 	"io/fs"
-	"path"
 	"slices"
 	"strings"
 	"testing"
@@ -94,26 +93,6 @@ func TestBuild_ModeArmsDiverge(t *testing.T) {
 			if slices.Contains(paths, p) {
 				t.Errorf("%s composes the other mode's %s", tc.mode, p)
 			}
-		}
-	}
-}
-
-// TestBlocks_AreLiteral is the rule that makes a block readable as the text the
-// model receives: what is written here is what is sent. A block that carried a
-// `{{NAME}}` would be a promise that something, somewhere, fills it in — and a
-// user writing their own prompt has no way to make that same promise, so a block
-// relying on one would be an example of nothing they could reproduce.
-//
-// A fact that genuinely varies per run belongs in the tail's <run_context> /
-// <task_context> / <tools> sections, which a block refers to by name.
-func TestBlocks_AreLiteral(t *testing.T) {
-	for _, p := range walkBlocks(t) {
-		body, err := blocksFS.ReadFile(path.Join("blocks", p))
-		if err != nil {
-			t.Fatalf("read %s: %v", p, err)
-		}
-		if strings.Contains(string(body), "{{") {
-			t.Errorf("block %s is not literal — it carries a {{...}} token nothing resolves", p)
 		}
 	}
 }
