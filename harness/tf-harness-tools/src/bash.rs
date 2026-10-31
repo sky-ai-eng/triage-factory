@@ -56,8 +56,10 @@
 //! rather than closed until the process closes them: it keeps running, its
 //! later output is discarded, and the result says so.
 
+use std::collections::HashSet;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Condvar, Mutex};
@@ -398,6 +400,12 @@ fn supervise(
 /// sharing one heap reads high. Accepted: the over-estimate kills earlier, and
 /// the budget is policy rather than billing.
 ///
+/// A process is counted once however many threads it has. gVisor's `children`
+/// file lists a child process's threads beside the process itself, and a
+/// thread's `statm` reports the whole process's resident set, so summing every
+/// listed id would count each process once per thread — a multi-threaded
+/// compiler reads several times its real size and is killed far under budget.
+///
 /// Every read is best-effort. A process that exits mid-walk contributes
 /// nothing instead of failing the sample, which is the right direction too —
 /// an unreadable `/proc` under-reports and the command lives. A host with no
@@ -405,17 +413,28 @@ fn supervise(
 /// which is the correct inert answer: the runtime that configures a budget
 /// only ever runs on Linux.
 pub fn tree_resident_bytes(pid: i32) -> u64 {
+    tree_resident_bytes_in(Path::new("/proc"), pid)
+}
+
+/// [`tree_resident_bytes`] against the procfs mounted at `proc`.
+fn tree_resident_bytes_in(proc: &Path, pid: i32) -> u64 {
     let page_size = page_size();
     let mut total: u64 = 0;
     let mut pending = vec![pid];
+    // Every thread id of every process already counted, the process's own id
+    // among them.
+    let mut counted: HashSet<i32> = HashSet::new();
     let mut visited = 0usize;
     while let Some(pid) = pending.pop() {
+        if !counted.insert(pid) {
+            continue;
+        }
         visited += 1;
         if visited > MAX_SAMPLED_PROCS {
             break;
         }
-        total = total.saturating_add(resident_pages(pid).saturating_mul(page_size));
-        collect_children(pid, &mut pending);
+        total = total.saturating_add(resident_pages(proc, pid).saturating_mul(page_size));
+        collect_children(proc, pid, &mut pending, &mut counted);
     }
     total
 }
@@ -431,8 +450,8 @@ fn page_size() -> u64 {
 
 /// Field 2 of `/proc/<pid>/statm`: resident pages. Zero for a process that is
 /// gone, or whose procfs entry cannot be read or parsed.
-fn resident_pages(pid: i32) -> u64 {
-    let Ok(statm) = std::fs::read_to_string(format!("/proc/{pid}/statm")) else {
+fn resident_pages(proc: &Path, pid: i32) -> u64 {
+    let Ok(statm) = std::fs::read_to_string(proc.join(pid.to_string()).join("statm")) else {
         return 0;
     };
     statm
@@ -444,12 +463,15 @@ fn resident_pages(pid: i32) -> u64 {
 
 /// Append `pid`'s direct children to `out`, from every thread's `children`
 /// file — a child is listed under the thread that forked it, not under the
-/// thread group.
-fn collect_children(pid: i32, out: &mut Vec<i32>) {
-    let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+/// thread group — and add each of `pid`'s thread ids to `threads`.
+fn collect_children(proc: &Path, pid: i32, out: &mut Vec<i32>, threads: &mut HashSet<i32>) {
+    let Ok(tasks) = std::fs::read_dir(proc.join(pid.to_string()).join("task")) else {
         return;
     };
     for task in tasks.flatten() {
+        if let Some(tid) = task.file_name().to_str().and_then(|n| n.parse().ok()) {
+            threads.insert(tid);
+        }
         let path = task.path().join("children");
         let Ok(listed) = std::fs::read_to_string(&path) else {
             continue;
@@ -1003,5 +1025,31 @@ background with its output in a file (`cmd > /tmp/cmd.log 2>&1 &`) and check on 
     #[test]
     fn an_absurd_sample_does_not_wrap_to_cold() {
         assert!(sample_is_hot(u64::MAX, 1024 * BYTES_PER_MB));
+    }
+
+    /// gVisor's procfs, as the walk meets it: the shell's `children` file lists
+    /// the child process and its threads, and every one of those ids answers
+    /// with the whole process's `task/` and `statm`.
+    #[test]
+    fn a_process_listed_with_its_threads_is_counted_once() {
+        let proc = tempfile::tempdir().unwrap();
+        let write = |rel: &str, body: &str| {
+            let path = proc.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        };
+        write("1/statm", "500 10 0 0 0 0 0\n");
+        write("1/task/1/children", "2 5 6 ");
+        for id in ["2", "5", "6"] {
+            write(&format!("{id}/statm"), "9000 300 0 0 0 0 0\n");
+            for tid in ["2", "5", "6"] {
+                write(&format!("{id}/task/{tid}/children"), "");
+            }
+        }
+
+        assert_eq!(
+            tree_resident_bytes_in(proc.path(), 1),
+            (10 + 300) * page_size()
+        );
     }
 }
