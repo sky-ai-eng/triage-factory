@@ -63,7 +63,7 @@ var (
 	// project its ID names.
 	jiraCondition = Condition(ConditionSpec[testParams]{
 		Name: "test.jira_condition", Source: "jira", Priority: Always(High),
-		Key: testID, Audience: TeamsTrackingJiraProject(testID, Admins),
+		Key: testID, Audience: TeamsArmingJiraProject(testID, Admins),
 		Render: testRender, Example: testParams{ID: "jp-1"},
 	})
 	onlyTeamCondition = Condition(ConditionSpec[testParams]{

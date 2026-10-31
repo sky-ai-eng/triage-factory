@@ -512,9 +512,9 @@ func (m *Manager) PollGitHubOnce(ctx context.Context, orgID string) {
 // rules across the org (not just the default team's) on the org's Jira site,
 // so a non-default team's Jira config is discovered and polled too.
 // toTrackerJiraRules then merges the rows per project. Local mode collapses
-// to N=1 (the single default team), where the union equals what the poller
-// read before. ok is false, with an empty list, when nothing was read: no store
-// is wired, or the read failed, which is logged.
+// to N=1, where the union is the one team's rules. ok is false, with an empty
+// list, when nothing was read: no store is wired, or the read failed, which is
+// logged.
 func (m *Manager) loadJiraRules(ctx context.Context, orgID, site string) (rules []domain.JiraProjectStatusRules, ok bool) {
 	if m.jiraRules == nil {
 		return nil, false
@@ -527,9 +527,12 @@ func (m *Manager) loadJiraRules(ctx context.Context, orgID, site string) (rules 
 	return rules, true
 }
 
-// StopAll stops all running polling loops without restarting.
+// StopAll stops all running polling loops without restarting, and starts the
+// Jira discovery counts over: whatever runs the loops next has not seen the
+// cycles in between.
 func (m *Manager) StopAll() {
 	m.stopAll()
+	m.jiraDiscovery.Reset()
 }
 
 // Restart is a convenience alias for RestartAll.

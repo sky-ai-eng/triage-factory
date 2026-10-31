@@ -11,10 +11,10 @@ import (
 
 // jiraDiscoveryDebounce is how many cycles in a row Jira must reject a
 // project's discovery query before the teams arming it are told: fifteen
-// minutes at the default poll interval. A rejection is Jira's answer about the
-// query itself, so it seldom flaps, and three cycles covers a team that is
-// already mid-edit — a status deleted in Jira while its rules are being
-// changed to match — without leaving a project silent for long.
+// minutes at the default poll interval, and less when a settings save polls
+// early. A rejection is Jira's answer about the query itself, so it seldom
+// flaps; three in a row rules out a one-off refusal without leaving a project
+// silent for long.
 const jiraDiscoveryDebounce = 3
 
 // jiraDiscoveryOutcome is what one cycle learned about one project's discovery.
@@ -49,10 +49,12 @@ func jiraDiscoveryOutcomeOf(err error) jiraDiscoveryOutcome {
 // cycle, so the poller keeps one of these for its lifetime and hands it to
 // every Tracker it builds (WithJiraDiscoveryStreaks).
 //
-// It is memory only. A restart or a new lease holder starts every count at
-// zero, which delays a raise and resolves nothing: a project still short of
-// the debounce is kept by the Sync, not resolved, so an open occurrence
-// survives until the count reaches it again. The zero value is ready to use.
+// It is memory only, and Reset when the poller stops, since a pod that leads
+// again later has not seen the cycles in between. A restart, a new lease
+// holder or a Reset starts every count at zero, which delays a raise and
+// resolves nothing: a project still short of the debounce is kept by the
+// Sync, not resolved, so an open occurrence survives until the count reaches
+// it again. The zero value is ready to use.
 type JiraDiscoveryStreaks struct {
 	mu    sync.Mutex
 	byOrg map[string]map[string]int
@@ -87,6 +89,13 @@ func (s *JiraDiscoveryStreaks) observe(orgID string, outcomes map[string]jiraDis
 	slices.Sort(failing)
 	slices.Sort(keep)
 	return failing, keep
+}
+
+// Reset starts every org's counts at zero.
+func (s *JiraDiscoveryStreaks) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.byOrg = nil
 }
 
 func (s *JiraDiscoveryStreaks) forget(orgID string) {

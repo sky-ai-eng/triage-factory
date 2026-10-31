@@ -101,24 +101,25 @@ func User[P any](userID func(P) string) Audience {
 	}}}
 }
 
-// TeamsTrackingJiraProject is the members or admins of every active team
+// TeamsArmingJiraProject is the members or admins of every active team
 // whose rules arm the jira_projects row jiraProjectID names, on the org's
-// current Jira site. A team that only watches the project is left out: TF asks
-// Jira nothing about the project on its behalf.
-func TeamsTrackingJiraProject[P any](jiraProjectID func(P) string, role Role) Audience {
+// current Jira site. It is narrower than the teams tracking the project: one
+// that only watches it is left out, because TF asks Jira nothing about the
+// project on its behalf.
+func TeamsArmingJiraProject[P any](jiraProjectID func(P) string, role Role) Audience {
 	if jiraProjectID == nil {
-		panic("notify: TeamsTrackingJiraProject needs a jira_projects row id function")
+		panic("notify: TeamsArmingJiraProject needs a jira_projects row id function")
 	}
 	if role != Members && role != Admins {
-		panic(fmt.Sprintf("notify: TeamsTrackingJiraProject role %q is not %q or %q", role, Members, Admins))
+		panic(fmt.Sprintf("notify: TeamsArmingJiraProject role %q is not %q or %q", role, Members, Admins))
 	}
 	return Audience{parts: []audiencePart{{
-		name:  "teams tracking a Jira project",
+		name:  "teams arming a Jira project",
 		param: reflect.TypeFor[P](),
 		resolve: func(ctx context.Context, r *resolution, p any) ([]Recipient, error) {
 			id := jiraProjectID(p.(P))
 			if id == "" {
-				return nil, errors.New("jira tracking audience: the params name no Jira project")
+				return nil, errors.New("jira arming audience: the params name no Jira project")
 			}
 			site, err := r.jiraSite(ctx)
 			if err != nil || site == "" {
@@ -126,7 +127,7 @@ func TeamsTrackingJiraProject[P any](jiraProjectID func(P) string, role Role) Au
 			}
 			teams, err := r.b.JiraStatusRules.ArmingTeamIDsSystem(ctx, r.orgID, site, id)
 			if err != nil {
-				return nil, fmt.Errorf("teams tracking Jira project: %w", err)
+				return nil, fmt.Errorf("teams arming Jira project: %w", err)
 			}
 			return teamRecipients(teams, role), nil
 		},

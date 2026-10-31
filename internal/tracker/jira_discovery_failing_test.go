@@ -222,4 +222,13 @@ func TestDiscoverJira_SharedCountsSpanTrackers(t *testing.T) {
 	rec.Inactive(t, org, kinds.JiraDiscoveryFailing)
 	discover(t, (&Tracker{orgID: org}).WithJiraDiscoveryStreaks(&shared), srv)
 	rec.Inactive(t, org, kinds.JiraDiscoveryFailing)
+
+	// A count one short of the debounce, then Reset: the next rejection is
+	// the first of a new run, not the one that completes the old.
+	for range jiraDiscoveryDebounce - 2 {
+		discover(t, (&Tracker{orgID: org}).WithJiraDiscoveryStreaks(&shared), srv)
+	}
+	shared.Reset()
+	discover(t, (&Tracker{orgID: org}).WithJiraDiscoveryStreaks(&shared), srv)
+	rec.Inactive(t, org, kinds.JiraDiscoveryFailing)
 }
