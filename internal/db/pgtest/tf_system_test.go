@@ -437,6 +437,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		if err := stores.ExternalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
 			TeamID: teamID, Provider: "jira", Scope: "https://acme.atlassian.net", Action: "status_transition", Target: "SKY-1",
 			ConversationID: conversationID, Credential: "org", ToState: "In Progress",
+			PerformedBy: domain.PerformedByAgent,
 		}); err != nil {
 			t.Errorf("ExternalActions.RecordSystem: %v", err)
 		}
@@ -510,7 +511,8 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		if err := stores.ExternalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
 			TeamID: teamID, Provider: domain.ProviderJira, Scope: site, Action: domain.ActionIssueCommentPosted,
 			Target: "MOVE-1", EntityID: ent.ID, URL: site + "/browse/MOVE-1", Credential: domain.CredentialJiraOrg,
-			DedupKey: "executor-rename",
+			DedupKey:    "executor-rename",
+			PerformedBy: domain.PerformedByAgent,
 		}); err != nil {
 			t.Fatalf("ExternalActions.RecordSystem: %v", err)
 		}

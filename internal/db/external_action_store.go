@@ -2,10 +2,27 @@ package db
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
+
+// ErrPerformedByRequired refuses an audit-ledger write whose performed_by is
+// empty or not one of the domain.PerformedBy* values. Who performed an act is
+// what separates a run's own actions from a person's approval of them, so a
+// row that does not say is refused rather than defaulted.
+var ErrPerformedByRequired = errors.New("external action performed_by must be agent, person or system")
+
+// RequirePerformedBy refuses a value domain.IsPerformedBy rejects with
+// ErrPerformedByRequired. Both dialects' external-action writes call it before
+// touching the database.
+func RequirePerformedBy(performedBy string) error {
+	if !domain.IsPerformedBy(performedBy) {
+		return ErrPerformedByRequired
+	}
+	return nil
+}
 
 // ExternalActionStore owns the external_actions table — the append-only audit
 // log of record: one row per external write TF performs under an ORG-scoped
@@ -37,8 +54,10 @@ import (
 // and the per-act key the agent's recording funnel fixes before its first
 // attempt, so a retried write lands on the row it may already have written.
 // An empty entry.Scope is refused with
-// ErrExternalObjectScopeRequired. SQLite is N=1 and unscoped; both pools
-// collapse to the one connection.
+// ErrExternalObjectScopeRequired, and an entry.PerformedBy that is not one of
+// the domain.PerformedBy* values with ErrPerformedByRequired, both before the
+// database is touched. SQLite is N=1 and unscoped; both pools collapse to the
+// one connection.
 //
 // A row references what the act was about by id — entry.EntityID, or
 // entry.RepositoryID for a GitHub act with no entity — and the writer resolves

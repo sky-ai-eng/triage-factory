@@ -144,6 +144,13 @@ func TestExternalActionReferences_Postgres(t *testing.T) {
 	dbtest.RunExternalActionReferenceConformance(t, pgExternalActionFixture(pgtest.Shared(t)))
 }
 
+// TestExternalActionPerformedBy_Postgres runs the shared ledger performed_by
+// conformance suite against the Postgres backend, on the node-id suite's
+// fixture.
+func TestExternalActionPerformedBy_Postgres(t *testing.T) {
+	dbtest.RunExternalActionPerformedByConformance(t, pgExternalActionFixture(pgtest.Shared(t)))
+}
+
 // TestExternalActionObject_Postgres runs the shared ledger object-identity
 // conformance suite against the Postgres backend, on the node-id suite's
 // fixture.

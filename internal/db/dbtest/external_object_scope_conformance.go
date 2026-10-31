@@ -207,8 +207,9 @@ func RunExternalObjectScopeConformance(t *testing.T, mk ExternalObjectScopeFacto
 			return domain.ExternalAction{
 				TeamID: teamID, Provider: domain.ProviderGitHub, Scope: scope,
 				Action: domain.ActionBranchPushed, Target: "octo/api", ExternalID: "refs/heads/fix",
-				Credential: domain.CredentialGitHubApp,
-				DedupKey:   domain.BranchPushDedupKey("conv-1", "repo-1", "refs/heads/fix", "abc123"),
+				Credential:  domain.CredentialGitHubApp,
+				DedupKey:    domain.BranchPushDedupKey("conv-1", "repo-1", "refs/heads/fix", "abc123"),
+				PerformedBy: domain.PerformedByAgent,
 			}
 		}
 		for _, scope := range []string{hostA, hostB, hostA} {
@@ -237,6 +238,7 @@ func RunExternalObjectScopeConformance(t *testing.T, mk ExternalObjectScopeFacto
 		unscoped := domain.ExternalAction{
 			TeamID: teamID, Provider: domain.ProviderJira, Action: domain.ActionIssueTransitioned,
 			Target: "ENG-1", Credential: domain.CredentialJiraOrg,
+			PerformedBy: domain.PerformedByAgent,
 		}
 		if err := s.ExternalActions.RecordSystem(ctx, orgID, unscoped); !errors.Is(err, db.ErrExternalObjectScopeRequired) {
 			t.Errorf("RecordSystem with no scope: err = %v, want ErrExternalObjectScopeRequired", err)

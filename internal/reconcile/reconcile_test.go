@@ -893,6 +893,7 @@ func recordPRCreated(t *testing.T, stores db.Stores, scope, conversationID, repo
 		ConversationID: conversationID,
 		Credential:     domain.CredentialGitHubApp,
 		NodeID:         nodeID,
+		PerformedBy:    domain.PerformedByAgent,
 	}); err != nil {
 		t.Fatalf("record pr_created for %s#%d: %v", repoPath, number, err)
 	}
@@ -1111,6 +1112,7 @@ func TestBackstop_FetchesUnderTheOwnerTheEntityHasNow(t *testing.T) {
 		TeamID: runmode.LocalDefaultTeamID, Provider: domain.ProviderGitHub, Scope: reconcileTestHost,
 		Action: domain.ActionPRCreated, Target: "octo/repo#5", EntityID: entity.ID, ExternalID: "5",
 		ToState: domain.DeliverableStatePRDraft, ConversationID: "conv-1", Credential: domain.CredentialGitHubApp, NodeID: "PR_5",
+		PerformedBy: domain.PerformedByAgent,
 	}); err != nil {
 		t.Fatalf("record pr_created: %v", err)
 	}

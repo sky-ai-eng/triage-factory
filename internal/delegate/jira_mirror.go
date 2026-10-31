@@ -346,17 +346,18 @@ func (s *Spawner) recordMirrorAction(ctx context.Context, orgID, entityID, scope
 		}
 	}
 	act := domain.ExternalAction{
-		TeamID:     teamID,
-		Provider:   domain.ProviderJira,
-		Scope:      scope,
-		Action:     action,
-		Target:     issueKey,
-		EntityID:   entityID,
-		ExternalID: externalID,
-		URL:        s.jiraBrowseURL(ctx, orgID, issueKey),
-		FromState:  from,
-		ToState:    to,
-		Credential: domain.CredentialJiraOrg,
+		TeamID:      teamID,
+		Provider:    domain.ProviderJira,
+		Scope:       scope,
+		Action:      action,
+		Target:      issueKey,
+		EntityID:    entityID,
+		ExternalID:  externalID,
+		URL:         s.jiraBrowseURL(ctx, orgID, issueKey),
+		FromState:   from,
+		ToState:     to,
+		Credential:  domain.CredentialJiraOrg,
+		PerformedBy: domain.PerformedBySystem,
 	}
 	// The issue, by its site and id; an entity that has not learned its id
 	// names no object.

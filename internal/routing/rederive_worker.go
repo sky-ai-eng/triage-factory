@@ -303,6 +303,14 @@ func (r *Router) processReDerive(ctx context.Context, item dbpkg.ClaimedReDerive
 			}
 			if anyInserted {
 				r.WakeFirings()
+				// Posted only now, after the commit: a completion that rolls
+				// back (ErrScoreMoved among them) admitted none of the
+				// firings the conflict rests on, and its successor decides
+				// again. A plan whose every firing collapsed onto a row
+				// already queued decided nothing new, so it posts nothing.
+				if c := plan.Conflict; c != nil {
+					r.postAutomationConflict(termCtx, orgID, plan.Task, c.Winner, c.Losers)
+				}
 			}
 			span.SetAttributes(telemetry.Outcome("completed"))
 		case errors.Is(err, dbpkg.ErrScoreMoved):

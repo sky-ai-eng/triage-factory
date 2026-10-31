@@ -348,19 +348,19 @@ func scopeForProvider(provider string) string {
 func (r *usageRig) seedExternalActions(t *testing.T) {
 	t.Helper()
 	pgtest.MustExec(t, r.h.AdminDB, `UPDATE users SET display_name = 'Org Admin' WHERE id = $1`, r.orgAdmin)
-	seed := func(teamID, provider, action, target, cred, key, actor, from, to string) {
+	seed := func(teamID, provider, action, target, cred, key, actor, from, to, performedBy string) {
 		var actorArg any
 		if actor != "" {
 			actorArg = actor
 		}
 		pgtest.MustExec(t, r.h.AdminDB, `
-			INSERT INTO external_actions (org_id, team_id, provider, scope, action, target, credential, dedup_key, actor_user_id, from_state, to_state)
-			VALUES ($1, $2, $3, $11, $4, $5, $6, $7, $8, NULLIF($9,''), NULLIF($10,''))
-		`, r.orgID, teamID, provider, action, target, cred, key, actorArg, from, to, scopeForProvider(provider))
+			INSERT INTO external_actions (org_id, team_id, provider, scope, action, target, credential, dedup_key, actor_user_id, from_state, to_state, performed_by)
+			VALUES ($1, $2, $3, $11, $4, $5, $6, $7, $8, NULLIF($9,''), NULLIF($10,''), $12)
+		`, r.orgID, teamID, provider, action, target, cred, key, actorArg, from, to, scopeForProvider(provider), performedBy)
 	}
-	seed(r.teamA, "github", "pr_created", "octo/repo#1", "github_app", "tA-created", "", "", "draft")
-	seed(r.teamA, "github", "pr_marked_ready", "octo/repo#1", "github_app", "tA-ready", r.orgAdmin, "draft", "open")
-	seed(r.teamB, "jira", "issue_transitioned", "SKY-1", "jira_org", "tB-trans", "", "To Do", "Done")
+	seed(r.teamA, "github", "pr_created", "octo/repo#1", "github_app", "tA-created", "", "", "draft", domain.PerformedByAgent)
+	seed(r.teamA, "github", "pr_marked_ready", "octo/repo#1", "github_app", "tA-ready", r.orgAdmin, "draft", "open", domain.PerformedByPerson)
+	seed(r.teamB, "jira", "issue_transitioned", "SKY-1", "jira_org", "tB-trans", "", "To Do", "Done", domain.PerformedBySystem)
 }
 
 // TestUsageActionsActivityHandler_Postgres pins the actions feed — its own pair
@@ -427,12 +427,20 @@ func TestUsageActionsActivityHandler_Postgres(t *testing.T) {
 			t.Fatalf("org actions = %d rows / total %d, want 3/3 (cross-team)", len(out.Items), out.Total())
 		}
 		var sawTeamB, sawHumanActor, sawSystem bool
+		wantPerformer := map[string]string{
+			"pr_created":         domain.PerformedByAgent,
+			"pr_marked_ready":    domain.PerformedByPerson,
+			"issue_transitioned": domain.PerformedBySystem,
+		}
 		for _, a := range out.Items {
 			if a.TeamID == "" || a.TeamName == "" {
 				t.Errorf("org feed action missing team id/name: %+v", a)
 			}
 			if a.TeamID == r.teamB {
 				sawTeamB = true
+			}
+			if a.PerformedBy != wantPerformer[a.Action] {
+				t.Errorf("%s row performed_by = %q, want %q", a.Action, a.PerformedBy, wantPerformer[a.Action])
 			}
 			switch a.Action {
 			case "pr_marked_ready":

@@ -290,17 +290,18 @@ func (s *Spawner) recordLinearMirrorTransition(ctx context.Context, orgID, teamI
 		return
 	}
 	act := domain.ExternalAction{
-		TeamID:     teamID,
-		Provider:   domain.ProviderLinear,
-		Scope:      e.Scope,
-		Action:     domain.ActionIssueTransitioned,
-		Target:     e.SourceID,
-		EntityID:   e.ID,
-		ExternalID: e.ExternalID,
-		URL:        issue.URL,
-		FromState:  issue.State.Name,
-		ToState:    to,
-		Credential: domain.CredentialLinearOrg,
+		TeamID:      teamID,
+		Provider:    domain.ProviderLinear,
+		Scope:       e.Scope,
+		Action:      domain.ActionIssueTransitioned,
+		Target:      e.SourceID,
+		EntityID:    e.ID,
+		ExternalID:  e.ExternalID,
+		URL:         issue.URL,
+		FromState:   issue.State.Name,
+		ToState:     to,
+		Credential:  domain.CredentialLinearOrg,
+		PerformedBy: domain.PerformedBySystem,
 	}
 	act.SetObject(domain.ObjectKindIssue, domain.IssueObjectKey(domain.ProviderLinear, e.Scope, e.ExternalID))
 	err := s.externalActions.RecordSystem(ctx, orgID, act)

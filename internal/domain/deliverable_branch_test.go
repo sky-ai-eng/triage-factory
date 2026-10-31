@@ -100,12 +100,12 @@ func TestBranchPushDedupKey_NamesTheRepository(t *testing.T) {
 func TestDeliverableAction_ReferencesWhatTheDeliverableIsAbout(t *testing.T) {
 	pr := NewPullRequestDeliverable("octo/api", 3, "PR_3", "fix", "main", "", "t", "b", true)
 	pr.EntityID = "entity-3"
-	if act := DeliverableAction(&pr, "u", ActionPRClosed, "", "", CredentialGitHubApp); act.EntityID != "entity-3" || act.RepositoryID != "" {
+	if act := DeliverableAction(&pr, PerformedByPerson, "u", ActionPRClosed, "", "", CredentialGitHubApp); act.EntityID != "entity-3" || act.RepositoryID != "" {
 		t.Errorf("pull request action references (%q, %q), want the entity alone", act.EntityID, act.RepositoryID)
 	}
 	branch, _ := NewBranchDeliverable("octo/api", "refs/heads/fix", "abc", false)
 	branch.DedupKey = BranchDedupKey("repo-uuid", branch.ExternalID)
-	if act := DeliverableAction(&branch, "u", ActionBranchDeleted, "", "", CredentialGitHubApp); act.EntityID != "" || act.RepositoryID != "repo-uuid" {
+	if act := DeliverableAction(&branch, PerformedByPerson, "u", ActionBranchDeleted, "", "", CredentialGitHubApp); act.EntityID != "" || act.RepositoryID != "repo-uuid" {
 		t.Errorf("branch action references (%q, %q), want the registry row alone", act.EntityID, act.RepositoryID)
 	}
 }

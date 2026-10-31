@@ -703,7 +703,6 @@ type TaskStore interface {
 	// Exempt from the returned-row rule: it reconciles a set, same as
 	// SetVisibilityTeams.
 	SetVisibilityTeamsSystem(ctx context.Context, orgID, taskID string, teamIDs []string) error
-	VisibilityTeamsSystem(ctx context.Context, orgID, taskID string) ([]string, error)
 	BumpSystem(ctx context.Context, orgID, taskID, eventID string) (domain.Task, error)
 	CloseSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType string) (domain.Task, error)
 

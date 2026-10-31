@@ -38,6 +38,7 @@ func TestExternalActionStore_Postgres_RoundTrip(t *testing.T) {
 		ActorUserID:    userID,
 		Credential:     domain.CredentialGitHubApp,
 		DetailJSON:     `{"k":"v"}`,
+		PerformedBy:    domain.PerformedByAgent,
 		// DedupKey empty → server fills a uuid.
 	}
 	if err := stores.ExternalActions.Record(ctx, orgID, in); err != nil {
@@ -77,6 +78,7 @@ func TestExternalActionStore_Postgres_BranchTwinDedup(t *testing.T) {
 		return domain.ExternalAction{
 			OrgID: orgID, Provider: domain.ProviderGitHub, Scope: "https://github.com", Action: domain.ActionBranchPushed,
 			Target: "octo/repo", URL: url, Credential: domain.CredentialGitHubApp, DedupKey: key,
+			PerformedBy: domain.PerformedByAgent,
 		}
 	}
 	if err := stores.ExternalActions.RecordSystem(ctx, orgID, twin("hook")); err != nil {
@@ -116,6 +118,7 @@ func TestExternalActionStore_Postgres_RLS(t *testing.T) {
 		OrgID: orgA, TeamID: teamA, Provider: domain.ProviderJira, Scope: "https://acme.atlassian.net",
 		Action: domain.ActionIssueTransitioned, Target: "SKY-1",
 		Credential: domain.CredentialJiraOrg, DedupKey: "sys-1",
+		PerformedBy: domain.PerformedByAgent,
 	}); err != nil {
 		t.Fatalf("RecordSystem (admin): %v", err)
 	}
@@ -127,6 +130,7 @@ func TestExternalActionStore_Postgres_RLS(t *testing.T) {
 			OrgID: orgA, TeamID: teamA, Provider: domain.ProviderGitHub, Scope: "https://github.com",
 			Action: domain.ActionPRMarkedReady, Target: "octo/repo#1", ActorUserID: alice,
 			Credential: domain.CredentialGitHubApp, DedupKey: "app-1",
+			PerformedBy: domain.PerformedByAgent,
 		})
 	}); err != nil {
 		t.Fatalf("alice Record under RLS: %v", err)
@@ -151,6 +155,7 @@ func TestExternalActionStore_Postgres_RLS(t *testing.T) {
 		return pgstore.NewForTx(tx, pgtest.SecretKey).ExternalActions.Record(ctx, orgB, domain.ExternalAction{
 			OrgID: orgB, Provider: domain.ProviderGitHub, Scope: "https://github.com", Action: domain.ActionPRCreated,
 			Target: "octo/repo#9", Credential: domain.CredentialGitHubApp, DedupKey: "cross-org",
+			PerformedBy: domain.PerformedByAgent,
 		})
 	})
 	pgtest.AssertRLSViolation(t, err)
@@ -201,11 +206,13 @@ func TestExternalActionStore_Postgres_ListByConversation(t *testing.T) {
 			OrgID: orgA, TeamID: teamA, Provider: domain.ProviderGitHub, Scope: "https://github.com",
 			Action: domain.ActionGHChannelWrite, Target: "octo/repo", ConversationID: convA,
 			Credential: domain.CredentialGitHubApp, DedupKey: "run-1",
+			PerformedBy: domain.PerformedByAgent,
 		},
 		{
 			OrgID: orgA, TeamID: teamA, Provider: domain.ProviderGitHub, Scope: "https://github.com",
 			Action: domain.ActionBranchPushed, Target: "octo/repo",
 			Credential: domain.CredentialGitHubApp, DedupKey: "detached-1",
+			PerformedBy: domain.PerformedByAgent,
 		},
 	} {
 		if err := stores.ExternalActions.RecordSystem(ctx, orgA, act); err != nil {

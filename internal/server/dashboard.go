@@ -414,6 +414,7 @@ func (dh *dashboardHandler) handleDashboardPRUpdate(w http.ResponseWriter, r *ht
 		ActorUserID: userID,
 		Credential:  ghclient.CredentialForRepo(r.Context(), dh.ghResolver, orgID, pr.owner, pr.repo),
 		EntityID:    pr.entity.ID,
+		PerformedBy: domain.PerformedByPerson,
 	}
 	draftRecord.SetObject(domain.ObjectKindPullRequest, "")
 	recordExternalActionBestEffort(r.Context(), dh.tx, orgID, userID, draftRecord)

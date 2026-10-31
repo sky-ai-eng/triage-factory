@@ -447,6 +447,7 @@ export interface ActivityAction {
   to_state?: string
   conversation_id?: string
   actor_user_id?: string
+  performed_by: 'agent' | 'person' | 'system'
   credential: string
   details?: unknown
   occurred_at: string

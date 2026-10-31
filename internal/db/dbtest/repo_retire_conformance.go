@@ -526,6 +526,7 @@ func seedRetireFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 		{Action: domain.ActionBranchPushed, Target: "octo/api", RepositoryID: repo.ID, URL: "https://github.com/octo/api/tree/fix", DedupKey: pushAction},
 	} {
 		act.TeamID, act.Provider, act.Scope, act.Credential = seed.TeamID, domain.ProviderGitHub, TestGitHubHost, domain.CredentialGitHubApp
+		act.PerformedBy = domain.PerformedByAgent
 		if err := s.ExternalActions.RecordSystem(ctx, orgID, act); err != nil {
 			t.Fatalf("seed ledger row %s: %v", act.DedupKey, err)
 		}

@@ -48,6 +48,7 @@ func RunExternalActionObjectConformance(t *testing.T, mk ExternalActionNodeIDFac
 			Target:         "octo/api",
 			ConversationID: f.ConversationID,
 			Credential:     domain.CredentialGitHubApp,
+			PerformedBy:    domain.PerformedByAgent,
 			ObjectKind:     kind,
 			ObjectKey:      key,
 		}

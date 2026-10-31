@@ -459,6 +459,14 @@ CREATE TABLE public.access_change_log (
 -- another row of the same object: a merge or stub fold of two entities
 -- re-points entity_id onto the survivor, and a rename absorbing a bare registry
 -- row re-points repository_id onto the renamed row.
+-- performed_by says who performed the act: 'agent' (a run's agent, and every
+-- refusal of one of its attempts), 'person' (a person acting through TF: an
+-- approval or edit of a run's deliverable, a board drag, a task close) or
+-- 'system' (TF on its own: the board mirrors, an event-driven teardown). A
+-- person's approval of a run's deliverable carries that run's conversation_id,
+-- and actor_user_id is set on a manual run's agent rows too, so this column is
+-- what tells them apart. No default: every writer names the performer.
+--
 -- object_kind and object_key name the object the act changed, set exactly
 -- when the act landed a change, NULL on a refusal, a failure and a catch-all
 -- row. The kind's identifying columns are read together (domain.ObjectID):
@@ -489,6 +497,8 @@ CREATE TABLE public.external_actions (
     node_id text,
     entity_id uuid,
     repository_id uuid,
+    performed_by text NOT NULL
+        CONSTRAINT external_actions_performed_by_check CHECK (performed_by IN ('agent', 'person', 'system')),
     object_kind text
         CONSTRAINT external_actions_object_kind_check CHECK (object_kind IN (
             'pull_request', 'issue', 'repository', 'branch', 'label', 'release',

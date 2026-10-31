@@ -71,6 +71,13 @@ func TestExternalActionReferences_SQLite(t *testing.T) {
 	dbtest.RunExternalActionReferenceConformance(t, sqliteExternalActionFixture)
 }
 
+// TestExternalActionPerformedBy_SQLite runs the shared ledger performed_by
+// conformance suite against the SQLite backend, on the node-id suite's
+// fixture.
+func TestExternalActionPerformedBy_SQLite(t *testing.T) {
+	dbtest.RunExternalActionPerformedByConformance(t, sqliteExternalActionFixture)
+}
+
 // TestExternalActionObject_SQLite runs the shared ledger object-identity
 // conformance suite against the SQLite backend, on the node-id suite's
 // fixture.

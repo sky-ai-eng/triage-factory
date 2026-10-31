@@ -1540,7 +1540,7 @@ func (s *Server) finalizeRequeue(r *http.Request, orgID, userID, taskID string, 
 // fatal: the calling handler has already flipped the task to its new state, and
 // the deliverables stay unresolved for a retry on the next close.
 func (s *Server) teardownTaskDeliverables(ctx context.Context, orgID, userID, taskID string) {
-	if err := deliverableteardown.Teardown(ctx, userTeardownDeps{s: s, userID: userID}, orgID, taskID, userID); err != nil {
+	if err := deliverableteardown.Teardown(ctx, userTeardownDeps{s: s, userID: userID}, orgID, taskID, domain.PerformedByPerson, userID); err != nil {
 		approvalDiscardLog.Error("task deliverable teardown failed; deliverables left unresolved for retry", "task", taskID, "error", err)
 	}
 }

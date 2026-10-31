@@ -15,8 +15,8 @@ import (
 // version just before it, at which the test seeds the rows a local install
 // carries.
 const (
-	externalActionObjectsVersion = 202610310002
-	externalActionObjectsPrior   = 202610310001
+	externalActionObjectsVersion = 202610310003
+	externalActionObjectsPrior   = 202610310002
 )
 
 // TestMigrate_ExternalActionObjectsBackfill pins the backfill: a row names its

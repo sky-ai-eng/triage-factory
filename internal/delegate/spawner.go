@@ -1774,7 +1774,7 @@ func (s *Spawner) TeardownTaskDeliverablesSystem(ctx context.Context, orgID, tas
 	// task and never walks back here. WithoutCancel keeps the caller's values,
 	// so the writes stay inside the close's trace.
 	ctx = context.WithoutCancel(ctx)
-	if err := deliverableteardown.Teardown(ctx, systemTeardown{s: s}, orgID, taskID, ""); err != nil {
+	if err := deliverableteardown.Teardown(ctx, systemTeardown{s: s}, orgID, taskID, domain.PerformedBySystem, ""); err != nil {
 		delegateLog.Error("system deliverable teardown failed; deliverables left unresolved for retry",
 			"task", taskID, "org", orgID, "error", err)
 	}
