@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -426,14 +427,21 @@ func RunEventStoreConformance(t *testing.T, mk EventStoreFactory) {
 		s, orgID, seed := mk(t)
 		entityID := seed.Entity(t, "before-previous")
 		otherEntityID := seed.Entity(t, "before-previous-other")
+		// Ids ascend in recording order, so a created_at tie (Postgres
+		// stamps microseconds) breaks on id the way SQLite's rowid does.
+		base := uuid.New()
+		var n byte
 		record := func(entity, eventType string, occurredAt time.Time) string {
 			t.Helper()
+			n++
+			id := base
+			id[15] = n
 			eid := entity
-			id, err := s.Record(ctx, orgID, domain.Event{EntityID: &eid, EventType: eventType, OccurredAt: occurredAt})
+			got, err := s.Record(ctx, orgID, domain.Event{ID: id.String(), EntityID: &eid, EventType: eventType, OccurredAt: occurredAt})
 			if err != nil {
 				t.Fatalf("Record %s: %v", eventType, err)
 			}
-			return id
+			return got
 		}
 		// The source says the first close happened after the second, so
 		// an order on occurred_at would pick neither; recording order picks

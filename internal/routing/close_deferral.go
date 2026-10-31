@@ -108,11 +108,11 @@ func causedByRunTransition(ctx context.Context, r *Router, orgID string, evt dom
 // person's next close is not the run's.
 //
 // The comparison is between when TF wrote the row and when it recorded the
-// previous event, in the poll that observed that close. A row the run wrote
-// after the previous close is at least a poll cycle later, because evt
-// needed a poll to see the entity open again first, which is more than
-// SQLite's whole-second ledger stamps (rounded down) or skew between the
-// database's clock and the recording process's can move it. A row written
+// previous event, in the poll that observed that close. A row that explains
+// evt was written after a poll saw the entity open again, so at least a poll
+// cycle after that close, which is more than SQLite's whole-second ledger
+// stamps (rounded down) or skew between the database's clock and the
+// recording process's can move it. A row written
 // just before the previous close could land after it only by skew, and would
 // then defer the later close as well; it never stops a run on its own close.
 func (r *Router) rowsSincePreviousEvent(ctx context.Context, orgID string, evt domain.Event, entityID string, rows []domain.ExternalAction) ([]domain.ExternalAction, error) {
