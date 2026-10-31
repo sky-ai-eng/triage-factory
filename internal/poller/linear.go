@@ -11,6 +11,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
+	"github.com/sky-ai-eng/triage-factory/internal/notify"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/tracker"
 	"github.com/sky-ai-eng/triage-factory/internal/upstream"
@@ -21,17 +23,17 @@ import (
 // loadLinearRules reads the union of every team's Linear rules in the org's
 // current workspace; toTrackerLinearRules merges them per Linear team. Rules
 // saved under another workspace name teams this one does not have, so they are
-// never asked about. Empty on error.
-func (m *Manager) loadLinearRules(ctx context.Context, orgID, workspaceID string) []domain.LinearTeamRules {
+// never asked about. Empty on error, with ok false.
+func (m *Manager) loadLinearRules(ctx context.Context, orgID, workspaceID string) (rules []domain.LinearTeamRules, ok bool) {
 	if m.linearRules == nil {
-		return nil
+		return nil, true
 	}
 	rules, err := m.linearRules.ListForOrgSystem(ctx, orgID, workspaceID)
 	if err != nil {
 		pollerLog.Warn("list linear rules (org union) failed", "org", orgID, "error", err)
-		return nil
+		return nil, false
 	}
-	return rules
+	return rules, true
 }
 
 // startLinear launches the Linear tracking loop, startJira's sibling: one
@@ -149,13 +151,20 @@ func (m *Manager) runLinearCycleForOrg(ctx context.Context, orgID string, now ti
 	// say what to discover.
 	workspaceID := domain.EntityScope("linear", orgSet)
 	bound := integrations.LinearSystemConfigured(creds) && workspaceID != ""
-	rules := m.loadLinearRules(ctx, orgID, workspaceID)
+	rules, rulesRead := m.loadLinearRules(ctx, orgID, workspaceID)
 	teams := toTrackerLinearRules(rules)
 	if bound && len(teams) == 0 {
 		// Nothing in this workspace to poll, but issues a previous workspace
 		// left tracked still retire: that needs no Linear call, and nothing
 		// else would ever close them.
 		m.trackerForOrg(orgID).RetireLinearOutOfScope(ctx, workspaceID)
+	}
+	if !bound || (rulesRead && len(teams) == 0) {
+		// Nothing to ask Linear: with no credential bound, or no team armed,
+		// no armed team is one the credential cannot read. This is what
+		// resolves the condition once the last armed team is untracked or
+		// disarmed, since no RefreshLinear runs to do it.
+		kinds.LinearTeamUnreadable.Sync(ctx, orgID, nil)
 	}
 	if !bound || len(rules) == 0 {
 		span.SetAttributes(telemetry.Outcome("unconfigured"))
@@ -187,7 +196,9 @@ func (m *Manager) runLinearCycleForOrg(ctx context.Context, orgID string, now ti
 		m.reportError("linear", orgID, cerr)
 		return
 	}
-	if _, err := m.trackerForOrg(orgID).RefreshLinear(ctx, workspaceID, client, teams); err != nil {
+	_, err := m.trackerForOrg(orgID).RefreshLinear(ctx, workspaceID, client, teams)
+	m.clearIfTurnedOff(ctx, orgID)
+	if err != nil {
 		var rl *linear.RateLimitError
 		if errors.As(err, &rl) {
 			span.SetAttributes(telemetry.Outcome("rate_limited"))
@@ -204,6 +215,27 @@ func (m *Manager) runLinearCycleForOrg(ctx context.Context, orgID string, now ti
 		return
 	}
 	refreshed = true
+}
+
+// clearIfTurnedOff clears Linear's conditions when an admin turned Linear off
+// while the refresh ran: the refresh may have raised one after the switch's
+// own ClearSource, and a turned-off source is not polled again to resolve it.
+// The switch commits before it clears, so this read sees it. A failed read
+// clears nothing; turning the source back on and its next cycle correct what
+// is left.
+func (m *Manager) clearIfTurnedOff(ctx context.Context, orgID string) {
+	if m.EventSources == nil {
+		return
+	}
+	off, err := eventsource.Disabled(ctx, m.EventSources, orgID, eventsource.KindLinear)
+	if err != nil {
+		linearLog.WarnContext(ctx, "re-reading the off switch after the refresh failed; a notification raised as linear was turned off may stay open",
+			"org", orgID, "error", err)
+		return
+	}
+	if off {
+		notify.ClearSource(ctx, orgID, eventsource.KindLinear)
+	}
 }
 
 // toTrackerLinearRules collapses the org-wide rule union into the tracker's

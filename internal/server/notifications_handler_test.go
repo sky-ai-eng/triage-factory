@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -506,6 +507,9 @@ func TestNotificationAction(t *testing.T) {
 	if code, _ := invoke(id, "fix", map[string]any{}); code != http.StatusInternalServerError {
 		t.Errorf("handler error = %d, want 500", code)
 	}
+	// A handler's own refusal is answered as it refused, wrapped or not.
+	refusal = fmt.Errorf("fix: %w", httpx.NewFault(http.StatusForbidden, httpx.ReasonTeamArchived, "team is archived"))
+	assertFault(t, doJSON(t, s, http.MethodPost, meNotifications+"/"+id+"/actions/fix", nil), http.StatusForbidden, httpx.ReasonTeamArchived)
 	refusal = nil
 
 	// The route takes no body: anything with a field is refused, and the

@@ -540,7 +540,9 @@ func (s *Server) handleNotificationMarkRead(w http.ResponseWriter, r *http.Reque
 
 // handleNotificationAction runs a row's invoke action as the caller and
 // returns the row as they now see it, resolved when the action fixed the
-// condition. The route takes no body. An error from the handler is a 500.
+// condition. The route takes no body. A handler that refuses with an
+// *httpx.Fault, as one writing through a route's own gate does, is answered
+// with it; any other error from the handler is a 500.
 //
 // POST /api/me/notifications/{id}/actions/{action_id}
 func (s *Server) handleNotificationAction(w http.ResponseWriter, r *http.Request) {
@@ -589,6 +591,8 @@ func (s *Server) handleNotificationAction(w http.ResponseWriter, r *http.Request
 		return
 	case errors.Is(err, notify.ErrConditionResolved):
 		conflict(w, "the condition has resolved, so its actions no longer apply")
+		return
+	case httpx.WriteFault(w, err):
 		return
 	case err != nil:
 		internalError(w, "notifications", err)

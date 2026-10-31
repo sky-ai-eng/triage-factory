@@ -30,6 +30,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/knowledgeevent"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/linearoauth"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/reachcache"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
@@ -625,6 +626,9 @@ func New(database *sql.DB, stores db.Stores) *Server {
 	s.onInstallationTokensInvalid = func(orgID, installationID string) {
 		s.ghTokenCache.Invalidate(orgID, installationID)
 	}
+	// The invoke actions of notification kinds whose effect is a write this
+	// server owns.
+	kinds.LinearTeamUnreadable.HandleAction("untrack", s.untrackUnreadableLinearTeam)
 	s.routes()
 	return s
 }

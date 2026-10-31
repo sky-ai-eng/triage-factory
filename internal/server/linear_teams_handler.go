@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -277,20 +278,28 @@ func linearPathID(w http.ResponseWriter, r *http.Request, name, thing string) (s
 // call is made past; a failed read is a 500, never "not connected", so a store
 // outage cannot send an admin off to rebind a credential that is fine.
 func (s *Server) linearSystemClient(w http.ResponseWriter, r *http.Request, orgID, op, notConfigured string) (*linear.Client, bool) {
-	client, err := s.linearResolver.ForSystem(r.Context(), orgID)
-	if errors.Is(err, eventsource.ErrDisabled) {
-		writeSourceDisabled(w, eventsource.KindLinear)
-		return nil, false
-	}
-	if errors.Is(err, linear.ErrNoLinearSystemCredential) {
-		writeNotConfigured(w, notConfigured)
-		return nil, false
-	}
+	client, err := s.resolveLinearSystemClient(r.Context(), orgID, notConfigured)
 	if err != nil {
-		internalError(w, op, err)
+		if !httpx.WriteFault(w, err) {
+			internalError(w, op, err)
+		}
 		return nil, false
 	}
 	return client, true
+}
+
+// resolveLinearSystemClient is linearSystemClient for a caller that answers
+// with an error: a turned-off source and a missing credential are each an
+// *httpx.Fault, and any other error is a failed resolution.
+func (s *Server) resolveLinearSystemClient(ctx context.Context, orgID, notConfigured string) (*linear.Client, error) {
+	client, err := s.linearResolver.ForSystem(ctx, orgID)
+	switch {
+	case errors.Is(err, eventsource.ErrDisabled):
+		return nil, sourceDisabledFault(eventsource.KindLinear)
+	case errors.Is(err, linear.ErrNoLinearSystemCredential):
+		return nil, notConfiguredFault(notConfigured)
+	}
+	return client, err
 }
 
 // writeLinearUpstream answers a Linear call that failed: 502, with the detail

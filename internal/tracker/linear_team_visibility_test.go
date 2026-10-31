@@ -12,13 +12,17 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 // The team visibility tests: Linear answers not-found for an issue the
 // credential cannot read as it does for a deleted one, so an armed team the
-// credential cannot read holds its missing issues instead of retiring them.
+// credential cannot read holds its missing issues instead of retiring them,
+// and is raised as linear.team_unreadable.
 
 // seedEngAndOps seeds ENG-1 in team ENG and OPS-2 in team OPS, both armed.
 func (fx *linearFixture) seedEngAndOps(t *testing.T) (eng, ops linear.Issue) {
@@ -47,12 +51,17 @@ func TestRefreshLinear_UnreadableTeamIsHeld(t *testing.T) {
 	fx.client.hiddenTeams = map[string]bool{linTeamID: true}
 	fx.client.notFound = map[string]bool{eng.ID: true, ops.ID: true}
 	spans := recordSpans(t)
+	rec := notifytest.Record(t)
 	evts, err := fx.cycle(t, linRulesWithOps())
 	if err != nil {
 		t.Fatalf("RefreshLinear: %v", err)
 	}
-	if got := teamVisibilitySpans(spans()); !slices.Equal(got, []string{"issues_held:1"}) {
-		t.Errorf("team visibility spans = %v, want one holding ENG-1, its count the issues held", got)
+	if got := teamVisibilitySpans(spans()); !slices.Equal(got, []string{"teams_unreadable:1"}) {
+		t.Errorf("team visibility spans = %v, want one naming ENG, its count the teams unreadable", got)
+	}
+	if open := rec.Open(runmode.LocalDefaultOrgID, kinds.LinearTeamUnreadable); len(open) != 1 ||
+		open[0].Params != (kinds.LinearTeam{LinearTeamID: linTeamID, TeamKey: "ENG"}) {
+		t.Errorf("open = %+v, want ENG alone, under its key", open)
 	}
 	if got := eventTypes(evts); !slices.Equal(got, []string{domain.EventLinearIssueUnreachable}) {
 		t.Fatalf("events = %v, want only OPS-2's unreachable", got)
@@ -68,7 +77,7 @@ func TestRefreshLinear_UnreadableTeamIsHeld(t *testing.T) {
 		t.Errorf("confirmations = %v, want %v: ENG's issue held, not asked about", got, want)
 	}
 	if !slices.Contains(fx.client.callLog(), "teams:"+linTeamID+","+opsTeamID) {
-		t.Errorf("calls = %v, want one read of both candidates' teams", fx.client.callLog())
+		t.Errorf("calls = %v, want one read of both armed teams", fx.client.callLog())
 	}
 	if !fx.pollCompleted() {
 		t.Error("a cycle that held a team did not report its poll")
@@ -86,6 +95,7 @@ func TestRefreshLinear_UnreadableTeamIsHeld(t *testing.T) {
 	if got := eventTypes(evts); !slices.Equal(got, []string{domain.EventLinearIssuePriorityChanged}) {
 		t.Errorf("events = %v, want ENG-1's change diffed from its held snapshot", got)
 	}
+	rec.Inactive(t, runmode.LocalDefaultOrgID, kinds.LinearTeamUnreadable)
 }
 
 // TestRefreshLinear_UnarmedTeamIsNotHeld: an issue whose team no rule arms is
@@ -107,8 +117,8 @@ func TestRefreshLinear_UnarmedTeamIsNotHeld(t *testing.T) {
 		t.Fatalf("events = %v, want the unarmed team's issue retired", got)
 	}
 	for _, c := range fx.client.callLog() {
-		if strings.HasPrefix(c, "teams:") {
-			t.Errorf("calls = %v, want no team read with no armed team among the candidates", fx.client.callLog())
+		if strings.HasPrefix(c, "teams:") && strings.Contains(c, linTeamID) {
+			t.Errorf("calls = %v, want the unarmed team left out of the team read", fx.client.callLog())
 		}
 	}
 }
@@ -131,6 +141,15 @@ func TestRefreshLinear_TeamReadFailureHolds(t *testing.T) {
 			fx := newLinearFixture(t)
 			is := linIssue(4)
 			fx.seed(t, is)
+			// Open before the failing read: a read that fails says nothing
+			// about the team, so it leaves the occurrence as it was.
+			rec := notifytest.Record(t)
+			fx.client.hiddenTeams = map[string]bool{linTeamID: true}
+			if _, err := fx.cycle(t, linRules()); err != nil {
+				t.Fatalf("RefreshLinear: %v", err)
+			}
+			rec.Active(t, runmode.LocalDefaultOrgID, kinds.LinearTeamUnreadable, linTeamID)
+			fx.client.hiddenTeams = nil
 			fx.client.notFound = map[string]bool{is.ID: true}
 			fx.client.fail = func(call string, _ int) error {
 				if strings.HasPrefix(call, "teams:") {
@@ -154,8 +173,52 @@ func TestRefreshLinear_TeamReadFailureHolds(t *testing.T) {
 			if fx.pollCompleted() != tc.wantPoll {
 				t.Errorf("poll completed = %v, want %v", fx.pollCompleted(), tc.wantPoll)
 			}
+			rec.Active(t, runmode.LocalDefaultOrgID, kinds.LinearTeamUnreadable, linTeamID)
 		})
 	}
+}
+
+// TestRefreshLinear_UnreadableTeamWithNothingTracked: an armed team the
+// credential cannot read is raised although the org tracks none of its issues
+// yet, since discovery finds nothing in it, and resolves on the first cycle
+// that reads it.
+func TestRefreshLinear_UnreadableTeamWithNothingTracked(t *testing.T) {
+	fx := newLinearFixture(t)
+	rec := notifytest.Record(t)
+	fx.client.hiddenTeams = map[string]bool{opsTeamID: true}
+	if _, err := fx.cycle(t, linRulesWithOps()); err != nil {
+		t.Fatalf("RefreshLinear: %v", err)
+	}
+	if open := rec.Open(runmode.LocalDefaultOrgID, kinds.LinearTeamUnreadable); len(open) != 1 || open[0].Key != opsTeamID {
+		t.Fatalf("open = %+v, want OPS alone", open)
+	}
+	if !fx.pollCompleted() {
+		t.Error("a cycle with an unreadable team did not report its poll")
+	}
+
+	fx.client.hiddenTeams = nil
+	if _, err := fx.cycle(t, linRulesWithOps()); err != nil {
+		t.Fatalf("RefreshLinear after access returned: %v", err)
+	}
+	rec.Inactive(t, runmode.LocalDefaultOrgID, kinds.LinearTeamUnreadable)
+}
+
+// TestRefreshLinear_DisarmedTeamResolves: a team no rule arms any more is not
+// one whose issues are held, so its occurrence resolves on the next cycle,
+// although the credential still cannot read it.
+func TestRefreshLinear_DisarmedTeamResolves(t *testing.T) {
+	fx := newLinearFixture(t)
+	rec := notifytest.Record(t)
+	fx.client.hiddenTeams = map[string]bool{opsTeamID: true}
+	if _, err := fx.cycle(t, linRulesWithOps()); err != nil {
+		t.Fatalf("RefreshLinear: %v", err)
+	}
+	rec.Active(t, runmode.LocalDefaultOrgID, kinds.LinearTeamUnreadable, opsTeamID)
+
+	if _, err := fx.cycle(t, linRules()); err != nil {
+		t.Fatalf("RefreshLinear without OPS: %v", err)
+	}
+	rec.Inactive(t, runmode.LocalDefaultOrgID, kinds.LinearTeamUnreadable)
 }
 
 // teamVisibilitySpans is each team visibility span's disposition and count,

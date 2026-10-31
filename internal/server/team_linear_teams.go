@@ -8,6 +8,8 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/notify"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
@@ -130,13 +132,10 @@ func (s *Server) handleTeamLinearTeamsPut(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	if !s.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
-		return
-	}
-	if !s.az.VerifyTeamNotArchived(w, r, orgID, userID, teamID) {
-		return
-	}
-	if !s.az.RequireTeamAdmin(w, r, orgID, userID, teamID) {
+	if err := s.az.TeamAdminWrite(r.Context(), orgID, userID, teamID); err != nil {
+		if !httpx.WriteFault(w, err) {
+			internalError(w, "authz", err)
+		}
 		return
 	}
 
@@ -157,16 +156,37 @@ func (s *Server) handleTeamLinearTeamsPut(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	stored, err := s.saveTeamLinearTeams(r.Context(), orgID, userID, teamID,
+		func([]domain.LinearTeamRules) []linearTeamWish { return wishes })
+	if err != nil {
+		if !httpx.WriteFault(w, err) {
+			internalError(w, "settings/team/linear-teams", err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, teamLinearTeamsResponse{LinearTeams: toLinearTeamSettings(stored)})
+}
+
+// saveTeamLinearTeams is the write behind PUT /api/teams/{team_id}/linear-teams,
+// for a caller that has passed its gate (authz.Checker.TeamAdminWrite): it
+// reads the team's stored set, gates the set wishes builds from it, stores
+// that set with its display order, and re-dues the org's Linear poll when what
+// a poll asks moved. It returns the set as stored, in display order. A write
+// it refuses is an *httpx.Fault; any other error is a failed write.
+func (s *Server) saveTeamLinearTeams(ctx context.Context, orgID, userID, teamID string, wishes func(stored []domain.LinearTeamRules) []linearTeamWish) ([]domain.LinearTeamRules, error) {
 	// The pre-image: what an absent rule is carried from, what needs no Linear
 	// call, and what the poll re-due decision compares against. It is read in
 	// the org's current Linear workspace, which is also the one the write
 	// stamps: rows saved under another workspace are neither shown, carried
 	// nor pruned.
-	prev, workspaceID, err := s.storedLinearTeams(r.Context(), orgID, userID, teamID)
+	// TODO(TFAC-1271): it is read outside the write transaction, so a write
+	// that commits between this read and that transaction is reverted by the
+	// rules carried from it, and neither caller is told.
+	prev, workspaceID, err := s.storedLinearTeams(ctx, orgID, userID, teamID)
 	if err != nil {
-		internalError(w, "settings/team/linear-teams", err)
-		return
+		return nil, err
 	}
+	want := wishes(prev)
 
 	// A rule names ids of one workspace, so a set can only be saved under the
 	// one the org's credential belongs to. With none recorded there is nowhere
@@ -174,17 +194,15 @@ func (s *Server) handleTeamLinearTeamsPut(w http.ResponseWriter, r *http.Request
 	// writes nothing: rows and the display order saved under a previous
 	// workspace stay stored for its rebind.
 	if workspaceID == "" {
-		if len(wishes) > 0 {
-			writeNotConfigured(w, "Linear is not connected for this organization, so a Linear team or a state mapping cannot be added")
-			return
+		if len(want) > 0 {
+			return nil, notConfiguredFault("Linear is not connected for this organization, so a Linear team or a state mapping cannot be added")
 		}
-		writeJSON(w, http.StatusOK, teamLinearTeamsResponse{LinearTeams: toLinearTeamSettings(nil)})
-		return
+		return nil, nil
 	}
 
-	next, ok := s.gateLinearTeams(w, r, orgID, wishes, prev)
-	if !ok {
-		return
+	next, err := s.gateLinearTeams(ctx, orgID, want, prev)
+	if err != nil {
+		return nil, err
 	}
 
 	// team_settings.linear_teams holds the display order; linear_team_rules
@@ -195,22 +213,21 @@ func (s *Server) handleTeamLinearTeamsPut(w http.ResponseWriter, r *http.Request
 		order = append(order, row.LinearTeamID)
 	}
 	var stored []domain.LinearTeamRules
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		teamSet, err := tx.Teams.GetSettings(r.Context(), teamID)
+	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		teamSet, err := tx.Teams.GetSettings(ctx, teamID)
 		if err != nil {
 			return fmt.Errorf("load team settings: %w", err)
 		}
 		teamSet.LinearTeams = order
-		if _, err := tx.Teams.UpdateSettings(r.Context(), teamID, teamSet); err != nil {
+		if _, err := tx.Teams.UpdateSettings(ctx, teamID, teamSet); err != nil {
 			return fmt.Errorf("save team settings: %w", err)
 		}
-		if stored, err = tx.LinearTeamRules.ReplaceForTeam(r.Context(), teamID, workspaceID, next); err != nil {
+		if stored, err = tx.LinearTeamRules.ReplaceForTeam(ctx, teamID, workspaceID, next); err != nil {
 			return fmt.Errorf("save linear rules: %w", err)
 		}
 		return nil
 	}); err != nil {
-		internalError(w, "settings/team/linear-teams", err)
-		return
+		return nil, err
 	}
 
 	// Re-due the org's Linear poll only when what the poller would ask moved:
@@ -218,13 +235,33 @@ func (s *Server) handleTeamLinearTeamsPut(w http.ResponseWriter, r *http.Request
 	// does its in_review rule, and resending an identical set changes nothing
 	// at all.
 	if !sameArmedLinearTeams(prev, next) && s.onLinearChanged != nil {
-		s.MarkLinearRestarted(r.Context(), orgID)
+		s.MarkLinearRestarted(ctx, orgID)
 		go s.onLinearChanged(orgID)
 	}
+	return orderLinearTeamRules(stored, order), nil
+}
 
-	writeJSON(w, http.StatusOK, teamLinearTeamsResponse{
-		LinearTeams: toLinearTeamSettings(orderLinearTeamRules(stored, order)),
+// untrackUnreadableLinearTeam is linear.team_unreadable's "Stop tracking"
+// action: it removes the row's Linear team from the tracked set of the team
+// the row is for, through the route's own gate and write, and reports the
+// condition resolved for that team, which no longer tracks it. Every other
+// Linear team in the set is resent as stored, so the write asks Linear
+// nothing.
+func (s *Server) untrackUnreadableLinearTeam(ctx context.Context, call notify.ActionCall[kinds.LinearTeam]) (bool, error) {
+	teamID := call.Recipient.TeamID
+	if err := s.az.TeamAdminWrite(ctx, call.OrgID, call.UserID, teamID); err != nil {
+		return false, err
+	}
+	_, err := s.saveTeamLinearTeams(ctx, call.OrgID, call.UserID, teamID, func(stored []domain.LinearTeamRules) []linearTeamWish {
+		keep := make([]linearTeamWish, 0, len(stored))
+		for _, row := range stored {
+			if row.LinearTeamID != call.Params.LinearTeamID {
+				keep = append(keep, linearTeamWish{index: len(keep), write: linearTeamWrite{ID: row.LinearTeamID}})
+			}
+		}
+		return keep
 	})
+	return err == nil, err
 }
 
 // shapeLinearTeamWishes checks the body's shape — every id present, a Linear

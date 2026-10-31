@@ -11,9 +11,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/linearoauth"
+	"github.com/sky-ai-eng/triage-factory/internal/notify"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
@@ -306,6 +308,9 @@ func (s *Server) handleLinearCredentialDelete(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// Nothing polls Linear without its credential, so nothing would resolve
+	// the source's open conditions.
+	notify.ClearSource(context.WithoutCancel(ctx), orgID, eventsource.KindLinear)
 	// Nothing was polling under a credential that was not there.
 	if had {
 		s.kickLinearChanged(r, orgID)
