@@ -112,7 +112,7 @@ func fenceRouter(database *sql.DB, spawner Delegator) *Router {
 	// Users wired so the author-centric ladder resolves the owner (whose
 	// automation fires); teamRepos/jiraRules nil → scope gate fails open.
 	return NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database),
-		nil, nil, st.Users, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events,
+		nil, nil, st.Users, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.ExternalActions,
 		st.Orgs, st.Teams, nil, nil, nil, nil, spawner, noopScorer{}, websocket.NewHub())
 }
 

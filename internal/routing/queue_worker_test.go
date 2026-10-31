@@ -35,9 +35,8 @@ func newQueueWorkerRouter(t *testing.T, database *sql.DB) *Router {
 		t.Fatalf("seed event handlers: %v", err)
 	}
 	seedMatchAllCIRule(t, database, runmode.LocalDefaultTeamID)
-	r := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.Orgs, st.Teams, nil, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
+	r := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.ExternalActions, st.Orgs, st.Teams, nil, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
 	r.SetEventQueue(st.EventQueue)
-	r.SetExternalActions(st.ExternalActions)
 	r.SetExecutorID(testExecutorID, 1)
 	return r
 }
@@ -234,9 +233,8 @@ func TestEventQueue_SurvivesRestart(t *testing.T) {
 func newQueueWorkerRouterNoSeed(t *testing.T, database *sql.DB) *Router {
 	t.Helper()
 	st := sqlitestore.New(database)
-	r := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.Orgs, st.Teams, nil, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
+	r := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.ExternalActions, st.Orgs, st.Teams, nil, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
 	r.SetEventQueue(st.EventQueue)
-	r.SetExternalActions(st.ExternalActions)
 	r.SetExecutorID(testExecutorID+"-2", 2)
 	return r
 }

@@ -32,7 +32,7 @@ func reviewRouter(database *sql.DB) *Router {
 	st := sqlitestore.New(database)
 	return NewRouter(
 		testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, st.Users,
-		testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events,
+		testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.ExternalActions,
 		st.Orgs, st.Teams, nil, nil, nil, st.TeamGitHubGroups, nil, noopScorer{}, websocket.NewHub(),
 	)
 }
