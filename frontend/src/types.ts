@@ -402,7 +402,7 @@ export interface Conversation {
 export type DeliverableKind = 'branch' | 'pull_request' | 'review' | 'issue' | 'comment' | 'message'
 
 // Deliverable mirrors an item of the POST /api/agent/conversations/{id}/deliverables/list wire shape
-// (internal/server/agent.go deliverableJSON, TFAC-465). One row per real external
+// (internal/server/agent.go deliverableJSON). One row per real external
 // object a conversation produced. `state` is meaningful only read with `kind` (see
 // internal/domain/deliverable.go — 'pending' aliases across kinds). `details` is
 // the parsed kind-specific payload (or null when absent/unparseable).

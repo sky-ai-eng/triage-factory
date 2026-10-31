@@ -60,7 +60,7 @@ const DefaultSocketPath = "/run/tf.sock"
 // rejects mismatching client versions so an old binary talking to
 // a new daemon (or vice versa) surfaces a clear error rather than
 // silently misbehaving.
-const ProtocolVersion = 1
+const ProtocolVersion = 2
 
 // ConversationInfo is what LookupConversation returns. Carries the routing-relevant
 // fields a subcommand needs to know about its own run — orgID for
