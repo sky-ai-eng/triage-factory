@@ -6778,6 +6778,10 @@ CREATE UNIQUE INDEX notifications_open_occurrence_idx ON public.notifications US
 
 CREATE INDEX notifications_list_idx ON public.notifications USING btree (org_id, resolved_at, priority, escalated_at, id);
 
+-- The orgs with an open condition of a kind, across the deployment: what a
+-- producer whose evaluation set can lose an org re-evaluates.
+CREATE INDEX notifications_open_kind_idx ON public.notifications USING btree (kind, origin, org_id) WHERE ((lifecycle = 'condition'::text) AND (resolved_at IS NULL));
+
 ALTER TABLE public.notifications ENABLE ROW LEVEL SECURITY;
 
 -- "May read". Team rows are also readable by org admins ("All teams"). No

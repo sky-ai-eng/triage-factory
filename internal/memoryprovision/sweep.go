@@ -40,15 +40,26 @@ func (m *Manager) Run(ctx context.Context, interval time.Duration) {
 // from a boundary to its memory, but the relay is lossy by contract and this
 // is what makes the debt settle anyway. Without a doorbell at all, latency is
 // one interval.
+//
+// It also resyncs kinds.MemoryGenerationFailing every resyncEvery in every org
+// where it is open. A sweep syncs only the orgs its page names, which are the
+// orgs owing a memory, so an org whose last owed memory settled with no sync
+// after it would keep its row open: the doorbell's attempts sync nothing, and
+// a sync can fail or be cut off by a demotion. The resync is what makes every
+// open row resolve, and on a successor brain as much as on this one.
 func (m *Manager) sweepLoop(ctx context.Context, interval time.Duration) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
+	resync := time.NewTicker(m.resyncEvery)
+	defer resync.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 			m.sweep(ctx, AttemptBackoff, "")
+		case <-resync.C:
+			m.resyncFailing(ctx)
 		}
 	}
 }
@@ -114,11 +125,6 @@ func (m *Manager) Nudge(orgID, conversationID string) {
 		}
 		if err := m.Fulfil(ctx, orgID, conversationID); err != nil {
 			log.Warn("memory doorbell: settling the owed memory failed", "conversation", conversationID, "org", orgID, "error", err)
-		}
-		// The sweep syncs only the orgs its page names, and a doorbell that
-		// settled an org's last owed memory leaves it out of every page.
-		if ctx.Err() == nil {
-			m.syncFailing(ctx, orgID)
 		}
 	}()
 }
@@ -197,6 +203,27 @@ const failingWindow = 5 * time.Minute
 // pageSyncEvery is how often a sweep syncs an org while it is still working
 // that org's conversations.
 const pageSyncEvery = 30 * time.Second
+
+// failingResyncEvery is how often sweepLoop resyncs every org where
+// kinds.MemoryGenerationFailing is open, which bounds how long a row outlives
+// the failures that opened it once no sweep reaches its org.
+const failingResyncEvery = time.Minute
+
+// resyncFailing syncs every org where kinds.MemoryGenerationFailing is open.
+// A list that fails is retried on the next tick.
+func (m *Manager) resyncFailing(ctx context.Context) {
+	orgs, err := kinds.MemoryGenerationFailing.OpenOrgs(ctx)
+	if err != nil {
+		log.Warn("list orgs with failing memory generation failed; resyncing next tick", "error", err)
+		return
+	}
+	for _, org := range orgs {
+		if ctx.Err() != nil {
+			return
+		}
+		m.syncFailing(ctx, org)
+	}
+}
 
 // syncFailing opens kinds.MemoryGenerationFailing for each error kind the
 // org's memory generation is failing with and resolves the rest. A read that

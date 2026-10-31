@@ -114,6 +114,8 @@ type Manager struct {
 	// attemptTimeout is AttemptTimeout, held as a field so a test can watch
 	// the bound fire without waiting out the real one.
 	attemptTimeout time.Duration
+	// resyncEvery is failingResyncEvery, held as a field for the same reason.
+	resyncEvery time.Duration
 
 	mu sync.Mutex
 	// base is the context the manager is running under — the brain's, set by
@@ -123,11 +125,10 @@ type Manager struct {
 	base     context.Context
 	inflight map[string]struct{}
 
-	// syncMu serializes syncFailing's read and write. The sweep and every
-	// doorbell sync concurrently, and every attempt is followed by a sync that
-	// starts after it lands, so with the pair held the last write is from a
-	// read that saw every attempt; without it, a read taken before another
-	// sync's attempt landed could write its stale answer last.
+	// syncMu serializes syncFailing's read and write. The ticker's sweeps and
+	// the doorbell's one-org sweeps sync concurrently, and without the pair
+	// held, a read taken before another sync's attempt landed could write its
+	// stale answer after that sync's.
 	syncMu sync.Mutex
 }
 
@@ -155,6 +156,7 @@ func NewManager(
 		llm:            llm,
 		notify:         notify,
 		attemptTimeout: AttemptTimeout,
+		resyncEvery:    failingResyncEvery,
 		inflight:       make(map[string]struct{}),
 	}
 	// Assigned through the nil check rather than straight onto the interface

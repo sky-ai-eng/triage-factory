@@ -161,10 +161,10 @@ func TestSweep_SyncsAsThePageGoes(t *testing.T) {
 	rec.Active(t, f.orgID, kinds.MemoryGenerationFailing, string(domain.MemoryAttemptErrProviderError))
 }
 
-// TestNudge_SyncsFailingGeneration: a doorbell that settles the org's last
-// owed memory resolves the condition, although no later sweep's page names
-// the org.
-func TestNudge_SyncsFailingGeneration(t *testing.T) {
+// TestSweepLoop_ResyncsWhatNoSweepReaches: the doorbell's attempt that
+// settles an org's last owed memory syncs nothing, and no later sweep's page
+// names the org, so the loop's resync is what resolves its row.
+func TestSweepLoop_ResyncsWhatNoSweepReaches(t *testing.T) {
 	rec := notifytest.Record(t)
 	f := newFixture(t)
 	f.message(roleAssistant, "", "worked on it")
@@ -177,7 +177,19 @@ func TestNudge_SyncsFailingGeneration(t *testing.T) {
 	rec.Active(t, f.orgID, kinds.MemoryGenerationFailing, string(domain.MemoryAttemptErrProviderError))
 
 	f.fake.err = nil
-	f.mgr.Nudge(f.orgID, f.conversationID)
+	if err := f.mgr.Fulfil(t.Context(), f.orgID, f.conversationID); err != nil {
+		t.Fatalf("Fulfil: %v", err)
+	}
+	if f.memory() == nil {
+		t.Fatal("the doorbell's attempt generates the memory")
+	}
+	f.mgr.sweep(t.Context(), 0, "")
+	rec.Active(t, f.orgID, kinds.MemoryGenerationFailing, string(domain.MemoryAttemptErrProviderError))
+
+	f.mgr.resyncEvery = 10 * time.Millisecond
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	f.mgr.Run(ctx, time.Hour)
 	waitFor(t, func() bool { return len(rec.Open(f.orgID, kinds.MemoryGenerationFailing)) == 0 })
 }
 
