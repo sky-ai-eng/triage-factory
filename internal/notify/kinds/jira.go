@@ -1,6 +1,75 @@
 package kinds
 
-import "github.com/sky-ai-eng/triage-factory/internal/notify"
+import (
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/notify"
+)
+
+// JiraMirror is one team's Jira status rule for one project, the rule whose
+// in-progress canonical the board mirror moves a claimed or delegated task's
+// ticket into.
+type JiraMirror struct {
+	TeamID        string `json:"team_id"`
+	JiraProjectID string `json:"jira_project_id"`
+	ProjectKey    string `json:"project_key"` // display only
+	Status        string `json:"status"`      // display only
+	// IssueKey is the ticket the last failed move was for; display only.
+	IssueKey string `json:"issue_key"`
+}
+
+// JiraMirrorFor is rule's occurrence, raised by a move of issueKey.
+func JiraMirrorFor(rule domain.JiraProjectStatusRules, issueKey string) JiraMirror {
+	return JiraMirror{
+		TeamID:        rule.TeamID,
+		JiraProjectID: rule.JiraProjectID,
+		ProjectKey:    rule.ProjectKey,
+		Status:        rule.InProgressCanonical.Name,
+		IssueKey:      issueKey,
+	}
+}
+
+// JiraMirrorFailing is open while a rule's in-progress canonical is no longer
+// one of its project's statuses, so claimed and delegated tickets stay where
+// they are in Jira. It is raised by a move Jira offered no transition for into
+// a canonical the project no longer has, never by a ticket that cannot reach a
+// status the project still has, and resolved by the next successful move under
+// the rule or a save of the team's rules that changes or drops it.
+var JiraMirrorFailing = notify.Condition(notify.ConditionSpec[JiraMirror]{
+	Name:        "jira.mirror_failing",
+	Source:      "jira",
+	Priority:    notify.Always(notify.High),
+	Dismissible: true,
+	Key:         func(m JiraMirror) string { return m.TeamID + ":" + m.JiraProjectID },
+	Audience:    notify.TeamAdmins(func(m JiraMirror) string { return m.TeamID }),
+	Render: func(m JiraMirror, _ notify.Recipient) notify.Content {
+		tickets, workflow, status, issue := "tickets", "the project's workflow", "its in-progress status", ""
+		if m.ProjectKey != "" {
+			tickets = m.ProjectKey + " tickets"
+			workflow = "the " + m.ProjectKey + " workflow"
+		}
+		if m.Status != "" {
+			status = `"` + m.Status + `"`
+		}
+		if m.IssueKey != "" {
+			issue = " (last tried on " + m.IssueKey + ")"
+		}
+		return notify.Content{
+			Title: "Jira can't move " + tickets + " into " + status,
+			Body: "Triage Factory moves a ticket into " + status + " when its task is claimed or delegated, " +
+				"but that status is no longer in " + workflow + issue + ". Until this is fixed, Jira doesn't " +
+				"show which tickets the team is working on. Choose an in-progress status in the team's Jira " +
+				"status rules.",
+			Actions: []notify.Action{notify.Link("Open Jira status rules", notify.Routes.TeamJiraRules(m.TeamID))},
+		}
+	},
+	Example: JiraMirror{
+		TeamID:        "00000000-0000-0000-0000-000000000000",
+		JiraProjectID: "00000000-0000-0000-0000-000000000001",
+		ProjectKey:    "SKY",
+		Status:        "In Progress",
+		IssueKey:      "SKY-12",
+	},
+})
 
 // JiraProject is a project TF polls, by its jira_projects registry row.
 type JiraProject struct {
@@ -21,7 +90,7 @@ var JiraDiscoveryFailing = notify.Condition(notify.ConditionSpec[JiraProject]{
 	Dismissible: true,
 	Key:         func(p JiraProject) string { return p.JiraProjectID },
 	Audience:    notify.TeamsArmingJiraProject(func(p JiraProject) string { return p.JiraProjectID }, notify.Admins),
-	Render: func(p JiraProject, _ notify.Recipient) notify.Content {
+	Render: func(p JiraProject, to notify.Recipient) notify.Content {
 		project := "a project"
 		if p.ProjectKey != "" {
 			project = "project " + p.ProjectKey
@@ -31,7 +100,9 @@ var JiraDiscoveryFailing = notify.Condition(notify.ConditionSpec[JiraProject]{
 			Body: "Jira refuses a query Triage Factory finds this project's new issues with, so new work from " +
 				"it is being missed. Usually a status named in a team's rules for the project no longer exists " +
 				"in Jira, or the Jira credential can no longer see the project.",
-			Actions: []notify.Action{notify.Link("Open Jira status rules", notify.Routes.TeamJira())},
+			// Each row is for one of the arming teams, so it links to that
+			// team's rules.
+			Actions: []notify.Action{notify.Link("Open Jira status rules", notify.Routes.TeamJiraRules(to.TeamID))},
 		}
 	},
 	Example: JiraProject{JiraProjectID: "00000000-0000-0000-0000-000000000000", ProjectKey: "SKY"},

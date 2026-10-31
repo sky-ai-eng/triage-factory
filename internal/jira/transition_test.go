@@ -2,10 +2,10 @@ package jira
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"testing"
 )
@@ -74,8 +74,8 @@ func TestTransitionTo_IDMismatchIsNotSalvagedByTheName(t *testing.T) {
 	if err == nil {
 		t.Fatal("TransitionTo with an unknown id succeeded; want an error")
 	}
-	if !strings.Contains(err.Error(), "no transition to") {
-		t.Errorf("error = %v, want it to say no transition was found", err)
+	if !errors.Is(err, ErrNoTransition) {
+		t.Errorf("error = %v, want ErrNoTransition", err)
 	}
 	if got := took(); len(got) != 0 {
 		t.Errorf("posted transitions = %v, want none", got)

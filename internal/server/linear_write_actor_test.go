@@ -88,6 +88,11 @@ type linearIssueFake struct {
 	addressed  []string
 	requests   int
 	failAssign bool
+	// stateGone answers a move as Linear does when the target state has been
+	// deleted from the team's workflow; transitionDown answers it with a
+	// server error.
+	stateGone      bool
+	transitionDown bool
 }
 
 func newLinearIssueFake(t *testing.T, assignee *linear.User, state linear.WorkflowState) *linearIssueFake {
@@ -152,6 +157,16 @@ func (f *linearIssueFake) serve(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if stateID, ok := input["stateId"].(string); ok {
+			if f.stateGone {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, `{"errors":[{"message":"Entity not found: WorkflowState","path":["issueUpdate"],"extensions":{"code":"INVALID_INPUT"}}]}`)
+				return
+			}
+			if f.transitionDown {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = io.WriteString(w, `{}`)
+				return
+			}
 			f.writes = append(f.writes, linearWrite{kind: "transition", value: stateID})
 			for _, st := range linearFixtureStates {
 				if st.ID == stateID {
@@ -597,7 +612,7 @@ func TestApplyLinearClaim(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := newLinearIssueFake(t, tc.assignee, linearFixtureState(t, tc.state))
 			fake.failAssign = tc.failAssign
-			applyLinearClaim(t.Context(), fake.client(), linearIssueUUID, linearIssueIdentifier, linearMe, linearClaimRule)
+			applyLinearClaim(t.Context(), fake.client(), runmode.LocalDefaultOrgID, linearIssueUUID, linearIssueIdentifier, linearMe, linearClaimRule)
 			if got := fake.Writes(); !slices.Equal(got, tc.want) {
 				t.Errorf("writes = %v, want %v", got, tc.want)
 			}

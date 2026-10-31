@@ -292,10 +292,11 @@ type Spawner struct {
 	// mu-guarded like the credential seam above it — creds hot-swap on config
 	// change, so a client is resolved fresh per write and never cached here.
 	jiraResolver jira.Resolver
-	// jiraMirrorLocks serializes the TFAC-300 board→Jira mirror per ticket so a
-	// slow in-progress mirror and the done mirror can't interleave or reorder
-	// their writes against the same issue (which could drag a Done ticket back
-	// to In Progress). Its own keyed lock, independent of mu; zero value ready.
+	// jiraMirrorLocks serializes the board→Jira mirror per ticket, so two passes
+	// for one ticket (two of its tasks delegated together, or an in-progress
+	// pass and the done mode) can't interleave or reorder their writes, which
+	// could drag a Done ticket back to In Progress. Its own keyed lock,
+	// independent of mu; zero value ready.
 	jiraMirrorLocks keyedMutex
 	// linearResolver routes the board→Linear mirror under the org's service
 	// credential (ForSystem). Wired post-construction via SetLinearResolver;

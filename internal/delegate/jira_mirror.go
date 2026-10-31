@@ -18,11 +18,11 @@
 //
 // Nothing on the board writes Done, and a clean run completion leaves the
 // ticket alone. A finished run means the agent opened its PR and the work is
-// awaiting human review + merge, which is still "in progress" to a watcher. A
-// ticket only reaches Done when its PR merges — a separate, entity-driven
-// mirror (forthcoming), for which runJiraMirror's done mode is reserved.
+// awaiting human review + merge, which is still "in progress" to a watcher.
 // PR-opened ≠ ticket-done: the task lifecycle (TF's board "done" column =
 // work submitted) is not the entity lifecycle (the change shipped).
+// runJiraMirror's done mode moves a ticket to Done; nothing calls it, and the
+// TODO at its branch names the event that should.
 //
 // The chokepoint only ever sees bot-owned tasks: announceTaskPlacement
 // early-returns unless claimed_by_agent_id is set. So every write here is
@@ -35,11 +35,9 @@
 // satisfies. That is what lets it coexist safely with the agent's own
 // cmd/exec/jira verbs — whoever writes first wins, the other no-ops.
 //
-// runJiraMirror still carries a done mode (transition into the Done bucket); it
-// is the reusable mechanism the forthcoming merge-driven Done mirror will call,
-// not anything triggered from the board. So two safeguards still matter: a Done
-// write can come from a human (or that merge mirror), and a slow in-progress
-// mirror must never drag such a ticket back. Per-issue serialization
+// A Done write can come from a person, in Jira or through the stock deck, or
+// from the done mode, and a slow in-progress mirror must never drag such a
+// ticket back. Two safeguards hold that. Per-issue serialization
 // (jiraMirrorLocks) keeps in-process mirrors for one ticket from interleaving,
 // and a forward-only in-progress rule (never transition a ticket already in the
 // Done bucket) holds even against an out-of-band human move. See runJiraMirror.
@@ -58,6 +56,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 )
 
 // jiraMirrorTimeout bounds one mirror operation (resolve + GetClaimState +
@@ -137,17 +136,16 @@ func (s *Spawner) mirrorJiraInProgress(orgID string, task *domain.Task) {
 	go s.runJiraMirror(orgID, task.EntityID, task.EntitySourceID, teamID, *rule, false)
 }
 
-// runJiraMirror is the detached worker the in-progress hook starts, and also the
-// done worker the forthcoming merge-driven Done mirror calls. It resolves the
-// org's system/bot Jira client fresh (creds hot-swap on config change, so a
+// runJiraMirror is the detached worker the in-progress hook starts. With done
+// set it moves the ticket to Done instead, a mode nothing calls (see the TODO
+// at its branch). It resolves the org's system/bot Jira client fresh (creds hot-swap on config change, so a
 // client is never cached) and then assigns the service account (in-progress
 // only, and only on an unassigned ticket — a ticket assigned to a person keeps
 // its assignee) and transitions the ticket into the target bucket, skipping any
 // step the ticket already satisfies.
 //
 // Two safeguards keep a slow in-progress mirror from clobbering a Done write for
-// the same ticket (Done now comes from a human or the merge mirror, not the
-// board):
+// the same ticket, whether a person's or the done mode's:
 //   - Per-issue serialization (jiraMirrorLocks): in-process mirrors for one
 //     ticket can't interleave or reorder their writes. The lock is keyed on
 //     the ticket's entity, not its key: a ticket that moved answers to both
@@ -162,11 +160,10 @@ func (s *Spawner) mirrorJiraInProgress(orgID string, task *domain.Task) {
 // The whole sequence is bounded by jiraMirrorTimeout so a slow ticket releases
 // the lock rather than pinning it.
 //
-// TODO(TFAC-878): every failure below is a log line and a return. A canonical
-// status that is no longer a reachable transition — retired from the project's
-// workflow — makes the mirror a no-op on every board move, so Jira silently
-// stops tracking the board and nothing tells the team. Needs the durable
-// notification channel.
+// Every failure below is a log line and a return. The in-progress move's
+// outcome is also recorded on kinds.JiraMirrorFailing (NoteJiraMirrorMove).
+// The condition is about the in-progress canonical, so the done mode neither
+// raises nor resolves it.
 func (s *Spawner) runJiraMirror(orgID, entityID, issueKey, teamID string, rule domain.JiraProjectStatusRules, done bool) {
 	resolver := s.getJiraResolver()
 	if resolver == nil {
@@ -220,6 +217,10 @@ func (s *Spawner) runJiraMirror(orgID, entityID, issueKey, teamID string, rule d
 	state := client.GetClaimState(ctx, issue)
 
 	if done {
+		// TODO(TFAC-1269): nothing calls the done mode. A merge of a PR opened
+		// for the ticket should, which needs a durable PR→ticket link first; its
+		// failures raise under a key of their own, not jira.mirror_failing's.
+		//
 		// Idempotency skip when the ticket is already in the Done bucket. Unlike
 		// the in-progress path below, a nil state (transient read failure) falls
 		// through to the transition rather than skipping: reaching the done mirror
@@ -272,12 +273,50 @@ func (s *Spawner) runJiraMirror(orgID, entityID, issueKey, teamID string, rule d
 		s.recordMirrorAction(ctx, orgID, entityID, scope, issueKey, issueID, teamID, domain.ActionIssueAssigned, "", "")
 	}
 	if !rule.InProgressContains(claimStatusRef(state)) {
-		if err := client.TransitionTo(ctx, issue, jira.Status{ID: rule.InProgressCanonical.ID, Name: rule.InProgressCanonical.Name}); err != nil {
+		err := client.TransitionTo(ctx, issue, jira.Status{ID: rule.InProgressCanonical.ID, Name: rule.InProgressCanonical.Name})
+		NoteJiraMirrorMove(ctx, client, orgID, rule, issueKey, err)
+		if err != nil {
 			jiraLog.Warn("mirror: transition to in-progress failed", "issue", issueKey, "target", rule.InProgressCanonical.Name, "error", err)
 			return
 		}
 		s.recordMirrorAction(ctx, orgID, entityID, scope, issueKey, issueID, teamID, domain.ActionIssueTransitioned, state.StatusName, rule.InProgressCanonical.Name)
 	}
+}
+
+// NoteJiraMirrorMove records on kinds.JiraMirrorFailing how a move of issueKey
+// into rule's in-progress canonical ended, err being the move's error. A move
+// that landed resolves the condition. A move Jira offered no transition for
+// raises it only when the canonical is no longer one of the project's
+// statuses, read through c: a ticket that cannot reach a status still in the
+// workflow, from where it sits, past a transition's condition or under c's
+// permissions, says nothing about the team's rule. Any other failure, and a
+// failed read of the statuses, leaves the condition as it was. Every move into
+// the in-progress canonical records through it: the board mirror, the claim
+// guard and the stock deck's claim.
+func NoteJiraMirrorMove(ctx context.Context, c *jira.Client, orgID string, rule domain.JiraProjectStatusRules, issueKey string, err error) {
+	m := kinds.JiraMirrorFor(rule, issueKey)
+	if err == nil {
+		kinds.JiraMirrorFailing.Set(ctx, orgID, m, false)
+		return
+	}
+	if !errors.Is(err, jira.ErrNoTransition) {
+		return
+	}
+	project := rule.ProjectExternalID
+	if project == "" {
+		project = rule.ProjectKey
+	}
+	statuses, err := c.ProjectStatuses(ctx, project)
+	if err != nil {
+		jiraLog.Warn("mirror: read the project's statuses failed; leaving its mirror condition as it was", "project", project, "error", err)
+		return
+	}
+	for _, st := range statuses {
+		if rule.InProgressCanonical.SameStatus(domain.JiraStatusRef{ID: st.ID, Name: st.Name}) {
+			return
+		}
+	}
+	kinds.JiraMirrorFailing.Set(ctx, orgID, m, true)
 }
 
 // recordMirrorAction appends one external_actions row for a board→Jira mirror
