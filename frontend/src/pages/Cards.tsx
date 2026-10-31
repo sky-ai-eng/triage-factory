@@ -93,11 +93,7 @@ export default function Cards() {
     </button>
   )
   const notifyPanel = (
-    <NotifyRulesPanel
-      open={notifyPanelOpen}
-      onClose={closeNotify}
-      openRuleId={linkedNotifyRule}
-    />
+    <NotifyRulesPanel open={notifyPanelOpen} onClose={closeNotify} openRuleId={linkedNotifyRule} />
   )
   const hasFetched = useRef(false)
   const navigate = useNavigate()
