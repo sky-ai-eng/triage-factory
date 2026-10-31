@@ -3,11 +3,13 @@ package domain
 import "testing"
 
 // TestEntityRefForExternal pins the (provider, target) → entity natural-key
-// mapping shared by the exec-touch resolver and the conversation-end produced-deliverable
-// attach: GitHub targets must parse as owner/repo#N (repo-level coordinates
-// map to nothing) and carry the pull request's node id when one is given, Jira targets are issue keys and need the issue's id, Linear
-// targets are issue identifiers and need the issue's UUID, Slack targets are a
-// SlackSourceID, and every other provider or empty key is skipped (ok=false).
+// mapping the exec-touch resolver uses: Jira targets are issue keys and need
+// the issue's id, Linear targets are issue identifiers and need the issue's
+// UUID, Slack targets are a SlackSourceID, and every GitHub coordinate, every
+// other provider and every empty key is skipped (ok=false). A GitHub key's
+// shape says neither whether it names a pull request or an issue nor which
+// repository its name belongs to now, so a GitHub entity is resolved from
+// GitHub's ids and never here.
 func TestEntityRefForExternal(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -25,14 +27,12 @@ func TestEntityRefForExternal(t *testing.T) {
 		wantKind     string
 	}{
 		{
-			name:     "github PR target → pr entity",
+			name:     "github owner/repo#N target skipped",
 			provider: ProviderGitHub, target: "octo/repo#18",
-			wantOK: true, wantSource: ProviderGitHub, wantKind: "pr",
 		},
 		{
-			name:     "github PR target with its node id → pr entity carrying it",
+			name:     "github target with a node id skipped",
 			provider: ProviderGitHub, target: "octo/repo#18", externalID: "PR_kwDO18",
-			wantOK: true, wantSource: ProviderGitHub, wantKind: "pr",
 		},
 		{
 			// A bare owner/repo is repo-level — a branch push's shape too.
@@ -79,14 +79,6 @@ func TestEntityRefForExternal(t *testing.T) {
 			// whitespace-only target mints an entity keyed on "".
 			name:     "jira whitespace-only target skipped",
 			provider: ProviderJira, target: "   ", externalID: "10042",
-		},
-		{
-			// GitHub natural keys stay verbatim: repo and owner names are
-			// case-sensitive, so folding them would break the mapping rather
-			// than repair it.
-			name:     "github mixed-case target left verbatim",
-			provider: ProviderGitHub, target: "Octo/Repo#18",
-			wantOK: true, wantSource: ProviderGitHub, wantKind: "pr",
 		},
 		{
 			name:     "slack source id → message entity",

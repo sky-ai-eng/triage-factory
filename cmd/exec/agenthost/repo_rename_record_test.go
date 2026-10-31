@@ -51,20 +51,25 @@ func renameRepo(t *testing.T, stores db.Stores) {
 	}
 }
 
+// renamedRepoJSON is the repository GitHub answers for either name of the
+// renamed repository: its id, under the name it has now.
+const renamedRepoJSON = `{"id":` + renamedRepoID + `,"full_name":"octo/new-name"}`
+
 // startRenamedRepoGitHub stands a GitHub that serves the renamed repository
-// under both names, as GitHub follows an old name to its repository, and
-// opens pull request #42 on it.
+// under both names, as GitHub follows an old name to its repository, answers
+// its pull requests' reads with it as their base, and opens pull request #42
+// on it.
 func startRenamedRepoGitHub(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if answerPRRead(w, r) {
-			return
-		}
 		w.Header().Set("Content-Type", "application/json")
 		path := strings.TrimPrefix(r.URL.Path, "/api/v3")
+		_, number, isPull := strings.Cut(path, "/pulls/")
 		switch {
 		case r.Method == http.MethodGet && (path == "/repos/octo/old-name" || path == "/repos/octo/new-name"):
-			_, _ = io.WriteString(w, `{"id":`+renamedRepoID+`,"full_name":"octo/new-name"}`)
+			_, _ = io.WriteString(w, renamedRepoJSON)
+		case r.Method == http.MethodGet && isPull && fakePRNodeID(path) != "":
+			_, _ = io.WriteString(w, `{"number":`+number+`,"node_id":"`+fakePRNodeID(path)+`","base":{"ref":"main","repo":`+renamedRepoJSON+`},"head":{"sha":"pr-head"}}`)
 		case r.Method == http.MethodPost && strings.HasSuffix(path, "/pulls"):
 			_, _ = io.WriteString(w, `{"number":42,"html_url":"https://github.com/octo/new-name/pull/42","node_id":"PR_renamed"}`)
 		default:
@@ -181,8 +186,8 @@ func TestLocalClient_OldNameAfterRename_JoinsTheRow(t *testing.T) {
 // before TF applies the rename, an object recorded under both the old name and
 // the new one GitHub already answers to is one row, under the registry's old
 // name, and the rename moves its target. The new name already has a bare
-// registry row, as an entity created through it mints one, and that row
-// carries no id to answer with.
+// registry row, which carries no id, and GitHub's id for the repository finds
+// the row that does: no second repository.
 func TestLocalClient_NewNameBeforeRename_DoesNotBlockIt(t *testing.T) {
 	gh := startRenamedRepoGitHub(t)
 	stores, info, client := newGithubRecordingClient(t, gh.URL, true)
@@ -256,11 +261,11 @@ func TestLocalClient_BranchPushedUnderOldName_RecordedUnderCurrent(t *testing.T)
 	}
 }
 
-// TestLocalClient_BranchWithNoRegistryRow_RecordsOnlyThePush pins that a branch
-// pushed to a repository no registry row answers for is refused as a
-// deliverable, since its key is the row's id, and that its push still leaves its
-// ledger row.
-func TestLocalClient_BranchWithNoRegistryRow_RecordsOnlyThePush(t *testing.T) {
+// TestLocalClient_BranchWithAFailedIdentityRead_RecordsOnlyThePush pins that a
+// branch whose repository's identity could not be read is refused as a
+// deliverable, since its key is the row GitHub's id names, and that its push
+// still leaves its ledger row, unlinked.
+func TestLocalClient_BranchWithAFailedIdentityRead_RecordsOnlyThePush(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	}))
@@ -281,16 +286,16 @@ func TestLocalClient_BranchWithNoRegistryRow_RecordsOnlyThePush(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list external actions: %v", err)
 	}
-	if len(acts) != 1 || acts[0].Action != domain.ActionBranchPushed || acts[0].ExternalID != "refs/heads/feature/x" {
-		t.Errorf("external actions = %+v, want the one branch_pushed row", acts)
+	if len(acts) != 1 || acts[0].Action != domain.ActionBranchPushed || acts[0].ExternalID != "refs/heads/feature/x" || acts[0].RepositoryID != "" {
+		t.Errorf("external actions = %+v, want the one branch_pushed row, unlinked", acts)
 	}
 }
 
-// TestLocalClient_RegistryHeldName_ResolvedFromTheRegistry pins that a name
-// the registry holds under an id is answered from the registry alone, in the
-// registry's spelling: GitHub names are case-insensitive, and the readers
-// compare the stored target exactly. The one GitHub read is the pull
-// request's, for its node id.
+// TestLocalClient_RegistryHeldName_ResolvedFromTheRegistry pins that a
+// repository GitHub's id names is recorded in the registry's spelling: GitHub
+// names are case-insensitive, and the readers compare the stored target
+// exactly. The one GitHub read is the pull request's, which answers its node
+// id and its repository's id together.
 func TestLocalClient_RegistryHeldName_ResolvedFromTheRegistry(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if answerPRRead(w, r) {
@@ -301,7 +306,7 @@ func TestLocalClient_RegistryHeldName_ResolvedFromTheRegistry(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
-	registerRepo(t, stores, "octo", "repo", "1")
+	registerRepo(t, stores, "octo", "repo", testRepoID("octo/repo"))
 
 	if _, err := client.GithubCreatePendingReview(context.Background(), "Octo", "Repo", 7, "head7", nil); err != nil {
 		t.Fatalf("GithubCreatePendingReview: %v", err)
@@ -312,22 +317,33 @@ func TestLocalClient_RegistryHeldName_ResolvedFromTheRegistry(t *testing.T) {
 	}
 }
 
-// TestRelayRuntime_RepoSlugByExternalID pins the sidecar's half of the id
-// lookup: the id relays to the orchestrator, which answers from its registry on
-// the org's GitHub host, and an id no row carries answers no name.
-func TestRelayRuntime_RepoSlugByExternalID(t *testing.T) {
-	stores, info := newCaptureStores(t, true)
-	registerRepo(t, stores, "octo", "old-name", renamedRepoID)
-	renameRepo(t, stores)
-	rt := newRelayRuntime(directDispatchConn{srv: NewRelayServer(stores, info, nil)}, info, nil)
+// TestLocalClient_BranchPushedUnderAnUnappliedNewName_LinksItsRowByID pins a
+// push through a checkout that spells the repository's new name before TF has
+// applied the rename: GitHub's id for the repository names the row TF holds
+// under the old name, so the branch is keyed on that row and recorded under
+// its name, and no second registry row is created for the new one.
+func TestLocalClient_BranchPushedUnderAnUnappliedNewName_LinksItsRowByID(t *testing.T) {
+	gh := startRenamedRepoGitHub(t)
+	stores, info, client := newGithubRecordingClient(t, gh.URL, true)
+	repoID := registerRepo(t, stores, "octo", "old-name", renamedRepoID)
+	ctx := context.Background()
 
-	for id, want := range map[string]string{renamedRepoID: "octo/new-name", "9999": ""} {
-		got, err := rt.RepoSlugByExternalID(context.Background(), id)
-		if err != nil {
-			t.Fatalf("RepoSlugByExternalID(%s) relay: %v", id, err)
-		}
-		if got != want {
-			t.Errorf("RepoSlugByExternalID(%s) = %q, want %q", id, got, want)
-		}
+	branch, ok := domain.NewBranchDeliverable("octo/new-name", "refs/heads/feature/x", "abc123", true)
+	if !ok {
+		t.Fatal("NewBranchDeliverable refused the fixture branch")
+	}
+	if _, err := client.UpsertDeliverable(ctx, branch); err != nil {
+		t.Fatalf("UpsertDeliverable: %v", err)
+	}
+	arts := listConversationDeliverables(t, stores, info.ConversationID)
+	if len(arts) != 1 || arts[0].Target != "octo/old-name" || arts[0].DedupKey != domain.BranchDedupKey(repoID, "refs/heads/feature/x") {
+		t.Fatalf("branch deliverables = %+v, want one keyed on row %s under octo/old-name", arts, repoID)
+	}
+	acts := listExternalActions(t, stores)
+	if len(acts) != 1 || acts[0].RepositoryID != repoID {
+		t.Errorf("push rows = %+v, want one referencing row %s", acts, repoID)
+	}
+	if row, err := stores.Repos.GetByRefSystem(ctx, info.OrgID, domain.RepoRefFromSlug(testScope("github"), "octo/new-name")); err != nil || row != nil {
+		t.Errorf("octo/new-name = %+v, %v; want no second registry row", row, err)
 	}
 }

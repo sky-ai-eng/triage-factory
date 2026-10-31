@@ -189,6 +189,15 @@ type RecordGHWriteArgs struct {
 	Errored        bool               `json:"errored,omitempty"`
 	ResponseUnread bool               `json:"response_unread,omitempty"`
 	GraphQL        *GraphQLWriteFacts `json:"graphql,omitempty"`
+
+	// RepositoryID, RepositoryName, ObjectNodeID and ObjectKind are what
+	// GitHub answered the injector for the write's objects
+	// (ghwrite.Observation.Identity): the repository's id and current name,
+	// and the pull request's or issue's node id and kind.
+	RepositoryID   string `json:"repository_id,omitempty"`
+	RepositoryName string `json:"repository_name,omitempty"`
+	ObjectNodeID   string `json:"object_node_id,omitempty"`
+	ObjectKind     string `json:"object_kind,omitempty"`
 }
 
 // GraphQLWriteFacts mirrors ghwrite.GraphQLFacts across the wire. It is spelled
@@ -253,6 +262,11 @@ type RecordPushArgs struct {
 	Rejected      bool   `json:"rejected"`
 	Reason        string `json:"reason"`
 	RemoteMessage string `json:"remote_message"`
+	// RepositoryID and RepositoryName are GitHub's id for the pushed
+	// repository and the name it answers with it, read by the sidecar with
+	// the push's credential (gitproxy.PushedRef).
+	RepositoryID   string `json:"repository_id,omitempty"`
+	RepositoryName string `json:"repository_name,omitempty"`
 }
 
 // RelayDispatcher serves the sidecar's org-bound relay ops. The concrete impl

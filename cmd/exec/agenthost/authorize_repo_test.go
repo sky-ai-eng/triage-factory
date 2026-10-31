@@ -48,7 +48,7 @@ func (r *gateRuntime) TaskOwnRepository(_ context.Context, repositoryID string) 
 	return r.taskRepo, nil
 }
 
-func (r *gateRuntime) Record(_ context.Context, _ *domain.Deliverable, act *domain.ExternalAction, _ domain.EntityContainer) {
+func (r *gateRuntime) Record(_ context.Context, _ *domain.Deliverable, act *domain.ExternalAction, _ domain.EntityContainer, _ domain.GitHubIdentity) {
 	r.denied = append(r.denied, act.Target)
 }
 

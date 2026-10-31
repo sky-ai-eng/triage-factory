@@ -53,40 +53,28 @@ func NormalizeJiraKey(key string) string {
 // mapped providers), SourceID is the natural key (== target, except for Jira,
 // where it is the target folded to its canonical spelling), ExternalID is the
 // provider id the entity is identified by, and kind is the entities.kind.
-// ok=false for anything the touched/produced rule skips — a repo-level GitHub
-// target (owner/repo with no '#N'), an empty key, a Jira or Linear coordinate
-// with no issue id, or an unmapped provider — so the caller resolves, creates,
-// and records nothing.
+// ok=false for anything the touched/produced rule skips — an empty key, a Jira
+// or Linear coordinate with no issue id, or an unmapped provider — so the
+// caller resolves, creates, and records nothing.
 //
-// It is the single home of the (provider, target) → entity mapping shared by
-// the exec-funnel touch resolver (resolveTouchedEntityInfo) and the
-// conversation-end produced-deliverable attach (memoryentities.Attach). GitHub
-// targets must parse as owner/repo#N; Jira targets are issue keys; Linear
-// targets are issue identifiers; Slack targets are a SlackSourceID
-// channel/root_ts.
+// It is the single home of the (provider, target) → entity mapping for the
+// exec-funnel touch resolver (resolveTouchedEntityInfo). Jira targets are
+// issue keys; Linear targets are issue identifiers; Slack targets are a
+// SlackSourceID channel/root_ts.
 //
 // A Jira coordinate needs externalID, the issue's numeric id, and a Linear
 // coordinate the issue's UUID: an issue key changes when the issue moves or
 // its project's (or team's) key is renamed, so an entity found or created on
-// the key alone can be another issue's, or a second row for this one. A
-// GitHub coordinate takes the pull request's node id when the caller has one,
-// and resolves on the key when it does not, since a write's request path names
-// a pull request by repository and number only. Slack ignores externalID.
+// the key alone can be another issue's, or a second row for this one. Slack
+// ignores externalID.
 //
-// NOTE: this assumes every GitHub target is a PR (kind="pr"). Exec only writes
-// PRs/reviews today, so that holds — but a GitHub *issue* shares the
-// "owner/repo#N" shape, and the poller's stub enrichment would then 404 against
-// /pulls/{n} every cycle. GitHub issue support must branch on kind here (and
-// give the poller an issue-aware enrichment path).
+// GitHub is not mapped here, so ok is false for every GitHub coordinate. An
+// owner/repo#N key names a pull request or an issue alike, and its owner/repo
+// is a spelling GitHub may since have given to another repository, so a
+// GitHub entity is resolved from GitHub's ids for the object and its
+// repository (domain.GitHubIdentity), never from the key's shape.
 func EntityRefForExternal(provider, target, externalID string) (ref EntityRef, kind string, ok bool) {
 	switch provider {
-	case ProviderGitHub:
-		// owner/repo#N is a PR entity; a bare owner/repo is a repo-level
-		// action (a branch push's shape too) and maps to no entity.
-		if _, _, _, parsed := ParsePRTarget(target); !parsed {
-			return EntityRef{}, "", false
-		}
-		return EntityRef{Source: provider, SourceID: target, ExternalID: externalID}, "pr", true
 	case ProviderJira:
 		// Normalized rather than passed through: this is the single seam
 		// every touched/produced Jira entity resolves through, so folding
@@ -228,4 +216,35 @@ func (e Entity) JiraIssueRef() string {
 type EntityContainer struct {
 	LinearTeamID string         `json:"linear_team_id,omitempty"`
 	JiraProject  JiraProjectRef `json:"jira_project,omitzero"`
+}
+
+// The kinds a GitHub entity is stored under: a pull request, or an issue.
+const (
+	EntityKindPullRequest = "pr"
+	EntityKindIssue       = "issue"
+)
+
+// GitHubIdentity is what GitHub answered for the objects a GitHub act names,
+// read by the observer that made the act with the credential it made it under.
+// The recording funnel cannot read GitHub (in multi mode it runs on the
+// executor, which holds no run credential), so it resolves the act's entity
+// and repository from these ids and never from a name. The zero value is an
+// act whose read failed or was never made, which is recorded unlinked.
+type GitHubIdentity struct {
+	// RepositoryID is GitHub's id for the repository the act is in, and
+	// Repository the owner/repo GitHub answered with it: the repository's name
+	// now, whatever name the act spelled.
+	RepositoryID string `json:"repository_id,omitempty"`
+	Repository   string `json:"repository,omitempty"`
+	// NodeID is the node id of the pull request or issue the act names by
+	// number, and Kind which of the two it is (EntityKindPullRequest or
+	// EntityKindIssue). Both empty for an act that names neither.
+	NodeID string `json:"node_id,omitempty"`
+	Kind   string `json:"kind,omitempty"`
+}
+
+// IsGitHubObjectKind reports whether kind is one a GitHub entity is stored
+// under.
+func IsGitHubObjectKind(kind string) bool {
+	return kind == EntityKindPullRequest || kind == EntityKindIssue
 }

@@ -40,7 +40,9 @@ func (t *Tracker) RetireGitHubOutOfScope(ctx context.Context, scope string) int 
 	retired := 0
 	forgotten := map[string]bool{}
 	for _, e := range entities {
-		if e.Scope == scope {
+		// An issue entity is not the pull request poller's to retire: it
+		// polls no issue, and the unreachable event is a pull request's.
+		if e.Scope == scope || e.Kind == domain.EntityKindIssue {
 			continue
 		}
 		t.forgetPullsCursor(ctx, e.RepositoryID, forgotten)

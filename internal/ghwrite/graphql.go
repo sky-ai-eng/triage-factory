@@ -148,13 +148,13 @@ var graphQLMutations = map[string]graphQLShape{
 	"updateIssueComment":            {action: domain.ActionCommentEdited, comment: []string{"issueComment"}, space: domain.GitHubIssueComment},
 	"deleteIssueComment":            {action: domain.ActionCommentDeleted, space: domain.GitHubIssueComment},
 	"createPullRequest":             {action: domain.ActionPRCreated, creates: true, provenance: true, numberFromURL: true},
-	"updatePullRequest":             {action: domain.ActionPREdited},
-	"closePullRequest":              {action: domain.ActionPRClosed},
-	"reopenPullRequest":             {action: domain.ActionPRReopened},
-	"mergePullRequest":              {action: domain.ActionPRMerged},
-	"markPullRequestReadyForReview": {action: domain.ActionPRMarkedReady},
-	"convertPullRequestToDraft":     {action: domain.ActionPRConvertedToDraft},
-	"addPullRequestReview":          {action: domain.ActionReviewSubmitted, provenance: true},
+	"updatePullRequest":             {action: domain.ActionPREdited, subject: domain.EntityKindPullRequest},
+	"closePullRequest":              {action: domain.ActionPRClosed, subject: domain.EntityKindPullRequest},
+	"reopenPullRequest":             {action: domain.ActionPRReopened, subject: domain.EntityKindPullRequest},
+	"mergePullRequest":              {action: domain.ActionPRMerged, subject: domain.EntityKindPullRequest},
+	"markPullRequestReadyForReview": {action: domain.ActionPRMarkedReady, subject: domain.EntityKindPullRequest},
+	"convertPullRequestToDraft":     {action: domain.ActionPRConvertedToDraft, subject: domain.EntityKindPullRequest},
+	"addPullRequestReview":          {action: domain.ActionReviewSubmitted, provenance: true, subject: domain.EntityKindPullRequest},
 	"addReaction":                   {action: domain.ActionReactionAdded},
 	"removeReaction":                {action: domain.ActionReactionRemoved},
 
@@ -166,8 +166,8 @@ var graphQLMutations = map[string]graphQLShape{
 
 	// Arming a merge rather than performing one. A distinct mutation, not a
 	// variant of mergePullRequest, so gating one has never implied the other.
-	"enablePullRequestAutoMerge":  {action: domain.ActionPRAutoMergeEnabled},
-	"disablePullRequestAutoMerge": {action: domain.ActionPRAutoMergeDisabled},
+	"enablePullRequestAutoMerge":  {action: domain.ActionPRAutoMergeEnabled, subject: domain.EntityKindPullRequest},
+	"disablePullRequestAutoMerge": {action: domain.ActionPRAutoMergeDisabled, subject: domain.EntityKindPullRequest},
 
 	// A revert opens a pull request, so it resolves like one — from the url in
 	// its own payload. gh selects only the new pull request's url, which is what
@@ -176,7 +176,7 @@ var graphQLMutations = map[string]graphQLShape{
 	// the row would name whichever the scan reached first.
 	"revertPullRequest": {action: domain.ActionPRReverted, creates: true, provenance: true, numberFromURL: true},
 
-	"updatePullRequestBranch": {action: domain.ActionPRBranchUpdated},
+	"updatePullRequestBranch": {action: domain.ActionPRBranchUpdated, subject: domain.EntityKindPullRequest},
 
 	// Labels and locks address a pull request and an issue through one mutation
 	// each, which is why their actions are one pair each rather than two.
@@ -188,19 +188,19 @@ var graphQLMutations = map[string]graphQLShape{
 	// The issue family. GitHub serves issue comments through addComment above,
 	// so only the lifecycle needs naming here.
 	"createIssue":   {action: domain.ActionIssueCreated, creates: true, numberFromURL: true},
-	"updateIssue":   {action: domain.ActionIssueUpdated},
-	"closeIssue":    {action: domain.ActionIssueClosed},
-	"reopenIssue":   {action: domain.ActionIssueReopened},
-	"deleteIssue":   {action: domain.ActionIssueDeleted},
-	"pinIssue":      {action: domain.ActionIssuePinned},
-	"unpinIssue":    {action: domain.ActionIssueUnpinned},
-	"transferIssue": {action: domain.ActionIssueTransferred},
+	"updateIssue":   {action: domain.ActionIssueUpdated, subject: domain.EntityKindIssue},
+	"closeIssue":    {action: domain.ActionIssueClosed, subject: domain.EntityKindIssue},
+	"reopenIssue":   {action: domain.ActionIssueReopened, subject: domain.EntityKindIssue},
+	"deleteIssue":   {action: domain.ActionIssueDeleted, subject: domain.EntityKindIssue},
+	"pinIssue":      {action: domain.ActionIssuePinned, subject: domain.EntityKindIssue},
+	"unpinIssue":    {action: domain.ActionIssueUnpinned, subject: domain.EntityKindIssue},
+	"transferIssue": {action: domain.ActionIssueTransferred, subject: domain.EntityKindIssue},
 
 	// It creates a branch, but its payload carries a ref name rather than a url,
 	// so there is nothing for a create's response parse to find. The row keeps
 	// the issue the branch was linked to, which is the more useful coordinate
 	// anyway — a branch with no commits has no page worth linking to.
-	"createLinkedBranch": {action: domain.ActionLinkedBranchCreated},
+	"createLinkedBranch": {action: domain.ActionLinkedBranchCreated, subject: domain.EntityKindIssue},
 
 	// The repository itself. gh performs these through GraphQL while performing
 	// the rest of the same command's settings work over REST, so the two halves
@@ -279,6 +279,12 @@ type graphQLShape struct {
 	// deleted, Shape.Comment's value. Empty for every mutation that does none
 	// of those to a comment.
 	space domain.GitHubCommentSpace
+	// subject is the entity kind of the object the mutation's input names as
+	// its subject (Shape.SubjectKind), for a mutation whose subject is always a
+	// pull request or always an issue. Empty for one whose subject may be
+	// either (a label, a lock, a comment, a reaction), something else, or the
+	// parent of the object it creates.
+	subject string
 }
 
 // ParseGraphQLRequest reads one GraphQL request body into the facts an audit
@@ -761,6 +767,7 @@ func classifyGraphQL(facts GraphQLFacts) (Shape, bool) {
 		CarriesProvenance:   entry.provenance,
 		NumberFromObjectURL: entry.numberFromURL,
 		Comment:             entry.space,
+		SubjectKind:         entry.subject,
 	}, true
 }
 

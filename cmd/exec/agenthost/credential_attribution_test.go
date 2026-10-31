@@ -77,7 +77,7 @@ func TestBranchPush_ResolvesItsOwnTier(t *testing.T) {
 	gh := startFakeGitHubComments(t)
 	stores, _, client := newGithubRecordingClient(t, gh.URL, true)
 	client.SetGitHubResolver(fakeGitHubResolver{baseURL: gh.URL, token: "tok", identity: ghclient.IdentityPAT})
-	registerRepo(t, stores, "octo", "repo", "1")
+	registerRepo(t, stores, "octo", "repo", testRepoID("octo/repo"))
 
 	branch, ok := domain.NewBranchDeliverable("octo/repo", "refs/heads/feat", "abc123", true)
 	if !ok {
@@ -100,6 +100,7 @@ func TestBranchPush_ResolvesItsOwnTier(t *testing.T) {
 // classify the tier — the secret store is disabled and the sealed bundle opens
 // only in the sidecar — so the sidecar's report is set on the client and must
 // reach the row the runtime beneath it builds, without any resolver being asked.
+// The repository's id arrives relayed with the push, as the sidecar reads it.
 func TestSetGitHubCredential_ReachesTheBranchRow(t *testing.T) {
 	stores, info := newCaptureStores(t, true)
 	client := NewLocal(stores, info)
@@ -110,8 +111,8 @@ func TestSetGitHubCredential_ReachesTheBranchRow(t *testing.T) {
 	if !ok {
 		t.Fatal("NewBranchDeliverable returned ok=false")
 	}
-	if _, err := client.UpsertDeliverable(context.Background(), branch); err != nil {
-		t.Fatalf("UpsertDeliverable: %v", err)
+	if _, err := client.UpsertDeliverableFor(context.Background(), branch, domain.GitHubIdentity{RepositoryID: "1", Repository: "octo/repo"}); err != nil {
+		t.Fatalf("UpsertDeliverableFor: %v", err)
 	}
 
 	acts := listExternalActions(t, stores)
@@ -216,7 +217,7 @@ func TestRelayServer_CredentialReachesBothRecorders(t *testing.T) {
 	if !ok {
 		t.Fatal("NewBranchDeliverable returned ok=false")
 	}
-	if _, err := srv.rt.UpsertDeliverable(ctx, branch); err != nil {
+	if _, err := srv.rt.UpsertDeliverable(ctx, branch, domain.GitHubIdentity{RepositoryID: "1", Repository: "octo/repo"}); err != nil {
 		t.Fatalf("runtime UpsertDeliverable: %v", err)
 	}
 	srv.audit.RecordGHChannelWrite(ctx, ghwrite.Observation{

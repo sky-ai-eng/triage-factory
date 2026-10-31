@@ -3,6 +3,7 @@ package agenthost
 import (
 	"context"
 	"errors"
+	"hash/fnv"
 	"io"
 	"net"
 	"net/http"
@@ -33,8 +34,14 @@ func reviewDiffServer(t *testing.T, headSHA *string) *httptest.Server {
 			_, _ = io.WriteString(w, diff)
 			return
 		}
+		if answerRepoRead(w, r) {
+			return
+		}
+		if answerRepoRead(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"number":7,"node_id":"`+fakePRNodeID(r.URL.Path)+`","base":{"ref":"main"},"head":{"sha":"`+*headSHA+`"}}`)
+		_, _ = io.WriteString(w, `{"number":`+fakePRNumber(r.URL.Path)+`,"node_id":"`+fakePRNodeID(r.URL.Path)+`","base":{"ref":"main","repo":`+fakeRepoJSON(r.URL.Path)+`,"repo":`+fakeRepoJSON(r.URL.Path)+`},"head":{"sha":"`+*headSHA+`"}}`)
 	}))
 	t.Cleanup(srv.Close)
 	return srv
@@ -44,6 +51,20 @@ func reviewDiffServer(t *testing.T, headSHA *string) *httptest.Server {
 // answer for pull request number: the id a start-review keys its draft on.
 func testPRNodeID(number int) string {
 	return "PR_kwDOtest" + strconv.Itoa(number)
+}
+
+// fakePRNumber is the pull request number a /repos/{owner}/{repo}/pulls/{number}
+// request path names, "7" for a path that names none.
+func fakePRNumber(path string) string {
+	_, rest, ok := strings.Cut(path, "/pulls/")
+	if !ok {
+		return "7"
+	}
+	number, _, _ := strings.Cut(rest, "/")
+	if _, err := strconv.Atoi(number); err != nil {
+		return "7"
+	}
+	return number
 }
 
 // fakePRNodeID is testPRNodeID for the pull request a
@@ -63,12 +84,17 @@ func fakePRNodeID(path string) string {
 	return testPRNodeID(n)
 }
 
-// answerPRRead answers r when it is the pull request read the host makes for
-// a review draft's node id (GET /repos/{owner}/{repo}/pulls/{number}), with
-// the PR object carrying testPRNodeID, and reports whether it did. A fake
-// GitHub that must see nothing else hands every other request to its own
-// failure.
+// answerPRRead answers r when it is a read of a pull request or of a
+// repository, the identity reads the host makes for what it records
+// (GET /repos/{owner}/{repo}/pulls/{number} and GET /repos/{owner}/{repo}):
+// the PR object carries testPRNodeID and its base repository, and the
+// repository testRepoID under the name the path spells. It reports whether it
+// answered. A fake GitHub that must see nothing else hands every other request
+// to its own failure.
 func answerPRRead(w http.ResponseWriter, r *http.Request) bool {
+	if answerRepoRead(w, r) {
+		return true
+	}
 	if r.Method != http.MethodGet || strings.Contains(r.Header.Get("Accept"), "diff") {
 		return false
 	}
@@ -78,8 +104,45 @@ func answerPRRead(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = io.WriteString(w, `{"number":`+number+`,"node_id":"`+node+`","base":{"ref":"main"},"head":{"sha":"pr-head"}}`)
+	_, _ = io.WriteString(w, `{"number":`+number+`,"node_id":"`+node+`","base":{"ref":"main","repo":`+fakeRepoJSON(r.URL.Path)+`},"head":{"sha":"pr-head"}}`)
 	return true
+}
+
+// answerRepoRead answers r when it is a repository read
+// (GET /repos/{owner}/{repo}), with testRepoID under the name the path
+// spells, and reports whether it did.
+func answerRepoRead(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/api/v3")
+	rest, ok := strings.CutPrefix(path, "/repos/")
+	if !ok || strings.Count(rest, "/") != 1 {
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = io.WriteString(w, fakeRepoJSON(path))
+	return true
+}
+
+// testRepoID is the GitHub id the fake GitHub servers in this package answer
+// for the repository slug names, folded like GitHub folds names.
+func testRepoID(slug string) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(strings.ToLower(slug)))
+	return strconv.FormatUint(uint64(h.Sum32()%1_000_000)+1, 10)
+}
+
+// fakeRepoJSON is the repository object a fake GitHub answers for the
+// repository a /repos/{owner}/{repo}/... path names.
+func fakeRepoJSON(path string) string {
+	rest, _ := strings.CutPrefix(strings.TrimPrefix(path, "/api/v3"), "/repos/")
+	parts := strings.SplitN(rest, "/", 3)
+	if len(parts) < 2 {
+		return `null`
+	}
+	slug := parts[0] + "/" + parts[1]
+	return `{"id":` + testRepoID(slug) + `,"full_name":"` + slug + `"}`
 }
 
 // TestLocalClient_GithubCreatePendingReview_RecordsLocalDraft pins that
@@ -106,7 +169,7 @@ func TestLocalClient_GithubCreatePendingReview_RecordsLocalDraft(t *testing.T) {
 			}))
 			t.Cleanup(srv.Close)
 			stores, info, client := newGithubRecordingClient(t, srv.URL, eventTriggered)
-			registerRepo(t, stores, "octo", "repo", "1")
+			registerRepo(t, stores, "octo", "repo", testRepoID("octo/repo"))
 
 			handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "headsha7", nil)
 			if err != nil {
@@ -679,7 +742,7 @@ func TestReviewDraftTarget_ReturnsRecordedPR(t *testing.T) {
 	}))
 	t.Cleanup(gh.Close)
 	stores, info, local := newGithubRecordingClient(t, gh.URL, true)
-	registerRepo(t, stores, "octo", "repo", "1")
+	registerRepo(t, stores, "octo", "repo", testRepoID("octo/repo"))
 	handle, err := local.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "headsha7", nil)
 	if err != nil {
 		t.Fatalf("GithubCreatePendingReview: %v", err)
@@ -723,7 +786,7 @@ func TestReviewDraftTarget_FollowsTheRegistryRow(t *testing.T) {
 	}))
 	t.Cleanup(gh.Close)
 	conn, stores, info, local := newGithubRecordingClientConn(t, gh.URL, true)
-	repoID := registerRepo(t, stores, "octo", "repo", "1")
+	repoID := registerRepo(t, stores, "octo", "repo", testRepoID("octo/repo"))
 	ctx := context.Background()
 	handle, err := local.GithubCreatePendingReview(ctx, "octo", "repo", 7, "headsha7", nil)
 	if err != nil {
@@ -773,11 +836,11 @@ func TestLocalClient_GithubAddPendingReviewComment_RefusesOtherRepo(t *testing.T
 			t.Errorf("unexpected GitHub call for a mismatched repo: %s %s", r.Method, r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"number":7,"node_id":"PR_kwDOother7","base":{"ref":"main"},"head":{"sha":"h"}}`)
+		_, _ = io.WriteString(w, `{"number":7,"node_id":"PR_kwDOother7","base":{"ref":"main","repo":`+fakeRepoJSON(r.URL.Path)+`},"head":{"sha":"h"}}`)
 	}))
 	t.Cleanup(srv.Close)
 	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
-	registerRepo(t, stores, "octo", "repo", "1")
+	registerRepo(t, stores, "octo", "repo", testRepoID("octo/repo"))
 
 	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "headsha7", nil)
 	if err != nil {
@@ -802,7 +865,7 @@ func TestLocalClient_GithubAddPendingReviewComment_AcceptsAnotherSpelling(t *tes
 	head := "commit_v1"
 	srv := reviewDiffServer(t, &head)
 	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
-	registerRepo(t, stores, "octo", "repo", "1")
+	registerRepo(t, stores, "octo", "repo", testRepoID("octo/repo"))
 
 	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "headsha7", nil)
 	if err != nil {

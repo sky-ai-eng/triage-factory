@@ -281,8 +281,13 @@ type createWorkspaceCheckoutResult struct {
 
 // --- deliverables (capture writers) ---
 
+// upsertDeliverableArgs is the upsert_deliverable op's payload, and the IPC
+// method's. GitHub is the sidecar's read of the deliverable's repository and
+// pull request (Runtime.UpsertDeliverable); the IPC method ignores it, since
+// the daemon reads the identity itself and never takes one from the jail.
 type upsertDeliverableArgs struct {
-	Deliverable domain.Deliverable `json:"deliverable"`
+	Deliverable domain.Deliverable    `json:"deliverable"`
+	GitHub      domain.GitHubIdentity `json:"github,omitzero"`
 }
 
 type upsertDeliverableResult struct {

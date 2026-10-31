@@ -484,6 +484,43 @@ func (s *entityStore) StampExternalIDSystem(ctx context.Context, orgID, entityID
 	return nil, nil
 }
 
+// AdoptGitHubIdentitySystem fills a GitHub row's NULL external_id and sets its
+// kind; see the interface doc. Like StampExternalIDSystem, the guard admits
+// the id the row already carries.
+func (s *entityStore) AdoptGitHubIdentitySystem(ctx context.Context, orgID, entityID, externalID, kind string) (*domain.Entity, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	if externalID == "" {
+		return nil, errors.New("adopt github identity: empty id")
+	}
+	if !domain.IsGitHubObjectKind(kind) {
+		return nil, fmt.Errorf("adopt github identity: %q is not a GitHub entity kind", kind)
+	}
+	e, err := scanEntityRow(s.q.QueryRowContext(ctx, `
+		UPDATE entities SET external_id = ?, kind = ?
+		WHERE id = ? AND source = 'github' AND (external_id IS NULL OR external_id = ?)
+		RETURNING `+entitySelectCols,
+		externalID, kind, entityID, externalID))
+	if err != nil {
+		if isUniqueViolation(err) {
+			return nil, fmt.Errorf("%w: %s", db.ErrEntityIdentityAmbiguous, externalID)
+		}
+		return nil, err
+	}
+	if e != nil {
+		return e, nil
+	}
+	existing, err := s.Get(ctx, orgID, entityID)
+	if err != nil {
+		return nil, err
+	}
+	if existing == nil {
+		return nil, sql.ErrNoRows
+	}
+	return nil, nil
+}
+
 // RenameSystem — see the interface doc. SQLite's single writer is the lock:
 // the transaction's reads and writes cannot interleave with another rename.
 func (s *entityStore) RenameSystem(ctx context.Context, orgID, source, scope, externalID, newKey, newURL string) (domain.EntityRenameOutcome, error) {

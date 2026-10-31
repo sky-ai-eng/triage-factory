@@ -951,6 +951,46 @@ func TestResolveGraphQL_NodeIDIsNeverTheExternalID(t *testing.T) {
 	}
 }
 
+// TestResolveGraphQL_SubjectKindNamesWhatTheSubjectIs: a mutation whose subject
+// is always a pull request, or always an issue, says which, so the subject's
+// node id is that object's identity. A mutation whose subject may be either (a
+// label, a lock, a reaction), is something else (a comment, a repository), or
+// is the parent of the object it creates says nothing.
+func TestResolveGraphQL_SubjectKindNamesWhatTheSubjectIs(t *testing.T) {
+	want := map[string]string{
+		"mergePullRequest":                domain.EntityKindPullRequest,
+		"closePullRequest":                domain.EntityKindPullRequest,
+		"updatePullRequestBranch":         domain.EntityKindPullRequest,
+		"enablePullRequestAutoMerge":      domain.EntityKindPullRequest,
+		"updateIssue":                     domain.EntityKindIssue,
+		"closeIssue":                      domain.EntityKindIssue,
+		"transferIssue":                   domain.EntityKindIssue,
+		"addLabelsToLabelable":            "",
+		"lockLockable":                    "",
+		"addReaction":                     "",
+		"addComment":                      "",
+		"updateIssueComment":              "",
+		"updateRepository":                "",
+		"createPullRequest":               "",
+		"revertPullRequest":               "",
+		"createIssue":                     "",
+		"addPullRequestReviewThreadReply": "",
+	}
+	for name, kind := range want {
+		shape, ok := Resolve(Observation{Status: 200, GraphQL: &GraphQLFacts{Fields: []string{name}, Subject: "N_kwSubject"}})
+		if !ok {
+			t.Errorf("%s did not resolve", name)
+			continue
+		}
+		if shape.SubjectKind != kind {
+			t.Errorf("%s subject kind = %q, want %q", name, shape.SubjectKind, kind)
+		}
+	}
+	if shape, ok := Classify("PUT", "/repos/acme/widgets/pulls/7/merge"); !ok || shape.SubjectKind != "" {
+		t.Errorf("a REST merge = %+v (ok=%v), want no subject kind: a REST path names its object by number", shape, ok)
+	}
+}
+
 // TestResolveGraphQL_RevertIsKeyedByThePRItOpened: a revert names two pull
 // requests — the one it undid and the one it opened — and the row addresses the
 // one it opened, because that is the object that did not exist before the

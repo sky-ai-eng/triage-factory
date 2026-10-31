@@ -576,6 +576,27 @@ func (s *repoStore) GetByRefSystem(ctx context.Context, orgID string, ref domain
 	return s.GetByRef(ctx, orgID, ref)
 }
 
+func (s *repoStore) GetByExternalIDSystem(ctx context.Context, orgID, host, externalID string) (*domain.Repository, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	if host == "" || externalID == "" {
+		return nil, nil
+	}
+	p, err := scanRepositoryFull(s.q.QueryRowContext(ctx, `
+		SELECT `+repoProfileFullColumns+`
+		FROM repositories
+		WHERE source = ? AND host = ? AND external_id = ? AND retired_at IS NULL
+	`, domain.RepoSourceGitHub, host, externalID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
 func (s *repoStore) UpsertSystem(ctx context.Context, orgID string, p domain.Repository) (domain.Repository, error) {
 	return s.Upsert(ctx, orgID, p)
 }

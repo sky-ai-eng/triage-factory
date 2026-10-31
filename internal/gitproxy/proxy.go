@@ -298,6 +298,14 @@ type PushedRef struct {
 	Rejected      bool
 	Reason        string
 	RemoteMessage string
+
+	// RepositoryID and RepositoryName are GitHub's id for the repository and
+	// the owner/repo it answers with that id, read by the observer that holds
+	// the push's credential and carried to the recording side, which keys the
+	// push's rows on the registry row the id names. The proxy never fills them;
+	// both are empty for a push whose observer read nothing.
+	RepositoryID   string
+	RepositoryName string
 }
 
 // Succeeded reports whether the upstream accepted this ref: a 2xx final

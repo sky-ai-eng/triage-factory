@@ -411,6 +411,19 @@ type EntityStore interface {
 	// externalID. Admin pool.
 	StampExternalIDSystem(ctx context.Context, orgID, entityID, externalID string) (*domain.Entity, error)
 
+	// AdoptGitHubIdentitySystem is StampExternalIDSystem for a GitHub row,
+	// which also sets the row's kind: a stub created from a key alone was
+	// created as a pull request, and the read that learns its node id (the PR
+	// poller's stub enrichment, the exec recording funnel's identity) also
+	// learns whether the number is a pull request or an issue. kind is
+	// domain.EntityKindPullRequest or domain.EntityKindIssue; anything else is
+	// refused before anything is written. The returns are StampExternalIDSystem's:
+	// the row as written, nil when the row carries a different id or is not a
+	// GitHub row, sql.ErrNoRows when no row has entityID, and
+	// ErrEntityIdentityAmbiguous when another row in the scope carries
+	// externalID. Admin pool.
+	AdoptGitHubIdentitySystem(ctx context.Context, orgID, entityID, externalID, kind string) (*domain.Entity, error)
+
 	// RenameSystem makes the entity carrying (source, scope, externalID)
 	// answer to newKey, the entity analogue of RepositoryStore.RenameSystem.
 	// One transaction, under a lock on the row (SELECT … FOR UPDATE in

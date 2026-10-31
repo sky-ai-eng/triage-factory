@@ -559,7 +559,9 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 	}
 	entities := make([]domain.Entity, 0, len(listed))
 	for _, e := range listed {
-		if e.Scope == scope {
+		// An issue entity is created by a run's write and is not polled yet:
+		// every read below is a pull request's.
+		if e.Scope == scope && e.Kind != domain.EntityKindIssue {
 			entities = append(entities, e)
 		}
 	}
@@ -947,7 +949,10 @@ func (t *Tracker) refreshPRBatch(ctx context.Context, client *ghclient.Client, n
 // the key names no number, or the PR can't be read this cycle — the caller
 // skips it and retries next cycle.
 // One extra fetch per stub, only until it carries a node_id or is folded into
-// the entity that does (learnPRNodeID). Caveat: a PR that is permanently
+// the entity that does (learnPRNodeID). A pull request the read answers 404
+// for is asked for as an issue (adoptIssueStub): a stub created from a key
+// alone, before writes resolved their objects by id, may be an issue, which
+// takes its kind and node id and is not polled from then on. Caveat: a PR that is permanently
 // unreadable (deleted, or org-private after the App loses access) never gets a
 // node_id, so ListActiveSystem keeps returning it and it costs one
 // GetPRBasic per cycle indefinitely. Acceptable bound until a stub-staleness /
@@ -961,6 +966,9 @@ func (t *Tracker) resolveStubNodeID(ctx context.Context, client *ghclient.Client
 		return "", false, false
 	}
 	pr, err := client.GetPRBasic(ctx, repo.Owner, repo.Repo, number)
+	if ghclient.IsHTTP404(err) && t.adoptIssueStub(ctx, client, e, repo, number) {
+		return "", false, false
+	}
 	if err != nil {
 		trackerLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "stub enrich: GetPRBasic failed", "source_id", e.SourceID, "error", err)
 		return "", false, false
@@ -973,6 +981,33 @@ func (t *Tracker) resolveStubNodeID(ctx context.Context, client *ghclient.Client
 	// GraphQL forms too in case the client shape ever changes.
 	terminal = pr.Merged || pr.State == "closed" || pr.State == "CLOSED" || pr.State == "MERGED"
 	return pr.NodeID, terminal, true
+}
+
+// adoptIssueStub asks GitHub what owner/repo#number is (ghclient.IdentityReader)
+// for a stub whose pull request read answered 404, and when it is an issue,
+// records the issue's node id and kind on the stub
+// (EntityStore.AdoptGitHubIdentitySystem), so it leaves the pull request
+// refresh for good. Reports whether it did. An issue whose node id another
+// entity carries already is left as it is: that entity is the issue's, and
+// the stub keeps failing until a dismiss retires it. Best-effort: a failed
+// read or write is logged, and the stub is tried again next cycle.
+func (t *Tracker) adoptIssueStub(ctx context.Context, client *ghclient.Client, e domain.Entity, repo *domain.Repository, number int) bool {
+	var none *ghclient.IdentityReader
+	id, err := none.Object(ctx, client, repo.Owner, repo.Repo, number)
+	if err != nil || id.Kind != domain.EntityKindIssue {
+		return false
+	}
+	// context.Background(), as every entity write in a cycle takes (see
+	// learnPRNodeID).
+	adopted, err := t.entities.AdoptGitHubIdentitySystem(context.Background(), t.orgID, e.ID, id.NodeID, domain.EntityKindIssue)
+	if err != nil || adopted == nil {
+		trackerLog.WarnContext(ctx, "stub enrich: recording that a stub is an issue failed",
+			"source_id", e.SourceID, "entity_id", e.ID, "node_id", id.NodeID, "error", err)
+		return false
+	}
+	trackerLog.InfoContext(ctx, "stub enrich: the stub is an issue, which the pull request poller does not track",
+		"source_id", e.SourceID, "entity_id", e.ID)
+	return true
 }
 
 // learnPRNodeID records a pull request's node id as the external id of an

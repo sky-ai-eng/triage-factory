@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
 )
 
@@ -1016,11 +1017,11 @@ func TestInjector_BufferRequestOverCapKeepsTheStrongerPromise(t *testing.T) {
 	}
 }
 
-// TestInjector_CreatedCommentNodeIDIsReadBack pins the one request the
+// TestInjector_CreatedCommentNodeIDIsReadBack pins the comment read the
 // injector makes of its own: a comment created without its node id in the
 // response is read back once, with the run's real credential, and the node id
 // rides the observation. A read that fails or names another comment leaves the
-// id empty and the write reported, and no other write reads anything.
+// id empty and the write reported, and no other write reads a comment.
 func TestInjector_CreatedCommentNodeIDIsReadBack(t *testing.T) {
 	const commentURL = "https://github.com/acme/widgets/pull/841#issuecomment-7"
 	addComment := graphQLEnvelope(t,
@@ -1090,6 +1091,13 @@ func TestInjector_CreatedCommentNodeIDIsReadBack(t *testing.T) {
 			var readAuth string
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
+				if r.Method == http.MethodGet && !strings.Contains(r.URL.Path, "/comments/") {
+					// The identity reads of the write's pull request and
+					// repository, which TestInjector_AcceptedWriteCarriesItsIdentity
+					// covers.
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
 				if r.Method == http.MethodGet {
 					reads = append(reads, r.URL.Path)
 					readAuth = r.Header.Get("Authorization")
@@ -1129,5 +1137,102 @@ func TestInjector_CreatedCommentNodeIDIsReadBack(t *testing.T) {
 				t.Errorf("reads = %q, want none", reads)
 			}
 		})
+	}
+}
+
+// TestInjector_AcceptedWriteCarriesItsIdentity pins the identity reads: an
+// accepted write is reported with what GitHub calls its objects, read with the
+// run's real credential — the pull request's or issue's node id and kind and
+// its repository's id for a write that names one by number, the repository's
+// alone for one that names none, and nothing read for a GraphQL mutation's
+// subject, which its request already named. Each repository is read once per
+// run, and a refused write reads nothing.
+func TestInjector_AcceptedWriteCarriesItsIdentity(t *testing.T) {
+	var mu sync.Mutex
+	reads := map[string]int{}
+	var readAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			mu.Lock()
+			reads[r.URL.Path]++
+			readAuth = r.Header.Get("Authorization")
+			mu.Unlock()
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/pulls/841":
+			_, _ = w.Write([]byte(`{"number":841,"node_id":"PR_kw841","base":{"repo":{"id":4242,"full_name":"acme/widgets"}}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/issues/9":
+			_, _ = w.Write([]byte(`{"number":9,"node_id":"I_kw9"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets":
+			_, _ = w.Write([]byte(`{"id":4242,"full_name":"acme/widgets"}`))
+		case r.Method == http.MethodGet:
+			w.WriteHeader(http.StatusNotFound)
+		case strings.HasSuffix(r.URL.Path, "/issues/77/labels"):
+			w.WriteHeader(http.StatusNotFound)
+		case r.URL.Path == "/graphql":
+			_, _ = w.Write([]byte(`{"data":{"mergePullRequest":{"pullRequest":{"url":"https://github.com/acme/widgets/pull/841"}}}}`))
+		default:
+			_, _ = w.Write([]byte(`[]`))
+		}
+	}))
+	defer upstream.Close()
+
+	writes := make(chan ObservedWrite, 8)
+	client, host := newInjectorWithWrites(t, upstream.URL, func(_ context.Context, w ObservedWrite) { writes <- w })
+	send := func(path, body string) ObservedWrite {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodPost, "https://"+host+path, strings.NewReader(body))
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("request %s: %v", path, err)
+		}
+		_ = resp.Body.Close()
+		select {
+		case w := <-writes:
+			return w
+		case <-time.After(5 * time.Second):
+			t.Fatalf("no write audit for %s", path)
+			return ObservedWrite{}
+		}
+	}
+	repo := domain.GitHubIdentity{RepositoryID: "4242", Repository: "acme/widgets"}
+	withObject := func(nodeID, kind string) domain.GitHubIdentity {
+		id := repo
+		id.NodeID, id.Kind = nodeID, kind
+		return id
+	}
+
+	if got := send("/api/v3/repos/acme/widgets/issues/841/labels", `{"labels":["bug"]}`).Identity; got != withObject("PR_kw841", domain.EntityKindPullRequest) {
+		t.Errorf("a label write on a pull request carries %+v, want its node id and repository id read back", got)
+	}
+	if got := send("/api/v3/repos/acme/widgets/issues/9/labels", `{"labels":["bug"]}`).Identity; got != withObject("I_kw9", domain.EntityKindIssue) {
+		t.Errorf("a label write on an issue carries %+v, want the issue's node id and kind", got)
+	}
+	if got := send("/api/v3/repos/acme/widgets/labels", `{"name":"bug"}`).Identity; got != repo {
+		t.Errorf("a repository write carries %+v, want the repository's id", got)
+	}
+	merge := graphQLEnvelope(t,
+		`mutation($input:MergePullRequestInput!){mergePullRequest(input:$input){pullRequest{url}}}`,
+		map[string]any{"input": map[string]any{"pullRequestId": "PR_kwSubject"}})
+	if got := send("/api/graphql", merge).Identity; got != withObject("PR_kwSubject", domain.EntityKindPullRequest) {
+		t.Errorf("a merge naming its pull request carries %+v, want the subject's node id", got)
+	}
+	if got := send("/api/v3/repos/acme/widgets/issues/77/labels", `{"labels":["bug"]}`).Identity; got != (domain.GitHubIdentity{}) {
+		t.Errorf("a refused write carries %+v, want nothing read", got)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	// The pull request's read answered its repository, and every later write
+	// in it takes the repository from the run's cache.
+	if reads["/repos/acme/widgets"] != 0 {
+		t.Errorf("repository reads = %d, want none after the pull request read answered it", reads["/repos/acme/widgets"])
+	}
+	if reads["/repos/acme/widgets/pulls/841"] != 1 || reads["/repos/acme/widgets/issues/77"] != 0 || reads["/repos/acme/widgets/pulls/77"] != 0 {
+		t.Errorf("object reads = %v, want #841 read once, as the label write's object, and nothing for the refused write", reads)
+	}
+	if readAuth != "token ghs_realtoken" {
+		t.Errorf("identity read authorization = %q, want the run's real credential", readAuth)
 	}
 }

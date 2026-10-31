@@ -30,6 +30,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/ghinjector"
 	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
@@ -81,6 +82,10 @@ type credRuntime struct {
 	agentHost  *agenthost.HostDaemon // the relocated exec-verb socket server; nil unless requested
 	proxied    bool                  // guards against a duplicate StartProxies
 	bootEpoch  int64
+
+	// pushIdentities caches GitHub's ids for the repositories the run pushes
+	// to (pushIdentity), so each is read once per run.
+	pushIdentities ghclient.IdentityReader
 }
 
 // newCredRuntime mints the per-run keypair. The public half is published to
@@ -302,7 +307,7 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 
 	var git *agentproc.GitProxyConfig
 	if req.GitEnabled {
-		git = r.gitProxyConfig(gitUpstream)
+		git = r.gitProxyConfig(gitUpstream, apiUpstream)
 		git.ConversationID = conversationID
 		git.SharedOriginHost = sharedOriginHost
 		git.SharedOriginCAPath = cell.CABundlePath
@@ -744,6 +749,10 @@ func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, to
 				URL:            w.URL,
 				Errored:        w.Errored,
 				ResponseUnread: w.ResponseUnread,
+				RepositoryID:   w.Identity.RepositoryID,
+				RepositoryName: w.Identity.Repository,
+				ObjectNodeID:   w.Identity.NodeID,
+				ObjectKind:     w.Identity.Kind,
 			}
 			// A GraphQL write is named in its request, which only this process
 			// ever saw — the orchestrator receives the act's name or nothing.
@@ -1079,8 +1088,10 @@ func (r *credRuntime) recordAudit(op string, args any) {
 // the TokenSource reads the held bundle's per-repo tokens; ProbeCredentials
 // checks the bundle carries any GitHub credential; Authorize, RecordDenial,
 // and RecordPush relay across the supervision channel to the orchestrator's
-// DB-backed gate and audit path (the capless sidecar holds no stores).
-func (r *credRuntime) gitProxyConfig(upstream string) *agentproc.GitProxyConfig {
+// DB-backed gate and audit path (the capless sidecar holds no stores). A push
+// is relayed with GitHub's id for its repository, read here against
+// apiUpstream, the REST mount, with the push's own credential (pushIdentity).
+func (r *credRuntime) gitProxyConfig(upstream, apiUpstream string) *agentproc.GitProxyConfig {
 	return &agentproc.GitProxyConfig{
 		Upstream: upstream,
 		TokenSource: func(_ context.Context, owner, repo string) (gitproxy.Token, error) {
@@ -1127,25 +1138,58 @@ func (r *credRuntime) gitProxyConfig(upstream string) *agentproc.GitProxyConfig 
 					Reason: denied.Reason,
 				})
 		},
-		RecordPush: func(_ context.Context, push gitproxy.PushedRef) {
+		RecordPush: func(ctx context.Context, push gitproxy.PushedRef) {
 			// Relay the completed push up so the orchestrator records the
 			// branch deliverable / push-failed row. The pre-push hook stands down
 			// in this sandbox (StartRunProxies sets PushCaptureProxy), so this
 			// relay is the sole push-capture path on the executor — without it
 			// no executor push reaches the audit log.
+			id := r.pushIdentity(ctx, apiUpstream, push.Repo)
 			r.recordAudit(agentproc.OpRecordPush,
 				agentproc.RecordPushArgs{
-					Repo:          push.Repo,
-					Ref:           push.Ref,
-					NewSHA:        push.NewSHA,
-					Created:       push.Created,
-					Status:        push.Status,
-					Rejected:      push.Rejected,
-					Reason:        push.Reason,
-					RemoteMessage: push.RemoteMessage,
+					Repo:           push.Repo,
+					Ref:            push.Ref,
+					NewSHA:         push.NewSHA,
+					Created:        push.Created,
+					Status:         push.Status,
+					Rejected:       push.Rejected,
+					Reason:         push.Reason,
+					RemoteMessage:  push.RemoteMessage,
+					RepositoryID:   id.RepositoryID,
+					RepositoryName: id.Repository,
 				})
 		},
 	}
+}
+
+// pushIdentityTimeout bounds the repository read a push's record waits on. The
+// push has landed (or been refused) by then, so past this it is recorded
+// unlinked rather than held.
+const pushIdentityTimeout = 5 * time.Second
+
+// pushIdentity reads GitHub's id for the repository a push went to, which the
+// orchestrator keys the push's rows on: this process is the push's observer,
+// and the only one that holds its credential. repoPath is the "owner/repo" the
+// git proxy parsed from the request, and the read is made with the bundle's
+// token for that repository, against the REST mount. A failed read is logged
+// and answered empty, which records the push unlinked.
+func (r *credRuntime) pushIdentity(ctx context.Context, apiUpstream, repoPath string) domain.GitHubIdentity {
+	owner, repo, ok := strings.Cut(repoPath, "/")
+	if !ok || apiUpstream == "" {
+		return domain.GitHubIdentity{}
+	}
+	reads := ghclient.NewTokenGetter(apiUpstream, func(ctx context.Context) (string, error) {
+		return r.githubAPIToken(ctx, owner, repo)
+	}, nil)
+	ctx, cancel := context.WithTimeout(ctx, pushIdentityTimeout)
+	defer cancel()
+	id, err := r.pushIdentities.Repository(ctx, reads, owner, repo)
+	if err != nil {
+		sidecarLog.Warn("reading a pushed repository's GitHub id failed; recording the push unlinked",
+			"repo", repoPath, "error", err)
+		return domain.GitHubIdentity{}
+	}
+	return id
 }
 
 // shutdown tears down the proxies (best-effort) on run end. Process exit

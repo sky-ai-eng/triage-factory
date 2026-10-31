@@ -40,8 +40,11 @@ func reviewFreshnessServer(t *testing.T, headSHA string, diffs map[string]string
 			_, _ = io.WriteString(w, diff)
 			return
 		}
+		if answerRepoRead(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"number":7,"node_id":"`+fakePRNodeID(r.URL.Path)+`","base":{"ref":"main","sha":"base0"},"head":{"sha":"`+headSHA+`"}}`)
+		_, _ = io.WriteString(w, `{"number":`+fakePRNumber(r.URL.Path)+`,"node_id":"`+fakePRNodeID(r.URL.Path)+`","base":{"ref":"main","repo":`+fakeRepoJSON(r.URL.Path)+`,"sha":"base0"},"head":{"sha":"`+headSHA+`"}}`)
 	}))
 	t.Cleanup(srv.Close)
 	return srv
@@ -292,7 +295,7 @@ func TestLocalClient_FinalizeReview_StampsFinalizedHead(t *testing.T) {
 		}))
 		t.Cleanup(srv.Close)
 		stores, info, client := newGithubRecordingClient(t, srv.URL, true)
-		registerRepo(t, stores, "octo", "repo", "1")
+		registerRepo(t, stores, "octo", "repo", testRepoID("octo/repo"))
 
 		handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "head1", nil)
 		if err != nil {
@@ -339,8 +342,11 @@ func TestLocalClient_FinalizeReview_Freshness_HTTP406Fallback(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, fallbackFilesJSON)
 		default:
+			if answerRepoRead(w, r) {
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"number":7,"node_id":"`+fakePRNodeID(r.URL.Path)+`","base":{"ref":"main"},"head":{"sha":"head2"}}`)
+			_, _ = io.WriteString(w, `{"number":`+fakePRNumber(r.URL.Path)+`,"node_id":"`+fakePRNodeID(r.URL.Path)+`","base":{"ref":"main","repo":`+fakeRepoJSON(r.URL.Path)+`},"head":{"sha":"head2"}}`)
 		}
 	}))
 	t.Cleanup(srv.Close)

@@ -195,6 +195,13 @@ func (s *Spawner) startLocalGitChannel(ctx context.Context, orgID string, task d
 	}
 	cfg.Upstream = base
 	cfg.ConversationID = info.ConversationID
+	// This process holds the push's credential, so it is the push's observer:
+	// the repository's GitHub id is read here, as the sidecar reads it for a
+	// multi push, and the recorder keys the push on the row it names.
+	record := cfg.RecordPush
+	cfg.RecordPush = func(ctx context.Context, push gitproxy.PushedRef) {
+		record(ctx, auditHost.IdentifyPushedRepository(ctx, push))
+	}
 	cfg.TokenSource = localGitTokenSource(scoped, orgID)
 	cfg.ProbeCredentials = func(ctx context.Context) error {
 		ok, err := scoped.HasAnyCredential(ctx, orgID)

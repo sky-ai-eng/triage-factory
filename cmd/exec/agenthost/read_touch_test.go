@@ -36,13 +36,17 @@ func touchRole(t *testing.T, conn *sql.DB, conversationID, entityID string) stri
 	}
 }
 
-// startFakeGitHubGetPR answers the PR read with a minimal PRView body, or a 500
-// when fail is set (to exercise the failed-read-touches-nothing path).
+// startFakeGitHubGetPR answers the PR read, and the identity reads beside it,
+// with a minimal PRView body (answerPRRead), or a 500 when fail is set (to
+// exercise the failed-read-touches-nothing path).
 func startFakeGitHubGetPR(t *testing.T, fail bool) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if fail {
 			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if answerPRRead(w, r) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")

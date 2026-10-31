@@ -36,6 +36,12 @@ func botOpenedPR() domain.Deliverable {
 	)
 }
 
+// botOpenedPRIdentity is what GitHub answers for botOpenedPR's pull request and
+// repository, which the PR create reads beside its response.
+var botOpenedPRIdentity = domain.GitHubIdentity{
+	RepositoryID: "1", Repository: "octo/repo", NodeID: "PR_kwDOABCD", Kind: domain.EntityKindPullRequest,
+}
+
 func ownerOf(t *testing.T, stores db.Stores, entityID string) string {
 	t.Helper()
 	team, err := stores.Entities.OwningTeamForEntitySystem(
@@ -65,7 +71,7 @@ func TestStampPROwnership_DeliverableFirst(t *testing.T) {
 	_, stores, info, _ := prOwnershipFixture(t)
 	a := botOpenedPR()
 
-	RecordExternalWrite(context.Background(), stores, info, &a, nil)
+	recordExternalWrite(context.Background(), stores, info, &a, nil, domain.EntityContainer{}, botOpenedPRIdentity)
 
 	ent := prEntity(t, stores)
 	if ent == nil {
@@ -95,7 +101,7 @@ func TestStampPROwnership_EntityFirst(t *testing.T) {
 	}
 
 	a := botOpenedPR()
-	RecordExternalWrite(ctx, stores, info, &a, nil)
+	recordExternalWrite(ctx, stores, info, &a, nil, domain.EntityContainer{}, botOpenedPRIdentity)
 
 	if ent := prEntity(t, stores); ent == nil || ent.ID != discovered.ID {
 		t.Fatalf("stamp created a second entity instead of back-filling %q", discovered.ID)
@@ -123,7 +129,7 @@ func TestStampPROwnership_DoesNotOverwriteExistingOwner(t *testing.T) {
 	}
 
 	a := botOpenedPR()
-	RecordExternalWrite(ctx, stores, info, &a, nil)
+	recordExternalWrite(ctx, stores, info, &a, nil, domain.EntityContainer{}, botOpenedPRIdentity)
 
 	if got := ownerOf(t, stores, ent.ID); got != otherTeam {
 		t.Errorf("owning team = %q, want the pre-existing owner %q", got, otherTeam)
@@ -146,7 +152,7 @@ func TestStampPROwnership_NoTeamOnConversation(t *testing.T) {
 
 	info.TeamID = ""
 	a := botOpenedPR()
-	RecordExternalWrite(ctx, stores, info, &a, nil)
+	recordExternalWrite(ctx, stores, info, &a, nil, domain.EntityContainer{}, botOpenedPRIdentity)
 
 	if got := ownerOf(t, stores, ent.ID); got != "" {
 		t.Errorf("teamless run stamped an owner: %q", got)
@@ -169,7 +175,7 @@ func TestStampPROwnership_WithAction(t *testing.T) {
 		Target:   a.Target,
 		URL:      a.URL,
 	}
-	RecordExternalWrite(ctx, stores, info, &a, act)
+	recordExternalWrite(ctx, stores, info, &a, act, domain.EntityContainer{}, botOpenedPRIdentity)
 
 	ent := prEntity(t, stores)
 	if ent == nil {
@@ -207,7 +213,10 @@ func TestStampPROwnership_ActionTargetsElsewhere(t *testing.T) {
 		Target:   "octo/repo#7",
 		URL:      "https://github.com/octo/repo/pull/7",
 	}
-	RecordExternalWrite(ctx, stores, info, &a, act)
+	// The identity the act's observer read is the act's object's, #7; the
+	// deliverable's pull request is the one its key names.
+	actID := domain.GitHubIdentity{RepositoryID: "1", Repository: "octo/repo", NodeID: "PR_kwDO7", Kind: domain.EntityKindPullRequest}
+	recordExternalWrite(ctx, stores, info, &a, act, domain.EntityContainer{}, actID)
 
 	owned := prEntity(t, stores)
 	if owned == nil {
@@ -249,7 +258,7 @@ func TestStampPROwnership_ReviewDeliverableDoesNotClaimOwnership(t *testing.T) {
 	if a.Target != "octo/repo#42" {
 		t.Fatalf("review target = %q, want the PR's natural key", a.Target)
 	}
-	RecordExternalWrite(ctx, stores, info, &a, nil)
+	recordExternalWrite(ctx, stores, info, &a, nil, domain.EntityContainer{}, botOpenedPRIdentity)
 
 	if got := ownerOf(t, stores, ent.ID); got != "" {
 		t.Errorf("a review claimed ownership of the reviewed PR: %q", got)

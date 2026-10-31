@@ -77,7 +77,7 @@ func TestRelocation_RelayRuntimeOverRealConn(t *testing.T) {
 		ExternalID: "5",
 		State:      domain.DeliverableStateCommentPosted,
 		DedupKey:   domain.ObjectKey(domain.ProviderGitHub, domain.DeliverableKindComment, "5", ""),
-	})
+	}, domain.GitHubIdentity{})
 	if err != nil {
 		t.Fatalf("UpsertDeliverable over wire: %v", err)
 	}

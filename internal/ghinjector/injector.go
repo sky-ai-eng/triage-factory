@@ -150,11 +150,18 @@
 // write as an attempt. A request whose document names no mutation is a read and
 // reports nothing at all, which is nearly all of this endpoint's traffic.
 //
-// The injector makes one request of its own. When a comment create's response
-// lacks the comment's node id, which is the case for every `gh pr comment`, it
-// reads the comment back once before reporting the write (fillCommentNodeID):
-// the comment's deliverable needs that id before a GraphQL delete that names the
-// comment by node id alone can arrive.
+// The injector makes requests of its own, all reads, through the upstream and
+// credential the write itself used, before reporting an accepted write. When a
+// comment create's response lacks the comment's node id, which is the case for
+// every `gh pr comment`, it reads the comment back (fillCommentNodeID): the
+// comment's deliverable needs that id before a GraphQL delete that names the
+// comment by node id alone can arrive. And it reads what GitHub calls the
+// objects the write names (fillIdentity): the repository's id, and the pull
+// request's or issue's node id and kind for a write that names one by number,
+// which is what the audit row's entity and repository are resolved from. A
+// GraphQL mutation whose subject is always a pull request or always an issue
+// already names that object's node id, so only its repository is read; each
+// repository is read once per run.
 //
 // The callback is not a policy: reporting a write neither permits nor prevents
 // it. It fires after the request has already transited, so a refused request
@@ -182,6 +189,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/credmiss"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 )
@@ -258,7 +266,8 @@ type Config struct {
 	// injector forwarded, whatever the outcome — the write audit's callback.
 	// Called inline on the response path, so the callback must not block. A
 	// comment create whose response lacked the comment's node id has it read
-	// back first (fillCommentNodeID), so the observation carries it.
+	// back first (fillCommentNodeID), and an accepted write has what GitHub
+	// calls its objects read (fillIdentity), so the observation carries both.
 	ObserveWrite func(ctx context.Context, w ObservedWrite)
 
 	// AuthorizeWrite decides the gated shapes and records their refusals. See
@@ -306,6 +315,12 @@ type Server struct {
 	// misses answers and logs the requests no credential could be found for.
 	misses *credmiss.Responder
 
+	// reads is the REST upstream the injector's own reads go through, with the
+	// credential every forwarded request is given, and identities the run's
+	// cache of what GitHub calls the objects its writes name.
+	reads      ghclient.Getter
+	identities *ghclient.IdentityReader
+
 	listener net.Listener
 	httpSrv  *http.Server
 	serveErr chan error
@@ -330,11 +345,13 @@ func New(cfg Config) (*Server, error) {
 		restURL:    rest,
 		graphqlURL: gql,
 		misses:     credmiss.NewResponder("ghinjector", cfg.ConversationID, injectorLog),
+		identities: ghclient.NewIdentityReader(),
 	}
 	s.proxy = &httputil.ReverseProxy{
 		Rewrite:        s.rewrite,
 		ModifyResponse: s.modifyResponse,
 	}
+	s.reads = ghclient.NewTokenGetter(rest.String(), cfg.TokenSource, proxyTransport{s})
 	return s, nil
 }
 
@@ -671,6 +688,7 @@ func (s *Server) auditWrite(resp *http.Response, graphql bool, body []byte) {
 		w.ExternalID, w.NodeID, w.URL = parseCreatedObject(body)
 	}
 	s.fillCommentNodeID(&w)
+	s.fillIdentity(&w)
 	s.cfg.ObserveWrite(context.Background(), w)
 }
 
@@ -700,6 +718,7 @@ func (s *Server) auditGraphQLWrite(resp *http.Response, facts *ghwrite.GraphQLFa
 		w.ResponseUnread = true
 	}
 	s.fillCommentNodeID(&w)
+	s.fillIdentity(&w)
 	s.cfg.ObserveWrite(context.Background(), w)
 }
 
@@ -708,10 +727,6 @@ func (s *Server) auditGraphQLWrite(resp *http.Response, facts *ghwrite.GraphQLFa
 // second on a healthy GitHub, and past this the write is reported without the
 // id rather than held.
 const commentNodeIDTimeout = 5 * time.Second
-
-// maxCommentReadBody caps the read-back comment's body. A comment is at most a
-// few tens of KB of JSON; the cap guards only against a pathological upstream.
-const maxCommentReadBody = 1 << 20
 
 // fillCommentNodeID reads back the node id of a comment the write just
 // created, when the create's response did not carry it. gh's `pr comment`
@@ -753,35 +768,7 @@ func (s *Server) fillCommentNodeID(w *ObservedWrite) {
 // its node id. The object read back must be the comment asked for: a body
 // naming another id, or no node id, is an error rather than a value.
 func (s *Server) readCommentNodeID(ctx context.Context, path, wantID string) (string, error) {
-	tok, err := s.cfg.TokenSource(ctx)
-	if err != nil {
-		return "", err
-	}
-	if tok == "" {
-		return "", errors.New("no credential")
-	}
-	u := *s.restURL
-	u.Path = singleJoiningSlash(s.restURL.Path, path)
-	u.RawPath = ""
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "token "+tok)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	transport := s.proxy.Transport
-	if transport == nil {
-		transport = http.DefaultTransport
-	}
-	resp, err := (&http.Client{Transport: transport}).Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("GET %s: status %d", path, resp.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxCommentReadBody))
+	body, err := s.reads.Get(ctx, path)
 	if err != nil {
 		return "", err
 	}
@@ -790,6 +777,74 @@ func (s *Server) readCommentNodeID(ctx context.Context, path, wantID string) (st
 		return "", fmt.Errorf("GET %s: response names comment %q with node id %q", path, id, nodeID)
 	}
 	return nodeID, nil
+}
+
+// proxyTransport sends the injector's own reads through the transport the
+// proxy forwards with, read when each request is sent, so they reach the
+// upstream the way a forwarded request does.
+type proxyTransport struct{ s *Server }
+
+func (t proxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if rt := t.s.proxy.Transport; rt != nil {
+		return rt.RoundTrip(req)
+	}
+	return http.DefaultTransport.RoundTrip(req)
+}
+
+// identityReadTimeout bounds the reads fillIdentity makes, for the reason
+// commentNodeIDTimeout bounds the comment read: the agent's response waits on
+// them, and past this the write is reported unlinked rather than held.
+const identityReadTimeout = 5 * time.Second
+
+// fillIdentity reads what GitHub calls the objects an accepted write names,
+// with the credential the write was made under (ghclient.IdentityReader), and
+// sets it on the observation: the repository's id, and, for a write that names
+// a pull request or issue by number, its node id and kind. A GraphQL mutation
+// whose subject is always a pull request or always an issue (Shape.SubjectKind)
+// named that object's node id in its request, so only the repository is read.
+// A refused write names nothing the audit row is linked to, and is not read
+// for. A failed read is logged and leaves the identity empty, which records
+// the write unlinked; the write is reported either way.
+func (s *Server) fillIdentity(w *ObservedWrite) {
+	if !w.Succeeded() {
+		return
+	}
+	var owner, repo, nodeID, kind string
+	var number int
+	if shape, ok := ghwrite.Resolve(*w); ok {
+		owner, repo, number = shape.Owner, shape.Repo, shape.Number
+		if shape.SubjectKind != "" {
+			nodeID, kind = shape.NodeID, shape.SubjectKind
+		}
+	} else if w.GraphQL == nil {
+		owner, repo, _ = strings.Cut(ghwrite.RepoPath(w.Path), "/")
+	}
+	if nodeID == "" && (owner == "" || repo == "") {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), identityReadTimeout)
+	defer cancel()
+	var id domain.GitHubIdentity
+	var err error
+	switch {
+	case nodeID != "":
+		id = domain.GitHubIdentity{NodeID: nodeID, Kind: kind}
+		if owner != "" && repo != "" {
+			var r domain.GitHubIdentity
+			if r, err = s.identities.Repository(ctx, s.reads, owner, repo); err == nil {
+				id.RepositoryID, id.Repository = r.RepositoryID, r.Repository
+			}
+		}
+	case number > 0:
+		id, err = s.identities.Object(ctx, s.reads, owner, repo, number)
+	default:
+		id, err = s.identities.Repository(ctx, s.reads, owner, repo)
+	}
+	if err != nil {
+		injectorLog.Warn("read what GitHub calls a write's objects failed; recording the write unlinked",
+			"conversation", s.cfg.ConversationID, "repo", owner+"/"+repo, "number", number, "error", err)
+	}
+	w.Identity = id
 }
 
 // auditWantsBody reports whether the write audit needs this response's body:

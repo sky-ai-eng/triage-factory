@@ -612,6 +612,25 @@ func getRepositoryByRef(ctx context.Context, q queryer, orgID string, ref domain
 	return findRepositoryByRef(ctx, q, orgID, source, ref)
 }
 
+func (s *repoStore) GetByExternalIDSystem(ctx context.Context, orgID, host, externalID string) (*domain.Repository, error) {
+	if host == "" || externalID == "" {
+		return nil, nil
+	}
+	p, err := pgScanRepositoryFull(s.admin.QueryRowContext(ctx, `
+		SELECT `+repoProfileFullColumns+`
+		FROM repositories
+		WHERE org_id = $1 AND source = $2 AND host = $3 AND external_id = $4
+		  AND retired_at IS NULL
+	`, orgID, domain.RepoSourceGitHub, host, externalID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
 func (s *repoStore) UpdateCloneStatusSystem(ctx context.Context, orgID, id, status, errMsg, errKind string) (domain.Repository, error) {
 	if err := validRepoID(id); err != nil {
 		return domain.Repository{}, err
