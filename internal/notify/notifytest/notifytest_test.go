@@ -57,6 +57,14 @@ func TestRecorder_ModelsTheVerbs(t *testing.T) {
 		t.Errorf("Open after the second Sync = %+v; want b seen twice and c", open)
 	}
 
+	// A kept member is neither raised nor resolved: c stays as it was, and d,
+	// which was not open, stays closed.
+	linearKind.Sync(ctx, org, []team{{ID: "b"}}, team{ID: "c"}, team{ID: "d"})
+	rec.Active(t, org, linearKind, "b", "c")
+	if open := rec.Open(org, linearKind); len(open) != 2 || open[0].Seen != 3 || open[1].Seen != 1 {
+		t.Errorf("Open after a Sync keeping c and d = %+v; want b bumped and c untouched", open)
+	}
+
 	jiraKind.Set(ctx, org, team{ID: "j"}, true)
 	linearNotice.Post(ctx, org, team{ID: "n"})
 	// An empty source names no kind's, so a kind with none stays open.

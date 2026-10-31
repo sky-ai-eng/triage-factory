@@ -255,19 +255,25 @@ func (c *ConditionKind[P]) Set(ctx context.Context, orgID string, p P, active bo
 	}
 }
 
-// Sync opens or bumps every member of active and resolves every other open
-// occurrence of the kind in the org. Call it only on a complete pass: a pass
-// that could not reach the upstream calls nothing.
-func (c *ConditionKind[P]) Sync(ctx context.Context, orgID string, active []P) {
+// Sync opens or bumps every member of active, leaves the open occurrences of
+// keep as they are, and resolves every other open occurrence of the kind in
+// the org. keep is the members the pass has no answer for, which neither
+// raises nor resolves them. Call it only on a complete pass: a pass that could
+// not reach the upstream at all calls nothing.
+func (c *ConditionKind[P]) Sync(ctx context.Context, orgID string, active []P, keep ...P) {
 	s := sink.Load()
 	if s == nil {
 		return
 	}
-	ps := make([]any, len(active))
-	for i, p := range active {
-		ps[i] = p
+	s.Sync(ctx, c.k, orgID, erased(active), erased(keep))
+}
+
+func erased[P any](ps []P) []any {
+	out := make([]any, len(ps))
+	for i, p := range ps {
+		out[i] = p
 	}
-	s.Sync(ctx, c.k, orgID, ps)
+	return out
 }
 
 // Post opens the notice, or bumps an unexpired one with the same key and
