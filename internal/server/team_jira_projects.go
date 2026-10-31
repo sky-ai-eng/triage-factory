@@ -9,6 +9,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
@@ -189,6 +190,9 @@ func (s *Server) handleTeamJiraProjectsPut(w http.ResponseWriter, r *http.Reques
 	// The pre-image: what this team has stored right now. It is what an absent
 	// rule is carried from, what the gates grandfather, and what the poller
 	// restart decision is compared against.
+	// TODO(TFAC-1271): it is read outside the write transaction, so a write
+	// that commits between this read and that transaction is reverted by the
+	// rules carried from it, and neither caller is told.
 	prev, site, err := s.storedJiraProjects(r.Context(), orgID, userID, teamID)
 	if err != nil {
 		internalError(w, "settings/team/jira-projects", err)
@@ -304,8 +308,26 @@ func (s *Server) handleTeamJiraProjectsPut(w http.ResponseWriter, r *http.Reques
 		s.MarkJiraRestarted(r.Context(), orgID)
 		go s.onJiraChanged(orgID)
 	}
+	resolveJiraMirrorsOnSave(context.WithoutCancel(r.Context()), orgID, teamID, prev, next)
 
 	writeJSON(w, http.StatusOK, teamJiraProjectsResponse{JiraProjects: toJiraProjectSettings(next)})
+}
+
+// resolveJiraMirrorsOnSave resolves kinds.JiraMirrorFailing for every project
+// of prev the save took out of the team's set or gave another in-progress
+// canonical. The gate read a new canonical from the project's statuses, and a
+// project the team no longer tracks is not the team's to fix; a canonical
+// that still cannot be reached is raised again by its next move.
+func resolveJiraMirrorsOnSave(ctx context.Context, orgID, teamID string, prev, next []domain.JiraProjectStatusRules) {
+	for _, p := range prev {
+		if p.InProgressCanonical.IsZero() {
+			continue
+		}
+		if n := domain.RuleForJiraProject(next, p.JiraProjectID); n != nil && n.InProgressCanonical.SameStatus(p.InProgressCanonical) {
+			continue
+		}
+		kinds.JiraMirrorFailing.Set(ctx, orgID, kinds.JiraMirror{TeamID: teamID, JiraProjectID: p.JiraProjectID}, false)
+	}
 }
 
 // jiraProjectWish is one validated body element: the project it names, as far

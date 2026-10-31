@@ -789,8 +789,7 @@ func (s *Server) endTaskConversations(ctx context.Context, orgID, userID, taskID
 // transition when the ticket is already assigned-to-self and already in any
 // in-progress member, so a second claim on the same issue doesn't
 // re-assign/re-transition redundantly. jiraUserClient is the acting user's own
-// client, so the assignment attributes to the claimer. Jira is addressed by the
-// issue id; the key names the ticket in the logs.
+// client, so the assignment attributes to the claimer.
 func (s *Server) syncJiraClaim(r *http.Request, orgID, userID, id string, jiraUserClient *jira.Client) {
 	// Fetch the task and its team's status rules in one WithTx so the rule read
 	// goes through the app-pool ListForTeam under jira_rules_select RLS.
@@ -817,33 +816,44 @@ func (s *Server) syncJiraClaim(r *http.Request, orgID, userID, id string, jiraUs
 		jiraLog.Warn("claim guard: no in_progress rule configured for project, skipping transition", "ticket", task.EntitySourceID)
 		return
 	}
-	go func(issue, issueKey string, ipMembers []domain.JiraStatusRef, ipCanonical jira.Status) {
-		// Detached from the request: this claim guard outlives the response,
-		// so it uses a background context.
-		bgCtx := context.Background()
-		state := jiraUserClient.GetClaimState(bgCtx, issue)
+	// Detached from the request: the sync outlives the response, so it uses a
+	// background context.
+	go applyJiraClaim(context.Background(), jiraUserClient, orgID, target.IssueRef, task.EntitySourceID, *rule)
+}
 
-		needAssign := state == nil || !state.AssignedToSelf
-		needTransition := state == nil || !domain.ContainsStatus(ipMembers, claimStatusRef(state))
+// applyJiraClaim is the write a claim makes in Jira, as the client's user:
+// assign the ticket to them unless it already is, and transition it to the
+// rule's in-progress canonical unless it already sits in an in-progress
+// member. A failed assign stops before the transition. Every failure is
+// logged rather than returned: the claim has landed in TF by the time this
+// runs. The transition's outcome is recorded in orgID as the bot mirror's is
+// (delegate.NoteJiraMirrorMove). Jira is addressed by issue, the ticket's id;
+// issueKey only labels the log lines.
+func applyJiraClaim(ctx context.Context, c *jira.Client, orgID, issue, issueKey string, rule domain.JiraProjectStatusRules) {
+	state := c.GetClaimState(ctx, issue)
+	ipCanonical := jira.Status{ID: rule.InProgressCanonical.ID, Name: rule.InProgressCanonical.Name}
 
-		if !needAssign && !needTransition {
-			jiraLog.Info("claim guard: already assigned to self and in in-progress, skipping", "issue", issueKey, "status", state.StatusName)
+	needAssign := state == nil || !state.AssignedToSelf
+	needTransition := state == nil || !domain.ContainsStatus(rule.InProgressMembers, claimStatusRef(state))
+
+	if !needAssign && !needTransition {
+		jiraLog.Info("claim guard: already assigned to self and in in-progress, skipping", "issue", issueKey, "status", state.StatusName)
+		return
+	}
+
+	if needAssign {
+		if err := c.AssignToSelf(ctx, issue); err != nil {
+			jiraLog.Error("failed to assign", "issue", issueKey, "error", err)
 			return
 		}
-
-		if needAssign {
-			if err := jiraUserClient.AssignToSelf(bgCtx, issue); err != nil {
-				jiraLog.Error("failed to assign", "issue", issueKey, "error", err)
-				return
-			}
+	}
+	if needTransition {
+		err := c.TransitionTo(ctx, issue, ipCanonical)
+		delegate.NoteJiraMirrorMove(ctx, c, orgID, rule, issueKey, err)
+		if err != nil {
+			jiraLog.Error("failed to transition", "issue", issueKey, "status", ipCanonical.Name, "error", err)
 		}
-		if needTransition {
-			if err := jiraUserClient.TransitionTo(bgCtx, issue, ipCanonical); err != nil {
-				jiraLog.Error("failed to transition", "issue", issueKey, "status", ipCanonical.Name, "error", err)
-			}
-		}
-	}(target.IssueRef, task.EntitySourceID, rule.InProgressMembers,
-		jira.Status{ID: rule.InProgressCanonical.ID, Name: rule.InProgressCanonical.Name})
+	}
 }
 
 // syncLinearClaim assigns a claimed Linear issue to the acting user and moves
@@ -892,7 +902,7 @@ func (s *Server) syncLinearClaim(r *http.Request, orgID, userID, id string, line
 	}
 	// Detached from the request: the sync outlives the response, so it uses a
 	// background context.
-	go applyLinearClaim(context.Background(), linearUserClient, target.issueID, target.identifier, target.linearUserID, *target.rule)
+	go applyLinearClaim(context.Background(), linearUserClient, orgID, target.issueID, target.identifier, target.linearUserID, *target.rule)
 }
 
 // triggerDelegation fires the delegation run and records the conversation_id on

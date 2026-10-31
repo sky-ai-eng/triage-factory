@@ -81,6 +81,8 @@ type recordingLinearServer struct {
 	// failTransition refuses every IssueUpdate, as Linear does when the
 	// target state no longer exists. A refused update is not recorded.
 	failTransition bool
+	// transitionDown answers every IssueUpdate with a server error.
+	transitionDown bool
 
 	// transitioned fires after an IssueUpdate is applied, the join for a
 	// detached mirror's write.
@@ -125,6 +127,12 @@ func (f *recordingLinearServer) serve(w http.ResponseWriter, r *http.Request) {
 			f.mu.Unlock()
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = io.WriteString(w, `{"errors":[{"message":"Entity not found: WorkflowState","extensions":{"code":"INVALID_INPUT"}}]}`)
+			return
+		}
+		if f.transitionDown {
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{}`)
 			return
 		}
 		input, _ := body.Variables["input"].(map[string]any)

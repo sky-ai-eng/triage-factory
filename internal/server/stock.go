@@ -10,6 +10,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	jiraevents "github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
@@ -864,8 +865,10 @@ func (s *Server) stockClaimTicket(r *http.Request, b *stockBatch, entity *domain
 		}
 	}
 	if state == nil || !rule.InProgressContains(claimStatusRef(state)) {
-		if err := b.jiraUserClient.TransitionTo(r.Context(), issue,
-			jira.Status{ID: rule.InProgressCanonical.ID, Name: rule.InProgressCanonical.Name}); err != nil {
+		err := b.jiraUserClient.TransitionTo(r.Context(), issue,
+			jira.Status{ID: rule.InProgressCanonical.ID, Name: rule.InProgressCanonical.Name})
+		delegate.NoteJiraMirrorMove(context.WithoutCancel(r.Context()), b.jiraUserClient, b.orgID, *rule, snap.Key, err)
+		if err != nil {
 			return stockFailed(snap.Key, httpx.ReasonUpstreamRejected, "transition: "+err.Error())
 		}
 		snap.Status = rule.InProgressCanonical.Name

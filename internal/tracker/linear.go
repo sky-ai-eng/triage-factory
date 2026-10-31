@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 	"go.opentelemetry.io/otel/codes"
@@ -106,9 +107,10 @@ type linearIssueState struct {
 }
 
 // RefreshLinear runs one tracking cycle for an org's Linear issues: the
-// retirement of rows from another workspace, discovery per armed team, a
-// batched refresh of every active Linear entity in the workspace, the diff, and
-// the poll-complete sentinel. It returns the number of events enqueued.
+// retirement of rows from another workspace, discovery per armed team, a read
+// of which armed teams the credential can see, a batched refresh of every
+// active Linear entity in the workspace, the diff, and the poll-complete
+// sentinel. It returns the number of events enqueued.
 //
 // scope is the org's Linear workspace id, domain.EntityScope("linear",
 // settings). An issue's entity is matched on its UUID (external_id) in that
@@ -147,6 +149,14 @@ func (t *Tracker) RefreshLinear(ctx context.Context, scope string, client Linear
 		// Rate limited, or every call failed on the connection: either way the
 		// cycle did not hear from Linear, so it must not report a completed poll.
 		return emitted, discoveryErr
+	}
+
+	// Which armed teams the credential reads, asked of every armed team each
+	// cycle rather than only of those with issues missing below, so an armed
+	// team with nothing tracked yet is checked too.
+	unreadable, err := t.checkLinearTeamVisibility(ctx, client, teams)
+	if err != nil {
+		return emitted, err
 	}
 
 	// Phase 2: refresh every active entity in the workspace, a batch at a
@@ -195,10 +205,7 @@ func (t *Tracker) RefreshLinear(ctx context.Context, scope string, client Linear
 
 	// The candidates arrive in the order the entities were listed, which is
 	// oldest-polled first, and the hold keeps that order.
-	candidates, err := t.holdLinearUnreadableTeams(ctx, client, missing, prevs, teams)
-	if err != nil {
-		return emitted, err
-	}
+	candidates := holdLinearUnreadableTeams(ctx, missing, prevs, teams, unreadable)
 	confirmed, err := t.confirmLinearIndividually(ctx, client, orgID, scope, candidates, prevs, teams, allDone, labelGroups)
 	emitted += confirmed
 	if err != nil {
@@ -448,60 +455,30 @@ func (t *Tracker) refreshLinearBatches(ctx context.Context, client LinearClient,
 	return emitted, missing, nil
 }
 
-// holdLinearUnreadableTeams removes from the confirmation candidates every
-// entity in an armed team the credential cannot read, and returns the rest in
-// their order.
+// checkLinearTeamVisibility reads every armed team and returns the ids of the
+// ones the credential cannot read. A complete read raises
+// linear.team_unreadable for exactly those teams, which resolves the
+// occurrence of a team the credential reads again or that is no longer armed.
 //
-// Linear answers not-found for an issue the credential cannot read exactly as
-// for a deleted one. When the credential loses a whole team — a key whose
-// owner is not in a private team, or an install the team was not shared with —
-// asking about its issues one at a time would retire every one of them and
-// close their tasks, when what changed is the credential. One read of the
-// teams tells the two apart. A held entity stays active and unrefreshed until
-// the credential reads its team again; the connection card names the team.
-//
-// Only armed teams are held. An entity in a team no rule arms is asked about
-// as before, so untracking a team that will not be readable again, one deleted
-// in Linear, lets its issues retire.
-//
-// An entity's team is its own (entities.linear_team_id), or its snapshot's on
-// a row that predates the column; one naming neither is asked about. A failed
-// read of the teams holds every candidate in an armed team this cycle, since
-// it is no evidence the credential reads them. A rate limit is returned and
-// ends the cycle.
-func (t *Tracker) holdLinearUnreadableTeams(ctx context.Context, client LinearClient, candidates []domain.Entity, prevs map[string]*domain.LinearSnapshot, teams LinearRules) ([]domain.Entity, error) {
-	teamOf := func(e domain.Entity) string {
-		if e.LinearTeamID != "" {
-			return e.LinearTeamID
-		}
-		if prev := prevs[e.ID]; prev != nil {
-			return prev.TeamID
-		}
-		return ""
-	}
-	var ids []string
-	seen := map[string]bool{}
-	for _, e := range candidates {
-		if id := teamOf(e); id != "" && !seen[id] && teams.ForTeam(id) != nil {
-			seen[id] = true
-			ids = append(ids, id)
-		}
-	}
-	if len(ids) == 0 {
-		return candidates, nil
-	}
-
-	// The span's count is the entities held, set only when some are. The
-	// number of teams read is at most the armed teams, and nobody acts on it.
+// A failed read raises nothing, since it is no evidence either way and the
+// open occurrences are left as they were, and it returns every armed team, so
+// the hold keeps their missing issues this cycle. A rate limit is returned
+// and ends the cycle.
+func (t *Tracker) checkLinearTeamVisibility(ctx context.Context, client LinearClient, teams LinearRules) (map[string]bool, error) {
 	ctx, span := tracer.Start(ctx, "tracker.linear.team_visibility")
 	defer span.End()
 
-	unreadable := make(map[string]bool, len(ids))
-	for _, id := range ids {
-		unreadable[id] = true
+	unreadable := make(map[string]bool, len(teams))
+	for _, rule := range teams {
+		unreadable[rule.ID] = true
 	}
-	for i := 0; i < len(ids); i += linearBatchSize {
-		readable, err := client.GetTeams(ctx, ids[i:min(i+linearBatchSize, len(ids))])
+	for i := 0; i < len(teams); i += linearBatchSize {
+		batch := teams[i:min(i+linearBatchSize, len(teams))]
+		ids := make([]string, len(batch))
+		for j, rule := range batch {
+			ids[j] = rule.ID
+		}
+		readable, err := client.GetTeams(ctx, ids)
 		if errors.Is(err, linear.ErrRateLimited) {
 			span.SetAttributes(telemetry.Outcome("rate_limited"))
 			return nil, err
@@ -511,19 +488,64 @@ func (t *Tracker) holdLinearUnreadableTeams(ctx context.Context, client LinearCl
 			span.SetAttributes(telemetry.Outcome("failed"))
 			trackerLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "linear team read failed; issues missing from tracked teams are left tracked this cycle",
 				"error", err)
-			for _, id := range ids {
-				unreadable[id] = true
+			for _, rule := range teams {
+				unreadable[rule.ID] = true
 			}
-			break
+			return unreadable, nil
 		}
 		for _, team := range readable {
 			delete(unreadable, team.ID)
 		}
 	}
-	if len(unreadable) == 0 {
-		return candidates, nil
-	}
 
+	var raise []kinds.LinearTeam
+	for _, rule := range teams {
+		if unreadable[rule.ID] {
+			raise = append(raise, kinds.LinearTeam{LinearTeamID: rule.ID, TeamKey: rule.Key})
+		}
+	}
+	kinds.LinearTeamUnreadable.Sync(ctx, t.orgID, raise)
+	// The span's count is the armed teams the credential cannot read, set
+	// only when there are some.
+	if len(raise) > 0 {
+		span.SetAttributes(telemetry.Disposition("teams_unreadable"), telemetry.Count(len(raise)))
+	}
+	return unreadable, nil
+}
+
+// holdLinearUnreadableTeams removes from the confirmation candidates every
+// entity in an armed team the credential cannot read, as
+// checkLinearTeamVisibility found this cycle, and returns the rest in their
+// order.
+//
+// Linear answers not-found for an issue the credential cannot read exactly as
+// for a deleted one. When the credential loses a whole team — a key whose
+// owner is not in a private team, or an install the team was not shared with —
+// asking about its issues one at a time would retire every one of them and
+// close their tasks, when what changed is the credential. One read of the
+// teams tells the two apart. A held entity stays active and unrefreshed until
+// the credential reads its team again; the connection card and the
+// linear.team_unreadable notification name the team.
+//
+// Only armed teams are held. An entity in a team no rule arms is asked about
+// as before, so untracking a team that will not be readable again, one deleted
+// in Linear, lets its issues retire.
+//
+// An entity's team is its own (entities.linear_team_id), or its snapshot's on
+// a row that predates the column; one naming neither is asked about.
+func holdLinearUnreadableTeams(ctx context.Context, candidates []domain.Entity, prevs map[string]*domain.LinearSnapshot, teams LinearRules, unreadable map[string]bool) []domain.Entity {
+	if len(unreadable) == 0 {
+		return candidates
+	}
+	teamOf := func(e domain.Entity) string {
+		if e.LinearTeamID != "" {
+			return e.LinearTeamID
+		}
+		if prev := prevs[e.ID]; prev != nil {
+			return prev.TeamID
+		}
+		return ""
+	}
 	kept := make([]domain.Entity, 0, len(candidates))
 	held := map[string]int{}
 	for _, e := range candidates {
@@ -533,18 +555,13 @@ func (t *Tracker) holdLinearUnreadableTeams(ctx context.Context, client LinearCl
 		}
 		kept = append(kept, e)
 	}
-	for _, id := range ids {
-		if n := held[id]; n > 0 {
-			// TODO(TFAC-878): open a durable "Linear team unreadable" condition
-			// for the org's admins, keyed on the team and closed when a cycle
-			// reads it again. This line and the settings card's banner are the
-			// only signals, so nobody who isn't looking learns the team is stale.
+	for _, rule := range teams {
+		if n := held[rule.ID]; n > 0 {
 			trackerLog.WarnContext(ctx, "linear credential cannot read a tracked team; its missing issues stay tracked instead of being retired as not found",
-				"linear_team_id", id, "team_key", teams.ForTeam(id).Key, "held", n)
+				"linear_team_id", rule.ID, "team_key", rule.Key, "held", n)
 		}
 	}
-	span.SetAttributes(telemetry.Disposition("issues_held"), telemetry.Count(len(candidates)-len(kept)))
-	return kept, nil
+	return kept
 }
 
 // confirmLinearIndividually asks Linear by UUID about each entity the batch

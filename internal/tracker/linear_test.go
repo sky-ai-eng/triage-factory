@@ -555,7 +555,7 @@ func TestRefreshLinear_SnapshotlessEntitySeedsQuietly(t *testing.T) {
 	if len(evts) != 0 {
 		t.Fatalf("events = %v, want a quiet seed", eventTypes(evts))
 	}
-	if !slices.Equal(fx.client.callLog(), []string{"viewer", "search:pickup:" + linTeamID, "search:assigned:" + linTeamID, "getIssues:1"}) {
+	if !slices.Equal(fx.client.callLog(), []string{"viewer", "search:pickup:" + linTeamID, "search:assigned:" + linTeamID, "teams:" + linTeamID, "getIssues:1"}) {
 		t.Errorf("calls = %v, want the entity read in the batch by UUID and nothing by identifier", fx.client.callLog())
 	}
 	if snap := fx.snapshot(t, "ENG-7"); snap.ID != "uuid-7" || snap.AssigneeUserID != "u-alice" {

@@ -85,13 +85,16 @@ func ProxyPlaceholder(baseURL, placeholder string) Config {
 const maxAttempts = 3
 
 // The extensions.code values the client classifies itself, and the two ways
-// Linear says an id resolves to nothing (a code, or a message prefix).
+// Linear says an id resolves to nothing (a code, or a message prefix). The
+// prefix is followed by the entity type, which only the message carries, so
+// a missing workflow state is told apart by its message alone.
 const (
 	codeRateLimited         = "RATELIMITED"
 	codeAuthenticationError = "AUTHENTICATION_ERROR"
 	codeForbidden           = "FORBIDDEN"
 	codeEntityNotFound      = "ENTITY_NOT_FOUND"
 	notFoundPrefix          = "Entity not found"
+	stateNotFoundPrefix     = notFoundPrefix + ": WorkflowState"
 )
 
 // rateLimitWaitCap is the most one request spends waiting out rate limits,

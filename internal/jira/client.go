@@ -649,7 +649,14 @@ func (c *Client) AssignTo(ctx context.Context, idOrKey, userID string) (User, er
 	return u, nil
 }
 
-// TransitionTo transitions an issue into the target status.
+// ErrNoTransition is TransitionTo finding no transition into its target among
+// the ones Jira offers the credential on the issue: the status left the
+// project's workflow, the workflow does not allow the move from where the
+// issue sits, or the credential may not transition it.
+var ErrNoTransition = errors.New("no transition to the target status")
+
+// TransitionTo transitions an issue into the target status. A target Jira
+// offers no transition into is an error matching ErrNoTransition.
 //
 // The target is matched by ID when it carries one: a Jira workflow references
 // the status entity, so an id keeps resolving across a rename while a name
@@ -682,7 +689,7 @@ func (c *Client) TransitionTo(ctx context.Context, idOrKey string, target Status
 	if wanted == "" {
 		wanted = "status id " + target.ID
 	}
-	return fmt.Errorf("no transition to %q found (available: %s)", wanted, strings.Join(available, ", "))
+	return fmt.Errorf("%w %q (available: %s)", ErrNoTransition, wanted, strings.Join(available, ", "))
 }
 
 // ClaimState describes the assignee + status of a Jira issue, used by

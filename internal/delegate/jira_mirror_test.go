@@ -46,6 +46,14 @@ type recordingJiraServer struct {
 	// exercise the mirror's read-failure and assign-failure paths.
 	failClaimState bool
 	failAssign     bool
+	// withdrawn takes In Progress out of the project's workflow: no
+	// transition leads into it and it is not one of the project's statuses.
+	// unreachable offers no transition into it for this ticket while it stays
+	// a project status, as a transition's condition or the ticket's position
+	// does. failTransition answers every transition write with a server error.
+	withdrawn      bool
+	unreachable    bool
+	failTransition bool
 
 	transitionPosted chan struct{}
 }
@@ -83,10 +91,33 @@ func (r *recordingJiraServer) handle(w http.ResponseWriter, req *http.Request) {
 		// The transition targets carry status ids, which is what the client
 		// matches a rule's canonical on — they are the same ids jiraRef mints,
 		// so the seeded rules and this workflow describe one instance.
-		_, _ = io.WriteString(w, `{"transitions":[`+
-			`{"id":"31","name":"Start","to":{"id":"st-In Progress","name":"In Progress"}},`+
+		r.mu.Lock()
+		offered := !r.withdrawn && !r.unreachable
+		r.mu.Unlock()
+		start := ""
+		if offered {
+			start = `{"id":"31","name":"Start","to":{"id":"st-In Progress","name":"In Progress"}},`
+		}
+		_, _ = io.WriteString(w, `{"transitions":[`+start+
 			`{"id":"41","name":"Finish","to":{"id":"st-Done","name":"Done"}}]}`)
+	case req.Method == http.MethodGet && strings.HasSuffix(path, "/statuses"):
+		r.mu.Lock()
+		withdrawn := r.withdrawn
+		r.mu.Unlock()
+		inProgress := `{"id":"st-In Progress","name":"In Progress"},`
+		if withdrawn {
+			inProgress = ""
+		}
+		_, _ = io.WriteString(w, `[{"statuses":[{"id":"st-To Do","name":"To Do"},`+inProgress+
+			`{"id":"st-Done","name":"Done"}]}]`)
 	case req.Method == http.MethodPost && strings.HasSuffix(path, "/transitions"):
+		r.mu.Lock()
+		fail := r.failTransition
+		r.mu.Unlock()
+		if fail {
+			http.Error(w, `{"err":"transition failed"}`, http.StatusInternalServerError)
+			return
+		}
 		var body struct {
 			Transition struct {
 				ID string `json:"id"`

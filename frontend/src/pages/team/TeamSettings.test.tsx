@@ -65,10 +65,13 @@ vi.mock('../../hooks/useEventSources', () => ({
   }),
 }))
 
+// The viewer's teams, mutable per test; the last one they wrote to is t1.
+const PLATFORM = { id: 't1', name: 'platform', slug: 'platform' }
+const myTeams = vi.hoisted(() => ({ teams: [] as { id: string; name: string; slug: string }[] }))
 const teamsRefresh = vi.hoisted(() => vi.fn())
 vi.mock('../../hooks/useTeams', () => ({
   useTeams: () => ({
-    teams: [{ id: 't1', name: 'platform', slug: 'platform' }],
+    teams: myTeams.teams,
     lastActingTeamId: 't1',
     multi: false,
     loading: false,
@@ -182,6 +185,7 @@ const TEAM_SETTINGS = {
 }
 
 beforeEach(() => {
+  myTeams.teams = [PLATFORM]
   session.present = true
   roles.team = 'admin'
   roles.org = true
@@ -362,6 +366,32 @@ describe('archiving the team', () => {
     // Absent, not disabled: the endpoint is the org's, and 404s for them.
     expect(screen.queryByText('Archive this team')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Archive' })).not.toBeInTheDocument()
+  })
+})
+
+describe('a link to one team', () => {
+  const renderAt = (entry: string) =>
+    render(
+      <MemoryRouter initialEntries={[entry]}>
+        <TeamSettings />
+      </MemoryRouter>,
+    )
+
+  it('opens the team it names, not the last one written to', async () => {
+    myTeams.teams = [PLATFORM, { id: 't2', name: 'ops', slug: 'ops' }]
+    renderAt('/?team=t2&source=github')
+    await waitFor(() => expect(document.querySelector('.sp[data-source="github"]')).not.toBeNull())
+    expect(screen.getByText('event source · ops')).toBeInTheDocument()
+  })
+
+  it('opens no team, rather than another one, when it names none of the viewer’s', async () => {
+    myTeams.teams = [PLATFORM, { id: 't2', name: 'ops', slug: 'ops' }]
+    renderAt('/?team=t9&source=github')
+    expect(
+      await screen.findByText('The team this link is for isn’t one of yours.'),
+    ).toBeInTheDocument()
+    expect(document.querySelector('.sp[data-source="github"]')).toBeNull()
+    expect(screen.queryByText(/platform/)).toBeNull()
   })
 })
 

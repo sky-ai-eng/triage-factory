@@ -480,6 +480,39 @@ func TestServerError_MutationNotRetried(t *testing.T) {
 	}
 }
 
+// TestTransitionIssue_DeletedStateIsStateNotFound: a move into a state gone
+// from the team's workflow is ErrStateNotFound, and nothing else is — not an
+// issue Linear cannot find, not a rate limit, not a server failure — because
+// the board mirror tells a team its rule is broken on that error alone.
+func TestTransitionIssue_DeletedStateIsStateNotFound(t *testing.T) {
+	shortWaits(t)
+	cases := map[string]struct {
+		rep  reply
+		want bool
+	}{
+		"deleted state": {rep: reply{status: http.StatusBadRequest, body: `{"errors":[{"message":"Entity not found: WorkflowState","path":["issueUpdate"],"extensions":{"code":"INVALID_INPUT","userPresentableMessage":"Could not find referenced WorkflowState."}}]}`}, want: true},
+		"missing issue": {rep: reply{status: http.StatusBadRequest, body: `{"errors":[{"message":"Entity not found: Issue","extensions":{"code":"INVALID_INPUT"}}]}`}},
+		"bare code":     {rep: reply{status: http.StatusBadRequest, body: `{"errors":[{"message":"Could not find it","extensions":{"code":"ENTITY_NOT_FOUND"}}]}`}},
+		"rate limited":  {rep: reply{status: http.StatusBadRequest, body: `{"errors":[{"message":"ratelimit exceeded","extensions":{"code":"RATELIMITED"}}]}`}},
+		"server error":  {rep: reply{status: http.StatusInternalServerError, body: `{}`}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := newStub(t, scripted(tc.rep, tc.rep, tc.rep))
+			err := s.client().TransitionIssue(context.Background(), "issue-1", "state-1")
+			if err == nil {
+				t.Fatal("TransitionIssue succeeded; want an error")
+			}
+			if got := errors.Is(err, ErrStateNotFound); got != tc.want {
+				t.Errorf("errors.Is(%v, ErrStateNotFound) = %v, want %v", err, got, tc.want)
+			}
+			if tc.want && !errors.Is(err, ErrNotFound) {
+				t.Errorf("err = %v; a missing state is ErrNotFound too", err)
+			}
+		})
+	}
+}
+
 func TestUnauthorized_NotRetried(t *testing.T) {
 	shortWaits(t)
 	cases := map[string]reply{

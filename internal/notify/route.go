@@ -30,30 +30,42 @@ func (routes) Trigger(triggerID string) Href {
 	return Href{route: promptsRoute, query: url.Values{"trigger": {triggerID}}}
 }
 
-// TeamJira is a team's Jira page: its tracked projects and their status rules.
-// Multi mode has it on /team's Jira source, which opens on the team the viewer
-// last acted in, because the page takes no team from its address; local mode,
-// which has no /team page, has the one team's on /settings.
+// TeamJiraRules is the Jira status rules of the team teamID names: in multi
+// mode its team page, opened on the Jira source; in local mode, whose one team
+// is configured on /settings, that page. teamID may be empty only in local
+// mode, where a row's recipient names no team.
 //
-// TODO(TFAC-1268): the link names neither the row's team nor its project, so
-// an admin of several teams can land on another team's rules and then has to
-// find the project by hand. Needs the page to read both from its URL; the
-// Href then carries them as query parameters, as Trigger does.
-func (routes) TeamJira() Href { return Href{route: teamJiraRoute} }
+// TODO(TFAC-1268): the link names the team but not the project, so an admin
+// lands on the team's Jira source and finds the project by hand. Needs the
+// Jira and Linear sources to read a project from their URL, and these routes
+// to carry it.
+func (routes) TeamJiraRules(teamID string) Href {
+	return Href{route: teamJiraRulesRoute, teamID: teamID}
+}
+
+// TeamLinearRules is the Linear rules of the team teamID names, on the same
+// pages as TeamJiraRules.
+func (routes) TeamLinearRules(teamID string) Href {
+	return Href{route: teamLinearRulesRoute, teamID: teamID}
+}
 
 // route is a page of the SPA. multi is its path under /orgs/{org_id}; local is
 // its path in local mode's route table, "" when local mode has no such page.
-// Either may end in the query that opens the right part of the page.
+// Either may end in the query that opens the right part of the page. A team
+// route is a page about one team: multi mode's address names it with a team
+// query parameter, and local mode's, with one team, names none.
 type route struct {
 	name  string
 	multi string
 	local string
+	team  bool
 }
 
 var (
-	orgSettingsRoute = newRoute("org_settings", "/org?tab=settings", "/settings")
-	promptsRoute     = newRoute("prompts", "/prompts", "/prompts")
-	teamJiraRoute    = newRoute("team_jira", "/team?source=jira", "/settings")
+	orgSettingsRoute     = newRoute("org_settings", "/org?tab=settings", "/settings")
+	promptsRoute         = newRoute("prompts", "/prompts", "/prompts")
+	teamJiraRulesRoute   = newTeamRoute("team_jira_rules", "/team?source=jira", "/settings")
+	teamLinearRulesRoute = newTeamRoute("team_linear_rules", "/team?source=linear", "/settings")
 )
 
 // routeTable is every route Routes builds. Renaming a page is an edit here and
@@ -66,6 +78,13 @@ var routeTable []*route
 func newRoute(name, multi, local string) *route {
 	r := &route{name: name, multi: multi, local: local}
 	routeTable = append(routeTable, r)
+	return r
+}
+
+// newTeamRoute declares a team route.
+func newTeamRoute(name, multi, local string) *route {
+	r := newRoute(name, multi, local)
+	r.team = true
 	return r
 }
 
@@ -85,6 +104,8 @@ func SPARoutes() []SPARoute {
 // External. A write that renders the zero Href is refused.
 type Href struct {
 	route *route
+	// teamID is the team a team route's page is about.
+	teamID string
 	// query is what a Routes builder names on its page; every value is
 	// required, so one the params left empty refuses the write.
 	query    url.Values
@@ -120,6 +141,15 @@ func (h Href) render(orgID string, local bool, checkHost func(*url.URL) error) (
 				return "", fmt.Errorf("route %s has no page in local mode", h.route.name)
 			}
 			page = h.route.local
+		} else if h.route.team {
+			if h.teamID == "" {
+				return "", fmt.Errorf("route %s names no team", h.route.name)
+			}
+			sep := "?"
+			if strings.Contains(page, "?") {
+				sep = "&"
+			}
+			page += sep + "team=" + url.QueryEscape(h.teamID)
 		}
 		if len(h.query) == 0 {
 			return page, nil

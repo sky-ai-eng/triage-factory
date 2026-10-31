@@ -83,16 +83,17 @@ This is the part that has to stay small. Every consumer uses one of three verbs 
 // for the deployment App) resolves
 kinds.GitHubAppUnusable.Sync(ctx, orgID, unusable)
 
-// internal/tracker/linear.go — a complete visibility pass
+// internal/tracker/linear.go — a complete visibility pass over every armed team
 kinds.LinearTeamUnreadable.Sync(ctx, orgID, unreadable)
 
 // internal/tracker/tracker.go — projects past the debounce raise; one Jira did
 // not answer, or still short of the debounce, is kept rather than resolved
 kinds.JiraDiscoveryFailing.Sync(ctx, orgID, failing, keep...)
 
-// internal/delegate/jira_mirror.go — true where the canonical is not a reachable
-// transition, false after a successful move; a transient error does neither
-kinds.JiraMirrorFailing.Set(ctx, orgID, kinds.JiraMirror{TeamID: teamID, ProjectID: rule.ProjectID}, true)
+// internal/delegate/jira_mirror.go — true where the canonical is no longer one of
+// the project's statuses, false after a successful move; a transient error, or a
+// ticket that can't reach a status the project still has, does neither
+kinds.JiraMirrorFailing.Set(ctx, orgID, kinds.JiraMirrorFor(rule, issueKey), true)
 
 // internal/routing — the conflict TFAC-518 surfaces
 kinds.AutomationConflict.Post(ctx, orgID, kinds.Conflict{TaskID: task.ID, Winner: winner, Losers: losers})
@@ -123,13 +124,17 @@ var LinearTeamUnreadable = notify.Condition(notify.ConditionSpec[LinearTeam]{
 		notify.TeamsTrackingLinearTeam(func(t LinearTeam) string { return t.LinearTeamID }, notify.Admins),
 	),
 	Render: func(t LinearTeam, to notify.Recipient) notify.Content {
-		c := notify.Content{
-			Title:   "Linear team " + t.TeamKey + " can't be read",
-			Body:    "…",
-			Actions: []notify.Action{notify.Link("Open Linear settings", notify.Routes.OrgSettings())},
+		c := notify.Content{Title: "Linear team " + t.TeamKey + " can't be read", Body: "…"}
+		settings := notify.Link("Open Linear settings", notify.Routes.OrgSettings())
+		if to.TeamID == "" {
+			c.Actions = []notify.Action{settings}
+			return c
 		}
-		if to.TeamID != "" {
-			c.Actions = append(c.Actions, notify.Invoke("untrack", "Stop tracking "+t.TeamKey, notify.RequiresTeamAdmin))
+		// A team admin can untrack, and the settings page is an org admin's,
+		// so the invoke is a team row's primary action.
+		c.Actions = []notify.Action{
+			notify.Invoke("untrack", "Stop tracking "+t.TeamKey, notify.RequiresTeamAdmin, notify.Confirm("…")),
+			settings,
 		}
 		return c
 	},
@@ -169,10 +174,10 @@ var LinearTeamUnreadable = notify.Condition(notify.ConditionSpec[LinearTeam]{
 **Invoke handlers** are the one integration that is more than a line. The kind declares the action (id, label, required permission, optional confirmation text); the effect is registered once at boot, beside the code that owns the operation:
 
 ```go
-kinds.LinearTeamUnreadable.HandleAction("untrack", untrackLinearTeam)
+kinds.LinearTeamUnreadable.HandleAction("untrack", s.untrackUnreadableLinearTeam)
 ```
 
-`untrackLinearTeam` is the function the tracked-set route uses, so validation and authorization exist once. It receives the request context carrying the caller's claims and a typed `notify.ActionCall[P]` (the row's org, the caller, the row's recipient, the decoded params) and returns whether the effect resolved the condition; if so, `notify` resolves the row the action was invoked on immediately, and the occurrence's other audiences' rows wait for the producer's next evaluation. The dispatcher the route calls is `notify.Caller`: `Actions` for the read, `RunAction` for the invoke, one permission check behind both. Handlers are registered from `internal/server` (in `server.New`) or `internal/app` (in `buildNotify`) because `kinds` cannot import them. A boot test fails if any `Invoke` id a kind's `Example` renders has no handler.
+`untrackUnreadableLinearTeam` writes through the functions the tracked-set route uses (its gate, `authz.Checker.TeamAdminWrite`, and its write, `saveTeamLinearTeams`), so validation and authorization exist once. A refusal from them is an `*httpx.Fault`, which the invoke route answers with as the tracked-set route would. It receives the request context carrying the caller's claims and a typed `notify.ActionCall[P]` (the row's org, the caller, the row's recipient, the decoded params) and returns whether the effect resolved the condition; if so, `notify` resolves the row the action was invoked on immediately, and the occurrence's other audiences' rows wait for the producer's next evaluation. The dispatcher the route calls is `notify.Caller`: `Actions` for the read, `RunAction` for the invoke, one permission check behind both. Handlers are registered from `internal/server` (in `server.New`) or `internal/app` (in `buildNotify`) because `kinds` cannot import them. A boot test fails if any `Invoke` id a kind's `Example` renders has no handler.
 
 ### Tests
 
@@ -253,7 +258,7 @@ The inbox is viewer-relative, so it lives under `/api/me` and answers for the or
 | `GET /api/me/notifications/{id}`                      | One notification the caller may read, with the caller's marks. 404 otherwise.                                                                                                                                                                   |
 | `PATCH /api/me/notifications/{id}`                    | The caller's marks: `{"read": bool, "dismissed": bool}`. Absent keeps a mark; `false` (or `null`) clears it. Answers the item as the caller now sees it.                                                                                         |
 | `POST /api/me/notifications/mark-read`                | `{"ids": [...]}` — the rows the client actually rendered, so a row that arrived after rendering is not marked. Multi-row transition, hence a verb route. Answers `{"ids": [...]}`, the ids it marked; one the caller cannot read is left out.   |
-| `POST /api/me/notifications/{id}/actions/{action_id}` | Run a declared invoke action. No body. 403 when the caller lacks the action's permission; 404 for an unknown action id or an unreadable row; 409 once the condition has resolved. Answers the item as the caller now sees it, or 204 when the row has since left what they may read.  |
+| `POST /api/me/notifications/{id}/actions/{action_id}` | Run a declared invoke action. No body. 403 when the caller lacks the action's permission; 404 for an unknown action id or an unreadable row; 409 once the condition has resolved; a handler's own refusal (`*httpx.Fault`) with its status. Answers the item as the caller now sees it, or 204 when the row has since left what they may read.  |
 | `POST /api/orgs/{org_id}/notifications/list`          | Org admins: every notification in the org, team rows included (the "All teams" view). Same filters plus `team_id_in`. Items carry the caller's marks.                                                                                           |
 
 The badge is `status=open, dismissed=false, unread=true, priority_in=[urgent, high], page_size=0`. The banner is `status=open, dismissed=false, priority_in=[urgent]`.
@@ -328,10 +333,10 @@ The same calls, tables (SQLite) and page. Local is N=1: the one user is the reci
 | Kind                          | Source | Audience                                    | Priority                              | Dismissible | Verb and site                                                                                                             | Actions                                                                       |
 | ----------------------------- | ------ | ------------------------------------------- | ------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
 | `github.app_unusable`         | github | org admins                                  | urgent                                | no          | `Sync` on every reconcile (`internal/poller/manager.go`, beside `logAppUsabilityChange`); an active App only              | Link: GitHub access settings                                                  |
-| `linear.team_unreadable`      | linear | org admins + admins of TF teams tracking it | high                                  | yes         | `Sync` on a complete visibility pass (`holdLinearUnreadableTeams`; never on outcome `failed`)                             | Link: Linear settings; invoke "Stop tracking" on team rows                    |
+| `linear.team_unreadable`      | linear | org admins + admins of TF teams tracking it | high                                  | yes         | `Sync` on a complete visibility pass over every armed team (`checkLinearTeamVisibility`; never on outcome `failed`)       | Link: Linear settings; invoke "Stop tracking" on team rows                    |
 | `jira.discovery_failing`      | jira   | admins of teams whose rules arm the project | high                                  | yes         | `Sync` from `discoverJira` after 3 rejected cycles in a row; unanswered projects kept                                     | Link: the team's Jira status rules                                            |
-| `jira.mirror_failing`         | jira   | team admins                                 | high                                  | yes         | `Set` in `runJiraMirror` and the claim guard (`syncJiraClaim`)                                                            | Link: the team's Jira status rules                                            |
-| `linear.mirror_failing`       | linear | team admins                                 | high                                  | yes         | `Set` in `runLinearMirror` and `applyLinearClaim`                                                                         | Link: the team's Linear rules                                                 |
+| `jira.mirror_failing`         | jira   | team admins                                 | high                                  | yes         | `Set` in `runJiraMirror`, `applyJiraClaim` and the stock deck's claim; a rules save resolves it                           | Link: the team's Jira status rules                                            |
+| `linear.mirror_failing`       | linear | team admins                                 | high                                  | yes         | `Set` in `runLinearMirror` and `applyLinearClaim`; a rules save resolves it                                               | Link: the team's Linear rules                                                 |
 | `memory.generation_failing`   | —      | org admins                                  | urgent for `no_model`, high otherwise | no          | `Sync` from the memory provisioner over the `error_kind`s currently failing across the org's attempts, after its debounce | Link: background-jobs model setting; invoke "Retry now" (rings `memory_owed`) |
 | `jira.status_drift`           | jira   | team admins                                 | high                                  | yes         | `Sync` from a detection pass that does not exist yet                                                                      | Link: the rule or handler editor                                              |
 | `routing.automation_conflict` | —      | admins of the losing teams                  | low                                   | (notice)    | `Post` in the router where the conflict is decided                                                                        | Link: the losing team's trigger                                               |

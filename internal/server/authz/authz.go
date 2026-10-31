@@ -109,16 +109,18 @@ func (az *Checker) ResolveTeamID(ctx context.Context, orgID, userID, raw string)
 // VerifyTeamInOrg confirms that team_id belongs to the active org.
 // Returns 404 (not 403) to avoid leaking team existence across orgs.
 func (az *Checker) VerifyTeamInOrg(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string) bool {
-	belongs, err := az.members().teamInOrg(r.Context(), orgID, userID, teamID)
+	return writeCheck(w, az.teamInOrg(r.Context(), orgID, userID, teamID))
+}
+
+func (az *Checker) teamInOrg(ctx context.Context, orgID, userID, teamID string) error {
+	belongs, err := az.members().teamInOrg(ctx, orgID, userID, teamID)
 	if err != nil {
-		httpx.InternalError(w, "authz", fmt.Errorf("team-in-org check %s/%s: %w", teamID, orgID, err))
-		return false
+		return fmt.Errorf("team-in-org check %s/%s: %w", teamID, orgID, err)
 	}
 	if !belongs {
-		httpx.NotFound(w, "team")
-		return false
+		return httpx.NewFault(http.StatusNotFound, httpx.ReasonNotFound, "team not found")
 	}
-	return true
+	return nil
 }
 
 // archivedTeamMessage is the 403 body the archive write-block returns. An
@@ -139,33 +141,62 @@ const archivedTeamMessage = "team is archived: restore it before making changes"
 // regardless. teams_select RLS gates on org access, not deleted_at, so an
 // archived team is still visible to the read.
 func (az *Checker) VerifyTeamNotArchived(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string) bool {
-	archived, err := az.members().teamArchived(r.Context(), orgID, userID, teamID)
+	return writeCheck(w, az.teamNotArchived(r.Context(), orgID, userID, teamID))
+}
+
+func (az *Checker) teamNotArchived(ctx context.Context, orgID, userID, teamID string) error {
+	archived, err := az.members().teamArchived(ctx, orgID, userID, teamID)
 	if err != nil {
-		httpx.InternalError(w, "authz", fmt.Errorf("team-archived check %s/%s: %w", teamID, orgID, err))
-		return false
+		return fmt.Errorf("team-archived check %s/%s: %w", teamID, orgID, err)
 	}
 	if archived {
-		httpx.WriteErrors(w, http.StatusForbidden, httpx.ErrorItem{
-			Reason: httpx.ReasonTeamArchived, Message: archivedTeamMessage,
-		})
-		return false
+		return httpx.NewFault(http.StatusForbidden, httpx.ReasonTeamArchived, archivedTeamMessage)
 	}
-	return true
+	return nil
 }
 
 // RequireTeamAdmin checks the user is an admin of the given team.
 // Returns 403 on non-admin.
 func (az *Checker) RequireTeamAdmin(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string) bool {
-	isAdmin, err := az.members().userIsTeamAdmin(r.Context(), orgID, userID, teamID)
+	return writeCheck(w, az.teamAdmin(r.Context(), orgID, userID, teamID))
+}
+
+func (az *Checker) teamAdmin(ctx context.Context, orgID, userID, teamID string) error {
+	isAdmin, err := az.members().userIsTeamAdmin(ctx, orgID, userID, teamID)
 	if err != nil {
-		httpx.InternalError(w, "authz", fmt.Errorf("team-admin check %s/%s/%s: %w", userID, orgID, teamID, err))
-		return false
+		return fmt.Errorf("team-admin check %s/%s/%s: %w", userID, orgID, teamID, err)
 	}
 	if !isAdmin {
-		writeForbidden(w, "team admin role required")
-		return false
+		return httpx.NewFault(http.StatusForbidden, httpx.ReasonForbidden, "team admin role required")
 	}
-	return true
+	return nil
+}
+
+// TeamAdminWrite is VerifyTeamInOrg, VerifyTeamNotArchived and
+// RequireTeamAdmin, in that order, as one check that returns its refusal as
+// an *httpx.Fault instead of writing it: the gate of a team-settings write
+// that a caller with no response of its own reaches too, such as a
+// notification's invoke action. Any other error is a failed check.
+func (az *Checker) TeamAdminWrite(ctx context.Context, orgID, userID, teamID string) error {
+	if err := az.teamInOrg(ctx, orgID, userID, teamID); err != nil {
+		return err
+	}
+	if err := az.teamNotArchived(ctx, orgID, userID, teamID); err != nil {
+		return err
+	}
+	return az.teamAdmin(ctx, orgID, userID, teamID)
+}
+
+// writeCheck writes a check's refusal, or a 500 for a check that failed, and
+// reports whether the request may proceed.
+func writeCheck(w http.ResponseWriter, err error) bool {
+	if err == nil {
+		return true
+	}
+	if !httpx.WriteFault(w, err) {
+		httpx.InternalError(w, "authz", err)
+	}
+	return false
 }
 
 // RequireOrgAdminRole checks the user is an admin of the given org.
