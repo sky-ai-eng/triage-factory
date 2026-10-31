@@ -121,7 +121,7 @@ func completionFinalStatus(evt domain.Event) string {
 // event. A run a person stopped, or one parked on a stall or a lost sandbox,
 // gets no deferral — its task closes now.
 func (r *Router) causingRun(ctx context.Context, orgID string, evt domain.Event, entityID string, rel *closeRelation, taskID string) (string, error) {
-	if rel.causedByRun == nil || r.externalActions == nil {
+	if rel.causedByRun == nil {
 		return "", nil
 	}
 	run, err := r.blueprints.RunningRunForTaskSystem(ctx, orgID, taskID)
@@ -186,7 +186,7 @@ func stepIndexOf(c *domain.Conversation) int {
 // run caused the event, mapped to that run. nil when the relation declares no
 // matcher.
 func (r *Router) terminatingDeferrals(ctx context.Context, orgID string, evt domain.Event, entityID string, rel *closeRelation) (map[string]string, error) {
-	if rel.causedByRun == nil || r.externalActions == nil {
+	if rel.causedByRun == nil {
 		return nil, nil
 	}
 	tasks, err := r.tasks.FindActiveByEntitySystem(ctx, orgID, entityID)

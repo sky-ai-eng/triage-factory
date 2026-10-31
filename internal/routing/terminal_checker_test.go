@@ -32,7 +32,7 @@ func newCheckerRouter(t *testing.T, database *sql.DB) *Router {
 	t.Helper()
 	st := sqlitestore.New(database)
 	return NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database),
-		nil, nil, nil, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events,
+		nil, nil, nil, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.ExternalActions,
 		st.Orgs, st.Teams, nil, st.JiraStatusRules, nil, nil, nil, noopScorer{}, websocket.NewHub())
 }
 

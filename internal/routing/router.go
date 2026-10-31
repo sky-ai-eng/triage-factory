@@ -115,8 +115,7 @@ type Router struct {
 	ws            *websocket.Hub
 	publisher     EventPublisher // nil-safe; set post-construction via SetEventPublisher — mirrors the per-event routing disposition sentinel onto the bus (TFAC-593)
 	// externalActions is the ledger the close phase reads to tell whether a
-	// task's own run caused the event closing it; set post-construction via
-	// SetExternalActions. nil → no close is ever deferred.
+	// task's own run caused the event closing it. Required.
 	externalActions dbpkg.ExternalActionStore
 	// sourceGate answers whether an org has paused an event source. nil-safe;
 	// set post-construction via SetEventSourceGate — a router without one
@@ -161,6 +160,10 @@ type Router struct {
 // orgs is required — the terminal-state checker iterates it per org and
 // dereferences it directly, so a nil orgs is a startup wiring bug that
 // panics there, not a degraded mode.
+// externalActions is required the same way — the close phase reads the
+// ledger to tell a closing event the task's own run caused, and dereferences
+// it directly, so a nil one panics at the first such close rather than
+// closing the task under the run.
 // teamRepos is nil-safe for task routing — with it missing, the team↔repo
 // gate drops no rule or trigger, as though every team tracked every
 // repository — and fails closed for notify rules, which then match no GitHub
@@ -169,30 +172,31 @@ type Router struct {
 // nil-safe — review_requested / mentioned visibility routing degrades to
 // handler-team visibility (the pre-ticket behavior) when missing or when an
 // event carries no identity.
-func NewRouter(prompts dbpkg.PromptStore, blueprints dbpkg.BlueprintStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, users dbpkg.UsersStore, tasks dbpkg.TaskStore, conversations dbpkg.ConversationStore, entities dbpkg.EntityStore, firings dbpkg.PendingFiringsStore, events dbpkg.EventStore, orgs dbpkg.OrgsStore, teams dbpkg.TeamsStore, teamRepos dbpkg.TeamGitHubReposStore, jiraRules dbpkg.JiraStatusRulesStore, linearRules dbpkg.LinearTeamRulesStore, githubGroups dbpkg.TeamGitHubGroupsStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
+func NewRouter(prompts dbpkg.PromptStore, blueprints dbpkg.BlueprintStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, users dbpkg.UsersStore, tasks dbpkg.TaskStore, conversations dbpkg.ConversationStore, entities dbpkg.EntityStore, firings dbpkg.PendingFiringsStore, events dbpkg.EventStore, externalActions dbpkg.ExternalActionStore, orgs dbpkg.OrgsStore, teams dbpkg.TeamsStore, teamRepos dbpkg.TeamGitHubReposStore, jiraRules dbpkg.JiraStatusRulesStore, linearRules dbpkg.LinearTeamRulesStore, githubGroups dbpkg.TeamGitHubGroupsStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
 	return &Router{
-		prompts:       prompts,
-		blueprints:    blueprints,
-		handlers:      handlers,
-		agents:        agents,
-		teamAgents:    teamAgents,
-		users:         users,
-		tasks:         tasks,
-		conversations: conversations,
-		entities:      entities,
-		firings:       firings,
-		events:        events,
-		orgs:          orgs,
-		teams:         teams,
-		teamRepos:     teamRepos,
-		jiraRules:     jiraRules,
-		linearRules:   linearRules,
-		githubGroups:  githubGroups,
-		spawner:       spawner,
-		scorer:        scorer,
-		ws:            ws,
-		firingWake:    make(chan struct{}, 1),
-		rederiveWake:  make(chan struct{}, 1),
+		prompts:         prompts,
+		blueprints:      blueprints,
+		handlers:        handlers,
+		agents:          agents,
+		teamAgents:      teamAgents,
+		users:           users,
+		tasks:           tasks,
+		conversations:   conversations,
+		entities:        entities,
+		firings:         firings,
+		events:          events,
+		externalActions: externalActions,
+		orgs:            orgs,
+		teams:           teams,
+		teamRepos:       teamRepos,
+		jiraRules:       jiraRules,
+		linearRules:     linearRules,
+		githubGroups:    githubGroups,
+		spawner:         spawner,
+		scorer:          scorer,
+		ws:              ws,
+		firingWake:      make(chan struct{}, 1),
+		rederiveWake:    make(chan struct{}, 1),
 	}
 }
 
@@ -244,14 +248,6 @@ func (r *Router) SetEventPublisher(p EventPublisher) {
 // constructions don't have to thread it.
 func (r *Router) SetTaskReDerive(s dbpkg.TaskReDeriveStore) {
 	r.rederive = s
-}
-
-// SetExternalActions wires the ledger the close phase reads to defer the
-// close of a task whose own run caused the closing event (close_deferral.go),
-// post-construction like SetEventQueue so the existing test constructions
-// need not thread it. Left nil, every task an event closes closes at once.
-func (r *Router) SetExternalActions(s dbpkg.ExternalActionStore) {
-	r.externalActions = s
 }
 
 // SetExecutorID wires this router's persistent instance-registry identity

@@ -195,7 +195,7 @@ func TestNotify_RaisesOnlyOnceRoutingSucceeds(t *testing.T) {
 
 	st := sqlitestore.New(database)
 	failing := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, st.Users,
-		erroringTaskStore{testTaskStore(database)}, st.Conversations, st.Entities, st.PendingFirings, st.Events,
+		erroringTaskStore{testTaskStore(database)}, st.Conversations, st.Entities, st.PendingFirings, st.Events, st.ExternalActions,
 		st.Orgs, st.Teams, st.TeamGitHubRepos, st.JiraStatusRules, nil, nil, nil, noopScorer{}, websocket.NewHub())
 	if err := failing.HandleEvent(ctx, ciEvent(t, entityID, "owner/repo")); err == nil {
 		t.Fatal("route with a failing task store = nil; want the upsert's error")
