@@ -30,20 +30,17 @@ var _ db.ArtifactStore = (*artifactStore)(nil)
 var pgArtifactRowFilter = ` AND ea.performed_by IN (` + db.ArtifactPerformersSQL() + `) AND ea.action NOT IN (` + db.ArtifactExcludedActionsSQL() +
 	`) AND (` + pgActionObjectIDSQL + `) IS NOT NULL`
 
-// pgArtifactSelect is the grouped read over the rows where selects, ending
-// in a WHERE the caller may extend with ORDER BY and a window. Each group's
-// latest row (greatest occurred_at, id) supplies the action, target and url;
-// the window aggregates supply the count and the earliest occurred_at. The
-// entity is joined only for a kind identified by entity_id (the kinds and
-// the split on provider are pgActionObjectIDSQL's entity arms), and its key
-// and url win over the row's; the row's stand in when the entity is not
-// readable or has no url yet.
-func pgArtifactSelect(where string) string {
+// pgArtifactCTEs opens the grouped read over the rows where selects: scoped
+// holds the rows with their object id, and grouped ranks each object's rows.
+// Each group's latest row (greatest occurred_at, id) supplies the action,
+// target and url; the window aggregates supply the count and the earliest
+// occurred_at.
+func pgArtifactCTEs(where string) string {
 	return `
 	WITH scoped AS (
 		SELECT ea.id, ea.org_id, ea.provider, ea.scope, ea.action, ea.target,
 		       COALESCE(ea.current_url, ea.url, '') AS url, ea.entity_id, ea.repository_id,
-		       ea.object_kind, ea.object_key, ea.occurred_at,
+		       ea.object_kind, ea.object_key, ea.occurred_at, ea.conversation_id, ea.team_id,
 		       ` + pgActionObjectIDSQL + ` AS object_id
 		  FROM external_actions ea
 		 WHERE ` + where + pgArtifactRowFilter + `
@@ -53,14 +50,47 @@ func pgArtifactSelect(where string) string {
 		       COUNT(*) OVER (PARTITION BY s.object_id) AS action_count,
 		       MIN(s.occurred_at) OVER (PARTITION BY s.object_id) AS first_at
 		  FROM scoped s
-	)
-	SELECT g.object_id, g.object_kind, g.provider, g.scope,
+	)`
+}
+
+// pgArtifactColumns is what scanPgArtifacts reads, off the latest row g.
+// The entity's key and url win over the row's; the row's stand in when the
+// entity is not readable or has no url yet.
+const pgArtifactColumns = `g.object_id, g.object_kind, g.provider, g.scope,
 	       COALESCE(g.entity_id::text, ''), COALESCE(g.repository_id::text, ''), COALESCE(g.object_key, ''),
 	       COALESCE(e.source_id, g.target), COALESCE(NULLIF(e.url, ''), g.url),
-	       g.action, g.action_count, g.first_at, g.occurred_at
-	  FROM grouped g
+	       g.action, g.action_count, g.first_at, g.occurred_at`
+
+// pgArtifactEntityJoin joins the entity only for a kind identified by
+// entity_id (the kinds and the split on provider are pgActionObjectIDSQL's
+// entity arms).
+const pgArtifactEntityJoin = `
 	  LEFT JOIN entities e ON e.id = g.entity_id AND e.org_id = g.org_id
-	       AND (g.object_kind = 'pull_request' OR (g.object_kind = 'issue' AND g.provider = 'github'))
+	       AND (g.object_kind = 'pull_request' OR (g.object_kind = 'issue' AND g.provider = 'github'))`
+
+// pgArtifactSelect is the grouped read over the rows where selects, ending
+// in a WHERE the caller may extend with ORDER BY and a window.
+func pgArtifactSelect(where string) string {
+	return pgArtifactCTEs(where) + `
+	SELECT ` + pgArtifactColumns + `
+	  FROM grouped g` + pgArtifactEntityJoin + `
+	 WHERE g.rn = 1`
+}
+
+// pgObjectActivitySelect is pgArtifactSelect plus each object's distinct
+// conversations and teams. Neither dialect takes DISTINCT inside a window
+// aggregate, so spread counts them with a GROUP BY and joins back on the
+// object id. Team ids are uuids, so a comma joins them unambiguously.
+func pgObjectActivitySelect(where string) string {
+	return pgArtifactCTEs(where) + `, spread AS (
+		SELECT s.object_id, COUNT(DISTINCT s.conversation_id) AS run_count,
+		       COALESCE(string_agg(DISTINCT s.team_id::text, ','), '') AS team_ids
+		  FROM scoped s
+		 GROUP BY s.object_id
+	)
+	SELECT ` + pgArtifactColumns + `, sp.run_count, sp.team_ids
+	  FROM grouped g
+	  JOIN spread sp ON sp.object_id = g.object_id` + pgArtifactEntityJoin + `
 	 WHERE g.rn = 1`
 }
 
@@ -173,6 +203,85 @@ func (s *artifactStore) ListForConversationsSystem(ctx context.Context, orgID st
 		return nil, err
 	}
 	return scanPgArtifacts(rows)
+}
+
+func (s *artifactStore) ListByTeam(ctx context.Context, orgID, teamID string, opts db.ArtifactListOpts) ([]domain.ObjectActivity, int, error) {
+	return listPgObjectActivity(ctx, s.q, `ea.org_id = $1 AND ea.team_id = $2::uuid`, []any{orgID, teamID}, opts)
+}
+
+func (s *artifactStore) ListByOrgSystem(ctx context.Context, orgID string, opts db.ArtifactListOpts) ([]domain.ObjectActivity, int, error) {
+	return listPgObjectActivity(ctx, s.admin, `ea.org_id = $1`, []any{orgID}, opts)
+}
+
+// listPgObjectActivity is both scopes' read: base and args select the scope's
+// rows, opts' filters narrow them, and the page is of objects.
+func listPgObjectActivity(ctx context.Context, q queryer, base string, args []any, opts db.ArtifactListOpts) ([]domain.ObjectActivity, int, error) {
+	if err := db.RequireArtifactOffsetPage(opts.ListOpts); err != nil {
+		return nil, 0, err
+	}
+	where, args := pgArtifactListWhere(base, args, opts)
+	var total int
+	if err := q.QueryRowContext(ctx, `
+		SELECT COUNT(DISTINCT `+pgActionObjectIDSQL+`)
+		  FROM external_actions ea
+		 WHERE `+where+pgArtifactRowFilter, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	if opts.CountOnly {
+		return []domain.ObjectActivity{}, total, nil
+	}
+	query := pgObjectActivitySelect(where) + ` ORDER BY g.occurred_at DESC, ` + pgArtifactObjectIDOrder
+	if opts.Limit > 0 {
+		args = append(args, opts.Limit, opts.Offset)
+		query += fmt.Sprintf(` LIMIT $%d OFFSET $%d`, len(args)-1, len(args))
+	}
+	rows, err := q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := []domain.ObjectActivity{}
+	for rows.Next() {
+		var (
+			a       domain.ObjectActivity
+			teamIDs string
+		)
+		if err := rows.Scan(
+			&a.ObjectID, &a.ObjectKind, &a.Provider, &a.Scope,
+			&a.EntityID, &a.RepositoryID, &a.ObjectKey,
+			&a.Target, &a.URL,
+			&a.LastAction, &a.ActionCount, &a.FirstAt, &a.LastAt,
+			&a.RunCount, &teamIDs,
+		); err != nil {
+			return nil, 0, err
+		}
+		a.TeamIDs = db.SplitArtifactTeamIDs(teamIDs)
+		out = append(out, a)
+	}
+	return out, total, rows.Err()
+}
+
+// pgArtifactListWhere appends opts' filters to base, numbering each bind
+// after args.
+func pgArtifactListWhere(base string, args []any, opts db.ArtifactListOpts) (string, []any) {
+	where := base
+	add := func(predicate string, v any) {
+		args = append(args, v)
+		where += fmt.Sprintf(predicate, len(args))
+	}
+	if opts.Provider != "" {
+		add(` AND ea.provider = $%d`, opts.Provider)
+	}
+	if opts.ObjectKind != "" {
+		add(` AND ea.object_kind = $%d`, opts.ObjectKind)
+	}
+	if !opts.Since.IsZero() {
+		add(` AND ea.occurred_at >= $%d`, opts.Since)
+	}
+	if !opts.Until.IsZero() {
+		add(` AND ea.occurred_at < $%d`, opts.Until)
+	}
+	return where, args
 }
 
 func scanPgArtifacts(rows *sql.Rows) ([]domain.Artifact, error) {

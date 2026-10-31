@@ -567,7 +567,6 @@ func RelayedRecordDedupKey(conversationID, recordKey string, n int) string {
 
 // ExternalActionListOpts bounds + filters a list read for the action-log feeds.
 // The zero value lists every action (newest first) with no filter or paging.
-// Mirrors DeliverableListOpts.
 type ExternalActionListOpts struct {
 	// Limit caps rows returned (0 = no limit; the feed passes a page size).
 	Limit int

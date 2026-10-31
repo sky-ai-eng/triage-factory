@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import ActivityFeed from './ActivityFeed'
-import type { ActivityAction, ActivityDeliverable } from '../types'
+import type { ActivityAction, ActivityObject } from '../types'
 import { listBody } from '../test/apiResponse'
 
 const action = (over: Partial<ActivityAction>): ActivityAction => ({
@@ -16,29 +16,27 @@ const action = (over: Partial<ActivityAction>): ActivityAction => ({
   ...over,
 })
 
-const deliverable = (over: Partial<ActivityDeliverable>): ActivityDeliverable => ({
-  id: 'a1',
-  kind: 'pull_request',
+const object = (over: Partial<ActivityObject>): ActivityObject => ({
+  object_id: 'b2JqZWN0',
+  object_kind: 'pull_request',
   provider: 'github',
-  state: 'merged',
   target: 'org/repo#9',
-  external_id: '9',
   url: 'https://example.test/9',
-  details: null,
-  created_at: '2026-06-25T00:00:00Z',
+  last_action: 'pr_created',
+  action_count: 1,
+  run_count: 1,
+  last_at: '2026-06-25T00:00:00Z',
+  deliverable: null,
   ...over,
 })
 
-// stubByLens answers the actions list route with action rows and the deliverables
-// list route with deliverable rows, recording every request. The two lenses are
-// two routes now, so the stub branches on the path rather than on a ?view= —
-// which is exactly the property the split bought: a request can only reach the
-// rows whose shape it can render.
-function stubByLens(actionsRows: ActivityAction[], objectsRows: ActivityDeliverable[] = []) {
+// stubByLens answers the actions list route with action rows and the artifacts
+// list route with object rows, recording every request. The two lenses are two
+// routes, so the stub branches on the path: a request can only reach the rows
+// whose shape it can render.
+function stubByLens(actionsRows: ActivityAction[], objectsRows: ActivityObject[] = []) {
   const fetchMock = vi.fn().mockImplementation((url: string) => {
-    const rows: (ActivityAction | ActivityDeliverable)[] = String(url).includes(
-      '/deliverables/list',
-    )
+    const rows: (ActivityAction | ActivityObject)[] = String(url).includes('/artifacts/list')
       ? objectsRows
       : actionsRows
     return Promise.resolve({ ok: true, ...listBody(rows) })
@@ -83,8 +81,8 @@ describe('ActivityFeed', () => {
     // The transition row shows its from→to endpoints.
     expect(screen.getByText('SKY-1')).toBeInTheDocument()
     expect(screen.getByText('In Progress')).toBeInTheDocument()
-    // A team-feed row with no resolved actor reads as a bot action.
-    expect(screen.getAllByText('bot').length).toBeGreaterThan(0)
+    // An agent row with no authorizing person reads as the agent alone.
+    expect(screen.getAllByText('agent').length).toBeGreaterThan(0)
 
     // The first request addressed the actions resource and asked for the
     // default page size in the body.
@@ -92,10 +90,26 @@ describe('ActivityFeed', () => {
     expect(calledBodies(fetchMock)[0]).toMatchObject({ page_size: 50 })
   })
 
-  it('toggles to the Objects lens — reads the deliverables route and renders deliverable rows', async () => {
+  it('toggles to the Objects lens — reads the artifacts route and renders one row per object', async () => {
     const fetchMock = stubByLens(
       [action({ id: 'pr', target: 'org/repo#1' })],
-      [deliverable({ id: 'art', target: 'org/repo#42', url: 'https://gh/pr42', state: 'merged' })],
+      [
+        object({
+          object_id: 'YnJhbmNo',
+          object_kind: 'branch',
+          target: 'org/repo',
+          url: 'https://gh/tree/fix',
+          last_action: 'branch_pushed',
+          action_count: 4,
+          run_count: 3,
+        }),
+        object({
+          object_id: 'cHI0Mg',
+          target: 'org/repo#42',
+          url: 'https://gh/pr42',
+          deliverable: { id: 'd1', kind: 'pull_request', state: 'merged' },
+        }),
+      ],
     )
 
     render(<ActivityFeed basePath="/api/teams/t1/usage" />)
@@ -103,26 +117,97 @@ describe('ActivityFeed', () => {
 
     fireEvent.click(screen.getByRole('tab', { name: /objects/i }))
 
-    // The Objects lens row (a deliverable) appears, and a request hit the
-    // deliverables route.
     expect(await screen.findByText('org/repo#42')).toBeInTheDocument()
     await waitFor(() =>
-      expect(calledUrls(fetchMock)).toContain('/api/teams/t1/usage/deliverables/list'),
+      expect(calledUrls(fetchMock)).toContain('/api/teams/t1/usage/artifacts/list'),
     )
-    // The merged deliverable's state badge rides its row (terminal states included).
-    const prLink = screen
+    const links = screen.getAllByRole('link')
+    const branch = links.find((l) => l.getAttribute('href') === 'https://gh/tree/fix')
+    const pr = links.find((l) => l.getAttribute('href') === 'https://gh/pr42')
+    // The branch three runs pushed is one row reading "3 runs", with its last
+    // action's verb.
+    expect(branch?.textContent).toContain('3 runs')
+    expect(branch?.textContent).toContain('Branch pushed')
+    expect(branch?.hasAttribute('data-deliverable')).toBe(false)
+    // One run says nothing about runs; the PR that is a deliverable is
+    // highlighted with the deliverable's state.
+    expect(pr?.textContent).not.toMatch(/runs?\b/)
+    expect(pr?.getAttribute('data-deliverable')).toBe('merged')
+    expect(pr?.textContent).toContain('merged')
+    // The team feed is one team: no chips.
+    expect(screen.queryByTitle('Platform')).not.toBeInTheDocument()
+  })
+
+  it('org Objects feed tags each object with every team that changed it', async () => {
+    stubByLens(
+      [],
+      [
+        object({
+          object_id: 'YnJhbmNo',
+          object_kind: 'branch',
+          target: 'org/repo',
+          url: 'https://gh/tree/fix',
+          run_count: 2,
+          teams: [
+            { id: 't1', name: 'Platform' },
+            { id: 't2', name: 'Growth' },
+          ],
+        }),
+        object({
+          object_id: 'aXNzdWU',
+          object_kind: 'issue',
+          provider: 'jira',
+          target: 'SKY-1',
+          url: 'https://jira/SKY-1',
+          last_action: 'issue_transitioned',
+          teams: [{ id: 't2', name: 'Growth' }],
+        }),
+      ],
+    )
+
+    render(<ActivityFeed basePath="/api/orgs/o1/usage" showTeam />)
+    fireEvent.click(screen.getByRole('tab', { name: /objects/i }))
+    expect(await screen.findByText('org/repo')).toBeInTheDocument()
+
+    const branch = screen
       .getAllByRole('link')
-      .find((l) => l.getAttribute('href') === 'https://gh/pr42')
-    expect(prLink?.textContent).toContain('merged')
+      .find((l) => l.getAttribute('href') === 'https://gh/tree/fix')
+    expect(branch?.textContent).toContain('Platform')
+    expect(branch?.textContent).toContain('Growth')
+    expect(branch?.textContent).toContain('2 runs')
+
+    // Scoping to a team keeps every object that team changed, without a refetch.
+    fireEvent.change(screen.getByLabelText('team'), { target: { value: 't1' } })
+    expect(screen.getByText('org/repo')).toBeInTheDocument()
+    expect(screen.queryByText('SKY-1')).not.toBeInTheDocument()
+  })
+
+  it('sends the Objects filters as the artifacts route spells them', async () => {
+    const fetchMock = stubByLens([], [object({})])
+    render(<ActivityFeed basePath="/api/orgs/o1/usage" showTeam />)
+    fireEvent.click(screen.getByRole('tab', { name: /objects/i }))
+    await screen.findByText('org/repo#9')
+
+    fireEvent.change(screen.getByLabelText('kind'), { target: { value: 'branch' } })
+    await waitFor(() =>
+      expect(calledBodies(fetchMock).some((b) => b.object_kind === 'branch')).toBe(true),
+    )
+    fireEvent.change(screen.getByLabelText('provider'), { target: { value: 'linear' } })
+    await waitFor(() =>
+      expect(calledBodies(fetchMock).some((b) => b.provider === 'linear')).toBe(true),
+    )
+    // The lens has no state filter, and never sends the deliverables vocabulary.
+    expect(screen.queryByLabelText('state')).not.toBeInTheDocument()
+    expect(calledBodies(fetchMock).every((b) => !('state' in b) && !('kind' in b))).toBe(true)
   })
 
   it('holds the loaded rows while the next request is in flight (no skeleton collapse)', async () => {
     // Park the Objects request so the mid-switch render is observable: the feed
     // must keep the Actions rows on screen rather than blanking to the skeleton,
     // which is what made the section's height jump on every toggle.
-    let releaseObjects: (rows: ActivityDeliverable[]) => void = () => {}
+    let releaseObjects: (rows: ActivityObject[]) => void = () => {}
     const fetchMock = vi.fn().mockImplementation((url: string) => {
-      if (String(url).includes('/deliverables/list')) {
+      if (String(url).includes('/artifacts/list')) {
         return new Promise((resolve) => {
           releaseObjects = (rows) => resolve({ ok: true, ...listBody(rows) })
         })
@@ -142,7 +227,7 @@ describe('ActivityFeed', () => {
     expect(screen.getByText('org/repo#1')).toBeInTheDocument()
     expect(screen.getByText(/1 action/)).toBeInTheDocument()
 
-    releaseObjects([deliverable({ id: 'art', target: 'org/repo#42' })])
+    releaseObjects([object({ target: 'org/repo#42' })])
     expect(await screen.findByText('org/repo#42')).toBeInTheDocument()
     expect(screen.queryByText('org/repo#1')).not.toBeInTheDocument()
   })
@@ -171,9 +256,9 @@ describe('ActivityFeed', () => {
       expect(calledBodies(fetchMock).some((b) => typeof b.since === 'string')).toBe(true),
     )
 
-    // The actions body never carries a deliverables-only filter — the routes
-    // decode strictly, so a stray `state` would be a 400, not a no-op.
-    expect(calledBodies(fetchMock).every((b) => !('state' in b) && !('kind' in b))).toBe(true)
+    // The actions body never carries the Objects lens's filter — the routes
+    // decode strictly, so a stray `object_kind` would be a 400, not a no-op.
+    expect(calledBodies(fetchMock).every((b) => !('object_kind' in b))).toBe(true)
   })
 
   it('org Actions feed shows the owning team + actor, and narrows in-memory by team', async () => {
@@ -192,6 +277,8 @@ describe('ActivityFeed', () => {
         team_name: 'Growth',
         actor_user_id: 'u2',
         actor_name: 'Bo',
+        performed_by: 'person',
+        action: 'pr_marked_ready',
         target: 'org/repo#2',
       }),
     ])
@@ -202,8 +289,11 @@ describe('ActivityFeed', () => {
     expect(await screen.findByText('org/repo#1')).toBeInTheDocument()
     expect(screen.getByText('org/repo#2')).toBeInTheDocument()
     expect(screen.getAllByText('Platform').length).toBeGreaterThan(0)
-    // 'Ada' is both the row's actor chip and an actor-filter <option>.
-    expect(screen.getAllByText('Ada').length).toBeGreaterThan(0)
+    // The agent row of Ada's run reads as the agent, authorized by Ada; Bo's
+    // own act reads as Bo. ('Ada' and 'Bo' are also actor-filter options.)
+    expect(screen.getByText('agent · Ada')).toBeInTheDocument()
+    expect(screen.getByTitle('Agent action, authorized by Ada')).toBeInTheDocument()
+    expect(screen.getByTitle('Performed by Bo')).toBeInTheDocument()
 
     // Scope to team t1 (client-side) — the t2 row drops without a refetch.
     fireEvent.change(screen.getByLabelText('team'), { target: { value: 't1' } })

@@ -485,101 +485,41 @@ func (s *deliverableStore) ListByConversations(ctx context.Context, orgID string
 	return scanDeliverableRows(rows)
 }
 
-func (s *deliverableStore) ListByTeam(ctx context.Context, orgID, teamID string, opts db.DeliverableListOpts) ([]domain.Deliverable, int, error) {
-	total, err := countPgDeliverables(ctx, s.q, `org_id = $1 AND team_id = $2`, []any{orgID, teamID}, opts)
-	if err != nil {
-		return nil, 0, err
-	}
-	if opts.CountOnly {
-		return []domain.Deliverable{}, total, nil
-	}
-	// Base WHERE only — the filter helper appends the optional predicates, the
-	// ORDER BY, and LIMIT/OFFSET so this and ListByOrgSystem share one builder.
-	query := `SELECT ` + pgDeliverableColumns + ` FROM deliverables WHERE org_id = $1 AND team_id = $2`
-	query, args := appendPgDeliverableFilters(query, []any{orgID, teamID}, opts)
-	rows, err := s.q.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, 0, err
-	}
-	out, err := scanDeliverableRows(rows)
-	return out, total, err
+// ListArtifactMatchesByTeamSystem runs on the admin pool (BYPASSRLS) behind
+// its caller's gate (see the interface); org_id and team_id stay bound.
+// idx_deliverables_entity and idx_deliverables_external_id serve the two arms.
+func (s *deliverableStore) ListArtifactMatchesByTeamSystem(ctx context.Context, orgID, teamID string, entityIDs, reviewIDs []string) ([]domain.Deliverable, error) {
+	return listPgArtifactMatches(ctx, s.admin, `org_id = $1 AND team_id = $2::uuid`, []any{orgID, teamID}, entityIDs, reviewIDs)
 }
 
-// appendPgDeliverableFilters appends opts' optional provider/kind/state/time
-// predicates, the newest-first ORDER BY, and LIMIT/OFFSET paging to a SELECT
-// whose WHERE clause is already open (the caller emitted at least `WHERE org_id
-// = $1`). Placeholders are numbered from len(args)+1, so a caller can prepend
-// any number of leading binds (org_id, team_id) without a filter colliding with
-// LIMIT — the same defensive numbering ListByTeam used for its lone LIMIT.
-func appendPgDeliverableFilters(query string, args []any, opts db.DeliverableListOpts) (string, []any) {
-	query, args = appendPgDeliverablePredicates(query, args, opts)
-	query += " ORDER BY created_at DESC, id DESC"
-	if opts.Limit > 0 {
-		args = append(args, opts.Limit)
-		query += fmt.Sprintf(" LIMIT $%d", len(args))
-		// OFFSET only with a LIMIT — paging the newest-first feed.
-		if opts.Offset > 0 {
-			args = append(args, opts.Offset)
-			query += fmt.Sprintf(" OFFSET $%d", len(args))
-		}
-	}
-	return query, args
+// ListArtifactMatchesByOrgSystem is the team read over every team, on the
+// admin pool; org_id stays bound.
+func (s *deliverableStore) ListArtifactMatchesByOrgSystem(ctx context.Context, orgID string, entityIDs, reviewIDs []string) ([]domain.Deliverable, error) {
+	return listPgArtifactMatches(ctx, s.admin, `org_id = $1`, []any{orgID}, entityIDs, reviewIDs)
 }
 
-// appendPgDeliverablePredicates is the filter half alone — no ordering, no window
-// — so the count and the page apply exactly the same predicate.
-func appendPgDeliverablePredicates(query string, args []any, opts db.DeliverableListOpts) (string, []any) {
-	if opts.Provider != "" {
-		args = append(args, opts.Provider)
-		query += fmt.Sprintf(" AND provider = $%d", len(args))
+// listPgArtifactMatches is both scopes' read; where and args select the
+// scope. An empty set binds as an empty array, which matches nothing.
+func listPgArtifactMatches(ctx context.Context, q queryer, where string, args []any, entityIDs, reviewIDs []string) ([]domain.Deliverable, error) {
+	if len(entityIDs) == 0 && len(reviewIDs) == 0 {
+		return nil, nil
 	}
-	if opts.Kind != "" {
-		args = append(args, opts.Kind)
-		query += fmt.Sprintf(" AND kind = $%d", len(args))
+	if reviewIDs == nil {
+		reviewIDs = []string{}
 	}
-	if opts.State != "" {
-		args = append(args, opts.State)
-		query += fmt.Sprintf(" AND state = $%d", len(args))
-	}
-	if !opts.Since.IsZero() {
-		args = append(args, opts.Since)
-		query += fmt.Sprintf(" AND created_at >= $%d", len(args))
-	}
-	if !opts.Until.IsZero() {
-		args = append(args, opts.Until)
-		query += fmt.Sprintf(" AND created_at < $%d", len(args))
-	}
-	return query, args
-}
-
-func countPgDeliverables(ctx context.Context, q queryer, where string, base []any, opts db.DeliverableListOpts) (int, error) {
-	query, args := appendPgDeliverablePredicates(`SELECT COUNT(*) FROM deliverables WHERE `+where, base, opts)
-	var n int
-	err := q.QueryRowContext(ctx, query, args...).Scan(&n)
-	return n, err
-}
-
-// ListByOrgSystem runs on the admin pool (BYPASSRLS), org-wide and across every
-// team — the bot-activity audit feed's org source (TFAC-483). It returns ALL
-// states (terminal included), in contrast to ListNonTerminalBySystem's
-// reconciler working set. Same org-wide admin shape as ListNonTerminalBySystem;
-// org_id stays in the WHERE clause as defense in depth.
-func (s *deliverableStore) ListByOrgSystem(ctx context.Context, orgID string, opts db.DeliverableListOpts) ([]domain.Deliverable, int, error) {
-	total, err := countPgDeliverables(ctx, s.admin, `org_id = $1`, []any{orgID}, opts)
+	args = append(args, domain.DeliverableKindPullRequest, pgUUIDArray(entityIDs), domain.DeliverableKindReview, reviewIDs)
+	n := len(args)
+	rows, err := q.QueryContext(ctx, fmt.Sprintf(`
+		SELECT `+pgDeliverableColumns+`
+		FROM deliverables
+		WHERE `+where+`
+		  AND ((kind = $%d AND entity_id = ANY($%d::uuid[])) OR (kind = $%d AND external_id = ANY($%d::text[])))
+		ORDER BY created_at DESC, id DESC
+	`, n-3, n-2, n-1, n), args...)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
-	if opts.CountOnly {
-		return []domain.Deliverable{}, total, nil
-	}
-	query := `SELECT ` + pgDeliverableColumns + ` FROM deliverables WHERE org_id = $1`
-	query, args := appendPgDeliverableFilters(query, []any{orgID}, opts)
-	rows, err := s.admin.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, 0, err
-	}
-	out, err := scanDeliverableRows(rows)
-	return out, total, err
+	return scanDeliverableRows(rows)
 }
 
 // ListNonTerminalBySystem runs on the admin pool (BYPASSRLS), org-scoped — the

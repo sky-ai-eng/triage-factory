@@ -202,7 +202,7 @@ func TestExternalActionStore_SQLite_EmptyDedupAppendsEveryRow(t *testing.T) {
 // paging — over a _time_format=sqlite conn so a bound Since/Until compares against
 // occurred_at correctly. TFAC-483.
 func TestExternalActionStore_SQLite_ListFiltersAndPaging(t *testing.T) {
-	conn := newSQLiteForDeliverableTestTimed(t)
+	conn := newSQLiteForDeliverableTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 	conversationID := seedDeliverableConversation(t, conn)

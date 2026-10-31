@@ -128,10 +128,16 @@ func TestArtifacts_SQLite(t *testing.T) {
 	dbtest.RunArtifactConformance(t, func(t *testing.T) dbtest.ArtifactFixture {
 		t.Helper()
 		conn := openSQLiteForTest(t)
+		otherTeam := uuid.NewString()
+		if _, err := conn.Exec(`INSERT INTO teams (id, org_id, slug, name) VALUES (?, ?, ?, ?)`,
+			otherTeam, runmode.LocalDefaultOrgID, "artifacts-other", "Other"); err != nil {
+			t.Fatalf("seed the other team: %v", err)
+		}
 		return dbtest.ArtifactFixture{
-			Stores: sqlitestore.New(conn),
-			OrgID:  runmode.LocalDefaultOrgID,
-			TeamID: runmode.LocalDefaultTeamID,
+			Stores:      sqlitestore.New(conn),
+			OrgID:       runmode.LocalDefaultOrgID,
+			TeamID:      runmode.LocalDefaultTeamID,
+			OtherTeamID: otherTeam,
 			NewConversation: func(t *testing.T) string {
 				return seedDeliverableConversationWithID(t, conn, uuid.NewString())
 			},
@@ -141,6 +147,13 @@ func TestArtifacts_SQLite(t *testing.T) {
 				if _, err := conn.Exec(`UPDATE external_actions SET occurred_at = ? WHERE id = ?`,
 					at.UTC().Format(time.DateTime), actionID); err != nil {
 					t.Fatalf("set occurred_at of %s: %v", actionID, err)
+				}
+			},
+			SetDeliverableCreatedAt: func(t *testing.T, deliverableID string, at time.Time) {
+				t.Helper()
+				if _, err := conn.Exec(`UPDATE deliverables SET created_at = ? WHERE id = ?`,
+					at.UTC().Format(time.DateTime), deliverableID); err != nil {
+					t.Fatalf("set created_at of %s: %v", deliverableID, err)
 				}
 			},
 		}

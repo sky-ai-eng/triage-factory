@@ -1056,13 +1056,13 @@ func (s *Server) routes() {
 	// console.
 	s.api("GET /api/orgs/{org_id}/usage/ops", uh.handleUsageOrgOps)
 	// Activity feed (EE, FeatureGovernance): the team/org Actions
-	// (external-action audit log) + Objects (deliverable history) lenses — same
+	// (external-action audit log) + Objects (artifacts across runs) lenses — same
 	// scope gates as the spend reads above, plus the entitlement (unlicensed →
 	// 404). Two resources, two routes each: the row shapes and the filter
 	// vocabularies differ, so one address cannot honestly serve both.
-	s.apiMutating("POST /api/teams/{team_id}/usage/deliverables/list", uh.handleUsageTeamDeliverables)
+	s.apiMutating("POST /api/teams/{team_id}/usage/artifacts/list", uh.handleUsageTeamArtifacts)
 	s.apiMutating("POST /api/teams/{team_id}/usage/actions/list", uh.handleUsageTeamActions)
-	s.apiMutating("POST /api/orgs/{org_id}/usage/deliverables/list", uh.handleUsageOrgDeliverables)
+	s.apiMutating("POST /api/orgs/{org_id}/usage/artifacts/list", uh.handleUsageOrgArtifacts)
 	s.apiMutating("POST /api/orgs/{org_id}/usage/actions/list", uh.handleUsageOrgActions)
 	// Per-team daily spend cap — org-admin-set, EE/governance-gated (the
 	// handlers 404 when unlicensed). The GET lists every active team + its cap

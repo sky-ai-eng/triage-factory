@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 
@@ -245,7 +244,7 @@ func TestDeliverableStore_Postgres_RLS_TeamScoped(t *testing.T) {
 		name, id string
 	}{{"alice", alice}, {"bob", bob}} {
 		err := h.WithUser(t, u.id, orgA, func(tx *sql.Tx) error {
-			rows, _, err := pgstore.NewForTx(tx, pgtest.SecretKey).Deliverables.ListByTeam(ctx, orgA, teamA, db.DeliverableListOpts{})
+			rows, _, err := pgstore.NewForTx(tx, pgtest.SecretKey).Deliverables.ListByConversation(ctx, orgA, conversationID, db.Unwindowed)
 			if err != nil {
 				return err
 			}
@@ -262,7 +261,7 @@ func TestDeliverableStore_Postgres_RLS_TeamScoped(t *testing.T) {
 	// Carol (teamB, same org, different team) sees zero — deliverables_select
 	// gates on user_in_team(team_id).
 	err := h.WithUser(t, carol, orgA, func(tx *sql.Tx) error {
-		rows, _, err := pgstore.NewForTx(tx, pgtest.SecretKey).Deliverables.ListByTeam(ctx, orgA, teamA, db.DeliverableListOpts{})
+		rows, _, err := pgstore.NewForTx(tx, pgtest.SecretKey).Deliverables.ListByConversation(ctx, orgA, conversationID, db.Unwindowed)
 		if err != nil {
 			return err
 		}
@@ -326,12 +325,11 @@ func TestDeliverableStore_Postgres_RLS_WritePath(t *testing.T) {
 	pgtest.AssertRLSViolation(t, err)
 }
 
-// TestDeliverableStore_Postgres_ListByTeam_IncludesDetached pins the
-// audit-ledger invariant: a deliverable whose conversation was purged
-// (conversation_id NULL) is still the team's and must come back from
-// ListByTeam. Guards against a future `AND conversation_id IS NOT NULL`
-// creeping into the query. TFAC-455.
-func TestDeliverableStore_Postgres_ListByTeam_IncludesDetached(t *testing.T) {
+// TestDeliverableStore_Postgres_SurvivesConversationPurge pins the
+// audit-ledger invariant: a deliverable whose conversation was purged is
+// detached (conversation_id NULL), not deleted, and still reads back as the
+// team's.
+func TestDeliverableStore_Postgres_SurvivesConversationPurge(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
@@ -361,15 +359,12 @@ func TestDeliverableStore_Postgres_ListByTeam_IncludesDetached(t *testing.T) {
 		t.Fatalf("conversation_id should be NULL after conversation purge, got %q", nullConversation.String)
 	}
 
-	rows, _, err := stores.Deliverables.ListByTeam(ctx, orgID, teamID, db.DeliverableListOpts{})
-	if err != nil {
-		t.Fatalf("ListByTeam: %v", err)
+	got, err := stores.Deliverables.Get(ctx, orgID, art.ID)
+	if err != nil || got == nil {
+		t.Fatalf("Get the detached deliverable = %v, %v", got, err)
 	}
-	if len(rows) != 1 || rows[0].ID != art.ID {
-		t.Errorf("ListByTeam dropped the detached deliverable: %+v", rows)
-	}
-	if rows[0].ConversationID != "" {
-		t.Errorf("detached row ConversationID = %q, want empty", rows[0].ConversationID)
+	if got.ConversationID != "" || got.TeamID != teamID {
+		t.Errorf("detached row = {conversation %q, team %q}, want {\"\", %s}", got.ConversationID, got.TeamID, teamID)
 	}
 }
 
@@ -824,127 +819,6 @@ func TestDeliverableStore_Postgres_ListByConversations_TeamScoped(t *testing.T) 
 	}); err != nil {
 		t.Fatalf("carol path: %v", err)
 	}
-}
-
-// TestDeliverableStore_Postgres_ListByOrgSystem pins the bot-activity audit feed's
-// org source (TFAC-483): on the admin pool it returns the org's deliverables across
-// EVERY team (cross-team), ALL states — terminal included (merged PR, dismissed
-// review), in contrast to ListNonTerminalBySystem — never crosses org
-// boundaries, and honors the provider/kind/state/time filters + limit/offset
-// paging from DeliverableListOpts.
-func TestDeliverableStore_Postgres_ListByOrgSystem(t *testing.T) {
-	h := pgtest.Shared(t)
-	h.Reset(t)
-	orgA, _, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
-	teamB := pgtest.SeedTeam(t, h, orgA, "team-b")
-	orgB, _, teamBOther := pgtest.SeedOrgWithUser(t, h, "bob")
-	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	ctx := context.Background()
-
-	seedArt := func(orgID, teamID, provider, kind, state, key, createdAt string) {
-		if _, err := h.AdminDB.Exec(`
-			INSERT INTO deliverables (org_id, team_id, provider, scope, kind, target, state, dedup_key, created_at)
-			VALUES ($1, $2, $3, 'https://github.com', $4, 'octo/repo', $5, $6, $7)
-		`, orgID, teamID, provider, kind, state, key, createdAt); err != nil {
-			t.Fatalf("seed %s: %v", key, err)
-		}
-	}
-	// teamA + teamB rows across the lifecycle (terminal included), plus an orgB
-	// row that must never leak into orgA's feed.
-	seedArt(orgA, teamA, domain.ProviderGit, domain.DeliverableKindBranch, domain.DeliverableStateBranchPushed, "a-branch", "2026-06-01T00:00:00Z")
-	seedArt(orgA, teamB, domain.ProviderGitHub, domain.DeliverableKindPullRequest, domain.DeliverableStatePROpen, "b-pr-open", "2026-06-02T00:00:00Z")
-	seedArt(orgA, teamA, domain.ProviderGitHub, domain.DeliverableKindPullRequest, domain.DeliverableStatePRMerged, "a-pr-merged", "2026-06-03T00:00:00Z") // terminal
-	seedArt(orgA, teamB, domain.ProviderGitHub, domain.DeliverableKindReview, domain.DeliverableStateReviewDismissed, "b-review", "2026-06-04T00:00:00Z")  // terminal
-	seedArt(orgA, teamA, domain.ProviderJira, domain.DeliverableKindComment, domain.DeliverableStateCommentPosted, "a-comment", "2026-06-05T00:00:00Z")
-	seedArt(orgB, teamBOther, domain.ProviderGitHub, domain.DeliverableKindPullRequest, domain.DeliverableStatePROpen, "other-org", "2026-06-06T00:00:00Z")
-
-	// No opts: every orgA row across both teams, terminal included, newest-first.
-	all, _, err := stores.Deliverables.ListByOrgSystem(ctx, orgA, db.DeliverableListOpts{})
-	if err != nil {
-		t.Fatalf("ListByOrgSystem: %v", err)
-	}
-	if len(all) != 5 {
-		t.Fatalf("returned %d rows, want 5 (3 teamA + 2 teamB, no orgB)", len(all))
-	}
-	teamsSeen := map[string]bool{}
-	for _, a := range all {
-		if a.OrgID != orgA {
-			t.Errorf("cross-org leak: row %q belongs to org %q", a.DedupKey, a.OrgID)
-		}
-		teamsSeen[a.TeamID] = true
-	}
-	if !teamsSeen[teamA] || !teamsSeen[teamB] {
-		t.Errorf("feed is not cross-team: saw teams %v, want both %s and %s", teamsSeen, teamA, teamB)
-	}
-	if all[0].DedupKey != "a-comment" || all[4].DedupKey != "a-branch" {
-		t.Errorf("order not newest-first: first=%q last=%q", all[0].DedupKey, all[4].DedupKey)
-	}
-
-	// Contrast the reconciler set: terminal rows (merged PR, dismissed review)
-	// drop out, leaving branch pushed + PR open = 2.
-	nonTerminal, err := stores.Deliverables.ListNonTerminalBySystem(ctx, orgA)
-	if err != nil {
-		t.Fatalf("ListNonTerminalBySystem: %v", err)
-	}
-	if len(nonTerminal) != 2 {
-		t.Errorf("ListNonTerminalBySystem returned %d, want 2 (the terminal-hiding contrast)", len(nonTerminal))
-	}
-
-	// Filters.
-	gh, _, err := stores.Deliverables.ListByOrgSystem(ctx, orgA, db.DeliverableListOpts{Provider: domain.ProviderGitHub})
-	if err != nil {
-		t.Fatalf("filter provider: %v", err)
-	}
-	if len(gh) != 3 {
-		t.Errorf("provider=github returned %d, want 3", len(gh))
-	}
-	prs, _, err := stores.Deliverables.ListByOrgSystem(ctx, orgA, db.DeliverableListOpts{Kind: domain.DeliverableKindPullRequest})
-	if err != nil {
-		t.Fatalf("filter kind: %v", err)
-	}
-	if len(prs) != 2 {
-		t.Errorf("kind=pull_request returned %d, want 2", len(prs))
-	}
-	open, _, err := stores.Deliverables.ListByOrgSystem(ctx, orgA, db.DeliverableListOpts{State: domain.DeliverableStatePROpen})
-	if err != nil {
-		t.Fatalf("filter state: %v", err)
-	}
-	if len(open) != 1 || open[0].DedupKey != "b-pr-open" {
-		t.Errorf("state=open returned %+v, want exactly the teamB open PR", open)
-	}
-
-	// Time window [06-03, 06-05): merged (06-03) + review (06-04), newest-first.
-	windowed, _, err := stores.Deliverables.ListByOrgSystem(ctx, orgA, db.DeliverableListOpts{
-		Since: time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC),
-		Until: time.Date(2026, 6, 5, 0, 0, 0, 0, time.UTC),
-	})
-	if err != nil {
-		t.Fatalf("filter window: %v", err)
-	}
-	if len(windowed) != 2 || windowed[0].DedupKey != "b-review" || windowed[1].DedupKey != "a-pr-merged" {
-		t.Errorf("time window = %+v, want [b-review, a-pr-merged]", dedupKeys(windowed))
-	}
-
-	// Paging: page 1 (limit 2) → comment + review; page 2 (offset 2) → merged + open.
-	page1, _, err := stores.Deliverables.ListByOrgSystem(ctx, orgA, db.DeliverableListOpts{Limit: 2})
-	if err != nil {
-		t.Fatalf("page 1: %v", err)
-	}
-	page2, _, err := stores.Deliverables.ListByOrgSystem(ctx, orgA, db.DeliverableListOpts{Limit: 2, Offset: 2})
-	if err != nil {
-		t.Fatalf("page 2: %v", err)
-	}
-	if len(page1) != 2 || len(page2) != 2 || page1[0].DedupKey != "a-comment" || page2[0].DedupKey != "a-pr-merged" {
-		t.Errorf("paging wrong: page1=%v page2=%v", dedupKeys(page1), dedupKeys(page2))
-	}
-}
-
-func dedupKeys(arts []domain.Deliverable) []string {
-	out := make([]string, len(arts))
-	for i, a := range arts {
-		out[i] = a.DedupKey
-	}
-	return out
 }
 
 // TestDeliverableStore_Postgres_ListPendingReviewsByEntity pins the new-commits

@@ -46,3 +46,31 @@ func TestIsObjectID(t *testing.T) {
 		}
 	}
 }
+
+func TestArtifactDeliverableKeys(t *testing.T) {
+	entityIDs, reviewIDs := ArtifactDeliverableKeys([]Artifact{
+		{ObjectKind: ObjectKindPullRequest, EntityID: "e2"},
+		{ObjectKind: ObjectKindPullRequest, EntityID: "e1"},
+		{ObjectKind: ObjectKindPullRequest, EntityID: "e2"},
+		{ObjectKind: ObjectKindPullRequest},
+		{ObjectKind: ObjectKindReview, ObjectKey: GitHubReviewObjectKey("77")},
+		{ObjectKind: ObjectKindReview, ObjectKey: GitHubReviewObjectKey("5")},
+		// Keys that name no review id contribute none.
+		{ObjectKind: ObjectKindReview, ObjectKey: "github:review:0"},
+		{ObjectKind: ObjectKindReview, ObjectKey: "github:review:abc"},
+		{ObjectKind: ObjectKindReview, ObjectKey: "github:review:007"},
+		{ObjectKind: ObjectKindReview, ObjectKey: "jira:review:9"},
+		// Kinds no deliverable matches contribute nothing, whatever they carry.
+		{ObjectKind: ObjectKindBranch, EntityID: "e3", ObjectKey: GitHubReviewObjectKey("8")},
+		{ObjectKind: ObjectKindIssue, EntityID: "e4"},
+	})
+	if len(entityIDs) != 2 || entityIDs[0] != "e1" || entityIDs[1] != "e2" {
+		t.Errorf("entity ids = %v, want [e1 e2]", entityIDs)
+	}
+	if len(reviewIDs) != 2 || reviewIDs[0] != "5" || reviewIDs[1] != "77" {
+		t.Errorf("review ids = %v, want [5 77]", reviewIDs)
+	}
+	if e, r := ArtifactDeliverableKeys(nil); len(e) != 0 || len(r) != 0 {
+		t.Errorf("no artifacts = (%v, %v), want none", e, r)
+	}
+}

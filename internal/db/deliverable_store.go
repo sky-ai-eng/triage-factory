@@ -3,7 +3,6 @@ package db
 import (
 	"context"
 	"errors"
-	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -252,11 +251,25 @@ type DeliverableStore interface {
 	// bound as defense in depth. Detached deliverables (conversation_id NULL) never match.
 	ListByConversations(ctx context.Context, orgID string, conversationIDs []string) ([]domain.Deliverable, error)
 
-	// ListByTeam returns the team's deliverables, newest first (the
-	// team_created index order). Backs team-level C2 (TFAC-449) through the
-	// shared A·6 API. Detached rows (conversation purged → conversation_id
-	// NULL) are still the team's and are included.
-	ListByTeam(ctx context.Context, orgID, teamID string, opts DeliverableListOpts) ([]domain.Deliverable, int, error)
+	// ListArtifactMatchesByTeamSystem returns teamID's deliverables that can
+	// be the same object as an artifact: its pull_request deliverables about
+	// one of entityIDs and its review deliverables whose external_id is one of
+	// reviewIDs (domain.ArtifactDeliverableKeys derives both sets from the
+	// artifacts), newest first (created_at DESC, id DESC), so the match
+	// domain.ArtifactDeliverable finds first is the most recently created.
+	// Both sets empty returns nil without touching the database.
+	//
+	// Admin pool (BYPASSRLS) in Postgres. Its reader is the Usage → Objects
+	// team lens, behind that route's team-admin-or-org-admin gate: an org admin
+	// on no team reads the team's ledger there, and under the deliverables
+	// RLS policy would see its artifacts with none of their deliverables, which
+	// the org lens shows them. org_id and team_id stay bound. Identical to a
+	// plain org read in SQLite.
+	ListArtifactMatchesByTeamSystem(ctx context.Context, orgID, teamID string, entityIDs, reviewIDs []string) ([]domain.Deliverable, error)
+
+	// ListArtifactMatchesByOrgSystem is ListArtifactMatchesByTeamSystem over
+	// every team of the org, for the org lens. Admin pool.
+	ListArtifactMatchesByOrgSystem(ctx context.Context, orgID string, entityIDs, reviewIDs []string) ([]domain.Deliverable, error)
 
 	// ListNonTerminalBySystem returns every deliverable for the org whose
 	// (kind, state) is still reconcilable — PR draft|open, review pending,
@@ -273,46 +286,4 @@ type DeliverableStore interface {
 	// defense in depth.
 	// Identical to a plain org read in SQLite (single-tenant, no RLS).
 	ListNonTerminalBySystem(ctx context.Context, orgID string) ([]domain.Deliverable, error)
-
-	// ListByOrgSystem returns the org's deliverables across EVERY team, newest
-	// first (created_at DESC, id DESC) — the org-wide source for the
-	// bot-activity audit feed (TFAC-483). Unlike ListNonTerminalBySystem (the
-	// reconciler's working set, which hides terminal rows) it returns ALL
-	// states, terminal included: the feed is a history of the actions the
-	// org's bot took, not a worklist, so merged PRs / deleted branches /
-	// dismissed reviews must be present. opts filters (provider / kind / state
-	// / time window) and pages (limit / offset).
-	//
-	// Admin-pool / org-wide in Postgres — the same BYPASSRLS, org-scoped shape
-	// ListNonTerminalBySystem uses (mirrors ListByConversationSystem's pool selection):
-	// the org feed is an org-admin-gated cross-team read with no per-team RLS
-	// context, so it must see every team's rows. org_id stays bound in the
-	// WHERE clause as defense in depth. Identical to a plain org read in SQLite
-	// (single-tenant, no RLS).
-	ListByOrgSystem(ctx context.Context, orgID string, opts DeliverableListOpts) ([]domain.Deliverable, int, error)
-}
-
-// DeliverableListOpts carries the optional filters/paging for
-// DeliverableStore.ListByTeam and ListByOrgSystem. The zero value lists every
-// deliverable (newest first) with no filter or paging.
-type DeliverableListOpts struct {
-	// Limit caps the number of rows returned. Zero means no limit; the
-	// activity feed passes a page size (~50).
-	Limit int
-	// Offset skips the first N rows, for limit/offset paging ("load more").
-	// Only meaningful alongside a positive Limit.
-	Offset int
-	// CountOnly returns only the filtered total: the count query runs, the row
-	// query doesn't, and the page comes back empty. Limit and Offset are
-	// ignored. Mirrors ListOpts.CountOnly (the explicit page_size: 0 request).
-	CountOnly bool
-	// Provider / Kind / State are optional exact-match filters on the matching
-	// deliverable column. Empty means no filter on that column.
-	Provider string
-	Kind     string
-	State    string
-	// Since / Until bound created_at to the half-open window [Since, Until).
-	// Each side applies only when non-zero, so the zero value is unbounded.
-	Since time.Time
-	Until time.Time
 }

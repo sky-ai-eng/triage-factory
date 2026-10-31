@@ -932,9 +932,10 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		if a := findActionByKey(t, s, orgID, earlyPushKey); a.RepositoryID != renamed.ID {
 			t.Errorf("early push's ledger row references %q, want the renamed row %s", a.RepositoryID, renamed.ID)
 		}
-		branches, _, err := s.Deliverables.ListByOrgSystem(ctx, orgID, db.DeliverableListOpts{})
+		// Every branch here is pushed, so the non-terminal read holds them all.
+		branches, err := s.Deliverables.ListNonTerminalBySystem(ctx, orgID)
 		if err != nil {
-			t.Fatalf("ListByOrgSystem: %v", err)
+			t.Fatalf("ListNonTerminalBySystem: %v", err)
 		}
 		var twice []string
 		for _, a := range branches {

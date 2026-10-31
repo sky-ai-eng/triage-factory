@@ -1,20 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { ActivityAction, ActivityDeliverable, DeliverableKind } from '../types'
+import type { ActivityAction, ActivityObject } from '../types'
 import type { ListRequest } from '../lib/apiClient'
 import { usePagedList } from '../hooks/usePagedList'
-import { DeliverableRow } from './DeliverableRow'
+import { ObjectRow } from './ObjectRow'
 import { ActionRow } from './ActionRow'
-import {
-  DELIVERABLE_KINDS,
-  DELIVERABLE_PROVIDERS,
-  DELIVERABLE_STATES,
-  KIND_META,
-  PROVIDER_LABEL,
-} from './deliverableMeta'
+import { PROVIDER_LABEL } from './deliverableMeta'
+import { OBJECT_KINDS, OBJECT_KIND_META, OBJECT_PROVIDERS } from './objectMeta'
 import { ACTION_OPTIONS, ACTION_PROVIDERS } from './actionMeta'
 
-// ActivityFeed is the EE /usage governance surface (TFAC-483), with TWO lenses on
-// the org's external footprint — toggled in the header, both behind
+// ActivityFeed is the EE /usage governance surface, with TWO lenses on the
+// org's external footprint — toggled in the header, both behind
 // FeatureGovernance and rendered only once the caller's entitlement + role gate
 // pass:
 //
@@ -22,24 +17,23 @@ import { ACTION_OPTIONS, ACTION_PROVIDERS } from './actionMeta'
 //     one row per external WRITE TF performed under an org credential (the bot's
 //     GitHub/Jira mutations, the human-authorized approval lifecycle, the Jira
 //     board mirror). Rendered by ActionRow. The source of truth for "what TF did."
-//   - Objects → the deliverables head: each object the bot produced and its CURRENT
-//     state, reconciler-maintained (includes externally-driven transitions a
-//     human made, which are NOT TF actions). Rendered by DeliverableRow. The PR #505
-//     feed, kept.
+//   - Objects → the artifacts across the scope: each object the runs' agents
+//     changed, once however many runs changed it, with the last action and the
+//     run count, highlighted when it is also a deliverable. Rendered by
+//     ObjectRow.
 //
 // Two scopes, set by the caller's basePath:
 //
 //   - team: /api/teams/{id}/usage (team admin or org admin).
-//   - org : /api/orgs/{id}/usage, showTeam (org admin) — rows carry the owning team
+//   - org : /api/orgs/{id}/usage, showTeam (org admin) — rows carry their teams
 //     (+ the authorizing actor on the Actions lens), with a client-side
 //     team-scope (and, on Actions, actor-scope) filter narrowing the loaded page.
 //
 // The lens is an ADDRESS, not a parameter: `${basePath}/actions/list` and
-// `${basePath}/deliverables/list` are two resources with different row shapes and
-// different filter vocabularies. They used to be one route selected by ?view=,
-// where an Objects-only `state=` filter silently did nothing on the Actions
-// lens. Filters adapt per lens (Actions: provider/action/time; Objects:
-// provider/kind/state/time). Filter state is in-memory (v1).
+// `${basePath}/artifacts/list` are two resources with different row shapes and
+// different filter vocabularies, and each route decodes strictly. Filters adapt
+// per lens (Actions: provider/action/time; Objects: provider/object kind/time).
+// Filter state is in-memory (v1).
 
 const PAGE_SIZE = 50
 
@@ -72,8 +66,7 @@ interface Filters {
   provider: string
   range: RangeKey
   // Objects lens:
-  kind: string
-  state: string
+  objectKind: string
   // Actions lens:
   action: string
 }
@@ -81,29 +74,26 @@ interface Filters {
 const EMPTY_FILTERS: Filters = {
   provider: 'all',
   range: 'all',
-  kind: 'all',
-  state: 'all',
+  objectKind: 'all',
   action: 'all',
 }
 
-type FeedRow = ActivityDeliverable | ActivityAction
+type FeedRow = ActivityObject | ActivityAction
 
 /** listPathFor resolves the lens to its own route. */
 function listPathFor(basePath: string, mode: Mode): string {
-  return `${basePath}/${mode === 'actions' ? 'actions' : 'deliverables'}/list`
+  return `${basePath}/${mode === 'actions' ? 'actions' : 'artifacts'}/list`
 }
 
 /** filterBodyFor builds the lens's filter half of the list body. 'all' / ''
  *  selections are omitted so the backend leaves that column unfiltered — and
  *  each lens sends only ITS OWN vocabulary, since the routes decode strictly
- *  and a stray `state` on the actions list is now a 400 rather than a filter
- *  that silently does nothing. */
+ *  and a stray `object_kind` on the actions list is a 400. */
 function filterBodyFor(mode: Mode, f: Filters): ListRequest {
   const body: ListRequest = {}
   if (f.provider !== 'all') body.provider = f.provider
   if (mode === 'objects') {
-    if (f.kind !== 'all') body.kind = f.kind
-    if (f.state !== 'all') body.state = f.state
+    if (f.objectKind !== 'all') body.object_kind = f.objectKind
   } else if (f.action !== 'all') {
     body.action = f.action
   }
@@ -150,7 +140,8 @@ export default function ActivityFeed({
   }, [])
 
   // Switching lens is a clean slate: the filter dimensions differ per lens, so
-  // reset filters + the in-memory scopes rather than carry a stale kind=/action=.
+  // reset filters + the in-memory scopes rather than carry a stale
+  // object_kind=/action=.
   const switchMode = useCallback((next: Mode) => {
     setMode(next)
     setFilters(EMPTY_FILTERS)
@@ -194,11 +185,12 @@ export default function ActivityFeed({
 
   // Distinct teams present in the loaded rows — the org feed's team-scope
   // options. In-memory because the org endpoint is org-wide (no team param).
+  // An action row names one team; an object names every team that changed it.
   const teamOptions = useMemo(() => {
     if (!showTeam || loaded === null) return []
     const seen = new Map<string, string>()
     for (const r of items) {
-      if (r.team_id) seen.set(r.team_id, r.team_name || r.team_id)
+      for (const t of rowTeams(r)) seen.set(t.id, t.name || t.id)
     }
     return [...seen.entries()]
       .map(([id, name]) => ({ id, name }))
@@ -222,7 +214,9 @@ export default function ActivityFeed({
   const visible = useMemo(() => {
     if (loaded === null) return null
     let out = items
-    if (showTeam && teamFilter) out = out.filter((r) => r.team_id === teamFilter)
+    if (showTeam && teamFilter) {
+      out = out.filter((r) => rowTeams(r).some((t) => t.id === teamFilter))
+    }
     if (showTeam && loaded.mode === 'actions' && actorFilter) {
       out = out.filter((r) => (r as ActivityAction).actor_user_id === actorFilter)
     }
@@ -262,11 +256,11 @@ export default function ActivityFeed({
       <div className="mt-1 font-mono text-label tracking-[0.06em] text-ink-3/70">
         {mode === 'actions'
           ? 'audit log of every org-credential action TF took'
-          : 'objects the bot produced + their current state'}
+          : 'each object the agents changed, once, across runs'}
       </div>
 
       {/* Filter bar — adapts per lens. Shared: provider + the time-range tabs.
-          Objects: kind/state. Actions: action (+ org actor scope). */}
+          Objects: object kind. Actions: action (+ org actor scope). */}
       <div className="mt-5 flex flex-wrap items-center gap-x-5 gap-y-2.5">
         <FeedSelect
           label="provider"
@@ -274,36 +268,22 @@ export default function ActivityFeed({
           onChange={(v) => setFilter('provider', v)}
           options={[
             { value: 'all', label: 'All' },
-            ...(mode === 'actions' ? ACTION_PROVIDERS : DELIVERABLE_PROVIDERS).map((p) => ({
+            ...(mode === 'actions' ? ACTION_PROVIDERS : OBJECT_PROVIDERS).map((p) => ({
               value: p,
               label: PROVIDER_LABEL[p] ?? p,
             })),
           ]}
         />
         {mode === 'objects' ? (
-          <>
-            <FeedSelect
-              label="kind"
-              value={filters.kind}
-              onChange={(v) => setFilter('kind', v)}
-              options={[
-                { value: 'all', label: 'All' },
-                ...DELIVERABLE_KINDS.map((k: DeliverableKind) => ({
-                  value: k,
-                  label: KIND_META[k].label,
-                })),
-              ]}
-            />
-            <FeedSelect
-              label="state"
-              value={filters.state}
-              onChange={(v) => setFilter('state', v)}
-              options={[
-                { value: 'all', label: 'All' },
-                ...DELIVERABLE_STATES.map((s) => ({ value: s, label: s })),
-              ]}
-            />
-          </>
+          <FeedSelect
+            label="kind"
+            value={filters.objectKind}
+            onChange={(v) => setFilter('objectKind', v)}
+            options={[
+              { value: 'all', label: 'All' },
+              ...OBJECT_KINDS.map((k) => ({ value: k, label: OBJECT_KIND_META[k].label })),
+            ]}
+          />
         ) : (
           <FeedSelect
             label="action"
@@ -359,15 +339,15 @@ export default function ActivityFeed({
               {visible.map((r) =>
                 rowMode === 'actions' ? (
                   <ActionRow
-                    key={r.id}
+                    key={(r as ActivityAction).id}
                     action={r as ActivityAction}
-                    note={showTeam && r.team_name ? <TeamChip name={r.team_name} /> : undefined}
+                    note={teamChips(showTeam, r)}
                   />
                 ) : (
-                  <DeliverableRow
-                    key={r.id}
-                    deliverable={r as ActivityDeliverable}
-                    note={showTeam && r.team_name ? <TeamChip name={r.team_name} /> : undefined}
+                  <ObjectRow
+                    key={(r as ActivityObject).object_id}
+                    object={r as ActivityObject}
+                    note={teamChips(showTeam, r)}
                   />
                 ),
               )}
@@ -480,7 +460,23 @@ function RangeTabs({ value, onChange }: { value: RangeKey; onChange: (r: RangeKe
   )
 }
 
-// TeamChip — the owning-team tag on an org-feed row (which team acted).
+// rowTeams is the teams a loaded row names: an action's one team, or every
+// team whose runs changed an object.
+function rowTeams(r: FeedRow): { id: string; name: string }[] {
+  if ('id' in r) return r.team_id ? [{ id: r.team_id, name: r.team_name ?? '' }] : []
+  return r.teams ?? []
+}
+
+// teamChips renders a row's team tags on the org feed, and nothing on the team
+// feed, which is one team.
+function teamChips(showTeam: boolean, r: FeedRow): React.ReactNode {
+  if (!showTeam) return undefined
+  const teams = rowTeams(r)
+  if (teams.length === 0) return undefined
+  return teams.map((t) => <TeamChip key={t.id} name={t.name || t.id} />)
+}
+
+// TeamChip — a team tag on an org-feed row (which team acted).
 function TeamChip({ name }: { name: string }) {
   return (
     <span

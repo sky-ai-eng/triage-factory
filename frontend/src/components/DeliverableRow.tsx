@@ -3,25 +3,23 @@ import type { Deliverable } from '../types'
 import { TONE_TEXT, TONE_VAR, type Tone } from './board/cardStyle'
 import { awaitsDecision, metaForKind, overlayKindFor, rowTone } from './deliverableMeta'
 
-// DeliverableRow + StateBadge, factored out of DeliverableList.tsx (TFAC-483) so the
-// bot-activity audit feed can render a provided Deliverable[] with the SAME row
-// rendering — kind icon + target + state badge + link-out — without the
-// conversation-scoped fetch or the approval overlay. DeliverableList still owns the fetch;
-// the feed renders link-out-only rows (no onOpenApproval handler).
+// DeliverableRow + StateBadge, factored out of DeliverableList.tsx: the row
+// rendering — kind icon + target + state badge + link-out — apart from the
+// conversation-scoped fetch, and the state badge the activity feed's object
+// rows carry for a matched deliverable. DeliverableList owns the fetch.
 
 // A single deliverable row. A still-ACTIONABLE pull_request / review row (a draft
 // PR / pending review awaiting an approve-or-dismiss decision) WITH a wired
 // onOpenApproval handler renders as a button that opens the approval overlay
 // (the external link stays reachable as a trailing affordance). Every other row
-// — resolved PRs/reviews, other kinds, and every row in the audit feed, which
-// wires no handler — is the link itself: a submitted review links to the posted
-// review's GitHub anchor, not back into the stale TF-side draft editor.
+// — resolved PRs/reviews, other kinds, and any row with no handler wired — is
+// the link itself: a submitted review links to the posted review's GitHub
+// anchor, not back into the stale TF-side draft editor.
 export function DeliverableRow({
   deliverable,
   onOpenApproval,
   onDismiss,
   dismissing,
-  note,
   highlighted,
 }: {
   deliverable: Deliverable
@@ -29,14 +27,9 @@ export function DeliverableRow({
   // In-place dismiss for a row in the conversation's unresolved set (close the draft PR /
   // discard the pending review without opening its editor). The owner decides
   // which rows get it — DeliverableList gates on the conversation projection's authoritative
-  // pending ids — so the audit feed and resolved rows never carry an [x].
+  // pending ids — so resolved rows never carry an [x].
   onDismiss?: () => void
   dismissing?: boolean
-  // Optional trailing context rendered between the target and the state badge —
-  // the bot-activity org feed (TFAC-483) passes the owning team chip here so a
-  // cross-team row shows which team's bot acted. Undefined elsewhere (the
-  // conversation-scoped list), so those rows are unchanged.
-  note?: React.ReactNode
   // Draws the row in the warm tone that marks work a person acts on, as the
   // Run page's Artifacts section does.
   highlighted?: boolean
@@ -54,7 +47,6 @@ export function DeliverableRow({
       <span className="min-w-0 flex-1 truncate font-mono text-reported text-ink-2">
         {deliverable.target || deliverable.external_id || meta.label}
       </span>
-      {note}
       <StateBadge state={deliverable.state} />
     </>
   )
@@ -93,9 +85,9 @@ export function DeliverableRow({
     )
   }
 
-  // Link-out rows (branch / issue / comment, or any row with no overlay handler —
-  // every audit-feed row). The whole row is the anchor; no external object means
-  // a plain, non-interactive row.
+  // Link-out rows (branch / issue / comment, or any row with no overlay
+  // handler). The whole row is the anchor; no external object means a plain,
+  // non-interactive row.
   if (deliverable.url) {
     return (
       <li className={dismissButton ? 'flex items-center gap-1' : undefined}>
