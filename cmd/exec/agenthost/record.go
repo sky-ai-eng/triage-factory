@@ -594,9 +594,13 @@ type resolvedEntity struct {
 	// and err why it failed.
 	attempted bool
 	entityID  string
-	err       error
-	provider  string
-	target    string
+	// entityKind is the resolved entity's kind (a GitHub pull request or
+	// issue: domain.EntityKindPullRequest, domain.EntityKindIssue), empty
+	// when nothing resolved.
+	entityKind string
+	err        error
+	provider   string
+	target     string
 }
 
 // matches reports whether r resolved (or failed to resolve) the same
@@ -645,7 +649,7 @@ func resolveDeliverableEntity(ctx context.Context, stores db.Stores, info Conver
 		return out
 	}
 	if entity != nil {
-		out.entityID = entity.ID
+		out.entityID, out.entityKind = entity.ID, entity.Kind
 		a.EntityID, a.Target = entity.ID, entity.SourceID
 	}
 	return out
@@ -704,10 +708,19 @@ func resolveActionReferences(ctx context.Context, stores db.Stores, info Convers
 			agenthostLog.Warn("resolving the action's entity failed; recording the action unlinked",
 				"conversation", info.ConversationID, "action", act.Action, "target", act.Target, "error", about.err)
 		case entity != nil:
-			about.entityID = entity.ID
+			about.entityID, about.entityKind = entity.ID, entity.Kind
 		}
 	}
 	act.EntityID = about.entityID
+	// GitHub numbers pull requests and issues in one sequence and serves both
+	// through the issue endpoints, so the endpoint a writer named its object
+	// kind from does not say which this one is. The entity does.
+	if act.Provider == domain.ProviderGitHub && act.EntityID != "" &&
+		(act.ObjectKind == domain.ObjectKindPullRequest || act.ObjectKind == domain.ObjectKindIssue) {
+		if kind := domain.GitHubEntityObjectKind(about.entityKind); kind != "" {
+			act.ObjectKind = kind
+		}
+	}
 	if act.EntityID == "" {
 		act.RepositoryID = resolveActionRepository(ctx, stores, info, act, github)
 	}

@@ -69,9 +69,10 @@ var actionObjectKinds = map[string]string{
 	ActionReviewRequested:      ObjectKindPullRequest,
 	ActionReviewRequestRemoved: ObjectKindPullRequest,
 
-	// owner/repo#N resolves to a pull request entity even when GitHub's
-	// object is an issue, so an issue's label and lock rows name the pull
-	// request kind too.
+	// Labels and locks on an issue go through the same endpoints. Every
+	// GitHub pull request or issue kind here is the endpoint's; the recording
+	// funnel replaces it with the kind of the entity the row resolves to
+	// (GitHubEntityObjectKind).
 	ActionLabelAdded:           ObjectKindPullRequest,
 	ActionLabelRemoved:         ObjectKindPullRequest,
 	ActionConversationLocked:   ObjectKindPullRequest,
@@ -126,9 +127,11 @@ var actionObjectKinds = map[string]string{
 }
 
 // ActionObjectKind returns the kind of object action changes when it lands,
-// "" for an action that names none. A reaction answers pull_request, the kind
-// of a reaction on a pull request or an issue; a writer that knows the
-// reaction landed on a comment names the comment.
+// "" for an action that names none. For a GitHub pull request or issue it is
+// the kind the action's endpoint implies, which the recording funnel replaces
+// with the resolved entity's (GitHubEntityObjectKind). A reaction answers
+// pull_request, the kind of a reaction on a pull request or an issue; a
+// writer that knows the reaction landed on a comment names the comment.
 func ActionObjectKind(action string) string {
 	return actionObjectKinds[action]
 }
@@ -145,6 +148,19 @@ func ActionNamesKind(action, kind string) bool {
 		return true
 	}
 	return kind == ObjectKindComment && (action == ActionReactionAdded || action == ActionReactionRemoved)
+}
+
+// GitHubEntityObjectKind is the object kind of a GitHub entity of kind
+// entityKind: pull_request for a pull request, issue for an issue, "" for
+// anything else.
+func GitHubEntityObjectKind(entityKind string) string {
+	switch entityKind {
+	case EntityKindPullRequest:
+		return ObjectKindPullRequest
+	case EntityKindIssue:
+		return ObjectKindIssue
+	}
+	return ""
 }
 
 // IsRefusalOrFailure reports whether action records a write that was refused

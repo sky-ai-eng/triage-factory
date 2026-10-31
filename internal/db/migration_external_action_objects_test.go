@@ -40,6 +40,7 @@ func TestMigrate_ExternalActionObjectsBackfill(t *testing.T) {
 	}
 	repoID := dbseed.GitHubRepository(t, database, orgID, githubURL, "octo", "api")
 	entity := createEntityForTest(t, database, "github", "octo/api#7", "pr", "A PR", "")
+	issue := createEntityForTest(t, database, "github", "octo/api#9", "issue", "An issue", "")
 
 	jiraIssueKey := domain.ObjectKey(domain.ProviderJira, domain.DeliverableKindIssue, domain.JiraIssueResource(jiraSite, "10042"), "")
 	linearCommentKey := domain.ObjectKey(domain.ProviderLinear, domain.DeliverableKindComment, "uuid-1", "cmt-1")
@@ -84,7 +85,11 @@ func TestMigrate_ExternalActionObjectsBackfill(t *testing.T) {
 	action("reaction", "github", githubURL, domain.ActionReactionAdded, "c-1", "", entity.ID, "")
 	action("review", "github", githubURL, domain.ActionReviewSubmitted, "c-1", "4242", entity.ID, "")
 	action("review-without-id", "github", githubURL, domain.ActionReviewSubmitted, "c-1", "0", entity.ID, "")
-	action("github-issue", "github", githubURL, domain.ActionIssueClosed, "c-1", "7", entity.ID, "")
+	// GitHub serves pull requests and issues through the same endpoints, so
+	// the kind is the entity's whichever the action names.
+	action("issue-endpoint-on-pr", "github", githubURL, domain.ActionIssueClosed, "c-1", "7", entity.ID, "")
+	action("github-issue", "github", githubURL, domain.ActionIssueClosed, "c-1", "9", issue.ID, "")
+	action("label-on-issue", "github", githubURL, domain.ActionLabelAdded, "c-1", "9", issue.ID, "")
 	action("repository", "github", githubURL, domain.ActionRepoEdited, "c-1", "", "", repoID)
 	action("release", "github", githubURL, domain.ActionReleaseEdited, "c-1", "31", "", repoID)
 	action("workflow", "github", githubURL, domain.ActionWorkflowDispatched, "c-1", "ci.yml", "", repoID)
@@ -124,7 +129,9 @@ func TestMigrate_ExternalActionObjectsBackfill(t *testing.T) {
 		"reaction":                {},
 		"review":                  {domain.ObjectKindReview, domain.GitHubReviewObjectKey("4242")},
 		"review-without-id":       {},
+		"issue-endpoint-on-pr":    {domain.ObjectKindPullRequest, ""},
 		"github-issue":            {domain.ObjectKindIssue, ""},
+		"label-on-issue":          {domain.ObjectKindIssue, ""},
 		"repository":              {domain.ObjectKindRepository, ""},
 		"release":                 {domain.ObjectKindRelease, "31"},
 		"workflow":                {domain.ObjectKindWorkflow, "ci.yml"},

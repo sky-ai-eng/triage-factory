@@ -41,24 +41,22 @@ UPDATE external_actions
    AND repository_id IS NOT NULL
    AND external_id IS NOT NULL AND external_id <> '';
 
--- A pull request act about the entity the row references. A reaction is left
--- out: its row does not say whether it landed on the pull request or on one of
--- its comments.
+-- A GitHub pull request or issue act about the entity the row references.
+-- GitHub numbers the two in one sequence and serves both through the issue
+-- endpoints, so the kind is the entity's, not the action's. A reaction is left
+-- out: its row does not say whether it landed on the object or on one of its
+-- comments.
 UPDATE external_actions
-   SET object_kind = 'pull_request'
- WHERE action IN (
+   SET object_kind = CASE (SELECT e.kind FROM entities e WHERE e.id = external_actions.entity_id)
+                       WHEN 'pr' THEN 'pull_request'
+                       WHEN 'issue' THEN 'issue' END
+ WHERE provider = 'github'
+   AND action IN (
         'pr_created', 'pr_marked_ready', 'pr_converted_to_draft', 'pr_edited',
         'pr_closed', 'pr_reopened', 'pr_merged', 'pr_auto_merge_enabled',
         'pr_auto_merge_disabled', 'pr_branch_updated', 'review_requested',
         'review_request_removed', 'label_added', 'label_removed',
-        'conversation_locked', 'conversation_unlocked')
-   AND entity_id IS NOT NULL;
-
--- A GitHub issue act about the entity the row references.
-UPDATE external_actions
-   SET object_kind = 'issue'
- WHERE provider = 'github'
-   AND action IN (
+        'conversation_locked', 'conversation_unlocked',
         'issue_created', 'issue_updated', 'issue_closed', 'issue_reopened',
         'issue_deleted', 'issue_pinned', 'issue_unpinned', 'issue_transferred')
    AND entity_id IS NOT NULL;

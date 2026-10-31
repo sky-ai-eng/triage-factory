@@ -238,3 +238,48 @@ func TestGHChannelWriteAction_NamesTheObject(t *testing.T) {
 		})
 	}
 }
+
+// TestRecordExternalWrite_GitHubObjectKindIsTheEntitys pins that a GitHub row
+// about a pull request or an issue names the kind of the entity it resolves
+// to, whichever endpoint the act came through: GitHub numbers the two in one
+// sequence and serves both through the issue endpoints, so the endpoint does
+// not say which one the act was on.
+func TestRecordExternalWrite_GitHubObjectKindIsTheEntitys(t *testing.T) {
+	ctx := context.Background()
+	stores, info := newCaptureStores(t, true)
+	registerRepo(t, stores, "octo", "repo", "1")
+	object := func(nodeID, kind string) domain.GitHubIdentity {
+		return domain.GitHubIdentity{RepositoryID: "1", Repository: "octo/repo", NodeID: nodeID, Kind: kind}
+	}
+	cases := []struct {
+		name, action, target, endpointKind string
+		read                               domain.GitHubIdentity
+		want                               string
+	}{
+		{"label on an issue", domain.ActionLabelAdded, "octo/repo#5", domain.ObjectKindPullRequest,
+			object("I_5", domain.EntityKindIssue), domain.ObjectKindIssue},
+		{"issue endpoint on a pull request", domain.ActionIssueUpdated, "octo/repo#6", domain.ObjectKindIssue,
+			object("PR_6", domain.EntityKindPullRequest), domain.ObjectKindPullRequest},
+	}
+	for _, c := range cases {
+		act := &domain.ExternalAction{
+			Provider: domain.ProviderGitHub, Action: c.action, Target: c.target,
+			Credential: domain.CredentialGitHubApp, DedupKey: c.name,
+		}
+		act.SetObject(c.endpointKind, "")
+		recordExternalWrite(ctx, stores, info, nil, act, domain.EntityContainer{}, c.read)
+	}
+	byKey := map[string]domain.ExternalAction{}
+	for _, a := range listExternalActions(t, stores) {
+		byKey[a.DedupKey] = a
+	}
+	for _, c := range cases {
+		row, ok := byKey[c.name]
+		if !ok || row.EntityID == "" {
+			t.Fatalf("%s: row %+v, want one linked to its entity", c.name, row)
+		}
+		if got, ok := domain.ObjectID(row); !ok || got != c.want+"|"+row.EntityID {
+			t.Errorf("%s: ObjectID = (%q, %v), want %q", c.name, got, ok, c.want+"|"+row.EntityID)
+		}
+	}
+}
