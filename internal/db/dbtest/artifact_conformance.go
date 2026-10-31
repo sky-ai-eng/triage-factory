@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -220,6 +221,12 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 			Provider: domain.ProviderGitHub, Scope: TestGitHubHost, Action: domain.ActionPRMerged,
 			Target: "octo/api#7", ObjectKind: domain.ObjectKindPullRequest,
 		}, at(5))
+		// A refusal and a catch-all are no artifact even when their writer
+		// named an object, which the recording funnel never lets one do.
+		refusedPush := branch(s, domain.ActionBranchPushFailed, "octo/api", "")
+		record(t, s, conv, refusedPush, at(6))
+		catchAll := pullRequest(s, domain.ActionGHChannelWrite)
+		record(t, s, conv, catchAll, at(7))
 
 		if got, total := list(t, s, conv, db.Unwindowed); len(got) != 0 || total != 0 {
 			t.Fatalf("read %d artifacts (total %d), want none: %+v", len(got), total, got)
@@ -236,8 +243,8 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 		}
 
 		// The agent's own row on the same pull request is the artifact, and the
-		// person's and TF's rows do not count toward it.
-		record(t, s, conv, pullRequest(s, domain.ActionPRCreated), at(6))
+		// person's, TF's and the catch-all's rows do not count toward it.
+		record(t, s, conv, pullRequest(s, domain.ActionPRCreated), at(8))
 		got, _ := list(t, s, conv, db.Unwindowed)
 		if len(got) != 1 || got[0].ActionCount != 1 || got[0].LastAction != domain.ActionPRCreated {
 			t.Errorf("after the agent's row: %+v, want one artifact of one pr_created row", got)
@@ -267,6 +274,23 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 		if got[0].Target != renamed.SourceID || got[0].URL != renamed.URL || got[0].EntityID != s.pr.ID {
 			t.Errorf("display = (%q, %q, entity %q), want the entity's (%q, %q, %q)",
 				got[0].Target, got[0].URL, got[0].EntityID, renamed.SourceID, renamed.URL, s.pr.ID)
+		}
+	})
+
+	t.Run("An_entity_with_no_url_displays_the_latest_rows_url", func(t *testing.T) {
+		s := setup(t)
+		conv := s.f.NewConversation(t)
+		stub, _, err := s.f.Stores.Entities.FindOrCreateSystem(ctx, s.f.OrgID, "github", TestGitHubHost,
+			"octo/api#8", "PR_art8", domain.EntityKindPullRequest, "", "")
+		if err != nil {
+			t.Fatalf("seed url-less entity: %v", err)
+		}
+		row := pullRequest(s, domain.ActionPRCreated)
+		row.EntityID, row.Target, row.URL = stub.ID, "octo/api#8", TestGitHubHost+"/octo/api/pull/8"
+		record(t, s, conv, row, at(1))
+		got, _ := list(t, s, conv, db.Unwindowed)
+		if len(got) != 1 || got[0].Target != "octo/api#8" || got[0].URL != row.URL {
+			t.Errorf("artifacts = %+v, want the entity's key and the row's url %q", got, row.URL)
 		}
 	})
 
@@ -366,21 +390,10 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 			}
 			return out, total
 		}
-		same := func(got []string, want ...string) bool {
-			if len(got) != len(want) {
-				return false
-			}
-			for i := range got {
-				if got[i] != want[i] {
-					return false
-				}
-			}
-			return true
-		}
-		if got, total := ids(t, domain.ExternalActionListOpts{ObjectID: objectID(t, push)}); !same(got, again.ID, push.ID) || total != 2 {
+		if got, total := ids(t, domain.ExternalActionListOpts{ObjectID: objectID(t, push)}); !slices.Equal(got, []string{again.ID, push.ID}) || total != 2 {
 			t.Errorf("object filter = %v (total %d), want the branch's two rows newest first", got, total)
 		}
-		if got, total := ids(t, domain.ExternalActionListOpts{Refused: true}); !same(got, failed.ID, denied.ID) || total != 2 {
+		if got, total := ids(t, domain.ExternalActionListOpts{Refused: true}); !slices.Equal(got, []string{failed.ID, denied.ID}) || total != 2 {
 			t.Errorf("refusal filter = %v (total %d), want the two refused or failed rows", got, total)
 		}
 		if got, total := ids(t, domain.ExternalActionListOpts{ObjectID: objectID(t, push), Refused: true}); len(got) != 0 || total != 0 {

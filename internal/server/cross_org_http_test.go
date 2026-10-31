@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -127,12 +128,55 @@ func TestCrossOrgHTTP_AgentArtifacts(t *testing.T) {
 	alice, _, orgA, sidA, sidB := setupTwoOrgSession(t, r)
 	runA := seedConversationInOrg(t, r, orgA, alice, "run-artifacts")
 
+	// One agent row on the run's pull request, so alice's read returns a row
+	// through the app pool's policies: the grouped ledger read and its
+	// entities join, under her claims.
+	var entityID, sourceID string
+	if err := r.h.AdminDB.QueryRow(`
+		SELECT e.id::text, e.source_id FROM conversations c
+		  JOIN tasks t ON t.id = c.task_id JOIN entities e ON e.id = t.entity_id
+		 WHERE c.id = $1`, runA).Scan(&entityID, &sourceID); err != nil {
+		t.Fatalf("read the run's entity: %v", err)
+	}
+	const rowURL = "https://github.com/octo/pull/1"
+	if _, err := r.h.AdminDB.Exec(`
+		INSERT INTO external_actions (org_id, team_id, provider, scope, action, target, url, conversation_id,
+		                              credential, dedup_key, entity_id, performed_by, object_kind)
+		VALUES ($1, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1),
+		        'github', 'https://github.com', 'pr_created', 'stale/key#1', $2, $3,
+		        'github_app', gen_random_uuid()::text, $4, 'agent', 'pull_request')
+	`, orgA, rowURL, runA, entityID); err != nil {
+		t.Fatalf("seed ledger row: %v", err)
+	}
+
 	path := "/api/agent/conversations/" + runA + "/artifacts/list"
-	if got := r.postJSONWithSid("POST", path, sidA, map[string]any{}).StatusCode; got != http.StatusOK {
-		t.Errorf("alice POST %s = %d, want 200", path, got)
+	resp := r.postJSONWithSid("POST", path, sidA, map[string]any{})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("alice POST %s = %d, want 200", path, resp.StatusCode)
+	}
+	var page struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
+		t.Fatalf("decode artifacts: %v", err)
+	}
+	_ = resp.Body.Close()
+	// The seeded entity has an empty url, so the row's stands in.
+	if len(page.Items) != 1 || page.Items[0]["target"] != sourceID || page.Items[0]["url"] != rowURL {
+		t.Errorf("alice's artifacts = %v, want one with target %q and url %q", page.Items, sourceID, rowURL)
 	}
 	if got := r.postJSONWithSid("POST", path, sidB, map[string]any{}).StatusCode; got != http.StatusNotFound {
 		t.Errorf("bob POST %s = %d, want 404 (cross-org leak)", path, got)
+	}
+
+	conv := r.requestWithSid("GET", "/api/agent/conversations/"+runA, sidA)
+	var m map[string]any
+	if err := json.NewDecoder(conv.Body).Decode(&m); err != nil {
+		t.Fatalf("decode conversation: %v", err)
+	}
+	_ = conv.Body.Close()
+	if m["artifact_count"] != float64(1) {
+		t.Errorf("alice's artifact_count = %v, want 1", m["artifact_count"])
 	}
 }
 

@@ -3,7 +3,6 @@ package sqlite
 import (
 	"context"
 	"database/sql"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -252,11 +251,9 @@ func appendExternalActionPredicates(query string, args []any, opts domain.Extern
 		args = append(args, opts.ObjectID)
 	}
 	if opts.Refused {
-		refusals := domain.RefusalOrFailureActions()
-		query += ` AND action IN (?` + strings.Repeat(`, ?`, len(refusals)-1) + `)`
-		for _, action := range refusals {
-			args = append(args, action)
-		}
+		placeholders, refusals := inListArgs(domain.RefusalOrFailureActions())
+		query += ` AND action IN (` + placeholders + `)`
+		args = append(args, refusals...)
 	}
 	if !opts.Since.IsZero() {
 		query += ` AND datetime(occurred_at) >= datetime(?)`

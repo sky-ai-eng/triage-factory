@@ -372,7 +372,9 @@ func (ag *agentHandler) handleAgentDeliverables(w http.ResponseWriter, r *http.R
 // /api/agent/conversations/{conversationID}/actions/list. The conversation is
 // the path id. ObjectID keeps the rows that changed one object (an
 // artifact's object_id); Refused keeps the refused and failed writes. Both
-// are optional and may be given together.
+// are optional and may be given together. The filters are fields of the body
+// itself rather than an embedded struct, so a type fault names them as the
+// caller spelled them.
 type conversationActionListRequest struct {
 	ObjectID string `json:"object_id"`
 	Refused  bool   `json:"refused"`
@@ -569,7 +571,7 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 		}
 		artifacts, total, e = tx.Artifacts.ListByConversation(r.Context(), orgID, conversationID,
 			db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
-		if e != nil || len(artifacts) == 0 {
+		if e != nil || !slices.ContainsFunc(artifacts, domain.ArtifactMayHaveDeliverable) {
 			return e
 		}
 		// Every deliverable, not a page of them: the match decides which

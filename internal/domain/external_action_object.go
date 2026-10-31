@@ -175,17 +175,35 @@ func GitHubEntityObjectKind(entityKind string) string {
 	return ""
 }
 
+var refusalOrFailureActions = []string{
+	ActionGitDenied, ActionEgressDenied, ActionGHWriteDenied, ActionCommitSignDenied, ActionBranchPushFailed,
+}
+
 // RefusalOrFailureActions is the actions that record a write that was refused
-// or failed. The ledger's list reads build their refusal filter's IN list
-// from it, so the filter and IsRefusalOrFailure cannot disagree.
+// or failed. The ledger's list reads build their refusal filter from it, so
+// the filter and IsRefusalOrFailure cannot disagree.
 func RefusalOrFailureActions() []string {
-	return []string{ActionGitDenied, ActionEgressDenied, ActionGHWriteDenied, ActionCommitSignDenied, ActionBranchPushFailed}
+	return slices.Clone(refusalOrFailureActions)
 }
 
 // IsRefusalOrFailure reports whether action records a write that was refused
 // or failed: nothing landed, and the row names no object.
 func IsRefusalOrFailure(action string) bool {
-	return slices.Contains(RefusalOrFailureActions(), action)
+	return slices.Contains(refusalOrFailureActions, action)
+}
+
+// ActionsNamingNoObject is every action ActionObjectKind gives no kind: the
+// refusals and failures, the catch-alls, and the actions that never land.
+// The artifact reads exclude their rows whatever the rows carry, so a writer
+// that named an object on one cannot make it an artifact.
+func ActionsNamingNoObject() []string {
+	var out []string
+	for _, action := range ExternalActionTypes() {
+		if ActionObjectKind(action) == "" {
+			out = append(out, action)
+		}
+	}
+	return out
 }
 
 // IsObjectID reports whether s has the shape ObjectID renders: a known object
@@ -193,7 +211,16 @@ func IsRefusalOrFailure(action string) bool {
 // carries it.
 func IsObjectID(s string) bool {
 	kind, rest, ok := strings.Cut(s, "|")
-	return ok && rest != "" && slices.Contains(ObjectKinds(), kind)
+	if !ok || rest == "" {
+		return false
+	}
+	switch kind {
+	case ObjectKindPullRequest, ObjectKindIssue, ObjectKindRepository, ObjectKindBranch, ObjectKindLabel,
+		ObjectKindRelease, ObjectKindWorkflow, ObjectKindWorkflowRun, ObjectKindReview, ObjectKindComment,
+		ObjectKindMessage:
+		return true
+	}
+	return false
 }
 
 // objectKindKeyed reports whether an object of kind is identified with an

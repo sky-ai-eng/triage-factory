@@ -25,16 +25,18 @@ func newArtifactStore(q, admin queryer) db.ArtifactStore {
 var _ db.ArtifactStore = (*artifactStore)(nil)
 
 // pgArtifactRowFilter is what every artifact read adds to its own WHERE: the
-// agent's rows that name an object.
-const pgArtifactRowFilter = ` AND ea.performed_by = 'agent' AND (` + pgActionObjectIDSQL + `) IS NOT NULL`
+// agent's rows that name an object, of an action that can name one.
+var pgArtifactRowFilter = ` AND ea.performed_by = 'agent' AND ea.action NOT IN (` + db.ArtifactExcludedActionsSQL +
+	`) AND (` + pgActionObjectIDSQL + `) IS NOT NULL`
 
 // pgArtifactSelect is the grouped read over the rows where selects, ending
 // in a WHERE the caller may extend with ORDER BY and a window. Each group's
 // latest row (greatest occurred_at, id) supplies the action, target and url;
-// the window aggregates supply the count and the earliest occurred_at. A kind
-// identified by entity_id displays the entity's current key and url, falling
-// back to the row's when the entity is not readable; the kinds and the split
-// on provider are pgActionObjectIDSQL's entity arms.
+// the window aggregates supply the count and the earliest occurred_at. The
+// entity is joined only for a kind identified by entity_id (the kinds and
+// the split on provider are pgActionObjectIDSQL's entity arms), and its key
+// and url win over the row's; the row's stand in when the entity is not
+// readable or has no url yet.
 func pgArtifactSelect(where string) string {
 	return `
 	WITH scoped AS (
@@ -53,13 +55,11 @@ func pgArtifactSelect(where string) string {
 	)
 	SELECT g.object_id, g.object_kind, g.provider, g.scope,
 	       COALESCE(g.entity_id::text, ''), COALESCE(g.repository_id::text, ''), COALESCE(g.object_key, ''),
-	       CASE WHEN e.id IS NOT NULL AND (g.object_kind = 'pull_request' OR (g.object_kind = 'issue' AND g.provider = 'github'))
-	            THEN e.source_id ELSE g.target END,
-	       CASE WHEN e.id IS NOT NULL AND (g.object_kind = 'pull_request' OR (g.object_kind = 'issue' AND g.provider = 'github'))
-	            THEN COALESCE(e.url, '') ELSE g.url END,
+	       COALESCE(e.source_id, g.target), COALESCE(NULLIF(e.url, ''), g.url),
 	       g.action, g.action_count, g.first_at, g.occurred_at
 	  FROM grouped g
 	  LEFT JOIN entities e ON e.id = g.entity_id AND e.org_id = g.org_id
+	       AND (g.object_kind = 'pull_request' OR (g.object_kind = 'issue' AND g.provider = 'github'))
 	 WHERE g.rn = 1`
 }
 

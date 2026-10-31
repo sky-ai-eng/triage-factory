@@ -23,8 +23,9 @@ func newArtifactStore(q queryer) db.ArtifactStore {
 var _ db.ArtifactStore = (*artifactStore)(nil)
 
 // sqliteArtifactRowFilter is what every artifact read adds to its own WHERE:
-// the agent's rows that name an object.
-const sqliteArtifactRowFilter = ` AND ea.performed_by = 'agent' AND (` + sqliteActionObjectIDSQL + `) IS NOT NULL`
+// the agent's rows that name an object, of an action that can name one.
+var sqliteArtifactRowFilter = ` AND ea.performed_by = 'agent' AND ea.action NOT IN (` + db.ArtifactExcludedActionsSQL +
+	`) AND (` + sqliteActionObjectIDSQL + `) IS NOT NULL`
 
 // sqliteArtifactSelect is the Postgres impl's grouped read (see
 // pgArtifactSelect for the model). occurred_at is text here, ordered as text
@@ -49,13 +50,11 @@ func sqliteArtifactSelect(where string) string {
 	)
 	SELECT g.object_id, g.object_kind, g.provider, g.scope,
 	       COALESCE(g.entity_id, ''), COALESCE(g.repository_id, ''), COALESCE(g.object_key, ''),
-	       CASE WHEN e.id IS NOT NULL AND (g.object_kind = 'pull_request' OR (g.object_kind = 'issue' AND g.provider = 'github'))
-	            THEN e.source_id ELSE g.target END,
-	       CASE WHEN e.id IS NOT NULL AND (g.object_kind = 'pull_request' OR (g.object_kind = 'issue' AND g.provider = 'github'))
-	            THEN COALESCE(e.url, '') ELSE g.url END,
+	       COALESCE(e.source_id, g.target), COALESCE(NULLIF(e.url, ''), g.url),
 	       g.action, g.action_count, g.first_at, g.occurred_at
 	  FROM grouped g
 	  LEFT JOIN entities e ON e.id = g.entity_id AND e.org_id = g.org_id
+	       AND (g.object_kind = 'pull_request' OR (g.object_kind = 'issue' AND g.provider = 'github'))
 	 WHERE g.rn = 1`
 }
 

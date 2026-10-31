@@ -9,8 +9,9 @@ import "time"
 //
 // Target and URL are display values. For a kind identified by EntityID (a
 // pull request, a GitHub issue) they are the entity's current key and url,
-// which follow a rename. For every other kind they are the latest row's
-// target and its url, current_url when a rename has moved the object.
+// which follow a rename, with the latest row's url standing in while the
+// entity has none. For every other kind they are the latest row's target and
+// its url, current_url when a rename has moved the object.
 // "Latest row" is the greatest (occurred_at, id) in the group.
 type Artifact struct {
 	ObjectID   string
@@ -42,6 +43,9 @@ type Artifact struct {
 // a staged review has no artifact to match. When more than one deliverable
 // matches, the first in the slice answers.
 func ArtifactDeliverable(a Artifact, deliverables []Deliverable) (Deliverable, bool) {
+	if !ArtifactMayHaveDeliverable(a) {
+		return Deliverable{}, false
+	}
 	for _, d := range deliverables {
 		switch {
 		case a.ObjectKind == ObjectKindPullRequest && d.Kind == DeliverableKindPullRequest:
@@ -55,4 +59,11 @@ func ArtifactDeliverable(a Artifact, deliverables []Deliverable) (Deliverable, b
 		}
 	}
 	return Deliverable{}, false
+}
+
+// ArtifactMayHaveDeliverable reports whether a is of a kind
+// ArtifactDeliverable can match: a pull request or a review. A reader with
+// none of these needs no deliverables.
+func ArtifactMayHaveDeliverable(a Artifact) bool {
+	return a.ObjectKind == ObjectKindPullRequest || a.ObjectKind == ObjectKindReview
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -250,13 +249,8 @@ func appendPgExternalActionPredicates(query string, args []any, opts domain.Exte
 		query += fmt.Sprintf(" AND (%s) = $%d", pgActionObjectIDSQL, len(args))
 	}
 	if opts.Refused {
-		refusals := domain.RefusalOrFailureActions()
-		placeholders := make([]string, len(refusals))
-		for i, action := range refusals {
-			args = append(args, action)
-			placeholders[i] = fmt.Sprintf("$%d", len(args))
-		}
-		query += " AND action IN (" + strings.Join(placeholders, ", ") + ")"
+		args = append(args, domain.RefusalOrFailureActions())
+		query += fmt.Sprintf(" AND action = ANY($%d)", len(args))
 	}
 	if !opts.Since.IsZero() {
 		args = append(args, opts.Since)

@@ -3,9 +3,25 @@ package db
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
+
+// ArtifactExcludedActionsSQL is domain.ActionsNamingNoObject as a list of SQL
+// string literals, for the artifact reads' `action NOT IN (...)`: a row of
+// one of these actions is never an artifact, whatever object it carries. The
+// values are TF's own action names; each is quoted with any single quote
+// doubled, which both dialects read the same way.
+var ArtifactExcludedActionsSQL = sqlStringLiterals(domain.ActionsNamingNoObject())
+
+func sqlStringLiterals(values []string) string {
+	quoted := make([]string, len(values))
+	for i, v := range values {
+		quoted[i] = "'" + strings.ReplaceAll(v, "'", "''") + "'"
+	}
+	return strings.Join(quoted, ", ")
+}
 
 // RequireArtifactOffsetPage refuses a keyset window: the artifact lists page
 // by offset. Both dialects call it before touching the database.
@@ -21,8 +37,9 @@ func RequireArtifactOffsetPage(opts ListOpts) error {
 // conversation the read asks for, have performed_by = 'agent', and name an
 // object (the dialect's SQL twin of domain.ObjectID is non-NULL), grouped by
 // that object id. A person's and TF's own rows never form an artifact, and
-// neither does a refusal, a failure or a catch-all row, none of which names an
-// object. Rows whose conversation was purged (conversation_id NULL) answer for
+// neither does a row of an action that names no object (a refusal, a
+// failure, a catch-all; ArtifactExcludedActionsSQL), whatever object it
+// carries. Rows whose conversation was purged (conversation_id NULL) answer for
 // no conversation. See domain.Artifact for the fields and the display rule.
 //
 // The app-pool methods run under the caller's claims in Postgres, where the
