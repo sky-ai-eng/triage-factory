@@ -873,6 +873,21 @@ func (s *Server) routes() {
 	// from the session and there is no id to address.
 	s.api("GET /api/me/settings", s.handleMeSettingsGet)
 	s.apiMutating("PATCH /api/me/settings", s.handleMeSettingsPatch)
+	// The caller's notification inbox, their marks on it, and the rows'
+	// invoke actions. Viewer-relative: the org is the credential's, so an API
+	// token reaches all of it. The list is the rows the caller is SENT; the
+	// single read, the marks and the actions take any row they may READ,
+	// which for an org admin includes every team's. mark-read is a verb
+	// because it is a multi-row transition over the ids the client rendered.
+	s.apiMutating("POST /api/me/notifications/list", s.handleNotificationList)
+	s.apiMutating("POST /api/me/notifications/mark-read", s.handleNotificationMarkRead)
+	s.api("GET /api/me/notifications/{id}", s.handleNotificationGet)
+	s.apiMutating("PATCH /api/me/notifications/{id}", s.handleNotificationMarksPatch)
+	s.apiMutating("POST /api/me/notifications/{id}/actions/{action_id}", s.handleNotificationAction)
+	// The org admin's "All teams" view: every row in the org, team rows
+	// included, which an org admin may read but is not sent. Authorized
+	// against {org_id}; a member who is not an admin gets 403.
+	s.apiMutating("POST /api/orgs/{org_id}/notifications/list", s.handleOrgNotificationList)
 	// Create the org — the "Start your Factory" onboarding CTA in
 	// both modes. Multi mints a net-new org (403 when org creation is
 	// disabled on the instance); local provisions its single synthetic
