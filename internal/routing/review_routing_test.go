@@ -17,7 +17,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // reviewTestHost is the org's GitHub host. Identities are bound to it and
@@ -29,12 +28,7 @@ const reviewTestHost = "https://github.com"
 // path consumes: Users (login→user_ids), Teams (user→teams), Orgs
 // (host), and TeamGitHubGroups (github-team→TF-team).
 func reviewRouter(database *sql.DB) *Router {
-	st := sqlitestore.New(database)
-	return NewRouter(
-		testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, st.Users,
-		testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.ExternalActions,
-		st.Orgs, st.Teams, nil, nil, nil, st.TeamGitHubGroups, nil, noopScorer{}, websocket.NewHub(),
-	)
+	return newTestRouter(testRouterDeps(database))
 }
 
 // setReviewHost stamps the github row's base_url on org_event_sources for the

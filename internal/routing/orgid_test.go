@@ -11,7 +11,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // TestHandleEvent_EmptyOrgID_Refused pins the defensive early-return
@@ -48,7 +47,7 @@ func TestHandleEvent_EmptyOrgID_Refused(t *testing.T) {
 		t.Fatalf("create entity: %v", err)
 	}
 
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).ExternalActions, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
+	router := newTestRouter(testRouterDeps(database))
 
 	err = router.HandleEvent(context.Background(), domain.Event{
 		EventType:    domain.EventGitHubPRCICheckFailed,
@@ -114,7 +113,7 @@ func TestHandleEvent_OrgIDThreaded(t *testing.T) {
 		t.Fatalf("create entity: %v", err)
 	}
 
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).ExternalActions, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
+	router := newTestRouter(testRouterDeps(database))
 
 	router.HandleEvent(context.Background(), domain.Event{
 		EventType:    domain.EventGitHubPRCICheckFailed,

@@ -12,7 +12,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // The worker's recovery and race behavior, on the SQLite handle the local
@@ -39,14 +38,12 @@ func (h hookedReDerive) Complete(ctx context.Context, r workitem.Receipt, effect
 func hookedReDeriveRouter(t *testing.T, database *sql.DB, handlers db.EventHandlerStore, beforeComplete func()) *Router {
 	t.Helper()
 	seedLocalBot(t, database)
-	st := sqlitestore.New(database)
-	if handlers == nil {
-		handlers = testEventHandlerStore(database)
+	deps := testRouterDeps(database)
+	if handlers != nil {
+		deps.Handlers = handlers
 	}
-	r := NewRouter(testPromptStore(database), testBlueprintStore(database), handlers, st.Agents, st.TeamAgents, nil, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.ExternalActions, st.Orgs, st.Teams, nil, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
-	r.SetTaskReDerive(hookedReDerive{TaskReDeriveStore: st.TaskReDerive, beforeComplete: beforeComplete})
-	r.SetExecutorID("rederive-worker-test", 1)
-	return r
+	deps.ReDerive = hookedReDerive{TaskReDeriveStore: sqlitestore.New(database).TaskReDerive, beforeComplete: beforeComplete}
+	return newTestRouter(deps)
 }
 
 // expireReDeriveLease rewinds a leased row's lease into the past, standing
@@ -89,7 +86,7 @@ func TestReDeriveWorker_ReclaimsADeadHoldersRowAndEvaluatesOnce(t *testing.T) {
 	}
 	expireReDeriveLease(t, database, taskID)
 
-	r := reDeriveRouter(t, database, nil)
+	r := reDeriveRouter(t, database, refusingDelegator{})
 	drainReDeriveOnce(t, r)
 
 	firings := firingsForTask(t, database, taskID)
@@ -205,7 +202,7 @@ func TestReDeriveWorker_ReadFailureRequeuesWithBackoffAndParksOnTheFifth(t *test
 	if err := workitem.Redrive(t.Context(), h.Conn(), h.Kind(), runmode.LocalDefaultOrgID, row.id, "operator"); err != nil {
 		t.Fatalf("Redrive: %v", err)
 	}
-	drainReDeriveOnce(t, reDeriveRouter(t, database, nil))
+	drainReDeriveOnce(t, reDeriveRouter(t, database, refusingDelegator{}))
 	if firings := firingsForTask(t, database, taskID); len(firings) != 1 {
 		t.Errorf("redriven evaluation admitted %d firing(s), want 1", len(firings))
 	}

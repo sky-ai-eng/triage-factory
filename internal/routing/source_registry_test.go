@@ -14,7 +14,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // fakeEventType is the out-of-core event type these tests route through the
@@ -94,10 +93,7 @@ func fakeEvent(entityID string) domain.Event {
 // TeamGitHubGroups, ...) are nil — the fake source's ResolveOwner hook
 // replaces the built-in author/assignee resolution entirely.
 func fakeSourceRouter(database *sql.DB) *Router {
-	st := sqlitestore.New(database)
-	return NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil,
-		testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.ExternalActions,
-		st.Orgs, st.Teams, nil, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
+	return newTestRouter(testRouterDeps(database))
 }
 
 // fakeSourceHooks builds SourceHooks for teamID: ResolveOwner always
@@ -166,18 +162,13 @@ func noOwnerSourceHooks() SourceHooks {
 	}
 }
 
-// fakeSourceQueueRouter is fakeSourceRouter plus the durable queue and a
-// delegator, so a test can route through the drain worker — the thing that
-// decides done vs. requeued — instead of calling HandleEvent directly.
+// fakeSourceQueueRouter is fakeSourceRouter with a delegator, for a test that
+// routes through the drain worker — the thing that decides done vs. requeued —
+// instead of calling HandleEvent directly.
 func fakeSourceQueueRouter(database *sql.DB, spawner Delegator) *Router {
-	st := sqlitestore.New(database)
-	r := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database),
-		st.Agents, st.TeamAgents, nil, testTaskStore(database), st.Conversations, st.Entities,
-		st.PendingFirings, st.Events, st.ExternalActions, st.Orgs, st.Teams, nil, nil, nil, nil, spawner,
-		noopScorer{}, websocket.NewHub())
-	r.SetEventQueue(st.EventQueue)
-	r.SetExecutorID(testExecutorID, 1)
-	return r
+	deps := testRouterDeps(database)
+	deps.Spawner = spawner
+	return newTestRouter(deps)
 }
 
 // TestSourceRegistry_OwnershipModelForEvent pins wire point 1

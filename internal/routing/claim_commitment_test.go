@@ -8,7 +8,6 @@ import (
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // claimScenario is one entity + task + trigger with the org bot wired and
@@ -82,9 +81,9 @@ func setupClaimScenario(t *testing.T, suffix string) claimScenario {
 	}
 
 	stub := &stubDelegator{db: database}
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database),
-		stores.Agents, stores.TeamAgents, nil, testTaskStore(database), stores.Conversations, stores.Entities,
-		stores.PendingFirings, stores.Events, stores.ExternalActions, stores.Orgs, stores.Teams, nil, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
+	deps := testRouterDeps(database)
+	deps.Spawner = stub
+	router := newTestRouter(deps)
 
 	return claimScenario{db: database, router: router, stub: stub, task: task, trigger: trigger, entity: entity.ID, event: eventID}
 }
@@ -298,7 +297,6 @@ func TestFiringWorker_DoesNotReStampAClearedClaim(t *testing.T) {
 	endTaskConversations(t, s.db, s.task.ID)
 
 	before := s.autoRuns(t)
-	s.router.SetExecutorID("firing-worker-test", 1)
 	drainOnce(t, s.router)
 
 	if agent, user := s.claim(t); agent != "" || user != "" {

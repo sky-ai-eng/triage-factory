@@ -16,7 +16,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // newGateDB spins up a migrated SQLite test DB with the event_handler FK
@@ -78,14 +77,18 @@ func ciEvent(t *testing.T, entityID, repo string) domain.Event {
 	}
 }
 
+// gateRouter is a router whose GitHub and Jira tracking gates read the SQLite
+// stores, so the tracking a test seeds decides them.
 func gateRouter(database *sql.DB) *Router {
+	return newTestRouter(gateRouterDeps(database))
+}
+
+// gateRouterDeps is gateRouter's RouterDeps, for a test that varies more.
+func gateRouterDeps(database *sql.DB) RouterDeps {
 	st := sqlitestore.New(database)
-	// Users wired so author-centric owner resolution (the PR author → team
-	// ladder) runs — the gate operates on the visibility set either way, but
-	// wiring it lets the CI tests assert a real owner instead of a NULL one.
-	return NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, st.Users,
-		testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.ExternalActions,
-		st.Orgs, st.Teams, st.TeamGitHubRepos, st.JiraStatusRules, nil, nil, nil, noopScorer{}, websocket.NewHub())
+	deps := testRouterDeps(database)
+	deps.TeamRepos, deps.JiraRules = st.TeamGitHubRepos, st.JiraStatusRules
+	return deps
 }
 
 // TestGate_DisjointRepos_DropsUntrackingTeam is acceptance #1: two teams
@@ -248,7 +251,6 @@ func TestGate_MatchesTheEntitysRepositoryByID(t *testing.T) {
 // escape hatches the gate must honor regardless of tracking state.
 func TestGate_EscapeHatches(t *testing.T) {
 	dbh := newGateDB(t)
-	st := sqlitestore.New(dbh)
 	// A gate-active router whose teamRepos store tracks *nothing*, so any
 	// allow result must come from an escape hatch, not from tracking.
 	r := gateRouter(dbh)
@@ -261,30 +263,14 @@ func TestGate_EscapeHatches(t *testing.T) {
 		t.Error("empty-team (system) handler should skip the gate")
 	}
 
-	jiraEvt := domain.Event{
-		EventType:    domain.EventJiraIssueAssigned,
-		MetadataJSON: `{"project":"SKY"}`,
-		OrgID:        runmode.LocalDefaultOrgID,
-	}
-
-	// (2) teamRepos + jiraRules unwired (nil) → pre-ticket behavior, never
-	// drops, for either source.
-	rNil := NewRouter(nil, nil, nil, nil, nil, nil, nil, st.Conversations, st.Entities, st.PendingFirings, st.Events, st.ExternalActions, st.Orgs, st.Teams, nil, nil, nil, nil, nil, noopScorer{}, nil)
-	if !rNil.handlerScopeMatchesEvent(context.Background(), githubEvt, domain.EventHandler{TeamID: "some-real-team"}, teamScopeCache{}) {
-		t.Error("nil teamRepos store should skip the GitHub gate")
-	}
-	if !rNil.handlerScopeMatchesEvent(context.Background(), jiraEvt, domain.EventHandler{TeamID: "some-real-team"}, teamScopeCache{}) {
-		t.Error("nil jiraRules store should skip the Jira gate")
-	}
-
-	// (3) Unknown source → ungated even with a gate-active router + a real
+	// (2) Unknown source → ungated even with a gate-active router + a real
 	// team that tracks nothing.
 	otherEvt := domain.Event{EventType: "system:poll:done", MetadataJSON: `{}`, OrgID: runmode.LocalDefaultOrgID}
 	if !r.handlerScopeMatchesEvent(context.Background(), otherEvt, domain.EventHandler{TeamID: "some-real-team"}, teamScopeCache{}) {
 		t.Error("non-github/jira event should skip the scope gate")
 	}
 
-	// (4) Malformed/empty project metadata on a gate-active router →
+	// (3) Malformed/empty project metadata on a gate-active router →
 	// fail-open (no drop), same policy as the GitHub branch.
 	emptyProjEvt := domain.Event{EventType: domain.EventJiraIssueAssigned, MetadataJSON: `{}`, OrgID: runmode.LocalDefaultOrgID}
 	if !r.handlerScopeMatchesEvent(context.Background(), emptyProjEvt, domain.EventHandler{TeamID: "some-real-team"}, teamScopeCache{}) {

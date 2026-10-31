@@ -16,7 +16,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // fenceStubDelegator mirrors the production spawner's event-path fence
@@ -107,13 +106,13 @@ func recordFenceEvent(t *testing.T, database *sql.DB, entityID string) domain.Ev
 	return evt
 }
 
+// fenceRouter is a router over spawner with no Agents store, so a fire records
+// no actor and stamps no agent claim.
 func fenceRouter(database *sql.DB, spawner Delegator) *Router {
-	st := sqlitestore.New(database)
-	// Users wired so the author-centric ladder resolves the owner (whose
-	// automation fires); teamRepos/jiraRules nil → scope gate fails open.
-	return NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database),
-		nil, nil, st.Users, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.ExternalActions,
-		st.Orgs, st.Teams, nil, nil, nil, nil, spawner, noopScorer{}, websocket.NewHub())
+	deps := testRouterDeps(database)
+	deps.Agents = nil
+	deps.Spawner = spawner
+	return newTestRouter(deps)
 }
 
 func fenceConversationCount(t *testing.T, database *sql.DB, entityID string) int {
@@ -271,7 +270,6 @@ func TestFiringWorker_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
 	enqueueFiring(t, database, entityID, taskID, triggerID, eventID)
 
 	router := fenceRouter(database, stub)
-	router.SetExecutorID("firing-worker-test", 1)
 	drainOnce(t, router)
 
 	rows := firingsFor(t, database, entityID)

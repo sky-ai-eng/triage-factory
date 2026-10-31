@@ -29,10 +29,9 @@ import (
 // completion.
 func walkRouter(t *testing.T, database *sql.DB, stub *stubDelegator, beforeComplete func()) *Router {
 	t.Helper()
-	r := firingRouter(database, stub)
-	r.SetTaskReDerive(hookedReDerive{TaskReDeriveStore: sqlitestore.New(database).TaskReDerive, beforeComplete: beforeComplete})
-	r.SetExecutorID("rederive-worker-test", 1)
-	return r
+	deps := firingRouterDeps(database, stub)
+	deps.ReDerive = hookedReDerive{TaskReDeriveStore: sqlitestore.New(database).TaskReDerive, beforeComplete: beforeComplete}
+	return newTestRouter(deps)
 }
 
 // twoAuthorTeams seeds the author aidan on two teams, both opted into

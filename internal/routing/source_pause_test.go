@@ -30,16 +30,6 @@ func turnOffSource(t *testing.T, database *sql.DB, kind string) {
 	}
 }
 
-// gatedRouter is reviewRouter with the event-source gate wired, which is the
-// production shape. reviewRouter deliberately leaves it off so the ~30 existing
-// routing tests keep routing.
-func gatedRouter(t *testing.T, database *sql.DB) *Router {
-	t.Helper()
-	r := reviewRouter(database)
-	r.SetEventSourceGate(sqlitestore.New(database).OrgEventSources)
-	return r
-}
-
 // seedTurnOffFixtures stands up the Jira routing shape these tests share: a
 // host, a user on the team, and a match-all assigned rule.
 func seedTurnOffFixtures(t *testing.T, database *sql.DB) {
@@ -62,7 +52,7 @@ func TestHandleEvent_TurnedOffSource_RecordsButCreatesNoTask(t *testing.T) {
 
 	turnOffSource(t, database, eventsource.KindJira)
 	entityID := jiraEntity(t, database, "SKY-off")
-	emitJiraAssigned(gatedRouter(t, database), entityID, "acct-aidan")
+	emitJiraAssigned(reviewRouter(database), entityID, "acct-aidan")
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
@@ -86,7 +76,7 @@ func TestHandleEvent_TurnedOffSource_RecordsButCreatesNoTask(t *testing.T) {
 	if _, err := st.OrgEventSources.SetDisabled(context.Background(), runmode.LocalDefaultOrgID, eventsource.KindJira, false, ""); err != nil {
 		t.Fatalf("turn back on: %v", err)
 	}
-	emitJiraAssigned(gatedRouter(t, database), entityID, "acct-aidan")
+	emitJiraAssigned(reviewRouter(database), entityID, "acct-aidan")
 
 	active, err = testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
@@ -106,14 +96,14 @@ func TestHandleEvent_TurnedOffSource_LeavesExistingTasksAlone(t *testing.T) {
 	seedTurnOffFixtures(t, database)
 
 	entityID := jiraEntity(t, database, "SKY-preexisting")
-	emitJiraAssigned(gatedRouter(t, database), entityID, "acct-aidan")
+	emitJiraAssigned(reviewRouter(database), entityID, "acct-aidan")
 	before, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(before) != 1 {
 		t.Fatalf("precondition: tasks=%d err=%v, want 1 task", len(before), err)
 	}
 
 	turnOffSource(t, database, eventsource.KindJira)
-	emitJiraAssigned(gatedRouter(t, database), entityID, "acct-aidan")
+	emitJiraAssigned(reviewRouter(database), entityID, "acct-aidan")
 
 	after, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
@@ -133,9 +123,10 @@ func TestHandleEvent_TurnedOffSource_PublishesSourceDisabled(t *testing.T) {
 	seedTurnOffFixtures(t, database)
 	turnOffSource(t, database, eventsource.KindJira)
 
-	router := gatedRouter(t, database)
 	pub := &fakeDispositionPublisher{}
-	router.SetEventPublisher(pub)
+	deps := testRouterDeps(database)
+	deps.Publisher = pub
+	router := newTestRouter(deps)
 
 	emitJiraAssigned(router, jiraEntity(t, database, "SKY-disp"), "acct-aidan")
 
@@ -159,7 +150,7 @@ func TestHandleEvent_TurnedOffSource_IsPerSource(t *testing.T) {
 	turnOffSource(t, database, eventsource.KindJira)
 
 	entityID := reviewEntity(t, database, "owner/repo#other-source")
-	emitCI(gatedRouter(t, database), entityID, "aidan")
+	emitCI(reviewRouter(database), entityID, "aidan")
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
@@ -184,7 +175,7 @@ func TestHandleEvent_RequiredSourceIsNeverDropped(t *testing.T) {
 
 	turnOffSource(t, database, eventsource.KindGitHub)
 	entityID := reviewEntity(t, database, "owner/repo#required")
-	emitCI(gatedRouter(t, database), entityID, "aidan")
+	emitCI(reviewRouter(database), entityID, "aidan")
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
@@ -212,8 +203,9 @@ func TestHandleEvent_SourcePolicyReadFails_ErrorsRatherThanRoutes(t *testing.T) 
 	database := newTestDB(t)
 	seedTurnOffFixtures(t, database)
 
-	router := reviewRouter(database)
-	router.SetEventSourceGate(erroringSourceStore{})
+	deps := testRouterDeps(database)
+	deps.EventSources = erroringSourceStore{}
+	router := newTestRouter(deps)
 	entityID := jiraEntity(t, database, "SKY-gatefault")
 
 	err := router.HandleEvent(context.Background(), domain.Event{

@@ -15,7 +15,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 	_ "modernc.org/sqlite"
 )
 
@@ -84,17 +83,15 @@ func seedLocalBot(t *testing.T, database *sql.DB) {
 }
 
 // reDeriveRouter builds a router over the database wired for the re-derive
-// worker: the re-evaluation queue, the agent and team_agents stores so a
-// planned firing stamps the bot's claim, and an executor identity so the
-// claim has an owner. spawner may be nil — the worker never fires inline.
+// worker, with the org's agent seeded so a planned firing stamps the bot's
+// claim. The worker never fires inline, so a test that starts no run passes
+// refusingDelegator{} as spawner.
 func reDeriveRouter(t *testing.T, database *sql.DB, spawner Delegator) *Router {
 	t.Helper()
 	seedLocalBot(t, database)
-	st := sqlitestore.New(database)
-	r := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), st.Agents, st.TeamAgents, nil, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.ExternalActions, st.Orgs, st.Teams, nil, nil, nil, nil, spawner, noopScorer{}, websocket.NewHub())
-	r.SetTaskReDerive(st.TaskReDerive)
-	r.SetExecutorID("rederive-worker-test", 1)
-	return r
+	deps := testRouterDeps(database)
+	deps.Spawner = spawner
+	return newTestRouter(deps)
 }
 
 // drainReDeriveOnce runs one full drain pass of the re-derive worker
@@ -243,7 +240,7 @@ func TestReDeriveWorker_AboveThreshold_AdmitsAFiringWithTheClaim(t *testing.T) {
 	taskID, triggerID := setupReDeriveScenario(t, database, 0.6)
 	scoreTask(t, database, taskID, 0.8)
 
-	r := reDeriveRouter(t, database, nil)
+	r := reDeriveRouter(t, database, refusingDelegator{})
 	drainReDeriveOnce(t, r)
 
 	firings := firingsForTask(t, database, taskID)
@@ -271,7 +268,7 @@ func TestReDeriveWorker_BelowThreshold_AdmitsNothing(t *testing.T) {
 	taskID, _ := setupReDeriveScenario(t, database, 0.6)
 	scoreTask(t, database, taskID, 0.4)
 
-	drainReDeriveOnce(t, reDeriveRouter(t, database, nil))
+	drainReDeriveOnce(t, reDeriveRouter(t, database, refusingDelegator{}))
 
 	requireNoFirings(t, database, taskID)
 	requireReDeriveDone(t, database, taskID)
@@ -295,7 +292,7 @@ func TestReDeriveWorker_BotClaimed_AdmitsNothing(t *testing.T) {
 		t.Fatalf("stamp agent claim: ok=%v err=%v", ok, err)
 	}
 
-	drainReDeriveOnce(t, reDeriveRouter(t, database, nil))
+	drainReDeriveOnce(t, reDeriveRouter(t, database, refusingDelegator{}))
 
 	task, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, taskID)
 	if task.ClaimedByAgentID != runmode.LocalDefaultAgentID {
@@ -319,7 +316,7 @@ func TestReDeriveWorker_UserClaimed_AdmitsNothing(t *testing.T) {
 		t.Fatalf("stamp user claim: ok=%v err=%v", ok, err)
 	}
 
-	drainReDeriveOnce(t, reDeriveRouter(t, database, nil))
+	drainReDeriveOnce(t, reDeriveRouter(t, database, refusingDelegator{}))
 
 	task, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, taskID)
 	if task.ClaimedByUserID != runmode.LocalDefaultUserID {
@@ -346,7 +343,7 @@ func TestReDeriveWorker_Snoozed_AdmitsNothing(t *testing.T) {
 		t.Fatalf("snooze task: %v", err)
 	}
 
-	drainReDeriveOnce(t, reDeriveRouter(t, database, nil))
+	drainReDeriveOnce(t, reDeriveRouter(t, database, refusingDelegator{}))
 
 	task, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, taskID)
 	if task.Status != "snoozed" || task.ClaimedByAgentID != "" {
@@ -394,7 +391,7 @@ func TestReDeriveWorker_CrossTeamTrigger_AdmitsOnlyTheVisibleTeams(t *testing.T)
 	// Score above both teams' thresholds so the only reason to skip team B
 	// is the team-mismatch guard.
 	scoreTask(t, database, taskID, 0.9)
-	drainReDeriveOnce(t, reDeriveRouter(t, database, nil))
+	drainReDeriveOnce(t, reDeriveRouter(t, database, refusingDelegator{}))
 
 	for _, f := range firingsForTask(t, database, taskID) {
 		if f.TriggerID == "trigger-teamB" {
@@ -491,7 +488,7 @@ func TestReDeriveWorker_ImmediateTrigger_WasDecidedAtEventTime(t *testing.T) {
 	taskID, _ := setupReDeriveScenario(t, database, 0)
 	scoreTask(t, database, taskID, 0.9)
 
-	drainReDeriveOnce(t, reDeriveRouter(t, database, nil))
+	drainReDeriveOnce(t, reDeriveRouter(t, database, refusingDelegator{}))
 
 	requireNoFirings(t, database, taskID)
 	requireReDeriveDone(t, database, taskID)
@@ -525,7 +522,7 @@ func TestReDeriveWorker_PredicateMismatch_AdmitsNothing(t *testing.T) {
 	})
 
 	scoreTask(t, database, task.ID, 0.9)
-	drainReDeriveOnce(t, reDeriveRouter(t, database, nil))
+	drainReDeriveOnce(t, reDeriveRouter(t, database, refusingDelegator{}))
 
 	requireNoFirings(t, database, task.ID)
 	requireReDeriveDone(t, database, task.ID)
@@ -566,7 +563,7 @@ func TestReDeriveWorker_MatchesThroughTheCurrentView(t *testing.T) {
 	})
 
 	scoreTask(t, database, task.ID, 0.9)
-	drainReDeriveOnce(t, reDeriveRouter(t, database, nil))
+	drainReDeriveOnce(t, reDeriveRouter(t, database, refusingDelegator{}))
 
 	if firings := firingsForTask(t, database, task.ID); len(firings) != 1 || firings[0].TriggerID != "t-view" {
 		t.Errorf("firings = %+v, want one for t-view", firings)

@@ -352,7 +352,7 @@ func TestCloseOwed_ReopenRace_RealTransitionIsStale(t *testing.T) {
 	database := newTestDB(t)
 	r := newQueueWorkerRouter(t, database)
 	pub := &fakeDispositionPublisher{}
-	r.SetEventPublisher(pub)
+	r.publisher = pub
 	gh := newFakeGitHub(t, "OPEN")
 	entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, "octo/repo#9")
 	seedSnapshot(t, database, entityID, prSnapshotJSON(t, "OPEN"))

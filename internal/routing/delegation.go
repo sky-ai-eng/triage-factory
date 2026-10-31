@@ -576,10 +576,6 @@ func (r *Router) fireDelegate(ctx context.Context, orgID string, task *domain.Ta
 	ctx, span := tracer.Start(ctx, "route.delegate", trace.WithAttributes(telemetry.TaskID(task.ID)))
 	defer span.End()
 
-	if r.spawner == nil {
-		return "", fmt.Errorf("spawner not configured")
-	}
-
 	// No status flip here. Previously we transitioned to
 	// status='delegated' for UI feedback + dedup. Now the
 	// responsibility axis is the claim columns: the blueprint-run insert writes

@@ -16,7 +16,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // outage stands in for a dependency that is down for a while and then
@@ -213,10 +212,7 @@ func TestProcessQueuedEvent_FireFailure_RequeuesThenFiresOnce(t *testing.T) {
 	o := &outage{remaining: 1}
 	stub := outageDelegator{fenceStubDelegator: &fenceStubDelegator{db: database}, o: o}
 
-	st := sqlitestore.New(database)
 	r := fenceRouter(database, stub)
-	r.SetEventQueue(st.EventQueue)
-	r.SetExecutorID(testExecutorID, 1)
 
 	// Same event shape as recordFenceEvent — the author resolves the owning
 	// team, whose trigger is the one that fires — but enqueued durably, so the
@@ -225,7 +221,7 @@ func TestProcessQueuedEvent_FireFailure_RequeuesThenFiresOnce(t *testing.T) {
 	// never reach a trigger.
 	meta := events.GitHubPRCICheckFailedMetadata{Author: "aidan", CheckName: "build", Repo: "owner/repo", HeadSHA: "abc123"}
 	metaJSON, _ := json.Marshal(meta)
-	if _, err := st.EventQueue.Enqueue(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
+	if _, err := sqlitestore.New(database).EventQueue.Enqueue(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
 		OrgID:        runmode.LocalDefaultOrgID,
 		EntityID:     &entityID,
 		EventType:    domain.EventGitHubPRCICheckFailed,
@@ -371,7 +367,7 @@ func TestDrainEventQueue_RequeueWriteFails_KeepsDraining(t *testing.T) {
 	// Only the first event's entity load fails, so the second row is
 	// perfectly routable and its fate is entirely the drain loop's choice.
 	r.entities = outageEntityStore{EntityStore: sqlitestore.New(database).Entities, o: &outage{remaining: 1}}
-	r.SetEventQueue(requeueFailingQueueStore{sqlitestore.New(database).EventQueue})
+	r.eventQueue = requeueFailingQueueStore{sqlitestore.New(database).EventQueue}
 
 	first, second := seedTwoQueuedEvents(t, database)
 
@@ -459,9 +455,9 @@ func TestFireMatchedTriggers_OneTriggerFails_SiblingsStillCommit(t *testing.T) {
 	// deterministically, so exactly one team's trigger hits the outage and
 	// the other must still get its conversation.
 	stub := outageDelegator{fenceStubDelegator: &fenceStubDelegator{db: database}, o: &outage{remaining: 1}}
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database),
-		stores.Agents, stores.TeamAgents, nil, testTaskStore(database), stores.Conversations, stores.Entities,
-		stores.PendingFirings, stores.Events, stores.ExternalActions, stores.Orgs, stores.Teams, nil, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
+	deps := testRouterDeps(database)
+	deps.Spawner = stub
+	router := newTestRouter(deps)
 
 	err = router.HandleEvent(context.Background(), domain.Event{
 		EventType:    domain.EventJiraIssueAvailable,

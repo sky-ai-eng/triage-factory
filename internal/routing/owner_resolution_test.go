@@ -14,7 +14,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // Owner-resolution error posture. Every read the owning-team ladder makes to
@@ -128,20 +127,14 @@ func (s outageGitHubGroupsStore) TeamsForGitHubTeamSystem(ctx context.Context, o
 	return s.TeamGitHubGroupsStore.TeamsForGitHubTeamSystem(ctx, orgID, host, githubTeamID, orgLogin, teamSlug)
 }
 
-// identityQueueRouter wires every store the owning-team ladder reads (Users,
-// Teams, Orgs, TeamGitHubGroups) plus the durable queue, so a test can route an
-// event through the drain worker — the thing that decides done vs. requeued —
-// rather than calling HandleEvent directly. teamRepos/jiraRules stay nil so the
-// tracking gates are inert and only the ladder's reads are under test.
+// identityQueueRouter is a router a test routes an event through by the drain
+// worker — the thing that decides done vs. requeued — rather than calling
+// HandleEvent directly. The tracking gates pass every team, so only the
+// ladder's reads are under test.
 func identityQueueRouter(database *sql.DB, spawner Delegator) *Router {
-	st := sqlitestore.New(database)
-	r := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database),
-		st.Agents, st.TeamAgents, st.Users, testTaskStore(database), st.Conversations, st.Entities,
-		st.PendingFirings, st.Events, st.ExternalActions, st.Orgs, st.Teams, nil, nil, nil, st.TeamGitHubGroups, spawner,
-		noopScorer{}, websocket.NewHub())
-	r.SetEventQueue(st.EventQueue)
-	r.SetExecutorID(testExecutorID, 1)
-	return r
+	deps := testRouterDeps(database)
+	deps.Spawner = spawner
+	return newTestRouter(deps)
 }
 
 // enqueueRoutedEvent durably enqueues one event the way the production
@@ -581,18 +574,15 @@ func TestOwnerResolution_TransientIdentityFailure_WatcherDoesNotCaptureOwnership
 	}
 }
 
-// TestAuthorTeams_UnwiredStores_StillDegrade pins the row of the table that
-// deliberately did NOT change: a nil identity store is test / pre-ticket
-// wiring, not an outage, so it still resolves to "no member owner" rather than
-// erroring. Around thirty router constructions in this package depend on it.
-func TestAuthorTeams_UnwiredStores_StillDegrade(t *testing.T) {
+// TestAuthorTeams_NoUsersStore_ResolvesEmpty pins that a router with no Users
+// store resolves to "no member owner" rather than erroring: a missing store is
+// wiring, not an outage.
+func TestAuthorTeams_NoUsersStore_ResolvesEmpty(t *testing.T) {
 	database := newTestDB(t)
-	// No Users/Teams/Orgs wired — the constructor's documented degrade.
-	r := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database),
-		nil, nil, nil, testTaskStore(database), nil, sqlitestore.New(database).Entities, nil,
-		sqlitestore.New(database).Events, sqlitestore.New(database).ExternalActions, sqlitestore.New(database).Orgs, nil, nil, nil, nil, nil, nil,
-		noopScorer{}, websocket.NewHub())
-	r.users, r.teams, r.orgs = nil, nil, nil
+	// No Users store — RouterDeps' documented degrade.
+	deps := testRouterDeps(database)
+	deps.Users = nil
+	r := newTestRouter(deps)
 
 	evt := domain.Event{
 		EventType:    domain.EventGitHubPRCICheckFailed,
@@ -626,7 +616,7 @@ func TestAuthorTeams_UnwiredStores_StillDegrade(t *testing.T) {
 // owner set, no error, no retry. A retry could not produce a different answer.
 func TestAuthorTeams_MalformedMetadata_ResolvesEmpty(t *testing.T) {
 	database := newTestDB(t)
-	r := identityQueueRouter(database, nil)
+	r := identityQueueRouter(database, refusingDelegator{})
 
 	for _, meta := range []string{`{"author":""}`, `not json`, `{}`} {
 		teams, err := r.authorTeams(t.Context(), runmode.LocalDefaultOrgID, domain.Event{
@@ -647,7 +637,7 @@ func TestAuthorTeams_MalformedMetadata_ResolvesEmpty(t *testing.T) {
 // This is the outcome a failed mapping read used to borrow.
 func TestRequestedPartyTeams_MalformedTeamHandle_ScopedEmpty(t *testing.T) {
 	database := newTestDB(t)
-	r := identityQueueRouter(database, nil)
+	r := identityQueueRouter(database, refusingDelegator{})
 
 	meta, _ := json.Marshal(events.GitHubPRReviewRequestedMetadata{
 		Author: "carol", Repo: "owner/repo", PRNumber: 1, RequestedTeam: "no-slash",
