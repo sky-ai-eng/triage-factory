@@ -38,14 +38,16 @@ const (
 	ObjectKindMessage     = "message"
 )
 
+var objectKinds = []string{
+	ObjectKindPullRequest, ObjectKindIssue, ObjectKindRepository, ObjectKindBranch,
+	ObjectKindLabel, ObjectKindRelease, ObjectKindWorkflow, ObjectKindWorkflowRun,
+	ObjectKindReview, ObjectKindComment, ObjectKindMessage,
+}
+
 // ObjectKinds is the closed object_kind vocabulary, in the order the column's
 // CHECK spells it.
 func ObjectKinds() []string {
-	return []string{
-		ObjectKindPullRequest, ObjectKindIssue, ObjectKindRepository, ObjectKindBranch,
-		ObjectKindLabel, ObjectKindRelease, ObjectKindWorkflow, ObjectKindWorkflowRun,
-		ObjectKindReview, ObjectKindComment, ObjectKindMessage,
-	}
+	return slices.Clone(objectKinds)
 }
 
 // actionObjectKinds maps every action that lands a change to the kind of
@@ -214,13 +216,7 @@ func IsObjectID(s string) bool {
 	if !ok || rest == "" {
 		return false
 	}
-	switch kind {
-	case ObjectKindPullRequest, ObjectKindIssue, ObjectKindRepository, ObjectKindBranch, ObjectKindLabel,
-		ObjectKindRelease, ObjectKindWorkflow, ObjectKindWorkflowRun, ObjectKindReview, ObjectKindComment,
-		ObjectKindMessage:
-		return true
-	}
-	return false
+	return slices.Contains(objectKinds, kind)
 }
 
 // objectKindKeyed reports whether an object of kind is identified with an

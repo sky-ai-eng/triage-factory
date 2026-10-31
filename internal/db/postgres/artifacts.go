@@ -26,7 +26,7 @@ var _ db.ArtifactStore = (*artifactStore)(nil)
 
 // pgArtifactRowFilter is what every artifact read adds to its own WHERE: the
 // agent's rows that name an object, of an action that can name one.
-var pgArtifactRowFilter = ` AND ea.performed_by = 'agent' AND ea.action NOT IN (` + db.ArtifactExcludedActionsSQL +
+var pgArtifactRowFilter = ` AND ea.performed_by = 'agent' AND ea.action NOT IN (` + db.ArtifactExcludedActionsSQL() +
 	`) AND (` + pgActionObjectIDSQL + `) IS NOT NULL`
 
 // pgArtifactSelect is the grouped read over the rows where selects, ending

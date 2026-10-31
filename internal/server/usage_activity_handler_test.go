@@ -361,7 +361,14 @@ func (r *usageRig) seedExternalActions(t *testing.T) {
 	seed(r.teamA, "github", "pr_created", "octo/repo#1", "github_app", "tA-created", "", "", "draft", domain.PerformedByAgent)
 	seed(r.teamA, "github", "pr_marked_ready", "octo/repo#1", "github_app", "tA-ready", r.orgAdmin, "draft", "open", domain.PerformedByPerson)
 	seed(r.teamB, "jira", "issue_transitioned", "SKY-1", "jira_org", "tB-trans", "", "To Do", "Done", domain.PerformedBySystem)
+	// The transition names its issue, so the feed carries an object.
+	pgtest.MustExec(t, r.h.AdminDB, `
+		UPDATE external_actions SET object_kind = 'issue', object_key = $2
+		 WHERE org_id = $1 AND dedup_key = 'tB-trans'`, r.orgID, usageSeedIssueKey)
 }
+
+// usageSeedIssueKey is the object_key seedExternalActions gives its Jira row.
+const usageSeedIssueKey = "jira:issue:acme-10001"
 
 // TestUsageActionsActivityHandler_Postgres pins the actions feed — its own pair
 // of routes since the ?view= multiplex split: the same FeatureGovernance gate
@@ -425,6 +432,23 @@ func TestUsageActionsActivityHandler_Postgres(t *testing.T) {
 		out := decodeList[actionJSON](t, rec)
 		if len(out.Items) != 3 || out.Total() != 3 {
 			t.Fatalf("org actions = %d rows / total %d, want 3/3 (cross-team)", len(out.Items), out.Total())
+		}
+		// The org feed shares the action projection: the Jira row's object
+		// rides it in its wire spelling, which decodes back to the raw id, and
+		// the rows that name no object carry neither key.
+		wantObject := domain.ObjectRef("issue|" + scopeForProvider("jira") + "|" + usageSeedIssueKey)
+		wire, _ := wantObject.MarshalText()
+		if !strings.Contains(rec.Body.String(), `"object_id":"`+string(wire)+`"`) {
+			t.Errorf("org feed body carries no object_id %q: %s", wire, rec.Body.String())
+		}
+		for _, a := range out.Items {
+			want := domain.ObjectRef("")
+			if a.Action == "issue_transitioned" {
+				want = wantObject
+			}
+			if a.ObjectID != want || (want != "") != (a.ObjectKind == domain.ObjectKindIssue) {
+				t.Errorf("%s row object = (%q, %q), want %q", a.Action, a.ObjectKind, a.ObjectID, want)
+			}
 		}
 		var sawTeamB, sawHumanActor, sawSystem bool
 		wantPerformer := map[string]string{

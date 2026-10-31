@@ -112,6 +112,10 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 		}
 		return id
 	}
+	objectRef := func(t *testing.T, a domain.ExternalAction) domain.ObjectRef {
+		t.Helper()
+		return domain.ObjectRef(objectID(t, a))
+	}
 	list := func(t *testing.T, s seed, conversationID string, opts db.ListOpts) ([]domain.Artifact, int) {
 		t.Helper()
 		got, total, err := s.f.Stores.Artifacts.ListByConversation(ctx, s.f.OrgID, conversationID, opts)
@@ -158,7 +162,7 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 		}
 		// LastAt descending: the branch (5) before the comment (3).
 		b, c := got[0], got[1]
-		if b.ObjectID != objectID(t, first) || b.ObjectID != objectID(t, latest) {
+		if b.ObjectID != objectRef(t, first) || b.ObjectID != objectRef(t, latest) {
 			t.Errorf("branch object id = %q, want %q", b.ObjectID, objectID(t, latest))
 		}
 		if b.ObjectKind != domain.ObjectKindBranch || b.Provider != domain.ProviderGitHub || b.Scope != TestGitHubHost ||
@@ -174,7 +178,7 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 		if !b.FirstAt.Equal(at(1)) || !b.LastAt.Equal(at(5)) {
 			t.Errorf("branch first/last = %v/%v, want %v/%v", b.FirstAt, b.LastAt, at(1), at(5))
 		}
-		if c.ObjectID != objectID(t, edited) || c.ActionCount != 2 || c.LastAction != domain.ActionCommentEdited {
+		if c.ObjectID != objectRef(t, edited) || c.ActionCount != 2 || c.LastAction != domain.ActionCommentEdited {
 			t.Errorf("comment = %+v, want object %q with 2 rows, last %q (the greater id at a tied instant)",
 				c, objectID(t, edited), domain.ActionCommentEdited)
 		}
@@ -195,7 +199,7 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 			if len(got) != 1 || total != 1 {
 				t.Fatalf("conversation %s read %d artifacts (total %d), want 1", conv, len(got), total)
 			}
-			if got[0].ObjectID != objectID(t, push) || got[0].ActionCount != want {
+			if got[0].ObjectID != objectRef(t, push) || got[0].ActionCount != want {
 				t.Errorf("conversation %s artifact = %+v, want object %q with %d rows", conv, got[0], objectID(t, push), want)
 			}
 		}
@@ -353,11 +357,11 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 		}
 		// FirstAt ascending: the branch (1) before the comment (2).
 		b, c := got[0], got[1]
-		if b.ObjectID != objectID(t, push) || b.ActionCount != 2 || b.LastAction != domain.ActionBranchDeleted ||
+		if b.ObjectID != objectRef(t, push) || b.ActionCount != 2 || b.LastAction != domain.ActionBranchDeleted ||
 			!b.FirstAt.Equal(at(1)) || !b.LastAt.Equal(at(3)) {
 			t.Errorf("branch = %+v, want 2 rows from %v to %v, last %q", b, at(1), at(3), domain.ActionBranchDeleted)
 		}
-		if c.ObjectID != objectID(t, posted) || c.ActionCount != 1 {
+		if c.ObjectID != objectRef(t, posted) || c.ActionCount != 1 {
 			t.Errorf("comment = %+v, want object %q with 1 row", c, objectID(t, posted))
 		}
 		if none, err := s.f.Stores.Artifacts.ListForConversationsSystem(ctx, s.f.OrgID, nil); err != nil || len(none) != 0 {

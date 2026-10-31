@@ -14,7 +14,7 @@ import "time"
 // its url, current_url when a rename has moved the object.
 // "Latest row" is the greatest (occurred_at, id) in the group.
 type Artifact struct {
-	ObjectID   string
+	ObjectID   ObjectRef
 	ObjectKind string
 	Provider   string
 	Scope      string

@@ -383,11 +383,10 @@ type conversationActionListRequest struct {
 }
 
 // conversationActionFilters is the canonical filter set the page token is
-// fingerprinted over, and what the store reads. ObjectID is the raw id the
-// wire spelling decodes to.
+// fingerprinted over, and what the store reads.
 type conversationActionFilters struct {
-	ObjectID string `json:"object_id"`
-	Refused  bool   `json:"refused"`
+	ObjectID domain.ObjectRef `json:"object_id"`
+	Refused  bool             `json:"refused"`
 }
 
 // handleAgentActions returns the external actions this conversation performed — the
@@ -429,7 +428,7 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 	var v httpx.Validation
 	filters := conversationActionFilters{Refused: req.Refused}
 	if req.ObjectID != "" {
-		id, ok := parseWireObjectID(req.ObjectID)
+		id, ok := domain.ParseObjectRef(req.ObjectID)
 		if !ok {
 			v.Invalid("object_id", "must be an object id, as an artifact's object_id spells it")
 		}
@@ -457,7 +456,7 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 		actions, total, e = tx.ExternalActions.ListByConversation(r.Context(), orgID, conversationID,
 			domain.ExternalActionListOpts{
 				Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly,
-				ObjectID: filters.ObjectID, Refused: filters.Refused,
+				ObjectID: string(filters.ObjectID), Refused: filters.Refused,
 			})
 		return e
 	}); err != nil {
@@ -478,11 +477,11 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 
 // artifactJSON is the wire shape of one item of POST
 // /api/agent/conversations/{conversationID}/artifacts/list: an object the
-// conversation's agent changed (domain.Artifact). ObjectID is the object id's
-// wire spelling (wireObjectID). Deliverable is the conversation's deliverable
-// that is the same object (domain.ArtifactDeliverable), or null.
+// conversation's agent changed (domain.Artifact). Deliverable is the
+// conversation's deliverable that is the same object
+// (domain.ArtifactDeliverable), or null.
 type artifactJSON struct {
-	ObjectID    string                   `json:"object_id"`
+	ObjectID    domain.ObjectRef         `json:"object_id"`
 	ObjectKind  string                   `json:"object_kind"`
 	Provider    string                   `json:"provider"`
 	Scope       string                   `json:"scope"`
@@ -507,7 +506,7 @@ type artifactDeliverableJSON struct {
 
 func toArtifactJSON(a domain.Artifact, deliverables []domain.Deliverable) artifactJSON {
 	out := artifactJSON{
-		ObjectID:    wireObjectID(a.ObjectID),
+		ObjectID:    a.ObjectID,
 		ObjectKind:  a.ObjectKind,
 		Provider:    a.Provider,
 		Scope:       a.Scope,

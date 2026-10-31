@@ -13,7 +13,9 @@ import (
 // one of these actions is never an artifact, whatever object it carries. The
 // values are TF's own action names; each is quoted with any single quote
 // doubled, which both dialects read the same way.
-var ArtifactExcludedActionsSQL = sqlStringLiterals(domain.ActionsNamingNoObject())
+func ArtifactExcludedActionsSQL() string {
+	return sqlStringLiterals(domain.ActionsNamingNoObject())
+}
 
 func sqlStringLiterals(values []string) string {
 	quoted := make([]string, len(values))
