@@ -229,6 +229,9 @@ func writeDecodeError(w http.ResponseWriter, err error) {
 		return
 	}
 	var typeErr *json.UnmarshalTypeError
+	// TODO(TFAC-1255): Field spells a field reached through an embedded
+	// struct with that struct's Go name ("PageRequest.page_size"), so every
+	// list route names page_size and page_token wrongly here.
 	if errors.As(err, &typeErr) && typeErr.Field != "" {
 		WriteErrors(w, http.StatusBadRequest, ErrorItem{
 			Reason:  ReasonInvalidField,

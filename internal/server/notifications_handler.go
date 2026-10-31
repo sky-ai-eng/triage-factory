@@ -149,6 +149,8 @@ func (s *Server) pingMarksChanged(orgID, userID string) {
 // than embedded from one struct: encoding/json names a type fault inside an
 // embedded struct by the struct's Go name, which would reach the error's
 // field.
+// TODO(TFAC-1255): embed one shared filter struct once the decode error
+// names the JSON field.
 type notificationListRequest struct {
 	Status     *string  `json:"status"`
 	Dismissed  *bool    `json:"dismissed"`
