@@ -68,8 +68,13 @@ var (
 		Key: testID, Audience: OrgMembers(), Render: testRender, Example: testParams{ID: "x"},
 	})
 	testNotice = Notice(NoticeSpec[testParams]{
-		Name: "test.notice", TTL: DefaultNoticeTTL,
-		Key: testID, Audience: OrgMembers(), Render: testRender, Example: testParams{ID: "x"},
+		Name: "test.notice", TTL: DefaultNoticeTTL, Key: testID, Audience: OrgMembers(),
+		Render: func(p testParams, to Recipient) Content {
+			c := testRender(p, to)
+			c.Actions = []Action{Link("Open settings", Routes.OrgSettings())}
+			return c
+		},
+		Example: testParams{ID: "x"},
 	})
 	panicCondition = Condition(ConditionSpec[testParams]{
 		Name: "test.panic_condition", Priority: Always(Low),

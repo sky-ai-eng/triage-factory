@@ -150,6 +150,17 @@ func (s *notificationStore) ResolveSourceSystem(ctx context.Context, orgID, sour
 	return s.resolve(ctx, domain.NotificationResolvedSourceOff, `org_id = $2 AND source = $3`, orgID, source)
 }
 
+func (s *notificationStore) ResolveIDSystem(ctx context.Context, orgID, id string) (*domain.Notification, error) {
+	if !isValidUUID(id) {
+		return nil, nil
+	}
+	got, err := s.resolve(ctx, domain.NotificationResolvedCleared, `org_id = $2 AND id = $3::uuid`, orgID, id)
+	if err != nil || len(got) == 0 {
+		return nil, err
+	}
+	return &got[0], nil
+}
+
 // resolve resolves the open conditions where selects; $1 is the reason.
 func (s *notificationStore) resolve(ctx context.Context, reason domain.NotificationResolvedReason, where string, args ...any) ([]domain.Notification, error) {
 	rows, err := s.admin.QueryContext(ctx, `

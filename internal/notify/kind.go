@@ -115,6 +115,9 @@ type kind struct {
 	audience    Audience
 	render      func(any, Recipient) Content
 	example     any
+
+	handlersMu sync.RWMutex
+	handlers   map[string]handler
 }
 
 func (k *kind) Name() string                            { return k.name }

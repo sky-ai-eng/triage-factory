@@ -120,7 +120,7 @@ var LinearTeamUnreadable = notify.Condition(notify.ConditionSpec[LinearTeam]{
 		c := notify.Content{
 			Title:   "Linear team " + t.TeamKey + " can't be read",
 			Body:    "…",
-			Actions: []notify.Action{notify.Link("Open Linear settings", notify.Routes.OrgSettings("linear"))},
+			Actions: []notify.Action{notify.Link("Open Linear settings", notify.Routes.OrgSettings())},
 		}
 		if to.TeamID != "" {
 			c.Actions = append(c.Actions, notify.Invoke("untrack", "Stop tracking "+t.TeamKey, notify.RequiresTeamAdmin))
@@ -166,7 +166,7 @@ var LinearTeamUnreadable = notify.Condition(notify.ConditionSpec[LinearTeam]{
 kinds.LinearTeamUnreadable.HandleAction("untrack", untrackLinearTeam)
 ```
 
-`untrackLinearTeam` is the function the tracked-set route uses, so validation and authorization exist once. It receives a typed `notify.ActionCall[P]` (params, the row's recipient, the request context carrying the caller's claims) and returns whether the effect resolved the condition; if so, `notify` resolves it immediately. Handlers are registered from `internal/app`/`internal/server` because `kinds` cannot import them. A boot test fails if any `Invoke` id a kind's `Example` renders has no handler.
+`untrackLinearTeam` is the function the tracked-set route uses, so validation and authorization exist once. It receives the request context carrying the caller's claims and a typed `notify.ActionCall[P]` (the row's org, the caller, the row's recipient, the decoded params) and returns whether the effect resolved the condition; if so, `notify` resolves the row the action was invoked on immediately, and the occurrence's other audiences' rows wait for the producer's next evaluation. The dispatcher the route calls is `notify.Caller`: `Actions` for the read, `RunAction` for the invoke, one permission check behind both. Handlers are registered from `internal/server` (in `server.New`) or `internal/app` (in `buildNotify`) because `kinds` cannot import them. A boot test fails if any `Invoke` id a kind's `Example` renders has no handler.
 
 ### Tests
 
@@ -247,7 +247,7 @@ The inbox is viewer-relative, so it lives under `/api/me` and answers for the or
 | `GET /api/me/notifications/{id}`                      | One notification the caller may read, with the caller's marks. 404 otherwise.                                                                                                                                                                   |
 | `PATCH /api/me/notifications/{id}`                    | The caller's marks: `{"read": bool, "dismissed": bool}`. `false` clears.                                                                                                                                                                        |
 | `POST /api/me/notifications/mark-read`                | `{"ids": [...]}` — the rows the client actually rendered, so a row that arrived after rendering is not marked. Multi-row transition, hence a verb route.                                                                                        |
-| `POST /api/me/notifications/{id}/actions/{action_id}` | Run a declared invoke action. No body. 403 when the caller lacks the action's permission; 404 for an unknown action id or an unreadable row.                                                                                                    |
+| `POST /api/me/notifications/{id}/actions/{action_id}` | Run a declared invoke action. No body. 403 when the caller lacks the action's permission; 404 for an unknown action id or an unreadable row; 409 once the condition has resolved.                                                                                                    |
 | `POST /api/orgs/{org_id}/notifications/list`          | Org admins: every notification in the org, team rows included (the "All teams" view). Same filters plus `team_id_in`. Items carry the caller's marks.                                                                                           |
 
 The badge is `status=open, dismissed=false, unread=true, priority_in=[urgent, high], page_size=0`. The banner is `status=open, dismissed=false, priority_in=[urgent]`.
@@ -272,10 +272,10 @@ An item:
   "expires_at": null,
   "actions": [
     {
-      "id": "open_settings",
+      "id": "org_settings",
       "type": "link",
       "label": "Open Linear settings",
-      "href": "/orgs/…/org?tab=linear"
+      "href": "/orgs/…/org?tab=settings"
     },
     {
       "id": "untrack",
@@ -292,8 +292,8 @@ An item:
 
 ### Actions
 
-- **`link`** — `href` is an in-app path built by `notify.Routes` (one Go table of the SPA's routes, so API and later email clients get a working address) or an external URL. External URLs are accepted only on the org's configured hosts (`github_base_url`, `jira_base_url`, Linear) and checked when the row is written.
-- **`invoke`** — runs a registered handler (see **Wiring**). `allowed` is computed per viewer at read time from the action's declared permission, so a client never offers a button that answers 403. A team member can see "team unreadable" without being allowed to untrack the team.
+- **`link`** — `href` is an in-app path built by `notify.Routes` (one Go table of the SPA's routes, rendered with the org prefixed, so API and later email clients get a working address) or an external URL from `notify.External`. External URLs are accepted only on the org's configured hosts (`github_base_url`, `jira_base_url`, Linear while a workspace is connected), with no dot segments in the path, and checked when the row is written. A rendering that is refused fails a `Set` or `Post`; in a `Sync` it skips only that member, whose key is kept so its open row is neither bumped nor resolved. A link's id is its route's name, or `external`. A test holds the route table to `frontend/src/main.tsx`.
+- **`invoke`** — runs a registered handler (see **Wiring**). Only a condition carries one; a notice's actions are links. The declared permission (`RequiresOrgAdmin`, or `RequiresTeamAdmin`, which only a team row's action may declare) is stored on the row. `allowed` is computed per viewer at read time from it, and is true only while the condition is open, the viewer holds the permission and the process has the handler, so a client never offers a button that answers 403, 404 or 409. A team member can see "team unreadable" without being allowed to untrack the team.
 
 ## Websocket
 

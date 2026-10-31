@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
+	"github.com/sky-ai-eng/triage-factory/internal/notify"
 )
 
 // TestAllDomainEventTypesRegistered_CompositionRoot is the out-of-core
@@ -228,6 +229,77 @@ func TestFrontendMirrorsExternalActionVocabulary(t *testing.T) {
 	if diff := vocabularyDiff(want, got); diff != "" {
 		t.Errorf("frontend ACTION_META has drifted from internal/domain/external_action.go:\n%s", diff)
 	}
+}
+
+// TestNotifyRoutesAreSPARoutes asserts that every page a notification's link
+// can address is a route frontend/src/main.tsx mounts, in each mode the table
+// gives it a page: under /orgs/:org_id in multi mode, and in local mode's flat
+// table. A notification links into the SPA by path, so a page renamed on one
+// side only is a link that lands nowhere.
+func TestNotifyRoutesAreSPARoutes(t *testing.T) {
+	src, err := os.ReadFile("frontend/src/main.tsx")
+	if err != nil {
+		t.Fatalf("read main.tsx: %v", err)
+	}
+	local := tsxRoutePaths(tsxFunctionBody(t, string(src), "LocalRoutes"))
+	multi := tsxRoutePaths(tsxRouteChildren(t, tsxFunctionBody(t, string(src), "MultiRoutes"), "/orgs/:org_id"))
+	pathOf := func(href string) string { return strings.SplitN(href, "?", 2)[0] }
+	for _, r := range notify.SPARoutes() {
+		if p := strings.TrimPrefix(pathOf(r.Multi), "/"); !slices.Contains(multi, p) {
+			t.Errorf("notify route %s: multi mode mounts no %q under /orgs/:org_id (it mounts %v)", r.Name, p, multi)
+		}
+		if r.Local == "" {
+			continue
+		}
+		if p := pathOf(r.Local); !slices.Contains(local, p) {
+			t.Errorf("notify route %s: local mode mounts no %q (it mounts %v)", r.Name, p, local)
+		}
+	}
+}
+
+var tsxRoutePath = regexp.MustCompile(`<Route\s[^>]*?path="([^"]+)"`)
+
+// tsxFunctionBody returns a top-level `function <name>() {…}` declaration's
+// body, read to the closing brace at column 0.
+func tsxFunctionBody(t *testing.T, src, name string) string {
+	t.Helper()
+	open := "\nfunction " + name + "() {"
+	start := strings.Index(src, open)
+	if start < 0 {
+		t.Fatalf("main.tsx declares no `function %s()`", name)
+	}
+	body := src[start+len(open):]
+	end := strings.Index(body, "\n}\n")
+	if end < 0 {
+		t.Fatalf("main.tsx function %s is unterminated", name)
+	}
+	return body[:end]
+}
+
+// tsxRouteChildren returns what sits between `<Route path="<parent>">` and the
+// first `</Route>` after it, which is its children while every child is
+// self-closing, as the org routes are.
+func tsxRouteChildren(t *testing.T, src, parent string) string {
+	t.Helper()
+	open := `<Route path="` + parent + `">`
+	start := strings.Index(src, open)
+	if start < 0 {
+		t.Fatalf("main.tsx has no %s", open)
+	}
+	body := src[start+len(open):]
+	end := strings.Index(body, "</Route>")
+	if end < 0 {
+		t.Fatalf("main.tsx %s is unterminated", open)
+	}
+	return body[:end]
+}
+
+func tsxRoutePaths(src string) []string {
+	var out []string
+	for _, m := range tsxRoutePath.FindAllStringSubmatch(src, -1) {
+		out = append(out, m[1])
+	}
+	return out
 }
 
 var (

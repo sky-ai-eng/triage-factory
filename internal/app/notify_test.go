@@ -11,8 +11,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/notify"
+	_ "github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server"
+	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -60,6 +63,35 @@ func TestBuildNotify_InstallsTheVerbs(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].Kind != bootCondition.Name() || items[0].Title != "boot a" {
 		t.Fatalf("inbox after Set = %+v; want the one row the verb wrote", items)
+	}
+}
+
+// The server's checker is what answers an invoke action's permission.
+var _ notify.Authorizer = (*authz.Checker)(nil)
+
+// TestBoot_EveryInvokeActionHasAHandler: once boot has registered the invoke
+// handlers — the server's in server.New, beside the routes that own each
+// operation, and the app's own in buildNotify — every invoke action a kind's
+// Example renders has one.
+func TestBoot_EveryInvokeActionHasAHandler(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	conn.SetMaxOpenConns(1)
+	if err := db.BootstrapSchemaForTest(conn); err != nil {
+		t.Fatalf("bootstrap schema: %v", err)
+	}
+	stores := sqlitestore.New(conn)
+
+	notifytest.Isolate(t)
+	server.New(conn, stores)
+	a := &App{stores: stores, wsHub: websocket.NewHub()}
+	a.buildNotify()
+	if missing := notify.UnhandledActions(); len(missing) > 0 {
+		t.Errorf("invoke actions with no handler after boot: %v; register each with HandleAction in server.New or buildNotify", missing)
 	}
 }
 
