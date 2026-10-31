@@ -21,6 +21,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/tracker"
 )
@@ -189,6 +191,9 @@ type linearStub struct {
 	requests  atomic.Int32
 	rateLimit bool
 	reset     time.Time
+	// hideTeams makes every team read answer that the credential reads none
+	// of the teams asked about.
+	hideTeams bool
 }
 
 func (s *linearStub) serve(t *testing.T) *httptest.Server {
@@ -205,7 +210,10 @@ func (s *linearStub) serve(t *testing.T) *httptest.Server {
 			return
 		}
 		var body struct {
-			Query string `json:"query"`
+			Query     string `json:"query"`
+			Variables struct {
+				IDs []string `json:"ids"`
+			} `json:"variables"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		switch {
@@ -213,6 +221,14 @@ func (s *linearStub) serve(t *testing.T) *httptest.Server {
 			_, _ = w.Write([]byte(`{"data":{"viewer":{"id":"u-viewer","name":"Viewer"}}}`))
 		case strings.Contains(body.Query, "query SearchIssues"):
 			_, _ = w.Write([]byte(`{"data":{"issues":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":""}}}}`))
+		case strings.Contains(body.Query, "query TeamsByID"):
+			nodes := []map[string]string{}
+			for _, id := range body.Variables.IDs {
+				if !s.hideTeams {
+					nodes = append(nodes, map[string]string{"id": id, "key": strings.ToUpper(id)})
+				}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"teams": map[string]any{"nodes": nodes}}})
 		default:
 			t.Errorf("unexpected query: %s", body.Query)
 			w.WriteHeader(http.StatusBadRequest)
@@ -300,8 +316,10 @@ func TestRunLinearCycleForOrg_PolicyReadFails_SkipsRatherThanPolls(t *testing.T)
 	}
 }
 
-// TestRunLinearCycleForOrg_Skips covers the two anticipated skips: an org with
-// no Linear credential, and one whose only rule is watched but unmapped.
+// TestRunLinearCycleForOrg_Skips covers the anticipated skips: an org with no
+// Linear credential, one with no rules, and one whose only rule is watched but
+// unmapped. Each knows without asking Linear that no armed team is unreadable,
+// so each resolves linear.team_unreadable.
 func TestRunLinearCycleForOrg_Skips(t *testing.T) {
 	recorder := recordSpans(t)
 	for _, tc := range []struct {
@@ -326,12 +344,82 @@ func TestRunLinearCycleForOrg_Skips(t *testing.T) {
 				orgs: stores.Orgs, users: stores.Users, secrets: linearSecrets{key: tc.key},
 				linearRules: linearRulesStore{rules: tc.rules},
 			}
+			rec := notifytest.Record(t)
+			kinds.LinearTeamUnreadable.Sync(context.Background(), runmode.LocalDefaultOrgID, []kinds.LinearTeam{{LinearTeamID: "eng", TeamKey: "ENG"}})
 			m.runLinearCycleForOrg(context.Background(), runmode.LocalDefaultOrgID, time.Now())
 			if got := spanOutcome(t, recorder, "poll.linear.org"); got != tc.outcome {
 				t.Errorf("span outcome = %q, want %q", got, tc.outcome)
 			}
+			rec.Inactive(t, runmode.LocalDefaultOrgID, kinds.LinearTeamUnreadable)
 		})
 	}
+}
+
+// switchedOffMidCycle answers the off switch's first read as on and every
+// later one as off: an admin turning Linear off while a cycle runs.
+type switchedOffMidCycle struct {
+	dbpkg.OrgEventSourceStore
+	reads atomic.Int32
+}
+
+func (s *switchedOffMidCycle) ListDisabledSystem(context.Context, string) ([]string, error) {
+	if s.reads.Add(1) == 1 {
+		return nil, nil
+	}
+	return []string{"linear"}, nil
+}
+
+// TestRunLinearCycleForOrg_TurnedOffMidCycleClears: a cycle already past its
+// off-switch check when Linear is turned off can raise linear.team_unreadable
+// after the switch cleared the source, so the cycle clears it again once its
+// refresh is over.
+func TestRunLinearCycleForOrg_TurnedOffMidCycleClears(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		sources dbpkg.OrgEventSourceStore
+		open    bool
+	}{
+		{"stays on", nil, true},
+		{"turned off", &switchedOffMidCycle{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := linearManager(t, &linearStub{hideTeams: true})
+			if tc.sources != nil {
+				m.EventSources = tc.sources
+			}
+			rec := notifytest.Record(t)
+			m.runLinearCycleForOrg(context.Background(), runmode.LocalDefaultOrgID, time.Now())
+			if open := len(rec.Open(runmode.LocalDefaultOrgID, kinds.LinearTeamUnreadable)) > 0; open != tc.open {
+				t.Errorf("open after the cycle = %v, want %v", open, tc.open)
+			}
+		})
+	}
+}
+
+// failingLinearRulesStore fails the org union read.
+type failingLinearRulesStore struct{ dbpkg.LinearTeamRulesStore }
+
+func (failingLinearRulesStore) ListForOrgSystem(context.Context, string, string) ([]domain.LinearTeamRules, error) {
+	return nil, errors.New("rules unreadable")
+}
+
+// TestRunLinearCycleForOrg_UnreadableRulesKeepCondition: a cycle that cannot
+// read the rules does not know which teams are armed, so it leaves
+// linear.team_unreadable as it was rather than resolve it.
+func TestRunLinearCycleForOrg_UnreadableRulesKeepCondition(t *testing.T) {
+	database := newMigratedSQLiteForPoller(t)
+	bindLinearWorkspace(t, database)
+	stores := sqlitestore.New(database)
+	m := &Manager{
+		database: database, pub: busPublisher{bus: newTestBus(t)},
+		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue,
+		orgs: stores.Orgs, users: stores.Users, secrets: linearSecrets{key: "lin_api_test"},
+		linearRules: failingLinearRulesStore{},
+	}
+	rec := notifytest.Record(t)
+	kinds.LinearTeamUnreadable.Sync(context.Background(), runmode.LocalDefaultOrgID, []kinds.LinearTeam{{LinearTeamID: "eng", TeamKey: "ENG"}})
+	m.runLinearCycleForOrg(context.Background(), runmode.LocalDefaultOrgID, time.Now())
+	rec.Active(t, runmode.LocalDefaultOrgID, kinds.LinearTeamUnreadable, "eng")
 }
 
 // TestRunLinearCycleForOrg_AnotherWorkspacesRulesDoNotApply: once the org's

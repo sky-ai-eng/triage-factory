@@ -43,10 +43,11 @@ func requireOrg(w http.ResponseWriter, r *http.Request) (string, bool) {
 // fault is server-side state, not the request — and never a 500, which is
 // reserved for a backend that failed to *read* the configuration.
 func writeNotConfigured(w http.ResponseWriter, msg string) {
-	httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
-		Reason:  httpx.ReasonNotConfigured,
-		Message: msg,
-	})
+	httpx.WriteFault(w, notConfiguredFault(msg))
+}
+
+func notConfiguredFault(msg string) *httpx.Fault {
+	return httpx.NewFault(http.StatusConflict, httpx.ReasonNotConfigured, msg)
 }
 
 // writeSourceDisabled writes the 409 for a request that needs a source an org
@@ -54,10 +55,12 @@ func writeNotConfigured(w http.ResponseWriter, msg string) {
 // refused for the org while it is off, so the request cannot do its work, and
 // nothing it changes would let it.
 func writeSourceDisabled(w http.ResponseWriter, kind string) {
-	httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
-		Reason:  httpx.ReasonSourceDisabled,
-		Message: eventsource.Label(kind) + " is turned off for this organization by an org admin; ask an org admin to turn it back on",
-	})
+	httpx.WriteFault(w, sourceDisabledFault(kind))
+}
+
+func sourceDisabledFault(kind string) *httpx.Fault {
+	return httpx.NewFault(http.StatusConflict, httpx.ReasonSourceDisabled,
+		eventsource.Label(kind)+" is turned off for this organization by an org admin; ask an org admin to turn it back on")
 }
 
 // forbidden writes a 403: the caller is authenticated and can see the

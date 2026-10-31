@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -79,12 +80,12 @@ func (p linearTeamPlan) needsLinear() bool {
 }
 
 // gateLinearTeams turns the shape-checked wishes into the rows to store, in
-// request order. It writes the response and returns false when the write must
-// not proceed.
+// request order. A write that must not proceed is refused with an
+// *httpx.Fault; any other error is a failed check.
 func (s *Server) gateLinearTeams(
-	w http.ResponseWriter, r *http.Request, orgID string,
+	ctx context.Context, orgID string,
 	wishes []linearTeamWish, stored []domain.LinearTeamRules,
-) ([]domain.LinearTeamRules, bool) {
+) ([]domain.LinearTeamRules, error) {
 	storedByID := make(map[string]domain.LinearTeamRules, len(stored))
 	for _, row := range stored {
 		storedByID[row.LinearTeamID] = row
@@ -130,8 +131,8 @@ func (s *Server) gateLinearTeams(
 	for _, p := range plans {
 		checkLinearPlanShape(&v, p)
 	}
-	if v.Flush(w, http.StatusUnprocessableEntity) {
-		return nil, false
+	if f := v.Fault(http.StatusUnprocessableEntity); f != nil {
+		return nil, f
 	}
 
 	if !slices.ContainsFunc(plans, linearTeamPlan.needsLinear) {
@@ -139,13 +140,13 @@ func (s *Server) gateLinearTeams(
 		for _, p := range plans {
 			out = append(out, p.row)
 		}
-		return out, true
+		return out, nil
 	}
 
-	client, ok := s.linearSystemClient(w, r, orgID, "settings/team/linear-teams",
+	client, err := s.resolveLinearSystemClient(ctx, orgID,
 		"Linear is not connected for this organization, so a Linear team or a state mapping cannot be added")
-	if !ok {
-		return nil, false
+	if err != nil {
+		return nil, err
 	}
 
 	out := make([]domain.LinearTeamRules, 0, len(plans))
@@ -155,14 +156,13 @@ func (s *Server) gateLinearTeams(
 			continue
 		}
 		base := fmt.Sprintf("linear_teams[%d]", p.wish.index)
-		team, err := client.GetTeam(r.Context(), p.wish.write.ID)
+		team, err := client.GetTeam(ctx, p.wish.write.ID)
 		if errors.Is(err, linear.ErrNotFound) {
 			v.Invalid(base+".id", "no Linear team "+p.wish.write.ID+" is visible to this organization's Linear credential")
 			continue
 		}
 		if err != nil {
-			writeLinearGateStopped(w, &v, orgID, "Linear team "+p.wish.write.ID, err)
-			return nil, false
+			return nil, linearGateStopped(&v, orgID, "Linear team "+p.wish.write.ID, err)
 		}
 		row := p.row
 		row.LinearTeamKey, row.LinearTeamName = team.Key, team.Name
@@ -174,10 +174,9 @@ func (s *Server) gateLinearTeams(
 		// One read per team with a changed rule, shared by every rule:
 		// it is the gate, and it is where each state's name and type come
 		// from.
-		states, err := client.ListWorkflowStates(r.Context(), p.wish.write.ID)
+		states, err := client.ListWorkflowStates(ctx, p.wish.write.ID)
 		if err != nil {
-			writeLinearGateStopped(w, &v, orgID, "the workflow states of Linear team "+team.Key, err)
-			return nil, false
+			return nil, linearGateStopped(&v, orgID, "the workflow states of Linear team "+team.Key, err)
 		}
 		byID := make(map[string]domain.LinearStateRef, len(states))
 		for _, st := range states {
@@ -223,10 +222,10 @@ func (s *Server) gateLinearTeams(
 		}
 		out = append(out, row)
 	}
-	if v.Flush(w, http.StatusUnprocessableEntity) {
-		return nil, false
+	if f := v.Fault(http.StatusUnprocessableEntity); f != nil {
+		return nil, f
 	}
-	return out, true
+	return out, nil
 }
 
 // checkLinearPlanShape records every fault in one element that the ids alone
@@ -296,19 +295,17 @@ func sortedStrings(in []string) []string {
 	return out
 }
 
-// writeLinearGateStopped ends the gate when Linear stops answering partway
-// through a set. Faults already found in earlier elements win: they are true
-// whether or not Linear is reachable, and they must be fixed before any retry
-// can store anything. Nothing is stored either way.
-func writeLinearGateStopped(w http.ResponseWriter, v *httpx.Validation, orgID, what string, err error) {
-	if v.Flush(w, http.StatusUnprocessableEntity) {
+// linearGateStopped is the refusal that ends the gate when Linear stops
+// answering partway through a set. Faults already found in earlier elements
+// win: they are true whether or not Linear is reachable, and they must be
+// fixed before any retry can store anything. Nothing is stored either way.
+func linearGateStopped(v *httpx.Validation, orgID, what string, err error) *httpx.Fault {
+	if f := v.Fault(http.StatusUnprocessableEntity); f != nil {
 		serverLog.Warn("linear write gate could not reach linear; reporting the field faults found first",
 			"org", orgID, "checking", what, "error", err)
-		return
+		return f
 	}
 	serverLog.Warn("linear write gate could not reach linear", "org", orgID, "checking", what, "error", err)
-	httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{
-		Reason:  httpx.ReasonUpstreamUnavailable,
-		Message: "could not confirm " + what + " with Linear, so nothing was saved" + httpx.LocalDetail(err),
-	})
+	return httpx.NewFault(http.StatusBadGateway, httpx.ReasonUpstreamUnavailable,
+		"could not confirm "+what+" with Linear, so nothing was saved"+httpx.LocalDetail(err))
 }

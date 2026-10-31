@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
+	"github.com/sky-ai-eng/triage-factory/internal/notify"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -230,6 +232,11 @@ func (s *Server) handleOrgSourcePatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if disabled {
+		// A turned-off source is not polled, so nothing would resolve its
+		// open conditions, and they no longer apply.
+		notify.ClearSource(context.WithoutCancel(r.Context()), orgID, kind)
+	}
 	if s.onSourcesChanged != nil {
 		s.onSourcesChanged(orgID, kind)
 	}
