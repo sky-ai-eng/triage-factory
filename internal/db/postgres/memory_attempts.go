@@ -115,14 +115,12 @@ func (s *memoryAttemptStore) FailingSystem(ctx context.Context, orgID string, sp
 		return domain.MemoryFailing{}, db.ErrInvalidMemoryFailingWindow
 	}
 	var out domain.MemoryFailing
-	// The owing condition is taskMemoryOwedRowSQL, the same words the task
-	// read's memory_pending and the sweep are written in, so "waiting" here is
-	// the wait those two report.
+	// "Waiting" is the task read's memory_pending, in the same words.
 	if err := s.admin.QueryRowContext(ctx, `
-		SELECT COUNT(DISTINCT t.id)
-		FROM conversations owed, tasks t
-		WHERE `+taskMemoryOwedRowSQL("t.org_id", "t.id")+`
-		  AND t.org_id = $1 AND t.status NOT IN ('done', 'dismissed')
+		SELECT COUNT(*)
+		FROM tasks t
+		WHERE t.org_id = $1 AND t.status NOT IN ('done', 'dismissed')
+		  AND `+taskMemoryPendingSQL("t.org_id", "t.id")+`
 	`, orgID).Scan(&out.TasksWaiting); err != nil {
 		return domain.MemoryFailing{}, wrapAdminPoolPermErr(err, "conversation_memory_attempts.FailingSystem")
 	}
@@ -131,10 +129,12 @@ func (s *memoryAttemptStore) FailingSystem(ctx context.Context, orgID string, sp
 	// and newest failure are one probe each per owing conversation on
 	// idx_conversation_memory_attempts_conversation, the window is a range on
 	// it, and idx_conversation_memory_attempts_generated answers the newest
-	// generated memory without reading the org's history.
+	// generated memory without reading the org's history. An org that has
+	// never generated one measures from -infinity rather than through an OR,
+	// so the bound stays a range the probes can seek to.
 	rows, err := s.admin.QueryContext(ctx, `
 		WITH generated AS (
-		    SELECT MAX(completed_at) AS at
+		    SELECT COALESCE(MAX(completed_at), '-infinity') AS at
 		    FROM conversation_memory_attempts
 		    WHERE org_id = $1 AND outcome = 'generated'
 		),
@@ -150,14 +150,14 @@ func (s *memoryAttemptStore) FailingSystem(ctx context.Context, orgID string, sp
 		    LATERAL (
 		        SELECT a.started_at FROM conversation_memory_attempts a
 		        WHERE a.conversation_id = o.id AND a.outcome = 'failed'
-		          AND (g.at IS NULL OR a.started_at > g.at)
+		          AND a.started_at > g.at
 		        ORDER BY a.started_at ASC, a.id ASC
 		        LIMIT 1
 		    ) first,
 		    LATERAL (
 		        SELECT a.started_at FROM conversation_memory_attempts a
 		        WHERE a.conversation_id = o.id AND a.outcome = 'failed'
-		          AND (g.at IS NULL OR a.started_at > g.at)
+		          AND a.started_at > g.at
 		        ORDER BY a.started_at DESC, a.id DESC
 		        LIMIT 1
 		    ) last
@@ -168,7 +168,7 @@ func (s *memoryAttemptStore) FailingSystem(ctx context.Context, orgID string, sp
 		               PARTITION BY a.error_kind ORDER BY a.started_at DESC, a.id DESC) AS rn
 		    FROM owing o, generated g, ends e, conversation_memory_attempts a
 		    WHERE a.conversation_id = o.id AND a.outcome = 'failed'
-		      AND (g.at IS NULL OR a.started_at > g.at)
+		      AND a.started_at > g.at
 		      AND e.newest - e.oldest >= $2::float8 * interval '1 second'
 		      AND a.started_at >= e.newest - $3::float8 * interval '1 second'
 		)

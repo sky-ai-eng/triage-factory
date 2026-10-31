@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
@@ -49,13 +48,20 @@ func (f *fixture) ageAttempts(d time.Duration) {
 	}
 }
 
-// failFor sweeps the fixture's org once and ages the attempt to a second short
-// of failingFor ago, so the next sweep's failure falls just short of the
-// debounce.
+// failFor sweeps the fixture's org once and ages the attempt to half of
+// failingFor ago, so the next sweep's failure falls well short of the debounce
+// however long the test takes to make it.
 func (f *fixture) failFor() {
 	f.t.Helper()
 	f.mgr.sweep(f.t.Context(), 0, f.orgID)
-	f.ageAttempts(failingFor - time.Second)
+	f.ageAttempts(failingFor / 2)
+}
+
+// spanFailing ages every attempt past the rest of failingFor, so the next
+// sweep's failure spans the debounce.
+func (f *fixture) spanFailing() {
+	f.t.Helper()
+	f.ageAttempts(failingFor/2 + time.Second)
 }
 
 // TestSweep_SyncsFailingGeneration: memory.generation_failing opens once the
@@ -75,12 +81,12 @@ func TestSweep_SyncsFailingGeneration(t *testing.T) {
 	rec.Inactive(t, f.orgID, kinds.MemoryGenerationFailing)
 
 	// The ticker's fleet-wide form syncs every org its page worked.
-	f.ageAttempts(2 * time.Second)
+	f.spanFailing()
 	f.mgr.sweep(t.Context(), 0, "")
 	rec.Active(t, f.orgID, kinds.MemoryGenerationFailing, string(domain.MemoryAttemptErrNoModel))
 	open := rec.Open(f.orgID, kinds.MemoryGenerationFailing)
-	if p, _ := open[0].Params.(kinds.MemoryFailure); p.TasksWaiting != 1 || !strings.Contains(p.ErrorMessage, "nothing is picked") {
-		t.Errorf("params = %+v, want the one waiting task and the newest attempt's message", open[0].Params)
+	if p, _ := open[0].Params.(kinds.MemoryFailure); p.TasksWaiting != 1 || p.ErrorMessage != "nothing is picked" {
+		t.Errorf("params = %+v, want the one waiting task and the newest attempt's message without the sentinel's", open[0].Params)
 	}
 
 	f.mgr.models = testModels
@@ -166,7 +172,7 @@ func TestNudge_SyncsFailingGeneration(t *testing.T) {
 	f.fake.err = errors.New("500 from upstream")
 	f.failFor()
 	f.mgr.sweep(t.Context(), 0, f.orgID)
-	f.ageAttempts(2 * time.Second)
+	f.spanFailing()
 	f.mgr.sweep(t.Context(), 0, f.orgID)
 	rec.Active(t, f.orgID, kinds.MemoryGenerationFailing, string(domain.MemoryAttemptErrProviderError))
 

@@ -88,7 +88,7 @@ var MemoryGenerationFailing = notify.Condition(notify.ConditionSpec[MemoryFailur
 	Example: MemoryFailure{
 		ErrorKind:    domain.MemoryAttemptErrNoModel,
 		TasksWaiting: 3,
-		ErrorMessage: "the background jobs model setting is empty",
+		ErrorMessage: "the background jobs model setting is empty — pick one in Settings",
 	},
 })
 

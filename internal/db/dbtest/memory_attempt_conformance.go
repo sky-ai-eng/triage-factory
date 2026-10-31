@@ -447,9 +447,11 @@ func RunMemoryAttemptStoreConformance(t *testing.T, mk MemoryAttemptStoreFactory
 	t.Run("a_memory_generated_anywhere_since_resets_the_debounce", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		stuck := seed.OwingConversation(t, "stuck", true)
-		for _, age := range []time.Duration{6 * time.Minute, 5 * time.Minute, 4 * time.Minute} {
+		for _, age := range []time.Duration{6 * time.Minute, 5 * time.Minute} {
 			fail(t, store, orgID, seed, stuck, domain.MemoryAttemptErrProviderError, "failed", age)
 		}
+		// Inside the window of every failure below, and still not one of them.
+		fail(t, store, orgID, seed, stuck, domain.MemoryAttemptErrTimeout, "exceeded", 4*time.Minute)
 		settled := seed.Conversation(t, "settled")
 		attempt(t, store, orgID, seed, settled, domain.MemoryAttemptGenerated, "", "", 3*time.Minute)
 		assertKinds(t, failing(t, store, orgID))

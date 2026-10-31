@@ -110,49 +110,72 @@ func (s *memoryAttemptStore) FailingSystem(ctx context.Context, orgID string, sp
 		return domain.MemoryFailing{}, db.ErrInvalidMemoryFailingWindow
 	}
 	var out domain.MemoryFailing
-	// The Postgres twin carries the reasoning. SQLite has no LATERAL, so the
-	// failures since the newest generated memory are read whole rather than
-	// probed per conversation; local mode's ledger is one person's. Times are
-	// compared through julianday(), which reads every stored format as the
-	// instant it names.
 	if err := s.q.QueryRowContext(ctx, `
-		SELECT COUNT(DISTINCT t.id)
-		FROM conversations owed, tasks t
-		WHERE `+taskMemoryOwedRowSQL("t.org_id", "t.id")+`
-		  AND t.org_id = ? AND t.status NOT IN ('done', 'dismissed')
+		SELECT COUNT(*)
+		FROM tasks t
+		WHERE t.org_id = ? AND t.status NOT IN ('done', 'dismissed')
+		  AND `+taskMemoryPendingSQL("t.org_id", "t.id")+`
 	`, orgID).Scan(&out.TasksWaiting); err != nil {
 		return domain.MemoryFailing{}, err
 	}
 
+	// The Postgres twin carries the reasoning, and this is the same read:
+	// correlated subqueries make its per-conversation probes, and the window
+	// is a range on idx_conversation_memory_attempts_conversation, so the
+	// cost does not grow with the outage. The CROSS JOINs fix the join order
+	// that range needs, since SQLite plans a CROSS JOIN's left side as the
+	// outer loop, and the unary + keeps the bound at the newest generated
+	// memory out of the index, so the range starts at the window instead.
+	// Attempt times compare as their stored text, which sorts in instant order
+	// because every one is written from a UTC time; julianday() measures only
+	// the two ends.
 	rows, err := s.q.QueryContext(ctx, `
 		WITH generated AS (
-		    SELECT julianday(MAX(completed_at)) AS at
+		    SELECT COALESCE(MAX(completed_at), '') AS at
 		    FROM conversation_memory_attempts
 		    WHERE org_id = ? AND outcome = 'generated'
 		),
-		failed AS (
-		    SELECT att.id, att.started_at, julianday(att.started_at) AS day,
-		           att.error_kind, att.error_message
-		    FROM conversations owed, tasks t, generated g, conversation_memory_attempts att
+		owing AS MATERIALIZED (
+		    SELECT owed.id
+		    FROM conversations owed, tasks t
 		    WHERE `+taskMemoryOwedRowSQL("t.org_id", "t.id")+`
 		      AND t.org_id = ?
-		      AND att.conversation_id = owed.id AND att.outcome = 'failed'
-		      AND (g.at IS NULL OR julianday(att.started_at) > g.at)
 		),
-		ends AS (SELECT MIN(day) AS oldest, MAX(day) AS newest FROM failed),
+		probes AS (
+		    SELECT
+		        (SELECT a.started_at FROM conversation_memory_attempts a
+		         WHERE a.conversation_id = o.id AND a.started_at > g.at AND a.outcome = 'failed'
+		         ORDER BY a.started_at ASC, a.id ASC
+		         LIMIT 1) AS first,
+		        (SELECT a.started_at FROM conversation_memory_attempts a
+		         WHERE a.conversation_id = o.id AND a.started_at > g.at AND a.outcome = 'failed'
+		         ORDER BY a.started_at DESC, a.id DESC
+		         LIMIT 1) AS last
+		    FROM generated g CROSS JOIN owing o
+		),
+		ends AS (
+		    SELECT MIN(first) AS oldest, MAX(last) AS newest FROM probes
+		),
+		bounds AS (
+		    SELECT (julianday(newest) - julianday(oldest)) * 86400.0 AS spanned,
+		           strftime('%Y-%m-%d %H:%M:%f', julianday(newest) - ? / 86400.0) AS since
+		    FROM ends
+		),
 		recent AS (
-		    SELECT f.id, f.started_at, f.error_kind, f.error_message,
+		    SELECT a.id, a.started_at, a.error_kind, a.error_message,
 		           ROW_NUMBER() OVER (
-		               PARTITION BY f.error_kind ORDER BY f.day DESC, f.id DESC) AS rn
-		    FROM failed f, ends e
-		    WHERE (e.newest - e.oldest) * 86400.0 >= ?
-		      AND f.day >= e.newest - ? / 86400.0
+		               PARTITION BY a.error_kind ORDER BY a.started_at DESC, a.id DESC) AS rn
+		    FROM bounds b CROSS JOIN generated g CROSS JOIN owing o
+		         CROSS JOIN conversation_memory_attempts a
+		    WHERE b.spanned >= ?
+		      AND a.conversation_id = o.id AND a.started_at >= b.since AND +a.started_at > g.at
+		      AND a.outcome = 'failed'
 		)
 		SELECT error_kind, COALESCE(error_message, '')
 		FROM recent
 		WHERE rn = 1
-		ORDER BY julianday(started_at) DESC, id DESC
-	`, orgID, orgID, span.Seconds(), window.Seconds())
+		ORDER BY started_at DESC, id DESC
+	`, orgID, orgID, window.Seconds(), span.Seconds())
 	if err != nil {
 		return domain.MemoryFailing{}, err
 	}

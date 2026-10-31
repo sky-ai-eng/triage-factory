@@ -140,21 +140,23 @@ func (m *Manager) Nudge(orgID, conversationID string) {
 // backlog that nobody is watching all of.
 //
 // Each org the page works has kinds.MemoryGenerationFailing synced as the page
-// goes, at most once per pageSyncEvery, and again when it ends: a page whose
-// attempts run to AttemptTimeout can take far longer than failingFor, and
-// syncing only at its end would hold the condition back for all of it. A
-// one-org sweep syncs its org even when the page is empty, so a re-sweep of an
-// org that owes nothing resolves it.
+// goes, at most once per pageSyncEvery, and again when the page ends if it was
+// worked since: a page whose attempts run to AttemptTimeout can take far longer
+// than failingFor, and syncing only at its end would hold the condition back
+// for all of it. A one-org sweep syncs its org even when the page is empty, so
+// a re-sweep of an org that owes nothing resolves it.
 func (m *Manager) sweep(ctx context.Context, backoff time.Duration, orgID string) {
 	owed, err := m.stores.Conversations.ListMemoryOwedSystem(ctx, orgID, backoff, sweepLimit)
 	if err != nil {
 		log.Warn("list conversations owing a memory failed; retrying next tick", "error", err)
 		return
 	}
-	// synced is when each org this page has worked was last synced.
+	// synced is when each org was last synced, and unsynced the orgs worked
+	// since.
 	synced := map[string]time.Time{}
+	unsynced := map[string]bool{}
 	if orgID != "" {
-		synced[orgID] = time.Time{}
+		unsynced[orgID] = true
 	}
 	for _, o := range owed {
 		if ctx.Err() != nil {
@@ -163,12 +165,14 @@ func (m *Manager) sweep(ctx context.Context, backoff time.Duration, orgID string
 		if err := m.Fulfil(ctx, o.OrgID, o.ConversationID); err != nil {
 			log.Warn("settling an owed memory failed", "conversation", o.ConversationID, "org", o.OrgID, "error", err)
 		}
-		if time.Since(synced[o.OrgID]) >= pageSyncEvery {
+		unsynced[o.OrgID] = true
+		if ctx.Err() == nil && time.Since(synced[o.OrgID]) >= pageSyncEvery {
 			m.syncFailing(ctx, o.OrgID)
 			synced[o.OrgID] = time.Now()
+			delete(unsynced, o.OrgID)
 		}
 	}
-	for org := range synced {
+	for org := range unsynced {
 		if ctx.Err() != nil {
 			return
 		}
@@ -203,7 +207,7 @@ func (m *Manager) syncFailing(ctx context.Context, orgID string) {
 	defer m.syncMu.Unlock()
 	f, err := m.stores.MemoryAttempts.FailingSystem(ctx, orgID, failingFor, failingWindow)
 	if err != nil {
-		log.Warn("read failing memory generation failed; syncing next sweep", "org", orgID, "error", err)
+		log.Warn("read failing memory generation failed; leaving the condition as it is", "org", orgID, "error", err)
 		return
 	}
 	kinds.MemoryGenerationFailing.Sync(ctx, orgID, kinds.MemoryFailuresFor(f))

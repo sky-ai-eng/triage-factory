@@ -273,12 +273,14 @@ func (m *Manager) Fulfil(ctx context.Context, orgID, conversationID string) (err
 	case errors.Is(err, systemllm.ErrNoModel):
 		// Configuration, not a fault: an org admin picks a model and the save
 		// rings the doorbell. The wrapped message names the setting, so it is
-		// TF's own wording and belongs on the row a person reads.
+		// TF's own wording and belongs on the row a person reads, without the
+		// sentinel's package-prefixed text in front of it.
 		span.SetAttributes(telemetry.Outcome(string(domain.MemoryAttemptErrNoModel)))
 		log.WarnContext(ctx, "memory generation skipped; no usable background jobs model",
 			"org", orgID, "conversation", conversationID, "error", err)
 		m.closeAttempt(ctx, orgID, attempt.ID, domain.MemoryAttemptFailed,
-			domain.MemoryAttemptErrNoModel, err.Error(), "", len(rows), 0)
+			domain.MemoryAttemptErrNoModel, strings.TrimPrefix(err.Error(), systemllm.ErrNoModel.Error()+": "),
+			"", len(rows), 0)
 		return nil
 	case err != nil:
 		m.closeAttempt(ctx, orgID, attempt.ID, domain.MemoryAttemptFailed,

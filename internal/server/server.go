@@ -1925,11 +1925,9 @@ func (s *Server) kickMemoryOwed(orgID, conversationID string) {
 	s.onMemoryOwed(orgID, conversationID)
 }
 
-// retryFailingMemoryGeneration is kinds.MemoryGenerationFailing's "Retry now":
-// the org-wide doorbell a background jobs model save rings, which re-sweeps
-// the org's owed memories ignoring the attempt backoff. The kind declares the
-// action org-admin only, and notify checks that before this runs. It reports
-// the condition unresolved, because the attempts the sweep makes decide that.
+// retryFailingMemoryGeneration is kinds.MemoryGenerationFailing's "Retry now",
+// the org-wide doorbell a background jobs model save rings. It reports the
+// condition unresolved, because the attempts the re-sweep makes decide that.
 func (s *Server) retryFailingMemoryGeneration(_ context.Context, call notify.ActionCall[kinds.MemoryFailure]) (bool, error) {
 	s.kickMemoryOwed(call.OrgID, "")
 	return false, nil

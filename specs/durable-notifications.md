@@ -95,8 +95,8 @@ kinds.JiraDiscoveryFailing.Sync(ctx, orgID, failing, keep...)
 // ticket that can't reach a status the project still has, does neither
 kinds.JiraMirrorFailing.Set(ctx, orgID, kinds.JiraMirrorFor(rule, issueKey), true)
 
-// internal/memoryprovision/sweep.go — as each sweep works an org's owed
-// memories; the store read applies the debounce and the window
+// internal/memoryprovision/sweep.go — as the sweep and the doorbell work an
+// org's owed memories; the store read applies the debounce and the window
 kinds.MemoryGenerationFailing.Sync(ctx, orgID, kinds.MemoryFailuresFor(failing))
 
 // internal/routing — the conflict TFAC-518 surfaces
@@ -341,7 +341,7 @@ The same calls, tables (SQLite) and page. Local is N=1: the one user is the reci
 | `jira.discovery_failing`      | jira   | admins of teams whose rules arm the project | high                                  | yes         | `Sync` from `discoverJira` after 3 rejected cycles in a row; unanswered projects kept                                     | Link: the team's Jira status rules                                            |
 | `jira.mirror_failing`         | jira   | team admins                                 | high                                  | yes         | `Set` in `runJiraMirror`, `applyJiraClaim` and the stock deck's claim; a rules save resolves it                           | Link: the team's Jira status rules                                            |
 | `linear.mirror_failing`       | linear | team admins                                 | high                                  | yes         | `Set` in `runLinearMirror` and `applyLinearClaim`; a rules save resolves it                                               | Link: the team's Linear rules                                                 |
-| `memory.generation_failing`   | —      | org admins                                  | urgent for `no_model`, high otherwise | no          | `Sync` as the provisioner sweeps: `error_kind`s failing in the last 5 min, once failures since a success span 2 min       | Link: background-jobs model setting; invoke "Retry now" (rings `memory_owed`) |
+| `memory.generation_failing`   | —      | org admins                                  | urgent for `no_model`, high otherwise | no          | `Sync` in the provisioner: once failures since a generated memory span 2 min, `error_kind`s within 5 min of the newest    | Link: background-jobs model setting; invoke "Retry now" (rings `memory_owed`) |
 | `jira.status_drift`           | jira   | team admins                                 | high                                  | yes         | `Sync` from a detection pass that does not exist yet                                                                      | Link: the rule or handler editor                                              |
 | `routing.automation_conflict` | —      | admins of the losing teams                  | low                                   | (notice)    | `Post` in `fireMatchedTriggers` for a conflict decided at event time; in `processReDerive` after the re-derive commits    | Link: the losing team's trigger                                               |
 
