@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"slices"
 	"testing"
 
+	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -425,6 +427,134 @@ func TestRankedWalk_ClaimedTask_HoldsNothing(t *testing.T) {
 		t.Errorf("firings = %v, want the owner's trig-av-owner queued behind its live conversation", got)
 	}
 	requireOwnedByBot(t, database, task.ID, owner)
+}
+
+// TestRankedWalk_RequeueBeforeScoring_DoesNotReplanAFiredTrigger: the team's
+// immediate trigger fired at event time, and a person requeued the task before
+// its score landed, so the post-scoring pass finds it unclaimed. The pass
+// resumes where the event-time walk would have held and decides only what
+// waited for the score: the deferred trigger beside the one that fired, never
+// the fired one again. Planning it again would stamp the bot's claim over the
+// requeue for a firing its (event, trigger) fence then skips.
+func TestRankedWalk_RequeueBeforeScoring_DoesNotReplanAFiredTrigger(t *testing.T) {
+	database := newTestDB(t)
+	seedHandlerFKTargets(t, database)
+	setReviewHost(t, database)
+	team := seedTeam(t, database, "team-a")
+	seedUserOnTeam(t, database, team, "aidan")
+	enableTeamAutoDelegate(t, database, team)
+	seedImmediateTrigger(t, database, team, domain.EventGitHubPRCICheckFailed, "ci-now")
+	seedDeferredTrigger(t, database, team, domain.EventGitHubPRCICheckFailed, "ci-later")
+	entityID := reviewEntity(t, database, "owner/repo#requeued")
+	stub := &stubDelegator{db: database}
+	r := walkRouter(t, database, stub, nil)
+
+	emitCI(r, entityID, "aidan")
+	if stub.calls != 1 {
+		t.Fatalf("%d fire(s) at event time, want the immediate trigger", stub.calls)
+	}
+	task := onlyTask(t, database, entityID)
+	if ok, err := sqlitestore.New(database).Swipes.RequeueTask(t.Context(), runmode.LocalDefaultOrgID, task.ID); err != nil || !ok {
+		t.Fatalf("requeue: ok=%v err=%v", ok, err)
+	}
+
+	scoreTask(t, database, task.ID, 0.9)
+	drainReDeriveOnce(t, r)
+
+	if got := firingTriggers(t, database, task.ID); !slices.Equal(got, []string{"trig-ci-later"}) {
+		t.Errorf("firings = %v, want only the deferred trig-ci-later; trig-ci-now already fired for this event", got)
+	}
+}
+
+// TestRankedWalk_RequeueBeforeScoring_PassesOverTheTeamsAboveTheHold: the
+// same requeue on a pool task, where the top team's immediate trigger fired at
+// event time and the next team's trigger is deferred. The post-scoring pass
+// starts at the deferred team, so the top team's fired trigger is not planned
+// again.
+func TestRankedWalk_RequeueBeforeScoring_PassesOverTheTeamsAboveTheHold(t *testing.T) {
+	database := newTestDB(t)
+	seedHandlerFKTargets(t, database)
+	a := seedTeam(t, database, "team-a")
+	b := seedTeam(t, database, "team-b")
+	enableTeamAutoDelegate(t, database, a, b)
+	low, high := minStr(a, b), maxStr(a, b)
+	seedImmediateTrigger(t, database, low, domain.EventJiraIssueAvailable, "av-low")
+	seedDeferredTrigger(t, database, high, domain.EventJiraIssueAvailable, "av-high")
+
+	st := sqlitestore.New(database)
+	entity, _, err := st.Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, "https://jira.example.com", "SKY-requeue", dbseed.JiraIssueID("SKY-requeue"), dbseed.JiraIssueProject("SKY-requeue"), "Requeued issue", "https://example.com/requeue")
+	if err != nil {
+		t.Fatalf("create entity: %v", err)
+	}
+	metaJSON, _ := json.Marshal(events.JiraIssueAvailableMetadata{IssueKey: "SKY-requeue", Project: "SKY", Status: "To Do"})
+	stub := &stubDelegator{db: database}
+	r := walkRouter(t, database, stub, nil)
+	if err := r.HandleEvent(context.Background(), domain.Event{
+		EventType: domain.EventJiraIssueAvailable, EntityID: &entity.ID,
+		MetadataJSON: string(metaJSON), OrgID: runmode.LocalDefaultOrgID,
+	}); err != nil {
+		t.Fatalf("HandleEvent: %v", err)
+	}
+	if stub.calls != 1 {
+		t.Fatalf("%d fire(s) at event time, want the top team's immediate trigger", stub.calls)
+	}
+	task := onlyTask(t, database, entity.ID)
+	if ok, err := st.Swipes.RequeueTask(t.Context(), runmode.LocalDefaultOrgID, task.ID); err != nil || !ok {
+		t.Fatalf("requeue: ok=%v err=%v", ok, err)
+	}
+
+	scoreTask(t, database, task.ID, 0.9)
+	drainReDeriveOnce(t, r)
+
+	if got := firingTriggers(t, database, task.ID); !slices.Equal(got, []string{"trig-av-high"}) {
+		t.Errorf("firings = %v, want only the deferred trig-av-high; trig-av-low already fired for this event", got)
+	}
+}
+
+// failingSettingsOrgs fails the org-settings read, the one the deferral gate
+// makes for the background-jobs model.
+type failingSettingsOrgs struct {
+	dbpkg.OrgsStore
+}
+
+func (failingSettingsOrgs) GetSettingsSystem(context.Context, string) (domain.OrgSettings, error) {
+	return domain.OrgSettings{}, errors.New("org settings unreadable")
+}
+
+// TestRankedWalk_ModelReadFailingAfterTheWinner_IsNotRetried: once a team's
+// trigger has won, a failed model read for a lower team's deferred trigger can
+// change nothing — the lower team lost the claim whatever its score — so the
+// event is not sent back to be replayed over it.
+func TestRankedWalk_ModelReadFailingAfterTheWinner_IsNotRetried(t *testing.T) {
+	database := newTestDB(t)
+	seedHandlerFKTargets(t, database)
+	a := seedTeam(t, database, "team-a")
+	b := seedTeam(t, database, "team-b")
+	enableTeamAutoDelegate(t, database, a, b)
+	low, high := minStr(a, b), maxStr(a, b)
+	seedImmediateTrigger(t, database, low, domain.EventJiraIssueAvailable, "av-low")
+	seedDeferredTrigger(t, database, high, domain.EventJiraIssueAvailable, "av-high")
+
+	st := sqlitestore.New(database)
+	entity, _, err := st.Entities.FindOrCreateJiraSystem(context.Background(), runmode.LocalDefaultOrgID, "https://jira.example.com", "SKY-modelerr", dbseed.JiraIssueID("SKY-modelerr"), dbseed.JiraIssueProject("SKY-modelerr"), "Model error issue", "https://example.com/modelerr")
+	if err != nil {
+		t.Fatalf("create entity: %v", err)
+	}
+	metaJSON, _ := json.Marshal(events.JiraIssueAvailableMetadata{IssueKey: "SKY-modelerr", Project: "SKY", Status: "To Do"})
+	stub := &stubDelegator{db: database}
+	r := firingRouter(database, stub)
+	r.orgs = failingSettingsOrgs{OrgsStore: st.Orgs}
+
+	err = r.HandleEvent(context.Background(), domain.Event{
+		EventType: domain.EventJiraIssueAvailable, EntityID: &entity.ID,
+		MetadataJSON: string(metaJSON), OrgID: runmode.LocalDefaultOrgID,
+	})
+	if err != nil {
+		t.Errorf("HandleEvent = %v; a read that cannot change the outcome must not ask for a replay", err)
+	}
+	if stub.calls != 1 {
+		t.Errorf("%d fire(s), want the top team's immediate trigger", stub.calls)
+	}
 }
 
 // TestRankedWalk_ScoreMovedRollback_PostsNoConflict: the post-scoring walk

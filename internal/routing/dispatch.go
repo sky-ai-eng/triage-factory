@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
@@ -796,7 +797,7 @@ func (r *Router) fireMatchedTriggers(ctx context.Context, orgID string, evt doma
 
 	fired := 0
 	injectedConversationID := ""
-	walk, err := r.walkTriggers(ctx, orgID, task, routing, func(trigger domain.EventHandler, acting string) (bool, error) {
+	walk, err := r.walkTriggers(ctx, orgID, task, routing, false, func(trigger domain.EventHandler, acting string) (bool, error) {
 		committed, err := r.tryAutoDelegateTrackingInjection(ctx, orgID, task, trigger, entityID, evt.ID, acting, &injectedConversationID)
 		if committed {
 			fired++
@@ -806,8 +807,8 @@ func (r *Router) fireMatchedTriggers(ctx context.Context, orgID string, evt doma
 	if walk.heldBy != "" {
 		span.SetAttributes(telemetry.Outcome("held_for_scoring"))
 	}
-	if routing.identityTeams && walk.winner != "" && len(walk.losers) > 0 {
-		r.postAutomationConflict(ctx, orgID, task, walk.winner, walk.losers)
+	if c := walk.conflict(routing); c != nil {
+		r.postAutomationConflict(ctx, orgID, task, c.Winner, c.Losers)
 	}
 	span.SetAttributes(telemetry.Count(fired))
 	return fired, injectedConversationID, err
@@ -836,6 +837,24 @@ type rankedWalk struct {
 	heldBy string
 }
 
+// automationConflict is a conflict a walk decided, in postAutomationConflict's
+// terms.
+type automationConflict struct {
+	Winner string
+	Losers []kinds.ConflictLoser
+}
+
+// conflict is the automation conflict the walk decided, or nil when it decided
+// none. Only a conflict between one identity's teams counts
+// (eventRouting.identityTeams): pool teams and orphan watchers contending for
+// a task are not one its losers' admins are told about.
+func (w rankedWalk) conflict(routing eventRouting) *automationConflict {
+	if !routing.identityTeams || w.winner == "" || len(w.losers) == 0 {
+		return nil
+	}
+	return &automationConflict{Winner: w.winner, Losers: w.losers}
+}
+
 // walkTriggers is the ranked walk both paths decide a task's triggers with:
 // fireMatchedTriggers at event time, and evaluateReDerive once the task is
 // scored, each over routing resolved from the event by matchHandlers and
@@ -856,6 +875,14 @@ type rankedWalk struct {
 // post-scoring pass skips a claimed task, so a hold would only cost the
 // claimant's own team its immediate triggers.
 //
+// fromHold is the post-scoring pass resuming where a walk without a score
+// stopped. That walk decided every team ranked above the first one carrying a
+// deferred trigger, and that team's immediate triggers: it tried them. So the
+// resumed walk passes over them and decides only what the hold left waiting —
+// the deferred triggers and every trigger of the teams below. Deciding the
+// rest again would re-plan a trigger that may already have fired for this
+// event, which a user's requeue makes look unclaimed.
+//
 // The first team whose trigger commits wins. A loser is a team ranked after
 // the winner with auto-delegation on and a trigger that fired now or was
 // undecided, and committed nothing: it lost the claim. An undecided loser is
@@ -868,13 +895,18 @@ type rankedWalk struct {
 // undecided one.
 //
 // A read failure is collected and the walk goes on, so the triggers that can
-// still commit do; the joined error is the caller's to retry. A deferred
-// trigger whose model read failed counts as undecided, so a lower team never
-// wins on a read nobody completed.
-func (r *Router) walkTriggers(ctx context.Context, orgID string, task *domain.Task, routing eventRouting, commit func(trigger domain.EventHandler, acting string) (bool, error)) (rankedWalk, error) {
+// still commit do; the joined error is the caller's to retry. The hold is
+// about what a score would decide, so a team whose switch could not be read,
+// or whose trigger failed to fire, does not hold: a lower team may take the
+// claim, as it could before the walk held at all. A deferred trigger whose
+// model read failed stays undecided, the state any unscored deferred trigger
+// is in, and holds; once a winner is decided that read can change nothing, so
+// its failure is not collected.
+func (r *Router) walkTriggers(ctx context.Context, orgID string, task *domain.Task, routing eventRouting, fromHold bool, commit func(trigger domain.EventHandler, acting string) (bool, error)) (rankedWalk, error) {
 	gate := deferralGate{r: r, orgID: orgID, score: task.AutonomySuitability}
 	var walk rankedWalk
 	var errs []error
+	reachedHold := !fromHold
 	for _, teamID := range routing.orderedTeams {
 		triggers := routing.teamTriggers[teamID]
 		if len(triggers) == 0 {
@@ -901,10 +933,20 @@ func (r *Router) walkTriggers(ctx context.Context, orgID string, task *domain.Ta
 				"team", acting, "task_id", task.ID, "event_type", task.EventType, "matched_triggers", len(triggers))
 			continue
 		}
+		heldTeam := false
+		if !reachedHold {
+			if !slices.ContainsFunc(triggers, deferredTrigger) {
+				continue
+			}
+			reachedHold, heldTeam = true, true
+		}
 		linked, linkedNow, committed, undecided := "", false, false, false
 		for _, trigger := range triggers {
+			if heldTeam && !deferredTrigger(trigger) {
+				continue
+			}
 			outcome, err := gate.outcome(ctx, trigger)
-			if err != nil {
+			if err != nil && walk.winner == "" {
 				errs = append(errs, fmt.Errorf("trigger %s: %w", trigger.ID, err))
 			}
 			switch outcome {
@@ -956,9 +998,9 @@ type deferralGate struct {
 	orgID string
 	score *float64
 
-	modelRead bool
-	noModel   bool
-	modelErr  error
+	modelRead   bool
+	noModel     bool
+	modelFailed bool
 }
 
 // outcome resolves trigger to fire now, skip, or undecided. A missing score
@@ -966,29 +1008,39 @@ type deferralGate struct {
 // firing without the evidence would spend run budget on exactly those. An org
 // with no usable background-jobs model never scores, so its deferred triggers
 // skip rather than hold the walk for a score that is not coming. A non-nil
-// error is a model read that failed; the trigger is undecided with it.
+// error is the model read failing, returned by the call that read it; that
+// trigger, and every later one the read would have decided, is undecided.
 func (g *deferralGate) outcome(ctx context.Context, trigger domain.EventHandler) (triggerOutcome, error) {
-	threshold := derefFloatDefault(trigger.MinAutonomySuitability, 0)
-	if threshold <= 0 {
+	if !deferredTrigger(trigger) {
 		return triggerFireNow, nil
 	}
 	if g.score != nil {
-		if *g.score >= threshold {
+		if *g.score >= *trigger.MinAutonomySuitability {
 			return triggerFireNow, nil
 		}
 		return triggerSkip, nil
 	}
 	if !g.modelRead {
 		g.modelRead = true
-		g.noModel, g.modelErr = g.r.orgHasNoBackgroundModel(ctx, g.orgID)
+		var err error
+		if g.noModel, err = g.r.orgHasNoBackgroundModel(ctx, g.orgID); err != nil {
+			g.modelFailed = true
+			return triggerUndecided, err
+		}
 	}
-	if g.modelErr != nil {
-		return triggerUndecided, g.modelErr
+	if g.modelFailed {
+		return triggerUndecided, nil
 	}
 	if g.noModel {
 		return triggerSkip, nil
 	}
 	return triggerUndecided, nil
+}
+
+// deferredTrigger reports whether trigger waits on the task's score: a
+// min_autonomy_suitability above zero.
+func deferredTrigger(trigger domain.EventHandler) bool {
+	return derefFloatDefault(trigger.MinAutonomySuitability, 0) > 0
 }
 
 // orgHasNoBackgroundModel reports whether the org's background jobs have no

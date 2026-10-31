@@ -3,10 +3,10 @@ package routing
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
-	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 )
 
 // The post-scoring re-evaluation. The ranked trigger walk (walkTriggers) holds
@@ -39,14 +39,7 @@ type reDeriveFiring struct {
 type reDerivePlan struct {
 	Task     *domain.Task
 	Firings  []reDeriveFiring
-	Conflict *reDeriveConflict
-}
-
-// reDeriveConflict is the winner and losers of a conflict the evaluation
-// decided, in postAutomationConflict's terms.
-type reDeriveConflict struct {
-	Winner string
-	Losers []kinds.ConflictLoser
+	Conflict *automationConflict
 }
 
 // evaluateReDerive runs the task's ranked trigger walk against the score it
@@ -57,18 +50,18 @@ type reDeriveConflict struct {
 // preflight read; the caller retries those rather than treating them as a
 // decision.
 //
-// The walk is the event-time path's own: the matched handlers and the routing
-// are recomputed from the task's primary event by matchHandlers and
-// resolveTeamRouting, through the event's current view, and walkTriggers
-// decides them. Nothing about the event-time walk is persisted, so the two can
-// differ only by what changed in between — about one scoring cycle, since a
-// task is scored once and a bump does not rescore it. With the score in hand
-// no trigger is undecided: an immediate trigger, or one whose threshold the
-// score meets, fires, one below its threshold skips, and the teams the
-// event-time walk held for this score are decided in rank order. An immediate trigger that already
-// committed at event time claimed the task, and a claimed task is not
-// re-derived. The switches stay live reads, as they are at event time: a
-// trigger disabled or deleted, auto_delegate_enabled, team_agents, the breaker.
+// The walk is the event-time path's own, resumed where it held: the matched
+// handlers and the routing are recomputed from the task's primary event by
+// matchHandlers and resolveTeamRouting, through the event's current view, and
+// walkTriggers decides them from the hold (fromHold). Nothing about the
+// event-time walk is persisted, so the two can differ only by what changed in
+// between — about one scoring cycle, since a task is scored once and a bump
+// does not rescore it. With the score in hand no trigger is undecided: a
+// deferred trigger whose threshold the score meets fires, one below it skips,
+// and the teams below the hold are decided in rank order, their immediate
+// triggers included. The switches stay live reads, as they are at event time:
+// a trigger disabled or deleted, auto_delegate_enabled, team_agents, the
+// breaker.
 //
 // orgID is the scoring context — every task the scorer writes belongs to the
 // org whose runner wrote it. A trigger the walk fires is planned only after
@@ -131,7 +124,9 @@ func (r *Router) evaluateReDerive(ctx context.Context, orgID, taskID string) (re
 	if err != nil {
 		return reDerivePlan{}, fmt.Errorf("match handlers for event %s: %w", evt.ID, err)
 	}
-	if len(matchedTriggers) == 0 {
+	// With no deferred trigger matched, the event-time walk held nothing and
+	// decided every trigger; the score leaves nothing to decide.
+	if !slices.ContainsFunc(matchedTriggers, deferredTrigger) {
 		return plan, nil
 	}
 	routing, ok, err := r.resolveTeamRouting(ctx, orgID, *evt, task.EntityID, matchedRules, matchedTriggers, scopeCache)
@@ -142,7 +137,7 @@ func (r *Router) evaluateReDerive(ctx context.Context, orgID, taskID string) (re
 		return plan, nil
 	}
 
-	walk, err := r.walkTriggers(ctx, orgID, task, routing, func(trigger domain.EventHandler, acting string) (bool, error) {
+	walk, err := r.walkTriggers(ctx, orgID, task, routing, true, func(trigger domain.EventHandler, acting string) (bool, error) {
 		// The checks the event-time path runs before it decides a firing:
 		// the cross-team exclusive-claim skip, the org agent, the per-team
 		// bot switch, the breaker.
@@ -170,9 +165,7 @@ func (r *Router) evaluateReDerive(ctx context.Context, orgID, taskID string) (re
 	if err != nil {
 		return reDerivePlan{}, err
 	}
-	if routing.identityTeams && walk.winner != "" && len(walk.losers) > 0 {
-		plan.Conflict = &reDeriveConflict{Winner: walk.winner, Losers: walk.losers}
-	}
+	plan.Conflict = walk.conflict(routing)
 	return plan, nil
 }
 

@@ -481,21 +481,19 @@ func TestReDeriveWorker_TeamNotInVisibilitySet_AdmitsNothing(t *testing.T) {
 	requireReDeriveDone(t, database, task.ID)
 }
 
-// TestReDeriveWorker_ImmediateTrigger_IsDecidedByTheWalk: the post-scoring
-// pass runs the event-time walk, immediate triggers included, so an immediate
-// trigger that did not commit at event time is decided again with the score
-// in hand. One that did commit claimed the task, and a claimed task is not
-// re-derived (TestReDeriveWorker_BotClaimed_AdmitsNothing).
-func TestReDeriveWorker_ImmediateTrigger_IsDecidedByTheWalk(t *testing.T) {
+// TestReDeriveWorker_ImmediateTrigger_WasDecidedAtEventTime: with no deferred
+// trigger matched, the event-time walk held nothing and decided every
+// trigger, so the post-scoring pass leaves an immediate trigger alone whatever
+// became of it then. The immediate triggers it does decide are the ones a
+// hold kept waiting (ranked_walk_test.go).
+func TestReDeriveWorker_ImmediateTrigger_WasDecidedAtEventTime(t *testing.T) {
 	database := newTestDB(t)
-	taskID, triggerID := setupReDeriveScenario(t, database, 0)
-	scoreTask(t, database, taskID, 0.1)
+	taskID, _ := setupReDeriveScenario(t, database, 0)
+	scoreTask(t, database, taskID, 0.9)
 
 	drainReDeriveOnce(t, reDeriveRouter(t, database, nil))
 
-	if firings := firingsForTask(t, database, taskID); len(firings) != 1 || firings[0].TriggerID != triggerID {
-		t.Errorf("firings = %+v, want one for the immediate trigger whatever the score", firings)
-	}
+	requireNoFirings(t, database, taskID)
 	requireReDeriveDone(t, database, taskID)
 }
 
