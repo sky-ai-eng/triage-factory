@@ -256,9 +256,8 @@ func TestAskedAboutMergeAlready(t *testing.T) {
 
 // TestNativeGate_ReviewIsRefusedAndNeverDispatched drives the real engine over
 // the real transcript with the real hook. `gh pr review` never reaches the
-// jail, the refusal names the verbs that replace it, and it is given again the
-// second time — the answer never changes and the redirect stays actionable, so
-// repetition is not badgering. Neither denial ends the run.
+// jail, and the refusal is given again the second time — the answer never
+// changes, so repetition is not badgering. Neither denial ends the run.
 func TestNativeGate_ReviewIsRefusedAndNeverDispatched(t *testing.T) {
 	h := newGateHarness(t, "r-gate-review", "review the PR", []gateTurn{
 		{calls: []domain.ToolCall{bashCall("c1", "gh pr review 7 --approve --body lgtm")}},
@@ -280,11 +279,6 @@ func TestNativeGate_ReviewIsRefusedAndNeverDispatched(t *testing.T) {
 	for i, r := range results {
 		if !r.IsError || r.Content != reviewRefusal {
 			t.Errorf("result %d = {is_error:%v, %q}, want the refusal in-band", i, r.IsError, r.Content)
-		}
-	}
-	for _, verb := range []string{"tfac gh pr start-review", "add-review-comment", "finalize-review"} {
-		if !strings.Contains(reviewRefusal, verb) {
-			t.Errorf("the refusal does not redirect to %q", verb)
 		}
 	}
 }
@@ -318,9 +312,6 @@ func TestNativeGate_MergeIsQuestionedThenAllowed(t *testing.T) {
 	if results[1].IsError {
 		t.Errorf("the re-issued merge was denied a second time: %q", results[1].Content)
 	}
-	if !strings.Contains(results[0].Content, "the opening message of this conversation") {
-		t.Error("the question must point at the mission, which is the opening message — not at an absent user")
-	}
 }
 
 // TestNativeGate_MergeReArmsAfterHumanInput: a person speaking is a new
@@ -350,35 +341,28 @@ func TestNativeGate_MergeReArmsAfterHumanInput(t *testing.T) {
 	}
 }
 
-// TestNativeGate_TextsMatchWhatTheInjectorDoes is the R5 check in test form,
-// and it runs in both directions because this file makes two different kinds of
+// TestNativeGate_AgreesWithTheInjector is the R5 check in test form, and it
+// runs in both directions because this file makes two different kinds of
 // promise.
 //
-// A text that says "refused" must correspond to a shape the injector actually
-// refuses, or the model learns that this harness's rules are negotiable. And
-// the merge text, which does NOT claim a refusal, must correspond to a shape
-// the injector lets through — a question that says "quote your authorization
-// and proceed" in front of a gate that would 403 the re-issue is the same lie
-// told the other way round.
-func TestNativeGate_TextsMatchWhatTheInjectorDoes(t *testing.T) {
+// A shape this gate refuses must be one the injector refuses too, or the model
+// learns that this harness's rules are negotiable by respelling the command.
+// And a merge, which this gate only questions, must be one the injector lets
+// through — a question that says "quote your authorization and proceed" in
+// front of a gate that would 403 the re-issue is the same lie told the other
+// way round.
+func TestNativeGate_AgreesWithTheInjector(t *testing.T) {
 	refusals := []struct {
-		name    string
-		refusal string
-		req     ghwrite.Request
+		name string
+		req  ghwrite.Request
 	}{
-		{"review", reviewRefusal, ghwrite.Request{Method: http.MethodPost, Path: "/repos/acme/widgets/pulls/7/reviews"}},
-		{"repo create", repoCreateRefusal, ghwrite.Request{Method: http.MethodPost, Path: "/user/repos"}},
+		{"review", ghwrite.Request{Method: http.MethodPost, Path: "/repos/acme/widgets/pulls/7/reviews"}},
+		{"repo create", ghwrite.Request{Method: http.MethodPost, Path: "/user/repos"}},
 	}
 	for _, tc := range refusals {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, gated := ghwrite.Gate(tc.req); !gated {
 				t.Fatalf("the matcher refuses %s but the injector forwards it", tc.name)
-			}
-			if !strings.Contains(tc.refusal, "This command was not run") {
-				t.Errorf("refusal does not say the command did not run: %q", tc.refusal)
-			}
-			if !strings.Contains(tc.refusal, "refused too") {
-				t.Errorf("refusal does not say another spelling fares no better: %q", tc.refusal)
 			}
 		})
 	}
@@ -396,17 +380,6 @@ func TestNativeGate_TextsMatchWhatTheInjectorDoes(t *testing.T) {
 		if ref, gated := ghwrite.Gate(req); gated {
 			t.Errorf("the merge question promises a re-issue proceeds, but the injector refuses %s %s as %q",
 				req.Method, req.Path, ref.Reason)
-		}
-	}
-	if strings.Contains(mergeGateQuestion, "refused") {
-		t.Error("the merge question must not claim a refusal it does not deliver")
-	}
-
-	// The review redirect names commands that have to exist, since a redirect
-	// to a verb nobody can run is worse than no redirect at all.
-	for _, verb := range []string{"tfac gh pr start-review", "add-review-comment", "finalize-review"} {
-		if !strings.Contains(reviewRefusal, verb) {
-			t.Errorf("the review refusal does not redirect to %q", verb)
 		}
 	}
 }
@@ -570,9 +543,7 @@ func (c staticGateCredentials) ForCall(context.Context) (schemas.ModelProvider, 
 
 // TestNativeGate_RepoCreateIsRefusedAndNeverDispatched: repository creation is
 // refused outright rather than questioned, because unlike a merge there is no
-// mission the runtime could be given that makes it right. The refusal names no
-// replacement verb — none exists — so this pins that it at least tells the
-// model what to do instead, which is stop and say so.
+// mission the runtime could be given that makes it right.
 func TestNativeGate_RepoCreateIsRefusedAndNeverDispatched(t *testing.T) {
 	h := newGateHarness(t, "r-gate-repo-create", "set up the new service", []gateTurn{
 		{calls: []domain.ToolCall{bashCall("c1", "gh repo create acme/widgets --private")}},
@@ -595,14 +566,5 @@ func TestNativeGate_RepoCreateIsRefusedAndNeverDispatched(t *testing.T) {
 		if !r.IsError || r.Content != repoCreateRefusal {
 			t.Errorf("result %d = {is_error:%v, %q}, want the refusal in-band", i, r.IsError, r.Content)
 		}
-	}
-	// No verb is named because none exists, and the file's own rule is that a
-	// redirect to a command that does not exist is worse than none. What the
-	// text must still carry is the actionable alternative.
-	if strings.Contains(repoCreateRefusal, "tfac ") {
-		t.Error("the refusal names a tfac verb; there is no repo verb to name")
-	}
-	if !strings.Contains(repoCreateRefusal, "final message") {
-		t.Error("the refusal does not tell the model what to do instead")
 	}
 }

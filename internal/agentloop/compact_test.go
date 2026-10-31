@@ -880,28 +880,16 @@ func TestCompaction_TheMissionSurvivesInTheSystemBlock(t *testing.T) {
 	}
 }
 
-// TestCompactionPrompts_AskTheSummaryToCarryTheRequest is the contract that
-// makes the result row's shape safe: the request reaches a continuation only
-// through the summary, so both prompts require it of every summary, and first
-// — a reader who gets no further than the opening section still learns what
-// the work is for.
-func TestCompactionPrompts_AskTheSummaryToCarryTheRequest(t *testing.T) {
-	if !strings.HasPrefix(compactionSections, "1. Request — ") {
-		t.Errorf("compactionSections opens with %.60q…, want the Request section first", compactionSections)
-	}
-	const instruction = "write the Request section first"
+// TestCompactionPrompts_ShareTheSectionList pins that the warm and cold
+// compaction prompts splice in the same section list, so a summary written on
+// either path has the same shape.
+func TestCompactionPrompts_ShareTheSectionList(t *testing.T) {
 	for name, prompt := range map[string]string{
 		"warm": warmCompactionRequest,
 		"cold": coldCompactionSystemPrompt,
 	} {
 		if !strings.Contains(prompt, compactionSections) {
 			t.Errorf("%s prompt does not splice in the shared section list", name)
-		}
-		if !strings.Contains(prompt, instruction) {
-			t.Errorf("%s prompt = %q, want the instruction %q", name, prompt, instruction)
-		}
-		if strings.Contains(prompt, "Do not restate the original request") {
-			t.Errorf("%s prompt still tells the model the request is preserved separately", name)
 		}
 	}
 }

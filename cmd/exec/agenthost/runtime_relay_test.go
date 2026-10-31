@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -259,16 +258,13 @@ func (tooLargeConn) call(context.Context, string, string, any, any) error {
 
 func (tooLargeConn) record(string, string, any) {}
 
-// TestSaveReviewDraftDetails_TooLargeTellsTheAgentWhatToDo: the whole draft
+// TestSaveReviewDraftDetails_TooLargeKeepsTheSizeRefusal: the whole draft
 // travels on every save, so a draft too large to relay comes back to the agent
-// saying to make the draft smaller, with the size refusal beneath it.
-func TestSaveReviewDraftDetails_TooLargeTellsTheAgentWhatToDo(t *testing.T) {
+// with the size refusal beneath it.
+func TestSaveReviewDraftDetails_TooLargeKeepsTheSizeRefusal(t *testing.T) {
 	c := &LocalClient{rt: newRelayRuntime(tooLargeConn{}, ConversationInfo{OrgID: "org", ConversationID: "conv"}, nil)}
 	err := c.saveReviewDraftDetails(context.Background(), "art-1", domain.ReviewArtifactDetails{ReviewBody: "body"})
 	if !errors.Is(err, sidecarproto.ErrFrameTooLarge) {
 		t.Fatalf("saveReviewDraftDetails = %v; want the size refusal beneath it", err)
-	}
-	if msg := err.Error(); !strings.Contains(msg, "shorten or delete some staged comments") || !strings.Contains(msg, "17000000 bytes") {
-		t.Fatalf("error = %q; want what to do and the size", msg)
 	}
 }

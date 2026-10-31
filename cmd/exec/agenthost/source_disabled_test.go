@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -83,13 +84,11 @@ func TestJiraVerb_SourceTurnedOff_RefusesBeforeCallingJira(t *testing.T) {
 	if !errors.Is(err, eventsource.ErrDisabled) {
 		t.Errorf("error = %v, want one wrapping eventsource.ErrDisabled", err)
 	}
-	// The message has to name the source and say what a pause covers. A reader
-	// told only "Jira is off" reasonably concludes the credential broke.
-	if !strings.Contains(err.Error(), "Jira") {
-		t.Errorf("error %q does not name the source", err)
-	}
-	if !strings.Contains(err.Error(), "agent access") {
-		t.Errorf("error %q does not say the pause covers agent access", err)
+	// The message is the refusal table's disabled row for Jira, so the reader
+	// learns what a pause covers rather than concluding the credential broke.
+	want := (&SourceRefusal{Kind: eventsource.KindJira, State: domain.SourceDisabled}).Error()
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("error %q does not carry the disabled refusal %q", err, want)
 	}
 }
 

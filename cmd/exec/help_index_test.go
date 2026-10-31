@@ -7,6 +7,8 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/convident"
+	jiraexec "github.com/sky-ai-eng/triage-factory/cmd/exec/jira"
+	linearexec "github.com/sky-ai-eng/triage-factory/cmd/exec/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -37,7 +39,7 @@ func TestHelpText_UnresolvedSourcesListEverything(t *testing.T) {
 	registerHelpIndexFakes(t)
 	out := helpText("tfac", nil)
 
-	for _, want := range []string{"Fake Source Commands:", "Fake Plain Commands:", "Jira Ticket Commands:", "Linear Issue Commands:"} {
+	for _, want := range []string{"Fake Source Commands:", "Fake Plain Commands:", jiraexec.HelpText, linearexec.HelpText} {
 		if !strings.Contains(out, want) {
 			t.Errorf("full listing is missing %q", want)
 		}
@@ -67,7 +69,7 @@ func TestHelpText_NotesFollowTheManifest(t *testing.T) {
 	if !strings.Contains(out, "Fake Plain Commands:") {
 		t.Error("a sourceless registered family must always be listed")
 	}
-	for kind, section := range map[string]string{"jira": "Jira Ticket Commands:", "linear": "Linear Issue Commands:"} {
+	for kind, section := range map[string]string{"jira": jiraexec.HelpText, "linear": linearexec.HelpText} {
 		if !strings.Contains(out, section) {
 			t.Errorf("the %s section must stay listed — explained, not hidden", kind)
 		}
@@ -75,8 +77,8 @@ func TestHelpText_NotesFollowTheManifest(t *testing.T) {
 			t.Errorf("the %s section is missing its note %q", kind, note)
 		}
 	}
-	if strings.Contains(out, "NOTE: GitHub") {
-		t.Error("a sealed GitHub carries a note")
+	if n := strings.Count(out, "NOTE: "); n != 2 {
+		t.Errorf("the index carries %d notes, want one each for jira and linear and none for a sealed GitHub", n)
 	}
 
 	sources["fakesrc"] = domain.SourceEntry{State: domain.SourceUnlicensed}
@@ -85,7 +87,7 @@ func TestHelpText_NotesFollowTheManifest(t *testing.T) {
 	}
 	sources["fakesrc"] = domain.SourceEntry{State: domain.SourceUnconfigured}
 	out = helpText("tfac", sources)
-	if !strings.Contains(out, "Fake Source Commands:") || !strings.Contains(out, "NOTE: Fakesrc: not set up") {
+	if !strings.Contains(out, "Fake Source Commands:") || !strings.Contains(out, "NOTE: "+agenthost.SourceNote("fakesrc", sources["fakesrc"])) {
 		t.Error("a registered family whose source is unconfigured must be listed with its note")
 	}
 }
@@ -98,7 +100,7 @@ func TestHelpText_SealedSourcesListTheirFamilies(t *testing.T) {
 	sealed := domain.SourceEntry{State: domain.SourceSealed}
 	out := helpText("tfac", domain.SourceManifest{"github": sealed, "jira": sealed, "linear": sealed, "fakesrc": sealed})
 
-	for _, want := range []string{"Fake Source Commands:", "Fake Plain Commands:", "Jira Ticket Commands:", "Linear Issue Commands:"} {
+	for _, want := range []string{"Fake Source Commands:", "Fake Plain Commands:", jiraexec.HelpText, linearexec.HelpText} {
 		if !strings.Contains(out, want) {
 			t.Errorf("resolved listing is missing %q", want)
 		}

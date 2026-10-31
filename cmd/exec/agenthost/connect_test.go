@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net"
-	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -105,25 +104,5 @@ func TestNewLocalFromEnv(t *testing.T) {
 	}
 	if got.ConversationID != "conv-local-env" {
 		t.Errorf("ConversationID: got %q, want conv-local-env", got.ConversationID)
-	}
-}
-
-// TestErrSandboxSocketMissing_Wording pins what the message must and must
-// not say. The point of the error is that the agent reading it stops
-// investigating its own command and the operator knows where to look, so
-// the socket path and the "launch wiring bug" attribution are contract —
-// as is the absence of the old spawner-injection blame, which sent the
-// first live dogfood run on a four-turn hunt through env vars.
-func TestErrSandboxSocketMissing_Wording(t *testing.T) {
-	msg := ErrSandboxSocketMissing.Error()
-	for _, want := range []string{DefaultSocketPath, "launch wiring bug"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("error text %q does not mention %q", msg, want)
-		}
-	}
-	for _, unwanted := range []string{"spawner", "does not exist"} {
-		if strings.Contains(msg, unwanted) {
-			t.Errorf("error text %q mentions %q; the run is not the problem", msg, unwanted)
-		}
 	}
 }

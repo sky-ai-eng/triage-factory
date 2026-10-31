@@ -62,7 +62,7 @@ func TestResumeAppend_IsTheLaunchAppendByteForByte(t *testing.T) {
 	if !strings.Contains(resumeAppend, "review the pull request and leave a summary") {
 		t.Error("the resumed turn carries no mission")
 	}
-	if !strings.Contains(resumeAppend, "You are one step inside a multi-step blueprint") {
+	if !strings.Contains(resumeAppend, strings.TrimSpace(agentprompt.NonTerminalCompletion(machinistSpec()))) {
 		t.Error("the resumed turn dropped the non-terminal step's addendum")
 	}
 }
