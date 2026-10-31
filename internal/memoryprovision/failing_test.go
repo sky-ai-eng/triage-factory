@@ -186,10 +186,13 @@ func TestSweepLoop_ResyncsWhatNoSweepReaches(t *testing.T) {
 	f.mgr.sweep(t.Context(), 0, "")
 	rec.Active(t, f.orgID, kinds.MemoryGenerationFailing, string(domain.MemoryAttemptErrProviderError))
 
-	f.mgr.resyncEvery = 10 * time.Millisecond
+	// A second manager: the fixture's is already running, and its loop reads
+	// resyncEvery, so setting it there would race.
+	resyncing := f.newManager(nil)
+	resyncing.resyncEvery = 10 * time.Millisecond
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	f.mgr.Run(ctx, time.Hour)
+	resyncing.Run(ctx, time.Hour)
 	waitFor(t, func() bool { return len(rec.Open(f.orgID, kinds.MemoryGenerationFailing)) == 0 })
 }
 
