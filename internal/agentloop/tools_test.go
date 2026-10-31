@@ -174,9 +174,10 @@ func TestSandboxTools_OmitTheConfigureVerb(t *testing.T) {
 // TestBash_DeclaresItsSummaryParams pins the shape of the two params the
 // interface renders in a shell command's place. The guard above already
 // proves the jail declares them identically; this says what they have to be
-// on both sides of it — strings, with the present tense required, because a
-// model skips an optional summary and the call then renders as its command.
-// The past tense stays optional: a settled row falls back to the present.
+// on both sides of it — strings, with the present tense required and given a
+// minimum length, because a model skips an optional summary and an empty one
+// satisfies `required`; either way the call renders as its command. The past
+// tense stays optional: a settled row falls back to the present.
 func TestBash_DeclaresItsSummaryParams(t *testing.T) {
 	var bash *schemas.ChatToolFunction
 	for _, tool := range SandboxTools() {
@@ -188,11 +189,12 @@ func TestBash_DeclaresItsSummaryParams(t *testing.T) {
 		t.Fatalf("the %s tool is missing", tooldefs.Bash.Name)
 	}
 	for _, param := range []struct {
-		name     string
-		required bool
+		name      string
+		required  bool
+		minLength int
 	}{
-		{"description", true},
-		{"description_past", false},
+		{"description", true, 5},
+		{"description_past", false, 0},
 	} {
 		node, ok := bash.Parameters.Properties.Get(param.name)
 		if !ok {
@@ -207,6 +209,15 @@ func TestBash_DeclaresItsSummaryParams(t *testing.T) {
 		}
 		if got := slices.Contains(bash.Parameters.Required, param.name); got != param.required {
 			t.Errorf("%q required = %v, want %v", param.name, got, param.required)
+		}
+		var declared struct {
+			MinLength int `json:"minLength"`
+		}
+		if err := json.Unmarshal(raw, &declared); err != nil {
+			t.Fatal(err)
+		}
+		if declared.MinLength != param.minLength {
+			t.Errorf("%q minLength = %d, want %d", param.name, declared.MinLength, param.minLength)
 		}
 	}
 }

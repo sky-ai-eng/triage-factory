@@ -18,8 +18,9 @@ package tooldefs
 //
 // `description` is required because models skip an optional summary, and a
 // call without one renders as its command on every surface that shows what
-// a run is doing. `description_past` stays optional: a settled row without it
-// falls back to `description`, which is still a sentence.
+// a run is doing. It has a minimum length because an empty string satisfies
+// `required` alone. `description_past` stays optional: a settled row without
+// it falls back to `description`, which is still a sentence.
 //
 // Nothing executes them, but the jail declares them identically all the same
 // and validates them like any other argument: a wrong-typed summary fails
@@ -32,7 +33,7 @@ var Bash = Tool{
 	Params: obj([]string{"command", "description"},
 		str("command", "Bash command to execute"),
 		num("timeout", "Timeout in seconds (optional). Without one, the command is stopped at the sandbox's default limit; a timeout above the sandbox's maximum is refused."),
-		str("description", "What this command is doing, in 1-6 words and present tense: \"Reproducing the flake\", \"Vetting the sandbox package\". Describe the action, never its outcome."),
+		str("description", "What this command is doing, in 1-6 words and present tense: \"Reproducing the flake\", \"Vetting the sandbox package\". Describe the action, never its outcome.").atLeast(5),
 		str("description_past", "The same summary in past tense, in 1-6 words: \"Ran the sampler test 50x\". You are writing it before the command runs, so describe the action, never a result you cannot know yet."),
 	),
 }

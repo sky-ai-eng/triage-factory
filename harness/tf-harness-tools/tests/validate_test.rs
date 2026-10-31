@@ -94,6 +94,22 @@ fn summary_arguments_do_not_affect_the_result() {
     assert_eq!(present_only, both);
 }
 
+/// An empty or near-empty summary satisfies `required` and still renders as
+/// the command, so the present tense has a minimum length. It is counted in
+/// characters: four accented letters are eight bytes and still too short.
+#[test]
+fn description_shorter_than_five_characters_is_rejected() {
+    for short in ["", "Test", "éééé"] {
+        assert_eq!(
+            err_of(
+                "bash",
+                json!({ "command": "echo hi", "description": short })
+            ),
+            "Invalid arguments: \"description\" must be at least 5 characters"
+        );
+    }
+}
+
 #[test]
 fn non_object_args() {
     assert_eq!(

@@ -74,6 +74,8 @@ type Schema struct {
 	Description string
 	// Enum constrains a string to a fixed set.
 	Enum []string
+	// MinLength is a string's minimum length in characters; zero is none.
+	MinLength int
 	// Fields and Required describe an object.
 	Fields   []Field
 	Required []string
@@ -94,6 +96,12 @@ func obj(required []string, fields ...Field) Schema {
 
 func str(name, description string) Field {
 	return Field{Name: name, Schema: Schema{Type: "string", Description: description}}
+}
+
+// atLeast sets a string field's minimum length in characters.
+func (f Field) atLeast(chars int) Field {
+	f.MinLength = chars
+	return f
 }
 
 func num(name, description string) Field {
@@ -193,6 +201,9 @@ func (s Schema) node() any {
 	n.Set("type", s.Type)
 	if len(s.Enum) > 0 {
 		n.Set("enum", s.Enum)
+	}
+	if s.MinLength > 0 {
+		n.Set("minLength", s.MinLength)
 	}
 	if s.Items != nil {
 		n.Set("items", s.Items.node())

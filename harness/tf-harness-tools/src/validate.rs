@@ -33,9 +33,12 @@ fn type_label(schema_type: &str) -> &'static str {
     }
 }
 
-/// Check `args` against the tool's parameter schema (shallow: required keys
-/// and top-level types; unknown keys pass through, like TypeBox without
-/// additionalProperties).
+/// Check `args` against the tool's parameter schema (shallow: required keys,
+/// top-level types and string `minLength`; unknown keys pass through, like
+/// TypeBox without additionalProperties).
+///
+/// `minLength` counts characters (Unicode scalar values), as JSON Schema
+/// does, not bytes.
 pub fn validate_args(tool: &str, args: &Value) -> Result<(), ToolError> {
     let Some(def) = tool_definition(tool) else {
         return Ok(());
@@ -75,6 +78,13 @@ pub fn validate_args(tool: &str, args: &Value) -> Result<(), ToolError> {
                     "Invalid arguments: \"{key}\" must be {}",
                     type_label(schema_type)
                 )));
+            }
+            if let (Some(min), Some(text)) = (schema["minLength"].as_u64(), value.as_str()) {
+                if (text.chars().count() as u64) < min {
+                    return Err(ToolError::new(format!(
+                        "Invalid arguments: \"{key}\" must be at least {min} characters"
+                    )));
+                }
             }
         }
     }
