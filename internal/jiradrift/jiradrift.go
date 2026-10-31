@@ -24,14 +24,14 @@
 //
 // The checks read Jira under the org's service credential. A catalog that
 // cannot be read is no evidence about the values it holds, so whatever depends
-// on it neither raises nor resolves.
+// on it neither raises nor resolves. The one exception is the save's: a
+// tracked project Jira answers 404 for offers nothing to its team's filters.
 package jiradrift
 
 import (
 	"cmp"
 	"context"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"slices"
 
@@ -94,11 +94,15 @@ type Pass struct {
 
 // catalogRead is one catalog as Jira answered it. ok is false when Jira did
 // not answer, or answered with nothing at all, which is not evidence that any
-// value is gone either.
+// value is gone either. notFound is a project Jira answers 404 for: deleted, or
+// no longer visible to the credential. The save counts such a project as
+// offering nothing, and so does a filter's check here; the project itself is
+// jira.discovery_failing's to report, so its own rule is left as it is.
 type catalogRead struct {
-	refs []domain.JiraStatusRef // statuses only
-	ids  map[string]bool
-	ok   bool
+	refs     []domain.JiraStatusRef // statuses only
+	ids      map[string]bool
+	ok       bool
+	notFound bool
 }
 
 // NewPass starts a pass that reads through c.
@@ -106,10 +110,15 @@ func NewPass(c Catalog) *Pass {
 	return &Pass{c: c, statuses: map[string]catalogRead{}, issueTypes: map[string]catalogRead{}}
 }
 
-// projectRef names a rule's project to Jira: by its id once the registry has
-// resolved it, else by its key.
-func projectRef(r domain.JiraProjectStatusRules) string {
-	return cmp.Or(r.ProjectExternalID, r.ProjectKey)
+// projectRefs is each project rules name, once, by domain's ProjectRef.
+func projectRefs(rules []domain.JiraProjectStatusRules) []string {
+	var refs []string
+	for _, r := range rules {
+		if ref := r.ProjectRef(); !slices.Contains(refs, ref) {
+			refs = append(refs, ref)
+		}
+	}
+	return refs
 }
 
 func (p *Pass) workflow(ctx context.Context, ref string) catalogRead {
@@ -119,8 +128,9 @@ func (p *Pass) workflow(ctx context.Context, ref string) catalogRead {
 	var got catalogRead
 	if !p.stopped && ref != "" {
 		statuses, err := p.c.ProjectStatuses(ctx, ref)
+		got.notFound = jira.IsNotFound(err)
 		if p.answered(ctx, err, "statuses", ref) && len(statuses) > 0 {
-			got = catalogRead{ok: true, ids: map[string]bool{}}
+			got.ok, got.ids = true, map[string]bool{}
 			for _, s := range statuses {
 				got.refs = append(got.refs, domain.JiraStatusRef{ID: s.ID, Name: s.Name})
 				got.ids[s.ID] = true
@@ -138,8 +148,9 @@ func (p *Pass) projectIssueTypes(ctx context.Context, ref string) catalogRead {
 	var got catalogRead
 	if !p.stopped && ref != "" {
 		types, err := p.c.ListIssueTypes(ctx, ref)
+		got.notFound = jira.IsNotFound(err)
 		if p.answered(ctx, err, "issue types", ref) && len(types) > 0 {
-			got = catalogRead{ok: true, ids: map[string]bool{}}
+			got.ok, got.ids = true, map[string]bool{}
 			for _, t := range types {
 				got.ids[t.ID] = true
 			}
@@ -168,15 +179,16 @@ func (p *Pass) instancePriorities(ctx context.Context) catalogRead {
 }
 
 // answered reports whether a read returned, and stops the pass on a failure
-// that is about Jira rather than this one request. Rejected is the one class
-// about the request: a project Jira will not describe, which says nothing
-// about the next one.
+// that is about Jira rather than this one request: a rate limit, an outage or
+// a refused credential, or the pass's own context ending. Anything else (a
+// project Jira will not describe, an answer that does not decode) says nothing
+// about the next read.
 func (p *Pass) answered(ctx context.Context, err error, what, project string) bool {
 	if err == nil {
 		return true
 	}
-	class, _ := upstream.ClassOf(err)
-	if class != upstream.Rejected || errors.Is(err, context.Canceled) || ctx.Err() != nil {
+	switch class, _ := upstream.ClassOf(err); {
+	case class == upstream.RateLimited, class == upstream.Transient, class == upstream.Auth, ctx.Err() != nil:
 		p.stopped = true
 	}
 	driftLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "jira drift: catalog read failed; leaving what depends on it as it is",
@@ -240,7 +252,7 @@ func RuleStatuses(rule domain.JiraProjectStatusRules, live []domain.JiraStatusRe
 func (p *Pass) Rules(ctx context.Context, orgID string, rules []domain.JiraProjectStatusRules) {
 	var drifted, keep []kinds.JiraStatusRule
 	for _, r := range rules {
-		live := p.workflow(ctx, projectRef(r))
+		live := p.workflow(ctx, r.ProjectRef())
 		if !live.ok {
 			keep = append(keep, kinds.JiraStatusRule{TeamID: r.TeamID, JiraProjectID: r.JiraProjectID})
 			continue
@@ -259,15 +271,13 @@ func (p *Pass) Rules(ctx context.Context, orgID string, rules []domain.JiraProje
 // every other open occurrence, including a handler deleted or disabled since,
 // resolves.
 func (p *Pass) Handlers(ctx context.Context, orgID string, rules []domain.JiraProjectStatusRules, handlers []domain.EventHandler) {
-	tracked := map[string][]string{}
+	byTeam := map[string][]domain.JiraProjectStatusRules{}
 	for _, r := range rules {
-		if ref := projectRef(r); !slices.Contains(tracked[r.TeamID], ref) {
-			tracked[r.TeamID] = append(tracked[r.TeamID], ref)
-		}
+		byTeam[r.TeamID] = append(byTeam[r.TeamID], r)
 	}
 	var drifted, keep []kinds.JiraHandlerFilter
 	for _, h := range handlers {
-		d, gone, known := p.handler(ctx, h, tracked[h.TeamID])
+		d, gone, known := p.handler(ctx, h, projectRefs(byTeam[h.TeamID]))
 		switch {
 		case !known:
 			keep = append(keep, kinds.JiraHandlerFilter{HandlerID: h.ID})
@@ -279,16 +289,11 @@ func (p *Pass) Handlers(ctx context.Context, orgID string, rules []domain.JiraPr
 }
 
 // Handler checks one handler and sets its occurrence, for a save that changed
-// it; teamRules is its team's status rules on the org's Jira site. A handler
-// whose catalogs could not all be read is left as it is, for the next pass.
-func (p *Pass) Handler(ctx context.Context, orgID string, h domain.EventHandler, teamRules []domain.JiraProjectStatusRules) {
-	var refs []string
-	for _, r := range teamRules {
-		if ref := projectRef(r); !slices.Contains(refs, ref) {
-			refs = append(refs, ref)
-		}
-	}
-	d, gone, known := p.handler(ctx, h, refs)
+// it; projects is its team's tracked projects on the org's Jira site, each by
+// domain's ProjectRef. A handler whose catalogs could not all be read is left
+// as it is, for the next pass.
+func (p *Pass) Handler(ctx context.Context, orgID string, h domain.EventHandler, projects []string) {
+	d, gone, known := p.handler(ctx, h, projects)
 	if known {
 		kinds.JiraPredicateDrift.Set(ctx, orgID, d, gone)
 	}
@@ -356,9 +361,10 @@ func (p *Pass) handler(ctx context.Context, h domain.EventHandler, projects []st
 }
 
 // catalog is the ids of catalog the handler's projects offer: the union over
-// projects for a status or an issue type, the instance's for a priority. ok is
-// false when any read it needs did not answer, since a value missing from the
-// rest may be the unread one's.
+// projects for a status or an issue type, the instance's for a priority. A
+// project Jira answers 404 for offers nothing, as it does to the save. ok is
+// false when any other read it needs did not answer, since a value missing
+// from the rest may be the unread one's.
 func (p *Pass) catalog(ctx context.Context, catalog events.JiraCatalog, projects []string) (map[string]bool, bool) {
 	if catalog == events.JiraPriorityCatalog {
 		read := p.instancePriorities(ctx)
@@ -371,6 +377,9 @@ func (p *Pass) catalog(ctx context.Context, catalog events.JiraCatalog, projects
 			read = p.projectIssueTypes(ctx, ref)
 		} else {
 			read = p.workflow(ctx, ref)
+		}
+		if read.notFound {
+			continue
 		}
 		if !read.ok {
 			return nil, false

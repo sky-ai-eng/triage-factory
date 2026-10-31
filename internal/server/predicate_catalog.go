@@ -1,7 +1,6 @@
 package server
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -275,7 +274,7 @@ func (c *catalogCheck) readTracked(tx db.TxStores) error {
 		if err != nil {
 			return fmt.Errorf("read team tracked jira projects: %w", err)
 		}
-		c.jiraRefs = idsOf(projects, func(p domain.JiraProjectStatusRules) string { return cmp.Or(p.ProjectExternalID, p.ProjectKey) })
+		c.jiraRefs = idsOf(projects, domain.JiraProjectStatusRules.ProjectRef)
 	}
 	teams, err := tx.LinearTeamRules.ListForTeam(c.ctx, c.teamID, domain.EntityScope("linear", settings))
 	if err != nil {

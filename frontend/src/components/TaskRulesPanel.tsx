@@ -53,6 +53,8 @@ export default function TaskRulesPanel({ open, onClose, openRuleId }: TaskRulesP
   // a settings panel that opens once per session — and the alternatives
   // (Suspense, data-fetching library) would require a broader refactor.
   useEffect(() => {
+    // A cleared link may be followed again, and should open its rule again.
+    if (!openRuleId) openedLink.current = null
     if (!open) return
     let cancelled = false
     // eslint-disable-next-line react-hooks/set-state-in-effect

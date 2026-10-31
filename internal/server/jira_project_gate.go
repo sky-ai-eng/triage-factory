@@ -90,15 +90,6 @@ func (p projectPlan) label() string {
 	return p.wish.jiraID
 }
 
-// statusRef names the project to Jira's status read: by its project id when
-// one is known, which a key rename does not move, else by its key.
-func (p projectPlan) statusRef() string {
-	if p.row.ProjectExternalID != "" {
-		return p.row.ProjectExternalID
-	}
-	return p.row.ProjectKey
-}
-
 // changedIDs is every status id this plan still has to resolve, across all four
 // rules — the one place the rule set is enumerated for the "does this project
 // need Jira at all?" question.
@@ -232,7 +223,7 @@ func (s *Server) gateJiraProjects(
 		// One fetch per project with a changed rule, shared by all four rules
 		// and doing both jobs at once: it is the gate, and it is where every
 		// display name comes from.
-		statuses, err := client.ProjectStatuses(r.Context(), p.statusRef())
+		statuses, err := client.ProjectStatuses(r.Context(), p.row.ProjectRef())
 		if err != nil {
 			writeJiraGateStopped(w, &v, orgID, "the statuses of project "+p.label(), err)
 			return nil, nil, false

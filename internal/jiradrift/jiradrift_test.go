@@ -2,6 +2,7 @@ package jiradrift
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"testing"
 
@@ -177,6 +178,59 @@ func TestPassRules_StopsAskingWhenJiraIsDown(t *testing.T) {
 	rec.Active(t, org, kinds.JiraStatusDrift, "team-a:row-2")
 }
 
+// TestPassRules_OneBadAnswerDoesNotStopThePass: a read that failed on its own
+// account, here an answer that does not decode, leaves the rest of the pass
+// reading.
+func TestPassRules_OneBadAnswerDoesNotStopThePass(t *testing.T) {
+	rec := notifytest.Record(t)
+	ctx, org := context.Background(), "org-bad-answer"
+	f := &fakeJira{
+		statuses: map[string][]jira.Status{"10002": jiraStatuses(without(workflow, ready))},
+		errs:     map[string]error{"statuses:10001": errors.New("parse project statuses: unexpected end of JSON input")},
+	}
+	NewPass(f).Rules(ctx, org, []domain.JiraProjectStatusRules{
+		armed("team-a", "row-1", "10001", "ONE"),
+		armed("team-a", "row-2", "10002", "TWO"),
+	})
+	if !slices.Equal(f.calls, []string{"statuses:10001", "statuses:10002"}) {
+		t.Errorf("reads = %v, want both workflows read", f.calls)
+	}
+	rec.Active(t, org, kinds.JiraStatusDrift, "team-a:row-2")
+}
+
+// TestPassHandlers_ProjectJiraCannotFindOffersNothing: a tracked project Jira
+// answers 404 for offers nothing to its team's filters, as it does to the
+// save, so a status only it had is gone. Its own rule is left as it is: the
+// project is jira.discovery_failing's to report.
+func TestPassHandlers_ProjectJiraCannotFindOffersNothing(t *testing.T) {
+	rec := notifytest.Record(t)
+	ctx, org := context.Background(), "org-not-found"
+	rules := []domain.JiraProjectStatusRules{
+		armed("team-a", "row-sky", "10000", "SKY"),
+		armed("team-a", "row-ops", "10001", "OPS"),
+	}
+	f := &fakeJira{
+		statuses: map[string][]jira.Status{"10000": jiraStatuses(workflow)},
+		errs:     map[string]error{"statuses:10001": &jira.StatusError{Status: 404, Class: upstream.Rejected}},
+	}
+	kinds.JiraStatusDrift.Set(ctx, org, kinds.JiraStatusRule{TeamID: "team-a", JiraProjectID: "row-ops"}, true)
+
+	pass := NewPass(f)
+	pass.Rules(ctx, org, rules)
+	pass.Handlers(ctx, org, rules, []domain.EventHandler{
+		handler("ops-status", "team-a", domain.EventJiraIssueStatusChanged, `{"new_status_id_in":["90"]}`),
+		handler("sky-status", "team-a", domain.EventJiraIssueStatusChanged, `{"new_status_id_in":["2"]}`),
+	})
+
+	rec.Active(t, org, kinds.JiraStatusDrift, "team-a:row-ops")
+	if keys := keysOf(rec.Open(org, kinds.JiraPredicateDrift)); !slices.Equal(keys, []string{"ops-status"}) {
+		t.Errorf("open = %v, want only the filter naming a status no findable project has", keys)
+	}
+	if n := len(f.calls); n != 2 {
+		t.Errorf("reads = %v, want each workflow read once across both checks", f.calls)
+	}
+}
+
 // TestPassRules_OneReadPerProject: two teams' rules for one project read its
 // workflow once.
 func TestPassRules_OneReadPerProject(t *testing.T) {
@@ -264,18 +318,18 @@ func TestPassHandlers(t *testing.T) {
 func TestPassHandler_SetsOneHandler(t *testing.T) {
 	rec := notifytest.Record(t)
 	ctx, org := context.Background(), "org-one-handler"
-	rules := []domain.JiraProjectStatusRules{armed("team-a", "row-sky", "10000", "SKY")}
+	projects := []string{"10000"}
 	f := &fakeJira{statuses: map[string][]jira.Status{"10000": jiraStatuses(workflow)}}
 	kinds.JiraPredicateDrift.Set(ctx, org, kinds.JiraHandlerFilter{HandlerID: "other"}, true)
 
 	h := handler("rule", "team-a", domain.EventJiraIssueStatusChanged, `{"new_status_id_in":["999"]}`)
 	h.Kind, h.Name = domain.EventHandlerKindRule, "Ready work"
-	NewPass(f).Handler(ctx, org, h, rules)
+	NewPass(f).Handler(ctx, org, h, projects)
 	rec.Active(t, org, kinds.JiraPredicateDrift, "rule", "other")
 
 	fixed := `{"new_status_id_in":["2"]}`
 	h.ScopePredicateJSON = &fixed
-	NewPass(f).Handler(ctx, org, h, rules)
+	NewPass(f).Handler(ctx, org, h, projects)
 	if keys := keysOf(rec.Open(org, kinds.JiraPredicateDrift)); !slices.Equal(keys, []string{"other"}) {
 		t.Errorf("open = %v, want the fixed rule resolved and the other left", keys)
 	}

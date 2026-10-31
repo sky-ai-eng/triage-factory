@@ -3,10 +3,9 @@ package server
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
+	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
@@ -21,8 +20,12 @@ import (
 // save; a save that changed neither the filter nor whether the handler is
 // enabled changes nothing the check reads, and is not checked.
 //
-// It runs after the write and never fails it: the save has already been
-// answered for, and whatever this cannot read is left for the hourly check.
+// It runs once the write has committed and never fails it: whatever it cannot
+// read is left for the hourly check. It runs before the response is written
+// rather than in the background, so the checks of two quick saves of one
+// handler cannot land out of order, and it gives up after
+// jiraDriftRecheckTimeout, so a slow Jira holds a save that has already
+// succeeded only that long.
 func (eh *eventHandlersHandler) recheckJiraDrift(ctx context.Context, orgID, userID string, prior, stored domain.EventHandler) {
 	if !strings.HasPrefix(stored.EventType, "jira:") {
 		return
@@ -35,23 +38,16 @@ func (eh *eventHandlersHandler) recheckJiraDrift(ctx context.Context, orgID, use
 		kinds.JiraPredicateDrift.Set(ctx, orgID, kinds.JiraHandlerFilter{HandlerID: stored.ID}, false)
 		return
 	}
-	var rules []domain.JiraProjectStatusRules
-	if err := eh.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		settings, err := tx.Orgs.GetSettings(ctx, orgID)
-		if err != nil {
-			return fmt.Errorf("read org settings: %w", err)
-		}
-		if site := domain.EntityScope("jira", settings); site != "" {
-			if rules, err = tx.JiraStatusRules.ListForTeam(ctx, stored.TeamID, site); err != nil {
-				return fmt.Errorf("read team tracked jira projects: %w", err)
-			}
-		}
-		return nil
-	}); err != nil {
+	ctx, cancel := context.WithTimeout(ctx, jiraDriftRecheckTimeout)
+	defer cancel()
+	// The save's own catalog check reads the team's tracked projects and the
+	// client the same way, so the two judge a filter against one catalog.
+	c := newCatalogCheck(ctx, eh.catalogs, orgID, stored.TeamID)
+	if err := eh.tx.WithReadTx(ctx, orgID, userID, c.readTracked); err != nil {
 		serverLog.Warn("jira drift recheck after a handler save could not read the team's projects", "org", orgID, "handler", stored.ID, "error", err)
 		return
 	}
-	client, err := eh.catalogs.jiraCatalogClient(ctx, orgID)
+	client, err := c.jira()
 	if err != nil {
 		// A source turned off or never connected has no drift to report: its
 		// notifications were resolved when it went away.
@@ -60,8 +56,12 @@ func (eh *eventHandlersHandler) recheckJiraDrift(ctx context.Context, orgID, use
 		}
 		return
 	}
-	jiradrift.NewPass(client).Handler(ctx, orgID, stored, rules)
+	jiradrift.NewPass(client).Handler(ctx, orgID, stored, c.jiraRefs)
 }
+
+// jiraDriftRecheckTimeout bounds the Jira reads a handler save's drift check
+// makes: one per tracked project, plus the priorities.
+const jiraDriftRecheckTimeout = 5 * time.Second
 
 // samePredicate reports whether two stored filters are the same text.
 func samePredicate(a, b *string) bool {

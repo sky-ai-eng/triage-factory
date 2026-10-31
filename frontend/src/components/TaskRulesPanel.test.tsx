@@ -1,13 +1,18 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import TaskRulesPanel from './TaskRulesPanel'
 import { jsonBody } from '../test/apiResponse'
 
 // What's under test is opening a linked rule: the editor is a stand-in that
 // shows which rule it was opened on.
 vi.mock('./TaskRuleEditor', () => ({
-  default: (props: { open: boolean; rule: { id: string } | null }) =>
-    props.open ? <p>editor {props.rule?.id ?? 'new'}</p> : null,
+  default: (props: { open: boolean; rule: { id: string } | null; onClose: () => void }) =>
+    props.open ? (
+      <p>
+        editor {props.rule?.id ?? 'new'}
+        <button onClick={props.onClose}>close editor</button>
+      </p>
+    ) : null,
 }))
 vi.mock('../hooks/useEventSources', () => ({
   useEventSources: () => ({ stateOf: () => 'available', canProduce: () => true }),
@@ -48,7 +53,7 @@ describe('TaskRulesPanel linked rule', () => {
     stubRules('rule-1', 'rule-2')
     render(<TaskRulesPanel open onClose={() => {}} openRuleId="rule-2" />)
 
-    await waitFor(() => expect(screen.getByText('editor rule-2')).toBeTruthy())
+    await waitFor(() => expect(screen.getByText(/editor rule-2/)).toBeTruthy())
     expect(toastMock.error).not.toHaveBeenCalled()
   })
 
@@ -58,6 +63,18 @@ describe('TaskRulesPanel linked rule', () => {
 
     await waitFor(() => expect(toastMock.error).toHaveBeenCalledTimes(1))
     expect(screen.queryByText(/^editor/)).toBeNull()
+  })
+
+  it('opens the rule again when the same link is followed again', async () => {
+    stubRules('rule-1')
+    const { rerender } = render(<TaskRulesPanel open onClose={() => {}} openRuleId="rule-1" />)
+    await waitFor(() => expect(screen.getByText(/editor rule-1/)).toBeTruthy())
+    fireEvent.click(screen.getByText('close editor'))
+    expect(screen.queryByText(/editor rule-1/)).toBeNull()
+
+    rerender(<TaskRulesPanel open={false} onClose={() => {}} openRuleId={null} />)
+    rerender(<TaskRulesPanel open onClose={() => {}} openRuleId="rule-1" />)
+    await waitFor(() => expect(screen.getByText(/editor rule-1/)).toBeTruthy())
   })
 
   it('opens no editor without a link', async () => {

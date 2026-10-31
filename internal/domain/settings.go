@@ -1202,6 +1202,16 @@ func ContainsStatus(refs []JiraStatusRef, status JiraStatusRef) bool {
 	return containsStatus(refs, status)
 }
 
+// ProjectRef names the rule's project to Jira's REST API: by Jira's project id
+// once the registry has resolved it, which a key rename does not move, else by
+// its key.
+func (r JiraProjectStatusRules) ProjectRef() string {
+	if r.ProjectExternalID != "" {
+		return r.ProjectExternalID
+	}
+	return r.ProjectKey
+}
+
 // RuleForJiraProject returns the rule for the jira_projects registry row
 // jiraProjectID, or nil when no rule in the slice is about it. Callers degrade
 // gracefully on nil ("no rules configured" — no terminal check, no
