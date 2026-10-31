@@ -93,6 +93,22 @@ func (s *jiraStatusRulesStore) TracksJiraProjectSystem(ctx context.Context, team
 	return true, nil
 }
 
+// ArmingTeamIDsSystem compares the id as text for the reason
+// TracksJiraProjectSystem does.
+func (s *jiraStatusRulesStore) ArmingTeamIDsSystem(ctx context.Context, orgID, site, jiraProjectID string) ([]string, error) {
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT `+jiraRuleCols+`
+		`+jiraRuleFrom+`
+		  AND r.org_id = $2 AND r.jira_project_id::text = $3
+		  AND EXISTS (SELECT 1 FROM teams t WHERE t.id = r.team_id AND t.deleted_at IS NULL)
+	`, site, orgID, jiraProjectID)
+	rules, err := scanJiraStatusRules(rows, err)
+	if err != nil {
+		return nil, fmt.Errorf("list teams arming jira project: %w", err)
+	}
+	return db.ArmingTeamIDs(rules), nil
+}
+
 func listJiraStatusRules(ctx context.Context, q queryer, teamID, site string) ([]domain.JiraProjectStatusRules, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT `+jiraRuleCols+`

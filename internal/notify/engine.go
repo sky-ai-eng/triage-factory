@@ -52,7 +52,7 @@ func (e *engine) Set(ctx context.Context, sk sink.Kind, orgID string, p any, act
 	e.commit(ctx, k.name, orgID, occ.writeCondition(ctx, orgID))
 }
 
-func (e *engine) Sync(ctx context.Context, sk sink.Kind, orgID string, active []any) {
+func (e *engine) Sync(ctx context.Context, sk sink.Kind, orgID string, active, keep []any) {
 	k := sk.(*kind)
 	defer e.recoverPanic(k.name, orgID)
 	r := e.resolution(orgID)
@@ -81,11 +81,14 @@ func (e *engine) Sync(ctx context.Context, sk sink.Kind, orgID string, active []
 		at[occ.key] = len(occs)
 		occs = append(occs, occ)
 	}
-	keys := make([]string, 0, len(occs)+len(unrendered))
+	keys := make([]string, 0, len(occs)+len(unrendered)+len(keep))
 	for _, occ := range occs {
 		keys = append(keys, occ.key)
 	}
 	keys = append(keys, unrendered...)
+	for _, p := range keep {
+		keys = append(keys, k.key(p))
+	}
 	e.commit(ctx, k.name, orgID, func(tx db.NotificationStore) ([]domain.Notification, error) {
 		var changed []domain.Notification
 		for _, occ := range occs {
