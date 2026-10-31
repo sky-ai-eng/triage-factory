@@ -748,8 +748,7 @@ func TestTaskContext_AnObjectTwoConversationsChangedRendersOnce(t *testing.T) {
 	arts, dels := f.spawner.taskArtifacts(context.Background(), runmode.LocalDefaultOrgID, f.taskID)
 	got := BuildTaskContext(domain.Task{}, "", "", "", arts, dels)
 
-	// The pushes also leave a branch deliverable, pinned to run-1; it names the
-	// same branch, so it adds no line.
+	// Both pushes name one branch, so it is one line.
 	assertLinesInOrder(t, got, []string{
 		"- Artifact: branch octo/repo — branch_pushed — https://github.com/octo/repo/tree/fix",
 		"- Artifact: review octo/repo#7 — pending",

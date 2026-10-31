@@ -23,7 +23,7 @@ const zeroOID = "0000000000000000000000000000000000000000"
 func TestParseReceivePackCommands(t *testing.T) {
 	// A realistic receive-pack request: the first command carries the
 	// capabilities after a NUL; a delete (new-sha all zeros) is dropped; a tag
-	// is returned (the branch filter lives downstream in NewBranchDeliverable);
+	// is returned (the branch filter lives downstream in domain.IsBranchPush);
 	// then the flush-pkt and the packfile, which must not be parsed as commands.
 	body := []byte(
 		pktLine(zeroOID+" aaaa1111 refs/heads/main\x00report-status side-band-64k\n") +
@@ -89,7 +89,7 @@ func TestReceivePackRepoPath(t *testing.T) {
 	}{
 		{"/octo/repo/git-receive-pack", "octo/repo"},
 		{"/octo/repo.git/git-receive-pack", "octo/repo"},
-		// Multi-segment paths pass through here; NewBranchDeliverable rejects them.
+		// Multi-segment paths pass through here; domain.IsBranchPush rejects them.
 		{"/scm/octo/repo/git-receive-pack", "scm/octo/repo"},
 	}
 	for _, c := range cases {

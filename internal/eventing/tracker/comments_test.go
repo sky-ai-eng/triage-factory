@@ -766,7 +766,7 @@ func TestRefreshLinear_FailedCommentReadIsRetried(t *testing.T) {
 	onlyCommented(t, evts, domain.EventLinearIssueCommented)
 }
 
-// TestMarkTFComments_ReadsOnlyItsScope: a comment deliverable recorded in another
+// TestMarkTFComments_ReadsOnlyItsScope: a comment recorded in another
 // workspace does not make a comment TF's.
 func TestMarkTFComments_ReadsOnlyItsScope(t *testing.T) {
 	database := newMigratedSQLite(t)

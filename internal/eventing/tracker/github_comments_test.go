@@ -294,7 +294,7 @@ func TestGitHubNewComments_StoredWithoutMarker(t *testing.T) {
 }
 
 // A conversation comment the ledger records TF posting is TF's, matched on the
-// row's object key, with no comment deliverable written. A review comment with
+// row's object key. A review comment with
 // the same number is a different comment, and so is a comment recorded on
 // another GitHub host.
 func TestGitHubNewComments_MarksTFComments(t *testing.T) {
