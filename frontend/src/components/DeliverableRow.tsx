@@ -1,7 +1,7 @@
 import { ExternalLink, X } from 'lucide-react'
 import type { Deliverable } from '../types'
 import { TONE_TEXT, TONE_VAR, type Tone } from './board/cardStyle'
-import { metaForKind } from './deliverableMeta'
+import { awaitsDecision, metaForKind, overlayKindFor, rowTone } from './deliverableMeta'
 
 // DeliverableRow + StateBadge, factored out of DeliverableList.tsx (TFAC-483) so the
 // bot-activity audit feed can render a provided Deliverable[] with the SAME row
@@ -22,6 +22,7 @@ export function DeliverableRow({
   onDismiss,
   dismissing,
   note,
+  highlighted,
 }: {
   deliverable: Deliverable
   onOpenApproval?: (kind: 'review' | 'pr', deliverableId: string) => void
@@ -36,17 +37,16 @@ export function DeliverableRow({
   // cross-team row shows which team's bot acted. Undefined elsewhere (the
   // conversation-scoped list), so those rows are unchanged.
   note?: React.ReactNode
+  // Draws the row in the warm tone that marks work a person acts on, as the
+  // Run page's Artifacts section does.
+  highlighted?: boolean
 }) {
   const meta = metaForKind(deliverable.kind)
   const Icon = meta.icon
-  const overlayKind: 'review' | 'pr' | null =
-    deliverable.kind === 'pull_request' ? 'pr' : deliverable.kind === 'review' ? 'review' : null
+  const overlayKind = overlayKindFor(deliverable.kind)
   // Only the awaiting-a-decision state routes to the overlay; any resolved state
   // falls through to the link-out rendering below.
-  const actionable =
-    deliverable.kind === 'pull_request'
-      ? deliverable.state === 'draft'
-      : deliverable.state === 'pending'
+  const actionable = awaitsDecision(deliverable.kind, deliverable.state)
 
   const body = (
     <>
@@ -59,28 +59,18 @@ export function DeliverableRow({
     </>
   )
 
-  const rowClass =
-    'flex w-full items-center gap-2 rounded-[4px] border border-line-1 bg-tint-1 px-2 py-1.5 text-left transition-colors hover:bg-tint-3'
+  const rowClass = `flex w-full items-center gap-2 rounded-[4px] border px-2 py-1.5 text-left transition-colors ${rowTone(highlighted)}`
 
   // The [x] rides the row's ACTIONABLE state, not the overlay handler — a
   // still-pending row stays dismissable even where no editor is wired, and a
   // freshly-resolved row drops it before the owner's pending set catches up.
   const dismissButton =
     onDismiss && actionable ? (
-      <button
-        type="button"
-        onClick={onDismiss}
-        disabled={dismissing}
-        aria-label={`Dismiss ${meta.label}`}
-        title={
-          deliverable.kind === 'pull_request'
-            ? 'Dismiss — closes the draft PR (branch kept)'
-            : 'Dismiss — discards the pending review'
-        }
-        className="inline-flex shrink-0 items-center justify-center rounded-[4px] p-1.5 text-ink-3/70 transition-colors hover:bg-alarm/[0.1] hover:text-alarm disabled:cursor-wait disabled:opacity-50"
-      >
-        <X size={12} aria-hidden />
-      </button>
+      <DismissDeliverableButton
+        kind={deliverable.kind}
+        onDismiss={onDismiss}
+        dismissing={dismissing}
+      />
     ) : null
 
   // Inline (not a precomputed boolean) so TypeScript narrows both to non-null
@@ -129,6 +119,35 @@ export function DeliverableRow({
       {body}
       {dismissButton}
     </li>
+  )
+}
+
+// DismissDeliverableButton — the in-place [x] that closes a draft PR or
+// discards a pending review without opening its editor.
+export function DismissDeliverableButton({
+  kind,
+  onDismiss,
+  dismissing,
+}: {
+  kind: string
+  onDismiss: () => void
+  dismissing?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onDismiss}
+      disabled={dismissing}
+      aria-label={`Dismiss ${metaForKind(kind).label}`}
+      title={
+        kind === 'pull_request'
+          ? 'Dismiss — closes the draft PR (branch kept)'
+          : 'Dismiss — discards the pending review'
+      }
+      className="inline-flex shrink-0 items-center justify-center rounded-[4px] p-1.5 text-ink-3/70 transition-colors hover:bg-alarm/[0.1] hover:text-alarm disabled:cursor-wait disabled:opacity-50"
+    >
+      <X size={12} aria-hidden />
+    </button>
   )
 }
 

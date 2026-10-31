@@ -61,7 +61,7 @@ func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request
 
 // writeConversationResource reads the conversation resource exactly as
 // handleAgentStatus does — the point read plus its display enrichment
-// (deliverable and artifact counts, blueprint step count, resumability) — and writes it as
+// (artifact counts, the derived approval signal, blueprint step count, resumability) — and writes it as
 // the response. Shared with handleAgentStop/handleMessage so a mutating verb
 // route answers with the resource it just changed rather than a status stub
 // naming only the field that verb happens to touch.
@@ -95,7 +95,7 @@ func (ag *agentHandler) writeConversationResource(w http.ResponseWriter, r *http
 		var arts []domain.Deliverable
 		if counts[conv.ID] > 0 {
 			if a, _, lerr := tx.Deliverables.ListByConversation(r.Context(), orgID, conv.ID, db.Unwindowed); lerr != nil {
-				serverLog.Warn("deliverable lookup for has_unresolved_deliverables failed; omitting it (deliverable_count unaffected)", "conversation", conv.ID, "error", lerr)
+				serverLog.Warn("deliverable lookup for has_unresolved_deliverables failed; omitting it", "conversation", conv.ID, "error", lerr)
 			} else {
 				arts = a
 			}
@@ -477,7 +477,7 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 
 // artifactJSON is the wire shape of one item of POST
 // /api/agent/conversations/{conversationID}/artifacts/list: an object the
-// conversation's agent changed (domain.Artifact). Deliverable is the
+// conversation changed (domain.Artifact). Deliverable is the
 // conversation's deliverable that is the same object
 // (domain.ArtifactDeliverable), or null.
 type artifactJSON struct {
@@ -532,7 +532,7 @@ type conversationArtifactListRequest struct {
 	httpx.PageRequest
 }
 
-// handleAgentArtifacts returns the objects this conversation's agent changed,
+// handleAgentArtifacts returns the objects this conversation changed,
 // one item per object however many actions it took on it, by the latest of
 // those actions first. Each item names the conversation's deliverable that is
 // the same object, matched after the page is read. Gated as its sibling
@@ -600,8 +600,8 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 }
 
 // conversationResponse projects a Conversation into the wire shape the frontend consumes,
-// augmented with `deliverable_count` and the per-kind `deliverable_counts` (so the
-// Board card can show what a conversation produced without a per-card fetch) and
+// augmented with `artifact_count` and the per-kind `artifact_counts` (so the
+// Board card can show what a conversation changed without a per-card fetch) and
 // the derived approval signal:
 // `has_unresolved_deliverables` (bool), `unresolved_pr_count` /
 // `unresolved_review_count`, and `pending_deliverable_ids` (the set of unresolved
@@ -614,6 +614,8 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 // per conversation:
 //   - deliverableCount from Deliverables.CountByConversation (the single-conversation path counts one
 //     conversation; the list path batches every conversation in one query — N+1 avoidance).
+//     It is not projected: it is what tells a conversation with no deliverables
+//     (definitively nothing unresolved) from one whose deliverable read failed.
 //   - arts is the conversation's deliverable set, which the caller reads best-effort (only
 //     for conversations that have any deliverable, so a conversation with none costs no list).
 //   - artifactCounts is the conversation's artifacts by object kind, from
@@ -687,8 +689,7 @@ func conversationResponse(conv *domain.Conversation, deliverableCount int, arts 
 		"blueprint_step_index": conv.BlueprintStepIndex,
 		"blueprint_step_count": progress.StepCount,
 		"blueprint_run_status": string(progress.Status),
-		"deliverable_count":    deliverableCount,
-		// The objects the conversation's agent changed, in all and by object
+		// The objects the conversation changed, in all and by object
 		// kind, read from the ledger. {} for a conversation that changed
 		// nothing.
 		"artifact_count":  artifactTotal(artifactCounts),
@@ -759,12 +760,6 @@ func conversationResponse(conv *domain.Conversation, deliverableCount int, arts 
 		out["has_unresolved_deliverables"] = prCount > 0 || reviewCount > 0
 		out["unresolved_pr_count"] = prCount
 		out["unresolved_review_count"] = reviewCount
-		// What the conversation wrote, by kind — the board card's footer
-		// strip. Under the same definitive-only guard as the counts above and
-		// off the same deliverable set, so the strip's totals and the warm marks
-		// it draws from the unresolved counts can never disagree. {} when the
-		// conversation produced nothing.
-		out["deliverable_counts"] = domain.DeliverableCountsByKind(arts)
 		// The set of unresolved approvable deliverable ids (all draft PRs + all ready
 		// reviews) — what the approval UI lists for per-item resolve. Emitted under
 		// the same definitive-only guard as the counts above, and always non-nil so
@@ -1290,13 +1285,14 @@ func (ag *agentHandler) handleAgentPermissions(w http.ResponseWriter, r *http.Re
 }
 
 // enrichConversations projects conversations onto the wire shape, augmenting each with a batched
-// deliverable_count and the derived has_unresolved_deliverables (+ per-kind counts).
+// artifact_count and the derived has_unresolved_deliverables (+ per-kind counts).
 // Both deliverable reads stay O(1) in queries regardless of how many conversations the set
 // has. Board's useWebSocket re-fetches on every status transition, so a per-conversation
 // read would scale with the task's conversation history.
 //
-//   - deliverable_count for every conversation: one CountByConversation (conversationID→count; a conversation with no
-//     deliverables is absent → 0).
+//   - the deliverable count for every conversation: one CountByConversation (conversationID→count; a
+//     conversation with no deliverables is absent → 0). Not projected; it decides which
+//     conversations need the list below.
 //   - artifact_count and artifact_counts for every conversation: one
 //     Artifacts.CountByConversations (conversation → object kind → count).
 //   - has_unresolved_deliverables for the conversations that have deliverables: one ListByConversations
@@ -1340,7 +1336,7 @@ func enrichConversations(ctx context.Context, tx db.TxStores, orgID string, conv
 	artsByConv := map[string][]domain.Deliverable{}
 	if len(withDeliverables) > 0 {
 		if arts, lerr := tx.Deliverables.ListByConversations(ctx, orgID, withDeliverables); lerr != nil {
-			serverLog.Warn("deliverable batch lookup failed; omitting has_unresolved_deliverables (deliverable_count unaffected)", "error", lerr)
+			serverLog.Warn("deliverable batch lookup failed; omitting has_unresolved_deliverables", "error", lerr)
 		} else {
 			for _, a := range arts {
 				artsByConv[a.ConversationID] = append(artsByConv[a.ConversationID], a)

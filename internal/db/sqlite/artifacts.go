@@ -23,8 +23,9 @@ func newArtifactStore(q queryer) db.ArtifactStore {
 var _ db.ArtifactStore = (*artifactStore)(nil)
 
 // sqliteArtifactRowFilter is what every artifact read adds to its own WHERE:
-// the agent's rows that name an object, of an action that can name one.
-var sqliteArtifactRowFilter = ` AND ea.performed_by = 'agent' AND ea.action NOT IN (` + db.ArtifactExcludedActionsSQL() +
+// the rows of an artifact performer that name an object, of an action that
+// can name one.
+var sqliteArtifactRowFilter = ` AND ea.performed_by IN (` + db.ArtifactPerformersSQL() + `) AND ea.action NOT IN (` + db.ArtifactExcludedActionsSQL() +
 	`) AND (` + sqliteActionObjectIDSQL + `) IS NOT NULL`
 
 // sqliteArtifactSelect is the Postgres impl's grouped read (see

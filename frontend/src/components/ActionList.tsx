@@ -3,29 +3,26 @@ import type { ActivityAction } from '../types'
 import { usePagedList } from '../hooks/usePagedList'
 import { ActionRow } from './ActionRow'
 
-// ActionList — every external write one conversation performed, newest first. The
-// sibling of DeliverableList, and the other half of "what did this conversation do".
-//
-// The two lists answer different questions and neither subsumes the other.
-// Deliverables are the OBJECTS a conversation owns and the state they are in now — a PR, a
-// review, a branch — which is what an approval surface needs. Actions are the
-// WRITES it made, including every one that leaves no object behind: a reply on
-// a review thread, a merge the upstream refused, a push the gate turned down, a
-// host the sandbox blocked. A conversation whose only external act was a reply produces
-// no deliverable at all, and before this list that conversation's record read as empty.
+// ActionList — the external writes one conversation performed, newest first,
+// narrowed to the writes on one object (`objectId`, an artifact's object_id) or
+// to the refused and failed ones (`refused`). The Run page's Artifacts section
+// expands into it: an artifact row lists the actions behind it, and the
+// "refused or failed" line lists the writes that changed nothing.
 //
 // Reads POST /api/agent/conversations/{id}/actions/list, which is team-scoped
-// through the conversation. It used to answer a hardcoded 200 newest rows and admit so
-// in a footnote; now it pages, and "older actions are in the activity feed"
-// becomes a "load more" that actually fetches them.
+// through the conversation, a page at a time with "load more" for the rest.
 interface Props {
   conversationId: string
+  /** Keep only the actions on this object (an artifact's object_id). */
+  objectId?: string
+  /** Keep only the refused and failed writes. */
+  refused?: boolean
   /** Soft-refetch trigger. Unlike a conversationId change this keeps the rows already on
    *  screen until the new set lands, so a live conversation's list doesn't blink. */
   refreshKey?: string
 }
 
-export default function ActionList({ conversationId, refreshKey }: Props) {
+export default function ActionList({ conversationId, objectId, refused, refreshKey }: Props) {
   // The hook is keyed by path and the path carries the conversation id, so a conversation change
   // swaps its target — which is also what keeps a page token minted for one
   // conversation from ever being sent against another.
@@ -35,20 +32,22 @@ export default function ActionList({ conversationId, refreshKey }: Props) {
   )
   const { items: actions, total, hasMore, loading, error, load, loadMore, setItems } = list
   const [loaded, setLoaded] = useState(false)
-  // Which conversation the rows on screen belong to. A conversation change clears them before the
-  // new conversation's land, so one conversation's actions never render under another's heading;
-  // a soft refetch (refreshKey) deliberately does not clear, because those rows
-  // were true a moment ago and this is an audit surface.
-  const shownConversation = useRef('')
+  // Which read the rows on screen belong to: the conversation and the filters.
+  // A change of either clears them before the new read's land, so one
+  // conversation's actions never render under another's heading; a soft
+  // refetch (refreshKey) deliberately does not clear, because those rows were
+  // true a moment ago and this is an audit surface.
+  const shownRead = useRef('')
 
   useEffect(() => {
     if (!conversationId) return
     let cancelled = false
-    if (shownConversation.current !== conversationId) {
-      shownConversation.current = conversationId
-      // The clear must land before the new conversation's rows do, so it is synchronous
-      // by design — the alternative renders one conversation's actions under another
-      // conversation's heading for a frame.
+    const read = `${conversationId}|${objectId ?? ''}|${refused ? 'refused' : ''}`
+    if (shownRead.current !== read) {
+      shownRead.current = read
+      // The clear must land before the new read's rows do, so it is synchronous
+      // by design — the alternative renders one read's actions under another's
+      // heading for a frame.
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setLoaded(false)
       setItems(() => [])
@@ -57,13 +56,16 @@ export default function ActionList({ conversationId, refreshKey }: Props) {
     // must fall to the error branch, not to "no external actions yet", which
     // would be a false statement about an audit surface. A failed refetch
     // leaves `loaded` already true, which is what keeps the stale rows up.
-    load({}).then((page) => {
+    load({
+      ...(objectId ? { object_id: objectId } : {}),
+      ...(refused ? { refused: true } : {}),
+    }).then((page) => {
       if (page && !cancelled) setLoaded(true)
     })
     return () => {
       cancelled = true
     }
-  }, [conversationId, refreshKey, load, setItems])
+  }, [conversationId, objectId, refused, refreshKey, load, setItems])
 
   // A failed load stands in for the rows only when there are none to show. A
   // failed soft refetch keeps what it has — those rows were true a moment ago,

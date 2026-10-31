@@ -190,15 +190,21 @@ function lifecycleOf(task: Task, run: Conversation | undefined): Lifecycle {
   return 'idle'
 }
 
-// The strip's four kinds. Issues and messages have no mark on the strip; a
-// run that wrote one of those still has its deliverable on the run page.
+// The strip's four kinds, read off the objects the run changed. Every
+// other object kind has no mark on the strip; a run that changed one still
+// has its artifact on the run page.
+//
+// The review mark adds the reviews waiting for approval. A review is an
+// artifact only once it is posted, so a finalized review that is still pending
+// is counted here and nowhere else, and shows on the card before it is posted.
 function artifactTotals(conversation: Conversation | undefined): ArtifactTotals | undefined {
-  const counts = conversation?.deliverable_counts
-  if (!counts) return undefined
+  if (!conversation) return undefined
+  const counts = conversation.artifact_counts ?? {}
+  const review = (counts.review ?? 0) + (conversation.unresolved_review_count ?? 0)
   const out: ArtifactTotals = {}
   if (counts.branch) out.branch = counts.branch
   if (counts.pull_request) out.pulls = counts.pull_request
-  if (counts.review) out.review = counts.review
+  if (review) out.review = review
   if (counts.comment) out.comment = counts.comment
   return Object.keys(out).length > 0 ? out : undefined
 }

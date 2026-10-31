@@ -380,7 +380,7 @@ func TestDeliverableStore_SQLite_ListByConversationAndTeam(t *testing.T) {
 }
 
 // TestDeliverableStore_SQLite_CountByConversation pins the batched
-// per-conversation count the conversation-list path uses for deliverable_count
+// per-conversation count the conversation-list path gates its deliverable read on
 // (TFAC-465): counts keyed by conversation id, a conversation with no deliverables
 // absent from the map (not 0-valued), unknown ids absent, and
 // an empty conversationIDs a no-op returning an empty map.

@@ -17,6 +17,11 @@ vi.mock('./useWebSocket', () => ({
   setPresenceView: vi.fn(),
 }))
 
+// The rail's Artifacts section subscribes to the socket too, and the mock
+// above keeps only the last handler registered. This suite is about the
+// readouts, so the section is left out.
+vi.mock('../components/runstation/RunArtifacts', () => ({ RunArtifacts: () => null }))
+
 const CONVERSATION_ID = 'r1'
 const T0 = new Date('2026-07-30T00:00:00Z').getTime()
 
@@ -35,7 +40,6 @@ function conversation(over: Partial<Conversation>): Conversation {
     StartedAt: new Date(T0).toISOString(),
     ClaimedAt: new Date(T0).toISOString(),
     ResultSummary: '',
-    deliverable_count: 0,
     ...over,
   } as Conversation
 }

@@ -244,8 +244,8 @@ func TestHandleAgentActions_StrictBody(t *testing.T) {
 }
 
 // TestConversationResponse_ArtifactCounts pins artifact_count and
-// artifact_counts on the single read and the batched list: the agent's rows
-// counted once per object, a person's row not at all, and {} for a
+// artifact_counts on the single read and the batched list: the run's rows
+// counted once per object, TF's own rows not at all, and {} for a
 // conversation that changed nothing.
 func TestConversationResponse_ArtifactCounts(t *testing.T) {
 	s := newTestServer(t)
@@ -259,14 +259,14 @@ func TestConversationResponse_ArtifactCounts(t *testing.T) {
 	created := artifactRow(domain.ActionPRCreated, domain.ObjectKindPullRequest, "")
 	created.EntityID = entityID
 	seedConversationAction(t, s, busy, created)
-	// A person's edit of the same pull request names it too, and is not the
-	// agent's.
+	// A person's edit of the run's pull request names the same object, so it
+	// is the same artifact.
 	edited := created
 	edited.Action, edited.PerformedBy = domain.ActionPREdited, domain.PerformedByPerson
 	seedConversationAction(t, s, busy, edited)
-	// Neither is a person's edit of an object the agent never touched.
+	// TF's own row on an object the run never touched is no artifact.
 	other := artifactRow(domain.ActionLabelDefinitionEdited, domain.ObjectKindLabel, "bug")
-	other.RepositoryID, other.PerformedBy = push.RepositoryID, domain.PerformedByPerson
+	other.RepositoryID, other.PerformedBy = push.RepositoryID, domain.PerformedBySystem
 	seedConversationAction(t, s, busy, other)
 
 	check := func(name string, m map[string]any, total float64, byKind map[string]float64) {

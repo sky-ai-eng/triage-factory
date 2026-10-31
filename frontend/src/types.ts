@@ -315,20 +315,10 @@ export interface Conversation {
   // draft PRs + unresolved_review_count ready reviews === pending_deliverable_ids.length.
   unresolved_pr_count?: number
   unresolved_review_count?: number
-  // deliverable_count is the number of deliverables this conversation produced (the
-  // conversationResponse projection — branch / PR / review / issue / comment, the
-  // primary gating one included), without a per-card fetch.
-  deliverable_count?: number
-  // deliverable_counts is the same set by kind — what the run WROTE, which the
-  // board card's footer strip states kind by kind. Emitted under the same
-  // definitive-only guard as has_unresolved_deliverables and off the same
-  // deliverable set, so the strip's totals and its warm marks never disagree;
-  // {} for a conversation that produced nothing, absent under the transient
-  // guard.
-  deliverable_counts?: Partial<Record<DeliverableKind, number>>
-  // artifact_count is the number of objects this conversation's agent changed,
+  // artifact_count is the number of objects this conversation changed,
   // read from the external-action ledger; artifact_counts is the same set by
-  // object kind ({} when it changed nothing). See ConversationArtifact.
+  // object kind ({} when it changed nothing) — what the board card's footer
+  // strip states kind by kind. See ConversationArtifact.
   artifact_count?: number
   artifact_counts?: Partial<Record<ObjectKind, number>>
   // actor_agent_id / actor_agent_name identify the bot that executed this
@@ -440,7 +430,7 @@ export type ObjectKind =
 
 // ConversationArtifact mirrors an item of
 // POST /api/agent/conversations/{id}/artifacts/list (internal/server/agent.go
-// artifactJSON): one object the conversation's agent changed, however many
+// artifactJSON): one object the conversation changed, however many
 // actions it took on it. It says what the run did (last_action, action_count),
 // not the object's current state. object_id is opaque and safe in a URL; it
 // is the value the actions list's object_id filter takes. deliverable is the
