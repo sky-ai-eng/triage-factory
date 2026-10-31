@@ -44,6 +44,11 @@ Signed in as the signer account: **Settings → SSH and GPG keys → New SSH key
 **Key type: Signing key**, paste `./secrets/commit-signer.pub`. Key titles are
 public, so name it after the product.
 
+On the same page, leave **Flag unsigned commits as unverified** (vigilant mode)
+unchecked. A squash merge is signed by GitHub, not by the account, so with it
+checked GitHub marks every squash merge that names the account as a co-author
+Partially verified.
+
 ## 4. Configure `control` and restart
 
 ```yaml
