@@ -215,6 +215,7 @@ func Budget(name string) attribute.KeyValue       { return keyBudget.String(name
 func Signed(signed bool) attribute.KeyValue { return keySigned.String(strconv.FormatBool(signed)) }
 
 // NotificationKind is a registered notification kind's name
-// ("linear.team_unreadable"): a Go value declared in internal/notify/kinds or
-// an extension's own package, never text a tenant wrote.
+// ("linear.team_unreadable"), a Go value declared in internal/notify/kinds or
+// an extension's own package, or "clear_source" for a ClearSource call; never
+// text a tenant wrote.
 func NotificationKind(name string) attribute.KeyValue { return keyKind.String(name) }

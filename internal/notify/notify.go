@@ -42,14 +42,15 @@ type Broadcaster interface {
 type Backend struct {
 	// Tx carries each call's writes in one transaction.
 	Tx db.TxRunner
-	// Notifications resolves a ping's recipients once the writes commit.
+	// Notifications answers who an audience is sent to: a ping's recipients
+	// once the writes commit, and local mode's one user before them.
 	Notifications db.NotificationStore
 	// Orgs and LinearTeamRules are the tracking resolvers' reads.
 	Orgs            db.OrgsStore
 	LinearTeamRules db.LinearTeamRulesStore
 	Hub             Broadcaster
-	// Local is N=1: every audience resolves to the one user, and a ping is
-	// one org envelope.
+	// Local is N=1: an occurrence is one row for the one user, written when
+	// any of its audiences is sent to them.
 	Local bool
 }
 

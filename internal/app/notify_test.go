@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/notify"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -42,6 +43,8 @@ func TestBuildNotify_InstallsTheVerbs(t *testing.T) {
 	}
 	stores := sqlitestore.New(conn)
 
+	// The engine is bound to a connection this test closes.
+	notifytest.Isolate(t)
 	a := &App{stores: stores, wsHub: websocket.NewHub()}
 	a.buildNotify()
 	if !notify.Installed() {

@@ -25,6 +25,10 @@ var (
 		Name: "notifytest.jira", Source: "jira", Priority: notify.Always(notify.High),
 		Key: teamID, Audience: notify.OrgAdmins(), Render: render, Example: team{ID: "x"},
 	})
+	sourcelessKind = notify.Condition(notify.ConditionSpec[team]{
+		Name: "notifytest.sourceless", Priority: notify.Always(notify.High),
+		Key: teamID, Audience: notify.OrgAdmins(), Render: render, Example: team{ID: "x"},
+	})
 	linearNotice = notify.Notice(notify.NoticeSpec[team]{
 		Name: "notifytest.notice", Source: "linear", TTL: notify.DefaultNoticeTTL,
 		Key: teamID, Audience: notify.OrgMembers(), Render: render, Example: team{ID: "x"},
@@ -45,15 +49,20 @@ func TestRecorder_ModelsTheVerbs(t *testing.T) {
 	linearKind.Set(ctx, org, team{ID: "a"}, false)
 	rec.Inactive(t, org, linearKind)
 
-	linearKind.Sync(ctx, org, []team{{ID: "a"}, {ID: "b"}})
+	linearKind.Sync(ctx, org, []team{{ID: "a"}, {ID: "b"}, {ID: "b"}})
 	linearKind.Sync(ctx, org, []team{{ID: "b"}, {ID: "c"}})
 	rec.Active(t, org, linearKind, "b", "c")
-	if open := rec.Open(org, linearKind); len(open) != 2 {
-		t.Errorf("Open after the second Sync = %+v; want b and c", open)
+	// b was raised once per pass, as the engine's seen_count would be.
+	if open := rec.Open(org, linearKind); len(open) != 2 || open[0].Seen != 2 {
+		t.Errorf("Open after the second Sync = %+v; want b seen twice and c", open)
 	}
 
 	jiraKind.Set(ctx, org, team{ID: "j"}, true)
 	linearNotice.Post(ctx, org, team{ID: "n"})
+	// An empty source names no kind's, so a kind with none stays open.
+	sourcelessKind.Set(ctx, org, team{ID: "s"}, true)
+	notify.ClearSource(ctx, org, "")
+	rec.Active(t, org, sourcelessKind, "s")
 	notify.ClearSource(ctx, org, "linear")
 	rec.Inactive(t, org, linearKind)
 	rec.Active(t, org, jiraKind, "j")

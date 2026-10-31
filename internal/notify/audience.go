@@ -100,6 +100,10 @@ func User[P any](userID func(P) string) Audience {
 	}}}
 }
 
+// TODO(TFAC-1246): TeamsTrackingJiraProject, the same resolver over the teams
+// whose rules arm a jira_projects row; jira.discovery_failing is its first
+// consumer.
+
 // TeamsTrackingLinearTeam is the members or admins of every active team that
 // tracks the Linear team linearTeamID names, in the org's current Linear
 // workspace.

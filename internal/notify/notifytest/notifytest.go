@@ -70,6 +70,14 @@ func Record(t testing.TB) *Recorder {
 	return r
 }
 
+// Isolate puts back, when the test ends, whatever notify had installed when
+// it was called: for a test that runs notify.Install itself.
+func Isolate(t testing.TB) {
+	t.Helper()
+	prev := sink.Load()
+	t.Cleanup(func() { sink.Swap(prev) })
+}
+
 // Open returns the kind's open occurrences in orgID, ordered by key.
 func (r *Recorder) Open(orgID string, k notify.Kind) []Occurrence {
 	r.mu.Lock()
@@ -146,17 +154,23 @@ func (r *Recorder) set(k sink.Kind, orgID string, p any, active bool) {
 func (r *Recorder) sync(k sink.Kind, orgID string, active []any) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	keep := map[string]bool{}
+	// One raise per key, with the last member's params, as the engine writes.
+	latest := map[string]any{}
+	var keys []string
 	for _, p := range active {
-		keep[k.Key(p)] = true
+		key := k.Key(p)
+		if _, seen := latest[key]; !seen {
+			keys = append(keys, key)
+		}
+		latest[key] = p
 	}
 	for key := range r.open[orgID][k.Name()] {
-		if !keep[key] {
+		if _, keep := latest[key]; !keep {
 			delete(r.open[orgID][k.Name()], key)
 		}
 	}
-	for _, p := range active {
-		r.raise(k, orgID, p)
+	for _, key := range keys {
+		r.raise(k, orgID, latest[key])
 	}
 }
 
@@ -167,8 +181,11 @@ func (r *Recorder) post(k sink.Kind, orgID string, p any) {
 }
 
 // clearSource drops the source's conditions; ClearSource leaves notices to
-// expire.
+// expire, and an empty source names no kind's.
 func (r *Recorder) clearSource(orgID, source string) {
+	if source == "" {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for name := range r.open[orgID] {

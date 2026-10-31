@@ -59,6 +59,10 @@ var (
 		Key: testID, Audience: Audiences(OrgAdmins(), TeamsTrackingLinearTeam(testID, Admins)),
 		Render: testRender, Example: testParams{ID: "lt-1"},
 	})
+	onlyTeamCondition = Condition(ConditionSpec[testParams]{
+		Name: "test.only_team_condition", Priority: Always(High),
+		Key: testID, Audience: TeamAdmins(testTeamID), Render: testRender, Example: testParams{ID: "x", TeamID: exampleTeamID},
+	})
 	membersCondition = Condition(ConditionSpec[testParams]{
 		Name: "test.members_condition", Source: "jira", Priority: Always(High),
 		Key: testID, Audience: OrgMembers(), Render: testRender, Example: testParams{ID: "x"},
@@ -172,7 +176,7 @@ func open(ns []domain.Notification) []domain.Notification {
 	return out
 }
 
-func localBackend(t *testing.T) (db.Stores, *hubRecorder) {
+func localBackend(t *testing.T) (db.Stores, *hubRecorder, *sql.DB) {
 	t.Helper()
 	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
@@ -189,7 +193,7 @@ func localBackend(t *testing.T) (db.Stores, *hubRecorder) {
 		Tx: stores.Tx, Notifications: stores.Notifications, Orgs: stores.Orgs,
 		LinearTeamRules: stores.LinearTeamRules, Hub: hub, Local: true,
 	})
-	return stores, hub
+	return stores, hub, conn
 }
 
 func TestVerbs_NoOpBeforeInstall(t *testing.T) {
@@ -206,9 +210,10 @@ func TestVerbs_NoOpBeforeInstall(t *testing.T) {
 }
 
 // Local is N=1: a kind with two audiences writes one row, for the one user,
-// and every ping is one org envelope. A bump of last_seen_at pings nobody.
+// and every ping is one envelope for them. A bump of last_seen_at pings
+// nobody.
 func TestLocal_SetCoalescesAndPingsOnChangeOnly(t *testing.T) {
-	stores, hub := localBackend(t)
+	stores, hub, _ := localBackend(t)
 	ctx := context.Background()
 	org, user := runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID
 	p := testParams{ID: "a", TeamID: runmode.LocalDefaultTeamID}
@@ -219,8 +224,8 @@ func TestLocal_SetCoalescesAndPingsOnChangeOnly(t *testing.T) {
 	if len(got) != 1 || got[0].Audience != want || got[0].Title != "thing a is wrong" || got[0].Source != "linear" || !got[0].Dismissible {
 		t.Fatalf("after Set(true): %+v; want one dismissible row for the local user", got)
 	}
-	if pings := hub.take(t); !slices.Equal(pings, []string{"org"}) {
-		t.Errorf("open pinged %v; want one org envelope", pings)
+	if pings := hub.take(t); !slices.Equal(pings, []string{user}) {
+		t.Errorf("open pinged %v; want one envelope for the local user", pings)
 	}
 
 	teamCondition.Set(ctx, org, p, true)
@@ -236,8 +241,8 @@ func TestLocal_SetCoalescesAndPingsOnChangeOnly(t *testing.T) {
 	if got := open(rows(t, stores, org, user, teamCondition)); len(got) != 1 || got[0].Priority != Urgent || !got[0].EscalatedAt.After(got[0].FirstSeenAt) {
 		t.Fatalf("after a raise at urgent: %+v; want the row escalated", got)
 	}
-	if pings := hub.take(t); !slices.Equal(pings, []string{"org"}) {
-		t.Errorf("an escalation pinged %v; want one org envelope", pings)
+	if pings := hub.take(t); !slices.Equal(pings, []string{user}) {
+		t.Errorf("an escalation pinged %v; want one envelope for the local user", pings)
 	}
 
 	teamCondition.Set(ctx, org, p, false)
@@ -245,8 +250,8 @@ func TestLocal_SetCoalescesAndPingsOnChangeOnly(t *testing.T) {
 	if len(all) != 1 || all[0].ResolvedAt == nil || all[0].ResolvedReason != domain.NotificationResolvedCleared {
 		t.Fatalf("after Set(false): %+v; want the row cleared", all)
 	}
-	if pings := hub.take(t); !slices.Equal(pings, []string{"org"}) {
-		t.Errorf("a resolve pinged %v; want one org envelope", pings)
+	if pings := hub.take(t); !slices.Equal(pings, []string{user}) {
+		t.Errorf("a resolve pinged %v; want one envelope for the local user", pings)
 	}
 	teamCondition.Set(ctx, org, p, false)
 	if pings := hub.take(t); len(pings) != 0 {
@@ -254,8 +259,32 @@ func TestLocal_SetCoalescesAndPingsOnChangeOnly(t *testing.T) {
 	}
 }
 
+// An archived team's audience is sent to nobody in local mode too, so a kind
+// whose only live audience is one writes nothing.
+func TestLocal_ArchivedTeamIsNobody(t *testing.T) {
+	stores, hub, conn := localBackend(t)
+	ctx := context.Background()
+	org, user := runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID
+	const archived = "00000000-0000-4000-8000-00000000a7c1"
+	if _, err := conn.Exec(`INSERT INTO teams (id, org_id, slug, name, deleted_at) VALUES (?, ?, 'archived', 'Archived', ?)`,
+		archived, org, time.Now().UTC()); err != nil {
+		t.Fatalf("seed archived team: %v", err)
+	}
+	onlyTeamCondition.Set(ctx, org, testParams{ID: "a", TeamID: archived}, true)
+	if got := rows(t, stores, org, user, onlyTeamCondition); len(got) != 0 {
+		t.Errorf("rows for an archived team's admins = %+v; want none", got)
+	}
+	onlyTeamCondition.Set(ctx, org, testParams{ID: "a", TeamID: runmode.LocalDefaultTeamID}, true)
+	if got := open(rows(t, stores, org, user, onlyTeamCondition)); len(got) != 1 {
+		t.Errorf("rows for the active team's admins = %+v; want one", got)
+	}
+	if pings := hub.take(t); !slices.Equal(pings, []string{user}) {
+		t.Errorf("pinged %v; want one envelope for the local user", pings)
+	}
+}
+
 func TestLocal_SyncResolvesWhatIsNotActive(t *testing.T) {
-	stores, hub := localBackend(t)
+	stores, hub, _ := localBackend(t)
 	ctx := context.Background()
 	org, user := runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID
 	team := runmode.LocalDefaultTeamID
@@ -271,8 +300,8 @@ func TestLocal_SyncResolvesWhatIsNotActive(t *testing.T) {
 	if len(got) != 1 || got[0].Key != "b" {
 		t.Fatalf("after Sync([b]): %+v; want only b open", got)
 	}
-	if pings := hub.take(t); !slices.Equal(pings, []string{"org"}) {
-		t.Errorf("resolving a pinged %v; want one org envelope", pings)
+	if pings := hub.take(t); !slices.Equal(pings, []string{user}) {
+		t.Errorf("resolving a pinged %v; want one envelope for the local user", pings)
 	}
 
 	teamCondition.Sync(ctx, org, nil)
@@ -282,7 +311,7 @@ func TestLocal_SyncResolvesWhatIsNotActive(t *testing.T) {
 }
 
 func TestLocal_PostAndClearSource(t *testing.T) {
-	stores, _ := localBackend(t)
+	stores, _, _ := localBackend(t)
 	ctx := context.Background()
 	org, user := runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID
 

@@ -18,6 +18,10 @@ var notifyLog = logging.Component("notify")
 
 const origin = domain.NotificationOriginSystem
 
+// clearSourceLabel is the kind ClearSource's failures are counted under: no
+// one kind failed, and the source is in the log line rather than the metric.
+const clearSourceLabel = "clear_source"
+
 // engine is the sink Install builds: each verb resolves its audiences, writes
 // in one transaction, and pings the rows that opened, escalated or resolved.
 type engine struct{ b Backend }
@@ -53,8 +57,8 @@ func (e *engine) Sync(ctx context.Context, sk sink.Kind, orgID string, active []
 			e.fail(k.name, orgID, err)
 			return
 		}
-		// Two members with one key are one occurrence; the later one's copy
-		// and params win.
+		// Two members with one key are one occurrence, and the later one's
+		// params win, audience included, as two Sets in a row would.
 		if i, ok := at[occ.key]; ok {
 			occs[i] = occ
 			continue
@@ -93,11 +97,13 @@ func (e *engine) Post(ctx context.Context, sk sink.Kind, orgID string, p any) {
 }
 
 func (e *engine) ClearSource(ctx context.Context, orgID, source string) {
-	// Not one kind's failure: the counter names the source instead.
-	label := "clear_source:" + source
-	defer e.recoverPanic(label, orgID)
-	e.commit(ctx, label, orgID, func(tx db.NotificationStore) ([]domain.Notification, error) {
-		return tx.ResolveSourceSystem(ctx, orgID, source)
+	defer e.recoverPanic(clearSourceLabel, orgID)
+	e.commit(ctx, clearSourceLabel, orgID, func(tx db.NotificationStore) ([]domain.Notification, error) {
+		resolved, err := tx.ResolveSourceSystem(ctx, orgID, source)
+		if err != nil {
+			return nil, fmt.Errorf("source %s: %w", source, err)
+		}
+		return resolved, nil
 	})
 }
 
@@ -121,8 +127,10 @@ func (e *engine) prepare(ctx context.Context, k *kind, r *resolution, p any, exp
 	if err != nil {
 		return occurrence{}, fmt.Errorf("resolve audience: %w", err)
 	}
-	if e.b.Local && len(recipients) > 0 {
-		recipients = []Recipient{{Scope: domain.NotificationScopeUser, UserID: runmode.LocalDefaultUserID}}
+	if e.b.Local {
+		if recipients, err = e.localRecipients(ctx, r.orgID, recipients); err != nil {
+			return occurrence{}, err
+		}
 	}
 	params, err := json.Marshal(p)
 	if err != nil {
@@ -145,6 +153,23 @@ func (e *engine) prepare(ctx context.Context, k *kind, r *resolution, p any, exp
 		})
 	}
 	return occ, nil
+}
+
+// localRecipients is N=1's audience: one row for the one user when any of
+// rs is sent to them, so a kind with several audiences shows once. What is
+// sent to whom is the store's answer, as it is for the ping, so an archived
+// team's audience reaches nobody here either.
+func (e *engine) localRecipients(ctx context.Context, orgID string, rs []Recipient) ([]Recipient, error) {
+	for _, to := range rs {
+		users, err := e.b.Notifications.RecipientsSystem(ctx, orgID, to)
+		if err != nil {
+			return nil, fmt.Errorf("resolve local recipient: %w", err)
+		}
+		if len(users) > 0 {
+			return []Recipient{{Scope: domain.NotificationScopeUser, UserID: runmode.LocalDefaultUserID}}, nil
+		}
+	}
+	return nil, nil
 }
 
 // upsert writes every row, returning those that opened or escalated: a bump
@@ -203,7 +228,7 @@ func (e *engine) ping(ctx context.Context, orgID string, changed []domain.Notifi
 	if len(changed) == 0 || e.b.Hub == nil {
 		return
 	}
-	orgWide := e.b.Local
+	orgWide := false
 	for _, n := range changed {
 		if n.Audience.Scope == domain.NotificationScopeOrg && n.Audience.Role == Members {
 			orgWide = true
