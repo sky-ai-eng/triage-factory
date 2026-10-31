@@ -53,11 +53,10 @@ func TestRefreshGitHub_MakesNoRequestForAnIssueEntity(t *testing.T) {
 	}
 }
 
-// TestRefreshGitHub_AStubThatIsAnIssueBecomesOne: a pull request stub created
-// from a key alone, before writes resolved their objects by id, may be an
-// issue. Its pull request read answers 404, GitHub answers the number as an
-// issue, and the stub takes kind issue and the issue's node id, so the next
-// cycle asks GitHub nothing about it.
+// TestRefreshGitHub_AStubThatIsAnIssueBecomesOne: a stored stub of kind pr may
+// name an issue. Its pull request read answers 404, GitHub answers the number
+// as an issue, and the stub takes kind issue and the issue's node id, without
+// a read of its repository, so the next cycle asks GitHub nothing about it.
 func TestRefreshGitHub_AStubThatIsAnIssueBecomesOne(t *testing.T) {
 	var mu sync.Mutex
 	var requests []string
@@ -69,8 +68,6 @@ func TestRefreshGitHub_AStubThatIsAnIssueBecomesOne(t *testing.T) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/repos/octo/repo/issues/12"):
 			_, _ = w.Write([]byte(`{"number":12,"node_id":"I_kw12","state":"open"}`))
-		case strings.HasSuffix(r.URL.Path, "/repos/octo/repo"):
-			_, _ = w.Write([]byte(`{"id":55,"full_name":"octo/repo"}`))
 		default:
 			http.NotFound(w, r)
 		}

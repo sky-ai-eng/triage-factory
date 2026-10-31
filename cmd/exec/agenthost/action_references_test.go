@@ -145,7 +145,8 @@ func TestRecordExternalWrite_RegistersAnUnknownRepositoryByItsID(t *testing.T) {
 // mode the identity was read by the run's sidecar and relayed, so a
 // repository id links only a repository the run works in — a worktree of the
 // run's, or its task's own repository. Any other id records the act unlinked,
-// and creates no entity in that repository.
+// and creates no entity in that repository; so does a node id naming an
+// entity there, whatever repository id rides beside it.
 func TestRecordExternalWrite_RelayedRepositoryOutsideTheRunIsUnlinked(t *testing.T) {
 	stores, info := newCaptureStores(t, true)
 	runmode.SetForTest(t, runmode.ModeMulti)
@@ -184,5 +185,34 @@ func TestRecordExternalWrite_RelayedRepositoryOutsideTheRunIsUnlinked(t *testing
 	}
 	if e, err := stores.Entities.GetBySourceSystem(ctx, info.OrgID, "github", testScope("github"), "octo/other#4"); err != nil || e != nil {
 		t.Errorf("octo/other#4 = %+v, %v; want no entity", e, err)
+	}
+	if _, _, err := stores.Entities.FindOrCreateSystem(ctx, info.OrgID, "github", testScope("github"), "octo/other#5", "PR_other5", "pr", "", ""); err != nil {
+		t.Fatalf("seed a pull request in the other repository: %v", err)
+	}
+	if a := record("other entity", "octo/repo#5", "1", "PR_other5"); a.EntityID != "" {
+		t.Errorf("an act relayed under the node id of a pull request in another repository references entity %q, want none", a.EntityID)
+	}
+}
+
+// TestRecordExternalWrite_RetiredRepositoryIsUnlinked: in local mode, an id
+// whose registry row is retired records the act unlinked, and registers no
+// second row for the repository under the retired row's name.
+func TestRecordExternalWrite_RetiredRepositoryIsUnlinked(t *testing.T) {
+	stores, info := newCaptureStores(t, true)
+	ctx := context.Background()
+	registerRepo(t, stores, "octo", "gone", "41")
+	ref := domain.RepoRef{Source: domain.RepoSourceGitHub, Host: testScope("github"), Owner: "octo", Repo: "gone", ExternalID: "41"}
+	if _, err := stores.Repos.RetireSystem(ctx, info.OrgID, ref); err != nil {
+		t.Fatalf("retire octo/gone: %v", err)
+	}
+	act := domain.ExternalAction{Provider: domain.ProviderGitHub, Action: domain.ActionLabelAdded, Target: "octo/gone#3", Credential: domain.CredentialGitHubApp, DedupKey: "retired"}
+	recordExternalWrite(ctx, stores, info, nil, &act, domain.EntityContainer{},
+		domain.GitHubIdentity{RepositoryID: "41", Repository: "octo/gone", NodeID: "PR_gone3", Kind: domain.EntityKindPullRequest})
+	acts := listExternalActions(t, stores)
+	if len(acts) != 1 || acts[0].EntityID != "" || acts[0].RepositoryID != "" {
+		t.Errorf("actions = %+v, want the one, unlinked", acts)
+	}
+	if r, err := stores.Repos.GetByRefSystem(ctx, info.OrgID, domain.RepoRefFromSlug(testScope("github"), "octo/gone")); err != nil || r != nil {
+		t.Errorf("live row for octo/gone = %+v, %v; want none", r, err)
 	}
 }

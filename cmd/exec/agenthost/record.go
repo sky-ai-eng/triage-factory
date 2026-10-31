@@ -390,8 +390,10 @@ func resolveEntityInfo(ctx context.Context, stores db.Stores, info ConversationI
 //
 // nil, never a key lookup, for a coordinate with no node id (the observer's
 // read failed, or the act names no pull request or issue), one whose
-// repository id names no row the run may record against, and one from
-// another scope than the org's current GitHub host. No GitHub entity is found
+// repository id names no row the run may record against, one from another
+// scope than the org's current GitHub host, and, in multi mode, one whose
+// node id names an entity in a repository the run does not work in
+// (runMayRecordAgainst): the node id was relayed too. No GitHub entity is found
 // or created from a key alone: a key's owner/repo is a spelling, which GitHub
 // may since have given to another repository.
 func resolveGitHubEntity(ctx context.Context, stores db.Stores, info ConversationInfo, c entityCoordinate) (*domain.Entity, error) {
@@ -407,8 +409,14 @@ func resolveGitHubEntity(ctx context.Context, stores db.Stores, info Conversatio
 		return nil, nil
 	}
 	entity, err := stores.Entities.GetByExternalIDSystem(ctx, info.OrgID, domain.ProviderGitHub, scope, id.NodeID)
-	if err != nil || entity != nil {
-		return entity, err
+	if err != nil {
+		return nil, err
+	}
+	if entity != nil {
+		if ok, err := relayedRepositoryAdmitted(ctx, stores, info, entity.RepositoryID); err != nil || !ok {
+			return nil, err
+		}
+		return entity, nil
 	}
 	_, _, number, ok := domain.ParsePRTarget(c.target)
 	if !ok {
@@ -461,12 +469,7 @@ func githubRepositoryRow(ctx context.Context, stores db.Stores, info Conversatio
 		if row == nil {
 			return nil, nil
 		}
-		ok, err := runMayRecordAgainst(ctx, stores, info, row.ID)
-		if err != nil || !ok {
-			if err == nil {
-				agenthostLog.Warn("a relayed repository id names a repository outside the run's; recording unlinked",
-					"conversation", info.ConversationID, "repository", row.ID)
-			}
+		if ok, err := relayedRepositoryAdmitted(ctx, stores, info, row.ID); err != nil || !ok {
 			return nil, err
 		}
 		return row, nil
@@ -487,7 +490,30 @@ func githubRepositoryRow(ctx context.Context, stores db.Stores, info Conversatio
 	if err != nil {
 		return nil, err
 	}
+	if registered.RetiredAt != nil {
+		// The registry answers a retired row by its id, but a retired row
+		// answers to no name, so an entity keyed under its name would
+		// get-or-create a second row for the repository. The act is recorded
+		// unlinked instead.
+		return nil, nil
+	}
 	return &registered, nil
+}
+
+// relayedRepositoryAdmitted reports whether an act may be filed under the
+// repository whose registry row is repositoryID: always in local mode, and in
+// multi mode, where the identity naming it was relayed by the run's sidecar,
+// only for a repository the run works in (runMayRecordAgainst).
+func relayedRepositoryAdmitted(ctx context.Context, stores db.Stores, info ConversationInfo, repositoryID string) (bool, error) {
+	if runmode.Current() != runmode.ModeMulti {
+		return true, nil
+	}
+	ok, err := runMayRecordAgainst(ctx, stores, info, repositoryID)
+	if err == nil && !ok {
+		agenthostLog.Info("a relayed GitHub id names a repository the run does not work in; recording unlinked",
+			"conversation", info.ConversationID, "repository", repositoryID)
+	}
+	return ok, err
 }
 
 // runMayRecordAgainst reports whether the repository whose registry row is

@@ -1286,8 +1286,7 @@ func gitPushRecorder(host *agenthost.LocalClient, info agenthost.ConversationInf
 			host.RecordGitPushFailed(ctx, push)
 			return
 		}
-		id := domain.GitHubIdentity{RepositoryID: push.RepositoryID, Repository: push.RepositoryName}
-		if _, err := host.UpsertDeliverableFor(ctx, art, id); err != nil {
+		if _, err := host.UpsertDeliverableFor(ctx, art, agenthost.PushIdentity(push)); err != nil {
 			delegateLog.Warn("git-proxy push capture: record branch deliverable failed",
 				"conversation", info.ConversationID, "repo", push.Repo, "ref", push.Ref, "error", err)
 		}

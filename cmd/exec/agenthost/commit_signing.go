@@ -388,7 +388,7 @@ func (c *LocalClient) MarkPushedSignature(ctx context.Context, push gitproxy.Pus
 	host, err := db.OrgGitHubHostSystem(ctx, c.stores.Orgs, c.info.OrgID)
 	var row *domain.Repository
 	if err == nil {
-		row, err = githubRepositoryRow(ctx, c.stores, c.info, host, pushIdentity(push))
+		row, err = githubRepositoryRow(ctx, c.stores, c.info, host, PushIdentity(push))
 	}
 	if err == nil && row == nil {
 		err = fmt.Errorf("%w: %s", errNoRegistryRow, push.Repo)

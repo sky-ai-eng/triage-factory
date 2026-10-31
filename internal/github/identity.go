@@ -70,8 +70,29 @@ func (r *IdentityReader) Object(ctx context.Context, g Getter, owner, repo strin
 	if !IsHTTP404(err) {
 		return domain.GitHubIdentity{}, fmt.Errorf("github identity: read %s/%s#%d: %w", owner, repo, number, err)
 	}
-	path = fmt.Sprintf("/repos/%s/%s/issues/%d", owner, repo, number)
-	body, err = g.Get(ctx, path)
+	issue, err := r.Issue(ctx, g, owner, repo, number)
+	if err != nil {
+		return domain.GitHubIdentity{}, err
+	}
+	out, err := r.Repository(ctx, g, owner, repo)
+	if err != nil {
+		return domain.GitHubIdentity{}, err
+	}
+	out.NodeID, out.Kind = issue.NodeID, issue.Kind
+	r.remember(key, out)
+	return out, nil
+}
+
+// Issue reads the issue numbered number in owner/repo: its node id and kind
+// issue, without its repository. It is Object's second read, for a caller
+// whose pull request read of the number has already answered 404. A number
+// GitHub answers as a pull request is an error, as is any failed request.
+func (r *IdentityReader) Issue(ctx context.Context, g Getter, owner, repo string, number int) (domain.GitHubIdentity, error) {
+	if owner == "" || repo == "" || number <= 0 {
+		return domain.GitHubIdentity{}, fmt.Errorf("github identity: %s/%s#%d names no issue", owner, repo, number)
+	}
+	path := fmt.Sprintf("/repos/%s/%s/issues/%d", owner, repo, number)
+	body, err := g.Get(ctx, path)
 	if err != nil {
 		return domain.GitHubIdentity{}, fmt.Errorf("github identity: read %s/%s#%d: %w", owner, repo, number, err)
 	}
@@ -91,13 +112,7 @@ func (r *IdentityReader) Object(ctx context.Context, g Getter, owner, repo strin
 		// it is one. Neither answer can be recorded.
 		return domain.GitHubIdentity{}, fmt.Errorf("github identity: %s/%s#%d is a pull request the pulls endpoint does not answer for", owner, repo, number)
 	}
-	out, err := r.Repository(ctx, g, owner, repo)
-	if err != nil {
-		return domain.GitHubIdentity{}, err
-	}
-	out.NodeID, out.Kind = issue.NodeID, domain.EntityKindIssue
-	r.remember(key, out)
-	return out, nil
+	return domain.GitHubIdentity{NodeID: issue.NodeID, Kind: domain.EntityKindIssue}, nil
 }
 
 // pullIdentity reads a pulls/{number} response. Its base repository is the

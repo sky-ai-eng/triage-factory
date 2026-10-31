@@ -1886,9 +1886,11 @@ func (c *LocalClient) GithubGetReviewDetail(ctx context.Context, owner, repo str
 // repository's old name lands on the entity rather than minting a second one,
 // and a read whose identity could not be read touches nothing.
 func (c *LocalClient) touchPR(ctx context.Context, client *ghclient.Client, owner, repo string, number int, nodeID string) {
-	id := c.githubPullRequest(ctx, client, owner, repo, nodeID)
+	var id domain.GitHubIdentity
 	if nodeID == "" {
 		id = c.githubObject(ctx, client, owner, repo, number)
+	} else {
+		id = c.githubPullRequest(ctx, client, owner, repo, nodeID)
 	}
 	c.rt.RecordReadTouch(ctx, domain.ProviderGitHub, domain.PullRequestTarget(owner+"/"+repo, number), "", domain.EntityContainer{}, id, "")
 }
@@ -3025,12 +3027,12 @@ func (c *LocalClient) RecordGitPushFailed(ctx context.Context, push gitproxy.Pus
 		ExternalID: push.Ref,
 		Credential: c.githubCredential(),
 		DetailJSON: string(detail),
-	}, pushIdentity(push))
+	}, PushIdentity(push))
 }
 
-// pushIdentity is the repository identity a push's observer read and carried
+// PushIdentity is the repository identity a push's observer read and carried
 // on the push (gitproxy.PushedRef).
-func pushIdentity(push gitproxy.PushedRef) domain.GitHubIdentity {
+func PushIdentity(push gitproxy.PushedRef) domain.GitHubIdentity {
 	return domain.GitHubIdentity{RepositoryID: push.RepositoryID, Repository: push.RepositoryName}
 }
 

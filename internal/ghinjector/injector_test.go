@@ -1144,15 +1144,18 @@ func TestInjector_CreatedCommentNodeIDIsReadBack(t *testing.T) {
 // accepted write is reported with what GitHub calls its objects, read with the
 // run's real credential — the pull request's or issue's node id and kind and
 // its repository's id for a write that names one by number, the repository's
-// alone for one that names none, and nothing read for a GraphQL mutation's
-// subject, which its request already named. Each repository is read once per
-// run, and a refused write reads nothing.
+// alone for one that names none. A GraphQL mutation is identified by the
+// object its response's url locates, never by the subject its request named,
+// which may not be what ran; one whose response locates nothing carries its
+// subject's node id, with nothing read. Each repository is read once per run,
+// and a refused write reads nothing.
 func TestInjector_AcceptedWriteCarriesItsIdentity(t *testing.T) {
 	var mu sync.Mutex
 	reads := map[string]int{}
 	var readAuth string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		body, _ := io.ReadAll(r.Body)
 		if r.Method == http.MethodGet {
 			mu.Lock()
 			reads[r.URL.Path]++
@@ -1170,8 +1173,10 @@ func TestInjector_AcceptedWriteCarriesItsIdentity(t *testing.T) {
 			w.WriteHeader(http.StatusNotFound)
 		case strings.HasSuffix(r.URL.Path, "/issues/77/labels"):
 			w.WriteHeader(http.StatusNotFound)
-		case r.URL.Path == "/graphql":
+		case r.URL.Path == "/graphql" && strings.Contains(string(body), "mergePullRequest"):
 			_, _ = w.Write([]byte(`{"data":{"mergePullRequest":{"pullRequest":{"url":"https://github.com/acme/widgets/pull/841"}}}}`))
+		case r.URL.Path == "/graphql":
+			_, _ = w.Write([]byte(`{"data":{"closePullRequest":{"pullRequest":{"id":"PR_kwClosed"}}}}`))
 		default:
 			_, _ = w.Write([]byte(`[]`))
 		}
@@ -1212,11 +1217,19 @@ func TestInjector_AcceptedWriteCarriesItsIdentity(t *testing.T) {
 	if got := send("/api/v3/repos/acme/widgets/labels", `{"name":"bug"}`).Identity; got != repo {
 		t.Errorf("a repository write carries %+v, want the repository's id", got)
 	}
+	// The variables name a node id the inline arguments do not use; the
+	// response's url says which pull request was merged.
 	merge := graphQLEnvelope(t,
-		`mutation($input:MergePullRequestInput!){mergePullRequest(input:$input){pullRequest{url}}}`,
-		map[string]any{"input": map[string]any{"pullRequestId": "PR_kwSubject"}})
-	if got := send("/api/graphql", merge).Identity; got != withObject("PR_kwSubject", domain.EntityKindPullRequest) {
-		t.Errorf("a merge naming its pull request carries %+v, want the subject's node id", got)
+		`mutation{mergePullRequest(input:{pullRequestId:"PR_kw841"}){pullRequest{url}}}`,
+		map[string]any{"input": map[string]any{"pullRequestId": "PR_kwElsewhere"}})
+	if got := send("/api/graphql", merge).Identity; got != withObject("PR_kw841", domain.EntityKindPullRequest) {
+		t.Errorf("a merge whose response names its pull request carries %+v, want the pull request the url locates", got)
+	}
+	closed := graphQLEnvelope(t,
+		`mutation($input:ClosePullRequestInput!){closePullRequest(input:$input){pullRequest{id}}}`,
+		map[string]any{"input": map[string]any{"pullRequestId": "PR_kwClosed"}})
+	if got := send("/api/graphql", closed).Identity; got != (domain.GitHubIdentity{NodeID: "PR_kwClosed", Kind: domain.EntityKindPullRequest}) {
+		t.Errorf("a close whose response locates nothing carries %+v, want its subject's node id alone", got)
 	}
 	if got := send("/api/v3/repos/acme/widgets/issues/77/labels", `{"labels":["bug"]}`).Identity; got != (domain.GitHubIdentity{}) {
 		t.Errorf("a refused write carries %+v, want nothing read", got)

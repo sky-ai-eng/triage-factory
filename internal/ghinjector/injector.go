@@ -800,11 +800,16 @@ const identityReadTimeout = 5 * time.Second
 // with the credential the write was made under (ghclient.IdentityReader), and
 // sets it on the observation: the repository's id, and, for a write that names
 // a pull request or issue by number, its node id and kind. A GraphQL mutation
-// whose subject is always a pull request or always an issue (Shape.SubjectKind)
-// named that object's node id in its request, so only the repository is read.
-// A refused write names nothing the audit row is linked to, and is not read
-// for. A failed read is logged and leaves the identity empty, which records
-// the write unlinked; the write is reported either way.
+// is located by the url its response carries, and read like any other write;
+// one whose response carries none, and whose subject is always a pull request
+// or always an issue (Shape.SubjectKind), is identified by the node id its
+// request named, with no read and no repository. The request's subject is not
+// used where the response located the object: a request can spell its
+// arguments inline and carry a variable naming some other node id, and the
+// response is GitHub's account of what the mutation acted on. A refused write
+// names nothing the audit row is linked to, and is not read for. A failed read
+// is logged and leaves the identity empty, which records the write unlinked;
+// the write is reported either way.
 func (s *Server) fillIdentity(w *ObservedWrite) {
 	if !w.Succeeded() {
 		return
@@ -813,7 +818,7 @@ func (s *Server) fillIdentity(w *ObservedWrite) {
 	var number int
 	if shape, ok := ghwrite.Resolve(*w); ok {
 		owner, repo, number = shape.Owner, shape.Repo, shape.Number
-		if shape.SubjectKind != "" {
+		if shape.SubjectKind != "" && owner == "" {
 			nodeID, kind = shape.NodeID, shape.SubjectKind
 		}
 	} else if w.GraphQL == nil {
@@ -829,12 +834,6 @@ func (s *Server) fillIdentity(w *ObservedWrite) {
 	switch {
 	case nodeID != "":
 		id = domain.GitHubIdentity{NodeID: nodeID, Kind: kind}
-		if owner != "" && repo != "" {
-			var r domain.GitHubIdentity
-			if r, err = s.identities.Repository(ctx, s.reads, owner, repo); err == nil {
-				id.RepositoryID, id.Repository = r.RepositoryID, r.Repository
-			}
-		}
 	case number > 0:
 		id, err = s.identities.Object(ctx, s.reads, owner, repo, number)
 	default:

@@ -502,7 +502,7 @@ func pushRelayServer(t *testing.T, stores db.Stores, info ConversationInfo) *Rel
 			if !ok {
 				return
 			}
-			_, _ = host.UpsertDeliverableFor(ctx, art, pushIdentity(push))
+			_, _ = host.UpsertDeliverableFor(ctx, art, PushIdentity(push))
 		},
 	}
 	return NewRelayServer(stores, info, git)
