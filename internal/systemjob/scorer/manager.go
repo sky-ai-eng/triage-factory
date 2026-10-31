@@ -64,7 +64,7 @@ func NewManager(scores db.ScoreStore, entities db.EntityStore, secrets agentproc
 // surface than paper over by routing to the local sentinel.
 func (m *Manager) Trigger(orgID string) {
 	if orgID == "" {
-		aiLog.Warn("empty org on trigger; dropping signal")
+		scorerLog.Warn("empty org on trigger; dropping signal")
 		return
 	}
 	m.mu.Lock()

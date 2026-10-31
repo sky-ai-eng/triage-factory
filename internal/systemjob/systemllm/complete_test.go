@@ -318,3 +318,26 @@ func TestTruncateResultText(t *testing.T) {
 		})
 	}
 }
+
+func TestStripCodeFences(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain JSON is untouched", `[{"a":1}]`, `[{"a":1}]`},
+		{"surrounding whitespace is trimmed", "  \n[1]\n  ", "[1]"},
+		{"fence with a language tag", "```json\n[1]\n```", "[1]"},
+		{"fence without a language tag", "```\n{\"a\":1}\n```", `{"a":1}`},
+		{"whitespace around the fences", "\n  ```json\n[1]\n```  \n", "[1]"},
+		{"opening fence with no closing fence", "```json\n[1]", "[1]"},
+		{"backticks inside the payload survive", "```\n[\"`x`\"]\n```", "[\"`x`\"]"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := string(StripCodeFences([]byte(tc.in))); got != tc.want {
+				t.Errorf("StripCodeFences(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}

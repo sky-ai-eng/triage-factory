@@ -29,8 +29,6 @@ on:
       - 'internal/server/login_ext.go'
       - 'internal/server/extension.go'
       - 'internal/auth/**'
-      - 'internal/auth/sessions/**'
-      - 'internal/auth/apitokens/**'
       - 'internal/db/migrations-postgres/**'
       - 'frontend/src/pages/Login.tsx'
       - 'frontend/src/pages/InviteAccept.tsx'

@@ -105,7 +105,7 @@ func (r *Runner) scoreTasks(ctx context.Context, tasks []domain.Task, model stri
 		// so Postgres multi-mode doesn't degrade every
 		// scored task to title-only context under RLS.
 		if descs, err := r.entities.DescriptionsSystem(ctx, orgID, entityIDs); err != nil {
-			aiLog.Warn("load entity descriptions for scoring failed", "error", err)
+			scorerLog.Warn("load entity descriptions for scoring failed", "error", err)
 		} else {
 			descriptions = descs
 		}
@@ -171,9 +171,9 @@ func (r *Runner) scoreTasks(ctx context.Context, tasks []domain.Task, model stri
 			// log it quietly so a boot-time overload doesn't read as a wall
 			// of errors.
 			if systemllm.IsProviderBackoff(res.err) {
-				aiLog.Info("scoring batch deferred; provider backing off, retrying next cycle", "batch", i+1, "batches", len(batches), "skipped", len(batches[i]))
+				scorerLog.Info("scoring batch deferred; provider backing off, retrying next cycle", "batch", i+1, "batches", len(batches), "skipped", len(batches[i]))
 			} else {
-				aiLog.Warn("scoring batch failed; tasks skipped", "batch", i+1, "batches", len(batches), "skipped", len(batches[i]), "error", res.err)
+				scorerLog.Warn("scoring batch failed; tasks skipped", "batch", i+1, "batches", len(batches), "skipped", len(batches[i]), "error", res.err)
 			}
 			skipped += len(batches[i])
 			continue

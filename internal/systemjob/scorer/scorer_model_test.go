@@ -109,9 +109,9 @@ func TestScoreBatch_SendsTheOrgsModel(t *testing.T) {
 // the setting so the remedy is in the log rather than only in the code.
 func TestRun_NoModelSkipsTheCycle(t *testing.T) {
 	logs := &captureHandler{}
-	prev := aiLog
-	aiLog = slog.New(logs)
-	t.Cleanup(func() { aiLog = prev })
+	prev := scorerLog
+	scorerLog = slog.New(logs)
+	t.Cleanup(func() { scorerLog = prev })
 
 	store := &stubScoreStore{tasks: []domain.Task{{ID: "t-1"}}}
 	var errored bool
@@ -155,9 +155,9 @@ func TestRun_NoModelSkipsTheCycle(t *testing.T) {
 // wrong settings page.
 func TestRun_ModelResolutionFailureIsACycleFailure(t *testing.T) {
 	logs := &captureHandler{}
-	prev := aiLog
-	aiLog = slog.New(logs)
-	t.Cleanup(func() { aiLog = prev })
+	prev := scorerLog
+	scorerLog = slog.New(logs)
+	t.Cleanup(func() { scorerLog = prev })
 
 	store := &stubScoreStore{tasks: []domain.Task{{ID: "t-1"}}}
 	var reported error

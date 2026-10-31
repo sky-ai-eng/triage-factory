@@ -20,7 +20,8 @@ on:
     paths:
       - 'internal/eventing/poller/**'
       - 'internal/eventing/tracker/**'
-      - 'internal/github/**'
+      - 'internal/github/*'
+      - 'internal/github/ghbase/**'
       - 'cmd/internal/pollbench/**'
       - 'cmd/pollbench/**'
       - 'scripts/poll-bench.sh'

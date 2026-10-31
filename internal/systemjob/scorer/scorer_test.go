@@ -108,9 +108,9 @@ func TestScoreTasks_BatchesAndCountsSkips(t *testing.T) {
 // as a wall of alarms.
 func TestScoreTasks_ProviderBackoff_LogsQuietly(t *testing.T) {
 	logs := &captureHandler{}
-	prev := aiLog
-	aiLog = slog.New(logs)
-	t.Cleanup(func() { aiLog = prev })
+	prev := scorerLog
+	scorerLog = slog.New(logs)
+	t.Cleanup(func() { scorerLog = prev })
 
 	r := NewRunner(nil, nil, "org-x", nil, nil, nil, nil, fixedModel, RunnerCallbacks{})
 	r.scoreFn = func(context.Context, []TaskInput, string, string, agentproc.SecretsReader) ([]TaskScore, error) {

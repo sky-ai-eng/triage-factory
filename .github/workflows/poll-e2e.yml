@@ -17,7 +17,8 @@ on:
     paths:
       - 'internal/eventing/poller/**'
       - 'internal/eventing/tracker/**'
-      - 'internal/github/**'
+      - 'internal/github/*'
+      - 'internal/github/ghbase/**'
       - 'internal/domain/**'
       - 'internal/db/**'
       - 'go.mod'
