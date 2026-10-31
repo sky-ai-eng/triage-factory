@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
+	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -766,43 +767,114 @@ func (r *Router) upsertTaskForEvent(ctx context.Context, orgID string, evt domai
 	return task, created, nil
 }
 
-// fireMatchedTriggers auto-delegates the matched triggers against the task, one
-// team at a time in priority order. The exclusive claim CAS resolves contention
-// (first claimer — human or bot — wins, the rest no-op), so only the
-// highest-priority matched team's trigger actually runs; later teams find the
-// task claimed and skip inside tryAutoDelegate. The per-team kill switch is
-// checked per firing team, and triggers with min_autonomy_suitability > 0 defer
-// to the post-scoring re-derive. Returns the count of triggers that actually
-// committed the bot to the task (tryAutoDelegate returned true — an immediate
-// fire or a successful enqueue onto pending_firings) — deferred triggers and
-// every no-op skip inside tryAutoDelegate (already claimed by another team,
-// breaker tripped, agent unavailable, disabled for the team, etc.) don't count.
+// fireMatchedTriggers auto-delegates the matched triggers against the task
+// through the ranked walk (walkTriggers), handing every trigger the walk
+// resolves to fire now to tryAutoDelegate. The exclusive claim CAS resolves
+// contention (first claimer — human or bot — wins, the rest no-op), so only the
+// first team in the walk whose trigger commits actually runs; later teams find
+// the task claimed and skip inside tryAutoDelegate. Returns the count of
+// triggers that actually committed the bot to the task (tryAutoDelegate
+// returned true — an immediate fire or a successful enqueue onto
+// pending_firings); a trigger the walk skipped or held, and every no-op skip
+// inside tryAutoDelegate (already claimed by another team, breaker tripped,
+// agent unavailable, disabled for the team, etc.), doesn't count.
 //
-// A dependency failure under one trigger does not cancel the others: the loop
+// A dependency failure under one trigger does not cancel the others: the walk
 // collects and keeps going, so the triggers that can still commit do. The
 // joined error asks the caller for a replay, and the replay is fenced per
 // (event, trigger) — the siblings that already fired no-op the second time
 // through, leaving only the failed one to actually retry.
 //
-// When orderedTeams are one identity's teams, the walk is also where a
-// conflict between them is decided: the first team whose trigger commits
-// wins, and the losers' admins are told (postAutomationConflict). A loser is
-// a team with auto-delegation on and a matched trigger that did not commit,
-// ranked after the winner, or ranked before it with every trigger deferred:
-// the winner's claim keeps the post-scoring pass from evaluating those, though
-// their score thresholds might not have passed. A replay posts only when a
-// trigger commits on it, and the repeat coalesces into the same notice; a team
-// whose switch could not be read on the first pass is never counted, since
-// the winner commits nothing on the replay that retries it.
+// A conflict the walk decides between one identity's teams is posted here
+// (postAutomationConflict). A replay posts only when a trigger commits on it,
+// and the repeat coalesces into the same notice; a team whose switch could not
+// be read on the first pass is never counted, since the winner commits nothing
+// on the replay that retries it.
 func (r *Router) fireMatchedTriggers(ctx context.Context, orgID string, evt domain.Event, entityID string, task *domain.Task, routing eventRouting) (int, string, error) {
 	ctx, span := tracer.Start(ctx, "route.triggers", trace.WithAttributes(telemetry.TaskID(task.ID)))
 	defer span.End()
 
 	fired := 0
 	injectedConversationID := ""
+	walk, err := r.walkTriggers(ctx, orgID, task, routing, func(trigger domain.EventHandler, acting string) (bool, error) {
+		committed, err := r.tryAutoDelegateTrackingInjection(ctx, orgID, task, trigger, entityID, evt.ID, acting, &injectedConversationID)
+		if committed {
+			fired++
+		}
+		return committed, err
+	})
+	if walk.heldBy != "" {
+		span.SetAttributes(telemetry.Outcome("held_for_scoring"))
+	}
+	if routing.identityTeams && walk.winner != "" && len(walk.losers) > 0 {
+		r.postAutomationConflict(ctx, orgID, task, walk.winner, walk.losers)
+	}
+	span.SetAttributes(telemetry.Count(fired))
+	return fired, injectedConversationID, err
+}
+
+// triggerOutcome is what one matched trigger resolves to in the ranked walk.
+type triggerOutcome int
+
+const (
+	// triggerFireNow: immediate, or deferred with a score at or above its
+	// threshold.
+	triggerFireNow triggerOutcome = iota
+	// triggerSkip: deferred with a score below its threshold, or with no score
+	// and no background-jobs model to ever produce one.
+	triggerSkip
+	// triggerUndecided: deferred with no score yet.
+	triggerUndecided
+)
+
+// rankedWalk is what walkTriggers decided: the team whose trigger committed
+// first, the teams that lost the claim to it, and the team the walk stopped
+// at to wait for a score ("" when it ran to the end).
+type rankedWalk struct {
+	winner string
+	losers []kinds.ConflictLoser
+	heldBy string
+}
+
+// walkTriggers is the ranked walk both paths decide a task's triggers with:
+// fireMatchedTriggers at event time, and evaluateReDerive once the task is
+// scored, each over routing resolved from the event by matchHandlers and
+// resolveTeamRouting. It visits routing.orderedTeams in rank order, passes
+// over a team whose auto_delegate_enabled switch is off, and resolves each of
+// the team's matched triggers to an outcome (deferralGate.outcome). A trigger
+// that fires now is handed to commit, which reports whether it committed the
+// bot to the task: at event time that is the fire itself, after scoring a
+// planned firing.
+//
+// The walk holds for scoring, so rank order is strict: it stops at the first
+// team that has an undecided trigger and committed nothing, and every team
+// ranked below it waits for the post-scoring pass, which runs this same walk
+// with the score in hand. Without the hold a lower team's immediate trigger
+// would take the claim on arrival, before the score that might let the higher
+// team's deferred trigger win exists. A task someone has claimed holds
+// nothing: no team's trigger can take the claim from them, and the
+// post-scoring pass skips a claimed task, so a hold would only cost the
+// claimant's own team its immediate triggers.
+//
+// The first team whose trigger commits wins. A loser is a team ranked after
+// the winner with auto-delegation on and a trigger that fired now or was
+// undecided, and committed nothing: it lost the claim. An undecided loser is
+// approximate, since its threshold may not have passed, but the winner's
+// claim keeps the post-scoring pass from deciding it. A team ranked before
+// the winner was not beaten by it, so it is never a loser: one whose triggers
+// all skipped or failed had nothing to lose, and one with an undecided
+// trigger stops the walk before any winner. linked is the trigger a loser's
+// admins are sent to: its first trigger that fired now, else its first
+// undecided one.
+//
+// A read failure is collected and the walk goes on, so the triggers that can
+// still commit do; the joined error is the caller's to retry. A deferred
+// trigger whose model read failed counts as undecided, so a lower team never
+// wins on a read nobody completed.
+func (r *Router) walkTriggers(ctx context.Context, orgID string, task *domain.Task, routing eventRouting, commit func(trigger domain.EventHandler, acting string) (bool, error)) (rankedWalk, error) {
+	gate := deferralGate{r: r, orgID: orgID, score: task.AutonomySuitability}
+	var walk rankedWalk
 	var errs []error
-	winner := ""
-	var losers []kinds.ConflictLoser
 	for _, teamID := range routing.orderedTeams {
 		triggers := routing.teamTriggers[teamID]
 		if len(triggers) == 0 {
@@ -814,9 +886,9 @@ func (r *Router) fireMatchedTriggers(ctx context.Context, orgID string, evt doma
 		enabled, err := r.autoDelegateEnabledForTeam(ctx, acting)
 		if err != nil {
 			// Unreadable is not disabled. The gate still refuses to fire on a
-			// team whose switch it couldn't read, but the event goes back on
-			// the queue rather than being consumed as if the user had turned
-			// automation off.
+			// team whose switch it couldn't read, but the caller retries
+			// rather than treating it as if the user had turned automation
+			// off.
 			errs = append(errs, fmt.Errorf("auto-delegate gate for team %s: %w", acting, err))
 			continue
 		}
@@ -826,45 +898,115 @@ func (r *Router) fireMatchedTriggers(ctx context.Context, orgID string, evt doma
 			// run started" surprise. One line at Info names the reason and the
 			// knob (team_settings.auto_delegate_enabled).
 			routerLog.Info("auto-trigger skipped: auto-delegate disabled for team",
-				"team", acting, "task_id", task.ID, "event_type", evt.EventType, "matched_triggers", len(triggers))
+				"team", acting, "task_id", task.ID, "event_type", task.EventType, "matched_triggers", len(triggers))
 			continue
 		}
-		// linked is the trigger a losing team's admins are sent to: its first
-		// immediate one, else its first deferred one.
-		linked, linkedImmediate, teamCommitted := "", false, false
+		linked, linkedNow, committed, undecided := "", false, false, false
 		for _, trigger := range triggers {
-			deferred := trigger.MinAutonomySuitability != nil && *trigger.MinAutonomySuitability > 0
-			if !linkedImmediate && (linked == "" || !deferred) {
-				linked, linkedImmediate = trigger.ID, !deferred
+			outcome, err := gate.outcome(ctx, trigger)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("trigger %s: %w", trigger.ID, err))
 			}
-			if deferred {
-				continue // deferred to post-scoring handler
+			switch outcome {
+			case triggerSkip:
+				routerLog.Debug("auto-trigger skipped: score below the trigger's threshold, or no model to score with",
+					"task_id", task.ID, "trigger_id", trigger.ID, "team", acting)
+				continue
+			case triggerUndecided:
+				undecided = true
+				if linked == "" {
+					linked = trigger.ID
+				}
+				continue
 			}
-			committed, err := r.tryAutoDelegateTrackingInjection(ctx, orgID, task, trigger, entityID, evt.ID, acting, &injectedConversationID)
+			if !linkedNow {
+				linked, linkedNow = trigger.ID, true
+			}
+			ok, err := commit(trigger, acting)
 			if err != nil {
 				errs = append(errs, fmt.Errorf("trigger %s: %w", trigger.ID, err))
 				continue
 			}
-			if committed {
-				fired++
-				teamCommitted = true
-			}
+			committed = committed || ok
 		}
-		loser := kinds.ConflictLoser{TeamID: acting, TriggerID: linked}
 		switch {
-		case teamCommitted:
-			if winner == "" {
-				winner = acting
+		case committed:
+			if walk.winner == "" {
+				walk.winner = acting
 			}
-		case winner != "", !linkedImmediate:
-			losers = append(losers, loser)
+		case walk.winner != "" && linked != "":
+			walk.losers = append(walk.losers, kinds.ConflictLoser{TeamID: acting, TriggerID: linked})
+		case undecided && task.ClaimedByAgentID == "" && task.ClaimedByUserID == "":
+			// Also diagnosable: the teams below wait on this one's score, and
+			// the post-scoring pass is what releases them.
+			routerLog.Info("auto-trigger walk held for scoring: a deferred trigger has no score yet",
+				"team", acting, "task_id", task.ID, "event_type", task.EventType, "trigger_id", linked)
+			walk.heldBy = acting
+			return walk, errors.Join(errs...)
 		}
 	}
-	if winner != "" && routing.identityTeams && len(losers) > 0 {
-		r.postAutomationConflict(ctx, orgID, task, winner, losers)
+	return walk, errors.Join(errs...)
+}
+
+// deferralGate resolves a matched trigger's min_autonomy_suitability against
+// the task's score, reading the org's background-jobs model at most once per
+// walk and only for a deferred trigger the score cannot decide.
+type deferralGate struct {
+	r     *Router
+	orgID string
+	score *float64
+
+	modelRead bool
+	noModel   bool
+	modelErr  error
+}
+
+// outcome resolves trigger to fire now, skip, or undecided. A missing score
+// is never read as passing: the threshold exists to filter tasks out, and
+// firing without the evidence would spend run budget on exactly those. An org
+// with no usable background-jobs model never scores, so its deferred triggers
+// skip rather than hold the walk for a score that is not coming. A non-nil
+// error is a model read that failed; the trigger is undecided with it.
+func (g *deferralGate) outcome(ctx context.Context, trigger domain.EventHandler) (triggerOutcome, error) {
+	threshold := derefFloatDefault(trigger.MinAutonomySuitability, 0)
+	if threshold <= 0 {
+		return triggerFireNow, nil
 	}
-	span.SetAttributes(telemetry.Count(fired))
-	return fired, injectedConversationID, errors.Join(errs...)
+	if g.score != nil {
+		if *g.score >= threshold {
+			return triggerFireNow, nil
+		}
+		return triggerSkip, nil
+	}
+	if !g.modelRead {
+		g.modelRead = true
+		g.noModel, g.modelErr = g.r.orgHasNoBackgroundModel(ctx, g.orgID)
+	}
+	if g.modelErr != nil {
+		return triggerUndecided, g.modelErr
+	}
+	if g.noModel {
+		return triggerSkip, nil
+	}
+	return triggerUndecided, nil
+}
+
+// orgHasNoBackgroundModel reports whether the org's background jobs have no
+// model to run on (systemllm.ErrNoModel), which means the scorer skips every
+// cycle and no task of the org gets a score. An unreadable settings row is an
+// error, not an answer. A router with no org store has nothing to read, so it
+// answers false: its deferred triggers wait for a score as they would on a
+// configured org.
+func (r *Router) orgHasNoBackgroundModel(ctx context.Context, orgID string) (bool, error) {
+	if r.orgs == nil {
+		return false, nil
+	}
+	settings, err := r.orgs.GetSettingsSystem(ctx, orgID)
+	if err != nil {
+		return false, fmt.Errorf("read org settings for the background jobs model: %w", err)
+	}
+	_, err = systemllm.ModelForSettings(settings)
+	return errors.Is(err, systemllm.ErrNoModel), nil
 }
 
 // postAutomationConflict tells the losing teams' admins that winner's

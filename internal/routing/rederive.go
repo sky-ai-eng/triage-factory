@@ -5,23 +5,23 @@ import (
 	"fmt"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 )
 
-// The post-scoring re-evaluation. Triggers with MinAutonomySuitability > 0
-// are skipped during HandleEvent on the promise that a task's deferred
-// triggers are evaluated once it has a score. That obligation is a
-// task_rederive_queue row, admitted by the score write in the transaction
-// that writes the scores (workkinds.TaskReDerive); the worker in
-// rederive_worker.go claims it, evaluates the task through evaluateReDerive
+// The post-scoring re-evaluation. The ranked trigger walk (walkTriggers) holds
+// at the first team whose deferred trigger (MinAutonomySuitability > 0) has no
+// score yet, on the promise that the walk runs again once the task has one.
+// That obligation is a task_rederive_queue row, admitted by the score write in
+// the transaction that writes the scores (workkinds.TaskReDerive); the worker
+// in rederive_worker.go claims it, evaluates the task through evaluateReDerive
 // below, and admits whatever the evaluation decided to fire onto
 // pending_firings inside the completion, so the decision and its record
 // commit together or not at all.
 //
 // The evaluation itself is a pure function of what it reads: it fires
 // nothing and writes nothing. It returns a plan, and the completion is where
-// the plan becomes rows.
+// the plan becomes rows, and where a conflict the plan decided is posted.
 
 // reDeriveFiring is one trigger the evaluation decided to fire: the handler,
 // the team it fires for, and the agent it claims the task for.
@@ -33,26 +33,47 @@ type reDeriveFiring struct {
 
 // reDerivePlan is the evaluation's verdict. Task is the task as read, nil
 // when it is gone; Firings is empty for the many decided outcomes that fire
-// nothing.
+// nothing. Conflict is the automation conflict the walk decided between one
+// identity's teams, nil when it decided none; the completion posts it once
+// the firings it rests on have landed.
 type reDerivePlan struct {
-	Task    *domain.Task
-	Firings []reDeriveFiring
+	Task     *domain.Task
+	Firings  []reDeriveFiring
+	Conflict *reDeriveConflict
 }
 
-// evaluateReDerive evaluates one task's deferred triggers against the score
-// it carries now. Every decided outcome — including "nothing to fire" and
-// "task gone" — returns a plan and nil. err is non-nil only where a read
-// failed before a verdict could be reached: the task load, the handlers
-// read, the metadata read, the visibility read, an unreadable per-team
-// switch, or a preflight read; the caller retries those rather than treating
-// them as a decision.
+// reDeriveConflict is the winner and losers of a conflict the evaluation
+// decided, in postAutomationConflict's terms.
+type reDeriveConflict struct {
+	Winner string
+	Losers []kinds.ConflictLoser
+}
+
+// evaluateReDerive runs the task's ranked trigger walk against the score it
+// carries now. Every decided outcome — including "nothing to fire" and "task
+// gone" — returns a plan and nil. err is non-nil only where a read failed
+// before a verdict could be reached: the task load, the primary event read,
+// handler matching, owner resolution, an unreadable per-team switch, or a
+// preflight read; the caller retries those rather than treating them as a
+// decision.
+//
+// The walk is the event-time path's own: the matched handlers and the routing
+// are recomputed from the task's primary event by matchHandlers and
+// resolveTeamRouting, through the event's current view, and walkTriggers
+// decides them. Nothing about the event-time walk is persisted, so the two can
+// differ only by what changed in between — about one scoring cycle, since a
+// task is scored once and a bump does not rescore it. With the score in hand
+// no trigger is undecided: an immediate trigger, or one whose threshold the
+// score meets, fires, one below its threshold skips, and the teams the
+// event-time walk held for this score are decided in rank order. An immediate trigger that already
+// committed at event time claimed the task, and a claimed task is not
+// re-derived. The switches stay live reads, as they are at event time: a
+// trigger disabled or deleted, auto_delegate_enabled, team_agents, the breaker.
 //
 // orgID is the scoring context — every task the scorer writes belongs to the
-// org whose runner wrote it. Per-team auto_delegate_enabled is checked per
-// firing team after the task's teams are resolved, and the preflight the
-// event-time path runs (autoDelegatePreflight) runs here per candidate
-// trigger, so a re-derived firing passes exactly the gates an event-time
-// one does.
+// org whose runner wrote it. A trigger the walk fires is planned only after
+// the preflight the event-time path runs (autoDelegatePreflight), so a
+// re-derived firing passes exactly the gates an event-time one does.
 func (r *Router) evaluateReDerive(ctx context.Context, orgID, taskID string) (reDerivePlan, error) {
 	task, err := r.tasks.GetSystem(ctx, orgID, taskID)
 	if err != nil {
@@ -90,124 +111,47 @@ func (r *Router) evaluateReDerive(ctx context.Context, orgID, taskID string) (re
 		return plan, nil
 	}
 
-	// No score landed — nothing to gate against. Decided, not deferred: a
-	// task with no score has nothing for a later pass to do differently.
+	// No score landed — nothing to gate against. Decided, not deferred: the
+	// event-time walk already ran without a score, and this one would decide
+	// nothing differently.
 	if task.AutonomySuitability == nil {
 		return plan, nil
 	}
 
-	// Fetch handlers for this event type — same call HandleEvent uses,
-	// kind-discriminated here.
-	handlers, err := r.handlers.GetEnabledForEventSystem(ctx, orgID, task.EventType)
+	evt, err := r.events.GetSystem(ctx, orgID, task.PrimaryEventID)
 	if err != nil {
-		return reDerivePlan{}, fmt.Errorf("query event_handlers for %s: %w", task.EventType, err)
+		return reDerivePlan{}, fmt.Errorf("load event %s: %w", task.PrimaryEventID, err)
+	}
+	if evt == nil {
+		return plan, nil
 	}
 
-	// Fetch the primary event's metadata for predicate matching, through its
-	// current view, as the event-time path matches it.
-	metadata, err := r.events.GetMetadataSystem(ctx, orgID, task.PrimaryEventID)
+	scopeCache := map[string]bool{}
+	matchedRules, matchedTriggers, err := r.matchHandlers(ctx, orgID, *evt, scopeCache)
 	if err != nil {
-		return reDerivePlan{}, fmt.Errorf("fetch metadata of event %s: %w", task.PrimaryEventID, err)
+		return reDerivePlan{}, fmt.Errorf("match handlers for event %s: %w", evt.ID, err)
 	}
-	if metadata, err = events.Current(ctx, orgID, task.EventType, metadata); err != nil {
-		return reDerivePlan{}, fmt.Errorf("resolve metadata of event %s: %w", task.PrimaryEventID, err)
+	if len(matchedTriggers) == 0 {
+		return plan, nil
 	}
-
-	// The task's recorded visibility set — the teams whose handlers matched
-	// the original event. Re-derive re-queries every enabled trigger for the
-	// event type, so without this gate a trigger whose team was never part
-	// of the situation (enabled after the fact, or otherwise absent from the
-	// match) could match the stored metadata, fire, and consolidate
-	// ownership onto a task that team can't see. The owner team_id always
-	// grants visibility, so it qualifies too.
-	visibleTeams, err := r.tasks.VisibilityTeamsSystem(ctx, orgID, taskID)
+	routing, ok, err := r.resolveTeamRouting(ctx, orgID, *evt, task.EntityID, matchedRules, matchedTriggers, scopeCache)
 	if err != nil {
-		return reDerivePlan{}, fmt.Errorf("fetch visibility teams of task %s: %w", taskID, err)
+		return reDerivePlan{}, fmt.Errorf("resolve owner for event %s: %w", evt.ID, err)
 	}
-	visibleSet := map[string]struct{}{}
-	if owner := teamIDValue(task); owner != "" {
-		visibleSet[owner] = struct{}{}
-	}
-	for _, vt := range visibleTeams {
-		visibleSet[vt] = struct{}{}
+	if !ok {
+		return plan, nil
 	}
 
-	// Author-centric tasks fire only the OWNER's automation (the same rule
-	// HandleEvent applies): a deferred trigger must belong to the owning
-	// team, and a NULL owner fires nothing. Other event types keep the
-	// visibility-set gate so a matched team's deferred trigger fires against
-	// the shared task.
-	//
-	// TODO(TFAC-1270): this loop diverges from fireMatchedTriggers' ranked
-	// walk — a NULL-owned author-centric task never fires, a watcher can win a
-	// member-owned task, the order follows trigger created_at — and a conflict
-	// it decides posts no kinds.AutomationConflict notice.
-	authorCentric := isAuthorCentricGitHubEvent(task.EventType)
-
-	for _, trigger := range handlers {
-		if trigger.Kind != domain.EventHandlerKindTrigger {
-			continue
-		}
-		// Gate first on who may fire, then on the firing team's own
-		// auto_delegate kill switch. The org-visible sentinel normalizes to
-		// the resolved owner team so it matches the (resolved) entries.
-		firingTeam := effectiveActingTeam(handlerTeamID(trigger), teamIDValue(task))
-		if authorCentric {
-			if owner := teamIDValue(task); owner == "" || firingTeam != owner {
-				continue
-			}
-		} else if _, visible := visibleSet[firingTeam]; !visible {
-			continue
-		}
-		// An unreadable kill switch is never treated as permission, but it is
-		// also not a decision: the read failed before a verdict. A switch
-		// that reads false is a decision.
-		enabled, err := r.autoDelegateEnabledForTeam(ctx, firingTeam)
-		if err != nil {
-			return reDerivePlan{}, fmt.Errorf("read auto_delegate switch of team %s: %w", firingTeam, err)
-		}
-		if !enabled {
-			continue
-		}
-		minAutonomy := derefFloatDefault(trigger.MinAutonomySuitability, 0)
-		// Only deferred triggers — immediate ones already fired in HandleEvent.
-		if minAutonomy <= 0 {
-			continue
-		}
-
-		// Autonomy gate.
-		if *task.AutonomySuitability < minAutonomy {
-			routerLog.Debug("re-derive: task suitability below trigger threshold, skipping", "task_id", taskID, "suitability", *task.AutonomySuitability, "trigger_id", trigger.ID, "threshold", minAutonomy)
-			continue
-		}
-
-		// Predicate match — same logic as HandleEvent.
-		predJSON := ""
-		if trigger.ScopePredicateJSON != nil {
-			predJSON = *trigger.ScopePredicateJSON
-		}
-		matched, err := matchPredicate(task.EventType, predJSON, metadata)
-		if err != nil {
-			routerLog.Error("re-derive: trigger predicate error", "trigger_id", trigger.ID, "error", err)
-			continue
-		}
-		if !matched {
-			continue
-		}
-
+	walk, err := r.walkTriggers(ctx, orgID, task, routing, func(trigger domain.EventHandler, acting string) (bool, error) {
 		// The checks the event-time path runs before it decides a firing:
 		// the cross-team exclusive-claim skip, the org agent, the per-team
 		// bot switch, the breaker.
-		agentID, proceed, err := r.autoDelegatePreflight(ctx, orgID, task, trigger, task.EntityID, firingTeam)
-		if err != nil {
-			return reDerivePlan{}, fmt.Errorf("preflight trigger %s: %w", trigger.ID, err)
+		agentID, proceed, err := r.autoDelegatePreflight(ctx, orgID, task, trigger, task.EntityID, acting)
+		if err != nil || !proceed {
+			return false, err
 		}
-		if !proceed {
-			continue
-		}
-
-		routerLog.Info("re-derive: task suitability meets trigger threshold, planning a firing", "task_id", taskID, "suitability", *task.AutonomySuitability, "trigger_id", trigger.ID, "threshold", minAutonomy)
-		plan.Firings = append(plan.Firings, reDeriveFiring{Trigger: trigger, FiringTeam: firingTeam, AgentID: agentID})
+		routerLog.Info("re-derive: planning a firing", "task_id", taskID, "suitability", *task.AutonomySuitability, "trigger_id", trigger.ID, "team", acting)
+		plan.Firings = append(plan.Firings, reDeriveFiring{Trigger: trigger, FiringTeam: acting, AgentID: agentID})
 		// The firing's admission stamps the bot's claim for this team, and
 		// the event-time path reads that claim off the in-memory task when
 		// the next matched trigger comes round: a second team's trigger
@@ -217,10 +161,17 @@ func (r *Router) evaluateReDerive(ctx context.Context, orgID, taskID string) (re
 		// seen at event time.
 		if agentID != "" {
 			task.ClaimedByAgentID = agentID
-			if firingTeam != "" {
-				task.TeamID = teamIDPtr(firingTeam)
+			if acting != "" {
+				task.TeamID = teamIDPtr(acting)
 			}
 		}
+		return true, nil
+	})
+	if err != nil {
+		return reDerivePlan{}, err
+	}
+	if routing.identityTeams && walk.winner != "" && len(walk.losers) > 0 {
+		plan.Conflict = &reDeriveConflict{Winner: walk.winner, Losers: walk.losers}
 	}
 	return plan, nil
 }
