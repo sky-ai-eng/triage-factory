@@ -5,23 +5,42 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 )
 
 // appRegistration reads the org's own App registration for the cycle's
-// before/after comparison: nil when the org has none (a PAT or managed
-// org) and when the read fails, which is logged — a missed comparison
+// before/after comparison: nil when the org has none (a PAT or managed org).
+// ok is false when nothing was read: no store is wired, or the read failed,
+// which is logged. The registration is then nil too. A missed comparison
 // costs one transition log line, and the resolver reads the row itself before
 // it would mint from it.
-func (m *Manager) appRegistration(ctx context.Context, orgID string) *domain.OrgGitHubApp {
+func (m *Manager) appRegistration(ctx context.Context, orgID string) (app *domain.OrgGitHubApp, ok bool) {
 	if m.apps == nil {
-		return nil
+		return nil, false
 	}
 	app, err := m.apps.GetForOrgSystem(ctx, orgID)
 	if err != nil {
 		githubLog.WarnContext(ctx, "read app registration failed", "org", orgID, "error", err)
-		return nil
+		return nil, false
 	}
-	return app
+	return app, true
+}
+
+// notifyAppUsability tells the org's admins while GitHub refuses the org's
+// active App, from the registration the reconcile left. It is a Sync over at
+// most one App rather than a Set on this one, so an occurrence for an App the
+// org no longer holds resolves too: one replaced by a new App, or removed in
+// favor of the deployment App, which leaves no registration at all.
+//
+// A staged App raises nothing. The PAT it would replace still polls, and the
+// cutover that would make it live refuses an App GitHub rejects, with the same
+// reason the Settings banner already shows.
+func notifyAppUsability(ctx context.Context, orgID string, app *domain.OrgGitHubApp) {
+	var unusable []kinds.GitHubApp
+	if app != nil && app.Active && app.Unusable() {
+		unusable = append(unusable, kinds.GitHubApp{AppID: app.AppID, Slug: app.Slug, Reason: app.UnusableReason})
+	}
+	kinds.GitHubAppUnusable.Sync(ctx, orgID, unusable)
 }
 
 // logAppUsabilityChange is the logging contract for GitHub accepting the org's
@@ -42,11 +61,6 @@ func logAppUsabilityChange(ctx context.Context, orgID string, before, after *dom
 	switch {
 	case after.UnusableReason == previous:
 	case after.Unusable():
-		// TODO(TFAC-878): this line and the Settings panel are the only notice
-		// an admin gets that the org's App was deleted on GitHub, or its
-		// key was, and the panel only tells whoever opens it. A durable
-		// notification for the org's admins would open here and close in the
-		// branch below.
 		githubLog.WarnContext(ctx, "github app no longer accepted by GitHub; polling stopped until it is replaced",
 			"org", orgID, "app_id", after.AppID, "slug", after.Slug, "reason", after.UnusableReason,
 			"active", after.Active, "error", reconcileErr)

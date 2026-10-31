@@ -724,9 +724,12 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// The reconcile is also what notices GitHub no longer accepting the org's
 	// App (db.GitHubAppUnusableError), so the registration is read on both
 	// sides of it: the change is logged once here rather than as a mint
-	// failure on every request that follows.
+	// failure on every request that follows. The admins' notification is
+	// synced on every cycle that can read the registration, including one that
+	// finds none, so a notification about an App the org no longer holds
+	// resolves.
 	if m.ReconcileGrant != nil {
-		before := m.appRegistration(ctx, orgID)
+		before, _ := m.appRegistration(ctx, orgID)
 		err := m.ReconcileGrant(ctx, orgID)
 		if err != nil {
 			conn.note(err)
@@ -735,8 +738,11 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		if err != nil && !errors.As(err, &unusable) {
 			githubLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "installation mirror reconcile failed", "org", orgID, "error", err)
 		}
-		after := m.appRegistration(ctx, orgID)
+		after, read := m.appRegistration(ctx, orgID)
 		logAppUsabilityChange(ctx, orgID, before, after, err)
+		if read {
+			notifyAppUsability(ctx, orgID, after)
+		}
 		// Only an active App is the org's credential. A staged App being
 		// unusable stops nothing here: the PAT it would replace is still the
 		// live credential and still polls. The staged banner in Settings shows it.
