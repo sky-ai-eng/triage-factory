@@ -14,8 +14,8 @@ import (
 // than walking every deliverable the org holds on the host.
 func TestDeliverableStore_SQLite_PresentExternalIDsPlan(t *testing.T) {
 	conn := openSQLiteForTest(t)
-	rows, err := conn.Query(`EXPLAIN QUERY PLAN `+sqlitestore.PresentExternalIDsQueryForTest+`?, ?)`,
-		runmode.LocalDefaultOrgID, "https://github.com", domain.ProviderGitHub, domain.DeliverableKindReview, "6000000001", "6000000002")
+	rows, err := conn.Query(`EXPLAIN QUERY PLAN `+sqlitestore.PresentExternalIDsQueryForTest,
+		runmode.LocalDefaultOrgID, "https://github.com", domain.ProviderGitHub, domain.DeliverableKindReview, `["6000000001","6000000002"]`)
 	if err != nil {
 		t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
 	}

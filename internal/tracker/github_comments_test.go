@@ -293,13 +293,13 @@ func TestGitHubNewComments_StoredWithoutMarker(t *testing.T) {
 	}
 }
 
-// A conversation comment TF recorded is TF's, matched on its deliverable's key.
-// A review comment with the same number is a different comment, and so is a
-// deliverable recorded on another GitHub host.
+// A conversation comment the ledger records TF posting is TF's, matched on the
+// row's object key, with no comment deliverable written. A review comment with
+// the same number is a different comment, and so is a comment recorded on
+// another GitHub host.
 func TestGitHubNewComments_MarksTFComments(t *testing.T) {
 	tr, stores := newReviewTestTracker(t)
 	ctx := context.Background()
-	org, team := runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
 	for _, seed := range []struct {
 		scope string
 		space domain.GitHubCommentSpace
@@ -309,12 +309,7 @@ func TestGitHubNewComments_MarksTFComments(t *testing.T) {
 		{reviewTestHost, domain.GitHubReviewComment, 102},
 		{"https://ghe.example.com", domain.GitHubIssueComment, 103},
 	} {
-		a := domain.Deliverable{TeamID: team, Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindComment,
-			Scope: seed.scope, Target: "octo/repo#7", State: domain.DeliverableStateCommentPosted,
-			DedupKey: domain.GitHubCommentKey(seed.space, seed.id)}
-		if _, err := stores.Deliverables.UpsertSystem(ctx, org, a); err != nil {
-			t.Fatalf("seed comment deliverable %d: %v", seed.id, err)
-		}
+		recordTFComment(t, stores, domain.ProviderGitHub, seed.scope, "octo/repo#7", domain.GitHubCommentKey(seed.space, seed.id))
 	}
 	reader := &fakeCommentReader{pages: map[string]ghclient.PRCommentPage{
 		"": {TotalCount: 4, Comments: []ghclient.PRComment{
@@ -339,11 +334,11 @@ func TestGitHubNewComments_MarksTFComments(t *testing.T) {
 	}
 }
 
-// failingCommentDeliverables fails the comment-key lookup.
-type failingCommentDeliverables struct{ db.DeliverableStore }
+// failingCommentLedger fails the comment-key lookup.
+type failingCommentLedger struct{ db.ExternalActionStore }
 
-func (failingCommentDeliverables) PresentDedupKeysSystem(context.Context, string, string, []string) (map[string]bool, error) {
-	return nil, errors.New("deliverable store down")
+func (failingCommentLedger) PresentPostedCommentKeysSystem(context.Context, string, string, []string) (map[string]bool, error) {
+	return nil, errors.New("ledger down")
 }
 
 // A failed read, of the comments or of which are TF's, keeps prev's marker and
@@ -356,7 +351,7 @@ func TestGitHubNewComments_FailedReadKeepsPrev(t *testing.T) {
 	}}}
 	failures := map[string]func(tr *Tracker, r *fakeCommentReader){
 		"comment read":   func(_ *Tracker, r *fakeCommentReader) { r.err = errors.New("graphql down") },
-		"tf attribution": func(tr *Tracker, _ *fakeCommentReader) { tr.deliverables = failingCommentDeliverables{tr.deliverables} },
+		"tf attribution": func(tr *Tracker, _ *fakeCommentReader) { tr.externalActions = failingCommentLedger{tr.externalActions} },
 	}
 	prevs := map[string]domain.PRSnapshot{
 		"with marker":    prevWithCommentMarker(2),
@@ -472,16 +467,11 @@ func TestRefreshGitHub_CommentedEndToEnd(t *testing.T) {
 			database := newMigratedSQLite(t)
 			stores := sqlitestore.New(database)
 			org := runmode.LocalDefaultOrgID
-			posted := domain.Deliverable{TeamID: runmode.LocalDefaultTeamID, Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindComment,
-				Scope: reviewTestHost, Target: "octo/repo#7", State: domain.DeliverableStateCommentPosted,
-				DedupKey: domain.GitHubCommentKey(domain.GitHubIssueComment, 4102)}
-			if _, err := stores.Deliverables.UpsertSystem(ctx, org, posted); err != nil {
-				t.Fatalf("seed TF's comment: %v", err)
-			}
+			recordTFComment(t, stores, domain.ProviderGitHub, reviewTestHost, "octo/repo#7", domain.GitHubCommentKey(domain.GitHubIssueComment, 4102))
 			entityID := seedReviewedPR(t, stores, tc.prev)
 
 			pub := &recordingPublisher{}
-			tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.EventQueue, org)
+			tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, org)
 			client := ghclient.NewClient(srv.URL, "tok")
 			if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, nil, nil); err != nil {
 				t.Fatalf("RefreshGitHub: %v", err)
@@ -630,7 +620,7 @@ func TestRefreshGitHub_RateLimitStopsTheReads(t *testing.T) {
 	}
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub under a rate limit: %v", err)

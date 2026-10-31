@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -391,12 +392,14 @@ func (s *deliverableStore) PresentDedupKeysSystem(ctx context.Context, orgID, sc
 	return present, nil
 }
 
-// presentExternalIDsQuery is PresentExternalIDsSystem's statement up to its
-// IN list, which the caller closes with one placeholder per id.
+// presentExternalIDsQuery is PresentExternalIDsSystem's statement, binding
+// org_id, scope, provider, kind and the ids as one JSON array, in that order:
+// json_each reads the list from one bind, so the statement is the same for any
+// number of ids.
 const presentExternalIDsQuery = `
 	SELECT external_id
 	FROM deliverables
-	WHERE org_id = ? AND scope = ? AND provider = ? AND kind = ? AND external_id IN (`
+	WHERE org_id = ? AND scope = ? AND provider = ? AND kind = ? AND external_id IN (SELECT value FROM json_each(?))`
 
 func (s *deliverableStore) PresentExternalIDsSystem(ctx context.Context, orgID, scope, provider, kind string, externalIDs []string) (map[string]bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
@@ -406,34 +409,26 @@ func (s *deliverableStore) PresentExternalIDsSystem(ctx context.Context, orgID, 
 		return nil, err
 	}
 	present := map[string]bool{}
-	// ?-placeholder IN list, chunked to stay inside SQLite's variable limit.
-	for _, chunk := range chunkIDs(externalIDs) {
-		placeholders := make([]string, len(chunk))
-		args := make([]any, 0, len(chunk)+4)
-		args = append(args, orgID, scope, provider, kind)
-		for i, id := range chunk {
-			placeholders[i] = "?"
-			args = append(args, id)
-		}
-		rows, err := s.q.QueryContext(ctx, presentExternalIDsQuery+strings.Join(placeholders, ", ")+`)`, args...)
-		if err != nil {
-			return nil, err
-		}
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			present[id] = true
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		rows.Close()
+	if len(externalIDs) == 0 {
+		return present, nil
 	}
-	return present, nil
+	list, err := json.Marshal(externalIDs)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx, presentExternalIDsQuery, orgID, scope, provider, kind, string(list))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		present[id] = true
+	}
+	return present, rows.Err()
 }
 
 func (s *deliverableStore) CountByConversation(ctx context.Context, orgID string, conversationIDs []string) (map[string]int, error) {

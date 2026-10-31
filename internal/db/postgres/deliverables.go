@@ -341,9 +341,10 @@ func (s *deliverableStore) ListPendingReviewsByEntitySystem(ctx context.Context,
 	return scanDeliverableRows(rows)
 }
 
-// PresentDedupKeysSystem runs on the admin pool (BYPASSRLS): the tracker
-// reads it with no claims, and a comment's deliverable belongs to whichever team's
-// run posted it. org_id stays in the WHERE clause as defense in depth.
+// PresentDedupKeysSystem runs on the admin pool (BYPASSRLS): the recording
+// funnel's system path reads it with no claims, and a comment's deliverable
+// belongs to whichever team's run posted it. org_id stays in the WHERE clause
+// as defense in depth.
 func (s *deliverableStore) PresentDedupKeysSystem(ctx context.Context, orgID, scope string, dedupKeys []string) (map[string]bool, error) {
 	if err := db.RequireExternalObjectScope(scope); err != nil {
 		return nil, err
@@ -371,8 +372,8 @@ func (s *deliverableStore) PresentDedupKeysSystem(ctx context.Context, orgID, sc
 	return present, rows.Err()
 }
 
-// PresentExternalIDsSystem runs on the admin pool (BYPASSRLS), as
-// PresentDedupKeysSystem: the tracker reads it with no claims, and a review's
+// PresentExternalIDsSystem runs on the admin pool (BYPASSRLS): the tracker
+// reads it with no claims, and a review's
 // deliverable belongs to whichever team's run submitted it. idx_deliverables_external_id
 // serves it. org_id stays in the WHERE clause as defense in depth.
 func (s *deliverableStore) PresentExternalIDsSystem(ctx context.Context, orgID, scope, provider, kind string, externalIDs []string) (map[string]bool, error) {

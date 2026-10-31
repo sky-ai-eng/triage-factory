@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -210,6 +211,50 @@ func (s *externalActionStore) ListPRCreatedWithoutDeliverableSystem(ctx context.
 		return nil, err
 	}
 	return scanExternalActionRows(rows)
+}
+
+// presentPostedCommentKeysQuery is PresentPostedCommentKeysSystem's statement,
+// binding org_id, scope, the object kind, the two comment actions and the keys
+// as one JSON array, in that order. SQLite binds no arrays, and json_each
+// reads the list from one bind, so the statement is the same for any number
+// of keys and the object-key index is searched once per key.
+const presentPostedCommentKeysQuery = `
+	SELECT object_key
+	  FROM external_actions
+	 WHERE org_id = ? AND scope = ? AND object_kind = ? AND action IN (?, ?)
+	   AND object_key IN (SELECT value FROM json_each(?))`
+
+// PresentPostedCommentKeysSystem is the tracker's read of which comments TF
+// posted (see the interface).
+func (s *externalActionStore) PresentPostedCommentKeysSystem(ctx context.Context, orgID, scope string, keys []string) (map[string]bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	if err := db.RequireExternalObjectScope(scope); err != nil {
+		return nil, err
+	}
+	present := map[string]bool{}
+	if len(keys) == 0 {
+		return present, nil
+	}
+	list, err := json.Marshal(keys)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx, presentPostedCommentKeysQuery,
+		orgID, scope, domain.ObjectKindComment, domain.ActionCommentPosted, domain.ActionIssueCommentPosted, string(list))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, err
+		}
+		present[key] = true
+	}
+	return present, rows.Err()
 }
 
 // appendExternalActionFilters appends opts' optional provider/action/actor/time

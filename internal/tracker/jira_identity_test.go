@@ -203,7 +203,7 @@ func newJiraIdentityFixture(t *testing.T, issues ...*fakeJiraIssue) *jiraIdentit
 func (fx *jiraIdentityFixture) cycle(t *testing.T, site string, rules JiraRules) []domain.Event {
 	t.Helper()
 	pub := &recordingPublisher{}
-	tr := New(fx.db, pub, fx.stores.Tasks, fx.stores.Entities, fx.stores.Repos, fx.stores.JiraProjects, fx.stores.Deliverables, fx.stores.EventQueue, runmode.LocalDefaultOrgID)
+	tr := New(fx.db, pub, fx.stores.Tasks, fx.stores.Entities, fx.stores.Repos, fx.stores.JiraProjects, fx.stores.Deliverables, fx.stores.ExternalActions, fx.stores.EventQueue, runmode.LocalDefaultOrgID)
 	rules = registeredRules(t, fx.stores.JiraProjects, site, rules)
 	if _, err := tr.RefreshJira(context.Background(), site, fx.client, site, rules); err != nil {
 		t.Fatalf("RefreshJira: %v", err)
