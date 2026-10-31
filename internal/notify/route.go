@@ -38,6 +38,17 @@ func (routes) TeamLinearRules(teamID string) Href {
 	return Href{route: teamLinearRulesRoute, teamID: teamID}
 }
 
+// TeamJira is a team's Jira page: its tracked projects and their status rules.
+// Multi mode has it on /team's Jira source, which opens on the team the viewer
+// last acted in, because the page takes no team from its address; local mode,
+// which has no /team page, has the one team's on /settings.
+//
+// TODO(TFAC-1268): the link names neither the row's team nor its project, so
+// an admin of several teams can land on another team's rules and then has to
+// find the project by hand. Needs the page to read both from its URL and an
+// Href that carries per-row query parameters.
+func (routes) TeamJira() Href { return Href{route: teamJiraRoute} }
+
 // route is a page of the SPA. multi is its path under /orgs/{org_id}; local is
 // its path in local mode's route table, "" when local mode has no such page.
 // Either may end in the query that opens the right part of the page. A team
@@ -52,6 +63,7 @@ type route struct {
 
 var (
 	orgSettingsRoute     = newRoute("org_settings", "/org?tab=settings", "/settings")
+	teamJiraRoute        = newRoute("team_jira", "/team?source=jira", "/settings")
 	teamJiraRulesRoute   = newTeamRoute("team_jira_rules", "/team?source=jira", "/settings")
 	teamLinearRulesRoute = newTeamRoute("team_linear_rules", "/team?source=linear", "/settings")
 )

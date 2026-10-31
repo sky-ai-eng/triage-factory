@@ -46,9 +46,11 @@ type Backend struct {
 	// Notifications answers who an audience is sent to: a ping's recipients
 	// once the writes commit, and local mode's one user before them.
 	Notifications db.NotificationStore
-	// Orgs and LinearTeamRules are the tracking resolvers' reads.
+	// Orgs, LinearTeamRules and JiraStatusRules are the tracking resolvers'
+	// reads.
 	Orgs            db.OrgsStore
 	LinearTeamRules db.LinearTeamRulesStore
+	JiraStatusRules db.JiraStatusRulesStore
 	Hub             Broadcaster
 	// Local is N=1: an occurrence is one row for the one user, written when
 	// any of its audiences is sent to them.

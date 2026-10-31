@@ -101,9 +101,41 @@ func User[P any](userID func(P) string) Audience {
 	}}}
 }
 
-// TODO(TFAC-1246): TeamsTrackingJiraProject, the same resolver over the teams
-// whose rules arm a jira_projects row; jira.discovery_failing is its first
-// consumer.
+// TeamsArmingJiraProject is the members or admins of every active team
+// whose rules arm the jira_projects row jiraProjectID names, on the org's
+// current Jira site. It is narrower than the teams tracking the project: one
+// that only watches it is left out, because TF asks Jira nothing about the
+// project on its behalf.
+func TeamsArmingJiraProject[P any](jiraProjectID func(P) string, role Role) Audience {
+	if jiraProjectID == nil {
+		panic("notify: TeamsArmingJiraProject needs a jira_projects row id function")
+	}
+	if role != Members && role != Admins {
+		panic(fmt.Sprintf("notify: TeamsArmingJiraProject role %q is not %q or %q", role, Members, Admins))
+	}
+	return Audience{parts: []audiencePart{{
+		name:  "teams arming a Jira project",
+		param: reflect.TypeFor[P](),
+		resolve: func(ctx context.Context, r *resolution, p any) ([]Recipient, error) {
+			id := jiraProjectID(p.(P))
+			if id == "" {
+				return nil, errors.New("jira arming audience: the params name no Jira project")
+			}
+			site, err := r.jiraSite(ctx)
+			if err != nil || site == "" {
+				return nil, err
+			}
+			teams, err := r.b.JiraStatusRules.ArmingTeamIDsSystem(ctx, r.orgID, site, id)
+			if err != nil {
+				return nil, fmt.Errorf("teams arming Jira project: %w", err)
+			}
+			return teamRecipients(teams, role), nil
+		},
+		examples: func(any) []Recipient {
+			return []Recipient{{Scope: domain.NotificationScopeTeam, Role: role, TeamID: exampleTeamID}}
+		},
+	}}}
+}
 
 // TeamsTrackingLinearTeam is the members or admins of every active team that
 // tracks the Linear team linearTeamID names, in the org's current Linear
@@ -131,16 +163,20 @@ func TeamsTrackingLinearTeam[P any](linearTeamID func(P) string, role Role) Audi
 			if err != nil {
 				return nil, fmt.Errorf("teams tracking Linear team: %w", err)
 			}
-			out := make([]Recipient, len(teams))
-			for i, team := range teams {
-				out[i] = Recipient{Scope: domain.NotificationScopeTeam, Role: role, TeamID: team}
-			}
-			return out, nil
+			return teamRecipients(teams, role), nil
 		},
 		examples: func(any) []Recipient {
 			return []Recipient{{Scope: domain.NotificationScopeTeam, Role: role, TeamID: exampleTeamID}}
 		},
 	}}}
+}
+
+func teamRecipients(teams []string, role Role) []Recipient {
+	out := make([]Recipient, len(teams))
+	for i, team := range teams {
+		out[i] = Recipient{Scope: domain.NotificationScopeTeam, Role: role, TeamID: team}
+	}
+	return out
 }
 
 // resolve runs every part, keeping the first of any recipient two parts name.
@@ -197,11 +233,19 @@ func (r *resolution) orgSettings(ctx context.Context) (domain.OrgSettings, error
 }
 
 func (r *resolution) linearWorkspace(ctx context.Context) (string, error) {
+	return r.scope(ctx, "linear")
+}
+
+func (r *resolution) jiraSite(ctx context.Context) (string, error) {
+	return r.scope(ctx, "jira")
+}
+
+func (r *resolution) scope(ctx context.Context, source string) (string, error) {
 	s, err := r.orgSettings(ctx)
 	if err != nil {
 		return "", err
 	}
-	return domain.EntityScope("linear", s), nil
+	return domain.EntityScope(source, s), nil
 }
 
 // checkExternal is an external link's host check against the org's configured
