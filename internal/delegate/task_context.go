@@ -208,9 +208,10 @@ func (s *Spawner) taskArtifacts(ctx context.Context, orgID, taskID string) ([]do
 // deliverable's state replaces that action, since it is where the object
 // stands now. A pull request or review deliverable no artifact matches is one
 // whose object no run has changed yet, such as a staged review, and renders
-// its own state. A deliverable of any other kind renders nothing: what it
-// records is an object the agent changed, which the ledger lists as an
-// artifact, so a line of its own would name the object twice.
+// its own state. A deliverable of any other kind renders nothing: it is
+// written beside the ledger row of the change it records, and that row is the
+// artifact, so a line of its own would name the object twice. A row from
+// before the ledger named objects has no artifact, and is not listed.
 //
 // A segment with no value is omitted, and every value is flattened, because a
 // target and a URL are provider-authored strings reaching the same bullet list
@@ -245,6 +246,8 @@ func artifactLines(artifacts []domain.Artifact, deliverables []domain.Deliverabl
 		out = append(out, artifactLine(a.ObjectKind, a.Target, status, a.URL))
 	}
 	for _, d := range orderedDeliverables {
+		// TODO(TFAC-1266): once deliverables are pull requests and reviews
+		// only, the kind half of this check excludes nothing and goes.
 		if matched[d.ID] || (d.Kind != domain.DeliverableKindPullRequest && d.Kind != domain.DeliverableKindReview) {
 			continue
 		}
