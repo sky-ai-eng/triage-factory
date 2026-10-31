@@ -16,7 +16,7 @@ import (
 // readiness until a fresh completion lands, and a stale (pre-restart)
 // completion is ignored.
 func TestPollReadinessStore_SQLite_ReadyLifecycle(t *testing.T) {
-	conn := newSQLiteForArtifactTest(t)
+	conn := newSQLiteForDeliverableTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 	const orgID = "00000000-0000-0000-0000-000000000001"
@@ -58,7 +58,7 @@ func TestPollReadinessStore_SQLite_ReadyLifecycle(t *testing.T) {
 // TestPollReadinessStore_SQLite_AnnouncePendingIsOneShot pins the "at most
 // once" consume contract.
 func TestPollReadinessStore_SQLite_AnnouncePendingIsOneShot(t *testing.T) {
-	conn := newSQLiteForArtifactTest(t)
+	conn := newSQLiteForDeliverableTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 	const orgID = "00000000-0000-0000-0000-000000000001"
@@ -82,7 +82,7 @@ func TestPollReadinessStore_SQLite_AnnouncePendingIsOneShot(t *testing.T) {
 // restart clears a source's stamp and drops it from the map, and a source
 // that never polled is simply absent.
 func TestPollReadinessStore_SQLite_LastPollTimes(t *testing.T) {
-	conn := newSQLiteForArtifactTest(t)
+	conn := newSQLiteForDeliverableTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 	const orgID = "00000000-0000-0000-0000-000000000001"
@@ -125,6 +125,6 @@ func TestPollReadinessStore_SQLite_LastPollTimes(t *testing.T) {
 // sentinel, whose orgs row BootstrapSchemaForTest seeds.
 func TestPollReadinessStore_SQLite_ConnectionConformance(t *testing.T) {
 	dbtest.RunPollReadinessConnectionConformance(t, func(t *testing.T) (db.PollReadinessStore, string) {
-		return sqlitestore.New(newSQLiteForArtifactTest(t)).PollReadiness, runmode.LocalDefaultOrgID
+		return sqlitestore.New(newSQLiteForDeliverableTest(t)).PollReadiness, runmode.LocalDefaultOrgID
 	})
 }

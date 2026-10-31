@@ -22,7 +22,7 @@ import (
 )
 
 // agentHandler serves the agent-conversation endpoints (status / messages / cancel /
-// message / interrupt / permissions / conversation list / artifact refresh). spawner and
+// message / interrupt / permissions / conversation list / deliverable refresh). spawner and
 // reconciler are read through getters so the handler always sees the current
 // instance, (re)wired onto the server after construction.
 type agentHandler struct {
@@ -61,7 +61,7 @@ func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request
 
 // writeConversationResource reads the conversation resource exactly as
 // handleAgentStatus does — the point read plus its display enrichment
-// (artifact counts, blueprint step count, resumability) — and writes it as
+// (deliverable counts, blueprint step count, resumability) — and writes it as
 // the response. Shared with handleAgentStop/handleMessage so a mutating verb
 // route answers with the resource it just changed rather than a status stub
 // naming only the field that verb happens to touch.
@@ -77,28 +77,28 @@ func (ag *agentHandler) writeConversationResource(w http.ResponseWriter, r *http
 		if conv == nil {
 			return nil
 		}
-		counts, e := tx.Artifacts.CountByConversation(r.Context(), orgID, []string{conv.ID})
+		counts, e := tx.Deliverables.CountByConversation(r.Context(), orgID, []string{conv.ID})
 		if e != nil {
 			return e
 		}
-		// Derive has_unresolved_artifacts (+ per-kind counts) from the conversation's
-		// artifact set. Only read the artifacts when the conversation has any —
+		// Derive has_unresolved_deliverables (+ per-kind counts) from the conversation's
+		// deliverable set. Only read the deliverables when the conversation has any —
 		// counts==0 means there's nothing unresolved, so skip the list. A list
 		// failure is best-effort BY DESIGN — this is display enrichment on top
 		// of an authoritative row, so it omits the derived flags (logged) but
 		// must not fail the status fetch or touch the count above. The
 		// swallowed-error sweep leaves it swallowed deliberately.
-		var arts []domain.Artifact
+		var arts []domain.Deliverable
 		if counts[conv.ID] > 0 {
-			if a, lerr := tx.Artifacts.ListByConversation(r.Context(), orgID, conv.ID); lerr != nil {
-				serverLog.Warn("artifact lookup for has_unresolved_artifacts failed; omitting it (artifact_count unaffected)", "conversation", conv.ID, "error", lerr)
+			if a, _, lerr := tx.Deliverables.ListByConversation(r.Context(), orgID, conv.ID, db.Unwindowed); lerr != nil {
+				serverLog.Warn("deliverable lookup for has_unresolved_deliverables failed; omitting it (deliverable_count unaffected)", "conversation", conv.ID, "error", lerr)
 			} else {
 				arts = a
 			}
 		}
 		// The owning blueprint's plan length and status, so the conversation
 		// page can tell a handed-off step from the one that ended the task, and
-		// whether the work is done. Best-effort like the artifact list above: a
+		// whether the work is done. Best-effort like the deliverable list above: a
 		// failure (or a blueprint row RLS hides) leaves both unresolved and the
 		// projection unqualified, never a failed status fetch.
 		var progress db.RunProgress
@@ -160,17 +160,17 @@ func addResumability(ctx context.Context, resp map[string]any, orgID string, con
 	}
 }
 
-// handleArtifactRefresh is the Tier-2, conversation-scoped half of artifact
+// handleDeliverableRefresh is the Tier-2, conversation-scoped half of deliverable
 // reconciliation (TFAC-464): the conversation view polls it (~5s while open) to pull a
-// conversation's non-terminal artifacts fresh against GitHub without waiting for the
+// conversation's non-terminal deliverables fresh against GitHub without waiting for the
 // background per-org cycle. It runs the SAME reconcile path as Tier 1, bounded
-// to this one conversation's artifacts, and pushes any transition over the WS hub.
+// to this one conversation's deliverables, and pushes any transition over the WS hub.
 //
-// Authorization rides the request-claims read: Conversations.Get + Artifacts.ListByConversation
+// Authorization rides the request-claims read: Conversations.Get + Deliverables.ListByConversation
 // are RLS-scoped, so a user can only refresh a conversation their team can see. The GitHub
-// calls and the artifact/memory writes happen OUTSIDE that read tx (no network
+// calls and the deliverable/memory writes happen OUTSIDE that read tx (no network
 // I/O under a held transaction) — the reconciler writes via its admin-pool path.
-func (ag *agentHandler) handleArtifactRefresh(w http.ResponseWriter, r *http.Request) {
+func (ag *agentHandler) handleDeliverableRefresh(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
@@ -185,22 +185,22 @@ func (ag *agentHandler) handleArtifactRefresh(w http.ResponseWriter, r *http.Req
 	if rc == nil {
 		// Same reading as a missing spawner: this deployment runs no
 		// reconciler, so the route has nothing to drive.
-		writeNotConfigured(w, "artifact reconciliation is not configured on this deployment")
+		writeNotConfigured(w, "deliverable reconciliation is not configured on this deployment")
 		return
 	}
 
-	// Read the conversation + its reconcilable non-terminal artifacts under request
+	// Read the conversation + its reconcilable non-terminal deliverables under request
 	// claims (authorization + RLS scoping). Filter to the same working set the
 	// org-wide Tier-1 query selects so the two tiers reconcile identically.
 	var conv *domain.Conversation
-	var arts []domain.Artifact
+	var arts []domain.Deliverable
 	if err := ag.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		conv, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
 		if e != nil || conv == nil {
 			return e
 		}
-		all, e := tx.Artifacts.ListByConversation(r.Context(), orgID, conversationID)
+		all, _, e := tx.Deliverables.ListByConversation(r.Context(), orgID, conversationID, db.Unwindowed)
 		if e != nil {
 			return e
 		}
@@ -227,14 +227,14 @@ func (ag *agentHandler) handleArtifactRefresh(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, map[string]any{"updated": len(updated)})
 }
 
-// artifactJSON is the wire shape of one conversation artifact for
-// GET /api/agent/conversations/{conversationID}/artifacts — the conversation's artifacts as the board /
+// deliverableJSON is the wire shape of one conversation deliverable for
+// GET /api/agent/conversations/{conversationID}/deliverables — the conversation's deliverables as the board /
 // RunDetail UI (TFAC-470) consumes them, across every kind (branch /
 // pull_request / review / issue / comment). details is the PARSED details_json
 // (the kind-specific payload as a JSON object, or null when absent/unparseable)
 // so the client gets structured data, not a string to re-parse. The mutable
 // dedup_key / org_id / team_id internals stay off the wire.
-type artifactJSON struct {
+type deliverableJSON struct {
 	ID         string          `json:"id"`
 	Kind       string          `json:"kind"`
 	Provider   string          `json:"provider"`
@@ -247,20 +247,20 @@ type artifactJSON struct {
 	CreatedAt  time.Time       `json:"created_at"`
 }
 
-// toArtifactJSON projects a stored artifact onto the read-API wire shape,
+// toDeliverableJSON projects a stored deliverable onto the read-API wire shape,
 // emitting details_json as embedded JSON (or null when absent/corrupt).
-func toArtifactJSON(a domain.Artifact) artifactJSON {
-	out := artifactEnvelope(a)
-	out.Details = storedArtifactDetails(a)
+func toDeliverableJSON(a domain.Deliverable) deliverableJSON {
+	out := deliverableEnvelope(a)
+	out.Details = storedDeliverableDetails(a)
 	return out
 }
 
-// artifactEnvelope fills the kind-independent half of the read shape, leaving
-// Details to the caller. The single read (GET /api/artifacts/{id}) composes a
+// deliverableEnvelope fills the kind-independent half of the read shape, leaving
+// Details to the caller. The single read (GET /api/deliverables/{id}) composes a
 // live representation for two of the kinds, so it fills that slot itself
 // rather than passing the stored payload through.
-func artifactEnvelope(a domain.Artifact) artifactJSON {
-	return artifactJSON{
+func deliverableEnvelope(a domain.Deliverable) deliverableJSON {
+	return deliverableJSON{
 		ID:         a.ID,
 		Kind:       a.Kind,
 		Provider:   a.Provider,
@@ -273,9 +273,9 @@ func artifactEnvelope(a domain.Artifact) artifactJSON {
 	}
 }
 
-// storedArtifactDetails is the details_json a row already holds, as the
+// storedDeliverableDetails is the details_json a row already holds, as the
 // embedded JSON object it is.
-func storedArtifactDetails(a domain.Artifact) json.RawMessage {
+func storedDeliverableDetails(a domain.Deliverable) json.RawMessage {
 	switch {
 	case a.DetailsJSON == "":
 		// No details — nil, which marshals to null.
@@ -286,21 +286,31 @@ func storedArtifactDetails(a domain.Artifact) json.RawMessage {
 		// Corrupt payload: serve null rather than fail the whole response's
 		// marshal (json.Marshal validates a RawMessage). details_json is written
 		// by our own marshaled structs, so an invalid value is a real upstream
-		// bug worth a trace, not an expected empty — mirror the artifact handler's
+		// bug worth a trace, not an expected empty — mirror the deliverable handler's
 		// "details unparseable" warning so it isn't a silent drop.
-		artifactsLog.Warn("artifact details_json is not valid JSON; serving null",
-			"artifact", a.ID, "dedup_key", a.DedupKey)
+		deliverablesLog.Warn("deliverable details_json is not valid JSON; serving null",
+			"deliverable", a.ID, "dedup_key", a.DedupKey)
 		return nil
 	}
 }
 
-// handleAgentArtifacts returns every artifact a conversation produced — branch, PR,
-// review, issue, comment — newest first (A·6, TFAC-465). It reuses
-// Artifacts.ListByConversation and reads the conversation first under request claims, so a
-// conversation the caller's team can't see is a 404 (RLS scopes both reads), never a leak;
-// a member of the owning team gets the list. Backs the conversation detail surface
-// (TFAC-470); team-level aggregation is TFAC-449 C2, not here.
-func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Request) {
+// conversationDeliverableListRequest is the body of POST
+// /api/agent/conversations/{conversationID}/deliverables/list. The
+// conversation is the path id and the read has no filters of its own, so the
+// body is paging alone.
+type conversationDeliverableListRequest struct {
+	httpx.PageRequest
+}
+
+// handleAgentDeliverables returns the deliverables a conversation produced — branch, PR,
+// review, issue, comment — newest first (A·6, TFAC-465), one page at a time. It
+// reads the conversation first under request claims, so a conversation the
+// caller's team can't see is a 404 (RLS scopes both reads), never a leak; a
+// member of the owning team gets the list. Backs the conversation detail
+// surface (TFAC-470); team-level aggregation is TFAC-449 C2, not here.
+//
+// POST /api/agent/conversations/{conversationID}/deliverables/list
+func (ag *agentHandler) handleAgentDeliverables(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
@@ -311,8 +321,21 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	var conv *domain.Conversation
-	var arts []domain.Artifact
+	var req conversationDeliverableListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(struct{}{}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
+	var (
+		conv  *domain.Conversation
+		arts  []domain.Deliverable
+		total int
+	)
 	if err := ag.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		conv, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
@@ -322,7 +345,8 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 		if conv == nil {
 			return nil
 		}
-		arts, e = tx.Artifacts.ListByConversation(r.Context(), orgID, conversationID)
+		arts, total, e = tx.Deliverables.ListByConversation(r.Context(), orgID, conversationID,
+			db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
 	}); err != nil {
 		internalError(w, "agent", err)
@@ -333,11 +357,11 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	out := make([]artifactJSON, len(arts))
+	out := make([]deliverableJSON, len(arts))
 	for i, a := range arts {
-		out[i] = toArtifactJSON(a)
+		out[i] = toDeliverableJSON(a)
 	}
-	writeJSON(w, http.StatusOK, out)
+	httpx.WriteList(w, page, out, total)
 }
 
 // conversationActionListRequest is the body of POST
@@ -350,7 +374,7 @@ type conversationActionListRequest struct {
 
 // handleAgentActions returns the external actions this conversation performed — the
 // audit log of record, filtered to one conversation and newest first. The
-// sibling of handleAgentArtifacts, and gated identically: the conversation is read first
+// sibling of handleAgentDeliverables, and gated identically: the conversation is read first
 // under request claims, so a conversation the caller's team can't see is a 404 rather
 // than an empty list.
 //
@@ -363,8 +387,8 @@ type conversationActionListRequest struct {
 //
 // Deliberately NOT behind the governance entitlement the /usage feeds sit
 // behind. That gate is about reading across teams; this read is scoped to a
-// single conversation whose transcript and artifacts the caller can already see, and the
-// actions are the part of that conversation's record which has no artifact to appear as
+// single conversation whose transcript and deliverables the caller can already see, and the
+// actions are the part of that conversation's record which has no deliverable to appear as
 // — a review-thread reply, a refused merge, a denied push. Withholding them
 // here would leave the incomplete answer the conversation view has today.
 //
@@ -424,23 +448,22 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 }
 
 // conversationResponse projects a Conversation into the wire shape the frontend consumes,
-// augmented with `artifact_count` and the per-kind `artifact_counts` (so the
+// augmented with `deliverable_count` and the per-kind `deliverable_counts` (so the
 // Board card can show what a conversation produced without a per-card fetch) and
 // the derived approval signal:
-// `has_unresolved_artifacts` (bool), `unresolved_pr_count` /
-// `unresolved_review_count`, and `pending_artifact_ids` (the set of unresolved
-// approvable artifact ids — all draft PRs + all ready reviews — for the per-item
-// resolve UI). These replace the legacy `pending_kind` /
-// `pending_artifact_id` overlay discriminators — approval is no longer a stored
-// conversation status but a view over the unresolved-artifact set.
+// `has_unresolved_deliverables` (bool), `unresolved_pr_count` /
+// `unresolved_review_count`, and `pending_deliverable_ids` (the set of unresolved
+// approvable deliverable ids — all draft PRs + all ready reviews — for the per-item
+// resolve UI). Approval is not a stored conversation status but a view over the
+// unresolved-deliverable set.
 //
 // Pure projection — it does no I/O. The caller supplies every input, which is
 // what lets the conversation-list path batch its reads instead of issuing them
 // per conversation:
-//   - artifactCount from Artifacts.CountByConversation (the single-conversation path counts one
+//   - deliverableCount from Deliverables.CountByConversation (the single-conversation path counts one
 //     conversation; the list path batches every conversation in one query — N+1 avoidance).
-//   - arts is the conversation's artifact set, which the caller reads best-effort (only
-//     for conversations that have any artifact, so a conversation with none costs no list).
+//   - arts is the conversation's deliverable set, which the caller reads best-effort (only
+//     for conversations that have any deliverable, so a conversation with none costs no list).
 //   - progress is the owning blueprint run's plan length and status, from
 //     Blueprints.RunProgress (batched the same way). Zero values when the
 //     conversation has no blueprint, and when the caller could not resolve one
@@ -461,8 +484,8 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 // blueprintDecisionForStepConversation is what resolves it against position).
 //
 // The derived approval keys are emitted only when the answer is definitive: when
-// the conversation has no artifacts (artifactCount == 0, so nothing can be unresolved) or
-// when the artifact set is actually in hand (len(arts) > 0). When artifactCount
+// the conversation has no deliverables (deliverableCount == 0, so nothing can be unresolved) or
+// when the deliverable set is actually in hand (len(arts) > 0). When deliverableCount
 // is positive but arts is empty — a best-effort read failed — the keys are
 // OMITTED rather than reported as a misleading false, so a transient DB/RLS hiccup
 // can't hide approval-required work; the client treats their absence as "unknown"
@@ -475,7 +498,7 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 // purpose: that route's client is the run station, whose live transcript
 // already shows the call this line would summarize, and buying it there would
 // add a query to a polled route for a field it does not render.
-func conversationResponse(conv *domain.Conversation, artifactCount int, arts []domain.Artifact, progress db.RunProgress, currentAction string) map[string]any {
+func conversationResponse(conv *domain.Conversation, deliverableCount int, arts []domain.Deliverable, progress db.RunProgress, currentAction string) map[string]any {
 	out := map[string]any{
 		"ID":            conv.ID,
 		"TaskID":        conv.TaskID,
@@ -509,7 +532,7 @@ func conversationResponse(conv *domain.Conversation, artifactCount int, arts []d
 		"blueprint_step_index": conv.BlueprintStepIndex,
 		"blueprint_step_count": progress.StepCount,
 		"blueprint_run_status": string(progress.Status),
-		"artifact_count":       artifactCount,
+		"deliverable_count":    deliverableCount,
 		// The token rollups the conversation read already SUMs, alongside the cost /
 		// duration / turns ones above. snake_case like every key added since
 		// the legacy PascalCase set froze. Plain ints — 0 for a conversation that never
@@ -571,22 +594,22 @@ func conversationResponse(conv *domain.Conversation, artifactCount int, arts []d
 	if conv.ClaimCurrentOp != "" {
 		out["claim_current_op"] = conv.ClaimCurrentOp
 	}
-	if artifactCount == 0 || len(arts) > 0 {
-		prCount, reviewCount := domain.UnresolvedArtifactCounts(arts)
-		out["has_unresolved_artifacts"] = prCount > 0 || reviewCount > 0
+	if deliverableCount == 0 || len(arts) > 0 {
+		prCount, reviewCount := domain.UnresolvedDeliverableCounts(arts)
+		out["has_unresolved_deliverables"] = prCount > 0 || reviewCount > 0
 		out["unresolved_pr_count"] = prCount
 		out["unresolved_review_count"] = reviewCount
 		// What the conversation wrote, by kind — the board card's footer
 		// strip. Under the same definitive-only guard as the counts above and
-		// off the same artifact set, so the strip's totals and the warm marks
+		// off the same deliverable set, so the strip's totals and the warm marks
 		// it draws from the unresolved counts can never disagree. {} when the
 		// conversation produced nothing.
-		out["artifact_counts"] = domain.ArtifactCountsByKind(arts)
-		// The set of unresolved approvable artifact ids (all draft PRs + all ready
+		out["deliverable_counts"] = domain.DeliverableCountsByKind(arts)
+		// The set of unresolved approvable deliverable ids (all draft PRs + all ready
 		// reviews) — what the approval UI lists for per-item resolve. Emitted under
 		// the same definitive-only guard as the counts above, and always non-nil so
 		// the field is [] rather than null when nothing is unresolved.
-		out["pending_artifact_ids"] = domain.UnresolvedArtifactIDs(arts)
+		out["pending_deliverable_ids"] = domain.UnresolvedDeliverableIDs(arts)
 	}
 	return out
 }
@@ -1090,16 +1113,16 @@ func (ag *agentHandler) handleAgentPermissions(w http.ResponseWriter, r *http.Re
 }
 
 // enrichConversations projects conversations onto the wire shape, augmenting each with a batched
-// artifact_count and the derived has_unresolved_artifacts (+ per-kind counts).
-// Both artifact reads stay O(1) in queries regardless of how many conversations the set
+// deliverable_count and the derived has_unresolved_deliverables (+ per-kind counts).
+// Both deliverable reads stay O(1) in queries regardless of how many conversations the set
 // has. Board's useWebSocket re-fetches on every status transition, so a per-conversation
 // read would scale with the task's conversation history.
 //
-//   - artifact_count for every conversation: one CountByConversation (conversationID→count; a conversation with no
-//     artifacts is absent → 0).
-//   - has_unresolved_artifacts for the conversations that have artifacts: one ListByConversations
+//   - deliverable_count for every conversation: one CountByConversation (conversationID→count; a conversation with no
+//     deliverables is absent → 0).
+//   - has_unresolved_deliverables for the conversations that have deliverables: one ListByConversations
 //     over just those conversation ids (count>0), grouped per conversation. The derivation needs
-//     the actual artifacts, but a conversation with none can't have an unresolved one, so
+//     the actual deliverables, but a conversation with none can't have an unresolved one, so
 //     it costs no list.
 //   - blueprint_step_count for the conversations that belong to a blueprint: one
 //     RunProgress over the deduped blueprint_run ids.
@@ -1121,20 +1144,20 @@ func enrichConversations(ctx context.Context, tx db.TxStores, orgID string, conv
 	for i := range convs {
 		conversationIDs[i] = convs[i].ID
 	}
-	counts, err := tx.Artifacts.CountByConversation(ctx, orgID, conversationIDs)
+	counts, err := tx.Deliverables.CountByConversation(ctx, orgID, conversationIDs)
 	if err != nil {
 		return nil, err
 	}
-	var withArtifacts []string
+	var withDeliverables []string
 	for i := range convs {
 		if counts[convs[i].ID] > 0 {
-			withArtifacts = append(withArtifacts, convs[i].ID)
+			withDeliverables = append(withDeliverables, convs[i].ID)
 		}
 	}
-	artsByConv := map[string][]domain.Artifact{}
-	if len(withArtifacts) > 0 {
-		if arts, lerr := tx.Artifacts.ListByConversations(ctx, orgID, withArtifacts); lerr != nil {
-			serverLog.Warn("artifact batch lookup failed; omitting has_unresolved_artifacts (artifact_count unaffected)", "error", lerr)
+	artsByConv := map[string][]domain.Deliverable{}
+	if len(withDeliverables) > 0 {
+		if arts, lerr := tx.Deliverables.ListByConversations(ctx, orgID, withDeliverables); lerr != nil {
+			serverLog.Warn("deliverable batch lookup failed; omitting has_unresolved_deliverables (deliverable_count unaffected)", "error", lerr)
 		} else {
 			for _, a := range arts {
 				artsByConv[a.ConversationID] = append(artsByConv[a.ConversationID], a)
@@ -1238,7 +1261,7 @@ type conversationListRequest struct {
 	Statuses []string `json:"statuses"`
 	// Attention keeps only the conversations waiting on a human: an unanswered
 	// permission prompt, or a not-live conversation still holding an unresolved
-	// artifact. False narrows nothing.
+	// deliverable. False narrows nothing.
 	Attention bool `json:"attention"`
 	// IncludeMessages adds each task's PRIMARY (newest-started) conversation's
 	// transcript, keyed by that conversation's id — what the Board seeds onto a card.
@@ -1351,7 +1374,7 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 			return e
 		}
 		resp.TotalCount = total
-		// One enrichConversations over the whole page keeps the artifact reads O(1)
+		// One enrichConversations over the whole page keeps the deliverable reads O(1)
 		// regardless of task/conversation count; the index alignment lets us group the
 		// projected responses by task without re-projecting.
 		enriched, e := enrichConversations(r.Context(), tx, orgID, convs)

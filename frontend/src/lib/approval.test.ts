@@ -18,7 +18,7 @@ describe('approvalKicker', () => {
   })
 
   it('degrades to the bare lead-in when the counts are absent', () => {
-    // The transient window: has_unresolved_artifacts true, counts omitted.
+    // The transient window: has_unresolved_deliverables true, counts omitted.
     expect(approvalKicker({ pr: 0, review: 0, total: 0 })).toBe('Awaiting approval')
   })
 })

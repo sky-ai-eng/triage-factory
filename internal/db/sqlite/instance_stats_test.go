@@ -10,7 +10,7 @@ import (
 
 func TestInstanceStatStore_SQLite_Conformance(t *testing.T) {
 	dbtest.RunInstanceStatStoreConformance(t, func(t *testing.T) db.InstanceStatStore {
-		conn := newSQLiteForArtifactTest(t)
+		conn := newSQLiteForDeliverableTest(t)
 		return sqlitestore.NewInstanceStatStore(conn)
 	})
 }

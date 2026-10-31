@@ -1,5 +1,5 @@
 // Generic staged-injection queue. The producer-agnostic "deliver live or stage
-// for the next resume" seam, generalized from the artifact-change feedback:
+// for the next resume" seam, generalized from the deliverable-change feedback:
 //
 //   - Live run (a warm, steerable process): the note is wrapped and steered in
 //     immediately, fire-and-forget (deliverInjectionLive).
@@ -9,8 +9,8 @@
 //     user's message — on the next resume (stagedInjectionsForResume, wired
 //     into SendMessage).
 //
-// Unlike the artifact-change ledger (which DERIVES its terminal injections from
-// the artifact rows, so it needs no queue), a producer here has no durable row
+// Unlike the deliverable-change ledger (which DERIVES its terminal injections from
+// the deliverable rows, so it needs no queue), a producer here has no durable row
 // of its own to re-derive from — the PR coherence feed is such a producer.
 // That's why this half is a real durable queue, not a derivation.
 
@@ -84,8 +84,8 @@ func (s *Spawner) stageOrDeliverInjection(orgID, conversationID, producer, body 
 //
 // The flush is destructive (DELETE … RETURNING), so an injection is delivered exactly
 // once even if two resumes race. This is the durable sibling of
-// artifactLedgerForResume — SendMessage prepends both, so a resume that has both
-// a resolved artifact and a staged injection carries two <system-note> blocks ahead of
+// deliverableLedgerForResume — SendMessage prepends both, so a resume that has both
+// a resolved deliverable and a staged injection carries two <system-note> blocks ahead of
 // the user's text.
 func (s *Spawner) stagedInjectionsForResume(ctx context.Context, orgID, conversationID string) string {
 	if s.stagedInjections == nil {

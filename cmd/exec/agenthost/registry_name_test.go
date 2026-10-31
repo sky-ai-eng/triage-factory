@@ -93,9 +93,9 @@ func TestLocalClient_ReviewUnderOldName_FoundByCoherenceReads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GithubCreatePendingReview: %v", err)
 	}
-	arts := listConversationArtifacts(t, stores, info.ConversationID)
+	arts := listConversationDeliverables(t, stores, info.ConversationID)
 	if len(arts) != 1 {
-		t.Fatalf("want 1 artifact, got %d: %+v", len(arts), arts)
+		t.Fatalf("want 1 deliverable, got %d: %+v", len(arts), arts)
 	}
 	wantTarget := domain.ReviewTarget("octo/new-name", 5)
 	if a := arts[0]; a.ID != handle || a.Target != wantTarget || a.DedupKey != domain.ReviewDedupKey(testPRNodeID(5), info.ConversationID) {
@@ -120,7 +120,7 @@ func TestLocalClient_ReviewUnderOldName_FoundByCoherenceReads(t *testing.T) {
 		t.Errorf("coherence targets = %+v, want the reviewing conversation %s", targets, info.ConversationID)
 	}
 
-	reviews, err := stores.Artifacts.ListPendingReviewsByEntitySystem(ctx, info.OrgID, pr.ID)
+	reviews, err := stores.Deliverables.ListPendingReviewsByEntitySystem(ctx, info.OrgID, pr.ID)
 	if err != nil {
 		t.Fatalf("ListPendingReviewsByEntitySystem: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestLocalClient_OldNameAfterRename_JoinsTheRow(t *testing.T) {
 			}
 
 			byKey := map[string]int{}
-			for _, a := range listConversationArtifacts(t, stores, info.ConversationID) {
+			for _, a := range listConversationDeliverables(t, stores, info.ConversationID) {
 				byKey[a.DedupKey]++
 			}
 			want := map[string]int{
@@ -171,7 +171,7 @@ func TestLocalClient_OldNameAfterRename_JoinsTheRow(t *testing.T) {
 				domain.ReviewDedupKey(testPRNodeID(5), info.ConversationID): 1,
 			}
 			if !maps.Equal(byKey, want) {
-				t.Errorf("artifact keys = %v, want %v", byKey, want)
+				t.Errorf("deliverable keys = %v, want %v", byKey, want)
 			}
 		})
 	}
@@ -207,20 +207,20 @@ func TestLocalClient_NewNameBeforeRename_DoesNotBlockIt(t *testing.T) {
 			t.Fatalf("GithubCreatePR via %s: %v", repo, err)
 		}
 	}
-	for _, a := range listConversationArtifacts(t, stores, info.ConversationID) {
+	for _, a := range listConversationDeliverables(t, stores, info.ConversationID) {
 		if !strings.HasPrefix(a.Target, "octo/old-name#") {
-			t.Errorf("artifact %s target = %q, want it under the registry's octo/old-name", a.DedupKey, a.Target)
+			t.Errorf("deliverable %s target = %q, want it under the registry's octo/old-name", a.DedupKey, a.Target)
 		}
 	}
 
 	renameRepo(t, stores)
-	arts := listConversationArtifacts(t, stores, info.ConversationID)
+	arts := listConversationDeliverables(t, stores, info.ConversationID)
 	if len(arts) != 2 {
 		t.Fatalf("want the review and the pull request, got %d: %+v", len(arts), arts)
 	}
 	for _, a := range arts {
 		if !strings.HasPrefix(a.Target, "octo/new-name#") {
-			t.Errorf("artifact %s target = %q after the rename, want octo/new-name", a.DedupKey, a.Target)
+			t.Errorf("deliverable %s target = %q after the rename, want octo/new-name", a.DedupKey, a.Target)
 		}
 	}
 }
@@ -234,31 +234,31 @@ func TestLocalClient_BranchPushedUnderOldName_RecordedUnderCurrent(t *testing.T)
 	registerRepo(t, stores, "octo", "old-name", renamedRepoID)
 	renameRepo(t, stores)
 
-	branch, ok := domain.NewBranchArtifact("octo/old-name", "refs/heads/feature/x", "abc123", true)
+	branch, ok := domain.NewBranchDeliverable("octo/old-name", "refs/heads/feature/x", "abc123", true)
 	if !ok {
-		t.Fatal("NewBranchArtifact refused the fixture branch")
+		t.Fatal("NewBranchDeliverable refused the fixture branch")
 	}
-	if _, err := client.UpsertArtifact(context.Background(), branch); err != nil {
-		t.Fatalf("UpsertArtifact: %v", err)
+	if _, err := client.UpsertDeliverable(context.Background(), branch); err != nil {
+		t.Fatalf("UpsertDeliverable: %v", err)
 	}
-	arts := listConversationArtifacts(t, stores, info.ConversationID)
+	arts := listConversationDeliverables(t, stores, info.ConversationID)
 	if len(arts) != 1 {
-		t.Fatalf("want 1 artifact, got %d: %+v", len(arts), arts)
+		t.Fatalf("want 1 deliverable, got %d: %+v", len(arts), arts)
 	}
 	a := arts[0]
 	row, err := stores.Repos.GetByRefSystem(context.Background(), info.OrgID, domain.RepoRefFromSlug(testScope("github"), "octo/new-name"))
 	if err != nil || row == nil {
 		t.Fatalf("resolve octo/new-name: %v, %v", row, err)
 	}
-	wantURL, _ := domain.BranchArtifactWebURL(gh.URL, "octo/new-name", "refs/heads/feature/x")
+	wantURL, _ := domain.BranchDeliverableWebURL(gh.URL, "octo/new-name", "refs/heads/feature/x")
 	if a.Target != "octo/new-name" || a.DedupKey != domain.BranchDedupKey(row.ID, "refs/heads/feature/x") || a.URL != wantURL {
-		t.Errorf("branch artifact = target %q key %q url %q, want it under octo/new-name, keyed on row %s, linked at %q", a.Target, a.DedupKey, a.URL, row.ID, wantURL)
+		t.Errorf("branch deliverable = target %q key %q url %q, want it under octo/new-name, keyed on row %s, linked at %q", a.Target, a.DedupKey, a.URL, row.ID, wantURL)
 	}
 }
 
 // TestLocalClient_BranchWithNoRegistryRow_RecordsOnlyThePush pins that a branch
-// pushed to a repository no registry row answers for is refused as an
-// artifact, since its key is the row's id, and that its push still leaves its
+// pushed to a repository no registry row answers for is refused as a
+// deliverable, since its key is the row's id, and that its push still leaves its
 // ledger row.
 func TestLocalClient_BranchWithNoRegistryRow_RecordsOnlyThePush(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -267,15 +267,15 @@ func TestLocalClient_BranchWithNoRegistryRow_RecordsOnlyThePush(t *testing.T) {
 	t.Cleanup(srv.Close)
 	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
 
-	branch, ok := domain.NewBranchArtifact("octo/unregistered", "refs/heads/feature/x", "abc123", true)
+	branch, ok := domain.NewBranchDeliverable("octo/unregistered", "refs/heads/feature/x", "abc123", true)
 	if !ok {
-		t.Fatal("NewBranchArtifact refused the fixture branch")
+		t.Fatal("NewBranchDeliverable refused the fixture branch")
 	}
-	if _, err := client.UpsertArtifact(context.Background(), branch); !errors.Is(err, errNoRegistryRow) {
-		t.Fatalf("UpsertArtifact err = %v, want errNoRegistryRow", err)
+	if _, err := client.UpsertDeliverable(context.Background(), branch); !errors.Is(err, errNoRegistryRow) {
+		t.Fatalf("UpsertDeliverable err = %v, want errNoRegistryRow", err)
 	}
-	if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 0 {
-		t.Errorf("artifacts = %+v, want none for a branch with no registry row", arts)
+	if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 0 {
+		t.Errorf("deliverables = %+v, want none for a branch with no registry row", arts)
 	}
 	acts, _, err := stores.ExternalActions.ListByOrgSystem(context.Background(), info.OrgID, domain.ExternalActionListOpts{})
 	if err != nil {
@@ -306,7 +306,7 @@ func TestLocalClient_RegistryHeldName_ResolvedFromTheRegistry(t *testing.T) {
 	if _, err := client.GithubCreatePendingReview(context.Background(), "Octo", "Repo", 7, "head7", nil); err != nil {
 		t.Fatalf("GithubCreatePendingReview: %v", err)
 	}
-	arts := listConversationArtifacts(t, stores, info.ConversationID)
+	arts := listConversationDeliverables(t, stores, info.ConversationID)
 	if len(arts) != 1 || arts[0].Target != "octo/repo#7" {
 		t.Errorf("review draft = %+v, want it under the registry's octo/repo", arts)
 	}

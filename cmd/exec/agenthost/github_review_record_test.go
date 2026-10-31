@@ -83,11 +83,11 @@ func answerPRRead(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // TestLocalClient_GithubCreatePendingReview_RecordsLocalDraft pins that
-// start-review lands one conversation-scoped `review` artifact with ZERO GitHub writes:
+// start-review lands one conversation-scoped `review` deliverable with ZERO GitHub writes:
 // state=pending (no ready sentinel), empty ExternalID (no GitHub review until
 // approval), the head SHA pinned into details, deduped on
 // github:review:<the node id GitHub answers for the PR>:<conversation_id> —
-// across both write paths. The returned handle is the artifact id.
+// across both write paths. The returned handle is the deliverable id.
 func TestLocalClient_GithubCreatePendingReview_RecordsLocalDraft(t *testing.T) {
 	for _, eventTriggered := range []bool{true, false} {
 		name := "manual"
@@ -116,22 +116,22 @@ func TestLocalClient_GithubCreatePendingReview_RecordsLocalDraft(t *testing.T) {
 				t.Fatal("expected a non-empty local review handle")
 			}
 
-			arts := listConversationArtifacts(t, stores, info.ConversationID)
+			arts := listConversationDeliverables(t, stores, info.ConversationID)
 			if len(arts) != 1 {
-				t.Fatalf("want 1 artifact, got %d: %+v", len(arts), arts)
+				t.Fatalf("want 1 deliverable, got %d: %+v", len(arts), arts)
 			}
 			a := arts[0]
 			if a.ID != handle {
-				t.Errorf("handle = %q, want the artifact id %q", handle, a.ID)
+				t.Errorf("handle = %q, want the deliverable id %q", handle, a.ID)
 			}
 			wantDedup := domain.ReviewDedupKey(testPRNodeID(7), info.ConversationID)
-			if a.Kind != domain.ArtifactKindReview || a.State != domain.ArtifactStateReviewPending ||
+			if a.Kind != domain.DeliverableKindReview || a.State != domain.DeliverableStateReviewPending ||
 				a.Target != "octo/repo#7" || a.ExternalID != "" || a.DedupKey != wantDedup {
-				t.Errorf("review artifact mismatch: %+v (want dedup %q)", a, wantDedup)
+				t.Errorf("review deliverable mismatch: %+v (want dedup %q)", a, wantDedup)
 			}
-			d, derr := domain.ParseReviewArtifactDetails(a.DetailsJSON)
+			d, derr := domain.ParseReviewDeliverableDetails(a.DetailsJSON)
 			if derr != nil {
-				t.Fatalf("ParseReviewArtifactDetails: %v", derr)
+				t.Fatalf("ParseReviewDeliverableDetails: %v", derr)
 			}
 			if d.HeadSHA != "headsha7" || d.Number != 7 {
 				t.Errorf("details mismatch: %+v", d)
@@ -167,8 +167,8 @@ func TestLocalClient_GithubAddPendingReviewComment_StagesLocally(t *testing.T) {
 		t.Fatal("expected a non-empty staged comment id")
 	}
 
-	arts := listConversationArtifacts(t, stores, info.ConversationID)
-	d, _ := domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
+	arts := listConversationDeliverables(t, stores, info.ConversationID)
+	d, _ := domain.ParseReviewDeliverableDetails(arts[0].DetailsJSON)
 	if len(d.StagedComments) != 1 || d.StagedComments[0].ID != cid {
 		t.Fatalf("comment not staged: %+v", d.StagedComments)
 	}
@@ -185,8 +185,8 @@ func TestLocalClient_GithubAddPendingReviewComment_StagesLocally(t *testing.T) {
 	if _, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", handle, "a.go", "bad", 99, nil, anchor); err == nil {
 		t.Error("expected an out-of-diff line to be rejected")
 	}
-	arts = listConversationArtifacts(t, stores, info.ConversationID)
-	d, _ = domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
+	arts = listConversationDeliverables(t, stores, info.ConversationID)
+	d, _ = domain.ParseReviewDeliverableDetails(arts[0].DetailsJSON)
 	if len(d.StagedComments) != 1 {
 		t.Errorf("a rejected comment must not be staged, got %d", len(d.StagedComments))
 	}
@@ -213,8 +213,8 @@ func TestLocalClient_GithubAddPendingReviewComment_FallbackLiveHead(t *testing.T
 		t.Fatal("expected a non-empty staged comment id")
 	}
 
-	arts := listConversationArtifacts(t, stores, info.ConversationID)
-	d, _ := domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
+	arts := listConversationDeliverables(t, stores, info.ConversationID)
+	d, _ := domain.ParseReviewDeliverableDetails(arts[0].DetailsJSON)
 	if len(d.StagedComments) != 1 || d.StagedComments[0].CommitSHA != "commit_v1" {
 		t.Errorf("fallback must anchor to the live head commit_v1, got %+v", d.StagedComments)
 	}
@@ -222,7 +222,7 @@ func TestLocalClient_GithubAddPendingReviewComment_FallbackLiveHead(t *testing.T
 
 // TestLocalClient_FinalizeReviewDraft pins finalize-review's host behavior: no
 // GitHub call, the agent's draft (body + event + the locally staged comments)
-// snapshotted into the artifact, the ready sentinel set, and the TFAC-358
+// snapshotted into the deliverable, the ready sentinel set, and the TFAC-358
 // anti-double-submit guard.
 func TestLocalClient_FinalizeReviewDraft(t *testing.T) {
 	head := "commit_v1"
@@ -241,14 +241,14 @@ func TestLocalClient_FinalizeReviewDraft(t *testing.T) {
 		t.Fatalf("FinalizeReviewDraft: %v", err)
 	}
 
-	arts := listConversationArtifacts(t, stores, info.ConversationID)
+	arts := listConversationDeliverables(t, stores, info.ConversationID)
 	if len(arts) != 1 {
-		t.Fatalf("want 1 artifact, got %d", len(arts))
+		t.Fatalf("want 1 deliverable, got %d", len(arts))
 	}
-	if arts[0].State != domain.ArtifactStateReviewPending {
-		t.Errorf("artifact must stay pending until approval, got %q", arts[0].State)
+	if arts[0].State != domain.DeliverableStateReviewPending {
+		t.Errorf("deliverable must stay pending until approval, got %q", arts[0].State)
 	}
-	d, _ := domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
+	d, _ := domain.ParseReviewDeliverableDetails(arts[0].DetailsJSON)
 	if d.ReviewEvent != "COMMENT" || d.ReviewBody != "## Review body" {
 		t.Errorf("ready sentinel / staged body not set: %+v", d)
 	}
@@ -295,10 +295,10 @@ func TestLocalClient_MultipleReviewDrafts_ResolveByHandle(t *testing.T) {
 		t.Fatalf("finalize review 8: %v", err)
 	}
 
-	arts := listConversationArtifacts(t, stores, info.ConversationID)
-	byID := map[string]domain.ReviewArtifactDetails{}
+	arts := listConversationDeliverables(t, stores, info.ConversationID)
+	byID := map[string]domain.ReviewDeliverableDetails{}
 	for _, a := range arts {
-		d, _ := domain.ParseReviewArtifactDetails(a.DetailsJSON)
+		d, _ := domain.ParseReviewDeliverableDetails(a.DetailsJSON)
 		byID[a.ID] = d
 	}
 	// PR 8's draft got the comment + the ready sentinel.
@@ -352,14 +352,14 @@ func TestLocalClient_ResetReviewDraft(t *testing.T) {
 		t.Errorf("reset commit_sha = %q, want the preserved headsha7", gotSHA)
 	}
 
-	arts := listConversationArtifacts(t, stores, info.ConversationID)
+	arts := listConversationDeliverables(t, stores, info.ConversationID)
 	if len(arts) != 1 {
 		t.Fatalf("reset must keep the one draft row, got %d", len(arts))
 	}
-	if arts[0].State != domain.ArtifactStateReviewPending {
+	if arts[0].State != domain.DeliverableStateReviewPending {
 		t.Errorf("draft must stay pending after reset, got %q", arts[0].State)
 	}
-	d, _ := domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
+	d, _ := domain.ParseReviewDeliverableDetails(arts[0].DetailsJSON)
 	if len(d.StagedComments) != 0 {
 		t.Errorf("reset must clear staged comments, got %+v", d.StagedComments)
 	}
@@ -420,7 +420,7 @@ func TestLocalClient_StagedReviewComment_UpdateDelete(t *testing.T) {
 	if err := client.UpdateStagedReviewComment(context.Background(), cid1, "first edited"); err != nil {
 		t.Fatalf("UpdateStagedReviewComment: %v", err)
 	}
-	d, _ := domain.ParseReviewArtifactDetails(listConversationArtifacts(t, stores, info.ConversationID)[0].DetailsJSON)
+	d, _ := domain.ParseReviewDeliverableDetails(listConversationDeliverables(t, stores, info.ConversationID)[0].DetailsJSON)
 	if len(d.StagedComments) != 2 {
 		t.Fatalf("update must not change the comment count, got %d", len(d.StagedComments))
 	}
@@ -435,7 +435,7 @@ func TestLocalClient_StagedReviewComment_UpdateDelete(t *testing.T) {
 	if err := client.DeleteStagedReviewComment(context.Background(), cid2); err != nil {
 		t.Fatalf("DeleteStagedReviewComment: %v", err)
 	}
-	d, _ = domain.ParseReviewArtifactDetails(listConversationArtifacts(t, stores, info.ConversationID)[0].DetailsJSON)
+	d, _ = domain.ParseReviewDeliverableDetails(listConversationDeliverables(t, stores, info.ConversationID)[0].DetailsJSON)
 	if len(d.StagedComments) != 1 || d.StagedComments[0].ID != cid1 {
 		t.Fatalf("delete must leave only comment 1, got %+v", d.StagedComments)
 	}
@@ -480,7 +480,7 @@ func TestLocalClient_StagedReviewComment_RejectedAfterFinalize(t *testing.T) {
 	}
 
 	// The staged comment + frozen proposed snapshot are untouched.
-	d, _ := domain.ParseReviewArtifactDetails(listConversationArtifacts(t, stores, info.ConversationID)[0].DetailsJSON)
+	d, _ := domain.ParseReviewDeliverableDetails(listConversationDeliverables(t, stores, info.ConversationID)[0].DetailsJSON)
 	if len(d.StagedComments) != 1 || byID(d.StagedComments, cid).Body != "first" {
 		t.Errorf("a rejected mutation must leave the staged comment intact, got %+v", d.StagedComments)
 	}
@@ -490,13 +490,13 @@ func TestLocalClient_StagedReviewComment_RejectedAfterFinalize(t *testing.T) {
 }
 
 // byID returns the staged comment with the given id, or a zero value.
-func byID(comments []domain.ReviewArtifactComment, id string) domain.ReviewArtifactComment {
+func byID(comments []domain.ReviewDeliverableComment, id string) domain.ReviewDeliverableComment {
 	for _, c := range comments {
 		if c.ID == id {
 			return c
 		}
 	}
-	return domain.ReviewArtifactComment{}
+	return domain.ReviewDeliverableComment{}
 }
 
 // TestLocalClient_GithubAddPendingReviewComment_DedupsExactMatch pins that a
@@ -530,8 +530,8 @@ func TestLocalClient_GithubAddPendingReviewComment_DedupsExactMatch(t *testing.T
 		t.Errorf("duplicate add returned id %q, want the existing id %q", cid2, cid1)
 	}
 
-	arts := listConversationArtifacts(t, stores, info.ConversationID)
-	d, _ := domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
+	arts := listConversationDeliverables(t, stores, info.ConversationID)
+	d, _ := domain.ParseReviewDeliverableDetails(arts[0].DetailsJSON)
 	if len(d.StagedComments) != 1 {
 		t.Fatalf("exact duplicate must not append a second staged comment, got %d: %+v", len(d.StagedComments), d.StagedComments)
 	}
@@ -547,8 +547,8 @@ func TestLocalClient_GithubAddPendingReviewComment_DedupsExactMatch(t *testing.T
 	if cid3 == cid1 {
 		t.Errorf("a different body on the same line must NOT dedup, got the same id %q", cid3)
 	}
-	arts = listConversationArtifacts(t, stores, info.ConversationID)
-	d, _ = domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
+	arts = listConversationDeliverables(t, stores, info.ConversationID)
+	d, _ = domain.ParseReviewDeliverableDetails(arts[0].DetailsJSON)
 	if len(d.StagedComments) != 2 {
 		t.Fatalf("a same-line different-body comment must stage separately, got %d: %+v", len(d.StagedComments), d.StagedComments)
 	}
@@ -568,8 +568,8 @@ func TestLocalClient_GithubAddPendingReviewComment_DedupsExactMatch(t *testing.T
 	if cid5 != cid4 {
 		t.Errorf("a multi-line duplicate (start_line=2, line=3) returned id %q, want the existing id %q", cid5, cid4)
 	}
-	arts = listConversationArtifacts(t, stores, info.ConversationID)
-	d, _ = domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
+	arts = listConversationDeliverables(t, stores, info.ConversationID)
+	d, _ = domain.ParseReviewDeliverableDetails(arts[0].DetailsJSON)
 	if len(d.StagedComments) != 3 {
 		t.Fatalf("a multi-line exact duplicate must not append a second staged comment, got %d: %+v", len(d.StagedComments), d.StagedComments)
 	}
@@ -622,8 +622,8 @@ func TestLocalClient_GithubAddPendingReviewComment_DedupRefreshesStaleAnchor(t *
 		t.Errorf("dedup across a changed anchor returned id %q, want the existing id %q", cid2, cid1)
 	}
 
-	arts := listConversationArtifacts(t, stores, info.ConversationID)
-	d, _ := domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
+	arts := listConversationDeliverables(t, stores, info.ConversationID)
+	d, _ := domain.ParseReviewDeliverableDetails(arts[0].DetailsJSON)
 	if len(d.StagedComments) != 1 {
 		t.Fatalf("dedup across a changed anchor must not append a second staged comment, got %d: %+v", len(d.StagedComments), d.StagedComments)
 	}
@@ -655,8 +655,8 @@ func TestLocalClient_PerCommentHeadSHA_CapturedAcrossCheckoutAdvance(t *testing.
 		t.Fatalf("add comment 2: %v", err)
 	}
 
-	arts := listConversationArtifacts(t, stores, info.ConversationID)
-	d, _ := domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
+	arts := listConversationDeliverables(t, stores, info.ConversationID)
+	d, _ := domain.ParseReviewDeliverableDetails(arts[0].DetailsJSON)
 	if len(d.StagedComments) != 2 {
 		t.Fatalf("want 2 staged comments, got %d", len(d.StagedComments))
 	}
@@ -714,7 +714,7 @@ func TestReviewDraftTarget_ReturnsRecordedPR(t *testing.T) {
 // read by the registry row the draft's entity references, not parsed from the
 // draft's target. A rename that rewrites no key is followed, in process and
 // relayed; a retired row is reported and refused; an id naming none of the
-// conversation's artifacts resolves nothing.
+// conversation's deliverables resolves nothing.
 func TestReviewDraftTarget_FollowsTheRegistryRow(t *testing.T) {
 	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !answerPRRead(w, r) {
@@ -729,18 +729,18 @@ func TestReviewDraftTarget_FollowsTheRegistryRow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GithubCreatePendingReview: %v", err)
 	}
-	if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 1 || arts[0].EntityID == "" {
+	if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 1 || arts[0].EntityID == "" {
 		t.Fatalf("review draft = %+v, want one linked to its pull request's entity", arts)
 	}
 	dbseed.RenameRepositoryOnly(t, conn, repoID, "acme", "renamed")
 
 	relayed := newRelayRuntime(directDispatchConn{srv: NewRelayServer(stores, info, nil)}, info, nil)
-	pr, err := relayed.ArtifactPullRequest(ctx, handle)
+	pr, err := relayed.DeliverablePullRequest(ctx, handle)
 	if err != nil || pr.RepositoryID != repoID || pr.Slug() != "acme/renamed" || pr.Number != 7 || pr.Retired {
-		t.Errorf("relayed ArtifactPullRequest = (%+v, %v), want acme/renamed#7 on row %s", pr, err, repoID)
+		t.Errorf("relayed DeliverablePullRequest = (%+v, %v), want acme/renamed#7 on row %s", pr, err, repoID)
 	}
-	if _, err := relayed.ArtifactPullRequest(ctx, "not-an-artifact"); err == nil {
-		t.Error("an id naming none of the conversation's artifacts resolved a pull request")
+	if _, err := relayed.DeliverablePullRequest(ctx, "not-an-deliverable"); err == nil {
+		t.Error("an id naming none of the conversation's deliverables resolved a pull request")
 	}
 	if owner, repo, number, err := local.ReviewDraftTarget(ctx, handle); err != nil || owner != "acme" || repo != "renamed" || number != 7 {
 		t.Errorf("ReviewDraftTarget = (%s/%s#%d, %v), want acme/renamed#7", owner, repo, number, err)
@@ -749,8 +749,8 @@ func TestReviewDraftTarget_FollowsTheRegistryRow(t *testing.T) {
 	if _, err := conn.Exec(`UPDATE repositories SET retired_at = CURRENT_TIMESTAMP WHERE id = ?`, repoID); err != nil {
 		t.Fatalf("retire repository: %v", err)
 	}
-	if pr, err := relayed.ArtifactPullRequest(ctx, handle); err != nil || !pr.Retired {
-		t.Errorf("relayed ArtifactPullRequest after retire = (%+v, %v), want it reported retired", pr, err)
+	if pr, err := relayed.DeliverablePullRequest(ctx, handle); err != nil || !pr.Retired {
+		t.Errorf("relayed DeliverablePullRequest after retire = (%+v, %v), want it reported retired", pr, err)
 	}
 	if _, _, _, err := local.ReviewDraftTarget(ctx, handle); err == nil {
 		t.Error("ReviewDraftTarget answered for a draft whose repository's row is retired")
@@ -787,8 +787,8 @@ func TestLocalClient_GithubAddPendingReviewComment_RefusesOtherRepo(t *testing.T
 	if err == nil || !strings.Contains(err.Error(), "is for octo/repo#7") {
 		t.Fatalf("want a refusal naming the review's PR, got %v", err)
 	}
-	arts := listConversationArtifacts(t, stores, info.ConversationID)
-	d, _ := domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
+	arts := listConversationDeliverables(t, stores, info.ConversationID)
+	d, _ := domain.ParseReviewDeliverableDetails(arts[0].DetailsJSON)
 	if len(d.StagedComments) != 0 {
 		t.Errorf("a refused comment must not be staged, got %+v", d.StagedComments)
 	}
@@ -811,8 +811,8 @@ func TestLocalClient_GithubAddPendingReviewComment_AcceptsAnotherSpelling(t *tes
 	if _, err := client.GithubAddPendingReviewComment(context.Background(), "Octo", "old-repo", handle, "a.go", "nit", 3, nil, "worktree_head"); err != nil {
 		t.Fatalf("GithubAddPendingReviewComment under another name of the repository: %v", err)
 	}
-	arts := listConversationArtifacts(t, stores, info.ConversationID)
-	d, _ := domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
+	arts := listConversationDeliverables(t, stores, info.ConversationID)
+	d, _ := domain.ParseReviewDeliverableDetails(arts[0].DetailsJSON)
 	if len(d.StagedComments) != 1 {
 		t.Errorf("staged comments = %+v, want the one comment", d.StagedComments)
 	}

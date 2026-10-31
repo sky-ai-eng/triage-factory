@@ -160,7 +160,7 @@ func (c *LocalClient) LinearGetIssue(ctx context.Context, issue string) (_ *line
 	}
 	// The addressed issue is the touched entity. The identifier, UUID and team
 	// come off the response, since the argument may have been either key.
-	c.rt.RecordReadTouch(ctx, domain.ArtifactProviderLinear, got.Identifier, got.ID, domain.EntityContainer{LinearTeamID: got.Team.ID}, got.URL)
+	c.rt.RecordReadTouch(ctx, domain.ProviderLinear, got.Identifier, got.ID, domain.EntityContainer{LinearTeamID: got.Team.ID}, got.URL)
 	return got, nil
 }
 
@@ -198,8 +198,8 @@ func (c *LocalClient) LinearTransition(ctx context.Context, issue, state string)
 	if err := client.TransitionIssue(ctx, got.ID, target.ID); err != nil {
 		return linearclient.WorkflowState{}, err
 	}
-	c.recordLinearIssue(ctx, got, domain.ActionIssueTransitioned, domain.ArtifactStateIssueUpdated,
-		got.State.Name, target.Name, artifactDetailsJSON(map[string]any{"state": target.Name}))
+	c.recordLinearIssue(ctx, got, domain.ActionIssueTransitioned, domain.DeliverableStateIssueUpdated,
+		got.State.Name, target.Name, deliverableDetailsJSON(map[string]any{"state": target.Name}))
 	return target, nil
 }
 
@@ -247,8 +247,8 @@ func (c *LocalClient) LinearAssign(ctx context.Context, issue, userID string) (_
 	if err := client.AssignIssue(ctx, got.ID, user.ID); err != nil {
 		return linearclient.User{}, err
 	}
-	c.recordLinearIssue(ctx, got, domain.ActionIssueAssigned, domain.ArtifactStateIssueUpdated, "", "",
-		artifactDetailsJSON(map[string]any{"assignee": map[string]any{"id": user.ID, "name": user.Name}}))
+	c.recordLinearIssue(ctx, got, domain.ActionIssueAssigned, domain.DeliverableStateIssueUpdated, "", "",
+		deliverableDetailsJSON(map[string]any{"assignee": map[string]any{"id": user.ID, "name": user.Name}}))
 	return user, nil
 }
 
@@ -265,8 +265,8 @@ func (c *LocalClient) LinearUnassign(ctx context.Context, issue string) (err err
 	if err := client.UnassignIssue(ctx, got.ID); err != nil {
 		return err
 	}
-	c.recordLinearIssue(ctx, got, domain.ActionIssueUpdated, domain.ArtifactStateIssueUpdated, "", "",
-		artifactDetailsJSON(map[string]any{"assignee": nil}))
+	c.recordLinearIssue(ctx, got, domain.ActionIssueUpdated, domain.DeliverableStateIssueUpdated, "", "",
+		deliverableDetailsJSON(map[string]any{"assignee": nil}))
 	return nil
 }
 
@@ -309,7 +309,7 @@ func (c *LocalClient) LinearCreateIssue(ctx context.Context, req LinearCreateIss
 	if err != nil {
 		return nil, err
 	}
-	c.recordLinearIssue(ctx, created, domain.ActionIssueCreated, domain.ArtifactStateIssueCreated, "", "", "")
+	c.recordLinearIssue(ctx, created, domain.ActionIssueCreated, domain.DeliverableStateIssueCreated, "", "", "")
 	return created, nil
 }
 
@@ -354,8 +354,8 @@ func (c *LocalClient) LinearUpdateIssue(ctx context.Context, issue string, edit 
 	if err := client.UpdateIssue(ctx, got.ID, fields); err != nil {
 		return err
 	}
-	c.recordLinearIssue(ctx, got, domain.ActionIssueUpdated, domain.ArtifactStateIssueUpdated, "", "",
-		artifactDetailsJSON(map[string]any{"fields": linearEditedFieldNames(edit)}))
+	c.recordLinearIssue(ctx, got, domain.ActionIssueUpdated, domain.DeliverableStateIssueUpdated, "", "",
+		deliverableDetailsJSON(map[string]any{"fields": linearEditedFieldNames(edit)}))
 	return nil
 }
 
@@ -379,8 +379,8 @@ func (c *LocalClient) LinearSetParent(ctx context.Context, issue, parent string)
 	if err := client.SetParent(ctx, got.ID, parentIssue.ID); err != nil {
 		return err
 	}
-	c.recordLinearIssue(ctx, got, domain.ActionIssueUpdated, domain.ArtifactStateIssueUpdated, "", "",
-		artifactDetailsJSON(map[string]any{"parent": parentIssue.Identifier}))
+	c.recordLinearIssue(ctx, got, domain.ActionIssueUpdated, domain.DeliverableStateIssueUpdated, "", "",
+		deliverableDetailsJSON(map[string]any{"parent": parentIssue.Identifier}))
 	return nil
 }
 
@@ -400,8 +400,8 @@ func (c *LocalClient) LinearSetPriority(ctx context.Context, issue string, prior
 	if err := client.SetPriority(ctx, got.ID, priority); err != nil {
 		return err
 	}
-	c.recordLinearIssue(ctx, got, domain.ActionIssueUpdated, domain.ArtifactStateIssueUpdated, "", "",
-		artifactDetailsJSON(map[string]any{"priority": priority}))
+	c.recordLinearIssue(ctx, got, domain.ActionIssueUpdated, domain.DeliverableStateIssueUpdated, "", "",
+		deliverableDetailsJSON(map[string]any{"priority": priority}))
 	return nil
 }
 
@@ -617,7 +617,7 @@ func validateLinearPriority(p int) error {
 	return nil
 }
 
-// linearEditedFieldNames lists which fields an edit touched, for the artifact's
+// linearEditedFieldNames lists which fields an edit touched, for the deliverable's
 // details_json — the names only, in a stable order.
 func linearEditedFieldNames(e LinearIssueEdit) []string {
 	names := []string{}
@@ -639,9 +639,9 @@ func linearEditedFieldNames(e LinearIssueEdit) []string {
 	return names
 }
 
-// --- linear artifact recording ---
+// --- linear deliverable recording ---
 //
-// Every Linear write an agent makes lands one `artifacts` row and its
+// Every Linear write an agent makes lands one `deliverables` row and its
 // external-action audit row in the same write, under the org's Linear service
 // identity, exactly as the Jira writes do: issue create and the in-place
 // edits collapse onto the issue's one row, and each comment is a row of its
@@ -653,7 +653,7 @@ func linearEditedFieldNames(e LinearIssueEdit) []string {
 // UUID the rows are keyed on and the identifier they display are already in
 // hand.
 
-// recordLinearIssue upserts the single `issue` artifact for issue, keyed on its
+// recordLinearIssue upserts the single `issue` deliverable for issue, keyed on its
 // UUID (linear:issue:<uuid>) — never its identifier, which changes when the
 // issue moves team or its team's key is renamed. target is the identifier and
 // url the issue's link, both of which an entity rename moves. fromState /
@@ -662,51 +662,51 @@ func (c *LocalClient) recordLinearIssue(ctx context.Context, issue *linearclient
 	if issue == nil || issue.ID == "" {
 		return
 	}
-	a := domain.Artifact{
-		Kind:        domain.ArtifactKindIssue,
+	a := domain.Deliverable{
+		Kind:        domain.DeliverableKindIssue,
 		Target:      issue.Identifier,
 		ExternalID:  issue.ID,
 		URL:         issue.URL,
 		State:       state,
-		DedupKey:    domain.ArtifactDedupKey(domain.ArtifactProviderLinear, domain.ArtifactKindIssue, issue.ID, ""),
+		DedupKey:    domain.ObjectKey(domain.ProviderLinear, domain.DeliverableKindIssue, issue.ID, ""),
 		DetailsJSON: detailsJSON,
 	}
-	c.upsertLinearArtifact(ctx, &a, linearAction(a, action, fromState, toState), issue.Team.ID)
+	c.upsertLinearDeliverable(ctx, &a, linearAction(a, action, fromState, toState), issue.Team.ID)
 }
 
-// recordLinearComment upserts a `comment` artifact keyed on the issue's UUID
+// recordLinearComment upserts a `comment` deliverable keyed on the issue's UUID
 // with the comment's id as its anchor (linear:comment:<issue uuid>:<comment
 // id>). Its url is the issue's: the comment is reached from there.
 func (c *LocalClient) recordLinearComment(ctx context.Context, issue *linearclient.Issue, commentID, body string) {
 	if issue == nil || issue.ID == "" || commentID == "" {
 		return
 	}
-	a := domain.Artifact{
-		Kind:        domain.ArtifactKindComment,
+	a := domain.Deliverable{
+		Kind:        domain.DeliverableKindComment,
 		Target:      issue.Identifier,
 		ExternalID:  commentID,
 		URL:         issue.URL,
-		State:       domain.ArtifactStateCommentPosted,
-		DedupKey:    domain.ArtifactDedupKey(domain.ArtifactProviderLinear, domain.ArtifactKindComment, issue.ID, commentID),
-		DetailsJSON: artifactDetailsJSON(map[string]any{"body": artifactBodySnippet(body)}),
+		State:       domain.DeliverableStateCommentPosted,
+		DedupKey:    domain.ObjectKey(domain.ProviderLinear, domain.DeliverableKindComment, issue.ID, commentID),
+		DetailsJSON: deliverableDetailsJSON(map[string]any{"body": deliverableBodySnippet(body)}),
 	}
-	c.upsertLinearArtifact(ctx, &a, linearAction(a, domain.ActionIssueCommentPosted, "", ""), issue.Team.ID)
+	c.upsertLinearDeliverable(ctx, &a, linearAction(a, domain.ActionIssueCommentPosted, "", ""), issue.Team.ID)
 }
 
-// upsertLinearArtifact stamps the provider onto a and writes it with its
+// upsertLinearDeliverable stamps the provider onto a and writes it with its
 // external-action row through the shared recording funnel (RecordExternalWrite),
 // which logs and swallows a failure. linearTeamID is the team of the issue the
 // write touched, which the funnel's touch creates the issue's entity with.
-func (c *LocalClient) upsertLinearArtifact(ctx context.Context, a *domain.Artifact, act *domain.ExternalAction, linearTeamID string) {
-	a.Provider = domain.ArtifactProviderLinear
+func (c *LocalClient) upsertLinearDeliverable(ctx context.Context, a *domain.Deliverable, act *domain.ExternalAction, linearTeamID string) {
+	a.Provider = domain.ProviderLinear
 	c.rt.Record(ctx, a, act, domain.EntityContainer{LinearTeamID: linearTeamID})
 }
 
 // linearAction builds the external-action row for a Linear write, under the
 // org's Linear service identity.
-func linearAction(a domain.Artifact, action, from, to string) *domain.ExternalAction {
+func linearAction(a domain.Deliverable, action, from, to string) *domain.ExternalAction {
 	return &domain.ExternalAction{
-		Provider:   domain.ArtifactProviderLinear,
+		Provider:   domain.ProviderLinear,
 		Action:     action,
 		Target:     a.Target,
 		ExternalID: a.ExternalID,

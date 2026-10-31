@@ -54,20 +54,20 @@ func (e *DivergentAnchorsError) Error() string {
 // rule read at every door that can produce such a draft: the agent's finalize,
 // the human's approve, and a Refresh that would drop the last inline comment of
 // a body-less review.
-func Empty(event, body string, comments []domain.ReviewArtifactComment) bool {
+func Empty(event, body string, comments []domain.ReviewDeliverableComment) bool {
 	return event != "APPROVE" && strings.TrimSpace(body) == "" && len(comments) == 0
 }
 
 // SubmitInput is the staged draft to publish plus the two pieces of context the
-// artifact row can't supply: the agentmeta footer to append to the body, and
+// deliverable row can't supply: the agentmeta footer to append to the body, and
 // the org's GitHub web host for the submitted review's deep link.
 type SubmitInput struct {
 	Owner  string
 	Repo   string
 	Number int
-	// Details is the review draft as stored on the artifact — its ReviewBody,
+	// Details is the review draft as stored on the deliverable — its ReviewBody,
 	// ReviewEvent (the ready sentinel), and StagedComments are what get posted.
-	Details domain.ReviewArtifactDetails
+	Details domain.ReviewDeliverableDetails
 	// Footer is appended verbatim to the review body (the agentmeta run
 	// attribution). Empty appends nothing.
 	Footer string
@@ -111,7 +111,7 @@ type SubmitResult struct {
 // one answer that cannot be.
 //
 // Callers keep their own persistence: this makes the GitHub write and reports
-// what happened, and never touches the artifact row (the two callers claim,
+// what happened, and never touches the deliverable row (the two callers claim,
 // stamp, and audit differently — one is a human approval, the other is the
 // drafting run's own action).
 func SubmitStaged(ctx context.Context, gh Submitter, in SubmitInput) (SubmitResult, error) {
@@ -147,7 +147,7 @@ func SubmitStaged(ctx context.Context, gh Submitter, in SubmitInput) (SubmitResu
 
 	// SubmitReview returns the event it submitted (it doesn't parse an
 	// authoritative event back from GitHub's response) — pass it back so the
-	// persisted artifact and the caller's response both reflect the same value
+	// persisted deliverable and the caller's response both reflect the same value
 	// that was requested.
 	reviewID, submittedEvent, err := gh.SubmitReview(ctx, in.Owner, in.Repo, in.Number,
 		commitID, in.Details.ReviewEvent, in.Details.ReviewBody+in.Footer, comments)

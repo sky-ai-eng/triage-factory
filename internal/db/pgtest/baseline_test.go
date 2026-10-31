@@ -29,7 +29,7 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 		"linear_team_rules",
 		"team_github_groups", "team_github_repos",
 		"prompts", "events_catalog", "entities", "entity_links", "events",
-		"event_handlers", "tasks", "task_events", "conversations", "claims", "artifacts",
+		"event_handlers", "tasks", "task_events", "conversations", "claims", "deliverables",
 		"messages", "claim_credentials", "conversation_memory", "conversation_memory_entities",
 		// conversation_memory_attempts: the ledger that separates "no memory
 		// was owed" from "one was owed and generation failed".
@@ -1439,9 +1439,9 @@ func TestFK_CrossOrgRejected(t *testing.T) {
 // conversation_worktrees, pending_firings) must NOT be visible to org members
 // who can't see the parent task/conversation. Earlier policies gated only on
 // org_id, leaking metadata across users in the same org. EXISTS-on-parent
-// inherits the parent table's RLS. (artifacts is excluded: it scopes
+// inherits the parent table's RLS. (deliverables is excluded: it scopes
 // directly on team_id like conversations, not via EXISTS-on-conversation,
-// so it has its own team-visibility coverage in artifacts_test.go.)
+// so it has its own team-visibility coverage in deliverables_test.go.)
 func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
@@ -3245,7 +3245,7 @@ func TestTeamGitHubRepos_CrossTenantRowIsUnrepresentable(t *testing.T) {
 }
 
 // TestBaseline_HostAndScopeRefuseEmpty pins the CHECKs that keep a repository's
-// or a commit signer's host and an artifact's or audit row's scope from being
+// or a commit signer's host and a deliverable's or audit row's scope from being
 // the empty string. Every
 // read addresses these rows by a host or scope, and none asks for "", so an
 // empty one is a row nothing can find. The stores refuse it before writing;
@@ -3268,9 +3268,9 @@ func TestBaseline_HostAndScopeRefuseEmpty(t *testing.T) {
 			args:       func(v string) []any { return []any{orgID, "api-" + v, v} },
 		},
 		{
-			name:       "artifacts.scope",
-			constraint: "artifacts_scope_check",
-			insert: `INSERT INTO artifacts (org_id, team_id, provider, kind, scope, target, state, dedup_key)
+			name:       "deliverables.scope",
+			constraint: "deliverables_scope_check",
+			insert: `INSERT INTO deliverables (org_id, team_id, provider, kind, scope, target, state, dedup_key)
 			         VALUES ($1, $2, 'github', 'pr', $3, 'acme/api#1', 'open', $4)`,
 			args: func(v string) []any { return []any{orgID, teamID, v, "pr:" + v} },
 		},

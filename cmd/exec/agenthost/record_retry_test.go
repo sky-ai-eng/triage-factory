@@ -114,18 +114,18 @@ func (s flakyActions) write(do func() error) error {
 	return err
 }
 
-// flakyArtifacts is an ArtifactStore whose admin-pool upserts go through
+// flakyDeliverables is a DeliverableStore whose admin-pool upserts go through
 // faults.
-type flakyArtifacts struct {
-	db.ArtifactStore
+type flakyDeliverables struct {
+	db.DeliverableStore
 	f *faults
 }
 
-func (s flakyArtifacts) UpsertSystem(ctx context.Context, orgID string, a domain.Artifact) (domain.Artifact, error) {
+func (s flakyDeliverables) UpsertSystem(ctx context.Context, orgID string, a domain.Deliverable) (domain.Deliverable, error) {
 	if skip, err := s.f.next(); skip {
-		return domain.Artifact{}, err
+		return domain.Deliverable{}, err
 	}
-	return s.ArtifactStore.UpsertSystem(ctx, orgID, a)
+	return s.DeliverableStore.UpsertSystem(ctx, orgID, a)
 }
 
 // flakyTx is a TxRunner whose claims transactions see the flaky ledger store,
@@ -162,7 +162,7 @@ func flakyLedger(stores db.Stores, actions, commits *faults) db.Stores {
 
 func ghWriteAction() *domain.ExternalAction {
 	return &domain.ExternalAction{
-		Provider:   domain.ArtifactProviderGitHub,
+		Provider:   domain.ProviderGitHub,
 		Action:     domain.ActionGHChannelWrite,
 		Target:     "acme/widgets",
 		Credential: domain.CredentialGitHubApp,
@@ -270,7 +270,7 @@ func TestRecordExternalWrite_PermanentFailureIsNotRetried(t *testing.T) {
 }
 
 // flakyEntities is an EntityStore whose identity lookups go through faults:
-// GetByExternalIDSystem is the first read an artifact carrying a provider id
+// GetByExternalIDSystem is the first read a deliverable carrying a provider id
 // resolves its entity through.
 type flakyEntities struct {
 	db.EntityStore
@@ -285,8 +285,8 @@ func (s flakyEntities) GetByExternalIDSystem(ctx context.Context, orgID, source,
 }
 
 // TestRecordExternalWrite_TransientEntityFailureStillLinks: resolving the
-// entity an artifact is about is retried like the write after it, so a lost
-// connection on the first lookups still records the artifact linked to its
+// entity a deliverable is about is retried like the write after it, so a lost
+// connection on the first lookups still records the deliverable linked to its
 // pull request's entity.
 func TestRecordExternalWrite_TransientEntityFailureStillLinks(t *testing.T) {
 	forEachTrigger(t, func(t *testing.T, eventTriggered bool) {
@@ -296,16 +296,16 @@ func TestRecordExternalWrite_TransientEntityFailureStillLinks(t *testing.T) {
 		stores := base
 		stores.Entities = flakyEntities{EntityStore: base.Entities, f: lookups}
 
-		pr := domain.NewPullRequestArtifact("acme/widgets", 7, "PR_kw7", "feat", "main", "https://github.com/acme/widgets/pull/7", "t", "b", true)
+		pr := domain.NewPullRequestDeliverable("acme/widgets", 7, "PR_kw7", "feat", "main", "https://github.com/acme/widgets/pull/7", "t", "b", true)
 		RecordExternalWrite(context.Background(), stores, info, &pr, nil)
 
-		arts := listConversationArtifacts(t, base, info.ConversationID)
-		entity, err := base.Entities.GetByExternalIDSystem(context.Background(), info.OrgID, domain.ArtifactProviderGitHub, testScope("github"), "PR_kw7")
+		arts := listConversationDeliverables(t, base, info.ConversationID)
+		entity, err := base.Entities.GetByExternalIDSystem(context.Background(), info.OrgID, domain.ProviderGitHub, testScope("github"), "PR_kw7")
 		if err != nil || entity == nil {
 			t.Fatalf("PR entity = %+v, %v; want one created for PR_kw7", entity, err)
 		}
 		if len(arts) != 1 || arts[0].EntityID != entity.ID {
-			t.Fatalf("artifacts = %+v; want one, linked to %s", arts, entity.ID)
+			t.Fatalf("deliverables = %+v; want one, linked to %s", arts, entity.ID)
 		}
 		if n := lookups.count(); n < 3 {
 			t.Errorf("entity lookups = %d; want the two failures retried", n)
@@ -314,7 +314,7 @@ func TestRecordExternalWrite_TransientEntityFailureStillLinks(t *testing.T) {
 }
 
 // TestRecordExternalWrite_PermanentEntityFailureRecordsUnlinked: a resolve
-// failure another attempt cannot get past is tried once, and the artifact is
+// failure another attempt cannot get past is tried once, and the deliverable is
 // still recorded, unlinked.
 func TestRecordExternalWrite_PermanentEntityFailureRecordsUnlinked(t *testing.T) {
 	fastRecordRetry(t)
@@ -323,15 +323,15 @@ func TestRecordExternalWrite_PermanentEntityFailureRecordsUnlinked(t *testing.T)
 	stores := base
 	stores.Entities = flakyEntities{EntityStore: base.Entities, f: lookups}
 
-	pr := domain.NewPullRequestArtifact("acme/widgets", 7, "PR_kw7", "feat", "main", "https://github.com/acme/widgets/pull/7", "t", "b", true)
+	pr := domain.NewPullRequestDeliverable("acme/widgets", 7, "PR_kw7", "feat", "main", "https://github.com/acme/widgets/pull/7", "t", "b", true)
 	RecordExternalWrite(context.Background(), stores, info, &pr, nil)
 
 	if n := lookups.count(); n != 1 {
 		t.Errorf("entity lookups = %d; want 1: the failure is not retryable", n)
 	}
-	arts := listConversationArtifacts(t, base, info.ConversationID)
+	arts := listConversationDeliverables(t, base, info.ConversationID)
 	if len(arts) != 1 || arts[0].EntityID != "" {
-		t.Fatalf("artifacts = %+v; want one, unlinked", arts)
+		t.Fatalf("deliverables = %+v; want one, unlinked", arts)
 	}
 }
 
@@ -416,7 +416,7 @@ func TestRelayServer_ResentRecordWritesOneRow(t *testing.T) {
 // path — the sidecar's record sender, the supervision channel, the
 // orchestrator's record lane and the write funnel — through an outage that
 // outlasts the write stage's retries. A comment is posted and then deleted.
-// The post's artifact cannot be written, so its record is deferred and resent;
+// The post's deliverable cannot be written, so its record is deferred and resent;
 // the delete, sent after it, must not be applied until the post has been. Were
 // it applied first it would find no comment row and write nothing, and the
 // post would then create the row as posted.
@@ -424,9 +424,9 @@ func TestRelayedRecords_RetriedRecordStaysAheadOfLaterOnes(t *testing.T) {
 	fastRecordRetry(t)
 	reader := installTestAuditDrops(t)
 	base, info := newCaptureStores(t, true)
-	artifactFaults := &faults{fail: recordRetry.attempts + 1}
+	deliverableFaults := &faults{fail: recordRetry.attempts + 1}
 	stores := base
-	stores.Artifacts = flakyArtifacts{ArtifactStore: base.Artifacts, f: artifactFaults}
+	stores.Deliverables = flakyDeliverables{DeliverableStore: base.Deliverables, f: deliverableFaults}
 	srv := NewRelayServer(stores, info, nil)
 
 	orchEnd, sidecarEnd := net.Pipe()
@@ -449,35 +449,35 @@ func TestRelayedRecords_RetriedRecordStaysAheadOfLaterOnes(t *testing.T) {
 	})
 	rt := NewRelayRuntime(sidecarConn, agentproc.NewRecordSender(sidecarConn), info, nil, nil)
 
-	key := domain.GitHubCommentDedupKey(domain.GitHubIssueComment, 7)
+	key := domain.GitHubCommentKey(domain.GitHubIssueComment, 7)
 	rt.Record(context.Background(),
-		&domain.Artifact{
-			Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindComment,
-			Target: "octo/repo#1", ExternalID: "7", State: domain.ArtifactStateCommentPosted, DedupKey: key,
+		&domain.Deliverable{
+			Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindComment,
+			Target: "octo/repo#1", ExternalID: "7", State: domain.DeliverableStateCommentPosted, DedupKey: key,
 		},
 		&domain.ExternalAction{
-			Provider: domain.ArtifactProviderGitHub, Action: domain.ActionCommentPosted,
+			Provider: domain.ProviderGitHub, Action: domain.ActionCommentPosted,
 			Target: "octo/repo#1", ExternalID: "7", Credential: domain.CredentialGitHubApp,
 		}, domain.EntityContainer{})
 	rt.Record(context.Background(),
-		&domain.Artifact{
-			Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindComment,
-			ExternalID: "7", State: domain.ArtifactStateCommentDeleted, DedupKey: key,
+		&domain.Deliverable{
+			Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindComment,
+			ExternalID: "7", State: domain.DeliverableStateCommentDeleted, DedupKey: key,
 		},
 		&domain.ExternalAction{
-			Provider: domain.ArtifactProviderGitHub, Action: domain.ActionCommentDeleted,
+			Provider: domain.ProviderGitHub, Action: domain.ActionCommentDeleted,
 			Target: "octo/repo", ExternalID: "7", Credential: domain.CredentialGitHubApp,
 		}, domain.EntityContainer{})
 
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		arts := listConversationArtifacts(t, base, info.ConversationID)
+		arts := listConversationDeliverables(t, base, info.ConversationID)
 		acts := listExternalActions(t, base)
-		if len(arts) == 1 && arts[0].State == domain.ArtifactStateCommentDeleted && len(acts) == 2 {
+		if len(arts) == 1 && arts[0].State == domain.DeliverableStateCommentDeleted && len(acts) == 2 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("artifacts = %+v, ledger rows = %d; want the comment deleted and both rows written", arts, len(acts))
+			t.Fatalf("deliverables = %+v, ledger rows = %d; want the comment deleted and both rows written", arts, len(acts))
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -487,7 +487,7 @@ func TestRelayedRecords_RetriedRecordStaysAheadOfLaterOnes(t *testing.T) {
 }
 
 // pushRelayServer is a RelayServer whose git gate records a relayed push the
-// way the executor's does: through UpsertArtifact, as a branch artifact with
+// way the executor's does: through UpsertDeliverable, as a branch deliverable with
 // its ledger row composed in. The pushed repository, octo/repo, has its
 // registry row, as a run's checkout does.
 func pushRelayServer(t *testing.T, stores db.Stores, info ConversationInfo) *RelayServer {
@@ -496,11 +496,11 @@ func pushRelayServer(t *testing.T, stores db.Stores, info ConversationInfo) *Rel
 	host := NewLocal(stores, info)
 	git := &agentproc.GitProxyConfig{
 		RecordPush: func(ctx context.Context, push gitproxy.PushedRef) {
-			art, ok := domain.NewBranchArtifact(push.Repo, push.Ref, push.NewSHA, push.Created)
+			art, ok := domain.NewBranchDeliverable(push.Repo, push.Ref, push.NewSHA, push.Created)
 			if !ok {
 				return
 			}
-			_, _ = host.UpsertArtifact(ctx, art)
+			_, _ = host.UpsertDeliverable(ctx, art)
 		},
 	}
 	return NewRelayServer(stores, info, git)
@@ -515,39 +515,39 @@ func pushArgs(t *testing.T) json.RawMessage {
 	return args
 }
 
-// TestRelayedPush_TransientArtifactFailureDefersTheRecord: a relayed push
-// whose branch artifact cannot be written past the write stage's retries is
+// TestRelayedPush_TransientDeliverableFailureDefersTheRecord: a relayed push
+// whose branch deliverable cannot be written past the write stage's retries is
 // deferred like any other relayed record, so the sidecar's resend retries the
-// artifact — rather than the record being acknowledged with only its ledger
-// row written. Nothing is counted lost, and the resend lands the artifact
+// deliverable — rather than the record being acknowledged with only its ledger
+// row written. Nothing is counted lost, and the resend lands the deliverable
 // beside the one ledger row.
-func TestRelayedPush_TransientArtifactFailureDefersTheRecord(t *testing.T) {
+func TestRelayedPush_TransientDeliverableFailureDefersTheRecord(t *testing.T) {
 	fastRecordRetry(t)
 	reader := installTestAuditDrops(t)
 	base, info := newCaptureStores(t, true)
-	artifactFaults := &faults{fail: -1}
+	deliverableFaults := &faults{fail: -1}
 	stores := base
-	stores.Artifacts = flakyArtifacts{ArtifactStore: base.Artifacts, f: artifactFaults}
+	stores.Deliverables = flakyDeliverables{DeliverableStore: base.Deliverables, f: deliverableFaults}
 	s := pushRelayServer(t, stores, info)
 
 	key := uuid.NewString()
 	if err := s.DispatchRecord(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordPush, key, pushArgs(t)); !errors.Is(err, errRecordDeferred) {
-		t.Fatalf("push with an unwritable artifact = %v; want %v", err, errRecordDeferred)
+		t.Fatalf("push with an unwritable deliverable = %v; want %v", err, errRecordDeferred)
 	}
-	if arts := listConversationArtifacts(t, base, info.ConversationID); len(arts) != 0 {
-		t.Fatalf("artifacts = %+v; want none during the outage", arts)
+	if arts := listConversationDeliverables(t, base, info.ConversationID); len(arts) != 0 {
+		t.Fatalf("deliverables = %+v; want none during the outage", arts)
 	}
 	if got := collectDrops(t, reader); len(got) != 0 {
 		t.Fatalf("drops = %v; a deferred record is not lost, and must not be counted", got)
 	}
 
-	artifactFaults.set(0, 0)
+	deliverableFaults.set(0, 0)
 	if err := s.DispatchRecord(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordPush, key, pushArgs(t)); err != nil {
 		t.Fatalf("resend = %v", err)
 	}
-	arts := listConversationArtifacts(t, base, info.ConversationID)
-	if len(arts) != 1 || arts[0].Kind != domain.ArtifactKindBranch {
-		t.Fatalf("artifacts = %+v; want the branch artifact landed by the resend", arts)
+	arts := listConversationDeliverables(t, base, info.ConversationID)
+	if len(arts) != 1 || arts[0].Kind != domain.DeliverableKindBranch {
+		t.Fatalf("deliverables = %+v; want the branch deliverable landed by the resend", arts)
 	}
 	if acts := listExternalActions(t, base); len(acts) != 1 || acts[0].Action != domain.ActionBranchPushed {
 		t.Fatalf("ledger rows = %+v; want one branch_pushed row across both applications", acts)
@@ -557,43 +557,43 @@ func TestRelayedPush_TransientArtifactFailureDefersTheRecord(t *testing.T) {
 	}
 }
 
-// TestRelayedPush_RefusedArtifactIsCountedOnce: an artifact refused for good
+// TestRelayedPush_RefusedDeliverableIsCountedOnce: a deliverable refused for good
 // is not resent. The record is acknowledged with its ledger row written, and
-// the artifact is counted lost once, at the write stage, under its kind.
-func TestRelayedPush_RefusedArtifactIsCountedOnce(t *testing.T) {
+// the deliverable is counted lost once, at the write stage, under its kind.
+func TestRelayedPush_RefusedDeliverableIsCountedOnce(t *testing.T) {
 	fastRecordRetry(t)
 	reader := installTestAuditDrops(t)
 	conn, stores, info := newCaptureStoresConn(t, true)
-	refuseArtifactWrites(t, conn)
+	refuseDeliverableWrites(t, conn)
 	s := pushRelayServer(t, stores, info)
 
 	if err := relayRecord(t, s, agentproc.RelayNamespaceCore, agentproc.OpRecordPush, pushArgs(t)); err != nil {
-		t.Fatalf("push with a refused artifact = %v; want it acknowledged", err)
+		t.Fatalf("push with a refused deliverable = %v; want it acknowledged", err)
 	}
 	if acts := listExternalActions(t, stores); len(acts) != 1 || acts[0].Action != domain.ActionBranchPushed {
-		t.Fatalf("ledger rows = %+v; want the branch_pushed row despite the refused artifact", acts)
+		t.Fatalf("ledger rows = %+v; want the branch_pushed row despite the refused deliverable", acts)
 	}
 	got := collectDrops(t, reader)
-	if len(got[dropStageRecord]) != 1 || got[dropStageRecord][domain.ArtifactKindBranch] != 1 {
-		t.Fatalf("drops = %v; want exactly one %s drop under op=%s", got, dropStageRecord, domain.ArtifactKindBranch)
+	if len(got[dropStageRecord]) != 1 || got[dropStageRecord][domain.DeliverableKindBranch] != 1 {
+		t.Fatalf("drops = %v; want exactly one %s drop under op=%s", got, dropStageRecord, domain.DeliverableKindBranch)
 	}
 }
 
-// TestUpsertArtifact_DirectFailureIsTheCallersToHandle: outside a relayed
-// record, a failed artifact is returned to the caller waiting on it and is not
+// TestUpsertDeliverable_DirectFailureIsTheCallersToHandle: outside a relayed
+// record, a failed deliverable is returned to the caller waiting on it and is not
 // counted here — the caller decides what the failure means.
-func TestUpsertArtifact_DirectFailureIsTheCallersToHandle(t *testing.T) {
+func TestUpsertDeliverable_DirectFailureIsTheCallersToHandle(t *testing.T) {
 	fastRecordRetry(t)
 	reader := installTestAuditDrops(t)
 	conn, stores, info := newCaptureStoresConn(t, true)
-	refuseArtifactWrites(t, conn)
+	refuseDeliverableWrites(t, conn)
 
-	branch, ok := domain.NewBranchArtifact("octo/repo", "refs/heads/feat", "abc123", true)
+	branch, ok := domain.NewBranchDeliverable("octo/repo", "refs/heads/feat", "abc123", true)
 	if !ok {
-		t.Fatal("NewBranchArtifact refused the fixture branch")
+		t.Fatal("NewBranchDeliverable refused the fixture branch")
 	}
-	if _, err := newDirectRuntime(stores, info).UpsertArtifact(context.Background(), branch); err == nil {
-		t.Fatal("UpsertArtifact = nil error, want the refused artifact's error")
+	if _, err := newDirectRuntime(stores, info).UpsertDeliverable(context.Background(), branch); err == nil {
+		t.Fatal("UpsertDeliverable = nil error, want the refused deliverable's error")
 	}
 	if got := collectDrops(t, reader); len(got) != 0 {
 		t.Fatalf("drops = %v; want none: the caller got the error", got)
@@ -610,7 +610,7 @@ func TestRelayServer_WireDedupKeyIsNotTrusted(t *testing.T) {
 
 	forged := domain.EgressDenialDedupKey("another-conversation", "api.github.com:443")
 	args, _ := json.Marshal(recordExternalWriteArgs{Action: &domain.ExternalAction{
-		Provider: domain.ArtifactProviderGitHub, Action: domain.ActionGHChannelWrite,
+		Provider: domain.ProviderGitHub, Action: domain.ActionGHChannelWrite,
 		Target: "acme/widgets", Credential: domain.CredentialGitHubApp, DedupKey: forged,
 	}})
 	key := uuid.NewString()

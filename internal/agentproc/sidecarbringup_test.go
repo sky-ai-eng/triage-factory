@@ -261,26 +261,26 @@ func largestReviewDraftDetails() string {
 	const unit = "This change moves the `Foo` call ahead of the lock, so a caller that \"holds\" it <never> waits & retries.\n"
 	body := strings.Repeat(unit, 65536/len(unit)+1)[:65536]
 	line := 10
-	comments := make([]domain.ReviewArtifactComment, 100)
+	comments := make([]domain.ReviewDeliverableComment, 100)
 	for i := range comments {
-		comments[i] = domain.ReviewArtifactComment{
+		comments[i] = domain.ReviewDeliverableComment{
 			ID: fmt.Sprintf("c%04d", i), Path: "internal/some/package/file_name.go",
 			Line: &line, Body: body, CommitSHA: strings.Repeat("a", 40),
 		}
 	}
-	return domain.MarshalReviewArtifactDetails(domain.ReviewArtifactDetails{
+	return domain.MarshalReviewDeliverableDetails(domain.ReviewDeliverableDetails{
 		Number: 1311, HeadSHA: strings.Repeat("b", 40),
 		FinalizedHeadSHA: strings.Repeat("b", 40), FinalizedBaseSHA: strings.Repeat("c", 40),
 		ReviewBody: body, ReviewEvent: "COMMENT", StagedComments: comments,
-		Proposed: domain.ReviewArtifactProposed{Body: body, Event: "COMMENT", Comments: comments},
+		Proposed: domain.ReviewDeliverableProposed{Body: body, Event: "COMMENT", Comments: comments},
 	})
 }
 
 // reviewDetailsArgs is the wire shape of agenthost's update_review_details_if_pending
 // op, which agentproc cannot import.
 type reviewDetailsArgs struct {
-	ArtifactID  string `json:"artifact_id"`
-	DetailsJSON string `json:"details_json"`
+	DeliverableID string `json:"deliverable_id"`
+	DetailsJSON   string `json:"details_json"`
 }
 
 // TestBringUpSidecar_TheLargestLegitimateFrameGetsThrough: the review-draft
@@ -291,7 +291,7 @@ func TestBringUpSidecar_TheLargestLegitimateFrameGetsThrough(t *testing.T) {
 	relay := &fakeRelayDispatcher{callReply: json.RawMessage(`{"updated":true}`), calls: make(chan sidecarproto.RelayCallBody, 1)}
 	sc, conn := bringUpWithDispatcher(t, relay, sidecarproto.WithWriteLimit(sidecarproto.MaxSidecarFrameSize))
 
-	args := reviewDetailsArgs{ArtifactID: "art-1", DetailsJSON: largestReviewDraftDetails()}
+	args := reviewDetailsArgs{DeliverableID: "art-1", DetailsJSON: largestReviewDraftDetails()}
 	// Measured the way the Conn writes it, so this checks the frame is the
 	// size the limit was set for and not a smaller stand-in.
 	rawArgs, _ := json.Marshal(args)
@@ -340,7 +340,7 @@ func TestBringUpSidecar_AFrameTooLargeToSendFailsOnlyItsCall(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	tooLarge := reviewDetailsArgs{ArtifactID: "art-1", DetailsJSON: strings.Repeat("x", sidecarproto.MaxSidecarFrameSize)}
+	tooLarge := reviewDetailsArgs{DeliverableID: "art-1", DetailsJSON: strings.Repeat("x", sidecarproto.MaxSidecarFrameSize)}
 	err := CallRelay(ctx, sc.conn, RelayNamespaceCore, "update_review_details_if_pending", tooLarge, nil)
 	if !errors.Is(err, sidecarproto.ErrFrameTooLarge) {
 		t.Fatalf("relaying a frame over the limit = %v; want ErrFrameTooLarge", err)
@@ -354,7 +354,7 @@ func TestBringUpSidecar_AFrameTooLargeToSendFailsOnlyItsCall(t *testing.T) {
 	var out struct {
 		Updated bool `json:"updated"`
 	}
-	if err := CallRelay(ctx, sc.conn, RelayNamespaceCore, "update_review_details_if_pending", reviewDetailsArgs{ArtifactID: "art-1", DetailsJSON: "{}"}, &out); err != nil {
+	if err := CallRelay(ctx, sc.conn, RelayNamespaceCore, "update_review_details_if_pending", reviewDetailsArgs{DeliverableID: "art-1", DetailsJSON: "{}"}, &out); err != nil {
 		t.Fatalf("the next call after the refused one: %v", err)
 	}
 	if !out.Updated {

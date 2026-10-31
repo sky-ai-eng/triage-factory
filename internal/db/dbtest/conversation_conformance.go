@@ -221,14 +221,14 @@ type ConversationSeeder struct {
 	// Returns the row's id.
 	SeedRawMessage func(t *testing.T, conversationID, column, rawJSON string) int64
 
-	// Artifact inserts an artifacts row on the conversation and returns its
+	// Deliverable inserts a deliverables row on the conversation and returns its
 	// id. detailsJSON is written verbatim (empty string included), because
-	// the unresolved-artifact predicate reads the review's ready sentinel out
+	// the unresolved-deliverable predicate reads the review's ready sentinel out
 	// of it and the suite has to be able to stage a value that is not JSON at
-	// all. ArtifactStore owns the table, so this is a seeded precondition
+	// all. DeliverableStore owns the table, so this is a seeded precondition
 	// rather than a store call — the conversation list reads it as a
 	// correlated predicate and never writes one.
-	Artifact func(t *testing.T, conversationID, kind, state, detailsJSON string) string
+	Deliverable func(t *testing.T, conversationID, kind, state, detailsJSON string) string
 
 	// PendingPermission inserts a state='pending' conversation_permissions
 	// row owned by claimID. PermissionStore owns the table; the conversation
@@ -3376,9 +3376,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 	t.Run("List_AttentionIsThePerConversationYourMove", func(t *testing.T) {
 		// The rail's `needs`: an unanswered permission prompt, or a not-live
-		// conversation still holding an unresolved artifact. Counted per
+		// conversation still holding an unresolved deliverable. Counted per
 		// conversation — three prompts on one run are one row — and matching
-		// domain.HasUnresolvedArtifacts on which artifacts count.
+		// domain.HasUnresolvedDeliverables on which deliverables count.
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 
@@ -3407,28 +3407,28 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// same conversation's open PR and its unfinalized review are not.
 		drafted := seedConversationForTaskTest(t, orgID, task, SeedConcluded, seed)
 		quiet := seedConversationForTaskTest(t, orgID, task, SeedConcluded, seed)
-		seed.Artifact(t, quiet, domain.ArtifactKindPullRequest, domain.ArtifactStatePROpen, "")
-		seed.Artifact(t, quiet, domain.ArtifactKindReview, domain.ArtifactStateReviewPending,
+		seed.Deliverable(t, quiet, domain.DeliverableKindPullRequest, domain.DeliverableStatePROpen, "")
+		seed.Deliverable(t, quiet, domain.DeliverableKindReview, domain.DeliverableStateReviewPending,
 			`{"number":7,"review_event":""}`)
 		if got := attention(); len(got) != 0 {
 			t.Errorf("attention with nothing unresolved = %v, want none", got)
 		}
-		seed.Artifact(t, drafted, domain.ArtifactKindPullRequest, domain.ArtifactStatePRDraft, "")
+		seed.Deliverable(t, drafted, domain.DeliverableKindPullRequest, domain.DeliverableStatePRDraft, "")
 		if got := attention(); len(got) != 1 || got[0] != drafted {
 			t.Errorf("attention with a draft PR = %v, want [%s]", got, drafted)
 		}
 		// A finalized pending review counts too, and a second unresolved
-		// artifact on the same conversation is still one row.
-		seed.Artifact(t, drafted, domain.ArtifactKindReview, domain.ArtifactStateReviewPending,
+		// deliverable on the same conversation is still one row.
+		seed.Deliverable(t, drafted, domain.DeliverableKindReview, domain.DeliverableStateReviewPending,
 			`{"number":7,"review_event":"REQUEST_CHANGES"}`)
 		if got := attention(); len(got) != 1 || got[0] != drafted {
-			t.Errorf("two unresolved artifacts on one conversation = %v, want one row", got)
+			t.Errorf("two unresolved deliverables on one conversation = %v, want one row", got)
 		}
 
-		// A LIVE conversation's unresolved artifact is not a human's move: the
+		// A LIVE conversation's unresolved deliverable is not a human's move: the
 		// agent is still working, and the run view lights it as WORKING.
 		live := seedConversationForTaskTest(t, orgID, task, "running", seed)
-		seed.Artifact(t, live, domain.ArtifactKindPullRequest, domain.ArtifactStatePRDraft, "")
+		seed.Deliverable(t, live, domain.DeliverableKindPullRequest, domain.DeliverableStatePRDraft, "")
 		if _, err := store.SetExecutorSystem(ctx, orgID, live, "exec-attn", 1); err != nil {
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
@@ -3454,7 +3454,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// Its draft PR now counts (it stopped being live), but on its own
 		// merit rather than the orphaned prompts'.
 		if got := attention(); len(got) != 2 {
-			t.Errorf("attention after the claim released = %v, want the two artifact-bearing rows", got)
+			t.Errorf("attention after the claim released = %v, want the two deliverable-bearing rows", got)
 		}
 	})
 
@@ -4066,7 +4066,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("set worktree (open): %v", err)
 		}
 		// completed WITH a worktree → excluded by the status filter. A completed
-		// conversation that left an unresolved artifact no longer parks, so its
+		// conversation that left an unresolved deliverable no longer parks, so its
 		// worktree is not preserved as a warm resume cache.
 		completed := seedConversationForTest(t, orgID, seed, SeedConcluded)
 		if _, err := store.SetWorktreePath(ctx, orgID, completed, "/tmp/triagefactory-runs/completed"); err != nil {

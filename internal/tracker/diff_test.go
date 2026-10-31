@@ -911,7 +911,7 @@ func TestDiff_ReviewRequested_OtherTeam_NoEvent(t *testing.T) {
 
 func TestDiff_ReviewRequested_SelfAuthoredViaTeam_NoEvent(t *testing.T) {
 	// PR authored by the session user; their team gets auto-assigned via
-	// CODEOWNERS. This is a reviewer-pool artifact, not an ask — no event.
+	// CODEOWNERS. This is a reviewer-pool deliverable, not an ask — no event.
 	prev := basePRSnapshot()
 	prev.Author = testUser
 	curr := basePRSnapshot()

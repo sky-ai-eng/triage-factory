@@ -15,7 +15,7 @@ import (
 // FK needs.
 func TestOrgEventSourceStore_SQLite_Conformance(t *testing.T) {
 	dbtest.RunOrgEventSourceStoreConformance(t, func(t *testing.T) (db.OrgEventSourceStore, string) {
-		conn := newSQLiteForArtifactTest(t)
+		conn := newSQLiteForDeliverableTest(t)
 		return sqlitestore.New(conn).OrgEventSources, runmode.LocalDefaultOrgID
 	})
 }

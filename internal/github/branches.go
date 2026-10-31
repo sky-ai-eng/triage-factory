@@ -36,8 +36,8 @@ const branchRefBatchSize = 50
 // A ref whose repository did NOT resolve (deleted/renamed repo, or a per-field
 // access error that GitHub returns as a null field + errors[]) is OMITTED, not
 // reported false: a permission or transient failure must never be read as
-// "branch deleted" and flip a branch artifact terminal. Callers treat a missing
-// key as "unknown — leave the artifact as-is".
+// "branch deleted" and flip a branch deliverable terminal. Callers treat a missing
+// key as "unknown — leave the deliverable as-is".
 //
 // Batches internally to stay under GitHub's per-query limits; transparent to
 // callers. A genuine whole-query failure (auth, cost ceiling, malformed)

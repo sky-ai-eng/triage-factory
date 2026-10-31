@@ -29,8 +29,8 @@ import (
 // What is left cannot become a foreign key. A pull request's key is its
 // repository's name AND its number, so entities.source_id stays the composite
 // display key "owner/repo#18" beside the entity's repository_id, and moves
-// because it is what everything reads and shows; an artifact's target is a
-// display value of the same shape. An artifact's dedup_key names no repository
+// because it is what everything reads and shows; a deliverable's target is a
+// display value of the same shape. A deliverable's dedup_key names no repository
 // (a pull request's node id, a registry row id, a comment's id), so it never
 // moves.
 //
@@ -42,7 +42,7 @@ import (
 // current_url — the maintained pointer reads coalesce over — is filled here,
 // on the repository's own rows: those about its entities (entity_id) and those
 // about it with no entity (repository_id).
-// artifacts.url needs no help: its upsert's conflict arm refreshes it the next
+// deliverables.url needs no help: its upsert's conflict arm refreshes it the next
 // time any writer lands on the row, and every writer lands on it by its id.
 //
 // What stays put entirely: history (events.payload_json; external_actions'
@@ -52,8 +52,8 @@ import (
 // is keyed by the repository row id, so a rename does not move it either.
 //
 // The rewrite stays on the renamed repository's host. Entities are the
-// repository's own (repository_id), and so are the artifacts: those about its
-// entities by artifacts.entity_id, its branches by the registry row id their
+// repository's own (repository_id), and so are the deliverables: those about its
+// entities by deliverables.entity_id, its branches by the registry row id their
 // keys carry, and so are the audit-ledger rows, by their entity_id or
 // repository_id. A stored link is rewritten only when it is on the host
 // (domain.RewriteRepoURL). A repository on another host under the same name
@@ -61,7 +61,7 @@ import (
 // repository that held the name, whose rows reference its own registry row and
 // entities.
 //
-// A retired row restored by a rename moves its own row, entities, artifacts
+// A retired row restored by a rename moves its own row, entities, deliverables
 // and audit-ledger pointers the same way, all selected by id.
 
 func (s *repoStore) ListIdentitiesSystem(ctx context.Context, orgID, host string) ([]domain.RepoIdentity, error) {
@@ -370,22 +370,22 @@ func absorbBareRepository(ctx context.Context, q queryer, occupant slugOccupant,
 	return nil
 }
 
-// moveAbsorbedBranches re-keys the branch artifacts recorded in the registry
+// moveAbsorbedBranches re-keys the branch deliverables recorded in the registry
 // row fromID onto toID, the row it is absorbed into. A branch is keyed on its
 // repository's row id and its ref (domain.BranchDedupKey), so a key naming
 // fromID would name a deleted row: no rename would find it again, and the next
 // push of the same ref, keyed on toID, would record the branch a second time.
 // A ref both rows recorded is one branch under two keys, and the older
-// artifact (created_at, then id) keeps it while the newer is deleted. No table
-// references an artifact row. The prefix is compared with SUBSTR rather than
+// deliverable (created_at, then id) keeps it while the newer is deleted. No table
+// references a deliverable row. The prefix is compared with SUBSTR rather than
 // LIKE: an id may hold '_', which LIKE reads as a wildcard.
 func moveAbsorbedBranches(ctx context.Context, q queryer, fromID, toID string) error {
 	from := domain.BranchDedupKeyPrefix(fromID)
 	rows, err := q.QueryContext(ctx, `
-		SELECT id, scope, dedup_key, created_at FROM artifacts
+		SELECT id, scope, dedup_key, created_at FROM deliverables
 		 WHERE provider = ? AND kind = ? AND SUBSTR(dedup_key, 1, ?) = ?
 		 ORDER BY id
-	`, domain.ArtifactProviderGit, domain.ArtifactKindBranch, len(from), from)
+	`, domain.ProviderGit, domain.DeliverableKindBranch, len(from), from)
 	if err != nil {
 		return err
 	}
@@ -416,26 +416,26 @@ func moveAbsorbedBranches(ctx context.Context, q queryer, fromID, toID string) e
 		var heldID string
 		var heldCreated time.Time
 		err := q.QueryRowContext(ctx, `
-			SELECT id, created_at FROM artifacts WHERE scope = ? AND dedup_key = ?
+			SELECT id, created_at FROM deliverables WHERE scope = ? AND dedup_key = ?
 		`, b.scope, key).Scan(&heldID, &heldCreated)
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
 		case err != nil:
 			return err
 		case heldCreated.Before(b.created) || (heldCreated.Equal(b.created) && heldID < b.id):
-			if _, err := q.ExecContext(ctx, `DELETE FROM artifacts WHERE id = ?`, b.id); err != nil {
-				return fmt.Errorf("delete branch artifact %s, recorded again under %s: %w", b.id, key, err)
+			if _, err := q.ExecContext(ctx, `DELETE FROM deliverables WHERE id = ?`, b.id); err != nil {
+				return fmt.Errorf("delete branch deliverable %s, recorded again under %s: %w", b.id, key, err)
 			}
 			continue
 		default:
-			if _, err := q.ExecContext(ctx, `DELETE FROM artifacts WHERE id = ?`, heldID); err != nil {
-				return fmt.Errorf("delete branch artifact %s, recorded first under %s: %w", heldID, b.key, err)
+			if _, err := q.ExecContext(ctx, `DELETE FROM deliverables WHERE id = ?`, heldID); err != nil {
+				return fmt.Errorf("delete branch deliverable %s, recorded first under %s: %w", heldID, b.key, err)
 			}
 		}
 		if _, err := q.ExecContext(ctx, `
-			UPDATE artifacts SET dedup_key = ?, updated_at = datetime('now') WHERE id = ?
+			UPDATE deliverables SET dedup_key = ?, updated_at = datetime('now') WHERE id = ?
 		`, key, b.id); err != nil {
-			return fmt.Errorf("re-key branch artifact %s onto %s: %w", b.id, key, err)
+			return fmt.Errorf("re-key branch deliverable %s onto %s: %w", b.id, key, err)
 		}
 	}
 	return nil
@@ -492,7 +492,7 @@ func renameRepositoryRow(ctx context.Context, q queryer, renamed identityRow, to
 // whose only job is to resolve to the object those keys name, on host only:
 // every row it selects carries the host as its scope.
 //
-// The entities, the artifacts and the audit-ledger rows are repositoryID's
+// The entities, the deliverables and the audit-ledger rows are repositoryID's
 // own, selected by id.
 func rewriteSlugDerivedKeys(ctx context.Context, q queryer, source, host, repositoryID, from, to string) error {
 	// entities.url first, while source_id still spells the old slug: the URL
@@ -534,7 +534,7 @@ func rewriteSlugDerivedKeys(ctx context.Context, q queryer, source, host, reposi
 		}
 		return fmt.Errorf("rewrite entity source ids %s -> %s: %w", from, to, err)
 	}
-	if err := moveRepositoryArtifactTargets(ctx, q, source, host, repositoryID, to); err != nil {
+	if err := moveRepositoryDeliverableTargets(ctx, q, source, host, repositoryID, to); err != nil {
 		return err
 	}
 	// external_actions — the audit ledger's pointer column, and only that.
@@ -631,9 +631,9 @@ func collectURLRewrites(rows *sql.Rows, host, from, to string) ([]urlRewrite, er
 	return out, rows.Err()
 }
 
-// moveRepositoryArtifactTargets moves the targets of repositoryID's own
-// artifacts. Every artifact about one of its entities takes that entity's key,
-// which the source_id rewrite has just moved (artifacts.entity_id), and every
+// moveRepositoryDeliverableTargets moves the targets of repositoryID's own
+// deliverables. Every deliverable about one of its entities takes that entity's key,
+// which the source_id rewrite has just moved (deliverables.entity_id), and every
 // branch recorded in it takes to: a branch has no entity, and its key carries
 // the registry row id (domain.BranchDedupKeyPrefix). The rows are selected by
 // id, never by the name a target spells, so a retired repository that held
@@ -641,23 +641,23 @@ func collectURLRewrites(rows *sql.Rows, host, from, to string) ([]urlRewrite, er
 // the name this rename does not know moves too. Only the target moves; the
 // key names no repository. The key prefix is compared with SUBSTR rather than
 // LIKE: an id may hold '_', which LIKE reads as a wildcard.
-func moveRepositoryArtifactTargets(ctx context.Context, q queryer, source, host, repositoryID, to string) error {
+func moveRepositoryDeliverableTargets(ctx context.Context, q queryer, source, host, repositoryID, to string) error {
 	prefix := domain.BranchDedupKeyPrefix(repositoryID)
 	if _, err := q.ExecContext(ctx, `
-		UPDATE artifacts SET target = ?, updated_at = datetime('now')
+		UPDATE deliverables SET target = ?, updated_at = datetime('now')
 		 WHERE scope = ? AND provider = ? AND kind = ?
 		   AND SUBSTR(dedup_key, 1, ?) = ?
 		   AND target <> ?
-	`, to, host, domain.ArtifactProviderGit, domain.ArtifactKindBranch, len(prefix), prefix, to); err != nil {
-		return fmt.Errorf("move branch artifact targets of %s onto %s: %w", repositoryID, to, err)
+	`, to, host, domain.ProviderGit, domain.DeliverableKindBranch, len(prefix), prefix, to); err != nil {
+		return fmt.Errorf("move branch deliverable targets of %s onto %s: %w", repositoryID, to, err)
 	}
 	if _, err := q.ExecContext(ctx, `
-		UPDATE artifacts SET target = (SELECT e.source_id FROM entities e WHERE e.id = artifacts.entity_id),
+		UPDATE deliverables SET target = (SELECT e.source_id FROM entities e WHERE e.id = deliverables.entity_id),
 		                     updated_at = datetime('now')
 		 WHERE entity_id IN (SELECT e.id FROM entities e WHERE e.source = ? AND e.scope = ? AND e.repository_id = ?)
-		   AND target <> (SELECT e.source_id FROM entities e WHERE e.id = artifacts.entity_id)
+		   AND target <> (SELECT e.source_id FROM entities e WHERE e.id = deliverables.entity_id)
 	`, source, host, repositoryID); err != nil {
-		return fmt.Errorf("move the targets of %s's entities' artifacts onto %s: %w", repositoryID, to, err)
+		return fmt.Errorf("move the targets of %s's entities' deliverables onto %s: %w", repositoryID, to, err)
 	}
 	return nil
 }

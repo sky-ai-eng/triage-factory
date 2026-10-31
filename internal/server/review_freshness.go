@@ -25,9 +25,9 @@ import (
 //
 // Freshness joins each out-comment to its staged comment by stable TF-local id, so
 // it never depends on slice ordering.
-func (ah *artifactsHandler) annotateReviewFreshness(ctx context.Context, orgID string, art *domain.Artifact, reviewed db.ArtifactPullRequest, details domain.ReviewArtifactDetails, out *reviewArtifactDetailsJSON) {
+func (ah *deliverablesHandler) annotateReviewFreshness(ctx context.Context, orgID string, art *domain.Deliverable, reviewed db.DeliverablePullRequest, details domain.ReviewDeliverableDetails, out *reviewDeliverableDetailsJSON) {
 	// reviewed is the pull request under review, resolved by the registry row
-	// its entity references (artifactPullRequest). A retired row's name is
+	// its entity references (deliverablePullRequest). A retired row's name is
 	// another repository's now, with no head of this pull request to compare
 	// against.
 	if reviewed.Retired {
@@ -36,26 +36,26 @@ func (ah *artifactsHandler) annotateReviewFreshness(ctx context.Context, orgID s
 	owner, repo, number := reviewed.Owner, reviewed.Repo, reviewed.Number
 	// The org's client reads its current GitHub host; a review recorded on
 	// another host has no live head there to compare against.
-	if onHost, _, err := ah.artifactOnCurrentHost(ctx, orgID, art); err != nil || !onHost {
+	if onHost, _, err := ah.deliverableOnCurrentHost(ctx, orgID, art); err != nil || !onHost {
 		if err != nil {
-			artifactsLog.Warn("review freshness: could not read the org's GitHub host; serving unknown freshness",
-				"artifact", art.ID, "error", err)
+			deliverablesLog.Warn("review freshness: could not read the org's GitHub host; serving unknown freshness",
+				"deliverable", art.ID, "error", err)
 		}
 		return
 	}
-	// Resolve the per-repo client directly (not ghForArtifact, which writes an
+	// Resolve the per-repo client directly (not ghForDeliverable, which writes an
 	// error response): a missing credential must degrade to "unknown", not 503 the
 	// overlay.
 	gh, err := ah.ghResolver.ClientForRepo(ctx, orgID, owner, repo)
 	if err != nil {
-		artifactsLog.Warn("review freshness: GitHub client unavailable; serving unknown freshness",
-			"artifact", art.ID, "owner", owner, "repo", repo, "error", err)
+		deliverablesLog.Warn("review freshness: GitHub client unavailable; serving unknown freshness",
+			"deliverable", art.ID, "owner", owner, "repo", repo, "error", err)
 		return
 	}
 	pr, err := gh.GetPRBasic(ctx, owner, repo, number)
 	if err != nil || pr.HeadSHA == "" {
-		artifactsLog.Warn("review freshness: live PR head unavailable; serving unknown freshness",
-			"artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
+		deliverablesLog.Warn("review freshness: live PR head unavailable; serving unknown freshness",
+			"deliverable", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
 		return
 	}
 	liveHead := pr.HeadSHA
@@ -85,8 +85,8 @@ func (ah *artifactsHandler) annotateReviewFreshness(ctx context.Context, orgID s
 			n := cmp.AheadBy
 			out.CommitsSinceFinalize = &n
 		} else {
-			artifactsLog.Warn("review freshness: commits-since-finalize compare failed; serving unknown count",
-				"artifact", art.ID, "owner", owner, "repo", repo, "base", finalizeHead, "head", liveHead, "error", e)
+			deliverablesLog.Warn("review freshness: commits-since-finalize compare failed; serving unknown count",
+				"deliverable", art.ID, "owner", owner, "repo", repo, "base", finalizeHead, "head", liveHead, "error", e)
 		}
 	}
 
@@ -96,8 +96,8 @@ func (ah *artifactsHandler) annotateReviewFreshness(ctx context.Context, orgID s
 		}
 		cmp, e := gh.CompareCommits(ctx, owner, repo, anchor, liveHead)
 		if e != nil {
-			artifactsLog.Warn("review freshness: compare failed; serving unknown for this anchor",
-				"artifact", art.ID, "owner", owner, "repo", repo, "base", anchor, "head", liveHead, "error", e)
+			deliverablesLog.Warn("review freshness: compare failed; serving unknown for this anchor",
+				"deliverable", art.ID, "owner", owner, "repo", repo, "base", anchor, "head", liveHead, "error", e)
 			return ghclient.LineMap{}, e
 		}
 		return ghclient.ParseLineMapFromPatches(cmp.Files), nil
@@ -109,7 +109,7 @@ func (ah *artifactsHandler) annotateReviewFreshness(ctx context.Context, orgID s
 	// carries the new path only when it actually changed).
 	type joined struct {
 		outcome  review.Outcome
-		original domain.ReviewArtifactComment
+		original domain.ReviewDeliverableComment
 	}
 	outcomes := review.ReconcileToHead(details.StagedComments, liveHead, finalizeHead, lineMapFor)
 	byID := make(map[string]joined, len(outcomes))

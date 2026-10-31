@@ -14,7 +14,7 @@ import (
 //
 // Both directions leak, under different keys. Outbound, otelhttp records
 // url.full, and TF's outbound URLs put tenant data in the path —
-// /repos/{owner}/{repo}/pulls/{n}, a Jira issue key, an artifact filename.
+// /repos/{owner}/{repo}/pulls/{n}, a Jira issue key, a deliverable filename.
 // Inbound, it records url.path, and TF's own API is not all opaque ids —
 // GET /api/repos/by-name/{owner}/{repo} names a repository, and the
 // dashboard's PR family names one plus a pull request number — so a server

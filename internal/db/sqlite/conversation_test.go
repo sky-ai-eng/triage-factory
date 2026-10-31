@@ -339,15 +339,15 @@ func newSQLiteConversationSeeder(conn *sql.DB) dbtest.ConversationSeeder {
 				t.Fatalf("collapse claim times: %v", err)
 			}
 		},
-		Artifact: func(t *testing.T, conversationID, kind, state, detailsJSON string) string {
+		Deliverable: func(t *testing.T, conversationID, kind, state, detailsJSON string) string {
 			t.Helper()
 			id := uuid.New().String()
 			if _, err := conn.Exec(`
-				INSERT INTO artifacts (id, conversation_id, team_id, provider, kind, target,
+				INSERT INTO deliverables (id, conversation_id, team_id, provider, kind, target,
 				                       state, dedup_key, details_json)
 				VALUES (?, ?, ?, 'github', ?, 'o/r#7', ?, ?, ?)
 			`, id, conversationID, runmode.LocalDefaultTeamID, kind, state, id, detailsJSON); err != nil {
-				t.Fatalf("seed artifact: %v", err)
+				t.Fatalf("seed deliverable: %v", err)
 			}
 			return id
 		},
@@ -633,17 +633,17 @@ func TestConversationStore_SQLite_PRCoherenceTargets(t *testing.T) {
 		extra := dbtest.PRCoherenceSeeder{
 			PendingReview: func(t *testing.T, conversationID, host, repo string, prNumber int, prNodeID string) {
 				t.Helper()
-				a := domain.NewReviewArtifact(repo, prNumber, prNodeID, "head-sha", conversationID)
+				a := domain.NewReviewDeliverable(repo, prNumber, prNodeID, "head-sha", conversationID)
 				a.ConversationID, a.Scope = conversationID, host
 				a.OrgID, a.TeamID = runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
-				pr, err := stores.Entities.GetByExternalIDSystem(ctx, runmode.LocalDefaultOrgID, domain.ArtifactProviderGitHub, host, prNodeID)
+				pr, err := stores.Entities.GetByExternalIDSystem(ctx, runmode.LocalDefaultOrgID, domain.ProviderGitHub, host, prNodeID)
 				if err != nil {
 					t.Fatalf("read the reviewed PR's entity: %v", err)
 				}
 				if pr != nil {
 					a.EntityID = pr.ID
 				}
-				if _, err := stores.Artifacts.UpsertSystem(ctx, runmode.LocalDefaultOrgID, a); err != nil {
+				if _, err := stores.Deliverables.UpsertSystem(ctx, runmode.LocalDefaultOrgID, a); err != nil {
 					t.Fatalf("seed pending review: %v", err)
 				}
 			},

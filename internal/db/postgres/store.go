@@ -192,14 +192,14 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// pair makes that insert unreachable through tf_app — see
 		// the impl's Create comment.
 		Conversations: newConversationStore(app, admin),
-		// Artifacts wires both pools: app for request-equivalent
+		// Deliverables wires both pools: app for request-equivalent
 		// writers (manual-run exec choke point under synthetic claims)
 		// and readers (run-detail, C2), admin for UpsertSystem — the
 		// event-triggered exec choke point has no creator user, so its
-		// insert can't pass artifacts_insert's team-write check on the
-		// app side (TFAC-459). artifacts_* RLS scopes by team_id like
+		// insert can't pass deliverables_insert's team-write check on the
+		// app side (TFAC-459). deliverables_* RLS scopes by team_id like
 		// runs; org_id stays in every clause as defense in depth.
-		Artifacts: newArtifactStore(app, admin),
+		Deliverables: newDeliverableStore(app, admin),
 		// Entities wires both pools: app for request-
 		// equivalent consumers (server panels, delegate context
 		// loaders) and admin for the `...System` variants the tracker
@@ -363,11 +363,11 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// pool's own transaction (the server's recordAccessChangeTx), so the
 		// store has no admin arm.
 		AccessChangeLog: newAccessChangeLogStore(app),
-		// ExternalActions holds both pools (like Artifacts): app for Record
+		// ExternalActions holds both pools (like Deliverables): app for Record
 		// (manual bot runs + server approval/board handlers, under claims) +
 		// ListByTeam, admin for RecordSystem (event-triggered runs + the Jira
 		// mirror, no claims) + ListByOrgSystem (the org-wide governance read) +
-		// ListPRCreatedWithoutArtifactSystem (the reconciler's PR backstop).
+		// ListPRCreatedWithoutDeliverableSystem (the reconciler's PR backstop).
 		// Append-only audit log of org-credential external writes. See TFAC-483.
 		ExternalActions: newExternalActionStore(app, admin),
 		// Spend holds both pools: app for ListSpend + SpendByCategory (the
@@ -420,7 +420,7 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// (TxStores.ConversationPendingInput, see tx.go) so the resume write commits
 		// atomically with the status flip.
 		ConversationPendingInput: newConversationPendingInputStore(admin),
-		// Permissions is split-pool like Artifacts: the pending read runs on
+		// Permissions is split-pool like Deliverables: the pending read runs on
 		// the app pool under RLS (the policy composes through the
 		// conversation, mirroring claims), every write on the admin pool —
 		// tf_app holds no write grant and the writers are delegate goroutines
@@ -538,7 +538,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		// production) need the production WithTx wiring instead,
 		// which gets the real admin pool via Store.admin.
 		Conversations:         newConversationStore(tx, tx),
-		Artifacts:             newArtifactStore(tx, tx),
+		Deliverables:          newDeliverableStore(tx, tx),
 		Entities:              newEntityStore(tx, tx),
 		Repos:                 newRepositoryStore(tx, tx),
 		PendingFirings:        newPendingFiringsStore(tx, nil),

@@ -1298,26 +1298,26 @@ const pgQueuePositionCTE = `
 // fails on both backends.
 const pgConversationLiveStatusesSQL = `'running','fetching','cloning','agent_starting','awaiting_credentials'`
 
-// pgUnresolvedArtifactSQL is the SQL twin of domain.HasUnresolvedArtifacts,
-// written against an artifacts alias `art`: a draft pull request, or a pending
+// pgUnresolvedDeliverableSQL is the SQL twin of domain.HasUnresolvedDeliverables,
+// written against a deliverables alias `art`: a draft pull request, or a pending
 // review that reached the ready sentinel (details.review_event, set by
 // finalize-review). A review that was started and never finalized is
 // deliberately NOT unresolved — it would strand a human on an approval card
 // with nothing to approve.
 //
-// The kind/state literals mirror domain.ArtifactKindPullRequest /
-// ArtifactStatePRDraft / ArtifactKindReview / ArtifactStateReviewPending; the
+// The kind/state literals mirror domain.DeliverableKindPullRequest /
+// DeliverableStatePRDraft / DeliverableKindReview / DeliverableStateReviewPending; the
 // conformance suite is what holds them to the Go predicate, since the two
 // definitions have to agree for a count to mean what every card means.
 //
 // details_json is a text column here, so the sentinel read is guarded on the
 // value looking like an object before the jsonb cast — CASE evaluates its
 // WHEN first, so a NULL, an empty string, or anything else that is not an
-// object reads as not-ready, exactly as domain's ParseReviewArtifactDetails
+// object reads as not-ready, exactly as domain's ParseReviewDeliverableDetails
 // error/zero arms do. A value that opens like an object and is not valid JSON
 // is corruption no writer can produce (every writer marshals the struct), and
 // this deliberately raises on it rather than silently counting it as resolved.
-const pgUnresolvedArtifactSQL = `
+const pgUnresolvedDeliverableSQL = `
 	   (art.kind = 'pull_request' AND art.state = 'draft')
 	OR (art.kind = 'review' AND art.state = 'pending'
 	    AND COALESCE(
@@ -1327,7 +1327,7 @@ const pgUnresolvedArtifactSQL = `
 // pgConversationAttentionSQL is the "YOUR MOVE" predicate — the rail's
 // `needs`, counted per conversation — written against the conversation alias
 // `r`: an unanswered permission prompt, OR a conversation that is not live and
-// still holds an unresolved artifact.
+// still holds an unresolved deliverable.
 //
 // Pending is derived the way PermissionStore.ListPending derives it (state
 // 'pending' AND owned by the conversation's currently-active claim), so a
@@ -1346,9 +1346,9 @@ const pgConversationAttentionSQL = `(
 			                    WHERE cl_p.conversation_id = r.id AND cl_p.released_at IS NULL))
 		OR ((` + pgDisplayStatusSQL + `) NOT IN (` + pgConversationLiveStatusesSQL + `)
 		    AND EXISTS (
-		        SELECT 1 FROM artifacts art
+		        SELECT 1 FROM deliverables art
 		        WHERE art.org_id = r.org_id AND art.conversation_id = r.id
-		          AND (` + pgUnresolvedArtifactSQL + `)))
+		          AND (` + pgUnresolvedDeliverableSQL + `)))
 	)`
 
 // conversationClaimLateral derives the claim-facing Conversation fields from claims:
@@ -1682,7 +1682,7 @@ func (s *conversationStore) List(ctx context.Context, orgID string, filter db.Co
 // filter can match nothing at all, so the caller answers with an empty result
 // instead of running two queries to learn it.
 //
-// The artifacts / conversation_permissions reads inside the attention
+// The deliverables / conversation_permissions reads inside the attention
 // predicate are correlated subqueries rather than joins, so nothing here can
 // multiply the row count — a conversation with three draft PRs is one row and
 // one unit of `needs`.
@@ -1701,7 +1701,7 @@ func pgConversationListWhere(orgID string, filter db.ConversationListFilter) (st
 			return "", nil, false
 		}
 		// The slice binds as a uuid[] literal through one $N (pgUUIDArray),
-		// like artifactStore.ListByConversations — not a raw []string.
+		// like deliverableStore.ListByConversations — not a raw []string.
 		args = append(args, pgUUIDArray(ids))
 		where += fmt.Sprintf(` AND r.task_id = ANY($%d)`, len(args))
 	}
@@ -1745,7 +1745,7 @@ func (s *conversationStore) ListPRCoherenceTargetsSystem(ctx context.Context, or
 		  AND (
 		       t.entity_id = $2
 		       OR EXISTS (
-		           SELECT 1 FROM artifacts a
+		           SELECT 1 FROM deliverables a
 		           WHERE a.org_id = $1 AND a.conversation_id = r.id AND a.entity_id = $2
 		             AND a.kind = $6 AND a.state = $7
 		       )
@@ -1764,7 +1764,7 @@ func (s *conversationStore) ListPRCoherenceTargetsSystem(ctx context.Context, or
 		      WHERE te.org_id = $1 AND te.task_id = r.task_id AND te.event_id = $3 AND te.kind = 'injected'
 		  )
 		ORDER BY r.started_at ASC, r.id ASC
-	`, orgID, query.EntityID, query.EventID, nullUUID(query.BaseRepositoryID), nullUUID(query.HeadRepositoryID), domain.ArtifactKindReview, domain.ArtifactStateReviewPending, query.PRRef, query.BranchRef)
+	`, orgID, query.EntityID, query.EventID, nullUUID(query.BaseRepositoryID), nullUUID(query.HeadRepositoryID), domain.DeliverableKindReview, domain.DeliverableStateReviewPending, query.PRRef, query.BranchRef)
 	if err != nil {
 		return nil, err
 	}
@@ -2022,7 +2022,7 @@ func (s *conversationStore) InsertMessageForClaimSystem(ctx context.Context, org
 }
 
 // LastAgentActivityAtSystem returns the created_at of the conversation's
-// newest non-user message (the artifact-change ledger watermark). Ordered by id
+// newest non-user message (the deliverable-change ledger watermark). Ordered by id
 // DESC (the monotonic sequence) so the watermark is the genuinely last-inserted
 // agent row. Admin pool: the resume path holds no JWT claims. ok=false when the
 // conversation has no agent message yet.
@@ -2355,7 +2355,7 @@ func (s *conversationStore) MessagesForConversations(ctx context.Context, orgID 
 	}
 	// App pool (RLS-active): conversation_id is a uuid column, so the slice
 	// binds as a uuid[] literal through one $N (pgUUIDArray), mirroring
-	// artifactStore.ListByConversations. Ordering on (conversation_id, the effective
+	// deliverableStore.ListByConversations. Ordering on (conversation_id, the effective
 	// assembly key) so the caller groups by ConversationID with each
 	// conversation's messages in the same order the single-conversation display
 	// read gives them. Withdrawn-pending rows are hidden, same as MessagesWindow.

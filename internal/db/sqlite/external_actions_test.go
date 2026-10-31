@@ -18,22 +18,22 @@ import (
 // every field reads back intact, that an empty id is generated, and that the
 // empty optional columns land as SQL NULL. TFAC-483.
 func TestExternalActionStore_SQLite_RoundTrip(t *testing.T) {
-	conn := newSQLiteForArtifactTest(t)
+	conn := newSQLiteForDeliverableTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	conversationID := seedArtifactConversation(t, conn)
+	conversationID := seedDeliverableConversation(t, conn)
 
 	in := domain.ExternalAction{
 		OrgID:          runmode.LocalDefaultOrgID,
 		TeamID:         runmode.LocalDefaultTeamID,
-		Provider:       domain.ArtifactProviderGitHub,
+		Provider:       domain.ProviderGitHub,
 		Scope:          "https://github.com",
 		Action:         domain.ActionPRMarkedReady,
 		Target:         "octo/repo#123",
 		ExternalID:     "123",
 		URL:            "https://github.com/octo/repo/pull/123",
-		FromState:      domain.ArtifactStatePRDraft,
-		ToState:        domain.ArtifactStatePROpen,
+		FromState:      domain.DeliverableStatePRDraft,
+		ToState:        domain.DeliverableStatePROpen,
 		ConversationID: conversationID,
 		ActorUserID:    runmode.LocalDefaultUserID,
 		Credential:     domain.CredentialGitHubApp,
@@ -65,7 +65,7 @@ func TestExternalActionStore_SQLite_RoundTrip(t *testing.T) {
 	// A system action: empty optionals (team/actor/from/to/external/url/detail) → NULL.
 	if err := stores.ExternalActions.RecordSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalAction{
 		OrgID:      runmode.LocalDefaultOrgID,
-		Provider:   domain.ArtifactProviderJira,
+		Provider:   domain.ProviderJira,
 		Scope:      "https://acme.atlassian.net",
 		Action:     domain.ActionIssueTransitioned,
 		Target:     "SKY-1",
@@ -92,18 +92,18 @@ func TestExternalActionStore_SQLite_RoundTrip(t *testing.T) {
 // mutation. A genuinely new push (different sha → different key) is recorded
 // distinctly. TFAC-483.
 func TestExternalActionStore_SQLite_BranchTwinDedup(t *testing.T) {
-	conn := newSQLiteForArtifactTest(t)
+	conn := newSQLiteForDeliverableTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	conversationID := seedArtifactConversation(t, conn)
+	conversationID := seedDeliverableConversation(t, conn)
 
 	key := domain.BranchPushDedupKey(conversationID, "repo-1", "refs/heads/feat", "abc123")
 	twin := func(url string) domain.ExternalAction {
 		return domain.ExternalAction{
 			OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
-			Provider: domain.ArtifactProviderGitHub, Scope: "https://github.com", Action: domain.ActionBranchPushed,
+			Provider: domain.ProviderGitHub, Scope: "https://github.com", Action: domain.ActionBranchPushed,
 			Target: "octo/repo", ExternalID: "refs/heads/feat", URL: url, ConversationID: conversationID,
-			ToState: domain.ArtifactStateBranchPushed, Credential: domain.CredentialGitHubApp, DedupKey: key,
+			ToState: domain.DeliverableStateBranchPushed, Credential: domain.CredentialGitHubApp, DedupKey: key,
 		}
 	}
 	// The hook fires first (the winner), then the proxy backstop with the same key.
@@ -131,7 +131,7 @@ func TestExternalActionStore_SQLite_BranchTwinDedup(t *testing.T) {
 
 	// A new push (different sha) is its own row.
 	if err := stores.ExternalActions.RecordSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalAction{
-		OrgID: runmode.LocalDefaultOrgID, Provider: domain.ArtifactProviderGitHub, Scope: "https://github.com",
+		OrgID: runmode.LocalDefaultOrgID, Provider: domain.ProviderGitHub, Scope: "https://github.com",
 		Action: domain.ActionBranchPushed, Target: "octo/repo", Credential: domain.CredentialGitHubApp,
 		DedupKey: domain.BranchPushDedupKey(conversationID, "repo-1", "refs/heads/feat", "def456"),
 	}); err != nil {
@@ -152,12 +152,12 @@ func TestExternalActionStore_SQLite_BranchTwinDedup(t *testing.T) {
 // audit log from silently dropping a PR toggled draft↔ready or a comment edited
 // twice. TFAC-483.
 func TestExternalActionStore_SQLite_EmptyDedupAppendsEveryRow(t *testing.T) {
-	conn := newSQLiteForArtifactTest(t)
+	conn := newSQLiteForDeliverableTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 
 	repeat := domain.ExternalAction{
-		OrgID: runmode.LocalDefaultOrgID, Provider: domain.ArtifactProviderGitHub, Scope: "https://github.com",
+		OrgID: runmode.LocalDefaultOrgID, Provider: domain.ProviderGitHub, Scope: "https://github.com",
 		Action: domain.ActionPREdited, Target: "octo/repo#1", Credential: domain.CredentialGitHubApp,
 		// DedupKey deliberately empty — the store fills a uuid per insert.
 	}
@@ -197,19 +197,19 @@ func TestExternalActionStore_SQLite_EmptyDedupAppendsEveryRow(t *testing.T) {
 // paging — over a _time_format=sqlite conn so a bound Since/Until compares against
 // occurred_at correctly. TFAC-483.
 func TestExternalActionStore_SQLite_ListFiltersAndPaging(t *testing.T) {
-	conn := newSQLiteForArtifactTestTimed(t)
+	conn := newSQLiteForDeliverableTestTimed(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	conversationID := seedArtifactConversation(t, conn)
+	conversationID := seedDeliverableConversation(t, conn)
 
 	seeds := []struct {
 		provider, action, actor, when string
 	}{
-		{domain.ArtifactProviderGitHub, domain.ActionPRCreated, "", "2026-06-01 00:00:00"},                             // bot, no actor
-		{domain.ArtifactProviderGitHub, domain.ActionPRMarkedReady, runmode.LocalDefaultUserID, "2026-06-02 00:00:00"}, // human-authorized
-		{domain.ArtifactProviderJira, domain.ActionIssueTransitioned, "", "2026-06-03 00:00:00"},
-		{domain.ArtifactProviderGitHub, domain.ActionCommentPosted, "", "2026-06-04 00:00:00"},
-		{domain.ArtifactProviderJira, domain.ActionIssueCommentPosted, "", "2026-06-05 00:00:00"},
+		{domain.ProviderGitHub, domain.ActionPRCreated, "", "2026-06-01 00:00:00"},                             // bot, no actor
+		{domain.ProviderGitHub, domain.ActionPRMarkedReady, runmode.LocalDefaultUserID, "2026-06-02 00:00:00"}, // human-authorized
+		{domain.ProviderJira, domain.ActionIssueTransitioned, "", "2026-06-03 00:00:00"},
+		{domain.ProviderGitHub, domain.ActionCommentPosted, "", "2026-06-04 00:00:00"},
+		{domain.ProviderJira, domain.ActionIssueCommentPosted, "", "2026-06-05 00:00:00"},
 	}
 	for i, s := range seeds {
 		e := domain.ExternalAction{
@@ -237,7 +237,7 @@ func TestExternalActionStore_SQLite_ListFiltersAndPaging(t *testing.T) {
 		t.Errorf("not newest-first: first=%q last=%q", all[0].Action, all[4].Action)
 	}
 
-	gh, _, _ := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Provider: domain.ArtifactProviderGitHub})
+	gh, _, _ := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Provider: domain.ProviderGitHub})
 	if len(gh) != 3 {
 		t.Errorf("provider=github returned %d, want 3", len(gh))
 	}
@@ -287,17 +287,17 @@ func TestExternalActionStore_SQLite_ListFiltersAndPaging(t *testing.T) {
 // host-only key would let the first conversation's row swallow every later
 // one, org-wide and forever.
 func TestExternalActionStore_SQLite_EgressDenialDedupPerConversation(t *testing.T) {
-	conn := newSQLiteForArtifactTest(t)
+	conn := newSQLiteForDeliverableTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	convA := seedArtifactConversation(t, conn)
-	convB := seedArtifactConversationWithID(t, conn, "88888888-8888-8888-8888-888888888888")
+	convA := seedDeliverableConversation(t, conn)
+	convB := seedDeliverableConversationWithID(t, conn, "88888888-8888-8888-8888-888888888888")
 
 	const target = "api.github.com:443"
 	denial := func(conversationID string) domain.ExternalAction {
 		return domain.ExternalAction{
 			OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
-			Provider: domain.ArtifactProviderNetwork, Scope: domain.NetworkScope, Action: domain.ActionEgressDenied,
+			Provider: domain.ProviderNetwork, Scope: domain.NetworkScope, Action: domain.ActionEgressDenied,
 			Target: target, ConversationID: conversationID, Credential: domain.CredentialNone,
 			DedupKey: domain.EgressDenialDedupKey(conversationID, target),
 		}
@@ -335,11 +335,11 @@ func TestExternalActionStore_SQLite_EgressDenialDedupPerConversation(t *testing.
 // actions survive in the org feed with conversation_id NULL, and must not
 // reappear under whichever run is being read).
 func TestExternalActionStore_SQLite_ListByConversation(t *testing.T) {
-	conn := newSQLiteForArtifactTest(t)
+	conn := newSQLiteForDeliverableTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	convA := seedArtifactConversation(t, conn)
-	convB := seedArtifactConversationWithID(t, conn, "88888888-8888-8888-8888-888888888888")
+	convA := seedDeliverableConversation(t, conn)
+	convB := seedDeliverableConversationWithID(t, conn, "88888888-8888-8888-8888-888888888888")
 
 	// Each row carries a caller-supplied id (the store honors one) so the two
 	// UPDATEs below address exactly the row they mean. Keying them on `action`
@@ -349,7 +349,7 @@ func TestExternalActionStore_SQLite_ListByConversation(t *testing.T) {
 		t.Helper()
 		if err := stores.ExternalActions.RecordSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalAction{
 			ID: id, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
-			Provider: domain.ArtifactProviderGitHub, Scope: "https://github.com", Action: action, Target: "octo/repo",
+			Provider: domain.ProviderGitHub, Scope: "https://github.com", Action: action, Target: "octo/repo",
 			ConversationID: conversationID, Credential: domain.CredentialGitHubApp,
 		}); err != nil {
 			t.Fatalf("record %s: %v", action, err)

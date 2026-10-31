@@ -76,7 +76,7 @@ func TestBackfillDashboardHistory_SeedsTerminalEntity_NoEvents(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 
 	n, err := tr.BackfillDashboardHistory(ctx, "https://github.com", client, "octocat", []string{"octo/repo"})
@@ -142,7 +142,7 @@ func TestBackfillDashboardHistory_HonorsContextCancellation(t *testing.T) {
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 
 	ctx, cancel := context.WithCancel(context.Background())

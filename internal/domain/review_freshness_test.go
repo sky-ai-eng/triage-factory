@@ -2,15 +2,15 @@ package domain
 
 import "testing"
 
-func reviewArtifactWith(t *testing.T, d ReviewArtifactDetails) Artifact {
+func reviewDeliverableWith(t *testing.T, d ReviewDeliverableDetails) Deliverable {
 	t.Helper()
-	return Artifact{Kind: ArtifactKindReview, DetailsJSON: MarshalReviewArtifactDetails(d)}
+	return Deliverable{Kind: DeliverableKindReview, DetailsJSON: MarshalReviewDeliverableDetails(d)}
 }
 
 // TestReviewAnchoredAtHead_StartHead: a head matching the start-review anchor
 // (details.HeadSHA) reads as current.
 func TestReviewAnchoredAtHead_StartHead(t *testing.T) {
-	a := reviewArtifactWith(t, ReviewArtifactDetails{HeadSHA: "headA"})
+	a := reviewDeliverableWith(t, ReviewDeliverableDetails{HeadSHA: "headA"})
 	if !ReviewAnchoredAtHead(a, "headA") {
 		t.Error("want anchored at the start head")
 	}
@@ -24,9 +24,9 @@ func TestReviewAnchoredAtHead_StartHead(t *testing.T) {
 // matching a comment's CommitSHA reads as current — the post-finalize case the
 // start-head-only compare would falsely flag as behind.
 func TestReviewAnchoredAtHead_ReconciledCommentHead(t *testing.T) {
-	a := reviewArtifactWith(t, ReviewArtifactDetails{
+	a := reviewDeliverableWith(t, ReviewDeliverableDetails{
 		HeadSHA: "startHead",
-		StagedComments: []ReviewArtifactComment{
+		StagedComments: []ReviewDeliverableComment{
 			{Path: "a.go", Body: "x", CommitSHA: "reconciledHead"},
 		},
 	})
@@ -41,16 +41,16 @@ func TestReviewAnchoredAtHead_ReconciledCommentHead(t *testing.T) {
 	}
 }
 
-// TestReviewAnchoredAtHead_SafeDefaults: a non-review artifact, an empty head, or
+// TestReviewAnchoredAtHead_SafeDefaults: a non-review deliverable, an empty head, or
 // unparseable details default to NOT anchored (the caller fires the note).
 func TestReviewAnchoredAtHead_SafeDefaults(t *testing.T) {
-	if ReviewAnchoredAtHead(Artifact{Kind: ArtifactKindPullRequest, DetailsJSON: ""}, "h") {
-		t.Error("non-review artifact must read as not anchored")
+	if ReviewAnchoredAtHead(Deliverable{Kind: DeliverableKindPullRequest, DetailsJSON: ""}, "h") {
+		t.Error("non-review deliverable must read as not anchored")
 	}
-	if ReviewAnchoredAtHead(reviewArtifactWith(t, ReviewArtifactDetails{HeadSHA: "h"}), "") {
+	if ReviewAnchoredAtHead(reviewDeliverableWith(t, ReviewDeliverableDetails{HeadSHA: "h"}), "") {
 		t.Error("empty head must read as not anchored")
 	}
-	if ReviewAnchoredAtHead(Artifact{Kind: ArtifactKindReview, DetailsJSON: "{not json"}, "h") {
+	if ReviewAnchoredAtHead(Deliverable{Kind: DeliverableKindReview, DetailsJSON: "{not json"}, "h") {
 		t.Error("unparseable details must read as not anchored")
 	}
 }

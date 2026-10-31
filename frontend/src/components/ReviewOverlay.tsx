@@ -8,15 +8,15 @@ import ReviewSummary from './ReviewSummary'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 
-// ReviewArtifact mirrors GET /api/artifacts/{id} for a review artifact: the
-// shared artifact envelope, with the review-shaped payload under `details`.
+// ReviewDeliverable mirrors GET /api/deliverables/{id} for a review deliverable: the
+// shared deliverable envelope, with the review-shaped payload under `details`.
 // review_body / review_event there are the STAGED values (applied to GitHub
 // only on approval); the comments are staged TF-side, each with its
 // severity parsed back out of the body (chip) and the clean body shown.
 // commits_since_finalize + per-comment freshness are computed against the live
 // PR head at GET time, so the human sees how far the PR has drifted
 // since the agent wrote the review.
-interface ReviewArtifact {
+interface ReviewDeliverable {
   id: string
   kind: string
   state: string
@@ -49,7 +49,7 @@ interface ReviewArtifact {
 }
 
 interface Props {
-  artifactId: string
+  deliverableId: string
   open: boolean
   onClose: () => void
 }
@@ -58,17 +58,17 @@ interface Props {
 // The review is staged TF-side (TFAC-494); this overlay reads it 1:1, edits
 // inline comments live, stages the summary body + verdict, and on Submit
 // approves — creating + submitting the review on GitHub atomically. Mirrors
-// PendingPROverlay's shape (artifactId-addressed, pessimistic sync, isolated
+// PendingPROverlay's shape (deliverableId-addressed, pessimistic sync, isolated
 // diff error) with review-specific affordances (inline comments + body/event
 // editor).
 //
 // A resolved review (submitted/dismissed) renders READ-ONLY: no Submit, no
-// edits, a link out to the posted review instead. The artifacts list stops
+// edits, a link out to the posted review instead. The deliverables list stops
 // routing resolved reviews here, but the overlay can still land on one — it was
 // already open when someone else approved, or an approval-roster row raced its
 // fetch — and must not present a dead (or worse, double-posting) Submit.
-export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
-  const [review, setReview] = useState<ReviewArtifact | null>(null)
+export default function ReviewOverlay({ deliverableId, open, onClose }: Props) {
+  const [review, setReview] = useState<ReviewDeliverable | null>(null)
   const [files, setFiles] = useState<FileData[]>([])
   const [loading, setLoading] = useState(true)
   // error is the blocking (full-screen) state: without the review there's nothing
@@ -98,9 +98,9 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
   const titleId = useId()
   useFocusTrap(dialogRef, { active: open, initialFocus: closeRef })
 
-  // Fetch the review artifact (blocking), then the diff (isolated).
+  // Fetch the review deliverable (blocking), then the diff (isolated).
   useEffect(() => {
-    if (!open || !artifactId) return
+    if (!open || !deliverableId) return
     let cancelled = false
     setLoading(true)
     setError(null)
@@ -110,9 +110,9 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
     setTruncationNote(null)
     setDiffError(null)
     ;(async () => {
-      let data: ReviewArtifact
+      let data: ReviewDeliverable
       try {
-        data = await apiJSON<ReviewArtifact>(`/api/artifacts/${artifactId}`)
+        data = await apiJSON<ReviewDeliverable>(`/api/deliverables/${deliverableId}`)
       } catch (err) {
         if (!cancelled) {
           setError(httpErrorMessage(err, 'Could not load the review.'))
@@ -126,7 +126,7 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
       try {
         // The diff endpoint answers with the patch text, not JSON, and the
         // truncation flag rides on a header — so this reads the Response.
-        const diffRes = await apiFetch(`/api/artifacts/${artifactId}/diff`)
+        const diffRes = await apiFetch(`/api/deliverables/${deliverableId}/diff`)
         const diffText = await diffRes.text()
         if (cancelled) return
         setFiles(parseDiff(diffText))
@@ -141,7 +141,7 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
     return () => {
       cancelled = true
     }
-  }, [open, artifactId, reloadKey])
+  }, [open, deliverableId, reloadKey])
 
   // Pessimistic comment ops on the live GitHub pending review: await the request,
   // throw on !ok so the child (ReviewComment) surfaces the error and stays in edit
@@ -149,7 +149,7 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
   const handleUpdateComment = useCallback(
     async (commentId: string, body: string) => {
       try {
-        await apiFetch(`/api/artifacts/${artifactId}/comments/${commentId}`, {
+        await apiFetch(`/api/deliverables/${deliverableId}/comments/${commentId}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ body }),
@@ -173,13 +173,15 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
           : prev,
       )
     },
-    [artifactId],
+    [deliverableId],
   )
 
   const handleDeleteComment = useCallback(
     async (commentId: string) => {
       try {
-        await apiFetch(`/api/artifacts/${artifactId}/comments/${commentId}`, { method: 'DELETE' })
+        await apiFetch(`/api/deliverables/${deliverableId}/comments/${commentId}`, {
+          method: 'DELETE',
+        })
       } catch (err) {
         throw new Error(httpErrorMessage(err, 'Could not delete the comment.'))
       }
@@ -195,15 +197,15 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
           : prev,
       )
     },
-    [artifactId],
+    [deliverableId],
   )
 
-  // Body + event stage into the artifact's details_json (no GitHub call — applied
+  // Body + event stage into the deliverable's details_json (no GitHub call — applied
   // at approval). lastSavePromise lets the submit handler await the last edit.
   const patchReview = useCallback(
     async (patch: object) => {
       try {
-        await apiFetch(`/api/artifacts/${artifactId}/review`, {
+        await apiFetch(`/api/deliverables/${deliverableId}/review`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(patch),
@@ -212,7 +214,7 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
         throw new Error(httpErrorMessage(err, 'Could not save the review.'))
       }
     },
-    [artifactId],
+    [deliverableId],
   )
 
   // Track every in-flight body/event stage (not just the most recent), so submit
@@ -257,7 +259,7 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
       if (inFlightSaves.current.size > 0) {
         await Promise.allSettled([...inFlightSaves.current])
       }
-      await apiFetch(`/api/artifacts/${artifactId}/approve`, {
+      await apiFetch(`/api/deliverables/${deliverableId}/approve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
       })
@@ -267,7 +269,7 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
     } finally {
       setSubmitting(false)
     }
-  }, [artifactId, onClose])
+  }, [deliverableId, onClose])
 
   // Re-reconcile the staged comments to the PR's live head (TFAC-500): survivors
   // are remapped, outdated comments dropped, the finalize frame re-pinned. On
@@ -277,7 +279,7 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
     setRefreshing(true)
     setRefreshError(null)
     try {
-      await apiFetch(`/api/artifacts/${artifactId}/review/refresh`, {
+      await apiFetch(`/api/deliverables/${deliverableId}/review/refresh`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
       })
@@ -290,7 +292,7 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
     } finally {
       setRefreshing(false)
     }
-  }, [artifactId])
+  }, [deliverableId])
 
   // Per-verdict counts for the Refresh confirmation (computed from the freshness
   // the GET already returned — no extra round-trip): how many comments would be

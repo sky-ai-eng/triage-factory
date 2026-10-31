@@ -38,7 +38,7 @@ func pgRepoRenameFactory(h *pgtest.Harness) dbtest.RepoRenameFactory {
 			TeamID: teamID,
 			Conversation: func(t *testing.T, suffix string) string {
 				t.Helper()
-				return seedPgArtifactConversation(t, h, orgID, teamID, userID)
+				return seedPgDeliverableConversation(t, h, orgID, teamID, userID)
 			},
 			Task: func(t *testing.T, entityID, suffix string) string {
 				t.Helper()

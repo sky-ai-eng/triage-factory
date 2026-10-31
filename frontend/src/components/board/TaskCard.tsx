@@ -47,7 +47,7 @@ import './task-card.css'
 //   PERMISSION  blocks. The agent has stopped. It takes the activity row's
 //               slot, because a stopped agent has no current command, and the
 //               two therefore never appear together.
-//   APPROVAL    does not block. Finished artifacts wait on a verdict while the
+//   APPROVAL    does not block. Finished deliverables wait on a verdict while the
 //               run carries on, so it spends no room at all: the strip warms
 //               the kinds involved and the corner brackets brighten. It can
 //               therefore coexist with a permission request without the card
@@ -88,7 +88,7 @@ export interface TaskCardProps {
   command?: string
   /** A blocked run. Its presence removes the activity row. */
   permission?: { command: string; count: number; onAllow?: () => void; onDeny?: () => void }
-  artifacts?: ArtifactTotals
+  deliverables?: ArtifactTotals
   pending?: PendingTotals
   /** How long the run has been going. Runs only. */
   elapsed?: string
@@ -115,7 +115,7 @@ export interface TaskCardProps {
 // say it is a thing you can pick up, and they brighten together on hover so
 // the whole card reads as one target rather than four.
 //
-// They also carry the ONE ask that does not block: artifacts waiting on a
+// They also carry the ONE ask that does not block: deliverables waiting on a
 // verdict take the frame from 35% warm to 90%. No element is added, nothing
 // has to find room on a card that is already dense, and four arms at the
 // card's corners are legible at a lane's scanning distance in a way a 14px
@@ -337,7 +337,7 @@ export function TaskCard({
   event,
   command,
   permission,
-  artifacts,
+  deliverables,
   pending,
   elapsed,
   age,
@@ -582,14 +582,14 @@ export function TaskCard({
 
       {settled ? (
         // A finished run has nothing to report and one duration to state, so
-        // the row and the footer collapse into each other: artifacts take the
+        // the row and the footer collapse into each other: deliverables take the
         // left, and "Ran for" carries the arrow at the right. One line where
         // there were two, and the elapsed clock stops being a live figure and
         // becomes the sentence's own subject. A task ended with no run to view
         // states its age instead.
         <div className="tc-foot">
           <span style={{ display: 'flex', minWidth: 0 }}>
-            <ArtifactStrip artifacts={artifacts} pending={pending} href={href} />
+            <ArtifactStrip deliverables={deliverables} pending={pending} href={href} />
           </span>
           {href ? (
             <ActivityRow
@@ -606,12 +606,12 @@ export function TaskCard({
           )}
         </div>
       ) : (
-        (time || artifacts) && (
+        (time || deliverables) && (
           <div className="tc-foot">
             <span className="tc-readout" title={queued ? ageTitle : undefined}>
               {time}
             </span>
-            <ArtifactStrip artifacts={artifacts} pending={pending} href={href} />
+            <ArtifactStrip deliverables={deliverables} pending={pending} href={href} />
           </div>
         )
       )}

@@ -25,7 +25,7 @@ import (
 // An unrecognized posture stages. The handler validates the enum on write, so a
 // value that reaches here off the closed set is corrupt state, and staging is
 // the outcome that loses nothing.
-func PostureSubmits(posture string, identity ghclient.Identity, event string, comments []domain.ReviewArtifactComment) bool {
+func PostureSubmits(posture string, identity ghclient.Identity, event string, comments []domain.ReviewDeliverableComment) bool {
 	switch posture {
 	case domain.ReviewPostureAuto:
 		return true
@@ -44,7 +44,7 @@ func PostureSubmits(posture string, identity ghclient.Identity, event string, co
 // read back out of the comment body, where add-review-comment baked the badge —
 // the same inverse the review overlay's chip uses, so the UI and this gate
 // agree on what "blocker" means.
-func consequential(event string, comments []domain.ReviewArtifactComment) bool {
+func consequential(event string, comments []domain.ReviewDeliverableComment) bool {
 	if strings.EqualFold(event, "REQUEST_CHANGES") {
 		return true
 	}

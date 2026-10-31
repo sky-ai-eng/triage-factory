@@ -14,7 +14,7 @@ import (
 // asserts.
 func TestRateLimitReadingStore_SQLite_Conformance(t *testing.T) {
 	dbtest.RunRateLimitReadingStoreConformance(t, func(t *testing.T) (db.RateLimitReadingStore, string) {
-		conn := newSQLiteForArtifactTest(t)
+		conn := newSQLiteForDeliverableTest(t)
 		return sqlitestore.New(conn).RateLimitReadings, runmode.LocalDefaultOrgID
 	})
 }

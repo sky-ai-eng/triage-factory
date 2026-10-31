@@ -7,7 +7,7 @@ import (
 
 // StagedInjection is one durably-queued agent-facing injection awaiting
 // delivery on a conversation's next resume/steer. It is the "terminal ledger"
-// half of the artifact-sidecar feedback design (TFAC-493) made generic
+// half of the deliverable-sidecar feedback design (TFAC-493) made generic
 // (TFAC-501): a producer that has no durable row to re-derive its injection
 // from (the PR coherence feed is such a producer) stages the
 // injection here, and the spawner flushes the conversation's pending injections
@@ -40,11 +40,11 @@ type StagedInjection struct {
 // the agent was told, and that stays true whether or not the event row still
 // exists — an FK would force a purge of events to either block or take
 // transcript rows with it. An id that no longer resolves is the better
-// failure, the same trade artifacts make by outliving the run that produced
+// failure, the same trade deliverables make by outliving the run that produced
 // them.
 //
 // The zero value is valid and means "no originating event": a human resolving
-// an artifact produces a note nothing external caused.
+// a deliverable produces a note nothing external caused.
 type NoteProvenance struct {
 	EventID   string `json:"event_id,omitempty"`
 	EventType string `json:"event_type,omitempty"`
@@ -97,12 +97,13 @@ const (
 	StagedInjectionProducerPRCoherence = "pr_coherence"
 )
 
-// NoteProducerArtifactResolved tags the note telling an agent that a human
-// resolved an artifact it produced. It shares the producer vocabulary above
+// NoteProducerDeliverableResolved tags the note telling an agent that a human
+// resolved a deliverable it produced. It shares the producer vocabulary above
 // but never reaches the staged queue — the resume path re-derives that note
-// from artifact state instead (artifactLedgerForResume) — so it appears only
-// on a live-delivered note's message row.
-const NoteProducerArtifactResolved = "artifact_resolved"
+// from deliverable state instead (deliverableLedgerForResume) — so it appears only
+// on a live-delivered note's message row. Stored message rows carry the value,
+// so it keeps its spelling.
+const NoteProducerDeliverableResolved = "artifact_resolved"
 
 // StagedInjectionBlock renders the bundled <system-note> block the resume path
 // prepends ahead of a parked conversation's user message: every staged
@@ -111,7 +112,7 @@ const NoteProducerArtifactResolved = "artifact_resolved"
 // the slice is empty, so a resume with nothing staged prepends nothing.
 //
 // The lead-in frames these as out-of-band updates that landed while the agent was
-// not running — the same shape ArtifactLedgerBlock uses for the artifact-change
+// not running — the same shape DeliverableLedgerBlock uses for the deliverable-change
 // ledger, so the two prepended blocks read consistently when a resume carries
 // both.
 func StagedInjectionBlock(injections []StagedInjection) string {

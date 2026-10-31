@@ -180,7 +180,7 @@ func Handle(args []string) {
 	fmt.Println("triagefactory uninstall: done. To remove the binary, run `brew uninstall triagefactory`.")
 }
 
-// uninstallPlan is the set of artifacts present on disk at invocation
+// uninstallPlan is the set of deliverables present on disk at invocation
 // time. We snapshot this before doing anything so we can show the user
 // an accurate "about to remove" list without lying about things that
 // were never there in the first place.

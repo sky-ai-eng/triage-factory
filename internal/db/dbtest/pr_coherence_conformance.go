@@ -27,9 +27,9 @@ type PRCoherenceTargetFactory func(t *testing.T) (
 // on but does not own. Each backend implements them against its own SQL or
 // sibling stores.
 type PRCoherenceSeeder struct {
-	// PendingReview attaches a pending review artifact for repo#prNumber,
+	// PendingReview attaches a pending review deliverable for repo#prNumber,
 	// keyed on the pull request's node id prNodeID, on the GitHub host (the
-	// artifact's scope) to the conversation, linked to the entity carrying
+	// deliverable's scope) to the conversation, linked to the entity carrying
 	// prNodeID on the host as the exec funnel links it (none, when no entity
 	// carries it) — the review arm's evidence that an agent is drafting
 	// against this PR.
@@ -138,7 +138,7 @@ func RunPRCoherenceTargetsConformance(t *testing.T, factory PRCoherenceTargetFac
 		eventID := seed.Event(t, entityID, domain.EventGitHubPRCICheckFailed)
 
 		// The reviewer's task hangs off a different entity entirely, so only
-		// the pending review artifact can connect it to the PR in question.
+		// the pending review deliverable can connect it to the PR in question.
 		otherEntityID := seed.Entity(t, "review-author")
 		otherEventID := seed.Event(t, otherEntityID, domain.EventGitHubPRCICheckFailed)
 		otherTaskID := seed.Task(t, otherEntityID, domain.EventGitHubPRCICheckFailed, otherEventID)

@@ -21,10 +21,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentmeta"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/artifactteardown"
 	"github.com/sky-ai-eng/triage-factory/internal/cell"
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/deliverableteardown"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
@@ -107,7 +107,7 @@ type Spawner struct {
 	tasks                                   db.TaskStore         // re-read tasks for run lifecycle handlers
 	conversations                           db.ConversationStore // run lifecycle + transcript
 	entities                                db.EntityStore       // entity reads for project lookup + resume context
-	artifacts                               db.ArtifactStore     // review + draft-PR artifact lookup on processCompletion park check
+	deliverables                            db.DeliverableStore  // review + draft-PR deliverable lookup on processCompletion park check
 	// stagedInjections is the durable, producer-agnostic "stage for next
 	// resume" agent-injection queue. The generic staged-injection API
 	// (stageOrDeliverInjection / stagedInjectionsForResume) appends here
@@ -646,7 +646,7 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		claimCredentials:      stores.ClaimCredentials,
 		tasks:                 stores.Tasks,
 		entities:              stores.Entities,
-		artifacts:             stores.Artifacts,
+		deliverables:          stores.Deliverables,
 		stagedInjections:      stores.StagedInjections,
 		events:                stores.Events,
 		taskMemory:            stores.TaskMemory,
@@ -1246,9 +1246,9 @@ func gitDenyNotMaterialized(repoID string) gitproxy.Decision {
 // with the upstream's answer for it; this is where the outcome splits:
 //
 //   - accepted (PushedRef.Succeeded: a 2xx whose report-status did not refuse
-//     the ref — the push landed): shape it into a branch artifact and upsert
+//     the ref — the push landed): shape it into a branch deliverable and upsert
 //     it through the same host-side path the pre-push hook uses —
-//     agenthost.NewLocal → UpsertArtifact — so the write routes to the right
+//     agenthost.NewLocal → UpsertDeliverable — so the write routes to the right
 //     pool (admin for an event-triggered run, the kicking-off user's synthetic
 //     claims for a manual one) and lands the ActionBranchPushed audit row in
 //     the same write. The same constructor and sink as the hook, which keys
@@ -1259,7 +1259,7 @@ func gitDenyNotMaterialized(repoID string) gitproxy.Decision {
 //   - refused (a non-2xx, or an "ng" ref inside a 200 — nothing landed):
 //     record ONLY the branch_push_failed audit row, carrying the report's
 //     reason and the remote's message. The audit log never omits an attempt;
-//     the artifact ledger never gains a branch that doesn't exist.
+//     the deliverable ledger never gains a branch that doesn't exist.
 //
 // host is the run's shared audit client rather than one built here, so the
 // credential the sidecar reports after bring-up reaches this recorder and the
@@ -1269,14 +1269,14 @@ func gitDenyNotMaterialized(repoID string) gitproxy.Decision {
 // every ordinary push transits the proxy (even `git push --no-verify`, which
 // skips client hooks), and the pre-push hook stands down there
 // (githooks.PushCaptureEnvVar) because it fires before the transfer and would
-// record failed pushes as artifacts.
+// record failed pushes as deliverables.
 //
 // Best-effort: a non-branch ref or a record failure is dropped (logged), never
 // surfaced. By the time this runs the push has already completed upstream, so
 // nothing it does can block, alter, or fail the push.
 func gitPushRecorder(host *agenthost.LocalClient, info agenthost.ConversationInfo) func(context.Context, gitproxy.PushedRef) {
 	return func(ctx context.Context, push gitproxy.PushedRef) {
-		art, ok := domain.NewBranchArtifact(push.Repo, push.Ref, push.NewSHA, push.Created)
+		art, ok := domain.NewBranchDeliverable(push.Repo, push.Ref, push.NewSHA, push.Created)
 		if !ok {
 			return // not a branch ref (tag/other) or an unparseable repo path
 		}
@@ -1284,8 +1284,8 @@ func gitPushRecorder(host *agenthost.LocalClient, info agenthost.ConversationInf
 			host.RecordGitPushFailed(ctx, push)
 			return
 		}
-		if _, err := host.UpsertArtifact(ctx, art); err != nil {
-			delegateLog.Warn("git-proxy push capture: record branch artifact failed",
+		if _, err := host.UpsertDeliverable(ctx, art); err != nil {
+			delegateLog.Warn("git-proxy push capture: record branch deliverable failed",
 				"conversation", info.ConversationID, "repo", push.Repo, "ref", push.Ref, "error", err)
 		}
 		host.MarkPushedSignature(ctx, push)
@@ -1741,7 +1741,7 @@ func (s *Spawner) broadcastMessage(orgID, conversationID string, msg *domain.Mes
 	})
 }
 
-// TeardownTaskArtifactsSystem retires every unresolved artifact a task's
+// TeardownTaskDeliverablesSystem retires every unresolved deliverable a task's
 // conversations hold, for a close nobody asked for: the event cascade finding
 // the PR merged, the reconciler finding an entity already terminal. The verb is
 // the router's — it stops the task's conversations and then calls this — and it
@@ -1756,30 +1756,30 @@ func (s *Spawner) broadcastMessage(orgID, conversationID string, msg *domain.Mes
 //
 // Best-effort by contract, like every other half of the close cascade: the task
 // is already terminal by the time this runs, so a failure is logged and the
-// artifacts stay unresolved for the next close to retry rather than unwinding a
+// deliverables stay unresolved for the next close to retry rather than unwinding a
 // close that landed.
-func (s *Spawner) TeardownTaskArtifactsSystem(ctx context.Context, orgID, taskID string) {
-	if s.conversations == nil || s.artifacts == nil || s.externalActions == nil {
+func (s *Spawner) TeardownTaskDeliverablesSystem(ctx context.Context, orgID, taskID string) {
+	if s.conversations == nil || s.deliverables == nil || s.externalActions == nil {
 		// The close already happened, and nothing walks back here for it, so
-		// the artifacts this pass would have retired stay open with no record
+		// the deliverables this pass would have retired stay open with no record
 		// of why. Say so rather than returning into silence.
-		delegateLog.Warn("artifact teardown skipped: the spawner holds no store for it; the task's artifacts stay unresolved",
+		delegateLog.Warn("deliverable teardown skipped: the spawner holds no store for it; the task's deliverables stay unresolved",
 			"task", taskID, "org", orgID)
 		return
 	}
 	// Detached from the caller's cancellation: the task is already closed, and
-	// a drain shutting down mid-pass would leave its artifacts half-retired
+	// a drain shutting down mid-pass would leave its deliverables half-retired
 	// with nothing able to reach them again — a replayed close finds no active
 	// task and never walks back here. WithoutCancel keeps the caller's values,
 	// so the writes stay inside the close's trace.
 	ctx = context.WithoutCancel(ctx)
-	if err := artifactteardown.Teardown(ctx, systemTeardown{s: s}, orgID, taskID, ""); err != nil {
-		delegateLog.Error("system artifact teardown failed; artifacts left unresolved for retry",
+	if err := deliverableteardown.Teardown(ctx, systemTeardown{s: s}, orgID, taskID, ""); err != nil {
+		delegateLog.Error("system deliverable teardown failed; deliverables left unresolved for retry",
 			"task", taskID, "org", orgID, "error", err)
 	}
 }
 
-// systemTeardown is the artifact teardown's admin-pool adapter, and its store
+// systemTeardown is the deliverable teardown's admin-pool adapter, and its store
 // surface too — the two are one type because the admin pool binds no
 // transaction to distinguish them. The `...System` store methods are per-call
 // with org_id bound by argument rather than by RLS, so a batch applies its
@@ -1788,7 +1788,7 @@ func (s *Spawner) TeardownTaskArtifactsSystem(ctx context.Context, orgID, taskID
 // so running the teardown again is safe.
 type systemTeardown struct{ s *Spawner }
 
-func (d systemTeardown) Batch(_ context.Context, _ string, fn func(artifactteardown.Stores) error) error {
+func (d systemTeardown) Batch(_ context.Context, _ string, fn func(deliverableteardown.Stores) error) error {
 	return fn(d)
 }
 
@@ -1805,12 +1805,12 @@ func (d systemTeardown) ConversationsForTask(ctx context.Context, orgID, taskID 
 	return d.s.conversations.ListForTaskSystem(ctx, orgID, taskID)
 }
 
-func (d systemTeardown) ArtifactsForConversation(ctx context.Context, orgID, conversationID string) ([]domain.Artifact, error) {
-	return d.s.artifacts.ListByConversationSystem(ctx, orgID, conversationID)
+func (d systemTeardown) DeliverablesForConversation(ctx context.Context, orgID, conversationID string) ([]domain.Deliverable, error) {
+	return d.s.deliverables.ListByConversationSystem(ctx, orgID, conversationID)
 }
 
-func (d systemTeardown) UpsertArtifact(ctx context.Context, orgID string, a domain.Artifact) error {
-	_, err := d.s.artifacts.UpsertSystem(ctx, orgID, a)
+func (d systemTeardown) UpsertDeliverable(ctx context.Context, orgID string, a domain.Deliverable) error {
+	_, err := d.s.deliverables.UpsertSystem(ctx, orgID, a)
 	return err
 }
 

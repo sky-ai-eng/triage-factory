@@ -9,7 +9,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// errNoRegistryRow refuses a branch artifact whose repository no registry row
+// errNoRegistryRow refuses a branch deliverable whose repository no registry row
 // answers for: a branch is keyed on its repository's row id
 // (domain.BranchDedupKey), so without a row there is nothing to key it on.
 var errNoRegistryRow = errors.New("no repository registry row answers to the branch's repository")
@@ -73,17 +73,17 @@ func (c *LocalClient) registryRepo(ctx context.Context, owner, repo string) (*do
 	return row, nil
 }
 
-// onRegistryRow records a GitHub or git artifact built under the name a verb
+// onRegistryRow records a GitHub or git deliverable built under the name a verb
 // spelled against its repository's registry row (registryRepo). The target
 // takes the registry's name, so the row reads like every other row of the
 // repository. A branch is keyed on the row's id (domain.BranchDedupKey), so
 // one whose repository has no row is refused with errNoRegistryRow, and one
 // whose row could not be read with the read's error. A pull request or review
 // is keyed on the pull request's node id already, and one whose repository's
-// row is missing or unreadable keeps the name it was built under. An artifact
+// row is missing or unreadable keeps the name it was built under. A deliverable
 // whose target does not lead with an owner/repo is returned as it is.
-func (c *LocalClient) onRegistryRow(ctx context.Context, a domain.Artifact) (domain.Artifact, error) {
-	if a.Provider != domain.ArtifactProviderGitHub && a.Provider != domain.ArtifactProviderGit {
+func (c *LocalClient) onRegistryRow(ctx context.Context, a domain.Deliverable) (domain.Deliverable, error) {
+	if a.Provider != domain.ProviderGitHub && a.Provider != domain.ProviderGit {
 		return a, nil
 	}
 	from, _, _ := strings.Cut(a.Target, "#")
@@ -94,7 +94,7 @@ func (c *LocalClient) onRegistryRow(ctx context.Context, a domain.Artifact) (dom
 		row, err = c.registryRepo(ctx, owner, repo)
 	}
 	if row == nil {
-		if a.Kind != domain.ArtifactKindBranch {
+		if a.Kind != domain.DeliverableKindBranch {
 			if err != nil {
 				agenthostLog.Warn("registry name: keeping the name as spelled",
 					"conversation", c.info.ConversationID, "repo", from, "error", err)
@@ -107,7 +107,7 @@ func (c *LocalClient) onRegistryRow(ctx context.Context, a domain.Artifact) (dom
 		return a, fmt.Errorf("%w: %s", errNoRegistryRow, from)
 	}
 	a.Target, _ = domain.RewriteRepoSlugPrefix(a.Target, from, row.Slug())
-	if a.Kind == domain.ArtifactKindBranch {
+	if a.Kind == domain.DeliverableKindBranch {
 		a.DedupKey = domain.BranchDedupKey(row.ID, a.ExternalID)
 	}
 	return a, nil

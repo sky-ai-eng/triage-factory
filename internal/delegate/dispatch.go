@@ -1644,7 +1644,7 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 	// blueprint running, the worktree on disk, the snapshot in the blob store
 	// for the resume path — and the task's column where it is. A step that
 	// queued a draft PR / pending review records its verdict normally and the
-	// orchestrator advances, the artifact riding along as a sidecar.
+	// orchestrator advances, the deliverable riding along as a sidecar.
 	if stepConversation.Status == domain.StatusOpen && !stepConversation.Concluded() {
 		dispatchLog.Info("blueprint_run step paused; blueprint remains running", "blueprint_run", br.ID, "step", stepIdx, "status", stepConversation.Status)
 		return

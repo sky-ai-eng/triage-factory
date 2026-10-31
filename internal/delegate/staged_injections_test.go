@@ -119,9 +119,9 @@ func TestStagedInjectionsForResume_FlushesAndDrains(t *testing.T) {
 }
 
 // TestResumeSystemPrepends_OrdersInjectionsThenLedger: a resumable run with BOTH
-// a staged injection AND a human-resolved artifact composes both <system-note>
+// a staged injection AND a human-resolved deliverable composes both <system-note>
 // blocks ahead of the user's text, staged-injection block first:
-// [staged injections][artifact ledger]. Guards the composed order against a
+// [staged injections][deliverable ledger]. Guards the composed order against a
 // refactor dropping or reordering a block (the components are tested individually
 // elsewhere; this pins SendMessage's assembly).
 func TestResumeSystemPrepends_OrdersInjectionsThenLedger(t *testing.T) {
@@ -130,11 +130,11 @@ func TestResumeSystemPrepends_OrdersInjectionsThenLedger(t *testing.T) {
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 	ctx := context.Background()
 
-	// Artifact ledger: a watermark in the past so the resolved PR lands in it.
+	// Deliverable ledger: a watermark in the past so the resolved PR lands in it.
 	seedMessageAt(t, s, "r-compose", time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
-	approvedPR := domain.NewPullRequestArtifact("o/r", 1, "node1", "h", "main",
+	approvedPR := domain.NewPullRequestDeliverable("o/r", 1, "node1", "h", "main",
 		"https://github.com/o/r/pull/1", "PR one", "", false) // draft=false → open (approved)
-	seedResolvedArtifact(t, s, "r-compose", approvedPR)
+	seedResolvedDeliverable(t, s, "r-compose", approvedPR)
 
 	// Staged injection on the same run.
 	stageOne(t, s, runmode.LocalDefaultOrgID, "r-compose",
@@ -152,7 +152,7 @@ func TestResumeSystemPrepends_OrdersInjectionsThenLedger(t *testing.T) {
 		t.Fatalf("a block is missing: injection=%d ledger=%d in %q", inj, ledger, prefix)
 	}
 	if inj > ledger {
-		t.Errorf("staged-injection block must precede the artifact ledger: %q", prefix)
+		t.Errorf("staged-injection block must precede the deliverable ledger: %q", prefix)
 	}
 	if strings.Count(prefix, "<system-note>") != 2 {
 		t.Errorf("want two distinct <system-note> blocks, got %d: %q", strings.Count(prefix, "<system-note>"), prefix)
@@ -160,7 +160,7 @@ func TestResumeSystemPrepends_OrdersInjectionsThenLedger(t *testing.T) {
 }
 
 // TestResumeSystemPrepends_EmptyWhenNothingPending: no staged injection and no
-// resolved artifact → empty prefix, so a plain resume prepends nothing.
+// resolved deliverable → empty prefix, so a plain resume prepends nothing.
 func TestResumeSystemPrepends_EmptyWhenNothingPending(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-none", "sess", "/tmp/wt")

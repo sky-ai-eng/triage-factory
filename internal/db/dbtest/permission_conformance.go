@@ -235,7 +235,7 @@ func RunPermissionStoreConformance(t *testing.T, mk PermissionStoreFactory) {
 	t.Run("approve_records_who_allowed_it_and_how_long_they_took", func(t *testing.T) {
 		store, orgID, userID, seed := mk(t)
 		// Backdated so the stamped wait is a real, assertable number rather
-		// than a rounding artifact.
+		// than a rounding deliverable.
 		requestedAt := time.Now().UTC().Add(-4 * time.Second)
 		conversationID, _ := newPending(t, store, orgID, seed, "toolu_allow", requestedAt)
 

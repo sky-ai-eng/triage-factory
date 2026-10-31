@@ -436,7 +436,7 @@ func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, 
 // arrives without one. See
 // EntityStore.CloseTerminalSystem for the transaction; this is the routing
 // half: the post-commit stop of the conversations the transaction stamped,
-// the artifact teardown behind it, and the tasks-updated nudge, sequenced
+// the deliverable teardown behind it, and the tasks-updated nudge, sequenced
 // exactly as closeTaskWithAudit sequences them for a typed close.
 //
 // closed=false means the guard declined and nothing was written: the entity
@@ -477,7 +477,7 @@ func (r *Router) runTerminatingClose(ctx context.Context, orgID string, evt doma
 		r.stopConversationsOnClosedTask(orgID, taskID, res.ActiveConversationIDs[taskID])
 		// Behind the stop, never beside it — see closeTaskWithAudit.
 		if r.spawner != nil {
-			r.spawner.TeardownTaskArtifactsSystem(ctx, orgID, taskID)
+			r.spawner.TeardownTaskDeliverablesSystem(ctx, orgID, taskID)
 		}
 	}
 	if evt.EventType == domain.EventSystemEntityCloseOwed {
@@ -767,11 +767,11 @@ func (r *Router) stopConversationsOnClosedTask(orgID, taskID string, conversatio
 // so a close that committed without the intent could leave a conversation the
 // system has forgotten it meant to stop, with no replay able to reach it.
 //
-// The kill then follows, post-commit and best-effort, and the artifact teardown
+// The kill then follows, post-commit and best-effort, and the deliverable teardown
 // behind it: a closed task is over, so the draft PRs it opened are closed and
 // its staged reviews dismissed, with the audit rows naming no actor because no
 // person asked for this. The teardown is keyed on the task rather than on the
-// conversations the close stamped — it is the artifacts of every attempt the
+// conversations the close stamped — it is the deliverables of every attempt the
 // task ever made that strand, not just the live one's.
 //
 // Only a close this call actually performed cascades: an already-terminal task
@@ -791,7 +791,7 @@ func (r *Router) closeTaskWithAudit(ctx context.Context, orgID, taskID, closingE
 	// releases its claim, so the teardown operates on settled conversations
 	// rather than racing a live agent that can still land a fresh draft PR.
 	if r.spawner != nil {
-		r.spawner.TeardownTaskArtifactsSystem(ctx, orgID, taskID)
+		r.spawner.TeardownTaskDeliverablesSystem(ctx, orgID, taskID)
 	}
 	return nil
 }

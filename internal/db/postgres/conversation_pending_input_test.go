@@ -26,7 +26,7 @@ func TestConversationPendingInputStore_Postgres(t *testing.T) {
 		seed := dbtest.ConversationPendingInputSeeder{
 			Conversation: func(t *testing.T, suffix string) string {
 				t.Helper()
-				return seedPgArtifactConversation(t, h, orgID, teamID, userID)
+				return seedPgDeliverableConversation(t, h, orgID, teamID, userID)
 			},
 			DeleteConversation: func(t *testing.T, conversationID string) {
 				t.Helper()

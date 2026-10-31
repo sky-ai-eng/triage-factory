@@ -395,7 +395,7 @@ func (p *ingestPipeline) handleChannelIDChanged(ctx context.Context, ws slacksto
 	}
 	slackLog.Info("slack channel id changed",
 		"workspace", ws.WorkspaceID, "org_id", ws.OrgID, "old_channel", ev.OldChannelID, "new_channel", ev.NewChannelID, "moved_to", moved.To,
-		"entities", moved.Entities, "superseded", moved.Superseded, "artifacts", moved.Artifacts, "actions", moved.Actions,
+		"entities", moved.Entities, "superseded", moved.Superseded, "deliverables", moved.Deliverables, "actions", moved.Actions,
 		"absorbed", moved.Absorbed, "trackers", moved.Trackers, "handlers", moved.Handlers)
 	if len(moved.SkippedHandlers) > 0 {
 		slackLog.Warn("slack channel id changed: handler channel filters left naming the absorbed channel row (stored filter unreadable)",

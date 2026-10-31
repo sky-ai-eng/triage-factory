@@ -212,7 +212,7 @@ func removeLegacyBareLayout(reposRoot string) {
 
 // sweepOrphanedStagingDirs reclaims the per-run staging dirs left behind by runs
 // that are gone — the step skill a launch mounts, and the prior-memory tree it
-// mounts beside it. The leftover-artifact counterpart of the run-tree sweep above
+// mounts beside it. The leftover-deliverable counterpart of the run-tree sweep above
 // and the orphaned-cgroup sweep on the privileged side. Cheap: the dirs hold one
 // SKILL.md and a handful of markdown files, but a crash loop would otherwise
 // accumulate them under $TMPDIR forever.

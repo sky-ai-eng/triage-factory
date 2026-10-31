@@ -942,13 +942,13 @@ func seedListConversation(t *testing.T, database *sql.DB, taskID, storedStatus s
 	return convID
 }
 
-// seedDraftPR leaves an unresolved artifact on the conversation — the shape
+// seedDraftPR leaves an unresolved deliverable on the conversation — the shape
 // that makes a concluded run somebody's move.
 func seedDraftPR(t *testing.T, database *sql.DB, conversationID string) {
 	t.Helper()
 	id := uuid.New().String()
 	execSQL(t, database, `
-		INSERT INTO artifacts (id, conversation_id, team_id, provider, kind, target, state, dedup_key)
+		INSERT INTO deliverables (id, conversation_id, team_id, provider, kind, target, state, dedup_key)
 		VALUES (?, ?, ?, 'github', 'pull_request', 'o/r#7', 'draft', ?)`,
 		id, conversationID, runmode.LocalDefaultTeamID, id)
 }

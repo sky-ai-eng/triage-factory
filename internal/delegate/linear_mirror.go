@@ -277,7 +277,7 @@ func (s *Spawner) recordLinearMirrorTransition(ctx context.Context, orgID, teamI
 	}
 	err := s.externalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
 		TeamID:     teamID,
-		Provider:   domain.ArtifactProviderLinear,
+		Provider:   domain.ProviderLinear,
 		Scope:      e.Scope,
 		Action:     domain.ActionIssueTransitioned,
 		Target:     e.SourceID,

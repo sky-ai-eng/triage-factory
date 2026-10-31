@@ -397,13 +397,13 @@ func (dh *dashboardHandler) handleDashboardPRUpdate(w http.ResponseWriter, r *ht
 	// feed. Best-effort in its own tx after the pessimistic GitHub write —
 	// never fails the toggle.
 	draftAction := domain.ActionPRMarkedReady
-	draftFrom, draftTo := domain.ArtifactStatePRDraft, domain.ArtifactStatePROpen
+	draftFrom, draftTo := domain.DeliverableStatePRDraft, domain.DeliverableStatePROpen
 	if draft {
 		draftAction = domain.ActionPRConvertedToDraft
-		draftFrom, draftTo = domain.ArtifactStatePROpen, domain.ArtifactStatePRDraft
+		draftFrom, draftTo = domain.DeliverableStatePROpen, domain.DeliverableStatePRDraft
 	}
 	draftRecord := domain.ExternalAction{
-		Provider:    domain.ArtifactProviderGitHub,
+		Provider:    domain.ProviderGitHub,
 		Scope:       pr.host,
 		Action:      draftAction,
 		Target:      pr.slug(),

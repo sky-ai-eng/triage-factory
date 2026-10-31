@@ -144,7 +144,7 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		TeamActivity:             newTeamActivityStore(tx),
 		TeamPRs:                  newTeamPRStore(tx),
 		Conversations:            newConversationStore(tx),
-		Artifacts:                newArtifactStore(tx),
+		Deliverables:             newDeliverableStore(tx),
 		Entities:                 newEntityStore(tx, tx),
 		Repos:                    newRepositoryStore(tx, tx),
 		PendingFirings:           newPendingFiringsStore(tx, nil),

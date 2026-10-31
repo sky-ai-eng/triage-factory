@@ -80,7 +80,7 @@ func ResetResolver(source string) {
 //     than commit it over the rename); when the rename is refused
 //     because an active row still holds the key, the row is returned under its
 //     stored key, which a later read renames. When follow is false the key may
-//     be older than the row's (an artifact's target), and the row is returned
+//     be older than the row's (a deliverable's target), and the row is returned
 //     as stored. A GitHub row is always returned as stored: a pull request's
 //     key is its repository's name and its number, a repository rename moves
 //     every such key at once (db.RepositoryStore.RenameSystem), and a caller's
@@ -119,7 +119,7 @@ func Resolve(ctx context.Context, stores db.Stores, orgID string, ref domain.Ent
 			return nil, err
 		}
 		if e != nil {
-			if !follow || e.SourceID == ref.SourceID || ref.Source == domain.ArtifactProviderGitHub {
+			if !follow || e.SourceID == ref.SourceID || ref.Source == domain.ProviderGitHub {
 				return e, nil
 			}
 			out, err := entities.RenameSystem(ctx, orgID, ref.Source, ref.Scope, ref.ExternalID, ref.SourceID, url)
@@ -141,9 +141,9 @@ func Resolve(ctx context.Context, stores db.Stores, orgID string, ref domain.Ent
 	var e *domain.Entity
 	var err error
 	switch {
-	case ref.Source == domain.ArtifactProviderLinear && container.LinearTeamID != "":
+	case ref.Source == domain.ProviderLinear && container.LinearTeamID != "":
 		e, _, err = entities.FindOrCreateLinearSystem(ctx, orgID, ref.Scope, ref.SourceID, ref.ExternalID, container.LinearTeamID, "", url)
-	case ref.Source == domain.ArtifactProviderJira && container.JiraProject.ID != "" && container.JiraProject.Key != "":
+	case ref.Source == domain.ProviderJira && container.JiraProject.ID != "" && container.JiraProject.Key != "":
 		e, _, err = entities.FindOrCreateJiraSystem(ctx, orgID, ref.Scope, ref.SourceID, ref.ExternalID, container.JiraProject, "", url)
 	default:
 		e, _, err = entities.FindOrCreateSystem(ctx, orgID, ref.Source, ref.Scope, ref.SourceID, ref.ExternalID, kind, "", url)

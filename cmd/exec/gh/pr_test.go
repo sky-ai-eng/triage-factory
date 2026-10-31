@@ -492,7 +492,7 @@ func TestPrThreadView_HonorsRepoFlag(t *testing.T) {
 	if host.calls != 1 {
 		t.Fatalf("RecordReadTouch called %d time(s), want 1", host.calls)
 	}
-	if host.provider != domain.ArtifactProviderGitHub || host.target != "octo/repo#42" {
+	if host.provider != domain.ProviderGitHub || host.target != "octo/repo#42" {
 		t.Errorf("touch = (%q, %q), want (github, octo/repo#42)", host.provider, host.target)
 	}
 }

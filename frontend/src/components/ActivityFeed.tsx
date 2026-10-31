@@ -1,16 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { ActivityAction, ActivityArtifact, ArtifactKind } from '../types'
+import type { ActivityAction, ActivityDeliverable, DeliverableKind } from '../types'
 import type { ListRequest } from '../lib/apiClient'
 import { usePagedList } from '../hooks/usePagedList'
-import { ArtifactRow } from './ArtifactRow'
+import { DeliverableRow } from './DeliverableRow'
 import { ActionRow } from './ActionRow'
 import {
-  ARTIFACT_KINDS,
-  ARTIFACT_PROVIDERS,
-  ARTIFACT_STATES,
+  DELIVERABLE_KINDS,
+  DELIVERABLE_PROVIDERS,
+  DELIVERABLE_STATES,
   KIND_META,
   PROVIDER_LABEL,
-} from './artifactMeta'
+} from './deliverableMeta'
 import { ACTION_OPTIONS, ACTION_PROVIDERS } from './actionMeta'
 
 // ActivityFeed is the EE /usage governance surface (TFAC-483), with TWO lenses on
@@ -22,9 +22,9 @@ import { ACTION_OPTIONS, ACTION_PROVIDERS } from './actionMeta'
 //     one row per external WRITE TF performed under an org credential (the bot's
 //     GitHub/Jira mutations, the human-authorized approval lifecycle, the Jira
 //     board mirror). Rendered by ActionRow. The source of truth for "what TF did."
-//   - Objects → the artifacts head: each object the bot produced and its CURRENT
+//   - Objects → the deliverables head: each object the bot produced and its CURRENT
 //     state, reconciler-maintained (includes externally-driven transitions a
-//     human made, which are NOT TF actions). Rendered by ArtifactRow. The PR #505
+//     human made, which are NOT TF actions). Rendered by DeliverableRow. The PR #505
 //     feed, kept.
 //
 // Two scopes, set by the caller's basePath:
@@ -35,7 +35,7 @@ import { ACTION_OPTIONS, ACTION_PROVIDERS } from './actionMeta'
 //     team-scope (and, on Actions, actor-scope) filter narrowing the loaded page.
 //
 // The lens is an ADDRESS, not a parameter: `${basePath}/actions/list` and
-// `${basePath}/artifacts/list` are two resources with different row shapes and
+// `${basePath}/deliverables/list` are two resources with different row shapes and
 // different filter vocabularies. They used to be one route selected by ?view=,
 // where an Objects-only `state=` filter silently did nothing on the Actions
 // lens. Filters adapt per lens (Actions: provider/action/time; Objects:
@@ -86,11 +86,11 @@ const EMPTY_FILTERS: Filters = {
   action: 'all',
 }
 
-type FeedRow = ActivityArtifact | ActivityAction
+type FeedRow = ActivityDeliverable | ActivityAction
 
 /** listPathFor resolves the lens to its own route. */
 function listPathFor(basePath: string, mode: Mode): string {
-  return `${basePath}/${mode === 'actions' ? 'actions' : 'artifacts'}/list`
+  return `${basePath}/${mode === 'actions' ? 'actions' : 'deliverables'}/list`
 }
 
 /** filterBodyFor builds the lens's filter half of the list body. 'all' / ''
@@ -274,7 +274,7 @@ export default function ActivityFeed({
           onChange={(v) => setFilter('provider', v)}
           options={[
             { value: 'all', label: 'All' },
-            ...(mode === 'actions' ? ACTION_PROVIDERS : ARTIFACT_PROVIDERS).map((p) => ({
+            ...(mode === 'actions' ? ACTION_PROVIDERS : DELIVERABLE_PROVIDERS).map((p) => ({
               value: p,
               label: PROVIDER_LABEL[p] ?? p,
             })),
@@ -288,7 +288,7 @@ export default function ActivityFeed({
               onChange={(v) => setFilter('kind', v)}
               options={[
                 { value: 'all', label: 'All' },
-                ...ARTIFACT_KINDS.map((k: ArtifactKind) => ({
+                ...DELIVERABLE_KINDS.map((k: DeliverableKind) => ({
                   value: k,
                   label: KIND_META[k].label,
                 })),
@@ -300,7 +300,7 @@ export default function ActivityFeed({
               onChange={(v) => setFilter('state', v)}
               options={[
                 { value: 'all', label: 'All' },
-                ...ARTIFACT_STATES.map((s) => ({ value: s, label: s })),
+                ...DELIVERABLE_STATES.map((s) => ({ value: s, label: s })),
               ]}
             />
           </>
@@ -364,9 +364,9 @@ export default function ActivityFeed({
                     note={showTeam && r.team_name ? <TeamChip name={r.team_name} /> : undefined}
                   />
                 ) : (
-                  <ArtifactRow
+                  <DeliverableRow
                     key={r.id}
-                    artifact={r as ActivityArtifact}
+                    deliverable={r as ActivityDeliverable}
                     note={showTeam && r.team_name ? <TeamChip name={r.team_name} /> : undefined}
                   />
                 ),

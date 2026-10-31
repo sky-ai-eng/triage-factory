@@ -130,7 +130,7 @@ const sqliteTaskRuleOrderJoin = `
 //	0  needs you   — the task holds a conversation matching the per-conversation
 //	                 needs-you predicate: an unanswered permission prompt, or a
 //	                 conversation that is not live and still holds an unresolved
-//	                 artifact.
+//	                 deliverable.
 //	1  failed      — its newest conversation died. Nothing is coming; a human
 //	                 decides what happens next, but there is no question
 //	                 waiting on them, so it sits below tier 0.

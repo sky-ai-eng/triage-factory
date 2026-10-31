@@ -16,7 +16,7 @@ import (
 //
 // Its own factory rather than TaskStoreFactory's seeder: the order under test
 // is a statement about rows in four other tables — conversations, claims,
-// conversation_permissions, artifacts — and the backends disagree on nearly
+// conversation_permissions, deliverables — and the backends disagree on nearly
 // every column of them.
 type TaskAttentionOrderFactory func(t *testing.T) (store db.TaskStore, orgID string, seed TaskAttentionOrderSeeder)
 
@@ -60,8 +60,8 @@ type TaskAttentionOrderSeeder struct {
 	// PendingPermission stages an unanswered tool prompt owned by claimID.
 	PendingPermission func(t *testing.T, conversationID, claimID string)
 
-	// Artifact stages one artifacts row on the conversation.
-	Artifact func(t *testing.T, conversationID, kind, state, detailsJSON string)
+	// Deliverable stages one deliverables row on the conversation.
+	Deliverable func(t *testing.T, conversationID, kind, state, detailsJSON string)
 }
 
 // RunTaskAttentionOrderConformance is the shared suite for the attention tier
@@ -112,7 +112,7 @@ func RunTaskAttentionOrderConformance(t *testing.T, mk TaskAttentionOrderFactory
 		// A concluded conversation still holding a draft pull request: the
 		// agent stopped, the PR is nobody's but a human's to finish.
 		needsYouConv := seed.Conversation(t, needsYou, SeedConcluded)
-		seed.Artifact(t, needsYouConv, domain.ArtifactKindPullRequest, domain.ArtifactStatePRDraft, "")
+		seed.Deliverable(t, needsYouConv, domain.DeliverableKindPullRequest, domain.DeliverableStatePRDraft, "")
 		seed.Conversation(t, failed, domain.StatusFailed)
 		// Mid-flight and claimed — `running` is derived from the live claim.
 		seed.ActiveClaim(t, seed.Conversation(t, flight, ""))
@@ -146,7 +146,7 @@ func RunTaskAttentionOrderConformance(t *testing.T, mk TaskAttentionOrderFactory
 		quiet := seed.Task(t, TaskAttentionFixture{Suffix: "keyset-quiet", Title: "a concluded", Status: "in_progress", Priority: 0.9})
 
 		needsYouConv := seed.Conversation(t, needsYou, SeedConcluded)
-		seed.Artifact(t, needsYouConv, domain.ArtifactKindPullRequest, domain.ArtifactStatePRDraft, "")
+		seed.Deliverable(t, needsYouConv, domain.DeliverableKindPullRequest, domain.DeliverableStatePRDraft, "")
 		seed.Conversation(t, failed, domain.StatusFailed)
 		seed.ActiveClaim(t, seed.Conversation(t, flight, ""))
 		seed.Conversation(t, quiet, SeedConcluded)
@@ -205,7 +205,7 @@ func RunTaskAttentionOrderConformance(t *testing.T, mk TaskAttentionOrderFactory
 		quiet := seed.Task(t, TaskAttentionFixture{Suffix: "attn-sort-quiet", Title: "aaa concluded", Status: "in_progress", Priority: 0.5})
 
 		conv := seed.Conversation(t, needsYou, SeedConcluded)
-		seed.Artifact(t, conv, domain.ArtifactKindPullRequest, domain.ArtifactStatePRDraft, "")
+		seed.Deliverable(t, conv, domain.DeliverableKindPullRequest, domain.DeliverableStatePRDraft, "")
 		seed.Conversation(t, quiet, SeedConcluded)
 
 		f := inProgress()
@@ -232,10 +232,10 @@ func RunTaskAttentionOrderConformance(t *testing.T, mk TaskAttentionOrderFactory
 		closedRecent := seed.Task(t, TaskAttentionFixture{Suffix: "attn-mix-done-recent", Title: "done recent", Status: "done", Priority: 0.5, ClosedAt: &newer})
 
 		needsConv := seed.Conversation(t, openNeeds, SeedConcluded)
-		seed.Artifact(t, needsConv, domain.ArtifactKindPullRequest, domain.ArtifactStatePRDraft, "")
+		seed.Deliverable(t, needsConv, domain.DeliverableKindPullRequest, domain.DeliverableStatePRDraft, "")
 		seed.Conversation(t, openQuiet, SeedConcluded)
 		staleConv := seed.Conversation(t, closedStale, SeedConcluded)
-		seed.Artifact(t, staleConv, domain.ArtifactKindPullRequest, domain.ArtifactStatePRDraft, "")
+		seed.Deliverable(t, staleConv, domain.DeliverableKindPullRequest, domain.DeliverableStatePRDraft, "")
 		seed.Conversation(t, closedRecent, SeedConcluded)
 
 		got, _ := list(t, s, orgID, db.TaskListFilter{})
@@ -256,7 +256,7 @@ func RunTaskAttentionOrderConformance(t *testing.T, mk TaskAttentionOrderFactory
 		recent := seed.Task(t, TaskAttentionFixture{Suffix: "attn-done-recent", Title: "recent", Status: "done", Priority: 0.5, ClosedAt: &newer})
 
 		conv := seed.Conversation(t, stale, SeedConcluded)
-		seed.Artifact(t, conv, domain.ArtifactKindPullRequest, domain.ArtifactStatePRDraft, "")
+		seed.Deliverable(t, conv, domain.DeliverableKindPullRequest, domain.DeliverableStatePRDraft, "")
 		seed.Conversation(t, recent, SeedConcluded)
 
 		got, _ := list(t, s, orgID, db.TaskListFilter{Statuses: []string{"done"}})

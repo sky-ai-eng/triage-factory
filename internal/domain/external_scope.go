@@ -1,6 +1,6 @@
 package domain
 
-// ExternalObjectScope is the scope an artifact or an audit-ledger row about
+// ExternalObjectScope is the scope a deliverable or an audit-ledger row about
 // an object of provider is recorded under, for an org with settings s: the
 // value an entity of the same provider is scoped under (EntityScope), so a
 // record about an entity and the entity itself name one namespace.
@@ -18,15 +18,15 @@ package domain
 // row's own.
 func ExternalObjectScope(provider string, s OrgSettings) string {
 	switch provider {
-	case ArtifactProviderGit:
-		return EntityScope(ArtifactProviderGitHub, s)
-	case ArtifactProviderNetwork:
+	case ProviderGit:
+		return EntityScope(ProviderGitHub, s)
+	case ProviderNetwork:
 		return NetworkScope
 	}
 	return EntityScope(provider, s)
 }
 
 // NetworkScope is the scope of an action whose target is a bare network
-// destination (ArtifactProviderNetwork): a host and port, which DNS names
+// destination (ProviderNetwork): a host and port, which DNS names
 // without any provider namespace around it.
 const NetworkScope = "internet"

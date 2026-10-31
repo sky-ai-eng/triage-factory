@@ -623,25 +623,25 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		}
 		return createWorkspaceCheckoutResult{Path: path}, nil
 
-	case methodUpsertArtifact:
-		var a upsertArtifactArgs
+	case methodUpsertDeliverable:
+		var a upsertDeliverableArgs
 		if err := dec(&a); err != nil {
 			return nil, err
 		}
 		// The sandbox records the branches its pre-push hook sees and nothing
-		// else: every other artifact is composed host-side from what the
-		// provider answered. An artifact is linked to the entity its key and
+		// else: every other deliverable is composed host-side from what the
+		// provider answered. A deliverable is linked to the entity its key and
 		// target name, and that resolution follows the target onto the entity,
 		// so a row the sandbox composed could link to, and rename, any entity
 		// in the org.
-		if a.Artifact.Provider != domain.ArtifactProviderGit || a.Artifact.Kind != domain.ArtifactKindBranch {
-			return nil, fmt.Errorf("the sandbox records branch artifacts only, not %s %s", a.Artifact.Provider, a.Artifact.Kind)
+		if a.Deliverable.Provider != domain.ProviderGit || a.Deliverable.Kind != domain.DeliverableKindBranch {
+			return nil, fmt.Errorf("the sandbox records branch deliverables only, not %s %s", a.Deliverable.Provider, a.Deliverable.Kind)
 		}
-		stored, err := client.UpsertArtifact(ctx, a.Artifact)
+		stored, err := client.UpsertDeliverable(ctx, a.Deliverable)
 		if err != nil {
 			return nil, err
 		}
-		return upsertArtifactResult{Artifact: stored}, nil
+		return upsertDeliverableResult{Deliverable: stored}, nil
 
 	// --- jira: build ForSystem host-side, make the REST call, return the
 	// result / error. The per-request LocalClient reads the credential

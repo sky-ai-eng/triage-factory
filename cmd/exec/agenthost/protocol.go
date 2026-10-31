@@ -279,14 +279,14 @@ type createWorkspaceCheckoutResult struct {
 	Path string `json:"path"`
 }
 
-// --- artifacts (capture writers) ---
+// --- deliverables (capture writers) ---
 
-type upsertArtifactArgs struct {
-	Artifact domain.Artifact `json:"artifact"`
+type upsertDeliverableArgs struct {
+	Deliverable domain.Deliverable `json:"deliverable"`
 }
 
-type upsertArtifactResult struct {
-	Artifact domain.Artifact `json:"artifact"`
+type upsertDeliverableResult struct {
+	Deliverable domain.Deliverable `json:"deliverable"`
 }
 
 // --- jira (exec jira ticket ...) ---
@@ -566,7 +566,7 @@ type githubCreatePRResult struct {
 
 // --- review draft staging (TFAC-494) ---
 //
-// start-review / add-review-comment are pure local artifact writes routed
+// start-review / add-review-comment are pure local deliverable writes routed
 // host-side so the sandbox (no DB) reaches them over the socket. CommitSHA pins
 // the reviewed commit for the atomic submit at approval; Comments is unused.
 
@@ -609,7 +609,7 @@ type reviewDraftTargetResult struct {
 
 // updateStagedReviewCommentArgs / deleteStagedReviewCommentArgs address one
 // comment on the conversation's review draft by its TF-local id (not a repo-scoped op —
-// the host resolves the owning draft from the conversation's artifacts).
+// the host resolves the owning draft from the conversation's deliverables).
 type updateStagedReviewCommentArgs struct {
 	CommentID string `json:"comment_id"`
 	Body      string `json:"body"`
@@ -761,7 +761,7 @@ const (
 	methodWorkspaceRoots                      = "WorkspaceRoots"
 	methodCreateWorkspaceCheckout             = "CreateWorkspaceCheckout"
 
-	methodUpsertArtifact = "UpsertArtifact"
+	methodUpsertDeliverable = "UpsertDeliverable"
 
 	methodJiraGetIssue       = "JiraGetIssue"
 	methodJiraTransitionTo   = "JiraTransitionTo"

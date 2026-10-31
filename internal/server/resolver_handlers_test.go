@@ -77,34 +77,34 @@ func captureLog(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-func seedDraftPRArtifact(t *testing.T, s *Server, owner, repo string) string {
+func seedDraftPRDeliverable(t *testing.T, s *Server, owner, repo string) string {
 	t.Helper()
-	// artifacts.conversation_id REFERENCES conversations(id), so mint a full
+	// deliverables.conversation_id REFERENCES conversations(id), so mint a full
 	// entity→event→prompt→task→blueprint_run→run chain and hang the draft PR
-	// artifact off it. The owner/repo the resolver keys on are encoded in the
-	// artifact's target (owner/repo#number), independent of the entity's source.
+	// deliverable off it. The owner/repo the resolver keys on are encoded in the
+	// deliverable's target (owner/repo#number), independent of the entity's source.
 	conversationID := seedSteerConversation(t, s.db, "ppr-"+uuid.New().String()[:8], dbtest.SeedConcluded)
-	a := domain.NewPullRequestArtifact(owner+"/"+repo, 42, "PR_"+owner+"_"+repo+"_42", "feature/x", "main",
+	a := domain.NewPullRequestDeliverable(owner+"/"+repo, 42, "PR_"+owner+"_"+repo+"_42", "feature/x", "main",
 		"https://example.test/"+owner+"/"+repo+"/pull/42", "Add thing", "Body.", true)
 	a.ConversationID = conversationID
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
-	stored, err := sqlitestore.New(s.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(s.db).Orgs, runmode.LocalDefaultOrgID, a))
+	stored, err := sqlitestore.New(s.db).Deliverables.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(s.db).Orgs, runmode.LocalDefaultOrgID, a))
 	if err != nil {
-		t.Fatalf("seed draft PR artifact: %v", err)
+		t.Fatalf("seed draft PR deliverable: %v", err)
 	}
 	return stored.ID
 }
 
-// --- PR artifact read (resolver tier coverage for the GitHub-native PR path) ---
+// --- PR deliverable read (resolver tier coverage for the GitHub-native PR path) ---
 
-// TestArtifactPR_AddressedByItsEntitysRepositoryRow: the pull request an
-// artifact is about is the one its entity names, in the repository that
+// TestDeliverablePR_AddressedByItsEntitysRepositoryRow: the pull request a
+// deliverable is about is the one its entity names, in the repository that
 // entity's registry row names now. After a rename that rewrote nothing else,
 // the live read goes out under the new name; once the row is retired — GitHub
 // serving its name as another repository — the read serves the stored snapshot
 // and a write is refused, rather than reaching that repository's #42.
-func TestArtifactPR_AddressedByItsEntitysRepositoryRow(t *testing.T) {
+func TestDeliverablePR_AddressedByItsEntitysRepositoryRow(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	var paths []string
@@ -117,15 +117,15 @@ func TestArtifactPR_AddressedByItsEntitysRepositoryRow(t *testing.T) {
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 
-	artID, _, _ := seedDraftPRArtifactWithConversation(t, srv, "renamed-pr", "acme", "api", 42)
-	art := getArtifact(t, srv, artID)
+	artID, _, _ := seedDraftPRDeliverableWithConversation(t, srv, "renamed-pr", "acme", "api", 42)
+	art := getDeliverable(t, srv, artID)
 	entity, err := sqlitestore.New(srv.db).Entities.GetSystem(context.Background(), runmode.LocalDefaultOrgID, art.EntityID)
 	if err != nil || entity == nil {
-		t.Fatalf("read the artifact's entity: got=%v err=%v", entity, err)
+		t.Fatalf("read the deliverable's entity: got=%v err=%v", entity, err)
 	}
 	dbseed.RenameRepositoryOnly(t, srv.db, entity.RepositoryID, "acme", "renamed")
 
-	rec := doJSON(t, srv, http.MethodGet, "/api/artifacts/"+artID, nil)
+	rec := doJSON(t, srv, http.MethodGet, "/api/deliverables/"+artID, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("get = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -144,11 +144,11 @@ func TestArtifactPR_AddressedByItsEntitysRepositoryRow(t *testing.T) {
 
 	execSQL(t, srv.db, `UPDATE repositories SET retired_at = CURRENT_TIMESTAMP WHERE id = ?`, entity.RepositoryID)
 	paths = nil
-	rec = doJSON(t, srv, http.MethodGet, "/api/artifacts/"+artID, nil)
+	rec = doJSON(t, srv, http.MethodGet, "/api/deliverables/"+artID, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("get after retire = %d, want 200 (the snapshot); body=%s", rec.Code, rec.Body.String())
 	}
-	rec = doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
+	rec = doJSON(t, srv, http.MethodPost, "/api/deliverables/"+artID+"/approve", nil)
 	if rec.Code != http.StatusConflict {
 		t.Errorf("approve after retire = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
@@ -157,7 +157,7 @@ func TestArtifactPR_AddressedByItsEntitysRepositoryRow(t *testing.T) {
 	}
 }
 
-func TestArtifactGet_AppOnlyOrg_Success(t *testing.T) {
+func TestDeliverableGet_AppOnlyOrg_Success(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	var gotAuth string
@@ -170,8 +170,8 @@ func TestArtifactGet_AppOnlyOrg_Success(t *testing.T) {
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 
-	artID := seedDraftPRArtifact(t, srv, "acme", "api")
-	rec := doJSON(t, srv, http.MethodGet, "/api/artifacts/"+artID, nil)
+	artID := seedDraftPRDeliverable(t, srv, "acme", "api")
+	rec := doJSON(t, srv, http.MethodGet, "/api/deliverables/"+artID, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("get = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -182,10 +182,10 @@ func TestArtifactGet_AppOnlyOrg_Success(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if out.Kind != domain.ArtifactKindPullRequest {
+	if out.Kind != domain.DeliverableKindPullRequest {
 		t.Errorf("kind = %q, want pull_request", out.Kind)
 	}
-	// Title/body come from the live PR (GetPR), not the artifact snapshot.
+	// Title/body come from the live PR (GetPR), not the deliverable snapshot.
 	if out.Details["title"] != "Live title" || out.Details["body"] != "Live body" {
 		t.Errorf("title/body = %v/%v, want live values", out.Details["title"], out.Details["body"])
 	}
@@ -199,17 +199,17 @@ func TestArtifactGet_AppOnlyOrg_Success(t *testing.T) {
 	}
 }
 
-// TestArtifactGet_NoCredentials_NotConfigured: an artifact read on an org
+// TestDeliverableGet_NoCredentials_NotConfigured: a deliverable read on an org
 // with no GitHub credential is 409 NOT_CONFIGURED — server-side configuration
 // the caller must fix, not a transient upstream outage (the 503 it used to
 // answer read as "try again later").
-func TestArtifactGet_NoCredentials_NotConfigured(t *testing.T) {
+func TestDeliverableGet_NoCredentials_NotConfigured(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	logs := captureLog(t)
 
-	artID := seedDraftPRArtifact(t, srv, "acme", "api")
-	rec := doJSON(t, srv, http.MethodGet, "/api/artifacts/"+artID, nil)
+	artID := seedDraftPRDeliverable(t, srv, "acme", "api")
+	rec := doJSON(t, srv, http.MethodGet, "/api/deliverables/"+artID, nil)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("get = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}

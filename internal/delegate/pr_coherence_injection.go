@@ -238,16 +238,16 @@ func (s *Spawner) prHeadRepositoryID(ctx context.Context, orgID, host, headRepo 
 // another executor.
 //
 // The reviews are the drafts about entityID, the PR's entity
-// (artifacts.entity_id), so a draft is found whatever name its target spells.
+// (deliverables.entity_id), so a draft is found whatever name its target spells.
 //
 // Best-effort: a lookup failure returns no suppressions, so every target gets
 // the note. A spurious "re-pull" is harmless; a missed advance leaves the
 // agent working against a diff that moved.
 func (s *Spawner) reviewsAnchoredAtHead(ctx context.Context, orgID, entityID, headSHA string) map[string]bool {
-	if s.artifacts == nil || headSHA == "" || entityID == "" {
+	if s.deliverables == nil || headSHA == "" || entityID == "" {
 		return nil
 	}
-	reviews, err := s.artifacts.ListPendingReviewsByEntitySystem(ctx, orgID, entityID)
+	reviews, err := s.deliverables.ListPendingReviewsByEntitySystem(ctx, orgID, entityID)
 	if err != nil {
 		delegateLog.Warn("PR coherence injection: lookup pending reviews failed", "entity", entityID, "error", err)
 		return nil

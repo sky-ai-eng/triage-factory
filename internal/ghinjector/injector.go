@@ -129,7 +129,7 @@
 // Exec-verb self-reporting doesn't exist on this channel, so the injector
 // reports every write it forwards through a caller-supplied callback
 // (ObserveWrite) the sidecar turns into an orchestrator relay, and every write
-// leaves exactly one report whichever transport it took. The artifacts a run
+// leaves exactly one report whichever transport it took. The deliverables a run
 // leaves behind — its pull requests, its reviews — are never minted from this
 // channel: the shapes that would create one are refused here and belong to the
 // exec verbs, which record what the agent proposed alongside what landed.
@@ -153,7 +153,7 @@
 // The injector makes one request of its own. When a comment create's response
 // lacks the comment's node id, which is the case for every `gh pr comment`, it
 // reads the comment back once before reporting the write (fillCommentNodeID):
-// the comment's artifact needs that id before a GraphQL delete that names the
+// the comment's deliverable needs that id before a GraphQL delete that names the
 // comment by node id alone can arrive.
 //
 // The callback is not a policy: reporting a write neither permits nor prevents
@@ -718,7 +718,7 @@ const maxCommentReadBody = 1 << 20
 // selects only the new comment's url, so its response never does. The id is
 // needed before anything else about the comment arrives: a GraphQL delete
 // names the comment by node id alone and its response names nothing
-// (deleteIssueComment returns only clientMutationId), so the comment's artifact
+// (deleteIssueComment returns only clientMutationId), so the comment's deliverable
 // has to hold the node id first.
 //
 // One GET of the comment, through the upstream and credential the write itself

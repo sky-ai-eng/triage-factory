@@ -81,7 +81,7 @@ func TestAuditDrop_RecordFailureIsCounted(t *testing.T) {
 	}
 
 	RecordExternalWrite(context.Background(), stores, info, nil, &domain.ExternalAction{
-		Provider:   domain.ArtifactProviderGitHub,
+		Provider:   domain.ProviderGitHub,
 		Action:     domain.ActionGHChannelWrite,
 		Target:     "acme/widgets",
 		Credential: domain.CredentialGitHubApp,
@@ -93,10 +93,10 @@ func TestAuditDrop_RecordFailureIsCounted(t *testing.T) {
 	}
 }
 
-// TestAuditDrop_RecordFailureNamesTheArtifactKind: an artifact-bearing write
+// TestAuditDrop_RecordFailureNamesTheDeliverableKind: a deliverable-bearing write
 // is named by its kind rather than the action's, matching the attribute the
 // artifact.record span at the same site already sets.
-func TestAuditDrop_RecordFailureNamesTheArtifactKind(t *testing.T) {
+func TestAuditDrop_RecordFailureNamesTheDeliverableKind(t *testing.T) {
 	reader := installTestAuditDrops(t)
 	conn, stores, info := newCaptureStoresConn(t, true)
 	if err := conn.Close(); err != nil {
@@ -104,12 +104,12 @@ func TestAuditDrop_RecordFailureNamesTheArtifactKind(t *testing.T) {
 	}
 
 	RecordExternalWrite(context.Background(), stores, info,
-		&domain.Artifact{Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest, Target: "acme/widgets#7"},
-		&domain.ExternalAction{Provider: domain.ArtifactProviderGitHub, Action: domain.ActionPRCreated, Target: "acme/widgets#7"})
+		&domain.Deliverable{Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindPullRequest, Target: "acme/widgets#7"},
+		&domain.ExternalAction{Provider: domain.ProviderGitHub, Action: domain.ActionPRCreated, Target: "acme/widgets#7"})
 
 	got := collectDrops(t, reader)
-	if n := got[dropStageRecord][domain.ArtifactKindPullRequest]; n != 1 {
-		t.Fatalf("drops = %v; want one %s drop under op=%s", got, dropStageRecord, domain.ArtifactKindPullRequest)
+	if n := got[dropStageRecord][domain.DeliverableKindPullRequest]; n != 1 {
+		t.Fatalf("drops = %v; want one %s drop under op=%s", got, dropStageRecord, domain.DeliverableKindPullRequest)
 	}
 }
 
@@ -120,7 +120,7 @@ func TestAuditDrop_SuccessfulWriteCountsNothing(t *testing.T) {
 	stores, info := newCaptureStores(t, true)
 
 	RecordExternalWrite(context.Background(), stores, info, nil, &domain.ExternalAction{
-		Provider:   domain.ArtifactProviderGitHub,
+		Provider:   domain.ProviderGitHub,
 		Action:     domain.ActionGHChannelWrite,
 		Target:     "acme/widgets",
 		Credential: domain.CredentialGitHubApp,

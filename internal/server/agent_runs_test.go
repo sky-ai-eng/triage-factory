@@ -335,7 +335,7 @@ func TestHandleConversations_TeamFilter(t *testing.T) {
 }
 
 // TestHandleConversations_AttentionFilter pins the rail's `needs` read: a
-// not-live conversation holding an unresolved artifact is one unit of
+// not-live conversation holding an unresolved deliverable is one unit of
 // attention, and a conversation holding nothing unresolved is none.
 func TestHandleConversations_AttentionFilter(t *testing.T) {
 	s := newTestServer(t)
@@ -361,14 +361,14 @@ func TestHandleConversations_AttentionFilter(t *testing.T) {
 	if got := attention(); got != 0 {
 		t.Errorf("attention with nothing unresolved = %d, want 0", got)
 	}
-	// Two unresolved artifacts on one conversation are still one thing to do.
+	// Two unresolved deliverables on one conversation are still one thing to do.
 	for _, target := range []string{"o/r#1", "o/r#2"} {
-		execSQL(t, s.db, `INSERT INTO artifacts (id, conversation_id, team_id, provider, kind, target, state, dedup_key)
+		execSQL(t, s.db, `INSERT INTO deliverables (id, conversation_id, team_id, provider, kind, target, state, dedup_key)
 			VALUES (?, ?, ?, 'github', 'pull_request', ?, 'draft', ?)`,
 			uuid.New().String(), drafted, runmode.LocalDefaultTeamID, target, target)
 	}
 	if got := attention(); got != 1 {
-		t.Errorf("attention counted per artifact, not per conversation: got %d, want 1", got)
+		t.Errorf("attention counted per deliverable, not per conversation: got %d, want 1", got)
 	}
 }
 

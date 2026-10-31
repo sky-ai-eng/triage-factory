@@ -10,7 +10,7 @@ import type { ArtifactTotals, PendingTotals } from './cardModel'
 // four of them are terminal the moment they are written. Only two shapes can
 // ever await a human: a DRAFT pull request, and a PENDING review with the
 // ready sentinel set. That is a domain fact, not a policy — see
-// `HasUnresolvedArtifacts`. A kind carrying one of them draws warm.
+// `HasUnresolvedDeliverables`. A kind carrying one of them draws warm.
 //
 // The strip is a record, so it opens the run page rather than answering
 // anything in place. It sits at the card's right edge because it is a target
@@ -24,18 +24,18 @@ import type { ArtifactTotals, PendingTotals } from './cardModel'
 const ORDER: Array<keyof ArtifactTotals> = ['branch', 'pulls', 'review', 'comment']
 
 export function ArtifactStrip({
-  artifacts,
+  deliverables,
   pending,
   href,
   style,
 }: {
-  artifacts?: ArtifactTotals
+  deliverables?: ArtifactTotals
   pending?: PendingTotals
   /** The run page. Renders a link; without it the strip is a plain readout. */
   href?: string
   style?: CSSProperties
 }) {
-  const has = artifacts ?? {}
+  const has = deliverables ?? {}
   const open: Record<string, number | undefined> = pending ?? {}
   const kinds = ORDER.filter((k) => (has[k] ?? 0) > 0)
   if (kinds.length === 0) return null
@@ -72,7 +72,7 @@ export function ArtifactStrip({
   // to be wired makes the affordance a property of the integration rather than
   // of the control.
   return href ? (
-    <Link to={href} title="Open the run's artifacts" style={{ ...base, cursor: 'pointer' }}>
+    <Link to={href} title="Open the run's deliverables" style={{ ...base, cursor: 'pointer' }}>
       {body}
     </Link>
   ) : (

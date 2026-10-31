@@ -105,16 +105,16 @@ func TestTaskStore_AttentionOrder_SQLite(t *testing.T) {
 					t.Fatalf("seed permission: %v", err)
 				}
 			},
-			Artifact: func(t *testing.T, conversationID, kind, state, detailsJSON string) {
+			Deliverable: func(t *testing.T, conversationID, kind, state, detailsJSON string) {
 				t.Helper()
 				id := uuid.New().String()
 				if _, err := conn.Exec(`
-					INSERT INTO artifacts (id, conversation_id, team_id, provider, kind, target,
+					INSERT INTO deliverables (id, conversation_id, team_id, provider, kind, target,
 					                       state, dedup_key, details_json)
 					VALUES (?, ?, ?, 'github', ?, 'o/r#7', ?, ?, ?)
 				`, id, conversationID, runmode.LocalDefaultTeamID, kind, state, id,
 					nullIfEmptyString(detailsJSON)); err != nil {
-					t.Fatalf("seed artifact: %v", err)
+					t.Fatalf("seed deliverable: %v", err)
 				}
 			},
 		}

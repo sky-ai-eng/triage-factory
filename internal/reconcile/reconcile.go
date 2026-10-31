@@ -1,4 +1,4 @@
-// Package reconcile keeps the artifacts table in sync with external GitHub
+// Package reconcile keeps the deliverables table in sync with external GitHub
 // state — webhook-independent, both modes (TFAC-464). It is self-sufficient: it
 // owns its fetches (RefreshPRs for PR + review state, a ref-existence probe for
 // branches) rather than leaning on the tracker, whose snapshots aren't a
@@ -8,10 +8,10 @@
 //
 //   - Tier 1 — a per-org background Manager/Runner (this package), kicked off
 //     the system:poll: GitHub sentinel, mirroring scorer/profiler/classifier.
-//     Each cycle reconciles the org's whole non-terminal artifact set.
+//     Each cycle reconciles the org's whole non-terminal deliverable set.
 //   - Tier 2 — a conversation-scoped refresh the frontend polls while a
 //     conversation view is open, reconciling just that conversation's
-//     non-terminal artifacts (wired in internal/server).
+//     non-terminal deliverables (wired in internal/server).
 package reconcile
 
 import (
@@ -36,24 +36,24 @@ type clientResolver interface {
 	ClientFor(ctx context.Context, orgID, target string) (*github.Client, error)
 }
 
-// Reconciler mirrors artifacts against live GitHub state. One instance is
+// Reconciler mirrors deliverables against live GitHub state. One instance is
 // shared between Tier 1 (the background Manager/Runner) and Tier 2 (the
 // conversation-scoped refresh endpoint): both call Reconcile with a set of
-// non-terminal artifacts. Writes route through the admin pool (UpsertSystem) —
+// non-terminal deliverables. Writes route through the admin pool (UpsertSystem) —
 // the reconciler has no JWT-claims context in either tier.
 //
 // The resolver's clients reach the org's current GitHub host and no other, so
-// only artifacts recorded on that host (their scope) are reconciled. Another
+// only deliverables recorded on that host (their scope) are reconciled. Another
 // host's pull request or branch is not where those clients look, and a branch
 // missing there would read as deleted.
 type Reconciler struct {
-	resolver  clientResolver
-	artifacts db.ArtifactStore
-	actions   db.ExternalActionStore // read for the pr_created rows the backstop works from
-	entities  db.EntityStore         // read for the pull request entity an artifact is about
-	repos     db.RepositoryStore     // read for the registry row an artifact's repository is
-	orgs      db.OrgsStore           // read for the org's current GitHub host
-	ws        *websocket.Hub         // nil-safe: broadcasts are skipped when unset (tests)
+	resolver     clientResolver
+	deliverables db.DeliverableStore
+	actions      db.ExternalActionStore // read for the pr_created rows the backstop works from
+	entities     db.EntityStore         // read for the pull request entity a deliverable is about
+	repos        db.RepositoryStore     // read for the registry row a deliverable's repository is
+	orgs         db.OrgsStore           // read for the org's current GitHub host
+	ws           *websocket.Hub         // nil-safe: broadcasts are skipped when unset (tests)
 	// prResolved runs after a pull request's draft → open transition commits.
 	// nil skips it (tests, and the window before the spawner is wired).
 	prResolved PullRequestResolvedHook
@@ -69,18 +69,18 @@ type PullRequestResolvedHook func(ctx context.Context, orgID, conversationID str
 
 // NewReconciler builds the shared reconciler. ws may be nil (broadcasts become
 // no-ops); the stores + resolver are required.
-func NewReconciler(resolver clientResolver, artifacts db.ArtifactStore, actions db.ExternalActionStore, entities db.EntityStore, repos db.RepositoryStore, orgs db.OrgsStore, ws *websocket.Hub) *Reconciler {
-	return &Reconciler{resolver: resolver, artifacts: artifacts, actions: actions, entities: entities, repos: repos, orgs: orgs, ws: ws}
+func NewReconciler(resolver clientResolver, deliverables db.DeliverableStore, actions db.ExternalActionStore, entities db.EntityStore, repos db.RepositoryStore, orgs db.OrgsStore, ws *websocket.Hub) *Reconciler {
+	return &Reconciler{resolver: resolver, deliverables: deliverables, actions: actions, entities: entities, repos: repos, orgs: orgs, ws: ws}
 }
 
-// onCurrentHost returns the org's current GitHub host and the artifacts of
+// onCurrentHost returns the org's current GitHub host and the deliverables of
 // arts recorded on it.
-func (rc *Reconciler) onCurrentHost(ctx context.Context, orgID string, arts []domain.Artifact) (string, []domain.Artifact, error) {
+func (rc *Reconciler) onCurrentHost(ctx context.Context, orgID string, arts []domain.Deliverable) (string, []domain.Deliverable, error) {
 	host, err := db.OrgGitHubHostSystem(ctx, rc.orgs, orgID)
 	if err != nil {
 		return "", nil, err
 	}
-	out := make([]domain.Artifact, 0, len(arts))
+	out := make([]domain.Deliverable, 0, len(arts))
 	for _, a := range arts {
 		if a.Scope == host {
 			out = append(out, a)
@@ -101,80 +101,80 @@ func (rc *Reconciler) HasPullRequestResolvedHook() bool {
 	return rc.prResolved != nil
 }
 
-// ReconcileOrg runs the PR-artifact backstop, then lists the org's
-// reconcilable non-terminal artifacts (admin pool, org-wide) and reconciles
+// ReconcileOrg runs the PR-deliverable backstop, then lists the org's
+// reconcilable non-terminal deliverables (admin pool, org-wide) and reconciles
 // them. The backstop goes first so a pull request it records is brought to
 // GitHub's current state in the same cycle, through the same transition — and
 // the same resolved hook — as a pull request recorded when it was opened. The
 // Tier-1 Runner's per-cycle body.
 func (rc *Reconciler) ReconcileOrg(ctx context.Context, orgID string) error {
 	// Best-effort — a backstop failure never aborts the reconcile cycle.
-	if err := rc.BackfillPRArtifacts(ctx, orgID); err != nil {
-		reconcileLog.WarnContext(ctx, "PR artifact backstop failed", "org", orgID, "error", err)
+	if err := rc.BackfillPRDeliverables(ctx, orgID); err != nil {
+		reconcileLog.WarnContext(ctx, "PR deliverable backstop failed", "org", orgID, "error", err)
 	}
-	arts, err := rc.artifacts.ListNonTerminalBySystem(ctx, orgID)
+	arts, err := rc.deliverables.ListNonTerminalBySystem(ctx, orgID)
 	if err != nil {
-		return fmt.Errorf("list non-terminal artifacts: %w", err)
+		return fmt.Errorf("list non-terminal deliverables: %w", err)
 	}
 	_, err = rc.Reconcile(ctx, orgID, arts)
 	return err
 }
 
 // prBackstopWindow is how far back the backstop reads the ledger. A missing
-// artifact is normally recorded on the first cycle after its pull request was
+// deliverable is normally recorded on the first cycle after its pull request was
 // opened. The window is long enough that a row is still read after the
 // backstop could not run for days (the control plane down, the org's GitHub
 // unreachable). It bounds both the rows the read returns and the rows it
 // scans: the read walks only the org's pr_created rows inside it
-// (ExternalActionStore.ListPRCreatedWithoutArtifactSystem).
+// (ExternalActionStore.ListPRCreatedWithoutDeliverableSystem).
 const prBackstopWindow = 7 * 24 * time.Hour
 
-// BackfillPRArtifacts is the PR-artifact backstop. TF opens a pull request only
+// BackfillPRDeliverables is the PR-deliverable backstop. TF opens a pull request only
 // through the create verb (`tfac exec gh pr create`); the gh-channel gate
 // refuses every other way of creating one. The verb writes the pull_request
-// artifact and its pr_created ledger row in one write, and when the artifact
+// deliverable and its pr_created ledger row in one write, and when the deliverable
 // write fails it writes the ledger row alone. That is the only case this pass
 // handles: a pull request the verb opened whose ledger row landed and whose
-// artifact did not. When the row and the artifact are both lost, this pass has
+// deliverable did not. When the row and the deliverable are both lost, this pass has
 // nothing to find; recovering that record is the recording path's job, and
 // once its row lands this pass handles it like any other.
 //
 // The ledger row decides both questions the pass answers. Whether TF opened
 // the pull request: one with no pr_created row was opened by someone else (a
 // person working from a branch a run pushed, for example) and gets no
-// artifact, because an artifact for it would hold its task open on an approval
+// deliverable, because a deliverable for it would hold its task open on an approval
 // for something TF never proposed. And who opened it: the row names the
-// conversation and team, and they own the artifact, whichever conversation
+// conversation and team, and they own the deliverable, whichever conversation
 // pushed the branch.
 //
 // The pass reads the pr_created rows on the org's current GitHub host from the
-// last prBackstopWindow whose pull request has no artifact, matching the two by
+// last prBackstopWindow whose pull request has no deliverable, matching the two by
 // the pull request's node id. A node id survives a repository rename, so the
 // match does not depend on the name the row recorded or on how its link spells
 // the host. A row written without a node id is never read, nor is one whose
-// conversation was purged, which leaves no one to own the artifact. It
+// conversation was purged, which leaves no one to own the deliverable. It
 // fetches those pull requests by node id (RefreshPRs, batched per owner the
 // pull request is under now: pullRequestOwner), which gives what the row does
 // not carry: the repository's current name, the number, link, refs, title and
-// body. The artifact is keyed
+// body. The deliverable is keyed
 // on the node id (domain.PullRequestDedupKey), the key the create verb writes
 // under, so the two writers land on one row whatever name each spelled the
 // repository with; its target is the current name. When every pull request
-// already has its artifact, the pass makes no GitHub call.
+// already has its deliverable, the pass makes no GitHub call.
 //
-// The artifact is recorded in the state the verb opened the pull request in,
+// The deliverable is recorded in the state the verb opened the pull request in,
 // and the reconcile that follows applies any transition since. The write is
 // insert-if-absent, so a pull request recorded after the read is left
 // untouched and repeating the pass changes nothing. Best-effort per owner and
 // per pull request: a credential or GitHub failure skips it this pass.
-func (rc *Reconciler) BackfillPRArtifacts(ctx context.Context, orgID string) error {
+func (rc *Reconciler) BackfillPRDeliverables(ctx context.Context, orgID string) error {
 	host, err := db.OrgGitHubHostSystem(ctx, rc.orgs, orgID)
 	if err != nil {
 		return fmt.Errorf("resolve github host: %w", err)
 	}
-	missing, err := rc.actions.ListPRCreatedWithoutArtifactSystem(ctx, orgID, host, time.Now().UTC().Add(-prBackstopWindow))
+	missing, err := rc.actions.ListPRCreatedWithoutDeliverableSystem(ctx, orgID, host, time.Now().UTC().Add(-prBackstopWindow))
 	if err != nil {
-		return fmt.Errorf("list pr_created rows without an artifact: %w", err)
+		return fmt.Errorf("list pr_created rows without a deliverable: %w", err)
 	}
 
 	byNodeID := map[string]domain.ExternalAction{}
@@ -251,10 +251,10 @@ func (rc *Reconciler) entityRepository(ctx context.Context, orgID, entityID stri
 	return rc.repos.GetSystem(ctx, orgID, e.RepositoryID)
 }
 
-// recordBackfilledPR records the pull_request artifact for the pr_created row
+// recordBackfilledPR records the pull_request deliverable for the pr_created row
 // act from snap, GitHub's current copy of the pull request, keyed on the node
 // id act carries and linked to the entity carrying it: the create verb's own
-// recording resolved, or created, that entity before its artifact write
+// recording resolved, or created, that entity before its deliverable write
 // failed. The target is the entity's key, as every writer records it, and
 // GitHub's current name when no entity carries the node id. The proposed
 // snapshot is what GitHub holds now: the title and body the verb sent, unless
@@ -266,48 +266,48 @@ func (rc *Reconciler) recordBackfilledPR(ctx context.Context, orgID, host string
 			"org", orgID, "target", act.Target, "node_id", act.NodeID)
 		return
 	}
-	art := domain.NewPullRequestArtifact(snap.Repo, snap.Number, act.NodeID, snap.HeadRef, snap.BaseRef,
-		snap.URL, snap.Title, snap.Body, act.ToState == domain.ArtifactStatePRDraft)
+	art := domain.NewPullRequestDeliverable(snap.Repo, snap.Number, act.NodeID, snap.HeadRef, snap.BaseRef,
+		snap.URL, snap.Title, snap.Body, act.ToState == domain.DeliverableStatePRDraft)
 	art.ConversationID = act.ConversationID
 	art.OrgID = orgID
 	art.TeamID = act.TeamID
 	art.Scope = host
 	if rc.entities != nil {
-		entity, err := rc.entities.GetByExternalIDSystem(ctx, orgID, domain.ArtifactProviderGitHub, host, act.NodeID)
+		entity, err := rc.entities.GetByExternalIDSystem(ctx, orgID, domain.ProviderGitHub, host, act.NodeID)
 		if err != nil {
-			reconcileLog.WarnContext(ctx, "backstop: read the PR's entity failed; recording the artifact unlinked",
+			reconcileLog.WarnContext(ctx, "backstop: read the PR's entity failed; recording the deliverable unlinked",
 				"org", orgID, "target", target, "error", err)
 		} else if entity != nil {
 			art.EntityID, art.Target = entity.ID, entity.SourceID
 		}
 	}
-	inserted, err := rc.artifacts.InsertArtifactIfAbsentSystem(ctx, orgID, art)
+	inserted, err := rc.deliverables.InsertDeliverableIfAbsentSystem(ctx, orgID, art)
 	if err != nil {
-		reconcileLog.WarnContext(ctx, "backstop: record PR artifact failed",
+		reconcileLog.WarnContext(ctx, "backstop: record PR deliverable failed",
 			"org", orgID, "target", target, "error", err)
 		return
 	}
 	if inserted {
-		reconcileLog.InfoContext(ctx, "backstop: recorded PR artifact from its pr_created row",
+		reconcileLog.InfoContext(ctx, "backstop: recorded PR deliverable from its pr_created row",
 			"org", orgID, "target", target, "recorded_as", act.Target, "conversation", act.ConversationID)
 	}
 }
 
-// Reconcile refreshes each artifact in arts on the org's current GitHub host
+// Reconcile refreshes each deliverable in arts on the org's current GitHub host
 // against live GitHub and applies any state transition: PR
-// draft/open/merged/closed, review submitted/dismissed, branch deleted. An
-// artifact recorded on another host is skipped (see Reconciler). Each
+// draft/open/merged/closed, review submitted/dismissed, branch deleted. A
+// deliverable recorded on another host is skipped (see Reconciler). Each
 // transition broadcasts over the WS hub (as
-// artifact_updated on the owning conversation, so the conversation view's
-// artifact-derived surface refreshes), and a draft pull request that stops
-// being unresolved runs the resolved hook. Returns the artifacts that
+// deliverable_updated on the owning conversation, so the conversation view's
+// deliverable-derived surface refreshes), and a draft pull request that stops
+// being unresolved runs the resolved hook. Returns the deliverables that
 // transitioned, carrying their new state.
 //
-// Best-effort per artifact: a single GitHub or write failure is logged and
+// Best-effort per deliverable: a single GitHub or write failure is logged and
 // skipped, never aborting the rest. GitHub work is grouped by repo OWNER —
 // RefreshPRs / BranchesExist key off a per-owner credential — and batched, so a
-// cycle is a handful of GraphQL calls regardless of artifact count.
-func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain.Artifact) ([]domain.Artifact, error) {
+// cycle is a handful of GraphQL calls regardless of deliverable count.
+func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain.Deliverable) ([]domain.Deliverable, error) {
 	if len(arts) == 0 {
 		return nil, nil
 	}
@@ -316,30 +316,30 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 		return nil, fmt.Errorf("resolve github host: %w", err)
 	}
 
-	// Pass 1 — group the GitHub fetches by owner. PR and review artifacts both
-	// refresh from a PR node id (stored in details); branch artifacts probe a
+	// Pass 1 — group the GitHub fetches by owner. PR and review deliverables both
+	// refresh from a PR node id (stored in details); branch deliverables probe a
 	// ref. The owner is the registry row's current one, read by id: through
 	// the pull request's entity for a pull request or review, through the key
 	// for a branch. A retired row's name is another repository's now, so its
-	// artifacts are left as they stand. An artifact missing its handle (no
+	// deliverables are left as they stand. A deliverable missing its handle (no
 	// node id, no repository) can't be refreshed and is left for a later cycle
 	// once a writer fills it in.
 	reads := newRegistryReads(rc)
 	prNodeIDsByOwner := map[string]map[string]bool{}
 	branchRefsByOwner := map[string][]github.BranchRef{}
-	branchRefs := map[string]github.BranchRef{} // artifact id → the ref probed for it
+	branchRefs := map[string]github.BranchRef{} // deliverable id → the ref probed for it
 	for _, a := range arts {
 		switch a.Kind {
-		case domain.ArtifactKindPullRequest, domain.ArtifactKindReview:
-			nodeID := artifactPRNodeID(a)
+		case domain.DeliverableKindPullRequest, domain.DeliverableKindReview:
+			nodeID := deliverablePRNodeID(a)
 			if nodeID == "" {
 				continue
 			}
-			pr, err := db.ResolveArtifactPullRequest(ctx, orgID, a, reads.entity, reads.repository)
+			pr, err := db.ResolveDeliverablePullRequest(ctx, orgID, a, reads.entity, reads.repository)
 			if err != nil {
-				if !errors.Is(err, db.ErrArtifactNamesNoPullRequest) {
-					reconcileLog.WarnContext(ctx, "resolve artifact's pull request failed; skipping it this cycle",
-						"org", orgID, "artifact", a.ID, "error", err)
+				if !errors.Is(err, db.ErrDeliverableNamesNoPullRequest) {
+					reconcileLog.WarnContext(ctx, "resolve deliverable's pull request failed; skipping it this cycle",
+						"org", orgID, "deliverable", a.ID, "error", err)
 				}
 				continue
 			}
@@ -347,11 +347,11 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 				continue
 			}
 			addNodeID(prNodeIDsByOwner, pr.Owner, nodeID)
-		case domain.ArtifactKindBranch:
+		case domain.DeliverableKindBranch:
 			ref, ok, err := branchProbe(ctx, orgID, a, reads.repository)
 			if err != nil {
-				reconcileLog.WarnContext(ctx, "resolve branch artifact's repository failed; skipping it this cycle",
-					"org", orgID, "artifact", a.ID, "error", err)
+				reconcileLog.WarnContext(ctx, "resolve branch deliverable's repository failed; skipping it this cycle",
+					"org", orgID, "deliverable", a.ID, "error", err)
 				continue
 			}
 			if ok {
@@ -362,7 +362,7 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 	}
 
 	// Pass 2 — one fetch per owner (PRs + branches), tolerant of a per-owner
-	// credential/network failure (skip that owner's artifacts this cycle). PR
+	// credential/network failure (skip that owner's deliverables this cycle). PR
 	// node ids are globally unique, so snapshots merge safely across owners.
 	snapshots := map[string]domain.PRSnapshot{}
 	branchExists := map[github.BranchRef]bool{}
@@ -402,7 +402,7 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 	// cycle.
 	//
 	// The write-back runs on a detached ctx (the fetches above stayed
-	// cancellable). A terminal artifact drops out of BOTH tiers' non-terminal
+	// cancellable). A terminal deliverable drops out of BOTH tiers' non-terminal
 	// working sets the moment applyTransition commits it, so if a client
 	// disconnect (Tier-2) or shutdown (Tier-1) cancelled the state write's
 	// follow-up, no later cycle would re-process it — the closure would be
@@ -411,7 +411,7 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 	// handlers' post-action bookkeeping; the github http.Client's own 30s
 	// timeout still bounds each call.
 	writeCtx := context.WithoutCancel(ctx)
-	var transitioned []domain.Artifact
+	var transitioned []domain.Deliverable
 	resolvedConversations := map[string]bool{}
 	for _, a := range arts {
 		newState, ok := nextState(a, snapshots, branchRefs, branchExists)
@@ -420,8 +420,8 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 		}
 		updated, err := rc.applyTransition(writeCtx, orgID, a, newState)
 		if err != nil {
-			reconcileLog.WarnContext(ctx, "apply artifact transition failed",
-				"org", orgID, "artifact", a.ID, "kind", a.Kind, "from", a.State, "to", newState, "error", err)
+			reconcileLog.WarnContext(ctx, "apply deliverable transition failed",
+				"org", orgID, "deliverable", a.ID, "kind", a.Kind, "from", a.State, "to", newState, "error", err)
 			continue
 		}
 		transitioned = append(transitioned, updated)
@@ -446,49 +446,49 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 // flips the row itself, so the reconciler never sees that one as a
 // transition). A review resolving is not here: the unresolved predicate reads
 // reviews too, but nothing marks one ready out of band.
-func isDraftResolved(a domain.Artifact, newState string) bool {
-	return a.Kind == domain.ArtifactKindPullRequest && a.State == domain.ArtifactStatePRDraft &&
-		newState != domain.ArtifactStatePRDraft
+func isDraftResolved(a domain.Deliverable, newState string) bool {
+	return a.Kind == domain.DeliverableKindPullRequest && a.State == domain.DeliverableStatePRDraft &&
+		newState != domain.DeliverableStatePRDraft
 }
 
 // applyTransition writes the new state (admin pool) and broadcasts the change.
 // Best-effort WS: a dropped broadcast must not undo the transition.
-func (rc *Reconciler) applyTransition(ctx context.Context, orgID string, a domain.Artifact, newState string) (domain.Artifact, error) {
+func (rc *Reconciler) applyTransition(ctx context.Context, orgID string, a domain.Deliverable, newState string) (domain.Deliverable, error) {
 	next := a
 	next.State = newState
-	if a.Kind == domain.ArtifactKindPullRequest {
+	if a.Kind == domain.DeliverableKindPullRequest {
 		// Nobody resolved this through TF — the row records that so the
 		// agent-facing note reads "on GitHub" rather than crediting a human
 		// approval or dismissal that never happened.
 		next.DetailsJSON = domain.StampPRResolution(a.DetailsJSON, domain.PRResolutionGitHub)
 	}
-	updated, err := rc.artifacts.UpsertSystem(ctx, orgID, next)
+	updated, err := rc.deliverables.UpsertSystem(ctx, orgID, next)
 	if err != nil {
-		return domain.Artifact{}, err
+		return domain.Deliverable{}, err
 	}
 	rc.broadcast(orgID, updated)
-	reconcileLog.InfoContext(ctx, "artifact reconciled",
-		"org", orgID, "artifact", a.ID, "kind", a.Kind, "from", a.State, "to", newState)
+	reconcileLog.InfoContext(ctx, "deliverable reconciled",
+		"org", orgID, "deliverable", a.ID, "kind", a.Kind, "from", a.State, "to", newState)
 	return updated, nil
 }
 
-// broadcast pushes the transition to the frontend as a dedicated artifact_updated
+// broadcast pushes the transition to the frontend as a dedicated deliverable_updated
 // event on the owning conversation. It deliberately does NOT reuse conversation_update:
 // that event's consumers (the Board) optimistically write the conversation's
 // Status from data.status, so a payload carrying no real status would blank the
 // card until a refetch. The conversation's own status is unchanged here — only its
-// artifact-derived surface (pending kind / approval card) is — so the FE handlers
+// deliverable-derived surface (pending kind / approval card) is — so the FE handlers
 // refetch the conversation on this event without touching status. Skipped for a
-// detached artifact (no conversation) or unset hub.
-func (rc *Reconciler) broadcast(orgID string, a domain.Artifact) {
+// detached deliverable (no conversation) or unset hub.
+func (rc *Reconciler) broadcast(orgID string, a domain.Deliverable) {
 	if rc.ws == nil || a.ConversationID == "" {
 		return
 	}
 	rc.ws.Broadcast(websocket.Event{
-		Type:           "artifact_updated",
+		Type:           "deliverable_updated",
 		OrgID:          orgID,
 		ConversationID: a.ConversationID,
-		Data:           map[string]any{"artifact_id": a.ID, "state": a.State},
+		Data:           map[string]any{"deliverable_id": a.ID, "state": a.State},
 	})
 	// And the resource-wide ping beside it, for the counters that follow a SET
 	// rather than one conversation. The event above is addressed to whoever is
@@ -499,31 +499,31 @@ func (rc *Reconciler) broadcast(orgID string, a domain.Artifact) {
 	conversationevent.Publish(rc.ws, orgID)
 }
 
-// nextState computes the artifact's reconciled state from the fetched GitHub
+// nextState computes the deliverable's reconciled state from the fetched GitHub
 // data, returning ok=false when there's no confident answer (snapshot missing,
 // review not yet surfaced, branch not probed or existence unknown) so the
 // caller leaves the row untouched. branchRefs is the ref probed for each
-// branch artifact, by artifact id. A returned state equal to the current one
+// branch deliverable, by deliverable id. A returned state equal to the current one
 // is a no-op.
-func nextState(a domain.Artifact, snapshots map[string]domain.PRSnapshot, branchRefs map[string]github.BranchRef, branchExists map[github.BranchRef]bool) (string, bool) {
+func nextState(a domain.Deliverable, snapshots map[string]domain.PRSnapshot, branchRefs map[string]github.BranchRef, branchExists map[github.BranchRef]bool) (string, bool) {
 	switch a.Kind {
-	case domain.ArtifactKindPullRequest:
-		d, _ := domain.ParsePRArtifactDetails(a.DetailsJSON)
+	case domain.DeliverableKindPullRequest:
+		d, _ := domain.ParsePRDeliverableDetails(a.DetailsJSON)
 		snap, ok := snapshots[d.NodeID]
 		if !ok {
 			return "", false
 		}
 		return prState(snap, a.State), true
 
-	case domain.ArtifactKindReview:
-		d, _ := domain.ParseReviewArtifactDetails(a.DetailsJSON)
+	case domain.DeliverableKindReview:
+		d, _ := domain.ParseReviewDeliverableDetails(a.DetailsJSON)
 		snap, ok := snapshots[d.NodeID]
 		if !ok {
 			return "", false
 		}
 		return reviewState(snap, a.ExternalID)
 
-	case domain.ArtifactKindBranch:
+	case domain.DeliverableKindBranch:
 		ref, ok := branchRefs[a.ID]
 		if !ok {
 			return "", false
@@ -533,14 +533,14 @@ func nextState(a domain.Artifact, snapshots map[string]domain.PRSnapshot, branch
 			return "", false // unknown (repo inaccessible) — never mark deleted on a non-answer
 		}
 		if exists {
-			return domain.ArtifactStateBranchPushed, true // still there — no-op
+			return domain.DeliverableStateBranchPushed, true // still there — no-op
 		}
-		return domain.ArtifactStateBranchDeleted, true
+		return domain.DeliverableStateBranchDeleted, true
 	}
 	return "", false
 }
 
-// prState maps a PR snapshot onto the artifact lifecycle, given the state the
+// prState maps a PR snapshot onto the deliverable lifecycle, given the state the
 // row holds now. GitHub's PR.state is OPEN/CLOSED/MERGED; merged is also
 // flagged explicitly, checked first so a merged PR never reads as merely
 // closed.
@@ -555,22 +555,22 @@ func nextState(a domain.Artifact, snapshots map[string]domain.PRSnapshot, branch
 func prState(snap domain.PRSnapshot, current string) string {
 	switch {
 	case snap.Merged || strings.EqualFold(snap.State, "MERGED"):
-		return domain.ArtifactStatePRMerged
+		return domain.DeliverableStatePRMerged
 	case strings.EqualFold(snap.State, "CLOSED"):
-		return domain.ArtifactStatePRClosed
-	case snap.IsDraft && current == domain.ArtifactStatePRDraft:
-		return domain.ArtifactStatePRDraft
+		return domain.DeliverableStatePRClosed
+	case snap.IsDraft && current == domain.DeliverableStatePRDraft:
+		return domain.DeliverableStatePRDraft
 	default:
-		return domain.ArtifactStatePROpen
+		return domain.DeliverableStatePROpen
 	}
 }
 
 // reviewState maps the bot's review (matched by its node id in the PR's latest
-// reviews) onto the artifact lifecycle. A pending review is private until
+// reviews) onto the deliverable lifecycle. A pending review is private until
 // submitted, so the bot's own pending review either isn't surfaced here or
-// reads as PENDING — both leave the artifact pending (ok=false / no-op). Only a
+// reads as PENDING — both leave the deliverable pending (ok=false / no-op). Only a
 // positive match with a terminal review state transitions the row, so a missing
-// review never flips a still-pending artifact to dismissed.
+// review never flips a still-pending deliverable to dismissed.
 func reviewState(snap domain.PRSnapshot, reviewID string) (string, bool) {
 	if reviewID == "" {
 		return "", false
@@ -581,11 +581,11 @@ func reviewState(snap domain.PRSnapshot, reviewID string) (string, bool) {
 		}
 		switch strings.ToUpper(rv.State) {
 		case "DISMISSED":
-			return domain.ArtifactStateReviewDismissed, true
+			return domain.DeliverableStateReviewDismissed, true
 		case "PENDING", "":
 			return "", false // still pending/private — leave as-is
 		default: // APPROVED, CHANGES_REQUESTED, COMMENTED
-			return domain.ArtifactStateReviewSubmitted, true
+			return domain.DeliverableStateReviewSubmitted, true
 		}
 	}
 	return "", false
@@ -593,26 +593,26 @@ func reviewState(snap domain.PRSnapshot, reviewID string) (string, bool) {
 
 // --- coordinate helpers ---
 
-// prOwner extracts the repo owner from a PR/review artifact target
+// prOwner extracts the repo owner from a PR/review deliverable target
 // (owner/repo#number). ok=false on a malformed target.
 func prOwner(target string) (string, bool) {
 	owner, _, _, ok := domain.ParsePRTarget(target)
 	return owner, ok
 }
 
-// artifactPRNodeID is the node id of the pull request a pull request or review
-// artifact is about, from its details; "" when the row carries none.
-func artifactPRNodeID(a domain.Artifact) string {
-	if a.Kind == domain.ArtifactKindReview {
-		d, _ := domain.ParseReviewArtifactDetails(a.DetailsJSON)
+// deliverablePRNodeID is the node id of the pull request a pull request or review
+// deliverable is about, from its details; "" when the row carries none.
+func deliverablePRNodeID(a domain.Deliverable) string {
+	if a.Kind == domain.DeliverableKindReview {
+		d, _ := domain.ParseReviewDeliverableDetails(a.DetailsJSON)
 		return d.NodeID
 	}
-	d, _ := domain.ParsePRArtifactDetails(a.DetailsJSON)
+	d, _ := domain.ParsePRDeliverableDetails(a.DetailsJSON)
 	return d.NodeID
 }
 
 // registryReads are the entity and registry-row point reads one reconcile
-// pass makes, each row read once however many artifacts reference it.
+// pass makes, each row read once however many deliverables reference it.
 type registryReads struct {
 	rc       *Reconciler
 	entities map[string]*domain.Entity
@@ -647,14 +647,14 @@ func (r *registryReads) repository(ctx context.Context, orgID, id string) (*doma
 	return row, nil
 }
 
-// branchProbe returns the ref a branch artifact's existence is probed at: its
+// branchProbe returns the ref a branch deliverable's existence is probed at: its
 // branch, in the repository its key's registry row (domain.BranchDedupKey) is
 // named now. A stored key that names its repository by owner/repo carries no
 // row and is probed at its target. ok=false when there is nothing to probe: a
 // retired row, whose name is another repository's now; a row that no longer
-// exists; or a malformed artifact.
-func branchProbe(ctx context.Context, orgID string, a domain.Artifact, repository func(ctx context.Context, orgID, id string) (*domain.Repository, error)) (github.BranchRef, bool, error) {
-	repositoryID, keyed := domain.BranchArtifactRepositoryID(a)
+// exists; or a malformed deliverable.
+func branchProbe(ctx context.Context, orgID string, a domain.Deliverable, repository func(ctx context.Context, orgID, id string) (*domain.Repository, error)) (github.BranchRef, bool, error) {
+	repositoryID, keyed := domain.BranchDeliverableRepositoryID(a)
 	if !keyed {
 		ref, ok := branchRefOf(a)
 		return ref, ok, nil
@@ -673,11 +673,11 @@ func branchProbe(ctx context.Context, orgID string, a domain.Artifact, repositor
 	return github.BranchRef{Owner: row.Owner, Repo: row.Repo, Branch: branch}, true, nil
 }
 
-// branchRefOf derives the GitHub coordinates of a branch artifact from its
+// branchRefOf derives the GitHub coordinates of a branch deliverable from its
 // Target (owner/repo) and ExternalID (refs/heads/<branch>), for a row whose
 // key carries no registry row (branchProbe). ok=false when either is
 // malformed — the row is skipped rather than probed against a guessed ref.
-func branchRefOf(a domain.Artifact) (github.BranchRef, bool) {
+func branchRefOf(a domain.Deliverable) (github.BranchRef, bool) {
 	parts := strings.SplitN(a.Target, "/", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return github.BranchRef{}, false

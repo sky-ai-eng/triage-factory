@@ -15,15 +15,15 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// pushDetails mirrors a branch artifact's details_json payload for assertions;
-// the producing type is unexported in internal/domain (NewBranchArtifact).
+// pushDetails mirrors a branch deliverable's details_json payload for assertions;
+// the producing type is unexported in internal/domain (NewBranchDeliverable).
 type pushDetails struct {
 	SHA string `json:"sha"`
 	New bool   `json:"new"`
 }
 
 // newTestStores opens an in-memory SQLite, migrates it, and seeds one
-// conversations row the artifacts FK (conversation_id) can point at. Returns the
+// conversations row the deliverables FK (conversation_id) can point at. Returns the
 // stores plus the conversation id to wire into ConversationInfo.
 func newTestStores(t *testing.T) (db.Stores, string) {
 	t.Helper()
@@ -46,7 +46,7 @@ func newTestStores(t *testing.T) (db.Stores, string) {
 	// Minimal valid conversation: event-triggered (creator_user_id NULL) + a
 	// non-blueprint origin so the parent-pairing CHECKs don't demand a
 	// task/prompt/blueprint chain. org_id/team_id default to the local
-	// sentinels. The artifact only needs conversation_id to satisfy its FK.
+	// sentinels. The deliverable only needs conversation_id to satisfy its FK.
 	if _, err := conn.Exec(`INSERT INTO conversations (id, trigger_type, creator_user_id, origin, status) VALUES ('r1', 'event', NULL, 'interactive', 'running')`); err != nil {
 		t.Fatalf("seed conversation: %v", err)
 	}
@@ -80,7 +80,7 @@ func hostFor(stores db.Stores, conversationID string, eventTriggered bool) agent
 	})
 }
 
-func TestRecordPush_UpsertsBranchArtifact(t *testing.T) {
+func TestRecordPush_UpsertsBranchDeliverable(t *testing.T) {
 	stores, conversationID := newTestStores(t)
 	repoID := registerOctoRepo(t, stores, "https://github.com")
 	host := hostFor(stores, conversationID, false)
@@ -92,15 +92,15 @@ func TestRecordPush_UpsertsBranchArtifact(t *testing.T) {
 		"--new=true",
 	})
 
-	arts, err := stores.Artifacts.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID)
+	arts, _, err := stores.Deliverables.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
 	if err != nil {
 		t.Fatalf("ListByConversation: %v", err)
 	}
 	if len(arts) != 1 {
-		t.Fatalf("got %d artifacts, want 1", len(arts))
+		t.Fatalf("got %d deliverables, want 1", len(arts))
 	}
 	a := arts[0]
-	if a.Provider != domain.ArtifactProviderGit || a.Kind != domain.ArtifactKindBranch {
+	if a.Provider != domain.ProviderGit || a.Kind != domain.DeliverableKindBranch {
 		t.Errorf("provider/kind = %q/%q, want git/branch", a.Provider, a.Kind)
 	}
 	if a.Target != "octo/repo" {
@@ -112,7 +112,7 @@ func TestRecordPush_UpsertsBranchArtifact(t *testing.T) {
 	if want := "https://github.com/octo/repo/tree/feature/x"; a.URL != want {
 		t.Errorf("url = %q, want %q", a.URL, want)
 	}
-	if a.State != domain.ArtifactStateBranchPushed {
+	if a.State != domain.DeliverableStateBranchPushed {
 		t.Errorf("state = %q, want pushed", a.State)
 	}
 	if want := domain.BranchDedupKey(repoID, "refs/heads/feature/x"); a.DedupKey != want {
@@ -132,7 +132,7 @@ func TestRecordPush_UpsertsBranchArtifact(t *testing.T) {
 
 // TestRecordPush_RepushUpsertsOneRow proves a second push of the same branch
 // lands on the one deduped row, updating the volatile payload (sha, new)
-// rather than minting a second artifact.
+// rather than minting a second deliverable.
 func TestRecordPush_RepushUpsertsOneRow(t *testing.T) {
 	stores, conversationID := newTestStores(t)
 	registerOctoRepo(t, stores, "https://github.com")
@@ -141,12 +141,12 @@ func TestRecordPush_RepushUpsertsOneRow(t *testing.T) {
 	runRecordPush(host, []string{"--remote", "git@github.com:octo/repo.git", "--ref", "refs/heads/main", "--sha", "aaa", "--new=true"})
 	runRecordPush(host, []string{"--remote", "git@github.com:octo/repo.git", "--ref", "refs/heads/main", "--sha", "bbb", "--new=false"})
 
-	arts, err := stores.Artifacts.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID)
+	arts, _, err := stores.Deliverables.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
 	if err != nil {
 		t.Fatalf("ListByConversation: %v", err)
 	}
 	if len(arts) != 1 {
-		t.Fatalf("got %d artifacts, want 1 (re-push must upsert)", len(arts))
+		t.Fatalf("got %d deliverables, want 1 (re-push must upsert)", len(arts))
 	}
 	var d pushDetails
 	_ = json.Unmarshal([]byte(arts[0].DetailsJSON), &d)
@@ -166,29 +166,29 @@ func TestRecordPush_EventTriggeredUsesSystemPool(t *testing.T) {
 
 	runRecordPush(host, []string{"--remote", "https://github.com/octo/repo", "--ref", "refs/heads/main", "--sha", "ccc", "--new=true"})
 
-	arts, err := stores.Artifacts.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID)
+	arts, _, err := stores.Deliverables.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
 	if err != nil {
 		t.Fatalf("ListByConversation: %v", err)
 	}
 	if len(arts) != 1 {
-		t.Fatalf("got %d artifacts, want 1", len(arts))
+		t.Fatalf("got %d deliverables, want 1", len(arts))
 	}
 }
 
 // TestRecordPush_SkipsNonBranchRef confirms a tag (or any non refs/heads ref)
-// is not recorded as a branch artifact.
+// is not recorded as a branch deliverable.
 func TestRecordPush_SkipsNonBranchRef(t *testing.T) {
 	stores, conversationID := newTestStores(t)
 	host := hostFor(stores, conversationID, false)
 
 	runRecordPush(host, []string{"--remote", "https://github.com/octo/repo", "--ref", "refs/tags/v1.0", "--sha", "ddd", "--new=true"})
 
-	arts, err := stores.Artifacts.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID)
+	arts, _, err := stores.Deliverables.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
 	if err != nil {
 		t.Fatalf("ListByConversation: %v", err)
 	}
 	if len(arts) != 0 {
-		t.Fatalf("got %d artifacts, want 0 (tags are not branches)", len(arts))
+		t.Fatalf("got %d deliverables, want 0 (tags are not branches)", len(arts))
 	}
 }
 
@@ -196,7 +196,7 @@ func TestRecordPush_SkipsNonBranchRef(t *testing.T) {
 // local-mode GHES path: with the org's GitHub base set to a GHES host, a push to
 // that host is captured (the gate accepts it) AND the recorded branch link is
 // anchored to the GHES host, not github.com. This is the scenario the earlier
-// github.com-only gate silently dropped before an artifact was ever written.
+// github.com-only gate silently dropped before a deliverable was ever written.
 func TestRecordPush_GHESHostRecordsAndAnchorsURL(t *testing.T) {
 	stores, conversationID := newTestStores(t)
 	dbtest.SeedOrgSettings(t, stores.Orgs, runmode.LocalDefaultOrgID,
@@ -211,12 +211,12 @@ func TestRecordPush_GHESHostRecordsAndAnchorsURL(t *testing.T) {
 		"--new=true",
 	})
 
-	arts, err := stores.Artifacts.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID)
+	arts, _, err := stores.Deliverables.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
 	if err != nil {
 		t.Fatalf("ListByConversation: %v", err)
 	}
 	if len(arts) != 1 {
-		t.Fatalf("got %d artifacts, want 1 (a GHES push must be captured in local mode)", len(arts))
+		t.Fatalf("got %d deliverables, want 1 (a GHES push must be captured in local mode)", len(arts))
 	}
 	if want := "https://github.corp.example.com/octo/repo/tree/feature/x"; arts[0].URL != want {
 		t.Errorf("url = %q, want %q (anchored to the GHES host, not github.com)", arts[0].URL, want)
@@ -235,12 +235,12 @@ func TestRecordPush_GHESOrgSkipsForeignHost(t *testing.T) {
 
 	runRecordPush(host, []string{"--remote", "https://github.com/octo/repo", "--ref", "refs/heads/main", "--sha", "xyz", "--new=true"})
 
-	arts, err := stores.Artifacts.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID)
+	arts, _, err := stores.Deliverables.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
 	if err != nil {
 		t.Fatalf("ListByConversation: %v", err)
 	}
 	if len(arts) != 0 {
-		t.Fatalf("got %d artifacts, want 0 (github.com is not the GHES org's host)", len(arts))
+		t.Fatalf("got %d deliverables, want 0 (github.com is not the GHES org's host)", len(arts))
 	}
 }
 

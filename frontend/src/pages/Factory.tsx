@@ -199,7 +199,7 @@ export default function Factory() {
       evt.type === 'event' ||
       evt.type === 'tasks_updated' ||
       evt.type === 'conversation_update' ||
-      evt.type === 'artifact_updated'
+      evt.type === 'deliverable_updated'
     ) {
       const refetch = (window as unknown as { __factoryRefetch?: () => void }).__factoryRefetch
       refetch?.()

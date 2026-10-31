@@ -81,7 +81,7 @@ const (
 	//
 	// A Conn serves these frames on a lane of their own, one at a time and in
 	// arrival order (see Conn), because the order records are applied in is
-	// visible: several artifact fields are last-writer-wins, and a comment's
+	// visible: several deliverable fields are last-writer-wins, and a comment's
 	// delete finds nothing to update if its post has not been applied yet.
 	KindRelayRecord Kind = "relay_record"
 

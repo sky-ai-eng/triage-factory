@@ -9,11 +9,11 @@ import { HttpError, apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient
 import { Dialog } from '../ui/dialog/Dialog'
 import { toast } from './Toast/toastStore'
 
-// PRArtifact mirrors GET /api/artifacts/{id} for a pull_request artifact: the
-// shared artifact envelope, with the PR-shaped payload under `details`.
+// PRDeliverable mirrors GET /api/deliverables/{id} for a pull_request deliverable: the
+// shared deliverable envelope, with the PR-shaped payload under `details`.
 // title/body there are the LIVE PR values (fetched from GitHub via GetPR), not
 // a local snapshot — the draft PR is a real GitHub object now, edited 1:1.
-interface PRArtifact {
+interface PRDeliverable {
   id: string
   kind: string
   url: string
@@ -30,7 +30,7 @@ interface PRArtifact {
 }
 
 interface Props {
-  artifactId: string
+  deliverableId: string
   open: boolean
   onClose: () => void
 }
@@ -44,7 +44,7 @@ interface Props {
 //   - no inline-comment surface (commentsByFile is always empty)
 //   - no draft toggle (the PR is always a draft until approval promotes it)
 //
-// The diff comes from GitHub (/api/artifacts/{id}/diff) — the PR exists, so the
+// The diff comes from GitHub (/api/deliverables/{id}/diff) — the PR exists, so the
 // server proxies GitHub's diff with the same 406→per-file fallback the review
 // overlay uses.
 //
@@ -53,8 +53,8 @@ interface Props {
 // which is the one thing in this flow that cannot be undone. So it goes through
 // a destructive Dialog that names the branch, cancels on Escape and on the
 // backdrop, and confirms only on a held press — never a single keystroke.
-export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
-  const [pr, setPR] = useState<PRArtifact | null>(null)
+export default function PendingPROverlay({ deliverableId, open, onClose }: Props) {
+  const [pr, setPR] = useState<PRDeliverable | null>(null)
   const [files, setFiles] = useState<FileData[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -70,7 +70,7 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
   const [diffError, setDiffError] = useState<string | null>(null)
   // submitError is the "Open PR" (approve) failure, shown as an inline banner
   // rather than the full-screen error state: a failed approve is safely
-  // retryable in place — the artifact stays draft and approve touches nothing
+  // retryable in place — the deliverable stays draft and approve touches nothing
   // but the ready flag — so we keep the editor visible instead of forcing a
   // close-and-reopen.
   const [submitError, setSubmitError] = useState<string | null>(null)
@@ -90,10 +90,10 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
   const titleId = useId()
   useFocusTrap(dialogRef, { active: open && !confirmingReject, initialFocus: closeRef })
 
-  // Fetch the PR artifact, then the diff. Reset stale state from any prior PR
+  // Fetch the PR deliverable, then the diff. Reset stale state from any prior PR
   // before the new fetch lands so the user doesn't see leftover values briefly.
   useEffect(() => {
-    if (!open || !artifactId) return
+    if (!open || !deliverableId) return
     let cancelled = false
     setLoading(true)
     setError(null)
@@ -106,9 +106,9 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
     ;(async () => {
       // PR fetch — a failure here blocks: there's nothing to edit or approve
       // without the PR, so it lands in `error` (the full-screen error state).
-      let prData: PRArtifact
+      let prData: PRDeliverable
       try {
-        prData = await apiJSON<PRArtifact>(`/api/artifacts/${artifactId}`)
+        prData = await apiJSON<PRDeliverable>(`/api/deliverables/${deliverableId}`)
       } catch (err) {
         if (!cancelled) {
           setError(httpErrorMessage(err, 'Could not load the pull request.'))
@@ -127,7 +127,7 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
         // FAILURE body is JSON, and httpErrorMessage surfaces that `error`
         // verbatim: the backend already produces an actionable message, no
         // point swallowing it behind a generic "Failed to load diff".
-        const diffRes = await apiFetch(`/api/artifacts/${artifactId}/diff`)
+        const diffRes = await apiFetch(`/api/deliverables/${deliverableId}/diff`)
         const diffText = await diffRes.text()
         if (cancelled) return
         setFiles(parseDiff(diffText))
@@ -142,7 +142,7 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
     return () => {
       cancelled = true
     }
-  }, [open, artifactId])
+  }, [open, deliverableId])
 
   // lastSavePromise tracks the most recent in-flight title/body PATCH so the
   // submit handler awaits it before approving — otherwise a click-Save-then-
@@ -156,7 +156,7 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
   const patchPR = useCallback(
     async (body: object) => {
       try {
-        await apiFetch(`/api/artifacts/${artifactId}/pr`, {
+        await apiFetch(`/api/deliverables/${deliverableId}/pr`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
@@ -167,7 +167,7 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
         throw new Error(httpErrorMessage(err, 'Could not save the pull request.'))
       }
     },
-    [artifactId],
+    [deliverableId],
   )
 
   const handleUpdateTitle = useCallback(
@@ -197,7 +197,7 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
   // says the PR was already resolved — on GitHub, or by another click — and the
   // server has refreshed its record. The overlay is now a picture of something
   // that no longer exists, so it reports what happened and closes; the
-  // conversation view repaints from the artifact_updated broadcast.
+  // conversation view repaints from the deliverable_updated broadcast.
   const resolvedElsewhere = useCallback(
     (err: unknown): boolean => {
       if (!(err instanceof HttpError) || err.status !== 409) return false
@@ -227,7 +227,7 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
           /* failed save already surfaced to the user; drop it and approve live state */
         }
       }
-      await apiFetch(`/api/artifacts/${artifactId}/approve`, {
+      await apiFetch(`/api/deliverables/${deliverableId}/approve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
       })
@@ -240,7 +240,7 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
     } finally {
       setSubmitting(false)
     }
-  }, [artifactId, onClose, resolvedElsewhere])
+  }, [deliverableId, onClose, resolvedElsewhere])
 
   const handleReject = useCallback(async () => {
     setRejecting(true)
@@ -248,7 +248,7 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
     try {
       // Nothing to wait for on the save side: a rejection discards the PR
       // whatever its title/body say, so an in-flight edit is irrelevant to it.
-      const out = await apiJSON<{ branch: string }>(`/api/artifacts/${artifactId}/reject`, {
+      const out = await apiJSON<{ branch: string }>(`/api/deliverables/${deliverableId}/reject`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
       })
@@ -270,7 +270,7 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
     } finally {
       setRejecting(false)
     }
-  }, [artifactId, onClose, resolvedElsewhere])
+  }, [deliverableId, onClose, resolvedElsewhere])
 
   // Close on Escape. The Dialog claims Escape first (capture + stopPropagation)
   // while the reject confirmation is up, so cancelling it never closes the
@@ -450,7 +450,7 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
                 tone: 'keep',
               },
             ]}
-            note="This cannot be undone. To close the PR but keep the branch, dismiss it from the run's artifact list instead."
+            note="This cannot be undone. To close the PR but keep the branch, dismiss it from the run's deliverable list instead."
             confirmLabel={rejecting ? 'Rejecting…' : 'Hold to reject & delete branch'}
             confirmHold={900}
             cancelLabel="Keep it"

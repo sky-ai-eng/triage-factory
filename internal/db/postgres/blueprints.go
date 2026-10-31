@@ -19,7 +19,7 @@ import (
 // blueprintStore is the Postgres impl of db.BlueprintStore. Holds two pools:
 //
 //   - app: app pool (tf_app, RLS-active). Every request-equivalent consumer
-//     (blueprints handler, artifact-PR / reviews handlers, user-initiated
+//     (blueprints handler, deliverable-PR / reviews handlers, user-initiated
 //     lifecycle entry points like CancelBlueprintRun and the
 //     ResumeBlueprintAfter* paths) runs here.
 //

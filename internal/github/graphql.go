@@ -794,8 +794,8 @@ func (pr gqlPR) buildSnapshot(includeCheckRuns bool) domain.PRSnapshot {
 	}
 
 	// Latest reviews per reviewer. ID is the review's GraphQL node id —
-	// carried so the artifact reconciler (TFAC-464) can match a pending
-	// review artifact (keyed on that id) to its now-submitted/dismissed state
+	// carried so the deliverable reconciler (TFAC-464) can match a pending
+	// review deliverable (keyed on that id) to its now-submitted/dismissed state
 	// here, rather than matching by author (which can't distinguish a fresh
 	// pending review from a prior submitted one by the same identity).
 	for _, rev := range pr.LatestReviews.Nodes {

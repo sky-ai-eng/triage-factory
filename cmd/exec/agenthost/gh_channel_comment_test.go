@@ -21,22 +21,22 @@ func graphQLWrite(mutation, subject, externalID, nodeID, url string) ghwrite.Obs
 	}
 }
 
-// onlyArtifact returns the conversation's one artifact, failing on any other
+// onlyDeliverable returns the conversation's one deliverable, failing on any other
 // count.
-func onlyArtifact(t *testing.T, stores db.Stores, conversationID string) domain.Artifact {
+func onlyDeliverable(t *testing.T, stores db.Stores, conversationID string) domain.Deliverable {
 	t.Helper()
-	arts := listConversationArtifacts(t, stores, conversationID)
+	arts := listConversationDeliverables(t, stores, conversationID)
 	if len(arts) != 1 {
-		t.Fatalf("want 1 artifact, got %d: %+v", len(arts), arts)
+		t.Fatalf("want 1 deliverable, got %d: %+v", len(arts), arts)
 	}
 	return arts[0]
 }
 
-// TestGHChannel_ThreadReplyRecordsCommentArtifact pins the reply acceptance for
+// TestGHChannel_ThreadReplyRecordsCommentDeliverable pins the reply acceptance for
 // both raw transports: a reply through `gh api` REST and one through
-// `gh api graphql` each leave a `comment` artifact in the review comments'
+// `gh api graphql` each leave a `comment` deliverable in the review comments'
 // numbering, carrying the reply's number and node id.
-func TestGHChannel_ThreadReplyRecordsCommentArtifact(t *testing.T) {
+func TestGHChannel_ThreadReplyRecordsCommentDeliverable(t *testing.T) {
 	const replyURL = "https://github.com/octo/repo/pull/42#discussion_r8"
 	cases := []struct {
 		name        string
@@ -68,16 +68,16 @@ func TestGHChannel_ThreadReplyRecordsCommentArtifact(t *testing.T) {
 				stores, info, client := newGithubRecordingClient(t, "https://github.com", eventTriggered)
 				client.RecordGHChannelWrite(context.Background(), tc.obs)
 
-				a := onlyArtifact(t, stores, info.ConversationID)
-				if a.Provider != domain.ArtifactProviderGitHub || a.Kind != domain.ArtifactKindComment ||
-					a.DedupKey != domain.GitHubCommentDedupKey(domain.GitHubReviewComment, 8) ||
+				a := onlyDeliverable(t, stores, info.ConversationID)
+				if a.Provider != domain.ProviderGitHub || a.Kind != domain.DeliverableKindComment ||
+					a.DedupKey != domain.GitHubCommentKey(domain.GitHubReviewComment, 8) ||
 					a.ExternalID != "8" || a.NodeID != "PRRC_kwReply" || a.Target != "octo/repo#42" ||
-					a.URL != replyURL || a.State != domain.ArtifactStateCommentPosted ||
+					a.URL != replyURL || a.State != domain.DeliverableStateCommentPosted ||
 					a.DetailsJSON != tc.wantDetails {
-					t.Errorf("reply artifact = %+v", a)
+					t.Errorf("reply deliverable = %+v", a)
 				}
 				if acts := listExternalActions(t, stores); len(acts) != 1 || acts[0].Action != domain.ActionCommentPosted {
-					t.Errorf("audit rows = %+v, want the one comment_posted row beside the artifact", acts)
+					t.Errorf("audit rows = %+v, want the one comment_posted row beside the deliverable", acts)
 				}
 			})
 		}
@@ -86,7 +86,7 @@ func TestGHChannel_ThreadReplyRecordsCommentArtifact(t *testing.T) {
 
 // TestGHChannel_CommentLifecycleByNodeID pins the edit and delete acceptance:
 // a comment posted through the channel, then edited and deleted through
-// GraphQL mutations that name it by node id alone, is one artifact, which the
+// GraphQL mutations that name it by node id alone, is one deliverable, which the
 // edit leaves as it is and the delete retires. The conversation comment is `gh
 // pr comment`'s shape — its number off the url's anchor, its node id read back
 // by the injector — and the inline comment is a thread reply.
@@ -120,24 +120,24 @@ func TestGHChannel_CommentLifecycleByNodeID(t *testing.T) {
 			ctx := context.Background()
 
 			client.RecordGHChannelWrite(ctx, tc.post)
-			posted := onlyArtifact(t, stores, info.ConversationID)
+			posted := onlyDeliverable(t, stores, info.ConversationID)
 			number := strconv.FormatInt(tc.number, 10)
 			if posted.ExternalID != number || posted.NodeID != tc.nodeID {
-				t.Fatalf("posted artifact = %+v, want both ids", posted)
+				t.Fatalf("posted deliverable = %+v, want both ids", posted)
 			}
 
 			// Edit and delete name the comment by node id only, and their
 			// responses return no number.
 			client.RecordGHChannelWrite(ctx, graphQLWrite(tc.edit, tc.nodeID, "", "", ""))
-			edited := onlyArtifact(t, stores, info.ConversationID)
-			if edited.ID != posted.ID || edited.State != domain.ArtifactStateCommentPosted {
+			edited := onlyDeliverable(t, stores, info.ConversationID)
+			if edited.ID != posted.ID || edited.State != domain.DeliverableStateCommentPosted {
 				t.Errorf("after the edit = %+v, want row %s still posted", edited, posted.ID)
 			}
 
 			client.RecordGHChannelWrite(ctx, graphQLWrite(tc.delete, tc.nodeID, "", "", ""))
-			deleted := onlyArtifact(t, stores, info.ConversationID)
-			if deleted.ID != posted.ID || deleted.State != domain.ArtifactStateCommentDeleted ||
-				deleted.DedupKey != domain.GitHubCommentDedupKey(tc.space, tc.number) ||
+			deleted := onlyDeliverable(t, stores, info.ConversationID)
+			if deleted.ID != posted.ID || deleted.State != domain.DeliverableStateCommentDeleted ||
+				deleted.DedupKey != domain.GitHubCommentKey(tc.space, tc.number) ||
 				deleted.ExternalID != number || deleted.NodeID != tc.nodeID || deleted.Target != "octo/repo#42" {
 				t.Errorf("after the delete = %+v, want row %s deleted with its coordinates kept", deleted, posted.ID)
 			}
@@ -161,17 +161,17 @@ func TestGHChannel_DeleteByNodeIDFindsTheVerbsRow(t *testing.T) {
 	}
 	client.RecordGHChannelWrite(ctx, graphQLWrite("deleteIssueComment", "IC_kw777", "", "", ""))
 
-	a := onlyArtifact(t, stores, info.ConversationID)
-	if a.DedupKey != "github:comment:777" || a.State != domain.ArtifactStateCommentDeleted {
-		t.Errorf("artifact = %+v, want the verb's row retired", a)
+	a := onlyDeliverable(t, stores, info.ConversationID)
+	if a.DedupKey != "github:comment:777" || a.State != domain.DeliverableStateCommentDeleted {
+		t.Errorf("deliverable = %+v, want the verb's row retired", a)
 	}
 }
 
-// TestGHChannel_NoCommentArtifact pins the writes that leave only their audit
+// TestGHChannel_NoCommentDeliverable pins the writes that leave only their audit
 // row: a refused comment write, an edit or a delete of a comment TF did not
 // post (named by number or by a node id no row carries), a reaction to a
 // comment, and a non-comment write.
-func TestGHChannel_NoCommentArtifact(t *testing.T) {
+func TestGHChannel_NoCommentDeliverable(t *testing.T) {
 	cases := []struct {
 		name string
 		obs  ghwrite.Observation
@@ -195,8 +195,8 @@ func TestGHChannel_NoCommentArtifact(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			stores, info, client := newGithubRecordingClient(t, "https://github.com", true)
 			client.RecordGHChannelWrite(context.Background(), tc.obs)
-			if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 0 {
-				t.Errorf("artifacts = %+v, want none", arts)
+			if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 0 {
+				t.Errorf("deliverables = %+v, want none", arts)
 			}
 			if acts := listExternalActions(t, stores); len(acts) != 1 {
 				t.Errorf("audit rows = %+v, want the write's one row", acts)

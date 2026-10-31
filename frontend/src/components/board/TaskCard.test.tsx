@@ -48,14 +48,14 @@ describe('TaskCard, queued', () => {
     expect(document.querySelector('.tc-out')).toBeNull()
   })
 
-  it('carries the artifacts a requeue handed back, and warms the frame when one waits', () => {
+  it('carries the deliverables a requeue handed back, and warms the frame when one waits', () => {
     renderCard({
       age: '4h ago',
       href: '/runs/c1',
-      artifacts: { branch: 1, pulls: 1 },
+      deliverables: { branch: 1, pulls: 1 },
       pending: { pulls: 1 },
     })
-    expect(screen.getByTitle("Open the run's artifacts")).toHaveAttribute('href', '/runs/c1')
+    expect(screen.getByTitle("Open the run's deliverables")).toHaveAttribute('href', '/runs/c1')
     expect(bracketWarm()).toContain('90%')
   })
 
@@ -179,7 +179,7 @@ describe('TaskCard, settled', () => {
       elapsed: '4:12',
       href: '/runs/c1',
       summary: 'Serialized the read behind a mutex.',
-      artifacts: { branch: 1, comment: 2 },
+      deliverables: { branch: 1, comment: 2 },
     })
     expect(screen.getByRole('link', { name: 'Ran for 4:12' })).toHaveAttribute('href', '/runs/c1')
     expect(screen.getByText('Serialized the read behind a mutex.')).toBeInTheDocument()

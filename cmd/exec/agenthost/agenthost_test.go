@@ -380,7 +380,7 @@ func TestServer_ConcurrentSockets_NoCrossContamination(t *testing.T) {
 }
 
 // TestLocalClient_RoutingByTriggerType_Manual pins the per-write
-// routing: a manual conversation's UpsertArtifact wraps in synthetic-claims
+// routing: a manual conversation's UpsertDeliverable wraps in synthetic-claims
 // (so RLS sees the kicking-off user), an event-triggered conversation's
 // goes through the admin-pool ...System variant. We can't observe
 // the pool directly in SQLite (one connection) but we can confirm
@@ -402,20 +402,20 @@ func TestLocalClient_RoutingByTriggerType_Manual(t *testing.T) {
 	}
 	client := NewLocal(stores, info)
 
-	// UpsertArtifact routes through the same withWrite branch the retired
+	// UpsertDeliverable routes through the same withWrite branch the retired
 	// pending-PR writer used: a synthetic-claims tx for a manual conversation.
-	if _, err := client.UpsertArtifact(context.Background(), domain.Artifact{
-		Provider: domain.ArtifactProviderGitHub,
-		Kind:     domain.ArtifactKindPullRequest,
+	if _, err := client.UpsertDeliverable(context.Background(), domain.Deliverable{
+		Provider: domain.ProviderGitHub,
+		Kind:     domain.DeliverableKindPullRequest,
 		Target:   "octocat/hello#1",
-		State:    domain.ArtifactStatePRDraft,
+		State:    domain.DeliverableStatePRDraft,
 		DedupKey: "github:pull_request:octocat/hello#1",
 	}); err != nil {
-		t.Fatalf("UpsertArtifact (manual): %v", err)
+		t.Fatalf("UpsertDeliverable (manual): %v", err)
 	}
-	got := listConversationArtifacts(t, stores, "conv-1")
+	got := listConversationDeliverables(t, stores, "conv-1")
 	if len(got) != 1 || got[0].Target != "octocat/hello#1" {
-		t.Errorf("unexpected artifacts: %+v", got)
+		t.Errorf("unexpected deliverables: %+v", got)
 	}
 }
 
@@ -433,21 +433,21 @@ func TestLocalClient_RoutingByTriggerType_Event(t *testing.T) {
 	}
 	client := NewLocal(stores, info)
 
-	// Event-triggered conversations have no user, so UpsertArtifact must route
+	// Event-triggered conversations have no user, so UpsertDeliverable must route
 	// through the admin-pool ...System variant (the case Postgres RLS would reject under
 	// tf_app). SQLite collapses both, but the same shape runs against Postgres.
-	if _, err := client.UpsertArtifact(context.Background(), domain.Artifact{
-		Provider: domain.ArtifactProviderGitHub,
-		Kind:     domain.ArtifactKindPullRequest,
+	if _, err := client.UpsertDeliverable(context.Background(), domain.Deliverable{
+		Provider: domain.ProviderGitHub,
+		Kind:     domain.DeliverableKindPullRequest,
 		Target:   "octocat/hello#2",
-		State:    domain.ArtifactStatePRDraft,
+		State:    domain.DeliverableStatePRDraft,
 		DedupKey: "github:pull_request:octocat/hello#2",
 	}); err != nil {
-		t.Fatalf("UpsertArtifact (event): %v", err)
+		t.Fatalf("UpsertDeliverable (event): %v", err)
 	}
-	got := listConversationArtifacts(t, stores, "conv-2")
+	got := listConversationDeliverables(t, stores, "conv-2")
 	if len(got) != 1 || got[0].Target != "octocat/hello#2" {
-		t.Errorf("unexpected artifacts: %+v", got)
+		t.Errorf("unexpected deliverables: %+v", got)
 	}
 }
 

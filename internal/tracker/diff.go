@@ -253,7 +253,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, repositoryID string
 	// Suppress entirely when the PR is self-authored: GitHub forbids
 	// requesting yourself directly, so the only way this fires on your own
 	// PR is via a team you're on (CODEOWNERS auto-assigning your team to
-	// paths you own). That's not an "ask" — it's a reviewer-pool artifact —
+	// paths you own). That's not an "ask" — it's a reviewer-pool deliverable —
 	// and surfacing it pollutes the queue. (In multi mode username is empty,
 	// so authorIsSelf is false and the scan always runs.)
 	if !authorIsSelf {

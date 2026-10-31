@@ -19,7 +19,7 @@ import "fmt"
 //	groups:read         - same, for private channels the bot is a member of
 //	channels:join       - bot self-joins a public channel when a team tracks it (private channels always need a human /invite)
 //	files:read          - read files shared in a thread (attachments as agent context)
-//	files:write         - upload files (agent-produced artifacts back into the thread)
+//	files:write         - upload files (agent-produced deliverables back into the thread)
 //	links:read          - see TF URLs shared in a message (future link-unfurl feature)
 //	links:write         - unfurl TF URLs shared in a message (future link-unfurl feature)
 var slackBotScopes = []string{

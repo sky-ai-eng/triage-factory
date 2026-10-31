@@ -36,8 +36,8 @@ type NewComment struct {
 	AuthorID  string
 	CreatedAt string
 	// ByTF is set when TF posted the comment. An agent's comment is recorded
-	// as a `comment` artifact keyed on the comment's id, and ByTF is whether
-	// that artifact exists. It is matched on the id rather than the author
+	// as a `comment` deliverable keyed on the comment's id, and ByTF is whether
+	// that deliverable exists. It is matched on the id rather than the author
 	// because a personal credential comments as the person who owns it.
 	ByTF bool
 	// Mentions are the users and teams a GitHub comment @-mentions
@@ -88,7 +88,7 @@ func commentedAt(c NewComment, issueUpdatedAt string) string {
 }
 
 // markTFComments sets ByTF on each comment TF posted: each with a `comment`
-// artifact in scope under the key the agent's comment verbs record it with,
+// deliverable in scope under the key the agent's comment verbs record it with,
 // which key spells from the comment's id. A comment key spells as "" has no
 // key to look for, and is taken as a person's.
 func (t *Tracker) markTFComments(ctx context.Context, scope string, comments []NewComment, key func(commentID string) string) error {
@@ -101,7 +101,7 @@ func (t *Tracker) markTFComments(ctx context.Context, scope string, comments []N
 	if len(keys) == 0 {
 		return nil
 	}
-	present, err := t.artifacts.PresentDedupKeysSystem(ctx, t.orgID, scope, keys)
+	present, err := t.deliverables.PresentDedupKeysSystem(ctx, t.orgID, scope, keys)
 	if err != nil {
 		return err
 	}
@@ -114,14 +114,14 @@ func (t *Tracker) markTFComments(ctx context.Context, scope string, comments []N
 }
 
 // issueCommentKey spells the key a comment on a Jira or Linear issue is
-// recorded under. resource is the issue's artifact resource
-// (domain.EntityArtifactResource); with none there is no key.
+// recorded under. resource is the issue's deliverable resource
+// (domain.EntityResource); with none there is no key.
 func issueCommentKey(provider, resource string) func(string) string {
 	return func(commentID string) string {
 		if resource == "" {
 			return ""
 		}
-		return domain.ArtifactDedupKey(provider, domain.ArtifactKindComment, resource, commentID)
+		return domain.ObjectKey(provider, domain.DeliverableKindComment, resource, commentID)
 	}
 }
 
@@ -162,8 +162,8 @@ func (t *Tracker) jiraNewComments(ctx context.Context, c *jiraCycle, prev domain
 		}
 	}
 	fresh := jiraCommentsSince(prev, curr.CommentCount, known)
-	resource := domain.EntityArtifactResource(domain.ArtifactProviderJira, c.scope, curr.ID)
-	if err := t.markTFComments(ctx, c.scope, fresh, issueCommentKey(domain.ArtifactProviderJira, resource)); err != nil {
+	resource := domain.EntityResource(domain.ProviderJira, c.scope, curr.ID)
+	if err := t.markTFComments(ctx, c.scope, fresh, issueCommentKey(domain.ProviderJira, resource)); err != nil {
 		trackerLog.WarnContext(ctx, "reading which jira comments TF posted failed; the issue's new comments are read again next cycle",
 			"source_id", curr.Key, "error", err)
 		keepJiraComments(prev, curr)
@@ -329,7 +329,7 @@ func (t *Tracker) linearNewComments(ctx context.Context, client LinearClient, sc
 		fresh = append(fresh, linearComment(c))
 	}
 	slices.SortStableFunc(fresh, func(a, b NewComment) int { return compareCommentTimes(a.CreatedAt, b.CreatedAt) })
-	if err := t.markTFComments(ctx, scope, fresh, issueCommentKey(domain.ArtifactProviderLinear, snap.ID)); err != nil {
+	if err := t.markTFComments(ctx, scope, fresh, issueCommentKey(domain.ProviderLinear, snap.ID)); err != nil {
 		trackerLog.WarnContext(ctx, "reading which linear comments TF posted failed; the issue's new comments are read again next cycle",
 			"source_id", snap.Identifier, "error", err)
 		keepLinearComments(prev, snap)
@@ -542,7 +542,7 @@ func githubCommentKey(commentID string) string {
 	if err != nil {
 		return ""
 	}
-	return domain.GitHubCommentDedupKey(domain.GitHubIssueComment, id)
+	return domain.GitHubCommentKey(domain.GitHubIssueComment, id)
 }
 
 // keepGitHubComments puts prev's comment marker and count back on curr.

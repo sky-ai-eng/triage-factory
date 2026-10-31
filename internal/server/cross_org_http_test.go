@@ -82,24 +82,25 @@ func TestCrossOrgHTTP_ConversationGet(t *testing.T) {
 	}
 }
 
-// TestCrossOrgHTTP_AgentArtifacts covers the run-scoped artifact read
-// (TFAC-465): alice sees her run's artifacts endpoint (200), bob sees it as
+// TestCrossOrgHTTP_AgentDeliverables covers the run-scoped deliverable read
+// (TFAC-465): alice sees her run's deliverables endpoint (200), bob sees it as
 // absent (404). The run read is the RLS-scoped authorization gate, so a
-// non-member never learns the run exists, let alone reads its artifacts.
-func TestCrossOrgHTTP_AgentArtifacts(t *testing.T) {
+// non-member never learns the run exists, let alone reads its deliverables.
+func TestCrossOrgHTTP_AgentDeliverables(t *testing.T) {
 	r := newAuthRig(t)
 	alice, _, orgA, sidA, sidB := setupTwoOrgSession(t, r)
 	runA := seedConversationInOrg(t, r, orgA, alice, "run-arts")
 
-	if got := r.requestWithSid("GET", "/api/agent/conversations/"+runA+"/artifacts", sidA).StatusCode; got != http.StatusOK {
-		t.Errorf("alice GET /api/agent/conversations/%s/artifacts = %d, want 200", runA, got)
+	path := "/api/agent/conversations/" + runA + "/deliverables/list"
+	if got := r.postJSONWithSid("POST", path, sidA, map[string]any{}).StatusCode; got != http.StatusOK {
+		t.Errorf("alice POST %s = %d, want 200", path, got)
 	}
-	if got := r.requestWithSid("GET", "/api/agent/conversations/"+runA+"/artifacts", sidB).StatusCode; got != http.StatusNotFound {
-		t.Errorf("bob GET /api/agent/conversations/%s/artifacts = %d, want 404 (cross-org leak)", runA, got)
+	if got := r.postJSONWithSid("POST", path, sidB, map[string]any{}).StatusCode; got != http.StatusNotFound {
+		t.Errorf("bob POST %s = %d, want 404 (cross-org leak)", path, got)
 	}
 }
 
-// TestCrossOrgHTTP_AgentActions is the artifact test's sibling for the
+// TestCrossOrgHTTP_AgentActions is the deliverable test's sibling for the
 // run-scoped action read. It matters more than the shape of the two endpoints
 // suggests: this one is deliberately NOT behind the governance entitlement the
 // cross-team /usage feeds sit behind, so the run-visibility check is the whole

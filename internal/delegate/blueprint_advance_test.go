@@ -14,28 +14,28 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// seedDraftPRArtifact records a draft pull_request artifact for conversationID, so the
+// seedDraftPRDeliverable records a draft pull_request deliverable for conversationID, so the
 // run looks (to processCompletion's park check) like it queued a PR for human
 // approval — the GitHub-native successor to seeding a pending_prs row.
-func seedDraftPRArtifact(t *testing.T, s *Spawner, conversationID string) {
+func seedDraftPRDeliverable(t *testing.T, s *Spawner, conversationID string) {
 	t.Helper()
-	seedDraftPRArtifactNumbered(t, s, conversationID, 1)
+	seedDraftPRDeliverableNumbered(t, s, conversationID, 1)
 }
 
-// seedDraftPRArtifactNumbered is seedDraftPRArtifact with the PR number spelled
-// out, for a fixture that hangs two draft PRs off one task: artifacts are
+// seedDraftPRDeliverableNumbered is seedDraftPRDeliverable with the PR number spelled
+// out, for a fixture that hangs two draft PRs off one task: deliverables are
 // uniquely keyed by their dedup_key, so a second one at the same number would
 // upsert over the first instead of joining it.
-func seedDraftPRArtifactNumbered(t *testing.T, s *Spawner, conversationID string, number int) {
+func seedDraftPRDeliverableNumbered(t *testing.T, s *Spawner, conversationID string, number int) {
 	t.Helper()
 	url := fmt.Sprintf("https://github.com/o/r/pull/%d", number)
-	a := domain.NewPullRequestArtifact("o/r", number, fmt.Sprintf("node-%d", number), "h", "main",
+	a := domain.NewPullRequestDeliverable("o/r", number, fmt.Sprintf("node-%d", number), "h", "main",
 		url, "queued PR", "", true)
 	a.ConversationID = conversationID
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
-	if _, err := s.artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, s.orgs, runmode.LocalDefaultOrgID, a)); err != nil {
-		t.Fatalf("seed draft PR artifact: %v", err)
+	if _, err := s.deliverables.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, s.orgs, runmode.LocalDefaultOrgID, a)); err != nil {
+		t.Fatalf("seed draft PR deliverable: %v", err)
 	}
 }
 
@@ -172,12 +172,12 @@ func TestProcessCompletion_BlueprintStepWritesNamespacedMemoryRow(t *testing.T) 
 	}
 }
 
-// TestTerminateBlueprint_CompletedWithUnresolvedArtifactLeavesTaskOpen pins the
+// TestTerminateBlueprint_CompletedWithUnresolvedDeliverableLeavesTaskOpen pins the
 // terminal-on-last gate: a blueprint that completes while a draft PR / ready
 // review is still unresolved does NOT close its task — and does not move its
 // column either. The card stays exactly where the mint put it, bot-claimed and
-// in_progress; the last artifact resolution closes it.
-func TestTerminateBlueprint_CompletedWithUnresolvedArtifactLeavesTaskOpen(t *testing.T) {
+// in_progress; the last deliverable resolution closes it.
+func TestTerminateBlueprint_CompletedWithUnresolvedDeliverableLeavesTaskOpen(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "term-unresolved")
 	stampBotClaim(t, database, taskID)
 	makeConversationBlueprintStep(t, database, conversationID, taskID)
@@ -188,14 +188,14 @@ func TestTerminateBlueprint_CompletedWithUnresolvedArtifactLeavesTaskOpen(t *tes
 	}
 	// The step completed and left a draft PR unresolved.
 	setConversationStatus(t, database, conversationID, dbtest.SeedConcluded)
-	seedDraftPRArtifact(t, s, conversationID)
+	seedDraftPRDeliverable(t, s, conversationID)
 
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, blueprintRunID, taskID, "event", "",
 		loadConversation(t, s, conversationID).StartedAt, runConfig{orgID: runmode.LocalDefaultOrgID},
 		domain.BlueprintRunStatusCompleted, "", nil, true)
 
 	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
-		t.Errorf("task.status = %q, want in_progress (an unresolved artifact leaves the task open, and moves no column)", got)
+		t.Errorf("task.status = %q, want in_progress (an unresolved deliverable leaves the task open, and moves no column)", got)
 	}
 	var claimedByAgent sql.NullString
 	if err := database.QueryRow(`SELECT claimed_by_agent_id FROM tasks WHERE id = ?`, taskID).Scan(&claimedByAgent); err != nil {
@@ -240,7 +240,7 @@ func makeConversationBlueprintStep(t *testing.T, database *sql.DB, conversationI
 // TestCloseTaskIfTerminalAndResolved_ClosesOnceTheLastDraftIsResolved pins the
 // closure a draft PR resolved off-click reaches: the blueprint completed with
 // the draft unresolved, so the task stayed open and in_progress; once the
-// artifact is no longer a draft — a human marked it ready on GitHub — the same
+// deliverable is no longer a draft — a human marked it ready on GitHub — the same
 // terminal-on-last rule closes the task.
 func TestCloseTaskIfTerminalAndResolved_ClosesOnceTheLastDraftIsResolved(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "resolved-closes")
@@ -251,7 +251,7 @@ func TestCloseTaskIfTerminalAndResolved_ClosesOnceTheLastDraftIsResolved(t *test
 		t.Fatalf("place task: %v", err)
 	}
 	setConversationStatus(t, database, conversationID, dbtest.SeedConcluded)
-	seedDraftPRArtifact(t, s, conversationID)
+	seedDraftPRDeliverable(t, s, conversationID)
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, blueprintRunID, taskID, "event", "",
 		loadConversation(t, s, conversationID).StartedAt, runConfig{orgID: runmode.LocalDefaultOrgID},
 		domain.BlueprintRunStatusCompleted, "", nil, true)
@@ -266,17 +266,17 @@ func TestCloseTaskIfTerminalAndResolved_ClosesOnceTheLastDraftIsResolved(t *test
 	}
 
 	// Marked ready on GitHub: the reconciler flips the row, then runs this.
-	arts, err := s.artifacts.ListByConversationSystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)
+	arts, err := s.deliverables.ListByConversationSystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)
 	if err != nil || len(arts) != 1 {
-		t.Fatalf("list artifacts: %v (%d)", err, len(arts))
+		t.Fatalf("list deliverables: %v (%d)", err, len(arts))
 	}
-	arts[0].State = domain.ArtifactStatePROpen
-	if _, err := s.artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, s.orgs, runmode.LocalDefaultOrgID, arts[0])); err != nil {
-		t.Fatalf("flip artifact: %v", err)
+	arts[0].State = domain.DeliverableStatePROpen
+	if _, err := s.deliverables.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, s.orgs, runmode.LocalDefaultOrgID, arts[0])); err != nil {
+		t.Fatalf("flip deliverable: %v", err)
 	}
 	s.CloseTaskIfTerminalAndResolved(context.Background(), runmode.LocalDefaultOrgID, conversationID)
 	if got := readTaskStatus(t, database, taskID); got != "done" {
-		t.Errorf("task.status = %q, want done (the last unresolved artifact was resolved on GitHub)", got)
+		t.Errorf("task.status = %q, want done (the last unresolved deliverable was resolved on GitHub)", got)
 	}
 
 	// Idempotent: a second cycle observing nothing new changes nothing.
@@ -304,7 +304,7 @@ func TestCloseTaskIfTerminalAndResolved_LeavesAnUnfinishedBlueprintAlone(t *test
 
 // TestTerminateBlueprint_UnresolvedIsAskedOfTheWholeTask pins the scope of the
 // completed arm's unresolved check. The blueprint that just finished produced
-// no artifact of its own; an earlier engagement on the same task left a draft
+// no deliverable of its own; an earlier engagement on the same task left a draft
 // PR open. That draft is unresolved work on this task, so the completion must
 // not close it — the older, per-blueprint read would have called the task clean
 // and closed it with the draft still sitting on GitHub.
@@ -314,7 +314,7 @@ func TestTerminateBlueprint_UnresolvedIsAskedOfTheWholeTask(t *testing.T) {
 	// The prior engagement: its own step conversation, carrying the draft PR.
 	priorBlueprintRunID := blueprintRunIDForConversation(t, database, conversationID)
 	addStepConversation(t, database, priorBlueprintRunID, taskID, "r-prior-task-wide", 0, dbtest.SeedConcluded)
-	seedDraftPRArtifact(t, s, "r-prior-task-wide")
+	seedDraftPRDeliverable(t, s, "r-prior-task-wide")
 	// The engagement that is finishing now, with nothing of its own unresolved.
 	makeConversationBlueprintStep(t, database, conversationID, taskID)
 	setConversationStatus(t, database, conversationID, dbtest.SeedConcluded)

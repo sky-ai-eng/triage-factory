@@ -148,7 +148,7 @@ func readTaskClose(t *testing.T, database *sql.DB, taskID string) (closedAt, clo
 
 // TestTaskPatch_RejectsUnwritableStatuses pins the accepted set. 'queued' is
 // requeue/undo territory — a bare status write would leave the claim stamped
-// and the agent's artifacts stranded — and 'snoozed' is what setting
+// and the agent's deliverables stranded — and 'snoozed' is what setting
 // snooze_until means, so accepting it as a status would be a second spelling
 // that can't carry the wake time the row needs. 'in_review' is an ex-status:
 // it left the vocabulary, so it is refused on the same terms as any word the

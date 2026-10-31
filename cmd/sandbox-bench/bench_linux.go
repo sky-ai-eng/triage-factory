@@ -73,7 +73,7 @@ type handle struct {
 
 // teardown reclaims one sandbox in dependency order: the driver first (its
 // in-flight call unblocks when the connection closes), then the jail, then
-// the network the jail ran in, then the host-side artifacts. Tolerates a
+// the network the jail ran in, then the host-side deliverables. Tolerates a
 // partially-constructed handle so failed bring-ups share the same path.
 // Runs once: oomtest reclaims its victims to judge them, and its deferred
 // teardownAll still holds them.

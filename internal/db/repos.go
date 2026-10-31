@@ -31,8 +31,8 @@ var (
 	//   - A durable record keyed on that name: an active entity
 	//     ("owner/repo#18"). Entity keys spell the slug themselves, so a name
 	//     can be spoken for by records alone. A retired row's entities are
-	//     closed, and a closed entity holds no key. An artifact's dedup key
-	//     names no repository, so no artifact speaks for a name.
+	//     closed, and a closed entity holds no key. A deliverable's dedup key
+	//     names no repository, so no deliverable speaks for a name.
 	//
 	// Neither is resolved by deleting the occupant. The first would drop a
 	// repository row that holds a provider id, a team's tracking decision or a
@@ -565,8 +565,8 @@ type RepositoryStore interface {
 	// rows) and the keys the entities spell ("owner/repo#18", which the
 	// repository now under the name has pull requests of its own under).
 	// Nothing else moves: the row keeps its id, name and provider id, its
-	// tracking rows, worktree ledger rows, events, artifacts and tasks. Its
-	// artifacts are keyed on ids — a pull request's node id, a comment's id,
+	// tracking rows, worktree ledger rows, events, deliverables and tasks. Its
+	// deliverables are keyed on ids — a pull request's node id, a comment's id,
 	// the row's own id — and reference its entities by id, so the repository
 	// now under the name records its own under keys and entities of its own.
 	//
@@ -590,8 +590,8 @@ type RepositoryStore interface {
 	// Everything it rewrites belongs to that host: the repository row is
 	// matched on (source, host, external_id), entities are the row's own (by
 	// repository_id, so a retired row that shares the old slug keeps its
-	// history), and so are the artifacts: those about its entities
-	// (artifacts.entity_id), which take their entity's new key, and its
+	// history), and so are the deliverables: those about its entities
+	// (deliverables.entity_id), which take their entity's new key, and its
 	// branches, found by the registry row id their dedup keys carry. Their
 	// targets move and their keys do not. The audit-ledger rows are its own
 	// too: those about its entities (external_actions.entity_id) and those
@@ -628,7 +628,7 @@ type RepositoryStore interface {
 	// it, so it takes the slug it was observed under and clears retired_at, in
 	// the same transaction, under the same occupant rules as a rename
 	// (Restored, and Renamed too when the slug moved). Its own entities,
-	// artifacts and audit-ledger pointers move with it, selected by id as in
+	// deliverables and audit-ledger pointers move with it, selected by id as in
 	// any rename; whatever answers to the name it was retired under now keeps
 	// its own.
 	//
@@ -643,7 +643,7 @@ type RepositoryStore interface {
 	// bare row is the same repository: its entities are re-pointed to the
 	// renamed row, the branches recorded in it are re-keyed onto the renamed
 	// row's id (domain.BranchDedupKey; a branch both rows recorded keeps the
-	// older artifact), its audit-ledger rows are re-pointed to the renamed row,
+	// older deliverable), its audit-ledger rows are re-pointed to the renamed row,
 	// its placement override moves onto the renamed row unless that row has
 	// one of its own, and it is deleted, in the rename's transaction.
 	//
@@ -659,7 +659,7 @@ type RepositoryStore interface {
 	//
 	// System (claims-free) variant only, and admin-pool in Postgres: the
 	// rewrite spans tables belonging to every team in the org (tracked sets,
-	// projects, entities, artifacts), which no request-scoped identity can
+	// projects, entities, deliverables), which no request-scoped identity can
 	// see all of, and its callers are the poller and the profiler.
 	RenameSystem(ctx context.Context, orgID string, observed domain.RepoRef) (domain.RepoRenameOutcome, error)
 

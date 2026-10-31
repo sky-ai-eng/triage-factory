@@ -16,7 +16,7 @@
 // a change moves no status at all.
 //
 // The emitters are the writes that move a conversation between the rail's sets
-// without touching conversations.status: a human resolving an artifact
+// without touching conversations.status: a human resolving a deliverable
 // (approve / dismiss, PR or review), and the reconciler flipping one terminal
 // because the object moved on GitHub. Both change whether a conversation is
 // waiting on a person, and neither writes the conversation row.

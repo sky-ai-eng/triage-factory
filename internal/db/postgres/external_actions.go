@@ -12,7 +12,7 @@ import (
 
 // externalActionStore is the Postgres impl of db.ExternalActionStore — the
 // append-only external-action audit log (TFAC-483). Holds the same two-pool
-// split the artifacts store uses:
+// split the deliverables store uses:
 //
 //   - q: app pool (tf_app, RLS-active). Record composes inside the claims-bearing
 //     WithTx that runs the audited action (manual bot conversations under
@@ -23,7 +23,7 @@ import (
 //   - admin: admin pool (BYPASSRLS). RecordSystem routes here for the
 //     event-triggered bot exec choke point + the Jira board mirror (no JWT
 //     claims). ListByOrgSystem reads here, org-wide across teams, and so does
-//     ListPRCreatedWithoutArtifactSystem, the reconciler's PR backstop.
+//     ListPRCreatedWithoutDeliverableSystem, the reconciler's PR backstop.
 //
 // org_id stays in every statement as defense in depth. Append-only: both Record
 // paths ON CONFLICT(org_id, scope, dedup_key) DO NOTHING — a duplicate is
@@ -41,7 +41,7 @@ var _ db.ExternalActionStore = (*externalActionStore)(nil)
 
 // pgExternalActionColumns is the SELECT list scanned into a domain.ExternalAction
 // via scanExternalAction. Nullable columns coalesce to ” so the scan targets are
-// plain strings, the same shape pgArtifactColumns uses. The url slot serves the
+// plain strings, the same shape pgDeliverableColumns uses. The url slot serves the
 // maintained pointer — current_url when a repository rename has moved the
 // object, the captured url otherwise — so every feed's link resolves without
 // any reader knowing the pointer column exists.
@@ -159,10 +159,10 @@ func (s *externalActionStore) ListByConversation(ctx context.Context, orgID, con
 	return out, total, err
 }
 
-// ListPRCreatedWithoutArtifactSystem is the PR backstop's read (see the
+// ListPRCreatedWithoutDeliverableSystem is the PR backstop's read (see the
 // interface), on the admin pool: the backstop holds no claims, and the
-// artifact that answers for a row may belong to any team.
-func (s *externalActionStore) ListPRCreatedWithoutArtifactSystem(ctx context.Context, orgID, scope string, since time.Time) ([]domain.ExternalAction, error) {
+// deliverable that answers for a row may belong to any team.
+func (s *externalActionStore) ListPRCreatedWithoutDeliverableSystem(ctx context.Context, orgID, scope string, since time.Time) ([]domain.ExternalAction, error) {
 	if err := db.RequireExternalObjectScope(scope); err != nil {
 		return nil, err
 	}
@@ -172,7 +172,7 @@ func (s *externalActionStore) ListPRCreatedWithoutArtifactSystem(ctx context.Con
 		 WHERE ea.org_id = $1 AND ea.action = $2 AND ea.occurred_at >= $3
 		   AND ea.scope = $4 AND ea.node_id IS NOT NULL AND ea.conversation_id IS NOT NULL
 		   AND NOT EXISTS (
-		       SELECT 1 FROM artifacts a
+		       SELECT 1 FROM deliverables a
 		        WHERE a.org_id = ea.org_id AND a.scope = ea.scope AND a.node_id = ea.node_id
 		   )
 		 ORDER BY ea.occurred_at, ea.id
@@ -187,7 +187,7 @@ func (s *externalActionStore) ListPRCreatedWithoutArtifactSystem(ctx context.Con
 // predicates, the newest-first ORDER BY, and LIMIT/OFFSET to a SELECT whose WHERE
 // is already open. Placeholders number from len(args)+1 so the leading binds
 // (org_id[, team_id]) never collide — the same defensive numbering
-// appendPgArtifactFilters uses.
+// appendPgDeliverableFilters uses.
 func appendPgExternalActionFilters(query string, args []any, opts domain.ExternalActionListOpts) (string, []any) {
 	query, args = appendPgExternalActionPredicates(query, args, opts)
 	query += " ORDER BY occurred_at DESC, id DESC"

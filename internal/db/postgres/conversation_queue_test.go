@@ -60,7 +60,7 @@ func TestConversationQueueStore_Postgres_ClaimCycle(t *testing.T) {
 	}
 	// team_id rides back on the claim (TFAC-458) and matches the value the
 	// mint derived from the parent task — this is the construction-path
-	// ConversationInfo.TeamID source the capture writers attribute artifacts by.
+	// ConversationInfo.TeamID source the capture writers attribute deliverables by.
 	var wantTeam string
 	if err := h.AdminDB.QueryRow(`SELECT team_id::text FROM tasks WHERE id = $1`, taskID).Scan(&wantTeam); err != nil {
 		t.Fatalf("read task team_id: %v", err)

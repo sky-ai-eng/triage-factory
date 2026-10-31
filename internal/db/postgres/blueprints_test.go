@@ -78,7 +78,7 @@ func TestBlueprintStore_Postgres_IsNewestRunForTask(t *testing.T) {
 // blueprint_runs_select is creator-scoped for manual runs. So when Alice's
 // delegation leaves a draft PR, the task is requeued, and BOB re-delegates it,
 // Bob's run is invisible to Alice — and the terminal-on-last close, which runs
-// on the app pool under the claims of whoever resolved the artifact, would ask
+// on the app pool under the claims of whoever resolved the deliverable, would ask
 // "is Alice's run still the task's newest?", be told yes by a query that cannot
 // see Bob's, and take the task to done under Bob's live engagement.
 //
@@ -152,14 +152,14 @@ func TestBlueprintStore_Postgres_IsNewestRunForTask_ReadsPastTheCreatorScope(t *
 			}
 		}
 
-		// Spelled out, because this one is the bug: a resolve on the artifact
+		// Spelled out, because this one is the bug: a resolve on the deliverable
 		// Alice's run left behind must not find her run current.
 		superseded, err := store.IsNewestRunForTask(ctx, orgID, taskID, aliceRun)
 		if err != nil {
 			t.Fatalf("IsNewestRunForTask (alice's run): %v", err)
 		}
 		if superseded {
-			t.Error("Alice's superseded run reports as the task's newest, so resolving its carried artifact would close the task under Bob's live run")
+			t.Error("Alice's superseded run reports as the task's newest, so resolving its carried deliverable would close the task under Bob's live run")
 		}
 		return nil
 	}); err != nil {

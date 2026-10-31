@@ -350,11 +350,11 @@ func (fx *jiraCommentFixture) cycle(t *testing.T) []domain.Event {
 func (fx *jiraCommentFixture) postedByTF(t *testing.T, commentID string) {
 	t.Helper()
 	site, _ := domain.JiraHost(jiraCommentSite)
-	key := domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindComment, domain.JiraIssueResource(site, "10001"), commentID)
-	if _, err := fx.stores.Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, domain.Artifact{
-		TeamID: runmode.LocalDefaultTeamID, Provider: domain.ArtifactProviderJira, Kind: domain.ArtifactKindComment,
+	key := domain.ObjectKey(domain.ProviderJira, domain.DeliverableKindComment, domain.JiraIssueResource(site, "10001"), commentID)
+	if _, err := fx.stores.Deliverables.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, domain.Deliverable{
+		TeamID: runmode.LocalDefaultTeamID, Provider: domain.ProviderJira, Kind: domain.DeliverableKindComment,
 		Scope: site, Target: "SKY-1", ExternalID: commentID,
-		State: domain.ArtifactStateCommentPosted, DedupKey: key,
+		State: domain.DeliverableStateCommentPosted, DedupKey: key,
 	}); err != nil {
 		t.Fatalf("record TF comment %s: %v", commentID, err)
 	}
@@ -615,11 +615,11 @@ func (fx *linearFixture) addComments(n int, cs ...linear.Comment) {
 func (fx *linearFixture) postedByTF(t *testing.T, n int, commentID string) {
 	t.Helper()
 	issueID := linIssue(n).ID
-	if _, err := fx.stores.Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, domain.Artifact{
-		TeamID: runmode.LocalDefaultTeamID, Provider: domain.ArtifactProviderLinear, Kind: domain.ArtifactKindComment,
+	if _, err := fx.stores.Deliverables.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, domain.Deliverable{
+		TeamID: runmode.LocalDefaultTeamID, Provider: domain.ProviderLinear, Kind: domain.DeliverableKindComment,
 		Scope: fx.workspace, Target: linIssue(n).Identifier, ExternalID: commentID,
-		State:    domain.ArtifactStateCommentPosted,
-		DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderLinear, domain.ArtifactKindComment, issueID, commentID),
+		State:    domain.DeliverableStateCommentPosted,
+		DedupKey: domain.ObjectKey(domain.ProviderLinear, domain.DeliverableKindComment, issueID, commentID),
 	}); err != nil {
 		t.Fatalf("record TF comment %s: %v", commentID, err)
 	}
@@ -779,17 +779,17 @@ func TestRefreshLinear_FailedCommentReadIsRetried(t *testing.T) {
 	onlyCommented(t, evts, domain.EventLinearIssueCommented)
 }
 
-// TestMarkTFComments_ReadsOnlyItsScope: a comment artifact recorded in another
+// TestMarkTFComments_ReadsOnlyItsScope: a comment deliverable recorded in another
 // workspace does not make a comment TF's.
 func TestMarkTFComments_ReadsOnlyItsScope(t *testing.T) {
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
-	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, runmode.LocalDefaultOrgID)
+	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.EventQueue, runmode.LocalDefaultOrgID)
 	fx := &linearFixture{tr: tr, stores: stores, workspace: "ws-other"}
 	fx.postedByTF(t, 1, "c-1")
 
 	comments := []NewComment{{ID: "c-1"}}
-	if err := tr.markTFComments(context.Background(), linWorkspace, comments, issueCommentKey(domain.ArtifactProviderLinear, linIssue(1).ID)); err != nil {
+	if err := tr.markTFComments(context.Background(), linWorkspace, comments, issueCommentKey(domain.ProviderLinear, linIssue(1).ID)); err != nil {
 		t.Fatal(err)
 	}
 	if comments[0].ByTF {

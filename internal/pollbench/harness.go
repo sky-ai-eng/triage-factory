@@ -229,7 +229,7 @@ func Run(cfg RunConfig) (*Result, error) {
 		base:   srv.URL(),
 	}
 	mgr := poller.NewManager(database, pub,
-		stores.Users, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, stores.Orgs,
+		stores.Users, stores.Tasks, stores.Entities, stores.Repos, stores.Deliverables, stores.EventQueue, stores.Orgs,
 		stores.JiraStatusRules, stores.JiraProjects, stores.LinearTeamRules, stores.TeamGitHubGroups, stores.Secrets, stores.GitHubApps, stores.PollReadiness,
 		resolver, nil)
 

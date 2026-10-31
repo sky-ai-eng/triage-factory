@@ -194,7 +194,7 @@ type GitProxyConfig struct {
 	// RecordPush, when non-nil, is forwarded to the git proxy as its
 	// receive-pack capture backstop: the proxy parses each branch push it
 	// transits and calls this with the pushed ref so the caller can record a
-	// branch artifact for a `git push --no-verify` that bypassed the pre-push
+	// branch deliverable for a `git push --no-verify` that bypassed the pre-push
 	// hook. The delegate wires it to the same record path the hook uses; nil
 	// (a test fixture, or a caller that doesn't record) disables the backstop.
 	// See gitproxy.Config.RecordPush and TFAC-467.
@@ -622,7 +622,7 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 
 	// Fetch relays: one per egressrelay catalog entry, each on its own
 	// port of hostVethIP. The relays exist for registries that serve
-	// artifacts via redirects into shared multi-tenant storage hostnames
+	// deliverables via redirects into shared multi-tenant storage hostnames
 	// (proxy.golang.org → storage.googleapis.com), which the CONNECT-only
 	// egress proxy above can never admit — see internal/egressrelay's
 	// package doc and CLAUDE.md. Which ecosystems get a relay, their route
@@ -680,7 +680,7 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 		}
 		gitPairs = append(gitPairs, proxyPairs...)
 		// The proxy owns push capture for this run: it observes each ref's
-		// actual upstream outcome (artifact for a ref that landed, audit
+		// actual upstream outcome (deliverable for a ref that landed, audit
 		// failure row otherwise), so the pre-push hook — which fires before
 		// the transfer and can't know the outcome — stands down.
 		env = append(env, githooks.PushCaptureEnvVar+"="+githooks.PushCaptureProxy)

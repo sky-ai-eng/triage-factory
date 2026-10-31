@@ -95,7 +95,7 @@ var identicalHelperRatchet = []string{
 	"queryTasksCtx",
 	"refreshInstant",
 	"reverseTaskMemories",
-	"scanArtifactRows",
+	"scanDeliverableRows",
 	"scanAuthEvent",
 	"scanAuthEventRows",
 	"scanConnectionStatus",
