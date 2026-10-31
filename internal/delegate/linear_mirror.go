@@ -186,10 +186,8 @@ func (s *Spawner) mirrorLinearInProgress(orgID string, task *domain.Task) {
 // issue's key, which only labels a log line when the entity can't be read.
 //
 // Every failure below is a log line, a count in linear.mirror_failures, and
-// a return. The counter is for operators; the team's admins are told when
-// Linear answers that the canonical no longer exists
-// (kinds.LinearMirrorFailing), which a move that lands resolves. Any other
-// failure leaves the condition as it was.
+// a return. The counter is for operators; the move's outcome is recorded for
+// the team's admins on kinds.LinearMirrorFailing (NoteLinearMirrorMove).
 func (s *Spawner) runLinearMirror(orgID, entityID, identifier, teamID string, rule domain.LinearTeamRules) {
 	resolver := s.getLinearResolver()
 	if resolver == nil || s.entities == nil || s.orgs == nil {
@@ -256,16 +254,28 @@ func (s *Spawner) runLinearMirror(orgID, entityID, identifier, teamID string, ru
 		linearLog.Debug("mirror: already in progress, skipping", "issue", identifier, "state", issue.State.Name)
 		return
 	}
-	if err := client.TransitionIssue(ctx, issue.ID, rule.InProgressCanonical.ID); err != nil {
+	err = client.TransitionIssue(ctx, issue.ID, rule.InProgressCanonical.ID)
+	NoteLinearMirrorMove(ctx, orgID, rule, identifier, err)
+	if err != nil {
 		linearLog.Warn("mirror: transition to in-progress failed", "issue", identifier, "target", rule.InProgressCanonical.Name, "error", err)
 		recordLinearMirrorFailure(orgID, linearMirrorTransitionFailed)
-		if errors.Is(err, linear.ErrStateNotFound) {
-			kinds.LinearMirrorFailing.Set(ctx, orgID, kinds.LinearMirrorFor(rule, identifier), true)
-		}
 		return
 	}
-	kinds.LinearMirrorFailing.Set(ctx, orgID, kinds.LinearMirrorFor(rule, identifier), false)
 	s.recordLinearMirrorTransition(ctx, orgID, teamID, e, issue, rule.InProgressCanonical.Name)
+}
+
+// NoteLinearMirrorMove records on kinds.LinearMirrorFailing how a move of
+// identifier into rule's in-progress canonical ended, err being the move's
+// error: a move that landed resolves the condition, Linear answering that the
+// state does not exist raises it, and any other failure leaves it as it was.
+// The board mirror and the claim guard both record through it.
+func NoteLinearMirrorMove(ctx context.Context, orgID string, rule domain.LinearTeamRules, identifier string, err error) {
+	switch {
+	case err == nil:
+		kinds.LinearMirrorFailing.Set(ctx, orgID, kinds.LinearMirrorFor(rule, identifier), false)
+	case errors.Is(err, linear.ErrStateNotFound):
+		kinds.LinearMirrorFailing.Set(ctx, orgID, kinds.LinearMirrorFor(rule, identifier), true)
+	}
 }
 
 // recordLinearMirrorTransition appends the external_actions row for one

@@ -28,10 +28,12 @@ func JiraMirrorFor(rule domain.JiraProjectStatusRules, issueKey string) JiraMirr
 	}
 }
 
-// JiraMirrorFailing is open while Jira offers no transition into a rule's
-// in-progress canonical, so claimed and delegated tickets stay where they are
-// in Jira. It is raised only by that answer, never by a transient failure,
-// and resolved by the next successful move under the rule.
+// JiraMirrorFailing is open while a rule's in-progress canonical is no longer
+// one of its project's statuses, so claimed and delegated tickets stay where
+// they are in Jira. It is raised by a move Jira offered no transition for into
+// a canonical the project no longer has, never by a ticket that cannot reach a
+// status the project still has, and resolved by the next successful move under
+// the rule or a save of the team's rules that changes or drops it.
 var JiraMirrorFailing = notify.Condition(notify.ConditionSpec[JiraMirror]{
 	Name:        "jira.mirror_failing",
 	Source:      "jira",
@@ -40,23 +42,23 @@ var JiraMirrorFailing = notify.Condition(notify.ConditionSpec[JiraMirror]{
 	Key:         func(m JiraMirror) string { return m.TeamID + ":" + m.JiraProjectID },
 	Audience:    notify.TeamAdmins(func(m JiraMirror) string { return m.TeamID }),
 	Render: func(m JiraMirror, _ notify.Recipient) notify.Content {
-		tickets, status, issue := "tickets", "its in-progress status", ""
+		tickets, workflow, status, issue := "tickets", "the project's workflow", "its in-progress status", ""
 		if m.ProjectKey != "" {
 			tickets = m.ProjectKey + " tickets"
+			workflow = "the " + m.ProjectKey + " workflow"
 		}
 		if m.Status != "" {
 			status = `"` + m.Status + `"`
 		}
 		if m.IssueKey != "" {
-			issue = " for " + m.IssueKey
+			issue = " (last tried on " + m.IssueKey + ")"
 		}
 		return notify.Content{
-			Title: "Jira won't move " + tickets + " into " + status,
+			Title: "Jira can't move " + tickets + " into " + status,
 			Body: "Triage Factory moves a ticket into " + status + " when its task is claimed or delegated, " +
-				"and Jira offered no transition into it" + issue + ". The status may have been removed from " +
-				"the project's workflow, or the workflow doesn't allow that move. Until this is fixed, Jira " +
-				"doesn't show which tickets the team is working on. Check the in-progress status in the " +
-				"team's Jira status rules.",
+				"but that status is no longer in " + workflow + issue + ". Until this is fixed, Jira doesn't " +
+				"show which tickets the team is working on. Choose an in-progress status in the team's Jira " +
+				"status rules.",
 			Actions: []notify.Action{notify.Link("Open Jira status rules", notify.Routes.TeamJiraRules(m.TeamID))},
 		}
 	},

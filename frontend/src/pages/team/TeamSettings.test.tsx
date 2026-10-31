@@ -384,11 +384,14 @@ describe('a link to one team', () => {
     expect(screen.getByText('event source · ops')).toBeInTheDocument()
   })
 
-  it('falls back to the last team written to when it names none of the viewer’s', async () => {
+  it('opens no team, rather than another one, when it names none of the viewer’s', async () => {
     myTeams.teams = [PLATFORM, { id: 't2', name: 'ops', slug: 'ops' }]
     renderAt('/?team=t9&source=github')
-    await waitFor(() => expect(document.querySelector('.sp[data-source="github"]')).not.toBeNull())
-    expect(screen.getByText('event source · platform')).toBeInTheDocument()
+    expect(
+      await screen.findByText('The team this link is for isn’t one of yours.'),
+    ).toBeInTheDocument()
+    expect(document.querySelector('.sp[data-source="github"]')).toBeNull()
+    expect(screen.queryByText(/platform/)).toBeNull()
   })
 })
 

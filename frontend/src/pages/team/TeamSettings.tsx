@@ -186,15 +186,19 @@ export default function TeamSettings() {
   const { teams, lastActingTeamId, loaded, refresh: refreshTeams } = useTeams()
   // `?team=` opens one of the viewer's teams by id, which is how a link about
   // a team (a notification's, say) lands on that team rather than the last one
-  // the viewer wrote to. An id that is none of theirs falls back the same way
-  // an absent one does.
-  const linkedTeamId = params.get('team')
-  const team = loaded
-    ? (teams.find((t) => t.id === linkedTeamId) ??
-      teams.find((t) => t.id === lastActingTeamId) ??
-      teams[0] ??
-      null)
-    : null
+  // the viewer wrote to. An id that is none of theirs opens no team at all:
+  // falling back would show another team's settings under a link about this
+  // one.
+  const linkedTeamId = params.get('team') || null
+  const linkedTeamMissing =
+    loaded && linkedTeamId !== null && !teams.some((t) => t.id === linkedTeamId)
+  const team =
+    loaded && !linkedTeamMissing
+      ? (teams.find((t) => t.id === linkedTeamId) ??
+        teams.find((t) => t.id === lastActingTeamId) ??
+        teams[0] ??
+        null)
+      : null
   const teamId = team?.id ?? ''
   const { roleForTeam } = useTeamRole()
   // Membership is a multi-mode idea. Local is one person who is everything, and
@@ -482,6 +486,9 @@ export default function TeamSettings() {
   )
 
   if (!team) {
+    if (linkedTeamMissing) {
+      return <p className="ts-empty">The team this link is for isn’t one of yours.</p>
+    }
     return <p className="ts-empty">{loaded ? 'No team resolved for this org.' : 'Loading…'}</p>
   }
 

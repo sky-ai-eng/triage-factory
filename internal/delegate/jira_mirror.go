@@ -160,11 +160,10 @@ func (s *Spawner) mirrorJiraInProgress(orgID string, task *domain.Task) {
 // The whole sequence is bounded by jiraMirrorTimeout so a slow ticket releases
 // the lock rather than pinning it.
 //
-// Every failure below is a log line and a return. The in-progress move also
-// tells the team's admins when Jira offers no transition into the canonical
-// (kinds.JiraMirrorFailing), and resolves that once a move lands; any other
-// failure leaves the condition as it was. The condition is about the
-// in-progress canonical, so the done mode neither raises nor resolves it.
+// Every failure below is a log line and a return. The in-progress move's
+// outcome is also recorded on kinds.JiraMirrorFailing (NoteJiraMirrorMove).
+// The condition is about the in-progress canonical, so the done mode neither
+// raises nor resolves it.
 func (s *Spawner) runJiraMirror(orgID, entityID, issueKey, teamID string, rule domain.JiraProjectStatusRules, done bool) {
 	resolver := s.getJiraResolver()
 	if resolver == nil {
@@ -274,16 +273,50 @@ func (s *Spawner) runJiraMirror(orgID, entityID, issueKey, teamID string, rule d
 		s.recordMirrorAction(ctx, orgID, entityID, scope, issueKey, issueID, teamID, domain.ActionIssueAssigned, "", "")
 	}
 	if !rule.InProgressContains(claimStatusRef(state)) {
-		if err := client.TransitionTo(ctx, issue, jira.Status{ID: rule.InProgressCanonical.ID, Name: rule.InProgressCanonical.Name}); err != nil {
+		err := client.TransitionTo(ctx, issue, jira.Status{ID: rule.InProgressCanonical.ID, Name: rule.InProgressCanonical.Name})
+		NoteJiraMirrorMove(ctx, client, orgID, rule, issueKey, err)
+		if err != nil {
 			jiraLog.Warn("mirror: transition to in-progress failed", "issue", issueKey, "target", rule.InProgressCanonical.Name, "error", err)
-			if errors.Is(err, jira.ErrNoTransition) {
-				kinds.JiraMirrorFailing.Set(ctx, orgID, kinds.JiraMirrorFor(rule, issueKey), true)
-			}
 			return
 		}
-		kinds.JiraMirrorFailing.Set(ctx, orgID, kinds.JiraMirrorFor(rule, issueKey), false)
 		s.recordMirrorAction(ctx, orgID, entityID, scope, issueKey, issueID, teamID, domain.ActionIssueTransitioned, state.StatusName, rule.InProgressCanonical.Name)
 	}
+}
+
+// NoteJiraMirrorMove records on kinds.JiraMirrorFailing how a move of issueKey
+// into rule's in-progress canonical ended, err being the move's error. A move
+// that landed resolves the condition. A move Jira offered no transition for
+// raises it only when the canonical is no longer one of the project's
+// statuses, read through c: a ticket that cannot reach a status still in the
+// workflow, from where it sits, past a transition's condition or under c's
+// permissions, says nothing about the team's rule. Any other failure, and a
+// failed read of the statuses, leaves the condition as it was. Every move into
+// the in-progress canonical records through it: the board mirror, the claim
+// guard and the stock deck's claim.
+func NoteJiraMirrorMove(ctx context.Context, c *jira.Client, orgID string, rule domain.JiraProjectStatusRules, issueKey string, err error) {
+	m := kinds.JiraMirrorFor(rule, issueKey)
+	if err == nil {
+		kinds.JiraMirrorFailing.Set(ctx, orgID, m, false)
+		return
+	}
+	if !errors.Is(err, jira.ErrNoTransition) {
+		return
+	}
+	project := rule.ProjectExternalID
+	if project == "" {
+		project = rule.ProjectKey
+	}
+	statuses, err := c.ProjectStatuses(ctx, project)
+	if err != nil {
+		jiraLog.Warn("mirror: read the project's statuses failed; leaving its mirror condition as it was", "project", project, "error", err)
+		return
+	}
+	for _, st := range statuses {
+		if rule.InProgressCanonical.SameStatus(domain.JiraStatusRef{ID: st.ID, Name: st.Name}) {
+			return
+		}
+	}
+	kinds.JiraMirrorFailing.Set(ctx, orgID, m, true)
 }
 
 // recordMirrorAction appends one external_actions row for a board→Jira mirror
