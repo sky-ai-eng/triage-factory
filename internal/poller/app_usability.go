@@ -10,9 +10,10 @@ import (
 
 // appRegistration reads the org's own App registration for the cycle's
 // before/after comparison: nil when the org has none (a PAT or managed org).
-// ok is false when the read fails, which is logged; the registration is then
-// nil too. A missed comparison costs one transition log line, and the resolver
-// reads the row itself before it would mint from it.
+// ok is false when nothing was read: no store is wired, or the read failed,
+// which is logged. The registration is then nil too. A missed comparison
+// costs one transition log line, and the resolver reads the row itself before
+// it would mint from it.
 func (m *Manager) appRegistration(ctx context.Context, orgID string) (app *domain.OrgGitHubApp, ok bool) {
 	if m.apps == nil {
 		return nil, false
