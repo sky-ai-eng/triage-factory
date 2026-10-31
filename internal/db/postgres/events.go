@@ -99,32 +99,13 @@ func (s *eventStore) LatestForEntityTypeAndDedupKey(ctx context.Context, orgID, 
 	// (system events, derived events). id DESC at the end is the
 	// deterministic tiebreaker for the otherwise-impossible case
 	// where two writes share both timestamps to the nanosecond.
-	row := s.q.QueryRowContext(ctx, `
-		SELECT id, entity_id, event_type, dedup_key,
-		       COALESCE(metadata_json::text, ''), occurred_at, created_at
+	return scanEvent(s.q.QueryRowContext(ctx, `
+		SELECT `+eventColumns+`
 		FROM events
 		WHERE org_id = $1 AND entity_id = $2 AND event_type = $3 AND dedup_key = $4
 		ORDER BY COALESCE(occurred_at, created_at) DESC, created_at DESC, id DESC
 		LIMIT 1
-	`, orgID, entityID, eventType, dedupKey)
-	var evt domain.Event
-	var entID sql.NullString
-	var occurredAt sql.NullTime
-	if err := row.Scan(&evt.ID, &entID, &evt.EventType, &evt.DedupKey,
-		&evt.MetadataJSON, &occurredAt, &evt.CreatedAt); err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
-		return nil, err
-	}
-	if entID.Valid {
-		s := entID.String
-		evt.EntityID = &s
-	}
-	if occurredAt.Valid {
-		evt.OccurredAt = occurredAt.Time
-	}
-	return &evt, nil
+	`, orgID, entityID, eventType, dedupKey))
 }
 
 func (s *eventStore) GetMetadataSystem(ctx context.Context, orgID, eventID string) (string, error) {
@@ -142,11 +123,38 @@ func (s *eventStore) GetMetadataSystem(ctx context.Context, orgID, eventID strin
 }
 
 func (s *eventStore) GetSystem(ctx context.Context, orgID, eventID string) (*domain.Event, error) {
-	row := s.admin.QueryRowContext(ctx, `
-		SELECT id, entity_id, event_type, dedup_key,
-		       COALESCE(metadata_json::text, ''), occurred_at, created_at
-		FROM events WHERE org_id = $1 AND id = $2
-	`, orgID, eventID)
+	evt, err := scanEvent(s.admin.QueryRowContext(ctx, `
+		SELECT `+eventColumns+` FROM events WHERE org_id = $1 AND id = $2
+	`, orgID, eventID))
+	if evt == nil || err != nil {
+		return nil, err
+	}
+	// Stamp the tenant context the worker needs for routing.
+	evt.OrgID = orgID
+	return evt, nil
+}
+
+// LatestForEntityTypeBeforeSystem is the close phase's read of the entity's
+// previous event of a type (see the interface). The row-value comparison is
+// the ORDER BY's own key, so a created_at tie between the two events breaks
+// on id the way the ordering does.
+func (s *eventStore) LatestForEntityTypeBeforeSystem(ctx context.Context, orgID, entityID, eventType, beforeEventID string) (*domain.Event, error) {
+	return scanEvent(s.admin.QueryRowContext(ctx, `
+		SELECT `+eventColumns+`
+		FROM events
+		WHERE org_id = $1 AND entity_id = $2 AND event_type = $3
+		  AND (created_at, id) < (SELECT created_at, id FROM events WHERE org_id = $1 AND id = $4)
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1
+	`, orgID, entityID, eventType, beforeEventID))
+}
+
+// eventColumns is the projection scanEvent reads, unqualified.
+const eventColumns = `id, entity_id, event_type, dedup_key,
+		       COALESCE(metadata_json::text, ''), occurred_at, created_at`
+
+// scanEvent reads one eventColumns row, (nil, nil) for no row.
+func scanEvent(row *sql.Row) (*domain.Event, error) {
 	var (
 		evt        domain.Event
 		entID      sql.NullString
@@ -166,7 +174,5 @@ func (s *eventStore) GetSystem(ctx context.Context, orgID, eventID string) (*dom
 	if occurredAt.Valid {
 		evt.OccurredAt = occurredAt.Time
 	}
-	// Stamp the tenant context the worker needs for routing.
-	evt.OrgID = orgID
 	return &evt, nil
 }

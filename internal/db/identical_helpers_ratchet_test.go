@@ -100,6 +100,7 @@ var identicalHelperRatchet = []string{
 	"scanConnectionStatus",
 	"scanDeliverableRows",
 	"scanEntityRow",
+	"scanEvent",
 	"scanExternalAction",
 	"scanExternalActionRows",
 	"scanIntIDs",

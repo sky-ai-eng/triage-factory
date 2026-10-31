@@ -345,6 +345,181 @@ func TestCloseDeferral_PRTerminationMatchesItsOwnAction(t *testing.T) {
 	}
 }
 
+// enqueueClosed durably enqueues the terminating github:pr:closed event.
+func enqueueClosed(t *testing.T, database *sql.DB, entityID string) {
+	t.Helper()
+	eid := entityID
+	meta, _ := json.Marshal(events.GitHubPRClosedMetadata{Author: "aidan", Repo: "owner/repo", PRNumber: 1, ClosedBy: "aidan"})
+	if _, err := sqlitestore.New(database).EventQueue.Enqueue(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
+		OrgID:        runmode.LocalDefaultOrgID,
+		EntityID:     &eid,
+		EventType:    domain.EventGitHubPRClosed,
+		MetadataJSON: string(meta),
+	}, ""); err != nil {
+		t.Fatalf("enqueue pr:closed: %v", err)
+	}
+}
+
+// pollCyclesPass moves every recorded event and ledger row an hour into the
+// past. It stands in for the poll cycles between one close and the next,
+// which a test otherwise runs inside one second, where SQLite's whole-second
+// ledger stamps cannot place a row written after a close later than it.
+func pollCyclesPass(t *testing.T, database *sql.DB) {
+	t.Helper()
+	if _, err := database.Exec(`UPDATE events SET created_at = datetime(created_at, '-1 hour')`); err != nil {
+		t.Fatalf("age events: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE external_actions SET occurred_at = datetime(occurred_at, '-1 hour')`); err != nil {
+		t.Fatalf("age ledger rows: %v", err)
+	}
+}
+
+// reopenEntity is the tracker's reactivation of a closed entity it saw open
+// again, a poll cycle after the close.
+func reopenEntity(t *testing.T, database *sql.DB, entityID string) {
+	t.Helper()
+	pollCyclesPass(t, database)
+	if _, err := database.Exec(`UPDATE entities SET state = 'active', closed_at = NULL WHERE id = ?`, entityID); err != nil {
+		t.Fatalf("reopen entity: %v", err)
+	}
+}
+
+// newDeferredCloseThenReopenFixture is a ci_check_failed task whose running
+// run closed its pull request, with the task's close held by that close, and
+// the pull request reopened since while the run keeps working.
+func newDeferredCloseThenReopenFixture(t *testing.T, sourceID string) deferredCIFixture {
+	t.Helper()
+	database := newTestDB(t)
+	r := newQueueWorkerRouter(t, database)
+	sp := &stoppingSpawner{}
+	r.spawner = sp
+	entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, sourceID)
+	runID, convID := seedRunOnTask(t, database, taskID, "running", "")
+	recordAgentAction(t, database, convID, domain.ExternalAction{Action: domain.ActionPRClosed, EntityID: entityID})
+	enqueueClosed(t, database, entityID)
+	if err := r.drainEventQueue(context.Background()); err != nil {
+		t.Fatalf("drain the run's close: %v", err)
+	}
+	eventID, deferredRun := taskDeferral(t, database, taskID)
+	if eventID == "" || deferredRun != runID {
+		t.Fatalf("setup: deferral = (%q, %q), want the close and run %s", eventID, deferredRun, runID)
+	}
+	reopenEntity(t, database, entityID)
+	return deferredCIFixture{r: r, database: database, sp: sp, entityID: entityID, taskID: taskID, runID: runID, convID: convID, eventID: eventID}
+}
+
+// TestCloseDeferral_PersonsCloseAfterAReopenStopsTheRun pins that a ledger
+// row explains one close: the run closed the pull request and a person
+// reopened it, so the person's next close is not the run's. It closes the
+// task and stops the run the way a close the run did not cause always has.
+func TestCloseDeferral_PersonsCloseAfterAReopenStopsTheRun(t *testing.T) {
+	f := newDeferredCloseThenReopenFixture(t, "owner/repo#close-reopen-person")
+
+	enqueueClosed(t, f.database, f.entityID)
+	if err := f.r.drainEventQueue(context.Background()); err != nil {
+		t.Fatalf("drain the person's close: %v", err)
+	}
+
+	if status, reason, eventType := taskRow(t, f.database, f.taskID); status != "done" || reason != "entity_closed" || eventType != domain.EventGitHubPRClosed {
+		t.Errorf("task = (%q, %q, %q), want done by the person's close", status, reason, eventType)
+	}
+	if !slices.Contains(f.sp.stoppedIDs(), f.convID) {
+		t.Errorf("stops = %v, want the run's conversation %s", f.sp.stoppedIDs(), f.convID)
+	}
+	if !cancelRequested(t, f.database, f.runID) {
+		t.Error("the run was not called off")
+	}
+}
+
+// TestCloseDeferral_RunsOwnCloseAfterAReopenDefers pins the other side: the
+// run closed the pull request, a person reopened it, and the run closed it
+// again. The second close is the run's own, written after the first, so it
+// is held like the first.
+func TestCloseDeferral_RunsOwnCloseAfterAReopenDefers(t *testing.T) {
+	f := newDeferredCloseThenReopenFixture(t, "owner/repo#close-reopen-run")
+	recordAgentAction(t, f.database, f.convID, domain.ExternalAction{Action: domain.ActionPRClosed, EntityID: f.entityID})
+
+	enqueueClosed(t, f.database, f.entityID)
+	if err := f.r.drainEventQueue(context.Background()); err != nil {
+		t.Fatalf("drain the run's second close: %v", err)
+	}
+
+	if status, _, _ := taskRow(t, f.database, f.taskID); status == "done" {
+		t.Fatal("the run's task closed under it")
+	}
+	eventID, deferredRun := taskDeferral(t, f.database, f.taskID)
+	if eventID == f.eventID || deferredRun != f.runID {
+		t.Errorf("deferral = (%q, %q), want the second close and run %s", eventID, deferredRun, f.runID)
+	}
+	if cancelRequested(t, f.database, f.runID) || slices.Contains(f.sp.stoppedIDs(), f.convID) {
+		t.Error("the closing run was stopped")
+	}
+}
+
+// TestCloseDeferral_IssueCompletionAfterAReopenMatchesOnlyTheRunsLaterMove
+// pins the transition matcher across a reopen, for Jira and Linear: the run
+// moved the issue to Done, it completed, and a person reopened it. A person's
+// move back to Done is not the run's; the run's own move after the reopen is.
+func TestCloseDeferral_IssueCompletionAfterAReopenMatchesOnlyTheRunsLaterMove(t *testing.T) {
+	cases := []struct {
+		name, eventType string
+		runMovesItAgain bool
+		wantCausedByRun bool
+	}{
+		{"jira_persons_done", domain.EventJiraIssueCompleted, false, false},
+		{"jira_runs_done", domain.EventJiraIssueCompleted, true, true},
+		{"linear_persons_done", domain.EventLinearIssueCompleted, false, false},
+		{"linear_runs_done", domain.EventLinearIssueCompleted, true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			database := newTestDB(t)
+			r := newQueueWorkerRouter(t, database)
+			entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, "owner/repo#"+tc.name)
+			runID, convID := seedRunOnTask(t, database, taskID, "running", "")
+			provider, scope := domain.ProviderJira, "example.atlassian.net"
+			meta, _ := json.Marshal(events.JiraIssueCompletedMetadata{IssueKey: "SKY-1", FinalStatus: "Done"})
+			if tc.eventType == domain.EventLinearIssueCompleted {
+				provider, scope = domain.ProviderLinear, "linear-workspace"
+				meta, _ = json.Marshal(events.LinearIssueCompletedMetadata{FinalStatus: "Done"})
+			}
+			moveToDone := func() {
+				recordAgentAction(t, database, convID, domain.ExternalAction{
+					Provider: provider, Scope: scope, Action: domain.ActionIssueTransitioned,
+					Target: "SKY-1", EntityID: entityID, ToState: "Done", ObjectKind: domain.ObjectKindIssue,
+				})
+			}
+			complete := func() domain.Event {
+				evt := domain.Event{EntityID: &entityID, EventType: tc.eventType, MetadataJSON: string(meta)}
+				id, err := sqlitestore.New(database).Events.RecordSystem(t.Context(), runmode.LocalDefaultOrgID, evt)
+				if err != nil {
+					t.Fatalf("record %s: %v", tc.eventType, err)
+				}
+				evt.ID = id
+				return evt
+			}
+
+			moveToDone()
+			complete()
+			// A person reopens the issue, and the tracker sees it a poll
+			// cycle later.
+			pollCyclesPass(t, database)
+			if tc.runMovesItAgain {
+				moveToDone()
+			}
+			evt := complete()
+
+			got, err := r.causingRun(t.Context(), runmode.LocalDefaultOrgID, evt, entityID, terminatingRelationFor(tc.eventType), taskID)
+			if err != nil {
+				t.Fatalf("causingRun: %v", err)
+			}
+			if want := map[bool]string{true: runID, false: ""}[tc.wantCausedByRun]; got != want {
+				t.Errorf("causingRun = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 // TestCloseDeferral_CancelRequestedRunGetsNoDeferral pins the stopped check on
 // the run itself: a run someone called off is stopped while its conversation
 // still shows it working, so the pass closes its task now.
