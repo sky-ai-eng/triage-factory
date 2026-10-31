@@ -96,7 +96,12 @@ func (s *Spawner) repointRenamedRemotesInJail(ctx context.Context, orgID, taskID
 		return
 	}
 	cmd := renamedRemotesScript(root, renames)
-	out, err := tools.Call("bash", map[string]any{"command": cmd, "timeout": renamedRemoteTimeoutSec})
+	// The jail requires a summary on every bash call, not only the model's.
+	out, err := tools.Call("bash", map[string]any{
+		"command":     cmd,
+		"description": "Repointing renamed remotes",
+		"timeout":     renamedRemoteTimeoutSec,
+	})
 	switch {
 	case err != nil:
 		delegateLog.Warn("repoint the remotes of renamed repositories in the jail failed", "task", taskID, "error", err)

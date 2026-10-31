@@ -19,6 +19,10 @@ fn missing_required_argument() {
         "Invalid arguments: \"command\" is required"
     );
     assert_eq!(
+        err_of("bash", json!({ "command": "echo hi" })),
+        "Invalid arguments: \"description\" is required"
+    );
+    assert_eq!(
         err_of("write", json!({ "path": "x.txt" })),
         "Invalid arguments: \"content\" is required"
     );
@@ -35,7 +39,7 @@ fn wrong_argument_type() {
         "Invalid arguments: \"offset\" must be a number"
     );
     assert_eq!(
-        err_of("bash", json!({ "command": 42 })),
+        err_of("bash", json!({ "command": 42, "description": "Echoing" })),
         "Invalid arguments: \"command\" must be a string"
     );
     assert_eq!(
@@ -57,28 +61,53 @@ fn wrong_type_for_a_summary_argument_is_still_an_error() {
     assert_eq!(
         err_of(
             "bash",
-            json!({ "command": "echo hi", "description_past": ["ran", "it"] })
+            json!({
+                "command": "echo hi",
+                "description": "Checking the greeting",
+                "description_past": ["ran", "it"],
+            })
         ),
         "Invalid arguments: \"description_past\" must be a string"
     );
 }
 
-/// The other half of the same contract: neither summary is required, and a
-/// well-formed one never stands between the model and its command.
+/// The other half of the same contract: the past-tense summary is optional,
+/// and neither summary changes what the command does.
 #[test]
-fn summary_arguments_are_optional_and_do_not_affect_the_result() {
-    let bare = run_tool("bash", "/tmp", json!({ "command": "echo hi" })).unwrap();
-    let summarized = run_tool(
+fn summary_arguments_do_not_affect_the_result() {
+    let present_only = run_tool(
+        "bash",
+        "/tmp",
+        json!({ "command": "echo hi", "description": "Checking the greeting" }),
+    )
+    .unwrap();
+    let both = run_tool(
         "bash",
         "/tmp",
         json!({
             "command": "echo hi",
-            "description": "Checking the greeting",
-            "description_past": "Checked the greeting",
+            "description": "Saying hello",
+            "description_past": "Said hello",
         }),
     )
     .unwrap();
-    assert_eq!(bare, summarized);
+    assert_eq!(present_only, both);
+}
+
+/// An empty or near-empty summary satisfies `required` and still renders as
+/// the command, so the present tense has a minimum length. It is counted in
+/// characters: four accented letters are eight bytes and still too short.
+#[test]
+fn description_shorter_than_five_characters_is_rejected() {
+    for short in ["", "Test", "éééé"] {
+        assert_eq!(
+            err_of(
+                "bash",
+                json!({ "command": "echo hi", "description": short })
+            ),
+            "Invalid arguments: \"description\" must be at least 5 characters"
+        );
+    }
 }
 
 #[test]

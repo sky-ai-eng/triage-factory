@@ -369,7 +369,7 @@ func testFreezeHoldsTheJailStill(t *testing.T, h Harness) {
 	done := make(chan agentloop.ToolOutcome, 1)
 	errs := make(chan error, 1)
 	go func() {
-		out, err := l.tools.Call("bash", map[string]any{"command": "echo thawed", "timeout": 60})
+		out, err := l.tools.Call("bash", map[string]any{"description": "Running a test command", "command": "echo thawed", "timeout": 60})
 		if err != nil {
 			errs <- err
 			return
@@ -423,7 +423,7 @@ func testMemoryCeilingKillsAreCounted(t *testing.T, h Harness) {
 	// child.
 	grow := fmt.Sprintf(`node -e 'const a=[];for(let i=0;i<%d;i++){a.push(Buffer.alloc(32<<20,1))}console.log("target reached")'`,
 		2*oomCeilingMB/32)
-	out, err := l.tools.Call("bash", map[string]any{"command": grow, "timeout": int(toolTimeout / time.Second)})
+	out, err := l.tools.Call("bash", map[string]any{"description": "Running a test command", "command": grow, "timeout": int(toolTimeout / time.Second)})
 	if err != nil {
 		t.Fatalf("the tool host died with the command (the kill took the jail, not the process): %v", err)
 	}
@@ -473,7 +473,7 @@ func testAFullTmpEndsNoJail(t *testing.T, h Harness) {
 	}
 	grow := fmt.Sprintf(`node -e 'const a=[];for(let i=0;i<%d;i++){a.push(Buffer.alloc(32<<20,1))}console.log("target reached")'`,
 		2*oomCeilingMB/32)
-	out, err := l.tools.Call("bash", map[string]any{"command": grow, "timeout": int(toolTimeout / time.Second)})
+	out, err := l.tools.Call("bash", map[string]any{"description": "Running a test command", "command": grow, "timeout": int(toolTimeout / time.Second)})
 	if err != nil {
 		t.Fatalf("the tool host died with the command: the kill took the jail, not the process: %v", err)
 	}
@@ -505,7 +505,7 @@ func testStopLeavesNothingRunning(t *testing.T, h Harness) {
 	}
 	// A tool host that is gone fails the call itself; any reply at all, a
 	// protocol error included, came from a process that is still running.
-	if out, err := l.tools.Call("bash", map[string]any{"command": "echo alive", "timeout": 10}); err == nil {
+	if out, err := l.tools.Call("bash", map[string]any{"description": "Running a test command", "command": "echo alive", "timeout": 10}); err == nil {
 		t.Fatalf("the tool host answered after Stop: %+v", out)
 	}
 	if err := l.jail.Stop(); err != nil {
@@ -785,7 +785,7 @@ func (l *liveCell) provision(_ context.Context, pubKeyB64 string) ([]byte, int64
 // own verdicts in what they print.
 func (l *liveCell) sh(t *testing.T, command string) string {
 	t.Helper()
-	out, err := l.tools.Call("bash", map[string]any{"command": command, "timeout": int(toolTimeout / time.Second)})
+	out, err := l.tools.Call("bash", map[string]any{"description": "Running a test command", "command": command, "timeout": int(toolTimeout / time.Second)})
 	if err != nil {
 		t.Fatalf("tool host transport failed running %q: %v", command, err)
 	}

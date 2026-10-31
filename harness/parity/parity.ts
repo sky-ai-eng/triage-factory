@@ -604,62 +604,62 @@ const cases: Case[] = [
   {
     name: "bash-echo",
     tool: "bash",
-    args: () => ({ command: "echo 'test output'" }),
+    args: () => ({ description: "Running a parity case", command: "echo 'test output'" }),
   },
   {
     name: "bash-no-output",
     tool: "bash",
-    args: () => ({ command: "true" }),
+    args: () => ({ description: "Running a parity case", command: "true" }),
   },
   {
     name: "bash-exit-1",
     tool: "bash",
-    args: () => ({ command: "exit 1" }),
+    args: () => ({ description: "Running a parity case", command: "exit 1" }),
   },
   {
     name: "bash-exit-7-with-output",
     tool: "bash",
-    args: () => ({ command: "echo partial result; exit 7" }),
+    args: () => ({ description: "Running a parity case", command: "echo partial result; exit 7" }),
   },
   {
     name: "bash-stderr-only",
     tool: "bash",
-    args: () => ({ command: "echo 'to stderr' 1>&2" }),
+    args: () => ({ description: "Running a parity case", command: "echo 'to stderr' 1>&2" }),
   },
   {
     name: "bash-line-truncation",
     tool: "bash",
-    args: () => ({ command: "seq 3000" }),
+    args: () => ({ description: "Running a parity case", command: "seq 3000" }),
   },
   {
     name: "bash-trailing-newline-count",
     tool: "bash",
-    args: () => ({ command: "seq -f 'line-%04.0f' 4000" }),
+    args: () => ({ description: "Running a parity case", command: "seq -f 'line-%04.0f' 4000" }),
   },
   {
     name: "bash-single-long-line",
     tool: "bash",
-    args: () => ({ command: "printf 'x%.0s' $(seq 1 60000); echo" }),
+    args: () => ({ description: "Running a parity case", command: "printf 'x%.0s' $(seq 1 60000); echo" }),
   },
   {
     name: "bash-invalid-timeout-zero",
     tool: "bash",
-    args: () => ({ command: "echo hi", timeout: 0 }),
+    args: () => ({ description: "Running a parity case", command: "echo hi", timeout: 0 }),
   },
   {
     name: "bash-invalid-timeout-negative",
     tool: "bash",
-    args: () => ({ command: "echo hi", timeout: -5 }),
+    args: () => ({ description: "Running a parity case", command: "echo hi", timeout: -5 }),
   },
   {
     name: "bash-timeout-with-output",
     tool: "bash",
-    args: () => ({ command: "seq 3000; sleep 5", timeout: 2 }),
+    args: () => ({ description: "Running a parity case", command: "seq 3000; sleep 5", timeout: 2 }),
   },
   {
     name: "bash-utf8-content",
     tool: "bash",
-    args: () => ({ command: "printf '\\xe2\\x82\\xac\\n'" }),
+    args: () => ({ description: "Running a parity case", command: "printf '\\xe2\\x82\\xac\\n'" }),
   },
   // ------------------------------------------------------------------ grep
   {

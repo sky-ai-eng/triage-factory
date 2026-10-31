@@ -497,12 +497,18 @@ func bashCall(id, command string) domain.ToolCall {
 }
 
 // recordingToolHost answers every call and records the shell command it was
-// handed, so a denial's absence from this list is the assertion.
-type recordingToolHost struct{ observed []string }
+// handed, so a denial's absence from this list is the assertion. It keeps each
+// call's whole argument map too, for a caller whose arguments are TF's own
+// rather than a model's.
+type recordingToolHost struct {
+	observed []string
+	args     []map[string]any
+}
 
 func (h *recordingToolHost) Call(name string, args map[string]any) (agentloop.ToolOutcome, error) {
 	cmd, _ := args["command"].(string)
 	h.observed = append(h.observed, cmd)
+	h.args = append(h.args, args)
 	return agentloop.ToolOutcome{Content: "ok:" + name}, nil
 }
 
