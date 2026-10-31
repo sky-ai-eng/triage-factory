@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"reflect"
 	"slices"
 
@@ -174,23 +175,43 @@ func appendNew(to []Recipient, rs ...Recipient) []Recipient {
 	return to
 }
 
-// resolution is one call's audience reads, sharing what every member of a
-// Sync would otherwise read again.
+// resolution is one call's reads of the org — its audiences and the hosts its
+// links may name — sharing what every member of a Sync would otherwise read
+// again.
 type resolution struct {
 	b     *Backend
 	orgID string
 
-	workspace *string
+	settings *domain.OrgSettings
+}
+
+func (r *resolution) orgSettings(ctx context.Context) (domain.OrgSettings, error) {
+	if r.settings == nil {
+		s, err := r.b.Orgs.GetSettingsSystem(ctx, r.orgID)
+		if err != nil {
+			return domain.OrgSettings{}, fmt.Errorf("org settings: %w", err)
+		}
+		r.settings = &s
+	}
+	return *r.settings, nil
 }
 
 func (r *resolution) linearWorkspace(ctx context.Context) (string, error) {
-	if r.workspace == nil {
-		settings, err := r.b.Orgs.GetSettingsSystem(ctx, r.orgID)
-		if err != nil {
-			return "", fmt.Errorf("org settings: %w", err)
-		}
-		ws := domain.EntityScope("linear", settings)
-		r.workspace = &ws
+	s, err := r.orgSettings(ctx)
+	if err != nil {
+		return "", err
 	}
-	return *r.workspace, nil
+	return domain.EntityScope("linear", s), nil
+}
+
+// checkExternal is an external link's host check against the org's configured
+// hosts, read only when a link needs it.
+func (r *resolution) checkExternal(ctx context.Context) func(*url.URL) error {
+	return func(u *url.URL) error {
+		s, err := r.orgSettings(ctx)
+		if err != nil {
+			return err
+		}
+		return configuredHosts(s)(u)
+	}
 }

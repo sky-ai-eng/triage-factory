@@ -176,11 +176,34 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 			len(got) != 1 || got[0].ID != a1.ID || got[0].ResolvedAt == nil {
 			t.Fatalf("ResolveSystem = %+v, %v; want a1", got, err)
 		}
-		if again := raise(t, f, db.NotificationOccurrence{Key: "a", Audience: orgAdmins}); !again.Opened || again.Notification.ID == a1.ID {
+		again := raise(t, f, db.NotificationOccurrence{Key: "a", Audience: orgAdmins})
+		if !again.Opened || again.Notification.ID == a1.ID {
 			t.Errorf("raise after resolve = %+v; want a new occurrence", again)
 		}
 		if _, total := inbox(t, f, db.NotificationListFilter{Status: domain.NotificationResolved}); total != 4 {
 			t.Errorf("resolved count = %d; want 4", total)
+		}
+
+		// One row by id: its sibling audience of the same key stays open.
+		sibling := raise(t, f, db.NotificationOccurrence{Key: "a", Audience: teamAdmins}).Notification
+		one, err := s.ResolveIDSystem(ctx, f.OrgID, again.Notification.ID)
+		if err != nil || one == nil || one.ID != again.Notification.ID || one.ResolvedAt == nil ||
+			one.ResolvedReason != domain.NotificationResolvedCleared {
+			t.Fatalf("ResolveIDSystem = %+v, %v; want the org admins row cleared", one, err)
+		}
+		AssertWriteReturnedStoredRow(t, "ResolveIDSystem", *one, stored(t, f, one.ID))
+		if v := get(t, f, sibling.ID); v == nil || v.ResolvedAt != nil {
+			t.Errorf("sibling audience after ResolveIDSystem = %+v; want it open", v)
+		}
+		for _, id := range []string{again.Notification.ID, "not-a-uuid", "00000000-0000-4000-8000-000000000000"} {
+			if got, err := s.ResolveIDSystem(ctx, f.OrgID, id); err != nil || got != nil {
+				t.Errorf("ResolveIDSystem(%q) = %+v, %v; want nil for a row that is not open", id, got, err)
+			}
+		}
+		expires := time.Now().Add(time.Hour)
+		n := raise(t, f, db.NotificationOccurrence{Key: "n", Lifecycle: domain.NotificationNotice, Dismissible: true, ExpiresAt: &expires}).Notification
+		if got, err := s.ResolveIDSystem(ctx, f.OrgID, n.ID); err != nil || got != nil {
+			t.Errorf("ResolveIDSystem on a notice = %+v, %v; want nil: a notice expires", got, err)
 		}
 	})
 

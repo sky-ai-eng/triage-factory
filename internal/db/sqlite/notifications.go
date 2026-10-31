@@ -146,6 +146,14 @@ func (s *notificationStore) ResolveSourceSystem(ctx context.Context, orgID, sour
 	return s.resolve(ctx, orgID, domain.NotificationResolvedSourceOff, `source = ?`, source)
 }
 
+func (s *notificationStore) ResolveIDSystem(ctx context.Context, orgID, id string) (*domain.Notification, error) {
+	got, err := s.resolve(ctx, orgID, domain.NotificationResolvedCleared, `id = ?`, id)
+	if err != nil || len(got) == 0 {
+		return nil, err
+	}
+	return &got[0], nil
+}
+
 func (s *notificationStore) resolve(ctx context.Context, orgID string, reason domain.NotificationResolvedReason, where string, args ...any) ([]domain.Notification, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

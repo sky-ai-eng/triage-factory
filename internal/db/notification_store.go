@@ -66,6 +66,11 @@ type NotificationStore interface {
 	// with that source.
 	ResolveSourceSystem(ctx context.Context, orgID, source string) ([]domain.Notification, error)
 
+	// ResolveIDSystem resolves (cleared) the one row id names, leaving the
+	// other audiences' rows of its key open, and returns it; nil when it is
+	// not an open condition in orgID.
+	ResolveIDSystem(ctx context.Context, orgID, id string) (*domain.Notification, error)
+
 	// RecipientsSystem returns the distinct, sorted ids of the users a row
 	// with audience a in orgID is sent to: ListForViewer's "is sent"
 	// predicate read the other way round, so a websocket ping reaches exactly

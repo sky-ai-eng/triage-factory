@@ -140,9 +140,13 @@ func (e *engine) prepare(ctx context.Context, k *kind, r *resolution, p any, exp
 	occ.recipients = recipients
 	for _, to := range recipients {
 		c := k.render(p, to)
+		stored, err := renderActions(k.lifecycle, to, c.Actions, r.orgID, e.b.Local, r.checkExternal(ctx))
+		if err != nil {
+			return occurrence{}, fmt.Errorf("actions for a %s row: %w", to.Scope, err)
+		}
 		var actions json.RawMessage
-		if len(c.Actions) > 0 {
-			if actions, err = json.Marshal(c.Actions); err != nil {
+		if len(stored) > 0 {
+			if actions, err = json.Marshal(stored); err != nil {
 				return occurrence{}, fmt.Errorf("marshal actions: %w", err)
 			}
 		}
