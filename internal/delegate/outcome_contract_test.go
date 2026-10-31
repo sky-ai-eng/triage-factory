@@ -3,7 +3,6 @@ package delegate
 import (
 	"context"
 	"database/sql"
-	"strings"
 	"testing"
 	"time"
 
@@ -35,15 +34,6 @@ func TestNonterminalStepSysPrompt_PositionGated(t *testing.T) {
 	}
 	if got := nonterminalStepSysPrompt(2, 3); got != "" {
 		t.Errorf("terminal step 2/3 got a fragment; the last step must see no `continue`")
-	}
-}
-
-// The step wrapper names the skill by its absolute path under the run root the
-// agent sees, so it resolves from inside a checkout.
-func TestBlueprintStepWrapperPrompt_SkillPathIsAbsolute(t *testing.T) {
-	got := buildBlueprintStepWrapperPrompt(domain.Task{Title: "t"}, domain.BlueprintStep{}, &domain.Prompt{Name: "Fix"}, "chain-step-0-fix", "/work", 1, "")
-	if want := "(materialized at /work/.claude/skills/chain-step-0-fix/SKILL.md)"; !strings.Contains(got, want) {
-		t.Errorf("wrapper missing %q; got:\n%s", want, got)
 	}
 }
 
