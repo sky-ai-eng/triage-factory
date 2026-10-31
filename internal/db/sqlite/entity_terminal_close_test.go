@@ -30,62 +30,68 @@ func TestEntityStore_CloseTerminal_SQLite(t *testing.T) {
 		if err := db.BootstrapSchemaForTest(conn); err != nil {
 			t.Fatalf("bootstrap schema: %v", err)
 		}
-		base, entityForTask := newSQLiteCloseIntentSeeder(conn)
-		seeder := dbtest.EntityTerminalCloseSeeder{
-			TaskCloseCancelIntentSeeder: base,
-			EntityForTask: func(t *testing.T, taskID string) string {
-				t.Helper()
-				id, ok := entityForTask[taskID]
-				if !ok {
-					t.Fatalf("no seeded entity for task %s", taskID)
-				}
-				return id
-			},
-			TaskOnEntity: func(t *testing.T, entityID, eventType string) string {
-				t.Helper()
-				taskID := uuid.New().String()
-				eventID := uuid.New().String()
-				now := time.Now().UTC()
-				if _, err := conn.Exec(`
-					INSERT INTO events (id, entity_id, event_type, dedup_key, metadata_json, created_at)
-					VALUES (?, ?, ?, '', '{}', ?)
-				`, eventID, entityID, eventType, now); err != nil {
-					t.Fatalf("seed event: %v", err)
-				}
-				if _, err := conn.Exec(`
-					INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id,
-					                   status, priority_score, scoring_status, created_at,
-					                   team_id, visibility)
-					VALUES (?, ?, ?, '', ?, 'queued', 0.5, 'pending', ?, ?, 'team')
-				`, taskID, entityID, eventType, eventID, now, runmode.LocalDefaultTeamID); err != nil {
-					t.Fatalf("seed task: %v", err)
-				}
-				entityForTask[taskID] = entityID
-				return taskID
-			},
-			EntityRow: func(t *testing.T, entityID string) (string, int64) {
-				t.Helper()
-				var state string
-				var seq int64
-				if err := conn.QueryRow(`SELECT state, poll_seq FROM entities WHERE id = ?`, entityID).Scan(&state, &seq); err != nil {
-					t.Fatalf("read entity %s: %v", entityID, err)
-				}
-				return state, seq
-			},
-			BumpPollSeq: func(t *testing.T, entityID string) {
-				t.Helper()
-				if _, err := conn.Exec(`UPDATE entities SET poll_seq = poll_seq + 1 WHERE id = ?`, entityID); err != nil {
-					t.Fatalf("bump poll_seq for %s: %v", entityID, err)
-				}
-			},
-			CloseEntityRaw: func(t *testing.T, entityID string) {
-				t.Helper()
-				if _, err := conn.Exec(`UPDATE entities SET state = 'closed', closed_at = ? WHERE id = ?`, time.Now().UTC(), entityID); err != nil {
-					t.Fatalf("close entity %s around the guard: %v", entityID, err)
-				}
-			},
-		}
+		seeder := newSQLiteTerminalCloseSeeder(conn)
 		stores := sqlitestore.New(conn)
 		return stores.Entities, stores.Tasks, runmode.LocalDefaultOrgID, seeder
 	})
+}
+
+// newSQLiteTerminalCloseSeeder extends the cancel-intent seeder with the
+// entity side the terminating-close suite reads and moves.
+func newSQLiteTerminalCloseSeeder(conn *sql.DB) dbtest.EntityTerminalCloseSeeder {
+	base, entityForTask := newSQLiteCloseIntentSeeder(conn)
+	return dbtest.EntityTerminalCloseSeeder{
+		TaskCloseCancelIntentSeeder: base,
+		EntityForTask: func(t *testing.T, taskID string) string {
+			t.Helper()
+			id, ok := entityForTask[taskID]
+			if !ok {
+				t.Fatalf("no seeded entity for task %s", taskID)
+			}
+			return id
+		},
+		TaskOnEntity: func(t *testing.T, entityID, eventType string) string {
+			t.Helper()
+			taskID := uuid.New().String()
+			eventID := uuid.New().String()
+			now := time.Now().UTC()
+			if _, err := conn.Exec(`
+				INSERT INTO events (id, entity_id, event_type, dedup_key, metadata_json, created_at)
+				VALUES (?, ?, ?, '', '{}', ?)
+			`, eventID, entityID, eventType, now); err != nil {
+				t.Fatalf("seed event: %v", err)
+			}
+			if _, err := conn.Exec(`
+				INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id,
+				                   status, priority_score, scoring_status, created_at,
+				                   team_id, visibility)
+				VALUES (?, ?, ?, '', ?, 'queued', 0.5, 'pending', ?, ?, 'team')
+			`, taskID, entityID, eventType, eventID, now, runmode.LocalDefaultTeamID); err != nil {
+				t.Fatalf("seed task: %v", err)
+			}
+			entityForTask[taskID] = entityID
+			return taskID
+		},
+		EntityRow: func(t *testing.T, entityID string) (string, int64) {
+			t.Helper()
+			var state string
+			var seq int64
+			if err := conn.QueryRow(`SELECT state, poll_seq FROM entities WHERE id = ?`, entityID).Scan(&state, &seq); err != nil {
+				t.Fatalf("read entity %s: %v", entityID, err)
+			}
+			return state, seq
+		},
+		BumpPollSeq: func(t *testing.T, entityID string) {
+			t.Helper()
+			if _, err := conn.Exec(`UPDATE entities SET poll_seq = poll_seq + 1 WHERE id = ?`, entityID); err != nil {
+				t.Fatalf("bump poll_seq for %s: %v", entityID, err)
+			}
+		},
+		CloseEntityRaw: func(t *testing.T, entityID string) {
+			t.Helper()
+			if _, err := conn.Exec(`UPDATE entities SET state = 'closed', closed_at = ? WHERE id = ?`, time.Now().UTC(), entityID); err != nil {
+				t.Fatalf("close entity %s around the guard: %v", entityID, err)
+			}
+		},
+	}
 }

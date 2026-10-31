@@ -1091,8 +1091,11 @@ func (s *entityStore) CloseWithSnapshotCASSystem(ctx context.Context, orgID, id,
 // SQLite the transaction is the lock: one writer at a time, so a mint and a
 // close on the same entity commit in some order and each sees the other's
 // result, which is all the Postgres FOR UPDATE buys.
-func (s *entityStore) CloseTerminalSystem(ctx context.Context, orgID, entityID string, expected *int64, closeTypes []string, closeReason, closeEventType, closingEventID string) (db.TerminalCloseResult, error) {
+func (s *entityStore) CloseTerminalSystem(ctx context.Context, orgID, entityID string, expected *int64, closeTypes []string, closeReason, closeEventType, closingEventID string, deferTo map[string]string) (db.TerminalCloseResult, error) {
 	if err := assertLocalOrg(orgID); err != nil {
+		return db.TerminalCloseResult{}, err
+	}
+	if err := db.RequireClosingEventForDeferral(deferTo, closingEventID); err != nil {
 		return db.TerminalCloseResult{}, err
 	}
 	res := db.TerminalCloseResult{ActiveConversationIDs: map[string][]string{}}
@@ -1115,6 +1118,16 @@ func (s *entityStore) CloseTerminalSystem(ctx context.Context, orgID, entityID s
 			return fmt.Errorf("list open tasks: %w", err)
 		}
 		for _, taskID := range taskIDs {
+			if runID, ok := deferTo[taskID]; ok {
+				deferred, err := deferTaskClose(ctx, q, taskID, closingEventID, runID)
+				if err != nil {
+					return fmt.Errorf("defer task %s: %w", taskID, err)
+				}
+				if deferred != nil {
+					res.DeferredTaskIDs = append(res.DeferredTaskIDs, taskID)
+				}
+				continue
+			}
 			closed, conversationIDs, err := closeTaskWithCancelIntent(ctx, q, taskID, closeReason, closeEventType, closingEventID)
 			if err != nil {
 				return fmt.Errorf("task %s: %w", taskID, err)

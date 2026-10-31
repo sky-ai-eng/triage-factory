@@ -399,11 +399,11 @@ type closeTerminalOutageStore struct {
 	o *outage
 }
 
-func (s closeTerminalOutageStore) CloseTerminalSystem(ctx context.Context, orgID, entityID string, expected *int64, closeTypes []string, closeReason, closeEventType, closingEventID string) (dbpkg.TerminalCloseResult, error) {
+func (s closeTerminalOutageStore) CloseTerminalSystem(ctx context.Context, orgID, entityID string, expected *int64, closeTypes []string, closeReason, closeEventType, closingEventID string, deferTo map[string]string) (dbpkg.TerminalCloseResult, error) {
 	if s.o.down() {
 		return dbpkg.TerminalCloseResult{}, errOutage
 	}
-	return s.EntityStore.CloseTerminalSystem(ctx, orgID, entityID, expected, closeTypes, closeReason, closeEventType, closingEventID)
+	return s.EntityStore.CloseTerminalSystem(ctx, orgID, entityID, expected, closeTypes, closeReason, closeEventType, closingEventID, deferTo)
 }
 
 // TestCloseOwed_FailedClose_ReplaysWholeAndParkedHoldsTheKey pins the

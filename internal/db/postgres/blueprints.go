@@ -1028,6 +1028,23 @@ func (s *blueprintStore) GetRunSystem(ctx context.Context, orgID, id string) (*d
 	return getBlueprintRun(ctx, s.admin, orgID, id)
 }
 
+func (s *blueprintStore) RunningRunForTaskSystem(ctx context.Context, orgID, taskID string) (*domain.BlueprintRun, error) {
+	if !isValidUUID(taskID) {
+		return nil, nil
+	}
+	br, err := scanBlueprintRun(s.admin.QueryRowContext(ctx, `
+		SELECT `+pgBlueprintRunColumns+`
+		FROM blueprint_runs WHERE org_id = $1 AND task_id = $2 AND status = 'running'
+	`, orgID, taskID).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &br, nil
+}
+
 func getBlueprintRun(ctx context.Context, q queryer, orgID, id string) (*domain.BlueprintRun, error) {
 	if !isValidUUID(id) {
 		return nil, nil

@@ -148,7 +148,7 @@ func TestEntityStore_CloseTerminal_Postgres_SerializesWithTaskMint(t *testing.T)
 		}
 		done := make(chan outcome, 1)
 		go func() {
-			res, err := stores.Entities.CloseTerminalSystem(ctx, orgID, entityID, &seq, []string{ci, review}, "entity_closed", domain.EventGitHubPRMerged, eventID)
+			res, err := stores.Entities.CloseTerminalSystem(ctx, orgID, entityID, &seq, []string{ci, review}, "entity_closed", domain.EventGitHubPRMerged, eventID, nil)
 			done <- outcome{res, err}
 		}()
 		select {

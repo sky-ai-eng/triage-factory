@@ -26,7 +26,7 @@ const linearTestWorkspace = "ws-acme"
 func linearRouter(database *sql.DB) *Router {
 	st := sqlitestore.New(database)
 	return NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, st.Users,
-		testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events,
+		testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.ExternalActions,
 		st.Orgs, st.Teams, st.TeamGitHubRepos, st.JiraStatusRules, st.LinearTeamRules, nil, nil, noopScorer{}, websocket.NewHub())
 }
 

@@ -95,6 +95,20 @@ type closeRelation struct {
 	terminatesEntity bool
 	// closeReason audits why the task closed. Defaults to "auto_closed_by_event".
 	closeReason string
+	// causedByRun declares that a task's own blueprint run can cause this
+	// relation's event, and how to tell: when it matches, the task's close
+	// is deferred until the run ends instead of stopping the run that did
+	// the work (see close_deferral.go). nil = never caused by a run; every
+	// task closes now.
+	causedByRun runCauseMatcher
+}
+
+// reason is the close reason the relation audits.
+func (rel *closeRelation) reason() string {
+	if rel.closeReason == "" {
+		return "auto_closed_by_event"
+	}
+	return rel.closeReason
 }
 
 // closeReasonReconciled is the close reason the poll's close obligation
@@ -114,9 +128,10 @@ var closeRelations = []closeRelation{
 	// CI went green → close the entity's CI-failure tasks, but only if no
 	// check is still failing or still running at the latest SHA.
 	{
-		onEvents: []string{domain.EventGitHubPRCICheckPassed},
-		closes:   []string{domain.EventGitHubPRCICheckFailed},
-		prepare:  prepareCIPassed,
+		onEvents:    []string{domain.EventGitHubPRCICheckPassed},
+		closes:      []string{domain.EventGitHubPRCICheckFailed},
+		prepare:     prepareCIPassed,
+		causedByRun: CausedByRunPush,
 	},
 	// A reviewer submitted a review (any verdict, including changes_requested)
 	// → their review_requested obligation is satisfied. Close only that
@@ -178,6 +193,10 @@ var closeRelations = []closeRelation{
 		closes:           githubPRTerminalCloseTypes(),
 		terminatesEntity: true,
 		closeReason:      "entity_closed",
+		causedByRun: causedByRunActionOnEntity(map[string]string{
+			domain.EventGitHubPRMerged: domain.ActionPRMerged,
+			domain.EventGitHubPRClosed: domain.ActionPRClosed,
+		}),
 	},
 	// TF stopped following a tracked PR (its host is no longer the org's) →
 	// the same entity-wide close + terminate. Like Jira's unreachable it spares
@@ -195,6 +214,7 @@ var closeRelations = []closeRelation{
 		closes:           jiraIssueTerminalCloseTypes(),
 		terminatesEntity: true,
 		closeReason:      "entity_closed",
+		causedByRun:      causedByRunTransition,
 	},
 	// Jira stopped resolving a tracked issue's key → close everything on the
 	// entity and terminate it. Same shape as completion, for a different
@@ -212,6 +232,7 @@ var closeRelations = []closeRelation{
 		closes:           linearCloseTypesExcept(domain.EventLinearIssueCompleted),
 		terminatesEntity: true,
 		closeReason:      "entity_closed",
+		causedByRun:      causedByRunTransition,
 	},
 	// Linear stopped giving TF a tracked issue → the Jira unreachable close,
 	// for Linear.
@@ -430,10 +451,7 @@ func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, 
 			}
 		}
 
-		reason := rel.closeReason
-		if reason == "" {
-			reason = "auto_closed_by_event"
-		}
+		reason := rel.reason()
 		// close_event_type records the events_catalog type that triggered the
 		// close. Every close here is event-driven (runCloses only runs from an
 		// event), so it is always set — for entity-wide "entity_closed" closes as
@@ -450,6 +468,26 @@ func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, 
 		for i := range targets {
 			t := targets[i]
 			if rel.keep != nil && !rel.keep(evt, cctx, taskTarget(t)) {
+				continue
+			}
+			// The task's own run caused this event: hold the close until the
+			// run ends rather than stop the run that did the work.
+			runID, err := r.causingRun(ctx, orgID, evt, entityID, rel, t.ID)
+			if err != nil {
+				routerLog.Error("close: run-cause match failed", "task_id", t.ID, "on_event", evt.EventType, "error", err)
+				errs = append(errs, fmt.Errorf("match task %s's run: %w", t.ID, err))
+				continue
+			}
+			if runID != "" {
+				deferred, err := r.tasks.DeferCloseSystem(ctx, orgID, t.ID, evt.ID, runID)
+				if err != nil {
+					routerLog.Error("close: failed to defer task close", "task_id", t.ID, "on_event", evt.EventType, "error", err)
+					errs = append(errs, fmt.Errorf("defer close of task %s: %w", t.ID, err))
+					continue
+				}
+				if deferred != nil {
+					routerLog.InfoContext(ctx, "deferred task close until its run ends", "task_id", t.ID, "on_event", evt.EventType, "blueprint_run_id", runID)
+				}
 				continue
 			}
 			if err := r.closeTaskWithAudit(ctx, orgID, t.ID, evt.ID, reason, evt.EventType); err != nil {
@@ -494,11 +532,16 @@ func (r *Router) runTerminatingClose(ctx context.Context, orgID string, evt doma
 	ctx, span := tracer.Start(ctx, "route.close", trace.WithAttributes(telemetry.EntityID(entityID)))
 	defer span.End()
 
-	reason := rel.closeReason
-	if reason == "" {
-		reason = "auto_closed_by_event"
+	reason := rel.reason()
+	// The tasks whose own run caused this event stay open with the close
+	// held, stamped in the same transaction that closes the rest.
+	deferTo, err := r.terminatingDeferrals(ctx, orgID, evt, entityID, rel)
+	if err != nil {
+		span.SetStatus(codes.Error, "terminating close")
+		routerLog.ErrorContext(ctx, "terminating close: run-cause match failed", "entity_id", entityID, "on_event", evt.EventType, "error", err)
+		return false, err
 	}
-	res, err := r.entities.CloseTerminalSystem(ctx, orgID, entityID, judgedAt, rel.closes, reason, evt.EventType, evt.ID)
+	res, err := r.entities.CloseTerminalSystem(ctx, orgID, entityID, judgedAt, rel.closes, reason, evt.EventType, evt.ID, deferTo)
 	if err != nil {
 		span.SetStatus(codes.Error, "terminating close")
 		routerLog.ErrorContext(ctx, "terminating close failed", "entity_id", entityID, "on_event", evt.EventType, "error", err)
@@ -510,6 +553,9 @@ func (r *Router) runTerminatingClose(ctx context.Context, orgID string, evt doma
 		routerLog.WarnContext(ctx, "terminating close declined: entity is no longer at the version the event was judged at",
 			"entity_id", entityID, "on_event", evt.EventType)
 		return false, nil
+	}
+	for _, taskID := range res.DeferredTaskIDs {
+		routerLog.InfoContext(ctx, "deferred task close until its run ends", "task_id", taskID, "on_event", evt.EventType, "blueprint_run_id", deferTo[taskID])
 	}
 	notify.ResolveEvents(ctx, orgID, entityID, r.openEventNotifications(ctx, orgID, entityID, rel.closes))
 	for _, taskID := range res.ClosedTaskIDs {

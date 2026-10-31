@@ -943,6 +943,20 @@ func (s *blueprintStore) IsNewestRunForTask(ctx context.Context, orgID, taskID, 
 func (s *blueprintStore) IsNewestRunForTaskSystem(ctx context.Context, orgID, taskID, blueprintRunID string) (bool, error) {
 	return s.IsNewestRunForTask(ctx, orgID, taskID, blueprintRunID)
 }
+func (s *blueprintStore) RunningRunForTaskSystem(ctx context.Context, orgID, taskID string) (*domain.BlueprintRun, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	br, err := scanBlueprintRunSQLite(s.q.QueryRowContext(ctx, blueprintRunSelect+` WHERE task_id = ? AND status = 'running'`, taskID).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &br, nil
+}
+
 func (s *blueprintStore) GetRun(ctx context.Context, orgID, id string) (*domain.BlueprintRun, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
