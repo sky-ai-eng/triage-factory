@@ -426,7 +426,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	branchTemplate := s.resolveBranchTemplate(context.WithoutCancel(ctx), task)
 	runURL := s.runURLFor(orgID, conversationID)
 	publishedRunURL := s.publishedRunURLFor(orgID, conversationID)
-	deliverables := s.taskArtifacts(context.WithoutCancel(ctx), orgID, task.ID)
+	artifacts, deliverables := s.taskArtifacts(context.WithoutCancel(ctx), orgID, task.ID)
 
 	// The two channels this launch composes, split by who authored what. TF's
 	// own words — the framework blocks, the mission, this run's facts, the verb
@@ -440,7 +440,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		cfg.appendSysPrompt,
 	)
 	systemPrompt := sdkSystemPrompt(systemBlock, agentBin)
-	taskContext := BuildTaskContext(task, cfg.container(), metadataJSON, cfg.prSkeleton, deliverables)
+	taskContext := BuildTaskContext(task, cfg.container(), metadataJSON, cfg.prSkeleton, artifacts, deliverables)
 
 	// The task context's retention, on the same terms as the native path: the
 	// row carrying these bytes is compacted like any other, and this file is the

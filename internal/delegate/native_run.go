@@ -443,7 +443,7 @@ type nativeLaunchText struct {
 // event fields rather than refusing the launch.
 func (s *Spawner) buildNativeLaunchText(ctx context.Context, task domain.Task, mission string, cfg runConfig, knowledge, replayed string) nativeLaunchText {
 	metadataJSON := s.taskEventMetadata(context.WithoutCancel(ctx), cfg.orgID, task)
-	deliverables := s.taskArtifacts(context.WithoutCancel(ctx), cfg.orgID, task.ID)
+	artifacts, deliverables := s.taskArtifacts(context.WithoutCancel(ctx), cfg.orgID, task.ID)
 
 	systemBlock := replayed
 	if systemBlock == "" {
@@ -476,7 +476,7 @@ func (s *Spawner) buildNativeLaunchText(ctx context.Context, task domain.Task, m
 		// subjects, issue bodies — which is why it carries untrusted markers,
 		// and text sitting inside the agent's own instructions reads as
 		// instruction however it is marked.
-		taskContext: BuildTaskContext(task, cfg.container(), metadataJSON, cfg.prSkeleton, deliverables),
+		taskContext: BuildTaskContext(task, cfg.container(), metadataJSON, cfg.prSkeleton, artifacts, deliverables),
 	}
 }
 
@@ -648,8 +648,13 @@ const artifactNudgeNote = artifactNudgeTag + "\n" +
 	"</system-note>"
 
 // artifactContractNudge builds the would-stop hook: a run whose task expects
-// an external artifact, that is about to conclude having recorded none, is
+// an external artifact, that is about to conclude having produced none, is
 // asked whether it meant to.
+//
+// "Produced" is an artifact (an object the run's agent changed, read from the
+// ledger) or a deliverable the conversation owns. The deliverable half is for a
+// staged review: it is the run's output, and it has no artifact until a person
+// approves it and it is posted.
 //
 // "Expects an artifact" is deliberately narrow — the terminal step of a run
 // against a GitHub, Jira or Linear entity, the shape whose whole point is to
@@ -666,18 +671,26 @@ const artifactNudgeNote = artifactNudgeTag + "\n" +
 // crash's successor.
 func (s *Spawner) artifactContractNudge(orgID, conversationID string, task domain.Task, cfg runConfig) func(context.Context, int, string) string {
 	expects := cfg.appendSysPrompt == "" && (task.EntitySource == "github" || task.EntitySource == "jira" || task.EntitySource == "linear")
-	if !expects || s.deliverables == nil {
+	if !expects || s.artifacts == nil || s.deliverables == nil {
 		return nil
 	}
 	return func(ctx context.Context, _ int, _ string) string {
-		arts, err := s.deliverables.ListByConversationSystem(ctx, orgID, conversationID)
+		// Fail quiet on every read: a read failure must not manufacture a
+		// nudge that sends a finished run back to work on a false premise.
+		changed, err := s.artifacts.ExistsForConversationSystem(ctx, orgID, conversationID)
 		if err != nil {
-			// Fail quiet: a read failure must not manufacture a nudge that
-			// sends a finished run back to work on a false premise.
+			delegateLog.Warn("read artifacts for the turn-end contract check failed; not nudging", "conversation", conversationID, "error", err)
+			return ""
+		}
+		if changed {
+			return ""
+		}
+		deliverables, err := s.deliverables.ListByConversationSystem(ctx, orgID, conversationID)
+		if err != nil {
 			delegateLog.Warn("read deliverables for the turn-end contract check failed; not nudging", "conversation", conversationID, "error", err)
 			return ""
 		}
-		if len(arts) > 0 {
+		if len(deliverables) > 0 {
 			return ""
 		}
 		rows, err := s.conversations.ListForAssemblySystem(ctx, orgID, conversationID)

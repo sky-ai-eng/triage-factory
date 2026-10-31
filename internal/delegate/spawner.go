@@ -108,6 +108,10 @@ type Spawner struct {
 	conversations                           db.ConversationStore // run lifecycle + transcript
 	entities                                db.EntityStore       // entity reads for project lookup + resume context
 	deliverables                            db.DeliverableStore  // review + draft-PR deliverable lookup on processCompletion park check
+	// artifacts reads the objects a conversation's agent changed, from the
+	// ledger: the turn-end nudge and the task context read it. Admin-pool
+	// System methods only.
+	artifacts db.ArtifactStore
 	// stagedInjections is the durable, producer-agnostic "stage for next
 	// resume" agent-injection queue. The generic staged-injection API
 	// (stageOrDeliverInjection / stagedInjectionsForResume) appends here
@@ -648,6 +652,7 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		tasks:                 stores.Tasks,
 		entities:              stores.Entities,
 		deliverables:          stores.Deliverables,
+		artifacts:             stores.Artifacts,
 		stagedInjections:      stores.StagedInjections,
 		events:                stores.Events,
 		taskMemory:            stores.TaskMemory,
