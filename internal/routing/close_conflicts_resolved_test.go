@@ -3,11 +3,9 @@ package routing
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"slices"
 	"testing"
 
-	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -23,7 +21,7 @@ func seedConflictsTaskOnEntity(t *testing.T, r *Router, database *sql.DB, source
 	t.Helper()
 	seedMatchAllRule(t, database, runmode.LocalDefaultTeamID, domain.EventGitHubPRConflicts)
 	entityID = newEntity(t, database, sourceID)
-	enqueueMergeableEvent(t, database, entityID, domain.EventGitHubPRConflicts, events.GitHubPRConflictsMetadata{
+	enqueueRoutedEvent(t, database, entityID, domain.EventGitHubPRConflicts, "", events.GitHubPRConflictsMetadata{
 		Author: "aidan", Repo: "owner/repo", PRNumber: 1, HeadSHA: "before",
 	})
 	if err := r.drainEventQueue(context.Background()); err != nil {
@@ -36,42 +34,13 @@ func seedConflictsTaskOnEntity(t *testing.T, r *Router, database *sql.DB, source
 	return entityID, live[0].ID
 }
 
-func enqueueMergeableEvent(t *testing.T, database *sql.DB, entityID, eventType string, metadata any) {
-	t.Helper()
-	eid := entityID
-	meta, _ := json.Marshal(metadata)
-	if _, err := sqlitestore.New(database).EventQueue.Enqueue(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
-		OrgID:        runmode.LocalDefaultOrgID,
-		EntityID:     &eid,
-		EventType:    eventType,
-		MetadataJSON: string(meta),
-	}, ""); err != nil {
-		t.Fatalf("enqueue %s: %v", eventType, err)
-	}
-}
-
 // enqueueConflictsResolved durably enqueues a conflicts_resolved event
 // observed at headSHA.
 func enqueueConflictsResolved(t *testing.T, database *sql.DB, entityID, headSHA string) {
 	t.Helper()
-	enqueueMergeableEvent(t, database, entityID, domain.EventGitHubPRConflictsResolved, events.GitHubPRConflictsResolvedMetadata{
+	enqueueRoutedEvent(t, database, entityID, domain.EventGitHubPRConflictsResolved, "", events.GitHubPRConflictsResolvedMetadata{
 		Author: "aidan", Repo: "owner/repo", PRNumber: 1, HeadSHA: headSHA,
 	})
-}
-
-// seedPRMergeable writes a PR snapshot whose mergeable is the given value,
-// standing in for the tracker's post-refresh commit.
-func seedPRMergeable(t *testing.T, database *sql.DB, entityID, mergeable string) {
-	t.Helper()
-	snap, _ := json.Marshal(domain.PRSnapshot{Mergeable: mergeable})
-	entities := sqlitestore.New(database).Entities
-	ent, err := entities.Get(t.Context(), runmode.LocalDefaultOrgID, entityID)
-	if err != nil || ent == nil {
-		t.Fatalf("read entity %s: ent=%v err=%v", entityID, ent, err)
-	}
-	if ok, err := entities.UpdateSnapshotCASSystem(t.Context(), runmode.LocalDefaultOrgID, entityID, string(snap), ent.PollSeq); err != nil || !ok {
-		t.Fatalf("seed snapshot: ok=%v err=%v", ok, err)
-	}
 }
 
 func TestCloseConflictsResolved_ClosesTheConflictsTask(t *testing.T) {
@@ -79,7 +48,7 @@ func TestCloseConflictsResolved_ClosesTheConflictsTask(t *testing.T) {
 	r := newQueueWorkerRouter(t, database)
 	entityID, taskID := seedConflictsTaskOnEntity(t, r, database, "owner/repo#resolved")
 
-	seedPRMergeable(t, database, entityID, "MERGEABLE")
+	seedPRSnapshot(t, database, entityID, domain.PRSnapshot{Mergeable: "MERGEABLE"})
 	enqueueConflictsResolved(t, database, entityID, "after")
 	if err := r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("drain the resolution: %v", err)
@@ -95,7 +64,7 @@ func TestCloseConflictsResolved_ConflictingAgainClosesNothing(t *testing.T) {
 	r := newQueueWorkerRouter(t, database)
 	entityID, taskID := seedConflictsTaskOnEntity(t, r, database, "owner/repo#conflicting-again")
 
-	seedPRMergeable(t, database, entityID, "CONFLICTING")
+	seedPRSnapshot(t, database, entityID, domain.PRSnapshot{Mergeable: "CONFLICTING"})
 	enqueueConflictsResolved(t, database, entityID, "after")
 	if err := r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("drain the resolution: %v", err)
@@ -115,7 +84,7 @@ func TestCloseConflictsResolved_RunsOwnPushDefersTheClose(t *testing.T) {
 	runID, convID := seedRunOnTask(t, database, taskID, "running", "")
 	recordAgentPush(t, database, convID, pushedSHA)
 
-	seedPRMergeable(t, database, entityID, "MERGEABLE")
+	seedPRSnapshot(t, database, entityID, domain.PRSnapshot{Mergeable: "MERGEABLE"})
 	enqueueConflictsResolved(t, database, entityID, pushedSHA)
 	if err := r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("drain the resolution: %v", err)
