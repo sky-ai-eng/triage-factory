@@ -10,6 +10,8 @@ import (
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -421,6 +423,7 @@ func TestAuthorCentric_TwoTeams_FiresDeterministically(t *testing.T) {
 	entityID := reviewEntity(t, database, "owner/repo#fires")
 	stub := &stubDelegator{db: database}
 	router := firingRouter(database, stub)
+	rec := notifytest.Record(t)
 
 	emitCI(router, entityID, "aidan")
 
@@ -443,6 +446,109 @@ func TestAuthorCentric_TwoTeams_FiresDeterministically(t *testing.T) {
 	// Still visible to both teams — the loser keeps its queue visibility.
 	if vis := visTeamsOf(t, database, active[0].ID); len(vis) != 2 {
 		t.Errorf("visibility = %v, want both teams", vis)
+	}
+	// The losing team's admins are told, linked to its own trigger.
+	loser, loserTrigger := teamB, "trig-ci-b"
+	if want == teamB {
+		loser, loserTrigger = teamA, "trig-ci-a"
+	}
+	c := onlyConflict(t, rec, active[0].ID)
+	if c.Winner.TeamID != want || c.Winner.Name == "" || c.Subject != "owner/repo#fires" || c.EventType != domain.EventGitHubPRCICheckFailed {
+		t.Errorf("conflict = %+v; want the winner %s named, on owner/repo#fires", c, want)
+	}
+	if len(c.Losers) != 1 || c.Losers[0] != (kinds.ConflictLoser{TeamID: loser, TriggerID: loserTrigger}) {
+		t.Errorf("losers = %+v; want only %s with its trigger %s", c.Losers, loser, loserTrigger)
+	}
+}
+
+// onlyConflict returns the one automation-conflict notice open in the local
+// org, failing t unless it is keyed on taskID.
+func onlyConflict(t *testing.T, rec *notifytest.Recorder, taskID string) kinds.Conflict {
+	t.Helper()
+	open := rec.Open(runmode.LocalDefaultOrgID, kinds.AutomationConflict)
+	if len(open) != 1 || open[0].Key != taskID {
+		t.Fatalf("automation conflicts open = %+v; want one keyed on task %s", open, taskID)
+	}
+	return open[0].Params.(kinds.Conflict)
+}
+
+// TestAuthorCentric_TwoTeams_LoserWithoutAnImmediateTrigger pins which teams
+// lose, the author being on two teams that each have a trigger. A team with
+// auto-delegation or its bot off lost nothing: its trigger could not have run
+// either. A team whose trigger is deferred lost, ranked before the winner or
+// after it, because the winner's claim keeps the post-scoring pass from ever
+// evaluating it.
+func TestAuthorCentric_TwoTeams_LoserWithoutAnImmediateTrigger(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		// sideline changes one team so that it fires nothing now.
+		sideline func(t *testing.T, database *sql.DB, team, trigger string)
+		// first sidelines the team ranked first rather than second, so the
+		// other one wins.
+		first bool
+		loses bool
+	}{
+		{"auto-delegation off", func(t *testing.T, database *sql.DB, team, _ string) {
+			if _, err := database.Exec(`UPDATE team_settings SET auto_delegate_enabled = 0 WHERE team_id = ?`, team); err != nil {
+				t.Fatalf("turn auto-delegation off: %v", err)
+			}
+		}, false, false},
+		{"bot off", func(t *testing.T, database *sql.DB, team, _ string) {
+			if _, err := database.Exec(`UPDATE team_agents SET enabled = 0 WHERE team_id = ?`, team); err != nil {
+				t.Fatalf("turn the bot off: %v", err)
+			}
+		}, false, false},
+		{"deferred trigger", deferTriggerFor, false, true},
+		{"deferred trigger ranked first", deferTriggerFor, true, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			database := newTestDB(t)
+			seedHandlerFKTargets(t, database)
+			setReviewHost(t, database)
+
+			teamA := seedTeam(t, database, "team-a")
+			teamB := seedTeam(t, database, "team-b")
+			seedUserOnTeam(t, database, teamA, "aidan")
+			seedUserOnTeam(t, database, teamB, "aidan")
+			enableTeamAutoDelegate(t, database, teamA, teamB)
+			seedImmediateTrigger(t, database, teamA, domain.EventGitHubPRCICheckFailed, "ci-a")
+			seedImmediateTrigger(t, database, teamB, domain.EventGitHubPRCICheckFailed, "ci-b")
+			// Equal priority, so the team with the lower id ranks first.
+			loser, loserTrigger, winner := teamB, "trig-ci-b", teamA
+			if (minStr(teamA, teamB) == teamB) != c.first {
+				loser, loserTrigger, winner = teamA, "trig-ci-a", teamB
+			}
+			c.sideline(t, database, loser, loserTrigger)
+
+			entityID := reviewEntity(t, database, "owner/repo#sidelined")
+			stub := &stubDelegator{db: database}
+			router := firingRouter(database, stub)
+			rec := notifytest.Record(t)
+			emitCI(router, entityID, "aidan")
+
+			if stub.calls != 1 {
+				t.Fatalf("expected exactly 1 fire, got %d", stub.calls)
+			}
+			if !c.loses {
+				rec.Inactive(t, runmode.LocalDefaultOrgID, kinds.AutomationConflict)
+				return
+			}
+			active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
+			if err != nil || len(active) != 1 {
+				t.Fatalf("expected 1 task, got %d (err=%v)", len(active), err)
+			}
+			got := onlyConflict(t, rec, active[0].ID)
+			if got.Winner.TeamID != winner || len(got.Losers) != 1 || got.Losers[0] != (kinds.ConflictLoser{TeamID: loser, TriggerID: loserTrigger}) {
+				t.Errorf("conflict = %+v; want %s's win, with %s linked to its deferred trigger %s", got, winner, loser, loserTrigger)
+			}
+		})
+	}
+}
+
+func deferTriggerFor(t *testing.T, database *sql.DB, _, trigger string) {
+	t.Helper()
+	if _, err := database.Exec(`UPDATE event_handlers SET min_autonomy_suitability = 0.5 WHERE id = ?`, trigger); err != nil {
+		t.Fatalf("defer trigger: %v", err)
 	}
 }
 
@@ -471,6 +577,7 @@ func TestAuthorCentric_ConsolidatedOwnerAnchorsNextEvent(t *testing.T) {
 	entityID := reviewEntity(t, database, "owner/repo#anchorfire")
 	stub := &stubDelegator{db: database}
 	router := firingRouter(database, stub)
+	rec := notifytest.Record(t)
 
 	// First CI failure: ambiguous owner → deterministic team fires and
 	// consolidates ownership onto itself.
@@ -499,6 +606,12 @@ func TestAuthorCentric_ConsolidatedOwnerAnchorsNextEvent(t *testing.T) {
 	}
 	if teamIDValue(&conflicts[0]) != winner {
 		t.Errorf("conflicts owner = %q, want the consolidated team %q (tier-2 anchor)", teamIDValue(&conflicts[0]), winner)
+	}
+	// The conflict was decided once, by the first event; the anchored one
+	// has a single candidate and posts nothing more.
+	onlyConflict(t, rec, ci[0].ID)
+	if open := rec.Open(runmode.LocalDefaultOrgID, kinds.AutomationConflict); open[0].Seen != 1 {
+		t.Errorf("the conflict was posted %d times; want once", open[0].Seen)
 	}
 }
 
@@ -752,6 +865,7 @@ func TestAuthorCentric_TwoTeams_WatcherDoesNotStealOwnership(t *testing.T) {
 	entityID := reviewEntity(t, database, "owner/repo#nosteal")
 	stub := &stubDelegator{db: database}
 	router := firingRouter(database, stub)
+	rec := notifytest.Record(t)
 	emitCI(router, entityID, "aidan")
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
@@ -773,6 +887,15 @@ func TestAuthorCentric_TwoTeams_WatcherDoesNotStealOwnership(t *testing.T) {
 	// C still sees the card (visibility), it just can't fire on it.
 	if vis := visTeamsOf(t, database, active[0].ID); len(vis) != 3 {
 		t.Errorf("visibility = %v, want all three teams (A, B, watcher C)", vis)
+	}
+	// Only the author's other team lost a conflict: the watcher was never a
+	// candidate, so it is not told.
+	loser := teamB
+	if owner == teamB {
+		loser = teamA
+	}
+	if c := onlyConflict(t, rec, active[0].ID); len(c.Losers) != 1 || c.Losers[0].TeamID != loser {
+		t.Errorf("losers = %+v; want only the author's other team %s", c.Losers, loser)
 	}
 }
 

@@ -1,4 +1,4 @@
-import { useState, useCallback, type ReactNode } from 'react'
+import { useState, useCallback, useEffect, useRef, type ReactNode } from 'react'
 import { AnimatePresence } from 'motion/react'
 import PromptDrawer from './PromptDrawer'
 import BindingGraph from './BindingGraph'
@@ -7,8 +7,10 @@ import TaskRuleEditor from './TaskRuleEditor'
 import TriggerConfigPanel from './TriggerConfigPanel'
 import ViewOnlyBadge from './ViewOnlyBadge'
 import { useTeamRole } from '../hooks/useTeamRole'
-import type { TriggerHandler, RuleHandler } from '../types'
-import { apiListAll } from '../lib/apiClient'
+import { toast } from './Toast/toastStore'
+import type { EventHandler, TriggerHandler, RuleHandler } from '../types'
+import { apiJSON, apiListAll, httpErrorMessage } from '../lib/apiClient'
+import { handlersBase } from '../lib/scope'
 
 // PromptsWorkspace is the single-team prompt/auto-delegation editor: the
 // BindingGraph canvas plus the drawers that create/edit prompts, triggers, and
@@ -30,6 +32,12 @@ interface PromptsWorkspaceProps {
   // tab leaves them out (the page header owns both).
   toolbarLeft?: ReactNode
   toolbarRight?: ReactNode
+  // openTriggerId opens that trigger's config panel, as a link to it asks.
+  // onTriggerOpened is called once the trigger has been read, with its team,
+  // or null when there is no trigger to open, so the caller can switch to the
+  // team and drop the link.
+  openTriggerId?: string | null
+  onTriggerOpened?: (triggerTeam: string | null) => void
 }
 
 export default function PromptsWorkspace({
@@ -37,6 +45,8 @@ export default function PromptsWorkspace({
   ready,
   toolbarLeft,
   toolbarRight,
+  openTriggerId,
+  onTriggerOpened,
 }: PromptsWorkspaceProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [isNew, setIsNew] = useState(false)
@@ -54,11 +64,50 @@ export default function PromptsWorkspace({
   // Prompt" default) avoids flashing a write affordance at a viewer for the
   // cold-load window before it flips to the badge. The drawers read `readOnly`
   // directly — they only open on a canvas click, by which point roles are loaded.
-  const { isViewer, loaded: rolesLoaded } = useTeamRole()
+  const { isViewer, roleForTeam, loaded: rolesLoaded } = useTeamRole()
   const readOnly = isViewer(teamId)
 
-  // Trigger config panel state.
+  // Trigger config panel state. foreignTrigger is a linked trigger of a team
+  // the viewer is not on: the page cannot switch to that team, so the panel
+  // opens it read-only rather than by the active team's role.
   const [editingTrigger, setEditingTrigger] = useState<TriggerHandler | null>(null)
+  const [foreignTrigger, setForeignTrigger] = useState(false)
+  const openTrigger = useCallback((t: TriggerHandler | null, foreign = false) => {
+    setEditingTrigger(t)
+    setForeignTrigger(foreign)
+  }, [])
+
+  // The read runs once per linked id: the callbacks it ends with are read
+  // through refs, so a new identity for either neither refetches nor reports
+  // the trigger twice.
+  const linkRef = useRef({ onTriggerOpened, roleForTeam })
+  useEffect(() => {
+    linkRef.current = { onTriggerOpened, roleForTeam }
+  })
+  useEffect(() => {
+    if (!openTriggerId) return
+    let cancelled = false
+    apiJSON<EventHandler>(`${handlersBase()}/${encodeURIComponent(openTriggerId)}`)
+      .then((h) => {
+        if (cancelled) return
+        const { onTriggerOpened, roleForTeam } = linkRef.current
+        if (h.kind !== 'trigger') {
+          toast.error('That link is to a task rule, not a trigger.')
+          onTriggerOpened?.(null)
+          return
+        }
+        openTrigger(h, roleForTeam(h.team_id) === null)
+        onTriggerOpened?.(h.team_id)
+      })
+      .catch((err) => {
+        if (cancelled) return
+        toast.error(httpErrorMessage(err, 'Could not open the linked trigger.'))
+        linkRef.current.onTriggerOpened?.(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [openTriggerId, openTrigger])
 
   // Forgiving banner state.
   const [bannerEventType, setBannerEventType] = useState<string | null>(null)
@@ -158,7 +207,7 @@ export default function PromptsWorkspace({
           scope={{ teamId }}
           scopeReady={ready}
           onPromptClick={openEdit}
-          onTriggerClick={setEditingTrigger}
+          onTriggerClick={openTrigger}
           onTriggerDeleted={handleTriggerDeleted}
         />
       </div>
@@ -190,15 +239,15 @@ export default function PromptsWorkspace({
       <TriggerConfigPanel
         open={editingTrigger !== null}
         trigger={editingTrigger}
-        readOnly={readOnly}
-        onClose={() => setEditingTrigger(null)}
+        readOnly={readOnly || foreignTrigger}
+        onClose={() => openTrigger(null)}
         onSaved={() => {
-          setEditingTrigger(null)
+          openTrigger(null)
           setGraphKey((k) => k + 1)
         }}
         onDeleted={() => {
           const eventType = editingTrigger?.event_type
-          setEditingTrigger(null)
+          openTrigger(null)
           setGraphKey((k) => k + 1)
           if (eventType) handleTriggerDeleted(eventType)
         }}

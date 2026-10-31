@@ -25,6 +25,11 @@ type routes struct{}
 // mode, which has no /org page, on /settings.
 func (routes) OrgSettings() Href { return Href{route: orgSettingsRoute} }
 
+// Trigger is a trigger, open in the prompts editor of the team that owns it.
+func (routes) Trigger(triggerID string) Href {
+	return Href{route: promptsRoute, query: url.Values{"trigger": {triggerID}}}
+}
+
 // TeamJiraRules is the Jira status rules of the team teamID names: in multi
 // mode its team page, opened on the Jira source; in local mode, whose one team
 // is configured on /settings, that page. teamID may be empty only in local
@@ -58,6 +63,7 @@ type route struct {
 
 var (
 	orgSettingsRoute     = newRoute("org_settings", "/org?tab=settings", "/settings")
+	promptsRoute         = newRoute("prompts", "/prompts", "/prompts")
 	teamJiraRulesRoute   = newTeamRoute("team_jira_rules", "/team?source=jira", "/settings")
 	teamLinearRulesRoute = newTeamRoute("team_linear_rules", "/team?source=linear", "/settings")
 )
@@ -99,7 +105,10 @@ func SPARoutes() []SPARoute {
 type Href struct {
 	route *route
 	// teamID is the team a team route's page is about.
-	teamID   string
+	teamID string
+	// query is what a Routes builder names on its page; every value is
+	// required, so one the params left empty refuses the write.
+	query    url.Values
 	external string
 }
 
@@ -126,24 +135,35 @@ func (h Href) id() string {
 func (h Href) render(orgID string, local bool, checkHost func(*url.URL) error) (string, error) {
 	switch {
 	case h.route != nil:
-		if !local {
-			href := "/orgs/" + url.PathEscape(orgID) + h.route.multi
-			if h.route.team {
-				if h.teamID == "" {
-					return "", fmt.Errorf("route %s names no team", h.route.name)
-				}
-				sep := "?"
-				if strings.Contains(href, "?") {
-					sep = "&"
-				}
-				href += sep + "team=" + url.QueryEscape(h.teamID)
+		page := "/orgs/" + url.PathEscape(orgID) + h.route.multi
+		if local {
+			if h.route.local == "" {
+				return "", fmt.Errorf("route %s has no page in local mode", h.route.name)
 			}
-			return href, nil
+			page = h.route.local
+		} else if h.route.team {
+			if h.teamID == "" {
+				return "", fmt.Errorf("route %s names no team", h.route.name)
+			}
+			sep := "?"
+			if strings.Contains(page, "?") {
+				sep = "&"
+			}
+			page += sep + "team=" + url.QueryEscape(h.teamID)
 		}
-		if h.route.local == "" {
-			return "", fmt.Errorf("route %s has no page in local mode", h.route.name)
+		if len(h.query) == 0 {
+			return page, nil
 		}
-		return h.route.local, nil
+		for name, values := range h.query {
+			if slices.Contains(values, "") {
+				return "", fmt.Errorf("route %s: query %s is empty", h.route.name, name)
+			}
+		}
+		sep := "?"
+		if strings.Contains(page, "?") {
+			sep = "&"
+		}
+		return page + sep + h.query.Encode(), nil
 	case h.external != "":
 		u, err := url.Parse(h.external)
 		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil {

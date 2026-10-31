@@ -137,6 +137,11 @@ func (r *Router) evaluateReDerive(ctx context.Context, orgID, taskID string) (re
 	// team, and a NULL owner fires nothing. Other event types keep the
 	// visibility-set gate so a matched team's deferred trigger fires against
 	// the shared task.
+	//
+	// TODO(TFAC-1270): this loop diverges from fireMatchedTriggers' ranked
+	// walk — a NULL-owned author-centric task never fires, a watcher can win a
+	// member-owned task, the order follows trigger created_at — and a conflict
+	// it decides posts no kinds.AutomationConflict notice.
 	authorCentric := isAuthorCentricGitHubEvent(task.EventType)
 
 	for _, trigger := range handlers {

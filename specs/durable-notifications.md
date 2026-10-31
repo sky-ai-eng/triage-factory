@@ -156,7 +156,7 @@ var LinearTeamUnreadable = notify.Condition(notify.ConditionSpec[LinearTeam]{
 
 **Where kinds live.** `internal/notify/kinds`, one file per source, so every audience and every line of copy is reviewed in one place. `kinds` imports `notify` and `domain`, never a producer package. `ee/` defines its kinds in its own packages with the same constructors; core never imports them.
 
-**Audience constructors** (V1): `OrgMembers()`, `OrgAdmins()`, `TeamMembers(fn)`, `TeamAdmins(fn)`, `User(fn)`, `TeamsTrackingLinearTeam(fn, role)`, `TeamsArmingJiraProject(fn, role)`, combined with `Audiences(...)`. These resolvers read the tracked sets (for Jira, the rules that arm a project) through stores handed to `notify.Install`, skip archived teams, and are re-run on every write. A resolution failure skips the write (logged, counted) and never falls back to a wider audience; `Set` and `Sync` retry it on the next evaluation.
+**Audience constructors** (V1): `OrgMembers()`, `OrgAdmins()`, `TeamMembers(fn)`, `TeamAdmins(fn)`, `Teams(fn, role)` (every team a list in the params names, one audience per team), `User(fn)`, `TeamsTrackingLinearTeam(fn, role)`, `TeamsArmingJiraProject(fn, role)`, combined with `Audiences(...)`. The tracking resolvers read the tracked sets (for Jira, the rules that arm a project) through stores handed to `notify.Install`, skip archived teams, and are re-run on every write. A resolution failure skips the write (logged, counted) and never falls back to a wider audience; `Set` and `Sync` retry it on the next evaluation.
 
 ### What `notify` does so a call site does not
 

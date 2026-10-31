@@ -81,6 +81,36 @@ func teamAudience[P any](teamID func(P) string, role Role) Audience {
 	}}}
 }
 
+// Teams is the members or admins of each team teamIDs names, one audience per
+// team.
+func Teams[P any](teamIDs func(P) []string, role Role) Audience {
+	if teamIDs == nil {
+		panic("notify: Teams needs a team ids function")
+	}
+	if role != Members && role != Admins {
+		panic(fmt.Sprintf("notify: Teams role %q is not %q or %q", role, Members, Admins))
+	}
+	to := func(p any) []Recipient {
+		var out []Recipient
+		for _, id := range teamIDs(p.(P)) {
+			out = appendNew(out, Recipient{Scope: domain.NotificationScopeTeam, Role: role, TeamID: id})
+		}
+		return out
+	}
+	return Audience{parts: []audiencePart{{
+		name:  "teams " + string(role),
+		param: reflect.TypeFor[P](),
+		resolve: func(_ context.Context, _ *resolution, p any) ([]Recipient, error) {
+			rs := to(p)
+			if len(rs) == 0 || slices.ContainsFunc(rs, func(r Recipient) bool { return r.TeamID == "" }) {
+				return nil, errors.New("teams audience: the params name no team, or an empty one")
+			}
+			return rs, nil
+		},
+		examples: to,
+	}}}
+}
+
 // User is the one user userID names.
 func User[P any](userID func(P) string) Audience {
 	if userID == nil {
