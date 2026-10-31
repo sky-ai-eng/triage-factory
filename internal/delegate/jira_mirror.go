@@ -58,6 +58,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 )
 
 // jiraMirrorTimeout bounds one mirror operation (resolve + GetClaimState +
@@ -162,11 +163,11 @@ func (s *Spawner) mirrorJiraInProgress(orgID string, task *domain.Task) {
 // The whole sequence is bounded by jiraMirrorTimeout so a slow ticket releases
 // the lock rather than pinning it.
 //
-// TODO(TFAC-878): every failure below is a log line and a return. A canonical
-// status that is no longer a reachable transition — retired from the project's
-// workflow — makes the mirror a no-op on every board move, so Jira silently
-// stops tracking the board and nothing tells the team. Needs the durable
-// notification channel.
+// Every failure below is a log line and a return. The in-progress move also
+// tells the team's admins when Jira offers no transition into the canonical
+// (kinds.JiraMirrorFailing), and resolves that once a move lands; any other
+// failure leaves the condition as it was. The condition is about the
+// in-progress canonical, so the done mode neither raises nor resolves it.
 func (s *Spawner) runJiraMirror(orgID, entityID, issueKey, teamID string, rule domain.JiraProjectStatusRules, done bool) {
 	resolver := s.getJiraResolver()
 	if resolver == nil {
@@ -274,8 +275,12 @@ func (s *Spawner) runJiraMirror(orgID, entityID, issueKey, teamID string, rule d
 	if !rule.InProgressContains(claimStatusRef(state)) {
 		if err := client.TransitionTo(ctx, issue, jira.Status{ID: rule.InProgressCanonical.ID, Name: rule.InProgressCanonical.Name}); err != nil {
 			jiraLog.Warn("mirror: transition to in-progress failed", "issue", issueKey, "target", rule.InProgressCanonical.Name, "error", err)
+			if errors.Is(err, jira.ErrNoTransition) {
+				kinds.JiraMirrorFailing.Set(ctx, orgID, kinds.JiraMirrorFor(rule, issueKey), true)
+			}
 			return
 		}
+		kinds.JiraMirrorFailing.Set(ctx, orgID, kinds.JiraMirrorFor(rule, issueKey), false)
 		s.recordMirrorAction(ctx, orgID, entityID, scope, issueKey, issueID, teamID, domain.ActionIssueTransitioned, state.StatusName, rule.InProgressCanonical.Name)
 	}
 }

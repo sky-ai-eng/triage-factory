@@ -25,16 +25,36 @@ type routes struct{}
 // mode, which has no /org page, on /settings.
 func (routes) OrgSettings() Href { return Href{route: orgSettingsRoute} }
 
+// TeamJiraRules is the Jira status rules of the team teamID names: in multi
+// mode its team page, opened on the Jira source; in local mode, whose one team
+// is configured on /settings, that page.
+func (routes) TeamJiraRules(teamID string) Href {
+	return Href{route: teamJiraRulesRoute, teamID: teamID}
+}
+
+// TeamLinearRules is the Linear rules of the team teamID names, on the same
+// pages as TeamJiraRules.
+func (routes) TeamLinearRules(teamID string) Href {
+	return Href{route: teamLinearRulesRoute, teamID: teamID}
+}
+
 // route is a page of the SPA. multi is its path under /orgs/{org_id}; local is
 // its path in local mode's route table, "" when local mode has no such page.
-// Either may end in the query that opens the right part of the page.
+// Either may end in the query that opens the right part of the page. A team
+// route is a page about one team: multi mode's address names it with a team
+// query parameter, and local mode's, with one team, names none.
 type route struct {
 	name  string
 	multi string
 	local string
+	team  bool
 }
 
-var orgSettingsRoute = newRoute("org_settings", "/org?tab=settings", "/settings")
+var (
+	orgSettingsRoute     = newRoute("org_settings", "/org?tab=settings", "/settings")
+	teamJiraRulesRoute   = newTeamRoute("team_jira_rules", "/team?source=jira", "/settings")
+	teamLinearRulesRoute = newTeamRoute("team_linear_rules", "/team?source=linear", "/settings")
+)
 
 // routeTable is every route Routes builds. Renaming a page is an edit here and
 // in frontend/src/main.tsx; TestNotifyRoutesAreSPARoutes fails until the two
@@ -46,6 +66,13 @@ var routeTable []*route
 func newRoute(name, multi, local string) *route {
 	r := &route{name: name, multi: multi, local: local}
 	routeTable = append(routeTable, r)
+	return r
+}
+
+// newTeamRoute declares a team route.
+func newTeamRoute(name, multi, local string) *route {
+	r := newRoute(name, multi, local)
+	r.team = true
 	return r
 }
 
@@ -64,7 +91,9 @@ func SPARoutes() []SPARoute {
 // Href is a Link's address: a page from Routes, or a page outside TF from
 // External. A write that renders the zero Href is refused.
 type Href struct {
-	route    *route
+	route *route
+	// teamID is the team a team route's page is about.
+	teamID   string
 	external string
 }
 
@@ -91,8 +120,19 @@ func (h Href) id() string {
 func (h Href) render(orgID string, local bool, checkHost func(*url.URL) error) (string, error) {
 	switch {
 	case h.route != nil:
+		if h.route.team && h.teamID == "" {
+			return "", fmt.Errorf("route %s names no team", h.route.name)
+		}
 		if !local {
-			return "/orgs/" + url.PathEscape(orgID) + h.route.multi, nil
+			href := "/orgs/" + url.PathEscape(orgID) + h.route.multi
+			if h.route.team {
+				sep := "?"
+				if strings.Contains(href, "?") {
+					sep = "&"
+				}
+				href += sep + "team=" + url.QueryEscape(h.teamID)
+			}
+			return href, nil
 		}
 		if h.route.local == "" {
 			return "", fmt.Errorf("route %s has no page in local mode", h.route.name)

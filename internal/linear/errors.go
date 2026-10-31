@@ -24,6 +24,11 @@ var (
 	// ErrNotFound is an id or identifier Linear resolves to nothing, which it
 	// also answers for an entity the credential may not see.
 	ErrNotFound = errors.New("linear: not found")
+
+	// ErrStateNotFound is Linear answering that a workflow state an id names
+	// does not exist, as it answers a move into a state deleted from its
+	// team's workflow. An error matching it also matches ErrNotFound.
+	ErrStateNotFound = errors.New("linear: workflow state not found")
 )
 
 // GraphQLError is the first entry of a response's errors list. Status is the
@@ -57,14 +62,17 @@ func (e *GraphQLError) Error() string {
 // UpstreamClass implements upstream.Classified.
 func (e *GraphQLError) UpstreamClass() upstream.Class { return e.class }
 
-// Is matches ErrUnauthorized for an auth-coded error and ErrNotFound for
-// Linear's entity-not-found.
+// Is matches ErrUnauthorized for an auth-coded error, ErrNotFound for
+// Linear's entity-not-found, and ErrStateNotFound for the entity-not-found
+// whose message names a workflow state.
 func (e *GraphQLError) Is(target error) bool {
 	switch target {
 	case ErrUnauthorized:
 		return e.class == upstream.Auth
 	case ErrNotFound:
 		return e.Code == codeEntityNotFound || strings.HasPrefix(e.Message, notFoundPrefix)
+	case ErrStateNotFound:
+		return strings.HasPrefix(e.Message, stateNotFoundPrefix)
 	}
 	return false
 }

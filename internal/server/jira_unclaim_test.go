@@ -47,6 +47,11 @@ type jiraIssueFake struct {
 	writes   []jiraWrite
 	issues   []string // what each /issue/ request named, id or key
 	requests int
+	// withdrawn is a status the workflow offers no transition into, as when
+	// it has left the project's workflow.
+	withdrawn string
+	// failTransition answers every transition write with a server error.
+	failTransition bool
 }
 
 func newJiraIssueFake(t *testing.T, statusID, assignee string) *jiraIssueFake {
@@ -101,12 +106,16 @@ func (f *jiraIssueFake) serve(w http.ResponseWriter, r *http.Request) {
 	case strings.HasSuffix(path, "/transitions") && r.Method == http.MethodGet:
 		var transitions []jira.Transition
 		for _, st := range jiraFixtureStatuses {
-			if st.ID != f.status.ID {
+			if st.ID != f.status.ID && st.ID != f.withdrawn {
 				transitions = append(transitions, jira.Transition{ID: "t-" + st.ID, Name: st.Name, To: jira.Status{ID: st.ID, Name: st.Name}})
 			}
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"transitions": transitions})
 	case strings.HasSuffix(path, "/transitions") && r.Method == http.MethodPost:
+		if f.failTransition {
+			http.Error(w, `{"errorMessages":["try again later"]}`, http.StatusInternalServerError)
+			return
+		}
 		raw, _ := io.ReadAll(r.Body)
 		var body struct {
 			Transition struct {

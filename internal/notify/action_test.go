@@ -95,6 +95,18 @@ func TestHref_Render(t *testing.T) {
 	if got, err := Routes.OrgSettings().render(org, true, none); err != nil || got != "/settings" {
 		t.Errorf("OrgSettings in local = %q, %v", got, err)
 	}
+	const team = "22222222-2222-4222-8222-222222222222"
+	if got, err := Routes.TeamJiraRules(team).render(org, false, none); err != nil || got != "/orgs/"+org+"/team?source=jira&team="+team {
+		t.Errorf("TeamJiraRules in multi = %q, %v", got, err)
+	}
+	if got, err := Routes.TeamLinearRules(team).render(org, true, none); err != nil || got != "/settings" {
+		t.Errorf("TeamLinearRules in local = %q, %v", got, err)
+	}
+	for _, local := range []bool{false, true} {
+		if _, err := Routes.TeamJiraRules("").render(org, local, none); err == nil || !strings.Contains(err.Error(), "names no team") {
+			t.Errorf("a team route with no team (local %v): err = %v; want it refused", local, err)
+		}
+	}
 	multiOnly := Href{route: &route{name: "multi_only", multi: "/org"}}
 	if _, err := multiOnly.render(org, true, none); err == nil || !strings.Contains(err.Error(), "no page in local mode") {
 		t.Errorf("a multi-only route in local: err = %v; want it refused", err)

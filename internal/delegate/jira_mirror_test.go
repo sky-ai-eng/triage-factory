@@ -46,6 +46,11 @@ type recordingJiraServer struct {
 	// exercise the mirror's read-failure and assign-failure paths.
 	failClaimState bool
 	failAssign     bool
+	// withdrawn drops the transition into In Progress from the workflow, as
+	// when the status has left the project's workflow; failTransition answers
+	// every transition write with a server error.
+	withdrawn      bool
+	failTransition bool
 
 	transitionPosted chan struct{}
 }
@@ -83,10 +88,23 @@ func (r *recordingJiraServer) handle(w http.ResponseWriter, req *http.Request) {
 		// The transition targets carry status ids, which is what the client
 		// matches a rule's canonical on — they are the same ids jiraRef mints,
 		// so the seeded rules and this workflow describe one instance.
-		_, _ = io.WriteString(w, `{"transitions":[`+
-			`{"id":"31","name":"Start","to":{"id":"st-In Progress","name":"In Progress"}},`+
+		r.mu.Lock()
+		withdrawn := r.withdrawn
+		r.mu.Unlock()
+		start := `{"id":"31","name":"Start","to":{"id":"st-In Progress","name":"In Progress"}},`
+		if withdrawn {
+			start = ""
+		}
+		_, _ = io.WriteString(w, `{"transitions":[`+start+
 			`{"id":"41","name":"Finish","to":{"id":"st-Done","name":"Done"}}]}`)
 	case req.Method == http.MethodPost && strings.HasSuffix(path, "/transitions"):
+		r.mu.Lock()
+		fail := r.failTransition
+		r.mu.Unlock()
+		if fail {
+			http.Error(w, `{"err":"transition failed"}`, http.StatusInternalServerError)
+			return
+		}
 		var body struct {
 			Transition struct {
 				ID string `json:"id"`

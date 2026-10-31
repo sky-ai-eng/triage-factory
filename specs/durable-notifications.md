@@ -88,7 +88,7 @@ kinds.LinearTeamUnreadable.Sync(ctx, orgID, unreadable)
 
 // internal/delegate/jira_mirror.go — true where the canonical is not a reachable
 // transition, false after a successful move; a transient error does neither
-kinds.JiraMirrorFailing.Set(ctx, orgID, kinds.JiraMirror{TeamID: teamID, ProjectID: rule.ProjectID}, true)
+kinds.JiraMirrorFailing.Set(ctx, orgID, kinds.JiraMirrorFor(rule, issueKey), true)
 
 // internal/routing — the conflict TFAC-518 surfaces
 kinds.AutomationConflict.Post(ctx, orgID, kinds.Conflict{TaskID: task.ID, Winner: winner, Losers: losers})
@@ -326,7 +326,7 @@ The same calls, tables (SQLite) and page. Local is N=1: the one user is the reci
 | `github.app_unusable`         | github | org admins                                  | urgent                                | no          | `Sync` on every reconcile (`internal/poller/manager.go`, beside `logAppUsabilityChange`); an active App only              | Link: GitHub access settings                                                  |
 | `linear.team_unreadable`      | linear | org admins + admins of TF teams tracking it | high                                  | yes         | `Sync` on a complete visibility pass (`holdLinearUnreadableTeams`; never on outcome `failed`)                             | Link: Linear settings; invoke "Stop tracking" on team rows                    |
 | `jira.discovery_failing`      | jira   | admins of teams tracking the project        | high                                  | yes         | `Sync` from `discoverJira` on a complete pass                                                                             | Link: the project's status rules                                              |
-| `jira.mirror_failing`         | jira   | team admins                                 | high                                  | yes         | `Set` in `runJiraMirror` and the claim guard (`syncJiraClaim`)                                                            | Link: the team's Jira status rules                                            |
+| `jira.mirror_failing`         | jira   | team admins                                 | high                                  | yes         | `Set` in `runJiraMirror` and the claim guard (`applyJiraClaim`)                                                           | Link: the team's Jira status rules                                            |
 | `linear.mirror_failing`       | linear | team admins                                 | high                                  | yes         | `Set` in `runLinearMirror` and `applyLinearClaim`                                                                         | Link: the team's Linear rules                                                 |
 | `memory.generation_failing`   | —      | org admins                                  | urgent for `no_model`, high otherwise | no          | `Sync` from the memory provisioner over the `error_kind`s currently failing across the org's attempts, after its debounce | Link: background-jobs model setting; invoke "Retry now" (rings `memory_owed`) |
 | `jira.status_drift`           | jira   | team admins                                 | high                                  | yes         | `Sync` from a detection pass that does not exist yet                                                                      | Link: the rule or handler editor                                              |
