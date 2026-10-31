@@ -122,6 +122,13 @@ type Manager struct {
 	// racing its successor's sweep to the same upsert. nil until Run.
 	base     context.Context
 	inflight map[string]struct{}
+
+	// syncMu serializes syncFailing's read and write. The sweep and every
+	// doorbell sync concurrently, and every attempt is followed by a sync that
+	// starts after it lands, so with the pair held the last write is from a
+	// read that saw every attempt; without it, a read taken before another
+	// sync's attempt landed could write its stale answer last.
+	syncMu sync.Mutex
 }
 
 // NewManager builds a Manager against stores — a brain-capable role's normal

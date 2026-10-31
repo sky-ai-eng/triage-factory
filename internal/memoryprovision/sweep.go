@@ -174,11 +174,13 @@ func (m *Manager) sweep(ctx context.Context, backoff time.Duration, orgID string
 
 // failingStreak is how many attempts in a row a conversation's memory must
 // fail, with no memory generated anywhere in the org since the first of them,
-// before kinds.MemoryGenerationFailing opens. The sweep retries a conversation
-// once per AttemptBackoff, so three is a few minutes of failing: longer than a
-// provider blip, which fails each owed conversation's attempt once however
-// many there are, and short enough that an admin hears about blocked tasks
-// within minutes.
+// before kinds.MemoryGenerationFailing opens. That is longer than a provider
+// blip, which fails each owed conversation's attempt once however many there
+// are. While few memories are owed, the sweep retries a conversation about
+// once per AttemptBackoff, so three is a few minutes of failing. The sweep
+// works its page serially, though, so when every attempt runs to
+// AttemptTimeout and many memories are owed, each retry waits for a whole
+// page.
 const failingStreak = 3
 
 // syncFailing opens kinds.MemoryGenerationFailing for each error kind the
@@ -186,6 +188,8 @@ const failingStreak = 3
 // that fails syncs nothing, so an open condition is neither bumped nor
 // resolved on no evidence.
 func (m *Manager) syncFailing(ctx context.Context, orgID string) {
+	m.syncMu.Lock()
+	defer m.syncMu.Unlock()
 	f, err := m.stores.MemoryAttempts.FailingSystem(ctx, orgID, failingStreak)
 	if err != nil {
 		log.Warn("read failing memory generation failed; syncing next sweep", "org", orgID, "error", err)
