@@ -1,8 +1,9 @@
 // Package notify is durable notifications (specs/durable-notifications.md):
-// the kinds, the three verbs a producer calls, and everything a call site
-// does not do — audience resolution, copy, actions, coalescing, resolution,
-// the websocket ping and failure handling — plus the dispatcher that runs a
-// row's invoke actions (Caller).
+// the kinds, the three verbs a producer calls and the one read beside them
+// (ConditionKind.OpenOrgs), and everything a call site does not do — audience
+// resolution, copy, actions, coalescing, resolution, the websocket ping and
+// failure handling — plus the dispatcher that runs a row's invoke actions
+// (Caller).
 //
 // A kind is a package-level value built by Condition or Notice, in
 // internal/notify/kinds or an extension's own package. A producer integrates

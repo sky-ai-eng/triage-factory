@@ -114,6 +114,8 @@ type Manager struct {
 	// attemptTimeout is AttemptTimeout, held as a field so a test can watch
 	// the bound fire without waiting out the real one.
 	attemptTimeout time.Duration
+	// syncEvery is failingSyncEvery, held as a field for the same reason.
+	syncEvery time.Duration
 
 	mu sync.Mutex
 	// base is the context the manager is running under — the brain's, set by
@@ -122,6 +124,15 @@ type Manager struct {
 	// racing its successor's sweep to the same upsert. nil until Run.
 	base     context.Context
 	inflight map[string]struct{}
+	// touched is the orgs an attempt has closed in since syncPass last took
+	// them.
+	touched map[string]struct{}
+
+	// syncMu serializes syncFailing's read and write. syncLoop and the
+	// doorbell's one-org sweeps sync concurrently, and without the pair held,
+	// a read taken before another sync's attempt landed could write its stale
+	// answer after that sync's.
+	syncMu sync.Mutex
 }
 
 // NewManager builds a Manager against stores — a brain-capable role's normal
@@ -148,7 +159,9 @@ func NewManager(
 		llm:            llm,
 		notify:         notify,
 		attemptTimeout: AttemptTimeout,
+		syncEvery:      failingSyncEvery,
 		inflight:       make(map[string]struct{}),
+		touched:        make(map[string]struct{}),
 	}
 	// Assigned through the nil check rather than straight onto the interface
 	// field: a typed nil in an interface is not nil, and every attempt would
@@ -266,12 +279,14 @@ func (m *Manager) Fulfil(ctx context.Context, orgID, conversationID string) (err
 	case errors.Is(err, systemllm.ErrNoModel):
 		// Configuration, not a fault: an org admin picks a model and the save
 		// rings the doorbell. The wrapped message names the setting, so it is
-		// TF's own wording and belongs on the row a person reads.
+		// TF's own wording and belongs on the row a person reads, without the
+		// sentinel's package-prefixed text in front of it.
 		span.SetAttributes(telemetry.Outcome(string(domain.MemoryAttemptErrNoModel)))
 		log.WarnContext(ctx, "memory generation skipped; no usable background jobs model",
 			"org", orgID, "conversation", conversationID, "error", err)
 		m.closeAttempt(ctx, orgID, attempt.ID, domain.MemoryAttemptFailed,
-			domain.MemoryAttemptErrNoModel, err.Error(), "", len(rows), 0)
+			domain.MemoryAttemptErrNoModel, strings.TrimPrefix(err.Error(), systemllm.ErrNoModel.Error()+": "),
+			"", len(rows), 0)
 		return nil
 	case err != nil:
 		m.closeAttempt(ctx, orgID, attempt.ID, domain.MemoryAttemptFailed,
@@ -402,6 +417,7 @@ func (m *Manager) closeAttempt(ctx context.Context, orgID, attemptID string,
 		outcome, kind, reason, systemLLMRunID, rowsTotal, rowsSent); err != nil {
 		log.Warn("close out memory attempt failed", "attempt", attemptID, "outcome", string(outcome), "error", err)
 	}
+	m.touch(orgID)
 }
 
 // announce tells the task's watchers its wait is over, so the composer

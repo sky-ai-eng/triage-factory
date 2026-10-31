@@ -268,6 +268,20 @@ func (c *ConditionKind[P]) Sync(ctx context.Context, orgID string, active []P, k
 	s.Sync(ctx, c.k, orgID, erased(active), erased(keep))
 }
 
+// OpenOrgs returns the orgs, across the deployment, holding an open occurrence
+// of the kind, sorted. It is for a producer whose evaluation set can lose an
+// org while an occurrence is still open there: re-evaluating each org it
+// returns is what resolves that occurrence. Unlike the verbs it returns its
+// error, because only the caller knows what a missing answer costs. Before
+// Install it returns nothing.
+func (c *ConditionKind[P]) OpenOrgs(ctx context.Context) ([]string, error) {
+	s := sink.Load()
+	if s == nil {
+		return nil, nil
+	}
+	return s.OpenOrgs(ctx, c.k)
+}
+
 func erased[P any](ps []P) []any {
 	out := make([]any, len(ps))
 	for i, p := range ps {

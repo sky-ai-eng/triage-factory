@@ -45,6 +45,14 @@ func (d *doorbellConversations) ListMemoryOwedSystem(_ context.Context, orgID st
 	return nil, nil
 }
 
+// quietAttempts answers the provisioner's failing-generation read with
+// nothing failing; the doorbell tests are about what reaches Nudge.
+type quietAttempts struct{ db.MemoryAttemptStore }
+
+func (quietAttempts) FailingSystem(context.Context, string, time.Duration, time.Duration) (domain.MemoryFailing, error) {
+	return domain.MemoryFailing{}, nil
+}
+
 // newDoorbellApp builds an App holding a real memory provisioner over the
 // recording store, at the given role. A real Manager rather than a stub because
 // the property under test is that the relay reaches Nudge with the right ids —
@@ -67,7 +75,7 @@ func newDoorbellApp(t *testing.T, role runmode.DeployRole) (*App, *doorbellConve
 	t.Cleanup(func() { database.Close() })
 	a.database = database
 	a.memoryProvisioner = memoryprovision.NewManager(
-		db.Stores{Conversations: conv}, nil, nil, nil, nil, nil,
+		db.Stores{Conversations: conv, MemoryAttempts: quietAttempts{}}, nil, nil, nil, nil, nil,
 	)
 	// Running, as it is on a pod whose brain holds the lease: the doorbell hangs
 	// off the brain's context, so a provisioner nobody started drops every nudge

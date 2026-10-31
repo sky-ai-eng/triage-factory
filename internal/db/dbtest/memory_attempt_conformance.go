@@ -3,7 +3,10 @@ package dbtest
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -35,6 +38,16 @@ type MemoryAttemptSeeder struct {
 	// what "well-formed" means for their id column, which is why this is the
 	// seeder's answer rather than a constant here.
 	DanglingSystemLLMRunID func(t *testing.T) string
+
+	// OwingConversation is Conversation ended with no memory row: one the
+	// provisioner owes a memory, on a task that is open when taskOpen and done
+	// otherwise.
+	OwingConversation func(t *testing.T, suffix string, taskOpen bool) (conversationID string)
+
+	// AgeAttempt rewrites an attempt's started_at, and its completed_at when
+	// it has one, to `age` ago, so attempts made back to back have an order
+	// that cannot tie.
+	AgeAttempt func(t *testing.T, attemptID string, age time.Duration)
 }
 
 // RunMemoryAttemptStoreConformance is the shared assertion suite for any
@@ -331,6 +344,156 @@ func RunMemoryAttemptStoreConformance(t *testing.T, mk MemoryAttemptStoreFactory
 		}
 		if other != nil {
 			t.Errorf("the other conversation read %+v, want nil", other)
+		}
+	})
+	// attempt makes one attempt on convID, closes it out with outcome unless
+	// outcome is empty, and ages it to `age` ago.
+	attempt := func(t *testing.T, store db.MemoryAttemptStore, orgID string, seed MemoryAttemptSeeder, convID string,
+		outcome domain.MemoryAttemptOutcome, kind domain.MemoryAttemptErrorKind, msg string, age time.Duration) {
+		t.Helper()
+		begun, err := store.BeginAttemptSystem(ctx, orgID, convID)
+		if err != nil {
+			t.Fatalf("BeginAttemptSystem: %v", err)
+		}
+		if outcome != "" {
+			if _, err := store.CompleteAttemptSystem(ctx, orgID, begun.ID, outcome, kind, msg, "", 1, 1); err != nil {
+				t.Fatalf("CompleteAttemptSystem %s/%s: %v", outcome, kind, err)
+			}
+		}
+		seed.AgeAttempt(t, begun.ID, age)
+	}
+	fail := func(t *testing.T, store db.MemoryAttemptStore, orgID string, seed MemoryAttemptSeeder, convID string,
+		kind domain.MemoryAttemptErrorKind, msg string, age time.Duration) {
+		t.Helper()
+		attempt(t, store, orgID, seed, convID, domain.MemoryAttemptFailed, kind, msg, age)
+	}
+	// failing reads with a two-minute debounce and a five-minute window.
+	failing := func(t *testing.T, store db.MemoryAttemptStore, orgID string) domain.MemoryFailing {
+		t.Helper()
+		got, err := store.FailingSystem(ctx, orgID, 2*time.Minute, 5*time.Minute)
+		if err != nil {
+			t.Fatalf("FailingSystem: %v", err)
+		}
+		return got
+	}
+	assertKinds := func(t *testing.T, got domain.MemoryFailing, want ...domain.MemoryFailingKind) {
+		t.Helper()
+		if !slices.Equal(got.Kinds, want) {
+			t.Errorf("Kinds = %+v, want %+v", got.Kinds, want)
+		}
+	}
+
+	t.Run("failing_waits_for_the_failures_to_span_the_debounce", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		conv := seed.OwingConversation(t, "debounce", true)
+		fail(t, store, orgID, seed, conv, domain.MemoryAttemptErrTimeout, "first", 3*time.Minute)
+		fail(t, store, orgID, seed, conv, domain.MemoryAttemptErrTimeout, "second", 2*time.Minute)
+
+		got := failing(t, store, orgID)
+		if got.TasksWaiting != 1 {
+			t.Errorf("TasksWaiting = %d, want the one open task", got.TasksWaiting)
+		}
+		assertKinds(t, got)
+
+		fail(t, store, orgID, seed, conv, domain.MemoryAttemptErrTimeout, "third", 30*time.Second)
+		assertKinds(t, failing(t, store, orgID), domain.MemoryFailingKind{Kind: domain.MemoryAttemptErrTimeout, ErrorMessage: "third"})
+	})
+
+	t.Run("a_burst_across_conversations_does_not_span_the_debounce", func(t *testing.T) {
+		// A blip fails every owed conversation within moments of each other,
+		// however many there are. The span is the org's, though, so an
+		// earlier failure on another conversation counts toward it.
+		store, orgID, seed := mk(t)
+		for i := range 4 {
+			conv := seed.OwingConversation(t, fmt.Sprintf("burst-%d", i), true)
+			fail(t, store, orgID, seed, conv, domain.MemoryAttemptErrProviderBackoff, "in backoff",
+				time.Minute+time.Duration(i)*100*time.Millisecond)
+		}
+		assertKinds(t, failing(t, store, orgID))
+
+		earlier := seed.OwingConversation(t, "earlier", true)
+		fail(t, store, orgID, seed, earlier, domain.MemoryAttemptErrProviderError, "the model call failed", 3*time.Minute+30*time.Second)
+		assertKinds(t, failing(t, store, orgID),
+			domain.MemoryFailingKind{Kind: domain.MemoryAttemptErrProviderBackoff, ErrorMessage: "in backoff"},
+			domain.MemoryFailingKind{Kind: domain.MemoryAttemptErrProviderError, ErrorMessage: "the model call failed"},
+		)
+	})
+
+	t.Run("failing_kinds_are_the_ones_inside_the_window", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		// The no_model is more than the window before the newest failure, so
+		// it is no longer what generation fails with.
+		mixed := seed.OwingConversation(t, "mixed", true)
+		fail(t, store, orgID, seed, mixed, domain.MemoryAttemptErrNoModel, "no model", 9*time.Minute)
+		fail(t, store, orgID, seed, mixed, domain.MemoryAttemptErrProviderError, "the model call failed", 4*time.Minute)
+		fail(t, store, orgID, seed, mixed, domain.MemoryAttemptErrProviderBackoff, "in backoff", 3*time.Minute)
+		fail(t, store, orgID, seed, mixed, domain.MemoryAttemptErrProviderError, "no memory text", time.Minute)
+		// A done task's conversation still owes its memory and still fails;
+		// it is not a task waiting.
+		closed := seed.OwingConversation(t, "closed", false)
+		fail(t, store, orgID, seed, closed, domain.MemoryAttemptErrTimeout, "exceeded", 2*time.Minute)
+
+		got := failing(t, store, orgID)
+		if got.TasksWaiting != 1 {
+			t.Errorf("TasksWaiting = %d, want the one open task", got.TasksWaiting)
+		}
+		assertKinds(t, got,
+			domain.MemoryFailingKind{Kind: domain.MemoryAttemptErrProviderError, ErrorMessage: "no memory text"},
+			domain.MemoryFailingKind{Kind: domain.MemoryAttemptErrTimeout, ErrorMessage: "exceeded"},
+			domain.MemoryFailingKind{Kind: domain.MemoryAttemptErrProviderBackoff, ErrorMessage: "in backoff"},
+		)
+	})
+
+	t.Run("a_memory_generated_anywhere_since_resets_the_debounce", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		stuck := seed.OwingConversation(t, "stuck", true)
+		for _, age := range []time.Duration{6 * time.Minute, 5 * time.Minute} {
+			fail(t, store, orgID, seed, stuck, domain.MemoryAttemptErrProviderError, "failed", age)
+		}
+		// Inside the window of every failure below, and still not one of them.
+		fail(t, store, orgID, seed, stuck, domain.MemoryAttemptErrTimeout, "exceeded", 4*time.Minute)
+		settled := seed.Conversation(t, "settled")
+		attempt(t, store, orgID, seed, settled, domain.MemoryAttemptGenerated, "", "", 3*time.Minute)
+		assertKinds(t, failing(t, store, orgID))
+
+		fail(t, store, orgID, seed, stuck, domain.MemoryAttemptErrProviderError, "failed", 2*time.Minute+30*time.Second)
+		fail(t, store, orgID, seed, stuck, domain.MemoryAttemptErrProviderError, "failed", time.Minute)
+		assertKinds(t, failing(t, store, orgID))
+		fail(t, store, orgID, seed, stuck, domain.MemoryAttemptErrProviderError, "again", 15*time.Second)
+		assertKinds(t, failing(t, store, orgID), domain.MemoryFailingKind{Kind: domain.MemoryAttemptErrProviderError, ErrorMessage: "again"})
+	})
+
+	t.Run("a_running_attempt_is_neither_a_failure_nor_a_success", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		conv := seed.OwingConversation(t, "running", true)
+		fail(t, store, orgID, seed, conv, domain.MemoryAttemptErrTimeout, "exceeded", 4*time.Minute)
+		attempt(t, store, orgID, seed, conv, "", "", "", time.Minute)
+		assertKinds(t, failing(t, store, orgID))
+
+		fail(t, store, orgID, seed, conv, domain.MemoryAttemptErrTimeout, "exceeded", 30*time.Second)
+		attempt(t, store, orgID, seed, conv, "", "", "", 0)
+		assertKinds(t, failing(t, store, orgID), domain.MemoryFailingKind{Kind: domain.MemoryAttemptErrTimeout, ErrorMessage: "exceeded"})
+	})
+
+	t.Run("a_conversation_owing_nothing_is_not_failing", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		live := seed.Conversation(t, "live")
+		for _, age := range []time.Duration{4 * time.Minute, time.Minute} {
+			fail(t, store, orgID, seed, live, domain.MemoryAttemptErrTimeout, "exceeded", age)
+		}
+		got := failing(t, store, orgID)
+		if got.TasksWaiting != 0 || len(got.Kinds) != 0 {
+			t.Errorf("FailingSystem = %+v, want nothing: the conversation has not ended", got)
+		}
+	})
+
+	t.Run("failing_refuses_a_negative_span_and_an_empty_window", func(t *testing.T) {
+		store, orgID, _ := mk(t)
+		if _, err := store.FailingSystem(ctx, orgID, -time.Second, time.Minute); !errors.Is(err, db.ErrInvalidMemoryFailingWindow) {
+			t.Errorf("a negative span: err = %v, want ErrInvalidMemoryFailingWindow", err)
+		}
+		if _, err := store.FailingSystem(ctx, orgID, time.Minute, 0); !errors.Is(err, db.ErrInvalidMemoryFailingWindow) {
+			t.Errorf("an empty window: err = %v, want ErrInvalidMemoryFailingWindow", err)
 		}
 	})
 }

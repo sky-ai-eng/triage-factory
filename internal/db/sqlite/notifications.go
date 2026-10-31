@@ -178,6 +178,27 @@ func (s *notificationStore) resolve(ctx context.Context, orgID string, reason do
 	return out, rows.Err()
 }
 
+// OpenConditionOrgsSystem: N=1, so the answer is the local org or nothing.
+func (s *notificationStore) OpenConditionOrgsSystem(ctx context.Context, origin domain.NotificationOrigin, kind string) ([]string, error) {
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT DISTINCT org_id FROM notifications
+		WHERE kind = ? AND origin = ? AND lifecycle = 'condition' AND resolved_at IS NULL
+		ORDER BY 1`, kind, origin)
+	if err != nil {
+		return nil, fmt.Errorf("list orgs with an open condition: %w", err)
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan org with an open condition: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 // RecipientsSystem: N=1, so an org or active team audience is the local user.
 func (s *notificationStore) RecipientsSystem(ctx context.Context, orgID string, a domain.NotificationAudience) ([]string, error) {
 	if err := assertLocalOrg(orgID); err != nil {

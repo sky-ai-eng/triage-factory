@@ -45,6 +45,26 @@ func TestMemoryAttemptStore_Postgres(t *testing.T) {
 				// instead of missing the row.
 				return uuid.New().String()
 			},
+			OwingConversation: func(t *testing.T, suffix string, taskOpen bool) string {
+				t.Helper()
+				conversationID, _ := seedPgConversationForTaskMemory(t, h, orgID, userID, promptID, suffix)
+				status := "done"
+				if taskOpen {
+					status = "queued"
+				}
+				pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET ended_at = now(), ended_reason = 'failed' WHERE id = $1`, conversationID)
+				pgtest.MustExec(t, h.AdminDB,
+					`UPDATE tasks SET status = $2 WHERE id = (SELECT task_id FROM conversations WHERE id = $1)`, conversationID, status)
+				return conversationID
+			},
+			AgeAttempt: func(t *testing.T, attemptID string, age time.Duration) {
+				t.Helper()
+				at := time.Now().UTC().Add(-age)
+				pgtest.MustExec(t, h.AdminDB, `
+					UPDATE conversation_memory_attempts
+					SET started_at = $2, completed_at = CASE WHEN completed_at IS NULL THEN NULL ELSE $2::timestamptz END
+					WHERE id = $1`, attemptID, at)
+			},
 		}
 		return stores.MemoryAttempts, orgID, seed
 	})

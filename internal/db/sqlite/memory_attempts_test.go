@@ -40,6 +40,33 @@ func TestMemoryAttemptStore_SQLite(t *testing.T) {
 				// the app actually mints.
 				return uuid.New().String()
 			},
+			OwingConversation: func(t *testing.T, suffix string, taskOpen bool) string {
+				t.Helper()
+				conversationID, _ := seedSQLiteConversationForTaskMemory(t, conn, suffix)
+				status := "done"
+				if taskOpen {
+					status = "queued"
+				}
+				if _, err := conn.Exec(`UPDATE conversations SET ended_at = ?, ended_reason = 'failed' WHERE id = ?`,
+					time.Now().UTC(), conversationID); err != nil {
+					t.Fatalf("end conversation: %v", err)
+				}
+				if _, err := conn.Exec(`UPDATE tasks SET status = ? WHERE id = (SELECT task_id FROM conversations WHERE id = ?)`,
+					status, conversationID); err != nil {
+					t.Fatalf("set task status: %v", err)
+				}
+				return conversationID
+			},
+			AgeAttempt: func(t *testing.T, attemptID string, age time.Duration) {
+				t.Helper()
+				at := time.Now().UTC().Add(-age)
+				if _, err := conn.Exec(`
+					UPDATE conversation_memory_attempts
+					SET started_at = ?, completed_at = CASE WHEN completed_at IS NULL THEN NULL ELSE ? END
+					WHERE id = ?`, at, at, attemptID); err != nil {
+					t.Fatalf("age attempt: %v", err)
+				}
+			},
 		}
 		return stores.MemoryAttempts, runmode.LocalDefaultOrgID, seed
 	})
