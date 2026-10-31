@@ -28,8 +28,8 @@ import (
 //     one row per external WRITE TF performed under an org credential (the
 //     bot's GitHub/Jira mutations, the human-authorized GitHub approval
 //     lifecycle, the Jira board mirror), who/what/when/from→to. The source of
-//     truth for "what did TF do." Includes the rows no artifact is made of: a
-//     person's and TF's own, refusals, failures.
+//     truth for "what did TF do." Includes the rows no artifact is made of,
+//     such as TF's own, refusals and failures.
 //
 // The two have different item shapes and different filter vocabularies, which
 // is why they are separate routes rather than one route with a lens selector.

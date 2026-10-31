@@ -164,7 +164,7 @@ type artifactSeed struct {
 // seedArtifacts stages the ledger the artifacts feeds read. Three runs push
 // one branch, two on teamA and one on teamB; one teamA run opens a pull
 // request, which has a newer and an older deliverable on teamA; one teamB
-// run transitions a Jira issue. A person's row on the pull request and a
+// run transitions a Jira issue. TF's own row on the pull request and a
 // refused push on teamA must not show.
 func (r *usageRig) seedArtifacts(t *testing.T) artifactSeed {
 	t.Helper()
@@ -225,9 +225,9 @@ func (r *usageRig) seedArtifacts(t *testing.T) artifactSeed {
 	record(r.teamB, b1, push)
 	prRow := record(r.teamA, a1, opened)
 	issueRow := record(r.teamB, b1, transitioned)
-	person := opened
-	person.Action, person.PerformedBy, person.ActorUserID = domain.ActionPRMarkedReady, domain.PerformedByPerson, r.member
-	record(r.teamA, a1, person)
+	system := opened
+	system.Action, system.PerformedBy = domain.ActionPRClosed, domain.PerformedBySystem
+	record(r.teamA, a1, system)
 	record(r.teamA, a2, domain.ExternalAction{
 		Provider: domain.ProviderGitHub, Scope: host, Action: domain.ActionGitDenied, Target: "octo/api",
 	})
@@ -330,7 +330,7 @@ func TestUsageArtifactsActivityHandler_Postgres(t *testing.T) {
 			}
 			p := got[seed.pr]
 			if p.RunCount != 1 || p.ActionCount != 1 || p.LastAction != domain.ActionPRCreated {
-				t.Errorf("teamA PR = %+v, want the agent's one pr_created alone", p)
+				t.Errorf("teamA PR = %+v, want the one pr_created alone, without TF's own close", p)
 			}
 			if p.Deliverable == nil || p.Deliverable.ID != seed.prDeliverableID ||
 				p.Deliverable.Kind != domain.DeliverableKindPullRequest || p.Deliverable.State != domain.DeliverableStatePROpen {

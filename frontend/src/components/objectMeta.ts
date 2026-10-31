@@ -59,7 +59,7 @@ export function metaForObjectKind(kind: string): ObjectKindMeta {
   return OBJECT_KIND_META[kind as ObjectKind] ?? FALLBACK_OBJECT_META
 }
 
-// OBJECT_PROVIDERS backs the Objects lens's provider filter: the systems an
-// agent's change can land in. 'network' (an egress denial) and 'git' never
+// OBJECT_PROVIDERS backs the Objects lens's provider filter: the systems a
+// run's change can land in. 'network' (an egress denial) and 'git' never
 // name an object.
 export const OBJECT_PROVIDERS = ['github', 'jira', 'linear', 'slack'] as const

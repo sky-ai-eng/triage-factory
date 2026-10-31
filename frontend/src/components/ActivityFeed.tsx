@@ -17,7 +17,7 @@ import { ACTION_OPTIONS, ACTION_PROVIDERS } from './actionMeta'
 //     one row per external WRITE TF performed under an org credential (the bot's
 //     GitHub/Jira mutations, the human-authorized approval lifecycle, the Jira
 //     board mirror). Rendered by ActionRow. The source of truth for "what TF did."
-//   - Objects → the artifacts across the scope: each object the runs' agents
+//   - Objects → the artifacts across the scope: each object the runs
 //     changed, once however many runs changed it, with the last action and the
 //     run count, highlighted when it is also a deliverable. Rendered by
 //     ObjectRow.
@@ -256,7 +256,7 @@ export default function ActivityFeed({
       <div className="mt-1 font-mono text-label tracking-[0.06em] text-ink-3/70">
         {mode === 'actions'
           ? 'audit log of every org-credential action TF took'
-          : 'each object the agents changed, once, across runs'}
+          : 'each object the runs changed, once, across runs'}
       </div>
 
       {/* Filter bar — adapts per lens. Shared: provider + the time-range tabs.

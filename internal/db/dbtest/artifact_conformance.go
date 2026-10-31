@@ -557,12 +557,9 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 		}
 	})
 
-	t.Run("Scope_reads_skip_person_system_and_refusal_rows", func(t *testing.T) {
+	t.Run("Scope_reads_skip_system_and_refusal_rows", func(t *testing.T) {
 		s := setup(t)
 		conv := s.f.NewConversation(t)
-		person := pullRequest(s, domain.ActionPREdited)
-		person.PerformedBy = domain.PerformedByPerson
-		record(t, s, conv, person, at(1))
 		system := pullRequest(s, domain.ActionPRClosed)
 		system.PerformedBy = domain.PerformedBySystem
 		record(t, s, conv, system, at(2))
