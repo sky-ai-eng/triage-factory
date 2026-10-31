@@ -169,7 +169,7 @@ func (s *eventHandlerStore) List(ctx context.Context, orgID string, f db.EventHa
 	}
 
 	q := `SELECT ` + sqliteEventHandlerColumns + ` FROM event_handlers` + where + `
-	      ORDER BY `+sqliteHandlerKindOrder+`,
+	      ORDER BY ` + sqliteHandlerKindOrder + `,
 	               CASE WHEN kind = 'rule' THEN sort_order ELSE 0 END ASC,
 	               CASE WHEN kind = 'rule' THEN name ELSE '' END ASC,
 	               created_at DESC, id`

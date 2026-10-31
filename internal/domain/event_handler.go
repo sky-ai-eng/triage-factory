@@ -71,8 +71,8 @@ type EventHandler struct {
 	// CreatorUserID is the user who authored a user-source handler, empty for
 	// a shipped one. A personal notify rule tells this user.
 	CreatorUserID string    `json:"creator_user_id,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 	// UserModified is the shipped-content sync's "never clobber a user edit"
 	// signal (mirrors domain.Blueprint.UserModified): true once a team's copy
 	// of a shipped handler has diverged from current shipped content via a
