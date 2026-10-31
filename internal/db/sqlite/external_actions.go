@@ -35,8 +35,28 @@ const externalActionColumns = `
 	COALESCE(external_id, ''), COALESCE(current_url, url, ''), COALESCE(from_state, ''),
 	COALESCE(to_state, ''), COALESCE(conversation_id, ''), COALESCE(actor_user_id, ''),
 	credential, dedup_key, COALESCE(detail_json, ''), COALESCE(node_id, ''),
-	COALESCE(entity_id, ''), COALESCE(repository_id, ''), performed_by, occurred_at
+	COALESCE(entity_id, ''), COALESCE(repository_id, ''), performed_by, COALESCE(object_kind, ''),
+	COALESCE(object_key, ''), occurred_at
 `
+
+// sqliteActionObjectIDSQL is the SQL twin of domain.ObjectID, written against
+// an external_actions alias `ea` — the SQLite mirror of the Postgres twin,
+// which carries the model. The ids are TEXT here, so they concatenate without
+// a cast.
+//
+// TODO(TFAC-1260): only the conformance suite reads it until the artifacts
+// read groups a run's rows by it.
+const sqliteActionObjectIDSQL = `
+	CASE
+	  WHEN ea.object_kind = 'pull_request' OR (ea.object_kind = 'issue' AND ea.provider = 'github')
+	    THEN ea.object_kind || '|' || NULLIF(ea.entity_id, '')
+	  WHEN ea.object_kind = 'repository'
+	    THEN ea.object_kind || '|' || NULLIF(ea.repository_id, '')
+	  WHEN ea.object_kind IN ('branch', 'label', 'release', 'workflow', 'workflow_run')
+	    THEN ea.object_kind || '|' || NULLIF(ea.repository_id, '') || '|' || NULLIF(ea.object_key, '')
+	  WHEN ea.object_kind IN ('issue', 'review', 'comment', 'message')
+	    THEN ea.object_kind || '|' || NULLIF(ea.scope, '') || '|' || NULLIF(ea.object_key, '')
+	END`
 
 func (s *externalActionStore) Record(ctx context.Context, orgID string, e domain.ExternalAction) error {
 	if err := assertLocalOrg(orgID); err != nil {
@@ -64,8 +84,8 @@ func (s *externalActionStore) Record(ctx context.Context, orgID string, e domain
 		INSERT INTO external_actions
 			(id, org_id, team_id, provider, scope, action, target, external_id, url,
 			 from_state, to_state, conversation_id, actor_user_id, credential, dedup_key, detail_json, node_id,
-			 entity_id, repository_id, performed_by)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 entity_id, repository_id, performed_by, object_kind, object_key)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(org_id, scope, dedup_key) DO NOTHING
 	`,
 		id, orgID, nullIfEmpty(e.TeamID), e.Provider, e.Scope, e.Action, e.Target,
@@ -73,6 +93,7 @@ func (s *externalActionStore) Record(ctx context.Context, orgID string, e domain
 		nullIfEmpty(e.ToState), nullIfEmpty(e.ConversationID), nullIfEmpty(e.ActorUserID),
 		e.Credential, dedupKey, nullIfEmpty(e.DetailJSON), nullIfEmpty(e.NodeID),
 		nullIfEmpty(e.EntityID), nullIfEmpty(e.RepositoryID), e.PerformedBy,
+		nullIfEmpty(e.ObjectKind), nullIfEmpty(e.ObjectKey),
 	)
 	return err
 }
@@ -268,6 +289,6 @@ func scanExternalAction(sc rowScanner, e *domain.ExternalAction) error {
 		&e.ID, &e.OrgID, &e.TeamID, &e.Provider, &e.Scope, &e.Action, &e.Target,
 		&e.ExternalID, &e.URL, &e.FromState, &e.ToState, &e.ConversationID,
 		&e.ActorUserID, &e.Credential, &e.DedupKey, &e.DetailJSON, &e.NodeID, &e.EntityID,
-		&e.RepositoryID, &e.PerformedBy, &e.OccurredAt,
+		&e.RepositoryID, &e.PerformedBy, &e.ObjectKind, &e.ObjectKey, &e.OccurredAt,
 	)
 }

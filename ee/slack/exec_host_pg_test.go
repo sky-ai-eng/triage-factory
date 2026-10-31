@@ -451,6 +451,10 @@ func TestSlackExecHandler_Send_RecordsDeliverableAndAction(t *testing.T) {
 				act.Credential != domain.CredentialSlackBot || act.Target != wantTarget {
 				t.Errorf("external_action mismatch: %+v", act)
 			}
+			// The object is the posted message, keyed as its deliverable is.
+			if act.ObjectKind != domain.ObjectKindMessage || act.ObjectKey != a.DedupKey {
+				t.Errorf("external_action names (%q, %q), want (message, %q)", act.ObjectKind, act.ObjectKey, a.DedupKey)
+			}
 		})
 	}
 }
@@ -655,6 +659,12 @@ func TestSlackExecHandler_Edit_UpsertsSameDeliverableRow(t *testing.T) {
 	if !sawPosted || !sawEdited {
 		t.Errorf("expected both slack_message_posted and slack_message_edited, got %+v", acts)
 	}
+	// The post and its edit name one object, the message.
+	for _, a := range acts {
+		if a.ObjectKind != domain.ObjectKindMessage || a.ObjectKey != arts[0].DedupKey {
+			t.Errorf("%s names (%q, %q), want (message, %q)", a.Action, a.ObjectKind, a.ObjectKey, arts[0].DedupKey)
+		}
+	}
 }
 
 // TestSlackExecHandler_Edit_PreservesCreatingConversationAndTeam_AcrossDifferentTeams
@@ -722,7 +732,7 @@ func TestSlackExecHandler_React_RecordsActionOnly(t *testing.T) {
 			r := newSlackExecRig(t)
 			orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-react-"+name)
 			r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
-			r.seedChannel(orgID, "T1", "C1")
+			row := r.seedChannel(orgID, "T1", "C1")
 			r.trackChannel(orgID, owner, teamID, "C1")
 			conversationID := r.seedConversation(orgID, teamID, owner, eventTriggered)
 			info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: eventTriggered}
@@ -746,6 +756,11 @@ func TestSlackExecHandler_React_RecordsActionOnly(t *testing.T) {
 			}
 			if !strings.Contains(acts[0].DetailJSON, "thumbsup") {
 				t.Errorf("detail_json missing emoji: %q", acts[0].DetailJSON)
+			}
+			// The object is the message reacted to, by its channel's row and ts.
+			wantKey := domain.ObjectKey(domain.ProviderSlack, domain.DeliverableKindMessage, domain.SlackMessageResource(row, "1700000000.000001"), "")
+			if acts[0].ObjectKind != domain.ObjectKindMessage || acts[0].ObjectKey != wantKey {
+				t.Errorf("reaction names (%q, %q), want (message, %q)", acts[0].ObjectKind, acts[0].ObjectKey, wantKey)
 			}
 		})
 	}

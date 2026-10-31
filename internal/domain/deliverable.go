@@ -349,22 +349,7 @@ func DeliverableEntityIdentity(a Deliverable) (scope, externalID string, ok bool
 		nodeID, ok := DeliverablePullRequestNodeID(a)
 		return "", nodeID, ok
 	}
-	p, rest, found := strings.Cut(a.DedupKey, ":")
-	if !found || p != a.Provider {
-		return "", "", false
-	}
-	_, rest, found = strings.Cut(rest, ":")
-	if !found {
-		return "", "", false
-	}
-	resource, _, _ := strings.Cut(rest, ":")
-	switch a.Provider {
-	case ProviderJira:
-		return ParseJiraIssueResource(resource)
-	case ProviderLinear:
-		return "", resource, resource != ""
-	}
-	return "", "", false
+	return ObjectKeyEntityIdentity(a.Provider, a.DedupKey)
 }
 
 // DeliverablePullRequestNodeID returns the GraphQL node id of the pull request a

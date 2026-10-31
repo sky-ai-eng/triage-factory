@@ -125,6 +125,33 @@ func seedSlackAction(t *testing.T, stores db.Stores, orgID, teamID, entityID, ta
 	}
 }
 
+// seedMessageObjectAction records an edit of the message ts as the exec
+// funnel records one: its object keyed on row, the registry row the channel
+// id resolved to when the edit was made.
+func seedMessageObjectAction(t *testing.T, stores db.Stores, orgID, teamID, row, ts, dedupKey string) {
+	t.Helper()
+	act := domain.ExternalAction{
+		TeamID: teamID, Provider: domain.ProviderSlack, Scope: domain.SlackScope, Action: domain.ActionSlackMessageEdited,
+		Target: "x", ExternalID: ts, Credential: domain.CredentialSlackBot, DedupKey: dedupKey,
+		PerformedBy: domain.PerformedByAgent,
+	}
+	act.SetObject(domain.ObjectKindMessage, messageKey(row, ts))
+	if err := stores.ExternalActions.RecordSystem(context.Background(), orgID, act); err != nil {
+		t.Fatalf("seed action %s: %v", dedupKey, err)
+	}
+}
+
+func readObjectKey(t *testing.T, h *pgtest.Harness, orgID, dedupKey string) string {
+	t.Helper()
+	var key string
+	if err := h.AdminDB.QueryRow(`
+		SELECT COALESCE(object_key, '') FROM external_actions WHERE org_id = $1 AND dedup_key = $2
+	`, orgID, dedupKey).Scan(&key); err != nil {
+		t.Fatalf("read action %s: %v", dedupKey, err)
+	}
+	return key
+}
+
 type actionRow struct{ target, url, currentURL string }
 
 func readAction(t *testing.T, h *pgtest.Harness, orgID, dedupKey string) actionRow {
@@ -365,7 +392,8 @@ func channelRowNamed(t *testing.T, channels slackstore.ChannelRegistryStore, org
 // thread's active entity; the handler filters naming it name the channel
 // instead, one that cannot be decoded being reported and left as stored; and
 // the deliverable keys naming it name the channel's row, except one the channel's
-// row already holds for the same message.
+// row already holds for the same message, while the ledger's message objects
+// naming it all name the channel's row.
 func TestChannelMove_Postgres_AbsorbsWhatTheNewIDGotFirst(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -402,6 +430,10 @@ func TestChannelMove_Postgres_AbsorbsWhatTheNewIDGotFirst(t *testing.T) {
 	kept := seedMessageDeliverable(t, stores, orgID, teamA, original, channel.ID, moveOld, "1700000000.000100", "1700000000.000500")
 	held := seedMessageDeliverable(t, stores, orgID, teamA, newcomer, absorbed.ID, moveNew, "1700000000.000100", "1700000000.000500")
 	rekeyed := seedMessageDeliverable(t, stores, orgID, teamA, newcomer, absorbed.ID, moveNew, "1700000000.000100", "1700000000.000600")
+
+	seedMessageObjectAction(t, stores, orgID, teamA, channel.ID, "1700000000.000500", "edit-on-channel")
+	seedMessageObjectAction(t, stores, orgID, teamA, absorbed.ID, "1700000000.000500", "edit-on-both")
+	seedMessageObjectAction(t, stores, orgID, teamA, absorbed.ID, "1700000000.000600", "edit-on-absorbed")
 
 	onAbsorbed := seedSlackHandler(t, h, orgID, teamA, userID, "absorbed", `{"channel_in":["`+absorbed.ID+`","C0OTHER01"],"mentioned_only":true}`)
 	onBoth := seedSlackHandler(t, h, orgID, teamA, userID, "both", `{"channel_in":["`+channel.ID+`","`+absorbed.ID+`"]}`)
@@ -492,6 +524,19 @@ func TestChannelMove_Postgres_AbsorbsWhatTheNewIDGotFirst(t *testing.T) {
 	}
 	if got := readDeliverable(t, h, rekeyed); got.key != messageKey(channel.ID, "1700000000.000600") {
 		t.Errorf("deliverable keyed on the absorbed row = %+v, want it keyed on the channel's row", got)
+	}
+
+	// Ledger objects: every message object keyed on the absorbed row is keyed
+	// on the channel's, the one the channel's row already holds included, so
+	// one message is one object.
+	for dedupKey, want := range map[string]string{
+		"edit-on-channel":  messageKey(channel.ID, "1700000000.000500"),
+		"edit-on-both":     messageKey(channel.ID, "1700000000.000500"),
+		"edit-on-absorbed": messageKey(channel.ID, "1700000000.000600"),
+	} {
+		if got := readObjectKey(t, h, orgID, dedupKey); got != want {
+			t.Errorf("action %s object_key = %q, want %q", dedupKey, got, want)
+		}
 	}
 }
 

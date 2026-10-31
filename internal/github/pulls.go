@@ -836,15 +836,24 @@ func (c *Client) PostReply(ctx context.Context, owner, repo string, number, comm
 
 // ReactToComment adds a reaction to a comment. Tries issue comments first, then review comments.
 func (c *Client) ReactToComment(ctx context.Context, owner, repo string, commentID int, emoji string) error {
-	body := map[string]any{"content": emoji}
-	// Try issue comment
-	_, err := c.Post(ctx, fmt.Sprintf("/repos/%s/%s/issues/comments/%d/reactions", owner, repo, commentID), body)
-	if err == nil {
-		return nil
-	}
-	// Try review comment
-	_, err = c.Post(ctx, fmt.Sprintf("/repos/%s/%s/pulls/comments/%d/reactions", owner, repo, commentID), body)
+	_, err := c.ReactToCommentScoped(ctx, owner, repo, commentID, emoji)
 	return err
+}
+
+// ReactToCommentScoped is ReactToComment that also returns which comment it
+// reacted to: a conversation comment, or a review comment reached through the
+// pulls/comments fallback. A comment's number is unique only within its
+// numbering, so the host-side recorder keys the reacted-to comment on the
+// pair. Meaningful only when err is nil.
+func (c *Client) ReactToCommentScoped(ctx context.Context, owner, repo string, commentID int, emoji string) (domain.GitHubCommentSpace, error) {
+	body := map[string]any{"content": emoji}
+	if _, err := c.Post(ctx, fmt.Sprintf("/repos/%s/%s/issues/comments/%d/reactions", owner, repo, commentID), body); err == nil {
+		return domain.GitHubIssueComment, nil
+	}
+	if _, err := c.Post(ctx, fmt.Sprintf("/repos/%s/%s/pulls/comments/%d/reactions", owner, repo, commentID), body); err != nil {
+		return "", err
+	}
+	return domain.GitHubReviewComment, nil
 }
 
 // UpdateComment updates a comment body. Tries issue comments first, then review comments.

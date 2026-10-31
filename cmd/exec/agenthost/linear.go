@@ -668,7 +668,7 @@ func (c *LocalClient) recordLinearIssue(ctx context.Context, issue *linearclient
 		ExternalID:  issue.ID,
 		URL:         issue.URL,
 		State:       state,
-		DedupKey:    domain.ObjectKey(domain.ProviderLinear, domain.DeliverableKindIssue, issue.ID, ""),
+		DedupKey:    domain.IssueObjectKey(domain.ProviderLinear, "", issue.ID),
 		DetailsJSON: detailsJSON,
 	}
 	c.upsertLinearDeliverable(ctx, &a, linearAction(a, action, fromState, toState), issue.Team.ID)
@@ -703,9 +703,10 @@ func (c *LocalClient) upsertLinearDeliverable(ctx context.Context, a *domain.Del
 }
 
 // linearAction builds the external-action row for a Linear write, under the
-// org's Linear service identity.
+// org's Linear service identity, naming the issue or comment the deliverable
+// is (issueObject).
 func linearAction(a domain.Deliverable, action, from, to string) *domain.ExternalAction {
-	return &domain.ExternalAction{
+	act := &domain.ExternalAction{
 		Provider:   domain.ProviderLinear,
 		Action:     action,
 		Target:     a.Target,
@@ -716,4 +717,6 @@ func linearAction(a domain.Deliverable, action, from, to string) *domain.Externa
 		Credential: domain.CredentialLinearOrg,
 		DetailJSON: a.DetailsJSON,
 	}
+	act.SetObject(issueObject(a))
+	return act
 }

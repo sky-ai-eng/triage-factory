@@ -1,6 +1,7 @@
 package sqlite_test
 
 import (
+	"database/sql"
 	"fmt"
 	"testing"
 	"time"
@@ -77,6 +78,13 @@ func TestExternalActionPerformedBy_SQLite(t *testing.T) {
 	dbtest.RunExternalActionPerformedByConformance(t, sqliteExternalActionFixture)
 }
 
+// TestExternalActionObject_SQLite runs the shared ledger object-identity
+// conformance suite against the SQLite backend, on the node-id suite's
+// fixture.
+func TestExternalActionObject_SQLite(t *testing.T) {
+	dbtest.RunExternalActionObjectConformance(t, sqliteExternalActionFixture)
+}
+
 // sqliteExternalActionFixture is a fresh in-memory DB with the local org's
 // team and a conversation in it.
 func sqliteExternalActionFixture(t *testing.T) dbtest.ExternalActionNodeIDFixture {
@@ -95,6 +103,14 @@ func sqliteExternalActionFixture(t *testing.T) dbtest.ExternalActionNodeIDFixtur
 				fmt.Sprintf("-%d seconds", int64(age.Seconds())), actionID); err != nil {
 				t.Fatalf("backdate occurred_at of %s: %v", actionID, err)
 			}
+		},
+		ObjectIDOf: func(t *testing.T, actionID string) (string, bool) {
+			t.Helper()
+			var id sql.NullString
+			if err := conn.QueryRow(`SELECT `+sqlitestore.ActionObjectIDSQLForTest+` FROM external_actions ea WHERE ea.id = ?`, actionID).Scan(&id); err != nil {
+				t.Fatalf("object id of %s: %v", actionID, err)
+			}
+			return id.String, id.Valid
 		},
 	}
 }

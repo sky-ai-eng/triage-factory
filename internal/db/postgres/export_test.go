@@ -11,3 +11,7 @@ import (
 func AssertClaimActiveInTx(ctx context.Context, tx *sql.Tx, orgID, conversationID, claimID string) error {
 	return assertClaimActive(ctx, tx, orgID, conversationID, claimID)
 }
+
+// ActionObjectIDSQLForTest exposes the SQL twin of domain.ObjectID so the
+// ledger conformance suite can hold the two to each other.
+const ActionObjectIDSQLForTest = pgActionObjectIDSQL

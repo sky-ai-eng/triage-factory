@@ -197,6 +197,13 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 	if act != nil {
 		stampActionIdentityInfo(act, info)
 		mintActionDedupKey(ctx, info, act)
+		// The object is the writer's to name, but only one its action can
+		// name: a relayed row cannot have a refusal claim it changed something,
+		// or carry a kind the column's CHECK would refuse along with the
+		// deliverable written beside it.
+		if !domain.ActionNamesKind(act.Provider, act.Action, act.ObjectKind) {
+			act.ObjectKind, act.ObjectKey = "", ""
+		}
 	}
 	ctx, cancel := recordContext(ctx)
 	defer cancel()
@@ -234,7 +241,7 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 	}
 	var about resolvedEntity
 	if act != nil {
-		about = resolveActionReferences(ctx, stores, info, a, act, container, github, subject)
+		about = resolveActionReferences(ctx, stores, info, act, container, github, subject)
 	}
 	if err == nil {
 		var deliverableErr error
@@ -587,9 +594,13 @@ type resolvedEntity struct {
 	// and err why it failed.
 	attempted bool
 	entityID  string
-	err       error
-	provider  string
-	target    string
+	// entityKind is the resolved entity's kind (a GitHub pull request or
+	// issue: domain.EntityKindPullRequest, domain.EntityKindIssue), empty
+	// when nothing resolved.
+	entityKind string
+	err        error
+	provider   string
+	target     string
 }
 
 // matches reports whether r resolved (or failed to resolve) the same
@@ -638,7 +649,7 @@ func resolveDeliverableEntity(ctx context.Context, stores db.Stores, info Conver
 		return out
 	}
 	if entity != nil {
-		out.entityID = entity.ID
+		out.entityID, out.entityKind = entity.ID, entity.Kind
 		a.EntityID, a.Target = entity.ID, entity.SourceID
 	}
 	return out
@@ -666,28 +677,27 @@ func deliverableGitHubIdentity(a domain.Deliverable, github domain.GitHubIdentit
 //
 // An action about the object the deliverable is about reuses subject, the
 // deliverable's entity, rather than resolving it again. Any other action resolves
-// (and creates, like the touch) its own coordinate, identified by the provider
-// id off the deliverable when it is the same provider's (a Jira deliverable's key
-// names its site and issue id; see domain.DeliverableEntityIdentity), and a
-// GitHub action by github, the identity its observer read. A failure another
-// attempt can get past is retried like the write (withRecordRetry); resolving
-// only finds, creates or renames toward what the provider answered, so a second
-// attempt lands on what a first one wrote. One that still fails is logged, and
-// the act is recorded unlinked. The resolution is returned for the touch, which
+// (and creates, like the touch) its own coordinate. A GitHub action is
+// identified by github, the identity its observer read. A Jira or Linear
+// action's object key names the issue it is about, a comment's key the issue
+// the comment is on, so the coordinate is identified by the site and issue id
+// or the UUID the key carries (domain.ObjectKeyEntityIdentity), whether or not
+// a deliverable is written beside the action. A failure another attempt can
+// get past is retried like the write (withRecordRetry); resolving only finds,
+// creates or renames toward what the provider answered, so a second attempt
+// lands on what a first one wrote. One that still fails is logged, and the act
+// is recorded unlinked. The resolution is returned for the touch, which
 // records it once the write settles.
-func resolveActionReferences(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Deliverable, act *domain.ExternalAction, container domain.EntityContainer, github domain.GitHubIdentity, subject resolvedEntity) resolvedEntity {
+func resolveActionReferences(ctx context.Context, stores db.Stores, info ConversationInfo, act *domain.ExternalAction, container domain.EntityContainer, github domain.GitHubIdentity, subject resolvedEntity) resolvedEntity {
 	act.EntityID, act.RepositoryID = "", ""
 	about := subject
 	if !subject.matches(act.Provider, act.Target) {
 		c := entityCoordinate{provider: act.Provider, target: act.Target, url: act.URL, container: container, github: github}
-		// A Jira or Linear deliverable's key names the issue every action beside it
-		// is about. A pull request deliverable's node id names one pull request, and
-		// an action about that one matched subject above, so a GitHub action
-		// here is about another object and takes nothing off the deliverable.
-		if a != nil && a.Provider == act.Provider && a.Provider != domain.ProviderGitHub {
-			if scope, externalID, ok := domain.DeliverableEntityIdentity(*a); ok {
-				c.scope, c.externalID = scope, externalID
-			}
+		// TODO(TFAC-1254): a relayed row's object_key is the sidecar's to
+		// choose, and resolving it follows a rename, so a forged key links
+		// another issue's entity and renames it onto the row's target.
+		if scope, externalID, ok := domain.ObjectKeyEntityIdentity(act.Provider, act.ObjectKey); ok {
+			c.scope, c.externalID = scope, externalID
 		}
 		about = resolvedEntity{attempted: true, provider: act.Provider, target: act.Target}
 		var entity *domain.Entity
@@ -701,10 +711,19 @@ func resolveActionReferences(ctx context.Context, stores db.Stores, info Convers
 			agenthostLog.Warn("resolving the action's entity failed; recording the action unlinked",
 				"conversation", info.ConversationID, "action", act.Action, "target", act.Target, "error", about.err)
 		case entity != nil:
-			about.entityID = entity.ID
+			about.entityID, about.entityKind = entity.ID, entity.Kind
 		}
 	}
 	act.EntityID = about.entityID
+	// GitHub numbers pull requests and issues in one sequence and serves both
+	// through the issue endpoints, so the endpoint a writer named its object
+	// kind from does not say which this one is. The entity does.
+	if act.Provider == domain.ProviderGitHub && act.EntityID != "" &&
+		(act.ObjectKind == domain.ObjectKindPullRequest || act.ObjectKind == domain.ObjectKindIssue) {
+		if kind := domain.GitHubEntityObjectKind(about.entityKind); kind != "" {
+			act.ObjectKind = kind
+		}
+	}
 	if act.EntityID == "" {
 		act.RepositoryID = resolveActionRepository(ctx, stores, info, act, github)
 	}
