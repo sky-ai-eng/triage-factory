@@ -451,7 +451,7 @@ export function useConversationDetail(conversationID: string | undefined): Conve
       .then((data) => {
         if (cancelled || !data?.updated) return
         return apiJSON<Conversation>(`/api/agent/conversations/${conversationID}`).then((row) => {
-          if (!cancelled && conversationID === lastConversationIDRef.current) setConversation(row)
+          if (!cancelled) setConversation(row)
         })
       })
       .catch(() => {})

@@ -829,4 +829,40 @@ describe('useConversationDetail deliverable refresh', () => {
       expect(urlsEndingWith(fetchMock, `/conversations/${CONVERSATION_ID}`)).toHaveLength(2),
     )
   })
+
+  it('discards a refresh answer for a conversation the page has left', async () => {
+    // r1's refresh is still in flight when the page moves to r2. Its answer
+    // reports a transition, but re-reading and installing r1's row now would
+    // put the wrong run's status on r2's page.
+    const fetchMock = mockFetch()
+    const base = fetchMock.getMockImplementation()!
+    const r1Refresh = deferred<{ updated: number }>()
+    fetchMock.mockImplementation((url: string) => {
+      if (url === '/api/agent/conversations/r1/deliverables/refresh') {
+        return Promise.resolve({ ok: true, status: 200, ...jsonBody(r1Refresh.promise) })
+      }
+      if (url === '/api/agent/conversations/r1') {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          ...jsonBody(conversation({ Status: 'failed' })),
+        })
+      }
+      return base(url)
+    })
+
+    const { rerender } = render(<RefreshProbe id="r1" />)
+    await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('failed'))
+    rerender(<RefreshProbe id="r2" />)
+    await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('running'))
+    const r1Reads = urlsEndingWith(fetchMock, '/conversations/r1').length
+
+    await act(async () => {
+      r1Refresh.settle({ updated: 1 })
+      // A macrotask, so the whole answer chain has run before the assertions.
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    expect(urlsEndingWith(fetchMock, '/conversations/r1')).toHaveLength(r1Reads)
+    expect(screen.getByTestId('status').textContent).toBe('running')
+  })
 })
