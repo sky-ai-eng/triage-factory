@@ -80,14 +80,15 @@ const (
 	EventGitHubPRLabelRemoved = "github:pr:label_removed"
 
 	// PR state events.
-	EventGitHubPRMerged         = "github:pr:merged"
-	EventGitHubPRClosed         = "github:pr:closed"
-	EventGitHubPROpened         = "github:pr:opened"
-	EventGitHubPRReadyForReview = "github:pr:ready_for_review"
-	EventGitHubPRNewCommits     = "github:pr:new_commits"
-	EventGitHubPRConflicts      = "github:pr:conflicts"
-	EventGitHubPRMentioned      = "github:pr:mentioned"
-	EventGitHubPRBodyUpdated    = "github:pr:body_updated"
+	EventGitHubPRMerged            = "github:pr:merged"
+	EventGitHubPRClosed            = "github:pr:closed"
+	EventGitHubPROpened            = "github:pr:opened"
+	EventGitHubPRReadyForReview    = "github:pr:ready_for_review"
+	EventGitHubPRNewCommits        = "github:pr:new_commits"
+	EventGitHubPRConflicts         = "github:pr:conflicts"
+	EventGitHubPRConflictsResolved = "github:pr:conflicts_resolved"
+	EventGitHubPRMentioned         = "github:pr:mentioned"
+	EventGitHubPRBodyUpdated       = "github:pr:body_updated"
 
 	// "Someone other than TF commented in a PR's conversation." One event per
 	// poll however many comments landed, naming the newest and every author.
@@ -297,6 +298,7 @@ func AllEventTypes() []EventType {
 		{ID: EventGitHubPRNewCommits, Source: "github", Category: "pr", Label: "New Commits", Description: "A tracked PR has new commits since the last poll"},
 		{ID: EventGitHubPRBodyUpdated, Source: "github", Category: "pr", Label: "PR Body Updated", Description: "The body of a tracked pull request was edited or cleared"},
 		{ID: EventGitHubPRConflicts, Source: "github", Category: "pr", Label: "Merge Conflicts", Description: "A PR has merge conflicts"},
+		{ID: EventGitHubPRConflictsResolved, Source: "github", Category: "pr", Label: "Conflicts Resolved", Description: "A PR's merge conflicts were resolved"},
 		{ID: EventGitHubPRReadyForReview, Source: "github", Category: "pr", Label: "Ready for Review", Description: "A draft PR was marked ready for review"},
 		{ID: EventGitHubPRMentioned, Source: "github", Category: "pr", Label: "Mentioned", Description: "You were @mentioned in a PR"},
 		{ID: EventGitHubPRCommented, Source: "github", Category: "pr", Label: "New Comment", Description: "Someone other than Triage Factory commented in a PR's conversation (one event per poll, naming every commenter)"},

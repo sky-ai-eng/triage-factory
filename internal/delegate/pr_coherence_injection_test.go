@@ -419,6 +419,29 @@ func TestHandlePRCoherence_MissingQualifiersDropTheirClause(t *testing.T) {
 	})
 }
 
+// TestHandlePRCoherence_ConflictsResolvedNote: the note other runs on the
+// pull request get when its conflicts clear, naming the head it was observed
+// at when the event carries one.
+func TestHandlePRCoherence_ConflictsResolvedNote(t *testing.T) {
+	for _, tc := range []struct {
+		name, headSHA, want string
+	}{
+		{"WithHead", "0123456789abcdef", "PR #7 (o/r) is no longer in GitHub's CONFLICTING merge state at 0123456789ab."},
+		{"WithoutHead", "", "PR #7 (o/r) is no longer in GitHub's CONFLICTING merge state."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, conversationID, _, source := coherenceFixture(t, domain.EventGitHubPRConflictsResolved, events.GitHubPRConflictsResolvedMetadata{
+				Repo: "o/r", PRNumber: 7, HeadSHA: tc.headSHA,
+			})
+			s.HandlePRCoherence(coherenceDisposition(t, source, ""))
+			got := flushOne(t, s, conversationID)
+			if len(got) != 1 || got[0].Body != tc.want {
+				t.Fatalf("notes = %+v, want one with body %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestHandlePRCoherence_RecordsProvenance: the note's message row names the
 // event it was composed from, on both the staged and the live path, so a
 // later reader can resolve a note back to its cause without parsing the body.

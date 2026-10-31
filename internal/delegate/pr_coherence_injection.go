@@ -71,6 +71,13 @@ func parsePRCoherenceEvent(evt *domain.Event) (prCoherenceEvent, bool) {
 		// The transition into CONFLICTING is itself the news; the head only
 		// says where it was observed.
 		complete = true
+	case domain.EventGitHubPRConflictsResolved:
+		var meta events.GitHubPRConflictsResolvedMetadata
+		if json.Unmarshal([]byte(evt.MetadataJSON), &meta) != nil {
+			return parsed, false
+		}
+		parsed = prCoherenceEvent{repo: meta.Repo, repositoryID: meta.RepositoryID, prNumber: meta.PRNumber, headSHA: meta.HeadSHA}
+		complete = true
 	default:
 		return parsed, false
 	}
@@ -104,6 +111,8 @@ func (p prCoherenceEvent) injectionBody(eventType string) string {
 		return fmt.Sprintf("CI check %q is now %s on %s%s. Reconcile this recovery with any CI-fix work in progress.", p.checkName, p.conclusion, target, at)
 	case domain.EventGitHubPRConflicts:
 		return fmt.Sprintf("%s is now in GitHub's CONFLICTING merge state%s. Refresh the base and resolve the merge conflicts before finalizing.", target, at)
+	case domain.EventGitHubPRConflictsResolved:
+		return fmt.Sprintf("%s is no longer in GitHub's CONFLICTING merge state%s.", target, at)
 	default:
 		return ""
 	}
@@ -262,8 +271,9 @@ func (s *Spawner) reviewsAnchoredAtHead(ctx context.Context, orgID, entityID, he
 }
 
 var coherenceEventTypes = map[string]struct{}{
-	domain.EventGitHubPRNewCommits:    {},
-	domain.EventGitHubPRCICheckFailed: {},
-	domain.EventGitHubPRCICheckPassed: {},
-	domain.EventGitHubPRConflicts:     {},
+	domain.EventGitHubPRNewCommits:        {},
+	domain.EventGitHubPRCICheckFailed:     {},
+	domain.EventGitHubPRCICheckPassed:     {},
+	domain.EventGitHubPRConflicts:         {},
+	domain.EventGitHubPRConflictsResolved: {},
 }

@@ -27,7 +27,7 @@ most one active task exists per entity, event type and `dedup_key`.
 | **Changes Requested** | `github:pr:review_changes_requested` | A review requesting changes was submitted — see [Reviews](#reviews) | — |
 | **Review: Commented** | `github:pr:review_commented` | A review with comments only was submitted, a reply in a review thread included — see [Reviews](#reviews) | — |
 | **CI Check Failed** | `github:pr:ci_check_failed` | A check run on the head commit completes with `failure`, `timed_out`, `cancelled` or `action_required`. One event per check run; a check run already failing last cycle, by id, does not emit again, and a re-run is a new check run | — |
-| **Merge Conflicts** | `github:pr:conflicts` | `mergeable` changes to `CONFLICTING` | — |
+| **Merge Conflicts** | `github:pr:conflicts` | `mergeable` changes to `CONFLICTING`; an `UNKNOWN` reading in between keeps the last known value | — |
 | **Ready for Review** | `github:pr:ready_for_review` | `isDraft` changes from `true` to `false` | — |
 | **Label Added** | `github:pr:label_added` | A label is added. Labels are names here — see [Labels](#labels) | label name |
 | **Label Removed** | `github:pr:label_removed` | A label is removed | label name |
@@ -42,6 +42,7 @@ most one active task exists per entity, event type and `dedup_key`.
 | **Review: Dismissed** | `github:pr:review_dismissed` | A reviewer's latest review was dismissed — see [Reviews](#reviews) | — |
 | **Review Request Removed** | `github:pr:review_request_removed` | A reviewer TF knows drops off the review requests, because they reviewed or the request was withdrawn. Closes that reviewer's `review_requested` task, keyed by id or by handle | keyed as `review_requested` |
 | **CI Check Passed** | `github:pr:ci_check_passed` | A check run completes with any other conclusion (`success`, `neutral`, `skipped`, `stale`) and was not already passing | — |
+| **Conflicts Resolved** | `github:pr:conflicts_resolved` | `mergeable` changes from `CONFLICTING` to `MERGEABLE`; an `UNKNOWN` reading in between keeps the last known value. Closes the pull request's conflicts task | — |
 | **New Commits** | `github:pr:new_commits` | The head commit changes | — |
 | **PR Body Updated** | `github:pr:body_updated` | The complete PR body changes, including clearing it | — |
 | **PR Merged** | `github:pr:merged` | `merged` changes to `true` | — |

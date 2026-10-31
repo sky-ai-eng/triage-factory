@@ -89,6 +89,11 @@ const EVENT_DISPLAY: Record<string, EventInfo> = {
     description: 'A PR has merge conflicts',
     color: 'bg-red-500/10 text-red-600',
   },
+  'github:pr:conflicts_resolved': {
+    label: 'Conflicts Resolved',
+    description: "A PR's merge conflicts were resolved",
+    color: 'bg-emerald-500/10 text-emerald-700',
+  },
   'github:pr:ready_for_review': {
     label: 'Ready for Review',
     description: 'A draft PR was marked ready for review',

@@ -26,7 +26,14 @@ import (
 // reads when the pass event routes).
 func seedPRCheckRuns(t *testing.T, database *sql.DB, entityID string, runs ...domain.CheckRun) {
 	t.Helper()
-	snap, err := json.Marshal(domain.PRSnapshot{CheckRuns: runs})
+	seedPRSnapshot(t, database, entityID, domain.PRSnapshot{CheckRuns: runs})
+}
+
+// seedPRSnapshot writes snapshot as the entity's PR snapshot, standing in for
+// the tracker's post-refresh commit.
+func seedPRSnapshot(t *testing.T, database *sql.DB, entityID string, snapshot domain.PRSnapshot) {
+	t.Helper()
+	snap, err := json.Marshal(snapshot)
 	if err != nil {
 		t.Fatalf("marshal snapshot: %v", err)
 	}
