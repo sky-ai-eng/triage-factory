@@ -136,23 +136,6 @@ func resolveActivityProvider(v *httpx.Validation, raw string) string {
 	return provider
 }
 
-// decodeArtifactActivityPage reads and validates an artifacts feed body,
-// writing the 400 itself. ok is false once it has answered.
-func decodeArtifactActivityPage(w http.ResponseWriter, r *http.Request) (db.ArtifactListOpts, httpx.Page, bool) {
-	var req artifactActivityListRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
-		return db.ArtifactListOpts{}, httpx.Page{}, false
-	}
-	var v httpx.Validation
-	opts := resolveArtifactActivityFilters(&v, req)
-	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(opts), 0)
-	if v.Flush(w, http.StatusBadRequest) {
-		return db.ArtifactListOpts{}, httpx.Page{}, false
-	}
-	opts.Limit, opts.Offset, opts.CountOnly = page.Limit, page.Offset, page.CountOnly
-	return opts, page, true
-}
-
 // artifactKeys returns what a deliverable carries when it is the same object
 // as one of items (domain.ArtifactDeliverableKeys). ok is false when there is
 // nothing to match, so the reader skips the deliverable read.
@@ -178,10 +161,17 @@ func (h *usageHandler) handleUsageTeamArtifacts(w http.ResponseWriter, r *http.R
 	if !ok {
 		return
 	}
-	opts, page, ok := decodeArtifactActivityPage(w, r)
-	if !ok {
+	var req artifactActivityListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
+	var v httpx.Validation
+	opts := resolveArtifactActivityFilters(&v, req)
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(opts), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+	opts.Limit, opts.Offset, opts.CountOnly = page.Limit, page.Offset, page.CountOnly
 
 	var (
 		items        []domain.ObjectActivity
@@ -224,10 +214,17 @@ func (h *usageHandler) handleUsageOrgArtifacts(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
-	opts, page, ok := decodeArtifactActivityPage(w, r)
-	if !ok {
+	var req artifactActivityListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
+	var v httpx.Validation
+	opts := resolveArtifactActivityFilters(&v, req)
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(opts), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+	opts.Limit, opts.Offset, opts.CountOnly = page.Limit, page.Offset, page.CountOnly
 
 	var (
 		items        []domain.ObjectActivity
