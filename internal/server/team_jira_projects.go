@@ -265,13 +265,8 @@ func (s *Server) handleTeamJiraProjectsPut(w http.ResponseWriter, r *http.Reques
 			at[project.ID] = i
 			next[i].JiraProjectID = project.ID
 		}
-		teamSet, err := tx.Teams.GetSettings(r.Context(), teamID)
-		if err != nil {
-			return fmt.Errorf("load team settings: %w", err)
-		}
-		teamSet.JiraProjects = jiraProjectIDsFromConfigs(next)
-		if _, err := tx.Teams.UpdateSettings(r.Context(), teamID, teamSet); err != nil {
-			return fmt.Errorf("save team settings: %w", err)
+		if _, err := tx.Teams.SetJiraProjectOrder(r.Context(), teamID, jiraProjectIDsFromConfigs(next)); err != nil {
+			return fmt.Errorf("save jira project order: %w", err)
 		}
 		// With no Jira site there is nothing stored to replace: every read
 		// confines itself to the site, and a set naming a project never gets

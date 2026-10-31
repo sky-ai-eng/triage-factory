@@ -225,14 +225,10 @@ func (s *Server) saveTeamLinearTeams(ctx context.Context, orgID, userID, teamID 
 			prev, workspaceID, sameLinearTeamRules, "Linear teams"); err != nil {
 			return err
 		}
-		teamSet, err := tx.Teams.GetSettings(ctx, teamID)
-		if err != nil {
-			return fmt.Errorf("load team settings: %w", err)
+		if _, err := tx.Teams.SetLinearTeamOrder(ctx, teamID, order); err != nil {
+			return fmt.Errorf("save linear team order: %w", err)
 		}
-		teamSet.LinearTeams = order
-		if _, err := tx.Teams.UpdateSettings(ctx, teamID, teamSet); err != nil {
-			return fmt.Errorf("save team settings: %w", err)
-		}
+		var err error
 		if stored, err = tx.LinearTeamRules.ReplaceForTeam(ctx, teamID, workspaceID, next); err != nil {
 			return fmt.Errorf("save linear rules: %w", err)
 		}

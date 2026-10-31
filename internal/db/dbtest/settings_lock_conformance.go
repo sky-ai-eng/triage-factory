@@ -28,12 +28,7 @@ func RunSettingsLockConformance(t *testing.T, mk SettingsLockFactory) {
 				if err := tx.Teams.LockSettings(ctx, teamID); err != nil {
 					return err
 				}
-				set, err := tx.Teams.GetSettings(ctx, teamID)
-				if err != nil {
-					return err
-				}
-				set.LinearTeams = []string{"written-by-first"}
-				if _, err := tx.Teams.UpdateSettings(ctx, teamID, set); err != nil {
+				if _, err := tx.Teams.SetLinearTeamOrder(ctx, teamID, []string{"written-by-first"}); err != nil {
 					return err
 				}
 				close(locked)
