@@ -1,7 +1,6 @@
 package server
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -58,7 +57,7 @@ type predicateCatalog struct {
 // reports their faults.
 var predicateCatalogs = []*predicateCatalog{
 	{
-		source: "jira", fields: []string{"status_id_in", "new_status_id_in", "old_status_id_in"},
+		source: "jira", fields: events.JiraCatalogFields(events.JiraStatusCatalog),
 		hint: catalogHint("a status in the workflow of a Jira project", "status", "jira/projects/{jira_id}/statuses"),
 		ids: func(c *catalogCheck) ([]string, error) {
 			return eachTracked(c.jiraRefs, c.jira, jira.IsNotFound, func(client *jira.Client, ref string) ([]string, error) {
@@ -68,7 +67,7 @@ var predicateCatalogs = []*predicateCatalog{
 		},
 	},
 	{
-		source: "jira", fields: []string{"issue_type_id_in"},
+		source: "jira", fields: events.JiraCatalogFields(events.JiraIssueTypeCatalog),
 		hint: catalogHint("an issue type of a Jira project", "issue type", "jira/projects/{jira_id}/issue-types"),
 		ids: func(c *catalogCheck) ([]string, error) {
 			return eachTracked(c.jiraRefs, c.jira, jira.IsNotFound, func(client *jira.Client, ref string) ([]string, error) {
@@ -79,7 +78,7 @@ var predicateCatalogs = []*predicateCatalog{
 	},
 	{
 		// Priorities are the Jira instance's, not a project's.
-		source: "jira", fields: []string{"priority_id_in", "new_priority_id_in", "old_priority_id_in"},
+		source: "jira", fields: events.JiraCatalogFields(events.JiraPriorityCatalog),
 		hint: "is not the id of one of this organization's Jira priorities " +
 			"(it takes a priority id from POST /api/orgs/{org_id}/jira/priorities/list, not the priority name)",
 		ids: func(c *catalogCheck) ([]string, error) {
@@ -275,7 +274,7 @@ func (c *catalogCheck) readTracked(tx db.TxStores) error {
 		if err != nil {
 			return fmt.Errorf("read team tracked jira projects: %w", err)
 		}
-		c.jiraRefs = idsOf(projects, func(p domain.JiraProjectStatusRules) string { return cmp.Or(p.ProjectExternalID, p.ProjectKey) })
+		c.jiraRefs = idsOf(projects, domain.JiraProjectStatusRules.ProjectRef)
 	}
 	teams, err := tx.LinearTeamRules.ListForTeam(c.ctx, c.teamID, domain.EntityScope("linear", settings))
 	if err != nil {

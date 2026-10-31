@@ -10,6 +10,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/jiradrift"
 	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
@@ -217,7 +218,7 @@ func (s *Server) handleTeamJiraProjectsPut(w http.ResponseWriter, r *http.Reques
 	// projects being added must exist, and status ids in a rule that changed
 	// must be in that project's workflow — the same fetch resolving each id to
 	// its display name.
-	next, ok := s.gateJiraProjects(w, r, orgID, site, wishes)
+	next, workflows, ok := s.gateJiraProjects(w, r, orgID, site, wishes)
 	if !ok {
 		return
 	}
@@ -316,6 +317,14 @@ func (s *Server) handleTeamJiraProjectsPut(w http.ResponseWriter, r *http.Reques
 		go s.onJiraChanged(orgID)
 	}
 	resolveJiraMirrorsOnSave(context.WithoutCancel(r.Context()), orgID, teamID, prev, next)
+	// The gate read the workflow of every project with a changed rule, which is
+	// the read the drift check makes, so a save that removed a status Jira no
+	// longer has resolves the team's notification now.
+	read := make(map[string][]domain.JiraStatusRef, len(workflows))
+	for i, workflow := range workflows {
+		read[next[i].JiraProjectID] = workflow
+	}
+	jiradrift.RulesSaved(context.WithoutCancel(r.Context()), orgID, teamID, prev, next, read)
 
 	writeJSON(w, http.StatusOK, teamJiraProjectsResponse{JiraProjects: toJiraProjectSettings(next)})
 }

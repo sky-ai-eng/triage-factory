@@ -540,5 +540,8 @@ func (a *App) newPollerManager() *poller.Manager {
 	// measurable from the other end; the router's drop beside it is what makes
 	// "no tasks" true for every producer at once.
 	m.EventSources = a.stores.OrgEventSources
+	// The Jira task rules and triggers the hourly drift check reads beside the
+	// status rules.
+	m.EventHandlers = a.stores.EventHandlers
 	return m
 }

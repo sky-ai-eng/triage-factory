@@ -90,15 +90,6 @@ func (p projectPlan) label() string {
 	return p.wish.jiraID
 }
 
-// statusRef names the project to Jira's status read: by its project id when
-// one is known, which a key rename does not move, else by its key.
-func (p projectPlan) statusRef() string {
-	if p.row.ProjectExternalID != "" {
-		return p.row.ProjectExternalID
-	}
-	return p.row.ProjectKey
-}
-
 // changedIDs is every status id this plan still has to resolve, across all four
 // rules — the one place the rule set is enumerated for the "does this project
 // need Jira at all?" question.
@@ -126,12 +117,15 @@ func (p projectPlan) needsJira() bool {
 //
 // site is the org's Jira site, which every row added here is registered on.
 //
+// Beside the rows it returns, by the index of each row, the statuses of every
+// project whose workflow it read: every project with a rule that changed.
+//
 // It writes the response and returns false when the write must not proceed.
 func (s *Server) gateJiraProjects(
 	w http.ResponseWriter, r *http.Request,
 	orgID, site string,
 	wishes []jiraProjectWish,
-) ([]domain.JiraProjectStatusRules, bool) {
+) ([]domain.JiraProjectStatusRules, map[int][]domain.JiraStatusRef, bool) {
 	// First pass: settle what each project needs from Jira, without asking yet.
 	// A set that needs nothing must not resolve a credential, let alone make a
 	// call — that is what keeps the door open while Jira is down.
@@ -182,7 +176,7 @@ func (s *Server) gateJiraProjects(
 		for _, p := range plans {
 			out = append(out, p.row)
 		}
-		return out, true
+		return out, nil, true
 	}
 
 	// The client is resolved only now that something needs verifying, so an
@@ -191,17 +185,18 @@ func (s *Server) gateJiraProjects(
 	client, ok := s.jiraSystemClient(w, r, orgID, "settings/team/jira-projects",
 		"Jira is not connected for this organization, so a project or a status mapping cannot be added")
 	if !ok {
-		return nil, false
+		return nil, nil, false
 	}
 	// A connected credential implies a usable site, so this holds only if the
 	// two ever disagree on what a usable base URL is.
 	if site == "" {
 		writeNotConfigured(w, "Jira has no site configured for this organization, so a project or a status mapping cannot be added")
-		return nil, false
+		return nil, nil, false
 	}
 
 	var v httpx.Validation
 	out := make([]domain.JiraProjectStatusRules, 0, len(plans))
+	workflows := map[int][]domain.JiraStatusRef{}
 	for i := range plans {
 		p := &plans[i]
 		base := fmt.Sprintf("jira_projects[%d]", p.wish.index)
@@ -216,7 +211,7 @@ func (s *Server) gateJiraProjects(
 			}
 			if err != nil {
 				writeJiraGateStopped(w, &v, orgID, "Jira project "+p.wish.jiraID, err)
-				return nil, false
+				return nil, nil, false
 			}
 			p.row.ProjectKey = normalizeJiraProjectKey(project.Key)
 			p.row.ProjectName = project.Name
@@ -228,15 +223,18 @@ func (s *Server) gateJiraProjects(
 		// One fetch per project with a changed rule, shared by all four rules
 		// and doing both jobs at once: it is the gate, and it is where every
 		// display name comes from.
-		statuses, err := client.ProjectStatuses(r.Context(), p.statusRef())
+		statuses, err := client.ProjectStatuses(r.Context(), p.row.ProjectRef())
 		if err != nil {
 			writeJiraGateStopped(w, &v, orgID, "the statuses of project "+p.label(), err)
-			return nil, false
+			return nil, nil, false
 		}
 		byID := make(map[string]domain.JiraStatusRef, len(statuses))
+		workflow := make([]domain.JiraStatusRef, 0, len(statuses))
 		for _, st := range statuses {
 			byID[st.ID] = domain.JiraStatusRef{ID: st.ID, Name: st.Name}
+			workflow = append(workflow, byID[st.ID])
 		}
+		workflows[len(out)] = workflow
 		resolve := func(ids []string, field string) []domain.JiraStatusRef {
 			refs := make([]domain.JiraStatusRef, 0, len(ids))
 			for _, id := range ids {
@@ -266,9 +264,9 @@ func (s *Server) gateJiraProjects(
 		out = append(out, row)
 	}
 	if v.Flush(w, http.StatusBadRequest) {
-		return nil, false
+		return nil, nil, false
 	}
-	return out, true
+	return out, workflows, true
 }
 
 // resolveOne resolves a canonical id. An empty id is an unset canonical — an

@@ -2957,10 +2957,11 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 	// above that reached nothing say nothing about any project, so they Sync
 	// nothing.
 	//
-	// TODO(TFAC-1249): a salvaged query is not this kind, since it keeps the
-	// project producing work, but the statuses salvageJiraQuery dropped are
-	// rules naming a status Jira no longer has, and only the log line above and
-	// the settings board say so. They belong to status drift's detection.
+	// A salvaged query is not this kind, since it keeps the project producing
+	// work. The statuses salvageJiraQuery dropped are a rule naming a status
+	// the workflow no longer has, which is jira.status_drift: the poller's
+	// drift check reads the same workflow and raises it for the teams whose
+	// rules name them.
 	failing, keep := t.discoveryStreaks().observe(t.orgID, projectOutcomes)
 	kinds.JiraDiscoveryFailing.Sync(ctx, t.orgID, jiraProjectParams(projects, failing), jiraProjectParams(projects, keep)...)
 
@@ -2993,8 +2994,8 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 // entirely and rerunning the same query would only repeat it), or nothing at
 // all survives — an inclusion set narrowed to empty is an unfiltered query,
 // never a narrower one. The stored rule is never edited: a status that
-// vanished upstream is the team's to remove, and the settings board is where
-// they are told.
+// vanished upstream is the team's to remove, and the settings board and the
+// team admins' jira.status_drift notification are where they are told.
 //
 // project names the project by Jira's id or, unresolved, by its key.
 func (t *Tracker) salvageJiraQuery(

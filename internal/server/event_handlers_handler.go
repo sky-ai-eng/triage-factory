@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -919,6 +920,7 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 		internalError(w, "event_handlers", err)
 		return
 	}
+	eh.recheckJiraDrift(context.WithoutCancel(r.Context()), orgID, userID, *existing, stored)
 	writeJSON(w, http.StatusOK, stored)
 }
 
@@ -965,6 +967,7 @@ func (eh *eventHandlersHandler) handleEventHandlerDelete(w http.ResponseWriter, 
 		notFound(w, "event handler")
 		return
 	}
+	resolveJiraDriftOnDelete(context.WithoutCancel(r.Context()), orgID, *existing)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
@@ -1123,6 +1126,7 @@ func (eh *eventHandlersHandler) handleEventHandlerPromote(w http.ResponseWriter,
 		internalError(w, "event_handlers", err)
 		return
 	}
+	eh.recheckJiraDrift(context.WithoutCancel(r.Context()), orgID, userID, *existing, promoted)
 	writeJSON(w, http.StatusOK, promoted)
 }
 
