@@ -39,8 +39,7 @@ type Stores interface {
 	// UpsertDeliverable writes back one deliverable whose state this teardown flipped.
 	UpsertDeliverable(ctx context.Context, orgID string, a domain.Deliverable) error
 	// RecordExternalAction appends the audit row for a GitHub write this
-	// teardown is about to make. The adapter sets the row's PerformedBy: the
-	// person whose close it runs for, or TF itself.
+	// teardown is about to make.
 	RecordExternalAction(ctx context.Context, orgID string, act domain.ExternalAction) error
 	// Entity and Repository are the point reads (db.EntityStore.Get,
 	// db.RepositoryStore.Get) a draft PR's pull request is resolved through:
@@ -78,9 +77,11 @@ type Deps interface {
 // resolution — a review is staged TF-side, so there is no GitHub object to
 // retire and no org-credential write to audit.
 //
-// actorUserID is the human who authorized the close, recorded on each audit
-// row. Empty is the autonomous spelling: an event-driven close has no actor,
-// and the row says so rather than naming whoever happened to be nearby.
+// performedBy names who performs the close on each audit row: a person
+// closing the card, or TF itself for an event-driven close. actorUserID is the
+// human who authorized it. Empty is the autonomous spelling: an event-driven
+// close has no actor, and the row says so rather than naming whoever happened
+// to be nearby.
 //
 // This never flips conversations.status. The caller stops the task's live runs
 // one step ahead of it, which owns that transition; a terminal conversation
@@ -89,7 +90,7 @@ type Deps interface {
 // The returned error is the batch's: the deliverables are unresolved and a retry
 // is expected. A GitHub close that fails is not an error — the deliverable is
 // already marked closed and reconciliation retires the object later.
-func Teardown(ctx context.Context, deps Deps, orgID, taskID, actorUserID string) error {
+func Teardown(ctx context.Context, deps Deps, orgID, taskID, performedBy, actorUserID string) error {
 	// One resolver for the whole pass, read once and threaded through both
 	// halves. An adapter's resolver is swapped under it on a GitHub config
 	// change, and the two halves are two views of the same act: the credential
@@ -148,7 +149,7 @@ func Teardown(ctx context.Context, deps Deps, orgID, taskID, actorUserID string)
 				if err := st.UpsertDeliverable(ctx, orgID, closed); err != nil {
 					return fmt.Errorf("upsert closed draft pr: %w", err)
 				}
-				act := domain.DeliverableAction(&pr, actorUserID, domain.ActionPRClosed,
+				act := domain.DeliverableAction(&pr, performedBy, actorUserID, domain.ActionPRClosed,
 					domain.DeliverableStatePRDraft, domain.DeliverableStatePRClosed,
 					credentialFor(credentials, pr.ID))
 				if err := st.RecordExternalAction(ctx, orgID, act); err != nil {

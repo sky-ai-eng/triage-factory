@@ -1540,7 +1540,7 @@ func (s *Server) finalizeRequeue(r *http.Request, orgID, userID, taskID string, 
 // fatal: the calling handler has already flipped the task to its new state, and
 // the deliverables stay unresolved for a retry on the next close.
 func (s *Server) teardownTaskDeliverables(ctx context.Context, orgID, userID, taskID string) {
-	if err := deliverableteardown.Teardown(ctx, userTeardownDeps{s: s, userID: userID}, orgID, taskID, userID); err != nil {
+	if err := deliverableteardown.Teardown(ctx, userTeardownDeps{s: s, userID: userID}, orgID, taskID, domain.PerformedByPerson, userID); err != nil {
 		approvalDiscardLog.Error("task deliverable teardown failed; deliverables left unresolved for retry", "task", taskID, "error", err)
 	}
 }
@@ -1582,10 +1582,7 @@ func (t txTeardownStores) UpsertDeliverable(ctx context.Context, orgID string, a
 	return err
 }
 
-// RecordExternalAction files act as the person's who closed the task: this
-// adapter runs the teardown their close drives.
 func (t txTeardownStores) RecordExternalAction(ctx context.Context, orgID string, act domain.ExternalAction) error {
-	act.PerformedBy = domain.PerformedByPerson
 	return t.tx.ExternalActions.Record(ctx, orgID, act)
 }
 

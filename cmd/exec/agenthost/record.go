@@ -39,9 +39,9 @@ func withWriteInfo(
 // stampActionIdentityInfo fills the conversation/org/team/actor common to
 // every bot-attributed action from info, and names the run's agent as its
 // performer. The action-specific fields (provider, action, target, credential,
-// from/to, dedup) are set by the caller. Every row this package writes passes
-// through here, and the performer is overwritten rather than defaulted, like
-// the identity beside it: a relayed row cannot claim a person performed it.
+// from/to, dedup) are set by the caller. The performer is overwritten rather
+// than defaulted, like the identity beside it: a relayed row cannot claim a
+// person performed it.
 func stampActionIdentityInfo(act *domain.ExternalAction, info ConversationInfo) {
 	act.OrgID = info.OrgID
 	act.TeamID = info.TeamID

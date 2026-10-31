@@ -578,18 +578,16 @@ type ExternalActionListOpts struct {
 
 // DeliverableAction builds the external_actions row for a deliverable-backed GitHub
 // write. ConversationID is the drafting conversation (art.ConversationID),
-// actorUserID is the human who authorized it (empty for an autonomous one),
+// performedBy says who made the write (a person's approval, or TF's own
+// teardown: both build their rows here, so the caller names it), actorUserID
+// is the human who authorized it (empty for an autonomous one),
 // team_id is the deliverable's team, and the object coordinates come from the
 // deliverable: the entity it is about (art.EntityID), or, for a branch, the
 // registry row its key names. from/to carry the lifecycle transition
 // (draft→open, pending→submitted, …). credential is the org credential the
 // write is made under, classified by the caller before it opens whatever
 // transaction this row lands in.
-//
-// PerformedBy is left empty: a person's approval and TF's own teardown both
-// build their rows here, so the caller sets it, and the store refuses the row
-// until it does.
-func DeliverableAction(art *Deliverable, actorUserID, action, from, to, credential string) ExternalAction {
+func DeliverableAction(art *Deliverable, performedBy, actorUserID, action, from, to, credential string) ExternalAction {
 	// A PR deliverable carries its html_url; a review deliverable carries none (its
 	// target is the PR), so fall back to the PR web URL from the target on the
 	// deliverable's host — the audit row links somewhere rather than render
@@ -613,6 +611,7 @@ func DeliverableAction(art *Deliverable, actorUserID, action, from, to, credenti
 		ToState:        to,
 		ConversationID: art.ConversationID,
 		ActorUserID:    actorUserID,
+		PerformedBy:    performedBy,
 		Credential:     credential,
 	}
 	if act.EntityID == "" {

@@ -1774,7 +1774,7 @@ func (s *Spawner) TeardownTaskDeliverablesSystem(ctx context.Context, orgID, tas
 	// task and never walks back here. WithoutCancel keeps the caller's values,
 	// so the writes stay inside the close's trace.
 	ctx = context.WithoutCancel(ctx)
-	if err := deliverableteardown.Teardown(ctx, systemTeardown{s: s}, orgID, taskID, ""); err != nil {
+	if err := deliverableteardown.Teardown(ctx, systemTeardown{s: s}, orgID, taskID, domain.PerformedBySystem, ""); err != nil {
 		delegateLog.Error("system deliverable teardown failed; deliverables left unresolved for retry",
 			"task", taskID, "org", orgID, "error", err)
 	}
@@ -1815,10 +1815,7 @@ func (d systemTeardown) UpsertDeliverable(ctx context.Context, orgID string, a d
 	return err
 }
 
-// RecordExternalAction files act as TF's own: this adapter runs the teardown
-// an event closing the task drives, which no person asked for.
 func (d systemTeardown) RecordExternalAction(ctx context.Context, orgID string, act domain.ExternalAction) error {
-	act.PerformedBy = domain.PerformedBySystem
 	return d.s.externalActions.RecordSystem(ctx, orgID, act)
 }
 

@@ -499,7 +499,7 @@ func (ah *deliverablesHandler) reviewApprove(w http.ResponseWriter, r *http.Requ
 				return fmt.Errorf("stamp CAS matched no row: deliverable %s is missing or no longer submitted", art.ID)
 			}
 			return tx.ExternalActions.Record(cleanupCtx, orgID,
-				personDeliverableAction(&submitted, userID, domain.ActionReviewSubmitted, domain.DeliverableStateReviewPending, domain.DeliverableStateReviewSubmitted, credential))
+				domain.DeliverableAction(&submitted, domain.PerformedByPerson, userID, domain.ActionReviewSubmitted, domain.DeliverableStateReviewPending, domain.DeliverableStateReviewSubmitted, credential))
 		})
 	}
 	if err := stamp(); err != nil {
