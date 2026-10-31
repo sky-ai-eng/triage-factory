@@ -21,11 +21,10 @@ var errNoRegistryRow = errors.New("no registry row the run may record against an
 const identityReadTimeout = 10 * time.Second
 
 // identities is the reader this client's identity reads go through: the
-// Server's, shared by every request of the run, or one of its own.
+// Server's, shared by every request of the run, or the one NewLocal built. A
+// client built any other way has none, and reads without caching (a nil
+// IdentityReader is a valid one).
 func (c *LocalClient) identities() *ghclient.IdentityReader {
-	if c.ghIdentities == nil {
-		c.ghIdentities = ghclient.NewIdentityReader()
-	}
 	return c.ghIdentities
 }
 

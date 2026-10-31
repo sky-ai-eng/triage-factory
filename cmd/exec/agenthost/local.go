@@ -69,9 +69,10 @@ type LocalClient struct {
 	ghCredential string
 
 	// ghIdentities reads what GitHub calls the objects this client's writes
-	// and addressed reads name (githubObject), caching each answer. The daemon
-	// hands every request the Server's one reader, so a run reads each
-	// repository once; nil until first use otherwise.
+	// and addressed reads name (githubObject), caching each answer. NewLocal
+	// builds one, and the daemon hands every request the Server's one reader,
+	// so a run reads each repository once. Set at construction and never
+	// written after, since one client can serve concurrent pushes.
 	ghIdentities *ghclient.IdentityReader
 
 	// ghClients memoizes the per-repo scoped GitHub client (+ identity) built
@@ -111,10 +112,11 @@ type LocalClient struct {
 // hands the per-socket run info here at request dispatch.
 func NewLocal(stores db.Stores, info ConversationInfo) *LocalClient {
 	return &LocalClient{
-		stores:    stores,
-		info:      info,
-		rt:        newDirectRuntime(stores, info),
-		gateWired: stores.TeamGitHubRepos != nil && stores.ConversationWorktrees != nil,
+		stores:       stores,
+		info:         info,
+		rt:           newDirectRuntime(stores, info),
+		gateWired:    stores.TeamGitHubRepos != nil && stores.ConversationWorktrees != nil,
+		ghIdentities: ghclient.NewIdentityReader(),
 	}
 }
 

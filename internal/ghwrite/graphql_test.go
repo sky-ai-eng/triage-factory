@@ -838,7 +838,7 @@ func TestGraphQLReviewCommentFamily(t *testing.T) {
 	// id is never filed as one: external_id holds one kind of id per object.
 	deleted, ok := Resolve(Observation{
 		Status:  200,
-		GraphQL: &GraphQLFacts{Fields: []string{"deletePullRequestReviewComment"}, Subject: "PRRC_kwReply"},
+		GraphQL: &GraphQLFacts{Fields: []string{"deletePullRequestReviewComment"}, Subject: "PRRC_kwReply", SubjectBound: true},
 	})
 	if !ok || deleted.ExternalID != "" || deleted.NodeID != "PRRC_kwReply" {
 		t.Errorf("delete = %+v (ok=%v), want no number and the node id the request named", deleted, ok)
@@ -929,24 +929,30 @@ func TestResolveGraphQL_ResponseLocatesTheObject(t *testing.T) {
 
 // TestResolveGraphQL_NodeIDIsNeverTheExternalID holds the rule across the whole
 // table: external_id carries one kind of id per object whichever transport the
-// act came through, so a node id the request named lands in NodeID and never
-// there.
+// act came through, so a node id the request's input is bound to lands in
+// NodeID and never there. A subject the input is not bound to lands in
+// neither.
 func TestResolveGraphQL_NodeIDIsNeverTheExternalID(t *testing.T) {
 	const subject = "N_kwSubject"
 	for name := range graphQLMutations {
-		shape, ok := Resolve(Observation{
-			Status:  200,
-			GraphQL: &GraphQLFacts{Fields: []string{name}, Subject: subject},
-		})
-		if !ok {
-			t.Errorf("%s did not resolve", name)
-			continue
-		}
-		if shape.ExternalID == subject {
-			t.Errorf("%s filed the request's node id as its external id", name)
-		}
-		if !shape.CreatesObject && shape.NodeID != subject {
-			t.Errorf("%s node id = %q, want the %q its request named", name, shape.NodeID, subject)
+		for _, bound := range []bool{true, false} {
+			shape, ok := Resolve(Observation{
+				Status:  200,
+				GraphQL: &GraphQLFacts{Fields: []string{name}, Subject: subject, SubjectBound: bound},
+			})
+			if !ok {
+				t.Errorf("%s did not resolve", name)
+				continue
+			}
+			if shape.ExternalID == subject {
+				t.Errorf("%s filed the request's node id as its external id", name)
+			}
+			switch {
+			case bound && !shape.CreatesObject && shape.NodeID != subject:
+				t.Errorf("%s node id = %q, want the %q its input is bound to", name, shape.NodeID, subject)
+			case !bound && shape.NodeID != "":
+				t.Errorf("%s node id = %q from a subject its input is not bound to, want none", name, shape.NodeID)
+			}
 		}
 	}
 }
@@ -988,6 +994,75 @@ func TestResolveGraphQL_SubjectKindNamesWhatTheSubjectIs(t *testing.T) {
 	}
 	if shape, ok := Classify("PUT", "/repos/acme/widgets/pulls/7/merge"); !ok || shape.SubjectKind != "" {
 		t.Errorf("a REST merge = %+v (ok=%v), want no subject kind: a REST path names its object by number", shape, ok)
+	}
+}
+
+// TestParseGraphQLRequest_SubjectIsBoundOnlyToTheInputTheMutationTakes: the
+// variables' node id names the object the mutation ran on only when the
+// document's single operation takes its input from $input, which is the form
+// gh sends. Every other way a request can carry a node id in its variables
+// leaves the subject unbound: arguments spelled inline beside a variable
+// naming something else, a second operation defining $input that the selected
+// one never reads, a hand-written top-level variable, and $input appearing
+// only inside a string or a comment.
+func TestParseGraphQLRequest_SubjectIsBoundOnlyToTheInputTheMutationTakes(t *testing.T) {
+	other := input(map[string]any{"pullRequestId": "PR_kwOther"})
+	tests := []struct {
+		name          string
+		query         string
+		operationName string
+		variables     any
+		want          bool
+	}{
+		{
+			name:      "gh's form",
+			query:     `mutation($input:ClosePullRequestInput!){closePullRequest(input:$input){pullRequest{id}}}`,
+			variables: other,
+			want:      true,
+		},
+		{
+			name:      "inline arguments",
+			query:     `mutation{closePullRequest(input:{pullRequestId:"PR_kwInline"}){clientMutationId}}`,
+			variables: other,
+		},
+		{
+			name: "another operation defines $input",
+			query: `mutation A{closePullRequest(input:{pullRequestId:"PR_kwInline"}){clientMutationId}}
+				mutation B($input:ClosePullRequestInput!){closePullRequest(input:$input){clientMutationId}}`,
+			operationName: "A",
+			variables:     other,
+		},
+		{
+			name:      "a top-level variable",
+			query:     `mutation($pullRequestId:ID!){closePullRequest(input:{pullRequestId:$pullRequestId}){clientMutationId}}`,
+			variables: map[string]any{"pullRequestId": "PR_kwOther"},
+		},
+		{
+			name:      "$input in a string",
+			query:     `mutation{closePullRequest(input:{pullRequestId:"$input"}){clientMutationId}}`,
+			variables: other,
+		},
+		{
+			name: "$input in a comment",
+			query: `mutation{ # $input
+				closePullRequest(input:{pullRequestId:"PR_kwInline"}){clientMutationId}}`,
+			variables: other,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			facts, ok := ParseGraphQLRequest(envelope(t, tc.query, tc.operationName, tc.variables))
+			if !ok || facts.Mutation() != "closePullRequest" || facts.Subject != "PR_kwOther" {
+				t.Fatalf("facts = %+v (ok=%v), want closePullRequest with the variables' node id as its subject", facts, ok)
+			}
+			if facts.SubjectBound != tc.want {
+				t.Errorf("subject bound = %v, want %v", facts.SubjectBound, tc.want)
+			}
+			shape, _ := classifyGraphQL(facts)
+			if shape.SubjectBound != tc.want {
+				t.Errorf("shape subject bound = %v, want %v", shape.SubjectBound, tc.want)
+			}
+		})
 	}
 }
 
@@ -1393,7 +1468,7 @@ func TestResolveGraphQL_RepoCreateIsLocatedByItsOwnURL(t *testing.T) {
 	// whose selection set returns no url.
 	archived, ok := Resolve(Observation{
 		Status:  200,
-		GraphQL: &GraphQLFacts{Fields: []string{"archiveRepository"}, Subject: "R_kwWidgets"},
+		GraphQL: &GraphQLFacts{Fields: []string{"archiveRepository"}, Subject: "R_kwWidgets", SubjectBound: true},
 	})
 	if !ok || archived.Target() != "R_kwWidgets" || archived.NodeID != "R_kwWidgets" || archived.ExternalID != "" {
 		t.Errorf("archive = %+v (ok=%v), want the node id as target and node id, and no external id", archived, ok)

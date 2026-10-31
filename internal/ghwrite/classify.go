@@ -82,8 +82,8 @@ type Shape struct {
 	ExternalID string
 
 	// NodeID is the GraphQL node id of the object acted on — the one a create
-	// made, read from its response, or the one any other GraphQL act named in
-	// its request. Empty where neither disclosed one.
+	// made, read from its response, or the one any other GraphQL act's input
+	// is bound to (SubjectBound). Empty where neither disclosed one.
 	NodeID string
 
 	// InReplyTo is the review comment a reply threads under, from the path. 0
@@ -103,12 +103,18 @@ type Shape struct {
 	// object properly (see resolveGraphQL).
 	Subject string
 
+	// SubjectBound reports that Subject is the object the mutation ran on
+	// (GraphQLFacts.SubjectBound). An unbound Subject is what the request's
+	// variables carried, which its document may not have used, and is a
+	// display value only.
+	SubjectBound bool
+
 	// SubjectKind is the entity kind (domain.EntityKindPullRequest or
 	// domain.EntityKindIssue) of the object a GraphQL mutation names as its
 	// subject, for a mutation whose subject is always the one or the other —
-	// closing a pull request, editing an issue. With it, the subject's node id
-	// is that object's identity and the write's observer has nothing to read
-	// for it. Empty for every REST shape and every other mutation.
+	// closing a pull request, editing an issue. With it, a bound subject's
+	// node id is that object's identity, and the write's observer reads only
+	// its repository. Empty for every REST shape and every other mutation.
 	SubjectKind string
 
 	// CreatesObject marks a shape whose response body names an object that did
@@ -141,11 +147,12 @@ type Shape struct {
 // the injector read for the object (Observation.Identity), so it is
 // deliberately preferred wherever the path supplies one.
 //
-// A GraphQL write that disclosed only a node id falls back to it. That target
-// creates no entity and links to nothing, which is the honest rendering of
-// what such a request actually said about its object — better than a repo the
-// row would be guessing at; when the node id is a pull request's or an
-// issue's (SubjectKind), the entity already carrying it is found by it.
+// A GraphQL write that disclosed only a node id falls back to it. The target
+// is display only and creates no entity: it is the honest rendering of what
+// such a request said about its object, better than a repo the row would be
+// guessing at. The audit row's entity comes from the injector's identity,
+// which uses the node id only when the input is bound to it (SubjectBound)
+// and the subject is a pull request or an issue (SubjectKind).
 func (s Shape) Target() string {
 	if s.Owner == "" || s.Repo == "" {
 		return s.Subject

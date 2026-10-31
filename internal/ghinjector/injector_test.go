@@ -1144,11 +1144,12 @@ func TestInjector_CreatedCommentNodeIDIsReadBack(t *testing.T) {
 // accepted write is reported with what GitHub calls its objects, read with the
 // run's real credential — the pull request's or issue's node id and kind and
 // its repository's id for a write that names one by number, the repository's
-// alone for one that names none. A GraphQL mutation is identified by the
-// object its response's url locates, never by the subject its request named,
-// which may not be what ran; one whose response locates nothing carries its
-// subject's node id, with nothing read. Each repository is read once per run,
-// and a refused write reads nothing.
+// alone for one that names none. A GraphQL mutation whose input is bound to
+// the node id its variables name carries that node id, with only the
+// repository its response locates read; one that spelled its arguments inline
+// beside a variable naming something else is identified by the object its
+// response's url locates, never by that variable. Each repository is read once
+// per run, and a refused write reads nothing.
 func TestInjector_AcceptedWriteCarriesItsIdentity(t *testing.T) {
 	var mu sync.Mutex
 	reads := map[string]int{}
@@ -1217,6 +1218,12 @@ func TestInjector_AcceptedWriteCarriesItsIdentity(t *testing.T) {
 	if got := send("/api/v3/repos/acme/widgets/labels", `{"name":"bug"}`).Identity; got != repo {
 		t.Errorf("a repository write carries %+v, want the repository's id", got)
 	}
+	bound := graphQLEnvelope(t,
+		`mutation($input:MergePullRequestInput!){mergePullRequest(input:$input){pullRequest{url}}}`,
+		map[string]any{"input": map[string]any{"pullRequestId": "PR_kwSubject"}})
+	if got := send("/api/graphql", bound).Identity; got != withObject("PR_kwSubject", domain.EntityKindPullRequest) {
+		t.Errorf("a merge whose input is bound to its pull request carries %+v, want the subject's node id and the repository's id", got)
+	}
 	// The variables name a node id the inline arguments do not use; the
 	// response's url says which pull request was merged.
 	merge := graphQLEnvelope(t,
@@ -1230,6 +1237,12 @@ func TestInjector_AcceptedWriteCarriesItsIdentity(t *testing.T) {
 		map[string]any{"input": map[string]any{"pullRequestId": "PR_kwClosed"}})
 	if got := send("/api/graphql", closed).Identity; got != (domain.GitHubIdentity{NodeID: "PR_kwClosed", Kind: domain.EntityKindPullRequest}) {
 		t.Errorf("a close whose response locates nothing carries %+v, want its subject's node id alone", got)
+	}
+	inline := graphQLEnvelope(t,
+		`mutation{closePullRequest(input:{pullRequestId:"PR_kwClosed"}){pullRequest{id}}}`,
+		map[string]any{"input": map[string]any{"pullRequestId": "PR_kwElsewhere"}})
+	if got := send("/api/graphql", inline).Identity; got != (domain.GitHubIdentity{}) {
+		t.Errorf("an inline close whose response locates nothing carries %+v, want nothing: its variables' node id is not what it closed", got)
 	}
 	if got := send("/api/v3/repos/acme/widgets/issues/77/labels", `{"labels":["bug"]}`).Identity; got != (domain.GitHubIdentity{}) {
 		t.Errorf("a refused write carries %+v, want nothing read", got)

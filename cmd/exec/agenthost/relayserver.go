@@ -873,11 +873,12 @@ func graphQLFactsFromWire(w *agentproc.GraphQLWriteFacts) *ghwrite.GraphQLFacts 
 		return nil
 	}
 	return &ghwrite.GraphQLFacts{
-		Operation:   w.Operation,
-		Fields:      w.Mutations,
-		Subject:     w.Subject,
-		Unreadable:  w.Unreadable,
-		NamesReview: w.NamesReview,
+		Operation:    w.Operation,
+		Fields:       w.Mutations,
+		Subject:      w.Subject,
+		SubjectBound: w.SubjectBound,
+		Unreadable:   w.Unreadable,
+		NamesReview:  w.NamesReview,
 	}
 }
 

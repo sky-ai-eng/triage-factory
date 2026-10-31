@@ -827,8 +827,9 @@ func TestGHChannelWriteAction_GraphQLCarriesProvenanceWhereItIsAsked(t *testing.
 // TestGHChannelWriteAction_CommentRowsShareTheNumber: a comment's create, edit,
 // and delete rows carry its number in external_id whatever transport each came
 // through, and its node id in detail_json. A GraphQL write names the comment by
-// node id, which therefore never lands in external_id; where the response did
-// not return the number, the row has none.
+// node id (here in gh's form, whose input is bound to it), which therefore
+// never lands in external_id; where the response did not return the number,
+// the row has none.
 func TestGHChannelWriteAction_CommentRowsShareTheNumber(t *testing.T) {
 	const nodeID = "IC_kwShared"
 	created := GHChannelWriteAction(ghwrite.Observation{
@@ -841,14 +842,14 @@ func TestGHChannelWriteAction_CommentRowsShareTheNumber(t *testing.T) {
 		Method: "POST", Path: "/graphql", Status: 200,
 		URL:        "https://github.com/octo/repo/pull/9#issuecomment-55",
 		ExternalID: "55",
-		GraphQL:    &ghwrite.GraphQLFacts{Fields: []string{"updateIssueComment"}, Subject: nodeID},
+		GraphQL:    &ghwrite.GraphQLFacts{Fields: []string{"updateIssueComment"}, Subject: nodeID, SubjectBound: true},
 	}, domain.CredentialGitHubApp)
 	restEdited := GHChannelWriteAction(ghwrite.Observation{
 		Method: "PATCH", Path: "/repos/octo/repo/issues/comments/55", Status: 200,
 	}, domain.CredentialGitHubApp)
 	deleted := GHChannelWriteAction(ghwrite.Observation{
 		Method: "POST", Path: "/graphql", Status: 200,
-		GraphQL: &ghwrite.GraphQLFacts{Fields: []string{"deleteIssueComment"}, Subject: nodeID},
+		GraphQL: &ghwrite.GraphQLFacts{Fields: []string{"deleteIssueComment"}, Subject: nodeID, SubjectBound: true},
 	}, domain.CredentialGitHubApp)
 
 	for name, act := range map[string]*domain.ExternalAction{"create": created, "graphql edit": edited, "rest edit": restEdited} {

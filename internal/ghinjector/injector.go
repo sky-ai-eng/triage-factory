@@ -159,9 +159,10 @@
 // objects the write names (fillIdentity): the repository's id, and the pull
 // request's or issue's node id and kind for a write that names one by number,
 // which is what the audit row's entity and repository are resolved from. A
-// GraphQL mutation whose subject is always a pull request or always an issue
-// already names that object's node id, so only its repository is read; each
-// repository is read once per run.
+// GraphQL mutation whose subject is always a pull request or always an issue,
+// and whose input is bound to the node id its variables name, is identified by
+// that node id, so only its repository is read; each repository is read once
+// per run.
 //
 // The callback is not a policy: reporting a write neither permits nor prevents
 // it. It fires after the request has already transited, so a refused request
@@ -800,16 +801,17 @@ const identityReadTimeout = 5 * time.Second
 // with the credential the write was made under (ghclient.IdentityReader), and
 // sets it on the observation: the repository's id, and, for a write that names
 // a pull request or issue by number, its node id and kind. A GraphQL mutation
-// is located by the url its response carries, and read like any other write;
-// one whose response carries none, and whose subject is always a pull request
-// or always an issue (Shape.SubjectKind), is identified by the node id its
-// request named, with no read and no repository. The request's subject is not
-// used where the response located the object: a request can spell its
-// arguments inline and carry a variable naming some other node id, and the
-// response is GitHub's account of what the mutation acted on. A refused write
-// names nothing the audit row is linked to, and is not read for. A failed read
-// is logged and leaves the identity empty, which records the write unlinked;
-// the write is reported either way.
+// whose subject is always a pull request or always an issue
+// (Shape.SubjectKind), and whose input is bound to the node id its variables
+// name (Shape.SubjectBound), is identified by that node id, and only the
+// repository its response locates is read. Any other GraphQL write is read
+// like a REST write, from the object its response's url locates, and one
+// whose response locates nothing carries no identity: a subject the document
+// may not have used is never taken for the object, since a request can spell
+// its arguments inline beside a variable naming some other node id. A refused
+// write names nothing the audit row is linked to, and is not read for. A
+// failed read is logged and leaves the identity empty, which records the
+// write unlinked; the write is reported either way.
 func (s *Server) fillIdentity(w *ObservedWrite) {
 	if !w.Succeeded() {
 		return
@@ -818,8 +820,8 @@ func (s *Server) fillIdentity(w *ObservedWrite) {
 	var number int
 	if shape, ok := ghwrite.Resolve(*w); ok {
 		owner, repo, number = shape.Owner, shape.Repo, shape.Number
-		if shape.SubjectKind != "" && owner == "" {
-			nodeID, kind = shape.NodeID, shape.SubjectKind
+		if shape.SubjectKind != "" && shape.SubjectBound {
+			nodeID, kind = shape.Subject, shape.SubjectKind
 		}
 	} else if w.GraphQL == nil {
 		owner, repo, _ = strings.Cut(ghwrite.RepoPath(w.Path), "/")
@@ -834,6 +836,12 @@ func (s *Server) fillIdentity(w *ObservedWrite) {
 	switch {
 	case nodeID != "":
 		id = domain.GitHubIdentity{NodeID: nodeID, Kind: kind}
+		if owner != "" && repo != "" {
+			var r domain.GitHubIdentity
+			if r, err = s.identities.Repository(ctx, s.reads, owner, repo); err == nil {
+				id.RepositoryID, id.Repository = r.RepositoryID, r.Repository
+			}
+		}
 	case number > 0:
 		id, err = s.identities.Object(ctx, s.reads, owner, repo, number)
 	default:

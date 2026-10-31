@@ -792,11 +792,12 @@ func ghWriteFactsToWire(f *ghwrite.GraphQLFacts) *agentproc.GraphQLWriteFacts {
 		return nil
 	}
 	return &agentproc.GraphQLWriteFacts{
-		Operation:   f.Operation,
-		Mutations:   f.Fields,
-		Subject:     f.Subject,
-		Unreadable:  f.Unreadable,
-		NamesReview: f.NamesReview,
+		Operation:    f.Operation,
+		Mutations:    f.Fields,
+		Subject:      f.Subject,
+		SubjectBound: f.SubjectBound,
+		Unreadable:   f.Unreadable,
+		NamesReview:  f.NamesReview,
 	}
 }
 

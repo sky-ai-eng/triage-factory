@@ -997,6 +997,13 @@ func (t *Tracker) adoptIssueStub(ctx context.Context, client *ghclient.Client, e
 	var none *ghclient.IdentityReader
 	id, err := none.Issue(ctx, client, repo.Owner, repo.Repo, number)
 	if err != nil {
+		// A 404 here says the number is neither a pull request nor an issue
+		// the credential can read, which the caller's pull request failure
+		// already reports. Anything else is this read's own failure.
+		if !ghclient.IsHTTP404(err) {
+			trackerLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "stub enrich: reading the stub's number as an issue failed",
+				"source_id", e.SourceID, "error", err)
+		}
 		return false
 	}
 	// context.Background(), as every entity write in a cycle takes (see

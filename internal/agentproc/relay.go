@@ -214,8 +214,10 @@ type GraphQLWriteFacts struct {
 	// Mutations are the top-level field names the mutation selected, aliases
 	// already resolved to the fields actually invoked.
 	Mutations []string `json:"mutations,omitempty"`
-	// Subject is the node id the variables named for the object acted on.
-	Subject string `json:"subject,omitempty"`
+	// Subject is the node id the variables named for the object acted on, and
+	// SubjectBound whether the mutation's input is bound to it.
+	Subject      string `json:"subject,omitempty"`
+	SubjectBound bool   `json:"subject_bound,omitempty"`
 	// Unreadable names why the request resolved to no single act, empty when it
 	// resolved cleanly.
 	Unreadable string `json:"unreadable,omitempty"`
