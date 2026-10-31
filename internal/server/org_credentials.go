@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/notify"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
@@ -430,6 +432,9 @@ func (s *Server) handleJiraCredentialDelete(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Nothing polls Jira without its credential, so nothing would resolve the
+	// source's open conditions.
+	notify.ClearSource(context.WithoutCancel(ctx), orgID, eventsource.KindJira)
 	// Stop the Jira poller and drop the in-memory client so it doesn't keep
 	// polling with a credential that no longer exists.
 	if s.onJiraChanged != nil {

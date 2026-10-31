@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"errors"
 	"net/http"
 	"slices"
 )
@@ -183,5 +184,46 @@ func (v *Validation) Flush(w http.ResponseWriter, status int) bool {
 		return false
 	}
 	WriteErrors(w, status, v.items...)
+	return true
+}
+
+// Fault is a refusal carried as an error, for code that answers more than one
+// caller: a route writes it with WriteFault, and a caller with no response of
+// its own, such as a notification's invoke action, returns it for the route
+// that ran the action to write.
+type Fault struct {
+	Status int
+	Items  []ErrorItem
+}
+
+func (f *Fault) Error() string {
+	if len(f.Items) == 0 {
+		return http.StatusText(f.Status)
+	}
+	return f.Items[0].Message
+}
+
+// NewFault is a Fault of one item.
+func NewFault(status int, reason, message string) *Fault {
+	return &Fault{Status: status, Items: []ErrorItem{{Reason: reason, Message: message}}}
+}
+
+// Fault returns the recorded faults as one refusal with status, or nil when
+// none were recorded.
+func (v *Validation) Fault(status int) *Fault {
+	if len(v.items) == 0 {
+		return nil
+	}
+	return &Fault{Status: status, Items: v.Items()}
+}
+
+// WriteFault writes err when it is a *Fault, anywhere in its chain, and
+// reports whether it did; any other error is the caller's to answer.
+func WriteFault(w http.ResponseWriter, err error) bool {
+	var f *Fault
+	if !errors.As(err, &f) {
+		return false
+	}
+	WriteErrors(w, f.Status, f.Items...)
 	return true
 }

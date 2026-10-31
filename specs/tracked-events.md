@@ -794,16 +794,21 @@ not-found for an issue the credential cannot see exactly as it does for a
 deleted one. When the org's credential changes to one that sees less, typically
 a personal key replaced by the app install while a private team has not been
 shared with the app, every issue in that team goes missing at once, and asking
-about each would retire them all and close their tasks. So before asking, the
-cycle reads the teams of the missing issues, once. An issue whose team is armed
-and unreadable is left tracked and unrefreshed, and the cycle logs the team
-with a warning (the `tracker.linear.team_visibility` span carries disposition
-`issues_held`, with the number held as `count`). A failed team read holds them too. The issues refresh as soon
-as the credential reads the team again. The **Linear connection** settings card
-names every tracked team the credential cannot read, and warns about private
-teams before a key is replaced or the app is installed over one. A team that
-will not be readable again, such as one deleted in Linear, retires its issues
-once no rule arms it: an issue in an unarmed team is asked about as before.
+about each would retire them all and close their tasks. So every cycle reads
+every armed team, once, before the refresh. An issue whose team is armed and
+unreadable is left tracked and unrefreshed, and the cycle logs the team with a
+warning that counts the issues held. The `tracker.linear.team_visibility` span
+carries disposition `teams_unreadable`, with the number of unreadable armed
+teams as `count`. A failed team read holds them too. The issues refresh as soon
+as the credential reads the team again. Each unreadable armed team is raised as
+the `linear.team_unreadable` notification for the org's admins and the admins
+of the teams tracking it, and resolves on the first complete read that finds
+the team readable or no longer armed; a failed read leaves it as it was. The
+**Linear connection** settings card names every tracked team the credential
+cannot read, and warns about private teams before a key is replaced or the app
+is installed over one. A team that will not be readable again, such as one
+deleted in Linear, retires its issues once no rule arms it: an issue in an
+unarmed team is asked about as before.
 
 The event's metadata is the issue's last-known state. Its team comes from the
 stored snapshot, or from Linear's answer when there is one, never from the

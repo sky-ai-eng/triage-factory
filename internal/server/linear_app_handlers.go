@@ -12,6 +12,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
@@ -372,6 +373,7 @@ func (s *Server) handleLinearAppDelete(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "linear-app", err)
 		return
 	}
+	removed := false
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		app, err := tx.LinearApps.GetForOrg(ctx, orgID)
 		if err != nil {
@@ -380,6 +382,7 @@ func (s *Server) handleLinearAppDelete(w http.ResponseWriter, r *http.Request) {
 		if app == nil {
 			return nil
 		}
+		removed = true
 		if inst != nil && inst.AppClientID == app.ClientID {
 			return errLinearInstallStranded
 		}
@@ -406,6 +409,9 @@ func (s *Server) handleLinearAppDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	linearAppLog.Info("removed linear oauth app", "org", orgID, "user", userID)
+	if removed {
+		s.clearSourceIfDisconnected(ctx, orgID, userID, eventsource.KindLinear)
+	}
 
 	resp, err := s.linearAppStatus(ctx, orgID, userID)
 	if err != nil {

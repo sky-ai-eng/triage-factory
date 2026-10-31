@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
+	"github.com/sky-ai-eng/triage-factory/internal/notify"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -230,6 +232,11 @@ func (s *Server) handleOrgSourcePatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if disabled {
+		// A turned-off source is not polled, so nothing would resolve its
+		// open conditions, and they no longer apply.
+		notify.ClearSource(context.WithoutCancel(r.Context()), orgID, kind)
+	}
 	if s.onSourcesChanged != nil {
 		s.onSourcesChanged(orgID, kind)
 	}
@@ -240,4 +247,25 @@ func (s *Server) handleOrgSourcePatch(w http.ResponseWriter, r *http.Request) {
 		s.ws.Broadcast(websocket.Event{Type: "sources_updated", OrgID: orgID, Data: map[string]any{}})
 	}
 	writeJSON(w, http.StatusOK, eventsource.NewSource(kind, state))
+}
+
+// clearSourceIfDisconnected resolves the org's open conditions of kind's
+// source when, after a delete of something the source's access can depend on,
+// the org no longer holds a usable credential for it: what the delete removed
+// was not necessarily the credential, so the source is asked rather than
+// assumed gone. A failed read clears nothing; the source's next poll corrects
+// what it raised.
+func (s *Server) clearSourceIfDisconnected(ctx context.Context, orgID, userID, kind string) {
+	var st eventsource.State
+	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		var err error
+		st, _, err = eventsource.StateFor(ctx, tx, orgID, kind)
+		return err
+	}); err != nil {
+		serverLog.Warn("source state read after a delete failed; its notifications are left as they are", "org", orgID, "source", kind, "error", err)
+		return
+	}
+	if st != eventsource.StateAvailable {
+		notify.ClearSource(context.WithoutCancel(ctx), orgID, kind)
+	}
 }
