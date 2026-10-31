@@ -199,7 +199,22 @@ func (r *Recorder) clearSource(orgID, source string) {
 	}
 }
 
-// fanout is the installed sink: it hands every call to every recorder.
+// openOrgs is the orgs where the kind has an open occurrence.
+func (r *Recorder) openOrgs(k sink.Kind) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []string
+	for orgID, byKind := range r.open {
+		if len(byKind[k.Name()]) > 0 {
+			out = append(out, orgID)
+		}
+	}
+	return out
+}
+
+// fanout is the installed sink: it hands every call to every recorder, and
+// answers OpenOrgs with every recorder's orgs, so a producer that re-evaluates
+// them can reach another test's org.
 type fanout struct{}
 
 func recorders() []*Recorder {
@@ -234,4 +249,17 @@ func (fanout) ClearSource(_ context.Context, orgID, source string) {
 	for _, r := range recorders() {
 		r.clearSource(orgID, source)
 	}
+}
+
+func (fanout) OpenOrgs(_ context.Context, k sink.Kind) ([]string, error) {
+	var out []string
+	for _, r := range recorders() {
+		for _, orgID := range r.openOrgs(k) {
+			if !slices.Contains(out, orgID) {
+				out = append(out, orgID)
+			}
+		}
+	}
+	slices.Sort(out)
+	return out, nil
 }

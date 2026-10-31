@@ -81,7 +81,7 @@ func TestRelayRuntime_RoundTripsCoreOps(t *testing.T) {
 		State:      domain.DeliverableStateCommentPosted,
 		DedupKey:   domain.ObjectKey(domain.ProviderGitHub, domain.DeliverableKindComment, "123", ""),
 	}
-	stored, err := rt.UpsertDeliverable(ctx, art)
+	stored, err := rt.UpsertDeliverable(ctx, art, domain.GitHubIdentity{})
 	if err != nil {
 		t.Fatalf("UpsertDeliverable relay: %v", err)
 	}
@@ -129,7 +129,8 @@ func TestRelayRuntime_RecordReadTouch_RoundTrips(t *testing.T) {
 	rt := newRelayRuntime(directDispatchConn{srv: srv}, info, nil)
 	ctx := context.Background()
 
-	rt.RecordReadTouch(ctx, domain.ProviderGitHub, "octo/repo#7", "", domain.EntityContainer{}, "")
+	rt.RecordReadTouch(ctx, domain.ProviderGitHub, "octo/repo#7", "", domain.EntityContainer{},
+		domain.GitHubIdentity{RepositoryID: "1", Repository: "octo/repo", NodeID: "PR_7", Kind: domain.EntityKindPullRequest}, "")
 
 	ent, err := stores.Entities.GetBySource(ctx, info.OrgID, "github", "https://github.com", "octo/repo#7")
 	if err != nil || ent == nil {
@@ -153,7 +154,7 @@ func TestRelayRuntime_LinearTouchCarriesTheTeam(t *testing.T) {
 	rt := newRelayRuntime(directDispatchConn{srv: srv}, info, nil)
 	ctx := context.Background()
 
-	rt.RecordReadTouch(ctx, domain.ProviderLinear, "ENG-1", "uuid-read", domain.EntityContainer{LinearTeamID: "team-eng"}, "")
+	rt.RecordReadTouch(ctx, domain.ProviderLinear, "ENG-1", "uuid-read", domain.EntityContainer{LinearTeamID: "team-eng"}, domain.GitHubIdentity{}, "")
 	rt.Record(ctx, &domain.Deliverable{
 		Provider: domain.ProviderLinear, Kind: domain.DeliverableKindIssue,
 		Target: "OPS-2", ExternalID: "uuid-write", State: domain.DeliverableStateIssueCreated,
@@ -161,8 +162,8 @@ func TestRelayRuntime_LinearTouchCarriesTheTeam(t *testing.T) {
 	}, &domain.ExternalAction{
 		Provider: domain.ProviderLinear, Action: domain.ActionIssueCreated,
 		Target: "OPS-2", ExternalID: "uuid-write", Credential: domain.CredentialLinearOrg,
-	}, domain.EntityContainer{LinearTeamID: "team-ops"})
-	rt.RecordReadTouch(ctx, domain.ProviderLinear, "ENG-3", "uuid-teamless", domain.EntityContainer{}, "")
+	}, domain.EntityContainer{LinearTeamID: "team-ops"}, domain.GitHubIdentity{})
+	rt.RecordReadTouch(ctx, domain.ProviderLinear, "ENG-3", "uuid-teamless", domain.EntityContainer{}, domain.GitHubIdentity{}, "")
 
 	for uuid, team := range map[string]string{"uuid-read": "team-eng", "uuid-write": "team-ops"} {
 		ent, err := stores.Entities.GetByExternalIDSystem(ctx, info.OrgID, domain.ProviderLinear, testScope("linear"), uuid)
@@ -189,7 +190,7 @@ func TestRelayRuntime_JiraTouchCarriesTheProject(t *testing.T) {
 	eng := domain.EntityContainer{JiraProject: domain.JiraProjectRef{ID: "10100", Key: "ENG", Name: "Engineering"}}
 	ops := domain.EntityContainer{JiraProject: domain.JiraProjectRef{ID: "10200", Key: "OPS"}}
 
-	rt.RecordReadTouch(ctx, domain.ProviderJira, "ENG-1", "20001", eng, "")
+	rt.RecordReadTouch(ctx, domain.ProviderJira, "ENG-1", "20001", eng, domain.GitHubIdentity{}, "")
 	resource := domain.JiraIssueResource(site, "20002")
 	rt.Record(ctx, &domain.Deliverable{
 		Provider: domain.ProviderJira, Kind: domain.DeliverableKindIssue,
@@ -198,8 +199,8 @@ func TestRelayRuntime_JiraTouchCarriesTheProject(t *testing.T) {
 	}, &domain.ExternalAction{
 		Provider: domain.ProviderJira, Action: domain.ActionIssueCreated,
 		Target: "OPS-2", Credential: domain.CredentialJiraOrg,
-	}, ops)
-	rt.RecordReadTouch(ctx, domain.ProviderJira, "ENG-3", "20003", domain.EntityContainer{}, "")
+	}, ops, domain.GitHubIdentity{})
+	rt.RecordReadTouch(ctx, domain.ProviderJira, "ENG-3", "20003", domain.EntityContainer{}, domain.GitHubIdentity{}, "")
 
 	for issueID, want := range map[string]domain.JiraProjectRef{"20001": eng.JiraProject, "20002": ops.JiraProject} {
 		ent, err := stores.Entities.GetByExternalIDSystem(ctx, info.OrgID, domain.ProviderJira, site, issueID)
@@ -238,7 +239,7 @@ func TestRelayServer_BindsOrgFromConversationInfoNotArgs(t *testing.T) {
 		ExternalID: "9",
 		State:      domain.DeliverableStateCommentPosted,
 		DedupKey:   domain.ObjectKey(domain.ProviderGitHub, domain.DeliverableKindComment, "9", ""),
-	})
+	}, domain.GitHubIdentity{})
 	if err != nil {
 		t.Fatalf("UpsertDeliverable relay: %v", err)
 	}

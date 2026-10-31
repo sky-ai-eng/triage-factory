@@ -435,3 +435,36 @@ fn a_background_process_outlives_its_call_in_the_jail() {
         "a background process died after its call returned: {check}"
     );
 }
+
+/// A background job that outlives its shell and then exits is reaped, not left
+/// a zombie of the jail's PID 1.
+#[test]
+fn an_orphan_that_exits_is_reaped_in_the_jail() {
+    if preflight().is_none() {
+        return;
+    }
+    let mut jail = Jail::start(&[]);
+
+    let launched = jail.call(&json!({
+        "id": 1,
+        "tool": "bash",
+        "args": { "description": "Running a test command", "command": "(sleep 0.2 &); echo launched" },
+    }));
+    assert_eq!(
+        launched["ok"],
+        json!(true),
+        "launch failed in jail: {launched}"
+    );
+
+    std::thread::sleep(Duration::from_secs(2));
+    let zombies = jail.call(&json!({
+        "id": 2,
+        "tool": "bash",
+        "args": { "description": "Running a test command", "command": "cat /proc/[0-9]*/stat 2>/dev/null | awk '$3 == \"Z\" { print $1, $2 } END { print \"checked\" }'" },
+    }));
+    assert_eq!(
+        text_of(&zombies),
+        "checked\n",
+        "an exited orphan was left a zombie: {zombies}"
+    );
+}

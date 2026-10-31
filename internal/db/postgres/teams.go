@@ -598,31 +598,19 @@ func scanTeams(rows *sql.Rows) ([]domain.Team, error) {
 }
 
 func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain.TeamSettings) (domain.TeamSettings, error) {
-	projects := u.JiraProjects
-	if projects == nil {
-		projects = []string{}
-	}
-	linearTeams := u.LinearTeams
-	if linearTeams == nil {
-		linearTeams = []string{}
-	}
-	// max_daily_cost_usd rides along (0 → NULL via nullFloat) so a
-	// read-modify-write team-settings save round-trips the org-admin-set value
-	// untouched. The team-settings handler never populates that field from its
-	// request body — a team admin cannot set their own cap — so its
-	// GetSettings→UpdateSettings flow writes back exactly what it read; it is
-	// *changed* only by the org-admin SetDailyCostCapSystem path.
+	// jira_projects, linear_teams and max_daily_cost_usd are absent from both
+	// arms: they belong to other writers (see the interface), and an insert
+	// takes their schema defaults.
 	stored, err := scanTeamSettings(s.app.QueryRowContext(ctx, `
 		INSERT INTO team_settings (
-			team_id, jira_projects, ai_reprioritize_threshold,
+			team_id, ai_reprioritize_threshold,
 			ai_preference_update_interval, default_model, auto_delegate_enabled,
 			auto_mode_enabled,
 			permission_absent_grace_ms, permission_absent_autodeny_enabled,
-			max_daily_cost_usd, branch_template, review_posture,
-			base_branch_push_policy, enabled_models, linear_teams, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
+			branch_template, review_posture,
+			base_branch_push_policy, enabled_models, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
 		ON CONFLICT (team_id) DO UPDATE SET
-			jira_projects = EXCLUDED.jira_projects,
 			ai_reprioritize_threshold = EXCLUDED.ai_reprioritize_threshold,
 			ai_preference_update_interval = EXCLUDED.ai_preference_update_interval,
 			default_model = EXCLUDED.default_model,
@@ -630,25 +618,71 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 			auto_mode_enabled = EXCLUDED.auto_mode_enabled,
 			permission_absent_grace_ms = EXCLUDED.permission_absent_grace_ms,
 			permission_absent_autodeny_enabled = EXCLUDED.permission_absent_autodeny_enabled,
-			max_daily_cost_usd = EXCLUDED.max_daily_cost_usd,
 			branch_template = EXCLUDED.branch_template,
 			review_posture = EXCLUDED.review_posture,
 			base_branch_push_policy = EXCLUDED.base_branch_push_policy,
 			enabled_models = EXCLUDED.enabled_models,
-			linear_teams = EXCLUDED.linear_teams,
 			updated_at = now()
 		RETURNING `+pgTeamSettingsColumns,
-		teamID, projects, u.AIReprioritizeThreshold,
+		teamID, u.AIReprioritizeThreshold,
 		u.AIPreferenceUpdateInterval, u.DefaultModel, u.AutoDelegateEnabled,
 		u.AutoModeEnabled,
 		u.PermissionAbsentGraceMS, u.PermissionAbsentAutodenyEnabled,
-		nullFloat(u.MaxDailyCostUSD), u.BranchTemplate, u.ReviewPosture,
-		u.BaseBranchPushPolicy, db.ModelSetColumnValue(u.EnabledModels), linearTeams,
+		u.BranchTemplate, u.ReviewPosture,
+		u.BaseBranchPushPolicy, db.ModelSetColumnValue(u.EnabledModels),
 	).Scan)
 	if err != nil {
 		return domain.TeamSettings{}, fmt.Errorf("upsert team_settings: %w", err)
 	}
 	return stored, nil
+}
+
+func (s *teamsStore) SetJiraProjectOrder(ctx context.Context, teamID string, jiraProjectIDs []string) (domain.TeamSettings, error) {
+	return setTeamOrderColumn(ctx, s.app, teamID, "jira_projects", jiraProjectIDs)
+}
+
+func (s *teamsStore) SetLinearTeamOrder(ctx context.Context, teamID string, linearTeamIDs []string) (domain.TeamSettings, error) {
+	return setTeamOrderColumn(ctx, s.app, teamID, "linear_teams", linearTeamIDs)
+}
+
+// setTeamOrderColumn upserts one of team_settings' two display-order columns,
+// named by its two callers, and returns the whole row: an insert takes every
+// other column's schema default, so the row it lands in is one the caller has
+// never seen.
+func setTeamOrderColumn(ctx context.Context, q queryer, teamID, column string, ids []string) (domain.TeamSettings, error) {
+	if ids == nil {
+		ids = []string{}
+	}
+	stored, err := scanTeamSettings(q.QueryRowContext(ctx, `
+		INSERT INTO team_settings (team_id, `+column+`, updated_at)
+		VALUES ($1, $2, now())
+		ON CONFLICT (team_id) DO UPDATE SET
+			`+column+` = EXCLUDED.`+column+`,
+			updated_at = now()
+		RETURNING `+pgTeamSettingsColumns,
+		teamID, ids).Scan)
+	if err != nil {
+		return domain.TeamSettings{}, fmt.Errorf("upsert team_settings.%s: %w", column, err)
+	}
+	return stored, nil
+}
+
+// teamSettingsLockSalt namespaces LockSettings' per-team advisory lock inside
+// hashtextextended()'s key space, clear of the other advisory locks. Value is
+// "TSET" as ASCII bytes — arbitrary but fixed.
+const teamSettingsLockSalt = 0x54534554
+
+func (s *teamsStore) LockSettings(ctx context.Context, teamID string) error {
+	// Outside a transaction the lock would be released by the statement that
+	// took it, so a caller would hold nothing while believing it held the lock.
+	tx, ok := s.app.(*sql.Tx)
+	if !ok {
+		return errors.New("postgres: LockSettings needs a transaction's stores, whose commit releases the lock")
+	}
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, $2))`, teamID, teamSettingsLockSalt); err != nil {
+		return fmt.Errorf("lock team settings: %w", err)
+	}
+	return nil
 }
 
 // SetDailyCostCapSystem upserts ONLY team_settings.max_daily_cost_usd for teamID

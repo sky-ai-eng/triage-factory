@@ -82,8 +82,8 @@ type Shape struct {
 	ExternalID string
 
 	// NodeID is the GraphQL node id of the object acted on — the one a create
-	// made, read from its response, or the one any other GraphQL act named in
-	// its request. Empty where neither disclosed one.
+	// made, read from its response, or the one any other GraphQL act's input
+	// is bound to (SubjectBound). Empty where neither disclosed one.
 	NodeID string
 
 	// InReplyTo is the review comment a reply threads under, from the path. 0
@@ -108,6 +108,20 @@ type Shape struct {
 	// every REST shape, and for a GraphQL request whose response located the
 	// object properly (see resolveGraphQL).
 	Subject string
+
+	// SubjectBound reports that Subject is the object the mutation ran on
+	// (GraphQLFacts.SubjectBound). An unbound Subject is what the request's
+	// variables carried, which its document may not have used, and is a
+	// display value only.
+	SubjectBound bool
+
+	// SubjectKind is the entity kind (domain.EntityKindPullRequest or
+	// domain.EntityKindIssue) of the object a GraphQL mutation names as its
+	// subject, for a mutation whose subject is always the one or the other —
+	// closing a pull request, editing an issue. With it, a bound subject's
+	// node id is that object's identity, and the write's observer reads only
+	// its repository. Empty for every REST shape and every other mutation.
+	SubjectKind string
 
 	// CreatesObject marks a shape whose response body names an object that did
 	// not exist before the request — a posted comment or reply, an opened pull
@@ -134,14 +148,17 @@ type Shape struct {
 }
 
 // Target renders the shape's resource key for the audit row: owner/repo#N when
-// the path carries a number, owner/repo otherwise. The '#N' form is what makes
-// a raw-gh write resolve to an entity (see domain.EntityRefForExternal), so it
-// is deliberately preferred wherever the path supplies one.
+// the path carries a number, owner/repo otherwise. The '#N' form is what a
+// raw-gh write's entity is created under when it has none, from the identity
+// the injector read for the object (Observation.Identity), so it is
+// deliberately preferred wherever the path supplies one.
 //
-// A GraphQL write that disclosed only a node id falls back to it. That target
-// resolves to no entity and links to nothing, which is the honest rendering of
-// what such a request actually said about its object — better than a repo the
-// row would be guessing at.
+// A GraphQL write that disclosed only a node id falls back to it. The target
+// is display only and creates no entity: it is the honest rendering of what
+// such a request said about its object, better than a repo the row would be
+// guessing at. The audit row's entity comes from the injector's identity,
+// which uses the node id only when the input is bound to it (SubjectBound)
+// and the subject is a pull request or an issue (SubjectKind).
 func (s Shape) Target() string {
 	if s.Owner == "" || s.Repo == "" {
 		return s.Subject
@@ -186,6 +203,15 @@ type Observation struct {
 	// by its number, while a GraphQL edit or delete addresses it by node id, and
 	// a later write is matched against whichever its own transport uses.
 	NodeID string
+
+	// Identity is what GitHub answered, to the injector that forwarded the
+	// write, for the objects the write names: the repository's id, and the
+	// pull request's or issue's node id and kind when it names one by number
+	// (domain.GitHubIdentity). The injector reads it after a write the upstream
+	// accepted, with the credential the write was made under; it is empty for
+	// a refused write and for one whose read failed, and the audit row records
+	// either unlinked.
+	Identity domain.GitHubIdentity
 
 	// GraphQL, when set, marks this as a write performed through the GraphQL
 	// endpoint and carries what the request envelope disclosed. Method and Path

@@ -71,6 +71,12 @@ type NotificationStore interface {
 	// not an open condition in orgID.
 	ResolveIDSystem(ctx context.Context, orgID, id string) (*domain.Notification, error)
 
+	// OpenConditionOrgsSystem returns the distinct, sorted ids of the orgs,
+	// across the deployment, holding an open condition of (origin, kind): the
+	// orgs a producer whose evaluation set can lose an org re-evaluates so its
+	// rows still resolve. Admin pool.
+	OpenConditionOrgsSystem(ctx context.Context, origin domain.NotificationOrigin, kind string) ([]string, error)
+
 	// RecipientsSystem returns the distinct, sorted ids of the users a row
 	// with audience a in orgID is sent to: ListForViewer's "is sent"
 	// predicate read the other way round, so a websocket ping reaches exactly

@@ -126,6 +126,14 @@ func (e *engine) ClearSource(ctx context.Context, orgID, source string) {
 	})
 }
 
+func (e *engine) OpenOrgs(ctx context.Context, sk sink.Kind) ([]string, error) {
+	orgs, err := e.b.Notifications.OpenConditionOrgsSystem(ctx, origin, sk.Name())
+	if err != nil {
+		return nil, fmt.Errorf("notify: orgs with an open %s: %w", sk.Name(), err)
+	}
+	return orgs, nil
+}
+
 func (e *engine) resolution(orgID string) *resolution {
 	return &resolution{b: &e.b, orgID: orgID}
 }

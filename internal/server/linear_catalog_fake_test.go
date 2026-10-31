@@ -81,6 +81,9 @@ type linearCatalogFake struct {
 	// carry a field fault and an upstream failure together.
 	teamFailing map[string]bool
 	calls       int
+	// onCall runs as each request arrives, before the fake answers it and
+	// outside its lock: a test's way to act while a handler waits on Linear.
+	onCall func()
 }
 
 func newLinearCatalogFake(t *testing.T, teams ...linear.Team) *linearCatalogFake {
@@ -121,7 +124,11 @@ func (f *linearCatalogFake) serve(w http.ResponseWriter, r *http.Request) {
 			labels[t.ID] = l
 		}
 	}
+	onCall := f.onCall
 	f.mu.Unlock()
+	if onCall != nil {
+		onCall()
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	if failing {
@@ -333,6 +340,13 @@ func (f *linearCatalogFake) SetTeamFailing(id string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.teamFailing[id] = true
+}
+
+// OnCall runs fn as each request arrives, before the fake answers it.
+func (f *linearCatalogFake) OnCall(fn func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.onCall = fn
 }
 
 // SetFailing makes every later request fail, standing in for an unreachable

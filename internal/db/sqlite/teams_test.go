@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -476,4 +477,12 @@ func TestTeamsStore_SQLite_TeamIDsForUserInOrgSystem_ExcludesArchived(t *testing
 	if len(ids) != 0 {
 		t.Errorf("archived team still routed: %v; want []", ids)
 	}
+}
+
+// TestTeamsStore_SQLite_SettingsLock runs the lock's conformance suite:
+// the IMMEDIATE write transaction is the lock SQLite takes.
+func TestTeamsStore_SQLite_SettingsLock(t *testing.T) {
+	dbtest.RunSettingsLockConformance(t, func(t *testing.T) (db.Stores, string, string, string) {
+		return sqlitestore.New(openSQLiteForTest(t)), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID
+	})
 }

@@ -1249,7 +1249,8 @@ func gitDenyNotMaterialized(repoID string) gitproxy.Decision {
 //   - accepted (PushedRef.Succeeded: a 2xx whose report-status did not refuse
 //     the ref — the push landed): shape it into a branch deliverable and upsert
 //     it through the same host-side path the pre-push hook uses —
-//     agenthost.NewLocal → UpsertDeliverable — so the write routes to the right
+//     agenthost.NewLocal → UpsertDeliverableFor, with the repository's GitHub
+//     id the push's observer read (PushedRef.RepositoryID) — so the write routes to the right
 //     pool (admin for an event-triggered run, the kicking-off user's synthetic
 //     claims for a manual one) and lands the ActionBranchPushed audit row in
 //     the same write. The same constructor and sink as the hook, which keys
@@ -1285,7 +1286,7 @@ func gitPushRecorder(host *agenthost.LocalClient, info agenthost.ConversationInf
 			host.RecordGitPushFailed(ctx, push)
 			return
 		}
-		if _, err := host.UpsertDeliverable(ctx, art); err != nil {
+		if _, err := host.UpsertDeliverableFor(ctx, art, agenthost.PushIdentity(push)); err != nil {
 			delegateLog.Warn("git-proxy push capture: record branch deliverable failed",
 				"conversation", info.ConversationID, "repo", push.Repo, "ref", push.Ref, "error", err)
 		}

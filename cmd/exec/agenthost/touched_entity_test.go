@@ -11,10 +11,12 @@ import (
 
 // TestResolveTouchedEntity_MapsProviderAndTarget pins the exec-touch resolver
 // contract (TFAC-513 §2): ExternalAction.Provider → entity source,
-// ExternalAction.Target → entity source_id, a repo-level GitHub target (no '#')
-// and a non-PR/issue provider resolve to nothing, a Jira target resolves only
-// with its issue id and only on the org's current site, and the created row is
-// a snapshot-less stub the poll cycle later enriches.
+// ExternalAction.Target → entity source_id, a GitHub target resolves only with
+// GitHub's identity for its object and under the kind that identity names, a
+// repo-level GitHub target (no '#') and a non-PR/issue provider resolve to
+// nothing, a Jira target resolves only with its issue id and only on the org's
+// current site, and the created row is a snapshot-less stub the poll cycle
+// later enriches.
 func TestResolveTouchedEntity_MapsProviderAndTarget(t *testing.T) {
 	stores, info := newCaptureStores(t, true)
 	ctx := context.Background()
@@ -28,9 +30,23 @@ func TestResolveTouchedEntity_MapsProviderAndTarget(t *testing.T) {
 		wantKind   string
 	}{
 		{
-			name:       "github PR target → pr entity",
-			coord:      entityCoordinate{provider: domain.ProviderGitHub, target: "octo/repo#18", url: "https://github.com/octo/repo/pull/18"},
+			name: "github PR target with its identity → pr entity",
+			coord: entityCoordinate{provider: domain.ProviderGitHub, target: "octo/repo#18", url: "https://github.com/octo/repo/pull/18",
+				github: domain.GitHubIdentity{RepositoryID: "1", Repository: "octo/repo", NodeID: "PR_18", Kind: domain.EntityKindPullRequest}},
 			wantEntity: true, wantSource: "github", wantKind: "pr",
+		},
+		{
+			name: "github issue target with its identity → issue entity",
+			coord: entityCoordinate{provider: domain.ProviderGitHub, target: "octo/repo#19",
+				github: domain.GitHubIdentity{RepositoryID: "1", Repository: "octo/repo", NodeID: "I_19", Kind: domain.EntityKindIssue}},
+			wantEntity: true, wantSource: "github", wantKind: "issue",
+		},
+		{
+			// An owner/repo#N key alone names a pull request or an issue in
+			// whichever repository holds the name now; nothing is resolved, or
+			// minted, on one.
+			name:  "github target without an identity is skipped",
+			coord: entityCoordinate{provider: domain.ProviderGitHub, target: "octo/repo#20"},
 		},
 		{
 			name: "jira issue target with its id → issue entity",
@@ -54,8 +70,9 @@ func TestResolveTouchedEntity_MapsProviderAndTarget(t *testing.T) {
 			// A bare owner/repo target is repo-level — this is also a branch
 			// push's shape (branchPushAction stamps Provider="github" with a
 			// repo-level Target), so it covers that skip too.
-			name:  "github repo-level target is skipped",
-			coord: entityCoordinate{provider: domain.ProviderGitHub, target: "octo/repo"},
+			name: "github repo-level target is skipped",
+			coord: entityCoordinate{provider: domain.ProviderGitHub, target: "octo/repo",
+				github: domain.GitHubIdentity{RepositoryID: "1", Repository: "octo/repo"}},
 		},
 		{
 			// PR-shaped target that WOULD resolve under github — proves the skip
@@ -93,8 +110,12 @@ func TestResolveTouchedEntity_MapsProviderAndTarget(t *testing.T) {
 			if ent.Kind != tc.wantKind {
 				t.Errorf("kind = %q, want %q", ent.Kind, tc.wantKind)
 			}
-			if ent.ExternalID != tc.coord.externalID {
-				t.Errorf("external_id = %q, want %q", ent.ExternalID, tc.coord.externalID)
+			wantID := tc.coord.externalID
+			if tc.coord.provider == domain.ProviderGitHub {
+				wantID = tc.coord.github.NodeID
+			}
+			if ent.ExternalID != wantID {
+				t.Errorf("external_id = %q, want %q", ent.ExternalID, wantID)
 			}
 			// The resolver mints a stub; the poll cycle owns enrichment.
 			if ent.SnapshotJSON != "" {
@@ -105,7 +126,8 @@ func TestResolveTouchedEntity_MapsProviderAndTarget(t *testing.T) {
 
 	// Idempotent: resolving an already-known target returns the same id and
 	// creates no duplicate (octo/repo#18 was created by the first subtest).
-	pr := entityCoordinate{provider: domain.ProviderGitHub, target: "octo/repo#18"}
+	pr := entityCoordinate{provider: domain.ProviderGitHub, target: "octo/repo#18",
+		github: domain.GitHubIdentity{RepositoryID: "1", Repository: "octo/repo", NodeID: "PR_18", Kind: domain.EntityKindPullRequest}}
 	first, err := resolveTouchedEntityInfo(ctx, stores, info, pr)
 	if err != nil {
 		t.Fatalf("resolveTouchedEntity (idempotent): %v", err)
@@ -121,13 +143,15 @@ func TestResolveTouchedEntity_MapsProviderAndTarget(t *testing.T) {
 
 // TestResolveTouchedEntity_PRInAnUntrackedRepository: a touch on a pull
 // request in a repository no team tracks creates its entity referencing a
-// registry row for that repository, created with it and tracked by nobody.
+// registry row for that repository, registered by GitHub's id for it and
+// tracked by nobody.
 func TestResolveTouchedEntity_PRInAnUntrackedRepository(t *testing.T) {
 	stores, info := newCaptureStores(t, true)
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
 
-	id, err := resolveTouchedEntityInfo(ctx, stores, info, entityCoordinate{provider: domain.ProviderGitHub, target: "upstream/lib#3"})
+	id, err := resolveTouchedEntityInfo(ctx, stores, info, entityCoordinate{provider: domain.ProviderGitHub, target: "upstream/lib#3",
+		github: domain.GitHubIdentity{RepositoryID: "77", Repository: "upstream/lib", NodeID: "PR_lib3", Kind: domain.EntityKindPullRequest}})
 	if err != nil || id == "" {
 		t.Fatalf("resolveTouchedEntityInfo = %q, %v; want a new entity", id, err)
 	}
@@ -136,8 +160,8 @@ func TestResolveTouchedEntity_PRInAnUntrackedRepository(t *testing.T) {
 		t.Fatalf("GetSystem(%s) = %v, %v", id, ent, err)
 	}
 	row, err := stores.Repos.GetByRefSystem(ctx, org, domain.RepoRef{Host: ent.Scope, Owner: "upstream", Repo: "lib"})
-	if err != nil || row == nil {
-		t.Fatalf("registry row for upstream/lib = %v, %v; want the one the touch created", row, err)
+	if err != nil || row == nil || row.ExternalID != "77" {
+		t.Fatalf("registry row for upstream/lib = %+v, %v; want the one the touch registered by id 77", row, err)
 	}
 	if ent.RepositoryID != row.ID {
 		t.Errorf("entity references repository %q, want %s", ent.RepositoryID, row.ID)
@@ -194,10 +218,11 @@ func TestResolveTouchedEntity_FollowsAMovedJiraIssue(t *testing.T) {
 // TestResolveTouchedEntity_FindsAPullRequestByItsNodeID: a touch carrying a
 // pull request's node id resolves the entity that carries it under whatever
 // key it is stored under, and leaves the key alone — a pull request's key
-// moves with its repository's rename, and the touch may spell either name. A
-// touch by an id-less row's key learns the id. The write funnel takes the id
-// off a pull request deliverable's node id, and links the deliverable to the entity
-// under that entity's key.
+// moves with its repository's rename, and the touch may spell either name. An
+// id-less stub under the key the registry row's name builds learns the id, and
+// the kind the identity names. The write funnel takes the id off a pull
+// request deliverable's node id, and links the deliverable to the entity under
+// that entity's key.
 func TestResolveTouchedEntity_FindsAPullRequestByItsNodeID(t *testing.T) {
 	stores, info := newCaptureStores(t, true)
 	ctx := context.Background()
@@ -208,7 +233,8 @@ func TestResolveTouchedEntity_FindsAPullRequestByItsNodeID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := resolveTouchedEntityInfo(ctx, stores, info, entityCoordinate{provider: domain.ProviderGitHub, target: "octo/new#7", externalID: "PR_7"})
+	id, err := resolveTouchedEntityInfo(ctx, stores, info, entityCoordinate{provider: domain.ProviderGitHub, target: "octo/new#7",
+		github: domain.GitHubIdentity{NodeID: "PR_7", Kind: domain.EntityKindPullRequest}})
 	if err != nil || id != stored.ID {
 		t.Fatalf("resolve = %q err=%v, want the existing entity %s", id, err, stored.ID)
 	}
@@ -223,16 +249,17 @@ func TestResolveTouchedEntity_FindsAPullRequestByItsNodeID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err = resolveTouchedEntityInfo(ctx, stores, info, entityCoordinate{provider: domain.ProviderGitHub, target: "octo/repo#8", externalID: "PR_8"})
+	id, err = resolveTouchedEntityInfo(ctx, stores, info, entityCoordinate{provider: domain.ProviderGitHub, target: "octo/repo#8",
+		github: domain.GitHubIdentity{RepositoryID: "1", Repository: "octo/repo", NodeID: "I_8", Kind: domain.EntityKindIssue}})
 	if err != nil || id != stub.ID {
 		t.Fatalf("resolve = %q err=%v, want the stub %s", id, err, stub.ID)
 	}
-	if got, _ := stores.Entities.GetSystem(ctx, org, stub.ID); got.ExternalID != "PR_8" {
-		t.Errorf("stub = %+v, want it to learn PR_8", got)
+	if got, _ := stores.Entities.GetSystem(ctx, org, stub.ID); got.ExternalID != "I_8" || got.Kind != domain.EntityKindIssue {
+		t.Errorf("stub = %+v, want it to learn I_8 and become an issue", got)
 	}
 
 	pr := domain.NewPullRequestDeliverable("octo/new", 7, "PR_7", "feature", "main", "https://github.com/octo/new/pull/7", "Widget", "", false)
-	if got := resolveDeliverableEntity(ctx, stores, info, &pr, domain.EntityContainer{}); got.entityID != stored.ID {
+	if got := resolveDeliverableEntity(ctx, stores, info, &pr, domain.EntityContainer{}, domain.GitHubIdentity{}); got.entityID != stored.ID {
 		t.Errorf("funnel resolved %q, want the entity carrying the deliverable's node id %s", got.entityID, stored.ID)
 	}
 	if pr.EntityID != stored.ID || pr.Target != "octo/old#7" {

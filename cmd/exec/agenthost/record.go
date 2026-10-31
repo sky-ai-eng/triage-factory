@@ -10,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entityscope"
 	"github.com/sky-ai-eng/triage-factory/internal/memoryentities"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -172,14 +173,17 @@ func deletesUnrecordedComment(ctx context.Context, stores db.Stores, info Conver
 // written on its own (recordActionAlone), and each failure is counted against
 // what it lost.
 func RecordExternalWrite(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Deliverable, act *domain.ExternalAction) {
-	recordExternalWrite(ctx, stores, info, a, act, domain.EntityContainer{})
+	recordExternalWrite(ctx, stores, info, a, act, domain.EntityContainer{}, domain.GitHubIdentity{})
 }
 
-// recordExternalWrite is RecordExternalWrite carrying container: what the
-// response the verb acted on says the touched issue sits in (a Linear issue's
-// team, a Jira issue's project), which the touch needs to create that issue's
-// entity. Zero for every other write.
-func recordExternalWrite(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Deliverable, act *domain.ExternalAction, container domain.EntityContainer) {
+// recordExternalWrite is RecordExternalWrite carrying what the act's observer
+// read. container is what the response the verb acted on says the touched
+// issue sits in (a Linear issue's team, a Jira issue's project), which the
+// touch needs to create that issue's entity. github is what GitHub answered
+// for the objects a GitHub act names (domain.GitHubIdentity), which every
+// GitHub entity and repository the write is linked to is resolved from. Each
+// is zero for a write that has none.
+func recordExternalWrite(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Deliverable, act *domain.ExternalAction, container domain.EntityContainer, github domain.GitHubIdentity) {
 	if a != nil {
 		if stores.Deliverables == nil {
 			return
@@ -233,11 +237,11 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 	}
 	var subject resolvedEntity
 	if err == nil && a != nil {
-		subject = resolveDeliverableEntity(ctx, stores, info, a, container)
+		subject = resolveDeliverableEntity(ctx, stores, info, a, container, github)
 	}
 	var about resolvedEntity
 	if act != nil {
-		about = resolveActionReferences(ctx, stores, info, act, container, subject)
+		about = resolveActionReferences(ctx, stores, info, act, container, github, subject)
 	}
 	if err == nil {
 		var deliverableErr error
@@ -316,11 +320,15 @@ type entityCoordinate struct {
 	// or Jira coordinate: a Linear entity is created carrying its team and a
 	// Jira entity its project, and neither is created without it.
 	container domain.EntityContainer
+	// github is what GitHub answered for a GitHub coordinate's object and
+	// repository (domain.GitHubIdentity), the only thing a GitHub entity is
+	// resolved from. externalID is unused for GitHub.
+	github domain.GitHubIdentity
 }
 
 // resolveTouchedEntityInfo maps a coordinate to an entities row, returning an
 // existing entity or a freshly-minted snapshot-less stub, and "" for anything
-// the touched-entity rule skips (a repo-level GitHub target with no '#N', an
+// the touched-entity rule skips (a GitHub coordinate with no node id, an
 // empty key, a Jira coordinate with no issue id, a coordinate from another
 // scope than the org's current one, an unmapped provider). It is the
 // free-function counterpart of the former LocalClient.resolveTouchedEntity;
@@ -330,7 +338,8 @@ type entityCoordinate struct {
 // The coordinate's key is what the provider answered with at the time of the
 // write or read, so an entity stored under another key is renamed onto it
 // (entityscope.Resolve with follow): an agent touching a moved Jira issue by
-// its old key resolves the issue's existing entity, never a second one.
+// its old key resolves the issue's existing entity, never a second one. A
+// GitHub coordinate is resolved by its ids instead (resolveGitHubEntity).
 //
 // The Slack case finds or mints a "message" entity for the thread target
 // names — domain.SlackSourceID(channel, rootTS), which the Slack resolver
@@ -351,6 +360,9 @@ func resolveEntityInfo(ctx context.Context, stores db.Stores, info ConversationI
 	if stores.Entities == nil {
 		return nil, nil
 	}
+	if c.provider == domain.ProviderGitHub {
+		return resolveGitHubEntity(ctx, stores, info, c)
+	}
 	ref, kind, ok := domain.EntityRefForExternal(c.provider, c.target, c.externalID)
 	if !ok {
 		return nil, nil
@@ -370,6 +382,163 @@ func resolveEntityInfo(ctx context.Context, stores db.Stores, info ConversationI
 	// context; neither an ExternalAction nor an addressed read carries one.
 	// url rides through when present.
 	return entityscope.Resolve(ctx, stores, info.OrgID, ref, c.container, kind, c.url, true)
+}
+
+// resolveGitHubEntity maps a GitHub coordinate to the entity of the pull
+// request or issue its identity names, by GitHub's ids alone. The node id
+// finds the entity whatever key it is stored under. On a miss the entity is
+// found or created under the key built from the registry row GitHub's
+// repository id names (githubRepositoryRow), in the name that row holds now,
+// and the number the coordinate's target ends in, carrying the node id and
+// the kind the read answered; a stub under that key with no id adopts both,
+// as the PR poller's stub enrichment does. So a write that spelled an old
+// name of its repository, or a new one TF has not applied, lands on the one
+// entity and the one registry row.
+//
+// nil, never a key lookup, for a coordinate with no node id (the observer's
+// read failed, or the act names no pull request or issue), one whose
+// repository id names no row the run may record against, one from another
+// scope than the org's current GitHub host, and, in multi mode, one whose
+// node id names an entity in a repository the run does not work in
+// (runMayRecordAgainst): the node id was relayed too. No GitHub entity is found
+// or created from a key alone: a key's owner/repo is a spelling, which GitHub
+// may since have given to another repository.
+func resolveGitHubEntity(ctx context.Context, stores db.Stores, info ConversationInfo, c entityCoordinate) (*domain.Entity, error) {
+	id := c.github
+	if id.NodeID == "" || !domain.IsGitHubObjectKind(id.Kind) {
+		return nil, nil
+	}
+	scope, err := entityscope.Of(ctx, stores, info.OrgID, domain.ProviderGitHub)
+	if err != nil {
+		return nil, err
+	}
+	if scope == "" || (c.scope != "" && c.scope != scope) {
+		return nil, nil
+	}
+	entity, err := stores.Entities.GetByExternalIDSystem(ctx, info.OrgID, domain.ProviderGitHub, scope, id.NodeID)
+	if err != nil {
+		return nil, err
+	}
+	if entity != nil {
+		if ok, err := relayedRepositoryAdmitted(ctx, stores, info, entity.RepositoryID); err != nil || !ok {
+			return nil, err
+		}
+		return entity, nil
+	}
+	_, _, number, ok := domain.ParsePRTarget(c.target)
+	if !ok {
+		return nil, nil
+	}
+	row, err := githubRepositoryRow(ctx, stores, info, scope, id)
+	if err != nil || row == nil {
+		return nil, err
+	}
+	key := domain.PullRequestTarget(row.Slug(), number)
+	entity, _, err = stores.Entities.FindOrCreateSystem(ctx, info.OrgID, domain.ProviderGitHub, scope, key, id.NodeID, id.Kind, "", c.url)
+	if err != nil {
+		return nil, err
+	}
+	if entity.ExternalID == "" {
+		adopted, err := stores.Entities.AdoptGitHubIdentitySystem(ctx, info.OrgID, entity.ID, id.NodeID, id.Kind)
+		if err != nil {
+			return nil, err
+		}
+		if adopted != nil {
+			entity = adopted
+		}
+	}
+	return entity, nil
+}
+
+// githubRepositoryRow returns the registry row GitHub's repository id names on
+// host, the org's GitHub host, for an act the run made; nil when the identity
+// carries no id, or names no row the run may record against.
+//
+// In multi mode the id was read by the run's sidecar and relayed, so it must
+// name a row the run may write to: one of its conversation_worktrees rows, or
+// its task's own repository (IsTaskOwnRepository), the same two arms the
+// repository gate admits a write by. Any other id is answered nil, which
+// records the act unlinked, so a sidecar cannot choose the repository an act
+// is filed under. Local mode has no relay and no gate, and a repository with
+// no row there is registered by its id first (FindOrCreateByExternalID, under
+// the name GitHub answered with it), never get-or-created from a name; a name
+// a row holds under another id is a repository GitHub has given the name to
+// since, which the poller has not seen yet, and is answered nil.
+func githubRepositoryRow(ctx context.Context, stores db.Stores, info ConversationInfo, host string, id domain.GitHubIdentity) (*domain.Repository, error) {
+	if id.RepositoryID == "" || host == "" || stores.Repos == nil {
+		return nil, nil
+	}
+	row, err := stores.Repos.GetByExternalIDSystem(ctx, info.OrgID, host, id.RepositoryID)
+	if err != nil {
+		return nil, err
+	}
+	if runmode.Current() == runmode.ModeMulti {
+		if row == nil {
+			return nil, nil
+		}
+		if ok, err := relayedRepositoryAdmitted(ctx, stores, info, row.ID); err != nil || !ok {
+			return nil, err
+		}
+		return row, nil
+	}
+	if row != nil {
+		return row, nil
+	}
+	owner, repo, ok := targetRepository(id.Repository)
+	if !ok {
+		return nil, nil
+	}
+	registered, err := stores.Repos.FindOrCreateByExternalID(ctx, info.OrgID, domain.RepoRef{Host: host, Owner: owner, Repo: repo, ExternalID: id.RepositoryID})
+	if errors.Is(err, db.ErrRepoSlugOccupied) {
+		agenthostLog.Warn("GitHub's repository id names a repository whose name another registry row holds; recording unlinked",
+			"conversation", info.ConversationID, "repo", id.Repository, "error", err)
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if registered.RetiredAt != nil {
+		// The registry answers a retired row by its id, but a retired row
+		// answers to no name, so an entity keyed under its name would
+		// get-or-create a second row for the repository. The act is recorded
+		// unlinked instead.
+		return nil, nil
+	}
+	return &registered, nil
+}
+
+// relayedRepositoryAdmitted reports whether an act may be filed under the
+// repository whose registry row is repositoryID: always in local mode, and in
+// multi mode, where the identity naming it was relayed by the run's sidecar,
+// only for a repository the run works in (runMayRecordAgainst).
+func relayedRepositoryAdmitted(ctx context.Context, stores db.Stores, info ConversationInfo, repositoryID string) (bool, error) {
+	if runmode.Current() != runmode.ModeMulti {
+		return true, nil
+	}
+	ok, err := runMayRecordAgainst(ctx, stores, info, repositoryID)
+	if err == nil && !ok {
+		agenthostLog.Info("a relayed GitHub id names a repository the run does not work in; recording unlinked",
+			"conversation", info.ConversationID, "repository", repositoryID)
+	}
+	return ok, err
+}
+
+// runMayRecordAgainst reports whether the repository whose registry row is
+// repositoryID is one the run works in: a conversation_worktrees row of the
+// run's, or the run's task's own repository.
+func runMayRecordAgainst(ctx context.Context, stores db.Stores, info ConversationInfo, repositoryID string) (bool, error) {
+	if stores.ConversationWorktrees != nil {
+		rows, err := stores.ConversationWorktrees.ListSystem(ctx, info.OrgID, info.ConversationID)
+		if err != nil {
+			return false, err
+		}
+		for _, w := range rows {
+			if w.RepositoryID == repositoryID {
+				return true, nil
+			}
+		}
+	}
+	return IsTaskOwnRepository(ctx, stores, info, repositoryID), nil
 }
 
 // recordEntityTouch resolves-or-creates the touched entity for a coordinate
@@ -441,10 +610,12 @@ func (r resolvedEntity) matches(provider, target string) bool {
 // GitHub pull request, review or comment deliverable is on, the Jira or Linear
 // issue, the Slack thread. It resolves (and creates, like the touch) the
 // entity for a's provider and target, identified by the provider id a's key
-// carries (domain.DeliverableEntityIdentity), and sets a.EntityID to it and
-// a.Target to its key: a deliverable's target is its entity's key, which every
-// rename moves by entity_id from then on. A branch, which has no entity, and
-// a deliverable whose entity does not resolve are written unlinked, and the
+// carries (domain.DeliverableEntityIdentity) — for GitHub, the pull request's
+// node id a pull request or review deliverable is keyed on, or, for a comment,
+// the identity its act's observer read (github) — and sets a.EntityID to it
+// and a.Target to its key: a deliverable's target is its entity's key, which
+// every rename moves by entity_id from then on. A branch, which has no entity,
+// and a deliverable whose entity does not resolve are written unlinked, and a
 // failure is logged. Best-effort, like the rest of the funnel: the write
 // happened, and its row is recorded either way. A failure another attempt can
 // get past is retried like the write after it (withRecordRetry); resolving
@@ -452,10 +623,12 @@ func (r resolvedEntity) matches(provider, target string) bool {
 // second attempt lands on what a first one wrote. The link is overwritten, never
 // taken from the caller, like the scope stamped beside it: the side that holds
 // the stores decides it, so a relayed row cannot name an entity of its choosing.
-func resolveDeliverableEntity(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Deliverable, container domain.EntityContainer) resolvedEntity {
+func resolveDeliverableEntity(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Deliverable, container domain.EntityContainer, github domain.GitHubIdentity) resolvedEntity {
 	a.EntityID = ""
 	c := entityCoordinate{provider: a.Provider, target: a.Target, url: a.URL, container: container}
-	if scope, externalID, ok := domain.DeliverableEntityIdentity(*a); ok {
+	if a.Provider == domain.ProviderGitHub {
+		c.github = deliverableGitHubIdentity(*a, github)
+	} else if scope, externalID, ok := domain.DeliverableEntityIdentity(*a); ok {
 		c.scope, c.externalID = scope, externalID
 	}
 	out := resolvedEntity{attempted: true, provider: a.Provider, target: a.Target}
@@ -478,32 +651,44 @@ func resolveDeliverableEntity(ctx context.Context, stores db.Stores, info Conver
 	return out
 }
 
+// deliverableGitHubIdentity is the identity a GitHub deliverable's entity is
+// resolved from. A pull request or review deliverable is keyed on its pull
+// request's node id, which wins over anything relayed beside it; the
+// repository id comes from github, the observer's read. Any other deliverable
+// (a comment) is about the object its act names, so it takes github whole.
+func deliverableGitHubIdentity(a domain.Deliverable, github domain.GitHubIdentity) domain.GitHubIdentity {
+	if nodeID, ok := domain.DeliverablePullRequestNodeID(a); ok {
+		github.NodeID, github.Kind = nodeID, domain.EntityKindPullRequest
+	}
+	return github
+}
+
 // resolveActionReferences links act to what it was about, by id, before the
 // act is written: EntityID to the entity its (provider, target) names, and,
-// for a GitHub act with no entity, RepositoryID to the registry row of the
-// repository its target names (resolveActionRepository). Both are overwritten,
-// never taken from the caller, like the scope stamped beside them: the side
-// that holds the stores decides them, so a relayed row cannot name an entity
-// or a repository of its choosing.
+// for a GitHub act with no entity, RepositoryID to the registry row of its
+// repository (resolveActionRepository). Both are overwritten, never taken from
+// the caller, like the scope stamped beside them: the side that holds the
+// stores decides them, so a relayed row cannot name an entity or a repository
+// of its choosing.
 //
 // An action about the object the deliverable is about reuses subject, the
 // deliverable's entity, rather than resolving it again. Any other action resolves
-// (and creates, like the touch) its own coordinate. A Jira or Linear action's
-// object key names the issue it is about, a comment's key the issue the
-// comment is on, so the coordinate is identified by the site and issue id or
-// the UUID the key carries (domain.ObjectKeyEntityIdentity), whether or not a
-// deliverable is written beside the action. A GitHub action resolves by its
-// owner/repo#N target. A failure another attempt can get past
-// is retried like the write (withRecordRetry); resolving only finds, creates or
-// renames toward what the provider answered, so a second attempt lands on what
-// a first one wrote. One that still fails is logged, and the act is recorded
-// unlinked. The resolution is returned for the touch, which records it once
-// the write settles.
-func resolveActionReferences(ctx context.Context, stores db.Stores, info ConversationInfo, act *domain.ExternalAction, container domain.EntityContainer, subject resolvedEntity) resolvedEntity {
+// (and creates, like the touch) its own coordinate. A GitHub action is
+// identified by github, the identity its observer read. A Jira or Linear
+// action's object key names the issue it is about, a comment's key the issue
+// the comment is on, so the coordinate is identified by the site and issue id
+// or the UUID the key carries (domain.ObjectKeyEntityIdentity), whether or not
+// a deliverable is written beside the action. A failure another attempt can
+// get past is retried like the write (withRecordRetry); resolving only finds,
+// creates or renames toward what the provider answered, so a second attempt
+// lands on what a first one wrote. One that still fails is logged, and the act
+// is recorded unlinked. The resolution is returned for the touch, which
+// records it once the write settles.
+func resolveActionReferences(ctx context.Context, stores db.Stores, info ConversationInfo, act *domain.ExternalAction, container domain.EntityContainer, github domain.GitHubIdentity, subject resolvedEntity) resolvedEntity {
 	act.EntityID, act.RepositoryID = "", ""
 	about := subject
 	if !subject.matches(act.Provider, act.Target) {
-		c := entityCoordinate{provider: act.Provider, target: act.Target, url: act.URL, container: container}
+		c := entityCoordinate{provider: act.Provider, target: act.Target, url: act.URL, container: container, github: github}
 		if scope, externalID, ok := domain.ObjectKeyEntityIdentity(act.Provider, act.ObjectKey); ok {
 			c.scope, c.externalID = scope, externalID
 		}
@@ -524,32 +709,37 @@ func resolveActionReferences(ctx context.Context, stores db.Stores, info Convers
 	}
 	act.EntityID = about.entityID
 	if act.EntityID == "" {
-		act.RepositoryID = resolveActionRepository(ctx, stores, info, act)
+		act.RepositoryID = resolveActionRepository(ctx, stores, info, act, github)
 	}
 	return about
 }
 
 // resolveActionRepository returns the registry row id of the repository a
-// GitHub act's target leads with — owner/repo, or the repository of an
-// owner/repo#N whose entity did not resolve — on act's scope, the org's
-// current GitHub host. The name the act spelled is resolved to an id here,
-// once. "" for an act of another provider, a target that names no repository
-// (a node id or an endpoint path, which a GraphQL or user-level write
-// records), or a name no live registry row answers to: a lookup never
-// registers a repository. A read failure is retried like the write, and one
-// that persists is logged and leaves the act unlinked.
-func resolveActionRepository(ctx context.Context, stores db.Stores, info ConversationInfo, act *domain.ExternalAction) string {
+// GitHub act is in, on act's scope, the org's current GitHub host: the row
+// GitHub's repository id names (githubRepositoryRow), which the act's observer
+// read when it made the act, so a repository renamed since, or under a name
+// TF has not applied yet, is the row it is. "" for an act of another
+// provider, an act whose observer read no id (its read failed, or the act
+// names no repository), and an id naming no row the run may record against.
+//
+// A denial (git_denied, gh_write_denied) is the exception: its repository is
+// whatever the refused request claimed, nothing verified it, and no read was
+// made for it. It is matched to a live row by name, lookup only, so the
+// Actions feed can filter it by repository; a lookup never registers one. A
+// read failure is retried like the write, and one that persists is logged and
+// leaves the act unlinked.
+func resolveActionRepository(ctx context.Context, stores db.Stores, info ConversationInfo, act *domain.ExternalAction, github domain.GitHubIdentity) string {
 	if act.Provider != domain.ProviderGitHub || act.Scope == "" || stores.Repos == nil {
-		return ""
-	}
-	owner, repo, ok := targetRepository(act.Target)
-	if !ok {
 		return ""
 	}
 	var row *domain.Repository
 	err := withRecordRetry(ctx, func() error {
 		var e error
-		row, e = stores.Repos.GetByRefSystem(ctx, info.OrgID, domain.RepoRef{Host: act.Scope, Owner: owner, Repo: repo})
+		if act.Action == domain.ActionGitDenied || act.Action == domain.ActionGHWriteDenied {
+			row, e = deniedRepository(ctx, stores, info, act)
+		} else {
+			row, e = githubRepositoryRow(ctx, stores, info, act.Scope, github)
+		}
 		return e
 	})
 	if err != nil {
@@ -561,6 +751,18 @@ func resolveActionRepository(ctx context.Context, stores db.Stores, info Convers
 		return ""
 	}
 	return row.ID
+}
+
+// deniedRepository is a denial's repository: the live row the owner/repo its
+// target leads with names on act's scope, or nil. A target that names no
+// repository (a node id or an endpoint path, which a GraphQL or user-level
+// request records) answers nil.
+func deniedRepository(ctx context.Context, stores db.Stores, info ConversationInfo, act *domain.ExternalAction) (*domain.Repository, error) {
+	owner, repo, ok := targetRepository(act.Target)
+	if !ok {
+		return nil, nil
+	}
+	return stores.Repos.GetByRefSystem(ctx, info.OrgID, domain.RepoRef{Host: act.Scope, Owner: owner, Repo: repo})
 }
 
 // targetRepository reads the owner/repo a GitHub act's target leads with,

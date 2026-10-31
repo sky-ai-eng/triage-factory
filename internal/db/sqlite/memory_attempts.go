@@ -101,3 +101,94 @@ func (s *memoryAttemptStore) NewestAttemptForConversationSystem(ctx context.Cont
 	}
 	return &a, nil
 }
+
+func (s *memoryAttemptStore) FailingSystem(ctx context.Context, orgID string, span, window time.Duration) (domain.MemoryFailing, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return domain.MemoryFailing{}, err
+	}
+	if span < 0 || window <= 0 {
+		return domain.MemoryFailing{}, db.ErrInvalidMemoryFailingWindow
+	}
+	var out domain.MemoryFailing
+	if err := s.q.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM tasks t
+		WHERE t.org_id = ? AND t.status NOT IN ('done', 'dismissed')
+		  AND `+taskMemoryPendingSQL("t.org_id", "t.id")+`
+	`, orgID).Scan(&out.TasksWaiting); err != nil {
+		return domain.MemoryFailing{}, err
+	}
+
+	// The Postgres twin carries the reasoning, and this is the same read:
+	// correlated subqueries make its per-conversation probes, and the window
+	// is a range on idx_conversation_memory_attempts_conversation, so the
+	// cost does not grow with the outage. The CROSS JOINs fix the join order
+	// that range needs, since SQLite plans a CROSS JOIN's left side as the
+	// outer loop, and the unary + keeps the bound at the newest generated
+	// memory out of the index, so the range starts at the window instead.
+	// Attempt times compare as their stored text, which sorts in instant order
+	// because every one is written from a UTC time; julianday() measures only
+	// the two ends.
+	rows, err := s.q.QueryContext(ctx, `
+		WITH generated AS (
+		    SELECT COALESCE(MAX(completed_at), '') AS at
+		    FROM conversation_memory_attempts
+		    WHERE org_id = ? AND outcome = 'generated'
+		),
+		owing AS MATERIALIZED (
+		    SELECT owed.id
+		    FROM conversations owed, tasks t
+		    WHERE `+taskMemoryOwedRowSQL("t.org_id", "t.id")+`
+		      AND t.org_id = ?
+		),
+		probes AS (
+		    SELECT
+		        (SELECT a.started_at FROM conversation_memory_attempts a
+		         WHERE a.conversation_id = o.id AND a.started_at > g.at AND a.outcome = 'failed'
+		         ORDER BY a.started_at ASC, a.id ASC
+		         LIMIT 1) AS first,
+		        (SELECT a.started_at FROM conversation_memory_attempts a
+		         WHERE a.conversation_id = o.id AND a.started_at > g.at AND a.outcome = 'failed'
+		         ORDER BY a.started_at DESC, a.id DESC
+		         LIMIT 1) AS last
+		    FROM generated g CROSS JOIN owing o
+		),
+		ends AS (
+		    SELECT MIN(first) AS oldest, MAX(last) AS newest FROM probes
+		),
+		bounds AS (
+		    SELECT (julianday(newest) - julianday(oldest)) * 86400.0 AS spanned,
+		           strftime('%Y-%m-%d %H:%M:%f', julianday(newest) - ? / 86400.0) AS since
+		    FROM ends
+		),
+		recent AS (
+		    SELECT a.id, a.started_at, a.error_kind, a.error_message,
+		           ROW_NUMBER() OVER (
+		               PARTITION BY a.error_kind ORDER BY a.started_at DESC, a.id DESC) AS rn
+		    FROM bounds b CROSS JOIN generated g CROSS JOIN owing o
+		         CROSS JOIN conversation_memory_attempts a
+		    WHERE b.spanned >= ?
+		      AND a.conversation_id = o.id AND a.started_at >= b.since AND +a.started_at > g.at
+		      AND a.outcome = 'failed'
+		)
+		SELECT error_kind, COALESCE(error_message, '')
+		FROM recent
+		WHERE rn = 1
+		ORDER BY started_at DESC, id DESC
+	`, orgID, orgID, window.Seconds(), span.Seconds())
+	if err != nil {
+		return domain.MemoryFailing{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k domain.MemoryFailingKind
+		if err := rows.Scan(&k.Kind, &k.ErrorMessage); err != nil {
+			return domain.MemoryFailing{}, err
+		}
+		out.Kinds = append(out.Kinds, k)
+	}
+	if err := rows.Err(); err != nil {
+		return domain.MemoryFailing{}, err
+	}
+	return out, nil
+}

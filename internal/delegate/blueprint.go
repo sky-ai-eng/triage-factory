@@ -379,7 +379,12 @@ func nonterminalStepSysPrompt(i, total int) string {
 // prompt) plus the non-terminal addendum (agentprompt.NonTerminalCompletion,
 // injected only for non-final steps) own the protocol; this wrapper supplies
 // only the step's context.
-func buildBlueprintStepWrapperPrompt(task domain.Task, step domain.BlueprintStep, stepPrompt *domain.Prompt, slug string, total int, nextStepName string) string {
+//
+// agentRunRoot is the run root as the agent sees it (agentproc.AgentVisibleRoot).
+// The skill's path is spelled from it in full because the agent works from
+// inside a checkout, where a path relative to the run root resolves into the
+// repository instead.
+func buildBlueprintStepWrapperPrompt(task domain.Task, step domain.BlueprintStep, stepPrompt *domain.Prompt, slug, agentRunRoot string, total int, nextStepName string) string {
 	mission := strings.TrimSpace(step.Brief)
 	if mission == "" {
 		mission = stepPrompt.Name
@@ -389,7 +394,7 @@ func buildBlueprintStepWrapperPrompt(task domain.Task, step domain.BlueprintStep
 	fmt.Fprintf(&b, "You are step %d of %d in a blueprint firing on this task.\n\n", step.StepIndex+1, total)
 	fmt.Fprintf(&b, "Task: %s\n", strings.TrimSpace(task.Title))
 	fmt.Fprintf(&b, "Mission for this step: %s\n\n", mission)
-	fmt.Fprintf(&b, "Skill slug: %q (materialized at ./.claude/skills/%s/SKILL.md)\n", slug, slug)
+	fmt.Fprintf(&b, "Skill slug: %q (materialized at %s)\n", slug, filepath.Join(agentRunRoot, ".claude", "skills", slug, "SKILL.md"))
 	isFinal := step.StepIndex+1 == total
 	fmt.Fprintf(&b, "Is final step: %v\n", isFinal)
 	if !isFinal {

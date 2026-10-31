@@ -100,6 +100,17 @@ type GraphQLFacts struct {
 	// decorate an audit row, and the row is worth more written promptly.
 	Subject string
 
+	// SubjectBound reports that Subject names the object the mutation acted
+	// on: it was read from the `input` variable, the document holds a single
+	// operation, and that operation spells $input. GraphQL validation then
+	// leaves the variable one place to go: an operation must use every
+	// variable it defines, and only the mutation's input argument takes the
+	// input's type. Any other Subject is a value the request carried that the
+	// document may not have used. Inline arguments can name one object while
+	// the variables name another, and a second operation can define a
+	// variable the selected one never reads.
+	SubjectBound bool
+
 	// Unreadable, when set, names why this request resolved to no single act
 	// (one of the reasons above). It never suppresses the row — an unreadable
 	// write is still a write — it only means the row takes the fallback.
@@ -148,13 +159,13 @@ var graphQLMutations = map[string]graphQLShape{
 	"updateIssueComment":            {action: domain.ActionCommentEdited, comment: []string{"issueComment"}, space: domain.GitHubIssueComment},
 	"deleteIssueComment":            {action: domain.ActionCommentDeleted, space: domain.GitHubIssueComment},
 	"createPullRequest":             {action: domain.ActionPRCreated, creates: true, provenance: true, numberFromURL: true},
-	"updatePullRequest":             {action: domain.ActionPREdited},
-	"closePullRequest":              {action: domain.ActionPRClosed},
-	"reopenPullRequest":             {action: domain.ActionPRReopened},
-	"mergePullRequest":              {action: domain.ActionPRMerged},
-	"markPullRequestReadyForReview": {action: domain.ActionPRMarkedReady},
-	"convertPullRequestToDraft":     {action: domain.ActionPRConvertedToDraft},
-	"addPullRequestReview":          {action: domain.ActionReviewSubmitted, provenance: true},
+	"updatePullRequest":             {action: domain.ActionPREdited, subject: domain.EntityKindPullRequest},
+	"closePullRequest":              {action: domain.ActionPRClosed, subject: domain.EntityKindPullRequest},
+	"reopenPullRequest":             {action: domain.ActionPRReopened, subject: domain.EntityKindPullRequest},
+	"mergePullRequest":              {action: domain.ActionPRMerged, subject: domain.EntityKindPullRequest},
+	"markPullRequestReadyForReview": {action: domain.ActionPRMarkedReady, subject: domain.EntityKindPullRequest},
+	"convertPullRequestToDraft":     {action: domain.ActionPRConvertedToDraft, subject: domain.EntityKindPullRequest},
+	"addPullRequestReview":          {action: domain.ActionReviewSubmitted, provenance: true, subject: domain.EntityKindPullRequest},
 	"addReaction":                   {action: domain.ActionReactionAdded},
 	"removeReaction":                {action: domain.ActionReactionRemoved},
 
@@ -166,8 +177,8 @@ var graphQLMutations = map[string]graphQLShape{
 
 	// Arming a merge rather than performing one. A distinct mutation, not a
 	// variant of mergePullRequest, so gating one has never implied the other.
-	"enablePullRequestAutoMerge":  {action: domain.ActionPRAutoMergeEnabled},
-	"disablePullRequestAutoMerge": {action: domain.ActionPRAutoMergeDisabled},
+	"enablePullRequestAutoMerge":  {action: domain.ActionPRAutoMergeEnabled, subject: domain.EntityKindPullRequest},
+	"disablePullRequestAutoMerge": {action: domain.ActionPRAutoMergeDisabled, subject: domain.EntityKindPullRequest},
 
 	// A revert opens a pull request, so it resolves like one — from the url in
 	// its own payload. gh selects only the new pull request's url, which is what
@@ -176,7 +187,7 @@ var graphQLMutations = map[string]graphQLShape{
 	// the row would name whichever the scan reached first.
 	"revertPullRequest": {action: domain.ActionPRReverted, creates: true, provenance: true, numberFromURL: true},
 
-	"updatePullRequestBranch": {action: domain.ActionPRBranchUpdated},
+	"updatePullRequestBranch": {action: domain.ActionPRBranchUpdated, subject: domain.EntityKindPullRequest},
 
 	// Labels and locks address a pull request and an issue through one mutation
 	// each, which is why their actions are one pair each rather than two.
@@ -188,19 +199,19 @@ var graphQLMutations = map[string]graphQLShape{
 	// The issue family. GitHub serves issue comments through addComment above,
 	// so only the lifecycle needs naming here.
 	"createIssue":   {action: domain.ActionIssueCreated, creates: true, numberFromURL: true},
-	"updateIssue":   {action: domain.ActionIssueUpdated},
-	"closeIssue":    {action: domain.ActionIssueClosed},
-	"reopenIssue":   {action: domain.ActionIssueReopened},
-	"deleteIssue":   {action: domain.ActionIssueDeleted},
-	"pinIssue":      {action: domain.ActionIssuePinned},
-	"unpinIssue":    {action: domain.ActionIssueUnpinned},
-	"transferIssue": {action: domain.ActionIssueTransferred},
+	"updateIssue":   {action: domain.ActionIssueUpdated, subject: domain.EntityKindIssue},
+	"closeIssue":    {action: domain.ActionIssueClosed, subject: domain.EntityKindIssue},
+	"reopenIssue":   {action: domain.ActionIssueReopened, subject: domain.EntityKindIssue},
+	"deleteIssue":   {action: domain.ActionIssueDeleted, subject: domain.EntityKindIssue},
+	"pinIssue":      {action: domain.ActionIssuePinned, subject: domain.EntityKindIssue},
+	"unpinIssue":    {action: domain.ActionIssueUnpinned, subject: domain.EntityKindIssue},
+	"transferIssue": {action: domain.ActionIssueTransferred, subject: domain.EntityKindIssue},
 
 	// It creates a branch, but its payload carries a ref name rather than a url,
 	// so there is nothing for a create's response parse to find. The row keeps
 	// the issue the branch was linked to, which is the more useful coordinate
 	// anyway — a branch with no commits has no page worth linking to.
-	"createLinkedBranch": {action: domain.ActionLinkedBranchCreated},
+	"createLinkedBranch": {action: domain.ActionLinkedBranchCreated, subject: domain.EntityKindIssue},
 
 	// The repository itself. gh performs these through GraphQL while performing
 	// the rest of the same command's settings work over REST, so the two halves
@@ -279,6 +290,12 @@ type graphQLShape struct {
 	// deleted, Shape.Comment's value. Empty for every mutation that does none
 	// of those to a comment.
 	space domain.GitHubCommentSpace
+	// subject is the entity kind of the object the mutation's input names as
+	// its subject (Shape.SubjectKind), for a mutation whose subject is always a
+	// pull request or always an issue. Empty for one whose subject may be
+	// either (a label, a lock, a comment, a reaction), something else, or the
+	// parent of the object it creates.
+	subject string
 }
 
 // ParseGraphQLRequest reads one GraphQL request body into the facts an audit
@@ -311,7 +328,7 @@ func ParseGraphQLRequest(body []byte) (GraphQLFacts, bool) {
 	if !strings.Contains(envelope.Query, mutationKeyword) {
 		return GraphQLFacts{}, false
 	}
-	subject := subjectFromVariables(envelope.Variables)
+	subject, fromInput := subjectFromVariables(envelope.Variables)
 
 	document, parsed := parseDocument(envelope.Query)
 	if !parsed {
@@ -346,6 +363,7 @@ func ParseGraphQLRequest(body []byte) (GraphQLFacts, bool) {
 		Operation:       op.name,
 		Fields:          fields,
 		Subject:         subject,
+		SubjectBound:    fromInput && len(document.ops) == 1 && documentReferencesVariable(envelope.Query, subjectInput),
 		NamesReview:     documentNames(envelope.Query, reviewInput) || variablesName(envelope.Variables, reviewInput),
 		ResponseAliased: documentAliasesOnto(envelope.Query, responseReadNames),
 	}
@@ -425,31 +443,37 @@ var graphQLSubjectKeys = []string{
 // that a crafted variable cannot turn an audit row's target into a payload.
 const maxSubjectLength = 256
 
+// subjectInput is the variable every mutation gh sends carries its arguments
+// in, as one input object.
+const subjectInput = "input"
+
 // subjectFromVariables lifts the acted-on object's node id out of a request's
 // variables — and nothing else. Every mutation gh sends wraps its arguments in
 // an `input` object, so that is looked in first, with the top level as the
-// fallback for a hand-written request.
+// fallback for a hand-written request. fromInput reports that the id came
+// from the `input` object, which is the only case GraphQLFacts.SubjectBound
+// can hold for.
 //
 // Only these specific keys, and only string values: the variables also carry
 // the comment bodies and review text an agent composed, which have no business
 // in an audit row and are never read.
-func subjectFromVariables(raw json.RawMessage) string {
+func subjectFromVariables(raw json.RawMessage) (subject string, fromInput bool) {
 	if len(raw) == 0 {
-		return ""
+		return "", false
 	}
 	var vars map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &vars); err != nil {
-		return ""
+		return "", false
 	}
-	if input, ok := vars["input"]; ok {
+	if input, ok := vars[subjectInput]; ok {
 		var inner map[string]json.RawMessage
 		if err := json.Unmarshal(input, &inner); err == nil {
 			if id := pickSubject(inner); id != "" {
-				return id
+				return id, true
 			}
 		}
 	}
-	return pickSubject(vars)
+	return pickSubject(vars), false
 }
 
 // reviewInput is the input field a review mutation names its pending review by.
@@ -757,10 +781,12 @@ func classifyGraphQL(facts GraphQLFacts) (Shape, bool) {
 	return Shape{
 		Action:              entry.action,
 		Subject:             facts.Subject,
+		SubjectBound:        facts.SubjectBound,
 		CreatesObject:       entry.creates,
 		CarriesProvenance:   entry.provenance,
 		NumberFromObjectURL: entry.numberFromURL,
 		Comment:             entry.space,
+		SubjectKind:         entry.subject,
 	}, true
 }
 
@@ -785,12 +811,14 @@ func resolveGraphQL(obs Observation) (Shape, bool) {
 		s.ExternalID = obs.ExternalID
 	}
 	// The node id of the object the act was performed on. Anything but a
-	// create names that object in its request, which is authoritative about
-	// what was acted on; a request that spelled its arguments inline discloses
-	// no subject, and the response's id stands in where it returned one. A
-	// create's request names only the parent, so its node id is the response's.
+	// create names that object in its request, and a subject the mutation's
+	// input is bound to (SubjectBound) is the object it ran on. A subject the
+	// document may not have used is not: the response's id stands in where it
+	// returned one, as it does for a request that spelled its arguments
+	// inline. A create's request names only the parent, so its node id is the
+	// response's.
 	s.NodeID = obs.NodeID
-	if !s.CreatesObject && s.Subject != "" {
+	if !s.CreatesObject && s.SubjectBound && s.Subject != "" {
 		s.NodeID = s.Subject
 	}
 	// A repository's url is read by its own parser and never by the object one:

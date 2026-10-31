@@ -38,7 +38,7 @@ func TestStampPRCommission_ManualRunStampsBothColumns(t *testing.T) {
 	conn, stores, info := newCaptureStoresConn(t, false)
 
 	a := botOpenedPR()
-	RecordExternalWrite(ctx, stores, info, &a, nil)
+	recordExternalWrite(ctx, stores, info, &a, nil, domain.EntityContainer{}, botOpenedPRIdentity)
 
 	ent := prEntity(t, stores)
 	if ent == nil {
@@ -64,7 +64,7 @@ func TestStampPRCommission_EventTriggeredRunRecordsNobody(t *testing.T) {
 	}
 
 	a := botOpenedPR()
-	RecordExternalWrite(ctx, stores, info, &a, nil)
+	recordExternalWrite(ctx, stores, info, &a, nil, domain.EntityContainer{}, botOpenedPRIdentity)
 
 	ent := prEntity(t, stores)
 	if ent == nil {
@@ -103,7 +103,7 @@ func TestStampPRCommission_DoesNotOverwriteExistingCommissioner(t *testing.T) {
 	}
 
 	a := botOpenedPR()
-	RecordExternalWrite(ctx, stores, info, &a, nil)
+	recordExternalWrite(ctx, stores, info, &a, nil, domain.EntityContainer{}, botOpenedPRIdentity)
 
 	if got := commissionerOf(t, conn, ent.ID); got != firstAsker {
 		t.Errorf("commissioned by = %q, want the pre-existing %q", got, firstAsker)
@@ -128,7 +128,7 @@ func TestStampPRCommission_ReviewDeliverableRecordsNothing(t *testing.T) {
 	a := domain.NewReviewDeliverable("octo/repo", 42, "PR_kwDO42", "headsha", info.ConversationID)
 	a.State, a.ExternalID = domain.DeliverableStateReviewSubmitted, "9001"
 	a.URL = "https://github.com/octo/repo/pull/42#pullrequestreview-9001"
-	RecordExternalWrite(ctx, stores, info, &a, nil)
+	recordExternalWrite(ctx, stores, info, &a, nil, domain.EntityContainer{}, botOpenedPRIdentity)
 
 	if got := commissionerOf(t, conn, ent.ID); got != "" {
 		t.Errorf("a review recorded a commissioner on the reviewed PR: %q", got)

@@ -11,13 +11,14 @@ import (
 )
 
 // graphQLWrite is a successful GraphQL comment write as the injector reports
-// it: the mutation and the node id its request named, plus whatever ids and
-// link the response gave.
+// it for gh's form of the request, whose input is bound to the node id it
+// names: the mutation and that node id, plus whatever ids and link the
+// response gave.
 func graphQLWrite(mutation, subject, externalID, nodeID, url string) ghwrite.Observation {
 	return ghwrite.Observation{
 		Method: "POST", Path: "/graphql", Status: 200,
 		ExternalID: externalID, NodeID: nodeID, URL: url,
-		GraphQL: &ghwrite.GraphQLFacts{Fields: []string{mutation}, Subject: subject},
+		GraphQL: &ghwrite.GraphQLFacts{Fields: []string{mutation}, Subject: subject, SubjectBound: true},
 	}
 }
 
@@ -164,6 +165,28 @@ func TestGHChannel_DeleteByNodeIDFindsTheVerbsRow(t *testing.T) {
 	a := onlyDeliverable(t, stores, info.ConversationID)
 	if a.DedupKey != "github:comment:777" || a.State != domain.DeliverableStateCommentDeleted {
 		t.Errorf("deliverable = %+v, want the verb's row retired", a)
+	}
+}
+
+// TestGHChannel_UnboundDeleteLeavesTheNamedRowAlone: a delete whose input is
+// not bound to the node id its variables name (it spelled its arguments
+// inline) may have deleted some other comment, so the comment the variables
+// name keeps its row as posted.
+func TestGHChannel_UnboundDeleteLeavesTheNamedRowAlone(t *testing.T) {
+	gh := startFakeGitHubComments(t)
+	stores, info, client := newGithubRecordingClient(t, gh.URL, true)
+	ctx := context.Background()
+
+	if _, err := client.GithubAddComment(ctx, "octo", "repo", 1, "posted through the verb"); err != nil {
+		t.Fatalf("GithubAddComment: %v", err)
+	}
+	unbound := graphQLWrite("deleteIssueComment", "IC_kw777", "", "", "")
+	unbound.GraphQL.SubjectBound = false
+	client.RecordGHChannelWrite(ctx, unbound)
+
+	a := onlyDeliverable(t, stores, info.ConversationID)
+	if a.DedupKey != "github:comment:777" || a.State != domain.DeliverableStateCommentPosted {
+		t.Errorf("deliverable = %+v, want the verb's row still posted", a)
 	}
 }
 

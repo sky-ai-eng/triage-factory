@@ -2,6 +2,9 @@ package agenthost
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -27,10 +30,16 @@ func TestRecorders_NameTheObjectALandedChangeChanged(t *testing.T) {
 			name:   "branch push",
 			action: domain.ActionBranchPushed,
 			record: func(t *testing.T) (db.Stores, string) {
-				stores, info := newCaptureStores(t, false)
-				repoID := registerRepo(t, stores, "octo", "repo", "1")
+				gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if !answerRepoRead(w, r) {
+						t.Errorf("unexpected GitHub call: %s %s", r.Method, r.URL.Path)
+					}
+				}))
+				t.Cleanup(gh.Close)
+				stores, _, client := newGithubRecordingClient(t, gh.URL, false)
+				repoID := registerRepo(t, stores, "octo", "repo", testRepoID("octo/repo"))
 				branch, _ := domain.NewBranchDeliverable("octo/repo", "refs/heads/feat", "abc123", true)
-				if _, err := NewLocal(stores, info).UpsertDeliverable(ctx, branch); err != nil {
+				if _, err := client.UpsertDeliverable(ctx, branch); err != nil {
 					t.Fatalf("UpsertDeliverable: %v", err)
 				}
 				return stores, "branch|" + repoID + "|refs/heads/feat"
@@ -40,12 +49,23 @@ func TestRecorders_NameTheObjectALandedChangeChanged(t *testing.T) {
 			name:   "pull request create",
 			action: domain.ActionPRCreated,
 			record: func(t *testing.T) (db.Stores, string) {
-				gh, _ := startFakeGitHubPRCreate(t)
+				gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case answerRepoRead(w, r):
+					case r.Method == http.MethodPost:
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = io.WriteString(w, `{"number":42,"html_url":"https://github.com/octo/repo/pull/42","node_id":"PR_kwDOABCD"}`)
+					default:
+						t.Errorf("unexpected GitHub call: %s %s", r.Method, r.URL.Path)
+					}
+				}))
+				t.Cleanup(gh.Close)
 				stores, _, client := newGithubRecordingClient(t, gh.URL, true)
+				registerRepo(t, stores, "octo", "repo", testRepoID("octo/repo"))
 				if _, _, _, err := client.GithubCreatePR(ctx, "octo", "repo", "feature/x", "main", "Fix", "Body", true); err != nil {
 					t.Fatalf("GithubCreatePR: %v", err)
 				}
-				pr, err := stores.Entities.GetBySourceSystem(ctx, runmode.LocalDefaultOrgID, "github", testScope("github"), "octo/repo#42")
+				pr, err := stores.Entities.GetByExternalIDSystem(ctx, runmode.LocalDefaultOrgID, "github", testScope("github"), "PR_kwDOABCD")
 				if err != nil || pr == nil {
 					t.Fatalf("the pull request's entity: %v, %v", pr, err)
 				}
@@ -84,7 +104,7 @@ func TestRecorders_NameTheObjectALandedChangeChanged(t *testing.T) {
 					DedupKey:   key,
 				}, domain.ActionIssueTransitioned, "", "Done")
 				recordExternalWrite(ctx, stores, info, nil, act,
-					jiraContainer(jiraclient.Project{ID: "10000", Key: "SKY", Name: "Sky"}))
+					jiraContainer(jiraclient.Project{ID: "10000", Key: "SKY", Name: "Sky"}), domain.GitHubIdentity{})
 
 				if got := listConversationDeliverables(t, stores, info.ConversationID); len(got) != 0 {
 					t.Fatalf("the action was recorded with deliverables %+v", got)

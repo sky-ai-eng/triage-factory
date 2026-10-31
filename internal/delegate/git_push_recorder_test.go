@@ -77,6 +77,10 @@ func registerOctoRepo(t *testing.T, stores db.Stores) string {
 	return row.ID
 }
 
+// The pushes below carry RepositoryID "1", GitHub's id for octo/repo, as the
+// push's observer — the sidecar, or the local git proxy — reads it and hands
+// it over.
+
 // recorderInfo is the run identity a delegated run carries — event-triggered,
 // so UpsertDeliverable takes the admin-pool branch (the common case for the proxy:
 // an auto-delegated run has no user identity).
@@ -96,11 +100,12 @@ func TestGitPushRecorder_RecordsBranch(t *testing.T) {
 	rec := gitPushRecorder(agenthost.NewLocal(stores, info), info)
 
 	rec(context.Background(), gitproxy.PushedRef{
-		Repo:    "octo/repo",
-		Ref:     "refs/heads/feature/x",
-		NewSHA:  "abc123",
-		Created: true,
-		Status:  200,
+		Repo:         "octo/repo",
+		RepositoryID: "1",
+		Ref:          "refs/heads/feature/x",
+		NewSHA:       "abc123",
+		Created:      true,
+		Status:       200,
 	})
 
 	arts, _, err := stores.Deliverables.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
@@ -142,7 +147,7 @@ func TestGitPushRecorder_SkipsNonBranchAndMalformed(t *testing.T) {
 
 	// A tag isn't a branch; a 3-segment repo path isn't owner/repo. Both make
 	// NewBranchDeliverable return ok=false, so the recorder skips them silently.
-	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/tags/v1", NewSHA: "abc", Created: false, Status: 200})
+	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/tags/v1", NewSHA: "abc", Created: false, Status: 200})
 	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo/extra", Ref: "refs/heads/main", NewSHA: "abc", Created: false, Status: 200})
 
 	arts, _, err := stores.Deliverables.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
@@ -167,7 +172,7 @@ func TestGitPushRecorder_RefusedPushRecordsAuditOnly(t *testing.T) {
 	rec := gitPushRecorder(agenthost.NewLocal(stores, info), info)
 	ctx := context.Background()
 
-	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/feature/x", NewSHA: "abc123", Created: true, Status: 403})
+	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/heads/feature/x", NewSHA: "abc123", Created: true, Status: 403})
 
 	arts, _, err := stores.Deliverables.ListByConversation(ctx, runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
 	if err != nil {
@@ -201,7 +206,7 @@ func TestGitPushRecorder_RefusedPushRecordsAuditOnly(t *testing.T) {
 
 	// The retry that lands: same (run, ref, sha), now a 2xx — the deliverable and
 	// the success audit row both appear despite the earlier failure.
-	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/feature/x", NewSHA: "abc123", Created: true, Status: 200})
+	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/heads/feature/x", NewSHA: "abc123", Created: true, Status: 200})
 	arts, _, err = stores.Deliverables.ListByConversation(ctx, runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
 	if err != nil {
 		t.Fatalf("ListByConversation after retry: %v", err)
@@ -227,8 +232,8 @@ func TestGitPushRecorder_DedupConvergesWithHook(t *testing.T) {
 	info := recorderInfo(conversationID)
 	rec := gitPushRecorder(agenthost.NewLocal(stores, info), info)
 
-	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/main", NewSHA: "aaa", Created: true, Status: 200})
-	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/main", NewSHA: "bbb", Created: false, Status: 200})
+	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/heads/main", NewSHA: "aaa", Created: true, Status: 200})
+	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/heads/main", NewSHA: "bbb", Created: false, Status: 200})
 
 	arts, _, err := stores.Deliverables.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
 	if err != nil {
@@ -258,6 +263,7 @@ func TestGitPushRecorder_RejectedRefInsideA200(t *testing.T) {
 
 	rec(ctx, gitproxy.PushedRef{
 		Repo:          "octo/repo",
+		RepositoryID:  "1",
 		Ref:           "refs/heads/feature/x",
 		NewSHA:        "abc123",
 		Created:       true,
@@ -315,7 +321,7 @@ func TestGitPushRecorder_FailureDetailOmitsEmpty(t *testing.T) {
 	rec := gitPushRecorder(agenthost.NewLocal(stores, info), info)
 	ctx := context.Background()
 
-	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/feature/x", NewSHA: "abc123", Status: 403})
+	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/heads/feature/x", NewSHA: "abc123", Status: 403})
 
 	acts, _, err := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Action: domain.ActionBranchPushFailed})
 	if err != nil {
@@ -364,9 +370,9 @@ func TestGitPushRecorder_NamesTheTipsSigner(t *testing.T) {
 
 	info := recorderInfo(conversationID)
 	rec := gitPushRecorder(agenthost.NewLocal(stores, info), info)
-	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/signed", NewSHA: signedTip, Created: true, Status: 200})
-	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/unsigned", NewSHA: unsignedTip, Created: true, Status: 200})
-	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/refused", NewSHA: unsignedTip, Created: true, Status: 403})
+	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/heads/signed", NewSHA: signedTip, Created: true, Status: 200})
+	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/heads/unsigned", NewSHA: unsignedTip, Created: true, Status: 200})
+	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/heads/refused", NewSHA: unsignedTip, Created: true, Status: 403})
 
 	signers := map[string]string{}
 	for _, action := range []string{domain.ActionBranchPushed, domain.ActionBranchPushFailed} {
@@ -446,9 +452,9 @@ func TestGitPushRecorder_StampsTheSignedTipForThePostPushCheck(t *testing.T) {
 
 	info := recorderInfo(conversationID)
 	rec := gitPushRecorder(agenthost.NewLocal(stores, info), info)
-	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/signed", NewSHA: landedTip, Created: true, Status: 200})
-	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/refused", NewSHA: refusedTip, Created: true, Status: 200, Rejected: true})
-	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/unsigned", NewSHA: "2222222222222222222222222222222222222222", Created: true, Status: 200})
+	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/heads/signed", NewSHA: landedTip, Created: true, Status: 200})
+	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/heads/refused", NewSHA: refusedTip, Created: true, Status: 200, Rejected: true})
+	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/heads/unsigned", NewSHA: "2222222222222222222222222222222222222222", Created: true, Status: 200})
 
 	row := func(id string) domain.CommitSignature {
 		t.Helper()
@@ -468,7 +474,7 @@ func TestGitPushRecorder_StampsTheSignedTipForThePostPushCheck(t *testing.T) {
 	}
 
 	time.Sleep(5 * time.Millisecond)
-	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/again", NewSHA: landedTip, Created: true, Status: 200})
+	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/heads/again", NewSHA: landedTip, Created: true, Status: 200})
 	if got := row(landed.ID); !got.PushedAt.Equal(*stamped.PushedAt) {
 		t.Errorf("a second push of the tip moved pushed_at to %v, want the first push's %v", got.PushedAt, stamped.PushedAt)
 	}
@@ -509,8 +515,8 @@ func TestGitPushRecorder_CountsAMultiRunsPushesByItsSealedSigner(t *testing.T) {
 			host := agenthost.NewLocal(stores, info)
 			host.SetSealedCommitSigner(c.sealed)
 			rec := gitPushRecorder(host, info)
-			rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/signed-" + string(c.sealed), NewSHA: signedTip, Created: true, Status: 200})
-			rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/unsigned-" + string(c.sealed), NewSHA: unsignedTip, Created: true, Status: 200})
+			rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/heads/signed-" + string(c.sealed), NewSHA: signedTip, Created: true, Status: 200})
+			rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/heads/unsigned-" + string(c.sealed), NewSHA: unsignedTip, Created: true, Status: 200})
 
 			var rm metricdata.ResourceMetrics
 			if err := reader.Collect(ctx, &rm); err != nil {

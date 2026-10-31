@@ -2104,6 +2104,11 @@ CREATE INDEX idx_conversation_memory_entities_entity ON public.conversation_memo
 CREATE INDEX idx_conversation_memory_attempts_conversation ON public.conversation_memory_attempts USING btree (conversation_id, started_at DESC, id DESC);
 
 
+-- The org's newest generated memory, which the memory provisioner's
+-- failing-generation read measures every failure against.
+CREATE INDEX idx_conversation_memory_attempts_generated ON public.conversation_memory_attempts USING btree (org_id, completed_at DESC) WHERE (outcome = 'generated'::text);
+
+
 CREATE INDEX idx_messages_conversation ON public.messages USING btree (conversation_id);
 
 
@@ -6792,6 +6797,10 @@ ALTER TABLE ONLY public.notifications
 CREATE UNIQUE INDEX notifications_open_occurrence_idx ON public.notifications USING btree (org_id, origin, kind, key, audience_scope, (COALESCE(audience_role, ''::text)), (COALESCE(team_id, '00000000-0000-0000-0000-000000000000'::uuid)), (COALESCE(user_id, '00000000-0000-0000-0000-000000000000'::uuid))) WHERE (resolved_at IS NULL);
 
 CREATE INDEX notifications_list_idx ON public.notifications USING btree (org_id, resolved_at, priority, escalated_at, id);
+
+-- The orgs with an open condition of a kind, across the deployment: what a
+-- producer whose evaluation set can lose an org re-evaluates.
+CREATE INDEX notifications_open_kind_idx ON public.notifications USING btree (kind, origin, org_id) WHERE ((lifecycle = 'condition'::text) AND (resolved_at IS NULL));
 
 ALTER TABLE public.notifications ENABLE ROW LEVEL SECURITY;
 

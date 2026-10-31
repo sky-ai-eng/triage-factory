@@ -157,14 +157,22 @@ func TestServer_SandboxUpsertDeliverable_RecordsBranchesOnly(t *testing.T) {
 	if _, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, info.OrgID, site, "ABC-1", "10001", dbseed.JiraIssueProject("ABC-1"), "Issue", site+"/browse/ABC-1"); err != nil {
 		t.Fatal(err)
 	}
-	registerRepo(t, stores, "octo", "repo", "1")
+	registerRepo(t, stores, "octo", "repo", testRepoID("octo/repo"))
 
 	sockPath := tempSocket(t)
 	listener, err := net.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+	// The daemon reads the pushed repository's id with its own credential.
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !answerPRRead(w, r) {
+			t.Errorf("unexpected GitHub call: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(gh.Close)
 	srv := NewServer(stores, info, nil)
+	srv.SetGitHubResolver(fakeGitHubResolver{baseURL: gh.URL, token: "org-pat"})
 	go func() { _ = srv.Serve(listener) }()
 	t.Cleanup(func() {
 		_ = listener.Close()

@@ -239,13 +239,8 @@ func RunJiraProjectConformance(t *testing.T, factory JiraProjectFactory) {
 		}
 		setOrder := func(teamID string, order []string) {
 			t.Helper()
-			ts, err := f.Teams.GetSettingsSystem(ctx, teamID)
-			if err != nil {
-				t.Fatalf("GetSettingsSystem: %v", err)
-			}
-			ts.JiraProjects = order
-			if _, err := f.Teams.UpdateSettings(ctx, teamID, ts); err != nil {
-				t.Fatalf("UpdateSettings: %v", err)
+			if _, err := f.Teams.SetJiraProjectOrder(ctx, teamID, order); err != nil {
+				t.Fatalf("SetJiraProjectOrder: %v", err)
 			}
 		}
 		setOrder(f.TeamID, []string{loser, other.ID, winner.ID})

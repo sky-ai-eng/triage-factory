@@ -3,9 +3,12 @@ package postgres_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 )
@@ -141,5 +144,68 @@ func TestTeamsStore_Postgres_NamesForIDsSystem_EmptyInput(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("NamesForIDsSystem(nil) = %+v; want empty map", got)
+	}
+}
+
+// TestTeamsStore_Postgres_SettingsLock runs the lock's conformance suite on
+// the production pool split, under the claims of the team's admin.
+func TestTeamsStore_Postgres_SettingsLock(t *testing.T) {
+	h := pgtest.Shared(t)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	dbtest.RunSettingsLockConformance(t, func(t *testing.T) (db.Stores, string, string, string) {
+		h.Reset(t)
+		orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "settings-lock")
+		return stores, orgID, userID, teamID
+	})
+}
+
+// TestTeamsStore_Postgres_SettingsLock_PerTeam: the lock is keyed by the team,
+// so a write on another team does not wait for it. SQLite has one writer at a
+// time, so this is Postgres's alone.
+func TestTeamsStore_Postgres_SettingsLock_PerTeam(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	ctx := t.Context()
+	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "settings-lock-scope")
+	otherTeamID := pgtest.SeedTeam(t, h, orgID, "other")
+
+	locked, release := make(chan struct{}), make(chan struct{})
+	held := make(chan error, 1)
+	go func() {
+		held <- stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+			if err := tx.Teams.LockSettings(ctx, teamID); err != nil {
+				return err
+			}
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case <-locked:
+	case err := <-held:
+		t.Fatalf("holder ended before taking the lock: %v", err)
+	}
+	defer func() {
+		close(release)
+		if err := <-held; err != nil {
+			t.Errorf("holder: %v", err)
+		}
+	}()
+
+	other := make(chan error, 1)
+	go func() {
+		other <- stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+			return tx.Teams.LockSettings(ctx, otherTeamID)
+		})
+	}()
+	select {
+	case err := <-other:
+		if err != nil {
+			t.Errorf("another team's lock: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("another team's lock waited on this team's")
 	}
 }

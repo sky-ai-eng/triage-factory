@@ -68,10 +68,11 @@
 //! * **Bash children** — `bash` runs each command in its own session
 //!   (`setsid`, via [`crate::shell`]) and [`crate::bash::execute`] waits for and
 //!   reaps it before returning. Because dispatch is synchronous and serial, no
-//!   bash child is ever alive at the moment `serve` observes EOF and exits, so
-//!   an engagement teardown leaves no orphan. The process-group kill that
-//!   backstops a runaway tree already lives in [`crate::shell::kill_process_tree`],
-//!   invoked by `bash` on timeout.
+//!   bash child is ever alive at the moment `serve` observes EOF and exits. A
+//!   command killed for its timeout or its memory budget is killed whole by
+//!   [`crate::bash::kill_command_tree`]. The processes a command leaves behind,
+//!   its killed descendants and the background jobs that outlive it, pass to
+//!   PID 1, which `serve` is in the jail; it reaps them between requests.
 //!
 //! # Extensibility
 //!
@@ -489,6 +490,7 @@ fn serve_connection(stream: UnixStream, cwd: &str) -> io::Result<()> {
     loop {
         match read_frame(&mut reader) {
             ReadOutcome::Frame(body) => {
+                reap_orphans();
                 let response = session.handle_request(&body);
                 if write_frame(&mut writer, &response).is_err() {
                     // Peer vanished mid-request. The loser contract: the
@@ -512,6 +514,32 @@ fn serve_connection(stream: UnixStream, cwd: &str) -> io::Result<()> {
             ReadOutcome::Io => return Ok(()),
         }
     }
+}
+
+/// Wait for every child that has exited, without blocking, when this process
+/// is the jail's PID 1.
+///
+/// PID 1 is handed every process whose parent dies: the descendants of a
+/// command a timeout or the memory budget killed, and every background job
+/// that outlives the shell that started it. Each stays a zombie until PID 1
+/// waits for it, holding a pid and showing in `ps` and `pgrep` as if it were
+/// still running. One that exits during a call waits for the next request.
+///
+/// Waiting for any child is safe here, between requests: dispatch is serial
+/// and `bash` reaps its own shell before it returns, so no shell's exit status
+/// is outstanding for this to take. Anywhere but PID 1 the children belong to
+/// whoever started them, a test binary's included, and are left alone.
+///
+/// The tool host has to stay PID 1 itself rather than run behind a separate
+/// reaper. The kernel delivers PID 1 no signal it has no handler for, and
+/// `kill -1` passes it over, so no command can end the engagement by
+/// signalling everything it can reach.
+fn reap_orphans() {
+    if unsafe { libc::getpid() } != 1 {
+        return;
+    }
+    let mut status = 0;
+    while unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) } > 0 {}
 }
 
 /// Connect to the unix stream socket at `socket_path`, serve a single

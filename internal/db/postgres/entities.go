@@ -235,6 +235,40 @@ func (s *entityStore) StampExternalIDSystem(ctx context.Context, orgID, entityID
 	return nil, nil
 }
 
+// AdoptGitHubIdentitySystem fills a GitHub row's NULL external_id and sets its
+// kind; see the interface doc. Like StampExternalIDSystem, the guard admits
+// the id the row already carries.
+func (s *entityStore) AdoptGitHubIdentitySystem(ctx context.Context, orgID, entityID, externalID, kind string) (*domain.Entity, error) {
+	if externalID == "" {
+		return nil, errors.New("adopt github identity: empty id")
+	}
+	if !domain.IsGitHubObjectKind(kind) {
+		return nil, fmt.Errorf("adopt github identity: %q is not a GitHub entity kind", kind)
+	}
+	e, err := scanEntityRow(s.admin.QueryRowContext(ctx, `
+		UPDATE entities SET external_id = $1, kind = $2
+		WHERE org_id = $3 AND id = $4 AND source = 'github' AND (external_id IS NULL OR external_id = $1)
+		RETURNING `+pgEntitySelectCols,
+		externalID, kind, orgID, entityID))
+	if err != nil {
+		if isUniqueViolation(err) {
+			return nil, fmt.Errorf("%w: %s", db.ErrEntityIdentityAmbiguous, externalID)
+		}
+		return nil, err
+	}
+	if e != nil {
+		return e, nil
+	}
+	existing, err := getEntity(ctx, s.admin, orgID, entityID)
+	if err != nil {
+		return nil, err
+	}
+	if existing == nil {
+		return nil, sql.ErrNoRows
+	}
+	return nil, nil
+}
+
 func (s *entityStore) Descriptions(ctx context.Context, orgID string, ids []string) (map[string]string, error) {
 	return entityDescriptions(ctx, s.q, orgID, ids)
 }

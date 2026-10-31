@@ -115,11 +115,11 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 	})
 
 	t.Run("team_settings_writes_return_the_stored_row", func(t *testing.T) {
-		// The returned-row standard on the two team_settings writes: what the
-		// write handed back is what a point read finds. SetDailyCostCapSystem
-		// is the case it is for — it touches one column of a row whose other
-		// twelve come from schema defaults, so nothing the caller holds
-		// describes what landed.
+		// The returned-row standard on the team_settings writes: what the
+		// write handed back is what a point read finds. The one-column writes
+		// are the case it is for — each touches one column of a row whose
+		// other columns come from schema defaults or another writer, so
+		// nothing the caller holds describes what landed.
 		stores, ids := factory(t)
 		read := func() (*domain.TeamSettings, error) {
 			set, err := stores.Teams.GetSettingsSystem(ctx, ids.TeamID)
@@ -129,9 +129,14 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			return &set, nil
 		}
 
+		ordered, err := stores.Teams.SetJiraProjectOrder(ctx, ids.TeamID, []string{"jira-row-b", "jira-row-a"})
+		if err != nil {
+			t.Fatalf("SetJiraProjectOrder: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Teams.SetJiraProjectOrder", ordered, read)
+
 		saved, err := stores.Teams.UpdateSettings(ctx, ids.TeamID, domain.TeamSettings{
-			JiraProjects: []string{"RET"}, AIReprioritizeThreshold: 4,
-			AIPreferenceUpdateInterval: 12, DefaultModel: domain.ModelOpus,
+			AIReprioritizeThreshold: 4, AIPreferenceUpdateInterval: 12, DefaultModel: domain.ModelOpus,
 			PermissionAbsentGraceMS: 1000,
 			BranchTemplate:          "ret/<ticket-id>",
 			ReviewPosture:           domain.ReviewPostureAutoUnlessBlocking,
@@ -141,6 +146,20 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			t.Fatalf("UpdateSettings: %v", err)
 		}
 		AssertWriteReturnedStoredRow(t, "Teams.UpdateSettings", saved, read)
+		// The settings save carried no order and kept the stored one, and the
+		// returned row says so.
+		if !slices.Equal(saved.JiraProjects, []string{"jira-row-b", "jira-row-a"}) {
+			t.Errorf("UpdateSettings returned jira_projects %v, want the stored order", saved.JiraProjects)
+		}
+
+		linearOrdered, err := stores.Teams.SetLinearTeamOrder(ctx, ids.TeamID, []string{"linear-team-a"})
+		if err != nil {
+			t.Fatalf("SetLinearTeamOrder: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Teams.SetLinearTeamOrder", linearOrdered, read)
+		if linearOrdered.DefaultModel != domain.ModelOpus || !slices.Equal(linearOrdered.JiraProjects, saved.JiraProjects) {
+			t.Errorf("SetLinearTeamOrder returned %+v, want the new order over the saved settings", linearOrdered)
+		}
 
 		capped, err := stores.Teams.SetDailyCostCapSystem(ctx, ids.TeamID, 9.5)
 		if err != nil {
@@ -1466,8 +1485,18 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			BaseBranchPushPolicy:            domain.BaseBranchPushManualOnly,
 			EnabledModels:                   []string{domain.ModelOpus, domain.ModelSonnet},
 		}
+		// Each column through the writer that owns it.
 		if _, err := stores.Teams.UpdateSettings(ctx, ids.TeamID, want); err != nil {
 			t.Fatalf("UpdateSettings: %v", err)
+		}
+		if _, err := stores.Teams.SetJiraProjectOrder(ctx, ids.TeamID, want.JiraProjects); err != nil {
+			t.Fatalf("SetJiraProjectOrder: %v", err)
+		}
+		if _, err := stores.Teams.SetLinearTeamOrder(ctx, ids.TeamID, want.LinearTeams); err != nil {
+			t.Fatalf("SetLinearTeamOrder: %v", err)
+		}
+		if _, err := stores.Teams.SetDailyCostCapSystem(ctx, ids.TeamID, want.MaxDailyCostUSD); err != nil {
+			t.Fatalf("SetDailyCostCapSystem: %v", err)
 		}
 		got, err := stores.Teams.GetSettingsSystem(ctx, ids.TeamID)
 		if err != nil {
@@ -1475,6 +1504,49 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("TeamSettings round-trip mismatch\n got: %+v\nwant: %+v", got, want)
+		}
+	})
+
+	// The settings save owns every column but three: the two display orders
+	// belong to the tracked-set writes and the daily cap to the org admin. A
+	// save loaded before one of those writes is the team-settings PATCH that
+	// read the row just before it; storing what it carries for them would
+	// undo the write, so it stores none of them.
+	t.Run("TeamSettings_OrdersAndCap_OwnedByTheirWritersNotSettingsSave", func(t *testing.T) {
+		stores, ids := factory(t)
+
+		loaded, err := stores.Teams.UpdateSettings(ctx, ids.TeamID, domain.DefaultTeamSettingsFor(stores.MultiMode))
+		if err != nil {
+			t.Fatalf("UpdateSettings (materialize): %v", err)
+		}
+		if _, err := stores.Teams.SetJiraProjectOrder(ctx, ids.TeamID, []string{"jira-row-a"}); err != nil {
+			t.Fatalf("SetJiraProjectOrder: %v", err)
+		}
+		if _, err := stores.Teams.SetLinearTeamOrder(ctx, ids.TeamID, []string{"linear-team-a"}); err != nil {
+			t.Fatalf("SetLinearTeamOrder: %v", err)
+		}
+		if _, err := stores.Teams.SetDailyCostCapSystem(ctx, ids.TeamID, 10); err != nil {
+			t.Fatalf("SetDailyCostCapSystem: %v", err)
+		}
+
+		// The save loaded before those writes still lands its own field, and
+		// neither it nor a save carrying other values for the three moves them.
+		loaded.BranchTemplate = "loaded/<ticket-id>"
+		if _, err := stores.Teams.UpdateSettings(ctx, ids.TeamID, loaded); err != nil {
+			t.Fatalf("UpdateSettings (loaded before the writes): %v", err)
+		}
+		loaded.JiraProjects, loaded.LinearTeams, loaded.MaxDailyCostUSD = []string{"someone-elses"}, []string{"someone-elses"}, 50
+		after, err := stores.Teams.UpdateSettings(ctx, ids.TeamID, loaded)
+		if err != nil {
+			t.Fatalf("UpdateSettings (other values for the three): %v", err)
+		}
+		if !slices.Equal(after.JiraProjects, []string{"jira-row-a"}) ||
+			!slices.Equal(after.LinearTeams, []string{"linear-team-a"}) || after.MaxDailyCostUSD != 10 {
+			t.Errorf("a settings save moved another writer's column: jira_projects=%v linear_teams=%v cap=%v; want [jira-row-a] [linear-team-a] 10",
+				after.JiraProjects, after.LinearTeams, after.MaxDailyCostUSD)
+		}
+		if after.BranchTemplate != "loaded/<ticket-id>" {
+			t.Errorf("the settings save didn't apply its own field: branch_template=%q", after.BranchTemplate)
 		}
 	})
 
@@ -1616,24 +1688,26 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 	})
 
-	t.Run("TeamSettings_NilProjects_RoundTripsEmpty", func(t *testing.T) {
-		// JiraProjects=nil writes []; reads back as []. Keeps "no
-		// projects configured" stable for downstream callers.
+	t.Run("TeamSettings_NilOrders_RoundTripEmpty", func(t *testing.T) {
+		// A nil order writes []; reads back as an empty non-nil slice. Keeps
+		// "nothing tracked" stable for downstream callers, and an order
+		// cleared after one was stored reads the same as one never written.
 		stores, ids := factory(t)
-		in := domain.TeamSettings{
-			AIReprioritizeThreshold:    5,
-			AIPreferenceUpdateInterval: 20,
-			DefaultModel:               domain.ModelSonnet,
+		if _, err := stores.Teams.SetJiraProjectOrder(ctx, ids.TeamID, []string{"jira-row-a"}); err != nil {
+			t.Fatalf("SetJiraProjectOrder: %v", err)
 		}
-		if _, err := stores.Teams.UpdateSettings(ctx, ids.TeamID, in); err != nil {
-			t.Fatalf("UpdateSettings: %v", err)
+		if _, err := stores.Teams.SetJiraProjectOrder(ctx, ids.TeamID, nil); err != nil {
+			t.Fatalf("SetJiraProjectOrder (nil): %v", err)
+		}
+		if _, err := stores.Teams.SetLinearTeamOrder(ctx, ids.TeamID, nil); err != nil {
+			t.Fatalf("SetLinearTeamOrder (nil): %v", err)
 		}
 		got, err := stores.Teams.GetSettingsSystem(ctx, ids.TeamID)
 		if err != nil {
 			t.Fatalf("GetSettingsSystem: %v", err)
 		}
-		if len(got.JiraProjects) != 0 {
-			t.Errorf("JiraProjects=%v; want empty slice", got.JiraProjects)
+		if got.JiraProjects == nil || len(got.JiraProjects) != 0 {
+			t.Errorf("JiraProjects=%#v; want an empty non-nil slice", got.JiraProjects)
 		}
 		if got.LinearTeams == nil || len(got.LinearTeams) != 0 {
 			t.Errorf("LinearTeams=%#v; want an empty non-nil slice", got.LinearTeams)

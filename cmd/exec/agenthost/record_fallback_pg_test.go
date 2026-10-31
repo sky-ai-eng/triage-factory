@@ -101,7 +101,7 @@ func TestRecordExternalWrite_Postgres_CrossTeamKeepsTheLedgerRow(t *testing.T) {
 		if !ok {
 			t.Fatal("NewBranchDeliverable refused the pushed branch")
 		}
-		if _, err := newDirectRuntime(stores, infoB).UpsertDeliverable(ctx, pushed); err == nil {
+		if _, err := newDirectRuntime(stores, infoB).UpsertDeliverable(ctx, pushed, domain.GitHubIdentity{}); err == nil {
 			t.Fatal("UpsertDeliverable = nil error, want team B refused team A's branch row")
 		}
 		var pushes []domain.ExternalAction

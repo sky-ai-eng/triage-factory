@@ -368,9 +368,10 @@ func pushSigner(ctx context.Context, stores db.Stores, orgID, sha string, sealed
 // signatures produced it, so the control plane's post-push check reads the
 // commit's verification on its next GitHub cycle. The first push of a commit
 // is the one kept. Host-side only, like RecordGitPushFailed: the git proxy's
-// push observer calls it for a branch the upstream accepted. Best-effort: the
-// push already happened, so a failure is logged and the commit goes
-// unchecked.
+// push observer calls it for a branch the upstream accepted. The repository is
+// the registry row GitHub's id for it names (githubRepositoryRow), as for the
+// push's own rows. Best-effort: the push already happened, so a failure is
+// logged and the commit goes unchecked.
 func (c *LocalClient) MarkPushedSignature(ctx context.Context, push gitproxy.PushedRef) {
 	if c.stores.CommitSignatures == nil || push.NewSHA == "" || !push.Succeeded() {
 		return
@@ -384,8 +385,11 @@ func (c *LocalClient) MarkPushedSignature(ctx context.Context, push gitproxy.Pus
 	if sig == nil {
 		return
 	}
-	owner, repo, _ := strings.Cut(push.Repo, "/")
-	row, err := c.registryRepo(ctx, owner, repo)
+	host, err := db.OrgGitHubHostSystem(ctx, c.stores.Orgs, c.info.OrgID)
+	var row *domain.Repository
+	if err == nil {
+		row, err = githubRepositoryRow(ctx, c.stores, c.info, host, PushIdentity(push))
+	}
 	if err == nil && row == nil {
 		err = fmt.Errorf("%w: %s", errNoRegistryRow, push.Repo)
 	}

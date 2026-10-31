@@ -376,7 +376,7 @@ func (h *slackExecHandler) react(ctx context.Context, rt agenthost.ExtensionRunt
 	}
 	// The object is the message reacted to.
 	act.SetObject(domain.ObjectKindMessage, slackMessageObjectKey(channel.Row, a.TS))
-	rt.Record(ctx, nil, act, domain.EntityContainer{})
+	rt.Record(ctx, nil, act, domain.EntityContainer{}, domain.GitHubIdentity{})
 	return slackReactResult{}, nil
 }
 
@@ -463,7 +463,7 @@ func (h *slackExecHandler) recordMessage(ctx context.Context, rt agenthost.Exten
 		Credential: domain.CredentialSlackBot,
 	}
 	act.SetObject(domain.ObjectKindMessage, slackMessageObjectKey(channelRow, ts))
-	rt.Record(ctx, a, act, domain.EntityContainer{})
+	rt.Record(ctx, a, act, domain.EntityContainer{}, domain.GitHubIdentity{})
 }
 
 // slackMessageObjectKey is the object_key of the message ts in the channel
@@ -589,7 +589,7 @@ func (h *slackExecHandler) readThread(ctx context.Context, rt agenthost.Extensio
 	// read and a human mention resolve to the same entity. Best-effort via the
 	// runtime, relayed to the orchestrator on the sidecar. `read channel` is
 	// set-returning and never touches.
-	rt.RecordReadTouch(ctx, domain.ProviderSlack, domain.SlackSourceID(a.Channel, a.TS), "", domain.EntityContainer{}, "")
+	rt.RecordReadTouch(ctx, domain.ProviderSlack, domain.SlackSourceID(a.Channel, a.TS), "", domain.EntityContainer{}, domain.GitHubIdentity{}, "")
 	return h.viewMessages(ctx, caller, token, msgs), nil
 }
 
