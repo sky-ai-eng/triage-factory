@@ -29,6 +29,11 @@ func (routes) OrgSettings() Href { return Href{route: orgSettingsRoute} }
 // Multi mode has it on /team's Jira source, which opens on the team the viewer
 // last acted in, because the page takes no team from its address; local mode,
 // which has no /team page, has the one team's on /settings.
+//
+// TODO(TFAC-1268): the link names neither the row's team nor its project, so
+// an admin of several teams can land on another team's rules and then has to
+// find the project by hand. Needs the page to read both from its URL and an
+// Href that carries per-row query parameters.
 func (routes) TeamJira() Href { return Href{route: teamJiraRoute} }
 
 // route is a page of the SPA. multi is its path under /orgs/{org_id}; local is
