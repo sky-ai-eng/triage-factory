@@ -472,25 +472,28 @@ func onlyConflict(t *testing.T, rec *notifytest.Recorder, taskID string) kinds.C
 	return open[0].Params.(kinds.Conflict)
 }
 
-// TestAuthorCentric_TwoTeams_NoConflictWithoutALoser pins what is not a
-// conflict, though the author is on two teams that each have a trigger: a team
-// whose trigger would not have run anyway lost nothing to the winner.
-func TestAuthorCentric_TwoTeams_NoConflictWithoutALoser(t *testing.T) {
+// TestAuthorCentric_TwoTeams_LoserWithoutAnImmediateTrigger pins which later
+// teams lose, the author being on two teams that each have a trigger: a team
+// with auto-delegation off lost nothing to the winner, while a team whose
+// trigger is deferred did, because the winner's claim keeps the post-scoring
+// pass from ever evaluating it.
+func TestAuthorCentric_TwoTeams_LoserWithoutAnImmediateTrigger(t *testing.T) {
 	for _, c := range []struct {
 		name string
-		// sideline makes the team that would lose one that never fires now.
+		// sideline makes the team that would lose one that fires nothing now.
 		sideline func(t *testing.T, database *sql.DB, team, trigger string)
+		loses    bool
 	}{
 		{"auto-delegation off", func(t *testing.T, database *sql.DB, team, _ string) {
 			if _, err := database.Exec(`UPDATE team_settings SET auto_delegate_enabled = 0 WHERE team_id = ?`, team); err != nil {
 				t.Fatalf("turn auto-delegation off: %v", err)
 			}
-		}},
+		}, false},
 		{"deferred trigger", func(t *testing.T, database *sql.DB, _, trigger string) {
 			if _, err := database.Exec(`UPDATE event_handlers SET min_autonomy_suitability = 0.5 WHERE id = ?`, trigger); err != nil {
 				t.Fatalf("defer trigger: %v", err)
 			}
-		}},
+		}, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			database := newTestDB(t)
@@ -505,13 +508,13 @@ func TestAuthorCentric_TwoTeams_NoConflictWithoutALoser(t *testing.T) {
 			seedImmediateTrigger(t, database, teamA, domain.EventGitHubPRCICheckFailed, "ci-a")
 			seedImmediateTrigger(t, database, teamB, domain.EventGitHubPRCICheckFailed, "ci-b")
 			// The second team in firing order is the one that would lose.
-			if minStr(teamA, teamB) == teamA {
-				c.sideline(t, database, teamB, "trig-ci-b")
-			} else {
-				c.sideline(t, database, teamA, "trig-ci-a")
+			loser, loserTrigger := teamB, "trig-ci-b"
+			if minStr(teamA, teamB) == teamB {
+				loser, loserTrigger = teamA, "trig-ci-a"
 			}
+			c.sideline(t, database, loser, loserTrigger)
 
-			entityID := reviewEntity(t, database, "owner/repo#noconflict")
+			entityID := reviewEntity(t, database, "owner/repo#laterteam")
 			stub := &stubDelegator{db: database}
 			router := firingRouter(database, stub)
 			rec := notifytest.Record(t)
@@ -520,7 +523,18 @@ func TestAuthorCentric_TwoTeams_NoConflictWithoutALoser(t *testing.T) {
 			if stub.calls != 1 {
 				t.Fatalf("expected exactly 1 fire, got %d", stub.calls)
 			}
-			rec.Inactive(t, runmode.LocalDefaultOrgID, kinds.AutomationConflict)
+			if !c.loses {
+				rec.Inactive(t, runmode.LocalDefaultOrgID, kinds.AutomationConflict)
+				return
+			}
+			active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
+			if err != nil || len(active) != 1 {
+				t.Fatalf("expected 1 task, got %d (err=%v)", len(active), err)
+			}
+			got := onlyConflict(t, rec, active[0].ID)
+			if len(got.Losers) != 1 || got.Losers[0] != (kinds.ConflictLoser{TeamID: loser, TriggerID: loserTrigger}) {
+				t.Errorf("losers = %+v; want %s linked to its deferred trigger %s", got.Losers, loser, loserTrigger)
+			}
 		})
 	}
 }

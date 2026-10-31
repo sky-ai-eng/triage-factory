@@ -786,11 +786,12 @@ func (r *Router) upsertTaskForEvent(ctx context.Context, orgID string, evt domai
 //
 // When orderedTeams are one identity's teams, the walk is also where a
 // conflict between them is decided: the first team whose trigger commits
-// wins, and every later team with auto-delegation on and a trigger to fire
-// now loses to its claim. The losers' admins are told (postAutomationConflict).
-// A deferred trigger takes no part: it is decided after scoring, if at all. A
-// replay finds the winner's trigger already fired, commits nothing, and posts
-// nothing.
+// wins, and every later team with auto-delegation on and a matched trigger
+// loses to its claim. The losers' admins are told (postAutomationConflict). A
+// later team whose triggers are all deferred loses too, though its score
+// threshold might not have passed: the claim keeps the post-scoring pass from
+// ever evaluating it. A replay finds the winner's trigger already fired,
+// commits nothing, and posts nothing.
 func (r *Router) fireMatchedTriggers(ctx context.Context, orgID string, evt domain.Event, entityID string, task *domain.Task, routing eventRouting) (int, string, error) {
 	ctx, span := tracer.Start(ctx, "route.triggers", trace.WithAttributes(telemetry.TaskID(task.ID)))
 	defer span.End()
@@ -826,13 +827,16 @@ func (r *Router) fireMatchedTriggers(ctx context.Context, orgID string, evt doma
 				"team", acting, "task_id", task.ID, "event_type", evt.EventType, "matched_triggers", len(triggers))
 			continue
 		}
-		immediate, teamCommitted := "", false
+		// linked is the trigger a losing team's admins are sent to: its first
+		// immediate one, else its first deferred one.
+		linked, linkedImmediate, teamCommitted := "", false, false
 		for _, trigger := range triggers {
-			if trigger.MinAutonomySuitability != nil && *trigger.MinAutonomySuitability > 0 {
-				continue // deferred to post-scoring handler
+			deferred := trigger.MinAutonomySuitability != nil && *trigger.MinAutonomySuitability > 0
+			if !linkedImmediate && (linked == "" || !deferred) {
+				linked, linkedImmediate = trigger.ID, !deferred
 			}
-			if immediate == "" {
-				immediate = trigger.ID
+			if deferred {
+				continue // deferred to post-scoring handler
 			}
 			committed, err := r.tryAutoDelegateTrackingInjection(ctx, orgID, task, trigger, entityID, evt.ID, acting, &injectedConversationID)
 			if err != nil {
@@ -847,8 +851,8 @@ func (r *Router) fireMatchedTriggers(ctx context.Context, orgID string, evt doma
 		switch {
 		case teamCommitted && winner == "":
 			winner = acting
-		case !teamCommitted && winner != "" && immediate != "" && routing.identityTeams:
-			losers = append(losers, kinds.ConflictLoser{TeamID: acting, TriggerID: immediate})
+		case !teamCommitted && winner != "" && routing.identityTeams:
+			losers = append(losers, kinds.ConflictLoser{TeamID: acting, TriggerID: linked})
 		}
 	}
 	if len(losers) > 0 {
