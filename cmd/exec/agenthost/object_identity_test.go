@@ -149,3 +149,72 @@ func TestRecorders_NameTheObjectALandedChangeChanged(t *testing.T) {
 		})
 	}
 }
+
+// TestRecordExternalWrite_KeepsOnlyAnObjectTheActionNames pins the funnel's
+// guard: a row reaching it with an object its action cannot name, as a relayed
+// row from a sidecar can, is recorded naming none, and the row itself lands.
+func TestRecordExternalWrite_KeepsOnlyAnObjectTheActionNames(t *testing.T) {
+	stores, info := newCaptureStores(t, false)
+	for _, act := range []*domain.ExternalAction{
+		{Provider: domain.ProviderGitHub, Action: domain.ActionGitDenied, Target: "octo/repo",
+			Credential: domain.CredentialGitHubApp, ObjectKind: domain.ObjectKindComment, ObjectKey: "github:comment:1"},
+		{Provider: domain.ProviderGitHub, Action: domain.ActionCommentPosted, Target: "octo/repo",
+			Credential: domain.CredentialGitHubApp, ObjectKind: "not_a_kind", ObjectKey: "x"},
+	} {
+		RecordExternalWrite(context.Background(), stores, info, nil, act)
+	}
+	rows := listExternalActions(t, stores)
+	if len(rows) != 2 {
+		t.Fatalf("want both rows recorded, got %+v", rows)
+	}
+	for _, a := range rows {
+		if a.ObjectKind != "" || a.ObjectKey != "" {
+			t.Errorf("%s row names object (%q, %q), want none", a.Action, a.ObjectKind, a.ObjectKey)
+		}
+	}
+}
+
+// TestGHChannelWriteAction_NamesTheObject pins the object each classified,
+// accepted gh-channel write names, by the kind its action changes and the key
+// off the shape, and that a shape without what its key needs names none.
+func TestGHChannelWriteAction_NamesTheObject(t *testing.T) {
+	rest := func(method, path, externalID string) ghwrite.Observation {
+		return ghwrite.Observation{Method: method, Path: path, Status: 200, ExternalID: externalID}
+	}
+	graphQL := func(mutation, subject string) ghwrite.Observation {
+		return ghwrite.Observation{Method: "POST", Path: "/graphql", Status: 200,
+			GraphQL: &ghwrite.GraphQLFacts{Fields: []string{mutation}, Subject: subject}}
+	}
+	cases := []struct {
+		name      string
+		obs       ghwrite.Observation
+		kind, key string
+	}{
+		{"reaction on a conversation comment", rest("POST", "/repos/octo/repo/issues/comments/5/reactions", ""),
+			domain.ObjectKindComment, domain.GitHubCommentKey(domain.GitHubIssueComment, 5)},
+		{"reaction on a review comment", rest("POST", "/repos/octo/repo/pulls/comments/5/reactions", ""),
+			domain.ObjectKindComment, domain.GitHubCommentKey(domain.GitHubReviewComment, 5)},
+		{"reaction on a pull request", rest("POST", "/repos/octo/repo/issues/7/reactions", ""),
+			domain.ObjectKindPullRequest, ""},
+		{"GraphQL reaction", graphQL("addReaction", "IC_kw1"), "", ""},
+		{"review dismissal", rest("PUT", "/repos/octo/repo/pulls/7/reviews/4242/dismissals", ""),
+			domain.ObjectKindReview, domain.GitHubReviewObjectKey("4242")},
+		{"label definition edit", rest("PATCH", "/repos/octo/repo/labels/needs%20triage", ""),
+			domain.ObjectKindLabel, "needs triage"},
+		{"release edit", rest("PATCH", "/repos/octo/repo/releases/31", ""), domain.ObjectKindRelease, "31"},
+		{"workflow dispatch", rest("POST", "/repos/octo/repo/actions/workflows/ci.yml/dispatches", ""),
+			domain.ObjectKindWorkflow, "ci.yml"},
+		{"workflow run cancel", rest("POST", "/repos/octo/repo/actions/runs/77/cancel", ""),
+			domain.ObjectKindWorkflowRun, "77"},
+		{"repository edit", rest("PATCH", "/repos/octo/repo", ""), domain.ObjectKindRepository, ""},
+		{"GraphQL comment delete naming only a node id", graphQL("deleteIssueComment", "IC_kw1"), "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			act := GHChannelWriteAction(c.obs, domain.CredentialGitHubApp)
+			if act.ObjectKind != c.kind || act.ObjectKey != c.key {
+				t.Errorf("%s row names (%q, %q), want (%q, %q)", act.Action, act.ObjectKind, act.ObjectKey, c.kind, c.key)
+			}
+		})
+	}
+}

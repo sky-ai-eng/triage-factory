@@ -63,6 +63,9 @@ const pgExternalActionColumns = `
 // the dual-dialect conformance suite holds the two definitions to each other,
 // row by row for every kind. A GitHub issue is identified by its entity and a
 // Jira or Linear one by its key, so the issue arms split on provider.
+//
+// TODO(TFAC-1260): only the conformance suite reads it until the artifacts
+// read groups a run's rows by it.
 const pgActionObjectIDSQL = `
 	CASE
 	  WHEN ea.object_kind = 'pull_request' OR (ea.object_kind = 'issue' AND ea.provider = 'github')

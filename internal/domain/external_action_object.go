@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"strconv"
 	"strings"
 )
 
@@ -132,6 +133,20 @@ func ActionObjectKind(action string) string {
 	return actionObjectKinds[action]
 }
 
+// ActionNamesKind reports whether a row for action may name an object of
+// kind: the kind ActionObjectKind gives, or a comment for a reaction. An
+// action that names no object (a refusal, a failure, a catch-all) may name
+// none.
+func ActionNamesKind(action, kind string) bool {
+	switch {
+	case kind == "":
+		return false
+	case kind == ActionObjectKind(action):
+		return true
+	}
+	return kind == ObjectKindComment && (action == ActionReactionAdded || action == ActionReactionRemoved)
+}
+
 // IsRefusalOrFailure reports whether action records a write that was refused
 // or failed: nothing landed, and the row names no object.
 func IsRefusalOrFailure(action string) bool {
@@ -213,12 +228,15 @@ func ObjectID(a ExternalAction) (string, bool) {
 }
 
 // GitHubReviewObjectKey is the object_key of a submitted GitHub review:
-// "github:review:<review id>". "" when the id is unknown.
+// "github:review:<review id>". "" for an id that is not a positive integer: a
+// submit whose response carried no id reads as 0, and every such review would
+// otherwise share one identity.
 func GitHubReviewObjectKey(reviewID string) string {
-	if reviewID == "" {
+	n, err := strconv.ParseInt(reviewID, 10, 64)
+	if err != nil || n <= 0 {
 		return ""
 	}
-	return ObjectKey(ProviderGitHub, ObjectKindReview, reviewID, "")
+	return ObjectKey(ProviderGitHub, ObjectKindReview, strconv.FormatInt(n, 10), "")
 }
 
 // IssueObjectKey is the object_key of the Jira or Linear issue carrying

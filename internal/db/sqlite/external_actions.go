@@ -43,6 +43,9 @@ const externalActionColumns = `
 // an external_actions alias `ea` — the SQLite mirror of the Postgres twin,
 // which carries the model. The ids are TEXT here, so they concatenate without
 // a cast.
+//
+// TODO(TFAC-1260): only the conformance suite reads it until the artifacts
+// read groups a run's rows by it.
 const sqliteActionObjectIDSQL = `
 	CASE
 	  WHEN ea.object_kind = 'pull_request' OR (ea.object_kind = 'issue' AND ea.provider = 'github')

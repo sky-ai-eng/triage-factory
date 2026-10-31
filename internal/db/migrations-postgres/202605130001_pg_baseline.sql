@@ -2065,6 +2065,8 @@ CREATE INDEX idx_external_actions_repository ON public.external_actions USING bt
 
 
 -- The rows that changed one keyed object, found by its key within a scope.
+-- TODO(TFAC-1265): nothing reads by it until the tracker's comment check
+-- looks TF's own comments up by key.
 CREATE INDEX idx_external_actions_object_key ON public.external_actions USING btree (org_id, scope, object_key) WHERE (object_key IS NOT NULL);
 
 
