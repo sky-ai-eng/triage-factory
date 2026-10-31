@@ -160,6 +160,11 @@ type Manager struct {
 	cursorMu sync.Mutex
 	ghCursor map[string]string
 
+	// jiraDiscovery counts each org's consecutive rejected Jira discovery
+	// cycles per project. A Tracker lives one cycle, so the counts live here
+	// and every Tracker is handed them; memory only, like the cursor above.
+	jiraDiscovery tracker.JiraDiscoveryStreaks
+
 	// heartbeatMu guards lastGithubTick/lastJiraTick — stamped at every
 	// wake of runGitHubCycle/runJiraCycle regardless of whether any org
 	// was due that wake, and within a cycle as each upstream request
@@ -215,7 +220,8 @@ func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, ta
 // (struct of method holders + store references) so per-cycle
 // allocation is fine.
 func (m *Manager) trackerForOrg(orgID string) *tracker.Tracker {
-	return tracker.New(m.database, m.pub, m.tasks, m.entities, m.repos, m.jiraProjects, m.artifacts, m.eventQueue, orgID)
+	return tracker.New(m.database, m.pub, m.tasks, m.entities, m.repos, m.jiraProjects, m.artifacts, m.eventQueue, orgID).
+		WithJiraDiscoveryStreaks(&m.jiraDiscovery)
 }
 
 // sourceDisabled reports whether this cycle must not run, and the span outcome
@@ -507,17 +513,18 @@ func (m *Manager) PollGitHubOnce(ctx context.Context, orgID string) {
 // so a non-default team's Jira config is discovered and polled too.
 // toTrackerJiraRules then merges the rows per project. Local mode collapses
 // to N=1 (the single default team), where the union equals what the poller
-// read before. Empty list on error.
-func (m *Manager) loadJiraRules(ctx context.Context, orgID, site string) []domain.JiraProjectStatusRules {
+// read before. ok is false, with an empty list, when nothing was read: no store
+// is wired, or the read failed, which is logged.
+func (m *Manager) loadJiraRules(ctx context.Context, orgID, site string) (rules []domain.JiraProjectStatusRules, ok bool) {
 	if m.jiraRules == nil {
-		return nil
+		return nil, false
 	}
 	rules, err := m.jiraRules.ListForOrgSystem(ctx, orgID, site)
 	if err != nil {
 		pollerLog.Warn("list jira rules (org union) failed", "org", orgID, "error", err)
-		return nil
+		return nil, false
 	}
-	return rules
+	return rules, true
 }
 
 // StopAll stops all running polling loops without restarting.
@@ -1613,7 +1620,7 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 		return
 	}
 	scope := domain.EntityScope("jira", orgSet)
-	rules := m.loadJiraRules(ctx, orgID, scope)
+	rules, rulesRead := m.loadJiraRules(ctx, orgID, scope)
 	// "Configured" is decided by the auth-method marker (via JiraSystemConfig),
 	// not key presence: a configured org has a URL plus the scheme's secret
 	// matching its jira_auth_method (DC PAT, or Cloud email + token). Reading
@@ -1629,8 +1636,15 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 	if configured && len(projects) == 0 {
 		// Nothing on this site to poll, but issues a previous site left
 		// tracked still retire: that needs no Jira call, and nothing else
-		// would ever close them.
-		m.trackerForOrg(orgID).RetireJiraOutOfScope(ctx, scope)
+		// would ever close them. With no project to discover, no project's
+		// discovery is failing either, and once the org's last armed project
+		// is unarmed this branch is the only place that can say so. It says
+		// so only from rules it read: a failed read is no answer about them.
+		tr := m.trackerForOrg(orgID)
+		tr.RetireJiraOutOfScope(ctx, scope)
+		if rulesRead {
+			tr.NoJiraDiscovery(ctx)
+		}
 	}
 	if !configured || len(rules) == 0 {
 		// An anticipated skip, not a failure: an org with no Jira config
@@ -1665,7 +1679,7 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 		// the set — a merge keeps every project's rules on one row — so an
 		// empty re-read is a failed one, and the cycle keeps the rules it
 		// already has rather than polling with none.
-		if reloaded := m.loadJiraRules(ctx, orgID, scope); len(reloaded) > 0 {
+		if reloaded, _ := m.loadJiraRules(ctx, orgID, scope); len(reloaded) > 0 {
 			projects = toTrackerJiraRules(reloaded)
 		}
 	}

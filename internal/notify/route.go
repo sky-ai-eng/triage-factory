@@ -25,6 +25,12 @@ type routes struct{}
 // mode, which has no /org page, on /settings.
 func (routes) OrgSettings() Href { return Href{route: orgSettingsRoute} }
 
+// TeamJira is a team's Jira page: its tracked projects and their status rules.
+// Multi mode has it on /team's Jira source, which opens on the team the viewer
+// last acted in, because the page takes no team from its address; local mode,
+// which has no /team page, has the one team's on /settings.
+func (routes) TeamJira() Href { return Href{route: teamJiraRoute} }
+
 // route is a page of the SPA. multi is its path under /orgs/{org_id}; local is
 // its path in local mode's route table, "" when local mode has no such page.
 // Either may end in the query that opens the right part of the page.
@@ -34,7 +40,10 @@ type route struct {
 	local string
 }
 
-var orgSettingsRoute = newRoute("org_settings", "/org?tab=settings", "/settings")
+var (
+	orgSettingsRoute = newRoute("org_settings", "/org?tab=settings", "/settings")
+	teamJiraRoute    = newRoute("team_jira", "/team?source=jira", "/settings")
+)
 
 // routeTable is every route Routes builds. Renaming a page is an edit here and
 // in frontend/src/main.tsx; TestNotifyRoutesAreSPARoutes fails until the two

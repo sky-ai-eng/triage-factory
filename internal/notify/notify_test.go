@@ -59,6 +59,13 @@ var (
 		Key: testID, Audience: Audiences(OrgAdmins(), TeamsTrackingLinearTeam(testID, Admins)),
 		Render: testRender, Example: testParams{ID: "lt-1"},
 	})
+	// jiraCondition is for the admins of every team whose rules arm the Jira
+	// project its ID names.
+	jiraCondition = Condition(ConditionSpec[testParams]{
+		Name: "test.jira_condition", Source: "jira", Priority: Always(High),
+		Key: testID, Audience: TeamsTrackingJiraProject(testID, Admins),
+		Render: testRender, Example: testParams{ID: "jp-1"},
+	})
 	onlyTeamCondition = Condition(ConditionSpec[testParams]{
 		Name: "test.only_team_condition", Priority: Always(High),
 		Key: testID, Audience: TeamAdmins(testTeamID), Render: testRender, Example: testParams{ID: "x", TeamID: exampleTeamID},
@@ -315,6 +322,33 @@ func TestLocal_SyncResolvesWhatIsNotActive(t *testing.T) {
 	}
 }
 
+// A kept member is one the pass has no answer for: its open row is left as it
+// was, neither bumped nor resolved, and one that is not open stays closed.
+func TestLocal_SyncLeavesWhatItKeeps(t *testing.T) {
+	stores, hub, _ := localBackend(t)
+	ctx := context.Background()
+	org, user := runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID
+	team := runmode.LocalDefaultTeamID
+
+	teamCondition.Sync(ctx, org, []testParams{{ID: "a", TeamID: team}, {ID: "b", TeamID: team}})
+	hub.take(t)
+
+	teamCondition.Sync(ctx, org, []testParams{{ID: "a", TeamID: team}}, testParams{ID: "b", TeamID: team}, testParams{ID: "c", TeamID: team})
+	got := open(rows(t, stores, org, user, teamCondition))
+	slices.SortFunc(got, func(x, y domain.Notification) int { return strings.Compare(x.Key, y.Key) })
+	if len(got) != 2 || got[0].Key != "a" || got[0].SeenCount != 2 || got[1].Key != "b" || got[1].SeenCount != 1 {
+		t.Fatalf("after Sync([a], keep b c): %+v; want a bumped, b open and untouched, and c never opened", got)
+	}
+	if pings := hub.take(t); len(pings) != 0 {
+		t.Errorf("a bump and a kept row pinged %v; want nothing", pings)
+	}
+
+	teamCondition.Sync(ctx, org, nil)
+	if got := open(rows(t, stores, org, user, teamCondition)); len(got) != 0 {
+		t.Fatalf("after Sync(nil): %+v; want the kept row resolved once nothing keeps it", got)
+	}
+}
+
 func TestLocal_PostAndClearSource(t *testing.T) {
 	stores, _, _ := localBackend(t)
 	ctx := context.Background()
@@ -456,6 +490,70 @@ func TestMulti_AudiencesAndPings(t *testing.T) {
 	}
 	if pings := hub.take(t); len(pings) != 0 {
 		t.Errorf("failed resolutions pinged %v", pings)
+	}
+}
+
+// TestMulti_JiraTrackingAudience runs against Postgres: a Jira project's
+// tracking audience is the admins of the active teams whose rules arm it, not
+// a team that only watches it, and a team that stops arming it has its row
+// resolved audience_removed on the next write.
+func TestMulti_JiraTrackingAudience(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+	orgID, owner, _ := pgtest.SeedOrgWithUser(t, h, "notify-jira")
+	arming, archived, watching := pgtest.SeedTeam(t, h, orgID, "arming"), pgtest.SeedTeam(t, h, orgID, "archived"), pgtest.SeedTeam(t, h, orgID, "watching")
+	armingAdmin, watchingAdmin := pgtest.SeedUser(t, h, "arming-admin"), pgtest.SeedUser(t, h, "watching-admin")
+	pgtest.AddOrgMember(t, h, armingAdmin, orgID, arming, "member", "admin")
+	pgtest.AddOrgMember(t, h, watchingAdmin, orgID, watching, "member", "admin")
+
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	settings, err := stores.Orgs.SetSourceBaseURL(ctx, orgID, "jira", "https://acme.atlassian.net")
+	if err != nil {
+		t.Fatalf("SetSourceBaseURL: %v", err)
+	}
+	site := domain.EntityScope("jira", settings)
+	project, err := stores.JiraProjects.FindOrCreate(ctx, orgID, site, "10000", "SKY", "Sky")
+	if err != nil {
+		t.Fatalf("register SKY: %v", err)
+	}
+	ref := func(name string) domain.JiraStatusRef { return domain.JiraStatusRef{ID: "st-" + name, Name: name} }
+	armed := []domain.JiraProjectStatusRules{{
+		JiraProjectID: project.ID, PickupMembers: []domain.JiraStatusRef{ref("To Do")},
+		InProgressMembers: []domain.JiraStatusRef{ref("Doing")}, InProgressCanonical: ref("Doing"),
+		DoneMembers: []domain.JiraStatusRef{ref("Done")}, DoneCanonical: ref("Done"),
+	}}
+	watched := []domain.JiraProjectStatusRules{{JiraProjectID: project.ID}}
+	for team, rules := range map[string][]domain.JiraProjectStatusRules{arming: armed, archived: armed, watching: watched} {
+		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, team, site, rules); err != nil {
+			t.Fatalf("rules for %s: %v", team, err)
+		}
+	}
+	pgtest.MustExec(t, h.AdminDB, `UPDATE teams SET deleted_at = now() WHERE id = $1`, archived)
+
+	hub := &hubRecorder{}
+	install(t, Backend{
+		Tx: stores.Tx, Notifications: stores.Notifications, Orgs: stores.Orgs,
+		LinearTeamRules: stores.LinearTeamRules, JiraStatusRules: stores.JiraStatusRules, Hub: hub,
+	})
+	armingAdmins := Recipient{Scope: domain.NotificationScopeTeam, Role: Admins, TeamID: arming}
+	p := testParams{ID: project.ID}
+
+	jiraCondition.Set(ctx, orgID, p, true)
+	if got := open(rows(t, stores, orgID, owner, jiraCondition)); len(got) != 1 || got[0].Audience != armingAdmins {
+		t.Fatalf("open rows = %+v; want one for the arming team's admins", got)
+	}
+	if pings := hub.take(t); !slices.Equal(pings, []string{armingAdmin}) {
+		t.Errorf("open pinged %v; want only the arming team's admin %s", pings, armingAdmin)
+	}
+
+	if err := stores.JiraStatusRules.ReplaceForTeam(ctx, arming, site, watched); err != nil {
+		t.Fatalf("unarm: %v", err)
+	}
+	jiraCondition.Set(ctx, orgID, p, true)
+	got := rows(t, stores, orgID, owner, jiraCondition)
+	if len(got) != 1 || got[0].ResolvedReason != domain.NotificationResolvedAudienceRemoved {
+		t.Errorf("rows after the team stops arming SKY = %+v; want its row resolved audience_removed", got)
 	}
 }
 
