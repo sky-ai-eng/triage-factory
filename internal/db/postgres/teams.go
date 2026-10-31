@@ -651,6 +651,24 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 	return stored, nil
 }
 
+// issueTrackerSetsLockSalt namespaces LockIssueTrackerSets' per-team advisory
+// lock inside hashtextextended()'s key space, clear of the other advisory
+// locks. Value is "TRKS" as ASCII bytes — arbitrary but fixed.
+const issueTrackerSetsLockSalt = 0x54524B53
+
+func (s *teamsStore) LockIssueTrackerSets(ctx context.Context, teamID string) error {
+	// Outside a transaction the lock would be released by the statement that
+	// took it, so a caller would hold nothing while believing it held the lock.
+	tx, ok := s.app.(*sql.Tx)
+	if !ok {
+		return errors.New("postgres: LockIssueTrackerSets needs a transaction's stores, whose commit releases the lock")
+	}
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, $2))`, teamID, issueTrackerSetsLockSalt); err != nil {
+		return fmt.Errorf("lock team issue tracker sets: %w", err)
+	}
+	return nil
+}
+
 // SetDailyCostCapSystem upserts ONLY team_settings.max_daily_cost_usd for teamID
 // — the org-admin per-team daily spend cap (TFAC-482). Admin pool (BYPASSRLS):
 // an org admin setting a team's cap may not be a member of that team, so the

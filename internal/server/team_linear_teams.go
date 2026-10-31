@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -41,6 +42,11 @@ import (
 // element for a team that is already armed leaves it armed. Clearing pickup,
 // in_progress or done disarms it; clearing every rule leaves it watched with
 // nothing mapped.
+//
+// Because an absent rule is carried from the stored set, a write whose stored
+// set another write replaced after it was read is refused with 409 CONFLICT,
+// as on the Jira route, rather than storing rules the caller never sent. The
+// caller reads the set again and resends.
 // --------------------------------------------------------------------
 
 // linearPickupRuleWrite is the pickup rule's write shape: members and nothing
@@ -172,16 +178,17 @@ func (s *Server) handleTeamLinearTeamsPut(w http.ResponseWriter, r *http.Request
 // reads the team's stored set, gates the set wishes builds from it, stores
 // that set with its display order, and re-dues the org's Linear poll when what
 // a poll asks moved. It returns the set as stored, in display order. A write
-// it refuses is an *httpx.Fault; any other error is a failed write.
+// it refuses is an *httpx.Fault; one refused because the stored set changed
+// after it was read also matches errIssueTrackerSetMoved. Any other error is a
+// failed write.
 func (s *Server) saveTeamLinearTeams(ctx context.Context, orgID, userID, teamID string, wishes func(stored []domain.LinearTeamRules) []linearTeamWish) ([]domain.LinearTeamRules, error) {
 	// The pre-image: what an absent rule is carried from, what needs no Linear
 	// call, and what the poll re-due decision compares against. It is read in
 	// the org's current Linear workspace, which is also the one the write
 	// stamps: rows saved under another workspace are neither shown, carried
-	// nor pruned.
-	// TODO(TFAC-1271): it is read outside the write transaction, so a write
-	// that commits between this read and that transaction is reverted by the
-	// rules carried from it, and neither caller is told.
+	// nor pruned. It is read outside the write transaction, so the gate's
+	// Linear calls hold no lock, and the write transaction reads it again
+	// before storing anything.
 	prev, workspaceID, err := s.storedLinearTeams(ctx, orgID, userID, teamID)
 	if err != nil {
 		return nil, err
@@ -214,6 +221,10 @@ func (s *Server) saveTeamLinearTeams(ctx context.Context, orgID, userID, teamID 
 	}
 	var stored []domain.LinearTeamRules
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		if err := recheckIssueTrackerSet(ctx, tx, orgID, teamID, readLinearTeams,
+			prev, workspaceID, sameLinearTeamRules, "Linear teams"); err != nil {
+			return err
+		}
 		teamSet, err := tx.Teams.GetSettings(ctx, teamID)
 		if err != nil {
 			return fmt.Errorf("load team settings: %w", err)
@@ -248,12 +259,17 @@ func (s *Server) saveTeamLinearTeams(ctx context.Context, orgID, userID, teamID 
 // condition resolved for that team, which no longer tracks it. Every other
 // Linear team in the set is resent as stored, so the write asks Linear
 // nothing.
+//
+// The action sends no body of its own, so when another write changes the set
+// between this one's read and its write, it rebuilds from the set as it then
+// stands and writes once more. A second change in that window is answered
+// with the route's 409.
 func (s *Server) untrackUnreadableLinearTeam(ctx context.Context, call notify.ActionCall[kinds.LinearTeam]) (bool, error) {
 	teamID := call.Recipient.TeamID
 	if err := s.az.TeamAdminWrite(ctx, call.OrgID, call.UserID, teamID); err != nil {
 		return false, err
 	}
-	_, err := s.saveTeamLinearTeams(ctx, call.OrgID, call.UserID, teamID, func(stored []domain.LinearTeamRules) []linearTeamWish {
+	without := func(stored []domain.LinearTeamRules) []linearTeamWish {
 		keep := make([]linearTeamWish, 0, len(stored))
 		for _, row := range stored {
 			if row.LinearTeamID != call.Params.LinearTeamID {
@@ -261,7 +277,11 @@ func (s *Server) untrackUnreadableLinearTeam(ctx context.Context, call notify.Ac
 			}
 		}
 		return keep
-	})
+	}
+	_, err := s.saveTeamLinearTeams(ctx, call.OrgID, call.UserID, teamID, without)
+	if errors.Is(err, errIssueTrackerSetMoved) {
+		_, err = s.saveTeamLinearTeams(ctx, call.OrgID, call.UserID, teamID, without)
+	}
 	return err == nil, err
 }
 
@@ -346,33 +366,52 @@ func shapeLinearStateIDs(v *httpx.Validation, ids []string, field string) {
 	}
 }
 
-// storedLinearTeams reads the team's rows in the org's current Linear
-// workspace, in display order — the order the team-settings read renders, so
-// "already stored" means what a client that just read the resource would
-// resend — and returns that workspace id ("" when none is bound).
+// storedLinearTeams is readLinearTeams in a read transaction of its own: the
+// pre-image a write is built from.
 func (s *Server) storedLinearTeams(ctx context.Context, orgID, userID, teamID string) ([]domain.LinearTeamRules, string, error) {
 	var (
 		out         []domain.LinearTeamRules
 		workspaceID string
 	)
 	err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		orgSet, err := tx.Orgs.GetSettings(ctx, orgID)
-		if err != nil {
-			return fmt.Errorf("load org settings: %w", err)
-		}
-		workspaceID = domain.EntityScope("linear", orgSet)
-		teamSet, err := tx.Teams.GetSettings(ctx, teamID)
-		if err != nil {
-			return fmt.Errorf("load team settings: %w", err)
-		}
-		rules, err := tx.LinearTeamRules.ListForTeam(ctx, teamID, workspaceID)
-		if err != nil {
-			return fmt.Errorf("load linear rules: %w", err)
-		}
-		out = orderLinearTeamRules(rules, teamSet.LinearTeams)
-		return nil
+		var err error
+		out, workspaceID, err = readLinearTeams(ctx, tx, orgID, teamID)
+		return err
 	})
 	return out, workspaceID, err
+}
+
+// readLinearTeams reads the team's rows in the org's current Linear
+// workspace, in display order — the order the team-settings read renders, so
+// "already stored" means what a client that just read the resource would
+// resend — and returns that workspace id ("" when none is bound).
+func readLinearTeams(ctx context.Context, tx db.TxStores, orgID, teamID string) ([]domain.LinearTeamRules, string, error) {
+	orgSet, err := tx.Orgs.GetSettings(ctx, orgID)
+	if err != nil {
+		return nil, "", fmt.Errorf("load org settings: %w", err)
+	}
+	workspaceID := domain.EntityScope("linear", orgSet)
+	teamSet, err := tx.Teams.GetSettings(ctx, teamID)
+	if err != nil {
+		return nil, "", fmt.Errorf("load team settings: %w", err)
+	}
+	rules, err := tx.LinearTeamRules.ListForTeam(ctx, teamID, workspaceID)
+	if err != nil {
+		return nil, "", fmt.Errorf("load linear rules: %w", err)
+	}
+	return orderLinearTeamRules(rules, teamSet.LinearTeams), workspaceID, nil
+}
+
+// sameLinearTeamRules reports whether two stored rows are the same: every
+// field a save writes, display values included, since nothing but a save
+// writes them.
+func sameLinearTeamRules(a, b domain.LinearTeamRules) bool {
+	return a.LinearTeamID == b.LinearTeamID &&
+		a.LinearTeamKey == b.LinearTeamKey && a.LinearTeamName == b.LinearTeamName &&
+		slices.Equal(a.PickupMembers, b.PickupMembers) &&
+		slices.Equal(a.InProgressMembers, b.InProgressMembers) && a.InProgressCanonical == b.InProgressCanonical &&
+		slices.Equal(a.InReviewMembers, b.InReviewMembers) && a.InReviewCanonical == b.InReviewCanonical &&
+		slices.Equal(a.DoneMembers, b.DoneMembers) && a.DoneCanonical == b.DoneCanonical
 }
 
 // orderLinearTeamRules puts rules in the display order. An id in order with no
