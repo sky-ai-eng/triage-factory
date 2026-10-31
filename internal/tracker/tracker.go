@@ -17,6 +17,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 	"go.opentelemetry.io/otel/attribute"
@@ -96,6 +97,9 @@ type Tracker struct {
 	// struct — today those are method parameters because credentials
 	// are process-global.
 	orgID string
+	// jiraStreaks counts each Jira project's consecutive rejected discovery
+	// cycles, which outlive this tracker; see JiraDiscoveryStreaks.
+	jiraStreaks *JiraDiscoveryStreaks
 }
 
 // New creates a Tracker bound to one tenant. The poller's per-org
@@ -2768,6 +2772,7 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 	// built from. The pair is set only where narrowing is SOUND, which is why
 	// the assigned-to-me query leaves it nil — see salvageJiraQuery.
 	type queryWithDone struct {
+		jiraProjectID         string // the jira_projects row, what a failing project's notification is keyed on
 		projectKey            string
 		projectRef            string // Jira's project id when known, else the key: what the salvage reads the workflow by
 		jql                   string
@@ -2798,8 +2803,8 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 		}
 		if jql := pickupJQL(p.PickupMembers); jql != "" {
 			queries = append(queries, queryWithDone{
-				projectKey: p.Key, projectRef: p.ref(), jql: jql, build: pickupJQL, members: p.PickupMembers,
-				doneMembers: allDone,
+				jiraProjectID: p.JiraProjectID, projectKey: p.Key, projectRef: p.ref(),
+				jql: jql, build: pickupJQL, members: p.PickupMembers, doneMembers: allDone,
 			})
 		}
 
@@ -2821,7 +2826,7 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 		// why that is unsound even though the members here are just as capable
 		// of naming a status Jira has deleted.
 		queries = append(queries, queryWithDone{
-			projectKey: p.Key, projectRef: p.ref(), jql: assignedJQL(p.DoneMembers),
+			jiraProjectID: p.JiraProjectID, projectKey: p.Key, projectRef: p.ref(), jql: assignedJQL(p.DoneMembers),
 			doneMembers: allDone, assignedToCurrentUser: true,
 		})
 	}
@@ -2839,6 +2844,9 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 	// One entry per query sent, nil for a query that returned: a pass whose
 	// every query failed because of the connection reports that.
 	outcomes := make([]error, 0, len(queries))
+	// What the cycle learned about each project, by jira_projects row, for the
+	// jira.discovery_failing Sync below.
+	projectOutcomes := map[string]jiraDiscoveryOutcome{}
 	for _, q := range queries {
 		issues, err := client.SearchIssues(ctx, q.jql, fields, 100)
 		// Only a query Jira rejected can be one naming a dead status. One it
@@ -2856,6 +2864,9 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 			}
 		}
 		outcomes = append(outcomes, err)
+		if q.jiraProjectID != "" {
+			projectOutcomes[q.jiraProjectID] = max(projectOutcomes[q.jiraProjectID], jiraDiscoveryOutcomeOf(err))
+		}
 		if err != nil {
 			// One project's query failing must not sink the others, so
 			// this continues — which means the caller gets a short result
@@ -2879,12 +2890,6 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 		}
 	}
 	if failed > 0 || salvaged > 0 {
-		// TODO(TFAC-878): a log line and this span attribute are the only trace.
-		// A salvaged query keeps the project producing work, but its rules still
-		// name a status Jira does not have, and the settings board is the only
-		// place that says so — nobody who is not looking at it ever learns.
-		// Surfacing a condition nobody is watching needs the durable
-		// notification channel.
 		span.SetAttributes(telemetry.Outcome("partial"), telemetry.Attempt(failed+salvaged))
 	}
 	if err := discoveryUnreached("jira", outcomes); err != nil {
@@ -2898,6 +2903,22 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 		span.SetAttributes(telemetry.Outcome("rate_limited"))
 		return all, err
 	}
+
+	// The teams arming a project are told once Jira has rejected its query
+	// jiraDiscoveryDebounce cycles in a row, and the occurrence resolves on
+	// the first cycle every query for it returns. A project with a query that
+	// was rate-limited or never answered is kept, and so is one still short of
+	// the debounce, so neither raises nor resolves: a count restarted by a new
+	// process must not resolve a condition that is still true. The two passes
+	// above that reached nothing say nothing about any project, so they Sync
+	// nothing.
+	//
+	// TODO(TFAC-1249): a salvaged query is not this kind, since it keeps the
+	// project producing work, but the statuses salvageJiraQuery dropped are
+	// rules naming a status Jira no longer has, and only the log line above and
+	// the settings board say so. They belong to status drift's detection.
+	failing, keep := t.discoveryStreaks().observe(t.orgID, projectOutcomes)
+	kinds.JiraDiscoveryFailing.Sync(ctx, t.orgID, jiraProjectParams(projects, failing), jiraProjectParams(projects, keep)...)
 
 	return all, nil
 }

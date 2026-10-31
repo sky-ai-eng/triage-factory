@@ -80,6 +80,23 @@ func (s *jiraStatusRulesStore) TracksJiraProjectSystem(ctx context.Context, team
 	return true, nil
 }
 
+func (s *jiraStatusRulesStore) ArmingTeamIDsSystem(ctx context.Context, orgID, site, jiraProjectID string) ([]string, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT `+jiraRuleCols+`
+		`+jiraRuleFrom+`
+		  AND r.jira_project_id = ?
+		  AND EXISTS (SELECT 1 FROM teams t WHERE t.id = r.team_id AND t.deleted_at IS NULL)
+	`, site, jiraProjectID)
+	rules, err := scanJiraStatusRules(rows, err)
+	if err != nil {
+		return nil, fmt.Errorf("list teams arming jira project: %w", err)
+	}
+	return db.ArmingTeamIDs(rules), nil
+}
+
 func listJiraStatusRules(ctx context.Context, q queryer, teamID, site string) ([]domain.JiraProjectStatusRules, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT `+jiraRuleCols+`

@@ -20,11 +20,11 @@ type Kind interface {
 	Key(p any) string
 }
 
-// Sink carries out the verbs. p and the members of active are the kind's
-// params type.
+// Sink carries out the verbs. p and the members of active and keep are the
+// kind's params type.
 type Sink interface {
 	Set(ctx context.Context, k Kind, orgID string, p any, active bool)
-	Sync(ctx context.Context, k Kind, orgID string, active []any)
+	Sync(ctx context.Context, k Kind, orgID string, active, keep []any)
 	Post(ctx context.Context, k Kind, orgID string, p any)
 	ClearSource(ctx context.Context, orgID, source string)
 }
