@@ -7,7 +7,7 @@ import {
   Eye,
   type LucideIcon,
 } from 'lucide-react'
-import type { DeliverableKind } from '../types'
+import type { DeliverableKind, ObjectKind } from '../types'
 
 // Shared deliverable-kind presentation, factored out of DeliverableList.tsx so both
 // the conversation-scoped list and the bot-activity audit feed render rows the
@@ -49,6 +49,43 @@ export function metaForKind(kind: string): KindMeta {
   return KIND_META[kind as DeliverableKind] ?? FALLBACK_META
 }
 
+// OBJECT_META is the presentation of every object kind an artifact can name.
+// A kind a deliverable can also be reads the same as that deliverable; the
+// rest share the generic glyph and differ only by label.
+const OBJECT_META: Record<ObjectKind, KindMeta> = {
+  ...KIND_META,
+  repository: { ...FALLBACK_META, label: 'repository' },
+  label: { ...FALLBACK_META, label: 'label' },
+  release: { ...FALLBACK_META, label: 'release' },
+  workflow: { ...FALLBACK_META, label: 'workflow' },
+  workflow_run: { ...FALLBACK_META, label: 'workflow run' },
+}
+
+const FALLBACK_OBJECT_META: KindMeta = { ...FALLBACK_META, label: 'object' }
+
+// metaForObjectKind resolves an artifact's object kind to its presentation,
+// falling back for a server value outside the union.
+export function metaForObjectKind(kind: string): KindMeta {
+  return OBJECT_META[kind as ObjectKind] ?? FALLBACK_OBJECT_META
+}
+
+// overlayKindFor names the approval overlay a deliverable kind opens in, or
+// null for a kind that has none.
+export function overlayKindFor(kind: string): 'pr' | 'review' | null {
+  if (kind === 'pull_request') return 'pr'
+  if (kind === 'review') return 'review'
+  return null
+}
+
+// awaitsDecision reports whether a deliverable is in the one state a person
+// acts on: a draft pull request, or a pending review. Any other state is
+// resolved and only links out.
+export function awaitsDecision(kind: string, state: string): boolean {
+  if (kind === 'pull_request') return state === 'draft'
+  if (kind === 'review') return state === 'pending'
+  return false
+}
+
 // DELIVERABLE_PROVIDERS / PROVIDER_LABEL back the feed's provider filter — the
 // external systems the bot acts in (internal/domain Provider*). 'git' is
 // the push-layer provider branches carry; the rest are the API providers.
@@ -84,3 +121,11 @@ export const DELIVERABLE_STATES = [
   'posted',
   'deleted',
 ] as const
+
+// rowTone is a row's border and fill: the warm highlight for work a person acts
+// on, else the quiet chrome every other row shares.
+export function rowTone(highlighted?: boolean): string {
+  return highlighted
+    ? 'border-warm/40 bg-warm/[0.06] hover:bg-warm/[0.1]'
+    : 'border-line-1 bg-tint-1 hover:bg-tint-3'
+}

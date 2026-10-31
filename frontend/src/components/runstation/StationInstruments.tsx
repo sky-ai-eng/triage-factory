@@ -13,10 +13,9 @@ import {
   retryingAt,
   workStartedAt,
 } from '../../lib/conversationStatus'
-import { deliverableSetKey } from '../../lib/approval'
 import { compactNum, tint, type StationState } from './stationStyle'
-import DeliverableList from '../DeliverableList'
-import ActionList from '../ActionList'
+import { RailSection as Section } from './RailSection'
+import { RunArtifacts } from './RunArtifacts'
 
 interface Props {
   conversation: Conversation
@@ -27,7 +26,7 @@ interface Props {
    *  RunDetail's overlay state. */
   onOpenDeliverable?: (kind: 'review' | 'pr', deliverableId: string) => void
   /** Re-pull the conversation projection after an in-place dismiss in the
-   *  Deliverables list (the list refetches its own rows). */
+   *  Artifacts section (the section refetches its own rows). */
   onDeliverableResolved?: () => void
 }
 
@@ -160,41 +159,14 @@ export function TelemetryRail({
         )}
       </Section>
 
-      {/* Deliverables — everything the conversation produced (branch / PR /
-          review / issue / comment), with its unresolved rows sorted first and
-          dismissable in place; PR/review rows open their approval overlays,
-          the rest link out. Gated on deliverable_count (free on the
-          conversation) so a conversation that produced
-          nothing skips both the section and its fetch — matching the board
-          card's affordance, which hides at 0. */}
-      {(conversation.deliverable_count ?? 0) > 0 && (
-        <Section label="Deliverables">
-          <DeliverableList
-            conversationId={conversation.ID}
-            pendingDeliverableIds={conversation.pending_deliverable_ids}
-            refreshKey={deliverableSetKey(conversation)}
-            onOpenApproval={onOpenDeliverable}
-            onResolved={onDeliverableResolved}
-          />
-        </Section>
-      )}
-
-      {/* Actions — every external write this conversation made,
-          deliverable-bearing or not.
-          Unlike Deliverables above, this section is NOT gated on a count: an empty
-          Actions list is an answer ("this conversation touched nothing outside
-          the box"),
-          where a hidden one is indistinguishable from a surface that was never
-          built — which is how the reply that started this went unnoticed.
-          Refetched when the conversation's status or turn count moves, so a
-          live conversation's list fills in without a request per streamed
-          row. */}
-      <Section label="Actions">
-        <ActionList
-          conversationId={conversation.ID}
-          refreshKey={`${conversation.Status}:${conversation.NumTurns ?? 0}`}
-        />
-      </Section>
+      {/* Artifacts — the objects this conversation's agent changed, with the
+          deliverables waiting on a person highlighted. Renders only once it
+          has something to show. */}
+      <RunArtifacts
+        conversation={conversation}
+        onOpenDeliverable={onOpenDeliverable}
+        onDeliverableResolved={onDeliverableResolved}
+      />
 
       {isConcluded(conversation) && conversation.ResultSummary && (
         <Section label="Summary" last>
@@ -210,28 +182,6 @@ export function TelemetryRail({
         </Section>
       )}
     </aside>
-  )
-}
-
-function Section({
-  label,
-  children,
-  last,
-}: {
-  label: string
-  children: React.ReactNode
-  last?: boolean
-}) {
-  return (
-    <div className={last ? '' : 'mb-5'}>
-      <div className="mb-2 flex items-center gap-2">
-        <span className="font-mono text-label-sm font-semibold uppercase tracking-[0.18em] text-ink-3/70">
-          {label}
-        </span>
-        <span className="h-px flex-1 bg-line-1" />
-      </div>
-      <div className="space-y-1.5">{children}</div>
-    </div>
   )
 }
 

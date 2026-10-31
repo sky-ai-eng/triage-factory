@@ -1,17 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { Deliverable } from '../types'
-import { apiFetch, httpErrorMessage } from '../lib/apiClient'
+import { httpErrorMessage } from '../lib/apiClient'
+import { dismissDeliverable } from '../lib/deliverables'
 import { usePagedList } from '../hooks/usePagedList'
 import { toast } from './Toast/toastStore'
 import { DeliverableRow } from './DeliverableRow'
 
-// DeliverableList — THE surface for every OBJECT a conversation produced, and (since the
-// separate approval roster was folded in here) the approval surface too. One
-// row per deliverable: a kind icon + the target + a state badge + an external
-// link. Paged conversation-scoped from POST /api/agent/conversations/{id}/deliverables/list;
-// the component owns its own fetch so every consumer stays a one-liner — the
-// RunDetail rail (mounts with the page → "always visible"), the board card's
-// popover and the RunStation dock's popover (mount on open → lazy-fetch).
+// DeliverableList — a conversation's deliverables, and the approval surface the
+// RunStation dock's popover raises. One row per deliverable: a kind icon + the
+// target + a state badge + an external link. Paged conversation-scoped from
+// POST /api/agent/conversations/{id}/deliverables/list; the component owns its
+// own fetch so a consumer stays a one-liner, and mounts on open → lazy-fetch.
 //
 // When the owner passes the conversation projection's `pendingDeliverableIds` (the
 // authoritative unresolved set — the ready-review predicate lives server-side,
@@ -20,10 +19,9 @@ import { DeliverableRow } from './DeliverableRow'
 // reviews) and carry an in-place [x] dismiss. Everything else keeps the backend's
 // order below them.
 //
-// It is deliberately not the whole answer to "what did this conversation do" — a
-// deliverable is a lifecycle object, so a write that creates none (a review-thread
-// reply, a refused merge, a denied push) can never appear here. ActionList is
-// the other half, and the RunStation mounts both.
+// It is deliberately not the answer to "what did this conversation do" — a
+// deliverable is work waiting on a person, and the objects a run changed are its
+// artifacts, which the Run page's rail lists (RunArtifacts).
 //
 // The row rendering itself lives in DeliverableRow.tsx, shared with the
 // bot-activity audit feed. pull_request / review rows open their approval
@@ -41,7 +39,7 @@ interface Props {
    *  (counts, pending ids, the derived board column). The list refetches its
    *  own rows regardless. */
   onResolved?: () => void
-  /** Soft-refetch trigger — pass deliverableSetKey(conversation) so the rows stay current
+  /** Soft-refetch trigger — pass artifactSetKey(conversation) so the rows stay current
    *  as the set changes shape. Unlike a conversationId change, this keeps the stale rows
    *  in place until the new set lands (no loading flash). */
   refreshKey?: string
@@ -112,23 +110,11 @@ export default function DeliverableList({
     )
   }, [deliverables, pendingDeliverableIds, pendingSet])
 
-  // Resolving one deliverable is two different things depending on its kind, and
-  // the routes say so: closing a draft PR is a real GitHub write (the /dismiss
-  // verb), while abandoning a staged review never leaves this process (a state
-  // field write on the review sub-resource).
   const dismissOne = async (a: Deliverable) => {
     if (dismissing[a.id]) return
     setDismissing((m) => ({ ...m, [a.id]: true }))
     try {
-      if (a.kind === 'review') {
-        await apiFetch(`/api/deliverables/${a.id}/review`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ state: 'dismissed' }),
-        })
-      } else {
-        await apiFetch(`/api/deliverables/${a.id}/dismiss`, { method: 'POST' })
-      }
+      await dismissDeliverable(a.id, a.kind)
       // Resolution is async + non-blocking: it touches only the GitHub object +
       // deliverable row, never the conversation. Reload in place (the row flips to its
       // resolved state) and let the owner re-derive the projection.

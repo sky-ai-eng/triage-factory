@@ -225,7 +225,7 @@ type DeliverableStore interface {
 	// from the table) have no entry — the caller treats a missing key as 0. It
 	// batches the conversation-list path's per-card count into one query so
 	// listing a task's conversations stays O(1) in deliverable reads rather than
-	// N+1 (the conversation response's deliverable_count,
+	// N+1 (the conversation response's approval-signal guard,
 	// internal/server/agent.go). An empty conversationIDs returns an empty map
 	// without touching the DB.
 	//

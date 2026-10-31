@@ -16,7 +16,6 @@ function station(over: Partial<Conversation>, actions: Partial<StationActions> =
     Model: 'claude-opus-5',
     StartedAt: '2026-07-30T00:00:00Z',
     ResultSummary: '',
-    deliverable_count: 0,
     ...over,
   } as Conversation
   return render(
@@ -106,7 +105,6 @@ describe('RunStation dock approval affordance', () => {
     station(
       {
         Status: 'running',
-        deliverable_count: 1,
         has_unresolved_deliverables: true,
         unresolved_pr_count: 1,
         unresolved_review_count: 0,
@@ -153,7 +151,6 @@ describe('RunStation dock approval affordance', () => {
     station(
       {
         Status: 'running',
-        deliverable_count: 2,
         has_unresolved_deliverables: true,
         unresolved_pr_count: 1,
         unresolved_review_count: 1,

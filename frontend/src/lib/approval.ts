@@ -13,12 +13,13 @@ export interface ApprovalCounts {
   total: number
 }
 
-// deliverableSetKey derives a cheap change-key for a conversation's deliverable set from the
-// projections that ride the conversation row (websocket-fresh), so an always-mounted
-// DeliverableList can refetch when the set changes shape — a live conversation minting a
-// new PR, a resolve landing from another surface or tab — without polling.
-export function deliverableSetKey(conversation: Conversation): string {
-  return `${conversation.deliverable_count ?? 0}:${(conversation.pending_deliverable_ids ?? []).join(',')}`
+// artifactSetKey derives a cheap change-key for a conversation's artifacts and
+// deliverables from the projections that ride the conversation row
+// (websocket-fresh), so a mounted list can refetch when either set changes
+// shape — a live conversation changing a new object, a resolve landing from
+// another surface or tab — without polling.
+export function artifactSetKey(conversation: Conversation): string {
+  return `${conversation.artifact_count ?? 0}:${(conversation.pending_deliverable_ids ?? []).join(',')}`
 }
 
 // approvalCounts reads the conversation projection's per-kind unresolved counts. Absent

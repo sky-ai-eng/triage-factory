@@ -24,7 +24,7 @@ import {
 import {
   approvalAction,
   approvalCounts,
-  deliverableSetKey,
+  artifactSetKey,
   hasUnresolvedDeliverables,
 } from '../../lib/approval'
 import DeliverableList from '../DeliverableList'
@@ -713,7 +713,7 @@ function ApprovalAffordance({
           <DeliverableList
             conversationId={conversation.ID}
             pendingDeliverableIds={conversation.pending_deliverable_ids}
-            refreshKey={deliverableSetKey(conversation)}
+            refreshKey={artifactSetKey(conversation)}
             onOpenApproval={(kind, id) => {
               setOpen(false)
               actions.onOpenDeliverable?.(kind, id)

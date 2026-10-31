@@ -3,14 +3,13 @@ import { Link } from 'react-router'
 import { Glyph } from './Glyph'
 import type { ArtifactTotals, PendingTotals } from './cardModel'
 
-// ArtifactStrip — what the run has WRITTEN, on every card that has a run, and
-// on a queued card carrying what a requeue handed back with it.
+// ArtifactStrip — the objects the run has CHANGED, on every card that has a
+// run, and on a queued card carrying what a requeue handed back with it. It
+// marks four object kinds (branch, pull request, review, comment).
 //
-// Six kinds exist (branch, pull_request, review, issue, comment, message) and
-// four of them are terminal the moment they are written. Only two shapes can
-// ever await a human: a DRAFT pull request, and a PENDING review with the
-// ready sentinel set. That is a domain fact, not a policy — see
-// `HasUnresolvedDeliverables`. A kind carrying one of them draws warm.
+// Only two shapes can ever await a human: a DRAFT pull request, and a PENDING
+// review with the ready sentinel set. That is a domain fact, not a policy —
+// see `HasUnresolvedDeliverables`. A kind carrying one of them draws warm.
 //
 // The strip is a record, so it opens the run page rather than answering
 // anything in place. It sits at the card's right edge because it is a target

@@ -42,19 +42,6 @@ func UnresolvedDeliverableIDs(arts []Deliverable) []string {
 	return ids
 }
 
-// DeliverableCountsByKind is how many deliverables of each kind a conversation
-// produced, keyed by the kind string with absent kinds omitted. It is what the
-// board card's footer strip states — what the run WROTE, by kind — and it is
-// taken off the same deliverable set as UnresolvedDeliverableCounts so the strip's
-// totals and its warm marks can never disagree.
-func DeliverableCountsByKind(arts []Deliverable) map[string]int {
-	out := map[string]int{}
-	for _, a := range arts {
-		out[a.Kind]++
-	}
-	return out
-}
-
 // UnresolvedDeliverableCounts returns how many draft pull requests and ready
 // (finalized) pending reviews in arts are still awaiting resolution. Same
 // predicates as HasUnresolvedDeliverables, broken out per kind for the run

@@ -197,38 +197,10 @@ func TestHandleAgentDeliverables_UnknownConversationNotFound(t *testing.T) {
 	}
 }
 
-// TestConversationResponse_DeliverableCount pins deliverable_count on the single-conversation response
-// (GET /api/agent/conversations/{id}).
-func TestConversationResponse_DeliverableCount(t *testing.T) {
-	s := newTestServer(t)
-	conversationID := seedSteerConversation(t, s.db, "cnt", dbtest.SeedConcluded)
-	seedConversationDeliverable(t, s, conversationID, domain.Deliverable{
-		Provider: "github", Kind: "comment", Target: "octo/repo",
-		State: domain.DeliverableStateCommentPosted, DedupKey: "c1",
-	})
-	seedConversationDeliverable(t, s, conversationID, domain.Deliverable{
-		Provider: "github", Kind: "comment", Target: "octo/repo",
-		State: domain.DeliverableStateCommentPosted, DedupKey: "c2",
-	})
-
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+conversationID, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET conversation = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var m map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if m["deliverable_count"] != float64(2) {
-		t.Errorf("deliverable_count = %v, want 2", m["deliverable_count"])
-	}
-}
-
-// TestConversationResponse_DeliverableCount_Unresolved pins that a completed conversation with an
-// unresolved draft PR reports the right deliverable_count (from CountByConversation) and the
-// derived approval signal (has_unresolved_deliverables + unresolved_pr_count) — the
-// successor to the legacy pending_kind overlay.
-func TestConversationResponse_DeliverableCount_Unresolved(t *testing.T) {
+// TestConversationResponse_HasUnresolved pins that a completed conversation with an
+// unresolved draft PR reports the derived approval signal
+// (has_unresolved_deliverables + unresolved_pr_count) on the single-conversation read.
+func TestConversationResponse_HasUnresolved(t *testing.T) {
 	s := newTestServer(t)
 	conversationID := seedSteerConversation(t, s.db, "park", dbtest.SeedConcluded)
 	seedConversationDeliverable(t, s, conversationID, domain.NewPullRequestDeliverable(
@@ -247,20 +219,11 @@ func TestConversationResponse_DeliverableCount_Unresolved(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if m["deliverable_count"] != float64(2) {
-		t.Errorf("deliverable_count = %v, want 2", m["deliverable_count"])
-	}
 	if m["has_unresolved_deliverables"] != true {
 		t.Errorf("has_unresolved_deliverables = %v, want true", m["has_unresolved_deliverables"])
 	}
 	if m["unresolved_pr_count"] != float64(1) {
 		t.Errorf("unresolved_pr_count = %v, want 1", m["unresolved_pr_count"])
-	}
-	// The per-kind breakdown rides the same guard as the unresolved counts and
-	// is taken off the same set: one draft PR and one comment.
-	counts, _ := m["deliverable_counts"].(map[string]any)
-	if counts["pull_request"] != float64(1) || counts["comment"] != float64(1) || len(counts) != 2 {
-		t.Errorf("deliverable_counts = %v, want {pull_request:1 comment:1}", m["deliverable_counts"])
 	}
 }
 
@@ -284,47 +247,5 @@ func TestConversationResponse_HasUnresolved_List(t *testing.T) {
 	}
 	if got := convs[0]["unresolved_pr_count"]; got != float64(1) {
 		t.Errorf("unresolved_pr_count = %v, want 1", got)
-	}
-	counts, _ := convs[0]["deliverable_counts"].(map[string]any)
-	if counts["pull_request"] != float64(1) || len(counts) != 1 {
-		t.Errorf("deliverable_counts = %v, want {pull_request:1}", convs[0]["deliverable_counts"])
-	}
-}
-
-// TestConversationResponse_DeliverableCount_List pins that the batched count flows
-// through the conversation-list path (POST /api/agent/conversations/list): two
-// conversations on one task get their own correct counts from the single
-// CountByConversation batch.
-func TestConversationResponse_DeliverableCount_List(t *testing.T) {
-	s := newTestServer(t)
-	// seedSteerConversation mints task t_lst with conversation r_lst and prompt
-	// p_lst; add a second conversation on the same task so the list path counts
-	// more than one conversation.
-	conv1 := seedSteerConversation(t, s.db, "lst", dbtest.SeedConcluded)
-	taskID := fixtureUUID("t_lst")
-	conv2 := fixtureUUID("r_lst2")
-	brID := seedBlueprintRunSQLite(t, s.db, taskID)
-	execSQL(t, s.db, `INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index, completed_at) VALUES (?, ?, ?, 'open', 'manual', ?, 0, CURRENT_TIMESTAMP)`, conv2, taskID, fixtureUUID("p_lst"), brID)
-
-	mkComment := func(key string) domain.Deliverable {
-		return domain.Deliverable{
-			Provider: "github", Kind: "comment", Target: "octo/repo",
-			State: domain.DeliverableStateCommentPosted, DedupKey: key,
-		}
-	}
-	seedConversationDeliverable(t, s, conv1, mkComment("l1"))
-	seedConversationDeliverable(t, s, conv1, mkComment("l2"))
-	seedConversationDeliverable(t, s, conv2, mkComment("l3"))
-
-	convs := listConversations(t, s, taskID)
-	if len(convs) != 2 {
-		t.Fatalf("listed %d conversations, want 2", len(convs))
-	}
-	want := map[string]float64{conv1: 2, conv2: 1}
-	for _, m := range convs {
-		id, _ := m["ID"].(string)
-		if got := m["deliverable_count"]; got != want[id] {
-			t.Errorf("conversation %s deliverable_count = %v, want %v", id, got, want[id])
-		}
 	}
 }

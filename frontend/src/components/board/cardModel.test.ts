@@ -53,7 +53,7 @@ describe('deriveCard lifecycle', () => {
         CompletedAt: '2026-07-16T11:00:00Z',
         ResultSummary: 'opened a draft pull request',
         DurationMs: 252_000,
-        deliverable_counts: { branch: 1, pull_request: 1 },
+        artifact_counts: { branch: 1, pull_request: 1 },
         unresolved_pr_count: 1,
         unresolved_review_count: 0,
       }),
@@ -268,5 +268,24 @@ describe('deriveCard lifecycle', () => {
     )
     expect(m.age).toBe('wakes in 5h')
     expect(m.ageTitle).toMatch(/^Snoozed until /)
+  })
+})
+
+describe('deriveCard artifacts', () => {
+  it('counts the review mark as posted reviews plus the ones waiting for approval', () => {
+    const m = deriveCard(
+      task(),
+      conversation({
+        Status: 'open',
+        artifact_counts: { review: 2, branch: 1, issue: 3 },
+        unresolved_pr_count: 0,
+        unresolved_review_count: 1,
+      }),
+      undefined,
+      NOW,
+    )
+    // The issue has no mark on the strip.
+    expect(m.artifacts).toEqual({ branch: 1, review: 3 })
+    expect(m.pending).toEqual({ review: 1 })
   })
 })
