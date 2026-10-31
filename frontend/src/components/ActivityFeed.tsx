@@ -136,7 +136,7 @@ export default function ActivityFeed({
   // pages without changing it.)
   const pageKey = `${listPath}|${JSON.stringify(filterBody)}`
 
-  const feed = usePagedList<FeedRow>(listPath, "Couldn't load activity.")
+  const feed = usePagedList<FeedRow>(listPath, "Couldn't load activity.", { keyOf: feedRowKey })
   const { items, load, loadMore, hasMore, loading, error } = feed
 
   const setFilter = useCallback(<K extends keyof Filters>(key: K, value: Filters[K]) => {
@@ -217,7 +217,7 @@ export default function ActivityFeed({
 
   const visible = useMemo(() => {
     if (loaded === null) return null
-    let out = loaded.mode === 'objects' ? uniqueObjects(items as ActivityObject[]) : items
+    let out = items
     if (showTeam && teamFilter) {
       out = out.filter((r) => rowTeams(r).some((t) => t.id === teamFilter))
     }
@@ -464,16 +464,12 @@ function RangeTabs({ value, onChange }: { value: RangeKey; onChange: (r: RangeKe
   )
 }
 
-// uniqueObjects keeps the first row of each object. The Objects list pages
-// by offset over the latest action, so an object a live run acts on between
-// two pages moves up and can be served again by the next one.
-function uniqueObjects(rows: ActivityObject[]): ActivityObject[] {
-  const seen = new Set<string>()
-  return rows.filter((r) => {
-    if (seen.has(r.object_id)) return false
-    seen.add(r.object_id)
-    return true
-  })
+// feedRowKey is a loaded row's identity, for usePagedList to merge pages by.
+// The Objects list pages by offset over the latest action, so an object a live
+// run acts on between two pages moves up and can be served again by the next
+// one; action rows are append-only and never repeat.
+function feedRowKey(r: FeedRow): string {
+  return 'id' in r ? r.id : r.object_id
 }
 
 // rowTeams is the teams a loaded row names: an action's one team, or every

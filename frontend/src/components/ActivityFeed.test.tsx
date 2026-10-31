@@ -138,13 +138,22 @@ describe('ActivityFeed', () => {
     expect(screen.queryByTitle('Platform')).not.toBeInTheDocument()
   })
 
-  it('renders an object once when the next page serves it again', async () => {
-    // Offset paging over the latest action: a live run moved the branch up
-    // between the two reads, so page 2 repeats it.
-    const branch = object({ object_id: 'YnJhbmNo', object_kind: 'branch', target: 'org/repo' })
+  it('renders an object once, as the later page read it, when that page serves it again', async () => {
+    // Offset paging over the latest action: a third run pushed the branch
+    // between the two reads, so page 2 repeats it with the newer counts.
+    const branch = object({
+      object_id: 'YnJhbmNo',
+      object_kind: 'branch',
+      target: 'org/repo',
+      run_count: 2,
+    })
     const pages = [
       listBody([branch], 'tok-2', 3),
-      listBody([branch, object({ object_id: 'cHI0Mg', target: 'org/repo#42' })], '', 3),
+      listBody(
+        [{ ...branch, run_count: 3 }, object({ object_id: 'cHI0Mg', target: 'org/repo#42' })],
+        '',
+        3,
+      ),
     ]
     const fetchMock = vi.fn().mockImplementation((url: string) =>
       Promise.resolve({
@@ -161,6 +170,8 @@ describe('ActivityFeed', () => {
 
     expect(await screen.findByText('org/repo#42')).toBeInTheDocument()
     expect(screen.getAllByText('org/repo')).toHaveLength(1)
+    expect(screen.getByText('3 runs')).toBeInTheDocument()
+    expect(screen.queryByText('2 runs')).not.toBeInTheDocument()
     expect(screen.getByText('2 objects')).toBeInTheDocument()
   })
 

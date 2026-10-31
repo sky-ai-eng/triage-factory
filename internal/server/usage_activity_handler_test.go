@@ -166,7 +166,8 @@ type artifactSeed struct {
 // request, which has a newer and an older deliverable on teamA; one teamB
 // run transitions a Jira issue; and a person's approval posts a teamA run's
 // staged review, which has its review deliverable. TF's own row on the pull
-// request and a refused push on teamA must not show.
+// request, a refused push on teamA, and a person's dashboard toggle of the
+// pull request, which names no run, must not show.
 func (r *usageRig) seedArtifacts(t *testing.T) artifactSeed {
 	t.Helper()
 	ctx := t.Context()
@@ -238,6 +239,11 @@ func (r *usageRig) seedArtifacts(t *testing.T) artifactSeed {
 	record(r.teamA, a2, domain.ExternalAction{
 		Provider: domain.ProviderGitHub, Scope: host, Action: domain.ActionGitDenied, Target: "octo/api",
 	})
+	// A person's draft toggle on the dashboard, after every other row: it
+	// names the pull request but no run and no team.
+	toggle := opened
+	toggle.Action, toggle.PerformedBy, toggle.ActorUserID = domain.ActionPRMarkedReady, domain.PerformedByPerson, r.member
+	record("", "", toggle)
 
 	deliverable := func(state string, created time.Time) string {
 		id := uuid.NewString()
@@ -382,6 +388,9 @@ func TestUsageArtifactsActivityHandler_Postgres(t *testing.T) {
 		}
 		teamNames := map[string]string{r.teamB: "teamB"}
 		for _, it := range out.Items {
+			if it.ObjectID == seed.pr && (it.ActionCount != 1 || it.LastAction != domain.ActionPRCreated || len(it.Teams) != 1) {
+				t.Errorf("org PR = %+v, want the run's one pr_created on teamA, without the dashboard toggle", it)
+			}
 			if it.ObjectID != seed.branch {
 				continue
 			}
