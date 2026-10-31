@@ -1126,6 +1126,29 @@ func TestDiff_Conflicts_AlreadyConflicting_NoEvent(t *testing.T) {
 	}
 }
 
+func TestDiff_ConflictsResolved(t *testing.T) {
+	for _, tc := range []struct {
+		prev, curr string
+		want       bool
+	}{
+		{"CONFLICTING", "MERGEABLE", true},
+		{"MERGEABLE", "MERGEABLE", false},
+	} {
+		t.Run(tc.prev+" to "+tc.curr, func(t *testing.T) {
+			prev, curr := basePRSnapshot(), basePRSnapshot()
+			prev.Mergeable, curr.Mergeable = tc.prev, tc.curr
+			curr.UpdatedAt = "2026-04-25T18:30:00Z" // present, but not the resolution's time
+			evt := findEvent(DiffPRSnapshots(prev, curr, testEntityID, testRepositoryID, testSelf, nil, nil, nil), domain.EventGitHubPRConflictsResolved)
+			if (evt != nil) != tc.want {
+				t.Fatalf("conflicts_resolved = %v, want present=%v", evt, tc.want)
+			}
+			if evt != nil && !evt.OccurredAt.IsZero() {
+				t.Errorf("conflicts_resolved OccurredAt = %v, want zero (no honest source time)", evt.OccurredAt)
+			}
+		})
+	}
+}
+
 // --- Metadata: Labels snapshot on every event -------------------------------
 
 func TestDiff_AllPREvents_CarryLabels(t *testing.T) {

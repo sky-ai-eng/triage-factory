@@ -497,6 +497,35 @@ func (p GitHubPRConflictsPredicate) Matches(m GitHubPRConflictsMetadata) bool {
 }
 
 // -----------------------------------------------------------------------------
+// conflicts_resolved — PR's merge conflicts with its base were resolved.
+// -----------------------------------------------------------------------------
+
+type GitHubPRConflictsResolvedMetadata struct {
+	Author       string   `json:"author"`
+	AuthorID     string   `json:"author_id,omitempty"` // GitHub's id for the PR author's account
+	Repo         string   `json:"repo"`
+	RepositoryID string   `json:"repository_id"` // the repository's registry row; what repo_in names
+	PRNumber     int      `json:"pr_number"`
+	IsDraft      bool     `json:"is_draft"`
+	HeadSHA      string   `json:"head_sha"`
+	Labels       []string `json:"labels"`
+}
+
+type GitHubPRConflictsResolvedPredicate struct {
+	AuthorIDIn []string `json:"author_id_in,omitempty" doc:"Match PRs authored by any of these GitHub accounts, each by GitHub's account id, not its login: the github_user_id of GET /api/me or the team roster, or of GET /api/orgs/{org_id}/github/users/by-name/{login} for an account outside TF. Empty matches every author."`
+	RepoIn     []string `json:"repo_in,omitempty" doc:"Match only events in these repositories, each one the team tracks, by registry id (the id field of POST /api/repos/list, not owner/name). Empty matches every repository the team tracks."`
+	IsDraft    *bool    `json:"is_draft,omitempty"`
+	HasLabel   *string  `json:"has_label,omitempty"`
+}
+
+func (p GitHubPRConflictsResolvedPredicate) Matches(m GitHubPRConflictsResolvedMetadata) bool {
+	return idIn(p.AuthorIDIn, m.AuthorID) &&
+		idIn(p.RepoIn, m.RepositoryID) &&
+		boolEq(p.IsDraft, m.IsDraft) &&
+		hasLabel(p.HasLabel, m.Labels)
+}
+
+// -----------------------------------------------------------------------------
 // ready_for_review — draft → ready transition.
 // -----------------------------------------------------------------------------
 
@@ -789,6 +818,7 @@ func init() {
 
 	Register(NewSchema[GitHubPRNewCommitsMetadata, GitHubPRNewCommitsPredicate](domain.EventGitHubPRNewCommits, OwnershipOwned))
 	Register(NewSchema[GitHubPRConflictsMetadata, GitHubPRConflictsPredicate](domain.EventGitHubPRConflicts, OwnershipOwned))
+	Register(NewSchema[GitHubPRConflictsResolvedMetadata, GitHubPRConflictsResolvedPredicate](domain.EventGitHubPRConflictsResolved, OwnershipOwned))
 	Register(NewSchema[GitHubPRReadyForReviewMetadata, GitHubPRReadyForReviewPredicate](domain.EventGitHubPRReadyForReview, OwnershipOwned))
 	Register(NewSchema[GitHubPROpenedMetadata, GitHubPROpenedPredicate](domain.EventGitHubPROpened, OwnershipOwned))
 	Register(NewSchema[GitHubPRMergedMetadata, GitHubPRMergedPredicate](domain.EventGitHubPRMerged, OwnershipOwned))

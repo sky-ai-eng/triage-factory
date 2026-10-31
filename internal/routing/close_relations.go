@@ -133,6 +133,15 @@ var closeRelations = []closeRelation{
 		prepare:     prepareCIPassed,
 		causedByRun: CausedByRunPush,
 	},
+	// The merge conflicts cleared → close the entity's conflicts task, but
+	// only while the snapshot still says MERGEABLE. A run's push that resolved
+	// them holds the close until that run ends.
+	{
+		onEvents:    []string{domain.EventGitHubPRConflictsResolved},
+		closes:      []string{domain.EventGitHubPRConflicts},
+		prepare:     prepareConflictsResolved,
+		causedByRun: CausedByRunPush,
+	},
 	// A reviewer submitted a review (any verdict, including changes_requested)
 	// → their review_requested obligation is satisfied. Close only that
 	// reviewer's per-reviewer task (keyed by the user's dedup_key, by GitHub
@@ -594,7 +603,7 @@ func (r *Router) openEventNotifications(ctx context.Context, orgID, entityID str
 // --- relation hooks ---------------------------------------------------------
 
 // prSnapshotForEntity loads + parses an entity's PR snapshot. The closes that
-// read the snapshot (CI green, review resolution) share it.
+// read the snapshot (CI green, review resolution, conflicts resolution) share it.
 //
 // A store error is err: the gate could not be evaluated, and the event
 // replays. A missing entity is ok=false — nothing to gate on, and a missing
@@ -637,6 +646,17 @@ func prepareCIPassed(ctx context.Context, r *Router, orgID string, _ domain.Even
 		return nil, false, nil
 	}
 	return nil, true, nil
+}
+
+// prepareConflictsResolved gates conflicts closes on the snapshot still
+// reading MERGEABLE, so a resolution routed after the pull request conflicted
+// again closes nothing.
+func prepareConflictsResolved(ctx context.Context, r *Router, orgID string, _ domain.Event, entityID string) (closeContext, bool, error) {
+	snap, ok, err := r.prSnapshotForEntity(ctx, orgID, entityID)
+	if err != nil || !ok {
+		return nil, false, err
+	}
+	return nil, snap.Mergeable == "MERGEABLE", nil
 }
 
 // reviewerFromMeta pulls the reviewer every typed review event carries: the

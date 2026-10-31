@@ -823,6 +823,12 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		if !bodyFetched {
 			newSnap.BodyHash, newSnap.BodyMentions = item.snap.BodyHash, item.snap.BodyMentions
 		}
+		// GitHub answers UNKNOWN while it computes mergeability. That is no
+		// answer, so the stored snapshot keeps the last known one, and the
+		// diff sees CONFLICTING → UNKNOWN → CONFLICTING as no change.
+		if newSnap.Mergeable == "" || newSnap.Mergeable == "UNKNOWN" {
+			newSnap.Mergeable = item.snap.Mergeable
+		}
 
 		if item.seed {
 			// Quiet-seed a snapshot-less entity: populate it like the

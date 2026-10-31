@@ -237,6 +237,15 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, repositoryID string
 		})
 	}
 
+	// A resolution has no honest source time either, for the same reason.
+	if prev.Mergeable == "CONFLICTING" && curr.Mergeable == "MERGEABLE" {
+		emitNoSource(domain.EventGitHubPRConflictsResolved, "", events.GitHubPRConflictsResolvedMetadata{
+			Author: curr.Author, AuthorID: curr.AuthorID,
+			Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
+			IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
+		})
+	}
+
 	// --- Review requests (per-reviewer) ------------------------------------
 	// The open-set discriminator is the *requested reviewer*. Scan each
 	// reviewer that transitioned in/out of the request list and emit a
