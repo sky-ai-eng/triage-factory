@@ -1,5 +1,42 @@
 # Changelog
 
+## [1.18.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.17.0...v1.18.0) (2026-10-31)
+
+
+### Features
+
+* **agenthost:** resolve GitHub writes by GitHub's ids, never by name (TFAC-1274) ([#1392](https://github.com/sky-ai-eng/triage-factory/issues/1392)) ([680cc99](https://github.com/sky-ai-eng/triage-factory/commit/680cc993598fa6496a39174ff97a0f628af6ef98))
+* **db:** notifications store and schema in both dialects (TFAC-1240) ([#1372](https://github.com/sky-ai-eng/triage-factory/issues/1372)) ([f750927](https://github.com/sky-ai-eng/triage-factory/commit/f7509276a6aabe61d9da0598a951c86ee3b5c4b4))
+* **ledger:** every external_actions row says who performed it (TFAC-1258) ([#1387](https://github.com/sky-ai-eng/triage-factory/issues/1387)) ([a03313f](https://github.com/sky-ai-eng/triage-factory/commit/a03313fc852ae9690277d60208225b91f82d7f30))
+* **ledger:** every ledger row that changes an external object names the object (TFAC-1259) ([#1388](https://github.com/sky-ai-eng/triage-factory/issues/1388)) ([369bf2c](https://github.com/sky-ai-eng/triage-factory/commit/369bf2c3557112580c20a6d6e471135915f3da15))
+* **linear:** Install is the one main action in setup and Settings, with the key and an org's own app behind a click (TFAC-1237) ([#1368](https://github.com/sky-ai-eng/triage-factory/issues/1368)) ([d2caf06](https://github.com/sky-ai-eng/triage-factory/commit/d2caf0612b99dcd8850225e00342513059029ee5))
+* **memory:** a landed change records its entity as produced when it lands (TFAC-1262) ([#1394](https://github.com/sky-ai-eng/triage-factory/issues/1394)) ([5ad1f90](https://github.com/sky-ai-eng/triage-factory/commit/5ad1f90cb471acd5b8737849cbec3d50d24caa73))
+* **notify:** kinds declared once, Set/Sync/Post at the call site, audiences resolved on every write (TFAC-1241) ([#1373](https://github.com/sky-ai-eng/triage-factory/issues/1373)) ([3d83fed](https://github.com/sky-ai-eng/triage-factory/commit/3d83fed6f067d6f8380d3b3e34df2a4957482b4b))
+* **notify:** Link through one route table, Invoke through handlers registered once at boot (TFAC-1242) ([#1376](https://github.com/sky-ai-eng/triage-factory/issues/1376)) ([15c4b7d](https://github.com/sky-ai-eng/triage-factory/commit/15c4b7d92495e54d32f3ad3d1d7e4abfc3eb8176))
+* **notify:** tell a team's admins when its Jira rules or filters name values Jira no longer has (TFAC-1249) ([#1393](https://github.com/sky-ai-eng/triage-factory/issues/1393)) ([aad01de](https://github.com/sky-ai-eng/triage-factory/commit/aad01decf8a8d45fe03411a3440a72dab70b2833))
+* **notify:** tell admins when the org's Linear credential can't read a tracked team, and let team admins stop tracking it (TFAC-1245) ([#1383](https://github.com/sky-ai-eng/triage-factory/issues/1383)) ([c7ffc42](https://github.com/sky-ai-eng/triage-factory/commit/c7ffc42344efc036fefa45675b59e5a1b1df95e1))
+* **notify:** tell org admins when GitHub stops accepting the org's App (TFAC-1244) ([#1378](https://github.com/sky-ai-eng/triage-factory/issues/1378)) ([2312997](https://github.com/sky-ai-eng/triage-factory/commit/2312997acf5d07c3f20d03ef5a2b8e00f392181f))
+* **notify:** tell org admins when memory generation keeps failing, with a Retry now action (TFAC-1248) ([#1389](https://github.com/sky-ai-eng/triage-factory/issues/1389)) ([57f6806](https://github.com/sky-ai-eng/triage-factory/commit/57f6806c97b732ae548793e40f3adf8a7d011279))
+* **notify:** tell team admins when Jira keeps rejecting a project's discovery query (TFAC-1246) ([#1381](https://github.com/sky-ai-eng/triage-factory/issues/1381)) ([ade7cb4](https://github.com/sky-ai-eng/triage-factory/commit/ade7cb472d39902c5e990b35f8186657b3022c0b))
+* **notify:** tell team admins when the Jira or Linear board mirror can't reach its canonical status (TFAC-1247) ([#1382](https://github.com/sky-ai-eng/triage-factory/issues/1382)) ([d06768f](https://github.com/sky-ai-eng/triage-factory/commit/d06768fc4793b3bfacdd1ba559adc6205107e8d6))
+* **notify:** tell the losing teams' admins when a multi-team automation conflict auto-resolves (TFAC-518) ([#1380](https://github.com/sky-ai-eng/triage-factory/issues/1380)) ([99db43d](https://github.com/sky-ai-eng/triage-factory/commit/99db43d17d851a4adaa1beb1354a9fc83b3a9265))
+* **notify:** the viewer's inbox under /api/me, marks, invoke, and the org admin's All-teams list (TFAC-1243) ([#1379](https://github.com/sky-ai-eng/triage-factory/issues/1379)) ([3a285fe](https://github.com/sky-ai-eng/triage-factory/commit/3a285fed4dec025c5c7226ea143659b8966f4949))
+* **setup:** connect GitHub through the deployment App, with the org's own App one click away (TFAC-1224) ([#1367](https://github.com/sky-ai-eng/triage-factory/issues/1367)) ([435ae19](https://github.com/sky-ai-eng/triage-factory/commit/435ae19c49d6923279723baefa6f75c244e6cb5a))
+* **telemetry:** emit engagement.complete for native runs (TFAC-1234) ([#1364](https://github.com/sky-ai-eng/triage-factory/issues/1364)) ([59bde5e](https://github.com/sky-ai-eng/triage-factory/commit/59bde5edae9b5b5a69dfd43178f6cdce43374763))
+* **telemetry:** root spans for the reconcile, reachable-repo, and marketplace-stats job cycles (TFAC-1230) ([#1359](https://github.com/sky-ai-eng/triage-factory/issues/1359)) ([d2faad8](https://github.com/sky-ai-eng/triage-factory/commit/d2faad863982c5f5d6bc9bab5bb262598e663387))
+* **telemetry:** route the remaining outbound HTTP clients through TracedTransport (TFAC-1231) ([#1361](https://github.com/sky-ai-eng/triage-factory/issues/1361)) ([1fe8b6e](https://github.com/sky-ai-eng/triage-factory/commit/1fe8b6e363cd42e0bde94f1244d5c0a469804928))
+
+
+### Bug Fixes
+
+* **agentloop:** require a summary on every native bash call (TFAC-1251) ([#1374](https://github.com/sky-ai-eng/triage-factory/issues/1374)) ([115beb5](https://github.com/sky-ai-eng/triage-factory/commit/115beb584535b5dc10e2188ee1d35b5752a65551))
+* **agentloop:** skip the warm attempt on an already-settled compaction request (TFAC-1235) ([#1366](https://github.com/sky-ai-eng/triage-factory/issues/1366)) ([ba7c91b](https://github.com/sky-ai-eng/triage-factory/commit/ba7c91b376d48ada8274ab588a1c978687118590))
+* **delegate:** point the agent at the run root for the step skill and TF's files (TFAC-1273) ([#1390](https://github.com/sky-ai-eng/triage-factory/issues/1390)) ([8f3dafc](https://github.com/sky-ai-eng/triage-factory/commit/8f3dafc3fd081622e6d3c66d26a270a0390549b2))
+* **harness:** count each process once, kill a command's whole tree, and reap the jail's orphans (TFAC-1275) ([#1391](https://github.com/sky-ai-eng/triage-factory/issues/1391)) ([42cd7ac](https://github.com/sky-ai-eng/triage-factory/commit/42cd7ac9baa9c94e81066d46829fd00ee31ceccf))
+* **routing:** one ranked trigger walk for event time and re-derive, held for scoring (TFAC-1270) ([#1385](https://github.com/sky-ai-eng/triage-factory/issues/1385)) ([958a8a0](https://github.com/sky-ai-eng/triage-factory/commit/958a8a09423e90111b363df2a03b1d5dde33166c))
+* **settings:** refuse a Linear or Jira tracked-set write whose stored set moved after it was read (TFAC-1271) ([#1386](https://github.com/sky-ai-eng/triage-factory/issues/1386)) ([b1962bb](https://github.com/sky-ai-eng/triage-factory/commit/b1962bbc393bf964c5720baa6c2d1abacaa8324e))
+* **telemetry:** drop parentless DB and outbound HTTP spans (TFAC-1229) ([#1363](https://github.com/sky-ai-eng/triage-factory/issues/1363)) ([3005b9a](https://github.com/sky-ai-eng/triage-factory/commit/3005b9a5c955aa4cbb28cf399f9c68cd98162866))
+
 ## [1.17.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.16.3...v1.17.0) (2026-10-29)
 
 
