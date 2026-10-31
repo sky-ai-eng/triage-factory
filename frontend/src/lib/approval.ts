@@ -4,8 +4,8 @@ import type { Conversation } from '../types'
 // approval; the "needs approval" state is a *view* over the
 // conversation's unresolved-deliverable set, projected onto the conversation as has_unresolved_deliverables
 // + pending_deliverable_ids + the per-kind counts. These helpers keep the
-// count-aware labels and the resolve-all copy in one place so the dock, the board
-// card, and the confirmation modal stay in lockstep.
+// count-aware labels and the resolve-all copy in one place so every surface
+// that raises them reads the same.
 
 export interface ApprovalCounts {
   pr: number
@@ -59,18 +59,6 @@ export function approvalAction({ pr, review, total }: ApprovalCounts): string {
   if (pr > 0 && review > 0) return `Review ${total} items`
   if (pr > 0) return pr === 1 ? 'Open PR' : `Open ${pr} PRs`
   return review === 1 ? 'Review' : `Review ${review} items`
-}
-
-// approvalKicker is the toned uppercase lead-in above the action ("PR ready to
-// open" / "2 reviews ready"). A mixed set keeps the per-kind breakdown
-// ("2 PRs · 1 review ready") rather than collapsing to a bare item count —
-// what's waiting is the information the row exists to carry.
-export function approvalKicker({ pr, review, total }: ApprovalCounts): string {
-  if (total === 0) return 'Awaiting approval'
-  if (pr > 0 && review > 0)
-    return `${pr} PR${pr === 1 ? '' : 's'} · ${review} review${review === 1 ? '' : 's'} ready`
-  if (pr > 0) return pr === 1 ? 'PR ready to open' : `${pr} PRs ready to open`
-  return review === 1 ? 'Review ready' : `${review} reviews ready`
 }
 
 // resolveAllSummary is the resolve-all confirmation copy the task-end gesture

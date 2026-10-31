@@ -107,7 +107,13 @@ type Spawner struct {
 	tasks                                   db.TaskStore         // re-read tasks for run lifecycle handlers
 	conversations                           db.ConversationStore // run lifecycle + transcript
 	entities                                db.EntityStore       // entity reads for project lookup + resume context
-	deliverables                            db.DeliverableStore  // review + draft-PR deliverable lookup on processCompletion park check
+	// deliverables holds the work a conversation prepared for a person. Read
+	// by the blueprint's task-close check (taskHasUnresolvedDeliverables), the
+	// resume note on a deliverable a person resolved, the turn-end nudge, the
+	// task context, and the PR coherence injection's pending-review lookup;
+	// read and written by TeardownTaskDeliverablesSystem, which retires a
+	// closed task's unresolved rows. Admin-pool System methods only.
+	deliverables db.DeliverableStore
 	// artifacts reads the objects a conversation's agent changed, from the
 	// ledger: the turn-end nudge and the task context read it. Admin-pool
 	// System methods only.

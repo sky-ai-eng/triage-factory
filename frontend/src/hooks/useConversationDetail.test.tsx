@@ -69,6 +69,9 @@ let pendingSince: Promise<Message[]> | null
 // Makes since_id reads answer 500, for the transient-failure paths.
 let failSinceReads: boolean
 
+// What POST …/deliverables/refresh reports it transitioned.
+let refreshUpdated = 0
+
 // Rows an older page (page_token read) answers with, keyed by the token asked
 // for. Absent = no history behind the first page.
 let olderPages: Record<string, { rows: Message[]; next: string }>
@@ -102,7 +105,7 @@ function mockFetch(transcript?: Promise<Message[]>) {
     })
     const pageToken = params?.get('page_token') ?? null
     const body: unknown = path.endsWith('/deliverables/refresh')
-      ? { updated: 0 }
+      ? { updated: refreshUpdated }
       : path.endsWith('/messages')
         ? sinceID !== null
           ? transcriptPage(pendingSince ?? serverMessages.filter((m) => m.id > sinceID))
@@ -618,11 +621,6 @@ describe('useConversationDetail transcript reconciliation', () => {
     await tick()
     expect(sinceRequests(fetchMock)).toEqual([])
     expect(transcript()).toBe('first')
-    // The deliverable half of the same tick is untouched — only the transcript
-    // repair is gated on the conversation being live.
-    expect(
-      fetchMock.mock.calls.some(([url]) => String(url).endsWith('/deliverables/refresh')),
-    ).toBe(true)
   })
 
   it('repairs the last row when the frame carrying it is dropped as the conversation settles', async () => {
@@ -765,5 +763,106 @@ describe('useConversationDetail transcript back-paging', () => {
     screen.getByRole('button', { name: 'load earlier' }).click()
     await waitFor(() => expect(screen.getByTestId('ids')).toHaveTextContent('10,30'))
     expect(screen.getByText(/\$0\.20/)).toBeInTheDocument()
+  })
+})
+
+function RefreshProbe({ id }: { id: string }) {
+  const { conversation } = useConversationDetail(id)
+  return <div data-testid="status">{conversation?.Status ?? ''}</div>
+}
+
+function urlsEndingWith(fetchMock: ReturnType<typeof mockFetch>, suffix: string): string[] {
+  return fetchMock.mock.calls.map(([url]) => String(url)).filter((url) => url.endsWith(suffix))
+}
+
+describe('useConversationDetail deliverable refresh', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    dispatch = null
+    serverConversation = conversation({ TotalCostUSD: 0.2 })
+    serverMessages = [message({ id: 11 })]
+    pendingSince = null
+    failSinceReads = false
+    refreshUpdated = 0
+    olderPages = {}
+    firstPageOlderToken = ''
+  })
+  afterEach(() => {
+    refreshUpdated = 0
+    vi.useRealTimers()
+  })
+
+  it('reconciles once per loaded conversation and never from the poll', async () => {
+    // Each refresh costs a GitHub request. The poll cycle's reconciler keeps
+    // an open page current from then on through deliverable_updated, so the
+    // page asks once when it loads a conversation and not on the 5s tick.
+    const fetchMock = mockFetch()
+    const { rerender } = render(<RefreshProbe id="r1" />)
+    await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('running'))
+    await tick()
+    await tick()
+    await tick()
+    expect(urlsEndingWith(fetchMock, '/deliverables/refresh')).toEqual([
+      '/api/agent/conversations/r1/deliverables/refresh',
+    ])
+
+    rerender(<RefreshProbe id="r2" />)
+    await waitFor(() => expect(urlsEndingWith(fetchMock, '/deliverables/refresh')).toHaveLength(2))
+    await tick()
+    await tick()
+    await tick()
+    expect(urlsEndingWith(fetchMock, '/deliverables/refresh')).toEqual([
+      '/api/agent/conversations/r1/deliverables/refresh',
+      '/api/agent/conversations/r2/deliverables/refresh',
+    ])
+  })
+
+  it('re-reads the conversation row when the load-time refresh moved a deliverable', async () => {
+    // The transition is also broadcast, but a dropped frame must not leave
+    // the approval surface on the pre-transition row. A settled conversation
+    // reads its row only at load, so a second read is the refresh's.
+    serverConversation = conversation({ Status: 'completed', TotalCostUSD: 0.2 })
+    refreshUpdated = 1
+    const fetchMock = mockFetch()
+    render(<RefreshProbe id={CONVERSATION_ID} />)
+    await waitFor(() =>
+      expect(urlsEndingWith(fetchMock, `/conversations/${CONVERSATION_ID}`)).toHaveLength(2),
+    )
+  })
+
+  it('discards a refresh answer for a conversation the page has left', async () => {
+    // r1's refresh is still in flight when the page moves to r2. Its answer
+    // reports a transition, but re-reading and installing r1's row now would
+    // put the wrong run's status on r2's page.
+    const fetchMock = mockFetch()
+    const base = fetchMock.getMockImplementation()!
+    const r1Refresh = deferred<{ updated: number }>()
+    fetchMock.mockImplementation((url: string) => {
+      if (url === '/api/agent/conversations/r1/deliverables/refresh') {
+        return Promise.resolve({ ok: true, status: 200, ...jsonBody(r1Refresh.promise) })
+      }
+      if (url === '/api/agent/conversations/r1') {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          ...jsonBody(conversation({ Status: 'failed' })),
+        })
+      }
+      return base(url)
+    })
+
+    const { rerender } = render(<RefreshProbe id="r1" />)
+    await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('failed'))
+    rerender(<RefreshProbe id="r2" />)
+    await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('running'))
+    const r1Reads = urlsEndingWith(fetchMock, '/conversations/r1').length
+
+    await act(async () => {
+      r1Refresh.settle({ updated: 1 })
+      // A macrotask, so the whole answer chain has run before the assertions.
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    expect(urlsEndingWith(fetchMock, '/conversations/r1')).toHaveLength(r1Reads)
+    expect(screen.getByTestId('status').textContent).toBe('running')
   })
 })
