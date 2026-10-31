@@ -70,6 +70,10 @@ import (
 // code deletes its entry. Diverging one requires an explicit decision that it
 // acquired dialect content; merely deleting the entry to make this test pass
 // defeats the ratchet.
+//
+// TODO(TFAC-1286): the list does not record each entry's tier, so the Tier B
+// scanners and Tier C SQL fragments, duplicated by decision, are counted in
+// the shrinking set alongside the Tier A helpers that could be shared.
 var identicalHelperRatchet = []string{
 	"EpisodeJailLossesSQL",
 	"EpisodeLostEngagementsSQL",
