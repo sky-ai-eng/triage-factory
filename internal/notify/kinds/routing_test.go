@@ -93,8 +93,8 @@ func TestAutomationConflict_OneRowPerLosingTeam(t *testing.T) {
 		if err != nil {
 			t.Fatalf("href %q: %v", actions[0].Href, err)
 		}
-		if q := u.Query(); u.Path != "/orgs/"+orgID+"/prompts" || q.Get("team") != n.Audience.TeamID || q.Get("trigger") != want {
-			t.Errorf("team %s links to %q; want its own trigger %s in its prompts editor", n.Audience.TeamID, actions[0].Href, want)
+		if u.Path != "/orgs/"+orgID+"/prompts" || u.Query().Get("trigger") != want {
+			t.Errorf("team %s links to %q; want its own trigger %s in the prompts editor", n.Audience.TeamID, actions[0].Href, want)
 		}
 	}
 	if got, want := hub.take(), sortedIDs(adminA, adminB); !slices.Equal(got, want) {

@@ -25,10 +25,9 @@ type routes struct{}
 // mode, which has no /org page, on /settings.
 func (routes) OrgSettings() Href { return Href{route: orgSettingsRoute} }
 
-// Trigger is one of a team's triggers, open in the prompts editor with that
-// team selected.
-func (routes) Trigger(teamID, triggerID string) Href {
-	return Href{route: promptsRoute, query: url.Values{"team": {teamID}, "trigger": {triggerID}}}
+// Trigger is a trigger, open in the prompts editor of the team that owns it.
+func (routes) Trigger(triggerID string) Href {
+	return Href{route: promptsRoute, query: url.Values{"trigger": {triggerID}}}
 }
 
 // route is a page of the SPA. multi is its path under /orgs/{org_id}; local is

@@ -66,12 +66,14 @@ var AutomationConflict = notify.Notice(notify.NoticeSpec[Conflict]{
 		if c.Subject != "" {
 			subject = c.Subject
 		}
+		// The task is about a person or a requested GitHub team, and either
+		// can map to several teams, so the copy names neither.
 		return notify.Content{
 			Title: winner + "'s automation handled " + subject,
-			Body: "This team's trigger matched too. " + subject + " is about someone on more than one team " +
-				"that automates " + eventLabel(c.EventType) + ", and only one team's automation runs on a task. " +
+			Body: "This team's trigger matched " + subject + " too. " + winner + " and this team both automate " +
+				eventLabel(c.EventType) + " for whoever it is about, and only one team's automation runs on a task. " +
 				"To choose which one runs, scope this team's trigger more narrowly, or ask " + theirs + " to scope theirs.",
-			Actions: []notify.Action{notify.Link("Open this team's trigger", notify.Routes.Trigger(loser.TeamID, loser.TriggerID))},
+			Actions: []notify.Action{notify.Link("Open this team's trigger", notify.Routes.Trigger(loser.TriggerID))},
 		}
 	},
 	Example: Conflict{

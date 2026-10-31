@@ -102,14 +102,14 @@ func TestHref_Render(t *testing.T) {
 	if _, err := (Href{}).render(org, false, none); err == nil {
 		t.Error("the zero Href rendered")
 	}
-	trigger := Routes.Trigger("team-1", "trig-1")
-	if got, err := trigger.render(org, false, none); err != nil || got != "/orgs/"+org+"/prompts?team=team-1&trigger=trig-1" {
+	trigger := Routes.Trigger("trig-1")
+	if got, err := trigger.render(org, false, none); err != nil || got != "/orgs/"+org+"/prompts?trigger=trig-1" {
 		t.Errorf("Trigger in multi = %q, %v", got, err)
 	}
-	if got, err := trigger.render(org, true, none); err != nil || got != "/prompts?team=team-1&trigger=trig-1" {
+	if got, err := trigger.render(org, true, none); err != nil || got != "/prompts?trigger=trig-1" {
 		t.Errorf("Trigger in local = %q, %v", got, err)
 	}
-	if _, err := Routes.Trigger("team-1", "").render(org, false, none); err == nil || !strings.Contains(err.Error(), "query trigger is empty") {
+	if _, err := Routes.Trigger("").render(org, false, none); err == nil || !strings.Contains(err.Error(), "query trigger is empty") {
 		t.Errorf("a Trigger naming no trigger: err = %v; want it refused", err)
 	}
 	withQuery := Href{route: orgSettingsRoute, query: url.Values{"source": {"jira"}}}

@@ -786,12 +786,14 @@ func (r *Router) upsertTaskForEvent(ctx context.Context, orgID string, evt domai
 //
 // When orderedTeams are one identity's teams, the walk is also where a
 // conflict between them is decided: the first team whose trigger commits
-// wins, and every later team with auto-delegation on and a matched trigger
-// loses to its claim. The losers' admins are told (postAutomationConflict). A
-// later team whose triggers are all deferred loses too, though its score
-// threshold might not have passed: the claim keeps the post-scoring pass from
-// ever evaluating it. A replay finds the winner's trigger already fired,
-// commits nothing, and posts nothing.
+// wins, and the losers' admins are told (postAutomationConflict). A loser is
+// a team with auto-delegation on and a matched trigger that did not commit,
+// ranked after the winner, or ranked before it with every trigger deferred:
+// the winner's claim keeps the post-scoring pass from evaluating those, though
+// their score thresholds might not have passed. A replay posts only when a
+// trigger commits on it, and the repeat coalesces into the same notice; a team
+// whose switch could not be read on the first pass is never counted, since
+// the winner commits nothing on the replay that retries it.
 func (r *Router) fireMatchedTriggers(ctx context.Context, orgID string, evt domain.Event, entityID string, task *domain.Task, routing eventRouting) (int, string, error) {
 	ctx, span := tracer.Start(ctx, "route.triggers", trace.WithAttributes(telemetry.TaskID(task.ID)))
 	defer span.End()
@@ -848,14 +850,17 @@ func (r *Router) fireMatchedTriggers(ctx context.Context, orgID string, evt doma
 				teamCommitted = true
 			}
 		}
+		loser := kinds.ConflictLoser{TeamID: acting, TriggerID: linked}
 		switch {
-		case teamCommitted && winner == "":
-			winner = acting
-		case !teamCommitted && winner != "" && routing.identityTeams:
-			losers = append(losers, kinds.ConflictLoser{TeamID: acting, TriggerID: linked})
+		case teamCommitted:
+			if winner == "" {
+				winner = acting
+			}
+		case winner != "", !linkedImmediate:
+			losers = append(losers, loser)
 		}
 	}
-	if len(losers) > 0 {
+	if winner != "" && routing.identityTeams && len(losers) > 0 {
 		r.postAutomationConflict(ctx, orgID, task, winner, losers)
 	}
 	span.SetAttributes(telemetry.Count(fired))
@@ -863,9 +868,13 @@ func (r *Router) fireMatchedTriggers(ctx context.Context, orgID string, evt doma
 }
 
 // postAutomationConflict tells the losing teams' admins that winner's
-// automation handled task. The winner's name is display only, so a failed read
-// posts without it rather than not at all.
+// automation handled task. A loser whose team has the bot turned off is
+// dropped: its trigger could not have run either. The winner's name is
+// display only, so a failed read posts without it rather than not at all.
 func (r *Router) postAutomationConflict(ctx context.Context, orgID string, task *domain.Task, winner string, losers []kinds.ConflictLoser) {
+	if losers = r.losersWithBot(ctx, orgID, task.ID, losers); len(losers) == 0 {
+		return
+	}
 	won := kinds.ConflictTeam{TeamID: winner}
 	if r.teams != nil {
 		team, err := r.teams.GetSystem(ctx, orgID, winner)
@@ -884,4 +893,31 @@ func (r *Router) postAutomationConflict(ctx context.Context, orgID string, task 
 	kinds.AutomationConflict.Post(ctx, orgID, kinds.Conflict{
 		TaskID: task.ID, EventType: task.EventType, Subject: subject, Winner: won, Losers: losers,
 	})
+}
+
+// losersWithBot keeps the losers whose team has the org's agent enabled, the
+// team_agents gate autoDelegatePreflight reads after the claim check a loser
+// stops at. A read that fails drops the loser rather than tell its admins on
+// a guess.
+func (r *Router) losersWithBot(ctx context.Context, orgID, taskID string, losers []kinds.ConflictLoser) []kinds.ConflictLoser {
+	if r.agents == nil || r.teamAgents == nil {
+		return losers
+	}
+	a, err := r.agents.GetForOrgSystem(ctx, orgID)
+	if err != nil || a == nil {
+		routerLog.Warn("automation conflict: org agent unreadable; not posting", "task_id", taskID, "error", err)
+		return nil
+	}
+	var out []kinds.ConflictLoser
+	for _, l := range losers {
+		ta, err := r.teamAgents.GetForTeamSystem(ctx, orgID, l.TeamID, a.ID)
+		if err != nil {
+			routerLog.Warn("automation conflict: losing team's bot switch unreadable; not telling it", "team", l.TeamID, "task_id", taskID, "error", err)
+			continue
+		}
+		if ta != nil && ta.Enabled {
+			out = append(out, l)
+		}
+	}
+	return out
 }
