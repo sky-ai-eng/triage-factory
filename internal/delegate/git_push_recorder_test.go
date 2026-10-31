@@ -117,7 +117,7 @@ func TestGitPushRecorder_RecordsBranch(t *testing.T) {
 	if a.Target != "octo/repo" || a.ExternalID != "refs/heads/feature/x" {
 		t.Errorf("target/external_id = %q/%q, want octo/repo, refs/heads/feature/x", a.Target, a.ExternalID)
 	}
-	if want := domain.BranchDedupKey(registerOctoRepo(t, stores), "refs/heads/feature/x"); a.DedupKey != want {
+	if want := domain.BranchDedupKey(registerOctoRepo(t, stores), "refs/heads/feature/x", conversationID); a.DedupKey != want {
 		t.Errorf("dedup_key = %q, want %q", a.DedupKey, want)
 	}
 	if a.ConversationID != conversationID || a.OrgID != runmode.LocalDefaultOrgID || a.TeamID != runmode.LocalDefaultTeamID {
@@ -132,6 +132,32 @@ func TestGitPushRecorder_RecordsBranch(t *testing.T) {
 	}
 	if d.SHA != "abc123" || !d.New {
 		t.Errorf("details = %+v, want sha=abc123 new=true", d)
+	}
+}
+
+// A branch is shared: each run that pushes to it is credited with a row of its
+// own, and a later run's push leaves an earlier run's row as it was.
+func TestGitPushRecorder_EachRunPushingABranchGetsItsOwnRow(t *testing.T) {
+	stores, conn, first := newRecorderStoresConn(t)
+	if _, err := conn.Exec(`INSERT INTO conversations (id, trigger_type, creator_user_id, origin, status) VALUES ('run-2', 'event', NULL, 'interactive', 'running')`); err != nil {
+		t.Fatalf("seed second run: %v", err)
+	}
+	ctx := context.Background()
+	for _, push := range []struct{ conversationID, sha string }{{first, "abc123"}, {"run-2", "def456"}} {
+		info := recorderInfo(push.conversationID)
+		gitPushRecorder(agenthost.NewLocal(stores, info), info)(ctx, gitproxy.PushedRef{
+			Repo: "octo/repo", Ref: "refs/heads/feature/x", NewSHA: push.sha, Status: 200,
+		})
+	}
+
+	for _, want := range []struct{ conversationID, sha string }{{first, "abc123"}, {"run-2", "def456"}} {
+		arts, err := stores.Artifacts.ListByConversation(ctx, runmode.LocalDefaultOrgID, want.conversationID)
+		if err != nil {
+			t.Fatalf("ListByConversation(%s): %v", want.conversationID, err)
+		}
+		if len(arts) != 1 || arts[0].Kind != domain.ArtifactKindBranch || domain.ParseBranchArtifactSHA(arts[0].DetailsJSON) != want.sha {
+			t.Errorf("%s's artifacts = %+v, want one branch row at %s", want.conversationID, arts, want.sha)
+		}
 	}
 }
 

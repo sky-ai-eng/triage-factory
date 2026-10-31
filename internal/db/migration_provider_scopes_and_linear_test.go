@@ -1164,7 +1164,7 @@ func TestMigrate_ProviderScopesKeyArtifactsOnIDs(t *testing.T) {
 	for id, want := range map[string]string{
 		"pr-3":   domain.PullRequestDedupKey("PR_3"),
 		"rv-3":   domain.ReviewDedupKey("PR_3", "conv-a"),
-		"br-api": domain.BranchDedupKey("repo-api", "refs/heads/octo/api-fix"),
+		"br-api": domain.BranchDedupKey("repo-api", "refs/heads/octo/api-fix", ""),
 	} {
 		if got := queryString(t, database, `SELECT dedup_key FROM artifacts WHERE id = ?`, id); got != want {
 			t.Errorf("%s dedup_key = %q, want the Go key %q", id, got, want)

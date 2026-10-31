@@ -33,11 +33,12 @@ func fakeJiraIssueID(key string) string {
 	return "1" + strings.Repeat("0", max(0, 4-len(n))) + n
 }
 
-// fakeJiraIssueDedupKey is the dedup key of the issue artifact for key on
-// site, the fake Jira's URL the recording stores make the org's Jira site.
-func fakeJiraIssueDedupKey(site, key string) string {
+// fakeJiraIssueDedupKey is the dedup key of conversationID's issue artifact
+// for key on site, the fake Jira's URL the recording stores make the org's
+// Jira site.
+func fakeJiraIssueDedupKey(site, key, conversationID string) string {
 	return domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindIssue,
-		domain.JiraIssueResource(site, fakeJiraIssueID(key)), "")
+		domain.JiraIssueResource(site, fakeJiraIssueID(key)), conversationID)
 }
 
 // startFakeJira stands a minimal Jira REST backend covering the mutating verbs
@@ -176,7 +177,7 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				a := arts[0]
 				if a.Provider != domain.ArtifactProviderJira || a.Kind != domain.ArtifactKindIssue ||
 					a.Target != "SKY-1" || a.ExternalID != "10001" || a.State != domain.ArtifactStateIssueCreated ||
-					a.DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-1") {
+					a.DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-1", info.ConversationID) {
 					t.Errorf("create artifact mismatch: %+v", a)
 				}
 				if a.ConversationID != info.ConversationID || a.TeamID != runmode.LocalDefaultTeamID {
@@ -198,7 +199,7 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				}
 				a := arts[0]
 				if a.Kind != domain.ArtifactKindIssue || a.Target != "SKY-9" ||
-					a.State != domain.ArtifactStateIssueUpdated || a.DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-9") {
+					a.State != domain.ArtifactStateIssueUpdated || a.DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-9", info.ConversationID) {
 					t.Errorf("transition artifact mismatch: %+v", a)
 				}
 				if !strings.Contains(a.DetailsJSON, `"status":"Done"`) {
@@ -248,7 +249,7 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				}
 				a := arts[0]
 				if a.Kind != domain.ArtifactKindIssue || a.Target != "SKY-9" ||
-					a.State != domain.ArtifactStateIssueUpdated || a.DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-9") {
+					a.State != domain.ArtifactStateIssueUpdated || a.DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-9", info.ConversationID) {
 					t.Errorf("assign artifact mismatch: %+v", a)
 				}
 				for _, want := range []string{`"id":"` + fakeJiraUserKey + `"`, `"name":"Ana Lyst"`} {
@@ -281,7 +282,7 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				}
 				a := arts[0]
 				if a.Kind != domain.ArtifactKindIssue || a.Target != "SKY-9" ||
-					a.State != domain.ArtifactStateIssueUpdated || a.DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-9") {
+					a.State != domain.ArtifactStateIssueUpdated || a.DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-9", info.ConversationID) {
 					t.Errorf("update artifact mismatch: %+v", a)
 				}
 				if !strings.Contains(a.DetailsJSON, `"summary"`) || !strings.Contains(a.DetailsJSON, `"priority"`) {
@@ -299,7 +300,7 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				}
 				arts := listConversationArtifacts(t, stores, info.ConversationID)
 				if len(arts) != 1 || arts[0].Kind != domain.ArtifactKindIssue ||
-					arts[0].DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-9") || arts[0].State != domain.ArtifactStateIssueUpdated {
+					arts[0].DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-9", info.ConversationID) || arts[0].State != domain.ArtifactStateIssueUpdated {
 					t.Fatalf("set-parent artifact mismatch: %+v", arts)
 				}
 				if !strings.Contains(arts[0].DetailsJSON, `"parent":"SKY-1"`) {
@@ -316,7 +317,7 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 					t.Fatalf("JiraSetPriority: %v", err)
 				}
 				arts := listConversationArtifacts(t, stores, info.ConversationID)
-				if len(arts) != 1 || arts[0].DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-9") ||
+				if len(arts) != 1 || arts[0].DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-9", info.ConversationID) ||
 					arts[0].State != domain.ArtifactStateIssueUpdated {
 					t.Fatalf("set-priority artifact mismatch: %+v", arts)
 				}
@@ -406,7 +407,7 @@ func TestLocalClient_JiraTransitionThenComment_DedupsIssue(t *testing.T) {
 		switch a.Kind {
 		case domain.ArtifactKindIssue:
 			issues++
-			if a.DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-5") {
+			if a.DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-5", info.ConversationID) {
 				t.Errorf("issue dedup_key = %q", a.DedupKey)
 			}
 		case domain.ArtifactKindComment:
@@ -467,4 +468,64 @@ func TestLocalClient_JiraRecordingFailure_DoesNotFailAction(t *testing.T) {
 	if rec.callCount() == 0 {
 		t.Fatal("expected the recorder to have been called (and to have failed)")
 	}
+}
+
+// An issue is shared: each run that acts on it is credited with a row of its
+// own, and every run's row links to the one issue entity.
+func TestIssueVerbs_EachRunActingOnAnIssueGetsItsOwnRow(t *testing.T) {
+	const second = "22222222-2222-2222-2222-222222222222"
+	ctx := context.Background()
+	seedSecond := func(t *testing.T, conn *sql.DB) {
+		t.Helper()
+		if _, err := conn.Exec(`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, second); err != nil {
+			t.Fatalf("seed second conversation: %v", err)
+		}
+	}
+	assertOneRowEach := func(t *testing.T, stores db.Stores, first string) {
+		t.Helper()
+		var entityID string
+		for _, conversationID := range []string{first, second} {
+			arts := listConversationArtifacts(t, stores, conversationID)
+			if len(arts) != 1 || arts[0].Kind != domain.ArtifactKindIssue || arts[0].EntityID == "" {
+				t.Fatalf("%s's artifacts = %+v, want one issue row linked to its entity", conversationID, arts)
+			}
+			if entityID != "" && arts[0].EntityID != entityID {
+				t.Errorf("%s's row links entity %s, want %s", conversationID, arts[0].EntityID, entityID)
+			}
+			entityID = arts[0].EntityID
+		}
+	}
+
+	t.Run("jira", func(t *testing.T) {
+		jira := startFakeJira(t)
+		conn, stores, info := newJiraRecordingStoresConn(t, jira.URL, true)
+		seedSecond(t, conn)
+		other := info
+		other.ConversationID = second
+		for _, client := range []*LocalClient{NewLocal(stores, info), NewLocal(stores, other)} {
+			if err := client.JiraTransitionTo(ctx, "SKY-9", "Done"); err != nil {
+				t.Fatalf("JiraTransitionTo: %v", err)
+			}
+		}
+		assertOneRowEach(t, stores, info.ConversationID)
+	})
+
+	t.Run("linear", func(t *testing.T) {
+		_, srv := startFakeLinear(t)
+		conn, stores, info := newCaptureStoresConn(t, true)
+		if _, err := stores.Orgs.SetLinearWorkspace(ctx, info.OrgID, "linear-workspace-uuid", "acme"); err != nil {
+			t.Fatalf("set linear workspace: %v", err)
+		}
+		seedSecond(t, conn)
+		other := info
+		other.ConversationID = second
+		for _, ci := range []ConversationInfo{info, other} {
+			client := NewLocal(stores, ci)
+			client.proxyCreds = &ProxyCredentials{LinearAPIURL: srv.URL, LinearAPIToken: fakeLinearPlaceholer}
+			if _, err := client.LinearTransition(ctx, "ENG-7", "Done"); err != nil {
+				t.Fatalf("LinearTransition: %v", err)
+			}
+		}
+		assertOneRowEach(t, stores, info.ConversationID)
+	})
 }

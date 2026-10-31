@@ -1086,8 +1086,10 @@ func (ah *artifactsHandler) handleArtifactReject(w http.ResponseWriter, r *http.
 // scope, to deleted, returning its web URL for the audit row. The repository is
 // the pull request's (artifactPullRequest) — the one the branch delete just
 // went to under its current name, repoPath — and the artifact is the one keyed
-// on that row and headRef (domain.BranchDedupKey), whatever name its target
-// spells. A conversation with no such artifact — a push the capture writers
+// on that row, headRef and the conversation (domain.BranchDedupKey), whatever
+// name its target spells. Other conversations' rows for the same branch are
+// left to the reconciler, which marks every pushed branch that is gone
+// deleted. A conversation with no such artifact — a push the capture writers
 // missed, a pull request recorded unlinked (no repositoryID), or no
 // conversation at all — is not an error: the PR artifact carries the rejection
 // on its own, and the returned URL falls back to the branch link on scope's
@@ -1097,7 +1099,7 @@ func retireBranchArtifact(ctx context.Context, tx db.TxStores, orgID, conversati
 	if conversationID == "" || repositoryID == "" {
 		return fallbackURL, nil
 	}
-	key := domain.BranchDedupKey(repositoryID, headRef)
+	key := domain.BranchDedupKey(repositoryID, headRef, conversationID)
 	arts, err := tx.Artifacts.ListByConversation(ctx, orgID, conversationID)
 	if err != nil {
 		return "", err

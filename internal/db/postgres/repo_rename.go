@@ -379,12 +379,14 @@ func absorbBareRepository(ctx context.Context, q queryer, orgID string, occupant
 
 // moveAbsorbedBranches re-keys the branch artifacts recorded in the registry
 // row fromID onto toID, the row it is absorbed into. A branch is keyed on its
-// repository's row id and its ref (domain.BranchDedupKey), so a key naming
-// fromID would name a deleted row: no rename would find it again, and the next
-// push of the same ref, keyed on toID, would record the branch a second time.
-// A ref both rows recorded is one branch under two keys, and the older
-// artifact (created_at, then id) keeps it while the newer is deleted. No table
-// references an artifact row.
+// repository's row id, its ref and the pushing conversation
+// (domain.BranchDedupKey), so a key naming fromID would name a deleted row: no
+// rename would find it again, and the conversation's next push of the same
+// ref, keyed on toID, would record the branch a second time. Everything after
+// the repository id carries over as it stands, whichever conversation, if
+// any, the key names. A key both rows hold is one conversation's branch under
+// two keys, and the older artifact (created_at, then id) keeps it while the
+// newer is deleted. No table references an artifact row.
 func moveAbsorbedBranches(ctx context.Context, q queryer, orgID, fromID, toID string) error {
 	from := domain.BranchDedupKeyPrefix(fromID)
 	rows, err := q.QueryContext(ctx, `
@@ -416,10 +418,11 @@ func moveAbsorbedBranches(ctx context.Context, q queryer, orgID, fromID, toID st
 		return err
 	}
 	for _, b := range found {
-		key := domain.BranchDedupKey(toID, strings.TrimPrefix(b.key, from))
-		if key == "" {
+		rest := strings.TrimPrefix(b.key, from)
+		if rest == "" {
 			continue
 		}
+		key := domain.BranchDedupKeyPrefix(toID) + rest
 		var heldID string
 		var heldCreated time.Time
 		err := q.QueryRowContext(ctx, `

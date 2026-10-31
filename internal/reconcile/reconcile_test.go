@@ -142,6 +142,7 @@ type stubGH struct {
 	reviews  map[string]string // review node id → PullRequestReview JSON body (GetReview); absent → node null
 	prCalls  map[string]bool   // PR node ids actually requested
 	refCalls map[string]bool   // branch refs actually requested ("owner/repo/branch")
+	refAsks  int               // branch refs requested, counting repeats
 }
 
 func newStubServer(t *testing.T, s *stubGH) *httptest.Server {
@@ -183,6 +184,7 @@ func newStubServer(t *testing.T, s *stubGH) *httptest.Server {
 				qv, _ := req.Variables[fmt.Sprintf("q%d", i)].(string)
 				key := ov + "/" + nv + "/" + strings.TrimPrefix(qv, "refs/heads/")
 				s.refCalls[key] = true
+				s.refAsks++
 				switch exists, known := s.branches[key]; {
 				case !known:
 					fields = append(fields, fmt.Sprintf(`"r%d":null`, i)) // unknown
@@ -348,7 +350,7 @@ func TestReconcile_AddressesRepositoriesByTheirRegistryRows(t *testing.T) {
 		pr.ConversationID, pr.EntityID = conversationID, entityID
 		seedArt(pr)
 		branch, _ = domain.NewBranchArtifact(repoPath, "refs/heads/feature", "sha", true)
-		branch.DedupKey = domain.BranchDedupKey(repositoryID, branch.ExternalID)
+		branch.DedupKey = domain.BranchDedupKey(repositoryID, branch.ExternalID, "")
 		branch.ConversationID = conversationID
 		seedArt(branch)
 		return pr, branch
@@ -616,6 +618,33 @@ func TestReconcile_UnknownBranchNotDeleted(t *testing.T) {
 		t.Errorf("unknown branch should not transition, got %+v", updated)
 	}
 	assertState(t, stores, runmode.LocalDefaultOrgID, branchArt.DedupKey, domain.ArtifactStateBranchPushed)
+}
+
+// Every run that pushes to a branch holds a row for it, so the branch is
+// probed once and each of its rows takes the answer.
+func TestReconcile_BranchTwoRunsPushedIsProbedOnce(t *testing.T) {
+	stores, seedConversation, seedArt := reconcileTestStores(t)
+	var keys []string
+	for i, conversationID := range []string{"77777777-7777-7777-7777-777777777777", "88888888-8888-8888-8888-888888888888"} {
+		seedConversation(fmt.Sprintf("ent-%d", 7+i), conversationID)
+		branch, _ := domain.NewBranchArtifact("octo/repo", "refs/heads/shared", "sha", i == 0)
+		branch.DedupKey = domain.BranchDedupKey("repo-octo/repo", branch.ExternalID, conversationID)
+		branch.ConversationID = conversationID
+		seedArt(branch)
+		keys = append(keys, branch.DedupKey)
+	}
+
+	stub := &stubGH{branches: map[string]bool{"octo/repo/shared": false}}
+	updated, err := reconcileSet(t, stores, &fakeResolver{client: newStubClient(t, stub)}, runmode.LocalDefaultOrgID)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if stub.refAsks != 1 || len(updated) != 2 {
+		t.Errorf("refs asked = %d, transitions = %d; want 1 and 2", stub.refAsks, len(updated))
+	}
+	for _, key := range keys {
+		assertState(t, stores, runmode.LocalDefaultOrgID, key, domain.ArtifactStateBranchDeleted)
+	}
 }
 
 // TestReconcile_SingleConversationScope pins the Tier-2 shape: Reconcile over
@@ -1182,7 +1211,7 @@ func TestBackstop_AndCreateWriterShareOneRowAcrossNames(t *testing.T) {
 // row's id.
 func keyedBranch(repoPath, ref, sha string, created bool) (domain.Artifact, bool) {
 	a, ok := domain.NewBranchArtifact(repoPath, ref, sha, created)
-	a.DedupKey = domain.BranchDedupKey("repo-"+repoPath, ref)
+	a.DedupKey = domain.BranchDedupKey("repo-"+repoPath, ref, "")
 	return a, ok
 }
 

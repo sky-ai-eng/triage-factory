@@ -323,11 +323,13 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 	// for a branch. A retired row's name is another repository's now, so its
 	// artifacts are left as they stand. An artifact missing its handle (no
 	// node id, no repository) can't be refreshed and is left for a later cycle
-	// once a writer fills it in.
+	// once a writer fills it in. Every run that pushes to a branch holds a row
+	// for it, so a ref is probed once and each of its rows takes the answer.
 	reads := newRegistryReads(rc)
 	prNodeIDsByOwner := map[string]map[string]bool{}
 	branchRefsByOwner := map[string][]github.BranchRef{}
 	branchRefs := map[string]github.BranchRef{} // artifact id → the ref probed for it
+	probedRefs := map[github.BranchRef]bool{}
 	for _, a := range arts {
 		switch a.Kind {
 		case domain.ArtifactKindPullRequest, domain.ArtifactKindReview:
@@ -356,7 +358,10 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 			}
 			if ok {
 				branchRefs[a.ID] = ref
-				branchRefsByOwner[ref.Owner] = append(branchRefsByOwner[ref.Owner], ref)
+				if !probedRefs[ref] {
+					probedRefs[ref] = true
+					branchRefsByOwner[ref.Owner] = append(branchRefsByOwner[ref.Owner], ref)
+				}
 			}
 		}
 	}

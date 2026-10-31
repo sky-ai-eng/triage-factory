@@ -41,13 +41,16 @@ func TestNewBranchArtifact_Shape(t *testing.T) {
 }
 
 func TestBranchDedupKey(t *testing.T) {
-	if got, want := BranchDedupKey("repo-uuid", "refs/heads/feature/x"), "git:branch:repo-uuid:refs/heads/feature/x"; got != want {
+	if got, want := BranchDedupKey("repo-uuid", "refs/heads/feature/x", "conv-1"), "git:branch:repo-uuid:refs/heads/feature/x:conv-1"; got != want {
 		t.Errorf("BranchDedupKey = %q, want %q", got, want)
 	}
-	if got := BranchDedupKey("", "refs/heads/x"); got != "" {
+	if got, want := BranchDedupKey("repo-uuid", "refs/heads/feature/x", ""), "git:branch:repo-uuid:refs/heads/feature/x"; got != want {
+		t.Errorf("BranchDedupKey with no conversation = %q, want %q", got, want)
+	}
+	if got := BranchDedupKey("", "refs/heads/x", ""); got != "" {
 		t.Errorf("BranchDedupKey with no repository = %q, want empty", got)
 	}
-	if got := BranchDedupKey("repo-uuid", ""); got != "" {
+	if got := BranchDedupKey("repo-uuid", "", ""); got != "" {
 		t.Errorf("BranchDedupKey with no ref = %q, want empty", got)
 	}
 }
@@ -57,7 +60,7 @@ func TestBranchDedupKey(t *testing.T) {
 // that is not a branch keyed on a registry row names one.
 func TestBranchArtifactRepositoryID(t *testing.T) {
 	keyed, _ := NewBranchArtifact("octo/api", "refs/heads/feature/x", "abc", true)
-	keyed.DedupKey = BranchDedupKey("repo-uuid", keyed.ExternalID)
+	keyed.DedupKey = BranchDedupKey("repo-uuid", keyed.ExternalID, "")
 	unkeyed, _ := NewBranchArtifact("octo/api", "refs/heads/feature/x", "abc", true)
 	byName := unkeyed
 	byName.DedupKey = "git:branch:octo/api:refs/heads/feature/x"
@@ -104,7 +107,7 @@ func TestArtifactAction_ReferencesWhatTheArtifactIsAbout(t *testing.T) {
 		t.Errorf("pull request action references (%q, %q), want the entity alone", act.EntityID, act.RepositoryID)
 	}
 	branch, _ := NewBranchArtifact("octo/api", "refs/heads/fix", "abc", false)
-	branch.DedupKey = BranchDedupKey("repo-uuid", branch.ExternalID)
+	branch.DedupKey = BranchDedupKey("repo-uuid", branch.ExternalID, "")
 	if act := ArtifactAction(&branch, "u", ActionBranchDeleted, "", "", CredentialGitHubApp); act.EntityID != "" || act.RepositoryID != "repo-uuid" {
 		t.Errorf("branch action references (%q, %q), want the registry row alone", act.EntityID, act.RepositoryID)
 	}

@@ -579,9 +579,9 @@ func TestLinearVerbs_RecordArtifacts(t *testing.T) {
 			for _, a := range listConversationArtifacts(t, stores, info.ConversationID) {
 				byKey[a.DedupKey] = a
 			}
-			issueKey := domain.ArtifactDedupKey(domain.ArtifactProviderLinear, domain.ArtifactKindIssue, fakeLinearIssueUUID, "")
+			issueKey := domain.ArtifactDedupKey(domain.ArtifactProviderLinear, domain.ArtifactKindIssue, fakeLinearIssueUUID, info.ConversationID)
 			commentKey := domain.ArtifactDedupKey(domain.ArtifactProviderLinear, domain.ArtifactKindComment, fakeLinearIssueUUID, fakeLinearCommentID)
-			createdKey := domain.ArtifactDedupKey(domain.ArtifactProviderLinear, domain.ArtifactKindIssue, fakeLinearCreated, "")
+			createdKey := domain.ArtifactDedupKey(domain.ArtifactProviderLinear, domain.ArtifactKindIssue, fakeLinearCreated, info.ConversationID)
 			if len(byKey) != 3 {
 				t.Fatalf("artifacts = %v, want exactly %s, %s, %s", byKey, issueKey, commentKey, createdKey)
 			}

@@ -9,22 +9,31 @@ import (
 // Artifact is one row in the artifacts table — the single durable,
 // conversation-attributed, polymorphic record of something a conversation
 // produced in an external system (a pushed branch, a draft/open PR, a draft/submitted
-// review, a Jira/Linear issue, a comment). One row per external object;
-// the (Provider, Kind) pair discriminates the shape. See TFAC-455.
+// review, a Jira/Linear issue, a comment). The (Provider, Kind) pair
+// discriminates the shape. See TFAC-455.
 //
 // Artifacts are deduped on (OrgID, Scope, DedupKey) so the same logical object
 // upserts to one row no matter which capture writer (exec choke point,
 // pre-push hook, git-proxy backstop, reconciliation) saw it first.
 // Build the key with ArtifactDedupKey and the scope with ExternalObjectScope.
 //
+// What a row stands for depends on the kind. A pull request, comment or
+// message row is the object TF wrote, one row per object, owned by the
+// conversation that wrote it. A branch, a Jira or Linear issue, and a review
+// draft are objects many conversations act on, so their key ends in the acting
+// conversation's id and each conversation that acts on one gets a row of its
+// own: a run is credited with its own push or issue update, rather than the
+// act landing on the row of whichever run touched the object first.
+//
 // TeamID is denormalized from the owning conversation so reads scope by team
 // exactly like conversations. ConversationID is nullable (empty string here) so
 // a row survives a conversation purge for audit — the FK is ON DELETE SET NULL.
 type Artifact struct {
 	ID string `json:"id"`
-	// ConversationID is the conversation that produced this artifact. Empty
-	// after the conversation is purged (FK ON DELETE SET NULL) — the artifact
-	// outlives it for the audit ledger.
+	// ConversationID is the conversation that produced this artifact — for a
+	// per-conversation kind, the conversation its key names. Empty after the
+	// conversation is purged (FK ON DELETE SET NULL) — the artifact outlives it
+	// for the audit ledger.
 	ConversationID string `json:"conversation_id,omitempty"`
 	OrgID          string `json:"org_id"`
 	TeamID         string `json:"team_id"`
@@ -254,16 +263,18 @@ func ArtifactProviders() []string {
 //     site as well, which is the shape stored keys hold. A rename moves the
 //     row's Target without touching its key.
 //   - anchor: an optional stable sub-discriminator appended when resource
-//     alone isn't unique — a branch's ref in its repository, a comment's id
-//     on its issue, the conversation that owns a review draft. Empty when
-//     resource is already unique (an issue itself).
+//     alone isn't unique — a comment's id on its issue, or, for a kind many
+//     conversations act on (a review draft, a Jira or Linear issue), the
+//     acting conversation's id. A branch takes both its ref and its
+//     conversation (BranchDedupKey). An issue acted on outside any run has no
+//     conversation and no anchor.
 //
 // Examples:
 //
 //	ArtifactDedupKey("github", "pull_request", "<PR node id>", "")                         => "github:pull_request:<PR node id>"
 //	ArtifactDedupKey("github", "review",       "<PR node id>", "<conversation id>")        => "github:review:<PR node id>:<conversation id>"
-//	ArtifactDedupKey("git",    "branch",       "<repository id>", "refs/heads/x")          => "git:branch:<repository id>:refs/heads/x"
-//	ArtifactDedupKey("jira",   "issue",        JiraIssueResource(site, "10042"), "")      => "jira:issue:https%3A%2F%2Facme.atlassian.net/10042"
+//	BranchDedupKey("<repository id>", "refs/heads/x", "<conversation id>")                  => "git:branch:<repository id>:refs/heads/x:<conversation id>"
+//	ArtifactDedupKey("jira",   "issue",        JiraIssueResource(site, "10042"), "<conversation id>") => "jira:issue:https%3A%2F%2Facme.atlassian.net/10042:<conversation id>"
 //	ArtifactDedupKey("jira",   "comment",      JiraIssueResource(site, "10042"), "20311") => "jira:comment:https%3A%2F%2Facme.atlassian.net/10042:20311"
 //	ArtifactDedupKey("linear", "comment",      "<issue uuid>", "<comment id>")             => "linear:comment:<issue uuid>:<comment id>"
 //	ArtifactDedupKey("slack",  "message",      SlackMessageResource("<channel row id>", ts), "") => "slack:message:<channel row id>/<ts>"

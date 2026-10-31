@@ -76,9 +76,10 @@ func (c *LocalClient) registryRepo(ctx context.Context, owner, repo string) (*do
 // onRegistryRow records a GitHub or git artifact built under the name a verb
 // spelled against its repository's registry row (registryRepo). The target
 // takes the registry's name, so the row reads like every other row of the
-// repository. A branch is keyed on the row's id (domain.BranchDedupKey), so
-// one whose repository has no row is refused with errNoRegistryRow, and one
-// whose row could not be read with the read's error. A pull request or review
+// repository. A branch is keyed on the row's id and this client's
+// conversation (domain.BranchDedupKey), so one whose repository has no row is
+// refused with errNoRegistryRow, and one whose row could not be read with the
+// read's error. A pull request or review
 // is keyed on the pull request's node id already, and one whose repository's
 // row is missing or unreadable keeps the name it was built under. An artifact
 // whose target does not lead with an owner/repo is returned as it is.
@@ -108,7 +109,7 @@ func (c *LocalClient) onRegistryRow(ctx context.Context, a domain.Artifact) (dom
 	}
 	a.Target, _ = domain.RewriteRepoSlugPrefix(a.Target, from, row.Slug())
 	if a.Kind == domain.ArtifactKindBranch {
-		a.DedupKey = domain.BranchDedupKey(row.ID, a.ExternalID)
+		a.DedupKey = domain.BranchDedupKey(row.ID, a.ExternalID, c.info.ConversationID)
 	}
 	return a, nil
 }

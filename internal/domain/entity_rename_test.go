@@ -150,7 +150,7 @@ func TestJiraIssueResource(t *testing.T) {
 	if _, _, ok := ArtifactEntityIdentity(review); ok {
 		t.Error("a GitHub review keyed on its repository's name read as an identity")
 	}
-	branch := Artifact{Provider: ArtifactProviderGit, Kind: ArtifactKindBranch, DedupKey: BranchDedupKey("repo-uuid", "refs/heads/x")}
+	branch := Artifact{Provider: ArtifactProviderGit, Kind: ArtifactKindBranch, DedupKey: BranchDedupKey("repo-uuid", "refs/heads/x", "")}
 	if _, _, ok := ArtifactEntityIdentity(branch); ok {
 		t.Error("a branch read as an entity identity")
 	}

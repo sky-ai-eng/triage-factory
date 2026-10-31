@@ -1317,12 +1317,14 @@ func (c *LocalClient) jiraIssueResource(ctx context.Context, issueID string) str
 	return domain.JiraIssueResource(site, issueID)
 }
 
-// recordJiraIssue upserts the single deduped `issue` artifact for the issue
+// recordJiraIssue upserts this conversation's `issue` artifact for the issue
 // key names. Every issue mutation (create / transition / assign / unassign /
-// update / set-parent / set-priority) collapses onto one row keyed on the
-// issue's site and id (domain.JiraIssueResource), never its key: the key
-// changes when the issue moves or its project's key is renamed, and the id
-// repeats across sites. target is the issue's current key and url its link,
+// update / set-parent / set-priority) a conversation makes collapses onto one
+// row keyed on the issue's site and id (domain.JiraIssueResource) and the
+// conversation, never the issue's key: the key changes when the issue moves or
+// its project's key is renamed, and the id repeats across sites. Another run
+// acting on the same issue gets a row of its own, so each run is credited with
+// what it did to the ticket. target is the issue's current key and url its link,
 // both of which an entity rename moves; external_id is the issue id. The store
 // preserves target/url on empty either way — see ArtifactStore.Upsert. state +
 // details_json carry the most recent action — by design the row tracks the
@@ -1367,7 +1369,7 @@ func (c *LocalClient) recordJiraIssueRef(ctx context.Context, ref jiraclient.Iss
 		ExternalID:  ref.ID,
 		URL:         c.jiraBrowseURL(ctx, key),
 		State:       state,
-		DedupKey:    domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindIssue, resource, ""),
+		DedupKey:    domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindIssue, resource, c.info.ConversationID),
 		DetailsJSON: detailsJSON,
 	}
 	c.upsertJiraArtifact(ctx, &a, jiraAction(a, action, "", toState), jiraContainer(ref.Project))

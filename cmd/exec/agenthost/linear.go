@@ -653,9 +653,11 @@ func linearEditedFieldNames(e LinearIssueEdit) []string {
 // UUID the rows are keyed on and the identifier they display are already in
 // hand.
 
-// recordLinearIssue upserts the single `issue` artifact for issue, keyed on its
-// UUID (linear:issue:<uuid>) — never its identifier, which changes when the
-// issue moves team or its team's key is renamed. target is the identifier and
+// recordLinearIssue upserts this conversation's `issue` artifact for issue,
+// keyed on its UUID and the conversation (linear:issue:<uuid>:<conversation
+// id>) — never its identifier, which changes when the issue moves team or its
+// team's key is renamed. Another run acting on the same issue gets a row of its
+// own, so each run is credited with what it did to it. target is the identifier and
 // url the issue's link, both of which an entity rename moves. fromState /
 // toState carry a transition's workflow states, empty otherwise.
 func (c *LocalClient) recordLinearIssue(ctx context.Context, issue *linearclient.Issue, action, state, fromState, toState, detailsJSON string) {
@@ -668,7 +670,7 @@ func (c *LocalClient) recordLinearIssue(ctx context.Context, issue *linearclient
 		ExternalID:  issue.ID,
 		URL:         issue.URL,
 		State:       state,
-		DedupKey:    domain.ArtifactDedupKey(domain.ArtifactProviderLinear, domain.ArtifactKindIssue, issue.ID, ""),
+		DedupKey:    domain.ArtifactDedupKey(domain.ArtifactProviderLinear, domain.ArtifactKindIssue, issue.ID, c.info.ConversationID),
 		DetailsJSON: detailsJSON,
 	}
 	c.upsertLinearArtifact(ctx, &a, linearAction(a, action, fromState, toState), issue.Team.ID)

@@ -38,9 +38,13 @@ func RequireExternalObjectScope(scope string) error {
 type ArtifactStore interface {
 	// Upsert inserts the artifact or, on a (org_id, scope, dedup_key)
 	// conflict, updates the existing row's mutable fields (state, target,
-	// details_json, conversation_id, team_id, updated_at). This is the one writer all
-	// of Sub-epic A shares: the same PR seen via exec and again via
-	// reconciliation lands on one row. Returns the stored row with id and
+	// details_json, updated_at) and keeps its conversation_id and team_id: a
+	// row belongs to the conversation that created it. A kind many
+	// conversations act on (a branch, an issue, a review draft) carries the
+	// acting conversation in its key (domain.Artifact), so another
+	// conversation's act on the same object inserts a row of its own. This is
+	// the one writer all of Sub-epic A shares: the same PR seen via exec and
+	// again via reconciliation lands on one row. Returns the stored row with id and
 	// timestamps populated. a.ID may be empty (both impls generate a uuid); a
 	// non-empty a.ID is honored on insert and ignored on update. An empty
 	// a.Scope is refused with ErrExternalObjectScopeRequired: the same dedup

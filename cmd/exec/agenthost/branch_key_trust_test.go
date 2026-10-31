@@ -28,7 +28,7 @@ func TestUpsertArtifact_KeysABranchOnItsTargetNotTheKeyItArrivesWith(t *testing.
 			otherID := registerRepo(t, stores, "octo", "other", "2")
 
 			for i, sentKey := range []string{
-				domain.BranchDedupKey(otherID, ref), // another repository in the org
+				domain.BranchDedupKey(otherID, ref, ""), // another repository in the org
 				"git:branch:not-a-uuid:" + ref,
 			} {
 				branch, _ := domain.NewBranchArtifact("octo/repo", ref, []string{"abc123", "def456"}[i], i == 0)
@@ -37,7 +37,7 @@ func TestUpsertArtifact_KeysABranchOnItsTargetNotTheKeyItArrivesWith(t *testing.
 				if err != nil {
 					t.Fatalf("UpsertArtifact with key %q: %v", sentKey, err)
 				}
-				if want := domain.BranchDedupKey(repoID, ref); stored.DedupKey != want {
+				if want := domain.BranchDedupKey(repoID, ref, info.ConversationID); stored.DedupKey != want {
 					t.Errorf("sent %q: stored key = %q, want %q", sentKey, stored.DedupKey, want)
 				}
 			}
@@ -51,7 +51,7 @@ func TestUpsertArtifact_KeysABranchOnItsTargetNotTheKeyItArrivesWith(t *testing.
 			}
 
 			ghost, _ := domain.NewBranchArtifact("octo/ghost", ref, "abc123", true)
-			ghost.DedupKey = domain.BranchDedupKey(repoID, ref)
+			ghost.DedupKey = domain.BranchDedupKey(repoID, ref, "")
 			if _, err := rt.UpsertArtifact(ctx, ghost); !errors.Is(err, errNoRegistryRow) {
 				t.Errorf("a target no row has: err = %v, want errNoRegistryRow", err)
 			}

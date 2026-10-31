@@ -251,7 +251,7 @@ func TestLocalClient_BranchPushedUnderOldName_RecordedUnderCurrent(t *testing.T)
 		t.Fatalf("resolve octo/new-name: %v, %v", row, err)
 	}
 	wantURL, _ := domain.BranchArtifactWebURL(gh.URL, "octo/new-name", "refs/heads/feature/x")
-	if a.Target != "octo/new-name" || a.DedupKey != domain.BranchDedupKey(row.ID, "refs/heads/feature/x") || a.URL != wantURL {
+	if a.Target != "octo/new-name" || a.DedupKey != domain.BranchDedupKey(row.ID, "refs/heads/feature/x", info.ConversationID) || a.URL != wantURL {
 		t.Errorf("branch artifact = target %q key %q url %q, want it under octo/new-name, keyed on row %s, linked at %q", a.Target, a.DedupKey, a.URL, row.ID, wantURL)
 	}
 }

@@ -115,7 +115,7 @@ func TestRecordPush_UpsertsBranchArtifact(t *testing.T) {
 	if a.State != domain.ArtifactStateBranchPushed {
 		t.Errorf("state = %q, want pushed", a.State)
 	}
-	if want := domain.BranchDedupKey(repoID, "refs/heads/feature/x"); a.DedupKey != want {
+	if want := domain.BranchDedupKey(repoID, "refs/heads/feature/x", conversationID); a.DedupKey != want {
 		t.Errorf("dedup_key = %q, want %q", a.DedupKey, want)
 	}
 	if a.ConversationID != conversationID || a.OrgID != runmode.LocalDefaultOrgID || a.TeamID != runmode.LocalDefaultTeamID {

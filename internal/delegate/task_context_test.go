@@ -468,6 +468,24 @@ func TestBuildTaskContext_ArtifactLinesRenderInCreatedOrder(t *testing.T) {
 	}
 }
 
+func TestBuildTaskContext_ObjectTwoRunsActedOnIsOneLine(t *testing.T) {
+	// Each run that acts on an issue holds a row for it. The block names the
+	// issue once, where it first appeared, with what the latest row records.
+	first := artifactAt("a1", "issue", "SKY-9", "created", "", 5)
+	later := artifactAt("a3", "issue", "SKY-9", "updated", "", 20)
+	first.ExternalID, later.ExternalID = "10009", "10009"
+	first.UpdatedAt, later.UpdatedAt = first.CreatedAt, later.CreatedAt
+	got := BuildTaskContext(domain.Task{}, "", "", "", []domain.Artifact{
+		later, first, artifactAt("a2", "pull_request", "owner/repo#3", "open", "", 12),
+	})
+
+	lines := []string{"- Artifact: issue SKY-9 — updated", "- Artifact: pull_request owner/repo#3 — open"}
+	issueAt, prAt := strings.Index(got, lines[0]), strings.Index(got, lines[1])
+	if strings.Count(got, "- Artifact: ") != 2 || issueAt < 0 || issueAt > prAt {
+		t.Errorf("want %q then %q and nothing else;\n%s", lines[0], lines[1], got)
+	}
+}
+
 func TestBuildTaskContext_ArtifactWithoutURLOmitsTheSegment(t *testing.T) {
 	// A branch push and a pending PR have no URL yet. The line renders without
 	// one rather than trailing an empty segment the model would read as a gap.

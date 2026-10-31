@@ -1012,7 +1012,7 @@ func seedBranchArtifact(t *testing.T, s *Server, conversationID, repoPath, ref s
 	if err != nil {
 		t.Fatalf("register %s: %v", repoPath, err)
 	}
-	a.DedupKey = domain.BranchDedupKey(repo.ID, ref)
+	a.DedupKey = domain.BranchDedupKey(repo.ID, ref, conversationID)
 	stored, err := stores.Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a)
 	if err != nil {
 		t.Fatalf("seed branch artifact: %v", err)

@@ -12,9 +12,10 @@ import (
 const branchRefPrefix = "refs/heads/"
 
 // branchDetails is the kind-specific payload in a branch artifact's
-// DetailsJSON. The dedup anchor is the ref (the stable key); the per-push
-// facts — which commit landed, and whether the push created the branch — live
-// here, so a re-push updates them in place on the one deduped row.
+// DetailsJSON. The dedup anchor is the ref and the pushing conversation (the
+// stable key); the per-push facts — which commit landed, and whether the push
+// created the branch — live here, so a run's re-push updates them in place on
+// that run's row.
 type branchDetails struct {
 	SHA string `json:"sha"`
 	New bool   `json:"new,omitempty"`
@@ -63,16 +64,26 @@ func NewBranchArtifact(repoPath, ref, sha string, created bool) (Artifact, bool)
 }
 
 // BranchDedupKey is the key a branch artifact is recorded under:
-// git:branch:<repository id>:<ref>, where the repository id is the registry
-// row's. A branch has no provider id, and the registry row is what TF holds
-// for its repository: a rename moves the row's name and not its id, and a
-// repository created under a freed name gets a row of its own. "" when either
-// half is empty.
-func BranchDedupKey(repositoryID, ref string) string {
+// git:branch:<repository id>:<ref>:<conversation id>, where the repository id
+// is the registry row's. A branch has no provider id, and the registry row is
+// what TF holds for its repository: a rename moves the row's name and not its
+// id, and a repository created under a freed name gets a row of its own.
+//
+// The conversation is part of the key because a branch is shared: every run
+// that pushes to it gets a row of its own, so each run is credited with its
+// push rather than the push landing on the row of whichever run pushed first.
+// An empty conversationID (a push made outside any run) keys on the branch
+// alone, the shape stored rows written without a conversation segment carry.
+// "" when the repository id or the ref is empty.
+func BranchDedupKey(repositoryID, ref, conversationID string) string {
 	if repositoryID == "" || ref == "" {
 		return ""
 	}
-	return BranchDedupKeyPrefix(repositoryID) + ref
+	key := BranchDedupKeyPrefix(repositoryID) + ref
+	if conversationID != "" {
+		key += ":" + conversationID
+	}
+	return key
 }
 
 // BranchDedupKeyPrefix is what the key of every branch recorded in the

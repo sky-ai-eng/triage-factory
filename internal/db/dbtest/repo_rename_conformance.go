@@ -179,7 +179,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		if branch.Target != renameNewSlug {
 			t.Errorf("branch target = %q, want %s", branch.Target, renameNewSlug)
 		}
-		if want := domain.BranchDedupKey(fx.repositoryID, fx.branchRef); branch.DedupKey != want {
+		if want := domain.BranchDedupKey(fx.repositoryID, fx.branchRef, ""); branch.DedupKey != want {
 			t.Errorf("branch dedup key = %q, want %q", branch.DedupKey, want)
 		}
 		neighbourArtifact, err := s.Artifacts.Get(ctx, orgID, fx.neighbourArtifactID)
@@ -858,24 +858,25 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 			t.Fatalf("premise: bare row = %+v, entity references %q; want a second, id-less row the entity references", bare, early.RepositoryID)
 		}
 		// Branches pushed while the bare row answered for the name are keyed
-		// on its id: one of a ref only it recorded, and one the renamed row
-		// recorded too.
-		bareBranch := func(ref string) string {
+		// on its id: one of a ref only it recorded, one the renamed row
+		// recorded too, and a run's own row for that same ref.
+		bareBranch := func(ref, conversationID string) string {
 			t.Helper()
 			branch, ok := domain.NewBranchArtifact(renameNewSlug, ref, "abc123", true)
 			if !ok {
 				t.Fatalf("NewBranchArtifact refused %s", ref)
 			}
-			branch.TeamID, branch.Scope, branch.DedupKey = seed.TeamID, TestGitHubHost, domain.BranchDedupKey(bare.ID, ref)
+			branch.TeamID, branch.Scope, branch.DedupKey = seed.TeamID, TestGitHubHost, domain.BranchDedupKey(bare.ID, ref, conversationID)
 			stored, err := s.Artifacts.UpsertSystem(ctx, orgID, branch)
 			if err != nil {
 				t.Fatalf("seed branch %s on the bare row: %v", ref, err)
 			}
 			return stored.ID
 		}
-		const earlyRef = "refs/heads/early"
-		earlyBranch := bareBranch(earlyRef)
-		twiceBranch := bareBranch(fx.branchRef)
+		const earlyRef, runConversation = "refs/heads/early", "rename-absorb-run"
+		earlyBranch := bareBranch(earlyRef, "")
+		twiceBranch := bareBranch(fx.branchRef, "")
+		runBranch := bareBranch(fx.branchRef, runConversation)
 		// The push of the early branch, recorded about the bare row.
 		const earlyPushKey = "rename-absorb-early-push"
 		if err := s.ExternalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
@@ -923,7 +924,10 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 		// Its branches are re-keyed onto the renamed row, and a ref both rows
 		// recorded is one row.
-		assertArtifactAt(t, s, orgID, earlyBranch, renameNewSlug, domain.BranchDedupKey(renamed.ID, earlyRef))
+		assertArtifactAt(t, s, orgID, earlyBranch, renameNewSlug, domain.BranchDedupKey(renamed.ID, earlyRef, ""))
+		// A run's row is that run's push, not the branch both rows recorded:
+		// it moves with its conversation and is not merged away.
+		assertArtifactAt(t, s, orgID, runBranch, renameNewSlug, domain.BranchDedupKey(renamed.ID, fx.branchRef, runConversation))
 		// Its audit-ledger rows move onto the renamed row rather than being
 		// unlinked by the delete.
 		if a := findActionByKey(t, s, orgID, earlyPushKey); a.RepositoryID != renamed.ID {
@@ -938,7 +942,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 			if strings.HasPrefix(a.DedupKey, domain.BranchDedupKeyPrefix(bare.ID)) {
 				t.Errorf("branch artifact %s still keyed on the deleted bare row: %q", a.ID, a.DedupKey)
 			}
-			if a.DedupKey == domain.BranchDedupKey(renamed.ID, fx.branchRef) {
+			if a.DedupKey == domain.BranchDedupKey(renamed.ID, fx.branchRef, "") {
 				twice = append(twice, a.ID)
 			}
 		}
@@ -1139,11 +1143,11 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		assertArtifactAt(t, s, orgID, liveRows.pr, "octo/api#18", domain.PullRequestDedupKey("PR_kwDOlive18"))
 		assertArtifactAt(t, s, orgID, liveRows.review, "octo/api#18", domain.ReviewDedupKey("PR_kwDOlive18", liveRows.conversationID))
 		assertArtifactAt(t, s, orgID, liveRows.comment, "octo/api#18", domain.GitHubCommentDedupKey(domain.GitHubIssueComment, 502))
-		assertArtifactAt(t, s, orgID, liveRows.branch, "octo/api", domain.BranchDedupKey(live.ID, ref))
+		assertArtifactAt(t, s, orgID, liveRows.branch, "octo/api", domain.BranchDedupKey(live.ID, ref, ""))
 		assertArtifactAt(t, s, orgID, deadRows.pr, "octo/api#18", domain.PullRequestDedupKey("PR_kwDOdead18"))
 		assertArtifactAt(t, s, orgID, deadRows.review, "octo/api#18", domain.ReviewDedupKey("PR_kwDOdead18", deadRows.conversationID))
 		assertArtifactAt(t, s, orgID, deadRows.comment, "octo/api#18", domain.GitHubCommentDedupKey(domain.GitHubIssueComment, 501))
-		assertArtifactAt(t, s, orgID, deadRows.branch, "octo/api", domain.BranchDedupKey(dead.ID, ref))
+		assertArtifactAt(t, s, orgID, deadRows.branch, "octo/api", domain.BranchDedupKey(dead.ID, ref, ""))
 	})
 
 	t.Run("Renaming_the_live_holder_leaves_a_retired_namesakes_artifacts", func(t *testing.T) {
@@ -1183,11 +1187,11 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		assertArtifactAt(t, s, orgID, liveRows.pr, "octo/api-v2#18", domain.PullRequestDedupKey("PR_kwDOlive18"))
 		assertArtifactAt(t, s, orgID, liveRows.review, "octo/api-v2#18", domain.ReviewDedupKey("PR_kwDOlive18", liveRows.conversationID))
 		assertArtifactAt(t, s, orgID, liveRows.comment, "octo/api-v2#18", domain.GitHubCommentDedupKey(domain.GitHubIssueComment, 502))
-		assertArtifactAt(t, s, orgID, liveRows.branch, "octo/api-v2", domain.BranchDedupKey(live.ID, ref))
+		assertArtifactAt(t, s, orgID, liveRows.branch, "octo/api-v2", domain.BranchDedupKey(live.ID, ref, ""))
 		assertArtifactAt(t, s, orgID, deadRows.pr, "octo/api#18", domain.PullRequestDedupKey("PR_kwDOdead18"))
 		assertArtifactAt(t, s, orgID, deadRows.review, "octo/api#18", domain.ReviewDedupKey("PR_kwDOdead18", deadRows.conversationID))
 		assertArtifactAt(t, s, orgID, deadRows.comment, "octo/api#18", domain.GitHubCommentDedupKey(domain.GitHubIssueComment, 501))
-		assertArtifactAt(t, s, orgID, deadRows.branch, "octo/api", domain.BranchDedupKey(dead.ID, ref))
+		assertArtifactAt(t, s, orgID, deadRows.branch, "octo/api", domain.BranchDedupKey(dead.ID, ref, ""))
 		// The audit ledger the same way: the live repository's rows, about its
 		// pull request and about the repository, follow it; the retired one's,
 		// whose links spell the same name, keep theirs.
@@ -1454,7 +1458,7 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 	branchArtifact, err := s.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
 		TeamID: seed.TeamID, Provider: domain.ArtifactProviderGit, Kind: domain.ArtifactKindBranch, Scope: TestGitHubHost,
 		Target: renameOldSlug, ExternalID: branchRef, State: domain.ArtifactStateBranchPushed,
-		DedupKey: domain.BranchDedupKey(repo.ID, branchRef),
+		DedupKey: domain.BranchDedupKey(repo.ID, branchRef, ""),
 	})
 	if err != nil {
 		t.Fatalf("seed branch artifact: %v", err)
@@ -1541,7 +1545,7 @@ func recordRepoArtifacts(t *testing.T, s db.Stores, orgID, teamID string, repo d
 		t.Fatalf("NewBranchArtifact refused %s %s", slug, ref)
 	}
 	branch.TeamID, branch.Scope = teamID, TestGitHubHost
-	branch.DedupKey = domain.BranchDedupKey(repo.ID, ref)
+	branch.DedupKey = domain.BranchDedupKey(repo.ID, ref, "")
 	storedBranch, err := s.Artifacts.UpsertSystem(ctx, orgID, branch)
 	if err != nil {
 		t.Fatalf("seed branch artifact %s: %v", slug, err)

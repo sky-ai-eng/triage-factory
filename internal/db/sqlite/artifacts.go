@@ -94,7 +94,10 @@ func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artif
 	// a re-delegate updating a GitHub comment) must not reassign either.
 	// Letting team_id follow the last writer while conversation_id stayed
 	// pinned to the first would desync the two and mis-scope the artifact out
-	// of its owning team's reads.
+	// of its owning team's reads. A kind many conversations act on (a branch,
+	// an issue, a review draft) keys on the acting conversation, so another
+	// conversation's act on one inserts a row of its own rather than landing
+	// here.
 	row := s.q.QueryRowContext(ctx, `
 		INSERT INTO artifacts
 			(id, conversation_id, org_id, team_id, provider, kind, scope, target,

@@ -720,7 +720,9 @@ func (r *directRuntime) UpsertArtifact(ctx context.Context, a domain.Artifact) (
 }
 
 // keyBranch keys branch artifact a on the registry row its target, an
-// owner/repo, names on a's scope, the org's current GitHub host. It returns
+// owner/repo, names on a's scope, the org's current GitHub host, and on this
+// runtime's conversation, which is bound here rather than taken from the
+// caller. It returns
 // errNoRegistryRow when no live row has that name, and the read's error when
 // the registry could not be read; either way a is left with no key. Any other
 // artifact is left as it is.
@@ -744,7 +746,7 @@ func (r *directRuntime) keyBranch(ctx context.Context, a *domain.Artifact) error
 	if row == nil {
 		return fmt.Errorf("%w: %s", errNoRegistryRow, a.Target)
 	}
-	a.DedupKey = domain.BranchDedupKey(row.ID, a.ExternalID)
+	a.DedupKey = domain.BranchDedupKey(row.ID, a.ExternalID, r.info.ConversationID)
 	return nil
 }
 

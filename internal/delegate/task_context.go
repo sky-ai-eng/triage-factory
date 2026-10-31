@@ -191,6 +191,12 @@ func (s *Spawner) taskArtifacts(ctx context.Context, orgID, taskID string) []dom
 // with no state or no URL yet simply contributes fewer segments; every value is
 // flattened, because a target and a URL are provider-authored strings reaching
 // the same bullet list the task's own fields do.
+//
+// Each run that pushes to a branch or acts on an issue holds a row of its own
+// for it, so rows naming one object (the same provider, kind, scope, target
+// and external id) are one line: placed where the object first appeared, with
+// the state and URL of the row updated last. A row with no external id names
+// no object yet and is never merged.
 func artifactLines(artifacts []domain.Artifact) []string {
 	if len(artifacts) == 0 {
 		return nil
@@ -202,9 +208,28 @@ func artifactLines(artifacts []domain.Artifact) []string {
 		}
 		return strings.Compare(a.ID, b.ID)
 	})
-
-	out := make([]string, 0, len(ordered))
+	type object struct{ provider, kind, scope, target, externalID string }
+	first := map[object]int{}
+	objects := make([]domain.Artifact, 0, len(ordered))
 	for _, a := range ordered {
+		if a.ExternalID == "" {
+			objects = append(objects, a)
+			continue
+		}
+		k := object{a.Provider, a.Kind, a.Scope, a.Target, a.ExternalID}
+		i, seen := first[k]
+		if !seen {
+			first[k] = len(objects)
+			objects = append(objects, a)
+			continue
+		}
+		if a.UpdatedAt.After(objects[i].UpdatedAt) {
+			objects[i] = a
+		}
+	}
+
+	out := make([]string, 0, len(objects))
+	for _, a := range objects {
 		segments := []string{strings.TrimSpace(singleLine(a.Kind) + " " + singleLine(a.Target))}
 		if state := singleLine(a.State); state != "" {
 			segments = append(segments, state)
