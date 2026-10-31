@@ -157,11 +157,11 @@ type Router struct {
 // orgs is required — the terminal-state checker iterates it per org and
 // dereferences it directly, so a nil orgs is a startup wiring bug that
 // panics there, not a degraded mode.
-// teamRepos is nil-safe — the team↔repo gate is skipped (no
-// handler is dropped) when missing, matching prior behavior where
-// repos were org-global and every team implicitly tracked them all.
-// jiraRules and linearRules are nil-safe the same way — the team↔project
-// and team↔Linear-team gates are skipped when missing. githubGroups is
+// teamRepos is nil-safe for task routing — with it missing, the team↔repo
+// gate drops no rule or trigger, as though every team tracked every
+// repository — and fails closed for notify rules, which then match no GitHub
+// event. jiraRules and linearRules are nil-safe the same way for the
+// team↔project and team↔Linear-team gates. githubGroups is
 // nil-safe — review_requested / mentioned visibility routing degrades to
 // handler-team visibility (the pre-ticket behavior) when missing or when an
 // event carries no identity.

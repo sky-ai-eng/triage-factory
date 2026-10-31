@@ -715,6 +715,9 @@ interface EventHandlerBase {
   // anyone), surfacing them to the team's board. Default off — visibility
   // otherwise rides ownership.
   applies_to_unowned: boolean
+  // creator_user_id: who authored a user-source handler; absent on a shipped
+  // one. A personal notify rule tells this user.
+  creator_user_id?: string
   created_at: string
   updated_at: string
   // source_available: whether the org can still produce events of this
@@ -743,7 +746,16 @@ export interface TriggerHandler extends EventHandlerBase {
   min_autonomy_suitability: number
 }
 
-export type EventHandler = RuleHandler | TriggerHandler
+// NotifyAudience: who a notify rule tells — its creator, or its team's members.
+export type NotifyAudience = 'creator' | 'team'
+
+export interface NotifyHandler extends EventHandlerBase {
+  kind: 'notify'
+  name: string
+  audience: NotifyAudience
+}
+
+export type EventHandler = RuleHandler | TriggerHandler | NotifyHandler
 
 export function isRule(h: EventHandler): h is RuleHandler {
   return h.kind === 'rule'

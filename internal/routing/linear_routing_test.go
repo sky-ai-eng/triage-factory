@@ -91,36 +91,36 @@ func TestLinearGate(t *testing.T) {
 	ctx := context.Background()
 	evt := linearEvent(domain.EventLinearIssueAssigned, "ent-1", "lt-eng", "")
 
-	if !r.handlerScopeMatchesEvent(ctx, evt, domain.EventHandler{TeamID: teamA}, map[string]bool{}) {
+	if !r.handlerScopeMatchesEvent(ctx, evt, domain.EventHandler{TeamID: teamA}, teamScopeCache{}) {
 		t.Error("a team that tracks the Linear team was dropped")
 	}
-	if r.handlerScopeMatchesEvent(ctx, evt, domain.EventHandler{TeamID: teamB}, map[string]bool{}) {
+	if r.handlerScopeMatchesEvent(ctx, evt, domain.EventHandler{TeamID: teamB}, teamScopeCache{}) {
 		t.Error("a team that does not track the Linear team passed the gate")
 	}
 
 	noTeam := linearEvent(domain.EventLinearIssueUnreachable, "ent-1", "", "")
 	for _, team := range []string{teamA, teamB} {
-		if r.handlerScopeMatchesEvent(ctx, noTeam, domain.EventHandler{TeamID: team}, map[string]bool{}) {
+		if r.handlerScopeMatchesEvent(ctx, noTeam, domain.EventHandler{TeamID: team}, teamScopeCache{}) {
 			t.Errorf("an event with no linear_team_id passed the gate for team %s", team)
 		}
 	}
-	if !r.handlerScopeMatchesEvent(ctx, noTeam, domain.EventHandler{}, map[string]bool{}) {
+	if !r.handlerScopeMatchesEvent(ctx, noTeam, domain.EventHandler{}, teamScopeCache{}) {
 		t.Error("a handler with no team is not gated, and was dropped")
 	}
 	malformed := evt
 	malformed.MetadataJSON = `not json`
-	if !r.handlerScopeMatchesEvent(ctx, malformed, domain.EventHandler{TeamID: teamB}, map[string]bool{}) {
+	if !r.handlerScopeMatchesEvent(ctx, malformed, domain.EventHandler{TeamID: teamB}, teamScopeCache{}) {
 		t.Error("malformed metadata should fail open")
 	}
 
 	unwired := linearRouter(database)
 	unwired.linearRules = nil
-	if !unwired.handlerScopeMatchesEvent(ctx, evt, domain.EventHandler{TeamID: teamB}, map[string]bool{}) {
+	if !unwired.handlerScopeMatchesEvent(ctx, evt, domain.EventHandler{TeamID: teamB}, teamScopeCache{}) {
 		t.Error("a nil linearRules store should skip the gate")
 	}
 	failing := linearRouter(database)
 	failing.linearRules = erroringLinearRules{}
-	if !failing.handlerScopeMatchesEvent(ctx, evt, domain.EventHandler{TeamID: teamB}, map[string]bool{}) {
+	if !failing.handlerScopeMatchesEvent(ctx, evt, domain.EventHandler{TeamID: teamB}, teamScopeCache{}) {
 		t.Error("a failed lookup should fail open")
 	}
 }
@@ -163,7 +163,7 @@ func TestLinearGate_IdentifierChangedReachesBothTeams(t *testing.T) {
 	}
 	for _, tc := range cases {
 		for team, want := range tc.want {
-			if got := r.handlerScopeMatchesEvent(ctx, tc.evt, domain.EventHandler{TeamID: team}, map[string]bool{}); got != want {
+			if got := r.handlerScopeMatchesEvent(ctx, tc.evt, domain.EventHandler{TeamID: team}, teamScopeCache{}); got != want {
 				t.Errorf("%s: gate for team %s = %v, want %v", tc.name, team, got, want)
 			}
 		}
@@ -183,17 +183,17 @@ func TestLinearGate_ReadsOnlyTheCurrentWorkspace(t *testing.T) {
 	evt := linearEvent(domain.EventLinearIssueAssigned, "ent-1", "lt-eng", "")
 	handler := domain.EventHandler{TeamID: teamA}
 
-	if !r.handlerScopeMatchesEvent(ctx, evt, handler, map[string]bool{}) {
+	if !r.handlerScopeMatchesEvent(ctx, evt, handler, teamScopeCache{}) {
 		t.Fatal("the team's own workspace's rule did not admit the event")
 	}
 	if _, err := database.Exec(`UPDATE org_settings SET linear_workspace_id = 'ws-other' WHERE org_id = ?`, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("switch workspace: %v", err)
 	}
-	if r.handlerScopeMatchesEvent(ctx, evt, handler, map[string]bool{}) {
+	if r.handlerScopeMatchesEvent(ctx, evt, handler, teamScopeCache{}) {
 		t.Error("a rule saved under the previous workspace admitted an event")
 	}
 	setLinearWorkspace(t, database)
-	if !r.handlerScopeMatchesEvent(ctx, evt, handler, map[string]bool{}) {
+	if !r.handlerScopeMatchesEvent(ctx, evt, handler, teamScopeCache{}) {
 		t.Error("binding the old workspace again did not restore its rules")
 	}
 }

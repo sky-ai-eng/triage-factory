@@ -32,12 +32,30 @@ type Occurrence struct {
 	Seen int
 }
 
+// EventOccurrence is one open event occurrence as the recorder models it: a
+// notice stays open, as an unexpired one does, and a condition until the
+// close phase resolves it.
+type EventOccurrence struct {
+	EventType string
+	EntityID  string
+	DedupKey  string
+	Condition bool
+	// Raise is the raise that last raised it, with the rules it matched.
+	Raise notify.EventRaise
+	// Seen counts the raises since it opened.
+	Seen int
+}
+
 // Recorder holds the occurrences the verbs left open.
 type Recorder struct {
 	mu sync.Mutex
 	// open is org → kind name → key.
 	open  map[string]map[string]map[string]Occurrence
 	kinds map[string]sink.Kind
+	// events is org → event key → occurrence.
+	events map[string]map[sink.EventKey]EventOccurrence
+	// closedSweeps counts ResolveClosedEntities calls per org.
+	closedSweeps map[string]int
 }
 
 var installed = struct {
@@ -51,7 +69,10 @@ var installed = struct {
 // recorder's test ends.
 func Record(t testing.TB) *Recorder {
 	t.Helper()
-	r := &Recorder{open: map[string]map[string]map[string]Occurrence{}, kinds: map[string]sink.Kind{}}
+	r := &Recorder{
+		open: map[string]map[string]map[string]Occurrence{}, kinds: map[string]sink.Kind{},
+		events: map[string]map[sink.EventKey]EventOccurrence{}, closedSweeps: map[string]int{},
+	}
 	installed.mu.Lock()
 	if len(installed.recorders) == 0 {
 		installed.prev = sink.Swap(fanout{})
@@ -113,6 +134,66 @@ func (r *Recorder) Inactive(t testing.TB, orgID string, k notify.Kind) {
 	t.Helper()
 	if open := r.Open(orgID, k); len(open) > 0 {
 		t.Errorf("notifytest: %s has %v open in org %s; want nothing", k.Name(), keysOf(open), orgID)
+	}
+}
+
+// ClosedEntityResolves is how many times notify.ResolveClosedEntities ran
+// for orgID.
+func (r *Recorder) ClosedEntityResolves(orgID string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.closedSweeps[orgID]
+}
+
+// Events returns the open event occurrences in orgID, ordered by event type,
+// then entity, then dedup key.
+func (r *Recorder) Events(orgID string) []EventOccurrence {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]EventOccurrence, 0, len(r.events[orgID]))
+	for _, occ := range r.events[orgID] {
+		out = append(out, occ)
+	}
+	slices.SortFunc(out, func(a, b EventOccurrence) int {
+		return strings.Compare(a.EventType+"\x00"+a.EntityID+"\x00"+a.DedupKey, b.EventType+"\x00"+b.EntityID+"\x00"+b.DedupKey)
+	})
+	return out
+}
+
+func (r *Recorder) raiseEvent(orgID string, ev notify.EventRaise) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	byKey := r.events[orgID]
+	if byKey == nil {
+		byKey = map[sink.EventKey]EventOccurrence{}
+		r.events[orgID] = byKey
+	}
+	key := sink.EventKey{Kind: ev.EventType, Key: notify.EventKey(ev.Entity.ID, ev.DedupKey)}
+	byKey[key] = EventOccurrence{
+		EventType: ev.EventType, EntityID: ev.Entity.ID, DedupKey: ev.DedupKey,
+		Condition: ev.Condition, Raise: ev, Seen: byKey[key].Seen + 1,
+	}
+}
+
+func (r *Recorder) openEvents(orgID, entityID string, kinds []string) []sink.EventKey {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []sink.EventKey
+	for key, occ := range r.events[orgID] {
+		if occ.Condition && occ.EntityID == entityID && slices.Contains(kinds, key.Kind) {
+			out = append(out, key)
+		}
+	}
+	return out
+}
+
+func (r *Recorder) resolveEvents(orgID string, keys []sink.EventKey) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, key := range keys {
+		if occ, ok := r.events[orgID][key]; ok && occ.Condition {
+			delete(r.events[orgID], key)
+		}
 	}
 }
 
@@ -197,6 +278,11 @@ func (r *Recorder) clearSource(orgID, source string) {
 			delete(r.open[orgID], name)
 		}
 	}
+	for key, occ := range r.events[orgID] {
+		if occ.Condition && occ.Raise.Source == source {
+			delete(r.events[orgID], key)
+		}
+	}
 }
 
 // openOrgs is the orgs where the kind has an open occurrence.
@@ -248,6 +334,44 @@ func (fanout) Post(_ context.Context, k sink.Kind, orgID string, p any) {
 func (fanout) ClearSource(_ context.Context, orgID, source string) {
 	for _, r := range recorders() {
 		r.clearSource(orgID, source)
+	}
+}
+
+func (fanout) RaiseEvent(_ context.Context, _ any, orgID string, raise any) {
+	for _, r := range recorders() {
+		r.raiseEvent(orgID, raise.(notify.EventRaise))
+	}
+}
+
+// OpenEvents answers from every recorder, deduplicated, as the one database
+// every recorder stands in for would.
+func (fanout) OpenEvents(_ context.Context, orgID, entityID string, kinds []string) ([]sink.EventKey, error) {
+	var out []sink.EventKey
+	for _, r := range recorders() {
+		for _, k := range r.openEvents(orgID, entityID, kinds) {
+			if !slices.Contains(out, k) {
+				out = append(out, k)
+			}
+		}
+	}
+	slices.SortFunc(out, func(a, b sink.EventKey) int { return strings.Compare(a.Kind+"\x00"+a.Key, b.Kind+"\x00"+b.Key) })
+	return out, nil
+}
+
+// ResolveClosedEntities is counted, not modelled: the recorder holds no
+// entity state to tell a closed entity by, so a test of the resolution itself
+// reads the database notify.Install writes through.
+func (fanout) ResolveClosedEntities(_ context.Context, orgID string) {
+	for _, r := range recorders() {
+		r.mu.Lock()
+		r.closedSweeps[orgID]++
+		r.mu.Unlock()
+	}
+}
+
+func (fanout) ResolveEvents(_ context.Context, orgID string, keys []sink.EventKey) {
+	for _, r := range recorders() {
+		r.resolveEvents(orgID, keys)
 	}
 }
 

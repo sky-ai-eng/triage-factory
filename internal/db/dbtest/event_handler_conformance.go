@@ -3,6 +3,7 @@ package dbtest
 import (
 	"context"
 	"errors"
+	"slices"
 	"strconv"
 	"testing"
 
@@ -564,6 +565,102 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		}
 		if firstRule >= firstTrigger {
 			t.Errorf("rules must come before triggers; firstRule=%d firstTrigger=%d", firstRule, firstTrigger)
+		}
+	})
+
+	// A notify rule round-trips its name and audience, names its creator,
+	// refuses rule- and trigger-only fields, and reads after every rule and
+	// trigger on its event type.
+	t.Run("Notify_RoundTripUpdateAndOrdering", func(t *testing.T) {
+		store, orgID, teamID, seedBlueprints, _ := factory(t)
+		ctx := context.Background()
+		bp := seedBlueprints(t, "p-notify-order")["p-notify-order"]
+		eventType := domain.EventGitHubPRCICheckFailed
+		read := func(id string) func() (*domain.EventHandler, error) {
+			return func() (*domain.EventHandler, error) { return store.Get(ctx, orgID, id) }
+		}
+
+		notifyID := uuid.New().String()
+		created, err := store.Create(ctx, orgID, teamID, domain.EventHandler{
+			ID: notifyID, Kind: domain.EventHandlerKindNotify, EventType: eventType, Enabled: true,
+			Name: "CI failed on my PR", Audience: domain.NotifyAudienceCreator,
+		})
+		if err != nil {
+			t.Fatalf("Create (notify): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Create (notify)", created, read(notifyID))
+		if created.Kind != domain.EventHandlerKindNotify || created.Audience != domain.NotifyAudienceCreator ||
+			created.Name != "CI failed on my PR" || created.CreatorUserID == "" || created.Source != domain.EventHandlerSourceUser ||
+			created.DefaultPriority != nil || created.SortOrder != nil || created.BlueprintID != "" {
+			t.Errorf("Create (notify) returned %+v; want a user notify rule naming its creator, with no rule or trigger fields", created)
+		}
+
+		next := created
+		next.Name = "CI failed on the team's PRs"
+		next.Audience = domain.NotifyAudienceTeam
+		next.Enabled = false
+		updated, err := store.Update(ctx, orgID, next)
+		if err != nil {
+			t.Fatalf("Update (notify): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Update (notify)", updated, read(notifyID))
+		if updated.Audience != domain.NotifyAudienceTeam || updated.Name != next.Name || updated.Enabled {
+			t.Errorf("Update (notify) returned %+v; want the new name, the team audience, disabled", updated)
+		}
+
+		priority, sortOrder, breaker, minAutonomy := 0.5, 0, 4, 0.0
+		for name, bad := range map[string]domain.EventHandler{
+			"no audience":    {Name: "x"},
+			"other audience": {Name: "x", Audience: "org"},
+			"no name":        {Audience: domain.NotifyAudienceCreator},
+			"rule fields":    {Name: "x", Audience: domain.NotifyAudienceCreator, DefaultPriority: &priority, SortOrder: &sortOrder},
+			"trigger fields": {Name: "x", Audience: domain.NotifyAudienceCreator, BlueprintID: bp, BreakerThreshold: &breaker, MinAutonomySuitability: &minAutonomy},
+			"unowned watch":  {Name: "x", Audience: domain.NotifyAudienceCreator, AppliesToUnowned: true},
+		} {
+			bad.ID, bad.Kind, bad.EventType = uuid.New().String(), domain.EventHandlerKindNotify, eventType
+			if _, err := store.Create(ctx, orgID, teamID, bad); err == nil {
+				t.Errorf("Create (notify, %s) succeeded; want it refused", name)
+			}
+		}
+		if _, err := store.Create(ctx, orgID, teamID, domain.EventHandler{
+			ID: uuid.New().String(), Kind: domain.EventHandlerKindRule, EventType: eventType,
+			Name: "r", DefaultPriority: &priority, SortOrder: &sortOrder, Audience: domain.NotifyAudienceTeam,
+		}); err == nil {
+			t.Error("Create (rule with an audience) succeeded; want it refused")
+		}
+
+		next.Enabled = true
+		if _, err := store.Update(ctx, orgID, next); err != nil {
+			t.Fatalf("re-enable the notify rule: %v", err)
+		}
+		if _, err := store.Create(ctx, orgID, teamID, domain.EventHandler{
+			ID: uuid.New().String(), Kind: domain.EventHandlerKindTrigger, BlueprintID: bp, EventType: eventType,
+			BreakerThreshold: &breaker, MinAutonomySuitability: &minAutonomy, Enabled: true,
+		}); err != nil {
+			t.Fatalf("Create (trigger): %v", err)
+		}
+		if _, err := store.Create(ctx, orgID, teamID, domain.EventHandler{
+			ID: uuid.New().String(), Kind: domain.EventHandlerKindRule, EventType: eventType,
+			Name: "r", DefaultPriority: &priority, SortOrder: &sortOrder, Enabled: true,
+		}); err != nil {
+			t.Fatalf("Create (rule): %v", err)
+		}
+		got, err := store.GetEnabledForEvent(ctx, orgID, eventType)
+		if err != nil {
+			t.Fatalf("GetEnabledForEvent: %v", err)
+		}
+		var kinds []string
+		for _, h := range got {
+			if len(kinds) == 0 || kinds[len(kinds)-1] != h.Kind {
+				kinds = append(kinds, h.Kind)
+			}
+		}
+		if want := []string{domain.EventHandlerKindRule, domain.EventHandlerKindTrigger, domain.EventHandlerKindNotify}; !slices.Equal(kinds, want) {
+			t.Errorf("GetEnabledForEvent kinds in order = %v; want %v", kinds, want)
+		}
+		listed, total, err := store.List(ctx, orgID, db.EventHandlerListFilter{Kind: domain.EventHandlerKindNotify}, db.ListOpts{Limit: 50})
+		if err != nil || total != 1 || len(listed) != 1 || listed[0].ID != notifyID {
+			t.Errorf("List(kind=notify) = %+v (total %d), %v; want only the notify rule", listed, total, err)
 		}
 	})
 

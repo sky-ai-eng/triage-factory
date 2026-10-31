@@ -25,7 +25,7 @@ So nothing answers: _this team's configuration has been broken for three weeks �
 
 Making notifications a third `event_handlers` kind (beside rules and triggers) was considered and rejected for V1. It would put every condition into the events catalog — the GitHub App becoming unusable, a Linear team becoming unreadable, a Jira mirror failing — although none of them is something an automation should run on, the set cannot be predicted ahead of time, and the catalog would change every time a new consumer appears. It also meets constraints in the router: entity-less events are dropped (`routableEntity` → `DispositionTasklessUnroutable`), `system:*` types never reach the durable queue, handlers are team-only (`event_handlers.team_id NOT NULL`), handlers are forward-only, and each producer would have to detect its own transitions to avoid writing an event per poll cycle.
 
-Event-driven notifications remain the plan for user-configured rules on events that already exist for automation ("notify me when CI fails on my PR"). They write into the same tables with `origin = 'event'`; see **Later: event notifications**.
+Event-driven notifications remain the plan for user-configured rules on events that already exist for automation ("notify me when CI fails on my PR"). They write into the same tables with `origin = 'event'`; see **Event notifications**.
 
 ## Vocabulary
 
@@ -36,7 +36,7 @@ Event-driven notifications remain the plan for user-configured rules on events t
 | **Occurrence** | One row: one kind + key, for one audience, from opening to resolution. A condition that resolves and comes back is a new occurrence. |
 | **Audience**   | Who a row is for: `org` / `team` / `user` scope, with role `members` or `admins` for org and team.                                   |
 | **Lifecycle**  | `condition` (the system resolves it) or `notice` (it expires).                                                                       |
-| **Origin**     | `system` (a code-defined kind, V1) or `event` (a notify handler on an event, later).                                                 |
+| **Origin**     | `system` (a code-defined kind) or `event` (a notify rule on an event; see **Event notifications**).                                  |
 | **Marks**      | One person's `read_at` / `dismissed_at` on a row.                                                                                    |
 
 ## Decisions
@@ -206,7 +206,7 @@ Postgres changes go into the baseline; SQLite gets a forward migration. Both beh
 | ------------------------------- | ---------------- | ----------------------------------------------------------------------------------- |
 | `id`                            | uuid             |                                                                                     |
 | `org_id`                        | uuid             |                                                                                     |
-| `origin`                        | text             | `system` \| `event`. V1 writes `system`.                                            |
+| `origin`                        | text             | `system` \| `event`.                                                                |
 | `lifecycle`                     | text             | `condition` \| `notice`. CHECK: `notice` ⇔ `expires_at IS NOT NULL`.                |
 | `kind`                          | text             | No FK; the registry is code.                                                        |
 | `key`                           | text             |                                                                                     |
@@ -226,6 +226,7 @@ Postgres changes go into the baseline; SQLite gets a forward migration. Both beh
 | `resolved_at`                   | timestamptz NULL |                                                                                     |
 | `resolved_reason`               | text NULL        | `cleared` \| `source_off` \| `audience_removed`                                     |
 | `expires_at`                    | timestamptz NULL | Notices only.                                                                       |
+| `entity_id`                     | uuid NULL        | Set iff `origin = 'event'`: the entity the event is about. FK `entities`.           |
 
 Indexes: a partial unique index on the open occurrence — `(org_id, origin, kind, key, audience_scope, coalesce(audience_role,''), coalesce(team_id, <nil uuid>), coalesce(user_id, <nil uuid>)) WHERE resolved_at IS NULL`, a list index on `(org_id, resolved_at, priority, escalated_at, id)`, and, in Postgres, a partial index on `(kind, origin, org_id) WHERE lifecycle = 'condition' AND resolved_at IS NULL` for `OpenOrgs`, which reads across orgs.
 
@@ -367,12 +368,96 @@ Jira configuration names values Jira can take away. Detection is `internal/jirad
 1. **Infrastructure and two consumers.** Tables, store and conformance, `notify` and `notifytest`, `kinds`, the API, the ping, the rail row, page and banner, and `github.app_unusable` + `linear.team_unreadable`. Together they exercise org and team audiences, a multi-audience key, `Set` and `Sync`, both action types, and the urgent banner.
 2. **Remaining condition consumers and notices.** `jira.discovery_failing`, both mirrors, `memory.generation_failing`, `routing.automation_conflict` (TFAC-518), and the arrival pop. Each removes its `TODO(TFAC-878)` marker.
 3. **`jira.status_drift` and `jira.predicate_drift`.** Detection in `internal/jiradrift` (see **Jira drift**).
+4. **Event notifications.** Notify rules on catalog events (see **Event notifications**).
+
+## Event notifications
+
+People configure notifications on events that already exist for automation: "notify me when CI fails on my PR", "tell the team when a review requests changes". A **notify rule** is a third kind of `event_handlers`, beside rules and triggers, and it writes into the same `notifications` tables with `origin = 'event'`. Nothing is added to the events catalog for it, and TF's own health conditions stay the code-defined kinds above.
+
+### The rule
+
+| Field             | Notes                                                                                                         |
+| ----------------- | ------------------------------------------------------------------------------------------------------------- |
+| `kind`            | `notify`.                                                                                                     |
+| `name`            | Required. Named in the notification's body, so a person can tell which rule told them.                        |
+| `event_type`      | A GitHub, Jira or Linear event. Another source is refused (422 `INVALID_FIELD`); see **Matching**.            |
+| `scope_predicate` | The same predicate schema, editor and checks as a task rule's.                                                |
+| `audience`        | `creator` (a personal rule, the default) or `team`. Stored as `event_handlers.notify_audience`.               |
+| `enabled`         | Defaults to true.                                                                                             |
+| `team_id`         | The owning team, as for every handler.                                                                        |
+
+A notify rule has no priority, sort order, blueprint or `applies_to_unowned`, and TF ships none: a shipped notify rule would badge every member of every team on install. Creation is `POST /api/event-handlers/notify`; reads, `PATCH` and `DELETE` are the existing handler routes, with a notify body schema (`name`, `enabled`, `scope_predicate`, `audience`). `scope_predicate: null` clears the filter; the other three always hold a value, so a `null` for one is a 400 naming it.
+
+### Audience
+
+- **`creator`** is one user-scope row for the rule's creator, written only while they are a member of the rule's team. A personal rule is a team handler, so the team's tracked set already limits what it can match, and a person who leaves the team stops being told.
+- **`team`** is one team-scope row for the team's members.
+- **One person, one row.** When one event matches a team rule and a personal rule, the personal row is not written if its creator is a member of the team whose rule matched: the team row already reaches them. Two rules for the same audience are one row (see **Coalescing**), so a person in two personal rules and a team rule on one event sees one notification.
+- **Local mode** writes one row for the one user, whichever rules matched.
+
+The membership read uses the inbox's own "is sent" predicate (`RecipientsSystem`), so an archived team's rules reach nobody. A failed read writes nothing for the event.
+
+### Who may write
+
+| Write                                                          | Gate                               |
+| -------------------------------------------------------------- | ---------------------------------- |
+| Create a personal rule                                         | Team write, as a task rule         |
+| Edit or delete a personal rule                                 | Its creator, or a team admin       |
+| Create, edit or delete a team rule, or move a rule to or from `team` | Team admin                   |
+
+A rule whose audience is the whole team badges every member, so it is a team admin's decision. Team members can read each other's personal rules through the API, as they can every handler of their team; the editor lists only the caller's own and the team's.
+
+### Matching
+
+A notify rule matches as a rule does: an active entity, the event's current view against the predicate, the event type's entitlement. Its predicate is matched in the same pass as rules and triggers, after the close phase, whether or not any task results. It raises once the event has routed: an error later in routing replays the event, and raising before it would tell people once per attempt. An entity that closed under the task mint raises nothing, the answer the lifecycle gate gives a straggler.
+
+**The tracked-set gate fails closed.** The router's team-scope gate answers "tracks" on a read error, malformed metadata or an unwired store, which is acceptable for tasks because it only narrows a set someone else computed. For a notification, a wrong "tracks" sends a person news about an entity their team does not track, which is a disclosure. The gate keeps both answers per team for one event, read from one lookup: notify rules take the strict one, where any answer the gate cannot prove is "does not track". GitHub, Jira and Linear have core's gates; an extension's source gate (`SourceHooks.TracksScope`) answers a bool that narrows and may fail open, so notify rules are refused on those event types until a source can answer strictly. A routing test holds the gated sources to the ones `domain.NotifyRuleSource` admits.
+
+A notification never fails routing. The event's routing obligation is its tasks. A failed write, or a failed read of who a rule tells, is logged and counted (`tf_notify_write_failures_total{kind="event"}`), and the event is not replayed for either. There is no next evaluation to correct it, which is the cost of not replaying a whole event for a notification.
+
+### Occurrences and coalescing
+
+- **Kind** is the event type and **key** is `<entity_id>/<dedup_key>`: one open occurrence per (event type, entity, dedup key) per audience, the same triple a task dedups on. The rule is not part of the key, because two rules that match one event describe one thing to be told. The first matching rule for the audience is named in the copy.
+- **Lifecycle.** An event type that a typed close relation closes (`closeRelations` in `internal/routing`, the non-terminating entries) opens a **condition**: CI check failed, review requested, changes requested, and Jira and Linear assigned and available. Every other type posts a **notice**, which expires `DefaultNoticeTTL` after its last event.
+- **A recurrence** while a condition is open bumps it quietly: the condition is still true. A recurrence of a notice bumps it and **resurfaces** it (`escalated_at` moves, so it is unread and undismissed again, and the ping is sent): a second comment on a pull request is news the person asked for.
+- **Priority** is `high` and every row is dismissible. `urgent` means work has stopped for the audience, which no catalog event says; a rule someone wrote in order to be told is what the badge is for.
+- **A raise never resolves an audience.** Unlike `Set`, an event names only the rules its own metadata matched, so a second event on the same key that a team rule's predicate excludes does not resolve that team's row.
+
+### Columns
+
+`notifications.entity_id` (FK `entities`, `ON DELETE CASCADE`) is set iff `origin = 'event'` (CHECK), with a partial index on `(org_id, entity_id, kind)` over open rows for the close phase's read. The event id, the rule's handler id and the dedup key ride in `params`, which nothing selects on. There is no `handler_id` column: several rules can raise one occurrence, and deleting or disabling a rule leaves the rows it raised to resolve or expire on their own, as untracking leaves a team's tasks.
+
+### Resolution
+
+- **Typed close relations resolve conditions on the same entity.** The relation's `prepare` gate and `keep` filter run once for both kinds of target. `keep` reads a target's event type, dedup key and owning team; a notification has no owning team, so a reassignment resolves the old assignee's "assigned" notification, and the same event raises a new one when a rule matches the new assignment.
+- **A terminating close** (merged, closed, completed, unreachable, the poll's close obligation) resolves every open event condition on the entity in the relation's close set, after the entity's transaction commits.
+- **`ClearSource`** resolves a source's event conditions with its system ones.
+- **An entity closed by a path that routes no event** (resolved from the stock deck, its repository retired) has no close relation to run. A brain-gated sweep (`notify.RunClosedEntitySweep`, every `ClosedEntitySweepInterval`) resolves open event conditions about entities that are not active, in the orgs one deployment-wide read finds holding any, and the stock deck's resolve runs the same pass for its org at once.
+- Resolution is best effort, as a raise is: a failed write is logged and counted, a failed read is logged, and neither is part of the close phase's routing obligation. A relation that would only resolve notifications never fails routing either: a `prepare` error with no task to close leaves the notifications open. A condition a failed resolve leaves open is dismissible and resolves when its entity closes.
+
+### Copy
+
+One rendering for every event type (`kinds.Event`):
+
+- **Title:** the catalog label and the entity's key, e.g. `CI Check Failed: acme/widgets#18`.
+- **Body:** the entity's title, then `From your rule "…"` or `From the team rule "…"`.
+- **Actions:** a link to the entity on its source (an external link, so the host check applies), and a link to the rule: "Edit your rule" on a personal row, which is how a person stops being told until per-person preferences exist, and "Open the team rule" on a team row. The entity's link is data rather than code, so an event row whose link is refused (no stored URL, a host the org no longer configures) is written with its other actions instead of failing the raise. An unreadable org setting is not a refused link: the host check could not run, and the raise fails as any unreadable read does.
+
+No type gets copy of its own in this phase. Where two open rows on one entity share a title (one per requested reviewer, one per label), the entity is where the reader acts on either, and a type that needs more than the label gets a renderer of its own when someone asks for it.
+
+### Forward-only
+
+A rule says nothing about an event that already happened. Creating, enabling or editing a notify rule applies to events from then on, and the editor says so under the event picker. Disabling or deleting one leaves what it already raised.
+
+### The editor
+
+Notify rules live on the triage page beside task rules: a **Notify rules** panel lists the caller's personal rules and the team's rules, each with an enabled switch, and opens an editor with the event picker and predicate editor task rules use, plus the audience (offered as "Just me" or "Everyone on the team"; the second only to a team admin). `Routes.NotifyRule(id)` is `/triage?notify_rule=<id>`, which opens that rule.
+
+### Not in scope
+
+Org-scoped handlers; out-of-app delivery, which is a later channel on the same handler; a per-type renderer; muting a rule per person.
 
 ## Later
-
-### Event notifications
-
-User-configured notifications on events that already exist for automation: a `notify` kind of `event_handlers`, written into the same tables with `origin = 'event'`. A personal rule is a team handler whose audience is its creator, so the team's tracked-set gate already handles what it may match; matching must fail closed, unlike the task-visibility gate. A row opened by an event is resolved by the existing close relations ("CI passed" resolves "CI failed"); a handler on an event with no close relation produces a notice. The event-specific columns (`handler_id`, `event_id`, `entity_id`) are designed with that work. Nothing is added to the events catalog for it.
 
 ### Also deferred
 

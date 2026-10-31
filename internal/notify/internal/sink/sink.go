@@ -20,14 +20,27 @@ type Kind interface {
 	Key(p any) string
 }
 
-// Sink carries out the verbs and answers the one read, OpenOrgs. p and the
-// members of active and keep are the kind's params type.
+// EventKey is one event occurrence's identity in an org: its kind, the event
+// type, and its key.
+type EventKey struct {
+	Kind string
+	Key  string
+}
+
+// Sink carries out the verbs and answers the reads, OpenOrgs and OpenEvents.
+// p and the members of active and keep are the kind's params type. For the
+// event verbs, k is notify's event kind and raise is a notify.EventRaise.
 type Sink interface {
 	Set(ctx context.Context, k Kind, orgID string, p any, active bool)
 	Sync(ctx context.Context, k Kind, orgID string, active, keep []any)
 	Post(ctx context.Context, k Kind, orgID string, p any)
 	ClearSource(ctx context.Context, orgID, source string)
 	OpenOrgs(ctx context.Context, k Kind) ([]string, error)
+
+	RaiseEvent(ctx context.Context, k any, orgID string, raise any)
+	OpenEvents(ctx context.Context, orgID, entityID string, kinds []string) ([]EventKey, error)
+	ResolveEvents(ctx context.Context, orgID string, keys []EventKey)
+	ResolveClosedEntities(ctx context.Context, orgID string)
 }
 
 type holder struct{ s Sink }

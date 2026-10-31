@@ -94,7 +94,7 @@ func (r *Router) HandleEvent(ctx context.Context, evt domain.Event) error {
 // event carries none (an ingest-path event, or a direct call). It reaches
 // exactly one stage: the terminating close, which refuses to land against
 // any other version of the entity.
-func (r *Router) routeEvent(ctx context.Context, evt domain.Event, judgedAt *int64) error {
+func (r *Router) routeEvent(ctx context.Context, evt domain.Event, judgedAt *int64) (err error) {
 	// Defensive: every upstream emitter (poller, per-org loop) tags
 	// events with evt.OrgID. A missing OrgID indicates an emitter bug — failing
 	// loud here prevents tenant-mixed writes that would silently land on the
@@ -197,7 +197,7 @@ func (r *Router) routeEvent(ctx context.Context, evt domain.Event, judgedAt *int
 	// nothing. A terminating event is gated here while its entity is STILL
 	// active (it is what closes the entity, in the close phase below), so it
 	// passes; only later stragglers on the now-closed entity drop.
-	entityID, ok, err := r.routableEntity(ctx, orgID, evt)
+	entity, ok, err := r.routableEntity(ctx, orgID, evt)
 	if err != nil {
 		disp.Disposition = events.DispositionError
 		return fmt.Errorf("resolve entity: %w", err)
@@ -206,6 +206,7 @@ func (r *Router) routeEvent(ctx context.Context, evt domain.Event, judgedAt *int
 		disp.Disposition = events.DispositionTasklessUnroutable
 		return nil
 	}
+	entityID := entity.ID
 	disp.EntityID = entityID
 
 	// Close phase — runs unconditionally, before routing, and independent of
@@ -252,18 +253,31 @@ func (r *Router) routeEvent(ctx context.Context, evt domain.Event, judgedAt *int
 	}
 
 	// One team↔scope cache for the whole event: the per-handler scope gate
-	// (matchHandlers) and the owner ladder's identity-tier gate (resolveTeamRouting
-	// → trackingTeams) share it, so a team's tracking status is looked up once per
-	// event even when it appears in both the matched handlers and the author's team
-	// set.
-	scopeCache := map[string]bool{}
+	// (matchHandlers), the owner ladder's identity-tier gate (resolveTeamRouting
+	// → trackingTeams) and the notify gate share it, so a team's tracking status
+	// is looked up once per event even when it appears in more than one of them.
+	scopeCache := teamScopeCache{}
 
-	// Match event_handlers (rules + triggers) for this event.
-	matchedRules, matchedTriggers, err := r.matchHandlers(ctx, orgID, evt, scopeCache)
+	// Match event_handlers (rules, triggers and notify rules) for this event.
+	matchedRules, matchedTriggers, matchedNotify, err := r.matchHandlers(ctx, orgID, evt, scopeCache)
 	if err != nil {
 		disp.Disposition = events.DispositionError
 		return fmt.Errorf("match handlers: %w", err)
 	}
+
+	// Notify rules tell people about the event whether or not it makes a task.
+	// They raise once the event has routed: an error below replays the event,
+	// and raising before it would tell people once per attempt. A raise never
+	// fails routing; the event's obligation is its tasks. An entity that closed
+	// under the mint is a straggler, the answer the lifecycle gate gives one,
+	// so nothing is raised about it.
+	closedUnderMint := false
+	defer func() {
+		if err == nil && !closedUnderMint {
+			r.raiseNotifications(ctx, orgID, evt, *entity, matchedNotify, scopeCache)
+		}
+	}()
+
 	if len(matchedRules) == 0 && len(matchedTriggers) == 0 {
 		// Nothing matched — event is recorded but no task created.
 		disp.Disposition = events.DispositionTasklessNoHandler
@@ -294,6 +308,7 @@ func (r *Router) routeEvent(ctx context.Context, evt domain.Event, judgedAt *int
 		// it. The same answer the gate gives a straggler on a closed entity,
 		// reached a moment later; the event is consumed, not replayed.
 		routerLog.InfoContext(ctx, "entity closed under the mint; no task", "entity_id", entityID, "event_type", evt.EventType)
+		closedUnderMint = true
 		disp.Disposition = events.DispositionTasklessUnroutable
 		return nil
 	}
@@ -356,7 +371,7 @@ func (r *Router) publishDisposition(orgID string, disp events.SystemRoutingDispo
 }
 
 // routableEntity is the entity-lifecycle gate that precedes the close + route
-// phases. It returns the active entity's id with ok=true when the event should
+// phases. It returns the active entity with ok=true when the event should
 // proceed; ok=false when it should not:
 //   - a system event (no entity context) creates nothing;
 //   - an event on an already-closed entity is recorded but spawns nothing — a
@@ -371,34 +386,37 @@ func (r *Router) publishDisposition(orgID string, disp events.SystemRoutingDispo
 // legitimate ok=false cases (no entity context, dangling reference, closed
 // entity) — so the caller can tell "nothing to route to" from "couldn't find
 // out" rather than reporting the latter as the former.
-func (r *Router) routableEntity(ctx context.Context, orgID string, evt domain.Event) (entityID string, ok bool, err error) {
+func (r *Router) routableEntity(ctx context.Context, orgID string, evt domain.Event) (*domain.Entity, bool, error) {
 	if evt.EntityID == nil {
-		return "", false, nil
+		return nil, false, nil
 	}
-	entityID = *evt.EntityID
+	entityID := *evt.EntityID
 
 	entity, err := r.entities.GetSystem(ctx, orgID, entityID)
 	if err != nil {
 		routerLog.Error("failed to load entity", "entity_id", entityID, "error", err)
-		return "", false, err
+		return nil, false, err
 	}
 	if entity == nil {
 		// Dangling reference — surprising, but not a query failure; treated
 		// like "nothing to route to."
 		routerLog.Error("entity not found", "entity_id", entityID)
-		return "", false, nil
+		return nil, false, nil
 	}
 	if entity.State != "active" {
-		return "", false, nil
+		return nil, false, nil
 	}
-	return entityID, true, nil
+	return entity, true, nil
 }
 
 // matchHandlers queries the enabled event_handlers for the event type and
-// returns those whose scope predicate matches AND whose team tracks the
-// event's entity (the team↔scope gate), split by kind. One query,
-// kind-discriminated locally — preserves the rules-before-triggers order via
-// the store's kind-ASC ORDER BY.
+// returns those whose scope predicate matches, split by kind. Rules and
+// triggers also pass the team↔scope gate here, in its open posture. Notify
+// rules are returned on their predicate alone: only routeEvent raises them,
+// and it applies the strict posture itself (raiseNotifications), so a caller
+// that discards them pays no tracking lookup for them. One query,
+// kind-discriminated locally — preserves the rules-before-triggers order the
+// store reads them in.
 //
 // Predicates are matched against the event's current view (events.Current):
 // a handler filter names the ids the source uses now, and an event recorded
@@ -408,7 +426,7 @@ func (r *Router) routableEntity(ctx context.Context, orgID string, evt domain.Ev
 // current view — and the caller must not read that as "queried fine, zero
 // handlers matched" (which would misreport an internal error as a legitimate
 // "nothing configured" outcome).
-func (r *Router) matchHandlers(ctx context.Context, orgID string, evt domain.Event, scopeCache map[string]bool) (matchedRules, matchedTriggers []domain.EventHandler, err error) {
+func (r *Router) matchHandlers(ctx context.Context, orgID string, evt domain.Event, scopeCache teamScopeCache) (matchedRules, matchedTriggers, matchedNotify []domain.EventHandler, err error) {
 	ctx, span := tracer.Start(ctx, "route.match")
 	defer span.End()
 
@@ -416,15 +434,14 @@ func (r *Router) matchHandlers(ctx context.Context, orgID string, evt domain.Eve
 	if err != nil {
 		span.SetStatus(codes.Error, "query event_handlers")
 		routerLog.ErrorContext(ctx, "failed to query event_handlers", "event_type", evt.EventType, "error", err)
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	metadataJSON, err := events.Current(ctx, orgID, evt.EventType, evt.MetadataJSON)
 	if err != nil {
 		span.SetStatus(codes.Error, "resolve event metadata")
 		routerLog.ErrorContext(ctx, "failed to resolve event metadata", "event_type", evt.EventType, "error", err)
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-
 	// scopeCache memoizes the team↔scope (e.g. team↔repo) gate per team for this
 	// one event, so a team with several matching handlers does a single tracking
 	// lookup. It's owned by HandleEvent and shared with the owner ladder's
@@ -443,6 +460,10 @@ func (r *Router) matchHandlers(ctx context.Context, orgID string, evt domain.Eve
 		if !matched {
 			continue
 		}
+		if h.Kind == domain.EventHandlerKindNotify {
+			matchedNotify = append(matchedNotify, h)
+			continue
+		}
 		// Team↔scope gate (repos / Jira projects): a team's
 		// handler only fires for events whose entity the team tracks. Dropped
 		// here so the team never enters the visibility set, its triggers never
@@ -458,8 +479,10 @@ func (r *Router) matchHandlers(ctx context.Context, orgID string, evt domain.Eve
 			matchedTriggers = append(matchedTriggers, h)
 		}
 	}
+	// The count is what passed the gate here; a notify rule passes its gate at
+	// raise time, so it is not counted as a match.
 	span.SetAttributes(telemetry.Count(len(matchedRules) + len(matchedTriggers)))
-	return matchedRules, matchedTriggers, nil
+	return matchedRules, matchedTriggers, matchedNotify, nil
 }
 
 // eventRouting is the resolved team-routing for an event: which team owns the
@@ -515,7 +538,7 @@ type eventRouting struct {
 //
 // The matched handlers still gate whether a task is created and supply the
 // priority; the model only decides the team set + owner.
-func (r *Router) resolveTeamRouting(ctx context.Context, orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler, scopeCache map[string]bool) (eventRouting, bool, error) {
+func (r *Router) resolveTeamRouting(ctx context.Context, orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler, scopeCache teamScopeCache) (eventRouting, bool, error) {
 	ctx, span := tracer.Start(ctx, "route.own")
 	defer span.End()
 
@@ -605,7 +628,7 @@ func resolvePoolRouting(matchedRules, matchedTriggers []domain.EventHandler) eve
 // has no lower tier left to be caught by. resolveSourceOwner is what makes that
 // contract a mechanism rather than a rule: a hook that returns empty without
 // claiming Unowned is refused, not believed.
-func (r *Router) resolveOwnedRouting(ctx context.Context, orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler, scopeCache map[string]bool) (eventRouting, bool, error) {
+func (r *Router) resolveOwnedRouting(ctx context.Context, orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler, scopeCache teamScopeCache) (eventRouting, bool, error) {
 	var owner string
 	var ownerSet []string
 	var err error
