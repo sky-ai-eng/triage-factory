@@ -1860,6 +1860,57 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 	})
 
+	t.Run("JiraStatusRules_ArmingTeamIDsSystem_ArmedActiveTeamsOnly", func(t *testing.T) {
+		// Two teams arm SKY and a third only watches it: the watcher is not an
+		// arming team, an archived team drops out, and a project no rule arms,
+		// another site, or a malformed id answers an empty list.
+		stores, ids := factory(t)
+		armed := []domain.JiraProjectStatusRules{{
+			ProjectKey: "SKY", PickupMembers: jiraRefs("To Do"),
+			InProgressMembers: jiraRefs("In Progress"), InProgressCanonical: jiraRef("In Progress"),
+			DoneMembers: jiraRefs("Done"), DoneCanonical: jiraRef("Done"),
+		}}
+		registerJiraProjects(t, stores, ids, armed)
+		watched := []domain.JiraProjectStatusRules{{ProjectKey: "SKY", JiraProjectID: armed[0].JiraProjectID}}
+		other, watcher := stores.SeedTeam(t, "arming-other"), stores.SeedTeam(t, "arming-watcher")
+		for team, rules := range map[string][]domain.JiraProjectStatusRules{ids.TeamID: armed, other: armed, watcher: watched} {
+			if err := stores.JiraStatusRules.ReplaceForTeam(ctx, team, jiraSite, rules); err != nil {
+				t.Fatalf("ReplaceForTeam(%s): %v", team, err)
+			}
+		}
+		arming := func(site, id string) []string {
+			t.Helper()
+			got, err := stores.JiraStatusRules.ArmingTeamIDsSystem(ctx, ids.OrgID, site, id)
+			if err != nil {
+				t.Fatalf("ArmingTeamIDsSystem(%q, %s): %v", site, id, err)
+			}
+			return got
+		}
+		if got, want := arming(jiraSite, armed[0].JiraProjectID), sortedTeams(ids.TeamID, other); !reflect.DeepEqual(got, want) {
+			t.Errorf("ArmingTeamIDsSystem(SKY) = %v; want %v", got, want)
+		}
+		ops, err := stores.JiraProjects.FindOrCreate(ctx, ids.OrgID, jiraSite, "id-OPS", "OPS", "")
+		if err != nil {
+			t.Fatalf("register OPS: %v", err)
+		}
+		for _, c := range []struct{ name, site, id string }{
+			{"unarmed project", jiraSite, ops.ID},
+			{"another site", "https://other.atlassian.net", armed[0].JiraProjectID},
+			{"no site", "", armed[0].JiraProjectID},
+			{"no such row", jiraSite, "not-a-uuid"},
+		} {
+			if got := arming(c.site, c.id); got == nil || len(got) != 0 {
+				t.Errorf("ArmingTeamIDsSystem(%s) = %#v; want an empty non-nil slice", c.name, got)
+			}
+		}
+		if _, err := stores.Teams.Archive(ctx, other); err != nil {
+			t.Fatalf("Archive: %v", err)
+		}
+		if got := arming(jiraSite, armed[0].JiraProjectID); !reflect.DeepEqual(got, []string{ids.TeamID}) {
+			t.Errorf("ArmingTeamIDsSystem(SKY) after archiving the other team = %v; want only %s", got, ids.TeamID)
+		}
+	})
+
 	t.Run("JiraStatusRules_ReplaceForTeam_PrunesMissingKeys", func(t *testing.T) {
 		// First insert two rules, then re-call with just one — the
 		// missing project_key row must be deleted.
@@ -2664,4 +2715,9 @@ func tracksByName(t *testing.T, stores SettingsStores, orgID, teamID, host, owne
 		t.Fatalf("TracksRepositorySystem(%s/%s on %s): %v", owner, repo, host, err)
 	}
 	return tracked
+}
+
+func sortedTeams(ids ...string) []string {
+	slices.Sort(ids)
+	return ids
 }

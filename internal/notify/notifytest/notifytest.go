@@ -151,7 +151,7 @@ func (r *Recorder) set(k sink.Kind, orgID string, p any, active bool) {
 	delete(r.open[orgID][k.Name()], k.Key(p))
 }
 
-func (r *Recorder) sync(k sink.Kind, orgID string, active []any) {
+func (r *Recorder) sync(k sink.Kind, orgID string, active, keep []any) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	// One raise per key, with the last member's params, as the engine writes.
@@ -164,8 +164,12 @@ func (r *Recorder) sync(k sink.Kind, orgID string, active []any) {
 		}
 		latest[key] = p
 	}
+	kept := map[string]bool{}
+	for _, p := range keep {
+		kept[k.Key(p)] = true
+	}
 	for key := range r.open[orgID][k.Name()] {
-		if _, keep := latest[key]; !keep {
+		if _, raised := latest[key]; !raised && !kept[key] {
 			delete(r.open[orgID][k.Name()], key)
 		}
 	}
@@ -214,9 +218,9 @@ func (fanout) Set(_ context.Context, k sink.Kind, orgID string, p any, active bo
 	}
 }
 
-func (fanout) Sync(_ context.Context, k sink.Kind, orgID string, active []any) {
+func (fanout) Sync(_ context.Context, k sink.Kind, orgID string, active, keep []any) {
 	for _, r := range recorders() {
-		r.sync(k, orgID, active)
+		r.sync(k, orgID, active, keep)
 	}
 }
 

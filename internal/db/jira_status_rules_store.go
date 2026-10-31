@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -82,6 +83,15 @@ type JiraStatusRulesStore interface {
 	// TeamGitHubReposStore.TracksRepositorySystem.
 	TracksJiraProjectSystem(ctx context.Context, teamID, site, jiraProjectID string) (bool, error)
 
+	// ArmingTeamIDsSystem returns the sorted ids of the org's active teams
+	// whose rule for the jira_projects row jiraProjectID, on site, arms it
+	// (domain.JiraProjectStatusRules.Armed): the teams a notification about
+	// the project's discovery is for. A team that only watches the project is
+	// left out, because discovery asks Jira nothing on its rule's behalf, and
+	// so is an archived team, because nothing is sent to one. An id that names
+	// no row answers an empty list. Admin pool.
+	ArmingTeamIDsSystem(ctx context.Context, orgID, site, jiraProjectID string) ([]string, error)
+
 	// ReplaceForTeam makes rules the team's whole set on site in one
 	// transaction: each entry is upserted under its JiraProjectID, and the
 	// team's rules for projects on site that the input no longer names are
@@ -118,6 +128,21 @@ func ValidateJiraStatusRulesInput(site string, rules []domain.JiraProjectStatusR
 		seen[r.JiraProjectID] = true
 	}
 	return nil
+}
+
+// ArmingTeamIDs is ArmingTeamIDsSystem's answer from the rules each dialect
+// reads for the project: the teams whose rule arms it, sorted, and never nil.
+// Arming is domain.JiraProjectStatusRules.Armed, applied here rather than
+// restated in SQL over the members' JSON.
+func ArmingTeamIDs(rules []domain.JiraProjectStatusRules) []string {
+	out := []string{}
+	for _, r := range rules {
+		if r.Armed() && !slices.Contains(out, r.TeamID) {
+			out = append(out, r.TeamID)
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // ErrJiraRuleProjectNotOnSite is returned by ReplaceForTeam when a rule names a

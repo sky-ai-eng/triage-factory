@@ -12,6 +12,7 @@ func (a *App) buildNotify() {
 		Notifications:   a.stores.Notifications,
 		Orgs:            a.stores.Orgs,
 		LinearTeamRules: a.stores.LinearTeamRules,
+		JiraStatusRules: a.stores.JiraStatusRules,
 		Hub:             a.wsHub,
 		Local:           a.local(),
 	})
