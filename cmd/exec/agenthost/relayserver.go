@@ -162,8 +162,8 @@ func (s *RelayServer) SetProxyCreds(pc *ProxyCredentials) { s.proxyCreds = pc }
 
 // SetGitHubCredential records which GitHub credential this run's writes act
 // under, so every audit row served here — the relayed gh-channel writes and
-// refusals, the git denials, the branch push composed into a deliverable upsert —
-// names the credential that made them.
+// refusals, the git denials, the branch pushes — names the credential that
+// made them.
 //
 // Injected late for the same reason SetProxyCreds is, and from the same place:
 // the classification lives in the sealed bundle, which opens only in the
@@ -1001,6 +1001,13 @@ func (s *RelayServer) dispatchCoreRecord(ctx context.Context, op string, args js
 			a.Action.DedupKey = ""
 		}
 		s.rt.Record(ctx, a.Deliverable, a.Action, a.EntityContainer, a.GitHub)
+
+	case opRecordBranchPush:
+		var a recordBranchPushArgs
+		if err := json.Unmarshal(args, &a); err != nil {
+			return fmt.Errorf("agenthost: decode relayed branch push: %w", err)
+		}
+		s.rt.RecordBranchPush(ctx, a.BranchPush, a.GitHub)
 
 	case opRecordReadTouch:
 		var a recordReadTouchArgs

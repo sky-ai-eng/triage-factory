@@ -132,6 +132,7 @@ var coreRecordOps = map[string]struct{}{
 	agentproc.OpRecordGHWrite:      {},
 	agentproc.OpRecordPush:         {},
 	opRecordExternalWrite:          {},
+	opRecordBranchPush:             {},
 	opRecordReadTouch:              {},
 }
 

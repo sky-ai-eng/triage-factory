@@ -36,13 +36,13 @@ func TestRecordExternalWrite_FailedDeliverableKeepsTheLedgerRow(t *testing.T) {
 			refuseDeliverableWrites(t, conn)
 
 			a := &domain.Deliverable{
-				Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindComment,
-				Target: "octo/repo#1", ExternalID: "7", State: domain.DeliverableStateCommentPosted,
-				DedupKey: domain.GitHubCommentKey(domain.GitHubIssueComment, 7),
+				Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindPullRequest,
+				Target: "octo/repo#1", ExternalID: "1", State: domain.DeliverableStatePRDraft,
+				DedupKey: domain.PullRequestDedupKey("PR_1"),
 			}
 			act := &domain.ExternalAction{
-				Provider: domain.ProviderGitHub, Action: domain.ActionCommentPosted,
-				Target: "octo/repo#1", ExternalID: "7", Credential: domain.CredentialGitHubApp,
+				Provider: domain.ProviderGitHub, Action: domain.ActionPRCreated,
+				Target: "octo/repo#1", ExternalID: "1", Credential: domain.CredentialGitHubApp,
 			}
 			RecordExternalWrite(context.Background(), stores, info, a, act)
 
@@ -50,36 +50,8 @@ func TestRecordExternalWrite_FailedDeliverableKeepsTheLedgerRow(t *testing.T) {
 				t.Errorf("deliverables = %+v, want none: the write was refused", arts)
 			}
 			acts := listExternalActions(t, stores)
-			if len(acts) != 1 || acts[0].Action != domain.ActionCommentPosted || acts[0].ConversationID != info.ConversationID {
-				t.Errorf("ledger rows = %+v, want the one comment_posted row despite the refused deliverable", acts)
-			}
-		})
-	}
-}
-
-// TestUpsertDeliverable_FailedBranchDeliverableKeepsThePushRow pins the same for the
-// branch push, which composes its ledger row inside the deliverable upsert: the
-// deliverable's error still reaches the caller, and the push row is recorded.
-func TestUpsertDeliverable_FailedBranchDeliverableKeepsThePushRow(t *testing.T) {
-	for _, eventTriggered := range []bool{true, false} {
-		name := "manual"
-		if eventTriggered {
-			name = "event-triggered"
-		}
-		t.Run(name, func(t *testing.T) {
-			conn, stores, info := newCaptureStoresConn(t, eventTriggered)
-			refuseDeliverableWrites(t, conn)
-
-			branch, ok := domain.NewBranchDeliverable("octo/repo", "refs/heads/feat", "abc123", true)
-			if !ok {
-				t.Fatal("NewBranchDeliverable refused the fixture branch")
-			}
-			if _, err := newDirectRuntime(stores, info).UpsertDeliverable(context.Background(), branch, domain.GitHubIdentity{}); err == nil {
-				t.Fatal("UpsertDeliverable = nil error, want the refused deliverable's error")
-			}
-			acts := listExternalActions(t, stores)
-			if len(acts) != 1 || acts[0].Action != domain.ActionBranchPushed {
-				t.Errorf("ledger rows = %+v, want the one branch_pushed row despite the refused deliverable", acts)
+			if len(acts) != 1 || acts[0].Action != domain.ActionPRCreated || acts[0].ConversationID != info.ConversationID {
+				t.Errorf("ledger rows = %+v, want the one pr_created row despite the refused deliverable", acts)
 			}
 		})
 	}

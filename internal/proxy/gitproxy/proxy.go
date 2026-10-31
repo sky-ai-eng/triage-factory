@@ -229,10 +229,10 @@ type Config struct {
 	// after the upstream responds — for EVERY outcome, with the final status
 	// and the ref's report-status line read into the PushedRef. The wiring is
 	// what branches on the outcome: an accepted ref (PushedRef.Succeeded)
-	// upserts the branch deliverable (same constructor + dedup key as the
+	// records its branch_pushed row (same constructor + dedup key as the
 	// pre-push hook, so a normal hook+push never double-records), while a
 	// refused one (a 403/404/422/5xx, or an "ng" ref inside a 200 — nothing
-	// landed) must record only an audit-log failure row, never a deliverable.
+	// landed) must record only an audit-log failure row.
 	//
 	// Because every push transits this proxy — `git push --no-verify` skips
 	// client-side hooks but not the network layer — this is multi mode's
@@ -287,8 +287,8 @@ type Config struct {
 //
 // Status and Rejected together are the outcome discriminator the wiring
 // branches on (see Succeeded). It is pure data — no domain dependency — so the
-// proxy stays free of the deliverable model; the wiring layer maps it to a branch
-// deliverable / audit row.
+// proxy stays free of the ledger model; the wiring layer maps it to a
+// branch_pushed / branch_push_failed row.
 type PushedRef struct {
 	Repo          string
 	Ref           string

@@ -3271,7 +3271,7 @@ func TestBaseline_HostAndScopeRefuseEmpty(t *testing.T) {
 			name:       "deliverables.scope",
 			constraint: "deliverables_scope_check",
 			insert: `INSERT INTO deliverables (org_id, team_id, provider, kind, scope, target, state, dedup_key)
-			         VALUES ($1, $2, 'github', 'pr', $3, 'acme/api#1', 'open', $4)`,
+			         VALUES ($1, $2, 'github', 'pull_request', $3, 'acme/api#1', 'open', $4)`,
 			args: func(v string) []any { return []any{orgID, teamID, v, "pr:" + v} },
 		},
 		{

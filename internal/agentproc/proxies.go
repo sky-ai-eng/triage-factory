@@ -193,11 +193,11 @@ type GitProxyConfig struct {
 
 	// RecordPush, when non-nil, is forwarded to the git proxy as its
 	// receive-pack capture backstop: the proxy parses each branch push it
-	// transits and calls this with the pushed ref so the caller can record a
-	// branch deliverable for a `git push --no-verify` that bypassed the pre-push
-	// hook. The delegate wires it to the same record path the hook uses; nil
-	// (a test fixture, or a caller that doesn't record) disables the backstop.
-	// See gitproxy.Config.RecordPush and TFAC-467.
+	// transits and calls this with the pushed ref so the caller can record the
+	// push, a `git push --no-verify` that bypassed the pre-push hook included.
+	// The delegate wires it to the same record path the hook uses; nil (a test
+	// fixture, or a caller that doesn't record) disables the backstop. See
+	// gitproxy.Config.RecordPush.
 	RecordPush func(ctx context.Context, push gitproxy.PushedRef)
 
 	// Authorize, when non-nil, is the per-request live authorization gate

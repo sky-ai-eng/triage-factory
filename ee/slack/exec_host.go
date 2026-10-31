@@ -108,7 +108,7 @@ type slackReactResult struct{}
 
 // authorizedChannel is the channel a verb acts on once authorized: ID is the
 // id Slack gives it now, and Row its slack_channels row, which a Slack
-// deliverable's dedup key names so that a later change of the id moves no key.
+// message's object key names so that a later change of the id moves no key.
 type authorizedChannel struct {
 	ID  string
 	Row string
@@ -281,8 +281,8 @@ func (h *slackExecHandler) send(ctx context.Context, rt agenthost.ExtensionRunti
 		threadRootErr = h.recordThreadRoot(ctx, rt, ws, a.Channel, ts, sendTitleText(a))
 	}
 	// recordMessage always runs next, even when threadRootErr is set: the
-	// Slack message already posted, and skipping the deliverables/external_actions
-	// write over a bookkeeping race would drop its audit trail entirely — a
+	// Slack message already posted, and skipping the external_actions write
+	// over a bookkeeping race would drop its audit trail entirely — a
 	// strictly worse outcome than the mis-tagged kind="message" fallback
 	// threadRootErr already reports below. There is deliberately no gate here
 	// to prevent that fallback from firing; recordThreadRoot's retries are the
@@ -436,49 +436,37 @@ retry:
 		ts, recordThreadRootMaxAttempts, err)
 }
 
-// recordMessage records the send/edit matrix: a `deliverables` row keyed on the
-// channel's registry row (channelRow) and the message's own ts — send and a
-// later edit share the key, so an edit upserts the send's row in place — with
-// Target set to the thread's SlackSourceID (rootTS), plus the paired
-// `external_actions` audit row under action. The key names the row rather than
+// recordMessage records the `external_actions` row for a send or an edit under
+// action, naming the message by the channel's registry row (channelRow) and the
+// message's own ts — send and a later edit name one object — with Target set
+// to the thread's SlackSourceID (rootTS). The key names the row rather than
 // the channel's Slack id, which can change, so a channel moving to a new id
 // leaves every message's key where it is.
 func (h *slackExecHandler) recordMessage(ctx context.Context, rt agenthost.ExtensionRuntime, action, channelRow, channel, rootTS, ts, permalink string) {
-	target := domain.SlackSourceID(channel, rootTS)
-	a := &domain.Deliverable{
-		Provider:   domain.ProviderSlack,
-		Kind:       domain.DeliverableKindMessage,
-		Target:     target,
-		ExternalID: ts,
-		URL:        permalink,
-		State:      domain.DeliverableStateMessagePosted,
-		DedupKey:   slackMessageObjectKey(channelRow, ts),
-	}
 	act := &domain.ExternalAction{
 		Provider:   domain.ProviderSlack,
 		Action:     action,
-		Target:     target,
+		Target:     domain.SlackSourceID(channel, rootTS),
 		ExternalID: ts,
 		URL:        permalink,
 		Credential: domain.CredentialSlackBot,
 	}
-	act.SetObject(domain.ObjectKindMessage, a.DedupKey)
-	rt.Record(ctx, a, act, domain.EntityContainer{}, domain.GitHubIdentity{})
+	act.SetObject(domain.ObjectKindMessage, slackMessageObjectKey(channelRow, ts))
+	rt.Record(ctx, nil, act, domain.EntityContainer{}, domain.GitHubIdentity{})
 }
 
-// slackMessageObjectKey is the key of the message ts in the channel whose
-// registry row is channelRow, the deliverable's dedup key and the action's
-// object_key alike, or "" when either half is unknown.
+// slackMessageObjectKey is the object_key of the message ts in the channel
+// whose registry row is channelRow, or "" when either half is unknown.
 func slackMessageObjectKey(channelRow, ts string) string {
 	resource := domain.SlackMessageResource(channelRow, ts)
 	if resource == "" {
 		return ""
 	}
-	return domain.ObjectKey(domain.ProviderSlack, domain.DeliverableKindMessage, resource, "")
+	return domain.ObjectKey(domain.ProviderSlack, domain.ObjectKindMessage, resource, "")
 }
 
 // permalinkBestEffort resolves ts's shareable link; "" on any failure — a
-// permalink is a nice-to-have on the deliverable row, never load-bearing.
+// permalink is a nice-to-have on the ledger row, never load-bearing.
 func (h *slackExecHandler) permalinkBestEffort(ctx context.Context, caller slackCaller, token, channel, ts string) string {
 	link, err := slackChatGetPermalink(ctx, h.client, caller, token, channel, ts)
 	if err != nil {

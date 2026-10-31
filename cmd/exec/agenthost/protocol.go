@@ -279,12 +279,10 @@ type createWorkspaceCheckoutResult struct {
 	Path string `json:"path"`
 }
 
-// --- deliverables (capture writers) ---
+// --- deliverables and branch pushes ---
 
-// upsertDeliverableArgs is the upsert_deliverable op's payload, and the IPC
-// method's. GitHub is the sidecar's read of the deliverable's repository and
-// pull request (Runtime.UpsertDeliverable); the IPC method ignores it, since
-// the daemon reads the identity itself and never takes one from the jail.
+// upsertDeliverableArgs is the upsert_deliverable op's payload. GitHub is the
+// sidecar's read of the deliverable's pull request (Runtime.UpsertDeliverable).
 type upsertDeliverableArgs struct {
 	Deliverable domain.Deliverable    `json:"deliverable"`
 	GitHub      domain.GitHubIdentity `json:"github,omitzero"`
@@ -292,6 +290,26 @@ type upsertDeliverableArgs struct {
 
 type upsertDeliverableResult struct {
 	Deliverable domain.Deliverable `json:"deliverable"`
+}
+
+// BranchPush is one push of a ref an observer saw land, as the push names it:
+// Repo is the "owner/repo" pushed to, Ref the remote ref (refs/heads/...), SHA
+// the commit the ref now points to, and Created whether the push created the
+// ref. Runtime.RecordBranchPush builds its ledger row.
+type BranchPush struct {
+	Repo    string `json:"repo"`
+	Ref     string `json:"ref"`
+	SHA     string `json:"sha"`
+	Created bool   `json:"created"`
+}
+
+// recordBranchPushArgs is the record_branch_push op's payload, and the IPC
+// method's. GitHub is the sidecar's read of the pushed repository
+// (Runtime.RecordBranchPush); the IPC method ignores it, since the daemon
+// reads the identity itself and never takes one from the jail.
+type recordBranchPushArgs struct {
+	BranchPush
+	GitHub domain.GitHubIdentity `json:"github,omitzero"`
 }
 
 // --- jira (exec jira ticket ...) ---
@@ -766,7 +784,7 @@ const (
 	methodWorkspaceRoots                      = "WorkspaceRoots"
 	methodCreateWorkspaceCheckout             = "CreateWorkspaceCheckout"
 
-	methodUpsertDeliverable = "UpsertDeliverable"
+	methodRecordBranchPush = "RecordBranchPush"
 
 	methodJiraGetIssue       = "JiraGetIssue"
 	methodJiraTransitionTo   = "JiraTransitionTo"

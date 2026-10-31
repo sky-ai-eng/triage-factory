@@ -50,7 +50,7 @@ func CausedByRunPush(ctx context.Context, r *Router, orgID string, evt domain.Ev
 		return false, err
 	}
 	for _, a := range pushes {
-		if domain.ParseBranchDeliverableSHA(a.DetailJSON) == meta.HeadSHA {
+		if domain.ParseBranchPushSHA(a.DetailJSON) == meta.HeadSHA {
 			return true, nil
 		}
 	}

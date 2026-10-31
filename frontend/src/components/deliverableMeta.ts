@@ -23,12 +23,8 @@ export interface KindMeta {
 // KIND_META is exhaustive over DeliverableKind. A server value outside the modeled
 // union falls through to FALLBACK_META at the render layer (forward-compat).
 export const KIND_META: Record<DeliverableKind, KindMeta> = {
-  branch: { icon: GitBranch, label: 'branch', text: 'text-ink-3' },
   pull_request: { icon: GitPullRequest, label: 'pull request', text: 'text-delegate' },
   review: { icon: Eye, label: 'review', text: 'text-snooze' },
-  issue: { icon: CircleDot, label: 'issue', text: 'text-warm' },
-  comment: { icon: MessageSquare, label: 'comment', text: 'text-ink-3' },
-  message: { icon: MessageCircle, label: 'message', text: 'text-ink-3' },
 }
 
 export const FALLBACK_META: KindMeta = {
@@ -45,9 +41,14 @@ export function metaForKind(kind: string): KindMeta {
 
 // OBJECT_META is the presentation of every object kind an artifact can name.
 // A kind a deliverable can also be reads the same as that deliverable; the
-// rest share the generic glyph and differ only by label.
+// rest that have a glyph of their own carry it, and the others share the
+// generic glyph and differ only by label.
 const OBJECT_META: Record<ObjectKind, KindMeta> = {
   ...KIND_META,
+  branch: { icon: GitBranch, label: 'branch', text: 'text-ink-3' },
+  issue: { icon: CircleDot, label: 'issue', text: 'text-warm' },
+  comment: { icon: MessageSquare, label: 'comment', text: 'text-ink-3' },
+  message: { icon: MessageCircle, label: 'message', text: 'text-ink-3' },
   repository: { ...FALLBACK_META, label: 'repository' },
   label: { ...FALLBACK_META, label: 'label' },
   release: { ...FALLBACK_META, label: 'release' },
@@ -86,8 +87,8 @@ export function awaitsDecision(kind: string, state: string): boolean {
 export const OBJECT_KINDS = Object.keys(OBJECT_META) as ObjectKind[]
 
 // OBJECT_PROVIDERS backs the Objects lens's provider filter: the systems a
-// run's change can land in. 'network' (an egress denial) and 'git' never name
-// an object.
+// run's change can land in. 'network' (an egress denial) never names an
+// object.
 export const OBJECT_PROVIDERS = ['github', 'jira', 'linear', 'slack'] as const
 
 // PROVIDER_LABEL names the external systems for the activity feed's provider
@@ -96,7 +97,6 @@ export const PROVIDER_LABEL: Record<string, string> = {
   github: 'GitHub',
   jira: 'Jira',
   slack: 'Slack',
-  git: 'Git',
   linear: 'Linear',
   network: 'Network',
 }

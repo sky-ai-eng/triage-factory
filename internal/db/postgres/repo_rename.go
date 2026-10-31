@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -31,9 +30,8 @@ import (
 // repository's name AND its number, so entities.source_id stays the composite
 // display key "owner/repo#18" beside the entity's repository_id, and moves
 // because it is what everything reads and shows; a deliverable's target is a
-// display value of the same shape. A deliverable's dedup_key names no repository
-// (a pull request's node id, a registry row id, a comment's id), so it never
-// moves.
+// display value of the same shape. A deliverable's dedup_key names no
+// repository (a pull request's node id), so it never moves.
 //
 // Stored links move with the keys. entities.url is rewritten alongside
 // source_id — a redirect stops the moment the freed name is re-claimed,
@@ -53,10 +51,9 @@ import (
 // is keyed by the repository row id, so a rename does not move it either.
 //
 // The rewrite stays on the renamed repository's host. Entities are the
-// repository's own (repository_id), and so are the deliverables: those about its
-// entities by deliverables.entity_id, its branches by the registry row id their
-// keys carry, and so are the audit-ledger rows, by their entity_id or
-// repository_id. A stored link is rewritten only when it is on the host
+// repository's own (repository_id), and so are the deliverables, about its
+// entities by deliverables.entity_id, and the audit-ledger rows, by their
+// entity_id or repository_id. A stored link is rewritten only when it is on the host
 // (domain.RewriteRepoURL). A repository on another host under the same name
 // is a different repository, and nothing of its is touched; nor is a retired
 // repository that held the name, whose rows reference its own registry row and
@@ -318,9 +315,8 @@ func repositoryHoldingSlug(ctx context.Context, q queryer, orgID, source string,
 // keys already spell the target slug, so the source_id rewrite after this
 // leaves them as they are, and a pull request with an entity under each name
 // still collides there and refuses the whole rename, this absorb included.
-// The branches recorded in it move too (moveAbsorbedBranches): their keys
-// carry the occupant's id, which the delete frees. So do the audit-ledger rows
-// about it (repository_id), which the delete would otherwise unlink, and its
+// So do the audit-ledger rows about it (repository_id), which the delete would
+// otherwise unlink, and its
 // placement override, which an operator may have set on the name while the
 // bare row held it, unless the renamed row has one of its own: that one wins,
 // and the delete cascades the occupant's away.
@@ -351,9 +347,6 @@ func absorbBareRepository(ctx context.Context, q queryer, orgID string, occupant
 	`, renamedID, orgID, occupant.id); err != nil {
 		return fmt.Errorf("re-point entities of the bare %s row: %w", to, err)
 	}
-	if err := moveAbsorbedBranches(ctx, q, orgID, occupant.id, renamedID); err != nil {
-		return fmt.Errorf("re-key branches of the bare %s row: %w", to, err)
-	}
 	if _, err := q.ExecContext(ctx, `
 		UPDATE external_actions SET repository_id = $1 WHERE org_id = $2 AND repository_id = $3
 	`, renamedID, orgID, occupant.id); err != nil {
@@ -373,77 +366,6 @@ func absorbBareRepository(ctx context.Context, q queryer, orgID string, occupant
 			return fmt.Errorf("%w: a worktree still references the bare %s row: %v", db.ErrRepoSlugOccupied, to, err)
 		}
 		return fmt.Errorf("delete the bare %s row: %w", to, err)
-	}
-	return nil
-}
-
-// moveAbsorbedBranches re-keys the branch deliverables recorded in the registry
-// row fromID onto toID, the row it is absorbed into. A branch is keyed on its
-// repository's row id and its ref (domain.BranchDedupKey), so a key naming
-// fromID would name a deleted row: no rename would find it again, and the next
-// push of the same ref, keyed on toID, would record the branch a second time.
-// A ref both rows recorded is one branch under two keys, and the older
-// deliverable (created_at, then id) keeps it while the newer is deleted. No table
-// references a deliverable row.
-func moveAbsorbedBranches(ctx context.Context, q queryer, orgID, fromID, toID string) error {
-	from := domain.BranchDedupKeyPrefix(fromID)
-	rows, err := q.QueryContext(ctx, `
-		SELECT id, scope, dedup_key, created_at FROM deliverables
-		 WHERE org_id = $1 AND provider = $2 AND kind = $3
-		   AND left(dedup_key, length($4::text)) = $4::text
-		 ORDER BY id
-	`, orgID, domain.ProviderGit, domain.DeliverableKindBranch, from)
-	if err != nil {
-		return err
-	}
-	type branch struct {
-		id, scope, key string
-		created        time.Time
-	}
-	var found []branch
-	for rows.Next() {
-		var b branch
-		if err := rows.Scan(&b.id, &b.scope, &b.key, &b.created); err != nil {
-			rows.Close()
-			return err
-		}
-		found = append(found, b)
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, b := range found {
-		key := domain.BranchDedupKey(toID, strings.TrimPrefix(b.key, from))
-		if key == "" {
-			continue
-		}
-		var heldID string
-		var heldCreated time.Time
-		err := q.QueryRowContext(ctx, `
-			SELECT id, created_at FROM deliverables WHERE org_id = $1 AND scope = $2 AND dedup_key = $3
-		`, orgID, b.scope, key).Scan(&heldID, &heldCreated)
-		switch {
-		case errors.Is(err, sql.ErrNoRows):
-		case err != nil:
-			return err
-		case heldCreated.Before(b.created) || (heldCreated.Equal(b.created) && heldID < b.id):
-			if _, err := q.ExecContext(ctx, `DELETE FROM deliverables WHERE org_id = $1 AND id = $2`, orgID, b.id); err != nil {
-				return fmt.Errorf("delete branch deliverable %s, recorded again under %s: %w", b.id, key, err)
-			}
-			continue
-		default:
-			if _, err := q.ExecContext(ctx, `DELETE FROM deliverables WHERE org_id = $1 AND id = $2`, orgID, heldID); err != nil {
-				return fmt.Errorf("delete branch deliverable %s, recorded first under %s: %w", heldID, b.key, err)
-			}
-		}
-		if _, err := q.ExecContext(ctx, `
-			UPDATE deliverables SET dedup_key = $1, updated_at = now() WHERE org_id = $2 AND id = $3
-		`, key, orgID, b.id); err != nil {
-			return fmt.Errorf("re-key branch deliverable %s onto %s: %w", b.id, key, err)
-		}
 	}
 	return nil
 }
@@ -646,24 +568,13 @@ func collectURLRewrites(rows *sql.Rows, host, from, to string) ([]urlRewrite, er
 }
 
 // moveRepositoryDeliverableTargets moves the targets of repositoryID's own
-// deliverables. Every deliverable about one of its entities takes that entity's key,
-// which the source_id rewrite has just moved (deliverables.entity_id), and every
-// branch recorded in it takes to: a branch has no entity, and its key carries
-// the registry row id (domain.BranchDedupKeyPrefix). The rows are selected by
-// id, never by the name a target spells, so a retired repository that held
-// the name keeps its rows as they are, and a row written under a spelling of
-// the name this rename does not know moves too. Only the target moves; the
-// key names no repository.
+// deliverables. Every deliverable about one of its entities takes that entity's
+// key, which the source_id rewrite has just moved (deliverables.entity_id). The
+// rows are selected by id, never by the name a target spells, so a retired
+// repository that held the name keeps its rows as they are, and a row written
+// under a spelling of the name this rename does not know moves too. Only the
+// target moves; the key names no repository.
 func moveRepositoryDeliverableTargets(ctx context.Context, q queryer, orgID, source, host, repositoryID, to string) error {
-	if _, err := q.ExecContext(ctx, `
-		UPDATE deliverables SET target = $1, updated_at = now()
-		 WHERE org_id = $2 AND scope = $3 AND provider = $4 AND kind = $5
-		   AND left(dedup_key, length($6::text)) = $6::text
-		   AND target <> $1
-	`, to, orgID, host, domain.ProviderGit, domain.DeliverableKindBranch,
-		domain.BranchDedupKeyPrefix(repositoryID)); err != nil {
-		return fmt.Errorf("move branch deliverable targets of %s onto %s: %w", repositoryID, to, err)
-	}
 	if _, err := q.ExecContext(ctx, `
 		UPDATE deliverables a SET target = e.source_id, updated_at = now()
 		  FROM entities e

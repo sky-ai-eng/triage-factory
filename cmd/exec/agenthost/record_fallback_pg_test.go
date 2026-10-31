@@ -13,11 +13,10 @@ import (
 
 // TestRecordExternalWrite_Postgres_CrossTeamKeepsTheLedgerRow pins that a
 // ledger row survives a deliverable write RLS refuses. Deliverables are keyed
-// org-wide but updated team-scoped, so a manual run in team B acting on a
-// comment team A's run recorded cannot update A's row under its user's claims.
-// The refused upsert must not take the ledger row with it, A's deliverable must be
-// left as it was, and the same holds for a branch push, whose ledger row is
-// composed inside the deliverable upsert.
+// org-wide but updated team-scoped, so a manual run in team B writing the
+// deliverable of a pull request team A's run recorded cannot update A's row
+// under its user's claims. The refused upsert must not take the ledger row
+// with it, and A's deliverable must be left as it was.
 func TestRecordExternalWrite_Postgres_CrossTeamKeepsTheLedgerRow(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -55,63 +54,32 @@ func TestRecordExternalWrite_Postgres_CrossTeamKeepsTheLedgerRow(t *testing.T) {
 		return out
 	}
 
-	t.Run("comment", func(t *testing.T) {
-		key := domain.GitHubCommentKey(domain.GitHubIssueComment, 7)
-		owned, err := stores.Deliverables.UpsertSystem(ctx, orgID, domain.Deliverable{
-			ConversationID: convA, TeamID: teamA, Provider: domain.ProviderGitHub,
-			Kind: domain.DeliverableKindComment, Scope: scope, Target: "octo/api#3", ExternalID: "7",
-			NodeID: "IC_kw7", State: domain.DeliverableStateCommentPosted, DedupKey: key,
-		})
-		if err != nil {
-			t.Fatalf("seed team A's comment: %v", err)
-		}
+	key := domain.PullRequestDedupKey("PR_kw3")
+	owned, err := stores.Deliverables.UpsertSystem(ctx, orgID, domain.Deliverable{
+		ConversationID: convA, TeamID: teamA, Provider: domain.ProviderGitHub,
+		Kind: domain.DeliverableKindPullRequest, Scope: scope, Target: "octo/api#3", ExternalID: "3",
+		NodeID: "PR_kw3", State: domain.DeliverableStatePRDraft, DedupKey: key,
+	})
+	if err != nil {
+		t.Fatalf("seed team A's pull request: %v", err)
+	}
 
-		RecordExternalWrite(ctx, stores, infoB, &domain.Deliverable{
-			Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindComment,
-			ExternalID: "7", State: domain.DeliverableStateCommentDeleted, DedupKey: key,
-		}, &domain.ExternalAction{
-			Provider: domain.ProviderGitHub, Action: domain.ActionCommentDeleted,
-			Target: "octo/api", ExternalID: "7", Credential: domain.CredentialGitHubApp,
-		})
-
-		if rows := ledgerFor(convB); len(rows) != 1 || rows[0].Action != domain.ActionCommentDeleted || rows[0].TeamID != teamB {
-			t.Errorf("team B's ledger rows = %+v, want its one comment_deleted row", rows)
-		}
-		got, err := stores.Deliverables.GetByNodeIDSystem(ctx, orgID, scope, "IC_kw7")
-		if err != nil || got == nil {
-			t.Fatalf("read team A's comment: %v, %v", got, err)
-		}
-		if got.ID != owned.ID || got.State != domain.DeliverableStateCommentPosted || got.TeamID != teamA {
-			t.Errorf("team A's comment = %+v, want it left as team A recorded it", got)
-		}
+	RecordExternalWrite(ctx, stores, infoB, &domain.Deliverable{
+		Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindPullRequest,
+		Target: "octo/api#3", ExternalID: "3", State: domain.DeliverableStatePROpen, DedupKey: key,
+	}, &domain.ExternalAction{
+		Provider: domain.ProviderGitHub, Action: domain.ActionPRMarkedReady,
+		Target: "octo/api#3", ExternalID: "3", Credential: domain.CredentialGitHubApp,
 	})
 
-	t.Run("branch push", func(t *testing.T) {
-		branch, ok := domain.NewBranchDeliverable("octo/api", "refs/heads/shared", "abc123", true)
-		if !ok {
-			t.Fatal("NewBranchDeliverable refused the fixture branch")
-		}
-		seed := branch
-		seed.ConversationID, seed.TeamID, seed.Scope = convA, teamA, scope
-		if _, err := stores.Deliverables.UpsertSystem(ctx, orgID, seed); err != nil {
-			t.Fatalf("seed team A's branch: %v", err)
-		}
-
-		pushed, ok := domain.NewBranchDeliverable("octo/api", "refs/heads/shared", "def456", false)
-		if !ok {
-			t.Fatal("NewBranchDeliverable refused the pushed branch")
-		}
-		if _, err := newDirectRuntime(stores, infoB).UpsertDeliverable(ctx, pushed, domain.GitHubIdentity{}); err == nil {
-			t.Fatal("UpsertDeliverable = nil error, want team B refused team A's branch row")
-		}
-		var pushes []domain.ExternalAction
-		for _, r := range ledgerFor(convB) {
-			if r.Action == domain.ActionBranchPushed {
-				pushes = append(pushes, r)
-			}
-		}
-		if len(pushes) != 1 || pushes[0].ExternalID != "refs/heads/shared" {
-			t.Errorf("team B's branch_pushed rows = %+v, want its one push", pushes)
-		}
-	})
+	if rows := ledgerFor(convB); len(rows) != 1 || rows[0].Action != domain.ActionPRMarkedReady || rows[0].TeamID != teamB {
+		t.Errorf("team B's ledger rows = %+v, want its one pr_marked_ready row", rows)
+	}
+	got, err := stores.Deliverables.ListByConversationSystem(ctx, orgID, convA)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("read team A's pull request: %+v, %v", got, err)
+	}
+	if got[0].ID != owned.ID || got[0].State != domain.DeliverableStatePRDraft || got[0].TeamID != teamA {
+		t.Errorf("team A's pull request = %+v, want it left as team A recorded it", got[0])
+	}
 }

@@ -1099,32 +1099,27 @@ CREATE TABLE public.repositories (
 );
 
 
--- One row per external object a conversation produces (branch, PR, review,
--- issue, comment); provider + kind discriminate, writers UPSERT on
--- (org_id, scope, dedup_key). scope is the provider namespace the object lives
--- in, the value an entity of that provider is scoped under
--- (domain.ExternalObjectScope): the GitHub host, the Jira site, the Linear
--- workspace id; target and dedup_key are only unique inside it. dedup_key names
--- the object by an id and never by a name (domain.ObjectKey): a pull
--- request by its GraphQL node id, a review draft by its pull request's node id
--- and its conversation, a branch by its repository's registry row id and its
--- ref, so a repository given a freed name records its own rows. entity_id is
--- the entity the deliverable is about (the pull request a pull request, review or
--- comment row is on, the Jira or Linear issue, the Slack thread; NULL for a
--- branch, which has none), and target is that entity's key, a display value
--- every rename moves by entity_id. team_id is denormalized from the conversation
--- so reads scope by team; conversation_id is nullable so the row survives a
--- purge. node_id is the object's GraphQL node id, which a GitHub comment row
--- carries so a GraphQL delete naming the comment by node id alone finds its
--- row, and a pull request row so the reconciler's backstop finds it from its
--- pr_created audit row. A comment row exists only for a comment TF posted.
+-- One row per pull request or review an agent prepared for a person, owned by
+-- the conversation that made it; every other object a run changes is read from
+-- the external_actions ledger. Writers UPSERT on (org_id, scope, dedup_key).
+-- scope is the GitHub host, the value the pull request's entity is scoped
+-- under (domain.ExternalObjectScope); target and dedup_key are only unique
+-- inside it. dedup_key names the object by an id and never by a name
+-- (domain.ObjectKey): a pull request by its GraphQL node id, a review draft by
+-- its pull request's node id and its conversation. entity_id is the entity of
+-- the pull request the row is or reviews, and target is that entity's key, a
+-- display value every rename moves by entity_id. team_id is denormalized from
+-- the conversation so reads scope by team; conversation_id is nullable so the
+-- row survives a purge. node_id is the pull request's GraphQL node id, which
+-- the reconciler's backstop finds the row by from its pr_created audit row.
 CREATE TABLE public.deliverables (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     conversation_id uuid,
     org_id uuid NOT NULL,
     team_id uuid NOT NULL,
     provider text NOT NULL,
-    kind text NOT NULL,
+    kind text NOT NULL
+        CONSTRAINT deliverables_kind_check CHECK (kind IN ('pull_request', 'review')),
     scope text NOT NULL
         CONSTRAINT deliverables_scope_check CHECK (scope <> ''),
     target text NOT NULL,
@@ -5341,8 +5336,8 @@ REVOKE ALL ON public.slack_event_deliveries FROM anon, authenticated, service_ro
 -- caches display names, since Slack event payloads carry only the channel ID.
 -- id is the channel's identity in TF, and every reference to a channel holds
 -- it: a team's tracking row, a thread entity (entities.slack_channel_id), a
--- slack:message handler's channel_in filter, a Slack message deliverable's dedup
--- key. channel_id is the ID Slack gives the channel now. It can change
+-- slack:message handler's channel_in filter, a Slack message's object_key in
+-- the audit ledger. channel_id is the ID Slack gives the channel now. It can change
 -- (slack_channel_id_changes below), and following the change rewrites this one
 -- column here. It is unique per org rather
 -- than globally because a channel ID is the same in every workspace across
@@ -5447,7 +5442,7 @@ GRANT SELECT, INSERT, DELETE ON public.team_slack_channels TO tf_app;
 -- event — a private channel shared through Slack Connect moves from its G… ID to
 -- a C… one). Following the change (the Slack store's MoveSystem) rewrites the
 -- registry row's channel_id, and the display values that spell the ID (thread
--- keys and permalinks, Slack deliverable keys, the audit ledger's links), in one
+-- keys and permalinks, the audit ledger's message keys and links), in one
 -- transaction. References hold the registry row and need nothing. It records
 -- the change here, because some copies of the old ID come from outside: event
 -- metadata is immutable, so a run on a task recorded before the change is told

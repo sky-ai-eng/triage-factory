@@ -339,18 +339,25 @@ func (r *slackExecRig) seedConversation(orgID, teamID, userID string, eventTrigg
 	return id
 }
 
-func (r *slackExecRig) deliverablesForConversation(orgID, conversationID string) []domain.Deliverable {
+// messageActions returns the conversation's Slack message posts and edits, and
+// requires it to hold no deliverable: a Slack write leaves its ledger row
+// alone.
+func (r *slackExecRig) messageActions(orgID, conversationID string) []domain.ExternalAction {
 	r.t.Helper()
 	arts, err := r.stor.Deliverables.ListByConversationSystem(r.t.Context(), orgID, conversationID)
 	if err != nil {
 		r.t.Fatalf("list deliverables: %v", err)
 	}
-	for _, a := range arts {
-		if a.Provider == domain.ProviderSlack && a.Scope != domain.SlackScope {
-			r.t.Errorf("slack deliverable %s recorded in scope %q, want %q", a.DedupKey, a.Scope, domain.SlackScope)
+	if len(arts) != 0 {
+		r.t.Errorf("a Slack write recorded %d deliverables, want none: %+v", len(arts), arts)
+	}
+	var out []domain.ExternalAction
+	for _, a := range r.actionsForConversation(orgID, conversationID) {
+		if a.Action == domain.ActionSlackMessagePosted || a.Action == domain.ActionSlackMessageEdited {
+			out = append(out, a)
 		}
 	}
-	return arts
+	return out
 }
 
 func (r *slackExecRig) actionsForConversation(orgID, conversationID string) []domain.ExternalAction {
@@ -401,7 +408,7 @@ func (r *slackExecRig) touchRowCount(conversationID string) int {
 
 // ---------- send / edit / react golden paths ----------
 
-func TestSlackExecHandler_Send_RecordsDeliverableAndAction(t *testing.T) {
+func TestSlackExecHandler_Send_RecordsTheAction(t *testing.T) {
 	for _, eventTriggered := range []bool{true, false} {
 		name := "manual"
 		if eventTriggered {
@@ -427,33 +434,23 @@ func TestSlackExecHandler_Send_RecordsDeliverableAndAction(t *testing.T) {
 				t.Errorf("chat.postMessage not called as expected: channel=%q markdown=%q", r.fake.lastPostChannel, r.fake.lastPostMarkdown)
 			}
 
-			arts := r.deliverablesForConversation(orgID, conversationID)
-			if len(arts) != 1 {
-				t.Fatalf("want 1 deliverable, got %d: %+v", len(arts), arts)
-			}
-			a := arts[0]
-			wantTarget := domain.SlackSourceID("C1", out.TS)
-			if a.Provider != domain.ProviderSlack || a.Kind != domain.DeliverableKindMessage ||
-				a.Target != wantTarget || a.ExternalID != out.TS || a.State != domain.DeliverableStateMessagePosted ||
-				a.DedupKey != domain.ObjectKey(domain.ProviderSlack, domain.DeliverableKindMessage, domain.SlackMessageResource(row, out.TS), "") {
-				t.Errorf("deliverable mismatch: %+v (want target=%q)", a, wantTarget)
-			}
-			if a.ConversationID != conversationID || a.TeamID != teamID {
-				t.Errorf("attribution mismatch: conversation=%q team=%q", a.ConversationID, a.TeamID)
-			}
-
-			acts := r.actionsForConversation(orgID, conversationID)
-			if len(acts) != 1 {
+			acts := r.messageActions(orgID, conversationID)
+			if len(acts) != 1 || len(r.actionsForConversation(orgID, conversationID)) != 1 {
 				t.Fatalf("want 1 external_action, got %d: %+v", len(acts), acts)
 			}
 			act := acts[0]
+			wantTarget := domain.SlackSourceID("C1", out.TS)
 			if act.Provider != domain.ProviderSlack || act.Action != domain.ActionSlackMessagePosted ||
-				act.Credential != domain.CredentialSlackBot || act.Target != wantTarget {
-				t.Errorf("external_action mismatch: %+v", act)
+				act.Credential != domain.CredentialSlackBot || act.Target != wantTarget || act.ExternalID != out.TS {
+				t.Errorf("external_action mismatch: %+v (want target=%q)", act, wantTarget)
 			}
-			// The object is the posted message, keyed as its deliverable is.
-			if act.ObjectKind != domain.ObjectKindMessage || act.ObjectKey != a.DedupKey {
-				t.Errorf("external_action names (%q, %q), want (message, %q)", act.ObjectKind, act.ObjectKey, a.DedupKey)
+			if act.ConversationID != conversationID || act.TeamID != teamID {
+				t.Errorf("attribution mismatch: conversation=%q team=%q", act.ConversationID, act.TeamID)
+			}
+			// The object is the posted message, by its channel's row and ts.
+			wantKey := domain.ObjectKey(domain.ProviderSlack, domain.ObjectKindMessage, domain.SlackMessageResource(row, out.TS), "")
+			if act.ObjectKind != domain.ObjectKindMessage || act.ObjectKey != wantKey {
+				t.Errorf("external_action names (%q, %q), want (message, %q)", act.ObjectKind, act.ObjectKey, wantKey)
 			}
 		})
 	}
@@ -607,11 +604,11 @@ func TestSlackExecHandler_Send_FileOnlyRootPost_TitlesFromAttachmentName(t *test
 	}
 }
 
-func TestSlackExecHandler_Edit_UpsertsSameDeliverableRow(t *testing.T) {
+func TestSlackExecHandler_Edit_NamesTheSentMessage(t *testing.T) {
 	r := newSlackExecRig(t)
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-edit")
 	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
-	r.seedChannel(orgID, "T1", "C1")
+	row := r.seedChannel(orgID, "T1", "C1")
 	r.trackChannel(orgID, owner, teamID, "C1")
 	conversationID := r.seedConversation(orgID, teamID, owner, true)
 	info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: true}
@@ -632,18 +629,7 @@ func TestSlackExecHandler_Edit_UpsertsSameDeliverableRow(t *testing.T) {
 		t.Errorf("chat.update not called as expected: %+v", r.fake)
 	}
 
-	arts := r.deliverablesForConversation(orgID, conversationID)
-	if len(arts) != 1 {
-		t.Fatalf("edit should upsert the same row, got %d deliverables: %+v", len(arts), arts)
-	}
-	if arts[0].State != domain.DeliverableStateMessagePosted {
-		t.Errorf("state = %q, want %q", arts[0].State, domain.DeliverableStateMessagePosted)
-	}
-	if arts[0].ConversationID != conversationID {
-		t.Errorf("edit must not reassign conversation_id away from the creating conversation: got %q, want %q", arts[0].ConversationID, conversationID)
-	}
-
-	acts := r.actionsForConversation(orgID, conversationID)
+	acts := r.messageActions(orgID, conversationID)
 	if len(acts) != 2 {
 		t.Fatalf("want 2 external_actions (post + edit), got %d: %+v", len(acts), acts)
 	}
@@ -660,21 +646,19 @@ func TestSlackExecHandler_Edit_UpsertsSameDeliverableRow(t *testing.T) {
 		t.Errorf("expected both slack_message_posted and slack_message_edited, got %+v", acts)
 	}
 	// The post and its edit name one object, the message.
+	wantKey := domain.ObjectKey(domain.ProviderSlack, domain.ObjectKindMessage, domain.SlackMessageResource(row, sendOut.TS), "")
 	for _, a := range acts {
-		if a.ObjectKind != domain.ObjectKindMessage || a.ObjectKey != arts[0].DedupKey {
-			t.Errorf("%s names (%q, %q), want (message, %q)", a.Action, a.ObjectKind, a.ObjectKey, arts[0].DedupKey)
+		if a.ObjectKind != domain.ObjectKindMessage || a.ObjectKey != wantKey {
+			t.Errorf("%s names (%q, %q), want (message, %q)", a.Action, a.ObjectKind, a.ObjectKey, wantKey)
 		}
 	}
 }
 
-// TestSlackExecHandler_Edit_PreservesCreatingConversationAndTeam_AcrossDifferentTeams
-// pins the deliverables-upsert fix: both conversation_id and team_id stay pinned
-// to the message's CREATING conversation, even when a different team's
-// conversation (both tracking the same channel) later edits it. The edit's own
-// external_action row still attributes to the EDITING conversation/team —
-// that's the audit trail's job — but the deliverable itself must not silently
-// migrate to a different team's reads.
-func TestSlackExecHandler_Edit_PreservesCreatingConversationAndTeam_AcrossDifferentTeams(t *testing.T) {
+// TestSlackExecHandler_Edit_AttributesEachActToItsConversation_AcrossDifferentTeams
+// pins that a message one team's conversation posted and another team's
+// conversation (both tracking the same channel) later edited leaves each act
+// attributed to the conversation and team that made it, and names one object.
+func TestSlackExecHandler_Edit_AttributesEachActToItsConversation_AcrossDifferentTeams(t *testing.T) {
 	r := newSlackExecRig(t)
 	orgID, owner, teamA := pgtest.SeedOrgWithUser(t, r.h, "slack-cross-team")
 	teamB := pgtest.SeedTeam(t, r.h, orgID, "slack-cross-team-b")
@@ -701,24 +685,16 @@ func TestSlackExecHandler_Edit_PreservesCreatingConversationAndTeam_AcrossDiffer
 		t.Fatalf("edit: %v", err)
 	}
 
-	artsA := r.deliverablesForConversation(orgID, convA)
-	if len(artsA) != 1 {
-		t.Fatalf("want 1 deliverable still attributed to the creating conversation A, got %d: %+v", len(artsA), artsA)
+	actsA := r.messageActions(orgID, convA)
+	if len(actsA) != 1 || actsA[0].Action != domain.ActionSlackMessagePosted || actsA[0].TeamID != teamA {
+		t.Fatalf("conversation A's external_actions = %+v, want exactly one slack_message_posted on team A", actsA)
 	}
-	if artsA[0].ConversationID != convA || artsA[0].TeamID != teamA {
-		t.Errorf("deliverable attribution drifted: conversation=%q team=%q, want conversation=%q team=%q", artsA[0].ConversationID, artsA[0].TeamID, convA, teamA)
+	actsB := r.messageActions(orgID, convB)
+	if len(actsB) != 1 || actsB[0].Action != domain.ActionSlackMessageEdited || actsB[0].TeamID != teamB {
+		t.Fatalf("conversation B's external_actions = %+v, want exactly one slack_message_edited on team B", actsB)
 	}
-	if artsB := r.deliverablesForConversation(orgID, convB); len(artsB) != 0 {
-		t.Errorf("editing conversation B must not have reassigned the deliverable to itself, got %+v", artsB)
-	}
-
-	actsA := r.actionsForConversation(orgID, convA)
-	if len(actsA) != 1 || actsA[0].Action != domain.ActionSlackMessagePosted {
-		t.Errorf("conversation A's external_actions = %+v, want exactly one slack_message_posted", actsA)
-	}
-	actsB := r.actionsForConversation(orgID, convB)
-	if len(actsB) != 1 || actsB[0].Action != domain.ActionSlackMessageEdited {
-		t.Errorf("conversation B's external_actions = %+v, want exactly one slack_message_edited (the audit trail still credits the editing conversation)", actsB)
+	if actsA[0].ObjectKey == "" || actsA[0].ObjectKey != actsB[0].ObjectKey {
+		t.Errorf("post names %q and edit names %q, want one message", actsA[0].ObjectKey, actsB[0].ObjectKey)
 	}
 }
 
@@ -744,8 +720,8 @@ func TestSlackExecHandler_React_RecordsActionOnly(t *testing.T) {
 				t.Errorf("reactions.add not called as expected: %+v", r.fake)
 			}
 
-			if arts := r.deliverablesForConversation(orgID, conversationID); len(arts) != 0 {
-				t.Errorf("react must not write a deliverable, got %+v", arts)
+			if posts := r.messageActions(orgID, conversationID); len(posts) != 0 {
+				t.Errorf("react must not record a post or an edit, got %+v", posts)
 			}
 			acts := r.actionsForConversation(orgID, conversationID)
 			if len(acts) != 1 {
@@ -758,7 +734,7 @@ func TestSlackExecHandler_React_RecordsActionOnly(t *testing.T) {
 				t.Errorf("detail_json missing emoji: %q", acts[0].DetailJSON)
 			}
 			// The object is the message reacted to, by its channel's row and ts.
-			wantKey := domain.ObjectKey(domain.ProviderSlack, domain.DeliverableKindMessage, domain.SlackMessageResource(row, "1700000000.000001"), "")
+			wantKey := domain.ObjectKey(domain.ProviderSlack, domain.ObjectKindMessage, domain.SlackMessageResource(row, "1700000000.000001"), "")
 			if acts[0].ObjectKind != domain.ObjectKindMessage || acts[0].ObjectKey != wantKey {
 				t.Errorf("reaction names (%q, %q), want (message, %q)", acts[0].ObjectKind, acts[0].ObjectKey, wantKey)
 			}
@@ -809,9 +785,8 @@ func TestSlackExecHandler_ResolvesRootViaThreadReplies(t *testing.T) {
 				if out.TS != replyTS {
 					t.Errorf("edit TS = %q, want %q (the message's own ts, not the root)", out.TS, replyTS)
 				}
-				arts := r.deliverablesForConversation(orgID, conversationID)
-				if len(arts) != 1 || arts[0].Target != wantTarget {
-					t.Fatalf("deliverables = %+v, want one deliverable targeting %q", arts, wantTarget)
+				if edits := r.messageActions(orgID, conversationID); len(edits) != 1 || edits[0].Target != wantTarget {
+					t.Fatalf("edits = %+v, want one edit targeting %q", edits, wantTarget)
 				}
 			case "react":
 				if _, err := r.hdl.react(context.Background(), r.rt(info), slackReactArgs{Channel: "C1", TS: replyTS, Emoji: "eyes"}); err != nil {
@@ -905,8 +880,8 @@ func TestSlackExecHandler_ResolvesRootViaThreadReplies_NeverFollowsCursor(t *tes
 // TestSlackExecHandler_Send_AttachFailure_StillRecordsPostedMessage pins the
 // fix: an uploadAttachment failure after a successful chat.postMessage must
 // not leave the already-posted message unrecorded. The verb still returns
-// the attach error (loudly, non-nil) but the deliverable/audit row for the post
-// itself must exist.
+// the attach error (loudly, non-nil) but the audit row for the post itself
+// must exist.
 func TestSlackExecHandler_Send_AttachFailure_StillRecordsPostedMessage(t *testing.T) {
 	r := newSlackExecRig(t)
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-attach-fail")
@@ -932,16 +907,9 @@ func TestSlackExecHandler_Send_AttachFailure_StillRecordsPostedMessage(t *testin
 		t.Errorf("result = %+v, want the posted message's channel/ts even on attach failure", out)
 	}
 
-	arts := r.deliverablesForConversation(orgID, conversationID)
-	if len(arts) != 1 {
-		t.Fatalf("want 1 deliverable for the message that DID post, got %d: %+v", len(arts), arts)
-	}
-	if arts[0].ExternalID != out.TS || arts[0].State != domain.DeliverableStateMessagePosted {
-		t.Errorf("deliverable mismatch: %+v", arts[0])
-	}
-	acts := r.actionsForConversation(orgID, conversationID)
-	if len(acts) != 1 || acts[0].Action != domain.ActionSlackMessagePosted {
-		t.Fatalf("external_actions = %+v, want one slack_message_posted row despite the attach failure", acts)
+	acts := r.messageActions(orgID, conversationID)
+	if len(acts) != 1 || acts[0].Action != domain.ActionSlackMessagePosted || acts[0].ExternalID != out.TS {
+		t.Fatalf("external_actions = %+v, want one slack_message_posted row for %s despite the attach failure", acts, out.TS)
 	}
 }
 
@@ -1048,16 +1016,15 @@ func TestSlackExecHandler_Send_ChannelMovedToANewID(t *testing.T) {
 	if out.Channel != "C0EXEC001" || r.fake.lastPostChannel != "C0EXEC001" {
 		t.Errorf("send result channel = %q, posted to %q; want both C0EXEC001", out.Channel, r.fake.lastPostChannel)
 	}
-	arts := r.deliverablesForConversation(orgID, conversationID)
-	if len(arts) != 1 || arts[0].Target != domain.SlackSourceID("C0EXEC001", "1700000000.000100") {
-		t.Errorf("deliverables = %+v, want one targeting the thread under C0EXEC001", arts)
+	if acts := r.messageActions(orgID, conversationID); len(acts) != 1 || acts[0].Target != domain.SlackSourceID("C0EXEC001", "1700000000.000100") {
+		t.Errorf("posts = %+v, want one targeting the thread under C0EXEC001", acts)
 	}
 }
 
-// TestSlackExecHandler_Edit_AfterAChannelMove: a message deliverable is keyed on
+// TestSlackExecHandler_Edit_AfterAChannelMove: a message's object key names
 // the channel's registry row, so an edit after Slack moved the channel to a
-// new id upserts the send's row, whichever id the agent names, and the move
-// itself rewrote only the row's target.
+// new id names the send's message, whichever id the agent names, and is
+// recorded under the thread's new key.
 func TestSlackExecHandler_Edit_AfterAChannelMove(t *testing.T) {
 	for _, editAs := range []string{"G0EXEC002", "C0EXEC002"} {
 		t.Run("edit as "+editAs, func(t *testing.T) {
@@ -1073,7 +1040,7 @@ func TestSlackExecHandler_Edit_AfterAChannelMove(t *testing.T) {
 			if err != nil {
 				t.Fatalf("send: %v", err)
 			}
-			wantKey := domain.ObjectKey(domain.ProviderSlack, domain.DeliverableKindMessage, domain.SlackMessageResource(row, sendOut.TS), "")
+			wantKey := domain.ObjectKey(domain.ProviderSlack, domain.ObjectKindMessage, domain.SlackMessageResource(row, sendOut.TS), "")
 			if _, err := slackstore.FromStores(r.stor).Channels.MoveSystem(r.t.Context(), orgID, "G0EXEC002", "C0EXEC002"); err != nil {
 				t.Fatalf("MoveSystem: %v", err)
 			}
@@ -1081,12 +1048,17 @@ func TestSlackExecHandler_Edit_AfterAChannelMove(t *testing.T) {
 				t.Fatalf("edit: %v", err)
 			}
 
-			arts := r.deliverablesForConversation(orgID, conversationID)
-			if len(arts) != 1 {
-				t.Fatalf("edit after the move should upsert the send's row, got %d deliverables: %+v", len(arts), arts)
+			acts := r.messageActions(orgID, conversationID)
+			if len(acts) != 2 {
+				t.Fatalf("want the post and the edit, got %d: %+v", len(acts), acts)
 			}
-			if arts[0].DedupKey != wantKey || arts[0].Target != domain.SlackSourceID("C0EXEC002", sendOut.TS) {
-				t.Errorf("deliverable = %+v, want key %s and the thread under C0EXEC002 as its target", arts[0], wantKey)
+			for _, a := range acts {
+				if a.ObjectKey != wantKey {
+					t.Errorf("%s names %q, want the send's message %s", a.Action, a.ObjectKey, wantKey)
+				}
+				if a.Action == domain.ActionSlackMessageEdited && a.Target != domain.SlackSourceID("C0EXEC002", sendOut.TS) {
+					t.Errorf("edit target = %q, want the thread under C0EXEC002", a.Target)
+				}
 			}
 		})
 	}

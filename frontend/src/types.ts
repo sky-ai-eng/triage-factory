@@ -389,18 +389,19 @@ export interface Conversation {
 }
 
 // DeliverableKind is the closed set of deliverable discriminators the backend emits
-// (internal/domain/deliverable.go). Kept a strict union — not widened with
-// `| string`, which would collapse the whole type to `string` and erase the
-// narrowing. A server value outside this set is handled defensively at the
-// render layer (a fallback icon/label), it just isn't part of the documented
-// contract.
-export type DeliverableKind = 'branch' | 'pull_request' | 'review' | 'issue' | 'comment' | 'message'
+// (internal/domain/deliverable.go): a deliverable is a pull request or a
+// review. Kept a strict union — not widened with `| string`, which would
+// collapse the whole type to `string` and erase the narrowing. A server value
+// outside this set is handled defensively at the render layer (a fallback
+// icon/label), it just isn't part of the documented contract.
+export type DeliverableKind = 'pull_request' | 'review'
 
 // Deliverable mirrors an item of the POST /api/agent/conversations/{id}/deliverables/list wire shape
-// (internal/server/agent.go deliverableJSON). One row per real external
-// object a conversation produced. `state` is meaningful only read with `kind` (see
-// internal/domain/deliverable.go — 'pending' aliases across kinds). `details` is
-// the parsed kind-specific payload (or null when absent/unparseable).
+// (internal/server/agent.go deliverableJSON). One row per pull request or
+// review a conversation prepared for a person. `state` is meaningful only read
+// with `kind` (see internal/domain/deliverable.go — 'pending' aliases across
+// kinds). `details` is the parsed kind-specific payload (or null when
+// absent/unparseable).
 export interface Deliverable {
   id: string
   kind: DeliverableKind

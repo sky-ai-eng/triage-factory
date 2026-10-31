@@ -2,20 +2,34 @@ package agenthost
 
 import (
 	"context"
-	"errors"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestUpsertDeliverable_KeysABranchOnTheRepositoryItsIDNames covers the
-// relayed write: on an executor the sidecar builds a branch's key, and the
-// runtime must not file the push under a repository the key names, or fail on
-// a key that names none. The branch is keyed on the row GitHub's repository id
-// names, under that row's name, whatever its target spells; a push whose
-// identity read failed is refused while the push keeps its ledger row.
-func TestUpsertDeliverable_KeysABranchOnTheRepositoryItsIDNames(t *testing.T) {
+// pushRowBySHA is the branch_pushed row of the push that landed sha, or nil.
+func pushRowBySHA(t *testing.T, acts []domain.ExternalAction, sha string) *domain.ExternalAction {
+	t.Helper()
+	for i := range acts {
+		if acts[i].Action == domain.ActionBranchPushed && domain.ParseBranchPushSHA(acts[i].DetailJSON) == sha {
+			return &acts[i]
+		}
+	}
+	return nil
+}
+
+// TestRecordBranchPush_NamesTheRepositoryItsIDNames covers the row the runtime
+// builds for a push: it names the registry row GitHub's repository id names,
+// under that row's name, whatever name the push spelled, keys it on that row
+// (domain.BranchPushDedupKey), and links the branch on the org's GitHub host. A
+// push whose identity read failed records the row naming no repository, keyed
+// and named by the repository the push named. No push writes a deliverable.
+func TestRecordBranchPush_NamesTheRepositoryItsIDNames(t *testing.T) {
 	const ref = "refs/heads/feat"
 	for _, eventTriggered := range []bool{true, false} {
 		name := "manual"
@@ -27,59 +41,71 @@ func TestUpsertDeliverable_KeysABranchOnTheRepositoryItsIDNames(t *testing.T) {
 			rt := newDirectRuntime(stores, info)
 			ctx := context.Background()
 			repoID := registerRepo(t, stores, "octo", "repo", "1")
-			otherID := registerRepo(t, stores, "octo", "other", "2")
+			registerRepo(t, stores, "octo", "other", "2")
 			id := domain.GitHubIdentity{RepositoryID: "1", Repository: "octo/repo"}
 
-			for i, sentKey := range []string{
-				domain.BranchDedupKey(otherID, ref), // another repository in the org
-				"git:branch:not-a-uuid:" + ref,
-			} {
-				// The second spells the repository by a name it has had: the id,
-				// not the name, decides the row.
-				branch, _ := domain.NewBranchDeliverable([]string{"octo/repo", "octo/old-repo"}[i], ref, []string{"abc123", "def456"}[i], i == 0)
-				branch.DedupKey = sentKey
-				stored, err := rt.UpsertDeliverable(ctx, branch, id)
-				if err != nil {
-					t.Fatalf("UpsertDeliverable with key %q: %v", sentKey, err)
-				}
-				if want := domain.BranchDedupKey(repoID, ref); stored.DedupKey != want || stored.Target != "octo/repo" {
-					t.Errorf("sent %q: stored key %q target %q, want %q under octo/repo", sentKey, stored.DedupKey, stored.Target, want)
-				}
-			}
-			for _, a := range listExternalActions(t, stores) {
-				if a.RepositoryID != repoID {
-					t.Errorf("push row %s names repository %q, want octo/repo's %s", a.DedupKey, a.RepositoryID, repoID)
-				}
-			}
-			if got := len(listExternalActions(t, stores)); got != 2 {
-				t.Errorf("push rows = %d, want 2", got)
-			}
+			// The second push spells the repository by a name it has had: the
+			// id, not the name, decides the row.
+			rt.RecordBranchPush(ctx, BranchPush{Repo: "octo/repo", Ref: ref, SHA: "abc123", Created: true}, id)
+			rt.RecordBranchPush(ctx, BranchPush{Repo: "octo/old-repo", Ref: ref, SHA: "def456"}, id)
+			rt.RecordBranchPush(ctx, BranchPush{Repo: "octo/ghost", Ref: ref, SHA: "0ff1ce"}, domain.GitHubIdentity{})
 
-			ghost, _ := domain.NewBranchDeliverable("octo/ghost", ref, "abc123", true)
-			ghost.DedupKey = domain.BranchDedupKey(repoID, ref)
-			if _, err := rt.UpsertDeliverable(ctx, ghost, domain.GitHubIdentity{}); !errors.Is(err, errNoRegistryRow) {
-				t.Errorf("a push whose identity read failed: err = %v, want errNoRegistryRow", err)
+			acts := listExternalActions(t, stores)
+			if len(acts) != 3 {
+				t.Fatalf("push rows = %d, want 3: %+v", len(acts), acts)
 			}
-			var ghostRow *domain.ExternalAction
-			for _, a := range listExternalActions(t, stores) {
-				if a.Target == "octo/ghost" {
-					ghostRow = &a
+			wantURL, _ := domain.BranchWebURL(testScope("github"), "octo/repo", ref)
+			for _, sha := range []string{"abc123", "def456"} {
+				row := pushRowBySHA(t, acts, sha)
+				if row == nil {
+					t.Fatalf("no push row for %s", sha)
+				}
+				if row.RepositoryID != repoID || row.Target != "octo/repo" {
+					t.Errorf("push %s names %q under %q, want octo/repo's %s", sha, row.RepositoryID, row.Target, repoID)
+				}
+				if want := domain.BranchPushDedupKey(info.ConversationID, repoID, ref, sha); row.DedupKey != want {
+					t.Errorf("push %s key = %q, want %q", sha, row.DedupKey, want)
+				}
+				if row.URL != wantURL || row.ObjectKind != domain.ObjectKindBranch || row.ObjectKey != ref {
+					t.Errorf("push %s = url %q object %q %q, want %q and the branch %s", sha, row.URL, row.ObjectKind, row.ObjectKey, wantURL, ref)
+				}
+				// No signature of the org's produced the tip, so the row says so.
+				if !strings.Contains(row.DetailJSON, `"signer":"unsigned"`) || row.Credential != domain.CredentialGitHubApp {
+					t.Errorf("push %s = detail %q credential %q, want it stamped unsigned under the App", sha, row.DetailJSON, row.Credential)
 				}
 			}
-			if ghostRow == nil || ghostRow.RepositoryID != "" {
-				t.Errorf("a push whose identity read failed: push row = %+v, want one naming no repository", ghostRow)
+			ghost := pushRowBySHA(t, acts, "0ff1ce")
+			if ghost == nil || ghost.RepositoryID != "" || ghost.Target != "octo/ghost" ||
+				ghost.DedupKey != domain.BranchPushDedupKey(info.ConversationID, "octo/ghost", ref, "0ff1ce") {
+				t.Errorf("a push whose identity read failed: row = %+v, want one naming no repository, keyed on octo/ghost", ghost)
+			}
+			if got := listConversationDeliverables(t, stores, info.ConversationID); len(got) != 0 {
+				t.Errorf("pushes wrote deliverables %+v, want none", got)
 			}
 		})
 	}
 }
 
-// TestUpsertDeliverable_RelayedRepositoryOutsideTheRunIsUnlinked: in multi
-// mode the repository id a branch arrives with was read by the run's sidecar,
-// so it keys the branch only when it names a repository the run works in — a
-// worktree of the run's, or its task's own repository. Any other id records
+// TestRecordBranchPush_SkipsARefThatIsNotABranch: a tag, or a push to a path
+// that is not owner/repo, records nothing.
+func TestRecordBranchPush_SkipsARefThatIsNotABranch(t *testing.T) {
+	stores, info := newCaptureStores(t, true)
+	rt := newDirectRuntime(stores, info)
+	ctx := context.Background()
+	rt.RecordBranchPush(ctx, BranchPush{Repo: "octo/repo", Ref: "refs/tags/v1", SHA: "abc123"}, domain.GitHubIdentity{})
+	rt.RecordBranchPush(ctx, BranchPush{Repo: "octo", Ref: "refs/heads/feat", SHA: "abc123"}, domain.GitHubIdentity{})
+	if acts := listExternalActions(t, stores); len(acts) != 0 {
+		t.Errorf("rows = %+v, want none", acts)
+	}
+}
+
+// TestRecordBranchPush_RelayedRepositoryOutsideTheRunIsUnlinked: in multi mode
+// the repository id a push arrives with was read by the run's sidecar, so it
+// names the push's repository only when it names a repository the run works in
+// — a worktree of the run's, or its task's own repository. Any other id records
 // the push unlinked, so a sidecar cannot file a push under a repository of its
 // choosing.
-func TestUpsertDeliverable_RelayedRepositoryOutsideTheRunIsUnlinked(t *testing.T) {
+func TestRecordBranchPush_RelayedRepositoryOutsideTheRunIsUnlinked(t *testing.T) {
 	stores, info := newCaptureStores(t, true)
 	runmode.SetForTest(t, runmode.ModeMulti)
 	rt := newDirectRuntime(stores, info)
@@ -92,18 +118,72 @@ func TestUpsertDeliverable_RelayedRepositoryOutsideTheRunIsUnlinked(t *testing.T
 		t.Fatalf("seed the run's worktree: %v", err)
 	}
 
-	own, _ := domain.NewBranchDeliverable("octo/repo", "refs/heads/feat", "abc123", true)
-	if stored, err := rt.UpsertDeliverable(ctx, own, domain.GitHubIdentity{RepositoryID: "1", Repository: "octo/repo"}); err != nil ||
-		stored.DedupKey != domain.BranchDedupKey(ownID, "refs/heads/feat") {
-		t.Fatalf("the run's own repository: stored %+v err=%v, want it keyed on %s", stored, err, ownID)
+	rt.RecordBranchPush(ctx, BranchPush{Repo: "octo/repo", Ref: "refs/heads/feat", SHA: "abc123", Created: true},
+		domain.GitHubIdentity{RepositoryID: "1", Repository: "octo/repo"})
+	rt.RecordBranchPush(ctx, BranchPush{Repo: "octo/repo", Ref: "refs/heads/feat", SHA: "def456"},
+		domain.GitHubIdentity{RepositoryID: "2", Repository: "octo/other"})
+
+	acts := listExternalActions(t, stores)
+	if own := pushRowBySHA(t, acts, "abc123"); own == nil || own.RepositoryID != ownID ||
+		own.DedupKey != domain.BranchPushDedupKey(info.ConversationID, ownID, "refs/heads/feat", "abc123") {
+		t.Errorf("the run's own repository: row = %+v, want it on %s", own, ownID)
 	}
-	other, _ := domain.NewBranchDeliverable("octo/repo", "refs/heads/feat", "def456", false)
-	if _, err := rt.UpsertDeliverable(ctx, other, domain.GitHubIdentity{RepositoryID: "2", Repository: "octo/other"}); !errors.Is(err, errNoRegistryRow) {
-		t.Fatalf("a repository outside the run: err = %v, want errNoRegistryRow", err)
+	if other := pushRowBySHA(t, acts, "def456"); other == nil || other.RepositoryID != "" ||
+		other.DedupKey != domain.BranchPushDedupKey(info.ConversationID, "octo/repo", "refs/heads/feat", "def456") {
+		t.Errorf("a repository outside the run: row = %+v, want it naming no repository", other)
 	}
-	for _, a := range listExternalActions(t, stores) {
-		if domain.ParseBranchDeliverableSHA(a.DetailJSON) == "def456" && a.RepositoryID != "" {
-			t.Errorf("the push relayed under another repository's id names repository %q, want none", a.RepositoryID)
+}
+
+// TestServer_SandboxRecordBranchPush_WritesThePushRow pins the sandbox's push
+// door: over the socket the pre-push hook names a push and nothing else, and
+// the daemon records its one branch_pushed row — about the registry row the id
+// it read for the repository names, naming the branch — and no deliverable. A
+// ref that is not a branch records nothing.
+func TestServer_SandboxRecordBranchPush_WritesThePushRow(t *testing.T) {
+	stores, info := newCaptureStores(t, true)
+	repoID := registerRepo(t, stores, "octo", "repo", testRepoID("octo/repo"))
+	ctx := context.Background()
+
+	sockPath := tempSocket(t)
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	// The daemon reads the pushed repository's id with its own credential.
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !answerPRRead(w, r) {
+			t.Errorf("unexpected GitHub call: %s %s", r.Method, r.URL.Path)
 		}
+	}))
+	t.Cleanup(gh.Close)
+	srv := NewServer(stores, info, nil)
+	srv.SetGitHubResolver(fakeGitHubResolver{baseURL: gh.URL, token: "org-pat"})
+	go func() { _ = srv.Serve(listener) }()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		_ = srv.Shutdown(context.Background())
+	})
+	sandbox := Dial(sockPath)
+	t.Cleanup(func() { _ = sandbox.Close() })
+
+	if err := sandbox.RecordBranchPush(ctx, "octo/repo", "refs/heads/feature/x", "abc123", true); err != nil {
+		t.Fatalf("RecordBranchPush: %v", err)
+	}
+	if err := sandbox.RecordBranchPush(ctx, "octo/repo", "refs/tags/v1", "abc123", true); err != nil {
+		t.Fatalf("RecordBranchPush (tag): %v", err)
+	}
+
+	acts := listExternalActions(t, stores)
+	if len(acts) != 1 {
+		t.Fatalf("ledger rows = %+v, want the one branch push", acts)
+	}
+	a := acts[0]
+	if a.Action != domain.ActionBranchPushed || a.RepositoryID != repoID ||
+		a.ObjectKind != domain.ObjectKindBranch || a.ObjectKey != "refs/heads/feature/x" ||
+		a.DedupKey != domain.BranchPushDedupKey(info.ConversationID, repoID, "refs/heads/feature/x", "abc123") {
+		t.Errorf("push row = %+v, want branch_pushed about %s naming the branch", a, repoID)
+	}
+	if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 0 {
+		t.Errorf("deliverables = %+v, want none", arts)
 	}
 }

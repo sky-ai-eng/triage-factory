@@ -60,7 +60,7 @@ func newTwoConversationTask(t *testing.T) twoConversationTask {
 func (f twoConversationTask) push(t *testing.T, conversationID, ref, sha string) {
 	t.Helper()
 	info := recorderInfo(conversationID)
-	gitPushRecorder(agenthost.NewLocal(f.stores, info), info)(context.Background(), gitproxy.PushedRef{
+	gitPushRecorder(agenthost.NewLocal(f.stores, info))(context.Background(), gitproxy.PushedRef{
 		Repo:         "octo/repo",
 		RepositoryID: "1",
 		Ref:          ref,

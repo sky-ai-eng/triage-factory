@@ -302,8 +302,8 @@ func GitHubReviewObjectKey(reviewID string) string {
 }
 
 // IssueObjectKey is the object_key of the Jira or Linear issue carrying
-// (scope, externalID): ObjectKey(provider, "issue", EntityResource(...), ""),
-// which is also the dedup key of the issue's deliverable. A Jira key names the
+// (scope, externalID): ObjectKey(provider, "issue", EntityResource(...), "").
+// A Jira key names the
 // site (scope) and the issue id; a Linear key names the issue's UUID alone, so
 // its scope is not read. "" when there is no resource to key on.
 func IssueObjectKey(provider, scope, externalID string) string {
@@ -315,8 +315,8 @@ func IssueObjectKey(provider, scope, externalID string) string {
 }
 
 // ObjectKeyEntityIdentity reads the identity of the issue a Jira or Linear
-// key names, an object_key or a deliverable dedup key alike: the scope (a
-// Jira key carries its site) and the provider id. A comment's key names its
+// object_key names: the scope (a Jira key carries its site) and the provider
+// id. A comment's key names its
 // issue first, so a comment's key answers for the issue it is on. ok=false for
 // another provider, a key of another provider, and a stored Jira key that
 // still spells an issue key rather than the issue's id.

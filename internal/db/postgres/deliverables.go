@@ -50,18 +50,14 @@ const pgDeliverableColumns = `
 
 // pgDeliverableNonTerminalPredicate is the SQL WHERE fragment selecting the
 // reconciler's working set — non-terminal deliverables backed by a fetchable
-// GitHub object (TFAC-464). Built from the domain consts (no bind params, all
+// GitHub object. Built from the domain consts (no bind params, all
 // literals) so it can't drift from domain.IsReconcilableNonTerminal. The state
 // strings carry no quotes, so the concatenation is injection-safe.
 // Review is intentionally absent: a review is staged TF-side until the atomic
 // submit at approval, so a pending review draft has no GitHub object to
 // reconcile (TFAC-494). Mirrors domain.reconcilableNonTerminal.
-var pgDeliverableNonTerminalPredicate = fmt.Sprintf(`(
-		   (kind = '%s' AND state IN ('%s', '%s'))
-		OR (kind = '%s' AND state = '%s')
-	)`,
+var pgDeliverableNonTerminalPredicate = fmt.Sprintf(`(kind = '%s' AND state IN ('%s', '%s'))`,
 	domain.DeliverableKindPullRequest, domain.DeliverableStatePRDraft, domain.DeliverableStatePROpen,
-	domain.DeliverableKindBranch, domain.DeliverableStateBranchPushed,
 )
 
 func (s *deliverableStore) Upsert(ctx context.Context, orgID string, a domain.Deliverable) (domain.Deliverable, error) {
@@ -84,6 +80,9 @@ func (s *deliverableStore) UpsertSystem(ctx context.Context, orgID string, a dom
 // needs. org_id stays bound as defense in depth.
 func (s *deliverableStore) InsertDeliverableIfAbsentSystem(ctx context.Context, orgID string, a domain.Deliverable) (bool, error) {
 	if err := db.RequireExternalObjectScope(a.Scope); err != nil {
+		return false, err
+	}
+	if err := db.RequireDeliverableKind(a.Kind); err != nil {
 		return false, err
 	}
 	res, err := s.admin.ExecContext(ctx, `
@@ -114,6 +113,9 @@ func (s *deliverableStore) upsert(ctx context.Context, q queryer, orgID string, 
 	if err := db.RequireExternalObjectScope(a.Scope); err != nil {
 		return domain.Deliverable{}, err
 	}
+	if err := db.RequireDeliverableKind(a.Kind); err != nil {
+		return domain.Deliverable{}, err
+	}
 	// ON CONFLICT(org_id, scope, dedup_key) updates the documented mutable
 	// fields from the proposed row (EXCLUDED.*) and bumps updated_at;
 	// id/created_at on the existing row are preserved. provider/kind/scope are
@@ -124,32 +126,26 @@ func (s *deliverableStore) upsert(ctx context.Context, q queryer, orgID string, 
 	// back to gen_random_uuid() server-side.
 	//
 	// target/external_id/url/node_id are preserved-on-empty: they are the
-	// backing object's stable coordinates (resource key / PR number / issue
-	// key, html link, GraphQL node id) — once known they only ever fill in or
-	// migrate to a more specific value (pending PR owner/repo →
-	// owner/repo#123), never legitimately clear. A later upsert that can't
-	// supply them — a reconciliation pass, a Jira mutation whose conversation
-	// can't compute the browse URL, or a GitHub comment delete that only knows
-	// the comment id, not its PR number — must not blank a value an
-	// earlier writer already stored. external_id/url/node_id are NULLIFed to
-	// NULL on insert, so COALESCE preserves them; target is NOT NULL, so
-	// NULLIF('','') folds an empty incoming target to NULL first. A non-empty
-	// incoming value still overwrites (the intentional-change / migration
-	// path). details_json is preserved-on-empty for the same reason: a comment
-	// delete cannot restate the thread a reply answers. So is entity_id: a
-	// writer that resolved no entity must not unlink a row another writer
-	// linked. state stays last-writer-wins by design (it tracks the latest
-	// action).
+	// backing object's stable coordinates (PR number or review id, html link,
+	// GraphQL node id) — once known they only ever fill in, never
+	// legitimately clear. A later upsert that can't supply them — a
+	// reconciliation pass — must not blank a value an earlier writer already
+	// stored. external_id/url/node_id are NULLIFed to NULL on insert, so
+	// COALESCE preserves them; target is NOT NULL, so NULLIF('','') folds an
+	// empty incoming target to NULL first. A non-empty incoming value still
+	// overwrites (the intentional-change path). details_json is
+	// preserved-on-empty for the same reason. So is entity_id: a writer that
+	// resolved no entity must not unlink a row another writer linked. state
+	// stays last-writer-wins by design (it tracks the latest action).
 	//
 	// conversation_id AND team_id are both preserved-on-conflict, NOT last-writer-wins:
 	// the deliverable belongs to its CREATING conversation (domain.Deliverable's doc),
 	// and team_id is denormalized off THAT SAME conversation — not off whichever
 	// writer happens to touch the row later — so a later writer touching the
-	// same dedup key (e.g. a different conversation editing a Slack message, or
-	// a re-delegate updating a GitHub comment) must not reassign either.
-	// Letting team_id follow the last writer while conversation_id stayed
-	// pinned to the first would desync the two and mis-scope the deliverable out
-	// of its owning team's reads.
+	// same dedup key (the reconciler, or the pull request backstop) must not
+	// reassign either. Letting team_id follow the last writer while
+	// conversation_id stayed pinned to the first would desync the two and
+	// mis-scope the deliverable out of its owning team's reads.
 	row := q.QueryRowContext(ctx, `
 		INSERT INTO deliverables
 			(id, conversation_id, org_id, team_id, provider, kind, target,
@@ -341,37 +337,6 @@ func (s *deliverableStore) ListPendingReviewsByEntitySystem(ctx context.Context,
 	return scanDeliverableRows(rows)
 }
 
-// PresentDedupKeysSystem runs on the admin pool (BYPASSRLS): the recording
-// funnel's system path reads it with no claims, and a comment's deliverable
-// belongs to whichever team's run posted it. org_id stays in the WHERE clause
-// as defense in depth.
-func (s *deliverableStore) PresentDedupKeysSystem(ctx context.Context, orgID, scope string, dedupKeys []string) (map[string]bool, error) {
-	if err := db.RequireExternalObjectScope(scope); err != nil {
-		return nil, err
-	}
-	present := map[string]bool{}
-	if len(dedupKeys) == 0 {
-		return present, nil
-	}
-	rows, err := s.admin.QueryContext(ctx, `
-		SELECT dedup_key
-		FROM deliverables
-		WHERE org_id = $1 AND scope = $2 AND dedup_key = ANY($3)
-	`, orgID, scope, dedupKeys)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var key string
-		if err := rows.Scan(&key); err != nil {
-			return nil, err
-		}
-		present[key] = true
-	}
-	return present, rows.Err()
-}
-
 // PresentExternalIDsSystem runs on the admin pool (BYPASSRLS): the tracker
 // reads it with no claims, and a review's
 // deliverable belongs to whichever team's run submitted it. idx_deliverables_external_id
@@ -401,34 +366,6 @@ func (s *deliverableStore) PresentExternalIDsSystem(ctx context.Context, orgID, 
 		present[id] = true
 	}
 	return present, rows.Err()
-}
-
-// GetByNodeIDSystem reads the newest row in scope carrying nodeID, on the
-// admin pool (BYPASSRLS): its callers record a run's writes, and the row may
-// belong to whichever team's run first recorded the object. idx_deliverables_node_id
-// serves it. org_id stays bound as defense in depth.
-func (s *deliverableStore) GetByNodeIDSystem(ctx context.Context, orgID, scope, nodeID string) (*domain.Deliverable, error) {
-	if err := db.RequireExternalObjectScope(scope); err != nil {
-		return nil, err
-	}
-	if nodeID == "" {
-		return nil, nil
-	}
-	row := s.admin.QueryRowContext(ctx, `
-		SELECT `+pgDeliverableColumns+`
-		FROM deliverables
-		WHERE org_id = $1 AND scope = $2 AND node_id = $3
-		ORDER BY created_at DESC, id DESC
-		LIMIT 1
-	`, orgID, scope, nodeID)
-	var a domain.Deliverable
-	if err := scanDeliverable(row, &a); err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
-		return nil, err
-	}
-	return &a, nil
 }
 
 func (s *deliverableStore) CountByConversation(ctx context.Context, orgID string, conversationIDs []string) (map[string]int, error) {

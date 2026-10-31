@@ -544,11 +544,11 @@ func TestLinearVerbs_BadCallsFailBeforeCallingLinear(t *testing.T) {
 	}
 }
 
-// TestLinearVerbs_RecordDeliverables pins the audit trail: each write lands one
-// deliverables row keyed on the issue's UUID (the comment's anchored on its id)
-// and one external action under the org's Linear identity, across both write
-// paths; reads record nothing.
-func TestLinearVerbs_RecordDeliverables(t *testing.T) {
+// TestLinearVerbs_RecordTheirLedgerRows pins the audit trail: each write lands
+// one external action under the org's Linear identity, naming the issue by its
+// UUID (a comment by the issue's UUID and its own id), and no deliverable,
+// across both write paths; reads record nothing.
+func TestLinearVerbs_RecordTheirLedgerRows(t *testing.T) {
 	for _, eventTriggered := range []bool{true, false} {
 		name := "manual"
 		if eventTriggered {
@@ -562,8 +562,8 @@ func TestLinearVerbs_RecordDeliverables(t *testing.T) {
 			if _, err := lc.LinearGetIssue(ctx, "ENG-7"); err != nil {
 				t.Fatalf("LinearGetIssue: %v", err)
 			}
-			if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 0 {
-				t.Fatalf("a read recorded %d deliverable(s)", len(arts))
+			if acts := listExternalActions(t, stores); len(acts) != 0 {
+				t.Fatalf("a read recorded %d action(s)", len(acts))
 			}
 			if _, err := lc.LinearTransition(ctx, "ENG-7", "Done"); err != nil {
 				t.Fatalf("LinearTransition: %v", err)
@@ -575,30 +575,12 @@ func TestLinearVerbs_RecordDeliverables(t *testing.T) {
 				t.Fatalf("LinearCreateIssue: %v", err)
 			}
 
-			byKey := map[string]domain.Deliverable{}
-			for _, a := range listConversationDeliverables(t, stores, info.ConversationID) {
-				byKey[a.DedupKey] = a
+			if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 0 {
+				t.Errorf("deliverables = %+v, want none", arts)
 			}
-			issueKey := domain.ObjectKey(domain.ProviderLinear, domain.DeliverableKindIssue, fakeLinearIssueUUID, "")
-			commentKey := domain.ObjectKey(domain.ProviderLinear, domain.DeliverableKindComment, fakeLinearIssueUUID, fakeLinearCommentID)
-			createdKey := domain.ObjectKey(domain.ProviderLinear, domain.DeliverableKindIssue, fakeLinearCreated, "")
-			if len(byKey) != 3 {
-				t.Fatalf("deliverables = %v, want exactly %s, %s, %s", byKey, issueKey, commentKey, createdKey)
-			}
-			if a := byKey[issueKey]; a.Provider != domain.ProviderLinear || a.Kind != domain.DeliverableKindIssue ||
-				a.Target != "ENG-7" || a.ExternalID != fakeLinearIssueUUID || a.State != domain.DeliverableStateIssueUpdated ||
-				!strings.HasPrefix(a.URL, "https://linear.app/acme/issue/ENG-7") {
-				t.Errorf("issue deliverable = %+v", a)
-			}
-			// The comment was posted naming the issue in lower case; its row
-			// carries the identifier Linear answered with.
-			if a := byKey[commentKey]; a.Kind != domain.DeliverableKindComment || a.Target != "ENG-7" ||
-				a.ExternalID != fakeLinearCommentID || a.State != domain.DeliverableStateCommentPosted {
-				t.Errorf("comment deliverable = %+v", a)
-			}
-			if a := byKey[createdKey]; a.Target != "ENG-8" || a.State != domain.DeliverableStateIssueCreated {
-				t.Errorf("created deliverable = %+v", a)
-			}
+			issueKey := domain.ObjectKey(domain.ProviderLinear, domain.ObjectKindIssue, fakeLinearIssueUUID, "")
+			commentKey := domain.ObjectKey(domain.ProviderLinear, domain.ObjectKindComment, fakeLinearIssueUUID, fakeLinearCommentID)
+			createdKey := domain.ObjectKey(domain.ProviderLinear, domain.ObjectKindIssue, fakeLinearCreated, "")
 
 			acts := listExternalActions(t, stores)
 			got := map[string]domain.ExternalAction{}
@@ -611,22 +593,27 @@ func TestLinearVerbs_RecordDeliverables(t *testing.T) {
 			if len(acts) != 3 {
 				t.Fatalf("external actions = %+v, want 3", acts)
 			}
-			if tr := got[domain.ActionIssueTransitioned]; tr.FromState != "Todo" || tr.ToState != "Done" || tr.Target != "ENG-7" {
-				t.Errorf("transition action = %+v, want Todo → Done on ENG-7", tr)
+			if tr := got[domain.ActionIssueTransitioned]; tr.FromState != "Todo" || tr.ToState != "Done" || tr.Target != "ENG-7" ||
+				tr.ExternalID != fakeLinearIssueUUID || tr.ObjectKind != domain.ObjectKindIssue || tr.ObjectKey != issueKey ||
+				!strings.HasPrefix(tr.URL, "https://linear.app/acme/issue/ENG-7") {
+				t.Errorf("transition action = %+v, want Todo → Done on ENG-7, naming the issue", tr)
 			}
-			if c := got[domain.ActionIssueCommentPosted]; c.ExternalID != fakeLinearCommentID {
+			// The comment was posted naming the issue in lower case; its row
+			// carries the identifier Linear answered with.
+			if c := got[domain.ActionIssueCommentPosted]; c.ExternalID != fakeLinearCommentID || c.Target != "ENG-7" ||
+				c.ObjectKind != domain.ObjectKindComment || c.ObjectKey != commentKey {
 				t.Errorf("comment action = %+v", c)
 			}
-			if c := got[domain.ActionIssueCreated]; c.Target != "ENG-8" {
+			if c := got[domain.ActionIssueCreated]; c.Target != "ENG-8" || c.ObjectKind != domain.ObjectKindIssue || c.ObjectKey != createdKey {
 				t.Errorf("create action = %+v", c)
 			}
 		})
 	}
 }
 
-// TestLinearAssign_RecordsTheAssignee pins an assign's audit trail: the issue's
-// deliverable and its external action name the person assigned, by id and name,
-// under the org's Linear identity.
+// TestLinearAssign_RecordsTheAssignee pins an assign's audit trail: its
+// external action names the person assigned, by id and name, under the org's
+// Linear identity, and no deliverable is written.
 func TestLinearAssign_RecordsTheAssignee(t *testing.T) {
 	ctx := context.Background()
 	_, srv := startFakeLinear(t)
@@ -636,18 +623,14 @@ func TestLinearAssign_RecordsTheAssignee(t *testing.T) {
 	}
 	names := []string{`"id":"` + fakeLinearPersonID + `"`, `"name":"Ana Lyst"`}
 
-	arts := listConversationDeliverables(t, stores, info.ConversationID)
-	if len(arts) != 1 || arts[0].ExternalID != fakeLinearIssueUUID || arts[0].State != domain.DeliverableStateIssueUpdated {
-		t.Fatalf("deliverables = %+v, want ENG-7's one issue row", arts)
+	if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 0 {
+		t.Fatalf("deliverables = %+v, want none", arts)
 	}
 	acts := listExternalActions(t, stores)
 	if len(acts) != 1 || acts[0].Action != domain.ActionIssueAssigned || acts[0].Credential != domain.CredentialLinearOrg {
 		t.Fatalf("external actions = %+v, want one assign under the org's Linear identity", acts)
 	}
 	for _, want := range names {
-		if !strings.Contains(arts[0].DetailsJSON, want) {
-			t.Errorf("deliverable details %q do not name the assignee (%s)", arts[0].DetailsJSON, want)
-		}
 		if !strings.Contains(acts[0].DetailJSON, want) {
 			t.Errorf("action details %q do not name the assignee (%s)", acts[0].DetailJSON, want)
 		}

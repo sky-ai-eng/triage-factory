@@ -15,19 +15,19 @@ func TestExternalObjectScope(t *testing.T) {
 		provider, want string
 	}{
 		{ProviderGitHub, EntityScope("github", s)},
-		{ProviderGit, EntityScope("github", s)},
 		{ProviderJira, EntityScope("jira", s)},
 		{ProviderLinear, "ws-1"},
 		{ProviderSlack, SlackScope},
 		{ProviderNetwork, NetworkScope},
 		{"gitlab", ""},
+		{"git", ""},
 	} {
 		if got := ExternalObjectScope(tc.provider, s); got != tc.want {
 			t.Errorf("ExternalObjectScope(%q) = %q, want %q", tc.provider, got, tc.want)
 		}
 	}
-	if got := ExternalObjectScope(ProviderGit, s); got != "https://ghe.example.com" {
-		t.Errorf("a branch's scope = %q, want the org's GitHub host", got)
+	if got := ExternalObjectScope(ProviderGitHub, s); got != "https://ghe.example.com" {
+		t.Errorf("a branch push's scope = %q, want the org's GitHub host", got)
 	}
 	unconfigured := OrgSettings{}
 	for _, p := range []string{ProviderJira, ProviderLinear} {

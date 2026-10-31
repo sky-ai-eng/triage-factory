@@ -650,12 +650,10 @@ type RepositoryStore interface {
 	// observed the rename (an agent touch through GitHub's redirect, or a pull
 	// request read off GraphQL, which keys by the current name). The provider
 	// has just reported that the name belongs to the renamed row's id, so the
-	// bare row is the same repository: its entities are re-pointed to the
-	// renamed row, the branches recorded in it are re-keyed onto the renamed
-	// row's id (domain.BranchDedupKey; a branch both rows recorded keeps the
-	// older deliverable), its audit-ledger rows are re-pointed to the renamed row,
-	// its placement override moves onto the renamed row unless that row has
-	// one of its own, and it is deleted, in the rename's transaction.
+	// bare row is the same repository: its entities and its audit-ledger rows
+	// are re-pointed to the renamed row, its placement override moves onto the
+	// renamed row unless that row has one of its own, and it is deleted, in
+	// the rename's transaction.
 	//
 	// Two states are refused instead, because writing through either would
 	// destroy a row rather than move one: ErrRepoSlugOccupied when anything

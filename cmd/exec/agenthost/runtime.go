@@ -29,7 +29,7 @@ import (
 //
 // The split is deliberately at OP granularity, not store-method granularity:
 // a write funnel that composes a deliverable upsert + an external-action append
-// inside one SyntheticClaimsWithTx (UpsertDeliverable, Record) relays as ONE op,
+// inside one SyntheticClaimsWithTx (Record) relays as ONE op,
 // so the transaction stays orchestrator-side — a tx closure cannot cross the
 // wire. Pure reads relay one-for-one.
 type Runtime interface {
@@ -90,10 +90,9 @@ type Runtime interface {
 	// Writes.
 	InsertConversationWorktree(ctx context.Context, row domain.ConversationWorktree) (inserted bool, winningPath string, err error)
 	DeleteConversationWorktree(ctx context.Context, repositoryID, ref string) error
-	// UpsertDeliverable records a, and github is what GitHub answered for its
-	// repository and pull request, read by the observer that holds the run's
-	// credential (domain.GitHubIdentity): a branch is keyed on the registry
-	// row GitHub's repository id names, never on its target's name.
+	// UpsertDeliverable records a, a review draft the host composed, and github
+	// is what GitHub answered for its pull request, read by the observer that
+	// holds the run's credential (domain.GitHubIdentity).
 	UpsertDeliverable(ctx context.Context, a domain.Deliverable, github domain.GitHubIdentity) (domain.Deliverable, error)
 	// UpdateReviewDetailsIfPending persists a review draft's mutated
 	// details_json, guarded on the draft still being state=pending. Returns
@@ -122,6 +121,17 @@ type Runtime interface {
 	// observer that made it (domain.GitHubIdentity), and zero for every other
 	// write: a GitHub entity or repository is resolved from it alone.
 	Record(ctx context.Context, a *domain.Deliverable, act *domain.ExternalAction, container domain.EntityContainer, github domain.GitHubIdentity)
+
+	// RecordBranchPush records the branch_pushed ledger row for push, a push
+	// of a branch that landed, through the same funnel as Record; github is
+	// what GitHub answered for the pushed repository, read by the observer
+	// that holds the run's credential. The row is built on the side that holds
+	// the stores, from the push alone: its repository is the registry row
+	// GitHub's id names, and its key, link, credential and signer are this
+	// side's, so a relayed push cannot file itself under another repository or
+	// claim a signer. A ref that is not a branch records nothing. Void and
+	// best-effort, like Record.
+	RecordBranchPush(ctx context.Context, push BranchPush, github domain.GitHubIdentity)
 
 	// RecordReadTouch persists a durable conversation→entity touch for an addressed read
 	// (a verb targeting one entity by id/key/ts): it resolves-or-creates the
@@ -238,6 +248,7 @@ const (
 	opListConversationDeliverables     = "list_conversation_deliverables"
 	opOrgJiraBase                      = "org_jira_base"
 	opUpsertDeliverable                = "upsert_deliverable"
+	opRecordBranchPush                 = "record_branch_push"
 	opUpdateReviewDetails              = "update_review_details_if_pending"
 	opTransitionReviewState            = "transition_review_state"
 	opRecordExternalWrite              = "record_external_write"
@@ -392,8 +403,8 @@ type directRuntime struct {
 	// which has no Server), and pre-set by tests.
 	ghResolver ghclient.Resolver
 
-	// ghCredential is the credential the branch-push row this runtime composes
-	// into a deliverable upsert is stamped with. Set through
+	// ghCredential is the credential the branch-push row this runtime builds
+	// (RecordBranchPush) is stamped with. Set through
 	// LocalClient.SetGitHubCredential — from the sidecar's report on an
 	// executor, from the resolved tier on every other placement. Empty falls
 	// back to the resolver below, and to the App when even that can't answer.
@@ -610,185 +621,102 @@ func (r *directRuntime) DeleteConversationWorktree(ctx context.Context, reposito
 
 // UpsertDeliverable stamps the run identity and the org's current scope
 // (stampScopeInfo) onto a, links it to the entity it is about
-// (resolveDeliverableEntity: a review draft's pull request; a branch has none)
-// and upserts it, composing the branch-push external action into the SAME
-// write. Event-triggered runs route admin-pool; manual
-// runs wrap in the kicking-off user's synthetic claims. Returns the stored
-// row. Each write is retried on a retryable error like the recording funnel's
-// (withRecordRetry) — the upsert is idempotent and the push row's dedup key is
-// deterministic — but on the caller's own context, since the caller is waiting
-// for the result. When the deliverable write fails, the action is written on its own
-// (recordActionAlone) before the deliverable's error is returned, so a push whose
-// deliverable could not be recorded still leaves its ledger row. Inside a relayed
-// record the deliverable's failure is also the record's (dropRelayedDeliverable).
-//
-// A branch is keyed here, on the registry row GitHub's repository id names
-// (keyBranch), and its push row takes its repository from that key. The key a
-// branch arrives with is discarded: on an executor it was built by the
-// sidecar, which must not be able to file a push under a repository of its
-// choosing, and the id it relays is admitted only for a repository the run
-// works in (githubRepositoryRow), as for every other act.
+// (resolveDeliverableEntity: a review draft's pull request) and upserts it.
+// Event-triggered runs route admin-pool; manual runs wrap in the kicking-off
+// user's synthetic claims. Returns the stored row. Each write is retried on a
+// retryable error like the recording funnel's (withRecordRetry) — the upsert
+// is idempotent — but on the caller's own context, since the caller is
+// waiting for the result.
 func (r *directRuntime) UpsertDeliverable(ctx context.Context, a domain.Deliverable, github domain.GitHubIdentity) (domain.Deliverable, error) {
 	a.OrgID = r.info.OrgID
 	a.TeamID = r.info.TeamID
 	a.ConversationID = r.info.ConversationID
-	if a.Kind == domain.DeliverableKindBranch {
-		a.DedupKey = ""
-	}
 	if err := withRecordRetry(ctx, func() error { return stampScopeInfo(ctx, r.stores, r.info.OrgID, &a, nil) }); err != nil {
-		r.dropBranchPush(ctx, a, r.branchPushAction(ctx, a), err)
 		return domain.Deliverable{}, err
 	}
-	keyErr := r.keyBranch(ctx, &a, github)
-	act := r.branchPushAction(ctx, a)
-	if keyErr != nil {
-		dropRelayedDeliverable(ctx, a, keyErr)
-		r.recordBranchPushAlone(ctx, a, act)
-		return domain.Deliverable{}, keyErr
-	}
 	resolveDeliverableEntity(ctx, r.stores, r.info, &a, domain.EntityContainer{}, github)
-	if r.info.IsEventTriggered {
-		var stored domain.Deliverable
-		err := withRecordRetry(ctx, func() error {
+	var stored domain.Deliverable
+	err := withRecordRetry(ctx, func() error {
+		return withWriteInfo(ctx, r.stores, r.info,
+			func() error {
+				var e error
+				stored, e = r.stores.Deliverables.UpsertSystem(ctx, r.info.OrgID, a)
+				return e
+			},
+			func(ts db.TxStores) error {
+				var e error
+				stored, e = ts.Deliverables.Upsert(ctx, r.info.OrgID, a)
+				return e
+			},
+		)
+	})
+	if err != nil {
+		return domain.Deliverable{}, err
+	}
+	return stored, nil
+}
+
+// RecordBranchPush builds push's branch_pushed row (domain.NewBranchPushAction)
+// and records it through the funnel (recordExternalWrite). The row names the
+// repository by the registry row GitHub's repository id names
+// (githubRepositoryRow) on the org's GitHub host, under the name that row
+// holds, and is keyed on it (domain.BranchPushDedupKey): the hook and the git
+// proxy observe one push and read the same id, so their twin rows share the
+// key. A repository with no row the run may record against, or a registry
+// read that fails, records the row with no repository, keyed and named by the
+// repository the push named. Its link is the branch on the org's GitHub host,
+// under the name GitHub answered with the id where the observer read it, so a
+// push spelled under an old name links to where the branch is now.
+func (r *directRuntime) RecordBranchPush(ctx context.Context, push BranchPush, github domain.GitHubIdentity) {
+	act, ok := domain.NewBranchPushAction(push.Repo, push.Ref, push.SHA, push.Created)
+	if !ok {
+		return
+	}
+	act.Credential = r.githubCredential(ctx, push.Repo)
+	act.DetailJSON = withPushSigner(act.DetailJSON, pushSigner(ctx, r.stores, r.info.OrgID, push.SHA, r.sealedSigner))
+	repository, name := push.Repo, push.Repo
+	err := withRecordRetry(ctx, func() error { return stampScopeInfo(ctx, r.stores, r.info.OrgID, nil, &act) })
+	var row *domain.Repository
+	if err == nil {
+		err = withRecordRetry(ctx, func() error {
 			var e error
-			stored, e = r.stores.Deliverables.UpsertSystem(ctx, r.info.OrgID, a)
+			row, e = githubRepositoryRow(ctx, r.stores, r.info, act.Scope, github)
 			return e
 		})
-		if err != nil {
-			dropRelayedDeliverable(ctx, a, err)
-			r.recordBranchPushAlone(ctx, a, act)
-			return domain.Deliverable{}, err
-		}
-		if rerr := withRecordRetry(ctx, func() error { return recordActionSystemInfo(ctx, r.stores, r.info, act) }); rerr != nil {
-			r.dropBranchPush(ctx, a, act, rerr)
-		}
-		return stored, nil
 	}
-	var out domain.Deliverable
-	var deliverableErr error
-	err := withRecordRetry(ctx, func() error {
-		return r.stores.Tx.SyntheticClaimsWithTx(ctx, r.info.OrgID, r.info.UserID, func(ts db.TxStores) error {
-			deliverableErr = nil
-			stored, uerr := ts.Deliverables.Upsert(ctx, r.info.OrgID, a)
-			if uerr != nil {
-				deliverableErr = uerr
-				return uerr
-			}
-			out = stored
-			return recordActionTx(ctx, ts, r.info.OrgID, act)
-		})
-	})
-	if deliverableErr != nil {
-		dropRelayedDeliverable(ctx, a, deliverableErr)
-		r.recordBranchPushAlone(ctx, a, act)
-	} else if err != nil {
-		r.dropBranchPush(ctx, a, act, err)
+	if err != nil {
+		agenthostLog.Warn("resolving a pushed branch's repository failed; recording the push under the name it was pushed to",
+			"conversation", r.info.ConversationID, "repo", push.Repo, "error", err)
 	}
-	return out, err
+	if row != nil {
+		act.Target, repository, name = row.Slug(), row.ID, row.Slug()
+	}
+	if github.Repository != "" {
+		name = github.Repository
+	}
+	if u, ok := domain.BranchWebURL(act.Scope, name, push.Ref); ok {
+		act.URL = u
+	}
+	act.DedupKey = domain.BranchPushDedupKey(r.info.ConversationID, repository, push.Ref, push.SHA)
+	recordExternalWrite(ctx, r.stores, r.info, nil, &act, domain.EntityContainer{}, github)
 }
 
-// keyBranch keys branch deliverable a on the registry row GitHub's repository
-// id names (githubRepositoryRow) on a's scope, the org's current GitHub host,
-// and records it under the name that row holds: its target takes the row's
-// name, so a push spelled under an old name, or a new one TF has not applied,
-// reads like every other row of the repository. The hook and
-// the git proxy observe one push and read the same id, so their twin rows
-// share the key. It returns errNoRegistryRow when no row the run may record
-// against carries the id (the observer's read failed, or the id names another
-// repository), and the read's error when the registry could not be read;
-// either way a is left with no key. Any other deliverable is left as it is.
-func (r *directRuntime) keyBranch(ctx context.Context, a *domain.Deliverable, github domain.GitHubIdentity) error {
-	if a.Kind != domain.DeliverableKindBranch {
-		return nil
-	}
-	a.DedupKey = ""
-	var row *domain.Repository
-	if err := withRecordRetry(ctx, func() error {
-		var e error
-		row, e = githubRepositoryRow(ctx, r.stores, r.info, a.Scope, github)
-		return e
-	}); err != nil {
-		return fmt.Errorf("read the registry row for %s: %w", a.Target, err)
-	}
-	if row == nil {
-		return fmt.Errorf("%w: %s", errNoRegistryRow, a.Target)
-	}
-	a.Target = row.Slug()
-	a.DedupKey = domain.BranchDedupKey(row.ID, a.ExternalID)
-	return nil
-}
-
-// branchPushAction builds the branch-push row of a, nil for a deliverable that
-// is not a branch, on a's scope: a branch's scope is the org's GitHub host,
-// which is the push's too.
-func (r *directRuntime) branchPushAction(ctx context.Context, a domain.Deliverable) *domain.ExternalAction {
-	act := branchPushActionInfo(a, r.info, r.githubCredential(ctx, a))
-	if act != nil {
-		act.Scope = a.Scope
-		act.DetailJSON = withPushSigner(act.DetailJSON, pushSigner(ctx, r.stores, r.info.OrgID, domain.ParseBranchDeliverableSHA(a.DetailsJSON), r.sealedSigner))
-	}
-	return act
-}
-
-// recordBranchPushAlone writes the branch-push row of a deliverable whose own
-// write failed, best-effort. A nil act (a deliverable that is not a branch) has
-// nothing to write.
-func (r *directRuntime) recordBranchPushAlone(ctx context.Context, a domain.Deliverable, act *domain.ExternalAction) {
-	if act == nil {
-		return
-	}
-	if err := recordActionAlone(ctx, r.stores, r.info, act); err != nil {
-		r.dropBranchPush(ctx, a, act, err)
-	}
-}
-
-// dropBranchPush accounts for a branch-push row that was not written, cause
-// being the error that lost it. A nil act (a deliverable that is not a branch)
-// lost no row.
-func (r *directRuntime) dropBranchPush(ctx context.Context, a domain.Deliverable, act *domain.ExternalAction, cause error) {
-	if act == nil {
-		return
-	}
-	recordWriteDrop(ctx, recordDropOp(nil, act), cause)
-	agenthostLog.Warn("branch external-action recording failed (push already applied)",
-		"conversation", r.info.ConversationID, "target", a.Target, "error", cause)
-}
-
-// dropRelayedDeliverable accounts for a deliverable that a relayed record — a
-// sidecar's record_push — failed to write, cause being the error that lost it.
-// There the deliverable is the record's loss like the ledger row beside it, as it
-// is in the recording funnel: held until the record's outcome is known, and
-// deferring the record when another attempt can land it, so the sidecar's
-// resend retries the deliverable too. Every other caller of UpsertDeliverable is
-// waiting on its result and gets the error back to handle, so outside a
-// relayed record this does nothing.
-func dropRelayedDeliverable(ctx context.Context, a domain.Deliverable, cause error) {
-	if relayedRecordFrom(ctx) == nil {
-		return
-	}
-	recordWriteDrop(ctx, recordDropOp(&a, nil), cause)
-}
-
-// githubCredential names the credential to stamp on the branch-push row for
-// deliverable a. A credential reported by whoever holds it wins outright — on an
-// executor that is the sidecar, and nothing this process can read would confirm
-// or contradict it.
+// githubCredential names the credential to stamp on the branch-push row for a
+// push to repository (owner/repo). A credential reported by whoever holds it
+// wins outright — on an executor that is the sidecar, and nothing this process
+// can read would confirm or contradict it.
 //
 // The resolver fallback exists for one caller: the local-mode pre-push hook,
-// which upserts a branch deliverable in a process that never resolved a gh client,
-// so nothing has classified the tier by the time the row is built. It is asked
-// only for a branch deliverable — the sole kind that yields an action here — and
-// answers from the same resolver that minted the token the push authenticated
-// with. Failure is silent and reads as the App: a push that already landed must
-// not be held up, or logged twice, over how its row is labeled.
-func (r *directRuntime) githubCredential(ctx context.Context, a domain.Deliverable) string {
+// which records a push in a process that never resolved a gh client, so
+// nothing has classified the tier by the time the row is built. It answers
+// from the same resolver that minted the token the push authenticated with.
+// Failure is silent and reads as the App: a push that already landed must not
+// be held up, or logged twice, over how its row is labeled.
+func (r *directRuntime) githubCredential(ctx context.Context, repository string) string {
 	if r.ghCredential != "" {
 		return r.ghCredential
 	}
-	if a.Kind != domain.DeliverableKindBranch {
-		return domain.CredentialGitHubApp
-	}
-	owner, repo, ok := strings.Cut(a.Target, "/")
+	owner, repo, ok := strings.Cut(repository, "/")
 	if !ok {
 		return domain.CredentialGitHubApp
 	}
@@ -1112,6 +1040,11 @@ func (r *relayRuntime) Record(_ context.Context, a *domain.Deliverable, act *dom
 	// RecordExternalWrite). The run's record sender delivers it in order and
 	// resends it until the orchestrator has applied it.
 	r.conn.record(agentproc.RelayNamespaceCore, opRecordExternalWrite, recordExternalWriteArgs{Deliverable: a, Action: act, EntityContainer: container, GitHub: github})
+}
+
+func (r *relayRuntime) RecordBranchPush(_ context.Context, push BranchPush, github domain.GitHubIdentity) {
+	// Queued, mirroring Record: the push already landed.
+	r.conn.record(agentproc.RelayNamespaceCore, opRecordBranchPush, recordBranchPushArgs{BranchPush: push, GitHub: github})
 }
 
 func (r *relayRuntime) RecordReadTouch(_ context.Context, provider, target, externalID string, container domain.EntityContainer, github domain.GitHubIdentity, url string) {

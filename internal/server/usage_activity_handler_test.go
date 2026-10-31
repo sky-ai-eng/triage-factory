@@ -51,7 +51,7 @@ func TestResolveArtifactActivityFilters(t *testing.T) {
 	}{
 		"unknown_provider":    {artifactActivityListRequest{Provider: "gitlab"}, "provider"},
 		"unknown_object_kind": {artifactActivityListRequest{ObjectKind: "pull_requests"}, "object_kind"},
-		"deliverable_kind":    {artifactActivityListRequest{ObjectKind: domain.DeliverableKindIssue + "s"}, "object_kind"},
+		"plural_object_kind":  {artifactActivityListRequest{ObjectKind: domain.ObjectKindIssue + "s"}, "object_kind"},
 		"bad_since":           {artifactActivityListRequest{Since: "yesterday"}, "since"},
 		"bad_until":           {artifactActivityListRequest{Until: "tomorrow"}, "until"},
 		"inverted_window":     {artifactActivityListRequest{Since: "2026-06-30", Until: "2026-06-01"}, "since"},

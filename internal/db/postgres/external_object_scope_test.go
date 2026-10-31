@@ -28,20 +28,6 @@ func TestExternalObjectScope_Postgres(t *testing.T) {
 	})
 }
 
-// TestCommentDeliverables_Postgres runs the shared comment-deliverable conformance
-// suite against the Postgres backend, both pools wired against AdminDB like the
-// scope suite above.
-func TestCommentDeliverables_Postgres(t *testing.T) {
-	h := pgtest.Shared(t)
-	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	dbtest.RunCommentDeliverableConformance(t, func(t *testing.T) (db.Stores, string, string) {
-		t.Helper()
-		h.Reset(t)
-		orgID, _, teamID := pgtest.SeedOrgWithUser(t, h, "comments")
-		return stores, orgID, teamID
-	})
-}
-
 // TestDeliverableUpsert_Postgres runs the shared deliverable upsert conformance suite
 // against the Postgres backend, both pools wired against AdminDB like the scope
 // suite above.

@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -22,12 +23,28 @@ func RequireExternalObjectScope(scope string) error {
 	return nil
 }
 
-// DeliverableStore owns the deliverables table — the single durable,
-// conversation-attributed, polymorphic record of everything a conversation
-// produces in an external system (branch, PR, review, Jira/Linear issue,
-// comment). Every capture writer in TFAC-454's Sub-epic A UPSERTs through it;
-// the conversation detail view, team-level C2, and the audit ledger read from
-// it.
+// ErrDeliverableKind refuses a deliverable write of a kind other than a pull
+// request or a review. A deliverable is work an agent prepared for a person to
+// act on, and those are the two kinds a person acts on; every other object a
+// run changes is an artifact, read from the external-action ledger.
+var ErrDeliverableKind = errors.New("a deliverable is a pull request or a review")
+
+// RequireDeliverableKind refuses a kind outside domain.DeliverableKinds with
+// ErrDeliverableKind. Both dialects' deliverable writes call it before touching
+// the database; the Postgres table's CHECK says the same.
+func RequireDeliverableKind(kind string) error {
+	switch kind {
+	case domain.DeliverableKindPullRequest, domain.DeliverableKindReview:
+		return nil
+	}
+	return fmt.Errorf("%w, not %q", ErrDeliverableKind, kind)
+}
+
+// DeliverableStore owns the deliverables table: one row per pull request or
+// review an agent prepared for a person, owned by the conversation that made
+// it. Approval, attention, task close and teardown read it, and so do the
+// conversation detail view and the artifacts read, which highlights the
+// artifact a deliverable is.
 //
 // Mirrors the conversations store for pool/RLS/scan conventions: app pool in
 // Postgres (RLS-active under tf_app, team-scoped via team_id exactly like
@@ -37,23 +54,22 @@ func RequireExternalObjectScope(scope string) error {
 type DeliverableStore interface {
 	// Upsert inserts the deliverable or, on a (org_id, scope, dedup_key)
 	// conflict, updates the existing row's mutable fields (state, target,
-	// details_json, conversation_id, team_id, updated_at). This is the one writer all
-	// of Sub-epic A shares: the same PR seen via exec and again via
+	// details_json, updated_at). The same PR seen via exec and again via
 	// reconciliation lands on one row. Returns the stored row with id and
 	// timestamps populated. a.ID may be empty (both impls generate a uuid); a
 	// non-empty a.ID is honored on insert and ignored on update. An empty
 	// a.Scope is refused with ErrExternalObjectScopeRequired: the same dedup
-	// key in two scopes is two objects.
+	// key in two scopes is two objects. A kind other than a pull request or a
+	// review is refused with ErrDeliverableKind.
 	//
 	// external_id, url and node_id are preserve-on-empty: an upsert that
 	// leaves them empty keeps whatever the row already holds rather than
 	// blanking it. They are the backing object's stable coordinates (PR
-	// number / issue key, html link, GraphQL node id) — once known they only
+	// number or review id, html link, GraphQL node id) — once known they only
 	// fill in, never legitimately clear — so a later writer that can't supply
-	// them (reconciliation, or a mutation that can't compute the URL) won't
-	// erase an earlier writer's value. To intentionally change them, pass the
-	// new non-empty value. details_json is preserve-on-empty too, so a comment
-	// delete that cannot restate a reply's thread does not erase it.
+	// them (reconciliation) won't erase an earlier writer's value. To
+	// intentionally change them, pass the new non-empty value. details_json is
+	// preserve-on-empty too.
 	//
 	// Runs on the app pool in Postgres (RLS-active), so the caller must be
 	// inside a claims-set tx (request handler or SyntheticClaimsWithTx). A
@@ -84,7 +100,8 @@ type DeliverableStore interface {
 	// backstop uses: it records the pull_request deliverable for a PR the ledger
 	// says the create verb opened, only if the verb (or a prior pass) didn't
 	// already. Admin pool — the backstop has no JWT-claims context.
-	// Identical single-connection path in SQLite.
+	// Identical single-connection path in SQLite. A kind other than a pull
+	// request or a review is refused with ErrDeliverableKind, as Upsert does.
 	InsertDeliverableIfAbsentSystem(ctx context.Context, orgID string, a domain.Deliverable) (bool, error)
 
 	// TransitionReviewState atomically compare-and-swaps a REVIEW deliverable's
@@ -168,21 +185,6 @@ type DeliverableStore interface {
 	// (single-tenant, no RLS).
 	ListPendingReviewsByEntitySystem(ctx context.Context, orgID, entityID string) ([]domain.Deliverable, error)
 
-	// PresentDedupKeysSystem returns the subset of dedupKeys under which a
-	// deliverable exists in scope, as a set. The recording funnel reads it to
-	// tell whether a comment a delete retires has a `comment` deliverable, so
-	// the delete never creates one. An empty scope is refused with
-	// ErrExternalObjectScopeRequired.
-	//
-	// Admin pool (BYPASSRLS) in Postgres: the funnel's system path holds no
-	// claims, and the deliverable belongs to whichever team's run posted the
-	// comment. org_id stays bound as defense in depth. Identical to a plain
-	// org read in SQLite.
-	//
-	// TODO(TFAC-1266): deleted with its one caller, deletesUnrecordedComment,
-	// once comment deliverables are no longer written.
-	PresentDedupKeysSystem(ctx context.Context, orgID, scope string, dedupKeys []string) (map[string]bool, error)
-
 	// PresentExternalIDsSystem returns the subset of externalIDs that a
 	// deliverable of the given provider and kind in scope carries as its
 	// external_id, as a set. The tracker reads it to tell a review TF
@@ -196,20 +198,6 @@ type DeliverableStore interface {
 	// org_id stays bound as defense in depth. Identical to a plain org read in
 	// SQLite.
 	PresentExternalIDsSystem(ctx context.Context, orgID, scope, provider, kind string, externalIDs []string) (map[string]bool, error)
-
-	// GetByNodeIDSystem returns the deliverable in scope carrying the GraphQL
-	// node id nodeID, or nil when none does (an empty nodeID included). A
-	// GraphQL delete names a GitHub comment by node id alone, and its response
-	// does not return the comment's number, which is what the row is keyed on,
-	// so the recorder finds the row through this. Should two rows
-	// ever carry one node id, the newest answers. An empty scope is refused
-	// with ErrExternalObjectScopeRequired.
-	//
-	// Admin pool (BYPASSRLS) in Postgres: the recorder holds no claims, and
-	// the row may belong to another team's run that recorded the object first.
-	// org_id stays bound as defense in depth. Identical to a plain org read in
-	// SQLite.
-	GetByNodeIDSystem(ctx context.Context, orgID, scope, nodeID string) (*domain.Deliverable, error)
 
 	// ListByConversationSystem is the admin-pool (BYPASSRLS) variant of ListByConversation for
 	// system-service readers that hold a real (org_id) identity but no
@@ -276,13 +264,13 @@ type DeliverableStore interface {
 	ListArtifactMatchesByOrgSystem(ctx context.Context, orgID string, entityIDs, reviewIDs []string) ([]domain.Deliverable, error)
 
 	// ListNonTerminalBySystem returns every deliverable for the org whose
-	// (kind, state) is still reconcilable — PR draft|open, branch pushed
+	// (kind, state) is still reconcilable — PR draft|open
 	// (domain.IsReconcilableNonTerminal). It is the deliverable reconciler's
 	// per-cycle working set, org-wide and bounded: terminal deliverables
-	// (merged/closed/submitted/dismissed/deleted) drop out, so the set shrinks
-	// as work resolves. A pending review is not in it: it is staged TF-side and
-	// has no GitHub object to reconcile until a person's approval posts it, at
-	// which point it is already terminal.
+	// (merged/closed/submitted/dismissed) drop out, so the set shrinks as work
+	// resolves. A pending review is not in it: it is staged TF-side and has no
+	// GitHub object to reconcile until a person's approval posts it, at which
+	// point it is already terminal.
 	//
 	// Admin-pool / org-wide in Postgres — the same BYPASSRLS, org-scoped
 	// shape the scorer's UnscoredTasks and EntityStore's

@@ -64,7 +64,7 @@ func (fx *linearFixture) seedLinearTask(t *testing.T, entityID string) string {
 
 // TestRefreshLinear_MoveBetweenArmedTeams: an issue moved from one armed team
 // to another is the same entity under its new identifier. Its tasks stay on
-// it, its url and its deliverables' targets follow it, and the move is
+// it, its url follows it, and the move is
 // identifier_changed, emitted before anything else the cycle diffs — never
 // unreachable.
 func TestRefreshLinear_MoveBetweenArmedTeams(t *testing.T) {
@@ -74,15 +74,6 @@ func TestRefreshLinear_MoveBetweenArmedTeams(t *testing.T) {
 	fx.seed(t, is)
 	before := fx.entity(t, "ENG-4")
 	taskID := fx.seedLinearTask(t, before.ID)
-	art, err := fx.stores.Deliverables.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, domain.Deliverable{
-		TeamID: runmode.LocalDefaultTeamID, Provider: domain.ProviderLinear, Kind: domain.DeliverableKindIssue,
-		Scope: before.Scope, Target: "ENG-4", ExternalID: is.ID, State: domain.DeliverableStateIssueUpdated,
-		DedupKey: domain.ObjectKey(domain.ProviderLinear, domain.DeliverableKindIssue, is.ID, ""),
-		EntityID: before.ID,
-	})
-	if err != nil {
-		t.Fatalf("seed deliverable: %v", err)
-	}
 
 	moved := movedToOps(is, 77)
 	fx.client.put(moved)
@@ -119,9 +110,6 @@ func TestRefreshLinear_MoveBetweenArmedTeams(t *testing.T) {
 	}
 	if task, err := fx.stores.Tasks.GetSystem(context.Background(), runmode.LocalDefaultOrgID, taskID); err != nil || task == nil || task.EntityID != before.ID {
 		t.Errorf("task = %+v err=%v, want it still on the entity", task, err)
-	}
-	if a, err := fx.stores.Deliverables.Get(context.Background(), runmode.LocalDefaultOrgID, art.ID); err != nil || a.Target != "OPS-77" || a.DedupKey != art.DedupKey {
-		t.Errorf("deliverable = %+v err=%v, want its target moved to OPS-77 and its key kept", a, err)
 	}
 	if snap := fx.snapshot(t, "OPS-77"); snap.Identifier != "OPS-77" || snap.TeamID != opsTeamID {
 		t.Errorf("snapshot = %+v, want the move committed", snap)
