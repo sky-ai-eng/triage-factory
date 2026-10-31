@@ -3,7 +3,6 @@ package memoryprovision
 import (
 	"context"
 	"errors"
-	"fmt"
 	"testing"
 	"time"
 
@@ -64,36 +63,45 @@ func (f *fixture) spanFailing() {
 	f.ageAttempts(failingFor/2 + time.Second)
 }
 
-// TestSweep_SyncsFailingGeneration: memory.generation_failing opens once the
-// org's failures span failingFor, whichever sweep made the last of them, and a
-// sweep whose attempt generates the memory resolves it.
-func TestSweep_SyncsFailingGeneration(t *testing.T) {
+// TestSyncPass_SyncsFailingGeneration: memory.generation_failing opens on the
+// first pass after the org's failures span failingFor, whichever sweep made
+// them, and the pass after an attempt generates the memory resolves it.
+func TestSyncPass_SyncsFailingGeneration(t *testing.T) {
 	rec := notifytest.Record(t)
 	f := newFixture(t)
 	f.message(roleAssistant, "", "worked on it")
 	f.end()
 	f.mgr.models = func(context.Context, string) (string, error) {
-		return "", fmt.Errorf("%w: nothing is picked", systemllm.ErrNoModel)
+		return systemllm.ModelForSettings(domain.OrgSettings{})
 	}
 
 	f.failFor()
-	f.mgr.sweep(t.Context(), 0, f.orgID)
+	f.mgr.sweep(t.Context(), 0, "")
+	f.mgr.syncPass(t.Context())
 	rec.Inactive(t, f.orgID, kinds.MemoryGenerationFailing)
 
-	// The ticker's fleet-wide form syncs every org its page worked.
+	// The ticker's fleet-wide sweep syncs nothing itself; the pass after it
+	// does.
 	f.spanFailing()
 	f.mgr.sweep(t.Context(), 0, "")
+	rec.Inactive(t, f.orgID, kinds.MemoryGenerationFailing)
+	f.mgr.syncPass(t.Context())
 	rec.Active(t, f.orgID, kinds.MemoryGenerationFailing, string(domain.MemoryAttemptErrNoModel))
 	open := rec.Open(f.orgID, kinds.MemoryGenerationFailing)
-	if p, _ := open[0].Params.(kinds.MemoryFailure); p.TasksWaiting != 1 || p.ErrorMessage != "nothing is picked" {
-		t.Errorf("params = %+v, want the one waiting task and the newest attempt's message without the sentinel's", open[0].Params)
+	if len(open) != 1 {
+		t.Fatalf("open = %+v; want the one no_model occurrence", open)
+	}
+	want := "the background jobs model setting is empty — pick one in Settings"
+	if p, _ := open[0].Params.(kinds.MemoryFailure); p.TasksWaiting != 1 || p.ErrorMessage != want {
+		t.Errorf("params = %+v, want the one waiting task and %q", open[0].Params, want)
 	}
 
 	f.mgr.models = testModels
-	f.mgr.sweep(t.Context(), 0, f.orgID)
+	f.mgr.sweep(t.Context(), 0, "")
 	if f.memory() == nil {
 		t.Fatal("the sweep after the fix generates the memory")
 	}
+	f.mgr.syncPass(t.Context())
 	rec.Inactive(t, f.orgID, kinds.MemoryGenerationFailing)
 }
 
@@ -116,10 +124,10 @@ func (h holdingCompleter) Complete(ctx context.Context, opts systemllm.CompleteO
 	return h.inner.Complete(ctx, opts)
 }
 
-// TestSweep_SyncsAsThePageGoes: a page syncs an org while it is still working
-// the org's conversations, so a slow attempt later in the page does not hold
-// back a condition an earlier one opened.
-func TestSweep_SyncsAsThePageGoes(t *testing.T) {
+// TestSyncPass_SeesAPageStillRunning: a pass syncs an org while a page is still
+// working the org's conversations, so a slow attempt later in the page does not
+// hold back a condition an earlier one opened.
+func TestSyncPass_SeesAPageStillRunning(t *testing.T) {
 	rec := notifytest.Record(t)
 	f := newFixture(t)
 	f.message(roleAssistant, "", "worked on it")
@@ -155,44 +163,33 @@ func TestSweep_SyncsAsThePageGoes(t *testing.T) {
 		defer close(done)
 		f.mgr.sweep(t.Context(), 0, "")
 	}()
-	waitFor(t, func() bool { return len(rec.Open(f.orgID, kinds.MemoryGenerationFailing)) == 1 })
+	waitFor(t, func() bool {
+		f.mgr.syncPass(t.Context())
+		return len(rec.Open(f.orgID, kinds.MemoryGenerationFailing)) == 1
+	})
 	close(released)
 	<-done
 	rec.Active(t, f.orgID, kinds.MemoryGenerationFailing, string(domain.MemoryAttemptErrProviderError))
 }
 
-// TestSweepLoop_ResyncsWhatNoSweepReaches: the doorbell's attempt that
-// settles an org's last owed memory syncs nothing, and no later sweep's page
-// names the org, so the loop's resync is what resolves its row.
-func TestSweepLoop_ResyncsWhatNoSweepReaches(t *testing.T) {
+// TestSyncLoop_ResolvesARowNoAttemptReaches: a row open in an org that owes
+// nothing has no attempt left to touch the org, as on a brain that took over
+// after the sync that would have resolved it never ran. The loop's pass
+// reaches it through OpenOrgs.
+func TestSyncLoop_ResolvesARowNoAttemptReaches(t *testing.T) {
 	rec := notifytest.Record(t)
 	f := newFixture(t)
-	f.message(roleAssistant, "", "worked on it")
-	f.end()
-	f.fake.err = errors.New("500 from upstream")
-	f.failFor()
-	f.mgr.sweep(t.Context(), 0, f.orgID)
-	f.spanFailing()
-	f.mgr.sweep(t.Context(), 0, f.orgID)
-	rec.Active(t, f.orgID, kinds.MemoryGenerationFailing, string(domain.MemoryAttemptErrProviderError))
-
-	f.fake.err = nil
-	if err := f.mgr.Fulfil(t.Context(), f.orgID, f.conversationID); err != nil {
-		t.Fatalf("Fulfil: %v", err)
-	}
-	if f.memory() == nil {
-		t.Fatal("the doorbell's attempt generates the memory")
-	}
+	kinds.MemoryGenerationFailing.Sync(t.Context(), f.orgID, []kinds.MemoryFailure{{ErrorKind: domain.MemoryAttemptErrProviderError}})
 	f.mgr.sweep(t.Context(), 0, "")
 	rec.Active(t, f.orgID, kinds.MemoryGenerationFailing, string(domain.MemoryAttemptErrProviderError))
 
 	// A second manager: the fixture's is already running, and its loop reads
-	// resyncEvery, so setting it there would race.
-	resyncing := f.newManager(nil)
-	resyncing.resyncEvery = 10 * time.Millisecond
+	// syncEvery, so setting it there would race.
+	syncing := f.newManager(nil)
+	syncing.syncEvery = 10 * time.Millisecond
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	resyncing.Run(ctx, time.Hour)
+	syncing.Run(ctx, time.Hour)
 	waitFor(t, func() bool { return len(rec.Open(f.orgID, kinds.MemoryGenerationFailing)) == 0 })
 }
 

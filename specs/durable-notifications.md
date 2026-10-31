@@ -97,9 +97,9 @@ kinds.JiraDiscoveryFailing.Sync(ctx, orgID, failing, keep...)
 // ticket that can't reach a status the project still has, does neither
 kinds.JiraMirrorFailing.Set(ctx, orgID, kinds.JiraMirrorFor(rule, issueKey), true)
 
-// internal/memoryprovision/sweep.go — as the sweep works an org's owed memories,
-// and every minute in each org MemoryGenerationFailing.OpenOrgs names; the store
-// read applies the debounce and the window
+// internal/memoryprovision/failing.go — every 30 seconds, in each org an attempt
+// has closed in since and each org MemoryGenerationFailing.OpenOrgs names; the
+// store read applies the debounce and the window
 kinds.MemoryGenerationFailing.Sync(ctx, orgID, kinds.MemoryFailuresFor(failing))
 
 // internal/routing — the conflict TFAC-518 surfaces
