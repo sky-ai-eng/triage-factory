@@ -40,7 +40,7 @@ type ArtifactStore interface {
 	// conflict, updates the existing row's mutable fields (state, target,
 	// details_json, updated_at) and keeps its conversation_id and team_id: a
 	// row belongs to the conversation that created it. A kind many
-	// conversations act on (a branch, an issue, a review draft) carries the
+	// conversations act on (a branch, a Jira or Linear issue) carries the
 	// acting conversation in its key (domain.Artifact), so another
 	// conversation's act on the same object inserts a row of its own. This is
 	// the one writer all of Sub-epic A shares: the same PR seen via exec and

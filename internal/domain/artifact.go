@@ -19,8 +19,9 @@ import (
 //
 // What a row stands for depends on the kind. A pull request, comment or
 // message row is the object TF wrote, one row per object, owned by the
-// conversation that wrote it. A branch, a Jira or Linear issue, and a review
-// draft are objects many conversations act on, so their key ends in the acting
+// conversation that wrote it. A review draft is one conversation's own, staged
+// TF-side, so its key names that conversation. A branch and a Jira or Linear
+// issue are objects many conversations act on, so their key ends in the acting
 // conversation's id and each conversation that acts on one gets a row of its
 // own: a run is credited with its own push or issue update, rather than the
 // act landing on the row of whichever run touched the object first.
@@ -263,11 +264,11 @@ func ArtifactProviders() []string {
 //     site as well, which is the shape stored keys hold. A rename moves the
 //     row's Target without touching its key.
 //   - anchor: an optional stable sub-discriminator appended when resource
-//     alone isn't unique — a comment's id on its issue, or, for a kind many
-//     conversations act on (a review draft, a Jira or Linear issue), the
-//     acting conversation's id. A branch takes both its ref and its
-//     conversation (BranchDedupKey). An issue acted on outside any run has no
-//     conversation and no anchor.
+//     alone isn't unique — a comment's id on its issue, the conversation that
+//     owns a review draft, or the conversation acting on a Jira or Linear
+//     issue. A branch takes both its ref and its conversation
+//     (BranchDedupKey). An issue acted on outside any run has no conversation
+//     and no anchor.
 //
 // Examples:
 //

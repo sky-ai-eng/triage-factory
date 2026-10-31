@@ -95,7 +95,7 @@ func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artif
 	// Letting team_id follow the last writer while conversation_id stayed
 	// pinned to the first would desync the two and mis-scope the artifact out
 	// of its owning team's reads. A kind many conversations act on (a branch,
-	// an issue, a review draft) keys on the acting conversation, so another
+	// a Jira or Linear issue) keys on the acting conversation, so another
 	// conversation's act on one inserts a row of its own rather than landing
 	// here.
 	row := s.q.QueryRowContext(ctx, `
