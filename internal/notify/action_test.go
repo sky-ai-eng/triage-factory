@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/url"
 	"slices"
 	"strings"
@@ -118,6 +119,10 @@ func TestHref_Render(t *testing.T) {
 		{"https://ghe.example.com@evil.example/", false},
 		{"/orgs/x/org", false},
 		{"javascript:alert(1)", false},
+		{"https://example.com/jira/../admin/reset", false},
+		{"https://example.com/jira/%2e%2e/admin", false},
+		{"https://example.com/jira/..%5cadmin", false},
+		{"https://example.com/jira/./browse/ENG-1", false},
 	} {
 		got, err := External(c.url).render(org, false, configuredHosts(settings))
 		if c.ok && (err != nil || got != c.url) {
@@ -262,6 +267,32 @@ func TestLocal_ActionsAreStoredRendered(t *testing.T) {
 	}
 }
 
+// A Sync member whose link is refused is skipped, not the pass: the others
+// write, and its key is kept, so its open row is neither bumped nor resolved.
+func TestLocal_SyncSkipsAnUnrenderedMember(t *testing.T) {
+	stores, _, _ := localBackend(t)
+	ctx := context.Background()
+	org, user := runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID
+	if _, err := stores.Orgs.SetSourceBaseURL(ctx, org, "github", "https://github.com"); err != nil {
+		t.Fatalf("set the GitHub base URL: %v", err)
+	}
+	good := func(id string) externalParams { return externalParams{ID: id, URL: "https://github.com/acme/" + id} }
+	externalCondition.Sync(ctx, org, []externalParams{good("a"), good("b"), good("c")})
+
+	count := failureCounter(t)
+	externalCondition.Sync(ctx, org, []externalParams{good("a"), {ID: "b", URL: "https://elsewhere.example/b"}})
+	seen := map[string]int{}
+	for _, n := range open(rows(t, stores, org, user, externalCondition)) {
+		seen[n.Key] = n.SeenCount
+	}
+	if want := map[string]int{"a": 2, "b": 1}; !maps.Equal(seen, want) {
+		t.Errorf("open rows' seen counts = %v; want %v: a bumped, b left as it was, c resolved", seen, want)
+	}
+	if n := count()[externalCondition.Name()]; n != 1 {
+		t.Errorf("failures counted = %d; want 1 for the refused member", n)
+	}
+}
+
 // recordingHandler registers a handler for actionCondition's "retry" that
 // keeps its calls and answers resolved and err.
 func recordingHandler(t *testing.T, resolved bool, err error) *[]ActionCall[testParams] {
@@ -350,6 +381,19 @@ func TestLocal_RunAction(t *testing.T) {
 	}
 	if admin.asked != 1 {
 		t.Errorf("one caller asked the org-admin question %d times; want once", admin.asked)
+	}
+
+	// Resolved: the fix no longer applies, to anyone.
+	calls = recordingHandler(t, true, nil)
+	views, err = caller.Actions(ctx, all[0])
+	if err != nil || views[1].Allowed == nil || *views[1].Allowed {
+		t.Errorf("Actions on a resolved row = %+v, %v; want retry disallowed", views, err)
+	}
+	if err := caller.RunAction(ctx, all[0], "retry"); !errors.Is(err, ErrConditionResolved) {
+		t.Errorf("RunAction on a resolved row: err = %v; want ErrConditionResolved", err)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("the handler ran %d times on a resolved row", len(*calls))
 	}
 }
 

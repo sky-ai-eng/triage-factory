@@ -3,6 +3,7 @@ package notify
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -21,6 +22,12 @@ const origin = domain.NotificationOriginSystem
 // clearSourceLabel is the kind ClearSource's failures are counted under: no
 // one kind failed, and the source is in the log line rather than the metric.
 const clearSourceLabel = "clear_source"
+
+// errUnrendered marks a member whose actions could not be rendered: one the
+// write refuses, or one whose host check could not read the org. It is that
+// member's params at fault rather than the call's, so Sync skips the member
+// and writes the rest.
+var errUnrendered = errors.New("actions not rendered")
 
 // engine is the sink Install builds: each verb resolves its audiences, writes
 // in one transaction, and pings the rows that opened, escalated or resolved.
@@ -51,8 +58,16 @@ func (e *engine) Sync(ctx context.Context, sk sink.Kind, orgID string, active []
 	r := e.resolution(orgID)
 	var occs []occurrence
 	at := map[string]int{}
+	var unrendered []string
 	for _, p := range active {
 		occ, err := e.prepare(ctx, k, r, p, nil)
+		if errors.Is(err, errUnrendered) {
+			// One member's rows are at fault, not the pass: the rest still
+			// write, and its key is kept so its open row is left as it was.
+			e.fail(k.name, orgID, err)
+			unrendered = append(unrendered, k.key(p))
+			continue
+		}
 		if err != nil {
 			e.fail(k.name, orgID, err)
 			return
@@ -66,10 +81,11 @@ func (e *engine) Sync(ctx context.Context, sk sink.Kind, orgID string, active []
 		at[occ.key] = len(occs)
 		occs = append(occs, occ)
 	}
-	keys := make([]string, len(occs))
-	for i, occ := range occs {
-		keys[i] = occ.key
+	keys := make([]string, 0, len(occs)+len(unrendered))
+	for _, occ := range occs {
+		keys = append(keys, occ.key)
 	}
+	keys = append(keys, unrendered...)
 	e.commit(ctx, k.name, orgID, func(tx db.NotificationStore) ([]domain.Notification, error) {
 		var changed []domain.Notification
 		for _, occ := range occs {
@@ -142,7 +158,7 @@ func (e *engine) prepare(ctx context.Context, k *kind, r *resolution, p any, exp
 		c := k.render(p, to)
 		stored, err := renderActions(k.lifecycle, to, c.Actions, r.orgID, e.b.Local, r.checkExternal(ctx))
 		if err != nil {
-			return occurrence{}, fmt.Errorf("actions for a %s row: %w", to.Scope, err)
+			return occurrence{}, fmt.Errorf("%w: actions for a %s row: %w", errUnrendered, to.Scope, err)
 		}
 		var actions json.RawMessage
 		if len(stored) > 0 {

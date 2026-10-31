@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -22,7 +23,7 @@ type routes struct{}
 // OrgSettings is the org's settings: GitHub, Jira and Linear access, polling,
 // the background-jobs model. Multi mode has them on /org's Settings tab; local
 // mode, which has no /org page, on /settings.
-func (routes) OrgSettings() Href { return Href{route: &orgSettingsRoute} }
+func (routes) OrgSettings() Href { return Href{route: orgSettingsRoute} }
 
 // route is a page of the SPA. multi is its path under /orgs/{org_id}; local is
 // its path in local mode's route table, "" when local mode has no such page.
@@ -33,12 +34,20 @@ type route struct {
 	local string
 }
 
-var orgSettingsRoute = route{name: "org_settings", multi: "/org?tab=settings", local: "/settings"}
+var orgSettingsRoute = newRoute("org_settings", "/org?tab=settings", "/settings")
 
 // routeTable is every route Routes builds. Renaming a page is an edit here and
 // in frontend/src/main.tsx; TestNotifyRoutesAreSPARoutes fails until the two
 // agree.
-var routeTable = []*route{&orgSettingsRoute}
+var routeTable []*route
+
+// newRoute declares a route and enters it in routeTable, so no page Routes
+// builds is missing from the table the test reads.
+func newRoute(name, multi, local string) *route {
+	r := &route{name: name, multi: multi, local: local}
+	routeTable = append(routeTable, r)
+	return r
+}
 
 // SPARoute is one entry of the route table.
 type SPARoute struct{ Name, Multi, Local string }
@@ -93,6 +102,13 @@ func (h Href) render(orgID string, local bool, checkHost func(*url.URL) error) (
 		u, err := url.Parse(h.external)
 		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil {
 			return "", fmt.Errorf("external link %q is not an absolute http(s) URL without credentials", h.external)
+		}
+		// A browser resolves these before it requests the page, so a path
+		// that passes the base-path check could still land outside the base.
+		if strings.Contains(u.Path, `\`) || slices.ContainsFunc(strings.Split(u.Path, "/"), func(seg string) bool {
+			return seg == "." || seg == ".."
+		}) {
+			return "", fmt.Errorf("external link %q has a dot segment or a backslash in its path", h.external)
 		}
 		if err := checkHost(u); err != nil {
 			return "", err

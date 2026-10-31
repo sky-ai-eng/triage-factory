@@ -19,6 +19,9 @@ var (
 	// ErrActionForbidden: the caller lacks the permission the action
 	// declares. The route answers 403.
 	ErrActionForbidden = errors.New("notify: the caller lacks the action's permission")
+	// ErrConditionResolved: the row's condition has resolved, so the actions
+	// that fix it no longer apply. The route answers 409.
+	ErrConditionResolved = errors.New("notify: the condition has resolved")
 )
 
 // ActionCall is what an invoke action's handler is given: the row's org, the
@@ -159,13 +162,15 @@ type ActionView struct {
 	Label   string `json:"label"`
 	Href    string `json:"href,omitempty"`
 	Confirm string `json:"confirm,omitempty"`
-	// Allowed is set on an invoke action: whether this caller may run it here.
+	// Allowed is set on an invoke action: whether this caller may run it here
+	// and now.
 	Allowed *bool `json:"allowed,omitempty"`
 }
 
 // Actions returns n's actions for the caller. An invoke action is allowed when
-// the caller holds the permission it declares and this process has its
-// handler, which is exactly when RunAction would run it.
+// its condition is still open, the caller holds the permission it declares,
+// and this process has its handler, which is exactly when RunAction would run
+// it.
 func (c *Caller) Actions(ctx context.Context, n domain.Notification) ([]ActionView, error) {
 	if n.OrgID != c.orgID {
 		return nil, fmt.Errorf("notification %s is in org %s, not the caller's %s", n.ID, n.OrgID, c.orgID)
@@ -178,7 +183,7 @@ func (c *Caller) Actions(ctx context.Context, n domain.Notification) ([]ActionVi
 	for i, a := range stored {
 		v := ActionView{ID: a.ID, Type: string(a.Type), Label: a.Label, Href: a.Href, Confirm: a.Confirm}
 		if a.Type == invokeAction {
-			ok := handlerFor(n.Kind, a.ID) != nil
+			ok := n.ResolvedAt == nil && handlerFor(n.Kind, a.ID) != nil
 			if ok {
 				if ok, err = c.may(ctx, a.Requires, n.Audience); err != nil {
 					return nil, err
@@ -219,6 +224,9 @@ func (c *Caller) RunAction(ctx context.Context, n domain.Notification, actionID 
 	}
 	if !ok {
 		return ErrActionForbidden
+	}
+	if n.ResolvedAt != nil {
+		return ErrConditionResolved
 	}
 	resolved, err := h(ctx, n, c.userID)
 	if err != nil {
