@@ -90,7 +90,7 @@ var JiraDiscoveryFailing = notify.Condition(notify.ConditionSpec[JiraProject]{
 	Dismissible: true,
 	Key:         func(p JiraProject) string { return p.JiraProjectID },
 	Audience:    notify.TeamsArmingJiraProject(func(p JiraProject) string { return p.JiraProjectID }, notify.Admins),
-	Render: func(p JiraProject, _ notify.Recipient) notify.Content {
+	Render: func(p JiraProject, to notify.Recipient) notify.Content {
 		project := "a project"
 		if p.ProjectKey != "" {
 			project = "project " + p.ProjectKey
@@ -100,7 +100,9 @@ var JiraDiscoveryFailing = notify.Condition(notify.ConditionSpec[JiraProject]{
 			Body: "Jira refuses a query Triage Factory finds this project's new issues with, so new work from " +
 				"it is being missed. Usually a status named in a team's rules for the project no longer exists " +
 				"in Jira, or the Jira credential can no longer see the project.",
-			Actions: []notify.Action{notify.Link("Open Jira status rules", notify.Routes.TeamJira())},
+			// Each row is for one of the arming teams, so it links to that
+			// team's rules.
+			Actions: []notify.Action{notify.Link("Open Jira status rules", notify.Routes.TeamJiraRules(to.TeamID))},
 		}
 	},
 	Example: JiraProject{JiraProjectID: "00000000-0000-0000-0000-000000000000", ProjectKey: "SKY"},
