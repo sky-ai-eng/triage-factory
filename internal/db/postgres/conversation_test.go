@@ -303,17 +303,17 @@ func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID stri
 				t.Fatalf("collapse claim times: %v", err)
 			}
 		},
-		Artifact: func(t *testing.T, conversationID, kind, state, detailsJSON string) string {
+		Deliverable: func(t *testing.T, conversationID, kind, state, detailsJSON string) string {
 			t.Helper()
 			id := uuid.New().String()
 			if _, err := conn.Exec(`
-				INSERT INTO artifacts (id, org_id, conversation_id, team_id, provider, scope, kind, target,
+				INSERT INTO deliverables (id, org_id, conversation_id, team_id, provider, scope, kind, target,
 				                       state, dedup_key, details_json)
 				VALUES ($1, $2, $3,
 				        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
 				        'github', 'https://github.com', $4, 'o/r#7', $5, $6, $7)
 			`, id, orgID, conversationID, kind, state, id, detailsJSON); err != nil {
-				t.Fatalf("seed artifact: %v", err)
+				t.Fatalf("seed deliverable: %v", err)
 			}
 			return id
 		},
@@ -1289,17 +1289,17 @@ func TestConversationStore_Postgres_PRCoherenceTargets(t *testing.T) {
 		extra := dbtest.PRCoherenceSeeder{
 			PendingReview: func(t *testing.T, conversationID, host, repo string, prNumber int, prNodeID string) {
 				t.Helper()
-				a := domain.NewReviewArtifact(repo, prNumber, prNodeID, "head-sha", conversationID)
+				a := domain.NewReviewDeliverable(repo, prNumber, prNodeID, "head-sha", conversationID)
 				a.ConversationID, a.Scope = conversationID, host
 				a.OrgID, a.TeamID = orgID, teamID
-				pr, err := stores.Entities.GetByExternalIDSystem(ctx, orgID, domain.ArtifactProviderGitHub, host, prNodeID)
+				pr, err := stores.Entities.GetByExternalIDSystem(ctx, orgID, domain.ProviderGitHub, host, prNodeID)
 				if err != nil {
 					t.Fatalf("read the reviewed PR's entity: %v", err)
 				}
 				if pr != nil {
 					a.EntityID = pr.ID
 				}
-				if _, err := stores.Artifacts.UpsertSystem(ctx, orgID, a); err != nil {
+				if _, err := stores.Deliverables.UpsertSystem(ctx, orgID, a); err != nil {
 					t.Fatalf("seed pending review: %v", err)
 				}
 			},

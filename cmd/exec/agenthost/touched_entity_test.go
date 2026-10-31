@@ -29,12 +29,12 @@ func TestResolveTouchedEntity_MapsProviderAndTarget(t *testing.T) {
 	}{
 		{
 			name:       "github PR target → pr entity",
-			coord:      entityCoordinate{provider: domain.ArtifactProviderGitHub, target: "octo/repo#18", url: "https://github.com/octo/repo/pull/18"},
+			coord:      entityCoordinate{provider: domain.ProviderGitHub, target: "octo/repo#18", url: "https://github.com/octo/repo/pull/18"},
 			wantEntity: true, wantSource: "github", wantKind: "pr",
 		},
 		{
 			name: "jira issue target with its id → issue entity",
-			coord: entityCoordinate{provider: domain.ArtifactProviderJira, target: "SKY-123", externalID: "10123", url: "https://x/browse/SKY-123",
+			coord: entityCoordinate{provider: domain.ProviderJira, target: "SKY-123", externalID: "10123", url: "https://x/browse/SKY-123",
 				container: domain.EntityContainer{JiraProject: domain.JiraProjectRef{ID: "10000", Key: "SKY"}}},
 			wantEntity: true, wantSource: "jira", wantKind: "issue",
 		},
@@ -42,20 +42,20 @@ func TestResolveTouchedEntity_MapsProviderAndTarget(t *testing.T) {
 			// A key alone names whichever issue holds it now; nothing is
 			// resolved, or minted, on one.
 			name:  "jira issue target without an id is skipped",
-			coord: entityCoordinate{provider: domain.ArtifactProviderJira, target: "SKY-124"},
+			coord: entityCoordinate{provider: domain.ProviderJira, target: "SKY-124"},
 		},
 		{
-			// An artifact recorded on another site names an issue the org's
+			// A deliverable recorded on another site names an issue the org's
 			// current site does not have.
 			name:  "jira coordinate from another site is skipped",
-			coord: entityCoordinate{provider: domain.ArtifactProviderJira, target: "SKY-125", externalID: "10125", scope: "https://other.example.com"},
+			coord: entityCoordinate{provider: domain.ProviderJira, target: "SKY-125", externalID: "10125", scope: "https://other.example.com"},
 		},
 		{
 			// A bare owner/repo target is repo-level — this is also a branch
 			// push's shape (branchPushAction stamps Provider="github" with a
 			// repo-level Target), so it covers that skip too.
 			name:  "github repo-level target is skipped",
-			coord: entityCoordinate{provider: domain.ArtifactProviderGitHub, target: "octo/repo"},
+			coord: entityCoordinate{provider: domain.ProviderGitHub, target: "octo/repo"},
 		},
 		{
 			// PR-shaped target that WOULD resolve under github — proves the skip
@@ -105,7 +105,7 @@ func TestResolveTouchedEntity_MapsProviderAndTarget(t *testing.T) {
 
 	// Idempotent: resolving an already-known target returns the same id and
 	// creates no duplicate (octo/repo#18 was created by the first subtest).
-	pr := entityCoordinate{provider: domain.ArtifactProviderGitHub, target: "octo/repo#18"}
+	pr := entityCoordinate{provider: domain.ProviderGitHub, target: "octo/repo#18"}
 	first, err := resolveTouchedEntityInfo(ctx, stores, info, pr)
 	if err != nil {
 		t.Fatalf("resolveTouchedEntity (idempotent): %v", err)
@@ -127,7 +127,7 @@ func TestResolveTouchedEntity_PRInAnUntrackedRepository(t *testing.T) {
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
 
-	id, err := resolveTouchedEntityInfo(ctx, stores, info, entityCoordinate{provider: domain.ArtifactProviderGitHub, target: "upstream/lib#3"})
+	id, err := resolveTouchedEntityInfo(ctx, stores, info, entityCoordinate{provider: domain.ProviderGitHub, target: "upstream/lib#3"})
 	if err != nil || id == "" {
 		t.Fatalf("resolveTouchedEntityInfo = %q, %v; want a new entity", id, err)
 	}
@@ -168,7 +168,7 @@ func TestResolveTouchedEntity_FollowsAMovedJiraIssue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := resolveTouchedEntityInfo(ctx, stores, info, entityCoordinate{provider: domain.ArtifactProviderJira, target: "NEW-7", externalID: "10007"})
+	id, err := resolveTouchedEntityInfo(ctx, stores, info, entityCoordinate{provider: domain.ProviderJira, target: "NEW-7", externalID: "10007"})
 	if err != nil || id != moved.ID {
 		t.Fatalf("resolve = %q err=%v, want the existing entity %s", id, err, moved.ID)
 	}
@@ -182,7 +182,7 @@ func TestResolveTouchedEntity_FollowsAMovedJiraIssue(t *testing.T) {
 		t.Fatal(err)
 	}
 	dbseed.ForgetIssueID(t, conn, legacy.ID)
-	id, err = resolveTouchedEntityInfo(ctx, stores, info, entityCoordinate{provider: domain.ArtifactProviderJira, target: "SKY-8", externalID: "10008"})
+	id, err = resolveTouchedEntityInfo(ctx, stores, info, entityCoordinate{provider: domain.ProviderJira, target: "SKY-8", externalID: "10008"})
 	if err != nil || id != legacy.ID {
 		t.Fatalf("resolve = %q err=%v, want the id-less row %s", id, err, legacy.ID)
 	}
@@ -196,7 +196,7 @@ func TestResolveTouchedEntity_FollowsAMovedJiraIssue(t *testing.T) {
 // key it is stored under, and leaves the key alone — a pull request's key
 // moves with its repository's rename, and the touch may spell either name. A
 // touch by an id-less row's key learns the id. The write funnel takes the id
-// off a pull request artifact's node id, and links the artifact to the entity
+// off a pull request deliverable's node id, and links the deliverable to the entity
 // under that entity's key.
 func TestResolveTouchedEntity_FindsAPullRequestByItsNodeID(t *testing.T) {
 	stores, info := newCaptureStores(t, true)
@@ -208,7 +208,7 @@ func TestResolveTouchedEntity_FindsAPullRequestByItsNodeID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := resolveTouchedEntityInfo(ctx, stores, info, entityCoordinate{provider: domain.ArtifactProviderGitHub, target: "octo/new#7", externalID: "PR_7"})
+	id, err := resolveTouchedEntityInfo(ctx, stores, info, entityCoordinate{provider: domain.ProviderGitHub, target: "octo/new#7", externalID: "PR_7"})
 	if err != nil || id != stored.ID {
 		t.Fatalf("resolve = %q err=%v, want the existing entity %s", id, err, stored.ID)
 	}
@@ -223,7 +223,7 @@ func TestResolveTouchedEntity_FindsAPullRequestByItsNodeID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err = resolveTouchedEntityInfo(ctx, stores, info, entityCoordinate{provider: domain.ArtifactProviderGitHub, target: "octo/repo#8", externalID: "PR_8"})
+	id, err = resolveTouchedEntityInfo(ctx, stores, info, entityCoordinate{provider: domain.ProviderGitHub, target: "octo/repo#8", externalID: "PR_8"})
 	if err != nil || id != stub.ID {
 		t.Fatalf("resolve = %q err=%v, want the stub %s", id, err, stub.ID)
 	}
@@ -231,12 +231,12 @@ func TestResolveTouchedEntity_FindsAPullRequestByItsNodeID(t *testing.T) {
 		t.Errorf("stub = %+v, want it to learn PR_8", got)
 	}
 
-	pr := domain.NewPullRequestArtifact("octo/new", 7, "PR_7", "feature", "main", "https://github.com/octo/new/pull/7", "Widget", "", false)
-	if got := resolveArtifactEntity(ctx, stores, info, &pr, domain.EntityContainer{}); got.entityID != stored.ID {
-		t.Errorf("funnel resolved %q, want the entity carrying the artifact's node id %s", got.entityID, stored.ID)
+	pr := domain.NewPullRequestDeliverable("octo/new", 7, "PR_7", "feature", "main", "https://github.com/octo/new/pull/7", "Widget", "", false)
+	if got := resolveDeliverableEntity(ctx, stores, info, &pr, domain.EntityContainer{}); got.entityID != stored.ID {
+		t.Errorf("funnel resolved %q, want the entity carrying the deliverable's node id %s", got.entityID, stored.ID)
 	}
 	if pr.EntityID != stored.ID || pr.Target != "octo/old#7" {
-		t.Errorf("artifact = entity %q target %q, want linked to %s under its key octo/old#7", pr.EntityID, pr.Target, stored.ID)
+		t.Errorf("deliverable = entity %q target %q, want linked to %s under its key octo/old#7", pr.EntityID, pr.Target, stored.ID)
 	}
 }
 

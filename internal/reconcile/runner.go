@@ -8,7 +8,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 )
 
-// Runner reconciles one org's non-terminal artifacts against GitHub as a
+// Runner reconciles one org's non-terminal deliverables against GitHub as a
 // background process, mirroring the scorer's Runner (internal/ai/runner.go). It
 // exposes a Trigger the system:poll: subscriber signals after a GitHub poll
 // completes; a single-flight gate collapses overlapping triggers so a long cycle

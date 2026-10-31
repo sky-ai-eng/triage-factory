@@ -115,8 +115,8 @@ func RunRepoRetireConformance(t *testing.T, mk RepoRenameFactory) {
 		if wt, err := s.ConversationWorktrees.GetByRepoRefSystem(ctx, orgID, fx.conversationID, fx.repo.ID, "pr-12"); err != nil || wt == nil {
 			t.Errorf("worktree ledger row = %+v, err=%v; want it kept", wt, err)
 		}
-		if a, err := s.Artifacts.Get(ctx, orgID, fx.artifactID); err != nil || a == nil || a.Target != "octo/api#12" {
-			t.Errorf("artifact = %+v, err=%v; want it kept as it was", a, err)
+		if a, err := s.Deliverables.Get(ctx, orgID, fx.deliverableID); err != nil || a == nil || a.Target != "octo/api#12" {
+			t.Errorf("deliverable = %+v, err=%v; want it kept as it was", a, err)
 		}
 		if got := seed.CountTasks(t); got != tasksBefore {
 			t.Errorf("tasks went %d -> %d; a retire mints and closes none", tasksBefore, got)
@@ -296,10 +296,10 @@ func RunRepoRetireConformance(t *testing.T, mk RepoRenameFactory) {
 		if ent, _ := s.Entities.GetSystem(ctx, orgID, newEntity.ID); ent == nil || ent.SourceID != "octo/api#12" {
 			t.Errorf("new repository's entity = %+v, want octo/api#12 untouched", ent)
 		}
-		// Its own artifact, keyed on its pull request's node id, moves with
+		// Its own deliverable, keyed on its pull request's node id, moves with
 		// it too.
-		if a, _ := s.Artifacts.Get(ctx, orgID, fx.artifactID); a == nil || a.Target != "octo/api-legacy#12" {
-			t.Errorf("artifact = %+v, want it moved to octo/api-legacy#12 with the restored row", a)
+		if a, _ := s.Deliverables.Get(ctx, orgID, fx.deliverableID); a == nil || a.Target != "octo/api-legacy#12" {
+			t.Errorf("deliverable = %+v, want it moved to octo/api-legacy#12 with the restored row", a)
 		}
 		// And so do its audit-ledger links, which reference its entity and its
 		// registry row, while every record keeps the name it was made under.
@@ -428,8 +428,8 @@ func RunRepoRetireConformance(t *testing.T, mk RepoRenameFactory) {
 		if ent, _ := s.Entities.GetSystem(ctx, orgID, fx.entityID); ent == nil || ent.State != "active" || ent.SourceID != "octo/api-v1#12" {
 			t.Errorf("entity = %+v, want it active under octo/api-v1#12", ent)
 		}
-		if a, _ := s.Artifacts.Get(ctx, orgID, fx.artifactID); a == nil || a.Target != "octo/api-v1#12" {
-			t.Errorf("artifact = %+v, want it moved with the repository", a)
+		if a, _ := s.Deliverables.Get(ctx, orgID, fx.deliverableID); a == nil || a.Target != "octo/api-v1#12" {
+			t.Errorf("deliverable = %+v, want it moved with the repository", a)
 		}
 	})
 
@@ -470,12 +470,12 @@ func RunRepoRetireConformance(t *testing.T, mk RepoRenameFactory) {
 
 // retireFixture is the state a repository leaves behind in TF: octo/api,
 // tracked by the seed team under GitHub id retireOldID, with an active pull
-// request entity, a worktree ledger row and a pull request artifact.
+// request entity, a worktree ledger row and a pull request deliverable.
 type retireFixture struct {
 	repo           domain.Repository
 	entityID       string
 	conversationID string
-	artifactID     string
+	deliverableID  string
 	// prAction and pushAction are the dedup keys of the audit-ledger rows of
 	// the pull request's creation (about its entity) and a branch push (about
 	// the repository's registry row).
@@ -511,26 +511,27 @@ func seedRetireFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 	}); err != nil {
 		t.Fatalf("seed worktree: %v", err)
 	}
-	artifact, err := s.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
-		TeamID: seed.TeamID, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest, Scope: TestGitHubHost,
+	deliverable, err := s.Deliverables.UpsertSystem(ctx, orgID, domain.Deliverable{
+		TeamID: seed.TeamID, Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindPullRequest, Scope: TestGitHubHost,
 		Target: domain.PullRequestTarget("octo/api", 12), ExternalID: "12", NodeID: retireOldPRNodeID,
-		State: domain.ArtifactStatePROpen, DedupKey: domain.PullRequestDedupKey(retireOldPRNodeID),
+		State: domain.DeliverableStatePROpen, DedupKey: domain.PullRequestDedupKey(retireOldPRNodeID),
 		EntityID: entity.ID,
 	})
 	if err != nil {
-		t.Fatalf("seed artifact: %v", err)
+		t.Fatalf("seed deliverable: %v", err)
 	}
 	prAction, pushAction := "retire-created-"+suffix, "retire-pushed-"+suffix
 	for _, act := range []domain.ExternalAction{
 		{Action: domain.ActionPRCreated, Target: "octo/api#12", EntityID: entity.ID, URL: "https://github.com/octo/api/pull/12", DedupKey: prAction},
 		{Action: domain.ActionBranchPushed, Target: "octo/api", RepositoryID: repo.ID, URL: "https://github.com/octo/api/tree/fix", DedupKey: pushAction},
 	} {
-		act.TeamID, act.Provider, act.Scope, act.Credential = seed.TeamID, domain.ArtifactProviderGitHub, TestGitHubHost, domain.CredentialGitHubApp
+		act.TeamID, act.Provider, act.Scope, act.Credential = seed.TeamID, domain.ProviderGitHub, TestGitHubHost, domain.CredentialGitHubApp
+		act.PerformedBy = domain.PerformedByAgent
 		if err := s.ExternalActions.RecordSystem(ctx, orgID, act); err != nil {
 			t.Fatalf("seed ledger row %s: %v", act.DedupKey, err)
 		}
 	}
-	return retireFixture{repo: *repo, entityID: entity.ID, conversationID: conversationID, artifactID: artifact.ID, prAction: prAction, pushAction: pushAction}
+	return retireFixture{repo: *repo, entityID: entity.ID, conversationID: conversationID, deliverableID: deliverable.ID, prAction: prAction, pushAction: pushAction}
 }
 
 // reassignedObservation is GitHub reporting octo/api under retireNewID.

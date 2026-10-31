@@ -49,18 +49,18 @@ func coherenceFixture(t *testing.T, eventType string, metadata any) (*Spawner, s
 // coherencePRNodeID is the node id of the fixture's pull request, o/r#7.
 const coherencePRNodeID = "PR_kwDOcoherence7"
 
-// seedPendingReview upserts a pending review artifact of the pull request
+// seedPendingReview upserts a pending review deliverable of the pull request
 // whose node id is prNodeID, its target spelled repo#pr, for conversationID,
 // with the given start-review head and (optional) reconciled comment SHAs.
 func seedPendingReview(t *testing.T, s *Spawner, conversationID, repo string, pr int, prNodeID, headSHA string, commentSHAs ...string) {
 	t.Helper()
-	a := domain.NewReviewArtifact(repo, pr, prNodeID, headSHA, conversationID)
+	a := domain.NewReviewDeliverable(repo, pr, prNodeID, headSHA, conversationID)
 	if len(commentSHAs) > 0 {
-		d, _ := domain.ParseReviewArtifactDetails(a.DetailsJSON)
+		d, _ := domain.ParseReviewDeliverableDetails(a.DetailsJSON)
 		for _, sha := range commentSHAs {
-			d.StagedComments = append(d.StagedComments, domain.ReviewArtifactComment{Path: "a.go", Body: "x", CommitSHA: sha})
+			d.StagedComments = append(d.StagedComments, domain.ReviewDeliverableComment{Path: "a.go", Body: "x", CommitSHA: sha})
 		}
-		a.DetailsJSON = domain.MarshalReviewArtifactDetails(d)
+		a.DetailsJSON = domain.MarshalReviewDeliverableDetails(d)
 	}
 	a.ConversationID = conversationID
 	a.OrgID = runmode.LocalDefaultOrgID
@@ -68,14 +68,14 @@ func seedPendingReview(t *testing.T, s *Spawner, conversationID, repo string, pr
 	a = dbtest.InOrgScope(t, s.orgs, runmode.LocalDefaultOrgID, a)
 	// Linked to the entity carrying the node id, as the recording links it;
 	// a node id no entity carries leaves the draft unlinked.
-	reviewed, err := s.entities.GetByExternalIDSystem(context.Background(), runmode.LocalDefaultOrgID, domain.ArtifactProviderGitHub, a.Scope, prNodeID)
+	reviewed, err := s.entities.GetByExternalIDSystem(context.Background(), runmode.LocalDefaultOrgID, domain.ProviderGitHub, a.Scope, prNodeID)
 	if err != nil {
 		t.Fatalf("read the reviewed PR's entity: %v", err)
 	}
 	if reviewed != nil {
 		a.EntityID = reviewed.ID
 	}
-	if _, err := s.artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a); err != nil {
+	if _, err := s.deliverables.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a); err != nil {
 		t.Fatalf("seed pending review: %v", err)
 	}
 }

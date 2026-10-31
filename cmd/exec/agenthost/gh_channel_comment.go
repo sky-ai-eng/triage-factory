@@ -12,8 +12,8 @@ import (
 
 // RecordGHChannelWrite records one write the real-`gh` channel forwarded: the
 // audit row every write leaves (GHChannelWriteAction) and, for a comment the
-// write posted or deleted, that comment's `comment` artifact
-// (ghChannelCommentArtifact), composed in one write through the shared funnel.
+// write posted or deleted, that comment's `comment` deliverable
+// (ghChannelCommentDeliverable), composed in one write through the shared funnel.
 //
 // Exported because local mode records it without a LocalClient in hand (the
 // delegate holds stores + ConversationInfo), while the sandbox path reaches it
@@ -22,26 +22,26 @@ import (
 // credential is the tier the injector attached upstream. Best-effort.
 func RecordGHChannelWrite(ctx context.Context, stores db.Stores, info ConversationInfo, obs ghwrite.Observation, credential string) {
 	act := GHChannelWriteAction(obs, credential)
-	RecordExternalWrite(ctx, stores, info, ghChannelCommentArtifact(ctx, stores, info, obs), act)
+	RecordExternalWrite(ctx, stores, info, ghChannelCommentDeliverable(ctx, stores, info, obs), act)
 }
 
-// ghChannelCommentArtifact builds the `comment` artifact a comment write
+// ghChannelCommentDeliverable builds the `comment` deliverable a comment write
 // through the channel leaves, or nil when the write is not an accepted post or
 // delete of a comment, or names no comment a row can be keyed on. An edit
 // leaves none: the row stores no body, so an edit has nothing on it to change,
 // and its audit row records it.
 //
 // The row is the one the exec verbs write for the same comment, keyed on the
-// comment's numbering and its number (domain.GitHubCommentDedupKey), so a
+// comment's numbering and its number (domain.GitHubCommentKey), so a
 // comment posted through one door and deleted through the other is one row. A
 // create's number is in its response; a REST delete names it in its path. A
 // GraphQL delete names the comment by node id alone, and its response never
 // returns the number, so the row is found by the node id the post stored. A
-// node id no row carries leaves no artifact: TF did not post that comment, or
+// node id no row carries leaves no deliverable: TF did not post that comment, or
 // its post was never recorded, and the audit row still records the delete. A
 // delete keyed by number leaves none for a comment TF did not post either
 // (RecordExternalWrite).
-func ghChannelCommentArtifact(ctx context.Context, stores db.Stores, info ConversationInfo, obs ghwrite.Observation) *domain.Artifact {
+func ghChannelCommentDeliverable(ctx context.Context, stores db.Stores, info ConversationInfo, obs ghwrite.Observation) *domain.Deliverable {
 	if !obs.Succeeded() {
 		return nil
 	}
@@ -52,15 +52,15 @@ func ghChannelCommentArtifact(ctx context.Context, stores db.Stores, info Conver
 	var state string
 	switch shape.Action {
 	case domain.ActionCommentPosted:
-		state = domain.ArtifactStateCommentPosted
+		state = domain.DeliverableStateCommentPosted
 	case domain.ActionCommentDeleted, domain.ActionReviewCommentDeleted:
-		state = domain.ArtifactStateCommentDeleted
+		state = domain.DeliverableStateCommentDeleted
 	default:
 		return nil
 	}
-	a := &domain.Artifact{
-		Provider: domain.ArtifactProviderGitHub,
-		Kind:     domain.ArtifactKindComment,
+	a := &domain.Deliverable{
+		Provider: domain.ProviderGitHub,
+		Kind:     domain.DeliverableKindComment,
 		NodeID:   shape.NodeID,
 		URL:      obs.URL,
 		State:    state,
@@ -77,15 +77,15 @@ func ghChannelCommentArtifact(ctx context.Context, stores db.Stores, info Conver
 
 	if id, err := strconv.ParseInt(shape.ExternalID, 10, 64); err == nil && id > 0 {
 		a.ExternalID = strconv.FormatInt(id, 10)
-		a.DedupKey = domain.GitHubCommentDedupKey(shape.Comment, id)
+		a.DedupKey = domain.GitHubCommentKey(shape.Comment, id)
 		return a
 	}
 	if a.NodeID == "" {
 		return nil
 	}
-	existing := commentArtifactByNodeID(ctx, stores, info, a.NodeID)
+	existing := commentDeliverableByNodeID(ctx, stores, info, a.NodeID)
 	if existing == nil {
-		agenthostLog.Debug("gh channel comment write names a node id no artifact carries; recording the action only",
+		agenthostLog.Debug("gh channel comment write names a node id no deliverable carries; recording the action only",
 			"conversation", info.ConversationID, "action", shape.Action)
 		return nil
 	}
@@ -94,11 +94,11 @@ func ghChannelCommentArtifact(ctx context.Context, stores db.Stores, info Conver
 	return a
 }
 
-// commentArtifactByNodeID finds the GitHub comment artifact carrying nodeID in
+// commentDeliverableByNodeID finds the GitHub comment deliverable carrying nodeID in
 // the org's current GitHub scope, or nil when none does or the read failed. A
-// failure is logged and costs the artifact, never the audit row beside it.
-func commentArtifactByNodeID(ctx context.Context, stores db.Stores, info ConversationInfo, nodeID string) *domain.Artifact {
-	if stores.Artifacts == nil || stores.Orgs == nil {
+// failure is logged and costs the deliverable, never the audit row beside it.
+func commentDeliverableByNodeID(ctx context.Context, stores db.Stores, info ConversationInfo, nodeID string) *domain.Deliverable {
+	if stores.Deliverables == nil || stores.Orgs == nil {
 		return nil
 	}
 	settings, err := stores.Orgs.GetSettingsSystem(ctx, info.OrgID)
@@ -107,17 +107,17 @@ func commentArtifactByNodeID(ctx context.Context, stores db.Stores, info Convers
 			"conversation", info.ConversationID, "error", err)
 		return nil
 	}
-	scope := domain.ExternalObjectScope(domain.ArtifactProviderGitHub, settings)
+	scope := domain.ExternalObjectScope(domain.ProviderGitHub, settings)
 	if scope == "" {
 		return nil
 	}
-	found, err := stores.Artifacts.GetByNodeIDSystem(ctx, info.OrgID, scope, nodeID)
+	found, err := stores.Deliverables.GetByNodeIDSystem(ctx, info.OrgID, scope, nodeID)
 	if err != nil {
 		agenthostLog.Warn("gh channel comment write: node id lookup failed",
 			"conversation", info.ConversationID, "error", err)
 		return nil
 	}
-	if found == nil || found.Provider != domain.ArtifactProviderGitHub || found.Kind != domain.ArtifactKindComment {
+	if found == nil || found.Provider != domain.ProviderGitHub || found.Kind != domain.DeliverableKindComment {
 		return nil
 	}
 	return found

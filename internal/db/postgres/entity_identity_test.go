@@ -158,7 +158,7 @@ func pgEntityReferents(t *testing.T, conn *sql.DB, entityID string) dbtest.Entit
 		"events":                       `SELECT COUNT(*) FROM events WHERE entity_id = $1`,
 		"event_queue":                  `SELECT COUNT(*) FROM event_queue WHERE entity_id = $1`,
 		"pending_firings":              `SELECT COUNT(*) FROM pending_firings WHERE entity_id = $1`,
-		"artifacts":                    `SELECT COUNT(*) FROM artifacts WHERE entity_id = $1`,
+		"deliverables":                 `SELECT COUNT(*) FROM deliverables WHERE entity_id = $1`,
 		"conversation_memory_entities": `SELECT COUNT(*) FROM conversation_memory_entities WHERE entity_id = $1`,
 		"entity_links":                 `SELECT COUNT(*) FROM entity_links WHERE from_entity_id = $1 OR to_entity_id = $1`,
 	} {

@@ -16,7 +16,7 @@ import "github.com/sky-ai-eng/triage-factory/internal/logging"
 //	worktree       bare-clone bootstrap
 //	repoprofile    repo-profiling manager construction
 //	sandbox        orphan-sandbox reap at boot (multi mode)
-//	reconcile      artifact-reconciler manager construction + poll gating
+//	reconcile      deliverable-reconciler manager construction + poll gating
 //	reachcache     reachable-repo cache manager construction
 var (
 	aiLog          = logging.Component("ai")

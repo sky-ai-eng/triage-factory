@@ -21,7 +21,7 @@ import (
 
 // pendingApprovalFixture installs the full FK chain for a task whose delegated
 // conversation has COMPLETED (terminal) while leaving an unresolved review
-// artifact behind — a finalized pending review plus the agent-side memory row. Returns (taskID, conversationID, reviewID). Centralized here
+// deliverable behind — a finalized pending review plus the agent-side memory row. Returns (taskID, conversationID, reviewID). Centralized here
 // so each teardown test exercises the shape the task-level resolve-all gesture
 // is meant to clean up: agent finished, wrote memory, prepared a review, the
 // human then dragged the card to Done / Queue / dismissed it instead of
@@ -90,36 +90,36 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, conversatio
 		t.Fatalf("RecordEntityTouchSystem: %v", err)
 	}
 
-	// A finalized review draft parks the conversation: a review artifact in
+	// A finalized review draft parks the conversation: a review deliverable in
 	// state=pending whose ready sentinel (details.review_event) is set,
 	// with the agent's draft snapshotted into details.proposed. Abandon
 	// flips it to dismissed (no GitHub call — the draft is local). Returns
-	// the artifact id.
+	// the deliverable id.
 	line := 1
-	reviewArt := domain.NewReviewArtifact("owner/repo", 7, "PR_node_pa", "headsha_pa", "r_pa")
+	reviewArt := domain.NewReviewDeliverable("owner/repo", 7, "PR_node_pa", "headsha_pa", "r_pa")
 	reviewArt.ConversationID = "r_pa"
 	reviewArt.OrgID = runmode.LocalDefaultOrgID
 	reviewArt.TeamID = runmode.LocalDefaultTeamID
-	rd, _ := domain.ParseReviewArtifactDetails(reviewArt.DetailsJSON)
+	rd, _ := domain.ParseReviewDeliverableDetails(reviewArt.DetailsJSON)
 	rd.ReviewBody = "agent draft body"
 	rd.ReviewEvent = "APPROVE"
-	rd.Proposed = domain.ReviewArtifactProposed{
+	rd.Proposed = domain.ReviewDeliverableProposed{
 		Body:     "agent draft body",
 		Event:    "APPROVE",
-		Comments: []domain.ReviewArtifactComment{{ID: "c_pa", Path: "x.go", Line: &line, Body: "agent comment"}},
+		Comments: []domain.ReviewDeliverableComment{{ID: "c_pa", Path: "x.go", Line: &line, Body: "agent comment"}},
 	}
-	reviewArt.DetailsJSON = domain.MarshalReviewArtifactDetails(rd)
-	stored, err := sqlitestore.New(database).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(database).Orgs, runmode.LocalDefaultOrgID, reviewArt))
+	reviewArt.DetailsJSON = domain.MarshalReviewDeliverableDetails(rd)
+	stored, err := sqlitestore.New(database).Deliverables.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(database).Orgs, runmode.LocalDefaultOrgID, reviewArt))
 	if err != nil {
-		t.Fatalf("seed review artifact: %v", err)
+		t.Fatalf("seed review deliverable: %v", err)
 	}
 	return "00000000-0000-4000-8000-000000000024", "r_pa", stored.ID
 }
 
 // assertPendingApprovalCleanedUp checks every post-condition the task-level
 // resolve-all teardown is meant to deliver: task at the expected post-state,
-// the unresolved review artifact flipped to dismissed, and the conversation's
-// own memory untouched — the teardown resolves artifacts, it does not write
+// the unresolved review deliverable flipped to dismissed, and the conversation's
+// own memory untouched — the teardown resolves deliverables, it does not write
 // memory. wantTaskStatus lets callers vary the assertion across the requeue
 // (`queued`), dismiss (`dismissed`) and complete (`done`) paths.
 //
@@ -149,21 +149,21 @@ func assertPendingApprovalCleanedUp(
 		t.Error("conversation no longer concluded (teardown must not flip conversation lifecycle)")
 	}
 
-	// The review artifact must be flipped to dismissed (its proposed snapshot is
+	// The review deliverable must be flipped to dismissed (its proposed snapshot is
 	// preserved for the audit ledger — abandonment retires the GitHub review, not
-	// the record). reviewID here is the artifact id.
+	// the record). reviewID here is the deliverable id.
 	var artState string
 	if err := database.QueryRow(
-		`SELECT state FROM artifacts WHERE id = ?`, reviewID,
+		`SELECT state FROM deliverables WHERE id = ?`, reviewID,
 	).Scan(&artState); err != nil {
-		t.Fatalf("scan review artifact state: %v", err)
+		t.Fatalf("scan review deliverable state: %v", err)
 	}
-	if artState != domain.ArtifactStateReviewDismissed {
-		t.Errorf("review artifact state = %q, want %q (dismissed on abandon)", artState, domain.ArtifactStateReviewDismissed)
+	if artState != domain.DeliverableStateReviewDismissed {
+		t.Errorf("review deliverable state = %q, want %q (dismissed on abandon)", artState, domain.DeliverableStateReviewDismissed)
 	}
 
 	// The agent's own memory is the conversation's account of what it tried;
-	// the teardown resolves artifacts and must not touch it.
+	// the teardown resolves deliverables and must not touch it.
 	mem, err := sqlitestore.New(database).TaskMemory.GetForConversationSystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)
 	if err != nil {
 		t.Fatalf("GetForConversationSystem: %v", err)
@@ -191,19 +191,19 @@ func seedCallerGesture(t *testing.T, database *sql.DB, taskID, action string) {
 }
 
 // seedCarriedDraftPR stages a draft pull request on conversationID — the other
-// unresolved artifact a stopped run leaves behind, and the one whose survival
+// unresolved deliverable a stopped run leaves behind, and the one whose survival
 // across a boundary actually costs something: the next attempt pushes to it
-// instead of opening a second PR for the same task. Returns the artifact id.
+// instead of opening a second PR for the same task. Returns the deliverable id.
 func seedCarriedDraftPR(t *testing.T, database *sql.DB, conversationID string) string {
 	t.Helper()
-	art := domain.NewPullRequestArtifact("owner/repo", 7, "PR_node_pa", "tf/pa", "main",
+	art := domain.NewPullRequestDeliverable("owner/repo", 7, "PR_node_pa", "tf/pa", "main",
 		"https://github.com/owner/repo/pull/7", "agent title", "agent body", true)
 	art.ConversationID = conversationID
 	art.OrgID = runmode.LocalDefaultOrgID
 	art.TeamID = runmode.LocalDefaultTeamID
-	stored, err := sqlitestore.New(database).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(database).Orgs, runmode.LocalDefaultOrgID, art))
+	stored, err := sqlitestore.New(database).Deliverables.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(database).Orgs, runmode.LocalDefaultOrgID, art))
 	if err != nil {
-		t.Fatalf("seed draft PR artifact: %v", err)
+		t.Fatalf("seed draft PR deliverable: %v", err)
 	}
 	return stored.ID
 }
@@ -238,19 +238,19 @@ func assertPendingApprovalCarried(
 	}
 
 	var reviewState string
-	if err := database.QueryRow(`SELECT state FROM artifacts WHERE id = ?`, reviewID).Scan(&reviewState); err != nil {
-		t.Fatalf("scan review artifact state: %v", err)
+	if err := database.QueryRow(`SELECT state FROM deliverables WHERE id = ?`, reviewID).Scan(&reviewState); err != nil {
+		t.Fatalf("scan review deliverable state: %v", err)
 	}
-	if reviewState != domain.ArtifactStateReviewPending {
-		t.Errorf("review artifact state = %q, want %q (a staged review survives every boundary but task end)", reviewState, domain.ArtifactStateReviewPending)
+	if reviewState != domain.DeliverableStateReviewPending {
+		t.Errorf("review deliverable state = %q, want %q (a staged review survives every boundary but task end)", reviewState, domain.DeliverableStateReviewPending)
 	}
 
 	var prState string
-	if err := database.QueryRow(`SELECT state FROM artifacts WHERE id = ?`, prID).Scan(&prState); err != nil {
-		t.Fatalf("scan draft PR artifact state: %v", err)
+	if err := database.QueryRow(`SELECT state FROM deliverables WHERE id = ?`, prID).Scan(&prState); err != nil {
+		t.Fatalf("scan draft PR deliverable state: %v", err)
 	}
-	if prState != domain.ArtifactStatePRDraft {
-		t.Errorf("draft PR artifact state = %q, want %q (the next attempt pushes to this PR)", prState, domain.ArtifactStatePRDraft)
+	if prState != domain.DeliverableStatePRDraft {
+		t.Errorf("draft PR deliverable state = %q, want %q (the next attempt pushes to this PR)", prState, domain.DeliverableStatePRDraft)
 	}
 
 	// No audit row either: nothing was written to GitHub, so nothing belongs
@@ -275,13 +275,13 @@ func assertPendingApprovalCarried(
 	}
 }
 
-// TestHandleUndo_CarriesArtifactsBackToTheQueue is the swipe-toast UX path:
+// TestHandleUndo_CarriesDeliverablesBackToTheQueue is the swipe-toast UX path:
 // Cards user dismissed/claimed the task, the agent ran and left a draft PR and
 // a staged review behind, the user hits Cmd-Z (or the toast's Undo button). The
 // task returns to the queue carrying both — an undo reverses a gesture, and
 // closing the PR the agent opened is not part of the gesture it reverses. The
 // swipe audit row is still recorded, since this is a swipe undo.
-func TestHandleUndo_CarriesArtifactsBackToTheQueue(t *testing.T) {
+func TestHandleUndo_CarriesDeliverablesBackToTheQueue(t *testing.T) {
 	s := newTestServer(t)
 	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
 	prID := seedCarriedDraftPR(t, s.db, conversationID)
@@ -308,11 +308,11 @@ func TestHandleUndo_CarriesArtifactsBackToTheQueue(t *testing.T) {
 	}
 }
 
-// TestHandleRequeue_CarriesArtifactsBackToTheQueue is the parallel for the
+// TestHandleRequeue_CarriesDeliverablesBackToTheQueue is the parallel for the
 // state-driven path: Board's drag-to-Queue, the "Return to queue" button. Same
 // carry, and NO swipe row — drag/click gestures aren't swipes and shouldn't
 // muddy the swipe analytics.
-func TestHandleRequeue_CarriesArtifactsBackToTheQueue(t *testing.T) {
+func TestHandleRequeue_CarriesDeliverablesBackToTheQueue(t *testing.T) {
 	s := newTestServer(t)
 	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
 	prID := seedCarriedDraftPR(t, s.db, conversationID)
@@ -339,12 +339,12 @@ func TestHandleRequeue_CarriesArtifactsBackToTheQueue(t *testing.T) {
 	}
 }
 
-// TestTaskDelegate_CarriesArtifactsToTheNextRun is the third non-terminal
+// TestTaskDelegate_CarriesDeliverablesToTheNextRun is the third non-terminal
 // boundary: handing the task back to the agent keeps the draft PR the last run
 // opened, so the blueprint that starts next pushes to it instead of opening a
 // second PR for the same task. The test server wires no spawner, so the route
 // stops right after the teardown decision — which is the whole thing under test.
-func TestTaskDelegate_CarriesArtifactsToTheNextRun(t *testing.T) {
+func TestTaskDelegate_CarriesDeliverablesToTheNextRun(t *testing.T) {
 	s := newTestServer(t)
 	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
 	prID := seedCarriedDraftPR(t, s.db, conversationID)
@@ -381,7 +381,7 @@ func TestTaskPatch_DismissCleansUpPendingApprovalConversation(t *testing.T) {
 // awaiting approval. The complete swipe action flips the task to
 // 'done' (so the card lands in the Done column rather than
 // disappearing from the board, the way dismiss makes it) but reuses
-// the same cleanup — review artifact flipped to dismissed, the completed
+// the same cleanup — review deliverable flipped to dismissed, the completed
 // conversation left untouched, the agent's own memory preserved.
 func TestTaskPatch_CompleteCleansUpPendingApprovalConversation(t *testing.T) {
 	s := newTestServer(t)
@@ -396,15 +396,15 @@ func TestTaskPatch_CompleteCleansUpPendingApprovalConversation(t *testing.T) {
 
 	assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID, "done")
 
-	// The draft PR is the half a close has to reach outward for: the artifact
+	// The draft PR is the half a close has to reach outward for: the deliverable
 	// flips to closed and the org-credential write it authorizes is audited
 	// against the user who closed the task.
 	var prState string
-	if err := s.db.QueryRow(`SELECT state FROM artifacts WHERE id = ?`, prID).Scan(&prState); err != nil {
-		t.Fatalf("scan draft PR artifact state: %v", err)
+	if err := s.db.QueryRow(`SELECT state FROM deliverables WHERE id = ?`, prID).Scan(&prState); err != nil {
+		t.Fatalf("scan draft PR deliverable state: %v", err)
 	}
-	if prState != domain.ArtifactStatePRClosed {
-		t.Errorf("draft PR artifact state = %q, want %q", prState, domain.ArtifactStatePRClosed)
+	if prState != domain.DeliverableStatePRClosed {
+		t.Errorf("draft PR deliverable state = %q, want %q", prState, domain.DeliverableStatePRClosed)
 	}
 	var actor sql.NullString
 	if err := s.db.QueryRow(
@@ -418,13 +418,13 @@ func TestTaskPatch_CompleteCleansUpPendingApprovalConversation(t *testing.T) {
 	}
 }
 
-// TestTaskClaim_CarriesArtifactsToTheClaimant is the takeover half: a person
+// TestTaskClaim_CarriesDeliverablesToTheClaimant is the takeover half: a person
 // claiming a task the agent was working takes the work over, not a cleared
 // desk. The agent's draft PR and staged review are exactly what they are
-// claiming — they finish the PR, or dismiss it through the artifact verbs, and
+// claiming — they finish the PR, or dismiss it through the deliverable verbs, and
 // either way the decision is theirs to make rather than one the claim makes for
 // them.
-func TestTaskClaim_CarriesArtifactsToTheClaimant(t *testing.T) {
+func TestTaskClaim_CarriesDeliverablesToTheClaimant(t *testing.T) {
 	s := newTestServer(t)
 	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
 	prID := seedCarriedDraftPR(t, s.db, conversationID)
@@ -452,7 +452,7 @@ func TestTaskClaim_CarriesArtifactsToTheClaimant(t *testing.T) {
 }
 
 // TestTaskClaim_WithoutPendingApprovalIsNoOp pins the plain path: a claim on a
-// task with no conversation and no artifact writes nothing beyond the claim
+// task with no conversation and no deliverable writes nothing beyond the claim
 // itself, so the queue → claim flow used by Cards.tsx and the Board's
 // queue → you drag is undisturbed by the stop pass in front of it.
 func TestTaskClaim_WithoutPendingApprovalIsNoOp(t *testing.T) {
@@ -1353,17 +1353,17 @@ func TestHandleUndo_ClearsClaimColumns(t *testing.T) {
 	}
 }
 
-// TestTeardownTaskArtifacts_Idempotent calls the teardown twice against the
-// same task. The first call resolves the review artifact (→ dismissed); the
-// second finds nothing unresolved left and is a no-op — the artifact stays
+// TestTeardownTaskDeliverables_Idempotent calls the teardown twice against the
+// same task. The first call resolves the review deliverable (→ dismissed); the
+// second finds nothing unresolved left and is a no-op — the deliverable stays
 // dismissed, the agent's memory stays its own, and the completed conversation
 // stays completed across both (a resolve never flips conversation lifecycle).
-func TestTeardownTaskArtifacts_Idempotent(t *testing.T) {
+func TestTeardownTaskDeliverables_Idempotent(t *testing.T) {
 	s := newTestServer(t)
 	taskID, conversationID, _ := pendingApprovalFixture(t, s.db)
 
-	s.teardownTaskArtifacts(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID)
-	s.teardownTaskArtifacts(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID)
+	s.teardownTaskDeliverables(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID)
+	s.teardownTaskDeliverables(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID)
 
 	if !storedConcluded(t, s.db, conversationID) {
 		t.Error("conversation no longer concluded after second call (teardown must not flip conversation lifecycle)")
@@ -1377,26 +1377,26 @@ func TestTeardownTaskArtifacts_Idempotent(t *testing.T) {
 	}
 }
 
-// TestTeardownTaskArtifacts_FailureHoldsArtifactForRetry is the regression for
+// TestTeardownTaskDeliverables_FailureHoldsDeliverableForRetry is the regression for
 // the all-or-nothing contract: if a DB op inside the teardown tx fails
-// transiently, the whole batch rolls back, leaving the artifact unresolved
+// transiently, the whole batch rolls back, leaving the deliverable unresolved
 // (still pending) and the conversation untouched — a subsequent call retries
 // cleanly.
 //
-// We force a failure by temporarily renaming the artifacts table — the teardown's
+// We force a failure by temporarily renaming the deliverables table — the teardown's
 // ListByConversation (and the dismiss upsert) reference it by name and the whole tx rolls
 // back. After restoring it, a second call resolves the review.
-func TestTeardownTaskArtifacts_FailureHoldsArtifactForRetry(t *testing.T) {
+func TestTeardownTaskDeliverables_FailureHoldsDeliverableForRetry(t *testing.T) {
 	s := newTestServer(t)
 	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
 
-	// Sabotage: rename the artifacts table so the teardown's ListByConversation fails with
+	// Sabotage: rename the deliverables table so the teardown's ListByConversation fails with
 	// "no such table" and the tx rolls back before any flip.
-	if _, err := s.db.Exec(`ALTER TABLE artifacts RENAME TO artifacts_temp`); err != nil {
-		t.Fatalf("rename artifacts table: %v", err)
+	if _, err := s.db.Exec(`ALTER TABLE deliverables RENAME TO deliverables_temp`); err != nil {
+		t.Fatalf("rename deliverables table: %v", err)
 	}
 
-	s.teardownTaskArtifacts(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID)
+	s.teardownTaskDeliverables(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID)
 
 	// The conversation is untouched (never flipped — teardown doesn't touch its status).
 	if !storedConcluded(t, s.db, conversationID) {
@@ -1404,18 +1404,18 @@ func TestTeardownTaskArtifacts_FailureHoldsArtifactForRetry(t *testing.T) {
 	}
 
 	// Heal the table; the next call must resolve the still-pending review.
-	if _, err := s.db.Exec(`ALTER TABLE artifacts_temp RENAME TO artifacts`); err != nil {
-		t.Fatalf("restore artifacts table: %v", err)
+	if _, err := s.db.Exec(`ALTER TABLE deliverables_temp RENAME TO deliverables`); err != nil {
+		t.Fatalf("restore deliverables table: %v", err)
 	}
 
-	s.teardownTaskArtifacts(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID)
+	s.teardownTaskDeliverables(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID)
 
 	var artState string
-	if err := s.db.QueryRow(`SELECT state FROM artifacts WHERE id = ?`, reviewID).Scan(&artState); err != nil {
-		t.Fatalf("scan review artifact after retry: %v", err)
+	if err := s.db.QueryRow(`SELECT state FROM deliverables WHERE id = ?`, reviewID).Scan(&artState); err != nil {
+		t.Fatalf("scan review deliverable after retry: %v", err)
 	}
-	if artState != domain.ArtifactStateReviewDismissed {
-		t.Errorf("review artifact state = %q after retry; want %q (review should be dismissed)", artState, domain.ArtifactStateReviewDismissed)
+	if artState != domain.DeliverableStateReviewDismissed {
+		t.Errorf("review deliverable state = %q after retry; want %q (review should be dismissed)", artState, domain.DeliverableStateReviewDismissed)
 	}
 }
 
@@ -1528,10 +1528,10 @@ func assertRequeueStoppedTheRun(t *testing.T, database *sql.DB, taskID, conversa
 }
 
 // TestHandleRequeue_StopsTheRunWorkingTheTask is the route's whole contract
-// against a live run. Requeue used to run artifact teardown, the Jira
+// against a live run. Requeue used to run deliverable teardown, the Jira
 // reversal and a broadcast, and nothing that touched the agent — so the card
 // landed back in Queued while its agent kept writing messages, kept landing
-// artifacts on a conversation whose task said nobody owned it, and the
+// deliverables on a conversation whose task said nobody owned it, and the
 // spawner's board-column recompute put the card straight back out of Queued
 // on the claim it re-derived.
 //
@@ -1591,7 +1591,7 @@ func TestHandleRequeue_TerminalConversationIsNotStopped(t *testing.T) {
 	}
 
 	// Task back in the queue, the completed conversation left completed, and
-	// its artifacts carried there with it.
+	// its deliverables carried there with it.
 	assertPendingApprovalCarried(t, s.db, taskID, conversationID, reviewID, prID, "queued")
 
 	var parkReason sql.NullString

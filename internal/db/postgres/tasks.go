@@ -679,10 +679,6 @@ func (s *taskStore) VisibilityTeams(ctx context.Context, orgID, taskID string) (
 	return visibilityTeams(ctx, s.q, taskID)
 }
 
-func (s *taskStore) VisibilityTeamsSystem(ctx context.Context, orgID, taskID string) ([]string, error) {
-	return visibilityTeams(ctx, s.admin, taskID)
-}
-
 func setOwnerTeam(ctx context.Context, q queryer, orgID, taskID, teamID string) (domain.Task, error) {
 	// Resolve the LocalDefaultTeamID sentinel to the canonical team so the
 	// teams(id) FK holds, mirroring FindOrCreate/StampAgentClaim. Only

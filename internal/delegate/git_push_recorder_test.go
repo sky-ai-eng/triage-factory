@@ -23,7 +23,7 @@ import (
 )
 
 // newRecorderStores opens an in-memory SQLite, migrates it, and seeds one
-// conversations row the artifacts FK (conversation_id) can point at, and the
+// conversations row the deliverables FK (conversation_id) can point at, and the
 // registry row of octo/repo, the repository every push here goes to —
 // mirroring the pre-push hook's own test fixture so the two writers are
 // exercised against the same store.
@@ -78,7 +78,7 @@ func registerOctoRepo(t *testing.T, stores db.Stores) string {
 }
 
 // recorderInfo is the run identity a delegated run carries — event-triggered,
-// so UpsertArtifact takes the admin-pool branch (the common case for the proxy:
+// so UpsertDeliverable takes the admin-pool branch (the common case for the proxy:
 // an auto-delegated run has no user identity).
 func recorderInfo(conversationID string) agenthost.ConversationInfo {
 	return agenthost.ConversationInfo{
@@ -103,15 +103,15 @@ func TestGitPushRecorder_RecordsBranch(t *testing.T) {
 		Status:  200,
 	})
 
-	arts, err := stores.Artifacts.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID)
+	arts, _, err := stores.Deliverables.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
 	if err != nil {
 		t.Fatalf("ListByConversation: %v", err)
 	}
 	if len(arts) != 1 {
-		t.Fatalf("got %d artifacts, want 1", len(arts))
+		t.Fatalf("got %d deliverables, want 1", len(arts))
 	}
 	a := arts[0]
-	if a.Provider != domain.ArtifactProviderGit || a.Kind != domain.ArtifactKindBranch {
+	if a.Provider != domain.ProviderGit || a.Kind != domain.DeliverableKindBranch {
 		t.Errorf("provider/kind = %q/%q, want git/branch", a.Provider, a.Kind)
 	}
 	if a.Target != "octo/repo" || a.ExternalID != "refs/heads/feature/x" {
@@ -141,25 +141,25 @@ func TestGitPushRecorder_SkipsNonBranchAndMalformed(t *testing.T) {
 	rec := gitPushRecorder(agenthost.NewLocal(stores, info), info)
 
 	// A tag isn't a branch; a 3-segment repo path isn't owner/repo. Both make
-	// NewBranchArtifact return ok=false, so the recorder skips them silently.
+	// NewBranchDeliverable return ok=false, so the recorder skips them silently.
 	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/tags/v1", NewSHA: "abc", Created: false, Status: 200})
 	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo/extra", Ref: "refs/heads/main", NewSHA: "abc", Created: false, Status: 200})
 
-	arts, err := stores.Artifacts.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID)
+	arts, _, err := stores.Deliverables.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
 	if err != nil {
 		t.Fatalf("ListByConversation: %v", err)
 	}
 	if len(arts) != 0 {
-		t.Fatalf("got %d artifacts, want 0 (tag + malformed repo are skipped)", len(arts))
+		t.Fatalf("got %d deliverables, want 0 (tag + malformed repo are skipped)", len(arts))
 	}
 }
 
 // TestGitPushRecorder_RefusedPushRecordsAuditOnly pins the outcome split: a
-// push the upstream refused (non-2xx) must NOT mint a branch artifact —
-// artifacts track only work that landed — but must leave a branch_push_failed
+// push the upstream refused (non-2xx) must NOT mint a branch deliverable —
+// deliverables track only work that landed — but must leave a branch_push_failed
 // external-action audit row carrying the attempt's sha and HTTP status, so the
 // audit log never omits an attempted external write. A subsequent successful
-// push of the same ref then lands the artifact and the branch_pushed row as
+// push of the same ref then lands the deliverable and the branch_pushed row as
 // usual (the failure row, keyed for that one act, can't swallow it).
 func TestGitPushRecorder_RefusedPushRecordsAuditOnly(t *testing.T) {
 	stores, conversationID := newRecorderStores(t)
@@ -169,12 +169,12 @@ func TestGitPushRecorder_RefusedPushRecordsAuditOnly(t *testing.T) {
 
 	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/feature/x", NewSHA: "abc123", Created: true, Status: 403})
 
-	arts, err := stores.Artifacts.ListByConversation(ctx, runmode.LocalDefaultOrgID, conversationID)
+	arts, _, err := stores.Deliverables.ListByConversation(ctx, runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
 	if err != nil {
 		t.Fatalf("ListByConversation: %v", err)
 	}
 	if len(arts) != 0 {
-		t.Fatalf("got %d artifacts for a refused push, want 0", len(arts))
+		t.Fatalf("got %d deliverables for a refused push, want 0", len(arts))
 	}
 	acts, _, err := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Action: domain.ActionBranchPushFailed})
 	if err != nil {
@@ -199,15 +199,15 @@ func TestGitPushRecorder_RefusedPushRecordsAuditOnly(t *testing.T) {
 		t.Errorf("detail = %+v, want sha=abc123 new=true http_status=403", d)
 	}
 
-	// The retry that lands: same (run, ref, sha), now a 2xx — the artifact and
+	// The retry that lands: same (run, ref, sha), now a 2xx — the deliverable and
 	// the success audit row both appear despite the earlier failure.
 	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/feature/x", NewSHA: "abc123", Created: true, Status: 200})
-	arts, err = stores.Artifacts.ListByConversation(ctx, runmode.LocalDefaultOrgID, conversationID)
+	arts, _, err = stores.Deliverables.ListByConversation(ctx, runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
 	if err != nil {
 		t.Fatalf("ListByConversation after retry: %v", err)
 	}
 	if len(arts) != 1 {
-		t.Fatalf("got %d artifacts after the successful retry, want 1", len(arts))
+		t.Fatalf("got %d deliverables after the successful retry, want 1", len(arts))
 	}
 	pushed, _, err := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Action: domain.ActionBranchPushed})
 	if err != nil {
@@ -221,7 +221,7 @@ func TestGitPushRecorder_RefusedPushRecordsAuditOnly(t *testing.T) {
 // TestGitPushRecorder_DedupConvergesWithHook proves the proxy backstop and the
 // pre-push hook converge on one row: recording the same branch twice (as the
 // hook then the proxy would for a single push) upserts in place — updating the
-// volatile head — rather than minting a second artifact.
+// volatile head — rather than minting a second deliverable.
 func TestGitPushRecorder_DedupConvergesWithHook(t *testing.T) {
 	stores, conversationID := newRecorderStores(t)
 	info := recorderInfo(conversationID)
@@ -230,12 +230,12 @@ func TestGitPushRecorder_DedupConvergesWithHook(t *testing.T) {
 	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/main", NewSHA: "aaa", Created: true, Status: 200})
 	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/main", NewSHA: "bbb", Created: false, Status: 200})
 
-	arts, err := stores.Artifacts.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID)
+	arts, _, err := stores.Deliverables.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
 	if err != nil {
 		t.Fatalf("ListByConversation: %v", err)
 	}
 	if len(arts) != 1 {
-		t.Fatalf("got %d artifacts, want 1 (same dedup_key must upsert)", len(arts))
+		t.Fatalf("got %d deliverables, want 1 (same dedup_key must upsert)", len(arts))
 	}
 	var d struct {
 		SHA string `json:"sha"`
@@ -248,7 +248,7 @@ func TestGitPushRecorder_DedupConvergesWithHook(t *testing.T) {
 
 // TestGitPushRecorder_RejectedRefInsideA200 is the refusal GitHub reports in
 // the body of a successful POST: the ref's report-status line is "ng". The
-// HTTP status says 200, and the recorder must still leave no artifact and a
+// HTTP status says 200, and the recorder must still leave no deliverable and a
 // branch_push_failed row carrying GitHub's reason and message.
 func TestGitPushRecorder_RejectedRefInsideA200(t *testing.T) {
 	stores, conversationID := newRecorderStores(t)
@@ -267,12 +267,12 @@ func TestGitPushRecorder_RejectedRefInsideA200(t *testing.T) {
 		RemoteMessage: "error: GH013: Repository rule violations found for refs/heads/feature/x.",
 	})
 
-	arts, err := stores.Artifacts.ListByConversation(ctx, runmode.LocalDefaultOrgID, conversationID)
+	arts, _, err := stores.Deliverables.ListByConversation(ctx, runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
 	if err != nil {
 		t.Fatalf("ListByConversation: %v", err)
 	}
 	if len(arts) != 0 {
-		t.Fatalf("got %d artifacts for a rejected ref, want 0", len(arts))
+		t.Fatalf("got %d deliverables for a rejected ref, want 0", len(arts))
 	}
 	pushed, _, err := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Action: domain.ActionBranchPushed})
 	if err != nil {

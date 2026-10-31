@@ -130,7 +130,7 @@ const sqliteTaskRuleOrderJoin = `
 //	0  needs you   — the task holds a conversation matching the per-conversation
 //	                 needs-you predicate: an unanswered permission prompt, or a
 //	                 conversation that is not live and still holds an unresolved
-//	                 artifact.
+//	                 deliverable.
 //	1  failed      — its newest conversation died. Nothing is coming; a human
 //	                 decides what happens next, but there is no question
 //	                 waiting on them, so it sits below tier 0.
@@ -647,10 +647,6 @@ func (s *taskStore) FindOrCreateAtUnlessEntityActiveSystem(ctx context.Context, 
 
 func (s *taskStore) SetVisibilityTeamsSystem(ctx context.Context, orgID, taskID string, teamIDs []string) error {
 	return s.SetVisibilityTeams(ctx, orgID, taskID, teamIDs)
-}
-
-func (s *taskStore) VisibilityTeamsSystem(ctx context.Context, orgID, taskID string) ([]string, error) {
-	return s.VisibilityTeams(ctx, orgID, taskID)
 }
 
 func (s *taskStore) BumpSystem(ctx context.Context, orgID, taskID, eventID string) (domain.Task, error) {

@@ -6,7 +6,7 @@ import type { Conversation, Task } from '../../types'
 // board and the card both read: a task is queued until it is being worked and
 // a conversation is attached; the scorer's summary shows in every state, a
 // run's own account never reaching the card; a queued task keeps the
-// artifacts a requeue handed back with it while showing none of the run.
+// deliverables a requeue handed back with it while showing none of the run.
 
 const NOW = Date.parse('2026-09-13T12:00:00Z')
 
@@ -45,7 +45,7 @@ describe('deriveCard lifecycle', () => {
     expect(m.command).toBeUndefined()
   })
 
-  it('keeps a queued task queued whatever conversation it carries, artifacts included', () => {
+  it('keeps a queued task queued whatever conversation it carries, deliverables included', () => {
     const m = deriveCard(
       task({ status: 'queued' }),
       conversation({
@@ -53,7 +53,7 @@ describe('deriveCard lifecycle', () => {
         CompletedAt: '2026-07-16T11:00:00Z',
         ResultSummary: 'opened a draft pull request',
         DurationMs: 252_000,
-        artifact_counts: { branch: 1, pull_request: 1 },
+        deliverable_counts: { branch: 1, pull_request: 1 },
         unresolved_pr_count: 1,
         unresolved_review_count: 0,
       }),
@@ -254,7 +254,7 @@ describe('deriveCard lifecycle', () => {
     ]
     expect(deriveCard(task(), steps[1], steps, NOW).chain).toEqual({ done: 1, total: 3 })
     expect(deriveCard(task(), steps[1], [steps[1]], NOW).chain).toBeUndefined()
-    // Returned to the queue, the task keeps its conversation's artifacts but
+    // Returned to the queue, the task keeps its conversation's deliverables but
     // not the run's shape: the steps are over.
     expect(deriveCard(task({ status: 'queued' }), steps[1], steps, NOW).chain).toBeUndefined()
   })

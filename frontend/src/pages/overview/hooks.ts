@@ -25,7 +25,7 @@ import { utcMidnightISO } from './data'
  * The hints that can move a reading on this page. The rail's curated set, plus
  * `event` (every recorded source event — the convergence's feed; poll cycles
  * burst these, which the debounce collapses to one refetch) and
- * `artifact_updated` (a PR merging moves the MERGED count without any task
+ * `deliverable_updated` (a PR merging moves the MERGED count without any task
  * necessarily changing).
  *
  * `message` is deliberately NOT here: an agent streams transcript rows
@@ -43,7 +43,7 @@ const HINTS = new Set<WSEvent['type']>([
   'conversations_updated',
   'permission_request',
   'permission_resolved',
-  'artifact_updated',
+  'deliverable_updated',
 ])
 
 const HINT_DEBOUNCE_MS = 1000
@@ -197,7 +197,7 @@ export function useConversationSets(
 /**
  * The rows' tasks, for the reference and the glyph. One list read over the
  * statuses that can carry a conversation — `queued` (a task can hold
- * artifacts and conversations there, claimed or not), `in_progress`, and
+ * deliverables and conversations there, claimed or not), `in_progress`, and
  * recent `done` (a settled run still asking) — keyed by task id for the join.
  */
 export function useTasksIndex(teamId: string, tick: number): Map<string, Task> | null {

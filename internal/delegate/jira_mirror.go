@@ -342,21 +342,22 @@ func (s *Spawner) recordMirrorAction(ctx context.Context, orgID, entityID, scope
 	}
 	if scope == "" && s.orgs != nil {
 		if set, err := s.orgs.GetSettingsSystem(ctx, orgID); err == nil {
-			scope = domain.ExternalObjectScope(domain.ArtifactProviderJira, set)
+			scope = domain.ExternalObjectScope(domain.ProviderJira, set)
 		}
 	}
 	err := s.externalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
-		TeamID:     teamID,
-		Provider:   domain.ArtifactProviderJira,
-		Scope:      scope,
-		Action:     action,
-		Target:     issueKey,
-		EntityID:   entityID,
-		ExternalID: externalID,
-		URL:        s.jiraBrowseURL(ctx, orgID, issueKey),
-		FromState:  from,
-		ToState:    to,
-		Credential: domain.CredentialJiraOrg,
+		TeamID:      teamID,
+		Provider:    domain.ProviderJira,
+		Scope:       scope,
+		Action:      action,
+		Target:      issueKey,
+		EntityID:    entityID,
+		ExternalID:  externalID,
+		URL:         s.jiraBrowseURL(ctx, orgID, issueKey),
+		FromState:   from,
+		ToState:     to,
+		Credential:  domain.CredentialJiraOrg,
+		PerformedBy: domain.PerformedBySystem,
 	})
 	if err != nil {
 		jiraLog.Warn("mirror: external-action recording failed (Jira move already applied)",

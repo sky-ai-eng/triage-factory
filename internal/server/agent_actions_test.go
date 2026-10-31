@@ -26,9 +26,9 @@ func seedConversationAction(t *testing.T, s *Server, conversationID string, a do
 }
 
 // TestHandleAgentActions pins the conversation-scoped action read — the half
-// of "what did this conversation do" that the artifact list structurally
+// of "what did this conversation do" that the deliverable list structurally
 // cannot answer. The two rows here are exactly that case: a review-thread reply
-// and a refused merge both produce no artifact, so before this endpoint a
+// and a refused merge both produce no deliverable, so before this endpoint a
 // conversation whose only external acts were these read as a conversation that
 // did nothing.
 func TestHandleAgentActions(t *testing.T) {
@@ -36,21 +36,24 @@ func TestHandleAgentActions(t *testing.T) {
 	conversationID := seedSteerConversation(t, s.db, "acts", dbtest.SeedConcluded)
 
 	seedConversationAction(t, s, conversationID, domain.ExternalAction{
-		Provider: domain.ArtifactProviderGitHub, Action: domain.ActionCommentPosted,
+		Provider: domain.ProviderGitHub, Action: domain.ActionCommentPosted,
 		Target: "octo/repo#42", ExternalID: "777",
 		URL:        "https://github.com/octo/repo/pull/42#discussion_r777",
 		Credential: domain.CredentialGitHubApp, DetailJSON: `{"in_reply_to":555}`,
+		PerformedBy: domain.PerformedByAgent,
 	})
 	seedConversationAction(t, s, conversationID, domain.ExternalAction{
-		Provider: domain.ArtifactProviderGitHub, Action: domain.ActionGHChannelWrite,
+		Provider: domain.ProviderGitHub, Action: domain.ActionGHChannelWrite,
 		Target: "octo/repo", Credential: domain.CredentialGitHubPAT,
-		DetailJSON: `{"method":"PUT","path":"/repos/octo/repo/pulls/42/merge","http_status":404,"attempted":"pr_merged"}`,
+		DetailJSON:  `{"method":"PUT","path":"/repos/octo/repo/pulls/42/merge","http_status":404,"attempted":"pr_merged"}`,
+		PerformedBy: domain.PerformedByAgent,
 	})
 	// A second conversation's action, to pin the scoping.
 	other := seedSteerConversation(t, s.db, "otheracts", dbtest.SeedConcluded)
 	seedConversationAction(t, s, other, domain.ExternalAction{
-		Provider: domain.ArtifactProviderGitHub, Action: domain.ActionBranchPushed,
+		Provider: domain.ProviderGitHub, Action: domain.ActionBranchPushed,
 		Target: "octo/repo", Credential: domain.CredentialGitHubApp,
+		PerformedBy: domain.PerformedByAgent,
 	})
 
 	page := decodeList[map[string]any](t, doJSON(t, s, http.MethodPost,
@@ -109,7 +112,7 @@ func TestHandleAgentActions_Empty(t *testing.T) {
 }
 
 // TestHandleAgentActions_UnknownConversationNotFound pins that the conversation
-// read is the authorization gate here exactly as it is for artifacts: an unknown
+// read is the authorization gate here exactly as it is for deliverables: an unknown
 // — or not-visible — conversation is a 404, never an empty list that would
 // confirm the id exists.
 func TestHandleAgentActions_UnknownConversationNotFound(t *testing.T) {
@@ -128,8 +131,9 @@ func TestHandleAgentActions_CorruptDetails(t *testing.T) {
 	s := newTestServer(t)
 	conversationID := seedSteerConversation(t, s.db, "badacts", dbtest.SeedConcluded)
 	seedConversationAction(t, s, conversationID, domain.ExternalAction{
-		Provider: domain.ArtifactProviderGitHub, Action: domain.ActionGHChannelWrite,
+		Provider: domain.ProviderGitHub, Action: domain.ActionGHChannelWrite,
 		Target: "octo/repo", Credential: domain.CredentialGitHubApp,
+		PerformedBy: domain.PerformedByAgent,
 	})
 	if _, err := s.db.Exec(`UPDATE external_actions SET detail_json='{not valid json' WHERE conversation_id=?`, conversationID); err != nil {
 		t.Fatalf("corrupt detail: %v", err)

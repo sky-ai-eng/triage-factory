@@ -108,7 +108,7 @@ func blueprintDecisionForStepConversation(runOutcome string, isFinal bool) (deci
 // CancelBlueprintRun / paused-cleanup callers have only a task (no claimed run)
 // and leave it empty — so cfg.teamID is NOT reliably set here. Any future
 // run-attributed work on the terminal path (e.g. recording a failed run's
-// artifacts, TFAC-454) must thread the team/identity explicitly rather than
+// deliverables, TFAC-454) must thread the team/identity explicitly rather than
 // trust cfg.
 func (s *Spawner) terminateBlueprint(
 	orgID, blueprintRunID, taskID, triggerType, creatorUserID string,
@@ -151,18 +151,18 @@ func (s *Spawner) terminateBlueprint(
 
 	if status == domain.BlueprintRunStatusCompleted {
 		// Completion and task-closure are independent. A clean finalization
-		// closes the task ONLY when no artifact remains unresolved; a blueprint
+		// closes the task ONLY when no deliverable remains unresolved; a blueprint
 		// that completed with an open draft PR / ready review leaves the task
 		// exactly as it is — bot-claimed and in_progress — until the last
-		// artifact is resolved (the last resolution closes it). The signal that
+		// deliverable is resolved (the last resolution closes it). The signal that
 		// a human is owed something rides the card frame and the attention
 		// order, not the lane the card sits in, so there is no column to move
 		// it to and nothing to write here. Unresolved is asked of the TASK, not
 		// of this blueprint: a draft PR carried in from an earlier engagement is
 		// unresolved work whichever run just finished.
-		if !s.taskHasUnresolvedArtifacts(bgCtx, orgID, taskID) {
+		if !s.taskHasUnresolvedDeliverables(bgCtx, orgID, taskID) {
 			// Mirror single-run behavior: a clean blueprint finalization with no
-			// unresolved artifact closes the task.
+			// unresolved deliverable closes the task.
 			var closeErr error
 			if triggerType == "manual" {
 				closeErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
@@ -379,7 +379,12 @@ func nonterminalStepSysPrompt(i, total int) string {
 // prompt) plus the non-terminal addendum (agentprompt.NonTerminalCompletion,
 // injected only for non-final steps) own the protocol; this wrapper supplies
 // only the step's context.
-func buildBlueprintStepWrapperPrompt(task domain.Task, step domain.BlueprintStep, stepPrompt *domain.Prompt, slug string, total int, nextStepName string) string {
+//
+// agentRunRoot is the run root as the agent sees it (agentproc.AgentVisibleRoot).
+// The skill's path is spelled from it in full because the agent works from
+// inside a checkout, where a path relative to the run root resolves into the
+// repository instead.
+func buildBlueprintStepWrapperPrompt(task domain.Task, step domain.BlueprintStep, stepPrompt *domain.Prompt, slug, agentRunRoot string, total int, nextStepName string) string {
 	mission := strings.TrimSpace(step.Brief)
 	if mission == "" {
 		mission = stepPrompt.Name
@@ -389,7 +394,7 @@ func buildBlueprintStepWrapperPrompt(task domain.Task, step domain.BlueprintStep
 	fmt.Fprintf(&b, "You are step %d of %d in a blueprint firing on this task.\n\n", step.StepIndex+1, total)
 	fmt.Fprintf(&b, "Task: %s\n", strings.TrimSpace(task.Title))
 	fmt.Fprintf(&b, "Mission for this step: %s\n\n", mission)
-	fmt.Fprintf(&b, "Skill slug: %q (materialized at ./.claude/skills/%s/SKILL.md)\n", slug, slug)
+	fmt.Fprintf(&b, "Skill slug: %q (materialized at %s)\n", slug, filepath.Join(agentRunRoot, ".claude", "skills", slug, "SKILL.md"))
 	isFinal := step.StepIndex+1 == total
 	fmt.Fprintf(&b, "Is final step: %v\n", isFinal)
 	if !isFinal {
@@ -640,46 +645,46 @@ func blueprintTerminalForResumedStepConversation(stepConversation *domain.Conver
 	}
 }
 
-// taskHasUnresolvedArtifacts reports whether any conversation on the task holds
-// an artifact still awaiting human resolution (a draft PR or a ready pending
-// review — domain.HasUnresolvedArtifacts). This is the derived signal that
+// taskHasUnresolvedDeliverables reports whether any conversation on the task holds
+// a deliverable still awaiting human resolution (a draft PR or a ready pending
+// review — domain.HasUnresolvedDeliverables). This is the derived signal that
 // decides whether a completed blueprint closes its task (none unresolved) or
 // leaves it open for a human (≥1 unresolved). Runs from a detached goroutine
 // with no request claims, so it reads via the admin-pool `...System` readers.
 //
 // The scope is the task rather than the run that just finished, because
-// artifacts outlive the engagement that produced them: a task requeued or
+// deliverables outlive the engagement that produced them: a task requeued or
 // re-delegated with a draft PR still open carries that PR into its next run,
 // and asking only the finishing blueprint's own steps would call the task
-// resolved with the draft still sitting on GitHub. One artifact query per
+// resolved with the draft still sitting on GitHub. One deliverable query per
 // conversation, so the cost is the task's own history, never org-wide.
 //
 // Fails OPEN: any read error returns true. Closing a task that still has an
-// unresolved artifact would silently drop the approval workflow (and is hard to
+// unresolved deliverable would silently drop the approval workflow (and is hard to
 // recover); leaving a task open spuriously is self-correcting on the next
 // derivation and recoverable by a human. So on error we assume "may be
 // unresolved" rather than risk the destructive direction.
 //
 // The unwired-store / empty-id guard below is NOT a read error and does not
-// trigger fail-open: a nil artifact store (a test fixture without artifact
-// tracking) or an empty task id means there are no artifacts to be unresolved,
+// trigger fail-open: a nil deliverable store (a test fixture without deliverable
+// tracking) or an empty task id means there are no deliverables to be unresolved,
 // so it returns false.
-func (s *Spawner) taskHasUnresolvedArtifacts(ctx context.Context, orgID, taskID string) bool {
-	if s.artifacts == nil || s.conversations == nil || taskID == "" {
+func (s *Spawner) taskHasUnresolvedDeliverables(ctx context.Context, orgID, taskID string) bool {
+	if s.deliverables == nil || s.conversations == nil || taskID == "" {
 		return false
 	}
 	convs, err := s.conversations.ListForTaskSystem(ctx, orgID, taskID)
 	if err != nil {
-		blueprintLog.Warn("list task conversations for unresolved-artifact check failed; treating as unresolved (fail open)", "task", taskID, "error", err)
+		blueprintLog.Warn("list task conversations for unresolved-deliverable check failed; treating as unresolved (fail open)", "task", taskID, "error", err)
 		return true
 	}
 	for _, conv := range convs {
-		arts, err := s.artifacts.ListByConversationSystem(ctx, orgID, conv.ID)
+		arts, err := s.deliverables.ListByConversationSystem(ctx, orgID, conv.ID)
 		if err != nil {
-			blueprintLog.Warn("list artifacts for unresolved check failed; treating as unresolved (fail open)", "conversation", conv.ID, "error", err)
+			blueprintLog.Warn("list deliverables for unresolved check failed; treating as unresolved (fail open)", "conversation", conv.ID, "error", err)
 			return true
 		}
-		if domain.HasUnresolvedArtifacts(arts) {
+		if domain.HasUnresolvedDeliverables(arts) {
 			return true
 		}
 	}
@@ -690,16 +695,16 @@ func (s *Spawner) taskHasUnresolvedArtifacts(ctx context.Context, orgID, taskID 
 // pull request resolved somewhere other than the approval click: a human
 // marking it ready on GitHub, or an agent doing so because its mission asked.
 // The click's own handler closes the task the same way; this is the same rule
-// for a resolution nobody clicked, called by the artifact reconciler when it
+// for a resolution nobody clicked, called by the deliverable reconciler when it
 // observes the transition. Closes the conversation's task iff its blueprint
 // run finished cleanly and no conversation on the task — any attempt, not just
-// this blueprint's steps — still holds an unresolved artifact. Anything else is
+// this blueprint's steps — still holds an unresolved deliverable. Anything else is
 // a no-op: an aborted or failed blueprint keeps its task open for a human, and
 // so does a sibling draft nobody has answered yet.
 //
 // It also stands down on a task that has moved past this run: one no agent
-// holds any more, or one whose newest blueprint run is not this one. An
-// artifact outlives the engagement that produced it, so a resolution can land
+// holds any more, or one whose newest blueprint run is not this one. A
+// deliverable outlives the engagement that produced it, so a resolution can land
 // on a task somebody has since self-claimed or re-delegated, and closing on it
 // would take the task to done under whoever holds it now. Both conditions
 // earn their place — a re-delegation leaves the task bot-claimed and only the
@@ -740,7 +745,7 @@ func (s *Spawner) CloseTaskIfTerminalAndResolved(ctx context.Context, orgID, con
 	if !isNewest {
 		return
 	}
-	if s.taskHasUnresolvedArtifacts(ctx, orgID, br.TaskID) {
+	if s.taskHasUnresolvedDeliverables(ctx, orgID, br.TaskID) {
 		return
 	}
 	// CloseSystem's WHERE is state-guarded, so a task the approval click (or a

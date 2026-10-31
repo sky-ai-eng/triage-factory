@@ -46,12 +46,12 @@ export default function RunDetail() {
   const [now, setNow] = useState(() => Date.now())
   const [stopPending, setStopPending] = useState(false)
   // Approval is derived now, not a stored conversation status: the
-  // conversation's unresolved artifact set (draft PRs + ready reviews) surfaces
-  // at the top of the station's artifact lists (the dock popover + the
-  // telemetry rail). `activeArtifact` is the one per-item editor currently open
+  // conversation's unresolved deliverable set (draft PRs + ready reviews) surfaces
+  // at the top of the station's deliverable lists (the dock popover + the
+  // telemetry rail). `activeDeliverable` is the one per-item editor currently open
   // (you edit one at a time — ReviewOverlay / PendingPROverlay key off a single
-  // artifact id).
-  const [activeArtifact, setActiveArtifact] = useState<{
+  // deliverable id).
+  const [activeDeliverable, setActiveDeliverable] = useState<{
     kind: 'review' | 'pr'
     id: string
   } | null>(null)
@@ -167,12 +167,12 @@ export default function RunDetail() {
     }
   }, [navigate, orgHref, conversation?.TaskID])
 
-  // Open one artifact's editor overlay by id — from the dock's approval
-  // popover, or from the rail's Artifacts list. The per-item editors
-  // (ReviewOverlay / PendingPROverlay) each key off a single artifact id, so
+  // Open one deliverable's editor overlay by id — from the dock's approval
+  // popover, or from the rail's Deliverables list. The per-item editors
+  // (ReviewOverlay / PendingPROverlay) each key off a single deliverable id, so
   // they're addressed one at a time.
-  const handleOpenArtifact = useCallback((kind: 'review' | 'pr', artifactId: string) => {
-    setActiveArtifact({ kind, id: artifactId })
+  const handleOpenDeliverable = useCallback((kind: 'review' | 'pr', deliverableId: string) => {
+    setActiveDeliverable({ kind, id: deliverableId })
   }, [])
 
   // Keyboard: Esc → back.
@@ -212,8 +212,8 @@ export default function RunDetail() {
     onBack: () => navigate(orgHref('/board')),
     onCancel: handleStop,
     onRequeue: handleRequeue,
-    onOpenArtifact: handleOpenArtifact,
-    onArtifactResolved: softRefresh,
+    onOpenDeliverable: handleOpenDeliverable,
+    onDeliverableResolved: softRefresh,
     onMessage: handleMessage,
     onInterrupt: handleStop,
     // A stop asked for and not yet settled disables the controls the same way
@@ -227,21 +227,21 @@ export default function RunDetail() {
     <div className="relative h-screen p-3">
       <GlassBackdrop />
 
-      {/* Per-item editors — one open at a time, addressed by artifact id. A
+      {/* Per-item editors — one open at a time, addressed by deliverable id. A
           softRefresh on close re-derives the set in place (no spinner flash). */}
       <ReviewOverlay
-        artifactId={activeArtifact?.kind === 'review' ? activeArtifact.id : ''}
-        open={activeArtifact?.kind === 'review'}
+        deliverableId={activeDeliverable?.kind === 'review' ? activeDeliverable.id : ''}
+        open={activeDeliverable?.kind === 'review'}
         onClose={() => {
-          setActiveArtifact(null)
+          setActiveDeliverable(null)
           softRefresh()
         }}
       />
       <PendingPROverlay
-        artifactId={activeArtifact?.kind === 'pr' ? activeArtifact.id : ''}
-        open={activeArtifact?.kind === 'pr'}
+        deliverableId={activeDeliverable?.kind === 'pr' ? activeDeliverable.id : ''}
+        open={activeDeliverable?.kind === 'pr'}
         onClose={() => {
-          setActiveArtifact(null)
+          setActiveDeliverable(null)
           softRefresh()
         }}
       />

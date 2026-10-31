@@ -70,7 +70,7 @@ type PRTopComment struct {
 // GetPRBasic fetches only the PR object itself — title, body, refs, state, URL —
 // in a single round-trip. Unlike GetPR it skips the reviews + review-comments +
 // issue-comments list calls (three extra requests), so it's the cheap read for
-// callers that need the PR's own fields and not its discussion (e.g. the artifact
+// callers that need the PR's own fields and not its discussion (e.g. the deliverable
 // PR handlers that read/promote title + body on every overlay load, edit, and
 // approve).
 func (c *Client) GetPRBasic(ctx context.Context, owner, repo string, number int) (*PRView, error) {
@@ -611,8 +611,8 @@ func (c *Client) SubmitReview(ctx context.Context, owner, repo string, number in
 // target. draft=true creates a draft PR.
 //
 // Returns (number, htmlURL, nodeID, err). nodeID is the PR's GraphQL global
-// node ID — the durable handle the GitHub-native artifact rework (TFAC-454)
-// keys a PR artifact on, distinct from the per-repo integer number; it composes
+// node ID — the durable handle the GitHub-native deliverable rework (TFAC-454)
+// keys a PR deliverable on, distinct from the per-repo integer number; it composes
 // with the pending-review node-ID ops. On a 422, the GitHub validation payload
 // is parsed and the per-error "message" / "code"+"field" is folded into the
 // returned error so callers see "Validation Failed: base 'develop' is not a
@@ -661,13 +661,13 @@ func (c *Client) UpdatePR(ctx context.Context, owner, repo string, number int, t
 // ClosePR closes an open or draft PR without merging it via REST
 // (PATCH /repos/{o}/{r}/pulls/{n} with state=closed). The head branch is
 // untouched — closing a PR never deletes the ref — which is exactly the
-// contract the artifact-abandon path needs: the draft PR is retired but the
+// contract the deliverable-abandon path needs: the draft PR is retired but the
 // pushed branch stays, so the work is recoverable. 422 validation failures are
 // lifted to a readable message via the same liftValidationErr CreatePR/UpdatePR
 // use.
 //
 // Used by the GitHub-native PR path's abandon flow — "Return to queue" on a run
-// that opened a draft PR closes that PR and flips its artifact to state=closed.
+// that opened a draft PR closes that PR and flips its deliverable to state=closed.
 func (c *Client) ClosePR(ctx context.Context, owner, repo string, number int) error {
 	payload := map[string]any{"state": "closed"}
 	_, err := c.Patch(ctx, fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number), payload)
@@ -775,8 +775,8 @@ func (c *Client) DismissReview(ctx context.Context, owner, repo string, number, 
 
 // CommentRef is a comment a write made or acted on, as far as GitHub's
 // response named it: which numbering it is in, its number, its GraphQL node id,
-// and its page link. The host-side artifact recorder (cmd/exec/agenthost) keys
-// the comment's artifact on the space and the number, and stores the node id so
+// and its page link. The host-side deliverable recorder (cmd/exec/agenthost) keys
+// the comment's deliverable on the space and the number, and stores the node id so
 // a later GraphQL edit or delete naming only that id finds the row. A field the
 // response did not carry is zero; a delete's response carries none.
 type CommentRef struct {
@@ -856,7 +856,7 @@ func (c *Client) UpdateComment(ctx context.Context, owner, repo string, commentI
 // UpdateCommentScoped is UpdateComment that also returns the comment it
 // updated: a conversation comment, or a review comment reached through the
 // pulls/comments fallback, with the node id and link from the edited object.
-// The host-side artifact recorder keys the comment's row on which of the two it
+// The host-side deliverable recorder keys the comment's row on which of the two it
 // was. The ref is meaningful only when err is nil; a body that does not parse
 // still leaves its Space and ID set, since the edit landed.
 func (c *Client) UpdateCommentScoped(ctx context.Context, owner, repo string, commentID int, body string) (CommentRef, error) {

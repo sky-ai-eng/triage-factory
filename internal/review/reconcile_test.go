@@ -23,15 +23,15 @@ const deleteDiff = "diff --git a/a.go b/a.go\n" +
 // renameDiff is a content-identical rename old.go → new.go.
 const renameDiff = "diff --git a/old.go b/new.go\nsimilarity index 100%\nrename from old.go\nrename to new.go\n"
 
-func cmt(id, path string, line int, sha string) domain.ReviewArtifactComment {
-	return domain.ReviewArtifactComment{ID: id, Path: path, Line: ptr(line), Body: "b", CommitSHA: sha}
+func cmt(id, path string, line int, sha string) domain.ReviewDeliverableComment {
+	return domain.ReviewDeliverableComment{ID: id, Path: path, Line: ptr(line), Body: "b", CommitSHA: sha}
 }
 
 // TestReconcileToHead_Classifies pins the four per-comment verdicts and that a
 // survivor is remapped + re-anchored while an outdated/unpositioned comment is
 // returned unchanged.
 func TestReconcileToHead_Classifies(t *testing.T) {
-	comments := []domain.ReviewArtifactComment{
+	comments := []domain.ReviewDeliverableComment{
 		cmt("shift", "a.go", 3, "anchor"),
 		cmt("del", "a.go", 3, "anchor"),
 		cmt("ren", "old.go", 3, "anchor"),
@@ -43,7 +43,7 @@ func TestReconcileToHead_Classifies(t *testing.T) {
 	for _, c := range comments {
 		// Per-comment line-map so each verdict is isolated.
 		lm := ghclient.ParseLineMap(maps[c.ID])
-		outs := ReconcileToHead([]domain.ReviewArtifactComment{c}, "head", "anchor",
+		outs := ReconcileToHead([]domain.ReviewDeliverableComment{c}, "head", "anchor",
 			func(string) (ghclient.LineMap, error) { return lm, nil })
 		got[c.ID] = outs[0]
 	}
@@ -67,7 +67,7 @@ func TestReconcileToHead_Classifies(t *testing.T) {
 // fetched for it.
 func TestReconcileToHead_AtHead(t *testing.T) {
 	var calls int
-	outs := ReconcileToHead([]domain.ReviewArtifactComment{cmt("c", "a.go", 3, "head")}, "head", "fallback",
+	outs := ReconcileToHead([]domain.ReviewDeliverableComment{cmt("c", "a.go", 3, "head")}, "head", "fallback",
 		func(string) (ghclient.LineMap, error) { calls++; return ghclient.LineMap{}, nil })
 	o := outs[0]
 	if !o.Survived || o.Status != ghclient.LineMapUnchanged || o.Comment.CommitSHA != "head" {
@@ -82,7 +82,7 @@ func TestReconcileToHead_AtHead(t *testing.T) {
 // the line-map exactly once.
 func TestReconcileToHead_CachesPerAnchor(t *testing.T) {
 	var calls int
-	comments := []domain.ReviewArtifactComment{
+	comments := []domain.ReviewDeliverableComment{
 		cmt("a", "a.go", 3, "anchor"),
 		cmt("b", "a.go", 4, "anchor"),
 		cmt("c", "a.go", 5, "anchor"),
@@ -100,7 +100,7 @@ func TestReconcileToHead_CachesPerAnchor(t *testing.T) {
 // the comment unchanged (not dropped, not classified).
 func TestReconcileToHead_MapError(t *testing.T) {
 	boom := errors.New("compare unavailable")
-	outs := ReconcileToHead([]domain.ReviewArtifactComment{cmt("c", "a.go", 3, "anchor")}, "head", "",
+	outs := ReconcileToHead([]domain.ReviewDeliverableComment{cmt("c", "a.go", 3, "anchor")}, "head", "",
 		func(string) (ghclient.LineMap, error) { return ghclient.LineMap{}, boom })
 	o := outs[0]
 	if !errors.Is(o.MapErr, boom) || o.Classified() || o.Survived {
@@ -115,7 +115,7 @@ func TestReconcileToHead_MapError(t *testing.T) {
 // supplied anchor, and that with no fallback either it reports unresolved.
 func TestReconcileToHead_FallbackAnchor(t *testing.T) {
 	// Empty CommitSHA + fallback "old": resolves and shifts.
-	outs := ReconcileToHead([]domain.ReviewArtifactComment{cmt("c", "a.go", 3, "")}, "head", "old",
+	outs := ReconcileToHead([]domain.ReviewDeliverableComment{cmt("c", "a.go", 3, "")}, "head", "old",
 		func(anchor string) (ghclient.LineMap, error) {
 			if anchor != "old" {
 				t.Errorf("resolver got anchor %q, want the fallback %q", anchor, "old")
@@ -127,7 +127,7 @@ func TestReconcileToHead_FallbackAnchor(t *testing.T) {
 	}
 
 	// Empty CommitSHA + empty fallback: unresolved (no anchor to map from).
-	outs = ReconcileToHead([]domain.ReviewArtifactComment{cmt("c", "a.go", 3, "")}, "head", "",
+	outs = ReconcileToHead([]domain.ReviewDeliverableComment{cmt("c", "a.go", 3, "")}, "head", "",
 		func(string) (ghclient.LineMap, error) {
 			t.Error("resolver must not be called with no anchor")
 			return ghclient.LineMap{}, nil

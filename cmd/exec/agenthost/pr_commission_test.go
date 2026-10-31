@@ -110,12 +110,12 @@ func TestStampPRCommission_DoesNotOverwriteExistingCommissioner(t *testing.T) {
 	}
 }
 
-// TestStampPRCommission_ReviewArtifactRecordsNothing shares the kind guard
+// TestStampPRCommission_ReviewDeliverableRecordsNothing shares the kind guard
 // with the ownership stamp, and needs its own case for the same reason: a
 // submitted review carries the identical owner/repo#N target as the pull
 // request it reviews. Reviewing someone else's work must not record you as
 // having asked for it.
-func TestStampPRCommission_ReviewArtifactRecordsNothing(t *testing.T) {
+func TestStampPRCommission_ReviewDeliverableRecordsNothing(t *testing.T) {
 	ctx := context.Background()
 	conn, stores, info := newCaptureStoresConn(t, false)
 
@@ -125,8 +125,8 @@ func TestStampPRCommission_ReviewArtifactRecordsNothing(t *testing.T) {
 		t.Fatalf("seed entity: %v", err)
 	}
 
-	a := domain.NewReviewArtifact("octo/repo", 42, "PR_kwDO42", "headsha", info.ConversationID)
-	a.State, a.ExternalID = domain.ArtifactStateReviewSubmitted, "9001"
+	a := domain.NewReviewDeliverable("octo/repo", 42, "PR_kwDO42", "headsha", info.ConversationID)
+	a.State, a.ExternalID = domain.DeliverableStateReviewSubmitted, "9001"
 	a.URL = "https://github.com/octo/repo/pull/42#pullrequestreview-9001"
 	RecordExternalWrite(ctx, stores, info, &a, nil)
 

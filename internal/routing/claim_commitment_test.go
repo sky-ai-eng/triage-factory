@@ -221,8 +221,8 @@ func TestDefer_ClaimCommitsWithTheQueuedFiring(t *testing.T) {
 // claimed_by_user_id IS NULL, so a landed stamp is proof the router's copy of
 // that field — read before the commit — is stale. Carrying it forward would
 // leave one task struct holding both claims at once, which the DB's XOR makes
-// unrepresentable and which reDeriveTask's "already claimed" guard
-// (rederive.go:70) would read as a user's ownership.
+// unrepresentable and which evaluateReDerive's "already claimed" guard
+// would read as a user's ownership.
 func TestDefer_CommittedClaimClearsTheStaleUserClaimInMemory(t *testing.T) {
 	s := setupClaimScenario(t, "defer-stale-user")
 

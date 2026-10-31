@@ -234,7 +234,7 @@ func TestLinearEvents_EveryTypeCarriesTeamID(t *testing.T) {
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, runmode.LocalDefaultOrgID)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.EventQueue, runmode.LocalDefaultOrgID)
 	snapJSON, _ := json.Marshal(base)
 	tr.emitLinearUnreachable(context.Background(), runmode.LocalDefaultOrgID,
 		domain.Entity{ID: "ent-1", SourceID: base.Identifier, SnapshotJSON: string(snapJSON)}, nil, events.LinearUnreachableNotFound)

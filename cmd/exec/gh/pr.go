@@ -564,7 +564,7 @@ func prThreadView(ctx context.Context, client ghAPI, host agenthost.Client, args
 	// ghAPI seam (a mirror of *github.Client, which fetches a thread by comment
 	// id) can't carry the PR number, so the touch is recorded here from the CLI
 	// positional the agent supplied, after the read succeeds. Best-effort.
-	host.RecordReadTouch(ctx, domain.ArtifactProviderGitHub, domain.PullRequestTarget(owner+"/"+repo, number), "")
+	host.RecordReadTouch(ctx, domain.ProviderGitHub, domain.PullRequestTarget(owner+"/"+repo, number), "")
 	printJSON(thread)
 }
 
@@ -613,19 +613,19 @@ func prReviewDismiss(ctx context.Context, client ghAPI, host agenthost.Client, a
 // --- Review lifecycle (local staging) ---
 
 // prStartReview records a fully TF-side review draft and prints its local handle.
-// Zero GitHub writes (TFAC-494): the review is staged entirely in the artifact's
+// Zero GitHub writes (TFAC-494): the review is staged entirely in the deliverable's
 // details_json and created+submitted atomically only at approval, so concurrent
 // runs on one PR never collide on GitHub's one-per-identity pending-review slot.
 // It reads the PR head SHA (a read, not a write) so the review pins to the
-// reviewed commit at submit. The durable run-scoped `review` artifact is recorded
+// reviewed commit at submit. The durable run-scoped `review` deliverable is recorded
 // at the host choke point (LocalClient.GithubCreatePendingReview), which reads
-// the PR's node id the draft is keyed on; the returned handle (the artifact id)
+// the PR's node id the draft is keyed on; the returned handle (the deliverable id)
 // is what add-review-comment / finalize-review speak.
 //
 // --fresh resets an in-progress draft to a clean slate so the agent can restart
 // a review it has botched: it clears the run's staged comments + the body/event
 // ready sentinel in place, keeping the same handle and pinned head SHA. Post-494
-// this is a local artifact reset — no GitHub write, no identity / no
+// this is a local deliverable reset — no GitHub write, no identity / no
 // anti-hijack logic (the GitHub pending-review model that needed those is gone).
 // On a clean slate (no prior start-review in this run) --fresh has nothing to
 // reset and falls through to a normal start.
@@ -664,7 +664,7 @@ func prStartReview(ctx context.Context, client ghAPI, host agenthost.Client, arg
 		exitErr(fmt.Sprintf("PR #%d has no head commit SHA — cannot start a review (push a commit to the PR branch first)", number))
 	}
 
-	// Record the local review-draft artifact through the host. No GitHub write,
+	// Record the local review-draft deliverable through the host. No GitHub write,
 	// no collision check — the draft is run-scoped, so two runs reviewing the same
 	// PR never share a row. Seed no inline comments (the agent adds them via
 	// add-review-comment).
@@ -749,7 +749,7 @@ func prAddReviewComment(ctx context.Context, host agenthost.Client, args []strin
 	exitOnErr(err)
 
 	// Bake the badge in, then stage onto this run's review draft. The host resolves
-	// the run's review artifact, validates the range against the anchor commit's
+	// the run's review deliverable, validates the range against the anchor commit's
 	// diff, and appends the staged comment — returning a TF-local comment id.
 	badgedBody := domain.SeverityBadgeMarkdown(severity) + body
 	commentID, err := host.GithubAddPendingReviewComment(ctx, owner, repo, reviewID, file, badgedBody, line, startLine, anchorSHA)
@@ -803,7 +803,7 @@ func reviewCommentTarget(ctx context.Context, host reviewHost, reviewID string, 
 
 // prFinalizeReview hands the finished review to the host, which snapshots the
 // agent's draft (body + event + the locally staged inline comments) into the
-// run's review artifact and sets the ready sentinel. The anti-double-submit
+// run's review deliverable and sets the ready sentinel. The anti-double-submit
 // guard fires host-side: a second call gets a hard error.
 //
 // Whether the review is then staged for a human or submitted to GitHub is the
@@ -866,7 +866,7 @@ func prFinalizeReview(ctx context.Context, host agenthost.Client, args []string)
 
 	_ = lookupConversation(host)
 
-	// Snapshot the draft into the run's review artifact, set the ready sentinel,
+	// Snapshot the draft into the run's review deliverable, set the ready sentinel,
 	// and — under a posting posture — submit it. The "meaningful review" check
 	// (body or inline comments for a non-approve) runs host-side, where the live
 	// comments are known.
@@ -909,7 +909,7 @@ func prFinalizeReview(ctx context.Context, host agenthost.Client, args []string)
 // review" — and stays a draft until a human marks it ready in the UI. The
 // body leaves here as the agent drafted it; the disclosure footer joins it at
 // the host choke point (LocalClient.GithubCreatePR), which also records the
-// durable pull_request artifact, deduped on the PR number — the idempotency
+// durable pull_request deliverable, deduped on the PR number — the idempotency
 // guard against a repeated `pr create`.
 func prCreate(ctx context.Context, client ghAPI, host agenthost.Client, args []string) {
 	title := flagVal(args, "--title")
@@ -1008,7 +1008,7 @@ func prCreate(ctx context.Context, client ghAPI, host agenthost.Client, args []s
 	}
 
 	// Always open a real draft PR. node_id (3rd return) is recorded onto the
-	// pull_request artifact at the host choke point (LocalClient.GithubCreatePR),
+	// pull_request deliverable at the host choke point (LocalClient.GithubCreatePR),
 	// so it's discarded here.
 	number, htmlURL, _, err := client.CreatePR(ctx, owner, repo, head, base, title, body, true)
 	exitOnErr(err)
@@ -1073,7 +1073,7 @@ func prCommentReact(ctx context.Context, client ghAPI, host agenthost.Client, ar
 //     unchanged.
 //   - a non-numeric id is a comment on this run's TF-side review draft (from
 //     add-review-comment, staged not yet submitted) → rewrite the staged comment
-//     on the review artifact via the host, with the severity badge re-baked so
+//     on the review deliverable via the host, with the severity badge re-baked so
 //     the chip survives the edit. No GitHub call until the review submits.
 //
 // REST ids are all-digits and staged ids never are, so a successful int parse is

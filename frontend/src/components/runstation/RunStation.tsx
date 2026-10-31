@@ -24,10 +24,10 @@ import {
 import {
   approvalAction,
   approvalCounts,
-  artifactSetKey,
-  hasUnresolvedArtifacts,
+  deliverableSetKey,
+  hasUnresolvedDeliverables,
 } from '../../lib/approval'
-import ArtifactList from '../ArtifactList'
+import DeliverableList from '../DeliverableList'
 import { EventTag, SourceTag } from '../board/cardChrome'
 import { STEP_VAR, type StepState } from '../board/cardStyle'
 import { PermissionPrompt } from '../permissions/PermissionPrompt'
@@ -40,14 +40,14 @@ export interface StationActions {
   onBack: () => void
   onCancel?: () => void
   onRequeue?: () => void
-  /** Open an artifact's approval overlay (PR / review) by artifact id — from
-   *  the telemetry rail's Artifacts list, the dock's approval popover, or the
+  /** Open a deliverable's approval overlay (PR / review) by deliverable id — from
+   *  the telemetry rail's Deliverables list, the dock's approval popover, or the
    *  dock button directly when exactly one item is unresolved. */
-  onOpenArtifact?: (kind: 'review' | 'pr', artifactId: string) => void
-  /** Re-pull the conversation projection after an in-place artifact dismiss
-   *  (the artifact list refetches its own rows; the counts and the derived
+  onOpenDeliverable?: (kind: 'review' | 'pr', deliverableId: string) => void
+  /** Re-pull the conversation projection after an in-place deliverable dismiss
+   *  (the deliverable list refetches its own rows; the counts and the derived
    *  approval state live on the conversation row). */
-  onArtifactResolved?: () => void
+  onDeliverableResolved?: () => void
   /** Steer the conversation with a free-form message (live process or `open`
    *  resume). */
   onMessage?: (text: string) => void
@@ -196,8 +196,8 @@ export default function RunStation({
           messages={messages}
           state={st}
           now={now}
-          onOpenArtifact={actions.onOpenArtifact}
-          onArtifactResolved={actions.onArtifactResolved}
+          onOpenDeliverable={actions.onOpenDeliverable}
+          onDeliverableResolved={actions.onDeliverableResolved}
         />
       </div>
 
@@ -515,11 +515,11 @@ function IntakeDock({
   actions: StationActions
   pending: PendingPermission[]
 }) {
-  // Approval is derived from the unresolved-artifact set, not a conversation
-  // status: a card surfaces "your move" whenever has_unresolved_artifacts is
+  // Approval is derived from the unresolved-deliverable set, not a conversation
+  // status: a card surfaces "your move" whenever has_unresolved_deliverables is
   // true, whether the conversation is live or terminal (TFAC-382/TFAC-492).
   const counts = approvalCounts(conversation)
-  const hasUnresolved = hasUnresolvedArtifacts(conversation)
+  const hasUnresolved = hasUnresolvedDeliverables(conversation)
   const isTerminal = isTerminalStatus(conversation.Status)
   // Parked: a turn ended, with the step's verdict or without. Not terminal —
   // the composer below offers to resume it — but the conversation is over
@@ -545,7 +545,7 @@ function IntakeDock({
       ? counts.pr === 1
         ? 'a draft PR is ready for your approval'
         : 'a review is ready for your approval'
-      : `${counts.total} artifacts await your approval`
+      : `${counts.total} deliverables await your approval`
     : active
       ? 'agent is executing — streaming live'
       : isConcluded(conversation)
@@ -597,7 +597,7 @@ function IntakeDock({
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
-          {hasUnresolved && actions.onOpenArtifact && (
+          {hasUnresolved && actions.onOpenDeliverable && (
             <ApprovalAffordance conversation={conversation} counts={counts} actions={actions} />
           )}
           {/* Pause and Cancel are one operation now — both stop the run and
@@ -657,11 +657,11 @@ function IntakeDock({
 }
 
 // ApprovalAffordance — the dock's "your move" control over the unresolved
-// artifact set. Exactly one unresolved item opens its editor directly (no list
-// detour; pending_artifact_ids lists draft PRs first, then ready reviews, so
+// deliverable set. Exactly one unresolved item opens its editor directly (no list
+// detour; pending_deliverable_ids lists draft PRs first, then ready reviews, so
 // unresolved_pr_count discriminates the head's kind). A plural/mixed set — or
 // a transiently absent id set — raises a popover with the conversation's
-// artifact list, unresolved rows sorted first: the same list the board card
+// deliverable list, unresolved rows sorted first: the same list the board card
 // and the telemetry rail use, so there is one approval surface, not a separate
 // roster.
 function ApprovalAffordance({
@@ -674,7 +674,7 @@ function ApprovalAffordance({
   actions: StationActions
 }) {
   const [open, setOpen] = useState(false)
-  const ids = conversation.pending_artifact_ids ?? []
+  const ids = conversation.pending_deliverable_ids ?? []
 
   if (counts.total === 1 && ids.length > 0) {
     return (
@@ -682,7 +682,7 @@ function ApprovalAffordance({
         tone="var(--color-warm)"
         solid
         onClick={() =>
-          actions.onOpenArtifact?.(
+          actions.onOpenDeliverable?.(
             (conversation.unresolved_pr_count ?? 0) > 0 ? 'pr' : 'review',
             ids[0],
           )
@@ -708,17 +708,17 @@ function ApprovalAffordance({
           className="z-[100] max-h-[360px] w-[320px] overflow-y-auto rounded-xl border border-line-1 bg-raised/95 p-2.5 shadow-float shadow-black/[0.08] backdrop-blur-2xl animate-in fade-in-0 zoom-in-95"
         >
           <div className="mb-1.5 px-1 font-mono text-label-sm font-semibold uppercase tracking-[0.18em] text-ink-3/70">
-            Artifacts
+            Deliverables
           </div>
-          <ArtifactList
+          <DeliverableList
             conversationId={conversation.ID}
-            pendingArtifactIds={conversation.pending_artifact_ids}
-            refreshKey={artifactSetKey(conversation)}
+            pendingDeliverableIds={conversation.pending_deliverable_ids}
+            refreshKey={deliverableSetKey(conversation)}
             onOpenApproval={(kind, id) => {
               setOpen(false)
-              actions.onOpenArtifact?.(kind, id)
+              actions.onOpenDeliverable?.(kind, id)
             }}
-            onResolved={actions.onArtifactResolved}
+            onResolved={actions.onDeliverableResolved}
           />
           <Popover.Arrow className="fill-raised" />
         </Popover.Content>

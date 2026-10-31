@@ -13,7 +13,7 @@ import (
 )
 
 // permissionStore is the Postgres impl of db.PermissionStore. Split-pool like
-// artifactStore: ListPending runs on the app pool under RLS (the
+// deliverableStore: ListPending runs on the app pool under RLS (the
 // conversation_permissions_select policy composes through the conversation,
 // mirroring claims), every write on the admin pool — tf_app holds no
 // INSERT/UPDATE grant, and every writer is a delegate goroutine with no

@@ -204,7 +204,7 @@ func DedupPreserveOrder(ids []string) []string {
 // Audiences:
 //
 //   - HTTP handlers (server/blueprints_handler.go, server/prompts_handler.go,
-//     server/artifacts_handler.go, server/reviews_handler.go) — read-mostly.
+//     server/deliverables_handler.go, server/reviews_handler.go) — read-mostly.
 //   - Delegate spawner (delegate/blueprint.go, delegate/run.go) — every method.
 //
 // # Postgres / RLS shape
@@ -653,8 +653,8 @@ type BlueprintStore interface {
 	// to, or one belonging to some other task, is false.
 	//
 	// The terminal-on-last closing hooks ask it of the run behind a
-	// just-resolved artifact, to find out whether that run is still the
-	// engagement the task is about. A task's artifacts outlive the run that
+	// just-resolved deliverable, to find out whether that run is still the
+	// engagement the task is about. A task's deliverables outlive the run that
 	// produced them, so a resolution can arrive against a superseded run — one
 	// the task was requeued or re-claimed away from — and closing on it would
 	// yank the task to done under whoever holds it now.

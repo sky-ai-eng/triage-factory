@@ -34,7 +34,7 @@ func TestClaimCredentialsStore_Postgres_PutGet(t *testing.T) {
 	h.Reset(t)
 	ctx := context.Background()
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
-	conversationID := seedPgArtifactConversation(t, h, orgID, teamID, userID)
+	conversationID := seedPgDeliverableConversation(t, h, orgID, teamID, userID)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
 	// No active claim yet: Put is a silent no-op and Get finds nothing —
@@ -116,7 +116,7 @@ func TestClaimCredentialsStore_Postgres_PutNeverRegressesBootEpoch(t *testing.T)
 	h.Reset(t)
 	ctx := context.Background()
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
-	conversationID := seedPgArtifactConversation(t, h, orgID, teamID, userID)
+	conversationID := seedPgDeliverableConversation(t, h, orgID, teamID, userID)
 	seedPgActiveClaim(t, h, orgID, conversationID, "executor-b", 2)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
@@ -189,7 +189,7 @@ func TestListActiveNeedingCredentialRefresh_Postgres(t *testing.T) {
 	soon, later := now.Add(3*time.Minute), now.Add(2*time.Hour)
 	seal := func(m domain.SourceManifest) string {
 		t.Helper()
-		convID := seedPgArtifactConversation(t, h, orgID, teamID, userID)
+		convID := seedPgDeliverableConversation(t, h, orgID, teamID, userID)
 		seedPgActiveClaim(t, h, orgID, convID, "executor-1", 1)
 		if err := stores.ClaimCredentials.Put(ctx, orgID, convID, "executor-1", 1, []byte("sealed"), m); err != nil {
 			t.Fatalf("Put: %v", err)

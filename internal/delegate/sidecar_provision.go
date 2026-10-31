@@ -557,7 +557,7 @@ func (s *Spawner) relayCredentialRefreshes(subject string, getter credBundleGett
 // the sandbox (the sidecar's StartRunProxies sets PushCaptureProxy), so the
 // proxy's relayed capture is the ONLY path a branch push reaches the audit log
 // — the same gitPushRecorder the in-process (all/local) backstop uses, so both
-// modes land the identical branch artifact / push-failed row.
+// modes land the identical branch deliverable / push-failed row.
 //
 // auditHost is the caller's — not built here — because the run's acting GitHub
 // credential is not known until the sidecar reports it, and the caller is the
@@ -596,7 +596,7 @@ func (s *Spawner) managedGitGate(info agenthost.ConversationInfo, stores db.Stor
 		RecordPush: func(ctx context.Context, pushed gitproxy.PushedRef) {
 			// This is the ONLY path a branch push reaches the audit log on an
 			// executor — the pre-push hook stands down inside the sandbox —
-			// so "was it even called" is a real question when an artifact is
+			// so "was it even called" is a real question when a deliverable is
 			// missing. The recorder swallows its own errors by contract, so
 			// the span reports that the relay arrived and how long the write
 			// took, not whether it succeeded; the store spans beneath it carry

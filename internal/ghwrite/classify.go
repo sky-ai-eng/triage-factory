@@ -94,7 +94,7 @@ type Shape struct {
 	// is in: a conversation comment or a review comment. Empty for every act
 	// that is not one of those three on a comment, a reaction to a comment
 	// included. It is what decides which of the two id spaces ExternalID is
-	// in, so the comment's artifact is keyed on the pair.
+	// in, so the comment's deliverable is keyed on the pair.
 	Comment domain.GitHubCommentSpace
 
 	// Subject is the node id a GraphQL request named for the object it acted on,
@@ -461,14 +461,14 @@ func Classify(method, path string) (Shape, bool) {
 }
 
 // classifyPulls handles /repos/{o}/{r}/pulls/... — the pull request itself, the
-// review comments addressed under it, and the two creates that also produce an
-// artifact.
+// review comments addressed under it, and the two creates that also produce a
+// deliverable.
 //
 // Those two are here for the same reason merge is: recording what happened is
 // unconditional, and whether the act should have been permitted is a separate
-// decision made by a separate mechanism reading this same table. An artifact
+// decision made by a separate mechanism reading this same table. A deliverable
 // answers "what exists", which is not the question the actions log answers — a
-// PR create that landed a pull_request artifact and an opaque audit row is
+// PR create that landed a pull_request deliverable and an opaque audit row is
 // invisible to anyone filtering the log for PR creations, which is precisely
 // the asymmetry between the verb path and the raw path this table exists to
 // remove.

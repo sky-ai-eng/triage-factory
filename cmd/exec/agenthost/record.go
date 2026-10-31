@@ -37,14 +37,17 @@ func withWriteInfo(
 }
 
 // stampActionIdentityInfo fills the conversation/org/team/actor common to
-// every bot-attributed action from info. The action-specific fields
-// (provider, action, target, credential, from/to, dedup) are set by the
-// caller.
+// every bot-attributed action from info, and names the run's agent as its
+// performer. The action-specific fields (provider, action, target, credential,
+// from/to, dedup) are set by the caller. The performer is overwritten rather
+// than defaulted, like the identity beside it: a relayed row cannot claim a
+// person performed it.
 func stampActionIdentityInfo(act *domain.ExternalAction, info ConversationInfo) {
 	act.OrgID = info.OrgID
 	act.TeamID = info.TeamID
 	act.ConversationID = info.ConversationID
 	act.ActorUserID = info.UserID // empty for event-triggered → SQL NULL
+	act.PerformedBy = domain.PerformedByAgent
 }
 
 // stampScopeInfo sets the Scope of a and act (either may be nil) to the
@@ -54,7 +57,7 @@ func stampActionIdentityInfo(act *domain.ExternalAction, info ConversationInfo) 
 // defaulted, like the run identity stamped beside it: the side that holds the
 // stores decides it, so a relayed row cannot name a namespace the write did
 // not reach.
-func stampScopeInfo(ctx context.Context, stores db.Stores, orgID string, a *domain.Artifact, act *domain.ExternalAction) error {
+func stampScopeInfo(ctx context.Context, stores db.Stores, orgID string, a *domain.Deliverable, act *domain.ExternalAction) error {
 	if a == nil && act == nil {
 		return nil
 	}
@@ -85,7 +88,7 @@ func recordActionSystemInfo(ctx context.Context, stores db.Stores, info Conversa
 }
 
 // recordActionTx appends act inside the caller's synthetic-claims tx (manual
-// runs), composing with the artifact upsert. A nil act is a no-op.
+// runs), composing with the deliverable upsert. A nil act is a no-op.
 func recordActionTx(ctx context.Context, ts db.TxStores, orgID string, act *domain.ExternalAction) error {
 	if act == nil || ts.ExternalActions == nil {
 		return nil
@@ -95,11 +98,11 @@ func recordActionTx(ctx context.Context, ts db.TxStores, orgID string, act *doma
 
 // recordActionAlone appends act in a write of its own, on the pool the run's
 // writes take, retried like every write-stage write (withRecordRetry). It is
-// what a funnel falls back to when the artifact composed with act failed: a
+// what a funnel falls back to when the deliverable composed with act failed: a
 // manual run's transaction rolled the action back with it, and an
 // event-triggered run never reached it. The ledger row is the audit log of
-// record and does not depend on the artifact. The commonest way the artifact
-// fails while the action would not is RLS: artifacts are keyed org-wide but
+// record and does not depend on the deliverable. The commonest way the deliverable
+// fails while the action would not is RLS: deliverables are keyed org-wide but
 // updated team-scoped, so a manual run acting on an object another team's run
 // recorded first cannot update that row, while the ledger row it appends is
 // only org-scoped.
@@ -118,19 +121,19 @@ func recordActionAlone(ctx context.Context, stores db.Stores, info ConversationI
 // recorded, is recorded by its audit row alone. A failed read is answered the
 // same way and counted, since a row the delete created would claim the comment
 // was TF's.
-func deletesUnrecordedComment(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Artifact) bool {
-	if a == nil || a.Kind != domain.ArtifactKindComment || a.State != domain.ArtifactStateCommentDeleted {
+func deletesUnrecordedComment(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Deliverable) bool {
+	if a == nil || a.Kind != domain.DeliverableKindComment || a.State != domain.DeliverableStateCommentDeleted {
 		return false
 	}
 	var present map[string]bool
 	err := withRecordRetry(ctx, func() error {
 		var e error
-		present, e = stores.Artifacts.PresentDedupKeysSystem(ctx, info.OrgID, a.Scope, []string{a.DedupKey})
+		present, e = stores.Deliverables.PresentDedupKeysSystem(ctx, info.OrgID, a.Scope, []string{a.DedupKey})
 		return e
 	})
 	if err != nil {
 		recordWriteDrop(ctx, recordDropOp(a, nil), err)
-		agenthostLog.Warn("reading a deleted comment's artifact failed; recording the action without it",
+		agenthostLog.Warn("reading a deleted comment's deliverable failed; recording the action without it",
 			"conversation", info.ConversationID, "error", err)
 		return true
 	}
@@ -140,7 +143,7 @@ func deletesUnrecordedComment(ctx context.Context, stores db.Stores, info Conver
 // RecordExternalWrite is the shared recording funnel behind every exec
 // choke-point write: it stamps the run's identity and the org's current scope
 // for each provider (stampScopeInfo) onto a and act (if present), links a to
-// the entity it is about (resolveArtifactEntity) and act to the entity or
+// the entity it is about (resolveDeliverableEntity) and act to the entity or
 // repository it is about (resolveActionReferences), upserts a (if non-nil) and
 // appends act (if non-nil) in the SAME write — admin pool for event-triggered
 // runs, a synthetic-claims tx for manual ones — logs (never fails) a write
@@ -148,12 +151,10 @@ func deletesUnrecordedComment(ctx context.Context, stores db.Stores, info Conver
 // resolutions run before the write and outside its transaction (see
 // recordEntityTouch).
 //
-// a is nil for an audit-only write that produces no artifact to compose
-// with (a Slack reaction, a review-thread reply) — mirrors the former
-// recordBotAction. act is nil when the write carries no distinct external
-// action (a review-draft snapshot re-upserting its artifact with no new
-// external write) — mirrors the former upsertGithubArtifact/upsertJiraArtifact
-// with act == nil. The caller is responsible for setting a.Provider (and any
+// a is nil for an audit-only write that produces no deliverable to compose
+// with (a Slack reaction, a review-thread reply). act is nil when the write
+// carries no distinct external action (a review-draft snapshot re-upserting
+// its deliverable with no new external write). The caller is responsible for setting a.Provider (and any
 // other polymorphic fields) before calling — this function only stamps the
 // run-identity fields common to every provider. A comment's delete is written
 // only over the comment's existing row (deletesUnrecordedComment).
@@ -167,10 +168,10 @@ func deletesUnrecordedComment(ctx context.Context, stores db.Stores, info Conver
 // each write that fails on a retryable error. What still fails is swallowed,
 // but counted: this is the last stage of the audit funnel auditstats.go
 // measures, and the only one a local-mode deployment (no sidecar, no relay)
-// can reach. A failed artifact never costs the action: the action is then
+// can reach. A failed deliverable never costs the action: the action is then
 // written on its own (recordActionAlone), and each failure is counted against
 // what it lost.
-func RecordExternalWrite(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Artifact, act *domain.ExternalAction) {
+func RecordExternalWrite(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Deliverable, act *domain.ExternalAction) {
 	recordExternalWrite(ctx, stores, info, a, act, domain.EntityContainer{})
 }
 
@@ -178,9 +179,9 @@ func RecordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 // response the verb acted on says the touched issue sits in (a Linear issue's
 // team, a Jira issue's project), which the touch needs to create that issue's
 // entity. Zero for every other write.
-func recordExternalWrite(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Artifact, act *domain.ExternalAction, container domain.EntityContainer) {
+func recordExternalWrite(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Deliverable, act *domain.ExternalAction, container domain.EntityContainer) {
 	if a != nil {
-		if stores.Artifacts == nil {
+		if stores.Deliverables == nil {
 			return
 		}
 		a.ConversationID = info.ConversationID
@@ -196,7 +197,7 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 	ctx, cancel := recordContext(ctx)
 	defer cancel()
 
-	// The artifact write itself, under the relay op that carried it (a
+	// The deliverable write itself, under the relay op that carried it (a
 	// sandboxed run) or under whatever ambient span exists. A CHILD rather
 	// than a linked root: unlike the ops above it, this never runs on its own
 	// — it is always inside a caller this trace already covers.
@@ -205,8 +206,8 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 	// by contract, so a failure would otherwise surface only as a warn line;
 	// the span makes it a trace with an error status and the drop counter
 	// beside it makes it a number, which is how "the PR was opened but TF has
-	// no artifact for it" stops being invisible and starts being measurable.
-	// The artifact kind is a closed domain vocabulary; its target is a repo
+	// no deliverable for it" stops being invisible and starts being measurable.
+	// The deliverable kind is a closed domain vocabulary; its target is a repo
 	// path, and stays out.
 	ctx, span := tracer.Start(ctx, "artifact.record",
 		trace.WithAttributes(telemetry.ConversationID(info.ConversationID), telemetry.OrgID(info.OrgID)))
@@ -215,8 +216,8 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 		span.SetAttributes(telemetry.Op(a.Kind))
 	}
 
-	// lost is what an error left in err cost: the artifact and the action
-	// written with it, or the action alone once the artifact's failure has been
+	// lost is what an error left in err cost: the deliverable and the action
+	// written with it, or the action alone once the deliverable's failure has been
 	// reported on its own.
 	lost := a
 	err := withRecordRetry(ctx, func() error { return stampScopeInfo(ctx, stores, info.OrgID, a, act) })
@@ -225,31 +226,31 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 	}
 	var subject resolvedEntity
 	if err == nil && a != nil {
-		subject = resolveArtifactEntity(ctx, stores, info, a, container)
+		subject = resolveDeliverableEntity(ctx, stores, info, a, container)
 	}
 	var about resolvedEntity
 	if act != nil {
 		about = resolveActionReferences(ctx, stores, info, a, act, container, subject)
 	}
 	if err == nil {
-		var artifactErr error
+		var deliverableErr error
 		err = withRecordRetry(ctx, func() error {
 			return withWriteInfo(ctx, stores, info,
 				func() error {
-					artifactErr = nil
+					deliverableErr = nil
 					if a != nil {
-						if _, e := stores.Artifacts.UpsertSystem(ctx, info.OrgID, *a); e != nil {
-							artifactErr = e
+						if _, e := stores.Deliverables.UpsertSystem(ctx, info.OrgID, *a); e != nil {
+							deliverableErr = e
 							return e
 						}
 					}
 					return recordActionSystemInfo(ctx, stores, info, act)
 				},
 				func(ts db.TxStores) error {
-					artifactErr = nil
+					deliverableErr = nil
 					if a != nil {
-						if _, e := ts.Artifacts.Upsert(ctx, info.OrgID, *a); e != nil {
-							artifactErr = e
+						if _, e := ts.Deliverables.Upsert(ctx, info.OrgID, *a); e != nil {
+							deliverableErr = e
 							return e
 						}
 					}
@@ -257,11 +258,11 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 				},
 			)
 		})
-		if artifactErr != nil && act != nil {
-			recordSpanError(span, artifactErr)
-			recordWriteDrop(ctx, recordDropOp(a, nil), artifactErr)
-			agenthostLog.Warn("artifact recording failed; recording the action without it",
-				"conversation", info.ConversationID, "kind", a.Kind, "target", a.Target, "error", artifactErr)
+		if deliverableErr != nil && act != nil {
+			recordSpanError(span, deliverableErr)
+			recordWriteDrop(ctx, recordDropOp(a, nil), deliverableErr)
+			agenthostLog.Warn("deliverable recording failed; recording the action without it",
+				"conversation", info.ConversationID, "kind", a.Kind, "target", a.Target, "error", deliverableErr)
 			err = recordActionAlone(ctx, stores, info, act)
 			lost = nil
 		}
@@ -296,12 +297,12 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 // entityCoordinate is an external object as the exec funnel saw it: the
 // (provider, target) a write or an addressed read named, its link, and — for a
 // provider whose entities are identified by an id a key change does not move —
-// that id, off the response the verb read or the artifact's dedup key.
+// that id, off the response the verb read or the deliverable's dedup key.
 type entityCoordinate struct {
 	provider, target, url string
 	externalID            string
 	// scope is the namespace the coordinate was recorded in, when it names
-	// one: a Jira artifact's dedup key carries its site. "" means the org's
+	// one: a Jira deliverable's dedup key carries its site. "" means the org's
 	// current scope.
 	scope string
 	// container is what the response says the object sits in, for a Linear
@@ -405,12 +406,12 @@ func recordTouchRow(ctx context.Context, stores db.Stores, info ConversationInfo
 	}
 }
 
-// resolvedEntity is the funnel's resolution of the entity its artifact or its
+// resolvedEntity is the funnel's resolution of the entity its deliverable or its
 // action is about, carried to the action and the touch so a write whose action
 // names the same object resolves it once. The coordinate rides along because
 // reuse is only sound when the consumer wants the same key: the action and the
-// touch resolve off the external action, the artifact's entity off the
-// artifact.
+// touch resolve off the external action, the deliverable's entity off the
+// deliverable.
 type resolvedEntity struct {
 	// attempted is whether a resolution of (provider, target) ran; entityID
 	// is what it answered, empty when it skipped the coordinate or failed,
@@ -429,14 +430,14 @@ func (r resolvedEntity) matches(provider, target string) bool {
 	return r.attempted && r.provider == provider && r.target == target
 }
 
-// resolveArtifactEntity links a to the entity it is about: the pull request a
-// GitHub pull request, review or comment artifact is on, the Jira or Linear
+// resolveDeliverableEntity links a to the entity it is about: the pull request a
+// GitHub pull request, review or comment deliverable is on, the Jira or Linear
 // issue, the Slack thread. It resolves (and creates, like the touch) the
 // entity for a's provider and target, identified by the provider id a's key
-// carries (domain.ArtifactEntityIdentity), and sets a.EntityID to it and
-// a.Target to its key: an artifact's target is its entity's key, which every
+// carries (domain.DeliverableEntityIdentity), and sets a.EntityID to it and
+// a.Target to its key: a deliverable's target is its entity's key, which every
 // rename moves by entity_id from then on. A branch, which has no entity, and
-// an artifact whose entity does not resolve are written unlinked, and the
+// a deliverable whose entity does not resolve are written unlinked, and the
 // failure is logged. Best-effort, like the rest of the funnel: the write
 // happened, and its row is recorded either way. A failure another attempt can
 // get past is retried like the write after it (withRecordRetry); resolving
@@ -444,10 +445,10 @@ func (r resolvedEntity) matches(provider, target string) bool {
 // second attempt lands on what a first one wrote. The link is overwritten, never
 // taken from the caller, like the scope stamped beside it: the side that holds
 // the stores decides it, so a relayed row cannot name an entity of its choosing.
-func resolveArtifactEntity(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Artifact, container domain.EntityContainer) resolvedEntity {
+func resolveDeliverableEntity(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Deliverable, container domain.EntityContainer) resolvedEntity {
 	a.EntityID = ""
 	c := entityCoordinate{provider: a.Provider, target: a.Target, url: a.URL, container: container}
-	if scope, externalID, ok := domain.ArtifactEntityIdentity(*a); ok {
+	if scope, externalID, ok := domain.DeliverableEntityIdentity(*a); ok {
 		c.scope, c.externalID = scope, externalID
 	}
 	out := resolvedEntity{attempted: true, provider: a.Provider, target: a.Target}
@@ -459,7 +460,7 @@ func resolveArtifactEntity(ctx context.Context, stores db.Stores, info Conversat
 	})
 	if err != nil {
 		out.err = err
-		agenthostLog.Warn("resolving the artifact's entity failed; recording the artifact unlinked",
+		agenthostLog.Warn("resolving the deliverable's entity failed; recording the deliverable unlinked",
 			"conversation", info.ConversationID, "kind", a.Kind, "target", a.Target, "error", err)
 		return out
 	}
@@ -478,28 +479,28 @@ func resolveArtifactEntity(ctx context.Context, stores db.Stores, info Conversat
 // that holds the stores decides them, so a relayed row cannot name an entity
 // or a repository of its choosing.
 //
-// An action about the object the artifact is about reuses subject, the
-// artifact's entity, rather than resolving it again. Any other action resolves
+// An action about the object the deliverable is about reuses subject, the
+// deliverable's entity, rather than resolving it again. Any other action resolves
 // (and creates, like the touch) its own coordinate, identified by the provider
-// id off the artifact when it is the same provider's (a Jira artifact's key
-// names its site and issue id, a pull request's artifact carries its node id;
-// see domain.ArtifactEntityIdentity). A failure another attempt can get past
+// id off the deliverable when it is the same provider's (a Jira deliverable's key
+// names its site and issue id, a pull request's deliverable carries its node id;
+// see domain.DeliverableEntityIdentity). A failure another attempt can get past
 // is retried like the write (withRecordRetry); resolving only finds, creates or
 // renames toward what the provider answered, so a second attempt lands on what
 // a first one wrote. One that still fails is logged, and the act is recorded
 // unlinked. The resolution is returned for the touch, which records it once
 // the write settles.
-func resolveActionReferences(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Artifact, act *domain.ExternalAction, container domain.EntityContainer, subject resolvedEntity) resolvedEntity {
+func resolveActionReferences(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Deliverable, act *domain.ExternalAction, container domain.EntityContainer, subject resolvedEntity) resolvedEntity {
 	act.EntityID, act.RepositoryID = "", ""
 	about := subject
 	if !subject.matches(act.Provider, act.Target) {
 		c := entityCoordinate{provider: act.Provider, target: act.Target, url: act.URL, container: container}
-		// A Jira or Linear artifact's key names the issue every action beside it
-		// is about. A pull request artifact's node id names one pull request, and
+		// A Jira or Linear deliverable's key names the issue every action beside it
+		// is about. A pull request deliverable's node id names one pull request, and
 		// an action about that one matched subject above, so a GitHub action
-		// here is about another object and takes nothing off the artifact.
-		if a != nil && a.Provider == act.Provider && a.Provider != domain.ArtifactProviderGitHub {
-			if scope, externalID, ok := domain.ArtifactEntityIdentity(*a); ok {
+		// here is about another object and takes nothing off the deliverable.
+		if a != nil && a.Provider == act.Provider && a.Provider != domain.ProviderGitHub {
+			if scope, externalID, ok := domain.DeliverableEntityIdentity(*a); ok {
 				c.scope, c.externalID = scope, externalID
 			}
 		}
@@ -535,7 +536,7 @@ func resolveActionReferences(ctx context.Context, stores db.Stores, info Convers
 // registers a repository. A read failure is retried like the write, and one
 // that persists is logged and leaves the act unlinked.
 func resolveActionRepository(ctx context.Context, stores db.Stores, info ConversationInfo, act *domain.ExternalAction) string {
-	if act.Provider != domain.ArtifactProviderGitHub || act.Scope == "" || stores.Repos == nil {
+	if act.Provider != domain.ProviderGitHub || act.Scope == "" || stores.Repos == nil {
 		return ""
 	}
 	owner, repo, ok := targetRepository(act.Target)
@@ -608,12 +609,12 @@ func recordTouchInfo(ctx context.Context, stores db.Stores, info ConversationInf
 // and is never read as a second owner. Each is independently guarded, so a run
 // with a team and no human (an event-triggered one) stamps only the owner.
 //
-// Scoped to kind=pull_request deliberately. A submitted-review artifact shares
+// Scoped to kind=pull_request deliberately. A submitted-review deliverable shares
 // the owner/repo#N target shape, and reviewing someone else's PR is the clearest
 // case of touching an entity you must not come to own.
 //
 // Ordering against the poller does not matter. The entity is the one the
-// artifact was linked to (resolveArtifactEntity), which resolves the pull
+// deliverable was linked to (resolveDeliverableEntity), which resolves the pull
 // request by its node id and its key as the tracker does, so it is either the
 // row the poller already created or the stub the poller later enriches; the
 // stamp itself is if-NULL, so neither ordering can overwrite an owner set
@@ -624,13 +625,13 @@ func recordTouchInfo(ctx context.Context, stores db.Stores, info ConversationInf
 // that PR, never the run. It is not retried — the entity is durable and the
 // event that would need the owner has not arrived yet, but nothing re-derives
 // the stamp later either, so a failure means that PR's events fall through to
-// the router's remaining tiers for good. A pull request artifact whose entity
+// the router's remaining tiers for good. A pull request deliverable whose entity
 // did not resolve has nothing to stamp.
-func stampPRAttribution(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Artifact) {
-	if a == nil || a.Provider != domain.ArtifactProviderGitHub || a.Kind != domain.ArtifactKindPullRequest {
+func stampPRAttribution(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Deliverable) {
+	if a == nil || a.Provider != domain.ProviderGitHub || a.Kind != domain.DeliverableKindPullRequest {
 		return
 	}
-	// Defensive: auto-fire is gated on an owned task and artifacts.team_id is
+	// Defensive: auto-fire is gated on an owned task and deliverables.team_id is
 	// NOT NULL, so a conversation without a team should not reach here. A run
 	// with neither a team nor a creator has nothing to attribute.
 	if (info.TeamID == "" && info.UserID == "") || stores.Entities == nil {

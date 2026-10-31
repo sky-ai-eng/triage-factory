@@ -363,7 +363,7 @@ func newPollRig(t *testing.T, ctx context.Context, w *orreryWorld, shape deploym
 	}
 	r := &pollRig{stores: stores, orgID: d.orgID, teamID: d.teamID, host: host, pub: &recordingPublisher{}, tr: tr}
 	r.mgr = poller.NewManager(d.database, r.pub,
-		stores.Users, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, stores.Orgs,
+		stores.Users, stores.Tasks, stores.Entities, stores.Repos, stores.Deliverables, stores.EventQueue, stores.Orgs,
 		stores.JiraStatusRules, stores.JiraProjects, stores.LinearTeamRules, stores.TeamGitHubGroups, stores.Secrets, stores.GitHubApps, stores.PollReadiness,
 		resolver, nil)
 	r.mgr.OnError = func(source, org string, err error) {

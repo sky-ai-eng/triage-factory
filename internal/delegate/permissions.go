@@ -331,7 +331,7 @@ func (s *Spawner) BrowserPermissionHandler(orgID, conversationID, claimID string
 		// hub-less test spawner. The payload is deliberately just the id: the
 		// prompt itself is read from
 		// GET /api/agent/conversations/{id}/permissions, so the socket is a
-		// refetch trigger like artifact_updated rather than the sole carrier of
+		// refetch trigger like deliverable_updated rather than the sole carrier of
 		// state no other path can reach. That costs one round-trip before a
 		// prompt renders, which is nothing against a human-paced, rare event.
 		s.wsHub.Broadcast(websocket.Event{

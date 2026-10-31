@@ -79,35 +79,35 @@ func seedThreadEntity(t *testing.T, stores db.Stores, orgID, channelID, threadTS
 // messageKey is the dedup key of the message ts in the channel whose registry
 // row is row.
 func messageKey(row, ts string) string {
-	return domain.ArtifactDedupKey(domain.ArtifactProviderSlack, domain.ArtifactKindMessage, domain.SlackMessageResource(row, ts), "")
+	return domain.ObjectKey(domain.ProviderSlack, domain.DeliverableKindMessage, domain.SlackMessageResource(row, ts), "")
 }
 
-// seedMessageArtifact records a message in thread, the thread entity the
+// seedMessageDeliverable records a message in thread, the thread entity the
 // message is about, as the exec funnel links it: keyed on row, the registry
 // row the channel id resolved to when the message was written.
-func seedMessageArtifact(t *testing.T, stores db.Stores, orgID, teamID string, thread domain.Entity, row, channel, rootTS, ts string) string {
+func seedMessageDeliverable(t *testing.T, stores db.Stores, orgID, teamID string, thread domain.Entity, row, channel, rootTS, ts string) string {
 	t.Helper()
-	a, err := stores.Artifacts.UpsertSystem(context.Background(), orgID, domain.Artifact{
-		TeamID: teamID, Provider: domain.ArtifactProviderSlack, Scope: domain.SlackScope, Kind: domain.ArtifactKindMessage,
+	a, err := stores.Deliverables.UpsertSystem(context.Background(), orgID, domain.Deliverable{
+		TeamID: teamID, Provider: domain.ProviderSlack, Scope: domain.SlackScope, Kind: domain.DeliverableKindMessage,
 		Target: domain.SlackSourceID(channel, rootTS), ExternalID: ts, EntityID: thread.ID,
 		URL:      moveReplyPermalink(channel, ts, rootTS),
-		State:    domain.ArtifactStateMessagePosted,
+		State:    domain.DeliverableStateMessagePosted,
 		DedupKey: messageKey(row, ts),
 	})
 	if err != nil {
-		t.Fatalf("seed artifact %s/%s: %v", channel, ts, err)
+		t.Fatalf("seed deliverable %s/%s: %v", channel, ts, err)
 	}
 	return a.ID
 }
 
-type artifactRow struct{ target, key, url string }
+type deliverableRow struct{ target, key, url string }
 
-func readArtifact(t *testing.T, h *pgtest.Harness, id string) artifactRow {
+func readDeliverable(t *testing.T, h *pgtest.Harness, id string) deliverableRow {
 	t.Helper()
-	var r artifactRow
-	if err := h.AdminDB.QueryRow(`SELECT target, dedup_key, COALESCE(url, '') FROM artifacts WHERE id = $1`, id).
+	var r deliverableRow
+	if err := h.AdminDB.QueryRow(`SELECT target, dedup_key, COALESCE(url, '') FROM deliverables WHERE id = $1`, id).
 		Scan(&r.target, &r.key, &r.url); err != nil {
-		t.Fatalf("read artifact %s: %v", id, err)
+		t.Fatalf("read deliverable %s: %v", id, err)
 	}
 	return r
 }
@@ -117,8 +117,9 @@ func readArtifact(t *testing.T, h *pgtest.Harness, id string) artifactRow {
 func seedSlackAction(t *testing.T, stores db.Stores, orgID, teamID, entityID, target, url, dedupKey string) {
 	t.Helper()
 	if err := stores.ExternalActions.RecordSystem(context.Background(), orgID, domain.ExternalAction{
-		TeamID: teamID, Provider: domain.ArtifactProviderSlack, Scope: domain.SlackScope, Action: domain.ActionSlackMessagePosted,
+		TeamID: teamID, Provider: domain.ProviderSlack, Scope: domain.SlackScope, Action: domain.ActionSlackMessagePosted,
 		Target: target, EntityID: entityID, URL: url, Credential: domain.CredentialSlackBot, DedupKey: dedupKey,
+		PerformedBy: domain.PerformedByAgent,
 	}); err != nil {
 		t.Fatalf("seed action %s: %v", dedupKey, err)
 	}
@@ -180,9 +181,9 @@ func resolvesTo(t *testing.T, channels slackstore.ChannelRegistryStore, orgID, r
 // TestChannelMove_Postgres_MovesTheChannel: references to the channel hold its
 // registry row, so a move rewrites the row's channel id and the display
 // values that spell it — every thread entity's key and permalink under the old
-// id in any state, the targets and permalinks of the Slack artifacts and the
+// id in any state, the targets and permalinks of the Slack deliverables and the
 // action pointers that name it — and leaves the tracking rows, handler
-// filters, the threads' identity (row and root ts) and the artifacts' dedup
+// filters, the threads' identity (row and root ts) and the deliverables' dedup
 // keys (row and ts) as they were. Nothing under a channel whose id merely
 // starts with the old one moves. A redelivery of the same change finds
 // nothing left to move.
@@ -209,11 +210,11 @@ func TestChannelMove_Postgres_MovesTheChannel(t *testing.T) {
 	}
 	neighbour := seedThreadEntity(t, stores, orgID, moveNeighbour, "1700000000.000100", "thread", movePermalink(moveNeighbour, "1700000000000100"))
 
-	artifact := seedMessageArtifact(t, stores, orgID, teamA, open, row, moveOld, "1700000000.000100", "1700000000.000300")
-	neighbourArtifact := seedMessageArtifact(t, stores, orgID, teamA, neighbour, neighbourRow, moveNeighbour, "1700000000.000100", "1700000000.000300")
+	deliverable := seedMessageDeliverable(t, stores, orgID, teamA, open, row, moveOld, "1700000000.000100", "1700000000.000300")
+	neighbourDeliverable := seedMessageDeliverable(t, stores, orgID, teamA, neighbour, neighbourRow, moveNeighbour, "1700000000.000100", "1700000000.000300")
 	// A message whose thread did not resolve when it was written is linked to
 	// no entity.
-	unlinkedArtifact := seedMessageArtifact(t, stores, orgID, teamA, domain.Entity{}, row, moveOld, "1700000000.000100", "1700000000.000400")
+	unlinkedDeliverable := seedMessageDeliverable(t, stores, orgID, teamA, domain.Entity{}, row, moveOld, "1700000000.000100", "1700000000.000400")
 
 	oldLink := moveReplyPermalink(moveOld, "1700000000000300", "1700000000.000100")
 	seedSlackAction(t, stores, orgID, teamA, open.ID, domain.SlackSourceID(moveOld, "1700000000.000100"), oldLink, "action-moved")
@@ -231,7 +232,7 @@ func TestChannelMove_Postgres_MovesTheChannel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MoveSystem: %v", err)
 	}
-	want := slackstore.ChannelMove{To: moveNew, Entities: 2, Artifacts: 2, Actions: 2}
+	want := slackstore.ChannelMove{To: moveNew, Entities: 2, Deliverables: 2, Actions: 2}
 	if !reflect.DeepEqual(move, want) {
 		t.Errorf("MoveSystem = %+v, want %+v", move, want)
 	}
@@ -284,30 +285,30 @@ func TestChannelMove_Postgres_MovesTheChannel(t *testing.T) {
 		t.Errorf("FindOrCreateThreadSystem by the retired id = %+v err=%v, want the existing thread %s", thread, err, open.ID)
 	}
 
-	// Artifacts: the target and permalink move; the key names the row and
+	// Deliverables: the target and permalink move; the key names the row and
 	// stays.
-	if got := readArtifact(t, h, artifact); got != (artifactRow{
+	if got := readDeliverable(t, h, deliverable); got != (deliverableRow{
 		target: domain.SlackSourceID(moveNew, "1700000000.000100"),
 		key:    messageKey(row, "1700000000.000300"),
 		url:    moveReplyPermalink(moveNew, "1700000000.000300", "1700000000.000100"),
 	}) {
-		t.Errorf("moved artifact = %+v", got)
+		t.Errorf("moved deliverable = %+v", got)
 	}
-	// An artifact linked to no entity moves its target by the channel id it
+	// A deliverable linked to no entity moves its target by the channel id it
 	// spells.
-	if got := readArtifact(t, h, unlinkedArtifact); got != (artifactRow{
+	if got := readDeliverable(t, h, unlinkedDeliverable); got != (deliverableRow{
 		target: domain.SlackSourceID(moveNew, "1700000000.000100"),
 		key:    messageKey(row, "1700000000.000400"),
 		url:    moveReplyPermalink(moveNew, "1700000000.000400", "1700000000.000100"),
 	}) {
-		t.Errorf("moved unlinked artifact = %+v", got)
+		t.Errorf("moved unlinked deliverable = %+v", got)
 	}
-	if got := readArtifact(t, h, neighbourArtifact); got != (artifactRow{
+	if got := readDeliverable(t, h, neighbourDeliverable); got != (deliverableRow{
 		target: domain.SlackSourceID(moveNeighbour, "1700000000.000100"),
 		key:    messageKey(neighbourRow, "1700000000.000300"),
 		url:    moveReplyPermalink(moveNeighbour, "1700000000.000300", "1700000000.000100"),
 	}) {
-		t.Errorf("neighbour artifact = %+v, want untouched", got)
+		t.Errorf("neighbour deliverable = %+v, want untouched", got)
 	}
 
 	// Action pointers: the record of the act keeps its target and link.
@@ -363,7 +364,7 @@ func channelRowNamed(t *testing.T, channels slackstore.ChannelRegistryStore, org
 // channel and is closed beside the thread's original, which stays the
 // thread's active entity; the handler filters naming it name the channel
 // instead, one that cannot be decoded being reported and left as stored; and
-// the artifact keys naming it name the channel's row, except one the channel's
+// the deliverable keys naming it name the channel's row, except one the channel's
 // row already holds for the same message.
 func TestChannelMove_Postgres_AbsorbsWhatTheNewIDGotFirst(t *testing.T) {
 	h := pgtest.Shared(t)
@@ -398,9 +399,9 @@ func TestChannelMove_Postgres_AbsorbsWhatTheNewIDGotFirst(t *testing.T) {
 
 	// One message recorded under both rows, and one only under the absorbed
 	// row.
-	kept := seedMessageArtifact(t, stores, orgID, teamA, original, channel.ID, moveOld, "1700000000.000100", "1700000000.000500")
-	held := seedMessageArtifact(t, stores, orgID, teamA, newcomer, absorbed.ID, moveNew, "1700000000.000100", "1700000000.000500")
-	rekeyed := seedMessageArtifact(t, stores, orgID, teamA, newcomer, absorbed.ID, moveNew, "1700000000.000100", "1700000000.000600")
+	kept := seedMessageDeliverable(t, stores, orgID, teamA, original, channel.ID, moveOld, "1700000000.000100", "1700000000.000500")
+	held := seedMessageDeliverable(t, stores, orgID, teamA, newcomer, absorbed.ID, moveNew, "1700000000.000100", "1700000000.000500")
+	rekeyed := seedMessageDeliverable(t, stores, orgID, teamA, newcomer, absorbed.ID, moveNew, "1700000000.000100", "1700000000.000600")
 
 	onAbsorbed := seedSlackHandler(t, h, orgID, teamA, userID, "absorbed", `{"channel_in":["`+absorbed.ID+`","C0OTHER01"],"mentioned_only":true}`)
 	onBoth := seedSlackHandler(t, h, orgID, teamA, userID, "both", `{"channel_in":["`+channel.ID+`","`+absorbed.ID+`"]}`)
@@ -413,7 +414,7 @@ func TestChannelMove_Postgres_AbsorbsWhatTheNewIDGotFirst(t *testing.T) {
 	}
 	want := slackstore.ChannelMove{
 		To: moveNew, Absorbed: absorbed.ID, Entities: 1, Superseded: []string{newcomer.ID},
-		Artifacts: 2, Trackers: 2, Handlers: 2, SkippedHandlers: []string{unreadable},
+		Deliverables: 2, Trackers: 2, Handlers: 2, SkippedHandlers: []string{unreadable},
 	}
 	if !reflect.DeepEqual(move, want) {
 		t.Errorf("MoveSystem = %+v, want %+v", move, want)
@@ -480,17 +481,17 @@ func TestChannelMove_Postgres_AbsorbsWhatTheNewIDGotFirst(t *testing.T) {
 		t.Errorf("unreadable handler = %v, want it as stored", got)
 	}
 
-	// Artifacts: a key naming the absorbed row names the channel's, unless
+	// Deliverables: a key naming the absorbed row names the channel's, unless
 	// the channel's row already holds it for the same message.
-	if got := readArtifact(t, h, kept); got.key != messageKey(channel.ID, "1700000000.000500") ||
+	if got := readDeliverable(t, h, kept); got.key != messageKey(channel.ID, "1700000000.000500") ||
 		got.target != domain.SlackSourceID(moveNew, "1700000000.000100") {
-		t.Errorf("artifact on the channel's row = %+v, want its key kept and its target moved", got)
+		t.Errorf("deliverable on the channel's row = %+v, want its key kept and its target moved", got)
 	}
-	if got := readArtifact(t, h, held); got.key != messageKey(absorbed.ID, "1700000000.000500") {
-		t.Errorf("artifact whose message the channel's row already holds = %+v, want its key left as it is", got)
+	if got := readDeliverable(t, h, held); got.key != messageKey(absorbed.ID, "1700000000.000500") {
+		t.Errorf("deliverable whose message the channel's row already holds = %+v, want its key left as it is", got)
 	}
-	if got := readArtifact(t, h, rekeyed); got.key != messageKey(channel.ID, "1700000000.000600") {
-		t.Errorf("artifact keyed on the absorbed row = %+v, want it keyed on the channel's row", got)
+	if got := readDeliverable(t, h, rekeyed); got.key != messageKey(channel.ID, "1700000000.000600") {
+		t.Errorf("deliverable keyed on the absorbed row = %+v, want it keyed on the channel's row", got)
 	}
 }
 

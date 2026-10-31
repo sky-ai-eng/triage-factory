@@ -8,12 +8,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TestUpsertArtifact_KeysABranchOnItsTargetNotTheKeyItArrivesWith covers the
+// TestUpsertDeliverable_KeysABranchOnItsTargetNotTheKeyItArrivesWith covers the
 // relayed write: on an executor the sidecar builds a branch's key, and the
 // runtime must not file the push under a repository the key names, or fail on
 // a key that names none. The branch is keyed on the row its target names, and
 // a target no row has is refused while the push keeps its ledger row.
-func TestUpsertArtifact_KeysABranchOnItsTargetNotTheKeyItArrivesWith(t *testing.T) {
+func TestUpsertDeliverable_KeysABranchOnItsTargetNotTheKeyItArrivesWith(t *testing.T) {
 	const ref = "refs/heads/feat"
 	for _, eventTriggered := range []bool{true, false} {
 		name := "manual"
@@ -31,11 +31,11 @@ func TestUpsertArtifact_KeysABranchOnItsTargetNotTheKeyItArrivesWith(t *testing.
 				domain.BranchDedupKey(otherID, ref), // another repository in the org
 				"git:branch:not-a-uuid:" + ref,
 			} {
-				branch, _ := domain.NewBranchArtifact("octo/repo", ref, []string{"abc123", "def456"}[i], i == 0)
+				branch, _ := domain.NewBranchDeliverable("octo/repo", ref, []string{"abc123", "def456"}[i], i == 0)
 				branch.DedupKey = sentKey
-				stored, err := rt.UpsertArtifact(ctx, branch)
+				stored, err := rt.UpsertDeliverable(ctx, branch)
 				if err != nil {
-					t.Fatalf("UpsertArtifact with key %q: %v", sentKey, err)
+					t.Fatalf("UpsertDeliverable with key %q: %v", sentKey, err)
 				}
 				if want := domain.BranchDedupKey(repoID, ref); stored.DedupKey != want {
 					t.Errorf("sent %q: stored key = %q, want %q", sentKey, stored.DedupKey, want)
@@ -50,9 +50,9 @@ func TestUpsertArtifact_KeysABranchOnItsTargetNotTheKeyItArrivesWith(t *testing.
 				t.Errorf("push rows = %d, want 2", got)
 			}
 
-			ghost, _ := domain.NewBranchArtifact("octo/ghost", ref, "abc123", true)
+			ghost, _ := domain.NewBranchDeliverable("octo/ghost", ref, "abc123", true)
 			ghost.DedupKey = domain.BranchDedupKey(repoID, ref)
-			if _, err := rt.UpsertArtifact(ctx, ghost); !errors.Is(err, errNoRegistryRow) {
+			if _, err := rt.UpsertDeliverable(ctx, ghost); !errors.Is(err, errNoRegistryRow) {
 				t.Errorf("a target no row has: err = %v, want errNoRegistryRow", err)
 			}
 			var ghostRow *domain.ExternalAction

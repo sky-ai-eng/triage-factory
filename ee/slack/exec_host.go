@@ -108,7 +108,7 @@ type slackReactResult struct{}
 
 // authorizedChannel is the channel a verb acts on once authorized: ID is the
 // id Slack gives it now, and Row its slack_channels row, which a Slack
-// artifact's dedup key names so that a later change of the id moves no key.
+// deliverable's dedup key names so that a later change of the id moves no key.
 type authorizedChannel struct {
 	ID  string
 	Row string
@@ -281,7 +281,7 @@ func (h *slackExecHandler) send(ctx context.Context, rt agenthost.ExtensionRunti
 		threadRootErr = h.recordThreadRoot(ctx, rt, ws, a.Channel, ts, sendTitleText(a))
 	}
 	// recordMessage always runs next, even when threadRootErr is set: the
-	// Slack message already posted, and skipping the artifacts/external_actions
+	// Slack message already posted, and skipping the deliverables/external_actions
 	// write over a bookkeeping race would drop its audit trail entirely — a
 	// strictly worse outcome than the mis-tagged kind="message" fallback
 	// threadRootErr already reports below. There is deliberately no gate here
@@ -367,7 +367,7 @@ func (h *slackExecHandler) react(ctx context.Context, rt agenthost.ExtensionRunt
 	rootTS := h.resolveMessageRootTS(ctx, caller, token, a.Channel, a.TS)
 	detail, _ := json.Marshal(map[string]string{"emoji": a.Emoji})
 	rt.Record(ctx, nil, &domain.ExternalAction{
-		Provider:   domain.ArtifactProviderSlack,
+		Provider:   domain.ProviderSlack,
 		Action:     domain.ActionSlackReactionAdded,
 		Target:     domain.SlackSourceID(a.Channel, rootTS),
 		ExternalID: a.TS,
@@ -433,7 +433,7 @@ retry:
 		ts, recordThreadRootMaxAttempts, err)
 }
 
-// recordMessage records the send/edit matrix: an `artifacts` row keyed on the
+// recordMessage records the send/edit matrix: a `deliverables` row keyed on the
 // channel's registry row (channelRow) and the message's own ts — send and a
 // later edit share the key, so an edit upserts the send's row in place — with
 // Target set to the thread's SlackSourceID (rootTS), plus the paired
@@ -442,17 +442,17 @@ retry:
 // leaves every message's key where it is.
 func (h *slackExecHandler) recordMessage(ctx context.Context, rt agenthost.ExtensionRuntime, action, channelRow, channel, rootTS, ts, permalink string) {
 	target := domain.SlackSourceID(channel, rootTS)
-	a := &domain.Artifact{
-		Provider:   domain.ArtifactProviderSlack,
-		Kind:       domain.ArtifactKindMessage,
+	a := &domain.Deliverable{
+		Provider:   domain.ProviderSlack,
+		Kind:       domain.DeliverableKindMessage,
 		Target:     target,
 		ExternalID: ts,
 		URL:        permalink,
-		State:      domain.ArtifactStateMessagePosted,
-		DedupKey:   domain.ArtifactDedupKey(domain.ArtifactProviderSlack, domain.ArtifactKindMessage, domain.SlackMessageResource(channelRow, ts), ""),
+		State:      domain.DeliverableStateMessagePosted,
+		DedupKey:   domain.ObjectKey(domain.ProviderSlack, domain.DeliverableKindMessage, domain.SlackMessageResource(channelRow, ts), ""),
 	}
 	act := &domain.ExternalAction{
-		Provider:   domain.ArtifactProviderSlack,
+		Provider:   domain.ProviderSlack,
 		Action:     action,
 		Target:     target,
 		ExternalID: ts,
@@ -463,7 +463,7 @@ func (h *slackExecHandler) recordMessage(ctx context.Context, rt agenthost.Exten
 }
 
 // permalinkBestEffort resolves ts's shareable link; "" on any failure — a
-// permalink is a nice-to-have on the artifact row, never load-bearing.
+// permalink is a nice-to-have on the deliverable row, never load-bearing.
 func (h *slackExecHandler) permalinkBestEffort(ctx context.Context, caller slackCaller, token, channel, ts string) string {
 	link, err := slackChatGetPermalink(ctx, h.client, caller, token, channel, ts)
 	if err != nil {
@@ -574,7 +574,7 @@ func (h *slackExecHandler) readThread(ctx context.Context, rt agenthost.Extensio
 	// read and a human mention resolve to the same entity. Best-effort via the
 	// runtime, relayed to the orchestrator on the sidecar. `read channel` is
 	// set-returning and never touches.
-	rt.RecordReadTouch(ctx, domain.ArtifactProviderSlack, domain.SlackSourceID(a.Channel, a.TS), "", domain.EntityContainer{}, "")
+	rt.RecordReadTouch(ctx, domain.ProviderSlack, domain.SlackSourceID(a.Channel, a.TS), "", domain.EntityContainer{}, "")
 	return h.viewMessages(ctx, caller, token, msgs), nil
 }
 

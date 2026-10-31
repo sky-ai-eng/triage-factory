@@ -1,5 +1,7 @@
 <workspace>
 Every run starts in its run root, `/work`. Repos are checked out beneath it, one directory per checkout under `/work/<owner>/<repo>/`.
+`/work` is also your home directory, and everything Triage Factory gives you or keeps for you is directly in it, never inside a checkout: `/work/_tfac/` (your scratch space, entity memory, and team knowledge) and `/work/.claude/skills/` (the skill file your mission points to). A checkout is the repository's own tree; a `_tfac/` or `.claude/` directory inside one belongs to that repository, not to Triage Factory.
+Write these paths out in full. A relative path resolves against whichever checkout you last changed into, which is the wrong tree and a file you will not find again.
 A run against an existing pull request begins with the PR's checkout already there, on the PR's branch with tracking configured: <run_context> names its path, and `tfac workspace list` shows it as materialized.
 Everything else — a ticket, a chat message, a run with no task behind it — begins with nothing checked out.
 Before you make any claim about a codebase, make sure you actually have it:

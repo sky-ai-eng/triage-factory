@@ -70,7 +70,7 @@ func (f fakeGitHubResolver) TokenFor(_ context.Context, _, _ string) (githubapp.
 }
 
 func (f fakeGitHubResolver) BaseURLFor(_ context.Context, _ string) (string, error) {
-	// Reached by UpsertArtifact when it re-anchors a branch artifact's URL to the
+	// Reached by UpsertDeliverable when it re-anchors a branch deliverable's URL to the
 	// org host; returns the configured base so a branch-capture test can assert
 	// the rewrite.
 	return f.baseURL, nil
@@ -453,7 +453,7 @@ func TestGithub_NotConfigured_BothModes(t *testing.T) {
 
 // TestServer_GithubCreatePR_ReturnsNodeID pins node_id end-to-end: the REST
 // create response's node_id crosses the daemon→IPC boundary intact (the durable
-// PR handle the artifact rework keys on), alongside number and html_url.
+// PR handle the deliverable rework keys on), alongside number and html_url.
 func TestServer_GithubCreatePR_ReturnsNodeID(t *testing.T) {
 	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

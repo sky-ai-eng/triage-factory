@@ -18,7 +18,7 @@ import (
 // matching orgs row the FK needs.
 func TestModelAvailabilityStore_SQLite_Conformance(t *testing.T) {
 	dbtest.RunModelAvailabilityStoreConformance(t, func(t *testing.T) (db.ModelAvailabilityStore, string) {
-		conn := newSQLiteForArtifactTest(t)
+		conn := newSQLiteForDeliverableTest(t)
 		return sqlitestore.New(conn).ModelAvailability, runmode.LocalDefaultOrgID
 	})
 }

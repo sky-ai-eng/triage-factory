@@ -35,7 +35,7 @@ func TestIsRetryable(t *testing.T) {
 		{"unique violation", &pgconn.PgError{Code: "23505"}, false},
 		{"rls refusal", &pgconn.PgError{Code: "42501"}, false},
 		{"integrity violation at commit", &pgconn.PgError{Code: "40002"}, false},
-		{"plain error", errors.New("artifact write refused"), false},
+		{"plain error", errors.New("deliverable write refused"), false},
 		{"transaction already finished", sql.ErrTxDone, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

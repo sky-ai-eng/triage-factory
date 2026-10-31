@@ -67,9 +67,9 @@ process in both modes:
      aborts the push only when `check-push` exits `3` ("refused by
      policy"); any other status allows it, so a missing binary or an
      unreadable database can never block a push. Runs first: a push about
-     to be aborted must not leave a branch artifact behind.
+     to be aborted must not leave a branch deliverable behind.
   2. **Branch recording** via `triagefactory hook record-push` — each
-     pushed branch as a durable `branch` artifact. Skips deletes, marks
+     pushed branch as a durable `branch` deliverable. Skips deletes, marks
      new branches, guarded so it can never change the exit status.
 
   Rewritten by `Ensure` on every startup so an upgraded binary refreshes a
@@ -79,9 +79,9 @@ process in both modes:
   whenever the per-run git proxy is wired), for both passes: the proxy
   already adjudicates the same policy at its ref gate, so the hook must
   not double-judge; and pre-push fires *before* the transfer, so it cannot
-  know whether the push will land — recording there would mint artifacts
+  know whether the push will land — recording there would mint deliverables
   for pushes GitHub refuses. Under a proxy, the proxy's receive-pack
-  capture owns the record instead: artifact + `branch_pushed` audit row on
+  capture owns the record instead: deliverable + `branch_pushed` audit row on
   a 2xx, a `branch_push_failed` audit row on anything else. Local mode has
   no proxy, so the hook keeps both roles there (push outcome unobservable
   — accepted).

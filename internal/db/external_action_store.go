@@ -2,10 +2,27 @@ package db
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
+
+// ErrPerformedByRequired refuses an audit-ledger write whose performed_by is
+// empty or not one of the domain.PerformedBy* values. Who performed an act is
+// what separates a run's own actions from a person's approval of them, so a
+// row that does not say is refused rather than defaulted.
+var ErrPerformedByRequired = errors.New("external action performed_by must be agent, person or system")
+
+// RequirePerformedBy refuses a value domain.IsPerformedBy rejects with
+// ErrPerformedByRequired. Both dialects' external-action writes call it before
+// touching the database.
+func RequirePerformedBy(performedBy string) error {
+	if !domain.IsPerformedBy(performedBy) {
+		return ErrPerformedByRequired
+	}
+	return nil
+}
 
 // ExternalActionStore owns the external_actions table — the append-only audit
 // log of record: one row per external write TF performs under an ORG-scoped
@@ -13,7 +30,7 @@ import (
 // substrate; the cross-team/org read surface is EE (gated by FeatureGovernance at
 // the HTTP layer). See TFAC-483.
 //
-// Two write paths, mirroring the Artifacts Upsert/UpsertSystem pool split — this
+// Two write paths, mirroring the Deliverables Upsert/UpsertSystem pool split — this
 // is the addition over AccessChangeLogStore (which has only an app-pool Record):
 //
 //   - Record runs on the APP pool (RLS-active). It composes inside the
@@ -26,7 +43,7 @@ import (
 //   - RecordSystem runs on the ADMIN pool (BYPASSRLS) for writers that hold a
 //     real (org_id) identity but no JWT-claims context: the event-triggered
 //     bot conversations and the Jira board mirror, neither of which has a
-//     user to bind claims for. Mirrors the `...System` admin halves on Artifacts / Reviews.
+//     user to bind claims for. Mirrors the `...System` admin halves on Deliverables / Reviews.
 //
 // Both Record paths use ON CONFLICT(org_id, scope, dedup_key) DO NOTHING —
 // append-only, never a mutation. An empty entry.DedupKey is filled with a uuid
@@ -37,8 +54,10 @@ import (
 // and the per-act key the agent's recording funnel fixes before its first
 // attempt, so a retried write lands on the row it may already have written.
 // An empty entry.Scope is refused with
-// ErrExternalObjectScopeRequired. SQLite is N=1 and unscoped; both pools
-// collapse to the one connection.
+// ErrExternalObjectScopeRequired, and an entry.PerformedBy that is not one of
+// the domain.PerformedBy* values with ErrPerformedByRequired, both before the
+// database is touched. SQLite is N=1 and unscoped; both pools collapse to the
+// one connection.
 //
 // A row references what the act was about by id — entry.EntityID, or
 // entry.RepositoryID for a GitHub act with no entity — and the writer resolves
@@ -92,7 +111,7 @@ type ExternalActionStore interface {
 
 	// ListByConversation returns one conversation's actions, newest first —
 	// what a single conversation did to the outside world, the sibling of
-	// Artifacts.ListByConversation. App pool in Postgres under the same
+	// Deliverables.ListByConversation. App pool in Postgres under the same
 	// org-scoped policy as ListByTeam; the handler reads the conversation
 	// first, so a conversation the caller's team cannot see is a 404 before
 	// this runs. Bounded + filtered by opts.
@@ -100,21 +119,21 @@ type ExternalActionStore interface {
 	// It is a separate read rather than a filter on ListByTeam because the two
 	// answer different questions and are reached from different surfaces: this
 	// one needs no governance entitlement, since a member of the owning team is
-	// already reading that conversation's transcript and artifacts.
+	// already reading that conversation's transcript and deliverables.
 	ListByConversation(ctx context.Context, orgID, conversationID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, int, error)
 
-	// ListPRCreatedWithoutArtifactSystem returns orgID's pr_created rows on
+	// ListPRCreatedWithoutDeliverableSystem returns orgID's pr_created rows on
 	// scope that occurred at or after since, carry a node id and a
-	// conversation, and have no artifact with that node id in the same org and
-	// scope — the pull requests the create verb opened whose artifact write
+	// conversation, and have no deliverable with that node id in the same org and
+	// scope — the pull requests the create verb opened whose deliverable write
 	// failed. Oldest first (occurred_at, id). It is the reconciler's PR
 	// backstop read, run every cycle, so it is one query with no count: a time
 	// bound the (org_id, action, occurred_at) index narrows on, and a NOT
-	// EXISTS against artifacts on (org_id, scope, node_id), which
-	// idx_artifacts_node_id serves. A row with no node id has nothing to match
-	// an artifact on, and a row whose conversation was purged has no one to
+	// EXISTS against deliverables on (org_id, scope, node_id), which
+	// idx_deliverables_node_id serves. A row with no node id has nothing to match
+	// a deliverable on, and a row whose conversation was purged has no one to
 	// own one, so neither is returned. Admin pool (BYPASSRLS): the backstop has
-	// no claims and an artifact may belong to any team. An empty scope is
+	// no claims and a deliverable may belong to any team. An empty scope is
 	// refused with ErrExternalObjectScopeRequired.
-	ListPRCreatedWithoutArtifactSystem(ctx context.Context, orgID, scope string, since time.Time) ([]domain.ExternalAction, error)
+	ListPRCreatedWithoutDeliverableSystem(ctx context.Context, orgID, scope string, since time.Time) ([]domain.ExternalAction, error)
 }

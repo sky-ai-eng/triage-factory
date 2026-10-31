@@ -842,14 +842,14 @@ const sqliteQueuePositionQuery = `
 // both.
 const sqliteConversationLiveStatusesSQL = `'running','fetching','cloning','agent_starting','awaiting_credentials'`
 
-// sqliteUnresolvedArtifactSQL is the SQL twin of
-// domain.HasUnresolvedArtifacts, written against an artifacts alias `art` — the
+// sqliteUnresolvedDeliverableSQL is the SQL twin of
+// domain.HasUnresolvedDeliverables, written against a deliverables alias `art` — the
 // SQLite mirror of the Postgres twin, which carries the model. The one
 // dialect difference is the sentinel read: json_valid() guards the extract
 // here, because details_json is TEXT and json_extract() on an unparseable
 // value raises. A value that is not a JSON object reads as not-ready either
-// way, matching domain's ParseReviewArtifactDetails.
-const sqliteUnresolvedArtifactSQL = `
+// way, matching domain's ParseReviewDeliverableDetails.
+const sqliteUnresolvedDeliverableSQL = `
 	   (art.kind = 'pull_request' AND art.state = 'draft')
 	OR (art.kind = 'review' AND art.state = 'pending'
 	    AND json_valid(art.details_json)
@@ -866,9 +866,9 @@ const sqliteConversationAttentionSQL = `(
 			                    WHERE cl_p.conversation_id = r.id AND cl_p.released_at IS NULL))
 		OR ((` + sqliteDisplayStatusSQL + `) NOT IN (` + sqliteConversationLiveStatusesSQL + `)
 		    AND EXISTS (
-		        SELECT 1 FROM artifacts art
+		        SELECT 1 FROM deliverables art
 		        WHERE art.conversation_id = r.id
-		          AND (` + sqliteUnresolvedArtifactSQL + `)))
+		          AND (` + sqliteUnresolvedDeliverableSQL + `)))
 	)`
 
 // sqliteConversationReturningColumns is sqliteConversationColumns' RETURNING-safe
@@ -1040,7 +1040,7 @@ func (s *conversationStore) List(ctx context.Context, orgID string, filter db.Co
 	}
 
 	// ?-placeholder IN list (SQLite has no array bind), mirroring
-	// artifactStore.ListByConversations, chunked to stay inside SQLite's variable
+	// deliverableStore.ListByConversations, chunked to stay inside SQLite's variable
 	// limit (chunkIDs) on the unwindowed path. Ordering by (task_id,
 	// started_at DESC, id) makes a windowed read's pages partition a total
 	// order; on the unwindowed chunked path the order ACROSS chunks is chunk
@@ -1119,7 +1119,7 @@ func (s *conversationStore) queuePositions(ctx context.Context) (map[string]int,
 // this statement's chunk of filter.TaskIDs — empty when the filter names no
 // task, which narrows on nothing rather than matching nothing.
 //
-// The artifacts / conversation_permissions reads inside the attention
+// The deliverables / conversation_permissions reads inside the attention
 // predicate are correlated subqueries rather than joins, so nothing here can
 // multiply the row count — a conversation with three draft PRs is one row and
 // one unit of `needs`.
@@ -1168,7 +1168,7 @@ func (s *conversationStore) ListPRCoherenceTargetsSystem(ctx context.Context, or
 		  AND (
 		       t.entity_id = ?
 		       OR EXISTS (
-		           SELECT 1 FROM artifacts a
+		           SELECT 1 FROM deliverables a
 		           WHERE a.conversation_id = r.id AND a.entity_id = ? AND a.kind = ? AND a.state = ?
 		       )
 		       OR EXISTS (
@@ -1186,7 +1186,7 @@ func (s *conversationStore) ListPRCoherenceTargetsSystem(ctx context.Context, or
 		      WHERE te.task_id = r.task_id AND te.event_id = ? AND te.kind = 'injected'
 		  )
 		ORDER BY r.started_at ASC, r.id ASC
-	`, query.EntityID, query.EntityID, domain.ArtifactKindReview, domain.ArtifactStateReviewPending, nullIfEmpty(query.BaseRepositoryID), query.PRRef, query.BranchRef, nullIfEmpty(query.BaseRepositoryID), nullIfEmpty(query.HeadRepositoryID), query.EventID)
+	`, query.EntityID, query.EntityID, domain.DeliverableKindReview, domain.DeliverableStateReviewPending, nullIfEmpty(query.BaseRepositoryID), query.PRRef, query.BranchRef, nullIfEmpty(query.BaseRepositoryID), nullIfEmpty(query.HeadRepositoryID), query.EventID)
 	if err != nil {
 		return nil, err
 	}
@@ -1827,7 +1827,7 @@ func (s *conversationStore) SetClaimPhaseSystem(ctx context.Context, orgID, conv
 }
 
 // LastAgentActivityAtSystem returns the created_at of the run's newest non-user
-// message (the artifact-change ledger watermark). Ordered by id DESC —
+// message (the deliverable-change ledger watermark). Ordered by id DESC —
 // the monotonic insertion order — rather than MAX(created_at), so the watermark
 // is the genuinely last-inserted agent row and never trips over mixed timestamp
 // text formats in a lexical MAX. ok=false when the run has no agent message yet.
@@ -2229,7 +2229,7 @@ func (s *conversationStore) MessagesForConversations(ctx context.Context, orgID 
 		return nil, nil
 	}
 	// ?-placeholder IN list (SQLite has no array bind), mirroring
-	// artifactStore.ListByConversations, chunked to stay inside SQLite's variable
+	// deliverableStore.ListByConversations, chunked to stay inside SQLite's variable
 	// limit (chunkIDs). A conversation_id falls in exactly one chunk, so
 	// ordering on (conversation_id, the effective assembly key) keeps each
 	// run's messages contiguous within the merged slice and in the same

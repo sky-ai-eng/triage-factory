@@ -573,7 +573,7 @@ func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, trigg
 	if errors.Is(markErr, db.ErrClaimReleased) {
 		// The release landed between the two writes. Same answer, same tail
 		// to skip; the failure row already on the transcript is the one
-		// artifact of this engagement that stands, and it is attributed to
+		// deliverable of this engagement that stands, and it is attributed to
 		// this claim rather than the successor's.
 		delegateLog.Error("claim fence refused the failure terminal — a successor owns this conversation; recording nothing further",
 			"conversation", conversationID, "claim_id", claimID, "org_id", orgID, "error", markErr)

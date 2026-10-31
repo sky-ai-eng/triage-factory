@@ -140,7 +140,7 @@ import (
 // composition across tables whose surviving row is the caller's).
 // FindOrCreate, FindOrCreateSystem and FindOrCreateLinearSystem already
 // return the row, StampExternalIDSystem returns the row it stamped, and
-// RenameSystem is a composition across entities, artifacts and the audit
+// RenameSystem is a composition across entities, deliverables and the audit
 // ledger that answers with what it moved.
 
 // Errors the identity writes refuse with. Both describe stored state a write
@@ -418,7 +418,7 @@ type EntityStore interface {
 	// key-derived value:
 	//
 	//   - entities.source_id, and entities.url when newURL is non-empty;
-	//   - the target of every artifact about the entity (artifacts.entity_id),
+	//   - the target of every deliverable about the entity (deliverables.entity_id),
 	//     which takes the new key. Their dedup key names the object by an id,
 	//     so it stays.
 	//   - external_actions.current_url, the audit ledger's maintained pointer,
@@ -443,7 +443,7 @@ type EntityStore interface {
 	// over it, and the bump is what makes its snapshot CAS miss. A caller that
 	// renames and then commits a fresh snapshot itself (the trackers) CASes on
 	// the returned value. System (admin-pool) only: the rewrite spans
-	// artifacts of every team in the org.
+	// deliverables of every team in the org.
 	RenameSystem(ctx context.Context, orgID, source, scope, externalID, newKey, newURL string) (domain.EntityRenameOutcome, error)
 
 	ListActiveSystem(ctx context.Context, orgID, source string) ([]domain.Entity, error)
@@ -731,8 +731,8 @@ type EntityStore interface {
 	//     answering for, under the key it has now;
 	//   - the survivor's poll_seq is bumped either way, so a cycle that read
 	//     either row before the merge misses its CAS;
-	//   - the newer row's artifacts and audit-ledger rows move onto the
-	//     survivor (entity_id), and every artifact of the survivor takes the
+	//   - the newer row's deliverables and audit-ledger rows move onto the
+	//     survivor (entity_id), and every deliverable of the survivor takes the
 	//     key it keeps; the links of its audit-ledger rows under the url it no
 	//     longer answers to move onto the one it keeps
 	//     (DuplicateEntityMergedKeys), as a rename moves them.
@@ -762,9 +762,9 @@ type EntityStore interface {
 	//     dedup_key), the stub's is dismissed with close_reason
 	//     duplicate_entity_merged, and a blueprint still running under one of
 	//     its unsettled conversations is marked cancel_requested;
-	//   - the stub's tasks, events, queue rows, pending firings, artifacts,
+	//   - the stub's tasks, events, queue rows, pending firings, deliverables,
 	//     audit-ledger rows, memory links (at the stronger of the two roles)
-	//     and entity links move onto into, the stub's artifacts take into's
+	//     and entity links move onto into, the stub's deliverables take into's
 	//     key, and the links of the audit-ledger rows under the stub's url
 	//     move onto into's, as a rename moves them;
 	//   - into takes the stub's owning team and commissioning user where it
@@ -948,7 +948,7 @@ func sameEntityNamespace(op string, a, b domain.Entity) error {
 // survivor takes its live state), the survivor's own otherwise. kept carries
 // the pair's external id, whichever row held it. Both dialects move the links
 // of the merged row's audit-ledger rows from dropped onto kept, as a rename
-// does; the merged row's artifacts take its key. Both select by entity_id.
+// does; the merged row's deliverables take its key. Both select by entity_id.
 func DuplicateEntityMergedKeys(survivor, loser domain.Entity) (kept, dropped domain.Entity) {
 	kept, dropped = survivor, loser
 	if loser.State == "active" {

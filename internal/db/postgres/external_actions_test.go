@@ -18,7 +18,7 @@ func TestExternalActionStore_Postgres_RoundTrip(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
-	conversationID := seedPgArtifactConversation(t, h, orgID, teamID, userID)
+	conversationID := seedPgDeliverableConversation(t, h, orgID, teamID, userID)
 
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
@@ -26,18 +26,19 @@ func TestExternalActionStore_Postgres_RoundTrip(t *testing.T) {
 	in := domain.ExternalAction{
 		OrgID:          orgID,
 		TeamID:         teamID,
-		Provider:       domain.ArtifactProviderGitHub,
+		Provider:       domain.ProviderGitHub,
 		Scope:          "https://github.com",
 		Action:         domain.ActionPRMarkedReady,
 		Target:         "octo/repo#123",
 		ExternalID:     "123",
 		URL:            "https://github.com/octo/repo/pull/123",
-		FromState:      domain.ArtifactStatePRDraft,
-		ToState:        domain.ArtifactStatePROpen,
+		FromState:      domain.DeliverableStatePRDraft,
+		ToState:        domain.DeliverableStatePROpen,
 		ConversationID: conversationID,
 		ActorUserID:    userID,
 		Credential:     domain.CredentialGitHubApp,
 		DetailJSON:     `{"k":"v"}`,
+		PerformedBy:    domain.PerformedByAgent,
 		// DedupKey empty → server fills a uuid.
 	}
 	if err := stores.ExternalActions.Record(ctx, orgID, in); err != nil {
@@ -75,8 +76,9 @@ func TestExternalActionStore_Postgres_BranchTwinDedup(t *testing.T) {
 	key := domain.BranchPushDedupKey("run-1", "repo-1", "refs/heads/feat", "abc123")
 	twin := func(url string) domain.ExternalAction {
 		return domain.ExternalAction{
-			OrgID: orgID, Provider: domain.ArtifactProviderGitHub, Scope: "https://github.com", Action: domain.ActionBranchPushed,
+			OrgID: orgID, Provider: domain.ProviderGitHub, Scope: "https://github.com", Action: domain.ActionBranchPushed,
 			Target: "octo/repo", URL: url, Credential: domain.CredentialGitHubApp, DedupKey: key,
+			PerformedBy: domain.PerformedByAgent,
 		}
 	}
 	if err := stores.ExternalActions.RecordSystem(ctx, orgID, twin("hook")); err != nil {
@@ -100,7 +102,7 @@ func TestExternalActionStore_Postgres_BranchTwinDedup(t *testing.T) {
 // member's Record (app pool, under claims) lands and is readable via ListByTeam;
 // a write whose org_id ≠ the claims org is rejected by the WITH CHECK; and a
 // different-org member reads zero (cross-org isolation). The policy is org-scoped
-// (not team-scoped like artifacts), so a same-org member of another team can
+// (not team-scoped like deliverables), so a same-org member of another team can
 // still read — the team-admin/org-admin gate lives at the HTTP layer. TFAC-483.
 func TestExternalActionStore_Postgres_RLS(t *testing.T) {
 	h := pgtest.Shared(t)
@@ -113,9 +115,10 @@ func TestExternalActionStore_Postgres_RLS(t *testing.T) {
 
 	// RecordSystem (admin pool) lands without any claims context.
 	if err := stores.ExternalActions.RecordSystem(ctx, orgA, domain.ExternalAction{
-		OrgID: orgA, TeamID: teamA, Provider: domain.ArtifactProviderJira, Scope: "https://acme.atlassian.net",
+		OrgID: orgA, TeamID: teamA, Provider: domain.ProviderJira, Scope: "https://acme.atlassian.net",
 		Action: domain.ActionIssueTransitioned, Target: "SKY-1",
 		Credential: domain.CredentialJiraOrg, DedupKey: "sys-1",
+		PerformedBy: domain.PerformedByAgent,
 	}); err != nil {
 		t.Fatalf("RecordSystem (admin): %v", err)
 	}
@@ -124,9 +127,10 @@ func TestExternalActionStore_Postgres_RLS(t *testing.T) {
 	// external_actions_all WITH CHECK (org_id = current_org_id) passes.
 	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
 		return pgstore.NewForTx(tx, pgtest.SecretKey).ExternalActions.Record(ctx, orgA, domain.ExternalAction{
-			OrgID: orgA, TeamID: teamA, Provider: domain.ArtifactProviderGitHub, Scope: "https://github.com",
+			OrgID: orgA, TeamID: teamA, Provider: domain.ProviderGitHub, Scope: "https://github.com",
 			Action: domain.ActionPRMarkedReady, Target: "octo/repo#1", ActorUserID: alice,
 			Credential: domain.CredentialGitHubApp, DedupKey: "app-1",
+			PerformedBy: domain.PerformedByAgent,
 		})
 	}); err != nil {
 		t.Fatalf("alice Record under RLS: %v", err)
@@ -149,8 +153,9 @@ func TestExternalActionStore_Postgres_RLS(t *testing.T) {
 	// A write whose org_id is NOT the claims org is rejected by the WITH CHECK.
 	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
 		return pgstore.NewForTx(tx, pgtest.SecretKey).ExternalActions.Record(ctx, orgB, domain.ExternalAction{
-			OrgID: orgB, Provider: domain.ArtifactProviderGitHub, Scope: "https://github.com", Action: domain.ActionPRCreated,
+			OrgID: orgB, Provider: domain.ProviderGitHub, Scope: "https://github.com", Action: domain.ActionPRCreated,
 			Target: "octo/repo#9", Credential: domain.CredentialGitHubApp, DedupKey: "cross-org",
+			PerformedBy: domain.PerformedByAgent,
 		})
 	})
 	pgtest.AssertRLSViolation(t, err)
@@ -189,7 +194,7 @@ func TestExternalActionStore_Postgres_ListByConversation(t *testing.T) {
 	h.Reset(t)
 	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
 	orgB, bob, _ := pgtest.SeedOrgWithUser(t, h, "bob")
-	convA := seedPgArtifactConversation(t, h, orgA, teamA, alice)
+	convA := seedPgDeliverableConversation(t, h, orgA, teamA, alice)
 	ctx := context.Background()
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
@@ -198,14 +203,16 @@ func TestExternalActionStore_Postgres_ListByConversation(t *testing.T) {
 	// not surface under any conversation.
 	for _, act := range []domain.ExternalAction{
 		{
-			OrgID: orgA, TeamID: teamA, Provider: domain.ArtifactProviderGitHub, Scope: "https://github.com",
+			OrgID: orgA, TeamID: teamA, Provider: domain.ProviderGitHub, Scope: "https://github.com",
 			Action: domain.ActionGHChannelWrite, Target: "octo/repo", ConversationID: convA,
 			Credential: domain.CredentialGitHubApp, DedupKey: "run-1",
+			PerformedBy: domain.PerformedByAgent,
 		},
 		{
-			OrgID: orgA, TeamID: teamA, Provider: domain.ArtifactProviderGitHub, Scope: "https://github.com",
+			OrgID: orgA, TeamID: teamA, Provider: domain.ProviderGitHub, Scope: "https://github.com",
 			Action: domain.ActionBranchPushed, Target: "octo/repo",
 			Credential: domain.CredentialGitHubApp, DedupKey: "detached-1",
+			PerformedBy: domain.PerformedByAgent,
 		},
 	} {
 		if err := stores.ExternalActions.RecordSystem(ctx, orgA, act); err != nil {

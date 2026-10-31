@@ -46,10 +46,10 @@ func (a *App) registerSubscribers() {
 		Filter: []string{"system:poll:"},
 		Handle: a.brainHolderOnly(a.handleProfilerPoll),
 	})
-	// Kick the per-org artifact reconciler on GitHub poll-complete sentinels.
+	// Kick the per-org deliverable reconciler on GitHub poll-complete sentinels.
 	// Mirrors the profiler: gated to source=="github" (a Jira cycle can't
 	// change a PR/branch's GitHub state), per-org via evt.OrgID. This is the
-	// webhook-independent baseline that keeps `artifacts` fresh in both modes
+	// webhook-independent baseline that keeps `deliverables` fresh in both modes
 	// (TFAC-464).
 	a.bus.Subscribe(eventbus.Subscriber{
 		Name:   "reconciler",
@@ -121,7 +121,7 @@ func (a *App) brainHolderOnly(h func(domain.Event)) func(domain.Event) {
 	}
 }
 
-// handleReconcilerPoll kicks the per-org artifact reconciler for the org whose
+// handleReconcilerPoll kicks the per-org deliverable reconciler for the org whose
 // GitHub poll just completed. Reuses pollEventProfilesGitHub's gate: only GitHub
 // completions qualify (a Jira cycle can't move a PR/branch's GitHub state), and
 // an empty / malformed event is a silent no-op. evt.OrgID scopes the per-org

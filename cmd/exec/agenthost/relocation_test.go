@@ -69,28 +69,28 @@ func TestRelocation_RelayRuntimeOverRealConn(t *testing.T) {
 		t.Fatal("expected the un-seeded repo to be untracked")
 	}
 
-	// A write op (upsert_artifact) relays over the wire and lands in the store.
-	stored, err := rt.UpsertArtifact(ctx, domain.Artifact{
-		Provider:   domain.ArtifactProviderGitHub,
-		Kind:       domain.ArtifactKindComment,
+	// A write op (upsert_deliverable) relays over the wire and lands in the store.
+	stored, err := rt.UpsertDeliverable(ctx, domain.Deliverable{
+		Provider:   domain.ProviderGitHub,
+		Kind:       domain.DeliverableKindComment,
 		Target:     "octo/repo#5",
 		ExternalID: "5",
-		State:      domain.ArtifactStateCommentPosted,
-		DedupKey:   domain.ArtifactDedupKey(domain.ArtifactProviderGitHub, domain.ArtifactKindComment, "5", ""),
+		State:      domain.DeliverableStateCommentPosted,
+		DedupKey:   domain.ObjectKey(domain.ProviderGitHub, domain.DeliverableKindComment, "5", ""),
 	})
 	if err != nil {
-		t.Fatalf("UpsertArtifact over wire: %v", err)
+		t.Fatalf("UpsertDeliverable over wire: %v", err)
 	}
 	if stored.ID == "" {
-		t.Fatal("expected a stored artifact id back over the wire")
+		t.Fatal("expected a stored deliverable id back over the wire")
 	}
 	if stored.OrgID != info.OrgID {
 		t.Fatalf("stored org = %q, want %q (bound orchestrator-side)", stored.OrgID, info.OrgID)
 	}
 
-	arts, err := rt.ListConversationArtifacts(ctx)
+	arts, err := rt.ListConversationDeliverables(ctx)
 	if err != nil {
-		t.Fatalf("ListConversationArtifacts over wire: %v", err)
+		t.Fatalf("ListConversationDeliverables over wire: %v", err)
 	}
 	found := false
 	for _, a := range arts {

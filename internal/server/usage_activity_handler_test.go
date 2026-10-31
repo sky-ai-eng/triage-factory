@@ -14,14 +14,14 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// TestResolveArtifactActivityFilters is a Docker-free unit test for the
-// artifacts feed's body validation: the pass-through filters, the time window
+// TestResolveDeliverableActivityFilters is a Docker-free unit test for the
+// deliverables feed's body validation: the pass-through filters, the time window
 // (RFC3339 / YYYY-MM-DD, unbounded by default, inverted rejected), and the
 // closed vocabularies.
-func TestResolveArtifactActivityFilters(t *testing.T) {
+func TestResolveDeliverableActivityFilters(t *testing.T) {
 	// Empty body → no filters, unbounded window.
 	var v httpx.Validation
-	opts := resolveArtifactActivityFilters(&v, artifactActivityListRequest{})
+	opts := resolveDeliverableActivityFilters(&v, deliverableActivityListRequest{})
 	if v.Flush(httptest.NewRecorder(), http.StatusBadRequest) {
 		t.Fatal("empty body was rejected")
 	}
@@ -31,7 +31,7 @@ func TestResolveArtifactActivityFilters(t *testing.T) {
 
 	// Filters + a bare-date window pass through.
 	v = httpx.Validation{}
-	opts = resolveArtifactActivityFilters(&v, artifactActivityListRequest{
+	opts = resolveDeliverableActivityFilters(&v, deliverableActivityListRequest{
 		Provider: "github", Kind: "pull_request", State: "open",
 		Since: "2026-06-01", Until: "2026-06-30",
 	})
@@ -48,7 +48,7 @@ func TestResolveArtifactActivityFilters(t *testing.T) {
 	// Malformed values are rejected, including filter values outside their
 	// closed vocabularies — which used to reach the store as literals and
 	// answer 200 with nothing.
-	for name, req := range map[string]artifactActivityListRequest{
+	for name, req := range map[string]deliverableActivityListRequest{
 		"bad_since":        {Since: "yesterday"},
 		"inverted_window":  {Since: "2026-06-30", Until: "2026-06-01"},
 		"unknown_provider": {Provider: "gitlab"},
@@ -56,7 +56,7 @@ func TestResolveArtifactActivityFilters(t *testing.T) {
 		"unknown_state":    {State: "opened"},
 	} {
 		var v httpx.Validation
-		resolveArtifactActivityFilters(&v, req)
+		resolveDeliverableActivityFilters(&v, req)
 		if !v.Flush(httptest.NewRecorder(), http.StatusBadRequest) {
 			t.Errorf("%s: expected a validation error, got none", name)
 		}
@@ -66,23 +66,23 @@ func TestResolveArtifactActivityFilters(t *testing.T) {
 	// actually store has to be accepted. A union assembled by hand omitted
 	// 'posted', so kind=comment + state=posted — a combination the comment and
 	// message writers produce — was rejected as a typo.
-	for _, state := range domain.ArtifactStates() {
+	for _, state := range domain.DeliverableStates() {
 		var v httpx.Validation
-		resolveArtifactActivityFilters(&v, artifactActivityListRequest{State: state})
+		resolveDeliverableActivityFilters(&v, deliverableActivityListRequest{State: state})
 		if v.Flush(httptest.NewRecorder(), http.StatusBadRequest) {
 			t.Errorf("state=%q rejected", state)
 		}
 	}
-	for _, kind := range domain.ArtifactKinds() {
+	for _, kind := range domain.DeliverableKinds() {
 		var v httpx.Validation
-		resolveArtifactActivityFilters(&v, artifactActivityListRequest{Kind: kind})
+		resolveDeliverableActivityFilters(&v, deliverableActivityListRequest{Kind: kind})
 		if v.Flush(httptest.NewRecorder(), http.StatusBadRequest) {
 			t.Errorf("kind=%q rejected", kind)
 		}
 	}
 }
 
-// TestResolveActionActivityFilters mirrors the artifacts test for the actions
+// TestResolveActionActivityFilters mirrors the deliverables test for the actions
 // feed: provider and the time window are identical; kind/state become
 // action/actor.
 func TestResolveActionActivityFilters(t *testing.T) {
@@ -152,15 +152,15 @@ func (r *usageRig) activityReq(caller, teamID, body string) *http.Request {
 	return req.WithContext(ctx)
 }
 
-// seedArtifacts stages the bot-activity rows the feed reads: two on teamA (a PR
+// seedDeliverables stages the bot-activity rows the feed reads: two on teamA (a PR
 // + a comment) and one on teamB (a branch), so the org feed is cross-team and
-// the team feed is teamA-only. conversation_id is left NULL — the feed reads artifacts
+// the team feed is teamA-only. conversation_id is left NULL — the feed reads deliverables
 // directly, not through a run.
-func (r *usageRig) seedArtifacts(t *testing.T) {
+func (r *usageRig) seedDeliverables(t *testing.T) {
 	t.Helper()
 	seed := func(teamID, provider, kind, state, key string) {
 		pgtest.MustExec(t, r.h.AdminDB, `
-			INSERT INTO artifacts (org_id, team_id, provider, scope, kind, target, state, dedup_key)
+			INSERT INTO deliverables (org_id, team_id, provider, scope, kind, target, state, dedup_key)
 			VALUES ($1, $2, $3, 'https://github.com', $4, 'octo/repo', $5, $6)
 		`, r.orgID, teamID, provider, kind, state, key)
 	}
@@ -169,14 +169,14 @@ func (r *usageRig) seedArtifacts(t *testing.T) {
 	seed(r.teamB, "git", "branch", "pushed", "tB-branch")
 }
 
-// TestUsageArtifactsActivityHandler_Postgres pins the artifacts feed's
+// TestUsageDeliverablesActivityHandler_Postgres pins the deliverables feed's
 // FeatureGovernance gate (unlicensed → 404), the role gates — team feed is team
 // admin OR org admin (an org admin reads ANY team's activity, unlike the
 // team-admin-only spend feed), org feed is org-admin-only — the cross-team org
 // read, the filter passthrough, and the org feed's resolved team names.
-func TestUsageArtifactsActivityHandler_Postgres(t *testing.T) {
+func TestUsageDeliverablesActivityHandler_Postgres(t *testing.T) {
 	r := newUsageRig(t)
-	r.seedArtifacts(t)
+	r.seedDeliverables(t)
 	// Restore the community default after the whole test so the process-global
 	// entitlement doesn't leak into sibling tests.
 	t.Cleanup(entitlements.Reset)
@@ -185,17 +185,17 @@ func TestUsageArtifactsActivityHandler_Postgres(t *testing.T) {
 	t.Run("unlicensed_team_404", func(t *testing.T) {
 		entitlements.Reset()
 		rec := httptest.NewRecorder()
-		r.uh.handleUsageTeamArtifacts(rec, r.activityReq(r.teamAdmin, r.teamA, ""))
+		r.uh.handleUsageTeamDeliverables(rec, r.activityReq(r.teamAdmin, r.teamA, ""))
 		if rec.Code != http.StatusNotFound {
-			t.Errorf("team artifacts unlicensed = %d, want 404; body=%s", rec.Code, rec.Body.String())
+			t.Errorf("team deliverables unlicensed = %d, want 404; body=%s", rec.Code, rec.Body.String())
 		}
 	})
 	t.Run("unlicensed_org_404", func(t *testing.T) {
 		entitlements.Reset()
 		rec := httptest.NewRecorder()
-		r.uh.handleUsageOrgArtifacts(rec, r.activityReq(r.orgAdmin, "", ""))
+		r.uh.handleUsageOrgDeliverables(rec, r.activityReq(r.orgAdmin, "", ""))
 		if rec.Code != http.StatusNotFound {
-			t.Errorf("org artifacts unlicensed = %d, want 404; body=%s", rec.Code, rec.Body.String())
+			t.Errorf("org deliverables unlicensed = %d, want 404; body=%s", rec.Code, rec.Body.String())
 		}
 	})
 
@@ -205,17 +205,17 @@ func TestUsageArtifactsActivityHandler_Postgres(t *testing.T) {
 	t.Run("team_plain_member_403", func(t *testing.T) {
 		license()
 		rec := httptest.NewRecorder()
-		r.uh.handleUsageTeamArtifacts(rec, r.activityReq(r.member, r.teamA, ""))
+		r.uh.handleUsageTeamDeliverables(rec, r.activityReq(r.member, r.teamA, ""))
 		if rec.Code != http.StatusForbidden {
-			t.Errorf("team artifacts as plain member = %d, want 403; body=%s", rec.Code, rec.Body.String())
+			t.Errorf("team deliverables as plain member = %d, want 403; body=%s", rec.Code, rec.Body.String())
 		}
 	})
 
 	t.Run("team_admin_200_team_scoped", func(t *testing.T) {
 		license()
 		rec := httptest.NewRecorder()
-		r.uh.handleUsageTeamArtifacts(rec, r.activityReq(r.teamAdmin, r.teamA, ""))
-		out := decodeList[activityArtifactJSON](t, rec)
+		r.uh.handleUsageTeamDeliverables(rec, r.activityReq(r.teamAdmin, r.teamA, ""))
+		out := decodeList[activityDeliverableJSON](t, rec)
 		if len(out.Items) != 2 || out.Total() != 2 {
 			t.Errorf("teamA feed = %d rows / total %d, want 2/2 (PR + comment)", len(out.Items), out.Total())
 		}
@@ -232,35 +232,35 @@ func TestUsageArtifactsActivityHandler_Postgres(t *testing.T) {
 		// org admin) may inspect ANY team's bot activity, even a team they're not on.
 		license()
 		rec := httptest.NewRecorder()
-		r.uh.handleUsageTeamArtifacts(rec, r.activityReq(r.orgAdmin, r.teamA, ""))
+		r.uh.handleUsageTeamDeliverables(rec, r.activityReq(r.orgAdmin, r.teamA, ""))
 		if rec.Code != http.StatusOK {
-			t.Errorf("team artifacts as org admin (not on teamA) = %d, want 200; body=%s", rec.Code, rec.Body.String())
+			t.Errorf("team deliverables as org admin (not on teamA) = %d, want 200; body=%s", rec.Code, rec.Body.String())
 		}
 	})
 
 	t.Run("org_member_403", func(t *testing.T) {
 		license()
 		rec := httptest.NewRecorder()
-		r.uh.handleUsageOrgArtifacts(rec, r.activityReq(r.member, "", ""))
+		r.uh.handleUsageOrgDeliverables(rec, r.activityReq(r.member, "", ""))
 		if rec.Code != http.StatusForbidden {
-			t.Errorf("org artifacts as plain member = %d, want 403; body=%s", rec.Code, rec.Body.String())
+			t.Errorf("org deliverables as plain member = %d, want 403; body=%s", rec.Code, rec.Body.String())
 		}
 	})
 
 	t.Run("org_team_admin_403", func(t *testing.T) {
 		license()
 		rec := httptest.NewRecorder()
-		r.uh.handleUsageOrgArtifacts(rec, r.activityReq(r.teamAdmin, "", ""))
+		r.uh.handleUsageOrgDeliverables(rec, r.activityReq(r.teamAdmin, "", ""))
 		if rec.Code != http.StatusForbidden {
-			t.Errorf("org artifacts as team admin (org member) = %d, want 403; body=%s", rec.Code, rec.Body.String())
+			t.Errorf("org deliverables as team admin (org member) = %d, want 403; body=%s", rec.Code, rec.Body.String())
 		}
 	})
 
 	t.Run("org_admin_200_cross_team_with_names", func(t *testing.T) {
 		license()
 		rec := httptest.NewRecorder()
-		r.uh.handleUsageOrgArtifacts(rec, r.activityReq(r.orgAdmin, "", ""))
-		out := decodeList[activityArtifactJSON](t, rec)
+		r.uh.handleUsageOrgDeliverables(rec, r.activityReq(r.orgAdmin, "", ""))
+		out := decodeList[activityDeliverableJSON](t, rec)
 		if len(out.Items) != 3 || out.Total() != 3 {
 			t.Fatalf("org feed = %d rows / total %d, want 3/3 (cross-team)", len(out.Items), out.Total())
 		}
@@ -286,8 +286,8 @@ func TestUsageArtifactsActivityHandler_Postgres(t *testing.T) {
 	t.Run("filter_passthrough_kind", func(t *testing.T) {
 		license()
 		rec := httptest.NewRecorder()
-		r.uh.handleUsageOrgArtifacts(rec, r.activityReq(r.orgAdmin, "", `{"kind":"pull_request"}`))
-		out := decodeList[activityArtifactJSON](t, rec)
+		r.uh.handleUsageOrgDeliverables(rec, r.activityReq(r.orgAdmin, "", `{"kind":"pull_request"}`))
+		out := decodeList[activityDeliverableJSON](t, rec)
 		if len(out.Items) != 1 || out.Items[0].Kind != "pull_request" {
 			t.Errorf("kind=pull_request filter returned %d rows (%+v), want exactly the one PR", len(out.Items), out.Items)
 		}
@@ -301,23 +301,23 @@ func TestUsageArtifactsActivityHandler_Postgres(t *testing.T) {
 	t.Run("paging_walks_the_feed", func(t *testing.T) {
 		license()
 		rec := httptest.NewRecorder()
-		r.uh.handleUsageOrgArtifacts(rec, r.activityReq(r.orgAdmin, "", `{"page_size":2}`))
-		first := decodeList[activityArtifactJSON](t, rec)
+		r.uh.handleUsageOrgDeliverables(rec, r.activityReq(r.orgAdmin, "", `{"page_size":2}`))
+		first := decodeList[activityDeliverableJSON](t, rec)
 		if len(first.Items) != 2 || first.Total() != 3 || first.NextPageToken == "" {
 			t.Fatalf("page 1 = %d rows / total %d / next %q, want 2/3/non-empty", len(first.Items), first.Total(), first.NextPageToken)
 		}
 		rec = httptest.NewRecorder()
-		r.uh.handleUsageOrgArtifacts(rec, r.activityReq(r.orgAdmin, "", `{"page_size":2,"page_token":"`+first.NextPageToken+`"}`))
-		second := decodeList[activityArtifactJSON](t, rec)
+		r.uh.handleUsageOrgDeliverables(rec, r.activityReq(r.orgAdmin, "", `{"page_size":2,"page_token":"`+first.NextPageToken+`"}`))
+		second := decodeList[activityDeliverableJSON](t, rec)
 		if len(second.Items) != 1 || second.NextPageToken != "" {
 			t.Fatalf("page 2 = %d rows / next %q, want 1/empty", len(second.Items), second.NextPageToken)
 		}
 		// No row is served twice across the two pages — the ORDER BY's id
 		// tiebreaker is what makes that true for rows sharing a created_at.
 		seen := map[string]bool{}
-		for _, a := range append(append([]activityArtifactJSON{}, first.Items...), second.Items...) {
+		for _, a := range append(append([]activityDeliverableJSON{}, first.Items...), second.Items...) {
 			if seen[a.ID] {
-				t.Errorf("artifact %s appeared on both pages", a.ID)
+				t.Errorf("deliverable %s appeared on both pages", a.ID)
 			}
 			seen[a.ID] = true
 		}
@@ -326,7 +326,7 @@ func TestUsageArtifactsActivityHandler_Postgres(t *testing.T) {
 	t.Run("over_max_page_size_400", func(t *testing.T) {
 		license()
 		rec := httptest.NewRecorder()
-		r.uh.handleUsageOrgArtifacts(rec, r.activityReq(r.orgAdmin, "", `{"page_size":100000}`))
+		r.uh.handleUsageOrgDeliverables(rec, r.activityReq(r.orgAdmin, "", `{"page_size":100000}`))
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("page_size=100000 = %d, want 400 (never a clamp); body=%s", rec.Code, rec.Body.String())
 		}
@@ -348,19 +348,19 @@ func scopeForProvider(provider string) string {
 func (r *usageRig) seedExternalActions(t *testing.T) {
 	t.Helper()
 	pgtest.MustExec(t, r.h.AdminDB, `UPDATE users SET display_name = 'Org Admin' WHERE id = $1`, r.orgAdmin)
-	seed := func(teamID, provider, action, target, cred, key, actor, from, to string) {
+	seed := func(teamID, provider, action, target, cred, key, actor, from, to, performedBy string) {
 		var actorArg any
 		if actor != "" {
 			actorArg = actor
 		}
 		pgtest.MustExec(t, r.h.AdminDB, `
-			INSERT INTO external_actions (org_id, team_id, provider, scope, action, target, credential, dedup_key, actor_user_id, from_state, to_state)
-			VALUES ($1, $2, $3, $11, $4, $5, $6, $7, $8, NULLIF($9,''), NULLIF($10,''))
-		`, r.orgID, teamID, provider, action, target, cred, key, actorArg, from, to, scopeForProvider(provider))
+			INSERT INTO external_actions (org_id, team_id, provider, scope, action, target, credential, dedup_key, actor_user_id, from_state, to_state, performed_by)
+			VALUES ($1, $2, $3, $11, $4, $5, $6, $7, $8, NULLIF($9,''), NULLIF($10,''), $12)
+		`, r.orgID, teamID, provider, action, target, cred, key, actorArg, from, to, scopeForProvider(provider), performedBy)
 	}
-	seed(r.teamA, "github", "pr_created", "octo/repo#1", "github_app", "tA-created", "", "", "draft")
-	seed(r.teamA, "github", "pr_marked_ready", "octo/repo#1", "github_app", "tA-ready", r.orgAdmin, "draft", "open")
-	seed(r.teamB, "jira", "issue_transitioned", "SKY-1", "jira_org", "tB-trans", "", "To Do", "Done")
+	seed(r.teamA, "github", "pr_created", "octo/repo#1", "github_app", "tA-created", "", "", "draft", domain.PerformedByAgent)
+	seed(r.teamA, "github", "pr_marked_ready", "octo/repo#1", "github_app", "tA-ready", r.orgAdmin, "draft", "open", domain.PerformedByPerson)
+	seed(r.teamB, "jira", "issue_transitioned", "SKY-1", "jira_org", "tB-trans", "", "To Do", "Done", domain.PerformedBySystem)
 }
 
 // TestUsageActionsActivityHandler_Postgres pins the actions feed — its own pair
@@ -373,7 +373,7 @@ func TestUsageActionsActivityHandler_Postgres(t *testing.T) {
 	r.seedExternalActions(t)
 	t.Cleanup(entitlements.Reset)
 
-	// Unlicensed → 404, exactly like the artifacts feed (the gate is the shared
+	// Unlicensed → 404, exactly like the deliverables feed (the gate is the shared
 	// caller resolver, so it runs identically on both resources).
 	t.Run("unlicensed_404", func(t *testing.T) {
 		entitlements.Reset()
@@ -427,12 +427,20 @@ func TestUsageActionsActivityHandler_Postgres(t *testing.T) {
 			t.Fatalf("org actions = %d rows / total %d, want 3/3 (cross-team)", len(out.Items), out.Total())
 		}
 		var sawTeamB, sawHumanActor, sawSystem bool
+		wantPerformer := map[string]string{
+			"pr_created":         domain.PerformedByAgent,
+			"pr_marked_ready":    domain.PerformedByPerson,
+			"issue_transitioned": domain.PerformedBySystem,
+		}
 		for _, a := range out.Items {
 			if a.TeamID == "" || a.TeamName == "" {
 				t.Errorf("org feed action missing team id/name: %+v", a)
 			}
 			if a.TeamID == r.teamB {
 				sawTeamB = true
+			}
+			if a.PerformedBy != wantPerformer[a.Action] {
+				t.Errorf("%s row performed_by = %q, want %q", a.Action, a.PerformedBy, wantPerformer[a.Action])
 			}
 			switch a.Action {
 			case "pr_marked_ready":
@@ -470,7 +478,7 @@ func TestUsageActionsActivityHandler_Postgres(t *testing.T) {
 		}
 	})
 
-	t.Run("actions_body_rejects_artifact_filters", func(t *testing.T) {
+	t.Run("actions_body_rejects_deliverable_filters", func(t *testing.T) {
 		// The two resources have different filter vocabularies, which is the whole
 		// reason they are two routes: `state=` used to be accepted here and
 		// silently ignored. Strict decoding makes it a 400.
@@ -478,7 +486,7 @@ func TestUsageActionsActivityHandler_Postgres(t *testing.T) {
 		rec := httptest.NewRecorder()
 		r.uh.handleUsageOrgActions(rec, r.activityReq(r.orgAdmin, "", `{"state":"open"}`))
 		if rec.Code != http.StatusBadRequest {
-			t.Errorf("actions list with an artifacts filter = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			t.Errorf("actions list with a deliverables filter = %d, want 400; body=%s", rec.Code, rec.Body.String())
 		}
 	})
 }

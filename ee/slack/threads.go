@@ -18,8 +18,8 @@ func init() {
 // resolveSlackThread is the Slack source's entityscope.Resolver. A Slack
 // entity references its channel's registry row, which only this package
 // resolves, so core's touched-entity and produced-entity paths reach Slack
-// threads through it. sourceID is the thread key an exec verb recorded as an
-// artifact's or action's target (domain.SlackSourceID) — the boundary where a
+// threads through it. sourceID is the thread key an exec verb recorded as a
+// deliverable's or action's target (domain.SlackSourceID) — the boundary where a
 // thread arrives as text — so it is split here into the channel id and the
 // thread ts, and the thread is found by the channel's row and that ts. A
 // channel id Slack has since replaced resolves to the channel's row; a channel

@@ -9,7 +9,7 @@
 #     mistaken agent, not a security control: the agent runs as the operator,
 #     so `git push --no-verify` (or a rewritten remote) walks past this hook.
 #     It catches the naive command, which is the failure that actually happens.
-#  2. Record each pushed branch as a durable `branch` artifact — the one
+#  2. Record each pushed branch as a durable `branch` deliverable — the one
 #     external action the exec CLIs don't mediate, so a branch pushed with raw
 #     `git` (and maybe never opened as a PR) would otherwise be invisible to TF.
 #
@@ -36,7 +36,7 @@
 # upstream's ACTUAL outcome, recording the branch only when the push landed
 # (2xx) and an audit failure row when it was refused. This hook fires before
 # the transfer and cannot know the outcome, so recording here would mint
-# artifacts for pushes GitHub rejected.
+# deliverables for pushes GitHub rejected.
 [ "${TF_GIT_PUSH_CAPTURE:-}" = "proxy" ] && exit 0
 
 remote_url="$2"
@@ -47,7 +47,7 @@ bin="${TRIAGE_FACTORY_BIN:-triagefactory}"
 # hand us a very long ref list, and a file keeps it byte-exact with no argv or
 # re-serialization step in the middle. The policy pass has to complete before
 # anything is recorded — a push we are about to abort must not leave a branch
-# artifact behind.
+# deliverable behind.
 #
 # If the spool can't be created we skip the policy pass and read the refs
 # straight from stdin, so a full or read-only TMPDIR degrades to today's

@@ -499,7 +499,7 @@ var orgScopedTables = []string{
 	"swipe_events",
 	"conversation_worktrees",
 	"pending_firings",
-	"artifacts",
+	"deliverables",
 	"conversation_memory", "conversation_memory_entities", "conversation_memory_attempts",
 	"claim_credentials", "messages", "claims", "conversations",
 	"task_events", "tasks",

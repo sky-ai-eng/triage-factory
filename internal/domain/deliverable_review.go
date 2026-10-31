@@ -1,0 +1,313 @@
+package domain
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+)
+
+// ReviewDeliverableComment is one inline comment on the agent's drafted review,
+// staged entirely TF-side (TFAC-494) — the review never occupies GitHub's
+// per-identity pending-review slot during the draft window. Body is the
+// GitHub-native form — the severity badge is baked in (parsed back out for
+// display via ParseSeverityBadge) — so it submits to GitHub verbatim at approval.
+// ID is a TF-local, non-numeric id minted at add-review-comment time and stable
+// across the draft; it's the key comment edit/delete address the staged set on,
+// and the key the approve-time human-feedback diff joins the proposed set to the
+// final set on (both sides carry the same local ids).
+//
+// Line/StartLine are pointers so an unpositioned comment is distinguishable from
+// a real line: nil means "no anchor", never silently collapsed to 0. A staged
+// comment with a nil Line can't be submitted to GitHub — approval surfaces that
+// rather than dropping it.
+//
+// CommitSHA is the PR head the comment's (path, line) was validated and anchored
+// against at add-review-comment time — GitHub interprets a comment's line in the
+// frame of a commit, so the atomic submit must pin commit_id to the same commit
+// the line was validated against. GitHub anchors each comment independently (a
+// review can carry comments against different commits); the atomic submit can't —
+// it takes one commit_id for the whole review — so all of a draft's comments must
+// share this SHA at approval, else the PR moved mid-review and the draft can't be
+// submitted coherently (approval surfaces that rather than mis-anchoring). Empty
+// only on rows staged before per-comment anchoring landed.
+type ReviewDeliverableComment struct {
+	ID        string `json:"id,omitempty"`
+	Path      string `json:"path"`
+	Line      *int   `json:"line,omitempty"`
+	StartLine *int   `json:"start_line,omitempty"`
+	Body      string `json:"body"`
+	CommitSHA string `json:"commit_sha,omitempty"`
+}
+
+// ReviewDeliverableProposed is the agent's first-draft review, snapshotted once at
+// finalize-review (the moment the agent hands the review off for human approval).
+// Write-once: the approve-time human-feedback diff compares it against the
+// human-edited final, so it must not change as the human edits.
+type ReviewDeliverableProposed struct {
+	Body     string                     `json:"body"`
+	Event    string                     `json:"event"`
+	Comments []ReviewDeliverableComment `json:"comments"`
+}
+
+// ReviewDeliverableDetails is the kind-specific payload in a review deliverable's
+// DetailsJSON. The whole review is staged here (TFAC-494) — start-review through
+// approval makes no GitHub write until the atomic submit at approval — so it
+// holds the full draft, not just a pointer to a live GitHub pending review:
+//
+//   - Number: the backing PR's per-repo number (a review anchors to a PR).
+//   - HeadSHA: the PR head at start-review — the frame the agent's checkout is
+//     measured against (ReviewAnchoredAtHead), and the FALLBACK commit_id for
+//     stored rows whose positioned comments carry no CommitSHA of their own. A
+//     review WITH anchored comments pins commit_id to the commit those comments
+//     were validated against (each comment's CommitSHA), not this — the PR head
+//     can advance between start-review and the comments — and a comment-less
+//     review (an approve / body-only request-changes) pins nothing, leaving
+//     GitHub to fill in the live head.
+//   - FinalizedHeadSHA: the PR head at finalize-review — the commit every staged
+//     comment was reconciled to, and the baseline the human-facing freshness
+//     check measures drift from: the review read compares it to the live PR
+//     head for the "N commits since this review was written" count. Empty on a
+//     never-finalized draft, and on stored rows finalized before the frame was
+//     recorded (those fall back to HeadSHA for the count).
+//   - FinalizedBaseSHA: the PR base branch tip at finalize-review. Paired with
+//     FinalizedHeadSHA it reproduces the finalize-time PR diff deterministically
+//     (the review overlay renders FinalizedBaseSHA...FinalizedHeadSHA so every
+//     staged comment anchors in the frame it was written against); the
+//     three-dot compare recomputes the merge-base from the two fixed commits, so
+//     a later base advance can't shift it. Empty on a comment-less review (which
+//     makes no GitHub call at finalize) and on stored rows predating the frame —
+//     the overlay falls back to the live PR diff in that case.
+//   - StagedComments: the mutable inline-comment set — appended at
+//     add-review-comment (each anchored to the PR head it was validated against,
+//     ReviewDeliverableComment.CommitSHA), edited/deleted live by the human (local
+//     writes to this slice), and submitted as the review's comments[] at approval.
+//     Comment ids are TF-local and stable so edit/delete address them.
+//   - ReviewBody / ReviewEvent: the *staged* review summary + verdict —
+//     finalized at finalize-review, then mutated 1:1 by the human via PATCH, and
+//     applied to GitHub at approval. ReviewEvent doubles as the **ready
+//     sentinel**: empty until finalize-review finalizes the draft, so the
+//     unresolved-deliverable check distinguishes a started-but-not-finalized review
+//     (not yet awaiting approval) from a finalized one (awaiting approval).
+//   - Proposed: the agent's first-draft {body, event, comments}. Write-once —
+//     snapshotted at finalize-review and never modified — the baseline the
+//     approve-time human-feedback diff renders against (proposed vs. the final
+//     StagedComments).
+//
+// NodeID is retained for backward compatibility with rows written before the
+// local-staging rework; it is no longer populated (review reconciliation is moot
+// for a never-published draft, TFAC-494 §8).
+type ReviewDeliverableDetails struct {
+	NodeID           string                     `json:"node_id,omitempty"`
+	Number           int                        `json:"number,omitempty"`
+	HeadSHA          string                     `json:"head_sha,omitempty"`
+	FinalizedHeadSHA string                     `json:"finalized_head_sha,omitempty"`
+	FinalizedBaseSHA string                     `json:"finalized_base_sha,omitempty"`
+	ReviewBody       string                     `json:"review_body"`
+	ReviewEvent      string                     `json:"review_event"`
+	StagedComments   []ReviewDeliverableComment `json:"staged_comments,omitempty"`
+	Proposed         ReviewDeliverableProposed  `json:"proposed"`
+}
+
+// ReviewTarget is the deliverable Target for a review: owner/repo#<number> — the PR
+// the review is attached to, as a display value. Parse it back with
+// ParsePRTarget, which is shape-generic over owner/repo#<number>.
+func ReviewTarget(repoPath string, number int) string {
+	return fmt.Sprintf("%s#%d", repoPath, number)
+}
+
+// ReviewDedupKey is the stable key a conversation's review-draft upserts on:
+// github:review:<PR node id>:<conversation_id>. A pending review has no GitHub
+// object of its own, so it is keyed on the pull request it reviews, by the
+// pull request's node id, which a repository rename does not change. It is
+// **conversation-scoped** (TFAC-494): the review is staged entirely TF-side, so
+// two conversations (different teams, a re-delegate, interactive steering)
+// reviewing the same PR each own an independent draft row instead of
+// colliding on one org+PR-scoped row. A conversation reviews a PR at most
+// once, so (PR, conversation) is unique. "" for an empty node id.
+func ReviewDedupKey(prNodeID, conversationID string) string {
+	if prNodeID == "" {
+		return ""
+	}
+	return ObjectKey(ProviderGitHub, DeliverableKindReview, prNodeID, conversationID)
+}
+
+// NewReviewDeliverable builds the durable review-draft deliverable start-review records
+// — a fully TF-side draft, with zero GitHub writes (TFAC-494). repoPath is
+// "owner/repo"; number is the PR number and prNodeID its GraphQL node id, which
+// the draft is keyed on; headSHA is the reviewed commit (pinned into details and
+// passed as commit_id at the atomic submit on approval); conversationID scopes
+// the dedup key so concurrent conversations on one PR never collide.
+//
+// The deliverable starts state=pending with an empty ReviewEvent and an empty
+// ExternalID: nothing exists on GitHub yet (the submitted review's id + URL are
+// stamped on at approval), and ReviewEvent stays empty until finalize-review sets
+// the ready sentinel. ConversationID/OrgID/TeamID are stamped by the recording client.
+func NewReviewDeliverable(repoPath string, number int, prNodeID, headSHA, conversationID string) Deliverable {
+	details, err := json.Marshal(ReviewDeliverableDetails{
+		Number:  number,
+		HeadSHA: headSHA,
+	})
+	if err != nil {
+		// This fixed shape can't realistically fail to marshal; degrade to empty
+		// details rather than dropping the deliverable entirely.
+		details = nil
+	}
+	return Deliverable{
+		Provider:    ProviderGitHub,
+		Kind:        DeliverableKindReview,
+		Target:      ReviewTarget(repoPath, number),
+		State:       DeliverableStateReviewPending,
+		DedupKey:    ReviewDedupKey(prNodeID, conversationID),
+		DetailsJSON: string(details),
+	}
+}
+
+// ReviewAnchoredAtHead reports whether a review deliverable is already anchored at
+// (or has reconciled to) headSHA — the freshness gate the PR coherence feed
+// uses to skip a note when the agent's checkout is not actually behind.
+//
+// "Anchored at headSHA" means headSHA is among the SHAs the review has recorded
+// working against: the start-review head (details.HeadSHA) OR any staged comment's
+// CommitSHA. The comment SHAs matter because finalize-review reconciles every
+// comment forward to the PR's current head (TFAC-499) while details.HeadSHA stays
+// pinned to the start head — so a review whose comments already moved to headSHA
+// must read as current even though its start anchor didn't. This is the durable,
+// always-available stand-in for "the conversation's worktree HEAD": TF doesn't track the
+// worktree's git HEAD as a column (and it may live on another executor), so the
+// review's own recorded anchors are the observable frame.
+//
+// Returns false (treat as behind) for a non-review deliverable, an empty headSHA, or
+// unparseable details — the caller then fires the note, the safe default (a
+// spurious "re-pull" is harmless; a missed advance leaves the agent stale).
+func ReviewAnchoredAtHead(a Deliverable, headSHA string) bool {
+	if a.Kind != DeliverableKindReview || headSHA == "" {
+		return false
+	}
+	d, err := ParseReviewDeliverableDetails(a.DetailsJSON)
+	if err != nil {
+		return false
+	}
+	if d.HeadSHA == headSHA {
+		return true
+	}
+	for i := range d.StagedComments {
+		if d.StagedComments[i].CommitSHA == headSHA {
+			return true
+		}
+	}
+	return false
+}
+
+// MarshalReviewDeliverableDetails serializes details to a DetailsJSON string.
+// Returns "" on a marshal error — callers treat "" as empty details (→ SQL NULL).
+func MarshalReviewDeliverableDetails(d ReviewDeliverableDetails) string {
+	b, err := json.Marshal(d)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// ParseReviewDeliverableDetails unmarshals a review deliverable's DetailsJSON. Returns
+// the zero value (no error) on empty input so callers can treat a detail-less row
+// as "no snapshot" without special-casing.
+func ParseReviewDeliverableDetails(detailsJSON string) (ReviewDeliverableDetails, error) {
+	var d ReviewDeliverableDetails
+	if strings.TrimSpace(detailsJSON) == "" {
+		return d, nil
+	}
+	if err := json.Unmarshal([]byte(detailsJSON), &d); err != nil {
+		return ReviewDeliverableDetails{}, err
+	}
+	return d, nil
+}
+
+// FirstPendingReviewDeliverable returns the first pending review deliverable in arts
+// (Kind==review, State==pending), or nil. "Pending" means not yet submitted or
+// dismissed — the TF-side draft is still live. Used by the abandon path (which
+// flips it dismissed) and shared by FirstReadyReview.
+func FirstPendingReviewDeliverable(arts []Deliverable) *Deliverable {
+	for i := range arts {
+		if arts[i].Kind == DeliverableKindReview && arts[i].State == DeliverableStateReviewPending {
+			return &arts[i]
+		}
+	}
+	return nil
+}
+
+// PendingReviewDeliverableByID returns the pending review deliverable in arts whose id
+// matches handle (Kind==review, State==pending), or nil. A single conversation
+// can hold several review drafts at once — dedup is conversation-scoped per PR
+// (TFAC-494), so a conversation reviewing multiple PRs gets one draft row each
+// — so add-review-comment / finalize-review must locate the specific draft the
+// agent named by its handle, not just the first pending review (which could be
+// a different PR's draft).
+func PendingReviewDeliverableByID(arts []Deliverable, handle string) *Deliverable {
+	for i := range arts {
+		if arts[i].ID == handle && arts[i].Kind == DeliverableKindReview && arts[i].State == DeliverableStateReviewPending {
+			return &arts[i]
+		}
+	}
+	return nil
+}
+
+// FirstReadyReview returns the first *finalized* pending review deliverable in arts
+// — Kind==review, State==pending, AND details.ReviewEvent != "" (the ready
+// sentinel set by finalize-review). Only a finalized review is an unresolved
+// deliverable: a conversation that called start-review but never finalize-review has a pending
+// deliverable with an empty ReviewEvent and must NOT count (it would strand on an
+// approval card with nothing to approve). Mirrors FirstDraftPullRequest for the
+// review kind; shared by HasUnresolvedDeliverables so consumers agree on "the
+// conversation has a review awaiting approval".
+func FirstReadyReview(arts []Deliverable) *Deliverable {
+	for i := range arts {
+		if isReadyReview(arts[i]) {
+			return &arts[i]
+		}
+	}
+	return nil
+}
+
+// AllPendingReviewDeliverables returns every pending review deliverable in arts (the
+// plural of FirstPendingReviewDeliverable), in slice order — Kind==review,
+// State==pending, regardless of the ready sentinel. The task-level resolve-all
+// teardown uses this to dismiss every abandoned review (finalized or not), the
+// same "abandon whether or not it reached the ready sentinel" rule the
+// single-deliverable teardown path applied via FirstPendingReviewDeliverable.
+func AllPendingReviewDeliverables(arts []Deliverable) []Deliverable {
+	var out []Deliverable
+	for i := range arts {
+		if arts[i].Kind == DeliverableKindReview && arts[i].State == DeliverableStateReviewPending {
+			out = append(out, arts[i])
+		}
+	}
+	return out
+}
+
+// AllReadyReviews returns every finalized pending review deliverable in arts (the
+// plural of FirstReadyReview), in slice order — the ones a human can actually
+// approve (the ready sentinel is set). The projection (pending_deliverable_ids)
+// uses this so only finalized reviews count as approvable, mirroring
+// AllDraftPullRequests for the review kind. Shares isReadyReview with the
+// single-deliverable predicate.
+func AllReadyReviews(arts []Deliverable) []Deliverable {
+	var out []Deliverable
+	for i := range arts {
+		if isReadyReview(arts[i]) {
+			out = append(out, arts[i])
+		}
+	}
+	return out
+}
+
+// isReadyReview is the single-deliverable predicate for "a finalized pending review
+// awaiting approval" — Kind==review, State==pending, and the ready sentinel
+// (details.ReviewEvent) set. FirstReadyReview and UnresolvedDeliverableCounts both
+// go through it so the "ready review" definition lives in exactly one place.
+func isReadyReview(a Deliverable) bool {
+	if a.Kind != DeliverableKindReview || a.State != DeliverableStateReviewPending {
+		return false
+	}
+	d, err := ParseReviewDeliverableDetails(a.DetailsJSON)
+	return err == nil && d.ReviewEvent != ""
+}

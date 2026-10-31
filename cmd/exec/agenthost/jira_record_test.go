@@ -22,7 +22,7 @@ import (
 
 // The TFAC-459 recording tests drive the LocalClient's host-routed Jira
 // mutations against a fake Jira backend with a *real* SQLite store bundle, and
-// assert that each successful action lands the right `artifacts` row. The
+// assert that each successful action lands the right `deliverables` row. The
 // LocalClient is the single seam the multi daemon dispatches through, so
 // proving it here covers both the sandbox and local-mode paths.
 
@@ -33,10 +33,10 @@ func fakeJiraIssueID(key string) string {
 	return "1" + strings.Repeat("0", max(0, 4-len(n))) + n
 }
 
-// fakeJiraIssueDedupKey is the dedup key of the issue artifact for key on
+// fakeJiraIssueDedupKey is the dedup key of the issue deliverable for key on
 // site, the fake Jira's URL the recording stores make the org's Jira site.
 func fakeJiraIssueDedupKey(site, key string) string {
-	return domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindIssue,
+	return domain.ObjectKey(domain.ProviderJira, domain.DeliverableKindIssue,
 		domain.JiraIssueResource(site, fakeJiraIssueID(key)), "")
 }
 
@@ -93,9 +93,9 @@ func startFakeJira(t *testing.T) *httptest.Server {
 	return srv
 }
 
-// newJiraRecordingStores builds a real SQLite store bundle (so Artifacts / Tx /
+// newJiraRecordingStores builds a real SQLite store bundle (so Deliverables / Tx /
 // Orgs are live) with the Jira credential faked to point at jiraURL, seeds a
-// conversation for the artifacts FK to anchor on, and returns the bundle + the
+// conversation for the deliverables FK to anchor on, and returns the bundle + the
 // conversation identity. eventTriggered picks the write path withWrite routes
 // through: admin pool (no user) when true, a synthetic-claims tx (manual
 // conversation) when false — both are exercised across the tests below.
@@ -139,18 +139,18 @@ func newJiraRecordingStoresConn(t *testing.T, jiraURL string, eventTriggered boo
 	return conn, stores, info
 }
 
-func listConversationArtifacts(t *testing.T, stores db.Stores, conversationID string) []domain.Artifact {
+func listConversationDeliverables(t *testing.T, stores db.Stores, conversationID string) []domain.Deliverable {
 	t.Helper()
-	arts, err := stores.Artifacts.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID)
+	arts, _, err := stores.Deliverables.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
 	if err != nil {
 		t.Fatalf("ListByConversation: %v", err)
 	}
 	return arts
 }
 
-// TestLocalClient_JiraActions_RecordArtifacts pins one row per successful
+// TestLocalClient_JiraActions_RecordDeliverables pins one row per successful
 // action with the right kind/target/state/dedup_key, across both write paths.
-func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
+func TestLocalClient_JiraActions_RecordDeliverables(t *testing.T) {
 	for _, eventTriggered := range []bool{true, false} {
 		name := "manual"
 		if eventTriggered {
@@ -169,15 +169,15 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				if key != "SKY-1" {
 					t.Fatalf("created key = %q, want SKY-1", key)
 				}
-				arts := listConversationArtifacts(t, stores, info.ConversationID)
+				arts := listConversationDeliverables(t, stores, info.ConversationID)
 				if len(arts) != 1 {
-					t.Fatalf("want 1 artifact, got %d: %+v", len(arts), arts)
+					t.Fatalf("want 1 deliverable, got %d: %+v", len(arts), arts)
 				}
 				a := arts[0]
-				if a.Provider != domain.ArtifactProviderJira || a.Kind != domain.ArtifactKindIssue ||
-					a.Target != "SKY-1" || a.ExternalID != "10001" || a.State != domain.ArtifactStateIssueCreated ||
+				if a.Provider != domain.ProviderJira || a.Kind != domain.DeliverableKindIssue ||
+					a.Target != "SKY-1" || a.ExternalID != "10001" || a.State != domain.DeliverableStateIssueCreated ||
 					a.DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-1") {
-					t.Errorf("create artifact mismatch: %+v", a)
+					t.Errorf("create deliverable mismatch: %+v", a)
 				}
 				if a.ConversationID != info.ConversationID || a.TeamID != runmode.LocalDefaultTeamID {
 					t.Errorf("attribution mismatch: conversation=%q team=%q", a.ConversationID, a.TeamID)
@@ -192,14 +192,14 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				if err := client.JiraTransitionTo(context.Background(), "SKY-9", "Done"); err != nil {
 					t.Fatalf("JiraTransitionTo: %v", err)
 				}
-				arts := listConversationArtifacts(t, stores, info.ConversationID)
+				arts := listConversationDeliverables(t, stores, info.ConversationID)
 				if len(arts) != 1 {
-					t.Fatalf("want 1 artifact, got %d: %+v", len(arts), arts)
+					t.Fatalf("want 1 deliverable, got %d: %+v", len(arts), arts)
 				}
 				a := arts[0]
-				if a.Kind != domain.ArtifactKindIssue || a.Target != "SKY-9" ||
-					a.State != domain.ArtifactStateIssueUpdated || a.DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-9") {
-					t.Errorf("transition artifact mismatch: %+v", a)
+				if a.Kind != domain.DeliverableKindIssue || a.Target != "SKY-9" ||
+					a.State != domain.DeliverableStateIssueUpdated || a.DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-9") {
+					t.Errorf("transition deliverable mismatch: %+v", a)
 				}
 				if !strings.Contains(a.DetailsJSON, `"status":"Done"`) {
 					t.Errorf("details_json %q did not carry the new status", a.DetailsJSON)
@@ -214,16 +214,16 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				if err := client.JiraAddComment(context.Background(), "SKY-9", "looks good to me"); err != nil {
 					t.Fatalf("JiraAddComment: %v", err)
 				}
-				arts := listConversationArtifacts(t, stores, info.ConversationID)
+				arts := listConversationDeliverables(t, stores, info.ConversationID)
 				if len(arts) != 1 {
-					t.Fatalf("want 1 artifact, got %d: %+v", len(arts), arts)
+					t.Fatalf("want 1 deliverable, got %d: %+v", len(arts), arts)
 				}
 				a := arts[0]
-				if a.Kind != domain.ArtifactKindComment || a.Target != "SKY-9" ||
-					a.ExternalID != "10042" || a.State != domain.ArtifactStateCommentPosted ||
-					a.DedupKey != domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindComment,
+				if a.Kind != domain.DeliverableKindComment || a.Target != "SKY-9" ||
+					a.ExternalID != "10042" || a.State != domain.DeliverableStateCommentPosted ||
+					a.DedupKey != domain.ObjectKey(domain.ProviderJira, domain.DeliverableKindComment,
 						domain.JiraIssueResource(jira.URL, "10009"), "10042") {
-					t.Errorf("comment artifact mismatch: %+v", a)
+					t.Errorf("comment deliverable mismatch: %+v", a)
 				}
 				if !strings.Contains(a.DetailsJSON, "looks good to me") {
 					t.Errorf("details_json %q did not carry the body snippet", a.DetailsJSON)
@@ -242,14 +242,14 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				if user.ID != fakeJiraUserKey || user.DisplayName != "Ana Lyst" {
 					t.Errorf("assigned %+v, want Ana Lyst", user)
 				}
-				arts := listConversationArtifacts(t, stores, info.ConversationID)
+				arts := listConversationDeliverables(t, stores, info.ConversationID)
 				if len(arts) != 1 {
-					t.Fatalf("want 1 artifact, got %d: %+v", len(arts), arts)
+					t.Fatalf("want 1 deliverable, got %d: %+v", len(arts), arts)
 				}
 				a := arts[0]
-				if a.Kind != domain.ArtifactKindIssue || a.Target != "SKY-9" ||
-					a.State != domain.ArtifactStateIssueUpdated || a.DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-9") {
-					t.Errorf("assign artifact mismatch: %+v", a)
+				if a.Kind != domain.DeliverableKindIssue || a.Target != "SKY-9" ||
+					a.State != domain.DeliverableStateIssueUpdated || a.DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-9") {
+					t.Errorf("assign deliverable mismatch: %+v", a)
 				}
 				for _, want := range []string{`"id":"` + fakeJiraUserKey + `"`, `"name":"Ana Lyst"`} {
 					if !strings.Contains(a.DetailsJSON, want) {
@@ -275,14 +275,14 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				}); err != nil {
 					t.Fatalf("JiraUpdateIssue: %v", err)
 				}
-				arts := listConversationArtifacts(t, stores, info.ConversationID)
+				arts := listConversationDeliverables(t, stores, info.ConversationID)
 				if len(arts) != 1 {
-					t.Fatalf("want 1 artifact, got %d: %+v", len(arts), arts)
+					t.Fatalf("want 1 deliverable, got %d: %+v", len(arts), arts)
 				}
 				a := arts[0]
-				if a.Kind != domain.ArtifactKindIssue || a.Target != "SKY-9" ||
-					a.State != domain.ArtifactStateIssueUpdated || a.DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-9") {
-					t.Errorf("update artifact mismatch: %+v", a)
+				if a.Kind != domain.DeliverableKindIssue || a.Target != "SKY-9" ||
+					a.State != domain.DeliverableStateIssueUpdated || a.DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-9") {
+					t.Errorf("update deliverable mismatch: %+v", a)
 				}
 				if !strings.Contains(a.DetailsJSON, `"summary"`) || !strings.Contains(a.DetailsJSON, `"priority"`) {
 					t.Errorf("details_json %q did not list the updated fields", a.DetailsJSON)
@@ -297,10 +297,10 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				if err := client.JiraSetParent(context.Background(), "SKY-9", "SKY-1"); err != nil {
 					t.Fatalf("JiraSetParent: %v", err)
 				}
-				arts := listConversationArtifacts(t, stores, info.ConversationID)
-				if len(arts) != 1 || arts[0].Kind != domain.ArtifactKindIssue ||
-					arts[0].DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-9") || arts[0].State != domain.ArtifactStateIssueUpdated {
-					t.Fatalf("set-parent artifact mismatch: %+v", arts)
+				arts := listConversationDeliverables(t, stores, info.ConversationID)
+				if len(arts) != 1 || arts[0].Kind != domain.DeliverableKindIssue ||
+					arts[0].DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-9") || arts[0].State != domain.DeliverableStateIssueUpdated {
+					t.Fatalf("set-parent deliverable mismatch: %+v", arts)
 				}
 				if !strings.Contains(arts[0].DetailsJSON, `"parent":"SKY-1"`) {
 					t.Errorf("details_json %q did not carry the parent", arts[0].DetailsJSON)
@@ -315,10 +315,10 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				if err := client.JiraSetPriority(context.Background(), "SKY-9", "Low"); err != nil {
 					t.Fatalf("JiraSetPriority: %v", err)
 				}
-				arts := listConversationArtifacts(t, stores, info.ConversationID)
+				arts := listConversationDeliverables(t, stores, info.ConversationID)
 				if len(arts) != 1 || arts[0].DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-9") ||
-					arts[0].State != domain.ArtifactStateIssueUpdated {
-					t.Fatalf("set-priority artifact mismatch: %+v", arts)
+					arts[0].State != domain.DeliverableStateIssueUpdated {
+					t.Fatalf("set-priority deliverable mismatch: %+v", arts)
 				}
 				if !strings.Contains(arts[0].DetailsJSON, `"priority":"Low"`) {
 					t.Errorf("details_json %q did not carry the priority", arts[0].DetailsJSON)
@@ -328,10 +328,10 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 	}
 }
 
-// TestLocalClient_JiraArtifactURLs_WhenSiteConfigured pins that issue
-// artifacts carry {site}/browse/<KEY> on the org's Jira site and comment
-// artifacts carry the focusedCommentId deep link.
-func TestLocalClient_JiraArtifactURLs_WhenSiteConfigured(t *testing.T) {
+// TestLocalClient_JiraDeliverableURLs_WhenSiteConfigured pins that issue
+// deliverables carry {site}/browse/<KEY> on the org's Jira site and comment
+// deliverables carry the focusedCommentId deep link.
+func TestLocalClient_JiraDeliverableURLs_WhenSiteConfigured(t *testing.T) {
 	jira := startFakeJira(t)
 	stores, info := newJiraRecordingStores(t, jira.URL, true)
 	client := NewLocal(stores, info)
@@ -344,13 +344,13 @@ func TestLocalClient_JiraArtifactURLs_WhenSiteConfigured(t *testing.T) {
 		t.Fatalf("JiraAddComment: %v", err)
 	}
 
-	for _, a := range listConversationArtifacts(t, stores, info.ConversationID) {
+	for _, a := range listConversationDeliverables(t, stores, info.ConversationID) {
 		switch a.Kind {
-		case domain.ArtifactKindIssue:
+		case domain.DeliverableKindIssue:
 			if a.URL != jira.URL+"/browse/SKY-7" {
 				t.Errorf("issue url = %q", a.URL)
 			}
-		case domain.ArtifactKindComment:
+		case domain.DeliverableKindComment:
 			if a.URL != jira.URL+"/browse/SKY-7?focusedCommentId=10042" {
 				t.Errorf("comment url = %q", a.URL)
 			}
@@ -358,10 +358,10 @@ func TestLocalClient_JiraArtifactURLs_WhenSiteConfigured(t *testing.T) {
 	}
 }
 
-// TestLocalClient_JiraComment_NoID_SkipsArtifact pins that when Jira's response
+// TestLocalClient_JiraComment_NoID_SkipsDeliverable pins that when Jira's response
 // carries no comment id, the comment still posts (action succeeds) but no
-// artifact row is written — there's no stable key to dedup on.
-func TestLocalClient_JiraComment_NoID_SkipsArtifact(t *testing.T) {
+// deliverable row is written — there's no stable key to dedup on.
+func TestLocalClient_JiraComment_NoID_SkipsDeliverable(t *testing.T) {
 	jira := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		// Comment POST returns a body with no id field.
@@ -375,15 +375,15 @@ func TestLocalClient_JiraComment_NoID_SkipsArtifact(t *testing.T) {
 	if err := client.JiraAddComment(context.Background(), "SKY-9", "no id back"); err != nil {
 		t.Fatalf("JiraAddComment must succeed even when the id is missing: %v", err)
 	}
-	if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 0 {
-		t.Errorf("expected no artifact when comment id is empty, got %+v", arts)
+	if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 0 {
+		t.Errorf("expected no deliverable when comment id is empty, got %+v", arts)
 	}
 }
 
 // TestLocalClient_JiraTransitionThenComment_DedupsIssue pins the upsert
 // invariant: a transition and a comment on the same issue leave exactly one
-// `issue` artifact (deduped on the issue's site and id) plus one `comment`
-// artifact.
+// `issue` deliverable (deduped on the issue's site and id) plus one `comment`
+// deliverable.
 func TestLocalClient_JiraTransitionThenComment_DedupsIssue(t *testing.T) {
 	jira := startFakeJira(t)
 	stores, info := newJiraRecordingStores(t, jira.URL, true)
@@ -397,26 +397,26 @@ func TestLocalClient_JiraTransitionThenComment_DedupsIssue(t *testing.T) {
 		t.Fatalf("JiraAddComment: %v", err)
 	}
 
-	arts := listConversationArtifacts(t, stores, info.ConversationID)
+	arts := listConversationDeliverables(t, stores, info.ConversationID)
 	if len(arts) != 2 {
-		t.Fatalf("want 2 artifacts (one issue, one comment), got %d: %+v", len(arts), arts)
+		t.Fatalf("want 2 deliverables (one issue, one comment), got %d: %+v", len(arts), arts)
 	}
 	var issues, comments int
 	for _, a := range arts {
 		switch a.Kind {
-		case domain.ArtifactKindIssue:
+		case domain.DeliverableKindIssue:
 			issues++
 			if a.DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-5") {
 				t.Errorf("issue dedup_key = %q", a.DedupKey)
 			}
-		case domain.ArtifactKindComment:
+		case domain.DeliverableKindComment:
 			comments++
-			if a.DedupKey != domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindComment,
+			if a.DedupKey != domain.ObjectKey(domain.ProviderJira, domain.DeliverableKindComment,
 				domain.JiraIssueResource(jira.URL, "10005"), "10042") {
 				t.Errorf("comment dedup_key = %q", a.DedupKey)
 			}
 		default:
-			t.Errorf("unexpected artifact kind %q", a.Kind)
+			t.Errorf("unexpected deliverable kind %q", a.Kind)
 		}
 	}
 	if issues != 1 || comments != 1 {
@@ -424,28 +424,28 @@ func TestLocalClient_JiraTransitionThenComment_DedupsIssue(t *testing.T) {
 	}
 }
 
-// erroringArtifacts fails every write so the best-effort path is exercised.
-type erroringArtifacts struct {
-	db.ArtifactStore
+// erroringDeliverables fails every write so the best-effort path is exercised.
+type erroringDeliverables struct {
+	db.DeliverableStore
 	mu    sync.Mutex
 	calls int
 }
 
-func (e *erroringArtifacts) Upsert(context.Context, string, domain.Artifact) (domain.Artifact, error) {
+func (e *erroringDeliverables) Upsert(context.Context, string, domain.Deliverable) (domain.Deliverable, error) {
 	e.mu.Lock()
 	e.calls++
 	e.mu.Unlock()
-	return domain.Artifact{}, errors.New("boom")
+	return domain.Deliverable{}, errors.New("boom")
 }
 
-func (e *erroringArtifacts) UpsertSystem(context.Context, string, domain.Artifact) (domain.Artifact, error) {
+func (e *erroringDeliverables) UpsertSystem(context.Context, string, domain.Deliverable) (domain.Deliverable, error) {
 	e.mu.Lock()
 	e.calls++
 	e.mu.Unlock()
-	return domain.Artifact{}, errors.New("boom")
+	return domain.Deliverable{}, errors.New("boom")
 }
 
-func (e *erroringArtifacts) callCount() int {
+func (e *erroringDeliverables) callCount() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.calls
@@ -457,8 +457,8 @@ func (e *erroringArtifacts) callCount() int {
 func TestLocalClient_JiraRecordingFailure_DoesNotFailAction(t *testing.T) {
 	jira := startFakeJira(t)
 	stores, info := newJiraRecordingStores(t, jira.URL, true)
-	rec := &erroringArtifacts{}
-	stores.Artifacts = rec
+	rec := &erroringDeliverables{}
+	stores.Deliverables = rec
 	client := NewLocal(stores, info)
 
 	if err := client.JiraTransitionTo(context.Background(), "SKY-9", "Done"); err != nil {

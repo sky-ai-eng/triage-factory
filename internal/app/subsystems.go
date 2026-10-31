@@ -108,17 +108,17 @@ func (a *App) buildAI() {
 	a.srv.SetProfilerTrigger(a.triggerProfiler)
 	repoprofileLog.Info("repo-profiling manager ready (per-org runners)")
 
-	// Artifact reconciler: per-org Runners mirroring artifacts against live
+	// Deliverable reconciler: per-org Runners mirroring deliverables against live
 	// GitHub state off the system:poll: GitHub sentinel (TFAC-464), a sibling
 	// to the scorer/profiler — same per-org isolation so a slow
 	// reconcile on one tenant can't head-of-line-block another. The shared
 	// Reconciler is also handed to the server for the Tier-2 run-scoped refresh
 	// endpoint, so foreground and background reconciliation run one code path.
-	reconciler := reconcile.NewReconciler(a.ghResolver, a.stores.Artifacts, a.stores.ExternalActions, a.stores.Entities, a.stores.Repos, a.stores.Orgs, a.wsHub)
+	reconciler := reconcile.NewReconciler(a.ghResolver, a.stores.Deliverables, a.stores.ExternalActions, a.stores.Entities, a.stores.Repos, a.stores.Orgs, a.wsHub)
 	a.reconcilerCore = reconciler
 	a.reconciler = reconcile.NewManager(reconciler)
 	a.srv.SetReconciler(reconciler)
-	reconcileLog.Info("artifact reconciler ready (per-org runners)")
+	reconcileLog.Info("deliverable reconciler ready (per-org runners)")
 
 	// Marketplace run-derived listing stats (TFAC-540): multi-mode only —
 	// the marketplace itself doesn't exist in local mode (db.Stores.Marketplace
@@ -514,7 +514,7 @@ func (a *App) scorerCallbacks() ai.RunnerCallbacks {
 func (a *App) newPollerManager() *poller.Manager {
 	// An installed org polls as its app user, through the process's one Linear
 	// token cache (buildRunCredentials).
-	m := poller.NewManager(a.database, a.ingestor, a.stores.Users, a.stores.Tasks, a.stores.Entities, a.stores.Repos, a.stores.Artifacts, a.stores.EventQueue, a.stores.Orgs, a.stores.JiraStatusRules, a.stores.JiraProjects, a.stores.LinearTeamRules, a.stores.TeamGitHubGroups, a.stores.Secrets, a.stores.GitHubApps, a.stores.PollReadiness, a.ghResolver, a.linearResolver)
+	m := poller.NewManager(a.database, a.ingestor, a.stores.Users, a.stores.Tasks, a.stores.Entities, a.stores.Repos, a.stores.Deliverables, a.stores.EventQueue, a.stores.Orgs, a.stores.JiraStatusRules, a.stores.JiraProjects, a.stores.LinearTeamRules, a.stores.TeamGitHubGroups, a.stores.Secrets, a.stores.GitHubApps, a.stores.PollReadiness, a.ghResolver, a.linearResolver)
 	// The App-installation grant mirror, refreshed by pull at the head of every
 	// GitHub cycle. Deliberately NOT a system:poll: subscriber like the scorer /
 	// profiler / reconciler: those all hang off a poll COMPLETION,

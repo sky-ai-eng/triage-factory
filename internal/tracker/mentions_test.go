@@ -237,11 +237,11 @@ func TestLocalReviewerResolver_FoldsCase(t *testing.T) {
 func TestGitHubNewReviews_MarksTFRepliesInAPersonsReview(t *testing.T) {
 	tr, stores := newReviewTestTracker(t)
 	ctx := context.Background()
-	reply := domain.Artifact{TeamID: runmode.LocalDefaultTeamID, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindComment,
-		Scope: reviewTestHost, Target: "octo/repo#7", State: domain.ArtifactStateCommentPosted,
-		DedupKey: domain.GitHubCommentDedupKey(domain.GitHubReviewComment, 802)}
-	if _, err := stores.Artifacts.UpsertSystem(ctx, runmode.LocalDefaultOrgID, reply); err != nil {
-		t.Fatalf("seed comment artifact: %v", err)
+	reply := domain.Deliverable{TeamID: runmode.LocalDefaultTeamID, Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindComment,
+		Scope: reviewTestHost, Target: "octo/repo#7", State: domain.DeliverableStateCommentPosted,
+		DedupKey: domain.GitHubCommentKey(domain.GitHubReviewComment, 802)}
+	if _, err := stores.Deliverables.UpsertSystem(ctx, runmode.LocalDefaultOrgID, reply); err != nil {
+		t.Fatalf("seed comment deliverable: %v", err)
 	}
 	reader := &fakeReviewReader{pages: map[string]ghclient.PRReviewPage{
 		"": {TotalCount: 2, Reviews: []ghclient.PRReview{
@@ -320,12 +320,12 @@ func TestRefreshGitHub_MentionedEndToEnd(t *testing.T) {
 	stores := sqlitestore.New(database)
 	org, team := runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
 	for _, key := range []string{
-		domain.GitHubCommentDedupKey(domain.GitHubIssueComment, 4102),
-		domain.GitHubCommentDedupKey(domain.GitHubReviewComment, 6002),
+		domain.GitHubCommentKey(domain.GitHubIssueComment, 4102),
+		domain.GitHubCommentKey(domain.GitHubReviewComment, 6002),
 	} {
-		posted := domain.Artifact{TeamID: team, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindComment,
-			Scope: reviewTestHost, Target: "octo/repo#7", State: domain.ArtifactStateCommentPosted, DedupKey: key}
-		if _, err := stores.Artifacts.UpsertSystem(ctx, org, posted); err != nil {
+		posted := domain.Deliverable{TeamID: team, Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindComment,
+			Scope: reviewTestHost, Target: "octo/repo#7", State: domain.DeliverableStateCommentPosted, DedupKey: key}
+		if _, err := stores.Deliverables.UpsertSystem(ctx, org, posted); err != nil {
 			t.Fatalf("seed TF's comment %s: %v", key, err)
 		}
 	}
@@ -360,7 +360,7 @@ func TestRefreshGitHub_MentionedEndToEnd(t *testing.T) {
 		commentPage, reviewPage)
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, nil, mentionResolver); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
@@ -397,7 +397,7 @@ func TestRefreshGitHub_KeepsBodyMentionsWithoutTheBody(t *testing.T) {
 	reads := 0
 	srv := commentRefreshServer(t, `{"totalCount":0,"nodes":[]}`, `{}`, &reads)
 
-	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, runmode.LocalDefaultOrgID)
+	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.EventQueue, runmode.LocalDefaultOrgID)
 	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, ghclient.NewClient(srv.URL, "tok"), domain.GitHubAccount{}, nil, mentionResolver); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
@@ -488,7 +488,7 @@ func TestRefreshGitHub_OpenedPRBodyMentions(t *testing.T) {
 		openPRJSON(3, "carol", "cc @bob", start.Add(-time.Hour)),
 		openPRJSON(4, "carol", "cc @erin", start.Add(-time.Minute)))
 	client := ghclient.NewClient(openedPRServer(t, first, second).URL, "tok")
-	tr := New(database, &recordingPreEnqueuedPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Artifacts, stores.EventQueue, org)
+	tr := New(database, &recordingPreEnqueuedPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.EventQueue, org)
 	resolver := knownLogins{"bob": true, "carol": true, "erin": true}
 
 	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, []string{"octo/repo"}, resolver); err != nil {

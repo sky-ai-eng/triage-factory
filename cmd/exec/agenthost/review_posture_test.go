@@ -78,7 +78,7 @@ func setTeamReviewPosture(t *testing.T, stores db.Stores, teamID, posture string
 //
 // The outcome is asserted on three surfaces that must agree — the returned
 // ReviewFinalizeResult (what the CLI reports), whether GitHub received a submit,
-// and the artifact's state (a posted review must not also sit in the approval
+// and the deliverable's state (a posted review must not also sit in the approval
 // queue for a human to act on).
 func TestFinalizeReviewDraft_PostureDecidesPosting(t *testing.T) {
 	cases := []struct {
@@ -185,12 +185,12 @@ func TestFinalizeReviewDraft_PostureDecidesPosting(t *testing.T) {
 				t.Fatalf("a staged review must reach GitHub zero times, saw %d", len(submits))
 			}
 
-			arts := listConversationArtifacts(t, stores, info.ConversationID)
+			arts := listConversationDeliverables(t, stores, info.ConversationID)
 			if len(arts) != 1 {
-				t.Fatalf("want 1 artifact, got %d", len(arts))
+				t.Fatalf("want 1 deliverable, got %d", len(arts))
 			}
 			a := arts[0]
-			d, _ := domain.ParseReviewArtifactDetails(a.DetailsJSON)
+			d, _ := domain.ParseReviewDeliverableDetails(a.DetailsJSON)
 			// The ready sentinel is armed under BOTH outcomes — it's the
 			// anti-double-submit guard, not an "awaiting approval" marker.
 			if d.ReviewEvent != tc.event {
@@ -201,7 +201,7 @@ func TestFinalizeReviewDraft_PostureDecidesPosting(t *testing.T) {
 			}
 			if tc.wantPosted {
 				// The posted payload matches what the human-approval path posts
-				// (internal/server TestReviewArtifactApprove pins the same
+				// (internal/server TestReviewDeliverableApprove pins the same
 				// shape): both publish through review.SubmitStaged, so the
 				// commit pin, the comments, and the footer are one contract.
 				got := submits[0]
@@ -217,7 +217,7 @@ func TestFinalizeReviewDraft_PostureDecidesPosting(t *testing.T) {
 				if c, _ := got["comments"].([]any); len(c) != 1 {
 					t.Errorf("submit comments = %v, want the one staged comment", got["comments"])
 				}
-				if a.State != domain.ArtifactStateReviewSubmitted {
+				if a.State != domain.DeliverableStateReviewSubmitted {
 					t.Errorf("state = %q, want submitted (no pending row for a human to act on)", a.State)
 				}
 				if a.ExternalID != "555" {
@@ -230,7 +230,7 @@ func TestFinalizeReviewDraft_PostureDecidesPosting(t *testing.T) {
 					t.Errorf("URL = %q, want the #pullrequestreview-555 anchor", a.URL)
 				}
 			} else {
-				if a.State != domain.ArtifactStateReviewPending {
+				if a.State != domain.DeliverableStateReviewPending {
 					t.Errorf("state = %q, want pending (awaiting human approval)", a.State)
 				}
 				if a.ExternalID != "" || a.URL != "" || res.URL != "" {
@@ -296,14 +296,14 @@ func TestFinalizeReviewDraft_AutoPost_SubmitFailureStaysStaged(t *testing.T) {
 		t.Error("Posted = true after a failed submit — the response must report what actually happened")
 	}
 
-	arts := listConversationArtifacts(t, stores, info.ConversationID)
+	arts := listConversationDeliverables(t, stores, info.ConversationID)
 	if len(arts) != 1 {
-		t.Fatalf("want 1 artifact, got %d", len(arts))
+		t.Fatalf("want 1 deliverable, got %d", len(arts))
 	}
-	if arts[0].State != domain.ArtifactStateReviewPending {
+	if arts[0].State != domain.DeliverableStateReviewPending {
 		t.Errorf("state = %q, want pending so a human can still approve the draft", arts[0].State)
 	}
-	d, _ := domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
+	d, _ := domain.ParseReviewDeliverableDetails(arts[0].DetailsJSON)
 	if d.ReviewEvent != "COMMENT" || len(d.StagedComments) != 1 {
 		t.Errorf("the staged draft must survive a failed submit intact: %+v", d)
 	}
@@ -342,11 +342,11 @@ func TestPostFinalizedReview_LosesClaimToConcurrentApprove(t *testing.T) {
 	if _, err := client.FinalizeReviewDraft(ctx, handle, "COMMENT", "## body"); err != nil {
 		t.Fatalf("FinalizeReviewDraft: %v", err)
 	}
-	art := listConversationArtifacts(t, stores, info.ConversationID)[0]
+	art := listConversationDeliverables(t, stores, info.ConversationID)[0]
 
 	// The human approve lands first, taking the claim the handler takes.
-	won, err := stores.Artifacts.TransitionReviewStateSystem(ctx, info.OrgID, art.ID,
-		domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted, "", "", "")
+	won, err := stores.Deliverables.TransitionReviewStateSystem(ctx, info.OrgID, art.ID,
+		domain.DeliverableStateReviewPending, domain.DeliverableStateReviewSubmitted, "", "", "")
 	if err != nil || !won {
 		t.Fatalf("simulated approve claim = %v, %v; want it to win", won, err)
 	}
@@ -364,8 +364,8 @@ func TestPostFinalizedReview_LosesClaimToConcurrentApprove(t *testing.T) {
 	}
 	// The winner's claim is intact: the loser must not have released it, which
 	// would put an already-approved review back in the queue.
-	after := listConversationArtifacts(t, stores, info.ConversationID)[0]
-	if after.State != domain.ArtifactStateReviewSubmitted {
+	after := listConversationDeliverables(t, stores, info.ConversationID)[0]
+	if after.State != domain.DeliverableStateReviewSubmitted {
 		t.Errorf("state = %q, want the approver's claim left untouched (submitted)", after.State)
 	}
 }
@@ -397,9 +397,9 @@ func TestPostFinalizedReview_ClaimsBeforePosting(t *testing.T) {
 
 	// A human approve arriving now takes the same CAS the handler takes — and
 	// loses, so the handler 409s instead of posting the review a second time.
-	art := listConversationArtifacts(t, stores, info.ConversationID)[0]
-	claimed, err := stores.Artifacts.TransitionReviewStateSystem(ctx, info.OrgID, art.ID,
-		domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted, "", "", "")
+	art := listConversationDeliverables(t, stores, info.ConversationID)[0]
+	claimed, err := stores.Deliverables.TransitionReviewStateSystem(ctx, info.OrgID, art.ID,
+		domain.DeliverableStateReviewPending, domain.DeliverableStateReviewSubmitted, "", "", "")
 	if err != nil {
 		t.Fatalf("late approve claim: %v", err)
 	}
@@ -431,17 +431,17 @@ func TestPostFinalizedReview_PostsThePostClaimContent(t *testing.T) {
 	if _, err := client.FinalizeReviewDraft(ctx, handle, "COMMENT", "## agent body"); err != nil {
 		t.Fatalf("FinalizeReviewDraft: %v", err)
 	}
-	art := listConversationArtifacts(t, stores, info.ConversationID)[0]
+	art := listConversationDeliverables(t, stores, info.ConversationID)[0]
 
 	// A human edits the staged body while the draft is still pending — the
 	// PATCH the overlay makes, guarded on pending exactly like this one.
-	edited, err := domain.ParseReviewArtifactDetails(art.DetailsJSON)
+	edited, err := domain.ParseReviewDeliverableDetails(art.DetailsJSON)
 	if err != nil {
 		t.Fatalf("parse details: %v", err)
 	}
 	edited.ReviewBody = "## human-edited body"
-	ok, err := stores.Artifacts.UpdateReviewDetailsIfPendingSystem(ctx, info.OrgID, art.ID,
-		domain.MarshalReviewArtifactDetails(edited))
+	ok, err := stores.Deliverables.UpdateReviewDetailsIfPendingSystem(ctx, info.OrgID, art.ID,
+		domain.MarshalReviewDeliverableDetails(edited))
 	if err != nil || !ok {
 		t.Fatalf("simulated human edit = %v, %v; want it to land while pending", ok, err)
 	}
@@ -485,16 +485,16 @@ func TestPostFinalizedReview_ReEvaluatesPostureAgainstPostClaimContent(t *testin
 	if _, err := client.FinalizeReviewDraft(ctx, handle, "COMMENT", "## body"); err != nil {
 		t.Fatalf("FinalizeReviewDraft: %v", err)
 	}
-	art := listConversationArtifacts(t, stores, info.ConversationID)[0]
+	art := listConversationDeliverables(t, stores, info.ConversationID)[0]
 
 	// The human escalates the verdict while it's still pending.
-	escalated, err := domain.ParseReviewArtifactDetails(art.DetailsJSON)
+	escalated, err := domain.ParseReviewDeliverableDetails(art.DetailsJSON)
 	if err != nil {
 		t.Fatalf("parse details: %v", err)
 	}
 	escalated.ReviewEvent = "REQUEST_CHANGES"
-	ok, err := stores.Artifacts.UpdateReviewDetailsIfPendingSystem(ctx, info.OrgID, art.ID,
-		domain.MarshalReviewArtifactDetails(escalated))
+	ok, err := stores.Deliverables.UpdateReviewDetailsIfPendingSystem(ctx, info.OrgID, art.ID,
+		domain.MarshalReviewDeliverableDetails(escalated))
 	if err != nil || !ok {
 		t.Fatalf("simulated escalation = %v, %v; want it to land while pending", ok, err)
 	}
@@ -510,8 +510,8 @@ func TestPostFinalizedReview_ReEvaluatesPostureAgainstPostClaimContent(t *testin
 		t.Errorf("GitHub saw %d submits, want 0", n)
 	}
 	// The claim is released, so the escalated review is back in the queue.
-	after := listConversationArtifacts(t, stores, info.ConversationID)[0]
-	if after.State != domain.ArtifactStateReviewPending {
+	after := listConversationDeliverables(t, stores, info.ConversationID)[0]
+	if after.State != domain.DeliverableStateReviewPending {
 		t.Errorf("state = %q, want pending — the claim must be released when the run declines to post", after.State)
 	}
 }

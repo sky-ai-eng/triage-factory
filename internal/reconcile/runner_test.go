@@ -55,14 +55,14 @@ func TestRunner_CycleSpan(t *testing.T) {
 		wantError   bool
 	}{
 		{name: "completed"},
-		// A closed connection fails the artifact list with ctx still live.
+		// A closed connection fails the deliverable list with ctx still live.
 		{name: "failed", closeDB: true, wantError: true},
 		{name: "shutdown", cancelled: true, wantOutcome: "shutdown"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			conn, stores, _, _ := reconcileTestDB(t)
-			rc := NewReconciler(&fakeResolver{client: newStubClient(t, &stubGH{})}, stores.Artifacts, stores.ExternalActions, stores.Entities, stores.Repos, stores.Orgs, nil)
+			rc := NewReconciler(&fakeResolver{client: newStubClient(t, &stubGH{})}, stores.Deliverables, stores.ExternalActions, stores.Entities, stores.Repos, stores.Orgs, nil)
 			if c.closeDB {
 				_ = conn.Close()
 			}

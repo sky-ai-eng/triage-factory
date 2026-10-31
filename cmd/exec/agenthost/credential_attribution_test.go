@@ -70,7 +70,7 @@ func TestUnclassifiedResolverKeepsTheApp(t *testing.T) {
 
 // TestBranchPush_ResolvesItsOwnTier covers the one recorder that runs in a
 // process which never resolved a gh client: the local-mode pre-push hook builds
-// a branch artifact and nothing has classified the credential by then. The row
+// a branch deliverable and nothing has classified the credential by then. The row
 // still names the tier, resolved from the same resolver that minted the token
 // the push authenticated with.
 func TestBranchPush_ResolvesItsOwnTier(t *testing.T) {
@@ -79,12 +79,12 @@ func TestBranchPush_ResolvesItsOwnTier(t *testing.T) {
 	client.SetGitHubResolver(fakeGitHubResolver{baseURL: gh.URL, token: "tok", identity: ghclient.IdentityPAT})
 	registerRepo(t, stores, "octo", "repo", "1")
 
-	branch, ok := domain.NewBranchArtifact("octo/repo", "refs/heads/feat", "abc123", true)
+	branch, ok := domain.NewBranchDeliverable("octo/repo", "refs/heads/feat", "abc123", true)
 	if !ok {
-		t.Fatal("NewBranchArtifact returned ok=false")
+		t.Fatal("NewBranchDeliverable returned ok=false")
 	}
-	if _, err := client.UpsertArtifact(context.Background(), branch); err != nil {
-		t.Fatalf("UpsertArtifact: %v", err)
+	if _, err := client.UpsertDeliverable(context.Background(), branch); err != nil {
+		t.Fatalf("UpsertDeliverable: %v", err)
 	}
 
 	acts := listExternalActions(t, stores)
@@ -106,12 +106,12 @@ func TestSetGitHubCredential_ReachesTheBranchRow(t *testing.T) {
 	client.SetGitHubCredential(domain.CredentialGitHubPAT)
 	registerRepo(t, stores, "octo", "repo", "1")
 
-	branch, ok := domain.NewBranchArtifact("octo/repo", "refs/heads/feat", "abc123", true)
+	branch, ok := domain.NewBranchDeliverable("octo/repo", "refs/heads/feat", "abc123", true)
 	if !ok {
-		t.Fatal("NewBranchArtifact returned ok=false")
+		t.Fatal("NewBranchDeliverable returned ok=false")
 	}
-	if _, err := client.UpsertArtifact(context.Background(), branch); err != nil {
-		t.Fatalf("UpsertArtifact: %v", err)
+	if _, err := client.UpsertDeliverable(context.Background(), branch); err != nil {
+		t.Fatalf("UpsertDeliverable: %v", err)
 	}
 
 	acts := listExternalActions(t, stores)
@@ -201,8 +201,8 @@ func TestNoteGitHubCredential_LeavesAReportedCredentialAlone(t *testing.T) {
 
 // TestRelayServer_CredentialReachesBothRecorders covers the executor's assembly
 // point, the one link the per-piece tests skip. A relay server builds audit rows
-// through two halves — its runtime, for the branch push composed into an
-// artifact upsert, and its audit client, for the relayed gh-channel writes and
+// through two halves — its runtime, for the branch push composed into a
+// deliverable upsert, and its audit client, for the relayed gh-channel writes and
 // git denials — so a credential that reaches only one of them leaves half the
 // run's log still claiming the App.
 func TestRelayServer_CredentialReachesBothRecorders(t *testing.T) {
@@ -212,12 +212,12 @@ func TestRelayServer_CredentialReachesBothRecorders(t *testing.T) {
 	ctx := context.Background()
 	registerRepo(t, stores, "octo", "repo", "1")
 
-	branch, ok := domain.NewBranchArtifact("octo/repo", "refs/heads/feat", "abc123", true)
+	branch, ok := domain.NewBranchDeliverable("octo/repo", "refs/heads/feat", "abc123", true)
 	if !ok {
-		t.Fatal("NewBranchArtifact returned ok=false")
+		t.Fatal("NewBranchDeliverable returned ok=false")
 	}
-	if _, err := srv.rt.UpsertArtifact(ctx, branch); err != nil {
-		t.Fatalf("runtime UpsertArtifact: %v", err)
+	if _, err := srv.rt.UpsertDeliverable(ctx, branch); err != nil {
+		t.Fatalf("runtime UpsertDeliverable: %v", err)
 	}
 	srv.audit.RecordGHChannelWrite(ctx, ghwrite.Observation{
 		Method: "PATCH", Path: "/repos/octo/repo/pulls/1", Status: 200,

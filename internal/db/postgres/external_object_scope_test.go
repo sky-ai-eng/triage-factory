@@ -14,7 +14,7 @@ import (
 )
 
 // TestExternalObjectScope_Postgres runs the shared scope conformance suite for
-// artifacts and the audit ledger against the Postgres backend. Both pools are
+// deliverables and the audit ledger against the Postgres backend. Both pools are
 // wired against AdminDB, so the suite exercises behavior independent of the
 // auth path; the claims-carrying run below covers RLS.
 func TestExternalObjectScope_Postgres(t *testing.T) {
@@ -28,13 +28,13 @@ func TestExternalObjectScope_Postgres(t *testing.T) {
 	})
 }
 
-// TestCommentArtifacts_Postgres runs the shared comment-artifact conformance
+// TestCommentDeliverables_Postgres runs the shared comment-deliverable conformance
 // suite against the Postgres backend, both pools wired against AdminDB like the
 // scope suite above.
-func TestCommentArtifacts_Postgres(t *testing.T) {
+func TestCommentDeliverables_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	dbtest.RunCommentArtifactConformance(t, func(t *testing.T) (db.Stores, string, string) {
+	dbtest.RunCommentDeliverableConformance(t, func(t *testing.T) (db.Stores, string, string) {
 		t.Helper()
 		h.Reset(t)
 		orgID, _, teamID := pgtest.SeedOrgWithUser(t, h, "comments")
@@ -42,13 +42,13 @@ func TestCommentArtifacts_Postgres(t *testing.T) {
 	})
 }
 
-// TestArtifactUpsert_Postgres runs the shared artifact upsert conformance suite
+// TestDeliverableUpsert_Postgres runs the shared deliverable upsert conformance suite
 // against the Postgres backend, both pools wired against AdminDB like the scope
 // suite above.
-func TestArtifactUpsert_Postgres(t *testing.T) {
+func TestDeliverableUpsert_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	dbtest.RunArtifactUpsertConformance(t, func(t *testing.T) (db.Stores, string, string) {
+	dbtest.RunDeliverableUpsertConformance(t, func(t *testing.T) (db.Stores, string, string) {
 		t.Helper()
 		h.Reset(t)
 		orgID, _, teamID := pgtest.SeedOrgWithUser(t, h, "upsert")
@@ -56,32 +56,53 @@ func TestArtifactUpsert_Postgres(t *testing.T) {
 	})
 }
 
-// TestArtifactStore_Postgres_ReturnedRowUnderClaims runs the artifact upsert
+// TestDeliverableConversationList_Postgres runs the shared conversation-scoped
+// deliverable list conformance suite against the Postgres backend, both pools
+// wired against AdminDB like the upsert suite above.
+func TestDeliverableConversationList_Postgres(t *testing.T) {
+	h := pgtest.Shared(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	dbtest.RunDeliverableConversationListConformance(t, func(t *testing.T) dbtest.DeliverableListFixture {
+		t.Helper()
+		h.Reset(t)
+		orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "list")
+		return dbtest.DeliverableListFixture{
+			Stores: stores,
+			OrgID:  orgID,
+			TeamID: teamID,
+			NewConversation: func(t *testing.T) string {
+				return seedPgDeliverableConversation(t, h, orgID, teamID, userID)
+			},
+		}
+	})
+}
+
+// TestDeliverableStore_Postgres_ReturnedRowUnderClaims runs the deliverable upsert
 // through the app pool inside a claims-carrying transaction, where the
-// artifacts RLS policies apply. On a BYPASSRLS connection RETURNING hands back
-// its row unconditionally; here the insert arm must pass artifacts_insert and
-// the conflict arm must see the row it updates (artifacts_update and
-// artifacts_select), or the write returns nothing. Both arms are checked
+// deliverables RLS policies apply. On a BYPASSRLS connection RETURNING hands back
+// its row unconditionally; here the insert arm must pass deliverables_insert and
+// the conflict arm must see the row it updates (deliverables_update and
+// deliverables_select), or the write returns nothing. Both arms are checked
 // against a point read under the same claims, and the scope comes back on
 // each.
-func TestArtifactStore_Postgres_ReturnedRowUnderClaims(t *testing.T) {
+func TestDeliverableStore_Postgres_ReturnedRowUnderClaims(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "claims")
-	conversationID := seedPgArtifactConversation(t, h, orgID, teamID, userID)
+	conversationID := seedPgDeliverableConversation(t, h, orgID, teamID, userID)
 	ctx := context.Background()
 
 	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-		store := pgstore.NewForTx(tx, pgtest.SecretKey).Artifacts
-		in := domain.Artifact{
+		store := pgstore.NewForTx(tx, pgtest.SecretKey).Deliverables
+		in := domain.Deliverable{
 			ConversationID: conversationID, TeamID: teamID,
-			Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest,
+			Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindPullRequest,
 			Scope: dbtest.TestOtherGitHubHost, Target: domain.PullRequestTarget("octo/api", 3), ExternalID: "3",
 			URL:    dbtest.TestOtherGitHubHost + "/octo/api/pull/3",
-			NodeID: "PR_kw3", State: domain.ArtifactStatePRDraft, DedupKey: domain.PullRequestDedupKey("PR_kw3"),
+			NodeID: "PR_kw3", State: domain.DeliverableStatePRDraft, DedupKey: domain.PullRequestDedupKey("PR_kw3"),
 		}
-		read := func(id string) func() (*domain.Artifact, error) {
-			return func() (*domain.Artifact, error) { return store.Get(ctx, orgID, id) }
+		read := func(id string) func() (*domain.Deliverable, error) {
+			return func() (*domain.Deliverable, error) { return store.Get(ctx, orgID, id) }
 		}
 
 		inserted, err := store.Upsert(ctx, orgID, in)
@@ -93,13 +114,13 @@ func TestArtifactStore_Postgres_ReturnedRowUnderClaims(t *testing.T) {
 			t.Errorf("Upsert (insert) returned scope %q, want %q", inserted.Scope, dbtest.TestOtherGitHubHost)
 		}
 
-		in.State = domain.ArtifactStatePROpen
+		in.State = domain.DeliverableStatePROpen
 		updated, err := store.Upsert(ctx, orgID, in)
 		if err != nil {
 			t.Fatalf("Upsert (conflict) under claims: %v", err)
 		}
 		dbtest.AssertWriteReturnedStoredRow(t, "Upsert (conflict)", updated, read(inserted.ID))
-		if updated.ID != inserted.ID || updated.State != domain.ArtifactStatePROpen || updated.Scope != dbtest.TestOtherGitHubHost {
+		if updated.ID != inserted.ID || updated.State != domain.DeliverableStatePROpen || updated.Scope != dbtest.TestOtherGitHubHost {
 			t.Errorf("Upsert (conflict) returned %+v, want row %s moved to open in its scope", updated, inserted.ID)
 		}
 		return nil
@@ -123,6 +144,13 @@ func TestExternalActionReferences_Postgres(t *testing.T) {
 	dbtest.RunExternalActionReferenceConformance(t, pgExternalActionFixture(pgtest.Shared(t)))
 }
 
+// TestExternalActionPerformedBy_Postgres runs the shared ledger performed_by
+// conformance suite against the Postgres backend, on the node-id suite's
+// fixture.
+func TestExternalActionPerformedBy_Postgres(t *testing.T) {
+	dbtest.RunExternalActionPerformedByConformance(t, pgExternalActionFixture(pgtest.Shared(t)))
+}
+
 // pgExternalActionFixture builds a fresh org per subtest with a team and a
 // conversation in it, both pools wired against AdminDB.
 func pgExternalActionFixture(h *pgtest.Harness) dbtest.ExternalActionNodeIDFactory {
@@ -135,7 +163,7 @@ func pgExternalActionFixture(h *pgtest.Harness) dbtest.ExternalActionNodeIDFacto
 			Stores:         stores,
 			OrgID:          orgID,
 			TeamID:         teamID,
-			ConversationID: seedPgArtifactConversation(t, h, orgID, teamID, userID),
+			ConversationID: seedPgDeliverableConversation(t, h, orgID, teamID, userID),
 			BackdateAction: func(t *testing.T, actionID string, age time.Duration) {
 				t.Helper()
 				if _, err := h.AdminDB.Exec(

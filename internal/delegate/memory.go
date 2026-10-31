@@ -649,6 +649,6 @@ func isSlugChar(r rune) bool {
 // conversation's memory row; this is the spawner's stores bound to it. Orgs is
 // what resolves a produced entity's scope from the org's settings.
 func (s *Spawner) attachConversationMemoryEntities(ctx context.Context, orgID, conversationID, primaryEntityID string) {
-	stores := db.Stores{TaskMemory: s.taskMemory, Artifacts: s.artifacts, Entities: s.entities, Orgs: s.orgs}
+	stores := db.Stores{TaskMemory: s.taskMemory, Deliverables: s.deliverables, Entities: s.entities, Orgs: s.orgs}
 	memoryentities.Attach(ctx, stores, orgID, conversationID, primaryEntityID)
 }

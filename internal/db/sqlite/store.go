@@ -51,7 +51,7 @@ func New(conn *sql.DB) db.Stores {
 		TeamActivity:   newTeamActivityStore(conn),
 		TeamPRs:        newTeamPRStore(conn),
 		Conversations:  newConversationStore(conn),
-		Artifacts:      newArtifactStore(conn),
+		Deliverables:   newDeliverableStore(conn),
 		Entities:       newEntityStore(conn, conn),
 		Repos:          newRepositoryStore(conn, conn),
 		PendingFirings: newPendingFiringsStore(conn, conn),

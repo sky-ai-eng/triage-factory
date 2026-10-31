@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import ActivityFeed from './ActivityFeed'
-import type { ActivityAction, ActivityArtifact } from '../types'
+import type { ActivityAction, ActivityDeliverable } from '../types'
 import { listBody } from '../test/apiResponse'
 
 const action = (over: Partial<ActivityAction>): ActivityAction => ({
@@ -10,12 +10,13 @@ const action = (over: Partial<ActivityAction>): ActivityAction => ({
   action: 'pr_created',
   target: 'org/repo#1',
   url: 'https://example.test/1',
+  performed_by: 'agent',
   credential: 'github_app',
   occurred_at: '2026-06-25T00:00:00Z',
   ...over,
 })
 
-const artifact = (over: Partial<ActivityArtifact>): ActivityArtifact => ({
+const deliverable = (over: Partial<ActivityDeliverable>): ActivityDeliverable => ({
   id: 'a1',
   kind: 'pull_request',
   provider: 'github',
@@ -28,14 +29,16 @@ const artifact = (over: Partial<ActivityArtifact>): ActivityArtifact => ({
   ...over,
 })
 
-// stubByLens answers the actions list route with action rows and the artifacts
-// list route with artifact rows, recording every request. The two lenses are
+// stubByLens answers the actions list route with action rows and the deliverables
+// list route with deliverable rows, recording every request. The two lenses are
 // two routes now, so the stub branches on the path rather than on a ?view= —
 // which is exactly the property the split bought: a request can only reach the
 // rows whose shape it can render.
-function stubByLens(actionsRows: ActivityAction[], objectsRows: ActivityArtifact[] = []) {
+function stubByLens(actionsRows: ActivityAction[], objectsRows: ActivityDeliverable[] = []) {
   const fetchMock = vi.fn().mockImplementation((url: string) => {
-    const rows: (ActivityAction | ActivityArtifact)[] = String(url).includes('/artifacts/list')
+    const rows: (ActivityAction | ActivityDeliverable)[] = String(url).includes(
+      '/deliverables/list',
+    )
       ? objectsRows
       : actionsRows
     return Promise.resolve({ ok: true, ...listBody(rows) })
@@ -89,10 +92,10 @@ describe('ActivityFeed', () => {
     expect(calledBodies(fetchMock)[0]).toMatchObject({ page_size: 50 })
   })
 
-  it('toggles to the Objects lens — reads the artifacts route and renders artifact rows', async () => {
+  it('toggles to the Objects lens — reads the deliverables route and renders deliverable rows', async () => {
     const fetchMock = stubByLens(
       [action({ id: 'pr', target: 'org/repo#1' })],
-      [artifact({ id: 'art', target: 'org/repo#42', url: 'https://gh/pr42', state: 'merged' })],
+      [deliverable({ id: 'art', target: 'org/repo#42', url: 'https://gh/pr42', state: 'merged' })],
     )
 
     render(<ActivityFeed basePath="/api/teams/t1/usage" />)
@@ -100,13 +103,13 @@ describe('ActivityFeed', () => {
 
     fireEvent.click(screen.getByRole('tab', { name: /objects/i }))
 
-    // The Objects lens row (an artifact) appears, and a request hit the
-    // artifacts route.
+    // The Objects lens row (a deliverable) appears, and a request hit the
+    // deliverables route.
     expect(await screen.findByText('org/repo#42')).toBeInTheDocument()
     await waitFor(() =>
-      expect(calledUrls(fetchMock)).toContain('/api/teams/t1/usage/artifacts/list'),
+      expect(calledUrls(fetchMock)).toContain('/api/teams/t1/usage/deliverables/list'),
     )
-    // The merged artifact's state badge rides its row (terminal states included).
+    // The merged deliverable's state badge rides its row (terminal states included).
     const prLink = screen
       .getAllByRole('link')
       .find((l) => l.getAttribute('href') === 'https://gh/pr42')
@@ -117,9 +120,9 @@ describe('ActivityFeed', () => {
     // Park the Objects request so the mid-switch render is observable: the feed
     // must keep the Actions rows on screen rather than blanking to the skeleton,
     // which is what made the section's height jump on every toggle.
-    let releaseObjects: (rows: ActivityArtifact[]) => void = () => {}
+    let releaseObjects: (rows: ActivityDeliverable[]) => void = () => {}
     const fetchMock = vi.fn().mockImplementation((url: string) => {
-      if (String(url).includes('/artifacts/list')) {
+      if (String(url).includes('/deliverables/list')) {
         return new Promise((resolve) => {
           releaseObjects = (rows) => resolve({ ok: true, ...listBody(rows) })
         })
@@ -139,7 +142,7 @@ describe('ActivityFeed', () => {
     expect(screen.getByText('org/repo#1')).toBeInTheDocument()
     expect(screen.getByText(/1 action/)).toBeInTheDocument()
 
-    releaseObjects([artifact({ id: 'art', target: 'org/repo#42' })])
+    releaseObjects([deliverable({ id: 'art', target: 'org/repo#42' })])
     expect(await screen.findByText('org/repo#42')).toBeInTheDocument()
     expect(screen.queryByText('org/repo#1')).not.toBeInTheDocument()
   })
@@ -168,7 +171,7 @@ describe('ActivityFeed', () => {
       expect(calledBodies(fetchMock).some((b) => typeof b.since === 'string')).toBe(true),
     )
 
-    // The actions body never carries an artifacts-only filter — the routes
+    // The actions body never carries a deliverables-only filter — the routes
     // decode strictly, so a stray `state` would be a 400, not a no-op.
     expect(calledBodies(fetchMock).every((b) => !('state' in b) && !('kind' in b))).toBe(true)
   })

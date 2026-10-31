@@ -14,7 +14,7 @@ import (
 // test fixtures outside internal/db can seed a conversation in any state.
 // Production mints a conversation only inside a BlueprintStore door, which
 // takes a whole firing to stage; most tests only need a row to hang
-// messages / artifacts / claims off — this helper is that fixture door.
+// messages / deliverables / claims off — this helper is that fixture door.
 //
 // The column list mirrors the conversations DDL. Constraint-driven defaults:
 // type is always 'delegation'; a manual trigger gets the local sentinel

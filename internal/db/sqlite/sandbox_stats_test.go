@@ -14,7 +14,7 @@ import (
 // had a cgroup.
 func TestSandboxStatStore_SQLite_Conformance(t *testing.T) {
 	dbtest.RunSandboxStatStoreConformance(t, func(t *testing.T) db.SandboxStatStore {
-		conn := newSQLiteForArtifactTest(t)
+		conn := newSQLiteForDeliverableTest(t)
 		return sqlitestore.NewSandboxStatStore(conn)
 	})
 }

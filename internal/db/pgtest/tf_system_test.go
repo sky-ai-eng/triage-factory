@@ -226,7 +226,7 @@ func TestTfSystem_CrossOrgSystemReadSucceeds(t *testing.T) {
 // truth for tf_system's grant list — more authoritative than the pg
 // baseline's own comments, which can drift. It points the postgres
 // store's admin half at SystemDB (tf_system) and exercises the
-// enumerated executor surface — claim, heartbeat, messages/artifacts/
+// enumerated executor surface — claim, heartbeat, messages/deliverables/
 // worktrees/memory/external-actions, cross-pod signals, the
 // blueprint-run reactor, and the schema assert. Any SQLSTATE 42501 here
 // means a missing grant: add it to the tf_system section of the pg
@@ -401,17 +401,17 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		}
 	})
 
-	t.Run("artifacts", func(t *testing.T) {
+	t.Run("deliverables", func(t *testing.T) {
 		conversationID := seedStepConversation(t, h, ctx, orgID, taskID, promptID, blueprintRunID, userID)
-		art, err := stores.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
+		art, err := stores.Deliverables.UpsertSystem(ctx, orgID, domain.Deliverable{
 			ConversationID: conversationID, TeamID: teamID, Provider: "github", Scope: "https://github.com", Kind: "pull_request",
 			Target: "octo/repo#1", State: "open", DedupKey: "conformance-" + conversationID,
 		})
 		if err != nil {
-			t.Fatalf("Artifacts.UpsertSystem: %v", err)
+			t.Fatalf("Deliverables.UpsertSystem: %v", err)
 		}
-		if _, err := stores.Artifacts.ListByConversationSystem(ctx, orgID, conversationID); err != nil {
-			t.Errorf("Artifacts.ListByConversationSystem: %v", err)
+		if _, err := stores.Deliverables.ListByConversationSystem(ctx, orgID, conversationID); err != nil {
+			t.Errorf("Deliverables.ListByConversationSystem: %v", err)
 		}
 		_ = art
 	})
@@ -437,6 +437,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		if err := stores.ExternalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
 			TeamID: teamID, Provider: "jira", Scope: "https://acme.atlassian.net", Action: "status_transition", Target: "SKY-1",
 			ConversationID: conversationID, Credential: "org", ToState: "In Progress",
+			PerformedBy: domain.PerformedByAgent,
 		}); err != nil {
 			t.Errorf("ExternalActions.RecordSystem: %v", err)
 		}
@@ -508,9 +509,10 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 			t.Fatalf("Entities.FindOrCreateJiraSystem: %v", err)
 		}
 		if err := stores.ExternalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
-			TeamID: teamID, Provider: domain.ArtifactProviderJira, Scope: site, Action: domain.ActionIssueCommentPosted,
+			TeamID: teamID, Provider: domain.ProviderJira, Scope: site, Action: domain.ActionIssueCommentPosted,
 			Target: "MOVE-1", EntityID: ent.ID, URL: site + "/browse/MOVE-1", Credential: domain.CredentialJiraOrg,
-			DedupKey: "executor-rename",
+			DedupKey:    "executor-rename",
+			PerformedBy: domain.PerformedByAgent,
 		}); err != nil {
 			t.Fatalf("ExternalActions.RecordSystem: %v", err)
 		}
@@ -828,7 +830,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 }
 
 // seedStepConversation writes one step conversation on the ADMIN pool, so
-// each subtest below gets its own row to hang worktrees, artifacts, memory
+// each subtest below gets its own row to hang worktrees, deliverables, memory
 // and signals off without re-running the claim subtest's side effects.
 //
 // Admin rather than the tf_system-backed store on purpose. The grant this

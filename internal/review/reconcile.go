@@ -7,7 +7,7 @@
 //   - the agent-facing finalize gate (cmd/exec/agenthost), which reconciles every
 //     comment to the PR head and HARD-FAILS if any is outdated, before arming the
 //     review for approval;
-//   - the human-facing freshness read (internal/server reviewArtifactDetails),
+//   - the human-facing freshness read (internal/server reviewDeliverableDetails),
 //     which classifies each comment current/moved/outdated against the live
 //     head for a badge, degrading to "unknown" on any error;
 //   - the human-facing Refresh action (internal/server), which re-pins survivors
@@ -68,7 +68,7 @@ func Freshness(status ghclient.LineMapStatus) string {
 // Comment always carries a usable value (remapped or original) so a caller that
 // keeps everything can just read Outcome.Comment regardless of state.
 type Outcome struct {
-	Comment      domain.ReviewArtifactComment
+	Comment      domain.ReviewDeliverableComment
 	Status       ghclient.LineMapStatus
 	Survived     bool
 	Unpositioned bool
@@ -100,7 +100,7 @@ type LineMapFor func(anchor string) (ghclient.LineMap, error)
 // Refresh keeps survivors and drops Outdated; a freshness read maps each Outcome
 // to a badge. The per-anchor line-map is fetched once and cached, so N comments
 // sharing the finalize head cost one resolver call.
-func ReconcileToHead(comments []domain.ReviewArtifactComment, head, fallbackAnchor string, lineMapFor LineMapFor) []Outcome {
+func ReconcileToHead(comments []domain.ReviewDeliverableComment, head, fallbackAnchor string, lineMapFor LineMapFor) []Outcome {
 	type cached struct {
 		lm  ghclient.LineMap
 		err error
@@ -122,7 +122,7 @@ func ReconcileToHead(comments []domain.ReviewArtifactComment, head, fallbackAnch
 	return out
 }
 
-func reconcileOne(c domain.ReviewArtifactComment, head, fallbackAnchor string, resolve LineMapFor) Outcome {
+func reconcileOne(c domain.ReviewDeliverableComment, head, fallbackAnchor string, resolve LineMapFor) Outcome {
 	if c.Line == nil {
 		// No anchor to forward-map. Returned unchanged; the approve path already
 		// rejects an unpositioned comment, so we don't invent a verdict for it.
@@ -158,7 +158,7 @@ func reconcileOne(c domain.ReviewArtifactComment, head, fallbackAnchor string, r
 // returns the comment unchanged and survived=false. The input is taken by value
 // and Line/StartLine are reassigned to fresh pointers, so the caller's comment is
 // never mutated in place.
-func Apply(c domain.ReviewArtifactComment, res ghclient.LineMapResult, head string) (domain.ReviewArtifactComment, bool) {
+func Apply(c domain.ReviewDeliverableComment, res ghclient.LineMapResult, head string) (domain.ReviewDeliverableComment, bool) {
 	switch res.Status {
 	case ghclient.LineMapUnchanged, ghclient.LineMapMoved:
 		newLine := res.Line

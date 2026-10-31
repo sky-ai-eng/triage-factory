@@ -73,7 +73,7 @@ type ConversationIdentity struct {
 
 	// ConversationID is TRIAGE_FACTORY_CONVERSATION_ID — the conversation the
 	// subprocess is acting on behalf of. Stamped into the conversation_id
-	// column of the rows a verb writes: artifacts, conversation_worktrees,
+	// column of the rows a verb writes: deliverables, conversation_worktrees,
 	// messages.
 	ConversationID string
 
@@ -81,7 +81,7 @@ type ConversationIdentity struct {
 	// the schema level, NOT NULL enforced by CHECK for every team-visibility
 	// conversation), read straight off the conversation row GetSystem already loads — no task hop.
 	// Carried onto the local-mode ConversationInfo (TFAC-458) so the capture
-	// writers can stamp artifacts.team_id (NOT NULL per TFAC-455 F1).
+	// writers can stamp deliverables.team_id (NOT NULL per TFAC-455 F1).
 	TeamID string
 
 	// IsEventTriggered is true when the conversation was spawned by an

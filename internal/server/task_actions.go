@@ -21,7 +21,7 @@ import (
 
 // The task verb routes: claim, delegate, requeue and undo. Each earns its
 // verb by carrying an effect a field write can't express — an external Jira or
-// Linear write, a spawned run, artifact teardown, an audit reversal. The
+// Linear write, a spawned run, deliverable teardown, an audit reversal. The
 // lifecycle axis (dismissed / done / snoozed) is a field write and lives on
 // PATCH /api/tasks/{id} in tasks.go; requeue and undo live there too, next to
 // the finalizer they share.
@@ -113,7 +113,7 @@ func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 	// Taking a task onto a human's plate takes it off the agent's: stop any
 	// in-flight run. What the run left behind stays — the person claiming the
 	// task inherits its draft PRs and staged reviews rather than a cleared
-	// desk, and retires them one at a time through the artifact verbs.
+	// desk, and retires them one at a time through the deliverable verbs.
 	//
 	// Only the takeover is a boundary, and the landing is what says so. A
 	// claim from unclaimed and an idempotent re-claim move the task off
@@ -544,7 +544,7 @@ func (s *Server) handleTaskDelegate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Re-delegating is still a handoff off whatever was in flight: stop the
-	// previous conversation before the new run starts. Its artifacts carry —
+	// previous conversation before the new run starts. Its deliverables carry —
 	// the next blueprint pushes to the draft PR the last one opened instead of
 	// opening a second.
 	//
@@ -692,7 +692,7 @@ func (s *Server) stampAgentClaim(w http.ResponseWriter, r *http.Request, orgID, 
 // Every gesture that moves a task off whoever was working it comes through
 // here — dismiss, complete, claim, re-delegate, return to queue — so there is
 // one stop pass rather than one per verb. What does NOT come through here is
-// the artifact teardown: a task's draft PRs and staged reviews survive every
+// the deliverable teardown: a task's draft PRs and staged reviews survive every
 // one of those gestures except the last, and only patchClose retires them.
 //
 // cause is the lifecycle event the caller is acting on. It reaches each stopped

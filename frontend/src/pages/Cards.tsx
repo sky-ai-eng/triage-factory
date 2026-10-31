@@ -135,7 +135,7 @@ export default function Cards() {
     const hesitationMs = Date.now() - cardStart
     // Each gesture addresses its own route: the two lifecycle ones are field
     // writes on the task, and claim/delegate are verbs because of what they
-    // reach — Jira, the spawner, artifact teardown.
+    // reach — Jira, the spawner, deliverable teardown.
     const request: [string, RequestInit] =
       action === 'snooze'
         ? [

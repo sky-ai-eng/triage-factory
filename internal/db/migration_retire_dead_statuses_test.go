@@ -63,7 +63,7 @@ func TestMigrate_RetiresDeadConversationStatuses(t *testing.T) {
 	}
 
 	// A row that was parked awaiting approval lands `open` with the same
-	// backfilled age. `open` rather than a terminal because the artifact it
+	// backfilled age. `open` rather than a terminal because the deliverable it
 	// queued still exists and is still unresolved — and because
 	// `open` is the one parked state the snapshot-retention sweep enumerates,
 	// so the workspace blob these rows were pinning can finally age out.

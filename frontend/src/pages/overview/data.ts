@@ -94,7 +94,7 @@ const FAILURE_PROSE: Record<string, string> = {
 }
 
 /** A NEEDS YOU row's prose is the ask. Failure states name their failure;
- *  unresolved artifacts name what to approve; the remainder of the attention
+ *  unresolved deliverables name what to approve; the remainder of the attention
  *  set is a conversation holding a permission prompt. */
 export function askProse(conv: Conversation): string {
   if (isFailedStatus(conv.Status)) {

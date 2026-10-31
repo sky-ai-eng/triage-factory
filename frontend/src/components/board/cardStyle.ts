@@ -1,10 +1,10 @@
 // cardStyle — the semantic colour vocabulary the run station and the action
-// and artifact rows share, mapped to theme tokens so it tracks light/dark
+// and deliverable rows share, mapped to theme tokens so it tracks light/dark
 // automatically. Pure module (no JSX), so the components that read it
 // (cardChrome.tsx and the rows) keep Fast Refresh happy.
 
 // Tone is the semantic colour vocabulary. `rust` is the resting accent; the
-// rest encode a conversation's or an artifact's state.
+// rest encode a conversation's or a deliverable's state.
 export type Tone = 'rust' | 'active' | 'good' | 'attention' | 'problem' | 'neutral'
 
 export const TONE_VAR: Record<Tone, string> = {

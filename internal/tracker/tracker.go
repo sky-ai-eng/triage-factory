@@ -75,9 +75,9 @@ type Tracker struct {
 	// which is what the snapshot write that follows moves the issue's entity
 	// onto, and names a project an unreachable event is about.
 	jiraProjects db.JiraProjectStore
-	// artifacts is read to tell the comments TF posted, each recorded as a
-	// `comment` artifact keyed on its id, from the ones people wrote.
-	artifacts db.ArtifactStore
+	// deliverables is read to tell the comments TF posted, each recorded as a
+	// `comment` deliverable keyed on its id, from the ones people wrote.
+	deliverables db.DeliverableStore
 	// queue is the durable outbox, held directly rather than reached
 	// through pub because the snapshot-paired arms need the ONE write that
 	// carries both halves: the snapshot advance and the events that belong
@@ -106,8 +106,8 @@ type Tracker struct {
 // loop calls this once per active org per cycle; the resulting
 // Tracker handles all event-emission for that org and stamps every
 // published event with the tenant via publish() below.
-func New(database *sql.DB, pub Publisher, tasks db.TaskStore, entities db.EntityStore, repos db.RepositoryStore, jiraProjects db.JiraProjectStore, artifacts db.ArtifactStore, queue db.EventQueueStore, orgID string) *Tracker {
-	return &Tracker{database: database, pub: pub, tasks: tasks, entities: entities, repos: repos, jiraProjects: jiraProjects, artifacts: artifacts, queue: queue, orgID: orgID}
+func New(database *sql.DB, pub Publisher, tasks db.TaskStore, entities db.EntityStore, repos db.RepositoryStore, jiraProjects db.JiraProjectStore, deliverables db.DeliverableStore, queue db.EventQueueStore, orgID string) *Tracker {
+	return &Tracker{database: database, pub: pub, tasks: tasks, entities: entities, repos: repos, jiraProjects: jiraProjects, deliverables: deliverables, queue: queue, orgID: orgID}
 }
 
 // publish stamps evt.OrgID with the tracker's configured tenant before

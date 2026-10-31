@@ -1118,7 +1118,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	if stepIdx+1 < len(plan) {
 		nextStepName = plan[stepIdx+1].PromptName
 	}
-	mission := buildBlueprintStepWrapperPrompt(*task, step, stepPrompt, slug, len(plan), nextStepName)
+	mission := buildBlueprintStepWrapperPrompt(*task, step, stepPrompt, slug, agentproc.AgentVisibleRoot(cfg.runRoot), len(plan), nextStepName)
 
 	toast.Info(s.wsHub, orgID, fmt.Sprintf("Blueprint step %d/%d: %s (%s)",
 		stepIdx+1, len(plan), truncateToastMsg(stepPrompt.Name, 60), shortConversationID(conv.ID)))
@@ -1644,7 +1644,7 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 	// blueprint running, the worktree on disk, the snapshot in the blob store
 	// for the resume path — and the task's column where it is. A step that
 	// queued a draft PR / pending review records its verdict normally and the
-	// orchestrator advances, the artifact riding along as a sidecar.
+	// orchestrator advances, the deliverable riding along as a sidecar.
 	if stepConversation.Status == domain.StatusOpen && !stepConversation.Concluded() {
 		dispatchLog.Info("blueprint_run step paused; blueprint remains running", "blueprint_run", br.ID, "step", stepIdx, "status", stepConversation.Status)
 		return

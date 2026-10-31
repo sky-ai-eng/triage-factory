@@ -13,9 +13,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/sky-ai-eng/triage-factory/internal/artifactteardown"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
+	"github.com/sky-ai-eng/triage-factory/internal/deliverableteardown"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
@@ -970,7 +970,7 @@ type taskPatchRequest struct {
 // dismissed, the in_progress stage) and the wake time. Effects
 // that a field write can't express keep their own verb routes — claim and
 // delegate reach external systems and spawn runs, requeue and undo tear down
-// artifacts and reverse an audit row.
+// deliverables and reverse an audit row.
 //
 // Guards apply in two rounds, and the order is deliberate: the body is
 // validated first (400 for shape, 422 for a value out of range), and only a
@@ -1293,13 +1293,13 @@ func (s *Server) patchClose(w http.ResponseWriter, r *http.Request, orgID, userI
 	}
 	// A closed task is over, so this is the one disposition that retires what
 	// the work left behind: stop any in-flight run, then resolve every
-	// unresolved artifact the task holds. Stop first — the stop parks each
+	// unresolved deliverable the task holds. Stop first — the stop parks each
 	// conversation and releases its claim, so the teardown behind it operates
 	// on a settled conversation rather than racing a live agent that can still
 	// land a fresh draft PR into the window between the two.
 	cleanupCtx := context.WithoutCancel(r.Context())
 	s.stopTaskConversations(cleanupCtx, orgID, userID, id, delegate.StopCauseTaskDispositioned)
-	s.teardownTaskArtifacts(cleanupCtx, orgID, userID, id)
+	s.teardownTaskDeliverables(cleanupCtx, orgID, userID, id)
 	s.broadcastTaskStatus(orgID, id, newStatus)
 	return true
 }
@@ -1393,7 +1393,7 @@ func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
 // handleRequeue is the state-driven counterpart to handleUndo: same
 // task-back-to-queue outcome, no swipe_events row. Used by Board's
 // drag-to-Queue gesture and the AgentCard's "Return to queue" button
-// on a conversation awaiting approval of its artifact. Both of those
+// on a conversation awaiting approval of its deliverable. Both of those
 // are deliberate state changes, not "reverse my last swipe," so
 // audit-logging them as undo events would muddy the swipe-UX
 // analytics.
@@ -1458,11 +1458,11 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 //   - stop: every run still working the task is stopped and the blueprint
 //     behind it cancelled. A requeued task is unclaimed and unowned, so an
 //     agent left executing against it keeps writing messages and landing
-//     artifacts on a task whose columns say nobody owns it. The stop is what
+//     deliverables on a task whose columns say nobody owns it. The stop is what
 //     makes returning a live run to the queue safe, which is why the routes
 //     above take every status rather than guarding on one.
 //
-//     The artifacts the stopped runs left are deliberately NOT resolved: a
+//     The deliverables the stopped runs left are deliberately NOT resolved: a
 //     requeued task carries its draft PRs and staged reviews to whoever picks
 //     it up next, who pushes to the same PR rather than opening a second.
 //
@@ -1523,32 +1523,32 @@ func (s *Server) finalizeRequeue(r *http.Request, orgID, userID, taskID string, 
 	}
 }
 
-// teardownTaskArtifacts retires every unresolved artifact the task's
+// teardownTaskDeliverables retires every unresolved deliverable the task's
 // conversations hold — each draft PR closed on GitHub and flipped to closed,
 // each pending review dismissed. It is the task-END pass and has exactly one
 // caller, patchClose: a task that is done or dismissed is over, so nothing will
 // come back for its draft PR. Every other disposition — requeue, claim,
-// re-delegate — leaves the artifacts standing for whoever picks the task up.
+// re-delegate — leaves the deliverables standing for whoever picks the task up.
 //
 // This never flips conversations.status. A live conversation is stopped by
 // stopTaskConversations one step ahead of this pass, which owns that
 // transition; a terminal conversation simply stays terminal.
 //
 // The adapter is the app pool under the closing user's claims, so every audit
-// row names that user as the authorizer — the same identity the artifact verbs
-// record when they retire one artifact at a time. All failures are logged, not
+// row names that user as the authorizer — the same identity the deliverable verbs
+// record when they retire one deliverable at a time. All failures are logged, not
 // fatal: the calling handler has already flipped the task to its new state, and
-// the artifacts stay unresolved for a retry on the next close.
-func (s *Server) teardownTaskArtifacts(ctx context.Context, orgID, userID, taskID string) {
-	if err := artifactteardown.Teardown(ctx, userTeardownDeps{s: s, userID: userID}, orgID, taskID, userID); err != nil {
-		approvalDiscardLog.Error("task artifact teardown failed; artifacts left unresolved for retry", "task", taskID, "error", err)
+// the deliverables stay unresolved for a retry on the next close.
+func (s *Server) teardownTaskDeliverables(ctx context.Context, orgID, userID, taskID string) {
+	if err := deliverableteardown.Teardown(ctx, userTeardownDeps{s: s, userID: userID}, orgID, taskID, domain.PerformedByPerson, userID); err != nil {
+		approvalDiscardLog.Error("task deliverable teardown failed; deliverables left unresolved for retry", "task", taskID, "error", err)
 	}
 }
 
-// userTeardownDeps is the artifact teardown's app-pool adapter: every read and
+// userTeardownDeps is the deliverable teardown's app-pool adapter: every read and
 // write runs inside one claims-bearing transaction as the closing user, so the
 // flips and their audit rows commit together and RLS scopes them exactly as the
-// per-artifact verbs are scoped.
+// per-deliverable verbs are scoped.
 type userTeardownDeps struct {
 	s      *Server
 	userID string
@@ -1557,7 +1557,7 @@ type userTeardownDeps struct {
 // Batch binds one transaction per call. The teardown makes two — a read pass
 // for credential attribution and the write pass — which is what keeps the
 // GitHub probe between them out of a write transaction.
-func (d userTeardownDeps) Batch(ctx context.Context, orgID string, fn func(artifactteardown.Stores) error) error {
+func (d userTeardownDeps) Batch(ctx context.Context, orgID string, fn func(deliverableteardown.Stores) error) error {
 	return d.s.tx.WithTx(ctx, orgID, d.userID, func(tx db.TxStores) error {
 		return fn(txTeardownStores{tx: tx})
 	})
@@ -1572,12 +1572,13 @@ func (t txTeardownStores) ConversationsForTask(ctx context.Context, orgID, taskI
 	return t.tx.Conversations.ListForTask(ctx, orgID, taskID)
 }
 
-func (t txTeardownStores) ArtifactsForConversation(ctx context.Context, orgID, conversationID string) ([]domain.Artifact, error) {
-	return t.tx.Artifacts.ListByConversation(ctx, orgID, conversationID)
+func (t txTeardownStores) DeliverablesForConversation(ctx context.Context, orgID, conversationID string) ([]domain.Deliverable, error) {
+	out, _, err := t.tx.Deliverables.ListByConversation(ctx, orgID, conversationID, db.Unwindowed)
+	return out, err
 }
 
-func (t txTeardownStores) UpsertArtifact(ctx context.Context, orgID string, a domain.Artifact) error {
-	_, err := t.tx.Artifacts.Upsert(ctx, orgID, a)
+func (t txTeardownStores) UpsertDeliverable(ctx context.Context, orgID string, a domain.Deliverable) error {
+	_, err := t.tx.Deliverables.Upsert(ctx, orgID, a)
 	return err
 }
 

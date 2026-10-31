@@ -16,7 +16,7 @@ import (
 // Register against the SAME id (simulating a restart) bumps it to 2 while
 // refreshing role/version — never minting a second row.
 func TestInstanceStore_SQLite_RegisterMintsAndBumpsEpoch(t *testing.T) {
-	conn := newSQLiteForArtifactTest(t)
+	conn := newSQLiteForDeliverableTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 
@@ -66,7 +66,7 @@ func TestInstanceStore_SQLite_RegisterMintsAndBumpsEpoch(t *testing.T) {
 // admission snapshot, and that nil pointer fields read back as nil (not a
 // spurious zero).
 func TestInstanceStore_SQLite_HeartbeatRoundTripsCapacitySnapshot(t *testing.T) {
-	conn := newSQLiteForArtifactTest(t)
+	conn := newSQLiteForDeliverableTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 
@@ -192,7 +192,7 @@ func TestInstanceStore_SQLite_HeartbeatRoundTripsCapacitySnapshot(t *testing.T) 
 // split-identity fence: a heartbeat carrying a STALE boot_epoch
 // (superseded by a later Register) matches no row.
 func TestInstanceStore_SQLite_HeartbeatFencedOnBootEpoch(t *testing.T) {
-	conn := newSQLiteForArtifactTest(t)
+	conn := newSQLiteForDeliverableTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 
@@ -225,7 +225,7 @@ func TestInstanceStore_SQLite_HeartbeatFencedOnBootEpoch(t *testing.T) {
 // (the zero value) alongside matched=false, never leak the current row's
 // real value.
 func TestInstanceStore_SQLite_HeartbeatFencedOnBootEpoch_DoesNotLeakNewerBootsDraining(t *testing.T) {
-	conn := newSQLiteForArtifactTest(t)
+	conn := newSQLiteForDeliverableTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 
@@ -260,7 +260,7 @@ func TestInstanceStore_SQLite_HeartbeatFencedOnBootEpoch_DoesNotLeakNewerBootsDr
 // flag and reports whether the id was known, and List surfaces every
 // registered instance (trivially one, at N=1).
 func TestInstanceStore_SQLite_SetDrainingAndList(t *testing.T) {
-	conn := newSQLiteForArtifactTest(t)
+	conn := newSQLiteForDeliverableTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 
@@ -297,7 +297,7 @@ func TestInstanceStore_SQLite_SetDrainingAndList(t *testing.T) {
 // TestInstanceStore_SQLite_GetUnknownIDReturnsNil pins the "no row" contract:
 // Get returns (nil, nil) rather than an error for an id never registered.
 func TestInstanceStore_SQLite_GetUnknownIDReturnsNil(t *testing.T) {
-	conn := newSQLiteForArtifactTest(t)
+	conn := newSQLiteForDeliverableTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 
@@ -313,7 +313,7 @@ func TestInstanceStore_SQLite_GetUnknownIDReturnsNil(t *testing.T) {
 // TestInstanceStore_SQLite_GCConformance runs the shared registry GC suite.
 func TestInstanceStore_SQLite_GCConformance(t *testing.T) {
 	dbtest.RunInstanceGCConformance(t, func(t *testing.T) dbtest.InstanceGCFixture {
-		conn := newSQLiteForArtifactTest(t)
+		conn := newSQLiteForDeliverableTest(t)
 		stores := sqlitestore.New(conn)
 		return dbtest.InstanceGCFixture{
 			Store: stores.Instances,
@@ -331,6 +331,6 @@ func TestInstanceStore_SQLite_GCConformance(t *testing.T) {
 // TestInstanceStore_SQLite_DrainConformance runs the shared drain suite.
 func TestInstanceStore_SQLite_DrainConformance(t *testing.T) {
 	dbtest.RunInstanceDrainConformance(t, func(t *testing.T) db.InstanceStore {
-		return sqlitestore.New(newSQLiteForArtifactTest(t)).Instances
+		return sqlitestore.New(newSQLiteForDeliverableTest(t)).Instances
 	})
 }

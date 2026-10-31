@@ -148,7 +148,7 @@ func endedFollowUpBlock(conv *domain.Conversation) string {
 // no coherent workspace to rehydrate. It is also an ended conversation, which
 // the rung above this one refuses first and for a reason a person can read.
 // Runs never park for approval; a concluded run that left an unresolved
-// artifact (draft PR / ready review) resumes through this same path plus the
+// deliverable (draft PR / ready review) resumes through this same path plus the
 // feedback ledger, not through a parked status.
 func resumableState(status string) bool {
 	return status == domain.StatusOpen
@@ -479,7 +479,7 @@ func (s *Spawner) recordSteeredMessage(ctx context.Context, orgID, conversationI
 // its own message is there: an undelivered row reads a parked conversation as
 // queued.
 //
-// The out-of-band <system-note> prepends (staged injections + the artifact
+// The out-of-band <system-note> prepends (staged injections + the deliverable
 // ledger) are deliberately NOT composed here. Delivery belongs to whichever
 // executor claims the row, and composing the prepend now would destructively
 // flush the staged-injection queue at enqueue time, losing anything staged in
@@ -865,16 +865,16 @@ func (s *Spawner) blueprintCalledOffNow(ctx context.Context, orgID string, conv 
 
 // resumeSystemPrepends assembles the out-of-band <system-note> blocks prepended
 // ahead of a resuming run's user message, in their final read order
-// [staged injections][artifact ledger]:
+// [staged injections][deliverable ledger]:
 //
 //   - the durable staged-injection queue flush (TFAC-501) — every producer-
 //     agnostic injection staged while the run wasn't running (e.g. the new-commits
 //     freshness injection), destructively flushed (delivered exactly once); and
-//   - the artifact-change ledger (TFAC-493) — every artifact this run produced
-//     that a human resolved while it wasn't running, derived from the artifact
+//   - the deliverable-change ledger (TFAC-493) — every deliverable this run produced
+//     that a human resolved while it wasn't running, derived from the deliverable
 //     rows (no ledger table).
 //
-// The artifact ledger is composed first and the staged-injection flush second, so
+// The deliverable ledger is composed first and the staged-injection flush second, so
 // the injection block lands FIRST in the returned prefix (each step writes to the
 // front). Both are out-of-band <system-note> blocks, so their order relative to
 // each other is cosmetic. Returns "" (prepend nothing) when neither has anything
@@ -882,7 +882,7 @@ func (s *Spawner) blueprintCalledOffNow(ctx context.Context, orgID string, conv 
 // never blocking the resume.
 func (s *Spawner) resumeSystemPrepends(ctx context.Context, orgID string, conv *domain.Conversation) string {
 	var prefix string
-	if block := s.artifactLedgerForResume(ctx, orgID, conv); block != "" {
+	if block := s.deliverableLedgerForResume(ctx, orgID, conv); block != "" {
 		prefix = block + "\n\n"
 	}
 	if block := s.stagedInjectionsForResume(ctx, orgID, conv.ID); block != "" {

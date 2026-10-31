@@ -26,7 +26,7 @@ func TestMoveThreadKey(t *testing.T) {
 	}
 }
 
-func TestMoveArtifactKey(t *testing.T) {
+func TestMoveDeliverableKey(t *testing.T) {
 	cases := []struct {
 		key, want string
 		ok        bool
@@ -38,9 +38,9 @@ func TestMoveArtifactKey(t *testing.T) {
 		{"slack:message", "slack:message", false},
 	}
 	for _, tc := range cases {
-		got, ok := MoveArtifactKey(tc.key, "G01", "C01")
+		got, ok := MoveDeliverableKey(tc.key, "G01", "C01")
 		if got != tc.want || ok != tc.ok {
-			t.Errorf("MoveArtifactKey(%q) = %q, %v; want %q, %v", tc.key, got, ok, tc.want, tc.ok)
+			t.Errorf("MoveDeliverableKey(%q) = %q, %v; want %q, %v", tc.key, got, ok, tc.want, tc.ok)
 		}
 	}
 }

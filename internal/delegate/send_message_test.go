@@ -307,7 +307,7 @@ func TestInjectionWillFlush(t *testing.T) {
 // TestSendMessage_CompletedAbortIsResumable: a completed+abort run passes the
 // steerable gate and routes to a resume (the agent's voluntary stop can be
 // picked back up). This is also the path a terminal run with an unresolved
-// artifact resumes through — approval is never a parked status.
+// deliverable resumes through — approval is never a parked status.
 func TestSendMessage_CompletedAbortIsResumable(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-ab", "sess-ab", "/tmp/does-not-exist-ab")

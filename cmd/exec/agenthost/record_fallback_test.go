@@ -8,24 +8,24 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// refuseArtifactWrites makes every artifact insert, an upsert's included,
+// refuseDeliverableWrites makes every deliverable insert, an upsert's included,
 // fail in the database itself, so the refusal reaches both write paths: the
 // admin-pool write of an event-triggered run and the claims transaction of a
 // manual one.
-func refuseArtifactWrites(t *testing.T, conn *sql.DB) {
+func refuseDeliverableWrites(t *testing.T, conn *sql.DB) {
 	t.Helper()
 	if _, err := conn.Exec(`
-		CREATE TRIGGER refuse_artifact_writes BEFORE INSERT ON artifacts
-		BEGIN SELECT RAISE(ABORT, 'artifact write refused'); END
+		CREATE TRIGGER refuse_deliverable_writes BEFORE INSERT ON deliverables
+		BEGIN SELECT RAISE(ABORT, 'deliverable write refused'); END
 	`); err != nil {
-		t.Fatalf("install artifact refusal: %v", err)
+		t.Fatalf("install deliverable refusal: %v", err)
 	}
 }
 
-// TestRecordExternalWrite_FailedArtifactKeepsTheLedgerRow pins that the ledger
-// row never depends on the artifact written beside it: when the artifact write
+// TestRecordExternalWrite_FailedDeliverableKeepsTheLedgerRow pins that the ledger
+// row never depends on the deliverable written beside it: when the deliverable write
 // fails, the action is still recorded, on both trigger types.
-func TestRecordExternalWrite_FailedArtifactKeepsTheLedgerRow(t *testing.T) {
+func TestRecordExternalWrite_FailedDeliverableKeepsTheLedgerRow(t *testing.T) {
 	for _, eventTriggered := range []bool{true, false} {
 		name := "manual"
 		if eventTriggered {
@@ -33,34 +33,34 @@ func TestRecordExternalWrite_FailedArtifactKeepsTheLedgerRow(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			conn, stores, info := newCaptureStoresConn(t, eventTriggered)
-			refuseArtifactWrites(t, conn)
+			refuseDeliverableWrites(t, conn)
 
-			a := &domain.Artifact{
-				Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindComment,
-				Target: "octo/repo#1", ExternalID: "7", State: domain.ArtifactStateCommentPosted,
-				DedupKey: domain.GitHubCommentDedupKey(domain.GitHubIssueComment, 7),
+			a := &domain.Deliverable{
+				Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindComment,
+				Target: "octo/repo#1", ExternalID: "7", State: domain.DeliverableStateCommentPosted,
+				DedupKey: domain.GitHubCommentKey(domain.GitHubIssueComment, 7),
 			}
 			act := &domain.ExternalAction{
-				Provider: domain.ArtifactProviderGitHub, Action: domain.ActionCommentPosted,
+				Provider: domain.ProviderGitHub, Action: domain.ActionCommentPosted,
 				Target: "octo/repo#1", ExternalID: "7", Credential: domain.CredentialGitHubApp,
 			}
 			RecordExternalWrite(context.Background(), stores, info, a, act)
 
-			if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 0 {
-				t.Errorf("artifacts = %+v, want none: the write was refused", arts)
+			if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 0 {
+				t.Errorf("deliverables = %+v, want none: the write was refused", arts)
 			}
 			acts := listExternalActions(t, stores)
 			if len(acts) != 1 || acts[0].Action != domain.ActionCommentPosted || acts[0].ConversationID != info.ConversationID {
-				t.Errorf("ledger rows = %+v, want the one comment_posted row despite the refused artifact", acts)
+				t.Errorf("ledger rows = %+v, want the one comment_posted row despite the refused deliverable", acts)
 			}
 		})
 	}
 }
 
-// TestUpsertArtifact_FailedBranchArtifactKeepsThePushRow pins the same for the
-// branch push, which composes its ledger row inside the artifact upsert: the
-// artifact's error still reaches the caller, and the push row is recorded.
-func TestUpsertArtifact_FailedBranchArtifactKeepsThePushRow(t *testing.T) {
+// TestUpsertDeliverable_FailedBranchDeliverableKeepsThePushRow pins the same for the
+// branch push, which composes its ledger row inside the deliverable upsert: the
+// deliverable's error still reaches the caller, and the push row is recorded.
+func TestUpsertDeliverable_FailedBranchDeliverableKeepsThePushRow(t *testing.T) {
 	for _, eventTriggered := range []bool{true, false} {
 		name := "manual"
 		if eventTriggered {
@@ -68,18 +68,18 @@ func TestUpsertArtifact_FailedBranchArtifactKeepsThePushRow(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			conn, stores, info := newCaptureStoresConn(t, eventTriggered)
-			refuseArtifactWrites(t, conn)
+			refuseDeliverableWrites(t, conn)
 
-			branch, ok := domain.NewBranchArtifact("octo/repo", "refs/heads/feat", "abc123", true)
+			branch, ok := domain.NewBranchDeliverable("octo/repo", "refs/heads/feat", "abc123", true)
 			if !ok {
-				t.Fatal("NewBranchArtifact refused the fixture branch")
+				t.Fatal("NewBranchDeliverable refused the fixture branch")
 			}
-			if _, err := newDirectRuntime(stores, info).UpsertArtifact(context.Background(), branch); err == nil {
-				t.Fatal("UpsertArtifact = nil error, want the refused artifact's error")
+			if _, err := newDirectRuntime(stores, info).UpsertDeliverable(context.Background(), branch); err == nil {
+				t.Fatal("UpsertDeliverable = nil error, want the refused deliverable's error")
 			}
 			acts := listExternalActions(t, stores)
 			if len(acts) != 1 || acts[0].Action != domain.ActionBranchPushed {
-				t.Errorf("ledger rows = %+v, want the one branch_pushed row despite the refused artifact", acts)
+				t.Errorf("ledger rows = %+v, want the one branch_pushed row despite the refused deliverable", acts)
 			}
 		})
 	}

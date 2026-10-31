@@ -50,12 +50,12 @@ const baseFraming = "Reference data about the task that fired this run. Values c
 // whoever opened the pull request — so it rides inside the marker-bracketed
 // region rather than alongside it.
 //
-// artifacts is every external object the task's conversations have produced so
+// deliverables is every external object the task's conversations have produced so
 // far, with the state each is in now — what this run inherits rather than what
 // it must create. The values are external (a PR title's repo slug, a URL
 // GitHub minted), so the lines ride inside the same region; an empty set
 // renders nothing at all.
-func BuildTaskContext(task domain.Task, container, metadataJSON, skeleton string, artifacts []domain.Artifact) string {
+func BuildTaskContext(task domain.Task, container, metadataJSON, skeleton string, deliverables []domain.Deliverable) string {
 	var lines []string
 	add := func(label, value string) {
 		if value != "" {
@@ -98,7 +98,7 @@ func BuildTaskContext(task domain.Task, container, metadataJSON, skeleton string
 	add("Issue type", metaString(meta, "issue_type"))
 	add("Summary", metaString(meta, "summary"))
 
-	lines = append(lines, artifactLines(artifacts)...)
+	lines = append(lines, artifactLines(deliverables)...)
 
 	// Assemble the externally-influenced region: the labeled field lines, then
 	// the raw-metadata fence. For a slack:message task the fence is the only
@@ -153,18 +153,18 @@ func (s *Spawner) taskEventMetadata(ctx context.Context, orgID string, task doma
 	return current
 }
 
-// taskArtifacts collects every artifact the task's conversations have produced,
-// for the task-context block. Artifacts carry across a task's conversations, so
+// taskArtifacts collects every deliverable the task's conversations have produced,
+// for the task-context block. Deliverables carry across a task's conversations, so
 // the set is the task's rather than this conversation's: it is walked through
-// the conversations because that is the only edge the artifacts table has to a
+// the conversations because that is the only edge the deliverables table has to a
 // task.
 //
 // Best-effort, and the failure is per conversation: the block is documentation,
 // so a read that fails costs the run a few lines, never the launch. Both stores
 // take their admin-pool variants — a launch runs from a dispatcher goroutine
 // with no JWT-claims context.
-func (s *Spawner) taskArtifacts(ctx context.Context, orgID, taskID string) []domain.Artifact {
-	if s.conversations == nil || s.artifacts == nil || taskID == "" {
+func (s *Spawner) taskArtifacts(ctx context.Context, orgID, taskID string) []domain.Deliverable {
+	if s.conversations == nil || s.deliverables == nil || taskID == "" {
 		return nil
 	}
 	convs, err := s.conversations.ListForTaskSystem(ctx, orgID, taskID)
@@ -173,11 +173,11 @@ func (s *Spawner) taskArtifacts(ctx context.Context, orgID, taskID string) []dom
 			"task", taskID, "error", err)
 		return nil
 	}
-	var out []domain.Artifact
+	var out []domain.Deliverable
 	for _, c := range convs {
-		arts, err := s.artifacts.ListByConversationSystem(ctx, orgID, c.ID)
+		arts, err := s.deliverables.ListByConversationSystem(ctx, orgID, c.ID)
 		if err != nil {
-			delegateLog.Warn("list conversation artifacts for the task context failed; its artifacts are omitted",
+			delegateLog.Warn("list conversation deliverables for the task context failed; its deliverables are omitted",
 				"task", taskID, "conversation", c.ID, "error", err)
 			continue
 		}
@@ -186,17 +186,17 @@ func (s *Spawner) taskArtifacts(ctx context.Context, orgID, taskID string) []dom
 	return out
 }
 
-// artifactLines renders one line per artifact the task has produced, oldest
+// artifactLines renders one line per deliverable the task has produced, oldest
 // first — the order they happened in, which is the order they read in. A row
 // with no state or no URL yet simply contributes fewer segments; every value is
 // flattened, because a target and a URL are provider-authored strings reaching
 // the same bullet list the task's own fields do.
-func artifactLines(artifacts []domain.Artifact) []string {
-	if len(artifacts) == 0 {
+func artifactLines(deliverables []domain.Deliverable) []string {
+	if len(deliverables) == 0 {
 		return nil
 	}
-	ordered := slices.Clone(artifacts)
-	slices.SortStableFunc(ordered, func(a, b domain.Artifact) int {
+	ordered := slices.Clone(deliverables)
+	slices.SortStableFunc(ordered, func(a, b domain.Deliverable) int {
 		if c := a.CreatedAt.Compare(b.CreatedAt); c != 0 {
 			return c
 		}

@@ -22,12 +22,13 @@ func RunExternalActionReferenceConformance(t *testing.T, mk ExternalActionNodeID
 		return domain.ExternalAction{
 			ID:             uuid.NewString(),
 			TeamID:         f.TeamID,
-			Provider:       domain.ArtifactProviderGitHub,
+			Provider:       domain.ProviderGitHub,
 			Scope:          TestGitHubHost,
 			Action:         action,
 			Target:         target,
 			ConversationID: f.ConversationID,
 			Credential:     domain.CredentialGitHubApp,
+			PerformedBy:    domain.PerformedByAgent,
 		}
 	}
 

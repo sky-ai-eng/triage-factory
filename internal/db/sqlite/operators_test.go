@@ -13,7 +13,7 @@ import (
 // No login identities in local mode, so no seeder.
 func TestOperatorStore_SQLite_Conformance(t *testing.T) {
 	dbtest.RunOperatorStoreConformance(t, func(t *testing.T) (db.OperatorStore, *dbtest.LoginIdentitySeeder) {
-		conn := newSQLiteForArtifactTest(t)
+		conn := newSQLiteForDeliverableTest(t)
 		return sqlitestore.New(conn).Operators, nil
 	})
 }
@@ -22,7 +22,7 @@ func TestOperatorStore_SQLite_Conformance(t *testing.T) {
 // binds a grant, but a bound row reads the way it does in Postgres, matching
 // its principal by id and nobody else.
 func TestOperatorStore_SQLite_BoundGrantMatchesItsPrincipal(t *testing.T) {
-	conn := newSQLiteForArtifactTest(t)
+	conn := newSQLiteForDeliverableTest(t)
 	store := sqlitestore.New(conn).Operators
 	ctx := context.Background()
 

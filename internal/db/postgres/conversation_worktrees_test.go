@@ -114,7 +114,7 @@ func TestConversationWorktreeStore_Postgres_InsertRingsCredDoorbell(t *testing.T
 	h.Reset(t)
 	ctx := context.Background()
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
-	conversationID := seedPgArtifactConversation(t, h, orgID, teamID, userID)
+	conversationID := seedPgDeliverableConversation(t, h, orgID, teamID, userID)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
 	// The worktree store references a registry row and never creates one (the
@@ -177,7 +177,7 @@ func TestConversationWorktreeStore_Postgres_RolledBackInsertRingsNoDoorbell(t *t
 	h.Reset(t)
 	ctx := context.Background()
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
-	conversationID := seedPgArtifactConversation(t, h, orgID, teamID, userID)
+	conversationID := seedPgDeliverableConversation(t, h, orgID, teamID, userID)
 
 	otherRepoID := pgtest.SeedRepository(t, h, orgID, "sky-ai-eng", "other-repo")
 

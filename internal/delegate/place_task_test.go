@@ -17,7 +17,7 @@ import (
 // announcement at mint and nothing afterwards. These tests walk the paths a
 // run passes through — a park, a step advance, a wake — to show none of them
 // touches the column, and pin the mint itself at the one production call
-// site. (The fourth path, a completion holding an unresolved artifact, is
+// site. (The fourth path, a completion holding an unresolved deliverable, is
 // pinned next to the rest of terminateBlueprint in blueprint_advance_test.go;
 // the announcement's own guards are pinned against the Jira mirror they gate,
 // in jira_mirror_test.go.)

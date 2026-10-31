@@ -358,7 +358,7 @@ type Conversation struct {
 	// claim's phase coalesced over it, so a hydrated DTO may carry a phase
 	// name here. The vocabulary and its classifiers live in conversation_status.go;
 	// don't restate the names anywhere else. Approval is a derived view over
-	// the unresolved-artifact set, never a stored status.
+	// the unresolved-deliverable set, never a stored status.
 	Status    string
 	Model     string
 	StartedAt time.Time
@@ -524,7 +524,7 @@ type Conversation struct {
 	// multi mode; the mint denormalizes it from the parent task at insert, so
 	// it carries the team without a task hop at read time).
 	// Surfaced onto ConversationInfo (TFAC-458) so the capture writers can stamp
-	// artifacts.team_id (NOT NULL, per TFAC-455 F1) directly off the conversation.
+	// deliverables.team_id (NOT NULL, per TFAC-455 F1) directly off the conversation.
 	// Populated by the Get and ClaimNextConversation scan paths; empty on rows
 	// hydrated by projections that don't select it.
 	TeamID string
@@ -697,7 +697,7 @@ type Message struct {
 	// Subtype discriminates a row that deviates from ordinary role
 	// behavior. Blank is normal — an assistant turn, a tool result, a
 	// person's message — and every discriminating value is named: the
-	// InjectionSubtype constants, MessageSubtypeStopNote, the artifact
+	// InjectionSubtype constants, MessageSubtypeStopNote, the deliverable
 	// system_note.
 	Subtype             string
 	ToolCalls           []ToolCall

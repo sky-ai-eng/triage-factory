@@ -726,7 +726,7 @@ func porcelainWriteCases() []wireCase {
 	return []wireCase{
 		// The pull request itself. Opening one is refused rather than
 		// classified: the exec verb is the one door, and a pull request opened
-		// here would leave an artifact with no draft flag, title, or body.
+		// here would leave a deliverable with no draft flag, title, or body.
 		{
 			name: "pr create",
 			args: ghArgs("pr", "create", "--head", "feature", "--base", "main", "--title", "T", "--body", "B"),

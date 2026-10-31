@@ -8,9 +8,9 @@ package sqlite
 // surfacing an unexported helper to an external test package.
 var ParseDBDatetimeForTest = parseDBDatetime
 
-// PRCreatedWithoutArtifactQueryForTest exposes the PR backstop read's
+// PRCreatedWithoutDeliverableQueryForTest exposes the PR backstop read's
 // statement so the query-plan test can EXPLAIN exactly what the store runs.
-var PRCreatedWithoutArtifactQueryForTest = prCreatedWithoutArtifactQuery
+var PRCreatedWithoutDeliverableQueryForTest = prCreatedWithoutDeliverableQuery
 
 // PresentExternalIDsQueryForTest exposes the review-id lookup's statement up
 // to its IN list so the query-plan test can EXPLAIN what the store runs.

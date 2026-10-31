@@ -183,7 +183,7 @@ func identityKey(r RepoRef) (repoIdentityKey, bool) {
 }
 
 // RewriteRepoSlugPrefix rewrites a leading repository slug in a slug-prefixed
-// identifier — an entity's source_id ("owner/repo#18"), an artifact target
+// identifier — an entity's source_id ("owner/repo#18"), a deliverable target
 // ("owner/repo" or "owner/repo#18"). Reports false when s does not start with
 // oldSlug at a boundary, in which case s is returned unchanged.
 //

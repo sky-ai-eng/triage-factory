@@ -229,12 +229,12 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// the outer tx — see Create's pool-routing comment for
 		// why that's the intended semantics.
 		Conversations: newConversationStore(tx, s.admin),
-		// Artifacts: app-side write routes through the tx so writes
-		// compose with the surrounding claims tx (artifacts_* RLS scopes
+		// Deliverables: app-side write routes through the tx so writes
+		// compose with the surrounding claims tx (deliverables_* RLS scopes
 		// by team_id like runs); admin half stays pinned to s.admin so
 		// UpsertSystem inside WithTx routes outside the tx and commits
 		// autonomously, the same shape Conversations / ConversationWorktrees use.
-		Artifacts:      newArtifactStore(tx, s.admin),
+		Deliverables:   newDeliverableStore(tx, s.admin),
 		Entities:       newEntityStore(tx, tx),
 		Repos:          newRepositoryStore(tx, tx),
 		PendingFirings: newPendingFiringsStore(tx, nil),
@@ -341,7 +341,7 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// commits or rolls back atomically with the action it records (the server
 		// approval flips, manual bot runs); admin half stays pinned to s.admin so
 		// RecordSystem + ListByOrgSystem inside WithTx route outside the tx — same
-		// autonomous-commit shape Artifacts / Events use for their admin halves.
+		// autonomous-commit shape Deliverables / Events use for their admin halves.
 		ExternalActions: newExternalActionStore(tx, s.admin),
 		// Spend: app half is the claims-set tx (ListSpend / SpendByCategory run
 		// under the surrounding claims, so the security_invoker view's base-table

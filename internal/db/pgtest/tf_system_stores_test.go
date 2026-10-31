@@ -28,7 +28,7 @@ import (
 // whose suite runs only superuser-bound has no backstop, so a new
 // executor-path store should be added here in the same change that introduces
 // it. The remaining executor surface — the claim CAS and requeue, the fleet
-// registry, cross-pod signals, worktrees, memory, artifacts — is already
+// registry, cross-pod signals, worktrees, memory, deliverables — is already
 // exercised role-bound by TestTfSystem_ExecutorSurfaceConformance in
 // tf_system_test.go, which walks those call sites directly rather than through
 // a shared suite (they have none).
