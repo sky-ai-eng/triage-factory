@@ -1044,6 +1044,7 @@ The tracker stores these fields for each PR and diffs them between cycles:
 - `body_mentions[]` — the users (`login`) and teams (`org/slug`) the body @-mentions, in lower case; see [Mentions](#mentions). `null` on a snapshot stored before it existed
 - `comment_count` — the number of conversation comments
 - `comment_marker` — the newest conversation comment TF has read, `{id, created_at}`; see [Comments](#comments)
+- `change_seen_at` — when TF last saw the pull request change (its head or `updated_at` moved), on TF's clock; for 5 minutes after it, the pull request is refreshed every poll. Also written when TF first sees a pull request opened since it last listed the repository, and when a closed pull request reopens. Empty on a snapshot stored before the field existed and on one seeded quietly, and never diffed
 
 `author`, each review's `author`, `merged_by` and `closed_by` are logins as GitHub's REST API spells them: a bot is `<slug>[bot]` (`dependabot[bot]`), the form event metadata carries as `author` and `reviewer`. GraphQL returns a bot's login without the suffix; the snapshot builder adds it. Beside every login the snapshot records GitHub's id for the account (`author_id`, `merged_by_id`, `closed_by_id`), which a rename does not change. A snapshot stored before ids were recorded has none, and neither does an actor GitHub returns without one (a deleted account).
 

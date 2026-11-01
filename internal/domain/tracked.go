@@ -99,6 +99,16 @@ type PRSnapshot struct {
 	ClosedBy   string `json:"closed_by,omitempty"`
 	ClosedByID string `json:"closed_by_id,omitempty"`
 
+	// ChangeSeenAt is when TF last saw the pull request change (its head or
+	// UpdatedAt moved), RFC 3339 in UTC. It is TF's clock, not GitHub's: a
+	// push of an old commit carries an old commit date. GitHub never sends
+	// it; only the tracker writes it, and for five minutes after it the
+	// poll refreshes the pull request every cycle, because check runs
+	// appear after the change that starts them. Empty on a snapshot stored
+	// before the field existed and on one seeded quietly, which both count
+	// as outside the five minutes.
+	ChangeSeenAt string `json:"change_seen_at,omitempty"`
+
 	// Timeline carries a tail of PR-side events (label add/remove, review
 	// request, ready-for-review) with their per-action createdAt
 	// timestamps, pulled from GraphQL timelineItems on the same PR query

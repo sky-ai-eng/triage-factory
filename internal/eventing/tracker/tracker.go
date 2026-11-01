@@ -337,6 +337,9 @@ func (t *Tracker) commitRefresh(ctx context.Context, orgID, entityID string, pre
 func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghclient.Client, self domain.GitHubAccount, repos []string, resolver ReviewerResolver) (int, string, error) {
 	orgID := t.orgID
 	startedAt := time.Now()
+	// changeSeenAt is the stamp this cycle writes on a pull request it sees
+	// change (PRSnapshot.ChangeSeenAt), on TF's clock.
+	changeSeenAt := startedAt.UTC().Format(time.RFC3339)
 	// Phase 1: Discovery — find new PRs and register as entities.
 	// quietRepos is the set of registry row ids whose open-PR listing
 	// returned 304 (unchanged) this cycle; their tracked entities can keep
@@ -445,8 +448,13 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 			var backfilled []domain.Event
 			// A pull request opened since TF last listed its repository: the
 			// identities its body mentions were mentioned just now, so they
-			// emit. Any other pull request's body is a baseline.
+			// emit, and its opening is a change that starts CI, so it is
+			// stamped. Any other pull request is a baseline: its state
+			// predates the tracking, like a quiet seed's, and stamping every
+			// one a repository's first listing returns would refresh them all
+			// every cycle for changeRefreshWindow.
 			if !terminal && openedSince(snap, lastListed[d.repositoryID]) {
+				snap.ChangeSeenAt = changeSeenAt
 				backfilled = append(backfilled, openedPRMentions(entity.ID, entity.RepositoryID, snap, resolver)...)
 			}
 			if !terminal && !self.Is(snap.Author, snap.AuthorID) {
@@ -517,8 +525,10 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 			// one fact: an entity active with its old merged snapshot stored
 			// is exactly what a terminating close reads as "close me", and
 			// this cycle's Phase 3 already re-diffs from the snapshot written
-			// here, so no transition is lost by writing it early.
+			// here, so no transition is lost by writing it early. A reopen
+			// starts CI, so the snapshot is stamped as a change.
 			if !prSnapshotTerminal(snap) && entity.State == "closed" {
+				snap.ChangeSeenAt = changeSeenAt
 				snapJSON, _ := json.Marshal(snap)
 				if reactivated, err := t.entities.ReactivateWithSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
 					trackerLog.Error("reactivate entity failed", "source_id", sid, "error", err)
@@ -665,6 +675,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		} else {
 			age = 24 * time.Hour
 		}
+		sinceChange := sinceChangeSeen(snap, time.Now())
 		// Gate against discovery's fresh snapshot when we have one. A repo
 		// that 304'd this cycle has no fresh snapshot, but a 304 means its
 		// open-PR listing (including each PR's updated_at + head sha) is
@@ -687,7 +698,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		if !ok && quietRepos[e.RepositoryID] {
 			fresh, ok = snap, true
 		}
-		if ok && shouldSkipRefresh(snap, fresh, age) {
+		if ok && shouldSkipRefresh(snap, fresh, age, sinceChange) {
 			// Skipped entities won't be diffed, so reconcile stale
 			// per-reviewer review_requested tasks here: for each active
 			// review_requested task whose keyed reviewer is no longer in the
@@ -905,6 +916,15 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		// written and the winning writer's next cycle re-diffs and emits
 		// the transition, so suppression loses nothing. A refresh that
 		// observed no change commits nothing but its poll stamp.
+		//
+		// The change stamp moves only when this refresh saw the head or
+		// updatedAt move; otherwise the stored one is carried, so a refresh
+		// the change window forced on an unchanged pull request stays one
+		// that observed no change.
+		newSnap.ChangeSeenAt = item.snap.ChangeSeenAt
+		if newSnap.HeadSHA != item.snap.HeadSHA || newSnap.UpdatedAt != item.snap.UpdatedAt {
+			newSnap.ChangeSeenAt = changeSeenAt
+		}
 		prevJSON, _ := json.Marshal(item.snap)
 		snapJSON, _ := json.Marshal(newSnap)
 		ok, enqueued, err := t.commitRefresh(ctx, orgID, item.entity.ID, string(prevJSON), string(snapJSON), item.entity.PollSeq, events)
