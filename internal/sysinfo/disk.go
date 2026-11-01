@@ -1,4 +1,4 @@
-package host
+package sysinfo
 
 // DiskAvailableMB returns the space, in MiB, an unprivileged process can
 // still write on the fullest of the filesystems holding paths, or Unknown. A

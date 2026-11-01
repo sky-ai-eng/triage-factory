@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/host"
+	"github.com/sky-ai-eng/triage-factory/internal/sysinfo"
 )
 
 // TestSuspendCheckingTransport_DropsIdleAfterSuspend pins the request-time
@@ -20,7 +20,7 @@ import (
 func TestSuspendCheckingTransport_DropsIdleAfterSuspend(t *testing.T) {
 	var suspended atomic.Int64
 	suspended.Store(int64(time.Hour))
-	host.SetSuspendSourceForTest(t, func() (time.Duration, bool) {
+	sysinfo.SetSuspendSourceForTest(t, func() (time.Duration, bool) {
 		return time.Duration(suspended.Load()), true
 	})
 
@@ -77,7 +77,7 @@ func TestSuspendCheckingTransport_DropsIdleAfterSuspend(t *testing.T) {
 func TestSuspendCheckingTransport_HTTP2BusyConnectionNotReused(t *testing.T) {
 	var suspended atomic.Int64
 	suspended.Store(int64(time.Hour))
-	host.SetSuspendSourceForTest(t, func() (time.Duration, bool) {
+	sysinfo.SetSuspendSourceForTest(t, func() (time.Duration, bool) {
 		return time.Duration(suspended.Load()), true
 	})
 
@@ -161,7 +161,7 @@ func TestSuspendCheckingTransport_HTTP2BusyConnectionNotReused(t *testing.T) {
 // TestDropIdleAfterSuspend_PassesThroughWhenUnsupported pins that a platform
 // with no suspend reading gets its transport back unwrapped.
 func TestDropIdleAfterSuspend_PassesThroughWhenUnsupported(t *testing.T) {
-	host.SetSuspendSourceForTest(t, func() (time.Duration, bool) { return 0, false })
+	sysinfo.SetSuspendSourceForTest(t, func() (time.Duration, bool) { return 0, false })
 	base := &http.Transport{}
 	if got := freshPoolAfterSuspend(base); got != http.RoundTripper(base) {
 		t.Errorf("freshPoolAfterSuspend wrapped the transport on a platform that cannot report suspended time: %T", got)

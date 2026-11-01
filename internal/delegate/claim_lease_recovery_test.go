@@ -15,9 +15,9 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/host"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/sysinfo"
 )
 
 // recordingQueue wraps the real conversation queue and counts the two lease
@@ -191,7 +191,7 @@ func (f *suspendFixture) assertRecoveries(t *testing.T, want map[string]int64) {
 func newSuspendFixture(t *testing.T) *suspendFixture {
 	t.Helper()
 	f := newClaimLeaseFixture(t)
-	host.SetSuspendSourceForTest(t, func() (time.Duration, bool) {
+	sysinfo.SetSuspendSourceForTest(t, func() (time.Duration, bool) {
 		return time.Duration(f.asleep.Load()), true
 	})
 	return f
@@ -798,7 +798,7 @@ func TestSuspendRecovery_AbandonedReacquireDoesNotFence(t *testing.T) {
 // exactly as it did before the recovery existed.
 func TestSuspendRecovery_NoSuspendClockFencesAsToday(t *testing.T) {
 	f := newSuspendFixture(t)
-	host.SetSuspendSourceForTest(t, func() (time.Duration, bool) { return 0, false })
+	sysinfo.SetSuspendSourceForTest(t, func() (time.Duration, bool) { return 0, false })
 	f.s.setClaimLease(20*time.Millisecond, 0, 0)
 	f.queue.before = func() { f.lapse(t) }
 	f.runLoop(t, time.Now().Add(-renewedRecently))

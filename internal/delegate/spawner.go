@@ -28,7 +28,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
-	"github.com/sky-ai-eng/triage-factory/internal/host"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
@@ -36,6 +35,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/pushpolicy"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
+	"github.com/sky-ai-eng/triage-factory/internal/sysinfo"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -501,13 +501,13 @@ type Spawner struct {
 	// tree has gone uncovered.
 	checkpointers map[string]*checkpointer
 	// memFloorMB is the dispatch memory guardrail: when available memory
-	// (host.MemAvailableMB — cgroup-scoped when confined)
+	// (sysinfo.MemAvailableMB — cgroup-scoped when confined)
 	// drops below this, drainConversationQueue defers claims (runs stay queued)
 	// until memory recovers. Zero disables. Set once at startup via
 	// SetDispatchMemFloor; the probe is injectable for tests.
 	memFloorMB int
 	// memAvailMB probes host available memory (MiB). Defaults to
-	// host.MemAvailableMB in NewSpawner; tests swap in a fake.
+	// sysinfo.MemAvailableMB in NewSpawner; tests swap in a fake.
 	memAvailMB func() int
 	// memGated tracks the guardrail's last observed state so the
 	// transition (and only the transition) is logged — a gated host
@@ -692,7 +692,7 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		ackWaiters:            make(map[int64]chan struct{}),
 		signalApplyWake:       make(chan struct{}, 1),
 		runSem:                make(chan struct{}, DefaultMaxConcurrentClaims),
-		memAvailMB:            host.MemAvailableMB,
+		memAvailMB:            sysinfo.MemAvailableMB,
 		diskAvailMB:           executorDiskAvailableMB,
 		snapshotInterval:      DefaultSnapshotInterval,
 	}

@@ -8,8 +8,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
-	"github.com/sky-ai-eng/triage-factory/internal/host"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/sysinfo"
 )
 
 // TestProcRegistry_RegisterGetDeregister covers the registry accessors the
@@ -178,7 +178,7 @@ func TestDispatchMemGated(t *testing.T) {
 
 	// Unknown probe → fails open.
 	s.SetDispatchMemFloor(4096)
-	s.memAvailMB = func() int { return host.Unknown }
+	s.memAvailMB = func() int { return sysinfo.Unknown }
 	if s.dispatchMemGated() {
 		t.Error("gated on an Unknown probe; guardrail must fail open")
 	}

@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/sky-ai-eng/triage-factory/internal/host"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
+	"github.com/sky-ai-eng/triage-factory/internal/sysinfo"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -68,7 +68,7 @@ func (s *Spawner) dispatchDiskGated() bool {
 		return false
 	}
 	avail := probe()
-	if avail == host.Unknown {
+	if avail == sysinfo.Unknown {
 		return false
 	}
 	gated := avail < floor
@@ -94,5 +94,5 @@ func executorDiskAvailableMB() int {
 	if root, err := paths.StateRootErr(); err == nil {
 		dirs = append(dirs, root)
 	}
-	return host.DiskAvailableMB(dirs...)
+	return sysinfo.DiskAvailableMB(dirs...)
 }

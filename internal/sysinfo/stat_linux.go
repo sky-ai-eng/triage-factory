@@ -1,6 +1,6 @@
 //go:build linux
 
-package host
+package sysinfo
 
 import (
 	"bufio"

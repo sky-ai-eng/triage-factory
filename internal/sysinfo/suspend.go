@@ -1,4 +1,4 @@
-package host
+package sysinfo
 
 import (
 	"sync/atomic"
@@ -41,10 +41,10 @@ func Suspended() (d time.Duration, ok bool) {
 	return (*suspendSource.Load())()
 }
 
-// TestT is the slice of *testing.T that SetSuspendSourceForTest needs,
+// SuspendTestT is the slice of *testing.T that SetSuspendSourceForTest needs,
 // declared here so production builds of this package do not import
 // "testing".
-type TestT interface {
+type SuspendTestT interface {
 	Helper()
 	Cleanup(func())
 }
@@ -54,7 +54,7 @@ type TestT interface {
 // _test.go file so other packages' tests can fake a suspend. It mutates a
 // process global, so tests that use it must not run in parallel with each
 // other.
-func SetSuspendSourceForTest(t TestT, fn func() (time.Duration, bool)) {
+func SetSuspendSourceForTest(t SuspendTestT, fn func() (time.Duration, bool)) {
 	t.Helper()
 	prev := suspendSource.Swap(&fn)
 	t.Cleanup(func() { suspendSource.Store(prev) })

@@ -1,4 +1,4 @@
-package host
+package sysinfo
 
 import (
 	"context"

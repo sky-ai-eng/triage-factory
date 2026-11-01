@@ -13,7 +13,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/github/grantmirror"
 	"github.com/sky-ai-eng/triage-factory/internal/github/reachcache"
-	"github.com/sky-ai-eng/triage-factory/internal/host"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/marketplacestats"
@@ -21,6 +20,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
+	"github.com/sky-ai-eng/triage-factory/internal/sysinfo"
 	"github.com/sky-ai-eng/triage-factory/internal/systemjob/repoprofile"
 	"github.com/sky-ai-eng/triage-factory/internal/systemjob/scorer"
 	"github.com/sky-ai-eng/triage-factory/internal/systemjob/syslimit"
@@ -289,7 +289,7 @@ func (a *App) buildExecution() error {
 	// throttle under load. Multi mode only: capacity planning is a
 	// deployment concern, and a laptop's numbers are just noise.
 	if runmode.Current() == runmode.ModeMulti {
-		if total := host.MemTotalMB(); total != host.Unknown {
+		if total := sysinfo.MemTotalMB(); total != sysinfo.Unknown {
 			// Platform reserve is role-aware: a dedicated executor pod hosts
 			// none of the co-resident platform stack (Postgres/GoTrue/object
 			// store) the all-in-one default models, so it reserves far less —

@@ -511,7 +511,7 @@ remain outside this contract (§3).
 A whole-system suspend (laptop sleep, `systemctl suspend`, hibernate) is the one pause a claim
 holder may recover from. The monotonic clock the watchdog runs on stops while the machine sleeps,
 so the watchdog does not fire, but the lease lapses on database time. On wake, a fenced write or
-renewal refused on the lapsed lease re-acquires the claim when `internal/host` measured a
+renewal refused on the lapsed lease re-acquires the claim when `internal/sysinfo` measured a
 suspend since the last accepted renewal, that renewal is younger than the self-fence deadline on
 the monotonic clock, and the holder has not fenced itself. The re-acquire is a compare-and-set on
 the claim being unreleased and minted by the holder's own executor boot, which is proof no

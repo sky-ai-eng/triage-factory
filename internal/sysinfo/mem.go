@@ -1,7 +1,9 @@
-package host
+package sysinfo
 
-// MemAvailableMB and MemTotalMB feed capacity decisions: the dispatch memory
-// guardrail and the boot-time capacity log.
+// MemAvailableMB returns available memory in MiB — container-scoped under a
+// cgroup v2 memory limit, host-wide MemAvailable otherwise — or Unknown. It
+// and MemTotalMB feed capacity decisions: the dispatch memory guardrail and
+// the boot-time capacity log.
 //
 // On Linux both are CONTAINER-scoped, not host-scoped, whenever this process
 // is confined by a real cgroup v2 memory limit anywhere in its own cgroup
@@ -15,11 +17,9 @@ package host
 //
 // They fall back to /proc/meminfo — always host-wide — only when truly
 // unconfined: no cgroup, or memory.max is "max" at every level.
-
-// MemAvailableMB returns available memory in MiB — container-scoped under a
-// cgroup v2 memory limit, host-wide MemAvailable otherwise — or Unknown.
 func MemAvailableMB() int { return memAvailableMB() }
 
 // MemTotalMB returns total memory in MiB — container-scoped under a cgroup v2
-// memory limit, host-wide MemTotal otherwise — or Unknown.
+// memory limit, host-wide MemTotal otherwise — or Unknown. MemAvailableMB's
+// doc says which applies.
 func MemTotalMB() int { return memTotalMB() }

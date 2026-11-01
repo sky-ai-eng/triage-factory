@@ -1,5 +1,5 @@
 //go:build !linux
 
-package host
+package sysinfo
 
 func diskAvailableMB([]string) int { return Unknown }

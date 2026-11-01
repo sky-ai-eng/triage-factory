@@ -1,6 +1,6 @@
 //go:build !linux && !darwin
 
-package host
+package sysinfo
 
 import "time"
 

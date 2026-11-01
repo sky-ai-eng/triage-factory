@@ -1,6 +1,6 @@
 //go:build !linux
 
-package host
+package sysinfo
 
 func memAvailableMB() int { return Unknown }
 

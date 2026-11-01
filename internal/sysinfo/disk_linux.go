@@ -1,6 +1,6 @@
 //go:build linux
 
-package host
+package sysinfo
 
 import "golang.org/x/sys/unix"
 

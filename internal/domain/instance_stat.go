@@ -13,7 +13,7 @@ import "time"
 // control pod has no runs (ActiveRuns/QueuedVisible/Claims/SpawnP50MS stay
 // nil), and a non-Linux or unconfined host can't read cpu/load/oom. A nil
 // field writes SQL NULL — "not applicable / not observed", not zero.
-// MemAvailableMB is cgroup-aware instance truth (host.MemAvailableMB), never a host-wide
+// MemAvailableMB is cgroup-aware instance truth (sysinfo.MemAvailableMB), never a host-wide
 // /proc/meminfo figure.
 type InstanceStat struct {
 	InstanceID string

@@ -87,7 +87,7 @@ of what this design **reuses rather than builds**:
 | `RunController` indirection for cancel/steer/interrupt/permission | `internal/delegate/process_registry.go` | Built (TFAC-305). In-process impl resolves `s.procs`/`s.cancels`/`s.permPending`; the seam exists precisely so a DB-signaling impl can slot in. |
 | Durable workspace snapshots + cross-host rehydrate | `internal/storage` (S3: `<org>/<blueprint_run>/workspace.tar`), `ensureWorkspace`/`workspaceRecoverable` (`resume.go`) | Built. A parked run can resume on a different machine today. |
 | Self-contained multi-mode runs | TFAC-545: per-run clone with App installation token; per-run `llmproxy`/`gitproxy`/`egressproxy` on the veth IP; agenthost socket per run | Built. **Credentials and toolchain co-locate with whichever host executes the run** — nothing about a run's execution needs the API box. |
-| Local admission control | `internal/host` + `TF_DISPATCH_MEM_FLOOR_MB` (TFAC-552); `internal/host` + `TF_DISPATCH_DISK_FLOOR_MB` (TFAC-1177); `TF_MAX_CONCURRENT_CLAIMS` clamped to 256 | Built, per-process — exactly the right shape per-executor. Contract to preserve: **gating never mutates queue state**; a tight host simply stops claiming and work flows to headroom with zero coordination. |
+| Local admission control | `sysinfo.MemAvailableMB` + `TF_DISPATCH_MEM_FLOOR_MB` (TFAC-552); `sysinfo.DiskAvailableMB` + `TF_DISPATCH_DISK_FLOOR_MB` (TFAC-1177); `TF_MAX_CONCURRENT_CLAIMS` clamped to 256 | Built, per-process — exactly the right shape per-executor. Contract to preserve: **gating never mutates queue state**; a tight host simply stops claiming and work flows to headroom with zero coordination. |
 | Replica-safe auth | RS256 JWKS verify (`internal/auth/verify`) + DB-backed sessions (`internal/auth/sessions`) | Built. Any API replica can serve any browser; no sticky sessions. |
 | Replica-safe delegation fences | `blueprint_runs_event_trigger_fence` UNIQUE `(triggering_event_id, trigger_id)`; task dedup partial index; `pending_firings` dedup index | Built. Two processes firing the same event/trigger produce exactly one run. |
 | Advisory-lock precedents | `auth_provision.go`, `team_github_repos.go`, ee/slack | Built for single-operation correctness (not leadership). |
@@ -1391,11 +1391,11 @@ every time-series question the dashboard has (utilization history,
 claim rates, headroom trends). A retention reaper trims it. One
 constraint on the sampler when it's promoted from
 `cmd/sandbox-bench/hostmetrics_linux.go`: its memory fields must come
-from `host.MemAvailableMB`, not the bench's own `/proc/meminfo` reader — the bench
+from `sysinfo.MemAvailableMB`, not the bench's own `/proc/meminfo` reader — the bench
 deliberately reads host-wide (it benchmarks hosts); the dashboard must
 report instance truth.
 
-Prerequisite fix: ✅ shipped (TFAC-581 + #624). `host.MemAvailableMB` is
+Prerequisite fix: ✅ shipped (TFAC-581 + #624). `sysinfo.MemAvailableMB` is
 **cgroup-aware** — and slightly stronger than this section originally
 asked for: it resolves the process's own cgroup from
 `/proc/self/cgroup` and takes the most restrictive `memory.max` across
@@ -1489,7 +1489,7 @@ cross-clamp. The sections above carry the per-item deltas.)
 3. Correctness bundle §5.4: claiming pop, auto-run DB gate,
    became_atomic fence, `system_llm_runs` trace-id, `poll_seq` CAS. (M) ✅
 4. `goose.Up` advisory lock; executor schema-version assert. (S) ✅
-5. cgroup-aware `host.MemAvailableMB`. (S) ✅
+5. cgroup-aware `sysinfo.MemAvailableMB`. (S) ✅
 
 **P1 — The split (first real fleet)**
 6. `TF_ROLE` + per-role subsystem wiring + compose profile (N executors
