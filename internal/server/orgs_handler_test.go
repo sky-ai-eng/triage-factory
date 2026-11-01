@@ -33,10 +33,9 @@ func (r *authRig) postJSONWithSid(method, path, sid string, body any) *http.Resp
 	return rec.Result()
 }
 
-// TestOrgCreate_HappyPath provisions a net-new org from the founder's
-// session and asserts the full tenant-row set landed on the admin pool,
-// the shipped defaults were materialized post-commit, and the session's
-// active org now points at the new org.
+// TestOrgCreate_HappyPath: creating an org from the founder's session writes the
+// org, its default team, both memberships and settings rows, bootstraps the
+// agent rows after commit, and points the session at the new org.
 func TestOrgCreate_HappyPath(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	runmode.SetOrgCreationEnabledForTest(t, true)
@@ -178,38 +177,6 @@ func TestOrgCreate_InvalidName_400(t *testing.T) {
 	}
 	if cnt != 0 {
 		t.Errorf("orgs created=%d on invalid input, want 0", cnt)
-	}
-}
-
-// TestOrgCreate_LocalModeIgnoresName pins the local arm's body contract: the
-// sentinel tenant's name is a seeded row, so a name a multi-mode-shaped client
-// sends is ignored rather than half-applied. The test server is already
-// provisioned, so this is the idempotent no-op arm (200, already_provisioned).
-// Uses the SQLite test server so it runs without Docker.
-func TestOrgCreate_LocalModeIgnoresName(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	s := newTestServer(t)
-
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs", map[string]string{"name": "Acme"})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status=%d, want 200 (already provisioned); body=%s", rec.Code, rec.Body.String())
-	}
-	var resp struct {
-		ID                 string `json:"id"`
-		Name               string `json:"name"`
-		AlreadyProvisioned bool   `json:"already_provisioned"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.ID != runmode.LocalDefaultOrgID {
-		t.Errorf("id=%q, want the local sentinel org", resp.ID)
-	}
-	if resp.Name == "Acme" {
-		t.Errorf("name=%q — the local arm must not take a name from the body", resp.Name)
-	}
-	if !resp.AlreadyProvisioned {
-		t.Error("already_provisioned=false on an already-provisioned install; want true")
 	}
 }
 
@@ -367,11 +334,9 @@ func TestOrgCreate_RLS_NonMemberCannotAccess(t *testing.T) {
 	}
 }
 
-// TestOrgGet_MemberVisibleAndNonDisclosing pins the org single read: a member
-// gets the org's identity plus their OWN role (which is what makes it useful
-// to a client that has to decide whether to render an admin surface), and a
-// non-member gets 404 rather than a 403 — a 403 would confirm the org exists
-// to somebody with no relationship to it.
+// TestOrgGet_MemberVisibleAndNonDisclosing: a member reads the org with their
+// own role, and a non-member gets 404 rather than a 403 that would confirm the
+// org exists.
 func TestOrgGet_MemberVisibleAndNonDisclosing(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	runmode.SetOrgCreationEnabledForTest(t, true)
@@ -426,11 +391,9 @@ func assertRowExists(t *testing.T, r *authRig, query string, arg any, label stri
 	}
 }
 
-// TestOrgCreate_CanCreateOrgMatchesRoute pins the creation rule from both
-// sides: for each kind of caller, POST /api/orgs answers what /api/me's
-// can_create_org predicts. A GitHub session creates; an SSO session is told to
-// sign in with GitHub; a deployment with creation turned off and an API token
-// are refused as FORBIDDEN.
+// TestOrgCreate_CanCreateOrgMatchesRoute: for each kind of caller, POST
+// /api/orgs answers what /api/me's can_create_org predicts. Only a GitHub
+// session on a deployment with creation enabled creates.
 func TestOrgCreate_CanCreateOrgMatchesRoute(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 

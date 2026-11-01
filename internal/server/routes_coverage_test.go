@@ -24,19 +24,16 @@ var preAuthAllowlist = []string{
 	"POST /api/webhooks/github",          // deployment-App webhook receiver; pre-auth, verified against the deployment secret in-handler before any store read, routed by installation binding, same limiter tier
 	"GET /api/invites/preview",           // invite-token preview; recipient not yet authenticated, admin-pool, token is the bearer secret
 	"GET /api/github/managed/callback",   // deployment-App bind callback; applies withSession itself to the cookie-bearing (writing) branch only — the no-cookie branch is someone who installed from GitHub's public page and has no session
-	// POST /api/sso/discover is now an ee/sso route (mounted via the extension
-	// seam, pre-auth + IP-rate-limited there), so it's no longer a core routes()
-	// mount and isn't checked by this core coverage test.
+	// POST /api/sso/discover is an ee/sso route, mounted pre-auth and
+	// IP-rate-limited through the extension seam, so core does not list it.
 	"/auth/v1/", // GoTrue reverse proxy; auth happens upstream
-	"/api/",     // JSON 404 for unknown /api/* (TFAC-409 item 5); no identity dependency, intentionally before the SPA fallback
+	"/api/",     // JSON 404 for unknown /api/*; no identity dependency, intentionally before the SPA fallback
 	"/",         // SPA fallback; no identity dependency
 }
 
-// TestRoutesCoverage asserts every /api/* route the server mounts either
-// goes through s.api / s.apiMutating (so withSession is in front of the
-// handler) or appears in preAuthAllowlist. It reads the server's own record
-// of its mounts (routeMux), so a raw s.mux.Handle("METHOD /api/...") added in
-// any file of the package, without wrapping, fails it.
+// TestRoutesCoverage: every /api/* mount the server records either goes through
+// s.api / s.apiMutating, which put withSession in front of the handler, or is in
+// preAuthAllowlist, and every allowlist entry matches a raw mount.
 func TestRoutesCoverage(t *testing.T) {
 	s := newTestServer(t)
 	if len(s.mux.mounts) == 0 {

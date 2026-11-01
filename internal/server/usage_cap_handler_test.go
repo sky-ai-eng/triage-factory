@@ -30,11 +30,10 @@ type capEcho struct {
 	MaxDailyCostUSD *float64 `json:"max_daily_cost_usd"`
 }
 
-// TestUsageTeamCap_GovernanceAndRoleGates_Postgres pins the per-team cap PUT
-// (TFAC-482): unlicensed → 404 (the EE-feature-hidden posture), org-admin +
-// governance → 200 and the value lands on the org rollup's by_team row, and
-// team-admin / plain-member → 403. Plus the clear-with-null and negative-400
-// edges. Multi-mode only (the gates short-circuit in local); skips without Docker.
+// TestUsageTeamCap_GovernanceAndRoleGates_Postgres pins the per-team cap PUT:
+// unlicensed is 404, an org admin with governance gets 200 and the value on the
+// org rollup's by_team row, a team admin or member gets 403; plus clear-with-null
+// and the negative-value 400.
 func TestUsageTeamCap_GovernanceAndRoleGates_Postgres(t *testing.T) {
 	r := newUsageRig(t)
 

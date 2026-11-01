@@ -10,10 +10,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// A Jira status change task keyed on the status's id, whose events carry the
-// status's name, is answered at its own key: the Factory's drop names a
-// station by the task's dedup_key, and no event carries that key. A key that
-// neither an event nor an active task carries is still no station.
+// POST /api/tasks creates the station's task (201) and finds it again (200).
+// A Jira status change task keyed on the status id, whose events carry the
+// name, is answered at its own key; a key nothing carries is a 422.
 func TestTaskCreate_AnswersAnActiveTaskNoEventNames(t *testing.T) {
 	s := newTestServer(t)
 	entity := seedStation(t, s, "owner/repo#202", domain.EventGitHubPRCICheckPassed)
@@ -36,8 +35,12 @@ func TestTaskCreate_AnswersAnActiveTaskNoEventNames(t *testing.T) {
 	}
 
 	code, created := post("In Review")
-	if code != http.StatusCreated {
-		t.Fatalf("POST under the event's key = %d, want 201", code)
+	if code != http.StatusCreated || created.ID == "" || created.EntityID != entity.ID {
+		t.Fatalf("POST under the event's key = %d %+v, want 201 and the station's task", code, created)
+	}
+	// The drop is idempotent: a second one finds the same row.
+	if code, again := post("In Review"); code != http.StatusOK || again.ID != created.ID {
+		t.Errorf("second POST = %d resolving %q, want 200 resolving %s", code, again.ID, created.ID)
 	}
 	execSQL(t, s.db, `UPDATE tasks SET dedup_key = '10003' WHERE id = ?`, created.ID)
 

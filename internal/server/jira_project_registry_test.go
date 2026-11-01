@@ -28,10 +28,9 @@ func teamJiraRules(t *testing.T, s *Server) ([]domain.JiraProjectStatusRules, st
 	return rules, site
 }
 
-// TestJiraProjectsPut_RegistersTheProjectByItsJiraID: an added project is
-// stored as a reference to the project's registry row, keyed by the Jira id
-// the caller named it by, under the key and name Jira gives for it, and the
-// team's display order names that row.
+// TestJiraProjectsPut_RegistersTheProjectByItsJiraID: an added project is stored
+// as a reference to its registry row, keyed by the Jira id it was named by under
+// Jira's key and name, and the team's display order names that row.
 func TestJiraProjectsPut_RegistersTheProjectByItsJiraID(t *testing.T) {
 	s, _ := newServerWithJiraCatalog(t, "SKY")
 	if rec := putJiraProjects(t, s, "SKY"); rec.Code != http.StatusOK {
@@ -55,11 +54,9 @@ func TestJiraProjectsPut_RegistersTheProjectByItsJiraID(t *testing.T) {
 	}
 }
 
-// TestJiraProjectsPut_SurvivesAProjectKeyRename: after the poll moves the
-// registry row onto the key Jira renamed the project to, the team's set reads
-// under the new key with its rules intact, and resending exactly what the
-// client read (the project's registry id) asks Jira nothing — the rename
-// touched no team's set.
+// TestJiraProjectsPut_SurvivesAProjectKeyRename: once the poll moves the registry
+// row onto the renamed key, the team's set reads under it with its rules intact,
+// and resending what the client read asks Jira nothing.
 func TestJiraProjectsPut_SurvivesAProjectKeyRename(t *testing.T) {
 	s, fake := newServerWithJiraCatalog(t, "SKY")
 	if rec := putJiraProjects(t, s, "SKY"); rec.Code != http.StatusOK {
@@ -96,11 +93,9 @@ func TestJiraProjectsPut_SurvivesAProjectKeyRename(t *testing.T) {
 	}
 }
 
-// TestJiraProjectsPut_RefusesATrackedProjectByItsJiraID: a stored project the
-// registry still holds under a stale key, and the catalog's entry for it under
-// its current key, are one Jira project. Naming it by its Jira id as though it
-// were being added would track it twice, so the write is refused with the
-// stored project named, and the id it is addressed by.
+// TestJiraProjectsPut_RefusesATrackedProjectByItsJiraID: naming by its Jira id a
+// stored project the registry holds under a stale key would track it twice, so
+// the write is refused naming the stored project and the id it is addressed by.
 func TestJiraProjectsPut_RefusesATrackedProjectByItsJiraID(t *testing.T) {
 	s, _ := newServerWithJiraCatalog(t, "SKY")
 	if rec := putJiraProjects(t, s, "SKY"); rec.Code != http.StatusOK {
@@ -126,11 +121,9 @@ func TestJiraProjectsPut_RefusesATrackedProjectByItsJiraID(t *testing.T) {
 	}
 }
 
-// TestJiraProjectsPut_ConflictsWithAMergeMidSave: while a save that read the
-// team's set is asking Jira about an added project, the poll merges a stored
-// project's unresolved registry row into the row that carries its Jira id. The
-// save names a row that no longer exists, so it is refused as a conflict to
-// read again, and nothing it carried is written.
+// TestJiraProjectsPut_ConflictsWithAMergeMidSave: when the poll merges a stored
+// project's row away while a save asks Jira about an added project, the save
+// names a row that no longer exists, so it is a conflict and writes nothing.
 func TestJiraProjectsPut_ConflictsWithAMergeMidSave(t *testing.T) {
 	s, fake := newServerWithJiraCatalog(t, "SKY", "OPS")
 	if rec := putJiraProjects(t, s, "SKY"); rec.Code != http.StatusOK {

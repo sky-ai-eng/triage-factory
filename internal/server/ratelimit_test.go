@@ -124,79 +124,6 @@ func TestIPRateLimiter_SweepEvictsIdle(t *testing.T) {
 	}
 }
 
-// TestPreAuthRateLimit_LocalModeNoOp asserts the wrapper never throttles in
-// local mode (N=1): far more than a burst's worth of requests all pass.
-func TestPreAuthRateLimit_LocalModeNoOp(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-
-	clk := time.Now()
-	s := &Server{preAuthLimiter: frozenLimiter(1.0, 3.0, time.Minute, &clk)}
-	h := s.preAuthRateLimit(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	for i := 0; i < 50; i++ {
-		req := httptest.NewRequest(http.MethodGet, "/api/sso/discover", nil)
-		req.Header.Set("X-Forwarded-For", "9.9.9.9")
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("local-mode request %d got %d, want 200 (no limiting at N=1)", i+1, rec.Code)
-		}
-	}
-}
-
-// TestPreAuthRateLimit_MultiMode429 asserts that in multi mode the wrapper
-// allows a burst, then returns 429 with a Retry-After header, and that the
-// cap is keyed per IP (a different client is unaffected).
-func TestPreAuthRateLimit_MultiMode429(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeMulti)
-	// Trust httptest's default RemoteAddr (192.0.2.1:1234) as the proxy so
-	// clientIP honors the per-request X-Forwarded-For and the cap keys per
-	// client. Without a trusted proxy, XFF is ignored and every request
-	// collapses onto the single peer IP (the spoof-resistance default).
-	runmode.SetClientIPPolicyForTest(t, "192.0.2.0/24", true)
-
-	clk := time.Now()
-	s := &Server{preAuthLimiter: frozenLimiter(1.0, 3.0, time.Minute, &clk)}
-	h := s.preAuthRateLimit(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	fire := func(ip string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodPost, "/api/sso/discover", nil)
-		req.Header.Set("X-Forwarded-For", ip)
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
-		return rec
-	}
-
-	// First three (the burst) pass.
-	for i := 0; i < 3; i++ {
-		if rec := fire("203.0.113.7"); rec.Code != http.StatusOK {
-			t.Fatalf("burst request %d got %d, want 200", i+1, rec.Code)
-		}
-	}
-
-	// Fourth is throttled with a usable Retry-After.
-	rec := fire("203.0.113.7")
-	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("over-cap request got %d, want 429", rec.Code)
-	}
-	ra := rec.Header().Get("Retry-After")
-	if ra == "" {
-		t.Fatalf("429 missing Retry-After header")
-	}
-	if secs, err := strconv.Atoi(ra); err != nil || secs < 1 {
-		t.Fatalf("Retry-After = %q, want a positive integer seconds value", ra)
-	}
-
-	// A different IP still has its own full budget — the cap is per client.
-	if rec := fire("198.51.100.4"); rec.Code != http.StatusOK {
-		t.Fatalf("distinct IP got %d, want 200 (independent bucket)", rec.Code)
-	}
-}
-
 // TestIPRateLimiter_ZeroRateNoPanic guards the division in allow(): a
 // limiter configured with a non-positive refill rate must still honor its
 // burst and then refuse with a fixed back-off rather than dividing by zero.
@@ -218,13 +145,9 @@ func TestIPRateLimiter_ZeroRateNoPanic(t *testing.T) {
 	}
 }
 
-// TestPreAuthRateLimit_LogoutCSRFRejectionCostsNoTokens locks in the wrap
-// ORDER for the logout mount: withCSRFOriginCheck (outer) runs before
-// preAuthRateLimit (inner), so a cross-origin POST the CSRF gate rejects
-// (403) never reaches the limiter and consumes no tokens. Without this
-// ordering a malicious page could CSRF-spam logout from a victim's browser
-// and drain that IP's shared pre-auth budget — starving its login /
-// discovery — with requests that never pass CSRF anyway.
+// TestPreAuthRateLimit_LogoutCSRFRejectionCostsNoTokens: on the logout mount the
+// CSRF check wraps the limiter, so cross-origin POSTs the check rejects spend
+// none of the IP's pre-auth budget, which a CSRF flood could otherwise drain.
 func TestPreAuthRateLimit_LogoutCSRFRejectionCostsNoTokens(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 
@@ -267,35 +190,9 @@ func TestPreAuthRateLimit_LogoutCSRFRejectionCostsNoTokens(t *testing.T) {
 	}
 }
 
-// TestPreAuthRateLimit_NilLimiterNoOp guards the defensive nil branch: a
-// Server without a limiter wired (no construction path does this today, but
-// the wrapper must not panic) passes requests through even in multi mode.
-func TestPreAuthRateLimit_NilLimiterNoOp(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeMulti)
-
-	s := &Server{} // preAuthLimiter nil
-	h := s.preAuthRateLimit(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("nil-limiter request got %d, want 200 (pass-through)", rec.Code)
-	}
-}
-
-// TestSignedWebhookRateLimit_SustainedTenPerSecondNeverThrottles locks in
-// the required acceptance bar directly against the production tier
-// constants: a synthetic signed-delivery stream sustained at exactly
-// 10 req/s (Slack's own floor for a single subscribed app/workspace is
-// ~8.3 req/s) must never see a 429, however long it runs. Unlike the
-// burst-then-refill tests above, this drives the limiter for enough
-// simulated wall-clock time (20s @ 10/s = 200 requests) that a tier sized
-// too low would eventually drain its bucket and start refusing — the
-// production rate (20/s) comfortably outpaces a 10/s arrival rate, so the
-// bucket never runs dry.
+// TestSignedWebhookRateLimit_SustainedTenPerSecondNeverThrottles: at the
+// production tier constants, 20 simulated seconds of signed deliveries at
+// 10 req/s (above Slack's ~8.3 req/s per app) never see a 429.
 func TestSignedWebhookRateLimit_SustainedTenPerSecondNeverThrottles(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 
@@ -320,12 +217,9 @@ func TestSignedWebhookRateLimit_SustainedTenPerSecondNeverThrottles(t *testing.T
 	}
 }
 
-// TestSignedWebhookRateLimit_MultiMode429 mirrors
-// TestPreAuthRateLimit_MultiMode429 for the signed-webhook tier: a burst is
-// allowed, the next request 429s with a Retry-After, and the cap is
-// independent per IP. Uses small test-only rate/burst values (not the real
-// tier constants) purely so the burst boundary is reachable in a few
-// iterations.
+// TestSignedWebhookRateLimit_MultiMode429: in multi mode a burst passes, the
+// next request is a 429 whose Retry-After is a positive number of seconds, and
+// another IP keeps its own budget. Small rate and burst keep the boundary close.
 func TestSignedWebhookRateLimit_MultiMode429(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	runmode.SetClientIPPolicyForTest(t, "192.0.2.0/24", true)
@@ -353,8 +247,12 @@ func TestSignedWebhookRateLimit_MultiMode429(t *testing.T) {
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("over-cap request got %d, want 429", rec.Code)
 	}
-	if ra := rec.Header().Get("Retry-After"); ra == "" {
+	ra := rec.Header().Get("Retry-After")
+	if ra == "" {
 		t.Fatalf("429 missing Retry-After header")
+	}
+	if secs, err := strconv.Atoi(ra); err != nil || secs < 1 {
+		t.Fatalf("Retry-After = %q, want a positive integer seconds value", ra)
 	}
 
 	// A different IP still has its own full budget — the cap is per client,
@@ -364,70 +262,36 @@ func TestSignedWebhookRateLimit_MultiMode429(t *testing.T) {
 	}
 }
 
-// TestSignedWebhookRateLimit_LocalModeNoOp mirrors
-// TestPreAuthRateLimit_LocalModeNoOp: the signed-webhook tier also no-ops in
-// local mode (Slack is Postgres-only / multi-mode-only today, but the
-// wrapper's contract should hold regardless).
-func TestSignedWebhookRateLimit_LocalModeNoOp(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-
+// TestRateLimitWrappers_NoOp: the wrappers never throttle in local mode (N=1),
+// and pass requests through when no limiter is wired.
+func TestRateLimitWrappers_NoOp(t *testing.T) {
 	clk := time.Now()
-	s := &Server{signedWebhookLimiter: frozenLimiter(10.0, 3.0, time.Minute, &clk)}
-	h := s.signedWebhookRateLimit(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	for i := 0; i < 50; i++ {
-		req := httptest.NewRequest(http.MethodPost, "/api/webhooks/slack/org1", nil)
-		req.Header.Set("X-Forwarded-For", "9.9.9.9")
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("local-mode request %d got %d, want 200 (no limiting at N=1)", i+1, rec.Code)
-		}
-	}
-}
-
-// TestPreAuthAndSignedWebhookLimiters_Independent asserts the two tiers are
-// wholly separate budgets: draining the human pre-auth burst on an IP must
-// not cost that same IP anything against its signed-webhook budget, and
-// vice versa. Without this, one Server-wide limiter shared across both
-// wrappers would let a flood against one route starve the other.
-func TestPreAuthAndSignedWebhookLimiters_Independent(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeMulti)
-	runmode.SetClientIPPolicyForTest(t, "192.0.2.0/24", true)
-
-	clk := time.Now()
-	s := &Server{
-		preAuthLimiter:       frozenLimiter(preAuthRatePerSec, 2.0, time.Minute, &clk),
-		signedWebhookLimiter: frozenLimiter(signedWebhookRatePerSec, 2.0, time.Minute, &clk),
-	}
-	preAuth := s.preAuthRateLimit(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	webhook := s.signedWebhookRateLimit(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	const ip = "203.0.113.9"
-	drain := func(h http.Handler) {
-		for i := 0; i < 2; i++ {
-			req := httptest.NewRequest(http.MethodPost, "/", nil)
-			req.Header.Set("X-Forwarded-For", ip)
-			rec := httptest.NewRecorder()
-			h.ServeHTTP(rec, req)
-			if rec.Code != http.StatusOK {
-				t.Fatalf("priming request %d got %d, want 200", i+1, rec.Code)
+	for _, tc := range []struct {
+		name string
+		mode runmode.Mode
+		wrap func(*Server, http.Handler) http.Handler
+		s    *Server
+	}{
+		{"pre-auth, local mode", runmode.ModeLocal, (*Server).preAuthRateLimit,
+			&Server{preAuthLimiter: frozenLimiter(1.0, 3.0, time.Minute, &clk)}},
+		{"signed webhook, local mode", runmode.ModeLocal, (*Server).signedWebhookRateLimit,
+			&Server{signedWebhookLimiter: frozenLimiter(10.0, 3.0, time.Minute, &clk)}},
+		{"pre-auth, nil limiter, multi mode", runmode.ModeMulti, (*Server).preAuthRateLimit, &Server{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runmode.SetForTest(t, tc.mode)
+			h := tc.wrap(tc.s, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+			for i := 0; i < 50; i++ {
+				req := httptest.NewRequest(http.MethodPost, "/", nil)
+				req.Header.Set("X-Forwarded-For", "9.9.9.9")
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, req)
+				if rec.Code != http.StatusOK {
+					t.Fatalf("request %d got %d, want 200 (pass-through)", i+1, rec.Code)
+				}
 			}
-		}
-	}
-	drain(preAuth) // exhausts this IP's pre-auth burst
-
-	req := httptest.NewRequest(http.MethodPost, "/", nil)
-	req.Header.Set("X-Forwarded-For", ip)
-	rec := httptest.NewRecorder()
-	webhook.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("signed-webhook request got %d, want 200 — draining the pre-auth budget must not affect it", rec.Code)
+		})
 	}
 }

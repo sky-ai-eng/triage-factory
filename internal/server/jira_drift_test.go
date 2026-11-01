@@ -10,11 +10,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// A save of the team's Jira rules decides status drift for every project whose
-// workflow it read, which is every project with a changed rule: a rule it
-// changed is resolved against that workflow, a rule it carried is not, and a
-// project it dropped names nothing. A save that reads nothing leaves the
-// condition to the drift check.
+// A Jira rules save decides status drift for each project whose workflow it read:
+// a changed rule is resolved against it, a carried one is not, a dropped project
+// names nothing, and a save that reads nothing leaves it to the drift check.
 func TestJiraProjectsPut_DecidesStatusDriftFromTheWorkflowItRead(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	s, fake := newServerWithJiraCatalog(t, "SKY")
@@ -69,10 +67,9 @@ func TestJiraProjectsPut_DecidesStatusDriftFromTheWorkflowItRead(t *testing.T) {
 	rec.Inactive(t, org, kinds.JiraStatusDrift)
 }
 
-// A task rule save that changes its filter or whether it is enabled checks it
-// at once: enabling one whose filter names a status no tracked project has
-// raises it, and removing that status resolves it. Disabling or deleting it
-// resolves it without asking Jira.
+// A task rule save that changes its filter or enabled state checks drift at once:
+// enabling one naming a status no tracked project has raises it, removing the
+// status resolves it, and disabling or deleting resolves it without asking Jira.
 func TestEventHandlerSave_ChecksJiraPredicateDrift(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	r := newJiraCatalogRig(t)

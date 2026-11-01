@@ -12,19 +12,15 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 )
 
-// The epic's acceptance, encoded: one session mints one token, and from there
-// a headless caller drives the cursor-scoped surface, the two wizard writes,
-// and its own rotation with no cookie in sight. The rows below are the ones the
-// live-handler harness can reach; the live-stack drive (websocket streaming
-// against a real deployment, a real GitHub PAT bind) is executed by hand.
+// These tests drive the headless flow: one session mints a token, and the
+// token alone then reaches the cursor-scoped routes, the wizard writes and its
+// own rotation.
 
 // ---------- the Bearer-only drive ----------
 
-// TestBearerAuth_CursorScopedSurfaceNeedsNoActiveOrg is the reason the token
-// exists. Under a session, POST /api/teams/list resolves its org from the
-// active-org cursor and answers 409 without one — and moving that cursor is a
-// session verb a token is refused. A token carries its org instead, so the
-// same routes answer with no cursor and no POST /api/me/active-org ever made.
+// TestBearerAuth_CursorScopedSurfaceNeedsNoActiveOrg: routes that resolve their
+// org from the session's active-org cursor answer a token from the org it carries,
+// with no cursor set and no POST /api/me/active-org ever made.
 func TestBearerAuth_CursorScopedSurfaceNeedsNoActiveOrg(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
@@ -89,12 +85,9 @@ func TestBearerAuth_CursorScopedSurfaceNeedsNoActiveOrg(t *testing.T) {
 	}
 }
 
-// TestBearerAuth_WizardWritesLandUnderToken covers the write the headless
-// wizard drive needed and could not make: the team's tracked set, proven by
-// read-back. The per-user GitHub identity is not a token's to bind in multi
-// mode: it is linked through Connect, a browser flow, and the token-capture
-// route does not exist there, so the token gets the 404 any caller gets and
-// nothing is written.
+// TestBearerAuth_WizardWritesLandUnderToken: a token can write a team's tracked
+// set, proven by read-back. The GitHub identity token-capture route does not
+// exist in multi mode, so a token gets 404 there and nothing is written.
 func TestBearerAuth_WizardWritesLandUnderToken(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
@@ -163,10 +156,9 @@ func TestBearerAuth_WizardWritesLandUnderToken(t *testing.T) {
 
 // ---------- expiry under the org's cap ----------
 
-// TestBearerAuth_OrgCapExpiresTokenAtUse pins that the cap is applied at use,
-// not at mint: a token older than the cap is refused the moment the cap says
-// so, with a body indistinguishable from an unknown token's, and it works again
-// the moment the cap is lifted. Nothing about the token row changed in between.
+// TestBearerAuth_OrgCapExpiresTokenAtUse: the org's max-age cap applies at use,
+// not at mint. A token older than the cap gets the unknown-token 401, the list
+// shows its effective expiry in the past, and lifting the cap revives it.
 func TestBearerAuth_OrgCapExpiresTokenAtUse(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
@@ -234,11 +226,9 @@ func TestBearerAuth_OrgCapExpiresTokenAtUse(t *testing.T) {
 
 // ---------- org scope on the sub-routes ----------
 
-// TestBearerAuth_OrgScopeSealsSubRoutes extends the sealed-scope rule past the
-// org's own read to the routes mounted beneath it, reads and writes alike: a
-// token bound to A gets 404 on every /api/orgs/B/... it names, for a caller who
-// is a member of both. The same routes on A answer, which is what proves the
-// 404 is the scope's doing and not a route that was never there.
+// TestBearerAuth_OrgScopeSealsSubRoutes: a token bound to org A gets 404 on every
+// /api/orgs/B/... route, reads and writes alike, for a member of both. The same
+// routes on A answer, so the 404 comes from the scope and not a missing route.
 func TestBearerAuth_OrgScopeSealsSubRoutes(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
@@ -279,12 +269,9 @@ func TestBearerAuth_OrgScopeSealsSubRoutes(t *testing.T) {
 
 // ---------- governance ----------
 
-// TestAPITokens_GovernanceLogAfterRotation is the audit half of the drive: after
-// a session mints a bounded token and the token rotates itself, the org's
-// access log carries one row per event, each naming the actor and everything a
-// reviewer needs to recognize the credential — name, prefix, the bounds it was
-// minted under — and never the secret. Read under both credentials, since the
-// org admin who audits may well be doing it headlessly.
+// TestAPITokens_GovernanceLogAfterRotation: a session mint, a token-authed mint
+// and a revoke each write one access-log row naming the actor, the token's name,
+// prefix and mint bounds, and never the plaintext, read under both credentials.
 func TestAPITokens_GovernanceLogAfterRotation(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()

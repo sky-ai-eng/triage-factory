@@ -113,9 +113,8 @@ func TestHandleEventHandlerCreateNotify_Refusals(t *testing.T) {
 }
 
 // TestNotifyRules_WriteGate_Postgres: a personal rule is a team writer's to
-// create and its creator's or a team admin's to change; a rule that tells the
-// whole team, before or after the write, is a team admin's. The RLS policies
-// hold the store to the same rule when the server's gate is not in the way.
+// create and its creator's or a team admin's to change, a team-wide rule is a
+// team admin's, and RLS holds the store to the same rule without the server's gate.
 func TestNotifyRules_WriteGate_Postgres(t *testing.T) {
 	r := newViewerRig(t)
 	r.bindGitHubPAT(t)

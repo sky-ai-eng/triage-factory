@@ -7,9 +7,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 )
 
-// Every id list on a Jira or Linear predicate is checked when it is saved:
-// against the team's tracked set in the database (the project and team
-// filters) or against a provider catalog. An id list in neither would store
+// Every id list on a Jira or Linear predicate is checked on save, against the
+// team's tracked set or a provider catalog; an id list in neither would store
 // whatever a caller sent.
 func TestPredicateCatalog_EveryIDListIsChecked(t *testing.T) {
 	trackedSet := map[string]bool{

@@ -8,11 +8,9 @@ import (
 	"time"
 )
 
-// TestListenAndServeContext_BindErrorDoesNotLeak guards the shutdown watcher
-// against leaking when the server stops on its own — here a bind failure —
-// before ctx is cancelled. ListenAndServe passes context.Background(), whose
-// Done channel never closes, so a watcher that only waited on ctx.Done()
-// would park forever.
+// TestListenAndServeContext_BindErrorDoesNotLeak: when the server stops on its
+// own, here on a bind failure, the shutdown watcher exits even though
+// context.Background()'s Done channel never closes.
 func TestListenAndServeContext_BindErrorDoesNotLeak(t *testing.T) {
 	// Occupy a port so the server's bind fails deterministically.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

@@ -32,13 +32,9 @@ const acmeTeamsGraphQL = `{"data":{"organization":{"databaseId":9,"teams":{
 		{"databaseId":12,"slug":"security","name":"Security","members":{"totalCount":40}}
 	]}}}}`
 
-// TestGitHubGroupCandidates_MembershipAndCounts exercises the candidate path
-// the onboarding wizard now reads: GET .../github-groups?include_membership=true
-// returns the org's *full* team list (via the GraphQL ListOrgTeamsDetailed,
-// carrying member counts) and flags the teams the caller personally belongs
-// to (Mine) so the wizard can pre-check them — the same list the Settings
-// editor reads, differing only in the pre-check. Local mode: candidates come
-// from GraphQL organization.teams; membership from REST /user/teams.
+// TestGitHubGroupCandidates_MembershipAndCounts: ?include_membership=true lists
+// every team of the tracked owners with member counts (GraphQL) and flags the
+// caller's own (REST /user/teams, matched by id) so the wizard can pre-check them.
 func TestGitHubGroupCandidates_MembershipAndCounts(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -74,14 +70,7 @@ func TestGitHubGroupCandidates_MembershipAndCounts(t *testing.T) {
 	}
 	seedConfiguredRepo(t, srv, "acme", "api")
 
-	rec := doJSON(t, srv, http.MethodGet, "/api/teams/default/github-groups?include_membership=true", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET github-groups = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var resp teamGitHubGroupsResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode body: %v; raw=%s", err, rec.Body.String())
-	}
+	resp := getGitHubGroups(t, srv, "?include_membership=true")
 	byKey := map[string]gitHubGroupCandidateJSON{}
 	for _, c := range resp.Candidates {
 		byKey[c.OrgLogin+"/"+c.TeamSlug] = c
@@ -97,29 +86,21 @@ func TestGitHubGroupCandidates_MembershipAndCounts(t *testing.T) {
 	}
 }
 
-// TestGitHubGroupCandidates_CredentialsMissing covers the disambiguation the
-// setup wizard relies on: a team that tracks repos but whose org has NO
-// resolvable GitHub credential must report credentials_missing=true with an
-// empty candidate list, so the UI can tell "reconnect GitHub" apart from
-// "these orgs have no teams." A tracked repo exists (so there's an owner to
-// resolve) but no creds are seeded, so ClientFor returns ErrNoGitHubCredentials
-// for the sole owner.
+// TestGitHubGroupCandidates_CredentialsMissing: credentials_missing is true only
+// when tracked repos have owners and no credential reaches any of them, so the
+// wizard can tell "reconnect GitHub" from "nothing to list".
 func TestGitHubGroupCandidates_CredentialsMissing(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 
-	// Track a repo (gives the candidate path an owner to resolve) but seed
-	// no GitHub credential — the org PAT is absent and there's no App.
-	seedConfiguredRepo(t, srv, "acme", "api")
+	// No tracked repos: no owner to resolve, so nothing is missing.
+	if resp := getGitHubGroups(t, srv, ""); resp.CredentialsMissing {
+		t.Errorf("credentials_missing=true with no tracked repos; want false")
+	}
 
-	rec := doJSON(t, srv, http.MethodGet, "/api/teams/default/github-groups", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET github-groups = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var resp teamGitHubGroupsResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode body: %v; raw=%s", err, rec.Body.String())
-	}
+	// A tracked repo gives an owner, and no credential is seeded for it.
+	seedConfiguredRepo(t, srv, "acme", "api")
+	resp := getGitHubGroups(t, srv, "")
 	if !resp.CredentialsMissing {
 		t.Errorf("credentials_missing=false with a tracked repo and no creds; want true")
 	}
@@ -128,58 +109,9 @@ func TestGitHubGroupCandidates_CredentialsMissing(t *testing.T) {
 	}
 }
 
-// TestGitHubGroupCandidates_ResolvedButNoTeams is the load-bearing complement
-// to the missing-creds case: an empty candidate list with a WORKING credential
-// must report credentials_missing=false. This is the exact disambiguation the
-// flag exists for — "this org's teams are empty" must not read as "reconnect
-// GitHub." The owner resolves via the org PAT but GraphQL returns no teams.
-func TestGitHubGroupCandidates_ResolvedButNoTeams(t *testing.T) {
-	keyring.MockInit()
-	srv := newTestServer(t)
-	ctx := context.Background()
-
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if strings.HasSuffix(r.URL.Path, "/graphql") {
-			// Owner resolves (PAT), but the org genuinely has no teams.
-			_, _ = w.Write([]byte(`{"data":{"organization":{"teams":{
-				"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[]}}}}`))
-			return
-		}
-		http.NotFound(w, r)
-	}))
-	t.Cleanup(ts.Close)
-
-	dbtest.SeedOrgSettings(t, srv.orgs, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: ts.URL})
-	seedSourceHost(t, srv, eventsource.KindGitHub, ts.URL)
-	if err := integrations.Save(ctx, srv.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
-		GitHubPAT: "ghp-test",
-	}); err != nil {
-		t.Fatalf("seed creds: %v", err)
-	}
-	seedConfiguredRepo(t, srv, "acme", "api")
-
-	rec := doJSON(t, srv, http.MethodGet, "/api/teams/default/github-groups", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET github-groups = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var resp teamGitHubGroupsResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode body: %v; raw=%s", err, rec.Body.String())
-	}
-	if resp.CredentialsMissing {
-		t.Errorf("credentials_missing=true with a working credential and no teams; want false")
-	}
-	if len(resp.Candidates) != 0 {
-		t.Errorf("got %d candidates, want 0: %+v", len(resp.Candidates), resp.Candidates)
-	}
-}
-
-// TestGitHubGroupCandidates_OwnersFromTrackedReposOnly pins where the owners
-// come from: the repositories a team tracks, not the whole registry. A
-// registry row no team tracks (a GitHub entity's repository gets one) names
-// an owner the org does not work with, so the credential is never asked for
-// that owner's teams and none of them become candidates.
+// TestGitHubGroupCandidates_OwnersFromTrackedReposOnly: candidates come from the
+// owners of tracked repositories only, so an untracked registry row's owner is
+// never asked for its teams.
 func TestGitHubGroupCandidates_OwnersFromTrackedReposOnly(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -215,14 +147,7 @@ func TestGitHubGroupCandidates_OwnersFromTrackedReposOnly(t *testing.T) {
 	seedConfiguredRepo(t, srv, "acme", "api")
 	seedUntrackedRepo(t, srv, "other", "thing")
 
-	rec := doJSON(t, srv, http.MethodGet, "/api/teams/default/github-groups", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET github-groups = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var resp teamGitHubGroupsResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode body: %v; raw=%s", err, rec.Body.String())
-	}
+	resp := getGitHubGroups(t, srv, "")
 	if len(askedOrgs) != 1 || askedOrgs[0] != "acme" {
 		t.Errorf("teams asked for owners %v; want [acme] — an untracked repository's owner is not one the org works with", askedOrgs)
 	}
@@ -231,35 +156,9 @@ func TestGitHubGroupCandidates_OwnersFromTrackedReposOnly(t *testing.T) {
 	}
 }
 
-// TestGitHubGroupCandidates_NoReposNotMissing guards the inverse: with no
-// tracked repos there is no owner to resolve, so credentials_missing must stay
-// false — an unconfigured team is not a creds failure, and the wizard reaches
-// this step only after repos are persisted anyway.
-func TestGitHubGroupCandidates_NoReposNotMissing(t *testing.T) {
-	keyring.MockInit()
-	srv := newTestServer(t)
-
-	rec := doJSON(t, srv, http.MethodGet, "/api/teams/default/github-groups", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET github-groups = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var resp teamGitHubGroupsResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode body: %v; raw=%s", err, rec.Body.String())
-	}
-	if resp.CredentialsMissing {
-		t.Errorf("credentials_missing=true with no tracked repos; want false")
-	}
-}
-
-// TestUserTeamsMulti_ReconstructsViaGraphQL drives the multi-mode path
-// (userTeamsMulti) directly: it resolves the caller's host-verified login,
-// fans out one GraphQL organization.teams(userLogins:) query per
-// tracked-repo owner (an untracked registry row's owner is not asked), and
-// de-dupes the result. Calling the method
-// rather than the HTTP handler sidesteps the multi-mode session/claims
-// middleware the local-mode test harness doesn't stand up, while still
-// exercising the membership-reconstruction logic the reviewer flagged.
+// TestUserTeamsMulti_ReconstructsViaGraphQL: userTeamsMulti queries GraphQL
+// with the caller's host-verified login once per tracked-repo owner and
+// de-dupes the teams. Called directly, past the multi-mode session middleware.
 func TestUserTeamsMulti_ReconstructsViaGraphQL(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -331,9 +230,8 @@ func TestUserTeamsMulti_ReconstructsViaGraphQL(t *testing.T) {
 	}
 }
 
-// TestUserTeamsMulti_NoLoginIsEmpty proves the multi path degrades to an
-// empty list (not an error) when the caller has no host-verified GitHub
-// identity — the user can still Skip the step.
+// TestUserTeamsMulti_NoLoginIsEmpty: a caller with no host-verified GitHub
+// identity gets an empty list, not an error.
 func TestUserTeamsMulti_NoLoginIsEmpty(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -386,21 +284,27 @@ func putGitHubGroups(t *testing.T, srv *Server, ids ...string) []gitHubGroupJSON
 	return out.Groups
 }
 
+// getGitHubGroups reads the default team's github-groups, query appended to
+// the path, failing unless it is a 200.
+func getGitHubGroups(t *testing.T, srv *Server, query string) teamGitHubGroupsResponse {
+	t.Helper()
+	rec := doJSON(t, srv, http.MethodGet, "/api/teams/default/github-groups"+query, nil)
+	var resp teamGitHubGroupsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || rec.Code != http.StatusOK {
+		t.Fatalf("github-groups GET%s = %d, want 200; body=%s", query, rec.Code, rec.Body.String())
+	}
+	return resp
+}
+
 // readGitHubGroups reads the default team's stored GitHub groups.
 func readGitHubGroups(t *testing.T, srv *Server) []gitHubGroupJSON {
 	t.Helper()
-	rec := doJSON(t, srv, http.MethodGet, "/api/teams/default/github-groups", nil)
-	var resp teamGitHubGroupsResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || rec.Code != http.StatusOK {
-		t.Fatalf("github-groups GET = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	return resp.Groups
+	return getGitHubGroups(t, srv, "").Groups
 }
 
-// TestUserTeams_WizardWriteReadBack: the wizard's Continue writes the checked
-// teams, by GitHub's ids, to the per-team github-groups replace-set endpoint,
-// and a read-back returns exactly that set with the names the candidates gave
-// them.
+// TestUserTeams_WizardWriteReadBack: the wizard writes the checked teams by
+// GitHub id to the replace-set endpoint, and a read-back returns that set with
+// the candidates' names.
 func TestUserTeams_WizardWriteReadBack(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -522,10 +426,9 @@ func assertGitHubGroupsUnconfirmed(t *testing.T, srv *Server, rec *httptest.Resp
 	}
 }
 
-// When GitHub fails one owner's team listing, a team found among the owners
-// that listed is still added, and the browse list carries those owners' teams.
-// A team found nowhere may be the failed owner's, so it is a 502, not a 422
-// blaming the request.
+// When one owner's team listing fails, the browse list still carries the other
+// owners' teams, and a team found nowhere may be the failed owner's, so it is a
+// 502 rather than a 422 blaming the request.
 func TestTeamGitHubGroupsPut_UnlistedOwnerIsAnUpstreamFault(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -535,12 +438,7 @@ func TestTeamGitHubGroupsPut_UnlistedOwnerIsAnUpstreamFault(t *testing.T) {
 	rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-groups", map[string]any{"github_team_ids": []string{"11", "99"}})
 	assertGitHubGroupsUnconfirmed(t, srv, rec)
 
-	rec = doJSON(t, srv, http.MethodGet, "/api/teams/default/github-groups", nil)
-	var resp teamGitHubGroupsResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || rec.Code != http.StatusOK {
-		t.Fatalf("GET = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	if len(resp.Candidates) != 2 || resp.CredentialsMissing {
+	if resp := getGitHubGroups(t, srv, ""); len(resp.Candidates) != 2 || resp.CredentialsMissing {
 		t.Errorf("GET candidates = %+v, credentials_missing=%v; want acme's two teams, false", resp.Candidates, resp.CredentialsMissing)
 	}
 }

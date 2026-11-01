@@ -12,15 +12,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TestMe_IsOperator_ReadsVerifiedIdentities pins /api/me's is_operator to the
-// same read the fleet gate makes, and the sign-in that binds a pending grant:
-// the GitHub sign-in that verifies the grant's address binds it to that
-// principal, after which it follows the principal rather than the address.
-// The token's email claim is not consulted, so an SSO sign-in whose identity
-// provider asserts an operator's address on an untrusted domain is not an
-// operator and binds nothing, and an operator calling with an API token still
-// is (the console refuses the token at its own gate; the flag describes the
-// person).
+// TestMe_IsOperator_ReadsVerifiedIdentities: is_operator reads what the fleet
+// gate reads. A GitHub sign-in verifying a grant's address binds it to the
+// principal; an SSO sign-in asserting it on an untrusted domain binds nothing;
+// and an operator calling with an API token is still reported as one.
 func TestMe_IsOperator_ReadsVerifiedIdentities(t *testing.T) {
 	r := newAuthRig(t)
 	ctx := context.Background()

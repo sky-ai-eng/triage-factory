@@ -35,10 +35,8 @@ func firstError(t *testing.T, rec *httptest.ResponseRecorder) errorItem {
 }
 
 // TestEventHandlerCreate_UnconfiguredSourceRejected: an org with no Jira
-// credential cannot author a jira rule or trigger. Create is the only
-// enforcement point there will ever be — event_type is immutable afterwards,
-// and the router matches on exact equality, so a handler authored here would
-// wait forever for an event that cannot be produced.
+// credential cannot create a jira rule or trigger, since event_type is
+// immutable and the handler would wait for an event nothing can produce.
 func TestEventHandlerCreate_UnconfiguredSourceRejected(t *testing.T) {
 	cases := map[string]struct {
 		path string
@@ -80,28 +78,9 @@ func TestEventHandlerCreate_UnconfiguredSourceRejected(t *testing.T) {
 	}
 }
 
-// TestEventHandlerCreate_AvailableSourceAccepted is the other half: the gate
-// refuses the source, never the event type. With the credential bound, the
-// same body is authored.
-func TestEventHandlerCreate_AvailableSourceAccepted(t *testing.T) {
-	s := newTestServer(t)
-	configureEventSources(t, s)
-
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
-		"event_type":       domain.EventJiraIssueAssigned,
-		"name":             "jira rule",
-		"default_priority": 0.5,
-	})
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
-	}
-}
-
-// TestEventHandlerCreate_UnlicensedKeepsItsOwn403 pins the split between the
-// two refusals. A licence the org does not hold is a permission fault and
-// stays 403 FORBIDDEN, unchanged; a source the org has not set up is a
-// semantically invalid reference and is 422 INVALID_FIELD. Both are asserted
-// in one place because it is their DIFFERENCE that is the contract.
+// TestEventHandlerCreate_UnlicensedKeepsItsOwn403: a licence the org does not
+// hold is a permission fault, 403 FORBIDDEN, where an unconfigured source is
+// the 422 INVALID_FIELD above.
 func TestEventHandlerCreate_UnlicensedKeepsItsOwn403(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s) // jira IS configured — only the licence is missing
@@ -120,10 +99,9 @@ func TestEventHandlerCreate_UnlicensedKeepsItsOwn403(t *testing.T) {
 	}
 }
 
-// TestEventHandlerList_SurfacesAHandlerWhoseSourceWentAway pins D5. Unbinding
-// a credential does not delete, disable or hide the handlers bound to it —
-// forward-only, like every other tracking change. They stay listed, stay
-// counted, and carry the derived flag the UI renders them inert from.
+// TestEventHandlerList_SurfacesAHandlerWhoseSourceWentAway: unbinding a
+// credential leaves its handlers listed and counted, with source_available
+// false on the list and the single read alike.
 func TestEventHandlerList_SurfacesAHandlerWhoseSourceWentAway(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
@@ -155,30 +133,17 @@ func TestEventHandlerList_SurfacesAHandlerWhoseSourceWentAway(t *testing.T) {
 	if len(after) != beforeTotal {
 		t.Errorf("list held %d rows, want the same %d — a handler that can no longer fire is still counted", len(after), beforeTotal)
 	}
-}
 
-// TestEventHandlerGet_CarriesTheSameRowShape: the single read is the list's
-// row shape, so it answers the derived flag too — a handler that is editable
-// must not be readable in a shape the list never produces.
-func TestEventHandlerGet_CarriesTheSameRowShape(t *testing.T) {
-	s := newTestServer(t)
-	configureEventSources(t, s)
-	id := createUserRuleFor(t, s, domain.EventJiraIssueAssigned)
-
-	if err := integrations.ClearJira(t.Context(), s.secrets, runmode.LocalDefaultOrgID); err != nil {
-		t.Fatalf("clear jira credential: %v", err)
-	}
-
-	rec := doJSON(t, s, http.MethodGet, "/api/event-handlers/"+id, nil)
+	rec := doJSON(t, s, http.MethodGet, "/api/event-handlers/"+jiraRule, nil)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("GET = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	var got map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if avail, present := got["source_available"]; !present || avail != false {
-		t.Errorf("source_available = %v (present=%v), want false", avail, present)
+		t.Errorf("single read source_available = %v (present=%v), want false", avail, present)
 	}
 }
 

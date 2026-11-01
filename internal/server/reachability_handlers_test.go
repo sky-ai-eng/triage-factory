@@ -29,26 +29,6 @@ func postReachability(t *testing.T, h http.HandlerFunc, body string) (int, reach
 	return rec.Code, res
 }
 
-func TestHandleGitHubReachability_Reachable(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	// srv.URL is a non-github host, so APIBase derives the GHES /api/v3 mount;
-	// the test server answers 200 on any path.
-	code, res := postReachability(t, handleGitHubReachability, `{"url":"`+srv.URL+`"}`)
-	if code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", code)
-	}
-	if !res.Reachable {
-		t.Errorf("Reachable=false, want true; reason=%q", res.Reason)
-	}
-	if !strings.HasSuffix(res.ProbedURL, "/api/v3") {
-		t.Errorf("ProbedURL = %q, want it to end with /api/v3 (derived API base)", res.ProbedURL)
-	}
-}
-
 func TestHandleGitHubReachability_Unreachable(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	addr := srv.URL
@@ -63,6 +43,10 @@ func TestHandleGitHubReachability_Unreachable(t *testing.T) {
 	}
 	if res.Reason == "" {
 		t.Errorf("want a non-empty reason on an unreachable host")
+	}
+	// A non-github host probes the GHES /api/v3 mount the handler derives.
+	if !strings.HasSuffix(res.ProbedURL, "/api/v3") {
+		t.Errorf("ProbedURL = %q, want it to end with /api/v3 (derived API base)", res.ProbedURL)
 	}
 }
 
@@ -109,11 +93,9 @@ func TestHandleJiraReachability_BadURL(t *testing.T) {
 	}
 }
 
-// TestNormalizeReachabilityURL pins the validator the handlers gate on. It is
-// the hermetic half of the *.ghe.com chain: this confirms a data-residency
-// host passes through untouched (a full handler probe of api.<tenant>.ghe.com
-// would force a flaky external DNS lookup), while ghbase.APIBase's
-// own table covers octocorp.ghe.com -> api.octocorp.ghe.com.
+// TestNormalizeReachabilityURL pins the validator the handlers gate on,
+// including that a *.ghe.com data-residency host passes through untouched,
+// which a handler probe could only show with an external DNS lookup.
 func TestNormalizeReachabilityURL(t *testing.T) {
 	good := []struct{ in, want string }{
 		{"https://github.com", "https://github.com"},
@@ -145,5 +127,25 @@ func TestNormalizeReachabilityURL(t *testing.T) {
 		if got, ok := ghbase.NormalizeBaseURL(in); ok {
 			t.Errorf("ghbase.NormalizeBaseURL(%q) = (%q, true), want rejected", in, got)
 		}
+	}
+}
+
+func TestHandleGitHubReachability_Reachable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	// srv.URL is a non-github host, so APIBase derives the GHES /api/v3 mount;
+	// the test server answers 200 on any path.
+	code, res := postReachability(t, handleGitHubReachability, `{"url":"`+srv.URL+`"}`)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", code)
+	}
+	if !res.Reachable {
+		t.Errorf("Reachable=false, want true; reason=%q", res.Reason)
+	}
+	if !strings.HasSuffix(res.ProbedURL, "/api/v3") {
+		t.Errorf("ProbedURL = %q, want it to end with /api/v3 (derived API base)", res.ProbedURL)
 	}
 }

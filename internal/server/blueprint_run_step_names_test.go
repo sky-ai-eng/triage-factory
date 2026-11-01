@@ -13,10 +13,9 @@ import (
 )
 
 // TestBlueprintRunGet_StepNamesFromFrozenPlan covers both projections of the
-// step list on GET /api/blueprint-runs/{id}: a run with a frozen plan carries
-// each step's prompt name (the chain indicator's label), and the defensive
-// no-plan fallback — which reads live blueprint_steps, where no name exists —
-// still returns the steps and simply omits the field.
+// step list on GET /api/blueprint-runs/{id}: a run with a frozen plan renders
+// that plan, names included, even after the live blueprint grows; a run with
+// none falls back to the live steps, which carry no name.
 func TestBlueprintRunGet_StepNamesFromFrozenPlan(t *testing.T) {
 	s := newTestServer(t)
 
@@ -54,6 +53,11 @@ func TestBlueprintRunGet_StepNamesFromFrozenPlan(t *testing.T) {
 		if *steps[i].Step.Name != want {
 			t.Errorf("step %d name = %q, want %q", i, *steps[i].Step.Name, want)
 		}
+		// A plan step has no created_at, so none is reported: never a zero
+		// "0001-01-01" timestamp leaking out of the frozen plan.
+		if steps[i].Step.CreatedAt != nil {
+			t.Errorf("step %d created_at = %q, want omitted", i, *steps[i].Step.CreatedAt)
+		}
 	}
 	// The name is additive: the brief still rides along as the secondary line.
 	if steps[1].Step.Brief != "land the fix" {
@@ -85,18 +89,30 @@ func TestBlueprintRunGet_StepNamesFromFrozenPlan(t *testing.T) {
 			t.Errorf("fallback step %d name = %q, want omitted", i, *st.Step.Name)
 		}
 	}
+
+	// Growing the live blueprint after the run was minted does not grow the
+	// run's rendered step count: the board derives its step pips from it.
+	p2 := createBarePrompt(t, s, "Appended")
+	if put := doJSON(t, s, http.MethodPut, "/api/blueprints/"+bpID+"/steps", map[string]any{
+		"steps": []map[string]any{{"step_prompt_id": p0}, {"step_prompt_id": p1}, {"step_prompt_id": p2}},
+	}); put.Code != http.StatusNoContent {
+		t.Fatalf("grow live blueprint: %d: %s", put.Code, put.Body.String())
+	}
+	if got := getBlueprintRunSteps(t, s, plannedID); len(got) != 2 {
+		t.Errorf("planned run steps after the live blueprint grew = %d, want 2 (the frozen plan)", len(got))
+	}
 }
 
 // blueprintRunStepJSON is the decode target for the run projection's step list —
-// only the fields these assertions read. Name is a *string so an omitted key is
-// distinguishable from one present but empty: the fallback path's contract is
-// that the key is absent, and a plain string would read "" either way.
+// only the fields these assertions read. Name and CreatedAt are pointers so an
+// omitted key is distinguishable from one present but empty.
 type blueprintRunStepJSON struct {
 	Step struct {
 		StepIndex    int     `json:"step_index"`
 		StepPromptID string  `json:"step_prompt_id"`
 		Name         *string `json:"name"`
 		Brief        string  `json:"brief"`
+		CreatedAt    *string `json:"created_at"`
 	} `json:"step"`
 }
 

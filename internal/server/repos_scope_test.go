@@ -19,9 +19,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// repoScopeRig is the multi-mode fixture for TFAC-559: a real Postgres-backed
-// Server (RLS live) with two teams, each tracking a distinct repo, plus a
-// teamless org member — the exact leak shape the ticket describes.
+// repoScopeRig is a real Postgres-backed Server (RLS live) with two teams, each
+// tracking a distinct repo, plus a teamless org member: the shape a cross-team
+// repository leak would show up in.
 type repoScopeRig struct {
 	h            *pgtest.Harness
 	s            *Server
@@ -141,31 +141,47 @@ func listedRepoSlugs(page listEnvelope[repoJSON]) []string {
 	return out
 }
 
-// TestHandleRepositories_TeamScoped pins the TFAC-559 fix: the registry list
-// returns the org-wide union for an org admin, only the caller's own team's
-// tracked repos for a plain member, and nothing for a teamless member —
-// where before the fix every caller saw the full org-wide list regardless
-// of role or team membership.
+// TestHandleRepositories_TeamScoped: the registry list is the org-wide union
+// for an org admin, the caller's own teams' tracked repos for a member, and
+// nothing for a teamless member. Each row's can_edit mirrors the PATCH gate.
 func TestHandleRepositories_TeamScoped(t *testing.T) {
 	rig := newRepoScopeRig(t)
 
-	// Org owner (admin) sees the org-wide union: both teams' repos. The
-	// total_count is scoped the same way the rows are — it counts what the
-	// caller may see, not what the table holds.
+	canEdit := func(page listEnvelope[repoJSON]) map[string]bool {
+		out := make(map[string]bool, len(page.Items))
+		for _, row := range page.Items {
+			out[row.Slug] = row.CanEdit
+		}
+		return out
+	}
+
+	// Org owner (admin) sees the org-wide union and may edit every row. The
+	// total_count counts what the caller may see, not what the table holds.
 	owner := rig.listRepos(t, rig.orgOwner)
 	if got := listedRepoSlugs(owner); !equalSlugs(got, []string{"acme/api", "acme/web"}) || owner.Total() != 2 {
 		t.Errorf("owner (org admin) repos = %v (total %d), want org-wide [acme/api acme/web]", got, owner.Total())
 	}
+	if got := canEdit(owner); !got["acme/api"] || !got["acme/web"] {
+		t.Errorf("org admin can_edit = %v, want both repos true", got)
+	}
 
-	// teamB member sees only teamB's tracked repo (acme/web), not teamA's
-	// (acme/api) — the cross-team leak this ticket fixes.
+	// teamB's team admin sees only teamB's tracked repo (acme/web), and may
+	// edit it.
 	member := rig.listRepos(t, rig.memberB)
 	if got := listedRepoSlugs(member); !equalSlugs(got, []string{"acme/web"}) || member.Total() != 1 {
 		t.Errorf("memberB repos = %v (total %d), want only [acme/web] with total 1", got, member.Total())
 	}
+	if got := canEdit(member); !got["acme/web"] {
+		t.Errorf("teamB admin can_edit[acme/web] = false, want true; got %v", got)
+	}
 
-	// A teamless member sees zero repos — before the fix this returned the
-	// full org-wide list to any org member regardless of team membership.
+	// A plain member of teamB sees the repo but may not edit it, which the page
+	// renders read-only rather than as a control that 403s.
+	got := canEdit(rig.listRepos(t, rig.plainB))
+	if editable, listed := got["acme/web"]; !listed || editable || len(got) != 1 {
+		t.Errorf("plain member can_edit = %v, want only acme/web, false", got)
+	}
+
 	teamless := rig.listRepos(t, rig.teamless)
 	if got := listedRepoSlugs(teamless); len(got) != 0 || teamless.Total() != 0 {
 		t.Errorf("teamless member repos = %v (total %d), want empty", got, teamless.Total())
@@ -281,12 +297,9 @@ func TestHandleRepoUpdate_TeamScoped(t *testing.T) {
 	}
 }
 
-// TestHandleRepoUpdate_RequiresAdmin pins the mutation gate: changing an
-// org-wide repository row takes an admin, not just membership of a team that
-// tracks it.
-// The two rejection codes are load-bearing and different — 403 for a repo
-// the caller can see in their own GET /api/repos list (404 there would read
-// as a bug), 404 for one they can't (disclosing nothing).
+// TestHandleRepoUpdate_RequiresAdmin: changing an org-wide repository row takes
+// an admin of a tracking team, not just membership. A member is 403 on a repo in
+// their own list and 404 on one outside it, which discloses nothing.
 func TestHandleRepoUpdate_RequiresAdmin(t *testing.T) {
 	rig := newRepoScopeRig(t)
 
@@ -322,56 +335,9 @@ func TestHandleRepoUpdate_RequiresAdmin(t *testing.T) {
 	}
 }
 
-// TestHandleRepositories_CanEdit pins the projection the Repos page gates
-// its base-branch control on: it mirrors the PATCH gate per row, so the
-// client never has to re-derive authz from role (org admin and team admin
-// are orthogonal, and only the server knows which tracking teams the caller
-// administers).
-func TestHandleRepositories_CanEdit(t *testing.T) {
-	rig := newRepoScopeRig(t)
-
-	canEdit := func(callerID string) map[string]bool {
-		t.Helper()
-		page := rig.listRepos(t, callerID)
-		out := make(map[string]bool, len(page.Items))
-		for _, row := range page.Items {
-			out[row.Slug] = row.CanEdit
-		}
-		return out
-	}
-
-	// Org admin: every repo in the org-wide union is editable.
-	if got := canEdit(rig.orgOwner); !got["acme/api"] || !got["acme/web"] {
-		t.Errorf("org admin can_edit = %v, want both repos true", got)
-	}
-
-	// Team admin of teamB: teamB's repo is editable, and teamA's isn't even
-	// in their list.
-	got := canEdit(rig.memberB)
-	if !got["acme/web"] {
-		t.Errorf("teamB admin can_edit[acme/web] = false, want true; got %v", got)
-	}
-	if _, listed := got["acme/api"]; listed {
-		t.Errorf("teamB admin should not see acme/api at all; got %v", got)
-	}
-
-	// Plain member of teamB: sees the repo, may not edit it — exactly the
-	// state the page renders read-only instead of a control that 403s.
-	got = canEdit(rig.plainB)
-	if _, listed := got["acme/web"]; !listed {
-		t.Fatalf("plain member should still see acme/web; got %v", got)
-	}
-	if got["acme/web"] {
-		t.Errorf("plain member can_edit[acme/web] = true, want false")
-	}
-}
-
-// TestHandleRepoBranches_TeamScoped pins the same gate on the branches
-// listing: a member is blocked (404) before any GitHub call is attempted for
-// a repo outside their team's tracked set, but passes the gate (reaching the
-// credential-resolution step, which then 400s on this org's unconfigured
-// GitHub creds) for a repo their team does track. The distinct status codes
-// prove the gate — not credential availability — is what's being exercised.
+// TestHandleRepoBranches_TeamScoped: the branches listing 404s a repo outside
+// the caller's tracked set before resolving any credential, and passes the gate
+// for one it tracks, reaching the 409 for this org's unconfigured GitHub.
 func TestHandleRepoBranches_TeamScoped(t *testing.T) {
 	rig := newRepoScopeRig(t)
 
@@ -415,12 +381,9 @@ func (r *repoScopeRig) setGitHubHost(t *testing.T, base string) {
 	}
 }
 
-// TestRepoRoutes_RowOnAnotherHostIsInvisible_Postgres pins the host gate under
-// RLS and real roles. Once the org points at another GitHub host, its rows on
-// the host it left are 404 to every caller — the org owner included, who sees
-// every row on the current host — on the id read, the by-name read, the PATCH
-// (no write, and a 404 rather than the 403 a tracking team's non-admin gets on
-// the current host), and the branch list. Pointing the org back restores them.
+// TestRepoRoutes_RowOnAnotherHostIsInvisible_Postgres: under RLS and real roles,
+// rows on a host the org left are 404 to every caller, the owner included, on
+// every repository route, and the PATCH writes nothing. Pointing back restores them.
 func TestRepoRoutes_RowOnAnotherHostIsInvisible_Postgres(t *testing.T) {
 	rig := newRepoScopeRig(t)
 	apiID := rig.repoID(t, "acme", "api")
@@ -495,11 +458,9 @@ func equalSlugs(a, b []string) bool {
 	return true
 }
 
-// TestHandleRepoRegister_GateAndTrack_Postgres pins who may register a
-// repository by GitHub id under real RLS — an org admin or the admin of a team,
-// and nobody else — and that a team admin who is no org admin can register a
-// repository and write it into their own team's set by the registry id that
-// returns.
+// TestHandleRepoRegister_GateAndTrack_Postgres: under real RLS only an org admin
+// or a team admin may register a repository by GitHub id, and a team admin who
+// is no org admin can then track it in their team by the returned registry id.
 func TestHandleRepoRegister_GateAndTrack_Postgres(t *testing.T) {
 	r := newRepoScopeRig(t)
 	if err := r.s.reachableRepos.ReplaceForPATSystem(t.Context(), r.orgID, dbtest.TestGitHubHost, []domain.ReachableRepository{

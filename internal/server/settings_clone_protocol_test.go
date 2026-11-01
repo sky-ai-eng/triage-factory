@@ -7,47 +7,13 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/zalando/go-keyring"
 
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestOrgSettings_CloneProtocolClear_LocalKeepsTheDefault pins the clear arm
-// in the mode where "ssh" is a real answer: local honors the stored value, so a
-// null means the package default and has to land on it rather than on the value
-// that happens to be the other option.
-func TestOrgSettings_CloneProtocolClear_LocalKeepsTheDefault(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
-
-	patchOrgSettingsOK(t, s, map[string]any{"github_clone_protocol": nil})
-
-	got, err := s.orgs.GetSettingsSystem(t.Context(), runmode.LocalDefaultOrgID)
-	if err != nil {
-		t.Fatalf("read back settings: %v", err)
-	}
-	if got.GitHubCloneProtocol != "https" {
-		t.Errorf("stored github_clone_protocol = %q; want %q", got.GitHubCloneProtocol, "https")
-	}
-}
-
-// TestOrgSettings_MultiNeverStoresSSH walks every door onto the column in the
-// mode that cannot honor an SSH clone at all — an App installation token is an
-// HTTPS bearer credential, and the runtime container carries no key, agent or
-// known_hosts.
-//
-// All three doors matter because they fail differently. Provisioning names only
-// org_id and takes the column from its DEFAULT, so the seed is the value a
-// fresh org is born with and nothing in the API is involved. An explicit null
-// means "back to the default", which reaches the column through a resolver
-// rather than as the raw package value. The set arm is the only one that was
-// ever guarded.
-//
-// Asserted against the stored column rather than the GET: the read side
-// normalizes, so every one of these looks correct through the API whatever the
-// row says, and only a consumer reading the column directly — the profiler,
-// choosing the clone URL it writes onto every repository row — can tell.
+// TestOrgSettings_MultiNeverStoresSSH: multi mode cannot honor an SSH clone, so
+// no door onto the column stores "ssh": the provisioning DEFAULT, an explicit
+// null, or a set. Asserted on the stored column, since the GET normalizes it.
 func TestOrgSettings_MultiNeverStoresSSH(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)

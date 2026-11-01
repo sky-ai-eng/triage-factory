@@ -1,16 +1,14 @@
 package server
 
 import (
-	"encoding/json"
 	"net/http"
 	"testing"
 )
 
-// TestBlueprintDelete_CascadesPromptsAndTrigger deletes a whole multi-step
-// blueprint and asserts the cascade: the header soft-deletes (request reads 404
-// but the row survives so the ...System reads still resolve it for in-flight
-// run timelines), every copy-only step prompt soft-deletes, and the bound
-// trigger is hard-deleted (detached).
+// TestBlueprintDelete_CascadesPromptsAndTrigger deletes a multi-step blueprint:
+// the header and every step prompt soft-delete (request reads 404, but the rows
+// survive for the ...System reads of in-flight run timelines), and the bound
+// trigger is hard-deleted.
 func TestBlueprintDelete_CascadesPromptsAndTrigger(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
@@ -22,17 +20,12 @@ func TestBlueprintDelete_CascadesPromptsAndTrigger(t *testing.T) {
 		t.Fatalf("delete blueprint: expected 200, got %d: %s", del.Code, del.Body.String())
 	}
 
-	// Header gone from request-facing reads (steps GET + List).
+	// Header gone from request-facing reads (GET + list).
 	if blueprintExists(t, s, bp) {
 		t.Fatal("deleted blueprint steps GET: the blueprint is still readable")
 	}
-	list := doJSON(t, s, http.MethodGet, "/api/blueprints", nil)
-	var bps []map[string]any
-	_ = json.Unmarshal(list.Body.Bytes(), &bps)
-	for _, b := range bps {
-		if b["id"] == bp {
-			t.Fatalf("deleted blueprint %s still listed", bp)
-		}
+	if blueprintListed(t, s, bp) {
+		t.Fatalf("deleted blueprint %s still listed", bp)
 	}
 
 	// Every step prompt is gone from request-facing reads.
@@ -86,12 +79,9 @@ func TestBlueprintDelete_NotFound(t *testing.T) {
 	}
 }
 
-// TestBlueprintDelete_SoftDeletesStepPromptsBySource proves the cascade
-// dispatches per step-prompt source: a user step prompt gets deleted_at stamped
-// (Delete), a system/imported one is hidden (Hide) and keeps deleted_at NULL so
-// the ...System reads still resolve it. createChainBlueprint mints user prompts,
-// so we flip one step prompt's source to "system" before deleting — exercising
-// the Hide branch the user-only tests above never reach.
+// TestBlueprintDelete_SoftDeletesStepPromptsBySource pins the cascade's split by
+// step-prompt source: a user prompt gets deleted_at stamped, a system prompt is
+// hidden with deleted_at NULL so the ...System reads still resolve it.
 func TestBlueprintDelete_SoftDeletesStepPromptsBySource(t *testing.T) {
 	s := newTestServer(t)
 	bp, ps := createChainBlueprint(t, s, "MixedSources", 2)
@@ -135,10 +125,9 @@ func TestBlueprintDelete_SoftDeletesStepPromptsBySource(t *testing.T) {
 	}
 }
 
-// countRows runs a COUNT(*) query against the server's raw DB handle. The
-// blueprint-delete cascade mixes soft-deletes (header, step prompts) with a hard
-// delete (trigger), so the tests assert at the row level — the request-facing
-// API can only see the soft-deleted rows as absent, not tell soft from hard.
+// countRows runs a COUNT(*) query against the server's raw DB handle, because
+// the request-facing API sees a soft-deleted row and a hard-deleted one the
+// same way.
 func countRows(t *testing.T, s *Server, query string, args ...any) int {
 	t.Helper()
 	var n int

@@ -40,22 +40,9 @@ func bindAnthropicRefWithMethod(t *testing.T, s *Server) {
 	}
 }
 
-// A local install arrives on the host's credentials — the SQLite column default
-// — so a zero-configuration first run is never asked to pick. The choice still
-// exists; it just starts answered.
-func TestOrgSettingsGet_LocalDefaultsToHostCredentials(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
-	if got := orgLLMAuthMethod(t, s); got != domain.LLMAuthSystem {
-		t.Errorf("llm_auth_method = %q, want the local default %q", got, domain.LLMAuthSystem)
-	}
-}
-
 // The selection round-trips as a stored fact rather than being derived from
-// what is bound — which is the whole point: an org that brings its own key and
-// has not bound one yet is a different state from one running on the host's,
-// and only a stored value distinguishes them.
+// what is bound: an org that brings its own key but has not bound one yet is a
+// different state from one running on the host's.
 func TestOrgSettingsPatch_LLMAuthMethod_RoundTrips(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -94,15 +81,16 @@ func TestOrgSettingsPatch_LLMAuthMethod_RejectsAnythingElse(t *testing.T) {
 	}
 }
 
-// Running on the host's credentials means holding none of your own: credential
-// resolution reaches for a stored key whenever one exists, so the row would be
-// describing a run that does not happen. The refusal names what to disconnect,
-// and disconnecting is its own act on its own resource — this route never
-// reaches across and deletes it.
+// A local org starts on the host's credentials and binding a key moves it onto
+// its own. Moving back while a key is bound is refused with 422 naming the key
+// to disconnect, and succeeds once nothing is bound.
 func TestOrgSettingsPatch_LLMAuthMethod_RefusesSystemWhileCredentialsBound(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
+	if got := orgLLMAuthMethod(t, s); got != domain.LLMAuthSystem {
+		t.Fatalf("llm_auth_method = %q before the bind, want the local default %q", got, domain.LLMAuthSystem)
+	}
 	bindAnthropicRefWithMethod(t, s)
 
 	rec := patchOrgSettings(t, s, map[string]any{"llm_auth_method": domain.LLMAuthSystem})
@@ -129,9 +117,8 @@ func TestOrgSettingsPatch_LLMAuthMethod_RefusesSystemWhileCredentialsBound(t *te
 	}
 }
 
-// A save that re-sends the method it already has is not asking for anything, so
-// it is not blamed for a state it did not create — the check fires on the
-// change, not on the value.
+// A save that re-sends the method it already has is not refused for a state it
+// did not create: the check fires on a change, not on the value.
 func TestOrgSettingsPatch_LLMAuthMethod_UnchangedValueIsNotRechecked(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -153,29 +140,9 @@ func TestOrgSettingsPatch_LLMAuthMethod_UnchangedValueIsNotRechecked(t *testing.
 	patchOrgSettingsOK(t, s, map[string]any{"llm_auth_method": domain.LLMAuthSystem})
 }
 
-// Binding a credential settles the question in the one direction that cannot be
-// wrong: an org holding its own key is not running on the host's, so nothing has
-// to ask the admin to confirm what they just did.
-func TestAnthropicPut_MovesTheOrgOntoItsOwnCredentials(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
-	if got := orgLLMAuthMethod(t, s); got != domain.LLMAuthSystem {
-		t.Fatalf("llm_auth_method = %q before the bind, want %q", got, domain.LLMAuthSystem)
-	}
-
-	bindAnthropicRefWithMethod(t, s)
-	if got := orgLLMAuthMethod(t, s); got != domain.LLMAuthBYOK {
-		t.Errorf("llm_auth_method = %q after a bind, want %q", got, domain.LLMAuthBYOK)
-	}
-}
-
-// Multi mode has no host credentials to lend: the operator's environment is one
-// environment shared by every tenant, and credential resolution refuses an org
-// with nothing bound rather than falling back to it. So "system" is refused on
-// the way in — an admin is told no, rather than left with a row that reads one
-// way and runs another — and the read reports the mode's single legal value for
-// a freshly provisioned org that has picked nothing.
+// Multi mode has no host credentials to lend, so a freshly provisioned org
+// stores and reads "byok", and a PATCH to "system" is refused with 400 naming
+// the field.
 func TestOrgSettings_MultiRefusesHostCredentials(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)

@@ -11,25 +11,19 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// The route surgery's own contracts: the org settings row's optimistic
-// concurrency, the single clearing convention on both settings PATCHes, the
-// poller kicks the fused setup route used to own, and the removal of the routes
-// this ticket retired.
+// The settings routes' shared contracts: the org settings row's optimistic
+// concurrency, the single clearing convention on both settings PATCHes, and the
+// poller kicks each credential and settings write owns.
 
-// TestOrgSettingsPatch_ConcurrentSaves_OneWinnerOneConflict is the property the
-// version column exists for. The settings save is a read-modify-write over the
-// whole form, so two admins editing different sections of the page each carried
-// the other's fields as their client last read them, and the first one's change
-// was undone with a 200 and nothing to notice.
-//
-// Both writers read the same version, so exactly one may commit; the loser gets
-// 409 VERSION_CONFLICT and a refetch shows the winner's write, unmerged. There
-// is no server-side merge, because the two writers disagree about fields
-// neither of them named.
+// TestOrgSettingsPatch_ConcurrentSaves_OneWinnerOneConflict: two saves from the
+// same version cannot both commit. The loser gets 409 VERSION_CONFLICT with no
+// server-side merge, the refetch shows the winner's write, and a retry at the
+// fresh version lands.
 func TestOrgSettingsPatch_ConcurrentSaves_OneWinnerOneConflict(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -64,7 +58,6 @@ func TestOrgSettingsPatch_ConcurrentSaves_OneWinnerOneConflict(t *testing.T) {
 		t.Fatalf("version did not move after a successful save: still %d", fresh)
 	}
 
-	// Re-applying at the fresh version is the loser's whole remedy.
 	retry := doJSON(t, s, http.MethodPatch, orgSettingsPath(), map[string]any{
 		"version": fresh, "github_poll_interval": "23m0s",
 	})
@@ -76,9 +69,8 @@ func TestOrgSettingsPatch_ConcurrentSaves_OneWinnerOneConflict(t *testing.T) {
 	}
 }
 
-// TestOrgSettingsPatch_VersionRequired: a PATCH with no version is exactly the
-// unconditional last-write-wins save this route stopped being, so it is
-// refused rather than silently defaulted.
+// TestOrgSettingsPatch_VersionRequired: a PATCH with no version would be an
+// unconditional last-write-wins save, so it is refused rather than defaulted.
 func TestOrgSettingsPatch_VersionRequired(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -113,10 +105,9 @@ func TestSettingsPatch_EmptyBodyRefused(t *testing.T) {
 	}
 }
 
-// TestOrgSettingsPatch_NullClearsEveryClearableField enumerates the org's
-// clearable fields and pins that null clears each one and the clear round-trips
-// through the GET. One convention, no empty-string sentinels, no
-// zero-means-null — the three encodings this route used to mix.
+// TestOrgSettingsPatch_NullClearsEveryClearableField: null clears each of the
+// org's clearable fields to its default, and the clear round-trips through the
+// GET. Null is the only clearing spelling.
 func TestOrgSettingsPatch_NullClearsEveryClearableField(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -180,13 +171,9 @@ func TestOrgSettingsPatch_NullClearsEveryClearableField(t *testing.T) {
 	}
 }
 
-// TestTeamSettingsPatch_NullClearsEveryClearableField is the team mirror.
-//
-// ai_model is deliberately NOT in the cleared set: it is the one field on
-// either scope where null is refused rather than meaning "reset", because
-// nothing resolves an empty default at dispatch. It rides along here anyway,
-// set before the mass clear and asserted after it, so a save that clears every
-// field around it is shown to leave it standing.
+// TestTeamSettingsPatch_NullClearsEveryClearableField is the team mirror. The
+// ai_model field, which refuses null, is set before the mass clear and asserted
+// after it, so a save clearing every field around it leaves it standing.
 func TestTeamSettingsPatch_NullClearsEveryClearableField(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -234,12 +221,9 @@ func TestTeamSettingsPatch_NullClearsEveryClearableField(t *testing.T) {
 	}
 }
 
-// A team's default model cannot be cleared, and that is the whole reason the
-// field sits outside the null-resets-everything contract above: nothing
-// resolves an empty default at dispatch, so a cleared team is one whose every
-// unpinned step refuses. The provisioning default is not a fallback to reach
-// for — picking it on the team's behalf would spend on a choice nobody made —
-// so the save refuses and says which models it will take instead.
+// A team's default model cannot be cleared: nothing resolves an empty default at
+// dispatch, and picking the provisioning default would spend on a choice nobody
+// made. The refusal names the models it will take.
 func TestTeamSettingsPatch_AIModelCannotBeCleared(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -257,7 +241,6 @@ func TestTeamSettingsPatch_AIModelCannotBeCleared(t *testing.T) {
 				t.Fatalf("status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
 			}
 			assertFieldError(t, rec, "ai_model")
-			// The refusal names what it will take, which is the whole fix.
 			if !strings.Contains(rec.Body.String(), domain.ModelAliasSonnet) {
 				t.Errorf("the refusal does not name a model it would accept: %s", rec.Body.String())
 			}
@@ -268,9 +251,9 @@ func TestTeamSettingsPatch_AIModelCannotBeCleared(t *testing.T) {
 	}
 }
 
-// TestTeamSettingsPatch_RangeChecks pins the two numerics that were previously
-// unvalidated: a threshold or interval at or below zero is refused rather than
-// persisted as a value nothing downstream can act on.
+// TestTeamSettingsPatch_RangeChecks: a reprioritize threshold or preference
+// interval at or below zero is a 422 OUT_OF_RANGE, and the GET advertises the
+// grace band the backend honors.
 func TestTeamSettingsPatch_RangeChecks(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -286,17 +269,15 @@ func TestTeamSettingsPatch_RangeChecks(t *testing.T) {
 			assertFirstError(t, rec, httpx.ReasonOutOfRange, field)
 		}
 	}
-	// The grace band is advertised on the GET, so the API caller can discover
-	// what the slider already knows.
 	if _, minS, maxS := teamGrace(t, s); minS != delegate.AbsentGraceMinSeconds || maxS != delegate.AbsentGraceMaxSeconds {
 		t.Errorf("advertised grace band [%d,%d], want [%d,%d]", minS, maxS,
 			delegate.AbsentGraceMinSeconds, delegate.AbsentGraceMaxSeconds)
 	}
 }
 
-// TestTeamSettingsPatch_RejectsJiraProjects: the rules moved to their own
-// replace-set resource, and a stale caller that still sends them here is told
-// so rather than half-saved.
+// TestTeamSettingsPatch_RejectsJiraProjects: the Jira rules are their own
+// replace-set resource, so a team settings PATCH naming jira_projects is a 400
+// UNKNOWN_FIELD rather than a partial save.
 func TestTeamSettingsPatch_RejectsJiraProjects(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -311,9 +292,8 @@ func TestTeamSettingsPatch_RejectsJiraProjects(t *testing.T) {
 	assertFirstError(t, rec, httpx.ReasonUnknownField, "jira_projects")
 }
 
-// TestTeamJiraProjectsPut_ReplaceSetRoundTrip pins the new resource's own
-// contract: the body IS the desired set, the GET echoes it, and a project
-// absent from a later PUT is untracked.
+// TestTeamJiraProjectsPut_ReplaceSetRoundTrip: the PUT body is the desired set,
+// the GET echoes it in order, and a project absent from a later PUT is untracked.
 func TestTeamJiraProjectsPut_ReplaceSetRoundTrip(t *testing.T) {
 	// Adding a project is gated against the org's live catalog, so the
 	// org is connected to one holding both projects.
@@ -343,11 +323,9 @@ func TestTeamJiraProjectsPut_ReplaceSetRoundTrip(t *testing.T) {
 	}
 }
 
-// TestSetupWizardSequence_KicksThePoller is the regression the fused setup
-// route's removal owes. That route bound the PAT, wrote the base URLs and the
-// clone protocol, AND re-dued polling; the wizard now drives three discrete
-// writes, and the poller kick has to survive the split or a freshly-configured
-// org sits idle until its next scheduled cycle.
+// TestSetupWizardSequence_KicksThePoller: the setup wizard's three writes (PAT
+// bind, Jira credential bind, clone-protocol save) each kick their poller, so a
+// freshly configured org does not sit idle, and both binds land an audit row.
 func TestSetupWizardSequence_KicksThePoller(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -376,9 +354,6 @@ func TestSetupWizardSequence_KicksThePoller(t *testing.T) {
 	}
 	<-ghDone
 
-	// The Jira credential bind is the leg that regressed when the fused route
-	// went away: it never kicked on its own, it just happened to ride the
-	// GitHub restart the fused route fired for the whole call.
 	jiraStub := jiraMyselfStub(t, `{"accountId":"org-bot","displayName":"Org Bot"}`, nil)
 	if rec := doJSON(t, s, http.MethodPut, jiraCredentialRoute(), map[string]any{
 		"deployment": "data_center", "url": jiraStub.URL, "pat": "jira_test",
@@ -387,8 +362,7 @@ func TestSetupWizardSequence_KicksThePoller(t *testing.T) {
 	}
 	<-jiraDone
 
-	// The clone-protocol save is the wizard's last call, and it moves a field
-	// the GitHub poller/clone path reads — so it kicks too.
+	// The clone protocol is a field the GitHub poller/clone path reads.
 	if rec := patchOrgSettings(t, s, map[string]any{"github_clone_protocol": "https"}); rec.Code != http.StatusOK {
 		t.Fatalf("clone protocol save = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -398,44 +372,26 @@ func TestSetupWizardSequence_KicksThePoller(t *testing.T) {
 	defer mu.Unlock()
 	if github < 2 {
 		t.Errorf("github poller kicks = %d across the wizard's writes, want at least 2 "+
-			"(the PAT bind and the settings save each own their own re-due now)", github)
+			"(the PAT bind and the settings save each own their own re-due)", github)
 	}
 	if jira < 1 {
 		t.Errorf("jira poller kicks = %d, want at least 1 (the credential bind owns its own re-due)", jira)
 	}
-}
 
-// TestRetiredRoutes_AreGone pins the removals. A route that still answers is a
-// second way to do something this ticket gave exactly one way to do, and the
-// pair of them drift.
-func TestRetiredRoutes_AreGone(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
-
-	for _, c := range []struct{ method, path string }{
-		{http.MethodPost, "/api/integrations/setup"},
-		{http.MethodDelete, "/api/integrations"},
-		{http.MethodPost, "/api/anthropic/connect"},
-		{http.MethodPost, "/api/bedrock/connect"},
-		{http.MethodGet, "/api/settings/org"},
-		{http.MethodPost, "/api/settings/org"},
-		{http.MethodGet, "/api/settings/team/default"},
-		{http.MethodPost, "/api/settings/team/default"},
-	} {
-		rec := doJSON(t, s, c.method, c.path, map[string]any{})
-		if rec.Code != http.StatusNotFound {
-			t.Errorf("%s %s = %d, want 404 (route retired)", c.method, c.path, rec.Code)
-		}
+	if v := getSecret(t, s, integrations.KeyGitHubPAT); v != "ghp_test" {
+		t.Errorf("stored PAT = %q, want the bound ghp_test", v)
 	}
+	rows := credAuditRows(t, s)
+	ghRow := findCredAudit(t, rows, domain.AccessActionCredentialSet, domain.CredentialKindGitHubPAT)
+	if ghRow.Host != gh.URL || ghRow.Name != "acme-bot" {
+		t.Errorf("github row = %+v, want host %q and the validated login acme-bot", ghRow, gh.URL)
+	}
+	findCredAudit(t, rows, domain.AccessActionCredentialSet, domain.CredentialKindJiraOrg)
 }
 
-// TestJiraIdentityPAT_RejectsWrongDeploymentFields: which credential shape a
-// user may bind is the ORG's deployment, not their choice. The route used to
-// dispatch on that server-side state and silently ignore the other shape's
-// fields, so a Cloud user pasting a Data Center PAT got "a Jira personal access
-// token is required" for a token they had just pasted. The wrong shape's field
-// is now rejected by name.
+// TestJiraIdentityPAT_RejectsWrongDeploymentFields: the credential shape a user
+// may bind is set by the ORG's deployment, so a Data Center org's identity route
+// rejects Cloud fields by name and still takes a PAT.
 func TestJiraIdentityPAT_RejectsWrongDeploymentFields(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -497,8 +453,7 @@ func TestJiraCredentialPut_RejectsCrossFlavorFields(t *testing.T) {
 		})
 	}
 
-	// An absent or unrecognized discriminator is refused rather than guessed —
-	// guessing is what the explicit field replaced.
+	// An absent or unrecognized discriminator is refused rather than guessed.
 	for _, body := range []map[string]any{
 		{"url": "https://jira.example.com", "pat": "p"},
 		{"deployment": "server", "url": "https://jira.example.com", "pat": "p"},
@@ -568,4 +523,28 @@ func teamJiraProjectKeys(t *testing.T, s *Server) []string {
 		keys = append(keys, p.Key)
 	}
 	return keys
+}
+
+// TestRetiredRoutes_AreGone pins the removed routes: one that still answered
+// would be a second way to do something these routes give exactly one way to do.
+func TestRetiredRoutes_AreGone(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	for _, c := range []struct{ method, path string }{
+		{http.MethodPost, "/api/integrations/setup"},
+		{http.MethodDelete, "/api/integrations"},
+		{http.MethodPost, "/api/anthropic/connect"},
+		{http.MethodPost, "/api/bedrock/connect"},
+		{http.MethodGet, "/api/settings/org"},
+		{http.MethodPost, "/api/settings/org"},
+		{http.MethodGet, "/api/settings/team/default"},
+		{http.MethodPost, "/api/settings/team/default"},
+	} {
+		rec := doJSON(t, s, c.method, c.path, map[string]any{})
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s %s = %d, want 404 (route retired)", c.method, c.path, rec.Code)
+		}
+	}
 }

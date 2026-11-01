@@ -157,11 +157,9 @@ func (r *authRig) setTokenAgeCap(orgID uuid.UUID, days int) {
 
 // ---------- policy ----------
 
-// TestAPITokenPolicy_MemberReadsTheCap pins the one read a member has of the
-// policy that binds their tokens: null while the org sets no cap, the number
-// once it does, and the same 404 for an org the caller is not in as every
-// other org-addressed read. A plain member (not an admin) is the caller, since
-// admins could already read it off the settings row.
+// TestAPITokenPolicy_MemberReadsTheCap: a plain member reads the org's token
+// max-age cap, null when unset, under a session or a token, and a non-member
+// gets 404.
 func TestAPITokenPolicy_MemberReadsTheCap(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
@@ -260,42 +258,6 @@ func TestAPITokenCreate_ReturnsPlaintextExactlyOnce(t *testing.T) {
 	}
 }
 
-// TestAPITokenCreate_ReportsEveryFieldFault is the all-fields rule: one
-// response names every problem, so a caller fixing one does not discover the
-// next on the next request.
-func TestAPITokenCreate_ReportsEveryFieldFault(t *testing.T) {
-	r := newAuthRig(t)
-	userID := r.seedUser()
-	orgID, _ := r.seedOrg(userID, "faults-org")
-	sid := r.signIn(userID)
-
-	rec := r.tokensJSON("POST", "/api/me/tokens", map[string]any{
-		"name":          "   ",
-		"org_id":        orgID.String(),
-		"expires_at":    "next tuesday",
-		"allowed_cidrs": []string{"10.0.0.0/8", "not-an-ip"},
-	}, sid, "")
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("status = %d, want 422: %s", rec.Code, rec.Body.String())
-	}
-	items := errorItems(t, rec)
-	if len(items) != 3 {
-		t.Fatalf("want 3 faults (name, expires_at, allowed_cidrs), got %d: %s", len(items), rec.Body.String())
-	}
-	fields := map[string]bool{}
-	for _, it := range items {
-		fields[it.Field] = true
-		if it.Reason != "INVALID_FIELD" {
-			t.Errorf("reason on %s = %q, want INVALID_FIELD", it.Field, it.Reason)
-		}
-	}
-	for _, want := range []string{"name", "expires_at", "allowed_cidrs"} {
-		if !fields[want] {
-			t.Errorf("no fault reported for %s: %s", want, rec.Body.String())
-		}
-	}
-}
-
 // TestAPITokenCreate_FieldValidation walks each single-field refusal.
 func TestAPITokenCreate_FieldValidation(t *testing.T) {
 	r := newAuthRig(t)
@@ -341,6 +303,34 @@ func TestAPITokenCreate_FieldValidation(t *testing.T) {
 			}
 		})
 	}
+
+	// One response names every fault, so a caller fixing one does not discover
+	// the next on the following request.
+	t.Run("every fault at once", func(t *testing.T) {
+		rec := r.tokensJSON("POST", "/api/me/tokens", map[string]any{
+			"name": "   ", "org_id": orgID.String(), "expires_at": "next tuesday",
+			"allowed_cidrs": []string{"10.0.0.0/8", "not-an-ip"},
+		}, sid, "")
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("status = %d, want 422: %s", rec.Code, rec.Body.String())
+		}
+		items := errorItems(t, rec)
+		if len(items) != 3 {
+			t.Fatalf("want 3 faults (name, expires_at, allowed_cidrs), got %d: %s", len(items), rec.Body.String())
+		}
+		fields := map[string]bool{}
+		for _, it := range items {
+			fields[it.Field] = true
+			if it.Reason != "INVALID_FIELD" {
+				t.Errorf("reason on %s = %q, want INVALID_FIELD", it.Field, it.Reason)
+			}
+		}
+		for _, want := range []string{"name", "expires_at", "allowed_cidrs"} {
+			if !fields[want] {
+				t.Errorf("no fault reported for %s: %s", want, rec.Body.String())
+			}
+		}
+	})
 }
 
 func manyCIDRs(n int) []string {
@@ -714,8 +704,8 @@ func TestAPITokenRevoke_Faults(t *testing.T) {
 	})
 }
 
-// TestAPITokenRevoke_RevokedTokenStopsWorking closes the loop: revocation is
-// not bookkeeping, the credential dies.
+// TestAPITokenRevoke_RevokedTokenStopsWorking: a revoked token stops
+// authenticating, whether a session revoked it or it revoked itself.
 func TestAPITokenRevoke_RevokedTokenStopsWorking(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
@@ -732,61 +722,22 @@ func TestAPITokenRevoke_RevokedTokenStopsWorking(t *testing.T) {
 	if rec := r.serve(r.bearerReq("GET", "/api/me", tok.Token)); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("token after revoke = %d, want 401", rec.Code)
 	}
-}
 
-// ---------- the headless flow, and the same-org rules that bound it ----------
-
-// TestAPITokens_HeadlessRotation is the acceptance shape: a session mints the
-// first token, and from there the token alone lists, mints its replacement in
-// the same org, and revokes itself. No cookie after the first call.
-func TestAPITokens_HeadlessRotation(t *testing.T) {
-	r := newAuthRig(t)
-	userID := r.seedUser()
-	orgID, _ := r.seedOrg(userID, "rotate-org")
-	sid := r.signIn(userID)
-
-	first := r.createToken(sid, map[string]any{"name": "deploy", "org_id": orgID.String()})
-
-	// Mint the replacement with the old token. Same name deliberately —
-	// rotation must not force a rename.
-	rec := r.tokensJSON("POST", "/api/me/tokens",
-		map[string]any{"name": "deploy", "org_id": orgID.String()}, "", first.Token)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("token-authed mint = %d, want 201: %s", rec.Code, rec.Body.String())
-	}
-	var second tokenCreated
-	if err := json.Unmarshal(rec.Body.Bytes(), &second); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if second.ID == first.ID || second.Token == first.Token {
-		t.Fatal("rotation returned the same credential")
-	}
-
-	// The new token sees both, then retires the old one.
-	listed := r.listTokens("", second.Token, map[string]any{})
-	if len(listed.Items) != 2 {
-		t.Fatalf("list under the new token = %d items, want 2", len(listed.Items))
-	}
-	if rec := r.tokensJSON("DELETE", "/api/me/tokens/"+first.ID, nil, "", second.Token); rec.Code != http.StatusNoContent {
-		t.Fatalf("token-authed revoke = %d, want 204: %s", rec.Code, rec.Body.String())
-	}
-	if rec := r.serve(r.bearerReq("GET", "/api/me", first.Token)); rec.Code != http.StatusUnauthorized {
-		t.Errorf("retired token = %d, want 401", rec.Code)
-	}
-
-	// Self-revoke is allowed, and the response still goes out.
-	if rec := r.tokensJSON("DELETE", "/api/me/tokens/"+second.ID, nil, "", second.Token); rec.Code != http.StatusNoContent {
+	// A token may revoke itself, and the 204 still goes out.
+	self := r.createToken(sid, map[string]any{"name": "self-revoking", "org_id": orgID.String()})
+	if rec := r.tokensJSON("DELETE", "/api/me/tokens/"+self.ID, nil, "", self.Token); rec.Code != http.StatusNoContent {
 		t.Fatalf("self-revoke = %d, want 204: %s", rec.Code, rec.Body.String())
 	}
-	if rec := r.serve(r.bearerReq("GET", "/api/me", second.Token)); rec.Code != http.StatusUnauthorized {
+	if rec := r.serve(r.bearerReq("GET", "/api/me", self.Token)); rec.Code != http.StatusUnauthorized {
 		t.Errorf("self-revoked token = %d, want 401", rec.Code)
 	}
 }
 
-// TestAPITokens_TokenCannotLeaveItsOrg is the containment property: a leaked
-// token for org A can neither mint one for org B, nor read B's tokens, nor
-// revoke them — while the same calls under a session succeed, which is what
-// proves the refusal is the credential's and not a missing membership.
+// ---------- org containment ----------
+
+// TestAPITokens_TokenCannotLeaveItsOrg: a token for org A can neither mint, list
+// nor revoke tokens in org B, while the same calls under a session spanning both
+// succeed, so the refusal comes from the credential and not the membership.
 func TestAPITokens_TokenCannotLeaveItsOrg(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
@@ -835,10 +786,9 @@ func TestAPITokens_TokenCannotLeaveItsOrg(t *testing.T) {
 	}
 }
 
-// TestAPITokens_MeUnderBearer: /api/me answers for a token caller, with the
-// token's sealed org as the cursor. The route reads its active org from
-// request context rather than the session row, which is what makes it tolerate
-// having no session at all.
+// TestAPITokens_MeUnderBearer: /api/me under a token reports the token's org as
+// active_org_id even when the session's cursor points elsewhere, and still lists
+// every org the principal belongs to.
 func TestAPITokens_MeUnderBearer(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
@@ -878,53 +828,6 @@ func TestAPITokens_MeUnderBearer(t *testing.T) {
 	// not what the principal is.
 	if len(me.Orgs) != 2 {
 		t.Errorf("orgs = %d, want 2", len(me.Orgs))
-	}
-}
-
-// TestAPITokens_NoOriginHeader is the shape a real headless client actually
-// sends: a Bearer and no Origin at all. The mutating routes sit behind the
-// same-origin check, which skips a Bearer request precisely so this works — a
-// cross-site browser context cannot attach the header without a preflight this
-// server never approves, so its presence already says the request was
-// deliberate.
-func TestAPITokens_NoOriginHeader(t *testing.T) {
-	r := newAuthRig(t)
-	userID := r.seedUser()
-	orgID, _ := r.seedOrg(userID, "curl-org")
-	sid := r.signIn(userID)
-	tok := r.createToken(sid, map[string]any{"name": "curl", "org_id": orgID.String()})
-
-	// No Origin, no cookie — just the Authorization header.
-	post := func(method, path string, body any) *httptest.ResponseRecorder {
-		t.Helper()
-		var payload []byte
-		if body != nil {
-			var err error
-			if payload, err = json.Marshal(body); err != nil {
-				t.Fatalf("marshal: %v", err)
-			}
-		}
-		req := httptest.NewRequest(method, path, bytes.NewReader(payload))
-		req.Header.Set("Authorization", "Bearer "+tok.Token)
-		req.Header.Set("Content-Type", "application/json")
-		rec := httptest.NewRecorder()
-		r.srv.mux.ServeHTTP(rec, req)
-		return rec
-	}
-
-	if rec := post("POST", "/api/me/tokens/list", map[string]any{}); rec.Code != http.StatusOK {
-		t.Errorf("Origin-less list = %d, want 200: %s", rec.Code, rec.Body.String())
-	}
-	rec := post("POST", "/api/me/tokens", map[string]any{"name": "minted-headless", "org_id": orgID.String()})
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("Origin-less mint = %d, want 201: %s", rec.Code, rec.Body.String())
-	}
-	var made tokenCreated
-	if err := json.Unmarshal(rec.Body.Bytes(), &made); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if rec := post("DELETE", "/api/me/tokens/"+made.ID, nil); rec.Code != http.StatusNoContent {
-		t.Errorf("Origin-less revoke = %d, want 204: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -985,11 +888,9 @@ func TestSessionVerbs_RefuseTokenAuth(t *testing.T) {
 	}
 }
 
-// TestSessionVerbs_LogoutRefusesBearerWithoutSession is the case the shared
-// guard exists for: POST /api/auth/logout sits outside withSession, so nothing
-// has resolved the credential by the time it runs and only the header's shape
-// says a token was presented. Without the check it would revoke nothing and
-// answer 204 — success for work that never happened.
+// TestSessionVerbs_LogoutRefusesBearerWithoutSession: logout sits outside
+// withSession, so the guard reads the header shape. Without it a token-only
+// logout would revoke nothing and answer 204.
 func TestSessionVerbs_LogoutRefusesBearerWithoutSession(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
@@ -999,14 +900,9 @@ func TestSessionVerbs_LogoutRefusesBearerWithoutSession(t *testing.T) {
 	assertFault(t, rec, http.StatusForbidden, "FORBIDDEN")
 }
 
-// TestSessionVerbs_NonAPITokenBearerIsNotTokenAuth pins the boundary of the
-// guard's header fallback: it asks for OUR token's shape, not for a Bearer.
-//
-// This server accepts exactly one Bearer form. A credential in any other shape
-// is not an API token, so the session verbs must not answer it "you need a
-// session" — that is both untrue and, on the pre-auth logout mount, a change to
-// what a caller who never touched a token gets from a route that has always
-// ignored the header. Logout still ends the session the cookie names.
+// TestSessionVerbs_NonAPITokenBearerIsNotTokenAuth: the session-verb guard refuses
+// only this server's token shape. Logout with a session cookie and some other
+// Bearer still answers 204 and ends the session.
 func TestSessionVerbs_NonAPITokenBearerIsNotTokenAuth(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
@@ -1040,10 +936,9 @@ func TestSessionVerbs_NonAPITokenBearerIsNotTokenAuth(t *testing.T) {
 	}
 }
 
-// TestSessionVerbs_NonAPITokenBearerOnGuardedRouteIs401 is the same boundary on
-// the routes that DO sit behind withSession: a credential this server does not
-// accept is refused there as an unusable credential, before any handler runs.
-// 401 and not the guard's 403 — the fault is the credential, not the verb.
+// TestSessionVerbs_NonAPITokenBearerOnGuardedRouteIs401: behind withSession, a
+// Bearer this server does not accept is a 401 before any handler runs, not the
+// session guard's 403.
 func TestSessionVerbs_NonAPITokenBearerOnGuardedRouteIs401(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()

@@ -11,10 +11,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 )
 
-// seedTeam inserts an extra team into an org so the resolver tests can
-// exercise the ≥2-team branches. SQLite's ListForUser returns every team
-// in the org (N=1 has no memberships join), so adding a row is enough to
-// make the caller "belong to" two teams from the resolver's view.
+// seedTeam inserts an extra team into an org. SQLite's ListForUser returns
+// every team in the org, so one more row makes the local caller a member of
+// two teams.
 func seedTeam(t *testing.T, s *Server, orgID, slug string) string {
 	t.Helper()
 	id := uuid.New().String()
@@ -27,116 +26,64 @@ func seedTeam(t *testing.T, s *Server, orgID, slug string) string {
 	return id
 }
 
-// TestResolveActingTeam_ReturnsSoleTeam pins the byte-identical solo
-// path: with one team in the org (the local default), no explicit pick,
-// and no sticky default, the resolver returns the sole team. Every write
-// site relies on this for solo behavior.
-func TestResolveActingTeam_ReturnsSoleTeam(t *testing.T) {
-	s := newTestServer(t)
+// TestResolveActingTeam pins the write resolver's order: a pick the caller is a
+// member of, then the sticky default, then the sole team. A teamless caller and
+// a pick of a team the caller is not on are selection errors, which map to 400.
+func TestResolveActingTeam(t *testing.T) {
+	const second = "second" // stands for the id of the seeded second team
+	for _, tc := range []struct {
+		name       string
+		orgID      string
+		seedSecond bool
+		pick       string
+		sticky     bool
+		want       string
+		wantErr    error
+	}{
+		{name: "sole team", orgID: runmode.LocalDefaultOrgID, want: runmode.LocalDefaultTeamID},
+		{name: "teamless org", orgID: "00000000-0000-0000-0000-0000000009ff", wantErr: teamscope.ErrNoTeam},
+		{name: "explicit pick", orgID: runmode.LocalDefaultOrgID, seedSecond: true, pick: second, want: second},
+		{name: "foreign pick", orgID: runmode.LocalDefaultOrgID, pick: uuid.New().String(), wantErr: teamscope.ErrForbidden},
+		{name: "sticky default", orgID: runmode.LocalDefaultOrgID, seedSecond: true, sticky: true, want: second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer(t)
+			pick, want := tc.pick, tc.want
+			if tc.seedSecond {
+				id := seedTeam(t, s, runmode.LocalDefaultOrgID, second)
+				if pick == second {
+					pick = id
+				}
+				if want == second {
+					want = id
+				}
+				if tc.sticky {
+					if err := s.users.SetLastActingTeam(t.Context(), runmode.LocalDefaultUserID, id); err != nil {
+						t.Fatalf("set last-acting team: %v", err)
+					}
+				}
+			}
 
-	got, err := teamscope.ResolveActing(t.Context(), s.teams, s.users, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "")
-	if err != nil {
-		t.Fatalf("resolveActingTeam: %v", err)
-	}
-	if got != runmode.LocalDefaultTeamID {
-		t.Errorf("acting team = %q; want %q (the org's sole/default team)", got, runmode.LocalDefaultTeamID)
+			got, err := teamscope.ResolveActing(t.Context(), s.teams, s.users, tc.orgID, runmode.LocalDefaultUserID, pick)
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) || !teamscope.IsSelectionError(err) {
+					t.Fatalf("error = %v; want %v, a selection error", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ResolveActing: %v", err)
+			}
+			if got != want {
+				t.Errorf("acting team = %q; want %q", got, want)
+			}
+		})
 	}
 }
 
-// TestResolveActingTeam_NoTeamErrors pins the teamless-caller guard
-// (TFAC-562): a caller with no team membership in the org — whether
-// because the org itself has no teams, or because they just aren't on any
-// of the org's teams — resolves to teamscope.ErrNoTeam, a clean
-// caller-mappable 400, rather than silently substituting an arbitrary team
-// (the org's default) the caller has no relationship to.
-func TestResolveActingTeam_NoTeamErrors(t *testing.T) {
-	s := newTestServer(t)
-
-	const orglessOrg = "00000000-0000-0000-0000-0000000009ff"
-	_, err := teamscope.ResolveActing(t.Context(), s.teams, s.users, orglessOrg, runmode.LocalDefaultUserID, "")
-	if err == nil {
-		t.Fatalf("resolveActingTeam on a teamless org returned nil error; want teamscope.ErrNoTeam")
-	}
-	if !errors.Is(err, teamscope.ErrNoTeam) {
-		t.Errorf("error = %v; want teamscope.ErrNoTeam", err)
-	}
-	if !teamscope.IsSelectionError(err) {
-		t.Errorf("error %v is not a selection error; should map to 400", err)
-	}
-}
-
-// TestResolveActingTeam_AmbiguousWithoutPick is the PR2 contract that
-// resolves the old TODO: a caller on two teams, with no explicit pick and
-// no sticky default, is refused rather than silently landing on a guessed
-// team. The required picker means the UI never reaches this; a non-UI
-// write that omits team_id gets a 400-mapped error.
-func TestResolveActingTeam_AmbiguousWithoutPick(t *testing.T) {
-	s := newTestServer(t)
-	seedTeam(t, s, runmode.LocalDefaultOrgID, "second")
-
-	_, err := teamscope.ResolveActing(t.Context(), s.teams, s.users, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "")
-	if err == nil {
-		t.Fatalf("resolveActingTeam with ≥2 teams and no pick returned nil error; want errActingTeamRequired")
-	}
-	if !teamscope.IsSelectionError(err) {
-		t.Errorf("error %v is not a selection error; should map to 400", err)
-	}
-}
-
-// TestResolveActingTeam_ExplicitPickHonored: a valid explicit pick wins
-// over everything else.
-func TestResolveActingTeam_ExplicitPickHonored(t *testing.T) {
-	s := newTestServer(t)
-	second := seedTeam(t, s, runmode.LocalDefaultOrgID, "second")
-
-	got, err := teamscope.ResolveActing(t.Context(), s.teams, s.users, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, second)
-	if err != nil {
-		t.Fatalf("resolveActingTeam: %v", err)
-	}
-	if got != second {
-		t.Errorf("acting team = %q; want the explicitly picked team %q", got, second)
-	}
-}
-
-// TestResolveActingTeam_PickForeignTeamRejected: picking a team the
-// caller doesn't belong to is refused (not silently honored). A team id
-// outside the caller's ListForUser set models a forged/stale pick.
-func TestResolveActingTeam_PickForeignTeamRejected(t *testing.T) {
-	s := newTestServer(t)
-	foreign := uuid.New().String() // never in the caller's team set
-
-	_, err := teamscope.ResolveActing(t.Context(), s.teams, s.users, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, foreign)
-	if err == nil {
-		t.Fatalf("picking a non-member team returned nil error; want errActingTeamForbidden")
-	}
-	if !teamscope.IsSelectionError(err) {
-		t.Errorf("error %v is not a selection error; should map to 400", err)
-	}
-}
-
-// TestResolveActingTeam_StickyDefaultSeedsAmbiguous: with ≥2 teams and no
-// explicit pick, a valid sticky default resolves the otherwise-ambiguous
-// case instead of erroring.
-func TestResolveActingTeam_StickyDefaultSeedsAmbiguous(t *testing.T) {
-	s := newTestServer(t)
-	second := seedTeam(t, s, runmode.LocalDefaultOrgID, "second")
-	if err := s.users.SetLastActingTeam(t.Context(), runmode.LocalDefaultUserID, second); err != nil {
-		t.Fatalf("set last-acting team: %v", err)
-	}
-
-	got, err := teamscope.ResolveActing(t.Context(), s.teams, s.users, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "")
-	if err != nil {
-		t.Fatalf("resolveActingTeam: %v", err)
-	}
-	if got != second {
-		t.Errorf("acting team = %q; want the sticky-default team %q", got, second)
-	}
-}
-
-// TestResolveReadTeam_DefaultsNeverBlock: the read-deck resolver never
-// errors on a multi-team caller — absent a filter and a sticky default it
-// returns the first (oldest) team, and a stale pick falls through rather
-// than 4xx-ing a read.
+// TestResolveReadTeam_DefaultsNeverBlock: the read resolver never errors on a
+// multi-team caller. With no filter and no sticky default it returns the
+// oldest team, and a stale filter falls back to it rather than 4xx-ing a read.
 func TestResolveReadTeam_DefaultsNeverBlock(t *testing.T) {
 	s := newTestServer(t)
 	seedTeam(t, s, runmode.LocalDefaultOrgID, "second")

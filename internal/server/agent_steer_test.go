@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -25,15 +27,11 @@ func execSQL(t *testing.T, database *sql.DB, query string, args ...any) {
 	}
 }
 
-// seedSteerConversation installs the entity → event → prompt → task → blueprint_run → conversation
-// chain a steering endpoint needs, on the local-default org/team, and returns
-// the conversation id. status sets the conversation's lifecycle state.
-//
-// The conversation is step 0 of its blueprint, which is where the blueprint's
-// current_step_index sits — the shape a firing produces, and the one the
-// drivability gate reads. A row that named no step would be undrivable, so a
-// fixture that left it NULL would silently make every steering test a test of
-// the refusal path.
+// seedSteerConversation installs the entity → event → prompt → task →
+// blueprint_run → conversation chain on the local-default org/team and returns
+// the conversation id; status sets its lifecycle state. The conversation is
+// step 0, where the blueprint's current_step_index sits: a row naming no step
+// is undrivable, which would turn every steering test into a refusal test.
 func seedSteerConversation(t *testing.T, database *sql.DB, suffix, status string) string {
 	t.Helper()
 	const eventType = "github:pr:ci_check_failed"
@@ -76,16 +74,9 @@ func messageRowCount(t *testing.T, database *sql.DB, conversationID string) int 
 	return n
 }
 
-// TestHandleMessage_TerminalConflictRecordsNothing drives the message endpoint
-// against a failed conversation: the conversation is visible (so the answer is a 409, not a 404)
-// and the refused send leaves no transcript row — the previous record-first
-// ordering durably recorded and broadcast the message before routing could
-// refuse it, so the sender saw an error toast while their words scrolled onto
-// every watcher's transcript as the conversation's latest activity.
-//
-// `failed` because that is what "terminal" means to the steering gate: a
-// conversation that concluded takes a follow-up, and only one whose
-// infrastructure died has nothing left to say a message to.
+// TestHandleMessage_TerminalConflictRecordsNothing: a message to a failed
+// conversation (the terminal state for steering; a concluded one takes a
+// follow-up) is a 409 and leaves no transcript row.
 func TestHandleMessage_TerminalConflictRecordsNothing(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
@@ -100,12 +91,9 @@ func TestHandleMessage_TerminalConflictRecordsNothing(t *testing.T) {
 	}
 }
 
-// TestHandleMessage_OrphanedRunningConflictRecordsNothing pins the window that
-// made the old ordering user-visible: a conversation whose row still says `running` but
-// with no live process registered anywhere (server restarted mid-engagement, or the
-// process died before a status write). The composer keys off DB status, so it
-// looks live and every send lands here. The send must 409 with nothing
-// recorded — not paint the message onto the transcript it will never reach.
+// TestHandleMessage_OrphanedRunningConflictRecordsNothing: a conversation whose
+// row says `running` with no live process anywhere (a restart mid-engagement)
+// looks live to the composer, and a send to it is a 409 with nothing recorded.
 func TestHandleMessage_OrphanedRunningConflictRecordsNothing(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
@@ -121,10 +109,8 @@ func TestHandleMessage_OrphanedRunningConflictRecordsNothing(t *testing.T) {
 }
 
 // TestHandleMessage_ParkedSDKRecordsExactlyOnce: a follow-up accepted onto a
-// parked SDK conversation lands as exactly one transcript row — the undelivered queue
-// row the resume dispatch will carry into the prompt. When the endpoint also
-// wrote its own optimistic row, every accepted SDK follow-up appeared twice in
-// the transcript (the endpoint's delivered row plus the queue's pending one).
+// parked SDK conversation lands as exactly one transcript row, the undelivered
+// queue row the resume dispatch carries into the prompt.
 func TestHandleMessage_ParkedSDKRecordsExactlyOnce(t *testing.T) {
 	s := newTestServer(t)
 	withEmptyBlobStore(t, s)
@@ -149,15 +135,31 @@ func TestHandleMessage_ParkedSDKRecordsExactlyOnce(t *testing.T) {
 	}
 }
 
-// TestHandleMessage_UnknownConversationNotFound: a message to a conversation not visible to
-// the caller's org is 404 (the authz gate), before anything is recorded.
-func TestHandleMessage_UnknownConversationNotFound(t *testing.T) {
+// TestSteerRoutes_UnknownConversationNotFound: a message, a stop or a permission
+// answer aimed at a conversation the caller's org cannot see is a 404 before the
+// spawner or broker is reached, with a body that does not echo the id.
+func TestSteerRoutes_UnknownConversationNotFound(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
+	absent := fixtureUUID("r_absent")
 
-	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+fixtureUUID("r_absent")+"/message", map[string]string{"text": "hello"})
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404 (unknown conversation)", rec.Code)
+	for name, tc := range map[string]struct {
+		path string
+		body any
+	}{
+		"message":    {"/message", map[string]string{"text": "hello"}},
+		"stop":       {"/stop", nil},
+		"permission": {"/permissions/req-1", map[string]string{"behavior": "allow"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := doJSON(t, s, "POST", "/api/agent/conversations/"+absent+tc.path, tc.body)
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("status = %d, want 404 (unknown conversation)", rec.Code)
+			}
+			if body := rec.Body.String(); strings.Contains(body, absent) {
+				t.Errorf("404 body %q echoes the requested id back", body)
+			}
+		})
 	}
 }
 
@@ -174,12 +176,9 @@ func TestHandleMessage_EmptyTextRejected(t *testing.T) {
 	}
 }
 
-// TestHandleAgentStop_RecordsTheRequestAndLeavesBlueprintRunning is the
-// endpoint's whole contract: the POST records a stop intent and answers with
-// the conversation carrying it, its status untouched; nothing holds this
-// conversation, so the dispatcher's settlement parks it; and the blueprint
-// behind it is left running and un-cancelled, which is what keeps the parked
-// conversation resumable.
+// TestHandleAgentStop_RecordsTheRequestAndLeavesBlueprintRunning: the POST
+// records a stop intent and answers with it, status untouched; the settlement
+// parks the unheld conversation; the blueprint stays running, so it can resume.
 func TestHandleAgentStop_RecordsTheRequestAndLeavesBlueprintRunning(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
@@ -281,10 +280,8 @@ func TestHandleBlueprintRunCancel_StepCarriesTheIntent(t *testing.T) {
 	}
 }
 
-// TestHandleAgentStop_RetiredPathsAreGone: /cancel and /interrupt were removed
-// outright rather than aliased. Two addresses for one gesture is how they
-// drifted into two meanings of `open`, and nothing consumes the API outside
-// this repo's own frontend.
+// TestHandleAgentStop_RetiredPathsAreGone: /stop is the one address for the
+// gesture, so /cancel and /interrupt are not routes.
 func TestHandleAgentStop_RetiredPathsAreGone(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
@@ -298,32 +295,9 @@ func TestHandleAgentStop_RetiredPathsAreGone(t *testing.T) {
 	}
 }
 
-// TestHandleAgentStop_UnknownConversationNotFound: stopping a conversation not visible to
-// the caller's org is 404 — the authz gate keeps a known conversation id from reaching
-// another tenant's process — and the body is the generic "conversation not found", not
-// the spawner's error text, so the response can't be used to probe which ids
-// exist.
-func TestHandleAgentStop_UnknownConversationNotFound(t *testing.T) {
-	s := newTestServer(t)
-	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
-
-	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+fixtureUUID("r_absent")+"/stop", nil)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404 (unknown conversation)", rec.Code)
-	}
-	if body := rec.Body.String(); strings.Contains(body, fixtureUUID("r_absent")) {
-		t.Errorf("404 body %q echoes the requested id back", body)
-	}
-}
-
-// TestHandleAgentStop_InternalFailureIsNot404 pins the classification: only
-// "there is nothing to stop" is a 404. A read or park that fails on the way to
-// stopping a conversation that really was active is a server fault — reporting it as a
-// missing conversation tells the user their work is gone while the agent keeps running,
-// and echoing the raw error leaks DB internals to the client.
-//
-// A closed handle is the cheapest real infrastructure failure to stage; the
-// preflight read is the first thing to hit it.
+// TestHandleAgentStop_InternalFailureIsNot404: only "nothing to stop" is a 404;
+// a failed read on the way to a stop is a 500, not a report that the work is
+// gone. A closed handle is the cheapest real failure to stage.
 func TestHandleAgentStop_InternalFailureIsNot404(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
@@ -338,10 +312,9 @@ func TestHandleAgentStop_InternalFailureIsNot404(t *testing.T) {
 	}
 }
 
-// TestHandleAgentPermission_NotPendingNotFound: with a visible conversation but no
-// pending prompt for the tool call id, the broker miss is a 404. The conversation is seeded
-// so the request clears the conversation-authz gate and actually reaches the broker
-// (otherwise this would test the conversation-not-found 404 instead).
+// TestHandleAgentPermission_NotPendingNotFound: a visible conversation with no
+// pending prompt for the tool call id is a 404 from the broker, past the
+// conversation gate the seeded row clears.
 func TestHandleAgentPermission_NotPendingNotFound(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
@@ -350,19 +323,6 @@ func TestHandleAgentPermission_NotPendingNotFound(t *testing.T) {
 	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+conversationID+"/permissions/req-ghost", map[string]string{"behavior": "allow"})
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404 (no pending permission request)", rec.Code)
-	}
-}
-
-// TestHandleAgentPermission_UnknownConversationNotFound: resolving a permission on a conversation
-// not visible to the caller's org is 404 before the broker is consulted —
-// mirrors the message/interrupt authz gate.
-func TestHandleAgentPermission_UnknownConversationNotFound(t *testing.T) {
-	s := newTestServer(t)
-	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
-
-	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+fixtureUUID("r_absent")+"/permissions/req-1", map[string]string{"behavior": "allow"})
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404 (unknown conversation)", rec.Code)
 	}
 }
 
@@ -378,34 +338,42 @@ func TestHandleAgentPermission_InvalidBehaviorRejected(t *testing.T) {
 	}
 }
 
-// TestHandleAgentPermission_ResolvesLiveRequest exercises the endpoint → broker
-// wiring on the success path: a parked permission handler is resolved by a POST,
-// the parked goroutine receives the decision, and the endpoint returns 200.
+// TestHandleAgentPermission_ResolvesLiveRequest: a prompt parked with no claim
+// is resolved by the POST and the agent receives the decision. No claim means
+// no audit row, so the body is {"status":"resolved"} with `permission` absent.
 func TestHandleAgentPermission_ResolvesLiveRequest(t *testing.T) {
 	s := newTestServer(t)
 	spawner := delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6")
 	s.SetSpawner(spawner)
 	conversationID := seedSteerConversation(t, s.db, "perm", "running")
 
-	// Park a permission prompt for the conversation: the broker registers synchronously,
-	// then the handler blocks until resolved (or it times out).
 	got := make(chan agentproc.PermissionDecision, 1)
 	h := spawner.BrowserPermissionHandler(runmode.LocalDefaultOrgID, conversationID, "", delegate.AbsentAutoDeny{})
 	go func() { got <- h(agentproc.PermissionRequest{ToolCallID: "req-1", ToolName: "Bash"}) }()
 
 	// Registration races the POST, so retry until the broker has the entry (404
 	// until then), bounded.
-	var code int
+	var rec *httptest.ResponseRecorder
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		code = doJSON(t, s, "POST", "/api/agent/conversations/"+conversationID+"/permissions/req-1", map[string]string{"behavior": "allow"}).Code
-		if code != http.StatusNotFound {
+	for {
+		rec = doJSON(t, s, "POST", "/api/agent/conversations/"+conversationID+"/permissions/req-1", map[string]string{"behavior": "allow"})
+		if rec.Code != http.StatusNotFound || !time.Now().Before(deadline) {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if code != http.StatusOK {
-		t.Fatalf("resolve status = %d, want 200", code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("resolve status = %d, want 200", rec.Code)
+	}
+	var resolvedBody struct {
+		Status     string                         `json:"status"`
+		Permission *domain.ConversationPermission `json:"permission"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resolvedBody); err != nil {
+		t.Fatalf("decode resolve response: %v (body %s)", err, rec.Body.String())
+	}
+	if resolvedBody.Status != "resolved" || resolvedBody.Permission != nil {
+		t.Errorf("body = %+v, want status resolved and no permission (nothing was recorded)", resolvedBody)
 	}
 	select {
 	case d := <-got:

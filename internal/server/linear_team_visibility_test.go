@@ -38,13 +38,21 @@ func getLinearTeamVisibility(t *testing.T, s *Server) linearTeamVisibility {
 	return got
 }
 
-// TestLinearTeamVisibility_Cuts: a tracked team the credential reads and is
-// private is in private, under Linear's current key and name; one it cannot
-// read is in unreadable, under the key and name stored when it was tracked; a
-// readable public team is in neither, and an untracked one is not asked about.
+// TestLinearTeamVisibility_Cuts: a readable private tracked team is in private
+// under Linear's key and name, an unreadable one in unreadable under its stored
+// ones, others in neither; with nothing tracked both are [] and Linear is not asked.
 func TestLinearTeamVisibility_Cuts(t *testing.T) {
 	gone := linear.Team{ID: linearTeamGhost, Key: "GHO", Name: "Ghosts", Private: true}
-	s, _ := newServerWithLinearCatalog(t, linearFixtureEng, linear.Team{ID: linearTeamOps, Key: "OPZ", Name: "Ops", Private: true})
+	s, fake := newServerWithLinearCatalog(t, linearFixtureEng, linear.Team{ID: linearTeamOps, Key: "OPZ", Name: "Ops", Private: true})
+
+	rec := doJSON(t, s, http.MethodGet, linearTeamVisibilityPath, nil)
+	if body := rec.Body.String(); rec.Code != http.StatusOK || body != "{\"private\":[],\"unreadable\":[]}\n" {
+		t.Errorf("with nothing tracked = %d %s, want both cuts as empty lists", rec.Code, body)
+	}
+	if fake.Calls() != 0 {
+		t.Errorf("Linear asked %d times with nothing tracked", fake.Calls())
+	}
+
 	trackLinearTeamsNamed(t, s, linearFixtureOps, gone)
 
 	got := getLinearTeamVisibility(t, s)
@@ -53,22 +61,6 @@ func TestLinearTeamVisibility_Cuts(t *testing.T) {
 	}
 	if want := []linearTrackedTeamJSON{{ID: linearTeamGhost, Key: "GHO", Name: "Ghosts"}}; !equalTrackedTeams(got.Unreadable, want) {
 		t.Errorf("unreadable = %+v, want %+v", got.Unreadable, want)
-	}
-}
-
-// TestLinearTeamVisibility_EmptyCutsAreLists: with nothing tracked, both cuts
-// are empty lists rather than null, and Linear is not asked.
-func TestLinearTeamVisibility_EmptyCutsAreLists(t *testing.T) {
-	s, fake := newServerWithLinearCatalog(t, linearFixtureEng)
-	rec := doJSON(t, s, http.MethodGet, linearTeamVisibilityPath, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET team-visibility = %d; body=%s", rec.Code, rec.Body.String())
-	}
-	if body := rec.Body.String(); body != "{\"private\":[],\"unreadable\":[]}\n" {
-		t.Errorf("body = %s, want both cuts as empty lists", body)
-	}
-	if fake.Calls() != 0 {
-		t.Errorf("Linear asked %d times with nothing tracked", fake.Calls())
 	}
 }
 

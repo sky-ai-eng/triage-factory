@@ -11,39 +11,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestAllProtectedRoutes_RejectUnauthenticated probes every /api/* route
-// registered via s.api / s.apiMutating with three flavors of unauth and
-// asserts each comes back as 401. Routes come from the server's own record
-// of its mounts (routeMux), so coverage can't drift behind new mounts — if
-// someone adds a route via s.api/s.apiMutating, the test picks it up on the
-// next run, whichever file registers it.
-//
-// The variants:
-//
-//	no cookie       — most basic gate; withSession not wired at all
-//	garbage value   — cookie present but value isn't a UUID
-//	unknown sid     — well-formed UUID with no matching session row
-//
-// All three short-circuit at auth middleware and never reach the route
-// handler. The no-cookie and garbage-value variants reject before any DB
-// access; the unknown-sid variant still performs a session lookup against
-// the sessions table to confirm the row doesn't exist, but it still
-// returns 401 without needing session-row fixtures. The mux extracts
-// path values during routing (before middleware runs), but the handler
-// never gets the chance to consume them, so the substituted values
-// only need to match the pattern's segment shape.
-//
-// What this test does NOT cover:
-//
-//   - Expired-but-extant sid: separate test; needs a real session row.
-//     Existing TestAuthFlow_ForceExpiryReturns401 covers the mechanism.
-//   - Cross-org access (sid for user A, query org B's resource): RLS
-//     concern, covered by cross_org_http_test.go.
-//   - CSRF rejection paths: covered by TestAuthFlow_Logout_CSRFOriginCheck.
-//
-// The static "is this route wrapped at all" guard lives in
-// routes_coverage_test.go; this is the runtime complement that proves
-// wrapping actually rejects bad input.
+// TestAllProtectedRoutes_RejectUnauthenticated: every route the server mounted
+// through s.api / s.apiMutating answers 401 to no cookie, a non-UUID cookie and
+// an unknown sid. Routes come from routeMux's record, so a new mount is covered.
 func TestAllProtectedRoutes_RejectUnauthenticated(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	rig := newAuthRig(t)
@@ -91,26 +61,9 @@ func TestAllProtectedRoutes_RejectUnauthenticated(t *testing.T) {
 	}
 }
 
-// TestAllMutatingRoutes_RejectCrossOrigin asserts that every route
-// registered via s.apiMutating returns 403 when the Origin header
-// points at a foreign site, regardless of cookie state. This proves
-// withCSRFOriginCheck is wired in front of every mutating handler —
-// the runtime complement to routes_coverage_test.go's static guarantee
-// that mutating routes go through apiMutating.
-//
-// Without this test, a future change that strips the CSRF wrap from
-// any individual route would slip through: the unauth test would
-// still pass (auth still 401s on no cookie), and routes_coverage_test
-// would still pass (the route is still registered via apiMutating).
-// The misconfig is only detectable by actually firing a cross-origin
-// request and watching for the rejection.
-//
-// We use Origin: https://evil.example and no cookie. CSRF fires
-// outside the auth wrap, so the no-cookie case still produces a 403
-// (not a 401) — that's the assertion. Path-param substitutions reuse
-// the unauth-test helper since CSRF, like auth, rejects before the
-// handler runs — the mux extracts path values during routing, but
-// no handler-level parsing or DB query happens past the rejection.
+// TestAllMutatingRoutes_RejectCrossOrigin: every s.apiMutating route answers a
+// foreign Origin with 403 even without a cookie, since the CSRF check wraps the
+// auth check, and apiMutating on a safe method, which CSRF passes, fails.
 func TestAllMutatingRoutes_RejectCrossOrigin(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	rig := newAuthRig(t)

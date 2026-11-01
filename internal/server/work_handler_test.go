@@ -197,45 +197,6 @@ func parkLocalEvent(t *testing.T, database *sql.DB, title string) int64 {
 	return batch.Events[0].Event.ID
 }
 
-func TestWorkCatalogue_LocalMode(t *testing.T) {
-	h := localWorkRig(t, newFakeWorkKind(t, "fixture"))
-	rec := httptest.NewRecorder()
-	h.handleCatalogue(rec, workReq(http.MethodGet, "/api/orgs/x/work", runmode.LocalDefaultOrgID, "local-user", "", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var body struct {
-		Kinds []workKindJSON `json:"kinds"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(body.Kinds) != 1 || body.Kinds[0].Kind != "fixture" || body.Kinds[0].Label != "Fixture work" {
-		t.Fatalf("kinds = %+v, want the one registered kind", body.Kinds)
-	}
-	if c := body.Kinds[0].Controls; !c.Redrive || !c.Supersede || !c.Cancel {
-		t.Errorf("controls = %+v, want every control the fake offers", c)
-	}
-	if body.Kinds[0].Objective.OldestReadyAgeSeconds != 30 {
-		t.Errorf("objective = %+v, want 30s", body.Kinds[0].Objective)
-	}
-
-	// The real registration: the event queue with its declared controls.
-	eq, _ := localEventQueueKind(t)
-	h = localWorkRig(t, eq)
-	rec = httptest.NewRecorder()
-	h.handleCatalogue(rec, workReq(http.MethodGet, "/api/orgs/x/work", runmode.LocalDefaultOrgID, "local-user", "", nil))
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(body.Kinds) != 1 || body.Kinds[0].Kind != workkinds.EventQueueName || body.Kinds[0].Controls.Supersede || !body.Kinds[0].Controls.Redrive || !body.Kinds[0].Controls.Cancel {
-		t.Errorf("event queue catalogue entry = %+v", body.Kinds)
-	}
-	if body.Kinds[0].Objective.OldestReadyAgeSeconds != 60 {
-		t.Errorf("event queue objective = %+v, want 60s", body.Kinds[0].Objective)
-	}
-}
-
 func TestWorkDepth_LocalMode(t *testing.T) {
 	f := newFakeWorkKind(t, "fixture")
 	f.admit(t, runmode.LocalDefaultOrgID, "ready-1")
@@ -665,11 +626,10 @@ func TestWorkHandler_DescribeFailureIs500(t *testing.T) {
 	}
 }
 
-// TestWorkHandler_Gate_Postgres pins the multi-mode gate against real
-// memberships: no session is 401, a plain member 403 on every route and
-// changes nothing, a token sealed to another org 404, and an org admin gets
-// the row and can move it. There is no RLS backstop on this surface — every
-// kind runs on the admin pool — so this predicate is the entire enforcement.
+// TestWorkHandler_Gate_Postgres: no session is 401, a plain member 403 on every
+// route with nothing changed, a token sealed to another org 404, and an org admin
+// reads and redrives. Every kind runs on the admin pool, so with no RLS backstop
+// this predicate is the entire enforcement.
 func TestWorkHandler_Gate_Postgres(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	h := pgtest.Shared(t)
@@ -850,11 +810,10 @@ func parkLocalFiring(t *testing.T, database *sql.DB, title string) int64 {
 	return batch.Firings[0].Firing.ID
 }
 
-// TestWorkHandler_RegistryListsEveryKindAndRedrivesAParkedFiring pins the
-// registry: the store bundle carries the event queue, the firing queue and
-// the re-evaluation queue in that order, the catalogue lists all three with
-// the controls each declares, a parked firing lists with its cause and
-// subject, and a redrive puts it back to ready.
+// TestWorkHandler_RegistryListsEveryKindAndRedrivesAParkedFiring: the store
+// bundle registers the event, firing and re-evaluation queues in that order, the
+// catalogue lists each with its label, controls and objective, and a parked
+// firing lists with its cause and subject and redrives to ready.
 func TestWorkHandler_RegistryListsEveryKindAndRedrivesAParkedFiring(t *testing.T) {
 	_, database := localEventQueueKind(t)
 	kinds := sqlitestore.New(database).WorkKinds
@@ -874,6 +833,9 @@ func TestWorkHandler_RegistryListsEveryKindAndRedrivesAParkedFiring(t *testing.T
 	}
 	if len(body.Kinds) != 3 || body.Kinds[1].Kind != workkinds.PendingFiringsName || body.Kinds[1].Label != workkinds.PendingFiringsLabel {
 		t.Fatalf("catalogue = %+v, want all three kinds", body.Kinds)
+	}
+	if eq := body.Kinds[0]; eq.Kind != workkinds.EventQueueName || eq.Controls.Supersede || !eq.Controls.Redrive || !eq.Controls.Cancel || eq.Objective.OldestReadyAgeSeconds != 60 {
+		t.Errorf("event queue catalogue entry = %+v, want redrive and cancel only, and a 60s objective", eq)
 	}
 	if body.Kinds[2].Kind != workkinds.TaskReDeriveName || body.Kinds[2].Label != workkinds.TaskReDeriveLabel {
 		t.Errorf("third kind = %+v, want the re-evaluation queue", body.Kinds[2])

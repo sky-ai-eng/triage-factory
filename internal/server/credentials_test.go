@@ -17,27 +17,26 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestIntegrationsStatus_SetupCompleteGate pins the mandatory-configuration
-// gate the AuthGate keys on: a provisioned-but-unconfigured org is NOT
-// setup_complete, and setup_step walks org → team → done as GitHub access
-// and a tracked repo land. This is the server-authoritative signal that
-// makes "I'll configure later" unreachable — the frontend can't fake it.
+// TestIntegrationsStatus_SetupCompleteGate pins the server-side gate the
+// AuthGate keys on: setup_step walks org → team → done as GitHub access and a
+// tracked repo land, and it counts the tracked set, never the registry.
 func TestIntegrationsStatus_SetupCompleteGate(t *testing.T) {
 	keyring.MockInit()
 	s := newTestServer(t)
 	ctx := t.Context()
 	org := runmode.LocalDefaultOrgID
 
-	getStatus := func() map[string]any { return getIntegrationsStatus(t, s) }
+	check := func(stage string, wantRepos float64, wantComplete bool, wantStep string) map[string]any {
+		t.Helper()
+		st := getIntegrationsStatus(t, s)
+		if st["github_repos"] != wantRepos || st["setup_complete"] != wantComplete || st["setup_step"] != wantStep {
+			t.Errorf("%s: github_repos=%v setup_complete=%v setup_step=%v; want %v, %v, %v",
+				stage, st["github_repos"], st["setup_complete"], st["setup_step"], wantRepos, wantComplete, wantStep)
+		}
+		return st
+	}
 
-	// Provisioned tenant, no GitHub creds, no repos → incomplete, resume at org.
-	st := getStatus()
-	if st["setup_complete"] != false {
-		t.Errorf("setup_complete=%v on a fresh org; want false", st["setup_complete"])
-	}
-	if st["setup_step"] != "org" {
-		t.Errorf("setup_step=%v with no GitHub; want org", st["setup_step"])
-	}
+	check("fresh org", 0, false, "org")
 
 	// GitHub configured (URL + PAT) but still no tracked repo → resume at team.
 	seedSourceHost(t, s, eventsource.KindGitHub, "https://github.com")
@@ -46,58 +45,19 @@ func TestIntegrationsStatus_SetupCompleteGate(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Save creds: %v", err)
 	}
-	st = getStatus()
-	if st["github_ready"] != true {
+	if st := check("GitHub and no repos", 0, false, "team"); st["github_ready"] != true {
 		t.Errorf("github_ready=%v after PAT saved; want true", st["github_ready"])
 	}
-	if st["setup_complete"] != false {
-		t.Errorf("setup_complete=%v with GitHub but no repos; want false", st["setup_complete"])
-	}
-	if st["setup_step"] != "team" {
-		t.Errorf("setup_step=%v with GitHub and no repos; want team", st["setup_step"])
-	}
 
-	// A tracked repo lands → setup is complete, gate opens.
-	seedConfiguredRepo(t, s, "acme", "widgets")
-	st = getStatus()
-	if st["setup_complete"] != true {
-		t.Errorf("setup_complete=%v with GitHub + a repo; want true", st["setup_complete"])
-	}
-	if st["setup_step"] != "done" {
-		t.Errorf("setup_step=%v when complete; want done", st["setup_step"])
-	}
-}
-
-// TestIntegrationsStatus_SetupCountsTrackedRepos pins that the setup gate
-// counts the repositories a team tracks, not the registry. A registry row no
-// team tracks (a GitHub entity's repository gets one) neither completes setup
-// nor shows in github_repos, and an org whose teams untrack every repository
-// resumes on the team step while both rows stay in the registry.
-func TestIntegrationsStatus_SetupCountsTrackedRepos(t *testing.T) {
-	keyring.MockInit()
-	s := newTestServer(t)
-	ctx := t.Context()
-	org := runmode.LocalDefaultOrgID
-
-	seedSourceHost(t, s, eventsource.KindGitHub, "https://github.com")
-	if err := integrations.Save(ctx, s.secrets, org, auth.Credentials{GitHubPAT: "ghp-test"}); err != nil {
-		t.Fatalf("Save creds: %v", err)
-	}
-	check := func(stage string, wantRepos float64, wantComplete bool, wantStep string) {
-		t.Helper()
-		st := getIntegrationsStatus(t, s)
-		if st["github_repos"] != wantRepos || st["setup_complete"] != wantComplete || st["setup_step"] != wantStep {
-			t.Errorf("%s: github_repos=%v setup_complete=%v setup_step=%v; want %v, %v, %v",
-				stage, st["github_repos"], st["setup_complete"], st["setup_step"], wantRepos, wantComplete, wantStep)
-		}
-	}
-
+	// A registry row no team tracks (a GitHub entity's repository gets one)
+	// neither completes setup nor shows in github_repos.
 	seedUntrackedRepo(t, s, "other", "thing")
 	check("only an untracked registry row", 0, false, "team")
 
 	seedConfiguredRepo(t, s, "acme", "widgets")
 	check("one tracked repo beside the untracked row", 1, true, "done")
 
+	// Untracking every repository resumes at team; both registry rows stay.
 	if err := dbtest.TrackRepos(ctx, s.allStores.Repos, s.allStores.TeamGitHubRepos, org, runmode.LocalDefaultTeamID, seedRepoHost(t, s), nil); err != nil {
 		t.Fatalf("untrack every repo: %v", err)
 	}
@@ -123,10 +83,9 @@ func getIntegrationsStatus(t *testing.T, s *Server) map[string]any {
 	return body
 }
 
-// seedGitHubApp inserts an org_github_apps row for the local org so tests can
-// exercise the App-based GitHub access path (the multi-mode alternative to a
-// PAT). `active` toggles the row's active flag — an inactive App must not
-// count as configured GitHub access.
+// seedLocalGitHubApp inserts an org_github_apps row for the local org, the
+// App-based alternative to a PAT. An inactive App must not count as configured
+// GitHub access, so `active` sets the row's flag.
 func seedLocalGitHubApp(t *testing.T, s *Server, clientID string, active bool) {
 	t.Helper()
 	act := 0
@@ -149,10 +108,9 @@ func seedLocalGitHubApp(t *testing.T, s *Server, clientID string, active bool) {
 	seedBYOAppCredentialClass(t, s, runmode.LocalDefaultOrgID)
 }
 
-// TestIntegrationsStatus_SetupCompleteGate_AppPath pins that a registered,
-// active GitHub App satisfies the GitHub step on its own — no PAT — so an
-// App-based (multi-mode) org walks the same team → done progression. Guards
-// the appRegistered branch the PAT-path test never touches.
+// TestIntegrationsStatus_SetupCompleteGate_AppPath: a registered, active GitHub
+// App satisfies the GitHub step without a PAT, so an App org walks the same
+// team → done progression.
 func TestIntegrationsStatus_SetupCompleteGate_AppPath(t *testing.T) {
 	keyring.MockInit()
 	s := newTestServer(t)
@@ -185,10 +143,9 @@ func TestIntegrationsStatus_SetupCompleteGate_AppPath(t *testing.T) {
 	}
 }
 
-// TestIntegrationsStatus_InactiveAppNotReady pins that an inactive App row
-// (a stale registration left by an uninstall/reinstall cycle) does NOT count
-// as configured GitHub access — GetForOrg doesn't filter on active, so the
-// status handler must, or a deactivated App would falsely complete setup.
+// TestIntegrationsStatus_InactiveAppNotReady: an inactive App row (a stale
+// registration) is not configured GitHub access. GetForOrg does not filter on
+// active, so the status handler must.
 func TestIntegrationsStatus_InactiveAppNotReady(t *testing.T) {
 	keyring.MockInit()
 	s := newTestServer(t)
@@ -203,16 +160,9 @@ func TestIntegrationsStatus_InactiveAppNotReady(t *testing.T) {
 	}
 }
 
-// TestGitHubPATPut_PersistsOrgGitHubLogin pins TFAC-452's write path through
-// the org PAT bind: a validated org PAT persists the credential's own login on
-// agents.github_org_login (so OrgIdentityFor can stamp the org commit identity)
-// WITHOUT writing user_github_identities — org access and per-user identity stay
-// independent. A fake GitHub host returns the login so no real network call is
-// made.
-//
-// It used to be pinned through the fused setup route, which bound the PAT as one
-// of the five things it did; the wizard drives this route now, so this is where
-// the property lives.
+// TestGitHubPATPut_PersistsOrgGitHubIdentity: a validated org PAT stores the
+// account it authenticates as (login, numeric id, email) on the org's agents
+// row, where the org commit identity is read, and writes no per-user identity.
 func TestGitHubPATPut_PersistsOrgGitHubIdentity(t *testing.T) {
 	keyring.MockInit()
 	runmode.SetForTest(t, runmode.ModeLocal)
@@ -238,8 +188,6 @@ func TestGitHubPATPut_PersistsOrgGitHubIdentity(t *testing.T) {
 		t.Fatalf("pat bind status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 
-	// The validated account identity is captured together: login, the
-	// account's numeric id, and its email.
 	var login, userID, email sql.NullString
 	if err := s.db.QueryRowContext(t.Context(),
 		`SELECT github_org_login, github_org_user_id, github_org_email FROM agents WHERE org_id = ?`, org,
@@ -250,7 +198,6 @@ func TestGitHubPATPut_PersistsOrgGitHubIdentity(t *testing.T) {
 		t.Errorf("agents GitHub identity = %q (%q) <%s>, want acme-bot (4242) <acme-bot@example.com>", login.String, userID.String, email.String)
 	}
 
-	// ...and per-user identity is untouched: the bind writes ACCESS, not identity.
 	var n int
 	if err := s.db.QueryRowContext(t.Context(),
 		`SELECT COUNT(*) FROM user_github_identities`,
@@ -262,17 +209,9 @@ func TestGitHubPATPut_PersistsOrgGitHubIdentity(t *testing.T) {
 	}
 }
 
-// TestSetupModelPicks pins the two model picks multi-mode setup requires before
-// the completeness gate opens: the org's background-jobs model and the default
-// team's default model. TF ships no fallback for either, so an org
-// through the gate without them has background jobs that never run and a team
-// whose unpinned steps refuse at dispatch — and neither says so at the moment
-// it happens.
-//
-// The predicate is exercised directly rather than through the status route,
-// because the route's other inputs (a GitHub credential, a tracked repo, a
-// session) decide nothing here and standing them up would only obscure which
-// input moved the answer.
+// TestSetupModelPicks: multi-mode setup requires the org's background-jobs
+// model and the default team's model, each reported on its own; local requires
+// neither. The predicate is called directly, since the route's other inputs decide nothing.
 func TestSetupModelPicks(t *testing.T) {
 	keyring.MockInit()
 	runmode.SetForTest(t, runmode.ModeMulti)
@@ -310,9 +249,8 @@ func TestSetupModelPicks(t *testing.T) {
 		t.Errorf("picks = (org %v, team %v) with no team default model; want (true, false)", org, team)
 	}
 
-	// The other half of the asymmetry: local pre-fills both from its own column
-	// defaults and never blocks on them, so a zero-configuration first run is
-	// not held on a question nobody was asked. Both are still cleared here.
+	// Local pre-fills both from its own column defaults and never blocks on
+	// them. Both are still cleared here.
 	runmode.SetForTest(t, runmode.ModeLocal)
 	if org, team := picks(); !org || !team {
 		t.Errorf("local blocked on model picks (org %v, team %v); it gates on neither", org, team)

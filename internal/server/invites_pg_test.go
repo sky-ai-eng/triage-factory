@@ -20,7 +20,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// ---------- grantOrgMembership (the TFAC-416 primitive) ----------
+// ---------- grantOrgMembership ----------
 
 // TestGrantOrgMembership_OrgOnly: a NULL team writes only the
 // org_memberships row — the deliberate "org member, zero teams" state an
@@ -84,10 +84,9 @@ func TestGrantOrgMembership_WithTeam(t *testing.T) {
 	}
 }
 
-// TestGrantOrgMembership_Idempotent: re-calling with the same args is a
-// no-op (ON CONFLICT DO NOTHING) — no error, no duplicate rows. The orgRowInserted
-// return distinguishes the net-new first grant (true) from the no-op re-grant
-// (false) — the gate JIT uses to audit only the net-new membership (TFAC-486).
+// TestGrantOrgMembership_Idempotent: a repeated grant is a no-op with no
+// duplicate rows, and orgRowInserted is true only for the first, net-new grant,
+// which is what JIT provisioning audits on.
 func TestGrantOrgMembership_Idempotent(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -116,41 +115,6 @@ func TestGrantOrgMembership_Idempotent(t *testing.T) {
 }
 
 // ---------- accept state machine (POST /api/invites/accept) ----------
-
-// TestInviteAccept_Valid_OrgOnly: a clean redeem mints the
-// org membership, leaves the user team-less (target NULL), stamps
-// accepted_at/accepted_by, and points the session at the org.
-func TestInviteAccept_Valid_OrgOnly(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeMulti)
-	r := newAuthRig(t)
-	owner := r.seedUser()
-	orgID, _ := r.seedOrg(owner, "accept-orgonly")
-	invitee := r.seedUser()
-	email := invitee.String() + "@test"
-
-	token := "tok-valid-" + uuid.NewString()
-	inviteID := seedInvite(t, r.h, orgID.String(), email, "member", "", sha256Of(token),
-		time.Now().Add(24*time.Hour), false, false)
-
-	sid := r.signInAs(invitee)
-	resp := postAccept(r, sid, token)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d; want 200 (body=%s)", resp.StatusCode, readBody(resp))
-	}
-
-	if n := countOrgMemberships(t, r.h, invitee.String(), orgID.String()); n != 1 {
-		t.Errorf("org_memberships = %d; want 1", n)
-	}
-	// Org-only: no team rows anywhere for the invitee.
-	var teamRows int
-	if err := r.h.AdminDB.QueryRow(`SELECT count(*) FROM memberships WHERE user_id=$1`, invitee).Scan(&teamRows); err != nil {
-		t.Fatalf("count team memberships: %v", err)
-	}
-	if teamRows != 0 {
-		t.Errorf("team memberships = %d; want 0 (org-only invite)", teamRows)
-	}
-	assertAcceptedBy(t, r.h, inviteID, invitee.String())
-}
 
 // TestInviteAccept_Valid_WithTeam: target_team_id set adds the team
 // membership as 'member'.
@@ -310,13 +274,9 @@ func TestInviteAccept_EmptyEmail_409(t *testing.T) {
 	}
 }
 
-// TestInviteAccept_UntrustedSSOIdentity_409: an SSO sign-in whose assertion
-// carries the invited address, on a domain nobody verified for its connection,
-// cannot accept. The token's email claim equals the invite address — GoTrue
-// marks it verified — but TF recorded the address untrusted, and acceptance
-// matches on TF's record, not the claim. No login extension is registered in
-// this package, so the callback's trust check answers no, which is exactly
-// ee/sso's answer for such a domain. The invite stays pending.
+// TestInviteAccept_UntrustedSSOIdentity_409: an SSO sign-in carrying the invited
+// address on an unverified domain cannot accept, because acceptance matches on
+// TF's identity record, not the JWT's email claim. The invite stays pending.
 func TestInviteAccept_UntrustedSSOIdentity_409(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
@@ -328,6 +288,8 @@ func TestInviteAccept_UntrustedSSOIdentity_409(t *testing.T) {
 	inviteID := seedInvite(t, r.h, orgID.String(), invited, "member", "", sha256Of(token),
 		time.Now().Add(24*time.Hour), false, false)
 
+	// No login extension is registered in this package, so the callback's
+	// domain trust check answers no, as ee/sso does for an unverified domain.
 	samlAuth := uuid.New()
 	r.h.SeedAuthUser(t, samlAuth.String(), samlAuth.String()+"@auth.test")
 	claims := validClaimsFor(samlAuth)
@@ -364,11 +326,9 @@ func TestInviteAccept_UntrustedSSOIdentity_409(t *testing.T) {
 	}
 }
 
-// TestInviteAccept_TrustedLinkedIdentity_Accepted: the invitee signs in with
-// GitHub under one address but holds the invited address verified on another
-// of their login identities (a linked SSO sign-in on a verified domain). That
-// identity proves the address is theirs, so the invite is accepted even though
-// the session's email claim names a different one.
+// TestInviteAccept_TrustedLinkedIdentity_Accepted: an invitee signed in with
+// GitHub under one address, holding the invited address verified on another of
+// their identities, accepts the org-only invite and joins no team.
 func TestInviteAccept_TrustedLinkedIdentity_Accepted(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
@@ -389,6 +349,13 @@ func TestInviteAccept_TrustedLinkedIdentity_Accepted(t *testing.T) {
 	}
 	if n := countOrgMemberships(t, r.h, invitee.String(), orgID.String()); n != 1 {
 		t.Errorf("org_memberships = %d; want 1", n)
+	}
+	var teamRows int
+	if err := r.h.AdminDB.QueryRow(`SELECT count(*) FROM memberships WHERE user_id=$1`, invitee).Scan(&teamRows); err != nil {
+		t.Fatalf("count team memberships: %v", err)
+	}
+	if teamRows != 0 {
+		t.Errorf("team memberships = %d; want 0 (org-only invite)", teamRows)
 	}
 	assertAcceptedBy(t, r.h, inviteID, invitee.String())
 }
@@ -428,51 +395,9 @@ func sha256Of(token string) []byte {
 
 // ---------- admin-surface handler tests (create/list/revoke/preview) ----------
 
-// TestInviteCreate_HappyPath: an org admin mints an invite and gets back a
-// usable accept_url carrying the raw token + an expiry.
-func TestInviteCreate_HappyPath(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeMulti)
-	r := newAuthRig(t)
-	owner := r.seedUser()
-	orgID, _ := r.seedOrg(owner, "create-happy")
-	sid := r.signInAs(owner) // earliest-membership → session active org = orgID
-
-	resp := doInviteReq(r, http.MethodPost, "/api/invites", sid,
-		map[string]string{"email": "Newbie@Example.com", "role": "member"})
-	raw := readBody(resp)
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("status = %d; want 201 (body=%s)", resp.StatusCode, raw)
-	}
-	var body struct {
-		ID        string `json:"id"`
-		AcceptURL string `json:"accept_url"`
-		ExpiresAt string `json:"expires_at"`
-	}
-	if err := json.Unmarshal([]byte(raw), &body); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if body.ID == "" || body.ExpiresAt == "" {
-		t.Errorf("missing id/expires_at: %s", raw)
-	}
-	if !strings.Contains(body.AcceptURL, "/invite/accept?token=") {
-		t.Errorf("accept_url = %q; want it to carry the token path", body.AcceptURL)
-	}
-	// Stored email is lower-cased; exactly one active invite exists.
-	var n int
-	if err := r.h.AdminDB.QueryRow(
-		`SELECT count(*) FROM org_invites WHERE org_id=$1 AND email='newbie@example.com'`, orgID,
-	).Scan(&n); err != nil {
-		t.Fatalf("count: %v", err)
-	}
-	if n != 1 {
-		t.Errorf("stored invites = %d; want 1 (lower-cased)", n)
-	}
-}
-
-// TestInviteCreate_CrossOrgTargetTeam_400: a target_team_id from a DIFFERENT
-// org is rejected (400) and mints nothing — the cross-org membership-leak
-// guard. RLS gates org-admin on insert but not that the team is in-org, so
-// this app-side check is the actual boundary.
+// TestInviteCreate_CrossOrgTargetTeam_400: a target_team_id from another org is
+// refused with 400 and mints nothing. RLS does not check that the team is in
+// the org, so this handler check is the only boundary.
 func TestInviteCreate_CrossOrgTargetTeam_400(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
@@ -482,7 +407,7 @@ func TestInviteCreate_CrossOrgTargetTeam_400(t *testing.T) {
 	_, teamB := r.seedOrg(ownerB, "create-orgb")
 	sid := r.signInAs(ownerA)
 
-	resp := doInviteReq(r, http.MethodPost, "/api/invites", sid, map[string]string{
+	resp := r.postJSONWithSid(http.MethodPost, "/api/invites", sid, map[string]string{
 		"email": "x@example.com", "role": "member", "target_team_id": teamB.String(),
 	})
 	if resp.StatusCode != http.StatusBadRequest {
@@ -497,130 +422,71 @@ func TestInviteCreate_CrossOrgTargetTeam_400(t *testing.T) {
 	}
 }
 
-// TestInviteCreate_ExistingMember_409: inviting an email that already maps to
-// a current member of THIS org via a *verified* identity is rejected (409) and
-// mints nothing — the invite-vs-existing-member guard (TFAC-437). The owner
-// signs in with a verified-email claim (what a real GitHub login carries), so
-// their own address is the ticket's repro (owner invites themselves → was 201,
-// now 409). NB resolveOrCreatePrincipal rewrites email_verified from the login
-// claim, so signing in with the default (email_verified absent → false) would
-// downgrade the seeded identity and the guard wouldn't fire — hence the
-// explicit verified claim here.
-func TestInviteCreate_ExistingMember_409(t *testing.T) {
+// TestInviteCreate_ExistingMemberGuard: an address that maps to a current member
+// of this org through a verified identity is refused with 409 and mints nothing,
+// whatever the member's role. A member of another org, or an address held only
+// on an unverified identity, can be invited.
+func TestInviteCreate_ExistingMemberGuard(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
-	r := newAuthRig(t)
-	owner := r.seedUser()
-	orgID, _ := r.seedOrg(owner, "create-existing")
-	claims := validClaimsFor(owner)
-	claims["email_verified"] = true
-	sid := r.signInWithClaims(owner, claims)
+	for _, tc := range []struct {
+		name string
+		// invitee seeds whoever holds the address and returns the address.
+		invitee    func(r *authRig, owner, orgID, teamID uuid.UUID) string
+		wantStatus int
+		wantRows   int
+	}{
+		{"the owner", func(r *authRig, owner, _, _ uuid.UUID) string {
+			return owner.String() + "@test"
+		}, http.StatusConflict, 0},
+		{"a non-owner member", func(r *authRig, _, orgID, teamID uuid.UUID) string {
+			member := r.seedUser()
+			pgtest.AddOrgMember(r.t, r.h, member.String(), orgID.String(), teamID.String(), "member", "member")
+			return member.String() + "@test"
+		}, http.StatusConflict, 0},
+		{"a member of another org", func(r *authRig, _, _, _ uuid.UUID) string {
+			other := r.seedUser()
+			r.seedOrg(other, "create-guard-other")
+			return other.String() + "@test"
+		}, http.StatusCreated, 1},
+		{"a member whose identity with the address is unverified", func(r *authRig, _, orgID, teamID uuid.UUID) string {
+			// seedUser's own <id>@test identity is verified; the invited address
+			// is on a second, unverified one.
+			member := r.seedUser()
+			pgtest.AddOrgMember(r.t, r.h, member.String(), orgID.String(), teamID.String(), "member", "member")
+			email := "unverified-" + member.String() + "@example.com"
+			seedExtraIdentity(r.t, r.h, member.String(), email, false)
+			return email
+		}, http.StatusCreated, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newAuthRig(t)
+			owner := r.seedUser()
+			orgID, teamID := r.seedOrg(owner, "create-guard")
+			email := tc.invitee(r, owner, orgID, teamID)
+			// signInAs reports the address verified: the login refreshes
+			// email_verified from the claim, and an unverified claim would
+			// downgrade the owner's seeded identity.
+			sid := r.signInAs(owner)
 
-	resp := doInviteReq(r, http.MethodPost, "/api/invites", sid,
-		map[string]string{"email": owner.String() + "@test", "role": "member"})
-	if resp.StatusCode != http.StatusConflict {
-		t.Fatalf("status = %d; want 409 (body=%s)", resp.StatusCode, readBody(resp))
-	}
-	var n int
-	if err := r.h.AdminDB.QueryRow(`SELECT count(*) FROM org_invites WHERE org_id=$1`, orgID).Scan(&n); err != nil {
-		t.Fatalf("count: %v", err)
-	}
-	if n != 0 {
-		t.Errorf("invites created = %d; want 0 (existing member rejected before insert)", n)
+			resp := r.postJSONWithSid(http.MethodPost, "/api/invites", sid,
+				map[string]string{"email": email, "role": "member"})
+			if resp.StatusCode != tc.wantStatus {
+				t.Fatalf("status = %d; want %d (body=%s)", resp.StatusCode, tc.wantStatus, readBody(resp))
+			}
+			var n int
+			if err := r.h.AdminDB.QueryRow(`SELECT count(*) FROM org_invites WHERE org_id=$1`, orgID).Scan(&n); err != nil {
+				t.Fatalf("count: %v", err)
+			}
+			if n != tc.wantRows {
+				t.Errorf("invites created = %d; want %d", n, tc.wantRows)
+			}
+		})
 	}
 }
 
-// TestInviteCreate_ExistingNonOwnerMember_409: the guard is role-agnostic —
-// a plain (non-owner) member's verified email is rejected too, not just the
-// owner's. Belt-and-suspenders over the owner-targeted ExistingMember case.
-func TestInviteCreate_ExistingNonOwnerMember_409(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeMulti)
-	r := newAuthRig(t)
-	owner := r.seedUser()
-	orgID, teamID := r.seedOrg(owner, "create-nonowner-member")
-	member := r.seedUser() // verified <id>@test identity from seedUser
-	pgtest.AddOrgMember(t, r.h, member.String(), orgID.String(), teamID.String(), "member", "member")
-	sid := r.signInAs(owner)
-
-	resp := doInviteReq(r, http.MethodPost, "/api/invites", sid,
-		map[string]string{"email": member.String() + "@test", "role": "member"})
-	if resp.StatusCode != http.StatusConflict {
-		t.Fatalf("status = %d; want 409 (non-owner member); body=%s", resp.StatusCode, readBody(resp))
-	}
-	var n int
-	if err := r.h.AdminDB.QueryRow(`SELECT count(*) FROM org_invites WHERE org_id=$1`, orgID).Scan(&n); err != nil {
-		t.Fatalf("count: %v", err)
-	}
-	if n != 0 {
-		t.Errorf("invites created = %d; want 0 (existing member rejected, role-agnostic)", n)
-	}
-}
-
-// TestInviteCreate_CrossOrgExistingUser_Allowed: an existing TF user who is a
-// verified member of a DIFFERENT org may still be invited into this one —
-// accept grants them a fresh membership. The guard is same-org-only.
-func TestInviteCreate_CrossOrgExistingUser_Allowed(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeMulti)
-	r := newAuthRig(t)
-	owner := r.seedUser()
-	orgID, _ := r.seedOrg(owner, "create-crossorg")
-	sid := r.signInAs(owner)
-
-	// A user who is a verified member of some OTHER org, not this one.
-	other := r.seedUser()
-	r.seedOrg(other, "create-crossorg-other")
-
-	resp := doInviteReq(r, http.MethodPost, "/api/invites", sid,
-		map[string]string{"email": other.String() + "@test", "role": "member"})
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("status = %d; want 201 (cross-org existing user allowed); body=%s", resp.StatusCode, readBody(resp))
-	}
-	var n int
-	if err := r.h.AdminDB.QueryRow(`SELECT count(*) FROM org_invites WHERE org_id=$1`, orgID).Scan(&n); err != nil {
-		t.Fatalf("count: %v", err)
-	}
-	if n != 1 {
-		t.Errorf("invites created = %d; want 1 (cross-org invite is legitimate)", n)
-	}
-}
-
-// TestInviteCreate_UnverifiedMember_Allowed: a member whose identity email is
-// UNVERIFIED is not a reliable dedup key — per the verified-only decision the
-// invite is allowed (201). Mirrors the principal-link rule: only a verified
-// email would auto-link on accept.
-func TestInviteCreate_UnverifiedMember_Allowed(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeMulti)
-	r := newAuthRig(t)
-	owner := r.seedUser()
-	orgID, teamID := r.seedOrg(owner, "create-unverified")
-	member := r.seedUser()
-	pgtest.AddOrgMember(t, r.h, member.String(), orgID.String(), teamID.String(), "member", "member")
-	// member already has a verified <id>@test identity; attach a SECOND,
-	// unverified identity carrying the address we'll invite, so the only match
-	// for that address is unverified.
-	unverifiedEmail := "unverified-" + member.String() + "@example.com"
-	seedExtraIdentity(t, r.h, member.String(), unverifiedEmail, false)
-	sid := r.signInAs(owner)
-
-	resp := doInviteReq(r, http.MethodPost, "/api/invites", sid,
-		map[string]string{"email": unverifiedEmail, "role": "member"})
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("status = %d; want 201 (unverified email not a dedup key); body=%s", resp.StatusCode, readBody(resp))
-	}
-	var n int
-	if err := r.h.AdminDB.QueryRow(`SELECT count(*) FROM org_invites WHERE org_id=$1`, orgID).Scan(&n); err != nil {
-		t.Fatalf("count: %v", err)
-	}
-	if n != 1 {
-		t.Errorf("invites created = %d; want 1 (unverified member allowed)", n)
-	}
-}
-
-// seedExtraIdentity attaches an additional user_identities row to an existing
-// principal carrying email with the given verified flag. seedUser already
-// mints one verified <id>@test identity per user; auth_user_id is the table PK,
-// so a second identity gets its own auth.users row. Lets a test pin a specific
-// email/verified combination (e.g. an unverified address that must not count
-// as a dedup key).
+// seedExtraIdentity attaches a second user_identities row, with its own
+// auth.users row (auth_user_id is the table's key), carrying email with the
+// given verified flag.
 func seedExtraIdentity(t *testing.T, h *pgtest.Harness, userID, email string, verified bool) {
 	t.Helper()
 	authID := uuid.NewString()
@@ -642,21 +508,20 @@ func TestInviteCreate_PendingDup_409(t *testing.T) {
 	r.seedOrg(owner, "create-dup")
 	sid := r.signInAs(owner)
 
-	first := doInviteReq(r, http.MethodPost, "/api/invites", sid,
+	first := r.postJSONWithSid(http.MethodPost, "/api/invites", sid,
 		map[string]string{"email": "dup@example.com", "role": "member"})
 	if first.StatusCode != http.StatusCreated {
 		t.Fatalf("first create status = %d; want 201 (body=%s)", first.StatusCode, readBody(first))
 	}
-	second := doInviteReq(r, http.MethodPost, "/api/invites", sid,
+	second := r.postJSONWithSid(http.MethodPost, "/api/invites", sid,
 		map[string]string{"email": "dup@example.com", "role": "admin"})
 	if second.StatusCode != http.StatusConflict {
 		t.Fatalf("second create status = %d; want 409 (body=%s)", second.StatusCode, readBody(second))
 	}
 }
 
-// TestInviteCreate_NonAdminIsForbidden: a plain member can't create invites —
-// 403 naming the missing role (they can see their own org) rather than 404,
-// and no row.
+// TestInviteCreate_NonAdminIsForbidden: a plain member cannot create invites,
+// and is told so with 403 rather than 404 since they can see their own org.
 func TestInviteCreate_NonAdminIsForbidden(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
@@ -666,16 +531,16 @@ func TestInviteCreate_NonAdminIsForbidden(t *testing.T) {
 	pgtest.AddOrgMember(t, r.h, member.String(), orgID.String(), teamID.String(), "member", "member")
 	sid := r.signInAs(member)
 
-	resp := doInviteReq(r, http.MethodPost, "/api/invites", sid,
+	resp := r.postJSONWithSid(http.MethodPost, "/api/invites", sid,
 		map[string]string{"email": "x@example.com", "role": "member"})
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("status = %d; want 403 (non-admin); body=%s", resp.StatusCode, readBody(resp))
 	}
 }
 
-// TestInviteList_ReturnsActive: the invite list surfaces the just-created
-// invite for the admin's org, and the single read answers with the same row —
-// without the accept URL, which exists only in the create response.
+// TestInviteList_ReturnsActive: the list and the single read answer with the
+// created invite, its address lower-cased, and without the accept URL, which
+// exists only in the create response.
 func TestInviteList_ReturnsActive(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
@@ -683,10 +548,10 @@ func TestInviteList_ReturnsActive(t *testing.T) {
 	r.seedOrg(owner, "list-active")
 	sid := r.signInAs(owner)
 
-	_ = doInviteReq(r, http.MethodPost, "/api/invites", sid,
-		map[string]string{"email": "listed@example.com", "role": "member"})
+	_ = r.postJSONWithSid(http.MethodPost, "/api/invites", sid,
+		map[string]string{"email": "Listed@Example.com", "role": "member"})
 
-	resp := doInviteReq(r, http.MethodPost, "/api/invites/list", sid, map[string]any{})
+	resp := r.postJSONWithSid(http.MethodPost, "/api/invites/list", sid, map[string]any{})
 	raw := readBody(resp)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d; want 200 (body=%s)", resp.StatusCode, raw)
@@ -705,7 +570,7 @@ func TestInviteList_ReturnsActive(t *testing.T) {
 		t.Fatalf("list = %+v (total %d); want one entry for listed@example.com", page.Items, page.TotalCount)
 	}
 
-	single := doInviteReq(r, http.MethodGet, "/api/invites/"+page.Items[0].ID, sid, nil)
+	single := r.postJSONWithSid(http.MethodGet, "/api/invites/"+page.Items[0].ID, sid, nil)
 	singleRaw := readBody(single)
 	if single.StatusCode != http.StatusOK {
 		t.Fatalf("single read status = %d; want 200 (body=%s)", single.StatusCode, singleRaw)
@@ -725,7 +590,7 @@ func TestInviteList_ReturnsActive(t *testing.T) {
 
 	// An invite id from another org, and a well-formed id that names nothing,
 	// are both 404 — the read is scoped to the same active set the list is.
-	if miss := doInviteReq(r, http.MethodGet, "/api/invites/11111111-1111-1111-1111-111111111111", sid, nil); miss.StatusCode != http.StatusNotFound {
+	if miss := r.postJSONWithSid(http.MethodGet, "/api/invites/11111111-1111-1111-1111-111111111111", sid, nil); miss.StatusCode != http.StatusNotFound {
 		t.Errorf("unknown invite id = %d; want 404", miss.StatusCode)
 	}
 }
@@ -739,18 +604,18 @@ func TestInviteRevoke_RemovesFromList(t *testing.T) {
 	r.seedOrg(owner, "revoke-http")
 	sid := r.signInAs(owner)
 
-	createResp := doInviteReq(r, http.MethodPost, "/api/invites", sid,
+	createResp := r.postJSONWithSid(http.MethodPost, "/api/invites", sid,
 		map[string]string{"email": "rev@example.com", "role": "member"})
 	var created struct {
 		ID string `json:"id"`
 	}
 	_ = json.Unmarshal([]byte(readBody(createResp)), &created)
 
-	revResp := doInviteReq(r, http.MethodPost, "/api/invites/"+created.ID+"/revoke", sid, nil)
+	revResp := r.postJSONWithSid(http.MethodPost, "/api/invites/"+created.ID+"/revoke", sid, nil)
 	if revResp.StatusCode != http.StatusOK {
 		t.Fatalf("revoke status = %d; want 200 (body=%s)", revResp.StatusCode, readBody(revResp))
 	}
-	listResp := doInviteReq(r, http.MethodPost, "/api/invites/list", sid, map[string]any{})
+	listResp := r.postJSONWithSid(http.MethodPost, "/api/invites/list", sid, map[string]any{})
 	var page struct {
 		Items      []json.RawMessage `json:"items"`
 		TotalCount int               `json:"total_count"`
@@ -760,14 +625,14 @@ func TestInviteRevoke_RemovesFromList(t *testing.T) {
 		t.Errorf("active invites after revoke = %d (total %d); want 0", len(page.Items), page.TotalCount)
 	}
 	// The single read drops it too: a revoked invite is not an active one.
-	if gone := doInviteReq(r, http.MethodGet, "/api/invites/"+created.ID, sid, nil); gone.StatusCode != http.StatusNotFound {
+	if gone := r.postJSONWithSid(http.MethodGet, "/api/invites/"+created.ID, sid, nil); gone.StatusCode != http.StatusNotFound {
 		t.Errorf("single read of a revoked invite = %d; want 404", gone.StatusCode)
 	}
 }
 
-// TestInvitePreview_ValidAndUnknown: the unauthenticated preview resolves a
-// live token to status=valid with the org name, and an unknown token to
-// status=not_found with nothing leaked.
+// TestInvitePreview_ValidAndUnknown: the create response carries an accept URL
+// and an expiry, the unauthenticated preview resolves its token to status=valid
+// with the org name, and an unknown token to status=not_found with nothing leaked.
 func TestInvitePreview_ValidAndUnknown(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
@@ -775,16 +640,20 @@ func TestInvitePreview_ValidAndUnknown(t *testing.T) {
 	r.seedOrg(owner, "preview-http")
 	sid := r.signInAs(owner)
 
-	createResp := doInviteReq(r, http.MethodPost, "/api/invites", sid,
+	createResp := r.postJSONWithSid(http.MethodPost, "/api/invites", sid,
 		map[string]string{"email": "prev@example.com", "role": "member"})
 	var created struct {
 		AcceptURL string `json:"accept_url"`
+		ExpiresAt string `json:"expires_at"`
 	}
 	_ = json.Unmarshal([]byte(readBody(createResp)), &created)
+	if !strings.Contains(created.AcceptURL, "/invite/accept?token=") || created.ExpiresAt == "" {
+		t.Errorf("create response = %+v; want an accept_url carrying the token and an expires_at", created)
+	}
 	token := tokenFromAcceptURL(t, created.AcceptURL)
 
 	// Preview is unauthenticated — no sid.
-	resp := doInviteReq(r, http.MethodGet, "/api/invites/preview?token="+url.QueryEscape(token), "", nil)
+	resp := r.postJSONWithSid(http.MethodGet, "/api/invites/preview?token="+url.QueryEscape(token), "", nil)
 	raw := readBody(resp)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d; want 200 (body=%s)", resp.StatusCode, raw)
@@ -803,7 +672,7 @@ func TestInvitePreview_ValidAndUnknown(t *testing.T) {
 		t.Error("org_name empty; want the org's name for the token holder")
 	}
 
-	unknown := doInviteReq(r, http.MethodGet, "/api/invites/preview?token=garbage", "", nil)
+	unknown := r.postJSONWithSid(http.MethodGet, "/api/invites/preview?token=garbage", "", nil)
 	var upv struct {
 		OrgName string `json:"org_name"`
 		Status  string `json:"status"`
@@ -819,38 +688,13 @@ func TestInvitePreview_ValidAndUnknown(t *testing.T) {
 
 // ---------- helpers ----------
 
-// signInAs completes a GitHub OAuth callback for userID with the default
-// claims (email = userID@test) reported verified, as GitHub reports a verified
-// primary address, and returns the sid cookie value. The verified flag is what
-// keeps the seeded identity holding its address after the login's refresh,
-// which is what invite acceptance matches on.
+// signInAs completes a GitHub OAuth callback for userID with email userID@test
+// reported verified and returns the sid. The flag keeps the seeded identity
+// holding its address after the login refresh, which acceptance matches on.
 func (r *authRig) signInAs(userID uuid.UUID) string {
 	claims := validClaimsFor(userID)
 	claims["email_verified"] = true
 	return r.signInWithClaims(userID, claims)
-}
-
-// doInviteReq fires a request at the mux with an optional sid cookie + a
-// same-origin Origin header (so mutating routes pass the CSRF check) and an
-// optional JSON body.
-func doInviteReq(r *authRig, method, path, sid string, body any) *http.Response {
-	r.t.Helper()
-	var rdr *bytes.Reader
-	if body != nil {
-		b, _ := json.Marshal(body)
-		rdr = bytes.NewReader(b)
-	} else {
-		rdr = bytes.NewReader(nil)
-	}
-	req := httptest.NewRequest(method, path, rdr)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Origin", r.srv.deployCfg.publicURL)
-	if sid != "" {
-		req.AddCookie(&http.Cookie{Name: r.srv.sidCookieName(), Value: sid})
-	}
-	rec := httptest.NewRecorder()
-	r.srv.mux.ServeHTTP(rec, req)
-	return rec.Result()
 }
 
 // tokenFromAcceptURL pulls the ?token= value out of a create response's
@@ -891,7 +735,7 @@ func (r *authRig) signInWithClaims(userID uuid.UUID, claims jwt.MapClaims) strin
 
 func postAccept(r *authRig, sid, token string) *http.Response {
 	r.t.Helper()
-	return doInviteReq(r, http.MethodPost, "/api/invites/accept", sid,
+	return r.postJSONWithSid(http.MethodPost, "/api/invites/accept", sid,
 		map[string]string{"token": token})
 }
 

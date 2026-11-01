@@ -28,12 +28,19 @@ func decodeSource(t *testing.T, raw []byte) eventsource.Source {
 	return got
 }
 
-// TestOrgSource_PatchTogglesAndReadReflectsIt walks the pair end to end: the
-// PATCH answers with the derived state rather than echoing the boolean it was
-// handed, the GET beside it agrees, and the list the whole authoring surface
-// reads from agrees too.
+// TestOrgSource_PatchTogglesAndReadReflectsIt: the source list is derived, so
+// binding credentials moves github and jira from unconfigured to available. The
+// PATCH answers the derived state, the GET and the list agree, and the pause is
+// audited as a source pause, not a credential removal.
 func TestOrgSource_PatchTogglesAndReadReflectsIt(t *testing.T) {
 	s := newTestServer(t)
+	unconfigureEventSources(t)
+	before := readOrgSources(t, s)
+	for _, kind := range []string{eventsource.KindGitHub, eventsource.KindJira} {
+		if before[kind] != string(eventsource.StateUnconfigured) {
+			t.Errorf("%s on a fresh org = %q, want unconfigured", kind, before[kind])
+		}
+	}
 	configureEventSources(t, s)
 
 	if got := readOrgSources(t, s)[eventsource.KindJira]; got != string(eventsource.StateAvailable) {
@@ -46,6 +53,13 @@ func TestOrgSource_PatchTogglesAndReadReflectsIt(t *testing.T) {
 	}
 	if got := decodeSource(t, rec.Body.Bytes()); got.State != eventsource.StateDisabled || got.Kind != "jira" {
 		t.Errorf("PATCH answered %+v, want jira/disabled", got)
+	}
+	audit, _, err := sqlitestore.New(s.db).AccessChangeLog.ListByOrg(context.Background(), runmode.LocalDefaultOrgID, domain.AccessChangeListOpts{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListByOrg: %v", err)
+	}
+	if len(audit) == 0 || audit[0].Action != domain.AccessActionEventSourceDisabled || audit[0].DetailJSON != domain.AccessDetailEventSource("jira") {
+		t.Errorf("newest audit row = %+v, want %q with detail %q", audit, domain.AccessActionEventSourceDisabled, domain.AccessDetailEventSource("jira"))
 	}
 
 	read := doJSON(t, s, http.MethodGet, orgSourcePath("jira"), nil)
@@ -75,10 +89,9 @@ func TestOrgSource_PatchTogglesAndReadReflectsIt(t *testing.T) {
 	}
 }
 
-// TestOrgSource_PatchClearsSnapshotsOnDisableOnly pins the write's other half:
-// disabling clears the tracker snapshots that make a re-enable safe, and
-// enabling does not (there is nothing to protect against, and clearing would
-// throw away a cycle of state for nothing).
+// TestOrgSource_PatchClearsSnapshotsOnDisableOnly: disabling clears the source's
+// tracker snapshots, so a re-enable does not diff stale state into a burst of
+// events; enabling leaves them alone.
 func TestOrgSource_PatchClearsSnapshotsOnDisableOnly(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
@@ -121,28 +134,6 @@ func TestOrgSource_PatchClearsSnapshotsOnDisableOnly(t *testing.T) {
 	}
 	if got.SnapshotJSON == "" {
 		t.Error("enabling cleared the snapshot; only disabling has a burst to prevent")
-	}
-}
-
-// TestOrgSource_PatchAudits pins that the pause reads as what it is in the
-// access log — not as a credential removal, which is the wrong story for "we
-// paused Jira for a sprint" and the reason this route exists.
-func TestOrgSource_PatchAudits(t *testing.T) {
-	s := newTestServer(t)
-	configureEventSources(t, s)
-
-	if rec := doJSON(t, s, http.MethodPatch, orgSourcePath("jira"), map[string]any{"disabled": true}); rec.Code != http.StatusOK {
-		t.Fatalf("PATCH: %d: %s", rec.Code, rec.Body.String())
-	}
-	rows, _, err := sqlitestore.New(s.db).AccessChangeLog.ListByOrg(context.Background(), runmode.LocalDefaultOrgID, domain.AccessChangeListOpts{Limit: 10})
-	if err != nil {
-		t.Fatalf("ListByOrg: %v", err)
-	}
-	if len(rows) == 0 || rows[0].Action != domain.AccessActionEventSourceDisabled {
-		t.Fatalf("newest audit row = %+v, want %q", rows, domain.AccessActionEventSourceDisabled)
-	}
-	if rows[0].DetailJSON != domain.AccessDetailEventSource("jira") {
-		t.Errorf("detail = %q, want %q", rows[0].DetailJSON, domain.AccessDetailEventSource("jira"))
 	}
 }
 
@@ -193,10 +184,9 @@ func TestOrgSource_RejectsBadRequests(t *testing.T) {
 	}
 }
 
-// TestOrgSource_WriteIsOrgAdminReadIsMember pins D3's split gate, and the
-// disclosure rule with it: a plain member reads (they have to be able to render
-// why their own handler is inert) but cannot write, and a caller outside the org
-// is told nothing at all.
+// TestOrgSource_WriteIsOrgAdminReadIsMember: a plain member reads a source (to
+// render why their handler is inert) but may not write it, and a caller outside
+// the org is told nothing at all.
 func TestOrgSource_WriteIsOrgAdminReadIsMember(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
@@ -242,9 +232,8 @@ func TestOrgSource_WriteIsOrgAdminReadIsMember(t *testing.T) {
 	}
 }
 
-// TestEventHandlerCreate_RefusesDisabledSource pins the create-time gate's new
-// arm. It is the same 422 INVALID_FIELD the unconfigured case answers, because
-// both are references the caller can act on — and it carries its own message,
+// TestEventHandlerCreate_RefusesDisabledSource: creating a handler on a turned-off
+// source is the unconfigured case's 422 INVALID_FIELD, with its own message,
 // since "go connect Jira" is useless advice for a source an admin turned off.
 func TestEventHandlerCreate_RefusesDisabledSource(t *testing.T) {
 	s := newTestServer(t)

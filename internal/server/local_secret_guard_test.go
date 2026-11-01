@@ -35,12 +35,9 @@ func TestSnapshotSecrets_Restores(t *testing.T) {
 	}
 }
 
-// TestGuardLocalSecretWrite_SerializesLocalWrites: in local mode the guard
-// holds the integration's mutex until its unlock runs, so a second write
-// waits for the first to finish restoring. A caller that already holds its
-// integration's lock passes no mutex and gets a restore all the same. Multi
-// mode keeps the secrets inside the transaction, so it takes no lock and has
-// nothing to restore.
+// TestGuardLocalSecretWrite_SerializesLocalWrites: in local mode the guard holds
+// the integration's mutex until unlock and returns a restore, with or without a
+// mutex; multi mode keeps secrets in the transaction, so it locks nothing.
 func TestGuardLocalSecretWrite_SerializesLocalWrites(t *testing.T) {
 	t.Run("local", func(t *testing.T) {
 		r := newLinearAccessRig(t)

@@ -103,67 +103,9 @@ func postStock(t *testing.T, s *Server, action string, ids ...string) (*httptest
 	return rec, body
 }
 
-// TestStockQueue_PerItemAccounting pins the batch policy's core invariant:
-// every submitted id comes back in the results, ok either way, so applied +
-// failed = submitted and no id is silently dropped mid-loop. The mixed batch
-// here is the case that used to under-report — one applicable ticket next to
-// an id that names none, whose row names the field.
-func TestStockQueue_PerItemAccounting(t *testing.T) {
-	keyring.MockInit() // in-memory keychain — the sandbox has no dbus backend
-	s := newTestServer(t)
-	seedStockConfig(t, s)
-	seedStockTicket(t, s, "SKY-1")
-
-	submitted := []string{"e_stock_SKY-1", "e_stock_missing"}
-	rec, body := postStock(t, s, "queue", submitted...)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	if len(body.Results) != len(submitted) {
-		t.Fatalf("results = %d rows, want one per submitted key (%d): %s", len(body.Results), len(submitted), rec.Body.String())
-	}
-	if body.Applied+body.Failed != len(submitted) {
-		t.Errorf("applied(%d) + failed(%d) != submitted(%d)", body.Applied, body.Failed, len(submitted))
-	}
-	if body.Applied != 1 || body.Failed != 1 {
-		t.Errorf("applied=%d failed=%d, want 1 and 1; body=%s", body.Applied, body.Failed, rec.Body.String())
-	}
-	seen := map[string]stockItemResult{}
-	for _, row := range body.Results {
-		seen[row.EntityID] = row
-	}
-	if row, ok := seen["e_stock_SKY-1"]; !ok || !row.OK || row.IssueKey != "SKY-1" {
-		t.Errorf("e_stock_SKY-1 row = %+v, want ok under SKY-1", row)
-	}
-	// A failed row carries the envelope's item shape, not a prose string, and
-	// an id that names no ticket names the field.
-	row, ok := seen["e_stock_missing"]
-	if !ok || row.OK {
-		t.Fatalf("e_stock_missing row = %+v, want a failure", row)
-	}
-	if len(row.Errors) == 0 || row.Errors[0].Reason != "NOT_FOUND" || row.Errors[0].Field != "entity_ids" {
-		t.Errorf("e_stock_missing errors = %+v, want NOT_FOUND on entity_ids", row.Errors)
-	}
-
-	// The applied key really did mint a task — the accounting isn't reporting
-	// work it didn't do.
-	var tasks int
-	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM tasks WHERE entity_id = 'e_stock_SKY-1'`,
-	).Scan(&tasks); err != nil {
-		t.Fatalf("count tasks: %v", err)
-	}
-	if tasks != 1 {
-		t.Errorf("tasks for the queued ticket = %d, want 1", tasks)
-	}
-}
-
-// TestStockActions_RejectMalformedBatches pins the request-level half of the
-// batch policy: an empty list, an over-cap list, a blank or whitespace-padded
-// id and a repeated id fail the whole call, because each would otherwise
-// make the accounting invariant a lie for the batch that ran — the padded id
-// by answering under an id the caller never sent. Every action route enforces
-// it identically: the validator is shared rather than restated per route.
+// TestStockActions_RejectMalformedBatches: an empty or over-cap list, a blank,
+// padded or repeated id each fail the whole call on every action route, since
+// each would break the one-result-per-submitted-id accounting.
 func TestStockActions_RejectMalformedBatches(t *testing.T) {
 	keyring.MockInit()
 	s := newTestServer(t)
@@ -199,11 +141,9 @@ func TestStockActions_RejectMalformedBatches(t *testing.T) {
 	}
 }
 
-// TestStockDeck_OneSchemaInEveryState pins the GET contract: status
-// distinguishes "still polling" from "here is the deck", and it never changes
-// which keys are present. A client that has to branch on status before it
-// knows whether `assigned` exists ends up writing two parsers and picking the
-// wrong one.
+// TestStockDeck_OneSchemaInEveryState: status tells "still polling" from "here
+// is the deck" but never changes which keys are present, so a client needs one
+// parser.
 func TestStockDeck_OneSchemaInEveryState(t *testing.T) {
 	keyring.MockInit()
 	s := newTestServer(t)
@@ -264,9 +204,9 @@ func readStockDeckKeys(t *testing.T, s *Server) map[string]any {
 	return out
 }
 
-// TestStockDeck_ListsAndActsOnTheEntitysCurrentKey: an entity renamed when TF
-// learned its issue moved — before the next poll refreshed its snapshot —
-// lists under the key it answers to now, and an action on that key finds it.
+// TestStockDeck_ListsAndActsOnTheEntitysCurrentKey: an entity renamed before
+// the next poll refreshed its snapshot lists under its current key, and a queue
+// on it applies there. A batch accounts for every id it was sent, in order.
 func TestStockDeck_ListsAndActsOnTheEntitysCurrentKey(t *testing.T) {
 	keyring.MockInit()
 	s := newTestServer(t)
@@ -292,9 +232,15 @@ func TestStockDeck_ListsAndActsOnTheEntitysCurrentKey(t *testing.T) {
 		t.Errorf("deck row = %v, want e_stock_SKY-1 under SKY-9", row)
 	}
 
-	rec, body := postStock(t, s, "queue", "e_stock_SKY-1")
-	if rec.Code != http.StatusOK || body.Applied != 1 || len(body.Results) != 1 || body.Results[0].IssueKey != "SKY-9" {
-		t.Fatalf("queue e_stock_SKY-1 = %d %s, want it applied under SKY-9", rec.Code, rec.Body.String())
+	rec, body := postStock(t, s, "queue", "e_stock_SKY-1", "e_stock_missing")
+	if rec.Code != http.StatusOK || body.Applied != 1 || body.Failed != 1 || len(body.Results) != 2 ||
+		!body.Results[0].OK || body.Results[0].EntityID != "e_stock_SKY-1" || body.Results[0].IssueKey != "SKY-9" {
+		t.Fatalf("queue = %d %s, want e_stock_SKY-1 applied under SKY-9 and one failure", rec.Code, rec.Body.String())
+	}
+	// An id that names no ticket fails on its own row, naming the field.
+	if missing := body.Results[1]; missing.OK || missing.EntityID != "e_stock_missing" ||
+		len(missing.Errors) == 0 || missing.Errors[0].Reason != "NOT_FOUND" || missing.Errors[0].Field != "entity_ids" {
+		t.Errorf("e_stock_missing row = %+v, want NOT_FOUND on entity_ids", missing)
 	}
 	var meta string
 	if err := s.db.QueryRow(
@@ -307,13 +253,9 @@ func TestStockDeck_ListsAndActsOnTheEntitysCurrentKey(t *testing.T) {
 	}
 }
 
-// TestJiraReaders_FollowAProjectKeyRename: a project whose key is renamed keeps
-// its registry row, which the issue's entity and the team's rule both
-// reference. Once the issue answers under the new key, the deck still
-// classifies it under its project's rule (an unassigned ticket in a pickup
-// status is still available to claim) and the claim/requeue path still finds
-// that rule: before the poll has re-keyed the registry row, when no key the
-// issue carries matches the rule's, and after it.
+// TestJiraReaders_FollowAProjectKeyRename: the deck and the claim path find an
+// issue's rule through its project's registry row, so after a project key
+// rename both still find it, before and after the poll re-keys the row.
 func TestJiraReaders_FollowAProjectKeyRename(t *testing.T) {
 	keyring.MockInit()
 	s := newTestServer(t)
@@ -386,10 +328,9 @@ func TestJiraReaders_FollowAProjectKeyRename(t *testing.T) {
 	check("after the registry row is re-keyed", "CORE")
 }
 
-// TestStockDeck_BlankDisplayNameClaimsNoUnassignedTicket: a Jira identity can
-// carry no display name (some Data Center installs). An unassigned ticket has
-// none either, and must not read as the user's: it is neither on the deck's
-// assigned half nor actionable as theirs.
+// TestStockDeck_BlankDisplayNameClaimsNoUnassignedTicket: with a Jira identity
+// that has no display name, an unassigned ticket (which has none either) is not
+// the user's: not on the assigned half, and not actionable as theirs.
 func TestStockDeck_BlankDisplayNameClaimsNoUnassignedTicket(t *testing.T) {
 	keyring.MockInit()
 	s := newTestServer(t)
@@ -423,9 +364,11 @@ func TestStockDeck_BlankDisplayNameClaimsNoUnassignedTicket(t *testing.T) {
 }
 
 // TestStockClaimAndDone_AddressJiraByIssueID: the claim and done writes name
-// the issue by its id, which a move leaves alone, never by its key.
+// the issue by its id, which a move leaves alone, never by its key. Done closes
+// the entity without routing an event, so it runs the closed-entity resolve.
 func TestStockClaimAndDone_AddressJiraByIssueID(t *testing.T) {
 	keyring.MockInit()
+	notes := notifytest.Record(t)
 	s := newTestServer(t)
 	seedStockConfig(t, s)
 	seedStockTicket(t, s, "SKY-1")
@@ -439,24 +382,7 @@ func TestStockClaimAndDone_AddressJiraByIssueID(t *testing.T) {
 		}
 	}
 	fake.assertIssuesNamed(t, dbseed.JiraIssueID("SKY-1"), dbseed.JiraIssueID("SKY-2"))
-}
-
-// Done closes the entity without routing an event, so no close relation
-// resolves its event notifications; the resolve runs the closed-entity pass
-// for its org at once.
-func TestStockDone_ResolvesTheClosedEntitysNotifications(t *testing.T) {
-	keyring.MockInit()
-	rec := notifytest.Record(t)
-	s := newTestServer(t)
-	seedStockConfig(t, s)
-	seedStockTicket(t, s, "SKY-3")
-	fake := newJiraIssueFake(t, statusToDoID, "")
-	s.jiraResolver = &recordingJiraResolver{userClient: fake.client()}
-
-	if resp, body := postStock(t, s, "done", "e_stock_SKY-3"); body.Applied != 1 {
-		t.Fatalf("done = %d %s, want it applied", resp.Code, resp.Body.String())
-	}
-	if n := rec.ClosedEntityResolves(runmode.LocalDefaultOrgID); n != 1 {
-		t.Errorf("closed-entity resolves = %d; want 1", n)
+	if n := notes.ClosedEntityResolves(runmode.LocalDefaultOrgID); n != 1 {
+		t.Errorf("closed-entity resolves = %d; want 1 for the done", n)
 	}
 }

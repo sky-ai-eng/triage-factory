@@ -46,9 +46,7 @@ func watchMemoryDoorbell(s *Server) *doorbell {
 }
 
 // seedLiveConversation puts one un-ended conversation on taskID and returns its
-// id. Written as SQL for the same reason the other task fixtures are: what the
-// boundary doors read is the row, and a store method that mints one would drag
-// in a blueprint run this test says nothing about.
+// id. It is SQL because a store method that mints one also needs a blueprint run.
 func seedLiveConversation(t *testing.T, s *Server, taskID string) string {
 	t.Helper()
 	id := uuid.New().String()
@@ -100,10 +98,9 @@ func TestEndTaskConversations_RingsOncePerStampedConversation(t *testing.T) {
 	}
 }
 
-// A boundary that stamped nothing rings nothing. Two shapes of that, and both
-// matter: a second gesture on a task whose conversations have already ended
-// (the door returns only the rows IT stamped, so the debt is not re-rung for),
-// and a task that had nothing live at all.
+// A boundary that stamped nothing rings nothing: a second gesture on a task
+// whose conversations already ended, a task with nothing live, and a task id
+// that names no row.
 func TestEndTaskConversations_RingsNothingWhenItStampedNothing(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -133,29 +130,17 @@ func TestEndTaskConversations_RingsNothingWhenItStampedNothing(t *testing.T) {
 	if got := d.taken(); len(got) != 0 {
 		t.Errorf("a boundary on a task with no live conversation rang %v", got)
 	}
-}
-
-// The write is what the ring reports, not the request: the rows come back from
-// the stamping statement itself, so a transaction that failed leaves nothing to
-// ring for. Forced by asking a task id that names no row — the tx commits having
-// stamped nothing, which is the same "nothing to ring" the rollback produces.
-func TestEndTaskConversations_RingsNothingForAnUnknownTask(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
-	d := watchMemoryDoorbell(s)
 
 	s.endTaskConversations(context.Background(), runmode.LocalDefaultOrgID,
 		runmode.LocalDefaultUserID, uuid.New().String(), domain.EndedRequeued)
 	if got := d.taken(); len(got) != 0 {
-		t.Errorf("a boundary that stamped nothing rang %v", got)
+		t.Errorf("a boundary on an unknown task rang %v", got)
 	}
 }
 
-// Choosing a background-jobs model is the fix for every generation that failed
-// `no_model`, so the save re-kicks the org's whole backlog rather than letting
-// each owed conversation age out of the attempt backoff. The org-wide form
-// carries no conversation id.
+// Choosing a background-jobs model fixes every generation that failed
+// `no_model`, so the save rings the org-wide doorbell (no conversation id) to
+// re-kick the backlog.
 func TestOrgSettingsPatch_BackgroundJobsModel_ReKicksTheMemorySweep(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -184,11 +169,9 @@ func TestOrgSettingsPatch_BackgroundJobsModel_ReKicksTheMemorySweep(t *testing.T
 	}
 }
 
-// A save that leaves the model where it was has fixed nothing, so it rings
-// nothing — the re-kick is computed from what the save CHANGED. Same for
-// clearing it: an org with no background-jobs model is an org whose generations
-// will fail `no_model` again, and re-running the backlog to prove that is spend
-// with no chance of landing.
+// Only a save that changes the model to one rings: re-sending the stored model,
+// clearing it (the backlog would fail `no_model` again), or saving another field
+// rings nothing.
 func TestOrgSettingsPatch_BackgroundJobsModel_UnchangedAndClearedRingNothing(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -214,10 +197,9 @@ func TestOrgSettingsPatch_BackgroundJobsModel_UnchangedAndClearedRingNothing(t *
 	}
 }
 
-// Binding an LLM credential is the other fix for a `no_model` backlog — the
-// model was named but its provider was not connected — so the credential PUTs
-// ring the same org-wide doorbell. The bearer flavour stands for all three
-// Bedrock shapes: they share bindBedrock, which is where the ring lives.
+// Binding an LLM credential also fixes a `no_model` backlog, so the credential
+// PUTs ring the org-wide doorbell. The bearer flavour stands for all three
+// Bedrock shapes, which share bindBedrock, where the ring lives.
 func TestBedrockBearerPut_ReKicksTheMemorySweep(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()

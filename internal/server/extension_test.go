@@ -72,27 +72,9 @@ func TestExtensionAPI_PublishPreEnqueued_NilIngestor_Logs(t *testing.T) {
 	}
 }
 
-// TestExtensionAPI_Bus_ReadsThroughToSetEventBus pins Bus() as a plain
-// read-through accessor to whatever SetEventBus wired — nil before wiring,
-// the same bus instance after.
-func TestExtensionAPI_Bus_ReadsThroughToSetEventBus(t *testing.T) {
-	srv := &Server{}
-	if got := (serverExtensionAPI{srv}).Bus(); got != nil {
-		t.Errorf("Bus() = %v, want nil before SetEventBus", got)
-	}
-
-	bus := eventbus.New()
-	srv.SetEventBus(bus)
-	if got := (serverExtensionAPI{srv}).Bus(); got != bus {
-		t.Errorf("Bus() = %v, want the bus SetEventBus wired (%v)", got, bus)
-	}
-}
-
-// TestExtensionAPI_OnReady_NilHookPanics pins the fail-fast-at-registration
-// contract shared with the other core registries (routing.RegisterSource,
-// events.Register): a nil hook panics immediately during install, rather
-// than being silently collected and later crashing a goroutine — with a much
-// less useful stack trace — when StartExtensionWorkers calls it.
+// TestExtensionAPI_OnReady_NilHookPanics: a nil hook panics at registration,
+// like the other core registries, rather than crashing a goroutine later when
+// StartExtensionWorkers calls it.
 func TestExtensionAPI_OnReady_NilHookPanics(t *testing.T) {
 	defer func() {
 		r := recover()
@@ -108,14 +90,9 @@ func TestExtensionAPI_OnReady_NilHookPanics(t *testing.T) {
 	api.OnReady(nil)
 }
 
-// TestExtensionAPI_OnReady_DoesNotFireUntilBrainStarts pins that
-// registering a hook (the install-time action) is inert on its own — it
-// must not run until StartBrainExtensionWorkers fires it, mirroring the
-// real boot order where OnReady is called during routes()/
-// installExtensions, well before app wiring AND this pod's first
-// background-brain acquisition. Plain StartExtensionWorkers (the
-// replica-safe path) must NOT fire a brain-gated OnReady hook either
-// (TFAC-583) — that's the whole point of the split.
+// TestExtensionAPI_OnReady_DoesNotFireUntilBrainStarts: an OnReady hook does not
+// run on registration or from the replica-safe StartExtensionWorkers, only from
+// StartBrainExtensionWorkers.
 func TestExtensionAPI_OnReady_DoesNotFireUntilBrainStarts(t *testing.T) {
 	srv := &Server{}
 	api := serverExtensionAPI{srv}
@@ -161,9 +138,8 @@ func TestExtensionAPI_OnReadyReplicaSafe_NilHookPanics(t *testing.T) {
 	api.OnReadyReplicaSafe(nil)
 }
 
-// TestExtensionAPI_OnReadyReplicaSafe_FiresFromStartExtensionWorkers pins
-// the escape hatch's contract: a replica-safe hook fires from the plain
-// (unconditional, brain-lease-agnostic) StartExtensionWorkers path, not
+// TestExtensionAPI_OnReadyReplicaSafe_FiresFromStartExtensionWorkers: a
+// replica-safe hook fires from StartExtensionWorkers and not from
 // StartBrainExtensionWorkers.
 func TestExtensionAPI_OnReadyReplicaSafe_FiresFromStartExtensionWorkers(t *testing.T) {
 	srv := &Server{}
@@ -187,13 +163,15 @@ func TestExtensionAPI_OnReadyReplicaSafe_FiresFromStartExtensionWorkers(t *testi
 	}
 }
 
-// TestServer_StartBrainExtensionWorkers_HookSeesWiredBus pins the seam's
-// core ordering guarantee: by the time a hook fires, read-through
-// accessors like Bus() resolve to whatever app wiring set before this
-// pod's brain started.
+// TestServer_StartBrainExtensionWorkers_HookSeesWiredBus: Bus() is nil before
+// SetEventBus, and inside a hook it returns the bus wired before the brain
+// started.
 func TestServer_StartBrainExtensionWorkers_HookSeesWiredBus(t *testing.T) {
 	srv := &Server{}
 	api := serverExtensionAPI{srv}
+	if got := api.Bus(); got != nil {
+		t.Errorf("Bus() = %v, want nil before SetEventBus", got)
+	}
 
 	bus := eventbus.New()
 	srv.SetEventBus(bus)
@@ -213,11 +191,9 @@ func TestServer_StartBrainExtensionWorkers_HookSeesWiredBus(t *testing.T) {
 	}
 }
 
-// TestServer_StartBrainExtensionWorkers_CtxCancelObservableInHook pins
-// that the context handed to a hook is the one passed to
-// StartBrainExtensionWorkers — internal/app passes a ctx that cancels on
-// EITHER process shutdown OR lease demotion, so a worker sees the same
-// signal either way.
+// TestServer_StartBrainExtensionWorkers_CtxCancelObservableInHook: a hook runs on
+// the context passed to StartBrainExtensionWorkers, which internal/app cancels on
+// shutdown or lease demotion.
 func TestServer_StartBrainExtensionWorkers_CtxCancelObservableInHook(t *testing.T) {
 	srv := &Server{}
 	api := serverExtensionAPI{srv}
@@ -248,12 +224,9 @@ func TestServer_StartBrainExtensionWorkers_CtxCancelObservableInHook(t *testing.
 	}
 }
 
-// TestServer_StartBrainExtensionWorkers_RepeatCallsRestartHooks pins that,
-// unlike StartExtensionWorkers, StartBrainExtensionWorkers is NOT
-// Once-guarded — a second call (modeling a lease re-acquisition after an
-// earlier demotion) fires the hooks again. internal/app's brainMu-guarded
-// startBrain is what prevents a spurious double-call while already
-// holding; this method itself trusts the caller.
+// TestServer_StartBrainExtensionWorkers_RepeatCallsRestartHooks: a second call,
+// as on lease re-acquisition, fires the hooks again. Unlike StartExtensionWorkers
+// it has no once-guard; internal/app's startBrain prevents a double start.
 func TestServer_StartBrainExtensionWorkers_RepeatCallsRestartHooks(t *testing.T) {
 	srv := &Server{}
 	api := serverExtensionAPI{srv}

@@ -15,11 +15,9 @@ func linearInReview() map[string]any {
 	return map[string]any{"member_ids": []string{linearStateReview}, "canonical_id": linearStateReview}
 }
 
-// TestLinearTeamsPut_InReviewOnAnArmedTeam: an element naming only in_review
-// on an armed team stores the rule, carries the other three as stored, and
-// leaves the team armed. In Review is also an in_progress member of
-// armedLinearTeam, so the state sits in both rules. Clearing it again keeps
-// the team armed. Neither write re-dues the poll.
+// TestLinearTeamsPut_InReviewOnAnArmedTeam: naming only in_review on an armed
+// team stores it (its state also an in_progress member), carries the other rules
+// and keeps the team armed, as does clearing it; neither write re-dues the poll.
 func TestLinearTeamsPut_InReviewOnAnArmedTeam(t *testing.T) {
 	s, _ := newServerWithLinearCatalog(t, linearFixtureEng)
 	armed := mustPutLinearTeams(t, s, armedLinearTeam(linearTeamEng))[0]

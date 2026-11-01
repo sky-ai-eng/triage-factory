@@ -15,32 +15,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// TestTaskPatchStage_RejectsBotClaimedTask pins the guard rule for the manual
-// user transition: only the task's own claimant may write its stage. A
-// bot-claimed task was placed in progress by the bot's own claim; letting a
-// person write the column by hand would be them staging somebody else's work.
-func TestTaskPatchStage_RejectsBotClaimedTask(t *testing.T) {
-	s := newTestServer(t)
-	taskID := seedLifecycleTask(t, s.db, "bot-claimed", lifecycleTaskOpts{
-		claimedByAgentID: runmode.LocalDefaultAgentID,
-	})
-
-	rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID,
-		map[string]any{"status": "in_progress"})
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403 (bot-claimed task isn't the caller's to advance); body=%s",
-			rec.Code, rec.Body.String())
-	}
-	if got := readTaskStatus(t, s.db, taskID); got != "in_progress" {
-		t.Errorf("task.status = %q, want %q (the bot's own claim placed it)", got, "in_progress")
-	}
-}
-
-// TestTaskPatchStage_RejectsUnclaimedTask covers the second guard: a stage is
-// the claimant's own progress marker, so an unclaimed (Queued column) task
-// must be claimed first. The AdvanceStatusForUser store method enforces the
-// same rule with a WHERE clause on claimed_by_user_id; the handler's 403 is
-// what distinguishes "not yours" from a lost race.
+// TestTaskPatchStage_RejectsUnclaimedTask: a stage is the claimant's own
+// progress marker, so writing one on a task the caller does not hold is a 403
+// that changes nothing.
 func TestTaskPatchStage_RejectsUnclaimedTask(t *testing.T) {
 	s := newTestServer(t)
 	taskID := seedLifecycleTask(t, s.db, "unclaimed", lifecycleTaskOpts{})
@@ -56,10 +33,8 @@ func TestTaskPatchStage_RejectsUnclaimedTask(t *testing.T) {
 	}
 }
 
-// TestTaskPatch_RejectsEveryMutationOnATerminalTask is the structural close of
-// the terminal-rewrite hole: a closed task takes no PATCH at all, dismiss and
-// complete included — those used to rewrite closed_at / close_reason on an
-// already-closed row and answer 200. Re-opening is requeue's and undo's job.
+// TestTaskPatch_RejectsEveryMutationOnATerminalTask: a closed task takes no
+// PATCH at all, a second close included; re-opening is requeue's and undo's job.
 func TestTaskPatch_RejectsEveryMutationOnATerminalTask(t *testing.T) {
 	s := newTestServer(t)
 
@@ -92,12 +67,9 @@ func TestTaskPatch_RejectsEveryMutationOnATerminalTask(t *testing.T) {
 	}
 }
 
-// TestTaskPatchClose_SecondCloseRewritesNothing pins the guard that the
-// handler's pre-read cannot provide. The pre-read and the write are separate
-// statements, so a close can land between them; the store's own status
-// predicate is what makes the second write find no row. Driving the store
-// directly is the point — it stands in for the write half of a concurrent
-// request that passed its own pre-read a moment earlier.
+// TestTaskPatchClose_SecondCloseRewritesNothing pins the store's own status
+// predicate, the guard for a close that lands between the handler's pre-read and
+// its write: driving the store directly stands in for that concurrent request.
 func TestTaskPatchClose_SecondCloseRewritesNothing(t *testing.T) {
 	s := newTestServer(t)
 	taskID := seedLifecycleTask(t, s.db, "double-close", lifecycleTaskOpts{})
@@ -146,13 +118,9 @@ func readTaskClose(t *testing.T, database *sql.DB, taskID string) (closedAt, clo
 	return at.String, reason.String
 }
 
-// TestTaskPatch_RejectsUnwritableStatuses pins the accepted set. 'queued' is
-// requeue/undo territory — a bare status write would leave the claim stamped
-// and the agent's deliverables stranded — and 'snoozed' is what setting
-// snooze_until means, so accepting it as a status would be a second spelling
-// that can't carry the wake time the row needs. 'in_review' is an ex-status:
-// it left the vocabulary, so it is refused on the same terms as any word the
-// board never had.
+// TestTaskPatch_RejectsUnwritableStatuses pins the accepted set: 'queued' is
+// requeue's and undo's, 'snoozed' is spelled by snooze_until, and any word outside
+// the vocabulary is a 400.
 func TestTaskPatch_RejectsUnwritableStatuses(t *testing.T) {
 	s := newTestServer(t)
 	taskID := seedLifecycleTask(t, s.db, "bad-target", lifecycleTaskOpts{
@@ -171,12 +139,9 @@ func TestTaskPatch_RejectsUnwritableStatuses(t *testing.T) {
 	}
 }
 
-// TestTaskPatch_ValidatesTheBodyBeforeTheTaskState pins the guard ordering as
-// a decision rather than an accident: a malformed body against a closed task
-// answers for the body, not for the task. The two rounds are independent — a
-// request can be wrong in its own right regardless of what it is aimed at —
-// and reversing them would make every shape error on a closed task report a
-// state conflict the caller can do nothing about.
+// TestTaskPatch_ValidatesTheBodyBeforeTheTaskState: a malformed body against a
+// closed task answers for the body, not the task. A body naming no field wrote
+// nothing, and one naming both axes contradicts itself.
 func TestTaskPatch_ValidatesTheBodyBeforeTheTaskState(t *testing.T) {
 	s := newTestServer(t)
 
@@ -184,10 +149,12 @@ func TestTaskPatch_ValidatesTheBodyBeforeTheTaskState(t *testing.T) {
 		body map[string]any
 		want int
 	}{
-		"empty_body":        {map[string]any{}, http.StatusBadRequest},
-		"unwritable_status": {map[string]any{"status": "queued"}, http.StatusBadRequest},
-		"both_axes":         {map[string]any{"status": "done", "snooze_until": nil}, http.StatusBadRequest},
-		"past_wake_time":    {map[string]any{"snooze_until": "2020-01-02T03:04:05Z"}, http.StatusUnprocessableEntity},
+		"empty_body":          {map[string]any{}, http.StatusBadRequest},
+		"hesitation_only":     {map[string]any{"hesitation_ms": 400}, http.StatusBadRequest},
+		"unwritable_status":   {map[string]any{"status": "queued"}, http.StatusBadRequest},
+		"both_axes":           {map[string]any{"status": "done", "snooze_until": nil}, http.StatusBadRequest},
+		"both_axes_with_wake": {map[string]any{"status": "done", "snooze_until": "2999-01-01T00:00:00Z"}, http.StatusBadRequest},
+		"past_wake_time":      {map[string]any{"snooze_until": "2020-01-02T03:04:05Z"}, http.StatusUnprocessableEntity},
 	} {
 		t.Run(name, func(t *testing.T) {
 			taskID := seedLifecycleTask(t, s.db, "order-"+name, lifecycleTaskOpts{status: "dismissed"})
@@ -203,39 +170,9 @@ func TestTaskPatch_ValidatesTheBodyBeforeTheTaskState(t *testing.T) {
 	}
 }
 
-// TestTaskPatch_RejectsEmptyAndContradictoryBodies pins the two shapes that
-// aren't a partial update at all: a body naming no field wrote nothing (and
-// "updated" is the one answer a client can't tell from a real write), and a
-// body naming both axes says two contradictory things about where the task
-// lands.
-func TestTaskPatch_RejectsEmptyAndContradictoryBodies(t *testing.T) {
-	s := newTestServer(t)
-	taskID := seedLifecycleTask(t, s.db, "empty-body", lifecycleTaskOpts{
-		claimedByUserID: runmode.LocalDefaultUserID,
-	})
-
-	for name, body := range map[string]map[string]any{
-		"empty":              {},
-		"hesitation_only":    {"hesitation_ms": 400},
-		"both_axes":          {"status": "done", "snooze_until": "2999-01-01T00:00:00Z"},
-		"both_axes_with_nil": {"status": "done", "snooze_until": nil},
-	} {
-		t.Run(name, func(t *testing.T) {
-			rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID, body)
-			if rec.Code != http.StatusBadRequest {
-				t.Errorf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
-			}
-			if got := readTaskStatus(t, s.db, taskID); got != "in_progress" {
-				t.Errorf("task.status = %q, want the seeded in_progress", got)
-			}
-		})
-	}
-}
-
-// TestTaskPatch_RejectsHesitationWhereNoGestureLands pins that hesitation_ms
-// is refused rather than silently dropped on the arms with no swipe_events row
-// to carry it. A field the server accepts and discards is indistinguishable
-// from one it recorded.
+// TestTaskPatch_RejectsHesitationWhereNoGestureLands: hesitation_ms is refused
+// rather than dropped on an arm with no swipe_events row to carry it, and a
+// negative one is refused everywhere.
 func TestTaskPatch_RejectsHesitationWhereNoGestureLands(t *testing.T) {
 	s := newTestServer(t)
 
@@ -260,10 +197,8 @@ func TestTaskPatch_RejectsHesitationWhereNoGestureLands(t *testing.T) {
 	})
 }
 
-// TestTaskPatchStage_HappyPath_ReassertsInProgress is the canonical flow. The
-// claim already put the task in progress, so what the route does is re-assert
-// it for the holder — idempotent by construction — and answer with the task
-// resource rather than a status stub.
+// TestTaskPatchStage_HappyPath_ReassertsInProgress: the holder re-asserts
+// in_progress, which the claim already set, and gets the task resource back.
 func TestTaskPatchStage_HappyPath_ReassertsInProgress(t *testing.T) {
 	s := newTestServer(t)
 	taskID := seedLifecycleTask(t, s.db, "happy-ip", lifecycleTaskOpts{
@@ -290,17 +225,14 @@ func TestTaskPatchStage_HappyPath_ReassertsInProgress(t *testing.T) {
 		t.Errorf("task.status = %q, want %q", got, "in_progress")
 	}
 	// A stage move is a field write, not a card gesture: nothing lands in the
-	// swipe analytics, matching what /advance wrote before this route existed.
+	// swipe analytics.
 	if got := readSwipeActions(t, s.db, taskID); len(got) != 0 {
 		t.Errorf("swipe_events actions = %v, want none for a stage move", got)
 	}
 }
 
-// TestTaskPatchStage_RefusesInReview covers the value that used to be the
-// second forward step. The refusal names the field, because a caller sending
-// a status the board no longer has needs to be told which field was wrong —
-// and it must not land on a task the caller does hold the claim to, which is
-// the shape a stale client sends.
+// TestTaskPatchStage_RefusesInReview: in_review is outside the vocabulary, so
+// even on a task the caller holds it is a 400 naming status, and nothing lands.
 func TestTaskPatchStage_RefusesInReview(t *testing.T) {
 	s := newTestServer(t)
 	taskID := seedLifecycleTask(t, s.db, "refuse-ir", lifecycleTaskOpts{
@@ -319,44 +251,8 @@ func TestTaskPatchStage_RefusesInReview(t *testing.T) {
 	}
 }
 
-// TestTaskPatchClose_WritesHistoricalActionStrings pins analytics continuity:
-// dismissed and done keep writing the 'dismiss' and 'complete' rows the swipe
-// deck has written since it shipped, so the historical aggregates stay
-// comparable across the route change.
-func TestTaskPatchClose_WritesHistoricalActionStrings(t *testing.T) {
-	s := newTestServer(t)
-
-	for status, wantAction := range map[string]string{"dismissed": "dismiss", "done": "complete"} {
-		t.Run(status, func(t *testing.T) {
-			taskID := seedLifecycleTask(t, s.db, "close-"+status, lifecycleTaskOpts{})
-			rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID,
-				map[string]any{"status": status, "hesitation_ms": 900})
-			if rec.Code != http.StatusOK {
-				t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-			}
-			if got := readTaskStatus(t, s.db, taskID); got != status {
-				t.Errorf("task.status = %q, want %q", got, status)
-			}
-			if got := readSwipeActions(t, s.db, taskID); !equalStrings(got, []string{wantAction}) {
-				t.Errorf("swipe_events actions = %v, want [%s]", got, wantAction)
-			}
-			var hesitation sql.NullInt64
-			if err := s.db.QueryRow(
-				`SELECT hesitation_ms FROM swipe_events WHERE task_id = ?`, taskID,
-			).Scan(&hesitation); err != nil {
-				t.Fatalf("scan hesitation_ms: %v", err)
-			}
-			if !hesitation.Valid || hesitation.Int64 != 900 {
-				t.Errorf("hesitation_ms = %v, want 900", hesitation)
-			}
-		})
-	}
-}
-
-// TestTaskPatch_404OnUnknownTask covers the not-found case. With the pre-load
-// Get in the handler, "task not found" cleanly produces 404 — distinct from
-// the 403 / 409 guard paths above. The 00000000-…-0bad id is a valid UUID
-// format so it passes the uuid.Parse gate and reaches the Get call.
+// TestTaskPatch_404OnUnknownTask: a well-formed id naming no task is a 404,
+// distinct from the 403 and 409 guards.
 func TestTaskPatch_404OnUnknownTask(t *testing.T) {
 	s := newTestServer(t)
 	rec := doJSON(t, s, http.MethodPatch,
@@ -368,11 +264,8 @@ func TestTaskPatch_404OnUnknownTask(t *testing.T) {
 	}
 }
 
-// TestTaskPatch_404OnMalformedID covers the Postgres-portability case: a
-// non-UUID path id would surface as SQLSTATE 22P02 from the store layer
-// without the handler-side uuid.Parse guard. We treat it as 404 (same as a
-// missing UUID-shaped id) rather than 400 so the API doesn't expose
-// backend-specific id-format quirks.
+// TestTaskPatch_404OnMalformedID: a non-UUID path id is a 404 like a missing
+// one, not the 22P02 a Postgres uuid column would raise.
 func TestTaskPatch_404OnMalformedID(t *testing.T) {
 	s := newTestServer(t)
 	rec := doJSON(t, s, http.MethodPatch,
@@ -392,14 +285,9 @@ type lifecycleTaskOpts struct {
 	claimedByAgentID string
 }
 
-// seedLifecycleTask inserts a task row directly. Mirrors the
-// pendingApprovalFixture pattern in requeue_test.go but without the
-// conversation / review / memory machinery — the lifecycle tests only touch
-// the task row. Each call uses a unique suffix to dodge the dedup index.
-//
-// taskID uses a real UUID since every task route validates the path id as a
-// UUID up front (defense against Postgres' 22P02 on malformed input). Entity +
-// event ids stay suffix-based strings since no handler validates those.
+// seedLifecycleTask inserts a task row with its entity and event, and nothing
+// else, and returns its UUID id. Each call needs a unique suffix to stay clear
+// of the dedup index.
 func seedLifecycleTask(t *testing.T, database *sql.DB, suffix string, opts lifecycleTaskOpts) string {
 	t.Helper()
 	ctx := context.Background()

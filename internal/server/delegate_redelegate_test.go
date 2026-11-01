@@ -61,6 +61,9 @@ func redelegateFixture(t *testing.T, s *Server, tag string) (taskID, blueprintID
 	return taskID, blueprintID, delegateOnce(t, s, taskID, blueprintID)
 }
 
+// delegateOnce delegates taskID with blueprintID through the route and returns
+// the response's conversation_id, failing unless it names step 0 of a blueprint
+// run on the task: the blueprint_run id resolves against no conversation route.
 func delegateOnce(t *testing.T, s *Server, taskID, blueprintID string) string {
 	t.Helper()
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/delegate",
@@ -73,6 +76,16 @@ func delegateOnce(t *testing.T, s *Server, taskID, blueprintID string) string {
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body.ConversationID == "" {
 		t.Fatalf("decode delegate response %s: %v", rec.Body.String(), err)
+	}
+	var stepIndex int
+	if err := s.db.QueryRow(`
+		SELECT COALESCE(c.blueprint_step_index, -1) FROM conversations c
+		  JOIN blueprint_runs br ON br.id = c.blueprint_run_id
+		 WHERE c.id = ? AND br.task_id = ?`, body.ConversationID, taskID).Scan(&stepIndex); err != nil {
+		t.Fatalf("conversation_id %q names no conversation of a blueprint run on the task: %v", body.ConversationID, err)
+	}
+	if stepIndex != 0 {
+		t.Errorf("conversation_id names step %d, want the blueprint's first step", stepIndex)
 	}
 	return body.ConversationID
 }

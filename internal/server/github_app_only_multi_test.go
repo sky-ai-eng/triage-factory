@@ -14,11 +14,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// A multi org's GitHub access is a GitHub App, the deployment's or its
-// own. What is pinned here, through the full multi-mode stack: the routes that
-// put an org token in place do not exist, the one that removes a token
-// still does, and an imported App always arrives with the client secret its
-// members link their GitHub accounts through.
+// A multi org's GitHub access is an App: the routes that bind an org token do
+// not exist, the one that removes it does, and an imported App must bring the
+// client secret members link their accounts through.
 
 // sendOrg sends method to one of the org's own routes from the admin's
 // signed-in browser, with body as JSON when it is non-nil.

@@ -22,10 +22,8 @@ var testApp = &domain.OrgGitHubApp{
 
 const testExpectedReceiver = "https://tf.example.org/api/webhooks/github/" + runmode.LocalDefaultOrgID
 
-// TestRefreshWebhookHealth_FailurePreservesPriorState is the invariant the
-// whole probe hangs on: a failed probe is not an answer. GitHub being
-// unreachable says nothing about whether an org's webhooks are configured, so
-// the last known state survives it untouched — only the retry schedule moves.
+// TestRefreshWebhookHealth_FailurePreservesPriorState: a failed probe is not
+// an answer, so the last known state and its checked_at survive it.
 func TestRefreshWebhookHealth_FailurePreservesPriorState(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -72,14 +70,9 @@ func TestRefreshWebhookHealth_FailurePreservesPriorState(t *testing.T) {
 	}
 }
 
-// TestWebhookHealthDTO_AppSwapDropsTheCachedAnswer pins that a cached answer
-// belongs to the registration it was probed for, not to the org.
-//
-// An org can tear its App down and register another — switch to a PAT and back,
-// or discard a staged App and import a different one — while its id never
-// changes. Serving the old App's state for the rest of the TTL would report a
-// health, a last-delivery time, and a repair button for something the org
-// no longer has.
+// TestWebhookHealthDTO_AppSwapDropsTheCachedAnswer: a cached answer belongs to
+// the registration it was probed for, so a different or re-imported App reads
+// null until it is probed itself.
 func TestWebhookHealthDTO_AppSwapDropsTheCachedAnswer(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -129,10 +122,8 @@ func TestWebhookHealthDTO_AppSwapDropsTheCachedAnswer(t *testing.T) {
 	waitForWebhookProbeIdle(t, s, runmode.LocalDefaultOrgID)
 }
 
-// TestRefreshWebhookHealth_LateProbeForAReplacedAppIsDropped closes the half an
-// invalidate-on-teardown call could not: a probe that was already in flight when
-// the registration changed. Writing its answer would stamp the OLD App's state
-// as freshly checked, and the entry would then look current for a full TTL.
+// TestRefreshWebhookHealth_LateProbeForAReplacedAppIsDropped: a probe still in
+// flight when the registration changed must not overwrite the new App's answer.
 func TestRefreshWebhookHealth_LateProbeForAReplacedAppIsDropped(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -165,11 +156,9 @@ func TestRefreshWebhookHealth_LateProbeForAReplacedAppIsDropped(t *testing.T) {
 	waitForWebhookProbeIdle(t, s, runmode.LocalDefaultOrgID)
 }
 
-// TestWebhookHealthDTO_NothingToProbe pins the cases that produce no probe
-// at all: an org with no App (nothing to ask about), a deployment with no
-// public identity (no receiver URL to compare a hook against, so any answer
-// would be invented), and an App GitHub no longer accepts (no webhook left to
-// diagnose).
+// TestWebhookHealthDTO_NothingToProbe: no App, no deployment public URL to
+// compare a hook against, or an App GitHub no longer has each yield null and
+// no probe.
 func TestWebhookHealthDTO_NothingToProbe(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	ctx := context.Background()
@@ -224,10 +213,9 @@ func TestWebhookHealthDTO_NothingToProbe(t *testing.T) {
 	})
 }
 
-// TestWebhookHealthDTO_LocalPlaceholderIsAState pins that a local-mode
-// deployment — whose App carries the inert placeholder hook URL TF wrote
-// itself — reports "not configured" as an ordinary state. Nothing about it is
-// an error, and the read that carries it is a plain 200.
+// TestWebhookHealthDTO_LocalPlaceholderIsAState: the probe is handed this
+// deployment's receiver URL, and a local App's placeholder hook reads as the
+// ordinary not_configured state.
 func TestWebhookHealthDTO_LocalPlaceholderIsAState(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -256,10 +244,9 @@ func TestWebhookHealthDTO_LocalPlaceholderIsAState(t *testing.T) {
 	}
 }
 
-// TestGitHubAppStatus_ProbeFailureDoesNotFailTheRead pins the second half of
-// the off-the-critical-path rule at the handler: with GitHub failing every
-// probe, the status endpoint still answers 200 and still serves the last known
-// state. The probe kicked here runs in the background and can only preserve.
+// TestGitHubAppStatus_ProbeFailureDoesNotFailTheRead: with every probe failing,
+// the status read still answers 200 with the last known state, and the
+// background probe it kicks leaves that state alone.
 func TestGitHubAppStatus_ProbeFailureDoesNotFailTheRead(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -354,10 +341,8 @@ func TestReplayCandidates(t *testing.T) {
 	}
 }
 
-// TestGitHubAppWebhookReplay_Gates pins the endpoint's refusals: an org that
-// isn't on a BYO App has nothing to replay and is 404'd before any GitHub call,
-// and an org whose App key can't be read fails as a gateway error rather than
-// as a 404 (which would read as "no App registered").
+// TestGitHubAppWebhookReplay_Gates: an org with no BYO App is a 404 before any
+// GitHub call, and an unreadable App key is a 502 with a message, not a 404.
 func TestGitHubAppWebhookReplay_Gates(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	path := "/api/orgs/" + runmode.LocalDefaultOrgID + "/github/app/webhook/replay"

@@ -49,13 +49,9 @@ func facetCounts(t *testing.T, body facetsBody) map[string]int {
 	return out
 }
 
-// TestTaskFacets_CountsTheLane is the route's happy path: one entry per event
-// type present in the lane, counting the rows the lane's own list returns.
-//
-// The fixture set spans the two ways a row can be absent from a lane — a
-// different status, and a snooze window the lane doesn't ask for — because
-// those are what a chip count silently overreports if the facet renders its
-// own predicate instead of the list's.
+// TestTaskFacets_CountsTheLane: one ascending entry per event type in the lane,
+// counting the lane's own rows, so a row in another status or a snooze window
+// the lane does not ask for adds nothing; an empty lane is [].
 func TestTaskFacets_CountsTheLane(t *testing.T) {
 	s := newTestServer(t)
 	future := time.Now().UTC().Add(2 * time.Hour)
@@ -105,8 +101,8 @@ func TestTaskFacets_CountsTheLane(t *testing.T) {
 	}
 }
 
-// TestTaskFacets_AgreesWithTheList is the invariant the shared WHERE renderer
-// exists for: the counts above a column and the rows in it are one query.
+// TestTaskFacets_AgreesWithTheList: the counts above a column sum to the
+// column's own total_count, since both render one WHERE clause.
 func TestTaskFacets_AgreesWithTheList(t *testing.T) {
 	s := newTestServer(t)
 	future := time.Now().UTC().Add(2 * time.Hour)
@@ -133,14 +129,9 @@ func TestTaskFacets_AgreesWithTheList(t *testing.T) {
 	}
 }
 
-// TestTaskFacets_RefusesTheFieldsItDoesNotAnswerFor covers the route's one
-// real asymmetry with the list. The facet is ABOUT the lane, so a caller
-// narrowing it by the values it exists to offer — or asking it for a page —
-// has misread what it answers, and a field ignored in silence is how that
-// misreading ships as a chip row that quietly hides half the lane.
-//
-// Each is INVALID_FIELD naming itself rather than UNKNOWN_FIELD: these are
-// real fields of the sibling list, so the fault is the meaning, not the spelling.
+// TestTaskFacets_RefusesTheFieldsItDoesNotAnswerFor: the facet counts the whole
+// lane, so the list's narrowing, sorting and paging fields are INVALID_FIELD
+// here even when empty, while a field of neither route is UNKNOWN_FIELD.
 func TestTaskFacets_RefusesTheFieldsItDoesNotAnswerFor(t *testing.T) {
 	for _, tc := range []struct {
 		field string
@@ -186,9 +177,8 @@ func TestTaskFacets_RefusesTheFieldsItDoesNotAnswerFor(t *testing.T) {
 	})
 }
 
-// TestTaskFacets_ValidatesTheLaneLikeTheList pins the shared half: the lane
-// filters are one struct and one validator, so a value the list refuses the
-// facet refuses identically, and every failing field is reported at once.
+// TestTaskFacets_ValidatesTheLaneLikeTheList: the lane filters share the list's
+// validator, so a value the list refuses the facet refuses, every field at once.
 func TestTaskFacets_ValidatesTheLaneLikeTheList(t *testing.T) {
 	s := newTestServer(t)
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/facets", map[string]any{

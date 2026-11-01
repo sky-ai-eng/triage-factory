@@ -176,8 +176,8 @@ func TestEventHandlerRepoIn_PromoteRefusesUntrackedRepos(t *testing.T) {
 	}
 }
 
-// The single-valued key is gone from the predicate schema, so a caller still
-// sending it is told so rather than having it dropped.
+// The predicate schema has no single-valued repo key, so a caller sending one
+// is told so rather than having it dropped.
 func TestEventHandlerRepoIn_RefusesRepoKey(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
@@ -193,10 +193,9 @@ func TestEventHandlerRepoIn_RefusesRepoKey(t *testing.T) {
 	}
 }
 
-// The check runs inside the write's transaction under the caller's claims, so
-// a plain team member, with no admin role anywhere, must be able to read the
-// org's GitHub host and the team's tracked set through RLS. A policy that hid
-// either would refuse every repo_in entry that member writes.
+// The check runs under the caller's claims, so a plain team member must be able
+// to read the org's GitHub host and the team's tracked set through RLS, or every
+// repo_in entry that member writes would be refused.
 func TestRepoInFaults_PlainMemberUnderRLS_Postgres(t *testing.T) {
 	rig := newRepoScopeRig(t)
 	rig.setGitHubHost(t, dbtest.TestGitHubHost)

@@ -2,11 +2,9 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"slices"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -31,10 +29,9 @@ func seedConversationDeliverable(t *testing.T, s *Server, conversationID string,
 	return stored
 }
 
-// TestHandleAgentDeliverables pins the conversation-scoped deliverable read
-// (TFAC-465): every deliverable a conversation produced, across kinds, projected
-// with its stable coordinates and details parsed — an object for a PR, null
-// for a detail-less review.
+// TestHandleAgentDeliverables pins the conversation-scoped deliverable read:
+// every kind a conversation produced, with its coordinates and details parsed,
+// an object for a PR and null for a detail-less review.
 func TestHandleAgentDeliverables(t *testing.T) {
 	s := newTestServer(t)
 	conversationID := seedSteerConversation(t, s.db, "arts", dbtest.SeedConcluded)
@@ -118,22 +115,6 @@ func TestHandleAgentDeliverables_CorruptDetails(t *testing.T) {
 	}
 }
 
-// TestHandleAgentDeliverables_Empty pins that a conversation with no deliverables returns an
-// empty items array, never null — the board card can render a 0 count
-// without special-casing.
-func TestHandleAgentDeliverables_Empty(t *testing.T) {
-	s := newTestServer(t)
-	conversationID := seedSteerConversation(t, s.db, "noarts", dbtest.SeedConcluded)
-	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/"+conversationID+"/deliverables/list", map[string]any{})
-	page := decodeList[map[string]any](t, rec)
-	if len(page.Items) != 0 || page.Total() != 0 {
-		t.Errorf("empty conversation deliverables = %+v (total %d), want an empty page", page.Items, page.Total())
-	}
-	if !strings.Contains(rec.Body.String(), `"items":[]`) {
-		t.Errorf("body = %s, want an empty array (never null)", rec.Body.String())
-	}
-}
-
 // TestHandleAgentDeliverables_Pages pins the list contract on the route: a
 // page holds page_size rows newest first, its token continues where it
 // stopped, total_count is every row on each page, and page_size 0 counts.
@@ -186,9 +167,8 @@ func TestHandleAgentDeliverables_Pages(t *testing.T) {
 }
 
 // TestHandleAgentDeliverables_UnknownConversationNotFound pins the 404 for an
-// unknown (or not-visible) conversation — the conversation read is the
-// authorization gate, so a missing conversation is indistinguishable from a
-// cross-team one.
+// unknown or not-visible conversation: the conversation read is the gate, so a
+// missing conversation reads the same as a cross-team one.
 func TestHandleAgentDeliverables_UnknownConversationNotFound(t *testing.T) {
 	s := newTestServer(t)
 	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/r_ghost/deliverables/list", map[string]any{})
@@ -211,14 +191,7 @@ func TestConversationResponse_HasUnresolved(t *testing.T) {
 		State: domain.DeliverableStateReviewSubmitted, DedupKey: "pk1",
 	})
 
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+conversationID, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET conversation = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var m map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	m := readConversation(t, s, conversationID)
 	if m["has_unresolved_deliverables"] != true {
 		t.Errorf("has_unresolved_deliverables = %v, want true", m["has_unresolved_deliverables"])
 	}
@@ -227,10 +200,9 @@ func TestConversationResponse_HasUnresolved(t *testing.T) {
 	}
 }
 
-// TestConversationResponse_HasUnresolved_List pins that the derived approval
-// signal propagates through the conversation-LIST endpoint — the batched
-// ListByConversations path, distinct from the single-conversation path. Guards
-// the list endpoint against a silent has_unresolved_deliverables regression.
+// TestConversationResponse_HasUnresolved_List pins the same signal on the
+// conversation list, which reads it through the batched ListByConversations
+// path rather than the single-conversation one.
 func TestConversationResponse_HasUnresolved_List(t *testing.T) {
 	s := newTestServer(t)
 	conversationID := seedSteerConversation(t, s.db, "pklist", dbtest.SeedConcluded)

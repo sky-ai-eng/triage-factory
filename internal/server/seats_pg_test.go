@@ -8,14 +8,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TestSeatLimit_EndToEnd_HardBlock drives the real multi-mode OAuth callback with
-// a committed 1-seat cap and pins the whole contract end-to-end: the first
-// distinct user is admitted (session minted, login_success recorded); a NEW
-// distinct user beyond the cap is hard-blocked (302 to /login?error=seat_limit,
-// NO session cookie, a seat_limit_rejected row, and crucially NO login_success —
-// so a blocked login never consumes a seat); and a returning, already-active user
-// is still admitted despite the deployment sitting at cap. pgtest-backed, so it
-// skips cleanly without Docker.
+// TestSeatLimit_EndToEnd_HardBlock: with a 1-seat cap the first user is admitted,
+// a new user is redirected to /login?error=seat_limit with no session and no
+// login_success (so it takes no seat), and a returning user is still admitted.
 func TestSeatLimit_EndToEnd_HardBlock(t *testing.T) {
 	r := newAuthRig(t)
 	setSeatCap(t, 1) // one committed seat for the whole deployment

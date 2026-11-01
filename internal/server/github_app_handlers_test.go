@@ -17,16 +17,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// fakeGitHubAppsStore stands in for the real store so the refresh handler's
-// branches can be driven directly: GetForOrgSystem decides the 404, the two
-// reconciles decide the 502, and ListInstallationsOnHostSystem supplies the
-// post-reconcile installations. The embedded interface is nil, so any method
-// the handler doesn't call panics — which keeps the fake honest about the
-// surface the handler actually depends on.
-//
-// The two reconciles count separately on purpose: which one a class reaches is
-// the whole substance of the handler's class branch, and a single counter would
-// pass whichever one it ran.
+// fakeGitHubAppsStore drives the refresh handler's branches directly; any
+// method it does not override panics on the nil embedded store. The two
+// reconciles are counted separately because which one a class reaches is what
+// the handler's class branch decides.
 type fakeGitHubAppsStore struct {
 	db.GitHubAppsStore
 	app           *domain.OrgGitHubApp
@@ -80,8 +74,8 @@ func (f *fakeGitHubAppsStore) ListInstallationsOnHostSystem(_ context.Context, _
 	return out, nil
 }
 
-// TestGitHubAppStatus_LocalMode_NoApp returns app:null + empty
-// installations when nothing is registered.
+// TestGitHubAppStatus_LocalMode_NoApp returns app:null and no installations
+// when nothing is registered, and never offers the deployment App in local mode.
 func TestGitHubAppStatus_LocalMode_NoApp(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -103,14 +97,14 @@ func TestGitHubAppStatus_LocalMode_NoApp(t *testing.T) {
 	if out.UsingDeploymentDefault {
 		t.Error("using_deployment_default=true, want false in local mode")
 	}
+	if out.DeploymentAppAvailable {
+		t.Error("deployment_app_available=true in local mode")
+	}
 }
 
-// TestNewGitHubAppStatusResponse_CarriesActive pins the §4 contract the
-// PAT↔App switching UX depends on: the status payload's `active` flag mirrors
-// the registration's Active bit for both a staged (active=false, mid-switch)
-// and a live (active=true) App, so the frontend can tell the staged window
-// apart from a live App. A pure mapping test — no DB, no Docker — so it always
-// runs.
+// TestNewGitHubAppStatusResponse_CarriesActive: the status payload's `active`
+// mirrors the registration's Active bit, so the switching UI can tell a staged
+// App from a live one.
 func TestNewGitHubAppStatusResponse_CarriesActive(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -136,11 +130,8 @@ func TestNewGitHubAppStatusResponse_CarriesActive(t *testing.T) {
 		})
 	}
 
-	// The status payload also carries each installation's suspension, so the
-	// panel can distinguish an installation whose tokens GitHub refuses from a
-	// working one. Nothing in the UI reads these yet — the surface is
-	// deliberately inert beyond the DTO — but a field the front end cannot see
-	// is a field it cannot adopt.
+	// Each installation's suspension, so the panel can tell an installation
+	// whose tokens GitHub refuses from a working one.
 	t.Run("installation suspension", func(t *testing.T) {
 		suspendedAt := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
 		resp := newGitHubAppStatusResponse(domain.GitHubCredentialClassBYOApp, nil, []domain.OrgGitHubAppInstallation{
@@ -164,10 +155,8 @@ func TestNewGitHubAppStatusResponse_CarriesActive(t *testing.T) {
 		}
 	})
 
-	// The payload also carries the App-webhook probe's answer, so the panel can
-	// tell an App that receives deliveries from one that receives none. The
-	// distinction the block has to preserve is between "no answer yet" and any
-	// answer at all: a null must never be renderable as healthy.
+	// The App-webhook probe's answer, null until there is one, so "no answer
+	// yet" is never renderable as healthy.
 	t.Run("webhook health", func(t *testing.T) {
 		app := &domain.OrgGitHubApp{OrgID: runmode.LocalDefaultOrgID, AppID: "123", Slug: "acme-bot", Active: true}
 
@@ -207,14 +196,9 @@ func TestNewGitHubAppStatusResponse_CarriesActive(t *testing.T) {
 	})
 }
 
-// TestNewGitHubAppStatusResponse_UsingDeploymentDefault walks all three
-// credential classes through the one field on this payload that a nil App
-// cannot answer for.
-//
-// A nil App means "no registration of your own", which is equally true of a PAT
-// org and an org riding the deployment's shared App — and the two
-// want opposite answers. This boolean is what lets the panel tell them apart,
-// which is why it is read off the class rather than off the absence of a row.
+// TestNewGitHubAppStatusResponse_UsingDeploymentDefault: a PAT org and a
+// managed org both have a nil App but want opposite answers here, so the field
+// is read off the class rather than the missing row.
 func TestNewGitHubAppStatusResponse_UsingDeploymentDefault(t *testing.T) {
 	byo := &domain.OrgGitHubApp{OrgID: runmode.LocalDefaultOrgID, AppID: "123", Slug: "acme-bot", Active: true}
 	insts := []domain.OrgGitHubAppInstallation{{InstallationID: "456", AccountType: "Organization", AccountLogin: "acme"}}
@@ -396,10 +380,8 @@ func TestGitHubAppStatus_MultiMode(t *testing.T) {
 	})
 }
 
-// TestGitHubAppInstallationsRefresh_NoApp 404s when an org whose class
-// says it brought its own App has no registration row to reconcile with, and
-// never reaches the backfill. The class promises the row; a missing one is a
-// 404 rather than a reconcile against nothing.
+// TestGitHubAppInstallationsRefresh_NoApp: a BYO-App org with no registration
+// row is a 404 and never reaches the backfill.
 func TestGitHubAppInstallationsRefresh_NoApp(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -416,14 +398,9 @@ func TestGitHubAppInstallationsRefresh_NoApp(t *testing.T) {
 	}
 }
 
-// TestGitHubAppInstallationsRefresh_ManagedClass admits an org riding the
-// deployment App — and reconciles it through the scoped refresh, never the
-// discovering backfill. That is the whole substance of the class branch: the
-// backfill stamps the requesting org's id on every installation
-// GET /app/installations reports, which under one App key serving many
-// orgs is every tenant's listing. A managed org holds no org_github_apps
-// row and can hold none, so the registration read the BYO arm makes is skipped
-// too — requiring it would 404 exactly the orgs this handler was opened to.
+// TestGitHubAppInstallationsRefresh_ManagedClass: a managed org reconciles
+// through the scoped refresh, never the discovering backfill, which under the
+// shared App key would stamp every tenant's installations with this org's id.
 func TestGitHubAppInstallationsRefresh_ManagedClass(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -561,11 +538,9 @@ func TestGitHubAppInstallationsRefresh_BackfillError(t *testing.T) {
 	}
 }
 
-// TestGitHubAppInstallationsRefresh_MultiMode_AdminGate verifies the refresh is
-// admin-only against a Postgres-backed auth rig: a plain member and a
-// non-member are both 404'd before any reconcile, while the org admin clears
-// the gate. (Unlike the member-readable status GET, this endpoint mutates the
-// mirror, so it gates on RequireOrgAdmin.)
+// TestGitHubAppInstallationsRefresh_MultiMode_AdminGate: the refresh writes the
+// mirror, so it is admin-only: a member gets 403, a non-member 404, and the
+// admin passes the gate.
 func TestGitHubAppInstallationsRefresh_MultiMode_AdminGate(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	rig := newAuthRig(t)
@@ -619,23 +594,16 @@ func TestGitHubAppInstallationsRefresh_MultiMode_AdminGate(t *testing.T) {
 	})
 
 	t.Run("admin_clears_gate", func(t *testing.T) {
-		// alice is the org owner/admin, so the gate passes and the real backfill
-		// runs. The App's PEM secret was never stored, so the reconcile fails
-		// fast (no network — DiscoverAppInstallations reads the PEM first) and
-		// the handler returns 502. Asserting exactly 502 confirms both that the
-		// admin cleared the RequireOrgAdmin gate (not a 404) and that the
-		// failure is the reconcile rather than authorization.
+		// The App's PEM was never stored, so the real backfill fails before any
+		// network call: a 502 shows the admin got past the gate.
 		if resp := rig.requestWithSid("POST", path, sidA); resp.StatusCode != http.StatusBadGateway {
 			t.Errorf("admin status=%d, want 502 (gate passes, backfill fails on the missing PEM)", resp.StatusCode)
 		}
 	})
 }
 
-// seedPGBYOAppCredentialClass records the BYO-App credential class for a
-// Postgres-rig org, which is what an App registration writes in the same
-// transaction as the org_github_apps row. A fixture that inserts the row
-// directly has to write this too — the handlers gate on the class before they
-// look for a registration at all.
+// seedPGBYOAppCredentialClass is seedBYOAppCredentialClass for a Postgres-rig
+// org: a fixture inserting org_github_apps directly needs the class too.
 func seedPGBYOAppCredentialClass(t *testing.T, rig *authRig, orgID string) {
 	t.Helper()
 	if _, err := rig.h.AdminDB.Exec(`
@@ -669,9 +637,7 @@ func TestNewGitHubAppStatusResponse_CarriesUnusable(t *testing.T) {
 }
 
 // TestGitHubAppInstallationsRefresh_UnusableApp: a refusal the reconcile
-// diagnosed is GitHub's answer about the App, so the route says what it is —
-// 422 UPSTREAM_REJECTED naming the reason — rather than the 502 that reads as
-// GitHub not answering.
+// diagnosed is a 422 UPSTREAM_REJECTED naming the reason, not a 502.
 func TestGitHubAppInstallationsRefresh_UnusableApp(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -706,10 +672,9 @@ func TestGitHubAppInstallationsRefresh_UnusableApp(t *testing.T) {
 	}
 }
 
-// TestGitHubAppInstallationsRefresh_RecoveredAppAnswersFresh: the reconcile
-// writes the registration — a successful listing clears a recorded unusable
-// reason — so the response describes the row as it stands after the
-// reconcile, not the one read before it.
+// TestGitHubAppInstallationsRefresh_RecoveredAppAnswersFresh: a reconcile that
+// clears the unusable reason is reflected in the response, which describes the
+// row after the reconcile rather than before it.
 func TestGitHubAppInstallationsRefresh_RecoveredAppAnswersFresh(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)

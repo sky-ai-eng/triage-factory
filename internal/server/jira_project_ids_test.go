@@ -18,10 +18,9 @@ func putJiraProjectElements(t *testing.T, s *Server, elements ...map[string]any)
 	return doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), map[string]any{"jira_projects": elements})
 }
 
-// A project renamed in Jira before the poll moved its registry row is still
-// the tracked project: named by its registry id, its absent rules keep what is
-// stored and Jira is not asked. Named by the Jira id its renamed catalog entry
-// carries, it is refused as the tracked project it is.
+// A project renamed in Jira before the poll moved its registry row is still the
+// tracked project: named by registry id it keeps its stored rules without asking
+// Jira, and named by its Jira id it is refused as already tracked.
 func TestJiraProjectsPut_TrackedProjectKeepsItsRulesAcrossARenameThePollHasNotApplied(t *testing.T) {
 	s, fake := newServerWithJiraCatalog(t, "SKY")
 	if rec := putJiraProjects(t, s, "SKY"); rec.Code != http.StatusOK {
@@ -95,11 +94,9 @@ func TestJiraProjectsPut_RefusesAnElementThatNamesNoProjectOfTheTeams(t *testing
 	}
 }
 
-// A tracked project the poll has not resolved carries no Jira id, so adding it
-// by Jira id cannot be told apart from it by the caller. Registering the added
-// project would resolve the tracked row onto it and put one project in the set
-// twice: the write is refused, naming the added element, and keeps nothing it
-// registered.
+// Adding by Jira id a project that is tracked under a row the poll has not
+// resolved would put it in the set twice, so the write is refused naming the
+// added element and keeps nothing it registered.
 func TestJiraProjectsPut_RefusesAnAddedProjectThatIsAnUnresolvedTrackedOne(t *testing.T) {
 	s, _ := newServerWithJiraCatalog(t, "SKY")
 	if rec := putJiraProjects(t, s, "SKY"); rec.Code != http.StatusOK {

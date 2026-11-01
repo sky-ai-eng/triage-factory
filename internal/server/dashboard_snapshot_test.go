@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"testing"
 
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
@@ -14,7 +15,7 @@ import (
 // returns it as the store reads it back.
 func seedPRSnapshot(t *testing.T, s *Server, owner, repo string, number int, snap domain.PRSnapshot) *domain.Entity {
 	t.Helper()
-	sourceID := owner + "/" + repo + "#" + itoa(number)
+	sourceID := owner + "/" + repo + "#" + strconv.Itoa(number)
 	entities := sqlitestore.New(s.db).Entities
 	entity, _, err := entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", sourceID, "", "pr", snap.Title, snap.URL)
 	if err != nil {
@@ -32,26 +33,6 @@ func seedPRSnapshot(t *testing.T, s *Server, owner, repo string, number int, sna
 		t.Fatalf("read seeded entity: %v", err)
 	}
 	return stored
-}
-
-func itoa(n int) string {
-	// Avoid importing strconv just for a test helper.
-	if n == 0 {
-		return "0"
-	}
-	var out []byte
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	for n > 0 {
-		out = append([]byte{byte('0' + n%10)}, out...)
-		n /= 10
-	}
-	if neg {
-		out = append([]byte{'-'}, out...)
-	}
-	return string(out)
 }
 
 // readPRSnapshot fetches and decodes the current snapshot of the entity.

@@ -29,9 +29,8 @@ func getMeLinear(t *testing.T, s *Server) meLinearBody {
 }
 
 // TestHandleMe_LocalMode_LinearIdentityFromOrgWorkspace: local /api/me carries
-// the user's Linear binding in the org's workspace, and only that one — a
-// binding in another workspace is a different Linear user id and never stands
-// in for it.
+// the user's Linear binding in the org's workspace only; one in another
+// workspace is a different Linear user and never stands in for it.
 func TestHandleMe_LocalMode_LinearIdentityFromOrgWorkspace(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)

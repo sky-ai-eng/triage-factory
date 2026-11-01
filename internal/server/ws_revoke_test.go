@@ -131,12 +131,9 @@ func TestWS_LogoutClosesSocket(t *testing.T) {
 	expectServerCloseCode(t, conn, websocket.CloseSessionRevoked)
 }
 
-// TestWS_MembershipRemovalClosesSocket is the membership acceptance case:
-// a member's WS is scoped to org B; an admin (here, a self-leave) deletes
-// their membership, and the socket must close with code 4002 (membership
-// changed) within 1s. 4002, not 4001 — the user keeps their session
-// (they may still belong to other orgs) and re-handshakes rather than
-// being logged out.
+// TestWS_MembershipRemovalClosesSocket: removing a member from the org their
+// socket is scoped to closes it within 1s with 4002 (membership changed), not
+// 4001, since their session stays valid for other orgs.
 func TestWS_MembershipRemovalClosesSocket(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)

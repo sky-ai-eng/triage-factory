@@ -275,11 +275,9 @@ func (r *usageRig) seedArtifacts(t *testing.T) artifactSeed {
 }
 
 // TestUsageArtifactsActivityHandler_Postgres pins the artifacts feeds: the
-// FeatureGovernance gate (unlicensed → 404) and the role gates, which are the
-// actions feeds'; one item per object across runs, with its run count and,
-// on the org feed, its teams by name; the deliverable match; the exclusion
-// of a person's and a refused row; strict decoding and the closed filters;
-// and paging over objects.
+// governance and role gates, one item per object with its run count and (org
+// feed) team names, the deliverable match, the excluded person's and refused
+// rows, strict decoding and closed filters, and paging over objects.
 func TestUsageArtifactsActivityHandler_Postgres(t *testing.T) {
 	r := newUsageRig(t)
 	seed := r.seedArtifacts(t)
@@ -540,11 +538,10 @@ func (r *usageRig) seedExternalActions(t *testing.T) {
 // usageSeedIssueKey is the object_key seedExternalActions gives its Jira row.
 const usageSeedIssueKey = "jira:issue:acme-10001"
 
-// TestUsageActionsActivityHandler_Postgres pins the actions feed — its own pair
-// of routes since the ?view= multiplex split: the same FeatureGovernance gate
-// (unlicensed → 404), the cross-team org read with resolved team + actor names
-// (a human row names its authorizer, a system row carries none), the
-// team-scoped read, and the action filter passthrough.
+// TestUsageActionsActivityHandler_Postgres pins the actions feeds: the
+// governance gate, the cross-team org read with resolved team and actor names (a
+// human row names its authorizer, a system row none), the team-scoped read, and
+// the action filter.
 func TestUsageActionsActivityHandler_Postgres(t *testing.T) {
 	r := newUsageRig(t)
 	r.seedExternalActions(t)
@@ -673,9 +670,8 @@ func TestUsageActionsActivityHandler_Postgres(t *testing.T) {
 	})
 
 	t.Run("actions_body_rejects_other_filters", func(t *testing.T) {
-		// The two resources have different filter vocabularies, which is the whole
-		// reason they are two routes: `state=` used to be accepted here and
-		// silently ignored. Strict decoding makes it a 400.
+		// The two resources have different filter vocabularies, which is why
+		// they are two routes: the other's `state` is an unknown field here.
 		license()
 		rec := httptest.NewRecorder()
 		r.uh.handleUsageOrgActions(rec, r.activityReq(r.orgAdmin, "", `{"state":"open"}`))

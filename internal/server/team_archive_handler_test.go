@@ -15,11 +15,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// teamArchiveRig is the multi-mode fixture for the archive/restore lifecycle:
-// a real Postgres-backed teamsHandler (so the deleted_at filter + teams_update
-// RLS are live) plus an org with a founder (org owner) and a plain member who
-// is NOT an org admin. spawner is a nil getter — the no-active-work
-// path doesn't need it, and the cascade enumeration is pinned in the db tests.
+// teamArchiveRig is a Postgres-backed teamsHandler, with RLS live, over an org
+// with an owner and a plain member. spawner is nil: the no-active-work path
+// does not need it.
 type teamArchiveRig struct {
 	h      *pgtest.Harness
 	s      *Server
@@ -98,10 +96,9 @@ func TestTeamArchive_OrgAdminArchivesAndCounts(t *testing.T) {
 	}
 }
 
-// TestTeamArchive_NonOrgAdminIsForbidden: a plain member can't archive /
-// restore / preview. The denial is 403, not the 404 it used to be: the team is
-// in their org and GET /api/teams lists it for them, so the gate names the
-// role they lack instead of denying the team exists. The team is untouched.
+// TestTeamArchive_NonOrgAdminIsForbidden: a plain member cannot archive, restore
+// or preview, and gets 403 rather than 404 since the team is listed for them.
+// The team is untouched.
 func TestTeamArchive_NonOrgAdminIsForbidden(t *testing.T) {
 	r := newTeamArchiveRig(t)
 
@@ -206,10 +203,9 @@ func TestTeamArchive_BlocksTeamSettingsWrite(t *testing.T) {
 	assertFirstError(t, wrec, httpx.ReasonTeamArchived, "")
 }
 
-// TestTeamArchive_BlocksMembershipWrite: once archived, a team's roster is
-// frozen — a member add is rejected with 403 TEAM_ARCHIVED. The membership
-// handlers gate on user_is_team_admin (no user_can_write_team filter), so this
-// proves the explicit VerifyTeamNotArchived gate covers them (TFAC-448).
+// TestTeamArchive_BlocksMembershipWrite: an archived team's member add is a 403
+// TEAM_ARCHIVED. The membership handlers' RLS does not filter archived teams,
+// so the handler's own archived check is what refuses it.
 func TestTeamArchive_BlocksMembershipWrite(t *testing.T) {
 	r := newTeamArchiveRig(t)
 

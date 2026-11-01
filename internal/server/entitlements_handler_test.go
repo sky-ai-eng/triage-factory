@@ -50,12 +50,9 @@ func decodeFeatures(t *testing.T, rec *httptest.ResponseRecorder) []string {
 	return resp.Features
 }
 
-// The probe reports the checker's state and NOTHING about runmode: the same
-// checker yields the same answer in local and multi. This is the load-bearing
-// invariant — a feature's EE-ness must not depend on local vs multi mode, and
-// local mode gets no free entitlement pass (so an unlicensed local build
-// reports [], exactly like unlicensed multi). "Local is free" lives in the
-// feature set + ungated core surfaces, not in this gate.
+// TestEntitlements_GatingIsModeAgnostic: the probe reports the checker's state
+// and nothing about runmode, so an unlicensed local build reports [] exactly as
+// unlicensed multi does; local mode gets no entitlement pass.
 func TestEntitlements_GatingIsModeAgnostic(t *testing.T) {
 	for _, mode := range []runmode.Mode{runmode.ModeLocal, runmode.ModeMulti} {
 		t.Run(string(mode)+"/unlicensed_is_empty", func(t *testing.T) {
