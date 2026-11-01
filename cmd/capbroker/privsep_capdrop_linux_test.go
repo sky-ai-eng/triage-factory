@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/capinfo"
+	"github.com/sky-ai-eng/triage-factory/internal/procinfo"
 )
 
 // capReportPattern matches TestMain's capReportEnv branch's output line:
@@ -95,7 +95,7 @@ func TestCapabilityDrop_BrokerKeepsExactGrantOrchestratorEndsEmpty(t *testing.T)
 		t.Skip("setpriv not found on PATH")
 	}
 
-	effective, err := capinfo.Effective()
+	effective, err := procinfo.EffectiveCaps()
 	if err != nil {
 		t.Fatalf("read own effective capability set: %v", err)
 	}

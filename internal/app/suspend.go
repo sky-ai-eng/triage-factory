@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/suspendclock"
+	"github.com/sky-ai-eng/triage-factory/internal/sysinfo"
 )
 
 // suspendCheckInterval is how often the process's suspend watchers read the
@@ -23,7 +23,7 @@ const (
 // the shared transport's idle connections, until ctx is done. It runs in
 // every process, since every process calls out over HTTP.
 func watchSuspendForConnections(ctx context.Context) {
-	suspendclock.Watch(ctx, suspendCheckInterval, suspendThreshold, func(slept time.Duration) {
+	sysinfo.WatchSuspend(ctx, suspendCheckInterval, suspendThreshold, func(slept time.Duration) {
 		appLog.Info("system resumed from suspend", "slept", slept)
 		dropIdleConnections()
 	})
@@ -38,7 +38,7 @@ func watchSuspendForConnections(ctx context.Context) {
 // above: the GitHub and Jira clients send through telemetry.TracedTransport,
 // which moves to a fresh connection pool on its first request after a suspend.
 func (a *App) watchSuspendForPolls(ctx context.Context) {
-	suspendclock.Watch(ctx, suspendCheckInterval, suspendThreshold, func(time.Duration) {
+	sysinfo.WatchSuspend(ctx, suspendCheckInterval, suspendThreshold, func(time.Duration) {
 		a.pollerMgr.PollAllSoon()
 	})
 }

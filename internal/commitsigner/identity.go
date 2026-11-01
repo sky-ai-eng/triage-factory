@@ -13,7 +13,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner/gitsig"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
@@ -144,7 +144,7 @@ func (d *DeploymentArm) identity(ctx context.Context, orgID string) (Identity, b
 	if row == nil || row.GitHubUserID <= 0 {
 		return Identity{}, false, nil
 	}
-	name := commitsign.IdentName(row.CommitName())
+	name := gitsig.IdentName(row.CommitName())
 	if name == "" {
 		name = row.Login
 	}
@@ -170,7 +170,7 @@ func (d *DeploymentArm) identity(ctx context.Context, orgID string) (Identity, b
 // no noreply address to derive, and has no override.
 //
 // The name is the one git writes into the committer header for it
-// (commitsign.IdentName), so the user.name a run is given and the committer
+// (gitsig.IdentName), so the user.name a run is given and the committer
 // every signature is checked against are the same string. A profile name git
 // would reduce to nothing falls back to the login, which has no characters git
 // strips.
@@ -179,7 +179,7 @@ func signerIdentity(s domain.OrgCommitSigner) (Identity, bool) {
 	if email == "" {
 		return Identity{}, false
 	}
-	name := commitsign.IdentName(s.CommitName())
+	name := gitsig.IdentName(s.CommitName())
 	if name == "" {
 		name = s.Login
 	}

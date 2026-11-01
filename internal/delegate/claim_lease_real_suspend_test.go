@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/suspendclock"
+	"github.com/sky-ai-eng/triage-factory/internal/sysinfo"
 )
 
 // Bounds for the real-suspend test. realSuspendMinSleep is comfortably longer
@@ -54,9 +54,9 @@ func TestSuspendRecovery_RealSuspend(t *testing.T) {
 	if os.Getenv("TF_TEST_REAL_SUSPEND") != "1" {
 		t.Skip("set TF_TEST_REAL_SUSPEND=1 and suspend the machine when the test logs READY")
 	}
-	base, ok := suspendclock.Suspended()
+	base, ok := sysinfo.Suspended()
 	if !ok {
-		t.Fatalf("suspendclock reports nothing on %s/%s, so there is no recovery to verify here", runtime.GOOS, runtime.GOARCH)
+		t.Fatalf("sysinfo.Suspended reports nothing on %s/%s, so there is no recovery to verify here", runtime.GOOS, runtime.GOARCH)
 	}
 
 	f := newClaimLeaseFixture(t)
@@ -83,7 +83,7 @@ func TestSuspendRecovery_RealSuspend(t *testing.T) {
 	var slept time.Duration
 	var stillSince time.Time
 	for {
-		now, _ := suspendclock.Suspended()
+		now, _ := sysinfo.Suspended()
 		if (now - base - slept).Abs() > realSuspendJitter {
 			slept, stillSince = now-base, time.Now()
 		} else if slept >= suspendThreshold && time.Since(stillSince) >= realSuspendSettle {
@@ -99,7 +99,7 @@ func TestSuspendRecovery_RealSuspend(t *testing.T) {
 	t.Logf("woke: suspend clock says %s asleep, wall clock jumped %s", slept.Round(time.Millisecond), wallJump.Round(time.Millisecond))
 
 	if diff := (wallJump - slept).Abs(); diff > realSuspendClockSlack {
-		t.Errorf("the suspend clock (%s) and the wall clock's jump (%s) disagree by %s, over %s: the clock pair suspendclock reads on %s is not measuring time asleep",
+		t.Errorf("the suspend clock (%s) and the wall clock's jump (%s) disagree by %s, over %s: the clock pair sysinfo.Suspended reads on %s is not measuring time asleep",
 			slept, wallJump, diff, realSuspendClockSlack, runtime.GOOS)
 	}
 	if slept < realSuspendMinSleep {

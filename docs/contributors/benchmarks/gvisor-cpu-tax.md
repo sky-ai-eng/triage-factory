@@ -51,7 +51,7 @@ Two independent measurements agree on the per-run cost:
 
 ### Metric caveat that started the confusion
 
-`internal/hoststat` samples `/proc/stat`, which inside a container reflects
+`internal/sysinfo` samples `/proc/stat`, which inside a container reflects
 the **whole host**, not the container (verified: container `/proc/stat` is
 byte-identical to the host's). So the dashboard's `cpu_pct` is whole-machine
 utilization, and control + executor pods report near-identical values because

@@ -10,8 +10,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner/gitsig"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/ghcli/ghwrite"
@@ -781,7 +781,7 @@ func (s *RelayServer) signDigest(ctx context.Context, a agentproc.SignDigestArgs
 	if s.signing == nil || s.signing.Requester == nil {
 		return agentproc.SignDigestReply{}, errors.New("agenthost: commit signing is not wired for this run")
 	}
-	digest, err := commitsign.ParseDigest(a.Digest)
+	digest, err := gitsig.ParseDigest(a.Digest)
 	if err != nil {
 		return agentproc.SignDigestReply{}, fmt.Errorf("agenthost: sign_digest: %w", err)
 	}

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner/gitsig"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
@@ -22,7 +22,7 @@ func TestRefusalLine(t *testing.T) {
 			name: "committer mismatch",
 			res: func() Result {
 				r := refused(RefusalCommitterMismatch)
-				r.Committer = commitsign.Identity{Name: "Mallory", Email: "mallory@example.com"}
+				r.Committer = gitsig.Identity{Name: "Mallory", Email: "mallory@example.com"}
 				return r
 			}(),
 			want: "triagefactory: this run signs commits only as Triage Factory <9+tf@users.noreply.github.com>, " +
@@ -32,7 +32,7 @@ func TestRefusalLine(t *testing.T) {
 		},
 		{
 			name: "a tag",
-			res:  func() Result { r := refused(RefusalNotACommit); r.Object = commitsign.ObjectTag; return r }(),
+			res:  func() Result { r := refused(RefusalNotACommit); r.Object = gitsig.ObjectTag; return r }(),
 			want: "triagefactory: this run signs commits only, and this is a tag. Nothing was created. " +
 				"Create it without signing; for a tag, drop -s.",
 		},
@@ -40,7 +40,7 @@ func TestRefusalLine(t *testing.T) {
 			name: "a push certificate",
 			res: func() Result {
 				r := refused(RefusalNotACommit)
-				r.Object = commitsign.ObjectPushCertificate
+				r.Object = gitsig.ObjectPushCertificate
 				return r
 			}(),
 			want: "triagefactory: this run signs commits only, and this is a push certificate. Nothing was created. " +

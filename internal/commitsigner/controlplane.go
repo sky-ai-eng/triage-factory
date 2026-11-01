@@ -14,7 +14,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner/gitsig"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
@@ -320,11 +320,11 @@ func (c *ControlPlane) decide(ctx context.Context, row domain.CommitSignature) d
 	if err != nil {
 		return c.undecided(ctx, row, "read the signer's key", err)
 	}
-	digest, err := commitsign.ParseDigest(row.Digest)
+	digest, err := gitsig.ParseDigest(row.Digest)
 	if err != nil {
 		return c.undecided(ctx, row, "read the request's digest", err)
 	}
-	sig, err := commitsign.SignDigest(key, digest)
+	sig, err := gitsig.SignDigest(key, digest)
 	if err != nil {
 		return c.undecided(ctx, row, "sign the digest", err)
 	}
@@ -384,11 +384,11 @@ func signingKey(ctx context.Context, secrets db.SecretStore, orgID, publicKey st
 		if raw == "" {
 			continue
 		}
-		key, err := commitsign.ParsePrivateKey([]byte(raw))
+		key, err := gitsig.ParsePrivateKey([]byte(raw))
 		if err != nil {
 			return nil, fmt.Errorf("parse %s: %w", name, err)
 		}
-		pub, err := commitsign.PublicKey(key)
+		pub, err := gitsig.PublicKey(key)
 		if err != nil {
 			return nil, fmt.Errorf("derive %s's public key: %w", name, err)
 		}

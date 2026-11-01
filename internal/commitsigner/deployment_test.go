@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner/gitsig"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -16,15 +16,15 @@ import (
 // configures, and its public half.
 func testDeploymentKey(t *testing.T) (pem, pub string) {
 	t.Helper()
-	key, err := commitsign.GenerateKey()
+	key, err := gitsig.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := commitsign.MarshalPrivateKey(key)
+	raw, err := gitsig.MarshalPrivateKey(key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pub, err = commitsign.PublicKey(key); err != nil {
+	if pub, err = gitsig.PublicKey(key); err != nil {
 		t.Fatal(err)
 	}
 	return string(raw), pub

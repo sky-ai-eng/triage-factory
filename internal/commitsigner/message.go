@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner/gitsig"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
@@ -44,7 +44,7 @@ func RefusalLine(res Result, signer Identity) string {
 		return linePrefix + fmt.Sprintf("this run signs commits only as %s, and this commit's committer is %s. "+
 			"Nothing was committed. Run the command again without setting the committer: "+
 			"no GIT_COMMITTER_NAME or GIT_COMMITTER_EMAIL, and no -c user.name or -c user.email. --author is fine.",
-			formatIdent(commitsign.Identity{Name: signer.Name, Email: signer.Email}), formatIdent(res.Committer))
+			formatIdent(gitsig.Identity{Name: signer.Name, Email: signer.Email}), formatIdent(res.Committer))
 	case RefusalNotACommit:
 		return linePrefix + fmt.Sprintf("this run signs commits only, and this is %s. "+
 			"Nothing was created. Create it without signing; for a tag, drop -s.", objectPhrase(res.Object))
@@ -91,9 +91,9 @@ const rebaseRestarts = "A rebase that stopped here still signs: run git rebase -
 // objectPhrase names what a not-a-commit payload was, after "this is".
 func objectPhrase(object string) string {
 	switch object {
-	case commitsign.ObjectTag:
+	case gitsig.ObjectTag:
 		return "a tag"
-	case commitsign.ObjectPushCertificate:
+	case gitsig.ObjectPushCertificate:
 		return "a push certificate"
 	}
 	return "not a commit"

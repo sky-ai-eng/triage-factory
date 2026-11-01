@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/capinfo"
+	"github.com/sky-ai-eng/triage-factory/internal/procinfo"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
@@ -46,7 +46,7 @@ var dialRaceWindow = 500 * time.Millisecond
 var dialRacePollInterval = 10 * time.Millisecond
 
 // effectiveCaps reports this process's own effective Linux capability
-// set — a package var wrapping capinfo.Effective (rather than calling it
+// set — a package var wrapping procinfo.EffectiveCaps (rather than calling it
 // directly) so tests can stub a privileged posture. Start's spawn-fallback
 // mechanism is meaningful independent of whether the *test* process
 // happens to hold real capabilities (a `go test` binary run by CI's
@@ -54,7 +54,7 @@ var dialRacePollInterval = 10 * time.Millisecond
 // stub this to simulate the privileged bare-metal deployment they stand
 // in for, the same way they already stub execSelfCommand instead of
 // re-exec'ing the real binary.
-var effectiveCaps = capinfo.Effective
+var effectiveCaps = procinfo.EffectiveCaps
 
 // brokerSocketPath is the socket path Start spawns the broker against.
 // Production always uses DefaultSocketPath (the one fixed, per-executor

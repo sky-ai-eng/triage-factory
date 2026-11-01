@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner/gitsig"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
 )
@@ -39,7 +39,7 @@ func (f *fixture) requestAs(t *testing.T, signer domain.CommitSigningMode, accou
 	row, err := f.stores.CommitSignatures.InsertSystem(context.Background(), domain.CommitSignature{
 		OrgID: f.orgID, ConversationID: f.conversationID, ClaimID: f.claimID, BootEpoch: 1,
 		Signer: signer, SignerHost: "https://github.com", SignerUserID: account,
-		Digest: commitsign.DigestOf([]byte(payload)).String(), State: domain.CommitSignatureRequested,
+		Digest: gitsig.DigestOf([]byte(payload)).String(), State: domain.CommitSignatureRequested,
 	})
 	if err != nil {
 		t.Fatalf("InsertSystem: %v", err)
@@ -63,7 +63,7 @@ func TestControlPlane_SignsAsTheDeploymentSigner(t *testing.T) {
 		t.Fatal("Handle = false, want this pod to claim the request")
 	}
 	got := f.row(t, req.ID)
-	want, err := commitsign.SignDigest(d.key, commitsign.DigestOf([]byte(payload)))
+	want, err := gitsig.SignDigest(d.key, gitsig.DigestOf([]byte(payload)))
 	if err != nil {
 		t.Fatalf("SignDigest: %v", err)
 	}

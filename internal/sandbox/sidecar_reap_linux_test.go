@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/procname"
+	"github.com/sky-ai-eng/triage-factory/internal/procinfo"
 )
 
 // sidecarReapHelperEnv gates this test binary's re-exec branch: a re-exec'd
@@ -29,7 +29,7 @@ const sidecarReapHelperEnv = "TF_TEST_SIDECAR_REAP_HELPER"
 // env is unset it returns and the normal suite runs.
 func reExecAsSidecarHelperIfRequested() {
 	if os.Getenv(sidecarReapHelperEnv) != "" {
-		procname.SetTitle(SidecarCommName)
+		procinfo.SetTitle(SidecarCommName)
 		select {} // blocks until SIGKILLed (reapOrphanSidecars, or test cleanup)
 	}
 }

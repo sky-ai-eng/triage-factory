@@ -61,7 +61,7 @@ const SharedOriginPort = 443
 // inference is lost — rather than failing the run.
 const SharedOriginListenerFD = 3
 
-// SidecarCommName is the kernel-visible process name (procname.SetTitle's
+// SidecarCommName is the kernel-visible process name (procinfo.SetTitle's
 // target, /proc/<pid>/comm) every run-sidecar process sets at startup.
 // Defined once here, exported, so cmd/runsidecar (which sets it) and this
 // package's own boot-time reap (which matches against it) can never drift

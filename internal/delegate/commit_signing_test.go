@@ -11,8 +11,8 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner/gitsig"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -29,11 +29,11 @@ func signingSpawner(t *testing.T, active bool) (*Spawner, db.Stores, string) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	paths.SetForTest(t, t.TempDir())
 	stores := sqlitestore.New(newDelegateTestDB(t))
-	key, err := commitsign.GenerateKey()
+	key, err := gitsig.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	public, err := commitsign.PublicKey(key)
+	public, err := gitsig.PublicKey(key)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
 	signing "github.com/sky-ai-eng/triage-factory/internal/commitsigner"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner/gitsig"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -26,11 +26,11 @@ func (s signerRow) GetSystem(context.Context, string, string) (*domain.Deploymen
 // has registered reads pending, with no account and the advice to verify; an
 // active signer names its account and what its commits carry, and no advice.
 func TestStatus(t *testing.T) {
-	key, err := commitsign.GenerateKey()
+	key, err := gitsig.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	pem, err := commitsign.MarshalPrivateKey(key)
+	pem, err := gitsig.MarshalPrivateKey(key)
 	if err != nil {
 		t.Fatal(err)
 	}

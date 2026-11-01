@@ -12,8 +12,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner/gitsig"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -40,12 +40,12 @@ type sidecarSigning struct {
 func newSidecarSigning(t *testing.T, budgets commitsigner.Budgets) *sidecarSigning {
 	t.Helper()
 	stores, conn := newTestDB(t)
-	key, err := commitsign.GenerateKey()
+	key, err := gitsig.GenerateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	public, _ := commitsign.PublicKey(key)
-	private, _ := commitsign.MarshalPrivateKey(key)
+	public, _ := gitsig.PublicKey(key)
+	private, _ := gitsig.MarshalPrivateKey(key)
 	ctx := context.Background()
 	if _, err := stores.OrgCommitSigners.Create(ctx, domain.OrgCommitSigner{
 		OrgID: runmode.LocalDefaultOrgID, Host: testScope("github"), GitHubUserID: 583231, Login: "octocat", PublicKey: public,
@@ -139,11 +139,11 @@ func TestRelayRuntime_SignCommitSignsOnTheControlPlane(t *testing.T) {
 	if err != nil || res.Refusal != "" {
 		t.Fatalf("SignCommit = %+v, %v; want a signature", res, err)
 	}
-	if want, _ := commitsign.Sign(f.key, payload); res.Signature != string(want) {
+	if want, _ := gitsig.Sign(f.key, payload); res.Signature != string(want) {
 		t.Fatal("the signature is not the org key's signature of the commit")
 	}
 
-	sha := commitsign.CommitID(commitsign.SignedCommit(payload, []byte(res.Signature)))
+	sha := gitsig.CommitID(gitsig.SignedCommit(payload, []byte(res.Signature)))
 	row, err := f.stores.CommitSignatures.ForCommitSystem(context.Background(), runmode.LocalDefaultOrgID, sha)
 	if err != nil {
 		t.Fatal(err)
@@ -154,7 +154,7 @@ func TestRelayRuntime_SignCommitSignsOnTheControlPlane(t *testing.T) {
 	if row.ConversationID != f.conversationID || row.ClaimID != f.claimID || row.State != domain.CommitSignatureSigned {
 		t.Errorf("signature row = %+v, want this run's, signed", row)
 	}
-	if row.Digest != commitsign.DigestOf(payload).String() {
+	if row.Digest != gitsig.DigestOf(payload).String() {
 		t.Errorf("row digest = %s, want the commit's", row.Digest)
 	}
 }
@@ -277,7 +277,7 @@ func TestRelayServer_RecordCommitSHAStampsOnlyThisRunsSignature(t *testing.T) {
 		row, err := f.stores.CommitSignatures.InsertSystem(ctx, domain.CommitSignature{
 			OrgID: runmode.LocalDefaultOrgID, ConversationID: conversationID, ClaimID: claimID, BootEpoch: 1,
 			Signer: domain.CommitSigningOrg, SignerHost: testScope("github"), SignerUserID: 583231,
-			PublicKey: f.signer.PublicKey, Digest: commitsign.DigestOf([]byte(uuid.NewString())).String(),
+			PublicKey: f.signer.PublicKey, Digest: gitsig.DigestOf([]byte(uuid.NewString())).String(),
 			State: domain.CommitSignatureSigned, Signature: "sig", SignedAt: &at,
 		})
 		if err != nil {

@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/hostmem"
+	"github.com/sky-ai-eng/triage-factory/internal/sysinfo"
 )
 
 // DefaultInstanceHeartbeatInterval is how often RunInstanceHeartbeat
@@ -174,14 +174,14 @@ func (s *Spawner) heartbeatOnce(ctx context.Context) bool {
 		hb.MaxRuns = &maxRuns
 		hb.ActiveRuns = &activeRuns
 		hb.DispatchGated = &gated
-		if total := hostmem.TotalMB(); total != hostmem.Unknown {
+		if total := sysinfo.MemTotalMB(); total != sysinfo.Unknown {
 			hb.MemTotalMB = &total
 		}
 		s.mu.Lock()
 		probe := s.memAvailMB
 		s.mu.Unlock()
 		if probe != nil {
-			if avail := probe(); avail != hostmem.Unknown {
+			if avail := probe(); avail != sysinfo.Unknown {
 				hb.MemAvailableMB = &avail
 			}
 		}

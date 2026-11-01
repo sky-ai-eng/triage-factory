@@ -1,0 +1,61 @@
+package sysinfo
+
+import (
+	"sync/atomic"
+	"time"
+)
+
+// suspendSource is the reading Suspended returns: the platform's by default,
+// swapped by SetSuspendSourceForTest. Atomic because an engagement's renewal
+// loop reads it on its own goroutine while a test may be swapping it.
+var suspendSource atomic.Pointer[func() (time.Duration, bool)]
+
+func init() {
+	read := platformSuspended
+	suspendSource.Store(&read)
+}
+
+// Suspended returns how long the system has spent suspended since boot, from
+// two kernel clocks that differ only by suspended time, and whether this
+// platform can report it. It is a cumulative reading: callers keep a base and
+// subtract. ok is false where the platform cannot report it, and the reading
+// then means "no suspend observed": a platform without the clocks must never
+// make an ordinary pause look like a suspend.
+//
+// Go's monotonic clock stops while the system sleeps on every platform TF
+// ships, so a timer or a time.Since cannot see a suspend at all. That is the
+// right answer for measuring what a process did, and the wrong one for
+// comparing against a lease stamped on database time, which kept running.
+// This is the one reading that tells the two apart.
+//
+// Readings are not smoothed. The two clocks are read in two calls, so two
+// readings taken close together can step backwards by the difference in the
+// gap between the calls: under a microsecond normally, hundreds of
+// microseconds under preemption. On darwin the reading also drifts while
+// awake, by the frequency correction NTP applies to one clock of the pair and
+// not the other, so on a machine that has not slept it can sit slightly below
+// zero. Callers subtract readings at most a self-fence deadline of awake time
+// apart, where both effects are milliseconds against a one-second threshold,
+// and clamp the difference at zero.
+func Suspended() (d time.Duration, ok bool) {
+	return (*suspendSource.Load())()
+}
+
+// SuspendTestT is the slice of *testing.T that SetSuspendSourceForTest needs,
+// declared here so production builds of this package do not import
+// "testing".
+type SuspendTestT interface {
+	Helper()
+	Cleanup(func())
+}
+
+// SetSuspendSourceForTest replaces the reading Suspended returns for the
+// duration of t and restores the previous one on cleanup. It lives outside a
+// _test.go file so other packages' tests can fake a suspend. It mutates a
+// process global, so tests that use it must not run in parallel with each
+// other.
+func SetSuspendSourceForTest(t SuspendTestT, fn func() (time.Duration, bool)) {
+	t.Helper()
+	prev := suspendSource.Swap(&fn)
+	t.Cleanup(func() { suspendSource.Store(prev) })
+}

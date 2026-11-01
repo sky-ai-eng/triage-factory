@@ -8,7 +8,7 @@ import (
 
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner/gitsig"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
@@ -162,11 +162,11 @@ func (l *LocalSigner) Sign(ctx context.Context, req LocalRequest) (res Result) {
 	if err != nil {
 		return l.unanswered(ctx, req, "read the signer's key", err)
 	}
-	sig, err := commitsign.Sign(key, req.Payload)
+	sig, err := gitsig.Sign(key, req.Payload)
 	if err != nil {
 		return l.unanswered(ctx, req, "sign the commit", err)
 	}
-	sha := commitsign.CommitID(commitsign.SignedCommit(req.Payload, sig))
+	sha := gitsig.CommitID(gitsig.SignedCommit(req.Payload, sig))
 	row, err := l.Stores.CommitSignatures.InsertSystem(ctx, domain.CommitSignature{
 		OrgID:          req.OrgID,
 		ConversationID: req.ConversationID,
@@ -176,7 +176,7 @@ func (l *LocalSigner) Sign(ctx context.Context, req LocalRequest) (res Result) {
 		SignerHost:     db.NormalizeGitHubHost(now.Host),
 		SignerUserID:   accountID,
 		PublicKey:      now.PublicKey,
-		Digest:         commitsign.DigestOf(req.Payload).String(),
+		Digest:         gitsig.DigestOf(req.Payload).String(),
 		State:          domain.CommitSignatureSigned,
 		Signature:      string(sig),
 		SignedAt:       &at,
@@ -200,9 +200,9 @@ func (l *LocalSigner) Sign(ctx context.Context, req LocalRequest) (res Result) {
 // with the committer the commit named. An error is a payload that could not
 // be read as an object at all.
 func CheckCommit(payload []byte, signer Identity) (Result, bool, error) {
-	committer, err := commitsign.ParseCommitter(payload)
+	committer, err := gitsig.ParseCommitter(payload)
 	if err != nil {
-		var nac *commitsign.NotACommitError
+		var nac *gitsig.NotACommitError
 		if errors.As(err, &nac) {
 			res := refused(RefusalNotACommit)
 			res.Object = nac.Object
@@ -257,6 +257,6 @@ func checkBudgets(ctx context.Context, sigs db.CommitSignatureStore, b Budgets, 
 }
 
 // formatIdent spells an identity the way a commit header does.
-func formatIdent(id commitsign.Identity) string {
+func formatIdent(id gitsig.Identity) string {
 	return id.Name + " <" + id.Email + ">"
 }

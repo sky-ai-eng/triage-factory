@@ -7,8 +7,8 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/commitsign"
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
+	"github.com/sky-ai-eng/triage-factory/internal/commitsigner/gitsig"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -63,7 +63,7 @@ func callSignDigest(t *testing.T, s *RelayServer, args any) (agentproc.SignDiges
 // engagement and host the request is queued under are the server's, whatever
 // else a sidecar sends.
 func TestRelayServer_SignDigestBindsTheRunFromItsOwnIdentity(t *testing.T) {
-	digest := commitsign.DigestOf([]byte("tree 4b825dc6\n"))
+	digest := gitsig.DigestOf([]byte("tree 4b825dc6\n"))
 	req := &recordingRequester{res: commitsigner.Result{
 		Outcome: commitsigner.OutcomeRefused, SignatureID: "sig-1",
 		Refusal: commitsigner.RefusalOrgMinuteBudget, RetryAfterSeconds: 12,
@@ -91,7 +91,7 @@ func TestRelayServer_SignDigestBindsTheRunFromItsOwnIdentity(t *testing.T) {
 }
 
 func TestRelayServer_SignDigestRefusesWhatItCannotQueue(t *testing.T) {
-	digest := commitsign.DigestOf([]byte("tree\n")).String()
+	digest := gitsig.DigestOf([]byte("tree\n")).String()
 	for name, c := range map[string]struct {
 		args  map[string]any
 		wired bool
