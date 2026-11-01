@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
 // TestClient_RedirectThatTurnsAWriteIntoARead pins that a write redirected
@@ -29,8 +31,8 @@ func TestClient_RedirectThatTurnsAWriteIntoARead(t *testing.T) {
 
 	_, err := NewClient(DataCenterPAT(srv.URL, "pat")).AddComment(context.Background(), "SKY-1", "done")
 	var se *StatusError
-	if !errors.As(err, &se) || se.Status != http.StatusFound {
-		t.Fatalf("AddComment err = %v, want a StatusError carrying the 302", err)
+	if !errors.As(err, &se) || se.Status != http.StatusFound || se.Class != upstream.Rejected {
+		t.Fatalf("AddComment err = %v, want a rejected StatusError carrying the 302", err)
 	}
 	if n := loginHits.Load(); n != 0 {
 		t.Errorf("the redirect was followed %d time(s), want none", n)

@@ -172,16 +172,32 @@ func TestServer_SandboxRecordBranchPush_WritesThePushRow(t *testing.T) {
 	if err := sandbox.RecordBranchPush(ctx, "octo/repo", "refs/tags/v1", "abc123", true); err != nil {
 		t.Fatalf("RecordBranchPush (tag): %v", err)
 	}
+	// The jail names the push and nothing else: an identity it sends beside
+	// the push is not read, so it cannot file the push under another
+	// repository's registry row.
+	registerRepo(t, stores, "octo", "other", testRepoID("octo/other"))
+	forged := recordBranchPushArgs{
+		BranchPush: BranchPush{Repo: "octo/repo", Ref: "refs/heads/forged", SHA: "def456", Created: true},
+		GitHub:     domain.GitHubIdentity{RepositoryID: testRepoID("octo/other"), Repository: "octo/other"},
+	}
+	if err := sandbox.call(ctx, methodRecordBranchPush, forged, nil); err != nil {
+		t.Fatalf("RecordBranchPush (forged identity): %v", err)
+	}
 
 	acts := listExternalActions(t, stores)
-	if len(acts) != 1 {
-		t.Fatalf("ledger rows = %+v, want the one branch push", acts)
+	if len(acts) != 2 {
+		t.Fatalf("ledger rows = %+v, want the two branch pushes", acts)
 	}
-	a := acts[0]
-	if a.Action != domain.ActionBranchPushed || a.RepositoryID != repoID ||
-		a.ObjectKind != domain.ObjectKindBranch || a.ObjectKey != "refs/heads/feature/x" ||
-		a.DedupKey != domain.BranchPushDedupKey(info.ConversationID, repoID, "refs/heads/feature/x", "abc123") {
-		t.Errorf("push row = %+v, want branch_pushed about %s naming the branch", a, repoID)
+	for _, a := range acts {
+		sha := "abc123"
+		if a.ExternalID == "refs/heads/forged" {
+			sha = "def456"
+		}
+		if a.Action != domain.ActionBranchPushed || a.RepositoryID != repoID || a.Target != "octo/repo" ||
+			a.ObjectKind != domain.ObjectKindBranch || a.ObjectKey != a.ExternalID ||
+			a.DedupKey != domain.BranchPushDedupKey(info.ConversationID, repoID, a.ExternalID, sha) {
+			t.Errorf("push row = %+v, want branch_pushed about %s naming the branch", a, repoID)
+		}
 	}
 	if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 0 {
 		t.Errorf("deliverables = %+v, want none", arts)

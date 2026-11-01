@@ -5442,8 +5442,7 @@ GRANT SELECT, INSERT, DELETE ON public.team_slack_channels TO tf_app;
 -- event — a private channel shared through Slack Connect moves from its G… ID to
 -- a C… one). Following the change (the Slack store's MoveSystem) rewrites the
 -- registry row's channel_id, and the display values that spell the ID (thread
--- keys and permalinks, the audit ledger's message keys and links), in one
--- transaction. References hold the registry row and need nothing. It records
+-- keys and permalinks, the audit ledger's links), in one transaction. References hold the registry row and need nothing. It records
 -- the change here, because some copies of the old ID come from outside: event
 -- metadata is immutable, so a run on a task recorded before the change is told
 -- the old ID, an agent or a client may hold it, and Slack may redeliver an

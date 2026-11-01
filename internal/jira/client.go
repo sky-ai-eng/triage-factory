@@ -370,6 +370,17 @@ func NewClient(cfg Config) *Client {
 	return &Client{cfg: cfg, http: h}
 }
 
+// classifyResponse is upstream.ClassifyResponse, except that a redirect is
+// Rejected rather than OK: the client follows every redirect but the ones
+// refuseWriteToRead hands back, so a 3xx that reaches here is a write a
+// gateway turned away.
+func classifyResponse(status int, header http.Header, body []byte) upstream.Class {
+	if status >= 300 && status < 400 {
+		return upstream.Rejected
+	}
+	return upstream.ClassifyResponse(status, header, body)
+}
+
 // maxRedirects is net/http's own limit, kept for the redirects
 // refuseWriteToRead follows.
 const maxRedirects = 10
@@ -1760,7 +1771,7 @@ func (c *Client) doRequest(ctx context.Context, method string, ep endpoint, body
 			continue
 		}
 
-		class := upstream.ClassifyResponse(resp.StatusCode, resp.Header, data)
+		class := classifyResponse(resp.StatusCode, resp.Header, data)
 		upstream.Record(ctx, upstream.Jira, c.orgID, class)
 		// A wait longer than maxRateLimitWait is not honored inline: the
 		// response goes back to the caller, which turns it into its normal
@@ -1837,7 +1848,7 @@ func newStatusError(method, url string, status int, body []byte) *StatusError {
 		URL:    url,
 		Status: status,
 		Body:   string(body),
-		Class:  upstream.ClassifyResponse(status, nil, body),
+		Class:  classifyResponse(status, nil, body),
 	}
 }
 

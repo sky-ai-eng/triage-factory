@@ -551,6 +551,59 @@ func TestRelayedPush_TransientLedgerFailureDefersTheRecord(t *testing.T) {
 	}
 }
 
+// flakyRepos is a RepositoryStore whose registry read by GitHub's id goes
+// through faults.
+type flakyRepos struct {
+	db.RepositoryStore
+	f *faults
+}
+
+func (s flakyRepos) GetByExternalIDSystem(ctx context.Context, orgID, host, externalID string) (*domain.Repository, error) {
+	if skip, err := s.f.next(); skip {
+		return nil, err
+	}
+	return s.RepositoryStore.GetByExternalIDSystem(ctx, orgID, host, externalID)
+}
+
+// TestRelayedPush_TransientRegistryFailureDefersTheRecord: a relayed push
+// whose repository cannot be read past the retries is deferred rather than
+// recorded under the name it was pushed to, so the resend keys the one row on
+// the registry row, as the other observer of the same push does.
+func TestRelayedPush_TransientRegistryFailureDefersTheRecord(t *testing.T) {
+	fastRecordRetry(t)
+	reader := installTestAuditDrops(t)
+	base, info := newCaptureStores(t, true)
+	repoFaults := &faults{fail: -1}
+	stores := base
+	stores.Repos = flakyRepos{RepositoryStore: base.Repos, f: repoFaults}
+	s := pushRelayServer(t, stores, info)
+
+	key := uuid.NewString()
+	if err := s.DispatchRecord(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordPush, key, pushArgs(t)); !errors.Is(err, errRecordDeferred) {
+		t.Fatalf("push with an unreadable registry = %v; want %v", err, errRecordDeferred)
+	}
+	if acts := listExternalActions(t, base); len(acts) != 0 {
+		t.Fatalf("ledger rows = %+v; want none during the outage", acts)
+	}
+	if got := collectDrops(t, reader); len(got) != 0 {
+		t.Fatalf("drops = %v; a deferred record is not lost, and must not be counted", got)
+	}
+
+	repoFaults.set(0, 0)
+	if err := s.DispatchRecord(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordPush, key, pushArgs(t)); err != nil {
+		t.Fatalf("resend = %v", err)
+	}
+	row, err := base.Repos.GetByExternalIDSystem(context.Background(), info.OrgID, testScope("github"), "1")
+	if err != nil || row == nil {
+		t.Fatalf("registry row = %v, %v", row, err)
+	}
+	acts := listExternalActions(t, base)
+	if len(acts) != 1 || acts[0].RepositoryID != row.ID ||
+		acts[0].DedupKey != domain.BranchPushDedupKey(info.ConversationID, row.ID, "refs/heads/feat", "abc123") {
+		t.Fatalf("ledger rows = %+v; want the one push keyed on registry row %s", acts, row.ID)
+	}
+}
+
 // TestRelayedPush_RefusedLedgerRowIsCountedOnce: a ledger row refused for good
 // is not resent. The record is acknowledged, and the row is counted lost once,
 // at the write stage, under its action.

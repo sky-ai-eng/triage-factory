@@ -102,3 +102,14 @@ func TestRecordExternalWrite_UnnamedCommentThatFailsToLandCountsNothing(t *testi
 		t.Errorf("unnamed comments = %v, want none for a row that never landed", got)
 	}
 }
+
+// TestCountUnnamedComment_ClampsAProviderOutsideTheVocabulary: a relayed row
+// names its own provider, so one TF does not know is counted as "other"
+// rather than minting a series of its own.
+func TestCountUnnamedComment_ClampsAProviderOutsideTheVocabulary(t *testing.T) {
+	counted := unnamedComments(t)
+	countUnnamedComment(context.Background(), &domain.ExternalAction{Provider: "made-up", Action: domain.ActionCommentPosted})
+	if got, want := counted(), map[string]int64{"other/comment_posted": 1}; !maps.Equal(got, want) {
+		t.Errorf("unnamed comments = %v, want %v", got, want)
+	}
+}

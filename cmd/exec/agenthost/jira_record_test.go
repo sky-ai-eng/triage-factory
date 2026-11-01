@@ -377,6 +377,9 @@ func TestLocalClient_JiraComment_NoID_RecordsTheRowNamingNoObject(t *testing.T) 
 	if a.Action != domain.ActionIssueCommentPosted || a.ObjectKind != "" || a.ObjectKey != "" {
 		t.Errorf("comment action = %+v, want issue_comment_posted naming no object", a)
 	}
+	if want := jira.URL + "/browse/SKY-9"; a.URL != want {
+		t.Errorf("url = %q, want the issue's link %q: there is no comment id to focus", a.URL, want)
+	}
 	if got := counted(); got["jira/issue_comment_posted"] != 1 || len(got) != 1 {
 		t.Errorf("unnamed comments = %v, want one jira/issue_comment_posted", got)
 	}

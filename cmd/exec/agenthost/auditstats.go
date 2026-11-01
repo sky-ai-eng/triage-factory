@@ -2,6 +2,7 @@ package agenthost
 
 import (
 	"context"
+	"slices"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -195,8 +196,10 @@ func newUnnamedCommentCounter(mp metric.MeterProvider) metric.Int64Counter {
 }
 
 // countUnnamedComment counts act when it is a posted comment that landed
-// naming no object. provider and action are closed domain vocabularies; the
-// target stays out, as it does from the drop counter.
+// naming no object. A relayed row's provider is the sidecar's to name, so a
+// provider outside domain.Providers is labeled "other", as relayDropOp
+// clamps a relayed op; the action is one of two constants. The target stays
+// out, as it does from the drop counter.
 func countUnnamedComment(ctx context.Context, act *domain.ExternalAction) {
 	if act == nil || act.ObjectKind != "" || auditUnnamedComments == nil {
 		return
@@ -204,8 +207,12 @@ func countUnnamedComment(ctx context.Context, act *domain.ExternalAction) {
 	if act.Action != domain.ActionCommentPosted && act.Action != domain.ActionIssueCommentPosted {
 		return
 	}
+	provider := act.Provider
+	if !slices.Contains(domain.Providers(), provider) {
+		provider = dropOpOther
+	}
 	auditUnnamedComments.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("provider", act.Provider),
+		attribute.String("provider", provider),
 		attribute.String("action", act.Action),
 	))
 }

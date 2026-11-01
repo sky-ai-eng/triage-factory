@@ -1409,8 +1409,12 @@ func (c *LocalClient) jiraBrowseURL(ctx context.Context, key string) string {
 
 // jiraCommentURL builds a deep link to the comment —
 // {site}/browse/<KEY>?focusedCommentId=<id> — which both Cloud and Server/DC
-// honor. Empty when the site URL is unavailable.
+// honor, or the issue's link for a comment whose id is unknown. Empty when the
+// site URL is unavailable.
 func (c *LocalClient) jiraCommentURL(ctx context.Context, key, commentID string) string {
+	if commentID == "" {
+		return c.jiraBrowseURL(ctx, key)
+	}
 	base := c.jiraSiteBase(ctx)
 	if base == "" {
 		return ""

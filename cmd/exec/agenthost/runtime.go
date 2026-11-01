@@ -685,6 +685,13 @@ func (r *directRuntime) RecordBranchPush(ctx context.Context, push BranchPush, g
 		})
 	}
 	if err != nil {
+		// A relayed push the sidecar will send again is deferred rather than
+		// recorded under its name, so the resend can key it on the registry
+		// row like its twin from the other observer.
+		if relayedRecordFrom(ctx) != nil && db.IsRetryable(err) {
+			recordWriteDrop(ctx, recordDropOp(nil, &act), err)
+			return
+		}
 		agenthostLog.Warn("resolving a pushed branch's repository failed; recording the push under the name it was pushed to",
 			"conversation", r.info.ConversationID, "repo", push.Repo, "error", err)
 	}
