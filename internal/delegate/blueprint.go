@@ -160,7 +160,7 @@ func (s *Spawner) terminateBlueprint(
 		// it to and nothing to write here. Unresolved is asked of the TASK, not
 		// of this blueprint: a draft PR carried in from an earlier engagement is
 		// unresolved work whichever run just finished.
-		if !s.TaskHasUnresolvedDeliverablesSystem(bgCtx, orgID, taskID) {
+		if !s.taskHasUnresolvedDeliverables(bgCtx, orgID, taskID) {
 			// Mirror single-run behavior: a clean blueprint finalization with no
 			// unresolved deliverable closes the task.
 			var closeErr error
@@ -645,12 +645,11 @@ func blueprintTerminalForResumedStepConversation(stepConversation *domain.Conver
 	}
 }
 
-// TaskHasUnresolvedDeliverablesSystem reports whether any conversation on the
-// task holds a deliverable still awaiting human resolution (a draft PR or a
-// ready pending review — domain.HasUnresolvedDeliverables). This is the derived
-// signal that decides whether a completed blueprint closes its task (none
-// unresolved) or leaves it open for a human (≥1 unresolved), and whether the
-// router's deferral sweep may apply a close it held for that blueprint. Runs
+// taskHasUnresolvedDeliverables reports whether any conversation on the task holds
+// a deliverable still awaiting human resolution (a draft PR or a ready pending
+// review — domain.HasUnresolvedDeliverables). This is the derived signal that
+// decides whether a completed blueprint closes its task (none unresolved) or
+// leaves it open for a human (≥1 unresolved). Runs from a detached goroutine
 // with no request claims, so it reads via the admin-pool `...System` readers.
 //
 // The scope is the task rather than the run that just finished, because
@@ -670,7 +669,7 @@ func blueprintTerminalForResumedStepConversation(stepConversation *domain.Conver
 // trigger fail-open: a nil deliverable store (a test fixture without deliverable
 // tracking) or an empty task id means there are no deliverables to be unresolved,
 // so it returns false.
-func (s *Spawner) TaskHasUnresolvedDeliverablesSystem(ctx context.Context, orgID, taskID string) bool {
+func (s *Spawner) taskHasUnresolvedDeliverables(ctx context.Context, orgID, taskID string) bool {
 	if s.deliverables == nil || s.conversations == nil || taskID == "" {
 		return false
 	}
@@ -746,7 +745,7 @@ func (s *Spawner) CloseTaskIfTerminalAndResolved(ctx context.Context, orgID, con
 	if !isNewest {
 		return
 	}
-	if s.TaskHasUnresolvedDeliverablesSystem(ctx, orgID, br.TaskID) {
+	if s.taskHasUnresolvedDeliverables(ctx, orgID, br.TaskID) {
 		return
 	}
 	// CloseSystem's WHERE is state-guarded, so a task the approval click (or a

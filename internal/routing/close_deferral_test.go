@@ -611,30 +611,15 @@ func concludeRun(t *testing.T, database *sql.DB, runID, convID string) {
 	}
 }
 
-// TestCloseDeferralSweep_CompletedRunsTerminatingCloseWaitsOnDeliverables pins
-// the terminating arm of a completed run: the run closed its entity and
-// completed with a deliverable still waiting on a person, which can sit on
-// another entity (the draft PR of a run that moved its Jira issue to done).
-// The held close waits, tearing nothing down, and applies with entity_closed
-// and the ordinary teardown once nothing is unresolved.
-func TestCloseDeferralSweep_CompletedRunsTerminatingCloseWaitsOnDeliverables(t *testing.T) {
+// TestCloseDeferralSweep_CompletedRunAppliesATerminatingClose pins the
+// terminating arm of a completed run: the run merged its pull request and
+// completed, and its task is still open (a deliverable waiting on a person).
+// The entity is closed, so nothing can act on that deliverable any more: the
+// task closes with entity_closed and the ordinary teardown.
+func TestCloseDeferralSweep_CompletedRunAppliesATerminatingClose(t *testing.T) {
 	f := newDeferredMergeFixture(t, "owner/repo#merged-then-completed")
 	concludeRun(t, f.database, f.runID, f.convID)
-	f.sp.setUnresolved(f.taskID, true)
 
-	f.r.sweepCloseDeferrals(t.Context())
-
-	if status, _, _ := taskRow(t, f.database, f.taskID); status == "done" {
-		t.Fatal("the sweep closed a task whose deliverable still waits on a person")
-	}
-	if eventID, _ := taskDeferral(t, f.database, f.taskID); eventID != f.eventID {
-		t.Fatalf("deferral = %q while a deliverable is unresolved, want %s kept", eventID, f.eventID)
-	}
-	if got := f.sp.tornDownCopy(); len(got) != 0 {
-		t.Fatalf("teardowns = %v while a deliverable is unresolved, want none", got)
-	}
-
-	f.sp.setUnresolved(f.taskID, false)
 	f.r.sweepCloseDeferrals(t.Context())
 
 	status, reason, eventType := taskRow(t, f.database, f.taskID)
@@ -643,35 +628,6 @@ func TestCloseDeferralSweep_CompletedRunsTerminatingCloseWaitsOnDeliverables(t *
 	}
 	if got := f.sp.tornDownCopy(); !slices.Equal(got, []string{f.taskID}) {
 		t.Errorf("teardowns = %v, want [%s]", got, f.taskID)
-	}
-}
-
-// TestCloseDeferralSweep_ReplacedCompletedRunsCloseIsDropped pins the
-// hand-over: the completed run's held terminating close waits on a
-// deliverable, the task is delegated again, and the person then resolves the
-// deliverable while the new run works. The held close was the old run's, so
-// it is dropped: the task stays open and the new run is not stopped.
-func TestCloseDeferralSweep_ReplacedCompletedRunsCloseIsDropped(t *testing.T) {
-	f := newDeferredMergeFixture(t, "owner/repo#merged-then-replaced")
-	concludeRun(t, f.database, f.runID, f.convID)
-	replacement, _ := seedRunOnTask(t, f.database, f.taskID, "running", "")
-	if _, err := f.database.Exec(`UPDATE blueprint_runs SET started_at = datetime('now', '+1 minute') WHERE id = ?`, replacement); err != nil {
-		t.Fatalf("start the replacement after the completed run: %v", err)
-	}
-
-	f.r.sweepCloseDeferrals(t.Context())
-
-	if status, _, _ := taskRow(t, f.database, f.taskID); status == "done" {
-		t.Error("the completed run's held close closed the task its replacement is working")
-	}
-	if eventID, _ := taskDeferral(t, f.database, f.taskID); eventID != "" {
-		t.Errorf("deferral = %q after a newer run took the task, want it dropped", eventID)
-	}
-	if got := f.sp.stoppedIDs(); len(got) != 0 {
-		t.Errorf("stopped conversations = %v, want none", got)
-	}
-	if got := f.sp.tornDownCopy(); len(got) != 0 {
-		t.Errorf("teardowns = %v, want none", got)
 	}
 }
 

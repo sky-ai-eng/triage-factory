@@ -49,11 +49,6 @@ type Delegator interface {
 	// leaves them for whatever picks the task up next. Nobody authorized an
 	// event-driven close, so the audit rows it writes name no actor.
 	TeardownTaskDeliverablesSystem(ctx context.Context, orgID, taskID string)
-	// TaskHasUnresolvedDeliverablesSystem reports whether any conversation on
-	// the task holds a deliverable a person has not resolved yet (a draft PR,
-	// a ready pending review). A read failure answers true, the direction
-	// that tears nothing down.
-	TaskHasUnresolvedDeliverablesSystem(ctx context.Context, orgID, taskID string) bool
 	// StageOrDeliverAdditiveEvent routes one agent-facing additive-event
 	// injection for a run by its live state — local process, live remote
 	// executor (TFAC-585's `inject` conversation_signals kind), or the durable

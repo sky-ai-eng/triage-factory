@@ -110,9 +110,6 @@ func (refusingDelegator) StopConversationAndCancelBlueprint(string, string, stri
 func (refusingDelegator) StopBlueprintRun(string, string, delegate.StopCause) error { return nil }
 
 func (refusingDelegator) TeardownTaskDeliverablesSystem(context.Context, string, string) {}
-func (refusingDelegator) TaskHasUnresolvedDeliverablesSystem(context.Context, string, string) bool {
-	return false
-}
 
 func (refusingDelegator) StageOrDeliverAdditiveEvent(context.Context, string, string, string, string, domain.NoteProvenance, delegate.AdditiveFiringRef) delegate.InjectOutcome {
 	return delegate.InjectNotDelivered
