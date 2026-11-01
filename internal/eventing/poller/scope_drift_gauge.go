@@ -133,6 +133,11 @@ func (c *ScopeDriftObserver) Tick(ctx context.Context) {
 	c.mu.Unlock()
 	counts := make(map[string]int64, len(prev))
 	for _, orgID := range orgIDs {
+		// A brain demoting mid-tick cancels ctx, which would fail every read
+		// left in the pass. Stop instead, keeping the previous values.
+		if ctx.Err() != nil {
+			return
+		}
 		n, reported, err := c.readOrg(ctx, orgID)
 		if err != nil {
 			pollerLog.Error("scope drift read failed; keeping the org's previous value", "org", orgID, "error", err)

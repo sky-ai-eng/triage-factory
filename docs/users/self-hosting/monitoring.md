@@ -124,7 +124,8 @@ lists, and is refreshed with each GitHub poll.
 
 It counts repositories on an account the App was uninstalled from as well as
 ones a selective grant leaves out. An org connected with a GitHub App has a
-series from its first GitHub poll on. An org connected with a token has none,
+series from its first GitHub poll on, while the App is installed on at least
+one account. An org connected with a token has none,
 and neither does an org that would read 0 while GitHub has not yet told Triage
 Factory whether one of its installations grants every repository, so a
 missing series is not a zero. `GitHubScopeDrift` warns when an org's count stays above zero for

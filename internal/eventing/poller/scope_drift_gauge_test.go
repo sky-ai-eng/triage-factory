@@ -157,6 +157,29 @@ func TestScopeDriftObserver_DropsOrgsThatStopQualifyingAndKeepsValuesOnAFailedRe
 	assertLines(t, scrapeMetric(t, registry, scopeDriftMetric), []string{`tf_github_scope_drift_repos{org_id="org-1"} 2`})
 }
 
+// TestScopeDriftObserver_CancelledTickKeepsThePreviousValues: a tick whose
+// context is cancelled (the brain demoting mid-pass) changes nothing, rather
+// than failing, logging and carrying forward every org it had left.
+func TestScopeDriftObserver_CancelledTickKeepsThePreviousValues(t *testing.T) {
+	provider, registry := newScrapedProvider(t)
+	src := &fakeScopeDriftSource{
+		orgs:      []string{"org-1"},
+		settings:  map[string]domain.OrgSettings{"org-1": appOrg(domain.GitHubCredentialClassBYOApp)},
+		installs:  map[string][]domain.OrgGitHubAppInstallation{"org-1": grant(domain.RepositorySelectionSelected)},
+		refreshed: map[string]bool{"org-1": true},
+		drift:     map[string]int{"org-1": 1},
+	}
+	c := NewScopeDriftObserver(provider, src)
+	defer c.Close()
+	c.Tick(context.Background())
+
+	src.drift["org-1"] = 5
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	c.Tick(ctx)
+	assertLines(t, scrapeMetric(t, registry, scopeDriftMetric), []string{`tf_github_scope_drift_repos{org_id="org-1"} 1`})
+}
+
 // TestScopeDriftObserver_CloseStopsReporting is the lease-flap case, as for
 // the connection observer.
 func TestScopeDriftObserver_CloseStopsReporting(t *testing.T) {
