@@ -32,11 +32,7 @@ cd "$ROOT"
 # Override-able so concurrent runs (or a coincidental real project of the same
 # name) don't collide; the default is an obvious throwaway.
 PROJECT="${TF_SMOKE_PROJECT:-tf-smoke}"
-# The env file sits in a directory of its own: jwk-init runs in a container
-# that writes the file through a temp file and a rename, which a bind mount
-# of the file alone cannot take.
-ENV_DIR=$(mktemp -d "${TMPDIR:-/tmp}/tf-smoke-env.XXXXXX")
-ENV_FILE="$ENV_DIR/smoke.env"
+ENV_FILE=$(mktemp "${TMPDIR:-/tmp}/tf-smoke-env.XXXXXX")
 # compose.dev.yml's image for control and executor.
 TF_IMAGE=triagefactory:dev
 WORKSPACE_BUCKET=tf-workspaces  # matches docker-compose.yml's TF_WORKSPACE_BUCKET default
@@ -60,8 +56,7 @@ cleanup() {
     dc logs --no-color --tail 200 2>/dev/null || true
   fi
   dc down -v --remove-orphans >/dev/null 2>&1 || true
-  rm -rf "$ENV_DIR"
-  rm -f "${unauth_out:-}"
+  rm -f "$ENV_FILE" "${unauth_out:-}"
 }
 trap cleanup EXIT
 
@@ -123,13 +118,16 @@ docker compose -p "$PROJECT" --env-file "$ENV_FILE" -f compose.dev.yml build
 # documented operator step), with the jwk-init of the binary under test, so
 # the keygen here can't drift from the real one. TF_PUBLIC_URL is set so the
 # token's iss claim matches; the file has no GOTRUE_JWT_KEYS yet, so this
-# generates fresh material. Run as the caller so the rewritten file stays
-# theirs to read.
+# generates fresh material. The file goes in on stdin and comes back on
+# stdout rather than through a bind mount, which a remote or VM daemon that
+# doesn't share TMPDIR, or a rootless one that maps the container's uid,
+# would leave unwritten. Writing it back in place keeps mktemp's 0600 mode.
 echo "Running jwk-init..."
-docker run --rm --pull never --user "$(id -u):$(id -g)" \
-  --entrypoint /usr/local/bin/triagefactory \
-  -e TF_PUBLIC_URL="$PUBLIC_URL" -v "$ENV_DIR:/smoke" \
-  "$TF_IMAGE" jwk-init --write-env /smoke/smoke.env
+minted=$(docker run --rm -i --pull never --entrypoint /bin/sh \
+  -e TF_PUBLIC_URL="$PUBLIC_URL" "$TF_IMAGE" -c \
+  'cat >/tmp/smoke.env && /usr/local/bin/triagefactory jwk-init --write-env /tmp/smoke.env >&2 && cat /tmp/smoke.env' \
+  <"$ENV_FILE")
+printf '%s\n' "$minted" >"$ENV_FILE"
 
 # --- Bring the stack up ----------------------------------------------------
 #

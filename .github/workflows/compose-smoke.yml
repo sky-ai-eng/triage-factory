@@ -44,13 +44,6 @@ concurrency:
 
 jobs:
   compose-smoke:
-    # Not on a release-please PR. Its commit changes only CHANGELOG.md, the
-    # release manifest and docker-compose.yml's TF image pin: the first two
-    # are not in the image's build context, and the stack runs the image
-    # built from source in place of the pin. So it builds the image and runs
-    # the stack of the main commit it sits on, which the push run on main
-    # tested. A job skipped by `if` reports success to a required check.
-    if: ${{ !startsWith(github.head_ref, 'release-please--') }}
     runs-on: ubuntu-latest
     # The cold image build downloads + verifies the gVisor runsc binary and
     # compiles frontend + SDK + Go; 30m is generous headroom over that.
