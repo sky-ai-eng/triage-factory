@@ -10,9 +10,11 @@
 #     a run's managed remote resolves to the per-run git proxy through the
 #     insteadOf rewrite TF puts in its git config. That rewrite's config block
 #     also carries triagefactory.proxyBase and triagefactory.upstreamBase, and
-#     the hook puts the upstream base back in the title. Git also appends
-#     "into <branch>" for the local branch, and a TF checkout's local branch is
-#     a triagefactory/ name nobody outside the run knows, so the hook drops it.
+#     the hook puts the upstream base back in the title. Git also ends the
+#     title with " into <branch>" for the branch HEAD is on, and a TF
+#     checkout's branch is a triagefactory/ name nobody outside the run knows,
+#     so the hook removes that exact ending. A title that only mentions the
+#     branch somewhere else (a `git merge -m` message, say) keeps every word.
 #     A commit that is not a merge is left alone.
 #
 #  2. Co-authored-by trailer. Credits the delegating human on MANUAL
@@ -51,7 +53,10 @@ if [ "$2" = merge ]; then
 		done
 		new=$new$rest
 	fi
-	new=${new%" into triagefactory/"*}
+	branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null)
+	case $branch in
+	triagefactory/*) new=${new%" into $branch"} ;;
+	esac
 	if [ "$new" != "$title" ]; then
 		{ printf '%s\n' "$new"; sed 1d "$f"; } >"$f.tf" && mv "$f.tf" "$f" || rm -f "$f.tf"
 	fi

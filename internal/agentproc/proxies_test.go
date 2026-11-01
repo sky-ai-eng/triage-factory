@@ -1154,6 +1154,17 @@ func TestGitProxyPairs_MergeTitleNamesUpstream(t *testing.T) {
 	if got, want := git(work, "log", "-1", "--format=%s"), "Merge branch 'main' of https://github.com/octo/repo"; got != want {
 		t.Errorf("merge title = %q, want %q", got, want)
 	}
+
+	// Only git's closing " into <branch>" is dropped: an authored title that
+	// names the branch mid-sentence keeps every word.
+	git(filepath.Join(dir, "upstream"), "commit", "-q", "--allow-empty", "-m", "third")
+	git(filepath.Join(dir, "upstream"), "push", "-q", "origin", "main")
+	git(work, "fetch", "-q", "origin", "main")
+	authored := "Merge fixes into triagefactory/conv-1/pr-7 before release"
+	git(work, "merge", "-q", "-m", authored, "FETCH_HEAD")
+	if got := git(work, "log", "-1", "--format=%s"); got != authored {
+		t.Errorf("authored merge title = %q, want it unchanged", got)
+	}
 }
 
 // TestEncodeGitConfigEnv_HooksAlwaysPresent pins that the consolidated

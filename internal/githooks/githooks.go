@@ -98,11 +98,12 @@ const (
 
 // prepareCommitMsgHook is the embedded prepare-commit-msg hook Ensure writes
 // into the hooks dir. It cleans a merge commit's title (the upstream URL in
-// place of the git proxy's, and no "into triagefactory/…"), and appends a
-// Co-authored-by: trailer crediting the delegating human on manual runs, gated
-// on the TRIAGE_FACTORY_GIT_COAUTHOR_TRAILER run env var. Generic +
-// idempotent: a commit that is not a merge, on a run with no trailer var
-// (autonomous/event runs), passes through unchanged.
+// place of the git proxy's, and no closing " into <branch>" for a
+// triagefactory/ checkout), and appends a Co-authored-by: trailer crediting
+// the delegating human on manual runs, gated on the
+// TRIAGE_FACTORY_GIT_COAUTHOR_TRAILER run env var. Generic + idempotent: a
+// commit that is not a merge, on a run with no trailer var (autonomous/event
+// runs), passes through unchanged.
 //
 //go:embed prepare-commit-msg
 var prepareCommitMsgHook []byte
