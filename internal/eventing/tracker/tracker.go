@@ -1933,6 +1933,9 @@ type jiraCycle struct {
 // terminal reports whether snap sits in one of the done statuses of the
 // project whose registry row is jiraProjectID. An issue in a project no rule
 // configures is never terminal.
+//
+// TODO(TFAC-1313): so an entity in a project no rule arms never closes, and
+// every cycle's refresh reads it until its issue becomes unreadable or moves.
 func (c *jiraCycle) terminal(jiraProjectID string, snap domain.JiraSnapshot) bool {
 	rule := c.projects.ForProject(jiraProjectID)
 	if rule == nil {

@@ -282,6 +282,31 @@ func (m *Manager) resolverGate(kind string) jiraclient.SourceGate {
 	return eventsource.ResolverGate(m.EventSources, kind)
 }
 
+// followsEntities reports whether the org has an active entity of source in
+// scope. With nothing armed, a Jira or Linear cycle has nothing to discover,
+// but such an entity is still read by its provider id: one an agent touched
+// outside every tracked set, or one whose project or team was disarmed. That
+// read is what moves an entity onto its issue's new key, and in multi mode the
+// only thing that does, since a relayed key is never followed (agenthost's
+// followsProviderKey). A failed read answers no, so the cycle skips as it
+// would with nothing to read, and the next cycle asks again.
+func (m *Manager) followsEntities(ctx context.Context, log *slog.Logger, source, orgID, scope string) bool {
+	if m.entities == nil {
+		return false
+	}
+	listed, err := m.entities.ListActiveSystem(ctx, orgID, source)
+	if err != nil {
+		log.ErrorContext(ctx, "list active entities failed; not refreshing the entities no armed rule covers this cycle", "org", orgID, "error", err)
+		return false
+	}
+	for _, e := range listed {
+		if e.Scope == scope {
+			return true
+		}
+	}
+	return false
+}
+
 // reviewerResolver builds the per-cycle TF-known reviewer resolver.
 // A self account with a login is the local/PAT "session user" signal →
 // resolve against that one account + their team memberships, preserving the
@@ -1654,15 +1679,24 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 	// pickup and done members, so a watched-but-unmapped project has nothing
 	// to ask about.
 	projects := toTrackerJiraRules(rules)
+	// With no armed project the cycle still refreshes the entities TF holds
+	// on this site (followsEntities), but only from rules it read: a failed
+	// read is no answer about which projects are armed, and refreshing a
+	// tracked issue as if none were would advance its snapshot past the
+	// transitions its project's rules would have emitted.
+	refreshOnly := configured && rulesRead && len(projects) == 0 && m.followsEntities(ctx, jiraLog, "jira", orgID, scope)
 	if configured && len(projects) == 0 {
-		// Nothing on this site to poll, but issues a previous site left
+		// Nothing on this site to discover, but issues a previous site left
 		// tracked still retire: that needs no Jira call, and nothing else
-		// would ever close them. With no project to discover, no project's
+		// would ever close them. A refresh-only cycle's RefreshJira retires
+		// them itself, first. With no project to discover, no project's
 		// discovery is failing either, and once the org's last armed project
 		// is unarmed this branch is the only place that can say so. It says
 		// so only from rules it read: a failed read is no answer about them.
 		tr := m.trackerForOrg(orgID)
-		tr.RetireJiraOutOfScope(ctx, scope)
+		if !refreshOnly {
+			tr.RetireJiraOutOfScope(ctx, scope)
+		}
 		if rulesRead {
 			tr.NoJiraDiscovery(ctx)
 		}
@@ -1670,7 +1704,7 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 			m.noJiraDrift(ctx, orgID)
 		}
 	}
-	if !configured || len(rules) == 0 {
+	if !configured || (len(rules) == 0 && !refreshOnly) {
 		// An anticipated skip, not a failure: an org with no Jira config
 		// is the common case, so it gets an outcome rather than an error
 		// status.
@@ -1709,17 +1743,24 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 		}
 	}
 	// Watched projects are checked too: a rule needs no arming to name a
-	// status, and a team's filters may name a watched project's.
-	m.checkJiraDrift(ctx, client, orgID, rules, now)
+	// status, and a team's filters may name a watched project's. An org with
+	// no rules at all has nothing to check, and noJiraDrift resolved it above.
+	if len(rules) > 0 {
+		m.checkJiraDrift(ctx, client, orgID, rules, now)
+	}
 	// A set of only watched projects was refreshed above and has nothing for
 	// discovery to ask. "The cycle asked nothing" and "the cycle declined to
 	// poll" are different facts, so the skip is stated here rather than left
 	// to emerge from empty member sets downstream. The project reads above
-	// still record the connection's state.
+	// still record the connection's state. A cycle with entities to refresh
+	// runs RefreshJira with no projects, whose discovery asks nothing.
 	if len(projects) == 0 {
-		span.SetAttributes(telemetry.Outcome("no_armed_projects"))
-		conn.skip("no_armed_projects")
-		return
+		if !refreshOnly {
+			span.SetAttributes(telemetry.Outcome("no_armed_projects"))
+			conn.skip("no_armed_projects")
+			return
+		}
+		span.SetAttributes(telemetry.Disposition("refresh_only"))
 	}
 	if _, err := m.trackerForOrg(orgID).RefreshJira(ctx, scope, client, orgSet.JiraBaseURL, projects); err != nil {
 		span.SetStatus(codes.Error, "refresh")

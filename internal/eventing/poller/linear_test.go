@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -194,6 +195,9 @@ type linearStub struct {
 	// hideTeams makes every team read answer that the credential reads none
 	// of the teams asked about.
 	hideTeams bool
+	// issues are the issue nodes a read by UUID answers from, each keyed by
+	// its "id".
+	issues []map[string]any
 }
 
 func (s *linearStub) serve(t *testing.T) *httptest.Server {
@@ -221,6 +225,14 @@ func (s *linearStub) serve(t *testing.T) *httptest.Server {
 			_, _ = w.Write([]byte(`{"data":{"viewer":{"id":"u-viewer","name":"Viewer"}}}`))
 		case strings.Contains(body.Query, "query SearchIssues"):
 			_, _ = w.Write([]byte(`{"data":{"issues":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":""}}}}`))
+		case strings.Contains(body.Query, "query IssuesByID"):
+			nodes := []map[string]any{}
+			for _, issue := range s.issues {
+				if slices.Contains(body.Variables.IDs, issue["id"].(string)) {
+					nodes = append(nodes, issue)
+				}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"issues": map[string]any{"nodes": nodes}}})
 		case strings.Contains(body.Query, "query TeamsByID"):
 			nodes := []map[string]string{}
 			for _, id := range body.Variables.IDs {

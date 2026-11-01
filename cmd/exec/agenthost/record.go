@@ -450,11 +450,8 @@ func resolveEntityInfo(ctx context.Context, stores db.Stores, info ConversationI
 // came from the run's sidecar, which chose its key and its id alike, so
 // following it would let a relayed write rename another issue's entity onto a
 // key of its choosing. The entity is still resolved by its id and linked as
-// stored; the poll cycle renames it when the provider's own answer says its
-// key moved, for an issue in a tracked Jira project or Linear team.
-//
-// TODO(TFAC-1297): an issue outside every tracked set is never polled, so an
-// entity only relayed writes reach keeps the key it had when TF first saw it.
+// stored, and its key moves only on an answer TF read from the provider
+// itself.
 func followsProviderKey(info ConversationInfo) bool {
 	return !info.Relayed
 }
