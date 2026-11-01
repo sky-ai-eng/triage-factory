@@ -125,14 +125,17 @@ minutes. These counters show what that costs and how it is going:
 | `tf_mergeability_answers_total`       | GitHub's answers, by `value` (`MERGEABLE`, `CONFLICTING`, `UNKNOWN`). A high share of `UNKNOWN` means GitHub is slow to compute mergeability.                       |
 | `tf_mergeability_unknown_giveups_total` | Pull requests GitHub answered `UNKNOWN` for ten times in a row. Their conflicts are seen at the next 10-minute read instead.                                       |
 | `tf_mergeability_sweep_changes_total` | 10-minute reads that found the answer changed. Today these are mostly merges to the base branch.                                                                  |
+| `tf_mergeability_dropped_total`       | Probes given up after five failed reads, by `outcome` (`dependency_down`, `transient`, `deadline`). The next poll queues the pull request again; a steady rate means TF cannot reach GitHub for it. |
 
 The probe queue is `kind="pr_mergeability_probes"` on the `tf_work_*` gauges
 and alerts. A probe is not read until 15 seconds after it is queued, so its
 objective for the oldest ready probe is two minutes. A probe that hits a
 GitHub rate limit waits for the limit to reset and counts as deferred, not
-failed. A parked probe stops
-that pull request's conflict detection until an admin redrives it under
-**Parked work**.
+failed. A probe whose reads keep failing is given up after five attempts and
+queued again by the next poll, so an outage delays conflict detection rather
+than stopping it. A probe parks only when it fails in a way a retry would
+repeat; a parked probe stops that pull request's conflict detection until an
+admin redrives it under **Parked work**.
 
 ### Alerts
 

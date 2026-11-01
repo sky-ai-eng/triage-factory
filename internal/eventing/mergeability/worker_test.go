@@ -343,3 +343,29 @@ func TestWorker_ARateLimitDefersTheProbesAndHoldsTheCredential(t *testing.T) {
 		t.Errorf("probes = %+v, want the second probe deferred unread", p)
 	}
 }
+
+func TestWorker_AProbeWhoseReadsKeepFailingIsDroppedNotParked(t *testing.T) {
+	r := newRig(t)
+	pr := r.pullRequest("9")
+	r.admit(pr.ID, domain.MergeabilityProbeNew)
+	r.resolver.err = errors.New("no credential")
+	for i := 0; i < probeKind.Policy.MaxAttempts; i++ {
+		// Each failed attempt backs off; the test stands in for the wait.
+		if _, err := r.database.Exec(`UPDATE pr_mergeability_probes SET next_attempt_at = strftime('%Y-%m-%d %H:%M:%f','now','-1 seconds') WHERE status = 'ready'`); err != nil {
+			t.Fatalf("ripen retry: %v", err)
+		}
+		r.drain(domain.MergeableConflicting)
+	}
+	probes := r.probes(pr.ID)
+	if len(probes) != 1 || probes[0].status != workitem.StatusDone {
+		t.Fatalf("probes = %+v, want the one probe done after its last failed attempt, not parked", probes)
+	}
+
+	// Its key is free, so the next poll's admission is a fresh probe that
+	// reads once the dependency is back.
+	r.admit(pr.ID, domain.MergeabilityProbeNew)
+	r.resolver.err = nil
+	if evts := r.drain(domain.MergeableConflicting); len(evts) != 1 || evts[0].EventType != domain.EventGitHubPRConflicts {
+		t.Errorf("published %v after the dependency recovered, want one github:pr:conflicts", types(evts))
+	}
+}

@@ -20,12 +20,14 @@ func init() {
 }
 
 // instruments are the probe worker's counters. Every label value is a closed
-// vocabulary: an admission reason, or one of GitHub's three answers.
+// vocabulary: an admission reason, one of GitHub's three answers, or a
+// work-item outcome.
 type instruments struct {
 	probes        metric.Int64Counter
 	answers       metric.Int64Counter
 	unknownGiveUp metric.Int64Counter
 	sweepChanges  metric.Int64Counter
+	dropped       metric.Int64Counter
 }
 
 // newInstruments builds the counters against mp; production passes the global
@@ -46,6 +48,7 @@ func newInstruments(mp metric.MeterProvider) *instruments {
 	mk(&in.answers, "mergeability.answers", "Mergeability answers GitHub gave the probe worker, by value: MERGEABLE, CONFLICTING or UNKNOWN.")
 	mk(&in.unknownGiveUp, "mergeability.unknown_giveups", "Pull requests left to the sweep after GitHub answered UNKNOWN on every retry.")
 	mk(&in.sweepChanges, "mergeability.sweep_changes", "Sweep reads that changed a pull request's known mergeability: a change nothing else probed for.")
+	mk(&in.dropped, "mergeability.dropped", "Probes dropped after their last read failed, by the failure's outcome; the poll queues the pull request again.")
 	return in
 }
 
@@ -70,5 +73,11 @@ func recordUnknownGiveUp() {
 func recordSweepChange() {
 	if s := stats.Load(); s != nil {
 		s.sweepChanges.Add(context.Background(), 1)
+	}
+}
+
+func recordDrop(outcome string) {
+	if s := stats.Load(); s != nil {
+		s.dropped.Add(context.Background(), 1, metric.WithAttributes(attribute.String("outcome", outcome)))
 	}
 }

@@ -215,12 +215,12 @@ func (w *Worker) probe(ctx context.Context, orgID string, items []db.ClaimedPRMe
 		b := byRepo[id]
 		client, err := w.resolve(ctx, orgID, b)
 		if err != nil {
-			outcome := workitem.OutcomeDependencyDown
-			if errors.Is(err, errResolvePanic) {
-				outcome = workitem.OutcomePoisonSuspected
-			}
 			log.WarnContext(ctx, "mergeability probes: no GitHub client for the repository", "repository_id", b.repositoryID, "error", err)
-			w.requeueAll(ctx, b.items, outcome, err)
+			if errors.Is(err, errResolvePanic) {
+				w.requeueAll(ctx, b.items, workitem.OutcomePoisonSuspected, err)
+			} else {
+				w.failReads(ctx, b.items, workitem.OutcomeDependencyDown, err)
+			}
 			continue
 		}
 		g, ok := byCredential[client.Credential()]
@@ -325,7 +325,7 @@ func (w *Worker) read(ctx context.Context, orgID string, g *credentialBatch) {
 		}
 		span.SetStatus(codes.Error, "read")
 		log.WarnContext(ctx, "mergeability probes: read failed; the probes retry with backoff", "credential", g.credential, "outcome", string(outcome), "error", err)
-		w.requeueAll(ctx, held, outcome, err)
+		w.failReads(ctx, held, outcome, err)
 		return
 	}
 
@@ -440,6 +440,47 @@ func (w *Worker) deferAll(ctx context.Context, items []db.ClaimedPRMergeabilityP
 			log.ErrorContext(ctx, "mergeability probes: deferral failed; the probe is reclaimed after its lease expires",
 				"probe_id", item.Receipt.ItemID, "entity_id", item.EntityID, "error", err)
 		}
+	}
+}
+
+// failReads disposes of probes whose read failed, or could not be sent, for
+// a reason outside them: the client could not be resolved, GitHub failed the
+// query, or it ran out its deadline. A probe with attempts left retries with
+// backoff. One on its last attempt is completed with nothing written instead
+// of parked, so its pull request's key is free and the poll's next cycle
+// admits it again: every admission reason but the UNKNOWN retry is derived
+// from the stored row on every cycle, so a parked probe would hold nothing an
+// admin could act on that the next cycle does not redo, and an outage would
+// stop the pull request's conflict detection for good rather than delay it.
+// A failure in the worker itself (a panic, or a completion that would not
+// write) still parks, through requeue, since retrying it would only repeat
+// it.
+func (w *Worker) failReads(ctx context.Context, items []db.ClaimedPRMergeabilityProbe, outcome workitem.Outcome, cause error) {
+	for _, item := range items {
+		termCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), terminalWriteTimeout)
+		if item.Receipt.Attempt >= probeKind.Policy.MaxAttempts {
+			w.drop(termCtx, item, outcome, cause)
+		} else {
+			w.requeue(termCtx, item, outcome, cause)
+		}
+		cancel()
+	}
+}
+
+// drop completes a probe whose last attempt failed, writing nothing: the
+// store's completion with no answer.
+func (w *Worker) drop(ctx context.Context, item db.ClaimedPRMergeabilityProbe, outcome workitem.Outcome, cause error) {
+	_, err := w.store.CompleteProbe(ctx, item.Receipt, db.PRMergeabilityAnswer{}, "")
+	switch {
+	case err == nil:
+		recordDrop(string(outcome))
+		log.WarnContext(ctx, "mergeability probes: dropped a probe whose last read failed; the poll queues the pull request again",
+			"probe_id", item.Receipt.ItemID, "entity_id", item.EntityID, "outcome", string(outcome), "cause", cause)
+	case errors.Is(err, workitem.ErrLeaseLost), errors.Is(err, workitem.ErrCancelled):
+		log.InfoContext(ctx, "mergeability probes: probe not held at drop", "probe_id", item.Receipt.ItemID, "entity_id", item.EntityID, "error", err)
+	default:
+		log.ErrorContext(ctx, "mergeability probes: drop failed; the probe is reclaimed after its lease expires",
+			"probe_id", item.Receipt.ItemID, "entity_id", item.EntityID, "error", err)
 	}
 }
 

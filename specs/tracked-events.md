@@ -254,7 +254,10 @@ answer is read again 30 seconds later, at most 10 times, and leaves the stored
 answer alone; the tenth records the read's head and time with no answer, so
 the PR waits for its sweep. A read GitHub refuses for a rate limit waits for
 the limit to reset, and the credential's other PRs wait with it without a
-request. The events carry no source time.
+request. A probe whose reads keep failing for another reason is given up after
+its fifth attempt with nothing written, and the next poll admits the PR again,
+since each admission reason is decided from the stored answer every cycle. The
+events carry no source time.
 
 #### PR Unreachable
 
