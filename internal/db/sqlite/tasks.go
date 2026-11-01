@@ -970,7 +970,8 @@ func (s *taskStore) Bump(ctx context.Context, orgID, taskID, eventID string) (do
 	return scanTaskBareRow(s.q.QueryRowContext(ctx, `
 		UPDATE tasks
 		SET status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END,
-		    snooze_until = CASE WHEN status = 'snoozed' THEN NULL ELSE snooze_until END
+		    snooze_until = CASE WHEN status = 'snoozed' THEN NULL ELSE snooze_until END,
+		    close_deferred_event_id = NULL
 		WHERE id = ?
 		RETURNING `+sqliteTaskBareColumns,
 		taskID), &t)
@@ -1112,34 +1113,117 @@ func closeTaskWithCancelIntent(ctx context.Context, q queryer, taskID, closeReas
 	return true, conversationIDs, nil
 }
 
-// sqliteTaskCloseDeferralColumns is the projection of a task's deferred
-// close, in the order scanTaskCloseDeferral reads it. DeferCloseSystem's
-// RETURNING and ListActiveCloseDeferralsSystem's SELECT both project it.
-const sqliteTaskCloseDeferralColumns = `org_id, id, close_deferred_event_id, close_deferred_blueprint_run_id`
+// sqliteTaskCloseDeferralColumns is the projection of a task's held close,
+// in the order scanTaskCloseDeferral reads it.
+const sqliteTaskCloseDeferralColumns = `org_id, id, close_deferred_event_id`
 
 func scanTaskCloseDeferral(scan func(...any) error) (domain.TaskCloseDeferral, error) {
 	var d domain.TaskCloseDeferral
-	err := scan(&d.OrgID, &d.TaskID, &d.EventID, &d.BlueprintRunID)
+	err := scan(&d.OrgID, &d.TaskID, &d.EventID)
 	return d, err
 }
 
-func (s *taskStore) DeferCloseSystem(ctx context.Context, orgID, taskID, eventID, blueprintRunID string) (*domain.TaskCloseDeferral, error) {
+func (s *taskStore) CloseOrHoldSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (db.TaskCloseOutcome, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return db.TaskCloseOutcome{}, err
+	}
+	var out db.TaskCloseOutcome
+	err := inTx(ctx, s.q, func(q queryer) error {
+		var err error
+		out, err = closeOrHoldTask(ctx, q, taskID, closeReason, closeEventType, closingEventID)
+		return err
+	})
+	if err != nil {
+		return db.TaskCloseOutcome{}, err
+	}
+	return out, nil
+}
+
+// closeOrHoldTask is CloseOrHoldSystem's body on a transaction the caller
+// owns, so the terminating close holds or closes each of its tasks with the
+// same statements inside its own transaction.
+func closeOrHoldTask(ctx context.Context, q queryer, taskID, closeReason, closeEventType, closingEventID string) (db.TaskCloseOutcome, error) {
+	if closingEventID != "" {
+		held, err := holdTaskCloseIfWorking(ctx, q, taskID, closingEventID)
+		if err != nil {
+			return db.TaskCloseOutcome{}, err
+		}
+		if held != nil {
+			return *held, nil
+		}
+	}
+	closed, conversationIDs, err := closeTaskWithCancelIntent(ctx, q, taskID, closeReason, closeEventType, closingEventID)
+	if err != nil {
+		return db.TaskCloseOutcome{}, err
+	}
+	return db.TaskCloseOutcome{Closed: closed, ActiveConversationIDs: conversationIDs}, nil
+}
+
+// holdTaskCloseIfWorking holds closingEventID's close on the task when it is
+// active and one of its conversations is working, and returns nil when it
+// held nothing. The transaction is the lock: one writer at a time.
+func holdTaskCloseIfWorking(ctx context.Context, q queryer, taskID, closingEventID string) (*db.TaskCloseOutcome, error) {
+	var prior sql.NullString
+	err := q.QueryRowContext(ctx, `
+		SELECT close_deferred_event_id FROM tasks
+		 WHERE id = ? AND status NOT IN ('done', 'dismissed')
+	`, taskID).Scan(&prior)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read task: %w", err)
+	}
+	working, err := workingConversationIDs(ctx, q, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("list working conversations: %w", err)
+	}
+	if len(working) == 0 {
+		return nil, nil
+	}
+	if _, err := q.ExecContext(ctx, `
+		UPDATE tasks SET close_deferred_event_id = ? WHERE id = ?
+	`, closingEventID, taskID); err != nil {
+		return nil, fmt.Errorf("hold close: %w", err)
+	}
+	return &db.TaskCloseOutcome{Held: true, NewlyHeld: !prior.Valid, WorkingConversationIDs: working}, nil
+}
+
+// workingConversationIDs drains the task's working conversation ids, oldest
+// first, and closes the cursor before returning.
+func workingConversationIDs(ctx context.Context, q queryer, taskID string) ([]string, error) {
+	rows, err := q.QueryContext(ctx, `
+		SELECT r.id FROM conversations r
+		 WHERE r.task_id = ?
+		   AND `+workingConversationSQL+`
+		 ORDER BY r.started_at, r.id
+	`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+func (s *taskStore) CloseDeferralForTaskSystem(ctx context.Context, orgID, taskID string) (*domain.TaskCloseDeferral, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	return deferTaskClose(ctx, s.q, taskID, eventID, blueprintRunID)
-}
-
-// deferTaskClose is DeferCloseSystem's body on a connection the caller
-// chooses, so the terminating close stamps its deferred tasks inside its own
-// transaction with the same statement.
-func deferTaskClose(ctx context.Context, q queryer, taskID, eventID, blueprintRunID string) (*domain.TaskCloseDeferral, error) {
-	d, err := scanTaskCloseDeferral(q.QueryRowContext(ctx, `
-		UPDATE tasks
-		   SET close_deferred_event_id = ?, close_deferred_blueprint_run_id = ?
-		 WHERE id = ? AND status NOT IN ('done', 'dismissed')
-		RETURNING `+sqliteTaskCloseDeferralColumns,
-		eventID, blueprintRunID, taskID).Scan)
+	d, err := scanTaskCloseDeferral(s.q.QueryRowContext(ctx, `
+		SELECT `+sqliteTaskCloseDeferralColumns+`
+		  FROM tasks
+		 WHERE id = ?
+		   AND close_deferred_event_id IS NOT NULL
+		   AND status NOT IN ('done', 'dismissed')
+	`, taskID).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -1178,7 +1262,7 @@ func (s *taskStore) ClearCloseDeferralSystem(ctx context.Context, orgID, taskID,
 	}
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE tasks
-		   SET close_deferred_event_id = NULL, close_deferred_blueprint_run_id = NULL
+		   SET close_deferred_event_id = NULL
 		 WHERE id = ? AND close_deferred_event_id = ?
 	`, taskID, eventID)
 	if err != nil {

@@ -89,19 +89,25 @@ func (s *Spawner) stageInjection(ctx context.Context, orgID, conversationID, sub
 // (prepend nothing) when nothing is staged or on any read error: feedback never
 // blocks a resume.
 //
-// The flush is destructive (DELETE … RETURNING), so an injection is delivered exactly
-// once even if two resumes race. This is the durable sibling of
-// deliverableLedgerForResume — SendMessage prepends both, so a resume that has both
-// a resolved deliverable and a staged injection carries two <system-note> blocks ahead of
-// the user's text.
+// This is the durable sibling of deliverableLedgerForResume — SendMessage
+// prepends both, so a resume that has both a resolved deliverable and a staged
+// injection carries two <system-note> blocks ahead of the user's text.
 func (s *Spawner) stagedInjectionsForResume(ctx context.Context, orgID, conversationID string) string {
+	return domain.StagedInjectionBlock(s.flushStagedInjections(ctx, orgID, conversationID))
+}
+
+// flushStagedInjections claims every pending staged injection on the
+// conversation, oldest first, or none when nothing is staged or on any read
+// error. The flush marks the rows delivered in the statement that returns
+// them, so an injection is delivered exactly once even if two readers race.
+func (s *Spawner) flushStagedInjections(ctx context.Context, orgID, conversationID string) []domain.StagedInjection {
 	if s.stagedInjections == nil {
-		return ""
+		return nil
 	}
 	injections, err := s.stagedInjections.FlushPendingSystem(ctx, orgID, conversationID)
 	if err != nil {
-		delegateLog.Warn("staged-injection flush failed; resuming without the block", "conversation", conversationID, "error", err)
-		return ""
+		delegateLog.Warn("staged-injection flush failed; delivering without the block", "conversation", conversationID, "error", err)
+		return nil
 	}
-	return domain.StagedInjectionBlock(injections)
+	return injections
 }

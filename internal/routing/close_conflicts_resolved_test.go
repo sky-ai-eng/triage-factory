@@ -3,7 +3,6 @@ package routing
 import (
 	"context"
 	"database/sql"
-	"slices"
 	"testing"
 	"time"
 
@@ -86,31 +85,5 @@ func TestCloseConflictsResolved_ConflictingAgainClosesNothing(t *testing.T) {
 
 	if status, _, _ := taskRow(t, database, taskID); status == "done" {
 		t.Error("the conflicts task closed while the stored mergeability says CONFLICTING")
-	}
-}
-
-func TestCloseConflictsResolved_RunsOwnPushDefersTheClose(t *testing.T) {
-	database := newTestDB(t)
-	r := newQueueWorkerRouter(t, database)
-	sp := &stoppingSpawner{}
-	r.spawner = sp
-	entityID, taskID := seedConflictsTaskOnEntity(t, r, database, "owner/repo#own-resolution")
-	runID, convID := seedRunOnTask(t, database, taskID, "running", "")
-	recordAgentPush(t, database, convID, pushedSHA)
-
-	seedMergeability(t, database, entityID, domain.MergeableMergeable)
-	enqueueConflictsResolved(t, database, entityID, pushedSHA)
-	if err := r.drainEventQueue(context.Background()); err != nil {
-		t.Fatalf("drain the resolution: %v", err)
-	}
-
-	if status, _, _ := taskRow(t, database, taskID); status == "done" {
-		t.Fatal("the conflicts run's task closed under it")
-	}
-	if eventID, deferredRun := taskDeferral(t, database, taskID); eventID == "" || deferredRun != runID {
-		t.Errorf("deferral = (%q, %q), want the resolution and run %s", eventID, deferredRun, runID)
-	}
-	if slices.Contains(sp.stoppedIDs(), convID) || cancelRequested(t, database, runID) {
-		t.Error("the conflicts run was stopped")
 	}
 }

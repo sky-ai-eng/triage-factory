@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"testing"
 
+	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -12,8 +13,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestTaskCloseDeferral_SQLite runs the shared close-deferral suite against
-// the SQLite impl, a fresh in-memory DB per subtest.
+// TestTaskCloseDeferral_SQLite runs the shared held-close suite against the
+// SQLite impl, a fresh in-memory DB per subtest.
 func TestTaskCloseDeferral_SQLite(t *testing.T) {
 	dbtest.RunTaskCloseDeferralConformance(t, func(t *testing.T) (dbtest.TaskCloseDeferralStores, string, dbtest.TaskCloseDeferralSeeder) {
 		t.Helper()
@@ -28,22 +29,33 @@ func TestTaskCloseDeferral_SQLite(t *testing.T) {
 			t.Fatalf("bootstrap schema: %v", err)
 		}
 		stores := sqlitestore.New(conn)
+		exec := func(t *testing.T, what, query string, args ...any) {
+			t.Helper()
+			if _, err := conn.Exec(query, args...); err != nil {
+				t.Fatalf("%s: %v", what, err)
+			}
+		}
 		seed := dbtest.TaskCloseDeferralSeeder{
 			EntityTerminalCloseSeeder: newSQLiteTerminalCloseSeeder(conn),
-			SetDeferralColumns: func(t *testing.T, taskID, eventID, blueprintRunID string) error {
-				t.Helper()
-				_, err := conn.Exec(`
-					UPDATE tasks SET close_deferred_event_id = NULLIF(?, ''), close_deferred_blueprint_run_id = NULLIF(?, '')
-					WHERE id = ?
-				`, eventID, blueprintRunID, taskID)
-				return err
+			Claim: func(t *testing.T, conversationID string) {
+				exec(t, "seed claim", `
+					INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, lease_expires_at)
+					VALUES (?, ?, ?, 'close-hold', 1, strftime('%Y-%m-%d %H:%M:%f', 'now', '+300 seconds'))
+				`, uuid.New().String(), runmode.LocalDefaultOrgID, conversationID)
+			},
+			HoldUntilLater: func(t *testing.T, conversationID string) {
+				exec(t, "hold until later", `
+					UPDATE conversations SET next_attempt_at = strftime('%Y-%m-%d %H:%M:%f', 'now', '+1 hour') WHERE id = ?
+				`, conversationID)
+			},
+			CallOff: func(t *testing.T, blueprintRunID string) {
+				exec(t, "call off", `UPDATE blueprint_runs SET cancel_requested = 1 WHERE id = ?`, blueprintRunID)
 			},
 		}
 		return dbtest.TaskCloseDeferralStores{
-			Tasks:           stores.Tasks,
-			Entities:        stores.Entities,
-			Blueprints:      stores.Blueprints,
-			ExternalActions: stores.ExternalActions,
+			Tasks:         stores.Tasks,
+			Entities:      stores.Entities,
+			Conversations: stores.Conversations,
 		}, runmode.LocalDefaultOrgID, seed
 	})
 }

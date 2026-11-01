@@ -111,6 +111,10 @@ const (
 	// The event type remains in the rendered body; one producer tag keeps the
 	// queue vocabulary independent of the four event kinds it carries.
 	StagedInjectionProducerPRCoherence = "pr_coherence"
+	// StagedInjectionProducerTaskClosing is the note telling a conversation
+	// still working on a task that an event resolved it, and that the task
+	// closes once its conversations finish.
+	StagedInjectionProducerTaskClosing = "task_closing"
 )
 
 // NoteProducerDeliverableResolved tags the note telling an agent that a human
@@ -132,6 +136,17 @@ const NoteProducerDeliverableResolved = "artifact_resolved"
 // ledger, so the two prepended blocks read consistently when a resume carries
 // both.
 func StagedInjectionBlock(injections []StagedInjection) string {
+	return stagedInjectionBlock("While you were not running, these updates landed on work you have open:", injections)
+}
+
+// StagedInjectionBoundaryBlock is StagedInjectionBlock for notes delivered
+// into a run that is still working, at a tool boundary, where they landed
+// while it worked rather than while it was away.
+func StagedInjectionBoundaryBlock(injections []StagedInjection) string {
+	return stagedInjectionBlock("While you were working, these updates landed on work you have open:", injections)
+}
+
+func stagedInjectionBlock(leadIn string, injections []StagedInjection) string {
 	lines := make([]string, 0, len(injections))
 	for i := range injections {
 		if injections[i].Body == "" {
@@ -142,7 +157,7 @@ func StagedInjectionBlock(injections []StagedInjection) string {
 	if len(lines) == 0 {
 		return ""
 	}
-	body := "While you were not running, these updates landed on work you have open:\n\n" +
+	body := leadIn + "\n\n" +
 		strings.Join(lines, "\n") +
 		"\n\nThese are informational — act only if they affect your work."
 	return WrapSystemNote(body)

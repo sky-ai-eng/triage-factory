@@ -237,6 +237,9 @@ type liveRunHandle struct {
 	lr             *agentproc.LiveRun
 	conversationID string
 	orgID          string
+	// boundary delivers the conversation's staged notes into lr at its next
+	// tool boundary, once StageNoteAtToolBoundary arms it.
+	boundary *toolBoundary
 }
 
 // registerProc records a run's live process handle so control ops can
@@ -250,7 +253,18 @@ type liveRunHandle struct {
 func (s *Spawner) registerProc(orgID, conversationID string, lr *agentproc.LiveRun) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.procs[conversationID] = &liveRunHandle{lr: lr, conversationID: conversationID, orgID: orgID}
+	s.procs[conversationID] = &liveRunHandle{
+		lr: lr, conversationID: conversationID, orgID: orgID,
+		boundary: &toolBoundary{deliver: func() { s.deliverNotesAtBoundary(orgID, conversationID, lr) }},
+	}
+}
+
+// toolBoundaryReached reports a tool boundary on the conversation's live
+// process to its handle, if one is registered.
+func (s *Spawner) toolBoundaryReached(conversationID string) {
+	if h := s.getProc(conversationID); h != nil {
+		h.boundary.reached()
+	}
 }
 
 // getProc returns the live handle for a run, or nil when the run has no

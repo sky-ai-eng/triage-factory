@@ -1169,10 +1169,7 @@ func (s *entityStore) CloseWithSnapshotCASSystem(ctx context.Context, orgID, id,
 // entity row is locked FOR UPDATE before anything else, which is the lock
 // every task mint takes first too (lockActiveEntity), so the two serialize
 // on it rather than on each other's rows.
-func (s *entityStore) CloseTerminalSystem(ctx context.Context, orgID, entityID string, expected *int64, closeTypes []string, closeReason, closeEventType, closingEventID string, deferTo map[string]string) (db.TerminalCloseResult, error) {
-	if err := db.RequireClosingEventForDeferral(deferTo, closingEventID); err != nil {
-		return db.TerminalCloseResult{}, err
-	}
+func (s *entityStore) CloseTerminalSystem(ctx context.Context, orgID, entityID string, expected *int64, closeTypes []string, closeReason, closeEventType, closingEventID string) (db.TerminalCloseResult, error) {
 	res := db.TerminalCloseResult{ActiveConversationIDs: map[string][]string{}}
 	err := inTx(ctx, s.admin, func(q queryer) error {
 		var state string
@@ -1195,25 +1192,19 @@ func (s *entityStore) CloseTerminalSystem(ctx context.Context, orgID, entityID s
 			return fmt.Errorf("list open tasks: %w", err)
 		}
 		for _, taskID := range taskIDs {
-			if runID, ok := deferTo[taskID]; ok {
-				deferred, err := deferTaskClose(ctx, q, orgID, taskID, closingEventID, runID)
-				if err != nil {
-					return fmt.Errorf("defer task %s: %w", taskID, err)
-				}
-				if deferred != nil {
-					res.DeferredTaskIDs = append(res.DeferredTaskIDs, taskID)
-				}
-				continue
-			}
-			closed, conversationIDs, err := closeTaskWithCancelIntent(ctx, q, orgID, taskID, closeReason, closeEventType, closingEventID)
+			out, err := closeOrHoldTask(ctx, q, orgID, taskID, closeReason, closeEventType, closingEventID)
 			if err != nil {
 				return fmt.Errorf("task %s: %w", taskID, err)
 			}
-			if !closed {
-				continue
+			switch {
+			case out.Held:
+				res.HeldTasks = append(res.HeldTasks, db.HeldTaskClose{
+					TaskID: taskID, NewlyHeld: out.NewlyHeld, WorkingConversationIDs: out.WorkingConversationIDs,
+				})
+			case out.Closed:
+				res.ClosedTaskIDs = append(res.ClosedTaskIDs, taskID)
+				res.ActiveConversationIDs[taskID] = out.ActiveConversationIDs
 			}
-			res.ClosedTaskIDs = append(res.ClosedTaskIDs, taskID)
-			res.ActiveConversationIDs[taskID] = conversationIDs
 		}
 
 		// The guard on state runs a second time even though this transaction

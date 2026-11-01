@@ -291,28 +291,6 @@ func (s *externalActionStore) CountByConversations(ctx context.Context, orgID st
 	return counts, rows.Err()
 }
 
-// ListAgentActionsForBlueprintRunSystem is the close phase's read of a run's
-// own actions (see the interface). occurred_at is whole seconds here, so the
-// rows of one second break on rowid, which is the order they were written.
-func (s *externalActionStore) ListAgentActionsForBlueprintRunSystem(ctx context.Context, orgID, blueprintRunID, action string) ([]domain.ExternalAction, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
-	}
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT `+externalActionColumns+`
-		  FROM external_actions
-		 WHERE org_id = ? AND action = ? AND performed_by = ?
-		   AND conversation_id IN (
-		       SELECT c.id FROM conversations c WHERE c.blueprint_run_id = ?
-		   )
-		 ORDER BY occurred_at DESC, rowid DESC
-	`, orgID, action, domain.PerformedByAgent, blueprintRunID)
-	if err != nil {
-		return nil, err
-	}
-	return scanExternalActionRows(rows)
-}
-
 // appendExternalActionFilters appends opts' optional provider/action/actor/time
 // predicates, the newest-first ORDER BY, and LIMIT/OFFSET to a SELECT whose WHERE
 // is already open. occurred_at is whole seconds, so rows of one second break on

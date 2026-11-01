@@ -47,6 +47,10 @@ func (s *fenceStubDelegator) StopBlueprintRun(orgID, blueprintRunID string, caus
 
 func (s *fenceStubDelegator) TeardownTaskDeliverablesSystem(context.Context, string, string) {}
 
+func (s *fenceStubDelegator) StageNoteAtToolBoundary(context.Context, string, string, string, string, domain.NoteProvenance) bool {
+	return true
+}
+
 func (s *fenceStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
 	return delegate.InjectNotDelivered
 }

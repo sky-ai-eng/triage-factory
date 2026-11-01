@@ -74,10 +74,12 @@ func RunEntityTerminalCloseConformance(t *testing.T, mk EntityTerminalCloseFacto
 		entityID := seed.EntityForTask(t, taskA)
 		taskB := seed.TaskOnEntity(t, entityID, review)
 		eventID := seed.Event(t, taskA)
-		brID, convID := seed.BlueprintAndConversation(t, taskA, "running", "")
+		// Parked on a person: still active, so the close stops it, and not
+		// working, so the close is not held.
+		brID, convID := seed.BlueprintAndConversation(t, taskA, "running", domain.StatusOpen)
 		_, seq := seed.EntityRow(t, entityID)
 
-		res, err := entities.CloseTerminalSystem(ctx, orgID, entityID, &seq, []string{ci, review}, "entity_closed", domain.EventGitHubPRMerged, eventID, nil)
+		res, err := entities.CloseTerminalSystem(ctx, orgID, entityID, &seq, []string{ci, review}, "entity_closed", domain.EventGitHubPRMerged, eventID)
 		if err != nil {
 			t.Fatalf("CloseTerminalSystem: %v", err)
 		}
@@ -121,7 +123,7 @@ func RunEntityTerminalCloseConformance(t *testing.T, mk EntityTerminalCloseFacto
 		_, judgedAt := seed.EntityRow(t, entityID)
 		seed.BumpPollSeq(t, entityID)
 
-		res, err := entities.CloseTerminalSystem(ctx, orgID, entityID, &judgedAt, []string{ci}, "entity_closed", domain.EventGitHubPRMerged, eventID, nil)
+		res, err := entities.CloseTerminalSystem(ctx, orgID, entityID, &judgedAt, []string{ci}, "entity_closed", domain.EventGitHubPRMerged, eventID)
 		if err != nil {
 			t.Fatalf("CloseTerminalSystem: %v", err)
 		}
@@ -148,14 +150,14 @@ func RunEntityTerminalCloseConformance(t *testing.T, mk EntityTerminalCloseFacto
 		entityID := seed.EntityForTask(t, taskID)
 		eventID := seed.Event(t, taskID)
 		_, seq := seed.EntityRow(t, entityID)
-		if res, err := entities.CloseTerminalSystem(ctx, orgID, entityID, &seq, []string{ci}, "entity_closed", domain.EventGitHubPRMerged, eventID, nil); err != nil || !res.Closed {
+		if res, err := entities.CloseTerminalSystem(ctx, orgID, entityID, &seq, []string{ci}, "entity_closed", domain.EventGitHubPRMerged, eventID); err != nil || !res.Closed {
 			t.Fatalf("first close: res=%+v err=%v", res, err)
 		}
 		// A replay, or a straggler: the entity is closed, so nothing
 		// happens — with the version the replay would carry and with none.
 		_, seqAfter := seed.EntityRow(t, entityID)
 		for _, expected := range []*int64{&seqAfter, nil} {
-			res, err := entities.CloseTerminalSystem(ctx, orgID, entityID, expected, []string{ci}, "entity_closed", domain.EventGitHubPRMerged, eventID, nil)
+			res, err := entities.CloseTerminalSystem(ctx, orgID, entityID, expected, []string{ci}, "entity_closed", domain.EventGitHubPRMerged, eventID)
 			if err != nil {
 				t.Fatalf("second close: %v", err)
 			}
@@ -167,7 +169,7 @@ func RunEntityTerminalCloseConformance(t *testing.T, mk EntityTerminalCloseFacto
 
 	t.Run("Missing_entity_declines", func(t *testing.T) {
 		entities, _, orgID, _ := mk(t)
-		res, err := entities.CloseTerminalSystem(ctx, orgID, "00000000-0000-0000-0000-00000000dead", nil, []string{ci}, "entity_closed", domain.EventGitHubPRMerged, "", nil)
+		res, err := entities.CloseTerminalSystem(ctx, orgID, "00000000-0000-0000-0000-00000000dead", nil, []string{ci}, "entity_closed", domain.EventGitHubPRMerged, "")
 		if err != nil {
 			t.Fatalf("CloseTerminalSystem: %v", err)
 		}
@@ -185,7 +187,7 @@ func RunEntityTerminalCloseConformance(t *testing.T, mk EntityTerminalCloseFacto
 		seed.BumpPollSeq(t, entityID)
 		seed.BumpPollSeq(t, entityID)
 
-		res, err := entities.CloseTerminalSystem(ctx, orgID, entityID, nil, []string{ci}, "entity_closed", domain.EventJiraIssueUnreachable, "", nil)
+		res, err := entities.CloseTerminalSystem(ctx, orgID, entityID, nil, []string{ci}, "entity_closed", domain.EventJiraIssueUnreachable, "")
 		if err != nil {
 			t.Fatalf("CloseTerminalSystem: %v", err)
 		}
@@ -207,7 +209,7 @@ func RunEntityTerminalCloseConformance(t *testing.T, mk EntityTerminalCloseFacto
 		survivor := seed.TaskOnEntity(t, entityID, review)
 		_, seq := seed.EntityRow(t, entityID)
 
-		res, err := entities.CloseTerminalSystem(ctx, orgID, entityID, &seq, []string{ci}, "entity_closed", domain.EventGitHubPRMerged, "", nil)
+		res, err := entities.CloseTerminalSystem(ctx, orgID, entityID, &seq, []string{ci}, "entity_closed", domain.EventGitHubPRMerged, "")
 		if err != nil {
 			t.Fatalf("CloseTerminalSystem: %v", err)
 		}
@@ -231,7 +233,7 @@ func RunEntityTerminalCloseConformance(t *testing.T, mk EntityTerminalCloseFacto
 		}
 		_, seq := seed.EntityRow(t, entityID)
 
-		res, err := entities.CloseTerminalSystem(ctx, orgID, entityID, &seq, []string{ci}, "entity_closed", domain.EventGitHubPRMerged, "", nil)
+		res, err := entities.CloseTerminalSystem(ctx, orgID, entityID, &seq, []string{ci}, "entity_closed", domain.EventGitHubPRMerged, "")
 		if err != nil {
 			t.Fatalf("CloseTerminalSystem: %v", err)
 		}
@@ -249,7 +251,7 @@ func RunEntityTerminalCloseConformance(t *testing.T, mk EntityTerminalCloseFacto
 		entityID := seed.EntityForTask(t, taskID)
 		eventID := seed.Event(t, taskID)
 		_, seq := seed.EntityRow(t, entityID)
-		if res, err := entities.CloseTerminalSystem(ctx, orgID, entityID, &seq, []string{ci}, "entity_closed", domain.EventGitHubPRMerged, eventID, nil); err != nil || !res.Closed {
+		if res, err := entities.CloseTerminalSystem(ctx, orgID, entityID, &seq, []string{ci}, "entity_closed", domain.EventGitHubPRMerged, eventID); err != nil || !res.Closed {
 			t.Fatalf("close: res=%+v err=%v", res, err)
 		}
 

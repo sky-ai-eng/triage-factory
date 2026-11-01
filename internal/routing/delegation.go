@@ -183,13 +183,23 @@ func (r *Router) tryAutoDelegateTrackingInjection(ctx context.Context, orgID str
 
 // autoDelegatePreflight runs the checks every auto-fired trigger passes
 // before its firing is decided, at event time and at the post-scoring
-// re-evaluation alike: the cross-team exclusive-claim skip, the org agent
-// resolution, the per-team team_agents.enabled gate, and the breaker. It
+// re-evaluation alike: the held-close skip, the cross-team exclusive-claim
+// skip, the org agent resolution, the per-team team_agents.enabled gate, and
+// the breaker. It
 // returns the agent the firing runs as and claims for; proceed=false is a
 // decided skip, logged where each check finds it, and a non-nil error is a
 // read that reached no verdict, which the caller retries rather than treats
 // as a decision. The breaker toast fires from here, so both callers keep it.
 func (r *Router) autoDelegatePreflight(ctx context.Context, orgID string, task *domain.Task, trigger domain.EventHandler, entityID string, actingTeamID string) (agentID string, proceed bool, err error) {
+	// An event has resolved the task and its close waits only for the work
+	// already on it, so nothing starts more. The event path bumps the task
+	// before it fires, so a recurring event has cleared the hold by now.
+	if hold, err := r.tasks.CloseDeferralForTaskSystem(ctx, orgID, task.ID); err != nil {
+		return "", false, fmt.Errorf("read held close: %w", err)
+	} else if hold != nil {
+		routerLog.Info("auto-trigger skipped: the task's close is held", "task_id", task.ID, "closing_event", hold.EventID)
+		return "", false, nil
+	}
 	// Exclusive claim: one task, one owner. If the bot has already
 	// claimed this task on behalf of a different team (an earlier
 	// matched team won the CAS), this team's trigger must not pile on a

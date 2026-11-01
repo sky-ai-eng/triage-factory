@@ -435,7 +435,8 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// is what the model reads as the conversation's first turn.
 	systemBlock := composeConversationSystemBlock(
 		mission,
-		runContext(cfg.scope, agentRunRoot, agentPRCheckout, branchTemplate, runURL, cfg.sources.notes, knowledge),
+		runContext(cfg.scope, agentRunRoot, agentPRCheckout, branchTemplate, runURL, cfg.sources.notes,
+			s.heldCloseLine(context.WithoutCancel(ctx), orgID, task.ID), knowledge),
 		cfg.sources.tools(agentprompt.RuntimeSDK),
 		cfg.appendSysPrompt,
 	)

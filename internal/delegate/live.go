@@ -191,6 +191,7 @@ func (s *Spawner) runLiveAndDrive(ctx context.Context, spec liveRunSpec) liveOut
 		}
 	}
 	sink := newActivitySink(spec.sink, spec.mirror, s.activityFor(spec.park.conversationID), s.resolvedActivityTimings())
+	sink.onToolBoundary = func() { s.toolBoundaryReached(spec.park.conversationID) }
 
 	lr, err := agentproc.RunInteractive(ctx, spec.opts, sink, spec.perms)
 	if err != nil {
@@ -762,6 +763,10 @@ type activitySink struct {
 	pending   []string
 	toolNames map[string]string
 	endTool   func()
+	// onToolBoundary hears each result that leaves no tool call in flight:
+	// the point a note can reach the agent mid-run (toolBoundary). Nil hears
+	// nothing.
+	onToolBoundary func()
 }
 
 func newActivitySink(inner agentproc.Sink, mirror *memoryMirror, tracker *activityTracker, timings activityTimings) *activitySink {
@@ -817,6 +822,9 @@ func (a *activitySink) OnToolResult(id string) {
 	delete(a.toolNames, id)
 	a.pending = slices.DeleteFunc(a.pending, func(p string) bool { return p == id })
 	a.trackTools()
+	if len(a.pending) == 0 && a.onToolBoundary != nil {
+		a.onToolBoundary()
+	}
 }
 
 // OnTurnEnd ends every tool call the turn left without a result: the turn is

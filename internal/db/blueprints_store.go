@@ -768,11 +768,4 @@ type BlueprintStore interface {
 	ConversationsForBlueprintSystem(ctx context.Context, orgID string, blueprintRunID string) ([]domain.Conversation, error)
 	ActiveStepConversationIDsSystem(ctx context.Context, orgID string, blueprintRunID string) ([]string, error)
 	IsNewestRunForTaskSystem(ctx context.Context, orgID, taskID, blueprintRunID string) (bool, error)
-
-	// RunningRunForTaskSystem returns the task's blueprint run still marked
-	// running, or (nil, nil) when it has none.
-	// blueprint_runs_one_active_run_per_task allows at most one. The router's
-	// close phase reads it to ask whether the event closing the task was
-	// caused by the task's own run.
-	RunningRunForTaskSystem(ctx context.Context, orgID, taskID string) (*domain.BlueprintRun, error)
 }

@@ -463,7 +463,8 @@ func (s *Spawner) buildNativeLaunchText(ctx context.Context, task domain.Task, m
 		// staged knowledge.
 		systemBlock = composeConversationSystemBlock(
 			mission,
-			runContext("", "", agentVisibleCheckout(cfg.runRoot, cfg.prCheckout), s.resolveBranchTemplate(ctx, task), "", cfg.sources.notes, knowledge),
+			runContext("", "", agentVisibleCheckout(cfg.runRoot, cfg.prCheckout), s.resolveBranchTemplate(ctx, task), "", cfg.sources.notes,
+				s.heldCloseLine(context.WithoutCancel(ctx), cfg.orgID, task.ID), knowledge),
 			cfg.sources.tools(agentprompt.RuntimeNative),
 			nonTerminal,
 		)

@@ -897,7 +897,8 @@ func bumpTask(ctx context.Context, q queryer, orgID, taskID string) (domain.Task
 	return scanTaskBareRow(q.QueryRowContext(ctx, `
 		UPDATE tasks
 		SET status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END,
-		    snooze_until = CASE WHEN status = 'snoozed' THEN NULL ELSE snooze_until END
+		    snooze_until = CASE WHEN status = 'snoozed' THEN NULL ELSE snooze_until END,
+		    close_deferred_event_id = NULL
 		WHERE org_id = $1 AND id = $2
 		RETURNING `+pgTaskBareColumns,
 		orgID, taskID), &t)
@@ -1027,31 +1028,99 @@ func closeTaskWithCancelIntent(ctx context.Context, q queryer, orgID, taskID, cl
 	return true, conversationIDs, nil
 }
 
-// pgTaskCloseDeferralColumns is the projection of a task's deferred close,
-// in the order scanTaskCloseDeferral reads it. DeferCloseSystem's RETURNING
-// and ListActiveCloseDeferralsSystem's SELECT both project it.
-const pgTaskCloseDeferralColumns = `org_id::text, id::text, close_deferred_event_id::text, close_deferred_blueprint_run_id::text`
+// pgTaskCloseDeferralColumns is the projection of a task's held close, in
+// the order scanTaskCloseDeferral reads it.
+const pgTaskCloseDeferralColumns = `org_id::text, id::text, close_deferred_event_id::text`
 
 func scanTaskCloseDeferral(scan func(...any) error) (domain.TaskCloseDeferral, error) {
 	var d domain.TaskCloseDeferral
-	err := scan(&d.OrgID, &d.TaskID, &d.EventID, &d.BlueprintRunID)
+	err := scan(&d.OrgID, &d.TaskID, &d.EventID)
 	return d, err
 }
 
-func (s *taskStore) DeferCloseSystem(ctx context.Context, orgID, taskID, eventID, blueprintRunID string) (*domain.TaskCloseDeferral, error) {
-	return deferTaskClose(ctx, s.admin, orgID, taskID, eventID, blueprintRunID)
+func (s *taskStore) CloseOrHoldSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (db.TaskCloseOutcome, error) {
+	var out db.TaskCloseOutcome
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		var err error
+		out, err = closeOrHoldTask(ctx, q, orgID, taskID, closeReason, closeEventType, closingEventID)
+		return err
+	})
+	if err != nil {
+		return db.TaskCloseOutcome{}, err
+	}
+	return out, nil
 }
 
-// deferTaskClose is DeferCloseSystem's body on a connection the caller
-// chooses, so the terminating close stamps its deferred tasks inside its own
-// transaction with the same statement.
-func deferTaskClose(ctx context.Context, q queryer, orgID, taskID, eventID, blueprintRunID string) (*domain.TaskCloseDeferral, error) {
-	d, err := scanTaskCloseDeferral(q.QueryRowContext(ctx, `
-		UPDATE tasks
-		   SET close_deferred_event_id = $1, close_deferred_blueprint_run_id = $2
-		 WHERE org_id = $3 AND id = $4 AND status NOT IN ('done', 'dismissed')
-		RETURNING `+pgTaskCloseDeferralColumns,
-		eventID, blueprintRunID, orgID, taskID).Scan)
+// closeOrHoldTask is CloseOrHoldSystem's body on a transaction the caller
+// owns, so the terminating close holds or closes each of its tasks with the
+// same statements inside its own transaction.
+func closeOrHoldTask(ctx context.Context, q queryer, orgID, taskID, closeReason, closeEventType, closingEventID string) (db.TaskCloseOutcome, error) {
+	if closingEventID != "" {
+		held, err := holdTaskCloseIfWorking(ctx, q, orgID, taskID, closingEventID)
+		if err != nil {
+			return db.TaskCloseOutcome{}, err
+		}
+		if held != nil {
+			return *held, nil
+		}
+	}
+	closed, conversationIDs, err := closeTaskWithCancelIntent(ctx, q, orgID, taskID, closeReason, closeEventType, closingEventID)
+	if err != nil {
+		return db.TaskCloseOutcome{}, err
+	}
+	return db.TaskCloseOutcome{Closed: closed, ActiveConversationIDs: conversationIDs}, nil
+}
+
+// holdTaskCloseIfWorking holds closingEventID's close on the task when it is
+// active and one of its conversations is working, and returns nil when it
+// held nothing. The task row is locked before the conversations are read, as
+// a close's own UPDATE would lock it.
+func holdTaskCloseIfWorking(ctx context.Context, q queryer, orgID, taskID, closingEventID string) (*db.TaskCloseOutcome, error) {
+	var prior sql.NullString
+	err := q.QueryRowContext(ctx, `
+		SELECT close_deferred_event_id::text FROM tasks
+		 WHERE org_id = $1 AND id = $2 AND status NOT IN ('done', 'dismissed')
+		 FOR UPDATE
+	`, orgID, taskID).Scan(&prior)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lock task: %w", err)
+	}
+	rows, err := q.QueryContext(ctx, `
+		SELECT r.id FROM conversations r
+		 WHERE r.org_id = $1 AND r.task_id = $2
+		   AND `+workingConversationSQL+`
+		 ORDER BY r.started_at, r.id
+	`, orgID, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("list working conversations: %w", err)
+	}
+	working, err := scanIDs(rows, "conversations.id")
+	if err != nil {
+		return nil, fmt.Errorf("list working conversations: %w", err)
+	}
+	if len(working) == 0 {
+		return nil, nil
+	}
+	if _, err := q.ExecContext(ctx, `
+		UPDATE tasks SET close_deferred_event_id = $3
+		 WHERE org_id = $1 AND id = $2
+	`, orgID, taskID, closingEventID); err != nil {
+		return nil, fmt.Errorf("hold close: %w", err)
+	}
+	return &db.TaskCloseOutcome{Held: true, NewlyHeld: !prior.Valid, WorkingConversationIDs: working}, nil
+}
+
+func (s *taskStore) CloseDeferralForTaskSystem(ctx context.Context, orgID, taskID string) (*domain.TaskCloseDeferral, error) {
+	d, err := scanTaskCloseDeferral(s.admin.QueryRowContext(ctx, `
+		SELECT `+pgTaskCloseDeferralColumns+`
+		  FROM tasks
+		 WHERE org_id = $1 AND id = $2
+		   AND close_deferred_event_id IS NOT NULL
+		   AND status NOT IN ('done', 'dismissed')
+	`, orgID, taskID).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -1088,7 +1157,7 @@ func (s *taskStore) ListActiveCloseDeferralsSystem(ctx context.Context) ([]domai
 func (s *taskStore) ClearCloseDeferralSystem(ctx context.Context, orgID, taskID, eventID string) (bool, error) {
 	res, err := s.admin.ExecContext(ctx, `
 		UPDATE tasks
-		   SET close_deferred_event_id = NULL, close_deferred_blueprint_run_id = NULL
+		   SET close_deferred_event_id = NULL
 		 WHERE org_id = $1 AND id = $2 AND close_deferred_event_id = $3
 	`, orgID, taskID, eventID)
 	if err != nil {

@@ -155,7 +155,7 @@ func TestStageTeamKnowledge_EmptyStagesNothingAndSaysNothing(t *testing.T) {
 		t.Fatalf("staged %v from an empty KB", got)
 	}
 	// And the composed run context says nothing about knowledge either.
-	if ctx := runContext("", "/work", "", "", "", "", ""); strings.Contains(ctx, knowledgeDirName) {
+	if ctx := runContext("", "/work", "", "", "", "", "", ""); strings.Contains(ctx, knowledgeDirName) {
 		t.Fatalf("run context mentioned knowledge with none staged;\n%s", ctx)
 	}
 }
@@ -290,7 +290,7 @@ func TestStageTeamKnowledge_UnusableSlugFallsBackToTheID(t *testing.T) {
 // TestRunContext_CarriesTheManifest is the composition half: the manifest is
 // per-run data and rides <run_context>, never a framework block.
 func TestRunContext_CarriesTheManifest(t *testing.T) {
-	got := runContext("", "/work", "", "tfac/<ticket-id>", "", "", "knowledge/team/ — your team's knowledge base")
+	got := runContext("", "/work", "", "tfac/<ticket-id>", "", "", "", "knowledge/team/ — your team's knowledge base")
 	if !strings.Contains(got, "<run_context>") || !strings.Contains(got, "knowledge/team/") {
 		t.Fatalf("run context did not carry the manifest;\n%s", got)
 	}

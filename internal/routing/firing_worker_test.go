@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -40,6 +41,9 @@ type stubDelegator struct {
 	// tornDown is every task id handed to TeardownTaskDeliverablesSystem, so a
 	// test can assert a close reached the deliverable pass.
 	tornDown []string
+	// noted is every conversation id handed to StageNoteAtToolBoundary, so a
+	// test can tell a close that held and told its conversations.
+	noted []string
 }
 
 var errStubDelegate = errors.New("stub: delegation refused")
@@ -161,6 +165,20 @@ func (s *stubDelegator) stoppedCopy() []string {
 
 func (s *stubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
 	return delegate.InjectNotDelivered
+}
+
+func (s *stubDelegator) StageNoteAtToolBoundary(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance) bool {
+	s.mu.Lock()
+	s.noted = append(s.noted, conversationID)
+	s.mu.Unlock()
+	return true
+}
+
+// notedIDs is the conversation ids StageNoteAtToolBoundary was called with.
+func (s *stubDelegator) notedIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.noted)
 }
 
 // setupDrainScenario seeds entity + prompt + event + task + trigger so a

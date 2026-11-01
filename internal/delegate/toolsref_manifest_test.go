@@ -82,7 +82,7 @@ func TestSourceDocsFor_DisabledSourceIsLeftOut(t *testing.T) {
 	if n := len(strings.Split(got.notes, "\n")); n != 4 {
 		t.Errorf("notes = %q, want one line per source that is not sealed", got.notes)
 	}
-	if block := runContext("", "/work", "", "", "", got.notes, ""); !strings.Contains(block, got.notes) {
+	if block := runContext("", "/work", "", "", "", got.notes, "", ""); !strings.Contains(block, got.notes) {
 		t.Errorf("<run_context> = %q, want the source notes in it", block)
 	}
 }

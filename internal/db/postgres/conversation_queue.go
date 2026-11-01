@@ -215,6 +215,25 @@ const awaitingDrivingSQL = `r.archived_at IS NULL
 	  AND NOT ` + activeClaimExistsSQL + `
 	  AND (r.status IS NULL OR (r.status = 'open' AND r.completed_at IS NULL AND ` + undeliveredInputExistsSQL + `))`
 
+// workingConversationSQL is a conversation still working on its task, with
+// no person needed for it to go on: a top-level conversation that has not
+// ended and either holds an active claim or is waiting to be driven
+// (awaitingDrivingSQL, whatever a hand-back's wait) under a blueprint nobody
+// called off, on either of the two columns blueprintDrivableSQL checks. A
+// conversation parked on a person, a concluded one and a failed one are not
+// working. An event close holds while one of the task's conversations is
+// (TaskStore.CloseOrHoldSystem), and the close-hold sweep applies it once
+// none is (ConversationStore.HasWorkingConversationForTaskSystem), so the two
+// read this one predicate.
+const workingConversationSQL = `r.parent_conversation_id IS NULL
+	  AND r.ended_at IS NULL
+	  AND (` + activeClaimExistsSQL + `
+	       OR (` + awaitingDrivingSQL + `
+	           AND NOT EXISTS (
+	               SELECT 1 FROM blueprint_runs br_w
+	               WHERE br_w.org_id = r.org_id AND br_w.id = r.blueprint_run_id
+	                 AND (br_w.cancel_requested OR br_w.status = 'cancelled'))))`
+
 // nextAttemptDueSQL is the time gate: no hand-back is holding the row back, or
 // the wait it set is over. statement_timestamp(), the clock the claim leases
 // are stamped and tested on, so a wait set before a suspend is already over

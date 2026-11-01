@@ -259,6 +259,15 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 		skip(domain.PendingFiringSkipTaskClosed)
 		return
 	}
+	hold, err := r.tasks.CloseDeferralForTaskSystem(unitCtx, f.OrgID, f.TaskID)
+	if err != nil {
+		requeue(workitem.OutcomeTransient, fmt.Errorf("held close lookup: %w", err))
+		return
+	}
+	if hold != nil {
+		skip(domain.PendingFiringSkipTaskClosed)
+		return
+	}
 	// The firing fires only if the bot's claim still holds. A user claim or
 	// a requeue invalidates the commitment the queued row carried.
 	if task.ClaimedByAgentID == "" {

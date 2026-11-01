@@ -30,6 +30,23 @@ var ErrNoSuchTask = errors.New("no task with that id")
 // insert can no longer strand a task on an entity nothing will close again.
 var ErrEntityClosed = errors.New("entity is closed or does not exist; no task may be minted on it")
 
+// TaskCloseOutcome is what TaskStore.CloseOrHoldSystem did to one task:
+// closed it, held its close, or neither, because the task was already
+// terminal.
+type TaskCloseOutcome struct {
+	// Closed reports that this call closed the task, and
+	// ActiveConversationIDs are the conversations then active on it, whose
+	// cancel intent the close stamped: the set the caller stops.
+	Closed                bool
+	ActiveConversationIDs []string
+	// Held reports that the close is held on the task, NewlyHeld that the
+	// task held no close before this call, and WorkingConversationIDs are
+	// the working conversations that made it hold: the set the caller tells.
+	Held                   bool
+	NewlyHeld              bool
+	WorkingConversationIDs []string
+}
+
 // AgentClaimStamp is the guarded task-claim write that rides *inside*
 // another store method's transaction — the bot taking responsibility for a
 // task, written in the same durable step as the engagement that commits it
@@ -425,8 +442,8 @@ type TaskStore interface {
 	// those guards was bypassed. The lifecycle task a terminating transition
 	// mints on the entity it closed (domain.TaskMayRideClosedEntity) is
 	// excluded: it is on a closed entity by design, and so is a task holding
-	// a deferred close (domain.TaskCloseDeferral), which stays open on the
-	// entity its own run closed until that run ends. Ordered by created_at
+	// a close (domain.TaskCloseDeferral), which stays open on the closed
+	// entity until none of its conversations is working. Ordered by created_at
 	// then id so the oldest violation is reported first. Read-only, org-bound
 	// by argument on the admin pool: the checker is a background job with no
 	// JWT claims.
@@ -494,7 +511,9 @@ type TaskStore interface {
 	// Bump records a new matching event on an existing task — if
 	// the task is snoozed, un-snoozes it (wake-on-bump). Does NOT
 	// update primary_event_id; subsequent events are tracked via
-	// the task_events junction (see RecordEvent).
+	// the task_events junction (see RecordEvent). It also clears a close
+	// the task holds (domain.TaskCloseDeferral): the task's own event
+	// arriving again says the situation is live again.
 	Bump(ctx context.Context, orgID, taskID, eventID string) (domain.Task, error)
 
 	// Close sets a task to done with the given close reason.
@@ -749,17 +768,34 @@ type TaskStore interface {
 	// by a typed sibling close produce identical rows.
 	CloseWithConversationCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (closed bool, activeConversationIDs []string, err error)
 
-	// DeferCloseSystem holds the close eventID owes an active task until
-	// blueprintRunID, the task's run whose own action caused the event, ends
-	// (see domain.TaskCloseDeferral). It overwrites a deferral the task
-	// already holds: a later event the same run caused replaces the earlier
-	// one. It writes nothing else — no close, no audit row, no cancel intent —
-	// so the task reads exactly as if the event had not arrived yet.
+	// CloseOrHoldSystem is the close an event owes a task, held while one of
+	// the task's conversations is working (domain.TaskCloseDeferral). In one
+	// transaction, the task's row locked first:
 	//
-	// Returns the deferral it stored, or nil when the task is not active
-	// (closed between the router's read and this write), which leaves the row
-	// untouched. Admin pool.
-	DeferCloseSystem(ctx context.Context, orgID, taskID, eventID, blueprintRunID string) (*domain.TaskCloseDeferral, error)
+	//   - an active task with a working conversation (a top-level, unended
+	//     conversation holding an active claim, or one that will be driven
+	//     without a person under a blueprint nobody called off) holds the
+	//     close: close_deferred_event_id is set to closingEventID, over any
+	//     close it already held, and nothing else is written — no close, no
+	//     audit row, no cancel intent. Held is true, NewlyHeld says whether
+	//     the task held no close before this write, and
+	//     WorkingConversationIDs are the conversations that made it hold.
+	//   - otherwise it is CloseWithConversationCancelIntentSystem, rows and
+	//     outcome alike: Closed and ActiveConversationIDs are its closed and
+	//     activeConversationIDs. A task already terminal is neither.
+	//
+	// A hold names its closing event, so with closingEventID empty nothing
+	// is held. Admin pool.
+	//
+	// Exempt from the returned-row rule: the caller acts on which of the
+	// three things happened and on the conversations behind it, not on the
+	// task row.
+	CloseOrHoldSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (TaskCloseOutcome, error)
+
+	// CloseDeferralForTaskSystem returns the close the task holds, or nil
+	// when it holds none or is no longer active. Admin pool: its readers
+	// (a run's launch, the auto-delegation gates) carry no claims.
+	CloseDeferralForTaskSystem(ctx context.Context, orgID, taskID string) (*domain.TaskCloseDeferral, error)
 
 	// ListActiveCloseDeferralsSystem returns every deferral held by an active
 	// task in every org that is not deleted, ordered by org then task id, for
@@ -767,13 +803,13 @@ type TaskStore interface {
 	// another path is never returned, and neither is one in a deleted org,
 	// whose tasks no close should reach any more. Admin pool, org-wide by
 	// design: the sweep is one brain loop over all orgs, and the partial index
-	// on the deferral columns keeps it to the rows that hold one.
+	// on the deferral column keeps it to the rows that hold one.
 	ListActiveCloseDeferralsSystem(ctx context.Context) ([]domain.TaskCloseDeferral, error)
 
 	// ClearCloseDeferralSystem clears the task's deferral when it still names
 	// eventID — a compare-and-clear on the event the sweep read, so a
-	// deferral DeferCloseSystem overwrote in between survives for the next
-	// pass. It does not look at the task's status. cleared reports whether
+	// deferral a later closing event overwrote in between survives for the
+	// next pass. It does not look at the task's status. cleared reports whether
 	// the compare matched.
 	//
 	// Exempt from the returned-row rule: what it leaves is a row with no

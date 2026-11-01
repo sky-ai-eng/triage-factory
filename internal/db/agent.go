@@ -575,6 +575,17 @@ type ConversationStore interface {
 	// no JWT-claims context.
 	HasLiveConversationForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error)
 
+	// HasWorkingConversationForTaskSystem reports whether one of the task's
+	// conversations is working, by the predicate TaskStore.CloseOrHoldSystem
+	// holds a close on: a top-level conversation that has not ended and
+	// either holds an active claim or will be driven without a person —
+	// mid-flight, or parked and woken by a person's input, whether it may be
+	// claimed now or a hand-back holds it until later — under a blueprint
+	// nobody called off. A conversation parked on a person, a concluded one
+	// and a failed one are not working. Admin pool: the router's close-hold
+	// sweep reads it.
+	HasWorkingConversationForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error)
+
 	// ListForTaskSystem mirrors ListForTask on the admin pool, with org_id
 	// bound by argument. The deliverable reconciler's task closure consumes it —
 	// a pull request resolved on GitHub has no requesting user to open a
