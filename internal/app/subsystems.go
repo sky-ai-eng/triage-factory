@@ -116,7 +116,15 @@ func (a *App) buildAI() {
 	// reconcile on one tenant can't head-of-line-block another. The shared
 	// Reconciler is also handed to the server for the Tier-2 run-scoped refresh
 	// endpoint, so foreground and background reconciliation run one code path.
-	reconciler := reconcile.NewReconciler(a.ghResolver, a.stores.Deliverables, a.stores.ExternalActions, a.stores.Entities, a.stores.Repos, a.stores.Orgs, a.wsHub)
+	// Multi mode's run records are relayed from each run's sidecar, so a pull
+	// request is attributed to a run only once GitHub says the run's sealed
+	// account authored it; local mode's are written by the process that made
+	// the create.
+	authorship := reconcile.SealedAuthor
+	if a.local() {
+		authorship = reconcile.TrustRecords
+	}
+	reconciler := reconcile.NewReconciler(a.ghResolver, a.stores, authorship, a.wsHub)
 	a.reconcilerCore = reconciler
 	a.reconciler = reconcile.NewManager(reconciler)
 	a.srv.SetReconciler(reconciler)
@@ -183,6 +191,9 @@ func (a *App) hookReconcilerToSpawner() {
 		return
 	}
 	a.reconcilerCore.SetPullRequestResolvedHook(a.spawner.CloseTaskIfTerminalAndResolved)
+	// And the edge back: the system teardown settles a pending draft through
+	// the reconciler before it decides whether to close it on GitHub.
+	a.spawner.SetDeliverableSettler(a.reconcilerCore)
 }
 
 // buildExecution constructs the delegation spawner, wiring it to the

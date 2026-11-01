@@ -62,7 +62,7 @@ func TestRunner_CycleSpan(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			conn, stores, _, _ := reconcileTestDB(t)
-			rc := NewReconciler(&fakeResolver{client: newStubClient(t, &stubGH{})}, stores.Deliverables, stores.ExternalActions, stores.Entities, stores.Repos, stores.Orgs, nil)
+			rc := NewReconciler(&fakeResolver{client: newStubClient(t, &stubGH{})}, stores, TrustRecords, nil)
 			if c.closeDB {
 				_ = conn.Close()
 			}

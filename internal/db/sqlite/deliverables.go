@@ -42,7 +42,7 @@ var _ db.DeliverableStore = (*deliverableStore)(nil)
 const deliverableColumns = `
 	id, conversation_id, org_id, team_id, provider, kind, scope, target,
 	external_id, url, node_id, entity_id,
-	state, dedup_key, details_json, created_at, updated_at
+	state, dedup_key, details_json, created_at, updated_at, verification
 `
 
 func (s *deliverableStore) Upsert(ctx context.Context, orgID string, a domain.Deliverable) (domain.Deliverable, error) {
@@ -53,6 +53,10 @@ func (s *deliverableStore) Upsert(ctx context.Context, orgID string, a domain.De
 		return domain.Deliverable{}, err
 	}
 	if err := db.RequireDeliverableKind(a.Kind); err != nil {
+		return domain.Deliverable{}, err
+	}
+	verification, err := db.DeliverableVerificationOrDefault(a.Kind, a.Verification)
+	if err != nil {
 		return domain.Deliverable{}, err
 	}
 	id := a.ID
@@ -89,11 +93,14 @@ func (s *deliverableStore) Upsert(ctx context.Context, orgID string, a domain.De
 	// reassign either. Letting team_id follow the last writer while
 	// conversation_id stayed pinned to the first would desync the two and
 	// mis-scope the deliverable out of its owning team's reads.
+	//
+	// verification is inserted and never updated here: a row is settled only
+	// through SettleVerificationSystem.
 	row := s.q.QueryRowContext(ctx, `
 		INSERT INTO deliverables
 			(id, conversation_id, org_id, team_id, provider, kind, scope, target,
-			 external_id, url, node_id, entity_id, state, dedup_key, details_json, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+			 external_id, url, node_id, entity_id, state, dedup_key, details_json, updated_at, verification)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
 		ON CONFLICT(org_id, scope, dedup_key) DO UPDATE SET
 			conversation_id       = deliverables.conversation_id,
 			team_id      = deliverables.team_id,
@@ -108,7 +115,7 @@ func (s *deliverableStore) Upsert(ctx context.Context, orgID string, a domain.De
 		RETURNING `+deliverableColumns,
 		id, nullIfEmpty(a.ConversationID), orgID, a.TeamID, a.Provider, a.Kind, a.Scope, a.Target,
 		nullIfEmpty(a.ExternalID), nullIfEmpty(a.URL), nullIfEmpty(a.NodeID), nullIfEmpty(a.EntityID),
-		a.State, a.DedupKey, nullIfEmpty(a.DetailsJSON),
+		a.State, a.DedupKey, nullIfEmpty(a.DetailsJSON), verification,
 	)
 	var out domain.Deliverable
 	if err := scanDeliverable(row, &out); err != nil {
@@ -147,6 +154,10 @@ func (s *deliverableStore) InsertDeliverableIfAbsent(ctx context.Context, orgID 
 	if err := db.RequireDeliverableKind(a.Kind); err != nil {
 		return false, err
 	}
+	verification, err := db.DeliverableVerificationOrDefault(a.Kind, a.Verification)
+	if err != nil {
+		return false, err
+	}
 	id := a.ID
 	if id == "" {
 		id = uuid.New().String()
@@ -154,12 +165,12 @@ func (s *deliverableStore) InsertDeliverableIfAbsent(ctx context.Context, orgID 
 	res, err := s.q.ExecContext(ctx, `
 		INSERT INTO deliverables
 			(id, conversation_id, org_id, team_id, provider, kind, scope, target,
-			 external_id, url, node_id, entity_id, state, dedup_key, details_json, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+			 external_id, url, node_id, entity_id, state, dedup_key, details_json, updated_at, verification)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
 		ON CONFLICT(org_id, scope, dedup_key) DO NOTHING`,
 		id, nullIfEmpty(a.ConversationID), orgID, a.TeamID, a.Provider, a.Kind, a.Scope, a.Target,
 		nullIfEmpty(a.ExternalID), nullIfEmpty(a.URL), nullIfEmpty(a.NodeID), nullIfEmpty(a.EntityID),
-		a.State, a.DedupKey, nullIfEmpty(a.DetailsJSON),
+		a.State, a.DedupKey, nullIfEmpty(a.DetailsJSON), verification,
 	)
 	if err != nil {
 		return false, err
@@ -511,6 +522,33 @@ func (s *deliverableStore) ListNonTerminalBySystem(ctx context.Context, orgID st
 	return scanDeliverableRows(rows)
 }
 
+func (s *deliverableStore) SettleVerificationSystem(ctx context.Context, orgID, id, verdict, detailsJSON string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	if err := db.RequireSettledVerification(verdict); err != nil {
+		return false, err
+	}
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE deliverables
+		SET verification = ?,
+		    state        = CASE WHEN ? = ? AND state IN (?, ?) THEN ? ELSE state END,
+		    details_json = COALESCE(NULLIF(?, ''), details_json),
+		    updated_at   = CURRENT_TIMESTAMP
+		WHERE org_id = ? AND id = ? AND kind = ? AND verification = ?
+	`, verdict, verdict, domain.DeliverableVerificationForeign,
+		domain.DeliverableStatePRDraft, domain.DeliverableStatePROpen, domain.DeliverableStatePRClosed, detailsJSON,
+		orgID, id, domain.DeliverableKindPullRequest, domain.DeliverableVerificationPending)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
 // --- Helpers ---
 
 func scanDeliverableRows(rows *sql.Rows) ([]domain.Deliverable, error) {
@@ -534,7 +572,7 @@ func scanDeliverable(sc rowScanner, a *domain.Deliverable) error {
 	if err := sc.Scan(
 		&a.ID, &conversationID, &a.OrgID, &a.TeamID, &a.Provider, &a.Kind, &a.Scope, &a.Target,
 		&externalID, &url, &nodeID, &entityID,
-		&a.State, &a.DedupKey, &detailsJSON, &a.CreatedAt, &a.UpdatedAt,
+		&a.State, &a.DedupKey, &detailsJSON, &a.CreatedAt, &a.UpdatedAt, &a.Verification,
 	); err != nil {
 		return err
 	}

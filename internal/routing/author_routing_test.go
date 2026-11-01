@@ -196,8 +196,8 @@ func TestAuthorCentric_OverrideOwningTeam(t *testing.T) {
 
 	entityID := reviewEntity(t, database, "owner/repo#override")
 	// Through the real writer, not a raw UPDATE: this is the exact pairing the
-	// bot-opened-PR path relies on — the exec funnel stamps the commissioning
-	// team, and routing reads it back as tier 1 — so the two halves are proven
+	// bot-opened-PR path relies on — the deliverable reconciler stamps the
+	// commissioning team, and routing reads it back as tier 1 — so the two halves are proven
 	// against each other rather than against a hand-written column poke.
 	stamped, err := sqlitestore.New(database).Entities.StampOwningTeamIfUnsetSystem(
 		context.Background(), runmode.LocalDefaultOrgID, entityID, teamOverride)

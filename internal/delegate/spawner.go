@@ -368,9 +368,14 @@ type Spawner struct {
 	// setActivityTimings.
 	activityTimingsOverride activityTimings
 
-	dispatchWake   chan struct{}  // best-effort latency nudge for the conversation-queue dispatcher; non-blocking send on enqueue, buffered depth 1 so a missed wake only defers to the next scan tick
-	firingWaker    FiringWaker    // nil-safe; set post-construction via SetFiringWaker
-	eventPublisher EventPublisher // nil-safe; set post-construction via SetEventPublisher — mirrors run status/activity onto the bus (TFAC-592)
+	dispatchWake chan struct{} // best-effort latency nudge for the conversation-queue dispatcher; non-blocking send on enqueue, buffered depth 1 so a missed wake only defers to the next scan tick
+	firingWaker  FiringWaker   // nil-safe; set post-construction via SetFiringWaker
+	// deliverableSettler settles a pending draft pull request before the
+	// system teardown decides whether to close it on GitHub. Nil-safe (an
+	// executor, and tests); set post-construction via SetDeliverableSettler
+	// and read under mu, like firingWaker beside it.
+	deliverableSettler DeliverableSettler
+	eventPublisher     EventPublisher // nil-safe; set post-construction via SetEventPublisher — mirrors run status/activity onto the bus (TFAC-592)
 	// memoryOwed is the doorbell every boundary this spawner stamps rings:
 	// the conversation may have ended without its agent having written its
 	// memory, and the brain is what generates the one it owes. Nil-safe; set
@@ -764,6 +769,31 @@ func (s *Spawner) SetFiringWaker(w FiringWaker) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.firingWaker = w
+}
+
+// DeliverableSettler settles a pending pull request deliverable from GitHub's
+// answer (reconcile.Reconciler.SettleDeliverable).
+type DeliverableSettler interface {
+	SettleDeliverable(ctx context.Context, orgID string, a domain.Deliverable)
+}
+
+// SetDeliverableSettler wires the reconciler the system teardown settles a
+// pending draft through. Post-construction, same pattern as SetFiringWaker:
+// the reconciler holds a hook into the spawner. Nil leaves a pending draft to
+// be closed TF-side only.
+func (s *Spawner) SetDeliverableSettler(d DeliverableSettler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deliverableSettler = d
+}
+
+// HasDeliverableSettler reports whether a settler is wired — the wiring's own
+// check that the system teardown was not left closing every pending draft
+// TF-side only.
+func (s *Spawner) HasDeliverableSettler() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.deliverableSettler != nil
 }
 
 // SetOnMemoryOwed wires the memory doorbell. Post-construction, same pattern
@@ -1808,6 +1838,15 @@ func (d systemTeardown) GitHub() ghclient.Resolver {
 	d.s.mu.Lock()
 	defer d.s.mu.Unlock()
 	return d.s.ghResolver
+}
+
+func (d systemTeardown) SettlePullRequest(ctx context.Context, orgID string, a domain.Deliverable) {
+	d.s.mu.Lock()
+	settler := d.s.deliverableSettler
+	d.s.mu.Unlock()
+	if settler != nil {
+		settler.SettleDeliverable(ctx, orgID, a)
+	}
 }
 
 func (d systemTeardown) ConversationsForTask(ctx context.Context, orgID, taskID string) ([]domain.Conversation, error) {

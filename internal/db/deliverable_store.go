@@ -40,6 +40,39 @@ func RequireDeliverableKind(kind string) error {
 	return fmt.Errorf("%w, not %q", ErrDeliverableKind, kind)
 }
 
+// ErrDeliverableVerification refuses a deliverable write whose verification is
+// outside its closed vocabulary (domain.DeliverableVerification*), or a settle
+// to anything but verified or foreign.
+var ErrDeliverableVerification = errors.New("deliverable verification is pending, verified or foreign")
+
+// DeliverableVerificationOrDefault is the verification an insert of a
+// deliverable of kind stores for v: v itself when it is in the vocabulary,
+// verified when it is empty, so every writer but a pull request create, which
+// inserts pending, writes a row TF acts on. Only a pull request is ever
+// settled, so a review is verified or refused. Anything else is refused with
+// ErrDeliverableVerification. Both dialects' inserts call it.
+func DeliverableVerificationOrDefault(kind, v string) (string, error) {
+	switch v {
+	case "", domain.DeliverableVerificationVerified:
+		return domain.DeliverableVerificationVerified, nil
+	case domain.DeliverableVerificationPending, domain.DeliverableVerificationForeign:
+		if kind == domain.DeliverableKindPullRequest {
+			return v, nil
+		}
+		return "", fmt.Errorf("%w; only a pull request is %q", ErrDeliverableVerification, v)
+	}
+	return "", fmt.Errorf("%w, not %q", ErrDeliverableVerification, v)
+}
+
+// RequireSettledVerification refuses a settle verdict other than verified or
+// foreign with ErrDeliverableVerification.
+func RequireSettledVerification(verdict string) error {
+	if verdict == domain.DeliverableVerificationVerified || verdict == domain.DeliverableVerificationForeign {
+		return nil
+	}
+	return fmt.Errorf("%w; a settle is verified or foreign, not %q", ErrDeliverableVerification, verdict)
+}
+
 // DeliverableStore owns the deliverables table: one row per pull request or
 // review an agent prepared for a person, owned by the conversation that made
 // it. Approval, attention, task close and teardown read it, and so do the
@@ -290,4 +323,19 @@ type DeliverableStore interface {
 	// defense in depth.
 	// Identical to a plain org read in SQLite (single-tenant, no RLS).
 	ListNonTerminalBySystem(ctx context.Context, orgID string) ([]domain.Deliverable, error)
+
+	// SettleVerificationSystem settles pull request deliverable id's
+	// verification, once: it moves a row still pending to verdict
+	// (domain.DeliverableVerificationVerified or ...Foreign) and reports
+	// whether this call moved it, so of two settlers exactly one acts on the
+	// verdict. A foreign verdict also closes a draft or open row, so nothing
+	// waits on it or reconciles it again; a merged or closed one keeps its
+	// state. detailsJSON, when non-empty, replaces the row's
+	// details: a verified row's head, base and node id are rewritten from
+	// GitHub's answer rather than kept as the recording run sent them. Its one
+	// writer is the deliverable reconciler. Admin pool — it has no JWT-claims
+	// context; org_id stays bound as defense in depth. Exempt from the
+	// returned-row rule as a compare-and-swap, like TransitionReviewState. Any
+	// other verdict is refused with ErrDeliverableVerification.
+	SettleVerificationSystem(ctx context.Context, orgID, id, verdict, detailsJSON string) (bool, error)
 }

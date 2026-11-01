@@ -41,17 +41,25 @@ type clientResolver interface {
 // non-terminal deliverables. Writes route through the admin pool (UpsertSystem) —
 // the reconciler has no JWT-claims context in either tier.
 //
+// It is also where a pull request create's deliverable, recorded pending, is
+// settled: the reconciler holds GitHub's copy of every pull request it
+// reconciles, which is what its Authorship checks the run's record against
+// (settle).
+//
 // The resolver's clients reach the org's current GitHub host and no other, so
 // only deliverables recorded on that host (their scope) are reconciled. Another
 // host's pull request is not where those clients look.
 type Reconciler struct {
-	resolver     clientResolver
-	deliverables db.DeliverableStore
-	actions      db.ExternalActionStore // read for the pr_created rows the backstop works from
-	entities     db.EntityStore         // read for the pull request entity a deliverable is about
-	repos        db.RepositoryStore     // read for the registry row a deliverable's pull request is in
-	orgs         db.OrgsStore           // read for the org's current GitHub host
-	ws           *websocket.Hub         // nil-safe: broadcasts are skipped when unset (tests)
+	resolver      clientResolver
+	deliverables  db.DeliverableStore
+	actions       db.ExternalActionStore    // read for the pr_created rows the backstop works from
+	entities      db.EntityStore            // read for the pull request entity a deliverable is about, and stamped
+	repos         db.RepositoryStore        // read for the registry row a deliverable's pull request is in
+	orgs          db.OrgsStore              // read for the org's current GitHub host
+	conversations db.ConversationStore      // read for the creator a run's pull request is stamped with
+	claims        db.ConversationQueueStore // read for the engagement live when a pull request was opened
+	authorship    Authorship
+	ws            *websocket.Hub // nil-safe: broadcasts are skipped when unset (tests)
 	// prResolved runs after a pull request's draft → open transition commits.
 	// nil skips it (tests, and the window before the spawner is wired).
 	prResolved PullRequestResolvedHook
@@ -65,10 +73,23 @@ type Reconciler struct {
 // approval nobody has left to give.
 type PullRequestResolvedHook func(ctx context.Context, orgID, conversationID string)
 
-// NewReconciler builds the shared reconciler. ws may be nil (broadcasts become
-// no-ops); the stores + resolver are required.
-func NewReconciler(resolver clientResolver, deliverables db.DeliverableStore, actions db.ExternalActionStore, entities db.EntityStore, repos db.RepositoryStore, orgs db.OrgsStore, ws *websocket.Hub) *Reconciler {
-	return &Reconciler{resolver: resolver, deliverables: deliverables, actions: actions, entities: entities, repos: repos, orgs: orgs, ws: ws}
+// NewReconciler builds the shared reconciler over stores, deciding who opened
+// a pull request by authorship: TrustRecords in local mode, SealedAuthor in
+// multi. ws may be nil (broadcasts become no-ops); the stores + resolver are
+// required.
+func NewReconciler(resolver clientResolver, stores db.Stores, authorship Authorship, ws *websocket.Hub) *Reconciler {
+	return &Reconciler{
+		resolver:      resolver,
+		deliverables:  stores.Deliverables,
+		actions:       stores.ExternalActions,
+		entities:      stores.Entities,
+		repos:         stores.Repos,
+		orgs:          stores.Orgs,
+		conversations: stores.Conversations,
+		claims:        stores.ConversationQueue,
+		authorship:    authorship,
+		ws:            ws,
+	}
 }
 
 // onCurrentHost returns the org's current GitHub host and the deliverables of
@@ -160,9 +181,12 @@ const prBackstopWindow = 7 * 24 * time.Hour
 // repository with; its target is the current name. When every pull request
 // already has its deliverable, the pass makes no GitHub call.
 //
-// The deliverable is recorded in the state the verb opened the pull request in,
-// and the reconcile that follows applies any transition since. The write is
-// insert-if-absent, so a pull request recorded after the read is left
+// The deliverable is recorded pending, like the create's own, in the state the
+// verb opened the pull request in: the row is relayed, like the deliverable it
+// stands in for, so whether its run opened the pull request is settled by the
+// reconcile that follows (settle), which also applies any transition since. A
+// row settled foreign is still a row, so its ledger row is not read again. The
+// write is insert-if-absent, so a pull request recorded after the read is left
 // untouched and repeating the pass changes nothing. Best-effort per owner and
 // per pull request: a credential or GitHub failure skips it this pass.
 func (rc *Reconciler) BackfillPRDeliverables(ctx context.Context, orgID string) error {
@@ -270,6 +294,7 @@ func (rc *Reconciler) recordBackfilledPR(ctx context.Context, orgID, host string
 	art.OrgID = orgID
 	art.TeamID = act.TeamID
 	art.Scope = host
+	art.Verification = domain.DeliverableVerificationPending
 	if rc.entities != nil {
 		entity, err := rc.entities.GetByExternalIDSystem(ctx, orgID, domain.ProviderGitHub, host, act.NodeID)
 		if err != nil {
@@ -298,8 +323,10 @@ func (rc *Reconciler) recordBackfilledPR(ctx context.Context, orgID, host string
 // transition broadcasts over the WS hub (as
 // deliverable_updated on the owning conversation, so the conversation view's
 // deliverable-derived surface refreshes), and a draft pull request that stops
-// being unresolved runs the resolved hook. Returns the deliverables that
-// transitioned, carrying their new state.
+// being unresolved runs the resolved hook. A pending pull request is settled
+// first (settle); one settled foreign is closed by it and transitions no
+// further. Returns the deliverables that transitioned, carrying their new
+// state.
 //
 // Best-effort per deliverable: a single GitHub or write failure is logged and
 // skipped, never aborting the rest. GitHub work is grouped by repo OWNER —
@@ -324,7 +351,7 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 	reads := newRegistryReads(rc)
 	prNodeIDsByOwner := map[string]map[string]bool{}
 	for _, a := range arts {
-		nodeID := deliverablePRNodeID(a)
+		nodeID := prNodeID(a)
 		if nodeID == "" {
 			continue
 		}
@@ -367,9 +394,11 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 		}
 	}
 
-	// Pass 3 — apply each transition, then run the draft-resolved closure once
-	// per conversation whose draft pull request stopped being unresolved this
-	// cycle.
+	// Pass 3 — settle each pending pull request (under TrustRecords whether or
+	// not GitHub's copy was read, since nothing is checked against it), apply
+	// each transition, then run the draft-resolved closure once per
+	// conversation whose draft pull request stopped being unresolved this
+	// cycle, including by being settled foreign.
 	//
 	// The write-back runs on a detached ctx (the fetches above stayed
 	// cancellable). A terminal deliverable drops out of BOTH tiers' non-terminal
@@ -383,7 +412,30 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 	writeCtx := context.WithoutCancel(ctx)
 	var transitioned []domain.Deliverable
 	resolvedConversations := map[string]bool{}
+	attribution := newAttributionReads(rc)
 	for _, a := range arts {
+		if a.Verification == domain.DeliverableVerificationPending {
+			var snap *domain.PRSnapshot
+			if s, ok := snapshots[prNodeID(a)]; ok {
+				snap = &s
+			}
+			settled, v, moved := rc.settle(writeCtx, orgID, a, snap, attribution)
+			switch {
+			case moved && v == verdictForeign:
+				rc.broadcast(orgID, settled)
+				transitioned = append(transitioned, settled)
+				if settled.ConversationID != "" && isDraftResolved(a, settled.State) {
+					resolvedConversations[settled.ConversationID] = true
+				}
+				continue
+			case !moved && v != verdictUnknown:
+				// Another settler moved the row first, so this copy of it is
+				// stale: writing a transition from it would put back what
+				// that settle replaced. The next pass reads the row as it is.
+				continue
+			}
+			a = settled
+		}
 		newState, ok := nextState(a, snapshots)
 		if !ok || newState == a.State {
 			continue
@@ -476,8 +528,7 @@ func (rc *Reconciler) broadcast(orgID string, a domain.Deliverable) {
 func nextState(a domain.Deliverable, snapshots map[string]domain.PRSnapshot) (string, bool) {
 	switch a.Kind {
 	case domain.DeliverableKindPullRequest:
-		d, _ := domain.ParsePRDeliverableDetails(a.DetailsJSON)
-		snap, ok := snapshots[d.NodeID]
+		snap, ok := snapshots[prNodeID(a)]
 		if !ok {
 			return "", false
 		}
@@ -554,12 +605,19 @@ func prOwner(target string) (string, bool) {
 	return owner, ok
 }
 
-// deliverablePRNodeID is the node id of the pull request a pull request or review
-// deliverable is about, from its details; "" when the row carries none.
-func deliverablePRNodeID(a domain.Deliverable) string {
+// prNodeID is the node id of the pull request a pull request or review
+// deliverable is about; "" when the row carries none. A pull request's is the
+// one its key names (domain.DeliverablePullRequestNodeID), the pull request
+// its entity is linked to, and its details only where the key names none:
+// details are the recording run's to fill, so a pull request read through
+// them could be another than the one the row is about.
+func prNodeID(a domain.Deliverable) string {
 	if a.Kind == domain.DeliverableKindReview {
 		d, _ := domain.ParseReviewDeliverableDetails(a.DetailsJSON)
 		return d.NodeID
+	}
+	if nodeID, ok := domain.DeliverablePullRequestNodeID(a); ok {
+		return nodeID
 	}
 	d, _ := domain.ParsePRDeliverableDetails(a.DetailsJSON)
 	return d.NodeID

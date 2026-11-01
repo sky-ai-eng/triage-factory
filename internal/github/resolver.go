@@ -188,6 +188,36 @@ func OrgIdentityAccount(ctx context.Context, resolver Resolver, orgID string) (O
 	return OrgIdentity{Name: name, Email: email}, ok
 }
 
+// BotAccount is the GitHub account an App acts as: its bot user's login,
+// "<slug>[bot]", and GitHub's numeric id for it in text, "" when the id is not
+// stored. An App's slug is unique on its GitHub and no user can hold a "[bot]"
+// login, so the login names the account even where the id is unknown.
+type BotAccount struct {
+	ID    string
+	Login string
+}
+
+// AppBotAccountResolver is the optional extension of Resolver, implemented by
+// the production resolver, that reports the bot account the org's App
+// credential acts as: the App the org's tokens are minted from, through the
+// same App-XOR-PAT gate ClientFor and TokenFor resolve through. ok is false
+// when the org's credential is not an App and when the resolution fails.
+// Unlike OrgIdentityAccountResolver it never answers with a commit signer's or
+// a PAT owner's account, either of which is a person's.
+type AppBotAccountResolver interface {
+	AppBotAccountFor(ctx context.Context, orgID string) (BotAccount, bool)
+}
+
+// AppBotAccount is the org's App bot account through AppBotAccountResolver,
+// and ok=false when resolver does not implement it.
+func AppBotAccount(ctx context.Context, resolver Resolver, orgID string) (BotAccount, bool) {
+	ar, ok := resolver.(AppBotAccountResolver)
+	if !ok {
+		return BotAccount{}, false
+	}
+	return ar.AppBotAccountFor(ctx, orgID)
+}
+
 // AccountClientResolver is the optional extension of Resolver, implemented by
 // the production resolver, for a caller that knows the account it acts on by
 // GitHub's numeric account id as well as by login: one holding a repository's
@@ -1185,6 +1215,25 @@ func (r *resolver) BaseURLFor(ctx context.Context, orgID string) (string, error)
 func (r *resolver) OrgIdentityFor(ctx context.Context, orgID string) (name, email string, ok bool) {
 	id, ok := r.OrgIdentityAccountFor(ctx, orgID)
 	return id.Name, id.Email, ok
+}
+
+// AppBotAccountFor is the bot account of the App activeApp resolves for the
+// org, which every installation token it mints acts as. See
+// AppBotAccountResolver.
+func (r *resolver) AppBotAccountFor(ctx context.Context, orgID string) (BotAccount, bool) {
+	class, host, err := r.credentialClassFor(ctx, orgID)
+	if err != nil || !class.Known() {
+		return BotAccount{}, false
+	}
+	app, err := r.activeApp(ctx, orgID, class, host)
+	if err != nil || !app.present() || app.slug() == "" {
+		return BotAccount{}, false
+	}
+	out := BotAccount{Login: app.slug() + domain.GitHubBotLoginSuffix}
+	if id := app.botUserID(); id != 0 {
+		out.ID = strconv.FormatInt(id, 10)
+	}
+	return out, true
 }
 
 // OrgIdentityAccountFor is OrgIdentityFor with the account id of the identity

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -45,7 +46,7 @@ const pgDeliverableColumns = `
 	id, COALESCE(conversation_id::text, ''), org_id, team_id, provider, kind, scope, target,
 	COALESCE(external_id, ''), COALESCE(url, ''), COALESCE(node_id, ''),
 	COALESCE(entity_id::text, ''),
-	state, dedup_key, COALESCE(details_json, ''), created_at, updated_at
+	state, dedup_key, COALESCE(details_json, ''), created_at, updated_at, verification
 `
 
 // pgDeliverableNonTerminalPredicate is the SQL WHERE fragment selecting the
@@ -96,19 +97,23 @@ func (s *deliverableStore) insertIfAbsent(ctx context.Context, q queryer, orgID 
 	if err := db.RequireDeliverableKind(a.Kind); err != nil {
 		return false, err
 	}
+	verification, err := db.DeliverableVerificationOrDefault(a.Kind, a.Verification)
+	if err != nil {
+		return false, err
+	}
 	res, err := q.ExecContext(ctx, `
 		INSERT INTO deliverables
 			(id, conversation_id, org_id, team_id, provider, kind, target,
 			 external_id, url, state, dedup_key, details_json, updated_at, scope,
-			 node_id, entity_id)
+			 node_id, entity_id, verification)
 		VALUES (COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()),
 		        NULLIF($2, '')::uuid, $3, $4, $5, $6, $7,
 		        NULLIF($8, ''), NULLIF($9, ''), $10, $11, NULLIF($12, ''), now(), $13,
-		        NULLIF($14, ''), NULLIF($15, '')::uuid)
+		        NULLIF($14, ''), NULLIF($15, '')::uuid, $16)
 		ON CONFLICT (org_id, scope, dedup_key) DO NOTHING`,
 		a.ID, a.ConversationID, orgID, a.TeamID, a.Provider, a.Kind, a.Target,
 		a.ExternalID, a.URL, a.State, a.DedupKey, a.DetailsJSON, a.Scope,
-		a.NodeID, a.EntityID,
+		a.NodeID, a.EntityID, verification,
 	)
 	if err != nil {
 		return false, err
@@ -125,6 +130,10 @@ func (s *deliverableStore) upsert(ctx context.Context, q queryer, orgID string, 
 		return domain.Deliverable{}, err
 	}
 	if err := db.RequireDeliverableKind(a.Kind); err != nil {
+		return domain.Deliverable{}, err
+	}
+	verification, err := db.DeliverableVerificationOrDefault(a.Kind, a.Verification)
+	if err != nil {
 		return domain.Deliverable{}, err
 	}
 	// ON CONFLICT(org_id, scope, dedup_key) updates the documented mutable
@@ -157,15 +166,18 @@ func (s *deliverableStore) upsert(ctx context.Context, q queryer, orgID string, 
 	// reassign either. Letting team_id follow the last writer while
 	// conversation_id stayed pinned to the first would desync the two and
 	// mis-scope the deliverable out of its owning team's reads.
+	//
+	// verification is inserted and never updated here: a row is settled only
+	// through SettleVerificationSystem.
 	row := q.QueryRowContext(ctx, `
 		INSERT INTO deliverables
 			(id, conversation_id, org_id, team_id, provider, kind, target,
 			 external_id, url, state, dedup_key, details_json, updated_at, scope,
-			 node_id, entity_id)
+			 node_id, entity_id, verification)
 		VALUES (COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()),
 		        NULLIF($2, '')::uuid, $3, $4, $5, $6, $7,
 		        NULLIF($8, ''), NULLIF($9, ''), $10, $11, NULLIF($12, ''), now(), $13,
-		        NULLIF($14, ''), NULLIF($15, '')::uuid)
+		        NULLIF($14, ''), NULLIF($15, '')::uuid, $16)
 		ON CONFLICT (org_id, scope, dedup_key) DO UPDATE SET
 			conversation_id       = deliverables.conversation_id,
 			team_id      = deliverables.team_id,
@@ -180,7 +192,7 @@ func (s *deliverableStore) upsert(ctx context.Context, q queryer, orgID string, 
 		RETURNING `+pgDeliverableColumns,
 		a.ID, a.ConversationID, orgID, a.TeamID, a.Provider, a.Kind, a.Target,
 		a.ExternalID, a.URL, a.State, a.DedupKey, a.DetailsJSON, a.Scope,
-		a.NodeID, a.EntityID,
+		a.NodeID, a.EntityID, verification,
 	)
 	var out domain.Deliverable
 	if err := scanDeliverable(row, &out); err != nil {
@@ -489,6 +501,33 @@ func (s *deliverableStore) ListNonTerminalBySystem(ctx context.Context, orgID st
 	return scanDeliverableRows(rows)
 }
 
+func (s *deliverableStore) SettleVerificationSystem(ctx context.Context, orgID, id, verdict, detailsJSON string) (bool, error) {
+	if err := db.RequireSettledVerification(verdict); err != nil {
+		return false, err
+	}
+	if _, err := uuid.Parse(id); err != nil {
+		return false, nil
+	}
+	res, err := s.admin.ExecContext(ctx, `
+		UPDATE deliverables
+		SET verification = $1,
+		    state        = CASE WHEN $1 = $2 AND state IN ($9, $10) THEN $3 ELSE state END,
+		    details_json = COALESCE(NULLIF($4, ''), details_json),
+		    updated_at   = now()
+		WHERE org_id = $5 AND id = $6 AND kind = $7 AND verification = $8
+	`, verdict, domain.DeliverableVerificationForeign, domain.DeliverableStatePRClosed, detailsJSON,
+		orgID, id, domain.DeliverableKindPullRequest, domain.DeliverableVerificationPending,
+		domain.DeliverableStatePRDraft, domain.DeliverableStatePROpen)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
 // --- Helpers ---
 
 func scanDeliverableRows(rows *sql.Rows) ([]domain.Deliverable, error) {
@@ -510,6 +549,6 @@ func scanDeliverable(sc rowScanner, a *domain.Deliverable) error {
 	return sc.Scan(
 		&a.ID, &a.ConversationID, &a.OrgID, &a.TeamID, &a.Provider, &a.Kind, &a.Scope, &a.Target,
 		&a.ExternalID, &a.URL, &a.NodeID, &a.EntityID,
-		&a.State, &a.DedupKey, &a.DetailsJSON, &a.CreatedAt, &a.UpdatedAt,
+		&a.State, &a.DedupKey, &a.DetailsJSON, &a.CreatedAt, &a.UpdatedAt, &a.Verification,
 	)
 }

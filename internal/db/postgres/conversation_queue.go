@@ -1899,6 +1899,23 @@ func (s *conversationQueueStore) ClaimByIDSystem(ctx context.Context, claimID st
 	return &out[0], nil
 }
 
+func (s *conversationQueueStore) ClaimsForConversationSystem(ctx context.Context, orgID, conversationID string) ([]domain.ExecutorClaim, error) {
+	// A non-uuid id names no conversation, as ClaimByIDSystem answers a
+	// non-uuid claim id: none, rather than a 22P02 from the bind.
+	if _, err := uuid.Parse(conversationID); err != nil {
+		return nil, nil
+	}
+	rows, err := s.conn.QueryContext(ctx, executorClaimCols+`
+		WHERE c.org_id = $1 AND c.conversation_id = $2
+		ORDER BY c.claimed_at, c.id
+	`, orgID, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanExecutorClaims(rows)
+}
+
 func scanExecutorClaims(rows *sql.Rows) ([]domain.ExecutorClaim, error) {
 	var out []domain.ExecutorClaim
 	for rows.Next() {

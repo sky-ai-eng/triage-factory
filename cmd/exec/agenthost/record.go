@@ -121,7 +121,10 @@ var errFunnelDeliverable = errors.New("agenthost: the recording funnel records o
 // request as a draft or open, so a deliverable in any other state was not
 // built by one; and the row's id is the store's to mint, as it is for every
 // other insert. Anything but a GitHub pull request keyed on its node id, as a
-// draft or open, is refused with errFunnelDeliverable.
+// draft or open, is refused with errFunnelDeliverable. The row is admitted
+// pending (domain.DeliverableVerificationPending): it is the recording run's
+// word, which nothing that applies a relayed record can check, so it is acted
+// on through TF only once the reconciler has settled it from GitHub's answer.
 func keyFunnelDeliverable(a *domain.Deliverable) error {
 	if a.Kind != domain.DeliverableKindPullRequest {
 		return errFunnelDeliverable
@@ -135,6 +138,7 @@ func keyFunnelDeliverable(a *domain.Deliverable) error {
 	}
 	a.ID = ""
 	a.DedupKey, a.NodeID = domain.PullRequestDedupKey(nodeID), nodeID
+	a.Verification = domain.DeliverableVerificationPending
 	return nil
 }
 
@@ -193,6 +197,12 @@ func recordActionAlone(ctx context.Context, stores db.Stores, info ConversationI
 // write that carries no external action. The caller is responsible for
 // setting a.Provider before calling — this function only stamps the
 // run-identity fields common to every provider.
+//
+// It changes no org-wide entity beyond linking it. A relayed create is the
+// sidecar's word, and nothing on this side can confirm the run opened the pull
+// request it names, so its deliverable is recorded pending, and the pull
+// request's owner and commissioner are the deliverable reconciler's to stamp
+// when it settles the row from GitHub's answer (internal/reconcile).
 //
 // Best-effort throughout: every write here already happened against the
 // external system (GitHub/Jira/Slack) before this is called, so a recording
@@ -290,9 +300,7 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 	// written by an insert that does nothing when the row is there: GitHub
 	// opens one pull request per node id, and a replay of the same create finds
 	// its own row, so a create that finds a row recorded by another writer
-	// leaves it as it was. written is whether an attempt's insert returned
-	// without error; whose row the key holds is read once the write settles.
-	var written bool
+	// leaves it as it was.
 	if err == nil {
 		var deliverableErr error
 		err = withRecordRetry(ctx, func() error {
@@ -304,7 +312,6 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 							deliverableErr = e
 							return e
 						}
-						written = true
 					}
 					return recordActionSystemInfo(ctx, stores, info, act)
 				},
@@ -315,7 +322,6 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 							deliverableErr = e
 							return e
 						}
-						written = true
 					}
 					return recordActionTx(ctx, ts, info.OrgID, act)
 				},
@@ -347,38 +353,6 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 	}
 	// Link the conversation to the act's entity outside the audit write.
 	recordActionMemoryLink(ctx, stores, info, act, about)
-	// Same placement, same reason: an admin-pool write, so it must run after
-	// withWriteInfo's tx has settled. A create attributes only a pull request
-	// whose deliverable the run holds: one that found the row recorded by
-	// another writer did not open it.
-	//
-	// TODO(TFAC-1302): a relayed create is the sidecar's word, and nothing on
-	// this side can confirm the run opened the pull request it names, so one
-	// naming a pull request no row holds yet is attributed to this run.
-	if written && runHoldsDeliverable(ctx, stores, info, *a) {
-		stampPRAttribution(ctx, stores, info, a)
-	}
-}
-
-// runHoldsDeliverable reports whether the run's own deliverables hold a row
-// under a's scope and key. It is read after the write settled, so no attempt
-// that did not land — a rolled-back transaction, a retry, a lost
-// acknowledgement — decides the answer. A read failure answers false:
-// attribution is best-effort, and is stamped only for a row known to be the
-// run's.
-func runHoldsDeliverable(ctx context.Context, stores db.Stores, info ConversationInfo, a domain.Deliverable) bool {
-	rows, err := stores.Deliverables.ListByConversationSystem(ctx, info.OrgID, info.ConversationID)
-	if err != nil {
-		agenthostLog.Warn("reading the run's deliverables failed; attributing nothing to the pull request",
-			"conversation", info.ConversationID, "target", a.Target, "error", err)
-		return false
-	}
-	for _, r := range rows {
-		if r.Scope == a.Scope && r.DedupKey == a.DedupKey {
-			return true
-		}
-	}
-	return false
 }
 
 // --- touched-entity resolution (TFAC-513 §2) ---
@@ -912,84 +886,6 @@ func actionMemoryRole(act domain.ExternalAction) string {
 		return domain.MemoryRoleProduced
 	}
 	return domain.MemoryRoleTouched
-}
-
-// --- attribution stamps for a bot-opened PR ---
-
-// stampPRAttribution records, on the entity behind a PR the bot just opened,
-// the two facts only the run knows: the team that commissioned it
-// (owning_team_id) and the human who asked for it
-// (commissioned_by_user_id).
-//
-// The gap they fill is the same one twice. The author of a PR TF opened is a
-// bot that maps to no TF user, so neither routing's owner nor the personal
-// list's "mine" can be derived from the object itself — the run that opened it
-// carries both answers, and this is the only moment the run and the entity are
-// in the same place. Left unstamped, the PR's first ci_check_failed finds no
-// owner and mints a task for nobody unless the repo happens to be
-// project-attached, and the person who pressed delegate never sees the pull
-// request their own ask produced.
-//
-// The two columns are written together and mean different things: the team is
-// the structural OWNER routing reads, the user is PROVENANCE — who asked —
-// and is never read as a second owner. Each is independently guarded, so a run
-// with a team and no human (an event-triggered one) stamps only the owner.
-//
-// Scoped to kind=pull_request deliberately. A submitted-review deliverable shares
-// the owner/repo#N target shape, and reviewing someone else's PR is the clearest
-// case of touching an entity you must not come to own.
-//
-// Ordering against the poller does not matter. The entity is the one the
-// deliverable was linked to (resolveDeliverableEntity), which resolves the pull
-// request by its node id and its key as the tracker does, so it is either the
-// row the poller already created or the stub the poller later enriches; the
-// stamp itself is if-NULL, so neither ordering can overwrite an owner set
-// deliberately elsewhere.
-//
-// Best-effort, like everything else downstream of an already-applied write: the
-// PR is open on GitHub regardless, and a failure here costs routing precision on
-// that PR, never the run. It is not retried — the entity is durable and the
-// event that would need the owner has not arrived yet, but nothing re-derives
-// the stamp later either, so a failure means that PR's events fall through to
-// the router's remaining tiers for good. A pull request deliverable whose entity
-// did not resolve has nothing to stamp.
-func stampPRAttribution(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Deliverable) {
-	if a == nil || a.Provider != domain.ProviderGitHub || a.Kind != domain.DeliverableKindPullRequest {
-		return
-	}
-	// Defensive: auto-fire is gated on an owned task and deliverables.team_id is
-	// NOT NULL, so a conversation without a team should not reach here. A run
-	// with neither a team nor a creator has nothing to attribute.
-	if (info.TeamID == "" && info.UserID == "") || stores.Entities == nil {
-		return
-	}
-	entityID := a.EntityID
-	if entityID == "" {
-		return
-	}
-	stamped, err := stores.Entities.StampOwningTeamIfUnsetSystem(ctx, info.OrgID, entityID, info.TeamID)
-	if err != nil {
-		agenthostLog.Warn("owning-team stamp failed",
-			"conversation", info.ConversationID, "entity", entityID, "target", a.Target, "error", err)
-	} else if stamped {
-		agenthostLog.Info("stamped owning team on bot-opened PR",
-			"conversation", info.ConversationID, "entity", entityID, "target", a.Target, "team", info.TeamID)
-	}
-	// info.UserID is conversations.creator_user_id — the accountable asker, not
-	// whoever drove the turn that ran the create. Empty for an event-triggered
-	// run, where the stamp is correctly a no-op. A failure here is independent
-	// of the one above: neither column is worth losing because the other's
-	// write failed.
-	stamped, err = stores.Entities.StampCommissionedByIfUnsetSystem(ctx, info.OrgID, entityID, info.UserID)
-	if err != nil {
-		agenthostLog.Warn("commissioned-by stamp failed",
-			"conversation", info.ConversationID, "entity", entityID, "target", a.Target, "error", err)
-		return
-	}
-	if stamped {
-		agenthostLog.Info("stamped commissioning user on bot-opened PR",
-			"conversation", info.ConversationID, "entity", entityID, "target", a.Target, "user", info.UserID)
-	}
 }
 
 // loadEntityMemory is the host side of `exec memory load`: it looks up the

@@ -73,8 +73,35 @@ type Deliverable struct {
 	// serializes to SQL NULL.
 	DetailsJSON string `json:"details_json,omitempty"`
 
+	// Verification is whether the recording run is known to have opened the
+	// pull request (the DeliverableVerification* consts). Only a verified row
+	// is acted on through TF (Actionable).
+	Verification string `json:"verification"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// The closed vocabulary of Deliverable.Verification.
+const (
+	// DeliverableVerificationPending is a pull request create's row until the
+	// reconciler settles it. The create is recorded on the word of whoever
+	// relayed it, which in multi mode is the run's sidecar, so nothing has
+	// yet confirmed the run opened the pull request it names.
+	DeliverableVerificationPending = "pending"
+	// DeliverableVerificationVerified is a row TF acts on: a pull request
+	// GitHub's answer shows the run opened, and every row of any other writer.
+	DeliverableVerificationVerified = "verified"
+	// DeliverableVerificationForeign is a pull request GitHub's answer shows
+	// the run did not open. Settling a row foreign also closes it, and TF
+	// never acts on it again.
+	DeliverableVerificationForeign = "foreign"
+)
+
+// Actionable reports whether a person's action on a may write to GitHub under
+// TF's credential: only a verified row's object is known to be the run's.
+func (a Deliverable) Actionable() bool {
+	return a.Verification == DeliverableVerificationVerified
 }
 
 // Provider discriminators, shared by deliverables (always github) and the

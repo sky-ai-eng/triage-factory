@@ -1550,6 +1550,12 @@ func (d userTeardownDeps) Batch(ctx context.Context, orgID string, fn func(deliv
 
 func (d userTeardownDeps) GitHub() ghclient.Resolver { return d.s.ghResolver }
 
+func (d userTeardownDeps) SettlePullRequest(ctx context.Context, orgID string, a domain.Deliverable) {
+	if d.s.reconciler != nil {
+		d.s.reconciler.SettleDeliverable(ctx, orgID, a)
+	}
+}
+
 // txTeardownStores binds the teardown's store surface to one transaction.
 type txTeardownStores struct{ tx db.TxStores }
 

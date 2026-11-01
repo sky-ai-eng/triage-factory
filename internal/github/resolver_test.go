@@ -1085,6 +1085,54 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 	})
 }
 
+// TestResolver_AppBotAccountFor pins whose account the App credential
+// reports: the bot of the App the org mints from, with its id where stored,
+// and nothing for an org whose tokens come from anything else, however its
+// commit identity resolves.
+func TestResolver_AppBotAccountFor(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		apps   *fakeApps
+		agents *fakeAgents
+		want   BotAccount
+		wantOK bool
+	}{
+		{
+			name:   "active App reports its bot",
+			apps:   &fakeApps{app: &domain.OrgGitHubApp{OrgID: "org-1", Active: true, Slug: "acme-bot", BotUserID: 41898282}},
+			agents: &fakeAgents{},
+			want:   BotAccount{ID: "41898282", Login: "acme-bot[bot]"}, wantOK: true,
+		},
+		{
+			name:   "active App with no stored bot user id reports the login alone",
+			apps:   &fakeApps{app: &domain.OrgGitHubApp{OrgID: "org-1", Active: true, Slug: "acme-bot"}},
+			agents: &fakeAgents{},
+			want:   BotAccount{Login: "acme-bot[bot]"}, wantOK: true,
+		},
+		{
+			name:   "staged App mints nothing, so reports none",
+			apps:   &fakeApps{app: &domain.OrgGitHubApp{OrgID: "org-1", Active: false, Slug: "acme-bot", BotUserID: 41898282}},
+			agents: &fakeAgents{agent: &domain.Agent{GitHubOrgLogin: "octocat", GitHubOrgUserID: "583231", GitHubOrgEmail: "octocat@example.com"}},
+		},
+		{
+			name:   "PAT owner is a person, not reported",
+			apps:   &fakeApps{app: nil},
+			agents: &fakeAgents{agent: &domain.Agent{GitHubOrgLogin: "octocat", GitHubOrgUserID: "583231", GitHubOrgEmail: "octocat@example.com"}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A live PAT beside every App, so the PAT tier is there to resolve
+			// and only the App's own answer is reported.
+			secrets := &fakeSecrets{vals: map[string]string{integrations.KeyGitHubPAT: "ghp_test"}}
+			r := newTestResolver(secrets, tc.apps, &fakeOrgs{base: "https://github.com"}, tc.agents, nil)
+			got, ok := AppBotAccount(context.Background(), r, "org-1")
+			if got != tc.want || ok != tc.wantOK {
+				t.Errorf("AppBotAccount = (%+v, %v), want (%+v, %v)", got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
+
 // TestResolver_TokenForRepoScoped_AppXorPAT pins the scoped path's App-XOR-PAT
 // contract: an active App is the credential (scoped mint or error, never the
 // PAT, even when one is present); only a no-App org uses the PAT (unscoped).

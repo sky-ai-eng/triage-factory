@@ -948,6 +948,16 @@ type ConversationQueueStore interface {
 	// history). Same cross-org operator-surface posture as
 	// RecentClaimsForExecutorSystem.
 	ClaimByIDSystem(ctx context.Context, claimID string) (*domain.ExecutorClaim, error)
+
+	// ClaimsForConversationSystem returns every engagement of one of orgID's
+	// conversations, live and released, in the same projection, oldest
+	// claimed first with an id tiebreaker. The reconciler reads it to find
+	// the engagement that was live when a pull request was opened and the
+	// GitHub account sealed into it (domain.SourceEntry.AccountID). Unbounded
+	// by design: one conversation's engagements are its attempts, parks and
+	// resumes, a handful each. Admin pool, org bound by argument; an unknown
+	// conversation answers with none.
+	ClaimsForConversationSystem(ctx context.Context, orgID, conversationID string) ([]domain.ExecutorClaim, error)
 }
 
 // OrgQueueShare is one org's conversation-queue occupancy from FleetQueueShares — the

@@ -47,9 +47,15 @@ func WrapSystemNote(body string) string {
 //   - review       → submitted : approved, submitted to GitHub
 //   - review       → dismissed : dismissed, discarded unsubmitted
 //
+// A pull request settled foreign gets no note: no person resolved it, and its
+// run did not open it.
+//
 // The note is bare (no <system-note> wrapper) — callers wrap it: the live path
 // wraps one note, the ledger path wraps the joined block.
 func DeliverableResolutionNote(a Deliverable) string {
+	if a.Verification == DeliverableVerificationForeign {
+		return ""
+	}
 	switch a.Kind {
 	case DeliverableKindPullRequest:
 		ref := prResolutionRef(a)
