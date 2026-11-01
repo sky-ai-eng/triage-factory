@@ -1,8 +1,8 @@
 # Alerting rules for TF's connections to the systems it connects to (GitHub,
 # Jira, Slack's Web API, and the LLM providers), read from
-# tf_upstream_requests_total, tf_upstream_up, tf_conversations_deferred and
-# tf_upstream_rate_limit_near_limit. Loaded by the bundled Prometheus through
-# the rule_files glob in prometheus.yml.
+# tf_upstream_requests_total, tf_upstream_up, tf_conversations_deferred,
+# tf_upstream_rate_limit_near_limit and tf_github_scope_drift_repos. Loaded by
+# the bundled Prometheus through the rule_files glob in prometheus.yml.
 #
 # Every critical alert in this file is fleet-wide on purpose. Each org connects with
 # its own credentials, and often to its own host: a GitHub Enterprise Server
@@ -16,9 +16,10 @@
 # orgs with the number of orgs it has a value for, and never looks at one org:
 # it needs at least two orgs before it can fire, so a single-org deployment
 # gets no page from either and reads the dashboard's "Orgs with failing
-# requests" and "Orgs down" panels instead. Two warnings, not pages, can fire
-# on one org's reading: ConversationsDeferred, and JiraDeploymentAppQuotaLow,
-# whose quota belongs to the deployment rather than to the org.
+# requests" and "Orgs down" panels instead. Three warnings, not pages, can
+# fire on one org's reading: ConversationsDeferred, GitHubScopeDrift, and
+# JiraDeploymentAppQuotaLow, whose quota belongs to the deployment rather than
+# to the org.
 #
 # Delivery is not configured in this repo. The bundled stack runs no
 # Alertmanager and prometheus.yml has no `alerting:` block, so a firing alert
@@ -153,6 +154,43 @@ groups:
             for what the providers and GitHub's API are answering. A clone or
             fetch that could not reach the git host is not a request counted
             there; the executor's log line for the hand-back names it.
+
+      # A team in an org tracks a repository that the org's GitHub App grant
+      # does not contain, so the poll skips it: its pull requests produce no
+      # events, tasks or runs. The count is the one the org's GitHub access
+      # settings list, read from the grant mirror each GitHub poll cycle
+      # refreshes, so it trails GitHub by at most a poll interval and a
+      # minute. Only an org with an App and a selective grant has a series: a
+      # token holds no grant, a grant of every repository cannot be drifted
+      # out of, and one of unknown width is not reported.
+      #
+      # A warning, not a page: the fault is one org's configuration, which the
+      # org's admin fixes on GitHub, and nothing an operator does changes it.
+      # The hour keeps it from firing while someone is still editing the grant
+      # or the tracked set.
+      #
+      # The gauge is exported by the one pod holding the background brain.
+      # When the lease moves, the series moves to another pod and is missing
+      # for a minute or two while the new holder takes its first reading, so
+      # the rule reads each org's maximum over 5 minutes across pods, which
+      # carries the hour over the handoff.
+      - alert: GitHubScopeDrift
+        expr: max by (org_id) (max_over_time(tf_github_scope_drift_repos[5m])) > 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Org {{ $labels.org_id }} tracks repositories outside its GitHub App grant"
+          description: >-
+            For an hour, teams in org {{ $labels.org_id }} have tracked
+            repositories that the org's GitHub App grant does not contain,
+            {{ $value }} in the last 5 minutes. Triage Factory does not poll
+            them, so their pull requests produce no tasks or runs. An admin of
+            the org fixes it: add the repositories to the App's installation
+            on GitHub (installing the App on their account if it has none
+            there), or untrack them. The org's GitHub access settings
+            (Organization → Settings → GitHub access) list them, with a link
+            to each installation's settings page on GitHub.
 
       # The deployment's Atlassian app (TF_ATLASSIAN_CLIENT_ID) is near its
       # hourly Jira quota. On Atlassian's default tier (Tier 1) the app has one
