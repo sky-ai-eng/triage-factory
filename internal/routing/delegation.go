@@ -347,10 +347,10 @@ func (r *Router) enqueueBusyFiring(ctx context.Context, orgID, entityID string, 
 //
 // The one fall-through is StageOrDeliverAdditiveEvent reporting
 // InjectNotDelivered — dropped outright (no live process anywhere, and the
-// durable append itself failed), or durably staged onto a conversation
-// that's since gone fully terminal (a staged row only flushes on the
-// conversation's next resume, so one that can never resume would silently
-// lose it). Neither case has a durable row to fall back on, so this
+// durable append itself failed), or staged onto a conversation nothing will
+// read it from (a staged row is read only by a native conversation's running
+// loop or by the conversation's next resume, so one with neither would
+// silently lose it). Neither case has a durable row to fall back on, so this
 // defers.
 //
 // InjectDeliveredRemote is distinct from the other "handled" outcomes: a

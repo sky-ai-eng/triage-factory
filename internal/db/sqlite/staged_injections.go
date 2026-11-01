@@ -5,15 +5,15 @@ import (
 	"database/sql"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // stagedInjectionStore is the SQLite impl of db.StagedInjectionStore, backed
-// by undelivered messages rows (role='user',
-// subtype='injection:system-note') rather than a side table — one transcript
-// canon. SQLite is single-tenant (local mode, N=1) with no RLS — org_id
+// by undelivered messages rows (role='user', subtype 'injection:event' or
+// 'injection:system-note') rather than a side table — one transcript canon. SQLite is single-tenant (local mode, N=1) with no RLS — org_id
 // exists for parity with the Postgres baseline and every caller passes
 // LocalDefaultOrgID (asserted at each entry). The `...System` method names
 // mirror the interface; in SQLite there's one connection, so System is
@@ -24,13 +24,11 @@ func newStagedInjectionStore(q queryer) db.StagedInjectionStore { return &staged
 
 var _ db.StagedInjectionStore = (*stagedInjectionStore)(nil)
 
-// stagedInjectionSubtype discriminates the staged-note rows from every other
-// undelivered user message (the resume pending-input row keeps subtype
-// 'text').
-const stagedInjectionSubtype = "injection:system-note"
-
 func (s *stagedInjectionStore) AppendSystem(ctx context.Context, orgID string, n domain.StagedInjection) (domain.StagedInjection, error) {
 	if err := assertLocalOrg(orgID); err != nil {
+		return domain.StagedInjection{}, err
+	}
+	if err := db.RequireStagedInjectionSubtype(n.Subtype); err != nil {
 		return domain.StagedInjection{}, err
 	}
 	meta, err := db.StagedInjectionMetadata(n)
@@ -48,9 +46,9 @@ func (s *stagedInjectionStore) AppendSystem(ctx context.Context, orgID string, n
 	if err := s.q.QueryRowContext(ctx, `
 		INSERT INTO messages (org_id, conversation_id, role, content, subtype, metadata, delivered)
 		VALUES (?, ?, 'user', ?, ?, ?, 0)
-		RETURNING id, org_id, conversation_id, content, user_id, metadata, created_at
-	`, orgID, n.ConversationID, n.Body, stagedInjectionSubtype, meta).Scan(
-		&r.ID, &r.OrgID, &r.ConvID, &r.Content, &userID, &metadata, &r.CreatedAt,
+		RETURNING id, org_id, conversation_id, content, subtype, user_id, metadata, created_at
+	`, orgID, n.ConversationID, n.Body, n.Subtype, meta).Scan(
+		&r.ID, &r.OrgID, &r.ConvID, &r.Content, &r.Subtype, &userID, &metadata, &r.CreatedAt,
 	); err != nil {
 		return domain.StagedInjection{}, err
 	}
@@ -62,10 +60,10 @@ func (s *stagedInjectionStore) FlushPendingSystem(ctx context.Context, orgID, co
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	// The shared flush primitive, narrowed to this store's subtype: one
+	// The shared flush primitive, narrowed to this store's subtypes: one
 	// definition of "consume a conversation's pending rows" serves every
 	// producer.
-	flushed, err := flushPendingInput(ctx, s.q, orgID, conversationID, stagedInjectionSubtype)
+	flushed, err := flushPendingInput(ctx, s.q, orgID, conversationID, db.StagedInjectionSubtypes)
 	if err != nil {
 		return nil, err
 	}
@@ -93,10 +91,15 @@ func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id strin
 	// keeps it out of the flush, assembly, and the display reads. The
 	// delivered = 0 guard keeps this from retiring an already-flushed row a
 	// racing resume just consumed.
+	args := []any{orgID, rowID}
+	for _, st := range db.StagedInjectionSubtypes {
+		args = append(args, st)
+	}
 	_, err = s.q.ExecContext(ctx, `
 		UPDATE messages SET window_state = 'inactive'
-		WHERE org_id = ? AND id = ? AND subtype = ? AND delivered = 0
-	`, orgID, rowID, stagedInjectionSubtype)
+		WHERE org_id = ? AND id = ? AND delivered = 0
+		  AND subtype IN (`+strings.TrimRight(strings.Repeat("?, ", len(db.StagedInjectionSubtypes)), ", ")+`)
+	`, args...)
 	return err
 }
 

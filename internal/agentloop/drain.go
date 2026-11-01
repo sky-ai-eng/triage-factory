@@ -71,15 +71,26 @@ func IsHumanInput(r domain.Message) bool {
 	return r.Subtype == "" || r.Subtype == domain.MessageSubtypeInjectionSteer
 }
 
-// hasPending reports whether any undelivered row is waiting — the would-stop
-// recheck, which catches input that landed while the concluding turn was
-// still streaming.
+// hasPending reports whether an undelivered row that must be read before
+// the run ends is waiting — the would-stop recheck, which catches input that
+// landed while the concluding turn was still streaming.
+//
+// Two kinds of row qualify: a person's input, and a new-event injection,
+// which carries an event the router handed to this conversation in place of
+// a run. Every other pending row, a PR note included, is information: it is
+// read if the loop makes another model call anyway, and otherwise it stays
+// queued for the next resume rather than extending a finishing run.
 func (e *Engine) hasPending(ctx context.Context, params Params) (bool, error) {
 	rows, err := e.Transcript.ListForAssembly(ctx, params.OrgID, params.ConversationID)
 	if err != nil {
 		return false, err
 	}
-	return len(pendingInOrder(rows)) > 0, nil
+	for _, r := range pendingInOrder(rows) {
+		if IsHumanInput(r) || r.Subtype == domain.MessageSubtypeInjectionEvent {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // pendingInOrder returns the undelivered rows in assembly order

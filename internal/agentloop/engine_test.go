@@ -103,6 +103,63 @@ func TestRun_DrainAfterNoToolCallTurnIsBare(t *testing.T) {
 	}
 }
 
+// TestRun_LateRecheckContinuesOnlyForAnEventInjection: a new-event injection
+// that lands while the concluding turn streams is work the agent was handed,
+// so it keeps the run going as a person's message does. Any other staged note
+// landing at the same point is information: the run concludes and the note
+// stays pending for the next resume.
+func TestRun_LateRecheckContinuesOnlyForAnEventInjection(t *testing.T) {
+	for _, tc := range []struct {
+		subtype      string
+		wantContinue bool
+	}{
+		{domain.MessageSubtypeInjectionEvent, true},
+		{domain.MessageSubtypeInjectionSystemNote, false},
+	} {
+		t.Run(tc.subtype, func(t *testing.T) {
+			tr := newMemTranscript(pendingUser("opening"))
+			p := &scriptedProvider{turns: []scriptedTurn{
+				{
+					text: "I think I'm done",
+					onCall: func() {
+						_, _ = tr.Insert(context.Background(), "org", &domain.Message{
+							ConversationID: "conv", Role: "user", Subtype: tc.subtype,
+							Content: "the note", Delivered: boolPtr(false),
+						})
+					},
+				},
+				{text: "read the note"},
+			}}
+			e := newTestEngine(tr, p, newScriptedToolHost())
+
+			got := e.Run(context.Background(), testParams())
+			if got.Kind != ResultConcluded {
+				t.Fatalf("disposition = %v, want concluded (err: %v)", got.Kind, got.Err)
+			}
+			note := tr.find(func(m domain.Message) bool { return m.Content == "the note" })
+			if note == nil {
+				t.Fatal("the note row is missing")
+			}
+			delivered := note.Delivered != nil && *note.Delivered
+			if tc.wantContinue {
+				if got.ResultSummary != "read the note" || p.calls != 2 {
+					t.Errorf("an event injection pending at the would-stop recheck must continue the run: summary %q after %d calls", got.ResultSummary, p.calls)
+				}
+				if !delivered {
+					t.Error("the continued run must read the event injection")
+				}
+				return
+			}
+			if got.ResultSummary != "I think I'm done" || p.calls != 1 {
+				t.Errorf("a staged note must not extend a finishing run: summary %q after %d calls", got.ResultSummary, p.calls)
+			}
+			if delivered {
+				t.Error("a note the run did not read must stay pending for the next resume")
+			}
+		})
+	}
+}
+
 func TestRun_RepairAnswersUnansweredToolCallsWithoutRedispatch(t *testing.T) {
 	// A crash left an assistant message whose two tool calls were only half
 	// answered — the exact partial-batch shape the repair pass diffs.

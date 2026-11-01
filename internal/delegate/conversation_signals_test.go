@@ -113,6 +113,38 @@ func (f *fakeConversationSignalStore) findUnacked(t *testing.T, target string) d
 	return domain.ConversationSignal{}
 }
 
+// count reports how many signals were ever written, acked or not.
+func (f *fakeConversationSignalStore) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.signals)
+}
+
+// wireLiveRemoteOwner gives conversationID an active claim held by a live
+// remote executor and wires conversation signals, so a signal for it would
+// resolve an owner and be written. Returns the signal store to assert on.
+func wireLiveRemoteOwner(t *testing.T, s *Spawner, database *sql.DB, conversationID string) *fakeConversationSignalStore {
+	t.Helper()
+	dbtest.SeedActiveClaim(t, database, conversationID, "executor-2", 0)
+	s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
+		"executor-2": {ID: "executor-2", LastHeartbeatAt: time.Now()},
+	}}
+	signals := newFakeConversationSignalStore()
+	s.SetConversationSignals(signals, nil)
+	if _, ok := s.resolveLiveOwner(context.Background(), runmode.LocalDefaultOrgID, conversationID); !ok {
+		t.Fatalf("precondition: conversation %s must have a live remote owner", conversationID)
+	}
+	return signals
+}
+
+// setConversationRuntime stamps the conversation's engine.
+func setConversationRuntime(t *testing.T, database *sql.DB, conversationID, runtime string) {
+	t.Helper()
+	if _, err := database.Exec(`UPDATE conversations SET runtime = ? WHERE id = ?`, runtime, conversationID); err != nil {
+		t.Fatalf("set runtime: %v", err)
+	}
+}
+
 // fakeInstanceStore is an in-memory db.InstanceStore for liveness tests.
 type fakeInstanceStore struct {
 	mu    sync.Mutex
@@ -478,9 +510,9 @@ func TestResolvePermission_LocalProcOwnedButRequestStaleNeverGoesRemote(t *testi
 	}
 }
 
-// TestStageOrDeliverAdditiveEvent_RemoteLiveSignals: no local process, but a
-// live remote owner exists -> InjectDeliveredRemote, fire-and-forget (never
-// waited on).
+// TestStageOrDeliverAdditiveEvent_RemoteLiveSignals: an SDK conversation with
+// no local process but a live remote owner -> InjectDeliveredRemote,
+// fire-and-forget (never waited on).
 func TestStageOrDeliverAdditiveEvent_RemoteLiveSignals(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-inj", "sess", "/tmp/wt")
@@ -555,7 +587,7 @@ func TestStageOrDeliverAdditiveEvent_TerminalRunNotDelivered(t *testing.T) {
 	if err := database.QueryRow(`
 		SELECT COUNT(*) FROM messages
 		WHERE conversation_id = ? AND delivered = 0 AND window_state = 'active'
-		  AND subtype = 'injection:system-note'
+		  AND subtype = 'injection:event'
 	`, "r-inj3").Scan(&flushable); err != nil {
 		t.Fatalf("count flushable staged injection messages: %v", err)
 	}
@@ -566,7 +598,7 @@ func TestStageOrDeliverAdditiveEvent_TerminalRunNotDelivered(t *testing.T) {
 	if err := database.QueryRow(`
 		SELECT COUNT(*) FROM messages
 		WHERE conversation_id = ? AND delivered = 0 AND window_state = 'inactive'
-		  AND subtype = 'injection:system-note'
+		  AND subtype = 'injection:event'
 	`, "r-inj3").Scan(&withdrawn); err != nil {
 		t.Fatalf("count withdrawn staged injection messages: %v", err)
 	}
@@ -578,9 +610,87 @@ func TestStageOrDeliverAdditiveEvent_TerminalRunNotDelivered(t *testing.T) {
 		t.Fatalf("Messages: %v", err)
 	}
 	for _, m := range msgs {
-		if m.Subtype == "injection:system-note" {
+		if m.Subtype == domain.MessageSubtypeInjectionEvent {
 			t.Errorf("withdrawn staged injection renders in the display read: %+v", m)
 		}
+	}
+}
+
+// TestStageOrDeliverAdditiveEvent_RunningNativeStagesEventWithoutSignal: a
+// native conversation has no process to steer, and its owning executor would
+// answer an inject signal as gone. The new-event injection is staged as an
+// injection:event row for the loop to read instead, even though a live remote
+// owner is resolvable, and nothing compensates with a pending firing.
+// InjectStagedResumable is the outcome the router records injected on.
+func TestStageOrDeliverAdditiveEvent_RunningNativeStagesEventWithoutSignal(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "r-native", "sess", "/tmp/wt")
+	setConversationRuntime(t, database, "r-native", domain.ConversationRuntimeNative)
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	signals := wireLiveRemoteOwner(t, s, database, "r-native")
+
+	prov := domain.NoteProvenance{EventID: "ev-native", EventType: domain.EventGitHubPRCICheckFailed}
+	outcome := s.StageOrDeliverAdditiveEvent(context.Background(), runmode.LocalDefaultOrgID, "r-native",
+		domain.EventGitHubPRCICheckFailed, "CI failed", prov, AdditiveFiringRef{
+			EntityID: "e1", TaskID: "t1", TriggerID: "tr1", TriggeringEventID: "ev-native",
+		})
+	if outcome != InjectStagedResumable {
+		t.Fatalf("outcome = %v, want InjectStagedResumable", outcome)
+	}
+	if n := signals.count(); n != 0 {
+		t.Errorf("wrote %d conversation signal(s) for a native conversation, want 0", n)
+	}
+	staged, err := s.stagedInjections.FlushPendingSystem(context.Background(), runmode.LocalDefaultOrgID, "r-native")
+	if err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	if len(staged) != 1 || staged[0].Subtype != domain.MessageSubtypeInjectionEvent || staged[0].Body != "CI failed" || staged[0].Provenance != prov {
+		t.Fatalf("staged = %+v, want one injection:event row carrying the body and provenance", staged)
+	}
+	var firings int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM pending_firings`).Scan(&firings); err != nil {
+		t.Fatalf("count pending firings: %v", err)
+	}
+	if firings != 0 {
+		t.Errorf("pending_firings holds %d row(s), want 0", firings)
+	}
+}
+
+// TestStageOrDeliverAdditiveEvent_FinishedNativeNotDelivered: a native
+// conversation whose step finished has no loop running and no resume coming
+// to read the row, so the staged row is withdrawn and the caller defers the
+// firing instead.
+func TestStageOrDeliverAdditiveEvent_FinishedNativeNotDelivered(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "r-native-done", "sess", "/tmp/wt")
+	setConversationRuntime(t, database, "r-native-done", domain.ConversationRuntimeNative)
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	signals := wireLiveRemoteOwner(t, s, database, "r-native-done")
+	// The conclusion releases the claim in the same transaction as the
+	// verdict, so the executor stays live but no longer owns the conversation.
+	if _, err := database.Exec(`UPDATE claims SET released_at = CURRENT_TIMESTAMP WHERE conversation_id = 'r-native-done'`); err != nil {
+		t.Fatalf("release claim: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome = 'finish' WHERE id = 'r-native-done'`); err != nil {
+		t.Fatalf("conclude conversation: %v", err)
+	}
+
+	outcome := s.StageOrDeliverAdditiveEvent(context.Background(), runmode.LocalDefaultOrgID, "r-native-done",
+		domain.EventGitHubPRCICheckFailed, "CI failed", domain.NoteProvenance{}, AdditiveFiringRef{
+			EntityID: "e1", TaskID: "t1", TriggerID: "tr1", TriggeringEventID: "ev1",
+		})
+	if outcome != InjectNotDelivered {
+		t.Fatalf("outcome = %v, want InjectNotDelivered", outcome)
+	}
+	if n := signals.count(); n != 0 {
+		t.Errorf("wrote %d conversation signal(s) for a native conversation, want 0", n)
+	}
+	staged, err := s.stagedInjections.FlushPendingSystem(context.Background(), runmode.LocalDefaultOrgID, "r-native-done")
+	if err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	if len(staged) != 0 {
+		t.Errorf("staged = %+v, want no row left for a finished conversation", staged)
 	}
 }
 
@@ -778,9 +888,9 @@ func TestStageOrDeliverAdditiveEvent_RemoteSignalCarriesProvenance(t *testing.T)
 	}}
 	s.SetConversationSignals(fakeSignals, nil)
 
-	want := domain.NoteProvenance{EventID: "ev-remote", EventType: domain.EventGitHubPRNewCommits}
+	want := domain.NoteProvenance{EventID: "ev-remote", EventType: domain.EventGitHubPRCICheckFailed}
 	if outcome := s.StageOrDeliverAdditiveEvent(context.Background(), runmode.LocalDefaultOrgID, "r-prov",
-		domain.StagedInjectionProducerPRCoherence, "body", want, AdditiveFiringRef{}); outcome != InjectDeliveredRemote {
+		domain.EventGitHubPRCICheckFailed, "body", want, AdditiveFiringRef{}); outcome != InjectDeliveredRemote {
 		t.Fatalf("outcome = %v, want InjectDeliveredRemote", outcome)
 	}
 

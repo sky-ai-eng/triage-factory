@@ -631,9 +631,10 @@ type ConversationStore interface {
 	// "injection:new-sandbox", "injection:nudge",
 	// "injection:output-limit", "injection:compaction-request",
 	// "injection:compaction-result", "injection:memory",
-	// "injection:task-context" and "stop-note" — plus two values owned where
-	// they are written, the staged-injection stores' "injection:system-note"
-	// and the deliverable feedback row's "system_note".
+	// "injection:task-context", the staged notes' "injection:event" (a
+	// new-event injection) and "injection:system-note" (every other staged
+	// note), and "stop-note" — plus one value owned where it is written, the
+	// deliverable feedback row's "system_note".
 	//
 	// InsertMessage/InsertMessageSystem/Messages/MessagesForConversations below serve
 	// today's readers (the SDK runtime's live stream, the UI transcript

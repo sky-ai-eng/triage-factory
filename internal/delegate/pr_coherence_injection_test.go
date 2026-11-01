@@ -2,11 +2,9 @@ package delegate
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
@@ -128,31 +126,66 @@ func TestHandlePRCoherence_ParkedEntityConversationStagesAllEventKinds(t *testin
 	}
 }
 
-func TestHandlePRCoherence_LiveCIFixReceivesNewCommits(t *testing.T) {
+// TestHandlePRCoherence_LiveSDKProcessStagesWithoutSteer: a PR note is
+// information, so a conversation with a live SDK process gets it staged for
+// its next resume rather than steered into the turn it is running, and no
+// signal goes to the remote owner either.
+func TestHandlePRCoherence_LiveSDKProcessStagesWithoutSteer(t *testing.T) {
 	s, conversationID, taskID, source := coherenceFixture(t, domain.EventGitHubPRNewCommits, events.GitHubPRNewCommitsMetadata{
 		Repo: "o/r", PRNumber: 7, PrevHeadSHA: "old-head", HeadSHA: "new-head",
 	})
+	signals := wireLiveRemoteOwner(t, s, s.database, conversationID)
 	controller := &fakeController{}
 	s.controller = controller
 	s.registerProc(runmode.LocalDefaultOrgID, conversationID, &agentproc.LiveRun{})
 
 	s.HandlePRCoherence(coherenceDisposition(t, source, ""))
-	waitSteerCalls(t, controller, 1)
-	controller.mu.Lock()
-	steer := controller.steerText
-	controller.mu.Unlock()
-	if !strings.Contains(steer, "advanced") || !strings.Contains(steer, "Re-pull") {
-		t.Errorf("live coherence note is not actionable: %q", steer)
+
+	got := flushOne(t, s, conversationID)
+	if len(got) != 1 || got[0].Subtype != domain.MessageSubtypeInjectionSystemNote {
+		t.Fatalf("staged = %+v, want one injection:system-note row", got)
 	}
-	if got := flushOne(t, s, conversationID); len(got) != 0 {
-		t.Fatalf("live delivery also staged a note: %+v", got)
+	if !strings.Contains(got[0].Body, "advanced") || !strings.Contains(got[0].Body, "Re-pull") {
+		t.Errorf("staged coherence note is not actionable: %q", got[0].Body)
+	}
+	controller.mu.Lock()
+	steerCalls := controller.steerCalls
+	controller.mu.Unlock()
+	if steerCalls != 0 {
+		t.Errorf("a PR note was steered into the live process %d time(s), want 0", steerCalls)
+	}
+	if n := signals.count(); n != 0 {
+		t.Errorf("wrote %d conversation signal(s) for a PR note, want 0", n)
 	}
 	var n int
 	if err := s.database.QueryRow(`SELECT COUNT(*) FROM task_events WHERE task_id = ? AND event_id = ? AND kind = 'injected'`, taskID, source.ID).Scan(&n); err != nil {
 		t.Fatalf("count task_events: %v", err)
 	}
 	if n != 0 {
-		t.Fatalf("informational live delivery marked task_events injected: %d", n)
+		t.Fatalf("informational delivery marked task_events injected: %d", n)
+	}
+}
+
+// TestHandlePRCoherence_RunningNativeConversationStagesWithoutSignal: the
+// owning executor would answer an inject signal for a native conversation as
+// gone, so the note is staged for the loop to read before its next model call
+// instead, however live the remote owner is.
+func TestHandlePRCoherence_RunningNativeConversationStagesWithoutSignal(t *testing.T) {
+	s, conversationID, _, source := coherenceFixture(t, domain.EventGitHubPRCICheckFailed, events.GitHubPRCICheckFailedMetadata{
+		Repo: "o/r", PRNumber: 7, HeadSHA: "new-head", CheckName: "test",
+	})
+	setConversationStatus(t, s.database, conversationID, domain.StatusRunning)
+	setConversationRuntime(t, s.database, conversationID, domain.ConversationRuntimeNative)
+	signals := wireLiveRemoteOwner(t, s, s.database, conversationID)
+
+	s.HandlePRCoherence(coherenceDisposition(t, source, ""))
+
+	got := flushOne(t, s, conversationID)
+	if len(got) != 1 || got[0].Subtype != domain.MessageSubtypeInjectionSystemNote || !strings.Contains(got[0].Body, "CI check") {
+		t.Fatalf("staged = %+v, want one injection:system-note row carrying the CI note", got)
+	}
+	if n := signals.count(); n != 0 {
+		t.Errorf("wrote %d conversation signal(s) for a PR note, want 0", n)
 	}
 }
 
@@ -443,67 +476,22 @@ func TestHandlePRCoherence_ConflictsResolvedNote(t *testing.T) {
 }
 
 // TestHandlePRCoherence_RecordsProvenance: the note's message row names the
-// event it was composed from, on both the staged and the live path, so a
-// later reader can resolve a note back to its cause without parsing the body.
+// event it was composed from, so a later reader can resolve a note back to its
+// cause without parsing the body.
 func TestHandlePRCoherence_RecordsProvenance(t *testing.T) {
-	t.Run("Staged", func(t *testing.T) {
-		s, conversationID, _, source := coherenceFixture(t, domain.EventGitHubPRConflicts, events.GitHubPRConflictsMetadata{
-			Repo: "o/r", PRNumber: 7, HeadSHA: "new-head",
-		})
-		s.HandlePRCoherence(coherenceDisposition(t, source, ""))
-		got := flushOne(t, s, conversationID)
-		if len(got) != 1 {
-			t.Fatalf("note not staged: %+v", got)
-		}
-		if got[0].Provenance.EventID != source.ID || got[0].Provenance.EventType != domain.EventGitHubPRConflicts {
-			t.Errorf("staged provenance = %+v, want event %s / %s",
-				got[0].Provenance, source.ID, domain.EventGitHubPRConflicts)
-		}
-		if got[0].Producer != domain.StagedInjectionProducerPRCoherence {
-			t.Errorf("staged producer = %q", got[0].Producer)
-		}
+	s, conversationID, _, source := coherenceFixture(t, domain.EventGitHubPRConflicts, events.GitHubPRConflictsMetadata{
+		Repo: "o/r", PRNumber: 7, HeadSHA: "new-head",
 	})
-
-	t.Run("Live", func(t *testing.T) {
-		s, conversationID, _, source := coherenceFixture(t, domain.EventGitHubPRConflicts, events.GitHubPRConflictsMetadata{
-			Repo: "o/r", PRNumber: 7, HeadSHA: "new-head",
-		})
-		s.controller = &fakeController{}
-		s.registerProc(runmode.LocalDefaultOrgID, conversationID, &agentproc.LiveRun{})
-
-		s.HandlePRCoherence(coherenceDisposition(t, source, ""))
-		waitSteerCalls(t, s.controller.(*fakeController), 1)
-
-		metadata := waitForNoteMetadata(t, s, conversationID)
-		if metadata["event_id"] != source.ID || metadata["event_type"] != domain.EventGitHubPRConflicts {
-			t.Errorf("live provenance = %+v, want event %s / %s", metadata, source.ID, domain.EventGitHubPRConflicts)
-		}
-		if metadata["producer"] != domain.StagedInjectionProducerPRCoherence {
-			t.Errorf("live producer = %v", metadata["producer"])
-		}
-	})
-}
-
-// waitForNoteMetadata reads back the metadata of the live-injected system_note
-// row. The live path records it from a goroutine, so this polls rather than
-// assuming the write has landed.
-func waitForNoteMetadata(t *testing.T, s *Spawner, conversationID string) map[string]any {
-	t.Helper()
-	for range 100 {
-		var raw sql.NullString
-		err := s.database.QueryRow(`
-			SELECT metadata FROM messages
-			WHERE conversation_id = ? AND subtype = 'system_note'
-			ORDER BY id DESC LIMIT 1
-		`, conversationID).Scan(&raw)
-		if err == nil && raw.String != "" {
-			var out map[string]any
-			if json.Unmarshal([]byte(raw.String), &out) == nil {
-				return out
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
+	s.HandlePRCoherence(coherenceDisposition(t, source, ""))
+	got := flushOne(t, s, conversationID)
+	if len(got) != 1 {
+		t.Fatalf("note not staged: %+v", got)
 	}
-	t.Fatal("live system_note metadata never landed")
-	return nil
+	if got[0].Provenance.EventID != source.ID || got[0].Provenance.EventType != domain.EventGitHubPRConflicts {
+		t.Errorf("staged provenance = %+v, want event %s / %s",
+			got[0].Provenance, source.ID, domain.EventGitHubPRConflicts)
+	}
+	if got[0].Producer != domain.StagedInjectionProducerPRCoherence {
+		t.Errorf("staged producer = %q", got[0].Producer)
+	}
 }

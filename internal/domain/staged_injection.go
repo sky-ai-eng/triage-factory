@@ -19,12 +19,17 @@ import (
 // queue does not interpret either, so a new consumer adds a producer tag and a
 // body string without touching the store.
 type StagedInjection struct {
-	ID             string    `json:"id"`
-	OrgID          string    `json:"org_id"`
-	ConversationID string    `json:"conversation_id"`
-	Producer       string    `json:"producer"`
-	Body           string    `json:"body"`
-	CreatedAt      time.Time `json:"created_at"`
+	ID             string `json:"id"`
+	OrgID          string `json:"org_id"`
+	ConversationID string `json:"conversation_id"`
+	// Subtype is the message subtype the row is stored under, and says what
+	// the note is for: MessageSubtypeInjectionEvent for a new-event
+	// injection, MessageSubtypeInjectionSystemNote for every other note. The
+	// store refuses any other value.
+	Subtype   string    `json:"subtype"`
+	Producer  string    `json:"producer"`
+	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"created_at"`
 	// Provenance names the event this note was composed from, for a reader
 	// that wants to say why the agent was told something. Zero for a note
 	// with no originating event.
@@ -80,6 +85,12 @@ type PRCoherenceTarget struct {
 	Concluded      bool
 	Outcome        string
 	Active         bool
+}
+
+// IsStagedInjectionSubtype reports whether subtype is one a staged injection
+// may be stored under.
+func IsStagedInjectionSubtype(subtype string) bool {
+	return subtype == MessageSubtypeInjectionEvent || subtype == MessageSubtypeInjectionSystemNote
 }
 
 // StagedInjectionProducer* tag a staged injection's origin. Free-text (no DB CHECK) so a

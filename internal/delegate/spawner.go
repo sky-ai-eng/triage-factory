@@ -118,10 +118,9 @@ type Spawner struct {
 	// ledger: the turn-end nudge and the task context read it. Admin-pool
 	// System methods only.
 	artifacts db.ArtifactStore
-	// stagedInjections is the durable, producer-agnostic "stage for next
-	// resume" agent-injection queue. The generic staged-injection API
-	// (stageOrDeliverInjection / stagedInjectionsForResume) appends here
-	// when a target run has no warm process and flushes on the next resume.
+	// stagedInjections is the durable, producer-agnostic agent-injection
+	// queue. stageInjection appends here; a native loop reads the rows
+	// itself, and stagedInjectionsForResume flushes them on an SDK resume.
 	// Admin-pool System methods only — both the producer (an eventbus
 	// subscriber) and the consumer (a resume goroutine) run without JWT
 	// claims. Nil-safe (tests passing a partial db.Stores{}).

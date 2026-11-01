@@ -67,5 +67,5 @@ func (s *conversationPendingInputStore) Consume(ctx context.Context, orgID, conv
 	if err := assertLocalOrg(orgID); err != nil {
 		return "", "", false, err
 	}
-	return db.ConsumePendingInput(flushPendingInput(ctx, s.q, orgID, conversationID, ""))
+	return db.ConsumePendingInput(flushPendingInput(ctx, s.q, orgID, conversationID, []string{""}))
 }
