@@ -423,6 +423,8 @@ func countersDelta(before, after Counters) Counters {
 		Pulls304:    after.Pulls304 - before.Pulls304,
 		GraphQL:     after.GraphQL - before.GraphQL,
 		Teams:       after.Teams - before.Teams,
+		Refs:        after.Refs - before.Refs,
+		Refs304:     after.Refs304 - before.Refs304,
 		RateLimited: after.RateLimited - before.RateLimited,
 		Other:       after.Other - before.Other,
 	}

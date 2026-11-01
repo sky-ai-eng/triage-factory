@@ -175,3 +175,56 @@ func TestMigrate_PRMergeabilityBackfill_SQLite(t *testing.T) {
 		t.Errorf("event queue = %+v (err %v), want nothing", q, err)
 	}
 }
+
+// TestMigrate_MergeableBaseRefBackfill_SQLite: an answer stored before the
+// base was recorded takes the base its entity's snapshot names, so the
+// upgrade probes no pull request as retargeted, and a snapshot naming none
+// leaves the row with no base.
+func TestMigrate_MergeableBaseRefBackfill_SQLite(t *testing.T) {
+	ctx := context.Background()
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	conn.SetMaxOpenConns(1)
+	conn.SetMaxIdleConns(1)
+	const prior = 202610310009
+	if err := db.BootstrapSchemaAtForTest(conn, prior); err != nil {
+		t.Fatalf("schema at %d: %v", prior, err)
+	}
+	if err := db.SeedLocalTenantRows(ctx, conn); err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	stores := sqlitestore.New(conn)
+	org := runmode.LocalDefaultOrgID
+	seed := func(number string, snap map[string]any) *domain.Entity {
+		t.Helper()
+		e, _, err := stores.Entities.FindOrCreateSystem(ctx, org, "github", dbtest.TestGitHubHost,
+			"octo/base#"+number, "PR_base"+number, domain.EntityKindPullRequest, "t", "")
+		if err != nil {
+			t.Fatalf("seed entity: %v", err)
+		}
+		raw, _ := json.Marshal(snap)
+		if ok, err := stores.Entities.UpdateSnapshotCASSystem(ctx, org, e.ID, string(raw), e.PollSeq); err != nil || !ok {
+			t.Fatalf("seed snapshot: ok=%v err=%v", ok, err)
+		}
+		if _, err := conn.Exec(`INSERT INTO pull_request_mergeability (entity_id, mergeable, mergeable_head_sha, checked_at) VALUES (?, 'MERGEABLE', 'h', ?)`,
+			e.ID, time.Now().UTC()); err != nil {
+			t.Fatalf("seed answer: %v", err)
+		}
+		return e
+	}
+	onMain := seed("1", map[string]any{"number": 1, "head_sha": "h", "base_ref": "main"})
+	noBase := seed("2", map[string]any{"number": 2, "head_sha": "h"})
+
+	if err := db.Migrate(conn, "sqlite3"); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	for e, want := range map[*domain.Entity]string{onMain: "main", noBase: ""} {
+		row, err := stores.PRMergeability.GetSystem(ctx, org, e.ID)
+		if err != nil || row == nil || row.MergeableBaseRef != want || row.Mergeable != domain.MergeableMergeable {
+			t.Errorf("row of %s after the upgrade = %+v (err %v), want its answer kept against base %q", e.SourceID, row, err, want)
+		}
+	}
+}

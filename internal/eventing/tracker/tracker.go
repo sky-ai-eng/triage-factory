@@ -343,6 +343,16 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 	// their stored snapshot through the Phase-2 gate without a refresh.
 	discovery, discoveryErr := t.discoverGitHub(ctx, scope, client, self.Login, repos)
 	discovered, quietRepos, lastListed := discovery.prs, discovery.quiet, discovery.lastListed
+	// listedOK is the set of registry row ids whose open-PR listing answered
+	// 200 this cycle: a merged pull request leaves the listing, so these are
+	// the repositories whose base branches the watch checks at once.
+	listedOK := map[string]bool{}
+	for _, c := range discovery.cursors {
+		if !quietRepos[c.repositoryID] {
+			listedOK[c.repositoryID] = true
+		}
+	}
+	watch := baseWatchScope{passRepos: discovery.passRepos, listedOK: listedOK}
 	var rateLimited *ghclient.ErrRateLimited
 	if discoveryErr != nil {
 		if errors.As(discoveryErr, &rateLimited) {
@@ -643,7 +653,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 			terminalItems = append(terminalItems, item)
 			continue
 		}
-		open = append(open, mergeabilityCandidate{entity: e, nodeID: snap.NodeID})
+		open = append(open, mergeabilityCandidate{entity: e, nodeID: snap.NodeID, snap: snap})
 		// Open path: gate against discovery's fresh snapshot if we have one.
 		// Entities not in this cycle's discovery (rare — e.g. a PR you've
 		// stopped being a reviewer on) fall through to refresh, which is the
@@ -732,6 +742,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		// default 30s+ poll cadence and carries no actionable signal;
 		// liveness is reported independently via /readyz.
 		trackerLog.Debug("github refresh: no-op cycle", "discovered", len(discovered), "entities", len(entities), "skipped", skippedOpen)
+		t.watchBaseBranches(ctx, client, orgID, open, watch, discoveredByNodeID, nil)
 		t.admitMergeabilityProbes(ctx, orgID, open, discoveredByNodeID, nil)
 		if len(entities) > 0 {
 			t.EmitPollComplete(ctx, "github", startedAt, len(entities), 0)
@@ -817,6 +828,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 	// No network here — snapshot comparison plus the entity writes each
 	// transition implies. A cycle slow in this phase and fast in the one
 	// before it is a database problem, not a GitHub one.
+	cycleCtx := ctx
 	ctx, diffSpan := tracer.Start(ctx, "tracker.github.diff_emit")
 
 	eventsEmitted := 0
@@ -921,7 +933,8 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 	diffSpan.SetAttributes(telemetry.Count(eventsEmitted))
 	diffSpan.End()
 
-	t.admitMergeabilityProbes(ctx, orgID, open, discoveredByNodeID, refreshed)
+	t.watchBaseBranches(cycleCtx, client, orgID, open, watch, discoveredByNodeID, refreshed)
+	t.admitMergeabilityProbes(cycleCtx, orgID, open, discoveredByNodeID, refreshed)
 
 	// Info only when the cycle actually produced something (an emitted
 	// event) — a cycle that fetched fresh state but found no transitions is
@@ -939,22 +952,34 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 	return eventsEmitted, "", nil
 }
 
-// mergeabilityCandidate is one open pull request a cycle knows: its entity
-// and the node id its snapshots are keyed by.
+// mergeabilityCandidate is one open pull request a cycle knows: its entity,
+// the node id its snapshots are keyed by, and its stored snapshot, which is
+// zero for a snapshot-less entity being seeded this cycle.
 type mergeabilityCandidate struct {
 	entity domain.Entity
 	nodeID string
+	snap   domain.PRSnapshot
 }
 
 // admitMergeabilityProbes admits a mergeability probe for every open pull
 // request whose mergeability can have changed since its stored answer was
 // read, and deletes the stored answers of entities no longer active:
 //
-//   - new: the pull request has no row;
+//   - new: the pull request's mergeability was never read: it has no row, or
+//     only the one the branch watch wrote its changed paths to;
 //   - head_moved: its current head is not the one its row was last read at.
 //     The current head is the refresh's when this cycle refreshed it, and the
 //     open-PR listing's otherwise. A repository whose listing answered 304
 //     has unchanged heads and gives none, so it admits nothing on this rule;
+//   - base_changed: its current base branch, taken the same way, is not the
+//     one its row was last read against: it was retargeted. A row that
+//     records no base admits nothing on this rule;
+//   - base_moved or base_reset: its row owes a base branch move the branch
+//     watch recorded, earlier in this cycle or before it, that no read since
+//     has settled;
+//   - unknown_retry: GitHub answered UNKNOWN on every retry of its last round
+//     of reads, longer ago than giveUpRecheck allows for the give-ups in a
+//     row its row counts;
 //   - sweep: its row was last read longer than mergeabilitySweepInterval ago.
 //
 // The reasons are tried in that order and a pull request is admitted once. A
@@ -990,22 +1015,28 @@ func (t *Tracker) admitMergeabilityProbes(ctx context.Context, orgID string, ope
 		if c.entity.ExternalID == "" {
 			continue
 		}
-		var head string
+		var head, base string
 		if snap, ok := refreshed[c.nodeID]; ok {
 			if prSnapshotTerminal(snap) {
 				continue
 			}
-			head = snap.HeadSHA
+			head, base = snap.HeadSHA, snap.BaseRef
 		} else if snap, ok := listed[c.nodeID]; ok {
-			head = snap.HeadSHA
+			head, base = snap.HeadSHA, snap.BaseRef
 		}
 		row, ok := answers[c.entity.ID]
 		var reason string
 		switch {
-		case !ok:
+		case !ok || (row.Mergeable == "" && row.CheckedAt == nil):
 			reason = domain.MergeabilityProbeNew
 		case head != "" && head != row.MergeableHeadSHA:
 			reason = domain.MergeabilityProbeHeadMoved
+		case base != "" && row.MergeableBaseRef != "" && base != row.MergeableBaseRef:
+			reason = domain.MergeabilityProbeBaseChanged
+		case row.BaseMoveReason != "":
+			reason = row.BaseMoveReason
+		case row.GiveUps > 0 && row.CheckedAt != nil && now.Sub(*row.CheckedAt) > giveUpRecheck(row.GiveUps):
+			reason = domain.MergeabilityProbeUnknownRetry
 		case row.CheckedAt == nil || now.Sub(*row.CheckedAt) > mergeabilitySweepInterval:
 			reason = domain.MergeabilityProbeSweep
 		default:
@@ -1016,6 +1047,9 @@ func (t *Tracker) admitMergeabilityProbes(ctx context.Context, orgID string, ope
 	if len(probes) == 0 {
 		return
 	}
+	// A probe that collapses into one a worker is reading needs nothing
+	// more: every reason here is decided again from the stored row next
+	// cycle, so a read that predates its cause is followed by another.
 	admitted, err := t.mergeability.AdmitSystem(ctx, orgID, probes)
 	if err != nil {
 		trackerLog.WarnContext(ctx, "mergeability: admitting probes failed; the next cycle decides them again", "probes", len(probes), "error", err)
@@ -1230,6 +1264,12 @@ func (t *Tracker) discoverGitHub(ctx context.Context, scope string, client *ghcl
 	lastListed := map[string]time.Time{}
 	var cursors []pullsCursor
 	trackedIDs := t.trackedRepositoryIDs(ctx, scope)
+	passRepos := make(map[string]bool, len(repos))
+	for _, name := range repos {
+		if id := trackedIDs[strings.ToLower(name)]; id != "" {
+			passRepos[id] = true
+		}
+	}
 
 	// Phase 1a: per-repo conditional open-PR enumeration, fanned out across a
 	// bounded worker pool (TFAC-570) sized by repoConcurrency() — default 4,
@@ -1455,7 +1495,7 @@ func (t *Tracker) discoverGitHub(ctx context.Context, scope string, client *ghcl
 		span.SetStatus(codes.Error, "every listing failed")
 		span.SetAttributes(telemetry.Outcome("failed"))
 	}
-	return githubDiscovery{prs: all, quiet: quiet, lastListed: lastListed, cursors: cursors, resumeFrom: resumeFrom}, discoveryErr
+	return githubDiscovery{prs: all, quiet: quiet, lastListed: lastListed, cursors: cursors, resumeFrom: resumeFrom, passRepos: passRepos}, discoveryErr
 }
 
 // githubDiscovery is what discoverGitHub found.
@@ -1484,6 +1524,10 @@ type githubDiscovery struct {
 	// itself rate-limited) when ErrRateLimited cut the cycle short. It's only
 	// ever non-empty alongside a non-nil error.
 	resumeFrom string
+	// passRepos is the set of registry row ids of the repositories this
+	// discovery was handed: the ones its client is for. The poller hands each
+	// App installation's pass its own.
+	passRepos map[string]bool
 }
 
 // discoveredPR is a pull request discovery found, with the registry row id of

@@ -872,7 +872,7 @@ func addReviewRequest(snap *domain.PRSnapshot, handle string, id int64) {
 // else so GitHub's cost for it is the nodes lookup alone.
 const prMergeabilityQuery = `
 	query PRMergeability($ids: [ID!]!) {
-		nodes(ids: $ids) { ... on PullRequest { id mergeable headRefOid } }
+		nodes(ids: $ids) { ... on PullRequest { id mergeable headRefOid baseRefName } }
 		rateLimit { cost }
 	}
 `
@@ -880,14 +880,16 @@ const prMergeabilityQuery = `
 // MaxMergeabilityBatch is how many pull requests one PRMergeability query
 // reads: GitHub's limit on nodes(ids:). The refresh documents stay at
 // refreshBatchSize because their fragments are heavy; this one asks for
-// three fields.
+// four fields.
 const MaxMergeabilityBatch = 100
 
 // MergeabilityRead is one pull request's mergeability as GitHub answered it:
-// MERGEABLE, CONFLICTING or UNKNOWN, and the head (headRefOid) at the read.
+// MERGEABLE, CONFLICTING or UNKNOWN, and the head (headRefOid) and base
+// branch (baseRefName) at the read.
 type MergeabilityRead struct {
 	Mergeable string
 	HeadSHA   string
+	BaseRef   string
 }
 
 // PRMergeability reads the mergeability of up to MaxMergeabilityBatch pull
@@ -912,9 +914,10 @@ func (c *Client) PRMergeability(ctx context.Context, nodeIDs []string) (map[stri
 	var resp struct {
 		Data struct {
 			Nodes []*struct {
-				ID         string `json:"id"`
-				Mergeable  string `json:"mergeable"`
-				HeadRefOid string `json:"headRefOid"`
+				ID          string `json:"id"`
+				Mergeable   string `json:"mergeable"`
+				HeadRefOid  string `json:"headRefOid"`
+				BaseRefName string `json:"baseRefName"`
 			} `json:"nodes"`
 		} `json:"data"`
 	}
@@ -932,7 +935,7 @@ func (c *Client) PRMergeability(ctx context.Context, nodeIDs []string) (map[stri
 		if mergeable != domain.MergeableMergeable && mergeable != domain.MergeableConflicting {
 			mergeable = domain.MergeableUnknown
 		}
-		out[n.ID] = MergeabilityRead{Mergeable: mergeable, HeadSHA: n.HeadRefOid}
+		out[n.ID] = MergeabilityRead{Mergeable: mergeable, HeadSHA: n.HeadRefOid, BaseRef: n.BaseRefName}
 	}
 	return out, nil
 }

@@ -122,7 +122,7 @@ func newRig(t *testing.T) *rig {
 		}
 		nodes := make([]map[string]string, len(body.Variables.IDs))
 		for i, id := range body.Variables.IDs {
-			nodes[i] = map[string]string{"id": id, "mergeable": answer, "headRefOid": "head-" + id}
+			nodes[i] = map[string]string{"id": id, "mergeable": answer, "headRefOid": "head-" + id, "baseRefName": "main"}
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"nodes": nodes, "rateLimit": map[string]int{"cost": 1}}})
 	}))
@@ -229,6 +229,10 @@ func TestWorker_ANewPullRequestThatConflictsEmitsConflictsOnce(t *testing.T) {
 	var meta events.GitHubPRConflictsMetadata
 	if err := json.Unmarshal([]byte(evts[0].MetadataJSON), &meta); err != nil || meta.HeadSHA != "head-PR_1" || meta.Author != "aidan" || meta.RepositoryID != pr.RepositoryID {
 		t.Errorf("metadata = %+v (err %v), want the read's head and the snapshot's author", meta, err)
+	}
+	if row, err := r.stores.PRMergeability.GetSystem(context.Background(), runmode.LocalDefaultOrgID, pr.ID); err != nil || row == nil ||
+		row.MergeableHeadSHA != "head-PR_1" || row.MergeableBaseRef != "main" {
+		t.Errorf("row = %+v (err %v), want the answer recorded at the read's head and base", row, err)
 	}
 
 	r.admit(pr.ID, domain.MergeabilityProbeSweep)

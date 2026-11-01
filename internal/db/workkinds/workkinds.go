@@ -276,8 +276,8 @@ const (
 // PRMergeabilityProbeDelay before it is probed; the wait also collapses a
 // burst of admissions for one pull request into one probe. An UNKNOWN answer
 // is read again PRMergeabilityUnknownRetryDelay later, at most
-// PRMergeabilityMaxUnknownReads times, after which the sweep reaches the pull
-// request.
+// PRMergeabilityMaxUnknownReads times, after which the round gives up and the
+// poll starts a fresh one a while later.
 const (
 	PRMergeabilityProbeDelay        = 15 * time.Second
 	PRMergeabilityUnknownRetryDelay = 30 * time.Second
@@ -298,7 +298,7 @@ const PRMergeabilityMaxFailedReads = 5
 // PRMergeabilityProbes is the queue of pull requests whose mergeability is due
 // to be read, as a work kind: one row per (pull request, admission) whose
 // read has not completed. The probe worker is its only consumer and the only
-// writer of pull_request_mergeability.
+// writer of pull_request_mergeability's answer columns.
 //
 // SingleTx: a probe's effect is the pull_request_mergeability row and the
 // conflict events its transition implies, which the completion's closure

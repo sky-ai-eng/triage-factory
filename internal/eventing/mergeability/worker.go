@@ -1,5 +1,6 @@
 // Package mergeability is the probe worker: the only reader of a pull
-// request's mergeability and the only writer of pull_request_mergeability.
+// request's mergeability and the only writer of the answer columns of
+// pull_request_mergeability.
 //
 // The poll admits probes onto pr_mergeability_probes (a work kind under
 // internal/db/workitem, workkinds.PRMergeabilityProbes) when a pull request's
@@ -358,7 +359,7 @@ func (w *Worker) read(ctx context.Context, orgID string, g *credentialBatch) {
 		if found {
 			recordAnswer(read.Mergeable)
 		}
-		w.complete(ctx, item, db.PRMergeabilityAnswer{Found: found, Mergeable: read.Mergeable, HeadSHA: read.HeadSHA}, traceparent)
+		w.complete(ctx, item, db.PRMergeabilityAnswer{Found: found, Mergeable: read.Mergeable, HeadSHA: read.HeadSHA, BaseRef: read.BaseRef}, traceparent)
 	}
 }
 
@@ -434,7 +435,7 @@ func (w *Worker) complete(ctx context.Context, item db.ClaimedPRMergeabilityProb
 	switch res.Outcome {
 	case db.PRMergeabilityGaveUp:
 		recordUnknownGiveUp()
-		log.InfoContext(termCtx, "mergeability probes: GitHub answered UNKNOWN on every retry; the sweep reads the pull request later",
+		log.InfoContext(termCtx, "mergeability probes: GitHub answered UNKNOWN on every retry; the poll starts a fresh round of reads later",
 			"entity_id", item.EntityID)
 	case db.PRMergeabilityRecorded:
 		if item.Reason == domain.MergeabilityProbeSweep && res.Previous != "" && res.Row != nil && res.Previous != res.Row.Mergeable {

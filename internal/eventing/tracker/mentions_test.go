@@ -411,6 +411,8 @@ func openedPRServer(t *testing.T, listings ...[]string) *httptest.Server {
 		case strings.HasSuffix(r.URL.Path, "/repos/octo/repo/pulls"):
 			_, _ = w.Write([]byte("[" + strings.Join(listings[min(n, len(listings)-1)], ",") + "]"))
 			n++
+		case isBranchRefRead(r):
+			http.NotFound(w, r)
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			http.Error(w, "unexpected", http.StatusNotFound)

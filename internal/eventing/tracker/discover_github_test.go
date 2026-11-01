@@ -77,6 +77,8 @@ func TestRefreshGitHub_RESTDiscovery_SeedsEntityAndConditionalSkips(t *testing.T
 			}
 			w.Header().Set("ETag", `"etag-1"`)
 			_, _ = w.Write([]byte(openPRBody))
+		case isBranchRefRead(r):
+			http.NotFound(w, r)
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			http.Error(w, "unexpected", http.StatusNotFound)

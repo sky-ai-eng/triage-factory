@@ -47,6 +47,8 @@ func seedBackfillServer(t *testing.T, reviewers ...string) *httptest.Server {
 				"head": {"sha": "sha1", "ref": "feat"}, "base": {"ref": "main"},
 				"created_at": "2026-06-01T00:00:00Z", "updated_at": "2026-06-01T00:00:00Z"
 			}]`))
+		case isBranchRefRead(r):
+			http.NotFound(w, r)
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			http.Error(w, "unexpected", http.StatusNotFound)

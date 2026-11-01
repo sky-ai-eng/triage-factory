@@ -41,6 +41,8 @@ type Counters struct {
 	Pulls304    int // GET /pulls page 1, served 304 (ETag hit)
 	GraphQL     int // POST /graphql served 200
 	Teams       int // GET /orgs/{owner}/teams
+	Refs        int // GET /git/ref/heads/{branch}, served 200
+	Refs304     int // GET /git/ref/heads/{branch}, served 304 (ETag hit)
 	RateLimited int // requests refused with the exhausted-budget 403
 	Other       int // anything the poll path shouldn't touch (bug tripwire)
 }
@@ -48,8 +50,9 @@ type Counters struct {
 // Server is the fake GitHub API. It serves exactly the surface the tracker's
 // cold-start path touches — the REST open-PR listing (with ETag conditional
 // support and >100-PR pagination), the GraphQL nodes(ids:) batch refresh,
-// and the org-teams listing the per-cycle group reconcile reads — plus
-// primary-rate-limit headers and exhaustion 403s when configured.
+// the org-teams listing the per-cycle group reconcile reads, and the base
+// branches' refs the branch watch reads, each at a tip that never moves —
+// plus primary-rate-limit headers and exhaustion 403s when configured.
 type Server struct {
 	ds  *Dataset
 	cfg ServerConfig
@@ -115,6 +118,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleGraphQL(w, r)
 	case strings.HasPrefix(path, "/api/v3/repos/") && strings.HasSuffix(path, "/pulls"):
 		s.handlePulls(w, r)
+	case strings.HasPrefix(path, "/api/v3/repos/") && strings.Contains(path, "/git/ref/heads/"):
+		s.handleRef(w, r)
 	case strings.HasPrefix(path, "/api/v3/orgs/") && strings.HasSuffix(path, "/teams"):
 		if !s.charge(w) {
 			return
@@ -287,6 +292,53 @@ func restPRJSON(repo Repo, pr PR) map[string]any {
 	}
 }
 
+// --- REST: branch refs -------------------------------------------------------
+
+// handleRef serves a branch's tip, a fixed sha per repository and branch, with
+// an ETag; a matching If-None-Match is a free 304, as on GitHub.
+func (s *Server) handleRef(w http.ResponseWriter, r *http.Request) {
+	// /api/v3/repos/{owner}/{repo}/git/ref/heads/{branch}
+	rest := strings.TrimPrefix(r.URL.Path, "/api/v3/repos/")
+	repoPath, branch, _ := strings.Cut(rest, "/git/ref/heads/")
+	parts := strings.Split(repoPath, "/")
+	if len(parts) != 2 || branch == "" {
+		s.mu.Lock()
+		s.counters.Other++
+		s.mu.Unlock()
+		http.Error(w, `{"message":"bad ref path"}`, http.StatusNotFound)
+		return
+	}
+	if _, ok := s.repoIdx[parts[1]]; !ok {
+		s.mu.Lock()
+		s.counters.Other++
+		s.mu.Unlock()
+		http.Error(w, `{"message":"unknown repo"}`, http.StatusNotFound)
+		return
+	}
+	sha := fmt.Sprintf("%040x", len(parts[1])*1000+len(branch))
+	etag := fmt.Sprintf(`W/"ref-%s-%s"`, parts[1], branch)
+	if r.Header.Get("If-None-Match") == etag {
+		s.mu.Lock()
+		s.counters.Refs304++
+		s.mu.Unlock()
+		s.rlHeadersFree(w)
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	if !s.charge(w) {
+		return
+	}
+	s.mu.Lock()
+	s.counters.Refs++
+	s.mu.Unlock()
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ref":    "refs/heads/" + branch,
+		"object": map[string]string{"sha": sha, "type": "commit"},
+	})
+}
+
 // --- REST: org teams ---------------------------------------------------------
 
 // handleTeams serves the org-teams listing the per-cycle GitHub-group
@@ -342,7 +394,7 @@ func (s *Server) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 		repo := s.ds.Repos[loc[0]]
 		pr := repo.PRs[loc[1]]
 		if mergeability {
-			nodes = append(nodes, map[string]any{"id": pr.NodeID, "mergeable": pr.Mergeable, "headRefOid": pr.HeadSHA})
+			nodes = append(nodes, map[string]any{"id": pr.NodeID, "mergeable": pr.Mergeable, "headRefOid": pr.HeadSHA, "baseRefName": pr.BaseRef})
 			continue
 		}
 		nodes = append(nodes, gqlPRJSON(repo, pr))
