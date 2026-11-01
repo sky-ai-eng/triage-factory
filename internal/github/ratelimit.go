@@ -306,7 +306,9 @@ func (c *Client) doStream(ctx context.Context, hc *http.Client, build reqBuilder
 //
 // Any response that isn't retried is returned to the caller along with its
 // body, already read — whole for a success, capped at upstream.MaxErrorBody
-// for an error — so a success is counted only once its body has arrived. The
+// for an error — so a success is counted only once its body has arrived. A
+// success is a 2xx or a 304 (succeeded); any other 3xx is a redirect the
+// client did not follow, returned like an error and counted Rejected. The
 // response's own Body is spent (http.NoBody). A streamed request (stream) is
 // the exception: its success comes back with the body unread, no bytes, and
 // the attempt not yet counted, and streamedBody counts it when the caller's
@@ -370,14 +372,14 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent, s
 			servedBy = resp.Request.URL.Host
 		}
 
-		if stream && resp.StatusCode < 400 {
+		if stream && succeeded(resp.StatusCode) {
 			resp.Body = &streamedBody{ReadCloser: resp.Body, ctx: ctx, orgID: c.orgID, host: servedBy}
 			return resp, nil, nil
 		}
 
 		var data []byte
 		var readErr error
-		if resp.StatusCode < 400 {
+		if succeeded(resp.StatusCode) {
 			data, readErr = io.ReadAll(resp.Body)
 		} else {
 			data, readErr = upstream.ReadErrorBody(resp.Body)
@@ -415,14 +417,14 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent, s
 			continue
 		}
 
-		if resp.StatusCode < 400 {
+		if succeeded(resp.StatusCode) {
 			upstream.Record(ctx, upstream.GitHub, c.orgID, upstream.OK)
 			return resp, data, nil
 		}
 
 		retryAfter, hasRetryAfter := upstream.RetryAfter(resp.Header)
 		primaryReset, primaryExhausted := primaryBudgetExhausted(resp.Header)
-		class := upstream.ClassifyResponse(resp.StatusCode, resp.Header, data)
+		class := classifyResponse(resp.StatusCode, resp.Header, data)
 		if resp.StatusCode == http.StatusForbidden && (hasRetryAfter || primaryExhausted || isSecondaryRateLimitBody(data)) {
 			class = upstream.RateLimited
 		}
