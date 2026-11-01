@@ -10,67 +10,64 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 
+	"github.com/pressly/goose/v3"
 	"golang.org/x/mod/modfile"
 )
 
-// sharedHeadImage returns the page image of an empty database after the
-// whole SQLite migration tree, the image every other test schema is built
-// from. Replaying the tree is the slow part of every SQLite-backed test
-// binary, and its result depends on nothing but the tree and the modules
-// that apply it, so binaries share it through a file under the OS temp
-// directory: the first to need it builds it, holding a lock, and the rest
-// read it. What Migrate does after goose, and the tenant rows, are written
-// from Go code, so they are never part of this file; each process applies
-// them over it.
+// imageCache shares the images migratedImageAt builds across test binaries.
+// Replaying the migration tree is the slow part of every SQLite-backed test
+// binary, and the image goose leaves at a version depends on nothing but the
+// migrations up to it and the modules that apply them, so binaries share
+// images through files under the OS temp directory: the first to need one
+// builds it, holding a lock, and the rest read it. What Migrate does after
+// goose, and the tenant rows, are written from Go code, so they are never
+// part of these files; each process applies them over the restored image.
 //
-// Any failure to read, lock or write the file falls back to building in
-// the process, so the cache can only save time. Tests-only.
-func sharedHeadImage(head int64) ([]byte, error) {
-	migratedImagesMu.Lock()
-	image, ok := migratedImages[head]
-	migratedImagesMu.Unlock()
-	if ok {
-		return image, nil
-	}
-
-	path, ok := headImageCachePath()
-	if !ok {
-		return migratedImageAt(head)
-	}
-	if image, ok := readHeadImage(path, head); ok {
-		return image, nil
-	}
-
-	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return migratedImageAt(head)
-	}
-	defer func() { _ = lock.Close() }()
-	if err := lockImageCache(lock); err != nil {
-		return migratedImageAt(head)
-	}
-	// Another binary may have written it while this one waited.
-	if image, ok := readHeadImage(path, head); ok {
-		return image, nil
-	}
-
-	image, err = migratedImageAt(head)
-	if err != nil {
-		return nil, err
-	}
-	writeHeadImage(path, image)
-	return image, nil
+// Each file is keyed by the migrations up to its own version, so a new
+// migration adds images without invalidating the ones below it. A nil cache
+// reads nothing and writes nothing, and any failure to read, lock or write
+// falls back to building in the process, so the cache can only save time.
+// Tests-only.
+type imageCache struct {
+	dir string
+	// keys maps each migration version in the tree to the key of the image
+	// goose leaves there.
+	keys map[int64]string
 }
 
-// readHeadImage reads the cached image at path and returns it only if a
-// database restored from it passes SQLite's integrity check and stands at
-// head, so an unreadable, damaged or foreign file is treated as absent and
-// rebuilt over. The integrity check reads every page: a damaged page outside
-// goose_db_version would pass the version read and fail the first fixture
-// that touched its table. A hit is also cached in the process, where
-// migratedImageAt finds it.
-func readHeadImage(path string, head int64) ([]byte, bool) {
+var (
+	sharedImageCacheOnce sync.Once
+	sharedImageCache     *imageCache
+)
+
+// openImageCache returns the cache under the OS temp directory for tree, or
+// nil when its keys cannot be computed (see imageCacheKeys).
+func openImageCache(treeFS fs.FS, tree goose.Migrations) *imageCache {
+	sharedImageCacheOnce.Do(func() {
+		dir := filepath.Join(os.TempDir(), "tf-test-sqlite-images")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return
+		}
+		if keys, ok := imageCacheKeys(treeFS, tree); ok {
+			sharedImageCache = &imageCache{dir: dir, keys: keys}
+		}
+	})
+	return sharedImageCache
+}
+
+// read returns the cached image at version only if a database restored from
+// it passes SQLite's integrity check and stands at version, so an unreadable,
+// damaged or foreign file is treated as absent and rebuilt over. The
+// integrity check reads every page: a damaged page outside goose_db_version
+// would pass the version read and fail the first fixture that touched its
+// table.
+func (c *imageCache) read(version int64) ([]byte, bool) {
+	path, ok := c.path(version)
+	if !ok {
+		return nil, false
+	}
 	image, err := os.ReadFile(path)
 	if err != nil || len(image) == 0 {
 		return nil, false
@@ -84,22 +81,22 @@ func readHeadImage(path string, head int64) ([]byte, bool) {
 	if err := template.QueryRow(`PRAGMA integrity_check(1)`).Scan(&integrity); err != nil || integrity != "ok" {
 		return nil, false
 	}
-	var version int64
-	if err := template.QueryRow(`SELECT MAX(version_id) FROM goose_db_version`).Scan(&version); err != nil || version != head {
+	var got int64
+	if err := template.QueryRow(`SELECT MAX(version_id) FROM goose_db_version`).Scan(&got); err != nil || got != version {
 		return nil, false
 	}
-
-	migratedImagesMu.Lock()
-	defer migratedImagesMu.Unlock()
-	migratedImages[head] = image
 	return image, true
 }
 
-// writeHeadImage writes image to path through a temporary file renamed into
-// place, so a reader never sees a partial image. Best-effort: a failure
-// leaves no file, and the next binary builds its own.
-func writeHeadImage(path string, image []byte) {
-	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+// write stores image as the image at version, through a temporary file
+// renamed into place, so a reader never sees a partial image. Best-effort: a
+// failure leaves no file, and the next binary builds its own.
+func (c *imageCache) write(version int64, image []byte) {
+	path, ok := c.path(version)
+	if !ok {
+		return
+	}
+	tmp, err := os.CreateTemp(c.dir, filepath.Base(path)+".*.tmp")
 	if err != nil {
 		return
 	}
@@ -110,90 +107,100 @@ func writeHeadImage(path string, image []byte) {
 	}
 }
 
-// headImageCachePath names the cache file for this build's migration tree
-// and modules. ok is false when the key cannot be computed, and the caller
-// builds in the process instead.
-func headImageCachePath() (string, bool) {
-	key, ok := headImageCacheKey()
+// lock blocks until this binary holds the cache's build lock, and returns
+// the function that releases it. One lock covers every build, so binaries
+// that start together wait for one replay from empty and then build what
+// they need from the images it left. A lock that cannot be taken returns at
+// once, and the caller builds unserialized.
+func (c *imageCache) lock() (release func()) {
+	if c == nil {
+		return func() {}
+	}
+	f, err := os.OpenFile(filepath.Join(c.dir, "build.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return func() {}
+	}
+	_ = lockImageCache(f)
+	return func() { _ = f.Close() }
+}
+
+func (c *imageCache) path(version int64) (string, bool) {
+	if c == nil {
+		return "", false
+	}
+	key, ok := c.keys[version]
 	if !ok {
 		return "", false
 	}
-	dir := filepath.Join(os.TempDir(), "tf-test-sqlite-images")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", false
-	}
-	return filepath.Join(dir, "head-"+key+".img"), true
+	return filepath.Join(c.dir, key+".img"), true
 }
 
-// headImageCacheModules are the modules whose code decides the image's
-// bytes: the SQLite engine and its C runtime, and goose, which writes
-// goose_db_version.
-var headImageCacheModules = map[string]bool{
+// imageCacheModules are the modules whose code decides an image's bytes: the
+// SQLite engine and its C runtime, and goose, which writes goose_db_version.
+var imageCacheModules = map[string]bool{
 	"modernc.org/sqlite":          true,
 	"modernc.org/libc":            true,
 	"github.com/pressly/goose/v3": true,
 }
 
-// headImageCacheKey hashes everything the head image depends on: the
-// embedded SQLite migration tree, the DSN the image is built under, and how
-// go.mod pins each module in headImageCacheModules. A test binary's build
-// info lists no dependencies, so the pins come from the go.mod beside this
-// file's source; ok is false when that cannot be read (a -trimpath build, or
-// a binary run away from its source tree) or headImageCachePins refuses it.
-func headImageCacheKey() (string, bool) {
+// imageCacheKeys keys the image at each version of tree by everything it
+// depends on: the DSN images are built under, how go.mod pins each module in
+// imageCacheModules, and every migration up to that version, path and body.
+// A test binary's build info lists no dependencies, so the pins come from the
+// go.mod beside this file's source; ok is false when that cannot be read (a
+// -trimpath build, or a binary run away from its source tree), when
+// imageCachePins refuses it, or when a migration cannot be read.
+func imageCacheKeys(treeFS fs.FS, tree goose.Migrations) (map[int64]string, bool) {
 	_, self, _, ok := runtime.Caller(0)
 	if !ok {
-		return "", false
+		return nil, false
 	}
 	gomod, err := os.ReadFile(filepath.Join(filepath.Dir(self), "..", "..", "go.mod"))
 	if err != nil {
-		return "", false
+		return nil, false
 	}
-	pins, ok := headImageCachePins(gomod)
+	pins, ok := imageCachePins(gomod)
 	if !ok {
-		return "", false
+		return nil, false
 	}
-	h := sha256.New()
-	fmt.Fprintf(h, "dsn %s\n%s", TestDSNMemory, pins)
-	err = fs.WalkDir(migrationsSQLiteFS, "migrations-sqlite", func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		body, err := fs.ReadFile(migrationsSQLiteFS, path)
+	keys := make(map[int64]string, len(tree))
+	link := sha256.Sum256([]byte("dsn " + TestDSNMemory + "\n" + pins))
+	for _, m := range tree {
+		body, err := fs.ReadFile(treeFS, m.Source)
 		if err != nil {
-			return err
+			return nil, false
 		}
-		fmt.Fprintf(h, "file %s %d\n", path, len(body))
+		h := sha256.New()
+		_, _ = h.Write(link[:])
+		fmt.Fprintf(h, "file %s %d\n", m.Source, len(body))
 		_, _ = h.Write(body)
-		return nil
-	})
-	if err != nil {
-		return "", false
+		copy(link[:], h.Sum(nil))
+		keys[m.Version] = hex.EncodeToString(link[:])
 	}
-	return hex.EncodeToString(h.Sum(nil)), true
+	return keys, true
 }
 
-// headImageCachePins renders, one line per module in headImageCacheModules
-// and in a fixed order, the version gomod requires and any replacement it
-// names. ok is false when gomod does not parse, when it requires one of the
-// modules not at all, and when it replaces one with a directory, whose code
-// can change without go.mod doing so.
-func headImageCachePins(gomod []byte) (string, bool) {
+// imageCachePins renders, one line per module in imageCacheModules and in a
+// fixed order, the version gomod requires and any replacement it names. ok is
+// false when gomod does not parse, when it requires one of the modules not at
+// all, and when it replaces one with a directory, whose code can change
+// without go.mod doing so.
+func imageCachePins(gomod []byte) (string, bool) {
 	file, err := modfile.Parse("go.mod", gomod, nil)
 	if err != nil {
 		return "", false
 	}
 	pins := map[string]string{}
 	for _, r := range file.Require {
-		if headImageCacheModules[r.Mod.Path] {
+		if imageCacheModules[r.Mod.Path] {
 			pins[r.Mod.Path] = r.Mod.Version
 		}
 	}
-	if len(pins) != len(headImageCacheModules) {
+	if len(pins) != len(imageCacheModules) {
 		return "", false
 	}
 	for _, r := range file.Replace {
-		if !headImageCacheModules[r.Old.Path] {
+		if !imageCacheModules[r.Old.Path] {
 			continue
 		}
 		// modfile gives a directory replacement no version.

@@ -11,7 +11,7 @@ import (
 // TestBootstrapUsesAdminPoolStoreCalls is the static guard. It is
 // the always-on (no Docker) companion to the two-pool pgtest regression
 // guard TestBootstrapNewOrg_Postgres_TwoPool — same family as
-// TestBootstrapSchemaForTest_MatchesMigrate and
+// TestMigrate_MatchesTheTestImages and
 // TestBootstrapLocalTenancy_ConstantsMatchRows.
 //
 // # The invariant
