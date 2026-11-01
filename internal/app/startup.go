@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
@@ -102,6 +103,10 @@ func (a *App) startWorkers(ctx context.Context) {
 	// spawner but never claims delegated conversations, so none of them run
 	// there.
 	if a.plan.dispatcher {
+		// Opened before the dispatcher claims anything, so the first
+		// increment after a restart is a change from zero.
+		agentproc.OpenOversizedFrameSeries()
+		delegate.OpenWorkspaceCheckpointSeries()
 		go a.spawner.RunDispatcher(ctx, delegate.DefaultDispatchScanInterval)
 		go a.spawner.RunSnapshotReaper(ctx, delegate.DefaultSnapshotReapInterval)
 		evictAfter, eerr := delegate.ParseWorkspaceEvictAfter(os.Getenv("TF_WORKSPACE_EVICT_AFTER_SEC"), a.local())

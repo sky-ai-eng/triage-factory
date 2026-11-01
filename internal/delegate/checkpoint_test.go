@@ -962,6 +962,47 @@ func checkpointCounter(t *testing.T) func(outcome string) int64 {
 	}
 }
 
+// Executor startup creates every outcome's checkpoint series at zero, so the
+// first failed checkpoint after a restart is a change increase() can see
+// rather than a series that appears already counted.
+func TestOpenWorkspaceCheckpointSeries_CreatesEachOutcomeAtZero(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	prev := workspaceCheckpoints.Swap(newWorkspaceCheckpointStats(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
+	t.Cleanup(func() { workspaceCheckpoints.Store(prev) })
+
+	OpenWorkspaceCheckpointSeries()
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect metrics: %v", err)
+	}
+	got := map[string]int64{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "workspace.checkpoints" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("workspace.checkpoints is %T, want an int64 sum", m.Data)
+			}
+			for _, dp := range sum.DataPoints {
+				v, _ := dp.Attributes.Value(attribute.Key("outcome"))
+				got[v.AsString()] = dp.Value
+			}
+		}
+	}
+	want := []string{checkpointWritten, checkpointSkippedUnchanged, checkpointSkippedBusy, checkpointFailed}
+	if len(got) != len(want) {
+		t.Errorf("series = %v, want exactly %v", got, want)
+	}
+	for _, outcome := range want {
+		if v, ok := got[outcome]; !ok || v != 0 {
+			t.Errorf("workspace.checkpoints{outcome=%q} = (%d, present %v), want present at 0", outcome, v, ok)
+		}
+	}
+}
+
 // stagedBlob archives src the way every snapshot does and returns the
 // compressed blob to read back.
 func stagedBlob(t *testing.T, src string, man snapshotManifest) io.Reader {

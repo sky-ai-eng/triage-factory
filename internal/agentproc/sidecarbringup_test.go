@@ -401,6 +401,38 @@ func TestBringUpSidecar_AFrameOverTheLimitClosesTheChannelAndIsCounted(t *testin
 	}
 }
 
+// Executor startup creates the oversized-frame series at zero, so the first
+// refusal after a restart is a change increase() can see rather than a series
+// that appears already counted.
+func TestOpenOversizedFrameSeries_CreatesTheSeriesAtZero(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	prev := oversizedFrames.Swap(newOversizedFrameStats(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
+	t.Cleanup(func() { oversizedFrames.Store(prev) })
+
+	OpenOversizedFrameSeries()
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect metrics: %v", err)
+	}
+	var points []metricdata.DataPoint[int64]
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "sidecar.frames.oversized" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("sidecar.frames.oversized is %T, want an int64 sum", m.Data)
+			}
+			points = append(points, sum.DataPoints...)
+		}
+	}
+	if len(points) != 1 || points[0].Value != 0 || points[0].Attributes.Len() != 0 {
+		t.Fatalf("sidecar.frames.oversized points = %+v, want one unlabeled point at 0", points)
+	}
+}
+
 // oversizedFrameCount reads sidecar.frames.oversized off reader.
 func oversizedFrameCount(t *testing.T, reader *sdkmetric.ManualReader) int64 {
 	t.Helper()

@@ -51,6 +51,19 @@ func newOversizedFrameStats(mp metric.MeterProvider) *oversizedFrameStats {
 	return &oversizedFrameStats{refused: counter}
 }
 
+// OpenOversizedFrameSeries creates the oversized-frame series at zero, ahead of
+// anything it counts. A counter series otherwise appears at its first
+// increment, already at 1, and increase() over a series that starts at 1 reads
+// 0, so the first refusal after an executor restart would never reach an
+// alert. Called at executor startup, which has to follow telemetry.Init: the
+// instrument is built in init() against the global provider, which drops a
+// measurement recorded before the real provider is installed.
+func OpenOversizedFrameSeries() {
+	if s := oversizedFrames.Load(); s != nil && s.refused != nil {
+		s.refused.Add(context.Background(), 0)
+	}
+}
+
 // reportOversizedFrame waits for a run's supervision channel to close and, if
 // it closed because the sidecar sent a frame over
 // sidecarproto.MaxSidecarFrameSize, logs and counts the refusal. A working

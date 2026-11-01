@@ -87,6 +87,10 @@ const (
 	checkpointFailed           = "failed"
 )
 
+// checkpointOutcomes is every outcome above. OpenWorkspaceCheckpointSeries
+// opens each at zero, so a new outcome belongs here as well.
+var checkpointOutcomes = []string{checkpointWritten, checkpointSkippedUnchanged, checkpointSkippedBusy, checkpointFailed}
+
 // ParseSnapshotInterval interprets the TF_SNAPSHOT_INTERVAL_SEC env value.
 // Empty → the default. 0 → checkpoints disabled. Non-numeric or negative → the
 // default plus an error the caller logs; a bad value must not brick boot, the
@@ -703,6 +707,24 @@ func newWorkspaceCheckpointStats(mp metric.MeterProvider) *workspaceCheckpointSt
 		delegateLog.Warn("workspace checkpoint counter setup failed", "error", err)
 	}
 	return &workspaceCheckpointStats{checkpoints: counter}
+}
+
+// OpenWorkspaceCheckpointSeries creates every outcome's checkpoint series at
+// zero, ahead of anything they count. A counter series otherwise appears at its
+// first increment, already at 1, and increase() over a series that starts at 1
+// reads 0, so the first failed checkpoint after an executor restart would
+// never reach an alert. Called at executor startup, which has to follow
+// telemetry.Init: the instrument is built in init() against the global
+// provider, which drops a measurement recorded before the real provider is
+// installed.
+func OpenWorkspaceCheckpointSeries() {
+	stats := workspaceCheckpoints.Load()
+	if stats == nil || stats.checkpoints == nil {
+		return
+	}
+	for _, outcome := range checkpointOutcomes {
+		stats.checkpoints.Add(context.Background(), 0, metric.WithAttributes(attribute.String("outcome", outcome)))
+	}
 }
 
 func recordWorkspaceCheckpoint(outcome string) {

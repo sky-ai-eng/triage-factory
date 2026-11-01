@@ -64,7 +64,10 @@ groups:
       # nothing until the executor is hard-killed, when the run comes back
       # from older work than it should. A warning: one failure is not an
       # outage, and a run of them usually means the object store is
-      # unreachable or refusing writes.
+      # unreachable or refusing writes. Each executor creates the series at
+      # zero when it starts, so a failure after an executor restart is an
+      # increase; the first-sample branch covers a failure before the series'
+      # first scrape.
       - alert: WorkspaceCheckpointsFailing
         expr: |
           sum(increase(tf_workspace_checkpoints_total{outcome="failed"}[1h])) > 0
@@ -88,7 +91,10 @@ groups:
       # A working sidecar refuses to send a frame over the size limit itself,
       # so an executor receiving one means a sidecar that skipped its own
       # check. Critical at the first sample: the sidecar holds one run's real
-      # credentials and parses that run's hostile traffic.
+      # credentials and parses that run's hostile traffic. Each executor
+      # creates the series at zero when it starts, so a refusal after an
+      # executor restart is an increase; the first-sample branch covers a
+      # refusal before the series' first scrape.
       - alert: SidecarFrameOversized
         expr: |
           sum(increase(tf_sidecar_frames_oversized_total[1h])) > 0
