@@ -9,11 +9,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TFAC-471 handler coverage: each org-roster write-point must emit exactly one
-// access_change_log row with the right action/target/detail, in the SAME tx as
-// the mutation. These ride the orgMembersRig (a real Postgres-backed Server, so
-// RLS + the guard triggers are live) and skip without Docker like the rest of
-// the pg-backed server tests.
+// Each org-roster write emits exactly one access_change_log row with the right
+// action, target and detail, in the same transaction as the mutation. These run
+// on orgMembersRig, with RLS and the guard triggers live.
 
 type auditRow struct {
 	actor  sql.NullString
@@ -103,12 +101,9 @@ func TestOrgMemberRemove_EmitsAuditRow(t *testing.T) {
 	}
 }
 
-// TestOrgMemberRemove_SelfLeaveEmitsAuditRow: a self-leave (the actor removes
-// their OWN membership) both succeeds and writes the org_member_revoked row.
-// The audit Record runs before the delete so the actor still has org access
-// when the row's RLS WITH CHECK (tf.user_has_org_access) is evaluated —
-// recording after the self-removal would fail the policy (SQLSTATE 42501).
-// Regression guard for the failure TestWS_MembershipRemovalClosesSocket caught.
+// TestOrgMemberRemove_SelfLeaveEmitsAuditRow: a self-leave succeeds and writes
+// the org_member_revoked row. The row is recorded before the delete, while the
+// actor still passes the audit table's RLS WITH CHECK on org access.
 func TestOrgMemberRemove_SelfLeaveEmitsAuditRow(t *testing.T) {
 	r := newOrgMembersRig(t)
 
@@ -153,10 +148,9 @@ func TestOrgOwnershipTransfer_EmitsAuditRow(t *testing.T) {
 	}
 }
 
-// TestOrgMemberRoleChange_FailedActionWritesNoAuditRow: the same-tx invariant —
-// demoting the sole owner trips the guard trigger (409), the whole tx rolls
-// back, and NO org_role_changed row is left behind. Proves the Record shares the
-// mutation's transaction rather than committing independently.
+// TestOrgMemberRoleChange_FailedActionWritesNoAuditRow: demoting the sole owner
+// trips the guard trigger (409) and leaves no org_role_changed row, so the audit
+// write shares the mutation's transaction.
 func TestOrgMemberRoleChange_FailedActionWritesNoAuditRow(t *testing.T) {
 	r := newOrgMembersRig(t)
 

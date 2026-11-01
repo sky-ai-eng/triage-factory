@@ -18,15 +18,9 @@ import (
 // it can never collide with one.
 const testLockSalt int64 = 90001
 
-// TestAcquireKeyedLock_Multi_SerializesSameKey is the pgtest acceptance
-// criterion for TFAC-579 item 6: two concurrent acquireKeyedLock calls for
-// the SAME key must serialize — the second blocks until the first releases —
-// even though each comes from a distinct connection, mirroring two control
-// pods each with their own in-process sync.Map. This is the primitive the
-// github-app-registration RMW guard (and, historically, the projects RMW
-// guard) is built on, so proving it here with a generic map+salt covers
-// every caller without needing to drive the full app-registration handler
-// (which calls out to GitHub's API).
+// TestAcquireKeyedLock_Multi_SerializesSameKey: two acquireKeyedLock calls for
+// the same key from separate in-process maps, as from two control pods,
+// serialize on the advisory lock: the second blocks until the first releases.
 func TestAcquireKeyedLock_Multi_SerializesSameKey(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	h := pgtest.Shared(t)
@@ -185,11 +179,9 @@ func TestAcquireKeyedLock_Local_UsesInProcessMutex(t *testing.T) {
 	}
 }
 
-// TestAcquireKeyedLock_Multi_WaitersDoNotDrainThePool pins that callers queued
-// on one key hold no pool connection while they wait. The holder needs a
-// second connection for the work the lock guards; were each waiter blocked on
-// pg_advisory_lock over a connection of its own, a queue as long as the pool
-// would leave the holder none, and nothing would move until a ctx expired.
+// TestAcquireKeyedLock_Multi_WaitersDoNotDrainThePool: callers queued on a key
+// hold no pool connection while they wait, so a queue as long as the pool cannot
+// starve the holder of the connection its guarded work needs.
 func TestAcquireKeyedLock_Multi_WaitersDoNotDrainThePool(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	h := pgtest.Shared(t)

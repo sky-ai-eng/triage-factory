@@ -16,10 +16,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestCommitSigner_Gates pins every commit-signer route's gate: the two reads
-// are any member's, every write is an org admin's, a plain member is refused a
-// write with 403 because the signer is in an org they can see, and a caller
-// outside the org is told nothing at all.
+// TestCommitSigner_Gates: the two reads are any member's and every write an
+// org admin's, so a member's write is a 403 and an outsider gets 404 throughout.
 func TestCommitSigner_Gates(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
@@ -92,10 +90,9 @@ func TestCommitSigner_Gates(t *testing.T) {
 	}
 }
 
-// TestCommitSigner_HostOrderIndependent_Postgres: the token's disconnect keeps
-// the org's GitHub host while a signer exists, and removing the signer
-// afterwards clears it, with every read in both requests running under the
-// admin's claims.
+// TestCommitSigner_HostOrderIndependent_Postgres: under the admin's RLS claims,
+// the token's disconnect keeps the host while a signer exists, and removing the
+// signer afterwards clears it.
 func TestCommitSigner_HostOrderIndependent_Postgres(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)

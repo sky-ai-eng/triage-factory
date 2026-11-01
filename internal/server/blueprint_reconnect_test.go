@@ -4,41 +4,25 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// Reconnection mutations (TFAC-312's canvas "drag an arrow's head onto a new
-// target" gesture): the sequence-edge re-target (atomic split + merge, leaving
-// an orphaned downstream) and the trigger-edge re-target (in-place blueprint_id
-// move). These are the re-target half of rule 4; the detach half reuses the
-// existing split / remove-trigger endpoints.
+// Reconnection mutations, the canvas gesture of dragging an arrow's head onto
+// a new target: the sequence-edge re-target (atomic split + merge, leaving an
+// orphaned downstream) and the trigger-edge re-target (in-place blueprint_id
+// move).
 
 type reconnectView struct {
 	Host              blueprintWithStepsView `json:"host"`
 	OrphanBlueprintID string                 `json:"orphan_blueprint_id"`
 }
 
-// build3StepBlueprint makes a bare blueprint with three bare-prompt steps and
-// returns (blueprintID, [p0,p1,p2]).
-func build3StepBlueprint(t *testing.T, s *Server, name string) (string, [3]string) {
-	t.Helper()
-	var pids [3]string
-	steps := make([]map[string]any, 0, 3)
-	for i := range pids {
-		pids[i] = createBarePrompt(t, s, name+"-p")
-		steps = append(steps, map[string]any{"step_prompt_id": pids[i]})
-	}
-	bp := createBareBlueprint(t, s, name)
-	if put := doJSON(t, s, http.MethodPut, "/api/blueprints/"+bp+"/steps", map[string]any{"steps": steps}); put.Code != http.StatusNoContent {
-		t.Fatalf("seed 3 steps: %d: %s", put.Code, put.Body.String())
-	}
-	return bp, pids
-}
-
 // --- sequence-edge re-target (POST /api/blueprints/{id}/reconnect) --------
 
 func TestBlueprintReconnect_RepointsUpstreamAndOrphansDownstream(t *testing.T) {
 	s := newTestServer(t)
-	b, p := build3StepBlueprint(t, s, "Chain") // [p0,p1,p2]
+	b, p := createChainBlueprint(t, s, "Chain", 3) // [p0,p1,p2]
 	target, q0 := createWrappedBlueprint(t, s, "Target")
 
 	// Re-point the boundary before step 1: [p0] stays and continues into the
@@ -84,7 +68,7 @@ func TestBlueprintReconnect_RepointsUpstreamAndOrphansDownstream(t *testing.T) {
 
 func TestBlueprintReconnect_SelfRejected(t *testing.T) {
 	s := newTestServer(t)
-	b, _ := build3StepBlueprint(t, s, "Self")
+	b, _ := createChainBlueprint(t, s, "Self", 3)
 	rec := doJSON(t, s, http.MethodPost, "/api/blueprints/"+b+"/reconnect", map[string]any{
 		"at_step_index":       1,
 		"target_blueprint_id": b,
@@ -92,21 +76,15 @@ func TestBlueprintReconnect_SelfRejected(t *testing.T) {
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("reconnect into self: expected 422, got %d: %s", rec.Code, rec.Body.String())
 	}
+	assertFirstError(t, rec, httpx.ReasonInvalidField, "target_blueprint_id")
 }
 
 func TestBlueprintReconnect_TriggeredTargetRejected(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
-	b, p := build3StepBlueprint(t, s, "Chain")
+	b, p := createChainBlueprint(t, s, "Chain", 3)
 	target, _ := createWrappedBlueprint(t, s, "TriggeredTarget")
-	if tr := doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
-		"event_type":               "github:pr:ci_check_failed",
-		"blueprint_id":             target,
-		"breaker_threshold":        3,
-		"min_autonomy_suitability": 0.0,
-	}); tr.Code != http.StatusCreated {
-		t.Fatalf("seed trigger on target: %d: %s", tr.Code, tr.Body.String())
-	}
+	attachTrigger(t, s, target, "github:pr:ci_check_failed")
 	rec := doJSON(t, s, http.MethodPost, "/api/blueprints/"+b+"/reconnect", map[string]any{
 		"at_step_index":       1,
 		"target_blueprint_id": target,
@@ -114,6 +92,8 @@ func TestBlueprintReconnect_TriggeredTargetRejected(t *testing.T) {
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("reconnect to triggered target: expected 422, got %d: %s", rec.Code, rec.Body.String())
 	}
+	// A state conflict the caller can clear, unlike the self-reference above.
+	assertFirstError(t, rec, httpx.ReasonConflict, "target_blueprint_id")
 	// Host untouched — still its original 3 steps (single transaction).
 	hs := listBlueprintSteps(t, s, b)
 	if len(hs) != 3 {
@@ -123,7 +103,7 @@ func TestBlueprintReconnect_TriggeredTargetRejected(t *testing.T) {
 
 func TestBlueprintReconnect_IndexOutOfRangeRejected(t *testing.T) {
 	s := newTestServer(t)
-	b, _ := build3StepBlueprint(t, s, "Chain")
+	b, _ := createChainBlueprint(t, s, "Chain", 3)
 	target, _ := createWrappedBlueprint(t, s, "Target")
 	for _, k := range []int{0, 3, 9} { // 0 keeps the upstream empty; ≥N keeps the downstream empty.
 		rec := doJSON(t, s, http.MethodPost, "/api/blueprints/"+b+"/reconnect", map[string]any{
@@ -138,7 +118,7 @@ func TestBlueprintReconnect_IndexOutOfRangeRejected(t *testing.T) {
 
 func TestBlueprintReconnect_MissingIndexRejected(t *testing.T) {
 	s := newTestServer(t)
-	b, _ := build3StepBlueprint(t, s, "Chain")
+	b, _ := createChainBlueprint(t, s, "Chain", 3)
 	target, _ := createWrappedBlueprint(t, s, "Target")
 	rec := doJSON(t, s, http.MethodPost, "/api/blueprints/"+b+"/reconnect", map[string]any{
 		"target_blueprint_id": target,
@@ -150,29 +130,11 @@ func TestBlueprintReconnect_MissingIndexRejected(t *testing.T) {
 
 // --- trigger-edge re-target (POST /api/event-handlers/{id}/retarget) ------
 
-func createTrigger(t *testing.T, s *Server, blueprintID string) string {
-	t.Helper()
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
-		"event_type":               "github:pr:ci_check_failed",
-		"blueprint_id":             blueprintID,
-		"breaker_threshold":        3,
-		"min_autonomy_suitability": 0.0,
-	})
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create trigger: %d: %s", rec.Code, rec.Body.String())
-	}
-	var h map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &h); err != nil {
-		t.Fatalf("decode trigger: %v", err)
-	}
-	return h["id"].(string)
-}
-
 func TestEventHandlerRetarget_MovesTriggerPreservingID(t *testing.T) {
 	s := newTestServer(t)
 	from, _ := createWrappedBlueprint(t, s, "From")
 	to, _ := createWrappedBlueprint(t, s, "To")
-	trigID := createTrigger(t, s, from)
+	trigID := attachTrigger(t, s, from, "github:pr:ci_check_failed")
 
 	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/"+trigID+"/retarget", map[string]any{
 		"blueprint_id": to,
@@ -203,8 +165,8 @@ func TestEventHandlerRetarget_AlreadyTriggeredRejected(t *testing.T) {
 	s := newTestServer(t)
 	from, _ := createWrappedBlueprint(t, s, "From")
 	to, _ := createWrappedBlueprint(t, s, "To")
-	trigID := createTrigger(t, s, from)
-	_ = createTrigger(t, s, to) // `to` already has its own trigger
+	trigID := attachTrigger(t, s, from, "github:pr:ci_check_failed")
+	attachTrigger(t, s, to, "github:pr:ci_check_failed") // `to` already has its own trigger
 
 	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/"+trigID+"/retarget", map[string]any{
 		"blueprint_id": to,

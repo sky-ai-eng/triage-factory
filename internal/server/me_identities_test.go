@@ -28,12 +28,10 @@ type identitiesWire struct {
 	Methods []loginMethodWire `json:"methods"`
 }
 
-// TestMeIdentities_MultiReturnsLinkedRows_MarksCurrent_NoLeak is the multi-mode
-// acceptance: a principal holding a GitHub + a SAML identity gets both rows back
-// from GET /api/me/identities; the identity backing the session is flagged
-// current (precisely — by auth_user_id, even though both identities share an
-// email); a second principal's identities never leak; and the opaque bridge
-// columns are never serialized.
+// TestMeIdentities_MultiReturnsLinkedRows_MarksCurrent_NoLeak: a principal with
+// a GitHub and a SAML identity gets both back, the session's own flagged current
+// by auth_user_id although both share an email, with no other principal's rows
+// and no bridge columns serialized.
 func TestMeIdentities_MultiReturnsLinkedRows_MarksCurrent_NoLeak(t *testing.T) {
 	r := newAuthRig(t)
 
@@ -151,10 +149,8 @@ func TestMeIdentities_MultiReturnsLinkedRows_MarksCurrent_NoLeak(t *testing.T) {
 	}
 }
 
-// idpProbeExtension is the login extension the idp test installs: the no-op
-// everywhere except the read seam, which answers from a fixed map and records
-// what it was asked, so the test can pin both the wire result and the "asked
-// once, distinct ids only" shape of the call.
+// idpProbeExtension is a no-op login extension except IdPForProviders, which
+// answers from a fixed map and records each call's ids.
 type idpProbeExtension struct {
 	noopLoginExtension
 	idps  map[string]string
@@ -166,11 +162,9 @@ func (e *idpProbeExtension) IdPForProviders(_ context.Context, ids []string) (ma
 	return e.idps, nil
 }
 
-// TestMeIdentities_SamlRowsCarryIdPFromExtension pins the vendor-mark contract:
-// a saml identity stamped with a provider id the extension recognises carries
-// `idp`; a github row never does; a saml row the extension cannot place (an
-// unstamped one, or a provider with no recorded IdP) omits the field rather
-// than sending "" — absent is the wire spelling of "plain SSO".
+// TestMeIdentities_SamlRowsCarryIdPFromExtension: a saml row whose provider the
+// extension recognises carries `idp`; a github row never does, and a saml row
+// the extension cannot place omits the field rather than sending "".
 func TestMeIdentities_SamlRowsCarryIdPFromExtension(t *testing.T) {
 	r := newAuthRig(t)
 	const knownProvider = "aaaaaaaa-0000-0000-0000-000000000001"

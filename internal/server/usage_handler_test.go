@@ -252,11 +252,9 @@ func TestSpendOrgLevel_NullTeamRowsByCategory(t *testing.T) {
 
 // --- local-mode end-to-end (SQLite, no Docker) ---
 
-// TestUsageEndpoints_Local drives the three endpoints through the real router +
-// withSession middleware against an in-memory SQLite (local mode), so the gates
-// short-circuit to the single implicit admin and we exercise the full read +
-// aggregation + JSON path. The role-gate 403s are multi-mode-only and covered
-// by the Postgres rig.
+// TestUsageEndpoints_Local drives the three endpoints through the real router in
+// local mode, where the gates admit the single implicit admin, to exercise the
+// read, aggregation and JSON path; the role-gate 403s are in the Postgres rig.
 func TestUsageEndpoints_Local(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newUsageTestServer(t)

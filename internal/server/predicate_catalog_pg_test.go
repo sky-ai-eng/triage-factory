@@ -7,12 +7,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// The catalog check reads the team's tracked projects in a read-only
-// transaction under the caller's claims, and asks Jira by each project's Jira
-// id, so a plain team member, with no admin role anywhere, must see the org's
-// Jira site, the team's rules and the Jira ids of the registry rows they
-// reference through RLS, and only their own team's. A policy that hid any of
-// them would refuse every status the member writes.
+// The catalog check reads the team's tracked projects under the caller's claims
+// and asks Jira by their Jira ids, so a plain team member must see, through RLS,
+// the org's Jira site and their own team's rules and registry rows, and no other's.
 func TestPredicateCatalog_ReadsTrackedProjectsUnderRLS_Postgres(t *testing.T) {
 	rig := newRepoScopeRig(t)
 	var site string

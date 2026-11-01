@@ -154,14 +154,9 @@ func seedLocalApp(t *testing.T, s *Server, active bool) {
 	seedBYOAppCredentialClass(t, s, org)
 }
 
-// seedBYOAppCredentialClass records that the org is in the BYO-App credential
-// system, which is what registering or importing an App writes in the same
-// transaction as the registration row.
-//
-// A fixture that inserts an org_github_apps row directly has to write this too,
-// or it is modelling a state the product cannot reach — an org with an App and
-// a class saying it has none. The handlers dispatch on the class, so without it
-// such a fixture is served as a PAT org.
+// seedBYOAppCredentialClass writes the BYO-App class that registering an App
+// writes beside its row. A fixture inserting the row directly needs it, or the
+// handlers, which dispatch on the class, serve the org as a PAT org.
 func seedBYOAppCredentialClass(t *testing.T, s *Server, orgID string) {
 	t.Helper()
 	if _, err := s.orgs.SetGitHubCredentialClass(context.Background(), orgID, domain.GitHubCredentialClassBYOApp); err != nil {
@@ -187,24 +182,10 @@ func setOrgGitHubBase(t *testing.T, s *Server, base string) {
 	dbtest.SeedOrgSettings(t, s.orgs, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: base})
 }
 
-// ghAppsRaceHook wraps the App store and fires a one-shot hook right after one
-// of the two reads the credential transitions guard on returns. It stands in
-// for a concurrent transition committing inside the window a handler's pre-lock
-// read is stale across — the window that is real because two of the three
-// handlers put a GitHub round-trip in it, and that no amount of test
-// concurrency could pin down deterministically.
-//
-// The hook runs after the wrapped read has already produced its answer, so the
-// handler receives the PRE-mutation row and then proceeds into a world where it
-// no longer holds. Only the first call is hooked; the re-read inside the
-// critical section sees the mutation, which is the whole point.
-//
-// This wraps s.githubApps, which is NOT the store a handler's own
-// tx.GitHubApps calls run against inside s.tx.WithTx — WithTx builds a fresh
-// TxStores straight off the *sql.Tx, so a hook here only reaches the
-// pre-transaction reads (GetForOrgSystem, ListInstallationsOnHostSystem), never
-// a write made through tx. See setActiveReturnsNilTx below for the shape that
-// reaches inside the transaction.
+// ghAppsRaceHook wraps s.githubApps and fires a one-shot hook after the first
+// GetForOrgSystem / ListInstallationsOnHostSystem returns, so the handler holds
+// the pre-mutation row while a concurrent transition commits. It reaches only
+// the reads before the transaction; the re-read under the lock sees the change.
 type ghAppsRaceHook struct {
 	db.GitHubAppsStore
 	afterGet  func() // fires once, after the first GetForOrgSystem
@@ -239,17 +220,9 @@ func (setActiveNilStore) SetActive(context.Context, string, bool) (*domain.OrgGi
 	return nil, nil
 }
 
-// setActiveReturnsNilTx wraps a TxRunner and swaps a setActiveNilStore into
-// every transaction it opens, leaving the rest of the stores real — the same
-// injection shape failingSecretsTx uses for tx.Secrets. This is what actually
-// reaches tx.GitHubApps.SetActive inside s.tx.WithTx, unlike ghAppsRaceHook
-// above: nothing in this codebase can make the registration vanish between
-// the cutover's authoritative GetForOrgSystem and its SetActive while the
-// lock is held (every writer of org_github_apps serializes on it), so there's
-// no real interleaving to race for. What this proves instead is that the
-// handler itself holds if SetActive ever reports it flipped nothing — the
-// same guarantee GetForOrgSystem's nil-on-absent contract gives the read
-// side, now enforced on the write side too.
+// setActiveReturnsNilTx swaps a setActiveNilStore into every transaction it
+// opens, which is how a test reaches tx.GitHubApps.SetActive inside the lock
+// where no real interleaving can.
 type setActiveReturnsNilTx struct{ inner db.TxRunner }
 
 func (w setActiveReturnsNilTx) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
@@ -305,10 +278,9 @@ func getSecret(t *testing.T, s *Server, key string) string {
 
 // --- staging at registration ---------------------------------------------
 
-// TestGitHubAppRegisterCallback_Staging pins the either/or staging rule
-// (TFAC-328): an App registered while an org PAT is live is written
-// active=false (staged — the PAT stays live until a cutover); a fresh setup
-// with no PAT registers active=true.
+// TestGitHubAppRegisterCallback_Staging: an App registered beside a live org
+// PAT is staged (active=false) and a fresh setup goes live; both write the
+// BYO-App class, which is independent of the Active bit.
 func TestGitHubAppRegisterCallback_Staging(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 
@@ -370,43 +342,12 @@ func TestGitHubAppRegisterCallback_Staging(t *testing.T) {
 			if app.Active != tc.wantActive {
 				t.Errorf("Active = %v, want %v (pat=%q)", app.Active, tc.wantActive, tc.pat)
 			}
+			assertCredentialClass(t, s, domain.GitHubCredentialClassBYOApp, "an App registration")
 		})
 	}
 }
 
 // --- discard -------------------------------------------------------------
-
-// TestGitHubAppDiscard_Staged tears down a staged registration (row +
-// installations + secrets) and leaves the live PAT untouched.
-func TestGitHubAppDiscard_Staged(t *testing.T) {
-	keyring.MockInit()
-	runmode.SetForTest(t, runmode.ModeLocal)
-	s := newTestServer(t)
-	seedLocalApp(t, s, false) // staged
-	seedInstallation(t, s, 1, "acme")
-	if err := s.secrets.Put(context.Background(), runmode.LocalDefaultOrgID, integrations.KeyGitHubPAT, "ghp_live", ""); err != nil {
-		t.Fatalf("seed pat: %v", err)
-	}
-
-	rec := doJSON(t, s, http.MethodDelete, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("DELETE github/app = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-
-	if app, _ := s.githubApps.GetForOrgSystem(context.Background(), runmode.LocalDefaultOrgID); app != nil {
-		t.Errorf("app still registered after discard: %+v", app)
-	}
-	if insts, _ := s.githubApps.ListInstallationsForOrgSystem(context.Background(), runmode.LocalDefaultOrgID); len(insts) != 0 {
-		t.Errorf("installations survived discard: %+v", insts)
-	}
-	if v := getSecret(t, s, "github_app_1_pem"); v != "" {
-		t.Errorf("app pem secret survived discard: %q", v)
-	}
-	// The live PAT must be untouched by a staged-switch discard.
-	if v := getSecret(t, s, integrations.KeyGitHubPAT); v != "ghp_live" {
-		t.Errorf("PAT = %q after discard, want it untouched (ghp_live)", v)
-	}
-}
 
 // TestGitHubAppDiscard_Active rejects discarding a live App — removing it only
 // happens through switch-to-pat.
@@ -425,20 +366,9 @@ func TestGitHubAppDiscard_Active(t *testing.T) {
 	}
 }
 
-// TestGitHubAppDiscard_AppGoesLiveUnderTheGuard is the discard half of the
-// serialization the three transitions share: a cutover commits between the
-// discard's read and its teardown, so the staged App the 409 guard cleared is
-// live by the time the teardown would run.
-//
-// The fixture commits BOTH halves of the cutover's transaction — the active
-// flip and the PAT delete — because it is the second half that sets the stake.
-// Once the PAT is gone the App is the org's only credential, so a discard that
-// proceeds on the stale "staged" answer isn't tearing down an abandoned switch,
-// it is taking the org's GitHub access with it.
-//
-// The guard has to be re-evaluated under the lock for the refusal to happen at
-// all; against the unserialized handler the stale answer stands and the
-// teardown commits.
+// TestGitHubAppDiscard_AppGoesLiveUnderTheGuard: a cutover (active flip and PAT
+// delete) commits between the discard's read and its teardown, so the guard,
+// re-read under the lock, must refuse rather than destroy the org's only credential.
 func TestGitHubAppDiscard_AppGoesLiveUnderTheGuard(t *testing.T) {
 	keyring.MockInit()
 	runmode.SetForTest(t, runmode.ModeLocal)
@@ -486,11 +416,9 @@ func TestGitHubAppDiscard_AppGoesLiveUnderTheGuard(t *testing.T) {
 
 // --- disconnect the live App ---------------------------------------------
 
-// TestGitHubAppDisconnect_Success is the whole teardown with nothing bound
-// after it: registration, installations, secrets and host gone, the class back
-// at the rowless default, the removal recorded, and the same post-commit
-// invalidations switch-to-pat owes — so the org is the fresh state every way
-// in (the deployment App included) is open from.
+// TestGitHubAppDisconnect_Success: registration, installations, secrets and
+// host are gone, the class is back at the default, the removal is recorded,
+// and tokens are invalidated and the poller kicked.
 func TestGitHubAppDisconnect_Success(t *testing.T) {
 	keyring.MockInit()
 	runmode.SetForTest(t, runmode.ModeLocal)
@@ -584,21 +512,33 @@ func TestGitHubAppDisconnect_Success(t *testing.T) {
 	}
 }
 
-// TestGitHubAppDisconnect_NoApp404: the App row is the resource.
-func TestGitHubAppDisconnect_NoApp404(t *testing.T) {
-	keyring.MockInit()
-	runmode.SetForTest(t, runmode.ModeLocal)
-	s := newTestServer(t)
+// TestGitHubAppTransitions_NoApp404: the App row is the resource every
+// transition acts on, so an org with none is a 404.
+func TestGitHubAppTransitions_NoApp404(t *testing.T) {
+	for _, tc := range []struct {
+		name, route string
+		body        any
+	}{
+		{"disconnect", "/github/app/disconnect", nil},
+		{"cutover", "/github/app/cutover", nil},
+		{"switch to PAT", "/github/pat/switch-to", map[string]string{"pat": "ghp_valid"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			keyring.MockInit()
+			runmode.SetForTest(t, runmode.ModeLocal)
+			s := newTestServer(t)
+			setOrgGitHubBase(t, s, newGitHubAccessStub(t, ghAccessStub{login: "octocat"}).URL)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/disconnect", nil)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("disconnect with no app = %d, want 404; body=%s", rec.Code, rec.Body.String())
+			rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+tc.route, tc.body)
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("%s with no app = %d, want 404; body=%s", tc.name, rec.Code, rec.Body.String())
+			}
+		})
 	}
 }
 
-// TestGitHubAppDisconnect_Staged409 is the intent boundary from this side: a
-// staged App is the discard's to remove, and refusing it here leaves the
-// staged registration, its key and the live PAT exactly as they were.
+// TestGitHubAppDisconnect_Staged409: a staged App is the discard's to remove,
+// so disconnect refuses and leaves the registration, its key and the PAT.
 func TestGitHubAppDisconnect_Staged409(t *testing.T) {
 	keyring.MockInit()
 	runmode.SetForTest(t, runmode.ModeLocal)
@@ -624,12 +564,9 @@ func TestGitHubAppDisconnect_Staged409(t *testing.T) {
 	}
 }
 
-// TestGitHubAppDisconnect_AppReplacedUnderTheGuard is this verb's half of the
-// serialization the transitions share: between the advisory read and the
-// lock, a switch-to-pat tears the live App down and a new registration lands
-// staged behind the token. The row this request first saw as live is gone; the
-// one under the lock is staged, and it is the discard's to remove, not this
-// verb's — so the teardown must not run on the stale answer.
+// TestGitHubAppDisconnect_AppReplacedUnderTheGuard: a switch-to-pat and a new
+// staged registration land between the advisory read and the lock, so the
+// disconnect must refuse rather than tear down the staged replacement.
 func TestGitHubAppDisconnect_AppReplacedUnderTheGuard(t *testing.T) {
 	keyring.MockInit()
 	runmode.SetForTest(t, runmode.ModeLocal)
@@ -668,17 +605,6 @@ func TestGitHubAppDisconnect_AppReplacedUnderTheGuard(t *testing.T) {
 
 // --- cutover -------------------------------------------------------------
 
-func TestGitHubAppCutover_NoApp404(t *testing.T) {
-	keyring.MockInit()
-	runmode.SetForTest(t, runmode.ModeLocal)
-	s := newTestServer(t)
-
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/cutover", nil)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("cutover with no app = %d, want 404; body=%s", rec.Code, rec.Body.String())
-	}
-}
-
 func TestGitHubAppCutover_AlreadyActive409(t *testing.T) {
 	keyring.MockInit()
 	runmode.SetForTest(t, runmode.ModeLocal)
@@ -711,10 +637,8 @@ func TestGitHubAppCutover_NoInstallations409(t *testing.T) {
 	}
 }
 
-// TestGitHubAppCutover_DeletedApp422: a staged App deleted on GitHub cannot be
-// cut over to, and the refusal says why — 422 naming the deleted App, with the
-// reason recorded on the registration — rather than a 502 that reads as a
-// GitHub outage worth retrying.
+// TestGitHubAppCutover_DeletedApp422: a staged App deleted on GitHub is a 422
+// naming it, with the reason recorded on the row, not a retryable-looking 502.
 func TestGitHubAppCutover_DeletedApp422(t *testing.T) {
 	keyring.MockInit()
 	runmode.SetForTest(t, runmode.ModeLocal)
@@ -739,45 +663,9 @@ func TestGitHubAppCutover_DeletedApp422(t *testing.T) {
 	}
 }
 
-// TestGitHubAppCutover_Success flips the staged App live and deletes the PAT in
-// one transaction; after it XOR holds.
-func TestGitHubAppCutover_Success(t *testing.T) {
-	keyring.MockInit()
-	runmode.SetForTest(t, runmode.ModeLocal)
-	s := newTestServer(t)
-	stub := newGitHubAccessStub(t, ghAccessStub{
-		appInstalls: []stubInstall{{ID: 1, Login: "acme"}},
-	})
-	setOrgGitHubBase(t, s, stub.URL)
-	seedLocalApp(t, s, false) // staged
-	if err := s.secrets.Put(context.Background(), runmode.LocalDefaultOrgID, integrations.KeyGitHubPAT, "ghp_live", ""); err != nil {
-		t.Fatalf("seed pat: %v", err)
-	}
-
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/cutover", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("cutover = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-
-	app, _ := s.githubApps.GetForOrgSystem(context.Background(), runmode.LocalDefaultOrgID)
-	if app == nil || !app.Active {
-		t.Fatalf("app not active after cutover: %+v", app)
-	}
-	if v := getSecret(t, s, integrations.KeyGitHubPAT); v != "" {
-		t.Errorf("PAT survived cutover: %q (XOR violated — App is now live)", v)
-	}
-}
-
-// TestGitHubAppCutover_RegistrationVanishesUnderTheGuard is the interleaving
-// that costs the org every credential it has. A discard commits while the
-// cutover is inside BackfillInstallationsFromAPI — seconds, not microseconds —
-// so by the time the cutover writes, the registration it verified is gone.
-// SetActive is an unchecked UPDATE and flips nothing; the PAT delete is
-// unconditional and lands. The org ends with no App, no PAT, and an audit row
-// saying the App became its credential.
-//
-// The lock is what makes the re-read possible, but the re-read is what refuses:
-// the PAT surviving is the assertion that matters.
+// TestGitHubAppCutover_RegistrationVanishesUnderTheGuard: a discard commits
+// while the cutover is reconciling with GitHub, so the re-read under the lock
+// must refuse, and the PAT the org still runs on must survive.
 func TestGitHubAppCutover_RegistrationVanishesUnderTheGuard(t *testing.T) {
 	keyring.MockInit()
 	runmode.SetForTest(t, runmode.ModeLocal)
@@ -815,17 +703,9 @@ func TestGitHubAppCutover_RegistrationVanishesUnderTheGuard(t *testing.T) {
 	}
 }
 
-// TestGitHubAppCutover_SetActiveReportsNoRow is the branch
-// TestGitHubAppCutover_RegistrationVanishesUnderTheGuard doesn't reach: that
-// test's discard lands before the lock, so the authoritative GetForOrgSystem
-// inside it already sees app == nil and refuses at the earlier guard — it
-// never gets as far as SetActive. Once the lock is held, nothing in this file
-// can make the registration vanish between that read and the cutover's
-// SetActive, so there is no real interleaving left to race for; this forces
-// the store's answer directly instead, to prove the handler holds on its own
-// if SetActive were ever to report it flipped nothing — the same
-// unchecked-UPDATE hole the file's header describes, now closed on the write
-// side rather than only guarded on the read side.
+// TestGitHubAppCutover_SetActiveReportsNoRow: if SetActive inside the lock
+// reports it flipped nothing, the cutover fails before its PAT delete runs,
+// which would otherwise strand the org with no credential.
 func TestGitHubAppCutover_SetActiveReportsNoRow(t *testing.T) {
 	keyring.MockInit()
 	runmode.SetForTest(t, runmode.ModeLocal)
@@ -860,37 +740,6 @@ func TestGitHubAppCutover_SetActiveReportsNoRow(t *testing.T) {
 
 // --- switch to PAT -------------------------------------------------------
 
-// TestGitHubAccessSwitchToPAT_Success validates the PAT, stores it, and tears
-// the App down (row + installations + secrets).
-func TestGitHubAccessSwitchToPAT_Success(t *testing.T) {
-	keyring.MockInit()
-	runmode.SetForTest(t, runmode.ModeLocal)
-	s := newTestServer(t)
-	stub := newGitHubAccessStub(t, ghAccessStub{login: "octocat"})
-	setOrgGitHubBase(t, s, stub.URL)
-	seedLocalApp(t, s, true)
-	seedInstallation(t, s, 1, "acme")
-
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/pat/switch-to", map[string]string{"pat": "ghp_valid"})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("switch-to-pat = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-
-	ctx := context.Background()
-	if app, _ := s.githubApps.GetForOrgSystem(ctx, runmode.LocalDefaultOrgID); app != nil {
-		t.Errorf("app survived switch-to-pat: %+v", app)
-	}
-	if insts, _ := s.githubApps.ListInstallationsForOrgSystem(ctx, runmode.LocalDefaultOrgID); len(insts) != 0 {
-		t.Errorf("installations survived switch-to-pat: %+v", insts)
-	}
-	if v := getSecret(t, s, "github_app_1_pem"); v != "" {
-		t.Errorf("app pem secret survived teardown: %q", v)
-	}
-	if v := getSecret(t, s, integrations.KeyGitHubPAT); v != "ghp_valid" {
-		t.Errorf("PAT = %q after switch, want ghp_valid stored", v)
-	}
-}
-
 // TestGitHubAccessSwitchToPAT_InvalidPAT rejects an unvalidatable token and
 // changes nothing.
 func TestGitHubAccessSwitchToPAT_InvalidPAT(t *testing.T) {
@@ -913,25 +762,9 @@ func TestGitHubAccessSwitchToPAT_InvalidPAT(t *testing.T) {
 	}
 }
 
-func TestGitHubAccessSwitchToPAT_NoApp404(t *testing.T) {
-	keyring.MockInit()
-	runmode.SetForTest(t, runmode.ModeLocal)
-	s := newTestServer(t)
-	stub := newGitHubAccessStub(t, ghAccessStub{login: "octocat"})
-	setOrgGitHubBase(t, s, stub.URL)
-
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/pat/switch-to", map[string]string{"pat": "ghp_valid"})
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("switch-to-pat with no app = %d, want 404; body=%s", rec.Code, rec.Body.String())
-	}
-}
-
-// TestGitHubAccessSwitchToPAT_RegistrationVanishesUnderTheGuard runs a discard
-// through the window auth.ValidateGitHub opens between this handler's 404 guard
-// and its teardown. What survives the window is not just the guard's answer but
-// the row itself — the refs teardownAppSecrets deletes ride on it, so a stale
-// pass tears down secrets by the identity of a registration that no longer
-// exists and reports a 200 for an App it did not remove.
+// TestGitHubAccessSwitchToPAT_RegistrationVanishesUnderTheGuard: a discard lands
+// while the PAT is being validated, so the switch must answer 404 and store no
+// PAT rather than report removing an App it did not remove.
 func TestGitHubAccessSwitchToPAT_RegistrationVanishesUnderTheGuard(t *testing.T) {
 	keyring.MockInit()
 	runmode.SetForTest(t, runmode.ModeLocal)
@@ -1051,12 +884,9 @@ func TestGitHubAppCutoverPreflight_Diff(t *testing.T) {
 	}
 }
 
-// TestBuildAccessDiff_MatchesTrackedReposByGitHubID pins the membership rule
-// both preflights share. A repository GitHub renamed before TF applied the
-// rename is reachable under its new name, because the ids agree. A tracked
-// name GitHub has given to another repository is dark, because the ids do
-// not. Only a tracked row with no GitHub id is matched by name, and each dark
-// entry names the registry row it is.
+// TestBuildAccessDiff_MatchesTrackedReposByGitHubID: both preflights match a
+// tracked repository by GitHub id (a rename stays reachable, a reused name is
+// dark), by name only when the row has no id, and name each dark registry row.
 func TestBuildAccessDiff_MatchesTrackedReposByGitHubID(t *testing.T) {
 	tracked := []domain.TrackedRepoTeams{
 		{RepositoryID: "row-renamed", ExternalID: "10", Owner: "acme", Repo: "old", Teams: []string{"core"}},
@@ -1083,9 +913,7 @@ func TestBuildAccessDiff_MatchesTrackedReposByGitHubID(t *testing.T) {
 // --- App XOR PAT guard ---------------------------------------------------
 
 // TestGitHubPATPut_WithApp409 rejects binding a PAT while an App is registered;
-// the switch flow is the only path between the two. The guard lives on the
-// credential resource now — the bulk settings save can no longer carry a token
-// at all, so it has nothing to guard.
+// the switch flow is the only path between the two.
 func TestGitHubPATPut_WithApp409(t *testing.T) {
 	keyring.MockInit()
 	runmode.SetForTest(t, runmode.ModeLocal)
@@ -1098,12 +926,8 @@ func TestGitHubPATPut_WithApp409(t *testing.T) {
 	}
 }
 
-// TestOrgSettingsSave_CarriesNoCredential proves the bulk settings save can't
-// reach the vault: a body carrying a token is REJECTED (the field is not part
-// of the schema, and strict decoding says so instead of ignoring it) and
-// stores nothing. This is the structural version of the old XOR guard on this
-// route — there is no longer a code path from here to a credential write to
-// guard.
+// TestOrgSettingsSave_CarriesNoCredential: the bulk settings save has no token
+// field, so strict decoding rejects one and nothing reaches the vault.
 func TestOrgSettingsSave_CarriesNoCredential(t *testing.T) {
 	keyring.MockInit()
 	runmode.SetForTest(t, runmode.ModeLocal)
@@ -1122,11 +946,9 @@ func TestOrgSettingsSave_CarriesNoCredential(t *testing.T) {
 
 // --- the bound identity Settings shows next to the token ------------------
 
-// TestOrgSettingsGet_ReportsBoundPATLogin pins the @login the Settings GitHub
-// section renders beside its "Replace token" control. It tracks the LIVE
-// credential: it appears on a bind, re-points on a rotation, and disappears
-// with the token — a name left behind by a since-replaced credential would tell
-// the operator they're about to rotate an account they aren't.
+// TestOrgSettingsGet_ReportsBoundPATLogin: github_pat_login follows the live
+// token, appearing on a bind, re-pointing on a rotation and clearing on unbind,
+// which leaves the org in the PAT class.
 func TestOrgSettingsGet_ReportsBoundPATLogin(t *testing.T) {
 	keyring.MockInit()
 	runmode.SetForTest(t, runmode.ModeLocal)
@@ -1159,12 +981,13 @@ func TestOrgSettingsGet_ReportsBoundPATLogin(t *testing.T) {
 	if got := orgPATLogin(t, s); got != "" {
 		t.Errorf("github_pat_login = %q after unbind, want empty", got)
 	}
+	// The class names the credential system, not whether it holds a credential.
+	assertCredentialClass(t, s, domain.GitHubCredentialClassPAT, "disconnecting the PAT")
 }
 
-// TestGitHubPATBindAndUnbind_RestartGitHubReadinessOnly pins kickGitHubChanged:
-// a PAT bind and a PAT unbind each kick the GitHub poller and mark GitHub poll
-// readiness restarted, and leave Jira's poller and readiness alone — a GitHub
-// credential change does not touch the Jira poller.
+// TestGitHubPATBindAndUnbind_RestartGitHubReadinessOnly: a PAT bind and unbind
+// each kick the GitHub poller and clear GitHub poll readiness, and leave Jira's
+// poller and readiness alone.
 func TestGitHubPATBindAndUnbind_RestartGitHubReadinessOnly(t *testing.T) {
 	keyring.MockInit()
 	runmode.SetForTest(t, runmode.ModeLocal)
@@ -1230,10 +1053,8 @@ func commitGitHubHost(t *testing.T, s *Server, baseURL string) {
 	}
 }
 
-// bindOrgGitHubPAT binds a token the way the product does: commit the host as
-// config, then bind the credential, which validates against the committed
-// value. A test standing up a fake GitHub host has to commit it for the same
-// reason a user does — the route takes no host of its own.
+// bindOrgGitHubPAT commits baseURL as the org's host and then binds the token,
+// which validates against the committed host; the route takes no host itself.
 func bindOrgGitHubPAT(t *testing.T, s *Server, baseURL, pat string) *httptest.ResponseRecorder {
 	t.Helper()
 	commitGitHubHost(t, s, baseURL)
@@ -1242,17 +1063,9 @@ func bindOrgGitHubPAT(t *testing.T, s *Server, baseURL, pat string) *httptest.Re
 
 // --- the host the bind validates against ---------------------------------
 
-// TestGitHubPATPut_ValidatesAgainstTheCommittedHost pins where the bind gets
-// its host: the org's saved GitHub URL, read fresh on every call. Two live
-// stubs stand in for two GitHub deployments, and the committed host moves
-// between the two binds — so a bind that followed anything stickier than the
-// current setting (a cached value, the credential's own copy of the host) would
-// probe the wrong server and resolve the wrong account.
-//
-// It also pins the two things that follow from the host being config rather
-// than credential: the bind writes no host, and the settings row's concurrency
-// token doesn't move — the setup wizard commits the URL a step earlier and
-// holds that token across the bind.
+// TestGitHubPATPut_ValidatesAgainstTheCommittedHost: the bind probes the org's
+// saved GitHub URL, read fresh each call, and writes no settings column, so the
+// settings version the setup wizard holds across the bind does not move.
 func TestGitHubPATPut_ValidatesAgainstTheCommittedHost(t *testing.T) {
 	keyring.MockInit()
 	runmode.SetForTest(t, runmode.ModeLocal)

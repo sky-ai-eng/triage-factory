@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/zalando/go-keyring"
@@ -49,86 +51,30 @@ func orgHasAnthropicKey(t *testing.T, s *Server) bool {
 	return out.HasAnthropicAPIKey
 }
 
-// TestAnthropicPut_ValidKey_StoresAndSetsRef drives the BYOK happy path: a
-// key that validates (stub 200) is stored in the vault under anthropic_api_key,
-// AnthropicAPIKeyRef is set (so has_anthropic_api_key flips true), and the
-// resolver would find it.
-func TestAnthropicPut_ValidKey_StoresAndSetsRef(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
-	ctx := context.Background()
-
-	auth.SetAnthropicModelsURLForTest(t, anthropicModelsStub(t, http.StatusOK).URL)
-
-	rec := doJSON(t, s, http.MethodPut, llmPath("anthropic"), map[string]any{"api_key": "  sk-ant-valid  "})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
-	}
-
-	// Stored under the canonical key — trimmed of the surrounding whitespace.
-	stored, err := s.secrets.Get(ctx, runmode.LocalDefaultOrgID, "anthropic_api_key")
-	if err != nil {
-		t.Fatalf("Get anthropic_api_key: %v", err)
-	}
-	if stored != "sk-ant-valid" {
-		t.Errorf("stored key = %q, want the trimmed key", stored)
-	}
-	if !orgHasAnthropicKey(t, s) {
-		t.Error("has_anthropic_api_key=false after storing a valid key")
-	}
-}
-
-// TestAnthropicPut_BadKey_Returns422_NothingStored pins the rejection path:
-// a key the host rejects (stub 401) is a 422, the message is surfaced, and no
-// secret nor ref is written.
-func TestAnthropicPut_BadKey_Returns422_NothingStored(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
-	ctx := context.Background()
-
-	auth.SetAnthropicModelsURLForTest(t, anthropicModelsStub(t, http.StatusUnauthorized).URL)
-
-	rec := doJSON(t, s, http.MethodPut, llmPath("anthropic"), map[string]any{"api_key": "sk-ant-bad"})
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("status=%d body=%s, want 422", rec.Code, rec.Body.String())
-	}
-	if firstErrorMessage(t, rec) == "" {
-		t.Error("422 carried no error message")
-	}
-
-	stored, _ := s.secrets.Get(ctx, runmode.LocalDefaultOrgID, "anthropic_api_key")
-	if stored != "" {
-		t.Errorf("key stored despite rejection: %q", stored)
-	}
-	if orgHasAnthropicKey(t, s) {
-		t.Error("has_anthropic_api_key=true after a rejected key")
-	}
-}
-
-// TestAnthropicDelete_ClearsStoredKey drives the "use system credentials" path.
-// It is a DELETE, not a blank PUT: a blank secret used to mean "clear the key
-// AND every Bedrock secret", the opposite of what the same blank meant on the
-// Bedrock route, and neither credential had a delete of its own. The blank-key
-// arm is now a 400 naming the field (asserted below), so the destructive intent
-// has exactly one spelling.
+// TestAnthropicDelete_ClearsStoredKey: a bind stores the trimmed key, a blank
+// PUT is a 400 naming api_key that leaves the key in place, and only DELETE
+// clears it. The bind and the clear each record one audit row, and no Bedrock row.
 func TestAnthropicDelete_ClearsStoredKey(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
 	ctx := context.Background()
 
-	// Seed a stored key via the validated path (stub 200).
 	auth.SetAnthropicModelsURLForTest(t, anthropicModelsStub(t, http.StatusOK).URL)
-	if rec := doJSON(t, s, http.MethodPut, llmPath("anthropic"), map[string]any{"api_key": "sk-ant-seed"}); rec.Code != http.StatusOK {
+	if rec := doJSON(t, s, http.MethodPut, llmPath("anthropic"), map[string]any{"api_key": "  sk-ant-seed  "}); rec.Code != http.StatusOK {
 		t.Fatalf("seed status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	stored, err := s.secrets.Get(ctx, runmode.LocalDefaultOrgID, "anthropic_api_key")
+	if err != nil {
+		t.Fatalf("Get anthropic_api_key: %v", err)
+	}
+	if stored != "sk-ant-seed" {
+		t.Errorf("stored key = %q, want the trimmed key", stored)
 	}
 	if !orgHasAnthropicKey(t, s) {
 		t.Fatal("seed did not set has_anthropic_api_key")
 	}
 
-	// A blank key is refused rather than silently destructive.
 	blank := doJSON(t, s, http.MethodPut, llmPath("anthropic"), map[string]any{"api_key": "   "})
 	if blank.Code != http.StatusBadRequest {
 		t.Fatalf("blank key status=%d body=%s, want 400", blank.Code, blank.Body.String())
@@ -143,18 +89,27 @@ func TestAnthropicDelete_ClearsStoredKey(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("clear status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
-	stored, _ := s.secrets.Get(ctx, runmode.LocalDefaultOrgID, "anthropic_api_key")
+	stored, _ = s.secrets.Get(ctx, runmode.LocalDefaultOrgID, "anthropic_api_key")
 	if stored != "" {
 		t.Errorf("key still stored after clear: %q", stored)
 	}
 	if orgHasAnthropicKey(t, s) {
 		t.Error("has_anthropic_api_key=true after clearing")
 	}
+
+	rows := credAuditRows(t, s)
+	findCredAudit(t, rows, domain.AccessActionCredentialSet, domain.CredentialKindAnthropicKey)
+	findCredAudit(t, rows, domain.AccessActionCredentialRemoved, domain.CredentialKindAnthropicKey)
+	for _, r := range rows {
+		if r.Kind == domain.CredentialKindBedrock {
+			t.Errorf("unexpected Bedrock row %+v: Bedrock was never configured", r)
+		}
+	}
 }
 
-// TestAnthropicPut_Unreachable_Returns422 pins that a transport failure
-// (stub closed) surfaces as a 422 on the bind surface (mirroring
-// handleJiraConnect's single-422 shape) and stores nothing.
+// TestAnthropicPut_Unreachable_Returns422: a key the validator cannot confirm
+// is a 422 with a message, and nothing is stored. A key the host rejects takes
+// the same handler path.
 func TestAnthropicPut_Unreachable_Returns422(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -170,34 +125,43 @@ func TestAnthropicPut_Unreachable_Returns422(t *testing.T) {
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status=%d body=%s, want 422", rec.Code, rec.Body.String())
 	}
+	if firstErrorMessage(t, rec) == "" {
+		t.Error("422 carried no error message")
+	}
+	if stored, _ := s.secrets.Get(t.Context(), runmode.LocalDefaultOrgID, "anthropic_api_key"); stored != "" {
+		t.Errorf("key stored despite the failed validation: %q", stored)
+	}
+	if orgHasAnthropicKey(t, s) {
+		t.Error("has_anthropic_api_key=true after a failed validation")
+	}
 }
 
-// TestAnthropicPut_SettingsPatchNoBackDoor pins that the org-settings PATCH
-// is NOT a write path for the key: an anthropic_api_key in that body is
-// REJECTED (strict decoding — the field doesn't exist on the schema) rather
-// than silently ignored, so the only way to set it is the validated resource
-// and a client that tries the back door is told so.
-func TestAnthropicPut_SettingsPatchNoBackDoor(t *testing.T) {
+// TestSettingsPatch_NoLLMCredentialBackDoor: the org settings PATCH has no
+// field for any LLM credential, so naming one is a 400 UNKNOWN_FIELD and
+// nothing is stored. The validated bind routes are the only write path.
+func TestSettingsPatch_NoLLMCredentialBackDoor(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
-	ctx := context.Background()
 
-	rec := patchOrgSettings(t, s, map[string]any{
-		"github_base_url":      "https://github.com",
-		"anthropic_api_key":    "sk-ant-sneaky",
-		"github_poll_interval": "5m0s",
-		"jira_poll_interval":   "5m0s",
-	})
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("settings patch status=%d body=%s, want 400", rec.Code, rec.Body.String())
+	for _, field := range []string{
+		"anthropic_api_key", "aws_bearer_token_bedrock", "aws_access_key_id",
+		"aws_secret_access_key", "bedrock_base_url",
+	} {
+		t.Run(field, func(t *testing.T) {
+			rec := patchOrgSettings(t, s, map[string]any{field: "sneaky", "github_poll_interval": "5m0s"})
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("settings patch status=%d body=%s, want 400", rec.Code, rec.Body.String())
+			}
+			assertFirstError(t, rec, httpx.ReasonUnknownField, field)
+		})
 	}
-	assertFirstError(t, rec, httpx.ReasonUnknownField, "anthropic_api_key")
-	stored, _ := s.secrets.Get(ctx, runmode.LocalDefaultOrgID, "anthropic_api_key")
-	if stored != "" {
-		t.Errorf("the settings PATCH stored the key (back door): %q", stored)
+	for _, k := range append([]string{"anthropic_api_key"}, integrations.BedrockKeys()...) {
+		if got := mustSecret(t, s, k); got != "" {
+			t.Errorf("the settings PATCH stored %s = %q", k, got)
+		}
 	}
-	if orgHasAnthropicKey(t, s) {
-		t.Error("has_anthropic_api_key=true after a settings PATCH (back door)")
+	if view := getOrgBedrockView(t, s); view.Has || view.HasAnthr {
+		t.Errorf("view = %+v after settings PATCHes, want no LLM credential", view)
 	}
 }

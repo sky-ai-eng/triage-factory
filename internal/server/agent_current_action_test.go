@@ -12,15 +12,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestHandleConversations_CurrentAction drives the conversation-list route over
-// one conversation per display state, each carrying a tool call the composition
-// would happily describe. Only the working one gets a line: every other state
-// already says something honest about itself, and the newest tool call on a
-// stopped conversation describes something that is no longer happening.
-//
-// The last case is the other half of the rule — a conversation that IS working
-// but whose newest assistant turn reached for no tool. Absent, not a guess: the
-// client renders the state label instead.
+// TestHandleConversations_CurrentAction pins that only a working conversation
+// carries a current action: a tool call on a stopped one is no longer happening,
+// and a working one whose newest turn called no tool carries none.
 func TestHandleConversations_CurrentAction(t *testing.T) {
 	s := newTestServer(t)
 	store := sqlitestore.New(s.db)

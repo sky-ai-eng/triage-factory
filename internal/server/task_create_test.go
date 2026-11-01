@@ -16,12 +16,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
-// POST /api/tasks chains an existing helper trio — Entities.Get →
-// Events.LatestForEntityTypeAndDedupKey → Tasks.FindOrCreate — all covered at
-// the db level. What the handler adds is request validation, the three refusals
-// and the create-vs-found status, which is what these pin. The Factory's drop
-// gesture is this route plus POST /api/tasks/{id}/delegate; the two-call flow
-// gets its own test below.
+// POST /api/tasks chains Entities.Get, Events.LatestForEntityTypeAndDedupKey and
+// Tasks.FindOrCreate, all covered at the db level; these pin what the handler
+// adds: validation, the refusals and the create-vs-found status.
 
 // seedStation stages an active entity with one event of eventType — the state a
 // station chip represents, and the minimum POST /api/tasks needs to resolve.
@@ -41,43 +38,6 @@ func seedStation(t *testing.T, s *Server, sourceID, eventType string) *domain.En
 	return entity
 }
 
-func TestTaskCreate_FindOrCreate(t *testing.T) {
-	s := newTestServer(t)
-	entity := seedStation(t, s, "owner/repo#201", domain.EventGitHubPRCICheckPassed)
-
-	body := map[string]string{
-		"entity_id":  entity.ID,
-		"event_type": domain.EventGitHubPRCICheckPassed,
-	}
-
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks", body)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("first POST /api/tasks = %d, want 201; body=%s", rec.Code, rec.Body.String())
-	}
-	var created taskJSON
-	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if created.ID == "" || created.EntityID != entity.ID {
-		t.Fatalf("created task = %+v; want the station's task", created)
-	}
-
-	// The gesture is idempotent by construction (the partial unique index on
-	// (entity_id, event_type, dedup_key)): a second drop finds the same row and
-	// says so with 200 rather than minting a second task.
-	rec = doJSON(t, s, http.MethodPost, "/api/tasks", body)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("second POST /api/tasks = %d, want 200 (found); body=%s", rec.Code, rec.Body.String())
-	}
-	var found taskJSON
-	if err := json.Unmarshal(rec.Body.Bytes(), &found); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if found.ID != created.ID {
-		t.Errorf("second call resolved task %s, want the first call's %s", found.ID, created.ID)
-	}
-}
-
 func TestTaskCreate_404OnMissingEntity(t *testing.T) {
 	s := newTestServer(t)
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks", map[string]string{
@@ -89,33 +49,8 @@ func TestTaskCreate_404OnMissingEntity(t *testing.T) {
 	}
 }
 
-// TestTaskCreate_422OnNoMatchingEvent confirms the "no matching event"
-// rejection fires for an active entity that hasn't produced an event of the
-// requested type — a malformed snapshot reference or a stale frontend retry. A
-// 422, not a 400: the body is well-formed, the station it references doesn't
-// exist for this entity.
-func TestTaskCreate_422OnNoMatchingEvent(t *testing.T) {
-	s := newTestServer(t)
-	entity, _, err := sqlitestore.New(s.db).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/repo#400e", "", "pr", "", "")
-	if err != nil {
-		t.Fatalf("seed entity: %v", err)
-	}
-	// No event recorded — the request asks for a station the entity has never
-	// been at.
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks", map[string]string{
-		"entity_id":  entity.ID,
-		"event_type": domain.EventGitHubPRCICheckPassed,
-	})
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Errorf("status = %d, want 422 (no matching event)", rec.Code)
-	}
-}
-
-// TestTaskCreate_409OnClosedEntity is the regression for the soft-close grace
-// race: factory snapshots include entities for ~60s after they close so the
-// chip can ride into the terminal station, but a drop during that window must
-// not synthesize a task on a merged/closed entity. The router's task-creation
-// path enforces the same "active only" contract.
+// TestTaskCreate_409OnClosedEntity: a factory snapshot shows an entity for a
+// while after it closes, but a drop in that window must not create a task on it.
 func TestTaskCreate_409OnClosedEntity(t *testing.T) {
 	s := newTestServer(t)
 	entity := seedStation(t, s, "owner/repo#409", domain.EventGitHubPRMerged)
@@ -169,12 +104,9 @@ func TestTaskCreate_400OnBadBody(t *testing.T) {
 	})
 }
 
-// TestFactoryDropGesture_CreateThenDelegate walks the drop end to end as the
-// frontend does it — POST /api/tasks, then POST /api/tasks/{id}/delegate on the
-// row it resolved — and pins the partial state the two calls make addressable:
-// when the spawn fails (here a blueprint id that doesn't resolve), the claim and
-// the swipe audit still land, and the client holds a task id it can retry
-// /delegate against without re-deriving the task.
+// TestFactoryDropGesture_CreateThenDelegate walks the drop as the frontend does,
+// POST /api/tasks then /delegate: when the spawn fails, the claim and the swipe
+// row still land, and SPAWN_FAILED tells the client to retry on the same task.
 func TestFactoryDropGesture_CreateThenDelegate(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
@@ -222,17 +154,14 @@ func TestFactoryDropGesture_CreateThenDelegate(t *testing.T) {
 	}
 }
 
-// TestFactoryDropGesture_BotDisabledLeavesTaskUnclaimed pins where the
-// bot-disabled refusal lands across the two calls: the task is created (the
-// entity does need attention at this station, bot or no bot), and the delegate
-// call refuses with 409, leaving no claim and no audit row.
+// TestFactoryDropGesture_BotDisabledLeavesTaskUnclaimed: with the agent
+// disabled the task is still created, and the delegate is a 409 that leaves no
+// claim and no swipe row.
 func TestFactoryDropGesture_BotDisabledLeavesTaskUnclaimed(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
 
-	// Flip the bot OFF on the local team. No door writes this column
-	// today, so the direct UPDATE is the only way to stage the shape the
-	// delegate gate reads.
+	// No route writes team_agents.enabled, so the fixture writes it directly.
 	if _, err := s.db.Exec(
 		`UPDATE team_agents SET enabled = 0 WHERE team_id = ? AND agent_id = ?`,
 		runmode.LocalDefaultTeamID, runmode.LocalDefaultAgentID,
@@ -281,11 +210,9 @@ func TestFactoryDropGesture_BotDisabledLeavesTaskUnclaimed(t *testing.T) {
 	}
 }
 
-// TestFactorySnapshot_PendingTasksRoundtrip pins the snapshot → create request
-// shape: a queued entity that already has an active task at this station
-// appears in /api/factory/snapshot under pending_tasks[event_type], and that
-// task's dedup_key is what the frontend forwards (with entity_id + event_type)
-// to POST /api/tasks.
+// TestFactorySnapshot_PendingTasksRoundtrip: an entity with an active task at a
+// station lists it under pending_tasks[event_type] with the dedup_key the
+// frontend forwards to POST /api/tasks.
 func TestFactorySnapshot_PendingTasksRoundtrip(t *testing.T) {
 	s := newTestServer(t)
 

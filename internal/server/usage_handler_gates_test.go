@@ -19,8 +19,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// usageRig is the multi-mode fixture for the Usage spend endpoints (TFAC-478):
-// a real Postgres-backed Server (RLS live) with four actors —
+// usageRig is the multi-mode fixture for the Usage spend endpoints: a real
+// Postgres-backed Server (RLS live) with four actors —
 //
 //   - owner     : org owner + teamA admin (founder).
 //   - orgAdmin  : org admin, member of teamB only (NOT teamA) — exercises the
@@ -302,11 +302,10 @@ func mustDecode(t *testing.T, rec *httptest.ResponseRecorder, out any) {
 	}
 }
 
-// TestUsageAccessLog_GatesAndEntitlement_Postgres pins the EE viewer's two-axis
-// gate under real RLS: the org-admin role gate (403 for a plain member or a mere
-// team admin) AND the FeatureGovernance entitlement (404-and-hide when
-// unlicensed, even for the org admin). The 200 path proves the org-admin read
-// resolves actor/target names across the org.
+// TestUsageAccessLog_GatesAndEntitlement_Postgres pins both gates under real
+// RLS: the org-admin role (403 for a member or a team admin) and the governance
+// entitlement (404 when unlicensed, even for an org admin); the 200 resolves
+// actor and target names across the org.
 func TestUsageAccessLog_GatesAndEntitlement_Postgres(t *testing.T) {
 	r := newUsageRig(t)
 	entitlements.Reset() // start unlicensed regardless of test order

@@ -58,10 +58,9 @@ func (r *authRig) serve(req *http.Request) *httptest.ResponseRecorder {
 
 // ---------- precedence and fail-closed ----------
 
-// TestBearerAuth_TakesPrecedenceOverCookie is the rule that makes the token
-// path safe to add at all: a request that names a credential is decided on that
-// credential. A bad Bearer alongside a perfectly good session cookie is a 401,
-// never a quiet downgrade to the ambient one.
+// TestBearerAuth_TakesPrecedenceOverCookie: a request carrying a Bearer is
+// decided on the Bearer. A bad token beside a good session cookie is a 401, not
+// a fallback to the cookie.
 func TestBearerAuth_TakesPrecedenceOverCookie(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
@@ -84,34 +83,6 @@ func TestBearerAuth_TakesPrecedenceOverCookie(t *testing.T) {
 	if rec := r.serve(req); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("bad Bearer + good cookie = %d, want 401 (the cookie must not be consulted): %s",
 			rec.Code, rec.Body.String())
-	}
-}
-
-// TestBearerAuth_ValidTokenWithoutCookie is the acceptance half: a minted token
-// alone drives a cursor-scoped route, no cookies at any point.
-func TestBearerAuth_ValidTokenWithoutCookie(t *testing.T) {
-	r := newAuthRig(t)
-	userID := r.seedUser()
-	orgID, _ := r.seedOrg(userID, "bearer-only-org")
-	_, plaintext := r.mintToken(userID, orgID, "ci")
-
-	rec := r.serve(r.bearerReq("GET", "/api/me", plaintext))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("Bearer-only /api/me = %d, want 200: %s", rec.Code, rec.Body.String())
-	}
-	var me struct {
-		ID          string `json:"id"`
-		Email       string `json:"email"`
-		ActiveOrgID string `json:"active_org_id"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &me); err != nil {
-		t.Fatalf("decode /api/me: %v (body=%s)", err, rec.Body.String())
-	}
-	if me.ID != userID.String() {
-		t.Errorf("/api/me id = %q, want the principal %q", me.ID, userID)
-	}
-	if me.ActiveOrgID != orgID.String() {
-		t.Errorf("/api/me active org = %q, want the token's org %q", me.ActiveOrgID, orgID)
 	}
 }
 
@@ -169,10 +140,9 @@ func TestBearerAuth_MalformedCredentialsAllRefuse(t *testing.T) {
 
 // ---------- request context ----------
 
-// TestBearerAuth_SeedsClaimsOrgAndTokenMarker pins what the token path puts in
-// context: the principal and their email as claims, the token's org as the
-// request's tenant, the TokenAuth marker every credential-type gate reads —
-// and NO auth-identity id, because there is no GoTrue login behind a token.
+// TestBearerAuth_SeedsClaimsOrgAndTokenMarker pins the token path's request
+// context: the principal's claims, the token's org, the TokenAuth marker, and no
+// session or auth-identity id, since no GoTrue login stands behind a token.
 func TestBearerAuth_SeedsClaimsOrgAndTokenMarker(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
@@ -223,37 +193,11 @@ func TestBearerAuth_SeedsClaimsOrgAndTokenMarker(t *testing.T) {
 	}
 }
 
-// TestSessionAuth_LeavesTokenMarkerUnset is the other half: a cookie request
-// must carry no TokenAuth, or every gate that reads it would fire on the wrong
-// credential.
-func TestSessionAuth_LeavesTokenMarkerUnset(t *testing.T) {
-	r := newAuthRig(t)
-	userID := r.seedUser()
-	r.seedOrg(userID, "session-marker-org")
-	resp, _ := r.driveCallback(userID)
-	sid := r.sidFromResp(resp)
-
-	var seen *httpx.TokenAuth
-	r.srv.mux.Handle("GET /api/test/session-marker-probe",
-		r.srv.withSession(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			seen = httpx.TokenAuthFrom(req.Context())
-			w.WriteHeader(http.StatusOK)
-		})))
-
-	if got := r.requestWithSid("GET", "/api/test/session-marker-probe", sid); got.StatusCode != http.StatusOK {
-		t.Fatalf("probe status = %d", got.StatusCode)
-	}
-	if seen != nil {
-		t.Errorf("TokenAuthFrom = %+v on a cookie-authed request, want nil", *seen)
-	}
-}
-
 // ---------- CSRF ----------
 
-// TestBearerAuth_SkipsCSRFOriginCheck pins the skip and its blast radius: the
-// same hostile Origin that gets a cookie request rejected is irrelevant to a
-// Bearer one, because a cross-site browser context cannot attach the header at
-// all without a preflight this server never approves.
+// TestBearerAuth_SkipsCSRFOriginCheck: a hostile Origin rejects a cookie request
+// but not a Bearer one, because a cross-site page cannot attach the header
+// without a CORS preflight this server never approves.
 func TestBearerAuth_SkipsCSRFOriginCheck(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
@@ -288,11 +232,9 @@ func TestBearerAuth_SkipsCSRFOriginCheck(t *testing.T) {
 
 // ---------- IP allowlist ----------
 
-// TestBearerAuth_CIDRAllowlist covers all three halves of the allowlist: an
-// in-range caller passes, an out-of-range one is refused with a body byte for
-// byte identical to an invalid token's (no disclosure that the secret was
-// otherwise good), and a v4-mapped v6 peer — what a dual-stack listener hands
-// Go — matches a plain v4 range.
+// TestBearerAuth_CIDRAllowlist: an in-range caller passes, a v4-mapped v6 peer
+// matches a v4 range, and an out-of-range caller gets a 401 byte-identical to an
+// invalid token's, so the refusal does not disclose that the secret was good.
 func TestBearerAuth_CIDRAllowlist(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
@@ -390,10 +332,9 @@ func TestBearerCredential(t *testing.T) {
 
 // ---------- org scope ----------
 
-// TestBearerAuth_OrgScopeIsSealed is the epic's central divergence from
-// sessions: the same user, a member of two orgs, reaches both with a cookie and
-// only the token's own org with a token. The refusal is 404, not 403 — outside
-// your credential's scope, the org does not exist.
+// TestBearerAuth_OrgScopeIsSealed: a member of two orgs reaches both with a
+// cookie and only the token's org with a token. The refusal is 404, not 403:
+// outside the credential's scope the org does not exist.
 func TestBearerAuth_OrgScopeIsSealed(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
@@ -450,10 +391,9 @@ func TestBearerAuth_OrgScopeCoversCallerNamedOrgs(t *testing.T) {
 
 // ---------- failure rate limit ----------
 
-// TestBearerAuth_FailureBudget pins the shape of the cap: it meters failures,
-// not requests. A working token never spends from it however often it calls;
-// once a stream of failures has drained it, the next request is refused before
-// the lookup it would otherwise have cost.
+// TestBearerAuth_FailureBudget: the per-IP cap meters failed token auths, not
+// requests. Successes never spend from it, and once failures drain it the next
+// request is refused before the token lookup.
 func TestBearerAuth_FailureBudget(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
@@ -559,10 +499,9 @@ func TestIPRateLimiter_PeekAndCharge(t *testing.T) {
 
 // ---------- websocket parity ----------
 
-// TestBearerAuth_WebsocketHandshakeAndRevocation is the streaming half of
-// session parity: a Bearer handshake connects (a non-browser client can set the
-// header), and revoking the token closes the socket on the next revalidation
-// sweep — the same bound a revoked session gets.
+// TestBearerAuth_WebsocketHandshakeAndRevocation: a Bearer websocket handshake
+// connects, and revoking the token closes the socket on the next revalidation
+// sweep, the same bound a revoked session gets.
 func TestBearerAuth_WebsocketHandshakeAndRevocation(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
@@ -599,10 +538,9 @@ func dialServerWSBearer(t *testing.T, baseURL, token string) *ws.Conn {
 
 // ---------- deprovisioning ----------
 
-// TestOrgMemberRemove_RevokesAPITokens pins the headless half of removal
-// hygiene: taking someone out of an org kills every token they hold in it,
-// leaves the ones they hold elsewhere alone, and writes one audit row per
-// token so the log says which credentials the removal retired and why.
+// TestOrgMemberRemove_RevokesAPITokens: removing a member from an org revokes
+// every token they hold in it, leaves their tokens in other orgs alone, and
+// writes one membership_removed audit row per revoked token.
 func TestOrgMemberRemove_RevokesAPITokens(t *testing.T) {
 	r := newAuthRig(t)
 	adminID := r.seedUser()

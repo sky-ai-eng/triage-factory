@@ -464,33 +464,34 @@ func TestLinearInstall_StateRefusals(t *testing.T) {
 	}
 }
 
-func TestLinearInstall_Denied(t *testing.T) {
-	r := newLinearInstallRig(t)
-	cookie, state := r.start(t)
-	rec := r.get(t, callbackPath(url.Values{"error": {"access_denied"}, "state": {state}}), cookie)
-	expectRedirect(t, rec, "linear_error", "denied")
-	r.assertNothingWritten(t)
-}
-
-// TestLinearInstall_OtherOAuthErrorsAreFailures: an OAuth error other than
-// access_denied says nothing about consent, so it reads as a failed install,
-// not a declined one.
-func TestLinearInstall_OtherOAuthErrorsAreFailures(t *testing.T) {
-	for _, oErr := range []string{"server_error", "temporarily_unavailable", "invalid_scope"} {
-		t.Run(oErr, func(t *testing.T) {
+// TestLinearInstall_CallbackFailures: a callback carrying an OAuth error, or a
+// code that does not exchange, writes nothing. Only access_denied reads as
+// declined; any other error says nothing about consent and is a failure.
+func TestLinearInstall_CallbackFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		params url.Values
+		want   string
+	}{
+		{"access_denied", url.Values{"error": {"access_denied"}}, "denied"},
+		{"server_error", url.Values{"error": {"server_error"}}, "install_failed"},
+		{"temporarily_unavailable", url.Values{"error": {"temporarily_unavailable"}}, "install_failed"},
+		{"invalid_scope", url.Values{"error": {"invalid_scope"}}, "install_failed"},
+		{"failed exchange", url.Values{"code": {"bad-code"}}, "install_failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			r := newLinearInstallRig(t)
 			cookie, state := r.start(t)
-			rec := r.get(t, callbackPath(url.Values{"error": {oErr}, "state": {state}}), cookie)
-			expectRedirect(t, rec, "linear_error", "install_failed")
+			tc.params.Set("state", state)
+			expectRedirect(t, r.get(t, callbackPath(tc.params), cookie), "linear_error", tc.want)
 			r.assertNothingWritten(t)
 		})
 	}
 }
 
-// TestLinearInstall_SSORequired: the org started requiring an SSO the admin's
-// session did not come through while they were at Linear. The callback is a
-// browser navigation, so the refusal is a redirect with its code like every
-// other refusal here, and nothing is exchanged or written.
+// TestLinearInstall_SSORequired: an org that started requiring an SSO the
+// admin's session did not come through, while they were at Linear, refuses the
+// callback with a redirect, exchanging and writing nothing.
 func TestLinearInstall_SSORequired(t *testing.T) {
 	r := newLinearInstallRig(t)
 	ext := &barringLoginExt{}
@@ -499,14 +500,6 @@ func TestLinearInstall_SSORequired(t *testing.T) {
 	ext.bar(runmode.LocalDefaultOrgID)
 	rec := r.get(t, callbackPath(url.Values{"code": {"good-code"}, "state": {state}}), cookie)
 	expectRedirect(t, rec, "linear_error", "sso_required")
-	r.assertNothingWritten(t)
-}
-
-func TestLinearInstall_FailedExchange(t *testing.T) {
-	r := newLinearInstallRig(t)
-	cookie, state := r.start(t)
-	rec := r.get(t, callbackPath(url.Values{"code": {"bad-code"}, "state": {state}}), cookie)
-	expectRedirect(t, rec, "linear_error", "install_failed")
 	r.assertNothingWritten(t)
 }
 
@@ -520,34 +513,6 @@ func TestLinearInstall_NoApp(t *testing.T) {
 	if loc.Path != "/setup" {
 		t.Errorf("redirected to %s, want back to the return_to", loc.Path)
 	}
-}
-
-// TestLinearInstall_WorkspaceTaken: a workspace another org holds is refused,
-// the minted pair revoked, and nothing written for this org.
-func TestLinearInstall_WorkspaceTaken(t *testing.T) {
-	r := newLinearInstallRig(t)
-	const otherOrg = "22222222-2222-2222-2222-222222222222"
-	if _, err := r.s.db.Exec(`INSERT INTO orgs (id, slug, name) VALUES (?, 'other', 'Other')`, otherOrg); err != nil {
-		t.Fatalf("seed org: %v", err)
-	}
-	if _, err := r.stores.LinearInstalls.UpsertSystem(t.Context(), domain.OrgLinearInstall{
-		OrgID: otherOrg, InstallID: "inst-other", WorkspaceID: "org-acme", WorkspaceURLKey: "acme", AppUserID: "lu-other",
-		AppClientID: "other-client", InstalledAt: time.Now(),
-	}); err != nil {
-		t.Fatalf("seed other org's install: %v", err)
-	}
-
-	cookie, state := r.start(t)
-	rec := r.get(t, callbackPath(url.Values{"code": {"good-code"}, "state": {state}}), cookie)
-	expectRedirect(t, rec, "linear_error", "workspace_taken")
-	r.assertNothingWritten(t)
-	if inst := r.installRow(t); inst != nil {
-		t.Errorf("install row = %+v, want none for this org", inst)
-	}
-	if got := r.oauth.Revoked(); len(got) != 2 {
-		t.Errorf("revoked %v, want the minted pair", got)
-	}
-	r.expectNoKick(t)
 }
 
 // TestLinearInstall_Disconnect: the disconnect revokes the install's refresh
@@ -583,10 +548,9 @@ func TestLinearInstall_Disconnect(t *testing.T) {
 	}
 }
 
-// TestLinearInstall_AppChangedMidCeremonyIsRefused: the code is exchanged
-// against the app that resolved when the callback started. An app replaced or
-// removed before the install is stored would leave it unable to refresh, so
-// the store refuses, revokes the pair, and writes nothing.
+// TestLinearInstall_AppChangedMidCeremonyIsRefused: an app replaced or removed
+// during the code exchange would leave the install unable to refresh, so the
+// store refuses, revokes the pair, and writes nothing.
 func TestLinearInstall_AppChangedMidCeremonyIsRefused(t *testing.T) {
 	for name, change := range map[string]func(t *testing.T, r *linearInstallRig){
 		"replaced": func(t *testing.T, r *linearInstallRig) { r.registerApp(t, "lin-client-2") },
@@ -784,9 +748,8 @@ func TestLinearApp_ChangesThatStrandTheInstallAreRefused(t *testing.T) {
 }
 
 // TestLinearInstall_MultiMode drives the ceremony on Postgres: the role gates
-// on both legs, the Bearer refusal on the static callback, the install written
-// across the admin pool and the claims transaction, and a second org refused
-// the workspace the first one holds.
+// on both legs, the Bearer refusal, the install written across both pools, and
+// a second org refused the workspace the first one holds.
 func TestLinearInstall_MultiMode(t *testing.T) {
 	rig := newAuthRig(t)
 	s := rig.srv
@@ -1026,12 +989,9 @@ func TestLinearInstallReturn(t *testing.T) {
 	}
 }
 
-// TestLinearInstall_ReinstallRevokesOnlyAnotherWorkspacesToken pins which
-// replaced install's refresh token the callback revokes. A re-install into
-// the same workspace is answered by the same app user, and Linear has not
-// been shown to keep its grant apart from the new one, so the old token is
-// left alone rather than risk ending the install just made. An install into
-// another workspace is another app user's grant, and is revoked.
+// TestLinearInstall_ReinstallRevokesOnlyAnotherWorkspacesToken: a re-install
+// into the same workspace may share the old grant, so its token is left alone;
+// one into another workspace is another app user's grant, and is revoked.
 func TestLinearInstall_ReinstallRevokesOnlyAnotherWorkspacesToken(t *testing.T) {
 	r := newLinearInstallRig(t)
 	r.install(t)

@@ -20,9 +20,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// listedTask is the slice of the task payload these tests assert on. The full
-// shape is pinned by the handler's own taskJSON; here we only care about which
-// rows came back, in what order.
+// listedTask is the slice of the task payload these tests assert on: which rows
+// came back, in what order.
 type listedTask struct {
 	ID     string `json:"id"`
 	Status string `json:"status"`
@@ -34,19 +33,15 @@ type taskListBody struct {
 	TotalCount    int          `json:"total_count"`
 }
 
-// postTaskList calls POST /api/tasks/list, asserts a 200, and decodes the
-// envelope.
+// postTaskList calls POST /api/tasks/list and decodes the envelope, failing
+// on a non-200, a null items list or a null total_count.
 func postTaskList(t *testing.T, s *Server, body map[string]any) taskListBody {
 	t.Helper()
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/list", body)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	page := decodeList[listedTask](t, doJSON(t, s, http.MethodPost, "/api/tasks/list", body))
+	if page.TotalCount == nil {
+		t.Fatalf("total_count is null")
 	}
-	var out taskListBody
-	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-		t.Fatalf("decode list envelope: %v (body=%s)", err, rec.Body.String())
-	}
-	return out
+	return taskListBody{Items: page.Items, NextPageToken: page.NextPageToken, TotalCount: *page.TotalCount}
 }
 
 func listedIDs(page taskListBody) []string {
@@ -77,11 +72,9 @@ type taskFixture struct {
 	inQueue bool
 }
 
-// seedTaskFixture inserts an entity + event + task for one fixture and returns
-// the task id. It writes the tasks row directly because several of these
-// states (a future snooze window, a closed_at in the past) have no store
-// method that produces them, and the point of the fixture set is the states
-// the queue filter has to exclude.
+// seedTaskFixture inserts an entity, event and task for one fixture and returns
+// the task id, writing the row directly because states such as a future snooze
+// or a past closed_at have no store method that produces them.
 func seedTaskFixture(t *testing.T, database *sql.DB, f taskFixture) string {
 	t.Helper()
 	now := time.Now().UTC()
@@ -136,7 +129,7 @@ func seedTaskFixture(t *testing.T, database *sql.DB, f taskFixture) string {
 }
 
 // queueProjectionBody is the body the triage deck and the board's Queued
-// column send — the filter set that replaced GET /api/queue.
+// column send.
 func queueProjectionBody() map[string]any {
 	return map[string]any{
 		"statuses":        []string{"queued"},
@@ -145,19 +138,9 @@ func queueProjectionBody() map[string]any {
 	}
 }
 
-// TestTaskList_QueueProjectionParity is the regression net for the alias
-// divergence this route retires. GET /api/queue and GET /api/tasks?status=queued
-// answered the same nominal filter with different hidden ones — the latter
-// returned claimed and future-snoozed rows the queue view hides — and the fix
-// is only real if the surviving route reproduces the *queue's* answer exactly.
-//
-// The oracle is the removed /api/queue store query, verbatim: the fixture set
-// spans every state the two spellings disagreed on (claimed by a user, claimed
-// by the bot, snoozed into the future, snoozed in the past, terminal), and the
-// new route's queue projection must return the same task set the old SQL does.
-// Sets, not sequences: the old ORDER BY had no id tiebreaker, so its order
-// among rows tying on every key was never defined (which is the bug the new
-// ordering fixes).
+// TestTaskList_QueueProjectionParity: the queue projection returns exactly the
+// pickable rows across every state that could leak in (held, snoozed into the
+// future or past, terminal), checked against the queue's definition in SQL too.
 func TestTaskList_QueueProjectionParity(t *testing.T) {
 	s := newTestServer(t)
 	past := time.Now().UTC().Add(-2 * time.Hour)
@@ -171,9 +154,7 @@ func TestTaskList_QueueProjectionParity(t *testing.T) {
 		// projection has nothing to exclude.
 		{name: "user-claimed", status: "in_progress", claimedUser: true},
 		{name: "bot-claimed", status: "in_progress", claimedBot: true},
-		// A queued row still inside a snooze window: the defensive half of
-		// the old filter, and the state ?status=queued surfaced and
-		// /api/queue didn't.
+		// A queued row still inside a snooze window.
 		{name: "queued-snoozed-future", status: "queued", snoozeUntil: &future},
 		{name: "snoozed-future", status: "snoozed", snoozeUntil: &future},
 		{name: "snoozed-past", status: "snoozed", snoozeUntil: &past},
@@ -196,9 +177,9 @@ func TestTaskList_QueueProjectionParity(t *testing.T) {
 		t.Errorf("queue projection = %v, want %v", got, wantQueue)
 	}
 
-	// The oracle: the exact query GET /api/queue ran, as it stood before this
-	// route replaced it. Any drift in the new filter's meaning shows up here
-	// even if the hand-written expectation above drifted with it.
+	// The oracle: the queue's definition as SQL, so a drift in the filter shows
+	// up even if the hand-written expectation drifted with it. It is compared
+	// as a set, since its ORDER BY has no id tiebreaker.
 	rows, err := s.db.Query(`
 		SELECT t.id
 		FROM tasks t
@@ -232,7 +213,7 @@ func TestTaskList_QueueProjectionParity(t *testing.T) {
 	}
 	slices.Sort(oracle)
 	if !slices.Equal(got, oracle) {
-		t.Errorf("queue projection = %v, old /api/queue query = %v", got, oracle)
+		t.Errorf("queue projection = %v, oracle query = %v", got, oracle)
 	}
 }
 
@@ -258,9 +239,8 @@ func TestTaskList_ShowSnoozedProjection(t *testing.T) {
 	}
 }
 
-// TestTaskList_ClosedSinceIsExplicit pins that the seven-day window the old
-// done column applied behind the caller's back is now the caller's to pass.
-// No hidden default: without closed_since, an old closure still lists.
+// TestTaskList_ClosedSinceIsExplicit: the done lane has no hidden window, so an
+// old closure lists until the caller passes closed_since, in either precision.
 func TestTaskList_ClosedSinceIsExplicit(t *testing.T) {
 	s := newTestServer(t)
 	old := time.Now().UTC().AddDate(0, 0, -30)
@@ -300,48 +280,9 @@ func TestTaskList_ClosedSinceIsExplicit(t *testing.T) {
 	}
 }
 
-// TestTaskList_PageTokenRoundTrip walks a result set page by page: each page
-// carries the filtered total, the token addresses the next window, and the
-// last page carries no token at all.
-func TestTaskList_PageTokenRoundTrip(t *testing.T) {
-	s := newTestServer(t)
-	for i := range 3 {
-		seedTaskFixture(t, s.db, taskFixture{name: fmt.Sprintf("page-%d", i), status: "queued"})
-	}
-
-	body := queueProjectionBody()
-	body["page_size"] = 2
-	first := postTaskList(t, s, body)
-	if len(first.Items) != 2 || first.TotalCount != 3 {
-		t.Fatalf("first page = %d items / total %d, want 2 / 3", len(first.Items), first.TotalCount)
-	}
-	if first.NextPageToken == "" {
-		t.Fatal("first page carries no next_page_token but two of three rows were returned")
-	}
-
-	body["page_token"] = first.NextPageToken
-	second := postTaskList(t, s, body)
-	if len(second.Items) != 1 || second.TotalCount != 3 {
-		t.Fatalf("second page = %d items / total %d, want 1 / 3", len(second.Items), second.TotalCount)
-	}
-	if second.NextPageToken != "" {
-		t.Errorf("last page carries next_page_token %q, want it absent", second.NextPageToken)
-	}
-
-	walked := append(listedIDs(first), listedIDs(second)...)
-	body["page_size"] = 50
-	delete(body, "page_token")
-	whole := listedIDs(postTaskList(t, s, body))
-	if !slices.Equal(walked, whole) {
-		t.Errorf("paged walk = %v, want %v (pages must partition the total order)", walked, whole)
-	}
-}
-
-// TestTaskList_PageTokenSurvivesTheLaneMoving is what this route pages by
-// keyset for. A lane mutates while it is being read — a run finishes and its
-// card leaves, a poll mints a task at the head of the queue — and the board
-// fetches the next page on scroll with no way to re-ask, so a row an offset
-// page skipped is simply never shown.
+// TestTaskList_PageTokenSurvivesTheLaneMoving: the token is a keyset position,
+// so a row leaving the lane above it does not shift page 2, which the board
+// fetches on scroll with no way to re-ask for a skipped row.
 func TestTaskList_PageTokenSurvivesTheLaneMoving(t *testing.T) {
 	s := newTestServer(t)
 	for i := range 7 {
@@ -383,24 +324,17 @@ func TestTaskList_PageTokenSurvivesTheLaneMoving(t *testing.T) {
 	}
 }
 
-// TestTaskList_OffsetTokenIsRefused pins the decision on the token form this
-// route used to mint: an offset-form token is refused, not honored.
-//
-// It would otherwise still work — the stores keep offset paging for the routes
-// that use it — and that is the reason to refuse it rather than a reason to
-// accept it: honoring one leaves this route an input that makes it page by
-// offset, which is the drop-and-repeat behavior it was converted to stop
-// doing. Nobody is stranded by this. The SPA ships inside this binary, so
-// there is no old client to bridge to, and a headless caller mid-walk across a
-// restart restarts one request earlier with paging that is actually correct.
+// TestTaskList_OffsetTokenIsRefused: an offset-form token, which the stores
+// would still honor for other routes, is a 400 here, so nothing can make this
+// route page by offset; its own keyset tokens still walk it.
 func TestTaskList_OffsetTokenIsRefused(t *testing.T) {
 	s := newTestServer(t)
 	for i := range 5 {
 		seedTaskFixture(t, s.db, taskFixture{name: fmt.Sprintf("offtok-%d", i), status: "queued"})
 	}
 
-	// The token a client minted against the pre-keyset route: the same opaque
-	// envelope, fingerprinted for this very query, carrying an offset.
+	// The same opaque envelope, fingerprinted for this very query, carrying an
+	// offset.
 	fingerprint := httpx.FilterFingerprint(taskListFilterKey{
 		Statuses:      []string{"queued"},
 		OnlyUnclaimed: true,
@@ -432,10 +366,9 @@ func TestTaskList_OffsetTokenIsRefused(t *testing.T) {
 	}
 }
 
-// TestTaskList_UnusablePageTokenIsA400 pins the fault class for a token this
-// build could not have minted — a keyset whose terms don't fit the order it
-// names. It reaches the store, which is the only place that knows the tuple,
-// and comes back as a bad page_token rather than a server fault.
+// TestTaskList_UnusablePageTokenIsA400: a keyset whose terms do not fit its
+// order reaches the store, the only place that knows the tuple, and comes back
+// as a bad page_token rather than a server fault.
 func TestTaskList_UnusablePageTokenIsA400(t *testing.T) {
 	s := newTestServer(t)
 	seedTaskFixture(t, s.db, taskFixture{name: "badtok", status: "queued"})
@@ -458,29 +391,6 @@ func TestTaskList_UnusablePageTokenIsA400(t *testing.T) {
 	assertFirstError(t, rec, "INVALID_PARAM", "page_token")
 }
 
-// TestTaskList_EmptyResult pins the envelope for a filter that matches
-// nothing: an empty items list (not null), no token, zero total.
-func TestTaskList_EmptyResult(t *testing.T) {
-	s := newTestServer(t)
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/list", map[string]any{"statuses": []string{"dismissed"}})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if string(raw["items"]) != "[]" {
-		t.Errorf("items = %s, want [] (never null — clients iterate it unguarded)", raw["items"])
-	}
-	if _, present := raw["next_page_token"]; present {
-		t.Errorf("next_page_token present on an empty result: %s", raw["next_page_token"])
-	}
-	if string(raw["total_count"]) != "0" {
-		t.Errorf("total_count = %s, want 0", raw["total_count"])
-	}
-}
-
 // TestTaskList_StrictBody is the negative space: every malformed filter is
 // rejected with the field named, never resolved to a default. A corrupt filter
 // that silently widens a result set is the failure this contract forbids.
@@ -498,21 +408,16 @@ func TestTaskList_StrictBody(t *testing.T) {
 			wantField:  "statuses",
 		},
 		{
-			// An ex-status is an unknown one: 'in_review' left the
-			// vocabulary, so a stale client asking for that lane is told
-			// which field is wrong rather than handed an empty page it
-			// would read as "nothing in review".
+			// 'in_review' is outside the vocabulary, so asking for it names
+			// the field rather than answering an empty page.
 			name:       "retired status",
 			body:       map[string]any{"statuses": []string{"in_review"}},
 			wantReason: "INVALID_FIELD",
 			wantField:  "statuses",
 		},
 		{
-			// 'claimed' named the claim axis rather than a lane. A claim is
-			// the stage marker now — it lands the row in progress — so the
-			// vocabulary is five lifecycle statuses and nothing else, and a
-			// client still asking for that projection is told the field is
-			// wrong rather than handed the empty page it can never fill.
+			// 'claimed' is a claim, not a lane: the vocabulary is the five
+			// lifecycle statuses.
 			name:       "retired claim projection",
 			body:       map[string]any{"statuses": []string{"claimed"}},
 			wantReason: "INVALID_FIELD",
@@ -654,52 +559,9 @@ func TestTaskList_StrictBody(t *testing.T) {
 	})
 }
 
-// TestTaskList_TokenIsBoundToItsFilters pins the token/filter binding: page 2
-// of one query cannot be requested with page 1's token of another. Without it
-// the offset would silently address a different result set and the caller
-// would page through rows it never asked for.
-func TestTaskList_TokenIsBoundToItsFilters(t *testing.T) {
-	s := newTestServer(t)
-	for i := range 3 {
-		seedTaskFixture(t, s.db, taskFixture{name: fmt.Sprintf("bound-%d", i), status: "queued"})
-	}
-
-	body := queueProjectionBody()
-	body["page_size"] = 2
-	token := postTaskList(t, s, body).NextPageToken
-	if token == "" {
-		t.Fatal("no token minted for a partial page")
-	}
-
-	// Same route, different filters, that token: refused.
-	other := map[string]any{
-		"statuses":   []string{"queued"},
-		"page_size":  2,
-		"page_token": token,
-	}
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/list", other)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
-	}
-	assertFirstError(t, rec, "INVALID_PARAM", "page_token")
-
-	// The same filters spelled differently — a reordered, duplicated status
-	// list — are the same query, so the token still works.
-	sameQuery := map[string]any{
-		"statuses":        []string{"queued", "queued"},
-		"only_unclaimed":  true,
-		"include_snoozed": false,
-		"page_size":       2,
-		"page_token":      token,
-	}
-	if page := postTaskList(t, s, sameQuery); len(page.Items) != 1 {
-		t.Errorf("second page under an equivalent filter spelling = %d items, want 1", len(page.Items))
-	}
-}
-
-// TestTaskList_CreatedSinceAndSources covers the two flow filters together
-// with the count-only page they exist to serve: "how many tasks arrived from
-// this source in this window" is one request with no rows in the answer.
+// TestTaskList_CreatedSinceAndSources: sources and created_since narrow the
+// list, and with page_size 0 answer "how many arrived from this source in this
+// window" with no rows and no token.
 func TestTaskList_CreatedSinceAndSources(t *testing.T) {
 	s := newTestServer(t)
 	a := seedTaskFixture(t, s.db, taskFixture{name: "flow-a", status: "queued"})
@@ -736,11 +598,9 @@ func TestTaskList_CreatedSinceAndSources(t *testing.T) {
 	}
 }
 
-// TestTaskList_SearchNarrowsTheCountItReports is the whole reason search moved
-// to the server: the lane's `N of M` tail has to answer the query the items
-// came from. A client-side filter leaves M counting the unfiltered lane while
-// the rows above it are filtered, and a match on an unfetched page is invisible
-// with no Load-more button left to reach it.
+// TestTaskList_SearchNarrowsTheCountItReports: search narrows the rows and the
+// total_count alike, so the lane's `N of M` answers the query; the needle is
+// trimmed, and a blank one is no filter.
 func TestTaskList_SearchNarrowsTheCountItReports(t *testing.T) {
 	s := newTestServer(t)
 	hit := seedTaskFixture(t, s.db, taskFixture{name: "searchable-widget", status: "queued"})
@@ -773,9 +633,8 @@ func TestTaskList_SearchNarrowsTheCountItReports(t *testing.T) {
 	}
 }
 
-// TestTaskList_EventTypesAndCreatedBefore covers the two remaining filters:
-// the station set, and the upper half of the created window whose lower half
-// already shipped.
+// TestTaskList_EventTypesAndCreatedBefore: event_types narrows to the station
+// set, and created_before bounds the created window alone or with created_since.
 func TestTaskList_EventTypesAndCreatedBefore(t *testing.T) {
 	s := newTestServer(t)
 	a := seedTaskFixture(t, s.db, taskFixture{name: "et-a", status: "queued"})
@@ -788,8 +647,8 @@ func TestTaskList_EventTypesAndCreatedBefore(t *testing.T) {
 		t.Errorf("event_types on the seeded station returned %v, want both %s and %s", got, a, b)
 	}
 	page = postTaskList(t, s, map[string]any{"event_types": []string{domain.EventGitHubPRReviewRequested}})
-	if len(page.Items) != 0 || page.TotalCount != 0 {
-		t.Errorf("event_types on an unused station = %+v, want an empty page", page)
+	if len(page.Items) != 0 || page.TotalCount != 0 || page.NextPageToken != "" {
+		t.Errorf("event_types on an unused station = %+v, want an empty page with no token", page)
 	}
 
 	past := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
@@ -806,9 +665,8 @@ func TestTaskList_EventTypesAndCreatedBefore(t *testing.T) {
 	}
 }
 
-// TestTaskList_SortReordersTheLane pins what a sort key may and may not move:
-// it reorders the rows of a lane, and it never displaces the lane structure or
-// the id tiebreaker underneath it.
+// TestTaskList_SortReordersTheLane: a sort key reorders a lane's rows (desc by
+// default) but never the lane structure, so a snoozed row stays last.
 func TestTaskList_SortReordersTheLane(t *testing.T) {
 	s := newTestServer(t)
 	// seedTaskFixture builds the entity title out of the name, so these are
@@ -861,10 +719,9 @@ func TestTaskList_SortReordersTheLane(t *testing.T) {
 	}
 }
 
-// TestTaskList_TokenIsBoundToItsSearchAndSort extends the token/filter binding
-// to the fields this route just gained: an offset addresses a position in an
-// ordering, so a token minted under one search or sort names different rows
-// under another.
+// TestTaskList_TokenIsBoundToItsSearchAndSort: a token names a position in one
+// query, so it is refused under other filters, another search or another sort,
+// and accepted under another spelling of the same query.
 func TestTaskList_TokenIsBoundToItsSearchAndSort(t *testing.T) {
 	s := newTestServer(t)
 	for i := range 3 {
@@ -901,6 +758,15 @@ func TestTaskList_TokenIsBoundToItsSearchAndSort(t *testing.T) {
 		"search": "BOUND-SEARCH", "page_size": 1, "page_token": searchToken,
 	}); len(page.Items) != 1 {
 		t.Errorf("second page under a differently-cased needle = %d items, want 1", len(page.Items))
+	}
+
+	// A duplicated status list is the same query; a different filter set is not.
+	statusToken := mint(map[string]any{"statuses": []string{"queued"}, "only_unclaimed": true})
+	refused(map[string]any{"statuses": []string{"queued"}}, statusToken)
+	if page := postTaskList(t, s, map[string]any{
+		"statuses": []string{"queued", "queued"}, "only_unclaimed": true, "page_size": 1, "page_token": statusToken,
+	}); len(page.Items) != 1 {
+		t.Errorf("second page under an equivalent filter spelling = %d items, want 1", len(page.Items))
 	}
 
 	sortToken := mint(map[string]any{"sort_key": "title", "sort_dir": "asc"})
@@ -953,12 +819,9 @@ func seedDraftPR(t *testing.T, database *sql.DB, conversationID string) {
 		id, conversationID, runmode.LocalDefaultTeamID, id)
 }
 
-// TestTaskList_AttentionOrderSurvivesPaging is the reason the attention tier
-// had to move server-side: the client's re-sort could only reorder the page it
-// held, so a needs-you card that the server's order put on page two stayed
-// there. The lane below is staged so priority alone would do exactly that —
-// both needs-you rows carry the LOWEST priority in the lane — and page one
-// holds them anyway.
+// TestTaskList_AttentionOrderSurvivesPaging: the needs-you tier orders the lane
+// on the server, so both needs-you rows, the lowest priority in the lane, fill
+// page 1, and the last page carries the total and no token.
 func TestTaskList_AttentionOrderSurvivesPaging(t *testing.T) {
 	s := newTestServer(t)
 	priority := func(v float64) *float64 { return &v }
@@ -997,5 +860,8 @@ func TestTaskList_AttentionOrderSurvivesPaging(t *testing.T) {
 	if want := []string{quietHigher, quietLower}; !slices.Equal(listedIDs(second), want) {
 		t.Errorf("page 2 = %v, want %v — the concluded rows, in priority order behind the tier",
 			listedIDs(second), want)
+	}
+	if second.TotalCount != 4 || second.NextPageToken != "" {
+		t.Errorf("last page total_count = %d, token %q; want 4 and no token", second.TotalCount, second.NextPageToken)
 	}
 }

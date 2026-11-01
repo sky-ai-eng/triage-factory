@@ -22,11 +22,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// viewerRig is the multi-mode fixture for the viewer-role write-path tests
-// (TFAC-447): a real Postgres-backed Server (RLS live) with one team carrying
-// an admin (founder), a plain member, and a viewer. The handlers are exercised
-// directly with injected claims + active-org context, the same shape
-// withSession/withOrg supply in production.
+// viewerRig is a Postgres-backed Server, with RLS live, over one team with an
+// admin (founder), a plain member and a viewer. Handlers are called directly
+// with the claims and active org withSession would supply.
 type viewerRig struct {
 	h      *pgtest.Harness
 	s      *Server
@@ -187,11 +185,8 @@ func TestViewer_PromptEdit_Forbidden(t *testing.T) {
 	}
 }
 
-// TestViewer_PromptCreate_Forbidden: a viewer POSTing a new prompt 403s at the
-// acting-team write gate (before the create tx); a member's POST creates (201).
-// Exercises the two-phase resolution the create path uses — ResolveActingNoStamp
-// for the gate, then ResolveActing (with stamp) in the main tx — which is a new
-// pattern worth its own integration coverage beyond the RLS layer.
+// TestViewer_PromptCreate_Forbidden: a viewer's prompt create is a 403 at the
+// acting-team write gate, before the create transaction; a member's is a 201.
 func TestViewer_PromptCreate_Forbidden(t *testing.T) {
 	r := newViewerRig(t)
 	// Sole-team callers omit team_id; the resolver falls back to their one team.

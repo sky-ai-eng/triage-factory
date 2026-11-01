@@ -12,15 +12,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// jiraCatalogRig is a test server whose org's Jira credential points at a fake
-// catalog serving the SKY and OPS projects, both in the registry on the org's
-// site, with the local team tracking SKY. OPS's workflow has a status SKY's
-// does not.
+// jiraCatalogRig is a jiraProjectInRig whose org's Jira credential points at a
+// fake catalog serving SKY and OPS, with the local team tracking SKY. OPS's
+// workflow has a status SKY's does not.
 type jiraCatalogRig struct {
-	s        *Server
-	fake     *jiraCatalogFake
-	site     string
-	sky, ops string // registry row ids
+	*jiraProjectInRig
+	fake *jiraCatalogFake
 }
 
 // opsOnlyStatusID is a status only OPS's workflow has.
@@ -34,29 +31,11 @@ func newJiraCatalogRig(t *testing.T) *jiraCatalogRig {
 	if err != nil {
 		t.Fatalf("GetSettingsSystem: %v", err)
 	}
-	r := &jiraCatalogRig{s: s, fake: fake, site: domain.EntityScope("jira", orgSet)}
-	register := func(key string) string {
-		p, err := s.allStores.JiraProjects.FindOrCreate(t.Context(), runmode.LocalDefaultOrgID, r.site, fakeJiraProjectID(key), key, key+" Project")
-		if err != nil {
-			t.Fatalf("register %s: %v", key, err)
-		}
-		return p.ID
-	}
-	r.sky, r.ops = register("SKY"), register("OPS")
+	r := &jiraProjectInRig{s: s, site: domain.EntityScope("jira", orgSet)}
+	r.sky = r.registerProject(t, r.site, fakeJiraProjectID("SKY"), "SKY")
+	r.ops = r.registerProject(t, r.site, fakeJiraProjectID("OPS"), "OPS")
 	r.track(t, r.sky)
-	return r
-}
-
-// track makes ids the local team's whole tracked set on the rig's site.
-func (r *jiraCatalogRig) track(t *testing.T, ids ...string) {
-	t.Helper()
-	rules := make([]domain.JiraProjectStatusRules, 0, len(ids))
-	for _, id := range ids {
-		rules = append(rules, domain.JiraProjectStatusRules{JiraProjectID: id})
-	}
-	if err := r.s.allStores.JiraStatusRules.ReplaceForTeam(t.Context(), runmode.LocalDefaultTeamID, r.site, rules); err != nil {
-		t.Fatalf("track jira projects: %v", err)
-	}
+	return &jiraCatalogRig{jiraProjectInRig: r, fake: fake}
 }
 
 func (r *jiraCatalogRig) do(t *testing.T, method, path string, body any) (int, map[string]any) {
@@ -65,13 +44,6 @@ func (r *jiraCatalogRig) do(t *testing.T, method, path string, body any) (int, m
 	var got map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &got)
 	return rec.Code, got
-}
-
-func (r *jiraCatalogRig) createRule(t *testing.T, eventType string, predicate map[string]any) (int, map[string]any) {
-	t.Helper()
-	return r.do(t, http.MethodPost, "/api/event-handlers/rules", map[string]any{
-		"event_type": eventType, "name": "scoped", "scope_predicate": predicate,
-	})
 }
 
 func (r *jiraCatalogRig) patch(t *testing.T, id string, body map[string]any) (int, map[string]any) {

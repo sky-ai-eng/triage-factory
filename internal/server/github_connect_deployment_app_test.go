@@ -17,13 +17,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/github/githubapp"
 )
 
-// Connect through the deployment App, against the bind ceremony's fake GitHub.
-//
-// The org has no App of its own, so Connect's OAuth client is the
-// deployment App's and it returns to the callback that App registers — the same
-// URL the bind ceremony returns to. Every refusal case asserts that no identity
-// row was written for the member, because a refusal that still links an
-// identity is the failure that matters.
+// Connect through the deployment App, against the bind ceremony's fake GitHub:
+// it shares the bind ceremony's callback URL, and every refusal asserts that no
+// identity row was written for the member.
 
 // connectRig is a bindRig plus a non-admin member of its org, signed in,
 // with no GitHub identity on the deployment's GitHub.
@@ -110,7 +106,7 @@ func connectCookieFrom(t *testing.T, rec *httptest.ResponseRecorder) *http.Cooki
 }
 
 // serveManagedCallback drives the deployment App's callback with the session
-// sid ("" for none) and the given cookies.
+// sid ("" for none) and the given cookies, skipping nil ones.
 func (r *bindRig) serveManagedCallback(t *testing.T, sid, query string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest("GET", ManagedBindCallbackPath+"?"+query, nil)
@@ -118,7 +114,9 @@ func (r *bindRig) serveManagedCallback(t *testing.T, sid, query string, cookies 
 		req.AddCookie(&http.Cookie{Name: r.srv.sidCookieName(), Value: sid})
 	}
 	for _, c := range cookies {
-		req.AddCookie(c)
+		if c != nil {
+			req.AddCookie(c)
+		}
 	}
 	rec := httptest.NewRecorder()
 	r.srv.mux.ServeHTTP(rec, req)
@@ -272,10 +270,9 @@ func TestDeploymentAppConnect_MemberLinksIdentity(t *testing.T) {
 	}
 }
 
-// TestDeploymentAppConnect_AdminLinksThenBinds is the first-login path the
-// setup wizard needs: an admin with no linked identity, on an org with no
-// GitHub URL, links their identity through Connect and then completes the bind,
-// whose identity proof that link satisfies — no token anywhere.
+// TestDeploymentAppConnect_AdminLinksThenBinds: an admin with no linked identity
+// on an org with no GitHub URL links through Connect, and that link satisfies
+// the bind's identity proof.
 func TestDeploymentAppConnect_AdminLinksThenBinds(t *testing.T) {
 	gh := newFakeGitHub()
 	rig := newBindRig(t, gh)
@@ -442,10 +439,9 @@ func assertConnectCookieKept(t *testing.T, rec *httptest.ResponseRecorder) {
 	}
 }
 
-// TestDeploymentAppConnect_TwoTabs: every Connect through the deployment App
-// shares one cookie, so a second start replaces the first's. The first tab's
-// return is refused as an expired attempt and leaves the cookie alone, and the
-// second tab's return then completes.
+// TestDeploymentAppConnect_TwoTabs: a second start replaces the shared cookie,
+// so the first tab's return is refused without touching it and the second
+// tab's return completes.
 func TestDeploymentAppConnect_TwoTabs(t *testing.T) {
 	rig := newConnectRig(t, newFakeGitHub())
 	_, stateA := rig.connectStarted(t, rig.memberSID, rig.returnTo())
@@ -469,10 +465,9 @@ func TestDeploymentAppConnect_TwoTabs(t *testing.T) {
 	}
 }
 
-// TestDeploymentAppConnect_StaleReturnLeavesABindAlone: a Connect return that
-// cannot complete, in a browser that also holds a bind ceremony, is refused as
-// a Connect. It neither spends the bind's record nor clears its cookie, and the
-// bind then completes.
+// TestDeploymentAppConnect_StaleReturnLeavesABindAlone: a stale Connect return
+// in a browser also holding a bind ceremony neither spends the bind's record
+// nor clears its cookie, and the bind then completes.
 func TestDeploymentAppConnect_StaleReturnLeavesABindAlone(t *testing.T) {
 	gh := newFakeGitHub()
 	rig := newBindRig(t, gh)
@@ -525,10 +520,9 @@ func TestDeploymentAppConnect_EmailsPermission(t *testing.T) {
 	})
 }
 
-// TestDeploymentAppConnect_BindInFlightStillCompletes: one browser holding a
-// live bind ceremony and a live Connect sends both cookies on every return to
-// the shared callback, and each return reaches its own flow — on the bind's
-// authorize leg, its install leg, and Connect's own.
+// TestDeploymentAppConnect_BindInFlightStillCompletes: with both cookies sent on
+// every return to the shared callback, the bind's two legs and Connect's own
+// return each reach their own flow.
 func TestDeploymentAppConnect_BindInFlightStillCompletes(t *testing.T) {
 	gh := newFakeGitHub()
 	rig := newBindRig(t, gh)

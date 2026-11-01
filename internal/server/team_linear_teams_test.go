@@ -272,11 +272,9 @@ func TestLinearTeamsPut_RuleFaults(t *testing.T) {
 	}
 }
 
-// TestLinearTeamsPut_PartlyMappedTeamIsStored: each rule is complete or empty
-// on its own, so a team mapped a rule at a time is stored at every step and
-// reads as unarmed until all three are mapped. Until then nothing the poller
-// asks has moved, so polling is not re-dued; arming it, and taking a rule
-// back off, both re-due it.
+// TestLinearTeamsPut_PartlyMappedTeamIsStored: a team mapped a rule at a time is
+// stored at every step and reads unarmed until all three are mapped. Polling is
+// re-dued only when it is armed or a rule is taken back off.
 func TestLinearTeamsPut_PartlyMappedTeamIsStored(t *testing.T) {
 	s, _ := newServerWithLinearCatalog(t, linearFixtureEng)
 	kicked := linearKicks(t, s)
@@ -530,11 +528,9 @@ func TestLinearTeamsPut_UnconnectedOrg(t *testing.T) {
 	}
 }
 
-// TestLinearTeams_WorkspaceSwitch: a team's Linear rules belong to the
-// workspace they were saved under. Once the org's credential belongs to
-// another workspace, the team-settings read shows none of them, a save under
-// the new workspace leaves them stored, and binding the old workspace again
-// brings them back.
+// TestLinearTeams_WorkspaceSwitch: a team's Linear rules belong to the workspace
+// they were saved under. Under another workspace the read shows none and a save
+// leaves them stored; binding the old workspace again brings them back.
 func TestLinearTeams_WorkspaceSwitch(t *testing.T) {
 	s, _ := newServerWithLinearCatalog(t, linearFixtureEng, linearFixtureOps)
 	saved := mustPutLinearTeams(t, s, armedLinearTeam(linearTeamEng))

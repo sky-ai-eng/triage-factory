@@ -16,13 +16,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 )
 
-// TestLinearTeamUnreadable_Postgres_StopTracking runs linear.team_unreadable's
-// "Stop tracking" through the invoke route on the Postgres stores: the org's
-// admin is sent the org row, the tracking team's admin the team row with the
-// action first, and the action removes that one Linear team from the team's
-// set without asking Linear, keeping the rest as stored. The team row resolves
-// at once; the org row waits for the producer, whose next pass no longer names
-// the team that stopped tracking.
+// TestLinearTeamUnreadable_Postgres_StopTracking: the org admin gets the org row
+// and the team admin the team row, whose "Stop tracking" drops only that Linear
+// team without asking Linear and resolves it; the org row waits for the producer.
 func TestLinearTeamUnreadable_Postgres_StopTracking(t *testing.T) {
 	rig := newAuthRig(t)
 	owner := rig.seedUser()
@@ -97,11 +93,9 @@ func TestLinearTeamUnreadable_Postgres_StopTracking(t *testing.T) {
 	}
 }
 
-// TestLinearTeamUnreadable_Postgres_StopTrackingRebuildsAfterAConcurrentSave:
-// a save that commits while "Stop tracking" waits for the team's settings lock
-// is kept. The action read the set before that save, finds it changed once it
-// holds the lock, and builds again from the set the save left, so OPS keeps the
-// rules the save armed it with and ENG is still the team removed.
+// TestLinearTeamUnreadable_Postgres_StopTrackingRebuildsAfterAConcurrentSave: a
+// save that commits while "Stop tracking" waits for the settings lock is kept,
+// because the action rebuilds from the changed set: OPS keeps its rules, ENG goes.
 func TestLinearTeamUnreadable_Postgres_StopTrackingRebuildsAfterAConcurrentSave(t *testing.T) {
 	rig := newAuthRig(t)
 	owner := rig.seedUser()

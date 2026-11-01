@@ -9,26 +9,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// The team roster answers in local mode too — that is the whole reason there is
-// one roster route rather than two. These tests drive it through the mux at the
-// "default" team alias, which is the address a local caller has (there is no
-// picker and no uuid a user could know).
+// The team roster answers in local mode too, at the "default" team alias, which
+// is the address a local caller has.
 
-// TestTeamRosterList_LocalSingleMember: N=1 answers with the one implicit
-// member, their captured GitHub identity, role admin, and the bootstrapped bot
-// beside the page — no 404, and the bot is never counted as a member.
-func TestTeamRosterList_LocalSingleMember(t *testing.T) {
-	s := newTestServer(t)
-	// Bind the identity on the host the capture paths use: the test server's
-	// org_settings leaves github_base_url unset, which resolves to the
-	// deployment's default GitHub (db.EffectiveGitHubHost) — the same host
-	// ghbase.ResolveBaseURL hands the PAT and Connect writers for an
-	// unconfigured org.
-	if err := s.users.UpsertGitHubIdentity(t.Context(), runmode.LocalDefaultUserID,
-		ghbase.DefaultBaseURL(), "AidanAllchin", "583231", "", "pat"); err != nil {
-		t.Fatalf("seed github identity: %v", err)
-	}
-
+// listLocalRoster reads the default team's roster through the mux.
+func listLocalRoster(t *testing.T, s *Server) teamRosterListResponse {
+	t.Helper()
 	rec := doJSON(t, s, http.MethodPost, "/api/teams/default/members/list", map[string]any{})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
@@ -37,6 +23,30 @@ func TestTeamRosterList_LocalSingleMember(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
+	return resp
+}
+
+// TestTeamRosterList_LocalSingleMember: N=1 answers with the one implicit member
+// as admin, with null identity fields until GitHub is bound and the bound ones
+// after, and the bootstrapped bot beside the page, never counted as a member.
+func TestTeamRosterList_LocalSingleMember(t *testing.T) {
+	s := newTestServer(t)
+
+	// Before any identity is captured the row is still there, with nulls, so
+	// the predicate editor renders rather than erroring.
+	if before := listLocalRoster(t, s); len(before.Items) != 1 ||
+		before.Items[0].GitHubUsername != nil || before.Items[0].GitHubUserID != nil {
+		t.Fatalf("roster before an identity = %+v, want one row with null github_username / github_user_id", before.Items)
+	}
+
+	// An unset github_base_url resolves to the deployment's default GitHub,
+	// the host the capture paths write the identity under.
+	if err := s.users.UpsertGitHubIdentity(t.Context(), runmode.LocalDefaultUserID,
+		ghbase.DefaultBaseURL(), "AidanAllchin", "583231", "", "pat"); err != nil {
+		t.Fatalf("seed github identity: %v", err)
+	}
+
+	resp := listLocalRoster(t, s)
 	if len(resp.Items) != 1 {
 		t.Fatalf("items = %d, want 1 (the single implicit user)", len(resp.Items))
 	}
@@ -72,32 +82,6 @@ func TestTeamRosterList_LocalSingleMember(t *testing.T) {
 	}
 }
 
-// TestTeamRosterList_LocalNoIdentityCaptured: the pre-GitHub-config state. The
-// row exists with a null github_username and the read still succeeds, so the
-// predicate editor renders (with its Variant-A toggle disabled) rather than
-// erroring.
-func TestTeamRosterList_LocalNoIdentityCaptured(t *testing.T) {
-	s := newTestServer(t)
-
-	rec := doJSON(t, s, http.MethodPost, "/api/teams/default/members/list", map[string]any{})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
-	}
-	var resp teamRosterListResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if len(resp.Items) != 1 {
-		t.Fatalf("items = %d, want 1", len(resp.Items))
-	}
-	if resp.Items[0].GitHubUsername != nil {
-		t.Errorf("github_username = %q, want null (not yet captured)", *resp.Items[0].GitHubUsername)
-	}
-	if resp.Items[0].GitHubUserID != nil {
-		t.Errorf("github_user_id = %q, want null (not yet captured)", *resp.Items[0].GitHubUserID)
-	}
-}
-
 // TestHandleMe_LocalMode_GitHubAccountID: local /api/me carries GitHub's id
 // for the local user's bound account beside its login, the value the predicate
 // editor writes for "match me".
@@ -121,9 +105,8 @@ func TestHandleMe_LocalMode_GitHubAccountID(t *testing.T) {
 	}
 }
 
-// TestTeamRosterList_RejectsBadPageSize: the paging fields are validated, not
-// repaired — an out-of-range page_size is a 400 rather than a silently clamped
-// window that answers a different question than the caller asked.
+// TestTeamRosterList_RejectsBadPageSize: an out-of-range page_size is a 400, not
+// a silently clamped window.
 func TestTeamRosterList_RejectsBadPageSize(t *testing.T) {
 	s := newTestServer(t)
 

@@ -47,11 +47,9 @@ type activityBody struct {
 	} `json:"by_tracked"`
 }
 
-// TestTeamActivity_NodeShape walks the node end to end in local mode: the
-// seeded flow lands in every cut, the by-source rows cover the external
-// sources whatever the traffic, last_poll_at is stitched in from
-// poll_readiness for exactly the sources that have completed a cycle, and
-// the tracked repository's row carries its flow under its registry id.
+// TestTeamActivity_NodeShape: the seeded flow lands in every cut, by_source
+// covers every external source, last_poll_at appears only for sources that
+// completed a cycle, and the tracked repository's row is keyed by registry id.
 func TestTeamActivity_NodeShape(t *testing.T) {
 	s := newTestServer(t)
 	taskID := seedTaskFixture(t, s.db, taskFixture{name: "activity", status: "queued"})
@@ -141,11 +139,9 @@ func TestTeamActivity_WindowIsValidated(t *testing.T) {
 	}
 }
 
-// TestTeamActivity_MergedAndFailedAreWindowedByTheAsk drives the day cut's two
-// convergence counts onto the wire, and pins that an RFC3339 since windows
-// ROWS rather than whole days: every fixture row shares one UTC day, and the
-// half of them before the mid-day bound must not be counted. A store that
-// bucketed first and clipped by day would answer 2 and 2.
+// TestTeamActivity_MergedAndFailedAreWindowedByTheAsk: the day cut's merged and
+// failed counts are windowed by row, not by day: every fixture shares one UTC
+// day, and the rows before the mid-day since bound are not counted.
 func TestTeamActivity_MergedAndFailedAreWindowedByTheAsk(t *testing.T) {
 	s := newTestServer(t)
 	// A fixed past day, so the assertions don't depend on what time the

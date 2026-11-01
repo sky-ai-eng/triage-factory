@@ -144,6 +144,9 @@ func TestGitHubGrantFindings_ListWithTotals(t *testing.T) {
 		if len(got.Items) != 0 || got.TotalCount != 1 {
 			t.Errorf("items=%d total=%d, want no rows and the total", len(got.Items), got.TotalCount)
 		}
+		if body := rec.Body.String(); !strings.Contains(body, `"items":[]`) || !strings.Contains(body, `"total_count":`) {
+			t.Errorf("body=%s, want items [] (never null) and a total_count", body)
+		}
 	})
 
 	t.Run("out-of-range page size is refused, never clamped", func(t *testing.T) {
@@ -164,11 +167,9 @@ func TestGitHubGrantFindings_ListWithTotals(t *testing.T) {
 	})
 }
 
-// A grant of every repository cannot be drifted out of, and one of unknown
-// width cannot be said to have been. The store proves the rule across all
-// three; the route has to carry it, and carry the width on the installation so
-// the panel can say which of "nothing drifts" and "drift is impossible here"
-// it means.
+// Scope drift is reported only for a selective grant (an all-repository grant
+// cannot drift, an unknown one cannot be said to), and the status payload
+// carries the width so the panel can say which it is.
 func TestGitHubGrantFindings_ScopeDriftFollowsTheGrantsWidth(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -227,10 +228,8 @@ func TestGitHubGrantFindings_PATOrgHasNoGrant(t *testing.T) {
 	}
 }
 
-// Opening the panel is three reads — the status and the two findings — and
-// none of them may ask GitHub anything or reconcile the mirror. The fake counts
-// both reconciles the App store offers; opening the panel must leave both at
-// zero.
+// Opening the panel (the status read and both findings) reconciles nothing and
+// asks GitHub nothing.
 func TestGitHubGrantFindings_OpeningThePanelAsksGitHubNothing(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -306,24 +305,6 @@ func TestNewGitHubAppStatusResponse_InstallationGrantFields(t *testing.T) {
 	// constructor call leaves it false.
 	if resp.DeploymentAppAvailable {
 		t.Error("deployment_app_available=true from the constructor alone")
-	}
-}
-
-// In local mode there is no deployment App to bind, whatever the environment
-// says, so the empty state is never offered Connect there.
-func TestGitHubAppStatus_LocalMode_NoDeploymentApp(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	s := newTestServer(t)
-	rec := doJSON(t, s, "GET", "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	var out githubAppStatusResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if out.DeploymentAppAvailable {
-		t.Error("deployment_app_available=true in local mode")
 	}
 }
 

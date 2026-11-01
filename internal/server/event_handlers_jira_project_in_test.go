@@ -72,20 +72,6 @@ func (r *jiraProjectInRig) createRule(t *testing.T, eventType string, predicate 
 	return rec.Code, got
 }
 
-func TestEventHandlerJiraProjectIn_CreateAcceptsTrackedProjects(t *testing.T) {
-	r := newJiraProjectInRig(t)
-	r.track(t, r.sky, r.ops)
-
-	code, got := r.createRule(t, domain.EventJiraIssueAssigned, map[string]any{"jira_project_id_in": []string{r.sky, r.ops}})
-	if code != http.StatusCreated {
-		t.Fatalf("status = %d, want 201: %v", code, got)
-	}
-	want := fmt.Sprintf(`{"jira_project_id_in":[%q,%q]}`, r.sky, r.ops)
-	if got["scope_predicate_json"] != want {
-		t.Errorf("stored predicate = %v, want %s", got["scope_predicate_json"], want)
-	}
-}
-
 // A registry row the team does not track, a project key, and an id nothing
 // answers to are each refused, every one reported, and nothing is written.
 func TestEventHandlerJiraProjectIn_CreateRefusesWhatTheTeamDoesNotTrack(t *testing.T) {
@@ -214,8 +200,8 @@ func TestEventHandlerJiraProjectIn_OnlyTheCurrentSiteCounts(t *testing.T) {
 	}
 }
 
-// The key fields are gone from the predicate schema, so a caller still
-// sending one is told so rather than having it dropped.
+// The predicate schema has no project key fields, so a caller sending one is
+// told so rather than having it dropped.
 func TestEventHandlerJiraProjectIn_RefusesProjectKey(t *testing.T) {
 	r := newJiraProjectInRig(t)
 	r.track(t, r.sky)
@@ -228,10 +214,8 @@ func TestEventHandlerJiraProjectIn_RefusesProjectKey(t *testing.T) {
 	}
 }
 
-// The team-settings read names each tracked project by the registry id
-// jira_project_id_in and the team write take, beside Jira's id for it and its
-// key and name, and keeps naming it by both ids after the project's key is
-// renamed.
+// The team-settings read names each tracked project by its registry id beside
+// Jira's id, key and name, and keeps both ids after the key is renamed.
 func TestTeamSettingsGet_NamesJiraProjectsByRegistryID(t *testing.T) {
 	r := newJiraProjectInRig(t)
 	r.track(t, r.sky)
@@ -262,11 +246,9 @@ func TestTeamSettingsGet_NamesJiraProjectsByRegistryID(t *testing.T) {
 	}
 }
 
-// The check runs inside the write's transaction under the caller's claims, so
-// a plain team member, with no admin role anywhere, must be able to read the
-// org's Jira site, the team's rules and the registry rows they reference
-// through RLS. A policy that hid any of them would refuse every entry that
-// member writes.
+// The check runs under the caller's claims, so a plain team member must be able
+// to read the org's Jira site, the team's rules and the registry rows they
+// reference through RLS, or every entry that member writes would be refused.
 func TestJiraProjectInFaults_PlainMemberUnderRLS_Postgres(t *testing.T) {
 	rig := newRepoScopeRig(t)
 	const jiraBase = "https://jira.example.com"

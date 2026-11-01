@@ -248,21 +248,6 @@ func expectConnectError(t *testing.T, rec *httptest.ResponseRecorder, code, retu
 	}
 }
 
-func TestLinearIdentity_StatusWithoutLinear(t *testing.T) {
-	r := newLinearInstallRig(t)
-	rec := doJSON(t, r.s, http.MethodGet, linearIdentityPath(), nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET: %d: %s", rec.Code, rec.Body.String())
-	}
-	var got linearIdentityStatusResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if got.Connected || got.WorkspaceURLKey != "" || !got.ConnectAvailable {
-		t.Errorf("status = %+v, want not connected, no workspace (nothing to gate), Connect available", got)
-	}
-}
-
 func TestLinearIdentity_APIKeyBinds(t *testing.T) {
 	r := newLinearConnectRig(t)
 	if st := r.status(t); st.Connected || st.WorkspaceURLKey != acmeWorkspaceURLKey || !st.ConnectAvailable {
@@ -347,6 +332,10 @@ func TestLinearIdentity_APIKeyRefusals(t *testing.T) {
 	t.Run("org has no linear", func(t *testing.T) {
 		r := newLinearInstallRig(t)
 		r.fake.set("person")
+		// The status names no workspace, so there is nothing to gate.
+		if st := (&linearConnectRig{linearInstallRig: r}).status(t); st.Connected || st.WorkspaceURLKey != "" || !st.ConnectAvailable {
+			t.Errorf("status = %+v, want not connected, no workspace, Connect available", st)
+		}
 		rec := doJSON(t, r.s, http.MethodPost, linearIdentityPath()+"/api-key", map[string]any{"api_key": linearUserKey})
 		if rec.Code != http.StatusConflict || errorItems(t, rec)[0].Reason != "NOT_CONFIGURED" {
 			t.Fatalf("status = %d %s, want 409 NOT_CONFIGURED", rec.Code, rec.Body.String())
@@ -722,10 +711,9 @@ func TestLinearIdentity_NoDisconnectedReason(t *testing.T) {
 	})
 }
 
-// TestLinearIdentity_RefusedMarkerIsReplacedOrRemoved: a key paste or a
-// Connect over a refused marker reads as connected with no reason, and the
-// user's own disconnect removes a marker, with its audit row, revoking
-// nothing.
+// TestLinearIdentity_RefusedMarkerIsReplacedOrRemoved: a key paste or Connect
+// over a refused marker reads as connected with no reason, and a disconnect or
+// member sweep removes the marker, revoking nothing.
 func TestLinearIdentity_RefusedMarkerIsReplacedOrRemoved(t *testing.T) {
 	t.Run("key paste", func(t *testing.T) {
 		r := newLinearConnectRig(t)
@@ -807,10 +795,9 @@ func (r *linearConnectRig) putRefusedMarker(t *testing.T) {
 	r.putUserSecret(t, env)
 }
 
-// TestLinearConnect_ReplacedGrantRevokedWithTheAppThatMintedIt: a grant
-// minted by the deployment app stays usable after the org registers its own
-// app, and connecting again through the org's app revokes it with the
-// deployment app, the only one Linear accepts the revoke from.
+// TestLinearConnect_ReplacedGrantRevokedWithTheAppThatMintedIt: a grant minted
+// by the deployment app stays usable after the org registers its own, and a
+// reconnect through the org's app revokes it with the deployment app.
 func TestLinearConnect_ReplacedGrantRevokedWithTheAppThatMintedIt(t *testing.T) {
 	r := newLinearConnectRig(t)
 	if rec := doJSON(t, r.s, http.MethodDelete, linearAppPath(), nil); rec.Code != http.StatusOK {
@@ -842,10 +829,9 @@ func TestLinearConnect_ReplacedGrantRevokedWithTheAppThatMintedIt(t *testing.T) 
 	}
 }
 
-// TestLinearConnect_LinearCallsRunOutsideTheUserLock: with the user's lock
-// held elsewhere, the callback still exchanges its code and checks who it
-// acts as; only the store waits for the lock. In multi mode the lock holds a
-// pool connection, so nothing holds it across a call to Linear.
+// TestLinearConnect_LinearCallsRunOutsideTheUserLock: with the user's lock held
+// elsewhere the callback still exchanges its code and checks who it acts as;
+// only the store waits. In multi mode the lock holds a pool connection.
 func TestLinearConnect_LinearCallsRunOutsideTheUserLock(t *testing.T) {
 	r := newLinearConnectRig(t)
 	cookie, state := r.startConnect(t, "")
@@ -922,10 +908,9 @@ func TestLinearConnect_RoutesRegistered(t *testing.T) {
 	}
 }
 
-// TestLinearIdentity_MultiMode walks the per-user slot on Postgres with two
-// members of one org: each binds in their own secret scope under RLS, one
-// cannot spend the other's Connect cookie, a token cannot finish a Connect,
-// /api/me carries the binding, and removing a member sweeps their credential.
+// TestLinearIdentity_MultiMode: on Postgres each member binds in their own
+// secret scope, cannot spend another's Connect cookie or finish a Connect with a
+// token, and is swept on removal; /api/me carries the binding.
 func TestLinearIdentity_MultiMode(t *testing.T) {
 	rig := newAuthRig(t)
 	s := rig.srv
@@ -1106,12 +1091,9 @@ func TestLinearIdentity_MultiMode(t *testing.T) {
 	}
 }
 
-// TestLinearIdentity_RemovalRacingABind: a member removed while their bind
-// is in flight ends with no credential, and the bind is refused as a
-// non-member's rather than failing. The route's membership check runs
-// before the user's lock, so the removal lands after it here; the bind reads
-// membership again under the lock instead of relying on the access-log
-// row's policy to abort its transaction.
+// TestLinearIdentity_RemovalRacingABind: a member removed after the route's
+// membership check, while their bind is in flight, ends with no credential and
+// the bind refused as a non-member's: the bind re-reads membership under its lock.
 func TestLinearIdentity_RemovalRacingABind(t *testing.T) {
 	rig := newAuthRig(t)
 	s := rig.srv
@@ -1295,10 +1277,9 @@ func (r *linearConnectRig) userSecretIn(t *testing.T, workspaceID string) string
 	return v
 }
 
-// TestLinearIdentity_WorkspaceMovesUnderAWaitingBind: a key checked against
-// the org's workspace, whose bind then waits on the user's lock while the org
-// moves to another workspace, is refused rather than stored under the
-// workspace the org had when the request began.
+// TestLinearIdentity_WorkspaceMovesUnderAWaitingBind: a key paste waiting on
+// the user's lock while the org moves workspace, or loses Linear, is refused
+// rather than stored under the workspace the request began in.
 func TestLinearIdentity_WorkspaceMovesUnderAWaitingBind(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -1345,10 +1326,9 @@ func TestLinearIdentity_WorkspaceMovesUnderAWaitingBind(t *testing.T) {
 	}
 }
 
-// TestLinearConnect_WorkspaceMovesDuringTheExchange: the org moving while a
-// Connect's code is exchanged refuses the store as a workspace mismatch and
-// revokes the minted pair, rather than storing the grant under the workspace
-// the callback read first.
+// TestLinearConnect_WorkspaceMovesDuringTheExchange: the org moving workspace
+// while a Connect's code is exchanged (with neither lock held) refuses the
+// store as a workspace mismatch and revokes the minted pair.
 func TestLinearConnect_WorkspaceMovesDuringTheExchange(t *testing.T) {
 	r := newLinearConnectRig(t)
 	cookie, state := r.startConnect(t, "")
@@ -1382,11 +1362,9 @@ func TestLinearConnect_WorkspaceMovesDuringTheExchange(t *testing.T) {
 	}
 }
 
-// TestLinearConnect_AppChangesDuringTheExchange: the code is exchanged
-// against the app that resolved when the callback started. An app replaced or
-// removed before the grant is stored would leave it unable to refresh, so the
-// store refuses, the minted pair is revoked with the app that minted it, and
-// nothing is written.
+// TestLinearConnect_AppChangesDuringTheExchange: an app replaced or removed
+// during the code exchange would leave the grant unable to refresh, so nothing
+// is stored and the pair is revoked with the app that minted it.
 func TestLinearConnect_AppChangesDuringTheExchange(t *testing.T) {
 	for name, change := range map[string]func(t *testing.T, r *linearConnectRig){
 		"replaced": func(t *testing.T, r *linearConnectRig) { r.registerApp(t, "lin-client-2") },
@@ -1417,9 +1395,8 @@ func TestLinearConnect_AppChangesDuringTheExchange(t *testing.T) {
 }
 
 // TestLinearIdentity_DisconnectActsOnTheWorkspaceItRunsIn: a disconnect that
-// waits on the user's lock while the org moves withdraws the credential for
-// the workspace the org is on when it runs, not the one it was on when the
-// request arrived.
+// waits on the user's lock while the org moves withdraws the credential for the
+// workspace the org is on when it runs.
 func TestLinearIdentity_DisconnectActsOnTheWorkspaceItRunsIn(t *testing.T) {
 	r := newLinearConnectRig(t)
 	ctx := t.Context()
@@ -1447,9 +1424,8 @@ func TestLinearIdentity_DisconnectActsOnTheWorkspaceItRunsIn(t *testing.T) {
 }
 
 // TestLinearIdentity_SweepActsOnTheWorkspaceItRunsIn: a removal whose sweep
-// waits on the member's lock while the org moves to another workspace
-// removes the member's credential for the workspace the org is on when the
-// sweep runs.
+// waits on the member's lock while the org moves workspace removes the
+// credential for the workspace the org is on when the sweep runs.
 func TestLinearIdentity_SweepActsOnTheWorkspaceItRunsIn(t *testing.T) {
 	rig := newAuthRig(t)
 	s := rig.srv

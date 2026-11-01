@@ -8,14 +8,13 @@ import (
 	"github.com/google/uuid"
 )
 
-// Signup no longer provisions a tenant — org creation is a deliberate
-// user action. These tests pin that contract: the OAuth callback resolves
-// only an existing membership and never mints orgs/teams/memberships.
+// Signup provisions no tenant; creating an org is a deliberate user action.
+// The OAuth callback resolves an existing membership and never mints orgs,
+// teams or memberships.
 
-// TestLookupEarliestMembership_ZeroMemberships pins the first-signup
-// outcome: a user with no org_memberships rows resolves to an invalid
-// NullUUID, so the session lands with a NULL active_org_id and the
-// frontend routes them to the onboarding entry.
+// TestLookupEarliestMembership_ZeroMemberships: a user with no memberships
+// resolves to an invalid NullUUID, so the session lands with a NULL
+// active_org_id and the frontend routes them to onboarding.
 func TestLookupEarliestMembership_ZeroMemberships(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
@@ -45,11 +44,9 @@ func TestLookupEarliestMembership_ReturnsEarliest(t *testing.T) {
 	}
 }
 
-// TestSignupCallback_CreatesNoTenant is the core acceptance: a
-// fresh signup (OAuth callback for a user with zero memberships)
-// provisions nothing — no org owned by the user, no membership rows — and
-// the session lands with a NULL active_org_id. The deliberate create-org
-// action (the onboarding "Start your Factory" CTA) is what mints a tenant.
+// TestSignupCallback_CreatesNoTenant: the OAuth callback for a user with no
+// memberships creates no org and no membership rows, and the session lands with
+// a NULL active_org_id.
 func TestSignupCallback_CreatesNoTenant(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()

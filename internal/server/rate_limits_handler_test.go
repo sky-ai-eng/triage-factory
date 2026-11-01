@@ -16,11 +16,9 @@ func orgRateLimitsPath(orgID string) string {
 	return "/api/orgs/" + orgID + "/integrations/rate-limits"
 }
 
-// TestOrgRateLimits_ServesCurrentReadingsWithNames pins the read the
-// settings cards render: the org's current readings, with an installation
-// named by the GitHub account it is on, a credential whose id is its kind left
-// unnamed, a field the reading did not state null rather than zero, and a
-// reading past its reset left out.
+// TestOrgRateLimits_ServesCurrentReadingsWithNames: the org's current readings,
+// an installation named by its GitHub account, a kind-id credential unnamed, an
+// unstated field null rather than zero, and a reading past its reset left out.
 func TestOrgRateLimits_ServesCurrentReadingsWithNames(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)

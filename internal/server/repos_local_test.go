@@ -16,22 +16,14 @@ import (
 	"github.com/zalando/go-keyring"
 )
 
-// sameRepoJSON reports whether two serialized rows say the same thing.
-//
-// Deliberately not `==`. repoJSON carries ProfiledAt as a *string, and each
-// decode allocates its own, so a struct compare of two independently
-// unmarshalled copies of one row is false whenever that field is set — and true
-// only while it is nil, which passes for the wrong reason and turns into a
-// spurious failure the moment a fixture stamps a profiled_at. DeepEqual follows
-// the pointer, and keeps covering fields added to repoJSON later without this
-// helper having to name them.
+// sameRepoJSON reports whether two serialized rows say the same thing. Not `==`:
+// repoJSON carries ProfiledAt as a *string and each decode allocates its own,
+// so DeepEqual is what compares the values.
 func sameRepoJSON(a, b repoJSON) bool { return reflect.DeepEqual(a, b) }
 
-// TestHandleRepoUpdate_LocalMode pins that tightening the repo-mutation gate
-// to admins leaves local mode alone. N=1 has one implicit owner and no team
-// boundary, so isOrgAdmin's local short-circuit resolves the gate before any
-// team lookup: the single user still writes base_branch, and still sees the
-// editable control (can_edit true).
+// TestHandleRepoUpdate_LocalMode: local mode's single user is the org admin, so
+// it writes base_branch and reads can_edit true; the PATCH answers the stored
+// row, and the id, by-name and list reads agree on it.
 func TestHandleRepoUpdate_LocalMode(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -125,15 +117,9 @@ func TestHandleRepoUpdate_LocalMode(t *testing.T) {
 	}
 }
 
-// TestReadRepo_AnnotationIsOptional pins the can_edit annotation as something a
-// read asks for rather than something it always pays. The branch list resolves
-// a repository in order to *use* its name upstream and carries no can_edit
-// field, and it is one call per keystroke on a type-to-filter box — so it must
-// not spend a non-admin's extra EXISTS computing a value it discards.
-//
-// Asserted through the return value, which is the contract's observable half:
-// noCanEdit answers false even for a caller who demonstrably may edit, so a
-// caller that did not ask for the annotation cannot read one either.
+// TestReadRepo_AnnotationIsOptional: readRepo computes can_edit only when asked,
+// so the branch list (one call per keystroke) skips the extra query. noCanEdit
+// answers false even for a caller who may edit.
 func TestReadRepo_AnnotationIsOptional(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -161,11 +147,9 @@ func TestReadRepo_AnnotationIsOptional(t *testing.T) {
 	}
 }
 
-// TestRepoAddressing_SurvivesRename is the invariant this addressing exists
-// for: a repository renamed between the page render and the client's next
-// call. The id the client is holding still resolves, so the PATCH lands and
-// the read answers — where a name-addressed request would 404 on a name
-// nothing answers to any more.
+// TestRepoAddressing_SurvivesRename: after a rename the id a client holds still
+// resolves, so the PATCH lands and the read shows the new name, while by-name
+// on the old name is a 404.
 func TestRepoAddressing_SurvivesRename(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -203,13 +187,9 @@ func TestRepoAddressing_SurvivesRename(t *testing.T) {
 	}
 }
 
-// TestRepoRoutes_RowOnAnotherHostIsInvisible pins that a repository row on a
-// GitHub host other than the org's current one is in nobody's view — local
-// mode's single user is an org admin, so this is the admin case. Every route
-// that resolves a repository answers 404 for it: the id read, the by-name read
-// (which resolves the name on the current host), the PATCH (which writes
-// nothing), and the branch list (which asks GitHub nothing). The row itself is
-// kept, so pointing the org back at its host shows it again unchanged.
+// TestRepoRoutes_RowOnAnotherHostIsInvisible: a row on a GitHub host other than
+// the org's current one is 404 to every repository route, for the admin too,
+// and the PATCH writes nothing. Pointing the org back shows the row unchanged.
 func TestRepoRoutes_RowOnAnotherHostIsInvisible(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)

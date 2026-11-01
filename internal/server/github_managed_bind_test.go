@@ -28,13 +28,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// The bind ceremony's end-to-end tests, against a fake GitHub.
-//
-// Every refusal arm gets its own case, and each one asserts the same two
-// things: no installation row was written, and the org's credential class did
-// not move. A ceremony that refuses and still leaves a binding behind is the
-// failure this whole file exists to prevent, so "it returned an error" is never
-// the assertion.
+// The bind ceremony's end-to-end tests, against a fake GitHub. Every refusal
+// asserts that no installation row was written and the credential class did
+// not move, since a refusal that still binds is the failure that matters.
 
 // bindTestKey is the RSA key the fake deployment App signs its JWTs with.
 // Generated once for the package — key generation is the slowest thing in these
@@ -280,13 +276,7 @@ func newBindRig(t *testing.T, gh *fakeGitHub) *bindRig {
 	// deployment.
 	ghBase := gh.start(t)
 	ghbase.SetDefaultBaseURLForTest(t, ghBase)
-	if _, err := rig.h.AdminDB.Exec(`
-		INSERT INTO org_event_sources (org_id, kind, base_url)
-		VALUES ($1, 'github', $2)
-		ON CONFLICT (org_id, kind) DO UPDATE SET base_url = $2
-	`, org.String(), ghBase); err != nil {
-		t.Fatalf("seed org_event_sources: %v", err)
-	}
+	seedOrgGitHubHost(t, rig, org.String(), ghBase)
 
 	// The deployment App the ceremony mints and exchanges with. Set on the
 	// field the handlers read; the resolver holds its own copy from the
@@ -343,13 +333,7 @@ func (r *bindRig) sibling(t *testing.T, slug string) *bindRig {
 	user := r.seedUser()
 	org, _ := r.seedOrg(user, slug+"-"+uuid.NewString()[:8])
 	resp, _ := r.driveCallback(user)
-	if _, err := r.h.AdminDB.Exec(`
-		INSERT INTO org_event_sources (org_id, kind, base_url)
-		VALUES ($1, 'github', $2)
-		ON CONFLICT (org_id, kind) DO UPDATE SET base_url = $2
-	`, org.String(), r.ghBase); err != nil {
-		t.Fatalf("seed org_event_sources: %v", err)
-	}
+	seedOrgGitHubHost(t, r.authRig, org.String(), r.ghBase)
 	out := &bindRig{
 		authRig: r.authRig, gh: r.gh, ghBase: r.ghBase,
 		orgID: org, userID: user, sid: r.sidFromResp(resp),
@@ -358,23 +342,11 @@ func (r *bindRig) sibling(t *testing.T, slug string) *bindRig {
 	return out
 }
 
-// connectAccount drives the named-account start and returns the response.
+// connectAccount drives the named-account start with a raw JSON body and
+// returns the response.
 func (r *bindRig) connectAccount(t *testing.T, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	return r.postOrg(t, "/github/managed/connect-account", body)
-}
-
-// postOrg sends a POST to one of the org's own routes from the admin's
-// signed-in browser.
-func (r *bindRig) postOrg(t *testing.T, route, body string) *httptest.ResponseRecorder {
-	t.Helper()
-	req := httptest.NewRequest("POST", "/api/orgs/"+r.orgID.String()+route, strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Origin", r.srv.deployCfg.publicURL)
-	req.AddCookie(&http.Cookie{Name: r.srv.sidCookieName(), Value: r.sid})
-	rec := httptest.NewRecorder()
-	r.srv.mux.ServeHTTP(rec, req)
-	return rec
+	return r.sendOrg(t, http.MethodPost, "/github/managed/connect-account", json.RawMessage(body))
 }
 
 // namedCeremony starts the named-account leg for login and returns the cookie
@@ -453,36 +425,18 @@ func (r *bindRig) bindCookie(t *testing.T, rec *httptest.ResponseRecorder) *http
 	return nil
 }
 
-// callback drives the GitHub return leg with the given cookie and query, from
-// a signed-in browser — the shape a ceremony coming back has.
+// callback drives the GitHub return leg with the given cookie (nil for none)
+// and query, from the admin's signed-in browser.
 func (r *bindRig) callback(t *testing.T, cookie *http.Cookie, query string) *httptest.ResponseRecorder {
 	t.Helper()
-	return r.serveCallback(t, cookie, query, r.sid)
+	return r.serveManagedCallback(t, r.sid, query, cookie)
 }
 
-// callbackSignedOut drives the same URL from a browser with NO Triage Factory
-// session, which is the ordinary shape of a GitHub-initiated install: GitHub's
-// public install page is reachable by anyone the account owner points at it,
-// with no reason ever to have visited TF. Attaching a session by default is how
-// that case hid — every assertion below about the signed-out path goes through
-// here on purpose.
+// callbackSignedOut drives the same URL from a browser with no Triage Factory
+// session, the ordinary shape of an install started from GitHub's public page.
 func (r *bindRig) callbackSignedOut(t *testing.T, cookie *http.Cookie, query string) *httptest.ResponseRecorder {
 	t.Helper()
-	return r.serveCallback(t, cookie, query, "")
-}
-
-func (r *bindRig) serveCallback(t *testing.T, cookie *http.Cookie, query, sid string) *httptest.ResponseRecorder {
-	t.Helper()
-	req := httptest.NewRequest("GET", ManagedBindCallbackPath+"?"+query, nil)
-	if sid != "" {
-		req.AddCookie(&http.Cookie{Name: r.srv.sidCookieName(), Value: sid})
-	}
-	if cookie != nil {
-		req.AddCookie(cookie)
-	}
-	rec := httptest.NewRecorder()
-	r.srv.mux.ServeHTTP(rec, req)
-	return rec
+	return r.serveManagedCallback(t, "", query, cookie)
 }
 
 // defaultCallbackQuery is what GitHub sends back on a successful install with
@@ -704,14 +658,9 @@ func TestManagedBind_UserTargetOnSomeoneElsesAccount(t *testing.T) {
 	rig.assertNothingBound(t)
 }
 
-// TestManagedBind_ContractorIsRefused is the case that justifies this ticket's
-// complexity, and it is named so nobody deletes it as redundant.
-//
-// A read-only contractor with :read on ONE repository inside Acme's
-// installation sees that whole installation in GET /user/installations — so
-// they pass GitHub's own prescribed association check. Without the authority
-// gate they could bind Acme into an org they control, where their agents
-// would then act on Acme's repositories.
+// TestManagedBind_ContractorIsRefused: a contractor with read on one repository
+// sees Acme's installation and passes GitHub's association check, so the
+// authority gate is what stops them binding Acme into an org they control.
 func TestManagedBind_ContractorIsRefused(t *testing.T) {
 	gh := newFakeGitHub()
 	gh.membershipRole = "member" // association passes; authority does not
@@ -850,20 +799,13 @@ func TestManagedBind_Refusals(t *testing.T) {
 	}
 }
 
-// TestManagedBind_OrgOnAnotherGitHubIsRefused: the deployment App is on
-// one GitHub, so an org whose github_base_url names another cannot bind
-// it. The refusal names both hosts and points at bringing your own App; it
-// fires at Connect, before any preflight, so the deployment's key is never
-// presented to a GitHub that has not seen it — the fake counts zero calls.
-// Nothing is written and the class does not move.
+// TestManagedBind_OrgOnAnotherGitHubIsRefused: an org on a GitHub other than
+// the deployment App's is refused at Connect, naming both hosts, before any
+// call presents the deployment's key to GitHub, and nothing is written.
 func TestManagedBind_OrgOnAnotherGitHubIsRefused(t *testing.T) {
 	gh := newFakeGitHub()
 	rig := newBindRig(t, gh)
-	if _, err := rig.h.AdminDB.Exec(`
-		UPDATE org_event_sources SET base_url = $2 WHERE org_id = $1 AND kind = 'github'
-	`, rig.orgID.String(), "https://ghe.example.com/"); err != nil {
-		t.Fatalf("re-point the org: %v", err)
-	}
+	rig.setGitHubHost(t, "https://ghe.example.com/")
 
 	rec := rig.start(t)
 	assertOutcome(t, rec, "wrong_github_host")
@@ -942,11 +884,9 @@ func TestManagedBind_OrgWithNoHostAdoptsTheAppsHost(t *testing.T) {
 	}
 }
 
-// TestManagedBind_HostMovedAfterTheStartIsRefused: an admin who points the
-// org at another GitHub after the start gets the start's refusal at the
-// callback, and nothing is written — no installation, no class, no host, no
-// change-log row. The callback checks the host before it asks GitHub
-// anything, and the bind checks it again in its own transaction.
+// TestManagedBind_HostMovedAfterTheStartIsRefused: a host moved after the start,
+// before the callback or during it, gets wrong_github_host from the callback's
+// check or the bind's own transaction, and nothing is written.
 func TestManagedBind_HostMovedAfterTheStartIsRefused(t *testing.T) {
 	const other = "https://ghe.example.com"
 	for _, c := range []struct {
@@ -1006,10 +946,8 @@ func TestManagedBind_HostMovedAfterTheStartIsRefused(t *testing.T) {
 	}
 }
 
-// TestManagedBind_SwitchFromOwnAppToTheDeploymentApp is the switch the
-// settings page makes: disconnect the org's own App, which clears its
-// host, then start the deployment App's ceremony on the org that is
-// left.
+// TestManagedBind_SwitchFromOwnAppToTheDeploymentApp: disconnecting the org's
+// own App clears its host, and the deployment App's ceremony then starts.
 func TestManagedBind_SwitchFromOwnAppToTheDeploymentApp(t *testing.T) {
 	rig := newBindRig(t, newFakeGitHub())
 	if _, err := rig.h.AdminDB.Exec(`
@@ -1020,7 +958,7 @@ func TestManagedBind_SwitchFromOwnAppToTheDeploymentApp(t *testing.T) {
 		t.Fatalf("seed byo app: %v", err)
 	}
 
-	if rec := rig.postOrg(t, "/github/app/disconnect", ""); rec.Code != http.StatusOK {
+	if rec := rig.sendOrg(t, http.MethodPost, "/github/app/disconnect", nil); rec.Code != http.StatusOK {
 		t.Fatalf("disconnect status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
 	if host := rig.githubHost(t); host != "" {
@@ -1033,12 +971,10 @@ func TestManagedBind_SwitchFromOwnAppToTheDeploymentApp(t *testing.T) {
 	}
 }
 
+// TestManagedBind_NoCookieIsTheUnboundInstall: a return with no ceremony behind
+// it (an install from the public page) is an ordinary state, answered with a
+// redirect to the recovery page that reads and discloses nothing.
 func TestManagedBind_NoCookieIsTheUnboundInstall(t *testing.T) {
-	// Somebody installed the deployment App from its public page, so GitHub
-	// returned them here with no ceremony behind it. That is an ordinary state,
-	// not an error: the installation exists and belongs to no org, and
-	// the answer is the recovery page — a redirect into the SPA, which is where
-	// the Connect button that finishes the job lives.
 	gh := newFakeGitHub()
 	rig := newBindRig(t, gh)
 
@@ -1074,11 +1010,8 @@ func TestManagedBind_NoCookieIsTheUnboundInstall(t *testing.T) {
 		}
 	}
 
-	// The case this branch actually exists for, and the one a session-attaching
-	// test helper hides: the installer has NO Triage Factory session. Nothing
-	// on this path resolves an identity, so a blanket 401 in front of it would
-	// answer the one person it is for with a JSON error and a dead-ended tab.
-	// The SPA route they are sent to handles sign-in with a return target.
+	// The installer usually has no Triage Factory session, so a 401 here would
+	// dead-end the person this branch is for.
 	t.Run("signed_out", func(t *testing.T) {
 		assertUnbound(t, rig.callbackSignedOut(t, nil, defaultCallbackQuery(4242)), ManagedInstallRecoveryPath)
 	})
@@ -1089,18 +1022,15 @@ func TestManagedBind_NoCookieIsTheUnboundInstall(t *testing.T) {
 		assertUnbound(t, rig.callback(t, nil, defaultCallbackQuery(4242)), ManagedInstallRecoveryPath)
 	})
 
-	// An install REQUEST from the public page: GitHub parked it with an owner
-	// and sent the requester here with no installation. The page it lands on
-	// has to say "requested", because "installed, now connect it" would send
-	// them to press a button that cannot find anything yet.
+	// An install request parked with an owner lands on the "requested" page, not
+	// one that sends them to a Connect that cannot find anything yet.
 	t.Run("requested", func(t *testing.T) {
 		assertUnbound(t, rig.callbackSignedOut(t, nil, "setup_action=request"),
 			ManagedInstallRecoveryPath+managedInstallRecoveryRequested)
 	})
 
-	// The operator's signal, and the one place the branch leaves a trace: a
-	// single line naming the installation GitHub sent back. It names it as the
-	// unsigned claim it is, and carries neither the code nor a login.
+	// The branch's one trace: an INFO line naming the installation, with neither
+	// the code nor a login.
 	t.Run("operator_log", func(t *testing.T) {
 		var logbuf bytes.Buffer
 		restore := logging.SetOutput(&logbuf)
@@ -1128,11 +1058,9 @@ func TestManagedBind_NoCookieIsTheUnboundInstall(t *testing.T) {
 	})
 }
 
-// TestManagedBind_RefusedBindIsLoggedForTheOperator pins the other operator
-// signal: a ceremony that came back and did not land leaves one WARN line
-// naming the installation and, once the App has read it, the account it
-// targets — so a self-hoster can tell "went to the wrong org" from
-// "never connected" without a payload, a code, or a token ever being logged.
+// TestManagedBind_RefusedBindIsLoggedForTheOperator: a refused bind leaves one
+// WARN line naming the reason, installation and account, and no code, token or
+// secret.
 func TestManagedBind_RefusedBindIsLoggedForTheOperator(t *testing.T) {
 	gh := newFakeGitHub()
 	gh.membershipRole = "member" // association passes; authority does not
@@ -1169,11 +1097,9 @@ func TestManagedBind_RefusedBindIsLoggedForTheOperator(t *testing.T) {
 	}
 }
 
-// TestManagedBind_CompletingWithoutASessionIsRefused pins the other half of the
-// split. The no-cookie door is open to anyone; the door that WRITES is not.
-// Someone bearing a bind cookie is about to have a credential bound into an
-// org, so that branch stays behind withSession and answers 401 without
-// one — the ordinary authentication failure, not a bind.
+// TestManagedBind_CompletingWithoutASessionIsRefused: the branch that binds
+// stays behind withSession, so a ceremony cookie without a session is a 401
+// that spends nothing.
 func TestManagedBind_CompletingWithoutASessionIsRefused(t *testing.T) {
 	gh := newFakeGitHub()
 	rig := newBindRig(t, gh)
@@ -1210,8 +1136,7 @@ func TestManagedBind_ExpiredRecord(t *testing.T) {
 	rig := newBindRig(t, gh)
 	cookie := rig.ceremony(t)
 
-	// Age the record past its expiry. The store refuses it; the handler never
-	// gets a chance to decide otherwise.
+	// The store refuses a record past its expiry.
 	if _, err := rig.h.AdminDB.Exec(
 		`UPDATE github_pending_binds SET expires_at = now() - interval '1 minute' WHERE org_id = $1`,
 		rig.orgID.String()); err != nil {
@@ -1262,10 +1187,9 @@ func TestManagedBind_UnknownNonce(t *testing.T) {
 	}
 }
 
-// TestManagedBind_SessionIsNotTheInitiator covers a browser carrying somebody
-// else's still-live ceremony cookie — a shared machine, since the cookie is
-// HttpOnly, SameSite=Lax and path-scoped and so is not reachable cross-site.
-// The cookie proves a browser; the record proves the person.
+// TestManagedBind_SessionIsNotTheInitiator: a browser carrying someone else's
+// live ceremony cookie (a shared machine) is refused, because the record names
+// the person who started it.
 func TestManagedBind_SessionIsNotTheInitiator(t *testing.T) {
 	// signIn re-points the rig's session at another user and returns the rig.
 	signIn := func(t *testing.T, rig *bindRig, user uuid.UUID) {
@@ -1291,9 +1215,8 @@ func TestManagedBind_SessionIsNotTheInitiator(t *testing.T) {
 		assertOutcome(t, out, "link_expired")
 		rig.assertNothingBound(t)
 
-		// The colleague's attempt spent nothing: the record is still the
-		// initiator's to finish. This is what makes the refusal a refusal
-		// rather than a denial of service against whoever started it.
+		// The colleague's attempt spent nothing, so it is no denial of service
+		// against the initiator.
 		if rig.recordConsumed(t, cookie) {
 			t.Fatal("a callback from another session spent the initiator's record")
 		}
@@ -1304,10 +1227,7 @@ func TestManagedBind_SessionIsNotTheInitiator(t *testing.T) {
 		}
 	})
 
-	// The disclosure case: a signed-in user with no relationship to the
-	// ceremony's org at all. The refusal must not name it — a back-link
-	// into its settings would hand out an org id they never asked for, which is
-	// the same thing the bound-elsewhere refusal is careful never to do.
+	// A signed-in user outside the ceremony's org must not be told its id.
 	t.Run("an_unrelated_user_is_told_nothing_about_the_org", func(t *testing.T) {
 		rig := newBindRig(t, newFakeGitHub())
 		cookie := rig.ceremony(t)
@@ -1357,10 +1277,8 @@ func TestManagedBind_RoleRevokedMidCeremony(t *testing.T) {
 		}
 	}
 
-	// The role is read again at every callback rather than trusted from the
-	// record, because minutes have passed since the click — on the install
-	// leg, whose record was minted by a callback the person was still an
-	// admin for...
+	// The role is re-read at every callback rather than trusted from the
+	// record: on the install leg...
 	cookie := rig.ceremony(t)
 	demote()
 	out := rig.callback(t, cookie, defaultCallbackQuery(4242))
@@ -1381,11 +1299,7 @@ func TestManagedBind_ConnectRequiresOrgAdmin(t *testing.T) {
 	rig := newBindRig(t, gh)
 
 	member := rig.seedUser()
-	if _, err := rig.h.AdminDB.Exec(
-		`INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, 'member')`,
-		member, rig.orgID.String()); err != nil {
-		t.Fatalf("insert org_membership: %v", err)
-	}
+	rig.addMember(t, member)
 	resp, _ := rig.driveCallback(member)
 	rig.sid = rig.sidFromResp(resp)
 
@@ -1402,11 +1316,9 @@ func TestManagedBind_ConnectRequiresOrgAdmin(t *testing.T) {
 	}
 }
 
-// TestManagedBind_RequiresSSOOfTheRecordsOrg is Require SSO at the callback:
-// the org the record names started requiring an SSO this session did not
-// come through after the ceremony began. The callback is a browser navigation,
-// so the refusal is the outcome page every other refusal renders, not an API
-// error body, and nothing is bound.
+// TestManagedBind_RequiresSSOOfTheRecordsOrg: the record's org started
+// requiring an SSO this session did not use, so the callback renders the
+// sso_required outcome page (a 403) and binds nothing.
 func TestManagedBind_RequiresSSOOfTheRecordsOrg(t *testing.T) {
 	gh := newFakeGitHub()
 	rig := newBindRig(t, gh)
@@ -1453,11 +1365,9 @@ func TestManagedBind_InstallationBoundElsewhere(t *testing.T) {
 	}
 }
 
-// TestManagedBind_OrgAlreadyHoldsItsOwnApp covers both evaluations of the
-// one-credential-slot rule: the advisory one at the Connect click, which exists
-// so nobody is sent to GitHub to complete an install that cannot land, and the
-// authoritative one inside the write lock, which is what actually holds the
-// invariant when the credential appears mid-ceremony.
+// TestManagedBind_OrgAlreadyHoldsItsOwnApp: the one-credential rule refuses at
+// Connect (advisory, so nobody is sent to GitHub for nothing) and again under
+// the write lock, for an App that appears mid-ceremony.
 func TestManagedBind_OrgAlreadyHoldsItsOwnApp(t *testing.T) {
 	seedApp := func(t *testing.T, rig *bindRig) {
 		t.Helper()
@@ -1536,38 +1446,22 @@ func TestManagedBind_OrgAlreadyHoldsAPAT(t *testing.T) {
 	})
 }
 
-// TestManagedBind_BearerTokenCannotComplete pins the substitute for a check
-// this route structurally cannot make.
-//
-// withSession treats a Bearer API token as the cookie's peer: any Authorization
-// header sends the request down that branch, so the identity the handler reads
-// would be the TOKEN's owner. Every other org-admin route defends the token's
-// sealed org with tokenScopeAllows against the {org_id} in its path — and this
-// route has no org in its path, by construction, so there is nothing for that
-// gate to attach to.
-//
-// The case that makes it concrete: one person administers two orgs,
-// starts a ceremony for THIS one in a browser, and completes it on a request
-// that also carries a token sealed to the OTHER. Identity would resolve off the
-// token while the cookie decides the org — a credential bound outside the scope
-// its token was minted for.
+// TestManagedBind_BearerTokenCannotComplete: the callback has no {org_id} for
+// tokenScopeAllows to check, so a request carrying a token sealed to another
+// org must be refused session_required rather than bind under that token.
 func TestManagedBind_BearerTokenCannotComplete(t *testing.T) {
 	gh := newFakeGitHub()
 	rig := newBindRig(t, gh)
 	cookie := rig.ceremony(t)
 
-	// The same person also administers a second org and holds a LIVE
-	// token sealed to it. Both halves matter: a bogus header would be refused
-	// by the middleware and would prove nothing about this route.
+	// A live token sealed to the person's second org: a bogus header would be
+	// refused by the middleware and prove nothing about this route.
 	otherOrg, _ := rig.seedOrg(rig.userID, "second-org-"+uuid.NewString()[:8])
 	_, plaintext := rig.mintToken(rig.userID, otherOrg, "stray-header")
 
 	req := httptest.NewRequest("GET", ManagedBindCallbackPath+"?"+defaultCallbackQuery(4242), nil)
 	req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: rig.sid})
 	req.AddCookie(cookie)
-	// A proxy or tool stamping a stray Authorization header is all it takes:
-	// any such header sends withSession down the token branch, and from there
-	// the identity the handler reads is the token's.
 	req.Header.Set("Authorization", "Bearer "+plaintext)
 	rec := httptest.NewRecorder()
 	rig.srv.mux.ServeHTTP(rec, req)
@@ -1608,10 +1502,9 @@ func TestManagedBind_RebindingTheSameInstallationIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestManagedBind_SecondAccountIsAdditive: an org may bind one installation
+// per GitHub account, and every later bind runs the whole ceremony again.
 func TestManagedBind_SecondAccountIsAdditive(t *testing.T) {
-	// An org may bind several installations — one per GitHub account, which
-	// is what an enterprise-owned App produces. The class flips on the first
-	// bind and every later one runs the whole ceremony again.
 	gh := newFakeGitHub()
 	rig := newBindRig(t, gh)
 
@@ -1637,14 +1530,9 @@ func TestManagedBind_SecondAccountIsAdditive(t *testing.T) {
 	}
 }
 
-// TestManagedBind_TwoOrgsRacingOneInstallation is the cross-tenant half
-// of uniqueness, and it is the case a lock keyed by the ORG cannot catch: the
-// two racers hold different org keys, so an org-keyed lock lets both read
-// "nobody owns this" and both write, landing one GitHub account in two
-// orgs.
-//
-// The sequential refusal next door passes with or without the installation
-// lock. This is the test that does not.
+// TestManagedBind_TwoOrgsRacingOneInstallation: two orgs binding one
+// installation at once land it in exactly one, which only a lock keyed on the
+// installation (not the org) guarantees.
 func TestManagedBind_TwoOrgsRacingOneInstallation(t *testing.T) {
 	gh := newFakeGitHub()
 	first := newBindRig(t, gh)
@@ -1689,9 +1577,7 @@ func TestManagedBind_TwoOrgsRacingOneInstallation(t *testing.T) {
 		t.Errorf("%d of %d orgs bound the same installation, want exactly 1", wins, len(racers))
 	}
 
-	// The assertion that matters is the row count, not the status: one
-	// installation may be live in exactly one org, whatever either
-	// caller was told.
+	// The row count is what matters, whatever either caller was told.
 	var holders int
 	if err := first.h.AdminDB.QueryRow(`
 		SELECT count(*) FROM org_github_app_installations
@@ -1764,14 +1650,8 @@ func TestManagedBind_CookieAttributes(t *testing.T) {
 	if !cookie.Secure {
 		t.Error("the bind cookie is not Secure on an https deployment")
 	}
-	// SameSite=Lax, and this assertion is the point of the test.
-	//
-	// The callback is a top-level GET navigation arriving from github.com. Lax
-	// sends a cookie on exactly that; STRICT DROPS IT. Under Strict the cookie
-	// would never arrive, every bind would refuse as a stale ceremony, and the
-	// symptom would point at the record rather than at the cookie. Anyone
-	// "hardening" this to Strict breaks the whole flow, so the value is pinned
-	// here on purpose.
+	// Lax, not Strict: the callback is a top-level navigation from github.com,
+	// which Strict drops the cookie on, so every bind would fail as stale.
 	if cookie.SameSite != http.SameSiteLaxMode {
 		t.Errorf("the bind cookie is SameSite=%v, want Lax — Strict drops it on the return from github.com "+
 			"and every bind would fail as a stale ceremony", cookie.SameSite)
@@ -1801,11 +1681,8 @@ func TestManagedBind_CookieAttributes(t *testing.T) {
 
 // --- The closed refusal set ------------------------------------------------
 
-// TestManagedBind_RefusalSetIsClosedAndDistinct holds the property the set is
-// for. Every outcome the ceremony can produce is a named member with its own
-// code and its own sentence, so a new failure mode has to declare itself rather
-// than arriving wearing somebody else's explanation — and no member leaks an
-// unfilled format placeholder into a page.
+// TestManagedBind_RefusalSetIsClosedAndDistinct: every refusal has its own code
+// and its own sentence, and none renders an unfilled format placeholder.
 func TestManagedBind_RefusalSetIsClosedAndDistinct(t *testing.T) {
 	set := []bindRefusal{
 		refuseNoDeploymentApp,
@@ -1853,15 +1730,9 @@ func TestManagedBind_RefusalSetIsClosedAndDistinct(t *testing.T) {
 
 // --- The identity proof ------------------------------------------------------
 
-// TestManagedBind_PlantedCodeIsRefused is the confused deputy the ceremony
-// exists to stop, in the one shape the other four proofs do not cover on their
-// own: the victim admin has a live ceremony (they clicked Connect and have not
-// finished), and an attacker who installed the App on THEIR OWN account has a
-// code and an installation_id they never exchanged. The victim's browser loads
-// that URL. Cookie, record, session and role all hold — they are the victim's —
-// and both GitHub gates pass, because they are asked about the attacker's
-// token against the attacker's installation. Only the identity proof says no:
-// the account that authorized is not the one linked to the admin.
+// TestManagedBind_PlantedCodeIsRefused: an attacker's code and installation id
+// loaded into a victim admin's live ceremony pass cookie, session, role and
+// both GitHub gates, so the identity proof, run first, must refuse.
 func TestManagedBind_PlantedCodeIsRefused(t *testing.T) {
 	gh := newFakeGitHub()
 	rig := newBindRig(t, gh)
@@ -1914,10 +1785,8 @@ func TestManagedBind_IdentityMustBeLinked(t *testing.T) {
 	}
 }
 
-// TestManagedBind_IdentityWithoutIDIsNotComparable: a linked row captured
-// before numeric ids were recorded carries a renameable login and nothing
-// else. Comparing logins is a comparison that can be arranged, so the row is
-// as good as absent until it is recaptured.
+// TestManagedBind_IdentityWithoutIDIsNotComparable: a linked identity with no
+// numeric id counts as unlinked, since a login match can be arranged by renaming.
 func TestManagedBind_IdentityWithoutIDIsNotComparable(t *testing.T) {
 	gh := newFakeGitHub()
 	rig := newBindRig(t, gh)
@@ -1947,11 +1816,9 @@ func TestManagedBind_IdentityComparesByIDNotLogin(t *testing.T) {
 	}
 }
 
-// TestManagedBind_RecordWithoutAnAccountCompletesAsTheInstallLeg: a record
-// minted by a build that sent the admin to GitHub's picker carries no account,
-// and it is live for up to fifteen minutes across an upgrade. Whatever leg the
-// column says — the value an older row acquired is a default — it completes
-// as the install leg with every proof, minus the one there is no name for.
+// TestManagedBind_RecordWithoutAnAccountCompletesAsTheInstallLeg: a stored
+// record with no account, whatever its leg column says, completes as the
+// install leg with every proof still run.
 func TestManagedBind_RecordWithoutAnAccountCompletesAsTheInstallLeg(t *testing.T) {
 	for _, leg := range []string{domain.GitHubBindLegAuthorize, domain.GitHubBindLegInstall} {
 		t.Run("leg="+leg, func(t *testing.T) {
@@ -1985,10 +1852,9 @@ func TestManagedBind_RecordWithoutAnAccountCompletesAsTheInstallLeg(t *testing.T
 	}
 }
 
-// TestManagedBind_UnknownLegIsRefusedAndNamed: a record carrying a leg this
-// build does not know is a data fault. The person gets the stale refusal —
-// their next step is the same — and the operator's log names the value,
-// which the generic refusal line would not.
+// TestManagedBind_UnknownLegIsRefusedAndNamed: a record with a leg this build
+// does not know gets the stale refusal, asks GitHub nothing, and the log names
+// the value.
 func TestManagedBind_UnknownLegIsRefusedAndNamed(t *testing.T) {
 	gh := newFakeGitHub()
 	rig := newBindRig(t, gh)
@@ -2017,10 +1883,9 @@ func TestManagedBind_UnknownLegIsRefusedAndNamed(t *testing.T) {
 
 // --- The named-account leg ----------------------------------------------------
 
-// TestManagedBind_NamedAccount_Organization is the leg for an account that
-// already has the App: no install page, no installation_id on the query — the
-// admin names the account, GitHub's OAuth authorize proves who they are, and
-// the installation is found among the ones that person can see.
+// TestManagedBind_NamedAccount_Organization: for an account that already has
+// the App, OAuth authorize proves the admin and the named account's
+// installation is found among the ones they can see.
 func TestManagedBind_NamedAccount_Organization(t *testing.T) {
 	gh := newFakeGitHub()
 	rig := newBindRig(t, gh)
@@ -2107,11 +1972,8 @@ func TestManagedBind_NamedAccount_UserTarget(t *testing.T) {
 }
 
 // TestManagedBind_NamedAccount_NotInTheListingContinuesToInstall: an account
-// with no installation and an account whose installation this person cannot
-// see look identical in the listing the answer comes from, and both get the
-// same answer — on to GitHub's install page for that account, under a fresh
-// record, where GitHub decides what to show. TF says nothing about which it
-// was, and reads nothing under the App's key.
+// with no installation and one whose installation the person cannot see both
+// continue to GitHub's install page under a fresh record, revealing nothing.
 func TestManagedBind_NamedAccount_NotInTheListingContinuesToInstall(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -2193,10 +2055,9 @@ func TestManagedBind_NamedAccount_UnknownLoginIsRefused(t *testing.T) {
 	}
 }
 
-// TestManagedBind_InstallLeg_AccountMismatch: the install leg binds only an
-// installation on the account that was named. The preselection can be changed
-// on the way through GitHub, and the person may well own both accounts — it
-// still is not the connection they asked for.
+// TestManagedBind_InstallLeg_AccountMismatch: the install leg binds only the
+// named account's installation, even if the person changed the preselection
+// to another account they own.
 func TestManagedBind_InstallLeg_AccountMismatch(t *testing.T) {
 	gh := newFakeGitHub()
 	rig := newBindRig(t, gh)
@@ -2217,11 +2078,9 @@ func TestManagedBind_InstallLeg_AccountMismatch(t *testing.T) {
 	rig.assertNothingBound(t)
 }
 
-// TestManagedBind_InstallLeg_HoldsTheNamedAccountByID: the install leg's
-// record carries the id the authorize leg resolved the named login to, and the
-// installation GitHub returns is held to that id. A rename between the two legs
-// still binds. Another account holding the named login by then is a mismatch,
-// whatever it is called.
+// TestManagedBind_InstallLeg_HoldsTheNamedAccountByID: the install leg holds
+// the installation to the id the named login resolved to, so a rename between
+// the legs binds and another account under that login is a mismatch.
 func TestManagedBind_InstallLeg_HoldsTheNamedAccountByID(t *testing.T) {
 	t.Run("the named account renamed between the legs", func(t *testing.T) {
 		gh := newFakeGitHub()
@@ -2365,9 +2224,8 @@ func TestManagedBind_NamedAccount_Refusals(t *testing.T) {
 }
 
 // TestManagedBind_NamedAccount_QueryInstallationIsIgnored: the record decides
-// the leg. A callback into a named ceremony that also carries an
-// installation_id — the shape a planted install-leg URL has — binds the named
-// account the person can see, never the id on the query string.
+// the leg, so an installation_id planted on a named ceremony's callback is
+// never read and the named account binds.
 func TestManagedBind_NamedAccount_QueryInstallationIsIgnored(t *testing.T) {
 	gh := newFakeGitHub()
 	rig := newBindRig(t, gh)
@@ -2405,10 +2263,9 @@ func TestManagedBind_NamedAccount_BoundElsewhere(t *testing.T) {
 	}
 }
 
-// TestManagedBind_NamedAccount_Start pins the start's own contract: the
-// account is validated as a login before it goes anywhere, the request must
-// come from the admin's own page, and an org that already holds a
-// credential is refused here before anyone is sent to GitHub.
+// TestManagedBind_NamedAccount_Start: the start validates the login, requires
+// the admin's own origin and role, and refuses an org holding a credential
+// before anyone is sent to GitHub.
 func TestManagedBind_NamedAccount_Start(t *testing.T) {
 	t.Run("MalformedLoginIsABadField", func(t *testing.T) {
 		rig := newBindRig(t, newFakeGitHub())
@@ -2454,11 +2311,7 @@ func TestManagedBind_NamedAccount_Start(t *testing.T) {
 	t.Run("RequiresOrgAdmin", func(t *testing.T) {
 		rig := newBindRig(t, newFakeGitHub())
 		member := rig.seedUser()
-		if _, err := rig.h.AdminDB.Exec(
-			`INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, 'member')`,
-			member, rig.orgID.String()); err != nil {
-			t.Fatalf("insert org_membership: %v", err)
-		}
+		rig.addMember(t, member)
 		resp, _ := rig.driveCallback(member)
 		req := httptest.NewRequest("POST", "/api/orgs/"+rig.orgID.String()+"/github/managed/connect-account",
 			strings.NewReader(`{"account":"acme"}`))
@@ -2498,10 +2351,9 @@ func TestManagedBind_NamedAccount_Start(t *testing.T) {
 
 // --- Mode gate -------------------------------------------------------------
 
+// TestManagedBind_LocalModeIs404: a local binary ships no shared App key, so
+// the ceremony's routes do not exist there.
 func TestManagedBind_LocalModeIs404(t *testing.T) {
-	// A distributed local binary ships no shared App key, so the ceremony does
-	// not exist there — and a route that does not exist in this deployment mode
-	// answers like one that does not exist at all.
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
 	var key [32]byte
@@ -2522,10 +2374,8 @@ func TestManagedBind_LocalModeIs404(t *testing.T) {
 }
 
 // TestManagedBind_OutcomePageReadsFromSetupAndSettings: the outcome page is
-// reached from Settings and from the setup wizard, so neither its back link
-// nor the install-request message names Settings. The link itself still
-// targets Settings, which the setup gate turns into /setup for an org still in
-// setup.
+// reached from Settings and the setup wizard, so its copy never names Settings,
+// though its link targets Settings (which the setup gate redirects).
 func TestManagedBind_OutcomePageReadsFromSetupAndSettings(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	rec := httptest.NewRecorder()

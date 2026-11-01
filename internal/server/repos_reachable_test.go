@@ -25,12 +25,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// The picker and the team-repos write gate both read the reachable-repo mirror
-// now, so what these tests are really about is the contract that mirror carries:
-// one shape and one freshness rule on both credential classes, a read that never
-// touches GitHub while the mirror is fresh, a first-ever open that says "we have
-// not looked yet" instead of "you have no repositories", and a write gate that
-// decides the same way no matter which process served the picker.
+// The picker and the team-repos write gate both read the reachable-repo mirror.
+// These tests pin its contract: one shape and one freshness rule on both
+// credential classes, no GitHub call while the mirror is fresh, a first-ever
+// open that says "not looked yet" rather than "no repositories", and a write
+// gate that decides the same way whichever process served the picker.
 
 // reachHarness wires the production refresh path into a test server and runs it
 // SYNCHRONOUSLY on trigger, so a test can assert on what one picker open
@@ -208,13 +207,9 @@ func responseKeys(t *testing.T, raw []byte) []string {
 	return keys
 }
 
-// TestPickerSchemaIsIdenticalAcrossCredentialClasses is the acceptance test for
-// the reason this cache exists at all. The picker used to be a proxy list, so
-// total_count was null — and it was null for two DIFFERENT reasons per tier
-// (/user/repos reports no count; /installation/repositories reports one
-// installation's, not the union's). Sourced locally, both tiers answer the same
-// keys and a real number, and the test compares them key-for-key rather than
-// checking each side in isolation.
+// TestPickerSchemaIsIdenticalAcrossCredentialClasses: served from the mirror,
+// the PAT and App pickers answer the same keys, a real total_count and each
+// option's GitHub id, without a GitHub call. The key sets are compared directly.
 func TestPickerSchemaIsIdenticalAcrossCredentialClasses(t *testing.T) {
 	keyring.MockInit()
 
@@ -278,11 +273,9 @@ func TestPickerSchemaIsIdenticalAcrossCredentialClasses(t *testing.T) {
 	}
 }
 
-// TestPickerReadinessSchemaMatchesTheReadyOne pins the empty case: a first-ever
-// open answers the readiness discriminator rather than an empty list, and the two
-// states carry the same keys — so a client renders off `status` instead of
-// guessing from an empty array whether the org has no repositories or has not
-// been looked at.
+// TestPickerReadinessSchemaMatchesTheReadyOne: a first-ever open answers
+// status discovering with items [] (not null), under the same keys as the ready
+// answer, so a client renders off `status` rather than an empty array.
 func TestPickerReadinessSchemaMatchesTheReadyOne(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -321,49 +314,9 @@ func TestPickerReadinessSchemaMatchesTheReadyOne(t *testing.T) {
 	}
 }
 
-// TestPickerReadMakesNoUpstreamCallWhenFresh is the rate-limit bound, stated as
-// a test: with a fresh mirror the picker reaches GitHub zero times, and N opens
-// inside one TTL cost one enumeration rather than N.
-func TestPickerReadMakesNoUpstreamCallWhenFresh(t *testing.T) {
-	keyring.MockInit()
-	srv := newTestServer(t)
-	gh := newCountingPATGitHub(t, "acme/api", "acme/web")
-	seedPATOrg(t, srv, gh.URL)
-	reach := wireReachRefresh(t, srv)
-
-	// The first open finds nothing mirrored, kicks the refresh, and answers the
-	// readiness state. That is the one enumeration this whole window is allowed.
-	if page := fetchPickerPage(t, srv, map[string]any{}); page.Status != githubRepoStatusDiscovering {
-		t.Fatalf("first open status = %q; want %q", page.Status, githubRepoStatusDiscovering)
-	}
-	enumerationsAfterFirstOpen := gh.userRepos.Load()
-	if enumerationsAfterFirstOpen == 0 {
-		t.Fatal("the first open never enumerated; the readiness state must be accompanied by an actual refresh")
-	}
-
-	for i := range 5 {
-		page := fetchPickerPage(t, srv, map[string]any{})
-		if page.Status != githubRepoStatusReady {
-			t.Fatalf("open %d status = %q; want %q", i+2, page.Status, githubRepoStatusReady)
-		}
-		if page.TotalCount != 2 {
-			t.Fatalf("open %d total_count = %d; want 2", i+2, page.TotalCount)
-		}
-	}
-	if got := gh.userRepos.Load(); got != enumerationsAfterFirstOpen {
-		t.Errorf("%d upstream enumerations after five more opens; want the %d the first open cost — a fresh mirror must not reach GitHub at all",
-			got, enumerationsAfterFirstOpen)
-	}
-	if reach.forced.Load() != 0 {
-		t.Errorf("%d forced refreshes from ordinary opens; want 0 — force is the explicit control, not the read path", reach.forced.Load())
-	}
-}
-
-// TestReachRefreshFreshnessContractIsOneContract drives both tiers through the
-// same stale → refresh → fresh sequence and asserts the same observable
-// behaviour, then that force bypasses the TTL on both. A freshness rule that
-// varied by credential class would be the same inconsistency as a total_count
-// that varied by credential class.
+// TestReachRefreshFreshnessContractIsOneContract: both credential classes
+// refresh an empty mirror, skip a fresh one without a GitHub call, refresh one
+// aged past the TTL, and refresh past the TTL when forced.
 func TestReachRefreshFreshnessContractIsOneContract(t *testing.T) {
 	keyring.MockInit()
 
@@ -428,29 +381,35 @@ func TestReachRefreshFreshnessContractIsOneContract(t *testing.T) {
 	}
 }
 
-// TestTeamReposPut_GateReadsTheMirrorFromAnotherPod is the multi-mode bug the
-// durable mirror closes, written so the old in-process cache could not pass it:
-// the picker is served by ONE server and the PUT by ANOTHER over the same
-// database. With the enumeration cached in the picker's process, the write gate
-// on the second process fell to its cold path and behaved differently depending
-// on which pod answered; reading the mirror, both processes decide identically.
-//
-// The cold path is made to disagree on purpose — the stub answers 404 for every
-// per-repo probe — so a gate that quietly fell through would reject the
-// reachable repository and fail the test rather than passing by coincidence.
+// TestTeamReposPut_GateReadsTheMirrorFromAnotherPod: the picker is served by
+// one server and the PUT by another over the same database, and the write gate
+// decides from the mirror the picker filled. The stub answers 404 for every
+// per-repo probe, so a gate that fell to its cold path would refuse the PUT.
 func TestTeamReposPut_GateReadsTheMirrorFromAnotherPod(t *testing.T) {
 	keyring.MockInit()
 	picker := newTestServer(t)
 	gh := newCountingPATGitHub(t, "owner/tracked")
 	seedPATOrg(t, picker, gh.URL)
 
-	// Pod A serves the picker, which is what fills the mirror.
-	wireReachRefresh(t, picker)
+	// Pod A serves the picker. The first open finds nothing mirrored, kicks the
+	// refresh, and answers the readiness state; the next reads the fresh mirror
+	// without reaching GitHub, and no ordinary open forces a refresh.
+	reach := wireReachRefresh(t, picker)
 	if page := fetchPickerPage(t, picker, map[string]any{}); page.Status != githubRepoStatusDiscovering {
 		t.Fatalf("first open on pod A = %q; want %q", page.Status, githubRepoStatusDiscovering)
 	}
-	if page := fetchPickerPage(t, picker, map[string]any{}); page.TotalCount != 1 {
-		t.Fatalf("pod A total_count = %d after the refresh; want 1", page.TotalCount)
+	spent := gh.userRepos.Load()
+	if spent == 0 {
+		t.Fatal("the first open never enumerated; the readiness state must be accompanied by an actual refresh")
+	}
+	if page := fetchPickerPage(t, picker, map[string]any{}); page.TotalCount != 1 || page.Status != githubRepoStatusReady {
+		t.Fatalf("pod A second open = %q, total_count %d; want %q and 1", page.Status, page.TotalCount, githubRepoStatusReady)
+	}
+	if got := gh.userRepos.Load(); got != spent {
+		t.Errorf("%d upstream enumerations after a fresh read; want the %d the first open cost", got, spent)
+	}
+	if reach.forced.Load() != 0 {
+		t.Errorf("%d forced refreshes from ordinary opens; want 0", reach.forced.Load())
 	}
 
 	// Pod B: a second process over the same database, which has never served a
@@ -468,11 +427,9 @@ func TestTeamReposPut_GateReadsTheMirrorFromAnotherPod(t *testing.T) {
 	assertNamesByID(t, msgs[0], ghost, "owner/ghost")
 }
 
-// TestTeamReposPut_StaleMirrorFallsToTheColdPath pins the gate's staleness
-// posture: past reachableGateMaxAge the mirror stops deciding writes and the
-// per-repo probe takes over. The stub answers 200 for every probe, so a gate
-// that kept trusting the stale mirror would refuse a repository the probe
-// accepts.
+// TestTeamReposPut_StaleMirrorFallsToTheColdPath: past reachableGateMaxAge the
+// mirror stops deciding writes and the per-repo probe takes over. The stub
+// accepts every probe, so a gate still trusting the stale mirror would refuse.
 func TestTeamReposPut_StaleMirrorFallsToTheColdPath(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -518,37 +475,9 @@ func TestTeamReposPut_StaleMirrorFallsToTheColdPath(t *testing.T) {
 	}
 }
 
-// TestPickerFiltersServerSide pins that the search moved to the server: the
-// filter narrows both the page AND the total, which is what lets the client stop
-// holding the whole set in memory to search it.
-func TestPickerFiltersServerSide(t *testing.T) {
-	keyring.MockInit()
-	srv := newTestServer(t)
-	gh := newCountingPATGitHub(t, "acme/api", "acme/web", "other/tool")
-	seedPATOrg(t, srv, gh.URL)
-	wireReachRefresh(t, srv).refresh(t, runmode.LocalDefaultOrgID, true)
-
-	all := fetchPickerPage(t, srv, map[string]any{})
-	if all.TotalCount != 3 {
-		t.Fatalf("unfiltered total_count = %d; want 3", all.TotalCount)
-	}
-	spent := gh.userRepos.Load()
-	filtered := fetchPickerPage(t, srv, map[string]any{"q": "acme/"})
-	if filtered.TotalCount != 2 || len(filtered.Items) != 2 {
-		t.Errorf("filtered page = %d items / total %d; want 2 and 2 — the total is what the filter matches",
-			len(filtered.Items), filtered.TotalCount)
-	}
-	if got := gh.userRepos.Load(); got != spent {
-		t.Errorf("%d upstream requests after a filtered read; want the %d the refresh spent — filtering happens in the store",
-			got, spent)
-	}
-}
-
-// TestPickerOptionsNameTheirRegistryRow pins the id a client tracks an option
-// by. acme/api's registry row carries the option's GitHub id; the row under
-// acme/web's name carries another, so it is another repository and that option
-// has no row of its own; acme/cli has no row at all, and a client registers it
-// by its GitHub id.
+// TestPickerOptionsNameTheirRegistryRow: an option names the registry row that
+// carries its GitHub id. A row under the same name with another GitHub id is
+// another repository, so that option, like one with no row, names none.
 func TestPickerOptionsNameTheirRegistryRow(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -573,9 +502,9 @@ func TestPickerOptionsNameTheirRegistryRow(t *testing.T) {
 	}
 }
 
-// TestPickerRejectsATokenFromAnotherFilter pins the page-token contract on this
-// route: a token minted under one search cannot address a page of another, which
-// is what stops an offset from silently pointing into a different result set.
+// TestPickerRejectsATokenFromAnotherFilter: the search runs in the store and
+// narrows both the page and the total, and a page token minted under one search
+// cannot address a page of another.
 func TestPickerRejectsATokenFromAnotherFilter(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -584,8 +513,17 @@ func TestPickerRejectsATokenFromAnotherFilter(t *testing.T) {
 	wireReachRefresh(t, srv).refresh(t, runmode.LocalDefaultOrgID, true)
 
 	first := fetchPickerPage(t, srv, map[string]any{"page_size": 1})
-	if first.NextPageToken == "" {
-		t.Fatal("want a next token with three rows and a page size of one")
+	if first.NextPageToken == "" || first.TotalCount != 3 {
+		t.Fatalf("first page = total %d, next token %q; want 3 and a token with a page size of one", first.TotalCount, first.NextPageToken)
+	}
+	spent := gh.userRepos.Load()
+	filtered := fetchPickerPage(t, srv, map[string]any{"q": "cli"})
+	if filtered.TotalCount != 1 || len(filtered.Items) != 1 {
+		t.Errorf("filtered page = %d items / total %d; want 1 and 1 — the total is what the filter matches",
+			len(filtered.Items), filtered.TotalCount)
+	}
+	if got := gh.userRepos.Load(); got != spent {
+		t.Errorf("%d upstream requests after a filtered read; want the %d the refresh spent", got, spent)
 	}
 	rec := doJSON(t, srv, http.MethodPost, "/api/github/repos/list", map[string]any{
 		"q": "cli", "page_token": first.NextPageToken,
@@ -644,12 +582,8 @@ func seedManagedOrg(t *testing.T, s *Server, installationIDs ...string) {
 	}
 }
 
-// The picker read for an org on the deployment's shared App. It used to
-// fail before it read a row: the class resolved to a refusal, and the handler
-// treats an unresolvable class as fatal — deliberately, since showing another
-// credential system's idea of the reach is worse than showing an error. With the
-// mirror able to hold the class, it is an ordinary store-backed list with a real
-// count, and nothing about the response distinguishes it from any other tier.
+// An org on the deployment's shared App reads the picker from the mirror like
+// any other class: status ready, a real count, the mirrored rows in order.
 func TestPickerServesAManagedOrgFromTheMirror(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -682,11 +616,9 @@ func TestPickerServesAManagedOrgFromTheMirror(t *testing.T) {
 	}
 }
 
-// A managed org that has bound nothing is told what will help. Its
-// usability is its installations, exactly as for an org on its own App, and
-// the PAT tier's "GitHub is not connected" would read as "add a token" — the one
-// thing that cannot help an org whose credential is an App it has yet to
-// install anywhere.
+// A managed org that has bound nothing gets the 409 that names the missing
+// installation, not the PAT tier's "GitHub is not connected", which reads as
+// "add a token" and cannot help an App org.
 func TestPickerManagedOrgWithNothingBoundIsNotToldToAddAToken(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)

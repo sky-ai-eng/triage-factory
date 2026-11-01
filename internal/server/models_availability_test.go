@@ -225,11 +225,9 @@ func (rig *availabilityRig) availabilityRows(t *testing.T) int {
 	return n
 }
 
-// The lifecycle, end to end through the real endpoint: a provider that answers
-// records verified, one that refuses records red with its own message, and one
-// that fails records NOTHING — which is the property the whole design turns
-// on, because a save gate that a 500 could turn red would be a save gate one
-// bad minute could jam shut.
+// A provider that answers records verified (and the probe's spend), one that
+// refuses records red with its own message, and one that fails records nothing,
+// so a transient 500 cannot turn a model red.
 func TestModelTest_Postgres_RecordsWhatTheProviderAnswered(t *testing.T) {
 	rig := newAvailabilityRig(t)
 	key := modelKeyOn(t, modelcatalog.ProviderAnthropic)
@@ -253,6 +251,20 @@ func TestModelTest_Postgres_RecordsWhatTheProviderAnswered(t *testing.T) {
 		}
 		if row.AvailabilityDetail != "" {
 			t.Errorf("verified row carries detail %q, want none", row.AvailabilityDetail)
+		}
+
+		// Every probe is a real charge, so it lands in the ledger under job=probe.
+		var (
+			model string
+			cost  float64
+		)
+		if err := rig.h.AdminDB.QueryRow(
+			`SELECT model, total_cost_usd FROM system_llm_runs WHERE org_id = $1 AND job = $2`,
+			rig.orgID, systemllm.JobProbe).Scan(&model, &cost); err != nil {
+			t.Fatalf("read the probe's ledger row: %v", err)
+		}
+		if model != key || cost <= 0 {
+			t.Errorf("ledger row = (%q, %v), want the probed key %q at a real cost", model, cost, key)
 		}
 	})
 
@@ -310,34 +322,6 @@ func TestModelTest_Postgres_RecordsWhatTheProviderAnswered(t *testing.T) {
 			t.Errorf("availability = %q, want %q — an inconclusive probe leaves the row absent", row.Availability, modelAvailabilityUnverified)
 		}
 	})
-}
-
-// Every probe is a real charge, so every probe lands in the ledger under
-// job=probe — where the spend view rolls it up as system_overhead alongside
-// every other call TF makes for itself.
-func TestModelTest_Postgres_RecordsSpend(t *testing.T) {
-	rig := newAvailabilityRig(t)
-	rig.provider.answerWith(http.StatusOK, "")
-	key := modelKeyOn(t, modelcatalog.ProviderAnthropic)
-	if rec := rig.test(t, rig.admin, key); rec.Code != http.StatusOK {
-		t.Fatalf("test = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
-	}
-
-	var (
-		model string
-		cost  float64
-	)
-	if err := rig.h.AdminDB.QueryRow(
-		`SELECT model, total_cost_usd FROM system_llm_runs WHERE org_id = $1 AND job = $2`,
-		rig.orgID, systemllm.JobProbe).Scan(&model, &cost); err != nil {
-		t.Fatalf("read the probe's ledger row: %v", err)
-	}
-	if model != key {
-		t.Errorf("ledger model = %q, want the probed key %q", model, key)
-	}
-	if cost <= 0 {
-		t.Errorf("ledger cost = %v, want a real stamp", cost)
-	}
 }
 
 // The eager pass after a credential bind: it tests every candidate of the named
@@ -479,9 +463,9 @@ func TestModelTest_Postgres_Gates(t *testing.T) {
 	})
 }
 
-// One org's verdict is not another's. The rows are the org's own inference
-// entitlements, and the read is scoped to the caller's org rather than to the
-// build's catalog.
+// One org's verdict is not another's: the read is scoped to the caller's org.
+// The neighbour, holding only Anthropic, sees its Anthropic rows unverified and
+// every other provider's unconfigured, with no detail or timestamp on any.
 func TestModelAvailability_Postgres_IsPerOrg(t *testing.T) {
 	rig := newAvailabilityRig(t)
 	rig.provider.answerWith(http.StatusOK, "")
@@ -511,6 +495,9 @@ func TestModelAvailability_Postgres_IsPerOrg(t *testing.T) {
 		if row.Availability != want {
 			t.Errorf("%s: neighbour sees %q, want %q — the verdict belongs to the org that paid for it",
 				row.Key, row.Availability, want)
+		}
+		if row.AvailabilityDetail != "" || row.AvailabilityCheckedAt != nil {
+			t.Errorf("%s: an unprobed row carries a detail or a timestamp", row.Key)
 		}
 	}
 }
@@ -559,18 +546,9 @@ func localModelTestRequest(modelKey string) *http.Request {
 	return r.WithContext(ctx)
 }
 
-// A local org that brought its OWN credential probes, and the verdict it
-// reaches is stored and published exactly as multi's is. Its runs go through
-// the agent runtime, which reports the provider's HTTP status on its terminal
-// event, so the transport can answer for an alias as readily as for a wire id.
-//
-// The stored row is keyed (credential family, alias): the alias names no
-// provider, so what the verdict is ABOUT is the credential it was spent
-// against, and the family half records which one.
-//
-// Both conclusive verdicts, because they take different arms of the write and a
-// refusal is the one that has to carry the provider's own message out to the
-// catalog read.
+// A local org on its own credential probes, and the verdict is stored and
+// published as multi's is. The row is keyed (credential family, alias), since an
+// alias names no provider. Both conclusive verdicts take different write arms.
 func TestModelTest_LocalMode_ProbesAndPublishesTheVerdict(t *testing.T) {
 	for name, tc := range map[string]struct {
 		verdict     modelprobe.Verdict
@@ -641,11 +619,9 @@ func TestModelTest_LocalMode_ProbesAndPublishesTheVerdict(t *testing.T) {
 	}
 }
 
-// Under the host's credentials both test routes refuse, and they refuse as a
-// SETUP GAP rather than answering — a verdict recorded there would be about the
-// machine the process happens to be running on, keyed to nothing TF can name,
-// watch, or invalidate. Nothing is stored, and the prober is never called: the
-// refusal is decided before anything is spent.
+// Under the host's credentials both test routes refuse with 409 before calling
+// the prober and store nothing: a verdict there would describe the machine the
+// process runs on, keyed to nothing TF can name or invalidate.
 func TestModelTests_LocalMode_SystemCredentialsRefuseWithoutSpending(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -686,14 +662,9 @@ func TestModelTests_LocalMode_SystemCredentialsRefuseWithoutSpending(t *testing.
 	}
 }
 
-// An org that has SAID it brings its own credentials and bound none is refused,
-// and the refusal has to name THAT gap. There is no provider to name: an alias
-// resolves its access path from the credential, so with nothing bound the model
-// under test names nothing that could be connected — and a message built from a
-// provider nobody chose reads as " is not connected for this organization".
-//
-// It is the same predicate the badge uses, so a caller told "unconfigured" by
-// the read and refused by this is being told one thing about one credential.
+// A local org on its own credentials with none bound: the test route refuses
+// without naming a provider (an alias names none), and the catalog read badges
+// every model unconfigured, the same predicate.
 func TestModelTest_LocalMode_NothingBoundRefusesWithoutNamingAProvider(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -761,14 +732,9 @@ func (c *countingProber) Probe(context.Context, string, modelcatalog.Model) (mod
 	return modelprobe.Result{Verdict: modelprobe.VerdictGreen}, nil
 }
 
-// A multi-mode pod that never had the prober wired says so as a configuration
-// fault, not as a 500 — and never panics on the nil.
-//
-// Both nils are covered because they are different bugs with the same symptom.
-// A nil GETTER is the unit-test shape. A getter that RETURNS nil is the live
-// one: routes register during buildServer and SetModelProber runs afterwards,
-// so the closure over s.modelProber hands back a nil interface until it does —
-// and calling Probe on that panics rather than 409ing.
+// A multi-mode pod with no prober wired answers 409, not a 500 or a panic. A
+// getter that returns nil is the live shape: routes register before
+// SetModelProber runs, so the closure hands back a nil interface until it does.
 func TestModelTest_Postgres_NoProberConfigured(t *testing.T) {
 	key := modelKeyOn(t, modelcatalog.ProviderAnthropic)
 	for name, wire := range map[string]func(*modelsHandler){
@@ -794,31 +760,9 @@ func TestModelTest_Postgres_NoProberConfigured(t *testing.T) {
 	}
 }
 
-// The state this whole value exists for: with only Anthropic bound, the four
-// Bedrock rows must say so rather than inviting a test. "unverified" would mean
-// "press test again" on a button the test route beside them refuses with 409,
-// which is a read pointing users at something they cannot do.
-func TestModelsList_Postgres_UnconnectedProviderIsUnconfigured(t *testing.T) {
-	rig := newAvailabilityRig(t) // binds Anthropic only
-
-	for _, row := range rig.catalogRead(t, rig.admin) {
-		want := modelAvailabilityUnverified
-		if row.Provider != modelcatalog.ProviderAnthropic {
-			want = modelAvailabilityUnconfigured
-		}
-		if row.Availability != want {
-			t.Errorf("%s (%s): availability = %q, want %q", row.Key, row.Provider, row.Availability, want)
-		}
-		if row.AvailabilityDetail != "" || row.AvailabilityCheckedAt != nil {
-			t.Errorf("%s: an unprobed row carries a detail or a timestamp", row.Key)
-		}
-	}
-}
-
-// The derived fact outranks the stored one. A credential unbound after a
-// successful probe leaves a green row that was true when it was written and is
-// not true now — and the row cannot know that, because nothing re-probes.
-// Reporting it as verified would send someone to pin a model that cannot run.
+// The derived fact outranks the stored one: a green row left by a probe before
+// the credential was unbound reads unconfigured, because nothing re-probes and
+// verified would send someone to pin a model that cannot run.
 func TestModelsList_Postgres_UnconfiguredOutranksAStoredGreen(t *testing.T) {
 	rig := newAvailabilityRig(t)
 	rig.provider.answerWith(http.StatusOK, "")
@@ -832,11 +776,9 @@ func TestModelsList_Postgres_UnconfiguredOutranksAStoredGreen(t *testing.T) {
 	}
 
 	// The org switches providers: Bedrock in, Anthropic out, the way the two
-	// credential routes do it — each clears only its own ref. It has to still
-	// hold SOMETHING, or it would be ambient, which is a different state with
-	// a different answer (see the ambient test below). The green row is
-	// deliberately left in place: nothing purges it, which is exactly why the
-	// derivation has to outrank it.
+	// credential routes do it — each clears only its own ref. The green row is
+	// left in place: nothing purges it, which is why the derivation has to
+	// outrank it.
 	pgtest.MustExec(t, rig.h.AdminDB, `
 		UPDATE org_settings
 		   SET bedrock_credentials_ref = 'aws_bearer_token_bedrock',
@@ -856,29 +798,9 @@ func TestModelsList_Postgres_UnconfiguredOutranksAStoredGreen(t *testing.T) {
 	}
 }
 
-// A multi-mode org that binds nothing is unconfigured, not ambient. There are
-// no host credentials for a multi-mode deployment to lend — the operator's
-// environment is one environment shared by every tenant, and credential
-// resolution refuses such an org outright — so anything softer here would badge
-// a picker full of models whose every run fails on the way out.
-func TestModelsList_Postgres_NothingBoundIsUnconfigured(t *testing.T) {
-	rig := newAvailabilityRig(t)
-	pgtest.MustExec(t, rig.h.AdminDB,
-		`UPDATE org_settings SET anthropic_api_key_ref = NULL, bedrock_credentials_ref = NULL WHERE org_id = $1`, rig.orgID)
-
-	for _, row := range rig.catalogRead(t, rig.admin) {
-		if row.Availability != modelAvailabilityUnconfigured {
-			t.Errorf("%s: availability = %q, want %q for an org that has bound nothing",
-				row.Key, row.Availability, modelAvailabilityUnconfigured)
-		}
-	}
-}
-
-// And a row hand-written to say the org runs on the host's credentials does not
-// change it: domain.EffectiveLLMAuthMethod resolves the mode's single legal
-// value whatever the column says, because a multi-mode deployment has none to lend.
-// The settings PATCH refuses to write it at all; this is the backstop for a row
-// that arrived some other way.
+// A multi-mode org that binds nothing is unconfigured, even with a row
+// hand-written to say it runs on the host's credentials: multi has none to lend,
+// so domain.EffectiveLLMAuthMethod ignores the column.
 func TestModelsList_Postgres_StoredHostCredentialsAreInert(t *testing.T) {
 	rig := newAvailabilityRig(t)
 	pgtest.MustExec(t, rig.h.AdminDB, `
@@ -930,34 +852,9 @@ func TestTeamModelsList_Postgres_ReportsTheSameAvailability(t *testing.T) {
 	}
 }
 
-// The zero-configuration local install: it runs on the host's credentials, so
-// there is no TF-owned credential for a verdict to be about and the whole
-// availability triple is absent from every row. Not "unverified" — that word
-// promises a test button, and the routes beside this one refuse.
-func TestModelsList_LocalMode_SystemCredentialsPublishNoAvailability(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
-
-	rec := doJSON(t, s, http.MethodGet, modelsPath(runmode.LocalDefaultOrgID), nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
-	}
-	items := decodeModels(t, rec.Body.Bytes()).Items
-	if len(items) == 0 {
-		t.Fatal("catalog read returned no models")
-	}
-	for _, row := range items {
-		if row.Availability != "" || row.AvailabilityDetail != "" || row.AvailabilityCheckedAt != nil {
-			t.Errorf("%s: availability = %q on the host's credentials, want the triple absent", row.Key, row.Availability)
-		}
-	}
-}
-
-// A stored verdict does not survive the org going back to the host's
-// credentials. The row stays in the table — nothing destroys it, and rebinding
-// the same credential makes it meaningful again — but it is not published,
-// because what it describes is a credential this org is no longer using.
+// A local org on the host's credentials has no TF-owned credential for a
+// verdict to be about, so every row omits the availability triple, even with a
+// stored verdict (kept for a later rebind) in the table.
 func TestModelsList_LocalMode_SystemCredentialsSuppressAStoredVerdict(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -971,57 +868,20 @@ func TestModelsList_LocalMode_SystemCredentialsSuppressAStoredVerdict(t *testing
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
 	}
-	for _, row := range decodeModels(t, rec.Body.Bytes()).Items {
-		if row.Availability != "" {
-			t.Errorf("%s: availability = %q, want the triple absent under system credentials", row.Key, row.Availability)
-		}
-	}
-}
-
-// A local org that has SAID it brings its own key and bound none is
-// unconfigured, and the recorded choice is what decides it — the same emptiness
-// that means "zero-config subscription" one row over. modelaccess.Ready refuses
-// to dispatch for such an org rather than letting the run authenticate from
-// whatever the operator's environment holds, so the badge is not overstating:
-// it is naming the refusal a run would hit.
-func TestModelsList_LocalMode_OwnCredentialsWithNoneBoundIsUnconfigured(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
-
-	set, err := s.allStores.Orgs.GetSettingsSystem(t.Context(), runmode.LocalDefaultOrgID)
-	if err != nil {
-		t.Fatalf("read org settings: %v", err)
-	}
-	set.LLMAuthMethod = domain.LLMAuthBYOK
-	if _, err := s.allStores.Orgs.UpdateSettingsVersioned(t.Context(), runmode.LocalDefaultOrgID, set, set.Version); err != nil {
-		t.Fatalf("select byok: %v", err)
-	}
-
-	rec := doJSON(t, s, http.MethodGet, modelsPath(runmode.LocalDefaultOrgID), nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
-	}
 	items := decodeModels(t, rec.Body.Bytes()).Items
 	if len(items) == 0 {
 		t.Fatal("catalog read returned no models")
 	}
 	for _, row := range items {
-		if row.Availability != modelAvailabilityUnconfigured {
-			t.Errorf("%s: availability = %q, want %q for an org bringing its own key with none bound",
-				row.Key, row.Availability, modelAvailabilityUnconfigured)
+		if row.Availability != "" || row.AvailabilityDetail != "" || row.AvailabilityCheckedAt != nil {
+			t.Errorf("%s: availability = %q, want the triple absent under system credentials", row.Key, row.Availability)
 		}
 	}
 }
 
-// Local BYOK's half of the same state, and the stored verdict beside it.
-//
-// The org brought its own Anthropic credential, so the surface exists: a stored
-// green renders verified, and everything it has not probed renders unverified —
-// an answer it can act on, because the test route beside it will spend one.
-// Nothing is unconfigured here, and nothing can be: an alias names no provider,
-// so "connected the provider that serves this model" has no per-model answer and
-// the org-wide one is what stands in.
+// A local org on its own Anthropic credential reads a stored green as verified
+// and everything unprobed as unverified. Nothing is unconfigured: an alias names
+// no provider, so the org-wide credential answers for every model.
 func TestModelsList_LocalMode_BYOKReadsStoredVerdicts(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()

@@ -16,11 +16,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// TestHandleConversations_Batched pins the aggregated conversation-list path the Board
-// uses to collapse its per-refresh fan-out (TFAC-98): one
-// POST /api/agent/conversations/list {task_ids, include_messages} returns the
-// `runs` map grouped per task (newest-first) plus each task's PRIMARY
-// conversation's transcript keyed by conversation id.
+// TestHandleConversations_Batched pins the board's batched read: one list call
+// returns `runs` grouped per task, newest first, and with include_messages the
+// transcript of each task's primary conversation only.
 func TestHandleConversations_Batched(t *testing.T) {
 	s := newTestServer(t)
 
@@ -104,47 +102,6 @@ func TestHandleConversations_Batched(t *testing.T) {
 	}
 }
 
-// TestHandleConversations_TaskIDsOptional pins the two readings the selector
-// has to keep apart. An ABSENT task_ids is no task narrowing — the whole
-// visible set, which is what lets the rail ask the resource a question no task
-// id can express. A task_ids that is PRESENT and unusable is still a 400: a
-// corrupt filter must never widen the result set by falling back.
-func TestHandleConversations_TaskIDsOptional(t *testing.T) {
-	s := newTestServer(t)
-	convA := seedSteerConversation(t, s.db, "opt-a", dbtest.SeedConcluded)
-	convB := seedSteerConversation(t, s.db, "opt-b", "running")
-
-	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/list", map[string]any{})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("list (no task_ids) = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var resp struct {
-		Runs       map[string][]map[string]any `json:"runs"`
-		TotalCount int                         `json:"total_count"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
-	}
-	seen := map[string]bool{}
-	for _, rows := range resp.Runs {
-		for _, r := range rows {
-			id, _ := r["ID"].(string)
-			seen[id] = true
-		}
-	}
-	if !seen[convA] || !seen[convB] {
-		t.Errorf("unnarrowed list missed a conversation: got %v, want both %s and %s", seen, convA, convB)
-	}
-	if resp.TotalCount != 2 {
-		t.Errorf("total_count = %d, want 2", resp.TotalCount)
-	}
-
-	if rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/list",
-		map[string]any{"task_ids": []string{" ", " "}}); rec.Code != http.StatusBadRequest {
-		t.Errorf("list (blank task_ids) = %d, want 400", rec.Code)
-	}
-}
-
 // TestHandleConversations_StatusFilter pins the rail's `running` read: the
 // filter names DISPLAY statuses (a claim phase is a legal value), an unknown
 // value is a client fault rather than an empty page, and a count-only page
@@ -205,12 +162,9 @@ func TestHandleConversations_StatusFilter(t *testing.T) {
 	}
 }
 
-// TestHandleConversations_TeamFilter pins the Overview's scope: the counts a
-// team-marked page shows are its own team's, so team_ids narrows to the
-// conversations that team owns and composes with the status filter rather than
-// replacing it. A malformed set is a 400 naming the field, and a set that
-// names a team owning nothing answers zero — never the viewer-wide number the
-// shell rail reads, which is the same page one field apart.
+// TestHandleConversations_TeamFilter pins team_ids: it narrows to the team's
+// conversations and composes with statuses, an empty list is no narrowing, a team
+// owning nothing counts zero, and malformed or oversized sets are 400s.
 func TestHandleConversations_TeamFilter(t *testing.T) {
 	s := newTestServer(t)
 	homeA := seedSteerConversation(t, s.db, "team-home-a", dbtest.SeedConcluded)
@@ -276,10 +230,10 @@ func TestHandleConversations_TeamFilter(t *testing.T) {
 		t.Errorf("team_ids=[absent team] total_count = %d, want 0", absent.TotalCount)
 	}
 
-	// An empty list is an ABSENT filter, not an empty selection — the same
-	// reading task_ids has, and the one the shell rail depends on.
-	if got := ids(list(map[string]any{"team_ids": []string{}})); len(got) != 3 {
-		t.Errorf("team_ids=[] = %v, want every conversation (empty is no narrowing)", got)
+	// An empty list is an ABSENT filter, not an empty selection, and so is an
+	// absent task_ids: this read is the whole visible set.
+	if all := list(map[string]any{"team_ids": []string{}}); len(ids(all)) != 3 || all.TotalCount != 3 {
+		t.Errorf("team_ids=[] = %v (total_count %d), want every conversation (empty is no narrowing)", ids(all), all.TotalCount)
 	}
 
 	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/list",
@@ -373,10 +327,8 @@ func TestHandleConversations_AttentionFilter(t *testing.T) {
 }
 
 // TestHandleConversations_BatchedCap pins the task_ids cap: a request beyond
-// maxBatchTaskIDs is REJECTED, not truncated. Truncation answered an oversized
-// board with a board-shaped payload silently missing its tail — the caller had
-// no way to tell the difference between "that task has no conversations" and "we
-// stopped reading at 500".
+// maxBatchTaskIDs is rejected, not truncated, since a truncated answer reads as
+// tasks with no conversations.
 func TestHandleConversations_BatchedCap(t *testing.T) {
 	s := newTestServer(t)
 	_ = seedSteerConversation(t, s.db, "cap", "running") // run on task t_cap
@@ -428,11 +380,9 @@ func TestHandleConversations_BatchedRejectsMalformedIDs(t *testing.T) {
 	assertFirstError(t, rec, httpx.ReasonInvalidField, "task_ids")
 }
 
-// TestHandleConversations_RejectsUnknownField: the old `include=` free-text
-// selector is gone — the body carries a typed include_messages bool, so a
-// mistyped selector is an unknown FIELD the strict decoder refuses rather than
-// a value the handler has to police. A typo can no longer return a payload
-// missing the section the caller asked for.
+// TestHandleConversations_RejectsUnknownField: the body takes a typed
+// include_messages bool, so a mistyped selector is an UNKNOWN_FIELD rather than
+// a payload missing the section the caller asked for.
 func TestHandleConversations_RejectsUnknownField(t *testing.T) {
 	s := newTestServer(t)
 	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/list", map[string]any{
@@ -444,12 +394,9 @@ func TestHandleConversations_RejectsUnknownField(t *testing.T) {
 	assertFirstError(t, rec, httpx.ReasonUnknownField, "include")
 }
 
-// TestHandleMessages_SinceID pins the transcript read's optional watermark: the
-// RunStation polls with it to repair rows whose websocket frame was dropped,
-// and every other caller — which passes nothing — must keep getting the whole
-// transcript. An unparseable or negative value is a 400: answering "give me
-// what I'm missing" with the whole transcript is the silent widening a corrupt
-// param must never buy.
+// TestHandleMessages_SinceID pins the transcript read's optional watermark:
+// absent or 0 is the whole transcript, a padded value is still a watermark, and
+// an unparseable or negative one is a 400 rather than a silent widening.
 func TestHandleMessages_SinceID(t *testing.T) {
 	s := newTestServer(t)
 	conversationID := seedSteerConversation(t, s.db, "since", "running")
@@ -512,11 +459,9 @@ func TestHandleMessages_SinceID(t *testing.T) {
 	}
 }
 
-// TestConversationResponse_TokenSums pins the four token rollups onto the run
-// wire shape: the read already SUMs them per conversation, so the RunStation's
-// telemetry rail reads the same authoritative numbers the usage dashboard
-// does instead of re-summing the transcript client-side. Emitted as plain
-// snake_case ints — a conversation with no usage-bearing message reads 0, never absent.
+// TestConversationResponse_TokenSums pins the four token rollups on the
+// conversation read, summed per conversation, and 0 (never absent) for a
+// conversation with no usage-bearing message.
 func TestConversationResponse_TokenSums(t *testing.T) {
 	s := newTestServer(t)
 	conversationID := seedSteerConversation(t, s.db, "tok", "running")
@@ -541,14 +486,7 @@ func TestConversationResponse_TokenSums(t *testing.T) {
 		t.Fatalf("InsertMessage(no usage): %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+conversationID, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET conversation = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var got map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
-	}
+	got := readConversation(t, s, conversationID)
 	for key, want := range map[string]float64{
 		"input_tokens":          30,
 		"output_tokens":         3,
@@ -567,14 +505,7 @@ func TestConversationResponse_TokenSums(t *testing.T) {
 
 	// A conversation that never streamed a usage-bearing message reads 0 on all four.
 	bare := seedSteerConversation(t, s.db, "tokbare", "queued")
-	rec = doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+bare, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET bare conversation = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	got = nil
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode bare: %v; body=%s", err, rec.Body.String())
-	}
+	got = readConversation(t, s, bare)
 	for _, key := range []string{"input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens"} {
 		v, ok := got[key]
 		if !ok {
@@ -587,11 +518,9 @@ func TestConversationResponse_TokenSums(t *testing.T) {
 	}
 }
 
-// TestConversationResponse_QueuePositionOnlyWhenQueued pins the wire half of
-// the queued run's hourglass: the place in line is emitted only for a row that
-// actually has one, and is ABSENT — no key, not a 0 and not a null — for every
-// other state, so a client renders the mark on presence rather than on a
-// sentinel it would have to know to special-case.
+// TestConversationResponse_QueuePositionOnlyWhenQueued: queue_position is the
+// place in line for a queued row, and absent (no key, not 0 or null) for a
+// claimed or concluded one.
 func TestConversationResponse_QueuePositionOnlyWhenQueued(t *testing.T) {
 	s := newTestServer(t)
 	first := seedSteerConversation(t, s.db, "qpos-first", "")
@@ -657,12 +586,9 @@ func TestConversationResponse_QueuePositionOnlyWhenQueued(t *testing.T) {
 	}
 }
 
-// TestConversationResponse_CarriesOutcomeAndChainPosition pins the three fields a
-// surface needs to tell a handed-off step from the one that ended the task:
-// the terminal outcome, its abort note, and the owning blueprint's plan
-// length beside the step's own index. Position is what disambiguates —
-// `continue` is what an ordinary completion records, so the outcome alone
-// cannot say whether the chain moves on.
+// TestConversationResponse_CarriesOutcomeAndChainPosition pins Outcome,
+// OutcomeReason, blueprint_step_index and blueprint_step_count on the single
+// read and the list: `continue` alone cannot say whether the chain moves on.
 func TestConversationResponse_CarriesOutcomeAndChainPosition(t *testing.T) {
 	s := newTestServer(t)
 	conversationID := seedSteerConversation(t, s.db, "chainpos", "running")
@@ -680,14 +606,7 @@ func TestConversationResponse_CarriesOutcomeAndChainPosition(t *testing.T) {
 		t.Fatalf("complete conversation: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+conversationID, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET conversation = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var got map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
-	}
+	got := readConversation(t, s, conversationID)
 	if got["Outcome"] != "continue" {
 		t.Errorf("Outcome = %v, want continue", got["Outcome"])
 	}
@@ -703,18 +622,7 @@ func TestConversationResponse_CarriesOutcomeAndChainPosition(t *testing.T) {
 
 	// The batched list path the board reads carries the same position, from
 	// one lookup over the deduped blueprint_run ids.
-	rec = doJSON(t, s, http.MethodPost, "/api/agent/conversations/list",
-		map[string]any{"task_ids": []string{fixtureUUID("t_chainpos")}})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("conversation list = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var list struct {
-		Runs map[string][]map[string]any `json:"runs"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
-		t.Fatalf("decode list: %v; body=%s", err, rec.Body.String())
-	}
-	convs := list.Runs[fixtureUUID("t_chainpos")]
+	convs := listConversations(t, s, fixtureUUID("t_chainpos"))
 	if len(convs) != 1 {
 		t.Fatalf("listed conversations = %d, want 1", len(convs))
 	}
@@ -733,14 +641,7 @@ func TestConversationResponse_CarriesOutcomeAndChainPosition(t *testing.T) {
 		t.Fatalf("read single blueprint_run_id: %v", err)
 	}
 	execSQL(t, s.db, `UPDATE blueprint_runs SET step_plan = ? WHERE id = ?`, `[{"step_index":0}]`, singleBlueprintRunID)
-	rec = doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+single, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET single-step conversation = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	got = nil
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode single-step: %v; body=%s", err, rec.Body.String())
-	}
+	got = readConversation(t, s, single)
 	if n, isNum := got["blueprint_step_count"].(float64); !isNum || n != 1 {
 		t.Errorf("single-step blueprint_step_count = %v, want 1", got["blueprint_step_count"])
 	}

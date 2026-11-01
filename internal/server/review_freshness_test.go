@@ -99,9 +99,9 @@ func getReviewFreshness(t *testing.T, s *Server, artID string) reviewFreshnessOu
 	return envelope.Details
 }
 
-// TestDeliverableDiff_ReviewServesFinalizeFrame pins that a review with a stored
-// finalize frame renders FinalizedBaseSHA...FinalizedHeadSHA (the finalize-time
-// PR diff) via the compare endpoint, and does NOT fetch the live PR diff (TFAC-500).
+// TestDeliverableDiff_ReviewServesFinalizeFrame: a review with a stored finalize
+// frame renders FinalizedBaseSHA...FinalizedHeadSHA through the compare endpoint
+// and does not fetch the live PR diff.
 func TestDeliverableDiff_ReviewServesFinalizeFrame(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -136,9 +136,8 @@ func TestDeliverableDiff_ReviewServesFinalizeFrame(t *testing.T) {
 	}
 }
 
-// TestDeliverableDiff_FramelessReviewServesLiveDiff pins the fallback: a review with
-// no stored finalize frame (comment-less or pre-TFAC-500) renders the live PR diff,
-// not a compare.
+// TestDeliverableDiff_FramelessReviewServesLiveDiff: a review with no stored
+// finalize frame renders the live PR diff, not a compare.
 func TestDeliverableDiff_FramelessReviewServesLiveDiff(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -172,10 +171,9 @@ func TestDeliverableDiff_FramelessReviewServesLiveDiff(t *testing.T) {
 	}
 }
 
-// TestReviewRefresh_RemapsAndDrops pins the Refresh action (TFAC-500): a finalized
-// review with one comment that shifts and one that goes outdated is reconciled to
-// the live head — the survivor is remapped + re-anchored, the outdated one is
-// dropped, and the finalize frame (base+head) is re-pinned to the live PR.
+// TestReviewRefresh_RemapsAndDrops: Refresh reconciles a finalized review to the
+// live head — the shifted comment is remapped and re-anchored, the outdated one
+// dropped, and the finalize frame re-pinned to the live PR.
 func TestReviewRefresh_RemapsAndDrops(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -290,12 +288,9 @@ func seedOutdatedOnlyReview(t *testing.T, srv *Server, suffix, body string) stri
 	return artID
 }
 
-// TestReviewRefresh_DropsLastCommentThenSubmitsUnpinned pins the shape a Refresh
-// can leave behind: every inline comment dropped as outdated, only the summary
-// left. The draft now has no position for a commit pin to protect, so the approve
-// sends no commit_id and GitHub pins the live head itself — a recorded SHA there
-// (the start head, or the head at refresh time) is only a chance to be stale and
-// be refused as "updated since you started reviewing".
+// TestReviewRefresh_DropsLastCommentThenSubmitsUnpinned: a Refresh that drops
+// every inline comment leaves no position for a commit pin to protect, so the
+// approve sends no commit_id and GitHub pins the live head, which cannot be stale.
 func TestReviewRefresh_DropsLastCommentThenSubmitsUnpinned(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -378,11 +373,9 @@ func approveDriftStub(t *testing.T, srv *Server, liveHead, compareRange, compare
 	seedApp(t, srv, stub, acmeInstall())
 }
 
-// TestReviewApprove_ShiftedSinceRefreshPinsLiveHead pins the approve-time
-// reconcile: the PR moved after the review's last frame (headA → headB) with a
-// pure shift on the commented line, so the approve remaps the comment, pins the
-// submit to headB, and stamps the moved frame onto the submitted row — no 422
-// for a push that landed between Refresh and Submit.
+// TestReviewApprove_ShiftedSinceRefreshPinsLiveHead: when the PR moved after the
+// review's frame with a pure shift on the commented line, approve remaps the
+// comment, pins the submit to the live head, and stamps that frame on the row.
 func TestReviewApprove_ShiftedSinceRefreshPinsLiveHead(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -412,10 +405,9 @@ func TestReviewApprove_ShiftedSinceRefreshPinsLiveHead(t *testing.T) {
 	}
 }
 
-// TestReviewApprove_OutdatedSinceRefreshRefuses pins the other arm: the commented
-// line itself changed after the review's frame, so the approve refuses (409),
-// posts nothing, releases the claim, and leaves the draft on its known frame —
-// dropping the comment is the human's call through Refresh.
+// TestReviewApprove_OutdatedSinceRefreshRefuses: when the commented line itself
+// changed, approve answers 409, posts nothing, releases the claim and leaves the
+// draft on its frame; dropping the comment is the human's call through Refresh.
 func TestReviewApprove_OutdatedSinceRefreshRefuses(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -496,78 +488,43 @@ func TestReviewRefresh_Guards(t *testing.T) {
 	}
 }
 
-// TestReviewFreshness_Current pins the no-drift fast path: the live PR head equals
-// the finalize head, so the comment is "current", the count is a non-nil 0, and NO
-// compare call is made (the stub fails on any compare request).
-func TestReviewFreshness_Current(t *testing.T) {
-	keyring.MockInit()
-	srv := newTestServer(t)
-	freshnessAppStub(t, srv, "headA", 0, "", "") // liveHead == finalizeHead; compare must not be hit
-	artID := seedFinalizedReviewAt(t, srv, "rfresh", 7, "headA", 3)
+// TestReviewFreshness_Verdicts pins each comment verdict against the live head:
+// current when the PR has not advanced (no compare call), moved with its
+// remapped line when lines landed above it, and outdated when its line changed.
+func TestReviewFreshness_Verdicts(t *testing.T) {
+	for _, tc := range []struct {
+		name, liveHead, compareRange, files string
+		aheadBy, wantMapped                 int
+	}{
+		{name: "current", liveHead: "headA"},
+		{name: "moved", liveHead: "headB", compareRange: "headA...headB", aheadBy: 2, wantMapped: 5,
+			files: `[{"filename":"a.go","status":"modified","patch":"@@ -1,5 +1,7 @@\n+newtop1\n+newtop2\n line1\n added2\n added3\n line4\n line5"}]`},
+		{name: "outdated", liveHead: "headB", compareRange: "headA...headB", aheadBy: 1,
+			files: `[{"filename":"a.go","status":"modified","patch":"@@ -1,5 +1,4 @@\n line1\n added2\n-added3\n line4\n line5"}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			keyring.MockInit()
+			srv := newTestServer(t)
+			freshnessAppStub(t, srv, tc.liveHead, tc.aheadBy, tc.compareRange, tc.files)
+			artID := seedFinalizedReviewAt(t, srv, "r"+tc.name, 7, "headA", 3)
 
-	out := getReviewFreshness(t, srv, artID)
-	if out.CommitsSinceFinalize == nil || *out.CommitsSinceFinalize != 0 {
-		t.Errorf("commits_since_finalize = %v, want a non-nil 0 (PR not advanced)", out.CommitsSinceFinalize)
-	}
-	if len(out.Comments) != 1 || out.Comments[0].Freshness != "current" {
-		t.Fatalf("comment freshness = %+v, want one 'current'", out.Comments)
+			out := getReviewFreshness(t, srv, artID)
+			if out.CommitsSinceFinalize == nil || *out.CommitsSinceFinalize != tc.aheadBy {
+				t.Errorf("commits_since_finalize = %v, want a non-nil %d", out.CommitsSinceFinalize, tc.aheadBy)
+			}
+			if len(out.Comments) != 1 || out.Comments[0].Freshness != tc.name {
+				t.Fatalf("comment freshness = %+v, want one %q", out.Comments, tc.name)
+			}
+			if out.Comments[0].MappedLine != tc.wantMapped {
+				t.Errorf("mapped_line = %d, want %d", out.Comments[0].MappedLine, tc.wantMapped)
+			}
+		})
 	}
 }
 
-// TestReviewFreshness_Moved pins the shift path: the PR advanced (headA → headB)
-// inserting two lines above the comment, so the same code now sits two lines down.
-// The comment is "moved", carries its remapped line, and the count reflects the
-// commits ahead.
-func TestReviewFreshness_Moved(t *testing.T) {
-	keyring.MockInit()
-	srv := newTestServer(t)
-	files := `[{"filename":"a.go","status":"modified","patch":"@@ -1,5 +1,7 @@\n+newtop1\n+newtop2\n line1\n added2\n added3\n line4\n line5"}]`
-	freshnessAppStub(t, srv, "headB", 2, "headA...headB", files)
-	artID := seedFinalizedReviewAt(t, srv, "rmoved", 7, "headA", 3)
-
-	out := getReviewFreshness(t, srv, artID)
-	if out.CommitsSinceFinalize == nil || *out.CommitsSinceFinalize != 2 {
-		t.Errorf("commits_since_finalize = %v, want 2", out.CommitsSinceFinalize)
-	}
-	if len(out.Comments) != 1 {
-		t.Fatalf("comments = %d, want 1", len(out.Comments))
-	}
-	c := out.Comments[0]
-	if c.Freshness != "moved" {
-		t.Errorf("freshness = %q, want moved", c.Freshness)
-	}
-	if c.MappedLine != 5 {
-		t.Errorf("mapped_line = %d, want 5 (shifted +2)", c.MappedLine)
-	}
-}
-
-// TestReviewFreshness_Outdated pins the outdated path: the anchored line was
-// deleted between headA and headB, so the comment no longer points at the same
-// code. Freshness is "outdated" with no remapped line; the count still resolves.
-func TestReviewFreshness_Outdated(t *testing.T) {
-	keyring.MockInit()
-	srv := newTestServer(t)
-	files := `[{"filename":"a.go","status":"modified","patch":"@@ -1,5 +1,4 @@\n line1\n added2\n-added3\n line4\n line5"}]`
-	freshnessAppStub(t, srv, "headB", 1, "headA...headB", files)
-	artID := seedFinalizedReviewAt(t, srv, "rold", 7, "headA", 3)
-
-	out := getReviewFreshness(t, srv, artID)
-	if out.CommitsSinceFinalize == nil || *out.CommitsSinceFinalize != 1 {
-		t.Errorf("commits_since_finalize = %v, want 1", out.CommitsSinceFinalize)
-	}
-	if len(out.Comments) != 1 || out.Comments[0].Freshness != "outdated" {
-		t.Fatalf("comment freshness = %+v, want one 'outdated'", out.Comments)
-	}
-	if out.Comments[0].MappedLine != 0 {
-		t.Errorf("mapped_line = %d, want 0 for outdated", out.Comments[0].MappedLine)
-	}
-}
-
-// TestReviewFreshness_NoAnchorComment pins that a staged comment with no line
-// anchor (line == nil) stays "unknown" with no remapped line — it can't be
-// forward-mapped. The PR hasn't advanced (live head == finalize head), so the
-// count is 0 and no compare is requested; the unknown verdict is purely the
-// missing-anchor branch, not a GitHub failure.
+// TestReviewFreshness_NoAnchorComment: a staged comment with no line anchor
+// stays "unknown" with no remapped line. The PR has not advanced, so the verdict
+// comes from the missing anchor, not a GitHub failure.
 func TestReviewFreshness_NoAnchorComment(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -591,10 +548,9 @@ func TestReviewFreshness_NoAnchorComment(t *testing.T) {
 	}
 }
 
-// TestReviewFreshness_DegradesWhenHeadUnavailable pins the graceful-degradation
-// contract: when the live PR head can't be fetched (GitHub 500), the overlay still
-// returns 200 with the staged comment, freshness "unknown", and a nil count — the
-// human can still read and act on the review.
+// TestReviewFreshness_DegradesWhenHeadUnavailable: when the live PR head cannot
+// be fetched, the overlay still answers 200 with the staged comment marked
+// "unknown" and a nil count, so the review stays readable.
 func TestReviewFreshness_DegradesWhenHeadUnavailable(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)

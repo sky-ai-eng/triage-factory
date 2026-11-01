@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -19,10 +20,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// marketplaceRig is the multi-mode fixture for the publish/republish/delist
-// handler family (TFAC-536): a real Postgres-backed Server (RLS enforced)
-// with one org carrying a founder (write role on the default team), a plain
-// member on a second team, and a viewer on the founder's team.
+// marketplaceRig is the multi-mode fixture for the marketplace handlers: a
+// Postgres-backed Server (RLS enforced) with one org carrying a founder (write
+// role on the default team), a plain member on a second team, and a viewer on
+// the founder's team.
 type marketplaceRig struct {
 	h      *pgtest.Harness
 	mh     *marketplaceHandler
@@ -115,9 +116,8 @@ func (r *marketplaceRig) seedBlueprintStep(t *testing.T, teamID, blueprintID str
 	`, r.orgID, teamID, blueprintID, stepIndex, promptID, brief)
 }
 
-// seedInstall inserts a marketplace_installs audit row directly (TFAC-538's
-// install/copy endpoint hasn't landed yet — this fixture only needs the
-// install count List.Sort=installs reads, not the real copy-to-team flow).
+// seedInstall inserts a marketplace_installs row directly, so a sort test can
+// set install counts without running the copy-to-team flow.
 func (r *marketplaceRig) seedInstall(t *testing.T, listingID, teamID, userID string) {
 	t.Helper()
 	pgtest.MustExec(t, r.h.AdminDB, `
@@ -126,10 +126,8 @@ func (r *marketplaceRig) seedInstall(t *testing.T, listingID, teamID, userID str
 	`, listingID, r.orgID, teamID, userID)
 }
 
-// seedStats writes a marketplace_listing_stats row directly (bypassing
-// RecomputeStatsSystem — that aggregation is pinned at the pgtest layer,
-// internal/db/pgtest/marketplace_stats_test.go; here the handler only needs
-// a row to exist so List/Get's join and sort=used have something to read).
+// seedStats writes a marketplace_listing_stats row directly; the aggregation
+// that computes it is pinned in internal/db/pgtest/marketplace_stats_test.go.
 func (r *marketplaceRig) seedStats(t *testing.T, listingID string, teamsUsing, totalRuns int) {
 	t.Helper()
 	pgtest.MustExec(t, r.h.AdminDB, `
@@ -138,9 +136,8 @@ func (r *marketplaceRig) seedStats(t *testing.T, listingID string, teamsUsing, t
 	`, listingID, r.orgID, teamsUsing, totalRuns)
 }
 
-// getListingDetail reads a listing back through the store as callerID — used
-// by the happy-path tests to assert on the built snapshot without duplicating
-// the store's own scan logic.
+// getListingDetail reads a listing back through the store as callerID, to
+// assert on the built snapshot without duplicating the store's scan logic.
 func (r *marketplaceRig) getListingDetail(t *testing.T, callerID, listingID string) domain.ListingDetail {
 	t.Helper()
 	var detail domain.ListingDetail
@@ -162,6 +159,100 @@ func doMarketplaceJSON(fn func(http.ResponseWriter, *http.Request), req *http.Re
 	rec := httptest.NewRecorder()
 	fn(rec, req)
 	return rec
+}
+
+// publishListing publishes body as callerID through the handler and returns
+// the new listing's id.
+func (r *marketplaceRig) publishListing(t *testing.T, callerID string, body map[string]any) string {
+	t.Helper()
+	rec := doMarketplaceJSON(r.mh.handleMarketplacePublish, r.req(http.MethodPost, "/api/marketplace/listings", callerID, body))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("publish %v: status = %d, want 201; body=%s", body, rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode publish response: %v", err)
+	}
+	return resp.ID
+}
+
+// publishPrompt seeds a prompt on the founder's team and publishes it as a
+// prompt-kind listing named listingName.
+func (r *marketplaceRig) publishPrompt(t *testing.T, name, body, model, tools, listingName string) string {
+	t.Helper()
+	return r.publishListing(t, r.admin, map[string]any{
+		"kind": "prompt", "source_id": r.seedPrompt(t, r.teamID, name, body, model, tools), "name": listingName,
+	})
+}
+
+// delist delists listingID as the founder.
+func (r *marketplaceRig) delist(t *testing.T, listingID string) {
+	t.Helper()
+	req := r.req(http.MethodPost, "/api/marketplace/listings/"+listingID+"/delist", r.admin, nil)
+	req.SetPathValue("id", listingID)
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceListingDelist, req); rec.Code != http.StatusNoContent {
+		t.Fatalf("delist: status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// list calls the browse list as callerID; query is a k=v&k=v string turned
+// into the request body.
+func (r *marketplaceRig) list(t *testing.T, callerID, query string) []domain.ListingSummary {
+	t.Helper()
+	body := map[string]any{}
+	for _, kv := range strings.Split(query, "&") {
+		if kv == "" {
+			continue
+		}
+		k, val, _ := strings.Cut(kv, "=")
+		decoded, err := url.QueryUnescape(val)
+		if err != nil {
+			t.Fatalf("unescape %q: %v", val, err)
+		}
+		body[k] = decoded
+	}
+	rec := doMarketplaceJSON(r.mh.handleMarketplaceList, r.req(http.MethodPost, "/api/marketplace/listings/list", callerID, body))
+	return decodeList[domain.ListingSummary](t, rec).Items
+}
+
+func listingIDs(summaries []domain.ListingSummary) []string {
+	ids := make([]string, len(summaries))
+	for i, s := range summaries {
+		ids[i] = s.ID
+	}
+	return ids
+}
+
+func decodeListingDetail(t *testing.T, rec *httptest.ResponseRecorder) domain.ListingDetail {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var detail domain.ListingDetail
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return detail
+}
+
+// installResponse mirrors installListingResponse — the wire shape the
+// install tests below decode.
+type installResponse struct {
+	Kind      string   `json:"kind"`
+	ID        string   `json:"id"`
+	PromptIDs []string `json:"prompt_ids"`
+}
+
+// installAs POSTs .../install as callerID with the given team_id and
+// returns the recorder.
+func (r *marketplaceRig) installAs(callerID, listingID, teamID string) *httptest.ResponseRecorder {
+	req := r.req(http.MethodPost, "/api/marketplace/listings/"+listingID+"/install", callerID, map[string]any{
+		"team_id": teamID,
+	})
+	req.SetPathValue("id", listingID)
+	return doMarketplaceJSON(r.mh.handleMarketplaceInstall, req)
 }
 
 // TestMarketplace_LocalIs404: every endpoint in the family 404s in local
@@ -201,16 +292,13 @@ func TestMarketplace_LocalIs404(t *testing.T) {
 	}
 }
 
-// TestMarketplace_NoToggleGate: the within-org marketplace has no admin
-// toggle — org_settings.marketplace_enabled defaults false (TFAC-535's
-// ship-dark column, reserved for the future cross-org gate) and every
-// endpoint in the family still works normally in multi mode regardless.
+// TestMarketplace_NoToggleGate: org_settings.marketplace_enabled defaults false
+// and is reserved for a cross-org gate; the within-org marketplace works
+// regardless.
 func TestMarketplace_NoToggleGate(t *testing.T) {
 	r := newMarketplaceRig(t)
-	// newMarketplaceRig seeds the org via the raw pgtest fixture helpers,
-	// which (unlike real signup provisioning) don't materialize an
-	// org_settings row — insert one here so the DEFAULT false clause on
-	// marketplace_enabled actually gets exercised.
+	// The pgtest org fixture materializes no org_settings row; insert one so the
+	// column's DEFAULT false is what the handlers run under.
 	pgtest.MustExec(t, r.h.AdminDB, `INSERT INTO org_settings (org_id) VALUES ($1)`, r.orgID)
 	var enabled bool
 	if err := r.h.AdminDB.QueryRow(`SELECT marketplace_enabled FROM org_settings WHERE org_id = $1`, r.orgID).Scan(&enabled); err != nil {
@@ -231,98 +319,6 @@ func TestMarketplace_NoToggleGate(t *testing.T) {
 	listReq := r.req(http.MethodPost, "/api/marketplace/listings/list", r.admin, map[string]any{})
 	if rec := doMarketplaceJSON(r.mh.handleMarketplaceList, listReq); rec.Code != http.StatusOK {
 		t.Fatalf("list with marketplace_enabled=false: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-}
-
-// TestMarketplacePublish_Prompt_HappyPath: publishing a standalone prompt
-// builds the snapshot server-side from the prompt row (body/model/allowed_tools,
-// no ids, no brief) and returns 201 with a fresh listing id.
-func TestMarketplacePublish_Prompt_HappyPath(t *testing.T) {
-	r := newMarketplaceRig(t)
-	promptID := r.seedPrompt(t, r.teamID, "Great Prompt", "do the thing", "opus", "Bash,Read")
-
-	rec := doMarketplaceJSON(r.mh.handleMarketplacePublish,
-		r.req(http.MethodPost, "/api/marketplace/listings", r.admin, map[string]any{
-			"kind": "prompt", "source_id": promptID, "name": "Great Prompt Listing",
-			"description": "does the thing", "event_types": []string{eventTypeFixture},
-		}))
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("publish prompt: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
-	}
-	var resp struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.ID == "" {
-		t.Fatalf("publish prompt: empty listing id")
-	}
-
-	detail := r.getListingDetail(t, r.admin, resp.ID)
-	if detail.Kind != domain.ListingKindPrompt {
-		t.Errorf("kind = %q, want prompt", detail.Kind)
-	}
-	if detail.Name != "Great Prompt Listing" || detail.Description != "does the thing" {
-		t.Errorf("name/description = %q/%q, want the request's values", detail.Name, detail.Description)
-	}
-	if detail.PublisherTeamID != r.teamID {
-		t.Errorf("publisher_team_id = %q, want %q (the prompt's own team)", detail.PublisherTeamID, r.teamID)
-	}
-	if len(detail.CurrentSnapshot.Steps) != 1 {
-		t.Fatalf("snapshot steps = %d, want 1", len(detail.CurrentSnapshot.Steps))
-	}
-	step := detail.CurrentSnapshot.Steps[0]
-	if step.Name != "Great Prompt" || step.Body != "do the thing" || step.Model != "opus" || step.AllowedTools != "Bash,Read" {
-		t.Errorf("snapshot step = %+v, want the source prompt's content verbatim", step)
-	}
-	if step.Brief != "" {
-		t.Errorf("prompt-kind snapshot step brief = %q, want empty", step.Brief)
-	}
-}
-
-// TestMarketplacePublish_Blueprint_HappyPath: publishing a blueprint inlines
-// every step's prompt content (body/model/allowed_tools/brief) in step_index
-// order — no ids anywhere in the snapshot.
-func TestMarketplacePublish_Blueprint_HappyPath(t *testing.T) {
-	r := newMarketplaceRig(t)
-	p1 := r.seedPrompt(t, r.teamID, "Step One", "first mission", "sonnet", "")
-	p2 := r.seedPrompt(t, r.teamID, "Step Two", "second mission", "opus", "Grep")
-	bp := r.seedBlueprint(t, r.teamID, "Two-Step Chain")
-	r.seedBlueprintStep(t, r.teamID, bp, 0, p1, "do step one first")
-	r.seedBlueprintStep(t, r.teamID, bp, 1, p2, "")
-
-	rec := doMarketplaceJSON(r.mh.handleMarketplacePublish,
-		r.req(http.MethodPost, "/api/marketplace/listings", r.admin, map[string]any{
-			"kind": "blueprint", "source_id": bp, "name": "Chain Listing",
-			"description": "a two-step chain", "event_types": []string{eventTypeFixture},
-		}))
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("publish blueprint: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
-	}
-	var resp struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-
-	detail := r.getListingDetail(t, r.admin, resp.ID)
-	if detail.Kind != domain.ListingKindBlueprint {
-		t.Errorf("kind = %q, want blueprint", detail.Kind)
-	}
-	if len(detail.CurrentSnapshot.Steps) != 2 {
-		t.Fatalf("snapshot steps = %d, want 2", len(detail.CurrentSnapshot.Steps))
-	}
-	s0, s1 := detail.CurrentSnapshot.Steps[0], detail.CurrentSnapshot.Steps[1]
-	if s0.StepIndex != 0 || s0.Name != "Step One" || s0.Body != "first mission" || s0.Model != "sonnet" || s0.Brief != "do step one first" {
-		t.Errorf("step 0 = %+v, want source step 0's content verbatim", s0)
-	}
-	if s1.StepIndex != 1 || s1.Name != "Step Two" || s1.Body != "second mission" || s1.Model != "opus" || s1.AllowedTools != "Grep" {
-		t.Errorf("step 1 = %+v, want source step 1's content verbatim", s1)
-	}
-	if len(detail.EventTypes) != 1 || detail.EventTypes[0] != eventTypeFixture {
-		t.Errorf("event_types = %+v, want [%s]", detail.EventTypes, eventTypeFixture)
 	}
 }
 
@@ -349,14 +345,9 @@ func TestMarketplacePublish_NonWriterIs403(t *testing.T) {
 	}
 }
 
-// TestMarketplacePublish_CrossTeamIs404: a write-role member of a *different*
-// team can't publish someone else's team object. Unlike the same-team-viewer
-// case (403 — visible but not writable), a member of teamB has no
-// prompts_select visibility into teamID's prompt at all (RLS: creator-or-
-// same-team), so buildListingSnapshot's Get returns nil and the response is
-// 404 — the same "invisible → 404, visible-but-blocked → 403" convention
-// authz.RequireTaskWrite documents elsewhere, so a prober on another team
-// never learns the prompt exists.
+// TestMarketplacePublish_CrossTeamIs404: a writer on another team cannot see the
+// source prompt under RLS, so publishing it is a 404 rather than the same-team
+// viewer's 403, and a prober learns nothing about the prompt.
 func TestMarketplacePublish_CrossTeamIs404(t *testing.T) {
 	r := newMarketplaceRig(t)
 	promptID := r.seedPrompt(t, r.teamID, "not-yours", "mission", "", "")
@@ -376,14 +367,7 @@ func TestMarketplacePublish_CrossTeamIs404(t *testing.T) {
 func TestMarketplacePublish_DuplicateActiveSourceIs409(t *testing.T) {
 	r := newMarketplaceRig(t)
 	promptID := r.seedPrompt(t, r.teamID, "dup", "mission", "", "")
-
-	first := doMarketplaceJSON(r.mh.handleMarketplacePublish,
-		r.req(http.MethodPost, "/api/marketplace/listings", r.admin, map[string]any{
-			"kind": "prompt", "source_id": promptID, "name": "n",
-		}))
-	if first.Code != http.StatusCreated {
-		t.Fatalf("first publish: status = %d, want 201; body=%s", first.Code, first.Body.String())
-	}
+	r.publishListing(t, r.admin, map[string]any{"kind": "prompt", "source_id": promptID, "name": "n"})
 
 	second := doMarketplaceJSON(r.mh.handleMarketplacePublish,
 		r.req(http.MethodPost, "/api/marketplace/listings", r.admin, map[string]any{
@@ -455,28 +439,19 @@ func TestMarketplacePublish_SourceNotFoundIs404(t *testing.T) {
 func TestMarketplaceRepublish_BumpsVersionPreservesV1(t *testing.T) {
 	r := newMarketplaceRig(t)
 	promptID := r.seedPrompt(t, r.teamID, "v1 name", "v1 body", "sonnet", "")
-
-	publishRec := doMarketplaceJSON(r.mh.handleMarketplacePublish,
-		r.req(http.MethodPost, "/api/marketplace/listings", r.admin, map[string]any{
-			"kind": "prompt", "source_id": promptID, "name": "Listing v1", "description": "d1",
-		}))
-	if publishRec.Code != http.StatusCreated {
-		t.Fatalf("publish: status = %d, want 201; body=%s", publishRec.Code, publishRec.Body.String())
-	}
-	var pubResp struct {
-		ID string `json:"id"`
-	}
-	_ = json.Unmarshal(publishRec.Body.Bytes(), &pubResp)
+	listingID := r.publishListing(t, r.admin, map[string]any{
+		"kind": "prompt", "source_id": promptID, "name": "Listing v1", "description": "d1",
+	})
 
 	// Edit the live prompt — the republish must pick up this new content, not
 	// what was frozen into v1.
 	pgtest.MustExec(t, r.h.AdminDB, `UPDATE prompts SET name = $1, body = $2 WHERE id = $3`,
 		"v2 name", "v2 body", promptID)
 
-	repubReq := r.req(http.MethodPost, "/api/marketplace/listings/"+pubResp.ID+"/versions", r.admin, map[string]any{
+	repubReq := r.req(http.MethodPost, "/api/marketplace/listings/"+listingID+"/versions", r.admin, map[string]any{
 		"name": "Listing v2", "description": "d2", "event_types": []string{eventTypeFixture},
 	})
-	repubReq.SetPathValue("id", pubResp.ID)
+	repubReq.SetPathValue("id", listingID)
 	repubRec := doMarketplaceJSON(r.mh.handleMarketplaceListingVersionCreate, repubReq)
 	if repubRec.Code != http.StatusOK {
 		t.Fatalf("republish: status = %d, want 200; body=%s", repubRec.Code, repubRec.Body.String())
@@ -489,7 +464,7 @@ func TestMarketplaceRepublish_BumpsVersionPreservesV1(t *testing.T) {
 		t.Fatalf("republish response current_version = %d, want 2 (the resource, not a bare version echo)", updated.CurrentVersion)
 	}
 
-	detail := r.getListingDetail(t, r.admin, pubResp.ID)
+	detail := r.getListingDetail(t, r.admin, listingID)
 	if detail.CurrentVersion != 2 {
 		t.Errorf("current_version = %d, want 2", detail.CurrentVersion)
 	}
@@ -516,103 +491,70 @@ func TestMarketplaceRepublish_BumpsVersionPreservesV1(t *testing.T) {
 // team may republish.
 func TestMarketplaceRepublish_NonWriterIs403(t *testing.T) {
 	r := newMarketplaceRig(t)
-	promptID := r.seedPrompt(t, r.teamID, "guarded", "mission", "", "")
-	publishRec := doMarketplaceJSON(r.mh.handleMarketplacePublish,
-		r.req(http.MethodPost, "/api/marketplace/listings", r.admin, map[string]any{
-			"kind": "prompt", "source_id": promptID, "name": "n",
-		}))
-	var pubResp struct {
-		ID string `json:"id"`
-	}
-	_ = json.Unmarshal(publishRec.Body.Bytes(), &pubResp)
+	listingID := r.publishPrompt(t, "guarded", "mission", "", "", "n")
 
-	repubReq := r.req(http.MethodPost, "/api/marketplace/listings/"+pubResp.ID+"/versions", r.viewer, map[string]any{"name": "n2"})
-	repubReq.SetPathValue("id", pubResp.ID)
+	repubReq := r.req(http.MethodPost, "/api/marketplace/listings/"+listingID+"/versions", r.viewer, map[string]any{"name": "n2"})
+	repubReq.SetPathValue("id", listingID)
 	rec := doMarketplaceJSON(r.mh.handleMarketplaceListingVersionCreate, repubReq)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("viewer republish: status = %d, want 403; body=%s", rec.Code, rec.Body.String())
 	}
 }
 
-// TestMarketplaceDelistRelist_RoundTrip: the publisher-team writer can delist
-// (hides from browse, listing survives) and relist (restores it); a
-// non-writer on the publisher team is blocked from both.
+// TestMarketplaceDelistRelist_RoundTrip: a publisher-team writer can delist,
+// which keeps the listing but drops it from every member's browse, the
+// publisher's included, and relist it; a viewer on the publisher team cannot.
 func TestMarketplaceDelistRelist_RoundTrip(t *testing.T) {
 	r := newMarketplaceRig(t)
-	promptID := r.seedPrompt(t, r.teamID, "delist-me", "mission", "", "")
-	publishRec := doMarketplaceJSON(r.mh.handleMarketplacePublish,
-		r.req(http.MethodPost, "/api/marketplace/listings", r.admin, map[string]any{
-			"kind": "prompt", "source_id": promptID, "name": "n",
-		}))
-	var pubResp struct {
-		ID string `json:"id"`
-	}
-	_ = json.Unmarshal(publishRec.Body.Bytes(), &pubResp)
+	listingID := r.publishPrompt(t, "delist-me", "mission", "", "", "n")
 
 	// Viewer cannot delist.
-	blockedReq := r.req(http.MethodPost, "/api/marketplace/listings/"+pubResp.ID+"/delist", r.viewer, nil)
-	blockedReq.SetPathValue("id", pubResp.ID)
+	blockedReq := r.req(http.MethodPost, "/api/marketplace/listings/"+listingID+"/delist", r.viewer, nil)
+	blockedReq.SetPathValue("id", listingID)
 	blockedRec := doMarketplaceJSON(r.mh.handleMarketplaceListingDelist, blockedReq)
 	if blockedRec.Code != http.StatusForbidden {
 		t.Fatalf("viewer delist: status = %d, want 403; body=%s", blockedRec.Code, blockedRec.Body.String())
 	}
 
-	// Founder delists.
-	delistReq := r.req(http.MethodPost, "/api/marketplace/listings/"+pubResp.ID+"/delist", r.admin, nil)
-	delistReq.SetPathValue("id", pubResp.ID)
-	delistRec := doMarketplaceJSON(r.mh.handleMarketplaceListingDelist, delistReq)
-	if delistRec.Code != http.StatusNoContent {
-		t.Fatalf("delist: status = %d, want 204; body=%s", delistRec.Code, delistRec.Body.String())
-	}
+	r.delist(t, listingID)
 	var status string
-	if err := r.h.AdminDB.QueryRow(`SELECT status FROM marketplace_listings WHERE id = $1`, pubResp.ID).Scan(&status); err != nil {
+	if err := r.h.AdminDB.QueryRow(`SELECT status FROM marketplace_listings WHERE id = $1`, listingID).Scan(&status); err != nil {
 		t.Fatalf("read status: %v", err)
 	}
 	if status != domain.ListingStatusDelisted {
 		t.Fatalf("status after delist = %q, want delisted", status)
 	}
+	for _, caller := range []string{r.member, r.admin} {
+		if got := r.list(t, caller, ""); len(got) != 0 {
+			t.Errorf("browse as %s after delist = %+v, want empty", caller, got)
+		}
+	}
 
 	// Founder relists.
-	relistReq := r.req(http.MethodPost, "/api/marketplace/listings/"+pubResp.ID+"/relist", r.admin, nil)
-	relistReq.SetPathValue("id", pubResp.ID)
+	relistReq := r.req(http.MethodPost, "/api/marketplace/listings/"+listingID+"/relist", r.admin, nil)
+	relistReq.SetPathValue("id", listingID)
 	relistRec := doMarketplaceJSON(r.mh.handleMarketplaceListingRelist, relistReq)
 	if relistRec.Code != http.StatusNoContent {
 		t.Fatalf("relist: status = %d, want 204; body=%s", relistRec.Code, relistRec.Body.String())
 	}
-	if err := r.h.AdminDB.QueryRow(`SELECT status FROM marketplace_listings WHERE id = $1`, pubResp.ID).Scan(&status); err != nil {
+	if err := r.h.AdminDB.QueryRow(`SELECT status FROM marketplace_listings WHERE id = $1`, listingID).Scan(&status); err != nil {
 		t.Fatalf("read status after relist: %v", err)
 	}
 	if status != domain.ListingStatusPublished {
 		t.Fatalf("status after relist = %q, want published", status)
 	}
+	if got := r.list(t, r.member, ""); len(got) != 1 || got[0].ID != listingID {
+		t.Errorf("browse as a member after relist = %+v, want the listing back", got)
+	}
 }
 
-// TestMarketplacePublish_DuplicateDelistedSourceIs409: publishing a source
-// whose prior listing was delisted must not mint a second listing for the
-// same source_id (a published-only lookup would miss it, which is why the
-// handler reads the source status-blind via GetBySource) — it 409s and
-// steers the caller to relist.
+// TestMarketplacePublish_DuplicateDelistedSourceIs409: a source whose listing
+// was delisted is not published as a second listing; the handler finds the
+// source's listing whatever its status and answers 409, steering to relist.
 func TestMarketplacePublish_DuplicateDelistedSourceIs409(t *testing.T) {
 	r := newMarketplaceRig(t)
 	promptID := r.seedPrompt(t, r.teamID, "dup-delisted", "mission", "", "")
-
-	firstRec := doMarketplaceJSON(r.mh.handleMarketplacePublish,
-		r.req(http.MethodPost, "/api/marketplace/listings", r.admin, map[string]any{
-			"kind": "prompt", "source_id": promptID, "name": "n",
-		}))
-	if firstRec.Code != http.StatusCreated {
-		t.Fatalf("first publish: status = %d, want 201; body=%s", firstRec.Code, firstRec.Body.String())
-	}
-	var firstResp struct {
-		ID string `json:"id"`
-	}
-	_ = json.Unmarshal(firstRec.Body.Bytes(), &firstResp)
-
-	delistReq := r.req(http.MethodPost, "/api/marketplace/listings/"+firstResp.ID+"/delist", r.admin, nil)
-	delistReq.SetPathValue("id", firstResp.ID)
-	if rec := doMarketplaceJSON(r.mh.handleMarketplaceListingDelist, delistReq); rec.Code != http.StatusNoContent {
-		t.Fatalf("delist: status = %d, want 204; body=%s", rec.Code, rec.Body.String())
-	}
+	r.delist(t, r.publishListing(t, r.admin, map[string]any{"kind": "prompt", "source_id": promptID, "name": "n"}))
 
 	secondRec := doMarketplaceJSON(r.mh.handleMarketplacePublish,
 		r.req(http.MethodPost, "/api/marketplace/listings", r.admin, map[string]any{
@@ -631,242 +573,100 @@ func TestMarketplacePublish_DuplicateDelistedSourceIs409(t *testing.T) {
 	}
 }
 
-// TestMarketplaceListingBySource_ShowsDelisted: the by-source lookup must
-// keep resolving a delisted listing (not revert to null) so the editor can
-// show "Delisted" + Relist instead of "never published" — a null response
-// here would let the frontend offer Publish again and mint a duplicate.
-func TestMarketplaceListingBySource_ShowsDelisted(t *testing.T) {
-	r := newMarketplaceRig(t)
-	promptID := r.seedPrompt(t, r.teamID, "delisted-lookup", "mission", "", "")
-
-	publishRec := doMarketplaceJSON(r.mh.handleMarketplacePublish,
-		r.req(http.MethodPost, "/api/marketplace/listings", r.admin, map[string]any{
-			"kind": "prompt", "source_id": promptID, "name": "n",
-		}))
-	var pubResp struct {
-		ID string `json:"id"`
-	}
-	_ = json.Unmarshal(publishRec.Body.Bytes(), &pubResp)
-
-	delistReq := r.req(http.MethodPost, "/api/marketplace/listings/"+pubResp.ID+"/delist", r.admin, nil)
-	delistReq.SetPathValue("id", pubResp.ID)
-	if rec := doMarketplaceJSON(r.mh.handleMarketplaceListingDelist, delistReq); rec.Code != http.StatusNoContent {
-		t.Fatalf("delist: status = %d, want 204; body=%s", rec.Code, rec.Body.String())
-	}
-
-	afterReq := r.req(http.MethodGet, "/api/marketplace/listings/by-source/"+promptID, r.admin, nil)
-	afterReq.SetPathValue("source_id", promptID)
-	afterRec := doMarketplaceJSON(r.mh.handleMarketplaceListingBySource, afterReq)
-	if afterRec.Code != http.StatusOK {
-		t.Fatalf("by-source after delist: status = %d, want 200; body=%s", afterRec.Code, afterRec.Body.String())
-	}
-	var listing domain.MarketplaceListing
-	if err := json.Unmarshal(afterRec.Body.Bytes(), &listing); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if listing.ID != pubResp.ID {
-		t.Fatalf("by-source id after delist = %q, want %q (not null)", listing.ID, pubResp.ID)
-	}
-	if listing.Status != domain.ListingStatusDelisted {
-		t.Errorf("by-source status after delist = %q, want delisted", listing.Status)
-	}
-}
-
 // TestMarketplaceListingBySource_RoundTrip: the by-source lookup 404s before
-// publish — it used to answer 200 with a literal null, the only single read in
-// the surface that reported absence in the body — and resolves the active
-// listing after.
+// publish, then serves the listing with its full event-type set (the republish
+// dialog seeds from it, and a republish replaces the set), and keeps serving it
+// once delisted so the editor offers Relist rather than a duplicate Publish.
 func TestMarketplaceListingBySource_RoundTrip(t *testing.T) {
 	r := newMarketplaceRig(t)
 	promptID := r.seedPrompt(t, r.teamID, "lookup-me", "mission", "", "")
-
-	beforeReq := r.req(http.MethodGet, "/api/marketplace/listings/by-source/"+promptID, r.admin, nil)
-	beforeReq.SetPathValue("source_id", promptID)
-	beforeRec := doMarketplaceJSON(r.mh.handleMarketplaceListingBySource, beforeReq)
-	if beforeRec.Code != http.StatusNotFound {
-		t.Fatalf("by-source before publish: status = %d, want 404; body=%s", beforeRec.Code, beforeRec.Body.String())
+	bySource := func() *httptest.ResponseRecorder {
+		req := r.req(http.MethodGet, "/api/marketplace/listings/by-source/"+promptID, r.admin, nil)
+		req.SetPathValue("source_id", promptID)
+		return doMarketplaceJSON(r.mh.handleMarketplaceListingBySource, req)
+	}
+	served := func() domain.ListingSummary {
+		t.Helper()
+		rec := bySource()
+		if rec.Code != http.StatusOK {
+			t.Fatalf("by-source: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		var listing domain.ListingSummary
+		if err := json.Unmarshal(rec.Body.Bytes(), &listing); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return listing
 	}
 
-	publishRec := doMarketplaceJSON(r.mh.handleMarketplacePublish,
-		r.req(http.MethodPost, "/api/marketplace/listings", r.admin, map[string]any{
-			"kind": "prompt", "source_id": promptID, "name": "n",
-		}))
-	var pubResp struct {
-		ID string `json:"id"`
+	if rec := bySource(); rec.Code != http.StatusNotFound {
+		t.Fatalf("by-source before publish: status = %d, want 404; body=%s", rec.Code, rec.Body.String())
 	}
-	_ = json.Unmarshal(publishRec.Body.Bytes(), &pubResp)
 
-	afterReq := r.req(http.MethodGet, "/api/marketplace/listings/by-source/"+promptID, r.admin, nil)
-	afterReq.SetPathValue("source_id", promptID)
-	afterRec := doMarketplaceJSON(r.mh.handleMarketplaceListingBySource, afterReq)
-	if afterRec.Code != http.StatusOK {
-		t.Fatalf("by-source after publish: status = %d, want 200; body=%s", afterRec.Code, afterRec.Body.String())
-	}
-	var listing domain.MarketplaceListing
-	if err := json.Unmarshal(afterRec.Body.Bytes(), &listing); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if listing.ID != pubResp.ID {
-		t.Errorf("by-source id = %q, want %q", listing.ID, pubResp.ID)
-	}
-}
-
-// TestMarketplaceListingBySource_IncludesEventTypes pins that the by-source
-// response carries the listing's full event-type facet set, not just the
-// header — the editor's republish dialog seeds its multi-select from this
-// response, and PublishVersion replaces the whole facet set from whatever
-// the client submits. Publishing with two event types and getting back
-// only one (or none) here would silently narrow the listing's browse
-// facets on the very next "Publish update" a user clicks.
-func TestMarketplaceListingBySource_IncludesEventTypes(t *testing.T) {
-	r := newMarketplaceRig(t)
-	promptID := r.seedPrompt(t, r.teamID, "multi-facet", "mission", "", "")
 	const secondEventType = "github:pr:ci_check_failed"
-
-	publishRec := doMarketplaceJSON(r.mh.handleMarketplacePublish,
-		r.req(http.MethodPost, "/api/marketplace/listings", r.admin, map[string]any{
-			"kind": "prompt", "source_id": promptID, "name": "n",
-			"event_types": []string{eventTypeFixture, secondEventType},
-		}))
-	if publishRec.Code != http.StatusCreated {
-		t.Fatalf("publish: status = %d, want 201; body=%s", publishRec.Code, publishRec.Body.String())
+	listingID := r.publishListing(t, r.admin, map[string]any{
+		"kind": "prompt", "source_id": promptID, "name": "n",
+		"event_types": []string{eventTypeFixture, secondEventType},
+	})
+	listing := served()
+	if listing.ID != listingID {
+		t.Errorf("by-source id = %q, want %q", listing.ID, listingID)
 	}
-	var pubResp struct {
-		ID string `json:"id"`
-	}
-	_ = json.Unmarshal(publishRec.Body.Bytes(), &pubResp)
-
-	afterReq := r.req(http.MethodGet, "/api/marketplace/listings/by-source/"+promptID, r.admin, nil)
-	afterReq.SetPathValue("source_id", promptID)
-	afterRec := doMarketplaceJSON(r.mh.handleMarketplaceListingBySource, afterReq)
-	if afterRec.Code != http.StatusOK {
-		t.Fatalf("by-source: status = %d, want 200; body=%s", afterRec.Code, afterRec.Body.String())
-	}
-	var summary domain.ListingSummary
-	if err := json.Unmarshal(afterRec.Body.Bytes(), &summary); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	got := append([]string(nil), summary.EventTypes...)
+	got := slices.Clone(listing.EventTypes)
 	sort.Strings(got)
 	want := []string{eventTypeFixture, secondEventType}
 	sort.Strings(want)
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
-		t.Fatalf("by-source event_types = %v, want %v (client seeds the republish dialog from exactly this)", got, want)
+	if !slices.Equal(got, want) {
+		t.Errorf("by-source event_types = %v, want %v", got, want)
+	}
+
+	r.delist(t, listingID)
+	if listing := served(); listing.ID != listingID || listing.Status != domain.ListingStatusDelisted {
+		t.Errorf("by-source after delist = %q/%q, want %q/delisted", listing.ID, listing.Status, listingID)
 	}
 }
 
-// publishListing is a small helper wrapping handleMarketplacePublish for the
-// browse-page tests below, which publish several listings and mostly care
-// about the resulting id.
-func (r *marketplaceRig) publishListing(t *testing.T, callerID string, body map[string]any) string {
-	t.Helper()
-	rec := doMarketplaceJSON(r.mh.handleMarketplacePublish, r.req(http.MethodPost, "/api/marketplace/listings", callerID, body))
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("publish %v: status = %d, want 201; body=%s", body, rec.Code, rec.Body.String())
-	}
-	var resp struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode publish response: %v", err)
-	}
-	return resp.ID
-}
-
-// list calls the browse list as callerID. query is the old query string
-// ("kind=prompt", "sort=votes", ""), parsed here into the body the route now
-// takes so the call sites stay readable.
-func (r *marketplaceRig) list(t *testing.T, callerID, query string) []domain.ListingSummary {
-	t.Helper()
-	body := map[string]any{}
-	for _, kv := range strings.Split(query, "&") {
-		if kv == "" {
-			continue
-		}
-		k, val, _ := strings.Cut(kv, "=")
-		decoded, err := url.QueryUnescape(val)
-		if err != nil {
-			t.Fatalf("unescape %q: %v", val, err)
-		}
-		body[k] = decoded
-	}
-	rec := doMarketplaceJSON(r.mh.handleMarketplaceList, r.req(http.MethodPost, "/api/marketplace/listings/list", callerID, body))
-	return decodeList[domain.ListingSummary](t, rec).Items
-}
-
-func listingIDs(summaries []domain.ListingSummary) []string {
-	ids := make([]string, len(summaries))
-	for i, s := range summaries {
-		ids[i] = s.ID
-	}
-	return ids
-}
-
-// TestMarketplaceList_QueryFilter narrows to name/description substring
-// matches, case-insensitively (ILIKE).
-func TestMarketplaceList_QueryFilter(t *testing.T) {
-	r := newMarketplaceRig(t)
-	p1 := r.seedPrompt(t, r.teamID, "Triage Helper", "m", "", "")
-	p2 := r.seedPrompt(t, r.teamID, "Deploy Bot", "m", "", "")
-	id1 := r.publishListing(t, r.admin, map[string]any{"kind": "prompt", "source_id": p1, "name": "Triage Helper", "description": "helps triage"})
-	r.publishListing(t, r.admin, map[string]any{"kind": "prompt", "source_id": p2, "name": "Deploy Bot", "description": "deploys things"})
-
-	got := r.list(t, r.admin, "query=triage")
-	if ids := listingIDs(got); len(ids) != 1 || ids[0] != id1 {
-		t.Fatalf("query=triage: ids = %v, want [%s]", ids, id1)
-	}
-}
-
-// TestMarketplaceList_IncludesPublisherTeamName: the browse card needs a
-// human-readable publisher label, not just publisher_team_id — resolved via
-// a join into teams (any org member can read any team's name under RLS,
-// unlike the caller-scoped /api/teams list).
-func TestMarketplaceList_IncludesPublisherTeamName(t *testing.T) {
-	r := newMarketplaceRig(t)
-	promptID := r.seedPrompt(t, r.teamID, "named", "m", "", "")
-	id := r.publishListing(t, r.admin, map[string]any{"kind": "prompt", "source_id": promptID, "name": "named"})
-
-	got := r.list(t, r.member, "")
-	if len(got) != 1 || got[0].ID != id {
-		t.Fatalf("list = %+v, want the one listing", got)
-	}
-	if got[0].PublisherTeamName != "default" {
-		t.Errorf("publisher_team_name = %q, want %q (the seeded team's name)", got[0].PublisherTeamName, "default")
-	}
-}
-
-// TestMarketplaceList_EventTypeFilter narrows to listings faceted on the
-// given event type — a listing with a different (or no) facet is excluded.
-func TestMarketplaceList_EventTypeFilter(t *testing.T) {
+// TestMarketplaceList_Filters: browse filters narrow the list — query to a name
+// or description match, event_type to listings faceted on it, kind to prompts
+// or blueprints — and every row names its publisher team, readable by any member.
+func TestMarketplaceList_Filters(t *testing.T) {
 	r := newMarketplaceRig(t)
 	const otherEventType = "github:pr:ci_check_failed"
-	p1 := r.seedPrompt(t, r.teamID, "Faceted", "m", "", "")
-	p2 := r.seedPrompt(t, r.teamID, "Other Facet", "m", "", "")
-	id1 := r.publishListing(t, r.admin, map[string]any{"kind": "prompt", "source_id": p1, "name": "Faceted", "event_types": []string{eventTypeFixture}})
-	r.publishListing(t, r.admin, map[string]any{"kind": "prompt", "source_id": p2, "name": "Other Facet", "event_types": []string{otherEventType}})
-
-	got := r.list(t, r.admin, "event_type="+eventTypeFixture)
-	if ids := listingIDs(got); len(ids) != 1 || ids[0] != id1 {
-		t.Fatalf("event_type filter: ids = %v, want [%s]", ids, id1)
-	}
-}
-
-// TestMarketplaceList_KindFilter narrows to prompt-only or blueprint-only
-// listings.
-func TestMarketplaceList_KindFilter(t *testing.T) {
-	r := newMarketplaceRig(t)
-	p1 := r.seedPrompt(t, r.teamID, "Standalone", "m", "", "")
-	promptListing := r.publishListing(t, r.admin, map[string]any{"kind": "prompt", "source_id": p1, "name": "Standalone"})
+	triage := r.publishListing(t, r.admin, map[string]any{
+		"kind": "prompt", "source_id": r.seedPrompt(t, r.teamID, "Triage Helper", "m", "", ""),
+		"name": "Triage Helper", "description": "helps triage", "event_types": []string{eventTypeFixture},
+	})
+	deploy := r.publishListing(t, r.admin, map[string]any{
+		"kind": "prompt", "source_id": r.seedPrompt(t, r.teamID, "Deploy Bot", "m", "", ""),
+		"name": "Deploy Bot", "description": "deploys things", "event_types": []string{otherEventType},
+	})
 	bp := r.seedBlueprint(t, r.teamID, "Chain")
-	step := r.seedPrompt(t, r.teamID, "Chain Step", "m", "", "")
-	r.seedBlueprintStep(t, r.teamID, bp, 0, step, "")
-	blueprintListing := r.publishListing(t, r.admin, map[string]any{"kind": "blueprint", "source_id": bp, "name": "Chain"})
+	r.seedBlueprintStep(t, r.teamID, bp, 0, r.seedPrompt(t, r.teamID, "Chain Step", "m", "", ""), "")
+	chain := r.publishListing(t, r.admin, map[string]any{"kind": "blueprint", "source_id": bp, "name": "Chain"})
 
-	if ids := listingIDs(r.list(t, r.admin, "kind=prompt")); len(ids) != 1 || ids[0] != promptListing {
-		t.Fatalf("kind=prompt: ids = %v, want [%s]", ids, promptListing)
-	}
-	if ids := listingIDs(r.list(t, r.admin, "kind=blueprint")); len(ids) != 1 || ids[0] != blueprintListing {
-		t.Fatalf("kind=blueprint: ids = %v, want [%s]", ids, blueprintListing)
+	for _, tc := range []struct {
+		name, query string
+		want        []string
+	}{
+		{"no filter", "", []string{triage, deploy, chain}},
+		{"query", "query=triage", []string{triage}},
+		{"event type", "event_type=" + eventTypeFixture, []string{triage}},
+		{"prompt kind", "kind=prompt", []string{triage, deploy}},
+		{"blueprint kind", "kind=blueprint", []string{chain}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := r.list(t, r.member, tc.query)
+			ids, want := listingIDs(got), slices.Clone(tc.want)
+			sort.Strings(ids)
+			sort.Strings(want)
+			if !slices.Equal(ids, want) {
+				t.Fatalf("%s: ids = %v, want %v", tc.query, ids, want)
+			}
+			for _, l := range got {
+				if l.PublisherTeamName != "default" {
+					t.Errorf("publisher_team_name = %q, want %q (the seeded team's name)", l.PublisherTeamName, "default")
+				}
+			}
+		})
 	}
 }
 
@@ -882,9 +682,9 @@ func TestMarketplaceList_InvalidKindOrSortIs400(t *testing.T) {
 	}
 }
 
-// TestMarketplaceList_SortOrders pins each of the three accepted sort orders
-// against listings with distinguishable install counts, vote counts, and
-// publish recency.
+// TestMarketplaceList_SortOrders pins each accepted sort order, and the
+// default, against listings with distinguishable install counts, vote counts,
+// run counts and recency.
 func TestMarketplaceList_SortOrders(t *testing.T) {
 	r := newMarketplaceRig(t)
 	pOld := r.seedPrompt(t, r.teamID, "Old One", "m", "", "")
@@ -930,9 +730,9 @@ func TestMarketplaceList_SortOrders(t *testing.T) {
 		t.Fatalf("sort=recent: ids = %v, want [%s %s %s] (newest updated_at first)", ids, fresh, mid, old)
 	}
 
-	// Run-derived usage (TFAC-540): fresh has the most total_runs despite
-	// having zero installs/votes, old has none — sort=used must order purely
-	// on total_runs, independent of the other two signals.
+	// Run-derived usage: fresh has the most total_runs despite having zero
+	// installs/votes, old has none — sort=used must order purely on
+	// total_runs, independent of the other two signals.
 	r.seedStats(t, old, 2, 0)
 	r.seedStats(t, mid, 1, 3)
 	r.seedStats(t, fresh, 1, 7)
@@ -947,47 +747,14 @@ func TestMarketplaceList_SortOrders(t *testing.T) {
 	}
 }
 
-// TestMarketplaceList_ExcludesDelisted: a delisted listing drops out of
-// browse for every member — including the publisher team's own member —
-// since browse is "what's currently on offer", distinct from the by-source
-// manage lookup which deliberately keeps resolving it.
-func TestMarketplaceList_ExcludesDelisted(t *testing.T) {
-	r := newMarketplaceRig(t)
-	promptID := r.seedPrompt(t, r.teamID, "soon-gone", "m", "", "")
-	id := r.publishListing(t, r.admin, map[string]any{"kind": "prompt", "source_id": promptID, "name": "soon-gone"})
-
-	if got := r.list(t, r.member, ""); len(got) != 1 {
-		t.Fatalf("list before delist = %+v, want 1 listing visible", got)
-	}
-
-	delistReq := r.req(http.MethodPost, "/api/marketplace/listings/"+id+"/delist", r.admin, nil)
-	delistReq.SetPathValue("id", id)
-	if rec := doMarketplaceJSON(r.mh.handleMarketplaceListingDelist, delistReq); rec.Code != http.StatusNoContent {
-		t.Fatalf("delist: status = %d, want 204; body=%s", rec.Code, rec.Body.String())
-	}
-
-	if got := r.list(t, r.member, ""); len(got) != 0 {
-		t.Fatalf("cross-team member's list after delist = %+v, want empty", got)
-	}
-	if got := r.list(t, r.admin, ""); len(got) != 0 {
-		t.Fatalf("publisher's own list after delist = %+v, want empty (browse ≠ manage)", got)
-	}
-}
-
 // TestMarketplaceGet_DelistedVisibleToPublisherOnly: the detail endpoint
 // (unlike List) still resolves a delisted listing for the publisher team —
 // via RLS, not a status filter — so the manage/relist flow keeps working;
 // a non-publisher member gets 404, same as any other invisible row.
 func TestMarketplaceGet_DelistedVisibleToPublisherOnly(t *testing.T) {
 	r := newMarketplaceRig(t)
-	promptID := r.seedPrompt(t, r.teamID, "manage-me", "m", "", "")
-	id := r.publishListing(t, r.admin, map[string]any{"kind": "prompt", "source_id": promptID, "name": "manage-me"})
-
-	delistReq := r.req(http.MethodPost, "/api/marketplace/listings/"+id+"/delist", r.admin, nil)
-	delistReq.SetPathValue("id", id)
-	if rec := doMarketplaceJSON(r.mh.handleMarketplaceListingDelist, delistReq); rec.Code != http.StatusNoContent {
-		t.Fatalf("delist: status = %d, want 204; body=%s", rec.Code, rec.Body.String())
-	}
+	id := r.publishPrompt(t, "manage-me", "m", "", "", "manage-me")
+	r.delist(t, id)
 
 	getReq := r.req(http.MethodGet, "/api/marketplace/listings/"+id, r.admin, nil)
 	getReq.SetPathValue("id", id)
@@ -1002,33 +769,50 @@ func TestMarketplaceGet_DelistedVisibleToPublisherOnly(t *testing.T) {
 	}
 }
 
-// TestMarketplaceGet_UnknownIdIs404: a well-formed but nonexistent listing id
-// 404s rather than 500ing.
-func TestMarketplaceGet_UnknownIdIs404(t *testing.T) {
+// TestMarketplace_UnknownAndMalformedListingIDs: a listing id that is not a
+// UUID, or names no listing, is a 404 on every listing route rather than a 500
+// from the uuid cast or a foreign key. Unvote is the one exception.
+func TestMarketplace_UnknownAndMalformedListingIDs(t *testing.T) {
 	r := newMarketplaceRig(t)
-	getReq := r.req(http.MethodGet, "/api/marketplace/listings/00000000-0000-0000-0000-000000000000", r.admin, nil)
-	getReq.SetPathValue("id", "00000000-0000-0000-0000-000000000000")
-	if rec := doMarketplaceJSON(r.mh.handleMarketplaceGet, getReq); rec.Code != http.StatusNotFound {
-		t.Fatalf("get unknown id: status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	const unknownID = "00000000-0000-0000-0000-000000000000"
+	for _, tc := range []struct {
+		name, method, suffix, id string
+		body                     any
+		fn                       func(http.ResponseWriter, *http.Request)
+		want                     int
+	}{
+		{name: "get unknown", method: http.MethodGet, id: unknownID, fn: r.mh.handleMarketplaceGet, want: http.StatusNotFound},
+		{name: "get malformed", method: http.MethodGet, id: "not-a-uuid", fn: r.mh.handleMarketplaceGet, want: http.StatusNotFound},
+		{name: "vote unknown", method: http.MethodPut, suffix: "/vote", id: unknownID, fn: r.mh.handleMarketplaceVote, want: http.StatusNotFound},
+		{name: "vote malformed", method: http.MethodPut, suffix: "/vote", id: "not-a-uuid", fn: r.mh.handleMarketplaceVote, want: http.StatusNotFound},
+		{name: "unvote malformed", method: http.MethodDelete, suffix: "/vote", id: "not-a-uuid", fn: r.mh.handleMarketplaceUnvote, want: http.StatusNotFound},
+		// Unvote's DELETE has no foreign key to trip: an unknown id is the same
+		// no-op as removing a vote that does not exist.
+		{name: "unvote unknown", method: http.MethodDelete, suffix: "/vote", id: unknownID, fn: r.mh.handleMarketplaceUnvote, want: http.StatusNoContent},
+		{name: "install unknown", method: http.MethodPost, suffix: "/install", id: unknownID, body: map[string]any{"team_id": ""},
+			fn: r.mh.handleMarketplaceInstall, want: http.StatusNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := r.req(tc.method, "/api/marketplace/listings/"+tc.id+tc.suffix, r.admin, tc.body)
+			req.SetPathValue("id", tc.id)
+			if rec := doMarketplaceJSON(tc.fn, req); rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, tc.want, rec.Body.String())
+			}
+		})
 	}
-}
-
-// TestMarketplaceGet_MalformedIdIs404: id is a uuid column on Postgres — a
-// non-UUID path value must 404 cleanly rather than 500 on the store's
-// SQLSTATE 22P02 cast error.
-func TestMarketplaceGet_MalformedIdIs404(t *testing.T) {
-	r := newMarketplaceRig(t)
-	getReq := r.req(http.MethodGet, "/api/marketplace/listings/not-a-uuid", r.admin, nil)
-	getReq.SetPathValue("id", "not-a-uuid")
-	if rec := doMarketplaceJSON(r.mh.handleMarketplaceGet, getReq); rec.Code != http.StatusNotFound {
-		t.Fatalf("get malformed id: status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	// Vote checks the listing before its INSERT, so nothing reaches the table.
+	var count int
+	if err := r.h.AdminDB.QueryRow(`SELECT COUNT(*) FROM marketplace_votes WHERE listing_id = $1`, unknownID).Scan(&count); err != nil {
+		t.Fatalf("count votes: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("vote count for unknown listing = %d, want 0 (nothing written)", count)
 	}
 }
 
 // TestMarketplaceGet_IncludesSnapshotAndVersions: the detail response carries
-// the full current snapshot (for the read-only step preview) and the
-// version history, not just the header — republishing must show up as a
-// second version entry alongside the untouched v1.
+// the current snapshot, built from the source prompt's content with no ids or
+// brief, and the version history, so a republish shows as v2 beside v1.
 func TestMarketplaceGet_IncludesSnapshotAndVersions(t *testing.T) {
 	r := newMarketplaceRig(t)
 	promptID := r.seedPrompt(t, r.teamID, "v1", "v1 body", "sonnet", "Bash")
@@ -1047,33 +831,30 @@ func TestMarketplaceGet_IncludesSnapshotAndVersions(t *testing.T) {
 
 	getReq := r.req(http.MethodGet, "/api/marketplace/listings/"+id, r.member, nil)
 	getReq.SetPathValue("id", id)
-	rec := doMarketplaceJSON(r.mh.handleMarketplaceGet, getReq)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("get: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	detail := decodeListingDetail(t, doMarketplaceJSON(r.mh.handleMarketplaceGet, getReq))
+	if detail.Name != "Detail Listing v2" || detail.Description != "d2" {
+		t.Errorf("name/description = %q/%q, want the republished v2 values", detail.Name, detail.Description)
 	}
-	var detail domain.ListingDetail
-	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
-		t.Fatalf("decode: %v", err)
+	if detail.Kind != domain.ListingKindPrompt || detail.PublisherTeamID != r.teamID {
+		t.Errorf("kind/publisher_team_id = %q/%q, want prompt/%q (the prompt's own team)", detail.Kind, detail.PublisherTeamID, r.teamID)
 	}
-	if detail.Name != "Detail Listing v2" {
-		t.Errorf("name = %q, want the republished v2 name", detail.Name)
+	if len(detail.CurrentSnapshot.Steps) != 1 {
+		t.Fatalf("current_snapshot = %+v, want one step", detail.CurrentSnapshot)
 	}
-	if len(detail.CurrentSnapshot.Steps) != 1 || detail.CurrentSnapshot.Steps[0].Body != "v1 body" {
-		t.Errorf("current_snapshot = %+v, want the (unchanged) source prompt body", detail.CurrentSnapshot)
+	if step := detail.CurrentSnapshot.Steps[0]; step.Name != "v1" || step.Body != "v1 body" || step.Model != "sonnet" || step.AllowedTools != "Bash" || step.Brief != "" {
+		t.Errorf("snapshot step = %+v, want the (unchanged) source prompt's content verbatim and no brief", step)
 	}
 	if len(detail.Versions) != 2 || detail.Versions[0].Version != 1 || detail.Versions[1].Version != 2 {
 		t.Fatalf("versions = %+v, want v1 and v2", detail.Versions)
 	}
 }
 
-// TestMarketplaceGet_Stats pins the TFAC-540 HTTP contract: Stats is nil
-// (omitted from the JSON body) until the aggregation job has computed a row
-// for this listing, and populated once it has — including the no-wrong-
-// fallbacks case where success_rate is absent because total_runs is 0.
+// TestMarketplaceGet_Stats: stats are omitted until the aggregation job has
+// written a row for the listing, then served, with success_rate absent while
+// total_runs is 0.
 func TestMarketplaceGet_Stats(t *testing.T) {
 	r := newMarketplaceRig(t)
-	promptID := r.seedPrompt(t, r.teamID, "stats-listing", "m", "", "")
-	id := r.publishListing(t, r.admin, map[string]any{"kind": "prompt", "source_id": promptID, "name": "stats-listing"})
+	id := r.publishPrompt(t, "stats-listing", "m", "", "", "stats-listing")
 
 	getReq := func() *http.Request {
 		req := r.req(http.MethodGet, "/api/marketplace/listings/"+id, r.member, nil)
@@ -1081,24 +862,12 @@ func TestMarketplaceGet_Stats(t *testing.T) {
 		return req
 	}
 
-	rec := doMarketplaceJSON(r.mh.handleMarketplaceGet, getReq())
-	if rec.Code != http.StatusOK {
-		t.Fatalf("get before stats computed: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var before domain.ListingDetail
-	if err := json.Unmarshal(rec.Body.Bytes(), &before); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if before.Stats != nil {
+	if before := decodeListingDetail(t, doMarketplaceJSON(r.mh.handleMarketplaceGet, getReq())); before.Stats != nil {
 		t.Errorf("Stats before the job has run = %+v, want nil", before.Stats)
 	}
 
 	r.seedStats(t, id, 2, 0)
-	rec = doMarketplaceJSON(r.mh.handleMarketplaceGet, getReq())
-	var zeroRuns domain.ListingDetail
-	if err := json.Unmarshal(rec.Body.Bytes(), &zeroRuns); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	zeroRuns := decodeListingDetail(t, doMarketplaceJSON(r.mh.handleMarketplaceGet, getReq()))
 	if zeroRuns.Stats == nil || zeroRuns.Stats.TeamsUsing != 2 || zeroRuns.Stats.TotalRuns != 0 {
 		t.Fatalf("Stats with zero runs = %+v, want teams_using=2 total_runs=0", zeroRuns.Stats)
 	}
@@ -1107,218 +876,84 @@ func TestMarketplaceGet_Stats(t *testing.T) {
 	}
 
 	pgtest.MustExec(t, r.h.AdminDB, `UPDATE marketplace_listing_stats SET total_runs = 4, success_rate = 0.5 WHERE listing_id = $1`, id)
-	rec = doMarketplaceJSON(r.mh.handleMarketplaceGet, getReq())
-	var withRuns domain.ListingDetail
-	if err := json.Unmarshal(rec.Body.Bytes(), &withRuns); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	withRuns := decodeListingDetail(t, doMarketplaceJSON(r.mh.handleMarketplaceGet, getReq()))
 	if withRuns.Stats == nil || withRuns.Stats.TotalRuns != 4 || withRuns.Stats.SuccessRate == nil || *withRuns.Stats.SuccessRate != 0.5 {
 		t.Fatalf("Stats with runs = %+v, want total_runs=4 success_rate=0.5", withRuns.Stats)
 	}
 }
 
-// TestMarketplaceVote_Idempotent: voting twice from the same user leaves
-// vote_count at 1 and viewer_voted true; a third-party's own viewer_voted
-// stays false.
-func TestMarketplaceVote_Idempotent(t *testing.T) {
-	r := newMarketplaceRig(t)
-	promptID := r.seedPrompt(t, r.teamID, "votable", "m", "", "")
-	id := r.publishListing(t, r.admin, map[string]any{"kind": "prompt", "source_id": promptID, "name": "votable"})
-
-	voteReq := func() *http.Request {
-		req := r.req(http.MethodPut, "/api/marketplace/listings/"+id+"/vote", r.member, nil)
-		req.SetPathValue("id", id)
-		return req
-	}
-	if rec := doMarketplaceJSON(r.mh.handleMarketplaceVote, voteReq()); rec.Code != http.StatusNoContent {
-		t.Fatalf("first vote: status = %d, want 204; body=%s", rec.Code, rec.Body.String())
-	}
-	if rec := doMarketplaceJSON(r.mh.handleMarketplaceVote, voteReq()); rec.Code != http.StatusNoContent {
-		t.Fatalf("second (repeat) vote: status = %d, want 204; body=%s", rec.Code, rec.Body.String())
-	}
-
-	memberGetReq := r.req(http.MethodGet, "/api/marketplace/listings/"+id, r.member, nil)
-	memberGetReq.SetPathValue("id", id)
-	memberDetail := decodeListingDetail(t, doMarketplaceJSON(r.mh.handleMarketplaceGet, memberGetReq))
-	if memberDetail.VoteCount != 1 {
-		t.Errorf("vote_count after repeat vote = %d, want 1", memberDetail.VoteCount)
-	}
-	if !memberDetail.ViewerVoted {
-		t.Errorf("member's viewer_voted = false, want true")
-	}
-
-	adminGetReq := r.req(http.MethodGet, "/api/marketplace/listings/"+id, r.admin, nil)
-	adminGetReq.SetPathValue("id", id)
-	adminDetail := decodeListingDetail(t, doMarketplaceJSON(r.mh.handleMarketplaceGet, adminGetReq))
-	if adminDetail.ViewerVoted {
-		t.Errorf("admin's viewer_voted = true, want false (admin never voted)")
-	}
-	if adminDetail.VoteCount != 1 {
-		t.Errorf("admin's view of vote_count = %d, want 1 (shared count)", adminDetail.VoteCount)
-	}
-}
-
-// TestMarketplaceUnvote_Idempotent: unvoting when no vote exists is a no-op
-// (still 204), and unvoting an existing vote drops the count and clears
-// viewer_voted.
+// TestMarketplaceUnvote_Idempotent: a vote counts once however often it is
+// cast, viewer_voted is the caller's own, and unvoting is a 204 with or without
+// a vote to remove.
 func TestMarketplaceUnvote_Idempotent(t *testing.T) {
 	r := newMarketplaceRig(t)
-	promptID := r.seedPrompt(t, r.teamID, "unvotable", "m", "", "")
-	id := r.publishListing(t, r.admin, map[string]any{"kind": "prompt", "source_id": promptID, "name": "unvotable"})
+	id := r.publishPrompt(t, "unvotable", "m", "", "", "unvotable")
 
-	unvoteReq := func() *http.Request {
-		req := r.req(http.MethodDelete, "/api/marketplace/listings/"+id+"/vote", r.member, nil)
+	voteReq := func(method string) *http.Request {
+		req := r.req(method, "/api/marketplace/listings/"+id+"/vote", r.member, nil)
 		req.SetPathValue("id", id)
 		return req
 	}
+	detailAs := func(callerID string) domain.ListingDetail {
+		req := r.req(http.MethodGet, "/api/marketplace/listings/"+id, callerID, nil)
+		req.SetPathValue("id", id)
+		return decodeListingDetail(t, doMarketplaceJSON(r.mh.handleMarketplaceGet, req))
+	}
 	// No prior vote — still a no-op 204.
-	if rec := doMarketplaceJSON(r.mh.handleMarketplaceUnvote, unvoteReq()); rec.Code != http.StatusNoContent {
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceUnvote, voteReq(http.MethodDelete)); rec.Code != http.StatusNoContent {
 		t.Fatalf("unvote with no prior vote: status = %d, want 204; body=%s", rec.Code, rec.Body.String())
 	}
 
-	voteReq := r.req(http.MethodPut, "/api/marketplace/listings/"+id+"/vote", r.member, nil)
-	voteReq.SetPathValue("id", id)
-	if rec := doMarketplaceJSON(r.mh.handleMarketplaceVote, voteReq); rec.Code != http.StatusNoContent {
-		t.Fatalf("vote: status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	for i := range 2 {
+		if rec := doMarketplaceJSON(r.mh.handleMarketplaceVote, voteReq(http.MethodPut)); rec.Code != http.StatusNoContent {
+			t.Fatalf("vote %d: status = %d, want 204; body=%s", i+1, rec.Code, rec.Body.String())
+		}
 	}
-	if rec := doMarketplaceJSON(r.mh.handleMarketplaceUnvote, unvoteReq()); rec.Code != http.StatusNoContent {
+	if d := detailAs(r.member); d.VoteCount != 1 || !d.ViewerVoted {
+		t.Errorf("voter's view after a repeat vote = count %d, viewer_voted %v; want 1, true", d.VoteCount, d.ViewerVoted)
+	}
+	if d := detailAs(r.admin); d.VoteCount != 1 || d.ViewerVoted {
+		t.Errorf("non-voter's view = count %d, viewer_voted %v; want the shared 1, false", d.VoteCount, d.ViewerVoted)
+	}
+
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceUnvote, voteReq(http.MethodDelete)); rec.Code != http.StatusNoContent {
 		t.Fatalf("unvote: status = %d, want 204; body=%s", rec.Code, rec.Body.String())
 	}
-
-	getReq := r.req(http.MethodGet, "/api/marketplace/listings/"+id, r.member, nil)
-	getReq.SetPathValue("id", id)
-	detail := decodeListingDetail(t, doMarketplaceJSON(r.mh.handleMarketplaceGet, getReq))
-	if detail.VoteCount != 0 {
-		t.Errorf("vote_count after unvote = %d, want 0", detail.VoteCount)
+	if d := detailAs(r.member); d.VoteCount != 0 || d.ViewerVoted {
+		t.Errorf("after unvote = count %d, viewer_voted %v; want 0, false", d.VoteCount, d.ViewerVoted)
 	}
-	if detail.ViewerVoted {
-		t.Errorf("viewer_voted after unvote = true, want false")
-	}
-}
-
-// TestMarketplaceVote_MalformedIdIs404: a non-UUID path value 404s cleanly —
-// same reasoning as TestMarketplaceGet_MalformedIdIs404 — rather than 500ing
-// on the store's cast error.
-func TestMarketplaceVote_MalformedIdIs404(t *testing.T) {
-	r := newMarketplaceRig(t)
-	req := r.req(http.MethodPut, "/api/marketplace/listings/not-a-uuid/vote", r.admin, nil)
-	req.SetPathValue("id", "not-a-uuid")
-	if rec := doMarketplaceJSON(r.mh.handleMarketplaceVote, req); rec.Code != http.StatusNotFound {
-		t.Fatalf("vote malformed id: status = %d, want 404; body=%s", rec.Code, rec.Body.String())
-	}
-}
-
-// TestMarketplaceUnvote_MalformedIdIs404 mirrors the vote-side case.
-func TestMarketplaceUnvote_MalformedIdIs404(t *testing.T) {
-	r := newMarketplaceRig(t)
-	req := r.req(http.MethodDelete, "/api/marketplace/listings/not-a-uuid/vote", r.admin, nil)
-	req.SetPathValue("id", "not-a-uuid")
-	if rec := doMarketplaceJSON(r.mh.handleMarketplaceUnvote, req); rec.Code != http.StatusNotFound {
-		t.Fatalf("unvote malformed id: status = %d, want 404; body=%s", rec.Code, rec.Body.String())
-	}
-}
-
-// TestMarketplaceVote_UnknownIdIs404: a well-formed but nonexistent listing
-// id 404s rather than 500ing on marketplace_votes' FK-to-marketplace_listings
-// violation — the pre-check in handleMarketplaceVote must catch this before
-// the INSERT ever runs.
-func TestMarketplaceVote_UnknownIdIs404(t *testing.T) {
-	r := newMarketplaceRig(t)
-	const unknownID = "00000000-0000-0000-0000-000000000000"
-	req := r.req(http.MethodPut, "/api/marketplace/listings/"+unknownID+"/vote", r.admin, nil)
-	req.SetPathValue("id", unknownID)
-	if rec := doMarketplaceJSON(r.mh.handleMarketplaceVote, req); rec.Code != http.StatusNotFound {
-		t.Fatalf("vote unknown id: status = %d, want 404; body=%s", rec.Code, rec.Body.String())
-	}
-	var count int
-	if err := r.h.AdminDB.QueryRow(`SELECT COUNT(*) FROM marketplace_votes WHERE listing_id = $1`, unknownID).Scan(&count); err != nil {
-		t.Fatalf("count votes: %v", err)
-	}
-	if count != 0 {
-		t.Errorf("vote count for unknown listing = %d, want 0 (nothing written)", count)
-	}
-}
-
-// TestMarketplaceUnvote_UnknownIdIsNoOp: unlike Vote, Unvote's DELETE carries
-// no FK — a well-formed but nonexistent listing id is just a zero-row no-op,
-// consistent with "removing a vote that doesn't exist" already being a no-op.
-func TestMarketplaceUnvote_UnknownIdIsNoOp(t *testing.T) {
-	r := newMarketplaceRig(t)
-	const unknownID = "00000000-0000-0000-0000-000000000000"
-	req := r.req(http.MethodDelete, "/api/marketplace/listings/"+unknownID+"/vote", r.admin, nil)
-	req.SetPathValue("id", unknownID)
-	if rec := doMarketplaceJSON(r.mh.handleMarketplaceUnvote, req); rec.Code != http.StatusNoContent {
-		t.Fatalf("unvote unknown id: status = %d, want 204 (idempotent no-op); body=%s", rec.Code, rec.Body.String())
-	}
-}
-
-func decodeListingDetail(t *testing.T, rec *httptest.ResponseRecorder) domain.ListingDetail {
-	t.Helper()
-	if rec.Code != http.StatusOK {
-		t.Fatalf("get: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var detail domain.ListingDetail
-	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	return detail
-}
-
-// installResponse mirrors installListingResponse — the wire shape the
-// install tests below decode.
-type installResponse struct {
-	Kind      string   `json:"kind"`
-	ID        string   `json:"id"`
-	PromptIDs []string `json:"prompt_ids"`
-}
-
-// publishPrompt publishes name/body/model/tools as a prompt-kind listing
-// (via the real handler, admin as publisher) and returns the listing id —
-// shared setup for the install tests below.
-func (r *marketplaceRig) publishPrompt(t *testing.T, name, body, model, tools, listingName string) string {
-	t.Helper()
-	promptID := r.seedPrompt(t, r.teamID, name, body, model, tools)
-	rec := doMarketplaceJSON(r.mh.handleMarketplacePublish,
-		r.req(http.MethodPost, "/api/marketplace/listings", r.admin, map[string]any{
-			"kind": "prompt", "source_id": promptID, "name": listingName,
-		}))
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("publish setup: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
-	}
-	var resp struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode publish response: %v", err)
-	}
-	return resp.ID
-}
-
-// installAs POSTs .../install as callerID with the given team_id and
-// returns the recorder.
-func (r *marketplaceRig) installAs(callerID, listingID, teamID string) *httptest.ResponseRecorder {
-	req := r.req(http.MethodPost, "/api/marketplace/listings/"+listingID+"/install", callerID, map[string]any{
-		"team_id": teamID,
-	})
-	req.SetPathValue("id", listingID)
-	return doMarketplaceJSON(r.mh.handleMarketplaceInstall, req)
 }
 
 // TestMarketplaceInstall_Prompt_HappyPath: installing a prompt-kind listing
-// creates one team prompt (source='marketplace', content copied verbatim)
-// in the target team and records the install with the right root_object_id.
+// creates a team prompt (source='marketplace', content copied verbatim) in the
+// target team and records the install; a repeat install is a second copy made
+// from the frozen snapshot, so it succeeds after the source prompt is gone.
 func TestMarketplaceInstall_Prompt_HappyPath(t *testing.T) {
 	r := newMarketplaceRig(t)
 	listingID := r.publishPrompt(t, "Great Prompt", "do the thing", "opus", "Bash,Read", "Great Prompt Listing")
 
-	rec := r.installAs(r.member, listingID, r.teamB)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("install: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	install := func() installResponse {
+		t.Helper()
+		rec := r.installAs(r.member, listingID, r.teamB)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("install: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+		}
+		var resp installResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return resp
 	}
-	var resp installResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
+	installCount := func() int {
+		t.Helper()
+		var n int
+		if err := r.h.AdminDB.QueryRow(`SELECT COUNT(*) FROM marketplace_installs WHERE listing_id = $1`, listingID).Scan(&n); err != nil {
+			t.Fatalf("count installs: %v", err)
+		}
+		return n
 	}
+
+	resp := install()
 	if resp.Kind != domain.ListingKindPrompt || resp.ID == "" || len(resp.PromptIDs) != 1 || resp.PromptIDs[0] != resp.ID {
 		t.Fatalf("install response = %+v, want kind=prompt with a single prompt id equal to the root id", resp)
 	}
@@ -1333,14 +968,29 @@ func TestMarketplaceInstall_Prompt_HappyPath(t *testing.T) {
 			name, body, model, tools, source, teamID)
 	}
 
-	var installCount int
 	var rootObjectID string
-	if err := r.h.AdminDB.QueryRow(`SELECT COUNT(*), COALESCE(MAX(root_object_id::text), '') FROM marketplace_installs WHERE listing_id = $1`, listingID).
-		Scan(&installCount, &rootObjectID); err != nil {
-		t.Fatalf("count installs: %v", err)
+	if err := r.h.AdminDB.QueryRow(`SELECT COALESCE(MAX(root_object_id::text), '') FROM marketplace_installs WHERE listing_id = $1`, listingID).
+		Scan(&rootObjectID); err != nil {
+		t.Fatalf("read install root: %v", err)
 	}
-	if installCount != 1 || rootObjectID != resp.ID {
-		t.Errorf("install record = count=%d root=%q, want count=1 root=%q", installCount, rootObjectID, resp.ID)
+	if n := installCount(); n != 1 || rootObjectID != resp.ID {
+		t.Errorf("install record = count=%d root=%q, want count=1 root=%q", n, rootObjectID, resp.ID)
+	}
+
+	if res, err := r.h.AdminDB.Exec(`DELETE FROM prompts WHERE id = (SELECT source_id::text FROM marketplace_listings WHERE id = $1)`, listingID); err != nil {
+		t.Fatalf("delete source prompt: %v", err)
+	} else if n, _ := res.RowsAffected(); n != 1 {
+		t.Fatalf("deleted %d source prompts, want 1", n)
+	}
+	again := install()
+	if again.ID == resp.ID {
+		t.Fatalf("repeat install produced the same root object id %q twice, want two distinct copies", again.ID)
+	}
+	if err := r.h.AdminDB.QueryRow(`SELECT body FROM prompts WHERE id = $1`, again.ID).Scan(&body); err != nil || body != "do the thing" {
+		t.Errorf("second copy body = %q (err %v), want the frozen snapshot content", body, err)
+	}
+	if n := installCount(); n != 2 {
+		t.Errorf("install count = %d after two installs by the same team, want 2", n)
 	}
 }
 
@@ -1355,22 +1005,9 @@ func TestMarketplaceInstall_Blueprint_HappyPath(t *testing.T) {
 	bp := r.seedBlueprint(t, r.teamID, "Two-Step Chain")
 	r.seedBlueprintStep(t, r.teamID, bp, 0, p1, "do step one first")
 	r.seedBlueprintStep(t, r.teamID, bp, 1, p2, "")
+	listingID := r.publishListing(t, r.admin, map[string]any{"kind": "blueprint", "source_id": bp, "name": "Chain Listing"})
 
-	publishRec := doMarketplaceJSON(r.mh.handleMarketplacePublish,
-		r.req(http.MethodPost, "/api/marketplace/listings", r.admin, map[string]any{
-			"kind": "blueprint", "source_id": bp, "name": "Chain Listing",
-		}))
-	if publishRec.Code != http.StatusCreated {
-		t.Fatalf("publish setup: status = %d, want 201; body=%s", publishRec.Code, publishRec.Body.String())
-	}
-	var pubResp struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(publishRec.Body.Bytes(), &pubResp); err != nil {
-		t.Fatalf("decode publish response: %v", err)
-	}
-
-	rec := r.installAs(r.member, pubResp.ID, r.teamB)
+	rec := r.installAs(r.member, listingID, r.teamB)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("install: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
 	}
@@ -1420,7 +1057,7 @@ func TestMarketplaceInstall_Blueprint_HappyPath(t *testing.T) {
 	if steps[0].name != "Step One" || steps[0].body != "first mission" || steps[0].model != "sonnet" || steps[0].brief != "do step one first" {
 		t.Errorf("step 0 = %+v, want the source step's content verbatim", steps[0])
 	}
-	if steps[1].name != "Step Two" || steps[1].body != "second mission" || steps[1].tools != "Grep" {
+	if steps[1].name != "Step Two" || steps[1].body != "second mission" || steps[1].model != "opus" || steps[1].tools != "Grep" || steps[1].brief != "" {
 		t.Errorf("step 1 = %+v, want the source step's content verbatim", steps[1])
 	}
 }
@@ -1449,17 +1086,6 @@ func TestMarketplaceInstall_NonWriterOnTargetTeamIs403(t *testing.T) {
 	}
 }
 
-// TestMarketplaceInstall_UnknownListingIs404: a well-formed but nonexistent
-// listing id 404s rather than 500ing.
-func TestMarketplaceInstall_UnknownListingIs404(t *testing.T) {
-	r := newMarketplaceRig(t)
-	const unknownID = "00000000-0000-0000-0000-000000000000"
-	rec := r.installAs(r.admin, unknownID, "")
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("unknown listing install: status = %d, want 404; body=%s", rec.Code, rec.Body.String())
-	}
-}
-
 // TestMarketplaceInstall_DelistedByPublisherIsGone: the publisher can still
 // see (Get) their own delisted listing (RLS: published OR own-team-write),
 // but installing it is refused with 410 — delisting must actually block new
@@ -1467,12 +1093,7 @@ func TestMarketplaceInstall_UnknownListingIs404(t *testing.T) {
 func TestMarketplaceInstall_DelistedByPublisherIsGone(t *testing.T) {
 	r := newMarketplaceRig(t)
 	listingID := r.publishPrompt(t, "delist-me", "mission", "", "", "n")
-
-	delistReq := r.req(http.MethodPost, "/api/marketplace/listings/"+listingID+"/delist", r.admin, nil)
-	delistReq.SetPathValue("id", listingID)
-	if rec := doMarketplaceJSON(r.mh.handleMarketplaceListingDelist, delistReq); rec.Code != http.StatusNoContent {
-		t.Fatalf("delist setup: status = %d, want 204; body=%s", rec.Code, rec.Body.String())
-	}
+	r.delist(t, listingID)
 
 	rec := r.installAs(r.admin, listingID, "")
 	if rec.Code != http.StatusGone {
@@ -1487,95 +1108,10 @@ func TestMarketplaceInstall_DelistedByPublisherIsGone(t *testing.T) {
 func TestMarketplaceInstall_DelistedInvisibleToNonPublisherIs404(t *testing.T) {
 	r := newMarketplaceRig(t)
 	listingID := r.publishPrompt(t, "delist-me-2", "mission", "", "", "n")
-
-	delistReq := r.req(http.MethodPost, "/api/marketplace/listings/"+listingID+"/delist", r.admin, nil)
-	delistReq.SetPathValue("id", listingID)
-	doMarketplaceJSON(r.mh.handleMarketplaceListingDelist, delistReq)
+	r.delist(t, listingID)
 
 	rec := r.installAs(r.member, listingID, r.teamB)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("delisted install (non-publisher, invisible): status = %d, want 404; body=%s", rec.Code, rec.Body.String())
-	}
-}
-
-// TestMarketplaceInstall_RepeatInstallCreatesSecondCopy: forks are cheap —
-// the same team installing the same listing twice gets two independent
-// copies and two marketplace_installs rows, not a dedupe/no-op.
-func TestMarketplaceInstall_RepeatInstallCreatesSecondCopy(t *testing.T) {
-	r := newMarketplaceRig(t)
-	listingID := r.publishPrompt(t, "repeatable", "mission", "", "", "n")
-
-	install := func() string {
-		rec := r.installAs(r.member, listingID, r.teamB)
-		if rec.Code != http.StatusCreated {
-			t.Fatalf("install: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
-		}
-		var resp installResponse
-		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-			t.Fatalf("decode: %v", err)
-		}
-		return resp.ID
-	}
-
-	first := install()
-	second := install()
-	if first == second {
-		t.Fatalf("repeat install produced the same root object id %q twice, want two distinct copies", first)
-	}
-
-	var count int
-	if err := r.h.AdminDB.QueryRow(`SELECT COUNT(*) FROM marketplace_installs WHERE listing_id = $1`, listingID).Scan(&count); err != nil {
-		t.Fatalf("count installs: %v", err)
-	}
-	if count != 2 {
-		t.Errorf("install count = %d after two installs by the same team, want 2", count)
-	}
-	var promptCount int
-	if err := r.h.AdminDB.QueryRow(`SELECT COUNT(*) FROM prompts WHERE id IN ($1, $2)`, first, second).Scan(&promptCount); err != nil {
-		t.Fatalf("count prompts: %v", err)
-	}
-	if promptCount != 2 {
-		t.Errorf("prompt count = %d, want 2 distinct copies", promptCount)
-	}
-}
-
-// TestMarketplaceInstall_SucceedsAfterSourceDeleted: install materializes
-// the frozen listing snapshot, never the publisher team's live source
-// object — so a hard-deleted source prompt does not break a later install
-// (TFAC-535's cross-org insurance: the installer consumes a snapshot
-// document, never source rows).
-func TestMarketplaceInstall_SucceedsAfterSourceDeleted(t *testing.T) {
-	r := newMarketplaceRig(t)
-	promptID := r.seedPrompt(t, r.teamID, "vanishing", "mission before deletion", "", "")
-	publishRec := doMarketplaceJSON(r.mh.handleMarketplacePublish,
-		r.req(http.MethodPost, "/api/marketplace/listings", r.admin, map[string]any{
-			"kind": "prompt", "source_id": promptID, "name": "Vanishing Prompt",
-		}))
-	if publishRec.Code != http.StatusCreated {
-		t.Fatalf("publish setup: status = %d, want 201; body=%s", publishRec.Code, publishRec.Body.String())
-	}
-	var pubResp struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(publishRec.Body.Bytes(), &pubResp); err != nil {
-		t.Fatalf("decode publish response: %v", err)
-	}
-
-	pgtest.MustExec(t, r.h.AdminDB, `DELETE FROM prompts WHERE id = $1`, promptID)
-
-	rec := r.installAs(r.member, pubResp.ID, r.teamB)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("install after source deleted: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
-	}
-	var resp installResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	var body string
-	if err := r.h.AdminDB.QueryRow(`SELECT body FROM prompts WHERE id = $1`, resp.ID).Scan(&body); err != nil {
-		t.Fatalf("read installed prompt: %v", err)
-	}
-	if body != "mission before deletion" {
-		t.Errorf("installed prompt body = %q, want the frozen snapshot content", body)
 	}
 }

@@ -94,16 +94,9 @@ func TestListRoutesResolveAPage(t *testing.T) {
 }
 
 // TestNoBareListOptsLiteral is the second invariant. It scans source text
-// rather than the AST because the thing being forbidden is a spelling: both
-// forms produce the identical value, and the point is that one of them states
-// the intent and the other hides it.
-//
-// It walks the whole module rather than this package. Scoping it to the
-// handlers was the obvious reading — a bare literal only becomes an unbounded
-// response body here — but it is the wrong one twice over: a store's own
-// `...System` variant and an importer reaching for every row are the same
-// judgment call, and a rule that stops at a directory boundary is a rule
-// somebody lands on the wrong side of. One did, in the commit that added this.
+// rather than the AST because what it forbids is a spelling: both forms produce
+// the same value, and only one states the intent. It walks the whole module,
+// since a store's ...System variant is the same judgment call as a handler's.
 func TestNoBareListOptsLiteral(t *testing.T) {
 	root, err := filepath.Abs("../..")
 	if err != nil {

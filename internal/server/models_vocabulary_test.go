@@ -123,10 +123,9 @@ func (rig *vocabularyRig) storedBackgroundJobsModel(t *testing.T) string {
 	return model
 }
 
-// The mirror image of the local vocabulary tests: a multi deployment stores and
-// dispatches concrete wire ids, so the harness alias is what it refuses — an
-// alias on the bifrost wire goes unresolved and every message it produced
-// persists unpriced, which is the bug this whole design started from.
+// A multi deployment stores and dispatches concrete wire ids, so it refuses a
+// harness alias: one on the bifrost wire goes unresolved and its messages
+// persist unpriced.
 func TestOrgSettingsPatch_BackgroundJobsModel_Postgres_RefusesTheOtherVocabulary(t *testing.T) {
 	rig := newVocabularyRig(t)
 	rig.connect(t, true, true)
@@ -153,13 +152,9 @@ func TestOrgSettingsPatch_BackgroundJobsModel_Postgres_RefusesTheOtherVocabulary
 	}
 }
 
-// A model whose provider the org has not connected is one its next cycle would
-// refuse, so it is not worth storing. The refusal names the provider, because
-// connecting it is the whole remedy — and nothing quietly picks the provider the
-// org does hold.
-//
-// Native-path only, and Postgres is where that path runs: the gate reads the
-// provider off the id, and an SDK alias names none.
+// A background-jobs model whose provider the org has not connected is refused,
+// naming the provider. Postgres only: the gate reads the provider off a wire id,
+// and an SDK alias names none.
 func TestOrgSettingsPatch_BackgroundJobsModel_Postgres_RefusesUnconnectedProvider(t *testing.T) {
 	rig := newVocabularyRig(t)
 	rig.connect(t, true, false)
@@ -179,11 +174,9 @@ func TestOrgSettingsPatch_BackgroundJobsModel_Postgres_RefusesUnconnectedProvide
 	}
 }
 
-// Save-time enforcement on the team default: a model whose provider the org
-// never connected is refused with the field named. The stored default is
-// untouched by the refusal.
-//
-// Native-path only, for the same reason as the org knob above.
+// A team default whose provider the org never connected is refused with the
+// field named, and the stored default is untouched. Postgres only, for the same
+// reason as the org knob above.
 func TestTeamSettingsPatch_Postgres_ModelProviderMustBeAvailable(t *testing.T) {
 	bedrockModel := modelKeyOn(t, modelcatalog.ProviderBedrock)
 

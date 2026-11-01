@@ -11,7 +11,6 @@ import (
 
 	"github.com/zalando/go-keyring"
 
-	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
@@ -28,10 +27,7 @@ type importStubCfg struct {
 	permissions map[string]string // GET /app permissions; nil → all granted (passes preflight)
 	appStatus   int               // GET /app status; 0 → 200
 	tokenStatus int               // POST /applications/{cid}/token status; 0 → 404 (valid secret)
-	// botUserID drives GET /users/<slug>[bot] (the TFAC-474 best-effort fetch):
-	// >0 → 200 {"id": botUserID}; 0 → 404, modeling the propagation-delay /
-	// not-found case where the bot user id stays unknown (stored NULL).
-	botUserID int64
+	botUserID   int64             // GET /users/<slug>[bot] id; 0 → 404, the bot account not found
 }
 
 // importFullPerms grants every permission the manifest requests, so a stub left
@@ -84,9 +80,7 @@ func newImportStub(t *testing.T, cfg importStubCfg) *httptest.Server {
 		w.WriteHeader(st)
 	})
 
-	// GET /api/v3/users/{login} — the bot-user-id lookup (TFAC-474). Serves the
-	// configured id when set, else 404 (bot account not found / not yet
-	// propagated) so the best-effort fetch fails and the row stores NULL.
+	// GET /api/v3/users/{login} — the best-effort bot-user-id lookup.
 	mux.HandleFunc("/api/v3/users/", func(w http.ResponseWriter, _ *http.Request) {
 		if cfg.botUserID == 0 {
 			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
@@ -111,9 +105,8 @@ func importBody(appID, pem string, extra map[string]any) map[string]any {
 }
 
 // TestGitHubAppImport_HappyPath_FreshSetup imports with no org PAT: the row
-// lands active=true, owner_type comes from GET /app (Organization → org), the
-// PEM + both secrets are vaulted, and the response carries the validated client
-// secret + connect_callback_url.
+// lands active with owner_type and bot user id from GitHub, the PEM and both
+// secrets are vaulted, and the response carries the validated secret.
 func TestGitHubAppImport_HappyPath_FreshSetup(t *testing.T) {
 	keyring.MockInit()
 	runmode.SetForTest(t, runmode.ModeLocal)
@@ -127,6 +120,7 @@ func TestGitHubAppImport_HappyPath_FreshSetup(t *testing.T) {
 	stub := newImportStub(t, importStubCfg{
 		appID: 123, slug: "acme-bot", clientID: "Iv1.abc", ownerType: "Organization",
 		tokenStatus: http.StatusNotFound, // valid client secret
+		botUserID:   41898282,
 	})
 	setOrgGitHubBase(t, s, stub.URL)
 
@@ -148,6 +142,9 @@ func TestGitHubAppImport_HappyPath_FreshSetup(t *testing.T) {
 	}
 	if !app.Active {
 		t.Error("Active = false, want true (no PAT → fresh setup, not staged)")
+	}
+	if app.BotUserID != 41898282 {
+		t.Errorf("BotUserID = %d, want 41898282 (fetched at import)", app.BotUserID)
 	}
 	if app.ClientSecretRef == "" || app.WebhookSecretRef == "" || app.PEMRef == "" {
 		t.Errorf("secret refs = %+v, want all set", app)
@@ -179,97 +176,9 @@ func TestGitHubAppImport_HappyPath_FreshSetup(t *testing.T) {
 	}
 }
 
-// TestGitHubAppImport_PersistsBotUserID pins TFAC-474's import-flow write: when
-// GET /users/<slug>[bot] resolves, the numeric bot user id is persisted on the
-// org_github_apps row so OrgIdentityFor can later build the numeric-id noreply
-// commit email.
-func TestGitHubAppImport_PersistsBotUserID(t *testing.T) {
-	keyring.MockInit()
-	runmode.SetForTest(t, runmode.ModeLocal)
-	s := newTestServer(t)
-
-	stub := newImportStub(t, importStubCfg{
-		appID: 41, slug: "acme-bot", clientID: "Iv1.x", botUserID: 41898282,
-	})
-	setOrgGitHubBase(t, s, stub.URL)
-
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/import",
-		importBody("41", testRSAPEM(t), nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("import = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	app, _ := s.githubApps.GetForOrgSystem(context.Background(), runmode.LocalDefaultOrgID)
-	if app == nil {
-		t.Fatal("no app row written")
-	}
-	if app.BotUserID != 41898282 {
-		t.Errorf("BotUserID = %d, want 41898282 (fetched at import)", app.BotUserID)
-	}
-}
-
-// TestGitHubAppImport_BotUserIDFetchFailure_StoresNull pins that a failed
-// GET /users/<slug>[bot] (here a 404) is best-effort: the import still succeeds
-// and the row is written with bot_user_id NULL (0), so the resolver falls back
-// to the plain noreply form — never a worse state than before TFAC-474.
-func TestGitHubAppImport_BotUserIDFetchFailure_StoresNull(t *testing.T) {
-	keyring.MockInit()
-	runmode.SetForTest(t, runmode.ModeLocal)
-	s := newTestServer(t)
-
-	// botUserID left 0 → the stub's /users handler 404s.
-	stub := newImportStub(t, importStubCfg{appID: 42, slug: "acme-bot", clientID: "Iv1.x"})
-	setOrgGitHubBase(t, s, stub.URL)
-
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/import",
-		importBody("42", testRSAPEM(t), nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("import = %d, want 200 (bot-id fetch failure must not block import); body=%s", rec.Code, rec.Body.String())
-	}
-	app, _ := s.githubApps.GetForOrgSystem(context.Background(), runmode.LocalDefaultOrgID)
-	if app == nil {
-		t.Fatal("no app row written — a best-effort bot-id fetch failure must not abort the import")
-	}
-	if app.BotUserID != 0 {
-		t.Errorf("BotUserID = %d, want 0 (NULL on fetch failure)", app.BotUserID)
-	}
-}
-
-// TestGitHubAppImport_StagedWhenPATLive imports while an org PAT is live: the
-// staging rule writes active=false (the PAT stays the live credential until a
-// cutover), exactly as the manifest callback does.
-func TestGitHubAppImport_StagedWhenPATLive(t *testing.T) {
-	keyring.MockInit()
-	runmode.SetForTest(t, runmode.ModeLocal)
-	s := newTestServer(t)
-
-	stub := newImportStub(t, importStubCfg{appID: 7, slug: "acme-bot", clientID: "Iv1.x"})
-	setOrgGitHubBase(t, s, stub.URL)
-	if err := s.secrets.Put(context.Background(), runmode.LocalDefaultOrgID, integrations.KeyGitHubPAT, "ghp_live", ""); err != nil {
-		t.Fatalf("seed pat: %v", err)
-	}
-
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/import",
-		importBody("7", testRSAPEM(t), nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("import = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	app, _ := s.githubApps.GetForOrgSystem(context.Background(), runmode.LocalDefaultOrgID)
-	if app == nil {
-		t.Fatal("no app row written")
-	}
-	if app.Active {
-		t.Error("Active = true, want false (org PAT live → staged)")
-	}
-	// No secret provided → ref empty.
-	if app.ClientSecretRef != "" {
-		t.Errorf("ClientSecretRef = %q, want empty (no client secret provided)", app.ClientSecretRef)
-	}
-}
-
-// TestGitHubAppImport_RequiresAGitHubURL: an App is registered on one GitHub,
-// and an org with no GitHub URL has not said which. A URL kept in the legacy
-// github_url secret is not read, so the import is refused before any GitHub
-// call and writes no App row.
+// TestGitHubAppImport_RequiresAGitHubURL: an org with no GitHub URL is refused
+// before any GitHub call, even with a URL in the legacy github_url secret, and
+// no App row is written.
 func TestGitHubAppImport_RequiresAGitHubURL(t *testing.T) {
 	keyring.MockInit()
 	runmode.SetForTest(t, runmode.ModeLocal)
@@ -453,11 +362,9 @@ func TestGitHubAppImport_BadClientSecret(t *testing.T) {
 	}
 }
 
-// TestGitHubAppImport_ClientSecretUnknown_StoresUnvalidated pins the
-// inconclusive branch of the check-token contract: a status that's neither 401
-// (bad) nor 404 (valid) stores the secret anyway and flags
-// client_secret_validated=false — the only path that persists a potentially-bad
-// credential, so its behavior is documented.
+// TestGitHubAppImport_ClientSecretUnknown_StoresUnvalidated: a check-token
+// status that is neither 401 (bad) nor 404 (valid) stores the secret anyway
+// and reports client_secret_validated=false.
 func TestGitHubAppImport_ClientSecretUnknown_StoresUnvalidated(t *testing.T) {
 	keyring.MockInit()
 	runmode.SetForTest(t, runmode.ModeLocal)
@@ -494,8 +401,9 @@ func TestGitHubAppImport_ClientSecretUnknown_StoresUnvalidated(t *testing.T) {
 	}
 }
 
-// TestGitHubAppImport_PersonalOwnerType covers mapAppOwnerType's non-org branch:
-// GitHub's "User" account type maps to owner_type "user".
+// TestGitHubAppImport_PersonalOwnerType: GitHub's "User" owner maps to
+// owner_type "user". Its bot lookup 404s, which the import shrugs off with
+// bot_user_id left NULL.
 func TestGitHubAppImport_PersonalOwnerType(t *testing.T) {
 	keyring.MockInit()
 	runmode.SetForTest(t, runmode.ModeLocal)
@@ -515,6 +423,9 @@ func TestGitHubAppImport_PersonalOwnerType(t *testing.T) {
 	}
 	if app.OwnerType != "user" {
 		t.Errorf("owner_type = %q, want user (mapped from GitHub's User)", app.OwnerType)
+	}
+	if app.BotUserID != 0 {
+		t.Errorf("BotUserID = %d, want 0 (NULL when the bot lookup fails)", app.BotUserID)
 	}
 }
 
@@ -536,9 +447,8 @@ func TestGitHubAppImport_OccupiedSlot(t *testing.T) {
 	}
 }
 
-// TestGitHubAppImport_NoSecret_ConnectUnavailable imports without a client
-// secret: the ref is empty and the identity status then reports
-// connect_available=false (the tightened §3 gate falls back to PAT capture).
+// TestGitHubAppImport_NoSecret_ConnectUnavailable: an App imported without a
+// client secret stores no ref, and identity status reports connect_available=false.
 func TestGitHubAppImport_NoSecret_ConnectUnavailable(t *testing.T) {
 	keyring.MockInit()
 	runmode.SetForTest(t, runmode.ModeLocal)
@@ -570,8 +480,8 @@ func TestGitHubAppImport_NoSecret_ConnectUnavailable(t *testing.T) {
 	}
 }
 
-// TestGitHubAppStatus_CarriesConnectCallbackURL pins §4: the status response
-// carries connect_callback_url, built from the deploy config's public URL.
+// TestGitHubAppStatus_CarriesConnectCallbackURL: the status response carries
+// connect_callback_url, built from the deploy config's public URL.
 func TestGitHubAppStatus_CarriesConnectCallbackURL(t *testing.T) {
 	keyring.MockInit()
 	runmode.SetForTest(t, runmode.ModeLocal)

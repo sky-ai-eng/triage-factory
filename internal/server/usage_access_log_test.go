@@ -316,27 +316,21 @@ func TestAccessChangeLabel(t *testing.T) {
 	}
 }
 
-// TestAccessLogList_StrictBody pins the strict-body contract on the access
-// log: an unknown category is a rejected request rather than a filter that
-// matches nothing, and the paging fields go through the shared resolver (so an
-// out-of-range page_size is a 400, never a clamp). Every one of these used to
-// default silently.
+// TestAccessLogList_StrictBody: an unknown category, an out-of-range page_size
+// and an unknown field are each a 400, never a filter matching nothing or a
+// clamp.
 func TestAccessLogList_StrictBody(t *testing.T) {
 	s := newLicensedAccessLogServer(t)
 	for _, tc := range []struct {
 		name string
 		body map[string]any
 	}{
-		{"page_size zero is the default, not a rejection — skip", nil},
 		{"page_size negative", map[string]any{"page_size": -5}},
 		{"page_size over cap", map[string]any{"page_size": 9999}},
 		{"unknown category", map[string]any{"category": "membershipp"}},
 		{"retired limit param", map[string]any{"limit": 10}},
 		{"retired offset param", map[string]any{"offset": 10}},
 	} {
-		if tc.body == nil {
-			continue
-		}
 		t.Run(tc.name, func(t *testing.T) {
 			rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/usage/access-log/list", tc.body)
 			if rec.Code != http.StatusBadRequest {
@@ -364,12 +358,9 @@ func newLicensedAccessLogServer(t *testing.T) *Server {
 
 // --- local-mode end-to-end (SQLite, no Docker) ---
 
-// TestUsageAccessLog_Local drives the viewer endpoint through the real router +
-// withSession middleware against in-memory SQLite (local mode), with the
-// governance feature licensed so the EE gate admits the request. It covers the
-// 200 read: newest-first ordering, name + label rendering, the category filter,
-// and limit/offset paging with has_more. The role-gate 403 is multi-mode-only
-// (Postgres rig); the unlicensed 404 is its own test below.
+// TestUsageAccessLog_Local drives the access log through the real router in
+// local mode with governance licensed: newest-first order, rendered names and
+// labels, each category filter, and paging.
 func TestUsageAccessLog_Local(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureGovernance))
@@ -455,12 +446,16 @@ func TestUsageAccessLog_Local(t *testing.T) {
 		}
 	})
 
+	t.Run("category_policy_excludes_membership_and_credentials", func(t *testing.T) {
+		// The seed holds no SSO rows, so the policy bucket is accepted and empty.
+		if resp := postAccessLog(t, s, map[string]any{"category": "policy"}); len(resp.Items) != 0 {
+			t.Errorf("category=policy items = %+v, want none of the seeded rows", resp.Items)
+		}
+	})
+
 	t.Run("unrecognized_category_is_rejected", func(t *testing.T) {
-		// An unknown category used to fall through as "no filter", so a typo
-		// answered with every row and looked like a working filter. It is a
-		// closed vocabulary now: reject rather than guess which reading the
-		// caller meant. The fault names the body field — category is a payload
-		// field on this route, not a query param, so the envelope carries it.
+		// A typo is refused, not read as "no filter", and the fault names the
+		// body field.
 		rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/usage/access-log/list", map[string]any{"category": "bogus"})
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("category=bogus = %d, want 400; body=%s", rec.Code, rec.Body.String())
@@ -506,13 +501,10 @@ func TestUsageAccessLog_Unlicensed404(t *testing.T) {
 	}
 }
 
-// TestUsageAccessLog_MalformedDetailDoesNotBreakResponse pins that a row whose
-// detail_json isn't valid JSON degrades gracefully: the column is free-form TEXT
-// (no JSON CHECK), and passing a malformed value straight into a json.RawMessage
-// would fail the whole response marshal — httpx.WriteJSON has already written a
-// 200 by then, so the client would get an empty body and the entire page would
-// die. The handler must instead omit that one row's detail and still serve the
-// page (the label, parsed leniently, still renders).
+// TestUsageAccessLog_MalformedDetailDoesNotBreakResponse: detail_json is free
+// TEXT, and a malformed value passed into a json.RawMessage would fail the
+// marshal after the 200 is written. The row's detail is omitted instead and its
+// label still renders.
 func TestUsageAccessLog_MalformedDetailDoesNotBreakResponse(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureGovernance))
@@ -527,9 +519,8 @@ func TestUsageAccessLog_MalformedDetailDoesNotBreakResponse(t *testing.T) {
 		t.Fatalf("seed malformed-detail row: %v", err)
 	}
 
-	// doUsage fails the test if the status isn't 200 or the body isn't valid JSON —
-	// which is exactly the pre-fix failure mode (200 + empty body), so a green
-	// decode here is the regression guard.
+	// postAccessLog fails on a non-200 or a body that does not decode, which is
+	// how a failed marshal would show.
 	resp := postAccessLog(t, s, map[string]any{})
 	if len(resp.Items) != 1 {
 		t.Fatalf("items = %d, want 1: %+v", len(resp.Items), resp.Items)
@@ -574,6 +565,18 @@ func seedAccessLogLocal(t *testing.T, s *Server) {
 	row("acl-3", domain.AccessActionTeamMemberAdded, "u-bob", team, `{"new_role":"member"}`, "2026-06-20 12:00:00")
 	row("acl-4", domain.AccessActionOrgMemberRevoked, "u-bob", "", "", "2026-06-20 13:00:00")
 }
+
+// nullable maps "" to a nil arg (SQL NULL) so the optional columns store NULL
+// rather than an empty string, matching how the store's Record writes them.
+func nullable(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+func ptrTime(t time.Time) *time.Time { return &t }
+func ptrInt(n int) *int              { return &n }
 
 // TestUsageAccessLog_PolicyCategory_Local covers the policy bucket end to end:
 // the SSO rows ee/sso writes are core-renderable and reachable through the
@@ -623,15 +626,3 @@ func TestUsageAccessLog_PolicyCategory_Local(t *testing.T) {
 		}
 	}
 }
-
-// nullable maps "" to a nil arg (SQL NULL) so the optional columns store NULL
-// rather than an empty string, matching how the store's Record writes them.
-func nullable(s string) any {
-	if s == "" {
-		return nil
-	}
-	return s
-}
-
-func ptrTime(t time.Time) *time.Time { return &t }
-func ptrInt(n int) *int              { return &n }

@@ -8,20 +8,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// POST /api/teams/{team_id}/prs/list — the team arm of the pull-request list,
-// and the Overview's OPEN PRS figure as its count-only read.
-//
-// Local mode is where the route's body contract is exercised: N=1 has one team
-// and one member, so the population's two legs, the states filter, and the
-// token's filter binding all read here. The disclosure rule is multi's —
-// localMembership answers "yes" to every gate — and lives in the Postgres
-// handler test below.
+// POST /api/teams/{team_id}/prs/list, whose count-only read is the Overview's
+// OPEN PRS figure. Local mode exercises the body contract; the disclosure rule
+// is multi-only and lives in team_prs_disclosure_test.go.
 
 const teamPRsPath = "/api/teams/default/prs/list"
 
@@ -92,10 +86,8 @@ func TestTeamPRList_MemberSeesBothLegs(t *testing.T) {
 	}
 }
 
-// TestTeamPRList_OpenCountIsTheOverviewFigure pins the shape the Overview
-// actually calls: states=[open] with page_size 0, reading total_count. The
-// figure has to be the number the list itself would report, or the page and
-// the tile disagree in front of the user.
+// TestTeamPRList_OpenCountIsTheOverviewFigure: the Overview's call, states=[open]
+// with page_size 0, counts open PRs only, and agrees with the paged read.
 func TestTeamPRList_OpenCountIsTheOverviewFigure(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -196,24 +188,5 @@ func TestTeamPRList_UnknownTeamIs404(t *testing.T) {
 	rec := doJSON(t, s, "POST", "/api/teams/not-a-team/prs/list", map[string]any{})
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
-	}
-}
-
-// TestTeamPRList_StoreReadsThroughTheClaimsTx is a wiring pin rather than a
-// behaviour one: the route must read the team arm through TxStores, where the
-// tracked-set semi-join runs under the caller's claims. A nil binding is the
-// failure mode a refactor introduces silently.
-func TestTeamPRList_StoreReadsThroughTheClaimsTx(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	s := newTestServer(t)
-
-	if err := s.tx.WithTx(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID,
-		func(tx db.TxStores) error {
-			if tx.TeamPRs == nil {
-				t.Error("TxStores.TeamPRs is not wired")
-			}
-			return nil
-		}); err != nil {
-		t.Fatalf("WithTx: %v", err)
 	}
 }

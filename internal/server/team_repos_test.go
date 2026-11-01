@@ -157,11 +157,9 @@ func TestUnreachableIn(t *testing.T) {
 	})
 }
 
-// TestUnreachableViaFanOut_MixedOutcomes drives the cold-path orchestration
-// with an injected check covering the four response shapes (200 / 404 / 403 /
-// 5xx). 200 passes, 404 and 403 are conclusive rejections, and a 5xx
-// (indeterminate) fails open — never rejected. The answer is index-aligned
-// with the input regardless of completion order.
+// TestUnreachableViaFanOut_MixedOutcomes: on the cold path 200 passes, 404 and
+// 403 are rejections, and an indeterminate 5xx fails open. The answer is
+// index-aligned with the input whatever the completion order.
 func TestUnreachableViaFanOut_MixedOutcomes(t *testing.T) {
 	repo := func(o, r string) domain.Repository { return domain.Repository{Owner: o, Repo: r} }
 
@@ -198,55 +196,6 @@ func equalBools(a, b []bool) bool {
 	return true
 }
 
-// TestTeamReposPut_MirrorIsAuthoritative proves the mirror decides membership:
-// with only owner/tracked reachable, a PUT adding owner/ghost's registry row is
-// refused even though the per-repo probe (cold path) would have accepted it.
-func TestTeamReposPut_MirrorIsAuthoritative(t *testing.T) {
-	keyring.MockInit()
-	srv := newTestServer(t)
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The enumeration the mirror is built from lists only owner/tracked.
-		if r.URL.Path == "/api/v3/user/repos" {
-			w.Header().Set("Content-Type", "application/json")
-			if r.URL.Query().Get("page") != "1" {
-				_, _ = w.Write([]byte(`[]`))
-				return
-			}
-			_, _ = w.Write([]byte(`[{"full_name":"owner/tracked","id":11}]`))
-			return
-		}
-		// Every per-repo probe would say reachable — so a cold-path fall-through
-		// would wrongly accept owner/ghost. The mirror must win.
-		if strings.HasPrefix(r.URL.Path, "/api/v3/repos/") {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"full_name":"x"}`))
-			return
-		}
-		http.NotFound(w, r)
-	}))
-	t.Cleanup(ts.Close)
-	seedSourceHost(t, srv, eventsource.KindGitHub, ts.URL)
-	if err := integrations.Save(context.Background(), srv.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
-		GitHubPAT: "ghp-test",
-	}); err != nil {
-		t.Fatalf("seed creds: %v", err)
-	}
-	wireReachRefresh(t, srv).refresh(t, runmode.LocalDefaultOrgID, true)
-
-	host := hostOf(t, srv)
-	tracked := registeredID(t, srv, "11")
-	ghost := registerBare(t, srv, host, "owner/ghost")
-
-	// Mirrored, and owner/ghost is not in it → 422 on its entry.
-	msgs := assertRefusedFields(t, putTracked(t, srv, tracked.ID, ghost), http.StatusUnprocessableEntity, "repository_ids[1]")
-	assertNamesByID(t, msgs[0], ghost, "owner/ghost")
-
-	// And a repository that IS mirrored is accepted without a probe.
-	if rec := putTracked(t, srv, tracked.ID); rec.Code != http.StatusOK {
-		t.Fatalf("reachable PUT against a fresh mirror = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-}
-
 // hostOf reads the org's current GitHub host.
 func hostOf(t *testing.T, s *Server) string {
 	t.Helper()
@@ -257,53 +206,9 @@ func hostOf(t *testing.T, s *Server) string {
 	return host
 }
 
-// TestTeamReposPut_ColdPathFailsOpenOn5xx proves the cold-path fan-out keeps
-// the documented fail-open posture: when the per-repo probe 5xxs (GitHub
-// outage), the write proceeds rather than coupling write availability to
-// GitHub's uptime. No cache is warmed, so the PUT takes the cold path.
-func TestTeamReposPut_ColdPathFailsOpenOn5xx(t *testing.T) {
-	keyring.MockInit()
-	srv := newTestServer(t)
-	var probed atomic.Bool
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v3/user/repos" {
-			// Empty enumeration — irrelevant here, the test never warms the cache.
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`[]`))
-			return
-		}
-		if strings.HasPrefix(r.URL.Path, "/api/v3/repos/") {
-			probed.Store(true)
-			http.Error(w, "boom", http.StatusInternalServerError)
-			return
-		}
-		http.NotFound(w, r)
-	}))
-	t.Cleanup(ts.Close)
-	seedSourceHost(t, srv, eventsource.KindGitHub, ts.URL)
-	if err := integrations.Save(context.Background(), srv.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
-		GitHubPAT: "ghp-test",
-	}); err != nil {
-		t.Fatalf("seed creds: %v", err)
-	}
-
-	if rec := putTracked(t, srv, registerBare(t, srv, hostOf(t, srv), "owner/whatever")); rec.Code != http.StatusOK {
-		t.Fatalf("cold-path 5xx PUT = %d, want 200 (fail-open); body=%s", rec.Code, rec.Body.String())
-	}
-	if !probed.Load() {
-		t.Error("expected the cold path to actually probe the per-repo endpoint")
-	}
-}
-
-// fakeReposServer stands in for GitHub, serving the subset of endpoints the
-// repo-tracking gate touches against a fixed reachable set (the given
-// full_names):
-//
-//   - GET /user/repos — the picker enumeration (cache-warm path). Returns the
-//     full_names on page 1, an empty page afterward so the paginator stops.
-//   - GET /repos/{owner}/{repo} — the cold-path reachability probe
-//     (CheckRepoAccess). 200 when the slug is in the reachable set, 404
-//     otherwise — exactly the signal the per-repo fan-out classifies.
+// fakeReposServer stands in for GitHub with fullNames reachable: GET /user/repos
+// lists them on page 1 (empty after), and the per-repo probe GET
+// /repos/{owner}/{repo} answers 200 for them and 404 for anything else.
 func fakeReposServer(t *testing.T, fullNames ...string) *httptest.Server {
 	t.Helper()
 	reachable := make(map[string]bool, len(fullNames))
@@ -342,12 +247,9 @@ func fakeReposServer(t *testing.T, fullNames ...string) *httptest.Server {
 	return ts
 }
 
-// mutablePATGitHub serves GET /user/repos — the PAT enumeration the mirror is
-// built from — over a slug→id map a test can rename and extend between
-// refreshes, so a case can stage what GitHub reports changing under TF. Every
-// per-repo probe answers 404, so a test that means the mirror to decide fails
-// rather than passing on the cold path. Every repository object names its
-// owner account, by mutablePATOwnerID.
+// mutablePATGitHub serves the PAT enumeration the mirror is built from over a
+// slug→id map a test can change between refreshes. Every per-repo probe is a
+// 404, so a case the mirror should decide cannot pass on the cold path.
 type mutablePATGitHub struct {
 	*httptest.Server
 	mu    sync.Mutex
@@ -450,12 +352,9 @@ func TestTeamReposPut_RejectsUnreachableRepo(t *testing.T) {
 	}
 }
 
-// TestTeamReposPut_StaleTrackedRepoStaysRemovable proves the guard only
-// checks NEWLY-ADDED repos: a repo tracked while reachable that later
-// becomes unreachable (creds revoked, App uninstalled) must not wedge the
-// picker. The user has to be able to save a corrected set — including one
-// that still carries the stale repo, or that drops it — without the guard
-// refusing a repo it can no longer reach.
+// TestTeamReposPut_StaleTrackedRepoStaysRemovable: the reachability guard checks
+// only newly added repos, so a tracked repo that became unreachable can be
+// re-saved or dropped, while a newly added unreachable one is still refused.
 func TestTeamReposPut_StaleTrackedRepoStaysRemovable(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -520,11 +419,9 @@ func TestTeamReposPut_FailsOpenWithoutCredentials(t *testing.T) {
 	}
 }
 
-// TestTeamReposPut_RefusesABadBody pins the body contract: the field is
-// required (an absent one is not an empty set), every entry is a registry id
-// in canonical form named once — each fault reported, 400 — and every
-// well-formed id that names no repository on the org's host is refused by its
-// own entry, 422. Nothing is written by any of them.
+// TestTeamReposPut_RefusesABadBody: repository_ids is required, each entry must
+// be a canonical registry id named once (400 per fault), and an id naming no
+// repository on the org's host is a 422 on its entry. Nothing is written.
 func TestTeamReposPut_RefusesABadBody(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -553,15 +450,15 @@ func TestTeamReposPut_RefusesABadBody(t *testing.T) {
 			t.Errorf("refusal %q should say the id names no repository on the host", m)
 		}
 	}
-	if got := getTracked(t, srv); len(got) != 1 || got[0].ID != api {
-		t.Errorf("tracked after the refusals = %+v, want only %s", got, api)
+	// A row TF never learned a GitHub id for is still named by registry id,
+	// with an empty github_id.
+	if got := getTracked(t, srv); len(got) != 1 || got[0].ID != api || got[0].GitHubID != "" {
+		t.Errorf("tracked after the refusals = %+v, want only %s, with no GitHub id", got, api)
 	}
 }
 
-// TestTeamRepos_ARenameKeepsTheSameRow pins that the set is addressed by
-// registry id end to end: a client that read the set before GitHub renamed a
-// repository writes it back after the rename, and the team keeps tracking the
-// same registry row, now under the new name.
+// TestTeamRepos_ARenameKeepsTheSameRow: a set read before a rename and written
+// back after it keeps tracking the same registry row, under the new name.
 func TestTeamRepos_ARenameKeepsTheSameRow(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -600,39 +497,9 @@ func TestTeamRepos_ARenameKeepsTheSameRow(t *testing.T) {
 	}
 }
 
-// TestTeamRepos_ARowWithNoGitHubIDSurvivesARoundTrip pins that a tracked
-// registry row TF never learned a GitHub id for is still nameable: the GET
-// hands it back by registry id with an empty github_id, and writing the GET
-// back keeps it.
-func TestTeamRepos_ARowWithNoGitHubIDSurvivesARoundTrip(t *testing.T) {
-	keyring.MockInit()
-	srv := newTestServer(t)
-	bare := registerBare(t, srv, hostOf(t, srv), "acme/legacy")
-	if rec := putTracked(t, srv, bare); rec.Code != http.StatusOK {
-		t.Fatalf("track = %d; body=%s", rec.Code, rec.Body.String())
-	}
-	read := getTracked(t, srv)
-	if len(read) != 1 || read[0].ID != bare || read[0].GitHubID != "" {
-		t.Fatalf("GET = %+v, want %s with no GitHub id", read, bare)
-	}
-	ids := make([]string, 0, len(read))
-	for _, r := range read {
-		ids = append(ids, r.ID)
-	}
-	if rec := putTracked(t, srv, ids...); rec.Code != http.StatusOK {
-		t.Fatalf("write back = %d; body=%s", rec.Code, rec.Body.String())
-	}
-	if again := getTracked(t, srv); len(again) != 1 || again[0].ID != bare {
-		t.Errorf("after writing the GET back = %+v, want %s still tracked", again, bare)
-	}
-}
-
-// TestRepoRegister pins POST /api/repos: the id is validated strictly, the
-// mirror supplies the name and refuses an id it does not list, and a
-// registration is idempotent — and resolves to the row TF holds when GitHub
-// has renamed the repository since. A name TF holds under another id is freed
-// by asking GitHub about that id: a deleted repository's row is retired, a
-// renamed one's is renamed, and the new repository gets a row of its own.
+// TestRepoRegister pins POST /api/repos: strict id validation, the name taken
+// from the mirror, idempotence across an unapplied rename, and a reused name
+// retiring a deleted repository's row or renaming a renamed one's.
 func TestRepoRegister(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -702,12 +569,9 @@ func TestRepoRegister(t *testing.T) {
 	}
 }
 
-// TestTeamRepos_OperateOnTheCurrentHostOnly pins that a team's tracked set is
-// per GitHub host. Once the org points at another host, the GET lists only that
-// host's tracking (none yet), a PUT records the new host's set without pruning
-// the old host's rows, and pointing the org back shows the old set unchanged.
-// No credentials are bound, so the reachability gate fails open and the test is
-// about the host alone.
+// TestTeamRepos_OperateOnTheCurrentHostOnly: a team's tracked set is per GitHub
+// host. Moving the org to another host shows and writes only that host's set,
+// and moving it back shows the old set unpruned. No credentials are bound.
 func TestTeamRepos_OperateOnTheCurrentHostOnly(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()

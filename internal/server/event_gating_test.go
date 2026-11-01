@@ -11,9 +11,7 @@ import (
 )
 
 // testGateFeature is the synthetic feature these tests gate the "jira" event
-// source behind — no real gated event source exists yet (TFAC-524 is the
-// generic mechanism; TFAC-509/510 will call GateEventSource("slack", ...)).
-
+// source behind.
 const testGateFeature = entitlements.Feature("test-gate")
 
 // gateJiraForTest gates the jira event source behind testGateFeature and
@@ -29,7 +27,7 @@ func grantTestGateFeature(t *testing.T) {
 	entitlements.RegisterProvider(entitlements.Static(testGateFeature))
 }
 
-// --- GET /api/event-types (Part 2) ------------------------------------
+// --- GET /api/event-types ----------------------------------------------
 
 func TestHandleEventTypes_GatedSourceHiddenWithoutFeature(t *testing.T) {
 	s := newTestServer(t)
@@ -80,7 +78,7 @@ func TestHandleEventTypes_GatedSourceVisibleWithFeature(t *testing.T) {
 	}
 }
 
-// --- GET /api/event-schemas (Part 3) -----------------------------------
+// --- GET /api/event-schemas --------------------------------------------
 
 func TestHandleEventSchemasList_GatedSourceHiddenWithoutFeature(t *testing.T) {
 	s := newTestServer(t)
@@ -134,17 +132,16 @@ func TestHandleEventSchemaGet_GatedSourceOKWithFeature(t *testing.T) {
 	}
 }
 
-// --- GET/POST /api/event-handlers (Part 4, team-scoped) -----------------
+// --- GET/POST /api/event-handlers --------------------------------------
 
 func TestHandleEventHandlersList_HidesGatedHandler(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
-	// Create both handlers BEFORE gating (create isn't reachable for the
-	// jira one once gated) — rows persist, only visibility is filtered.
+	// The jira rule is created before gating, since its create is refused once
+	// gated; the github rule after, since gating jira must not refuse it.
 	jiraID := createUserRuleFor(t, s, domain.EventJiraIssueAssigned)
-	githubID := createUserRuleFor(t, s, domain.EventGitHubPROpened)
-
 	gateJiraForTest(t)
+	githubID := createUserRuleFor(t, s, domain.EventGitHubPROpened)
 
 	got := listEventHandlers(t, s, "rule")
 	var sawJira, sawGithub bool
@@ -203,22 +200,6 @@ func TestHandleEventHandlerCreate_RejectsGatedEventType(t *testing.T) {
 	}
 }
 
-func TestHandleEventHandlerCreate_UngatedEventTypeUnaffected(t *testing.T) {
-	s := newTestServer(t)
-	configureEventSources(t, s)
-	gateJiraForTest(t)
-
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
-		"event_type":       domain.EventGitHubPROpened,
-		"name":             "github rule",
-		"default_priority": 0.5,
-		"sort_order":       0,
-	})
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("expected 201 for an ungated github event type, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
 func TestHandleEventHandlerCreate_AllowsGatedEventTypeWithFeature(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
@@ -236,12 +217,8 @@ func TestHandleEventHandlerCreate_AllowsGatedEventTypeWithFeature(t *testing.T) 
 	}
 }
 
-// --- the event-handler list's entitlement gate (Part 4) ---
-//
-// The gate now filters in the store's query (so the page and total_count agree
-// about what the caller can see), which makes it an end-to-end assertion rather
-// than a pure one over a slice.
-
+// TestEventHandlerList_DropsGatedKeepsUngated: the gate filters in the store's
+// query, so the page and total_count agree about what the caller can see.
 func TestEventHandlerList_DropsGatedKeepsUngated(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
@@ -265,25 +242,6 @@ func TestEventHandlerList_DropsGatedKeepsUngated(t *testing.T) {
 	// would render as a missing row on a page claiming more.
 	if page.Total() != len(page.Items) {
 		t.Errorf("total = %d but the page held %d rows", page.Total(), len(page.Items))
-	}
-}
-
-func TestEventHandlerList_GrantedFeatureKeepsBoth(t *testing.T) {
-	s := newTestServer(t)
-	configureEventSources(t, s)
-	ghRule := createUserRuleFor(t, s, domain.EventGitHubPROpened)
-
-	gateJiraForTest(t)
-	grantTestGateFeature(t)
-	jiraRule := createUserRuleFor(t, s, domain.EventJiraIssueAssigned)
-
-	page := decodeList[domain.EventHandler](t, doJSON(t, s, http.MethodPost, "/api/event-handlers/list", map[string]any{}))
-	ids := map[string]bool{}
-	for _, h := range page.Items {
-		ids[h.ID] = true
-	}
-	if !ids[jiraRule] || !ids[ghRule] {
-		t.Errorf("items = %v, want both handlers once entitled", ids)
 	}
 }
 

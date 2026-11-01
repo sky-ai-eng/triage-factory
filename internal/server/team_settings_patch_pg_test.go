@@ -12,11 +12,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
-// TestTeamSettingsPatch_Postgres_KeepsAFieldSavedMidPatch: the team-settings
-// PATCH stores back every field its body does not name, so another settings
-// save that commits while the PATCH waits for the team's settings lock is
-// kept. The PATCH reads the row only once it holds the lock, and stores the
-// field that save changed beside its own.
+// TestTeamSettingsPatch_Postgres_KeepsAFieldSavedMidPatch: a settings save that
+// commits while the PATCH waits for the team's settings lock is kept, because
+// the PATCH reads the row only once it holds the lock.
 func TestTeamSettingsPatch_Postgres_KeepsAFieldSavedMidPatch(t *testing.T) {
 	rig := newAuthRig(t)
 	alice := rig.seedUser()

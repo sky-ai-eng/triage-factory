@@ -22,21 +22,14 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// TFAC-327: the review diff/submit, pending-PR submit, and branches
-// handlers were migrated off the PAT-only process-global
-// GitHub client onto the credential resolver, so App-only orgs (no PAT) reach
-// GitHub through the org's App installation token instead of 503/400-ing on a
-// nil global client. These tests drive each call site against an App-only org
-// (resolver tier 1) and against an org with no credentials at all (resolver
-// returns ErrNoGitHubCredentials).
+// The deliverable and branch handlers reach GitHub through the credential
+// resolver, so an App-only org (no PAT) uses its App installation token. These
+// tests drive each call site against an App-only org and an org with no
+// credentials at all.
 
-// newAppAPIMux returns a ServeMux pre-wired with the two endpoints every
-// resolver tier-1 path needs: the App installation-token mint (the token value
-// encodes the installation id, so a test can assert which installation token
-// reached GitHub) and GET /repos/{owner}/{repo}, which serves double duty as
-// the ClientForRepo coverage probe (needs a 200) and GetRepoMeta (needs a
-// clone_url). Tests register their specific endpoint on the returned mux, wrap
-// it in httptest.NewServer, then point the org's App base URL at it via seedApp.
+// newAppAPIMux returns a ServeMux serving the App installation-token mint (the
+// token encodes the installation id) and GET /repos/{owner}/{repo}, the
+// coverage probe and repo-meta read. Tests add their own endpoint and seedApp it.
 func newAppAPIMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v3/app/installations/{id}/access_tokens", func(w http.ResponseWriter, r *http.Request) {
@@ -64,12 +57,9 @@ func acmeInstall() []domain.OrgGitHubAppInstallation {
 	}
 }
 
-// captureLog redirects component-logger output to a buffer for the duration of
-// the test so a handler's "github not configured" log line can be asserted.
-// logging.SetOutput restores the prior destination on cleanup, so it composes
-// safely if anything else has already redirected output. The handler tests
-// don't run in parallel and newTestServer starts no background goroutines, so
-// the global swap is safe.
+// captureLog redirects component-logger output to a buffer for the test, and
+// restores the prior destination on cleanup. The swap is global, which is safe
+// because these tests do not run in parallel.
 func captureLog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
@@ -98,19 +88,19 @@ func seedDraftPRDeliverable(t *testing.T, s *Server, owner, repo string) string 
 
 // --- PR deliverable read (resolver tier coverage for the GitHub-native PR path) ---
 
-// TestDeliverablePR_AddressedByItsEntitysRepositoryRow: the pull request a
-// deliverable is about is the one its entity names, in the repository that
-// entity's registry row names now. After a rename that rewrote nothing else,
-// the live read goes out under the new name; once the row is retired — GitHub
-// serving its name as another repository — the read serves the stored snapshot
-// and a write is refused, rather than reaching that repository's #42.
+// TestDeliverablePR_AddressedByItsEntitysRepositoryRow: an App-only org reads a
+// PR deliverable live, with the App installation token, under the name its
+// entity's registry row holds now. Once the row is retired the read serves the
+// snapshot and a write is refused, without reaching GitHub.
 func TestDeliverablePR_AddressedByItsEntitysRepositoryRow(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	var paths []string
+	var gotAuth string
 	mux := newAppAPIMux()
 	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
 		paths = append(paths, r.URL.Path)
+		gotAuth = r.Header.Get("Authorization")
 		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42, "title": "Live title", "body": "Live body"})
 	})
 	stub := httptest.NewServer(mux)
@@ -130,6 +120,7 @@ func TestDeliverablePR_AddressedByItsEntitysRepositoryRow(t *testing.T) {
 		t.Fatalf("get = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	var out struct {
+		Kind    string         `json:"kind"`
 		Details map[string]any `json:"details"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
@@ -138,8 +129,16 @@ func TestDeliverablePR_AddressedByItsEntitysRepositoryRow(t *testing.T) {
 	if len(paths) != 1 || paths[0] != "/api/v3/repos/acme/renamed/pulls/42" {
 		t.Errorf("live reads = %v, want the one under acme/renamed", paths)
 	}
-	if out.Details["repo"] != "renamed" || out.Details["title"] != "Live title" {
-		t.Errorf("details = %v, want the live PR under its repository's current name", out.Details)
+	if gotAuth != "Bearer ghs_111" {
+		t.Errorf("PR read with auth %q, want App installation token Bearer ghs_111", gotAuth)
+	}
+	if out.Kind != domain.DeliverableKindPullRequest {
+		t.Errorf("kind = %q, want pull_request", out.Kind)
+	}
+	// Title and body come from the live PR, not the deliverable's snapshot.
+	if out.Details["repo"] != "renamed" || out.Details["title"] != "Live title" ||
+		out.Details["body"] != "Live body" || out.Details["number"] != float64(42) {
+		t.Errorf("details = %v, want the live PR #42 under its repository's current name", out.Details)
 	}
 
 	execSQL(t, srv.db, `UPDATE repositories SET retired_at = CURRENT_TIMESTAMP WHERE id = ?`, entity.RepositoryID)
@@ -157,52 +156,9 @@ func TestDeliverablePR_AddressedByItsEntitysRepositoryRow(t *testing.T) {
 	}
 }
 
-func TestDeliverableGet_AppOnlyOrg_Success(t *testing.T) {
-	keyring.MockInit()
-	srv := newTestServer(t)
-	var gotAuth string
-	mux := newAppAPIMux()
-	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42, "title": "Live title", "body": "Live body"})
-	})
-	stub := httptest.NewServer(mux)
-	t.Cleanup(stub.Close)
-	seedApp(t, srv, stub, acmeInstall())
-
-	artID := seedDraftPRDeliverable(t, srv, "acme", "api")
-	rec := doJSON(t, srv, http.MethodGet, "/api/deliverables/"+artID, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("get = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var out struct {
-		Kind    string         `json:"kind"`
-		Details map[string]any `json:"details"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if out.Kind != domain.DeliverableKindPullRequest {
-		t.Errorf("kind = %q, want pull_request", out.Kind)
-	}
-	// Title/body come from the live PR (GetPR), not the deliverable snapshot.
-	if out.Details["title"] != "Live title" || out.Details["body"] != "Live body" {
-		t.Errorf("title/body = %v/%v, want live values", out.Details["title"], out.Details["body"])
-	}
-	if out.Details["number"] != float64(42) {
-		t.Errorf("number = %v, want 42", out.Details["number"])
-	}
-	// The live read reached GitHub through the App installation token (App bot
-	// identity), not a PAT.
-	if gotAuth != "Bearer ghs_111" {
-		t.Errorf("PR read with auth %q, want App installation token Bearer ghs_111", gotAuth)
-	}
-}
-
 // TestDeliverableGet_NoCredentials_NotConfigured: a deliverable read on an org
-// with no GitHub credential is 409 NOT_CONFIGURED — server-side configuration
-// the caller must fix, not a transient upstream outage (the 503 it used to
-// answer read as "try again later").
+// with no GitHub credential is 409 NOT_CONFIGURED, configuration the caller
+// must fix, not a 503 that reads as a transient outage.
 func TestDeliverableGet_NoCredentials_NotConfigured(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)

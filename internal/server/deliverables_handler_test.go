@@ -37,41 +37,6 @@ func getDeliverable(t *testing.T, s *Server, id string) *domain.Deliverable {
 	return a
 }
 
-// TestDeliverableUpdate_Success pins the 1:1 live edit: PATCH writes title/body to
-// GitHub via UpdatePR and refreshes the deliverable's mutable snapshot while the
-// proposed (agent draft) snapshot stays frozen.
-func TestDeliverableUpdate_Success(t *testing.T) {
-	keyring.MockInit()
-	srv := newTestServer(t)
-	var gotPatch map[string]any
-	mux := newAppAPIMux()
-	mux.HandleFunc("PATCH /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&gotPatch)
-		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42})
-	})
-	stub := httptest.NewServer(mux)
-	t.Cleanup(stub.Close)
-	seedApp(t, srv, stub, acmeInstall())
-
-	artID := seedDraftPRDeliverable(t, srv, "acme", "api")
-	rec := doJSON(t, srv, http.MethodPatch, "/api/deliverables/"+artID+"/pr", map[string]any{"title": "Edited title", "body": "Edited body"})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("patch = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	// The live edit reached GitHub with the full title+body (whole-field replace).
-	if gotPatch["title"] != "Edited title" || gotPatch["body"] != "Edited body" {
-		t.Errorf("UpdatePR body = %v, want edited title+body", gotPatch)
-	}
-	// Snapshot moved; proposed stayed the agent's draft.
-	d, _ := domain.ParsePRDeliverableDetails(getDeliverable(t, srv, artID).DetailsJSON)
-	if d.Snapshot.Title != "Edited title" || d.Snapshot.Body != "Edited body" {
-		t.Errorf("snapshot = %+v, want edited", d.Snapshot)
-	}
-	if d.Proposed.Title != "Add thing" || d.Proposed.Body != "Body." {
-		t.Errorf("proposed = %+v, want frozen agent draft", d.Proposed)
-	}
-}
-
 // TestDeliverableUpdate_GitHubFailure_Pessimistic pins the pessimistic contract: a
 // GitHub rejection (422) returns non-2xx and the snapshot is NOT moved — no
 // silent success over a write GitHub refused.
@@ -98,20 +63,9 @@ func TestDeliverableUpdate_GitHubFailure_Pessimistic(t *testing.T) {
 	}
 }
 
-// TestDeliverableWrites_KindScoped is the whole point of splitting the deliverable
-// write surface: a body shaped for one kind can no longer reach the other
-// kind's write path.
-//
-// The hole it closes is specific. The merged PATCH dispatched on the ROW's
-// kind, so a review-shaped body landing on a PR deliverable decoded to all-nil
-// pointers, sailed past the "partial edit" branch, and performed a real
-// UpdatePR — rewriting the PR with its own current content — plus an audit row,
-// and answered 200. The mirror case, a PR-shaped body on a review deliverable, was
-// ignored with a 200 that promised a write nobody made.
-//
-// Every stub here fails the test on contact, so "no upstream call" is asserted
-// by the GitHub client never being reached at all rather than by inspecting
-// what it was asked to do.
+// TestDeliverableWrites_KindScoped: a write shaped for one deliverable kind is
+// refused on the other kind's route, with no GitHub call, no audit row and no
+// state change. Every stub answers 500 and records the hit.
 func TestDeliverableWrites_KindScoped(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -147,9 +101,7 @@ func TestDeliverableWrites_KindScoped(t *testing.T) {
 		"comment delete on a PR deliverable": {http.MethodDelete, "/api/deliverables/" + prID + "/comments/c_1", nil, http.StatusConflict},
 		"refresh on a PR deliverable":        {http.MethodPost, "/api/deliverables/" + prID + "/review/refresh", nil, http.StatusConflict},
 		"dismiss on a review deliverable":    {http.MethodPost, "/api/deliverables/" + reviewID + "/dismiss", nil, http.StatusConflict},
-		// A zero-field PR patch is the other half of the same hole: it named
-		// nothing, so there is nothing to send GitHub, and the old route sent
-		// the PR its own content back anyway.
+		// A zero-field PR patch names nothing to send GitHub.
 		"zero-field PR patch": {http.MethodPatch, "/api/deliverables/" + prID + "/pr", map[string]any{}, http.StatusBadRequest},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -181,65 +133,9 @@ func TestDeliverableWrites_KindScoped(t *testing.T) {
 	}
 }
 
-// TestDeliverableApprove pins the promote-on-approval flow: the draft is marked
-// ready (MarkPRReady via GraphQL), the deliverable flips to open, and the human
-// verdict lands in conversation_memory — and the PR's title and body are never
-// written, because the disclosure footer is already on the body from creation
-// and approval has nothing to add. Approval is a decoupled sidecar: it must
-// NOT touch conversation status. The fixture pre-seeds the conversation as
-// concluded, and we assert it STAYS concluded (approve didn't flip it).
-// Task closure here is a no-op because the fixture blueprint_run is still
-// 'running' (not a clean completion); the terminal-on-last closure is covered
-// by the dedicated dismiss/closure tests.
-func TestDeliverableApprove(t *testing.T) {
-	keyring.MockInit()
-	srv := newTestServer(t)
-	var marked, patched bool
-	mux := newAppAPIMux()
-	mux.HandleFunc("PATCH /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
-		patched = true
-		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42})
-	})
-	// approve reads the LIVE PR for the content it records, so GET must serve
-	// the current title/body (matching the proposed snapshot here → "as drafted").
-	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42, "node_id": "PR_node", "state": "open", "draft": true, "title": "Proposed title", "body": "Proposed body"})
-	})
-	mux.HandleFunc("POST /api/graphql", func(w http.ResponseWriter, r *http.Request) {
-		marked = true
-		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"markPullRequestReadyForReview": map[string]any{"pullRequest": map[string]any{"isDraft": false}}}})
-	})
-	stub := httptest.NewServer(mux)
-	t.Cleanup(stub.Close)
-	seedApp(t, srv, stub, acmeInstall())
-
-	artID, conversationID, _ := seedDraftPRDeliverableWithConversation(t, srv, "appr", "acme", "api", 42)
-	rec := doJSON(t, srv, http.MethodPost, "/api/deliverables/"+artID+"/approve", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("approve = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	if !marked {
-		t.Error("approve must MarkPRReady")
-	}
-	if patched {
-		t.Error("approve must leave the PR's title and body alone")
-	}
-	if got := getDeliverable(t, srv, artID).State; got != domain.DeliverableStatePROpen {
-		t.Errorf("deliverable state = %q, want open", got)
-	}
-	if !storedConcluded(t, srv.db, conversationID) {
-		t.Error("conversation no longer concluded")
-	}
-	// Approval writes no memory: the conversation's row is the agent's own
-	// account of what it tried, and a verdict about a deliverable is not that.
-	assertAgentMemoryUntouched(t, srv, conversationID)
-}
-
-// TestDeliverableApprove_LedgerNamesWhoPerformedEachAct pins performed_by on
-// the two writers that share one conversation's ledger: the run's agent,
-// through the agenthost funnel, and the person approving the run's draft PR.
-// Both rows carry the conversation's id and, on a manual run, the same actor,
-// so performed_by is the only column that tells them apart.
+// TestDeliverableApprove_LedgerNamesWhoPerformedEachAct: the agent's writes and a
+// person's approval share one conversation's ledger and, on a manual run, one
+// actor, so performed_by is the only column that tells the rows apart.
 func TestDeliverableApprove_LedgerNamesWhoPerformedEachAct(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -294,18 +190,9 @@ func TestDeliverableApprove_LedgerNamesWhoPerformedEachAct(t *testing.T) {
 	}
 }
 
-// TestDeliverableApprove_ClosesOnlyWhileTheTaskIsStillTheRunsToClose pins the
-// terminal-on-last guards from the request side: approving the last unresolved
-// deliverable on a task still bot-claimed by its newest run closes it, and the
-// same approval on a task that has moved on does not. Deliverables carry across
-// requeue, claim and re-delegation, so an approval can land on a carried PR
-// long after the run that opened it stopped being what the task is about —
-// and closing then would take it to done under whoever holds it today.
-//
-// Every arm shares one fixture, so the control proves the closure fires here
-// and each other arm isolates what stops it. Both guards earn their place: a
-// handover clears the agent claim without minting a run, a re-delegation mints
-// a run without clearing the claim.
+// TestDeliverableApprove_ClosesOnlyWhileTheTaskIsStillTheRunsToClose: approving
+// the last unresolved deliverable closes a task still bot-claimed by its newest
+// run, and not one a person took over or a later delegation superseded.
 func TestDeliverableApprove_ClosesOnlyWhileTheTaskIsStillTheRunsToClose(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -371,14 +258,14 @@ func TestDeliverableApprove_ClosesOnlyWhileTheTaskIsStillTheRunsToClose(t *testi
 	}
 }
 
-// TestDeliverableAbandon_ClosesDraftPR pins the walk-away path: dismissing a task
-// whose conversation opened a draft PR closes that PR on GitHub (ClosePR →
-// state closed) and flips its deliverable to closed. The pushed branch is
-// untouched.
+// TestDeliverableAbandon_ClosesDraftPR: dismissing a task resolves its
+// conversation's deliverables: the draft PR is closed on GitHub, and the staged
+// review, which has no GitHub object, is dismissed with no GitHub call.
 func TestDeliverableAbandon_ClosesDraftPR(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	var closeState string
+	var reviewTouchedGitHub bool
 	mux := newAppAPIMux()
 	mux.HandleFunc("PATCH /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
@@ -386,57 +273,17 @@ func TestDeliverableAbandon_ClosesDraftPR(t *testing.T) {
 		closeState, _ = body["state"].(string)
 		_ = json.NewEncoder(w).Encode(map[string]any{"number": 7, "state": "closed"})
 	})
+	for _, pattern := range []string{"POST /api/graphql", "DELETE /api/v3/repos/{owner}/{repo}/pulls/{number}/reviews/{rid}"} {
+		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+			reviewTouchedGitHub = true
+			_, _ = w.Write([]byte(`{"data":{}}`))
+		})
+	}
 	stub := httptest.NewServer(mux)
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 
-	taskID, _, artID := seedClaimedPRApprovalFixture(t, srv, "acme", "api", 7)
-	rec := doJSON(t, srv, http.MethodPatch, "/api/tasks/"+taskID,
-		map[string]any{"status": "dismissed", "hesitation_ms": 0})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("dismiss = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	if closeState != "closed" {
-		t.Errorf("ClosePR sent state=%q, want closed", closeState)
-	}
-	if got := getDeliverable(t, srv, artID).State; got != domain.DeliverableStatePRClosed {
-		t.Errorf("deliverable state = %q, want closed", got)
-	}
-}
-
-// TestDeliverableTeardown_ResolvesAllDeliverables pins the task-level resolve-all
-// gesture (the card reaching done or dismissed): a task whose conversation
-// holds MULTIPLE unresolved deliverables — a draft PR and a pending review — has
-// them ALL resolved. The draft PR is closed on GitHub; the review is flipped to
-// dismissed with NO GitHub call (it was staged TF-side, TFAC-494). Branches are
-// kept.
-func TestDeliverableTeardown_ResolvesAllDeliverables(t *testing.T) {
-	keyring.MockInit()
-	srv := newTestServer(t)
-	var prClosed, reviewTouchedGitHub bool
-	mux := newAppAPIMux()
-	mux.HandleFunc("PATCH /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
-		prClosed = true
-		_ = json.NewEncoder(w).Encode(map[string]any{"number": 7, "state": "closed"})
-	})
-	// Any review-delete call (GraphQL node lookup or REST delete) would be a
-	// regression — a staged review has no GitHub object to retire.
-	mux.HandleFunc("POST /api/graphql", func(w http.ResponseWriter, r *http.Request) {
-		reviewTouchedGitHub = true
-		_, _ = w.Write([]byte(`{"data":{}}`))
-	})
-	mux.HandleFunc("DELETE /api/v3/repos/{owner}/{repo}/pulls/{number}/reviews/{rid}", func(w http.ResponseWriter, r *http.Request) {
-		reviewTouchedGitHub = true
-		_ = json.NewEncoder(w).Encode(map[string]any{})
-	})
-	stub := httptest.NewServer(mux)
-	t.Cleanup(stub.Close)
-	seedApp(t, srv, stub, acmeInstall())
-
-	// seedClaimedPRApprovalFixture hangs a draft PR (#7) off conversation
-	// r_ab; add a finalized review draft on the same conversation so the
-	// task holds two unresolved deliverables of different kinds.
-	taskID, conversationID, prArtID := seedClaimedPRApprovalFixture(t, srv, "acme", "api", 7)
+	taskID, conversationID, artID := seedClaimedPRApprovalFixture(t, srv, "acme", "api", 7)
 	rv := domain.NewReviewDeliverable("acme/api", 7, "PR_acme_api_7", "headsha7", conversationID)
 	rv.ConversationID = conversationID
 	rv.OrgID = runmode.LocalDefaultOrgID
@@ -445,67 +292,27 @@ func TestDeliverableTeardown_ResolvesAllDeliverables(t *testing.T) {
 	rd.ReviewBody = "body"
 	rd.ReviewEvent = "COMMENT"
 	rv.DetailsJSON = domain.MarshalReviewDeliverableDetails(rd)
-	reviewStored, err := sqlitestore.New(srv.db).Deliverables.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(srv.db).Orgs, runmode.LocalDefaultOrgID, rv))
+	review, err := sqlitestore.New(srv.db).Deliverables.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(srv.db).Orgs, runmode.LocalDefaultOrgID, rv))
 	if err != nil {
 		t.Fatalf("seed review deliverable: %v", err)
 	}
 
 	rec := doJSON(t, srv, http.MethodPatch, "/api/tasks/"+taskID,
-		map[string]any{"status": "done", "hesitation_ms": 0})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("complete = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	if !prClosed {
-		t.Error("resolve-all must close the draft PR on GitHub")
-	}
-	if reviewTouchedGitHub {
-		t.Error("resolve-all must NOT make any GitHub call for the staged review")
-	}
-	if got := getDeliverable(t, srv, prArtID).State; got != domain.DeliverableStatePRClosed {
-		t.Errorf("PR deliverable state = %q, want closed", got)
-	}
-	if got := getDeliverable(t, srv, reviewStored.ID).State; got != domain.DeliverableStateReviewDismissed {
-		t.Errorf("review deliverable state = %q, want dismissed", got)
-	}
-}
-
-// TestDeliverableDismiss_PR pins the per-deliverable dismiss sidecar: POST
-// /api/deliverables/{id}/dismiss closes the draft PR on GitHub (ClosePR → state
-// closed), flips the deliverable to closed, and — crucially — never touches the
-// conversation's lifecycle. The pushed branch is untouched (we send only state=closed).
-func TestDeliverableDismiss_PR(t *testing.T) {
-	keyring.MockInit()
-	srv := newTestServer(t)
-	var closeState string
-	mux := newAppAPIMux()
-	mux.HandleFunc("PATCH /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
-		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		closeState, _ = body["state"].(string)
-		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42, "state": "closed"})
-	})
-	stub := httptest.NewServer(mux)
-	t.Cleanup(stub.Close)
-	seedApp(t, srv, stub, acmeInstall())
-
-	artID, conversationID, _ := seedDraftPRDeliverableWithConversation(t, srv, "dis", "acme", "api", 42)
-	rec := doJSON(t, srv, http.MethodPost, "/api/deliverables/"+artID+"/dismiss", nil)
+		map[string]any{"status": "dismissed", "hesitation_ms": 0})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("dismiss = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	if closeState != "closed" {
 		t.Errorf("ClosePR sent state=%q, want closed", closeState)
 	}
-	dismissed := getDeliverable(t, srv, artID)
-	if dismissed.State != domain.DeliverableStatePRClosed {
-		t.Errorf("deliverable state = %q, want closed", dismissed.State)
+	if reviewTouchedGitHub {
+		t.Error("dismissing the task made a GitHub call for the staged review")
 	}
-	if d, _ := domain.ParsePRDeliverableDetails(dismissed.DetailsJSON); d.Resolution != domain.PRResolutionDismissed {
-		t.Errorf("resolution = %q, want dismissed", d.Resolution)
+	if got := getDeliverable(t, srv, artID).State; got != domain.DeliverableStatePRClosed {
+		t.Errorf("deliverable state = %q, want closed", got)
 	}
-	// The conversation lifecycle is untouched — dismiss is a decoupled sidecar.
-	if !storedConcluded(t, srv.db, conversationID) {
-		t.Error("conversation no longer concluded (dismiss must not flip conversation lifecycle)")
+	if got := getDeliverable(t, srv, review.ID).State; got != domain.DeliverableStateReviewDismissed {
+		t.Errorf("review deliverable state = %q, want dismissed", got)
 	}
 }
 
@@ -524,92 +331,69 @@ func TestDeliverableDismiss_TerminalDeliverable409(t *testing.T) {
 	}
 }
 
-// TestDeliverableDismiss_TerminalBlueprintLastDeliverableClosesTask pins §3: resolving
-// the LAST unresolved deliverable on an already-terminal blueprint closes the task
-// (done), with no accept/dismiss distinction — a dismiss closes it just like an
-// approve would.
-func TestDeliverableDismiss_TerminalBlueprintLastDeliverableClosesTask(t *testing.T) {
-	keyring.MockInit()
-	srv := newTestServer(t)
-	mux := newAppAPIMux()
-	mux.HandleFunc("PATCH /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42, "state": "closed"})
-	})
-	stub := httptest.NewServer(mux)
-	t.Cleanup(stub.Close)
-	seedApp(t, srv, stub, acmeInstall())
-
-	artID, _, taskID := seedDraftPRDeliverableWithConversation(t, srv, "tolc", "acme", "api", 42)
-	// Drive the blueprint to a terminal status so resolving the only deliverable is
-	// the last-on-terminal trigger.
-	execSQL(t, srv.db, `UPDATE blueprint_runs SET status = 'completed' WHERE task_id = ?`, taskID)
-
-	rec := doJSON(t, srv, http.MethodPost, "/api/deliverables/"+artID+"/dismiss", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("dismiss = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var taskStatus string
-	if err := srv.db.QueryRow(`SELECT status FROM tasks WHERE id = ?`, taskID).Scan(&taskStatus); err != nil {
-		t.Fatalf("read task: %v", err)
-	}
-	if taskStatus != "done" {
-		t.Errorf("task.status = %q, want done (last resolution on a terminal blueprint closes the task)", taskStatus)
-	}
-}
-
-// TestDeliverableDismiss_AbortedBlueprintLeavesTaskOpen pins the clean-completion
-// gate: resolving the last deliverable on a NON-completed terminal blueprint
-// (aborted / failed / cancelled) must leave the task open for human attention,
-// mirroring terminateBlueprint — a stray draft PR on an aborted blueprint doesn't
-// override the "needs a human" disposition.
-func TestDeliverableDismiss_AbortedBlueprintLeavesTaskOpen(t *testing.T) {
-	// The non-completed terminal vocabulary, from the domain constants (compile-
-	// checked against the real blueprint_runs.status values terminateBlueprint
-	// writes) — only 'completed' is a clean finalization that may close the task.
-	for _, terminal := range []domain.BlueprintRunStatus{
-		domain.BlueprintRunStatusAborted,
-		domain.BlueprintRunStatusFailed,
-		domain.BlueprintRunStatusCancelled,
+// TestDeliverableDismiss_ClosesTaskOnlyOnCompletedBlueprint: dismissing a draft PR
+// closes it on GitHub and leaves the conversation alone; as the task's last
+// unresolved deliverable it closes the task only if the blueprint run completed.
+func TestDeliverableDismiss_ClosesTaskOnlyOnCompletedBlueprint(t *testing.T) {
+	for _, tc := range []struct {
+		runStatus domain.BlueprintRunStatus
+		wantDone  bool
+	}{
+		{domain.BlueprintRunStatusCompleted, true},
+		{domain.BlueprintRunStatusAborted, false},
+		{domain.BlueprintRunStatusFailed, false},
+		{domain.BlueprintRunStatusCancelled, false},
+		{domain.BlueprintRunStatusRunning, false},
 	} {
-		t.Run(string(terminal), func(t *testing.T) {
+		t.Run(string(tc.runStatus), func(t *testing.T) {
 			keyring.MockInit()
 			srv := newTestServer(t)
+			var closeState string
 			mux := newAppAPIMux()
 			mux.HandleFunc("PATCH /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]any
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				closeState, _ = body["state"].(string)
 				_ = json.NewEncoder(w).Encode(map[string]any{"number": 42, "state": "closed"})
 			})
 			stub := httptest.NewServer(mux)
 			t.Cleanup(stub.Close)
 			seedApp(t, srv, stub, acmeInstall())
 
-			artID, _, taskID := seedDraftPRDeliverableWithConversation(t, srv, "tolab-"+string(terminal), "acme", "api", 42)
-			execSQL(t, srv.db, `UPDATE blueprint_runs SET status = ? WHERE task_id = ?`, string(terminal), taskID)
+			artID, conversationID, taskID := seedDraftPRDeliverableWithConversation(t, srv, "dis-"+string(tc.runStatus), "acme", "api", 42)
+			execSQL(t, srv.db, `UPDATE blueprint_runs SET status = ? WHERE task_id = ?`, string(tc.runStatus), taskID)
 
 			rec := doJSON(t, srv, http.MethodPost, "/api/deliverables/"+artID+"/dismiss", nil)
 			if rec.Code != http.StatusOK {
 				t.Fatalf("dismiss = %d, want 200; body=%s", rec.Code, rec.Body.String())
 			}
+			if closeState != "closed" {
+				t.Errorf("ClosePR sent state=%q, want closed", closeState)
+			}
+			dismissed := getDeliverable(t, srv, artID)
+			if dismissed.State != domain.DeliverableStatePRClosed {
+				t.Errorf("deliverable state = %q, want closed", dismissed.State)
+			}
+			if d, _ := domain.ParsePRDeliverableDetails(dismissed.DetailsJSON); d.Resolution != domain.PRResolutionDismissed {
+				t.Errorf("resolution = %q, want dismissed", d.Resolution)
+			}
+			if !storedConcluded(t, srv.db, conversationID) {
+				t.Error("conversation no longer concluded (dismiss must not flip conversation lifecycle)")
+			}
 			var taskStatus string
 			if err := srv.db.QueryRow(`SELECT status FROM tasks WHERE id = ?`, taskID).Scan(&taskStatus); err != nil {
 				t.Fatalf("read task: %v", err)
 			}
-			if taskStatus == "done" {
-				t.Errorf("task.status = done; a %s blueprint must leave the task open for a human", terminal)
+			if done := taskStatus == "done"; done != tc.wantDone {
+				t.Errorf("task.status = %q (done = %v), want done = %v", taskStatus, done, tc.wantDone)
 			}
 		})
 	}
 }
 
-// TestDeliverableDismiss_TaskLessConversationClosesNoTask pins the non-blueprint branch
-// against the actual model: a future user-triggered conversation
-// (origin='interactive') is neither blueprint- nor task-linked — it carries a
-// NULL blueprint_run_id AND a NULL task_id (both allowed once origin <>
-// 'blueprint'). Resolving a deliverable on such a conversation must be a clean
-// no-op for task closure: GetRunForConversation routes to the standalone
-// branch, the conversation has no task, and the taskID == "" guard short-
-// circuits — no task is closed, no error. (No such conversation exists in
-// production today; this pins the forward-compat path so it can't regress into
-// closing a phantom task.)
+// TestDeliverableDismiss_TaskLessConversationClosesNoTask: a deliverable on an
+// interactive conversation with no task and no blueprint run resolves, and the
+// task-closure check finds nothing to close rather than failing.
 func TestDeliverableDismiss_TaskLessConversationClosesNoTask(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -645,40 +429,9 @@ func TestDeliverableDismiss_TaskLessConversationClosesNoTask(t *testing.T) {
 	}
 }
 
-// TestDeliverableDismiss_LiveBlueprintLeavesTaskOpen is the counterpart: resolving
-// the last deliverable while the blueprint is still LIVE (not terminal) leaves the
-// task open — the running blueprint keeps going and re-checks task closure when
-// it terminates.
-func TestDeliverableDismiss_LiveBlueprintLeavesTaskOpen(t *testing.T) {
-	keyring.MockInit()
-	srv := newTestServer(t)
-	mux := newAppAPIMux()
-	mux.HandleFunc("PATCH /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42, "state": "closed"})
-	})
-	stub := httptest.NewServer(mux)
-	t.Cleanup(stub.Close)
-	seedApp(t, srv, stub, acmeInstall())
-
-	// seedDraftPRDeliverableWithConversation leaves the blueprint_run 'running' (live).
-	artID, _, taskID := seedDraftPRDeliverableWithConversation(t, srv, "tolo", "acme", "api", 42)
-	rec := doJSON(t, srv, http.MethodPost, "/api/deliverables/"+artID+"/dismiss", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("dismiss = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var taskStatus string
-	if err := srv.db.QueryRow(`SELECT status FROM tasks WHERE id = ?`, taskID).Scan(&taskStatus); err != nil {
-		t.Fatalf("read task: %v", err)
-	}
-	if taskStatus == "done" {
-		t.Errorf("task.status = done; a live blueprint must leave the task open on resolve")
-	}
-}
-
-// TestDeliverableUpdate_SingleField_UsesLiveBaseline pins the lost-update fix: a
-// PATCH that touches only the title fills the untouched body from the PR's CURRENT
-// live value, not a stale cached snapshot — so a body edited directly on GitHub
-// isn't silently reverted.
+// TestDeliverableUpdate_SingleField_UsesLiveBaseline: a PATCH that names only the
+// title fills the body from the PR's live value, not the cached snapshot, so an
+// edit made on GitHub is not reverted.
 func TestDeliverableUpdate_SingleField_UsesLiveBaseline(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -707,6 +460,15 @@ func TestDeliverableUpdate_SingleField_UsesLiveBaseline(t *testing.T) {
 	}
 	if patchBody["body"] != "Body edited on GitHub" {
 		t.Errorf("UpdatePR body = %v, want the live body (no lost update); the stale snapshot was %q", patchBody["body"], "Body.")
+	}
+	// The deliverable's snapshot follows what GitHub now holds; the proposed
+	// agent draft stays frozen.
+	d, _ := domain.ParsePRDeliverableDetails(getDeliverable(t, srv, artID).DetailsJSON)
+	if d.Snapshot.Title != "New title" || d.Snapshot.Body != "Body edited on GitHub" {
+		t.Errorf("snapshot = %+v, want the edited title over the live body", d.Snapshot)
+	}
+	if d.Proposed.Title != "Add thing" || d.Proposed.Body != "Body." {
+		t.Errorf("proposed = %+v, want frozen agent draft", d.Proposed)
 	}
 }
 
@@ -739,10 +501,9 @@ func TestDeliverableUpdate_PartialEdit_GetPRFailure_502(t *testing.T) {
 	}
 }
 
-// TestDeliverableApprove_MalformedDetails_StillPromotes pins that an unparseable
-// details_json costs only what the row could not carry forward: approve still
-// marks the PR ready and flips the deliverable, and still writes nothing to the
-// PR's title or body.
+// TestDeliverableApprove_MalformedDetails_StillPromotes: an unparseable
+// details_json still lets approve mark the PR ready and flip the deliverable,
+// writing nothing to the PR's title or body.
 func TestDeliverableApprove_MalformedDetails_StillPromotes(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -782,11 +543,9 @@ func TestDeliverableApprove_MalformedDetails_StillPromotes(t *testing.T) {
 	}
 }
 
-// TestDeliverableApprove_BodyByteIdentical pins that approval never rewrites the
-// PR body: the disclosure footer the body already carries from creation is the
-// only one it will ever carry, and a human's concurrent edit on GitHub cannot
-// be clobbered by an approval that reads-then-writes. The stub fails the test
-// on any PATCH rather than merely recording one.
+// TestDeliverableApprove_BodyByteIdentical: approval never rewrites the PR, so a
+// concurrent edit on GitHub survives; the snapshot it records is the live body
+// verbatim, disclosure footer included. The stub fails on any PATCH.
 func TestDeliverableApprove_BodyByteIdentical(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -806,7 +565,7 @@ func TestDeliverableApprove_BodyByteIdentical(t *testing.T) {
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 
-	artID, _, _ := seedDraftPRDeliverableWithConversation(t, srv, "appftr", "acme", "api", 42)
+	artID, conversationID, _ := seedDraftPRDeliverableWithConversation(t, srv, "appftr", "acme", "api", 42)
 	rec := doJSON(t, srv, http.MethodPost, "/api/deliverables/"+artID+"/approve", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("approve = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -819,39 +578,12 @@ func TestDeliverableApprove_BodyByteIdentical(t *testing.T) {
 	if d.Snapshot.Body != liveBody {
 		t.Errorf("recorded snapshot body = %q, want the live body verbatim %q", d.Snapshot.Body, liveBody)
 	}
-}
-
-// TestDeliverableApprove_NonDraft_409 pins the state guard: approving a deliverable
-// that's no longer a draft (already open or closed) is a conflict and performs
-// no GitHub mutation — a stale double-click can't record a second approval.
-func TestDeliverableApprove_NonDraft_409(t *testing.T) {
-	keyring.MockInit()
-	srv := newTestServer(t)
-	mutated := false
-	mux := newAppAPIMux()
-	mux.HandleFunc("PATCH /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
-		mutated = true
-		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42})
-	})
-	mux.HandleFunc("POST /api/graphql", func(w http.ResponseWriter, r *http.Request) {
-		mutated = true
-		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{}})
-	})
-	stub := httptest.NewServer(mux)
-	t.Cleanup(stub.Close)
-	seedApp(t, srv, stub, acmeInstall())
-
-	artID, _, _ := seedDraftPRDeliverableWithConversation(t, srv, "appnd", "acme", "api", 42)
-	if _, err := srv.db.Exec(`UPDATE deliverables SET state=? WHERE id=?`, domain.DeliverableStatePROpen, artID); err != nil {
-		t.Fatalf("flip deliverable to open: %v", err)
+	// Approval is a sidecar: the conversation stays concluded, and a verdict
+	// about a deliverable is written into no memory.
+	if !storedConcluded(t, srv.db, conversationID) {
+		t.Error("conversation no longer concluded")
 	}
-	rec := doJSON(t, srv, http.MethodPost, "/api/deliverables/"+artID+"/approve", nil)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("approve on non-draft = %d, want 409; body=%s", rec.Code, rec.Body.String())
-	}
-	if mutated {
-		t.Error("approve on a non-draft must not perform any GitHub mutation")
-	}
+	assertAgentMemoryUntouched(t, srv, conversationID)
 }
 
 // seedDraftPRDeliverableWithConversation mints a completed (terminal) conversation
@@ -1010,11 +742,9 @@ func newRejectStub(t *testing.T, srv *Server, live map[string]any, node string, 
 	return rs
 }
 
-// TestDeliverableReject_PR pins the whole rejection: the head branch is deleted
-// from the upstream, the draft PR closed, the PR deliverable flipped to closed
-// carrying branch_deleted, both writes audited (the branch delete with the
-// branch's link and no deliverable of its own) — and, as with dismiss, the
-// conversation lifecycle untouched and its memory left alone.
+// TestDeliverableReject_PR: a rejection deletes the head branch, closes the draft
+// PR, flips the PR deliverable to closed, audits both writes, and leaves the
+// conversation and its memory alone.
 func TestDeliverableReject_PR(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -1106,12 +836,9 @@ func TestDeliverableReject_PR(t *testing.T) {
 	}
 }
 
-// TestDeliverableReject_BranchAlreadyGone_ReconcilesAnd409 pins the race where
-// the branch was deleted out-of-band between the overlay loading and the
-// click, GitHub not yet showing the auto-close: the delete finds no ref, and
-// rather than recording a rejection over a deletion it never made, the verb
-// reconciles the row against GitHub and answers 409 with nothing of its own
-// written — no close, no rejection stamp, no branch_deleted audit row.
+// TestDeliverableReject_BranchAlreadyGone_ReconcilesAnd409: when the branch was
+// deleted out of band, the verb reconciles the row against GitHub and answers 409
+// without writing anything of its own: no close, no rejection, no audit row.
 func TestDeliverableReject_BranchAlreadyGone_ReconcilesAnd409(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -1153,10 +880,9 @@ func TestDeliverableReject_BranchAlreadyGone_ReconcilesAnd409(t *testing.T) {
 	assertAgentMemoryUntouched(t, srv, conversationID)
 }
 
-// TestDeliverableReject_ResolvedOnGitHub409 pins the live-state guard: a draft
-// merged (or closed, or marked ready) on GitHub since the overlay loaded is
-// not this verb's to touch — least of all its branch — so no DELETE is sent,
-// the row is reconciled, and the answer is 409.
+// TestDeliverableReject_ResolvedOnGitHub409: a draft merged, closed or marked
+// ready on GitHub since the overlay loaded gets no DELETE; the row is reconciled
+// and the answer is 409.
 func TestDeliverableReject_ResolvedOnGitHub409(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -1195,10 +921,9 @@ func TestDeliverableReject_ResolvedOnGitHub409(t *testing.T) {
 	}
 }
 
-// TestDeliverableApprove_ResolvedOnGitHub409 is the same guard on the other verb:
-// "Open PR" on a draft someone closed on GitHub is a 409 and a reconcile, not
-// a ready-for-review mutation GitHub would reject into a 502 while the row sat
-// draft until the next pass.
+// TestDeliverableApprove_ResolvedOnGitHub409: approving a draft someone closed on
+// GitHub is a 409 and a reconcile, not a ready-for-review mutation GitHub would
+// refuse.
 func TestDeliverableApprove_ResolvedOnGitHub409(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -1224,10 +949,9 @@ func TestDeliverableApprove_ResolvedOnGitHub409(t *testing.T) {
 	}
 }
 
-// TestDeliverableReject_DeleteRefused_NothingChanges pins the pessimistic order:
-// when GitHub refuses the branch delete the handler answers 502, sends no
-// close, and leaves the deliverable a draft — the user can retry, dismiss, or
-// open the PR conventionally.
+// TestDeliverableReject_DeleteRefused_NothingChanges: when GitHub refuses the
+// branch delete the handler answers 502, sends no close, and leaves the
+// deliverable a draft.
 func TestDeliverableReject_DeleteRefused_NothingChanges(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -1256,14 +980,13 @@ func TestDeliverableReject_DeleteRefused_NothingChanges(t *testing.T) {
 	}
 }
 
-// TestDeliverableReject_TerminalDeliverable409 pins the guard, and the race from the
-// ticket in both directions: a reject after a resolution is a clean 409, and an
-// approve racing a completed reject is the same clean 409 — never a panic, never
-// a second GitHub write.
+// TestDeliverableReject_TerminalDeliverable409: once a draft is resolved, a
+// second reject and an approve racing the reject are both a clean 409 with no
+// second GitHub write.
 func TestDeliverableReject_TerminalDeliverable409(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
-	newRejectStub(t, srv, livePR("open", true, false), liveNode("OPEN", true, false), http.StatusNoContent, "")
+	rs := newRejectStub(t, srv, livePR("open", true, false), liveNode("OPEN", true, false), http.StatusNoContent, "")
 
 	artID, _, _ := seedDraftPRDeliverableWithConversation(t, srv, "rej409", "acme", "api", 42)
 	if rec := doJSON(t, srv, http.MethodPost, "/api/deliverables/"+artID+"/reject", nil); rec.Code != http.StatusOK {
@@ -1275,11 +998,13 @@ func TestDeliverableReject_TerminalDeliverable409(t *testing.T) {
 	if rec := doJSON(t, srv, http.MethodPost, "/api/deliverables/"+artID+"/approve", nil); rec.Code != http.StatusConflict {
 		t.Errorf("approve after reject = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
+	if len(rs.deletePaths) != 1 || rs.marked {
+		t.Errorf("GitHub writes = deletes %v, marked ready %v; want the first reject's one delete and nothing else", rs.deletePaths, rs.marked)
+	}
 }
 
-// TestDeliverableReject_UnknownHeadBranch409 pins the data guard: a PR row that
-// never recorded its head branch cannot carry a rejection (there is nothing to
-// delete), and the answer is a 409 pointing at dismiss — not a delete of some
+// TestDeliverableReject_UnknownHeadBranch409: a PR row that never recorded its
+// head branch has nothing to delete, so reject answers 409 rather than deleting a
 // guessed ref.
 func TestDeliverableReject_UnknownHeadBranch409(t *testing.T) {
 	keyring.MockInit()
@@ -1301,11 +1026,9 @@ func TestDeliverableReject_UnknownHeadBranch409(t *testing.T) {
 	}
 }
 
-// TestDeliverableRoutes_AnDeliverableOnAnotherHost: the client these routes resolve
-// talks to the org's GitHub host now, where the same owner/repo#N is a
-// different pull request. A deliverable recorded on another host reads back its
-// stored snapshot and refuses every GitHub write with a 409, and GitHub sees
-// no call for it either way.
+// TestDeliverableRoutes_AnDeliverableOnAnotherHost: a deliverable recorded on a
+// host other than the org's, where owner/repo#N may be a different pull request,
+// reads back its stored snapshot and answers writes 409 without calling GitHub.
 func TestDeliverableRoutes_AnDeliverableOnAnotherHost(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)

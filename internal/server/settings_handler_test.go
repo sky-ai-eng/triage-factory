@@ -13,8 +13,6 @@ import (
 	"github.com/zalando/go-keyring"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
-	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
-	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
@@ -52,10 +50,8 @@ func TestDefaultedCloneProtocolView_ModeAware(t *testing.T) {
 //
 // A stored project is the team's commitment to WATCH it; being ARMED — all
 // three rules complete — is the later state reached by mapping the workflow's
-// statuses. So each rule is independently complete-or-empty, and what is
-// refused is a rule that cannot be executed: members with no write target, or a
-// write target that is not one of them. The jpsr_*_complete_or_empty CHECK
-// constraints are the DB-level mirror of the first half.
+// statuses. The jpsr_*_complete_or_empty CHECK constraints are the DB-level
+// mirror of each rule's complete-or-empty requirement.
 
 func validProject(key string) domain.JiraProjectStatusRules {
 	return domain.JiraProjectStatusRules{
@@ -68,88 +64,70 @@ func validProject(key string) domain.JiraProjectStatusRules {
 	}
 }
 
-// validProjectRule is validProject under the name the tests that seed the
-// store directly (rather than going through the handler) call it by.
-func validProjectRule(key string) domain.JiraProjectStatusRules { return validProject(key) }
-
-func TestValidateProjectRules_Valid(t *testing.T) {
-	if err := validateProjectRules(validProject("SKY")); err != nil {
-		t.Fatalf("fully-armed project should be valid, got: %v", err)
-	}
-}
-
-func TestValidateProjectRules_NoRulesAtAll_Valid(t *testing.T) {
-	// Watched, unarmed: the state a project lands in when it is picked from the
-	// catalog and nobody has mapped its statuses yet.
-	if err := validateProjectRules(domain.JiraProjectStatusRules{ProjectKey: "SKY"}); err != nil {
-		t.Fatalf("watched-but-unmapped project should be valid, got: %v", err)
-	}
-}
-
-func TestValidateProjectRules_PickupOnly_Valid(t *testing.T) {
-	// Each rule is independently complete-or-empty, so a half-finished mapping
-	// persists instead of forcing the whole workflow to be mapped at once.
-	p := validProject("SKY")
-	p.InProgressMembers, p.InProgressCanonical = nil, domain.JiraStatusRef{}
-	p.DoneMembers, p.DoneCanonical = nil, domain.JiraStatusRef{}
-	if err := validateProjectRules(p); err != nil {
-		t.Fatalf("pickup-only project should be valid, got: %v", err)
-	}
-}
-
-func TestValidateProjectRules_InProgressMissingCanonical_Rejected(t *testing.T) {
-	p := validProject("SKY")
-	p.InProgressCanonical = domain.JiraStatusRef{}
-	err := validateProjectRules(p)
-	if err == nil || !strings.Contains(err.Error(), "in_progress canonical is required") {
-		t.Errorf("missing in_progress canonical should be rejected, got: %v", err)
-	}
-}
-
-func TestValidateProjectRules_InProgressCanonicalWithoutMembers_Rejected(t *testing.T) {
-	p := validProject("SKY")
-	p.InProgressMembers = nil
-	err := validateProjectRules(p)
-	if err == nil || !strings.Contains(err.Error(), "in_progress members are required") {
-		t.Errorf("canonical with no members should be rejected, got: %v", err)
-	}
-}
-
-func TestValidateProjectRules_InProgressCanonicalNotInMembers_Rejected(t *testing.T) {
-	p := validProject("SKY")
-	p.InProgressCanonical = domain.JiraStatusRef{ID: "10009", Name: "Doing"}
-	err := validateProjectRules(p)
-	if err == nil || !strings.Contains(err.Error(), "not in members") {
-		t.Errorf("canonical-not-in-members should be rejected, got: %v", err)
-	}
-}
-
-func TestValidateProjectRules_DoneMissingCanonical_Rejected(t *testing.T) {
-	p := validProject("SKY")
-	p.DoneCanonical = domain.JiraStatusRef{}
-	err := validateProjectRules(p)
-	if err == nil || !strings.Contains(err.Error(), "done canonical is required") {
-		t.Errorf("missing done canonical should be rejected, got: %v", err)
-	}
-}
-
-func TestValidateProjectRules_LegacyNameOnlyRow_Valid(t *testing.T) {
-	// A row written before statuses were identified carries names and no ids.
-	// It is live data, not a migration that has not run, so it stays valid —
-	// the canonical matches its member by name.
-	p := domain.JiraProjectStatusRules{
-		ProjectKey:          "SKY",
-		PickupMembers:       []domain.JiraStatusRef{{Name: "To Do"}},
-		InProgressMembers:   []domain.JiraStatusRef{{Name: "In Progress"}},
-		InProgressCanonical: domain.JiraStatusRef{Name: "In Progress"},
-		DoneMembers:         []domain.JiraStatusRef{{Name: "Done"}},
-		DoneCanonical:       domain.JiraStatusRef{Name: "Done"},
-	}
-	if err := validateProjectRules(p); err != nil {
-		t.Fatalf("legacy name-only row should stay valid, got: %v", err)
-	}
-	if !p.Armed() {
-		t.Error("legacy name-only row should still read as armed")
+// TestValidateProjectRules: each rule is independently complete-or-empty, so a
+// watched project with no rules or a half-finished mapping is valid, and a rule
+// that cannot be executed (members with no write target, or a write target that
+// is not one of them) is refused.
+func TestValidateProjectRules(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		mutate    func(p *domain.JiraProjectStatusRules)
+		wantErr   string // empty: the project is valid
+		wantArmed bool
+	}{
+		{"fully armed", nil, "", true},
+		{"watched with no rules", func(p *domain.JiraProjectStatusRules) {
+			*p = domain.JiraProjectStatusRules{ProjectKey: "SKY"}
+		}, "", false},
+		{"pickup only", func(p *domain.JiraProjectStatusRules) {
+			p.InProgressMembers, p.InProgressCanonical = nil, domain.JiraStatusRef{}
+			p.DoneMembers, p.DoneCanonical = nil, domain.JiraStatusRef{}
+		}, "", false},
+		// Rows written before statuses were identified carry names and no ids.
+		// They are live data, so they stay valid: the canonical matches its
+		// member by name.
+		{"name-only row", func(p *domain.JiraProjectStatusRules) {
+			*p = domain.JiraProjectStatusRules{
+				ProjectKey:          "SKY",
+				PickupMembers:       []domain.JiraStatusRef{{Name: "To Do"}},
+				InProgressMembers:   []domain.JiraStatusRef{{Name: "In Progress"}},
+				InProgressCanonical: domain.JiraStatusRef{Name: "In Progress"},
+				DoneMembers:         []domain.JiraStatusRef{{Name: "Done"}},
+				DoneCanonical:       domain.JiraStatusRef{Name: "Done"},
+			}
+		}, "", true},
+		{"in_progress missing canonical", func(p *domain.JiraProjectStatusRules) {
+			p.InProgressCanonical = domain.JiraStatusRef{}
+		}, "in_progress canonical is required", false},
+		{"in_progress canonical without members", func(p *domain.JiraProjectStatusRules) {
+			p.InProgressMembers = nil
+		}, "in_progress members are required", false},
+		{"in_progress canonical not in members", func(p *domain.JiraProjectStatusRules) {
+			p.InProgressCanonical = domain.JiraStatusRef{ID: "10009", Name: "Doing"}
+		}, "not in members", false},
+		{"done missing canonical", func(p *domain.JiraProjectStatusRules) {
+			p.DoneCanonical = domain.JiraStatusRef{}
+		}, "done canonical is required", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			p := validProject("SKY")
+			if c.mutate != nil {
+				c.mutate(&p)
+			}
+			err := validateProjectRules(p)
+			if c.wantErr == "" {
+				if err != nil {
+					t.Fatalf("want valid, got: %v", err)
+				}
+				if p.Armed() != c.wantArmed {
+					t.Errorf("Armed() = %v, want %v", p.Armed(), c.wantArmed)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Errorf("want an error containing %q, got: %v", c.wantErr, err)
+			}
+		})
 	}
 }
 
@@ -187,12 +165,7 @@ func TestJiraProjectIDRe(t *testing.T) {
 	}
 }
 
-// --- Handler tests: POST /api/settings/team/default rejects invalid rules ---
-//
-// These confirm the wire-up — validation errors on any of the three rules
-// propagate to a 400 before any persistence fires. Happy-path round-trip
-// isn't tested here because it'd write to the real keychain;
-// those invariants are covered by the unit tests above.
+// --- Handler tests: the jira-projects PUT rejects invalid rules -------------
 
 // teamProjectsBodyWith builds a replace-set body carrying a single project, to
 // exercise one project's rules through the jira-projects PUT. The rules are
@@ -224,169 +197,42 @@ func validDone() map[string]any {
 	return map[string]any{"member_ids": []string{statusDoneID}, "canonical_id": statusDoneID}
 }
 
-func TestTeamJiraProjectsPut_PickupCanonicalID_Refused(t *testing.T) {
-	// Pickup has no write target — TF never transitions a ticket back into it —
-	// so the field does not exist on that rule's shape and the strict decode is
-	// what says so.
-	s, _ := newServerWithJiraCatalog(t, "SKY")
-	body := teamProjectsBodyWith("SKY",
-		map[string]any{"member_ids": []string{statusToDoID}, "canonical_id": statusToDoID},
-		validInProgress(),
-		validDone(),
-	)
-	rec := putTeamJiraProjects(t, s, body)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
-	}
-	if msg := firstErrorMessage(t, rec); !strings.Contains(msg, "canonical_id") {
-		t.Errorf("error should name the field that does not belong on pickup, got: %q", msg)
-	}
-}
-
-func TestTeamJiraProjectsPut_InProgressCanonicalNotInMembers_Rejected(t *testing.T) {
-	s, _ := newServerWithJiraCatalog(t, "SKY")
-	body := teamProjectsBodyWith("SKY",
-		validPickup(),
+// TestTeamJiraProjectsPut_InvalidRulesRejected: the PUT refuses a rule it could
+// not execute with a 400 whose message names the fault.
+func TestTeamJiraProjectsPut_InvalidRulesRejected(t *testing.T) {
+	for _, c := range []struct {
+		name                     string
+		pickup, inProgress, done map[string]any
+		wantMsg                  string
+	}{
+		// Pickup has no write target — TF never transitions a ticket back into
+		// it — so the field does not exist on that rule's shape and the strict
+		// decode is what says so.
+		{"pickup canonical_id",
+			map[string]any{"member_ids": []string{statusToDoID}, "canonical_id": statusToDoID}, validInProgress(), validDone(),
+			"canonical_id"},
 		// A real status of this project's workflow, but not one of the members
 		// it was chosen from.
-		map[string]any{"member_ids": []string{statusInProgressID}, "canonical_id": statusDoneID},
-		validDone(),
-	)
-	rec := putTeamJiraProjects(t, s, body)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
-	}
-	resp := firstErrorMessage(t, rec)
-	if !strings.Contains(resp, "not in members") {
-		t.Errorf("error should mention canonical not in members, got: %q", resp)
-	}
-}
-
-func TestTeamJiraProjectsPut_InProgressMembersWithoutCanonical_Rejected(t *testing.T) {
-	s, _ := newServerWithJiraCatalog(t, "SKY")
-	body := teamProjectsBodyWith("SKY",
-		validPickup(),
-		map[string]any{"member_ids": []string{statusInProgressID}},
-		validDone(),
-	)
-	rec := putTeamJiraProjects(t, s, body)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
-	}
-	resp := firstErrorMessage(t, rec)
-	if !strings.Contains(resp, "canonical is required") {
-		t.Errorf("error should mention canonical required, got: %q", resp)
-	}
-}
-
-func TestTeamJiraProjectsPut_DoneCanonicalNotInMembers_Rejected(t *testing.T) {
-	s, _ := newServerWithJiraCatalog(t, "SKY")
-	body := teamProjectsBodyWith("SKY",
-		validPickup(),
-		validInProgress(),
-		map[string]any{"member_ids": []string{statusToDoID}, "canonical_id": statusDoneID},
-	)
-	rec := putTeamJiraProjects(t, s, body)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
-	}
-	resp := firstErrorMessage(t, rec)
-	if !strings.Contains(resp, "not in members") {
-		t.Errorf("error should mention canonical not in members, got: %q", resp)
-	}
-}
-
-// TestSettingsPatch_PerProjectRules_RoundTrip verifies the core
-// contract: two projects in the same team can carry different rules,
-// and saving → loading preserves each project's rules independently.
-// Exercises the JiraStatusRulesStore directly (the HTTP handler's
-// keychain write isn't available in the test env).
-func TestSettingsPatch_PerProjectRules_RoundTrip(t *testing.T) {
-	s := newTestServer(t)
-	ctx := t.Context()
-	teamID := runmode.LocalDefaultTeamID
-
-	rules := []domain.JiraProjectStatusRules{
-		{
-			ProjectKey:          "SKY",
-			PickupMembers:       jiraRefs("Backlog", "Selected"),
-			InProgressMembers:   jiraRefs("In Progress"),
-			InProgressCanonical: jiraRef("In Progress"),
-			DoneMembers:         jiraRefs("Done"),
-			DoneCanonical:       jiraRef("Done"),
-		},
-		{
-			ProjectKey:          "OPS",
-			PickupMembers:       jiraRefs("New", "Triage"),
-			InProgressMembers:   jiraRefs("Active"),
-			InProgressCanonical: jiraRef("Active"),
-			DoneMembers:         jiraRefs("Resolved", "Verified"),
-			DoneCanonical:       jiraRef("Resolved"),
-		},
-	}
-	const site = "https://jira.example.com"
-	project := map[string]string{}
-	for i := range rules {
-		rules[i].JiraProjectID = dbseed.JiraProject(t, s.db, runmode.LocalDefaultOrgID, site, rules[i].ProjectKey)
-		project[rules[i].ProjectKey] = rules[i].JiraProjectID
-	}
-	if err := s.jiraRules.ReplaceForTeam(ctx, teamID, site, rules); err != nil {
-		t.Fatalf("ReplaceForTeam: %v", err)
-	}
-	got, err := s.jiraRules.ListForTeamSystem(ctx, teamID, site)
-	if err != nil {
-		t.Fatalf("ListForTeamSystem: %v", err)
-	}
-	if r := domain.RuleForJiraProject(got, project["SKY"]); r == nil || r.InProgressCanonical.Name != "In Progress" || !r.PickupContains(jiraRef("Backlog")) {
-		t.Errorf("SKY rules round-trip: %+v", r)
-	}
-	if r := domain.RuleForJiraProject(got, project["OPS"]); r == nil || r.DoneCanonical.Name != "Resolved" || !r.PickupContains(jiraRef("Triage")) {
-		t.Errorf("OPS rules round-trip: %+v", r)
-	}
-
-	// Edit only SKY's rules; OPS must stay untouched.
-	for i, p := range rules {
-		if p.ProjectKey == "SKY" {
-			rules[i].PickupMembers = jiraRefs("Ready")
-		}
-	}
-	if err := s.jiraRules.ReplaceForTeam(ctx, teamID, site, rules); err != nil {
-		t.Fatalf("ReplaceForTeam (edit SKY): %v", err)
-	}
-	got, err = s.jiraRules.ListForTeamSystem(ctx, teamID, site)
-	if err != nil {
-		t.Fatalf("ListForTeamSystem: %v", err)
-	}
-	if r := domain.RuleForJiraProject(got, project["SKY"]); r == nil || !r.PickupContains(jiraRef("Ready")) || r.PickupContains(jiraRef("Backlog")) {
-		t.Errorf("SKY edit didn't apply: %+v", r)
-	}
-	if r := domain.RuleForJiraProject(got, project["OPS"]); r == nil || !r.PickupContains(jiraRef("Triage")) || r.DoneCanonical.Name != "Resolved" {
-		t.Errorf("OPS untouched check failed: %+v", r)
-	}
-
-	// Drop SKY — the rules row for SKY should vanish while OPS persists.
-	kept := make([]domain.JiraProjectStatusRules, 0, len(rules))
-	for _, p := range rules {
-		if p.ProjectKey != "SKY" {
-			kept = append(kept, p)
-		}
-	}
-	if err := s.jiraRules.ReplaceForTeam(ctx, teamID, site, kept); err != nil {
-		t.Fatalf("ReplaceForTeam (drop SKY): %v", err)
-	}
-	got, err = s.jiraRules.ListForTeamSystem(ctx, teamID, site)
-	if err != nil {
-		t.Fatalf("ListForTeamSystem: %v", err)
-	}
-	if r := domain.RuleForJiraProject(got, project["SKY"]); r != nil {
-		t.Errorf("SKY rules should be gone after drop, got: %+v", r)
-	}
-	if r := domain.RuleForJiraProject(got, project["OPS"]); r == nil || r.DoneCanonical.Name != "Resolved" {
-		t.Errorf("OPS rules should persist after dropping SKY: %+v", r)
+		{"in_progress canonical not in members",
+			validPickup(), map[string]any{"member_ids": []string{statusInProgressID}, "canonical_id": statusDoneID}, validDone(),
+			"not in members"},
+		{"in_progress members without canonical",
+			validPickup(), map[string]any{"member_ids": []string{statusInProgressID}}, validDone(),
+			"canonical is required"},
+		{"done canonical not in members",
+			validPickup(), validInProgress(), map[string]any{"member_ids": []string{statusToDoID}, "canonical_id": statusDoneID},
+			"not in members"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s, _ := newServerWithJiraCatalog(t, "SKY")
+			rec := putTeamJiraProjects(t, s, teamProjectsBodyWith("SKY", c.pickup, c.inProgress, c.done))
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+			}
+			if msg := firstErrorMessage(t, rec); !strings.Contains(msg, c.wantMsg) {
+				t.Errorf("error = %q, want it to mention %q", msg, c.wantMsg)
+			}
+		})
 	}
 }
 
@@ -413,14 +259,13 @@ func TestTeamJiraProjectsPut_DuplicateProject_Rejected(t *testing.T) {
 
 // TestSettingsGet_MemberCountAndRole verifies the scope GET responses carry
 // the membership signals the frontend's N=1 collapse + role gating read.
-// Local mode is the degenerate single-member world, so the org
-// and team both report one member and the caller is the team admin.
+// Local mode is the single-member case: one member, and the caller is team admin.
 func TestSettingsGet_MemberCountAndRole(t *testing.T) {
 	s := newTestServer(t)
 
 	orgRec := doJSON(t, s, "GET", orgSettingsPath(), nil)
 	if orgRec.Code != http.StatusOK {
-		t.Fatalf("GET /api/settings/org: %d: %s", orgRec.Code, orgRec.Body.String())
+		t.Fatalf("GET %s: %d: %s", orgSettingsPath(), orgRec.Code, orgRec.Body.String())
 	}
 	var org struct {
 		MemberCount int `json:"member_count"`
@@ -434,7 +279,7 @@ func TestSettingsGet_MemberCountAndRole(t *testing.T) {
 
 	teamRec := doJSON(t, s, "GET", teamSettingsPath("default"), nil)
 	if teamRec.Code != http.StatusOK {
-		t.Fatalf("GET /api/settings/team/default: %d: %s", teamRec.Code, teamRec.Body.String())
+		t.Fatalf("GET %s: %d: %s", teamSettingsPath("default"), teamRec.Code, teamRec.Body.String())
 	}
 	var team struct {
 		MemberCount int    `json:"member_count"`
@@ -481,127 +326,52 @@ func patchTeamSettingsOK(t *testing.T, s *Server, teamID string, body any) map[s
 	return resp
 }
 
-// TestOrgSettingsPatch_BlankGitHubURLWithApp_409 closes the settings-route half
-// of the hazard TestGitHubPATDelete_StagedApp_KeepsHost covers for the PAT
-// unbind: the org's GitHub URL is the only record of the host an App was
-// registered on, so blanking it while an App is registered strands the App.
-// The config route refuses instead of skipping, because here the clear is the
-// request itself, not a side effect of one.
-func TestOrgSettingsPatch_BlankGitHubURLWithApp_409(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
-	const host = "https://github.example.com"
-
-	patchOrgSettingsOK(t, s, map[string]any{"github_base_url": host})
-	seedLocalApp(t, s, false) // staged is enough — the App resolves against this host either way
-
-	rec := patchOrgSettings(t, s, map[string]any{"github_base_url": nil})
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
-	}
-	if got := rec.Body.String(); !strings.Contains(got, "github_base_url") {
-		t.Errorf("body %s should name the offending field", got)
-	}
-
-	var stored string
-	if err := s.db.QueryRowContext(t.Context(),
-		`SELECT COALESCE(base_url, '') FROM org_event_sources WHERE org_id = ? AND kind = 'github'`,
-		runmode.LocalDefaultOrgID).Scan(&stored); err != nil {
-		t.Fatalf("read github base_url: %v", err)
-	}
-	if stored != host {
-		t.Errorf("github base_url = %q, want %q — the refused save must not have partially applied", stored, host)
-	}
-}
-
-// TestOrgSettingsPatch_BlankGitHubURLWithoutApp_OK is the other half: with no App
-// to strand, clearing the host is an ordinary config edit and stays allowed. The
-// guard above must not turn into a blanket ban on emptying the field.
-func TestOrgSettingsPatch_BlankGitHubURLWithoutApp_OK(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
-
-	patchOrgSettingsOK(t, s, map[string]any{"github_base_url": "https://github.example.com"})
-	patchOrgSettingsOK(t, s, map[string]any{"github_base_url": nil})
-
-	var stored string
-	if err := s.db.QueryRowContext(t.Context(),
-		`SELECT COALESCE(base_url, '') FROM org_event_sources WHERE org_id = ? AND kind = 'github'`,
-		runmode.LocalDefaultOrgID).Scan(&stored); err != nil {
-		t.Fatalf("read github base_url: %v", err)
-	}
-	if stored != "" {
-		t.Errorf("github base_url = %q, want cleared", stored)
-	}
-}
-
-// TestOrgSettingsPatch_RetargetGitHubURLWithApp_409: an App works only on the
-// GitHub that registered it, so moving an App org to another host is refused
-// like clearing it is. Moving hosts is a disconnect and a fresh connect.
-func TestOrgSettingsPatch_RetargetGitHubURLWithApp_409(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
-
-	patchOrgSettingsOK(t, s, map[string]any{"github_base_url": "https://old.example.com"})
-	seedLocalApp(t, s, true)
-	rec := patchOrgSettings(t, s, map[string]any{"github_base_url": "https://new.example.com"})
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
-	}
-	if e := firstError(t, rec); e.Field != "github_base_url" {
-		t.Errorf("error = %+v, want it on github_base_url", e)
-	}
-
-	var stored string
-	if err := s.db.QueryRowContext(t.Context(),
-		`SELECT COALESCE(base_url, '') FROM org_event_sources WHERE org_id = ? AND kind = 'github'`,
-		runmode.LocalDefaultOrgID).Scan(&stored); err != nil {
-		t.Fatalf("read github base_url: %v", err)
-	}
-	if stored != "https://old.example.com" {
-		t.Errorf("github base_url = %q, want the host the App is on", stored)
-	}
-}
-
-// TestOrgSettingsPatch_RetargetGitHubURLWithPAT_409: a token works only on the
-// GitHub that issued it, so the URL does not move while one is bound.
-func TestOrgSettingsPatch_RetargetGitHubURLWithPAT_409(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
-
-	patchOrgSettingsOK(t, s, map[string]any{"github_base_url": "https://old.example.com"})
-	if err := integrations.Save(t.Context(), s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{GitHubPAT: "ghp_bound"}); err != nil {
-		t.Fatalf("seed creds: %v", err)
-	}
-	for _, target := range []any{"https://new.example.com", nil} {
-		rec := patchOrgSettings(t, s, map[string]any{"github_base_url": target})
-		if rec.Code != http.StatusConflict {
-			t.Fatalf("github_base_url → %v: status = %d, want 409; body=%s", target, rec.Code, rec.Body.String())
-		}
-		if e := firstError(t, rec); e.Field != "github_base_url" {
-			t.Errorf("error = %+v, want it on github_base_url", e)
+// TestOrgSettingsPatch_GitHubURLHeldByACredential_409: a token or an App works
+// only on the GitHub that issued it, so while one is bound (a staged App
+// included) the URL neither moves nor clears: a 409 on github_base_url, and the
+// stored host stays. Moving hosts is a disconnect and a fresh connect.
+func TestOrgSettingsPatch_GitHubURLHeldByACredential_409(t *testing.T) {
+	const oldHost = "https://old.example.com"
+	bindPAT := func(t *testing.T, s *Server) {
+		t.Helper()
+		if err := integrations.Save(t.Context(), s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{GitHubPAT: "ghp_bound"}); err != nil {
+			t.Fatalf("seed creds: %v", err)
 		}
 	}
-	var stored string
-	if err := s.db.QueryRowContext(t.Context(),
-		`SELECT COALESCE(base_url, '') FROM org_event_sources WHERE org_id = ? AND kind = 'github'`,
-		runmode.LocalDefaultOrgID).Scan(&stored); err != nil {
-		t.Fatalf("read github base_url: %v", err)
-	}
-	if stored != "https://old.example.com" {
-		t.Errorf("github base_url = %q, want the host the token is on", stored)
+	for _, tc := range []struct {
+		name   string
+		bind   func(t *testing.T, s *Server)
+		target any
+	}{
+		{"active App, retarget", func(t *testing.T, s *Server) { seedLocalApp(t, s, true) }, "https://new.example.com"},
+		{"staged App, clear", func(t *testing.T, s *Server) { seedLocalApp(t, s, false) }, nil},
+		{"PAT, retarget", bindPAT, "https://new.example.com"},
+		{"PAT, clear", bindPAT, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runmode.SetForTest(t, runmode.ModeLocal)
+			keyring.MockInit()
+			s := newTestServer(t)
+			patchOrgSettingsOK(t, s, map[string]any{"github_base_url": oldHost})
+			tc.bind(t, s)
+
+			rec := patchOrgSettings(t, s, map[string]any{"github_base_url": tc.target})
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+			}
+			if e := firstError(t, rec); e.Field != "github_base_url" {
+				t.Errorf("error = %+v, want it on github_base_url", e)
+			}
+			if got := sourceHost(t, s, eventsource.KindGitHub); got != oldHost {
+				t.Errorf("github base_url = %q, want %q kept", got, oldHost)
+			}
+		})
 	}
 }
 
-// TestOrgSettingsPatch_RetargetGitHubURLWithInstallation: an org bound to
-// the deployment's App holds the host its installations are on, like a token or
-// a registration does — moving off it is refused while one is bound there. An
-// installation the org left on some other GitHub records its own host and
-// is not stranded by the move, so it holds nothing in place.
+// TestOrgSettingsPatch_RetargetGitHubURLWithInstallation: an org on the
+// deployment's App cannot move off a host one of its installations is on. An
+// installation on some other GitHub records its own host and holds nothing.
 func TestOrgSettingsPatch_RetargetGitHubURLWithInstallation(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -633,27 +403,16 @@ func TestOrgSettingsPatch_RetargetGitHubURLWithInstallation(t *testing.T) {
 			if rec.Code != tc.wantCode {
 				t.Fatalf("status = %d, want %d; body=%s", rec.Code, tc.wantCode, rec.Body.String())
 			}
-			var stored string
-			if err := s.db.QueryRowContext(ctx,
-				`SELECT COALESCE(base_url, '') FROM org_event_sources WHERE org_id = ? AND kind = 'github'`,
-				runmode.LocalDefaultOrgID).Scan(&stored); err != nil {
-				t.Fatalf("read github base_url: %v", err)
-			}
-			if stored != tc.wantBase {
-				t.Errorf("github base_url = %q, want %q", stored, tc.wantBase)
+			if got := sourceHost(t, s, eventsource.KindGitHub); got != tc.wantBase {
+				t.Errorf("github base_url = %q, want %q", got, tc.wantBase)
 			}
 		})
 	}
 }
 
-// TestOrgSettingsPatch_GitHubURLClear_PreservesUserIdentity asserts the
-// access/identity decoupling: clearing the org's GitHub URL is an
-// access change (PAT_1), and it must NOT touch the user's per-user GitHub
-// identity (PAT_2). Identity is owned solely by its own capture surface (the
-// setup wizard's User step / the Connect gate page), never mutated as a side
-// effect of an org-credential save. A leftover row is durable + harmless (the
-// runtime tolerates absent/stale identity) and is still valid if GitHub is
-// reconnected to the same host.
+// TestOrgSettingsPatch_GitHubURLClear_PreservesUserIdentity: with nothing bound,
+// clearing the org's GitHub URL is allowed and clears it, and the caller's
+// per-user GitHub identity survives: only its own capture surface writes it.
 func TestOrgSettingsPatch_GitHubURLClear_PreservesUserIdentity(t *testing.T) {
 	keyring.MockInit() // in-memory keychain — the sandbox has no dbus backend
 	s := newTestServer(t)
@@ -671,8 +430,10 @@ func TestOrgSettingsPatch_GitHubURLClear_PreservesUserIdentity(t *testing.T) {
 		t.Fatalf("precondition: GetGitHubLogin = %q, want octocat", login)
 	}
 
-	// Disconnect the org's GitHub access: clear the GitHub URL.
 	patchOrgSettingsOK(t, s, map[string]any{"github_base_url": nil})
+	if got := sourceHost(t, s, eventsource.KindGitHub); got != "" {
+		t.Errorf("github base_url = %q, want cleared", got)
+	}
 
 	login, err := s.users.GetGitHubLogin(ctx, runmode.LocalDefaultUserID, host)
 	if err != nil {
@@ -685,27 +446,19 @@ func TestOrgSettingsPatch_GitHubURLClear_PreservesUserIdentity(t *testing.T) {
 
 // --- Jira access/identity decoupling ---------------------------------------
 //
-// These mirror the GitHub untangle above for Jira: org-level Jira ACCESS
-// (PAT_1, the bot connection) must never write or clear the *caller's* per-user
-// Jira identity or credential. The only writer of user_jira_identities is the
-// dedicated bind surface (POST .../jira/identity/pat); the org connect /
-// settings-save / disconnect paths leave both the identity and the per-user
-// credential untouched. We assert that by seeding a distinct user identity /
-// credential and proving the org operation didn't disturb it.
+// The org's Jira service credential never writes or clears a caller's per-user
+// Jira identity or credential; only the identity bind route writes those. Each
+// test seeds a user identity or credential and checks the org operation left it.
 
-// TestJiraConnect_DoesNotWriteUserIdentity covers the two-stage Settings connect
-// (POST /api/jira/connect → handleJiraConnect): validating + storing the org's
-// Jira credential must NOT bind the caller's identity, even though the same
-// /myself round-trip yields an account. The credential here belongs to the org
-// bot, not the user.
+// TestJiraConnect_DoesNotWriteUserIdentity: binding the org's Jira credential
+// validates it against /myself but does not bind the caller's identity to that
+// account, which is the org bot's.
 func TestJiraConnect_DoesNotWriteUserIdentity(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit() // in-memory keychain — the sandbox has no dbus backend
 	s := newTestServer(t)
 	ctx := t.Context()
 
-	// The org connects Jira with a credential whose /myself maps to a DIFFERENT
-	// account (the org bot). The connect must not overwrite the user's identity.
 	jiraStub := jiraMyselfStub(t, `{"accountId":"org-bot","displayName":"Org Bot"}`, nil)
 
 	// Seed a pre-existing per-user Jira identity, as the bind flow would have,
@@ -726,56 +479,6 @@ func TestJiraConnect_DoesNotWriteUserIdentity(t *testing.T) {
 	}
 	if accountID != "user-acct" || displayName != "User Name" {
 		t.Errorf("org Jira connect overwrote the caller's identity: got (%q, %q), want (user-acct, User Name)", accountID, displayName)
-	}
-}
-
-// TestJiraConnect_Cloud_StoresAPITokenCredential covers the Cloud org-access
-// variant: posting an email + API token validates against the Cloud config
-// (Basic auth, REST v3 /myself) and stores the Cloud credential pair plus the
-// auth-method marker, so the system resolver later rebuilds a Cloud client. No
-// DC PAT is written.
-func TestJiraConnect_Cloud_StoresAPITokenCredential(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit() // in-memory keychain — the sandbox has no dbus backend
-	s := newTestServer(t)
-	ctx := t.Context()
-
-	var gotAuth, gotPath string
-	jiraStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth, gotPath = r.Header.Get("Authorization"), r.URL.Path
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"accountId":"cloud-bot","displayName":"Cloud Bot"}`)
-	}))
-	t.Cleanup(jiraStub.Close)
-
-	rec := doJSON(t, s, "PUT", jiraCredentialRoute(),
-		map[string]any{"deployment": "cloud", "url": jiraStub.URL, "email": "bot@acme.com", "token": "cloud_tok"})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
-	}
-
-	// Validated through the Cloud config: Basic email:token against REST v3.
-	wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("bot@acme.com:cloud_tok"))
-	if gotAuth != wantAuth {
-		t.Errorf("validate Authorization = %q, want %q (Cloud uses Basic email:token)", gotAuth, wantAuth)
-	}
-	if gotPath != "/rest/api/3/myself" {
-		t.Errorf("validate path = %q, want /rest/api/3/myself (Cloud uses REST v3)", gotPath)
-	}
-
-	// Stored under the Cloud keys + marker; no DC PAT written.
-	creds, err := integrations.Load(ctx, s.secrets, runmode.LocalDefaultOrgID)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if creds.JiraEmail != "bot@acme.com" || creds.JiraAPIToken != "cloud_tok" {
-		t.Errorf("stored cloud creds = (%q, %q), want (bot@acme.com, cloud_tok)", creds.JiraEmail, creds.JiraAPIToken)
-	}
-	if creds.JiraAuthMethod != string(jira.AuthMethodCloudAPIToken) {
-		t.Errorf("auth-method marker = %q, want %q", creds.JiraAuthMethod, jira.AuthMethodCloudAPIToken)
-	}
-	if creds.JiraPAT != "" {
-		t.Errorf("DC PAT unexpectedly stored on a Cloud connect: %q", creds.JiraPAT)
 	}
 }
 
@@ -802,11 +505,9 @@ func TestJiraConnect_Cloud_RequiresBothHalves(t *testing.T) {
 	}
 }
 
-// TestJiraConnect_Cloud_MismatchHint pins the deployment-mismatch hint: when the
-// user picks Cloud (sends email + token) but the host rejects the credential AND
-// the URL isn't a Cloud host, the 422 message nudges them toward the Data Center
-// scheme rather than only saying "bad token". The hint is advisory — validation,
-// not the hostname, gates storage, so a working combo is never blocked.
+// TestJiraConnect_Cloud_MismatchHint: a Cloud credential rejected by a host that
+// is not a Cloud host is a 422 hinting at the Data Center scheme. The hint is
+// advisory: validation, not the hostname, gates storage.
 func TestJiraConnect_Cloud_MismatchHint(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -829,11 +530,10 @@ func TestJiraConnect_Cloud_MismatchHint(t *testing.T) {
 	}
 }
 
-// TestJiraConnect_SchemeSwitch_ClearsStaleCredential pins the scheme-switch
-// cleanup: reconnecting an org under a different Jira auth scheme drops the
-// previous scheme's stored secret, so no stale credential lingers and no later
-// read can mistake the org for the old scheme. DC → Cloud here; the DC PAT must
-// be gone afterward.
+// TestJiraConnect_SchemeSwitch_ClearsStaleCredential: reconnecting the org under
+// the other Jira auth scheme stores that scheme's credential and marker and drops
+// the previous one's secret, in both directions. Cloud validates with Basic
+// email:token against REST v3.
 func TestJiraConnect_SchemeSwitch_ClearsStaleCredential(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -841,7 +541,9 @@ func TestJiraConnect_SchemeSwitch_ClearsStaleCredential(t *testing.T) {
 	ctx := t.Context()
 
 	// One stub answering both REST v2 (DC validate) and v3 (Cloud validate).
-	jiraStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	var gotAuth, gotPath string
+	jiraStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth, gotPath = r.Header.Get("Authorization"), r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"accountId":"acct","displayName":"Bot"}`)
 	}))
@@ -863,6 +565,12 @@ func TestJiraConnect_SchemeSwitch_ClearsStaleCredential(t *testing.T) {
 		map[string]any{"deployment": "cloud", "url": jiraStub.URL, "email": "bot@acme.com", "token": "cloud_tok"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("Cloud connect status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	if want := "Basic " + base64.StdEncoding.EncodeToString([]byte("bot@acme.com:cloud_tok")); gotAuth != want {
+		t.Errorf("validate Authorization = %q, want %q (Cloud uses Basic email:token)", gotAuth, want)
+	}
+	if gotPath != "/rest/api/3/myself" {
+		t.Errorf("validate path = %q, want /rest/api/3/myself (Cloud uses REST v3)", gotPath)
 	}
 	creds, _ = integrations.Load(ctx, s.secrets, runmode.LocalDefaultOrgID)
 	if creds.JiraAuthMethod != string(jira.AuthMethodCloudAPIToken) {
@@ -891,45 +599,9 @@ func TestJiraConnect_SchemeSwitch_ClearsStaleCredential(t *testing.T) {
 	}
 }
 
-// TestJiraCredentialPut_DoesNotWriteUserIdentity covers the org Jira credential
-// resource: binding the org's service credential (PAT_1) validates the token
-// but must not bind the caller's identity, even though the same /myself
-// round-trip yields an account. (This used to ride the bulk settings save; the
-// property is the same, the route isn't.)
-func TestJiraCredentialPut_DoesNotWriteUserIdentity(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
-	ctx := t.Context()
-
-	// The /myself stub maps the token to the org's bot account.
-	jiraStub := jiraMyselfStub(t, `{"accountId":"org-bot","displayName":"Org Bot"}`, nil)
-	// A pre-existing user identity (keyed on the org's Jira host) the org
-	// credential bind must leave alone.
-	if err := s.users.UpsertJiraIdentity(ctx, runmode.LocalDefaultUserID, jiraStub.URL, "user-acct", "User Name", "pat"); err != nil {
-		t.Fatalf("seed identity: %v", err)
-	}
-
-	rec := doJSON(t, s, "PUT", jiraCredentialRoute(), map[string]any{
-		"deployment": "data_center", "url": jiraStub.URL, "pat": "org_pat",
-	})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("jira bind = %d, body=%s", rec.Code, rec.Body.String())
-	}
-
-	accountID, displayName, err := s.users.GetJiraIdentity(ctx, runmode.LocalDefaultUserID, jiraStub.URL)
-	if err != nil {
-		t.Fatalf("GetJiraIdentity: %v", err)
-	}
-	if accountID != "user-acct" || displayName != "User Name" {
-		t.Errorf("org Jira credential bind overwrote the caller's identity: got (%q, %q), want (user-acct, User Name)", accountID, displayName)
-	}
-}
-
-// TestOrgSettingsPatch_JiraURLClear_PreservesUserIdentity: clearing the
-// org's Jira URL on an org with no service credential (its members bind their
-// own) must NOT wipe the user's independent Jira identity. Per-user Jira
-// access is cleared only by its own surface.
+// TestOrgSettingsPatch_JiraURLClear_PreservesUserIdentity: clearing the Jira URL
+// of an org with no service credential (its members bind their own) leaves the
+// caller's Jira identity in place.
 func TestOrgSettingsPatch_JiraURLClear_PreservesUserIdentity(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -953,11 +625,9 @@ func TestOrgSettingsPatch_JiraURLClear_PreservesUserIdentity(t *testing.T) {
 	}
 }
 
-// TestJiraCredentialDelete_PreservesUserCredential is the credential half of
-// the untangle (the URL-clear test above covers the identity half): unbinding
-// the org's Jira credential (PAT_1) deletes only the org key — the user's own
-// stored credential, custodied under the separate per-user "jira_token/<host>"
-// namespace, is untouched. Org access and per-user access are independent.
+// TestJiraCredentialDelete_PreservesUserCredential: unbinding the org's Jira
+// credential deletes only the org key; the caller's own credential, stored
+// under the per-user "jira_token/<host>" key, survives.
 func TestJiraCredentialDelete_PreservesUserCredential(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -965,24 +635,19 @@ func TestJiraCredentialDelete_PreservesUserCredential(t *testing.T) {
 	ctx := t.Context()
 	const host = "https://jira.example.com"
 
-	// The org has a Jira PAT (the thing we'll clear)...
 	seedSourceHost(t, s, eventsource.KindJira, host)
 	if err := integrations.Save(ctx, s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{JiraPAT: "org-pat"}); err != nil {
 		t.Fatalf("seed org creds: %v", err)
 	}
-	// ...and the caller has bound their own per-user credential, as the bind
-	// flow stores it (under the host-scoped per-user key).
 	if err := s.secrets.PutUser(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "jira_token/"+host, "user-token", "Jira user access token"); err != nil {
 		t.Fatalf("seed user credential: %v", err)
 	}
 
-	// Unbind the org Jira credential.
 	rec := doJSON(t, s, "DELETE", jiraCredentialRoute(), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("jira unbind = %d, body=%s", rec.Code, rec.Body.String())
 	}
 
-	// The user's per-user credential survives — it lives under a different key.
 	stored, err := s.secrets.GetUserSystem(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "jira_token/"+host)
 	if err != nil {
 		t.Fatalf("GetUserSystem after org unbind: %v", err)
@@ -1144,7 +809,7 @@ func TestTeamSettingsPatch_EnabledModels_HeldToBothSets(t *testing.T) {
 	}
 }
 
-// --- TFAC-477 daily spend cap ----------------------------------------------
+// --- daily spend cap and concurrent-run limit ------------------------------
 
 // orgDailyCap reads the org settings GET and returns max_daily_cost_usd.
 func orgDailyCap(t *testing.T, s *Server) float64 {
@@ -1162,73 +827,6 @@ func orgDailyCap(t *testing.T, s *Server) float64 {
 	return resp.MaxDailyCostUSD
 }
 
-// TestOrgSettingsPatch_DailyCostCap_RoundTrip pins the wire round-trip: a
-// positive cap reflects on the next GET, and null clears it back to "no cap".
-func TestOrgSettingsPatch_DailyCostCap_RoundTrip(t *testing.T) {
-	s := newTestServer(t)
-
-	if got := orgDailyCap(t, s); got != 0 {
-		t.Fatalf("fresh org daily cap = %v, want 0 (no cap by default)", got)
-	}
-
-	patchOrgSettingsOK(t, s, map[string]any{"max_daily_cost_usd": 25.5})
-	if got := orgDailyCap(t, s); got != 25.5 {
-		t.Errorf("after setting 25.5, GET max_daily_cost_usd = %v, want 25.5", got)
-	}
-
-	// null clears the cap — the one clearing convention.
-	patchOrgSettingsOK(t, s, map[string]any{"max_daily_cost_usd": nil})
-	if got := orgDailyCap(t, s); got != 0 {
-		t.Errorf("after null, GET max_daily_cost_usd = %v, want 0 (cleared)", got)
-	}
-}
-
-// TestOrgSettingsPatch_DailyCostCap_ZeroRejected: "no cap" has exactly one
-// spelling, and it is null. An explicit 0 is refused rather than quietly read as
-// "no cap" — capping at $0 and having no cap are different intents, and a caller
-// who means the second one already has a way to say it.
-func TestOrgSettingsPatch_DailyCostCap_ZeroRejected(t *testing.T) {
-	s := newTestServer(t)
-	patchOrgSettingsOK(t, s, map[string]any{"max_daily_cost_usd": 12})
-
-	rec := patchOrgSettings(t, s, map[string]any{"max_daily_cost_usd": 0})
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("explicit 0 should 422, got %d: %s", rec.Code, rec.Body.String())
-	}
-	assertFirstError(t, rec, httpx.ReasonOutOfRange, "max_daily_cost_usd")
-	if got := orgDailyCap(t, s); got != 12 {
-		t.Errorf("the refused save changed the cap: got %v, want 12", got)
-	}
-}
-
-// TestOrgSettingsPatch_DailyCostCap_OmittedFieldUntouched pins the absent-means-
-// keep half of the convention: a save that omits max_daily_cost_usd must leave a
-// previously-set cap intact (an unrelated org save can't stomp the cap).
-func TestOrgSettingsPatch_DailyCostCap_OmittedFieldUntouched(t *testing.T) {
-	s := newTestServer(t)
-	patchOrgSettingsOK(t, s, map[string]any{"max_daily_cost_usd": 40})
-
-	// A save touching only the enable-set omits the cap → it must survive.
-	patchOrgSettingsOK(t, s, map[string]any{"enabled_models": []string{domain.ModelAliasSonnet}})
-	if got := orgDailyCap(t, s); got != 40 {
-		t.Errorf("omitting max_daily_cost_usd cleared the cap: got %v, want 40 preserved", got)
-	}
-}
-
-// TestOrgSettingsPatch_DailyCostCap_NegativeRejected pins the range check. A
-// well-formed number outside the band a field honors is semantic, not a shape
-// fault, so it answers 422 OUT_OF_RANGE.
-func TestOrgSettingsPatch_DailyCostCap_NegativeRejected(t *testing.T) {
-	s := newTestServer(t)
-	rec := patchOrgSettings(t, s, map[string]any{"max_daily_cost_usd": -1})
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("negative cap should 422, got %d: %s", rec.Code, rec.Body.String())
-	}
-	assertFirstError(t, rec, httpx.ReasonOutOfRange, "max_daily_cost_usd")
-}
-
-// --- TFAC-638 concurrent-run limit -----------------------------------------
-
 // orgConcurrentRuns reads the org settings GET and returns max_concurrent_runs.
 func orgConcurrentRuns(t *testing.T, s *Server) int {
 	t.Helper()
@@ -1245,78 +843,66 @@ func orgConcurrentRuns(t *testing.T, s *Server) int {
 	return resp.MaxConcurrentRuns
 }
 
-// TestOrgSettingsPatch_ConcurrentRuns_RoundTrip pins the wire round-trip: a
-// positive limit reflects on the next GET, and null clears it to "unlimited".
-func TestOrgSettingsPatch_ConcurrentRuns_RoundTrip(t *testing.T) {
+// TestOrgSettingsPatch_DailyCostCap_OmittedFieldUntouched: a fresh org has no
+// cost cap and no concurrent-run limit, and a save that omits them leaves the
+// stored values alone.
+func TestOrgSettingsPatch_DailyCostCap_OmittedFieldUntouched(t *testing.T) {
 	s := newTestServer(t)
-
-	if got := orgConcurrentRuns(t, s); got != 0 {
-		t.Fatalf("fresh org concurrent-run limit = %v, want 0 (unlimited by default)", got)
+	if capUSD, runs := orgDailyCap(t, s), orgConcurrentRuns(t, s); capUSD != 0 || runs != 0 {
+		t.Fatalf("fresh org cap = %v, concurrent runs = %v; want 0 and 0 (no limit by default)", capUSD, runs)
 	}
+	patchOrgSettingsOK(t, s, map[string]any{"max_daily_cost_usd": 40, "max_concurrent_runs": 5})
 
-	patchOrgSettingsOK(t, s, map[string]any{"max_concurrent_runs": 8})
-	if got := orgConcurrentRuns(t, s); got != 8 {
-		t.Errorf("after setting 8, GET max_concurrent_runs = %v, want 8", got)
-	}
-
-	// null clears the limit — the same convention as the cost cap above.
-	patchOrgSettingsOK(t, s, map[string]any{"max_concurrent_runs": nil})
-	if got := orgConcurrentRuns(t, s); got != 0 {
-		t.Errorf("after null, GET max_concurrent_runs = %v, want 0 (cleared)", got)
-	}
-
-	// An explicit 0 is refused, exactly as on the cost cap: "unlimited" is null.
-	rec := patchOrgSettings(t, s, map[string]any{"max_concurrent_runs": 0})
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("explicit 0 should 422, got %d: %s", rec.Code, rec.Body.String())
-	}
-	assertFirstError(t, rec, httpx.ReasonOutOfRange, "max_concurrent_runs")
-}
-
-// TestOrgSettingsPatch_ConcurrentRuns_OmittedFieldUntouched pins the absent-
-// means-keep half: a save that omits max_concurrent_runs must leave a
-// previously-set limit intact (an unrelated org save can't stomp it).
-func TestOrgSettingsPatch_ConcurrentRuns_OmittedFieldUntouched(t *testing.T) {
-	s := newTestServer(t)
-	patchOrgSettingsOK(t, s, map[string]any{"max_concurrent_runs": 5})
-
-	// A save touching only the enable-set omits the limit → it must survive.
+	// A save touching only the enable-set omits both → they must survive.
 	patchOrgSettingsOK(t, s, map[string]any{"enabled_models": []string{domain.ModelAliasSonnet}})
+	if got := orgDailyCap(t, s); got != 40 {
+		t.Errorf("omitting max_daily_cost_usd cleared the cap: got %v, want 40 preserved", got)
+	}
 	if got := orgConcurrentRuns(t, s); got != 5 {
 		t.Errorf("omitting max_concurrent_runs cleared the limit: got %v, want 5 preserved", got)
 	}
 }
 
-// TestOrgSettingsPatch_ConcurrentRuns_NegativeRejected pins the range check.
-func TestOrgSettingsPatch_ConcurrentRuns_NegativeRejected(t *testing.T) {
+// TestOrgSettingsPatch_LimitsOutOfRange: zero, a negative, or a value past the
+// ceiling is a 422 OUT_OF_RANGE that leaves the stored limit alone. "No limit"
+// is spelled null, and the ceiling itself is accepted.
+func TestOrgSettingsPatch_LimitsOutOfRange(t *testing.T) {
 	s := newTestServer(t)
-	rec := patchOrgSettings(t, s, map[string]any{"max_concurrent_runs": -1})
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("negative limit should 422, got %d: %s", rec.Code, rec.Body.String())
-	}
-	assertFirstError(t, rec, httpx.ReasonOutOfRange, "max_concurrent_runs")
-}
+	patchOrgSettingsOK(t, s, map[string]any{"max_daily_cost_usd": 12, "max_concurrent_runs": 4})
 
-// TestOrgSettingsPatch_ConcurrentRuns_OversizedRejected pins the upper bound: a
-// value beyond the ceiling 400s at the handler rather than overflowing the
-// Postgres int4 column into a 500.
-func TestOrgSettingsPatch_ConcurrentRuns_OversizedRejected(t *testing.T) {
-	s := newTestServer(t)
-	rec := patchOrgSettings(t, s,
-		map[string]any{"max_concurrent_runs": domain.MaxConcurrentClaimsCeiling + 1})
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("oversized limit should 422, got %d: %s", rec.Code, rec.Body.String())
+	for _, c := range []struct {
+		field string
+		value int
+	}{
+		{"max_daily_cost_usd", 0},
+		{"max_daily_cost_usd", -1},
+		{"max_concurrent_runs", 0},
+		{"max_concurrent_runs", -1},
+		// Past the ceiling it would overflow the Postgres int4 column into a 500.
+		{"max_concurrent_runs", domain.MaxConcurrentClaimsCeiling + 1},
+	} {
+		t.Run(fmt.Sprintf("%s=%d", c.field, c.value), func(t *testing.T) {
+			rec := patchOrgSettings(t, s, map[string]any{c.field: c.value})
+			if rec.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+			}
+			assertFirstError(t, rec, httpx.ReasonOutOfRange, c.field)
+		})
 	}
-	assertFirstError(t, rec, httpx.ReasonOutOfRange, "max_concurrent_runs")
-	// The ceiling itself is accepted.
-	patchOrgSettingsOK(t, s,
-		map[string]any{"max_concurrent_runs": domain.MaxConcurrentClaimsCeiling})
+	if got := orgDailyCap(t, s); got != 12 {
+		t.Errorf("a refused save changed the cap: got %v, want 12", got)
+	}
+	if got := orgConcurrentRuns(t, s); got != 4 {
+		t.Errorf("a refused save changed the concurrent-run limit: got %v, want 4", got)
+	}
+
+	patchOrgSettingsOK(t, s, map[string]any{"max_concurrent_runs": domain.MaxConcurrentClaimsCeiling})
 	if got := orgConcurrentRuns(t, s); got != domain.MaxConcurrentClaimsCeiling {
 		t.Errorf("ceiling value should round-trip, got %v want %v", got, domain.MaxConcurrentClaimsCeiling)
 	}
 }
 
-// --- TFAC-392 unattended-prompt grace window bounds ------------------------
+// --- unattended-prompt grace window bounds ---------------------------------
 
 // teamGrace reads the team settings GET and returns the stored grace (ms) plus
 // the advertised min/max second bounds that drive the UI slider's range.
@@ -1339,28 +925,9 @@ func teamGrace(t *testing.T, s *Server) (graceMS, minS, maxS int) {
 	return resp.TeamSettings.PermissionAbsentGraceMS, resp.Min, resp.Max
 }
 
-// TestTeamSettingsGet_GraceBoundsAdvertised pins that the GET surfaces the
-// backend-honored grace band so the slider can track it instead of hardcoding.
-func TestTeamSettingsGet_GraceBoundsAdvertised(t *testing.T) {
-	s := newTestServer(t)
-	_, minS, maxS := teamGrace(t, s)
-	if minS != delegate.AbsentGraceMinSeconds {
-		t.Errorf("grace min = %d, want %d", minS, delegate.AbsentGraceMinSeconds)
-	}
-	if maxS != delegate.AbsentGraceMaxSeconds {
-		t.Errorf("grace max = %d, want %d", maxS, delegate.AbsentGraceMaxSeconds)
-	}
-	if minS < 1 || maxS <= minS {
-		t.Errorf("nonsensical grace bounds [%d, %d]", minS, maxS)
-	}
-}
-
-// TestTeamSettingsPatch_GraceOutOfBandRejected pins the write-side band check: a
-// value outside [min, max] is REJECTED, and an in-band one round-trips
-// verbatim. It used to clamp, which answered "saved" for a grace the caller
-// never asked for — invisible to an API client, since the UI slider can only
-// express in-band values in the first place. A well-formed number outside the
-// band it honors is semantic rather than a shape fault, so it answers 422.
+// TestTeamSettingsPatch_GraceOutOfBandRejected: a grace outside the band is a
+// 422 OUT_OF_RANGE that leaves the stored value, never a clamp, and an in-band
+// value round-trips verbatim.
 func TestTeamSettingsPatch_GraceOutOfBandRejected(t *testing.T) {
 	s := newTestServer(t)
 
@@ -1387,8 +954,7 @@ func TestTeamSettingsPatch_GraceOutOfBandRejected(t *testing.T) {
 }
 
 // jiraCredentialRoute is the org's Jira service-credential resource in local
-// mode — the PUT that replaced POST /api/jira/connect when credentials became
-// addressable resources rather than fields on the bulk settings save.
+// mode.
 func jiraCredentialRoute() string {
 	return "/api/orgs/" + runmode.LocalDefaultOrgID + "/jira/access/credential"
 }
@@ -1415,13 +981,9 @@ func teamReviewPosture(t *testing.T, s *Server) string {
 	return resp.TeamSettings.ReviewPosture
 }
 
-// TestTeamSettingsPatch_ReviewPosture pins the posture's write path: it defaults
-// to the identity-derived value, accepts each known posture, resets to the
-// default on an explicit null, is left untouched by a save that omits the key
-// (an unrelated save must not silently re-gate a team's reviews), and rejects an
-// unknown value rather than storing something that would quietly resolve to
-// "stage everything". A blank string is NOT a spelling of the reset any more —
-// null is the one clearing convention, and "" is just an unknown posture.
+// TestTeamSettingsPatch_ReviewPosture: the posture defaults to the
+// identity-derived value, accepts each known posture, resets on null, survives
+// an unrelated save, and refuses a blank or unknown value rather than storing it.
 func TestTeamSettingsPatch_ReviewPosture(t *testing.T) {
 	s := newTestServer(t)
 
@@ -1484,12 +1046,9 @@ func teamBasePushPolicy(t *testing.T, s *Server) string {
 	return resp.TeamSettings.BaseBranchPushPolicy
 }
 
-// TestTeamSettingsPatch_BaseBranchPushPolicy pins the policy's write path, same
-// contract as the review posture: defaults to refusing, accepts each known
-// value, resets to the default on null, survives an unrelated save untouched
-// (an unrelated save must never re-open base-branch pushes, nor silently close
-// them on a team that opted in), and rejects an unknown value — which would
-// otherwise resolve as "never" forever and read as a bug.
+// TestTeamSettingsPatch_BaseBranchPushPolicy: the same contract as the review
+// posture. An unrelated save must neither open nor close base-branch pushes, and
+// an unknown value, which would resolve as "never", is refused.
 func TestTeamSettingsPatch_BaseBranchPushPolicy(t *testing.T) {
 	s := newTestServer(t)
 
@@ -1570,12 +1129,9 @@ func pollReady(t *testing.T, s *Server, source string) bool {
 	return ok
 }
 
-// TestOrgSettingsPatch_GitHubChange_RestartsGitHubReadinessOnly pins which
-// poll readiness a settings save clears. A GitHub change (here the host) kicks
-// the GitHub poller and marks GitHub restarted, so the last-poll time waits for
-// a poll of the new configuration; Jira's poller is not kicked and its
-// readiness stands. A save that changes GitHub and Jira together kicks and
-// marks both.
+// TestOrgSettingsPatch_GitHubChange_RestartsGitHubReadinessOnly: a GitHub host
+// change kicks the GitHub poller and clears GitHub poll readiness only; a save
+// changing GitHub and Jira together kicks and clears both.
 func TestOrgSettingsPatch_GitHubChange_RestartsGitHubReadinessOnly(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()

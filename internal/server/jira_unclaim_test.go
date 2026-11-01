@@ -266,9 +266,8 @@ func TestApplyJiraUnclaim(t *testing.T) {
 	}
 }
 
-// TestTaskRequeue_JiraTask_PutsTheTicketBack: claiming a Jira task records
-// the ticket's state in the claim, and returning it to the queue puts the
-// ticket back in that status, unassigned, as the user who claimed it,
+// TestTaskRequeue_JiraTask_PutsTheTicketBack: a requeue puts a claimed ticket
+// back in the status the claim recorded, unassigned, as the user who claimed it,
 // addressing the issue by its id.
 func TestTaskRequeue_JiraTask_PutsTheTicketBack(t *testing.T) {
 	fake := newJiraIssueFake(t, statusToDoID, "")

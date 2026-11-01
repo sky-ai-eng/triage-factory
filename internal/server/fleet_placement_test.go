@@ -124,41 +124,24 @@ func TestHandleFleetPlacement_UnregisteredRepoIsNotFound(t *testing.T) {
 	}
 }
 
-func TestHandleFleetPlacement_RejectsAMalformedRepo(t *testing.T) {
-	for _, repo := range []string{"acme", "acme/", "/web", "acme/web/extra"} {
+// TestHandleFleetPlacement_RejectsBadQuery: a missing org or repo, a repo that
+// is not owner/name, or an unknown kind is a 400.
+func TestHandleFleetPlacement_RejectsBadQuery(t *testing.T) {
+	for _, query := range []string{
+		"org=org1",
+		"repo=acme/web",
+		"org=org1&repo=acme/web&kind=bogus",
+		"org=org1&repo=acme",
+		"org=org1&repo=acme/",
+		"org=org1&repo=/web",
+		"org=org1&repo=acme/web/extra",
+	} {
 		s := &Server{az: &authz.Checker{}, placement: &fakeExplainer{}, repos: fleetRepos}
 		rec := httptest.NewRecorder()
-		s.handleFleetPlacement(rec, localModeReq("/api/fleet/placement?org=org1&repo="+repo))
+		s.handleFleetPlacement(rec, localModeReq("/api/fleet/placement?"+query))
 		if rec.Code != http.StatusBadRequest {
-			t.Errorf("repo=%q: status %d, want 400", repo, rec.Code)
+			t.Errorf("?%s: status %d, want 400", query, rec.Code)
 		}
-	}
-}
-
-func TestHandleFleetPlacement_RequiresRepoParam(t *testing.T) {
-	s := &Server{az: &authz.Checker{}, placement: &fakeExplainer{}}
-	rec := httptest.NewRecorder()
-	s.handleFleetPlacement(rec, localModeReq("/api/fleet/placement?org=org1"))
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("missing repo should 400, got %d", rec.Code)
-	}
-}
-
-func TestHandleFleetPlacement_RequiresOrgParam(t *testing.T) {
-	s := &Server{az: &authz.Checker{}, placement: &fakeExplainer{}}
-	rec := httptest.NewRecorder()
-	s.handleFleetPlacement(rec, localModeReq("/api/fleet/placement?repo=acme/web"))
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("missing org should 400, got %d", rec.Code)
-	}
-}
-
-func TestHandleFleetPlacement_RejectsBadKind(t *testing.T) {
-	s := &Server{az: &authz.Checker{}, placement: &fakeExplainer{}}
-	rec := httptest.NewRecorder()
-	s.handleFleetPlacement(rec, localModeReq("/api/fleet/placement?org=org1&repo=acme/web&kind=bogus"))
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("bad kind should 400, got %d", rec.Code)
 	}
 }
 

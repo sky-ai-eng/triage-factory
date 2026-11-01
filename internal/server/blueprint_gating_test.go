@@ -10,10 +10,9 @@ import (
 
 // --- gatedEventTypes (pure unit test) ------------------------------------
 //
-// The visibility rule itself — "hide a blueprint iff it has ≥1 trigger and
-// every one of them fires on a gated type" — now lives in the store's query,
-// where it can filter and count the same rows. What stays here is the handler's
-// half: deriving WHICH event types this org is not entitled to.
+// The store's query applies the visibility rule (hide a blueprint iff it has
+// at least one trigger and every one fires on a gated type); the handler
+// derives which event types the org is not entitled to.
 
 func TestGatedEventTypes_ListsOnlyUnlicensedTypes(t *testing.T) {
 	gateJiraForTest(t)

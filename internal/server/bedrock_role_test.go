@@ -226,10 +226,9 @@ func TestBedrockRolePut_ClearsOtherProviders(t *testing.T) {
 	}
 }
 
-// TestTrustPolicyPrincipalARN converts an STS assumed-role session ARN (what
-// GetCallerIdentity returns when the control service runs under an instance
-// role / IRSA — the recommended setup) to the underlying IAM role ARN, which
-// is what a trust policy Principal must name. IAM user/role ARNs pass through.
+// TestTrustPolicyPrincipalARN: an STS assumed-role session ARN (what the control
+// service reports under an instance role or IRSA) becomes the IAM role ARN a
+// trust policy Principal must name; IAM user and role ARNs pass through.
 func TestTrustPolicyPrincipalARN(t *testing.T) {
 	cases := []struct{ in, want string }{
 		// assumed-role session ARN → role ARN (drops the session name).

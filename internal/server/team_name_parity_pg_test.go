@@ -24,11 +24,8 @@ func (r *teamRenameRig) createReq(callerID string, body any) *http.Request {
 	return req.WithContext(ctx)
 }
 
-// TestTeamName_SameRuleAtBothDoors pins the create/rename symmetry: a name one
-// door refuses, the other refuses too, with the same reason and the same field.
-// Create used to skip the length cap entirely, so a team could be created with
-// a name its own rename would then reject — the shape of gap a per-door
-// validator produces, and the reason both doors now call validateTeamName.
+// TestTeamName_SameRuleAtBothDoors: a name create refuses, rename refuses too,
+// with the same reason and field, and the team keeps its name.
 func TestTeamName_SameRuleAtBothDoors(t *testing.T) {
 	r := newTeamRenameRig(t)
 

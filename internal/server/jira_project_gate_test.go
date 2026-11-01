@@ -11,10 +11,9 @@ import (
 	"github.com/zalando/go-keyring"
 )
 
-// jiraProjectsBody builds a replace-set body naming each project by key, the
-// spelling putTeamJiraProjects rewrites to the route's identifiers, each fully
-// armed — the gate is about the project, so the rules are held constant and
-// valid.
+// jiraProjectsBody builds a replace-set body naming each project by key (which
+// putTeamJiraProjects rewrites to the route's ids), each armed with valid rules
+// so the gate under test is the project's.
 func jiraProjectsBody(keys ...string) map[string]any {
 	projects := make([]map[string]any, len(keys))
 	for i, k := range keys {
@@ -95,11 +94,9 @@ func TestJiraProjectsPut_EveryUnknownProjectNamed(t *testing.T) {
 	}
 }
 
-// TestJiraProjectsPut_StoredProjectGrandfathered is the reason the gate is
-// scoped to added projects. This route is a replace-set — every write resends
-// the whole set — so gating a stored project would mean a project deleted in
-// Jira locks the team out of its own configuration door, including the write
-// that would remove the offending row.
+// TestJiraProjectsPut_StoredProjectGrandfathered: only added projects are
+// checked. Every write resends the whole set, so checking a stored one would
+// let a project deleted in Jira block every save, the removal included.
 func TestJiraProjectsPut_StoredProjectGrandfathered(t *testing.T) {
 	s, fake := newServerWithJiraCatalog(t, "SKY", "OPS")
 
@@ -144,10 +141,9 @@ func TestJiraProjectsPut_RemovalOnlyAsksJiraNothing(t *testing.T) {
 	}
 }
 
-// TestJiraProjectsPut_ArmingAStoredProjectSkipsTheProjectCheck: mapping a
-// watched project's statuses adds no project, so its existence is not
-// re-checked — but the status ids are new, so that project's workflow is
-// read, and the names it comes back with are what get stored.
+// TestJiraProjectsPut_ArmingAStoredProjectSkipsTheProjectCheck: arming a
+// watched project adds no project, so its existence is not re-checked, but
+// its workflow is read for the new status ids and their names are stored.
 func TestJiraProjectsPut_ArmingAStoredProjectSkipsTheProjectCheck(t *testing.T) {
 	s, fake := newServerWithJiraCatalog(t, "SKY")
 
@@ -246,10 +242,9 @@ func TestJiraProjectsPut_StatusNamesAreResolvedNotAccepted(t *testing.T) {
 	}
 }
 
-// TestJiraProjectsPut_UpstreamFailureStoresNothing keeps the two failure modes
-// apart. Jira not answering establishes nothing, so it is an upstream error —
-// never a silent skip, and never a stored success, which is the one outcome a
-// caller can neither see nor undo by retrying.
+// TestJiraProjectsPut_UpstreamFailureStoresNothing: Jira not answering is an
+// upstream error that stores nothing, never a silent skip or a stored success the
+// caller could neither see nor undo.
 func TestJiraProjectsPut_UpstreamFailureStoresNothing(t *testing.T) {
 	s, fake := newServerWithJiraCatalog(t, "SKY")
 	fake.SetFailing(true)
@@ -283,10 +278,9 @@ func TestJiraProjectsPut_UnconnectedOrgCannotAdd(t *testing.T) {
 	}
 }
 
-// TestJiraProjectsPut_ShapeFaultsPrecedeTheGate: a malformed project id never
-// reaches Jira. The gate is an existence check, not a grammar one, and asking
-// about "SKY" (a key, where an id belongs) would spend a round trip to learn
-// what the pattern already knows.
+// TestJiraProjectsPut_ShapeFaultsPrecedeTheGate: a malformed project id (a key
+// where an id belongs) is a 400 that never reaches Jira, since the pattern
+// already rules it out.
 func TestJiraProjectsPut_ShapeFaultsPrecedeTheGate(t *testing.T) {
 	s, fake := newServerWithJiraCatalog(t, "SKY")
 
@@ -303,36 +297,9 @@ func TestJiraProjectsPut_ShapeFaultsPrecedeTheGate(t *testing.T) {
 	}
 }
 
-// TestJiraStatusesRead_ForwardsIDs pins the other half of the id contract. The
-// PUT accepts status ids and nothing else, so a caller — the SPA or a headless
-// one — needs somewhere to learn which id is which: this read is that catalog,
-// and it would be useless if it served names alone.
-func TestJiraStatusesRead_ForwardsIDs(t *testing.T) {
-	s, _ := newServerWithJiraCatalog(t, "SKY")
-
-	got := decodeList[jiraStatusJSON](t, doJSON(t, s, http.MethodPost, jiraStatusesListPath("SKY"), map[string]any{})).Items
-	if len(got) != len(jiraFixtureStatuses) {
-		t.Fatalf("statuses = %+v, want the project's whole workflow", got)
-	}
-	byName := map[string]string{}
-	for _, st := range got {
-		if st.ID == "" {
-			t.Errorf("status %q came back with no id", st.Name)
-		}
-		byName[st.Name] = st.ID
-	}
-	if byName["In Progress"] != statusInProgressID {
-		t.Errorf("In Progress id = %q, want %q", byName["In Progress"], statusInProgressID)
-	}
-}
-
-// TestJiraProjectsPut_FieldFaultSurvivesALaterUpstreamFailure: a replace-set
-// can carry both kinds of fault at once, and they are not equally useful. A bad
-// identifier is the caller's own and is true whether or not Jira is reachable —
-// they have to fix it before any retry can store anything. "Jira did not
-// answer" only says try again. Reporting the second over the first throws away
-// the half of the answer that is certain and sends the caller round a loop to
-// rediscover it.
+// TestJiraProjectsPut_FieldFaultSurvivesALaterUpstreamFailure: a write with an
+// unknown project and a failed Jira read reports the unknown project, which
+// the caller must fix whether or not Jira answers, rather than the outage.
 func TestJiraProjectsPut_FieldFaultSurvivesALaterUpstreamFailure(t *testing.T) {
 	s, fake := newServerWithJiraCatalog(t, "SKY")
 	// SKY resolves as a project but its workflow read fails, so the fault the

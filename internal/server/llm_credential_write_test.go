@@ -284,11 +284,9 @@ func TestLLMCredentialWrite_StaleSettingsSaveConflicts(t *testing.T) {
 	}
 }
 
-// TestLLMCredentialBind_StaleHostCredentialsSaveConflicts: the settings save
-// refuses the host's credentials while a ref is set, and it checks that
-// against the row it read. A bind that lands between that read and the save's
-// write moves the version, so the save answers 409 rather than storing
-// "system" beside the credential the bind just stored.
+// TestLLMCredentialBind_StaleHostCredentialsSaveConflicts: a bind that lands
+// between the settings save's read and its write moves the version, so a save
+// to the host's credentials answers 409 rather than storing "system" beside it.
 func TestLLMCredentialBind_StaleHostCredentialsSaveConflicts(t *testing.T) {
 	for _, c := range []struct {
 		name string
@@ -382,11 +380,8 @@ func TestLLMCredentialRotation_UnchangedRefLeavesSettingsVersion(t *testing.T) {
 }
 
 // TestLLMCredentialWrite_RacingProviderRefsSurvive: each provider's route
-// writes only its own ref, so one that lands between the other's read and its
-// write survives it. An Anthropic unbind that read the row before a Bedrock
-// bind committed does not clear the Bedrock ref, and a Bedrock bind that read
-// the row before an Anthropic unbind committed does not put the Anthropic ref
-// back.
+// writes only its own ref, so the other provider's write landing between this
+// route's read and its write survives it, in both directions.
 func TestLLMCredentialWrite_RacingProviderRefsSurvive(t *testing.T) {
 	newRacingServer := func(t *testing.T) (*Server, *func(ctx context.Context, orgs db.OrgsStore) error) {
 		t.Helper()
