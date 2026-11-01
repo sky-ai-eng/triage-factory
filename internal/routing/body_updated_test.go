@@ -121,7 +121,7 @@ func TestBodyUpdated_PollToRule(t *testing.T) {
 			}
 			// A fresh router discovers the edit without an in-memory signal.
 			router := reviewRouter(database)
-			router.drainEventQueue(ctx)
+			mustDrain(t, router)
 			check(1, 0)
 			if _, err := database.Exec(`INSERT INTO event_handlers
 				(id, org_id, team_id, creator_user_id, kind, event_type, scope_predicate_json,
@@ -131,15 +131,15 @@ func TestBodyUpdated_PollToRule(t *testing.T) {
 				t.Fatal(err)
 			}
 			poll("Edit with a mismatching predicate")
-			router.drainEventQueue(ctx)
+			mustDrain(t, router)
 			check(2, 0)
 			if _, err := database.Exec(`UPDATE event_handlers SET scope_predicate_json='{"has_label":"attention"}' WHERE id='body-rule'`); err != nil {
 				t.Fatal(err)
 			}
-			router.drainEventQueue(ctx)
+			mustDrain(t, router)
 			check(2, 0) // Enabling a match does not replay historical edits.
 			poll("Edit matching the rule")
-			router.drainEventQueue(ctx)
+			mustDrain(t, router)
 			check(3, 1)
 			active, err := st.Tasks.FindActiveByEntity(ctx, org, entity.ID)
 			if err != nil || len(active) != 1 || active[0].EventType != eventType {
@@ -149,8 +149,8 @@ func TestBodyUpdated_PollToRule(t *testing.T) {
 				t.Fatalf("body task visibility = %v, want owner team", visible)
 			}
 			poll("Edit matching the rule")
-			router.drainEventQueue(ctx)
-			router.drainEventQueue(ctx)
+			mustDrain(t, router)
+			mustDrain(t, router)
 			check(3, 1)
 			if got := countRows(t, database, `SELECT COUNT(*) FROM event_queue WHERE status='done'`); got != 3 {
 				t.Fatalf("completed queue rows = %d, want 3", got)

@@ -77,7 +77,7 @@ func TestHandleEvent_MultipleTeams_OneTask(t *testing.T) {
 
 	router := newTestRouter(testRouterDeps(database))
 
-	router.HandleEvent(context.Background(), domain.Event{
+	mustHandle(t, router, domain.Event{
 		EventType:    domain.EventGitHubPRCICheckFailed,
 		EntityID:     &entity.ID,
 		DedupKey:     "build",
@@ -147,7 +147,7 @@ func TestHandleEvent_BackfillCreatedAt_PreservesOccurredAt(t *testing.T) {
 
 	router := newTestRouter(testRouterDeps(database))
 
-	router.HandleEvent(context.Background(), domain.Event{
+	mustHandle(t, router, domain.Event{
 		EventType:    domain.EventGitHubPRReviewRequested,
 		EntityID:     &entity.ID,
 		MetadataJSON: string(metaJSON),
@@ -192,7 +192,7 @@ func TestHandleEvent_NoOccurredAt_FallsBackToNow(t *testing.T) {
 
 	before := time.Now()
 	router := reviewRouter(database)
-	router.HandleEvent(context.Background(), domain.Event{
+	mustHandle(t, router, domain.Event{
 		EventType:    domain.EventGitHubPRCICheckFailed,
 		EntityID:     &entity.ID,
 		DedupKey:     "build",
@@ -277,7 +277,7 @@ func TestHandleEvent_BecameAtomic_Suppressed(t *testing.T) {
 	atomicJSON, _ := json.Marshal(atomicMeta)
 
 	router := newTestRouter(testRouterDeps(database))
-	router.HandleEvent(context.Background(), domain.Event{
+	mustHandle(t, router, domain.Event{
 		EventType:    domain.EventJiraIssueBecameAtomic,
 		EntityID:     &entity.ID,
 		MetadataJSON: string(atomicJSON),
@@ -490,7 +490,7 @@ func TestHandleEvent_MultipleTeams_OneBotRun(t *testing.T) {
 	router := newTestRouter(deps)
 	rec := notifytest.Record(t)
 
-	router.HandleEvent(context.Background(), domain.Event{
+	mustHandle(t, router, domain.Event{
 		EventType: domain.EventJiraIssueAvailable, EntityID: &entity.ID,
 		MetadataJSON: string(metaJSON), OrgID: runmode.LocalDefaultOrgID,
 	})
@@ -604,7 +604,7 @@ func TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam(t *testing.T) {
 	deps.Spawner = stub
 	router := newTestRouter(deps)
 
-	router.HandleEvent(context.Background(), domain.Event{
+	mustHandle(t, router, domain.Event{
 		EventType: domain.EventJiraIssueAvailable, EntityID: &entity.ID,
 		MetadataJSON: string(metaJSON), OrgID: runmode.LocalDefaultOrgID,
 	})
@@ -664,7 +664,7 @@ func TestHandleEvent_SingleTeam_OneTask(t *testing.T) {
 
 	router := reviewRouter(database)
 
-	router.HandleEvent(context.Background(), domain.Event{
+	mustHandle(t, router, domain.Event{
 		EventType:    domain.EventGitHubPRCICheckFailed,
 		EntityID:     &entity.ID,
 		DedupKey:     "build",

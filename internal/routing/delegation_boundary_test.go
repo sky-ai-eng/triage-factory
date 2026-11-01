@@ -1,7 +1,6 @@
 package routing
 
 import (
-	"context"
 	"database/sql"
 	"testing"
 
@@ -79,7 +78,7 @@ func TestHandleEvent_SecondFireEndsThePriorConversation(t *testing.T) {
 	var rung []string
 	spawner.SetOnMemoryOwed(func(_, conversationID string) { rung = append(rung, conversationID) })
 
-	router.HandleEvent(context.Background(), recordFenceEvent(t, database, entityID))
+	mustHandle(t, router, recordFenceEvent(t, database, entityID))
 	first := unEndedConversations(t, database, entityID)
 	if len(first) != 1 {
 		t.Fatalf("after the first fire: %d un-ended conversations, want 1", len(first))
@@ -92,7 +91,7 @@ func TestHandleEvent_SecondFireEndsThePriorConversation(t *testing.T) {
 		t.Fatalf("the concluded run ended itself; the fixture no longer models the gap")
 	}
 
-	router.HandleEvent(context.Background(), recordFenceEvent(t, database, entityID))
+	mustHandle(t, router, recordFenceEvent(t, database, entityID))
 
 	endedAt, reason := conversationBoundary(t, database, concluded)
 	if !endedAt.Valid || reason != string(domain.EndedDelegated) {
@@ -119,12 +118,12 @@ func TestHandleEvent_ReplayedEvent_StampsNothingTwice(t *testing.T) {
 
 	// A first run, concluded and un-ended, so the second fire has something to
 	// stamp and the replay after it has nothing.
-	router.HandleEvent(context.Background(), recordFenceEvent(t, database, entityID))
+	mustHandle(t, router, recordFenceEvent(t, database, entityID))
 	concluded := unEndedConversations(t, database, entityID)[0]
 	fenceCompleteConversations(t, database, entityID)
 
 	replayed := recordFenceEvent(t, database, entityID)
-	router.HandleEvent(context.Background(), replayed)
+	mustHandle(t, router, replayed)
 	firstStamp, firstReason := conversationBoundary(t, database, concluded)
 	if !firstStamp.Valid {
 		t.Fatalf("the fire did not stamp the concluded run")
@@ -137,7 +136,7 @@ func TestHandleEvent_ReplayedEvent_StampsNothingTwice(t *testing.T) {
 	// the insert, so what keeps the replay harmless is that the stamp has
 	// nothing left to find: the concluded row carries its boundary already, and
 	// the row the first delivery minted is live, which this door never touches.
-	router.HandleEvent(context.Background(), replayed)
+	mustHandle(t, router, replayed)
 
 	if rang != 0 {
 		t.Errorf("memory doorbell rang %d times on the replay, want 0 — every terminal row was already stamped", rang)
@@ -162,7 +161,7 @@ func TestFiringWorker_EndsThePriorConversation(t *testing.T) {
 
 	// A concluded, un-ended run on the task — what the deferred firing queued
 	// behind and what the drain now has to end before it opens step 0.
-	router.HandleEvent(context.Background(), recordFenceEvent(t, database, entityID))
+	mustHandle(t, router, recordFenceEvent(t, database, entityID))
 	live := unEndedConversations(t, database, entityID)
 	if len(live) != 1 {
 		t.Fatalf("after the immediate fire: %d un-ended conversations, want 1", len(live))

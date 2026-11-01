@@ -115,7 +115,7 @@ func TestHandleEvent_OrgIDThreaded(t *testing.T) {
 
 	router := newTestRouter(testRouterDeps(database))
 
-	router.HandleEvent(context.Background(), domain.Event{
+	mustHandle(t, router, domain.Event{
 		EventType:    domain.EventGitHubPRCICheckFailed,
 		EntityID:     &entity.ID,
 		DedupKey:     "build",

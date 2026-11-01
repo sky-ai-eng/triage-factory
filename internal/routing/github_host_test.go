@@ -106,7 +106,7 @@ func TestGitHubUnreachable_ClosesEntityAndTasks(t *testing.T) {
 			entityID, taskIDs := seedPRWithTasks(t, database, tc.host, "owner/repo#1",
 				append(live, domain.EventGitHubPRClosed)...)
 
-			gateRouter(database).HandleEvent(ctx, tc.event(t, entityID))
+			mustHandle(t, gateRouter(database), tc.event(t, entityID))
 
 			e, err := sqlitestore.New(database).Entities.Get(ctx, runmode.LocalDefaultOrgID, entityID)
 			if err != nil || e == nil || e.State != "closed" {
@@ -193,7 +193,7 @@ func TestGate_HostIsPartOfTheRepoMatch(t *testing.T) {
 			if err != nil {
 				t.Fatalf("create entity: %v", err)
 			}
-			gateRouter(database).HandleEvent(ctx, tc.event(t, entity.ID, tc.host))
+			mustHandle(t, gateRouter(database), tc.event(t, entity.ID, tc.host))
 
 			var taskID string
 			if err := database.QueryRow(`SELECT id FROM tasks WHERE entity_id = ? AND event_type = ?`, entity.ID, tc.rule).Scan(&taskID); err != nil {

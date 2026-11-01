@@ -308,7 +308,7 @@ func TestIntegration_WorktreeIsolation(t *testing.T) {
 		[]byte("must-not-be-readable-from-sandbox"), 0o644); err != nil {
 		t.Skipf("can't write host sentinel: %v", err)
 	}
-	defer os.Remove("/tmp/host-sentinel-" + t.Name())
+	defer func() { _ = os.Remove("/tmp/host-sentinel-" + t.Name()) }()
 
 	cfg.Argv = []string{"/bin/cat", "/tmp/host-sentinel-" + t.Name()}
 

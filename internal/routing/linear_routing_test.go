@@ -251,7 +251,7 @@ func TestLinearAssigned_RoutesToAssigneesTrackingTeam(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	linearRouter(database).HandleEvent(ctx, linearEvent(domain.EventLinearIssueAssigned, entity.ID, "lt-eng", "lu-alice"))
+	mustHandle(t, linearRouter(database), linearEvent(domain.EventLinearIssueAssigned, entity.ID, "lt-eng", "lu-alice"))
 
 	active, err := testTaskStore(database).FindActiveByEntity(ctx, runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil || len(active) != 1 {
@@ -306,15 +306,13 @@ func activeOfType(t *testing.T, database *sql.DB, entityID, eventType string) []
 // task tier would anchor the second event on A's still-active task and bump it.
 func TestLinearReassign_PriorOwnerClosesNewOwnerMinted(t *testing.T) {
 	database, router, teamA, teamB, entityID := reassignFixture(t)
-	ctx := context.Background()
-
-	router.HandleEvent(ctx, linearEvent(domain.EventLinearIssueAssigned, entityID, "lt-eng", "lu-alice"))
+	mustHandle(t, router, linearEvent(domain.EventLinearIssueAssigned, entityID, "lt-eng", "lu-alice"))
 	first := activeOfType(t, database, entityID, domain.EventLinearIssueAssigned)
 	if len(first) != 1 || teamIDValue(&first[0]) != teamA {
 		t.Fatalf("after the first assignment: %d tasks, want one owned by team A", len(first))
 	}
 
-	router.HandleEvent(ctx, linearEvent(domain.EventLinearIssueAssigned, entityID, "lt-eng", "lu-bob"))
+	mustHandle(t, router, linearEvent(domain.EventLinearIssueAssigned, entityID, "lt-eng", "lu-bob"))
 	active := activeOfType(t, database, entityID, domain.EventLinearIssueAssigned)
 	if len(active) != 1 {
 		t.Fatalf("active assigned tasks after reassignment = %d, want 1", len(active))
@@ -332,11 +330,9 @@ func TestLinearReassign_PriorOwnerClosesNewOwnerMinted(t *testing.T) {
 // it again, which would discard its claim and any run on it.
 func TestLinearReassign_SameMemberNoChurn(t *testing.T) {
 	database, router, _, _, entityID := reassignFixture(t)
-	ctx := context.Background()
-
-	router.HandleEvent(ctx, linearEvent(domain.EventLinearIssueAssigned, entityID, "lt-eng", "lu-alice"))
+	mustHandle(t, router, linearEvent(domain.EventLinearIssueAssigned, entityID, "lt-eng", "lu-alice"))
 	first := activeOfType(t, database, entityID, domain.EventLinearIssueAssigned)
-	router.HandleEvent(ctx, linearEvent(domain.EventLinearIssueAssigned, entityID, "lt-eng", "lu-alice"))
+	mustHandle(t, router, linearEvent(domain.EventLinearIssueAssigned, entityID, "lt-eng", "lu-alice"))
 	second := activeOfType(t, database, entityID, domain.EventLinearIssueAssigned)
 	if len(first) != 1 || len(second) != 1 || second[0].ID != first[0].ID {
 		t.Errorf("tasks before %v, after %v: want the one task preserved", first, second)
@@ -351,12 +347,12 @@ func TestLinearReassign_AssignClosesAvailablePoolTask(t *testing.T) {
 	ctx := context.Background()
 	seedUserJiraRule(t, database, teamA, domain.EventLinearIssueAvailable)
 
-	router.HandleEvent(ctx, linearEvent(domain.EventLinearIssueAvailable, entityID, "lt-eng", ""))
+	mustHandle(t, router, linearEvent(domain.EventLinearIssueAvailable, entityID, "lt-eng", ""))
 	if avail := activeOfType(t, database, entityID, domain.EventLinearIssueAvailable); len(avail) != 1 {
 		t.Fatalf("setup: available tasks = %d, want 1", len(avail))
 	}
 
-	router.HandleEvent(ctx, linearEvent(domain.EventLinearIssueAssigned, entityID, "lt-eng", "lu-alice"))
+	mustHandle(t, router, linearEvent(domain.EventLinearIssueAssigned, entityID, "lt-eng", "lu-alice"))
 	if avail := activeOfType(t, database, entityID, domain.EventLinearIssueAvailable); len(avail) != 0 {
 		t.Errorf("available pool task should retire on assignment, still %d active", len(avail))
 	}
@@ -403,7 +399,7 @@ func TestLinearUnreachable_ClosesEntityAndTasks(t *testing.T) {
 				`{"id":"uuid-5","identifier":"ENG-5","team_id":"lt-eng","state":{"id":"st-Todo","name":"Todo"}}`,
 				domain.EventLinearIssueAssigned)
 
-			linearRouter(database).HandleEvent(ctx, linearEvent(domain.EventLinearIssueUnreachable, entityID, linearTeamID, ""))
+			mustHandle(t, linearRouter(database), linearEvent(domain.EventLinearIssueUnreachable, entityID, linearTeamID, ""))
 
 			e, err := sqlitestore.New(database).Entities.Get(ctx, runmode.LocalDefaultOrgID, entityID)
 			if err != nil || e == nil || e.State != "closed" {
@@ -453,7 +449,7 @@ func TestHandleEvent_TurnedOffLinear_RecordsButCreatesNoTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	router := linearRouter(database)
-	router.HandleEvent(ctx, linearEvent(domain.EventLinearIssueAssigned, entity.ID, "lt-eng", "lu-alice"))
+	mustHandle(t, router, linearEvent(domain.EventLinearIssueAssigned, entity.ID, "lt-eng", "lu-alice"))
 
 	active, err := testTaskStore(database).FindActiveByEntity(ctx, runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil {

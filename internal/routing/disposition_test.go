@@ -91,7 +91,7 @@ func TestHandleEvent_EntitlementGated_PublishesFrozen(t *testing.T) {
 	router := newTestRouter(deps)
 
 	entityID := reviewEntity(t, database, "owner/repo#frozen")
-	emitCI(router, entityID, "aidan")
+	emitCI(t, router, entityID, "aidan")
 
 	got := pub.eventsCopy()
 	if len(got) != 1 {
@@ -129,7 +129,7 @@ func TestHandleEvent_NoHandlerMatched_PublishesTasklessNoHandler(t *testing.T) {
 	router := newTestRouter(deps)
 
 	entityID := reviewEntity(t, database, "owner/repo#nohandler")
-	emitCI(router, entityID, "aidan")
+	emitCI(t, router, entityID, "aidan")
 
 	got := pub.eventsCopy()
 	if len(got) != 1 {
@@ -161,7 +161,7 @@ func TestHandleEvent_NoOwnerResolved_PublishesTasklessNoOwner(t *testing.T) {
 	router := newTestRouter(deps)
 
 	entityID := reviewEntity(t, database, "owner/repo#stranger")
-	emitCI(router, entityID, "stranger") // not a TF user — no owner resolves
+	emitCI(t, router, entityID, "stranger") // not a TF user — no owner resolves
 
 	got := pub.eventsCopy()
 	if len(got) != 1 {
@@ -194,7 +194,7 @@ func TestHandleEvent_MatchingHandler_PublishesTaskCreatedThenBumped(t *testing.T
 	router := newTestRouter(deps)
 
 	entityID := reviewEntity(t, database, "owner/repo#createdthenbumped")
-	emitCI(router, entityID, "aidan")
+	emitCI(t, router, entityID, "aidan")
 
 	got := pub.eventsCopy()
 	if len(got) != 1 {
@@ -220,7 +220,7 @@ func TestHandleEvent_MatchingHandler_PublishesTaskCreatedThenBumped(t *testing.T
 
 	// A second ci_check_failed on the same entity finds the existing task
 	// (same dedup unit) instead of creating a new one.
-	emitCI(router, entityID, "aidan")
+	emitCI(t, router, entityID, "aidan")
 
 	got = pub.eventsCopy()
 	if len(got) != 2 {
@@ -253,7 +253,9 @@ func TestHandleEvent_HandlerQueryError_PublishesError(t *testing.T) {
 	router := newTestRouter(deps)
 
 	entityID := reviewEntity(t, database, "owner/repo#handlererr")
-	emitCI(router, entityID, "aidan")
+	if err := router.HandleEvent(t.Context(), ciFailedEvent(entityID, "aidan")); err == nil {
+		t.Fatal("HandleEvent returned nil, want the injected store error")
+	}
 
 	got := pub.eventsCopy()
 	if len(got) != 1 {
@@ -292,7 +294,9 @@ func TestHandleEvent_TaskUpsertError_PublishesError(t *testing.T) {
 	router := newTestRouter(deps)
 
 	entityID := reviewEntity(t, database, "owner/repo#upserterr")
-	emitCI(router, entityID, "aidan")
+	if err := router.HandleEvent(t.Context(), ciFailedEvent(entityID, "aidan")); err == nil {
+		t.Fatal("HandleEvent returned nil, want the injected store error")
+	}
 
 	got := pub.eventsCopy()
 	if len(got) != 1 {
@@ -339,7 +343,7 @@ func TestHandleEvent_BecameAtomicSuppression_PublishesTasklessNotError(t *testin
 
 	meta := events.JiraIssueBecameAtomicMetadata{IssueKey: "SKY-dispsuppress"}
 	metaJSON, _ := json.Marshal(meta)
-	router.HandleEvent(context.Background(), domain.Event{
+	mustHandle(t, router, domain.Event{
 		EventType: domain.EventJiraIssueBecameAtomic, EntityID: &entity.ID,
 		MetadataJSON: string(metaJSON), OrgID: runmode.LocalDefaultOrgID,
 	})
@@ -423,7 +427,7 @@ func TestHandleEvent_MultipleTeams_TriggersFiredCountsOnlyCommitted(t *testing.T
 	deps.Publisher = pub
 	router := newTestRouter(deps)
 
-	router.HandleEvent(context.Background(), domain.Event{
+	mustHandle(t, router, domain.Event{
 		EventType: domain.EventJiraIssueAvailable, EntityID: &entity.ID,
 		MetadataJSON: string(metaJSON), OrgID: runmode.LocalDefaultOrgID,
 	})

@@ -72,7 +72,7 @@ func TestIntegration_CrossTenantEgressBlocked(t *testing.T) {
 	const port = "9999"
 	const unadmittedPort = "9998"
 	mustRun(t, "ip", "link", "add", "tfsib0", "type", "dummy")
-	defer exec.Command("ip", "link", "del", "tfsib0").Run()
+	defer func() { _ = exec.Command("ip", "link", "del", "tfsib0").Run() }()
 	mustRun(t, "ip", "addr", "add", sibIP+"/24", "dev", "tfsib0")
 	mustRun(t, "ip", "link", "set", "tfsib0", "up")
 

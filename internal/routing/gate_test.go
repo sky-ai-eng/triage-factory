@@ -61,6 +61,24 @@ func seedMatchAllCIRule(t *testing.T, database *sql.DB, teamID string) {
 	}
 }
 
+// mustHandle routes evt and fails the test if the router returns an error:
+// every event these tests route is one the router should accept, so an error
+// means the test's setup is wrong rather than that the routing is.
+func mustHandle(t *testing.T, r *Router, evt domain.Event) {
+	t.Helper()
+	if err := r.HandleEvent(t.Context(), evt); err != nil {
+		t.Fatalf("HandleEvent(%s): %v", evt.EventType, err)
+	}
+}
+
+// mustDrain drains the durable event queue and fails the test on an error.
+func mustDrain(t *testing.T, r *Router) {
+	t.Helper()
+	if err := r.drainEventQueue(t.Context()); err != nil {
+		t.Fatalf("drain event queue: %v", err)
+	}
+}
+
 func ciEvent(t *testing.T, entityID, repo string) domain.Event {
 	t.Helper()
 	meta := events.GitHubPRCICheckFailedMetadata{
@@ -125,7 +143,7 @@ func TestGate_DisjointRepos_DropsUntrackingTeam(t *testing.T) {
 		t.Fatalf("create entity: %v", err)
 	}
 
-	gateRouter(dbh).HandleEvent(context.Background(), ciEvent(t, entity.ID, "owner/repo-b"))
+	mustHandle(t, gateRouter(dbh), ciEvent(t, entity.ID, "owner/repo-b"))
 
 	active, err := testTaskStore(dbh).FindActiveByEntity(ctx, runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil {
@@ -169,7 +187,7 @@ func TestGate_SharedRepo_VisibleToBoth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
-	gateRouter(dbh).HandleEvent(context.Background(), ciEvent(t, entity.ID, "owner/shared"))
+	mustHandle(t, gateRouter(dbh), ciEvent(t, entity.ID, "owner/shared"))
 
 	active, err := testTaskStore(dbh).FindActiveByEntity(ctx, runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil || len(active) != 1 {
@@ -318,7 +336,7 @@ func TestJiraGate_DisjointProjects_DropsUntrackingTeam(t *testing.T) {
 		t.Fatalf("create entity: %v", err)
 	}
 
-	gateRouter(dbh).HandleEvent(context.Background(), jiraAssignedEvent(t, *entity, "SKY"))
+	mustHandle(t, gateRouter(dbh), jiraAssignedEvent(t, *entity, "SKY"))
 
 	active, err := testTaskStore(dbh).FindActiveByEntity(ctx, runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil {
@@ -425,7 +443,7 @@ func TestGate_MultiTeamAuthor_UntrackedTeamGatedFromOwnerLadder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
-	gateRouter(dbh).HandleEvent(context.Background(), ciEvent(t, entity.ID, "owner/repo-a"))
+	mustHandle(t, gateRouter(dbh), ciEvent(t, entity.ID, "owner/repo-a"))
 
 	active, err := testTaskStore(dbh).FindActiveByEntity(ctx, runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil || len(active) != 1 {
@@ -474,7 +492,7 @@ func TestGate_MultiTeamAuthor_BothTrack_StaysAmbiguous(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
-	gateRouter(dbh).HandleEvent(context.Background(), ciEvent(t, entity.ID, "owner/shared"))
+	mustHandle(t, gateRouter(dbh), ciEvent(t, entity.ID, "owner/shared"))
 
 	active, err := testTaskStore(dbh).FindActiveByEntity(ctx, runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil || len(active) != 1 {
@@ -513,7 +531,7 @@ func TestGate_LocalN1_NoOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
-	gateRouter(dbh).HandleEvent(context.Background(), ciEvent(t, entity.ID, "owner/repo"))
+	mustHandle(t, gateRouter(dbh), ciEvent(t, entity.ID, "owner/repo"))
 
 	active, err := testTaskStore(dbh).FindActiveByEntity(ctx, runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil || len(active) != 1 {
