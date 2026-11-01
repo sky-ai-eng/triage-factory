@@ -237,20 +237,24 @@ for it. GitHub computes it lazily: a read starts a test merge, answers
 reads it only when it can have changed, through a probe the poll admits:
 
 - `new`: TF holds no answer for the PR;
-- `head_moved`: the PR's head is not the one its answer was read at. The head
+- `head_moved`: the PR's head is not the one TF last read it at. The head
   comes from the cycle's refresh of the PR, or from the open-PR listing; a
   repository whose listing is unchanged (a 304) admits nothing on this rule;
-- `sweep`: the answer was read more than 10 minutes ago, which bounds how late
-  a conflict caused by the base branch moving is seen.
+- `sweep`: TF last read it more than 10 minutes ago, which bounds how late a
+  conflict caused by the base branch moving is seen.
 
 A probe is read 15 seconds after its admission, and a PR with a probe already
-waiting collapses into it. The probe worker reads each repository's waiting
-PRs in one GraphQL query (`PRMergeability`) and stores each known answer
-(`MERGEABLE` or `CONFLICTING`) with the head it was read at. The two conflict
-events fire from the stored answer's transitions, in the write that stores it,
-so the stored answer is their re-emit guard. An `UNKNOWN` answer is read again
-30 seconds later, at most 10 times, and leaves the stored answer alone; after
-the tenth, the PR waits for its sweep. The events carry no source time.
+waiting collapses into it. The probe worker reads the waiting PRs that share a
+GitHub credential (an App installation, or the org's token) in one GraphQL
+query (`PRMergeability`), whatever repositories they are in, and stores each
+known answer (`MERGEABLE` or `CONFLICTING`) with the head it was read at. The
+two conflict events fire from the stored answer's transitions, in the write
+that stores it, so the stored answer is their re-emit guard. An `UNKNOWN`
+answer is read again 30 seconds later, at most 10 times, and leaves the stored
+answer alone; the tenth records the read's head and time with no answer, so
+the PR waits for its sweep. A read GitHub refuses for a rate limit waits for
+the limit to reset, and the credential's other PRs wait with it without a
+request. The events carry no source time.
 
 #### PR Unreachable
 

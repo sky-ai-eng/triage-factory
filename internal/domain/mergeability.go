@@ -15,13 +15,16 @@ const (
 type PRMergeability struct {
 	EntityID string
 	OrgID    string
-	// Mergeable is MERGEABLE or CONFLICTING. Empty only on a row whose
-	// answer column is NULL, which no writer produces.
+	// Mergeable is the last known answer, MERGEABLE or CONFLICTING. Empty
+	// while no read has answered: the row was created by a probe whose
+	// retries all answered UNKNOWN.
 	Mergeable string
-	// MergeableHeadSHA is the pull request's head (headRefOid) the answer
-	// was read at.
+	// MergeableHeadSHA is the pull request's head (headRefOid) at the last
+	// read that settled a probe: a known answer, or the UNKNOWN that ended
+	// its retries. It is the head the answer was read at only when that read
+	// answered.
 	MergeableHeadSHA string
-	// CheckedAt is when the answer was read; nil when it never was.
+	// CheckedAt is when that read was made; nil when it never was.
 	CheckedAt *time.Time
 }
 
@@ -32,12 +35,12 @@ const (
 	// MergeabilityProbeNew is a pull request with no mergeability row.
 	MergeabilityProbeNew = "new"
 	// MergeabilityProbeHeadMoved is a pull request whose head is not the one
-	// its row's answer was read at.
+	// its row was last read at.
 	MergeabilityProbeHeadMoved = "head_moved"
 	// MergeabilityProbeUnknownRetry is the re-read of a probe GitHub answered
 	// UNKNOWN.
 	MergeabilityProbeUnknownRetry = "unknown_retry"
-	// MergeabilityProbeSweep is a pull request whose answer was read longer
+	// MergeabilityProbeSweep is a pull request whose row was last read longer
 	// than the sweep interval ago, or never.
 	MergeabilityProbeSweep = "sweep"
 )

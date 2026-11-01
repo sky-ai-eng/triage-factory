@@ -231,7 +231,21 @@ func (s *prMergeabilityStore) CompleteProbe(ctx context.Context, r workitem.Rece
 		}
 		if answer.Mergeable == domain.MergeableUnknown {
 			if unknownReads+1 >= workkinds.PRMergeabilityMaxUnknownReads {
-				res.Outcome = db.PRMergeabilityGaveUp
+				// The give-up moves the row's head and time and leaves its
+				// answer (NULL on a new row), so the poll waits for the
+				// sweep rather than admitting the pull request again.
+				row, err := scanSQLitePRMergeability(tx.QueryRowContext(ctx, `
+					INSERT INTO pull_request_mergeability (entity_id, org_id, mergeable, mergeable_head_sha, checked_at)
+					VALUES (?, ?, NULL, ?, ?)
+					ON CONFLICT (entity_id) DO UPDATE SET
+						mergeable_head_sha = excluded.mergeable_head_sha,
+						checked_at = excluded.checked_at
+					RETURNING `+sqlitePRMergeabilityColumns,
+					entityID, r.OrgID, nullIfEmpty(answer.HeadSHA), time.Now().UTC()))
+				if err != nil {
+					return nil, fmt.Errorf("record the give-up for entity %s: %w", entityID, err)
+				}
+				res.Outcome, res.Row = db.PRMergeabilityGaveUp, &row
 				return nil, nil
 			}
 			res.Outcome = db.PRMergeabilityRetried
@@ -287,6 +301,13 @@ func (s *prMergeabilityStore) Requeue(ctx context.Context, r workitem.Receipt, o
 		return false, err
 	}
 	return workitem.Requeue(ctx, s.conn, s.kind, r, outcome, cause)
+}
+
+func (s *prMergeabilityStore) DeferRateLimited(ctx context.Context, r workitem.Receipt, until time.Time) error {
+	if err := assertLocalOrg(r.OrgID); err != nil {
+		return err
+	}
+	return workitem.Defer(ctx, s.conn, s.kind, r, workkinds.PRMergeabilityDeferRateLimited, until, db.PRMergeabilityRateLimitHolds)
 }
 
 func (s *prMergeabilityStore) PruneSettled(ctx context.Context, before time.Time) (int, error) {

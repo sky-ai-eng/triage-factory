@@ -21,12 +21,11 @@ import (
 // point is webhooks.
 const staleRefreshFloor = 10 * time.Minute
 
-// mergeabilitySweepInterval is how long a pull request's stored mergeability
-// answer is trusted before the poll admits a probe to read it again, whatever
-// else did or did not move. The refresh does not read mergeability, and a
-// merge to the base branch moves neither the pull request's updated_at nor
-// its head, so this is what bounds how late a conflict the base branch caused
-// is seen: the same 10 minutes staleRefreshFloor gave the refresh's read.
+// mergeabilitySweepInterval is how long after a pull request's last
+// mergeability read the poll admits a probe to read it again, whatever else
+// did or did not move. A merge to the base branch moves neither the pull
+// request's updated_at nor its head, so this is what bounds how late a
+// conflict the base branch caused is seen. It matches staleRefreshFloor.
 const mergeabilitySweepInterval = 10 * time.Minute
 
 // shouldSkipRefresh reports whether a tracked open PR can keep its

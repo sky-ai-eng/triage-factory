@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -72,11 +73,14 @@ type PRMergeabilityStore interface {
 	//     head it was read at and the time, and the transition from the
 	//     previous answer is enqueued on the durable event queue, stamped
 	//     with the org and traceparent;
-	//   - UNKNOWN: the row is untouched. Below
-	//     workkinds.PRMergeabilityMaxUnknownReads UNKNOWN reads, the probe is
-	//     completed and a successor admitted under its key with reason
-	//     unknown_retry, due workkinds.PRMergeabilityUnknownRetryDelay from
-	//     now; at the limit it is completed with nothing owed.
+	//   - UNKNOWN: below workkinds.PRMergeabilityMaxUnknownReads UNKNOWN
+	//     reads, the row is untouched, and the probe is completed and a
+	//     successor admitted under its key with reason unknown_retry, due
+	//     workkinds.PRMergeabilityUnknownRetryDelay from now. At the limit the
+	//     probe is completed with nothing owed, and the row's head and
+	//     checked_at move to the read's while its answer stays (NULL on a row
+	//     the give-up creates), so the poll's next admission for the pull
+	//     request is its sweep.
 	//
 	// A receipt another holder took is workitem.ErrLeaseLost and writes
 	// nothing at all, events included; workitem.ErrCancelled means the
@@ -87,6 +91,15 @@ type PRMergeabilityStore interface {
 	// to ready with a backoff retry time, or parks when the outcome is
 	// permanent or the budget is spent. parked reports which.
 	Requeue(ctx context.Context, r workitem.Receipt, outcome workitem.Outcome, cause error) (parked bool, err error)
+
+	// DeferRateLimited returns a claimed probe to ready, due at until, with
+	// the attempt its claim charged refunded (workitem.Defer under
+	// workkinds.PRMergeabilityDeferRateLimited): GitHub's rate limit on the
+	// probe's credential resets at until, which is waiting the probe is owed
+	// rather than a failure of its own, whether its read was refused or never
+	// sent. The deferral's predicate is always true, because the reason to
+	// wait is GitHub's answer, which no row holds.
+	DeferRateLimited(ctx context.Context, r workitem.Receipt, until time.Time) error
 
 	// PruneSettled deletes done and cancelled probes settled before the
 	// cutoff, across every org, and reports how many. Parked probes are kept
@@ -147,7 +160,8 @@ const (
 	PRMergeabilityRecorded PRMergeabilityOutcome = "recorded"
 	// PRMergeabilityRetried is an UNKNOWN answer whose successor was admitted.
 	PRMergeabilityRetried PRMergeabilityOutcome = "unknown_retry"
-	// PRMergeabilityGaveUp is an UNKNOWN answer at the retry limit.
+	// PRMergeabilityGaveUp is an UNKNOWN answer at the retry limit, recorded
+	// on the row as a read with no answer.
 	PRMergeabilityGaveUp PRMergeabilityOutcome = "unknown_gave_up"
 	// PRMergeabilitySkipped is a probe completed with no write: no answer, or
 	// an entity that is gone or no longer active.
@@ -160,7 +174,8 @@ type PRMergeabilityProbeResult struct {
 	// Previous is the row's answer before a recorded one; empty when the
 	// pull request had no row.
 	Previous string
-	// Row is the row a recorded answer wrote, as the write returned it.
+	// Row is the row a recorded answer or a give-up wrote, as the write
+	// returned it.
 	Row *domain.PRMergeability
 	// Events are the transitions enqueued with the answer, each stamped
 	// with the id the enqueue minted.
@@ -204,6 +219,11 @@ func PRMergeabilityProbeCols(entityID, reason string, probeAfter any, unknownRea
 		"unknown_reads": unknownReads,
 	}
 }
+
+// PRMergeabilityRateLimitHolds is DeferRateLimited's deferral predicate in
+// both dialects: the rate limit is GitHub's answer to the worker, so there is
+// nothing under the row lock to check.
+func PRMergeabilityRateLimitHolds(*sql.Tx) (bool, error) { return true, nil }
 
 // KnownMergeable reports whether a GitHub answer is one the row stores.
 func KnownMergeable(v string) bool {

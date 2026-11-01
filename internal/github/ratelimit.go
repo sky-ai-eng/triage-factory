@@ -105,6 +105,19 @@ func (c *Client) RateLimit(bucket string) (remaining int, reset time.Time, ok bo
 	return b.Remaining, b.Reset, ok
 }
 
+// GraphQLBudgetResumeAt is when c's last reading of the GraphQL budget resets,
+// when that reading says the budget is spent. A query sent on a spent budget
+// whose reset is within maxRateLimitWait waits for the reset instead of
+// returning ErrRateLimited, so a caller whose own deadline is shorter than the
+// wait sees its deadline, and reads this to learn it was a rate limit.
+func (c *Client) GraphQLBudgetResumeAt() (time.Time, bool) {
+	remaining, reset, ok := c.RateLimit(bucketGraphQL)
+	if !ok || remaining > 0 || !reset.After(time.Now()) {
+		return time.Time{}, false
+	}
+	return reset, true
+}
+
 // recordRateLimit keeps a response's reading of the bucket its
 // X-RateLimit-Resource names, or of fallback (the request's bucket) when the
 // header is absent, and returns that bucket. Called on every response the

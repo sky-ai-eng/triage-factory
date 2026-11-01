@@ -4570,10 +4570,12 @@ GRANT SELECT,USAGE ON SEQUENCE public.task_rederive_queue_id_seq TO tf_app;
 
 -- A pull request's mergeability, read only by the probe worker and stored
 -- here rather than in the entity's snapshot. One row per GitHub pull request
--- entity the worker has an answer for: the last known answer (never UNKNOWN),
--- the head it was read at, and when. The probe worker is the only writer of
--- the three, and github:pr:conflicts / github:pr:conflicts_resolved are
--- emitted from the row's transitions in the transaction that writes it. The
+-- entity the worker has read: the last known answer (never UNKNOWN, and NULL
+-- until a read answers), and the head and time of the last read that settled
+-- a probe, which is a known answer or the UNKNOWN that ended its retries. The
+-- probe worker is the only writer of the three, and github:pr:conflicts /
+-- github:pr:conflicts_resolved are emitted from the answer's transitions in
+-- the transaction that writes it. The
 -- poll deletes the rows of entities no longer active.
 --
 -- Admin-pool wired with org_id bound per statement; the policy below is
@@ -4593,6 +4595,9 @@ ALTER TABLE ONLY public.pull_request_mergeability
     ADD CONSTRAINT pull_request_mergeability_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.pull_request_mergeability
     ADD CONSTRAINT pull_request_mergeability_entity_id_org_id_fkey FOREIGN KEY (entity_id, org_id) REFERENCES public.entities(id, org_id) ON DELETE CASCADE;
+
+-- Every poll cycle lists an org's rows and deletes its inactive ones.
+CREATE INDEX idx_pull_request_mergeability_org ON public.pull_request_mergeability (org_id, entity_id);
 
 ALTER TABLE public.pull_request_mergeability ENABLE ROW LEVEL SECURITY;
 CREATE POLICY pull_request_mergeability_all ON public.pull_request_mergeability
@@ -4672,6 +4677,10 @@ CREATE INDEX IF NOT EXISTS idx_pr_mergeability_probes_ready_cancel ON public.pr_
 CREATE INDEX IF NOT EXISTS idx_pr_mergeability_probes_leased_expiry ON public.pr_mergeability_probes (lease_expires_at) WHERE status = 'leased';
 CREATE INDEX IF NOT EXISTS idx_pr_mergeability_probes_parked ON public.pr_mergeability_probes (org_id, id) WHERE status = 'parked';
 CREATE UNIQUE INDEX IF NOT EXISTS uq_pr_mergeability_probes_unique_key ON public.pr_mergeability_probes (org_id, unique_key) WHERE unique_key IS NOT NULL AND status IN ('ready','leased','parked');
+-- The entity delete's cascade, and the worker's hourly prune of settled
+-- probes, which are a day of sweeps.
+CREATE INDEX idx_pr_mergeability_probes_entity ON public.pr_mergeability_probes (entity_id);
+CREATE INDEX idx_pr_mergeability_probes_done_at ON public.pr_mergeability_probes (done_at) WHERE status IN ('done','cancelled');
 
 ALTER TABLE public.pr_mergeability_probes ENABLE ROW LEVEL SECURITY;
 CREATE POLICY pr_mergeability_probes_all ON public.pr_mergeability_probes

@@ -266,6 +266,9 @@ const (
 	PRMergeabilityProbesName                 = "pr_mergeability_probes"
 	PRMergeabilityProbesLabel                = "Mergeability probes"
 	PRMergeabilityProbesOldestReadyObjective = 2 * time.Minute
+	// PRMergeabilityDeferRateLimited is the deferral reason a probe records
+	// while GitHub's rate limit on its credential has not reset.
+	PRMergeabilityDeferRateLimited = "github_rate_limited"
 )
 
 // Probe timing. A read right after a push mostly answers UNKNOWN, because

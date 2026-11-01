@@ -891,10 +891,13 @@ type MergeabilityRead struct {
 }
 
 // PRMergeability reads the mergeability of up to MaxMergeabilityBatch pull
-// requests in one query, keyed by node id. An id with no node, or whose node
-// is not a pull request, is absent from the map. Reading starts GitHub's
-// computation for a pull request it has not computed, which is why the answer
-// can be UNKNOWN.
+// requests in one query, keyed by node id. The ids may come from any
+// repositories the client can read. An id with no node, or whose node is not
+// a pull request, is absent from the map. Reading starts GitHub's computation
+// for a pull request it has not computed, which is why the answer can be
+// UNKNOWN; a pull request whose mergeable came back as anything other than
+// MERGEABLE or CONFLICTING (null beside a field error, say) is UNKNOWN too,
+// since it is no answer either.
 func (c *Client) PRMergeability(ctx context.Context, nodeIDs []string) (map[string]MergeabilityRead, error) {
 	if len(nodeIDs) == 0 {
 		return nil, nil
@@ -925,7 +928,11 @@ func (c *Client) PRMergeability(ctx context.Context, nodeIDs []string) (map[stri
 		if i >= len(nodeIDs) || n == nil || n.ID == "" || n.ID != nodeIDs[i] {
 			continue
 		}
-		out[n.ID] = MergeabilityRead{Mergeable: n.Mergeable, HeadSHA: n.HeadRefOid}
+		mergeable := n.Mergeable
+		if mergeable != domain.MergeableMergeable && mergeable != domain.MergeableConflicting {
+			mergeable = domain.MergeableUnknown
+		}
+		out[n.ID] = MergeabilityRead{Mergeable: mergeable, HeadSHA: n.HeadRefOid}
 	}
 	return out, nil
 }

@@ -7,9 +7,12 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 
@@ -32,10 +35,13 @@ type rig struct {
 	worker   *Worker
 	pub      *recorder
 
-	mu       sync.Mutex
-	answer   string
-	reads    int
-	resolver *fixedResolver
+	mu     sync.Mutex
+	answer string
+	reads  int
+	// rateLimited makes GitHub refuse every read for a spent GraphQL budget
+	// that resets in an hour.
+	rateLimited bool
+	resolver    *fixedResolver
 }
 
 type recorder struct {
@@ -57,13 +63,21 @@ func (r *recorder) take() []domain.Event {
 	return out
 }
 
+// fixedResolver hands out a new client for the one fake GitHub on every
+// call, as the production resolver does, so no rate-limit reading carries
+// from one resolution to the next.
 type fixedResolver struct {
-	client *ghclient.Client
-	err    error
+	base  string
+	err   error
+	repos []string
 }
 
-func (f *fixedResolver) ClientForRepo(context.Context, string, string, string) (*ghclient.Client, error) {
-	return f.client, f.err
+func (f *fixedResolver) ClientForRepo(_ context.Context, _, owner, repo string) (*ghclient.Client, error) {
+	f.repos = append(f.repos, owner+"/"+repo)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return ghclient.NewClient(f.base, "tok"), nil
 }
 
 func newRig(t *testing.T) *rig {
@@ -93,8 +107,17 @@ func newRig(t *testing.T) *rig {
 		}
 		r.mu.Lock()
 		r.reads++
-		answer := r.answer
+		answer, limited := r.answer, r.rateLimited
 		r.mu.Unlock()
+		if limited {
+			w.Header().Set("X-RateLimit-Resource", "graphql")
+			w.Header().Set("X-RateLimit-Limit", "5000")
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10))
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
+			return
+		}
 		nodes := make([]map[string]string, len(body.Variables.IDs))
 		for i, id := range body.Variables.IDs {
 			nodes[i] = map[string]string{"id": id, "mergeable": answer, "headRefOid": "head-" + id}
@@ -102,18 +125,23 @@ func newRig(t *testing.T) *rig {
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"nodes": nodes, "rateLimit": map[string]int{"cost": 1}}})
 	}))
 	t.Cleanup(srv.Close)
-	r.resolver = &fixedResolver{client: ghclient.NewClient(srv.URL, "tok")}
+	r.resolver = &fixedResolver{base: srv.URL}
 	r.worker = NewWorker(r.stores.PRMergeability, r.stores.Orgs, r.resolver, r.pub, workitem.Owner{ID: "test-worker", Epoch: 1})
 	return r
 }
 
-// pullRequest seeds an open pull request entity with a snapshot the event
-// metadata is read from.
+// pullRequest seeds an open pull request entity in octo/api with a snapshot
+// the event metadata is read from.
 func (r *rig) pullRequest(number string) *domain.Entity {
+	r.t.Helper()
+	return r.pullRequestIn("octo/api", number)
+}
+
+func (r *rig) pullRequestIn(repo, number string) *domain.Entity {
 	r.t.Helper()
 	ctx := context.Background()
 	e, _, err := r.stores.Entities.FindOrCreateSystem(ctx, runmode.LocalDefaultOrgID, "github", "https://github.com",
-		"octo/api#"+number, "PR_"+number, domain.EntityKindPullRequest, "PR", "")
+		repo+"#"+number, "PR_"+number, domain.EntityKindPullRequest, "PR", "")
 	if err != nil {
 		r.t.Fatalf("seed entity: %v", err)
 	}
@@ -158,11 +186,12 @@ func (r *rig) readCount() int {
 
 type probeRow struct {
 	reason, status, outcome string
+	attempt                 int
 }
 
 func (r *rig) probes(entityID string) []probeRow {
 	r.t.Helper()
-	rows, err := r.database.Query(`SELECT reason, status, COALESCE(last_outcome, '') FROM pr_mergeability_probes WHERE entity_id = ? ORDER BY id`, entityID)
+	rows, err := r.database.Query(`SELECT reason, status, COALESCE(last_outcome, ''), attempt FROM pr_mergeability_probes WHERE entity_id = ? ORDER BY id`, entityID)
 	if err != nil {
 		r.t.Fatalf("read probes: %v", err)
 	}
@@ -170,7 +199,7 @@ func (r *rig) probes(entityID string) []probeRow {
 	var out []probeRow
 	for rows.Next() {
 		var p probeRow
-		if err := rows.Scan(&p.reason, &p.status, &p.outcome); err != nil {
+		if err := rows.Scan(&p.reason, &p.status, &p.outcome, &p.attempt); err != nil {
 			r.t.Fatalf("scan: %v", err)
 		}
 		out = append(out, p)
@@ -247,8 +276,9 @@ func TestWorker_UnknownRetriesUntilTheLimitThenStops(t *testing.T) {
 			t.Errorf("probe %d = %+v, want %s and done", i, p, want)
 		}
 	}
-	if row, err := r.stores.PRMergeability.GetSystem(context.Background(), runmode.LocalDefaultOrgID, pr.ID); err != nil || row != nil {
-		t.Errorf("row = %+v (err %v), want none written for UNKNOWN", row, err)
+	row, err := r.stores.PRMergeability.GetSystem(context.Background(), runmode.LocalDefaultOrgID, pr.ID)
+	if err != nil || row == nil || row.Mergeable != "" || row.MergeableHeadSHA != "head-PR_3" || row.CheckedAt == nil {
+		t.Errorf("row = %+v (err %v), want the give-up's read recorded with no answer", row, err)
 	}
 }
 
@@ -265,5 +295,51 @@ func TestWorker_AnUnresolvableClientFailsTheProbeAsDependencyDown(t *testing.T) 
 	}
 	if n := r.readCount(); n != 0 {
 		t.Errorf("GitHub was read %d times without a client", n)
+	}
+}
+
+func TestWorker_PullRequestsInTwoRepositoriesOnOneCredentialAreReadInOneQuery(t *testing.T) {
+	r := newRig(t)
+	api, web := r.pullRequestIn("octo/api", "5"), r.pullRequestIn("octo/web", "6")
+	r.admit(api.ID, domain.MergeabilityProbeNew)
+	r.admit(web.ID, domain.MergeabilityProbeNew)
+
+	if evts := r.drain(domain.MergeableConflicting); len(evts) != 2 {
+		t.Fatalf("published %v, want a github:pr:conflicts for each pull request", types(evts))
+	}
+	if n := r.readCount(); n != 1 {
+		t.Errorf("GitHub was read %d times, want one query for both repositories", n)
+	}
+	if !slices.Equal(r.resolver.repos, []string{"octo/api", "octo/web"}) && !slices.Equal(r.resolver.repos, []string{"octo/web", "octo/api"}) {
+		t.Errorf("resolved %v, want a client resolved for each repository", r.resolver.repos)
+	}
+}
+
+func TestWorker_ARateLimitDefersTheProbesAndHoldsTheCredential(t *testing.T) {
+	r := newRig(t)
+	first := r.pullRequest("7")
+	r.admit(first.ID, domain.MergeabilityProbeNew)
+	r.mu.Lock()
+	r.rateLimited = true
+	r.mu.Unlock()
+
+	r.drain(domain.MergeableConflicting)
+	if n := r.readCount(); n != 1 {
+		t.Fatalf("GitHub was read %d times, want the one refused read", n)
+	}
+	if p := r.probes(first.ID); len(p) != 1 || p[0].status != workitem.StatusReady || p[0].outcome != "deferred" || p[0].attempt != 0 {
+		t.Errorf("probes = %+v, want the probe deferred with its attempt refunded", p)
+	}
+
+	// Another pull request on the same credential waits for the reset too,
+	// without a request of its own.
+	second := r.pullRequest("8")
+	r.admit(second.ID, domain.MergeabilityProbeNew)
+	r.drain(domain.MergeableConflicting)
+	if n := r.readCount(); n != 1 {
+		t.Errorf("GitHub was read %d times, want no read on a rate-limited credential", n)
+	}
+	if p := r.probes(second.ID); len(p) != 1 || p[0].status != workitem.StatusReady || p[0].outcome != "deferred" || p[0].attempt != 0 {
+		t.Errorf("probes = %+v, want the second probe deferred unread", p)
 	}
 }

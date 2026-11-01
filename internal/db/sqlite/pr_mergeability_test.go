@@ -47,7 +47,7 @@ func sqliteMergeabilityFixture(t *testing.T, conn *sql.DB) dbtest.PRMergeability
 
 func readSQLiteMergeabilityProbes(t *testing.T, conn *sql.DB, entityID string) []dbtest.MergeabilityProbeRow {
 	t.Helper()
-	rows, err := conn.Query(`SELECT id, status, reason, unknown_reads, probe_after FROM pr_mergeability_probes WHERE entity_id = ? ORDER BY id`, entityID)
+	rows, err := conn.Query(`SELECT id, status, reason, unknown_reads, attempt, probe_after FROM pr_mergeability_probes WHERE entity_id = ? ORDER BY id`, entityID)
 	if err != nil {
 		t.Fatalf("read probes: %v", err)
 	}
@@ -56,7 +56,7 @@ func readSQLiteMergeabilityProbes(t *testing.T, conn *sql.DB, entityID string) [
 	for rows.Next() {
 		var r dbtest.MergeabilityProbeRow
 		var after string
-		if err := rows.Scan(&r.ID, &r.Status, &r.Reason, &r.UnknownReads, &after); err != nil {
+		if err := rows.Scan(&r.ID, &r.Status, &r.Reason, &r.UnknownReads, &r.Attempt, &after); err != nil {
 			t.Fatalf("scan probe: %v", err)
 		}
 		if r.ProbeAfter, err = time.Parse("2006-01-02 15:04:05.000", after); err != nil {

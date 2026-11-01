@@ -37,6 +37,7 @@ type MergeabilityProbeRow struct {
 	Status       string
 	Reason       string
 	UnknownReads int
+	Attempt      int
 	ProbeAfter   time.Time
 }
 
@@ -222,7 +223,7 @@ func RunPRMergeabilityConformance(t *testing.T, mk PRMergeabilityFactory) {
 		}
 	})
 
-	t.Run("Unknown_admits_a_retry_until_the_limit_and_leaves_the_row", func(t *testing.T) {
+	t.Run("Unknown_admits_a_retry_until_the_limit_and_the_give_up_keeps_the_answer", func(t *testing.T) {
 		f := mk(t)
 		e := pr(t, f, "5")
 		probe(t, f, e.ID, domain.MergeableMergeable, "head-5")
@@ -257,9 +258,32 @@ func RunPRMergeabilityConformance(t *testing.T, mk PRMergeabilityFactory) {
 			}
 		}
 		after, _ := f.Stores.PRMergeability.GetSystem(ctx, f.OrgID, e.ID)
-		if after == nil || before == nil || after.Mergeable != before.Mergeable || after.MergeableHeadSHA != before.MergeableHeadSHA ||
-			after.CheckedAt == nil || before.CheckedAt == nil || !after.CheckedAt.Equal(*before.CheckedAt) {
-			t.Errorf("row after UNKNOWN reads = %+v, want it untouched from %+v", after, before)
+		if after == nil || before == nil || after.Mergeable != before.Mergeable || after.MergeableHeadSHA != "head-5b" ||
+			after.CheckedAt == nil || before.CheckedAt == nil || after.CheckedAt.Before(*before.CheckedAt) {
+			t.Errorf("row after the give-up = %+v, want %+v's answer at the give-up's head, read no earlier", after, before)
+		}
+	})
+
+	t.Run("A_give_up_with_no_row_records_a_read_with_no_answer", func(t *testing.T) {
+		f := mk(t)
+		e := pr(t, f, "5n")
+		admit(t, f, e.ID, domain.MergeabilityProbeNew)
+		var res db.PRMergeabilityProbeResult
+		for reads := 0; reads < workkinds.PRMergeabilityMaxUnknownReads; reads++ {
+			res = answer(t, f, claimOne(t, f), domain.MergeableUnknown, "head-5n")
+		}
+		if res.Outcome != db.PRMergeabilityGaveUp || res.Row == nil {
+			t.Fatalf("last read = %+v, want a give-up that wrote the row", res)
+		}
+		AssertWriteReturnedStoredRow(t, "CompleteProbe give-up insert", *res.Row, stored(f, e.ID))
+		if res.Row.Mergeable != "" || res.Row.MergeableHeadSHA != "head-5n" || res.Row.CheckedAt == nil {
+			t.Errorf("row = %+v, want no answer at head-5n, read now", *res.Row)
+		}
+		// The next known answer is the pull request's first, so a conflict
+		// emits as it does for a pull request with no row.
+		admit(t, f, e.ID, domain.MergeabilityProbeSweep)
+		if got := answer(t, f, claimOne(t, f), domain.MergeableConflicting, "head-5n"); len(got.Events) != 1 || got.Events[0].EventType != domain.EventGitHubPRConflicts || got.Previous != "" {
+			t.Errorf("first answer after the give-up = %+v, want one github:pr:conflicts", got)
 		}
 	})
 
@@ -335,6 +359,26 @@ func RunPRMergeabilityConformance(t *testing.T, mk PRMergeabilityFactory) {
 		}
 		if rows := f.Probes(t, e.ID); len(rows) != 1 {
 			t.Errorf("a stale UNKNOWN completion admitted a retry: %+v", rows)
+		}
+	})
+
+	t.Run("A_rate_limit_defers_the_probe_and_refunds_its_attempt", func(t *testing.T) {
+		f := mk(t)
+		e := pr(t, f, "12")
+		admit(t, f, e.ID, domain.MergeabilityProbeNew)
+		item := claimOne(t, f)
+		if err := f.Stores.PRMergeability.DeferRateLimited(ctx, item.Receipt, time.Now().Add(time.Hour)); err != nil {
+			t.Fatalf("DeferRateLimited: %v", err)
+		}
+		if rows := f.Probes(t, e.ID); len(rows) != 1 || rows[0].Status != workitem.StatusReady || rows[0].Attempt != 0 {
+			t.Fatalf("probes = %+v, want the one probe ready with its attempt refunded", rows)
+		}
+		f.Ripen(t)
+		if batch, err := f.Stores.PRMergeability.Claim(ctx, mergeabilityOwner, f.OrgID, 100); err != nil || len(batch.Items) != 0 {
+			t.Errorf("Claim before the reset = %d items (err %v), want none", len(batch.Items), err)
+		}
+		if err := f.Stores.PRMergeability.DeferRateLimited(ctx, item.Receipt, time.Now().Add(time.Hour)); !errors.Is(err, workitem.ErrLeaseLost) {
+			t.Errorf("a second deferral on the same receipt = %v, want ErrLeaseLost", err)
 		}
 	})
 

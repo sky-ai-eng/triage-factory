@@ -43,7 +43,7 @@ func TestPRMergeabilityStore_Postgres(t *testing.T) {
 			},
 			Probes: func(t *testing.T, entityID string) []dbtest.MergeabilityProbeRow {
 				t.Helper()
-				rows, err := h.AdminDB.Query(`SELECT id, status, reason, unknown_reads, probe_after FROM pr_mergeability_probes WHERE entity_id = $1 ORDER BY id`, entityID)
+				rows, err := h.AdminDB.Query(`SELECT id, status, reason, unknown_reads, attempt, probe_after FROM pr_mergeability_probes WHERE entity_id = $1 ORDER BY id`, entityID)
 				if err != nil {
 					t.Fatalf("read probes: %v", err)
 				}
@@ -51,7 +51,7 @@ func TestPRMergeabilityStore_Postgres(t *testing.T) {
 				var out []dbtest.MergeabilityProbeRow
 				for rows.Next() {
 					var r dbtest.MergeabilityProbeRow
-					if err := rows.Scan(&r.ID, &r.Status, &r.Reason, &r.UnknownReads, &r.ProbeAfter); err != nil {
+					if err := rows.Scan(&r.ID, &r.Status, &r.Reason, &r.UnknownReads, &r.Attempt, &r.ProbeAfter); err != nil {
 						t.Fatalf("scan probe: %v", err)
 					}
 					out = append(out, r)

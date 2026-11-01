@@ -128,7 +128,9 @@ minutes. These counters show what that costs and how it is going:
 
 The probe queue is `kind="pr_mergeability_probes"` on the `tf_work_*` gauges
 and alerts. A probe is not read until 15 seconds after it is queued, so its
-objective for the oldest ready probe is two minutes. A parked probe stops
+objective for the oldest ready probe is two minutes. A probe that hits a
+GitHub rate limit waits for the limit to reset and counts as deferred, not
+failed. A parked probe stops
 that pull request's conflict detection until an admin redrives it under
 **Parked work**.
 

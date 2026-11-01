@@ -221,7 +221,21 @@ func (s *prMergeabilityStore) CompleteProbe(ctx context.Context, r workitem.Rece
 		}
 		if answer.Mergeable == domain.MergeableUnknown {
 			if unknownReads+1 >= workkinds.PRMergeabilityMaxUnknownReads {
-				res.Outcome = db.PRMergeabilityGaveUp
+				// The give-up moves the row's head and time and leaves its
+				// answer (NULL on a new row), so the poll waits for the
+				// sweep rather than admitting the pull request again.
+				row, err := scanPgPRMergeability(tx.QueryRowContext(ctx, `
+					INSERT INTO public.pull_request_mergeability (entity_id, org_id, mergeable, mergeable_head_sha, checked_at)
+					VALUES ($1, $2, NULL, $3, $4)
+					ON CONFLICT (entity_id) DO UPDATE SET
+						mergeable_head_sha = excluded.mergeable_head_sha,
+						checked_at = excluded.checked_at
+					RETURNING `+pgPRMergeabilityColumns,
+					entityID, r.OrgID, nullIfEmpty(answer.HeadSHA), time.Now().UTC()))
+				if err != nil {
+					return nil, fmt.Errorf("record the give-up for entity %s: %w", entityID, err)
+				}
+				res.Outcome, res.Row = db.PRMergeabilityGaveUp, &row
 				return nil, nil
 			}
 			res.Outcome = db.PRMergeabilityRetried
@@ -278,6 +292,10 @@ func (s *prMergeabilityStore) CompleteProbe(ctx context.Context, r workitem.Rece
 
 func (s *prMergeabilityStore) Requeue(ctx context.Context, r workitem.Receipt, outcome workitem.Outcome, cause error) (bool, error) {
 	return workitem.Requeue(ctx, s.conn, s.kind, r, outcome, cause)
+}
+
+func (s *prMergeabilityStore) DeferRateLimited(ctx context.Context, r workitem.Receipt, until time.Time) error {
+	return workitem.Defer(ctx, s.conn, s.kind, r, workkinds.PRMergeabilityDeferRateLimited, until, db.PRMergeabilityRateLimitHolds)
 }
 
 func (s *prMergeabilityStore) PruneSettled(ctx context.Context, before time.Time) (int, error) {

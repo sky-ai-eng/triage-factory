@@ -1,10 +1,12 @@
 -- +goose Up
 -- A pull request's mergeability, read only by the probe worker and stored
 -- here rather than in the entity's snapshot. One row per GitHub pull request
--- entity the worker has an answer for: the last known answer (never UNKNOWN),
--- the head it was read at, and when. The probe worker is the only writer of
--- the three, and github:pr:conflicts / github:pr:conflicts_resolved are
--- emitted from the row's transitions in the transaction that writes it.
+-- entity the worker has read: the last known answer (never UNKNOWN, and NULL
+-- until a read answers), and the head and time of the last read that settled
+-- a probe, which is a known answer or the UNKNOWN that ended its retries. The
+-- probe worker is the only writer of the three, and github:pr:conflicts /
+-- github:pr:conflicts_resolved are emitted from the answer's transitions in
+-- the transaction that writes it.
 CREATE TABLE pull_request_mergeability (
     entity_id           TEXT PRIMARY KEY REFERENCES entities(id) ON DELETE CASCADE,
     org_id              TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
@@ -70,6 +72,10 @@ CREATE INDEX IF NOT EXISTS idx_pr_mergeability_probes_ready_cancel ON pr_mergeab
 CREATE INDEX IF NOT EXISTS idx_pr_mergeability_probes_leased_expiry ON pr_mergeability_probes (lease_expires_at) WHERE status = 'leased';
 CREATE INDEX IF NOT EXISTS idx_pr_mergeability_probes_parked ON pr_mergeability_probes (org_id, id) WHERE status = 'parked';
 CREATE UNIQUE INDEX IF NOT EXISTS uq_pr_mergeability_probes_unique_key ON pr_mergeability_probes (org_id, unique_key) WHERE unique_key IS NOT NULL AND status IN ('ready','leased','parked');
+-- The entity delete's cascade, and the worker's hourly prune of settled
+-- probes, which are a day of sweeps.
+CREATE INDEX idx_pr_mergeability_probes_entity ON pr_mergeability_probes (entity_id);
+CREATE INDEX idx_pr_mergeability_probes_done_at ON pr_mergeability_probes (done_at) WHERE status IN ('done','cancelled');
 
 -- +goose Down
 SELECT 'down not supported';

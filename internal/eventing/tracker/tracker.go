@@ -751,11 +751,11 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		for i, item := range openItems {
 			nodeIDs[i] = item.nodeID
 		}
-		open, err := t.refreshPRBatch(ctx, client, nodeIDs, true)
+		openSnaps, err := t.refreshPRBatch(ctx, client, nodeIDs, true)
 		if err != nil {
 			return 0, "", fmt.Errorf("refresh open PRs: %w", err)
 		}
-		for k, v := range open {
+		for k, v := range openSnaps {
 			refreshed[k] = v
 		}
 	}
@@ -950,12 +950,12 @@ type mergeabilityCandidate struct {
 // request whose mergeability can have changed since its stored answer was
 // read, and deletes the stored answers of entities no longer active:
 //
-//   - new: the pull request has no stored answer;
-//   - head_moved: its current head is not the one the answer was read at.
+//   - new: the pull request has no row;
+//   - head_moved: its current head is not the one its row was last read at.
 //     The current head is the refresh's when this cycle refreshed it, and the
 //     open-PR listing's otherwise. A repository whose listing answered 304
 //     has unchanged heads and gives none, so it admits nothing on this rule;
-//   - sweep: the answer was read longer than mergeabilitySweepInterval ago.
+//   - sweep: its row was last read longer than mergeabilitySweepInterval ago.
 //
 // The reasons are tried in that order and a pull request is admitted once. A
 // pull request already holding an unsettled probe collapses into it. A

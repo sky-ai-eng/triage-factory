@@ -4,10 +4,10 @@
 // The poll admits probes onto pr_mergeability_probes (a work kind under
 // internal/db/workitem, workkinds.PRMergeabilityProbes) when a pull request's
 // mergeability can have changed. The worker claims the ripe ones per org,
-// reads each repository's batch in one GraphQL query, and records every answer
-// in its own transaction, which also enqueues the conflict event the answer's
-// transition implies and completes the probe. Nothing in it depends on who
-// admitted a probe.
+// reads the ones that share a GitHub credential in one GraphQL query, and
+// records every answer in its own transaction, which also enqueues the
+// conflict event the answer's transition implies and completes the probe.
+// Nothing in it depends on who admitted a probe.
 package mergeability
 
 import (
@@ -75,19 +75,22 @@ type Publisher interface {
 }
 
 // Worker drains pr_mergeability_probes. Exactly one process runs it at a
-// time, which is what makes it a brain component.
+// time, which is what makes it a brain component, and one goroutine drives
+// it: Drain is not safe for concurrent use.
 type Worker struct {
 	store    db.PRMergeabilityStore
 	orgs     OrgLister
 	resolver ClientResolver
 	pub      Publisher
 	owner    workitem.Owner
+	// limited is when each credential GitHub rate-limited may be read again.
+	limited map[limitKey]time.Time
 }
 
 // NewWorker builds the worker. owner is the process identity every claim is
 // stamped with: provenance, not a fence.
 func NewWorker(store db.PRMergeabilityStore, orgs OrgLister, resolver ClientResolver, pub Publisher, owner workitem.Owner) *Worker {
-	return &Worker{store: store, orgs: orgs, resolver: resolver, pub: pub, owner: owner}
+	return &Worker{store: store, orgs: orgs, resolver: resolver, pub: pub, owner: owner, limited: map[limitKey]time.Time{}}
 }
 
 // RunMergeabilityProbes is the worker's loop: a drain at start, a drain on
@@ -160,18 +163,36 @@ func (w *Worker) drainOrg(ctx context.Context, orgID string) error {
 	}
 }
 
-// repoBatch is the probes of one repository: one GraphQL query.
-type repoBatch struct {
+// repoProbes is the probes of one repository, which share the client
+// resolved for it.
+type repoProbes struct {
 	repositoryID, owner, repo string
 	items                     []db.ClaimedPRMergeabilityProbe
 }
 
+// credentialBatch is the probes whose repositories resolved to one
+// credential: one GraphQL query, read through the first of their clients.
+type credentialBatch struct {
+	credential string
+	client     *ghclient.Client
+	items      []db.ClaimedPRMergeabilityProbe
+}
+
+// errResolvePanic marks a client resolution that panicked, which returns its
+// probes as poison rather than as a dependency being down.
+var errResolvePanic = errors.New("panic resolving a GitHub client")
+
 // probe reads one claimed batch. A probe whose pull request is gone, closed
-// or has no node id is completed with no read; the rest are grouped by the
-// repository registry row their entity references, since a client is
-// resolved per repository.
+// or has no node id is completed with no read. The rest are resolved to a
+// client a repository at a time, since an App installation's grant decides
+// per repository whether the installation may read it, and are then read a
+// credential at a time: nodes(ids:) takes ids from any repositories the
+// credential can read, so the probes that share one cost one query whatever
+// repositories they are in. A claimed batch is at most
+// ghclient.MaxMergeabilityBatch probes, so no credential's share of it needs
+// more than one query.
 func (w *Worker) probe(ctx context.Context, orgID string, items []db.ClaimedPRMergeabilityProbe) {
-	byRepo := map[string]*repoBatch{}
+	byRepo := map[string]*repoProbes{}
 	for _, item := range items {
 		if item.Receipt.Reclaimed {
 			log.WarnContext(ctx, "mergeability probes: reclaimed a probe whose lease expired without a terminal write",
@@ -183,37 +204,78 @@ func (w *Worker) probe(ctx context.Context, orgID string, items []db.ClaimedPRMe
 		}
 		b, ok := byRepo[item.RepositoryID]
 		if !ok {
-			b = &repoBatch{repositoryID: item.RepositoryID, owner: item.Owner, repo: item.Repo}
+			b = &repoProbes{repositoryID: item.RepositoryID, owner: item.Owner, repo: item.Repo}
 			byRepo[item.RepositoryID] = b
 		}
 		b.items = append(b.items, item)
 	}
-	repos := make([]string, 0, len(byRepo))
-	for id := range byRepo {
-		repos = append(repos, id)
+
+	byCredential := map[string]*credentialBatch{}
+	for _, id := range sortedKeys(byRepo) {
+		b := byRepo[id]
+		client, err := w.resolve(ctx, orgID, b)
+		if err != nil {
+			outcome := workitem.OutcomeDependencyDown
+			if errors.Is(err, errResolvePanic) {
+				outcome = workitem.OutcomePoisonSuspected
+			}
+			log.WarnContext(ctx, "mergeability probes: no GitHub client for the repository", "repository_id", b.repositoryID, "error", err)
+			w.requeueAll(ctx, b.items, outcome, err)
+			continue
+		}
+		g, ok := byCredential[client.Credential()]
+		if !ok {
+			g = &credentialBatch{credential: client.Credential(), client: client}
+			byCredential[g.credential] = g
+		}
+		g.items = append(g.items, b.items...)
 	}
-	sort.Strings(repos)
-	for _, id := range repos {
-		w.probeRepo(ctx, orgID, byRepo[id])
+	for _, credential := range sortedKeys(byCredential) {
+		w.read(ctx, orgID, byCredential[credential])
 	}
 }
 
-// probeRepo renews the batch's leases, reads the repository's pull requests
-// in one query, and records each answer. The read runs under the kind's
-// UnitDeadline on ctx with its cancellation dropped: a demoted brain finishes
-// the batch it holds rather than abandoning leases the next holder would only
-// wait out.
-func (w *Worker) probeRepo(ctx context.Context, orgID string, b *repoBatch) {
+// resolve is ClientForRepo for one repository's probes, with a panic turned
+// into errResolvePanic so it cannot kill the single worker goroutine.
+func (w *Worker) resolve(ctx context.Context, orgID string, b *repoProbes) (client *ghclient.Client, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			client, err = nil, fmt.Errorf("%w: %v", errResolvePanic, rec)
+		}
+	}()
+	return w.resolver.ClientForRepo(ctx, orgID, b.owner, b.repo)
+}
+
+// read renews one credential's probes, reads them in one query, and records
+// each answer. The read runs under the kind's UnitDeadline on ctx with its
+// cancellation dropped: a demoted brain finishes the batch it holds rather
+// than abandoning leases the next holder would only wait out.
+//
+// A credential GitHub rate-limited is not read again until the limit resets:
+// the read that was refused and every later one on that credential defer
+// their probes to the reset, the later ones without a request, and a
+// deferral spends none of a probe's attempts.
+func (w *Worker) read(ctx context.Context, orgID string, g *credentialBatch) {
 	ctx, span := tracer.Start(context.WithoutCancel(ctx), "mergeability.probe_batch",
 		trace.WithSpanKind(trace.SpanKindProducer),
-		trace.WithAttributes(telemetry.OrgID(orgID), attribute.String("repository_id", b.repositoryID), telemetry.Count(len(b.items))))
+		trace.WithAttributes(telemetry.OrgID(orgID), attribute.String("credential", g.credential), telemetry.Count(len(g.items))))
 	defer span.End()
 
+	key := limitKey{orgID: orgID, credential: g.credential}
+	if until, ok := w.limited[key]; ok {
+		if time.Now().Before(until) {
+			span.SetAttributes(telemetry.Outcome("rate_limited"))
+			w.deferAll(ctx, g.items, until)
+			return
+		}
+		delete(w.limited, key)
+	}
+
 	// Renewal is the fence check before the read, and where a cancellation
-	// request is observed. A batch claimed behind another repository's slow
+	// request is observed. A batch claimed behind another credential's slow
 	// read may otherwise reach GitHub on a lease about to lapse.
-	held := b.items[:0]
-	for _, item := range b.items {
+	held := g.items[:0]
+	for _, item := range g.items {
 		r, err := w.store.RenewLease(ctx, item.Receipt)
 		switch {
 		case err == nil:
@@ -235,18 +297,10 @@ func (w *Worker) probeRepo(ctx context.Context, orgID string, b *repoBatch) {
 			// A panic must not kill the single worker goroutine; the probes
 			// it held go back with the outcome that says why.
 			span.SetStatus(codes.Error, "panic")
-			log.ErrorContext(ctx, "mergeability probes: panic probing a repository", "repository_id", b.repositoryID, "panic", rec)
+			log.ErrorContext(ctx, "mergeability probes: panic reading a credential's probes", "credential", g.credential, "panic", rec)
 			w.requeueAll(ctx, held, workitem.OutcomePoisonSuspected, fmt.Errorf("panic: %v", rec))
 		}
 	}()
-
-	client, err := w.resolver.ClientForRepo(ctx, orgID, b.owner, b.repo)
-	if err != nil {
-		span.SetStatus(codes.Error, "resolve client")
-		log.WarnContext(ctx, "mergeability probes: no GitHub client for the repository", "repository_id", b.repositoryID, "error", err)
-		w.requeueAll(ctx, held, workitem.OutcomeDependencyDown, err)
-		return
-	}
 
 	nodeIDs := make([]string, len(held))
 	for i, item := range held {
@@ -254,19 +308,23 @@ func (w *Worker) probeRepo(ctx context.Context, orgID string, b *repoBatch) {
 		recordProbe(item.Reason)
 	}
 	readCtx, cancel := context.WithTimeout(ctx, probeKind.Policy.UnitDeadline)
-	reads, err := client.PRMergeability(readCtx, nodeIDs)
+	reads, err := g.client.PRMergeability(readCtx, nodeIDs)
 	cancel()
 	if err != nil {
+		if until, ok := rateLimitedUntil(g.client, err); ok {
+			w.limited[key] = until
+			span.SetAttributes(telemetry.Outcome("rate_limited"))
+			log.WarnContext(ctx, "mergeability probes: GitHub rate-limited the read; the credential's probes wait for the reset",
+				"credential", g.credential, "probes", len(held), "resume_at", until, "error", err)
+			w.deferAll(ctx, held, until)
+			return
+		}
 		outcome := workitem.OutcomeTransient
-		var limited *ghclient.ErrRateLimited
-		switch {
-		case errors.As(err, &limited):
-			outcome = workitem.OutcomeDependencyDown
-		case errors.Is(err, context.DeadlineExceeded):
+		if errors.Is(err, context.DeadlineExceeded) {
 			outcome = workitem.OutcomeDeadline
 		}
 		span.SetStatus(codes.Error, "read")
-		log.WarnContext(ctx, "mergeability probes: read failed; the probes retry with backoff", "repository_id", b.repositoryID, "outcome", string(outcome), "error", err)
+		log.WarnContext(ctx, "mergeability probes: read failed; the probes retry with backoff", "credential", g.credential, "outcome", string(outcome), "error", err)
 		w.requeueAll(ctx, held, outcome, err)
 		return
 	}
@@ -281,6 +339,51 @@ func (w *Worker) probeRepo(ctx context.Context, orgID string, b *repoBatch) {
 		}
 		w.complete(ctx, item, db.PRMergeabilityAnswer{Found: found, Mergeable: read.Mergeable, HeadSHA: read.HeadSHA}, traceparent)
 	}
+}
+
+// limitKey names one credential's rate-limit budget: GitHub meters an App
+// installation or a token on its own, and an org's credentials are its own.
+type limitKey struct {
+	orgID, credential string
+}
+
+// minRateLimitWait is the shortest wait a rate limit defers probes for, so
+// a reset GitHub gave as now, or a refusal that named no reset, is not read
+// again at once.
+const minRateLimitWait = time.Minute
+
+// rateLimitedUntil reports when a read that failed with err may be sent again
+// on client's credential, when the failure was a rate limit: GitHub refused
+// the read (ErrRateLimited), or the client was waiting out a spent budget's
+// reset when the read's deadline ran out.
+func rateLimitedUntil(client *ghclient.Client, err error) (time.Time, bool) {
+	var until time.Time
+	var limited *ghclient.ErrRateLimited
+	switch {
+	case errors.As(err, &limited):
+		until = limited.ResumeAt
+	case errors.Is(err, context.DeadlineExceeded):
+		reset, ok := client.GraphQLBudgetResumeAt()
+		if !ok {
+			return time.Time{}, false
+		}
+		until = reset
+	default:
+		return time.Time{}, false
+	}
+	if floor := time.Now().Add(minRateLimitWait); until.Before(floor) {
+		until = floor
+	}
+	return until, true
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // complete records one answer and forwards its events once they committed.
@@ -319,6 +422,24 @@ func (w *Worker) complete(ctx context.Context, item db.ClaimedPRMergeabilityProb
 	}
 	for _, evt := range res.Events {
 		w.pub.PublishPreEnqueued(termCtx, evt)
+	}
+}
+
+// deferAll returns probes to ready until a rate limit resets, with the
+// attempt each claim charged refunded.
+func (w *Worker) deferAll(ctx context.Context, items []db.ClaimedPRMergeabilityProbe, until time.Time) {
+	for _, item := range items {
+		termCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), terminalWriteTimeout)
+		err := w.store.DeferRateLimited(termCtx, item.Receipt, until)
+		cancel()
+		switch {
+		case err == nil:
+		case errors.Is(err, workitem.ErrLeaseLost), errors.Is(err, workitem.ErrCancelled):
+			log.InfoContext(ctx, "mergeability probes: probe not held at deferral", "probe_id", item.Receipt.ItemID, "entity_id", item.EntityID, "error", err)
+		default:
+			log.ErrorContext(ctx, "mergeability probes: deferral failed; the probe is reclaimed after its lease expires",
+				"probe_id", item.Receipt.ItemID, "entity_id", item.EntityID, "error", err)
+		}
 	}
 }
 
