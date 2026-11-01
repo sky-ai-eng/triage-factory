@@ -232,7 +232,8 @@ func TestStampPROwnership_ActionTargetsElsewhere(t *testing.T) {
 // TestStampPROwnership_ReviewDeliverableDoesNotClaimOwnership guards the narrowest
 // and most consequential edge: a submitted review carries the same
 // owner/repo#N target as the PR it reviews. Reviewing another team's PR must
-// never transfer that PR to the reviewing team, so the stamp keys on the
+// never transfer that PR to the reviewing team, so the funnel refuses any
+// deliverable but a pull request create's, and the stamp keys on the
 // deliverable kind, not on the target shape.
 func TestStampPROwnership_ReviewDeliverableDoesNotClaimOwnership(t *testing.T) {
 	ctx := context.Background()

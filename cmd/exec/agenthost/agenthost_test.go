@@ -404,13 +404,8 @@ func TestLocalClient_RoutingByTriggerType_Manual(t *testing.T) {
 
 	// The deliverable upsert routes through the withWrite branch: a
 	// synthetic-claims tx for a manual conversation.
-	if _, err := client.upsertDeliverable(context.Background(), domain.Deliverable{
-		Provider: domain.ProviderGitHub,
-		Kind:     domain.DeliverableKindPullRequest,
-		Target:   "octocat/hello#1",
-		State:    domain.DeliverableStatePRDraft,
-		DedupKey: "github:pull_request:octocat/hello#1",
-	}, domain.GitHubIdentity{}); err != nil {
+	if _, err := client.upsertDeliverable(context.Background(),
+		domain.NewReviewDeliverable("octocat/hello", 1, "PR_hello1", "head-sha", info.ConversationID), domain.GitHubIdentity{}); err != nil {
 		t.Fatalf("UpsertDeliverable (manual): %v", err)
 	}
 	got := listConversationDeliverables(t, stores, "conv-1")
@@ -436,13 +431,8 @@ func TestLocalClient_RoutingByTriggerType_Event(t *testing.T) {
 	// Event-triggered conversations have no user, so the upsert must route
 	// through the admin-pool ...System variant (the case Postgres RLS would reject under
 	// tf_app). SQLite collapses both, but the same shape runs against Postgres.
-	if _, err := client.upsertDeliverable(context.Background(), domain.Deliverable{
-		Provider: domain.ProviderGitHub,
-		Kind:     domain.DeliverableKindPullRequest,
-		Target:   "octocat/hello#2",
-		State:    domain.DeliverableStatePRDraft,
-		DedupKey: "github:pull_request:octocat/hello#2",
-	}, domain.GitHubIdentity{}); err != nil {
+	if _, err := client.upsertDeliverable(context.Background(),
+		domain.NewReviewDeliverable("octocat/hello", 2, "PR_hello2", "head-sha", info.ConversationID), domain.GitHubIdentity{}); err != nil {
 		t.Fatalf("UpsertDeliverable (event): %v", err)
 	}
 	got := listConversationDeliverables(t, stores, "conv-2")

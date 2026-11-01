@@ -320,3 +320,24 @@ func TestAuditDrop_PanickingRecordIsCountedAndAcknowledged(t *testing.T) {
 		t.Fatalf("want one %s drop under op=acmeprov.record_thing", dropStageRelayDispatch)
 	}
 }
+
+// TestRecordDropOp_LabelsOnlyTheVocabulary: a relayed record's deliverable
+// kind and action are the sidecar's, so the write-stage drop label is either
+// value only when it is in its domain vocabulary, and other when it is not.
+func TestRecordDropOp_LabelsOnlyTheVocabulary(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		a    *domain.Deliverable
+		act  *domain.ExternalAction
+		want string
+	}{
+		{"known kind", &domain.Deliverable{Kind: domain.DeliverableKindPullRequest}, nil, domain.DeliverableKindPullRequest},
+		{"unknown kind", &domain.Deliverable{Kind: "forged"}, nil, dropOpOther},
+		{"known action", nil, &domain.ExternalAction{Action: domain.ActionPRCreated}, domain.ActionPRCreated},
+		{"unknown action", nil, &domain.ExternalAction{Action: "forged"}, dropOpOther},
+	} {
+		if got := recordDropOp(tc.a, tc.act); got != tc.want {
+			t.Errorf("%s: recordDropOp = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}

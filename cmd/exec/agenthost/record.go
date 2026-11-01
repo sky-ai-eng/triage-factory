@@ -78,6 +78,66 @@ func stampScopeInfo(ctx context.Context, stores db.Stores, orgID string, a *doma
 	return nil
 }
 
+// errReviewKeyUnreadable refuses a review deliverable whose key names no pull
+// request node id, so it cannot be rebuilt under the run's conversation.
+var errReviewKeyUnreadable = errors.New("agenthost: a review deliverable's key names no pull request node id")
+
+// keyReviewToConversation rebuilds review deliverable a's dedup key under
+// info's conversation (domain.ReviewDedupKey), from the pull request node id
+// its key carries (domain.DeliverablePullRequestNodeID). The key is this
+// side's to build, like the identity stamped beside it: a review draft is
+// keyed per conversation, so a key naming another conversation would conflict
+// onto that conversation's draft and write over it. A review whose key carries
+// no readable node id is refused with errReviewKeyUnreadable. Any other kind
+// is left as it is.
+func keyReviewToConversation(a *domain.Deliverable, info ConversationInfo) error {
+	if a.Kind != domain.DeliverableKindReview {
+		return nil
+	}
+	nodeID, ok := domain.DeliverablePullRequestNodeID(*a)
+	if !ok {
+		return errReviewKeyUnreadable
+	}
+	a.DedupKey = domain.ReviewDedupKey(nodeID, info.ConversationID)
+	return nil
+}
+
+// errFunnelDeliverable refuses a deliverable the recording funnel does not
+// write: anything but a GitHub pull request, keyed on its node id, in the
+// state a create opens one in.
+var errFunnelDeliverable = errors.New("agenthost: the recording funnel records only a pull request create's deliverable")
+
+// keyFunnelDeliverable admits a, a deliverable the recording funnel is to
+// write, and rebuilds its key and node id from the pull request node id its
+// key carries (domain.PullRequestDedupKey). Its one writer is the pull request
+// create (recordGithubPR). The key is this side's to build, like the review
+// key (keyReviewToConversation): a key carrying anything after the node id
+// names the same pull request under a key no other row holds, so it would
+// escape the insert's conflict with the row already recorded for it. A review
+// draft is recorded through UpsertDeliverable and moved through its
+// state-guarded writes, never through the funnel, so a review arriving here
+// was not built by TF: refusing it keeps a relayed record from writing a
+// draft whose state and review id the sender chose. A create opens a pull
+// request as a draft or open, so a deliverable in any other state was not
+// built by one; and the row's id is the store's to mint, as it is for every
+// other insert. Anything but a GitHub pull request keyed on its node id, as a
+// draft or open, is refused with errFunnelDeliverable.
+func keyFunnelDeliverable(a *domain.Deliverable) error {
+	if a.Kind != domain.DeliverableKindPullRequest {
+		return errFunnelDeliverable
+	}
+	if a.State != domain.DeliverableStatePRDraft && a.State != domain.DeliverableStatePROpen {
+		return errFunnelDeliverable
+	}
+	nodeID, ok := domain.DeliverablePullRequestNodeID(*a)
+	if !ok {
+		return errFunnelDeliverable
+	}
+	a.ID = ""
+	a.DedupKey, a.NodeID = domain.PullRequestDedupKey(nodeID), nodeID
+	return nil
+}
+
 // recordActionSystemInfo appends act on the admin pool (event-triggered
 // runs). A nil act — or a partial test wiring with no ExternalActions store —
 // is a no-op.
@@ -120,20 +180,19 @@ func recordActionAlone(ctx context.Context, stores db.Stores, info ConversationI
 // choke-point write: it stamps the run's identity and the org's current scope
 // for each provider (stampScopeInfo) onto a and act (if present), links a to
 // the entity it is about (resolveDeliverableEntity) and act to the entity or
-// repository it is about (resolveActionReferences), upserts a (if non-nil) and
-// appends act (if non-nil) in the SAME write — admin pool for event-triggered
+// repository it is about (resolveActionReferences), inserts a (if non-nil, and
+// only when no row holds its key) and appends act (if non-nil) in the SAME write — admin pool for event-triggered
 // runs, a synthetic-claims tx for manual ones — logs (never fails) a write
 // error, and records the conversation's link to the act's entity once the write
 // settles (recordActionMemoryLink). Both entity resolutions run before the write and
 // outside its transaction (see recordEntityTouch).
 //
-// a is the pull request or review deliverable the write prepared for a
-// person, and nil for every other write, which leaves its ledger row alone. act
-// is nil when the write carries no distinct external action (a review-draft
-// snapshot re-upserting its deliverable with no new external write). The
-// caller is responsible for setting a.Provider (and any other polymorphic
-// fields) before calling — this function only stamps the run-identity fields
-// common to every provider.
+// a is the pull request deliverable a create opened, and nil for every other
+// write, which leaves its ledger row alone; any other deliverable is refused
+// (keyFunnelDeliverable), and its action is recorded without it. act is nil for a
+// write that carries no external action. The caller is responsible for
+// setting a.Provider before calling — this function only stamps the
+// run-identity fields common to every provider.
 //
 // Best-effort throughout: every write here already happened against the
 // external system (GitHub/Jira/Slack) before this is called, so a recording
@@ -193,13 +252,25 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 	// the span makes it a trace with an error status and the drop counter
 	// beside it makes it a number, which is how "the PR was opened but TF has
 	// no deliverable for it" stops being invisible and starts being measurable.
-	// The deliverable kind is a closed domain vocabulary; its target is a repo
-	// path, and stays out.
+	// The deliverable kind is set on the span once the deliverable is
+	// admitted (keyFunnelDeliverable), which keeps it in the closed domain
+	// vocabulary; its target is a repo path, and stays out.
 	ctx, span := tracer.Start(ctx, "artifact.record",
 		trace.WithAttributes(telemetry.ConversationID(info.ConversationID), telemetry.OrgID(info.OrgID)))
 	defer span.End()
 	if a != nil {
-		span.SetAttributes(telemetry.Op(a.Kind))
+		if kerr := keyFunnelDeliverable(a); kerr != nil {
+			telemetry.RecordSpanError(span, kerr)
+			recordWriteDrop(ctx, recordDropOp(a, nil), kerr)
+			agenthostLog.Warn("refusing a deliverable that is not a pull request create's; recording the action without it",
+				"conversation", info.ConversationID, "kind", a.Kind, "state", a.State, "target", a.Target)
+			if act == nil {
+				return
+			}
+			a = nil
+		} else {
+			span.SetAttributes(telemetry.Op(a.Kind))
+		}
 	}
 
 	// lost is what an error left in err cost: the deliverable and the action
@@ -215,6 +286,13 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 	if act != nil {
 		about = resolveActionReferences(ctx, stores, info, act, container, github, subject)
 	}
+	// The deliverable is a pull request create's (keyFunnelDeliverable),
+	// written by an insert that does nothing when the row is there: GitHub
+	// opens one pull request per node id, and a replay of the same create finds
+	// its own row, so a create that finds a row recorded by another writer
+	// leaves it as it was. written is whether an attempt's insert returned
+	// without error; whose row the key holds is read once the write settles.
+	var written bool
 	if err == nil {
 		var deliverableErr error
 		err = withRecordRetry(ctx, func() error {
@@ -222,20 +300,22 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 				func() error {
 					deliverableErr = nil
 					if a != nil {
-						if _, e := stores.Deliverables.UpsertSystem(ctx, info.OrgID, *a); e != nil {
+						if _, e := stores.Deliverables.InsertDeliverableIfAbsentSystem(ctx, info.OrgID, *a); e != nil {
 							deliverableErr = e
 							return e
 						}
+						written = true
 					}
 					return recordActionSystemInfo(ctx, stores, info, act)
 				},
 				func(ts db.TxStores) error {
 					deliverableErr = nil
 					if a != nil {
-						if _, e := ts.Deliverables.Upsert(ctx, info.OrgID, *a); e != nil {
+						if _, e := ts.Deliverables.InsertDeliverableIfAbsent(ctx, info.OrgID, *a); e != nil {
 							deliverableErr = e
 							return e
 						}
+						written = true
 					}
 					return recordActionTx(ctx, ts, info.OrgID, act)
 				},
@@ -268,8 +348,37 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 	// Link the conversation to the act's entity outside the audit write.
 	recordActionMemoryLink(ctx, stores, info, act, about)
 	// Same placement, same reason: an admin-pool write, so it must run after
-	// withWriteInfo's tx has settled.
-	stampPRAttribution(ctx, stores, info, a)
+	// withWriteInfo's tx has settled. A create attributes only a pull request
+	// whose deliverable the run holds: one that found the row recorded by
+	// another writer did not open it.
+	//
+	// TODO(TFAC-1302): a relayed create is the sidecar's word, and nothing on
+	// this side can confirm the run opened the pull request it names, so one
+	// naming a pull request no row holds yet is attributed to this run.
+	if written && runHoldsDeliverable(ctx, stores, info, *a) {
+		stampPRAttribution(ctx, stores, info, a)
+	}
+}
+
+// runHoldsDeliverable reports whether the run's own deliverables hold a row
+// under a's scope and key. It is read after the write settled, so no attempt
+// that did not land — a rolled-back transaction, a retry, a lost
+// acknowledgement — decides the answer. A read failure answers false:
+// attribution is best-effort, and is stamped only for a row known to be the
+// run's.
+func runHoldsDeliverable(ctx context.Context, stores db.Stores, info ConversationInfo, a domain.Deliverable) bool {
+	rows, err := stores.Deliverables.ListByConversationSystem(ctx, info.OrgID, info.ConversationID)
+	if err != nil {
+		agenthostLog.Warn("reading the run's deliverables failed; attributing nothing to the pull request",
+			"conversation", info.ConversationID, "target", a.Target, "error", err)
+		return false
+	}
+	for _, r := range rows {
+		if r.Scope == a.Scope && r.DedupKey == a.DedupKey {
+			return true
+		}
+	}
+	return false
 }
 
 // --- touched-entity resolution (TFAC-513 §2) ---
@@ -309,10 +418,12 @@ type entityCoordinate struct {
 // kept here so the write funnel and the read path both reach it without a
 // LocalClient.
 //
-// The coordinate's key is what the provider answered with at the time of the
-// write or read, so an entity stored under another key is renamed onto it
-// (entityscope.Resolve with follow): an agent touching a moved Jira issue by
-// its old key resolves the issue's existing entity, never a second one. A
+// A coordinate carrying a provider id resolves the entity carrying it,
+// whatever key it is stored under: an agent touching a moved Jira issue by its
+// old key resolves the issue's existing entity, never a second one. When the
+// coordinate was not relayed, its key is what the provider answered with at
+// the time of the write or read, so the entity is renamed onto it
+// (followsProviderKey). A
 // GitHub coordinate is resolved by its ids instead (resolveGitHubEntity).
 //
 // The Slack case finds or mints a "message" entity for the thread target
@@ -355,7 +466,23 @@ func resolveEntityInfo(ctx context.Context, stores db.Stores, info ConversationI
 	// The poll cycle (or, for Slack, the ingest pipeline) seeds the title from
 	// context; neither an ExternalAction nor an addressed read carries one.
 	// url rides through when present.
-	return entityscope.Resolve(ctx, stores, info.OrgID, ref, c.container, kind, c.url, true)
+	return entityscope.Resolve(ctx, stores, info.OrgID, ref, c.container, kind, c.url, followsProviderKey(info))
+}
+
+// followsProviderKey reports whether a coordinate's key is taken as the key
+// its provider answers with now, so an entity found by the coordinate's id
+// under another key is renamed onto it (entityscope.Resolve with follow): only
+// when the coordinate was not relayed (info.Relayed). A relayed coordinate
+// came from the run's sidecar, which chose its key and its id alike, so
+// following it would let a relayed write rename another issue's entity onto a
+// key of its choosing. The entity is still resolved by its id and linked as
+// stored; the poll cycle renames it when the provider's own answer says its
+// key moved, for an issue in a tracked Jira project or Linear team.
+//
+// TODO(TFAC-1297): an issue outside every tracked set is never polled, so an
+// entity only relayed writes reach keeps the key it had when TF first saw it.
+func followsProviderKey(info ConversationInfo) bool {
+	return !info.Relayed
 }
 
 // resolveGitHubEntity maps a GitHub coordinate to the entity of the pull
@@ -647,7 +774,9 @@ func deliverableGitHubIdentity(a domain.Deliverable, github domain.GitHubIdentit
 // identified by github, the identity its observer read. A Jira or Linear
 // action's object key names the issue it is about, a comment's key the issue
 // the comment is on, so the coordinate is identified by the site and issue id
-// or the UUID the key carries (domain.ObjectKeyEntityIdentity). A failure another attempt can
+// or the UUID the key carries (domain.ObjectKeyEntityIdentity). A relayed key
+// is the sidecar's, so the entity it names is linked as stored and never
+// renamed onto the act's target (followsProviderKey). A failure another attempt can
 // get past is retried like the write (withRecordRetry); resolving only finds,
 // creates or renames toward what the provider answered, so a second attempt
 // lands on what a first one wrote. One that still fails is logged, and the act
@@ -658,9 +787,6 @@ func resolveActionReferences(ctx context.Context, stores db.Stores, info Convers
 	about := subject
 	if !subject.matches(act.Provider, act.Target) {
 		c := entityCoordinate{provider: act.Provider, target: act.Target, url: act.URL, container: container, github: github}
-		// TODO(TFAC-1254): a relayed row's object_key is the sidecar's to
-		// choose, and resolving it follows a rename, so a forged key links
-		// another issue's entity and renames it onto the row's target.
 		if scope, externalID, ok := domain.ObjectKeyEntityIdentity(act.Provider, act.ObjectKey); ok {
 			c.scope, c.externalID = scope, externalID
 		}

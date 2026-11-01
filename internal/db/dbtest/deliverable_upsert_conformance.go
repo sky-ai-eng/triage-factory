@@ -57,8 +57,54 @@ func RunDeliverableUpsertConformance(t *testing.T, mk ExternalObjectScopeFactory
 			if _, err := s.Deliverables.InsertDeliverableIfAbsentSystem(ctx, orgID, a); !errors.Is(err, db.ErrDeliverableKind) {
 				t.Errorf("InsertDeliverableIfAbsentSystem(kind %q): err = %v, want ErrDeliverableKind", kind, err)
 			}
+			if _, err := s.Deliverables.InsertDeliverableIfAbsent(ctx, orgID, a); !errors.Is(err, db.ErrDeliverableKind) {
+				t.Errorf("InsertDeliverableIfAbsent(kind %q): err = %v, want ErrDeliverableKind", kind, err)
+			}
 		}
 	})
+
+	// Insert-if-absent inserts a row once and, on a conflict, changes nothing:
+	// a second write of the same key in another state leaves the first row's
+	// state as it was. A row with no scope is refused and leaves nothing.
+	for _, door := range []struct {
+		name   string
+		insert func(s db.DeliverableStore, orgID string, a domain.Deliverable) (bool, error)
+	}{
+		{"InsertDeliverableIfAbsent", func(s db.DeliverableStore, orgID string, a domain.Deliverable) (bool, error) {
+			return s.InsertDeliverableIfAbsent(ctx, orgID, a)
+		}},
+		{"InsertDeliverableIfAbsentSystem", func(s db.DeliverableStore, orgID string, a domain.Deliverable) (bool, error) {
+			return s.InsertDeliverableIfAbsentSystem(ctx, orgID, a)
+		}},
+	} {
+		t.Run("Insert_if_absent/"+door.name, func(t *testing.T) {
+			s, orgID, teamID := mk(t)
+			pr := func(draft bool) domain.Deliverable {
+				a := domain.NewPullRequestDeliverable("octo/api", 7, "PR_kw7", "feat", "main", "https://github.com/octo/api/pull/7", "Title", "Body", draft)
+				a.TeamID = teamID
+				a.Scope = TestGitHubHost
+				return a
+			}
+			unscoped := pr(true)
+			unscoped.Scope = ""
+			if _, err := door.insert(s.Deliverables, orgID, unscoped); !errors.Is(err, db.ErrExternalObjectScopeRequired) {
+				t.Errorf("%s with no scope: err = %v, want ErrExternalObjectScopeRequired", door.name, err)
+			}
+			if inserted, err := door.insert(s.Deliverables, orgID, pr(true)); err != nil || !inserted {
+				t.Fatalf("%s (first) = %v, %v; want an insert", door.name, inserted, err)
+			}
+			if inserted, err := door.insert(s.Deliverables, orgID, pr(false)); err != nil || inserted {
+				t.Errorf("%s (conflict) = %v, %v; want no insert", door.name, inserted, err)
+			}
+			rows, err := s.Deliverables.ListNonTerminalBySystem(ctx, orgID)
+			if err != nil {
+				t.Fatalf("ListNonTerminalBySystem: %v", err)
+			}
+			if len(rows) != 1 || rows[0].State != domain.DeliverableStatePRDraft {
+				t.Errorf("rows after a conflicting insert = %+v, want the one row, still draft", rows)
+			}
+		})
+	}
 
 	for _, door := range []struct {
 		name   string

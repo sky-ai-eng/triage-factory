@@ -110,8 +110,9 @@ func TestStampPRCommission_DoesNotOverwriteExistingCommissioner(t *testing.T) {
 	}
 }
 
-// TestStampPRCommission_ReviewDeliverableRecordsNothing shares the kind guard
-// with the ownership stamp, and needs its own case for the same reason: a
+// TestStampPRCommission_ReviewDeliverableRecordsNothing shares the funnel's
+// refusal and the kind guard with the ownership stamp, and needs its own case
+// for the same reason: a
 // submitted review carries the identical owner/repo#N target as the pull
 // request it reviews. Reviewing someone else's work must not record you as
 // having asked for it.
