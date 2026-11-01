@@ -231,13 +231,10 @@ type PRFile struct {
 }
 
 // MaxPRFiles caps the total number of files fetched by GetPRFiles across all
-// pages (maxFetchPages × 100). Exported so callers can detect a truncated
-// listing (len(files) >= MaxPRFiles means GetPRFiles hit the cap and the
-// result may be incomplete).
-//
-// TODO(TFAC-1305): GitHub lists up to 3,000 of a PR's files, so a PR with
-// more than 1,000 reads as truncated when GitHub would list them all.
-const MaxPRFiles = maxFetchPages * 100
+// pages: GitHub's own limit, the most of a PR's files its files endpoint
+// lists. Exported so callers can detect a truncated listing (len(files) >=
+// MaxPRFiles means GetPRFiles hit the cap and the result may be incomplete).
+const MaxPRFiles = 3000
 
 // GetPRFiles lists files changed in a PR, including per-file patch content.
 // Paginates up to MaxPRFiles total results; a PR with more changed files than
@@ -954,13 +951,8 @@ type restPR struct {
 }
 
 // MaxOpenPRs is the most open PRs ListOpenPRs returns for one repo: its
-// listing stops at maxFetchPages pages of 100.
-//
-// TODO(TFAC-1305): a repository with more open PRs than this has its older
-// ones never discovered, and a tracked one pushed past the last page is
-// refreshed in full on every cycle its listing changes; the listing gets a
-// cap of its own above any real repository.
-const MaxOpenPRs = maxFetchPages * 100
+// listing stops at maxOpenPRPages pages of 100.
+const MaxOpenPRs = maxOpenPRPages * 100
 
 // ListOpenPRs lists a repo's open PRs via REST with a conditional request,
 // returning them as DiscoveredPRs (node ID + discovery snapshot) ready to
@@ -998,12 +990,12 @@ func (c *Client) ListOpenPRs(ctx context.Context, owner, repo, etag string) ([]D
 	out = append(out, page1...)
 
 	// Single-page fast path: fewer than a full page means no more pages.
-	// Capped at maxFetchPages (TFAC-571): a repo with more than 1,000 open
-	// PRs would otherwise paginate unbounded on every discovery cycle.
+	// Capped at maxOpenPRPages, a backstop against a pagination that never
+	// ends rather than a limit any real repository reaches.
 	for page := 2; len(out) > 0 && len(out)%100 == 0; page++ {
-		if page > maxFetchPages {
+		if page > maxOpenPRPages {
 			githubLog.Warn("open PR listing truncated at page cap; some open PRs may be missing from discovery this cycle",
-				"owner", owner, "repo", repo, "resource", "pulls", "page_cap", maxFetchPages)
+				"owner", owner, "repo", repo, "resource", "pulls", "page_cap", maxOpenPRPages)
 			break
 		}
 		data, perr := c.Get(ctx, fmt.Sprintf("/repos/%s/%s/pulls?state=open&per_page=100&page=%d", owner, repo, page))

@@ -134,7 +134,7 @@ flags (see `go run ./cmd/pollbench -h` for all):
 | `smoke` | 20 | ~100 | 1 | CI tripwire |
 | `dp1` | 300 | ~4,600 | 1 | Large-org GHES target |
 | `stress` | 600 | ~12,100 | 1 | Headroom check |
-| `mono` | 1 | 1,500 (1,000 tracked) | 100 | Mergeability probing on a monorepo |
+| `mono` | 1 | 1,500 | 100 | Mergeability probing on a monorepo |
 
 Per-repo PR counts are drawn from a mixed distribution around the shape's
 mean (~70% of repos below the mean, ~25% up to 3×, ~5% pathological at
@@ -144,9 +144,10 @@ exceed the 100-PR page size.
 `mono` is one repository shaped on kubernetes/kubernetes: 1,500 open PRs on
 `main`, with changed-file counts at the measured median 3, p90 17, p99 140,
 and maximum 550. Its `main` moves every 2 warm cycles, and 1% of its PRs
-are pushed every warm cycle. TF's open-PR listing stops at 1,000 PRs per
-repository, so it tracks 1,000 of the 1,500, and every expectation and
-per-PR figure the report prints counts the tracked ones.
+are pushed every warm cycle. TF tracks all 1,500. Its open-PR listing
+stops at 10,000 PRs per repository; a run whose repository has more tracks
+the first 10,000, and every expectation and per-PR figure the report
+prints counts the tracked ones.
 
 > The `dp1` numbers are placeholders approximating a large single-org GHES
 > deployment (several hundred to a few thousand developers). Replace them with a

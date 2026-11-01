@@ -211,7 +211,7 @@ minutes before that listing, for clock skew between GitHub and TF. Any other PR
 found for the first time was already open when TF last looked, so its body is a
 baseline and emits nothing, as for every other change in tracking. That covers
 every PR in a repository's first listing (TF's first poll, or a repository just
-added to a team's tracked set), one past the 1,000 open PRs a listing returns,
+added to a team's tracked set), one past the 10,000 open PRs a listing returns,
 and a reopened PR. A PR TF's agent opens is recorded as an entity when
 the agent records it, before a poll finds it, and that entity is seeded
 without events, so its body is a baseline too. A snapshot stored before
