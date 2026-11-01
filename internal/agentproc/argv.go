@@ -74,6 +74,12 @@ func BuildArgs(opts RunOptions) []string {
 		if opts.PermissionPrompts {
 			args = append(args, "--permission-prompts")
 		}
+		// Opt the wrapper into the PostToolBatch hook, which asks for text
+		// to hand the model after each tool batch. Without it the wrapper
+		// registers no hook and a batch costs no round trip.
+		if opts.OnToolBatch != nil {
+			args = append(args, "--tool-batch-notes")
+		}
 	} else {
 		args = append(args, "-p", opts.Message)
 	}

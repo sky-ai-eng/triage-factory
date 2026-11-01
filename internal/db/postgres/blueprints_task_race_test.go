@@ -129,7 +129,8 @@ func (fx raceFixture) fire(t *testing.T, stores db.Stores, br domain.BlueprintRu
 	if br.ID == "" {
 		br.ID = uuid.New().String()
 	}
-	return stores.Blueprints.CreateRunWithFirstStepSystem(context.Background(), fx.orgID, br, claim, "", fx.firstStep(br))
+	inserted, claimed, conv, _, err := stores.Blueprints.CreateRunWithFirstStepSystem(context.Background(), fx.orgID, br, claim, "", fx.firstStep(br))
+	return inserted, claimed, conv, err
 }
 
 // TestBlueprintStore_Postgres_OneActiveRunPerTask: the task gate
@@ -174,7 +175,7 @@ func TestBlueprintStore_Postgres_OneActiveRunPerTask(t *testing.T) {
 			defer wg.Done()
 			ready.Done()
 			<-start
-			insertedFlags[i], _, _, errs[i] = stores.Blueprints.CreateRunWithFirstStepSystem(ctx, fx.orgID, firings[i], db.AgentClaimStamp{}, "", fx.firstStep(firings[i]))
+			insertedFlags[i], _, _, _, errs[i] = stores.Blueprints.CreateRunWithFirstStepSystem(ctx, fx.orgID, firings[i], db.AgentClaimStamp{}, "", fx.firstStep(firings[i]))
 		}(i)
 	}
 	ready.Wait()

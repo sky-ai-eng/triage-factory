@@ -152,7 +152,9 @@ func TestCloseCancelIntent_KillFailureStillLeavesTheRunCalledOff(t *testing.T) {
 	r.spawner = sp
 
 	entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, "owner/repo#kill-fails")
-	brID, convID := seedRunOnTask(t, database, taskID, "running", "")
+	// Parked on a person: not working, so the merge closes the task and
+	// stops the run rather than holding the close.
+	brID, convID := seedRunOnTask(t, database, taskID, "running", domain.StatusOpen)
 
 	enqueueMerged(t, database, entityID)
 	if err := r.drainEventQueue(context.Background()); err != nil {

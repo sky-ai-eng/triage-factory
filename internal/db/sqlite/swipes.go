@@ -236,7 +236,9 @@ func (s *swipeStore) RequeueTask(ctx context.Context, orgID string, taskID strin
 		// Also clear close metadata — re-queueing a
 		// previously-terminal task means it isn't terminal anymore,
 		// and the Board's Done-column 7-day cap reads closed_at to
-		// gate visibility.
+		// gate visibility. A held close clears too: putting the task back in
+		// the queue overrides the event that resolved it, as reopening a
+		// closed one does.
 		res, err := q.ExecContext(ctx,
 			`UPDATE tasks
 			    SET status = 'queued',
@@ -245,7 +247,8 @@ func (s *swipeStore) RequeueTask(ctx context.Context, orgID string, taskID strin
 			        claimed_by_user_id  = NULL,
 			        source_status = NULL,
 			        closed_at = NULL,
-			        close_reason = NULL
+			        close_reason = NULL,
+			        close_deferred_event_id = NULL
 			  WHERE id = ?`,
 			taskID,
 		)
@@ -314,7 +317,8 @@ func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID, us
 		// after status returns to 'queued'. Clear both cols so the task
 		// lands back in the team's unclaimed triage queue, the same shape
 		// /requeue produces. Close metadata clears too — undoing a dismiss
-		// or complete means the task isn't terminal anymore.
+		// or complete means the task isn't terminal anymore. A held close
+		// clears as /requeue's does.
 		res, err := q.ExecContext(ctx,
 			`UPDATE tasks
 			    SET status = 'queued',
@@ -323,7 +327,8 @@ func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID, us
 			        claimed_by_user_id  = NULL,
 			        source_status = NULL,
 			        closed_at = NULL,
-			        close_reason = NULL
+			        close_reason = NULL,
+			        close_deferred_event_id = NULL
 			  WHERE id = ?
 			    AND (SELECT creator_user_id FROM swipe_events
 			          WHERE task_id = ? ORDER BY id DESC LIMIT 1) = ?

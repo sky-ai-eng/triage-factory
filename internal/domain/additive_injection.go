@@ -26,3 +26,39 @@ func AdditiveEventInjection(eventType, metadataJSON string) string {
 		eventType, metadataJSON,
 	)
 }
+
+// taskClosingGuidance is what an agent working on a task should do once an
+// event has resolved the situation the task is about.
+const taskClosingGuidance = "If your own work caused this, finish what you were doing. Otherwise start nothing new on this task and wrap up."
+
+// TaskClosingInjection is the agent-facing copy telling a conversation on a
+// task whose close is held that an event resolved the situation the task is
+// about, so the task closes once the work on it is finished: the
+// conversations working when the close was held, each one engaged while it
+// still is, and a deliverable awaiting a person. metadataJSON is the closing event's metadata JSON; "" renders
+// a body naming the event type alone. Bare, like AdditiveEventInjection.
+func TaskClosingInjection(eventType, metadataJSON string) string {
+	return taskClosingNote(eventType, metadataJSON, taskClosingGuidance+" ")
+}
+
+// TaskClosingNotice is TaskClosingInjection without the line saying what to
+// do about it, for work a person started: what the person asked for is what
+// the agent acts on, and the note only tells it what happened.
+func TaskClosingNotice(eventType, metadataJSON string) string {
+	return taskClosingNote(eventType, metadataJSON, "")
+}
+
+// taskClosingNote is the close note with guidance, "" or a sentence and its
+// trailing space, ahead of its last line.
+func taskClosingNote(eventType, metadataJSON, guidance string) string {
+	if metadataJSON == "" {
+		return fmt.Sprintf(
+			"A %s event resolved the situation this task is about. %sThe task closes once the work on it is finished.",
+			eventType, guidance,
+		)
+	}
+	return fmt.Sprintf(
+		"A %s event resolved the situation this task is about. Event metadata:\n%s\n%sThe task closes once the work on it is finished.",
+		eventType, metadataJSON, guidance,
+	)
+}

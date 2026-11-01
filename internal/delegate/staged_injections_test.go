@@ -2,6 +2,7 @@ package delegate
 
 import (
 	"context"
+	"database/sql"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -93,10 +95,10 @@ func TestStageOrDeliverInjectionPrimitive_BlankBodyNoOp(t *testing.T) {
 	}
 }
 
-// TestStagedInjectionsForResume_FlushesAndDrains: the resume helper bundles every
+// TestStagedInjectionsForEngagement_FlushesAndDrains: the helper bundles every
 // staged injection into one wrapped block, oldest content present, and drains the
 // queue so a second resume prepends nothing.
-func TestStagedInjectionsForResume_FlushesAndDrains(t *testing.T) {
+func TestStagedInjectionsForEngagement_FlushesAndDrains(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "run-resume", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
@@ -105,7 +107,7 @@ func TestStagedInjectionsForResume_FlushesAndDrains(t *testing.T) {
 	stageOne(t, s, runmode.LocalDefaultOrgID, "run-resume", "p", "injection one")
 	stageOne(t, s, runmode.LocalDefaultOrgID, "run-resume", "p", "injection two")
 
-	block := s.stagedInjectionsForResume(ctx, runmode.LocalDefaultOrgID, "run-resume")
+	block := s.stagedInjectionsForEngagement(ctx, runmode.LocalDefaultOrgID, "run-resume")
 	if !strings.HasPrefix(block, "<system-note>") || !strings.HasSuffix(block, "</system-note>") {
 		t.Fatalf("block not wrapped: %q", block)
 	}
@@ -113,8 +115,122 @@ func TestStagedInjectionsForResume_FlushesAndDrains(t *testing.T) {
 		t.Errorf("block missing a staged injection: %q", block)
 	}
 	// Destructive: the flush drained the queue.
-	if again := s.stagedInjectionsForResume(ctx, runmode.LocalDefaultOrgID, "run-resume"); again != "" {
+	if again := s.stagedInjectionsForEngagement(ctx, runmode.LocalDefaultOrgID, "run-resume"); again != "" {
 		t.Errorf("second resume should prepend nothing (queue drained), got %q", again)
+	}
+}
+
+// heldCloseFixture is a conversation no person started, on a task whose
+// close a CI pass holds.
+func heldCloseFixture(t *testing.T, convID string) (s *Spawner, database *sql.DB, conv *domain.Conversation, taskID, eventID string) {
+	t.Helper()
+	org := runmode.LocalDefaultOrgID
+	database = newDelegateTestDB(t)
+	seedConversation(t, database, convID, "sess", "/tmp/wt")
+	markEngaged(t, database, convID)
+	if _, err := database.Exec(`UPDATE conversations SET trigger_type = 'event', creator_user_id = NULL WHERE id = ?`, convID); err != nil {
+		t.Fatalf("make the conversation event-triggered: %v", err)
+	}
+	stores := testSpawnerStores(database)
+	s = NewSpawner(database, stores, nil, nil, "claude-sonnet-4-6")
+	ctx := context.Background()
+
+	var entityID string
+	if err := database.QueryRow(`SELECT t.id, t.entity_id FROM conversations c JOIN tasks t ON t.id = c.task_id WHERE c.id = ?`, convID).Scan(&taskID, &entityID); err != nil {
+		t.Fatalf("read task: %v", err)
+	}
+	eventID, err := stores.Events.Record(ctx, org, domain.Event{EventType: domain.EventGitHubPRCICheckPassed, EntityID: &entityID, MetadataJSON: `{"check_name":"build"}`})
+	if err != nil {
+		t.Fatalf("record the pass: %v", err)
+	}
+	if out, err := stores.Tasks.CloseOrHoldSystem(ctx, org, taskID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed, eventID); err != nil || !out.Held {
+		t.Fatalf("setup: hold = (%+v, %v), want held", out, err)
+	}
+	if conv, err = s.conversations.GetSystem(ctx, org, convID); err != nil || conv == nil {
+		t.Fatalf("read conversation: %v", err)
+	}
+	return s, database, conv, taskID, eventID
+}
+
+// TestTellHeldClose_StagesTheCloseNoteOncePerClosingEvent: an engagement on a
+// task whose close is held stages the close note naming the closing event,
+// and the next engagement on the same hold stages nothing more.
+func TestTellHeldClose_StagesTheCloseNoteOncePerClosingEvent(t *testing.T) {
+	s, _, conv, taskID, eventID := heldCloseFixture(t, "run-held")
+	org := runmode.LocalDefaultOrgID
+	ctx := context.Background()
+
+	s.tellHeldClose(ctx, org, conv, taskID)
+	s.tellHeldClose(ctx, org, conv, taskID)
+
+	notes, err := s.stagedInjections.FlushPendingSystem(ctx, org, conv.ID)
+	if err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	if len(notes) != 1 {
+		t.Fatalf("staged notes = %+v, want one", notes)
+	}
+	if n := notes[0]; n.Producer != domain.StagedInjectionProducerTaskClosing || n.Provenance.EventID != eventID || !strings.Contains(n.Body, "A github:pr:ci_check_passed event resolved") {
+		t.Errorf("note = %+v, want the close note naming the pass", n)
+	}
+}
+
+// TestTellHeldClose_TellsWorkAPersonStartedWhatHappenedOnly: an engagement
+// delivering a person's message, one already under way on a message it
+// delivered, and a conversation a person delegated, get the close notice
+// without the line saying what to do about it. A whole note still waiting from
+// before the person's message is replaced by the notice.
+func TestTellHeldClose_TellsWorkAPersonStartedWhatHappenedOnly(t *testing.T) {
+	org := runmode.LocalDefaultOrgID
+	ctx := context.Background()
+	for _, how := range []string{"waiting_message", "delivered_message", "delegation"} {
+		t.Run(how, func(t *testing.T) {
+			s, database, conv, taskID, eventID := heldCloseFixture(t, "run-held-"+how)
+			evt, err := s.events.GetSystem(ctx, org, eventID)
+			if err != nil || evt == nil {
+				t.Fatalf("read the pass: %v", err)
+			}
+			message := pendingUserInput(conv.ID, runmode.LocalDefaultUserID, "fix the nits before I approve")
+			switch how {
+			case "waiting_message":
+				// Told while no person was asking, then the person writes.
+				s.tellHeldClose(ctx, org, conv, taskID)
+				if _, err := s.conversations.InsertMessage(ctx, org, message); err != nil {
+					t.Fatalf("queue the person's message: %v", err)
+				}
+			case "delivered_message":
+				delivered := true
+				message.Delivered = &delivered
+				if _, err := s.conversations.InsertMessage(ctx, org, message); err != nil {
+					t.Fatalf("record the person's delivered message: %v", err)
+				}
+			default:
+				if _, err := database.Exec(`UPDATE conversations SET trigger_type = 'manual', creator_user_id = ? WHERE id = ?`, runmode.LocalDefaultUserID, conv.ID); err != nil {
+					t.Fatalf("make the conversation a person's: %v", err)
+				}
+				conv.CreatorUserID = runmode.LocalDefaultUserID
+			}
+
+			if how == "delivered_message" {
+				// The close is held while the engagement is under way, and the
+				// router tells it.
+				s.TellTaskClosing(ctx, org, conv.ID, *evt)
+			} else {
+				s.tellHeldClose(ctx, org, conv, taskID)
+			}
+
+			notes, err := s.stagedInjections.FlushPendingSystem(ctx, org, conv.ID)
+			if err != nil {
+				t.Fatalf("flush: %v", err)
+			}
+			metadataJSON := evt.MetadataJSON
+			if current, err := events.Current(ctx, org, evt.EventType, metadataJSON); err == nil {
+				metadataJSON = current
+			}
+			if want := domain.TaskClosingNotice(evt.EventType, metadataJSON); len(notes) != 1 || notes[0].Body != want {
+				t.Errorf("staged notes = %+v, want the one notice %q", notes, want)
+			}
+		})
 	}
 }
 
@@ -175,11 +291,11 @@ func TestResumeSystemPrepends_EmptyWhenNothingPending(t *testing.T) {
 	}
 }
 
-// TestStagedInjectionsForResume_NilStoreSafe: a spawner with no staged-injection store
+// TestStagedInjectionsForEngagement_NilStoreSafe: a spawner with no staged-injection store
 // (partial test bundle) degrades to "" rather than panicking.
-func TestStagedInjectionsForResume_NilStoreSafe(t *testing.T) {
+func TestStagedInjectionsForEngagement_NilStoreSafe(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	if got := s.stagedInjectionsForResume(context.Background(), runmode.LocalDefaultOrgID, "r"); got != "" {
+	if got := s.stagedInjectionsForEngagement(context.Background(), runmode.LocalDefaultOrgID, "r"); got != "" {
 		t.Errorf("nil store should yield empty block, got %q", got)
 	}
 }

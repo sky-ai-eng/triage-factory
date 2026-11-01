@@ -245,6 +245,14 @@ type RunOptions struct {
 	// threads it through.
 	OnResult func(*Result)
 
+	// OnToolBatch, when non-nil, is asked for text to hand the model each
+	// time every tool call of a batch has resolved, before the model's next
+	// request (the SDK's PostToolBatch hook). "" hands nothing. Called from
+	// the reader goroutine while the agent's turn waits on the answer, so it
+	// may read the database but must return promptly. Only RunInteractive
+	// threads it through.
+	OnToolBatch func() string
+
 	// LLMResolver, when non-nil, resolves the org's LLM env map instead of
 	// Run's built-in raw-secret resolution — the seam the brain wires to
 	// internal/cred/llmcred so a role-mode Bedrock org mints short-lived STS

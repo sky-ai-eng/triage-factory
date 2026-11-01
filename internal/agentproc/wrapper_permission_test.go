@@ -274,6 +274,86 @@ func TestHandlePermission_RepliesKeyedByToolCallID(t *testing.T) {
 	}
 }
 
+// toolBatchStubSDK fires the wrapper's PostToolBatch hook as the SDK does
+// after a tool batch resolves, first for a subagent's batch and then for the
+// agent's, and yields what each returned; null when the wrapper registered
+// no hook.
+const toolBatchStubSDK = `
+export function query({ options }) {
+  return {
+    async *[Symbol.asyncIterator]() {
+      const hook = options.hooks?.PostToolBatch?.[0]?.hooks?.[0]
+      if (!hook) {
+        yield { type: "stub_hook", output: null }
+        return
+      }
+      const signal = new AbortController().signal
+      const sub = await hook({ hook_event_name: "PostToolBatch", tool_calls: [], agent_id: "sub-1" }, undefined, { signal })
+      yield { type: "stub_subagent_hook", output: sub }
+      const output = await hook({ hook_event_name: "PostToolBatch", tool_calls: [] }, undefined, { signal })
+      yield { type: "stub_hook", output }
+    },
+    async interrupt() {},
+    async setPermissionMode() {},
+  }
+}
+`
+
+// TestWrapperToolBatchHookCarriesTheReply: with --tool-batch-notes the
+// wrapper asks over a tool_batch for what the model reads after the agent's
+// batch, and hands the reply's context back as the hook's additionalContext.
+// A subagent's batch asks nothing. Without the flag no hook is registered.
+func TestWrapperToolBatchHookCarriesTheReply(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed")
+	}
+	if out := startWrapper(t, node, toolBatchStubSDK).next(); out["type"] != "stub_hook" || out["output"] != nil {
+		t.Errorf("without the flag the stub saw %v, want no hook", out)
+	}
+
+	w := startWrapper(t, node, toolBatchStubSDK, "--tool-batch-notes")
+	sub := w.next()
+	if subOut, ok := sub["output"].(map[string]any); sub["type"] != "stub_subagent_hook" || !ok || len(subOut) != 0 {
+		t.Fatalf("first non-ready line = %v, want the subagent's batch answered with nothing and no tool_batch", sub)
+	}
+	req := w.next()
+	id, _ := req["id"].(string)
+	if req["type"] != "control" || req["subtype"] != "tool_batch" || id == "" {
+		t.Fatalf("first non-ready line = %v, want a tool_batch with an id", req)
+	}
+	reply, err := json.Marshal(map[string]any{"kind": "tool_batch_reply", "id": id, "context": "the task is resolved"})
+	if err != nil {
+		t.Fatalf("marshal tool_batch_reply: %v", err)
+	}
+	if _, err := w.stdin.Write(append(reply, '\n')); err != nil {
+		t.Fatalf("write tool_batch_reply: %v", err)
+	}
+	out := w.next()
+	output, _ := out["output"].(map[string]any)
+	specific, _ := output["hookSpecificOutput"].(map[string]any)
+	if specific["hookEventName"] != "PostToolBatch" || specific["additionalContext"] != "the task is resolved" {
+		t.Errorf("hook returned %v, want the reply's context as PostToolBatch additionalContext (stderr: %s)", out, w.stderr.String())
+	}
+}
+
+// TestHandleToolBatch_RepliesByID: the reader answers a tool_batch with the
+// caller's text, keyed by the hook's id.
+func TestHandleToolBatch_RepliesByID(t *testing.T) {
+	stdin := newSyncBuffer()
+	l := &LiveRun{stdin: captureWriteCloser{stdin}, done: make(chan struct{}), toolBatch: func() string { return "the task is resolved" }}
+
+	l.handleToolBatch(controlLine{Subtype: "tool_batch", ID: "batch-1"})
+
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdin.String())), &resp); err != nil {
+		t.Fatalf("decode tool_batch_reply %q: %v", stdin.String(), err)
+	}
+	if resp["kind"] != "tool_batch_reply" || resp["id"] != "batch-1" || resp["context"] != "the task is resolved" {
+		t.Errorf("tool_batch_reply = %v, want the caller's text keyed by batch-1", resp)
+	}
+}
+
 // missingToolUseIDStubSDK is the contract-violating case sdk.d.ts says cannot
 // happen: canUseTool invoked with no toolUseID at all. It gates two calls
 // concurrently, because collapsing both onto one absent key is how a missing id

@@ -26,34 +26,33 @@ import (
 func testRouterDeps(database *sql.DB) RouterDeps {
 	st := sqlitestore.New(database)
 	return RouterDeps{
-		Prompts:         st.Prompts,
-		Blueprints:      st.Blueprints,
-		Handlers:        st.EventHandlers,
-		Agents:          st.Agents,
-		TeamAgents:      st.TeamAgents,
-		Users:           st.Users,
-		Tasks:           st.Tasks,
-		Conversations:   st.Conversations,
-		Entities:        st.Entities,
-		Firings:         st.PendingFirings,
-		Events:          st.Events,
-		EventQueue:      st.EventQueue,
-		ExternalActions: st.ExternalActions,
-		Orgs:            st.Orgs,
-		Teams:           st.Teams,
-		TeamRepos:       tracksEveryRepo{st.TeamGitHubRepos},
-		JiraRules:       tracksEveryJiraProject{st.JiraStatusRules},
-		LinearRules:     tracksEveryLinearTeam{st.LinearTeamRules},
-		GitHubGroups:    st.TeamGitHubGroups,
-		ReDerive:        st.TaskReDerive,
-		Mergeability:    st.PRMergeability,
-		EventSources:    st.OrgEventSources,
-		Spawner:         refusingDelegator{},
-		Scorer:          noopScorer{},
-		WS:              websocket.NewHub(),
-		Publisher:       discardPublisher{},
-		ExecutorID:      testExecutorID,
-		BootEpoch:       1,
+		Prompts:       st.Prompts,
+		Blueprints:    st.Blueprints,
+		Handlers:      st.EventHandlers,
+		Agents:        st.Agents,
+		TeamAgents:    st.TeamAgents,
+		Users:         st.Users,
+		Tasks:         st.Tasks,
+		Conversations: st.Conversations,
+		Entities:      st.Entities,
+		Firings:       st.PendingFirings,
+		Events:        st.Events,
+		EventQueue:    st.EventQueue,
+		Orgs:          st.Orgs,
+		Teams:         st.Teams,
+		TeamRepos:     tracksEveryRepo{st.TeamGitHubRepos},
+		JiraRules:     tracksEveryJiraProject{st.JiraStatusRules},
+		LinearRules:   tracksEveryLinearTeam{st.LinearTeamRules},
+		GitHubGroups:  st.TeamGitHubGroups,
+		ReDerive:      st.TaskReDerive,
+		Mergeability:  st.PRMergeability,
+		EventSources:  st.OrgEventSources,
+		Spawner:       refusingDelegator{},
+		Scorer:        noopScorer{},
+		WS:            websocket.NewHub(),
+		Publisher:     discardPublisher{},
+		ExecutorID:    testExecutorID,
+		BootEpoch:     1,
 	}
 }
 
@@ -113,6 +112,10 @@ func (refusingDelegator) TeardownTaskDeliverablesSystem(context.Context, string,
 
 func (refusingDelegator) StageOrDeliverAdditiveEvent(context.Context, string, string, string, string, domain.NoteProvenance, delegate.AdditiveFiringRef) delegate.InjectOutcome {
 	return delegate.InjectNotDelivered
+}
+
+func (refusingDelegator) TellTaskClosing(context.Context, string, string, domain.Event) bool {
+	return false
 }
 
 // discardPublisher is the Publisher of a test that does not read the

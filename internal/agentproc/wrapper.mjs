@@ -12,9 +12,9 @@
 //   - streaming-input (`--input-format stream-json`): the prompt is an
 //     AsyncIterable<SDKUserMessage> fed from newline-delimited control
 //     messages on stdin. This is the only mode in which the SDK exposes
-//     its live controls — interrupt(), setPermissionMode(), and the
-//     canUseTool permission callback — so it backs the interactive
-//     LiveRun API on the Go side. The control protocol is documented
+//     its live controls — interrupt(), setPermissionMode(), the
+//     canUseTool permission callback and the PostToolBatch hook — so it
+//     backs the interactive LiveRun API on the Go side. The control protocol is documented
 //     alongside the Go LiveRun type (live.go).
 //
 // Auth resolves through the SDK's own env-var/keychain logic — we
@@ -54,6 +54,7 @@ function parseArgs(argv) {
   let prompt = ""
   let streamInput = false
   let permissionPrompts = false
+  let toolBatchNotes = false
   const opts = {}
   const addDirs = []
 
@@ -131,6 +132,13 @@ function parseArgs(argv) {
         // handler was supplied.
         permissionPrompts = true
         break
+      case "--tool-batch-notes":
+        // Opt into the PostToolBatch hook (valueless flag): after each
+        // tool batch the wrapper asks the Go side for text to hand the
+        // model before its next request. The Go side emits it only when
+        // it has something to answer with.
+        toolBatchNotes = true
+        break
       case "--output-format":
         // CLI flag — the SDK iterator already emits the same shape.
         next()
@@ -144,7 +152,7 @@ function parseArgs(argv) {
   }
 
   if (addDirs.length > 0) opts.additionalDirectories = addDirs
-  return { prompt, options: opts, streamInput, permissionPrompts }
+  return { prompt, options: opts, streamInput, permissionPrompts, toolBatchNotes }
 }
 
 function emit(obj) {
@@ -217,9 +225,11 @@ function userMessage(text, blocks) {
 // until end/EOF. permissionPrompts gates canUseTool: when false the
 // callback is left unset and the SDK gates solely on --allowedTools, so an
 // off-allowlist tool auto-denies with no prompt (the autonomous-run path).
-async function runStreamingInput(options, permissionPrompts) {
+// toolBatchNotes gates the PostToolBatch hook the same way.
+async function runStreamingInput(options, permissionPrompts, toolBatchNotes) {
   const input = createInputStream()
   const pendingPerms = new Map()
+  const pendingBatches = new Map()
   let closing = false
 
   // Deny + clear every parked permission promise. Called on end/EOF (and
@@ -310,6 +320,39 @@ async function runStreamingInput(options, permissionPrompts) {
     }
   }
 
+  // PostToolBatch fires once every tool call of a batch has resolved, with
+  // the model's next request waiting on it. Each one emits a tool_batch and
+  // parks on the tool_batch_reply carrying the same id; its context, when
+  // there is any, is handed to the model with the batch's results. Closing,
+  // an abort, and the drain all settle it with nothing, so a reply that
+  // never comes cannot strand the turn. A subagent's batch (agent_id set)
+  // asks nothing: its context would reach the subagent, whose summary back
+  // to the agent need not carry it.
+  if (toolBatchNotes) {
+    const onToolBatch = async (input, _toolUseID, { signal } = {}) => {
+      if (closing || input?.agent_id) return {}
+      const id = randomUUID()
+      emit({ type: "control", subtype: "tool_batch", id })
+      const context = await new Promise((resolve) => {
+        let done = false
+        const settle = (text) => {
+          if (done) return
+          done = true
+          pendingBatches.delete(id)
+          resolve(text)
+        }
+        pendingBatches.set(id, settle)
+        if (signal) {
+          if (signal.aborted) settle("")
+          else signal.addEventListener("abort", () => settle(""), { once: true })
+        }
+      })
+      if (!context) return {}
+      return { hookSpecificOutput: { hookEventName: "PostToolBatch", additionalContext: context } }
+    }
+    options.hooks = { ...options.hooks, PostToolBatch: [{ hooks: [onToolBatch] }] }
+  }
+
   const q = query({ prompt: input, options })
 
   // closeInput is the single drain path: deny anything parked, end the
@@ -319,6 +362,7 @@ async function runStreamingInput(options, permissionPrompts) {
     if (closing) return
     closing = true
     denyAllPending("run ended")
+    for (const settle of [...pendingBatches.values()]) settle("")
     input.end()
   }
 
@@ -379,6 +423,16 @@ async function runStreamingInput(options, permissionPrompts) {
         break
       }
 
+      case "tool_batch_reply": {
+        const settle = pendingBatches.get(ctl.id)
+        if (!settle) {
+          process.stderr.write(`wrapper: no pending tool batch ${ctl.id}\n`)
+          break
+        }
+        settle(ctl.context ?? "")
+        break
+      }
+
       case "end":
         closeInput()
         break
@@ -420,7 +474,7 @@ async function runStreamingInput(options, permissionPrompts) {
   process.exit(0)
 }
 
-const { prompt, options, streamInput, permissionPrompts } = parseArgs(process.argv.slice(2))
+const { prompt, options, streamInput, permissionPrompts, toolBatchNotes } = parseArgs(process.argv.slice(2))
 
 // Forward the spawned Claude Code subprocess's stderr through our own.
 // Without this, the SDK swallows the child's stderr ("ignore" in its
@@ -436,7 +490,7 @@ if (!options.pathToClaudeCodeExecutable) {
 }
 
 if (streamInput) {
-  await runStreamingInput(options, permissionPrompts)
+  await runStreamingInput(options, permissionPrompts, toolBatchNotes)
 } else {
   if (!prompt) {
     process.stderr.write("wrapper: missing -p <message>\n")

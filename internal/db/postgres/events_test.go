@@ -86,21 +86,6 @@ func TestEventStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	if meta != "" {
 		t.Errorf("GetMetadataSystem under orgB returned %q; want empty", meta)
 	}
-
-	// The previous-event read under orgB must miss orgA's row too.
-	laterID, err := stores.Events.RecordSystem(ctx, orgA, domain.Event{
-		EntityID: &eid, EventType: domain.EventGitHubPRCICheckPassed,
-	})
-	if err != nil {
-		t.Fatalf("RecordSystem orgA later: %v", err)
-	}
-	prev, err := stores.Events.LatestForEntityTypeBeforeSystem(ctx, orgB, entityA, domain.EventGitHubPRCICheckPassed, laterID)
-	if err != nil {
-		t.Fatalf("LatestForEntityTypeBeforeSystem cross-org: %v", err)
-	}
-	if prev != nil {
-		t.Errorf("LatestForEntityTypeBeforeSystem under orgB returned orgA's row %s", prev.ID)
-	}
 }
 
 // TestEventStore_Postgres_RLS_AppPoolRequiresClaims pins the

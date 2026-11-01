@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -52,7 +53,7 @@ func TestBlueprintStore_Postgres_ManualFiringNeedsACreator(t *testing.T) {
 				TriggerType: "manual", CreatorUserID: tc.creator,
 				BlueprintRunID: br.ID, BlueprintStepIndex: &step0,
 			}
-			_, _, _, err := stores.Blueprints.CreateRunWithFirstStepSystem(ctx, orgID, br, db.AgentClaimStamp{}, "", step)
+			_, _, _, _, err := stores.Blueprints.CreateRunWithFirstStepSystem(ctx, orgID, br, db.AgentClaimStamp{}, "", step)
 			if !errors.Is(err, db.ErrManualCreatorRequired) {
 				t.Fatalf("CreateRunWithFirstStepSystem = %v, want db.ErrManualCreatorRequired", err)
 			}
@@ -172,6 +173,44 @@ func pgSequenceScaffold(t *testing.T, h *pgtest.Harness) (db.BlueprintStore, dbt
 			t.Helper()
 			if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, orgID, taskID, userID); err != nil || !ok {
 				t.Fatalf("ClaimQueuedForUser: ok=%v err=%v", ok, err)
+			}
+		},
+		CloseTask: func(t *testing.T, taskID string) {
+			t.Helper()
+			if _, err := h.AdminDB.Exec(`UPDATE tasks SET status = 'done' WHERE id = $1`, taskID); err != nil {
+				t.Fatalf("close the task: %v", err)
+			}
+		},
+		HoldTaskClose: func(t *testing.T, taskID string) {
+			t.Helper()
+			if _, err := h.AdminDB.Exec(`UPDATE tasks SET close_deferred_event_id = primary_event_id WHERE id = $1`, taskID); err != nil {
+				t.Fatalf("hold the task's close: %v", err)
+			}
+		},
+		SetConversationStatus: func(t *testing.T, convID, status string) {
+			t.Helper()
+			stored, concluded := dbtest.SeedStatus(status)
+			var st, completed any
+			if stored != "" {
+				st = stored
+			}
+			if concluded || stored == "failed" {
+				completed = time.Now().UTC()
+			}
+			if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = $1, completed_at = $2, parked_at = NULL, park_reason = NULL WHERE id = $3`, st, completed, convID); err != nil {
+				t.Fatalf("set conversation status: %v", err)
+			}
+		},
+		SetParentConversation: func(t *testing.T, convID, parentID string) {
+			t.Helper()
+			if _, err := h.AdminDB.Exec(`UPDATE conversations SET parent_conversation_id = $1 WHERE id = $2`, parentID, convID); err != nil {
+				t.Fatalf("set parent_conversation_id: %v", err)
+			}
+		},
+		EndConversation: func(t *testing.T, convID string, reason domain.EndedReason) {
+			t.Helper()
+			if _, err := h.AdminDB.Exec(`UPDATE conversations SET ended_at = $1, ended_reason = $2 WHERE id = $3`, time.Now().UTC(), string(reason), convID); err != nil {
+				t.Fatalf("end the conversation: %v", err)
 			}
 		},
 		RunCount: func(t *testing.T, taskID string) int {

@@ -45,7 +45,7 @@ func blueprintIDOfRun(t *testing.T, database *sql.DB, blueprintRunID string) str
 func (f stepFixture) fireStepZero(t *testing.T, br *domain.BlueprintRun) string {
 	t.Helper()
 	ctx := context.Background()
-	_, _, conv, err := f.s.blueprints.CreateRunWithFirstStepSystem(ctx, runmode.LocalDefaultOrgID, *br, db.AgentClaimStamp{}, "",
+	_, _, conv, _, err := f.s.blueprints.CreateRunWithFirstStepSystem(ctx, runmode.LocalDefaultOrgID, *br, db.AgentClaimStamp{}, "",
 		f.s.buildStepConversation(ctx, runmode.LocalDefaultOrgID, br.ID, f.task,
 			domain.BlueprintStep{BlueprintID: br.BlueprintID, StepIndex: 0, StepPromptID: stepPromptID(t, f.database, f.conversationIDs[0])},
 			"claude-sonnet-4-6", "manual", "", runmode.LocalDefaultUserID, ""))

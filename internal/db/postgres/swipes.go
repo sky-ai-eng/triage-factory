@@ -206,7 +206,9 @@ func (s *swipeStore) RequeueTask(ctx context.Context, orgID string, taskID strin
 		// row up immediately. Status reset to 'queued' covers the
 		// snoozed-back-to-queue path too.
 		// Also clear close metadata — re-queueing a
-		// previously-terminal task means it isn't terminal anymore.
+		// previously-terminal task means it isn't terminal anymore. A held
+		// close clears too: putting the task back in the queue overrides the
+		// event that resolved it, as reopening a closed one does.
 		res, err := tx.ExecContext(ctx,
 			`UPDATE tasks
 			    SET status = 'queued',
@@ -215,7 +217,8 @@ func (s *swipeStore) RequeueTask(ctx context.Context, orgID string, taskID strin
 			        claimed_by_user_id  = NULL,
 			        source_status = NULL,
 			        closed_at = NULL,
-			        close_reason = NULL
+			        close_reason = NULL,
+			        close_deferred_event_id = NULL
 			  WHERE org_id = $1 AND id = $2`,
 			orgID, taskID,
 		)
@@ -290,7 +293,8 @@ func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID, us
 			        claimed_by_user_id  = NULL,
 			        source_status = NULL,
 			        closed_at = NULL,
-			        close_reason = NULL
+			        close_reason = NULL,
+			        close_deferred_event_id = NULL
 			  WHERE org_id = $1 AND id = $2
 			    AND (SELECT creator_user_id FROM swipe_events
 			          WHERE org_id = $1 AND task_id = $2 ORDER BY id DESC LIMIT 1) = $3

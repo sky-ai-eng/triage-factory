@@ -259,6 +259,15 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 		skip(domain.PendingFiringSkipTaskClosed)
 		return
 	}
+	hold, err := r.tasks.CloseDeferralForTaskSystem(unitCtx, f.OrgID, f.TaskID)
+	if err != nil {
+		requeue(workitem.OutcomeTransient, fmt.Errorf("held close lookup: %w", err))
+		return
+	}
+	if hold != nil {
+		skip(domain.PendingFiringSkipTaskClosed)
+		return
+	}
 	// The firing fires only if the bot's claim still holds. A user claim or
 	// a requeue invalidates the commitment the queued row carried.
 	if task.ClaimedByAgentID == "" {
@@ -300,6 +309,11 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 		// the immediate path fired it first. The existing run is the
 		// materialization.
 		skip(domain.PendingFiringSkipAlreadyFired)
+		return
+	case errors.Is(err, delegate.ErrTaskClosed):
+		// The task closed, or an event held its close, after the reads
+		// above: the skip they make for a closed or held task.
+		skip(domain.PendingFiringSkipTaskClosed)
 		return
 	case errors.Is(err, delegate.ErrTaskBusy):
 		// Another run went live on the task between the claim and the

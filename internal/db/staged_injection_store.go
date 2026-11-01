@@ -84,4 +84,19 @@ type StagedInjectionStore interface {
 	//
 	// Exempt from the returned-row rule: it is a delete.
 	DeleteSystem(ctx context.Context, orgID, id string) (consumed bool, err error)
+
+	// HasNoteForEventSystem reports whether producer has told the
+	// conversation of eventID: a note it staged with that event in its
+	// provenance, delivered or still waiting to be. A withdrawn note
+	// (DeleteSystem) never happened and does not count.
+	HasNoteForEventSystem(ctx context.Context, orgID, conversationID, producer, eventID string) (bool, error)
+
+	// WithdrawPendingSystem withdraws every note producer staged on the
+	// conversation that is still waiting, as DeleteSystem withdraws one. A
+	// note already delivered is left as it is. The close note uses it to
+	// replace a waiting note with the version the next engagement should
+	// read.
+	//
+	// Exempt from the returned-row rule: it is a bulk delete.
+	WithdrawPendingSystem(ctx context.Context, orgID, conversationID, producer string) error
 }

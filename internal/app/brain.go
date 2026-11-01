@@ -90,10 +90,10 @@ func (a *App) startBrain(term int64) {
 	// its transition implies. The scan is its only schedule: a probe is not
 	// ripe until well after its admission. Same single-worker discipline.
 	go a.mergeability.RunMergeabilityProbes(brainCtx, mergeability.DefaultScanInterval)
-	// Close-deferral sweep: applies the closes the router held on tasks
-	// whose own run caused the closing event, once that run has ended, and
-	// drops them when the run completed and its own ending closes the task.
-	// One sweeper across every org, like the workers above.
+	// Close-hold sweep: applies the closes the router held on tasks while
+	// their conversations worked, once none of them is working and the close
+	// still holds, and drops the ones that no longer do. One sweeper across
+	// every org, like the workers above.
 	go a.router.RunCloseDeferralSweep(brainCtx, routing.DefaultCloseDeferralSweepInterval)
 	// Terminal-state invariant checker: read-only. Counts the entities the
 	// poll's enforcement should have closed and did not — active with a

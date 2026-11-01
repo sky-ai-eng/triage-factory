@@ -55,6 +55,18 @@ type BlueprintSequenceScaffold struct {
 	// ClaimTaskForUser hands the task to a human, so the firing's own stamp is
 	// refused.
 	ClaimTaskForUser func(t *testing.T, taskID string)
+	// CloseTask marks the task done; HoldTaskClose holds its close on the
+	// task's own event, as an event close waiting on its work does.
+	CloseTask     func(t *testing.T, taskID string)
+	HoldTaskClose func(t *testing.T, taskID string)
+	// SetConversationStatus puts a conversation in a stored state: "" for
+	// mid-flight, SeedConcluded, or "failed", each with no park.
+	SetConversationStatus func(t *testing.T, convID, status string)
+	// SetParentConversation makes the conversation a subagent of parentID.
+	SetParentConversation func(t *testing.T, convID, parentID string)
+	// EndConversation stamps a boundary on the conversation, as an earlier
+	// one would have.
+	EndConversation func(t *testing.T, convID string, reason domain.EndedReason)
 
 	// RunCount counts blueprint_runs on the task.
 	RunCount func(t *testing.T, taskID string) int
@@ -102,7 +114,7 @@ func RunBlueprintSequenceConformance(t *testing.T, mk BlueprintSequenceFactory) 
 		taskID := sc.NewTask(t)
 		br := sc.Firing(t, taskID)
 
-		inserted, claimed, conv, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br,
+		inserted, claimed, conv, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br,
 			db.AgentClaimStamp{AgentID: sc.AgentID}, sc.ConsolidateTeamID, sc.Step(br, 0))
 		if err != nil {
 			t.Fatalf("CreateRunWithFirstStepSystem: %v", err)
@@ -138,7 +150,7 @@ func RunBlueprintSequenceConformance(t *testing.T, mk BlueprintSequenceFactory) 
 		store, sc := mk(t)
 		taken := sc.NewTask(t)
 		takenBr := sc.Firing(t, taken)
-		_, _, occupied, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, takenBr, db.AgentClaimStamp{}, "", sc.Step(takenBr, 0))
+		_, _, occupied, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, takenBr, db.AgentClaimStamp{}, "", sc.Step(takenBr, 0))
 		if err != nil || occupied == nil {
 			t.Fatalf("seed a committed conversation: (%v, %v)", occupied, err)
 		}
@@ -149,7 +161,7 @@ func RunBlueprintSequenceConformance(t *testing.T, mk BlueprintSequenceFactory) 
 		step := sc.Step(br, 0)
 		step.ID = occupied.ID // primary-key collision
 
-		inserted, claimed, conv, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br,
+		inserted, claimed, conv, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br,
 			db.AgentClaimStamp{AgentID: sc.AgentID}, sc.ConsolidateTeamID, step)
 		if err == nil {
 			t.Fatalf("a duplicate conversation id must fail the firing, got (inserted=%v, claimed=%v, conv=%v)", inserted, claimed, conv != nil)
@@ -175,7 +187,7 @@ func RunBlueprintSequenceConformance(t *testing.T, mk BlueprintSequenceFactory) 
 		store, sc := mk(t)
 		taken := sc.NewTask(t)
 		takenBr := sc.Firing(t, taken)
-		_, _, occupied, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, takenBr, db.AgentClaimStamp{}, "", sc.Step(takenBr, 0))
+		_, _, occupied, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, takenBr, db.AgentClaimStamp{}, "", sc.Step(takenBr, 0))
 		if err != nil || occupied == nil {
 			t.Fatalf("seed a committed conversation: (%v, %v)", occupied, err)
 		}
@@ -185,14 +197,14 @@ func RunBlueprintSequenceConformance(t *testing.T, mk BlueprintSequenceFactory) 
 		br.ID = uuid.New().String()
 		doomed := sc.Step(br, 0)
 		doomed.ID = occupied.ID
-		if _, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br, db.AgentClaimStamp{AgentID: sc.AgentID}, "", doomed); err == nil {
+		if _, _, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br, db.AgentClaimStamp{AgentID: sc.AgentID}, "", doomed); err == nil {
 			t.Fatal("the doomed firing was expected to fail")
 		}
 
 		// Same (triggering_event_id, trigger_id), fresh run id: the replay.
 		retry := br
 		retry.ID = uuid.New().String()
-		inserted, _, conv, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, retry, db.AgentClaimStamp{AgentID: sc.AgentID}, "", sc.Step(retry, 0))
+		inserted, _, conv, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, retry, db.AgentClaimStamp{AgentID: sc.AgentID}, "", sc.Step(retry, 0))
 		if err != nil {
 			t.Fatalf("replay after a rolled-back firing: %v", err)
 		}
@@ -218,14 +230,14 @@ func RunBlueprintSequenceConformance(t *testing.T, mk BlueprintSequenceFactory) 
 		taskID := sc.NewTask(t)
 		br := sc.Firing(t, taskID)
 		br.ID = uuid.New().String()
-		if inserted, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br, db.AgentClaimStamp{AgentID: sc.AgentID}, "", sc.Step(br, 0)); err != nil || !inserted {
+		if inserted, _, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br, db.AgentClaimStamp{AgentID: sc.AgentID}, "", sc.Step(br, 0)); err != nil || !inserted {
 			t.Fatalf("first fire: inserted=%v err=%v", inserted, err)
 		}
 		ownerAfterFirstFire := sc.TaskOwnerTeam(t, taskID)
 
 		replay := br
 		replay.ID = uuid.New().String()
-		inserted, claimed, conv, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, replay, db.AgentClaimStamp{AgentID: sc.AgentID}, sc.ConsolidateTeamID, sc.Step(replay, 0))
+		inserted, claimed, conv, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, replay, db.AgentClaimStamp{AgentID: sc.AgentID}, sc.ConsolidateTeamID, sc.Step(replay, 0))
 		if err != nil {
 			t.Fatalf("replay fire: %v", err)
 		}
@@ -251,7 +263,7 @@ func RunBlueprintSequenceConformance(t *testing.T, mk BlueprintSequenceFactory) 
 		sc.ClaimTaskForUser(t, taskID)
 		br := sc.Firing(t, taskID)
 
-		inserted, claimed, conv, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br,
+		inserted, claimed, conv, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br,
 			db.AgentClaimStamp{AgentID: sc.AgentID}, sc.ConsolidateTeamID, sc.Step(br, 0))
 		if err != nil {
 			t.Fatalf("CreateRunWithFirstStepSystem against a user-claimed task: %v", err)
@@ -284,7 +296,7 @@ func RunBlueprintSequenceConformance(t *testing.T, mk BlueprintSequenceFactory) 
 		br := sc.ManualFiring(t, taskID)
 		br.ID = uuid.New().String()
 
-		inserted, _, conv, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br, db.AgentClaimStamp{}, "", sc.Step(br, 0))
+		inserted, _, conv, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br, db.AgentClaimStamp{}, "", sc.Step(br, 0))
 		if err != nil {
 			t.Fatalf("manual firing: %v", err)
 		}
@@ -306,7 +318,7 @@ func RunBlueprintSequenceConformance(t *testing.T, mk BlueprintSequenceFactory) 
 		// intent is a deferral the caller must handle, not a satisfied one.
 		second := sc.ManualFiring(t, taskID)
 		second.ID = uuid.New().String()
-		if _, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, second, db.AgentClaimStamp{}, "", sc.Step(second, 0)); err == nil {
+		if _, _, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, second, db.AgentClaimStamp{}, "", sc.Step(second, 0)); err == nil {
 			t.Error("a second manual firing on a busy task should refuse")
 		} else if !isTaskBusy(err) {
 			t.Errorf("second manual firing = %v, want db.ErrTaskBusyActiveRun", err)
@@ -321,7 +333,7 @@ func RunBlueprintSequenceConformance(t *testing.T, mk BlueprintSequenceFactory) 
 		taken := sc.NewTask(t)
 		takenBr := sc.ManualFiring(t, taken)
 		takenBr.ID = uuid.New().String()
-		_, _, occupied, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, takenBr, db.AgentClaimStamp{}, "", sc.Step(takenBr, 0))
+		_, _, occupied, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, takenBr, db.AgentClaimStamp{}, "", sc.Step(takenBr, 0))
 		if err != nil || occupied == nil {
 			t.Fatalf("seed a committed conversation: (%v, %v)", occupied, err)
 		}
@@ -336,7 +348,7 @@ func RunBlueprintSequenceConformance(t *testing.T, mk BlueprintSequenceFactory) 
 		// the two arms share one transaction body, and a regression that let a
 		// claim or a consolidation outlive a rolled-back step would otherwise
 		// only be caught on one of them.
-		if _, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br,
+		if _, _, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br,
 			db.AgentClaimStamp{AgentID: sc.AgentID}, sc.ConsolidateTeamID, step); err == nil {
 			t.Fatal("a duplicate conversation id must fail the manual firing too")
 		}
@@ -366,7 +378,7 @@ func RunBlueprintSequenceConformance(t *testing.T, mk BlueprintSequenceFactory) 
 		step := sc.Step(br, 0)
 		step.TaskID = br.TaskID
 
-		_, _, conv, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br,
+		_, _, conv, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br,
 			db.AgentClaimStamp{AgentID: sc.AgentID}, sc.ConsolidateTeamID, step)
 		if !errors.Is(err, db.ErrNoSuchTask) {
 			t.Fatalf("CreateRunWithFirstStepSystem against a missing task = %v, want db.ErrNoSuchTask", err)
@@ -388,7 +400,7 @@ func RunBlueprintSequenceConformance(t *testing.T, mk BlueprintSequenceFactory) 
 		ownerBefore := sc.TaskOwnerTeam(t, taskID)
 		br := sc.Firing(t, taskID)
 
-		if _, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br, db.AgentClaimStamp{AgentID: sc.AgentID}, sc.BadTeamID, sc.Step(br, 0)); err == nil {
+		if _, _, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br, db.AgentClaimStamp{AgentID: sc.AgentID}, sc.BadTeamID, sc.Step(br, 0)); err == nil {
 			t.Fatal("a refused consolidation must fail the firing, not proceed under the old owner")
 		}
 		if n := sc.RunCount(t, taskID); n != 0 {
@@ -407,7 +419,7 @@ func RunBlueprintSequenceConformance(t *testing.T, mk BlueprintSequenceFactory) 
 	seedFiring := func(t *testing.T, store db.BlueprintStore, sc BlueprintSequenceScaffold, taskID string) (domain.BlueprintRun, *domain.Conversation) {
 		t.Helper()
 		br := sc.Firing(t, taskID)
-		_, _, step0, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br, db.AgentClaimStamp{}, "", sc.Step(br, 0))
+		_, _, step0, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br, db.AgentClaimStamp{}, "", sc.Step(br, 0))
 		if err != nil || step0 == nil {
 			t.Fatalf("seed a committed firing: (%v, %v)", step0, err)
 		}

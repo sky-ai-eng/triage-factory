@@ -215,6 +215,36 @@ const awaitingDrivingSQL = `r.archived_at IS NULL
 	  AND NOT ` + activeClaimExistsSQL + `
 	  AND (r.status IS NULL OR (r.status = 'open' AND r.completed_at IS NULL AND ` + undeliveredInputExistsSQL + `))`
 
+// workingConversationSQL is a conversation still working on its task, with
+// no person needed for it to go on: a top-level conversation that has not
+// ended and either holds an active claim, is waiting to be driven
+// (awaitingDrivingSQL, whatever a hand-back's wait) under a blueprint nobody
+// called off, on either of the two columns blueprintDrivableSQL checks, or is
+// the current step of a running blueprint nobody called off that has given it
+// an answer (settled, or parked on an invalid envelope) the blueprint has not
+// acted on yet. That last arm is a blueprint between two steps: its next step
+// has no conversation yet, and the work on the task is not over until the
+// blueprint has advanced or ended. A conversation parked on a person, and a
+// concluded or failed one its blueprint has moved past, are not working. An
+// event close holds while one of the task's conversations is
+// (TaskStore.CloseOrHoldSystem), and the close-hold sweep applies it once
+// none is (TaskStore.ListActiveCloseDeferralsSystem), so the two read this
+// one predicate.
+var workingConversationSQL = `r.parent_conversation_id IS NULL
+	  AND r.ended_at IS NULL
+	  AND (` + activeClaimExistsSQL + `
+	       OR (` + awaitingDrivingSQL + `
+	           AND NOT EXISTS (
+	               SELECT 1 FROM blueprint_runs br_w
+	               WHERE br_w.org_id = r.org_id AND br_w.id = r.blueprint_run_id
+	                 AND (br_w.cancel_requested OR br_w.status = 'cancelled')))
+	       OR ((` + db.SettledConversationSQL("r") + ` OR ` + db.ParkedOnInvalidEnvelopeSQL("r") + `)
+	           AND EXISTS (
+	               SELECT 1 FROM blueprint_runs br_s
+	               WHERE br_s.org_id = r.org_id AND br_s.id = r.blueprint_run_id
+	                 AND br_s.status = 'running' AND NOT br_s.cancel_requested
+	                 AND br_s.current_step_index = r.blueprint_step_index)))`
+
 // nextAttemptDueSQL is the time gate: no hand-back is holding the row back, or
 // the wait it set is over. statement_timestamp(), the clock the claim leases
 // are stamped and tested on, so a wait set before a suspend is already over

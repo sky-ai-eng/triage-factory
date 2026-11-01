@@ -80,6 +80,13 @@ var (
 	// queue), never dropped. Conflating the two turns a routine busy-task race
 	// into silent intent loss.
 	ErrTaskBusyActiveRun = errors.New("db: another run is active on this task (one-active-per-task index)")
+	// ErrTaskClosedForEventRun is returned by CreateRunWithFirstStepSystem,
+	// in both dialects, when an event-triggered firing names a task that has
+	// closed, or whose close an event holds, by the time the firing takes the
+	// task's lock. The router's reads before the firing are a fast path; this
+	// is the check no close can land between. A manual delegation is a
+	// person's decision and is never refused for it.
+	ErrTaskClosedForEventRun = errors.New("db: an event-triggered run names a closed task, or one whose close is held")
 )
 
 // DuplicationStep is one selected prompt resolved to its place in a source
@@ -543,21 +550,26 @@ type BlueprintStore interface {
 	// --- Runs -----------------------------------------------------------
 
 	// CreateRunWithFirstStepSystem commits a firing as ONE transaction: the
-	// task's owner consolidation, the blueprint_runs insert, the task's agent
-	// claim, and the first step's conversations row. It is the only door a
+	// delegation boundary on the task's settled conversations, the task's
+	// owner consolidation, the blueprint_runs insert, the task's agent claim,
+	// and the first step's conversations row. It is the only door a
 	// delegation is fired through, in either dialect, and it exists because
 	// each of those writes is implied by the one before it — a blueprint_run
 	// that commits without its first step is a 'running' parent nothing
 	// drives, holding the one-active-run index against its task, invisible to
-	// every recovery arm that joins through conversations.
+	// every recovery arm that joins through conversations, and a boundary
+	// that commits without its run ends conversations nothing replaced.
 	//
 	// Statement order inside the transaction is fixed:
 	//
 	//  1. The task's row lock, taken by every firing whether or not it
-	//     consolidates. Steps 3 and 4 both write that row and both come AFTER
+	//     consolidates. Steps 4 and 5 both write that row and both come AFTER
 	//     step 2, so without a fixed order two firings racing on one task can
 	//     take tasks and blueprint_runs in opposite orders and deadlock. No
-	//     such task aborts the firing here, before anything is written.
+	//     such task aborts the firing here, before anything is written. An
+	//     event-triggered firing on a task that is closed or holds a close,
+	//     read under that lock, aborts as ErrTaskClosedForEventRun once the
+	//     fence below has passed it, so a replay still reads as one.
 	//  2. The blueprint_runs insert, which requires a trigger type: the arm
 	//     is chosen by that value, so an empty one selects the manual arm by
 	//     omission rather than by intent and impls reject it with
@@ -572,18 +584,28 @@ type BlueprintStore interface {
 	//     blueprint_runs_one_active_run_per_task as ErrTaskBusyActiveRun.
 	//     Everything below is skipped when the fence caught a replay, which is
 	//     what makes inserted=false mean nothing was written.
-	//  3. ownerTeamID, when non-empty, becomes tasks.team_id — the acting team
+	//  3. The delegation boundary: every settled (failed or concluded),
+	//     un-ended, top-level conversation on the task ends as delegated, and
+	//     comes back in ended as Get projects it so the caller can ring the
+	//     memory doorbell for each after the commit. Before the step insert,
+	//     because step 0 must never open on a task whose prior conversation
+	//     is un-ended: the task would carry two and nothing could say which it
+	//     is about, a person's follow-up would strand on the concluded one,
+	//     and the new run would open without the account of the work the
+	//     ended one owes. A live row is left to whoever drives it, and a
+	//     race that made one live meets the one-active-run index in step 2.
+	//  4. ownerTeamID, when non-empty, becomes tasks.team_id — the acting team
 	//     taking ownership before anything reads it. The conversations insert
 	//     derives its own team_id from the task, so it sees this. Zero rows
 	//     (no such task) or an error aborts the whole firing: firing with an
 	//     owner the caller asked to change is the wrong card on the wrong
 	//     board, which no later write corrects.
-	//  4. The task's agent claim (see AgentClaimStamp) — a replay never
+	//  5. The task's agent claim (see AgentClaimStamp) — a replay never
 	//     reaches it, so it cannot re-stamp a claim the original firing
 	//     already settled or steal one the user has since taken. Returns
 	//     claimed=true only when the stamp actually moved the claim; a refusal
 	//     is not an error and still commits the run and its step.
-	//  5. The first step's conversations row.
+	//  6. The first step's conversations row.
 	//
 	// Returns inserted=false with nothing else committed when the fence caught
 	// a replay: the run for THIS event already exists, so the caller skips.
@@ -599,7 +621,7 @@ type BlueprintStore interface {
 	// RETURNING row could not tell a fenced no-op from a failure, and
 	// `inserted` is the answer the caller needs. The conversation IS returned,
 	// because its insert has no such arm.
-	CreateRunWithFirstStepSystem(ctx context.Context, orgID string, br domain.BlueprintRun, claim AgentClaimStamp, ownerTeamID string, firstStep domain.Conversation) (inserted, claimed bool, conv *domain.Conversation, err error)
+	CreateRunWithFirstStepSystem(ctx context.Context, orgID string, br domain.BlueprintRun, claim AgentClaimStamp, ownerTeamID string, firstStep domain.Conversation) (inserted, claimed bool, conv *domain.Conversation, ended []domain.Conversation, err error)
 
 	// AdvanceRunToStepSystem commits a step advance as ONE transaction: the
 	// blueprint_run's current_step_index bump, the boundary stamp on the step
@@ -768,11 +790,4 @@ type BlueprintStore interface {
 	ConversationsForBlueprintSystem(ctx context.Context, orgID string, blueprintRunID string) ([]domain.Conversation, error)
 	ActiveStepConversationIDsSystem(ctx context.Context, orgID string, blueprintRunID string) ([]string, error)
 	IsNewestRunForTaskSystem(ctx context.Context, orgID, taskID, blueprintRunID string) (bool, error)
-
-	// RunningRunForTaskSystem returns the task's blueprint run still marked
-	// running, or (nil, nil) when it has none.
-	// blueprint_runs_one_active_run_per_task allows at most one. The router's
-	// close phase reads it to ask whether the event closing the task was
-	// caused by the task's own run.
-	RunningRunForTaskSystem(ctx context.Context, orgID, taskID string) (*domain.BlueprintRun, error)
 }

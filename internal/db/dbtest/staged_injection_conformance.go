@@ -309,6 +309,94 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 		}
 	})
 
+	t.Run("HasNoteForEvent_counts_staged_and_delivered_notes_only", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		conversationID := seed.Conversation(t, "told")
+		const producer = domain.StagedInjectionProducerTaskClosing
+		told := func(eventID string) bool {
+			t.Helper()
+			got, err := store.HasNoteForEventSystem(ctx, orgID, conversationID, producer, eventID)
+			if err != nil {
+				t.Fatalf("HasNoteForEventSystem: %v", err)
+			}
+			return got
+		}
+		stage := func(eventID string) domain.StagedInjection {
+			t.Helper()
+			n, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{
+				ConversationID: conversationID, Subtype: domain.MessageSubtypeInjectionSystemNote, Producer: producer,
+				Body: "resolved", Provenance: domain.NoteProvenance{EventID: eventID, EventType: domain.EventGitHubPRCICheckPassed},
+			})
+			if err != nil {
+				t.Fatalf("append: %v", err)
+			}
+			return n
+		}
+
+		stage("evt-told")
+		if !told("evt-told") {
+			t.Error("a staged note did not count")
+		}
+		if got, err := store.HasNoteForEventSystem(ctx, orgID, conversationID, "pr_note", "evt-told"); err != nil || got {
+			t.Errorf("another producer's question = (%v, %v), want not told", got, err)
+		}
+		if _, err := store.FlushPendingSystem(ctx, orgID, conversationID); err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+		if !told("evt-told") {
+			t.Error("a delivered note did not count")
+		}
+
+		withdrawn := stage("evt-withdrawn")
+		if _, err := store.DeleteSystem(ctx, orgID, withdrawn.ID); err != nil {
+			t.Fatalf("withdraw: %v", err)
+		}
+		if told("evt-withdrawn") {
+			t.Error("a withdrawn note counted")
+		}
+	})
+
+	t.Run("WithdrawPending_withdraws_the_producer's_waiting_notes_on_one_conversation", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		conversationID := seed.Conversation(t, "withdraw")
+		other := seed.Conversation(t, "withdraw-other")
+		stage := func(conversationID, producer, eventID string) {
+			t.Helper()
+			if _, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{
+				ConversationID: conversationID, Subtype: domain.MessageSubtypeInjectionSystemNote, Producer: producer,
+				Body: producer, Provenance: domain.NoteProvenance{EventID: eventID},
+			}); err != nil {
+				t.Fatalf("append: %v", err)
+			}
+		}
+		const closing = domain.StagedInjectionProducerTaskClosing
+		stage(conversationID, closing, "evt-delivered")
+		if _, err := store.FlushPendingSystem(ctx, orgID, conversationID); err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+		stage(conversationID, closing, "evt-waiting")
+		stage(conversationID, domain.StagedInjectionProducerPRCoherence, "evt-pr")
+		stage(other, closing, "evt-other")
+
+		if err := store.WithdrawPendingSystem(ctx, orgID, conversationID, closing); err != nil {
+			t.Fatalf("WithdrawPendingSystem: %v", err)
+		}
+
+		if got, err := store.HasNoteForEventSystem(ctx, orgID, conversationID, closing, "evt-delivered"); err != nil || !got {
+			t.Errorf("the delivered note = (%v, %v), want still told", got, err)
+		}
+		left, err := store.FlushPendingSystem(ctx, orgID, conversationID)
+		if err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+		if len(left) != 1 || left[0].Producer != domain.StagedInjectionProducerPRCoherence {
+			t.Errorf("still waiting = %+v, want only the other producer's note", left)
+		}
+		if got, err := store.FlushPendingSystem(ctx, orgID, other); err != nil || len(got) != 1 {
+			t.Errorf("the other conversation's notes = %+v (err %v), want its one note", got, err)
+		}
+	})
+
 	t.Run("Conversation_delete_cascades_pending_notes", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		conversationID := seed.Conversation(t, "cascade")

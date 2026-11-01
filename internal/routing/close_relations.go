@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 
+	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
@@ -95,12 +96,6 @@ type closeRelation struct {
 	terminatesEntity bool
 	// closeReason audits why the task closed. Defaults to "auto_closed_by_event".
 	closeReason string
-	// causedByRun declares that a task's own blueprint run can cause this
-	// relation's event, and how to tell: when it matches, the task's close
-	// is deferred until the run ends instead of stopping the run that did
-	// the work (see close_deferral.go). nil = never caused by a run; every
-	// task closes now.
-	causedByRun runCauseMatcher
 }
 
 // reason is the close reason the relation audits.
@@ -128,19 +123,16 @@ var closeRelations = []closeRelation{
 	// CI went green → close the entity's CI-failure tasks, but only if no
 	// check is still failing or still running at the latest SHA.
 	{
-		onEvents:    []string{domain.EventGitHubPRCICheckPassed},
-		closes:      []string{domain.EventGitHubPRCICheckFailed},
-		prepare:     prepareCIPassed,
-		causedByRun: CausedByRunPush,
+		onEvents: []string{domain.EventGitHubPRCICheckPassed},
+		closes:   []string{domain.EventGitHubPRCICheckFailed},
+		prepare:  prepareCIPassed,
 	},
 	// The merge conflicts cleared → close the entity's conflicts task, but
 	// only while the pull request's stored mergeability still says MERGEABLE.
-	// A run's push that resolved them holds the close until that run ends.
 	{
-		onEvents:    []string{domain.EventGitHubPRConflictsResolved},
-		closes:      []string{domain.EventGitHubPRConflicts},
-		prepare:     prepareConflictsResolved,
-		causedByRun: CausedByRunPush,
+		onEvents: []string{domain.EventGitHubPRConflictsResolved},
+		closes:   []string{domain.EventGitHubPRConflicts},
+		prepare:  prepareConflictsResolved,
 	},
 	// A reviewer submitted a review (any verdict, including changes_requested)
 	// → their review_requested obligation is satisfied. Close only that
@@ -181,6 +173,8 @@ var closeRelations = []closeRelation{
 	// A Jira or Linear issue was (re)assigned → retire the stale
 	// assigned/available tasks that no longer reflect the assignment, so the
 	// new assignment mints a fresh task owned by the new assignee's team.
+	// The assigned task closes at once even under a working conversation;
+	// runCloses says why.
 	{
 		onEvents: []string{domain.EventJiraIssueAssigned},
 		closes:   []string{domain.EventJiraIssueAssigned, domain.EventJiraIssueAvailable},
@@ -202,10 +196,6 @@ var closeRelations = []closeRelation{
 		closes:           githubPRTerminalCloseTypes(),
 		terminatesEntity: true,
 		closeReason:      "entity_closed",
-		causedByRun: causedByRunActionOnEntity(map[string]string{
-			domain.EventGitHubPRMerged: domain.ActionPRMerged,
-			domain.EventGitHubPRClosed: domain.ActionPRClosed,
-		}),
 	},
 	// TF stopped following a tracked PR (its host is no longer the org's) →
 	// the same entity-wide close + terminate. Like Jira's unreachable it spares
@@ -223,7 +213,6 @@ var closeRelations = []closeRelation{
 		closes:           jiraIssueTerminalCloseTypes(),
 		terminatesEntity: true,
 		closeReason:      "entity_closed",
-		causedByRun:      causedByRunTransition,
 	},
 	// Jira stopped resolving a tracked issue's key → close everything on the
 	// entity and terminate it. Same shape as completion, for a different
@@ -241,7 +230,6 @@ var closeRelations = []closeRelation{
 		closes:           linearCloseTypesExcept(domain.EventLinearIssueCompleted),
 		terminatesEntity: true,
 		closeReason:      "entity_closed",
-		causedByRun:      causedByRunTransition,
 	},
 	// Linear stopped giving TF a tracked issue → the Jira unreachable close,
 	// for Linear.
@@ -479,34 +467,37 @@ func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, 
 			if rel.keep != nil && !rel.keep(evt, cctx, taskTarget(t)) {
 				continue
 			}
-			// The task's own run caused this event: hold the close until the
-			// run ends rather than stop the run that did the work.
-			runID, err := r.causingRun(ctx, orgID, evt, entityID, rel, t.ID)
+			var (
+				closedTask bool
+				err        error
+			)
+			if t.EventType == evt.EventType {
+				// A task of the closing event's own type closes at once,
+				// working conversation or not: the event mints its own task
+				// after this phase, and the dedup index admits one active
+				// task per (entity, type, key), so a task held open here
+				// would take the new event as a bump and the new assignee's
+				// team would get no task.
+				closedTask, err = r.closeTaskWithAudit(ctx, orgID, t.ID, evt.ID, reason, evt.EventType)
+			} else {
+				var out dbpkg.TaskCloseOutcome
+				out, err = r.closeOrHoldTaskWithAudit(ctx, orgID, t.ID, evt, reason)
+				closedTask = out.Closed
+				if out.Held {
+					routerLog.InfoContext(ctx, "held task close", "task_id", t.ID, "on_event", evt.EventType,
+						"working", len(out.WorkingConversationIDs), "awaiting_person", out.AwaitingPerson, "newly_held", out.NewlyHeld)
+				}
+			}
 			if err != nil {
-				routerLog.Error("close: run-cause match failed", "task_id", t.ID, "on_event", evt.EventType, "error", err)
-				errs = append(errs, fmt.Errorf("match task %s's run: %w", t.ID, err))
-				continue
-			}
-			if runID != "" {
-				deferred, err := r.tasks.DeferCloseSystem(ctx, orgID, t.ID, evt.ID, runID)
-				if err != nil {
-					routerLog.Error("close: failed to defer task close", "task_id", t.ID, "on_event", evt.EventType, "error", err)
-					errs = append(errs, fmt.Errorf("defer close of task %s: %w", t.ID, err))
-					continue
-				}
-				if deferred != nil {
-					routerLog.InfoContext(ctx, "deferred task close until its run ends", "task_id", t.ID, "on_event", evt.EventType, "blueprint_run_id", runID)
-				}
-				continue
-			}
-			if err := r.closeTaskWithAudit(ctx, orgID, t.ID, evt.ID, reason, evt.EventType); err != nil {
 				routerLog.Error("close: failed to close task", "task_id", t.ID, "on_event", evt.EventType, "error", err)
 				errs = append(errs, fmt.Errorf("close task %s: %w", t.ID, err))
 				continue
 			}
-			routerLog.InfoContext(ctx, "closed task", "task_id", t.ID, "on_event", evt.EventType, "reason", reason)
-			closedAny = true
-			closed++
+			if closedTask {
+				routerLog.InfoContext(ctx, "closed task", "task_id", t.ID, "on_event", evt.EventType, "reason", reason)
+				closedAny = true
+				closed++
+			}
 		}
 	}
 	return closedAny, errors.Join(errs...)
@@ -523,7 +514,10 @@ func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, 
 // EntityStore.CloseTerminalSystem for the transaction; this is the routing
 // half: the post-commit stop of the conversations the transaction stamped,
 // the deliverable teardown behind it, and the tasks-updated nudge, sequenced
-// exactly as closeTaskWithAudit sequences them for a typed close.
+// exactly as closeTaskWithAudit sequences them for a typed close. A task with
+// a working conversation is held in that transaction rather than closed, and
+// its conversations are told after the commit, as closeOrHoldTaskWithAudit
+// tells them; the entity closes either way.
 //
 // closed=false means the guard declined and nothing was written: the entity
 // reopened (or was re-polled) between the event's enqueue and now, so the
@@ -542,15 +536,7 @@ func (r *Router) runTerminatingClose(ctx context.Context, orgID string, evt doma
 	defer span.End()
 
 	reason := rel.reason()
-	// The tasks whose own run caused this event stay open with the close
-	// held, stamped in the same transaction that closes the rest.
-	deferTo, err := r.terminatingDeferrals(ctx, orgID, evt, entityID, rel)
-	if err != nil {
-		span.SetStatus(codes.Error, "terminating close")
-		routerLog.ErrorContext(ctx, "terminating close: run-cause match failed", "entity_id", entityID, "on_event", evt.EventType, "error", err)
-		return false, err
-	}
-	res, err := r.entities.CloseTerminalSystem(ctx, orgID, entityID, judgedAt, rel.closes, reason, evt.EventType, evt.ID, deferTo)
+	res, err := r.entities.CloseTerminalSystem(ctx, orgID, entityID, judgedAt, rel.closes, reason, evt.EventType, evt.ID)
 	if err != nil {
 		span.SetStatus(codes.Error, "terminating close")
 		routerLog.ErrorContext(ctx, "terminating close failed", "entity_id", entityID, "on_event", evt.EventType, "error", err)
@@ -563,15 +549,17 @@ func (r *Router) runTerminatingClose(ctx context.Context, orgID string, evt doma
 			"entity_id", entityID, "on_event", evt.EventType)
 		return false, nil
 	}
-	for _, taskID := range res.DeferredTaskIDs {
-		routerLog.InfoContext(ctx, "deferred task close until its run ends", "task_id", taskID, "on_event", evt.EventType, "blueprint_run_id", deferTo[taskID])
+	for _, h := range res.HeldTasks {
+		routerLog.InfoContext(ctx, "held task close", "task_id", h.TaskID, "on_event", evt.EventType,
+			"working", len(h.WorkingConversationIDs), "awaiting_person", h.AwaitingPerson, "newly_held", h.NewlyHeld)
+		if h.NewlyHeld {
+			r.tellTaskClosing(ctx, orgID, evt, h.TaskID, h.WorkingConversationIDs)
+		}
 	}
 	notify.ResolveEvents(ctx, orgID, entityID, r.openEventNotifications(ctx, orgID, entityID, rel.closes))
 	for _, taskID := range res.ClosedTaskIDs {
 		routerLog.InfoContext(ctx, "closed task", "task_id", taskID, "on_event", evt.EventType, "reason", reason)
-		r.stopConversationsOnClosedTask(orgID, taskID, res.ActiveConversationIDs[taskID])
-		// Behind the stop, never beside it — see closeTaskWithAudit.
-		r.spawner.TeardownTaskDeliverablesSystem(ctx, orgID, taskID)
+		r.finishTaskClose(ctx, orgID, taskID, res.ActiveConversationIDs[taskID])
 	}
 	if evt.EventType == domain.EventSystemEntityCloseOwed {
 		// Worth a line every time: the obligation firing means a close was
@@ -870,10 +858,35 @@ func (r *Router) stopConversationsOnClosedTask(orgID, taskID string, conversatio
 	}
 }
 
+// closeOrHoldTaskWithAudit is a typed relation's close of a task: closed
+// through closeTaskWithAudit's rows and post-commit sequence while nothing on
+// the task is working and none of its deliverables awaits a person, and held
+// otherwise (TaskStore.CloseOrHoldSystem), with the note sent to each working
+// conversation the first time the task holds. A closing event that finds the
+// close already held only takes its place, since the conversations were told
+// when it began. A deliverable awaiting a person holds the close because
+// closing the task would retire it before they act on it.
+func (r *Router) closeOrHoldTaskWithAudit(ctx context.Context, orgID, taskID string, evt domain.Event, closeReason string) (dbpkg.TaskCloseOutcome, error) {
+	out, err := r.tasks.CloseOrHoldSystem(ctx, orgID, taskID, closeReason, evt.EventType, evt.ID)
+	if err != nil {
+		return dbpkg.TaskCloseOutcome{}, err
+	}
+	switch {
+	case out.Closed:
+		r.finishTaskClose(ctx, orgID, taskID, out.ActiveConversationIDs)
+	case out.Held && out.NewlyHeld:
+		r.tellTaskClosing(ctx, orgID, evt, taskID, out.WorkingConversationIDs)
+	}
+	return out, nil
+}
+
 // closeTaskWithAudit closes a task, records the closing event in task_events,
-// and stops the conversations working on it. Every typed close goes through
-// here; the terminating close runs the same task-close body inside the entity
-// store's transaction and then the same post-commit sequence
+// and stops the conversations working on it, whatever they are doing. Only a
+// typed close of a task of its own event's type takes it directly; every
+// other event close holds while the task is worked on
+// (closeOrHoldTaskWithAudit), and closes through the same rows and the same
+// post-commit sequence when it does not. The terminating close runs that body
+// inside the entity store's transaction and then the same sequence
 // (runTerminatingClose), so cancellation + audit are uniform.
 //
 // The first three writes — the task's terminal flip, the audit row, and
@@ -891,22 +904,29 @@ func (r *Router) stopConversationsOnClosedTask(orgID, taskID string, conversatio
 // conversations the close stamped — it is the deliverables of every attempt the
 // task ever made that strand, not just the live one's.
 //
-// Only a close this call actually performed cascades: an already-terminal task
-// returns no conversation ids, so a replayed close neither stamps, stops nor
-// tears down — the conversation under it may be one a user resumed after the
-// close, which the resume ladder deliberately allows.
-func (r *Router) closeTaskWithAudit(ctx context.Context, orgID, taskID, closingEventID, closeReason, closeEventType string) error {
+// Only a close this call actually performed cascades, and closed reports
+// whether it did: an already-terminal task returns no conversation ids, so a
+// replayed close neither stamps, stops nor tears down — the conversation
+// under it may be one a user resumed after the close, which the resume
+// ladder deliberately allows.
+func (r *Router) closeTaskWithAudit(ctx context.Context, orgID, taskID, closingEventID, closeReason, closeEventType string) (closed bool, err error) {
 	closed, activeConversationIDs, err := r.tasks.CloseWithConversationCancelIntentSystem(ctx, orgID, taskID, closeReason, closeEventType, closingEventID)
 	if err != nil {
-		return err
+		return false, err
 	}
-	if !closed {
-		return nil
+	if closed {
+		r.finishTaskClose(ctx, orgID, taskID, activeConversationIDs)
 	}
+	return closed, nil
+}
+
+// finishTaskClose is what follows a close an event performed, once it has
+// committed: the stop of the conversations it stamped, then the teardown of
+// the task's deliverables. Behind the stop, never beside it: the stop parks
+// each conversation and releases its claim, so the teardown operates on
+// settled conversations rather than racing a live agent that can still land
+// a fresh draft PR.
+func (r *Router) finishTaskClose(ctx context.Context, orgID, taskID string, activeConversationIDs []string) {
 	r.stopConversationsOnClosedTask(orgID, taskID, activeConversationIDs)
-	// Behind the stop, never beside it: the stop parks each conversation and
-	// releases its claim, so the teardown operates on settled conversations
-	// rather than racing a live agent that can still land a fresh draft PR.
 	r.spawner.TeardownTaskDeliverablesSystem(ctx, orgID, taskID)
-	return nil
 }

@@ -104,6 +104,10 @@ func (s *injectingStubDelegator) StopBlueprintRun(orgID, blueprintRunID string, 
 
 func (s *injectingStubDelegator) TeardownTaskDeliverablesSystem(context.Context, string, string) {}
 
+func (s *injectingStubDelegator) TellTaskClosing(context.Context, string, string, domain.Event) bool {
+	return true
+}
+
 func (s *injectingStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
 	s.calls = append(s.calls, injectCall{orgID, conversationID, producer, body, firing})
 	return s.outcome

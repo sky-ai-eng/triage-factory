@@ -1093,24 +1093,22 @@ func (s *conversationStore) EndConversationsForTeamSystem(ctx context.Context, o
 	return endConversationsScoped(ctx, s.admin, orgID, reason, `team_id = $4`, teamID)
 }
 
-func (s *conversationStore) EndTerminalConversationsForTaskSystem(ctx context.Context, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error) {
-	if !domain.IsEndedReason(string(reason)) {
-		return nil, fmt.Errorf("%w: %q", db.ErrInvalidEndedReason, reason)
-	}
-	if !isValidUUID(taskID) {
-		return nil, nil
-	}
-	// The stored column, not the display ladder: `queued` and `running` are
-	// derived from the active claim and never written here, so a row that
-	// reads settled in SQL (failed, or concluded) is one no engagement is
-	// driving.
-	return writeConversationsReturning(ctx, s.admin, `
+// endSettledConversationsForTask is the delegation boundary: the task's
+// settled conversations end as delegated, on the transaction of the firing
+// that opens the next one (CreateRunWithFirstStepSystem), so they end only
+// with a run that replaces them. The stored column, not the display ladder:
+// `queued` and `running` are derived from the active claim and never written
+// here, so a row that reads settled in SQL (failed, or concluded) is one no
+// engagement is driving, and a live row is left to whoever drives it.
+// Top-level rows only, and an already-ended row keeps the boundary it had.
+func endSettledConversationsForTask(ctx context.Context, q queryer, orgID, taskID string) ([]domain.Conversation, error) {
+	return writeConversationsReturning(ctx, q, `
 		UPDATE conversations SET ended_at = $1, ended_reason = $2
 		WHERE org_id = $3 AND task_id = $4
 		  AND ended_at IS NULL AND parent_conversation_id IS NULL
 		  AND `+db.SettledConversationSQL("conversations")+`
 		RETURNING *
-	`, time.Now().UTC(), string(reason), orgID, taskID)
+	`, time.Now().UTC(), string(domain.EndedDelegated), orgID, taskID)
 }
 
 func (s *conversationStore) EndConversation(ctx context.Context, orgID, conversationID string, reason domain.EndedReason) (*domain.Conversation, error) {
@@ -2040,6 +2038,19 @@ func (s *conversationStore) LastAgentActivityAtSystem(ctx context.Context, orgID
 		return time.Time{}, false, err
 	}
 	return at, true, nil
+}
+
+func (s *conversationStore) HasPersonMessageSystem(ctx context.Context, orgID, conversationID string) (bool, error) {
+	var wrote bool
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM messages
+			WHERE org_id = $1 AND conversation_id = $2
+			  AND role = 'user' AND subtype IN ('', $3) AND user_id IS NOT NULL
+			  AND NOT (delivered = false AND window_state = 'inactive')
+		)
+	`, orgID, conversationID, domain.MessageSubtypeInjectionSteer).Scan(&wrote)
+	return wrote, err
 }
 
 // insertConversationMessage attributes the row to an engagement: an explicit
