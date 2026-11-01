@@ -3,6 +3,8 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"testing"
@@ -103,6 +105,104 @@ func TestBootstrapSchemaForTest_MatchesMigrate(t *testing.T) {
 	assertSameMigratedDatabase(t, "tenantless image", tenantless, real)
 	if got, want := dumpEventsCatalog(t, tenantless), dumpEventsCatalog(t, real); !reflect.DeepEqual(got, want) {
 		t.Errorf("tenantless image: events_catalog content differs.\nrestored: %v\nreal:     %v", got, want)
+	}
+}
+
+// A file in the shared image cache that is not this tree's head image is
+// treated as absent, so a bad file costs a rebuild rather than failing every
+// SQLite-backed test that restores it.
+func TestReadHeadImage_TakesOnlyTheHeadImage(t *testing.T) {
+	head, err := sqliteHeadVersion()
+	if err != nil {
+		t.Fatalf("head version: %v", err)
+	}
+	image, err := sharedHeadImage(head)
+	if err != nil {
+		t.Fatalf("head image: %v", err)
+	}
+	write := func(body []byte) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "head.img")
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+		return path
+	}
+
+	if _, ok := readHeadImage(write(image), head); !ok {
+		t.Error("the head image was rejected")
+	}
+	if _, ok := readHeadImage(write(image), head+1); ok {
+		t.Error("an image at another version was taken as head")
+	}
+	if _, ok := readHeadImage(write([]byte("not a database")), head); ok {
+		t.Error("a file that is not a database was taken as head")
+	}
+	if _, ok := readHeadImage(filepath.Join(t.TempDir(), "missing.img"), head); ok {
+		t.Error("a missing file was taken as head")
+	}
+
+	// A damaged table page that leaves goose_db_version readable at head.
+	damaged := append([]byte(nil), image...)
+	template, err := openTemplate(image)
+	if err != nil {
+		t.Fatalf("open template: %v", err)
+	}
+	var pageSize, root int
+	if err := template.QueryRow(`PRAGMA page_size`).Scan(&pageSize); err != nil {
+		t.Fatalf("page size: %v", err)
+	}
+	if err := template.QueryRow(`SELECT rootpage FROM sqlite_master WHERE type = 'table' AND name = 'entities'`).Scan(&root); err != nil {
+		t.Fatalf("entities root page: %v", err)
+	}
+	_ = template.Close()
+	for i := (root - 1) * pageSize; i < root*pageSize; i++ {
+		damaged[i] = 0xFF
+	}
+	probe, err := openTemplate(damaged)
+	if err != nil {
+		t.Fatalf("open damaged template: %v", err)
+	}
+	var version int64
+	if err := probe.QueryRow(`SELECT MAX(version_id) FROM goose_db_version`).Scan(&version); err != nil || version != head {
+		t.Fatalf("the damaged image no longer reads at head (%d, %v), so it checks nothing a version read would miss", version, err)
+	}
+	_ = probe.Close()
+	if _, ok := readHeadImage(write(damaged), head); ok {
+		t.Error("an image with a damaged table page was taken as head")
+	}
+}
+
+// The cache key must change whenever the code of a module that writes the
+// image can, so a go.mod that replaces one with a directory, in any spelling
+// go.mod accepts, turns the cache off.
+func TestHeadImageCachePins(t *testing.T) {
+	const requires = "module m\n\ngo 1.26\n\nrequire (\n\tgithub.com/pressly/goose/v3 v3.27.1\n\tmodernc.org/libc v1.72.1\n\tmodernc.org/sqlite v1.50.0\n)\n"
+	base, ok := headImageCachePins([]byte(requires))
+	if !ok {
+		t.Fatal("refused a go.mod that requires every module")
+	}
+	for _, tc := range []struct {
+		name, replace string
+		ok            bool
+	}{
+		{"relative directory", `replace modernc.org/sqlite => ../sqlite`, false},
+		{"absolute directory", `replace modernc.org/sqlite => /src/sqlite`, false},
+		{"quoted directory", `replace modernc.org/sqlite => "../sqlite"`, false},
+		{"quoted module path and directory", `replace "modernc.org/sqlite" => "../sqlite"`, false},
+		{"one version to a directory", `replace modernc.org/sqlite v1.50.0 => ../sqlite`, false},
+		{"another module", `replace modernc.org/sqlite => example.com/fork/sqlite v1.50.1`, true},
+	} {
+		pins, ok := headImageCachePins([]byte(requires + tc.replace + "\n"))
+		if ok != tc.ok {
+			t.Errorf("%s: ok = %v, want %v", tc.name, ok, tc.ok)
+		}
+		if ok && pins == base {
+			t.Errorf("%s: the replacement left the key unchanged", tc.name)
+		}
+	}
+	if _, ok := headImageCachePins([]byte("module m\n\nrequire modernc.org/sqlite v1.50.0\n")); ok {
+		t.Error("took a go.mod that does not require every module")
 	}
 }
 

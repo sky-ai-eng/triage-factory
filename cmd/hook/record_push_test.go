@@ -48,18 +48,20 @@ func pushRows(t *testing.T, stores db.Stores, conversationID string) []domain.Ex
 	return acts
 }
 
-// newTestStores opens an in-memory SQLite, migrates it, and seeds one
-// conversations row a ledger row's conversation_id can point at. Returns the
-// stores plus the conversation id to wire into ConversationInfo.
+// newTestStores opens an in-memory SQLite holding the migrated schema, and
+// seeds one conversations row a ledger row's conversation_id can point at.
+// Returns the stores plus the conversation id to wire into ConversationInfo.
 func newTestStores(t *testing.T) (db.Stores, string) {
 	t.Helper()
 	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
+	conn.SetMaxOpenConns(1)
+	conn.SetMaxIdleConns(1)
 	t.Cleanup(func() { _ = conn.Close() })
-	if err := db.Migrate(conn, "sqlite3"); err != nil {
-		t.Fatalf("migrate: %v", err)
+	if err := db.BootstrapTenantlessSchemaForTest(conn); err != nil {
+		t.Fatalf("bootstrap schema: %v", err)
 	}
 	// Seed the local sentinel org so org_settings (org_id → orgs FK) can be
 	// written — the branch-capture gate resolves the org's GitHub base from it.

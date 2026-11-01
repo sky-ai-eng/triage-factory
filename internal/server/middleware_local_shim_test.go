@@ -153,7 +153,8 @@ func TestHandleMe_LocalMode_CarriesSoleTeamAsAdmin(t *testing.T) {
 
 // TestHandleMe_LocalMode_UnprovisionedInstall_AnswersEmptyTeams: a local install
 // nobody has provisioned has no org or team, and /api/me still answers 200 with
-// teams []. It migrates directly because newTestServer seeds the local tenant.
+// teams []. It restores the tenantless schema itself because newTestServer
+// seeds the local tenant.
 func TestHandleMe_LocalMode_UnprovisionedInstall_AnswersEmptyTeams(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 
@@ -164,8 +165,8 @@ func TestHandleMe_LocalMode_UnprovisionedInstall_AnswersEmptyTeams(t *testing.T)
 	database.SetMaxOpenConns(1)
 	database.SetMaxIdleConns(1)
 	t.Cleanup(func() { _ = database.Close() })
-	if err := db.Migrate(database, "sqlite3"); err != nil {
-		t.Fatalf("migrate: %v", err)
+	if err := db.BootstrapTenantlessSchemaForTest(database); err != nil {
+		t.Fatalf("bootstrap tenantless schema: %v", err)
 	}
 	// The fixture is only honest if it really is tenantless.
 	var teams int

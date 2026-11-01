@@ -220,6 +220,43 @@ go_group() {
     fi
   fi
 
+  # A test outside internal/db gets a migrated SQLite schema from the image
+  # internal/db builds once per test binary (db.BootstrapSchemaForTest and
+  # db.BootstrapTenantlessSchemaForTest), never from db.Migrate: Migrate
+  # replays the whole migration tree, which costs ~20s per call under -race.
+  # A call split across lines is not caught.
+  blue "test SQLite migrate guard"
+  local test_src migrate_offenders
+  if ! test_src=$(list_go_files); then
+    red "test SQLite migrate guard: could not resolve the tracked Go file list — guard NOT verified"
+    rc=1
+  else
+    test_src=$(printf '%s\n' "$test_src" | grep '_test\.go$' | grep -v '^internal/db/')
+    status=$?
+    if (( status > 1 )); then
+      red "test SQLite migrate guard: could not filter the Go file list — guard NOT verified"
+      rc=1
+    elif [[ -z "${test_src//[[:space:]]/}" ]]; then
+      red "test SQLite migrate guard: no test files left to scan — guard NOT verified"
+      rc=1
+    else
+      migrate_offenders=$(printf '%s\n' "$test_src" | xargs awk '
+        { line = $0; sub(/\/\/.*/, "", line)
+          if (line ~ /db\.Migrate\([^)]*"sqlite3"/) print FILENAME ":" FNR }' | sort -u)
+      status=$?
+      if (( status != 0 )); then
+        red "test SQLite migrate guard: scan exited $status — guard NOT verified (see the error above)"
+        rc=1
+      elif [[ -n "$migrate_offenders" ]]; then
+        red 'db.Migrate(…, "sqlite3") in a test outside internal/db — restore the schema with db.BootstrapSchemaForTest or db.BootstrapTenantlessSchemaForTest:'
+        echo "$migrate_offenders"
+        rc=1
+      else
+        green "test SQLite migrate guard OK"
+      fi
+    fi
+  fi
+
   # Open-core boundary: the dependency graph points inward, so core (internal/,
   # cmd/) must never import ee/. Only the composition root (package main, at the
   # repo root) wires ee in — ee.Install() + the ee/sso blank import — so it is the
