@@ -56,9 +56,7 @@ func TestMigrate_ExternalActionObjectsBackfill(t *testing.T) {
 		}
 	}
 
-	if err := Migrate(database, "sqlite3"); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	migrateThrough(t, database, 202610310010)
 
 	type object struct{ kind, key string }
 	want := map[string]object{
