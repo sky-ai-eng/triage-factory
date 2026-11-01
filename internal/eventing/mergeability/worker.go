@@ -294,8 +294,11 @@ func (w *Worker) read(ctx context.Context, orgID string, g *credentialBatch) {
 
 	defer func() {
 		if rec := recover(); rec != nil {
-			// A panic must not kill the single worker goroutine; the probes
-			// it held go back with the outcome that says why.
+			// A panic must not kill the single worker goroutine. Each
+			// completion recovers its own, so one here is in the read (or the
+			// loop around the completions), and every probe it held goes back
+			// with the outcome that says why; one already completed answers
+			// the requeue with a lost lease.
 			span.SetStatus(codes.Error, "panic")
 			log.ErrorContext(ctx, "mergeability probes: panic reading a credential's probes", "credential", g.credential, "panic", rec)
 			w.requeueAll(ctx, held, workitem.OutcomePoisonSuspected, fmt.Errorf("panic: %v", rec))
@@ -311,7 +314,7 @@ func (w *Worker) read(ctx context.Context, orgID string, g *credentialBatch) {
 	reads, err := g.client.PRMergeability(readCtx, nodeIDs)
 	cancel()
 	if err != nil {
-		if until, ok := rateLimitedUntil(g.client, err); ok {
+		if until, ok := rateLimitedUntil(err); ok {
 			w.limited[key] = until
 			span.SetAttributes(telemetry.Outcome("rate_limited"))
 			log.WarnContext(ctx, "mergeability probes: GitHub rate-limited the read; the credential's probes wait for the reset",
@@ -353,24 +356,16 @@ type limitKey struct {
 const minRateLimitWait = time.Minute
 
 // rateLimitedUntil reports when a read that failed with err may be sent again
-// on client's credential, when the failure was a rate limit: GitHub refused
-// the read (ErrRateLimited), or the client was waiting out a spent budget's
-// reset when the read's deadline ran out.
-func rateLimitedUntil(client *ghclient.Client, err error) (time.Time, bool) {
-	var until time.Time
+// on its credential, when the failure was a rate limit. The client returns
+// ErrRateLimited for every rate limit it does not wait out, a wait that would
+// outlast the read's deadline included, so that is the only error to look
+// for.
+func rateLimitedUntil(err error) (time.Time, bool) {
 	var limited *ghclient.ErrRateLimited
-	switch {
-	case errors.As(err, &limited):
-		until = limited.ResumeAt
-	case errors.Is(err, context.DeadlineExceeded):
-		reset, ok := client.GraphQLBudgetResumeAt()
-		if !ok {
-			return time.Time{}, false
-		}
-		until = reset
-	default:
+	if !errors.As(err, &limited) {
 		return time.Time{}, false
 	}
+	until := limited.ResumeAt
 	if floor := time.Now().Add(minRateLimitWait); until.Before(floor) {
 		until = floor
 	}
@@ -389,10 +384,18 @@ func sortedKeys[V any](m map[string]V) []string {
 // complete records one answer and forwards its events once they committed.
 // The loser contract is every work kind's: ErrLeaseLost logs and stops, since
 // nothing landed and the probe's next holder reads again; ErrCancelled logs;
-// any other failure returns the probe with backoff.
+// any other failure returns the probe with backoff. A panic returns this
+// probe alone as poison, so the probes completed after it in the same batch
+// are not charged for it.
 func (w *Worker) complete(ctx context.Context, item db.ClaimedPRMergeabilityProbe, answer db.PRMergeabilityAnswer, traceparent string) {
 	termCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), terminalWriteTimeout)
 	defer cancel()
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.ErrorContext(termCtx, "mergeability probes: panic completing a probe", "probe_id", item.Receipt.ItemID, "entity_id", item.EntityID, "panic", rec)
+			w.requeue(termCtx, item, workitem.OutcomePoisonSuspected, fmt.Errorf("panic: %v", rec))
+		}
+	}()
 	res, err := w.store.CompleteProbe(termCtx, item.Receipt, answer, traceparent)
 	switch {
 	case err == nil:

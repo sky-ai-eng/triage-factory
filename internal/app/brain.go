@@ -85,8 +85,8 @@ func (a *App) startBrain(term int64) {
 	// scan tick is the floor. Same single-worker discipline.
 	go a.router.RunReDeriveQueue(brainCtx, routing.DefaultReDeriveScanInterval)
 	// Mergeability probe worker: claims the probes the poll admits for pull
-	// requests whose mergeability can have changed, reads them from GitHub a
-	// repository at a time, and records each answer with the conflict event
+	// requests whose mergeability can have changed, reads the ones that share a
+	// GitHub credential in one query, and records each answer with the conflict event
 	// its transition implies. The scan is its only schedule: a probe is not
 	// ripe until well after its admission. Same single-worker discipline.
 	go a.mergeability.RunMergeabilityProbes(brainCtx, mergeability.DefaultScanInterval)

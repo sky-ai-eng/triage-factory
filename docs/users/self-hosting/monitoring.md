@@ -116,15 +116,17 @@ When you combine pods in a query:
 ### Mergeability probes
 
 Triage Factory learns whether a pull request conflicts by asking GitHub only
-when the answer can have changed: a new pull request, a new head, or every 10
-minutes. These counters show what that costs and how it is going:
+when the answer can have changed: a new pull request, a new head, or a
+sweep, which the first poll more than 10 minutes after the last read admits
+(about every 15 minutes at the default 5-minute poll interval). These counters
+show what that costs and how it is going:
 
 | Metric                                | What it counts                                                                                                                                                    |
 | ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `tf_mergeability_probes_total`        | Pull requests asked about, by `reason` (`new`, `head_moved`, `unknown_retry`, `sweep`). Each read makes GitHub run a test merge, which on GitHub Enterprise Server is your server's work. |
 | `tf_mergeability_answers_total`       | GitHub's answers, by `value` (`MERGEABLE`, `CONFLICTING`, `UNKNOWN`). A high share of `UNKNOWN` means GitHub is slow to compute mergeability.                       |
-| `tf_mergeability_unknown_giveups_total` | Pull requests GitHub answered `UNKNOWN` for ten times in a row. Their conflicts are seen at the next 10-minute read instead.                                       |
-| `tf_mergeability_sweep_changes_total` | 10-minute reads that found the answer changed. Today these are mostly merges to the base branch.                                                                  |
+| `tf_mergeability_unknown_giveups_total` | Pull requests GitHub answered `UNKNOWN` for ten times in a row. Their conflicts are seen at the next sweep instead.                                       |
+| `tf_mergeability_sweep_changes_total` | Sweep reads that found the answer changed. Today these are mostly merges to the base branch.                                                                  |
 | `tf_mergeability_dropped_total`       | Probes given up after five failed reads, by `outcome` (`dependency_down`, `transient`, `deadline`). The next poll queues the pull request again; a steady rate means TF cannot reach GitHub for it. |
 
 The probe queue is `kind="pr_mergeability_probes"` on the `tf_work_*` gauges

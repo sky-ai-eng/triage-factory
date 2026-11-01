@@ -38,20 +38,26 @@ type rig struct {
 	mu     sync.Mutex
 	answer string
 	reads  int
-	// rateLimited makes GitHub refuse every read for a spent GraphQL budget
-	// that resets in an hour.
-	rateLimited bool
-	resolver    *fixedResolver
+	// refuse, when set, answers every read in place of GitHub's answer: a
+	// rate-limit refusal, in the tests that set it.
+	refuse   func(w http.ResponseWriter)
+	resolver *fixedResolver
 }
 
 type recorder struct {
 	mu     sync.Mutex
 	events []domain.Event
+	// panicNext makes the next publish panic instead of recording.
+	panicNext bool
 }
 
 func (r *recorder) PublishPreEnqueued(_ context.Context, evt domain.Event) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.panicNext {
+		r.panicNext = false
+		panic("publish failed")
+	}
 	r.events = append(r.events, evt)
 }
 
@@ -107,15 +113,10 @@ func newRig(t *testing.T) *rig {
 		}
 		r.mu.Lock()
 		r.reads++
-		answer, limited := r.answer, r.rateLimited
+		answer, refuse := r.answer, r.refuse
 		r.mu.Unlock()
-		if limited {
-			w.Header().Set("X-RateLimit-Resource", "graphql")
-			w.Header().Set("X-RateLimit-Limit", "5000")
-			w.Header().Set("X-RateLimit-Remaining", "0")
-			w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10))
-			w.WriteHeader(http.StatusForbidden)
-			_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
+		if refuse != nil {
+			refuse(w)
 			return
 		}
 		nodes := make([]map[string]string, len(body.Variables.IDs))
@@ -315,32 +316,98 @@ func TestWorker_PullRequestsInTwoRepositoriesOnOneCredentialAreReadInOneQuery(t 
 	}
 }
 
+// spentGraphQLBudget sets the headers of a response reporting the GraphQL
+// budget spent until reset.
+func spentGraphQLBudget(w http.ResponseWriter, reset time.Time) {
+	w.Header().Set("X-RateLimit-Resource", "graphql")
+	w.Header().Set("X-RateLimit-Limit", "5000")
+	w.Header().Set("X-RateLimit-Remaining", "0")
+	w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(reset.Unix(), 10))
+}
+
+// Every shape GitHub refuses a read in for a rate limit defers the probe,
+// whether or not the wait it names is one the client would sleep through
+// without a deadline: the read's own deadline is shorter than all of them.
 func TestWorker_ARateLimitDefersTheProbesAndHoldsTheCredential(t *testing.T) {
+	refusals := map[string]func(w http.ResponseWriter){
+		"a spent budget resetting in an hour": func(w http.ResponseWriter) {
+			spentGraphQLBudget(w, time.Now().Add(time.Hour))
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
+		},
+		"a spent budget resetting after the read's deadline": func(w http.ResponseWriter) {
+			spentGraphQLBudget(w, time.Now().Add(2*time.Minute))
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
+		},
+		"a secondary limit's Retry-After": func(w http.ResponseWriter) {
+			w.Header().Set("Retry-After", "60")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"You have exceeded a secondary rate limit."}`))
+		},
+		"a RATE_LIMITED error in a 200": func(w http.ResponseWriter) {
+			spentGraphQLBudget(w, time.Now().Add(time.Hour))
+			_, _ = w.Write([]byte(`{"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}`))
+		},
+	}
+	for name, refuse := range refusals {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t)
+			first := r.pullRequest("7")
+			r.admit(first.ID, domain.MergeabilityProbeNew)
+			r.mu.Lock()
+			r.refuse = refuse
+			r.mu.Unlock()
+
+			start := time.Now()
+			r.drain(domain.MergeableConflicting)
+			if elapsed := time.Since(start); elapsed > 10*time.Second {
+				t.Errorf("the drain took %v, want the refusal returned rather than waited out", elapsed)
+			}
+			if n := r.readCount(); n != 1 {
+				t.Fatalf("GitHub was read %d times, want the one refused read", n)
+			}
+			if p := r.probes(first.ID); len(p) != 1 || p[0].status != workitem.StatusReady || p[0].outcome != "deferred" || p[0].attempt != 0 {
+				t.Errorf("probes = %+v, want the probe deferred with its attempt refunded", p)
+			}
+
+			// Another pull request on the same credential waits for the reset
+			// too, without a request of its own.
+			second := r.pullRequest("8")
+			r.admit(second.ID, domain.MergeabilityProbeNew)
+			r.drain(domain.MergeableConflicting)
+			if n := r.readCount(); n != 1 {
+				t.Errorf("GitHub was read %d times, want no read on a rate-limited credential", n)
+			}
+			if p := r.probes(second.ID); len(p) != 1 || p[0].status != workitem.StatusReady || p[0].outcome != "deferred" || p[0].attempt != 0 {
+				t.Errorf("probes = %+v, want the second probe deferred unread", p)
+			}
+		})
+	}
+}
+
+// A panic completing one probe of a batch returns that probe alone: the ones
+// completed after it are recorded as if nothing had happened.
+func TestWorker_APanicCompletingOneProbeLeavesTheRestOfTheBatchCompleted(t *testing.T) {
 	r := newRig(t)
-	first := r.pullRequest("7")
-	r.admit(first.ID, domain.MergeabilityProbeNew)
-	r.mu.Lock()
-	r.rateLimited = true
-	r.mu.Unlock()
+	a, b := r.pullRequest("11"), r.pullRequest("12")
+	r.admit(a.ID, domain.MergeabilityProbeNew)
+	r.admit(b.ID, domain.MergeabilityProbeNew)
+	r.pub.mu.Lock()
+	r.pub.panicNext = true
+	r.pub.mu.Unlock()
 
-	r.drain(domain.MergeableConflicting)
-	if n := r.readCount(); n != 1 {
-		t.Fatalf("GitHub was read %d times, want the one refused read", n)
-	}
-	if p := r.probes(first.ID); len(p) != 1 || p[0].status != workitem.StatusReady || p[0].outcome != "deferred" || p[0].attempt != 0 {
-		t.Errorf("probes = %+v, want the probe deferred with its attempt refunded", p)
-	}
+	published := r.drain(domain.MergeableConflicting)
 
-	// Another pull request on the same credential waits for the reset too,
-	// without a request of its own.
-	second := r.pullRequest("8")
-	r.admit(second.ID, domain.MergeabilityProbeNew)
-	r.drain(domain.MergeableConflicting)
-	if n := r.readCount(); n != 1 {
-		t.Errorf("GitHub was read %d times, want no read on a rate-limited credential", n)
+	// The panic came after the first answer committed, so both probes are
+	// done, and only the second answer's event reached the publisher.
+	for _, e := range []*domain.Entity{a, b} {
+		if p := r.probes(e.ID); len(p) != 1 || p[0].status != workitem.StatusDone {
+			t.Errorf("probes of %s = %+v, want one done probe", e.ID, p)
+		}
 	}
-	if p := r.probes(second.ID); len(p) != 1 || p[0].status != workitem.StatusReady || p[0].outcome != "deferred" || p[0].attempt != 0 {
-		t.Errorf("probes = %+v, want the second probe deferred unread", p)
+	if len(published) != 1 || published[0].EventType != domain.EventGitHubPRConflicts {
+		t.Errorf("published %+v, want the one github:pr:conflicts the panic did not interrupt", published)
 	}
 }
 

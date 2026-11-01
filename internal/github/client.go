@@ -630,6 +630,12 @@ func (c *Client) postGraphQL(ctx context.Context, body any, idempotent bool) ([]
 				"errors", len(gqlResp.Errors), "type", e.Type, "path", e.Path, "message", e.Message)
 			return data, nil
 		}
+		// GitHub can refuse a query on a spent budget with a 200 whose only
+		// content is a RATE_LIMITED error, which is the same refusal as a 403
+		// reporting a spent budget and is returned as one.
+		if e.Type == "RATE_LIMITED" {
+			return nil, &ErrRateLimited{ResumeAt: c.graphQLResumeAt()}
+		}
 		// Surface the first error; note when more were dropped so a multi-error
 		// total failure isn't silently reduced to a single message.
 		if len(gqlResp.Errors) > 1 {

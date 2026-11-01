@@ -512,20 +512,26 @@ func TestTruncatedBody_SpentBudget(t *testing.T) {
 
 	t.Run("reset past transientBackoffMax", func(t *testing.T) {
 		var calls atomic.Int32
+		reset := time.Now().Add(time.Minute)
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			calls.Add(1)
-			spentBudget(w, time.Now().Add(time.Minute))
+			spentBudget(w, reset)
 			truncated(w, http.StatusOK)
 		}))
 		t.Cleanup(srv.Close)
 
-		// The deadline ends the wait; what matters is that the call was
-		// waiting for the reset rather than giving up on the request.
+		// What matters is that the call stops for the reset rather than giving
+		// up on the request as a failure. A reset past the caller's deadline
+		// is not waited for: the call returns at once with when to resume.
 		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 		defer cancel()
 		_, err := clientAgainst(srv.URL).Get(ctx, "/x")
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("err = %v, want the wait for the reset cut off by the deadline", err)
+		var rl *ErrRateLimited
+		if !errors.As(err, &rl) {
+			t.Fatalf("err = %v, want *ErrRateLimited", err)
+		}
+		if !rl.ResumeAt.Equal(time.Unix(reset.Unix(), 0)) {
+			t.Errorf("ResumeAt = %v, want the budget's reset %v", rl.ResumeAt, time.Unix(reset.Unix(), 0))
 		}
 		if got := calls.Load(); got != 1 {
 			t.Errorf("upstream requests = %d, want 1", got)
