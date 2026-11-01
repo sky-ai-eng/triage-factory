@@ -1,5 +1,6 @@
 # Alerting rules for delegated runs: claims no executor is driving, workspace
-# checkpoints, and the credential sidecar's supervision channel. Loaded by the
+# checkpoints, the credential sidecar's supervision channel, and sandboxes
+# reaching their memory limit. Loaded by the
 # bundled Prometheus through the rule_files glob in prometheus.yml. Severity
 # and delivery follow tf-connections.yml: critical is a fault an operator can
 # fix, warning needs a look, and nothing is sent anywhere until prometheus.yml
@@ -106,3 +107,49 @@ groups:
             channel. Its ERROR line, "sidecar sent a supervision frame over the
             size limit; closed its supervision channel", names the
             conversation.
+
+      # A run parks sandbox_lost once its sandbox has been lost as many times
+      # in a row as the jail budget allows, and memory_limit="true" says the
+      # memory limit ended the last one. The run then waits for a person, and
+      # the toast the org sees tells them to raise a limit only an operator
+      # can set, so this is the operator's copy of that toast. A warning that
+      # fires on the counter's first sample, like the rules above.
+      - alert: RunPausedAtMemoryLimit
+        expr: |
+          sum by (org_id) (increase(tf_conversations_sandbox_lost_parks_total{memory_limit="true"}[1h])) > 0
+          or
+          sum by (org_id) (
+            tf_conversations_sandbox_lost_parks_total{memory_limit="true"}
+            unless last_over_time(tf_conversations_sandbox_lost_parks_total{memory_limit="true"}[1h] offset 1h)
+          ) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "A run is paused because its sandbox kept reaching its memory limit"
+          description: >-
+            A run in org {{ $labels.org_id }} kept losing its sandbox, the
+            last time at TF_CLAIM_MEMORY_LIMIT_MB, and is paused until someone
+            sends it a message. If the work needs more memory, raise
+            TF_CLAIM_MEMORY_LIMIT_MB on the executors.
+            tf_sandbox_peak_memory_ratio shows how close other runs come to
+            the limit.
+
+      # The memory limit ending a sandbox costs the run every process it had
+      # running. A run whose calls complete between losses is restarted in
+      # place each time rather than paused, so RunPausedAtMemoryLimit never
+      # sees it. A run that does pause can lose up to nine sandboxes first
+      # (three in place on each of three claims), so the threshold is more
+      # than one run's worth in an hour.
+      - alert: SandboxesLostToMemoryLimit
+        expr: sum(increase(tf_sandbox_memory_kills_total{kind="jail_lost"}[1h])) > 9
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sandboxes are being ended by their memory limit"
+          description: >-
+            The memory limit ended about {{ $value | printf "%.0f" }}
+            sandboxes in the last hour. Each one cost its run every process it had running.
+            Break tf_sandbox_memory_kills_total down by org_id to find the
+            runs, and compare tf_sandbox_peak_memory_ratio across runs: if
+            most come close to the limit, raise TF_CLAIM_MEMORY_LIMIT_MB on
+            the executors.

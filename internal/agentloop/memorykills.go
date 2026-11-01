@@ -20,6 +20,21 @@ type JailMemory interface {
 	OOMKilled() bool
 }
 
+// MemoryKill names one kind of thing memory ended in a jail, as it is counted.
+// The values are metric attribute values, so they are a closed set.
+type MemoryKill string
+
+const (
+	// MemoryKillBashBudget is a `bash` command the harness killed for
+	// exceeding the per-command memory budget. The jail is untouched.
+	MemoryKillBashBudget MemoryKill = "bash_budget"
+	// MemoryKillCeiling is a process the kernel killed to hold the jail at its
+	// ceiling, in a jail that went on running.
+	MemoryKillCeiling MemoryKill = "ceiling"
+	// MemoryKillJailLost is a jail the ceiling ended.
+	MemoryKillJailLost MemoryKill = "jail_lost"
+)
+
 // jailExitWait bounds how long a dead tool host waits for its jail to finish
 // exiting before reading the jail's exit attribution. The tool host is the
 // jail's main process, so a jail whose tool host died follows it within a
@@ -29,6 +44,11 @@ const jailExitWait = 5 * time.Second
 // WatchMemoryKills wraps host so a call's result says when the jail's memory
 // ceiling killed something while the call ran or since the previous call.
 // limitMB is the ceiling the jail was launched under, zero for none.
+//
+// count, when not nil, is told every kill the watch sees, once: n of kind.
+// That includes a command the per-command budget killed, which the harness's
+// own error already explains to the model and which the watch therefore
+// leaves as it is.
 //
 // The kernel holds a jail at its ceiling by killing the host process with the
 // most memory in it, usually the one running the largest guest process. The
@@ -40,8 +60,11 @@ const jailExitWait = 5 * time.Second
 // ToolHostLostError whose notice says the ceiling ended the jail.
 //
 // A call during which nothing was killed passes through unchanged.
-func WatchMemoryKills(host ToolHost, jail JailMemory, limitMB int) ToolHost {
-	w := &memoryKillWatch{host: host, jail: jail, limitMB: limitMB, exitWait: jailExitWait}
+func WatchMemoryKills(host ToolHost, jail JailMemory, limitMB int, count func(kind MemoryKill, n int)) ToolHost {
+	if count == nil {
+		count = func(MemoryKill, int) {}
+	}
+	w := &memoryKillWatch{host: host, jail: jail, limitMB: limitMB, exitWait: jailExitWait, count: count}
 	if n, ok := jail.OOMKills(); ok {
 		w.told = n
 	}
@@ -53,6 +76,7 @@ type memoryKillWatch struct {
 	jail     JailMemory
 	limitMB  int
 	exitWait time.Duration
+	count    func(kind MemoryKill, n int)
 
 	// mu spans a whole call, both count reads included, so the kills read on
 	// either side of a call happened during that call and no other.
@@ -70,6 +94,9 @@ func (w *memoryKillWatch) Call(name string, args map[string]any) (ToolOutcome, e
 	out, err := w.host.Call(name, args)
 	if err != nil {
 		return out, w.explainLostHost(name, before, beforeOK, err)
+	}
+	if out.Cause == ToolErrorCauseMemoryBudget {
+		w.count(MemoryKillBashBudget, 1)
 	}
 	after, afterOK := w.jail.OOMKills()
 	if !afterOK {
@@ -94,6 +121,9 @@ func (w *memoryKillWatch) Call(name string, args map[string]any) (ToolOutcome, e
 	}
 	if after > w.told {
 		w.told = after
+	}
+	if n := during + background; n > 0 {
+		w.count(MemoryKillCeiling, n)
 	}
 
 	var notices []string
@@ -142,6 +172,7 @@ func (w *memoryKillWatch) explainLostHost(name string, before int, beforeOK bool
 	if !ended {
 		return err
 	}
+	w.count(MemoryKillJailLost, 1)
 	return &ToolHostLostError{
 		Notice:      w.lostNotice(name, sent),
 		Reason:      "the sandbox reached " + w.limitPhrase() + " and the kernel ended it",

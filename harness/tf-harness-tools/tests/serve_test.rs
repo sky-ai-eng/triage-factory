@@ -356,6 +356,9 @@ fn a_configured_budget_kills_a_hog_without_ending_the_engagement() {
         message.contains("starting"),
         "the partial output was dropped: {message}"
     );
+    // The cause rides beside the string, so the peer counts the kill without
+    // reading the message.
+    assert_eq!(breach["cause"], json!("memory_budget"), "{breach}");
 
     // The engagement is untouched: the next call answers normally and the
     // server still exits cleanly on EOF.

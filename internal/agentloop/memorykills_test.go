@@ -41,12 +41,18 @@ func (h funcToolHost) Call(name string, args map[string]any) (ToolOutcome, error
 func (funcToolHost) Close() error { return nil }
 
 func watch(jail *fakeJail, limitMB int, call func(name string, args map[string]any) (ToolOutcome, error)) *memoryKillWatch {
-	w := WatchMemoryKills(funcToolHost{call: call}, jail, limitMB).(*memoryKillWatch)
+	w := WatchMemoryKills(funcToolHost{call: call}, jail, limitMB, nil).(*memoryKillWatch)
 	w.exitWait = 50 * time.Millisecond
 	return w
 }
 
 const killedOutput = "partial\n\n\nCommand was killed by SIGKILL (signal 9)"
+
+// tally is a count func that adds every kill it is told to a map by kind.
+func tally() (map[MemoryKill]int, func(MemoryKill, int)) {
+	got := map[MemoryKill]int{}
+	return got, func(kind MemoryKill, n int) { got[kind] += n }
+}
 
 // A call during which nothing was killed comes back exactly as the host
 // answered it, in every form a result takes.
@@ -174,6 +180,48 @@ func TestWatchMemoryKills_ABackgroundKillIsToldAsOne(t *testing.T) {
 	})
 }
 
+// Every kill the watch sees is counted once, under what memory ended: the
+// budget's command, the ceiling's processes, or the jail. A budget kill keeps
+// the harness's own error as it is, since that error already tells the model.
+func TestWatchMemoryKills_CountsEveryKillOnceByKind(t *testing.T) {
+	jail := &fakeJail{}
+	var answer func() (ToolOutcome, error)
+	w := watch(jail, 4096, func(string, map[string]any) (ToolOutcome, error) { return answer() })
+	got, count := tally()
+	w.count = count
+
+	const budgetError = "Command killed: exceeded the per-command memory budget (~3100 MB resident against a 3072 MB budget)."
+	answer = func() (ToolOutcome, error) {
+		return ToolOutcome{ToolError: budgetError, Cause: ToolErrorCauseMemoryBudget}, nil
+	}
+	if out, err := w.Call("bash", nil); err != nil || out.ToolError != budgetError {
+		t.Fatalf("budget kill = (%+v, %v), want the harness's error unchanged", out, err)
+	}
+
+	answer = func() (ToolOutcome, error) { jail.kills++; return ToolOutcome{ToolError: killedOutput}, nil }
+	_, _ = w.Call("bash", nil)
+
+	answer = func() (ToolOutcome, error) { return ToolOutcome{Content: "ok"}, nil }
+	jail.kills += 2 // in the background, between calls
+	_, _ = w.Call("read", nil)
+	_, _ = w.Call("read", nil) // nothing new
+
+	answer = func() (ToolOutcome, error) { jail.kills++; return ToolOutcome{}, io.EOF }
+	if _, err := w.Call("bash", nil); err == nil {
+		t.Fatal("a call whose tool host died returned no error")
+	}
+
+	want := map[MemoryKill]int{MemoryKillBashBudget: 1, MemoryKillCeiling: 3, MemoryKillJailLost: 1}
+	if len(got) != len(want) {
+		t.Errorf("counted %v, want %v", got, want)
+	}
+	for kind, n := range want {
+		if got[kind] != n {
+			t.Errorf("%s = %d, want %d (all: %v)", kind, got[kind], n, got)
+		}
+	}
+}
+
 // A jail with no ceiling of its own can still lose a process to the host
 // running out of memory, and the notice must not invent a limit.
 func TestWatchMemoryKills_AnUncappedJailNamesNoLimit(t *testing.T) {
@@ -284,6 +332,8 @@ func TestWatchMemoryKills_ExplainsAJailTheCeilingEnded(t *testing.T) {
 				tc.during(jail)
 				return ToolOutcome{}, callErr
 			})
+			counted, count := tally()
+			w.count = count
 			if tc.before != nil {
 				tc.before(jail)
 			}
@@ -294,6 +344,13 @@ func TestWatchMemoryKills_ExplainsAJailTheCeilingEnded(t *testing.T) {
 			lost, ok := lostToolHost(err)
 			if explained := tc.notice != ""; ok != explained {
 				t.Fatalf("explained = %v, want %v (err: %v)", ok, explained, err)
+			}
+			wantLost := 0
+			if ok {
+				wantLost = 1
+			}
+			if counted[MemoryKillJailLost] != wantLost || counted[MemoryKillCeiling] != 0 {
+				t.Errorf("counted %v, want jail_lost %d and no ceiling kills", counted, wantLost)
 			}
 			if !ok {
 				return
@@ -339,7 +396,7 @@ func TestRun_AJailTheCeilingEndedIsExplainedOnTheCallItEnded(t *testing.T) {
 				jail.exited = true
 				jail.oomKilled = true
 				return ToolOutcome{}, io.EOF
-			}}, jail, 4096)
+			}}, jail, 4096, nil)
 			turns := []scriptedTurn{{calls: []domain.ToolCall{{ID: "c1", Name: "bash"}, {ID: "c2", Name: "read"}}}}
 			if restartable {
 				host = restartingWatch{ToolHost: host}

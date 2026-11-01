@@ -80,7 +80,10 @@ the spec. In brief: a 4-byte big-endian length prefix then that many JSON bytes;
 request `{id, tool, args}`; response `{id, ok, result}` or `{id, ok:false,
 error}`, where `error` is the tool's message string for a tool failure or a
 `{kind, message}` object for a protocol failure (`unknown_tool`,
-`malformed_request`, `request_too_large`, `response_too_large`). A protocol
+`malformed_request`, `request_too_large`, `response_too_large`). A tool
+failure the host itself caused also carries `cause` beside the string
+(`memory_budget` for a `bash` budget kill), which the peer counts and the model
+never sees. A protocol
 error doesn't imply the engagement is over: all kinds are survivable — read the
 next frame — except `request_too_large`, after which the server always closes
 because the stream can't be resynchronized past a body it refused to read
@@ -184,7 +187,8 @@ All model-visible strings match pi. The differences that exist:
   configured with one, so the one-shot CLI and the differential parity corpus
   never see it. What it adds is an error path pi does not have: a command whose
   process tree exceeds the budget is SIGKILLed and comes back as a tool error
-  naming the observed figure and the limit, with whatever it printed first.
+  naming the observed figure and the limit, with whatever it printed first,
+  and `cause: "memory_budget"` on the serve response.
   Sampling is adaptive — every 300 ms normally, every 100 ms once a sample
   reaches 70% of the budget and until five consecutive samples fall back below
   it — so a breach can still overshoot between ticks, bounded by the tighter

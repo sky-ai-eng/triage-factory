@@ -75,17 +75,27 @@ func (e *ProtocolError) Fatal() bool {
 
 // ToolOutcome is one dispatched call's result, already classified.
 //
-// Exactly one of the three is set. Content is the model-facing text of a
-// successful call; ToolError is the message a tool that ran and failed threw
-// (an ordinary is_error result — the RPC succeeded); Protocol is a
-// transport-level failure whose Fatal() decides whether the engagement can
-// continue.
+// Exactly one of Content, ToolError and Protocol is set. Content is the
+// model-facing text of a successful call; ToolError is the message a tool that
+// ran and failed threw (an ordinary is_error result — the RPC succeeded);
+// Protocol is a transport-level failure whose Fatal() decides whether the
+// engagement can continue.
+//
+// Cause accompanies a ToolError when the tool host ended the call itself and
+// said why, as one of the ToolErrorCause values. The model reads ToolError
+// alone; Cause is what the call's failure is counted under.
 type ToolOutcome struct {
 	Content   string
 	Images    []ToolImage
 	ToolError string
+	Cause     string
 	Protocol  *ProtocolError
 }
+
+// ToolErrorCauseMemoryBudget is the cause the harness gives a `bash` command
+// it killed for exceeding the per-command memory budget. The value is the
+// harness's ToolErrorCause wire string.
+const ToolErrorCauseMemoryBudget = "memory_budget"
 
 // ToolImage is a non-text content block a tool returned (the read tool on an
 // image file), carried as base64 data + mime type exactly as the harness
@@ -181,6 +191,7 @@ type serveResponse struct {
 	OK     bool            `json:"ok"`
 	Result json.RawMessage `json:"result,omitempty"`
 	Error  json.RawMessage `json:"error,omitempty"`
+	Cause  string          `json:"cause,omitempty"`
 }
 
 // errRequestNotSent marks a call whose request never reached the tool host,
@@ -257,7 +268,7 @@ func classifyResponse(resp serveResponse) (ToolOutcome, error) {
 	// with a stable `kind` when the failure is protocol-level.
 	var asString string
 	if err := json.Unmarshal(resp.Error, &asString); err == nil {
-		return ToolOutcome{ToolError: asString}, nil
+		return ToolOutcome{ToolError: asString, Cause: resp.Cause}, nil
 	}
 	var asProto struct {
 		Kind    string `json:"kind"`

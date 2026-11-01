@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -135,6 +137,7 @@ func TestJailLost_TheConversationGoesOnInANewCell(t *testing.T) {
 // the limit a person can raise when the memory ceiling ended the last jail.
 func TestJailLost_TheLastLossTheBudgetAllowsParksForAPerson(t *testing.T) {
 	f := newStallFixture(t, "r-jail-lost-spent", activityTimings{idle: time.Hour})
+	collect := sandboxMemoryMetrics(t)
 	hub, captured := capturingHub(t)
 	f.s.wsHub = hub
 
@@ -172,6 +175,10 @@ func TestJailLost_TheLastLossTheBudgetAllowsParksForAPerson(t *testing.T) {
 	}
 	if got := captured.toasts(); len(got) != 1 || !strings.Contains(got[0], "lost 3 times in a row") || !strings.Contains(got[0], "TF_CLAIM_MEMORY_LIMIT_MB") {
 		t.Errorf("toasts = %q, want one saying how many sandboxes were lost and naming TF_CLAIM_MEMORY_LIMIT_MB", got)
+	}
+	if got := counterAt(t, collect(), "conversations.sandbox_lost_parks",
+		attribute.String("memory_limit", "true"), attribute.String("org.id", runmode.LocalDefaultOrgID)); got != 1 {
+		t.Errorf("sandbox-lost parks at the memory limit = %d, want 1", got)
 	}
 
 	if next, err := f.s.conversationQueue.ClaimNextConversation(context.Background(), "exec-successor", 1, db.ClaimPlacement{}, time.Minute); err != nil || next != nil {

@@ -228,8 +228,10 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	}, func(jail cell.Jail, conn net.Conn) agentloop.ToolHost {
 		// Every result says when the jail's ceiling killed something during
 		// or before the call, and a jail the ceiling ended says so on the
-		// call it ended. Watched against the same ceiling the launch set.
-		return agentloop.WatchMemoryKills(agentloop.NewToolHost(conn, timings.toolSocket()), jail, memoryLimitMB)
+		// call it ended. Watched against the same ceiling the launch set, and
+		// every kill it sees is counted for the operator.
+		return agentloop.WatchMemoryKills(agentloop.NewToolHost(conn, timings.toolSocket()), jail, memoryLimitMB,
+			func(kind agentloop.MemoryKill, n int) { recordMemoryKills(orgID, kind, n) })
 	})
 	if err != nil {
 		return launchFailed(err)

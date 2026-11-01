@@ -134,6 +134,9 @@ func (j *restartableJail) endOverrunCall(limit time.Duration, seen time.Time) (h
 }
 
 func (j *restartableJail) recordActuals(ctx context.Context, orgID, claimID string, a cell.Actuals) error {
+	// Each jail's own peak, before it folds into the claim's: a restarted
+	// jail's is its own observation, against the same ceiling.
+	recordPeakMemory(orgID, a.PeakMemMB, j.spec.MemoryLimitMB)
 	j.mu.Lock()
 	if a.PeakMemMB != nil && (j.spent.PeakMemMB == nil || *a.PeakMemMB > *j.spent.PeakMemMB) {
 		peak := *a.PeakMemMB
