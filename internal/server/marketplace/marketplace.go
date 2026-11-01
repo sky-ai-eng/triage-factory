@@ -22,7 +22,10 @@
 // publisher team's live rows, so a copy survives the publisher team or its
 // source object being deleted.
 
-package server
+// Package marketplace serves the within-org marketplace: publishing team
+// prompts and blueprints as listings, browsing and voting on them, and
+// installing a listing into a team.
+package marketplace
 
 import (
 	"context"
@@ -41,10 +44,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 )
 
-// marketplaceHandler serves the /api/marketplace/listings publish/republish/
+// Handler serves the /api/marketplace/listings publish/republish/
 // delist/relist/by-source family. It holds only the transactional store
-// runner + authz checker, mirroring blueprintsHandler/eventHandlersHandler.
-type marketplaceHandler struct {
+// runner + authz checker, mirroring the blueprint and event-handler handlers.
+type Handler struct {
 	tx db.TxRunner
 	az *authz.Checker
 }
@@ -61,16 +64,16 @@ var errMarketplaceSourceNotFound = errors.New("marketplace: source object not fo
 // role failure, it's "this surface doesn't exist for you". Returns (orgID,
 // userID, true) on success. No org-settings toggle check — the within-org
 // marketplace has none; see the file doc comment.
-func (mh *marketplaceHandler) gateMarketplace(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
+func (mh *Handler) gateMarketplace(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
 	if runmode.Current() == runmode.ModeLocal {
-		notFound(w, "route")
+		httpx.NotFound(w, "route")
 		return "", "", false
 	}
-	orgID, ok = requireOrg(w, r)
+	orgID, ok = httpx.RequireOrg(w, r)
 	if !ok {
 		return "", "", false
 	}
-	userID = ClaimsFrom(r.Context()).Subject
+	userID = httpx.ClaimsFrom(r.Context()).Subject
 	return orgID, userID, true
 }
 
@@ -85,8 +88,8 @@ func duplicateSourceMessage(kind, status string) string {
 }
 
 // validateMarketplaceEventTypes rejects any event type not present in the
-// events_catalog registry — the same check event_handlers_handler's create
-// path runs, reused here so a listing's facets can never reference an id the
+// events_catalog registry — the same check the event-handler create path
+// runs, reused here so a listing's facets can never reference an id the
 // catalog doesn't know.
 func validateMarketplaceEventTypes(eventTypes []string) error {
 	for _, et := range eventTypes {
@@ -189,7 +192,7 @@ type publishListingRequest struct {
 // standalone prompt as a new org-visible listing.
 //
 // POST /api/marketplace/listings
-func (mh *marketplaceHandler) handleMarketplacePublish(w http.ResponseWriter, r *http.Request) {
+func (mh *Handler) handleMarketplacePublish(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := mh.gateMarketplace(w, r)
 	if !ok {
 		return
@@ -241,11 +244,11 @@ func (mh *marketplaceHandler) handleMarketplacePublish(w http.ResponseWriter, r 
 		existingListing, e = tx.Marketplace.GetBySource(r.Context(), orgID, req.SourceID)
 		return e
 	}); err != nil {
-		internalError(w, "marketplace", err)
+		httpx.InternalError(w, "marketplace", err)
 		return
 	}
 	if sourceNotFound {
-		notFound(w, req.Kind)
+		httpx.NotFound(w, req.Kind)
 		return
 	}
 	if existingListing != nil {
@@ -276,18 +279,18 @@ func (mh *marketplaceHandler) handleMarketplacePublish(w http.ResponseWriter, r 
 		}, snap)
 		return e
 	}); err != nil {
-		if isUniqueViolation(err) {
+		if httpx.IsUniqueViolation(err) {
 			// A concurrent publish of the same source won the race between our
 			// pre-check and this insert — translate the partial-unique-index hit
 			// to the same friendly 409 rather than a raw constraint error.
 			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this " + req.Kind + " is already published — use the republish endpoint to push an update"})
 			return
 		}
-		internalError(w, "marketplace", err)
+		httpx.InternalError(w, "marketplace", err)
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, map[string]string{"id": listingID})
+	httpx.WriteJSON(w, http.StatusCreated, map[string]string{"id": listingID})
 }
 
 // publishVersionRequest is the POST /api/marketplace/listings/{id}/versions
@@ -307,7 +310,7 @@ type publishVersionRequest struct {
 // snapshot is untouched — republish never rewrites history.
 //
 // POST /api/marketplace/listings/{id}/versions
-func (mh *marketplaceHandler) handleMarketplaceListingVersionCreate(w http.ResponseWriter, r *http.Request) {
+func (mh *Handler) handleMarketplaceListingVersionCreate(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := mh.gateMarketplace(w, r)
 	if !ok {
 		return
@@ -358,11 +361,11 @@ func (mh *marketplaceHandler) handleMarketplaceListingVersionCreate(w http.Respo
 		}
 		return se
 	}); err != nil {
-		internalError(w, "marketplace", err)
+		httpx.InternalError(w, "marketplace", err)
 		return
 	}
 	if listingNotFound {
-		notFound(w, "listing")
+		httpx.NotFound(w, "listing")
 		return
 	}
 	if sourceUnavailable {
@@ -386,14 +389,14 @@ func (mh *marketplaceHandler) handleMarketplaceListingVersionCreate(w http.Respo
 	}); err != nil {
 		if errors.Is(err, db.ErrNoSuchListing) {
 			// Raced past the Get above (deleted between gate and write) — 404.
-			notFound(w, "listing")
+			httpx.NotFound(w, "listing")
 			return
 		}
-		internalError(w, "marketplace", err)
+		httpx.InternalError(w, "marketplace", err)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, updated)
+	httpx.WriteJSON(w, http.StatusOK, updated)
 }
 
 // gateMarketplaceListingWrite resolves a listing's publisher team and applies
@@ -401,7 +404,7 @@ func (mh *marketplaceHandler) handleMarketplaceListingVersionCreate(w http.Respo
 // success; on failure it has already written the response (404 for a missing
 // listing renders via the caller's own check when listing is nil, 403 for a
 // non-writer) and returns (nil, false).
-func (mh *marketplaceHandler) gateMarketplaceListingWrite(w http.ResponseWriter, r *http.Request, orgID, userID, id string) (*domain.MarketplaceListing, bool) {
+func (mh *Handler) gateMarketplaceListingWrite(w http.ResponseWriter, r *http.Request, orgID, userID, id string) (*domain.MarketplaceListing, bool) {
 	var (
 		listing *domain.MarketplaceListing
 		missing bool
@@ -418,11 +421,11 @@ func (mh *marketplaceHandler) gateMarketplaceListingWrite(w http.ResponseWriter,
 		listing = &detail.MarketplaceListing
 		return nil
 	}); err != nil {
-		internalError(w, "marketplace", err)
+		httpx.InternalError(w, "marketplace", err)
 		return nil, false
 	}
 	if missing {
-		notFound(w, "listing")
+		httpx.NotFound(w, "listing")
 		return nil, false
 	}
 	if !mh.az.RequireTeamWrite(w, r, orgID, userID, listing.PublisherTeamID) {
@@ -439,7 +442,7 @@ func (mh *marketplaceHandler) gateMarketplaceListingWrite(w http.ResponseWriter,
 // published OR own-team-write).
 //
 // POST /api/marketplace/listings/{id}/delist
-func (mh *marketplaceHandler) handleMarketplaceListingDelist(w http.ResponseWriter, r *http.Request) {
+func (mh *Handler) handleMarketplaceListingDelist(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := mh.gateMarketplace(w, r)
 	if !ok {
 		return
@@ -457,10 +460,10 @@ func (mh *marketplaceHandler) handleMarketplaceListingDelist(w http.ResponseWrit
 	}); err != nil {
 		if errors.Is(err, db.ErrNoSuchListing) {
 			// Raced past gateMarketplaceListingWrite above — 404.
-			notFound(w, "listing")
+			httpx.NotFound(w, "listing")
 			return
 		}
-		internalError(w, "marketplace", err)
+		httpx.InternalError(w, "marketplace", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -472,7 +475,7 @@ func (mh *marketplaceHandler) handleMarketplaceListingDelist(w http.ResponseWrit
 // delist.
 //
 // POST /api/marketplace/listings/{id}/relist
-func (mh *marketplaceHandler) handleMarketplaceListingRelist(w http.ResponseWriter, r *http.Request) {
+func (mh *Handler) handleMarketplaceListingRelist(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := mh.gateMarketplace(w, r)
 	if !ok {
 		return
@@ -490,10 +493,10 @@ func (mh *marketplaceHandler) handleMarketplaceListingRelist(w http.ResponseWrit
 	}); err != nil {
 		if errors.Is(err, db.ErrNoSuchListing) {
 			// Raced past gateMarketplaceListingWrite above — 404.
-			notFound(w, "listing")
+			httpx.NotFound(w, "listing")
 			return
 		}
-		internalError(w, "marketplace", err)
+		httpx.InternalError(w, "marketplace", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -516,12 +519,12 @@ func (mh *marketplaceHandler) handleMarketplaceListingRelist(w http.ResponseWrit
 // is display-only).
 //
 // GET /api/marketplace/listings/by-source/{source_id}
-func (mh *marketplaceHandler) handleMarketplaceListingBySource(w http.ResponseWriter, r *http.Request) {
+func (mh *Handler) handleMarketplaceListingBySource(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := mh.gateMarketplace(w, r)
 	if !ok {
 		return
 	}
-	sourceID, ok := uuidPathOr404(w, r, "source_id", "listing")
+	sourceID, ok := httpx.UUIDPathOr404(w, r, "source_id", "listing")
 	if !ok {
 		return
 	}
@@ -532,16 +535,16 @@ func (mh *marketplaceHandler) handleMarketplaceListingBySource(w http.ResponseWr
 		listing, e = tx.Marketplace.GetBySource(r.Context(), orgID, sourceID)
 		return e
 	}); err != nil {
-		internalError(w, "marketplace", err)
+		httpx.InternalError(w, "marketplace", err)
 		return
 	}
 	if listing == nil {
 		// 404, not the 200-with-literal-null this used to answer: it was the
 		// only single read in the surface that reported absence in the body.
-		notFound(w, "listing")
+		httpx.NotFound(w, "listing")
 		return
 	}
-	writeJSON(w, http.StatusOK, listing)
+	httpx.WriteJSON(w, http.StatusOK, listing)
 }
 
 // marketplaceListingIDOr404 guards the {id} path value on every listing route
@@ -549,7 +552,7 @@ func (mh *marketplaceHandler) handleMarketplaceListingBySource(w http.ResponseWr
 // get/vote/unvote/install guarded already; versions/delist/relist did not, so
 // a malformed id reached the store as a 22P02 → 500.
 func marketplaceListingIDOr404(w http.ResponseWriter, r *http.Request) (string, bool) {
-	return uuidPathOr404(w, r, "id", "listing")
+	return httpx.UUIDPathOr404(w, r, "id", "listing")
 }
 
 // handleMarketplaceList serves the browse page: search + event-type/kind
@@ -572,7 +575,7 @@ type marketplaceListRequest struct {
 }
 
 // POST /api/marketplace/listings/list
-func (mh *marketplaceHandler) handleMarketplaceList(w http.ResponseWriter, r *http.Request) {
+func (mh *Handler) handleMarketplaceList(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := mh.gateMarketplace(w, r)
 	if !ok {
 		return
@@ -624,7 +627,7 @@ func (mh *marketplaceHandler) handleMarketplaceList(w http.ResponseWriter, r *ht
 		listings, total, e = tx.Marketplace.List(r.Context(), orgID, userID, f, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
 	}); err != nil {
-		internalError(w, "marketplace", err)
+		httpx.InternalError(w, "marketplace", err)
 		return
 	}
 	httpx.WriteList(w, page, listings, total)
@@ -636,7 +639,7 @@ func (mh *marketplaceHandler) handleMarketplaceList(w http.ResponseWriter, r *ht
 // delisted by another team resolves to 404, not just absent from browse.
 //
 // GET /api/marketplace/listings/{id}
-func (mh *marketplaceHandler) handleMarketplaceGet(w http.ResponseWriter, r *http.Request) {
+func (mh *Handler) handleMarketplaceGet(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := mh.gateMarketplace(w, r)
 	if !ok {
 		return
@@ -659,14 +662,14 @@ func (mh *marketplaceHandler) handleMarketplaceGet(w http.ResponseWriter, r *htt
 		}
 		return e
 	}); err != nil {
-		internalError(w, "marketplace", err)
+		httpx.InternalError(w, "marketplace", err)
 		return
 	}
 	if missing {
-		notFound(w, "listing")
+		httpx.NotFound(w, "listing")
 		return
 	}
-	writeJSON(w, http.StatusOK, detail)
+	httpx.WriteJSON(w, http.StatusOK, detail)
 }
 
 // handleMarketplaceVote records the caller's "recommend" vote on a listing.
@@ -675,7 +678,7 @@ func (mh *marketplaceHandler) handleMarketplaceGet(w http.ResponseWriter, r *htt
 // 204.
 //
 // PUT /api/marketplace/listings/{id}/vote
-func (mh *marketplaceHandler) handleMarketplaceVote(w http.ResponseWriter, r *http.Request) {
+func (mh *Handler) handleMarketplaceVote(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := mh.gateMarketplace(w, r)
 	if !ok {
 		return
@@ -700,11 +703,11 @@ func (mh *marketplaceHandler) handleMarketplaceVote(w http.ResponseWriter, r *ht
 		}
 		return nil
 	}); err != nil {
-		internalError(w, "marketplace", err)
+		httpx.InternalError(w, "marketplace", err)
 		return
 	}
 	if missing {
-		notFound(w, "listing")
+		httpx.NotFound(w, "listing")
 		return
 	}
 
@@ -719,10 +722,10 @@ func (mh *marketplaceHandler) handleMarketplaceVote(w http.ResponseWriter, r *ht
 			// Delist/Relist/PublishVersion; the vote row surviving as an
 			// orphaned no-op is harmless (idempotent, and it counts again if the
 			// listing is ever relisted).
-			notFound(w, "listing")
+			httpx.NotFound(w, "listing")
 			return
 		}
-		internalError(w, "marketplace", err)
+		httpx.InternalError(w, "marketplace", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -735,7 +738,7 @@ func (mh *marketplaceHandler) handleMarketplaceVote(w http.ResponseWriter, r *ht
 // existence pre-check needed here unlike handleMarketplaceVote).
 //
 // DELETE /api/marketplace/listings/{id}/vote
-func (mh *marketplaceHandler) handleMarketplaceUnvote(w http.ResponseWriter, r *http.Request) {
+func (mh *Handler) handleMarketplaceUnvote(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := mh.gateMarketplace(w, r)
 	if !ok {
 		return
@@ -747,7 +750,7 @@ func (mh *marketplaceHandler) handleMarketplaceUnvote(w http.ResponseWriter, r *
 	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		return tx.Marketplace.Unvote(r.Context(), orgID, id, userID)
 	}); err != nil {
-		internalError(w, "marketplace", err)
+		httpx.InternalError(w, "marketplace", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -785,7 +788,7 @@ type installListingResponse struct {
 // cheap").
 //
 // POST /api/marketplace/listings/{id}/install
-func (mh *marketplaceHandler) handleMarketplaceInstall(w http.ResponseWriter, r *http.Request) {
+func (mh *Handler) handleMarketplaceInstall(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := mh.gateMarketplace(w, r)
 	if !ok {
 		return
@@ -854,11 +857,11 @@ func (mh *marketplaceHandler) handleMarketplaceInstall(w http.ResponseWriter, r 
 		if teamscope.WriteIfSelectionError(w, err) {
 			return
 		}
-		internalError(w, "marketplace", err)
+		httpx.InternalError(w, "marketplace", err)
 		return
 	}
 	if listingNotFound {
-		notFound(w, "listing")
+		httpx.NotFound(w, "listing")
 		return
 	}
 	if delisted {
@@ -866,24 +869,29 @@ func (mh *marketplaceHandler) handleMarketplaceInstall(w http.ResponseWriter, r 
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, resp)
+	httpx.WriteJSON(w, http.StatusCreated, resp)
 }
 
-func (s *Server) registerMarketplaceRoutes() {
+// New builds the marketplace handler.
+func New(tx db.TxRunner, az *authz.Checker) *Handler {
+	return &Handler{tx: tx, az: az}
+}
+
+// Register mounts the marketplace routes.
+func (mh *Handler) Register(m httpx.Mounts) {
 	// Within-org prompt marketplace — multi-mode only; every handler opens
 	// with gateMarketplace, which 404s in local mode (see
-	// marketplace_handler.go).
-	mh := &marketplaceHandler{tx: s.tx, az: s.az}
-	s.apiMutating("POST /api/marketplace/listings/list", mh.handleMarketplaceList)
-	s.apiMutating("POST /api/marketplace/listings", mh.handleMarketplacePublish)
-	s.api("GET /api/marketplace/listings/{id}", mh.handleMarketplaceGet)
-	s.apiMutating("POST /api/marketplace/listings/{id}/versions", mh.handleMarketplaceListingVersionCreate)
-	s.apiMutating("POST /api/marketplace/listings/{id}/delist", mh.handleMarketplaceListingDelist)
-	s.apiMutating("POST /api/marketplace/listings/{id}/relist", mh.handleMarketplaceListingRelist)
-	s.apiMutating("PUT /api/marketplace/listings/{id}/vote", mh.handleMarketplaceVote)
-	s.apiMutating("DELETE /api/marketplace/listings/{id}/vote", mh.handleMarketplaceUnvote)
-	s.api("GET /api/marketplace/listings/by-source/{source_id}", mh.handleMarketplaceListingBySource)
+	// marketplace.go).
+	m.APIMutating("POST /api/marketplace/listings/list", mh.handleMarketplaceList)
+	m.APIMutating("POST /api/marketplace/listings", mh.handleMarketplacePublish)
+	m.API("GET /api/marketplace/listings/{id}", mh.handleMarketplaceGet)
+	m.APIMutating("POST /api/marketplace/listings/{id}/versions", mh.handleMarketplaceListingVersionCreate)
+	m.APIMutating("POST /api/marketplace/listings/{id}/delist", mh.handleMarketplaceListingDelist)
+	m.APIMutating("POST /api/marketplace/listings/{id}/relist", mh.handleMarketplaceListingRelist)
+	m.APIMutating("PUT /api/marketplace/listings/{id}/vote", mh.handleMarketplaceVote)
+	m.APIMutating("DELETE /api/marketplace/listings/{id}/vote", mh.handleMarketplaceUnvote)
+	m.API("GET /api/marketplace/listings/by-source/{source_id}", mh.handleMarketplaceListingBySource)
 	// Install/"copy to my team" — materializes the listing's
 	// current snapshot into the caller's team as a brand-new fork.
-	s.apiMutating("POST /api/marketplace/listings/{id}/install", mh.handleMarketplaceInstall)
+	m.APIMutating("POST /api/marketplace/listings/{id}/install", mh.handleMarketplaceInstall)
 }

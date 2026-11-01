@@ -38,6 +38,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/blueprints"
 	"github.com/sky-ai-eng/triage-factory/internal/server/deliverables"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/marketplace"
 	"github.com/sky-ai-eng/triage-factory/internal/server/models"
 	"github.com/sky-ai-eng/triage-factory/internal/server/prompts"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teams"
@@ -917,7 +918,6 @@ func (s *Server) routes() {
 	s.registerStockRoutes()
 	s.registerFactoryRoutes()
 	s.registerEventHandlerRoutes()
-	s.registerMarketplaceRoutes()
 	s.registerGitHubRoutes()
 	s.registerSourceRoutes()
 
@@ -940,6 +940,7 @@ func (s *Server) routes() {
 	prompts.New(s.db, s.tx, s.az).Register(m)
 	blueprints.New(s.tx, s.az, func() *delegate.Spawner { return s.spawner }).Register(m)
 	work.New(s.az, s.allStores.WorkKinds).Register(m)
+	marketplace.New(s.tx, s.az).Register(m)
 
 	// SSO (connection / domains / break-glass admin surface, the verify-
 	// before-enforce test-start, and the identifier-first discovery probe) is

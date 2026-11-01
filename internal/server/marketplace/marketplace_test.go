@@ -1,4 +1,4 @@
-package server
+package marketplace
 
 import (
 	"bytes"
@@ -17,17 +17,18 @@ import (
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // marketplaceRig is the multi-mode fixture for the marketplace handlers: a
-// Postgres-backed Server (RLS enforced) with one org carrying a founder (write
+// Postgres-backed handler (RLS enforced) with one org carrying a founder (write
 // role on the default team), a plain member on a second team, and a viewer on
 // the founder's team.
 type marketplaceRig struct {
 	h      *pgtest.Harness
-	mh     *marketplaceHandler
+	mh     *Handler
 	orgID  string
 	teamID string
 	admin  string // founder — write role on teamID
@@ -44,7 +45,6 @@ func newMarketplaceRig(t *testing.T) *marketplaceRig {
 	h.Reset(t)
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
-	s := New(h.AdminDB, stores)
 
 	orgID, founder, teamID := pgtest.SeedOrgWithUser(t, h, "founder")
 	viewer := pgtest.SeedUser(t, h, "viewer")
@@ -55,7 +55,7 @@ func newMarketplaceRig(t *testing.T) *marketplaceRig {
 
 	return &marketplaceRig{
 		h:      h,
-		mh:     &marketplaceHandler{tx: s.tx, az: s.az},
+		mh:     New(stores.Tx, authz.New(h.AdminDB, stores.Tx)),
 		orgID:  orgID,
 		teamID: teamID,
 		admin:  founder,
@@ -65,8 +65,7 @@ func newMarketplaceRig(t *testing.T) *marketplaceRig {
 	}
 }
 
-// req builds a request to path as callerID with claims + active org injected,
-// mirroring viewerRig.req.
+// req builds a request to path as callerID with claims + active org injected.
 func (r *marketplaceRig) req(method, path, callerID string, body any) *http.Request {
 	var rdr *bytes.Reader
 	if body != nil {
