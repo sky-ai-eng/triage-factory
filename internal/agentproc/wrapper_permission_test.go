@@ -274,9 +274,10 @@ func TestHandlePermission_RepliesKeyedByToolCallID(t *testing.T) {
 	}
 }
 
-// toolBatchStubSDK fires the wrapper's PostToolBatch hook once, as the SDK
-// does after a tool batch resolves, and yields what it returned; null when
-// the wrapper registered no hook.
+// toolBatchStubSDK fires the wrapper's PostToolBatch hook as the SDK does
+// after a tool batch resolves, first for a subagent's batch and then for the
+// agent's, and yields what each returned; null when the wrapper registered
+// no hook.
 const toolBatchStubSDK = `
 export function query({ options }) {
   return {
@@ -286,7 +287,10 @@ export function query({ options }) {
         yield { type: "stub_hook", output: null }
         return
       }
-      const output = await hook({ hook_event_name: "PostToolBatch", tool_calls: [] }, undefined, { signal: new AbortController().signal })
+      const signal = new AbortController().signal
+      const sub = await hook({ hook_event_name: "PostToolBatch", tool_calls: [], agent_id: "sub-1" }, undefined, { signal })
+      yield { type: "stub_subagent_hook", output: sub }
+      const output = await hook({ hook_event_name: "PostToolBatch", tool_calls: [] }, undefined, { signal })
       yield { type: "stub_hook", output }
     },
     async interrupt() {},
@@ -296,9 +300,9 @@ export function query({ options }) {
 `
 
 // TestWrapperToolBatchHookCarriesTheReply: with --tool-batch-notes the
-// wrapper asks over a tool_batch for what the model reads after the batch,
-// and hands the reply's context back as the hook's additionalContext.
-// Without the flag no hook is registered.
+// wrapper asks over a tool_batch for what the model reads after the agent's
+// batch, and hands the reply's context back as the hook's additionalContext.
+// A subagent's batch asks nothing. Without the flag no hook is registered.
 func TestWrapperToolBatchHookCarriesTheReply(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -309,6 +313,10 @@ func TestWrapperToolBatchHookCarriesTheReply(t *testing.T) {
 	}
 
 	w := startWrapper(t, node, toolBatchStubSDK, "--tool-batch-notes")
+	sub := w.next()
+	if subOut, ok := sub["output"].(map[string]any); sub["type"] != "stub_subagent_hook" || !ok || len(subOut) != 0 {
+		t.Fatalf("first non-ready line = %v, want the subagent's batch answered with nothing and no tool_batch", sub)
+	}
 	req := w.next()
 	id, _ := req["id"].(string)
 	if req["type"] != "control" || req["subtype"] != "tool_batch" || id == "" {

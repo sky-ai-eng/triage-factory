@@ -1192,7 +1192,7 @@ func (s *entityStore) CloseTerminalSystem(ctx context.Context, orgID, entityID s
 			return fmt.Errorf("list open tasks: %w", err)
 		}
 		for _, taskID := range taskIDs {
-			out, err := closeOrHoldTask(ctx, q, orgID, taskID, closeReason, closeEventType, closingEventID)
+			out, err := closeOrHoldTask(ctx, q, orgID, taskID, closeReason, closeEventType, closingEventID, false)
 			if err != nil {
 				return fmt.Errorf("task %s: %w", taskID, err)
 			}

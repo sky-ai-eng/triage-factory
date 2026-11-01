@@ -6,6 +6,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/google/uuid"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -51,10 +52,28 @@ func secondCIFailedTask(t *testing.T, r *Router, database *sql.DB, entityID, fir
 	return ""
 }
 
-func setConversationStatus(t *testing.T, database *sql.DB, convID, status string) {
+// failRun leaves the run as a step that failed leaves it once its blueprint
+// has acted on the failure: the conversation and the run both failed.
+func failRun(t *testing.T, database *sql.DB, runID, convID string) {
 	t.Helper()
-	if _, err := database.Exec(`UPDATE conversations SET status = ? WHERE id = ?`, status, convID); err != nil {
-		t.Fatalf("set conversation %s status %s: %v", convID, status, err)
+	if _, err := database.Exec(`UPDATE conversations SET status = ? WHERE id = ?`, domain.StatusFailed, convID); err != nil {
+		t.Fatalf("fail conversation %s: %v", convID, err)
+	}
+	if _, err := database.Exec(`UPDATE blueprint_runs SET status = 'failed' WHERE id = ?`, runID); err != nil {
+		t.Fatalf("fail blueprint run %s: %v", runID, err)
+	}
+}
+
+// seedDraftPullRequest gives the conversation a draft pull request
+// deliverable, one that awaits a person's verdict.
+func seedDraftPullRequest(t *testing.T, database *sql.DB, convID string) {
+	t.Helper()
+	if _, err := database.Exec(`
+		INSERT INTO deliverables (id, conversation_id, org_id, team_id, provider, kind, scope, target, state, dedup_key)
+		SELECT ?, id, org_id, team_id, 'github', 'pull_request', 'github.com', 'acme/widget#7', 'draft', 'held-close-' || id
+		  FROM conversations WHERE id = ?
+	`, uuid.New().String(), convID); err != nil {
+		t.Fatalf("seed draft pull request on %s: %v", convID, err)
 	}
 }
 
@@ -218,7 +237,7 @@ func TestCloseHold_OwnEventArrivingAgainCancelsTheHold(t *testing.T) {
 	if err := f.r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("drain the second failure: %v", err)
 	}
-	setConversationStatus(t, f.database, f.convID, domain.StatusFailed)
+	failRun(t, f.database, f.runID, f.convID)
 	f.r.sweepCloseDeferrals(t.Context())
 
 	if status, _, _ := taskRow(t, f.database, f.taskID); status == "done" {
@@ -241,7 +260,7 @@ func TestCloseHoldSweep_LeavesAHoldCancelledSinceItsReadAlone(t *testing.T) {
 	if err := f.r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("drain the second failure: %v", err)
 	}
-	setConversationStatus(t, f.database, f.convID, domain.StatusFailed)
+	failRun(t, f.database, f.runID, f.convID)
 	closed, err := f.r.settleCloseDeferral(t.Context(), read)
 	if err != nil {
 		t.Fatalf("settle: %v", err)
@@ -278,7 +297,7 @@ func TestCloseHoldSweep_LeavesAWorkingTaskHeld(t *testing.T) {
 // reason and type, its audit row, and the deliverable teardown.
 func TestCloseHoldSweep_AppliesTheCloseOnceNothingWorks(t *testing.T) {
 	f := newHeldCIFixture(t, "owner/repo#sweep-applies")
-	setConversationStatus(t, f.database, f.convID, domain.StatusFailed)
+	failRun(t, f.database, f.runID, f.convID)
 
 	f.r.sweepCloseDeferrals(t.Context())
 
@@ -298,6 +317,51 @@ func TestCloseHoldSweep_AppliesTheCloseOnceNothingWorks(t *testing.T) {
 	}
 }
 
+// TestCloseHoldSweep_SparesATaskAwaitingAPersonFromATypedClose: once nothing
+// works, a held typed close of a task whose run left a draft pull request for
+// a person is dropped, and the task and its deliverable are left alone. A held
+// terminating close applies anyway: nobody can act on a deliverable for a
+// merged pull request.
+func TestCloseHoldSweep_SparesATaskAwaitingAPersonFromATypedClose(t *testing.T) {
+	f := newHeldCIFixture(t, "owner/repo#sweep-awaiting")
+	failRun(t, f.database, f.runID, f.convID)
+	seedDraftPullRequest(t, f.database, f.convID)
+
+	f.r.sweepCloseDeferrals(t.Context())
+
+	if status, _, _ := taskRow(t, f.database, f.taskID); status == "done" {
+		t.Error("the typed close closed a task awaiting a person")
+	}
+	if ev := heldClose(t, f.database, f.taskID); ev != "" {
+		t.Errorf("held close = %q, want dropped", ev)
+	}
+	if slices.Contains(f.sp.tornDownCopy(), f.taskID) {
+		t.Error("the typed close tore down the deliverable awaiting a person")
+	}
+
+	database := newTestDB(t)
+	r := newQueueWorkerRouter(t, database)
+	sp := &stoppingSpawner{}
+	r.spawner = sp
+	entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, "owner/repo#merged-awaiting")
+	runID, convID := seedRunOnTask(t, database, taskID, "running", "")
+	enqueueMerged(t, database, entityID)
+	if err := r.drainEventQueue(context.Background()); err != nil {
+		t.Fatalf("drain the merge: %v", err)
+	}
+	failRun(t, database, runID, convID)
+	seedDraftPullRequest(t, database, convID)
+
+	r.sweepCloseDeferrals(t.Context())
+
+	if status, reason, _ := taskRow(t, database, taskID); status != "done" || reason != "entity_closed" {
+		t.Errorf("task = (%q, %q), want closed by the merge", status, reason)
+	}
+	if !slices.Contains(sp.tornDownCopy(), taskID) {
+		t.Error("the terminating close left the deliverable on the merged pull request")
+	}
+}
+
 // TestCloseHoldSweep_DropsAHoldThatNoLongerHolds: CI failing again by the
 // time nothing works means the pass no longer resolves the task, so the hold
 // is cleared and nothing closes.
@@ -306,7 +370,7 @@ func TestCloseHoldSweep_DropsAHoldThatNoLongerHolds(t *testing.T) {
 	seedPRCheckRuns(t, f.database, f.entityID,
 		domain.CheckRun{ID: 1, Name: "build", Status: "completed", Conclusion: "failure"},
 	)
-	setConversationStatus(t, f.database, f.convID, domain.StatusFailed)
+	failRun(t, f.database, f.runID, f.convID)
 
 	f.r.sweepCloseDeferrals(t.Context())
 

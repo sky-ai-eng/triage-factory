@@ -47,7 +47,7 @@ func (s *fenceStubDelegator) StopBlueprintRun(orgID, blueprintRunID string, caus
 
 func (s *fenceStubDelegator) TeardownTaskDeliverablesSystem(context.Context, string, string) {}
 
-func (s *fenceStubDelegator) StageNoteAtToolBoundary(context.Context, string, string, string, string, domain.NoteProvenance) bool {
+func (s *fenceStubDelegator) TellTaskClosing(context.Context, string, string, domain.Event) bool {
 	return true
 }
 

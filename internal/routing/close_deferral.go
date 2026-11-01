@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 )
 
 // An event close that finds one of the task's conversations still working
@@ -24,20 +23,14 @@ import (
 // closes for tasks nothing is working on any more.
 const DefaultCloseDeferralSweepInterval = 30 * time.Second
 
-// tellTaskClosing stages the note that evt resolved the task on each of its
-// working conversations, delivered where the conversation's runtime reads it
-// without starting a turn. Best effort, after the hold committed: a lost note
-// costs the conversation the news, never the close, which the sweep applies
-// once the conversation finishes whether or not it was told.
+// tellTaskClosing tells each of the task's working conversations that evt
+// resolved it, delivered where the conversation's runtime reads it without
+// starting a turn. Best effort, after the hold committed: a lost note costs
+// the conversation the news, never the close, which the sweep applies once
+// the conversation finishes whether or not it was told.
 func (r *Router) tellTaskClosing(ctx context.Context, orgID string, evt domain.Event, taskID string, conversationIDs []string) {
-	metadataJSON := evt.MetadataJSON
-	if current, err := events.Current(ctx, orgID, evt.EventType, metadataJSON); err == nil {
-		metadataJSON = current
-	}
-	body := domain.TaskClosingInjection(evt.EventType, metadataJSON)
-	prov := domain.NoteProvenance{EventID: evt.ID, EventType: evt.EventType}
 	for _, id := range conversationIDs {
-		if !r.spawner.StageNoteAtToolBoundary(ctx, orgID, id, domain.StagedInjectionProducerTaskClosing, body, prov) {
+		if !r.spawner.TellTaskClosing(ctx, orgID, id, evt) {
 			routerLog.WarnContext(ctx, "close held, but the closing note was not staged", "task_id", taskID, "conversation", id, "on_event", evt.EventType)
 		}
 	}
@@ -93,8 +86,11 @@ func (r *Router) sweepCloseDeferrals(ctx context.Context) {
 // settleCloseDeferral decides one held close. While a conversation on the
 // task is working it is left for the next pass. Otherwise the close applies
 // if the relation still admits it against current state, and is dropped if
-// not (CI failing again, a reopened pull request). closed reports whether
-// the task closed.
+// not (CI failing again, a reopened pull request). A typed relation's close
+// is dropped too while one of the task's deliverables awaits a person's
+// verdict, as it is when nothing held it (closeOrHoldTaskWithAudit): the
+// entity is still open, so the person can still act on it, and resolving
+// the last one closes the task. closed reports whether the task closed.
 //
 // The close goes through ApplyHeldCloseSystem, which applies it only while
 // the task still holds this event's close: the list was read before this
@@ -139,16 +135,19 @@ func (r *Router) settleCloseDeferral(ctx context.Context, d domain.TaskCloseDefe
 			"task_id", task.ID, "on_event", evt.EventType)
 		return false, r.clearCloseDeferral(ctx, d)
 	}
-	out, err := r.tasks.ApplyHeldCloseSystem(ctx, d.OrgID, task.ID, d.EventID, reason, evt.EventType)
+	typed := terminatingRelationFor(evt.EventType) == nil
+	out, err := r.tasks.ApplyHeldCloseSystem(ctx, d.OrgID, task.ID, d.EventID, reason, evt.EventType, typed)
 	if err != nil {
 		return false, fmt.Errorf("close task: %w", err)
+	}
+	if out.AwaitingPerson {
+		routerLog.InfoContext(ctx, "held close dropped: a deliverable on the task awaits a person",
+			"task_id", task.ID, "on_event", evt.EventType)
 	}
 	if !out.Closed {
 		return false, nil
 	}
-	r.stopConversationsOnClosedTask(d.OrgID, task.ID, out.ActiveConversationIDs)
-	// Behind the stop, never beside it — see closeTaskWithAudit.
-	r.spawner.TeardownTaskDeliverablesSystem(ctx, d.OrgID, task.ID)
+	r.finishTaskClose(ctx, d.OrgID, task.ID, out.ActiveConversationIDs)
 	routerLog.InfoContext(ctx, "closed task on its held close", "task_id", task.ID, "on_event", evt.EventType, "reason", reason)
 	return true, nil
 }

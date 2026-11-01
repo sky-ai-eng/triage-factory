@@ -673,7 +673,9 @@ type EntityStore interface {
 	// A task with a working conversation is not closed: it holds the close
 	// exactly as TaskStore.CloseOrHoldSystem holds one, in the same
 	// transaction that closes the others, and is reported in HeldTasks. The
-	// entity closes whether or not any task held. When the guard misses,
+	// entity closes whether or not any task held. Unlike CloseOrHoldSystem's,
+	// this close does not spare a task awaiting a person's verdict on a
+	// deliverable: on a closed entity nothing can act on one. When the guard misses,
 	// nothing is held either. A hold names its closing event, so with
 	// closingEventID empty every task closes.
 	CloseTerminalSystem(ctx context.Context, orgID, entityID string, expected *int64, closeTypes []string, closeReason, closeEventType, closingEventID string) (TerminalCloseResult, error)

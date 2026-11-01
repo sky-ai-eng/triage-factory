@@ -1042,7 +1042,7 @@ func (s *taskStore) CloseOrHoldSystem(ctx context.Context, orgID, taskID, closeR
 	var out db.TaskCloseOutcome
 	err := inTx(ctx, s.admin, func(q queryer) error {
 		var err error
-		out, err = closeOrHoldTask(ctx, q, orgID, taskID, closeReason, closeEventType, closingEventID)
+		out, err = closeOrHoldTask(ctx, q, orgID, taskID, closeReason, closeEventType, closingEventID, true)
 		return err
 	})
 	if err != nil {
@@ -1053,15 +1053,30 @@ func (s *taskStore) CloseOrHoldSystem(ctx context.Context, orgID, taskID, closeR
 
 // closeOrHoldTask is CloseOrHoldSystem's body on a transaction the caller
 // owns, so the terminating close holds or closes each of its tasks with the
-// same statements inside its own transaction.
-func closeOrHoldTask(ctx context.Context, q queryer, orgID, taskID, closeReason, closeEventType, closingEventID string) (db.TaskCloseOutcome, error) {
+// same statements inside its own transaction. spareAwaitingPerson leaves open
+// a task that nothing is working on and that awaits a person's verdict on a
+// deliverable; the terminating close passes false, since its entity is closed
+// and nothing can act on one.
+func closeOrHoldTask(ctx context.Context, q queryer, orgID, taskID, closeReason, closeEventType, closingEventID string, spareAwaitingPerson bool) (db.TaskCloseOutcome, error) {
 	if closingEventID != "" {
-		held, err := holdTaskCloseIfWorking(ctx, q, orgID, taskID, closingEventID)
+		st, ok, err := readEventClose(ctx, q, orgID, taskID, spareAwaitingPerson)
 		if err != nil {
 			return db.TaskCloseOutcome{}, err
 		}
-		if held != nil {
-			return *held, nil
+		if !ok {
+			return db.TaskCloseOutcome{}, nil
+		}
+		if len(st.working) > 0 {
+			if _, err := q.ExecContext(ctx, `
+				UPDATE tasks SET close_deferred_event_id = $3
+				 WHERE org_id = $1 AND id = $2
+			`, orgID, taskID, closingEventID); err != nil {
+				return db.TaskCloseOutcome{}, fmt.Errorf("hold close: %w", err)
+			}
+			return db.TaskCloseOutcome{Held: true, NewlyHeld: !st.held.Valid, WorkingConversationIDs: st.working}, nil
+		}
+		if st.awaitingPerson {
+			return db.TaskCloseOutcome{AwaitingPerson: true}, nil
 		}
 	}
 	closed, conversationIDs, err := closeTaskWithCancelIntent(ctx, q, orgID, taskID, closeReason, closeEventType, closingEventID)
@@ -1071,42 +1086,30 @@ func closeOrHoldTask(ctx context.Context, q queryer, orgID, taskID, closeReason,
 	return db.TaskCloseOutcome{Closed: closed, ActiveConversationIDs: conversationIDs}, nil
 }
 
-// holdTaskCloseIfWorking holds closingEventID's close on the task when it is
-// active and one of its conversations is working, and returns nil when it
-// held nothing. The task row is locked before the conversations are read, as
-// a close's own UPDATE would lock it.
-func holdTaskCloseIfWorking(ctx context.Context, q queryer, orgID, taskID, closingEventID string) (*db.TaskCloseOutcome, error) {
-	var prior sql.NullString
-	err := q.QueryRowContext(ctx, `
+// eventCloseState is what an event close decides on: the close the task
+// holds, its working conversations, and, read only for a close that spares
+// one and only while nothing is working, whether a deliverable on the task
+// awaits a person's verdict.
+type eventCloseState struct {
+	held           sql.NullString
+	working        []string
+	awaitingPerson bool
+}
+
+// readEventClose locks the task's row, as a close's own UPDATE would, then
+// reads its eventCloseState. ok is false for a task that is not active.
+func readEventClose(ctx context.Context, q queryer, orgID, taskID string, spareAwaitingPerson bool) (st eventCloseState, ok bool, err error) {
+	err = q.QueryRowContext(ctx, `
 		SELECT close_deferred_event_id::text FROM tasks
 		 WHERE org_id = $1 AND id = $2 AND status NOT IN ('done', 'dismissed')
 		 FOR UPDATE
-	`, orgID, taskID).Scan(&prior)
+	`, orgID, taskID).Scan(&st.held)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
+		return eventCloseState{}, false, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("lock task: %w", err)
+		return eventCloseState{}, false, fmt.Errorf("lock task: %w", err)
 	}
-	working, err := workingConversationIDs(ctx, q, orgID, taskID)
-	if err != nil {
-		return nil, err
-	}
-	if len(working) == 0 {
-		return nil, nil
-	}
-	if _, err := q.ExecContext(ctx, `
-		UPDATE tasks SET close_deferred_event_id = $3
-		 WHERE org_id = $1 AND id = $2
-	`, orgID, taskID, closingEventID); err != nil {
-		return nil, fmt.Errorf("hold close: %w", err)
-	}
-	return &db.TaskCloseOutcome{Held: true, NewlyHeld: !prior.Valid, WorkingConversationIDs: working}, nil
-}
-
-// workingConversationIDs lists the task's working conversation ids, oldest
-// first.
-func workingConversationIDs(ctx context.Context, q queryer, orgID, taskID string) ([]string, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT r.id FROM conversations r
 		 WHERE r.org_id = $1 AND r.task_id = $2
@@ -1114,48 +1117,52 @@ func workingConversationIDs(ctx context.Context, q queryer, orgID, taskID string
 		 ORDER BY r.started_at, r.id
 	`, orgID, taskID)
 	if err != nil {
-		return nil, fmt.Errorf("list working conversations: %w", err)
+		return eventCloseState{}, false, fmt.Errorf("list working conversations: %w", err)
 	}
-	working, err := scanIDs(rows, "conversations.id")
-	if err != nil {
-		return nil, fmt.Errorf("list working conversations: %w", err)
+	if st.working, err = scanIDs(rows, "conversations.id"); err != nil {
+		return eventCloseState{}, false, fmt.Errorf("list working conversations: %w", err)
 	}
-	return working, nil
+	if spareAwaitingPerson && len(st.working) == 0 {
+		if err := q.QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM deliverables art
+				  JOIN conversations c ON c.org_id = art.org_id AND c.id = art.conversation_id
+				 WHERE c.org_id = $1 AND c.task_id = $2
+				   AND (`+pgUnresolvedDeliverableSQL+`))
+		`, orgID, taskID).Scan(&st.awaitingPerson); err != nil {
+			return eventCloseState{}, false, fmt.Errorf("read unresolved deliverables: %w", err)
+		}
+	}
+	return st, true, nil
 }
 
-func (s *taskStore) ApplyHeldCloseSystem(ctx context.Context, orgID, taskID, heldEventID, closeReason, closeEventType string) (db.TaskCloseOutcome, error) {
+func (s *taskStore) ApplyHeldCloseSystem(ctx context.Context, orgID, taskID, heldEventID, closeReason, closeEventType string, spareAwaitingPerson bool) (db.TaskCloseOutcome, error) {
 	var out db.TaskCloseOutcome
 	err := inTx(ctx, s.admin, func(q queryer) error {
-		var held sql.NullString
-		err := q.QueryRowContext(ctx, `
-			SELECT close_deferred_event_id::text FROM tasks
-			 WHERE org_id = $1 AND id = $2 AND status NOT IN ('done', 'dismissed')
-			 FOR UPDATE
-		`, orgID, taskID).Scan(&held)
-		if errors.Is(err, sql.ErrNoRows) || (err == nil && held.String != heldEventID) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("lock task: %w", err)
-		}
-		working, err := workingConversationIDs(ctx, q, orgID, taskID)
+		st, ok, err := readEventClose(ctx, q, orgID, taskID, spareAwaitingPerson)
 		if err != nil {
 			return err
 		}
-		if len(working) > 0 {
-			out = db.TaskCloseOutcome{Held: true, WorkingConversationIDs: working}
+		if !ok || st.held.String != heldEventID {
 			return nil
 		}
-		closed, conversationIDs, err := closeTaskWithCancelIntent(ctx, q, orgID, taskID, closeReason, closeEventType, heldEventID)
-		if err != nil {
-			return err
+		if len(st.working) > 0 {
+			out = db.TaskCloseOutcome{Held: true, WorkingConversationIDs: st.working}
+			return nil
+		}
+		out = db.TaskCloseOutcome{AwaitingPerson: st.awaitingPerson}
+		if !st.awaitingPerson {
+			closed, conversationIDs, err := closeTaskWithCancelIntent(ctx, q, orgID, taskID, closeReason, closeEventType, heldEventID)
+			if err != nil {
+				return err
+			}
+			out = db.TaskCloseOutcome{Closed: closed, ActiveConversationIDs: conversationIDs}
 		}
 		if _, err := q.ExecContext(ctx, `
 			UPDATE tasks SET close_deferred_event_id = NULL WHERE org_id = $1 AND id = $2
 		`, orgID, taskID); err != nil {
 			return fmt.Errorf("clear hold: %w", err)
 		}
-		out = db.TaskCloseOutcome{Closed: closed, ActiveConversationIDs: conversationIDs}
 		return nil
 	})
 	if err != nil {

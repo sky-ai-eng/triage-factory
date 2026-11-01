@@ -32,6 +32,9 @@ type TaskCloseDeferralSeeder struct {
 	HoldUntilLater func(t *testing.T, conversationID string)
 	// CallOff sets the blueprint run's cancel_requested.
 	CallOff func(t *testing.T, blueprintRunID string)
+	// DraftPullRequest gives the conversation a draft pull request
+	// deliverable, one that awaits a person's verdict.
+	DraftPullRequest func(t *testing.T, conversationID string)
 }
 
 // TaskCloseDeferralFactory hands the suite a fresh database per subtest: the
@@ -61,8 +64,10 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 	}
 
 	t.Run("Working_predicate", func(t *testing.T) {
+		// run is the blueprint's status, "" for running.
 		cases := []struct {
 			name    string
+			run     string
 			status  string
 			stage   func(t *testing.T, seed TaskCloseDeferralSeeder, runID, convID string)
 			working bool
@@ -72,9 +77,10 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 				stage: func(t *testing.T, seed TaskCloseDeferralSeeder, _, convID string) { seed.Claim(t, convID) }},
 			{name: "held_by_a_hand_back", status: "", working: true,
 				stage: func(t *testing.T, seed TaskCloseDeferralSeeder, _, convID string) { seed.HoldUntilLater(t, convID) }},
+			{name: "between_steps", status: SeedConcluded, working: true},
 			{name: "parked_on_a_person", status: domain.StatusOpen},
-			{name: "concluded", status: SeedConcluded},
-			{name: "failed", status: domain.StatusFailed},
+			{name: "concluded", run: "completed", status: SeedConcluded},
+			{name: "failed", run: "failed", status: domain.StatusFailed},
 			{name: "blueprint_called_off", status: "",
 				stage: func(t *testing.T, seed TaskCloseDeferralSeeder, runID, _ string) { seed.CallOff(t, runID) }},
 		}
@@ -82,7 +88,11 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 			t.Run(tc.name, func(t *testing.T) {
 				stores, orgID, seed := mk(t)
 				taskID := seed.Task(t)
-				runID, convID := seed.BlueprintAndConversation(t, taskID, "running", tc.status)
+				run := tc.run
+				if run == "" {
+					run = "running"
+				}
+				runID, convID := seed.BlueprintAndConversation(t, taskID, run, tc.status)
 				if tc.stage != nil {
 					tc.stage(t, seed, runID, convID)
 				}
@@ -322,7 +332,7 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 		}
 		apply := func(taskID, eventID string) db.TaskCloseOutcome {
 			t.Helper()
-			out, err := stores.Tasks.ApplyHeldCloseSystem(ctx, orgID, taskID, eventID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed)
+			out, err := stores.Tasks.ApplyHeldCloseSystem(ctx, orgID, taskID, eventID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed, true)
 			if err != nil {
 				t.Fatalf("ApplyHeldCloseSystem: %v", err)
 			}
@@ -371,10 +381,61 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 			t.Errorf("close audit rows = %d, want 1", n)
 		}
 	})
+
+	t.Run("A_typed_close_leaves_a_task_awaiting_a_person_open", func(t *testing.T) {
+		stores, orgID, seed := mk(t)
+		idle := seed.Task(t)
+		_, idleConv := seed.BlueprintAndConversation(t, idle, "completed", SeedConcluded)
+		seed.DraftPullRequest(t, idleConv)
+		out, err := stores.Tasks.CloseOrHoldSystem(ctx, orgID, idle, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed, seed.Event(t, idle))
+		if err != nil {
+			t.Fatalf("CloseOrHoldSystem: %v", err)
+		}
+		if !outcomeEqual(out, db.TaskCloseOutcome{AwaitingPerson: true}) {
+			t.Errorf("close of a task awaiting a person = %+v, want left open", out)
+		}
+		if s := seed.TaskStatus(t, idle); s == "done" {
+			t.Error("the close closed a task awaiting a person")
+		}
+		if n := seed.CloseAuditCount(t, idle); n != 0 {
+			t.Errorf("close audit rows = %d, want 0", n)
+		}
+
+		// Held while its run worked, which then stopped with a draft pull
+		// request left for a person: the typed close is dropped, the
+		// terminating one applies.
+		for _, typed := range []bool{true, false} {
+			taskID := seed.Task(t)
+			eventID := seed.Event(t, taskID)
+			runID, convID := seed.BlueprintAndConversation(t, taskID, "running", "")
+			if _, err := stores.Tasks.CloseOrHoldSystem(ctx, orgID, taskID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed, eventID); err != nil {
+				t.Fatalf("CloseOrHoldSystem: %v", err)
+			}
+			seed.CallOff(t, runID)
+			seed.DraftPullRequest(t, convID)
+			out, err := stores.Tasks.ApplyHeldCloseSystem(ctx, orgID, taskID, eventID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed, typed)
+			if err != nil {
+				t.Fatalf("ApplyHeldCloseSystem: %v", err)
+			}
+			if typed {
+				if !outcomeEqual(out, db.TaskCloseOutcome{AwaitingPerson: true}) {
+					t.Errorf("typed apply = %+v, want left open", out)
+				}
+				if s := seed.TaskStatus(t, taskID); s == "done" {
+					t.Error("the typed apply closed a task awaiting a person")
+				}
+				if d := held(t, stores.Tasks, orgID, taskID); d != nil {
+					t.Errorf("the dropped hold is still read: %+v", *d)
+				}
+			} else if !out.Closed {
+				t.Errorf("terminating apply = %+v, want closed", out)
+			}
+		}
+	})
 }
 
 func outcomeEqual(a, b db.TaskCloseOutcome) bool {
-	return a.Closed == b.Closed && a.Held == b.Held && a.NewlyHeld == b.NewlyHeld &&
+	return a.Closed == b.Closed && a.Held == b.Held && a.NewlyHeld == b.NewlyHeld && a.AwaitingPerson == b.AwaitingPerson &&
 		slices.Equal(a.ActiveConversationIDs, b.ActiveConversationIDs) &&
 		slices.Equal(a.WorkingConversationIDs, b.WorkingConversationIDs)
 }

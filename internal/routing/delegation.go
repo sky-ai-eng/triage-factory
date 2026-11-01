@@ -192,8 +192,7 @@ func (r *Router) tryAutoDelegateTrackingInjection(ctx context.Context, orgID str
 // as a decision. The breaker toast fires from here, so both callers keep it.
 func (r *Router) autoDelegatePreflight(ctx context.Context, orgID string, task *domain.Task, trigger domain.EventHandler, entityID string, actingTeamID string) (agentID string, proceed bool, err error) {
 	// An event has resolved the task and its close waits only for the work
-	// already on it, so nothing starts more. The event path bumps the task
-	// before it fires, so a recurring event has cleared the hold by now.
+	// already on it, so nothing starts more.
 	if hold, err := r.tasks.CloseDeferralForTaskSystem(ctx, orgID, task.ID); err != nil {
 		return "", false, fmt.Errorf("read held close: %w", err)
 	} else if hold != nil {

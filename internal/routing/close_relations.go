@@ -484,9 +484,12 @@ func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, 
 				var out dbpkg.TaskCloseOutcome
 				out, err = r.closeOrHoldTaskWithAudit(ctx, orgID, t.ID, evt, reason)
 				closedTask = out.Closed
-				if out.Held {
+				switch {
+				case out.Held:
 					routerLog.InfoContext(ctx, "held task close while its conversations work", "task_id", t.ID, "on_event", evt.EventType,
 						"working", len(out.WorkingConversationIDs), "newly_held", out.NewlyHeld)
+				case out.AwaitingPerson:
+					routerLog.InfoContext(ctx, "left task open: a deliverable on it awaits a person", "task_id", t.ID, "on_event", evt.EventType)
 				}
 			}
 			if err != nil {
@@ -560,9 +563,7 @@ func (r *Router) runTerminatingClose(ctx context.Context, orgID string, evt doma
 	notify.ResolveEvents(ctx, orgID, entityID, r.openEventNotifications(ctx, orgID, entityID, rel.closes))
 	for _, taskID := range res.ClosedTaskIDs {
 		routerLog.InfoContext(ctx, "closed task", "task_id", taskID, "on_event", evt.EventType, "reason", reason)
-		r.stopConversationsOnClosedTask(orgID, taskID, res.ActiveConversationIDs[taskID])
-		// Behind the stop, never beside it — see closeTaskWithAudit.
-		r.spawner.TeardownTaskDeliverablesSystem(ctx, orgID, taskID)
+		r.finishTaskClose(ctx, orgID, taskID, res.ActiveConversationIDs[taskID])
 	}
 	if evt.EventType == domain.EventSystemEntityCloseOwed {
 		// Worth a line every time: the obligation firing means a close was
@@ -861,12 +862,15 @@ func (r *Router) stopConversationsOnClosedTask(orgID, taskID string, conversatio
 	}
 }
 
-// closeOrHoldTaskWithAudit is an event's close of a task: closed through
-// closeTaskWithAudit's rows and post-commit sequence while nothing on the
-// task is working, and held otherwise (TaskStore.CloseOrHoldSystem), with
+// closeOrHoldTaskWithAudit is a typed relation's close of a task: closed
+// through closeTaskWithAudit's rows and post-commit sequence while nothing on
+// the task is working, and held otherwise (TaskStore.CloseOrHoldSystem), with
 // the note sent to each working conversation the first time the task holds.
 // A closing event that finds the close already held only takes its place,
-// since the conversations were told when it began.
+// since the conversations were told when it began. A task nothing is working
+// on and one of whose deliverables awaits a person's verdict is left open:
+// the entity is still open, so the person can still act on it, and closing
+// the task would retire the deliverable before they do.
 func (r *Router) closeOrHoldTaskWithAudit(ctx context.Context, orgID, taskID string, evt domain.Event, closeReason string) (dbpkg.TaskCloseOutcome, error) {
 	out, err := r.tasks.CloseOrHoldSystem(ctx, orgID, taskID, closeReason, evt.EventType, evt.ID)
 	if err != nil {
@@ -874,9 +878,7 @@ func (r *Router) closeOrHoldTaskWithAudit(ctx context.Context, orgID, taskID str
 	}
 	switch {
 	case out.Closed:
-		r.stopConversationsOnClosedTask(orgID, taskID, out.ActiveConversationIDs)
-		// Behind the stop, never beside it — see closeTaskWithAudit.
-		r.spawner.TeardownTaskDeliverablesSystem(ctx, orgID, taskID)
+		r.finishTaskClose(ctx, orgID, taskID, out.ActiveConversationIDs)
 	case out.Held && out.NewlyHeld:
 		r.tellTaskClosing(ctx, orgID, evt, taskID, out.WorkingConversationIDs)
 	}
@@ -916,13 +918,19 @@ func (r *Router) closeTaskWithAudit(ctx context.Context, orgID, taskID, closingE
 	if err != nil {
 		return err
 	}
-	if !closed {
-		return nil
+	if closed {
+		r.finishTaskClose(ctx, orgID, taskID, activeConversationIDs)
 	}
-	r.stopConversationsOnClosedTask(orgID, taskID, activeConversationIDs)
-	// Behind the stop, never beside it: the stop parks each conversation and
-	// releases its claim, so the teardown operates on settled conversations
-	// rather than racing a live agent that can still land a fresh draft PR.
-	r.spawner.TeardownTaskDeliverablesSystem(ctx, orgID, taskID)
 	return nil
+}
+
+// finishTaskClose is what follows a close an event performed, once it has
+// committed: the stop of the conversations it stamped, then the teardown of
+// the task's deliverables. Behind the stop, never beside it: the stop parks
+// each conversation and releases its claim, so the teardown operates on
+// settled conversations rather than racing a live agent that can still land
+// a fresh draft PR.
+func (r *Router) finishTaskClose(ctx context.Context, orgID, taskID string, activeConversationIDs []string) {
+	r.stopConversationsOnClosedTask(orgID, taskID, activeConversationIDs)
+	r.spawner.TeardownTaskDeliverablesSystem(ctx, orgID, taskID)
 }

@@ -51,6 +51,13 @@ func TestTaskCloseDeferral_SQLite(t *testing.T) {
 			CallOff: func(t *testing.T, blueprintRunID string) {
 				exec(t, "call off", `UPDATE blueprint_runs SET cancel_requested = 1 WHERE id = ?`, blueprintRunID)
 			},
+			DraftPullRequest: func(t *testing.T, conversationID string) {
+				exec(t, "seed draft pull request", `
+					INSERT INTO deliverables (id, conversation_id, org_id, team_id, provider, kind, scope, target, state, dedup_key)
+					SELECT ?, id, org_id, team_id, 'github', 'pull_request', 'github.com', 'acme/widget#7', 'draft', 'held-close-' || id
+					  FROM conversations WHERE id = ?
+				`, uuid.New().String(), conversationID)
+			},
 		}
 		return dbtest.TaskCloseDeferralStores{
 			Tasks:         stores.Tasks,

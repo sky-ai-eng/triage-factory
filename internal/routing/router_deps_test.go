@@ -114,7 +114,7 @@ func (refusingDelegator) StageOrDeliverAdditiveEvent(context.Context, string, st
 	return delegate.InjectNotDelivered
 }
 
-func (refusingDelegator) StageNoteAtToolBoundary(context.Context, string, string, string, string, domain.NoteProvenance) bool {
+func (refusingDelegator) TellTaskClosing(context.Context, string, string, domain.Event) bool {
 	return false
 }
 

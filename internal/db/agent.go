@@ -581,9 +581,11 @@ type ConversationStore interface {
 	// either holds an active claim or will be driven without a person —
 	// mid-flight, or parked and woken by a person's input, whether it may be
 	// claimed now or a hand-back holds it until later — under a blueprint
-	// nobody called off. A conversation parked on a person, a concluded one
-	// and a failed one are not working. Admin pool: the router's close-hold
-	// sweep reads it.
+	// nobody called off, or is the current step of a running blueprint
+	// nobody called off whose answer the blueprint has yet to act on. A
+	// conversation parked on a person, and a concluded or failed one its
+	// blueprint has moved past, are not working. Admin pool: the router's
+	// close-hold sweep reads it.
 	HasWorkingConversationForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error)
 
 	// ListForTaskSystem mirrors ListForTask on the admin pool, with org_id

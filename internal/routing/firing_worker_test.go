@@ -41,7 +41,7 @@ type stubDelegator struct {
 	// tornDown is every task id handed to TeardownTaskDeliverablesSystem, so a
 	// test can assert a close reached the deliverable pass.
 	tornDown []string
-	// noted is every conversation id handed to StageNoteAtToolBoundary, so a
+	// noted is every conversation id handed to TellTaskClosing, so a
 	// test can tell a close that held and told its conversations.
 	noted []string
 }
@@ -167,14 +167,14 @@ func (s *stubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, 
 	return delegate.InjectNotDelivered
 }
 
-func (s *stubDelegator) StageNoteAtToolBoundary(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance) bool {
+func (s *stubDelegator) TellTaskClosing(ctx context.Context, orgID, conversationID string, evt domain.Event) bool {
 	s.mu.Lock()
 	s.noted = append(s.noted, conversationID)
 	s.mu.Unlock()
 	return true
 }
 
-// notedIDs is the conversation ids StageNoteAtToolBoundary was called with.
+// notedIDs is the conversation ids TellTaskClosing was called with.
 func (s *stubDelegator) notedIDs() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()

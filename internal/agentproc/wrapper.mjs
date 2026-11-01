@@ -325,10 +325,12 @@ async function runStreamingInput(options, permissionPrompts, toolBatchNotes) {
   // parks on the tool_batch_reply carrying the same id; its context, when
   // there is any, is handed to the model with the batch's results. Closing,
   // an abort, and the drain all settle it with nothing, so a reply that
-  // never comes cannot strand the turn.
+  // never comes cannot strand the turn. A subagent's batch (agent_id set)
+  // asks nothing: its context would reach the subagent, whose summary back
+  // to the agent need not carry it.
   if (toolBatchNotes) {
-    const onToolBatch = async (_input, _toolUseID, { signal } = {}) => {
-      if (closing) return {}
+    const onToolBatch = async (input, _toolUseID, { signal } = {}) => {
+      if (closing || input?.agent_id) return {}
       const id = randomUUID()
       emit({ type: "control", subtype: "tool_batch", id })
       const context = await new Promise((resolve) => {

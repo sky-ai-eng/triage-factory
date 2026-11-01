@@ -31,8 +31,8 @@ var ErrNoSuchTask = errors.New("no task with that id")
 var ErrEntityClosed = errors.New("entity is closed or does not exist; no task may be minted on it")
 
 // TaskCloseOutcome is what TaskStore.CloseOrHoldSystem or
-// ApplyHeldCloseSystem did to one task: closed it, held its close, or
-// neither.
+// ApplyHeldCloseSystem did to one task: closed it, held its close, left it
+// open for a person, or none of these.
 type TaskCloseOutcome struct {
 	// Closed reports that this call closed the task, and
 	// ActiveConversationIDs are the conversations then active on it, whose
@@ -45,6 +45,11 @@ type TaskCloseOutcome struct {
 	Held                   bool
 	NewlyHeld              bool
 	WorkingConversationIDs []string
+	// AwaitingPerson reports that the close left the task open because
+	// nothing is working on it and one of its deliverables awaits a person's
+	// verdict (domain.HasUnresolvedDeliverables). Resolving the last of them
+	// is what closes the task then.
+	AwaitingPerson bool
 }
 
 // AgentClaimStamp is the guarded task-claim write that rides *inside*
@@ -768,28 +773,35 @@ type TaskStore interface {
 	// by a typed sibling close produce identical rows.
 	CloseWithConversationCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (closed bool, activeConversationIDs []string, err error)
 
-	// CloseOrHoldSystem is the close an event owes a task, held while one of
-	// the task's conversations is working (domain.TaskCloseDeferral). In one
-	// transaction, the task's row locked first:
+	// CloseOrHoldSystem is the close a typed relation's event owes a task,
+	// one that leaves the entity open: held while one of the task's
+	// conversations is working (domain.TaskCloseDeferral), and not applied
+	// to a task waiting on a person. In one transaction, the task's row
+	// locked first:
 	//
 	//   - an active task with a working conversation (a top-level, unended
-	//     conversation holding an active claim, or one that will be driven
-	//     without a person under a blueprint nobody called off) holds the
-	//     close: close_deferred_event_id is set to closingEventID, over any
-	//     close it already held, and nothing else is written — no close, no
-	//     audit row, no cancel intent. Held is true, NewlyHeld says whether
-	//     the task held no close before this write, and
-	//     WorkingConversationIDs are the conversations that made it hold.
+	//     conversation holding an active claim, one that will be driven
+	//     without a person under a blueprint nobody called off, or the
+	//     current step of a running blueprint that has not yet acted on the
+	//     step's answer) holds the close: close_deferred_event_id is set to
+	//     closingEventID, over any close it already held, and nothing else
+	//     is written — no close, no audit row, no cancel intent. Held is
+	//     true, NewlyHeld says whether the task held no close before this
+	//     write, and WorkingConversationIDs are the conversations that made
+	//     it hold.
+	//   - an active task with none, one of whose deliverables awaits a
+	//     person's verdict, is left as it is: AwaitingPerson is true. The
+	//     entity is still open, so the person can still act on it.
 	//   - otherwise it is CloseWithConversationCancelIntentSystem, rows and
 	//     outcome alike: Closed and ActiveConversationIDs are its closed and
-	//     activeConversationIDs. A task already terminal is neither.
+	//     activeConversationIDs. A task already terminal is none of these.
 	//
 	// A hold names its closing event, so with closingEventID empty nothing
-	// is held. Admin pool.
+	// is held or left open. Admin pool.
 	//
-	// Exempt from the returned-row rule: the caller acts on which of the
-	// three things happened and on the conversations behind it, not on the
-	// task row.
+	// Exempt from the returned-row rule: the caller acts on which of these
+	// things happened and on the conversations behind it, not on the task
+	// row.
 	CloseOrHoldSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (TaskCloseOutcome, error)
 
 	// ApplyHeldCloseSystem applies the close the task holds on heldEventID,
@@ -802,11 +814,16 @@ type TaskStore interface {
 	//     outcome is zero.
 	//   - a task with a working conversation keeps its hold unwritten: Held
 	//     is true, NewlyHeld false, and WorkingConversationIDs name them.
+	//   - with spareAwaitingPerson, the sweep's answer for a typed relation's
+	//     close, a task one of whose deliverables awaits a person's verdict
+	//     has its hold cleared and stays open: AwaitingPerson is true, as
+	//     CloseOrHoldSystem leaves such a task. A terminating close passes
+	//     false: its entity is closed, so nothing can act on a deliverable.
 	//   - otherwise it is CloseWithConversationCancelIntentSystem with
 	//     heldEventID as the closing event, and the hold is cleared with it.
 	//
 	// Admin pool. Exempt from the returned-row rule as CloseOrHoldSystem is.
-	ApplyHeldCloseSystem(ctx context.Context, orgID, taskID, heldEventID, closeReason, closeEventType string) (TaskCloseOutcome, error)
+	ApplyHeldCloseSystem(ctx context.Context, orgID, taskID, heldEventID, closeReason, closeEventType string, spareAwaitingPerson bool) (TaskCloseOutcome, error)
 
 	// CloseDeferralForTaskSystem returns the close the task holds, or nil
 	// when it holds none or is no longer active. Admin pool: its readers

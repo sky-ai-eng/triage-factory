@@ -21,7 +21,6 @@ import (
 	"context"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 )
 
 // stageOrDeliverInjection routes one agent-facing note for an SDK
@@ -85,17 +84,16 @@ func (s *Spawner) stageInjection(ctx context.Context, orgID, conversationID, sub
 	return stored.ID, true
 }
 
-// tellHeldClose stages the close note on a conversation an engagement is
-// starting, when its task's close is held and the conversation has not had
-// the note for that closing event. Every runtime reads staged notes before
-// its agent's first model call of an engagement, so the agent learns the
-// task is resolved before it does anything. The note is a transcript row
+// tellHeldClose tells a conversation an engagement is starting that its
+// task's close is held (TellTaskClosing). Every runtime reads staged notes
+// before its agent's first model call of an engagement, so the agent learns
+// the task is resolved before it does anything. The note is a transcript row
 // rather than a line in the conversation's system block, which is fixed for
 // the conversation's life: the hold can be cancelled after this engagement,
 // and a row says what was true when it was sent. Best effort: a failed read
 // or stage logs, and the engagement runs without the note.
 func (s *Spawner) tellHeldClose(ctx context.Context, orgID, conversationID, taskID string) {
-	if s.tasks == nil || s.events == nil || s.stagedInjections == nil {
+	if s.tasks == nil || s.events == nil {
 		return
 	}
 	hold, err := s.tasks.CloseDeferralForTaskSystem(ctx, orgID, taskID)
@@ -106,25 +104,12 @@ func (s *Spawner) tellHeldClose(ctx context.Context, orgID, conversationID, task
 	if hold == nil {
 		return
 	}
-	told, err := s.stagedInjections.HasNoteForEventSystem(ctx, orgID, conversationID, domain.StagedInjectionProducerTaskClosing, hold.EventID)
-	if err != nil {
-		delegateLog.Warn("read whether the conversation has the close note failed; the engagement starts without it", "conversation", conversationID, "error", err)
-		return
-	}
-	if told {
-		return
-	}
 	evt, err := s.events.GetSystem(ctx, orgID, hold.EventID)
 	if err != nil || evt == nil {
 		delegateLog.Warn("read the held close's event failed; the engagement starts without the close note", "task_id", taskID, "event_id", hold.EventID, "error", err)
 		return
 	}
-	metadataJSON := evt.MetadataJSON
-	if current, err := events.Current(ctx, orgID, evt.EventType, metadataJSON); err == nil {
-		metadataJSON = current
-	}
-	s.stageInjection(ctx, orgID, conversationID, domain.MessageSubtypeInjectionSystemNote, domain.StagedInjectionProducerTaskClosing,
-		domain.TaskClosingInjection(evt.EventType, metadataJSON), domain.NoteProvenance{EventID: evt.ID, EventType: evt.EventType})
+	s.TellTaskClosing(ctx, orgID, conversationID, *evt)
 }
 
 // stagedInjectionsAhead flushes the conversation's durable staged-injection

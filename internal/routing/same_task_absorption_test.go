@@ -104,7 +104,7 @@ func (s *injectingStubDelegator) StopBlueprintRun(orgID, blueprintRunID string, 
 
 func (s *injectingStubDelegator) TeardownTaskDeliverablesSystem(context.Context, string, string) {}
 
-func (s *injectingStubDelegator) StageNoteAtToolBoundary(context.Context, string, string, string, string, domain.NoteProvenance) bool {
+func (s *injectingStubDelegator) TellTaskClosing(context.Context, string, string, domain.Event) bool {
 	return true
 }
 

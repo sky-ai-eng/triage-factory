@@ -5,9 +5,35 @@ import (
 	"sync"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 )
 
-// StageNoteAtToolBoundary stages one agent-facing note for a working
+// TellTaskClosing stages the note that evt resolved the conversation's task,
+// delivered at its next tool boundary (stageNoteAtToolBoundary), unless the
+// conversation already has the note for evt. Reports whether the
+// conversation has the note now. The router tells each working conversation
+// through it when a close begins to hold, and the dispatcher tells an
+// engagement that starts while it holds (tellHeldClose), so both send the
+// same note once. A failed read of whether it was told stages the note
+// anyway: a second copy of it costs the agent less than none.
+func (s *Spawner) TellTaskClosing(ctx context.Context, orgID, conversationID string, evt domain.Event) bool {
+	if s.stagedInjections != nil {
+		told, err := s.stagedInjections.HasNoteForEventSystem(ctx, orgID, conversationID, domain.StagedInjectionProducerTaskClosing, evt.ID)
+		if err != nil {
+			delegateLog.Warn("read whether the conversation has the close note failed; staging it", "conversation", conversationID, "event_id", evt.ID, "error", err)
+		} else if told {
+			return true
+		}
+	}
+	metadataJSON := evt.MetadataJSON
+	if current, err := events.Current(ctx, orgID, evt.EventType, metadataJSON); err == nil {
+		metadataJSON = current
+	}
+	return s.stageNoteAtToolBoundary(ctx, orgID, conversationID, domain.StagedInjectionProducerTaskClosing,
+		domain.TaskClosingInjection(evt.EventType, metadataJSON), domain.NoteProvenance{EventID: evt.ID, EventType: evt.EventType})
+}
+
+// stageNoteAtToolBoundary stages one agent-facing note for a working
 // conversation and has it reach the agent at its next tool boundary: the
 // moment every tool call the agent has in flight has returned. It never
 // starts a turn. producer tags the row (domain.StagedInjectionProducer*),
@@ -23,7 +49,7 @@ import (
 // the note at its next tool batch. A conversation with no live process here,
 // parked or concluded or owned by another executor, reads the row on its next
 // resume.
-func (s *Spawner) StageNoteAtToolBoundary(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance) bool {
+func (s *Spawner) stageNoteAtToolBoundary(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance) bool {
 	if body == "" {
 		return false
 	}
