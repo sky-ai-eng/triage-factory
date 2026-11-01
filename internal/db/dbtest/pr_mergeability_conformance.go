@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -82,6 +83,12 @@ func RunPRMergeabilityConformance(t *testing.T, mk PRMergeabilityFactory) {
 		}
 		return n
 	}
+	markMoved := func(t *testing.T, f PRMergeabilityFixture, reason string, entityIDs ...string) {
+		t.Helper()
+		if n, err := f.Stores.PRMergeability.MarkBaseMovedSystem(ctx, f.OrgID, entityIDs, reason); err != nil || n != len(entityIDs) {
+			t.Fatalf("MarkBaseMovedSystem = (%d, %v), want %d rows written", n, err, len(entityIDs))
+		}
+	}
 	claimOne := func(t *testing.T, f PRMergeabilityFixture) db.ClaimedPRMergeabilityProbe {
 		t.Helper()
 		f.Ripen(t)
@@ -94,13 +101,17 @@ func RunPRMergeabilityConformance(t *testing.T, mk PRMergeabilityFactory) {
 		}
 		return batch.Items[0]
 	}
-	answer := func(t *testing.T, f PRMergeabilityFixture, item db.ClaimedPRMergeabilityProbe, mergeable, head string) db.PRMergeabilityProbeResult {
+	answerOn := func(t *testing.T, f PRMergeabilityFixture, item db.ClaimedPRMergeabilityProbe, mergeable, head, base string) db.PRMergeabilityProbeResult {
 		t.Helper()
-		res, err := f.Stores.PRMergeability.CompleteProbe(ctx, item.Receipt, db.PRMergeabilityAnswer{Found: true, Mergeable: mergeable, HeadSHA: head}, "")
+		res, err := f.Stores.PRMergeability.CompleteProbe(ctx, item.Receipt, db.PRMergeabilityAnswer{Found: true, Mergeable: mergeable, HeadSHA: head, BaseRef: base}, "")
 		if err != nil {
 			t.Fatalf("CompleteProbe %s: %v", mergeable, err)
 		}
 		return res
+	}
+	answer := func(t *testing.T, f PRMergeabilityFixture, item db.ClaimedPRMergeabilityProbe, mergeable, head string) db.PRMergeabilityProbeResult {
+		t.Helper()
+		return answerOn(t, f, item, mergeable, head, "main")
 	}
 	probe := func(t *testing.T, f PRMergeabilityFixture, entityID, mergeable, head string) db.PRMergeabilityProbeResult {
 		t.Helper()
@@ -142,6 +153,64 @@ func RunPRMergeabilityConformance(t *testing.T, mk PRMergeabilityFactory) {
 		}
 	})
 
+	t.Run("A_base_move_holds_until_a_read_leased_after_it_settles", func(t *testing.T) {
+		f := mk(t)
+		e, fresh := pr(t, f, "1f"), pr(t, f, "1g")
+		probe(t, f, e.ID, domain.MergeableMergeable, "h")
+		before, _ := f.Stores.PRMergeability.GetSystem(ctx, f.OrgID, e.ID)
+
+		// A read leased before the move was recorded may have read GitHub
+		// before it, so its answer leaves the move owed. The pause keeps the
+		// two timestamps apart on SQLite's millisecond clock.
+		admit(t, f, e.ID, domain.MergeabilityProbeSweep)
+		early := claimOne(t, f)
+		time.Sleep(5 * time.Millisecond)
+		markMoved(t, f, domain.MergeabilityProbeBaseMoved, e.ID, fresh.ID)
+		row, _ := f.Stores.PRMergeability.GetSystem(ctx, f.OrgID, e.ID)
+		if row == nil || before == nil || row.BaseMoveReason != domain.MergeabilityProbeBaseMoved || row.Mergeable != before.Mergeable || row.MergeableHeadSHA != before.MergeableHeadSHA {
+			t.Fatalf("row after the move = %+v, want %+v's answer with base_moved owed", row, before)
+		}
+		if res := answer(t, f, early, domain.MergeableMergeable, "h"); res.Row == nil || res.Row.BaseMoveReason != domain.MergeabilityProbeBaseMoved {
+			t.Errorf("answer leased before the move = %+v, want the move still owed", res.Row)
+		}
+
+		// A probe dropped with no answer leaves it too, and a reset replaces it.
+		admit(t, f, e.ID, domain.MergeabilityProbeBaseMoved)
+		if _, err := f.Stores.PRMergeability.CompleteProbe(ctx, claimOne(t, f).Receipt, db.PRMergeabilityAnswer{}, ""); err != nil {
+			t.Fatalf("CompleteProbe with no answer: %v", err)
+		}
+		markMoved(t, f, domain.MergeabilityProbeBaseReset, e.ID)
+		if row, _ := f.Stores.PRMergeability.GetSystem(ctx, f.OrgID, e.ID); row == nil || row.BaseMoveReason != domain.MergeabilityProbeBaseReset {
+			t.Errorf("row after a drop and a reset = %+v, want base_reset owed", row)
+		}
+
+		time.Sleep(5 * time.Millisecond)
+		admit(t, f, e.ID, domain.MergeabilityProbeBaseReset)
+		res := answer(t, f, claimOne(t, f), domain.MergeableConflicting, "h")
+		if res.Row == nil || res.Row.BaseMoveReason != "" {
+			t.Errorf("answer leased after the move = %+v, want nothing owed", res.Row)
+		}
+		AssertWriteReturnedStoredRow(t, "CompleteProbe after a base move", *res.Row, stored(f, e.ID))
+
+		// A pull request with no row gets one owing the move and no answer,
+		// and an UNKNOWN give-up read after the move settles it.
+		row, _ = f.Stores.PRMergeability.GetSystem(ctx, f.OrgID, fresh.ID)
+		if row == nil || row.Mergeable != "" || row.CheckedAt != nil || row.BaseMoveReason != domain.MergeabilityProbeBaseMoved {
+			t.Fatalf("row of a pull request marked with no answer = %+v, want only the move", row)
+		}
+		admit(t, f, fresh.ID, domain.MergeabilityProbeNew)
+		for reads := 0; reads < workkinds.PRMergeabilityMaxUnknownReads; reads++ {
+			res = answer(t, f, claimOne(t, f), domain.MergeableUnknown, "h")
+		}
+		if res.Outcome != db.PRMergeabilityGaveUp || res.Row == nil || res.Row.BaseMoveReason != "" {
+			t.Errorf("give-up after the move = %+v, want nothing owed", res)
+		}
+
+		if _, err := f.Stores.PRMergeability.MarkBaseMovedSystem(ctx, f.OrgID, []string{e.ID}, domain.MergeabilityProbeSweep); err == nil {
+			t.Error("a base move recorded with a reason other than base_moved or base_reset succeeded")
+		}
+	})
+
 	t.Run("Claim_waits_for_probe_after_and_names_the_pull_request", func(t *testing.T) {
 		f := mk(t)
 		e := pr(t, f, "2")
@@ -168,8 +237,9 @@ func RunPRMergeabilityConformance(t *testing.T, mk PRMergeabilityFactory) {
 		if res.Outcome != db.PRMergeabilityRecorded || res.Previous != "" || res.Row == nil {
 			t.Fatalf("result = %+v, want a recorded answer with no previous one", res)
 		}
-		if res.Row.Mergeable != domain.MergeableConflicting || res.Row.MergeableHeadSHA != "head-3" || res.Row.CheckedAt == nil || res.Row.OrgID != f.OrgID {
-			t.Errorf("row = %+v, want CONFLICTING at head-3, checked now", res.Row)
+		if res.Row.Mergeable != domain.MergeableConflicting || res.Row.MergeableHeadSHA != "head-3" || res.Row.MergeableBaseRef != "main" ||
+			res.Row.CheckedAt == nil || res.Row.OrgID != f.OrgID {
+			t.Errorf("row = %+v, want CONFLICTING at head-3 against main, checked now", res.Row)
 		}
 		AssertWriteReturnedStoredRow(t, "CompleteProbe upsert", *res.Row, stored(f, e.ID))
 
@@ -235,7 +305,8 @@ func RunPRMergeabilityConformance(t *testing.T, mk PRMergeabilityFactory) {
 			if item.UnknownReads != reads {
 				t.Fatalf("read %d claimed a probe with unknown_reads %d", reads, item.UnknownReads)
 			}
-			res := answer(t, f, item, domain.MergeableUnknown, "head-5b")
+			// The pull request was retargeted before these reads.
+			res := answerOn(t, f, item, domain.MergeableUnknown, "head-5b", "release")
 			last := reads == workkinds.PRMergeabilityMaxUnknownReads-1
 			switch {
 			case last && (res.Outcome != db.PRMergeabilityGaveUp || res.SuccessorID != 0):
@@ -259,8 +330,11 @@ func RunPRMergeabilityConformance(t *testing.T, mk PRMergeabilityFactory) {
 		}
 		after, _ := f.Stores.PRMergeability.GetSystem(ctx, f.OrgID, e.ID)
 		if after == nil || before == nil || after.Mergeable != before.Mergeable || after.MergeableHeadSHA != "head-5b" ||
-			after.CheckedAt == nil || before.CheckedAt == nil || after.CheckedAt.Before(*before.CheckedAt) {
-			t.Errorf("row after the give-up = %+v, want %+v's answer at the give-up's head, read no earlier", after, before)
+			after.MergeableBaseRef != "release" || after.CheckedAt == nil || before.CheckedAt == nil || after.CheckedAt.Before(*before.CheckedAt) {
+			t.Errorf("row after the give-up = %+v, want %+v's answer at the give-up's head and base, read no earlier", after, before)
+		}
+		if before.GiveUps != 0 || after.GiveUps != 1 {
+			t.Errorf("give_ups = %d before and %d after the give-up, want 0 then 1", before.GiveUps, after.GiveUps)
 		}
 	})
 
@@ -276,14 +350,27 @@ func RunPRMergeabilityConformance(t *testing.T, mk PRMergeabilityFactory) {
 			t.Fatalf("last read = %+v, want a give-up that wrote the row", res)
 		}
 		AssertWriteReturnedStoredRow(t, "CompleteProbe give-up insert", *res.Row, stored(f, e.ID))
-		if res.Row.Mergeable != "" || res.Row.MergeableHeadSHA != "head-5n" || res.Row.CheckedAt == nil {
-			t.Errorf("row = %+v, want no answer at head-5n, read now", *res.Row)
+		if res.Row.Mergeable != "" || res.Row.MergeableHeadSHA != "head-5n" || res.Row.CheckedAt == nil || res.Row.GiveUps != 1 {
+			t.Errorf("row = %+v, want no answer at head-5n, read now, one give-up", *res.Row)
 		}
+		// A second round that gives up too counts a second give-up in a row.
+		admit(t, f, e.ID, domain.MergeabilityProbeUnknownRetry)
+		for reads := 0; reads < workkinds.PRMergeabilityMaxUnknownReads; reads++ {
+			res = answer(t, f, claimOne(t, f), domain.MergeableUnknown, "head-5n")
+		}
+		if res.Outcome != db.PRMergeabilityGaveUp || res.Row == nil || res.Row.GiveUps != 2 {
+			t.Fatalf("second round = %+v, want a second give-up in a row", res)
+		}
+		AssertWriteReturnedStoredRow(t, "CompleteProbe give-up update", *res.Row, stored(f, e.ID))
 		// The next known answer is the pull request's first, so a conflict
 		// emits as it does for a pull request with no row.
 		admit(t, f, e.ID, domain.MergeabilityProbeSweep)
-		if got := answer(t, f, claimOne(t, f), domain.MergeableConflicting, "head-5n"); len(got.Events) != 1 || got.Events[0].EventType != domain.EventGitHubPRConflicts || got.Previous != "" {
+		got := answer(t, f, claimOne(t, f), domain.MergeableConflicting, "head-5n")
+		if len(got.Events) != 1 || got.Events[0].EventType != domain.EventGitHubPRConflicts || got.Previous != "" {
 			t.Errorf("first answer after the give-up = %+v, want one github:pr:conflicts", got)
+		}
+		if got.Row == nil || got.Row.GiveUps != 0 {
+			t.Errorf("row after a known answer = %+v, want no give-ups", got.Row)
 		}
 	})
 
@@ -419,6 +506,220 @@ func RunPRMergeabilityConformance(t *testing.T, mk PRMergeabilityFactory) {
 		}
 		if rows := f.Probes(t, e.ID); len(rows) != 1 || rows[0].Status != workitem.StatusReady {
 			t.Errorf("probes after the prune = %+v, want the ready one", rows)
+		}
+	})
+
+	pathsOf := func(f PRMergeabilityFixture, entityID string) func() (*domain.PRPaths, error) {
+		return func() (*domain.PRPaths, error) {
+			rows, err := f.Stores.PRMergeability.ListPathsSystem(ctx, f.OrgID, []string{entityID})
+			if err != nil || len(rows) == 0 {
+				return nil, err
+			}
+			return &rows[0], nil
+		}
+	}
+	samplePaths := []domain.ChangedPath{
+		{Path: "src/a.go", Change: domain.PathModified},
+		{Path: "src/b.go", Change: domain.PathRenamed, Previous: "old/b.go"},
+	}
+
+	t.Run("The_path_upsert_returns_its_row_and_leaves_the_answer_alone", func(t *testing.T) {
+		f := mk(t)
+		e := pr(t, f, "13")
+		probe(t, f, e.ID, domain.MergeableConflicting, "head-13")
+		answer, _ := f.Stores.PRMergeability.GetSystem(ctx, f.OrgID, e.ID)
+
+		got, err := f.Stores.PRMergeability.UpsertPathsSystem(ctx, f.OrgID, domain.PRPaths{EntityID: e.ID, Paths: samplePaths, HeadSHA: "head-13", BaseRef: "main", Complete: true})
+		if err != nil {
+			t.Fatalf("UpsertPathsSystem: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "UpsertPathsSystem over a row", got, pathsOf(f, e.ID))
+		if got.EntityID != e.ID || got.OrgID != f.OrgID || got.HeadSHA != "head-13" || got.BaseRef != "main" || !got.Complete || len(got.Paths) != 2 || got.Paths[1] != samplePaths[1] {
+			t.Errorf("paths = %+v, want the list as written", got)
+		}
+		after, _ := f.Stores.PRMergeability.GetSystem(ctx, f.OrgID, e.ID)
+		if after == nil || answer == nil || !reflect.DeepEqual(*after, *answer) {
+			t.Errorf("answer after the path write = %+v, want %+v untouched", after, answer)
+		}
+
+		// A rewrite replaces the list, its head, its base and its completeness.
+		again, err := f.Stores.PRMergeability.UpsertPathsSystem(ctx, f.OrgID, domain.PRPaths{EntityID: e.ID, Paths: samplePaths[:1], HeadSHA: "head-13b", BaseRef: "release"})
+		if err != nil {
+			t.Fatalf("UpsertPathsSystem rewrite: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "UpsertPathsSystem rewrite", again, pathsOf(f, e.ID))
+		if again.HeadSHA != "head-13b" || again.BaseRef != "release" || again.Complete || len(again.Paths) != 1 {
+			t.Errorf("rewritten paths = %+v, want one path at head-13b against release, incomplete", again)
+		}
+	})
+
+	t.Run("The_probe_upserts_leave_the_paths_alone", func(t *testing.T) {
+		f := mk(t)
+		e := pr(t, f, "14")
+		written, err := f.Stores.PRMergeability.UpsertPathsSystem(ctx, f.OrgID, domain.PRPaths{EntityID: e.ID, Paths: samplePaths, HeadSHA: "head-14", BaseRef: "main", Complete: true})
+		if err != nil {
+			t.Fatalf("UpsertPathsSystem: %v", err)
+		}
+		// The row the path write created carries no answer, so the first
+		// answer is the pull request's first.
+		row, _ := f.Stores.PRMergeability.GetSystem(ctx, f.OrgID, e.ID)
+		if row == nil || row.Mergeable != "" || row.MergeableHeadSHA != "" || row.MergeableBaseRef != "" || row.CheckedAt != nil {
+			t.Fatalf("row after a path write alone = %+v, want no answer", row)
+		}
+		res := probe(t, f, e.ID, domain.MergeableConflicting, "head-14")
+		if len(res.Events) != 1 || res.Events[0].EventType != domain.EventGitHubPRConflicts || res.Previous != "" {
+			t.Errorf("first answer over a path-only row = %+v, want one github:pr:conflicts", res)
+		}
+		if got, _ := pathsOf(f, e.ID)(); got == nil || !reflect.DeepEqual(*got, written) {
+			t.Errorf("paths after an answer = %+v, want %+v", got, written)
+		}
+
+		admit(t, f, e.ID, domain.MergeabilityProbeHeadMoved)
+		for reads := 0; reads < workkinds.PRMergeabilityMaxUnknownReads; reads++ {
+			answer(t, f, claimOne(t, f), domain.MergeableUnknown, "head-14b")
+		}
+		if got, _ := pathsOf(f, e.ID)(); got == nil || !reflect.DeepEqual(*got, written) {
+			t.Errorf("paths after an UNKNOWN give-up = %+v, want %+v", got, written)
+		}
+	})
+
+	t.Run("Paths_list_by_entity_and_refuse_a_bad_write", func(t *testing.T) {
+		f := mk(t)
+		answered, written, none := pr(t, f, "15"), pr(t, f, "16"), pr(t, f, "17")
+		probe(t, f, answered.ID, domain.MergeableMergeable, "h")
+		if _, err := f.Stores.PRMergeability.UpsertPathsSystem(ctx, f.OrgID, domain.PRPaths{EntityID: written.ID, HeadSHA: "h", BaseRef: "main"}); err != nil {
+			t.Fatalf("UpsertPathsSystem: %v", err)
+		}
+		rows, err := f.Stores.PRMergeability.ListPathsSystem(ctx, f.OrgID, []string{answered.ID, written.ID, none.ID})
+		if err != nil || len(rows) != 2 {
+			t.Fatalf("ListPathsSystem = %+v (err %v), want the two rows", rows, err)
+		}
+		for _, r := range rows {
+			switch r.EntityID {
+			case answered.ID:
+				if r.Paths != nil || r.HeadSHA != "" || r.Complete {
+					t.Errorf("paths of a row never given any = %+v, want none", r)
+				}
+			case written.ID:
+				if r.Paths == nil || len(r.Paths) != 0 || r.HeadSHA != "h" {
+					t.Errorf("paths of a pull request that changes nothing = %+v, want an empty list read at h", r)
+				}
+			default:
+				t.Errorf("ListPathsSystem returned %+v, an entity not asked for", r)
+			}
+		}
+		for _, bad := range []domain.PRPaths{
+			{EntityID: written.ID, Paths: samplePaths, BaseRef: "main"},
+			{EntityID: written.ID, Paths: samplePaths, HeadSHA: "h"},
+			{EntityID: written.ID, HeadSHA: "h", BaseRef: "main", Paths: []domain.ChangedPath{{Path: "a", Change: "moved"}}},
+			{EntityID: written.ID, HeadSHA: "h", BaseRef: "main", Paths: []domain.ChangedPath{{Change: domain.PathAdded}}},
+		} {
+			if _, err := f.Stores.PRMergeability.UpsertPathsSystem(ctx, f.OrgID, bad); err == nil {
+				t.Errorf("UpsertPathsSystem(%+v) succeeded, want refused", bad)
+			}
+		}
+	})
+
+	t.Run("Clearing_paths_forgets_the_list_and_keeps_the_answer", func(t *testing.T) {
+		f := mk(t)
+		withPaths, answered := pr(t, f, "19"), pr(t, f, "20")
+		probe(t, f, withPaths.ID, domain.MergeableConflicting, "h19")
+		probe(t, f, answered.ID, domain.MergeableMergeable, "h20")
+		before, _ := f.Stores.PRMergeability.GetSystem(ctx, f.OrgID, withPaths.ID)
+		if _, err := f.Stores.PRMergeability.UpsertPathsSystem(ctx, f.OrgID, domain.PRPaths{EntityID: withPaths.ID, Paths: samplePaths, HeadSHA: "h19", BaseRef: "main", Complete: true}); err != nil {
+			t.Fatalf("UpsertPathsSystem: %v", err)
+		}
+		if n, err := f.Stores.PRMergeability.ClearPathsSystem(ctx, f.OrgID, []string{withPaths.ID, answered.ID}); err != nil || n != 1 {
+			t.Fatalf("ClearPathsSystem = (%d, %v), want the one row holding paths cleared", n, err)
+		}
+		got, _ := pathsOf(f, withPaths.ID)()
+		if got == nil || got.Paths != nil || got.HeadSHA != "" || got.BaseRef != "" || got.Complete {
+			t.Errorf("paths after the clear = %+v, want none", got)
+		}
+		after, _ := f.Stores.PRMergeability.GetSystem(ctx, f.OrgID, withPaths.ID)
+		if after == nil || before == nil || !reflect.DeepEqual(*after, *before) {
+			t.Errorf("answer after the clear = %+v, want %+v untouched", after, before)
+		}
+	})
+
+	t.Run("Branch_tips_upsert_list_and_delete_the_untargeted", func(t *testing.T) {
+		f := mk(t)
+		e := pr(t, f, "18")
+		observed := time.Now().UTC().Add(-time.Minute).Truncate(time.Millisecond)
+		tips := func() func() (*domain.BranchTip, error) {
+			return func() (*domain.BranchTip, error) {
+				rows, err := f.Stores.PRMergeability.ListBranchTipsSystem(ctx, f.OrgID)
+				for _, r := range rows {
+					if r.RepositoryID == e.RepositoryID && r.Branch == "main" {
+						return &r, err
+					}
+				}
+				return nil, err
+			}
+		}
+		first, err := f.Stores.PRMergeability.UpsertBranchTipSystem(ctx, f.OrgID, domain.BranchTip{
+			RepositoryID: e.RepositoryID, Branch: "main", TipSHA: "tip-1", ETag: `"e1"`, ObservedAt: observed,
+		})
+		if err != nil {
+			t.Fatalf("UpsertBranchTipSystem: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "UpsertBranchTipSystem insert", first, tips())
+		if first.OrgID != f.OrgID || first.TipSHA != "tip-1" || first.ETag != `"e1"` || !first.ObservedAt.Equal(observed) {
+			t.Errorf("tip = %+v, want tip-1 with its etag, observed a minute ago", first)
+		}
+		moved, err := f.Stores.PRMergeability.UpsertBranchTipSystem(ctx, f.OrgID, domain.BranchTip{
+			RepositoryID: e.RepositoryID, Branch: "main", TipSHA: "tip-2", ObservedAt: observed.Add(time.Minute),
+		})
+		if err != nil {
+			t.Fatalf("UpsertBranchTipSystem update: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "UpsertBranchTipSystem update", moved, tips())
+		if moved.TipSHA != "tip-2" || moved.ETag != "" || !moved.ObservedAt.Equal(observed.Add(time.Minute)) || moved.CompareFailingSince != nil {
+			t.Errorf("updated tip = %+v, want tip-2 with no etag and no failure", moved)
+		}
+		failing := observed.Add(2 * time.Minute)
+		moved.CompareFailingSince = &failing
+		marked, err := f.Stores.PRMergeability.UpsertBranchTipSystem(ctx, f.OrgID, moved)
+		if err != nil {
+			t.Fatalf("UpsertBranchTipSystem failing: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "UpsertBranchTipSystem failing", marked, tips())
+		if marked.CompareFailingSince == nil || !marked.CompareFailingSince.Equal(failing) {
+			t.Errorf("failing tip = %+v, want failing since %s", marked, failing)
+		}
+		marked.CompareFailingSince = nil
+		if cleared, err := f.Stores.PRMergeability.UpsertBranchTipSystem(ctx, f.OrgID, marked); err != nil || cleared.CompareFailingSince != nil {
+			t.Errorf("clearing the failure = (%+v, %v), want none recorded", cleared, err)
+		}
+		if _, err := f.Stores.PRMergeability.UpsertBranchTipSystem(ctx, f.OrgID, domain.BranchTip{
+			RepositoryID: e.RepositoryID, Branch: "release/1.0", TipSHA: "tip-r", ObservedAt: observed,
+		}); err != nil {
+			t.Fatalf("UpsertBranchTipSystem second branch: %v", err)
+		}
+		for _, bad := range []domain.BranchTip{
+			{RepositoryID: e.RepositoryID, Branch: "main", ObservedAt: observed},
+			{RepositoryID: e.RepositoryID, TipSHA: "t", ObservedAt: observed},
+			{RepositoryID: e.RepositoryID, Branch: "main", TipSHA: "t"},
+		} {
+			if _, err := f.Stores.PRMergeability.UpsertBranchTipSystem(ctx, f.OrgID, bad); err == nil {
+				t.Errorf("UpsertBranchTipSystem(%+v) succeeded, want refused", bad)
+			}
+		}
+
+		rows, err := f.Stores.PRMergeability.ListBranchTipsSystem(ctx, f.OrgID)
+		if err != nil || len(rows) != 2 || rows[0].Branch != "main" || rows[1].Branch != "release/1.0" {
+			t.Fatalf("ListBranchTipsSystem = %+v (err %v), want main then release/1.0", rows, err)
+		}
+		keep := []domain.BranchRef{{RepositoryID: e.RepositoryID, Branch: "release/1.0"}, {RepositoryID: e.RepositoryID, Branch: "never-stored"}}
+		if n, err := f.Stores.PRMergeability.DeleteBranchTipsExceptSystem(ctx, f.OrgID, keep); err != nil || n != 1 {
+			t.Fatalf("DeleteBranchTipsExceptSystem = (%d, %v), want main deleted", n, err)
+		}
+		rows, _ = f.Stores.PRMergeability.ListBranchTipsSystem(ctx, f.OrgID)
+		if len(rows) != 1 || rows[0].Branch != "release/1.0" {
+			t.Errorf("tips after the delete = %+v, want release/1.0 alone", rows)
+		}
+		if n, err := f.Stores.PRMergeability.DeleteBranchTipsExceptSystem(ctx, f.OrgID, nil); err != nil || n != 1 {
+			t.Errorf("DeleteBranchTipsExceptSystem keeping nothing = (%d, %v), want the last row deleted", n, err)
 		}
 	})
 

@@ -119,6 +119,8 @@ func pollerTestServer(t *testing.T) *httptest.Server {
 		case strings.HasSuffix(r.URL.Path, "/pulls"):
 			w.Header().Set("ETag", `"etag-1"`)
 			_, _ = w.Write([]byte(openPRBodyForPoller))
+		case isBranchRefRead(r):
+			http.NotFound(w, r)
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			http.Error(w, "unexpected", http.StatusNotFound)

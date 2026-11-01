@@ -23,10 +23,30 @@ const staleRefreshFloor = 10 * time.Minute
 
 // mergeabilitySweepInterval is how long after a pull request's last
 // mergeability read the poll admits a probe to read it again, whatever else
-// did or did not move. A merge to the base branch moves neither the pull
-// request's updated_at nor its head, so this is what bounds how late a
-// conflict the base branch caused is seen. It matches staleRefreshFloor.
-const mergeabilitySweepInterval = 10 * time.Minute
+// did or did not move. A new head, a new base branch, and a base branch move
+// that touches the pull request's files (the branch watch) are probed for when
+// the poll sees them; the sweep catches the changes those miss, such as a
+// rename the base made that git stops pairing after a later rewrite of the
+// file.
+const mergeabilitySweepInterval = 6 * time.Hour
+
+// mergeabilityGiveUpRecheck is how long after GitHub answered UNKNOWN on every
+// retry of a round of reads the poll admits a fresh round. GitHub computing
+// mergeability that slowly is load on its side, which a pause can outlast,
+// and the sweep would leave a conflict unseen for hours.
+const mergeabilityGiveUpRecheck = 10 * time.Minute
+
+// giveUpRecheck is the pause after the n-th give-up in a row before a fresh
+// round: mergeabilityGiveUpRecheck, doubled for each give-up before the n-th,
+// and never longer than mergeabilitySweepInterval, so a pull request GitHub
+// keeps answering UNKNOWN for costs fewer reads the longer it goes on.
+func giveUpRecheck(n int) time.Duration {
+	d := mergeabilityGiveUpRecheck
+	for i := 1; i < n && d < mergeabilitySweepInterval; i++ {
+		d *= 2
+	}
+	return min(d, mergeabilitySweepInterval)
+}
 
 // shouldSkipRefresh reports whether a tracked open PR can keep its
 // stored snapshot for this poll cycle (no follow-up RefreshPRs call

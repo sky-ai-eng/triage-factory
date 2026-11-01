@@ -8,14 +8,14 @@ import (
 )
 
 // TestPRMergeability_AnswersOnlyPullRequests pins the read's shape: each
-// pull request answers its mergeability and head by node id, an id with no
+// pull request answers its mergeability, head and base by node id, an id with no
 // node (null) or whose node is another type (an object with none of the
 // fields asked for) is absent from the answer, and a pull request whose
 // mergeable is null beside a field error answers UNKNOWN.
 func TestPRMergeability_AnswersOnlyPullRequests(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"data":{"nodes":[
-			{"id":"PR_a","mergeable":"CONFLICTING","headRefOid":"sha-a"},
+			{"id":"PR_a","mergeable":"CONFLICTING","headRefOid":"sha-a","baseRefName":"main"},
 			null,
 			{},
 			{"id":"PR_d","mergeable":"UNKNOWN","headRefOid":"sha-d"},
@@ -30,7 +30,7 @@ func TestPRMergeability_AnswersOnlyPullRequests(t *testing.T) {
 		t.Fatalf("PRMergeability: %v", err)
 	}
 	want := map[string]MergeabilityRead{
-		"PR_a": {Mergeable: "CONFLICTING", HeadSHA: "sha-a"},
+		"PR_a": {Mergeable: "CONFLICTING", HeadSHA: "sha-a", BaseRef: "main"},
 		"PR_d": {Mergeable: "UNKNOWN", HeadSHA: "sha-d"},
 		"PR_e": {Mergeable: "UNKNOWN", HeadSHA: "sha-e"},
 	}

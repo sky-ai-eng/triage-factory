@@ -27,7 +27,7 @@ most one active task exists per entity, event type and `dedup_key`.
 | **Changes Requested** | `github:pr:review_changes_requested` | A review requesting changes was submitted — see [Reviews](#reviews) | — |
 | **Review: Commented** | `github:pr:review_commented` | A review with comments only was submitted, a reply in a review thread included — see [Reviews](#reviews) | — |
 | **CI Check Failed** | `github:pr:ci_check_failed` | A check run on the head commit completes with `failure`, `timed_out`, `cancelled` or `action_required`. One event per check run; a check run already failing last cycle, by id, does not emit again, and a re-run is a new check run | — |
-| **Merge Conflicts** | `github:pr:conflicts` | The PR's stored mergeability changes to `CONFLICTING`, a PR with none included — see [Mergeability](#mergeability) | — |
+| **Merge Conflicts** | `github:pr:conflicts` | The PR's stored mergeability changes to `CONFLICTING`, a PR with none included. A PR is re-checked within about one GitHub poll of a push to its head, a change of its base branch, or a base-branch move that touches its files, and every open PR is re-checked at least every 6 hours — see [Mergeability](#mergeability) | — |
 | **Ready for Review** | `github:pr:ready_for_review` | `isDraft` changes from `true` to `false` | — |
 | **Label Added** | `github:pr:label_added` | A label is added. Labels are names here — see [Labels](#labels) | label name |
 | **Label Removed** | `github:pr:label_removed` | A label is removed | label name |
@@ -42,7 +42,7 @@ most one active task exists per entity, event type and `dedup_key`.
 | **Review: Dismissed** | `github:pr:review_dismissed` | A reviewer's latest review was dismissed — see [Reviews](#reviews) | — |
 | **Review Request Removed** | `github:pr:review_request_removed` | A reviewer TF knows drops off the review requests, because they reviewed or the request was withdrawn. Closes that reviewer's `review_requested` task, keyed by id or by handle | keyed as `review_requested` |
 | **CI Check Passed** | `github:pr:ci_check_passed` | A check run completes with any other conclusion (`success`, `neutral`, `skipped`, `stale`) and was not already passing | — |
-| **Conflicts Resolved** | `github:pr:conflicts_resolved` | The PR's stored mergeability changes from `CONFLICTING` to `MERGEABLE`. Closes the pull request's conflicts task — see [Mergeability](#mergeability) | — |
+| **Conflicts Resolved** | `github:pr:conflicts_resolved` | The PR's stored mergeability changes from `CONFLICTING` to `MERGEABLE`. Closes the pull request's conflicts task. A PR is re-checked within about one GitHub poll of a push to its head, a change of its base branch, or a base-branch move that touches its files, and every open PR is re-checked at least every 6 hours — see [Mergeability](#mergeability) | — |
 | **New Commits** | `github:pr:new_commits` | The head commit changes | — |
 | **PR Body Updated** | `github:pr:body_updated` | The complete PR body changes, including clearing it | — |
 | **PR Merged** | `github:pr:merged` | `merged` changes to `true` | — |
@@ -238,23 +238,93 @@ for it. GitHub computes it lazily: a read starts a test merge, answers
 `UNKNOWN` until it finishes, and a push to the base branch resets it. So TF
 reads it only when it can have changed, through a probe the poll admits:
 
-- `new`: TF holds no answer for the PR;
+- `new`: TF has never read it;
 - `head_moved`: the PR's head is not the one TF last read it at. The head
   comes from the cycle's refresh of the PR, or from the open-PR listing; a
   repository whose listing is unchanged (a 304) admits nothing on this rule;
-- `sweep`: TF last read it more than 10 minutes ago, which bounds how late a
-  conflict caused by the base branch moving is seen.
+- `base_changed`: the PR's base branch is not the one TF last read it
+  against: it was retargeted. The base is taken the way the head is, and an
+  answer that records no base admits nothing on this rule;
+- `base_moved`: the PR's base branch moved and the PR's changed paths overlap
+  what the move changed, or TF does not hold all of the PR's changed paths;
+- `base_reset`: the PR's base branch moved and TF cannot tell what the move
+  changed, so every open PR on it is read;
+- `unknown_retry`: GitHub answered `UNKNOWN` on every read of TF's last
+  round, long enough ago (below);
+- `sweep`: TF last read it more than 6 hours ago, which catches the changes
+  the rules above miss.
+
+The base-branch rules come from a watch over each (repository, base branch)
+the org's open PRs target, the base taken from the stored snapshot's
+`base_ref`. The watch reads a branch's tip (`git/ref/heads/{branch}`,
+conditional on the last ETag) in any cycle where the repository's open-PR
+listing answered 200, since a merged PR leaves the listing, and in any cycle
+where the branch was last checked more than 10 minutes ago, which catches a
+direct push that changes no PR. When the tip moved it compares the previous
+tip with the new one:
+
+- `ahead` with fewer than 300 files: the move's paths are those files and
+  each one's previous name; the overlapping PRs get `base_moved`. A move that
+  changed no file overlaps nothing, and no PR's paths are read for it. A
+  compare that carries no file list is read as one with 300;
+- `ahead` with 300 files (the compare's cap): over 250 commits, `base_reset`.
+  Otherwise the range's first-parent chain is compared one step at a time and
+  the move's paths are the union of the steps' files; a step with 300 files,
+  or a chain longer than 20 steps, is `base_reset`;
+- `identical`: nothing;
+- `behind` or `diverged` (a rewound or force-pushed base), or a 404 (the
+  previous tip is gone): `base_reset`.
+
+A branch seen for the first time is `base_reset` too. Any other compare
+failure leaves the stored tip and is tried again next cycle, except a rate
+limit; once a branch's compares have kept failing for 20 minutes, counted from
+the first failure (stored on the branch's row and cleared by a success), the
+branch is `base_reset` (GitHub can fail every time to generate a comparison
+whose diff is too large).
+
+The watch records each move on the stored row of every PR it affects
+(`base_move_reason`, with the time it was recorded) and then stores the new
+tip, so a failure between the two processes the move again next cycle. The
+poll's admission, which runs after the watch, admits `base_moved` or
+`base_reset` for every row that owes a move, every cycle, until a read by a
+probe leased at or after the move was recorded settles: a known answer, or the
+`UNKNOWN` give-up. A probe that is given up with nothing written, or that the
+worker was already reading when the move was recorded and so may have read
+GitHub before it, leaves the move owed, and the next cycle admits another.
+
+A PR's paths are its changed files plus the previous path of each file it
+renamed or copied, read (GraphQL `PRChangedPaths`, with REST for the previous
+paths) only for a moved base, and only for a PR whose stored list was read at
+another head or against another base. A PR whose files GitHub fails or
+declines to list on some page, or whose head or base moves between pages, is
+probed and its list is not stored, so the next move reads it again. A reset
+that can have taken commits out of the base (a rewrite, a previous tip that is
+gone, a compare that would not answer, or a branch seen for the first time)
+clears the stored lists of the PRs on it, because a merge base that moves back
+adds files to a list at an unchanged head. A merge base that moves forward at
+an unchanged head (the base took in commits the PR's head already has) can add
+a file only when those commits changed it and the head later changed it back;
+that case is left to the sweep. A move's paths are its files plus each one's
+previous path. They overlap when a PR path equals a move path or one is a
+parent directory of the other, or when the move deleted a file, or renamed one
+into another directory, and the PR added a file anywhere under the directory
+the old file was in (never the repository root).
 
 A probe is read 15 seconds after its admission, and a PR with a probe already
 waiting collapses into it. The probe worker reads the waiting PRs that share a
 GitHub credential (an App installation, or the org's token) in one GraphQL
 query (`PRMergeability`), whatever repositories they are in, and stores each
-known answer (`MERGEABLE` or `CONFLICTING`) with the head it was read at. The
+known answer (`MERGEABLE` or `CONFLICTING`) with the head and base it was read at. The
 two conflict events fire from the stored answer's transitions, in the write
 that stores it, so the stored answer is their re-emit guard. An `UNKNOWN`
 answer is read again 30 seconds later, at most 10 times, and leaves the stored
-answer alone; the tenth records the read's head and time with no answer, so
-the PR waits for its sweep. A read GitHub refuses for a rate limit waits for
+answer alone; the tenth records the read's head, base and time with no answer
+and counts a give-up on the row. The first poll more than 10 minutes later
+admits a fresh round (`unknown_retry`), and each further give-up in a row
+doubles the pause, up to the sweep's 6 hours, so a GitHub slow to compute
+mergeability delays the answer by minutes rather than until the sweep, and one
+that never answers is asked less and less often. A known answer resets the
+count. A read GitHub refuses for a rate limit waits for
 the limit to reset, and the credential's other PRs wait with it without a
 request. A probe whose reads keep failing for another reason is given up after
 its fifth attempt with nothing written, and one whose repository no credential

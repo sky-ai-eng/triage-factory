@@ -69,6 +69,8 @@ func TestRefreshGitHub_ReEnableAfterPauseEmitsNothing(t *testing.T) {
 			_, _ = w.Write([]byte(reseedMergedPRRefresh))
 		case strings.Contains(r.URL.Path, "/pulls/9"):
 			_, _ = w.Write([]byte(reseedMergedPRBasic))
+		case isBranchRefRead(r):
+			http.NotFound(w, r)
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			http.Error(w, "unexpected", http.StatusNotFound)
@@ -284,6 +286,8 @@ func TestRefreshGitHub_ReEnable_KnownEntitySilentNewEntityDiscovered(t *testing.
 			_, _ = w.Write([]byte(reseedMergedPRBasic))
 		case strings.HasSuffix(r.URL.Path, "/pulls"):
 			_, _ = w.Write([]byte(reseedNewPRList))
+		case isBranchRefRead(r):
+			http.NotFound(w, r)
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			http.Error(w, "unexpected", http.StatusNotFound)
