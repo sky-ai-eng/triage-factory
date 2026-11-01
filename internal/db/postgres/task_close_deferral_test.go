@@ -189,7 +189,7 @@ func TestTaskCloseDeferral_Postgres_ExpiryLetsAStepAdvanceThrough(t *testing.T) 
 		var waiting int
 		if err := h.AdminDB.QueryRow(`
 			SELECT count(*) FROM pg_stat_activity
-			 WHERE wait_event_type = 'Lock' AND query LIKE '%UPDATE blueprint_runs br SET cancel_requested%'
+			 WHERE wait_event_type = 'Lock' AND query LIKE '%UPDATE blueprint_runs br SET cancel_requested%= ANY(%'
 		`).Scan(&waiting); err != nil {
 			t.Fatalf("read waiting backends: %v", err)
 		}

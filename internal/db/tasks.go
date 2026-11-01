@@ -866,8 +866,14 @@ type TaskStore interface {
 	// ApplyHeldCloseSystem once nothing on the task is working, reading the
 	// deliverables they left only then; until then a stop that never landed
 	// is retried, since the conversation still works and nobody has asked it
-	// to stop. Admin pool. Exempt from the returned-row rule: it writes no
-	// task row, and the caller acts on the conversations.
+	// to stop.
+	//
+	// Whether a person drives a conversation is read in this transaction,
+	// which takes no lock a person's message waits on, as the close note's
+	// wording is chosen without one: a message that lands while the expiry
+	// runs does not keep its conversation from expiring. Admin pool. Exempt
+	// from the returned-row rule: it writes no task row, and the caller acts
+	// on the conversations.
 	ExpireHeldCloseSystem(ctx context.Context, orgID, taskID, heldEventID string, heldFor time.Duration) (expired []string, err error)
 
 	// ClearCloseDeferralSystem clears the task's deferral when it still names

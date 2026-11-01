@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // A held close stops the work an event started once it has held for the
@@ -120,6 +121,31 @@ func TestCloseHoldExpiry_StopsTheWorkAndKeepsTheCloseADeliverableHolds(t *testin
 	}
 	if slices.Contains(f.sp.tornDownCopy(), f.taskID) {
 		t.Error("the sweep tore down the draft awaiting a person")
+	}
+}
+
+// TestCloseHoldExpiry_LeavesAHoldItsRelationNoLongerAdmits: CI failing on
+// the pull request again by the time the limit runs out means the situation
+// may be live, so the expiry stops nothing and leaves the hold for the settle
+// to judge once nothing works, rather than dropping it under the working run.
+func TestCloseHoldExpiry_LeavesAHoldItsRelationNoLongerAdmits(t *testing.T) {
+	f := newHeldCIFixture(t, "owner/repo#expiry-not-admitted")
+	startedByEvent(t, f.database, f.runID, f.convID)
+	seedPRCheckRuns(t, f.database, f.entityID,
+		domain.CheckRun{ID: 1, Name: "build", Status: "completed", Conclusion: "failure"},
+	)
+	ageHold(t, f.database, f.taskID)
+
+	f.r.sweepCloseDeferrals(t.Context(), DefaultCloseHoldTimeout)
+
+	if got := f.sp.stoppedIDs(); len(got) != 0 {
+		t.Errorf("stopped = %v, want nothing", got)
+	}
+	if cancelRequested(t, f.database, f.runID) {
+		t.Error("the run was called off")
+	}
+	if ev := heldClose(t, f.database, f.taskID); ev != f.eventID {
+		t.Errorf("held close = %q, want %s left for the settle", ev, f.eventID)
 	}
 }
 
