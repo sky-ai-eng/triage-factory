@@ -2,15 +2,14 @@ package linear
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/execflags"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/execout"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
 )
 
@@ -66,7 +65,7 @@ var ValueFlags = func() map[string]bool {
 
 func handleIssue(host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: " + prog.Prefix() + " linear issue <action> [flags]")
+		execout.ExitErr("usage: " + prog.Prefix() + " linear issue <action> [flags]")
 	}
 	action := args[0]
 	flags := args[1:]
@@ -89,37 +88,37 @@ func handleIssue(host agenthost.Client, args []string) {
 	case "view":
 		a := parseOrExit(action, flags, 1)
 		issue, err := host.LinearGetIssue(ctx, a.positional[0])
-		exitOnErr(err)
-		printJSON(issue)
+		execout.ExitOnErr(err)
+		execout.PrintJSON(issue)
 	case "list-states":
 		a := parseOrExit(action, flags, 1)
 		states, err := host.LinearListStates(ctx, a.positional[0])
-		exitOnErr(err)
-		printJSON(nonNil(states))
+		execout.ExitOnErr(err)
+		execout.PrintJSON(nonNil(states))
 	case "transition":
 		a := parseOrExit(action, flags, 1)
 		state := a.required("--state")
 		moved, err := host.LinearTransition(ctx, a.positional[0], state)
-		exitOnErr(err)
-		printJSON(map[string]any{"ok": true, "issue": a.positional[0], "state": moved})
+		execout.ExitOnErr(err)
+		execout.PrintJSON(map[string]any{"ok": true, "issue": a.positional[0], "state": moved})
 	case "comment":
 		a := parseOrExit(action, flags, 1)
 		body := a.required("--body")
 		commentID, err := host.LinearAddComment(ctx, a.positional[0], body)
-		exitOnErr(err)
-		printJSON(map[string]any{"ok": true, "issue": a.positional[0], "comment_id": commentID})
+		execout.ExitOnErr(err)
+		execout.PrintJSON(map[string]any{"ok": true, "issue": a.positional[0], "comment_id": commentID})
 	case "assign":
 		a := parseOrExit(action, flags, 1)
 		if !a.has("--user") {
-			exitErr("--user is required: name the person to assign by their Linear user id, which `" + prog.Prefix() + " linear user search <query>` returns")
+			execout.ExitErr("--user is required: name the person to assign by their Linear user id, which `" + prog.Prefix() + " linear user search <query>` returns")
 		}
 		user, err := host.LinearAssign(ctx, a.positional[0], a.value("--user"))
-		exitOnErr(err)
-		printJSON(map[string]any{"ok": true, "issue": a.positional[0], "assigned": user})
+		execout.ExitOnErr(err)
+		execout.PrintJSON(map[string]any{"ok": true, "issue": a.positional[0], "assigned": user})
 	case "unassign":
 		a := parseOrExit(action, flags, 1)
-		exitOnErr(host.LinearUnassign(ctx, a.positional[0]))
-		printJSON(map[string]any{"ok": true, "issue": a.positional[0], "assigned": nil})
+		execout.ExitOnErr(host.LinearUnassign(ctx, a.positional[0]))
+		execout.PrintJSON(map[string]any{"ok": true, "issue": a.positional[0], "assigned": nil})
 	case "create":
 		issueCreate(ctx, host, flags)
 	case "edit":
@@ -127,22 +126,22 @@ func handleIssue(host agenthost.Client, args []string) {
 	case "set-parent":
 		a := parseOrExit(action, flags, 1)
 		parent := a.required("--parent")
-		exitOnErr(host.LinearSetParent(ctx, a.positional[0], parent))
-		printJSON(map[string]any{"ok": true, "issue": a.positional[0], "parent": parent})
+		execout.ExitOnErr(host.LinearSetParent(ctx, a.positional[0], parent))
+		execout.PrintJSON(map[string]any{"ok": true, "issue": a.positional[0], "parent": parent})
 	case "set-priority":
 		a := parseOrExit(action, flags, 1)
 		priority := parsePriority(a.required("--priority"))
-		exitOnErr(host.LinearSetPriority(ctx, a.positional[0], priority))
-		printJSON(map[string]any{"ok": true, "issue": a.positional[0], "priority": priority})
+		execout.ExitOnErr(host.LinearSetPriority(ctx, a.positional[0], priority))
+		execout.PrintJSON(map[string]any{"ok": true, "issue": a.positional[0], "priority": priority})
 	case "list-children":
 		a := parseOrExit(action, flags, 1)
 		children, err := host.LinearListChildren(ctx, a.positional[0])
-		exitOnErr(err)
-		printJSON(nonNil(children))
+		execout.ExitOnErr(err)
+		execout.PrintJSON(nonNil(children))
 	case "search":
 		issueSearch(ctx, host, flags)
 	default:
-		exitErr(unknownActionMessage(prog.Prefix(), action))
+		execout.ExitErr(unknownActionMessage(prog.Prefix(), action))
 	}
 }
 
@@ -159,8 +158,8 @@ func issueCreate(ctx context.Context, host agenthost.Client, flags []string) {
 		req.Priority = parsePriority(a.value("--priority"))
 	}
 	issue, err := host.LinearCreateIssue(ctx, req)
-	exitOnErr(err)
-	printJSON(map[string]any{"ok": true, "id": issue.ID, "identifier": issue.Identifier, "url": issue.URL})
+	execout.ExitOnErr(err)
+	execout.PrintJSON(map[string]any{"ok": true, "id": issue.ID, "identifier": issue.Identifier, "url": issue.URL})
 }
 
 func issueEdit(ctx context.Context, host agenthost.Client, flags []string) {
@@ -181,10 +180,10 @@ func issueEdit(ctx context.Context, host agenthost.Client, flags []string) {
 	edit.AddLabels = a.values["--add-label"]
 	edit.RemoveLabels = a.values["--remove-label"]
 	if edit.IsEmpty() {
-		exitErr("at least one of --title, --description, --priority, --add-label, --remove-label is required")
+		execout.ExitErr("at least one of --title, --description, --priority, --add-label, --remove-label is required")
 	}
-	exitOnErr(host.LinearUpdateIssue(ctx, a.positional[0], edit))
-	printJSON(map[string]any{"ok": true, "issue": a.positional[0]})
+	execout.ExitOnErr(host.LinearUpdateIssue(ctx, a.positional[0], edit))
+	execout.PrintJSON(map[string]any{"ok": true, "issue": a.positional[0]})
 }
 
 func issueSearch(ctx context.Context, host agenthost.Client, flags []string) {
@@ -198,13 +197,13 @@ func issueSearch(ctx context.Context, host agenthost.Client, flags []string) {
 	if a.has("--max") {
 		n, err := strconv.Atoi(a.value("--max"))
 		if err != nil || n < 1 || n > agenthost.LinearSearchMaxResults {
-			exitErr(fmt.Sprintf("--max must be a number from 1 to %d", agenthost.LinearSearchMaxResults))
+			execout.ExitErr(fmt.Sprintf("--max must be a number from 1 to %d", agenthost.LinearSearchMaxResults))
 		}
 		req.Max = n
 	}
 	issues, err := host.LinearSearch(ctx, req)
-	exitOnErr(err)
-	printJSON(nonNil(issues))
+	execout.ExitOnErr(err)
+	execout.PrintJSON(nonNil(issues))
 }
 
 // unknownActionMessage is the mistyped-verb error: what was wrong, the valid
@@ -246,7 +245,7 @@ func (a issueArgs) value(flag string) string {
 // refused a blank one.
 func (a issueArgs) required(flag string) string {
 	if !a.has(flag) {
-		exitErr(flag + " is required")
+		execout.ExitErr(flag + " is required")
 	}
 	return a.value(flag)
 }
@@ -291,14 +290,14 @@ func parseIssueArgs(action string, args []string, positionals int) (issueArgs, e
 
 func parseOrExit(action string, args []string, positionals int) issueArgs {
 	a, err := parseIssueArgs(action, args, positionals)
-	exitOnErr(err)
+	execout.ExitOnErr(err)
 	return a
 }
 
 func parsePriority(raw string) int {
 	p, err := strconv.Atoi(strings.TrimSpace(raw))
 	if err != nil || p < 0 || p > 4 {
-		exitErr("--priority must be 0-4 (0 none, 1 urgent, 2 high, 3 normal, 4 low)")
+		execout.ExitErr("--priority must be 0-4 (0 none, 1 urgent, 2 high, 3 normal, 4 low)")
 	}
 	return p
 }
@@ -309,24 +308,4 @@ func nonNil[T any](v []T) []T {
 		return []T{}
 	}
 	return v
-}
-
-// --- output ---
-
-func printJSON(v any) {
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	_ = enc.Encode(v)
-}
-
-func exitOnErr(err error) {
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-}
-
-func exitErr(msg string) {
-	fmt.Fprintln(os.Stderr, msg)
-	os.Exit(1)
 }

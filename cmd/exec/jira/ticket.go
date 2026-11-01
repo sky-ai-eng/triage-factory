@@ -2,15 +2,14 @@ package jira
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/execflags"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/execout"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
 )
@@ -73,7 +72,7 @@ func hasHelpFlag(args []string) bool {
 
 func handleTicket(host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: " + prog.Prefix() + " jira ticket <action> [flags]")
+		execout.ExitErr("usage: " + prog.Prefix() + " jira ticket <action> [flags]")
 	}
 
 	action := args[0]
@@ -129,7 +128,7 @@ func handleTicket(host agenthost.Client, args []string) {
 	case "set-priority":
 		ticketSetPriority(host, flags)
 	default:
-		exitErr(unknownActionMessage(prog.Prefix(), action))
+		execout.ExitErr(unknownActionMessage(prog.Prefix(), action))
 	}
 }
 
@@ -156,75 +155,75 @@ func ticketActions() []string {
 
 func ticketView(host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: jira ticket view <key>")
+		execout.ExitErr("usage: jira ticket view <key>")
 	}
 	issue, err := host.JiraGetIssue(context.Background(), args[0])
-	exitOnErr(err)
-	printJSON(issue)
+	execout.ExitOnErr(err)
+	execout.PrintJSON(issue)
 }
 
 func ticketTransition(host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: jira ticket transition <key> --status <status>")
+		execout.ExitErr("usage: jira ticket transition <key> --status <status>")
 	}
 	key := args[0]
 	status := flagVal(args, "--status")
 	if status == "" {
-		exitErr("--status is required")
+		execout.ExitErr("--status is required")
 	}
 	err := host.JiraTransitionTo(context.Background(), key, status)
-	exitOnErr(err)
-	printJSON(map[string]any{"ok": true, "key": key, "status": status})
+	execout.ExitOnErr(err)
+	execout.PrintJSON(map[string]any{"ok": true, "key": key, "status": status})
 }
 
 func ticketListTransitions(host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: jira ticket list-transitions <key>")
+		execout.ExitErr("usage: jira ticket list-transitions <key>")
 	}
 	transitions, err := host.JiraGetTransitions(context.Background(), args[0])
-	exitOnErr(err)
-	printJSON(transitions)
+	execout.ExitOnErr(err)
+	execout.PrintJSON(transitions)
 }
 
 func ticketComment(host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: jira ticket comment <key> --body <text>")
+		execout.ExitErr("usage: jira ticket comment <key> --body <text>")
 	}
 	key := args[0]
 	body := flagVal(args, "--body")
 	if body == "" {
-		exitErr("--body is required")
+		execout.ExitErr("--body is required")
 	}
 	err := host.JiraAddComment(context.Background(), key, body)
-	exitOnErr(err)
-	printJSON(map[string]any{"ok": true, "key": key})
+	execout.ExitOnErr(err)
+	execout.PrintJSON(map[string]any{"ok": true, "key": key})
 }
 
 func ticketAssign(host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: jira ticket assign <key> --user <user-id>")
+		execout.ExitErr("usage: jira ticket assign <key> --user <user-id>")
 	}
 	userID := flagVal(args, "--user")
 	if userID == "" {
-		exitErr("--user is required: name the person to assign by their Jira user id, which `" + prog.Prefix() + " jira user search <query> --issue <key>` returns")
+		execout.ExitErr("--user is required: name the person to assign by their Jira user id, which `" + prog.Prefix() + " jira user search <query> --issue <key>` returns")
 	}
 	user, err := host.JiraAssign(context.Background(), args[0], userID)
-	exitOnErr(err)
-	printJSON(map[string]any{"ok": true, "key": args[0], "assigned": user})
+	execout.ExitOnErr(err)
+	execout.PrintJSON(map[string]any{"ok": true, "key": args[0], "assigned": user})
 }
 
 func ticketUnassign(host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: jira ticket unassign <key>")
+		execout.ExitErr("usage: jira ticket unassign <key>")
 	}
 	err := host.JiraUnassign(context.Background(), args[0])
-	exitOnErr(err)
-	printJSON(map[string]any{"ok": true, "key": args[0], "assigned": nil})
+	execout.ExitOnErr(err)
+	execout.PrintJSON(map[string]any{"ok": true, "key": args[0], "assigned": nil})
 }
 
 func ticketCreate(host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: jira ticket create <project> --type <type> --summary <text> [--description <text>] [--parent <key>] [--priority <priority>]")
+		execout.ExitErr("usage: jira ticket create <project> --type <type> --summary <text> [--description <text>] [--parent <key>] [--priority <priority>]")
 	}
 	project := args[0]
 	issueType := flagVal(args, "--type")
@@ -234,20 +233,20 @@ func ticketCreate(host agenthost.Client, args []string) {
 	priority := flagVal(args, "--priority")
 
 	if issueType == "" {
-		exitErr("--type is required")
+		execout.ExitErr("--type is required")
 	}
 	if summary == "" {
-		exitErr("--summary is required")
+		execout.ExitErr("--summary is required")
 	}
 
 	key, err := host.JiraCreateIssue(context.Background(), project, issueType, summary, description, parentKey, priority)
-	exitOnErr(err)
-	printJSON(map[string]any{"ok": true, "key": key})
+	execout.ExitOnErr(err)
+	execout.PrintJSON(map[string]any{"ok": true, "key": key})
 }
 
 func ticketEdit(host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: jira ticket edit <key> [--summary <text>] [--description <text>] [--priority <priority>] [--type <type>] [--add-label <label>] [--remove-label <label>]")
+		execout.ExitErr("usage: jira ticket edit <key> [--summary <text>] [--description <text>] [--priority <priority>] [--type <type>] [--add-label <label>] [--remove-label <label>]")
 	}
 	key := args[0]
 
@@ -269,52 +268,52 @@ func ticketEdit(host agenthost.Client, args []string) {
 		fields.IssueType = &v
 	}
 	addLabels, err := flagVals(args, "--add-label")
-	exitOnErr(err)
+	execout.ExitOnErr(err)
 	fields.AddLabels = addLabels
 
 	removeLabels, err := flagVals(args, "--remove-label")
-	exitOnErr(err)
+	execout.ExitOnErr(err)
 	fields.RemoveLabels = removeLabels
 
 	if fields.IsEmpty() {
-		exitErr("at least one of --summary, --description, --priority, --type, --add-label, --remove-label is required")
+		execout.ExitErr("at least one of --summary, --description, --priority, --type, --add-label, --remove-label is required")
 	}
 
 	err = host.JiraUpdateIssue(context.Background(), key, fields)
-	exitOnErr(err)
-	printJSON(map[string]any{"ok": true, "key": key})
+	execout.ExitOnErr(err)
+	execout.PrintJSON(map[string]any{"ok": true, "key": key})
 }
 
 func ticketSetParent(host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: jira ticket set-parent <key> --parent <parent_key>")
+		execout.ExitErr("usage: jira ticket set-parent <key> --parent <parent_key>")
 	}
 	key := args[0]
 	parentKey := flagVal(args, "--parent")
 	if parentKey == "" {
-		exitErr("--parent is required")
+		execout.ExitErr("--parent is required")
 	}
 	err := host.JiraSetParent(context.Background(), key, parentKey)
-	exitOnErr(err)
-	printJSON(map[string]any{"ok": true, "key": key, "parent": parentKey})
+	execout.ExitOnErr(err)
+	execout.PrintJSON(map[string]any{"ok": true, "key": key, "parent": parentKey})
 }
 
 func ticketListChildren(host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: jira ticket list-children <key>")
+		execout.ExitErr("usage: jira ticket list-children <key>")
 	}
 	children, err := host.JiraGetChildIssues(context.Background(), args[0])
-	exitOnErr(err)
+	execout.ExitOnErr(err)
 	if children == nil {
 		children = []jiraclient.Issue{}
 	}
-	printJSON(children)
+	execout.PrintJSON(children)
 }
 
 func ticketSearch(host agenthost.Client, args []string) {
 	jql := flagVal(args, "--jql")
 	if jql == "" {
-		exitErr("--jql is required")
+		execout.ExitErr("--jql is required")
 	}
 
 	var fields []string
@@ -328,52 +327,52 @@ func ticketSearch(host agenthost.Client, args []string) {
 	if m := flagVal(args, "--max"); m != "" {
 		v, err := strconv.Atoi(m)
 		if err != nil {
-			exitErr("--max must be a number")
+			execout.ExitErr("--max must be a number")
 		}
 		if v <= 0 {
 			// The client coerces a non-positive cap to a default, so an
 			// unguarded `--max 0` would surprise by returning more than the
 			// no-flag default of 50. Reject it with a clear message instead.
-			exitErr("--max must be a positive number")
+			execout.ExitErr("--max must be a positive number")
 		}
 		maxResults = v
 	}
 
 	issues, err := host.JiraSearchIssues(context.Background(), jql, fields, maxResults)
-	exitOnErr(err)
+	execout.ExitOnErr(err)
 	if issues == nil {
 		issues = []jiraclient.Issue{}
 	}
-	printJSON(issues)
+	execout.PrintJSON(issues)
 }
 
 func ticketListPriorities(host agenthost.Client) {
 	priorities, err := host.JiraListPriorities(context.Background())
-	exitOnErr(err)
-	printJSON(priorities)
+	execout.ExitOnErr(err)
+	execout.PrintJSON(priorities)
 }
 
 func ticketSetPriority(host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: jira ticket set-priority <key> --priority <priority>")
+		execout.ExitErr("usage: jira ticket set-priority <key> --priority <priority>")
 	}
 	key := args[0]
 	priority := flagVal(args, "--priority")
 	if priority == "" {
-		exitErr("--priority is required")
+		execout.ExitErr("--priority is required")
 	}
 	err := host.JiraSetPriority(context.Background(), key, priority)
-	exitOnErr(err)
-	printJSON(map[string]any{"ok": true, "key": key, "priority": priority})
+	execout.ExitOnErr(err)
+	execout.PrintJSON(map[string]any{"ok": true, "key": key, "priority": priority})
 }
 
 func ticketListTypes(host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: jira ticket list-types <project>")
+		execout.ExitErr("usage: jira ticket list-types <project>")
 	}
 	types, err := host.JiraListIssueTypes(context.Background(), args[0])
-	exitOnErr(err)
-	printJSON(types)
+	execout.ExitOnErr(err)
+	execout.PrintJSON(types)
 }
 
 // --- helpers ---
@@ -427,22 +426,4 @@ func flagVals(args []string, flag string) ([]string, error) {
 		vals = append(vals, args[i+1])
 	}
 	return vals, nil
-}
-
-func printJSON(v any) {
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	enc.Encode(v)
-}
-
-func exitOnErr(err error) {
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-}
-
-func exitErr(msg string) {
-	fmt.Fprintln(os.Stderr, msg)
-	os.Exit(1)
 }

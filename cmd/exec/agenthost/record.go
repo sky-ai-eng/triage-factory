@@ -242,7 +242,7 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 			)
 		})
 		if deliverableErr != nil && act != nil {
-			recordSpanError(span, deliverableErr)
+			telemetry.RecordSpanError(span, deliverableErr)
 			recordWriteDrop(ctx, recordDropOp(a, nil), deliverableErr)
 			agenthostLog.Warn("deliverable recording failed; recording the action without it",
 				"conversation", info.ConversationID, "kind", a.Kind, "target", a.Target, "error", deliverableErr)
@@ -258,7 +258,7 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 		} else if act != nil {
 			target = act.Target
 		}
-		recordSpanError(span, err)
+		telemetry.RecordSpanError(span, err)
 		recordWriteDrop(ctx, recordDropOp(lost, act), err)
 		agenthostLog.Warn("external write recording failed (action already applied)",
 			"conversation", info.ConversationID, "kind", kind, "target", target, "error", err)

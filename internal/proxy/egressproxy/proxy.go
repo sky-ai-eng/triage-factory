@@ -86,6 +86,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/bindaddr"
 )
 
 var egressLog = logging.Component("egressproxy")
@@ -280,8 +281,8 @@ func (s *Server) Start(addr string) (string, error) {
 		addr = "127.0.0.1:0"
 	}
 	if !s.cfg.AllowNonLoopback {
-		if err := assertLoopback(addr); err != nil {
-			return "", err
+		if err := bindaddr.RequireLoopback(addr); err != nil {
+			return "", fmt.Errorf("egressproxy: %w", err)
 		}
 	}
 	ln, err := net.Listen("tcp", addr)
@@ -591,34 +592,4 @@ func (s *Server) callerAuthorized(r *http.Request) bool {
 	}
 	want := BasicUser + ":" + s.cfg.IncomingToken
 	return subtle.ConstantTimeCompare(decoded, []byte(want)) == 1
-}
-
-// assertLoopback enforces the loopback-only-by-default bind, same
-// contract as llmproxy: the veth-IP sandbox bind is the conscious
-// opt-out via AllowNonLoopback.
-func assertLoopback(addr string) error {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return fmt.Errorf("egressproxy: parse bind address %q: %w", addr, err)
-	}
-	if host == "" || host == "0.0.0.0" || host == "::" {
-		return fmt.Errorf("egressproxy: bind address %q binds to all interfaces — set AllowNonLoopback=true to confirm intent", addr)
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		if !ip.IsLoopback() {
-			return fmt.Errorf("egressproxy: bind address %q is not loopback — set AllowNonLoopback=true to confirm intent", addr)
-		}
-		return nil
-	}
-	addrs, err := net.LookupHost(host)
-	if err != nil {
-		return fmt.Errorf("egressproxy: resolve %q: %w", host, err)
-	}
-	for _, a := range addrs {
-		ip := net.ParseIP(a)
-		if ip == nil || !ip.IsLoopback() {
-			return fmt.Errorf("egressproxy: bind host %q resolves to %s (not loopback) — set AllowNonLoopback=true to confirm intent", host, a)
-		}
-	}
-	return nil
 }

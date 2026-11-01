@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/execout"
 )
 
 // listOutput is the JSON shape printed by `workspace list`. Two sections:
@@ -138,7 +139,7 @@ func listWorkspaces(host agenthost.Client) (listOutput, error) {
 func runList(host agenthost.Client, _ []string) {
 	out, err := listWorkspaces(host)
 	if err != nil {
-		exitErr(err.Error())
+		execout.ExitErr(err.Error())
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")

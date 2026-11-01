@@ -9,6 +9,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/execflags"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/execout"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
 )
 
@@ -20,7 +21,7 @@ var userHelp = map[string]string{
 
 func handleUser(host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: " + prog.Prefix() + " linear user <action> [args]")
+		execout.ExitErr("usage: " + prog.Prefix() + " linear user <action> [args]")
 	}
 	action := args[0]
 	rest := args[1:]
@@ -39,13 +40,13 @@ func handleUser(host agenthost.Client, args []string) {
 	switch action {
 	case "search":
 		query, err := parseUserSearchArgs(rest)
-		exitOnErr(err)
+		execout.ExitOnErr(err)
 		matches, err := host.LinearSearchUsers(context.Background(), query)
-		exitOnErr(err)
+		execout.ExitOnErr(err)
 		matches.Users = nonNil(matches.Users)
-		printJSON(matches)
+		execout.PrintJSON(matches)
 	default:
-		exitErr(unknownUserActionMessage(prog.Prefix(), action))
+		execout.ExitErr(unknownUserActionMessage(prog.Prefix(), action))
 	}
 }
 

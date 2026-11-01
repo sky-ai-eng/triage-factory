@@ -18,13 +18,12 @@ package memory
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
 	"strconv"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/execflags"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/execout"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
 )
 
@@ -78,7 +77,7 @@ func Handle(ctx context.Context, host agenthost.Client, args []string) {
 	case "load":
 		runLoad(ctx, host, args[1:])
 	default:
-		exitErr("unknown memory command: " + args[0])
+		execout.ExitErr("unknown memory command: " + args[0])
 	}
 }
 
@@ -143,13 +142,13 @@ func parseLoadArgs(args []string) (loadArgs, error) {
 func runLoad(ctx context.Context, host agenthost.Client, args []string) {
 	parsed, err := parseLoadArgs(args)
 	if err != nil {
-		exitErr(fmt.Sprintf("usage: %s memory load --source <github|jira|slack> --id <source_id> [--limit N]\n%s", prog.Prefix(), err))
+		execout.ExitErr(fmt.Sprintf("usage: %s memory load --source <github|jira|slack> --id <source_id> [--limit N]\n%s", prog.Prefix(), err))
 	}
 	res, err := host.MemoryLoad(ctx, parsed.source, parsed.sourceID, parsed.limit)
 	if err != nil {
-		exitErr(err.Error())
+		execout.ExitErr(err.Error())
 	}
-	printJSON(res)
+	execout.PrintJSON(res)
 }
 
 func printHelp() {
@@ -159,15 +158,4 @@ func printHelp() {
 // helpText renders the `memory` usage under the invoked prefix.
 func helpText(prefix string) string {
 	return fmt.Sprintf("Usage: %s memory <command> [args]\n\n%s\n", prefix, HelpText)
-}
-
-func printJSON(v any) {
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	_ = enc.Encode(v)
-}
-
-func exitErr(msg string) {
-	fmt.Fprintln(os.Stderr, msg)
-	os.Exit(1)
 }
