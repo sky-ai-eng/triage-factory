@@ -70,6 +70,17 @@ const SQLiteTxLockParam = "_txlock=immediate"
 // production DSN by TestDSN_TestMemoryMatchesProductionStorageParams.
 const TestDSNMemory = ":memory:?_pragma=foreign_keys(on)&" + SQLiteTxLockParam + "&" + SQLiteTimeFormatParam
 
+// TestDSNMemoryNoForeignKeys is TestDSNMemory with enforcement off, for the
+// migration tests that stage rows as an older schema held them — historical
+// data routinely does not satisfy constraints a later migration introduced,
+// and reproducing it is the whole point of those tests.
+//
+// foreign_keys(off) is spelled out rather than left to SQLite's default. The
+// default is off today, but "off" here is a requirement of these tests, not an
+// observation about the driver: a future default flip, or a driver that
+// enables it for you, would break them somewhere far from this line.
+const TestDSNMemoryNoForeignKeys = ":memory:?_pragma=foreign_keys(off)&" + SQLiteTxLockParam + "&" + SQLiteTimeFormatParam
+
 // OpenAt returns a connection to the SQLite database at the given path.
 // The directory must already exist.
 func OpenAt(dbPath string) (*sql.DB, error) {
