@@ -63,7 +63,7 @@ func (s *stagedInjectionStore) FlushPendingSystem(ctx context.Context, orgID, co
 	// The shared flush primitive, narrowed to this store's subtypes: one
 	// definition of "consume a conversation's pending rows" serves every
 	// producer.
-	flushed, err := flushPendingInput(ctx, s.q, orgID, conversationID, db.StagedInjectionSubtypes)
+	flushed, err := flushPendingInput(ctx, s.q, orgID, conversationID, domain.StagedInjectionSubtypes)
 	if err != nil {
 		return nil, err
 	}
@@ -92,13 +92,13 @@ func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id strin
 	// delivered = 0 guard keeps this from retiring an already-flushed row a
 	// racing resume just consumed.
 	args := []any{orgID, rowID}
-	for _, st := range db.StagedInjectionSubtypes {
+	for _, st := range domain.StagedInjectionSubtypes {
 		args = append(args, st)
 	}
 	_, err = s.q.ExecContext(ctx, `
 		UPDATE messages SET window_state = 'inactive'
 		WHERE org_id = ? AND id = ? AND delivered = 0
-		  AND subtype IN (`+strings.TrimRight(strings.Repeat("?, ", len(db.StagedInjectionSubtypes)), ", ")+`)
+		  AND subtype IN (`+strings.TrimRight(strings.Repeat("?, ", len(domain.StagedInjectionSubtypes)), ", ")+`)
 	`, args...)
 	return err
 }

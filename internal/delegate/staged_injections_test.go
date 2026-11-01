@@ -17,7 +17,7 @@ import (
 // note was composed from.
 func stageOne(t *testing.T, s *Spawner, orgID, conversationID, producer, body string) (delivered bool) {
 	t.Helper()
-	delivered, _, _ = s.stageOrDeliverInjection(orgID, conversationID, domain.MessageSubtypeInjectionSystemNote, producer, body, domain.NoteProvenance{})
+	delivered, _, _ = s.stageOrDeliverInjection(context.Background(), orgID, conversationID, domain.MessageSubtypeInjectionSystemNote, producer, body, domain.NoteProvenance{})
 	return delivered
 }
 

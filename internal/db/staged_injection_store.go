@@ -12,20 +12,15 @@ import (
 // one of the two a staged note is stored under.
 var ErrStagedInjectionSubtype = errors.New("a staged injection is an injection:event or an injection:system-note row")
 
-// RequireStagedInjectionSubtype refuses a subtype other than
-// domain.MessageSubtypeInjectionEvent or domain.MessageSubtypeInjectionSystemNote
-// with ErrStagedInjectionSubtype. Both dialects' AppendSystem call it before
-// touching the database.
+// RequireStagedInjectionSubtype refuses a subtype outside
+// domain.StagedInjectionSubtypes with ErrStagedInjectionSubtype. Both
+// dialects' AppendSystem call it before touching the database.
 func RequireStagedInjectionSubtype(subtype string) error {
 	if domain.IsStagedInjectionSubtype(subtype) {
 		return nil
 	}
 	return fmt.Errorf("%w, not %q", ErrStagedInjectionSubtype, subtype)
 }
-
-// StagedInjectionSubtypes is every subtype a staged injection is stored
-// under: the set FlushPendingSystem consumes and DeleteSystem withdraws from.
-var StagedInjectionSubtypes = []string{domain.MessageSubtypeInjectionEvent, domain.MessageSubtypeInjectionSystemNote}
 
 // StagedInjectionStore is the durable, producer-agnostic "stage for next
 // resume" queue, stored as undelivered messages rows (role='user',
@@ -49,7 +44,7 @@ type StagedInjectionStore interface {
 	// and CreatedAt come from the DB, not the caller's input. The injection's
 	// Body is the bare, already-rendered line — the flush wraps and
 	// bundles. Its Subtype is written as the row's subtype and must be one of
-	// StagedInjectionSubtypes; any other value is refused with
+	// domain.StagedInjectionSubtypes; any other value is refused with
 	// ErrStagedInjectionSubtype before anything is written.
 	//
 	// A failure to append is the one drop the queue can suffer, and it is

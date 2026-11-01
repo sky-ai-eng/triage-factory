@@ -47,7 +47,7 @@ import (
 //
 // delivered=false with staged=false is a drop: the live gate raced a closing
 // process and the durable append then failed (see stageInjection).
-func (s *Spawner) stageOrDeliverInjection(orgID, conversationID, subtype, producer, body string, prov domain.NoteProvenance) (delivered, staged bool, stagedID string) {
+func (s *Spawner) stageOrDeliverInjection(ctx context.Context, orgID, conversationID, subtype, producer, body string, prov domain.NoteProvenance) (delivered, staged bool, stagedID string) {
 	if body == "" {
 		return false, false, ""
 	}
@@ -55,7 +55,7 @@ func (s *Spawner) stageOrDeliverInjection(orgID, conversationID, subtype, produc
 		s.deliverInjectionLive(orgID, conversationID, domain.WrapSystemNote(body), producer, prov)
 		return true, false, ""
 	}
-	stagedID, staged = s.stageInjection(context.Background(), orgID, conversationID, subtype, producer, body, prov)
+	stagedID, staged = s.stageInjection(ctx, orgID, conversationID, subtype, producer, body, prov)
 	return false, staged, stagedID
 }
 

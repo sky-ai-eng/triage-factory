@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"slices"
 	"strings"
 	"time"
 )
@@ -87,10 +88,14 @@ type PRCoherenceTarget struct {
 	Active         bool
 }
 
+// StagedInjectionSubtypes is every subtype a staged injection may be stored
+// under: the set the store writes, flushes and withdraws.
+var StagedInjectionSubtypes = []string{MessageSubtypeInjectionEvent, MessageSubtypeInjectionSystemNote}
+
 // IsStagedInjectionSubtype reports whether subtype is one a staged injection
 // may be stored under.
 func IsStagedInjectionSubtype(subtype string) bool {
-	return subtype == MessageSubtypeInjectionEvent || subtype == MessageSubtypeInjectionSystemNote
+	return slices.Contains(StagedInjectionSubtypes, subtype)
 }
 
 // StagedInjectionProducer* tag a staged injection's origin. Free-text (no DB CHECK) so a

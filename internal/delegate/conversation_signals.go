@@ -263,7 +263,16 @@ func (s *Spawner) resolveLiveOwner(ctx context.Context, orgID, conversationID st
 		return "", false
 	}
 	conv, err := s.conversations.GetSystem(ctx, orgID, conversationID)
-	if err != nil || conv == nil || conv.ExecutorID == "" {
+	if err != nil || conv == nil {
+		return "", false
+	}
+	return s.liveOwnerOf(ctx, conv)
+}
+
+// liveOwnerOf is resolveLiveOwner for a caller that has already read the
+// conversation.
+func (s *Spawner) liveOwnerOf(ctx context.Context, conv *domain.Conversation) (executorID string, ok bool) {
+	if s.instances == nil || conv.ExecutorID == "" {
 		return "", false
 	}
 	inst, err := s.instances.Get(ctx, conv.ExecutorID)
@@ -479,10 +488,10 @@ func (s *Spawner) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conver
 		}
 		return s.keepStagedIfRead(ctx, orgID, conversationID, stagedID, nativeLoopWillRead)
 	}
-	if s.signalRemoteInject(ctx, orgID, conversationID, producer, body, prov, firing) {
+	if s.signalRemoteInject(ctx, orgID, conv, producer, body, prov, firing) {
 		return InjectDeliveredRemote
 	}
-	delivered, staged, stagedID := s.stageOrDeliverInjection(orgID, conversationID, domain.MessageSubtypeInjectionEvent, producer, body, prov)
+	delivered, staged, stagedID := s.stageOrDeliverInjection(ctx, orgID, conversationID, domain.MessageSubtypeInjectionEvent, producer, body, prov)
 	if delivered {
 		return InjectDeliveredLocal // race: getProc missed above, live by the time stageOrDeliverInjection ran
 	}
@@ -531,17 +540,18 @@ func (s *Spawner) keepStagedIfRead(ctx context.Context, orgID, conversationID, s
 // the live remote executor that owns it, as an `inject` conversation_signals
 // row. Reports false when there is no live remote owner or the signal could
 // not be written, and the caller falls back to the staged queue.
-func (s *Spawner) signalRemoteInject(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing AdditiveFiringRef) bool {
+func (s *Spawner) signalRemoteInject(ctx context.Context, orgID string, conv *domain.Conversation, producer, body string, prov domain.NoteProvenance, firing AdditiveFiringRef) bool {
 	s.mu.Lock()
 	conversationSignals := s.conversationSignals
 	s.mu.Unlock()
 	if conversationSignals == nil {
 		return false
 	}
-	executorID, ok := s.resolveLiveOwner(ctx, orgID, conversationID)
+	executorID, ok := s.liveOwnerOf(ctx, conv)
 	if !ok {
 		return false
 	}
+	conversationID := conv.ID
 	payload, err := json.Marshal(injectPayload{
 		Producer: producer, Body: body,
 		EventID: prov.EventID, EventType: prov.EventType,

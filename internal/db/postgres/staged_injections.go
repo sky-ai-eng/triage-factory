@@ -54,7 +54,7 @@ func (s *stagedInjectionStore) FlushPendingSystem(ctx context.Context, orgID, co
 	// definition of "consume a conversation's pending rows" serves every
 	// producer, so a note is delivered exactly once even under a resume race
 	// and withdrawn rows stay out by the same rule the claim predicate uses.
-	flushed, err := flushPendingInput(ctx, s.admin, orgID, conversationID, db.StagedInjectionSubtypes)
+	flushed, err := flushPendingInput(ctx, s.admin, orgID, conversationID, domain.StagedInjectionSubtypes)
 	if err != nil {
 		return nil, err
 	}
@@ -78,6 +78,6 @@ func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id strin
 	_, err = s.admin.ExecContext(ctx, `
 		UPDATE messages SET window_state = 'inactive'
 		WHERE org_id = $1::uuid AND id = $2 AND subtype = ANY($3::text[]) AND delivered = false
-	`, orgID, rowID, db.StagedInjectionSubtypes)
+	`, orgID, rowID, domain.StagedInjectionSubtypes)
 	return err
 }
