@@ -46,9 +46,52 @@ func NewHTTPError(statusCode int, body, msg string) *HTTPError {
 	return &HTTPError{
 		StatusCode: statusCode,
 		Body:       body,
-		Class:      upstream.ClassifyResponse(statusCode, nil, []byte(body)),
+		Class:      classifyResponse(statusCode, nil, []byte(body)),
 		msg:        msg,
 	}
+}
+
+// classifyResponse is upstream.ClassifyResponse, except that a redirect is
+// Rejected rather than OK: the client follows every redirect it can but the
+// ones refuseWriteToRead hands back, so a 3xx that reaches a caller is a
+// redirect it did not follow, in practice a write a gateway turned away.
+func classifyResponse(status int, header http.Header, body []byte) upstream.Class {
+	if status >= 300 && status < 400 {
+		return upstream.Rejected
+	}
+	return upstream.ClassifyResponse(status, header, body)
+}
+
+// succeeded reports whether the request core reads a response as a success:
+// a 2xx, or the 304 a conditional GET asks for (GetConditional). Any other
+// 3xx is a redirect the client did not follow, and fails.
+func succeeded(status int) bool {
+	return status < 300 || status == http.StatusNotModified
+}
+
+// maxRedirects is net/http's own limit, kept for the redirects
+// refuseWriteToRead follows.
+const maxRedirects = 10
+
+// refuseWriteToRead stops a redirect that would turn a write into a read.
+// net/http answers a 301, 302 or 303 to a POST, PUT, PATCH or DELETE by
+// sending a GET to the new location, so a gateway that redirects a write (an
+// SSO proxy in front of GHES sending it to a login page) would come back as a
+// 2xx from a page that never saw the write, and a write that discards its
+// response body (DeleteBranchRef, ClosePR, DeleteComment) would report a
+// change that did not happen. Refusing hands back the redirect itself, which
+// every caller of the request core treats as a failed status. A read is
+// followed (DownloadArtifact depends on it), and so is a 307 or 308, which
+// resends the write's method and body: GitHub's own answer to a write on a
+// renamed repository.
+func refuseWriteToRead(req *http.Request, via []*http.Request) error {
+	if req.Method != via[0].Method {
+		return http.ErrUseLastResponse
+	}
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("stopped after %d redirects", maxRedirects)
+	}
+	return nil
 }
 
 // IsHTTP406 reports whether err is an HTTP 406 Not Acceptable response.
@@ -75,7 +118,7 @@ func newStatusError(what string, resp *http.Response, body []byte) *HTTPError {
 	return &HTTPError{
 		StatusCode: resp.StatusCode,
 		Body:       string(body),
-		Class:      upstream.ClassifyResponse(resp.StatusCode, resp.Header, body),
+		Class:      classifyResponse(resp.StatusCode, resp.Header, body),
 		msg:        fmt.Sprintf("%s returned %d: %s", what, resp.StatusCode, upstream.Excerpt(body)),
 	}
 }
@@ -203,7 +246,8 @@ func NewProxyClient(proxyURL, placeholder string) *Client {
 //
 // Tracing follows the same ownership: a supplied client replaces the
 // instrumented one NewClient built, so a caller that wants spans wraps its
-// own Transport with telemetry.TracedTransport.
+// own Transport with telemetry.TracedTransport. The redirect policy does not:
+// the request core sends with refuseWriteToRead whatever hc's CheckRedirect.
 func NewClientWithHTTPClient(baseURL, pat string, hc *http.Client) *Client {
 	c := NewClient(baseURL, pat)
 	if hc != nil {
@@ -250,7 +294,9 @@ func (c *Client) newRequest(ctx context.Context, method, fullURL string, body an
 // poller/shutdown abort — additive to the 30s client timeout), returns the
 // body doWithRetry read, and returns a typed *HTTPError on any non-2xx so
 // every caller can status-discriminate via errors.As and read the body from
-// HTTPError.Body.
+// HTTPError.Body. A 3xx is one of those: it is a redirect the client did not
+// follow (refuseWriteToRead hands back a write's), so the request it answers
+// did not reach anything that acted on it.
 //
 // GET requests go through doIdempotent (rate-limit pre-flight + retry);
 // every other method is a mutation and goes through doMutation (single
@@ -272,13 +318,7 @@ func (c *Client) request(ctx context.Context, method, path string, body any, acc
 	if err != nil {
 		return nil, fmt.Errorf("request %s: %w", path, err)
 	}
-	// TODO(TFAC-1294): a write a gateway redirects with a 301, 302 or 303 is
-	// followed as a GET and arrives here as that page's 2xx, so a write that
-	// discards its body (DeleteComment, DeleteBranchRef, ClosePR, ...) reports
-	// a change that never happened. Fixing it needs a CheckRedirect that hands
-	// such a redirect back, and this check (and the GraphQL path's) failing
-	// the 3xx it passes.
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode >= 300 {
 		return nil, newStatusError(method+" "+path, resp, data)
 	}
 	return data, nil
@@ -359,7 +399,7 @@ func (c *Client) GetConditional(ctx context.Context, path, etag string) (body []
 	if resp.StatusCode == http.StatusNotModified {
 		return nil, "", true, nil
 	}
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode >= 300 {
 		return nil, "", false, newStatusError("GET "+path, resp, data)
 	}
 	return data, resp.Header.Get("ETag"), false, nil
@@ -406,10 +446,10 @@ func (c *Client) Delete(ctx context.Context, path string) ([]byte, error) {
 // because http.Client's fields are value types or interfaces that we don't
 // mutate.
 //
-// Redirects are followed automatically by the inherited transport; Go's
-// stdlib strips the Authorization header on cross-origin redirects, which
-// is the right behavior here — the signed S3 URL would reject our Bearer
-// token anyway.
+// Redirects are followed automatically: the request core's redirect policy
+// (refuseWriteToRead) follows every redirect of a GET. Go's stdlib strips
+// the Authorization header on cross-origin redirects, which is the right
+// behavior here — the signed S3 URL would reject our Bearer token anyway.
 //
 // A body that breaks off partway is not retried, because what was read is
 // already in dst; the error wraps a *upstream.TransportError, so it classifies
@@ -423,7 +463,7 @@ func (c *Client) DownloadArtifact(ctx context.Context, path string, dst io.Write
 	}
 
 	// Shallow copy so the long-download timeout doesn't bleed into other
-	// API calls that share the same client. Inherits Transport/Jar/CheckRedirect.
+	// API calls that share the same client. Inherits Transport/Jar.
 	client := *c.http
 	client.Timeout = downloadTimeout
 	resp, errBody, err := c.doStream(ctx, &client, build)
@@ -432,7 +472,7 @@ func (c *Client) DownloadArtifact(ctx context.Context, path string, dst io.Write
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode >= 300 {
 		// Wrap in *HTTPError so callers can errors.As to discriminate
 		// status codes (e.g., the download-logs fallback path needs to
 		// detect 404 specifically — GitHub returns it for runs that
@@ -511,8 +551,8 @@ func (e gqlErrors) first(context string) error {
 }
 
 // PostGraphQL sends a GraphQL query document, with its variables, to GitHub's
-// GraphQL API. ctx cancels the request. Only a transport-level (>= 400)
-// non-2xx returns a *HTTPError; the load-bearing 200-carrying-errors[]
+// GraphQL API. ctx cancels the request. Only a transport-level non-2xx
+// returns a *HTTPError; the load-bearing 200-carrying-errors[]
 // partial-vs-total-failure path below is preserved exactly — a usable `data`
 // block degrades to the partial result, an absent/null `data` is a genuine
 // failure.
@@ -602,7 +642,7 @@ func (c *Client) postGraphQL(ctx context.Context, body any, idempotent bool) ([]
 	if err != nil {
 		return nil, fmt.Errorf("graphql request: %w", err)
 	}
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode >= 300 {
 		return nil, newStatusError("GraphQL", resp, data)
 	}
 
