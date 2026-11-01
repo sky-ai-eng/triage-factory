@@ -252,7 +252,7 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 	if a != nil {
 		span.SetAttributes(telemetry.Op(a.Kind))
 		if kerr := keyFunnelDeliverable(a); kerr != nil {
-			recordSpanError(span, kerr)
+			telemetry.RecordSpanError(span, kerr)
 			recordWriteDrop(ctx, recordDropOp(a, nil), kerr)
 			agenthostLog.Warn("refusing a deliverable that is not a pull request create's; recording the action without it",
 				"conversation", info.ConversationID, "kind", a.Kind, "target", a.Target)
