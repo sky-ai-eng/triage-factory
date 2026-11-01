@@ -255,8 +255,11 @@ answer alone; the tenth records the read's head and time with no answer, so
 the PR waits for its sweep. A read GitHub refuses for a rate limit waits for
 the limit to reset, and the credential's other PRs wait with it without a
 request. A probe whose reads keep failing for another reason is given up after
-its fifth attempt with nothing written, and the next poll admits the PR again,
-since each admission reason is decided from the stored answer every cycle. The
+its fifth attempt with nothing written, and one whose repository no credential
+the org holds can read (a repository outside the App's grant, say) is given up
+on its first; the next poll admits the PR again, since each admission reason is
+decided from the stored answer every cycle. A probe parks only after ten
+attempts, which takes repeated crashes or failures in the worker itself. The
 events carry no source time.
 
 #### PR Unreachable

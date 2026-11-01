@@ -284,6 +284,17 @@ const (
 	PRMergeabilityMaxUnknownReads   = 10
 )
 
+// PRMergeabilityMaxFailedReads is the attempt on which the probe worker gives
+// up a probe whose read failed for a reason outside it, completing it with
+// nothing written so the next poll admits the pull request again. It is half
+// the kind's MaxAttempts on purpose: a claim parks a probe whose lease
+// expired on its last attempt, so the attempts between the two are the room
+// a probe whose lease ran out (a crash mid-read, a terminal write that did not
+// land) has to be read again and dropped instead. Only a probe that keeps
+// losing its lease, or keeps failing in the worker, reaches MaxAttempts and
+// parks.
+const PRMergeabilityMaxFailedReads = 5
+
 // PRMergeabilityProbes is the queue of pull requests whose mergeability is due
 // to be read, as a work kind: one row per (pull request, admission) whose
 // read has not completed. The probe worker is its only consumer and the only
@@ -303,8 +314,10 @@ const (
 // The claim filter holds a row back until its probe_after; next_attempt_at
 // stays the package's, for backoff after a failed read.
 //
-// Timing and budget are the re-evaluation queue's: a unit is one GraphQL
-// read for a batch of pull requests and one small transaction per answer.
+// Timing is the re-evaluation queue's: a unit is one GraphQL read for a batch
+// of pull requests and one small transaction per answer. The budget is twice
+// PRMergeabilityMaxFailedReads, so the probe worker's give-up comes before
+// the claim's park (see PRMergeabilityMaxFailedReads).
 // Fairness interleaves at batch granularity; the worker claims per org.
 // Frozen is empty: the kind's columns are immutable after admission, so the
 // store reads them by id after the claim.
@@ -313,7 +326,7 @@ func PRMergeabilityProbes(d workitem.Dialect) workitem.Kind {
 		Table:   "pr_mergeability_probes",
 		Dialect: d,
 		Policy: workitem.Policy{
-			MaxAttempts:  5,
+			MaxAttempts:  2 * PRMergeabilityMaxFailedReads,
 			Lease:        60 * time.Second,
 			RenewEvery:   20 * time.Second,
 			UnitDeadline: 30 * time.Second,

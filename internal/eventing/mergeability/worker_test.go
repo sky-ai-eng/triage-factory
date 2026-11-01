@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -287,12 +288,30 @@ func TestWorker_AnUnresolvableClientFailsTheProbeAsDependencyDown(t *testing.T) 
 	r := newRig(t)
 	pr := r.pullRequest("4")
 	r.admit(pr.ID, domain.MergeabilityProbeNew)
-	r.resolver.err = errors.New("no credential")
+	r.resolver.err = errors.New("the secret store is unreachable")
 	r.drain(domain.MergeableConflicting)
 
 	probes := r.probes(pr.ID)
 	if len(probes) != 1 || probes[0].status != workitem.StatusReady || probes[0].outcome != string(workitem.OutcomeDependencyDown) {
 		t.Errorf("probes = %+v, want the one probe back to ready as dependency_down", probes)
+	}
+	if n := r.readCount(); n != 0 {
+		t.Errorf("GitHub was read %d times without a client", n)
+	}
+}
+
+// A repository no credential reaches stays that way until someone changes
+// the configuration, so its probes are dropped on the first try rather than
+// retried, and the next poll admits them again.
+func TestWorker_AProbeWhoseRepositoryNoCredentialReachesIsDroppedAtOnce(t *testing.T) {
+	r := newRig(t)
+	pr := r.pullRequest("5")
+	r.admit(pr.ID, domain.MergeabilityProbeNew)
+	r.resolver.err = fmt.Errorf("%w: octo/api not in the app installation grant", ghclient.ErrNoGitHubCredentials)
+	r.drain(domain.MergeableConflicting)
+
+	if probes := r.probes(pr.ID); len(probes) != 1 || probes[0].status != workitem.StatusDone || probes[0].attempt != 1 {
+		t.Errorf("probes = %+v, want the one probe done on its first attempt", probes)
 	}
 	if n := r.readCount(); n != 0 {
 		t.Errorf("GitHub was read %d times without a client", n)
@@ -411,17 +430,25 @@ func TestWorker_APanicCompletingOneProbeLeavesTheRestOfTheBatchCompleted(t *test
 	}
 }
 
+// ripenRetries stands in for the backoff after a failed attempt.
+func (r *rig) ripenRetries() {
+	r.t.Helper()
+	if _, err := r.database.Exec(`UPDATE pr_mergeability_probes SET next_attempt_at = strftime('%Y-%m-%d %H:%M:%f','now','-1 seconds') WHERE status = 'ready'`); err != nil {
+		r.t.Fatalf("ripen retry: %v", err)
+	}
+}
+
 func TestWorker_AProbeWhoseReadsKeepFailingIsDroppedNotParked(t *testing.T) {
 	r := newRig(t)
 	pr := r.pullRequest("9")
 	r.admit(pr.ID, domain.MergeabilityProbeNew)
-	r.resolver.err = errors.New("no credential")
-	for i := 0; i < probeKind.Policy.MaxAttempts; i++ {
-		// Each failed attempt backs off; the test stands in for the wait.
-		if _, err := r.database.Exec(`UPDATE pr_mergeability_probes SET next_attempt_at = strftime('%Y-%m-%d %H:%M:%f','now','-1 seconds') WHERE status = 'ready'`); err != nil {
-			t.Fatalf("ripen retry: %v", err)
-		}
+	r.resolver.err = errors.New("the secret store is unreachable")
+	for i := 1; i <= workkinds.PRMergeabilityMaxFailedReads; i++ {
+		r.ripenRetries()
 		r.drain(domain.MergeableConflicting)
+		if p := r.probes(pr.ID); i < workkinds.PRMergeabilityMaxFailedReads && (len(p) != 1 || p[0].status != workitem.StatusReady) {
+			t.Fatalf("after failed attempt %d: probes = %+v, want the probe back to ready", i, p)
+		}
 	}
 	probes := r.probes(pr.ID)
 	if len(probes) != 1 || probes[0].status != workitem.StatusDone {
@@ -434,5 +461,35 @@ func TestWorker_AProbeWhoseReadsKeepFailingIsDroppedNotParked(t *testing.T) {
 	r.resolver.err = nil
 	if evts := r.drain(domain.MergeableConflicting); len(evts) != 1 || evts[0].EventType != domain.EventGitHubPRConflicts {
 		t.Errorf("published %v after the dependency recovered, want one github:pr:conflicts", types(evts))
+	}
+}
+
+// A probe whose lease ran out on its last read, with no terminal write (its
+// holder died mid-read, say), is claimed again rather than parked, and its
+// next failed read drops it.
+func TestWorker_AProbeWhoseLeaseLapsedOnItsLastReadIsDroppedNotParked(t *testing.T) {
+	r := newRig(t)
+	pr := r.pullRequest("13")
+	r.admit(pr.ID, domain.MergeabilityProbeNew)
+	r.resolver.err = errors.New("the secret store is unreachable")
+	for i := 1; i < workkinds.PRMergeabilityMaxFailedReads; i++ {
+		r.ripenRetries()
+		r.drain(domain.MergeableConflicting)
+	}
+
+	// The last read's holder claims it and dies before writing anything.
+	r.ripenRetries()
+	ctx := context.Background()
+	claim, err := r.stores.PRMergeability.Claim(ctx, workitem.Owner{ID: "dead-worker", Epoch: 1}, runmode.LocalDefaultOrgID, 10)
+	if err != nil || len(claim.Items) != 1 || claim.Items[0].Receipt.Attempt != workkinds.PRMergeabilityMaxFailedReads {
+		t.Fatalf("claim = %+v, %v; want the probe on its last read", claim, err)
+	}
+	if _, err := r.database.Exec(`UPDATE pr_mergeability_probes SET lease_expires_at = strftime('%Y-%m-%d %H:%M:%f','now','-1 seconds') WHERE status = 'leased'`); err != nil {
+		t.Fatalf("expire lease: %v", err)
+	}
+
+	r.drain(domain.MergeableConflicting)
+	if p := r.probes(pr.ID); len(p) != 1 || p[0].status != workitem.StatusDone || p[0].attempt != workkinds.PRMergeabilityMaxFailedReads+1 {
+		t.Errorf("probes = %+v, want the probe reclaimed and dropped, not parked", p)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"time"
 
@@ -214,13 +215,30 @@ func (w *Worker) probe(ctx context.Context, orgID string, items []db.ClaimedPRMe
 	for _, id := range sortedKeys(byRepo) {
 		b := byRepo[id]
 		client, err := w.resolve(ctx, orgID, b)
-		if err != nil {
+		switch {
+		case err == nil:
+		case errors.Is(err, errResolvePanic):
 			log.WarnContext(ctx, "mergeability probes: no GitHub client for the repository", "repository_id", b.repositoryID, "error", err)
-			if errors.Is(err, errResolvePanic) {
-				w.requeueAll(ctx, b.items, workitem.OutcomePoisonSuspected, err)
-			} else {
-				w.failReads(ctx, b.items, workitem.OutcomeDependencyDown, err)
+			w.requeueAll(ctx, b.items, workitem.OutcomePoisonSuspected, err)
+			continue
+		case errors.Is(err, ghclient.ErrNoGitHubCredentials):
+			// No credential the org holds reaches the repository: a
+			// repository outside the App's grant, say, which the org's
+			// GitHub access settings report as scope drift. That holds until
+			// someone changes the configuration, so retrying cannot help;
+			// the probes drop now, and the poll admits them again each cycle
+			// until it is fixed.
+			log.InfoContext(ctx, "mergeability probes: no credential reaches the repository; its probes are dropped",
+				"repository_id", b.repositoryID, "probes", len(b.items), "error", err)
+			for _, item := range b.items {
+				termCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), terminalWriteTimeout)
+				w.drop(termCtx, item, dropNoCredential, err)
+				cancel()
 			}
+			continue
+		default:
+			log.WarnContext(ctx, "mergeability probes: no GitHub client for the repository", "repository_id", b.repositoryID, "error", err)
+			w.failReads(ctx, b.items, workitem.OutcomeDependencyDown, err)
 			continue
 		}
 		g, ok := byCredential[client.Credential()]
@@ -448,10 +466,11 @@ func (w *Worker) deferAll(ctx context.Context, items []db.ClaimedPRMergeabilityP
 
 // failReads disposes of probes whose read failed, or could not be sent, for
 // a reason outside them: the client could not be resolved, GitHub failed the
-// query, or it ran out its deadline. A probe with attempts left retries with
-// backoff. One on its last attempt is completed with nothing written instead
-// of parked, so its pull request's key is free and the poll's next cycle
-// admits it again: every admission reason but the UNKNOWN retry is derived
+// query, or it ran out its deadline. A probe below
+// workkinds.PRMergeabilityMaxFailedReads attempts retries with backoff. One
+// at it, or past it after a lost lease, is completed with nothing written
+// instead of parked, so its pull request's key is free and the poll's next
+// cycle admits it again: every admission reason but the UNKNOWN retry is derived
 // from the stored row on every cycle, so a parked probe would hold nothing an
 // admin could act on that the next cycle does not redo, and an outage would
 // stop the pull request's conflict detection for good rather than delay it.
@@ -461,8 +480,8 @@ func (w *Worker) deferAll(ctx context.Context, items []db.ClaimedPRMergeabilityP
 func (w *Worker) failReads(ctx context.Context, items []db.ClaimedPRMergeabilityProbe, outcome workitem.Outcome, cause error) {
 	for _, item := range items {
 		termCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), terminalWriteTimeout)
-		if item.Receipt.Attempt >= probeKind.Policy.MaxAttempts {
-			w.drop(termCtx, item, outcome, cause)
+		if item.Receipt.Attempt >= workkinds.PRMergeabilityMaxFailedReads {
+			w.drop(termCtx, item, string(outcome), cause)
 		} else {
 			w.requeue(termCtx, item, outcome, cause)
 		}
@@ -470,15 +489,27 @@ func (w *Worker) failReads(ctx context.Context, items []db.ClaimedPRMergeability
 	}
 }
 
-// drop completes a probe whose last attempt failed, writing nothing: the
-// store's completion with no answer.
-func (w *Worker) drop(ctx context.Context, item db.ClaimedPRMergeabilityProbe, outcome workitem.Outcome, cause error) {
+// dropNoCredential is the drop outcome of a probe whose repository no
+// credential the org holds can read. The others are the read's
+// workitem.Outcome.
+const dropNoCredential = "no_credential"
+
+// drop completes a probe that will not be read, writing nothing: the store's
+// completion with no answer. outcome is why, as the dropped counter labels
+// it.
+func (w *Worker) drop(ctx context.Context, item db.ClaimedPRMergeabilityProbe, outcome string, cause error) {
 	_, err := w.store.CompleteProbe(ctx, item.Receipt, db.PRMergeabilityAnswer{}, "")
 	switch {
 	case err == nil:
-		recordDrop(string(outcome))
-		log.WarnContext(ctx, "mergeability probes: dropped a probe whose last read failed; the poll queues the pull request again",
-			"probe_id", item.Receipt.ItemID, "entity_id", item.EntityID, "outcome", string(outcome), "cause", cause)
+		recordDrop(outcome)
+		// A drop for no credential was logged once for its repository; a
+		// drop after failed reads ends an outage the probe could not outlast.
+		level := slog.LevelWarn
+		if outcome == dropNoCredential {
+			level = slog.LevelDebug
+		}
+		log.Log(ctx, level, "mergeability probes: dropped a probe; the poll queues the pull request again",
+			"probe_id", item.Receipt.ItemID, "entity_id", item.EntityID, "outcome", outcome, "cause", cause)
 	case errors.Is(err, workitem.ErrLeaseLost), errors.Is(err, workitem.ErrCancelled):
 		log.InfoContext(ctx, "mergeability probes: probe not held at drop", "probe_id", item.Receipt.ItemID, "entity_id", item.EntityID, "error", err)
 	default:
