@@ -1,4 +1,7 @@
-package server
+// Package blueprints serves the blueprints API: blueprint CRUD, the step list
+// and its restructuring verbs (merge, split, reconnect, duplicate), and the
+// blueprint-run reads and cancel.
+package blueprints
 
 import (
 	"errors"
@@ -21,13 +24,19 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 )
 
-// blueprintsHandler serves the blueprint + blueprint-run endpoints. spawner is
-// read through a getter so the handler always sees the current delegation
-// spawner, which is wired onto the server after construction.
-type blueprintsHandler struct {
+// Handler serves the blueprint + blueprint-run endpoints. spawner is read
+// through a getter so the handler always sees the current delegation spawner,
+// which is wired onto the server after construction.
+type Handler struct {
 	tx      db.TxRunner
 	az      *authz.Checker
 	spawner func() *delegate.Spawner
+}
+
+// New builds the blueprints handler. spawner is read on every run cancel, not
+// once here; see Handler.
+func New(tx db.TxRunner, az *authz.Checker, spawner func() *delegate.Spawner) *Handler {
+	return &Handler{tx: tx, az: az, spawner: spawner}
 }
 
 const maxBlueprintSteps = 50
@@ -41,20 +50,20 @@ const maxBlueprintSteps = 50
 // same shape the prompt-delete gate uses. The same-team guards inside the
 // restructure handlers (merge/reconnect refuse cross-team) mean gating on the
 // host/path blueprint's team is sufficient for those.
-func (bh *blueprintsHandler) gateBlueprintWrite(w http.ResponseWriter, r *http.Request, orgID, userID, id string) bool {
+func (h *Handler) gateBlueprintWrite(w http.ResponseWriter, r *http.Request, orgID, userID, id string) bool {
 	var bp *domain.Blueprint
-	if err := bh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		bp, e = tx.Blueprints.Get(r.Context(), orgID, id)
 		return e
 	}); err != nil {
-		internalError(w, "blueprints", err)
+		httpx.InternalError(w, "blueprints", err)
 		return false
 	}
 	if bp == nil {
 		return true // let the handler's own nil-check render the 404
 	}
-	return bh.az.RequireTeamWrite(w, r, orgID, userID, bp.TeamID)
+	return h.az.RequireTeamWrite(w, r, orgID, userID, bp.TeamID)
 }
 
 // --- Blueprint header CRUD -----------------------------------------------
@@ -73,19 +82,19 @@ type blueprintListFilterKey struct {
 }
 
 // POST /api/blueprints/list
-func (bh *blueprintsHandler) handleBlueprintsList(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (h *Handler) handleBlueprintsList(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
+	userID := httpx.ClaimsFrom(r.Context()).Subject
 
 	var req blueprintListRequest
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	var v httpx.Validation
-	teamIDFilterField(&v, req.TeamID)
+	httpx.TeamIDFilterField(&v, req.TeamID)
 	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(blueprintListFilterKey{TeamID: req.TeamID}), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
@@ -102,12 +111,12 @@ func (bh *blueprintsHandler) handleBlueprintsList(w http.ResponseWriter, r *http
 		blueprints []domain.Blueprint
 		total      int
 	)
-	if err := bh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		blueprints, total, e = tx.Blueprints.List(r.Context(), orgID, filter, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
 	}); err != nil {
-		internalError(w, "blueprints", err)
+		httpx.InternalError(w, "blueprints", err)
 		return
 	}
 	httpx.WriteList(w, page, blueprints, total)
@@ -120,31 +129,31 @@ func (bh *blueprintsHandler) handleBlueprintsList(w http.ResponseWriter, r *http
 // resolve its name rather than meet a 404 that reads as deletion.
 //
 // GET /api/blueprints/{id}
-func (bh *blueprintsHandler) handleBlueprintGet(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (h *Handler) handleBlueprintGet(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
-	id, ok := uuidPathOr404(w, r, "id", "blueprint")
+	userID := httpx.ClaimsFrom(r.Context()).Subject
+	id, ok := httpx.UUIDPathOr404(w, r, "id", "blueprint")
 	if !ok {
 		return
 	}
 
 	var blueprint *domain.Blueprint
-	if err := bh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		blueprint, e = tx.Blueprints.Get(r.Context(), orgID, id)
 		return e
 	}); err != nil {
-		internalError(w, "blueprints", err)
+		httpx.InternalError(w, "blueprints", err)
 		return
 	}
 	if blueprint == nil {
-		notFound(w, "blueprint")
+		httpx.NotFound(w, "blueprint")
 		return
 	}
-	writeJSON(w, http.StatusOK, blueprint)
+	httpx.WriteJSON(w, http.StatusOK, blueprint)
 }
 
 // firstPromptInput is the optional inline prompt the canvas's "New Prompt"
@@ -160,7 +169,7 @@ type firstPromptInput struct {
 
 type createBlueprintRequest struct {
 	Name string `json:"name"`
-	// TeamID is the acting team the write picker supplied (see resolveActingTeam).
+	// TeamID is the acting team the write picker supplied (see teamscope.ResolveActing).
 	TeamID string `json:"team_id"`
 	// FirstPrompt, when set, auto-wraps a new prompt as this blueprint's sole
 	// step in one transaction. Optional — bare-blueprint callers omit it.
@@ -174,8 +183,8 @@ type blueprintCreateResponse struct {
 	FirstPromptID string `json:"first_prompt_id,omitempty"`
 }
 
-func (bh *blueprintsHandler) handleBlueprintCreate(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (h *Handler) handleBlueprintCreate(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
@@ -186,7 +195,7 @@ func (bh *blueprintsHandler) handleBlueprintCreate(w http.ResponseWriter, r *htt
 
 	// With first_prompt the blueprint name defaults to the prompt's name; the
 	// prompt itself must carry a name + body (it's the step's mission).
-	// Name defaulting happens here (before resolveActingTeam inside the tx)
+	// Name defaulting happens here (before teamscope.ResolveActing inside the tx)
 	// because it is a pure string assignment independent of team resolution.
 	if req.FirstPrompt != nil {
 		if req.FirstPrompt.Name == "" {
@@ -210,18 +219,18 @@ func (bh *blueprintsHandler) handleBlueprintCreate(w http.ResponseWriter, r *htt
 	}
 
 	id := uuid.New().String()
-	userID := ClaimsFrom(r.Context()).Subject
+	userID := httpx.ClaimsFrom(r.Context()).Subject
 
 	// Reject viewers before authoring a blueprint (TFAC-447): resolve the acting
 	// team read-only (no last-acting stamp — we may 403) and gate. The main tx
 	// re-resolves (and stamps) only for callers that pass.
-	if !bh.az.RequireActingTeamWrite(w, r, orgID, userID, req.TeamID, "blueprints") {
+	if !h.az.RequireActingTeamWrite(w, r, orgID, userID, req.TeamID, "blueprints") {
 		return
 	}
 
 	var created *domain.Blueprint
 	var firstPromptID string
-	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		if e != nil {
 			return e
@@ -262,10 +271,10 @@ func (bh *blueprintsHandler) handleBlueprintCreate(w http.ResponseWriter, r *htt
 		if teamscope.WriteIfSelectionError(w, err) {
 			return
 		}
-		internalError(w, "blueprints", err)
+		httpx.InternalError(w, "blueprints", err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, blueprintCreateResponse{Blueprint: created, FirstPromptID: firstPromptID})
+	httpx.WriteJSON(w, http.StatusCreated, blueprintCreateResponse{Blueprint: created, FirstPromptID: firstPromptID})
 }
 
 type renameBlueprintRequest struct {
@@ -275,13 +284,13 @@ type renameBlueprintRequest struct {
 // handleBlueprintUpdate renames a blueprint header. A blueprint's name is
 // independent of its entry prompt's (auto-wrap defaults them equal, but the box
 // chrome lets a user rename the blueprint without touching the prompt).
-func (bh *blueprintsHandler) handleBlueprintUpdate(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (h *Handler) handleBlueprintUpdate(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
-	id, ok := uuidPathOr404(w, r, "id", "blueprint")
+	userID := httpx.ClaimsFrom(r.Context()).Subject
+	id, ok := httpx.UUIDPathOr404(w, r, "id", "blueprint")
 	if !ok {
 		return
 	}
@@ -297,12 +306,12 @@ func (bh *blueprintsHandler) handleBlueprintUpdate(w http.ResponseWriter, r *htt
 	}
 
 	// Viewers can't rename a blueprint (TFAC-447).
-	if !bh.gateBlueprintWrite(w, r, orgID, userID, id) {
+	if !h.gateBlueprintWrite(w, r, orgID, userID, id) {
 		return
 	}
 
 	var updated domain.Blueprint
-	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		updated, e = tx.Blueprints.Rename(r.Context(), orgID, id, name)
 		return e
@@ -310,13 +319,13 @@ func (bh *blueprintsHandler) handleBlueprintUpdate(w http.ResponseWriter, r *htt
 		// The rename itself reports a missing or soft-deleted row now, so the
 		// probe read this handler used to bracket the write with is gone.
 		if errors.Is(err, db.ErrNoSuchBlueprint) {
-			notFound(w, "blueprint")
+			httpx.NotFound(w, "blueprint")
 			return
 		}
-		internalError(w, "blueprints", err)
+		httpx.InternalError(w, "blueprints", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, updated)
+	httpx.WriteJSON(w, http.StatusOK, updated)
 }
 
 // handleBlueprintDelete soft-deletes a whole blueprint and cascades, in one
@@ -334,8 +343,8 @@ func (bh *blueprintsHandler) handleBlueprintUpdate(w http.ResponseWriter, r *htt
 //     presence. We resolve the steps and soft-delete each via the shared
 //     source-dispatch — the other half of the prompt-delete sole-owner pairing.
 //   - The bound trigger is detached: every handler ListForBlueprint resolves is
-//     deleted via EventHandlers.Delete, matching handleEventHandlerDelete and
-//     the prompt head-delete path — a system_slug (shipped) trigger
+//     deleted via EventHandlers.Delete, matching DELETE /api/event-handlers/{id}
+//     and the prompt head-delete path — a system_slug (shipped) trigger
 //     soft-deletes so the shipped-content sync never resurrects it, a
 //     user-created trigger hard-deletes. The blueprint header stays present
 //     (soft-deleted, not gone), so the trigger's (blueprint_id, org_id) /
@@ -343,24 +352,24 @@ func (bh *blueprintsHandler) handleBlueprintUpdate(w http.ResponseWriter, r *htt
 //
 // 404 by re-read (Get filters soft-deleted) when the blueprint is missing or
 // already deleted.
-func (bh *blueprintsHandler) handleBlueprintDelete(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (h *Handler) handleBlueprintDelete(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
-	id, ok := uuidPathOr404(w, r, "id", "blueprint")
+	userID := httpx.ClaimsFrom(r.Context()).Subject
+	id, ok := httpx.UUIDPathOr404(w, r, "id", "blueprint")
 	if !ok {
 		return
 	}
 
 	// Viewers can't delete a blueprint (TFAC-447).
-	if !bh.gateBlueprintWrite(w, r, orgID, userID, id) {
+	if !h.gateBlueprintWrite(w, r, orgID, userID, id) {
 		return
 	}
 
 	var found bool
-	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		existing, e := tx.Blueprints.Get(r.Context(), orgID, id)
 		if e != nil || existing == nil {
 			return e
@@ -405,14 +414,14 @@ func (bh *blueprintsHandler) handleBlueprintDelete(w http.ResponseWriter, r *htt
 		// Retire the header last (audit row + steps stay; deleted_at stamped).
 		return tx.Blueprints.Delete(r.Context(), orgID, id)
 	}); err != nil {
-		internalError(w, "blueprints", err)
+		httpx.InternalError(w, "blueprints", err)
 		return
 	}
 	if !found {
-		notFound(w, "blueprint")
+		httpx.NotFound(w, "blueprint")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 // --- Blueprint steps -----------------------------------------------------
@@ -449,19 +458,19 @@ const maxBlueprintStepIDs = 200
 // and, with blueprint_ids, the per-blueprint read.
 //
 // POST /api/blueprint-steps/list
-func (bh *blueprintsHandler) handleBlueprintStepsAll(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (h *Handler) handleBlueprintStepsAll(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
+	userID := httpx.ClaimsFrom(r.Context()).Subject
 
 	var req blueprintStepListRequest
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	var v httpx.Validation
-	teamIDFilterField(&v, req.TeamID)
+	httpx.TeamIDFilterField(&v, req.TeamID)
 	blueprintIDs := httpx.CanonicalStrings(req.BlueprintIDs)
 	if len(blueprintIDs) > maxBlueprintStepIDs {
 		v.OutOfRange("blueprint_ids", fmt.Sprintf("at most %d blueprint ids per request", maxBlueprintStepIDs))
@@ -482,14 +491,14 @@ func (bh *blueprintsHandler) handleBlueprintStepsAll(w http.ResponseWriter, r *h
 		steps []domain.BlueprintStep
 		total int
 	)
-	if err := bh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		steps, total, e = tx.Blueprints.ListAllSteps(r.Context(), orgID,
 			db.BlueprintStepListFilter{TeamID: req.TeamID, BlueprintIDs: blueprintIDs},
 			db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
 	}); err != nil {
-		internalError(w, "blueprints", err)
+		httpx.InternalError(w, "blueprints", err)
 		return
 	}
 	httpx.WriteList(w, page, steps, total)
@@ -511,12 +520,12 @@ type blueprintRunListFilterKey struct {
 }
 
 // POST /api/blueprint-runs/list
-func (bh *blueprintsHandler) handleBlueprintRunsList(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (h *Handler) handleBlueprintRunsList(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
+	userID := httpx.ClaimsFrom(r.Context()).Subject
 
 	var req blueprintRunListRequest
 	if !httpx.DecodeJSONStrict(w, r, &req) {
@@ -546,14 +555,14 @@ func (bh *blueprintsHandler) handleBlueprintRunsList(w http.ResponseWriter, r *h
 		runs  []domain.BlueprintRun
 		total int
 	)
-	if err := bh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		runs, total, e = tx.Blueprints.ListRuns(r.Context(), orgID,
 			db.BlueprintRunListFilter{BlueprintID: req.BlueprintID, Statuses: statuses},
 			db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
 	}); err != nil {
-		internalError(w, "blueprints", err)
+		httpx.InternalError(w, "blueprints", err)
 		return
 	}
 	// The rows are the run objects themselves — the same shape the single
@@ -575,33 +584,33 @@ type blueprintStepsPutRequest struct {
 // handleBlueprintStepsPut replaces the blueprint's step list. Validates that
 // the blueprint exists and that every step references a prompt the blueprint's
 // own team owns (same-team guard).
-func (bh *blueprintsHandler) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (h *Handler) handleBlueprintStepsPut(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
-	id, ok := uuidPathOr404(w, r, "id", "blueprint")
+	userID := httpx.ClaimsFrom(r.Context()).Subject
+	id, ok := httpx.UUIDPathOr404(w, r, "id", "blueprint")
 	if !ok {
 		return
 	}
 
 	var blueprint *domain.Blueprint
-	if err := bh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		blueprint, e = tx.Blueprints.Get(r.Context(), orgID, id)
 		return e
 	}); err != nil {
-		internalError(w, "blueprints", err)
+		httpx.InternalError(w, "blueprints", err)
 		return
 	}
 	if blueprint == nil {
-		notFound(w, "blueprint")
+		httpx.NotFound(w, "blueprint")
 		return
 	}
 	// Viewers can't rewrite a blueprint's steps (TFAC-447). Gate on the
 	// already-loaded blueprint's team — no extra round-trip.
-	if !bh.az.RequireTeamWrite(w, r, orgID, userID, blueprint.TeamID) {
+	if !h.az.RequireTeamWrite(w, r, orgID, userID, blueprint.TeamID) {
 		return
 	}
 
@@ -629,7 +638,7 @@ func (bh *blueprintsHandler) handleBlueprintStepsPut(w http.ResponseWriter, r *h
 	// Validate each step's prompt exists + is same-team, then replace in one
 	// tx so all lookups and the final write share claims.
 	var fault blueprintFault
-	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		for i, sid := range stepIDs {
 			stepPrompt, e := tx.Prompts.Get(r.Context(), orgID, sid)
 			if e != nil {
@@ -668,7 +677,7 @@ func (bh *blueprintsHandler) handleBlueprintStepsPut(w http.ResponseWriter, r *h
 		_, e := tx.Blueprints.ReplaceSteps(r.Context(), orgID, id, stepIDs, briefs)
 		return e
 	}); err != nil {
-		internalError(w, "blueprints", err)
+		httpx.InternalError(w, "blueprints", err)
 		return
 	}
 	if fault.write(w) {
@@ -734,12 +743,12 @@ type mergeBlueprintRequest struct {
 // handleBlueprintMerge absorbs a trigger-less source blueprint onto the tail of
 // the host ({id}) and retires the source, atomically. The host keeps its
 // identity, name, and trigger.
-func (bh *blueprintsHandler) handleBlueprintMerge(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (h *Handler) handleBlueprintMerge(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
+	userID := httpx.ClaimsFrom(r.Context()).Subject
 	hostID := r.PathValue("id")
 
 	var req mergeBlueprintRequest
@@ -758,7 +767,7 @@ func (bh *blueprintsHandler) handleBlueprintMerge(w http.ResponseWriter, r *http
 	// Viewers can't restructure blueprints (TFAC-447). Gate on the host; the
 	// same-team guard below refuses a cross-team source, so the host's team is
 	// the write scope.
-	if !bh.gateBlueprintWrite(w, r, orgID, userID, hostID) {
+	if !h.gateBlueprintWrite(w, r, orgID, userID, hostID) {
 		return
 	}
 
@@ -768,7 +777,7 @@ func (bh *blueprintsHandler) handleBlueprintMerge(w http.ResponseWriter, r *http
 		steps        []domain.BlueprintStep
 		fault        blueprintFault
 	)
-	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		if host, e = tx.Blueprints.Get(r.Context(), orgID, hostID); e != nil {
 			return e
@@ -824,15 +833,15 @@ func (bh *blueprintsHandler) handleBlueprintMerge(w http.ResponseWriter, r *http
 		steps, e = tx.Blueprints.ListSteps(r.Context(), orgID, hostID)
 		return e
 	}); err != nil {
-		internalError(w, "blueprints", err)
+		httpx.InternalError(w, "blueprints", err)
 		return
 	}
 	if host == nil {
-		notFound(w, "blueprint")
+		httpx.NotFound(w, "blueprint")
 		return
 	}
 	if source == nil {
-		notFound(w, "source blueprint")
+		httpx.NotFound(w, "source blueprint")
 		return
 	}
 	if fault.write(w) {
@@ -841,7 +850,7 @@ func (bh *blueprintsHandler) handleBlueprintMerge(w http.ResponseWriter, r *http
 	if steps == nil {
 		steps = []domain.BlueprintStep{}
 	}
-	writeJSON(w, http.StatusOK, blueprintWithSteps{Blueprint: merged, Steps: steps})
+	httpx.WriteJSON(w, http.StatusOK, blueprintWithSteps{Blueprint: merged, Steps: steps})
 }
 
 type splitBlueprintRequest struct {
@@ -861,13 +870,13 @@ type blueprintSplitResponse struct {
 // handleBlueprintSplit partitions a blueprint at an index into the upstream
 // (trigger-retained) half and a new trigger-less downstream blueprint,
 // atomically.
-func (bh *blueprintsHandler) handleBlueprintSplit(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (h *Handler) handleBlueprintSplit(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
-	id, ok := uuidPathOr404(w, r, "id", "blueprint")
+	userID := httpx.ClaimsFrom(r.Context()).Subject
+	id, ok := httpx.UUIDPathOr404(w, r, "id", "blueprint")
 	if !ok {
 		return
 	}
@@ -885,7 +894,7 @@ func (bh *blueprintsHandler) handleBlueprintSplit(w http.ResponseWriter, r *http
 	atIndex := *req.AtStepIndex
 
 	// Viewers can't restructure blueprints (TFAC-447).
-	if !bh.gateBlueprintWrite(w, r, orgID, userID, id) {
+	if !h.gateBlueprintWrite(w, r, orgID, userID, id) {
 		return
 	}
 
@@ -896,7 +905,7 @@ func (bh *blueprintsHandler) handleBlueprintSplit(w http.ResponseWriter, r *http
 		upSteps, downSteps   []domain.BlueprintStep
 		fault                blueprintFault
 	)
-	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		if bp, e = tx.Blueprints.Get(r.Context(), orgID, id); e != nil || bp == nil {
 			return e
@@ -940,11 +949,11 @@ func (bh *blueprintsHandler) handleBlueprintSplit(w http.ResponseWriter, r *http
 		downSteps, e = tx.Blueprints.ListSteps(r.Context(), orgID, newID)
 		return e
 	}); err != nil {
-		internalError(w, "blueprints", err)
+		httpx.InternalError(w, "blueprints", err)
 		return
 	}
 	if bp == nil {
-		notFound(w, "blueprint")
+		httpx.NotFound(w, "blueprint")
 		return
 	}
 	if fault.write(w) {
@@ -956,7 +965,7 @@ func (bh *blueprintsHandler) handleBlueprintSplit(w http.ResponseWriter, r *http
 	if downSteps == nil {
 		downSteps = []domain.BlueprintStep{}
 	}
-	writeJSON(w, http.StatusOK, blueprintSplitResponse{
+	httpx.WriteJSON(w, http.StatusOK, blueprintSplitResponse{
 		Upstream:   blueprintWithSteps{Blueprint: upstream, Steps: upSteps},
 		Downstream: blueprintWithSteps{Blueprint: downstream, Steps: downSteps},
 	})
@@ -988,13 +997,13 @@ type blueprintReconnectResponse struct {
 // onto the surviving upstream half, atomically: SplitAt + MergeInto run in one
 // tx (inTx reuses the WithTx tx), so a mid-sequence failure can't leave a
 // half-split blueprint behind. The host keeps its id + trigger.
-func (bh *blueprintsHandler) handleBlueprintReconnect(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (h *Handler) handleBlueprintReconnect(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
-	id, ok := uuidPathOr404(w, r, "id", "blueprint")
+	userID := httpx.ClaimsFrom(r.Context()).Subject
+	id, ok := httpx.UUIDPathOr404(w, r, "id", "blueprint")
 	if !ok {
 		return
 	}
@@ -1014,7 +1023,7 @@ func (bh *blueprintsHandler) handleBlueprintReconnect(w http.ResponseWriter, r *
 
 	// Viewers can't restructure blueprints (TFAC-447). Gate on the host; the
 	// same-team guard below refuses a cross-team target.
-	if !bh.gateBlueprintWrite(w, r, orgID, userID, id) {
+	if !h.gateBlueprintWrite(w, r, orgID, userID, id) {
 		return
 	}
 
@@ -1027,7 +1036,7 @@ func (bh *blueprintsHandler) handleBlueprintReconnect(w http.ResponseWriter, r *
 		hostSteps    []domain.BlueprintStep
 		fault        blueprintFault
 	)
-	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		if host, e = tx.Blueprints.Get(r.Context(), orgID, id); e != nil || host == nil {
 			return e
@@ -1108,15 +1117,15 @@ func (bh *blueprintsHandler) handleBlueprintReconnect(w http.ResponseWriter, r *
 		hostSteps, e = tx.Blueprints.ListSteps(r.Context(), orgID, id)
 		return e
 	}); err != nil {
-		internalError(w, "blueprints", err)
+		httpx.InternalError(w, "blueprints", err)
 		return
 	}
 	if host == nil {
-		notFound(w, "blueprint")
+		httpx.NotFound(w, "blueprint")
 		return
 	}
 	if target == nil {
-		notFound(w, "target blueprint")
+		httpx.NotFound(w, "target blueprint")
 		return
 	}
 	if fault.write(w) {
@@ -1125,7 +1134,7 @@ func (bh *blueprintsHandler) handleBlueprintReconnect(w http.ResponseWriter, r *
 	if hostSteps == nil {
 		hostSteps = []domain.BlueprintStep{}
 	}
-	writeJSON(w, http.StatusOK, blueprintReconnectResponse{
+	httpx.WriteJSON(w, http.StatusOK, blueprintReconnectResponse{
 		Host:              blueprintWithSteps{Blueprint: hostOut, Steps: hostSteps},
 		OrphanBlueprintID: orphanID,
 	})
@@ -1138,7 +1147,7 @@ type duplicateBlueprintsRequest struct {
 	// induced contiguous runs) from each prompt's resolved (blueprint, index).
 	// Callers never pass blueprint ids or ranges.
 	PromptIDs []string `json:"prompt_ids"`
-	// TeamID is the acting team the write picker supplied (see resolveActingTeam);
+	// TeamID is the acting team the write picker supplied (see teamscope.ResolveActing);
 	// optional, defaulted by resolution. The store rejects a prompt set that
 	// resolves outside it.
 	TeamID string `json:"team_id"`
@@ -1148,12 +1157,12 @@ type duplicateBlueprintsRequest struct {
 // trigger-less blueprint(s) following the induced-contiguous-runs rule, in one
 // transaction. Originals are untouched. Returns each new blueprint with its
 // ordered step list so the caller can render/locate the copies.
-func (bh *blueprintsHandler) handleBlueprintDuplicate(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (h *Handler) handleBlueprintDuplicate(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
+	userID := httpx.ClaimsFrom(r.Context()).Subject
 
 	var req duplicateBlueprintsRequest
 	if !httpx.DecodeJSONStrict(w, r, &req) {
@@ -1165,7 +1174,7 @@ func (bh *blueprintsHandler) handleBlueprintDuplicate(w http.ResponseWriter, r *
 	}
 
 	// Viewers can't duplicate prompts into a new blueprint (TFAC-447).
-	if !bh.az.RequireActingTeamWrite(w, r, orgID, userID, req.TeamID, "blueprints") {
+	if !h.az.RequireActingTeamWrite(w, r, orgID, userID, req.TeamID, "blueprints") {
 		return
 	}
 
@@ -1173,7 +1182,7 @@ func (bh *blueprintsHandler) handleBlueprintDuplicate(w http.ResponseWriter, r *
 		out   []blueprintWithSteps
 		fault blueprintFault
 	)
-	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		if e != nil {
 			return e
@@ -1221,13 +1230,13 @@ func (bh *blueprintsHandler) handleBlueprintDuplicate(w http.ResponseWriter, r *
 		if teamscope.WriteIfSelectionError(w, err) {
 			return
 		}
-		internalError(w, "blueprints", err)
+		httpx.InternalError(w, "blueprints", err)
 		return
 	}
 	if fault.write(w) {
 		return
 	}
-	writeJSON(w, http.StatusCreated, out)
+	httpx.WriteJSON(w, http.StatusCreated, out)
 }
 
 // --- Blueprint runs (multi-step instances) -------------------------------
@@ -1307,13 +1316,13 @@ func newBlueprintStepViewFromPlan(ps domain.BlueprintPlanStep, blueprintID strin
 // cancelled 1-step run sprouting a phantom second step once a prompt was
 // appended). ListSteps is only a fallback for a run with no frozen plan
 // (defensive — every run minted through the delegation path freezes one).
-func (bh *blueprintsHandler) handleBlueprintRunGet(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (h *Handler) handleBlueprintRunGet(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
-	id, ok := uuidPathOr404(w, r, "id", "blueprint run")
+	userID := httpx.ClaimsFrom(r.Context()).Subject
+	id, ok := httpx.UUIDPathOr404(w, r, "id", "blueprint run")
 	if !ok {
 		return
 	}
@@ -1321,7 +1330,7 @@ func (bh *blueprintsHandler) handleBlueprintRunGet(w http.ResponseWriter, r *htt
 	var br *domain.BlueprintRun
 	var fallbackSteps []domain.BlueprintStep
 	var stepConversations []domain.Conversation
-	if err := bh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		br, e = tx.Blueprints.GetRun(r.Context(), orgID, id)
 		if e != nil {
@@ -1340,11 +1349,11 @@ func (bh *blueprintsHandler) handleBlueprintRunGet(w http.ResponseWriter, r *htt
 		}
 		return e
 	}); err != nil {
-		internalError(w, "blueprints", err)
+		httpx.InternalError(w, "blueprints", err)
 		return
 	}
 	if br == nil {
-		notFound(w, "blueprint run")
+		httpx.NotFound(w, "blueprint run")
 		return
 	}
 
@@ -1381,31 +1390,31 @@ func (bh *blueprintsHandler) handleBlueprintRunGet(w http.ResponseWriter, r *htt
 		views = append(views, view)
 	}
 
-	writeJSON(w, http.StatusOK, blueprintRunResponse{BlueprintRun: br, Steps: views})
+	httpx.WriteJSON(w, http.StatusOK, blueprintRunResponse{BlueprintRun: br, Steps: views})
 }
 
-func (bh *blueprintsHandler) handleBlueprintRunCancel(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (h *Handler) handleBlueprintRunCancel(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
-	id, ok := uuidPathOr404(w, r, "id", "blueprint run")
+	userID := httpx.ClaimsFrom(r.Context()).Subject
+	id, ok := httpx.UUIDPathOr404(w, r, "id", "blueprint run")
 	if !ok {
 		return
 	}
 
 	var br *domain.BlueprintRun
-	if err := bh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		br, e = tx.Blueprints.GetRun(r.Context(), orgID, id)
 		return e
 	}); err != nil {
-		internalError(w, "blueprints", err)
+		httpx.InternalError(w, "blueprints", err)
 		return
 	}
 	if br == nil {
-		notFound(w, "blueprint run")
+		httpx.NotFound(w, "blueprint run")
 		return
 	}
 
@@ -1418,34 +1427,34 @@ func (bh *blueprintsHandler) handleBlueprintRunCancel(w http.ResponseWriter, r *
 
 	// Availability check after the existence + terminal checks so a missing or
 	// already-terminal run gets a 404/409 rather than a 503.
-	spawner := bh.spawner()
+	spawner := h.spawner()
 	if spawner == nil {
 		httpx.WriteDelegationUnavailable(w)
 		return
 	}
 	if err := spawner.CancelBlueprintRun(orgID, id, userID); err != nil {
-		internalError(w, "blueprints", err)
+		httpx.InternalError(w, "blueprints", err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "cancelling"})
+	httpx.WriteJSON(w, http.StatusAccepted, map[string]string{"status": "cancelling"})
 }
 
-func (s *Server) registerBlueprintRoutes() {
-	bh := &blueprintsHandler{tx: s.tx, az: s.az, spawner: func() *delegate.Spawner { return s.spawner }}
-	s.apiMutating("POST /api/blueprints/list", bh.handleBlueprintsList)
-	s.api("GET /api/blueprints/{id}", bh.handleBlueprintGet)
-	s.apiMutating("POST /api/blueprints", bh.handleBlueprintCreate)
-	s.apiMutating("PUT /api/blueprints/{id}", bh.handleBlueprintUpdate)
-	s.apiMutating("DELETE /api/blueprints/{id}", bh.handleBlueprintDelete)
+// Register mounts the blueprint and blueprint-run routes.
+func (h *Handler) Register(m httpx.Mounts) {
+	m.APIMutating("POST /api/blueprints/list", h.handleBlueprintsList)
+	m.API("GET /api/blueprints/{id}", h.handleBlueprintGet)
+	m.APIMutating("POST /api/blueprints", h.handleBlueprintCreate)
+	m.APIMutating("PUT /api/blueprints/{id}", h.handleBlueprintUpdate)
+	m.APIMutating("DELETE /api/blueprints/{id}", h.handleBlueprintDelete)
 	// One route for the canvas's bulk read and the per-blueprint read: they
 	// differ only by a filter, and a filter is what a list body is for.
-	s.apiMutating("POST /api/blueprint-steps/list", bh.handleBlueprintStepsAll)
-	s.apiMutating("PUT /api/blueprints/{id}/steps", bh.handleBlueprintStepsPut)
-	s.apiMutating("POST /api/blueprints/{id}/merge", bh.handleBlueprintMerge)
-	s.apiMutating("POST /api/blueprints/{id}/split", bh.handleBlueprintSplit)
-	s.apiMutating("POST /api/blueprints/{id}/reconnect", bh.handleBlueprintReconnect)
-	s.apiMutating("POST /api/blueprints/duplicate", bh.handleBlueprintDuplicate)
-	s.apiMutating("POST /api/blueprint-runs/list", bh.handleBlueprintRunsList)
-	s.api("GET /api/blueprint-runs/{id}", bh.handleBlueprintRunGet)
-	s.apiMutating("POST /api/blueprint-runs/{id}/cancel", bh.handleBlueprintRunCancel)
+	m.APIMutating("POST /api/blueprint-steps/list", h.handleBlueprintStepsAll)
+	m.APIMutating("PUT /api/blueprints/{id}/steps", h.handleBlueprintStepsPut)
+	m.APIMutating("POST /api/blueprints/{id}/merge", h.handleBlueprintMerge)
+	m.APIMutating("POST /api/blueprints/{id}/split", h.handleBlueprintSplit)
+	m.APIMutating("POST /api/blueprints/{id}/reconnect", h.handleBlueprintReconnect)
+	m.APIMutating("POST /api/blueprints/duplicate", h.handleBlueprintDuplicate)
+	m.APIMutating("POST /api/blueprint-runs/list", h.handleBlueprintRunsList)
+	m.API("GET /api/blueprint-runs/{id}", h.handleBlueprintRunGet)
+	m.APIMutating("POST /api/blueprint-runs/{id}/cancel", h.handleBlueprintRunCancel)
 }

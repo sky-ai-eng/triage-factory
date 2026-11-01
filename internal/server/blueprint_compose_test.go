@@ -14,6 +14,12 @@ import (
 // upstream and a new trigger-less downstream, and a second trigger on one
 // blueprint is a clean 409.
 
+// maxBlueprintSteps is the step cap the blueprints API enforces on the steps
+// PUT, merge and reconnect. TestBlueprintMerge_ExceedsStepCapRejected fails if
+// it drifts from that cap: a lower API cap refuses the steps PUT that builds
+// the host, and a higher one lets the over-cap merge through.
+const maxBlueprintSteps = 50
+
 type composeSteps []map[string]any
 
 type blueprintWithStepsView struct {

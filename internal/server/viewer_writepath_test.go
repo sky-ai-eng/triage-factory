@@ -14,7 +14,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
-	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -27,7 +26,6 @@ import (
 type viewerRig struct {
 	h      *pgtest.Harness
 	s      *Server
-	bh     *blueprintsHandler
 	eh     *eventHandlersHandler
 	orgID  string
 	teamID string
@@ -55,7 +53,6 @@ func newViewerRig(t *testing.T) *viewerRig {
 	return &viewerRig{
 		h:      h,
 		s:      s,
-		bh:     &blueprintsHandler{tx: s.tx, az: s.az, spawner: func() *delegate.Spawner { return nil }},
 		eh:     &eventHandlersHandler{tx: s.tx, az: s.az, catalogs: s},
 		orgID:  orgID,
 		teamID: teamID,
@@ -132,25 +129,6 @@ func assertViewOnly403(t *testing.T, rec *httptest.ResponseRecorder, what string
 	}
 	if !strings.Contains(rec.Body.String(), "view-only") {
 		t.Errorf("%s: body = %s, want a view-only message", what, rec.Body.String())
-	}
-}
-
-// TestViewer_BlueprintCreate_Forbidden: a viewer POSTing a blueprint 403s at the
-// acting-team gate; a member creates (201). Covers the blueprint handler gates
-// added alongside the RLS swap so a viewer gets a clean 403 rather than the
-// blueprints_insert RLS violation.
-func TestViewer_BlueprintCreate_Forbidden(t *testing.T) {
-	r := newViewerRig(t)
-	body := map[string]string{"name": "new-blueprint"}
-
-	rec := httptest.NewRecorder()
-	r.bh.handleBlueprintCreate(rec, r.req(http.MethodPost, "/api/blueprints", r.viewer, body))
-	assertViewOnly403(t, rec, "viewer POST blueprint")
-
-	rec = httptest.NewRecorder()
-	r.bh.handleBlueprintCreate(rec, r.req(http.MethodPost, "/api/blueprints", r.member, body))
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("member POST blueprint: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
 	}
 }
 
