@@ -49,7 +49,7 @@ func TestShouldSkipRefresh_ChangeWindow(t *testing.T) {
 	}
 
 	// The stamp as the caller reads it. No stamp is a snapshot stored before
-	// the field existed, which must gate exactly as it did then.
+	// the field existed, which the gate decides on its other signals alone.
 	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
 	stamps := []struct {
 		name  string

@@ -156,9 +156,9 @@ func formatChangeSeen(t time.Time) string {
 // sinceChangeSeen is how long before now TF last saw the pull request change,
 // read from the stored snapshot's ChangeSeenAt. A snapshot with no stamp
 // (stored before the field existed, or seeded quietly) or an unparseable one
-// gives changeRefreshWindow, outside the window, so it gates exactly as it did
-// before the stamp existed. A stamp ahead of now gives a negative duration,
-// inside the window.
+// gives changeRefreshWindow, outside the window, so the gate decides on its
+// other signals alone. A stamp ahead of now gives a negative duration, inside
+// the window.
 func sinceChangeSeen(snap domain.PRSnapshot, now time.Time) time.Duration {
 	seen, err := time.Parse(time.RFC3339, snap.ChangeSeenAt)
 	if err != nil {

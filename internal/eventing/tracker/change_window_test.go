@@ -261,13 +261,13 @@ func countType(types []string, want string) int {
 // stores none. The next cycle's listing is a 304 (head and updatedAt unchanged,
 // since a check run completing bumps neither), but GitHub now reports the check
 // passed. Inside the window that cycle refreshes and emits ci_check_passed.
-// Without a stamp, the gate skips the pull request as it did before the window
-// existed, and the result waits for the staleness floor.
+// Without a stamp, the gate decides on its other signals alone, skips the pull
+// request, and the result waits for the staleness floor.
 func TestRefreshGitHub_ChangeWindowReadsCheckRunsCreatedAfterRefresh(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		// clearStamp strips the change stamp the push cycle wrote, which is
-		// the gate as it was before the stamp existed.
+		// clearStamp strips the change stamp the push cycle wrote, leaving
+		// the gate its other signals alone.
 		clearStamp bool
 		wantPassed int
 	}{
@@ -301,7 +301,7 @@ func TestRefreshGitHub_ChangeWindowReadsCheckRunsCreatedAfterRefresh(t *testing.
 
 			if tc.clearStamp {
 				if refreshed || len(got) != 0 {
-					t.Fatalf("with no stamp: refreshed=%v, emitted %v; want the gate to skip it, as before the window", refreshed, got)
+					t.Fatalf("with no stamp: refreshed=%v, emitted %v; want the gate to skip it", refreshed, got)
 				}
 				return
 			}
@@ -408,6 +408,28 @@ func TestRefreshGitHub_ChangeSeenAtLifecycle(t *testing.T) {
 		r.assertStampedIn(from, to)
 	})
 
+	t.Run("a stamped pull request that closes is not restamped by its terminal refreshes", func(t *testing.T) {
+		r := newChangeWindowRig(t)
+		r.cycle()
+		r.srv.set(func(s *changingPRServer) { s.head, s.updatedAt = "sha2", "2026-10-30T12:10:00Z" })
+		r.cycle()
+		r.srv.set(func(s *changingPRServer) { s.open, s.updatedAt = false, "2026-10-30T12:20:00Z" })
+		// No router runs here, so the entity stays active and every cycle
+		// refreshes it as terminal, which reads no check runs. Two cycles: the
+		// one that sees the close, and the first terminal refresh.
+		r.cycle()
+		r.cycle()
+		if snap := r.snapshot(); snap.ChangeSeenAt == "" || snap.CheckRuns != nil {
+			t.Fatalf("stored snapshot has change_seen_at %q and check_runs %+v; want a stamp and none, the state a restamp would loop on", snap.ChangeSeenAt, snap.CheckRuns)
+		}
+		before := r.entity()
+		r.cycle()
+		if after := r.entity(); after.PollSeq != before.PollSeq || after.SnapshotJSON != before.SnapshotJSON {
+			t.Fatalf("an unchanged terminal refresh wrote the snapshot: poll_seq %d → %d, snapshot %s → %s",
+				before.PollSeq, after.PollSeq, before.SnapshotJSON, after.SnapshotJSON)
+		}
+	})
+
 	t.Run("a quiet seed is not stamped", func(t *testing.T) {
 		r := newChangeWindowRig(t)
 		// Not in the listing, so only the snapshot-less stub path reaches it.
@@ -430,8 +452,8 @@ func TestRefreshGitHub_ChangeSeenAtLifecycle(t *testing.T) {
 // that saw the change was answered, not when the cycle started. Discovery and
 // the refresh batches can take minutes at scale; a stamp from the cycle's start
 // would then be expired before the next cycle, which would skip the check runs
-// created just after that refresh. The refresh here answers more than a second
-// after the cycle starts, so a cycle-start stamp fails the test. A newly opened
+// created just after that refresh. The refresh here answers after a delay, so a
+// cycle-start stamp fails the test. A newly opened
 // and a reopened pull request are stamped by discovery first, and must be
 // stamped again by the refresh that first reads their check runs.
 func TestRefreshGitHub_ChangeSeenAtIsTheRefreshTime(t *testing.T) {
@@ -480,7 +502,7 @@ func TestRefreshGitHub_ChangeSeenAtIsTheRefreshTime(t *testing.T) {
 			tc.setup(r)
 			r.srv.set(func(s *changingPRServer) {
 				tc.move(s)
-				s.refreshDelay = 1100 * time.Millisecond
+				s.refreshDelay = 50 * time.Millisecond
 			})
 			r.cycle()
 
