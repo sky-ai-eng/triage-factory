@@ -126,13 +126,18 @@ func (s *deliverableStore) UpsertSystem(ctx context.Context, orgID string, a dom
 	return s.Upsert(ctx, orgID, a)
 }
 
-// InsertDeliverableIfAbsentSystem inserts a only when no (org_id, scope,
-// dedup_key) row exists — ON CONFLICT DO NOTHING — returning whether a row was
-// inserted. See
-// the interface doc: it never overwrites an existing row, so the reconciler
-// backstop can't regress a PR's state. Identical single-connection path in
-// SQLite (no admin/app split).
+// InsertDeliverableIfAbsentSystem is identical to InsertDeliverableIfAbsent in
+// SQLite: local mode has no admin/app pool split.
 func (s *deliverableStore) InsertDeliverableIfAbsentSystem(ctx context.Context, orgID string, a domain.Deliverable) (bool, error) {
+	return s.InsertDeliverableIfAbsent(ctx, orgID, a)
+}
+
+// InsertDeliverableIfAbsent inserts a only when no (org_id, scope, dedup_key)
+// row exists — ON CONFLICT DO NOTHING — returning whether a row was inserted.
+// See the interface doc: it never overwrites an existing row, so neither the
+// reconciler backstop nor a pull request create can move a row another writer
+// recorded.
+func (s *deliverableStore) InsertDeliverableIfAbsent(ctx context.Context, orgID string, a domain.Deliverable) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}

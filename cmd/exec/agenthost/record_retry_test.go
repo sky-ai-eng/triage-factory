@@ -114,7 +114,7 @@ func (s flakyActions) write(do func() error) error {
 	return err
 }
 
-// flakyDeliverables is a DeliverableStore whose admin-pool upserts go through
+// flakyDeliverables is a DeliverableStore whose admin-pool writes go through
 // faults.
 type flakyDeliverables struct {
 	db.DeliverableStore
@@ -126,6 +126,13 @@ func (s flakyDeliverables) UpsertSystem(ctx context.Context, orgID string, a dom
 		return domain.Deliverable{}, err
 	}
 	return s.DeliverableStore.UpsertSystem(ctx, orgID, a)
+}
+
+func (s flakyDeliverables) InsertDeliverableIfAbsentSystem(ctx context.Context, orgID string, a domain.Deliverable) (bool, error) {
+	if skip, err := s.f.next(); skip {
+		return false, err
+	}
+	return s.DeliverableStore.InsertDeliverableIfAbsentSystem(ctx, orgID, a)
 }
 
 // flakyTx is a TxRunner whose claims transactions see the flaky ledger store,
@@ -416,11 +423,13 @@ func TestRelayServer_ResentRecordWritesOneRow(t *testing.T) {
 // TestRelayedRecords_RetriedRecordStaysAheadOfLaterOnes runs the whole relayed
 // path — the sidecar's record sender, the supervision channel, the
 // orchestrator's record lane and the write funnel — through an outage that
-// outlasts the write stage's retries. A draft pull request is recorded and
-// then marked ready. The create's deliverable cannot be written, so its record
-// is deferred and resent; the ready mark, sent after it, must not be applied
-// until the create has been. Were it applied first, the create would then
-// write the row back as a draft.
+// outlasts the write stage's retries. Two records name one pull request: a
+// create as a draft, then one carrying it open. The first's deliverable cannot
+// be written, so its record is deferred and resent; the second, sent after it,
+// must not be applied until the first has been. A pull request deliverable is
+// inserted only when absent, so in order the draft stands and the second
+// record writes only its ledger row; applied first, the second would have
+// recorded the row open.
 func TestRelayedRecords_RetriedRecordStaysAheadOfLaterOnes(t *testing.T) {
 	fastRecordRetry(t)
 	reader := installTestAuditDrops(t)
@@ -474,11 +483,14 @@ func TestRelayedRecords_RetriedRecordStaysAheadOfLaterOnes(t *testing.T) {
 	for {
 		arts := listConversationDeliverables(t, base, info.ConversationID)
 		acts := listExternalActions(t, base)
-		if len(arts) == 1 && arts[0].State == domain.DeliverableStatePROpen && len(acts) == 2 {
+		if len(acts) == 2 {
+			if len(arts) != 1 || arts[0].State != domain.DeliverableStatePRDraft {
+				t.Fatalf("deliverables = %+v; want the first record's draft", arts)
+			}
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("deliverables = %+v, ledger rows = %d; want the pull request open and both rows written", arts, len(acts))
+			t.Fatalf("deliverables = %+v, ledger rows = %d; want both rows written", arts, len(acts))
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

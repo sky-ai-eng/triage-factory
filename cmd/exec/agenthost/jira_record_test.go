@@ -442,6 +442,20 @@ func (e *erroringDeliverables) UpsertSystem(context.Context, string, domain.Deli
 	return domain.Deliverable{}, errors.New("boom")
 }
 
+func (e *erroringDeliverables) InsertDeliverableIfAbsent(context.Context, string, domain.Deliverable) (bool, error) {
+	e.mu.Lock()
+	e.calls++
+	e.mu.Unlock()
+	return false, errors.New("boom")
+}
+
+func (e *erroringDeliverables) InsertDeliverableIfAbsentSystem(context.Context, string, domain.Deliverable) (bool, error) {
+	e.mu.Lock()
+	e.calls++
+	e.mu.Unlock()
+	return false, errors.New("boom")
+}
+
 func (e *erroringDeliverables) callCount() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()

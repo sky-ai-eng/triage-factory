@@ -990,13 +990,18 @@ func (s *RelayServer) dispatchCoreRecord(ctx context.Context, op string, args js
 		if err := json.Unmarshal(args, &a); err != nil {
 			return fmt.Errorf("agenthost: decode relayed external write: %w", err)
 		}
-		// The ledger key is this side's to choose, like the identity and scope
-		// the funnel stamps over whatever the wire said: it is derived from the
-		// record's key under this run's conversation (mintActionDedupKey). A key
-		// the sidecar chose could equal another run's deterministic one — a
-		// branch push's, an egress denial's — and the row it wrote first would
-		// suppress that run's real one. No action the sidecar builds carries a
-		// key of its own; the ops whose rows have one build them here.
+		// Every key is this side's to choose, like the identity and scope the
+		// funnel stamps over whatever the wire said. The ledger key is derived
+		// from the record's key under this run's conversation
+		// (mintActionDedupKey): a key the sidecar chose could equal another
+		// run's deterministic one — a branch push's, an egress denial's — and
+		// the row it wrote first would suppress that run's real one. No action
+		// the sidecar builds carries a key of its own; the ops whose rows have
+		// one build them here. A review deliverable's key is rebuilt under this
+		// run's conversation (keyReviewToConversation), so it cannot name
+		// another run's draft, and a pull request deliverable is only ever
+		// inserted (writeFunnelDeliverable), so a key naming a pull request
+		// another run recorded changes nothing on that row.
 		if a.Action != nil {
 			a.Action.DedupKey = ""
 		}

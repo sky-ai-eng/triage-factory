@@ -99,7 +99,8 @@ type Runtime interface {
 	// false when the draft was resolved (submitted/dismissed) since it was read
 	// — the writer surfaces the lost race instead of resurrecting the resolved
 	// review, which the unconditional UpsertDeliverable (state last-writer-wins)
-	// would do with its stale in-memory pending state.
+	// would do with its stale in-memory pending state. A deliverable that is
+	// not the conversation's own is refused with an error naming it.
 	UpdateReviewDetailsIfPending(ctx context.Context, deliverableID, detailsJSON string) (bool, error)
 	// TransitionReviewState is the review deliverable's compare-and-swap: the row
 	// moves from → to only while it still holds `from`, optionally stamping the
@@ -108,7 +109,8 @@ type Runtime interface {
 	// simultaneously reachable by a human in the approval queue, and both callers
 	// submit the same review, so exactly one of them has to win a CAS or the
 	// review posts twice. Returns false when the race was lost (or the row is
-	// gone), never an error.
+	// gone). A deliverable that is not the conversation's own is refused with
+	// an error naming it.
 	TransitionReviewState(ctx context.Context, deliverableID, from, to, externalID, url, detailsJSON string) (bool, error)
 	// Record is the void, best-effort external-write funnel (RecordExternalWrite):
 	// a recording failure is logged host-side and never fails the agent's
@@ -575,16 +577,31 @@ func (r *directRuntime) ReviewPosture(ctx context.Context, owner, repo string) (
 // the same read ListConversationDeliverables serves, so the id names nothing
 // outside this run.
 func (r *directRuntime) DeliverablePullRequest(ctx context.Context, deliverableID string) (db.DeliverablePullRequest, error) {
-	arts, err := r.ListConversationDeliverables(ctx)
+	a, err := r.ownDeliverable(ctx, deliverableID)
 	if err != nil {
 		return db.DeliverablePullRequest{}, err
 	}
+	return db.ResolveDeliverablePullRequest(ctx, r.info.OrgID, a, r.stores.Entities.GetSystem, r.stores.Repos.GetSystem)
+}
+
+// ownDeliverable returns deliverableID's row when it is one of the
+// conversation's own deliverables (ListConversationDeliverables), and an error
+// naming the id when it is not. Every write addressed by a deliverable id the
+// wire carried checks it first, because the store's by-id writes are filtered
+// by org and id alone. Ownership does not move once the row is written (the
+// upsert keeps conversation_id), so a write after this check reaches the same
+// row the check read.
+func (r *directRuntime) ownDeliverable(ctx context.Context, deliverableID string) (domain.Deliverable, error) {
+	arts, err := r.ListConversationDeliverables(ctx)
+	if err != nil {
+		return domain.Deliverable{}, err
+	}
 	for _, a := range arts {
 		if a.ID == deliverableID {
-			return db.ResolveDeliverablePullRequest(ctx, r.info.OrgID, a, r.stores.Entities.GetSystem, r.stores.Repos.GetSystem)
+			return a, nil
 		}
 	}
-	return db.DeliverablePullRequest{}, fmt.Errorf("deliverable %s is not one of this conversation's", deliverableID)
+	return domain.Deliverable{}, fmt.Errorf("deliverable %s is not one of this conversation's", deliverableID)
 }
 
 func (r *directRuntime) InsertConversationWorktree(ctx context.Context, row domain.ConversationWorktree) (bool, string, error) {
@@ -620,17 +637,28 @@ func (r *directRuntime) DeleteConversationWorktree(ctx context.Context, reposito
 }
 
 // UpsertDeliverable stamps the run identity and the org's current scope
-// (stampScopeInfo) onto a, links it to the entity it is about
+// (stampScopeInfo) onto a, keys it on the run's conversation
+// (keyReviewToConversation), links it to the entity it is about
 // (resolveDeliverableEntity: a review draft's pull request) and upserts it.
 // Event-triggered runs route admin-pool; manual runs wrap in the kicking-off
 // user's synthetic claims. Returns the stored row. Each write is retried on a
 // retryable error like the recording funnel's (withRecordRetry) — the upsert
 // is idempotent — but on the caller's own context, since the caller is
 // waiting for the result.
+//
+// a must be a review draft. A pull request deliverable is written only by its
+// create, through the funnel, which never overwrites a recorded one; an upsert
+// of one here would let a relayed write move another run's pull request row.
 func (r *directRuntime) UpsertDeliverable(ctx context.Context, a domain.Deliverable, github domain.GitHubIdentity) (domain.Deliverable, error) {
+	if a.Kind != domain.DeliverableKindReview {
+		return domain.Deliverable{}, fmt.Errorf("agenthost: a deliverable upsert records a review draft, not a %q", a.Kind)
+	}
 	a.OrgID = r.info.OrgID
 	a.TeamID = r.info.TeamID
 	a.ConversationID = r.info.ConversationID
+	if err := keyReviewToConversation(&a, r.info); err != nil {
+		return domain.Deliverable{}, err
+	}
 	if err := withRecordRetry(ctx, func() error { return stampScopeInfo(ctx, r.stores, r.info.OrgID, &a, nil) }); err != nil {
 		return domain.Deliverable{}, err
 	}
@@ -741,8 +769,12 @@ func (r *directRuntime) githubCredential(ctx context.Context, repository string)
 // UpdateReviewDetailsIfPending routes the guarded draft write through the same
 // event-vs-manual pool split UpsertDeliverable uses: event-triggered runs write
 // admin-pool (no JWT claims); manual runs write under the kicking-off user's
-// synthetic claims.
+// synthetic claims. A deliverable that is not the conversation's own is
+// refused before anything is written (ownDeliverable).
 func (r *directRuntime) UpdateReviewDetailsIfPending(ctx context.Context, deliverableID, detailsJSON string) (bool, error) {
+	if _, err := r.ownDeliverable(ctx, deliverableID); err != nil {
+		return false, err
+	}
 	if r.info.IsEventTriggered {
 		return r.stores.Deliverables.UpdateReviewDetailsIfPendingSystem(ctx, r.info.OrgID, deliverableID, detailsJSON)
 	}
@@ -759,8 +791,13 @@ func (r *directRuntime) UpdateReviewDetailsIfPending(ctx context.Context, delive
 // pool split UpdateReviewDetailsIfPending uses: event-triggered runs claim on
 // the admin pool (no JWT claims); manual runs claim under the kicking-off user's
 // synthetic claims — the same pool the approve handler races on, which is what
-// makes the two callers contend for one row rather than pass each other.
+// makes the two callers contend for one row rather than pass each other. A
+// deliverable that is not the conversation's own is refused before anything is
+// written (ownDeliverable).
 func (r *directRuntime) TransitionReviewState(ctx context.Context, deliverableID, from, to, externalID, url, detailsJSON string) (bool, error) {
+	if _, err := r.ownDeliverable(ctx, deliverableID); err != nil {
+		return false, err
+	}
 	if r.info.IsEventTriggered {
 		return r.stores.Deliverables.TransitionReviewStateSystem(ctx, r.info.OrgID, deliverableID, from, to, externalID, url, detailsJSON)
 	}

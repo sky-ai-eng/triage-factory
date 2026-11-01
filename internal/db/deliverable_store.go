@@ -104,6 +104,16 @@ type DeliverableStore interface {
 	// request or a review is refused with ErrDeliverableKind, as Upsert does.
 	InsertDeliverableIfAbsentSystem(ctx context.Context, orgID string, a domain.Deliverable) (bool, error)
 
+	// InsertDeliverableIfAbsent is the app-pool (RLS-active) variant of
+	// InsertDeliverableIfAbsentSystem, for a writer inside a claims-set tx:
+	// the exec funnel records a manual run's pull request create through it,
+	// under the kicking-off user's synthetic claims, so a create naming a pull
+	// request another run already recorded changes nothing on that row. An
+	// empty scope is refused with ErrExternalObjectScopeRequired and a kind
+	// other than a pull request or a review with ErrDeliverableKind.
+	// Identical to InsertDeliverableIfAbsentSystem in SQLite.
+	InsertDeliverableIfAbsent(ctx context.Context, orgID string, a domain.Deliverable) (bool, error)
+
 	// TransitionReviewState atomically compare-and-swaps a REVIEW deliverable's
 	// state: the row moves from → to only when it still holds `from` (and is a
 	// review), and the caller learns whether it won (true) or lost the race /

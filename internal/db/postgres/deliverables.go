@@ -71,21 +71,32 @@ func (s *deliverableStore) UpsertSystem(ctx context.Context, orgID string, a dom
 	return s.upsert(ctx, s.admin, orgID, a)
 }
 
-// InsertDeliverableIfAbsentSystem inserts a only when no (org_id, scope,
-// dedup_key) row exists — ON CONFLICT DO NOTHING — on the admin pool
-// (BYPASSRLS; the reconciler
-// backstop has no JWT-claims context). Returns whether a row was inserted:
-// RowsAffected is 1 on insert, 0 when a row already existed. See the interface
-// doc for why this never-overwrite path (not UpsertSystem) is what the backstop
-// needs. org_id stays bound as defense in depth.
+// InsertDeliverableIfAbsentSystem runs insertIfAbsent on the admin pool
+// (BYPASSRLS; the reconciler backstop and an event-triggered run's pull
+// request create have no JWT-claims context).
 func (s *deliverableStore) InsertDeliverableIfAbsentSystem(ctx context.Context, orgID string, a domain.Deliverable) (bool, error) {
+	return s.insertIfAbsent(ctx, s.admin, orgID, a)
+}
+
+// InsertDeliverableIfAbsent runs insertIfAbsent on the app pool (RLS-active),
+// for a manual run's pull request create under synthetic claims.
+func (s *deliverableStore) InsertDeliverableIfAbsent(ctx context.Context, orgID string, a domain.Deliverable) (bool, error) {
+	return s.insertIfAbsent(ctx, s.q, orgID, a)
+}
+
+// insertIfAbsent inserts a only when no (org_id, scope, dedup_key) row exists
+// — ON CONFLICT DO NOTHING — on q. Returns whether a row was inserted:
+// RowsAffected is 1 on insert, 0 when a row already existed. See the interface
+// doc for why this never-overwrite path (not an upsert) is what its writers
+// need. org_id stays bound as defense in depth.
+func (s *deliverableStore) insertIfAbsent(ctx context.Context, q queryer, orgID string, a domain.Deliverable) (bool, error) {
 	if err := db.RequireExternalObjectScope(a.Scope); err != nil {
 		return false, err
 	}
 	if err := db.RequireDeliverableKind(a.Kind); err != nil {
 		return false, err
 	}
-	res, err := s.admin.ExecContext(ctx, `
+	res, err := q.ExecContext(ctx, `
 		INSERT INTO deliverables
 			(id, conversation_id, org_id, team_id, provider, kind, target,
 			 external_id, url, state, dedup_key, details_json, updated_at, scope,
