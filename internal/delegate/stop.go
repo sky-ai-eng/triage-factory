@@ -150,6 +150,11 @@ const (
 	// StopCauseTaskClosed — the system decided the task is resolved (its
 	// entity merged, closed, or otherwise stopped needing attention).
 	StopCauseTaskClosed StopCause = "task_closed"
+	// StopCauseCloseHoldExpired — an event resolved the task while the
+	// conversation was working, and it was still working when the close-hold
+	// limit ran out. Its own cause rather than a close because the task can
+	// stay open after it, held by a person's work or deliverable.
+	StopCauseCloseHoldExpired StopCause = "close_hold_expired"
 	// StopCauseTaskDispositioned — a user swiped the task away.
 	StopCauseTaskDispositioned StopCause = "task_dispositioned"
 	// StopCauseTaskRequeued — a user returned the task to the queue. Its own
@@ -174,6 +179,8 @@ func (c StopCause) note() string {
 	switch c {
 	case StopCauseTaskClosed:
 		return "Run stopped: the task it was working on was closed."
+	case StopCauseCloseHoldExpired:
+		return "Run stopped: the task it was working on was resolved, and the run had not finished in the time allowed after that."
 	case StopCauseTaskDispositioned:
 		return "Run stopped: the task it was working on was dispositioned."
 	case StopCauseTaskRequeued:

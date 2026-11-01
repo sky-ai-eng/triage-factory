@@ -239,7 +239,7 @@ func TestCloseHold_OwnEventArrivingAgainCancelsTheHold(t *testing.T) {
 		t.Fatalf("drain the second failure: %v", err)
 	}
 	failRun(t, f.database, f.runID, f.convID)
-	f.r.sweepCloseDeferrals(t.Context())
+	f.r.sweepCloseDeferrals(t.Context(), DefaultCloseHoldTimeout)
 
 	if status, _, _ := taskRow(t, f.database, f.taskID); status == "done" {
 		t.Error("the sweep closed a task its own event reopened")
@@ -280,7 +280,7 @@ func TestCloseHoldSweep_LeavesAHoldCancelledSinceItsReadAlone(t *testing.T) {
 func TestCloseHoldSweep_LeavesAWorkingTaskHeld(t *testing.T) {
 	f := newHeldCIFixture(t, "owner/repo#sweep-working")
 
-	f.r.sweepCloseDeferrals(t.Context())
+	f.r.sweepCloseDeferrals(t.Context(), DefaultCloseHoldTimeout)
 
 	if status, _, _ := taskRow(t, f.database, f.taskID); status == "done" {
 		t.Error("the sweep closed a task a conversation is working on")
@@ -300,7 +300,7 @@ func TestCloseHoldSweep_AppliesTheCloseOnceNothingWorks(t *testing.T) {
 	f := newHeldCIFixture(t, "owner/repo#sweep-applies")
 	failRun(t, f.database, f.runID, f.convID)
 
-	f.r.sweepCloseDeferrals(t.Context())
+	f.r.sweepCloseDeferrals(t.Context(), DefaultCloseHoldTimeout)
 
 	status, reason, eventType := taskRow(t, f.database, f.taskID)
 	if status != "done" || reason != "auto_closed_by_event" || eventType != domain.EventGitHubPRCICheckPassed {
@@ -327,7 +327,7 @@ func TestCloseHoldSweep_WaitsForADeliverableAwaitingAPerson(t *testing.T) {
 	failRun(t, f.database, f.runID, f.convID)
 	seedDraftPullRequest(t, f.database, f.convID, f.entityID)
 
-	f.r.sweepCloseDeferrals(t.Context())
+	f.r.sweepCloseDeferrals(t.Context(), DefaultCloseHoldTimeout)
 
 	if status, _, _ := taskRow(t, f.database, f.taskID); status == "done" {
 		t.Error("the sweep closed a task whose draft awaits a person")
@@ -342,7 +342,7 @@ func TestCloseHoldSweep_WaitsForADeliverableAwaitingAPerson(t *testing.T) {
 	if _, err := f.database.Exec(`UPDATE deliverables SET state = 'open' WHERE conversation_id = ?`, f.convID); err != nil {
 		t.Fatalf("resolve the draft: %v", err)
 	}
-	f.r.sweepCloseDeferrals(t.Context())
+	f.r.sweepCloseDeferrals(t.Context(), DefaultCloseHoldTimeout)
 
 	if status, reason, _ := taskRow(t, f.database, f.taskID); status != "done" || reason != "auto_closed_by_event" {
 		t.Errorf("task = (%q, %q), want closed by the pass once the draft is resolved", status, reason)
@@ -359,7 +359,7 @@ func TestCloseHoldSweep_DropsAHoldThatNoLongerHolds(t *testing.T) {
 	)
 	failRun(t, f.database, f.runID, f.convID)
 
-	f.r.sweepCloseDeferrals(t.Context())
+	f.r.sweepCloseDeferrals(t.Context(), DefaultCloseHoldTimeout)
 
 	if status, _, _ := taskRow(t, f.database, f.taskID); status == "done" {
 		t.Error("the sweep closed a task whose close no longer holds")
@@ -409,7 +409,7 @@ func TestCloseHold_FiringsSkipAHeldTask(t *testing.T) {
 		t.Fatal("setup: the preflight declines the task before its close is held")
 	}
 
-	if _, err := database.Exec(`UPDATE tasks SET close_deferred_event_id = ? WHERE id = ?`, eventID, taskID); err != nil {
+	if _, err := database.Exec(`UPDATE tasks SET close_deferred_event_id = ?, close_deferred_at = CURRENT_TIMESTAMP WHERE id = ?`, eventID, taskID); err != nil {
 		t.Fatalf("hold the task's close: %v", err)
 	}
 	if preflight() {

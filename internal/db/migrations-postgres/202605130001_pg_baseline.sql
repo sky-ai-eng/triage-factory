@@ -1502,7 +1502,12 @@ CREATE TABLE public.tasks (
     -- by a bump of the task and by its close-hold sweep, and read only while
     -- the task is active.
     close_deferred_event_id uuid,
+    -- When the close was first held: kept while later closing events take the
+    -- hold's place, cleared with the hold. The close-hold sweep stops the
+    -- event-started work still going once a hold is older than its limit.
+    close_deferred_at timestamp with time zone,
     CONSTRAINT tasks_claim_xor CHECK (((claimed_by_agent_id IS NULL) OR (claimed_by_user_id IS NULL))),
+    CONSTRAINT tasks_close_hold_paired CHECK (((close_deferred_event_id IS NULL) = (close_deferred_at IS NULL))),
     CONSTRAINT tasks_claimed_requires_team CHECK ((((claimed_by_user_id IS NULL) AND (claimed_by_agent_id IS NULL)) OR (team_id IS NOT NULL))),
     -- Assigning a task, to a person or to the bot, IS the stage marker: the
     -- queue holds nobody's work. Returning a task to the queue is the only way

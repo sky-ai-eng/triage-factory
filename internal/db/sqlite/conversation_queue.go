@@ -133,6 +133,22 @@ var workingConversationSQL = `r.parent_conversation_id IS NULL
 	                 AND br_s.status = 'running' AND br_s.cancel_requested = 0
 	                 AND br_s.current_step_index = r.blueprint_step_index)))`
 
+// personMessageSQL, personDrivenConversationSQL and expiringConversationSQL
+// are the Postgres twins' predicates in this dialect.
+const personMessageSQL = `m_p.role = 'user'
+	  AND m_p.subtype IN ('', '` + domain.MessageSubtypeInjectionSteer + `')
+	  AND m_p.user_id IS NOT NULL
+	  AND NOT (m_p.delivered = 0 AND m_p.window_state = 'inactive')`
+
+const personDrivenConversationSQL = `(r.creator_user_id IS NOT NULL OR EXISTS (
+		SELECT 1 FROM messages m_p
+		WHERE m_p.conversation_id = r.id
+		  AND ` + personMessageSQL + `))`
+
+var expiringConversationSQL = workingConversationSQL + `
+	  AND NOT ` + personDrivenConversationSQL + `
+	  AND r.stop_requested_at IS NULL`
+
 // nextAttemptDueSQL is the time gate, compared as text in the claims lease
 // layout: HandBackClaimSystem stamps next_attempt_at with sqliteNowPlusExpr,
 // so both sides of the comparison are the one spelling.

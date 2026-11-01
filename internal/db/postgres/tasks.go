@@ -906,7 +906,8 @@ func bumpTask(ctx context.Context, q queryer, orgID, taskID string) (domain.Task
 		UPDATE tasks
 		SET status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END,
 		    snooze_until = CASE WHEN status = 'snoozed' THEN NULL ELSE snooze_until END,
-		    close_deferred_event_id = NULL
+		    close_deferred_event_id = NULL,
+		    close_deferred_at = NULL
 		WHERE org_id = $1 AND id = $2
 		RETURNING `+pgTaskBareColumns,
 		orgID, taskID, domain.StagedInjectionSubtypes, domain.StagedInjectionProducerTaskClosing), &t)
@@ -1080,8 +1081,10 @@ func closeOrHoldTask(ctx context.Context, q queryer, orgID, taskID, closeReason,
 			if applying {
 				return out, nil
 			}
+			// statement_timestamp(), the clock the expiry reads it on.
 			if _, err := q.ExecContext(ctx, `
-				UPDATE tasks SET close_deferred_event_id = $3
+				UPDATE tasks SET close_deferred_event_id = $3,
+				                 close_deferred_at = COALESCE(close_deferred_at, statement_timestamp())
 				 WHERE org_id = $1 AND id = $2
 			`, orgID, taskID, closingEventID); err != nil {
 				return db.TaskCloseOutcome{}, fmt.Errorf("hold close: %w", err)
@@ -1095,13 +1098,23 @@ func closeOrHoldTask(ctx context.Context, q queryer, orgID, taskID, closeReason,
 		return db.TaskCloseOutcome{}, err
 	}
 	if applying {
-		if _, err := q.ExecContext(ctx, `
-			UPDATE tasks SET close_deferred_event_id = NULL WHERE org_id = $1 AND id = $2
-		`, orgID, taskID); err != nil {
-			return db.TaskCloseOutcome{}, fmt.Errorf("clear hold: %w", err)
+		if err := clearHold(ctx, q, orgID, taskID); err != nil {
+			return db.TaskCloseOutcome{}, err
 		}
 	}
 	return db.TaskCloseOutcome{Closed: closed, ActiveConversationIDs: conversationIDs}, nil
+}
+
+// clearHold clears the close the task holds, with the time it began, inside
+// the applying close's transaction.
+func clearHold(ctx context.Context, q queryer, orgID, taskID string) error {
+	if _, err := q.ExecContext(ctx, `
+		UPDATE tasks SET close_deferred_event_id = NULL, close_deferred_at = NULL
+		 WHERE org_id = $1 AND id = $2
+	`, orgID, taskID); err != nil {
+		return fmt.Errorf("clear hold: %w", err)
+	}
+	return nil
 }
 
 // eventCloseState is what an event close decides on: the close the task
@@ -1229,12 +1242,115 @@ func (s *taskStore) ListActiveCloseDeferralsSystem(ctx context.Context) ([]domai
 	return out, rows.Err()
 }
 
+// heldForSQL is a held close that began at least $n seconds ago by
+// statement_timestamp(), the clock the hold is stamped on.
+func heldForSQL(n int) string {
+	return fmt.Sprintf(`close_deferred_at <= statement_timestamp() - make_interval(secs => $%d)`, n)
+}
+
+func (s *taskStore) ListExpiredCloseDeferralsSystem(ctx context.Context, heldFor time.Duration) ([]domain.TaskCloseDeferral, error) {
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT `+pgTaskCloseDeferralColumns+`
+		  FROM tasks
+		 WHERE close_deferred_event_id IS NOT NULL
+		   AND `+heldForSQL(1)+`
+		   AND status NOT IN ('done', 'dismissed')
+		   AND EXISTS (SELECT 1 FROM orgs o WHERE o.id = tasks.org_id AND o.deleted_at IS NULL)
+		   AND EXISTS (
+		       SELECT 1 FROM conversations r
+		        WHERE r.org_id = tasks.org_id AND r.task_id = tasks.id
+		          AND `+expiringConversationSQL+`)
+		 ORDER BY org_id, id
+	`, heldFor.Seconds())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.TaskCloseDeferral
+	for rows.Next() {
+		d, err := scanTaskCloseDeferral(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+func (s *taskStore) ExpireHeldCloseSystem(ctx context.Context, orgID, taskID, heldEventID string, heldFor time.Duration) ([]string, error) {
+	var expired []string
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		var err error
+		expired, err = expireHeldClose(ctx, q, orgID, taskID, heldEventID, heldFor)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return expired, nil
+}
+
+// expireHeldClose is ExpireHeldCloseSystem's body.
+//
+// The task's row is locked FOR NO KEY UPDATE, the lock a task UPDATE takes.
+// That orders the expiry against a bump, a hold, a close and a firing, which
+// all lock or write the row, and leaves a blueprint step's advance free to
+// insert its next conversation: the advance holds the blueprint row the
+// cancel stamp below writes, and its insert takes a key-share lock on the
+// task, which FOR UPDATE would refuse, deadlocking the two.
+//
+// The stamp calls the expired conversations' blueprint runs off in the
+// transaction that decides it, so a stop that never lands still leaves
+// nothing to drive them on. It also covers a blueprint between two steps,
+// whose settled step no stop reaches.
+func expireHeldClose(ctx context.Context, q queryer, orgID, taskID, heldEventID string, heldFor time.Duration) ([]string, error) {
+	var expired bool
+	err := q.QueryRowContext(ctx, `
+		SELECT `+heldForSQL(4)+` FROM tasks
+		 WHERE org_id = $1 AND id = $2 AND status NOT IN ('done', 'dismissed')
+		   AND close_deferred_event_id = $3
+		 FOR NO KEY UPDATE
+	`, orgID, taskID, heldEventID, heldFor.Seconds()).Scan(&expired)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && !expired) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lock task: %w", err)
+	}
+	rows, err := q.QueryContext(ctx, `
+		SELECT r.id FROM conversations r
+		 WHERE r.org_id = $1 AND r.task_id = $2
+		   AND `+expiringConversationSQL+`
+		 ORDER BY r.started_at, r.id
+	`, orgID, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("list expired conversations: %w", err)
+	}
+	ids, err := scanIDs(rows, "conversations.id")
+	if err != nil {
+		return nil, fmt.Errorf("list expired conversations: %w", err)
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	if _, err := q.ExecContext(ctx, `
+		UPDATE blueprint_runs br SET cancel_requested = true
+		 WHERE br.org_id = $1
+		   AND br.status = 'running'
+		   AND br.cancel_requested = false
+		   AND br.id IN (SELECT c.blueprint_run_id FROM conversations c WHERE c.org_id = $1 AND c.id = ANY($2))
+	`, orgID, pgUUIDArray(ids)); err != nil {
+		return nil, fmt.Errorf("stamp run cancel intent: %w", err)
+	}
+	return ids, nil
+}
+
 func (s *taskStore) ClearCloseDeferralSystem(ctx context.Context, orgID, taskID, eventID string) (bool, error) {
 	var cleared bool
 	err := inTx(ctx, s.admin, func(q queryer) error {
 		res, err := q.ExecContext(ctx, `
 			UPDATE tasks
-			   SET close_deferred_event_id = NULL
+			   SET close_deferred_event_id = NULL, close_deferred_at = NULL
 			 WHERE org_id = $1 AND id = $2 AND close_deferred_event_id = $3
 		`, orgID, taskID, eventID)
 		if err != nil {

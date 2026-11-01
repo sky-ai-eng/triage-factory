@@ -976,7 +976,8 @@ func (s *taskStore) Bump(ctx context.Context, orgID, taskID, eventID string) (do
 			UPDATE tasks
 			SET status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END,
 			    snooze_until = CASE WHEN status = 'snoozed' THEN NULL ELSE snooze_until END,
-			    close_deferred_event_id = NULL
+			    close_deferred_event_id = NULL,
+			    close_deferred_at = NULL
 			WHERE id = ?
 			RETURNING `+sqliteTaskBareColumns,
 			taskID), &t); err != nil {
@@ -1172,7 +1173,9 @@ func closeOrHoldTask(ctx context.Context, q queryer, taskID, closeReason, closeE
 				return out, nil
 			}
 			if _, err := q.ExecContext(ctx, `
-				UPDATE tasks SET close_deferred_event_id = ? WHERE id = ?
+				UPDATE tasks SET close_deferred_event_id = ?,
+				                 close_deferred_at = COALESCE(close_deferred_at, `+sqliteNowExpr+`)
+				 WHERE id = ?
 			`, closingEventID, taskID); err != nil {
 				return db.TaskCloseOutcome{}, fmt.Errorf("hold close: %w", err)
 			}
@@ -1185,11 +1188,21 @@ func closeOrHoldTask(ctx context.Context, q queryer, taskID, closeReason, closeE
 		return db.TaskCloseOutcome{}, err
 	}
 	if applying {
-		if _, err := q.ExecContext(ctx, `UPDATE tasks SET close_deferred_event_id = NULL WHERE id = ?`, taskID); err != nil {
-			return db.TaskCloseOutcome{}, fmt.Errorf("clear hold: %w", err)
+		if err := clearHold(ctx, q, taskID); err != nil {
+			return db.TaskCloseOutcome{}, err
 		}
 	}
 	return db.TaskCloseOutcome{Closed: closed, ActiveConversationIDs: conversationIDs}, nil
+}
+
+// clearHold is the Postgres twin's.
+func clearHold(ctx context.Context, q queryer, taskID string) error {
+	if _, err := q.ExecContext(ctx, `
+		UPDATE tasks SET close_deferred_event_id = NULL, close_deferred_at = NULL WHERE id = ?
+	`, taskID); err != nil {
+		return fmt.Errorf("clear hold: %w", err)
+	}
+	return nil
 }
 
 // eventCloseState is the Postgres twin's.
@@ -1253,10 +1266,16 @@ func (s *taskStore) ApplyHeldCloseSystem(ctx context.Context, orgID, taskID, hel
 // workingConversationIDs drains the task's working conversation ids, oldest
 // first, and closes the cursor before returning.
 func workingConversationIDs(ctx context.Context, q queryer, taskID string) ([]string, error) {
+	return conversationIDsWhere(ctx, q, taskID, workingConversationSQL)
+}
+
+// conversationIDsWhere drains the ids of the task's conversations r matching
+// predicate, oldest first, and closes the cursor before returning.
+func conversationIDsWhere(ctx context.Context, q queryer, taskID, predicate string) ([]string, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT r.id FROM conversations r
 		 WHERE r.task_id = ?
-		   AND `+workingConversationSQL+`
+		   AND `+predicate+`
 		 ORDER BY r.started_at, r.id
 	`, taskID)
 	if err != nil {
@@ -1322,6 +1341,92 @@ func (s *taskStore) ListActiveCloseDeferralsSystem(ctx context.Context) ([]domai
 	return out, rows.Err()
 }
 
+// heldForSQL is a held close that began at least the bound modifier ago
+// (sqliteLeaseModifier of the negated duration), compared as text in the
+// layout the hold is stamped in.
+const heldForSQL = `close_deferred_at <= ` + sqliteNowPlusExpr
+
+func (s *taskStore) ListExpiredCloseDeferralsSystem(ctx context.Context, heldFor time.Duration) ([]domain.TaskCloseDeferral, error) {
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT `+sqliteTaskCloseDeferralColumns+`
+		  FROM tasks
+		 WHERE close_deferred_event_id IS NOT NULL
+		   AND `+heldForSQL+`
+		   AND status NOT IN ('done', 'dismissed')
+		   AND EXISTS (
+		       SELECT 1 FROM conversations r
+		        WHERE r.task_id = tasks.id
+		          AND `+expiringConversationSQL+`)
+		 ORDER BY org_id, id
+	`, sqliteLeaseModifier(-heldFor))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.TaskCloseDeferral
+	for rows.Next() {
+		d, err := scanTaskCloseDeferral(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+func (s *taskStore) ExpireHeldCloseSystem(ctx context.Context, orgID, taskID, heldEventID string, heldFor time.Duration) ([]string, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	var expired []string
+	err := inTx(ctx, s.q, func(q queryer) error {
+		var err error
+		expired, err = expireHeldClose(ctx, q, taskID, heldEventID, heldFor)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return expired, nil
+}
+
+// expireHeldClose is the Postgres twin's. The transaction is the lock: one
+// writer at a time.
+func expireHeldClose(ctx context.Context, q queryer, taskID, heldEventID string, heldFor time.Duration) ([]string, error) {
+	var expired bool
+	err := q.QueryRowContext(ctx, `
+		SELECT `+heldForSQL+` FROM tasks
+		 WHERE id = ? AND status NOT IN ('done', 'dismissed') AND close_deferred_event_id = ?
+	`, sqliteLeaseModifier(-heldFor), taskID, heldEventID).Scan(&expired)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && !expired) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read task: %w", err)
+	}
+	ids, err := conversationIDsWhere(ctx, q, taskID, expiringConversationSQL)
+	if err != nil {
+		return nil, fmt.Errorf("list expired conversations: %w", err)
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	if _, err := q.ExecContext(ctx, `
+		UPDATE blueprint_runs SET cancel_requested = 1
+		 WHERE status = 'running'
+		   AND cancel_requested = 0
+		   AND id IN (SELECT c.blueprint_run_id FROM conversations c
+		               WHERE c.id IN (`+strings.TrimRight(strings.Repeat("?, ", len(ids)), ", ")+`))
+	`, args...); err != nil {
+		return nil, fmt.Errorf("stamp run cancel intent: %w", err)
+	}
+	return ids, nil
+}
+
 func (s *taskStore) ClearCloseDeferralSystem(ctx context.Context, orgID, taskID, eventID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
@@ -1330,7 +1435,7 @@ func (s *taskStore) ClearCloseDeferralSystem(ctx context.Context, orgID, taskID,
 	err := inTx(ctx, s.q, func(q queryer) error {
 		res, err := q.ExecContext(ctx, `
 			UPDATE tasks
-			   SET close_deferred_event_id = NULL
+			   SET close_deferred_event_id = NULL, close_deferred_at = NULL
 			 WHERE id = ? AND close_deferred_event_id = ?
 		`, taskID, eventID)
 		if err != nil {

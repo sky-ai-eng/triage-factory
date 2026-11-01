@@ -2044,12 +2044,11 @@ func (s *conversationStore) HasPersonMessageSystem(ctx context.Context, orgID, c
 	var wrote bool
 	err := s.admin.QueryRowContext(ctx, `
 		SELECT EXISTS (
-			SELECT 1 FROM messages
-			WHERE org_id = $1 AND conversation_id = $2
-			  AND role = 'user' AND subtype IN ('', $3) AND user_id IS NOT NULL
-			  AND NOT (delivered = false AND window_state = 'inactive')
+			SELECT 1 FROM messages m_p
+			WHERE m_p.org_id = $1 AND m_p.conversation_id = $2
+			  AND `+personMessageSQL+`
 		)
-	`, orgID, conversationID, domain.MessageSubtypeInjectionSteer).Scan(&wrote)
+	`, orgID, conversationID).Scan(&wrote)
 	return wrote, err
 }
 

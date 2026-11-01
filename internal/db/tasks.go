@@ -787,8 +787,10 @@ type TaskStore interface {
 	//     step's answer), or with none and an unresolved deliverable whose
 	//     pull request is still open, holds the close:
 	//     close_deferred_event_id is set to closingEventID, over any close it
-	//     already held, and nothing else is written — no close, no audit row,
-	//     no cancel intent. Held is true, NewlyHeld says whether the task
+	//     already held, and close_deferred_at to the database's now when it
+	//     held none (a later closing event keeps the time the hold began), and
+	//     nothing else is written — no close, no audit row, no cancel intent.
+	//     Held is true, NewlyHeld says whether the task
 	//     held no close before this write, WorkingConversationIDs are the
 	//     working conversations, and AwaitingPerson says a deliverable made
 	//     it hold.
@@ -838,6 +840,41 @@ type TaskStore interface {
 	// org-wide by design: the sweep is one brain loop over all orgs, and the
 	// partial index on the deferral column keeps it to the rows that hold one.
 	ListActiveCloseDeferralsSystem(ctx context.Context) ([]domain.TaskCloseDeferral, error)
+
+	// ListExpiredCloseDeferralsSystem returns every deferral an active task
+	// in a live org has held for heldFor or longer, by the database's clock,
+	// while one of its conversations is still working that no person started
+	// or wrote to and nobody has asked to stop: work an event started, which
+	// the close note told to wrap up. Ordered by org then task id, for the
+	// close-hold sweep, which expires each through ExpireHeldCloseSystem. A
+	// person's work is told what happened without being told to stop, so its
+	// conversations never expire. Admin pool, org-wide by design, as
+	// ListActiveCloseDeferralsSystem is.
+	ListExpiredCloseDeferralsSystem(ctx context.Context, heldFor time.Duration) ([]domain.TaskCloseDeferral, error)
+
+	// ExpireHeldCloseSystem expires the work an event started under the
+	// close the task has held on heldEventID for heldFor or longer, for the
+	// close-hold sweep, which read that hold earlier. In one transaction, the
+	// task's row locked first: a task no longer active, whose hold no longer
+	// names heldEventID, or that has held it for less than heldFor, is left
+	// as it is and expired is empty. Otherwise expired are the conversations
+	// ListExpiredCloseDeferralsSystem would expire, and cancel intent is
+	// stamped on their running blueprint runs.
+	//
+	// The close stays held either way. The caller stops the expired
+	// conversations, and the sweep applies the close through
+	// ApplyHeldCloseSystem once nothing on the task is working, reading the
+	// deliverables they left only then; until then a stop that never landed
+	// is retried, since the conversation still works and nobody has asked it
+	// to stop.
+	//
+	// Whether a person drives a conversation is read in this transaction,
+	// which takes no lock a person's message waits on, as the close note's
+	// wording is chosen without one: a message that lands while the expiry
+	// runs does not keep its conversation from expiring. Admin pool. Exempt
+	// from the returned-row rule: it writes no task row, and the caller acts
+	// on the conversations.
+	ExpireHeldCloseSystem(ctx context.Context, orgID, taskID, heldEventID string, heldFor time.Duration) (expired []string, err error)
 
 	// ClearCloseDeferralSystem clears the task's deferral when it still names
 	// eventID — a compare-and-clear on the event the sweep read, so a
