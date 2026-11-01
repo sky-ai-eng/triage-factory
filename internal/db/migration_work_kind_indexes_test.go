@@ -10,7 +10,7 @@ import (
 )
 
 // The SQLite migration that creates the mergeability probe queue.
-const prMergeabilityFile = "migrations-sqlite/202610310008_pr_mergeability.sql"
+const prMergeabilityFile = "migrations-sqlite/202610310009_pr_mergeability.sql"
 
 // The SQLite migration that moves each kind's table onto the work-item block,
 // and the status literals and index names its previous lifecycle used, which
