@@ -4,10 +4,11 @@
 // injection, under the subtype that says what it is for:
 // injection:event for a new-event injection, injection:system-note for every
 // other note. A native loop reads the rows itself before its next model call.
-// An SDK conversation has them flushed — bundled into one <system-note> ahead
-// of the user's message — on its next resume (stagedInjectionsForResume,
-// wired into SendMessage); a new-event injection for a live SDK process is
-// steered in instead (deliverInjectionLive).
+// An SDK conversation has them flushed — bundled into one <system-note> with
+// its first message — when its next engagement starts
+// (stagedInjectionsForEngagement, read by a resume's prepends and a launch's
+// first turn); a new-event injection for a live SDK process is steered in
+// instead (deliverInjectionLive).
 //
 // Unlike the deliverable-change ledger (which DERIVES its terminal injections from
 // the deliverable rows, so it needs no queue), a producer here has no durable row
@@ -83,25 +84,89 @@ func (s *Spawner) stageInjection(ctx context.Context, orgID, conversationID, sub
 	return stored.ID, true
 }
 
-// stagedInjectionsForResume flushes a resuming run's durable staged-injection queue and
-// returns the bundled <system-note> block to prepend ahead of its user message —
-// every injection staged while the run was not running (TFAC-501). Returns ""
-// (prepend nothing) when nothing is staged or on any read error: feedback never
-// blocks a resume.
+// tellHeldClose tells a conversation an engagement is starting that its
+// task's close is held (TellTaskClosing). Every runtime reads staged notes
+// before its agent's first model call of an engagement, so the agent learns
+// the task is resolved before it does anything. The note is a transcript row
+// rather than a line in the conversation's system block, which is fixed for
+// the conversation's life: the hold can be cancelled after this engagement,
+// and a row says what was true when it was sent.
 //
-// The flush is destructive (DELETE … RETURNING), so an injection is delivered exactly
-// once even if two resumes race. This is the durable sibling of
-// deliverableLedgerForResume — SendMessage prepends both, so a resume that has both
-// a resolved deliverable and a staged injection carries two <system-note> blocks ahead of
-// the user's text.
-func (s *Spawner) stagedInjectionsForResume(ctx context.Context, orgID, conversationID string) string {
+// Work a person drives (a conversation a person delegated, or one a person has
+// written to) is told what happened without what to do about it
+// (personStarted). A task held for a person's deliverable is
+// engaged almost only that way, by the person asking for changes before they
+// resolve it. Best effort: a failed read or stage logs, and the engagement
+// runs without the note.
+func (s *Spawner) tellHeldClose(ctx context.Context, orgID string, conv *domain.Conversation, taskID string) {
+	if s.tasks == nil || s.events == nil {
+		return
+	}
+	hold, err := s.tasks.CloseDeferralForTaskSystem(ctx, orgID, taskID)
+	if err != nil {
+		delegateLog.Warn("read the task's held close failed; the engagement starts without the close note", "task_id", taskID, "error", err)
+		return
+	}
+	if hold == nil {
+		return
+	}
+	evt, err := s.events.GetSystem(ctx, orgID, hold.EventID)
+	if err != nil || evt == nil {
+		delegateLog.Warn("read the held close's event failed; the engagement starts without the close note", "task_id", taskID, "event_id", hold.EventID, "error", err)
+		return
+	}
+	s.tellTaskClosing(ctx, orgID, conv.ID, s.personStarted(ctx, orgID, conv), *evt)
+}
+
+// personStarted reports whether a person drives the work on conv: they
+// delegated the conversation, which every step of its blueprint inherits, or
+// they have written to it. Only a person's message wakes a conversation that
+// has run (staged notes ride whatever engagement runs next), so once one has
+// written, every engagement after is theirs, and the answer holds before
+// their message is delivered and after. A failed read answers false, and the
+// engagement is told to wrap up.
+func (s *Spawner) personStarted(ctx context.Context, orgID string, conv *domain.Conversation) bool {
+	if conv.CreatorUserID != "" {
+		return true
+	}
+	if s.conversations == nil {
+		return false
+	}
+	wrote, err := s.conversations.HasPersonMessageSystem(ctx, orgID, conv.ID)
+	if err != nil {
+		delegateLog.Warn("read whether a person wrote to the conversation failed; telling it of the held close", "conversation", conv.ID, "error", err)
+		return false
+	}
+	return wrote
+}
+
+// stagedInjectionsForEngagement flushes the conversation's durable
+// staged-injection queue and returns the bundled <system-note> block an SDK
+// engagement sends with its first message: every injection staged while the
+// run was not running. A resume puts it ahead of the person's message, and a
+// launch ahead of its continuation note or after its opening
+// (composeLaunchTurn). Returns "" (nothing to send) when nothing is staged or
+// on any read error: feedback never blocks an engagement.
+//
+// This is the durable sibling of deliverableLedgerForResume — SendMessage
+// prepends both, so a resume that has both a resolved deliverable and a staged
+// injection carries two <system-note> blocks ahead of the user's text.
+func (s *Spawner) stagedInjectionsForEngagement(ctx context.Context, orgID, conversationID string) string {
+	return domain.StagedInjectionBlock(s.flushStagedInjections(ctx, orgID, conversationID))
+}
+
+// flushStagedInjections claims every pending staged injection on the
+// conversation, oldest first, or none when nothing is staged or on any read
+// error. The flush marks the rows delivered in the statement that returns
+// them, so an injection is delivered exactly once even if two readers race.
+func (s *Spawner) flushStagedInjections(ctx context.Context, orgID, conversationID string) []domain.StagedInjection {
 	if s.stagedInjections == nil {
-		return ""
+		return nil
 	}
 	injections, err := s.stagedInjections.FlushPendingSystem(ctx, orgID, conversationID)
 	if err != nil {
-		delegateLog.Warn("staged-injection flush failed; resuming without the block", "conversation", conversationID, "error", err)
-		return ""
+		delegateLog.Warn("staged-injection flush failed; delivering without the block", "conversation", conversationID, "error", err)
+		return nil
 	}
-	return domain.StagedInjectionBlock(injections)
+	return injections
 }

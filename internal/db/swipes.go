@@ -92,7 +92,10 @@ type SwipeStore interface {
 	// stays a clean view of swipe-card decisions. Returns ok=false
 	// when no row matched (the public /requeue endpoint maps that
 	// to 404 instead of a silent 200 on a bogus id). It clears the
-	// claim and the source_status the claim recorded with it.
+	// claim and the source_status the claim recorded with it, and any
+	// held close: putting the task back in the queue overrides the event
+	// that resolved it, as reopening a closed task does, and the requeue's
+	// handler ends the conversations the close waited on.
 	RequeueTask(ctx context.Context, orgID string, taskID string) (ok bool, err error)
 
 	// ClearSnooze wakes a snoozed task early: status 'snoozed' →
@@ -130,7 +133,7 @@ type SwipeStore interface {
 	// need to read rows the requesting user did not write, which is why
 	// the Postgres one runs on the admin pool — see its own comment.
 	// Handlers map ok=false to 409. Like RequeueTask, a successful undo
-	// clears the claim and its source_status.
+	// clears the claim and its source_status, and any held close.
 	UndoLastSwipe(ctx context.Context, orgID string, taskID, userID string) (ok bool, err error)
 }
 

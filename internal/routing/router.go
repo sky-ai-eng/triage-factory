@@ -64,6 +64,12 @@ type Delegator interface {
 	// outcomes are delivered or staged where something will read them, and
 	// the caller records task_events 'injected'.
 	StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.InjectOutcome
+	// TellTaskClosing stages the note that evt resolved the conversation's
+	// task, delivered at its next tool boundary and never as a turn of its
+	// own, unless the conversation already has it. The held close tells each
+	// working conversation through it. Reports whether the conversation has
+	// the note. Signature matches *delegate.Spawner's method exactly.
+	TellTaskClosing(ctx context.Context, orgID, conversationID string, evt domain.Event) bool
 }
 
 // EventPublisher is the bus-publish seam the router uses to mirror the
@@ -95,34 +101,33 @@ type EventPublisher interface {
 type Router struct {
 	// One field per RouterDeps field, which documents each. The workers'
 	// doorbells below are the router's own.
-	prompts         dbpkg.PromptStore
-	blueprints      dbpkg.BlueprintStore
-	handlers        dbpkg.EventHandlerStore
-	agents          dbpkg.AgentStore
-	teamAgents      dbpkg.TeamAgentStore
-	users           dbpkg.UsersStore
-	tasks           dbpkg.TaskStore
-	conversations   dbpkg.ConversationStore
-	entities        dbpkg.EntityStore
-	firings         dbpkg.PendingFiringsStore
-	events          dbpkg.EventStore
-	eventQueue      dbpkg.EventQueueStore
-	externalActions dbpkg.ExternalActionStore
-	orgs            dbpkg.OrgsStore
-	teams           dbpkg.TeamsStore
-	teamRepos       dbpkg.TeamGitHubReposStore
-	jiraRules       dbpkg.JiraStatusRulesStore
-	linearRules     dbpkg.LinearTeamRulesStore
-	githubGroups    dbpkg.TeamGitHubGroupsStore
-	rederive        dbpkg.TaskReDeriveStore
-	mergeability    dbpkg.PRMergeabilityStore
-	sourceGate      *sourceGate // built over RouterDeps.EventSources; see source_gate.go
-	spawner         Delegator
-	scorer          Scorer
-	ws              *websocket.Hub
-	publisher       EventPublisher
-	executorID      string
-	bootEpoch       int64
+	prompts       dbpkg.PromptStore
+	blueprints    dbpkg.BlueprintStore
+	handlers      dbpkg.EventHandlerStore
+	agents        dbpkg.AgentStore
+	teamAgents    dbpkg.TeamAgentStore
+	users         dbpkg.UsersStore
+	tasks         dbpkg.TaskStore
+	conversations dbpkg.ConversationStore
+	entities      dbpkg.EntityStore
+	firings       dbpkg.PendingFiringsStore
+	events        dbpkg.EventStore
+	eventQueue    dbpkg.EventQueueStore
+	orgs          dbpkg.OrgsStore
+	teams         dbpkg.TeamsStore
+	teamRepos     dbpkg.TeamGitHubReposStore
+	jiraRules     dbpkg.JiraStatusRulesStore
+	linearRules   dbpkg.LinearTeamRulesStore
+	githubGroups  dbpkg.TeamGitHubGroupsStore
+	rederive      dbpkg.TaskReDeriveStore
+	mergeability  dbpkg.PRMergeabilityStore
+	sourceGate    *sourceGate // built over RouterDeps.EventSources; see source_gate.go
+	spawner       Delegator
+	scorer        Scorer
+	ws            *websocket.Hub
+	publisher     EventPublisher
+	executorID    string
+	bootEpoch     int64
 
 	// firingWake is the firing worker's doorbell: a conversation terminal
 	// sends on it (WakeFirings) so the task's next firing is claimed at once
@@ -144,8 +149,7 @@ type RouterDeps struct {
 	// toast. Required.
 	Prompts dbpkg.PromptStore
 	// Blueprints resolves a trigger's blueprint to its first step's prompt,
-	// which the per-(entity, prompt) breaker keys on, and reads the blueprint
-	// runs the close-deferral sweep waits on. Required.
+	// which the per-(entity, prompt) breaker keys on. Required.
 	Blueprints dbpkg.BlueprintStore
 	// Handlers is the event_handlers store: the rules and triggers an event
 	// matches, and the trigger a queued firing names. Required.
@@ -167,7 +171,9 @@ type RouterDeps struct {
 	// Tasks is task lifecycle: dedup, claims, closes and the breaker. Required.
 	Tasks dbpkg.TaskStore
 	// Conversations finds a task's live conversation: the busy half of the
-	// task gate, and the conversation an additive event folds into. Required.
+	// task gate, and the conversation an additive event folds into. The
+	// close-hold sweep reads whether a task's conversations still work.
+	// Required.
 	Conversations dbpkg.ConversationStore
 	// Entities is the closed-entity guard, the structural owner tier and the
 	// entity-terminating close cascade. Required.
@@ -181,9 +187,6 @@ type RouterDeps struct {
 	// EventQueue is the durable queue the drain worker (RunEventQueue) claims
 	// events from. Required.
 	EventQueue dbpkg.EventQueueStore
-	// ExternalActions is the ledger the close phase reads to tell whether a
-	// task's own run caused the event closing it. Required.
-	ExternalActions dbpkg.ExternalActionStore
 	// Orgs is per-org iteration for the terminal-state checker and the org
 	// settings team routing reads (hosts, the background jobs model).
 	// Required.
@@ -252,7 +255,6 @@ func (d RouterDeps) missing() []string {
 		{"Firings", d.Firings},
 		{"Events", d.Events},
 		{"EventQueue", d.EventQueue},
-		{"ExternalActions", d.ExternalActions},
 		{"Orgs", d.Orgs},
 		{"Teams", d.Teams},
 		{"TeamRepos", d.TeamRepos},
@@ -299,36 +301,35 @@ func NewRouter(deps RouterDeps) (*Router, error) {
 		return nil, fmt.Errorf("routing: RouterDeps missing required %s", strings.Join(missing, ", "))
 	}
 	return &Router{
-		prompts:         deps.Prompts,
-		blueprints:      deps.Blueprints,
-		handlers:        deps.Handlers,
-		agents:          deps.Agents,
-		teamAgents:      deps.TeamAgents,
-		users:           deps.Users,
-		tasks:           deps.Tasks,
-		conversations:   deps.Conversations,
-		entities:        deps.Entities,
-		firings:         deps.Firings,
-		events:          deps.Events,
-		eventQueue:      deps.EventQueue,
-		externalActions: deps.ExternalActions,
-		orgs:            deps.Orgs,
-		teams:           deps.Teams,
-		teamRepos:       deps.TeamRepos,
-		jiraRules:       deps.JiraRules,
-		linearRules:     deps.LinearRules,
-		githubGroups:    deps.GitHubGroups,
-		rederive:        deps.ReDerive,
-		mergeability:    deps.Mergeability,
-		sourceGate:      newSourceGate(deps.EventSources),
-		spawner:         deps.Spawner,
-		scorer:          deps.Scorer,
-		ws:              deps.WS,
-		publisher:       deps.Publisher,
-		executorID:      deps.ExecutorID,
-		bootEpoch:       deps.BootEpoch,
-		firingWake:      make(chan struct{}, 1),
-		rederiveWake:    make(chan struct{}, 1),
+		prompts:       deps.Prompts,
+		blueprints:    deps.Blueprints,
+		handlers:      deps.Handlers,
+		agents:        deps.Agents,
+		teamAgents:    deps.TeamAgents,
+		users:         deps.Users,
+		tasks:         deps.Tasks,
+		conversations: deps.Conversations,
+		entities:      deps.Entities,
+		firings:       deps.Firings,
+		events:        deps.Events,
+		eventQueue:    deps.EventQueue,
+		orgs:          deps.Orgs,
+		teams:         deps.Teams,
+		teamRepos:     deps.TeamRepos,
+		jiraRules:     deps.JiraRules,
+		linearRules:   deps.LinearRules,
+		githubGroups:  deps.GitHubGroups,
+		rederive:      deps.ReDerive,
+		mergeability:  deps.Mergeability,
+		sourceGate:    newSourceGate(deps.EventSources),
+		spawner:       deps.Spawner,
+		scorer:        deps.Scorer,
+		ws:            deps.WS,
+		publisher:     deps.Publisher,
+		executorID:    deps.ExecutorID,
+		bootEpoch:     deps.BootEpoch,
+		firingWake:    make(chan struct{}, 1),
+		rederiveWake:  make(chan struct{}, 1),
 	}, nil
 }
 

@@ -3,65 +3,27 @@ package routing
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"slices"
 	"testing"
 
 	"github.com/google/uuid"
-
-	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// A run whose own action produced the event that closes its task finishes
-// before the task closes: the close is held on the task and the sweep applies
-// it when the run ends. Every other task the event closes closes at once.
+// An event close that finds a working conversation on its task holds the
+// close and tells the conversation instead of stopping it; the sweep applies
+// the close once nothing on the task is working, if it still holds then.
 
-// pushedSHA is the commit enqueueCIPassed reports CI passing on.
-const pushedSHA = "abc123"
-
-// recordAgentAction writes a ledger row the run's agent performed on
-// conversationID, the way the agent's recording funnel does.
-func recordAgentAction(t *testing.T, database *sql.DB, conversationID string, a domain.ExternalAction) {
+// heldClose reads a task's held close event, "" for none.
+func heldClose(t *testing.T, database *sql.DB, taskID string) string {
 	t.Helper()
-	a.ConversationID = conversationID
-	a.PerformedBy = domain.PerformedByAgent
-	if a.Provider == "" {
-		a.Provider = domain.ProviderGitHub
+	var ev sql.NullString
+	if err := database.QueryRow(`SELECT close_deferred_event_id FROM tasks WHERE id = ?`, taskID).Scan(&ev); err != nil {
+		t.Fatalf("read task %s's held close: %v", taskID, err)
 	}
-	if a.Scope == "" {
-		a.Scope = "github.com"
-	}
-	if a.Target == "" {
-		a.Target = "owner/repo#1"
-	}
-	if a.Credential == "" {
-		a.Credential = domain.CredentialGitHubApp
-	}
-	if err := sqlitestore.New(database).ExternalActions.RecordSystem(t.Context(), runmode.LocalDefaultOrgID, a); err != nil {
-		t.Fatalf("record %s: %v", a.Action, err)
-	}
-}
-
-func recordAgentPush(t *testing.T, database *sql.DB, conversationID, sha string) {
-	t.Helper()
-	recordAgentAction(t, database, conversationID, domain.ExternalAction{
-		Action: domain.ActionBranchPushed, ExternalID: "refs/heads/tf/fix",
-		DetailJSON: `{"sha":"` + sha + `","new":false}`,
-	})
-}
-
-// taskDeferral reads a task's two deferral columns, "" for NULL.
-func taskDeferral(t *testing.T, database *sql.DB, taskID string) (eventID, blueprintRunID string) {
-	t.Helper()
-	var ev, run sql.NullString
-	if err := database.QueryRow(`SELECT close_deferred_event_id, close_deferred_blueprint_run_id FROM tasks WHERE id = ?`, taskID).Scan(&ev, &run); err != nil {
-		t.Fatalf("read task %s's deferral: %v", taskID, err)
-	}
-	return ev.String, run.String
+	return ev.String
 }
 
 func taskRow(t *testing.T, database *sql.DB, taskID string) (status, closeReason, closeEventType string) {
@@ -74,7 +36,7 @@ func taskRow(t *testing.T, database *sql.DB, taskID string) (status, closeReason
 }
 
 // secondCIFailedTask mints a ci_check_failed task for another check on the
-// entity: a task the same pass closes that no run is working on.
+// entity: a task the same pass closes that nothing is working on.
 func secondCIFailedTask(t *testing.T, r *Router, database *sql.DB, entityID, firstTaskID string) string {
 	t.Helper()
 	enqueueCIFailedCheck(t, database, entityID, "lint")
@@ -90,138 +52,129 @@ func secondCIFailedTask(t *testing.T, r *Router, database *sql.DB, entityID, fir
 	return ""
 }
 
-// deferredCIFixture is a ci_check_failed task whose running run pushed the
-// commit CI then passed on, with its close already deferred by that pass.
-type deferredCIFixture struct {
+// failRun leaves the run as a step that failed leaves it once its blueprint
+// has acted on the failure: the conversation and the run both failed.
+func failRun(t *testing.T, database *sql.DB, runID, convID string) {
+	t.Helper()
+	if _, err := database.Exec(`UPDATE conversations SET status = ? WHERE id = ?`, domain.StatusFailed, convID); err != nil {
+		t.Fatalf("fail conversation %s: %v", convID, err)
+	}
+	if _, err := database.Exec(`UPDATE blueprint_runs SET status = 'failed' WHERE id = ?`, runID); err != nil {
+		t.Fatalf("fail blueprint run %s: %v", runID, err)
+	}
+}
+
+// seedDraftPullRequest gives the conversation a draft pull request
+// deliverable about the pull request entityID names, one that awaits a
+// person's verdict while that entity is open.
+func seedDraftPullRequest(t *testing.T, database *sql.DB, convID, entityID string) {
+	t.Helper()
+	if _, err := database.Exec(`
+		INSERT INTO deliverables (id, conversation_id, org_id, team_id, provider, kind, scope, target, state, dedup_key, entity_id)
+		SELECT ?, id, org_id, team_id, 'github', 'pull_request', 'github.com', 'acme/widget#7', 'draft', 'held-close-' || id, ?
+		  FROM conversations WHERE id = ?
+	`, uuid.New().String(), entityID, convID); err != nil {
+		t.Fatalf("seed draft pull request on %s: %v", convID, err)
+	}
+}
+
+// heldCIFixture is a ci_check_failed task with a working conversation whose
+// close a CI pass has held, and a sibling ci_check_failed task with nothing
+// on it that the same pass closed.
+type heldCIFixture struct {
 	r                *Router
 	database         *sql.DB
 	sp               *stoppingSpawner
 	entityID, taskID string
+	otherID          string
 	runID, convID    string
 	eventID          string
 }
 
-func newDeferredCIFixture(t *testing.T, sourceID string) deferredCIFixture {
+func newHeldCIFixture(t *testing.T, sourceID string) heldCIFixture {
 	t.Helper()
 	database := newTestDB(t)
 	r := newQueueWorkerRouter(t, database)
 	sp := &stoppingSpawner{}
 	r.spawner = sp
 	entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, sourceID)
-	runID, convID := seedRunOnTask(t, database, taskID, "running", "")
-	recordAgentPush(t, database, convID, pushedSHA)
-	seedPRCheckRuns(t, database, entityID, domain.CheckRun{ID: 1, Name: "build", Status: "completed", Conclusion: "success"})
-	enqueueCIPassed(t, database, entityID, "build")
-	if err := r.drainEventQueue(context.Background()); err != nil {
-		t.Fatalf("drain the pass: %v", err)
-	}
-	eventID, deferredRun := taskDeferral(t, database, taskID)
-	if eventID == "" || deferredRun != runID {
-		t.Fatalf("setup: deferral = (%q, %q), want the pass and run %s", eventID, deferredRun, runID)
-	}
-	return deferredCIFixture{r: r, database: database, sp: sp, entityID: entityID, taskID: taskID, runID: runID, convID: convID, eventID: eventID}
-}
-
-func setRunStatus(t *testing.T, database *sql.DB, runID, status string) {
-	t.Helper()
-	if _, err := database.Exec(`UPDATE blueprint_runs SET status = ? WHERE id = ?`, status, runID); err != nil {
-		t.Fatalf("set run %s status %s: %v", runID, status, err)
-	}
-}
-
-func setConversationStatus(t *testing.T, database *sql.DB, convID, status string) {
-	t.Helper()
-	if _, err := database.Exec(`UPDATE conversations SET status = ? WHERE id = ?`, status, convID); err != nil {
-		t.Fatalf("set conversation %s status %s: %v", convID, status, err)
-	}
-}
-
-// TestCloseDeferral_CIPassFromTheRunsPushDefersItsTask is the headline. The
-// run pushed the fix CI passed on: its task stays open with the close held,
-// and nothing stops the run. The pass's other ci_check_failed task, which no
-// run is working on, closes as it always has.
-func TestCloseDeferral_CIPassFromTheRunsPushDefersItsTask(t *testing.T) {
-	database := newTestDB(t)
-	r := newQueueWorkerRouter(t, database)
-	sp := &stoppingSpawner{}
-	r.spawner = sp
-
-	entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, "owner/repo#own-push")
 	otherID := secondCIFailedTask(t, r, database, entityID, taskID)
 	runID, convID := seedRunOnTask(t, database, taskID, "running", "")
-	recordAgentPush(t, database, convID, pushedSHA)
 	seedPRCheckRuns(t, database, entityID,
 		domain.CheckRun{ID: 1, Name: "build", Status: "completed", Conclusion: "success"},
 		domain.CheckRun{ID: 2, Name: "lint", Status: "completed", Conclusion: "success"},
 	)
-
 	enqueueCIPassed(t, database, entityID, "build")
 	if err := r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("drain the pass: %v", err)
 	}
+	eventID := heldClose(t, database, taskID)
+	if eventID == "" {
+		t.Fatal("setup: the pass held no close")
+	}
+	return heldCIFixture{r: r, database: database, sp: sp, entityID: entityID, taskID: taskID, otherID: otherID, runID: runID, convID: convID, eventID: eventID}
+}
 
-	if status, _, _ := taskRow(t, database, taskID); status == "done" {
-		t.Fatal("the run's task closed under it")
+// TestCloseHold_WorkingConversationHoldsTheClose is the headline: the pass
+// holds the close of the task a conversation is working on, stops nothing,
+// tears nothing down, and tells the conversation once. The sibling task
+// nothing is working on closes now.
+func TestCloseHold_WorkingConversationHoldsTheClose(t *testing.T) {
+	f := newHeldCIFixture(t, "owner/repo#held")
+
+	if status, _, _ := taskRow(t, f.database, f.taskID); status == "done" {
+		t.Fatal("the worked-on task closed under its conversation")
 	}
-	if eventID, deferredRun := taskDeferral(t, database, taskID); eventID == "" || deferredRun != runID {
-		t.Errorf("deferral = (%q, %q), want the pass and run %s", eventID, deferredRun, runID)
+	if got := f.sp.stoppedIDs(); len(got) != 0 {
+		t.Errorf("stopped = %v, want nothing", got)
 	}
-	if got := sp.stoppedIDs(); slices.Contains(got, convID) {
-		t.Errorf("the run's conversation was stopped: %v", got)
-	}
-	if cancelRequested(t, database, runID) {
+	if cancelRequested(t, f.database, f.runID) {
 		t.Error("the run was called off")
 	}
-	if n := closeAuditCount(t, database, taskID); n != 0 {
-		t.Errorf("close audit rows on the deferred task = %d, want 0", n)
+	if n := closeAuditCount(t, f.database, f.taskID); n != 0 {
+		t.Errorf("close audit rows on the held task = %d, want 0", n)
 	}
-	if slices.Contains(sp.tornDownCopy(), taskID) {
-		t.Error("the deferred task's deliverables were torn down")
+	if got := f.sp.notedIDs(); !slices.Equal(got, []string{f.convID}) {
+		t.Errorf("noted = %v, want [%s]", got, f.convID)
 	}
-	if status, reason, _ := taskRow(t, database, otherID); status != "done" || reason != "auto_closed_by_event" {
+	if status, reason, _ := taskRow(t, f.database, f.otherID); status != "done" || reason != "auto_closed_by_event" {
 		t.Errorf("other task = (%q, %q), want closed by the event", status, reason)
 	}
-}
-
-// TestCloseDeferral_StoppedRunGetsNoDeferral pins the first condition: a run
-// whose newest conversation is parked open without its step's conclusion is
-// stopped, so the pass closes its task now, exactly as it would have before.
-func TestCloseDeferral_StoppedRunGetsNoDeferral(t *testing.T) {
-	database := newTestDB(t)
-	r := newQueueWorkerRouter(t, database)
-	r.spawner = &stoppingSpawner{}
-
-	entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, "owner/repo#stopped-run")
-	_, convID := seedRunOnTask(t, database, taskID, "running", domain.StatusOpen)
-	recordAgentPush(t, database, convID, pushedSHA)
-	seedPRCheckRuns(t, database, entityID, domain.CheckRun{ID: 1, Name: "build", Status: "completed", Conclusion: "success"})
-
-	enqueueCIPassed(t, database, entityID, "build")
-	if err := r.drainEventQueue(context.Background()); err != nil {
-		t.Fatalf("drain the pass: %v", err)
-	}
-
-	if status, _, _ := taskRow(t, database, taskID); status != "done" {
-		t.Errorf("task status = %q, want done: a stopped run gets no deferral", status)
-	}
-	if eventID, _ := taskDeferral(t, database, taskID); eventID != "" {
-		t.Errorf("a stopped run's task was deferred on %s", eventID)
+	if got := f.sp.tornDownCopy(); !slices.Equal(got, []string{f.otherID}) {
+		t.Errorf("teardowns = %v, want only the closed task %s", got, f.otherID)
 	}
 }
 
-// TestCloseDeferral_TerminatingCloseDefersTheCausingTask pins the terminating
-// arm: the run merged its pull request, so its task is held while the merge
-// closes the entity's other task and the entity itself, in one transaction.
-func TestCloseDeferral_TerminatingCloseDefersTheCausingTask(t *testing.T) {
+// TestCloseHold_SecondClosingEventSendsNoSecondNote: a later closing event
+// while the close is held takes its place, and the conversations, told
+// already, are not told again.
+func TestCloseHold_SecondClosingEventSendsNoSecondNote(t *testing.T) {
+	f := newHeldCIFixture(t, "owner/repo#held-twice")
+
+	enqueueCIPassed(t, f.database, f.entityID, "lint")
+	if err := f.r.drainEventQueue(context.Background()); err != nil {
+		t.Fatalf("drain the second pass: %v", err)
+	}
+
+	if ev := heldClose(t, f.database, f.taskID); ev == "" || ev == f.eventID {
+		t.Errorf("held close = %q, want the second pass's event", ev)
+	}
+	if got := f.sp.notedIDs(); len(got) != 1 {
+		t.Errorf("noted = %v, want the one note the first pass sent", got)
+	}
+}
+
+// TestCloseHold_TerminatingCloseHoldsAndTells: a merge closes the entity and
+// its idle task, and holds the worked-on task's close and tells its
+// conversation, in the same pass.
+func TestCloseHold_TerminatingCloseHoldsAndTells(t *testing.T) {
 	database := newTestDB(t)
 	r := newQueueWorkerRouter(t, database)
 	sp := &stoppingSpawner{}
 	r.spawner = sp
-
-	entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, "owner/repo#own-merge")
+	entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, "owner/repo#merged-held")
 	otherID := secondCIFailedTask(t, r, database, entityID, taskID)
-	runID, convID := seedRunOnTask(t, database, taskID, "running", "")
-	recordAgentAction(t, database, convID, domain.ExternalAction{Action: domain.ActionPRMerged, EntityID: entityID})
+	_, convID := seedRunOnTask(t, database, taskID, "running", "")
 
 	enqueueMerged(t, database, entityID)
 	if err := r.drainEventQueue(context.Background()); err != nil {
@@ -233,568 +186,243 @@ func TestCloseDeferral_TerminatingCloseDefersTheCausingTask(t *testing.T) {
 		t.Fatalf("read entity: %v", err)
 	}
 	if state != "closed" {
-		t.Errorf("entity state = %q, want closed: the entity closes whether or not a task deferred", state)
+		t.Errorf("entity state = %q, want closed", state)
 	}
-	if status, _, _ := taskRow(t, database, taskID); status == "done" {
-		t.Error("the merging run's task closed under it")
+	if heldClose(t, database, taskID) == "" {
+		t.Error("the worked-on task's close was not held")
 	}
-	if eventID, deferredRun := taskDeferral(t, database, taskID); eventID == "" || deferredRun != runID {
-		t.Errorf("deferral = (%q, %q), want the merge and run %s", eventID, deferredRun, runID)
-	}
-	if cancelRequested(t, database, runID) || slices.Contains(sp.stoppedIDs(), convID) {
-		t.Error("the merging run was stopped")
+	if got := sp.notedIDs(); !slices.Equal(got, []string{convID}) {
+		t.Errorf("noted = %v, want [%s]", got, convID)
 	}
 	if status, reason, _ := taskRow(t, database, otherID); status != "done" || reason != "entity_closed" {
 		t.Errorf("other task = (%q, %q), want closed with entity_closed", status, reason)
 	}
 }
 
-// TestCloseDeferral_IssueCompletionMatchesTheRunsLastTransition pins the
-// transition matcher on the Jira and Linear completions: the run's newest
-// issue_transitioned row on the entity explains the completion when its
-// to_state is the status the issue finished in, ignoring case, and not when
-// it names another status. Only the newest counts: a run that moved the issue
-// to done and then back did not cause its completion. The transitions are
-// written back to back, inside one second on SQLite, so the write order is
-// what decides which is newest.
-func TestCloseDeferral_IssueCompletionMatchesTheRunsLastTransition(t *testing.T) {
-	cases := []struct {
-		name, eventType string
-		toStates        []string // in the order the run made them
-		final           string
-		want            bool
-	}{
-		{"jira_same_status_other_case", domain.EventJiraIssueCompleted, []string{"Done"}, "DONE", true},
-		{"jira_other_status", domain.EventJiraIssueCompleted, []string{"Done"}, "Closed", false},
-		{"jira_done_then_back", domain.EventJiraIssueCompleted, []string{"Done", "In Progress"}, "Done", false},
-		{"jira_back_then_done", domain.EventJiraIssueCompleted, []string{"In Progress", "Done"}, "Done", true},
-		{"linear_same_status_other_case", domain.EventLinearIssueCompleted, []string{"done"}, "Done", true},
-		{"linear_other_status", domain.EventLinearIssueCompleted, []string{"Done"}, "Canceled", false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			database := newTestDB(t)
-			r := newQueueWorkerRouter(t, database)
-			entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, "owner/repo#"+tc.name)
-			runID, convID := seedRunOnTask(t, database, taskID, "running", "")
-			provider, scope := domain.ProviderJira, "example.atlassian.net"
-			if tc.eventType == domain.EventLinearIssueCompleted {
-				provider, scope = domain.ProviderLinear, "linear-workspace"
-			}
-			for _, to := range tc.toStates {
-				recordAgentAction(t, database, convID, domain.ExternalAction{
-					Provider: provider, Scope: scope, Action: domain.ActionIssueTransitioned,
-					Target: "SKY-1", EntityID: entityID, ToState: to, ObjectKind: domain.ObjectKindIssue,
-				})
-			}
-
-			var meta []byte
-			if tc.eventType == domain.EventJiraIssueCompleted {
-				meta, _ = json.Marshal(events.JiraIssueCompletedMetadata{IssueKey: "SKY-1", FinalStatus: tc.final})
-			} else {
-				meta, _ = json.Marshal(events.LinearIssueCompletedMetadata{FinalStatus: tc.final})
-			}
-			evt := domain.Event{ID: uuid.New().String(), EventType: tc.eventType, MetadataJSON: string(meta)}
-
-			rel := terminatingRelationFor(tc.eventType)
-			if rel == nil {
-				t.Fatalf("no terminating relation for %s", tc.eventType)
-			}
-			got, err := r.causingRun(t.Context(), runmode.LocalDefaultOrgID, evt, entityID, rel, taskID)
-			if err != nil {
-				t.Fatalf("causingRun: %v", err)
-			}
-			if want := map[bool]string{true: runID, false: ""}[tc.want]; got != want {
-				t.Errorf("causingRun = %q, want %q", got, want)
-			}
-		})
-	}
-}
-
-// TestCloseDeferral_PRTerminationMatchesItsOwnAction pins the pull request
-// matcher's two arms: a pr_merged row explains github:pr:merged and a
-// pr_closed row github:pr:closed, each on the event's entity, and neither
-// explains the other.
-func TestCloseDeferral_PRTerminationMatchesItsOwnAction(t *testing.T) {
-	cases := []struct {
-		name, eventType, action string
-		want                    bool
-	}{
-		{"merged_by_merge", domain.EventGitHubPRMerged, domain.ActionPRMerged, true},
-		{"closed_by_close", domain.EventGitHubPRClosed, domain.ActionPRClosed, true},
-		{"merged_not_by_close", domain.EventGitHubPRMerged, domain.ActionPRClosed, false},
-		{"closed_not_by_merge", domain.EventGitHubPRClosed, domain.ActionPRMerged, false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			database := newTestDB(t)
-			r := newQueueWorkerRouter(t, database)
-			entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, "owner/repo#"+tc.name)
-			runID, convID := seedRunOnTask(t, database, taskID, "running", "")
-			recordAgentAction(t, database, convID, domain.ExternalAction{Action: tc.action, EntityID: entityID})
-
-			evt := domain.Event{ID: uuid.New().String(), EventType: tc.eventType, MetadataJSON: "{}"}
-			got, err := r.causingRun(t.Context(), runmode.LocalDefaultOrgID, evt, entityID, terminatingRelationFor(tc.eventType), taskID)
-			if err != nil {
-				t.Fatalf("causingRun: %v", err)
-			}
-			if want := map[bool]string{true: runID, false: ""}[tc.want]; got != want {
-				t.Errorf("causingRun = %q, want %q", got, want)
-			}
-		})
-	}
-}
-
-// enqueueClosed durably enqueues the terminating github:pr:closed event.
-func enqueueClosed(t *testing.T, database *sql.DB, entityID string) {
-	t.Helper()
-	eid := entityID
-	meta, _ := json.Marshal(events.GitHubPRClosedMetadata{Author: "aidan", Repo: "owner/repo", PRNumber: 1, ClosedBy: "aidan"})
-	if _, err := sqlitestore.New(database).EventQueue.Enqueue(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
-		OrgID:        runmode.LocalDefaultOrgID,
-		EntityID:     &eid,
-		EventType:    domain.EventGitHubPRClosed,
-		MetadataJSON: string(meta),
-	}, ""); err != nil {
-		t.Fatalf("enqueue pr:closed: %v", err)
-	}
-}
-
-// pollCyclesPass moves every recorded event and ledger row an hour into the
-// past. It stands in for the poll cycles between one close and the next,
-// which a test otherwise runs inside one second, where SQLite's whole-second
-// ledger stamps cannot place a row written after a close later than it.
-func pollCyclesPass(t *testing.T, database *sql.DB) {
-	t.Helper()
-	if _, err := database.Exec(`UPDATE events SET created_at = datetime(created_at, '-1 hour')`); err != nil {
-		t.Fatalf("age events: %v", err)
-	}
-	if _, err := database.Exec(`UPDATE external_actions SET occurred_at = datetime(occurred_at, '-1 hour')`); err != nil {
-		t.Fatalf("age ledger rows: %v", err)
-	}
-}
-
-// reopenEntity is the tracker's reactivation of a closed entity it saw open
-// again, a poll cycle after the close.
-func reopenEntity(t *testing.T, database *sql.DB, entityID string) {
-	t.Helper()
-	pollCyclesPass(t, database)
-	if _, err := database.Exec(`UPDATE entities SET state = 'active', closed_at = NULL WHERE id = ?`, entityID); err != nil {
-		t.Fatalf("reopen entity: %v", err)
-	}
-}
-
-// newDeferredCloseThenReopenFixture is a ci_check_failed task whose running
-// run closed its pull request, with the task's close held by that close, and
-// the pull request reopened since while the run keeps working.
-func newDeferredCloseThenReopenFixture(t *testing.T, sourceID string) deferredCIFixture {
-	t.Helper()
-	database := newTestDB(t)
-	r := newQueueWorkerRouter(t, database)
+// TestCloseHold_ReassignmentClosesAtOnce pins the exception: a task of the
+// closing event's own type closes under a working conversation, which is
+// stopped, so the new assignment mints the new assignee's team a task of its
+// own instead of bumping the old one.
+func TestCloseHold_ReassignmentClosesAtOnce(t *testing.T) {
+	database, router, _, teamB, entityID := reassignFixture(t)
 	sp := &stoppingSpawner{}
-	r.spawner = sp
-	entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, sourceID)
-	runID, convID := seedRunOnTask(t, database, taskID, "running", "")
-	recordAgentAction(t, database, convID, domain.ExternalAction{Action: domain.ActionPRClosed, EntityID: entityID})
-	enqueueClosed(t, database, entityID)
-	if err := r.drainEventQueue(context.Background()); err != nil {
-		t.Fatalf("drain the run's close: %v", err)
+	router.spawner = sp
+	mustHandle(t, router, linearEvent(domain.EventLinearIssueAssigned, entityID, "lt-eng", "lu-alice"))
+	first := activeOfType(t, database, entityID, domain.EventLinearIssueAssigned)
+	if len(first) != 1 {
+		t.Fatalf("after the first assignment: %d tasks, want 1", len(first))
 	}
-	eventID, deferredRun := taskDeferral(t, database, taskID)
-	if eventID == "" || deferredRun != runID {
-		t.Fatalf("setup: deferral = (%q, %q), want the close and run %s", eventID, deferredRun, runID)
+	_, convID := seedRunOnTask(t, database, first[0].ID, "running", "")
+
+	mustHandle(t, router, linearEvent(domain.EventLinearIssueAssigned, entityID, "lt-eng", "lu-bob"))
+
+	if status, _, _ := taskRow(t, database, first[0].ID); status != "done" {
+		t.Errorf("the old assignment's task = %q, want done", status)
 	}
-	reopenEntity(t, database, entityID)
-	return deferredCIFixture{r: r, database: database, sp: sp, entityID: entityID, taskID: taskID, runID: runID, convID: convID, eventID: eventID}
+	if got := sp.stoppedIDs(); !slices.Equal(got, []string{convID}) {
+		t.Errorf("stopped = %v, want [%s]", got, convID)
+	}
+	active := activeOfType(t, database, entityID, domain.EventLinearIssueAssigned)
+	if len(active) != 1 || active[0].ID == first[0].ID || teamIDValue(&active[0]) != teamB {
+		t.Errorf("active assigned tasks = %+v, want one new task owned by team B", active)
+	}
 }
 
-// TestCloseDeferral_PersonsCloseAfterAReopenStopsTheRun pins that a ledger
-// row explains one close: the run closed the pull request and a person
-// reopened it, so the person's next close is not the run's. It closes the
-// task and stops the run the way a close the run did not cause always has.
-func TestCloseDeferral_PersonsCloseAfterAReopenStopsTheRun(t *testing.T) {
-	f := newDeferredCloseThenReopenFixture(t, "owner/repo#close-reopen-person")
+// TestCloseHold_OwnEventArrivingAgainCancelsTheHold: the task's own event
+// arriving again says the situation is live again, so once nothing is
+// working the sweep leaves the task open.
+func TestCloseHold_OwnEventArrivingAgainCancelsTheHold(t *testing.T) {
+	f := newHeldCIFixture(t, "owner/repo#held-then-failed")
 
-	enqueueClosed(t, f.database, f.entityID)
+	enqueueCIFailedCheck(t, f.database, f.entityID, "build")
 	if err := f.r.drainEventQueue(context.Background()); err != nil {
-		t.Fatalf("drain the person's close: %v", err)
+		t.Fatalf("drain the second failure: %v", err)
 	}
+	failRun(t, f.database, f.runID, f.convID)
+	f.r.sweepCloseDeferrals(t.Context())
 
-	if status, reason, eventType := taskRow(t, f.database, f.taskID); status != "done" || reason != "entity_closed" || eventType != domain.EventGitHubPRClosed {
-		t.Errorf("task = (%q, %q, %q), want done by the person's close", status, reason, eventType)
+	if status, _, _ := taskRow(t, f.database, f.taskID); status == "done" {
+		t.Error("the sweep closed a task its own event reopened")
 	}
-	if !slices.Contains(f.sp.stoppedIDs(), f.convID) {
-		t.Errorf("stops = %v, want the run's conversation %s", f.sp.stoppedIDs(), f.convID)
-	}
-	if !cancelRequested(t, f.database, f.runID) {
-		t.Error("the run was not called off")
+	if ev := heldClose(t, f.database, f.taskID); ev != "" {
+		t.Errorf("held close = %q after the task's own event, want none", ev)
 	}
 }
 
-// TestCloseDeferral_RunsOwnCloseAfterAReopenDefers pins the other side: the
-// run closed the pull request, a person reopened it, and the run closed it
-// again. The second close is the run's own, written after the first, so it
-// is held like the first.
-func TestCloseDeferral_RunsOwnCloseAfterAReopenDefers(t *testing.T) {
-	f := newDeferredCloseThenReopenFixture(t, "owner/repo#close-reopen-run")
-	recordAgentAction(t, f.database, f.convID, domain.ExternalAction{Action: domain.ActionPRClosed, EntityID: f.entityID})
+// TestCloseHoldSweep_LeavesAHoldCancelledSinceItsReadAlone: the sweep settles
+// the holds it listed, and the task's own event can cancel one in between.
+// The pass still admitting the close by then (the checks still pass) does not
+// close the task or bring the hold back.
+func TestCloseHoldSweep_LeavesAHoldCancelledSinceItsReadAlone(t *testing.T) {
+	f := newHeldCIFixture(t, "owner/repo#sweep-cancelled")
+	read := domain.TaskCloseDeferral{OrgID: runmode.LocalDefaultOrgID, TaskID: f.taskID, EventID: f.eventID}
 
-	enqueueClosed(t, f.database, f.entityID)
+	enqueueCIFailedCheck(t, f.database, f.entityID, "build")
 	if err := f.r.drainEventQueue(context.Background()); err != nil {
-		t.Fatalf("drain the run's second close: %v", err)
+		t.Fatalf("drain the second failure: %v", err)
+	}
+	failRun(t, f.database, f.runID, f.convID)
+	closed, err := f.r.settleCloseDeferral(t.Context(), read)
+	if err != nil {
+		t.Fatalf("settle: %v", err)
 	}
 
-	if status, _, _ := taskRow(t, f.database, f.taskID); status == "done" {
-		t.Fatal("the run's task closed under it")
+	if status, _, _ := taskRow(t, f.database, f.taskID); closed || status == "done" {
+		t.Error("the sweep closed a task on a hold its own event cancelled")
 	}
-	eventID, deferredRun := taskDeferral(t, f.database, f.taskID)
-	if eventID == f.eventID || deferredRun != f.runID {
-		t.Errorf("deferral = (%q, %q), want the second close and run %s", eventID, deferredRun, f.runID)
-	}
-	if cancelRequested(t, f.database, f.runID) || slices.Contains(f.sp.stoppedIDs(), f.convID) {
-		t.Error("the closing run was stopped")
+	if ev := heldClose(t, f.database, f.taskID); ev != "" {
+		t.Errorf("held close = %q after settling a cancelled hold, want none", ev)
 	}
 }
 
-// TestCloseDeferral_IssueCompletionAfterAReopenMatchesOnlyTheRunsLaterMove
-// pins the transition matcher across a reopen, for Jira and Linear: the run
-// moved the issue to Done, it completed, and a person reopened it. A person's
-// move back to Done is not the run's; the run's own move after the reopen is.
-func TestCloseDeferral_IssueCompletionAfterAReopenMatchesOnlyTheRunsLaterMove(t *testing.T) {
-	cases := []struct {
-		name, eventType string
-		runMovesItAgain bool
-		wantCausedByRun bool
-	}{
-		{"jira_persons_done", domain.EventJiraIssueCompleted, false, false},
-		{"jira_runs_done", domain.EventJiraIssueCompleted, true, true},
-		{"linear_persons_done", domain.EventLinearIssueCompleted, false, false},
-		{"linear_runs_done", domain.EventLinearIssueCompleted, true, true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			database := newTestDB(t)
-			r := newQueueWorkerRouter(t, database)
-			entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, "owner/repo#"+tc.name)
-			runID, convID := seedRunOnTask(t, database, taskID, "running", "")
-			provider, scope := domain.ProviderJira, "example.atlassian.net"
-			meta, _ := json.Marshal(events.JiraIssueCompletedMetadata{IssueKey: "SKY-1", FinalStatus: "Done"})
-			if tc.eventType == domain.EventLinearIssueCompleted {
-				provider, scope = domain.ProviderLinear, "linear-workspace"
-				meta, _ = json.Marshal(events.LinearIssueCompletedMetadata{FinalStatus: "Done"})
-			}
-			moveToDone := func() {
-				recordAgentAction(t, database, convID, domain.ExternalAction{
-					Provider: provider, Scope: scope, Action: domain.ActionIssueTransitioned,
-					Target: "SKY-1", EntityID: entityID, ToState: "Done", ObjectKind: domain.ObjectKindIssue,
-				})
-			}
-			complete := func() domain.Event {
-				evt := domain.Event{EntityID: &entityID, EventType: tc.eventType, MetadataJSON: string(meta)}
-				id, err := sqlitestore.New(database).Events.RecordSystem(t.Context(), runmode.LocalDefaultOrgID, evt)
-				if err != nil {
-					t.Fatalf("record %s: %v", tc.eventType, err)
-				}
-				evt.ID = id
-				return evt
-			}
-
-			moveToDone()
-			complete()
-			// A person reopens the issue, and the tracker sees it a poll
-			// cycle later.
-			pollCyclesPass(t, database)
-			if tc.runMovesItAgain {
-				moveToDone()
-			}
-			evt := complete()
-
-			got, err := r.causingRun(t.Context(), runmode.LocalDefaultOrgID, evt, entityID, terminatingRelationFor(tc.eventType), taskID)
-			if err != nil {
-				t.Fatalf("causingRun: %v", err)
-			}
-			if want := map[bool]string{true: runID, false: ""}[tc.wantCausedByRun]; got != want {
-				t.Errorf("causingRun = %q, want %q", got, want)
-			}
-		})
-	}
-}
-
-// TestCloseDeferral_CancelRequestedRunGetsNoDeferral pins the stopped check on
-// the run itself: a run someone called off is stopped while its conversation
-// still shows it working, so the pass closes its task now.
-func TestCloseDeferral_CancelRequestedRunGetsNoDeferral(t *testing.T) {
-	database := newTestDB(t)
-	r := newQueueWorkerRouter(t, database)
-	r.spawner = &stoppingSpawner{}
-
-	entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, "owner/repo#called-off")
-	runID, convID := seedRunOnTask(t, database, taskID, "running", "")
-	if _, err := database.Exec(`UPDATE blueprint_runs SET cancel_requested = 1 WHERE id = ?`, runID); err != nil {
-		t.Fatalf("call the run off: %v", err)
-	}
-	recordAgentPush(t, database, convID, pushedSHA)
-	seedPRCheckRuns(t, database, entityID, domain.CheckRun{ID: 1, Name: "build", Status: "completed", Conclusion: "success"})
-
-	enqueueCIPassed(t, database, entityID, "build")
-	if err := r.drainEventQueue(context.Background()); err != nil {
-		t.Fatalf("drain the pass: %v", err)
-	}
-
-	if status, _, _ := taskRow(t, database, taskID); status != "done" {
-		t.Errorf("task status = %q, want done: a called-off run gets no deferral", status)
-	}
-	if eventID, _ := taskDeferral(t, database, taskID); eventID != "" {
-		t.Errorf("a called-off run's task was deferred on %s", eventID)
-	}
-}
-
-// TestCloseDeferral_LaterEventFromTheSameRunOverwritesTheDeferral pins the
-// overwrite: the run's push turned CI green and its close was held, and then
-// the same run merged the pull request. The merge's deferral replaces the
-// pass's, stamped in the transaction that closes the entity.
-func TestCloseDeferral_LaterEventFromTheSameRunOverwritesTheDeferral(t *testing.T) {
-	f := newDeferredCIFixture(t, "owner/repo#pass-then-merge")
-	recordAgentAction(t, f.database, f.convID, domain.ExternalAction{Action: domain.ActionPRMerged, EntityID: f.entityID})
-
-	enqueueMerged(t, f.database, f.entityID)
-	if err := f.r.drainEventQueue(context.Background()); err != nil {
-		t.Fatalf("drain the merge: %v", err)
-	}
-
-	eventID, deferredRun := taskDeferral(t, f.database, f.taskID)
-	if eventID == f.eventID || deferredRun != f.runID {
-		t.Fatalf("deferral = (%q, %q), want a newer event and run %s", eventID, deferredRun, f.runID)
-	}
-	var eventType string
-	if err := f.database.QueryRow(`SELECT event_type FROM events WHERE id = ?`, eventID).Scan(&eventType); err != nil {
-		t.Fatalf("read the deferral's event: %v", err)
-	}
-	if eventType != domain.EventGitHubPRMerged {
-		t.Errorf("deferral names a %s event, want the merge", eventType)
-	}
-	if status, _, _ := taskRow(t, f.database, f.taskID); status == "done" {
-		t.Error("the run's task closed under it")
-	}
-}
-
-// newDeferredMergeFixture is a ci_check_failed task whose running run merged
-// its pull request, with the task's close held by that merge and the entity
-// closed.
-func newDeferredMergeFixture(t *testing.T, sourceID string) deferredCIFixture {
-	t.Helper()
-	database := newTestDB(t)
-	r := newQueueWorkerRouter(t, database)
-	sp := &stoppingSpawner{}
-	r.spawner = sp
-	entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, sourceID)
-	runID, convID := seedRunOnTask(t, database, taskID, "running", "")
-	recordAgentAction(t, database, convID, domain.ExternalAction{Action: domain.ActionPRMerged, EntityID: entityID})
-	enqueueMerged(t, database, entityID)
-	if err := r.drainEventQueue(context.Background()); err != nil {
-		t.Fatalf("drain the merge: %v", err)
-	}
-	eventID, deferredRun := taskDeferral(t, database, taskID)
-	if eventID == "" || deferredRun != runID {
-		t.Fatalf("setup: deferral = (%q, %q), want the merge and run %s", eventID, deferredRun, runID)
-	}
-	return deferredCIFixture{r: r, database: database, sp: sp, entityID: entityID, taskID: taskID, runID: runID, convID: convID, eventID: eventID}
-}
-
-// concludeRun marks the run completed with its step conversation parked on
-// its verdict, the shape a run that finished cleanly leaves.
-func concludeRun(t *testing.T, database *sql.DB, runID, convID string) {
-	t.Helper()
-	setRunStatus(t, database, runID, "completed")
-	if _, err := database.Exec(`UPDATE conversations SET status = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?`, domain.StatusOpen, convID); err != nil {
-		t.Fatalf("conclude conversation %s: %v", convID, err)
-	}
-}
-
-// TestCloseDeferralSweep_CompletedRunAppliesATerminatingClose pins the
-// terminating arm of a completed run: the run merged its pull request and
-// completed, and its task is still open (a deliverable waiting on a person).
-// The entity is closed, so nothing can act on that deliverable any more: the
-// task closes with entity_closed and the ordinary teardown.
-func TestCloseDeferralSweep_CompletedRunAppliesATerminatingClose(t *testing.T) {
-	f := newDeferredMergeFixture(t, "owner/repo#merged-then-completed")
-	concludeRun(t, f.database, f.runID, f.convID)
-
-	f.r.sweepCloseDeferrals(t.Context())
-
-	status, reason, eventType := taskRow(t, f.database, f.taskID)
-	if status != "done" || reason != "entity_closed" || eventType != domain.EventGitHubPRMerged {
-		t.Errorf("task = (%q, %q, %q), want done by the merge's entity_closed", status, reason, eventType)
-	}
-	if got := f.sp.tornDownCopy(); !slices.Equal(got, []string{f.taskID}) {
-		t.Errorf("teardowns = %v, want [%s]", got, f.taskID)
-	}
-}
-
-// TestCloseDeferralSweep_ReopenedEntityClearsWithoutClosing pins the
-// terminating re-check: the run merged and the pull request was reopened
-// since, so when the run fails its task is live work again and the held
-// close no longer holds.
-func TestCloseDeferralSweep_ReopenedEntityClearsWithoutClosing(t *testing.T) {
-	f := newDeferredMergeFixture(t, "owner/repo#merged-then-reopened")
-	if _, err := f.database.Exec(`UPDATE entities SET state = 'active', closed_at = NULL WHERE id = ?`, f.entityID); err != nil {
-		t.Fatalf("reopen entity: %v", err)
-	}
-	setRunStatus(t, f.database, f.runID, "failed")
-	setConversationStatus(t, f.database, f.convID, domain.StatusFailed)
+// TestCloseHoldSweep_LeavesAWorkingTaskHeld: while the conversation works,
+// the sweep closes nothing and stops nothing.
+func TestCloseHoldSweep_LeavesAWorkingTaskHeld(t *testing.T) {
+	f := newHeldCIFixture(t, "owner/repo#sweep-working")
 
 	f.r.sweepCloseDeferrals(t.Context())
 
 	if status, _, _ := taskRow(t, f.database, f.taskID); status == "done" {
-		t.Error("the sweep closed a task whose pull request was reopened")
+		t.Error("the sweep closed a task a conversation is working on")
 	}
-	if eventID, _ := taskDeferral(t, f.database, f.taskID); eventID != "" {
-		t.Errorf("deferral still held after its close stopped holding: %s", eventID)
+	if ev := heldClose(t, f.database, f.taskID); ev != f.eventID {
+		t.Errorf("held close = %q, want %s", ev, f.eventID)
 	}
-	if len(f.sp.tornDownCopy()) != 0 {
-		t.Errorf("teardowns = %v, want none", f.sp.tornDownCopy())
-	}
-}
-
-// TestCloseDeferralSweep_CompletedRunClearsWithoutClosing pins the sweep's
-// hand-off on a live entity: while the run works the deferral waits, and once
-// the run completes a task still open is waiting on a person, which still
-// works while the pull request is open, so the sweep drops the held CI close
-// and closes nothing.
-func TestCloseDeferralSweep_CompletedRunClearsWithoutClosing(t *testing.T) {
-	f := newDeferredCIFixture(t, "owner/repo#sweep-completed")
-
-	f.r.sweepCloseDeferrals(t.Context())
-	if eventID, _ := taskDeferral(t, f.database, f.taskID); eventID != f.eventID {
-		t.Fatalf("a working run's deferral changed to %q", eventID)
-	}
-
-	concludeRun(t, f.database, f.runID, f.convID)
-	f.r.sweepCloseDeferrals(t.Context())
-
-	if eventID, _ := taskDeferral(t, f.database, f.taskID); eventID != "" {
-		t.Errorf("deferral still held after the run completed: %s", eventID)
-	}
-	if status, _, _ := taskRow(t, f.database, f.taskID); status == "done" {
-		t.Error("the sweep closed a task whose run completed: that close is the run's own")
-	}
-	if n := closeAuditCount(t, f.database, f.taskID); n != 0 {
-		t.Errorf("close audit rows = %d, want 0", n)
-	}
-	if len(f.sp.tornDownCopy()) != 0 {
-		t.Errorf("teardowns = %v, want none", f.sp.tornDownCopy())
+	if got := f.sp.stoppedIDs(); len(got) != 0 {
+		t.Errorf("stopped = %v, want nothing", got)
 	}
 }
 
-// TestCloseDeferralSweep_FailedRunAppliesTheOrdinaryClose pins the apply: a
-// run that failed gets the close the event owed its task, through the
-// ordinary path — the event's reason and type, its audit row, and the
-// deliverable teardown.
-func TestCloseDeferralSweep_FailedRunAppliesTheOrdinaryClose(t *testing.T) {
-	f := newDeferredCIFixture(t, "owner/repo#sweep-failed")
-	setRunStatus(t, f.database, f.runID, "failed")
-	setConversationStatus(t, f.database, f.convID, domain.StatusFailed)
+// TestCloseHoldSweep_AppliesTheCloseOnceNothingWorks: the close applies
+// through the ordinary path once the conversation stops working: the event's
+// reason and type, its audit row, and the deliverable teardown.
+func TestCloseHoldSweep_AppliesTheCloseOnceNothingWorks(t *testing.T) {
+	f := newHeldCIFixture(t, "owner/repo#sweep-applies")
+	failRun(t, f.database, f.runID, f.convID)
 
 	f.r.sweepCloseDeferrals(t.Context())
 
 	status, reason, eventType := taskRow(t, f.database, f.taskID)
 	if status != "done" || reason != "auto_closed_by_event" || eventType != domain.EventGitHubPRCICheckPassed {
-		t.Errorf("task = (%q, %q, %q), want done by the ci_check_passed close", status, reason, eventType)
+		t.Errorf("task = (%q, %q, %q), want done by the pass", status, reason, eventType)
 	}
-	var auditEvent string
-	if err := f.database.QueryRow(`SELECT event_id FROM task_events WHERE task_id = ? AND kind = 'closed'`, f.taskID).Scan(&auditEvent); err != nil {
-		t.Fatalf("read close audit row: %v", err)
+	var audit int
+	if err := f.database.QueryRow(`SELECT COUNT(*) FROM task_events WHERE task_id = ? AND event_id = ? AND kind = 'closed'`, f.taskID, f.eventID).Scan(&audit); err != nil {
+		t.Fatalf("read the close audit row: %v", err)
 	}
-	if auditEvent != f.eventID {
-		t.Errorf("close audit row names event %s, want the deferred %s", auditEvent, f.eventID)
+	if audit != 1 {
+		t.Errorf("close audit rows naming the pass = %d, want 1", audit)
 	}
-	if got := f.sp.tornDownCopy(); !slices.Equal(got, []string{f.taskID}) {
-		t.Errorf("teardowns = %v, want [%s]", got, f.taskID)
-	}
-}
-
-// TestCloseDeferralSweep_StoppedRunningRunAppliesTheClose pins the other way
-// a run ends for the sweep: still marked running, with its newest
-// conversation parked without a conclusion. The close then stops it, as an
-// undeferred close would have.
-func TestCloseDeferralSweep_StoppedRunningRunAppliesTheClose(t *testing.T) {
-	f := newDeferredCIFixture(t, "owner/repo#sweep-stalled")
-	setConversationStatus(t, f.database, f.convID, domain.StatusOpen)
-
-	f.r.sweepCloseDeferrals(t.Context())
-
-	if status, _, _ := taskRow(t, f.database, f.taskID); status != "done" {
-		t.Errorf("task status = %q, want done", status)
-	}
-	if !slices.Contains(f.sp.stoppedIDs(), f.convID) {
-		t.Errorf("stops = %v, want the parked conversation %s", f.sp.stoppedIDs(), f.convID)
-	}
-	if !cancelRequested(t, f.database, f.runID) {
-		t.Error("the run's cancel intent was not set")
+	if !slices.Contains(f.sp.tornDownCopy(), f.taskID) {
+		t.Errorf("teardowns = %v, want the held task %s among them", f.sp.tornDownCopy(), f.taskID)
 	}
 }
 
-// TestCloseDeferralSweep_RefusingPrepareClearsWithoutClosing pins the re-check:
-// by the time the run failed, CI is red again, so the close the pass owed no
-// longer holds, and the sweep drops it rather than closing a task whose
-// failure is back.
-func TestCloseDeferralSweep_RefusingPrepareClearsWithoutClosing(t *testing.T) {
-	f := newDeferredCIFixture(t, "owner/repo#sweep-red-again")
-	setRunStatus(t, f.database, f.runID, "failed")
-	setConversationStatus(t, f.database, f.convID, domain.StatusFailed)
-	seedPRCheckRuns(t, f.database, f.entityID, domain.CheckRun{ID: 5, Name: "build", Status: "completed", Conclusion: "failure"})
+// TestCloseHoldSweep_WaitsForADeliverableAwaitingAPerson: once nothing works,
+// a draft pull request the run left for a person keeps the close held, with
+// nothing torn down, until the person resolves it; the next pass then closes
+// the task.
+func TestCloseHoldSweep_WaitsForADeliverableAwaitingAPerson(t *testing.T) {
+	f := newHeldCIFixture(t, "owner/repo#sweep-awaiting")
+	failRun(t, f.database, f.runID, f.convID)
+	seedDraftPullRequest(t, f.database, f.convID, f.entityID)
 
 	f.r.sweepCloseDeferrals(t.Context())
 
 	if status, _, _ := taskRow(t, f.database, f.taskID); status == "done" {
-		t.Error("the sweep closed a task whose CI is failing again")
+		t.Error("the sweep closed a task whose draft awaits a person")
 	}
-	if eventID, _ := taskDeferral(t, f.database, f.taskID); eventID != "" {
-		t.Errorf("deferral still held after its close stopped holding: %s", eventID)
+	if heldClose(t, f.database, f.taskID) != f.eventID {
+		t.Error("the sweep dropped the close a draft awaiting a person holds")
 	}
-	if n := closeAuditCount(t, f.database, f.taskID); n != 0 {
-		t.Errorf("close audit rows = %d, want 0", n)
+	if slices.Contains(f.sp.tornDownCopy(), f.taskID) {
+		t.Error("the sweep tore down the draft awaiting a person")
+	}
+
+	if _, err := f.database.Exec(`UPDATE deliverables SET state = 'open' WHERE conversation_id = ?`, f.convID); err != nil {
+		t.Fatalf("resolve the draft: %v", err)
+	}
+	f.r.sweepCloseDeferrals(t.Context())
+
+	if status, reason, _ := taskRow(t, f.database, f.taskID); status != "done" || reason != "auto_closed_by_event" {
+		t.Errorf("task = (%q, %q), want closed by the pass once the draft is resolved", status, reason)
 	}
 }
 
-// racingDeferralStore stands in for the close phase landing between the
-// sweep's read and its clear: right after the list read, it overwrites the
-// task's deferral with a newer event the same run caused.
-type racingDeferralStore struct {
-	dbpkg.TaskStore
-	taskID, newerEventID, runID string
-}
-
-func (s racingDeferralStore) ListActiveCloseDeferralsSystem(ctx context.Context) ([]domain.TaskCloseDeferral, error) {
-	out, err := s.TaskStore.ListActiveCloseDeferralsSystem(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := s.DeferCloseSystem(ctx, runmode.LocalDefaultOrgID, s.taskID, s.newerEventID, s.runID); err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-// TestCloseDeferralSweep_OverwrittenDeferralSurvivesTheClear pins the
-// compare-and-clear: the run completed, so the sweep clears the deferral it
-// read, but a newer event replaced it in between, and that one survives for
-// the next pass.
-func TestCloseDeferralSweep_OverwrittenDeferralSurvivesTheClear(t *testing.T) {
-	f := newDeferredCIFixture(t, "owner/repo#sweep-overwritten")
-	newer := uuid.New().String()
-	if _, err := f.database.Exec(`
-		INSERT INTO events (id, entity_id, event_type, dedup_key, metadata_json, created_at)
-		VALUES (?, ?, ?, '', '{}', CURRENT_TIMESTAMP)
-	`, newer, f.entityID, domain.EventGitHubPRCICheckPassed); err != nil {
-		t.Fatalf("seed newer event: %v", err)
-	}
-	setRunStatus(t, f.database, f.runID, "completed")
-	f.r.tasks = racingDeferralStore{TaskStore: f.r.tasks, taskID: f.taskID, newerEventID: newer, runID: f.runID}
+// TestCloseHoldSweep_DropsAHoldThatNoLongerHolds: CI failing again by the
+// time nothing works means the pass no longer resolves the task, so the hold
+// is cleared and nothing closes.
+func TestCloseHoldSweep_DropsAHoldThatNoLongerHolds(t *testing.T) {
+	f := newHeldCIFixture(t, "owner/repo#sweep-dropped")
+	seedPRCheckRuns(t, f.database, f.entityID,
+		domain.CheckRun{ID: 1, Name: "build", Status: "completed", Conclusion: "failure"},
+	)
+	failRun(t, f.database, f.runID, f.convID)
 
 	f.r.sweepCloseDeferrals(t.Context())
 
-	if eventID, _ := taskDeferral(t, f.database, f.taskID); eventID != newer {
-		t.Errorf("deferral = %q, want the newer event %s to survive the stale clear", eventID, newer)
+	if status, _, _ := taskRow(t, f.database, f.taskID); status == "done" {
+		t.Error("the sweep closed a task whose close no longer holds")
+	}
+	if ev := heldClose(t, f.database, f.taskID); ev != "" {
+		t.Errorf("held close = %q, want cleared", ev)
+	}
+}
+
+// TestCloseHold_FiringsSkipAHeldTask: no automatic firing starts new work on
+// a task whose close is held. The preflight every auto-fire runs proceeds on
+// the task until its close is held and declines it after, and the firing
+// worker skips its queued firing as task_closed.
+func TestCloseHold_FiringsSkipAHeldTask(t *testing.T) {
+	database := newTestDB(t)
+	ctx := t.Context()
+	org := runmode.LocalDefaultOrgID
+	stores := sqlitestore.New(database)
+	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
+	enqueueFiring(t, database, entityID, taskID, triggerID, eventID)
+	agent, err := stores.Agents.GetForOrgSystem(ctx, org)
+	if err != nil || agent == nil {
+		t.Fatalf("read the org agent: agent=%v err=%v", agent, err)
+	}
+	if err := stores.TeamAgents.AddForTeam(ctx, org, runmode.LocalDefaultTeamID, agent.ID); err != nil {
+		t.Fatalf("enable the bot for the team: %v", err)
+	}
+	stub := &stubDelegator{db: database}
+	r := drainRouter(database, stores.PendingFirings, stub)
+	trigger, err := stores.EventHandlers.GetSystem(ctx, org, triggerID)
+	if err != nil || trigger == nil {
+		t.Fatalf("read trigger: trigger=%v err=%v", trigger, err)
+	}
+	preflight := func() bool {
+		t.Helper()
+		task, err := testTaskStore(database).GetSystem(ctx, org, taskID)
+		if err != nil || task == nil {
+			t.Fatalf("read task: task=%v err=%v", task, err)
+		}
+		_, proceed, err := r.autoDelegatePreflight(ctx, org, task, *trigger, entityID, "")
+		if err != nil {
+			t.Fatalf("preflight: %v", err)
+		}
+		return proceed
+	}
+	if !preflight() {
+		t.Fatal("setup: the preflight declines the task before its close is held")
+	}
+
+	if _, err := database.Exec(`UPDATE tasks SET close_deferred_event_id = ? WHERE id = ?`, eventID, taskID); err != nil {
+		t.Fatalf("hold the task's close: %v", err)
+	}
+	if preflight() {
+		t.Error("the preflight proceeds on a held task")
+	}
+	drainOnce(t, r)
+
+	rows := firingsFor(t, database, entityID)
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 firing row, got %d", len(rows))
+	}
+	requireSkipped(t, rows[0], domain.PendingFiringSkipTaskClosed)
+	if stub.calls != 0 {
+		t.Errorf("Delegate called %d times on a held task", stub.calls)
 	}
 }

@@ -967,13 +967,30 @@ func (s *taskStore) Bump(ctx context.Context, orgID, taskID, eventID string) (do
 		return domain.Task{}, err
 	}
 	var t domain.Task
-	return scanTaskBareRow(s.q.QueryRowContext(ctx, `
-		UPDATE tasks
-		SET status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END,
-		    snooze_until = CASE WHEN status = 'snoozed' THEN NULL ELSE snooze_until END
-		WHERE id = ?
-		RETURNING `+sqliteTaskBareColumns,
-		taskID), &t)
+	err := inTx(ctx, s.q, func(q queryer) error {
+		var prior sql.NullString
+		if err := q.QueryRowContext(ctx, `SELECT close_deferred_event_id FROM tasks WHERE id = ?`, taskID).Scan(&prior); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if _, err := scanTaskBareRow(q.QueryRowContext(ctx, `
+			UPDATE tasks
+			SET status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END,
+			    snooze_until = CASE WHEN status = 'snoozed' THEN NULL ELSE snooze_until END,
+			    close_deferred_event_id = NULL
+			WHERE id = ?
+			RETURNING `+sqliteTaskBareColumns,
+			taskID), &t); err != nil {
+			return err
+		}
+		if !prior.Valid {
+			return nil
+		}
+		return withdrawProducerNotesForTask(ctx, q, taskID, domain.StagedInjectionProducerTaskClosing)
+	})
+	if err != nil {
+		return domain.Task{}, err
+	}
+	return t, nil
 }
 
 func (s *taskStore) Close(ctx context.Context, orgID, taskID, closeReason, closeEventType string) (domain.Task, error) {
@@ -1112,34 +1129,162 @@ func closeTaskWithCancelIntent(ctx context.Context, q queryer, taskID, closeReas
 	return true, conversationIDs, nil
 }
 
-// sqliteTaskCloseDeferralColumns is the projection of a task's deferred
-// close, in the order scanTaskCloseDeferral reads it. DeferCloseSystem's
-// RETURNING and ListActiveCloseDeferralsSystem's SELECT both project it.
-const sqliteTaskCloseDeferralColumns = `org_id, id, close_deferred_event_id, close_deferred_blueprint_run_id`
+// sqliteTaskCloseDeferralColumns is the projection of a task's held close,
+// in the order scanTaskCloseDeferral reads it.
+const sqliteTaskCloseDeferralColumns = `org_id, id, close_deferred_event_id`
 
 func scanTaskCloseDeferral(scan func(...any) error) (domain.TaskCloseDeferral, error) {
 	var d domain.TaskCloseDeferral
-	err := scan(&d.OrgID, &d.TaskID, &d.EventID, &d.BlueprintRunID)
+	err := scan(&d.OrgID, &d.TaskID, &d.EventID)
 	return d, err
 }
 
-func (s *taskStore) DeferCloseSystem(ctx context.Context, orgID, taskID, eventID, blueprintRunID string) (*domain.TaskCloseDeferral, error) {
+func (s *taskStore) CloseOrHoldSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (db.TaskCloseOutcome, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return db.TaskCloseOutcome{}, err
+	}
+	var out db.TaskCloseOutcome
+	err := inTx(ctx, s.q, func(q queryer) error {
+		var err error
+		out, err = closeOrHoldTask(ctx, q, taskID, closeReason, closeEventType, closingEventID, false)
+		return err
+	})
+	if err != nil {
+		return db.TaskCloseOutcome{}, err
+	}
+	return out, nil
+}
+
+// closeOrHoldTask is the Postgres twin's: every event close's body, applying
+// for the sweep's.
+func closeOrHoldTask(ctx context.Context, q queryer, taskID, closeReason, closeEventType, closingEventID string, applying bool) (db.TaskCloseOutcome, error) {
+	if closingEventID != "" {
+		st, ok, err := readEventClose(ctx, q, taskID)
+		if err != nil {
+			return db.TaskCloseOutcome{}, err
+		}
+		if !ok || (applying && st.held.String != closingEventID) {
+			return db.TaskCloseOutcome{}, nil
+		}
+		if len(st.working) > 0 || st.awaitingPerson {
+			out := db.TaskCloseOutcome{Held: true, WorkingConversationIDs: st.working, AwaitingPerson: st.awaitingPerson}
+			if applying {
+				return out, nil
+			}
+			if _, err := q.ExecContext(ctx, `
+				UPDATE tasks SET close_deferred_event_id = ? WHERE id = ?
+			`, closingEventID, taskID); err != nil {
+				return db.TaskCloseOutcome{}, fmt.Errorf("hold close: %w", err)
+			}
+			out.NewlyHeld = !st.held.Valid
+			return out, nil
+		}
+	}
+	closed, conversationIDs, err := closeTaskWithCancelIntent(ctx, q, taskID, closeReason, closeEventType, closingEventID)
+	if err != nil {
+		return db.TaskCloseOutcome{}, err
+	}
+	if applying {
+		if _, err := q.ExecContext(ctx, `UPDATE tasks SET close_deferred_event_id = NULL WHERE id = ?`, taskID); err != nil {
+			return db.TaskCloseOutcome{}, fmt.Errorf("clear hold: %w", err)
+		}
+	}
+	return db.TaskCloseOutcome{Closed: closed, ActiveConversationIDs: conversationIDs}, nil
+}
+
+// eventCloseState is the Postgres twin's.
+type eventCloseState struct {
+	held           sql.NullString
+	working        []string
+	awaitingPerson bool
+}
+
+// readEventClose reads the task's eventCloseState, by the Postgres twin's
+// rules. ok is false for a task that is not active. The transaction is the
+// lock: one writer at a time.
+func readEventClose(ctx context.Context, q queryer, taskID string) (st eventCloseState, ok bool, err error) {
+	err = q.QueryRowContext(ctx, `
+		SELECT close_deferred_event_id FROM tasks
+		 WHERE id = ? AND status NOT IN ('done', 'dismissed')
+	`, taskID).Scan(&st.held)
+	if errors.Is(err, sql.ErrNoRows) {
+		return eventCloseState{}, false, nil
+	}
+	if err != nil {
+		return eventCloseState{}, false, fmt.Errorf("read task: %w", err)
+	}
+	if st.working, err = workingConversationIDs(ctx, q, taskID); err != nil {
+		return eventCloseState{}, false, fmt.Errorf("list working conversations: %w", err)
+	}
+	if len(st.working) == 0 {
+		if err := q.QueryRowContext(ctx, `SELECT `+awaitingPersonSQL("?"), taskID).Scan(&st.awaitingPerson); err != nil {
+			return eventCloseState{}, false, fmt.Errorf("read deliverables awaiting a person: %w", err)
+		}
+	}
+	return st, true, nil
+}
+
+// awaitingPersonSQL is the Postgres twin's, for task taskExpr.
+func awaitingPersonSQL(taskExpr string) string {
+	return `EXISTS (
+		SELECT 1 FROM deliverables art
+		  JOIN conversations c ON c.id = art.conversation_id
+		 WHERE c.task_id = ` + taskExpr + `
+		   AND (` + sqliteUnresolvedDeliverableSQL + `)
+		   AND EXISTS (SELECT 1 FROM entities e WHERE e.id = art.entity_id AND e.state = 'active'))`
+}
+
+func (s *taskStore) ApplyHeldCloseSystem(ctx context.Context, orgID, taskID, heldEventID, closeReason, closeEventType string) (db.TaskCloseOutcome, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return db.TaskCloseOutcome{}, err
+	}
+	var out db.TaskCloseOutcome
+	err := inTx(ctx, s.q, func(q queryer) error {
+		var err error
+		out, err = closeOrHoldTask(ctx, q, taskID, closeReason, closeEventType, heldEventID, true)
+		return err
+	})
+	if err != nil {
+		return db.TaskCloseOutcome{}, err
+	}
+	return out, nil
+}
+
+// workingConversationIDs drains the task's working conversation ids, oldest
+// first, and closes the cursor before returning.
+func workingConversationIDs(ctx context.Context, q queryer, taskID string) ([]string, error) {
+	rows, err := q.QueryContext(ctx, `
+		SELECT r.id FROM conversations r
+		 WHERE r.task_id = ?
+		   AND `+workingConversationSQL+`
+		 ORDER BY r.started_at, r.id
+	`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+func (s *taskStore) CloseDeferralForTaskSystem(ctx context.Context, orgID, taskID string) (*domain.TaskCloseDeferral, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	return deferTaskClose(ctx, s.q, taskID, eventID, blueprintRunID)
-}
-
-// deferTaskClose is DeferCloseSystem's body on a connection the caller
-// chooses, so the terminating close stamps its deferred tasks inside its own
-// transaction with the same statement.
-func deferTaskClose(ctx context.Context, q queryer, taskID, eventID, blueprintRunID string) (*domain.TaskCloseDeferral, error) {
-	d, err := scanTaskCloseDeferral(q.QueryRowContext(ctx, `
-		UPDATE tasks
-		   SET close_deferred_event_id = ?, close_deferred_blueprint_run_id = ?
-		 WHERE id = ? AND status NOT IN ('done', 'dismissed')
-		RETURNING `+sqliteTaskCloseDeferralColumns,
-		eventID, blueprintRunID, taskID).Scan)
+	d, err := scanTaskCloseDeferral(s.q.QueryRowContext(ctx, `
+		SELECT `+sqliteTaskCloseDeferralColumns+`
+		  FROM tasks
+		 WHERE id = ?
+		   AND close_deferred_event_id IS NOT NULL
+		   AND status NOT IN ('done', 'dismissed')
+	`, taskID).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -1155,6 +1300,11 @@ func (s *taskStore) ListActiveCloseDeferralsSystem(ctx context.Context) ([]domai
 		  FROM tasks
 		 WHERE close_deferred_event_id IS NOT NULL
 		   AND status NOT IN ('done', 'dismissed')
+		   AND NOT EXISTS (
+		       SELECT 1 FROM conversations r
+		        WHERE r.task_id = tasks.id
+		          AND `+workingConversationSQL+`)
+		   AND NOT `+awaitingPersonSQL("tasks.id")+`
 		 ORDER BY org_id, id
 	`)
 	if err != nil {
@@ -1176,19 +1326,27 @@ func (s *taskStore) ClearCloseDeferralSystem(ctx context.Context, orgID, taskID,
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
-	res, err := s.q.ExecContext(ctx, `
-		UPDATE tasks
-		   SET close_deferred_event_id = NULL, close_deferred_blueprint_run_id = NULL
-		 WHERE id = ? AND close_deferred_event_id = ?
-	`, taskID, eventID)
+	var cleared bool
+	err := inTx(ctx, s.q, func(q queryer) error {
+		res, err := q.ExecContext(ctx, `
+			UPDATE tasks
+			   SET close_deferred_event_id = NULL
+			 WHERE id = ? AND close_deferred_event_id = ?
+		`, taskID, eventID)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil || n == 0 {
+			return err
+		}
+		cleared = true
+		return withdrawProducerNotesForTask(ctx, q, taskID, domain.StagedInjectionProducerTaskClosing)
+	})
 	if err != nil {
 		return false, err
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	return n > 0, nil
+	return cleared, nil
 }
 
 func (s *taskStore) SetStatus(ctx context.Context, orgID, taskID, status string) (domain.Task, error) {

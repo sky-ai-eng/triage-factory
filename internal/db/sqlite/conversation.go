@@ -639,37 +639,40 @@ func (s *conversationStore) markFailedIfActive(ctx context.Context, orgID, conve
 // --- Boundaries ---
 
 func (s *conversationStore) EndConversationsForTask(ctx context.Context, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error) {
-	return s.endConversationsScoped(ctx, orgID, reason, "task_id = ?", taskID, "")
+	return endConversationsScoped(ctx, s.q, orgID, reason, "task_id = ?", taskID, "")
 }
 
 func (s *conversationStore) EndConversationsForTeamSystem(ctx context.Context, orgID, teamID string, reason domain.EndedReason) ([]domain.Conversation, error) {
-	return s.endConversationsScoped(ctx, orgID, reason, "team_id = ?", teamID, "")
+	return endConversationsScoped(ctx, s.q, orgID, reason, "team_id = ?", teamID, "")
 }
 
-func (s *conversationStore) EndTerminalConversationsForTaskSystem(ctx context.Context, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error) {
-	// The stored column, not the display ladder: `queued` and `running` are
-	// derived from the active claim and never written here, so a row that
-	// reads settled in SQL (failed, or concluded) is one no engagement is
-	// driving.
-	return s.endConversationsScoped(ctx, orgID, reason, "task_id = ?", taskID,
+// endSettledConversationsForTask is the delegation boundary: the task's
+// settled conversations end as delegated, on the transaction of the firing
+// that opens the next one (CreateRunWithFirstStepSystem), so they end only
+// with a run that replaces them. The stored column, not the display ladder:
+// `queued` and `running` are derived from the active claim and never written
+// here, so a row that reads settled in SQL (failed, or concluded) is one no
+// engagement is driving, and a live row is left to whoever drives it.
+func endSettledConversationsForTask(ctx context.Context, q queryer, orgID, taskID string) ([]domain.Conversation, error) {
+	return endConversationsScoped(ctx, q, orgID, domain.EndedDelegated, "task_id = ?", taskID,
 		` AND `+db.SettledConversationSQL("conversations"))
 }
 
-// endConversationsScoped is the body every many-row boundary door shares.
+// endConversationsScoped is the body every many-row boundary stamp shares.
 // scopeSQL names the set the stamp covers — one task's conversations, one
-// team's — and statusClause is the terminal-only door's narrowing, empty for
+// team's — and statusClause is the delegation boundary's narrowing, empty for
 // the others. Both are SQL fragments this file composes, never a caller's
 // string. The rest of the predicate is every door's: un-ended and top-level,
 // so a concluded row ends with the rest and a subagent's boundary stays its
 // spawner's.
-func (s *conversationStore) endConversationsScoped(ctx context.Context, orgID string, reason domain.EndedReason, scopeSQL string, scopeArg any, statusClause string) ([]domain.Conversation, error) {
+func endConversationsScoped(ctx context.Context, q queryer, orgID string, reason domain.EndedReason, scopeSQL string, scopeArg any, statusClause string) ([]domain.Conversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
 	if !domain.IsEndedReason(string(reason)) {
 		return nil, fmt.Errorf("%w: %q", db.ErrInvalidEndedReason, reason)
 	}
-	rows, err := s.q.QueryContext(ctx, `
+	rows, err := q.QueryContext(ctx, `
 		UPDATE conversations SET ended_at = ?, ended_reason = ?
 		WHERE `+scopeSQL+`
 		  AND ended_at IS NULL AND parent_conversation_id IS NULL`+statusClause+`
@@ -1852,6 +1855,22 @@ func (s *conversationStore) LastAgentActivityAtSystem(ctx context.Context, orgID
 		return time.Time{}, false, err
 	}
 	return at, true, nil
+}
+
+func (s *conversationStore) HasPersonMessageSystem(ctx context.Context, orgID, conversationID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	var wrote bool
+	err := s.q.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM messages
+			WHERE org_id = ? AND conversation_id = ?
+			  AND role = 'user' AND subtype IN ('', ?) AND user_id IS NOT NULL
+			  AND NOT (delivered = 0 AND window_state = 'inactive')
+		)
+	`, orgID, conversationID, domain.MessageSubtypeInjectionSteer).Scan(&wrote)
+	return wrote, err
 }
 
 // NewestWorktreePathForTaskSystem is the Postgres twin in the other dialect —

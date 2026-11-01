@@ -31,9 +31,6 @@ func TestNewBranchPushAction_Shape(t *testing.T) {
 	if d.SHA != "abc123" || !d.New {
 		t.Errorf("details = %+v, want sha=abc123 new=true", d)
 	}
-	if got := ParseBranchPushSHA(act.DetailJSON); got != "abc123" {
-		t.Errorf("ParseBranchPushSHA = %q, want abc123", got)
-	}
 }
 
 // TestBranchPushDedupKey_NamesTheRepository pins that two repositories'

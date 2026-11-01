@@ -115,6 +115,24 @@ const awaitingDrivingSQL = `r.archived_at IS NULL
 	  AND NOT ` + activeClaimExistsSQL + `
 	  AND (r.status IS NULL OR (r.status = 'open' AND r.completed_at IS NULL AND ` + undeliveredInputExistsSQL + `))`
 
+// workingConversationSQL is a conversation still working on its task, with
+// no person needed for it to go on. The Postgres twin carries the model; this
+// is the same predicate in the other dialect.
+var workingConversationSQL = `r.parent_conversation_id IS NULL
+	  AND r.ended_at IS NULL
+	  AND (` + activeClaimExistsSQL + `
+	       OR (` + awaitingDrivingSQL + `
+	           AND NOT EXISTS (
+	               SELECT 1 FROM blueprint_runs br_w
+	               WHERE br_w.id = r.blueprint_run_id
+	                 AND (br_w.cancel_requested = 1 OR br_w.status = 'cancelled')))
+	       OR ((` + db.SettledConversationSQL("r") + ` OR ` + db.ParkedOnInvalidEnvelopeSQL("r") + `)
+	           AND EXISTS (
+	               SELECT 1 FROM blueprint_runs br_s
+	               WHERE br_s.id = r.blueprint_run_id
+	                 AND br_s.status = 'running' AND br_s.cancel_requested = 0
+	                 AND br_s.current_step_index = r.blueprint_step_index)))`
+
 // nextAttemptDueSQL is the time gate, compared as text in the claims lease
 // layout: HandBackClaimSystem stamps next_attempt_at with sqliteNowPlusExpr,
 // so both sides of the comparison are the one spelling.

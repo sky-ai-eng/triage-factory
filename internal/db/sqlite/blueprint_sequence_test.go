@@ -120,6 +120,44 @@ func sqliteSequenceScaffold(t *testing.T) (db.BlueprintStore, dbtest.BlueprintSe
 				t.Fatalf("ClaimQueuedForUser: ok=%v err=%v", ok, err)
 			}
 		},
+		CloseTask: func(t *testing.T, taskID string) {
+			t.Helper()
+			if _, err := conn.Exec(`UPDATE tasks SET status = 'done' WHERE id = ?`, taskID); err != nil {
+				t.Fatalf("close the task: %v", err)
+			}
+		},
+		HoldTaskClose: func(t *testing.T, taskID string) {
+			t.Helper()
+			if _, err := conn.Exec(`UPDATE tasks SET close_deferred_event_id = primary_event_id WHERE id = ?`, taskID); err != nil {
+				t.Fatalf("hold the task's close: %v", err)
+			}
+		},
+		SetConversationStatus: func(t *testing.T, convID, status string) {
+			t.Helper()
+			stored, concluded := dbtest.SeedStatus(status)
+			var st, completed any
+			if stored != "" {
+				st = stored
+			}
+			if concluded || stored == "failed" {
+				completed = time.Now().UTC()
+			}
+			if _, err := conn.Exec(`UPDATE conversations SET status = ?, completed_at = ?, parked_at = NULL, park_reason = NULL WHERE id = ?`, st, completed, convID); err != nil {
+				t.Fatalf("set conversation status: %v", err)
+			}
+		},
+		SetParentConversation: func(t *testing.T, convID, parentID string) {
+			t.Helper()
+			if _, err := conn.Exec(`UPDATE conversations SET parent_conversation_id = ? WHERE id = ?`, parentID, convID); err != nil {
+				t.Fatalf("set parent_conversation_id: %v", err)
+			}
+		},
+		EndConversation: func(t *testing.T, convID string, reason domain.EndedReason) {
+			t.Helper()
+			if _, err := conn.Exec(`UPDATE conversations SET ended_at = ?, ended_reason = ? WHERE id = ?`, time.Now().UTC(), string(reason), convID); err != nil {
+				t.Fatalf("end the conversation: %v", err)
+			}
+		},
 		RunCount: func(t *testing.T, taskID string) int {
 			return countOn(t, `SELECT count(*) FROM blueprint_runs WHERE task_id = ?`, taskID)
 		},

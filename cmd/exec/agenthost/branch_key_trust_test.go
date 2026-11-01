@@ -2,6 +2,7 @@ package agenthost
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -16,7 +17,10 @@ import (
 func pushRowBySHA(t *testing.T, acts []domain.ExternalAction, sha string) *domain.ExternalAction {
 	t.Helper()
 	for i := range acts {
-		if acts[i].Action == domain.ActionBranchPushed && domain.ParseBranchPushSHA(acts[i].DetailJSON) == sha {
+		var d struct {
+			SHA string `json:"sha"`
+		}
+		if acts[i].Action == domain.ActionBranchPushed && json.Unmarshal([]byte(acts[i].DetailJSON), &d) == nil && d.SHA == sha {
 			return &acts[i]
 		}
 	}

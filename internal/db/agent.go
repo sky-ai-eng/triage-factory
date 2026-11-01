@@ -954,27 +954,6 @@ type ConversationStore interface {
 	// ending, so the team-visibility RLS would hide the rows.
 	EndConversationsForTeamSystem(ctx context.Context, orgID, teamID string, reason domain.EndedReason) ([]domain.Conversation, error)
 
-	// EndTerminalConversationsForTaskSystem is the task boundary door
-	// (EndConversationsForTask) on the admin pool, narrowed to the settled
-	// rows — failed, or concluded (domain.Conversation.Settled). Everything
-	// else about it is the
-	// same door: top-level rows only, already-ended rows untouched, the
-	// stamped rows returned as Get projects them.
-	//
-	// The narrowing is what makes it safe for a caller that has NOT stopped
-	// the task's conversations first. A delegation opening on a task whose
-	// prior conversation concluded must end that row or the task carries two
-	// un-ended conversations and nothing can say which one it is about; a
-	// still-live row, by contrast, is somebody else's to stop, and ending it
-	// underneath its engagement would strand the work it is still doing.
-	// Whoever owns the stop (the delegate route, the requeue, the takeover)
-	// calls the unnarrowed door.
-	//
-	// Admin-pool only, with no app-pool twin: its caller is Spawner.Delegate,
-	// which runs claimless on the router's and the drain's event path as much
-	// as on a person's.
-	EndTerminalConversationsForTaskSystem(ctx context.Context, orgID, taskID string, reason domain.EndedReason) ([]domain.Conversation, error)
-
 	InsertMessageSystem(ctx context.Context, orgID string, msg *domain.Message) (int64, error)
 
 	// --- Claim-fenced engagement writes ---
@@ -1336,6 +1315,15 @@ type ConversationStore interface {
 	// live. Admin pool: the resume path runs on a detached goroutine with no
 	// JWT claims.
 	LastAgentActivityAtSystem(ctx context.Context, orgID, conversationID string) (at time.Time, ok bool, err error)
+
+	// HasPersonMessageSystem reports whether a person has written to the
+	// conversation: a plain or steered user message with an author, delivered
+	// or still waiting, and not withdrawn. Every row TF writes itself carries
+	// a subtype of its own, so these rows are the people's alone; the
+	// held-close note reads it to tell work a person drives from work an
+	// event started, during the engagement as much as before it. Admin pool,
+	// for the router and the dispatcher's claim path.
+	HasPersonMessageSystem(ctx context.Context, orgID, conversationID string) (bool, error)
 
 	// ListReapableSnapshotKeysSystem returns the (org, task_id) of every task
 	// all of whose top-level conversations last went idle before cutoff and

@@ -3481,91 +3481,6 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	t.Run("EndTerminalConversationsForTaskSystem_StampsTheFinishedRowsAndLeavesTheRestAlone", func(t *testing.T) {
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		ent := seed.Entity(t, "end-terminal")
-		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
-		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
-
-		// The same status ladder the unnarrowed door sweeps whole. Here only
-		// the bottom two rungs move: a delegation opening on this task must
-		// end what finished, and must not reach past an engagement that is
-		// still driving a row.
-		live := seedConversationForTaskTest(t, orgID, taskID, "", seed)
-		parked := seedConversationForTaskTest(t, orgID, taskID, "open", seed)
-		concluded := seedConversationForTaskTest(t, orgID, taskID, SeedConcluded, seed)
-		failed := seedConversationForTaskTest(t, orgID, taskID, "failed", seed)
-
-		// A subagent of the live row, terminal in its own right: it ends with
-		// its spawner, never with the task.
-		subagent := seedConversationForTaskTest(t, orgID, taskID, SeedConcluded, seed)
-		seed.SetParentConversation(t, subagent, live)
-
-		// Already ended, by an earlier boundary. The first boundary is the one
-		// that happened, so this row keeps its own reason.
-		earlier := seedConversationForTaskTest(t, orgID, taskID, SeedConcluded, seed)
-		if _, err := store.EndConversation(ctx, orgID, earlier, domain.EndedStepAdvanced); err != nil {
-			t.Fatalf("seed an already-ended row: %v", err)
-		}
-
-		before := time.Now().UTC().Add(-time.Second)
-		stamped, err := store.EndTerminalConversationsForTaskSystem(ctx, orgID, taskID, domain.EndedDelegated)
-		if err != nil {
-			t.Fatalf("EndTerminalConversationsForTaskSystem: %v", err)
-		}
-		want := map[string]struct{}{concluded: {}, failed: {}}
-		if len(stamped) != len(want) {
-			ids := make([]string, len(stamped))
-			for i, c := range stamped {
-				ids[i] = c.ID
-			}
-			t.Fatalf("stamped %v, want exactly the two terminal un-ended top-level rows %s and %s",
-				ids, concluded, failed)
-		}
-		for _, c := range stamped {
-			if _, ok := want[c.ID]; !ok {
-				t.Errorf("stamped an unexpected conversation %s", c.ID)
-			}
-			if c.EndedReason != domain.EndedDelegated {
-				t.Errorf("%s ended_reason = %q, want delegated", c.ID, c.EndedReason)
-			}
-			if c.EndedAt == nil || c.EndedAt.Before(before) {
-				t.Errorf("%s ended_at = %v, want a stamp from this call", c.ID, c.EndedAt)
-			}
-			// The returned row IS the stored row — the caller rings the memory
-			// doorbell per row it comes back with, never off a re-read.
-			AssertWriteReturnedStoredRow(t, "EndTerminalConversationsForTaskSystem "+c.ID, c, func() (*domain.Conversation, error) {
-				return store.Get(ctx, orgID, c.ID)
-			})
-		}
-		for name, id := range map[string]string{"live": live, "parked": parked, "subagent": subagent} {
-			got, err := store.Get(ctx, orgID, id)
-			if err != nil || got == nil {
-				t.Fatalf("Get the %s row: err=%v got=%v", name, err, got)
-			}
-			if got.EndedAt != nil {
-				t.Errorf("%s row ended_at = %v, want NULL — this door reaches finished transcripts only", name, got.EndedAt)
-			}
-		}
-		again, err := store.Get(ctx, orgID, earlier)
-		if err != nil || again == nil {
-			t.Fatalf("Get the already-ended row: err=%v got=%v", err, again)
-		}
-		if again.EndedReason != domain.EndedStepAdvanced {
-			t.Errorf("already-ended row moved to %q, want its original step_advanced", again.EndedReason)
-		}
-
-		// Idempotent: a replayed delegation finds nothing left to stamp.
-		twice, err := store.EndTerminalConversationsForTaskSystem(ctx, orgID, taskID, domain.EndedDelegated)
-		if err != nil {
-			t.Fatalf("EndTerminalConversationsForTaskSystem (second call): %v", err)
-		}
-		if len(twice) != 0 {
-			t.Errorf("second call stamped %d rows, want none — every terminal row already carries a boundary", len(twice))
-		}
-	})
-
 	t.Run("EndConversation_StampsOnceAndAnswersNilOnAMiss", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
@@ -5107,6 +5022,46 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		if !at2.Equal(toolAt) {
 			t.Errorf("watermark = %v, want the newer tool row %v", at2, toolAt)
+		}
+	})
+
+	t.Run("HasPersonMessageSystem_SeesOnlyWhatAPersonWrote", func(t *testing.T) {
+		store, orgID, userID, seed := mk(t)
+		ctx := context.Background()
+		wrote := func(conversationID string) bool {
+			t.Helper()
+			ok, err := store.HasPersonMessageSystem(ctx, orgID, conversationID)
+			if err != nil {
+				t.Fatalf("HasPersonMessageSystem: %v", err)
+			}
+			return ok
+		}
+		insert := func(m domain.Message) {
+			t.Helper()
+			if _, err := store.InsertMessage(ctx, orgID, &m); err != nil {
+				t.Fatalf("InsertMessage %q: %v", m.Content, err)
+			}
+		}
+		undelivered, delivered := false, true
+
+		waiting := seedConversationForTest(t, orgID, seed, "open")
+		// Rows TF writes carry the engagement's user too, and a withdrawn
+		// message never happened.
+		insert(domain.Message{ConversationID: waiting, UserID: userID, Role: "user", Subtype: domain.MessageSubtypeInjectionTaskContext, Content: "the task", Delivered: &delivered})
+		insert(domain.Message{ConversationID: waiting, UserID: userID, Role: "user", Subtype: domain.MessageSubtypeStopNote, Content: "parked"})
+		insert(domain.Message{ConversationID: waiting, UserID: userID, Role: "user", Content: "withdrawn", Delivered: &undelivered, WindowState: domain.MessageWindowInactive})
+		if wrote(waiting) {
+			t.Fatalf("HasPersonMessageSystem = true with only TF's rows and a withdrawn message")
+		}
+		insert(domain.Message{ConversationID: waiting, UserID: userID, Role: "user", Content: "one more thing", Delivered: &undelivered})
+		if !wrote(waiting) {
+			t.Errorf("HasPersonMessageSystem = false with a person's message waiting")
+		}
+
+		steered := seedConversationForTest(t, orgID, seed, "running")
+		insert(domain.Message{ConversationID: steered, UserID: userID, Role: "user", Subtype: domain.MessageSubtypeInjectionSteer, Content: "mid-turn", Delivered: &delivered, WindowState: domain.MessageWindowInactive})
+		if !wrote(steered) {
+			t.Errorf("HasPersonMessageSystem = false with a person's steer delivered and compacted away")
 		}
 	})
 

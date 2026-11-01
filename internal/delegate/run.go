@@ -774,6 +774,15 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 // the session cannot: why it paused. lastHandBackOutcome picks the note (see
 // continuationNote). A launch with no session to resume has a model that knows
 // nothing, and gets the opening.
+//
+// Either one carries the notes staged for the conversation, so a launch reads
+// what landed before it as every other engagement does. The continuation note
+// follows them, the way a resume puts them ahead of the person's message
+// (resumeSystemPrepends), since the session already knows the task. The
+// opening comes first, as a native engagement's does (mintOpeningRows): a
+// model that knows nothing reads what the task is before what happened to
+// it. They are flushed only once the turn's own rows are written, so a
+// refused write leaves them staged.
 func (s *Spawner) composeLaunchTurn(
 	ctx context.Context,
 	opts *agentproc.RunOptions,
@@ -789,11 +798,17 @@ func (s *Spawner) composeLaunchTurn(
 		}
 		opts.OpeningBlocks = nil
 		opts.Message = note
+		if notes := s.stagedInjectionsForEngagement(ctx, orgID, conversationID); notes != "" {
+			opts.Message = notes + "\n\n" + note
+		}
 		return nil
 	}
 	blocks, err := s.openingTurnBlocks(ctx, sink, orgID, conversationID, creatorUserID, memories, taskContext)
 	if err != nil {
 		return err
+	}
+	if notes := s.stagedInjectionsForEngagement(ctx, orgID, conversationID); notes != "" {
+		blocks = append(blocks, agentproc.ContentBlock{Type: "text", Text: notes})
 	}
 	opts.Message = ""
 	opts.OpeningBlocks = blocks

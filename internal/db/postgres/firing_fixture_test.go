@@ -102,7 +102,7 @@ func tryFirePgRun(t *testing.T, h *pgtest.Harness, stores db.Stores, orgID strin
 	if step.Model == "" {
 		step.Model = "m"
 	}
-	_, _, conv, err := stores.Blueprints.CreateRunWithFirstStepSystem(
+	_, _, conv, _, err := stores.Blueprints.CreateRunWithFirstStepSystem(
 		context.Background(), orgID, br, db.AgentClaimStamp{}, "", step)
 	return conv, err
 }

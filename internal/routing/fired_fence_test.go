@@ -47,6 +47,10 @@ func (s *fenceStubDelegator) StopBlueprintRun(orgID, blueprintRunID string, caus
 
 func (s *fenceStubDelegator) TeardownTaskDeliverablesSystem(context.Context, string, string) {}
 
+func (s *fenceStubDelegator) TellTaskClosing(context.Context, string, string, domain.Event) bool {
+	return true
+}
+
 func (s *fenceStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
 	return delegate.InjectNotDelivered
 }
@@ -234,7 +238,7 @@ func TestFiringWorker_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
 	priorBlueprintRunID := uuid.New().String()
 	priorStepID := uuid.New().String()
 	stepIdx := 0
-	inserted, _, _, err := sqlitestore.New(database).Blueprints.CreateRunWithFirstStepSystem(t.Context(), runmode.LocalDefaultOrgID, domain.BlueprintRun{
+	inserted, _, _, _, err := sqlitestore.New(database).Blueprints.CreateRunWithFirstStepSystem(t.Context(), runmode.LocalDefaultOrgID, domain.BlueprintRun{
 		ID:                priorBlueprintRunID,
 		BlueprintID:       blueprintID,
 		TaskID:            taskID,

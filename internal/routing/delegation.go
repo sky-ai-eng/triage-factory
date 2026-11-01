@@ -40,9 +40,10 @@ import (
 // (queued because the task was busy; the commitment is real even though
 // the conversation hasn't started yet). Every other exit — already claimed by
 // another team, the bot disabled for the team, no agent bootstrapped, the
-// breaker tripped, a duplicate already queued, or a replay hitting
-// ErrAlreadyFired — returns (false, nil): nothing new happened on this call,
-// and nothing should.
+// breaker tripped, a duplicate already queued, a replay hitting
+// ErrAlreadyFired, or a task whose close is held or that closed under the fire
+// — returns (false, nil): nothing new happened on this call, and nothing
+// should.
 //
 // A non-nil error is the third outcome, and it means something else: a
 // dependency this decision rests on failed, so whether the trigger should
@@ -161,6 +162,14 @@ func (r *Router) tryAutoDelegateTrackingInjection(ctx context.Context, orgID str
 				"task_id", task.ID, "trigger", trigger.ID, "event_id", triggeringEventID)
 			return false, nil
 		}
+		// The preflight read no held close, but the task closed or an event
+		// held its close before the insert locked it. Nothing new starts on
+		// a task an event resolved.
+		if errors.Is(err, delegate.ErrTaskClosed) {
+			routerLog.Info("auto-delegate skipped: the task closed or its close is held under the fire",
+				"task_id", task.ID, "trigger", trigger.ID, "event_id", triggeringEventID)
+			return false, nil
+		}
 		// The gate read said idle, but something else went live on this task
 		// before our insert — the one-active-run index is the authority, the
 		// gate just a fast-path. The intent is still valid: defer it onto
@@ -183,13 +192,22 @@ func (r *Router) tryAutoDelegateTrackingInjection(ctx context.Context, orgID str
 
 // autoDelegatePreflight runs the checks every auto-fired trigger passes
 // before its firing is decided, at event time and at the post-scoring
-// re-evaluation alike: the cross-team exclusive-claim skip, the org agent
-// resolution, the per-team team_agents.enabled gate, and the breaker. It
+// re-evaluation alike: the held-close skip, the cross-team exclusive-claim
+// skip, the org agent resolution, the per-team team_agents.enabled gate, and
+// the breaker. It
 // returns the agent the firing runs as and claims for; proceed=false is a
 // decided skip, logged where each check finds it, and a non-nil error is a
 // read that reached no verdict, which the caller retries rather than treats
 // as a decision. The breaker toast fires from here, so both callers keep it.
 func (r *Router) autoDelegatePreflight(ctx context.Context, orgID string, task *domain.Task, trigger domain.EventHandler, entityID string, actingTeamID string) (agentID string, proceed bool, err error) {
+	// An event has resolved the task and its close waits only for the work
+	// already on it, so nothing starts more.
+	if hold, err := r.tasks.CloseDeferralForTaskSystem(ctx, orgID, task.ID); err != nil {
+		return "", false, fmt.Errorf("read held close: %w", err)
+	} else if hold != nil {
+		routerLog.Info("auto-trigger skipped: the task's close is held", "task_id", task.ID, "closing_event", hold.EventID)
+		return "", false, nil
+	}
 	// Exclusive claim: one task, one owner. If the bot has already
 	// claimed this task on behalf of a different team (an earlier
 	// matched team won the CAS), this team's trigger must not pile on a
@@ -614,8 +632,8 @@ func (r *Router) fireDelegate(ctx context.Context, orgID string, task *domain.Ta
 		// This leaves the task in a clean unclaimed-queued state, which is
 		// correct.
 		//
-		// The two anticipated refusals — a replay hitting the fence, a task
-		// that went busy under the fire — are outcomes both callers handle
+		// The anticipated refusals — a replay hitting the fence, a task that
+		// went busy or closed under the fire — are outcomes both callers handle
 		// by design, so they name themselves instead of colouring the trace
 		// red and diluting "traces with errors".
 		switch {
@@ -623,6 +641,8 @@ func (r *Router) fireDelegate(ctx context.Context, orgID string, task *domain.Ta
 			span.SetAttributes(telemetry.Outcome("already_fired"))
 		case errors.Is(err, delegate.ErrTaskBusy):
 			span.SetAttributes(telemetry.Outcome("task_busy"))
+		case errors.Is(err, delegate.ErrTaskClosed):
+			span.SetAttributes(telemetry.Outcome("task_closed"))
 		default:
 			span.SetStatus(codes.Error, "delegate")
 		}

@@ -237,6 +237,9 @@ type liveRunHandle struct {
 	lr             *agentproc.LiveRun
 	conversationID string
 	orgID          string
+	// boundary is whether the next tool batch hands the agent the
+	// conversation's staged notes (stageNoteAtToolBoundary arms it).
+	boundary *toolBoundary
 }
 
 // registerProc records a run's live process handle so control ops can
@@ -250,7 +253,12 @@ type liveRunHandle struct {
 func (s *Spawner) registerProc(orgID, conversationID string, lr *agentproc.LiveRun) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.procs[conversationID] = &liveRunHandle{lr: lr, conversationID: conversationID, orgID: orgID}
+	// Armed from the start: the launch read the staged queue before the
+	// process existed, and a note staged since found no handle to arm.
+	s.procs[conversationID] = &liveRunHandle{
+		lr: lr, conversationID: conversationID, orgID: orgID,
+		boundary: &toolBoundary{armed: true},
+	}
 }
 
 // getProc returns the live handle for a run, or nil when the run has no

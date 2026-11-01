@@ -74,7 +74,7 @@ func seedFleetFixture(t *testing.T, h *pgtest.Harness) fleetFixture {
 	blueprintRunID := uuid.New().String()
 	conversationID := uuid.New().String()
 	step0 := 0
-	if _, _, _, err := stores.Blueprints.CreateRunWithFirstStepSystem(ctx, orgID, domain.BlueprintRun{
+	if _, _, _, _, err := stores.Blueprints.CreateRunWithFirstStepSystem(ctx, orgID, domain.BlueprintRun{
 		ID: blueprintRunID, BlueprintID: blueprintID, TaskID: taskID,
 		TriggerType: domain.BlueprintTriggerManual, WorktreePath: "/tmp/wt-" + blueprintRunID,
 	}, db.AgentClaimStamp{}, "", domain.Conversation{

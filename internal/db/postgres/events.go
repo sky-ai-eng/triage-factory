@@ -134,21 +134,6 @@ func (s *eventStore) GetSystem(ctx context.Context, orgID, eventID string) (*dom
 	return evt, nil
 }
 
-// LatestForEntityTypeBeforeSystem is the close phase's read of the entity's
-// previous event of a type (see the interface). The row-value comparison is
-// the ORDER BY's own key, so a created_at tie between the two events breaks
-// on id the way the ordering does.
-func (s *eventStore) LatestForEntityTypeBeforeSystem(ctx context.Context, orgID, entityID, eventType, beforeEventID string) (*domain.Event, error) {
-	return scanEvent(s.admin.QueryRowContext(ctx, `
-		SELECT `+eventColumns+`
-		FROM events
-		WHERE org_id = $1 AND entity_id = $2 AND event_type = $3
-		  AND (created_at, id) < (SELECT created_at, id FROM events WHERE org_id = $1 AND id = $4)
-		ORDER BY created_at DESC, id DESC
-		LIMIT 1
-	`, orgID, entityID, eventType, beforeEventID))
-}
-
 // eventColumns is the projection scanEvent reads, unqualified.
 const eventColumns = `id, entity_id, event_type, dedup_key,
 		       COALESCE(metadata_json::text, ''), occurred_at, created_at`

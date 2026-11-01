@@ -270,29 +270,6 @@ func (s *externalActionStore) CountByConversations(ctx context.Context, orgID st
 	return counts, rows.Err()
 }
 
-// ListAgentActionsForBlueprintRunSystem is the close phase's read of a run's
-// own actions (see the interface), on the admin pool: the router holds no
-// claims.
-func (s *externalActionStore) ListAgentActionsForBlueprintRunSystem(ctx context.Context, orgID, blueprintRunID, action string) ([]domain.ExternalAction, error) {
-	if !isValidUUID(blueprintRunID) {
-		return nil, nil
-	}
-	rows, err := s.admin.QueryContext(ctx, `
-		SELECT `+pgExternalActionColumns+`
-		  FROM external_actions
-		 WHERE org_id = $1 AND action = $2 AND performed_by = $3
-		   AND conversation_id IN (
-		       SELECT c.id FROM conversations c
-		        WHERE c.org_id = $1 AND c.blueprint_run_id = $4::uuid
-		   )
-		 ORDER BY occurred_at DESC, id DESC
-	`, orgID, action, domain.PerformedByAgent, blueprintRunID)
-	if err != nil {
-		return nil, err
-	}
-	return scanExternalActionRows(rows)
-}
-
 // appendPgExternalActionFilters appends opts' optional provider/action/actor/time
 // predicates, the newest-first ORDER BY, and LIMIT/OFFSET to a SELECT whose WHERE
 // is already open. Placeholders number from len(args)+1 so the leading binds

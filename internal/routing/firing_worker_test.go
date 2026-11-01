@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -40,6 +41,9 @@ type stubDelegator struct {
 	// tornDown is every task id handed to TeardownTaskDeliverablesSystem, so a
 	// test can assert a close reached the deliverable pass.
 	tornDown []string
+	// noted is every conversation id handed to TellTaskClosing, so a
+	// test can tell a close that held and told its conversations.
+	noted []string
 }
 
 var errStubDelegate = errors.New("stub: delegation refused")
@@ -98,7 +102,7 @@ func stubDelegateRun(database *sql.DB, task domain.Task, opts delegate.DelegateO
 	// insert's transaction, so a stub that split them would hide the very
 	// coupling the router now depends on.
 	stepIdx := 0
-	inserted, _, _, err := store.Blueprints.CreateRunWithFirstStepSystem(context.Background(), runmode.LocalDefaultOrgID, br, opts.TaskClaim, opts.OwnerTeamID,
+	inserted, _, _, _, err := store.Blueprints.CreateRunWithFirstStepSystem(context.Background(), runmode.LocalDefaultOrgID, br, opts.TaskClaim, opts.OwnerTeamID,
 		domain.Conversation{
 			ID: uuid.New().String(), TaskID: task.ID, PromptID: promptID, Model: "stub",
 			TriggerType: opts.TriggerType, TriggerID: opts.TriggerID, CreatorUserID: opts.CreatorUserID,
@@ -110,6 +114,9 @@ func stubDelegateRun(database *sql.DB, task domain.Task, opts delegate.DelegateO
 		// router branches on rather than a raw store error.
 		if errors.Is(err, dbpkg.ErrTaskBusyActiveRun) {
 			return "", delegate.ErrTaskBusy
+		}
+		if errors.Is(err, dbpkg.ErrTaskClosedForEventRun) {
+			return "", delegate.ErrTaskClosed
 		}
 		return "", err
 	}
@@ -161,6 +168,20 @@ func (s *stubDelegator) stoppedCopy() []string {
 
 func (s *stubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
 	return delegate.InjectNotDelivered
+}
+
+func (s *stubDelegator) TellTaskClosing(ctx context.Context, orgID, conversationID string, evt domain.Event) bool {
+	s.mu.Lock()
+	s.noted = append(s.noted, conversationID)
+	s.mu.Unlock()
+	return true
+}
+
+// notedIDs is the conversation ids TellTaskClosing was called with.
+func (s *stubDelegator) notedIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.noted)
 }
 
 // setupDrainScenario seeds entity + prompt + event + task + trigger so a

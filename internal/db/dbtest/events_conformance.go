@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -67,9 +66,6 @@ type EventStoreSeeder struct {
 //   - LatestForEntityTypeAndDedupKey returns (nil, nil) on miss.
 //   - GetMetadataSystem returns "" on missing event (NULL/no-row).
 //   - GetMetadataSystem round-trips a real metadata string.
-//   - LatestForEntityTypeBeforeSystem returns the entity's newest event of
-//     the type recorded before the given one, in recording order, and
-//     (nil, nil) when there is none.
 func RunEventStoreConformance(t *testing.T, mk EventStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -431,87 +427,4 @@ func RunEventStoreConformance(t *testing.T, mk EventStoreFactory) {
 			}
 		}
 	})
-
-	t.Run("LatestForEntityTypeBeforeSystem_returns_the_previous_event_of_the_type", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		entityID := seed.Entity(t, "before-previous")
-		otherEntityID := seed.Entity(t, "before-previous-other")
-		// Ids ascend in recording order, so a created_at tie (Postgres
-		// stamps microseconds) breaks on id the way SQLite's rowid does.
-		base := uuid.New()
-		var n byte
-		record := func(entity, eventType string, occurredAt time.Time) string {
-			t.Helper()
-			n++
-			id := base
-			id[15] = n
-			eid := entity
-			got, err := s.Record(ctx, orgID, domain.Event{ID: id.String(), EntityID: &eid, EventType: eventType, OccurredAt: occurredAt})
-			if err != nil {
-				t.Fatalf("Record %s: %v", eventType, err)
-			}
-			return got
-		}
-		// The source says the first close happened after the second, so
-		// an order on occurred_at would pick neither; recording order picks
-		// the first.
-		now := time.Now().UTC().Truncate(time.Second)
-		firstClose := record(entityID, domain.EventGitHubPRClosed, now.Add(-time.Hour))
-		record(entityID, domain.EventGitHubPROpened, time.Time{})
-		record(otherEntityID, domain.EventGitHubPRClosed, time.Time{})
-		secondClose := record(entityID, domain.EventGitHubPRClosed, now.Add(-2*time.Hour))
-		record(entityID, domain.EventGitHubPRClosed, time.Time{})
-
-		got, err := s.LatestForEntityTypeBeforeSystem(ctx, orgID, entityID, domain.EventGitHubPRClosed, secondClose)
-		if err != nil || got == nil {
-			t.Fatalf("LatestForEntityTypeBeforeSystem: got=%v err=%v", got, err)
-		}
-		if got.ID != firstClose {
-			t.Errorf("ID = %q, want the first close %q", got.ID, firstClose)
-		}
-		if got.EventType != domain.EventGitHubPRClosed || got.EntityID == nil || *got.EntityID != entityID {
-			t.Errorf("got (%s, %v), want a %s on %s", got.EventType, got.EntityID, domain.EventGitHubPRClosed, entityID)
-		}
-		if got.CreatedAt.IsZero() {
-			t.Error("CreatedAt is zero; the close phase compares ledger rows against it")
-		}
-	})
-
-	t.Run("LatestForEntityTypeBeforeSystem_nil_without_an_earlier_event_of_the_type", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		entityID := seed.Entity(t, "before-none")
-		eid := entityID
-		// An earlier event of another type is not one of this type.
-		if _, err := s.Record(ctx, orgID, domain.Event{EntityID: &eid, EventType: domain.EventGitHubPROpened}); err != nil {
-			t.Fatalf("Record opened: %v", err)
-		}
-		closeID, err := s.Record(ctx, orgID, domain.Event{EntityID: &eid, EventType: domain.EventGitHubPRClosed})
-		if err != nil {
-			t.Fatalf("Record closed: %v", err)
-		}
-		got, err := s.LatestForEntityTypeBeforeSystem(ctx, orgID, entityID, domain.EventGitHubPRClosed, closeID)
-		if err != nil {
-			t.Fatalf("LatestForEntityTypeBeforeSystem: %v", err)
-		}
-		if got != nil {
-			t.Errorf("got %+v, want nil: the only earlier event is another type", got)
-		}
-	})
-
-	t.Run("LatestForEntityTypeBeforeSystem_nil_when_the_event_is_unknown", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		entityID := seed.Entity(t, "before-unknown")
-		eid := entityID
-		if _, err := s.Record(ctx, orgID, domain.Event{EntityID: &eid, EventType: domain.EventGitHubPRClosed}); err != nil {
-			t.Fatalf("Record: %v", err)
-		}
-		got, err := s.LatestForEntityTypeBeforeSystem(ctx, orgID, entityID, domain.EventGitHubPRClosed, "00000000-0000-0000-0000-000000000000")
-		if err != nil {
-			t.Fatalf("LatestForEntityTypeBeforeSystem: %v", err)
-		}
-		if got != nil {
-			t.Errorf("got %+v, want nil for an event that is not in the log", got)
-		}
-	})
-
 }

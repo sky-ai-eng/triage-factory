@@ -76,20 +76,6 @@ func BranchWebURL(base, repoPath, ref string) (string, bool) {
 	return branchWebURL(base, repoPath, branch), true
 }
 
-// ParseBranchPushSHA extracts the pushed commit SHA from a branch_pushed row's
-// detail_json (the {"sha":...,"new":...} payload), or "" when it's absent or
-// unparseable.
-func ParseBranchPushSHA(detailJSON string) string {
-	if strings.TrimSpace(detailJSON) == "" {
-		return ""
-	}
-	var d branchPushDetails
-	if err := json.Unmarshal([]byte(detailJSON), &d); err != nil {
-		return ""
-	}
-	return d.SHA
-}
-
 // validOwnerRepo reports whether repoPath is exactly two non-empty segments
 // (owner/repo). A single segment, a trailing slash, or a nested path (GHES
 // /scm/..., nested GitLab groups) is rejected rather than guessed.

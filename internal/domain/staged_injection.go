@@ -99,8 +99,9 @@ func IsStagedInjectionSubtype(subtype string) bool {
 }
 
 // StagedInjectionProducer* tag a staged injection's origin. Free-text (no DB CHECK) so a
-// new producer adds a const without a migration; used for audit/debugging and a
-// future per-producer flush policy, never for control flow today.
+// new producer adds a const without a migration; used for audit/debugging, and
+// the close note's tag is what its dedup and withdrawal match, so renaming one
+// strands the rows already staged under the old value.
 const (
 	// StagedInjectionProducerPRNewCommits tags a head-SHA-change note. Nothing
 	// writes it — the PR coherence feed carries head changes under its own tag
@@ -111,6 +112,14 @@ const (
 	// The event type remains in the rendered body; one producer tag keeps the
 	// queue vocabulary independent of the four event kinds it carries.
 	StagedInjectionProducerPRCoherence = "pr_coherence"
+	// StagedInjectionProducerTaskClosing is the note telling a conversation
+	// still working on a task that an event resolved it, and that the task
+	// closes once the work on it is finished, in either version
+	// (TaskClosingInjection, or TaskClosingNotice for work a person started).
+	// A conversation is told once per closing event
+	// (StagedInjectionStore.HasNoteForEventSystem), and a hold cleared
+	// without its close withdraws the notes still waiting (TaskStore.Bump).
+	StagedInjectionProducerTaskClosing = "task_closing"
 )
 
 // NoteProducerDeliverableResolved tags the note telling an agent that a human
@@ -132,6 +141,17 @@ const NoteProducerDeliverableResolved = "artifact_resolved"
 // ledger, so the two prepended blocks read consistently when a resume carries
 // both.
 func StagedInjectionBlock(injections []StagedInjection) string {
+	return stagedInjectionBlock("While you were not running, these updates landed on work you have open:", injections)
+}
+
+// StagedInjectionBoundaryBlock is StagedInjectionBlock for notes delivered
+// into a run that is still working, at a tool boundary, where they landed
+// while it worked rather than while it was away.
+func StagedInjectionBoundaryBlock(injections []StagedInjection) string {
+	return stagedInjectionBlock("While you were working, these updates landed on work you have open:", injections)
+}
+
+func stagedInjectionBlock(leadIn string, injections []StagedInjection) string {
 	lines := make([]string, 0, len(injections))
 	for i := range injections {
 		if injections[i].Body == "" {
@@ -142,7 +162,7 @@ func StagedInjectionBlock(injections []StagedInjection) string {
 	if len(lines) == 0 {
 		return ""
 	}
-	body := "While you were not running, these updates landed on work you have open:\n\n" +
+	body := leadIn + "\n\n" +
 		strings.Join(lines, "\n") +
 		"\n\nThese are informational — act only if they affect your work."
 	return WrapSystemNote(body)

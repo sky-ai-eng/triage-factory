@@ -44,7 +44,7 @@ func fireRun(t *testing.T, store db.BlueprintStore, sc BlueprintSequenceScaffold
 		br = sc.ManualFiring(t, taskID)
 	}
 	br.ID = uuid.New().String()
-	inserted, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br, db.AgentClaimStamp{}, "", sc.Step(br, 0))
+	inserted, _, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br, db.AgentClaimStamp{}, "", sc.Step(br, 0))
 	if err != nil {
 		return "", err
 	}
@@ -112,7 +112,7 @@ func RunBlueprintRunWriteConformance(t *testing.T, mk BlueprintSequenceFactory) 
 
 		// The door picks its arm off this value, so an empty one does not
 		// fail — it fires a manual delegation nobody asked for.
-		if _, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br, db.AgentClaimStamp{}, "", sc.Step(br, 0)); !errors.Is(err, db.ErrBlueprintRunTriggerTypeRequired) {
+		if _, _, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br, db.AgentClaimStamp{}, "", sc.Step(br, 0)); !errors.Is(err, db.ErrBlueprintRunTriggerTypeRequired) {
 			t.Fatalf("firing with no trigger type = %v, want db.ErrBlueprintRunTriggerTypeRequired", err)
 		}
 		if n := sc.RunCount(t, taskID); n != 0 {
@@ -122,6 +122,155 @@ func RunBlueprintRunWriteConformance(t *testing.T, mk BlueprintSequenceFactory) 
 			t.Errorf("conversations on the task = %d, want 0", n)
 		}
 	})
+}
+
+// RunEventFiringOnAResolvedTaskConformance pins the check an event-triggered
+// firing makes under the task's lock: a task that closed, or whose close an
+// event holds, after the router's reads starts no run, while a replay of a
+// firing that did commit still reads as one and a person may still delegate
+// on a held task.
+func RunEventFiringOnAResolvedTaskConformance(t *testing.T, mk BlueprintSequenceFactory) {
+	t.Helper()
+	for _, how := range []string{"closed", "held"} {
+		t.Run(how, func(t *testing.T) {
+			store, sc := mk(t)
+			ctx := context.Background()
+			taskID := sc.NewTask(t)
+			fired := sc.Firing(t, taskID)
+			fired.ID = uuid.New().String()
+			if inserted, _, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, fired, db.AgentClaimStamp{}, "", sc.Step(fired, 0)); err != nil || !inserted {
+				t.Fatalf("first firing = (%v, %v), want inserted", inserted, err)
+			}
+			if _, err := store.MarkRunStatusSystem(ctx, sc.OrgID, fired.ID, domain.BlueprintRunStatusCancelled, "system_cancelled", nil); err != nil {
+				t.Fatalf("cancel the first run: %v", err)
+			}
+			if how == "closed" {
+				sc.CloseTask(t, taskID)
+			} else {
+				sc.HoldTaskClose(t, taskID)
+			}
+
+			replay := fired
+			replay.ID = uuid.New().String()
+			if inserted, _, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, replay, db.AgentClaimStamp{}, "", sc.Step(replay, 0)); err != nil || inserted {
+				t.Errorf("a replay of the committed firing on a %s task = (%v, %v), want the fence's inserted=false", how, inserted, err)
+			}
+			if _, err := fireRun(t, store, sc, taskID, domain.BlueprintTriggerEvent); !errors.Is(err, db.ErrTaskClosedForEventRun) {
+				t.Fatalf("an event firing on a %s task = %v, want db.ErrTaskClosedForEventRun", how, err)
+			}
+			if n := sc.RunCount(t, taskID); n != 1 {
+				t.Errorf("blueprint_runs on the task = %d, want only the first", n)
+			}
+			if n := sc.ConversationCount(t, taskID); n != 1 {
+				t.Errorf("conversations on the task = %d, want only the first's", n)
+			}
+			if how == "held" {
+				mustFireRun(t, store, sc, taskID, domain.BlueprintTriggerManual)
+			}
+		})
+	}
+}
+
+// RunFiringDelegationBoundaryConformance pins the delegation boundary a firing
+// commits with its run: the task's settled conversations end as delegated and
+// come back as stored, while live, parked, subagent and already-ended ones are
+// left alone, and a firing that starts no run, refused or replayed, ends
+// nothing.
+func RunFiringDelegationBoundaryConformance(t *testing.T, mk BlueprintSequenceFactory) {
+	t.Helper()
+	store, sc := mk(t)
+	ctx := context.Background()
+
+	// One conversation per firing, each run cancelled so the next can fire.
+	// The cancel parks a conversation without a verdict, which ends nothing.
+	fireOne := func(taskID string) (domain.BlueprintRun, string) {
+		t.Helper()
+		br := sc.Firing(t, taskID)
+		br.ID = uuid.New().String()
+		_, _, conv, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br, db.AgentClaimStamp{}, "", sc.Step(br, 0))
+		if err != nil {
+			t.Fatalf("fire on task %s: %v", taskID, err)
+		}
+		if _, err := store.MarkRunStatusSystem(ctx, sc.OrgID, br.ID, domain.BlueprintRunStatusCancelled, "system_cancelled", nil); err != nil {
+			t.Fatalf("cancel run %s: %v", br.ID, err)
+		}
+		return br, conv.ID
+	}
+	ended := func(convID string) *domain.Conversation {
+		t.Helper()
+		c, err := sc.GetConversation(t, convID)
+		if err != nil || c == nil {
+			t.Fatalf("GetConversation(%s): err=%v got=%v", convID, err, c)
+		}
+		return c
+	}
+
+	held := sc.NewTask(t)
+	_, unreplaced := fireOne(held)
+	sc.SetConversationStatus(t, unreplaced, SeedConcluded)
+	sc.HoldTaskClose(t, held)
+	if _, err := fireRun(t, store, sc, held, domain.BlueprintTriggerEvent); !errors.Is(err, db.ErrTaskClosedForEventRun) {
+		t.Fatalf("an event firing on a held task = %v, want db.ErrTaskClosedForEventRun", err)
+	}
+	if c := ended(unreplaced); c.EndedAt != nil {
+		t.Errorf("a refused firing ended %s (%q), want it left for the run that replaces it", unreplaced, c.EndedReason)
+	}
+
+	taskID := sc.NewTask(t)
+	convs := map[string]string{}
+	var last domain.BlueprintRun
+	for _, name := range []string{"concluded", "failed", "live", "parked", "subagent", "earlier"} {
+		last, convs[name] = fireOne(taskID)
+	}
+	sc.SetConversationStatus(t, convs["concluded"], SeedConcluded)
+	sc.SetConversationStatus(t, convs["failed"], "failed")
+	sc.SetConversationStatus(t, convs["live"], "")
+	sc.SetConversationStatus(t, convs["subagent"], SeedConcluded)
+	sc.SetParentConversation(t, convs["subagent"], convs["live"])
+	sc.SetConversationStatus(t, convs["earlier"], SeedConcluded)
+	sc.EndConversation(t, convs["earlier"], domain.EndedStepAdvanced)
+
+	replay := last
+	replay.ID = uuid.New().String()
+	if inserted, _, _, stamped, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, replay, db.AgentClaimStamp{}, "", sc.Step(replay, 0)); err != nil || inserted || len(stamped) != 0 {
+		t.Fatalf("replay = (inserted %v, ended %d, %v), want the fence's no-op", inserted, len(stamped), err)
+	}
+	if c := ended(convs["concluded"]); c.EndedAt != nil {
+		t.Errorf("a replay ended the concluded conversation (%q)", c.EndedReason)
+	}
+
+	before := time.Now().UTC().Add(-time.Second)
+	br := sc.Firing(t, taskID)
+	br.ID = uuid.New().String()
+	inserted, _, _, stamped, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br, db.AgentClaimStamp{}, "", sc.Step(br, 0))
+	if err != nil || !inserted {
+		t.Fatalf("firing = (%v, %v), want inserted", inserted, err)
+	}
+	want := map[string]bool{convs["concluded"]: true, convs["failed"]: true}
+	if len(stamped) != len(want) {
+		t.Fatalf("ended %d conversations, want exactly the concluded and failed top-level rows", len(stamped))
+	}
+	for _, c := range stamped {
+		if !want[c.ID] {
+			t.Errorf("ended an unexpected conversation %s", c.ID)
+		}
+		if c.EndedReason != domain.EndedDelegated || c.EndedAt == nil || c.EndedAt.Before(before) {
+			t.Errorf("%s ended (%v, %q), want delegated by this firing", c.ID, c.EndedAt, c.EndedReason)
+		}
+		// The caller rings the memory doorbell per row it comes back with,
+		// never off a re-read.
+		AssertWriteReturnedStoredRow(t, "the boundary's "+c.ID, c, func() (*domain.Conversation, error) {
+			return sc.GetConversation(t, c.ID)
+		})
+	}
+	for _, name := range []string{"live", "parked", "subagent"} {
+		if c := ended(convs[name]); c.EndedAt != nil {
+			t.Errorf("the %s conversation ended (%q), want it left alone", name, c.EndedReason)
+		}
+	}
+	if c := ended(convs["earlier"]); c.EndedReason != domain.EndedStepAdvanced {
+		t.Errorf("the already-ended conversation moved to %q, want its own step_advanced", c.EndedReason)
+	}
 }
 
 // RunOneActiveRunPerTaskConformance pins the DB backstop for "a task has at

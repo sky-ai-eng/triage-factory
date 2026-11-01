@@ -119,7 +119,9 @@ func seedStrandedPR(t *testing.T, r *Router, database *sql.DB) (entityID, taskID
 	t.Helper()
 	entityID, taskID = seedCIFailedTaskOnEntity(t, r, database, "octo/repo#9")
 	seedSnapshot(t, database, entityID, prSnapshotJSON(t, "MERGED"))
-	blueprintRunID, _ = seedRunOnTask(t, database, taskID, "running", "")
+	// Parked on a person: still active, so the close stops it, and not
+	// working, so the close is not held.
+	blueprintRunID, _ = seedRunOnTask(t, database, taskID, "running", domain.StatusOpen)
 	return entityID, taskID, blueprintRunID
 }
 
@@ -399,11 +401,11 @@ type closeTerminalOutageStore struct {
 	o *outage
 }
 
-func (s closeTerminalOutageStore) CloseTerminalSystem(ctx context.Context, orgID, entityID string, expected *int64, closeTypes []string, closeReason, closeEventType, closingEventID string, deferTo map[string]string) (dbpkg.TerminalCloseResult, error) {
+func (s closeTerminalOutageStore) CloseTerminalSystem(ctx context.Context, orgID, entityID string, expected *int64, closeTypes []string, closeReason, closeEventType, closingEventID string) (dbpkg.TerminalCloseResult, error) {
 	if s.o.down() {
 		return dbpkg.TerminalCloseResult{}, errOutage
 	}
-	return s.EntityStore.CloseTerminalSystem(ctx, orgID, entityID, expected, closeTypes, closeReason, closeEventType, closingEventID, deferTo)
+	return s.EntityStore.CloseTerminalSystem(ctx, orgID, entityID, expected, closeTypes, closeReason, closeEventType, closingEventID)
 }
 
 // TestCloseOwed_FailedClose_ReplaysWholeAndParkedHoldsTheKey pins the
