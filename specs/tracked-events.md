@@ -267,8 +267,8 @@ tip with the new one:
   compare that carries no file list is read as one with 300;
 - `ahead` with 300 files (the compare's cap): over 250 commits, `base_reset`.
   Otherwise the range's first-parent chain is compared one step at a time and
-  the move's paths are the union of the steps' files; a step with 300 files
-  is `base_reset`;
+  the move's paths are the union of the steps' files; a step with 300 files,
+  or a chain longer than 20 steps, is `base_reset`;
 - `identical`: nothing;
 - `behind` or `diverged` (a rewound or force-pushed base), or a 404 (the
   previous tip is gone): `base_reset`.
@@ -293,21 +293,20 @@ GitHub before it, leaves the move owed, and the next cycle admits another.
 A PR's paths are its changed files plus the previous path of each file it
 renamed or copied, read (GraphQL `PRChangedPaths`, with REST for the previous
 paths) only for a moved base, and only for a PR whose stored list was read at
-another head or against another base. A PR whose later page of files fails
-to read is probed and its list is not stored, so the next move reads it
-again. A reset that can have taken commits out
-of the base (a rewrite, a previous tip that is gone, a compare that would not
-answer, or a branch seen for the first time) clears the stored lists of the
-PRs on it, because a merge base
-that moves back adds files to a list at an unchanged head. A merge base that
-moves forward at an unchanged head (the base took in commits the PR's head
-already has) can add a file only when those commits changed it and the head
-later changed it back; that case is left to the sweep. A move's paths are its
-files plus each one's previous path.
-They overlap when a PR path equals a move path or one is a parent directory
-of the other, or when the move deleted a file, or renamed one into another
-directory, and the PR added a file anywhere under the directory the old file
-was in (never the repository root).
+another head or against another base. A PR whose files GitHub fails or
+declines to list on some page, or whose head or base moves between pages, is
+probed and its list is not stored, so the next move reads it again. A reset
+that can have taken commits out of the base (a rewrite, a previous tip that is
+gone, a compare that would not answer, or a branch seen for the first time)
+clears the stored lists of the PRs on it, because a merge base that moves back
+adds files to a list at an unchanged head. A merge base that moves forward at
+an unchanged head (the base took in commits the PR's head already has) can add
+a file only when those commits changed it and the head later changed it back;
+that case is left to the sweep. A move's paths are its files plus each one's
+previous path. They overlap when a PR path equals a move path or one is a
+parent directory of the other, or when the move deleted a file, or renamed one
+into another directory, and the PR added a file anywhere under the directory
+the old file was in (never the repository root).
 
 A probe is read 15 seconds after its admission, and a PR with a probe already
 waiting collapses into it. The probe worker reads the waiting PRs that share a

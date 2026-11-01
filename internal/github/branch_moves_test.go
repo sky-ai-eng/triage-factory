@@ -89,9 +89,9 @@ func TestCompare_MapsFilesAndCommits(t *testing.T) {
 
 // TestPRChangedPaths_PagesEachPullRequest: a pull request with more files than
 // the first page is paged through node(id:) and is complete when the list
-// holds all its changedFiles; one whose head moved or that was retargeted
-// between pages, or whose files GitHub could not list, is incomplete; an id
-// with no node, or whose later page failed, is absent.
+// holds all its changedFiles. An id with no node is absent, and so is one
+// whose head moved or that was retargeted between pages, whose files GitHub
+// could not list, or whose later page failed.
 func TestPRChangedPaths_PagesEachPullRequest(t *testing.T) {
 	file := func(p string) string { return `{"path":"` + p + `","changeType":"MODIFIED"}` }
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -132,20 +132,16 @@ func TestPRChangedPaths_PagesEachPullRequest(t *testing.T) {
 	if a := got["PR_a"]; !a.Complete || a.HeadSHA != "ha" || a.BaseRef != "main" || len(a.Paths) != 2 || a.Paths[1] != (domain.ChangedPath{Path: "a2", Change: domain.PathRenamed}) {
 		t.Errorf("PR_a = %+v, want both pages, complete", a)
 	}
-	if b := got["PR_b"]; b.Complete || len(b.Paths) != 1 {
-		t.Errorf("PR_b = %+v, want its first page alone, incomplete: its head moved", b)
-	}
-	if r := got["PR_r"]; r.Complete || len(r.Paths) != 1 {
-		t.Errorf("PR_r = %+v, want its first page alone, incomplete: it was retargeted", r)
-	}
-	if c, ok := got["PR_c"]; !ok || c.Complete || c.ChangedFiles != 4 {
-		t.Errorf("PR_c = %+v, want an incomplete read", c)
-	}
-	if _, ok := got["PR_gone"]; ok {
-		t.Error("an id with no node has a read")
-	}
-	if f, ok := got["PR_f"]; ok {
-		t.Errorf("PR_f = %+v, want no read: its second page failed", f)
+	for id, why := range map[string]string{
+		"PR_b":    "its head moved between pages",
+		"PR_r":    "it was retargeted between pages",
+		"PR_c":    "GitHub could not list its files",
+		"PR_f":    "its second page failed",
+		"PR_gone": "it has no node",
+	} {
+		if r, ok := got[id]; ok {
+			t.Errorf("%s = %+v, want no read: %s", id, r, why)
+		}
 	}
 }
 

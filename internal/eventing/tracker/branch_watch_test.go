@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -14,6 +15,10 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
@@ -42,6 +47,9 @@ type watchWorld struct {
 	tip string
 	// listing304 makes the open-PR listing answer 304 to its stored ETag.
 	listing304 bool
+	// refFails makes main's ref read answer 404, as GitHub does to a
+	// credential that cannot read the repository's contents.
+	refFails bool
 	// compares maps "base...head" to a compare body, or to "404", "422" or
 	// "rate-limited".
 	compares map[string]string
@@ -122,6 +130,10 @@ func (w *watchWorld) serve(rw http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(rw).Encode(prs)
 	case path == "/repos/octo/repo/git/ref/heads/main":
 		w.refReads++
+		if w.refFails {
+			http.NotFound(rw, r)
+			return
+		}
 		etag := `"ref-` + w.tip + `"`
 		if r.Header.Get("If-None-Match") == etag {
 			rw.WriteHeader(http.StatusNotModified)
@@ -349,6 +361,27 @@ func TestBranchWatch_FirstSightResetsTheBaseOnceAndStoresTheTip(t *testing.T) {
 
 func TestBranchWatch_CompareStatuses(t *testing.T) {
 	twoSteps := `{"sha":"mid","parents":[{"sha":"old"}]},{"sha":"new","parents":[{"sha":"mid"},{"sha":"side"}]}`
+	// chain is a truncated move of n first-parent steps from old to new, each
+	// step's compare listing one file, the last step's src/a.go.
+	chain := func(n int) map[string]string {
+		shas := []string{"old"}
+		for i := 1; i < n; i++ {
+			shas = append(shas, fmt.Sprintf("c%d", i))
+		}
+		shas = append(shas, "new")
+		commits := make([]string, n)
+		out := map[string]string{}
+		for i := 1; i <= n; i++ {
+			commits[i-1] = fmt.Sprintf(`{"sha":%q,"parents":[{"sha":%q}]}`, shas[i], shas[i-1])
+			file := fmt.Sprintf("docs/s%d.md", i)
+			if i == n {
+				file = "src/a.go"
+			}
+			out[shas[i-1]+"..."+shas[i]] = compareBody("ahead", 1, "", file)
+		}
+		out["old...new"] = compareBody("ahead", n, strings.Join(commits, ","), filesOf("gen", ghclient.CompareFileCap)...)
+		return out
+	}
 	cases := []struct {
 		name     string
 		compares map[string]string
@@ -409,6 +442,16 @@ func TestBranchWatch_CompareStatuses(t *testing.T) {
 			compares: map[string]string{"old...new": compareBody("ahead", ghclient.CompareCommitCap+1, twoSteps, filesOf("gen", ghclient.CompareFileCap)...)},
 			want:     map[int]string{1: domain.MergeabilityProbeBaseReset, 2: domain.MergeabilityProbeBaseReset, 3: domain.MergeabilityProbeBaseReset},
 			reads:    []string{"old...new"},
+		},
+		{
+			name:     "a walk of maxMoveSteps steps uses their files",
+			compares: chain(maxMoveSteps),
+			want:     map[int]string{1: domain.MergeabilityProbeBaseMoved},
+		},
+		{
+			name:     "a walk longer than maxMoveSteps resets the base",
+			compares: chain(maxMoveSteps + 1),
+			want:     map[int]string{1: domain.MergeabilityProbeBaseReset, 2: domain.MergeabilityProbeBaseReset, 3: domain.MergeabilityProbeBaseReset},
 		},
 		{
 			name: "a truncated step resets the base",
@@ -604,6 +647,100 @@ func TestBranchWatch_ACompareThatKeepsFailingResetsTheBase(t *testing.T) {
 	}
 }
 
+// withWatchMetrics points the branch watch's instruments at a reader the test
+// collects, for the test's duration.
+func withWatchMetrics(t *testing.T) *sdkmetric.ManualReader {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	prev := stats.Swap(newInstruments(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
+	t.Cleanup(func() { stats.Store(prev) })
+	return reader
+}
+
+// readFailures is mergeability.base_read_failures by read, as reader last
+// collected it.
+func readFailures(t *testing.T, reader *sdkmetric.ManualReader) map[string]int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	out := map[string]int64{}
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != baseReadFailuresMetric {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("%s is %T, want an int64 sum", m.Name, m.Data)
+			}
+			for _, dp := range sum.DataPoints {
+				read, _ := dp.Attributes.Value(attribute.Key("read"))
+				out[read.AsString()] = dp.Value
+			}
+		}
+	}
+	return out
+}
+
+// Every read the watch could not make is counted by what it read, except a
+// rate limit, which is waited out: a ref read that fails leaves the move
+// unprocessed, and the count is how an operator learns of it.
+func TestBranchWatch_FailedReadsAreCounted(t *testing.T) {
+	reader := withWatchMetrics(t)
+	w := newWatchWorld(t)
+	w.seenOnce()
+
+	w.set(func(w *watchWorld) { w.refFails = true })
+	if got := w.cycle(); len(got) != 0 {
+		t.Fatalf("a failed ref read admitted %v, want nothing", got)
+	}
+	if tip := w.storedTip(); tip == nil || tip.TipSHA != "old" {
+		t.Fatalf("stored tip = %+v, want old: the move is not processed", tip)
+	}
+	w.set(func(w *watchWorld) {
+		w.refFails = false
+		w.compares["old...new"] = "422"
+	})
+	w.cycle()
+	if got, want := readFailures(t, reader), map[string]int64{baseReadTip: 1, baseReadCompare: 1}; !maps.Equal(got, want) {
+		t.Errorf("read failures = %v, want %v", got, want)
+	}
+
+	// GitHub cannot list PR_1's files: it is probed, and its list is not
+	// stored, so the next move reads it again.
+	w.set(func(w *watchWorld) {
+		w.compares["old...new"] = compareBody("ahead", 1, "", "src/a.go")
+		w.paths["PR_1"] = `{"id":"PR_1","headRefOid":"h1","baseRefName":"main","changedFiles":1,"files":null}`
+	})
+	want := map[int]string{1: domain.MergeabilityProbeBaseMoved}
+	if got := w.cycle(); !mapsEqual(got, want) {
+		t.Errorf("admitted %v, want %v", got, want)
+	}
+	if got := readFailures(t, reader)[baseReadPaths]; got != 1 {
+		t.Errorf("paths read failures = %d, want 1", got)
+	}
+	rows, err := w.stores.PRMergeability.ListPathsSystem(context.Background(), runmode.LocalDefaultOrgID, []string{w.prs[0].ID})
+	if err != nil || len(rows) != 1 || rows[0].Paths != nil {
+		t.Errorf("PR_1's stored paths = %+v (err %v), want none", rows, err)
+	}
+
+	// Last, since the client then refuses every request until the limit
+	// resets.
+	w.set(func(w *watchWorld) {
+		w.tip = "newer"
+		w.compares["new...newer"] = "rate-limited"
+	})
+	w.cycle()
+	if !slices.Contains(w.compareReads, "new...newer") {
+		t.Fatalf("compares sent %v, want new...newer among them", w.compareReads)
+	}
+	if got, want := readFailures(t, reader), map[string]int64{baseReadTip: 1, baseReadCompare: 1, baseReadPaths: 1}; !maps.Equal(got, want) {
+		t.Errorf("read failures = %v, want %v: a rate limit is not one", got, want)
+	}
+}
+
 // A rate-limited compare is waited out: it neither starts the failure clock
 // nor resets the base, however long ago the branch was last checked.
 func TestBranchWatch_ARateLimitedCompareIsWaitedOut(t *testing.T) {
@@ -726,10 +863,25 @@ func TestBranchWatch_RenamesTakeTheirPreviousPathFromREST(t *testing.T) {
 	}
 }
 
+// countingDeletes counts the branch watch's deletes of stale tips.
+type countingDeletes struct {
+	db.PRMergeabilityStore
+	deletes int
+}
+
+func (c *countingDeletes) DeleteBranchTipsExceptSystem(ctx context.Context, orgID string, keep []domain.BranchRef) (int, error) {
+	c.deletes++
+	return c.PRMergeabilityStore.DeleteBranchTipsExceptSystem(ctx, orgID, keep)
+}
+
+// A tip no open pull request's base names is deleted, and a cycle with none
+// to delete sends no delete, which is a write transaction.
 func TestBranchWatch_DeletesTheTipsOfBranchesNoOpenPRTargets(t *testing.T) {
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
 	w := newWatchWorld(t)
+	store := &countingDeletes{PRMergeabilityStore: w.stores.PRMergeability}
+	w.tr.mergeability = store
 	if _, err := w.stores.PRMergeability.UpsertBranchTipSystem(ctx, org, domain.BranchTip{
 		RepositoryID: w.repoID, Branch: "release", TipSHA: "r1", ObservedAt: time.Now(),
 	}); err != nil {
@@ -739,6 +891,10 @@ func TestBranchWatch_DeletesTheTipsOfBranchesNoOpenPRTargets(t *testing.T) {
 	tips, err := w.stores.PRMergeability.ListBranchTipsSystem(ctx, org)
 	if err != nil || len(tips) != 1 || tips[0].Branch != "main" {
 		t.Errorf("tips after the cycle = %+v (err %v), want main's alone", tips, err)
+	}
+	w.cycle()
+	if store.deletes != 1 {
+		t.Errorf("deletes sent = %d, want 1: the second cycle had no tip to delete", store.deletes)
 	}
 }
 

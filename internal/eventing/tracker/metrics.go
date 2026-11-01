@@ -38,10 +38,19 @@ const (
 	pathFetchRESTRenames = "rest_renames"
 )
 
+// The GitHub reads of the branch watch that can fail: the
+// mergeability.base_read_failures label vocabulary.
 const (
-	baseMovesMetric      = "mergeability.base_moves"
-	overlapSetSizeMetric = "mergeability.overlap_set_size"
-	pathFetchesMetric    = "mergeability.path_fetches"
+	baseReadTip     = "tip"
+	baseReadCompare = "compare"
+	baseReadPaths   = "paths"
+)
+
+const (
+	baseMovesMetric        = "mergeability.base_moves"
+	baseReadFailuresMetric = "mergeability.base_read_failures"
+	overlapSetSizeMetric   = "mergeability.overlap_set_size"
+	pathFetchesMetric      = "mergeability.path_fetches"
 )
 
 // overlapSetSizeBounds are the histogram's buckets, as a share of the base's
@@ -50,11 +59,12 @@ const (
 var overlapSetSizeBounds = []float64{0, 0.005, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1}
 
 // instruments are the branch watch's. Every label value is a closed
-// vocabulary: a move outcome or a path-fetch source.
+// vocabulary: a move outcome, a read or a path-fetch source.
 type instruments struct {
-	baseMoves      metric.Int64Counter
-	overlapSetSize metric.Float64Histogram
-	pathFetches    metric.Int64Counter
+	baseMoves        metric.Int64Counter
+	baseReadFailures metric.Int64Counter
+	overlapSetSize   metric.Float64Histogram
+	pathFetches      metric.Int64Counter
 }
 
 // newInstruments builds the instruments against mp; production passes the
@@ -68,6 +78,10 @@ func newInstruments(mp metric.MeterProvider) *instruments {
 	if in.baseMoves, err = m.Int64Counter(baseMovesMetric,
 		metric.WithDescription("Base branch moves the poll processed, by outcome: overlap (the pull requests whose changed paths overlap the move were probed), identical, or a reset that probed every pull request on the base (reset_first_sight, reset_truncated, reset_rewritten, reset_missing_tip, reset_unreadable).")); err != nil {
 		trackerLog.Warn("tracker instrument setup failed", "instrument", baseMovesMetric, "error", err)
+	}
+	if in.baseReadFailures, err = m.Int64Counter(baseReadFailuresMetric,
+		metric.WithDescription("Branch watch reads GitHub failed, other than rate limits, by read: tip (a base branch's tip, per branch), compare (what a move changed, per branch) or paths (a pull request's changed files, per pull request). A failed tip read leaves the branch's move unprocessed until a read succeeds.")); err != nil {
+		trackerLog.Warn("tracker instrument setup failed", "instrument", baseReadFailuresMetric, "error", err)
 	}
 	if in.overlapSetSize, err = m.Float64Histogram(overlapSetSizeMetric,
 		metric.WithDescription("The share of a base branch's open pull requests an overlap move probed, per move."),
@@ -84,6 +98,15 @@ func newInstruments(mp metric.MeterProvider) *instruments {
 func recordBaseMoveOutcome(outcome string) {
 	if s := stats.Load(); s != nil {
 		s.baseMoves.Add(context.Background(), 1, metric.WithAttributes(attribute.String("outcome", outcome)))
+	}
+}
+
+func recordBaseReadFailures(read string, n int) {
+	if n == 0 {
+		return
+	}
+	if s := stats.Load(); s != nil {
+		s.baseReadFailures.Add(context.Background(), int64(n), metric.WithAttributes(attribute.String("read", read)))
 	}
 }
 

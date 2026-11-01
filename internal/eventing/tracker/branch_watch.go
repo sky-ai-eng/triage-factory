@@ -11,6 +11,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/upstream"
@@ -123,8 +124,12 @@ func (t *Tracker) watchBaseBranches(ctx context.Context, client *ghclient.Client
 		trackerLog.WarnContext(ctx, "branch watch: reading the stored tips failed; no base branch is checked this cycle", "error", err)
 		return
 	}
-	if _, err := t.mergeability.DeleteBranchTipsExceptSystem(ctx, orgID, targeted); err != nil {
-		trackerLog.WarnContext(ctx, "branch watch: deleting the tips of branches no open pull request targets failed; the next cycle retries", "error", err)
+	// The delete is a write transaction, so it is sent only on a cycle that
+	// has a tip to delete.
+	if len(db.BranchTipsToDelete(rows, targeted)) > 0 {
+		if _, err := t.mergeability.DeleteBranchTipsExceptSystem(ctx, orgID, targeted); err != nil {
+			trackerLog.WarnContext(ctx, "branch watch: deleting the tips of branches no open pull request targets failed; the next cycle retries", "error", err)
+		}
 	}
 	stored := make(map[domain.BranchRef]domain.BranchTip, len(rows))
 	for _, row := range rows {
@@ -211,7 +216,7 @@ func (t *Tracker) checkBaseBranch(ctx context.Context, client *ghclient.Client, 
 	}
 	sha, newETag, notModified, err := client.BranchTip(ctx, c.owner, c.repo, c.ref.Branch, etag)
 	if err != nil {
-		t.logBaseReadFailure(ctx, c, "reading the branch's tip", err, rateLimited)
+		t.logBaseReadFailure(ctx, c, baseReadTip, "reading the branch's tip", err, rateLimited)
 		return
 	}
 	switch {
@@ -236,15 +241,16 @@ func (t *Tracker) checkBaseBranch(ctx context.Context, client *ghclient.Client, 
 		switch {
 		case err == nil:
 		case errors.As(err, &rl):
-			t.logBaseReadFailure(ctx, c, "comparing the branch's previous tip with its new one", err, rateLimited)
+			t.logBaseReadFailure(ctx, c, baseReadCompare, "comparing the branch's previous tip with its new one", err, rateLimited)
 			return
 		case failing == nil || time.Since(*failing) <= unreadableMoveAfter:
-			t.logBaseReadFailure(ctx, c, "comparing the branch's previous tip with its new one", err, rateLimited)
+			t.logBaseReadFailure(ctx, c, baseReadCompare, "comparing the branch's previous tip with its new one", err, rateLimited)
 			c.compareFailed = true
 			return
 		default:
 			trackerLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "branch watch: comparing the branch's previous tip with its new one keeps failing; every pull request on it is probed",
 				"repository_id", c.ref.RepositoryID, "branch", c.ref.Branch, "failing_since", *failing, "error", err)
+			recordBaseReadFailures(baseReadCompare, 1)
 			outcome, paths = baseMoveUnreadable, nil
 		}
 		c.done, c.outcome, c.movePaths = true, outcome, paths
@@ -261,10 +267,14 @@ func (t *Tracker) checkBaseBranch(ctx context.Context, client *ghclient.Client, 
 // still.
 const unreadableMoveAfter = 20 * time.Minute
 
-func (t *Tracker) logBaseReadFailure(ctx context.Context, c *baseCheck, what string, err error, rateLimited *atomic.Bool) {
+// logBaseReadFailure logs a failed read of c and counts it under read, unless
+// it is a rate limit, which instead stops new checks from starting.
+func (t *Tracker) logBaseReadFailure(ctx context.Context, c *baseCheck, read, what string, err error, rateLimited *atomic.Bool) {
 	var rl *ghclient.ErrRateLimited
 	if errors.As(err, &rl) {
 		rateLimited.Store(true)
+	} else {
+		recordBaseReadFailures(read, 1)
 	}
 	trackerLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "branch watch: "+what+" failed; the branch is checked again next cycle",
 		"repository_id", c.ref.RepositoryID, "branch", c.ref.Branch, "error", err)
@@ -280,8 +290,8 @@ func (t *Tracker) logBaseReadFailure(ctx context.Context, c *baseCheck, what str
 //     CompareCommitCap commits, the range cannot be walked and the base is
 //     reset; otherwise its first-parent chain is walked from tip to old, one
 //     compare per step, and the steps' files are the move's. A step listing
-//     CompareFileCap files, or a chain that leaves the range without reaching
-//     old, resets the base;
+//     CompareFileCap files, a chain longer than maxMoveSteps, or one that
+//     leaves the range without reaching old, resets the base;
 //   - identical: nothing to probe;
 //   - behind or diverged: the base was rewound or force-pushed, and a compare
 //     lists only the new side's changes, so it cannot say what the rewrite
@@ -319,7 +329,7 @@ func describeMove(ctx context.Context, client *ghclient.Client, owner, repo, old
 	}
 	for cur, steps := tip, 0; cur != old; steps++ {
 		ps := parents[cur]
-		if len(ps) == 0 || steps > len(cmp.Commits) {
+		if len(ps) == 0 || steps == maxMoveSteps {
 			return baseMoveTruncated, nil, nil
 		}
 		step, err := client.Compare(ctx, owner, repo, ps[0], cur)
@@ -337,6 +347,12 @@ func describeMove(ctx context.Context, client *ghclient.Client, owner, repo, old
 	}
 	return baseMoveOverlap, paths, nil
 }
+
+// maxMoveSteps is the most first-parent steps describeMove compares before it
+// resets the base instead. Each step is a REST request, while a reset costs a
+// mergeability read of each open pull request on the base, which GitHub
+// answers up to 100 to a query.
+const maxMoveSteps = 20
 
 // overlapPaths reads the changed paths of every open pull request on a base
 // whose move is an overlap, keyed by entity id: the stored list when it was
@@ -430,8 +446,10 @@ func (t *Tracker) readPRPaths(ctx context.Context, client *ghclient.Client, orgI
 			if errors.As(err, &rl) {
 				return false
 			}
+			recordBaseReadFailures(baseReadPaths, len(chunk))
 			continue
 		}
+		recordBaseReadFailures(baseReadPaths, len(chunk)-len(reads))
 		for _, pr := range chunk {
 			read, ok := reads[pr.entity.ExternalID]
 			if !ok {
@@ -450,11 +468,13 @@ func (t *Tracker) readPRPaths(ctx context.Context, client *ghclient.Client, orgI
 					if errors.As(err, &rl) {
 						return false
 					}
+					recordBaseReadFailures(baseReadPaths, 1)
 					continue
 				}
 				paths.Paths = withPrevious(paths.Paths, previous, &paths.Complete)
 			}
 			if paths.HeadSHA == "" || paths.BaseRef == "" {
+				recordBaseReadFailures(baseReadPaths, 1)
 				continue
 			}
 			if written, err := t.mergeability.UpsertPathsSystem(ctx, orgID, paths); err != nil {

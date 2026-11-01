@@ -186,9 +186,10 @@ type ChangedPathsRead struct {
 	BaseRef string
 	// ChangedFiles is how many files GitHub says the pull request changes.
 	ChangedFiles int
-	Paths        []domain.ChangedPath
-	// Complete is true when Paths holds all ChangedFiles, read at one head
-	// and base.
+	// Paths is every page read, all at HeadSHA and BaseRef.
+	Paths []domain.ChangedPath
+	// Complete is true when Paths holds all ChangedFiles, which it does not
+	// past MaxPRChangedPaths.
 	Complete bool
 }
 
@@ -215,14 +216,13 @@ func (f *gqlChangedFiles) appendTo(paths []domain.ChangedPath) []domain.ChangedP
 // requests, keyed by node id, paging each one with more files through
 // node(id:) up to MaxPRChangedPaths. requests counts the queries sent. An id
 // with no node, or whose node is not a pull request, is absent, and so is one
-// whose later page failed: a list that read short only for this cycle is not
-// one to keep. A later page that GitHub answers with no files, or at another
-// head or base than the first, ends that pull request's list incomplete
-// rather than failing the batch. err is the
-// first page's failure, or a rate limit on any page: every request after one
-// would be refused the same way, and a GraphQL secondary limit does not stop
-// the client's own budget check from sending them, so the batch ends there and
-// returns no reads.
+// whose files GitHub could not list on some page, or answered a later page of
+// at another head or base than the first: a list that read short only for
+// this cycle is not one to keep, and the pull request is read again the next
+// time it is needed. err is the first page's failure, or a rate limit on any
+// page: every request after one would be refused the same way, and a GraphQL
+// secondary limit does not stop the client's own budget check from sending
+// them, so the batch ends there and returns no reads.
 func (c *Client) PRChangedPaths(ctx context.Context, nodeIDs []string) (reads map[string]ChangedPathsRead, requests int, err error) {
 	if len(nodeIDs) == 0 {
 		return nil, 0, nil
@@ -254,36 +254,32 @@ func (c *Client) PRChangedPaths(ctx context.Context, nodeIDs []string) (reads ma
 		if i >= len(nodeIDs) || n == nil || n.ID == "" || n.ID != nodeIDs[i] {
 			continue
 		}
-		read := ChangedPathsRead{HeadSHA: n.HeadRefOid, BaseRef: n.BaseRefName, ChangedFiles: n.ChangedFiles}
 		// files is null when GitHub could not list them (a field error
-		// beside the node), which leaves the list incomplete.
-		stable, failed := n.Files != nil, false
-		if n.Files != nil {
-			read.Paths = n.Files.appendTo(nil)
-			next, cursor := n.Files.PageInfo.HasNextPage, n.Files.PageInfo.EndCursor
-			for next && len(read.Paths) < MaxPRChangedPaths {
-				page, head, base, err := c.prChangedPathsPage(ctx, n.ID, cursor)
-				requests++
-				var rl *ErrRateLimited
-				if errors.As(err, &rl) {
-					return nil, requests, fmt.Errorf("PR changed paths: %w", err)
-				}
-				if err != nil {
-					failed = true
-					break
-				}
-				if page == nil || head != read.HeadSHA || base != read.BaseRef {
-					stable = false
-					break
-				}
-				read.Paths = page.appendTo(read.Paths)
-				next, cursor = page.PageInfo.HasNextPage, page.PageInfo.EndCursor
+		// beside the node).
+		if n.Files == nil {
+			continue
+		}
+		read := ChangedPathsRead{HeadSHA: n.HeadRefOid, BaseRef: n.BaseRefName, ChangedFiles: n.ChangedFiles, Paths: n.Files.appendTo(nil)}
+		failed := false
+		next, cursor := n.Files.PageInfo.HasNextPage, n.Files.PageInfo.EndCursor
+		for next && len(read.Paths) < MaxPRChangedPaths {
+			page, head, base, err := c.prChangedPathsPage(ctx, n.ID, cursor)
+			requests++
+			var rl *ErrRateLimited
+			if errors.As(err, &rl) {
+				return nil, requests, fmt.Errorf("PR changed paths: %w", err)
 			}
+			if err != nil || page == nil || head != read.HeadSHA || base != read.BaseRef {
+				failed = true
+				break
+			}
+			read.Paths = page.appendTo(read.Paths)
+			next, cursor = page.PageInfo.HasNextPage, page.PageInfo.EndCursor
 		}
 		if failed {
 			continue
 		}
-		read.Complete = stable && len(read.Paths) == read.ChangedFiles
+		read.Complete = len(read.Paths) == read.ChangedFiles
 		reads[n.ID] = read
 	}
 	return reads, requests, nil
