@@ -47,9 +47,7 @@ func TestMigrate_ExternalActionsPerformedBy(t *testing.T) {
 		}
 	}
 
-	if err := Migrate(database, "sqlite3"); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	migrateThrough(t, database, 202610310002)
 
 	want := map[string]string{
 		"mirror":     "system",
