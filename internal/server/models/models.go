@@ -1,4 +1,8 @@
-package server
+// Package models serves the models this deployment offers — the catalog read
+// at org and team scope and the paid availability probes — and is the one
+// door the rest of the server takes onto which model universe this deployment
+// may offer or store (DeploymentUniverse).
+package models
 
 import (
 	"errors"
@@ -15,7 +19,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// modelsHandler serves the models this deployment offers, at the two scopes
+// Handler serves the models this deployment offers, at the two scopes
 // that shape the answer, plus the writes that shape them:
 //
 //   - GET /api/orgs/{org_id}/models — as one org sees them.
@@ -33,7 +37,7 @@ import (
 // enabled, because a team's own model choices are drawn from that set — gate it
 // on admin and the team page has nothing to draw. The two test routes are org
 // admin, because each one spends the org's money.
-type modelsHandler struct {
+type Handler struct {
 	az *authz.Checker
 	tx db.TxRunner
 	// prober runs one paid request against the org's credentials to establish
@@ -41,7 +45,13 @@ type modelsHandler struct {
 	// routes register before the app injects it, so the closure over the
 	// server's field is what lets a route registered first read a value set
 	// later.
-	prober func() modelProber
+	prober func() Prober
+}
+
+// New builds the models handler. prober is read on every probe request, not
+// once here; see Handler.prober.
+func New(az *authz.Checker, tx db.TxRunner, prober func() Prober) *Handler {
+	return &Handler{az: az, tx: tx, prober: prober}
 }
 
 // modelPricesPerMTok is a model's headline rates in dollars per million tokens.
@@ -165,7 +175,7 @@ const (
 // belongs in this data — absent fields — never in a mode branch in the client.
 //
 // GET /api/orgs/{org_id}/models
-func (h *modelsHandler) handleModelsList(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleModelsList(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := h.az.RequireOrgMember(w, r)
 	if !ok {
 		return
@@ -182,10 +192,10 @@ func (h *modelsHandler) handleModelsList(w http.ResponseWriter, r *http.Request)
 		orgSet, err = tx.Orgs.GetSettings(r.Context(), orgID)
 		return err
 	}); err != nil {
-		internalError(w, "models", err)
+		httpx.InternalError(w, "models", err)
 		return
 	}
-	universe := deploymentUniverse()
+	universe := DeploymentUniverse()
 	enabled := domain.OrgModelSet(orgSet.EnabledModels, universe.DefaultEnabled())
 
 	models := universe.Models()
@@ -193,18 +203,18 @@ func (h *modelsHandler) handleModelsList(w http.ResponseWriter, r *http.Request)
 	for _, m := range models {
 		items = append(items, catalogRow(m, enabled.Has(m.Key), avail))
 	}
-	writeJSON(w, http.StatusOK, modelCatalogResponse{Items: items})
+	httpx.WriteJSON(w, http.StatusOK, modelCatalogResponse{Items: items})
 }
 
-// deploymentUniverse is the handler surface's one door onto what this
+// DeploymentUniverse is the handler surface's one door onto what this
 // deployment may offer or store.
 //
 // One helper rather than a modelcatalog call per site, so the models read, every
-// model validator beside it and the probe routes cannot end up asking about
-// different universes. modelcatalog takes the mode as a parameter and reads no
-// ambient mode of its own; this is the single place in this package that
-// supplies it.
-func deploymentUniverse() modelcatalog.Universe {
+// model validator elsewhere in the server and the probe routes cannot end up
+// asking about different universes. modelcatalog takes the mode as a parameter
+// and reads no ambient mode of its own; this is the single place in the server
+// that supplies it.
+func DeploymentUniverse() modelcatalog.Universe {
 	return modelcatalog.UniverseFor(runmode.Current() == runmode.ModeMulti)
 }
 
@@ -258,7 +268,7 @@ func catalogRow(m modelcatalog.Model, enabled bool, avail availabilityIndex) mod
 // admin goes to change it.
 //
 // GET /api/teams/{team_id}/models
-func (h *modelsHandler) handleTeamModelsList(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleTeamModelsList(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, teamID, ok := h.resolveTeam(w, r)
 	if !ok {
 		return
@@ -283,10 +293,10 @@ func (h *modelsHandler) handleTeamModelsList(w http.ResponseWriter, r *http.Requ
 			return fmt.Errorf("read team settings: %w", err)
 		}
 		enabled = domain.TeamModelSet(teamSet.EnabledModels,
-			domain.OrgModelSet(orgSet.EnabledModels, deploymentUniverse().DefaultEnabled()))
+			domain.OrgModelSet(orgSet.EnabledModels, DeploymentUniverse().DefaultEnabled()))
 		return nil
 	}); err != nil {
-		internalError(w, "models", err)
+		httpx.InternalError(w, "models", err)
 		return
 	}
 
@@ -295,7 +305,7 @@ func (h *modelsHandler) handleTeamModelsList(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	models := deploymentUniverse().Models()
+	models := DeploymentUniverse().Models()
 	items := make([]modelCatalogRow, 0, len(models))
 	for _, m := range models {
 		if !enabled.Has(m.Key) {
@@ -303,20 +313,20 @@ func (h *modelsHandler) handleTeamModelsList(w http.ResponseWriter, r *http.Requ
 		}
 		items = append(items, catalogRow(m, true, avail))
 	}
-	writeJSON(w, http.StatusOK, modelCatalogResponse{Items: items})
+	httpx.WriteJSON(w, http.StatusOK, modelCatalogResponse{Items: items})
 }
 
 // resolveTeam is the shared prefix of the two team-scoped model routes: the
 // session's org, the path's team, and the check that the team is in that org so
 // a cross-org id 404s rather than reaching a store.
-func (h *modelsHandler) resolveTeam(w http.ResponseWriter, r *http.Request) (orgID, userID, teamID string, ok bool) {
-	orgID, ok = requireOrg(w, r)
+func (h *Handler) resolveTeam(w http.ResponseWriter, r *http.Request) (orgID, userID, teamID string, ok bool) {
+	orgID, ok = httpx.RequireOrg(w, r)
 	if !ok {
 		return "", "", "", false
 	}
-	claims := ClaimsFrom(r.Context())
+	claims := httpx.ClaimsFrom(r.Context())
 	if claims == nil {
-		writeUnauth(w)
+		httpx.WriteUnauth(w)
 		return "", "", "", false
 	}
 	userID = claims.Subject
@@ -330,14 +340,14 @@ func (h *modelsHandler) resolveTeam(w http.ResponseWriter, r *http.Request) (org
 	return orgID, userID, teamID, true
 }
 
-// writeModelAccessError renders a modelaccess refusal as the fault it is,
+// WriteAccessError renders a modelaccess refusal as the fault it is,
 // returning false for anything else so the caller falls through to its own
 // error handling.
 //
 // 400 INVALID_FIELD on the named field: the value is well-formed and the write
 // is well-addressed, but it names a model this organization cannot
 // authenticate. The message carries the remedy — connect the provider.
-func writeModelAccessError(w http.ResponseWriter, err error, field string) bool {
+func WriteAccessError(w http.ResponseWriter, err error, field string) bool {
 	if !errors.Is(err, modelaccess.ErrProviderUnconfigured) {
 		return false
 	}
@@ -347,7 +357,8 @@ func writeModelAccessError(w http.ResponseWriter, err error, field string) bool 
 	return true
 }
 
-func (s *Server) registerModelRoutes() {
+// Register mounts the models routes.
+func (h *Handler) Register(m httpx.Mounts) {
 	// The models this deployment offers, as one org sees them: the shipped
 	// catalog joined to the org's own enable-set. Org-scoped because that
 	// enable-set is org state, and member-level because its widest reader is a
@@ -360,14 +371,13 @@ func (s *Server) registerModelRoutes() {
 	// sets are WRITTEN on their scope's settings resource — they are ordinary
 	// columns, not effects a field write cannot express — so there is no write
 	// verb here.
-	mdh := &modelsHandler{az: s.az, tx: s.tx, prober: func() modelProber { return s.modelProber }}
-	s.api("GET /api/orgs/{org_id}/models", mdh.handleModelsList)
-	s.api("GET /api/teams/{team_id}/models", mdh.handleTeamModelsList)
+	m.API("GET /api/orgs/{org_id}/models", h.handleModelsList)
+	m.API("GET /api/teams/{team_id}/models", h.handleTeamModelsList)
 	// The availability probes: the same verb on the item and on the
 	// collection, because "test this model" and "test this provider's
 	// candidates" are two nameable things with two response shapes. Both are
 	// POSTs for an effect no field write can express — each one calls the
 	// provider and is billed for it.
-	s.apiMutating("POST /api/orgs/{org_id}/models/{model_key}/test", mdh.handleModelTest)
-	s.apiMutating("POST /api/orgs/{org_id}/models/tests", mdh.handleModelTestSweep)
+	m.APIMutating("POST /api/orgs/{org_id}/models/{model_key}/test", h.handleModelTest)
+	m.APIMutating("POST /api/orgs/{org_id}/models/tests", h.handleModelTestSweep)
 }

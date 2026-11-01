@@ -1,4 +1,4 @@
-package server
+package models
 
 import (
 	"context"
@@ -16,11 +16,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// modelProber is the slice of internal/llm/modelprobe the test endpoints call: one
+// Prober is the slice of internal/llm/modelprobe the test endpoints call: one
 // paid request establishing whether this org's credentials can invoke one
 // model. A narrow interface so a handler test can answer with a canned verdict
 // instead of standing up a provider.
-type modelProber interface {
+type Prober interface {
 	Probe(ctx context.Context, orgID string, m modelcatalog.Model) (modelprobe.Result, error)
 }
 
@@ -137,7 +137,7 @@ func (a availabilityIndex) familyFor(m modelcatalog.Model) string {
 // member resolves the same providers an admin does — which matters, because a
 // member silently answered with the defaults would see a picker full of models
 // their org cannot run.
-func (h *modelsHandler) availability(w http.ResponseWriter, r *http.Request, orgID, userID string) (availabilityIndex, bool) {
+func (h *Handler) availability(w http.ResponseWriter, r *http.Request, orgID, userID string) (availabilityIndex, bool) {
 	multi := runmode.Current() == runmode.ModeMulti
 	var index availabilityIndex
 	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -156,7 +156,7 @@ func (h *modelsHandler) availability(w http.ResponseWriter, r *http.Request, org
 		}
 		return nil
 	}); err != nil {
-		internalError(w, "models", err)
+		httpx.InternalError(w, "models", err)
 		return availabilityIndex{}, false
 	}
 	return index, true
@@ -229,7 +229,7 @@ type modelTestSweepRequest struct {
 // move is to try again.
 //
 // POST /api/orgs/{org_id}/models/{model_key}/test
-func (h *modelsHandler) handleModelTest(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleModelTest(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := h.az.RequireOrgAdmin(w, r)
 	if !ok {
 		return
@@ -262,7 +262,7 @@ func (h *modelsHandler) handleModelTest(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	httpx.WriteJSON(w, http.StatusOK, result)
 }
 
 // handleModelTestSweep tests every candidate of one provider — the eager pass
@@ -293,7 +293,7 @@ func (h *modelsHandler) handleModelTest(w http.ResponseWriter, r *http.Request) 
 // answers, and one more thing that can disagree with what the sweep does.
 //
 // POST /api/orgs/{org_id}/models/tests
-func (h *modelsHandler) handleModelTestSweep(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleModelTestSweep(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := h.az.RequireOrgAdmin(w, r)
 	if !ok {
 		return
@@ -339,7 +339,7 @@ func (h *modelsHandler) handleModelTestSweep(w http.ResponseWriter, r *http.Requ
 	}
 
 	items := []modelTestResult{}
-	for _, model := range deploymentUniverse().CandidatesFor(provider) {
+	for _, model := range DeploymentUniverse().CandidatesFor(provider) {
 		if state, _, checkedAt := avail.forModel(model); state == modelAvailabilityVerified {
 			items = append(items, modelTestResult{
 				ModelKey: model.Key, Outcome: modelTestSkipped, CheckedAt: checkedAt,
@@ -354,7 +354,7 @@ func (h *modelsHandler) handleModelTestSweep(w http.ResponseWriter, r *http.Requ
 		}
 		items = append(items, result)
 	}
-	writeJSON(w, http.StatusOK, modelTestSweepResponse{Provider: provider, Items: items})
+	httpx.WriteJSON(w, http.StatusOK, modelTestSweepResponse{Provider: provider, Items: items})
 }
 
 // runProbe spends one request and persists whatever it concluded, returning
@@ -371,17 +371,17 @@ func (h *modelsHandler) handleModelTestSweep(w http.ResponseWriter, r *http.Requ
 // is a state that means "we tried and could not tell", which every consumer
 // would then have to decide how to render and which one bad provider minute
 // could put on a model that works.
-func (h *modelsHandler) runProbe(w http.ResponseWriter, r *http.Request, prober modelProber, orgID, userID, family string, model modelcatalog.Model) (modelTestResult, bool) {
+func (h *Handler) runProbe(w http.ResponseWriter, r *http.Request, prober Prober, orgID, userID, family string, model modelcatalog.Model) (modelTestResult, bool) {
 	res, err := prober.Probe(r.Context(), orgID, model)
 	if err != nil {
 		if modelprobe.IsSetupGap(err) {
 			// The org cannot reach this provider at all. Not a verdict about
 			// the model, and nothing is recorded — the fix is a credential,
 			// which is the same page the caller is already on.
-			writeNotConfigured(w, err.Error())
+			httpx.WriteNotConfigured(w, err.Error())
 			return modelTestResult{}, false
 		}
-		internalError(w, "models", fmt.Errorf("probe %s: %w", model.Key, err))
+		httpx.InternalError(w, "models", fmt.Errorf("probe %s: %w", model.Key, err))
 		return modelTestResult{}, false
 	}
 
@@ -406,7 +406,7 @@ func (h *modelsHandler) runProbe(w http.ResponseWriter, r *http.Request, prober 
 	}); err != nil {
 		// The request was made and billed; only the record of it failed. Say
 		// so rather than reporting an outcome the next read will contradict.
-		internalError(w, "models", fmt.Errorf("record availability for %s: %w", model.Key, err))
+		httpx.InternalError(w, "models", fmt.Errorf("record availability for %s: %w", model.Key, err))
 		return modelTestResult{}, false
 	}
 
@@ -432,21 +432,21 @@ func (h *modelsHandler) runProbe(w http.ResponseWriter, r *http.Request, prober 
 // There is no mode gate. Both modes can spend a probe — multi from this
 // process, local through the agent runtime — so the only deployment that
 // cannot answer is one where the seam was never wired.
-func (h *modelsHandler) requireProbing(w http.ResponseWriter) (modelProber, bool) {
+func (h *Handler) requireProbing(w http.ResponseWriter) (Prober, bool) {
 	// Both nils mean the same thing and both must be caught here: the getter
 	// itself is nil in a unit test that never set it, and the getter RETURNS
 	// nil on a pod where SetModelProber has not run — routes register before
 	// the app injects the seam, so the second case is the live one. Checking
 	// only the getter would hand runProbe a nil interface to call.
 	if h.prober == nil {
-		writeNotConfigured(w, noProberConfigured)
+		httpx.WriteNotConfigured(w, noProberConfigured)
 		return nil, false
 	}
 	prober := h.prober()
 	if prober == nil {
 		// A serving pod that never had the credential seam wired. Deployment
 		// shape, not a transient outage.
-		writeNotConfigured(w, noProberConfigured)
+		httpx.WriteNotConfigured(w, noProberConfigured)
 		return nil, false
 	}
 	return prober, true
@@ -462,9 +462,9 @@ const noProberConfigured = "this deployment has no model prober configured"
 // exist, and probing an arbitrary caller-supplied string would let anyone spend
 // the org's money on requests to models TF never named.
 func offeredModel(w http.ResponseWriter, rawKey string) (modelcatalog.Model, bool) {
-	model, ok := deploymentUniverse().Lookup(strings.TrimSpace(rawKey))
+	model, ok := DeploymentUniverse().Lookup(strings.TrimSpace(rawKey))
 	if !ok {
-		notFound(w, "model")
+		httpx.NotFound(w, "model")
 		return modelcatalog.Model{}, false
 	}
 	return model, true
@@ -487,7 +487,7 @@ func requireOwnCredentials(w http.ResponseWriter, avail availabilityIndex) bool 
 	if avail.creds.BringsOwn() {
 		return true
 	}
-	writeNotConfigured(w, "this organization runs on the credentials of the machine hosting it, which no stored availability result can describe — connect a provider in Settings → Claude credentials to test models against it")
+	httpx.WriteNotConfigured(w, "this organization runs on the credentials of the machine hosting it, which no stored availability result can describe — connect a provider in Settings → Claude credentials to test models against it")
 	return false
 }
 
@@ -506,10 +506,10 @@ func requireCredentialFor(w http.ResponseWriter, avail availabilityIndex, m mode
 		return true
 	}
 	if m.Provider != "" {
-		writeNotConfigured(w, notConnectedMessage(m.Provider))
+		httpx.WriteNotConfigured(w, notConnectedMessage(m.Provider))
 		return false
 	}
-	writeNotConfigured(w, "this organization has connected no Claude credentials — connect one in Settings → Claude credentials before testing models")
+	httpx.WriteNotConfigured(w, "this organization has connected no Claude credentials — connect one in Settings → Claude credentials before testing models")
 	return false
 }
 
@@ -528,7 +528,7 @@ func requireProviderConnected(w http.ResponseWriter, avail availabilityIndex, pr
 	if avail.creds.Has(provider) {
 		return true
 	}
-	writeNotConfigured(w, notConnectedMessage(provider))
+	httpx.WriteNotConfigured(w, notConnectedMessage(provider))
 	return false
 }
 

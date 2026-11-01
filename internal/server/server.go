@@ -36,6 +36,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/models"
 	"github.com/sky-ai-eng/triage-factory/internal/wsevent/knowledgeevent"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -125,7 +126,7 @@ type Server struct {
 	// credentials can invoke a given model. Wired via SetModelProber after
 	// construction; nil in local mode, where nothing probes and the test
 	// routes say the deployment cannot answer.
-	modelProber modelProber
+	modelProber models.Prober
 	// fleetQueue backs the GET /api/fleet/queue view: per-org
 	// conversation-queue shares (active/queued + cap). Satisfied by the
 	// ConversationQueue store; a narrow interface so the handler test can
@@ -917,7 +918,11 @@ func (s *Server) routes() {
 	s.registerGitHubRoutes()
 	s.registerSourceRoutes()
 	s.registerWorkRoutes()
-	s.registerModelRoutes()
+
+	// The domains that live in their own subpackages register through the
+	// same two mounts, handed over as httpx.Mounts.
+	m := s.mounts()
+	models.New(s.az, s.tx, func() models.Prober { return s.modelProber }).Register(m)
 
 	// SSO (connection / domains / break-glass admin surface, the verify-
 	// before-enforce test-start, and the identifier-first discovery probe) is
@@ -1165,7 +1170,7 @@ func (s *Server) SetBedrockRoleResolver(r bedrockRoleResolver) {
 // on every serving process, in either mode — the transport differs (a direct
 // call in multi, the agent runtime in local) but the question and the verdicts
 // do not. Nil until wired: the test routes report the deployment cannot probe.
-func (s *Server) SetModelProber(p modelProber) {
+func (s *Server) SetModelProber(p models.Prober) {
 	s.modelProber = p
 }
 

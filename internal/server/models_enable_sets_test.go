@@ -10,10 +10,7 @@ import (
 
 	"github.com/zalando/go-keyring"
 
-	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
-	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
-	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -28,8 +25,29 @@ import (
 // that team's own.
 func teamModelsPath(teamID string) string { return "/api/teams/" + teamID + "/models" }
 
+// catalogRead is the models read as these tests read it: the key and whether
+// it is enabled, which is all an enable-set changes.
+type catalogRead struct {
+	Items []catalogRow `json:"items"`
+}
+
+type catalogRow struct {
+	Key     string `json:"key"`
+	Enabled bool   `json:"enabled"`
+}
+
+// decodeModels reads the response body as the catalog contract.
+func decodeModels(t *testing.T, body []byte) catalogRead {
+	t.Helper()
+	var resp catalogRead
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("decode catalog: %v (body: %s)", err, body)
+	}
+	return resp
+}
+
 // keysOf collects the model keys a catalog read returned, in order.
-func keysOf(items []modelCatalogRow) []string {
+func keysOf(items []catalogRow) []string {
 	out := make([]string, 0, len(items))
 	for _, it := range items {
 		out = append(out, it.Key)
@@ -200,85 +218,6 @@ func assertFieldError(t *testing.T, rec *httptest.ResponseRecorder, field string
 		}
 	}
 	t.Errorf("no error names field %q: %s", field, rec.Body.String())
-}
-
-// TestTeamModelsRead_ScopeAndSets_Postgres: on Postgres the team's set shapes
-// its catalog, including for an org admin not on the team; one team's set does
-// not narrow another's, and a team in another org is invisible.
-func TestTeamModelsRead_ScopeAndSets_Postgres(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeMulti)
-	h := pgtest.Shared(t)
-	h.Reset(t)
-
-	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
-	s := New(h.AdminDB, stores)
-	mdh := &modelsHandler{az: s.az, tx: s.tx}
-
-	orgID, owner, teamA := pgtest.SeedOrgWithUser(t, h, "enableset-founder")
-	teamB := pgtest.SeedTeam(t, h, orgID, "teamB")
-	orgAdmin := pgtest.SeedUser(t, h, "enableset-orgadmin")
-	pgtest.AddOrgMember(t, h, orgAdmin, orgID, teamB, "admin", "member") // org admin, teamB only
-	teamAdmin := pgtest.SeedUser(t, h, "enableset-teamadmin")
-	pgtest.AddOrgMember(t, h, teamAdmin, orgID, teamA, "member", "admin") // teamA admin, plain org member
-
-	// teamA is narrowed to one model. Written straight to the row rather than
-	// through the settings route: this test is about what the READ does with a
-	// stored set, and going through the write would only re-prove the write.
-	pgtest.MustExec(t, h.AdminDB, `
-		INSERT INTO team_settings (team_id, enabled_models, default_model)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (team_id) DO UPDATE SET
-			enabled_models = EXCLUDED.enabled_models,
-			default_model = EXCLUDED.default_model`,
-		teamA, `["`+domain.ModelSonnet+`"]`, domain.ModelSonnet)
-
-	req := func(teamID string) *http.Request {
-		r := httptest.NewRequest(http.MethodGet, "/api/models", nil)
-		r.SetPathValue("team_id", teamID)
-		return r
-	}
-	withCaller := func(r *http.Request, caller string) *http.Request {
-		ctx := httpx.WithOrgID(r.Context(), orgID)
-		ctx = httpx.WithClaims(ctx, &verify.Claims{Subject: caller})
-		return r.WithContext(ctx)
-	}
-
-	t.Run("the_set_shapes_the_read_for_members_and_for_the_org_admin", func(t *testing.T) {
-		// The second reader is the point: a membership-gated read would answer
-		// the org admin with the defaults and show them a catalog nobody
-		// narrowed, seconds after the team narrowed it.
-		for _, caller := range []string{teamAdmin, orgAdmin} {
-			rec := httptest.NewRecorder()
-			mdh.handleTeamModelsList(rec, withCaller(req(teamA), caller))
-			if rec.Code != http.StatusOK {
-				t.Fatalf("teamA read = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
-			}
-			got := keysOf(decodeModels(t, rec.Body.Bytes()).Items)
-			if len(got) != 1 || got[0] != domain.ModelSonnet {
-				t.Errorf("teamA read for %s = %v, want just %s", caller, got, domain.ModelSonnet)
-			}
-		}
-	})
-
-	t.Run("another_team_is_untouched", func(t *testing.T) {
-		rec := httptest.NewRecorder()
-		mdh.handleTeamModelsList(rec, withCaller(req(teamB), orgAdmin))
-		if rec.Code != http.StatusOK {
-			t.Fatalf("teamB read = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
-		}
-		if got, want := len(decodeModels(t, rec.Body.Bytes()).Items), len(modelcatalog.UniverseFor(true).Models()); got != want {
-			t.Errorf("narrowing teamA also narrowed teamB: %d models, want %d", got, want)
-		}
-	})
-
-	t.Run("team_in_another_org_is_404", func(t *testing.T) {
-		_, _, otherTeam := pgtest.SeedOrgWithUser(t, h, "enableset-other-org")
-		rec := httptest.NewRecorder()
-		mdh.handleTeamModelsList(rec, withCaller(req(otherTeam), owner))
-		if rec.Code != http.StatusNotFound {
-			t.Errorf("read of another org's team = %d, want 404 (body: %s)", rec.Code, rec.Body.String())
-		}
-	})
 }
 
 // A manual delegation refused for its model's provider answers 422 naming the

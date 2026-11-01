@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/models"
 	"github.com/sky-ai-eng/triage-factory/internal/server/prompts"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 )
@@ -162,7 +163,7 @@ func (ph *promptsHandler) handlePromptCreate(w http.ResponseWriter, r *http.Requ
 		})
 		return
 	}
-	if universe := deploymentUniverse(); !prompts.ValidModel(universe, req.Model) {
+	if universe := models.DeploymentUniverse(); !prompts.ValidModel(universe, req.Model) {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
 			Reason: httpx.ReasonInvalidField, Message: prompts.InvalidModelError(universe), Field: "model",
 		})
@@ -245,7 +246,7 @@ func (ph *promptsHandler) handlePromptPut(w http.ResponseWriter, r *http.Request
 		})
 		return
 	}
-	if universe := deploymentUniverse(); !prompts.ValidModel(universe, req.Model) {
+	if universe := models.DeploymentUniverse(); !prompts.ValidModel(universe, req.Model) {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
 			Reason: httpx.ReasonInvalidField, Message: prompts.InvalidModelError(universe), Field: "model",
 		})

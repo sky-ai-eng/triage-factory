@@ -1,4 +1,4 @@
-package server
+package models
 
 import (
 	"bytes"
@@ -20,6 +20,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/llm/modelprobe"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/systemjob/systemllm"
 )
@@ -92,7 +93,7 @@ func (m *mockProvider) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // store — only the far end of the socket is a fake.
 type availabilityRig struct {
 	h        *pgtest.Harness
-	mdh      *modelsHandler
+	mdh      *Handler
 	provider *mockProvider
 	orgID    string
 	admin    string
@@ -107,7 +108,6 @@ func newAvailabilityRig(t *testing.T) *availabilityRig {
 	h.Reset(t)
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
-	s := New(h.AdminDB, stores)
 
 	orgID, admin, teamID := pgtest.SeedOrgWithUser(t, h, "availability-api")
 	member := pgtest.SeedUser(t, h, "availability-api-member")
@@ -132,7 +132,7 @@ func newAvailabilityRig(t *testing.T) *availabilityRig {
 
 	return &availabilityRig{
 		h:        h,
-		mdh:      &modelsHandler{az: s.az, tx: s.tx, prober: func() modelProber { return prober }},
+		mdh:      New(authz.New(h.AdminDB, stores.Tx), stores.Tx, func() Prober { return prober }),
 		provider: provider,
 		orgID:    orgID,
 		admin:    admin,
@@ -521,29 +521,22 @@ func (c cannedProber) Probe(context.Context, string, modelcatalog.Model) (modelp
 // invalidates it through. Both fields, because that is what the bind route
 // writes — the ref says which provider, the method says the org has stopped
 // running on the host's.
-func bindLocalAnthropic(t *testing.T, s *Server) {
+func bindLocalAnthropic(t *testing.T, l *localRig) {
 	t.Helper()
-	if _, err := s.allStores.Orgs.SetAnthropicKeyRef(t.Context(), runmode.LocalDefaultOrgID, secretKeyAnthropicAPIKey); err != nil {
+	if _, err := l.stores.Orgs.SetAnthropicKeyRef(t.Context(), runmode.LocalDefaultOrgID, "anthropic_api_key"); err != nil {
 		t.Fatalf("bind anthropic: %v", err)
 	}
-	if _, err := s.allStores.Orgs.SetBedrockCredentialsRef(t.Context(), runmode.LocalDefaultOrgID, ""); err != nil {
+	if _, err := l.stores.Orgs.SetBedrockCredentialsRef(t.Context(), runmode.LocalDefaultOrgID, ""); err != nil {
 		t.Fatalf("unbind bedrock: %v", err)
 	}
 }
 
-// localModelHandler wires the models handler over a local server with a canned
-// verdict, and returns a request addressed at the local org as its own user.
-func localModelHandler(s *Server, canned cannedProber) *modelsHandler {
-	return &modelsHandler{az: s.az, tx: s.tx, prober: func() modelProber { return canned }}
-}
-
+// localModelTestRequest is a test-route request addressed at the local org as
+// its own user.
 func localModelTestRequest(modelKey string) *http.Request {
-	r := httptest.NewRequest(http.MethodPost, "/api/models", nil)
-	r.SetPathValue("org_id", runmode.LocalDefaultOrgID)
+	r := localRequest()
 	r.SetPathValue("model_key", modelKey)
-	ctx := httpx.WithOrgID(r.Context(), runmode.LocalDefaultOrgID)
-	ctx = httpx.WithClaims(ctx, &verify.Claims{Subject: runmode.LocalDefaultUserID})
-	return r.WithContext(ctx)
+	return r
 }
 
 // A local org on its own credential probes, and the verdict is stored and
@@ -562,9 +555,9 @@ func TestModelTest_LocalMode_ProbesAndPublishesTheVerdict(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			runmode.SetForTest(t, runmode.ModeLocal)
 			keyring.MockInit()
-			s := newTestServer(t)
-			bindLocalAnthropic(t, s)
-			mdh := localModelHandler(s, cannedProber{res: modelprobe.Result{Verdict: tc.verdict, Detail: tc.detail}})
+			l := newLocalRig(t)
+			bindLocalAnthropic(t, l)
+			mdh := l.handler(cannedProber{res: modelprobe.Result{Verdict: tc.verdict, Detail: tc.detail}})
 
 			key := domain.ModelAliasSonnet
 			rec := httptest.NewRecorder()
@@ -589,7 +582,7 @@ func TestModelTest_LocalMode_ProbesAndPublishesTheVerdict(t *testing.T) {
 
 			// The row is keyed by the credential family it was spent against.
 			var provider string
-			if err := s.db.QueryRow(
+			if err := l.db.QueryRow(
 				`SELECT provider FROM model_availability WHERE org_id = ? AND model_key = ?`,
 				runmode.LocalDefaultOrgID, key).Scan(&provider); err != nil {
 				t.Fatalf("read the stored row: %v", err)
@@ -600,7 +593,7 @@ func TestModelTest_LocalMode_ProbesAndPublishesTheVerdict(t *testing.T) {
 
 			// The verdict reaches the catalog read, which is where anyone
 			// choosing a model actually sees it.
-			read := doJSON(t, s, http.MethodGet, modelsPath(runmode.LocalDefaultOrgID), nil)
+			read := l.list(t)
 			if read.Code != http.StatusOK {
 				t.Fatalf("catalog read = %d, want 200 (body: %s)", read.Code, read.Body.String())
 			}
@@ -625,9 +618,9 @@ func TestModelTest_LocalMode_ProbesAndPublishesTheVerdict(t *testing.T) {
 func TestModelTests_LocalMode_SystemCredentialsRefuseWithoutSpending(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
-	s := newTestServer(t)
+	l := newLocalRig(t)
 	spent := &countingProber{}
-	mdh := &modelsHandler{az: s.az, tx: s.tx, prober: func() modelProber { return spent }}
+	mdh := l.handler(spent)
 
 	single := httptest.NewRecorder()
 	mdh.handleModelTest(single, localModelTestRequest(domain.ModelAliasSonnet))
@@ -654,7 +647,7 @@ func TestModelTests_LocalMode_SystemCredentialsRefuseWithoutSpending(t *testing.
 		t.Errorf("the prober was called %d times; a refused route must spend nothing", spent.calls)
 	}
 	var rows int
-	if err := s.db.QueryRow(`SELECT count(*) FROM model_availability`).Scan(&rows); err != nil {
+	if err := l.db.QueryRow(`SELECT count(*) FROM model_availability`).Scan(&rows); err != nil {
 		t.Fatalf("count model_availability: %v", err)
 	}
 	if rows != 0 {
@@ -668,21 +661,21 @@ func TestModelTests_LocalMode_SystemCredentialsRefuseWithoutSpending(t *testing.
 func TestModelTest_LocalMode_NothingBoundRefusesWithoutNamingAProvider(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
-	s := newTestServer(t)
+	l := newLocalRig(t)
 
 	// Brings its own, binds nothing: the state the setup flow leaves behind
 	// between choosing BYOK and pasting a key.
-	set, err := s.allStores.Orgs.GetSettingsSystem(t.Context(), runmode.LocalDefaultOrgID)
+	set, err := l.stores.Orgs.GetSettingsSystem(t.Context(), runmode.LocalDefaultOrgID)
 	if err != nil {
 		t.Fatalf("read org settings: %v", err)
 	}
 	set.LLMAuthMethod = domain.LLMAuthBYOK
-	if _, err := s.allStores.Orgs.UpdateSettingsVersioned(t.Context(), runmode.LocalDefaultOrgID, set, set.Version); err != nil {
+	if _, err := l.stores.Orgs.UpdateSettingsVersioned(t.Context(), runmode.LocalDefaultOrgID, set, set.Version); err != nil {
 		t.Fatalf("select byok: %v", err)
 	}
 
 	spent := &countingProber{}
-	mdh := &modelsHandler{az: s.az, tx: s.tx, prober: func() modelProber { return spent }}
+	mdh := l.handler(spent)
 	rec := httptest.NewRecorder()
 	mdh.handleModelTest(rec, localModelTestRequest(domain.ModelAliasSonnet))
 
@@ -711,7 +704,7 @@ func TestModelTest_LocalMode_NothingBoundRefusesWithoutNamingAProvider(t *testin
 		t.Errorf("refusal does not say where to fix it: %q", message)
 	}
 	// The badge the read publishes for the same model agrees.
-	read := doJSON(t, s, http.MethodGet, modelsPath(runmode.LocalDefaultOrgID), nil)
+	read := l.list(t)
 	if read.Code != http.StatusOK {
 		t.Fatalf("catalog read = %d, want 200 (body: %s)", read.Code, read.Body.String())
 	}
@@ -737,14 +730,14 @@ func (c *countingProber) Probe(context.Context, string, modelcatalog.Model) (mod
 // SetModelProber runs, so the closure hands back a nil interface until it does.
 func TestModelTest_Postgres_NoProberConfigured(t *testing.T) {
 	key := modelKeyOn(t, modelcatalog.ProviderAnthropic)
-	for name, wire := range map[string]func(*modelsHandler){
-		"nil_getter":         func(h *modelsHandler) { h.prober = nil },
-		"getter_returns_nil": func(h *modelsHandler) { h.prober = func() modelProber { return nil } },
-		"getter_returns_nil_ptr": func(h *modelsHandler) {
+	for name, wire := range map[string]func(*Handler){
+		"nil_getter":         func(h *Handler) { h.prober = nil },
+		"getter_returns_nil": func(h *Handler) { h.prober = func() Prober { return nil } },
+		"getter_returns_nil_ptr": func(h *Handler) {
 			// The shape server.go actually builds: a closure over a field that
 			// is still the interface's zero value.
-			var unset modelProber
-			h.prober = func() modelProber { return unset }
+			var unset Prober
+			h.prober = func() Prober { return unset }
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -858,13 +851,13 @@ func TestTeamModelsList_Postgres_ReportsTheSameAvailability(t *testing.T) {
 func TestModelsList_LocalMode_SystemCredentialsSuppressAStoredVerdict(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
-	s := newTestServer(t)
-	if _, err := s.allStores.ModelAvailability.Record(t.Context(), runmode.LocalDefaultOrgID,
+	l := newLocalRig(t)
+	if _, err := l.stores.ModelAvailability.Record(t.Context(), runmode.LocalDefaultOrgID,
 		modelcatalog.ProviderAnthropic, domain.ModelAliasSonnet, domain.ModelAvailabilityGreen, ""); err != nil {
 		t.Fatalf("record a green verdict: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodGet, modelsPath(runmode.LocalDefaultOrgID), nil)
+	rec := l.list(t)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
 	}
@@ -885,16 +878,16 @@ func TestModelsList_LocalMode_SystemCredentialsSuppressAStoredVerdict(t *testing
 func TestModelsList_LocalMode_BYOKReadsStoredVerdicts(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
-	s := newTestServer(t)
-	bindLocalAnthropic(t, s)
+	l := newLocalRig(t)
+	bindLocalAnthropic(t, l)
 
 	probed := domain.ModelAliasSonnet
-	if _, err := s.allStores.ModelAvailability.Record(t.Context(), runmode.LocalDefaultOrgID,
+	if _, err := l.stores.ModelAvailability.Record(t.Context(), runmode.LocalDefaultOrgID,
 		modelcatalog.ProviderAnthropic, probed, domain.ModelAvailabilityGreen, ""); err != nil {
 		t.Fatalf("record a green verdict: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodGet, modelsPath(runmode.LocalDefaultOrgID), nil)
+	rec := l.list(t)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
 	}
