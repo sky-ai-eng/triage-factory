@@ -261,6 +261,18 @@ const (
 	// instruction channel, and its own subtype is what the row-counting
 	// gates ask for when they answer "has this conversation started?".
 	MessageSubtypeInjectionTaskContext = "injection:task-context"
+	// MessageSubtypeInjectionEvent marks a staged note that carries an event
+	// the router folded into this conversation in place of a run: the event
+	// is marked injected, so nothing else acts on it, and the agent reading
+	// it is the work. That is why a native loop about to conclude keeps going
+	// for one of these rows, as it does for a person's message.
+	MessageSubtypeInjectionEvent = "injection:event"
+	// MessageSubtypeInjectionSystemNote marks every other staged note, such
+	// as a PR coherence note: information nothing depends on the agent
+	// reading. A native loop reads it before its next model call, and a
+	// loop about to conclude does not continue for it; a note still pending
+	// then waits for the conversation's next resume.
+	MessageSubtypeInjectionSystemNote = "injection:system-note"
 	// MessageSubtypeStopNote marks a delivered row recording why an
 	// engagement stopped — a guard park, an unrecoverable provider error.
 	// A statement of fact written into history, not input awaiting

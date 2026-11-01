@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -48,6 +49,7 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 		want := domain.NoteProvenance{EventID: "evt-provenance-1", EventType: domain.EventGitHubPRCICheckFailed}
 		written, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{
 			ConversationID: conversationID,
+			Subtype:        domain.MessageSubtypeInjectionSystemNote,
 			Producer:       domain.StagedInjectionProducerPRCoherence,
 			Body:           "CI went red",
 			Provenance:     want,
@@ -80,6 +82,7 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 
 		written, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{
 			ConversationID: conversationID,
+			Subtype:        domain.MessageSubtypeInjectionSystemNote,
 			Producer:       domain.StagedInjectionProducerPRCoherence,
 			Body:           "no event caused this",
 		})
@@ -98,18 +101,95 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 		}
 	})
 
+	t.Run("Subtype_is_stored_and_any_other_value_refused", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		conversationID := seed.Conversation(t, "subtype")
+
+		for _, subtype := range []string{domain.MessageSubtypeInjectionEvent, domain.MessageSubtypeInjectionSystemNote} {
+			written, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{
+				ConversationID: conversationID, Subtype: subtype, Producer: "p", Body: subtype,
+			})
+			if err != nil {
+				t.Fatalf("append %s: %v", subtype, err)
+			}
+			if written.Subtype != subtype {
+				t.Errorf("returned subtype = %q, want %q", written.Subtype, subtype)
+			}
+		}
+		for _, subtype := range []string{"", domain.MessageSubtypeInjectionSteer, "text"} {
+			_, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{
+				ConversationID: conversationID, Subtype: subtype, Producer: "p", Body: "refused",
+			})
+			if !errors.Is(err, db.ErrStagedInjectionSubtype) {
+				t.Errorf("append subtype %q: err = %v, want ErrStagedInjectionSubtype", subtype, err)
+			}
+		}
+
+		got, err := store.FlushPendingSystem(ctx, orgID, conversationID)
+		if err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("flush returned %d rows, want the two accepted appends: %+v", len(got), got)
+		}
+		for _, n := range got {
+			if n.Subtype != n.Body {
+				t.Errorf("flushed row stored under %q, appended as %q", n.Subtype, n.Body)
+			}
+		}
+	})
+
+	t.Run("Flush_and_withdraw_cover_both_subtypes", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		conversationID := seed.Conversation(t, "both")
+
+		var ids []string
+		for _, subtype := range []string{
+			domain.MessageSubtypeInjectionEvent, domain.MessageSubtypeInjectionSystemNote,
+			domain.MessageSubtypeInjectionEvent, domain.MessageSubtypeInjectionSystemNote,
+		} {
+			written, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{
+				ConversationID: conversationID, Subtype: subtype, Producer: "p", Body: subtype,
+			})
+			if err != nil {
+				t.Fatalf("append %s: %v", subtype, err)
+			}
+			ids = append(ids, written.ID)
+		}
+		// Withdraw one row of each subtype; the other two flush, oldest first.
+		for _, id := range ids[2:] {
+			if consumed, err := store.DeleteSystem(ctx, orgID, id); err != nil || consumed {
+				t.Fatalf("withdraw %s = (consumed %v, %v), want a withdrawal", id, consumed, err)
+			}
+		}
+
+		got, err := store.FlushPendingSystem(ctx, orgID, conversationID)
+		if err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+		if len(got) != 2 || got[0].ID != ids[0] || got[1].ID != ids[1] {
+			t.Fatalf("flush = %+v, want rows %s then %s", got, ids[0], ids[1])
+		}
+		if got[0].Subtype != domain.MessageSubtypeInjectionEvent || got[1].Subtype != domain.MessageSubtypeInjectionSystemNote {
+			t.Errorf("flushed subtypes = %q, %q, want injection:event then injection:system-note", got[0].Subtype, got[1].Subtype)
+		}
+		if again, err := store.FlushPendingSystem(ctx, orgID, conversationID); err != nil || len(again) != 0 {
+			t.Errorf("second flush = (%+v, %v), want nothing left", again, err)
+		}
+	})
+
 	t.Run("Append_then_Flush_returns_notes_sorted_and_drains", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		conversationID := seed.Conversation(t, "drain")
 
-		first, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{ConversationID: conversationID, Producer: domain.StagedInjectionProducerPRNewCommits, Body: "first"})
+		first, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{ConversationID: conversationID, Subtype: domain.MessageSubtypeInjectionSystemNote, Producer: domain.StagedInjectionProducerPRNewCommits, Body: "first"})
 		if err != nil {
 			t.Fatalf("append first: %v", err)
 		}
 		if first.ID == "" {
 			t.Error("AppendSystem must return a row with a minted id")
 		}
-		if _, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{ConversationID: conversationID, Producer: domain.StagedInjectionProducerPRNewCommits, Body: "second"}); err != nil {
+		if _, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{ConversationID: conversationID, Subtype: domain.MessageSubtypeInjectionSystemNote, Producer: domain.StagedInjectionProducerPRNewCommits, Body: "second"}); err != nil {
 			t.Fatalf("append second: %v", err)
 		}
 
@@ -161,7 +241,7 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 		store, orgID, seed := mk(t)
 		convA := seed.Conversation(t, "iso-a")
 		convB := seed.Conversation(t, "iso-b")
-		if _, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{ConversationID: convA, Producer: "p", Body: "for-A"}); err != nil {
+		if _, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{ConversationID: convA, Subtype: domain.MessageSubtypeInjectionSystemNote, Producer: "p", Body: "for-A"}); err != nil {
 			t.Fatalf("append A: %v", err)
 		}
 		got, err := store.FlushPendingSystem(ctx, orgID, convB)
@@ -186,12 +266,12 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 		store, orgID, seed := mk(t)
 		conversationID := seed.Conversation(t, "withdraw")
 
-		doomed, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{ConversationID: conversationID, Producer: "p", Body: "withdrawn"})
+		doomed, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{ConversationID: conversationID, Subtype: domain.MessageSubtypeInjectionSystemNote, Producer: "p", Body: "withdrawn"})
 		if err != nil {
 			t.Fatalf("append: %v", err)
 		}
-		if err := store.DeleteSystem(ctx, orgID, doomed.ID); err != nil {
-			t.Fatalf("withdraw: %v", err)
+		if consumed, err := store.DeleteSystem(ctx, orgID, doomed.ID); err != nil || consumed {
+			t.Fatalf("withdraw = (consumed %v, %v), want a withdrawal", consumed, err)
 		}
 		got, err := store.FlushPendingSystem(ctx, orgID, conversationID)
 		if err != nil {
@@ -202,7 +282,7 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 		}
 
 		// The withdrawal is per-row: a note staged afterwards flushes normally.
-		if _, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{ConversationID: conversationID, Producer: "p", Body: "survivor"}); err != nil {
+		if _, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{ConversationID: conversationID, Subtype: domain.MessageSubtypeInjectionSystemNote, Producer: "p", Body: "survivor"}); err != nil {
 			t.Fatalf("append survivor: %v", err)
 		}
 		got, err = store.FlushPendingSystem(ctx, orgID, conversationID)
@@ -213,17 +293,26 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 			t.Errorf("post-withdrawal flush = %+v, want just the survivor", got)
 		}
 
-		// Withdrawing an already-flushed id is a tolerated no-op, and never
-		// resurrects or hides the delivered row's flush-once state.
-		if err := store.DeleteSystem(ctx, orgID, got[0].ID); err != nil {
-			t.Fatalf("withdraw flushed id: %v", err)
+		// Withdrawing an already-flushed id is a no-op that reports the row
+		// consumed, and never resurrects or hides its flush-once state.
+		consumed, err := store.DeleteSystem(ctx, orgID, got[0].ID)
+		if err != nil || !consumed {
+			t.Fatalf("withdraw flushed id = (consumed %v, %v), want consumed", consumed, err)
+		}
+		if again, err := store.FlushPendingSystem(ctx, orgID, conversationID); err != nil || len(again) != 0 {
+			t.Errorf("flush after withdrawing a flushed id = (%+v, %v), want nothing", again, err)
+		}
+
+		// An id that names no row is a no-op that reports nothing consumed.
+		if consumed, err := store.DeleteSystem(ctx, orgID, "999999999"); err != nil || consumed {
+			t.Errorf("withdraw unknown id = (consumed %v, %v), want (false, nil)", consumed, err)
 		}
 	})
 
 	t.Run("Conversation_delete_cascades_pending_notes", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		conversationID := seed.Conversation(t, "cascade")
-		if _, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{ConversationID: conversationID, Producer: "p", Body: "doomed"}); err != nil {
+		if _, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{ConversationID: conversationID, Subtype: domain.MessageSubtypeInjectionSystemNote, Producer: "p", Body: "doomed"}); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 		seed.DeleteConversation(t, conversationID)
@@ -262,6 +351,7 @@ func RunStagedInjectionReturnedRowConformance(t *testing.T, mk StagedInjectionRe
 
 		appended, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{
 			ConversationID: conversationID,
+			Subtype:        domain.MessageSubtypeInjectionSystemNote,
 			Producer:       domain.StagedInjectionProducerPRNewCommits,
 			Body:           "returned-row check",
 		})

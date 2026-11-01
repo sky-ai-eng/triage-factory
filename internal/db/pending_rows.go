@@ -18,6 +18,7 @@ type PendingRow struct {
 	OrgID     string
 	ConvID    string
 	Content   string
+	Subtype   string
 	UserID    string
 	Metadata  string
 	CreatedAt time.Time
@@ -63,6 +64,7 @@ func StagedInjectionFromPending(r PendingRow) domain.StagedInjection {
 		ID:             strconv.FormatInt(r.ID, 10),
 		ConversationID: r.ConvID,
 		OrgID:          r.OrgID,
+		Subtype:        r.Subtype,
 		Body:           r.Content,
 		CreatedAt:      r.CreatedAt,
 	}

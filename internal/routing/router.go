@@ -50,18 +50,19 @@ type Delegator interface {
 	// event-driven close, so the audit rows it writes name no actor.
 	TeardownTaskDeliverablesSystem(ctx context.Context, orgID, taskID string)
 	// StageOrDeliverAdditiveEvent routes one agent-facing additive-event
-	// injection for a run by its live state — local process, live remote
-	// executor (TFAC-585's `inject` conversation_signals kind), or the durable
-	// staged-injection fallback — returning a 4-way outcome. Signature
-	// matches *delegate.Spawner's method exactly. Used by tryAutoDelegate's
-	// additive-event branch to fold a follow-up event into the task's live
-	// conversation instead of deferring a second one:
+	// injection for a conversation — a local SDK process, a staged row a
+	// native loop reads, a live remote executor (the `inject`
+	// conversation_signals kind, for an SDK conversation), or the durable
+	// staged queue an SDK resume reads — returning a 4-way outcome.
+	// Signature matches *delegate.Spawner's method exactly. Used by
+	// tryAutoDelegate's additive-event branch to fold a follow-up event into
+	// the task's live conversation instead of deferring a second one:
 	// InjectNotDelivered means the firing must fall through to the normal
 	// deferral (no durable row to fall back on); InjectDeliveredRemote
 	// means a live remote executor now owns recording the outcome (the
 	// caller must NOT record task_events 'injected' itself); the other two
-	// outcomes are handled exactly like the pre-TFAC-585 delivered/staged
-	// cases.
+	// outcomes are delivered or staged where something will read them, and
+	// the caller records task_events 'injected'.
 	StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.InjectOutcome
 }
 

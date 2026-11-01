@@ -10,9 +10,8 @@ import (
 
 // stagedInjectionStore is the Postgres impl of db.StagedInjectionStore — the
 // durable "stage for next resume" agent-injection queue (TFAC-501), backed
-// by undelivered messages rows (role='user',
-// subtype='injection:system-note') rather than a side table — one transcript
-// canon. Wired against the ADMIN (BYPASSRLS) pool in postgres.New: both the
+// by undelivered messages rows (role='user', subtype 'injection:event' or
+// 'injection:system-note') rather than a side table — one transcript canon. Wired against the ADMIN (BYPASSRLS) pool in postgres.New: both the
 // producer (an eventbus subscriber) and the consumer (a detached resume
 // goroutine) run without JWT claims, so an app-pool/RLS statement would see
 // nothing. org_id stays bound in every WHERE/INSERT clause as defense in
@@ -25,12 +24,10 @@ func newStagedInjectionStore(admin queryer) db.StagedInjectionStore {
 
 var _ db.StagedInjectionStore = (*stagedInjectionStore)(nil)
 
-// stagedInjectionSubtype discriminates the staged-note rows from every other
-// undelivered user message (the resume pending-input row keeps subtype
-// 'text').
-const stagedInjectionSubtype = "injection:system-note"
-
 func (s *stagedInjectionStore) AppendSystem(ctx context.Context, orgID string, n domain.StagedInjection) (domain.StagedInjection, error) {
+	if err := db.RequireStagedInjectionSubtype(n.Subtype); err != nil {
+		return domain.StagedInjection{}, err
+	}
 	meta, err := db.StagedInjectionMetadata(n)
 	if err != nil {
 		return domain.StagedInjection{}, err
@@ -42,10 +39,10 @@ func (s *stagedInjectionStore) AppendSystem(ctx context.Context, orgID string, n
 	if err := s.admin.QueryRowContext(ctx, `
 		INSERT INTO messages (org_id, conversation_id, role, content, subtype, metadata, delivered)
 		VALUES ($1::uuid, $2::uuid, 'user', $3, $4, $5::jsonb, false)
-		RETURNING id, org_id::text, conversation_id::text, content,
+		RETURNING id, org_id::text, conversation_id::text, content, subtype,
 		          COALESCE(user_id::text, ''), COALESCE(metadata::text, ''), created_at
-	`, orgID, n.ConversationID, n.Body, stagedInjectionSubtype, meta).Scan(
-		&r.ID, &r.OrgID, &r.ConvID, &r.Content, &r.UserID, &r.Metadata, &r.CreatedAt,
+	`, orgID, n.ConversationID, n.Body, n.Subtype, meta).Scan(
+		&r.ID, &r.OrgID, &r.ConvID, &r.Content, &r.Subtype, &r.UserID, &r.Metadata, &r.CreatedAt,
 	); err != nil {
 		return domain.StagedInjection{}, err
 	}
@@ -53,23 +50,23 @@ func (s *stagedInjectionStore) AppendSystem(ctx context.Context, orgID string, n
 }
 
 func (s *stagedInjectionStore) FlushPendingSystem(ctx context.Context, orgID, conversationID string) ([]domain.StagedInjection, error) {
-	// The shared flush primitive, narrowed to this store's subtype: one
+	// The shared flush primitive, narrowed to this store's subtypes: one
 	// definition of "consume a conversation's pending rows" serves every
 	// producer, so a note is delivered exactly once even under a resume race
 	// and withdrawn rows stay out by the same rule the claim predicate uses.
-	flushed, err := flushPendingInput(ctx, s.admin, orgID, conversationID, stagedInjectionSubtype)
+	flushed, err := flushPendingInput(ctx, s.admin, orgID, conversationID, domain.StagedInjectionSubtypes)
 	if err != nil {
 		return nil, err
 	}
 	return db.StagedInjectionsFromPending(flushed), nil
 }
 
-func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id string) error {
+func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id string) (bool, error) {
 	rowID, err := strconv.ParseInt(id, 10, 64)
 	if err != nil {
 		// A non-numeric id can only be a pre-refactor uuid that no longer
 		// names any row — the contract is a silent no-op.
-		return nil
+		return false, nil
 	}
 	// Retire, don't delete (see the interface doc): the executor's tf_system
 	// role holds no DELETE on messages. delivered stays false — withdrawn
@@ -78,9 +75,24 @@ func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id strin
 	// the flush, assembly, and the display reads. The delivered = false guard
 	// keeps this from retiring an already-flushed row a racing resume just
 	// consumed.
-	_, err = s.admin.ExecContext(ctx, `
+	res, err := s.admin.ExecContext(ctx, `
 		UPDATE messages SET window_state = 'inactive'
-		WHERE org_id = $1::uuid AND id = $2 AND subtype = $3 AND delivered = false
-	`, orgID, rowID, stagedInjectionSubtype)
-	return err
+		WHERE org_id = $1::uuid AND id = $2 AND subtype = ANY($3::text[]) AND delivered = false
+	`, orgID, rowID, domain.StagedInjectionSubtypes)
+	if err != nil {
+		return false, err
+	}
+	if n, err := res.RowsAffected(); err != nil || n > 0 {
+		return false, err
+	}
+	// Nothing was withdrawn. delivered only ever flips to true, so reading it
+	// after the update cannot disagree with what stopped the update.
+	var consumed bool
+	err = s.admin.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM messages
+			WHERE org_id = $1::uuid AND id = $2 AND subtype = ANY($3::text[]) AND delivered = true
+		)
+	`, orgID, rowID, domain.StagedInjectionSubtypes).Scan(&consumed)
+	return consumed, err
 }

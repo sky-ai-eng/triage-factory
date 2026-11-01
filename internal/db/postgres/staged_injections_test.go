@@ -54,7 +54,7 @@ func TestStagedInjectionStore_Postgres_OrgScoped(t *testing.T) {
 	convA := seedPgDeliverableConversation(t, h, orgA, teamA, userA)
 
 	if _, err := stores.StagedInjections.AppendSystem(ctx, orgA, domain.StagedInjection{
-		ConversationID: convA, Producer: domain.StagedInjectionProducerPRNewCommits, Body: "for org A",
+		ConversationID: convA, Subtype: domain.MessageSubtypeInjectionSystemNote, Producer: domain.StagedInjectionProducerPRNewCommits, Body: "for org A",
 	}); err != nil {
 		t.Fatalf("append: %v", err)
 	}

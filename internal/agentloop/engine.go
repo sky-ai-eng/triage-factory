@@ -736,9 +736,10 @@ func (e *Engine) Run(ctx context.Context, params Params) (result Result) {
 		// going.
 		bareDrain = true
 
-		// Late-signal recheck: input that landed while this turn was
-		// streaming means the model has not seen the newest instruction, so
-		// concluding now would drop it.
+		// Late-signal recheck: a person's input or a new-event injection
+		// that landed while this turn was streaming means the model has not
+		// seen work it was handed, so concluding now would drop it. Any other
+		// pending note waits for the next resume (see hasPending).
 		pending, err := e.hasPending(ctx, params)
 		if err != nil {
 			return e.failed(ctx, started, turn, fmt.Errorf("recheck pending input: %w", err))

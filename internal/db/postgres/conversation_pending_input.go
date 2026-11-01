@@ -57,5 +57,5 @@ func (s *conversationPendingInputStore) Peek(ctx context.Context, orgID, convers
 }
 
 func (s *conversationPendingInputStore) Consume(ctx context.Context, orgID, conversationID string) (string, string, bool, error) {
-	return db.ConsumePendingInput(flushPendingInput(ctx, s.admin, orgID, conversationID, ""))
+	return db.ConsumePendingInput(flushPendingInput(ctx, s.admin, orgID, conversationID, []string{""}))
 }

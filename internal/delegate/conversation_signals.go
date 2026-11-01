@@ -8,10 +8,11 @@
 // specs/horizontal-scaling/README.md §5.2.
 //
 // This file also carries StageOrDeliverAdditiveEvent, the cross-pod-aware
-// successor TFAC-594's additive-injection gate calls: the `inject` signal
-// kind exists because that gate's live path is a process-local getProc
-// hit the router (a brain component) can't reach for a run executing on a
-// remote executor.
+// seam the router's additive-injection gate calls: the `inject` signal kind
+// carries a new-event injection to an SDK conversation running on a remote
+// executor, because the SDK's live path is a process-local getProc hit the
+// router (a brain component) can't reach. A native conversation needs no
+// signal: its loop reads the staged row itself.
 //
 // Every mechanism here is dormant unless SetConversationSignals wires it — always
 // nil in local mode (conversation_signals is Postgres-only) and in every test that
@@ -262,7 +263,16 @@ func (s *Spawner) resolveLiveOwner(ctx context.Context, orgID, conversationID st
 		return "", false
 	}
 	conv, err := s.conversations.GetSystem(ctx, orgID, conversationID)
-	if err != nil || conv == nil || conv.ExecutorID == "" {
+	if err != nil || conv == nil {
+		return "", false
+	}
+	return s.liveOwnerOf(ctx, conv)
+}
+
+// liveOwnerOf is resolveLiveOwner for a caller that has already read the
+// conversation.
+func (s *Spawner) liveOwnerOf(ctx context.Context, conv *domain.Conversation) (executorID string, ok bool) {
+	if s.instances == nil || conv.ExecutorID == "" {
 		return "", false
 	}
 	inst, err := s.instances.Get(ctx, conv.ExecutorID)
@@ -416,10 +426,10 @@ const (
 	// a pending_firing on "gone") once delivery is confirmed, so the
 	// caller must NOT record it here.
 	InjectDeliveredRemote
-	// InjectStagedResumable means the event was durably staged AND the
-	// run is currently resumable — the caller should record the
-	// task_event 'injected' itself (the staged row will flush on the
-	// run's next resume), exactly as before TFAC-585.
+	// InjectStagedResumable means the event was durably staged AND
+	// something will read the row: the conversation's own loop (a native
+	// conversation that is queued, running, or in a claim phase) or its next
+	// resume. The caller records the task_event 'injected' itself.
 	InjectStagedResumable
 )
 
@@ -442,14 +452,23 @@ type AdditiveFiringRef struct {
 }
 
 // StageOrDeliverAdditiveEvent is the cross-pod-aware entry point for the
-// routed additive-injection gate: it adds the "handed to a live remote
-// executor" outcome, which its callers must NOT re-record locally, to the
-// live/staged decision stageOrDeliverInjection makes on its own.
+// routed additive-injection gate: a new-event injection, which the router
+// folds into this conversation in place of a run and then marks injected.
 //
-// Decision order: local live process (byte-identical to the pre-TFAC-585
-// path) → a live remote owner (insert an `inject` conversation_signals row,
-// fire-and-forget — never waited on, per the reply-leg contract) → the
-// existing staged/resumable fallback.
+// Decision order:
+//
+//  1. A local live process (an SDK conversation on this pod): steered in.
+//  2. A native conversation: staged as an injection:event row, never sent as
+//     a signal. The loop reads its pending rows before every model call, and
+//     its would-stop recheck continues for this subtype, so a running loop
+//     reads it before it concludes.
+//  3. An SDK conversation with a live remote owner: an `inject`
+//     conversation_signals row, fire-and-forget — never waited on, per the
+//     reply-leg contract.
+//  4. Otherwise staged for the SDK conversation's next resume.
+//
+// A staged row nothing will read is withdrawn and reported InjectNotDelivered,
+// so the caller defers the firing instead.
 func (s *Spawner) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing AdditiveFiringRef) InjectOutcome {
 	if body == "" {
 		return InjectNotDelivered
@@ -458,64 +477,125 @@ func (s *Spawner) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conver
 		s.deliverInjectionLive(orgID, conversationID, domain.WrapSystemNote(body), producer, prov)
 		return InjectDeliveredLocal
 	}
-	s.mu.Lock()
-	conversationSignals := s.conversationSignals
-	s.mu.Unlock()
-	if conversationSignals != nil {
-		if executorID, ok := s.resolveLiveOwner(ctx, orgID, conversationID); ok {
-			payload, merr := json.Marshal(injectPayload{
-				Producer: producer, Body: body,
-				EventID: prov.EventID, EventType: prov.EventType,
-				EntityID: firing.EntityID, TaskID: firing.TaskID,
-				TriggerID: firing.TriggerID, TriggeringEventID: firing.TriggeringEventID,
-				ClaimAgentID: firing.TaskClaim.AgentID, ClaimActingTeamID: firing.TaskClaim.ActingTeamID,
-			})
-			if merr != nil {
-				delegateLog.Warn("marshal inject payload failed; falling back to the staged queue", "conversation", conversationID, "error", merr)
-			} else if id, ierr := conversationSignals.Insert(ctx, orgID, conversationID, domain.ConversationSignalInject, string(payload), executorID); ierr != nil {
-				delegateLog.Warn("insert inject signal failed; falling back to the staged queue", "conversation", conversationID, "error", ierr)
-			} else {
-				if nerr := s.notifyCtl(ctx, "new", id); nerr != nil {
-					delegateLog.Warn("notify tf_ctl for inject signal failed; the owner's backstop scan still finds it", "signal_id", id, "error", nerr)
-				}
-				return InjectDeliveredRemote
-			}
-		}
+	conv, err := s.conversations.GetSystem(ctx, orgID, conversationID)
+	if err != nil || conv == nil {
+		return InjectNotDelivered
 	}
-	delivered, staged, stagedID := s.stageOrDeliverInjection(orgID, conversationID, producer, body, prov)
+	if undeliveredRowsFor(conv.Runtime) == inputRoleLiveQueue {
+		stagedID, ok := s.stageInjection(ctx, orgID, conversationID, domain.MessageSubtypeInjectionEvent, producer, body, prov)
+		if !ok {
+			return InjectNotDelivered
+		}
+		return s.keepStagedIfRead(ctx, orgID, conversationID, stagedID, nativeLoopWillRead)
+	}
+	if s.signalRemoteInject(ctx, orgID, conv, producer, body, prov, firing) {
+		return InjectDeliveredRemote
+	}
+	delivered, staged, stagedID := s.stageOrDeliverInjection(ctx, orgID, conversationID, domain.MessageSubtypeInjectionEvent, producer, body, prov)
 	if delivered {
 		return InjectDeliveredLocal // race: getProc missed above, live by the time stageOrDeliverInjection ran
 	}
 	if !staged {
 		return InjectNotDelivered
 	}
-	conv, err := s.conversations.GetSystem(ctx, orgID, conversationID)
-	if err != nil || conv == nil || !injectionWillFlush(conv.Status, conv.Concluded(), conv.Outcome) {
-		// The row staged above is now orphaned: the caller falls through to
-		// the normal deferral (enqueueBusyFiring), and a staged row nothing
-		// will ever flush is a permanent leak — worse, a double-delivery
-		// hazard if this "non-resumable" run is later boot-recovered and
-		// resumed (the staged row would flush into it while the pending
-		// firing also spawns a fresh run). Best-effort delete: a leaked row
-		// is the pre-existing status quo, never worth failing the deferral
-		// over.
-		if stagedID != "" && s.stagedInjections != nil {
-			if derr := s.stagedInjections.DeleteSystem(ctx, orgID, stagedID); derr != nil {
-				delegateLog.Warn("delete orphaned staged injection failed", "conversation", conversationID, "staged_id", stagedID, "error", derr)
-			}
-		}
-		return InjectNotDelivered
-	}
-	return InjectStagedResumable
+	return s.keepStagedIfRead(ctx, orgID, conversationID, stagedID, func(conv *domain.Conversation) bool {
+		return injectionWillFlush(conv.Status, conv.Concluded(), conv.Outcome)
+	})
 }
 
-// StageOrDeliverInformationalEvent exposes the same live/local, live/remote,
-// and resumable staging transport without attaching routing side effects.
-// The empty firing reference is load-bearing: an owner that receives the
-// cross-pod signal delivers the note but neither marks task_events nor
-// compensates with a pending firing if the conversation disappeared.
-func (s *Spawner) StageOrDeliverInformationalEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance) InjectOutcome {
-	return s.StageOrDeliverAdditiveEvent(ctx, orgID, conversationID, producer, body, prov, AdditiveFiringRef{})
+// nativeLoopWillRead reports whether a row staged on a native conversation
+// will be read: by its loop, while it is queued, running, or in a claim
+// phase, or by its next resume.
+func nativeLoopWillRead(conv *domain.Conversation) bool {
+	if conv.Status == domain.StatusQueued || domain.IsActiveConversationStatus(conv.Status) {
+		return true
+	}
+	return injectionWillFlush(conv.Status, conv.Concluded(), conv.Outcome)
+}
+
+// keepStagedIfRead re-reads the conversation after a stage and keeps the row
+// only if willRead says something will read it. The read comes after the
+// write so a conversation that ended in between is seen as ended.
+//
+// Otherwise the row is withdrawn: the caller falls through to the normal
+// deferral (enqueueBusyFiring), and a staged row nothing will ever read is a
+// permanent leak — worse, a double-delivery hazard if the conversation is
+// later resumed (the staged row would be read while the pending firing also
+// spawns a fresh run). A row a reader consumed before the withdrawal reached
+// it was delivered, so that case is reported handled instead: deferring then
+// would run a second blueprint for an event the agent has already read. The
+// withdrawal is otherwise best-effort: a leaked row is never worth failing the
+// deferral over.
+func (s *Spawner) keepStagedIfRead(ctx context.Context, orgID, conversationID, stagedID string, willRead func(*domain.Conversation) bool) InjectOutcome {
+	conv, err := s.conversations.GetSystem(ctx, orgID, conversationID)
+	if err == nil && conv != nil && willRead(conv) {
+		return InjectStagedResumable
+	}
+	if stagedID != "" && s.stagedInjections != nil {
+		consumed, derr := s.stagedInjections.DeleteSystem(ctx, orgID, stagedID)
+		if derr != nil {
+			delegateLog.Warn("delete orphaned staged injection failed", "conversation", conversationID, "staged_id", stagedID, "error", derr)
+		} else if consumed {
+			return InjectStagedResumable
+		}
+	}
+	return InjectNotDelivered
+}
+
+// signalRemoteInject hands a new-event injection for an SDK conversation to
+// the live remote executor that owns it, as an `inject` conversation_signals
+// row. Reports false when there is no live remote owner or the signal could
+// not be written, and the caller falls back to the staged queue.
+func (s *Spawner) signalRemoteInject(ctx context.Context, orgID string, conv *domain.Conversation, producer, body string, prov domain.NoteProvenance, firing AdditiveFiringRef) bool {
+	s.mu.Lock()
+	conversationSignals := s.conversationSignals
+	s.mu.Unlock()
+	if conversationSignals == nil {
+		return false
+	}
+	executorID, ok := s.liveOwnerOf(ctx, conv)
+	if !ok {
+		return false
+	}
+	conversationID := conv.ID
+	payload, err := json.Marshal(injectPayload{
+		Producer: producer, Body: body,
+		EventID: prov.EventID, EventType: prov.EventType,
+		EntityID: firing.EntityID, TaskID: firing.TaskID,
+		TriggerID: firing.TriggerID, TriggeringEventID: firing.TriggeringEventID,
+		ClaimAgentID: firing.TaskClaim.AgentID, ClaimActingTeamID: firing.TaskClaim.ActingTeamID,
+	})
+	if err != nil {
+		delegateLog.Warn("marshal inject payload failed; falling back to the staged queue", "conversation", conversationID, "error", err)
+		return false
+	}
+	id, err := conversationSignals.Insert(ctx, orgID, conversationID, domain.ConversationSignalInject, string(payload), executorID)
+	if err != nil {
+		delegateLog.Warn("insert inject signal failed; falling back to the staged queue", "conversation", conversationID, "error", err)
+		return false
+	}
+	if nerr := s.notifyCtl(ctx, "new", id); nerr != nil {
+		delegateLog.Warn("notify tf_ctl for inject signal failed; the owner's backstop scan still finds it", "signal_id", id, "error", nerr)
+	}
+	return true
+}
+
+// StageOrDeliverInformationalEvent stages a note that is information rather
+// than work, such as a PR coherence note, as an injection:system-note row. It
+// never steers a live process and never sends a signal, in either runtime:
+// nothing depends on the agent reading the note, so it does not need the
+// guarantees a new-event injection does. A native loop reads it before its
+// next model call; an SDK conversation reads it on its next resume. A note
+// still pending when a run concludes waits for the next resume.
+//
+// It does not check whether anything will read the row. The caller gates
+// that — see HandlePRCoherence, which stages only for a conversation that is
+// live or that a resume will read.
+func (s *Spawner) StageOrDeliverInformationalEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance) {
+	if body == "" {
+		return
+	}
+	s.stageInjection(ctx, orgID, conversationID, domain.MessageSubtypeInjectionSystemNote, producer, body, prov)
 }
 
 // --- Owner-side signal-apply loop ---
