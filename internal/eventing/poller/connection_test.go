@@ -48,12 +48,6 @@ func newGitHubConnServer(t *testing.T, modes map[string]string) *githubConnServe
 	return s
 }
 
-func (s *githubConnServer) set(repo, mode string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.modes[repo] = mode
-}
-
 func (s *githubConnServer) setAll(mode string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

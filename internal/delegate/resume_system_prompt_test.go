@@ -2,7 +2,6 @@ package delegate
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"strings"
 	"testing"
@@ -550,14 +549,4 @@ func (f *launchFixture) nextStep(t *testing.T) string {
 		t.Fatalf("AdvanceRunToStepSystem to step 2 = (%v, %v, %v)", advanced, next, err)
 	}
 	return next.ID
-}
-
-// taskIDOf reads the task a fixture conversation was seeded against.
-func taskIDOf(t *testing.T, database *sql.DB, conversationID string) string {
-	t.Helper()
-	var taskID string
-	if err := database.QueryRow(`SELECT task_id FROM conversations WHERE id = ?`, conversationID).Scan(&taskID); err != nil {
-		t.Fatalf("read task_id for %s: %v", conversationID, err)
-	}
-	return taskID
 }

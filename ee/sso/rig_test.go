@@ -473,11 +473,6 @@ func (r *authRig) driveCallbackClaims(claims jwt.MapClaims) (resp *http.Response
 	return r.fireCallback(cookies, csrf, url.Values{"code": {"fake-" + uuid.NewString()}}), token
 }
 
-func (r *authRig) driveCallback(userID uuid.UUID) (resp *http.Response, accessToken string) {
-	r.t.Helper()
-	return r.driveCallbackClaims(validClaimsFor(userID))
-}
-
 // fireCallback drives GET /api/auth/callback with the start's cookies replayed
 // (so the signed state cookie is present — the rig never needs its name) and the
 // given query (csrf + a code or error).
@@ -546,7 +541,7 @@ func (r *authRig) requestWithSid(method, path, sid string) *http.Response {
 // ---------- seeding (admin pool; bypasses RLS — fixtures) ----------
 
 // seedUser inserts auth.users + public.users + a github identity for a fresh
-// UUID, so a driveCallback resolves back to it rather than minting a fresh
+// UUID, so a sign-in resolves back to it rather than minting a fresh
 // principal.
 func (r *authRig) seedUser() uuid.UUID {
 	r.t.Helper()

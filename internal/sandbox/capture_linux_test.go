@@ -12,24 +12,6 @@ import (
 	"testing"
 )
 
-// captureTestJail is the jail identity the capture tests' trees are handed
-// to, and so the identity the capture jail runs as.
-var captureTestJail = struct{ uid, gid int }{JailUID(9), JailGID(9)}
-
-// captureTestTree returns a directory that passes validateRunTreeRoot and is
-// held by a jail identity, as every tree a capture is asked for is: t.TempDir()
-// is absolute, clean, ≥2 components deep and symlink-free on Linux, and it is
-// chowned to captureTestJail. Handing it over needs root, so a test that needs
-// one skips without it.
-func captureTestTree(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	if err := os.Chown(dir, captureTestJail.uid, captureTestJail.gid); err != nil {
-		t.Skipf("a capture needs a tree held by a jail identity, and handing one over needs root: %v", err)
-	}
-	return dir
-}
-
 func captureTestStaging(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "tf-capture-test-*")

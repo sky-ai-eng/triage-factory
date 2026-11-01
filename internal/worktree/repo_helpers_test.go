@@ -10,17 +10,6 @@ import (
 	"testing"
 )
 
-// initRepoAt makes dir a git working tree, skipping when git isn't installed.
-func initRepoAt(t *testing.T, dir string) {
-	t.Helper()
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
-	}
-	gitAt(t, dir, "init", "-q", ".")
-	gitAt(t, dir, "config", "user.email", "test@example.com")
-	gitAt(t, dir, "config", "user.name", "Test")
-}
-
 func gitAt(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)

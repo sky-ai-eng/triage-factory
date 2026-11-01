@@ -86,15 +86,6 @@ func TestConversationWorktreeStore_SQLite(t *testing.T) {
 	})
 }
 
-// trackRepoForTest adds slug to the local default team's tracked set on
-// dbtest.TestGitHubHost, which is how a repository row comes to exist for a
-// worktree to reference: tracking is the one door into the registry. Returns
-// the repository's row id.
-func trackRepoForTest(t *testing.T, stores db.Stores, slug string) string {
-	t.Helper()
-	return trackRepoOnHostForTest(t, stores, dbtest.TestGitHubHost, slug)
-}
-
 // trackRepoOnHostForTest is trackRepoForTest on a named GitHub host. It
 // appends rather than replaces, so a fixture staging several repositories
 // keeps every one of them tracked; tracking on one host leaves the team's
