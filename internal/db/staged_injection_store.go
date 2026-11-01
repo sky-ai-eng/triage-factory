@@ -75,9 +75,13 @@ type StagedInjectionStore interface {
 	// KEPT false — withdrawn means "never happened", so it must not read as
 	// delivered transcript history) rather than deleting it — the executor's
 	// tf_system role holds no DELETE on messages, and a retired row is
-	// equally invisible to the flush, assembly, and the display reads. A
-	// no-op (no error) if the row is already gone or was flushed.
+	// equally invisible to the flush, assembly, and the display reads.
+	//
+	// A row a reader already consumed is left as it is, and consumed reports
+	// it: the note reached the agent between the stage and the recheck, so
+	// the caller must not defer as if it had not. A row that is gone, or an id
+	// that names none, is a no-op that reports consumed=false.
 	//
 	// Exempt from the returned-row rule: it is a delete.
-	DeleteSystem(ctx context.Context, orgID, id string) error
+		DeleteSystem(ctx context.Context, orgID, id string) (consumed bool, err error)
 }

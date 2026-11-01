@@ -75,15 +75,20 @@ func (s *stagedInjectionStore) FlushPendingSystem(ctx context.Context, orgID, co
 	return out, nil
 }
 
-func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id string) error {
+func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return false, err
 	}
 	rowID, err := strconv.ParseInt(id, 10, 64)
 	if err != nil {
 		// A non-numeric id can only be a pre-refactor uuid that no longer
 		// names any row — the contract is a silent no-op.
-		return nil
+		return false, nil
+	}
+	subtypes := strings.TrimRight(strings.Repeat("?, ", len(domain.StagedInjectionSubtypes)), ", ")
+	args := []any{orgID, rowID}
+	for _, st := range domain.StagedInjectionSubtypes {
+		args = append(args, st)
 	}
 	// Retire, don't delete (see the interface doc). delivered stays 0 —
 	// withdrawn means the note never happened, and a delivered stamp would
@@ -91,16 +96,26 @@ func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id strin
 	// keeps it out of the flush, assembly, and the display reads. The
 	// delivered = 0 guard keeps this from retiring an already-flushed row a
 	// racing resume just consumed.
-	args := []any{orgID, rowID}
-	for _, st := range domain.StagedInjectionSubtypes {
-		args = append(args, st)
-	}
-	_, err = s.q.ExecContext(ctx, `
+	res, err := s.q.ExecContext(ctx, `
 		UPDATE messages SET window_state = 'inactive'
-		WHERE org_id = ? AND id = ? AND delivered = 0
-		  AND subtype IN (`+strings.TrimRight(strings.Repeat("?, ", len(domain.StagedInjectionSubtypes)), ", ")+`)
+		WHERE org_id = ? AND id = ? AND delivered = 0 AND subtype IN (`+subtypes+`)
 	`, args...)
-	return err
+	if err != nil {
+		return false, err
+	}
+	if n, err := res.RowsAffected(); err != nil || n > 0 {
+		return false, err
+	}
+	// Nothing was withdrawn. delivered only ever flips to 1, so reading it
+	// after the update cannot disagree with what stopped the update.
+	var consumed bool
+	err = s.q.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM messages
+			WHERE org_id = ? AND id = ? AND delivered = 1 AND subtype IN (`+subtypes+`)
+		)
+	`, args...).Scan(&consumed)
+	return consumed, err
 }
 
 // stagedInjectionIDLess orders decimal message-row ids numerically (a

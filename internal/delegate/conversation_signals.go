@@ -521,16 +521,22 @@ func nativeLoopWillRead(conv *domain.Conversation) bool {
 // deferral (enqueueBusyFiring), and a staged row nothing will ever read is a
 // permanent leak — worse, a double-delivery hazard if the conversation is
 // later resumed (the staged row would be read while the pending firing also
-// spawns a fresh run). The withdrawal is best-effort: a leaked row is never
-// worth failing the deferral over.
+// spawns a fresh run). A row a reader consumed before the withdrawal reached
+// it was delivered, so that case is reported handled instead: deferring then
+// would run a second blueprint for an event the agent has already read. The
+// withdrawal is otherwise best-effort: a leaked row is never worth failing the
+// deferral over.
 func (s *Spawner) keepStagedIfRead(ctx context.Context, orgID, conversationID, stagedID string, willRead func(*domain.Conversation) bool) InjectOutcome {
 	conv, err := s.conversations.GetSystem(ctx, orgID, conversationID)
 	if err == nil && conv != nil && willRead(conv) {
 		return InjectStagedResumable
 	}
 	if stagedID != "" && s.stagedInjections != nil {
-		if derr := s.stagedInjections.DeleteSystem(ctx, orgID, stagedID); derr != nil {
+		consumed, derr := s.stagedInjections.DeleteSystem(ctx, orgID, stagedID)
+		if derr != nil {
 			delegateLog.Warn("delete orphaned staged injection failed", "conversation", conversationID, "staged_id", stagedID, "error", derr)
+		} else if consumed {
+			return InjectStagedResumable
 		}
 	}
 	return InjectNotDelivered

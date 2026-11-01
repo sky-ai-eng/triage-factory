@@ -694,6 +694,41 @@ func TestStageOrDeliverAdditiveEvent_FinishedNativeNotDelivered(t *testing.T) {
 	}
 }
 
+// TestKeepStagedIfRead_ConsumedBeforeRecheckIsHandled: the native loop read
+// the staged event and concluded before the post-stage recheck. The recheck
+// sees a finished conversation, but the row was delivered, so the outcome is
+// handled rather than a deferral that would run a second blueprint for an
+// event the agent already read.
+func TestKeepStagedIfRead_ConsumedBeforeRecheckIsHandled(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "r-consumed", "sess", "/tmp/wt")
+	setConversationRuntime(t, database, "r-consumed", domain.ConversationRuntimeNative)
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	ctx := context.Background()
+
+	stagedID, ok := s.stageInjection(ctx, runmode.LocalDefaultOrgID, "r-consumed", domain.MessageSubtypeInjectionEvent, "p", "CI failed", domain.NoteProvenance{})
+	if !ok {
+		t.Fatal("stage failed")
+	}
+	if _, err := database.Exec(`UPDATE messages SET delivered = 1 WHERE id = ?`, stagedID); err != nil {
+		t.Fatalf("consume staged row: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome = 'finish' WHERE id = 'r-consumed'`); err != nil {
+		t.Fatalf("conclude conversation: %v", err)
+	}
+
+	if got := s.keepStagedIfRead(ctx, runmode.LocalDefaultOrgID, "r-consumed", stagedID, nativeLoopWillRead); got != InjectStagedResumable {
+		t.Fatalf("outcome = %v, want InjectStagedResumable for a row the loop already read", got)
+	}
+	var windowState string
+	if err := database.QueryRow(`SELECT window_state FROM messages WHERE id = ?`, stagedID).Scan(&windowState); err != nil {
+		t.Fatalf("read staged row: %v", err)
+	}
+	if windowState != string(domain.MessageWindowActive) {
+		t.Errorf("window_state = %q, want the consumed row left as it was", windowState)
+	}
+}
+
 // TestApplySignal_Inject_LiveDeliversAndRecords: the owner's apply loop
 // steers a live inject signal and records task_events 'injected'.
 //

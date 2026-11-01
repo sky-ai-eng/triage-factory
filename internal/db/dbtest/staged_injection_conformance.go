@@ -158,8 +158,8 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 		}
 		// Withdraw one row of each subtype; the other two flush, oldest first.
 		for _, id := range ids[2:] {
-			if err := store.DeleteSystem(ctx, orgID, id); err != nil {
-				t.Fatalf("withdraw %s: %v", id, err)
+			if consumed, err := store.DeleteSystem(ctx, orgID, id); err != nil || consumed {
+				t.Fatalf("withdraw %s = (consumed %v, %v), want a withdrawal", id, consumed, err)
 			}
 		}
 
@@ -270,8 +270,8 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 		if err != nil {
 			t.Fatalf("append: %v", err)
 		}
-		if err := store.DeleteSystem(ctx, orgID, doomed.ID); err != nil {
-			t.Fatalf("withdraw: %v", err)
+		if consumed, err := store.DeleteSystem(ctx, orgID, doomed.ID); err != nil || consumed {
+			t.Fatalf("withdraw = (consumed %v, %v), want a withdrawal", consumed, err)
 		}
 		got, err := store.FlushPendingSystem(ctx, orgID, conversationID)
 		if err != nil {
@@ -293,10 +293,19 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 			t.Errorf("post-withdrawal flush = %+v, want just the survivor", got)
 		}
 
-		// Withdrawing an already-flushed id is a tolerated no-op, and never
-		// resurrects or hides the delivered row's flush-once state.
-		if err := store.DeleteSystem(ctx, orgID, got[0].ID); err != nil {
-			t.Fatalf("withdraw flushed id: %v", err)
+		// Withdrawing an already-flushed id is a no-op that reports the row
+		// consumed, and never resurrects or hides its flush-once state.
+		consumed, err := store.DeleteSystem(ctx, orgID, got[0].ID)
+		if err != nil || !consumed {
+			t.Fatalf("withdraw flushed id = (consumed %v, %v), want consumed", consumed, err)
+		}
+		if again, err := store.FlushPendingSystem(ctx, orgID, conversationID); err != nil || len(again) != 0 {
+			t.Errorf("flush after withdrawing a flushed id = (%+v, %v), want nothing", again, err)
+		}
+
+		// An id that names no row is a no-op that reports nothing consumed.
+		if consumed, err := store.DeleteSystem(ctx, orgID, "999999999"); err != nil || consumed {
+			t.Errorf("withdraw unknown id = (consumed %v, %v), want (false, nil)", consumed, err)
 		}
 	})
 

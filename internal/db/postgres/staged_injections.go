@@ -61,12 +61,12 @@ func (s *stagedInjectionStore) FlushPendingSystem(ctx context.Context, orgID, co
 	return db.StagedInjectionsFromPending(flushed), nil
 }
 
-func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id string) error {
+func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id string) (bool, error) {
 	rowID, err := strconv.ParseInt(id, 10, 64)
 	if err != nil {
 		// A non-numeric id can only be a pre-refactor uuid that no longer
 		// names any row — the contract is a silent no-op.
-		return nil
+		return false, nil
 	}
 	// Retire, don't delete (see the interface doc): the executor's tf_system
 	// role holds no DELETE on messages. delivered stays false — withdrawn
@@ -75,9 +75,24 @@ func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id strin
 	// the flush, assembly, and the display reads. The delivered = false guard
 	// keeps this from retiring an already-flushed row a racing resume just
 	// consumed.
-	_, err = s.admin.ExecContext(ctx, `
+	res, err := s.admin.ExecContext(ctx, `
 		UPDATE messages SET window_state = 'inactive'
 		WHERE org_id = $1::uuid AND id = $2 AND subtype = ANY($3::text[]) AND delivered = false
 	`, orgID, rowID, domain.StagedInjectionSubtypes)
-	return err
+	if err != nil {
+		return false, err
+	}
+	if n, err := res.RowsAffected(); err != nil || n > 0 {
+		return false, err
+	}
+	// Nothing was withdrawn. delivered only ever flips to true, so reading it
+	// after the update cannot disagree with what stopped the update.
+	var consumed bool
+	err = s.admin.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM messages
+			WHERE org_id = $1::uuid AND id = $2 AND subtype = ANY($3::text[]) AND delivered = true
+		)
+	`, orgID, rowID, domain.StagedInjectionSubtypes).Scan(&consumed)
+	return consumed, err
 }
