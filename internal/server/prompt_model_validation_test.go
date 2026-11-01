@@ -10,12 +10,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
 )
 
-// A stored model value is dispatched verbatim by the runtime that will send it,
-// so the accepted set is this deployment's universe and nothing else. These
-// tests run local, where that universe is the Claude Code SDK's alias list — so
-// the interesting rejection is the NATIVE wire id: it is what the multi picker
-// offers, what an older local build stored, and what a stale client still
-// sends. Handing one to the subprocess pins a version nobody asked for.
+// A stored model value is dispatched verbatim, so the accepted set is this
+// deployment's universe. These tests run local, where that is the SDK's alias
+// list, so the telling rejection is a native wire id: what the multi picker
+// offers and a stale client may still send.
 func TestPromptCreate_ModelMustBeOfferedByTheUniverse(t *testing.T) {
 	s := newTestServer(t)
 

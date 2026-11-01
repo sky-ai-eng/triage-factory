@@ -13,9 +13,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// The two things POST /api/dashboard/prs/list grew: a states filter, and a
-// second identity leg — pull requests a run the viewer commissioned opened
-// under the bot's login.
+// POST /api/dashboard/prs/list: the viewer's pull requests, their states
+// filter and their page token.
 
 // seedCommissionedPR inserts a github pull-request entity carrying snap, with
 // the commissioner and entity state the read consults beside snapshot_json.
@@ -45,25 +44,20 @@ func seedCommissionedPR(t *testing.T, s *Server, snap domain.PRSnapshot, commiss
 	}
 }
 
-// TestDashboardPRs_IncludesWhatICommissioned is the second leg's reason for
-// existing: a pull request TF opened is authored by a bot that maps to no TF
-// user, so the author predicate alone never returns work the viewer asked for.
-// Someone else's commission stays theirs.
+// TestDashboardPRs_IncludesWhatICommissioned: "mine" is what my GitHub login
+// authored plus what a run I commissioned opened under the bot's login, which
+// maps to no TF user. The commissioned leg needs no bound login, and another
+// person's pull requests, authored or commissioned, are never mine.
 func TestDashboardPRs_IncludesWhatICommissioned(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
 	ctx := context.Background()
 
-	host := dashboardTestHost(t, s, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID)
-	if err := s.users.UpsertGitHubIdentity(ctx, runmode.LocalDefaultUserID, host, "octocat", "", "", "connect_oauth"); err != nil {
-		t.Fatalf("bind identity: %v", err)
-	}
 	const someoneElse = "44444444-4444-4444-4444-444444444444"
 	if _, err := s.db.ExecContext(ctx,
 		`INSERT INTO users (id, display_name) VALUES (?, 'Someone Else')`, someoneElse); err != nil {
 		t.Fatalf("seed other user: %v", err)
 	}
-
 	seedCommissionedPR(t, s, domain.PRSnapshot{
 		Number: 1, Repo: "acme/widget", Author: "octocat", State: "OPEN", Title: "Mine by hand",
 	}, "", "")
@@ -73,42 +67,37 @@ func TestDashboardPRs_IncludesWhatICommissioned(t *testing.T) {
 	seedCommissionedPR(t, s, domain.PRSnapshot{
 		Number: 3, Repo: "acme/widget", Author: "tf-bot", State: "OPEN", Title: "Somebody else's ask",
 	}, someoneElse, "")
-
-	out := decodeList[domain.PRSummaryRow](t, doJSON(t, s, "POST", "/api/dashboard/prs/list", map[string]any{}))
-	if len(out.Items) != 2 || out.Total() != 2 {
-		t.Fatalf("got %d rows / total %d, want 2/2; items=%+v", len(out.Items), out.Total(), out.Items)
-	}
-	got := map[int]bool{}
-	for _, p := range out.Items {
-		got[p.Number] = true
-	}
-	if !got[1] || !got[2] {
-		t.Errorf("returned %v, want #1 (authored) and #2 (commissioned)", got)
-	}
-	if got[3] {
-		t.Error("returned #3 — another person's commission is not mine")
-	}
-}
-
-// TestDashboardPRs_UnboundIdentityStillSeesCommissions is why the handler no
-// longer short-circuits on a missing GitHub login: a person who has never
-// bound one can still have asked for work, and hiding it behind an unrelated
-// missing binding answers the wrong question.
-func TestDashboardPRs_UnboundIdentityStillSeesCommissions(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	s := newTestServer(t)
-
 	seedCommissionedPR(t, s, domain.PRSnapshot{
-		Number: 5, Repo: "acme/widget", Author: "tf-bot", State: "OPEN", Title: "Mine by delegation",
-	}, runmode.LocalDefaultUserID, "")
-	seedCommissionedPR(t, s, domain.PRSnapshot{
-		Number: 6, Repo: "acme/widget", Author: "octocat", State: "OPEN", Title: "Nobody's, to me",
+		Number: 4, Repo: "acme/widget", Author: "someone-else", State: "OPEN", Title: "Not mine",
 	}, "", "")
 
-	out := decodeList[domain.PRSummaryRow](t, doJSON(t, s, "POST", "/api/dashboard/prs/list", map[string]any{}))
-	if len(out.Items) != 1 || out.Total() != 1 || out.Items[0].Number != 5 {
-		t.Fatalf("got %+v (total %d), want exactly #5 — the commissioned leg needs no bound login",
-			out.Items, out.Total())
+	mine := func() map[int]domain.PRSummaryRow {
+		t.Helper()
+		out := decodeList[domain.PRSummaryRow](t, doJSON(t, s, "POST", "/api/dashboard/prs/list", map[string]any{}))
+		if out.Total() != len(out.Items) {
+			t.Errorf("total %d, page %d rows", out.Total(), len(out.Items))
+		}
+		got := map[int]domain.PRSummaryRow{}
+		for _, p := range out.Items {
+			got[p.Number] = p
+		}
+		return got
+	}
+
+	if got := mine(); len(got) != 1 || got[2].Number != 2 {
+		t.Errorf("with no bound login, returned %v, want exactly #2 (commissioned)", got)
+	}
+
+	host := dashboardTestHost(t, s, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID)
+	if err := s.users.UpsertGitHubIdentity(ctx, runmode.LocalDefaultUserID, host, "octocat", "", "", "connect_oauth"); err != nil {
+		t.Fatalf("bind identity: %v", err)
+	}
+	got := mine()
+	if len(got) != 2 || got[1].Number != 1 || got[2].Number != 2 {
+		t.Fatalf("returned %v, want #1 (authored) and #2 (commissioned)", got)
+	}
+	if got[1].Repo != "acme/widget" || got[1].Author != "octocat" {
+		t.Errorf("#1 = %+v, want acme/widget by octocat", got[1])
 	}
 }
 

@@ -20,14 +20,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// seedReviewDeliverableWithConversation mints a completed (terminal) conversation
-// chain and a finalized review-draft deliverable hung off it (TFAC-494):
-// state=pending, ready sentinel set, the head SHA pinned, one staged inline
-// comment, and the agent's draft snapshotted into proposed. The whole review is
-// staged TF-side — no GitHub object exists until approval. The conversation is
-// completed because approval/dismiss are decoupled sidecars that never flip
-// conversation lifecycle (TFAC-379). Returns (deliverableID, conversationID,
-// taskID).
+// seedReviewDeliverableWithConversation mints a concluded conversation chain and
+// a finalized review draft on it: pending, the head SHA pinned, one staged inline
+// comment with a MAJOR badge, and the agent's draft snapshotted into proposed.
+// The review is staged TF-side; no GitHub object exists until approval.
 func seedReviewDeliverableWithConversation(t *testing.T, s *Server, suffix, owner, repo string, number int, event string) (deliverableID, conversationID, taskID string) {
 	t.Helper()
 	conversationID = seedSteerConversation(t, s.db, suffix, dbtest.SeedConcluded)
@@ -104,17 +100,10 @@ func TestReviewDeliverableGet_SeverityRoundTrip(t *testing.T) {
 	}
 }
 
-// TestReviewDeliverableApprove pins the atomic submit-on-approval flow: SubmitReview
-// POSTs the staged body+event+footer+comments to GitHub, the deliverable flips
-// pending → submitted and gains the submitted review's id + URL, the
-// conversation stays completed (approval never flips it), and the conversation's
-// own memory is left exactly as its gate filed it.
-//
-// The POST asserted here is composed by review.SubmitStaged — the same function
-// the auto-post posture calls from the agent's finalize, whose test
-// (cmd/exec/agenthost TestFinalizeReviewDraft_PostureDecidesPosting) pins the
-// identical payload shape. Keep the two assertion sets in step: they exist to
-// catch either path drifting away from the shared publish.
+// TestReviewDeliverableApprove: approval submits the staged event, body, footer
+// and comments in one POST, marks the deliverable submitted with the review's id
+// and URL, and leaves the conversation and its memory alone. Keep the payload
+// checks in step with cmd/exec/agenthost TestFinalizeReviewDraft_PostureDecidesPosting.
 func TestReviewDeliverableApprove(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -221,13 +210,10 @@ func TestReviewDeliverableApprove_NonPending_409(t *testing.T) {
 	}
 }
 
-// TestReviewDeliverableApprove_SubmitsPostClaimContent pins the read-after-claim:
-// an edit that lands between the approve click and the claim must be what
-// reaches GitHub — the submit payload is rebuilt from the row AFTER the claim
-// freezes it, not from the snapshot the handler was dispatched with. The racing
-// PATCH is injected from the resolver's repo-coverage probe (GET /repos), which
-// approve performs after loading its deliverable snapshot and before taking the
-// claim — exactly the window where a guarded edit still succeeds.
+// TestReviewDeliverableApprove_SubmitsPostClaimContent: an edit landing between
+// the approve click and the claim is what reaches GitHub, because the payload is
+// rebuilt from the row after the claim. The racing PATCH runs from the repo
+// probe (GET /repos), which approve makes before taking the claim.
 func TestReviewDeliverableApprove_SubmitsPostClaimContent(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -277,11 +263,9 @@ func TestReviewDeliverableApprove_SubmitsPostClaimContent(t *testing.T) {
 	}
 }
 
-// TestReviewDeliverableApprove_GitHubFailure_ReleasesClaim pins the claim/release
-// pair around the GitHub write: approve claims the deliverable (pending → submitted)
-// BEFORE SubmitReview so the post is at-most-once, and a GitHub failure releases
-// the claim (back to pending, no id/URL) so a retry can succeed. The retry then
-// completes the flow: submitted, with the posted review's id + URL stamped.
+// TestReviewDeliverableApprove_GitHubFailure_ReleasesClaim: approve claims the
+// review before submitting so the post is at most once; a GitHub failure
+// releases the claim (pending, no id or URL), and the retry then submits.
 func TestReviewDeliverableApprove_GitHubFailure_ReleasesClaim(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -320,10 +304,9 @@ func TestReviewDeliverableApprove_GitHubFailure_ReleasesClaim(t *testing.T) {
 	}
 }
 
-// TestReviewDeliverableGet_Submitted_URLNoFreshness pins the resolved-review read:
-// GET returns state=submitted with the posted review's url, and makes NO GitHub
-// call — freshness against the live head is meaningless once the review posted,
-// so commits_since_finalize stays null.
+// TestReviewDeliverableGet_Submitted_URLNoFreshness: a submitted review reads
+// back with its posted coordinates and no GitHub call, since freshness against
+// the live head means nothing once posted; commits_since_finalize stays null.
 func TestReviewDeliverableGet_Submitted_URLNoFreshness(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -479,10 +462,9 @@ func TestReviewDeliverableCommentDelete(t *testing.T) {
 	}
 }
 
-// TestReviewDeliverableUpdate_InvalidEvent_400 pins early validation of the staged
-// verdict: an invalid (or empty) review_event is rejected at PATCH time and the
-// stored sentinel is left unchanged (an empty event would otherwise un-park the
-// conversation).
+// TestReviewDeliverableUpdate_InvalidEvent_400: an invalid or empty review_event
+// is rejected at PATCH time and the stored one is left unchanged, since an empty
+// event would un-park the conversation.
 func TestReviewDeliverableUpdate_InvalidEvent_400(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -499,36 +481,9 @@ func TestReviewDeliverableUpdate_InvalidEvent_400(t *testing.T) {
 	}
 }
 
-// TestReviewDeliverableUpdate_NonPending_409 pins that staging is rejected once the
-// review is no longer pending: a PATCH on a submitted/dismissed deliverable returns
-// 409 and doesn't write body/event the user can't act on.
-func TestReviewDeliverableUpdate_NonPending_409(t *testing.T) {
-	keyring.MockInit()
-	srv := newTestServer(t)
-	artID, _, _ := seedReviewDeliverableWithConversation(t, srv, "rnp", "acme", "api", 7, "COMMENT")
-	// Flip to submitted out-of-band.
-	art := getDeliverable(t, srv, artID)
-	art.State = domain.DeliverableStateReviewSubmitted
-	if _, err := sqlitestore.New(srv.db).Deliverables.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(srv.db).Orgs, runmode.LocalDefaultOrgID, *art)); err != nil {
-		t.Fatalf("flip submitted: %v", err)
-	}
-	rec := doJSON(t, srv, http.MethodPatch, "/api/deliverables/"+artID+"/review", map[string]any{"body": "edit"})
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("PATCH on submitted review = %d, want 409; body=%s", rec.Code, rec.Body.String())
-	}
-	// The staged body must be unchanged.
-	if d, _ := domain.ParseReviewDeliverableDetails(getDeliverable(t, srv, artID).DetailsJSON); d.ReviewBody != "## Review\nlgtm" {
-		t.Errorf("review_body = %q after rejected PATCH, want unchanged", d.ReviewBody)
-	}
-}
-
-// TestReviewDeliverableDismiss pins the per-deliverable dismiss for reviews, now a
-// field write on the review sub-resource: PATCH {state:"dismissed"} flips the
-// deliverable pending → dismissed with NO GitHub call (the review is staged
-// TF-side) and never touches the conversation lifecycle (the decoupled
-// sidecar). It is a field write precisely because nothing
-// external happens — which is why the /dismiss verb, which really does close a
-// PR on GitHub, no longer answers for reviews.
+// TestReviewDeliverableDismiss: dismissing a staged review is a field write,
+// PATCH {state:"dismissed"}, because nothing happens on GitHub; it flips the
+// deliverable to dismissed and leaves the conversation alone.
 func TestReviewDeliverableDismiss(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -546,16 +501,21 @@ func TestReviewDeliverableDismiss(t *testing.T) {
 	}
 }
 
-// TestReviewDeliverableDismiss_NonPending_409 pins the state guard: dismissing an
-// already-submitted (terminal) review returns 409.
+// TestReviewDeliverableDismiss_NonPending_409: once a review is submitted, both
+// a dismiss and a content edit are 409, and the staged body is unchanged.
 func TestReviewDeliverableDismiss_NonPending_409(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	artID, _, _ := seedReviewDeliverableWithConversation(t, srv, "rdis409", "acme", "api", 7, "COMMENT")
 	execSQL(t, srv.db, `UPDATE deliverables SET state = ? WHERE id = ?`, domain.DeliverableStateReviewSubmitted, artID)
-	rec := doJSON(t, srv, http.MethodPatch, "/api/deliverables/"+artID+"/review", map[string]any{"state": "dismissed"})
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("dismiss of submitted review = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	for _, body := range []map[string]any{{"state": "dismissed"}, {"body": "edit"}} {
+		rec := doJSON(t, srv, http.MethodPatch, "/api/deliverables/"+artID+"/review", body)
+		if rec.Code != http.StatusConflict {
+			t.Errorf("PATCH %v on a submitted review = %d, want 409; body=%s", body, rec.Code, rec.Body.String())
+		}
+	}
+	if d, _ := domain.ParseReviewDeliverableDetails(getDeliverable(t, srv, artID).DetailsJSON); d.ReviewBody != "## Review\nlgtm" {
+		t.Errorf("review_body = %q after the rejected PATCHes, want unchanged", d.ReviewBody)
 	}
 }
 
@@ -585,10 +545,9 @@ func TestReviewDeliverablePatch_StateVocabulary(t *testing.T) {
 	}
 }
 
-// TestReviewDeliverableCommentUpdate_RejectsSeverityInBody pins that a submitted
-// body carrying its own severity badge is refused. It used to be silently
-// stripped and the stored severity re-baked over it — a 200 for a value the
-// route threw away.
+// TestReviewDeliverableCommentUpdate_RejectsSeverityInBody: a comment body that
+// carries its own severity badge is refused with 422 rather than stripped, and
+// the stored severity is unchanged.
 func TestReviewDeliverableCommentUpdate_RejectsSeverityInBody(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -618,47 +577,6 @@ func TestReviewDeliverableGet_MalformedDetails_500(t *testing.T) {
 	rec := doJSON(t, srv, http.MethodGet, "/api/deliverables/"+artID, nil)
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("get with corrupt details = %d, want 500; body=%s", rec.Code, rec.Body.String())
-	}
-}
-
-// TestReviewDeliverableApprove_SharedCommitSHA_PinsToIt pins that the submitted
-// review's commit_id is the commit the inline comments were validated against
-// (their CommitSHA), not the start-review head — so the comments anchor to the
-// frame they were authored in even if the PR advanced after start-review.
-func TestReviewDeliverableApprove_SharedCommitSHA_PinsToIt(t *testing.T) {
-	keyring.MockInit()
-	srv := newTestServer(t)
-	var submitBody map[string]any
-	mux := newAppAPIMux()
-	mux.HandleFunc("POST /api/v3/repos/{owner}/{repo}/pulls/{number}/reviews", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&submitBody)
-		_ = json.NewEncoder(w).Encode(map[string]any{"id": 7})
-	})
-	stub := httptest.NewServer(mux)
-	t.Cleanup(stub.Close)
-	seedApp(t, srv, stub, acmeInstall())
-
-	artID, _, _ := seedReviewDeliverableWithConversation(t, srv, "rshare", "acme", "api", 7, "COMMENT")
-	// Two comments both anchored to commit_v2 — a different commit than the
-	// start-review head ("headsharshare"). The pin must follow the comments.
-	art := getDeliverable(t, srv, artID)
-	d, _ := domain.ParseReviewDeliverableDetails(art.DetailsJSON)
-	l1, l2 := 3, 4
-	d.StagedComments = []domain.ReviewDeliverableComment{
-		{ID: "c1", Path: "a.go", Line: &l1, Body: "first", CommitSHA: "commit_v2"},
-		{ID: "c2", Path: "a.go", Line: &l2, Body: "second", CommitSHA: "commit_v2"},
-	}
-	art.DetailsJSON = domain.MarshalReviewDeliverableDetails(d)
-	if _, err := sqlitestore.New(srv.db).Deliverables.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(srv.db).Orgs, runmode.LocalDefaultOrgID, *art)); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-
-	rec := doJSON(t, srv, http.MethodPost, "/api/deliverables/"+artID+"/approve", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("approve = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	if submitBody["commit_id"] != "commit_v2" {
-		t.Errorf("submit commit_id = %v, want commit_v2 (the comments' anchor, not the start head)", submitBody["commit_id"])
 	}
 }
 

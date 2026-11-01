@@ -72,15 +72,6 @@ func connectOrgProviders(t *testing.T, s *Server, anthropic, bedrock bool) {
 	}
 }
 
-// providersOf collects the distinct providers a catalog read returned.
-func providersOf(items []modelCatalogRow) map[string]bool {
-	out := map[string]bool{}
-	for _, it := range items {
-		out[it.Provider] = true
-	}
-	return out
-}
-
 // The team read is the intersection of the org's and the team's enable-sets:
 // narrowing the team removes the rest from the picker and clearing puts them
 // back. Local mode, so the sets are written in the harness's aliases.

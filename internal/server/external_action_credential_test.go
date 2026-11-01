@@ -11,11 +11,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/github/githubapp"
 )
 
-// The approval lifecycle is org-executed but human-authorized, and it used to
-// file every one of its rows under the GitHub App. In a PAT org that named a
-// service account the org does not have — so these pin that the row follows the
-// tier the resolver picked, and that an unclassifiable one still reads as the
-// App rather than inventing a PAT.
+// The approval lifecycle is org-executed but human-authorized, so its audit
+// rows name the credential tier the resolver picked (filing a PAT org's rows
+// under the App would name a service account the org does not have), and an
+// unclassifiable tier reads as the App rather than inventing a PAT.
 
 // identityResolver is a ghclient.Resolver that reports a fixed tier. Only the
 // identity arm is exercised; the rest panic so a test that starts depending on

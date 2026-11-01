@@ -8,22 +8,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 )
 
-// TestUsageGovernanceGates_NoLicenceOracle_Postgres pins the property the whole
-// role-before-entitlement ordering exists for: a caller who fails the role check
-// gets the SAME status whether or not the deployment is licensed for governance.
-//
-// The failure it guards against is subtle and easy to reintroduce, because each
-// gate is defensible alone. Check the entitlement first and an unlicensed
-// deployment answers 404 to everyone, which reads like good hygiene — but then a
-// plain member who probes the route sees 404 here and 403 on a licensed
-// deployment, and the difference between those two answers is the org's plan
-// tier. Nobody below org admin is supposed to be able to read that off the API.
-//
-// So this asserts sameness across the licence axis, not any particular code. The
-// route's actual gate strength is covered by the per-route tests; what would slip
-// past those is exactly a divergence here.
-//
-// Multi-mode only (both gates short-circuit in local); skips without Docker.
+// TestUsageGovernanceGates_NoLicenceOracle_Postgres: a caller who fails the role
+// check gets the same status whether or not governance is licensed. Checking the
+// entitlement first would answer that caller 404 unlicensed and 403 licensed,
+// revealing the org's plan tier, so this asserts sameness, not a particular code.
 func TestUsageGovernanceGates_NoLicenceOracle_Postgres(t *testing.T) {
 	r := newUsageRig(t)
 
