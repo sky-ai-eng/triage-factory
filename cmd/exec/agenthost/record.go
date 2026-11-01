@@ -116,31 +116,6 @@ func recordActionAlone(ctx context.Context, stores db.Stores, info ConversationI
 	})
 }
 
-// deletesUnrecordedComment reports whether a retires a comment that has no
-// row. A comment row exists only for a comment TF posted, so a delete never
-// creates one: a delete of a person's comment, or of one whose post was never
-// recorded, is recorded by its audit row alone. A failed read is answered the
-// same way and counted, since a row the delete created would claim the comment
-// was TF's.
-func deletesUnrecordedComment(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Deliverable) bool {
-	if a == nil || a.Kind != domain.DeliverableKindComment || a.State != domain.DeliverableStateCommentDeleted {
-		return false
-	}
-	var present map[string]bool
-	err := withRecordRetry(ctx, func() error {
-		var e error
-		present, e = stores.Deliverables.PresentDedupKeysSystem(ctx, info.OrgID, a.Scope, []string{a.DedupKey})
-		return e
-	})
-	if err != nil {
-		recordWriteDrop(ctx, recordDropOp(a, nil), err)
-		agenthostLog.Warn("reading a deleted comment's deliverable failed; recording the action without it",
-			"conversation", info.ConversationID, "error", err)
-		return true
-	}
-	return !present[a.DedupKey]
-}
-
 // RecordExternalWrite is the shared recording funnel behind every exec
 // choke-point write: it stamps the run's identity and the org's current scope
 // for each provider (stampScopeInfo) onto a and act (if present), links a to
@@ -152,13 +127,13 @@ func deletesUnrecordedComment(ctx context.Context, stores db.Stores, info Conver
 // settles (recordActionMemoryLink). Both entity resolutions run before the write and
 // outside its transaction (see recordEntityTouch).
 //
-// a is nil for an audit-only write that produces no deliverable to compose
-// with (a Slack reaction, a review-thread reply). act is nil when the write
-// carries no distinct external action (a review-draft snapshot re-upserting
-// its deliverable with no new external write). The caller is responsible for setting a.Provider (and any
-// other polymorphic fields) before calling — this function only stamps the
-// run-identity fields common to every provider. A comment's delete is written
-// only over the comment's existing row (deletesUnrecordedComment).
+// a is the pull request or review deliverable the write prepared for a
+// person, and nil for every other write, which leaves its ledger row alone. act
+// is nil when the write carries no distinct external action (a review-draft
+// snapshot re-upserting its deliverable with no new external write). The
+// caller is responsible for setting a.Provider (and any other polymorphic
+// fields) before calling — this function only stamps the run-identity fields
+// common to every provider.
 //
 // Best-effort throughout: every write here already happened against the
 // external system (GitHub/Jira/Slack) before this is called, so a recording
@@ -232,9 +207,6 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 	// reported on its own.
 	lost := a
 	err := withRecordRetry(ctx, func() error { return stampScopeInfo(ctx, stores, info.OrgID, a, act) })
-	if err == nil && deletesUnrecordedComment(ctx, stores, info, a) {
-		a, lost = nil, nil
-	}
 	var subject resolvedEntity
 	if err == nil && a != nil {
 		subject = resolveDeliverableEntity(ctx, stores, info, a, container, github)
@@ -290,6 +262,8 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 		recordWriteDrop(ctx, recordDropOp(lost, act), err)
 		agenthostLog.Warn("external write recording failed (action already applied)",
 			"conversation", info.ConversationID, "kind", kind, "target", target, "error", err)
+	} else {
+		countUnnamedComment(ctx, act)
 	}
 	// Link the conversation to the act's entity outside the audit write.
 	recordActionMemoryLink(ctx, stores, info, act, about)
@@ -313,8 +287,8 @@ type entityCoordinate struct {
 	provider, target, url string
 	externalID            string
 	// scope is the namespace the coordinate was recorded in, when it names
-	// one: a Jira deliverable's dedup key carries its site. "" means the org's
-	// current scope.
+	// one: a Jira object key carries its site. "" means the org's current
+	// scope.
 	scope string
 	// container is what the response says the object sits in, for a Linear
 	// or Jira coordinate: a Linear entity is created carrying its team and a
@@ -613,16 +587,12 @@ func (r resolvedEntity) matches(provider, target string) bool {
 }
 
 // resolveDeliverableEntity links a to the entity it is about: the pull request a
-// GitHub pull request, review or comment deliverable is on, the Jira or Linear
-// issue, the Slack thread. It resolves (and creates, like the touch) the
-// entity for a's provider and target, identified by the provider id a's key
-// carries (domain.DeliverableEntityIdentity) — for GitHub, the pull request's
-// node id a pull request or review deliverable is keyed on, or, for a comment,
-// the identity its act's observer read (github) — and sets a.EntityID to it
-// and a.Target to its key: a deliverable's target is its entity's key, which
-// every rename moves by entity_id from then on. A branch, which has no entity,
-// and a deliverable whose entity does not resolve are written unlinked, and a
-// failure is logged. Best-effort, like the rest of the funnel: the write
+// pull request or review deliverable is on. It resolves (and creates, like the
+// touch) the entity for a's target, identified by the pull request's node id a
+// is keyed on (deliverableGitHubIdentity), and sets a.EntityID to it and
+// a.Target to its key: a deliverable's target is its entity's key, which every
+// rename moves by entity_id from then on. A deliverable whose entity does not
+// resolve is written unlinked, and a failure is logged. Best-effort, like the rest of the funnel: the write
 // happened, and its row is recorded either way. A failure another attempt can
 // get past is retried like the write after it (withRecordRetry); resolving
 // only finds, creates or renames toward what the provider answered, so a
@@ -631,12 +601,7 @@ func (r resolvedEntity) matches(provider, target string) bool {
 // the stores decides it, so a relayed row cannot name an entity of its choosing.
 func resolveDeliverableEntity(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Deliverable, container domain.EntityContainer, github domain.GitHubIdentity) resolvedEntity {
 	a.EntityID = ""
-	c := entityCoordinate{provider: a.Provider, target: a.Target, url: a.URL, container: container}
-	if a.Provider == domain.ProviderGitHub {
-		c.github = deliverableGitHubIdentity(*a, github)
-	} else if scope, externalID, ok := domain.DeliverableEntityIdentity(*a); ok {
-		c.scope, c.externalID = scope, externalID
-	}
+	c := entityCoordinate{provider: a.Provider, target: a.Target, url: a.URL, container: container, github: deliverableGitHubIdentity(*a, github)}
 	out := resolvedEntity{attempted: true, provider: a.Provider, target: a.Target}
 	var entity *domain.Entity
 	err := withRecordRetry(ctx, func() error {
@@ -657,11 +622,10 @@ func resolveDeliverableEntity(ctx context.Context, stores db.Stores, info Conver
 	return out
 }
 
-// deliverableGitHubIdentity is the identity a GitHub deliverable's entity is
-// resolved from. A pull request or review deliverable is keyed on its pull
-// request's node id, which wins over anything relayed beside it; the
-// repository id comes from github, the observer's read. Any other deliverable
-// (a comment) is about the object its act names, so it takes github whole.
+// deliverableGitHubIdentity is the identity a deliverable's entity is resolved
+// from. A pull request or review deliverable is keyed on its pull request's
+// node id, which wins over anything relayed beside it; the repository id comes
+// from github, the observer's read.
 func deliverableGitHubIdentity(a domain.Deliverable, github domain.GitHubIdentity) domain.GitHubIdentity {
 	if nodeID, ok := domain.DeliverablePullRequestNodeID(a); ok {
 		github.NodeID, github.Kind = nodeID, domain.EntityKindPullRequest
@@ -683,8 +647,7 @@ func deliverableGitHubIdentity(a domain.Deliverable, github domain.GitHubIdentit
 // identified by github, the identity its observer read. A Jira or Linear
 // action's object key names the issue it is about, a comment's key the issue
 // the comment is on, so the coordinate is identified by the site and issue id
-// or the UUID the key carries (domain.ObjectKeyEntityIdentity), whether or not
-// a deliverable is written beside the action. A failure another attempt can
+// or the UUID the key carries (domain.ObjectKeyEntityIdentity). A failure another attempt can
 // get past is retried like the write (withRecordRetry); resolving only finds,
 // creates or renames toward what the provider answered, so a second attempt
 // lands on what a first one wrote. One that still fails is logged, and the act

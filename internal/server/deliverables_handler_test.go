@@ -13,6 +13,7 @@ import (
 	"github.com/zalando/go-keyring"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
@@ -129,48 +130,6 @@ func TestDeliverableWrites_KindScoped(t *testing.T) {
 	}
 	if got := getDeliverable(t, srv, reviewID).State; got != domain.DeliverableStateReviewPending {
 		t.Errorf("review deliverable state = %q, want pending (unchanged)", got)
-	}
-}
-
-// TestDeliverableGet_ServesEveryKind: a deliverable whose kind has no composed
-// representation answers with the shared envelope, `kind` naming the shape and
-// its stored details_json under `details`, rather than a 404.
-func TestDeliverableGet_ServesEveryKind(t *testing.T) {
-	keyring.MockInit()
-	srv := newTestServer(t)
-	conversationID := seedSteerConversation(t, srv.db, "anykind", dbtest.SeedConcluded)
-
-	branch, ok := domain.NewBranchDeliverable("acme/api", "refs/heads/feature/x", "deadbeef", true)
-	if !ok {
-		t.Fatal("NewBranchDeliverable refused a well-formed ref")
-	}
-	branch.ConversationID = conversationID
-	branch.OrgID = runmode.LocalDefaultOrgID
-	branch.TeamID = runmode.LocalDefaultTeamID
-	stored, err := sqlitestore.New(srv.db).Deliverables.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(srv.db).Orgs, runmode.LocalDefaultOrgID, branch))
-	if err != nil {
-		t.Fatalf("seed branch deliverable: %v", err)
-	}
-
-	rec := doJSON(t, srv, http.MethodGet, "/api/deliverables/"+stored.ID, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("get branch deliverable = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var out struct {
-		ID      string         `json:"id"`
-		Kind    string         `json:"kind"`
-		State   string         `json:"state"`
-		Target  string         `json:"target"`
-		Details map[string]any `json:"details"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if out.ID != stored.ID || out.Kind != domain.DeliverableKindBranch || out.Target != "acme/api" {
-		t.Errorf("envelope = %+v, want the branch deliverable's own coordinates", out)
-	}
-	if out.Details["sha"] != "deadbeef" {
-		t.Errorf("details = %v, want the stored branch payload", out.Details)
 	}
 }
 
@@ -783,43 +742,15 @@ func newRejectStub(t *testing.T, srv *Server, live map[string]any, node string, 
 	return rs
 }
 
-// seedBranchDeliverable records the pushed-branch deliverable the run's push would
-// have captured for the draft PR's head, so a reject has a sibling to retire:
-// keyed, as the push's sink keys it, on the registry row of repoPath's
-// repository.
-func seedBranchDeliverable(t *testing.T, s *Server, conversationID, repoPath, ref string) string {
-	t.Helper()
-	stores := sqlitestore.New(s.db)
-	a, ok := domain.NewBranchDeliverable(repoPath, ref, "abc123", true)
-	if !ok {
-		t.Fatalf("NewBranchDeliverable(%q, %q) refused", repoPath, ref)
-	}
-	a.ConversationID = conversationID
-	a.OrgID = runmode.LocalDefaultOrgID
-	a.TeamID = runmode.LocalDefaultTeamID
-	a = dbtest.InOrgScope(t, stores.Orgs, runmode.LocalDefaultOrgID, a)
-	repo, err := stores.Repos.FindOrCreateByRefSystem(context.Background(), runmode.LocalDefaultOrgID, domain.RepoRefFromSlug(a.Scope, repoPath))
-	if err != nil {
-		t.Fatalf("register %s: %v", repoPath, err)
-	}
-	a.DedupKey = domain.BranchDedupKey(repo.ID, ref)
-	stored, err := stores.Deliverables.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a)
-	if err != nil {
-		t.Fatalf("seed branch deliverable: %v", err)
-	}
-	return stored.ID
-}
-
 // TestDeliverableReject_PR: a rejection deletes the head branch, closes the draft
-// PR, flips the PR deliverable to closed and retires the branch deliverable,
-// audits both writes, and leaves the conversation and its memory alone.
+// PR, flips the PR deliverable to closed, audits both writes, and leaves the
+// conversation and its memory alone.
 func TestDeliverableReject_PR(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	rs := newRejectStub(t, srv, livePR("open", true, false), liveNode("OPEN", true, false), http.StatusNoContent, "")
 
 	artID, conversationID, _ := seedDraftPRDeliverableWithConversation(t, srv, "rej", "acme", "api", 42)
-	branchID := seedBranchDeliverable(t, srv, conversationID, "acme/api", "refs/heads/feature/x")
 
 	rec := doJSON(t, srv, http.MethodPost, "/api/deliverables/"+artID+"/reject", nil)
 	if rec.Code != http.StatusOK {
@@ -857,8 +788,12 @@ func TestDeliverableReject_PR(t *testing.T) {
 	if details.Proposed.Title != "Proposed title" {
 		t.Errorf("proposed snapshot must survive the flip; got %q", details.Proposed.Title)
 	}
-	if got := getDeliverable(t, srv, branchID).State; got != domain.DeliverableStateBranchDeleted {
-		t.Errorf("branch deliverable state = %q, want deleted", got)
+	arts, _, err := sqlitestore.New(srv.db).Deliverables.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
+	if err != nil {
+		t.Fatalf("list conversation deliverables: %v", err)
+	}
+	if len(arts) != 1 || arts[0].ID != artID {
+		t.Errorf("conversation deliverables = %+v, want the PR alone: a branch delete writes no deliverable", arts)
 	}
 
 	acts, _, err := sqlitestore.New(srv.db).ExternalActions.ListByOrgSystem(context.Background(), runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Action: domain.ActionBranchDeleted})
@@ -867,6 +802,9 @@ func TestDeliverableReject_PR(t *testing.T) {
 	}
 	if len(acts) != 1 || acts[0].Target != "acme/api" || acts[0].ExternalID != "refs/heads/feature/x" || acts[0].ConversationID != conversationID {
 		t.Errorf("branch_deleted audit rows = %+v, want one on acme/api refs/heads/feature/x for the drafting conversation", acts)
+	}
+	if wantURL, _ := domain.BranchWebURL(pr.Scope, "acme/api", "refs/heads/feature/x"); len(acts) == 1 && (wantURL == "" || acts[0].URL != wantURL) {
+		t.Errorf("branch_deleted url = %q, want the branch on the deliverable's host %q", acts[0].URL, wantURL)
 	}
 	// The branch delete is about the repository, by its registry row.
 	repo, err := sqlitestore.New(srv.db).Repos.GetByRefSystem(context.Background(), runmode.LocalDefaultOrgID, domain.RepoRefFromSlug(pr.Scope, "acme/api"))

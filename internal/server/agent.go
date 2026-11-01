@@ -306,8 +306,8 @@ type conversationDeliverableListRequest struct {
 	httpx.PageRequest
 }
 
-// handleAgentDeliverables returns the deliverables a conversation produced — branch, PR,
-// review, issue, comment — newest first, one page at a time. It reads the
+// handleAgentDeliverables returns the deliverables a conversation prepared — its
+// pull requests and reviews — newest first, one page at a time. It reads the
 // conversation first under request claims, so a conversation the caller's team
 // can't see is a 404 (RLS scopes both reads), never a leak; a member of the
 // owning team gets the list. Backs the conversation detail surface; team-level

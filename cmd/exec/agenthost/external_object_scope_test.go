@@ -10,7 +10,7 @@ import (
 
 // TestRecordExternalWrite_StampsTheOrgScopePerProvider pins the exec funnel's
 // scope rule: every row it records — whatever provider, and whichever door
-// (the shared funnel, a branch push through UpsertDeliverable) — is recorded in
+// (the shared funnel, a branch push through RecordBranchPushFor) — is recorded in
 // the org's current scope for its provider, and a scope the caller put on the
 // row is overwritten rather than trusted, the same as the run identity.
 func TestRecordExternalWrite_StampsTheOrgScopePerProvider(t *testing.T) {
@@ -41,26 +41,21 @@ func TestRecordExternalWrite_StampsTheOrgScopePerProvider(t *testing.T) {
 		TeamID: runmode.LocalDefaultTeamID, ConversationID: "conv-scope",
 	}
 	RecordExternalWrite(ctx, stores, info, &domain.Deliverable{
-		Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindComment,
+		Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindPullRequest,
 		Scope:  "https://elsewhere.example.com",
-		Target: "octo/api#1", ExternalID: "c-1", State: domain.DeliverableStateCommentPosted,
-		DedupKey: domain.ObjectKey(domain.ProviderGitHub, domain.DeliverableKindComment, "c-1", ""),
+		Target: "octo/api#1", ExternalID: "1", State: domain.DeliverableStatePRDraft,
+		DedupKey: domain.PullRequestDedupKey("PR_1"),
 	}, &domain.ExternalAction{
 		Provider: domain.ProviderGitHub, Scope: "https://elsewhere.example.com",
-		Action: domain.ActionCommentPosted, Target: "octo/api#1", Credential: domain.CredentialGitHubApp,
+		Action: domain.ActionPRCreated, Target: "octo/api#1", Credential: domain.CredentialGitHubApp,
 	})
 	RecordExternalWrite(ctx, stores, info, nil, &domain.ExternalAction{
 		Provider: domain.ProviderJira, Action: domain.ActionIssueCommentPosted,
 		Target: "ENG-1", Credential: domain.CredentialJiraOrg,
 	})
 	RecordExternalWrite(ctx, stores, info, nil, egressDeniedAction("conv-scope", "pypi.org:443", "off-allowlist"))
-	branch, ok := domain.NewBranchDeliverable("octo/api", "refs/heads/fix", "abc123", true)
-	if !ok {
-		t.Fatal("NewBranchDeliverable refused a valid ref")
-	}
-	if _, err := NewLocal(stores, info).UpsertDeliverableFor(ctx, branch, domain.GitHubIdentity{RepositoryID: "1", Repository: "octo/api"}); err != nil {
-		t.Fatalf("UpsertDeliverableFor: %v", err)
-	}
+	NewLocal(stores, info).RecordBranchPushFor(ctx, "octo/api", "refs/heads/fix", "abc123", true,
+		domain.GitHubIdentity{RepositoryID: "1", Repository: "octo/api"})
 
 	byProvider := map[string]string{}
 	for _, a := range listConversationDeliverables(t, stores, "conv-scope") {
@@ -75,8 +70,7 @@ func TestRecordExternalWrite_StampsTheOrgScopePerProvider(t *testing.T) {
 	}
 	for key, provider := range map[string]string{
 		"deliverable:github":                             domain.ProviderGitHub,
-		"deliverable:git":                                domain.ProviderGit,
-		"action:github:" + domain.ActionCommentPosted:    domain.ProviderGitHub,
+		"action:github:" + domain.ActionPRCreated:        domain.ProviderGitHub,
 		"action:github:" + domain.ActionBranchPushed:     domain.ProviderGitHub,
 		"action:jira:" + domain.ActionIssueCommentPosted: domain.ProviderJira,
 		"action:network:" + domain.ActionEgressDenied:    domain.ProviderNetwork,

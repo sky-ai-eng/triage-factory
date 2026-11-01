@@ -79,37 +79,7 @@ func seedThreadEntity(t *testing.T, stores db.Stores, orgID, channelID, threadTS
 // messageKey is the dedup key of the message ts in the channel whose registry
 // row is row.
 func messageKey(row, ts string) string {
-	return domain.ObjectKey(domain.ProviderSlack, domain.DeliverableKindMessage, domain.SlackMessageResource(row, ts), "")
-}
-
-// seedMessageDeliverable records a message in thread, the thread entity the
-// message is about, as the exec funnel links it: keyed on row, the registry
-// row the channel id resolved to when the message was written.
-func seedMessageDeliverable(t *testing.T, stores db.Stores, orgID, teamID string, thread domain.Entity, row, channel, rootTS, ts string) string {
-	t.Helper()
-	a, err := stores.Deliverables.UpsertSystem(context.Background(), orgID, domain.Deliverable{
-		TeamID: teamID, Provider: domain.ProviderSlack, Scope: domain.SlackScope, Kind: domain.DeliverableKindMessage,
-		Target: domain.SlackSourceID(channel, rootTS), ExternalID: ts, EntityID: thread.ID,
-		URL:      moveReplyPermalink(channel, ts, rootTS),
-		State:    domain.DeliverableStateMessagePosted,
-		DedupKey: messageKey(row, ts),
-	})
-	if err != nil {
-		t.Fatalf("seed deliverable %s/%s: %v", channel, ts, err)
-	}
-	return a.ID
-}
-
-type deliverableRow struct{ target, key, url string }
-
-func readDeliverable(t *testing.T, h *pgtest.Harness, id string) deliverableRow {
-	t.Helper()
-	var r deliverableRow
-	if err := h.AdminDB.QueryRow(`SELECT target, dedup_key, COALESCE(url, '') FROM deliverables WHERE id = $1`, id).
-		Scan(&r.target, &r.key, &r.url); err != nil {
-		t.Fatalf("read deliverable %s: %v", id, err)
-	}
-	return r
+	return domain.ObjectKey(domain.ProviderSlack, domain.ObjectKindMessage, domain.SlackMessageResource(row, ts), "")
 }
 
 // seedSlackAction records a message action about the thread entity entityID
@@ -208,10 +178,9 @@ func resolvesTo(t *testing.T, channels slackstore.ChannelRegistryStore, orgID, r
 // TestChannelMove_Postgres_MovesTheChannel: references to the channel hold its
 // registry row, so a move rewrites the row's channel id and the display
 // values that spell it — every thread entity's key and permalink under the old
-// id in any state, the targets and permalinks of the Slack deliverables and the
-// action pointers that name it — and leaves the tracking rows, handler
-// filters, the threads' identity (row and root ts) and the deliverables' dedup
-// keys (row and ts) as they were. Nothing under a channel whose id merely
+// id in any state, and the action pointers that name it — and leaves the
+// tracking rows, handler filters and the threads' identity (row and root ts)
+// as they were. Nothing under a channel whose id merely
 // starts with the old one moves. A redelivery of the same change finds
 // nothing left to move.
 func TestChannelMove_Postgres_MovesTheChannel(t *testing.T) {
@@ -237,12 +206,6 @@ func TestChannelMove_Postgres_MovesTheChannel(t *testing.T) {
 	}
 	neighbour := seedThreadEntity(t, stores, orgID, moveNeighbour, "1700000000.000100", "thread", movePermalink(moveNeighbour, "1700000000000100"))
 
-	deliverable := seedMessageDeliverable(t, stores, orgID, teamA, open, row, moveOld, "1700000000.000100", "1700000000.000300")
-	neighbourDeliverable := seedMessageDeliverable(t, stores, orgID, teamA, neighbour, neighbourRow, moveNeighbour, "1700000000.000100", "1700000000.000300")
-	// A message whose thread did not resolve when it was written is linked to
-	// no entity.
-	unlinkedDeliverable := seedMessageDeliverable(t, stores, orgID, teamA, domain.Entity{}, row, moveOld, "1700000000.000100", "1700000000.000400")
-
 	oldLink := moveReplyPermalink(moveOld, "1700000000000300", "1700000000.000100")
 	seedSlackAction(t, stores, orgID, teamA, open.ID, domain.SlackSourceID(moveOld, "1700000000.000100"), oldLink, "action-moved")
 	seedSlackAction(t, stores, orgID, teamA, neighbour.ID, domain.SlackSourceID(moveNeighbour, "1700000000.000100"),
@@ -259,7 +222,7 @@ func TestChannelMove_Postgres_MovesTheChannel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MoveSystem: %v", err)
 	}
-	want := slackstore.ChannelMove{To: moveNew, Entities: 2, Deliverables: 2, Actions: 2}
+	want := slackstore.ChannelMove{To: moveNew, Entities: 2, Actions: 2}
 	if !reflect.DeepEqual(move, want) {
 		t.Errorf("MoveSystem = %+v, want %+v", move, want)
 	}
@@ -310,32 +273,6 @@ func TestChannelMove_Postgres_MovesTheChannel(t *testing.T) {
 	}
 	if thread, err := channels.FindOrCreateThreadSystem(ctx, orgID, moveOld, "1700000000.000100", "message", "", ""); err != nil || thread.Created || thread.EntityID != open.ID {
 		t.Errorf("FindOrCreateThreadSystem by the retired id = %+v err=%v, want the existing thread %s", thread, err, open.ID)
-	}
-
-	// Deliverables: the target and permalink move; the key names the row and
-	// stays.
-	if got := readDeliverable(t, h, deliverable); got != (deliverableRow{
-		target: domain.SlackSourceID(moveNew, "1700000000.000100"),
-		key:    messageKey(row, "1700000000.000300"),
-		url:    moveReplyPermalink(moveNew, "1700000000.000300", "1700000000.000100"),
-	}) {
-		t.Errorf("moved deliverable = %+v", got)
-	}
-	// A deliverable linked to no entity moves its target by the channel id it
-	// spells.
-	if got := readDeliverable(t, h, unlinkedDeliverable); got != (deliverableRow{
-		target: domain.SlackSourceID(moveNew, "1700000000.000100"),
-		key:    messageKey(row, "1700000000.000400"),
-		url:    moveReplyPermalink(moveNew, "1700000000.000400", "1700000000.000100"),
-	}) {
-		t.Errorf("moved unlinked deliverable = %+v", got)
-	}
-	if got := readDeliverable(t, h, neighbourDeliverable); got != (deliverableRow{
-		target: domain.SlackSourceID(moveNeighbour, "1700000000.000100"),
-		key:    messageKey(neighbourRow, "1700000000.000300"),
-		url:    moveReplyPermalink(moveNeighbour, "1700000000.000300", "1700000000.000100"),
-	}) {
-		t.Errorf("neighbour deliverable = %+v, want untouched", got)
 	}
 
 	// Action pointers: the record of the act keeps its target and link.
@@ -391,9 +328,7 @@ func channelRowNamed(t *testing.T, channels slackstore.ChannelRegistryStore, org
 // channel and is closed beside the thread's original, which stays the
 // thread's active entity; the handler filters naming it name the channel
 // instead, one that cannot be decoded being reported and left as stored; and
-// the deliverable keys naming it name the channel's row, except one the channel's
-// row already holds for the same message, while the ledger's message objects
-// naming it all name the channel's row.
+// the ledger's message objects naming it all name the channel's row.
 func TestChannelMove_Postgres_AbsorbsWhatTheNewIDGotFirst(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -427,10 +362,6 @@ func TestChannelMove_Postgres_AbsorbsWhatTheNewIDGotFirst(t *testing.T) {
 
 	// One message recorded under both rows, and one only under the absorbed
 	// row.
-	kept := seedMessageDeliverable(t, stores, orgID, teamA, original, channel.ID, moveOld, "1700000000.000100", "1700000000.000500")
-	held := seedMessageDeliverable(t, stores, orgID, teamA, newcomer, absorbed.ID, moveNew, "1700000000.000100", "1700000000.000500")
-	rekeyed := seedMessageDeliverable(t, stores, orgID, teamA, newcomer, absorbed.ID, moveNew, "1700000000.000100", "1700000000.000600")
-
 	seedMessageObjectAction(t, stores, orgID, teamA, channel.ID, "1700000000.000500", "edit-on-channel")
 	seedMessageObjectAction(t, stores, orgID, teamA, absorbed.ID, "1700000000.000500", "edit-on-both")
 	seedMessageObjectAction(t, stores, orgID, teamA, absorbed.ID, "1700000000.000600", "edit-on-absorbed")
@@ -446,7 +377,7 @@ func TestChannelMove_Postgres_AbsorbsWhatTheNewIDGotFirst(t *testing.T) {
 	}
 	want := slackstore.ChannelMove{
 		To: moveNew, Absorbed: absorbed.ID, Entities: 1, Superseded: []string{newcomer.ID},
-		Deliverables: 2, Trackers: 2, Handlers: 2, SkippedHandlers: []string{unreadable},
+		Trackers: 2, Handlers: 2, SkippedHandlers: []string{unreadable},
 	}
 	if !reflect.DeepEqual(move, want) {
 		t.Errorf("MoveSystem = %+v, want %+v", move, want)
@@ -511,19 +442,6 @@ func TestChannelMove_Postgres_AbsorbsWhatTheNewIDGotFirst(t *testing.T) {
 	}
 	if got := readPredicate(t, h, unreadable)["channel_in"]; !reflect.DeepEqual(got, []any{absorbed.ID, float64(7)}) {
 		t.Errorf("unreadable handler = %v, want it as stored", got)
-	}
-
-	// Deliverables: a key naming the absorbed row names the channel's, unless
-	// the channel's row already holds it for the same message.
-	if got := readDeliverable(t, h, kept); got.key != messageKey(channel.ID, "1700000000.000500") ||
-		got.target != domain.SlackSourceID(moveNew, "1700000000.000100") {
-		t.Errorf("deliverable on the channel's row = %+v, want its key kept and its target moved", got)
-	}
-	if got := readDeliverable(t, h, held); got.key != messageKey(absorbed.ID, "1700000000.000500") {
-		t.Errorf("deliverable whose message the channel's row already holds = %+v, want its key left as it is", got)
-	}
-	if got := readDeliverable(t, h, rekeyed); got.key != messageKey(channel.ID, "1700000000.000600") {
-		t.Errorf("deliverable keyed on the absorbed row = %+v, want it keyed on the channel's row", got)
 	}
 
 	// Ledger objects: every message object keyed on the absorbed row is keyed

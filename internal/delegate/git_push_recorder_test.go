@@ -23,7 +23,7 @@ import (
 )
 
 // newRecorderStores opens an in-memory SQLite, migrates it, and seeds one
-// conversations row the deliverables FK (conversation_id) can point at, and the
+// conversations row a ledger row's conversation_id can point at, and the
 // registry row of octo/repo, the repository every push here goes to —
 // mirroring the pre-push hook's own test fixture so the two writers are
 // exercised against the same store.
@@ -61,8 +61,8 @@ func newRecorderStoresConn(t *testing.T) (db.Stores, *sql.DB, string) {
 
 // registerOctoRepo gives the registry a row for octo/repo on the org's GitHub
 // host, carrying GitHub's id for it, as the repository of a run's checkout has
-// one: the branch sink keys a branch on the row. Returns the row's id, the
-// same one on every call.
+// one: the recorder names the pushed repository by the row. Returns the
+// row's id, the same one on every call.
 func registerOctoRepo(t *testing.T, stores db.Stores) string {
 	t.Helper()
 	ctx := context.Background()
@@ -82,8 +82,8 @@ func registerOctoRepo(t *testing.T, stores db.Stores) string {
 // it over.
 
 // recorderInfo is the run identity a delegated run carries — event-triggered,
-// so UpsertDeliverable takes the admin-pool branch (the common case for the proxy:
-// an auto-delegated run has no user identity).
+// so the recorder writes on the admin pool (the common case for the proxy: an
+// auto-delegated run has no user identity).
 func recorderInfo(conversationID string) agenthost.ConversationInfo {
 	return agenthost.ConversationInfo{
 		OrgID:            runmode.LocalDefaultOrgID,
@@ -94,10 +94,29 @@ func recorderInfo(conversationID string) agenthost.ConversationInfo {
 	}
 }
 
+// pushRows returns the org's branch_pushed ledger rows and requires the
+// conversation to hold no deliverable: a push leaves its ledger row alone.
+func pushRows(t *testing.T, stores db.Stores, conversationID string) []domain.ExternalAction {
+	t.Helper()
+	ctx := context.Background()
+	acts, _, err := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Action: domain.ActionBranchPushed})
+	if err != nil {
+		t.Fatalf("ListByOrgSystem (branch_pushed): %v", err)
+	}
+	arts, _, err := stores.Deliverables.ListByConversation(ctx, runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
+	if err != nil {
+		t.Fatalf("Deliverables.ListByConversation: %v", err)
+	}
+	if len(arts) != 0 {
+		t.Errorf("a push wrote %d deliverables, want none: %+v", len(arts), arts)
+	}
+	return acts
+}
+
 func TestGitPushRecorder_RecordsBranch(t *testing.T) {
 	stores, conversationID := newRecorderStores(t)
 	info := recorderInfo(conversationID)
-	rec := gitPushRecorder(agenthost.NewLocal(stores, info), info)
+	rec := gitPushRecorder(agenthost.NewLocal(stores, info))
 
 	rec(context.Background(), gitproxy.PushedRef{
 		Repo:         "octo/repo",
@@ -108,21 +127,22 @@ func TestGitPushRecorder_RecordsBranch(t *testing.T) {
 		Status:       200,
 	})
 
-	arts, _, err := stores.Deliverables.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
-	if err != nil {
-		t.Fatalf("ListByConversation: %v", err)
+	acts := pushRows(t, stores, conversationID)
+	if len(acts) != 1 {
+		t.Fatalf("got %d branch_pushed rows, want 1", len(acts))
 	}
-	if len(arts) != 1 {
-		t.Fatalf("got %d deliverables, want 1", len(arts))
+	a := acts[0]
+	repoID := registerOctoRepo(t, stores)
+	if a.Provider != domain.ProviderGitHub || a.Target != "octo/repo" || a.ExternalID != "refs/heads/feature/x" {
+		t.Errorf("row = provider %q target %q external_id %q, want github, octo/repo, refs/heads/feature/x", a.Provider, a.Target, a.ExternalID)
 	}
-	a := arts[0]
-	if a.Provider != domain.ProviderGit || a.Kind != domain.DeliverableKindBranch {
-		t.Errorf("provider/kind = %q/%q, want git/branch", a.Provider, a.Kind)
+	if a.ObjectKind != domain.ObjectKindBranch || a.ObjectKey != "refs/heads/feature/x" || a.RepositoryID != repoID {
+		t.Errorf("object = %q %q in repository %q, want the branch keyed on its ref in %s", a.ObjectKind, a.ObjectKey, a.RepositoryID, repoID)
 	}
-	if a.Target != "octo/repo" || a.ExternalID != "refs/heads/feature/x" {
-		t.Errorf("target/external_id = %q/%q, want octo/repo, refs/heads/feature/x", a.Target, a.ExternalID)
+	if want := "https://github.com/octo/repo/tree/feature/x"; a.URL != want {
+		t.Errorf("url = %q, want %q", a.URL, want)
 	}
-	if want := domain.BranchDedupKey(registerOctoRepo(t, stores), "refs/heads/feature/x"); a.DedupKey != want {
+	if want := domain.BranchPushDedupKey(conversationID, repoID, "refs/heads/feature/x", "abc123"); a.DedupKey != want {
 		t.Errorf("dedup_key = %q, want %q", a.DedupKey, want)
 	}
 	if a.ConversationID != conversationID || a.OrgID != runmode.LocalDefaultOrgID || a.TeamID != runmode.LocalDefaultTeamID {
@@ -132,8 +152,8 @@ func TestGitPushRecorder_RecordsBranch(t *testing.T) {
 		SHA string `json:"sha"`
 		New bool   `json:"new"`
 	}
-	if err := json.Unmarshal([]byte(a.DetailsJSON), &d); err != nil {
-		t.Fatalf("details_json %q: %v", a.DetailsJSON, err)
+	if err := json.Unmarshal([]byte(a.DetailJSON), &d); err != nil {
+		t.Fatalf("detail_json %q: %v", a.DetailJSON, err)
 	}
 	if d.SHA != "abc123" || !d.New {
 		t.Errorf("details = %+v, want sha=abc123 new=true", d)
@@ -143,33 +163,35 @@ func TestGitPushRecorder_RecordsBranch(t *testing.T) {
 func TestGitPushRecorder_SkipsNonBranchAndMalformed(t *testing.T) {
 	stores, conversationID := newRecorderStores(t)
 	info := recorderInfo(conversationID)
-	rec := gitPushRecorder(agenthost.NewLocal(stores, info), info)
+	rec := gitPushRecorder(agenthost.NewLocal(stores, info))
 
-	// A tag isn't a branch; a 3-segment repo path isn't owner/repo. Both make
-	// NewBranchDeliverable return ok=false, so the recorder skips them silently.
+	// A tag isn't a branch; a 3-segment repo path isn't owner/repo. The
+	// recorder skips both silently, landed or refused.
 	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/tags/v1", NewSHA: "abc", Created: false, Status: 200})
 	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo/extra", Ref: "refs/heads/main", NewSHA: "abc", Created: false, Status: 200})
+	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/tags/v2", NewSHA: "abc", Created: false, Status: 403})
 
-	arts, _, err := stores.Deliverables.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
+	acts, _, err := stores.ExternalActions.ListByOrgSystem(context.Background(), runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{})
 	if err != nil {
-		t.Fatalf("ListByConversation: %v", err)
+		t.Fatalf("ListByOrgSystem: %v", err)
 	}
-	if len(arts) != 0 {
-		t.Fatalf("got %d deliverables, want 0 (tag + malformed repo are skipped)", len(arts))
+	if len(acts) != 0 {
+		t.Fatalf("got %d ledger rows, want 0 (tags + malformed repo are skipped)", len(acts))
 	}
+	pushRows(t, stores, conversationID)
 }
 
 // TestGitPushRecorder_RefusedPushRecordsAuditOnly pins the outcome split: a
-// push the upstream refused (non-2xx) must NOT mint a branch deliverable —
-// deliverables track only work that landed — but must leave a branch_push_failed
-// external-action audit row carrying the attempt's sha and HTTP status, so the
-// audit log never omits an attempted external write. A subsequent successful
-// push of the same ref then lands the deliverable and the branch_pushed row as
-// usual (the failure row, keyed for that one act, can't swallow it).
+// push the upstream refused (non-2xx) must NOT leave a branch_pushed row —
+// that row records only a push that landed — but must leave a
+// branch_push_failed audit row carrying the attempt's sha and HTTP status, so
+// the audit log never omits an attempted external write. A subsequent
+// successful push of the same ref then lands the branch_pushed row as usual
+// (the failure row, keyed for that one act, can't swallow it).
 func TestGitPushRecorder_RefusedPushRecordsAuditOnly(t *testing.T) {
 	stores, conversationID := newRecorderStores(t)
 	info := recorderInfo(conversationID)
-	rec := gitPushRecorder(agenthost.NewLocal(stores, info), info)
+	rec := gitPushRecorder(agenthost.NewLocal(stores, info))
 	ctx := context.Background()
 
 	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/heads/feature/x", NewSHA: "abc123", Created: true, Status: 403})
@@ -204,61 +226,42 @@ func TestGitPushRecorder_RefusedPushRecordsAuditOnly(t *testing.T) {
 		t.Errorf("detail = %+v, want sha=abc123 new=true http_status=403", d)
 	}
 
-	// The retry that lands: same (run, ref, sha), now a 2xx — the deliverable and
-	// the success audit row both appear despite the earlier failure.
+	// The retry that lands: same (run, ref, sha), now a 2xx — the success
+	// audit row appears despite the earlier failure.
 	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/heads/feature/x", NewSHA: "abc123", Created: true, Status: 200})
-	arts, _, err = stores.Deliverables.ListByConversation(ctx, runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
-	if err != nil {
-		t.Fatalf("ListByConversation after retry: %v", err)
-	}
-	if len(arts) != 1 {
-		t.Fatalf("got %d deliverables after the successful retry, want 1", len(arts))
-	}
-	pushed, _, err := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Action: domain.ActionBranchPushed})
-	if err != nil {
-		t.Fatalf("ListByOrgSystem (branch_pushed): %v", err)
-	}
-	if len(pushed) != 1 {
+	if pushed := pushRows(t, stores, conversationID); len(pushed) != 1 {
 		t.Fatalf("got %d branch_pushed actions after the retry, want 1 (the failure row must not swallow it)", len(pushed))
 	}
 }
 
-// TestGitPushRecorder_DedupConvergesWithHook proves the proxy backstop and the
-// pre-push hook converge on one row: recording the same branch twice (as the
-// hook then the proxy would for a single push) upserts in place — updating the
-// volatile head — rather than minting a second deliverable.
+// TestGitPushRecorder_DedupConvergesWithHook proves the proxy and the pre-push
+// hook converge on one row: the same push observed twice (as the hook then the
+// proxy would for a single push) is one branch_pushed row, while a push of
+// another commit to the same ref is a row of its own.
 func TestGitPushRecorder_DedupConvergesWithHook(t *testing.T) {
 	stores, conversationID := newRecorderStores(t)
 	info := recorderInfo(conversationID)
-	rec := gitPushRecorder(agenthost.NewLocal(stores, info), info)
+	rec := gitPushRecorder(agenthost.NewLocal(stores, info))
 
 	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/heads/main", NewSHA: "aaa", Created: true, Status: 200})
+	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/heads/main", NewSHA: "aaa", Created: true, Status: 200})
+	if acts := pushRows(t, stores, conversationID); len(acts) != 1 {
+		t.Fatalf("got %d branch_pushed rows for one push observed twice, want 1", len(acts))
+	}
 	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/heads/main", NewSHA: "bbb", Created: false, Status: 200})
-
-	arts, _, err := stores.Deliverables.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
-	if err != nil {
-		t.Fatalf("ListByConversation: %v", err)
-	}
-	if len(arts) != 1 {
-		t.Fatalf("got %d deliverables, want 1 (same dedup_key must upsert)", len(arts))
-	}
-	var d struct {
-		SHA string `json:"sha"`
-	}
-	_ = json.Unmarshal([]byte(arts[0].DetailsJSON), &d)
-	if d.SHA != "bbb" {
-		t.Errorf("details sha after re-record = %q, want bbb", d.SHA)
+	if acts := pushRows(t, stores, conversationID); len(acts) != 2 {
+		t.Fatalf("got %d branch_pushed rows after a push of another commit, want 2", len(acts))
 	}
 }
 
 // TestGitPushRecorder_RejectedRefInsideA200 is the refusal GitHub reports in
 // the body of a successful POST: the ref's report-status line is "ng". The
-// HTTP status says 200, and the recorder must still leave no deliverable and a
-// branch_push_failed row carrying GitHub's reason and message.
+// HTTP status says 200, and the recorder must still leave no branch_pushed row
+// and a branch_push_failed row carrying GitHub's reason and message.
 func TestGitPushRecorder_RejectedRefInsideA200(t *testing.T) {
 	stores, conversationID := newRecorderStores(t)
 	info := recorderInfo(conversationID)
-	rec := gitPushRecorder(agenthost.NewLocal(stores, info), info)
+	rec := gitPushRecorder(agenthost.NewLocal(stores, info))
 	ctx := context.Background()
 
 	rec(ctx, gitproxy.PushedRef{
@@ -318,7 +321,7 @@ func TestGitPushRecorder_RejectedRefInsideA200(t *testing.T) {
 func TestGitPushRecorder_FailureDetailOmitsEmpty(t *testing.T) {
 	stores, conversationID := newRecorderStores(t)
 	info := recorderInfo(conversationID)
-	rec := gitPushRecorder(agenthost.NewLocal(stores, info), info)
+	rec := gitPushRecorder(agenthost.NewLocal(stores, info))
 	ctx := context.Background()
 
 	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/heads/feature/x", NewSHA: "abc123", Status: 403})
@@ -369,7 +372,7 @@ func TestGitPushRecorder_NamesTheTipsSigner(t *testing.T) {
 	commitsigner.SetMeterProviderForTest(t, sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
 
 	info := recorderInfo(conversationID)
-	rec := gitPushRecorder(agenthost.NewLocal(stores, info), info)
+	rec := gitPushRecorder(agenthost.NewLocal(stores, info))
 	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/heads/signed", NewSHA: signedTip, Created: true, Status: 200})
 	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/heads/unsigned", NewSHA: unsignedTip, Created: true, Status: 200})
 	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/heads/refused", NewSHA: unsignedTip, Created: true, Status: 403})
@@ -451,7 +454,7 @@ func TestGitPushRecorder_StampsTheSignedTipForThePostPushCheck(t *testing.T) {
 	landed, refused := signature(landedTip), signature(refusedTip)
 
 	info := recorderInfo(conversationID)
-	rec := gitPushRecorder(agenthost.NewLocal(stores, info), info)
+	rec := gitPushRecorder(agenthost.NewLocal(stores, info))
 	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/heads/signed", NewSHA: landedTip, Created: true, Status: 200})
 	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/heads/refused", NewSHA: refusedTip, Created: true, Status: 200, Rejected: true})
 	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/heads/unsigned", NewSHA: "2222222222222222222222222222222222222222", Created: true, Status: 200})
@@ -514,7 +517,7 @@ func TestGitPushRecorder_CountsAMultiRunsPushesByItsSealedSigner(t *testing.T) {
 			info := recorderInfo(conversationID)
 			host := agenthost.NewLocal(stores, info)
 			host.SetSealedCommitSigner(c.sealed)
-			rec := gitPushRecorder(host, info)
+			rec := gitPushRecorder(host)
 			rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/heads/signed-" + string(c.sealed), NewSHA: signedTip, Created: true, Status: 200})
 			rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", RepositoryID: "1", Ref: "refs/heads/unsigned-" + string(c.sealed), NewSHA: unsignedTip, Created: true, Status: 200})
 

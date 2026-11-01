@@ -1,8 +1,7 @@
 // Package reconcile keeps the deliverables table in sync with external GitHub
-// state — webhook-independent, both modes (TFAC-464). It is self-sufficient: it
-// owns its fetches (RefreshPRs for PR + review state, a ref-existence probe for
-// branches) rather than leaning on the tracker, whose snapshots aren't a
-// reliable source (no branch discovery, throttled PR refreshes).
+// state — webhook-independent, both modes. It is self-sufficient: it owns its
+// fetch (RefreshPRs for PR + review state) rather than leaning on the tracker,
+// whose snapshots aren't a reliable source (throttled PR refreshes).
 //
 // The work splits into two tiers over one shared Reconciler:
 //
@@ -44,14 +43,13 @@ type clientResolver interface {
 //
 // The resolver's clients reach the org's current GitHub host and no other, so
 // only deliverables recorded on that host (their scope) are reconciled. Another
-// host's pull request or branch is not where those clients look, and a branch
-// missing there would read as deleted.
+// host's pull request is not where those clients look.
 type Reconciler struct {
 	resolver     clientResolver
 	deliverables db.DeliverableStore
 	actions      db.ExternalActionStore // read for the pr_created rows the backstop works from
 	entities     db.EntityStore         // read for the pull request entity a deliverable is about
-	repos        db.RepositoryStore     // read for the registry row a deliverable's repository is
+	repos        db.RepositoryStore     // read for the registry row a deliverable's pull request is in
 	orgs         db.OrgsStore           // read for the org's current GitHub host
 	ws           *websocket.Hub         // nil-safe: broadcasts are skipped when unset (tests)
 	// prResolved runs after a pull request's draft → open transition commits.
@@ -193,7 +191,7 @@ func (rc *Reconciler) BackfillPRDeliverables(ctx context.Context, orgID string) 
 		addNodeID(nodeIDsByOwner, owner, act.NodeID)
 	}
 
-	for _, owner := range ownerUnion(nodeIDsByOwner, nil) {
+	for _, owner := range sortedOwners(nodeIDsByOwner) {
 		client, err := rc.resolver.ClientFor(ctx, orgID, owner)
 		if err != nil {
 			reconcileLog.WarnContext(ctx, "backstop: resolve github client failed; skipping owner this pass",
@@ -295,8 +293,8 @@ func (rc *Reconciler) recordBackfilledPR(ctx context.Context, orgID, host string
 
 // Reconcile refreshes each deliverable in arts on the org's current GitHub host
 // against live GitHub and applies any state transition: PR
-// draft/open/merged/closed, review submitted/dismissed, branch deleted. A
-// deliverable recorded on another host is skipped (see Reconciler). Each
+// draft/open/merged/closed, review submitted/dismissed. A deliverable recorded
+// on another host is skipped (see Reconciler). Each
 // transition broadcasts over the WS hub (as
 // deliverable_updated on the owning conversation, so the conversation view's
 // deliverable-derived surface refreshes), and a draft pull request that stops
@@ -305,8 +303,8 @@ func (rc *Reconciler) recordBackfilledPR(ctx context.Context, orgID, host string
 //
 // Best-effort per deliverable: a single GitHub or write failure is logged and
 // skipped, never aborting the rest. GitHub work is grouped by repo OWNER —
-// RefreshPRs / BranchesExist key off a per-owner credential — and batched, so a
-// cycle is a handful of GraphQL calls regardless of deliverable count.
+// RefreshPRs keys off a per-owner credential — and batched, so a cycle is a
+// handful of GraphQL calls regardless of deliverable count.
 func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain.Deliverable) ([]domain.Deliverable, error) {
 	if len(arts) == 0 {
 		return nil, nil
@@ -317,56 +315,38 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 	}
 
 	// Pass 1 — group the GitHub fetches by owner. PR and review deliverables both
-	// refresh from a PR node id (stored in details); branch deliverables probe a
-	// ref. The owner is the registry row's current one, read by id: through
-	// the pull request's entity for a pull request or review, through the key
-	// for a branch. A retired row's name is another repository's now, so its
-	// deliverables are left as they stand. A deliverable missing its handle (no
-	// node id, no repository) can't be refreshed and is left for a later cycle
-	// once a writer fills it in.
+	// refresh from a PR node id (stored in details). The owner is the registry
+	// row's current one, read by id through the pull request's entity. A
+	// retired row's name is another repository's now, so its deliverables are
+	// left as they stand. A deliverable missing its handle (no node id, no
+	// repository) can't be refreshed and is left for a later cycle once a
+	// writer fills it in.
 	reads := newRegistryReads(rc)
 	prNodeIDsByOwner := map[string]map[string]bool{}
-	branchRefsByOwner := map[string][]github.BranchRef{}
-	branchRefs := map[string]github.BranchRef{} // deliverable id → the ref probed for it
 	for _, a := range arts {
-		switch a.Kind {
-		case domain.DeliverableKindPullRequest, domain.DeliverableKindReview:
-			nodeID := deliverablePRNodeID(a)
-			if nodeID == "" {
-				continue
-			}
-			pr, err := db.ResolveDeliverablePullRequest(ctx, orgID, a, reads.entity, reads.repository)
-			if err != nil {
-				if !errors.Is(err, db.ErrDeliverableNamesNoPullRequest) {
-					reconcileLog.WarnContext(ctx, "resolve deliverable's pull request failed; skipping it this cycle",
-						"org", orgID, "deliverable", a.ID, "error", err)
-				}
-				continue
-			}
-			if pr.Retired {
-				continue
-			}
-			addNodeID(prNodeIDsByOwner, pr.Owner, nodeID)
-		case domain.DeliverableKindBranch:
-			ref, ok, err := branchProbe(ctx, orgID, a, reads.repository)
-			if err != nil {
-				reconcileLog.WarnContext(ctx, "resolve branch deliverable's repository failed; skipping it this cycle",
-					"org", orgID, "deliverable", a.ID, "error", err)
-				continue
-			}
-			if ok {
-				branchRefs[a.ID] = ref
-				branchRefsByOwner[ref.Owner] = append(branchRefsByOwner[ref.Owner], ref)
-			}
+		nodeID := deliverablePRNodeID(a)
+		if nodeID == "" {
+			continue
 		}
+		pr, err := db.ResolveDeliverablePullRequest(ctx, orgID, a, reads.entity, reads.repository)
+		if err != nil {
+			if !errors.Is(err, db.ErrDeliverableNamesNoPullRequest) {
+				reconcileLog.WarnContext(ctx, "resolve deliverable's pull request failed; skipping it this cycle",
+					"org", orgID, "deliverable", a.ID, "error", err)
+			}
+			continue
+		}
+		if pr.Retired {
+			continue
+		}
+		addNodeID(prNodeIDsByOwner, pr.Owner, nodeID)
 	}
 
-	// Pass 2 — one fetch per owner (PRs + branches), tolerant of a per-owner
-	// credential/network failure (skip that owner's deliverables this cycle). PR
-	// node ids are globally unique, so snapshots merge safely across owners.
+	// Pass 2 — one fetch per owner, tolerant of a per-owner credential/network
+	// failure (skip that owner's deliverables this cycle). PR node ids are
+	// globally unique, so snapshots merge safely across owners.
 	snapshots := map[string]domain.PRSnapshot{}
-	branchExists := map[github.BranchRef]bool{}
-	for _, owner := range ownerUnion(prNodeIDsByOwner, branchRefsByOwner) {
+	for _, owner := range sortedOwners(prNodeIDsByOwner) {
 		client, err := rc.resolver.ClientFor(ctx, orgID, owner)
 		if err != nil {
 			reconcileLog.WarnContext(ctx, "resolve github client failed; skipping owner this cycle",
@@ -382,16 +362,6 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 			} else {
 				for k, v := range snaps {
 					snapshots[k] = v
-				}
-			}
-		}
-		if refs := branchRefsByOwner[owner]; len(refs) > 0 {
-			ex, err := client.BranchesExist(ctx, refs)
-			if err != nil {
-				reconcileLog.WarnContext(ctx, "branch existence check failed", "org", orgID, "owner", owner, "count", len(refs), "error", err)
-			} else {
-				for k, v := range ex {
-					branchExists[k] = v
 				}
 			}
 		}
@@ -414,7 +384,7 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 	var transitioned []domain.Deliverable
 	resolvedConversations := map[string]bool{}
 	for _, a := range arts {
-		newState, ok := nextState(a, snapshots, branchRefs, branchExists)
+		newState, ok := nextState(a, snapshots)
 		if !ok || newState == a.State {
 			continue
 		}
@@ -501,11 +471,9 @@ func (rc *Reconciler) broadcast(orgID string, a domain.Deliverable) {
 
 // nextState computes the deliverable's reconciled state from the fetched GitHub
 // data, returning ok=false when there's no confident answer (snapshot missing,
-// review not yet surfaced, branch not probed or existence unknown) so the
-// caller leaves the row untouched. branchRefs is the ref probed for each
-// branch deliverable, by deliverable id. A returned state equal to the current one
-// is a no-op.
-func nextState(a domain.Deliverable, snapshots map[string]domain.PRSnapshot, branchRefs map[string]github.BranchRef, branchExists map[github.BranchRef]bool) (string, bool) {
+// review not yet surfaced) so the caller leaves the row untouched. A returned
+// state equal to the current one is a no-op.
+func nextState(a domain.Deliverable, snapshots map[string]domain.PRSnapshot) (string, bool) {
 	switch a.Kind {
 	case domain.DeliverableKindPullRequest:
 		d, _ := domain.ParsePRDeliverableDetails(a.DetailsJSON)
@@ -522,20 +490,6 @@ func nextState(a domain.Deliverable, snapshots map[string]domain.PRSnapshot, bra
 			return "", false
 		}
 		return reviewState(snap, a.ExternalID)
-
-	case domain.DeliverableKindBranch:
-		ref, ok := branchRefs[a.ID]
-		if !ok {
-			return "", false
-		}
-		exists, known := branchExists[ref]
-		if !known {
-			return "", false // unknown (repo inaccessible) — never mark deleted on a non-answer
-		}
-		if exists {
-			return domain.DeliverableStateBranchPushed, true // still there — no-op
-		}
-		return domain.DeliverableStateBranchDeleted, true
 	}
 	return "", false
 }
@@ -647,48 +601,6 @@ func (r *registryReads) repository(ctx context.Context, orgID, id string) (*doma
 	return row, nil
 }
 
-// branchProbe returns the ref a branch deliverable's existence is probed at: its
-// branch, in the repository its key's registry row (domain.BranchDedupKey) is
-// named now. A stored key that names its repository by owner/repo carries no
-// row and is probed at its target. ok=false when there is nothing to probe: a
-// retired row, whose name is another repository's now; a row that no longer
-// exists; or a malformed deliverable.
-func branchProbe(ctx context.Context, orgID string, a domain.Deliverable, repository func(ctx context.Context, orgID, id string) (*domain.Repository, error)) (github.BranchRef, bool, error) {
-	repositoryID, keyed := domain.BranchDeliverableRepositoryID(a)
-	if !keyed {
-		ref, ok := branchRefOf(a)
-		return ref, ok, nil
-	}
-	branch, ok := strings.CutPrefix(a.ExternalID, "refs/heads/")
-	if !ok || branch == "" {
-		return github.BranchRef{}, false, nil
-	}
-	row, err := repository(ctx, orgID, repositoryID)
-	if err != nil {
-		return github.BranchRef{}, false, err
-	}
-	if row == nil || row.RetiredAt != nil {
-		return github.BranchRef{}, false, nil
-	}
-	return github.BranchRef{Owner: row.Owner, Repo: row.Repo, Branch: branch}, true, nil
-}
-
-// branchRefOf derives the GitHub coordinates of a branch deliverable from its
-// Target (owner/repo) and ExternalID (refs/heads/<branch>), for a row whose
-// key carries no registry row (branchProbe). ok=false when either is
-// malformed — the row is skipped rather than probed against a guessed ref.
-func branchRefOf(a domain.Deliverable) (github.BranchRef, bool) {
-	parts := strings.SplitN(a.Target, "/", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return github.BranchRef{}, false
-	}
-	branch, ok := strings.CutPrefix(a.ExternalID, "refs/heads/")
-	if !ok || branch == "" {
-		return github.BranchRef{}, false
-	}
-	return github.BranchRef{Owner: parts[0], Repo: parts[1], Branch: branch}, true
-}
-
 func addNodeID(m map[string]map[string]bool, owner, id string) {
 	if m[owner] == nil {
 		m[owner] = map[string]bool{}
@@ -708,18 +620,11 @@ func sortedKeys(set map[string]bool) []string {
 	return out
 }
 
-// ownerUnion returns every distinct owner across the PR and branch work maps,
-// sorted for deterministic per-owner iteration.
-func ownerUnion(prByOwner map[string]map[string]bool, branchByOwner map[string][]github.BranchRef) []string {
-	seen := map[string]bool{}
+// sortedOwners returns the owners the PR work map holds, sorted for
+// deterministic per-owner iteration.
+func sortedOwners(prByOwner map[string]map[string]bool) []string {
+	out := make([]string, 0, len(prByOwner))
 	for o := range prByOwner {
-		seen[o] = true
-	}
-	for o := range branchByOwner {
-		seen[o] = true
-	}
-	out := make([]string, 0, len(seen))
-	for o := range seen {
 		out = append(out, o)
 	}
 	sort.Strings(out)

@@ -31,7 +31,7 @@ func seedConversationDeliverable(t *testing.T, s *Server, conversationID string,
 
 // TestHandleAgentDeliverables pins the conversation-scoped deliverable read:
 // every kind a conversation produced, with its coordinates and details parsed,
-// an object for a PR and null for a detail-less comment.
+// an object for a PR and null for a detail-less review.
 func TestHandleAgentDeliverables(t *testing.T) {
 	s := newTestServer(t)
 	conversationID := seedSteerConversation(t, s.db, "arts", dbtest.SeedConcluded)
@@ -39,12 +39,12 @@ func TestHandleAgentDeliverables(t *testing.T) {
 	pr := seedConversationDeliverable(t, s, conversationID, domain.NewPullRequestDeliverable(
 		"octo/repo", 42, "PR_node", "feature/x", "main",
 		"https://github.com/octo/repo/pull/42", "Add thing", "Body.", true))
-	comment := seedConversationDeliverable(t, s, conversationID, domain.Deliverable{
-		Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindComment,
+	review := seedConversationDeliverable(t, s, conversationID, domain.Deliverable{
+		Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindReview,
 		Target: "octo/repo#42", ExternalID: "555",
-		URL:      "https://github.com/octo/repo/pull/42#issuecomment-555",
-		State:    domain.DeliverableStateCommentPosted,
-		DedupKey: domain.ObjectKey("github", "comment", "555", ""),
+		URL:      "https://github.com/octo/repo/pull/42#pullrequestreview-555",
+		State:    domain.DeliverableStateReviewSubmitted,
+		DedupKey: domain.ReviewDedupKey("PR_node", conversationID),
 	})
 
 	page := decodeList[map[string]any](t, doJSON(t, s, http.MethodPost,
@@ -75,16 +75,16 @@ func TestHandleAgentDeliverables(t *testing.T) {
 		t.Errorf("PR created_at missing: %v", prJSON["created_at"])
 	}
 
-	commentJSON, ok := byID[comment.ID]
+	reviewJSON, ok := byID[review.ID]
 	if !ok {
-		t.Fatalf("comment deliverable %s missing from response", comment.ID)
+		t.Fatalf("review deliverable %s missing from response", review.ID)
 	}
-	if commentJSON["kind"] != "comment" {
-		t.Errorf("comment kind = %v", commentJSON["kind"])
+	if reviewJSON["kind"] != "review" {
+		t.Errorf("review kind = %v", reviewJSON["kind"])
 	}
 	// A detail-less deliverable serializes details as null — key present, value nil.
-	if v, present := commentJSON["details"]; !present || v != nil {
-		t.Errorf("comment details = %v (present=%v), want null", v, present)
+	if v, present := reviewJSON["details"]; !present || v != nil {
+		t.Errorf("review details = %v (present=%v), want null", v, present)
 	}
 }
 
@@ -95,8 +95,8 @@ func TestHandleAgentDeliverables_CorruptDetails(t *testing.T) {
 	s := newTestServer(t)
 	conversationID := seedSteerConversation(t, s.db, "corrupt", dbtest.SeedConcluded)
 	art := seedConversationDeliverable(t, s, conversationID, domain.Deliverable{
-		Provider: "github", Kind: "comment", Target: "octo/repo#1",
-		State: domain.DeliverableStateCommentPosted, DedupKey: "corrupt1",
+		Provider: "github", Kind: "review", Target: "octo/repo#1",
+		State: domain.DeliverableStateReviewSubmitted, DedupKey: "corrupt1",
 	})
 	if _, err := s.db.Exec(`UPDATE deliverables SET details_json='{not valid json' WHERE id=?`, art.ID); err != nil {
 		t.Fatalf("corrupt details: %v", err)
@@ -124,9 +124,9 @@ func TestHandleAgentDeliverables_Pages(t *testing.T) {
 	var ids []string
 	for i := 0; i < 3; i++ {
 		d := seedConversationDeliverable(t, s, conversationID, domain.Deliverable{
-			Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindComment,
-			Target: "octo/repo#1", State: domain.DeliverableStateCommentPosted,
-			DedupKey: domain.ObjectKey("github", "comment", strconv.Itoa(100+i), ""),
+			Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindPullRequest,
+			Target: "octo/repo#" + strconv.Itoa(100+i), State: domain.DeliverableStatePROpen,
+			DedupKey: domain.PullRequestDedupKey("PR_" + strconv.Itoa(100+i)),
 		})
 		ids = append(ids, d.ID)
 	}
@@ -187,8 +187,8 @@ func TestConversationResponse_HasUnresolved(t *testing.T) {
 		"octo/repo", 7, "PR_node", "feature/x", "main",
 		"https://github.com/octo/repo/pull/7", "T", "B", true))
 	seedConversationDeliverable(t, s, conversationID, domain.Deliverable{
-		Provider: "github", Kind: "comment", Target: "octo/repo#7",
-		State: domain.DeliverableStateCommentPosted, DedupKey: "pk1",
+		Provider: "github", Kind: "review", Target: "octo/repo#7",
+		State: domain.DeliverableStateReviewSubmitted, DedupKey: "pk1",
 	})
 
 	m := readConversation(t, s, conversationID)

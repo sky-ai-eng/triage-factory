@@ -11,11 +11,10 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
-	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// runRecordPush upserts a `branch` deliverable for one pushed ref. Invoked by
-// the pre-push hook, once per non-delete ref. Best-effort: a recording
+// runRecordPush records the branch_pushed ledger row for one pushed ref.
+// Invoked by the pre-push hook, once per non-delete ref. Best-effort: a recording
 // failure is reported on stderr and returns so the hook (which also guards
 // with `|| true`) never blocks the push. Only a malformed invocation (a bug
 // in the hook) exits non-zero, to surface the bug.
@@ -34,9 +33,9 @@ func runRecordPush(host agenthost.Client, args []string) {
 	if *remote == "" || *ref == "" || *sha == "" {
 		// --sha is required, not just --remote/--ref: the commit SHA is part
 		// of the durable "what landed" record (it's the branch's pushed head
-		// in details_json), so an empty one would store a meaningless
-		// deliverable. The hook always supplies it for a real push; an empty
-		// value means a malformed invocation.
+		// in the row's detail and its key), so an empty one would store a
+		// meaningless row. The hook always supplies it for a real push; an
+		// empty value means a malformed invocation.
 		fmt.Fprintln(os.Stderr, "hook record-push: --remote, --ref, and --sha are required")
 		os.Exit(2)
 	}
@@ -52,9 +51,9 @@ func runRecordPush(host agenthost.Client, args []string) {
 
 	// Gate the remote on the org's OWN GitHub host — github.com, a GHES host, or
 	// a GHEC data-residency host — so a push to an unrelated remote (gitlab, a
-	// personal fork elsewhere) isn't recorded as an org branch deliverable. The
-	// deliverable sink re-anchors the recorded link to this same host, so a GHES
-	// org's branch link is correct end-to-end; the two resolve identically.
+	// personal fork elsewhere) isn't recorded as an org branch push. The
+	// recorded link is built on this same host, so a GHES org's branch link is
+	// correct end-to-end; the two resolve identically.
 	// An unresolvable base (orgGitHubHost returns "") falls back to a
 	// github.com-only gate, preserving the historical behavior on a read miss.
 	owner, repo, ok := parseRemoteOwnerRepo(*remote, orgGitHubHost(ctx, host))
@@ -65,17 +64,11 @@ func runRecordPush(host agenthost.Client, args []string) {
 		return
 	}
 
-	// Build through the shared constructor so the hook and the git-proxy
-	// receive-pack backstop (TFAC-467) land on the same deduped row. A
-	// non-branch ref (tag, etc.) returns ok=false — skip it cleanly, since
-	// the hook forwards every non-delete ref and can't know the namespace
-	// policy. Not an error.
-	deliverable, ok := domain.NewBranchDeliverable(owner+"/"+repo, *ref, *sha, *isNew)
-	if !ok {
-		return
-	}
-
-	if _, err := host.UpsertDeliverable(ctx, deliverable); err != nil {
+	// The host builds the row through the same constructor the git proxy's
+	// capture does, so the two land on the same deduped row. It records
+	// nothing for a non-branch ref (tag, etc.): the hook forwards every
+	// non-delete ref and can't know the namespace policy.
+	if err := host.RecordBranchPush(ctx, owner+"/"+repo, *ref, *sha, *isNew); err != nil {
 		fmt.Fprintf(os.Stderr, "hook record-push: record branch %s: %v\n", *ref, err)
 		return // best-effort: never fail the push
 	}
@@ -119,8 +112,8 @@ func orgGitHubHost(ctx context.Context, host agenthost.Client) string {
 // exactly owner/repo on a recognized host (the caller treats that as a
 // best-effort skip).
 //
-// Host gating: a branch deliverable is a GitHub entity, so a remote that isn't the
-// org's GitHub host (gitlab.com/group/repo, a personal fork elsewhere) must NOT
+// Host gating: a branch push is recorded against the org's GitHub, so a remote
+// that isn't the org's GitHub host (gitlab.com/group/repo, a personal fork elsewhere) must NOT
 // be recorded. baseHost is the org's resolved GitHub host — github.com, a GHES
 // host, or a GHEC data-residency host; a remote is accepted when its host
 // matches it (or is a loopback/private proxy address). An empty baseHost (the

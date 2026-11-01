@@ -50,9 +50,7 @@ type ExternalAction struct {
 	// an action with no team context (a dashboard board-drag on an org-wide PR) →
 	// SQL NULL. Backs the team-scoped read.
 	TeamID string `json:"team_id,omitempty"`
-	// Provider is the external system: github | jira (the Deliverable provider
-	// consts). A branch push is a github action even though its deliverable provider
-	// is "git".
+	// Provider is the external system: one of the Provider* consts.
 	Provider string `json:"provider"`
 	// Scope is the provider namespace the acted-on object lives in, as on a
 	// Deliverable (ExternalObjectScope): the GitHub host, the Jira site, the
@@ -243,8 +241,8 @@ const (
 	// report-status — branch protection, a ruleset, a pre-receive hook — or
 	// a fatal error the remote sent instead of a report; nothing landed).
 	// Recorded by the git proxy's outcome capture so the audit log never
-	// omits an attempted external write, while the branch deliverable is
-	// deliberately NOT written (deliverables track only work that exists).
+	// omits an attempted external write, while no branch_pushed row is
+	// written (that row records only a push that landed).
 	// detail_json carries {sha, new, http_status, reason, remote_message},
 	// the last two only when the response reported them. No natural key
 	// (each act's key is its own; see ExternalAction.DedupKey): each failed
@@ -509,10 +507,10 @@ func ExternalActionTypes() []string {
 // row.
 //
 // repository is the pushed repository's registry row id, which both observers
-// key the branch deliverable on (BranchDeliverableRepositoryID), or, for a push to a
-// repository with no registry row, the name its deliverable was recorded under:
-// with no row there is no id, and a name keeps two such repositories apart.
-// An id holds no '/', so the two never collide.
+// resolve from the id GitHub answers for the repository, or, for a push to a
+// repository with no registry row, the name the push was recorded under: with
+// no row there is no id, and a name keeps two such repositories apart. An id
+// holds no '/', so the two never collide.
 //
 // This is one of the three actions with a deterministic natural key (the others
 // are EgressDenialDedupKey and CommitSignBudgetDedupKey); every other action's
@@ -599,8 +597,8 @@ type ExternalActionListOpts struct {
 // teardown: both build their rows here, so the caller names it), actorUserID
 // is the human who authorized it (empty for an autonomous one),
 // team_id is the deliverable's team, and the object coordinates come from the
-// deliverable: the entity it is about (art.EntityID), or, for a branch, the
-// registry row its key names. from/to carry the lifecycle transition
+// deliverable: the entity of the pull request it is about (art.EntityID).
+// from/to carry the lifecycle transition
 // (draft→open, pending→submitted, …). credential is the org credential the
 // write is made under, classified by the caller before it opens whatever
 // transaction this row lands in. The row names the object action changes
@@ -632,9 +630,6 @@ func DeliverableAction(art *Deliverable, performedBy, actorUserID, action, from,
 		ActorUserID:    actorUserID,
 		PerformedBy:    performedBy,
 		Credential:     credential,
-	}
-	if act.EntityID == "" {
-		act.RepositoryID, _ = BranchDeliverableRepositoryID(*art)
 	}
 	key := ""
 	kind := ActionObjectKind(action)

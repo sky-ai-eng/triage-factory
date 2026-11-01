@@ -112,12 +112,12 @@ func TestJiraIssueResource(t *testing.T) {
 		if strings.ContainsAny(resource[:strings.LastIndex(resource, "/")], ":/") {
 			t.Errorf("JiraIssueResource(%q) = %q: the escaped site holds a separator", site, resource)
 		}
-		key := ObjectKey(ProviderJira, DeliverableKindComment, resource, "20001")
-		gotSite, gotID, ok := DeliverableEntityIdentity(Deliverable{Provider: ProviderJira, DedupKey: key})
+		key := ObjectKey(ProviderJira, ObjectKindComment, resource, "20001")
+		gotSite, gotID, ok := ObjectKeyEntityIdentity(ProviderJira, key)
 		if !ok || gotSite != site || gotID != "10042" {
-			t.Errorf("DeliverableEntityIdentity(%q) = (%q, %q, %v), want (%q, 10042)", key, gotSite, gotID, ok, site)
+			t.Errorf("ObjectKeyEntityIdentity(%q) = (%q, %q, %v), want (%q, 10042)", key, gotSite, gotID, ok, site)
 		}
-		if want := ObjectKey(ProviderJira, DeliverableKindComment, EntityResource("jira", site, "10042"), "20001"); key != want {
+		if want := ObjectKey(ProviderJira, ObjectKindComment, EntityResource("jira", site, "10042"), "20001"); key != want {
 			t.Errorf("%q is not keyed on the entity's resource (%q)", key, want)
 		}
 	}
@@ -127,34 +127,30 @@ func TestJiraIssueResource(t *testing.T) {
 	if r := JiraIssueResource("https://acme.atlassian.net", ""); r != "" {
 		t.Errorf("no id = %q, want empty", r)
 	}
-	// A deliverable keyed on the issue key names no identity.
-	if _, _, ok := DeliverableEntityIdentity(Deliverable{Provider: ProviderJira, DedupKey: "jira:issue:SKY-1"}); ok {
-		t.Error("a key-shaped Jira dedup key read as an identity")
+	// A key spelling the issue key names no identity.
+	if _, _, ok := ObjectKeyEntityIdentity(ProviderJira, "jira:issue:SKY-1"); ok {
+		t.Error("a key-shaped Jira object key read as an identity")
 	}
-	// A GitHub pull request's identity is the node id its key names, and a
-	// review's is its pull request's. A key that still spells the repository's
-	// name names none, whatever the row's node_id column holds.
+	// A GitHub pull request deliverable's pull request is the node id its key
+	// names, and a review's is its pull request's. A key that still spells the
+	// repository's name names none, whatever the row's node_id column holds.
 	pr := Deliverable{Provider: ProviderGitHub, Kind: DeliverableKindPullRequest, DedupKey: "github:pull_request:o/r#1", NodeID: "PR_kwDO1"}
-	if _, _, ok := DeliverableEntityIdentity(pr); ok {
+	if _, ok := DeliverablePullRequestNodeID(pr); ok {
 		t.Error("a GitHub pull request keyed on its repository's name read as an identity")
 	}
 	pr.DedupKey = PullRequestDedupKey("PR_kwDO1")
-	if scope, id, ok := DeliverableEntityIdentity(pr); !ok || scope != "" || id != "PR_kwDO1" {
-		t.Errorf("github pull request identity = (%q, %q, %v), want its node id", scope, id, ok)
+	if id, ok := DeliverablePullRequestNodeID(pr); !ok || id != "PR_kwDO1" {
+		t.Errorf("github pull request identity = (%q, %v), want its node id", id, ok)
 	}
 	review := Deliverable{Provider: ProviderGitHub, Kind: DeliverableKindReview, DedupKey: ReviewDedupKey("PR_kwDO1", "conv-9"), NodeID: "PRR_kwDO9"}
-	if _, id, ok := DeliverableEntityIdentity(review); !ok || id != "PR_kwDO1" {
+	if id, ok := DeliverablePullRequestNodeID(review); !ok || id != "PR_kwDO1" {
 		t.Errorf("github review identity = (%q, %v), want its pull request's node id", id, ok)
 	}
 	review.DedupKey = "github:review:o/r#1:conv-9"
-	if _, _, ok := DeliverableEntityIdentity(review); ok {
+	if _, ok := DeliverablePullRequestNodeID(review); ok {
 		t.Error("a GitHub review keyed on its repository's name read as an identity")
 	}
-	branch := Deliverable{Provider: ProviderGit, Kind: DeliverableKindBranch, DedupKey: BranchDedupKey("repo-uuid", "refs/heads/x")}
-	if _, _, ok := DeliverableEntityIdentity(branch); ok {
-		t.Error("a branch read as an entity identity")
-	}
-	if _, id, ok := DeliverableEntityIdentity(Deliverable{Provider: ProviderLinear, DedupKey: "linear:comment:uuid-1:c-1"}); !ok || id != "uuid-1" {
+	if _, id, ok := ObjectKeyEntityIdentity(ProviderLinear, "linear:comment:uuid-1:c-1"); !ok || id != "uuid-1" {
 		t.Errorf("linear identity = (%q, %v), want uuid-1", id, ok)
 	}
 	// Two sites' issue 10042 are two resources.

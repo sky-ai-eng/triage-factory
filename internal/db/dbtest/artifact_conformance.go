@@ -712,12 +712,8 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 		posted := store(s.f.TeamID, review("55"))
 		newerPR := store(s.f.TeamID, pr(s.pr.ID))
 		theirPR := store(s.f.OtherTeamID, pr(s.pr.ID))
-		store(s.f.TeamID, pr(other.ID))       // another entity
-		store(s.f.TeamID, review("56"))       // another review
-		store(s.f.TeamID, domain.Deliverable{ // a branch on the entity matches nothing
-			Kind: domain.DeliverableKindBranch, EntityID: s.pr.ID, Target: "octo/api", ExternalID: "refs/heads/fix",
-			State: domain.DeliverableStateBranchPushed,
-		})
+		store(s.f.TeamID, pr(other.ID)) // another entity
+		store(s.f.TeamID, review("56")) // another review
 
 		ids := func(ds []domain.Deliverable) []string {
 			out := make([]string, len(ds))

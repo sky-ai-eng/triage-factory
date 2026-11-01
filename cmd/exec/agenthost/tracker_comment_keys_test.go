@@ -76,7 +76,7 @@ func TestRecordedComments_AreFoundUnderTheTrackersKeys(t *testing.T) {
 					t.Fatalf("JiraAddComment: %v", err)
 				}
 				return stores, func(scope string) string {
-					return domain.ObjectKey(domain.ProviderJira, domain.DeliverableKindComment,
+					return domain.ObjectKey(domain.ProviderJira, domain.ObjectKindComment,
 						domain.EntityResource(domain.ProviderJira, scope, "10005"), "10042")
 				}
 			},
@@ -91,7 +91,7 @@ func TestRecordedComments_AreFoundUnderTheTrackersKeys(t *testing.T) {
 					t.Fatalf("LinearAddComment: %v", err)
 				}
 				return stores, func(string) string {
-					return domain.ObjectKey(domain.ProviderLinear, domain.DeliverableKindComment, fakeLinearIssueUUID, fakeLinearCommentID)
+					return domain.ObjectKey(domain.ProviderLinear, domain.ObjectKindComment, fakeLinearIssueUUID, fakeLinearCommentID)
 				}
 			},
 		},

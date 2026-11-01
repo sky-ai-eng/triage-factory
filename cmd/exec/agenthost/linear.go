@@ -198,8 +198,8 @@ func (c *LocalClient) LinearTransition(ctx context.Context, issue, state string)
 	if err := client.TransitionIssue(ctx, got.ID, target.ID); err != nil {
 		return linearclient.WorkflowState{}, err
 	}
-	c.recordLinearIssue(ctx, got, domain.ActionIssueTransitioned, domain.DeliverableStateIssueUpdated,
-		got.State.Name, target.Name, deliverableDetailsJSON(map[string]any{"state": target.Name}))
+	c.recordLinearIssue(ctx, got, domain.ActionIssueTransitioned,
+		got.State.Name, target.Name, actionDetailJSON(map[string]any{"state": target.Name}))
 	return target, nil
 }
 
@@ -247,8 +247,8 @@ func (c *LocalClient) LinearAssign(ctx context.Context, issue, userID string) (_
 	if err := client.AssignIssue(ctx, got.ID, user.ID); err != nil {
 		return linearclient.User{}, err
 	}
-	c.recordLinearIssue(ctx, got, domain.ActionIssueAssigned, domain.DeliverableStateIssueUpdated, "", "",
-		deliverableDetailsJSON(map[string]any{"assignee": map[string]any{"id": user.ID, "name": user.Name}}))
+	c.recordLinearIssue(ctx, got, domain.ActionIssueAssigned, "", "",
+		actionDetailJSON(map[string]any{"assignee": map[string]any{"id": user.ID, "name": user.Name}}))
 	return user, nil
 }
 
@@ -265,8 +265,8 @@ func (c *LocalClient) LinearUnassign(ctx context.Context, issue string) (err err
 	if err := client.UnassignIssue(ctx, got.ID); err != nil {
 		return err
 	}
-	c.recordLinearIssue(ctx, got, domain.ActionIssueUpdated, domain.DeliverableStateIssueUpdated, "", "",
-		deliverableDetailsJSON(map[string]any{"assignee": nil}))
+	c.recordLinearIssue(ctx, got, domain.ActionIssueUpdated, "", "",
+		actionDetailJSON(map[string]any{"assignee": nil}))
 	return nil
 }
 
@@ -309,7 +309,7 @@ func (c *LocalClient) LinearCreateIssue(ctx context.Context, req LinearCreateIss
 	if err != nil {
 		return nil, err
 	}
-	c.recordLinearIssue(ctx, created, domain.ActionIssueCreated, domain.DeliverableStateIssueCreated, "", "", "")
+	c.recordLinearIssue(ctx, created, domain.ActionIssueCreated, "", "", "")
 	return created, nil
 }
 
@@ -354,8 +354,8 @@ func (c *LocalClient) LinearUpdateIssue(ctx context.Context, issue string, edit 
 	if err := client.UpdateIssue(ctx, got.ID, fields); err != nil {
 		return err
 	}
-	c.recordLinearIssue(ctx, got, domain.ActionIssueUpdated, domain.DeliverableStateIssueUpdated, "", "",
-		deliverableDetailsJSON(map[string]any{"fields": linearEditedFieldNames(edit)}))
+	c.recordLinearIssue(ctx, got, domain.ActionIssueUpdated, "", "",
+		actionDetailJSON(map[string]any{"fields": linearEditedFieldNames(edit)}))
 	return nil
 }
 
@@ -379,8 +379,8 @@ func (c *LocalClient) LinearSetParent(ctx context.Context, issue, parent string)
 	if err := client.SetParent(ctx, got.ID, parentIssue.ID); err != nil {
 		return err
 	}
-	c.recordLinearIssue(ctx, got, domain.ActionIssueUpdated, domain.DeliverableStateIssueUpdated, "", "",
-		deliverableDetailsJSON(map[string]any{"parent": parentIssue.Identifier}))
+	c.recordLinearIssue(ctx, got, domain.ActionIssueUpdated, "", "",
+		actionDetailJSON(map[string]any{"parent": parentIssue.Identifier}))
 	return nil
 }
 
@@ -400,8 +400,8 @@ func (c *LocalClient) LinearSetPriority(ctx context.Context, issue string, prior
 	if err := client.SetPriority(ctx, got.ID, priority); err != nil {
 		return err
 	}
-	c.recordLinearIssue(ctx, got, domain.ActionIssueUpdated, domain.DeliverableStateIssueUpdated, "", "",
-		deliverableDetailsJSON(map[string]any{"priority": priority}))
+	c.recordLinearIssue(ctx, got, domain.ActionIssueUpdated, "", "",
+		actionDetailJSON(map[string]any{"priority": priority}))
 	return nil
 }
 
@@ -617,8 +617,8 @@ func validateLinearPriority(p int) error {
 	return nil
 }
 
-// linearEditedFieldNames lists which fields an edit touched, for the deliverable's
-// details_json — the names only, in a stable order.
+// linearEditedFieldNames lists which fields an edit touched, for the ledger
+// row's detail_json — the names only, in a stable order.
 func linearEditedFieldNames(e LinearIssueEdit) []string {
 	names := []string{}
 	if e.Title != nil {
@@ -639,84 +639,71 @@ func linearEditedFieldNames(e LinearIssueEdit) []string {
 	return names
 }
 
-// --- linear deliverable recording ---
+// --- linear recording ---
 //
-// Every Linear write an agent makes lands one `deliverables` row and its
-// external-action audit row in the same write, under the org's Linear service
-// identity, exactly as the Jira writes do: issue create and the in-place
-// edits collapse onto the issue's one row, and each comment is a row of its
-// own. Recording is best-effort and runs after the write took effect, so it
-// can never fail or roll back the action it observed. Reads record nothing.
+// Every Linear write an agent makes lands one external-action audit row, under
+// the org's Linear service identity, exactly as the Jira writes do: an issue
+// create or edit names the issue, a comment names itself. Recording is
+// best-effort and runs after the write took effect, so it can never fail or
+// roll back the action it observed. Reads record nothing.
 //
 // Unlike Jira, no read-back follows the write: every verb resolves the issue
 // before writing (to reach its team, or to write against its UUID), so the
-// UUID the rows are keyed on and the identifier they display are already in
-// hand.
+// UUID the rows name the issue by and the identifier they display are already
+// in hand.
 
-// recordLinearIssue upserts the single `issue` deliverable for issue, keyed on its
-// UUID (linear:issue:<uuid>) — never its identifier, which changes when the
-// issue moves team or its team's key is renamed. target is the identifier and
-// url the issue's link, both of which an entity rename moves. fromState /
-// toState carry a transition's workflow states, empty otherwise.
-func (c *LocalClient) recordLinearIssue(ctx context.Context, issue *linearclient.Issue, action, state, fromState, toState, detailsJSON string) {
+// recordLinearIssue records the ledger row for a mutation of issue, naming it
+// by its UUID (linear:issue:<uuid>) — never its identifier, which changes when
+// the issue moves team or its team's key is renamed. target is the identifier
+// and url the issue's link. fromState / toState carry a transition's workflow
+// states, empty otherwise.
+func (c *LocalClient) recordLinearIssue(ctx context.Context, issue *linearclient.Issue, action, fromState, toState, detailsJSON string) {
 	if issue == nil || issue.ID == "" {
 		return
 	}
-	a := domain.Deliverable{
-		Kind:        domain.DeliverableKindIssue,
-		Target:      issue.Identifier,
-		ExternalID:  issue.ID,
-		URL:         issue.URL,
-		State:       state,
-		DedupKey:    domain.IssueObjectKey(domain.ProviderLinear, "", issue.ID),
-		DetailsJSON: detailsJSON,
-	}
-	c.upsertLinearDeliverable(ctx, &a, linearAction(a, action, fromState, toState), issue.Team.ID)
+	act := linearAction(issue, action, issue.ID, fromState, toState, detailsJSON)
+	act.SetObject(domain.ObjectKindIssue, domain.IssueObjectKey(domain.ProviderLinear, "", issue.ID))
+	c.recordLinearAction(ctx, act, issue.Team.ID)
 }
 
-// recordLinearComment upserts a `comment` deliverable keyed on the issue's UUID
-// with the comment's id as its anchor (linear:comment:<issue uuid>:<comment
-// id>). Its url is the issue's: the comment is reached from there.
+// recordLinearComment records the issue_comment_posted row for a comment on
+// issue, naming it by the issue's UUID and the comment's id
+// (linear:comment:<issue uuid>:<comment id>). Its url is the issue's: the
+// comment is reached from there. A missing comment id records the row naming
+// no object.
 func (c *LocalClient) recordLinearComment(ctx context.Context, issue *linearclient.Issue, commentID, body string) {
-	if issue == nil || issue.ID == "" || commentID == "" {
+	if issue == nil || issue.ID == "" {
 		return
 	}
-	a := domain.Deliverable{
-		Kind:        domain.DeliverableKindComment,
-		Target:      issue.Identifier,
-		ExternalID:  commentID,
-		URL:         issue.URL,
-		State:       domain.DeliverableStateCommentPosted,
-		DedupKey:    domain.ObjectKey(domain.ProviderLinear, domain.DeliverableKindComment, issue.ID, commentID),
-		DetailsJSON: deliverableDetailsJSON(map[string]any{"body": deliverableBodySnippet(body)}),
+	act := linearAction(issue, domain.ActionIssueCommentPosted, commentID, "", "",
+		actionDetailJSON(map[string]any{"body": actionBodySnippet(body)}))
+	if commentID != "" {
+		act.SetObject(domain.ObjectKindComment, domain.ObjectKey(domain.ProviderLinear, domain.ObjectKindComment, issue.ID, commentID))
 	}
-	c.upsertLinearDeliverable(ctx, &a, linearAction(a, domain.ActionIssueCommentPosted, "", ""), issue.Team.ID)
+	c.recordLinearAction(ctx, act, issue.Team.ID)
 }
 
-// upsertLinearDeliverable stamps the provider onto a and writes it with its
-// external-action row through the shared recording funnel (RecordExternalWrite),
-// which logs and swallows a failure. linearTeamID is the team of the issue the
-// write touched, which the funnel's touch creates the issue's entity with.
-func (c *LocalClient) upsertLinearDeliverable(ctx context.Context, a *domain.Deliverable, act *domain.ExternalAction, linearTeamID string) {
-	a.Provider = domain.ProviderLinear
-	c.rt.Record(ctx, a, act, domain.EntityContainer{LinearTeamID: linearTeamID}, domain.GitHubIdentity{})
+// recordLinearAction writes act through the shared recording funnel
+// (RecordExternalWrite), which logs and swallows a failure. linearTeamID is the
+// team of the issue the write touched, which the funnel's touch creates the
+// issue's entity with.
+func (c *LocalClient) recordLinearAction(ctx context.Context, act *domain.ExternalAction, linearTeamID string) {
+	c.rt.Record(ctx, nil, act, domain.EntityContainer{LinearTeamID: linearTeamID}, domain.GitHubIdentity{})
 }
 
-// linearAction builds the external-action row for a Linear write, under the
-// org's Linear service identity, naming the issue or comment the deliverable
-// is (issueObject).
-func linearAction(a domain.Deliverable, action, from, to string) *domain.ExternalAction {
-	act := &domain.ExternalAction{
+// linearAction builds the external-action row for a Linear write on issue,
+// under the org's Linear service identity. externalID is the id of the object
+// the write changed: the issue's UUID, or a comment's id.
+func linearAction(issue *linearclient.Issue, action, externalID, from, to, detailJSON string) *domain.ExternalAction {
+	return &domain.ExternalAction{
 		Provider:   domain.ProviderLinear,
 		Action:     action,
-		Target:     a.Target,
-		ExternalID: a.ExternalID,
-		URL:        a.URL,
+		Target:     issue.Identifier,
+		ExternalID: externalID,
+		URL:        issue.URL,
 		FromState:  from,
 		ToState:    to,
 		Credential: domain.CredentialLinearOrg,
-		DetailJSON: a.DetailsJSON,
+		DetailJSON: detailJSON,
 	}
-	act.SetObject(issueObject(a))
-	return act
 }

@@ -102,12 +102,28 @@ func newGithubRecordingClientConn(t *testing.T, ghURL string, eventTriggered boo
 	return conn, stores, info, client
 }
 
-// TestLocalClient_GithubAddComment_RecordsDeliverable pins a standalone comment
-// landing one `comment` deliverable with the full coordinates the add path knows —
-// target owner/repo#N, the comment id and node id, its html_url, state posted,
-// deduped on github:comment:<id>, linked to the pull request's entity —
-// across both write paths.
-func TestLocalClient_GithubAddComment_RecordsDeliverable(t *testing.T) {
+// commentRows is the conversation's ledger rows of the given action, failing
+// the test when the writes left a deliverable.
+func commentRows(t *testing.T, stores db.Stores, info ConversationInfo, action string) []domain.ExternalAction {
+	t.Helper()
+	if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 0 {
+		t.Errorf("comment writes left deliverables %+v, want none", arts)
+	}
+	var out []domain.ExternalAction
+	for _, a := range listExternalActions(t, stores) {
+		if a.Action == action {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// TestLocalClient_GithubAddComment_RecordsItsRow pins a standalone comment
+// landing one comment_posted row with the full coordinates the add path knows —
+// target owner/repo#N, the comment id, its html_url, naming the comment by
+// github:comment:<id>, linked to the pull request's entity — and no
+// deliverable, across both write paths.
+func TestLocalClient_GithubAddComment_RecordsItsRow(t *testing.T) {
 	for _, eventTriggered := range []bool{true, false} {
 		name := "manual"
 		if eventTriggered {
@@ -124,17 +140,15 @@ func TestLocalClient_GithubAddComment_RecordsDeliverable(t *testing.T) {
 			if id != 777 {
 				t.Fatalf("comment id = %d, want 777", id)
 			}
-			arts := listConversationDeliverables(t, stores, info.ConversationID)
-			if len(arts) != 1 {
-				t.Fatalf("want 1 deliverable, got %d: %+v", len(arts), arts)
+			rows := commentRows(t, stores, info, domain.ActionCommentPosted)
+			if len(rows) != 1 {
+				t.Fatalf("want 1 comment_posted row, got %d: %+v", len(rows), rows)
 			}
-			a := arts[0]
-			if a.Provider != domain.ProviderGitHub || a.Kind != domain.DeliverableKindComment ||
-				a.Target != "octo/repo#1" || a.ExternalID != "777" ||
+			a := rows[0]
+			if a.Provider != domain.ProviderGitHub || a.Target != "octo/repo#1" || a.ExternalID != "777" ||
 				a.URL != "https://github.com/octo/repo/pull/1#issuecomment-777" ||
-				a.State != domain.DeliverableStateCommentPosted || a.DedupKey != "github:comment:777" ||
-				a.NodeID != "IC_kw777" {
-				t.Errorf("comment deliverable mismatch: %+v", a)
+				a.ObjectKind != domain.ObjectKindComment || a.ObjectKey != "github:comment:777" {
+				t.Errorf("comment row mismatch: %+v", a)
 			}
 			if a.ConversationID != info.ConversationID || a.TeamID != runmode.LocalDefaultTeamID {
 				t.Errorf("attribution mismatch: conversation=%q team=%q", a.ConversationID, a.TeamID)
@@ -147,12 +161,10 @@ func TestLocalClient_GithubAddComment_RecordsDeliverable(t *testing.T) {
 	}
 }
 
-// TestLocalClient_GithubCommentLifecycle_DedupsAndRetires pins that add →
-// comment-update → comment-delete stay on one row keyed on the comment id: the
-// update leaves it as it is (still posted), the delete retires it to the
-// deleted state — and the delete (which carries only the id, not the PR
-// number) does not blank the target/url the add stamped.
-func TestLocalClient_GithubCommentLifecycle_DedupsAndRetires(t *testing.T) {
+// TestLocalClient_GithubCommentLifecycle_NamesOneComment pins that add →
+// comment-update → comment-delete each leave their own row, all naming the
+// one comment by its number, so the comment is one object.
+func TestLocalClient_GithubCommentLifecycle_NamesOneComment(t *testing.T) {
 	gh := startFakeGitHubComments(t)
 	stores, info, client := newGithubRecordingClient(t, gh.URL, true)
 	ctx := context.Background()
@@ -164,41 +176,32 @@ func TestLocalClient_GithubCommentLifecycle_DedupsAndRetires(t *testing.T) {
 	if err := client.GithubUpdateComment(ctx, "octo", "repo", id, "edited take"); err != nil {
 		t.Fatalf("GithubUpdateComment: %v", err)
 	}
-
-	arts := listConversationDeliverables(t, stores, info.ConversationID)
-	if len(arts) != 1 {
-		t.Fatalf("update should leave the one row, got %d deliverables: %+v", len(arts), arts)
-	}
-	if arts[0].State != domain.DeliverableStateCommentPosted || arts[0].Target != "octo/repo#1" ||
-		arts[0].URL != "https://github.com/octo/repo/pull/1#issuecomment-777" {
-		t.Errorf("after update the row drifted: %+v", arts[0])
-	}
-
 	if err := client.GithubDeleteComment(ctx, "octo", "repo", id); err != nil {
 		t.Fatalf("GithubDeleteComment: %v", err)
 	}
-	arts = listConversationDeliverables(t, stores, info.ConversationID)
-	if len(arts) != 1 {
-		t.Fatalf("delete should retire the same row, got %d deliverables: %+v", len(arts), arts)
+
+	if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 0 {
+		t.Errorf("deliverables = %+v, want none", arts)
 	}
-	a := arts[0]
-	if a.State != domain.DeliverableStateCommentDeleted || a.DedupKey != "github:comment:777" {
-		t.Errorf("delete did not retire in place: %+v", a)
+	actions := map[string]int{}
+	for _, a := range listExternalActions(t, stores) {
+		actions[a.Action]++
+		if a.ObjectKind != domain.ObjectKindComment || a.ObjectKey != "github:comment:777" {
+			t.Errorf("%s row names %q %q, want comment 777", a.Action, a.ObjectKind, a.ObjectKey)
+		}
 	}
-	// The id-only delete must inherit, not blank, the add's coordinates.
-	if a.Target != "octo/repo#1" || a.URL != "https://github.com/octo/repo/pull/1#issuecomment-777" || a.ExternalID != "777" ||
-		a.NodeID != "IC_kw777" {
-		t.Errorf("retire blanked the add's stable coordinates: %+v", a)
+	want := map[string]int{domain.ActionCommentPosted: 1, domain.ActionCommentEdited: 1, domain.ActionCommentDeleted: 1}
+	if !maps.Equal(actions, want) {
+		t.Errorf("audit actions = %v, want %v", actions, want)
 	}
 }
 
-// TestLocalClient_GithubCommentUpdateDelete_ReviewComment_RetiresItsRow pins
+// TestLocalClient_GithubCommentUpdateDelete_ReviewComment_NamesTheReply pins
 // comment-update / comment-delete on a review comment TF posted, which they
 // reach by falling back to the pulls/comments endpoint when the id isn't a
-// conversation comment. The reply's row, keyed in the review comments'
-// numbering, is left as it is by the edit and retired by the delete, with the
-// reply's coordinates kept.
-func TestLocalClient_GithubCommentUpdateDelete_ReviewComment_RetiresItsRow(t *testing.T) {
+// conversation comment. Their rows name the reply in the review comments'
+// numbering, as the reply's own row does.
+func TestLocalClient_GithubCommentUpdateDelete_ReviewComment_NamesTheReply(t *testing.T) {
 	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		// The issues-comments endpoint 404s (id is not a top-level comment);
@@ -226,33 +229,21 @@ func TestLocalClient_GithubCommentUpdateDelete_ReviewComment_RetiresItsRow(t *te
 	if _, err := client.GithubReplyToComment(ctx, "octo", "repo", 1, 555, "a thread reply"); err != nil {
 		t.Fatalf("GithubReplyToComment: %v", err)
 	}
-	posted := listConversationDeliverables(t, stores, info.ConversationID)
-	if len(posted) != 1 || posted[0].DedupKey != domain.GitHubCommentKey(domain.GitHubReviewComment, 999) {
-		t.Fatalf("deliverables after the reply = %+v, want the reply's one row", posted)
-	}
-
 	if err := client.GithubUpdateComment(ctx, "octo", "repo", 999, "edit a review comment"); err != nil {
 		t.Fatalf("update via the review fallback must still succeed: %v", err)
 	}
-	arts := listConversationDeliverables(t, stores, info.ConversationID)
-	if len(arts) != 1 || arts[0].ID != posted[0].ID || arts[0].State != domain.DeliverableStateCommentPosted {
-		t.Errorf("deliverables after the edit = %+v, want the reply's row still posted", arts)
-	}
-
 	if err := client.GithubDeleteComment(ctx, "octo", "repo", 999); err != nil {
 		t.Fatalf("delete via the review fallback must still succeed: %v", err)
 	}
-	arts = listConversationDeliverables(t, stores, info.ConversationID)
-	if len(arts) != 1 {
-		t.Fatalf("the delete should retire the reply's row, got %d deliverables: %+v", len(arts), arts)
-	}
-	if a := arts[0]; a.ID != posted[0].ID || a.State != domain.DeliverableStateCommentDeleted ||
-		a.NodeID != "PRRC_kw999" || a.Target != "octo/repo#1" || a.DetailsJSON != `{"in_reply_to":555}` {
-		t.Errorf("review comment after delete = %+v, want the reply's row deleted with its coordinates kept", a)
+	if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 0 {
+		t.Errorf("deliverables = %+v, want none", arts)
 	}
 	actions := map[string]int{}
 	for _, a := range listExternalActions(t, stores) {
 		actions[a.Action]++
+		if a.ObjectKind != domain.ObjectKindComment || a.ObjectKey != domain.GitHubCommentKey(domain.GitHubReviewComment, 999) {
+			t.Errorf("%s row names %q %q, want review comment 999", a.Action, a.ObjectKind, a.ObjectKey)
+		}
 	}
 	want := map[string]int{domain.ActionCommentPosted: 1, domain.ActionReviewCommentEdited: 1, domain.ActionReviewCommentDeleted: 1}
 	if !maps.Equal(actions, want) {
@@ -260,11 +251,11 @@ func TestLocalClient_GithubCommentUpdateDelete_ReviewComment_RetiresItsRow(t *te
 	}
 }
 
-// TestLocalClient_GithubReplyToComment_RecordsDeliverable pins a thread reply's
-// own `comment` deliverable: keyed in the review comments' numbering, carrying
-// the reply's node id, its discussion link, the PR-shaped target,
-// and the comment it answers in its details.
-func TestLocalClient_GithubReplyToComment_RecordsDeliverable(t *testing.T) {
+// TestLocalClient_GithubReplyToComment_RecordsItsRow pins a thread reply's own
+// comment_posted row: naming the reply in the review comments' numbering,
+// carrying its discussion link, the PR-shaped target, and the comment it
+// answers in its detail.
+func TestLocalClient_GithubReplyToComment_RecordsItsRow(t *testing.T) {
 	gh := startFakeGitHubComments(t)
 	stores, info, client := newGithubRecordingClient(t, gh.URL, false)
 
@@ -275,24 +266,23 @@ func TestLocalClient_GithubReplyToComment_RecordsDeliverable(t *testing.T) {
 	if id != 777 {
 		t.Fatalf("reply id = %d, want 777", id)
 	}
-	arts := listConversationDeliverables(t, stores, info.ConversationID)
-	if len(arts) != 1 {
-		t.Fatalf("want 1 deliverable, got %d: %+v", len(arts), arts)
+	rows := commentRows(t, stores, info, domain.ActionCommentPosted)
+	if len(rows) != 1 {
+		t.Fatalf("want 1 comment_posted row, got %d: %+v", len(rows), rows)
 	}
-	a := arts[0]
-	if a.Kind != domain.DeliverableKindComment || a.DedupKey != domain.GitHubCommentKey(domain.GitHubReviewComment, 777) ||
-		a.Target != "octo/repo#1" || a.ExternalID != "777" || a.NodeID != "PRRC_kw777" ||
-		a.URL != gh.URL+"/octo/repo/pull/1#discussion_r777" || a.State != domain.DeliverableStateCommentPosted ||
-		a.DetailsJSON != `{"in_reply_to":555}` {
-		t.Errorf("reply deliverable = %+v", a)
+	a := rows[0]
+	if a.ObjectKind != domain.ObjectKindComment || a.ObjectKey != domain.GitHubCommentKey(domain.GitHubReviewComment, 777) ||
+		a.Target != "octo/repo#1" || a.ExternalID != "777" ||
+		a.URL != gh.URL+"/octo/repo/pull/1#discussion_r777" || a.DetailJSON != `{"in_reply_to":555}` {
+		t.Errorf("reply row = %+v", a)
 	}
 }
 
-// TestLocalClient_GithubComments_SameNumberInBothSpacesAreTwoRows pins that a
+// TestLocalClient_GithubComments_SameNumberInBothSpacesAreTwoObjects pins that a
 // conversation comment and a review comment GitHub happened to number alike are
 // recorded as two comments: the two numberings are separate, so the key names
 // which one a number is in.
-func TestLocalClient_GithubComments_SameNumberInBothSpacesAreTwoRows(t *testing.T) {
+func TestLocalClient_GithubComments_SameNumberInBothSpacesAreTwoObjects(t *testing.T) {
 	gh := startFakeGitHubComments(t)
 	stores, info, client := newGithubRecordingClient(t, gh.URL, true)
 	ctx := context.Background()
@@ -308,11 +298,11 @@ func TestLocalClient_GithubComments_SameNumberInBothSpacesAreTwoRows(t *testing.
 	if commentID != replyID {
 		t.Fatalf("the fake numbered the two %d and %d; the case needs one number", commentID, replyID)
 	}
-	arts := listConversationDeliverables(t, stores, info.ConversationID)
-	if len(arts) != 2 {
-		t.Fatalf("want 2 deliverables for two comments numbered %d, got %d: %+v", commentID, len(arts), arts)
+	rows := commentRows(t, stores, info, domain.ActionCommentPosted)
+	if len(rows) != 2 {
+		t.Fatalf("want 2 rows for two comments numbered %d, got %d: %+v", commentID, len(rows), rows)
 	}
-	keys := map[string]bool{arts[0].DedupKey: true, arts[1].DedupKey: true}
+	keys := map[string]bool{rows[0].ObjectKey: true, rows[1].ObjectKey: true}
 	if !keys[domain.GitHubCommentKey(domain.GitHubIssueComment, 777)] || !keys[domain.GitHubCommentKey(domain.GitHubReviewComment, 777)] {
 		t.Errorf("keys = %v, want one in each numbering", keys)
 	}
@@ -320,8 +310,7 @@ func TestLocalClient_GithubComments_SameNumberInBothSpacesAreTwoRows(t *testing.
 
 // TestLocalClient_GithubUpdateDeleteComment_PersonsComment_LeavesNoDeliverable
 // pins that an edit and a delete of a conversation comment TF never posted
-// leave no deliverable, so a comment row keeps meaning TF posted the comment; the
-// audit ledger records both.
+// leave their audit rows and no deliverable.
 func TestLocalClient_GithubUpdateDeleteComment_PersonsComment_LeavesNoDeliverable(t *testing.T) {
 	for _, eventTriggered := range []bool{true, false} {
 		name := "manual"
@@ -340,7 +329,7 @@ func TestLocalClient_GithubUpdateDeleteComment_PersonsComment_LeavesNoDeliverabl
 				t.Fatalf("GithubDeleteComment: %v", err)
 			}
 			if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 0 {
-				t.Errorf("deliverables = %+v, want none for a comment TF did not post", arts)
+				t.Errorf("deliverables = %+v, want none", arts)
 			}
 			acts := listExternalActions(t, stores)
 			if len(acts) != 2 {
@@ -355,22 +344,28 @@ func TestLocalClient_GithubUpdateDeleteComment_PersonsComment_LeavesNoDeliverabl
 	}
 }
 
-// TestLocalClient_GithubAddComment_NoID_SkipsDeliverable pins that when GitHub's
-// response carries no comment id, the comment still posts (action succeeds) but
-// no deliverable is written — there's no stable key to dedup on.
-func TestLocalClient_GithubAddComment_NoID_SkipsDeliverable(t *testing.T) {
+// TestLocalClient_GithubAddComment_NoID_RecordsTheRowNamingNoObject pins that
+// when GitHub's response carries no comment id, the comment still posts (action
+// succeeds), and its row is recorded naming no object, since there's no stable
+// key to name the comment by, and counted as an unnamed comment.
+func TestLocalClient_GithubAddComment_NoID_RecordsTheRowNamingNoObject(t *testing.T) {
 	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{}`) // POST returns a body with no id
 	}))
 	t.Cleanup(gh.Close)
+	counted := unnamedComments(t)
 
 	stores, info, client := newGithubRecordingClient(t, gh.URL, true)
 	if _, err := client.GithubAddComment(context.Background(), "octo", "repo", 1, "no id back"); err != nil {
 		t.Fatalf("GithubAddComment must succeed even when the id is missing: %v", err)
 	}
-	if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 0 {
-		t.Errorf("expected no deliverable when comment id is empty, got %+v", arts)
+	rows := commentRows(t, stores, info, domain.ActionCommentPosted)
+	if len(rows) != 1 || rows[0].ObjectKind != "" || rows[0].ObjectKey != "" || rows[0].ExternalID != "" {
+		t.Errorf("rows = %+v, want one comment_posted row naming no object", rows)
+	}
+	if got := counted(); got["github/comment_posted"] != 1 || len(got) != 1 {
+		t.Errorf("unnamed comments = %v, want one github/comment_posted", got)
 	}
 }
 
@@ -380,8 +375,8 @@ func TestLocalClient_GithubAddComment_NoID_SkipsDeliverable(t *testing.T) {
 func TestLocalClient_GithubCommentRecordingFailure_DoesNotFailAction(t *testing.T) {
 	gh := startFakeGitHubComments(t)
 	_, _, client := newGithubRecordingClient(t, gh.URL, true)
-	rec := &erroringDeliverables{}
-	client.stores.Deliverables = rec
+	rec := &erroringActions{}
+	client.stores.ExternalActions = rec
 	// The runtime is derived from stores at construction, so a post-construction
 	// swap of the recorder must rebuild it (the DB effects route through c.rt).
 	client.rt = newDirectRuntime(client.stores, client.info)

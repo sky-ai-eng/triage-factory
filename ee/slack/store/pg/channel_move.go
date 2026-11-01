@@ -23,7 +23,7 @@ const channelMoveLockSalt int64 = 0x43484944
 // (lockChannelWrites) until the move commits.
 //
 // References to the channel hold its registry row and need nothing: a thread
-// is found by its channel's row and root ts, and a Slack deliverable's dedup key
+// is found by its channel's row and root ts, and a Slack message's object key
 // names the row and the message's ts. What moves is the row's channel_id and
 // the display values that spell it, which live in tables core owns as well as
 // in the Slack ones; they move in the same transaction, so no display value
@@ -38,9 +38,6 @@ func (s *channelRegistryStore) MoveSystem(ctx context.Context, orgID, oldID, new
 		return slackstore.ChannelMove{To: newID}, nil
 	}
 	var out slackstore.ChannelMove
-	// The deliverables rewritten, by id: the absorb rekeys some, and the target
-	// and permalink move can reach the same ones.
-	deliverables := map[string]bool{}
 	err := inTx(ctx, s.admin, func(q db.Execer) error {
 		if _, err := q.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, $2))`, orgID, channelMoveLockSalt); err != nil {
 			return fmt.Errorf("lock channel move: %w", err)
@@ -61,7 +58,7 @@ func (s *channelRegistryStore) MoveSystem(ctx context.Context, orgID, oldID, new
 			}
 			if absorbed != "" {
 				out.Absorbed = absorbed
-				if err := absorbRegistryRow(ctx, q, orgID, channel, absorbed, &out, deliverables); err != nil {
+				if err := absorbRegistryRow(ctx, q, orgID, channel, absorbed, &out); err != nil {
 					return err
 				}
 			}
@@ -74,10 +71,6 @@ func (s *channelRegistryStore) MoveSystem(ctx context.Context, orgID, oldID, new
 				return err
 			}
 		}
-		if err := moveDeliverables(ctx, q, orgID, channel, oldID, to, deliverables); err != nil {
-			return err
-		}
-		out.Deliverables = len(deliverables)
 		if out.Actions, err = moveActionPointers(ctx, q, orgID, channel, oldID, to); err != nil {
 			return err
 		}
@@ -164,9 +157,8 @@ func registryRowFor(ctx context.Context, q db.Execer, orgID, channelID string) (
 // the new id was sighted, or a team tracked it, before the change arrived)
 // into the channel's row, moves every reference to it onto the channel's row,
 // and deletes it. The absorbed row's workspace is the more recent sighting and
-// is kept when it has one; so is its name. It records what it moved on out,
-// and the deliverables it rekeyed in deliverables.
-func absorbRegistryRow(ctx context.Context, q db.Execer, orgID, channel, absorbed string, out *slackstore.ChannelMove, deliverables map[string]bool) error {
+// is kept when it has one; so is its name. It records what it moved on out.
+func absorbRegistryRow(ctx context.Context, q db.Execer, orgID, channel, absorbed string, out *slackstore.ChannelMove) error {
 	if _, err := q.ExecContext(ctx, `
 		UPDATE slack_channels c SET
 			first_seen_at    = LEAST(c.first_seen_at, a.first_seen_at),
@@ -190,9 +182,6 @@ func absorbRegistryRow(ctx context.Context, q db.Execer, orgID, channel, absorbe
 		UPDATE entities SET slack_channel_id = $2 WHERE org_id = $1 AND slack_channel_id = $3
 	`, orgID, channel, absorbed); err != nil {
 		return fmt.Errorf("move absorbed slack channel's entities: %w", err)
-	}
-	if err := rekeyAbsorbedDeliverables(ctx, q, orgID, channel, absorbed, deliverables); err != nil {
-		return err
 	}
 	if err := rekeyAbsorbedActionObjects(ctx, q, orgID, channel, absorbed); err != nil {
 		return err
@@ -243,72 +232,15 @@ func supersedeDuplicateThreads(ctx context.Context, q db.Execer, orgID, channel,
 	return closed, nil
 }
 
-// rekeyAbsorbedDeliverables rewrites the dedup keys of the Slack deliverables that
-// name the absorbed registry row to name the channel's row, whose messages
-// they are from now on: a later write about the same message resolves to the
-// channel's row and keys on it. A key the channel's row already holds — the
-// same message recorded under both rows before the change arrived — is left
-// as it is, since the two rows were two before the move.
-func rekeyAbsorbedDeliverables(ctx context.Context, q db.Execer, orgID, channel, absorbed string, deliverables map[string]bool) error {
-	rows, err := q.QueryContext(ctx, `
-		SELECT id, dedup_key FROM deliverables
-		WHERE org_id = $1 AND provider = $2 AND scope = $3
-		  AND strpos(dedup_key, ':' || $4 || '/') > 0
-		ORDER BY id
-		FOR UPDATE
-	`, orgID, domain.ProviderSlack, domain.SlackScope, absorbed)
-	if err != nil {
-		return fmt.Errorf("list slack deliverables keyed on the absorbed channel row: %w", err)
-	}
-	type held struct{ id, key string }
-	var found []held
-	for rows.Next() {
-		var h held
-		if err := rows.Scan(&h.id, &h.key); err != nil {
-			rows.Close()
-			return err
-		}
-		found = append(found, h)
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, h := range found {
-		key, ok := slackstore.MoveDeliverableKey(h.key, absorbed, channel)
-		if !ok {
-			continue
-		}
-		var taken bool
-		if err := q.QueryRowContext(ctx, `
-			SELECT EXISTS (SELECT 1 FROM deliverables WHERE org_id = $1 AND scope = $3 AND dedup_key = $2)
-		`, orgID, key, domain.SlackScope).Scan(&taken); err != nil {
-			return fmt.Errorf("check rekeyed deliverable key %s: %w", key, err)
-		}
-		if taken {
-			continue
-		}
-		if _, err := q.ExecContext(ctx, `
-			UPDATE deliverables SET dedup_key = $1, updated_at = now() WHERE org_id = $2 AND id = $3
-		`, key, orgID, h.id); err != nil {
-			return fmt.Errorf("rekey slack deliverable %s: %w", h.id, err)
-		}
-		deliverables[h.id] = true
-	}
-	return nil
-}
-
 // rekeyAbsorbedActionObjects re-points the audit ledger's Slack message
 // objects keyed on the absorbed registry row onto the channel's row, as a fold
 // of two entities re-points entity_id onto the survivor: the message is the
 // channel's from now on, and a later act on it keys on the channel's row. A
 // message recorded under both rows before the change arrived becomes one
-// object, since an object_key, unlike a deliverable's key, is not unique.
+// object, since an object_key is not unique.
 func rekeyAbsorbedActionObjects(ctx context.Context, q db.Execer, orgID, channel, absorbed string) error {
-	from := domain.ObjectKey(domain.ProviderSlack, domain.DeliverableKindMessage, absorbed+"/", "")
-	to := domain.ObjectKey(domain.ProviderSlack, domain.DeliverableKindMessage, channel+"/", "")
+	from := domain.ObjectKey(domain.ProviderSlack, domain.ObjectKindMessage, absorbed+"/", "")
+	to := domain.ObjectKey(domain.ProviderSlack, domain.ObjectKindMessage, channel+"/", "")
 	if _, err := q.ExecContext(ctx, `
 		UPDATE external_actions SET object_key = $5 || substr(object_key, length($4) + 1)
 		WHERE org_id = $1 AND scope = $2 AND object_kind = $3 AND starts_with(object_key, $4)
@@ -418,72 +350,11 @@ func moveThreadKeys(ctx context.Context, q db.Execer, orgID, channel, oldID, new
 	return len(found), nil
 }
 
-// moveDeliverables rewrites the display values of the Slack deliverables naming the
-// channel: the target, which is the key of the thread entity the deliverable is
-// about (deliverables.entity_id) and takes the key moveThreadKeys gave it, and
-// the permalink. A deliverable linked to no entity has no key to take; its
-// target spells the channel id, and moves with it. The dedup key names the
-// channel's registry row and the message's ts, so it does not move. channel
-// is the channel's registry row, "" when it has none. Each deliverable rewritten
-// is added to deliverables.
-func moveDeliverables(ctx context.Context, q db.Execer, orgID, channel, oldID, newID string, deliverables map[string]bool) error {
-	rows, err := q.QueryContext(ctx, `
-		SELECT a.id, a.target, COALESCE(a.url, ''), COALESCE(e.source_id, '')
-		  FROM deliverables a
-		  LEFT JOIN entities e ON e.org_id = a.org_id AND e.id = a.entity_id
-		 WHERE a.org_id = $1 AND a.provider = $2 AND a.scope = $4
-		   AND ((a.entity_id IS NULL AND starts_with(a.target, $3 || '/'))
-		        OR (e.slack_channel_id = NULLIF($5, '')::uuid AND a.target <> e.source_id)
-		        OR strpos(COALESCE(a.url, ''), '/archives/' || $3) > 0)
-		 ORDER BY a.id
-		 FOR UPDATE OF a
-	`, orgID, domain.ProviderSlack, oldID, domain.SlackScope, channel)
-	if err != nil {
-		return fmt.Errorf("list slack deliverables to move: %w", err)
-	}
-	type held struct{ id, target, url, entityKey string }
-	var found []held
-	for rows.Next() {
-		var h held
-		if err := rows.Scan(&h.id, &h.target, &h.url, &h.entityKey); err != nil {
-			rows.Close()
-			return err
-		}
-		found = append(found, h)
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
-	for _, h := range found {
-		target, targetMoved := h.entityKey, h.entityKey != "" && h.entityKey != h.target
-		if h.entityKey == "" {
-			target, targetMoved = slackstore.MoveThreadKey(h.target, oldID, newID)
-		}
-		url, urlMoved := slackstore.MovePermalink(h.url, oldID, newID)
-		if !targetMoved && !urlMoved {
-			continue
-		}
-		if _, err := q.ExecContext(ctx, `
-			UPDATE deliverables SET target = $1, url = NULLIF($2, ''), updated_at = now()
-			WHERE org_id = $3 AND id = $4
-		`, target, url, orgID, h.id); err != nil {
-			return fmt.Errorf("move slack deliverable %s: %w", h.id, err)
-		}
-		deliverables[h.id] = true
-	}
-	return nil
-}
-
 // moveActionPointers moves the audit ledger's pointer for the Slack actions
 // about the channel whose link points into its archive under oldID: those about
 // one of the channel's thread entities (external_actions.entity_id, the entity
 // referencing the channel's registry row), and those linked to no entity, whose
-// link names the channel by the id it moves off, as an unlinked deliverable's
-// target does. Only current_url is written; the pointer's current value is the
+// link names the channel by the id it moves off. Only current_url is written; the pointer's current value is the
 // rewrite base, so successive moves chain. channel is the channel's registry
 // row, "" when it has none.
 func moveActionPointers(ctx context.Context, q db.Execer, orgID, channel, oldID, newID string) (int, error) {

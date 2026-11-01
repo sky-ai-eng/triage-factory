@@ -55,12 +55,11 @@ func newTwoConversationTask(t *testing.T) twoConversationTask {
 }
 
 // push records an accepted push of ref to octo/repo by conversationID, through
-// the git proxy's recorder: the ledger row and the branch deliverable, which
-// stays pinned to the first conversation that pushed the ref.
+// the git proxy's recorder: its branch_pushed ledger row.
 func (f twoConversationTask) push(t *testing.T, conversationID, ref, sha string) {
 	t.Helper()
 	info := recorderInfo(conversationID)
-	gitPushRecorder(agenthost.NewLocal(f.stores, info), info)(context.Background(), gitproxy.PushedRef{
+	gitPushRecorder(agenthost.NewLocal(f.stores, info))(context.Background(), gitproxy.PushedRef{
 		Repo:         "octo/repo",
 		RepositoryID: "1",
 		Ref:          ref,
