@@ -448,6 +448,21 @@ func TestIntegration_RootfsHasPnpm(t *testing.T) {
 	toolchainTest(t, []string{"/usr/bin/pnpm", "--version"}, pnpmVersion)
 }
 
+// TestIntegration_RootfsHasRust builds and runs a fresh cargo project inside
+// the sandbox, which needs rustc, the host target's standard library, and
+// build-base's C linker together, and runs both linters through cargo, which
+// finds them on PATH. Offline: the project has no dependencies, and fetching
+// crates through the egress proxy is the egress interception test's to cover.
+func TestIntegration_RootfsHasRust(t *testing.T) {
+	toolchainTest(t, []string{"/bin/sh", "-c", `set -e
+cd /work
+cargo new --quiet --vcs none hello
+cd hello
+cargo fmt --check
+cargo clippy --quiet --offline
+cargo run --quiet --offline`}, "Hello, world!")
+}
+
 // TestIntegration_ConfigureProxies_InjectsEnv is the
 // sandbox-side proxy wiring test. Asserts:
 //

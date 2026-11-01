@@ -386,21 +386,23 @@ conditions:
    never a fallback to tunneling.
 10. **Every toolchain the rootfs ships trusts the CA**, each through the
     variable it reads (`cell.JailEnv`): `SSL_CERT_FILE` for Go, curl
-    and OpenSSL, `NODE_EXTRA_CA_CERTS` for Node and so npm and pnpm, and
+    and OpenSSL, `NODE_EXTRA_CA_CERTS` for Node and so npm and pnpm,
     `PIP_CERT` for pip, which the rootfs runs from a venv (`python3 -m venv`
-    installs it from the wheel CPython bundles). The list is fixed by an
-    integration test that fetches through the interceptor with each
-    toolchain inside a jail (`TestIntegration_EgressIntercept` in
-    `internal/agentproc`), so a toolchain added to the rootfs without its
+    installs it from the wheel CPython bundles), and `CARGO_HTTP_CAINFO` for
+    cargo. The list is fixed by an integration test that fetches through the
+    interceptor with each toolchain inside a jail
+    (`TestIntegration_EgressIntercept` in `internal/agentproc`), so a
+    toolchain added to the rootfs without its
     variable fails the test. The guardrail prompt forbids disabling
     verification. A toolchain left out fails with certificate errors, and an
     agent's fix for those (`strict-ssl=false`, `--trusted-host`) ends up
     committed to the customer's repository.
 
-**Accepted residual.** For npm and pip, a new dependency's bytes pass
-through TF with only TLS behind them. That stays contained. An install outside
-TF re-fetches from the real registry and checks the lockfile's hash (`npm ci`
-fails with `EINTEGRITY`, pip's hash-checking mode with a mismatch), so a forged
+**Accepted residual.** For npm, pip, and cargo, a new dependency's bytes
+pass through TF with only TLS behind them. That stays contained. An install
+outside TF re-fetches from the real registry and checks the lockfile's hash
+(`npm ci` fails with `EINTEGRITY`, pip's hash-checking mode with a mismatch,
+cargo with `failed to verify the checksum`), so a forged
 package is caught at the first such install, and an unpinned one was never
 recorded. Go is covered even inside the run, because the checksum database's
 key ships with the toolchain. What remains is build output committed to a
@@ -627,7 +629,7 @@ The cases, one per invariant:
 | `FreezeHoldsTheJailStill`, `StopLeavesNothingRunning` | 7 |
 | `MemoryCeilingKillsAreCounted` | 8 — a process grown to twice a 512 MB ceiling is killed, `OOMKills` rises across the call, and the jail and its tool host carry on |
 | `TeardownReleasesTheCell` | 9 — two engagements of one conversation back to back, then a reap |
-| `TrustVariablesNameTheRunsBundle` | 10 — `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS` and `PIP_CERT` each name a file whose hash is that of the bundle the sidecar wrote, which carries a name-constrained CA |
+| `TrustVariablesNameTheRunsBundle` | 10 — `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `PIP_CERT`, and `CARGO_HTTP_CAINFO` each name a file whose hash is that of the bundle the sidecar wrote, which carries a name-constrained CA |
 | `RelaunchAfterTheJailDies` | 11 — a file written to `/work` and one written to `/tmp` are there in the second jail, a heartbeat a background process of the first jail writes into `/work` stops, and the second jail reaches every sidecar endpoint |
 | `AFullTmpEndsNoJail` | 12 — under a 512 MB ceiling the jail writes 1 GB into `/tmp` and keeps answering; a process then grown past the ceiling is killed, `OOMKills` rises, and the jail and its `/tmp` file are still there |
 

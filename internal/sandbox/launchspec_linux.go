@@ -158,9 +158,9 @@ type rootfsVariant struct {
 }
 
 // rootfsCatalog is the broker's curated variant set. "base" is today's
-// toolchain rootfs; its recipe (alpine sha + apkPackages + pnpm) resolves
-// to a content hash via rootfsCacheKey, exactly the name→recipe→hash
-// contract the sandbox-fleet image dimension consumes.
+// toolchain rootfs; its recipe (alpine sha + apkPackages + pnpm + Rust)
+// resolves to a content hash via rootfsCacheKey, exactly the
+// name→recipe→hash contract the sandbox-fleet image dimension consumes.
 var rootfsCatalog = map[string]rootfsVariant{
 	"base": {name: "base", resolve: ensureRootfs},
 }
@@ -290,6 +290,7 @@ var allowedSandboxEnvKeys = map[string]struct{}{
 	"SSL_CERT_FILE":       {},
 	"NODE_EXTRA_CA_CERTS": {},
 	"PIP_CERT":            {},
+	"CARGO_HTTP_CAINFO":   {},
 
 	// Real-gh channel (cell.JailEnv). GH_HOST redirects gh at the
 	// per-run injector; GH_ENTERPRISE_TOKEN is the per-run PLACEHOLDER (never

@@ -5,7 +5,7 @@ The image is fixed and you are not root, so a system package manager (`apk add`,
 
 Whichever ecosystem you are building, leave its registry and toolchain settings as you find them. Some are already aimed at a per-run relay rather than at the public host — Go's `GOPROXY` and `GOTOOLCHAIN` are the ones you are most likely to meet — and repointing one at a public mirror, at a `direct` fetch, or at a pinned local version routes around the provisioned path and lands on a host that is not reachable, which looks like a broken network rather than the misconfiguration it is.
 
-The same goes for certificate verification. Connections to the registries are verified against a certificate bundle this sandbox provides, which `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS` and `PIP_CERT` already name. Never turn verification off (`strict-ssl=false`, `--trusted-host`, `NODE_TLS_REJECT_UNAUTHORIZED=0`, `curl -k`) or point those variables anywhere else: a certificate error here is a misconfiguration to report, and a switched-off check ends up committed to the repository you are working on.
+The same goes for certificate verification. Connections to the registries are verified against a certificate bundle this sandbox provides, which `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `PIP_CERT`, and `CARGO_HTTP_CAINFO` already name. Never turn verification off (`strict-ssl=false`, `--trusted-host`, `NODE_TLS_REJECT_UNAUTHORIZED=0`, `curl -k`) or point those variables anywhere else: a certificate error here is a misconfiguration to report, and a switched-off check ends up committed to the repository you are working on.
 
 Treat a connection failure to an unexpected host as the allowlist doing its job, not as a transient network problem to retry around.
 </isolation>

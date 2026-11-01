@@ -176,7 +176,7 @@ func testTrustVariablesNameTheRunsBundle(t *testing.T, h Harness) {
 	sum := sha256.Sum256(written)
 	want := hex.EncodeToString(sum[:])
 
-	for _, v := range []string{"SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "PIP_CERT"} {
+	for _, v := range []string{"SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "PIP_CERT", "CARGO_HTTP_CAINFO"} {
 		out := strings.TrimSpace(l.sh(t, fmt.Sprintf(`p="${%s:-}"; if [ -z "$p" ]; then echo UNSET; else sha256sum "$p"; fi`, v)))
 		got, _, _ := strings.Cut(out, " ")
 		if got != want {

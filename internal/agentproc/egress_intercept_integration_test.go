@@ -29,7 +29,7 @@ import (
 //
 // SKIP-by-default, like the gh-injector live test. All must hold:
 //
-//	TF_TEST_EGRESS_INTERCEPT_LIVE=1  opt in (it reaches registry.npmjs.org and PyPI)
+//	TF_TEST_EGRESS_INTERCEPT_LIVE=1  opt in (it reaches registry.npmjs.org, PyPI, and crates.io)
 //	runsc on PATH                    gVisor runtime
 //	euid 0                           the sandbox needs CAP_NET_ADMIN / CAP_SYS_ADMIN
 //
@@ -52,7 +52,7 @@ func requireEgressInterceptLive(t *testing.T) {
 
 // interceptToolchainScript runs each toolchain's fetch and prints OK or FAIL
 // per step, with the step's output after a FAIL. The packages are small and
-// long-lived: left-pad for npm and pnpm, six for pip.
+// long-lived: left-pad for npm and pnpm, six for pip, itoa for cargo.
 const interceptToolchainScript = `
 set -u
 cd /work
@@ -64,6 +64,7 @@ step curl curl -fsS -o /dev/null https://registry.npmjs.org/left-pad
 step npm_install sh -c 'mkdir -p /work/npmproj && cd /work/npmproj && printf "{\"name\":\"probe\",\"version\":\"0.0.0\",\"private\":true}" > package.json && npm install --no-fund left-pad@1.3.0 && grep -q "audited\|vulnerabilit" /work/npm_install.log'
 step pnpm_install sh -c 'mkdir -p /work/pnpmproj && cd /work/pnpmproj && printf "{\"name\":\"probe\",\"version\":\"0.0.0\",\"private\":true}" > package.json && pnpm add left-pad@1.3.0'
 step pip_venv sh -c 'python3 -m venv /work/venv && /work/venv/bin/pip install --no-cache-dir six==1.16.0'
+step cargo_fetch sh -c 'mkdir -p /work/cargoproj/src && cd /work/cargoproj && printf "[package]\nname = \"probe\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\nitoa = \"=1.0.11\"\n" > Cargo.toml && : > src/lib.rs && cargo fetch'
 mkdir -p /work/gofetch
 cat > /work/gofetch/main.go <<'EOF'
 package main
@@ -178,7 +179,7 @@ func TestIntegration_EgressIntercept_ToolchainsInTheJail(t *testing.T) {
 		t.Errorf("jail exited with %v", waitErr)
 	}
 
-	for _, step := range []string{"curl", "npm_install", "pnpm_install", "pip_venv", "go_client", "publish_refused"} {
+	for _, step := range []string{"curl", "npm_install", "pnpm_install", "pip_venv", "cargo_fetch", "go_client", "publish_refused"} {
 		if !strings.Contains(transcript, "OK "+step+"\n") {
 			t.Errorf("step %s did not pass in the jail", step)
 		}

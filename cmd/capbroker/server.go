@@ -33,6 +33,16 @@ var callTimeout = 60 * time.Second
 // so tests can shrink it.
 var captureTimeout = 5 * time.Minute
 
+// rootfsBakeTimeout bounds one EnsureRootfs dispatch, AND (mirrored) the
+// client-side budget IPCClient.EnsureRootfs gives the call. A warm cache
+// answers with one stat, but a cold one bakes the whole toolchain rootfs:
+// several hundred megabytes of apk packages and the Rust release over the
+// host's own link, then extraction. That is bounded by bandwidth rather
+// than by a wedged syscall, and a canceled bake starts over from nothing,
+// so a budget the bake cannot fit would fail every launch on the executor.
+// A var (like callTimeout above) so tests can shrink it.
+var rootfsBakeTimeout = 15 * time.Minute
+
 // connIOTimeout bounds a single frame's read/write. A client that never
 // sends a frame, or never drains the reply, is confused or malicious;
 // there's no reason to hold the goroutine open past this.
@@ -209,13 +219,17 @@ func (s *Server) handleConn(conn net.Conn) {
 	// on broker Shutdown (which cancels baseCtx). CaptureRunTree shells
 	// out to git (bundle + full binary diff) against a worktree of
 	// arbitrary size, so it gets captureTimeout rather than the host-op
-	// budget. Every other method is a bounded host operation and keeps
-	// the callTimeout budget.
+	// budget, and EnsureRootfs may bake the rootfs over the network, so it
+	// gets rootfsBakeTimeout. Every other method is a bounded host
+	// operation and keeps the callTimeout budget.
 	ctx := s.baseCtx
 	if req.Method != methodWaitRun {
 		budget := callTimeout
-		if req.Method == methodCaptureRunTree {
+		switch req.Method {
+		case methodCaptureRunTree:
 			budget = captureTimeout
+		case methodEnsureRootfs:
+			budget = rootfsBakeTimeout
 		}
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(s.baseCtx, budget)
