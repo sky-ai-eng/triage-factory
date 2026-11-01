@@ -1107,8 +1107,8 @@ func TestSandboxGitProxyPairs_SharedOrigin(t *testing.T) {
 // TestGitProxyPairs_MergeTitleNamesUpstream drives a real merge of a fetched
 // branch through the rewrite and the shipped prepare-commit-msg hook. Git
 // titles that merge with the URL it fetched from, which the rewrite made the
-// proxy's, and with the TF checkout's local branch; the commit that lands must
-// name neither.
+// proxy's, and with the PR checkout's local branch; the commit that lands must
+// name the upstream URL and the branch the checkout pushes to instead.
 func TestGitProxyPairs_MergeTitleNamesUpstream(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
@@ -1145,17 +1145,18 @@ func TestGitProxyPairs_MergeTitleNamesUpstream(t *testing.T) {
 	work := filepath.Join(dir, "work")
 	git(dir, "clone", "-q", "https://github.com/octo/repo", work)
 	git(work, "switch", "-q", "-c", "triagefactory/conv-1/pr-7")
+	git(work, "config", "remote.origin.push", "refs/heads/triagefactory/conv-1/pr-7:refs/heads/feature-x")
 	git(work, "commit", "-q", "--allow-empty", "-m", "side")
 	git(filepath.Join(dir, "upstream"), "commit", "-q", "--allow-empty", "-m", "second")
 	git(filepath.Join(dir, "upstream"), "push", "-q", "origin", "main")
 	git(work, "fetch", "-q", "origin", "main")
 	git(work, "merge", "-q", "--no-edit", "FETCH_HEAD")
 
-	if got, want := git(work, "log", "-1", "--format=%s"), "Merge branch 'main' of https://github.com/octo/repo"; got != want {
+	if got, want := git(work, "log", "-1", "--format=%s"), "Merge branch 'main' of https://github.com/octo/repo into feature-x"; got != want {
 		t.Errorf("merge title = %q, want %q", got, want)
 	}
 
-	// Only git's closing " into <branch>" is dropped: an authored title that
+	// Only git's closing " into <branch>" is renamed: an authored title that
 	// names the branch mid-sentence keeps every word.
 	git(filepath.Join(dir, "upstream"), "commit", "-q", "--allow-empty", "-m", "third")
 	git(filepath.Join(dir, "upstream"), "push", "-q", "origin", "main")

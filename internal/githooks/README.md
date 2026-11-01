@@ -91,9 +91,10 @@ process in both modes:
 
   1. **Merge titles.** For a merge commit (`git merge`, `git pull`), the
      title names the upstream URL in place of the per-run git proxy address
-     the run's `insteadOf` rewrite resolved the remote to, and drops the
-     ` into <branch>` git ends it with when the current branch is a
-     `triagefactory/` checkout. The two URL bases come from
+     the run's `insteadOf` rewrite resolved the remote to. Its closing
+     ` into <branch>` names the branch a push refspec sends the local branch
+     to, when that branch has another name (a PR checkout's local branch
+     pushes to the pull request's head branch). The two URL bases come from
      `triagefactory.proxyBase` and `triagefactory.upstreamBase`, which the
      rewrite's config block carries.
   2. **Co-author trailer.** On a manual run, appends the

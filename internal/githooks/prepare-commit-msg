@@ -11,11 +11,14 @@
 #     insteadOf rewrite TF puts in its git config. That rewrite's config block
 #     also carries triagefactory.proxyBase and triagefactory.upstreamBase, and
 #     the hook puts the upstream base back in the title. Git also ends the
-#     title with " into <branch>" for the branch HEAD is on, and a TF
-#     checkout's branch is a triagefactory/ name nobody outside the run knows,
-#     so the hook removes that exact ending. A title that only mentions the
-#     branch somewhere else (a `git merge -m` message, say) keeps every word.
-#     A commit that is not a merge is left alone.
+#     title with " into <branch>" for the local branch HEAD is on, and a PR
+#     checkout's local branch is a name nobody outside the run knows: TF
+#     pushes it to the pull request's head branch through an explicit push
+#     refspec. When a push refspec sends the branch to a branch of another
+#     name, the hook names that branch instead. A branch pushed under its own
+#     name has no such mapping and keeps its title, and a title that only
+#     mentions the branch somewhere else (a `git merge -m` message, say)
+#     keeps every word. A commit that is not a merge is left alone.
 #
 #  2. Co-authored-by trailer. Credits the delegating human on MANUAL
 #     delegated-agent runs, so a commit authored by the org's GitHub identity
@@ -54,9 +57,17 @@ if [ "$2" = merge ]; then
 		new=$new$rest
 	fi
 	branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null)
-	case $branch in
-	triagefactory/*) new=${new%" into $branch"} ;;
-	esac
+	if [ -n "$branch" ]; then
+		dest=$(git for-each-ref --format='%(push:remoteref)' "refs/heads/$branch" 2>/dev/null)
+		dest=${dest#refs/heads/}
+		case $new in
+		*" into $branch")
+			if [ -n "$dest" ] && [ "$dest" != "$branch" ]; then
+				new="${new%" into $branch"} into $dest"
+			fi
+			;;
+		esac
+	fi
 	if [ "$new" != "$title" ]; then
 		{ printf '%s\n' "$new"; sed 1d "$f"; } >"$f.tf" && mv "$f.tf" "$f" || rm -f "$f.tf"
 	fi
