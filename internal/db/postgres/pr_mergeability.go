@@ -108,33 +108,43 @@ func probeAfter(delay time.Duration) time.Time {
 	return time.Now().UTC().Add(delay)
 }
 
-func (s *prMergeabilityStore) AdmitSystem(ctx context.Context, orgID string, probes []db.PRMergeabilityProbe) (int, error) {
+func (s *prMergeabilityStore) AdmitSystem(ctx context.Context, orgID string, probes []db.PRMergeabilityProbe) (db.PRMergeabilityAdmission, error) {
 	if err := db.ValidatePRMergeabilityProbes(probes); err != nil {
-		return 0, err
+		return db.PRMergeabilityAdmission{}, err
 	}
 	if len(probes) == 0 {
-		return 0, nil
+		return db.PRMergeabilityAdmission{}, nil
 	}
-	admitted := 0
+	var res db.PRMergeabilityAdmission
 	err := inTxRaw(ctx, s.conn, func(tx *sql.Tx) error {
-		admitted = 0
+		res = db.PRMergeabilityAdmission{}
 		after := probeAfter(workkinds.PRMergeabilityProbeDelay)
 		for _, p := range probes {
-			_, deduplicated, err := workitem.Admit(ctx, tx, s.kind, orgID, workkinds.PRMergeabilityProbeKey(p.EntityID),
+			id, deduplicated, err := workitem.Admit(ctx, tx, s.kind, orgID, workkinds.PRMergeabilityProbeKey(p.EntityID),
 				db.PRMergeabilityProbeCols(p.EntityID, p.Reason, after, 0))
 			if err != nil {
 				return fmt.Errorf("admit mergeability probe for entity %s: %w", p.EntityID, err)
 			}
 			if !deduplicated {
-				admitted++
+				res.Admitted++
+				continue
+			}
+			// The collapse wrote the existing row, so this transaction holds its
+			// lock and the status cannot change under the read.
+			var status string
+			if err := tx.QueryRowContext(ctx, `SELECT status FROM public.pr_mergeability_probes WHERE id = $1`, id).Scan(&status); err != nil {
+				return fmt.Errorf("read the probe entity %s collapsed into: %w", p.EntityID, err)
+			}
+			if status == workitem.StatusLeased {
+				res.InFlight++
 			}
 		}
 		return nil
 	})
 	if err != nil {
-		return 0, err
+		return db.PRMergeabilityAdmission{}, err
 	}
-	return admitted, nil
+	return res, nil
 }
 
 func (s *prMergeabilityStore) Claim(ctx context.Context, owner workitem.Owner, orgID string, n int) (db.PRMergeabilityClaim, error) {
@@ -404,6 +414,22 @@ func (s *prMergeabilityStore) ListPathsSystem(ctx context.Context, orgID string,
 		out = append(out, p)
 	}
 	return out, rows.Err()
+}
+
+func (s *prMergeabilityStore) ClearPathsSystem(ctx context.Context, orgID string, entityIDs []string) (int, error) {
+	if len(entityIDs) == 0 {
+		return 0, nil
+	}
+	res, err := s.conn.ExecContext(ctx, `
+		UPDATE public.pull_request_mergeability
+		SET paths_json = NULL, paths_head_sha = NULL, paths_base_ref = NULL, paths_complete = false
+		WHERE org_id = $1 AND entity_id = ANY($2::uuid[]) AND paths_json IS NOT NULL
+	`, orgID, pgUUIDArray(entityIDs))
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
 }
 
 func (s *prMergeabilityStore) UpsertPathsSystem(ctx context.Context, orgID string, p domain.PRPaths) (domain.PRPaths, error) {

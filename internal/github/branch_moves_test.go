@@ -3,10 +3,14 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -162,5 +166,51 @@ func TestPreviousPaths_PagesTheRESTFiles(t *testing.T) {
 	}
 	if len(got) != 2 || got["new.go"] != "old.go" || got["copy.go"] != "src.go" {
 		t.Errorf("previous paths = %v", got)
+	}
+}
+
+// TestPRChangedPaths_ARateLimitedPageEndsTheBatch: a rate limit on a later
+// page is the batch's error, returned at once, and no other pull request's
+// page is asked for after it.
+func TestPRChangedPaths_ARateLimitedPageEndsTheBatch(t *testing.T) {
+	reset := time.Now().Add(time.Hour)
+	var mu sync.Mutex
+	var pages []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if strings.Contains(req.Query, "query PRChangedPaths(") {
+			page := `"files":{"pageInfo":{"hasNextPage":true,"endCursor":"c"},"nodes":[{"path":"x","changeType":"MODIFIED"}]}`
+			_, _ = w.Write([]byte(`{"data":{"nodes":[
+				{"id":"PR_a","headRefOid":"ha","baseRefName":"main","changedFiles":2,` + page + `},
+				{"id":"PR_b","headRefOid":"hb","baseRefName":"main","changedFiles":2,` + page + `}
+			],"rateLimit":{"cost":1}}}`))
+			return
+		}
+		mu.Lock()
+		pages = append(pages, fmt.Sprint(req.Variables["id"]))
+		mu.Unlock()
+		w.Header().Set("X-RateLimit-Resource", "graphql")
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", reset.Unix()))
+		_, _ = w.Write([]byte(`{"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	reads, requests, err := NewClient(srv.URL, "tok").PRChangedPaths(context.Background(), []string{"PR_a", "PR_b"})
+	var rl *ErrRateLimited
+	if !errors.As(err, &rl) {
+		t.Fatalf("err = %v, want *ErrRateLimited", err)
+	}
+	if reads != nil || requests != 2 {
+		t.Errorf("reads = %v, requests = %d, want no reads after the batch and one page", reads, requests)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(pages) != 1 || pages[0] != "PR_a" {
+		t.Errorf("pages asked for = %v, want PR_a's alone", pages)
 	}
 }

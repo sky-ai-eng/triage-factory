@@ -17,6 +17,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -430,9 +431,9 @@ type failingAdmit struct {
 	fail bool
 }
 
-func (f *failingAdmit) AdmitSystem(ctx context.Context, orgID string, probes []db.PRMergeabilityProbe) (int, error) {
+func (f *failingAdmit) AdmitSystem(ctx context.Context, orgID string, probes []db.PRMergeabilityProbe) (db.PRMergeabilityAdmission, error) {
 	if f.fail && len(probes) > 0 && probes[0].Reason == domain.MergeabilityProbeBaseMoved {
-		return 0, errors.New("admission refused")
+		return db.PRMergeabilityAdmission{}, errors.New("admission refused")
 	}
 	return f.PRMergeabilityStore.AdmitSystem(ctx, orgID, probes)
 }
@@ -458,6 +459,82 @@ func TestBranchWatch_TheTipIsStoredOnlyAfterAdmission(t *testing.T) {
 	}
 	if tip := w.storedTip(); tip == nil || tip.TipSHA != "new" {
 		t.Errorf("stored tip = %+v, want new", tip)
+	}
+}
+
+// A probe a worker is reading may have read GitHub before the move, so a
+// move whose probe collapses into it keeps the previous tip, and the branch's
+// next check processes the move again with a fresh probe.
+func TestBranchWatch_AMoveWhoseProbeIsBeingReadIsProcessedAgain(t *testing.T) {
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	w := newWatchWorld(t)
+	w.seenOnce()
+	w.set(func(w *watchWorld) { w.compares["old...new"] = compareBody("ahead", 1, "", "src/a.go") })
+
+	if _, err := w.stores.PRMergeability.AdmitSystem(ctx, org, []db.PRMergeabilityProbe{{EntityID: w.prs[0].ID, Reason: domain.MergeabilityProbeSweep}}); err != nil {
+		t.Fatalf("AdmitSystem: %v", err)
+	}
+	if _, err := w.db.Exec(`UPDATE pr_mergeability_probes SET probe_after = strftime('%Y-%m-%d %H:%M:%f','now','-1 seconds') WHERE status = 'ready'`); err != nil {
+		t.Fatalf("ripen: %v", err)
+	}
+	claim, err := w.stores.PRMergeability.Claim(ctx, workitem.Owner{ID: "reader", Epoch: 1}, org, 10)
+	if err != nil || len(claim.Items) != 1 {
+		t.Fatalf("Claim = %d items (err %v), want PR_1's probe", len(claim.Items), err)
+	}
+
+	if got := w.cycle(); len(got) != 0 {
+		t.Fatalf("admitted %v, want PR_1's probe collapsed into the one being read", got)
+	}
+	if tip := w.storedTip(); tip == nil || tip.TipSHA != "old" {
+		t.Fatalf("stored tip = %+v, want old: the move's probe was being read", tip)
+	}
+
+	if _, err := w.stores.PRMergeability.CompleteProbe(ctx, claim.Items[0].Receipt,
+		db.PRMergeabilityAnswer{Found: true, Mergeable: domain.MergeableMergeable, HeadSHA: "h1", BaseRef: "main"}, ""); err != nil {
+		t.Fatalf("CompleteProbe: %v", err)
+	}
+	if got := w.cycle(); !mapsEqual(got, map[int]string{1: domain.MergeabilityProbeBaseMoved}) {
+		t.Errorf("the next check admitted %v, want a fresh base_moved for PR_1", got)
+	}
+	if tip := w.storedTip(); tip == nil || tip.TipSHA != "new" {
+		t.Errorf("stored tip = %+v, want new", tip)
+	}
+}
+
+// A rewrite can move a pull request's merge base back at an unchanged head,
+// so the reset clears the base's stored lists; a move that only went forward
+// keeps them.
+func TestBranchWatch_ARewriteClearsTheStoredPaths(t *testing.T) {
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	for _, c := range []struct {
+		name    string
+		compare string
+		cleared bool
+	}{
+		{"rewritten", compareBody("diverged", 2, "", "src/a.go"), true},
+		{"previous tip gone", "404", true},
+		{"truncated", compareBody("ahead", ghclient.CompareCommitCap+1, "", filesOf("gen", ghclient.CompareFileCap)...), false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w := newWatchWorld(t)
+			w.seenOnce()
+			if _, err := w.stores.PRMergeability.UpsertPathsSystem(ctx, org, domain.PRPaths{
+				EntityID: w.prs[0].ID, Paths: []domain.ChangedPath{modified("src/a.go")}, HeadSHA: "h1", BaseRef: "main", Complete: true,
+			}); err != nil {
+				t.Fatalf("seed paths: %v", err)
+			}
+			w.set(func(w *watchWorld) { w.compares["old...new"] = c.compare })
+			w.cycle()
+			rows, err := w.stores.PRMergeability.ListPathsSystem(ctx, org, []string{w.prs[0].ID})
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("ListPathsSystem = %+v (err %v)", rows, err)
+			}
+			if cleared := rows[0].Paths == nil; cleared != c.cleared {
+				t.Errorf("paths after the reset = %+v, want cleared %v", rows[0], c.cleared)
+			}
+		})
 	}
 }
 

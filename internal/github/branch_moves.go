@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -213,7 +214,10 @@ func (f *gqlChangedFiles) appendTo(paths []domain.ChangedPath) []domain.ChangedP
 // with no node, or whose node is not a pull request, is absent. A later page
 // that fails, or that reads another head or base than the first, ends that
 // pull request's list incomplete rather than failing the batch. err is the
-// first page's failure only.
+// first page's failure, or a rate limit on any page: every request after one
+// would be refused the same way, and a GraphQL secondary limit does not stop
+// the client's own budget check from sending them, so the batch ends there and
+// returns no reads.
 func (c *Client) PRChangedPaths(ctx context.Context, nodeIDs []string) (reads map[string]ChangedPathsRead, requests int, err error) {
 	if len(nodeIDs) == 0 {
 		return nil, 0, nil
@@ -255,6 +259,10 @@ func (c *Client) PRChangedPaths(ctx context.Context, nodeIDs []string) (reads ma
 			for next && len(read.Paths) < MaxPRChangedPaths {
 				page, head, base, err := c.prChangedPathsPage(ctx, n.ID, cursor)
 				requests++
+				var rl *ErrRateLimited
+				if errors.As(err, &rl) {
+					return nil, requests, fmt.Errorf("PR changed paths: %w", err)
+				}
 				if err != nil || page == nil || head != read.HeadSHA || base != read.BaseRef {
 					stable = false
 					break

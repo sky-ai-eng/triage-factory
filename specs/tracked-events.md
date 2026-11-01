@@ -271,12 +271,22 @@ tip with the new one:
 
 A branch seen for the first time is `base_reset` too. The new tip is stored
 only after the move's probes are admitted, so a failure between the two
-processes the move again next cycle; a failed read leaves the stored tip.
+processes the move again next cycle; a failed read leaves the stored tip. A
+probe that collapses into one the worker is reading leaves the stored tip too,
+since that read may predate the move, and the move is processed again at the
+branch's next check.
 
 A PR's paths are its changed files plus the previous path of each file it
 renamed or copied, read (GraphQL `PRChangedPaths`, with REST for the previous
 paths) only for a moved base, and only for a PR whose stored list was read at
-another head or against another base. A move's paths are its files plus each one's previous path.
+another head or against another base. A reset that can have taken commits out
+of the base (a rewrite, a previous tip that is gone, or a branch seen for the
+first time) clears the stored lists of the PRs on it, because a merge base
+that moves back adds files to a list at an unchanged head. A merge base that
+moves forward at an unchanged head (the base took in commits the PR's head
+already has) can add a file only when those commits changed it and the head
+later changed it back; that case is left to the sweep. A move's paths are its
+files plus each one's previous path.
 They overlap when a PR path equals a move path or one is a parent directory
 of the other, or when the move deleted a file, or renamed one into another
 directory, and the PR added a file anywhere under the directory the old file

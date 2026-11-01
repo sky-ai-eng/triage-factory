@@ -52,8 +52,8 @@ type PRMergeabilityStore interface {
 	// An entry whose pull request already has an unsettled probe collapses
 	// into it, which keeps that probe's reason and probe_after. A reason
 	// outside domain.MergeabilityProbeReasons is refused before anything is
-	// written. admitted counts the entries that inserted a row.
-	AdmitSystem(ctx context.Context, orgID string, probes []PRMergeabilityProbe) (admitted int, err error)
+	// written.
+	AdmitSystem(ctx context.Context, orgID string, probes []PRMergeabilityProbe) (PRMergeabilityAdmission, error)
 
 	// Claim leases up to n ripe probes of the org and reads, beside each, its
 	// own columns, the entity's node id and state, and the owner and name of
@@ -114,6 +114,12 @@ type PRMergeabilityStore interface {
 	// row whose paths were never written has nil Paths.
 	ListPathsSystem(ctx context.Context, orgID string, entityIDs []string) ([]domain.PRPaths, error)
 
+	// ClearPathsSystem forgets the changed paths of the org's entities in
+	// entityIDs, leaving their answers alone, so the next base move reads
+	// them again; it reports how many rows it cleared. A bulk write, exempt
+	// from the returned-row rule.
+	ClearPathsSystem(ctx context.Context, orgID string, entityIDs []string) (int, error)
+
 	// UpsertPathsSystem writes one pull request's changed paths, the head and
 	// base they were read at and whether they are complete, and returns the path
 	// columns as persisted. A pull request with no row gets one with no
@@ -140,6 +146,19 @@ type PRMergeabilityStore interface {
 type PRMergeabilityProbe struct {
 	EntityID string
 	Reason   string
+}
+
+// PRMergeabilityAdmission is what one AdmitSystem call did with its entries.
+type PRMergeabilityAdmission struct {
+	// Admitted counts the entries that inserted a probe.
+	Admitted int
+	// InFlight counts the entries that collapsed into a probe a worker holds
+	// leased. Its read may already have happened, so its answer can predate
+	// whatever the entry was admitted for: a caller whose reason is not
+	// decided again from the stored row each cycle admits it again once that
+	// probe settles. An entry that collapsed into a ready probe is answered
+	// by that probe's read, which is still to come.
+	InFlight int
 }
 
 // ClaimedPRMergeabilityProbe is one leased probe and what reading it needs.

@@ -451,34 +451,60 @@ func withPrevious(paths []domain.ChangedPath, previous map[string]string, comple
 //
 //   - no move: the tip's ETag and observed time are written;
 //   - identical: nothing is probed;
-//   - a reset: every open pull request on the base, base_reset;
+//   - a reset: every open pull request on the base, base_reset. A reset that
+//     can have taken commits out of the base (a rewrite, a previous tip that
+//     is gone, or a branch whose history TF has not seen) can also move a
+//     pull request's merge base back at an unchanged head, which adds files
+//     to its list, so the stored lists are cleared first and read again at
+//     the next move;
 //   - an overlap: base_moved for each pull request whose paths overlap the
 //     move's, and for each whose paths could not be read or are incomplete.
+//
+// A probe that collapses into one a worker holds leased also leaves the
+// previous tip: that probe may have read GitHub before the move, and nothing
+// else decides a base move again once its tip is stored. The next check of
+// the branch processes the move again and admits a fresh probe.
 func (t *Tracker) admitBaseMove(ctx context.Context, orgID string, c baseCheck, prs []basePR, paths map[string]domain.PRPaths) {
 	var probes []db.PRMergeabilityProbe
 	switch c.outcome {
 	case "", baseMoveIdentical:
 	case baseMoveOverlap:
+		move := indexMove(c.movePaths)
 		for _, pr := range prs {
 			if pr.entity.ExternalID == "" {
 				continue
 			}
 			p, ok := paths[pr.entity.ID]
-			if !ok || !p.Complete || overlaps(p.Paths, c.movePaths) {
+			if !ok || !p.Complete || move.overlaps(p.Paths) {
 				probes = append(probes, db.PRMergeabilityProbe{EntityID: pr.entity.ID, Reason: domain.MergeabilityProbeBaseMoved})
 			}
 		}
 	default:
+		ids := make([]string, 0, len(prs))
 		for _, pr := range prs {
 			if pr.entity.ExternalID != "" {
 				probes = append(probes, db.PRMergeabilityProbe{EntityID: pr.entity.ID, Reason: domain.MergeabilityProbeBaseReset})
 			}
+			ids = append(ids, pr.entity.ID)
+		}
+		if c.outcome != baseMoveTruncated {
+			if _, err := t.mergeability.ClearPathsSystem(ctx, orgID, ids); err != nil {
+				trackerLog.WarnContext(ctx, "branch watch: clearing the changed paths of a rewritten base's pull requests failed; the move is processed again next cycle",
+					"repository_id", c.ref.RepositoryID, "branch", c.ref.Branch, "error", err)
+				return
+			}
 		}
 	}
 	if len(probes) > 0 {
-		if _, err := t.mergeability.AdmitSystem(ctx, orgID, probes); err != nil {
+		res, err := t.mergeability.AdmitSystem(ctx, orgID, probes)
+		if err != nil {
 			trackerLog.WarnContext(ctx, "branch watch: admitting a moved base's probes failed; the move is processed again next cycle",
 				"repository_id", c.ref.RepositoryID, "branch", c.ref.Branch, "probes", len(probes), "error", err)
+			return
+		}
+		if res.InFlight > 0 {
+			trackerLog.DebugContext(ctx, "branch watch: a probe the move owes was being read; the move is processed again at the branch's next check",
+				"repository_id", c.ref.RepositoryID, "branch", c.ref.Branch, "in_flight", res.InFlight)
 			return
 		}
 	}

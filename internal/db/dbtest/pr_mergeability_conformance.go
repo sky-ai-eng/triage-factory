@@ -75,13 +75,17 @@ func RunPRMergeabilityConformance(t *testing.T, mk PRMergeabilityFactory) {
 		}
 		return e
 	}
-	admit := func(t *testing.T, f PRMergeabilityFixture, entityID, reason string) int {
+	admission := func(t *testing.T, f PRMergeabilityFixture, entityID, reason string) db.PRMergeabilityAdmission {
 		t.Helper()
-		n, err := f.Stores.PRMergeability.AdmitSystem(ctx, f.OrgID, []db.PRMergeabilityProbe{{EntityID: entityID, Reason: reason}})
+		res, err := f.Stores.PRMergeability.AdmitSystem(ctx, f.OrgID, []db.PRMergeabilityProbe{{EntityID: entityID, Reason: reason}})
 		if err != nil {
 			t.Fatalf("AdmitSystem: %v", err)
 		}
-		return n
+		return res
+	}
+	admit := func(t *testing.T, f PRMergeabilityFixture, entityID, reason string) int {
+		t.Helper()
+		return admission(t, f, entityID, reason).Admitted
 	}
 	claimOne := func(t *testing.T, f PRMergeabilityFixture) db.ClaimedPRMergeabilityProbe {
 		t.Helper()
@@ -144,6 +148,25 @@ func RunPRMergeabilityConformance(t *testing.T, mk PRMergeabilityFactory) {
 		}
 		if _, err := f.Stores.PRMergeability.AdmitSystem(ctx, f.OrgID, []db.PRMergeabilityProbe{{EntityID: e.ID, Reason: "base_moved_later"}}); err == nil {
 			t.Error("an admission with a reason outside the vocabulary succeeded")
+		}
+	})
+
+	t.Run("Admit_reports_a_collapse_into_a_leased_probe_as_in_flight", func(t *testing.T) {
+		f := mk(t)
+		e := pr(t, f, "1f")
+		if got := admission(t, f, e.ID, domain.MergeabilityProbeNew); got != (db.PRMergeabilityAdmission{Admitted: 1}) {
+			t.Fatalf("first admission = %+v, want one admitted", got)
+		}
+		if got := admission(t, f, e.ID, domain.MergeabilityProbeBaseMoved); got != (db.PRMergeabilityAdmission{}) {
+			t.Errorf("an admission into a ready probe = %+v, want it collapsed and not in flight: that probe's read is still to come", got)
+		}
+		item := claimOne(t, f)
+		if got := admission(t, f, e.ID, domain.MergeabilityProbeBaseMoved); got != (db.PRMergeabilityAdmission{InFlight: 1}) {
+			t.Errorf("an admission into a leased probe = %+v, want it in flight", got)
+		}
+		answer(t, f, item, domain.MergeableMergeable, "h")
+		if got := admission(t, f, e.ID, domain.MergeabilityProbeBaseMoved); got != (db.PRMergeabilityAdmission{Admitted: 1}) {
+			t.Errorf("an admission once the probe settled = %+v, want one admitted", got)
 		}
 	})
 
@@ -537,6 +560,28 @@ func RunPRMergeabilityConformance(t *testing.T, mk PRMergeabilityFactory) {
 			if _, err := f.Stores.PRMergeability.UpsertPathsSystem(ctx, f.OrgID, bad); err == nil {
 				t.Errorf("UpsertPathsSystem(%+v) succeeded, want refused", bad)
 			}
+		}
+	})
+
+	t.Run("Clearing_paths_forgets_the_list_and_keeps_the_answer", func(t *testing.T) {
+		f := mk(t)
+		withPaths, answered := pr(t, f, "19"), pr(t, f, "20")
+		probe(t, f, withPaths.ID, domain.MergeableConflicting, "h19")
+		probe(t, f, answered.ID, domain.MergeableMergeable, "h20")
+		before, _ := f.Stores.PRMergeability.GetSystem(ctx, f.OrgID, withPaths.ID)
+		if _, err := f.Stores.PRMergeability.UpsertPathsSystem(ctx, f.OrgID, domain.PRPaths{EntityID: withPaths.ID, Paths: samplePaths, HeadSHA: "h19", BaseRef: "main", Complete: true}); err != nil {
+			t.Fatalf("UpsertPathsSystem: %v", err)
+		}
+		if n, err := f.Stores.PRMergeability.ClearPathsSystem(ctx, f.OrgID, []string{withPaths.ID, answered.ID}); err != nil || n != 1 {
+			t.Fatalf("ClearPathsSystem = (%d, %v), want the one row holding paths cleared", n, err)
+		}
+		got, _ := pathsOf(f, withPaths.ID)()
+		if got == nil || got.Paths != nil || got.HeadSHA != "" || got.BaseRef != "" || got.Complete {
+			t.Errorf("paths after the clear = %+v, want none", got)
+		}
+		after, _ := f.Stores.PRMergeability.GetSystem(ctx, f.OrgID, withPaths.ID)
+		if after == nil || before == nil || !reflect.DeepEqual(*after, *before) {
+			t.Errorf("answer after the clear = %+v, want %+v untouched", after, before)
 		}
 	})
 

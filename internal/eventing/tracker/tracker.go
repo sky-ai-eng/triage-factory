@@ -1037,12 +1037,15 @@ func (t *Tracker) admitMergeabilityProbes(ctx context.Context, orgID string, ope
 	if len(probes) == 0 {
 		return
 	}
-	admitted, err := t.mergeability.AdmitSystem(ctx, orgID, probes)
+	// A probe that collapses into one a worker is reading needs nothing
+	// more: every reason here is decided again from the stored row next
+	// cycle, so a read that predates its cause is followed by another.
+	res, err := t.mergeability.AdmitSystem(ctx, orgID, probes)
 	if err != nil {
 		trackerLog.WarnContext(ctx, "mergeability: admitting probes failed; the next cycle decides them again", "probes", len(probes), "error", err)
 		return
 	}
-	trackerLog.DebugContext(ctx, "mergeability: probes due", "due", len(probes), "admitted", admitted)
+	trackerLog.DebugContext(ctx, "mergeability: probes due", "due", len(probes), "admitted", res.Admitted)
 }
 
 // refreshPRBatch is client.RefreshPRs under a span, wrapped rather than

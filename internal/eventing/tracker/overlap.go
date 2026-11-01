@@ -23,29 +23,29 @@ import (
 // RENAMED or COPIED one. D counts as vacated whether or not the move emptied
 // it.
 func overlaps(prPaths, movePaths []domain.ChangedPath) bool {
-	move := pathSet(movePaths, func(c domain.ChangedPath) bool { return c.Previous != "" })
-	// Every directory a move path lies under, so a pull request path that is
-	// a parent of a move path is one lookup rather than a scan of the move.
-	moveDirs := map[string]bool{}
-	for m := range move {
-		for d := path.Dir(m); d != "." && d != "/" && !moveDirs[d]; d = path.Dir(d) {
-			moveDirs[d] = true
-		}
-	}
-	for p := range pathSet(prPaths, func(c domain.ChangedPath) bool {
-		return c.Change == domain.PathRenamed || c.Change == domain.PathCopied
-	}) {
-		if move[p] || moveDirs[p] {
-			return true
-		}
-		for d := path.Dir(p); d != "." && d != "/"; d = path.Dir(d) {
-			if move[d] {
-				return true
-			}
-		}
-	}
+	return indexMove(movePaths).overlaps(prPaths)
+}
 
-	vacated := map[string]bool{}
+// moveIndex is a move's side of the overlap rule, built once per move so
+// checking each pull request on the base costs its own paths' depth rather
+// than the size of the move.
+type moveIndex struct {
+	// paths is the move's paths; dirs, every directory one of them lies
+	// under; vacated, the directories it vacated.
+	paths, dirs, vacated map[string]bool
+}
+
+func indexMove(movePaths []domain.ChangedPath) moveIndex {
+	m := moveIndex{
+		paths:   pathSet(movePaths, func(c domain.ChangedPath) bool { return c.Previous != "" }),
+		dirs:    map[string]bool{},
+		vacated: map[string]bool{},
+	}
+	for p := range m.paths {
+		for d := path.Dir(p); d != "." && d != "/" && !m.dirs[d]; d = path.Dir(d) {
+			m.dirs[d] = true
+		}
+	}
 	for _, c := range movePaths {
 		var old string
 		switch {
@@ -57,10 +57,28 @@ func overlaps(prPaths, movePaths []domain.ChangedPath) bool {
 			continue
 		}
 		if d := path.Dir(old); d != "." && d != "/" {
-			vacated[d] = true
+			m.vacated[d] = true
 		}
 	}
-	if len(vacated) == 0 {
+	return m
+}
+
+// overlaps is the rule overlaps states, for a pull request on this move's
+// base.
+func (m moveIndex) overlaps(prPaths []domain.ChangedPath) bool {
+	for p := range pathSet(prPaths, func(c domain.ChangedPath) bool {
+		return c.Change == domain.PathRenamed || c.Change == domain.PathCopied
+	}) {
+		if m.paths[p] || m.dirs[p] {
+			return true
+		}
+		for d := path.Dir(p); d != "." && d != "/"; d = path.Dir(d) {
+			if m.paths[d] {
+				return true
+			}
+		}
+	}
+	if len(m.vacated) == 0 {
 		return false
 	}
 	for _, c := range prPaths {
@@ -70,7 +88,7 @@ func overlaps(prPaths, movePaths []domain.ChangedPath) bool {
 			continue
 		}
 		for d := path.Dir(c.Path); d != "." && d != "/"; d = path.Dir(d) {
-			if vacated[d] {
+			if m.vacated[d] {
 				return true
 			}
 		}
