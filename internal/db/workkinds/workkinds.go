@@ -276,8 +276,8 @@ const (
 // PRMergeabilityProbeDelay before it is probed; the wait also collapses a
 // burst of admissions for one pull request into one probe. An UNKNOWN answer
 // is read again PRMergeabilityUnknownRetryDelay later, at most
-// PRMergeabilityMaxUnknownReads times, after which the sweep reaches the pull
-// request.
+// PRMergeabilityMaxUnknownReads times, after which the round gives up and the
+// poll starts a fresh one a while later.
 const (
 	PRMergeabilityProbeDelay        = 15 * time.Second
 	PRMergeabilityUnknownRetryDelay = 30 * time.Second

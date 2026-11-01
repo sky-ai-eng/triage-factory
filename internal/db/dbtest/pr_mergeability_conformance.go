@@ -333,6 +333,9 @@ func RunPRMergeabilityConformance(t *testing.T, mk PRMergeabilityFactory) {
 			after.MergeableBaseRef != "release" || after.CheckedAt == nil || before.CheckedAt == nil || after.CheckedAt.Before(*before.CheckedAt) {
 			t.Errorf("row after the give-up = %+v, want %+v's answer at the give-up's head and base, read no earlier", after, before)
 		}
+		if before.GaveUp || !after.GaveUp {
+			t.Errorf("gave_up = %v before and %v after the give-up, want false then true", before.GaveUp, after.GaveUp)
+		}
 	})
 
 	t.Run("A_give_up_with_no_row_records_a_read_with_no_answer", func(t *testing.T) {
@@ -347,14 +350,18 @@ func RunPRMergeabilityConformance(t *testing.T, mk PRMergeabilityFactory) {
 			t.Fatalf("last read = %+v, want a give-up that wrote the row", res)
 		}
 		AssertWriteReturnedStoredRow(t, "CompleteProbe give-up insert", *res.Row, stored(f, e.ID))
-		if res.Row.Mergeable != "" || res.Row.MergeableHeadSHA != "head-5n" || res.Row.CheckedAt == nil {
-			t.Errorf("row = %+v, want no answer at head-5n, read now", *res.Row)
+		if res.Row.Mergeable != "" || res.Row.MergeableHeadSHA != "head-5n" || res.Row.CheckedAt == nil || !res.Row.GaveUp {
+			t.Errorf("row = %+v, want no answer at head-5n, read now and given up", *res.Row)
 		}
 		// The next known answer is the pull request's first, so a conflict
 		// emits as it does for a pull request with no row.
 		admit(t, f, e.ID, domain.MergeabilityProbeSweep)
-		if got := answer(t, f, claimOne(t, f), domain.MergeableConflicting, "head-5n"); len(got.Events) != 1 || got.Events[0].EventType != domain.EventGitHubPRConflicts || got.Previous != "" {
+		got := answer(t, f, claimOne(t, f), domain.MergeableConflicting, "head-5n")
+		if len(got.Events) != 1 || got.Events[0].EventType != domain.EventGitHubPRConflicts || got.Previous != "" {
 			t.Errorf("first answer after the give-up = %+v, want one github:pr:conflicts", got)
+		}
+		if got.Row == nil || got.Row.GaveUp {
+			t.Errorf("row after a known answer = %+v, want it no longer given up", got.Row)
 		}
 	})
 

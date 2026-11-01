@@ -53,5 +53,11 @@ ALTER TABLE pull_request_mergeability ADD COLUMN paths_complete BOOLEAN NOT NULL
 ALTER TABLE pull_request_mergeability ADD COLUMN base_move_reason TEXT NULL CHECK (base_move_reason IN ('base_moved','base_reset'));
 ALTER TABLE pull_request_mergeability ADD COLUMN base_moved_at TEXT NULL;
 
+-- Whether the probe worker's last settling read was the UNKNOWN give-up:
+-- GitHub answered UNKNOWN on every retry, so mergeable, if set, is from an
+-- earlier read. The poll reads such a pull request again once checked_at is
+-- old enough, rather than waiting for the sweep; a known answer clears it.
+ALTER TABLE pull_request_mergeability ADD COLUMN gave_up BOOLEAN NOT NULL DEFAULT 0;
+
 -- +goose Down
 SELECT 'down not supported';

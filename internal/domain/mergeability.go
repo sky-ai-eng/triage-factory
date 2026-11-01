@@ -30,6 +30,9 @@ type PRMergeability struct {
 	MergeableBaseRef string
 	// CheckedAt is when that read was made; nil when it never was.
 	CheckedAt *time.Time
+	// GaveUp is true when that read was the UNKNOWN that ended a probe's
+	// retries, so Mergeable, if set, is from an earlier read.
+	GaveUp bool
 	// BaseMoveReason is a base branch move the answer may predate, which the
 	// branch watch recorded for the pull request: MergeabilityProbeBaseMoved
 	// or MergeabilityProbeBaseReset, and empty when none is owed. A read by a
@@ -51,7 +54,8 @@ const (
 	// the one its row was last read against: it was retargeted.
 	MergeabilityProbeBaseChanged = "base_changed"
 	// MergeabilityProbeUnknownRetry is the re-read of a probe GitHub answered
-	// UNKNOWN.
+	// UNKNOWN, and the first read of a fresh round of them once the round
+	// before gave up.
 	MergeabilityProbeUnknownRetry = "unknown_retry"
 	// MergeabilityProbeSweep is a pull request whose row was last read longer
 	// than the sweep interval ago, or never.

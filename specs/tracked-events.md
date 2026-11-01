@@ -247,6 +247,8 @@ reads it only when it can have changed, through a probe the poll admits:
   what the move changed, or TF does not hold all of the PR's changed paths;
 - `base_reset`: the PR's base branch moved and TF cannot tell what the move
   changed, so every open PR on it is read;
+- `unknown_retry`: GitHub answered `UNKNOWN` on every read of TF's last
+  round, more than 10 minutes ago (below);
 - `sweep`: TF last read it more than 6 hours ago, which catches the changes
   the rules above miss.
 
@@ -314,8 +316,11 @@ known answer (`MERGEABLE` or `CONFLICTING`) with the head and base it was read a
 two conflict events fire from the stored answer's transitions, in the write
 that stores it, so the stored answer is their re-emit guard. An `UNKNOWN`
 answer is read again 30 seconds later, at most 10 times, and leaves the stored
-answer alone; the tenth records the read's head, base and time with no answer, so
-the PR waits for its sweep. A read GitHub refuses for a rate limit waits for
+answer alone; the tenth records the read's head, base and time with no answer
+and marks the row given up, and the first poll more than 10 minutes later
+admits a fresh round (`unknown_retry`), so a GitHub slow to compute
+mergeability delays the answer by minutes rather than until the sweep. A known
+answer clears the mark. A read GitHub refuses for a rate limit waits for
 the limit to reset, and the credential's other PRs wait with it without a
 request. A probe whose reads keep failing for another reason is given up after
 its fifth attempt with nothing written, and one whose repository no credential

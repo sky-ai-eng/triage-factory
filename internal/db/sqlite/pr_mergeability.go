@@ -34,11 +34,11 @@ func newPRMergeabilityStore(conn *sql.DB) db.PRMergeabilityStore {
 
 var _ db.PRMergeabilityStore = (*prMergeabilityStore)(nil)
 
-const sqlitePRMergeabilityColumns = `entity_id, org_id, COALESCE(mergeable, ''), COALESCE(mergeable_head_sha, ''), COALESCE(mergeable_base_ref, ''), checked_at, COALESCE(base_move_reason, '')`
+const sqlitePRMergeabilityColumns = `entity_id, org_id, COALESCE(mergeable, ''), COALESCE(mergeable_head_sha, ''), COALESCE(mergeable_base_ref, ''), checked_at, COALESCE(base_move_reason, ''), gave_up`
 
 func scanSQLitePRMergeability(row interface{ Scan(...any) error }) (domain.PRMergeability, error) {
 	var m domain.PRMergeability
-	err := row.Scan(&m.EntityID, &m.OrgID, &m.Mergeable, &m.MergeableHeadSHA, &m.MergeableBaseRef, &m.CheckedAt, &m.BaseMoveReason)
+	err := row.Scan(&m.EntityID, &m.OrgID, &m.Mergeable, &m.MergeableHeadSHA, &m.MergeableBaseRef, &m.CheckedAt, &m.BaseMoveReason, &m.GaveUp)
 	return m, err
 }
 
@@ -242,16 +242,18 @@ func (s *prMergeabilityStore) CompleteProbe(ctx context.Context, r workitem.Rece
 		}
 		if answer.Mergeable == domain.MergeableUnknown {
 			if unknownReads+1 >= workkinds.PRMergeabilityMaxUnknownReads {
-				// The give-up moves the row's head and time and leaves its
-				// answer (NULL on a new row), so the poll waits for the
-				// sweep rather than admitting the pull request again.
+				// The give-up moves the row's head and time, leaves its
+				// answer (NULL on a new row) and marks it given up, so the
+				// poll waits a while before a fresh round of reads rather
+				// than admitting the pull request again at once.
 				row, err := scanSQLitePRMergeability(tx.QueryRowContext(ctx, `
-					INSERT INTO pull_request_mergeability (entity_id, org_id, mergeable, mergeable_head_sha, mergeable_base_ref, checked_at)
-					VALUES (?, ?, NULL, ?, ?, ?)
+					INSERT INTO pull_request_mergeability (entity_id, org_id, mergeable, mergeable_head_sha, mergeable_base_ref, checked_at, gave_up)
+					VALUES (?, ?, NULL, ?, ?, ?, 1)
 					ON CONFLICT (entity_id) DO UPDATE SET
 						mergeable_head_sha = excluded.mergeable_head_sha,
 						mergeable_base_ref = excluded.mergeable_base_ref,
-						checked_at = excluded.checked_at,`+sqliteClearBaseMove+`
+						checked_at = excluded.checked_at,
+						gave_up = 1,`+sqliteClearBaseMove+`
 					RETURNING `+sqlitePRMergeabilityColumns,
 					entityID, r.OrgID, nullIfEmpty(answer.HeadSHA), nullIfEmpty(answer.BaseRef), time.Now().UTC(), r.ItemID, r.ItemID))
 				if err != nil {
@@ -279,7 +281,8 @@ func (s *prMergeabilityStore) CompleteProbe(ctx context.Context, r workitem.Rece
 				mergeable = excluded.mergeable,
 				mergeable_head_sha = excluded.mergeable_head_sha,
 				mergeable_base_ref = excluded.mergeable_base_ref,
-				checked_at = excluded.checked_at,`+sqliteClearBaseMove+`
+				checked_at = excluded.checked_at,
+				gave_up = 0,`+sqliteClearBaseMove+`
 			RETURNING `+sqlitePRMergeabilityColumns,
 			entityID, r.OrgID, answer.Mergeable, nullIfEmpty(answer.HeadSHA), nullIfEmpty(answer.BaseRef), now, r.ItemID, r.ItemID))
 		if err != nil {

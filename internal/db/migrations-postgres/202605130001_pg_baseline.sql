@@ -4590,6 +4590,11 @@ GRANT SELECT,USAGE ON SEQUENCE public.task_rederive_queue_id_seq TO tf_app;
 -- leased at or after base_moved_at settles a read, which clears both; a probe
 -- dropped or read before the move leaves them.
 --
+-- gave_up is whether the probe worker's last settling read was the UNKNOWN
+-- give-up, so mergeable, if set, is from an earlier read. The poll reads such
+-- a pull request again once checked_at is old enough, rather than waiting for
+-- the sweep; a known answer clears it.
+--
 -- Admin-pool wired with org_id bound per statement; the policy below is
 -- defense-in-depth.
 CREATE TABLE public.pull_request_mergeability (
@@ -4604,7 +4609,8 @@ CREATE TABLE public.pull_request_mergeability (
     paths_base_ref      text NULL,
     paths_complete      boolean NOT NULL DEFAULT false,
     base_move_reason    text NULL CHECK (base_move_reason IN ('base_moved','base_reset')),
-    base_moved_at       timestamp with time zone NULL
+    base_moved_at       timestamp with time zone NULL,
+    gave_up             boolean NOT NULL DEFAULT false
 );
 
 ALTER TABLE ONLY public.pull_request_mergeability

@@ -38,7 +38,7 @@ func newPRMergeabilityStore(conn *sql.DB) db.PRMergeabilityStore {
 
 var _ db.PRMergeabilityStore = (*prMergeabilityStore)(nil)
 
-const pgPRMergeabilityColumns = `entity_id::text, org_id::text, COALESCE(mergeable, ''), COALESCE(mergeable_head_sha, ''), COALESCE(mergeable_base_ref, ''), checked_at, COALESCE(base_move_reason, '')`
+const pgPRMergeabilityColumns = `entity_id::text, org_id::text, COALESCE(mergeable, ''), COALESCE(mergeable_head_sha, ''), COALESCE(mergeable_base_ref, ''), checked_at, COALESCE(base_move_reason, ''), gave_up`
 
 // pgClearBaseMove is the SET clauses a read's upsert clears the row's
 // recorded base move with when the probe making it, whose id is bound at
@@ -56,7 +56,7 @@ func pgClearBaseMove(param string) string {
 func scanPgPRMergeability(row interface{ Scan(...any) error }) (domain.PRMergeability, error) {
 	var m domain.PRMergeability
 	var checked sql.NullTime
-	if err := row.Scan(&m.EntityID, &m.OrgID, &m.Mergeable, &m.MergeableHeadSHA, &m.MergeableBaseRef, &checked, &m.BaseMoveReason); err != nil {
+	if err := row.Scan(&m.EntityID, &m.OrgID, &m.Mergeable, &m.MergeableHeadSHA, &m.MergeableBaseRef, &checked, &m.BaseMoveReason, &m.GaveUp); err != nil {
 		return domain.PRMergeability{}, err
 	}
 	if checked.Valid {
@@ -234,16 +234,18 @@ func (s *prMergeabilityStore) CompleteProbe(ctx context.Context, r workitem.Rece
 		}
 		if answer.Mergeable == domain.MergeableUnknown {
 			if unknownReads+1 >= workkinds.PRMergeabilityMaxUnknownReads {
-				// The give-up moves the row's head and time and leaves its
-				// answer (NULL on a new row), so the poll waits for the
-				// sweep rather than admitting the pull request again.
+				// The give-up moves the row's head and time, leaves its
+				// answer (NULL on a new row) and marks it given up, so the
+				// poll waits a while before a fresh round of reads rather
+				// than admitting the pull request again at once.
 				row, err := scanPgPRMergeability(tx.QueryRowContext(ctx, `
-					INSERT INTO public.pull_request_mergeability (entity_id, org_id, mergeable, mergeable_head_sha, mergeable_base_ref, checked_at)
-					VALUES ($1, $2, NULL, $3, $4, $5)
+					INSERT INTO public.pull_request_mergeability (entity_id, org_id, mergeable, mergeable_head_sha, mergeable_base_ref, checked_at, gave_up)
+					VALUES ($1, $2, NULL, $3, $4, $5, true)
 					ON CONFLICT (entity_id) DO UPDATE SET
 						mergeable_head_sha = excluded.mergeable_head_sha,
 						mergeable_base_ref = excluded.mergeable_base_ref,
-						checked_at = excluded.checked_at,`+pgClearBaseMove("$6")+`
+						checked_at = excluded.checked_at,
+						gave_up = true,`+pgClearBaseMove("$6")+`
 					RETURNING `+pgPRMergeabilityColumns,
 					entityID, r.OrgID, nullIfEmpty(answer.HeadSHA), nullIfEmpty(answer.BaseRef), time.Now().UTC(), r.ItemID))
 				if err != nil {
@@ -275,7 +277,8 @@ func (s *prMergeabilityStore) CompleteProbe(ctx context.Context, r workitem.Rece
 				mergeable = excluded.mergeable,
 				mergeable_head_sha = excluded.mergeable_head_sha,
 				mergeable_base_ref = excluded.mergeable_base_ref,
-				checked_at = excluded.checked_at,`+pgClearBaseMove("$7")+`
+				checked_at = excluded.checked_at,
+				gave_up = false,`+pgClearBaseMove("$7")+`
 			RETURNING `+pgPRMergeabilityColumns,
 			entityID, r.OrgID, answer.Mergeable, nullIfEmpty(answer.HeadSHA), nullIfEmpty(answer.BaseRef), now, r.ItemID))
 		if err != nil {

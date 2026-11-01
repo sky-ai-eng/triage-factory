@@ -30,6 +30,12 @@ const staleRefreshFloor = 10 * time.Minute
 // file.
 const mergeabilitySweepInterval = 6 * time.Hour
 
+// mergeabilityGiveUpRecheck is how long after GitHub answered UNKNOWN on every
+// retry of a round of reads the poll admits a fresh round. GitHub computing
+// mergeability that slowly is load on its side, which a pause can outlast,
+// and the sweep would leave a conflict unseen for hours.
+const mergeabilityGiveUpRecheck = 10 * time.Minute
+
 // shouldSkipRefresh reports whether a tracked open PR can keep its
 // stored snapshot for this poll cycle (no follow-up RefreshPRs call
 // needed). Skipping means we trust the stored snapshot through this

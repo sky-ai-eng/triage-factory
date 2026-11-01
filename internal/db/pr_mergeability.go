@@ -85,9 +85,8 @@ type PRMergeabilityStore interface {
 	//     workkinds.PRMergeabilityUnknownRetryDelay from now. At the limit the
 	//     probe is completed with nothing owed, and the row's head, base and
 	//     checked_at move to the read's while its answer stays (NULL on a row
-	//     the give-up creates), and a base move is cleared as a known answer
-	//     clears it, so the poll's next admission for the pull request is its
-	//     sweep.
+	//     the give-up creates), gave_up is set, and a base move is cleared as a
+	//     known answer clears it. A known answer clears gave_up.
 	//
 	// A receipt another holder took is workitem.ErrLeaseLost and writes
 	// nothing at all, events included; workitem.ErrCancelled means the

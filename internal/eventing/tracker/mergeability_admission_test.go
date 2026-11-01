@@ -24,12 +24,14 @@ import (
 // requests admit nothing on the head rule.
 
 // stored is the answer a case seeds before the cycle: the head and base it
-// was read at (no base when base is empty) and how long ago. pathsOnly seeds
+// was read at (no base when base is empty), how long ago, and whether that
+// read was the UNKNOWN give-up. pathsOnly seeds
 // instead the row the branch watch leaves when it writes a pull request's
 // changed paths before any read.
 type storedAnswer struct {
 	head, base string
 	age        time.Duration
+	gaveUp     bool
 	pathsOnly  bool
 }
 
@@ -88,8 +90,8 @@ func refreshAdmissions(t *testing.T, answer *storedAnswer, notModified bool) []s
 			t.Fatalf("seed stored paths: %v", err)
 		}
 	case answer != nil:
-		if _, err := database.Exec(`INSERT INTO pull_request_mergeability (entity_id, mergeable, mergeable_head_sha, mergeable_base_ref, checked_at) VALUES (?, 'MERGEABLE', ?, NULLIF(?, ''), ?)`,
-			ent.ID, answer.head, answer.base, time.Now().UTC().Add(-answer.age)); err != nil {
+		if _, err := database.Exec(`INSERT INTO pull_request_mergeability (entity_id, mergeable, mergeable_head_sha, mergeable_base_ref, checked_at, gave_up) VALUES (?, 'MERGEABLE', ?, NULLIF(?, ''), ?, ?)`,
+			ent.ID, answer.head, answer.base, time.Now().UTC().Add(-answer.age), answer.gaveUp); err != nil {
 			t.Fatalf("seed stored answer: %v", err)
 		}
 	}
@@ -152,6 +154,19 @@ func TestRefreshGitHub_AdmitsBaseChangedForARetargetedPullRequest(t *testing.T) 
 func TestRefreshGitHub_A304ListingAdmitsNoBaseChanged(t *testing.T) {
 	if got := refreshAdmissions(t, &storedAnswer{head: "deadbeef", base: "release", age: time.Minute}, true); len(got) != 0 {
 		t.Errorf("admitted %v behind an unchanged listing, want nothing", got)
+	}
+}
+
+func TestRefreshGitHub_AdmitsAFreshRoundOfReadsAfterAGiveUp(t *testing.T) {
+	late := mergeabilityGiveUpRecheck + time.Minute
+	if got := refreshAdmissions(t, &storedAnswer{head: "deadbeef", age: late, gaveUp: true}, false); !slices.Equal(got, []string{domain.MergeabilityProbeUnknownRetry}) {
+		t.Errorf("admitted %v for a give-up past the recheck, want unknown_retry", got)
+	}
+	if got := refreshAdmissions(t, &storedAnswer{head: "deadbeef", age: time.Minute, gaveUp: true}, false); len(got) != 0 {
+		t.Errorf("admitted %v for a give-up just now, want nothing yet", got)
+	}
+	if got := refreshAdmissions(t, &storedAnswer{head: "deadbeef", age: late}, false); len(got) != 0 {
+		t.Errorf("admitted %v for a known answer as old, want nothing before the sweep", got)
 	}
 }
 

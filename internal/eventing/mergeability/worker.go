@@ -435,7 +435,7 @@ func (w *Worker) complete(ctx context.Context, item db.ClaimedPRMergeabilityProb
 	switch res.Outcome {
 	case db.PRMergeabilityGaveUp:
 		recordUnknownGiveUp()
-		log.InfoContext(termCtx, "mergeability probes: GitHub answered UNKNOWN on every retry; the sweep reads the pull request later",
+		log.InfoContext(termCtx, "mergeability probes: GitHub answered UNKNOWN on every retry; the poll starts a fresh round of reads later",
 			"entity_id", item.EntityID)
 	case db.PRMergeabilityRecorded:
 		if item.Reason == domain.MergeabilityProbeSweep && res.Previous != "" && res.Row != nil && res.Previous != res.Row.Mergeable {
