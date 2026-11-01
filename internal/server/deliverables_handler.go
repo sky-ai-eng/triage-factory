@@ -1359,3 +1359,42 @@ func hostOrNotConfigured(host string) string {
 	}
 	return host
 }
+
+func (s *Server) registerDeliverableRoutes() {
+	// Deliverable-id-addressed endpoints back both the GitHub-native PR preview
+	// and the review preview (kind-dispatched inside the handlers). A review
+	// lives on GitHub rather than locally: GET serves the deliverable + its live
+	// pending-review comments, PATCH stages body/event, the comment routes
+	// edit/delete inline comments on that pending review, approve submits it,
+	// and dismiss resolves a single deliverable. The task-level resolve-all runs
+	// once, when the task itself ends (drag-to-Done / dismiss), through
+	// teardownTaskDeliverables.
+	ah := &deliverablesHandler{
+		tx: s.tx, ws: s.ws, ghResolver: s.ghResolver,
+		spawner:    func() *delegate.Spawner { return s.spawner },
+		reconciler: func() *reconcile.Reconciler { return s.reconciler },
+		publicURL: func() string {
+			if s.deployCfg == nil {
+				return ""
+			}
+			return s.deployCfg.publicURL
+		},
+	}
+	// One read for every kind; the writes are kind-scoped sub-resources, so a
+	// review-shaped body can never reach the PR write path.
+	s.api("GET /api/deliverables/{id}", ah.handleDeliverableGet)
+	s.apiMutating("PATCH /api/deliverables/{id}/pr", ah.handleDeliverablePRUpdate)
+	s.apiMutating("PATCH /api/deliverables/{id}/review", ah.handleDeliverableReviewUpdate)
+	s.api("GET /api/deliverables/{id}/diff", ah.handleDeliverableDiff)
+	s.apiMutating("POST /api/deliverables/{id}/approve", ah.handleDeliverableApprove)
+	// Pull requests only: closing one is a real GitHub write. A review is
+	// abandoned through PATCH …/review {state:"dismissed"}.
+	s.apiMutating("POST /api/deliverables/{id}/dismiss", ah.handleDeliverableDismiss)
+	// Dismiss's irreversible sibling: the head branch is deleted from the
+	// upstream as well. Its own verb because the branch delete is the one PR
+	// write that cannot be undone, so the client confirms it explicitly.
+	s.apiMutating("POST /api/deliverables/{id}/reject", ah.handleDeliverableReject)
+	s.apiMutating("POST /api/deliverables/{id}/review/refresh", ah.handleReviewRefresh)
+	s.apiMutating("PATCH /api/deliverables/{id}/comments/{commentId}", ah.handleDeliverableCommentUpdate)
+	s.apiMutating("DELETE /api/deliverables/{id}/comments/{commentId}", ah.handleDeliverableCommentDelete)
+}

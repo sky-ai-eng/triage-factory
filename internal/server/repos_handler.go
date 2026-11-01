@@ -1322,3 +1322,22 @@ func upstreamPageFromCursor(v *httpx.Validation, cursor string) (int, bool) {
 // PATCH gate (repoMutationAccess) is narrower still, because a repository
 // row is org-wide and has no team to write against: it takes an org admin or a
 // team admin of a team that tracks the repo.
+
+func (s *Server) registerRepoRoutes() {
+	// Proxy list: the rows come from GitHub, which reports no total for this
+	// read, so total_count is null and page_token wraps the upstream cursor.
+	s.apiMutating("POST /api/github/repos/list", s.handleGitHubRepos)
+	s.apiMutating("POST /api/github/repos/refresh", s.handleGitHubReposRefresh)
+	s.apiMutating("POST /api/repos/list", s.handleRepositories)
+	// Registration by GitHub id: how a repository the picker offers gets the
+	// registry id a team's tracked set is written with.
+	s.apiMutating("POST /api/repos", s.handleRepoRegister)
+	// Addressed by the registry row id, which is what every repo payload
+	// carries. by-name is the slug-accepting read the API rules give a
+	// resource with a unique name, and the only one: the writes take the id
+	// they were served, so a rename cannot repoint a save.
+	s.api("GET /api/repos/by-name/{owner}/{repo}", s.handleRepoGetByName)
+	s.api("GET /api/repos/{id}", s.handleRepoGet)
+	s.apiMutating("PATCH /api/repos/{id}", s.handleRepoUpdate)
+	s.apiMutating("POST /api/repos/{id}/branches/list", s.handleRepoBranches)
+}

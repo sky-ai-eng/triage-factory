@@ -934,3 +934,46 @@ func resolveSpendTeamNames(ctx context.Context, tx db.TxStores, orgID string, ro
 	}
 	return names, nil
 }
+
+func (s *Server) registerUsageRoutes() {
+	// Usage (spend layer) — the core Usage page's read API, each route under
+	// the scope it reports on: usage is a fact about a caller, a team, or an
+	// org, the same way a roster is. /api/me/usage is viewer-relative and
+	// takes its org from the session; the team and org routes name their scope
+	// in the path, and the org routes authorize against THAT org rather than
+	// whichever one the session points at. Scope is role-gated: /me is any org
+	// member, /teams/{id} is membership (with the per-person by_user cut alone
+	// held to team admin), /orgs/{id} is org-admin. The team/org reads use the
+	// admin-pool ListSpendSystem (the route's gate is the authorization for
+	// crossing RLS).
+	uh := &usageHandler{tx: s.tx, az: s.az, conversationQueue: s.allStores.ConversationQueue}
+	s.api("GET /api/me/usage", uh.handleUsageMe)
+	s.api("GET /api/teams/{team_id}/usage", uh.handleUsageTeam)
+	s.api("GET /api/orgs/{org_id}/usage", uh.handleUsageOrg)
+	// Org-scoped operations subset: an org admin's own queue waits + run
+	// durations + failure rates. Org-admin gated, SaaS-safe (no cross-tenant
+	// machine truth) — the org-facing complement to the operator-only fleet
+	// console.
+	s.api("GET /api/orgs/{org_id}/usage/ops", uh.handleUsageOrgOps)
+	// Activity feed (EE, FeatureGovernance): the team/org Actions
+	// (external-action audit log) + Objects (artifacts across runs) lenses — same
+	// scope gates as the spend reads above, plus the entitlement (unlicensed →
+	// 404). Two resources, two routes each: the row shapes and the filter
+	// vocabularies differ, so one address cannot honestly serve both.
+	s.apiMutating("POST /api/teams/{team_id}/usage/artifacts/list", uh.handleUsageTeamArtifacts)
+	s.apiMutating("POST /api/teams/{team_id}/usage/actions/list", uh.handleUsageTeamActions)
+	s.apiMutating("POST /api/orgs/{org_id}/usage/artifacts/list", uh.handleUsageOrgArtifacts)
+	s.apiMutating("POST /api/orgs/{org_id}/usage/actions/list", uh.handleUsageOrgActions)
+	// Per-team daily spend cap — org-admin-set, EE/governance-gated (the
+	// handlers 404 when unlicensed). The GET lists every active team + its cap
+	// for the editor (so an idle team can be pre-capped); the PUT writes one
+	// cap and is mutating, so it runs through the CSRF + session wrap. Both
+	// write/read the admin pool: an org admin may cap a team they don't belong
+	// to.
+	s.apiMutating("POST /api/orgs/{org_id}/usage/team-caps/list", uh.handleUsageTeamCaps)
+	s.apiMutating("PUT /api/teams/{team_id}/usage/cap", uh.handleUsageTeamCap)
+	// EE governance audit surface: the access & credential change-log viewer.
+	// Org-admin-gated AND FeatureGovernance-gated (404 unlicensed) inside the
+	// handler — the data is core, only the cross-team lens is Enterprise.
+	s.apiMutating("POST /api/orgs/{org_id}/usage/access-log/list", uh.handleUsageAccessLog)
+}

@@ -602,3 +602,18 @@ func (s *Server) reachabilityClients(ctx context.Context, orgID, userID string) 
 
 	return clients
 }
+
+func (s *Server) registerTrackedSetRoutes() {
+	s.apiMutating("PUT /api/teams/{team_id}/jira-projects", s.handleTeamJiraProjectsPut)
+	// The Linear sibling: the Linear teams this team tracks and the workflow
+	// state rules for each.
+	s.apiMutating("PUT /api/teams/{team_id}/linear-teams", s.handleTeamLinearTeamsPut)
+	// The other two child collections, siblings of jira-projects: the team's
+	// tracked GitHub repos and its GitHub-team mappings, both replace-set
+	// PUTs. github-repos, not repos — it reads as the sibling it is and does
+	// not collide with the top-level /api/repos registry resource.
+	s.api("GET /api/teams/{team_id}/github-repos", s.handleTeamReposGet)
+	s.apiMutating("PUT /api/teams/{team_id}/github-repos", s.handleTeamReposPut)
+	s.api("GET /api/teams/{team_id}/github-groups", s.handleTeamGitHubGroupsGet)
+	s.apiMutating("PUT /api/teams/{team_id}/github-groups", s.handleTeamGitHubGroupsPut)
+}

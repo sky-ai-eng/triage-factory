@@ -2043,3 +2043,27 @@ func isHTTPS(r *http.Request) bool {
 	}
 	return r.Header.Get("X-Forwarded-Proto") == "https"
 }
+
+func (s *Server) registerAuthRoutes() {
+	// Integration credentials (GitHub PAT, Jira PAT). Distinct from the
+	// session-auth routes — these are per-user-stored credentials for
+	// talking to third-party services on the user's behalf, not the user's own
+	// login, which is why they sit outside /api/auth/*: that prefix means
+	// session authentication and nothing else. Wrapped via s.api/apiMutating —
+	// managing them requires a session.
+	s.api("GET /api/integrations/status", s.handleIntegrationsStatus)
+	// Logout-everywhere: must be authenticated to use it (you can only
+	// nuke your own sessions).
+	s.apiMutating("POST /api/auth/logout/all", s.handleLogoutAll)
+	// /api/me is the session-protected identity endpoint. In local mode
+	// the shim in withSession injects sentinel claims so the handler
+	// sees a non-nil claims value; in multi mode the handler 401s when
+	// no claims are seeded.
+	s.api("GET /api/me", s.handleMe)
+	// Linked login identities for the signed-in principal — the read-only
+	// "Login methods" view. Personal read keyed on the session principal, no
+	// org scoping. Both modes (local returns a single synthetic row).
+	s.api("GET /api/me/identities", s.handleMeIdentities)
+	// Switch the session's active org.
+	s.apiMutating("POST /api/me/active-org", s.handleActiveOrgUpdate)
+}

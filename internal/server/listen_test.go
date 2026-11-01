@@ -21,7 +21,7 @@ func TestListenAndServeContext_BindErrorDoesNotLeak(t *testing.T) {
 	}
 	defer ln.Close()
 
-	s := &Server{mux: http.NewServeMux()}
+	s := &Server{mux: &routeMux{ServeMux: http.NewServeMux()}}
 
 	before := runtime.NumGoroutine()
 	if err := s.ListenAndServe(ln.Addr().String()); err == nil {

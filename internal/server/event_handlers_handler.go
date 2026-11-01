@@ -22,7 +22,8 @@ import (
 
 // eventHandlersHandler serves the event-handler (rule + trigger) config
 // endpoints. It holds the transactional store runner the handlers use;
-// routes() registers its methods through the api()/apiMutating() wrappers.
+// registerEventHandlerRoutes registers its methods through the
+// api()/apiMutating() wrappers.
 type eventHandlersHandler struct {
 	tx db.TxRunner
 	az *authz.Checker
@@ -1393,4 +1394,26 @@ func (eh *eventHandlersHandler) handleEventHandlerReorder(w http.ResponseWriter,
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "reordered"})
+}
+
+func (s *Server) registerEventHandlerRoutes() {
+	s.api("GET /api/event-schemas", handleEventSchemasList)
+	s.api("GET /api/event-schemas/{event_type}", handleEventSchemaGet)
+	// The unified event_handlers surface — one ordered list for both kinds,
+	// with `kind` as the row discriminator on every read. The writes are split
+	// per kind, because a rule and a trigger require different fields and
+	// default `enabled` in opposite directions.
+	eh := &eventHandlersHandler{tx: s.tx, az: s.az, catalogs: s}
+	s.apiMutating("POST /api/event-handlers/list", eh.handleEventHandlersList)
+	// The canonical single read. The mutation routes load this row internally;
+	// this is the only address that hands it back.
+	s.api("GET /api/event-handlers/{id}", eh.handleEventHandlerGet)
+	s.apiMutating("POST /api/event-handlers/rules", eh.handleEventHandlerCreateRule)
+	s.apiMutating("POST /api/event-handlers/triggers", eh.handleEventHandlerCreateTrigger)
+	s.apiMutating("POST /api/event-handlers/notify", eh.handleEventHandlerCreateNotify)
+	s.apiMutating("PUT /api/event-handlers/reorder", eh.handleEventHandlerReorder)
+	s.apiMutating("PATCH /api/event-handlers/{id}", eh.handleEventHandlerUpdate)
+	s.apiMutating("DELETE /api/event-handlers/{id}", eh.handleEventHandlerDelete)
+	s.apiMutating("POST /api/event-handlers/{id}/promote", eh.handleEventHandlerPromote)
+	s.apiMutating("POST /api/event-handlers/{id}/retarget", eh.handleEventHandlerRetarget)
 }

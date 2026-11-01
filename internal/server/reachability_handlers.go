@@ -71,3 +71,10 @@ func invalidBaseURLField(w http.ResponseWriter, field string) {
 		Field:   field,
 	})
 }
+
+func (s *Server) registerReachabilityRoutes() {
+	// URL-only host reachability (the wizard's URL sub-step) — no auth sent,
+	// distinct from the creds stage (auth.ValidateGitHub / /api/jira/connect).
+	s.apiMutating("POST /api/github/reachability", handleGitHubReachability)
+	s.apiMutating("POST /api/jira/reachability", handleJiraReachability)
+}

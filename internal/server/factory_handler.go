@@ -465,3 +465,8 @@ func extractEntityAuthor(e *domain.Entity) domain.GitHubAccount {
 	}
 	return domain.GitHubAccount{Login: snap.Author, ID: snap.AuthorID}
 }
+
+func (s *Server) registerFactoryRoutes() {
+	fh := &factoryHandler{tx: s.tx}
+	s.api("GET /api/factory/snapshot", fh.handleFactorySnapshot)
+}

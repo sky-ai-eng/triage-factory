@@ -1815,3 +1815,35 @@ func validateHesitation(v *httpx.Validation, ms int) {
 		v.OutOfRange("hesitation_ms", "hesitation_ms must be zero or greater")
 	}
 }
+
+func (s *Server) registerTaskRoutes() {
+	// Find-or-create the task at a station. The Factory's drop gesture is this
+	// plus POST /api/tasks/{id}/delegate: the task is the row, delegating is
+	// what you then do to it, so the in-between state — task resolved, run not
+	// started — is addressable rather than a partial success buried in one
+	// call's response.
+	s.apiMutating("POST /api/tasks", s.handleTaskCreate)
+	// The one tasks list read: every filtered view of the queue goes through
+	// it, so two spellings of the same read cannot drift into two different
+	// hidden filters. apiMutating is deliberate for a body-carrying read — see
+	// handleTaskList.
+	s.apiMutating("POST /api/tasks/list", s.handleTaskList)
+	// The lane's own event-type set, beside the list and under the same
+	// filters minus the reader's own — the chips a lane offers are about the
+	// lane, not about the page a filtered query happened to return. A POST
+	// for the same reason the list is: the filter is a structured body.
+	s.apiMutating("POST /api/tasks/facets", s.handleTaskFacets)
+	s.api("GET /api/tasks/{id}", s.handleTaskGet)
+	// The task's field-write path: the lifecycle axis and the wake time are
+	// columns, so they are PATCHed rather than given a route per value — a
+	// route per value is how one gesture grows arms with different required
+	// fields, different authz and different response shapes. Each verb below
+	// earns its own route by carrying an effect a field write cannot express:
+	// an external Jira write, a spawned run, deliverable teardown, an audit
+	// reversal.
+	s.apiMutating("PATCH /api/tasks/{id}", s.handleTaskPatch)
+	s.apiMutating("POST /api/tasks/{id}/claim", s.handleTaskClaim)
+	s.apiMutating("POST /api/tasks/{id}/delegate", s.handleTaskDelegate)
+	s.apiMutating("POST /api/tasks/{id}/undo", s.handleUndo)
+	s.apiMutating("POST /api/tasks/{id}/requeue", s.handleRequeue)
+}

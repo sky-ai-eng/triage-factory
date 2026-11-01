@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -35,14 +36,14 @@ type orgMembersHandler struct {
 	// org-scoped connections (TFAC-75) so their event stream stops at
 	// removal rather than lingering until the socket drops.
 	ws *websocket.Hub
-	// revokeUserOrgSessions revokes a removed member's auth sessions scoped
-	// to one org (TFAC-487) — deprovisioning hygiene alongside the WS-kick.
-	// It's a closure over the Server because s.authDeps.sessions is wired
-	// late (SetAuthDeps runs after routes()), so the store can't be captured
-	// at construction. routes() always wires a non-nil closure; the closure
-	// itself nil-checks authDeps for the boot race (and local mode never
-	// reaches it — handleOrgMemberRemove 404s first). The nil guard on the
-	// field is belt-and-suspenders for a future caller that constructs the
+	// revokeUserOrgSessions revokes a removed member's auth sessions scoped to
+	// one org (TFAC-487) — deprovisioning hygiene alongside the WS-kick. It's a
+	// closure over the Server because s.authDeps.sessions is wired late
+	// (SetAuthDeps runs after routes()), so the store can't be captured at
+	// construction. registerOrgMemberRoutes always wires a non-nil closure; the
+	// closure itself nil-checks authDeps for the boot race (and local mode
+	// never reaches it — handleOrgMemberRemove 404s first). The nil guard on
+	// the field is belt-and-suspenders for a future caller that constructs the
 	// handler without it (e.g. a test). Returns the count of revoked rows.
 	revokeUserOrgSessions func(ctx context.Context, userID, orgID string) (int64, error)
 	// revokeUserOrgTokens revokes a removed member's API tokens scoped to one
@@ -296,9 +297,9 @@ func (h *orgMembersHandler) handleOrgMemberRemove(w http.ResponseWriter, r *http
 	// filter (their sessions active in other orgs are untouched). Per-request
 	// gates (RLS + role checks) already deny the org's data on the next
 	// request, so a revoke failure isn't a data hole — log and continue.
-	// routes() always wires the closure; the nil guard only matters for a
-	// handler constructed without it (a test). Local mode never reaches here
-	// — handleOrgMemberRemove 404s at the top.
+	// registerOrgMemberRoutes always wires the closure; the nil guard only
+	// matters for a handler constructed without it (a test). Local mode never
+	// reaches here — handleOrgMemberRemove 404s at the top.
 	if h.revokeUserOrgSessions != nil {
 		revoked, err := h.revokeUserOrgSessions(r.Context(), targetID, orgID)
 		if err != nil {
@@ -474,4 +475,53 @@ func writeOrgMemberMutationResult(w http.ResponseWriter, scope string, err error
 		internalError(w, scope, err)
 	}
 	return false
+}
+
+func (s *Server) registerOrgMemberRoutes() {
+	// Org People roster: list members + change role + remove. Multi-mode only
+	// (each handler 404s in local). GET is any-member; PATCH/DELETE gate
+	// org-admin (DELETE also allows a self-leave). The last-owner guard is a
+	// DB trigger surfaced as a 409. revokeUserOrgSessions is read lazily
+	// because authDeps lands after routes() runs (SetAuthDeps); the closure
+	// nil-checks it for the boot race and parses the string ids the handler
+	// carries into the UUIDs the store expects.
+	omh := &orgMembersHandler{tx: s.tx, az: s.az, ws: s.ws,
+		revokeUserOrgSessions: func(ctx context.Context, userID, orgID string) (int64, error) {
+			if s.authDeps == nil {
+				return 0, errors.New("auth not wired")
+			}
+			uid, err := uuid.Parse(userID)
+			if err != nil {
+				return 0, fmt.Errorf("parse user id: %w", err)
+			}
+			oid, err := uuid.Parse(orgID)
+			if err != nil {
+				return 0, fmt.Errorf("parse org id: %w", err)
+			}
+			return s.authDeps.sessions.RevokeForUserInOrgSystem(ctx, uid, oid)
+		},
+		// The token half of the same deprovisioning. It takes string ids
+		// straight through — the store validates them itself and answers an
+		// unparseable one with "revoked nothing" rather than an error, since
+		// an id that names no row is not a failure to revoke.
+		revokeUserOrgTokens: func(ctx context.Context, targetUserID, orgID, actorUserID string) (int, error) {
+			if s.authDeps == nil || s.authDeps.apiTokens == nil {
+				return 0, errors.New("auth not wired")
+			}
+			return s.authDeps.apiTokens.RevokeForUserInOrgSystem(ctx, targetUserID, orgID, actorUserID)
+		},
+		sweepUserOrgLinear: s.sweepLinearUserCredential,
+		publishKick: func(ctx context.Context, userID, sid, orgID string, code int, reason string) {
+			if s.wsBackplane != nil {
+				s.wsBackplane.PublishKick(ctx, userID, sid, orgID, code, reason)
+			}
+		},
+	}
+	s.apiMutating("POST /api/orgs/{org_id}/members/list", omh.handleOrgMembersList)
+	s.apiMutating("PATCH /api/orgs/{org_id}/members/{user_id}", omh.handleOrgMemberRoleChange)
+	s.apiMutating("DELETE /api/orgs/{org_id}/members/{user_id}", omh.handleOrgMemberRemove)
+	// Ownership transfer: owner-only (gated on tf.user_owns_org + the
+	// guard_org_owner_transfer trigger). Promotes the target, repoints the
+	// owner sentinel, demotes the former owner — all in one tx as the owner.
+	s.apiMutating("POST /api/orgs/{org_id}/transfer-ownership", omh.handleOrgOwnershipTransfer)
 }

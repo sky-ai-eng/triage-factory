@@ -461,3 +461,15 @@ func (h *avatarsHandler) handleAvatar(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(img.data)
 }
+
+func (s *Server) registerAvatarRoutes() {
+	// Avatar proxy: serves a user's OAuth-captured avatar same-origin so it
+	// renders under the app's tight `img-src 'self'` CSP instead of being
+	// blocked as a cross-origin image. Any authenticated org member; the
+	// target user_id is resolved under the caller's claims, so RLS scopes it
+	// to the caller + co-org-members (a cross-org id 404s). One
+	// process-lifetime fetcher owns the upstream fetch + cache. Consumed by
+	// Usage's by-user roster and the topbar UserMenu.
+	avh := &avatarsHandler{tx: s.tx, fetcher: newAvatarFetcher()}
+	s.api("GET /api/avatars/{user_id}", avh.handleAvatar)
+}

@@ -346,3 +346,28 @@ func writeModelAccessError(w http.ResponseWriter, err error, field string) bool 
 	})
 	return true
 }
+
+func (s *Server) registerModelRoutes() {
+	// The models this deployment offers, as one org sees them: the shipped
+	// catalog joined to the org's own enable-set. Org-scoped because that
+	// enable-set is org state, and member-level because its widest reader is a
+	// team admin who cannot see org settings but must know what the org
+	// enabled. Unpaginated for the same reason /api/event-types is — a
+	// compile-time vocabulary, not a collection that grows with use.
+	//
+	// The team-scoped read is the same node one scope down (as /usage is
+	// mounted at both): the org's enable-set narrowed to that team's own. Both
+	// sets are WRITTEN on their scope's settings resource — they are ordinary
+	// columns, not effects a field write cannot express — so there is no write
+	// verb here.
+	mdh := &modelsHandler{az: s.az, tx: s.tx, prober: func() modelProber { return s.modelProber }}
+	s.api("GET /api/orgs/{org_id}/models", mdh.handleModelsList)
+	s.api("GET /api/teams/{team_id}/models", mdh.handleTeamModelsList)
+	// The availability probes: the same verb on the item and on the
+	// collection, because "test this model" and "test this provider's
+	// candidates" are two nameable things with two response shapes. Both are
+	// POSTs for an effect no field write can express — each one calls the
+	// provider and is billed for it.
+	s.apiMutating("POST /api/orgs/{org_id}/models/{model_key}/test", mdh.handleModelTest)
+	s.apiMutating("POST /api/orgs/{org_id}/models/tests", mdh.handleModelTestSweep)
+}

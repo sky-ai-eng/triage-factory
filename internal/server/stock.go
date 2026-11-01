@@ -1036,3 +1036,21 @@ func claimStatusRef(state *jira.ClaimState) domain.JiraStatusRef {
 	}
 	return domain.JiraStatusRef{ID: state.StatusID, Name: state.StatusName}
 }
+
+func (s *Server) registerStockRoutes() {
+	// **Declared exception** to the list-envelope rule. The stock deck is a
+	// composite the discovery UI deals from — a readiness status plus two
+	// partitions of the same set — not a row list a client walks. It reads the
+	// team's whole active Jira set, bounded by the team's tracked projects
+	// rather than by a window; the deck is meant to be dealt whole. What it
+	// does hold to is one shape in every state: the status field never changes
+	// which keys are present.
+	s.api("GET /api/jira/stock", s.handleJiraStockGet)
+	// One route per carry-over action. The arms share only an eligibility
+	// gate: queue mints a task off a synthesized event with no Jira write,
+	// claim makes two external Jira writes before it touches a row, and done
+	// transitions the ticket and closes the entity without minting anything.
+	s.apiMutating("POST /api/jira/stock/queue", s.handleJiraStockQueue)
+	s.apiMutating("POST /api/jira/stock/claim", s.handleJiraStockClaim)
+	s.apiMutating("POST /api/jira/stock/done", s.handleJiraStockDone)
+}

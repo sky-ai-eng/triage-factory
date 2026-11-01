@@ -27,10 +27,11 @@ import (
 type settingsHandler struct {
 	tx db.TxRunner
 	// az gates the org-scoped credential routes on the {org_id} path segment.
-	// Always set — the single construction site in routes() passes the server's
-	// checker — and dereferenced unguarded by those handlers. The struct's other
-	// handlers are session-scoped and resolve the org from the session instead,
-	// so they never read it.
+	// Always set — the single construction site in
+	// registerSettingsHandlerRoutes passes the server's checker — and
+	// dereferenced unguarded by those handlers. The struct's other handlers are
+	// session-scoped and resolve the org from the session instead, so they
+	// never read it.
 	az *authz.Checker
 	// bedrockRole resolves live AWS calls for the Bedrock role-mode setup +
 	// connect probe (TFAC-616): sts:GetCallerIdentity for the trust-policy
@@ -40,13 +41,13 @@ type settingsHandler struct {
 	bedrockRole func() bedrockRoleResolver
 	// kickJira re-dues Jira polling after this handler binds the org's Jira
 	// credential. The poller callbacks live on the Server, so the single
-	// construction site in routes() hands this handler the one method rather
-	// than a back-reference to the whole server.
+	// construction site in registerSettingsHandlerRoutes hands this handler the
+	// one method rather than a back-reference to the whole server.
 	kickJira func(r *http.Request, orgID string)
 	// guardJiraWrite takes the org's Jira credential lock, which the unbind
 	// and a settings save moving the Jira site take too, and prepares the
 	// bind's keychain writes in local mode: the Server's guardJiraWrite, wired
-	// from routes() like kickJira.
+	// from registerSettingsHandlerRoutes like kickJira.
 	guardJiraWrite func(ctx context.Context, orgID string) (restore, unlock func(), err error)
 	// guardAnthropicWrite and guardBedrockWrite do the same for the LLM
 	// credential binds and unbinds: the Server's guardLocalAnthropicWrite and
@@ -60,7 +61,7 @@ type settingsHandler struct {
 	// conversation age out of the attempt backoff one at a time. One argument,
 	// because these handlers structurally have no conversation to name — what
 	// they changed is the whole org's ability to generate at all. Wired from
-	// routes() like kickJira.
+	// registerSettingsHandlerRoutes like kickJira.
 	kickMemoryBacklog func(orgID string)
 }
 
@@ -687,4 +688,42 @@ func (se *settingsHandler) handleGitHubPreflightSSH(w http.ResponseWriter, r *ht
 	}
 	settingsLog.Info("ssh preflight ok", "ssh_host", sshHost)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "host": sshHost})
+}
+
+func (s *Server) registerSettingsHandlerRoutes() {
+	se := &settingsHandler{
+		tx: s.tx, az: s.az,
+		bedrockRole:         func() bedrockRoleResolver { return s.bedrockRole },
+		kickJira:            s.kickJiraChanged,
+		guardJiraWrite:      s.guardJiraWrite,
+		guardAnthropicWrite: s.guardLocalAnthropicWrite,
+		guardBedrockWrite:   s.guardLocalBedrockWrite,
+		kickMemoryBacklog:   func(orgID string) { s.kickMemoryOwed(orgID, "") },
+	}
+	s.apiMutating("POST /api/github/preflight-ssh", se.handleGitHubPreflightSSH)
+	// Bedrock role-mode setup: returns the control service's caller ARN + the
+	// TF-generated External ID so the UI can render a filled trust-policy
+	// snippet. POST (not GET) because first entry generates + persists the
+	// External ID — a state change that needs CSRF protection, per the
+	// mutating-verb convention (route_auth_test enforces GET ≠ apiMutating).
+	s.apiMutating("POST /api/bedrock/role-setup", se.handleBedrockRoleSetup)
+
+	// The org's LLM provider credential — one resource per credential SHAPE,
+	// so a route's required fields are fixed and a blank secret never selects
+	// a second behaviour. Rotation is the PUT with a new value; removal is the
+	// DELETE. An org may hold both providers at once: a bind replaces only
+	// material of its own provider, and says so in the response. See
+	// llm_credentials.go.
+	s.apiMutating("PUT /api/orgs/{org_id}/llm/anthropic", se.handleAnthropicPut)
+	s.apiMutating("DELETE /api/orgs/{org_id}/llm/anthropic", se.handleAnthropicDelete)
+	s.apiMutating("PUT /api/orgs/{org_id}/llm/bedrock/access-keys", se.handleBedrockAccessKeysPut)
+	s.apiMutating("PUT /api/orgs/{org_id}/llm/bedrock/bearer", se.handleBedrockBearerPut)
+	s.apiMutating("PUT /api/orgs/{org_id}/llm/bedrock/role", se.handleBedrockRolePut)
+	s.apiMutating("DELETE /api/orgs/{org_id}/llm/bedrock", se.handleBedrockDelete)
+
+	// The org's Jira credential — the Jira half of the addressable-resource
+	// pair whose rationale sits with the GitHub PAT routes in
+	// registerGitHubRoutes.
+	s.apiMutating("PUT /api/orgs/{org_id}/jira/access/credential", se.handleJiraConnect)
+	s.apiMutating("DELETE /api/orgs/{org_id}/jira/access/credential", s.handleJiraCredentialDelete)
 }
