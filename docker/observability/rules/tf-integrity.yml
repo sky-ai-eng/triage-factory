@@ -49,15 +49,14 @@ groups:
         annotations:
           summary: "A run in org {{ $labels.org_id }} recorded a pull request it did not open"
           description: >-
-            In the last hour, a run's record named a pull request whose GitHub
-            author is not the account Triage Factory sealed into that run. A
-            working run's sidecar never records one, so treat that run's
-            sidecar as compromised. Triage Factory deleted the deliverable, or
-            did not record it, and attributed nothing to the run; the run's
-            audit record of the create is kept. Its ERROR line, "deleted a pull
-            request deliverable its run did not open" or "a pr_created row
-            names a pull request its run did not open", names the conversation
-            and the pull request.
+            In the last hour, a run recorded a pull request whose GitHub author
+            is not the account Triage Factory sealed into that run. A working
+            run's sidecar never records one, so treat that run's sidecar as
+            compromised. Triage Factory closed the deliverable, will not act on
+            the pull request, and attributed nothing to the run; the run's
+            audit record of the create is kept. Its ERROR line, "a run recorded
+            a pull request it did not open", names the conversation and the
+            pull request.
 
       # Closing an entity closes its open tasks in the same transaction, and
       # a task mint refuses a closed entity in its own, so a task open on a

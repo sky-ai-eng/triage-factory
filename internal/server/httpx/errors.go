@@ -43,6 +43,13 @@ const (
 	// source back on.
 	ReasonSourceDisabled = "SOURCE_DISABLED"
 
+	// The deliverable's pull request is not confirmed as its run's: the row is
+	// pending until TF reads GitHub's answer for who opened it, or GitHub's
+	// answer showed the run did not. Its own code because a pending row's fix
+	// is to try again shortly, and a foreign one's is that TF will not act on
+	// it at all.
+	ReasonDeliverableUnverified = "DELIVERABLE_UNVERIFIED"
+
 	// The invite the caller holds was addressed to a different email than the
 	// one they are signed in as. Its own code because the client's response is
 	// not "try again" but "sign in as someone else" — the address itself is in

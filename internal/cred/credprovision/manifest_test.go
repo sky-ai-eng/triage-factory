@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
@@ -190,30 +191,38 @@ func TestProvision_ReSealMovesUnresolvedToSealed(t *testing.T) {
 }
 
 // TestProvision_GitHubEntryRecordsTheAppAccount pins whose account the GitHub
-// entry records: the bot user the App's tokens act as, which authors the run's
-// pull requests, never the commit identity's account, which for an org with a
-// commit signer is a person's. A seal that learns no bot user records none.
+// entry records: the bot the App's tokens act as, which authors the run's pull
+// requests, never the commit identity's account, which for an org with a
+// commit signer is a person's. An App bound while the tokens were minted, so
+// the reads on either side of the mint disagree, records none.
 func TestProvision_GitHubEntryRecordsTheAppAccount(t *testing.T) {
 	avail := eventsource.Availability{eventsource.NewSource(eventsource.KindGitHub, eventsource.StateAvailable)}
+	botA := ghclient.BotAccount{ID: "41898282", Login: "acme-bot[bot]"}
+	botB := ghclient.BotAccount{ID: "29110", Login: "other-bot[bot]"}
 	for _, tc := range []struct {
-		name, appAccount, want string
+		name     string
+		accounts []ghclient.BotAccount
+		want     ghclient.BotAccount
 	}{
-		{name: "bot user known", appAccount: "41898282", want: "41898282"},
-		{name: "bot user unknown", appAccount: "", want: ""},
+		{name: "bot known", accounts: []ghclient.BotAccount{botA}, want: botA},
+		{name: "bot id not stored", accounts: []ghclient.BotAccount{{Login: botA.Login}}, want: ghclient.BotAccount{Login: botA.Login}},
+		{name: "App rebound during the mint", accounts: []ghclient.BotAccount{botA, botB}},
+		{name: "no App"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rig := newProvisionRig(t, avail, &installTokens{})
 			rig.m.ghResolver = &fakeScopedResolver{
 				hasCred: true, base: "https://github.com",
 				name: "Octo Cat", email: "octocat@example.com", accountID: "583231",
-				appAccountID: tc.appAccount,
+				appAccounts: tc.accounts,
 			}
 			bundle := rig.provision(t)
-			if got := bundle.Sources[eventsource.KindGitHub]; got.State != domain.SourceSealed || got.AccountID != tc.want {
-				t.Errorf("github = %+v, want sealed with account %q", got, tc.want)
+			got := bundle.Sources[eventsource.KindGitHub]
+			if got.State != domain.SourceSealed || got.AccountID != tc.want.ID || got.AccountLogin != tc.want.Login {
+				t.Errorf("github = %+v, want sealed with account %+v", got, tc.want)
 			}
-			if got := rig.claims.sources[eventsource.KindGitHub].AccountID; got != tc.want {
-				t.Errorf("claims-row github account = %q, want %q", got, tc.want)
+			if c := rig.claims.sources[eventsource.KindGitHub]; c.AccountID != tc.want.ID || c.AccountLogin != tc.want.Login {
+				t.Errorf("claims-row github = %+v, want account %+v", c, tc.want)
 			}
 		})
 	}

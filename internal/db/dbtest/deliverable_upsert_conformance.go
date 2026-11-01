@@ -3,6 +3,7 @@ package dbtest
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -106,34 +107,88 @@ func RunDeliverableUpsertConformance(t *testing.T, mk ExternalObjectScopeFactory
 		})
 	}
 
-	// A delete removes the row it names and nothing else, and an id naming no
-	// row removes nothing.
-	t.Run("DeleteSystem_removes_only_the_row_it_names", func(t *testing.T) {
+	// A row is inserted verified unless its writer says pending, an upsert
+	// never moves it, and a settle moves a pending row once: to verified with
+	// its details replaced, or to foreign and closed.
+	t.Run("Verification_is_settled_once", func(t *testing.T) {
 		s, orgID, teamID := mk(t)
-		seed := func(number int, nodeID string) domain.Deliverable {
-			a := domain.NewPullRequestDeliverable("octo/api", number, nodeID, "feat", "main", "", "Title", "Body", true)
-			a.TeamID, a.Scope = teamID, TestGitHubHost
-			row, err := s.Deliverables.UpsertSystem(ctx, orgID, a)
-			if err != nil {
-				t.Fatalf("seed deliverable %s: %v", nodeID, err)
+		pr := func(number int, verification string) domain.Deliverable {
+			a := domain.NewPullRequestDeliverable("octo/api", number, fmt.Sprintf("PR_v%d", number), "feat", "main", "", "Title", "Body", true)
+			a.TeamID, a.Scope, a.Verification = teamID, TestGitHubHost, verification
+			return a
+		}
+		get := func(id string) domain.Deliverable {
+			t.Helper()
+			got, err := s.Deliverables.Get(ctx, orgID, id)
+			if err != nil || got == nil {
+				t.Fatalf("Get %s = (%+v, %v)", id, got, err)
 			}
-			return row
+			return *got
 		}
-		gone, kept := seed(7, "PR_kw7"), seed(8, "PR_kw8")
-		if removed, err := s.Deliverables.DeleteSystem(ctx, orgID, gone.ID); err != nil || !removed {
-			t.Fatalf("DeleteSystem = (%v, %v), want (true, nil)", removed, err)
+		byKey := func(dedupKey string) domain.Deliverable {
+			t.Helper()
+			rows, err := s.Deliverables.ListNonTerminalBySystem(ctx, orgID)
+			if err != nil {
+				t.Fatalf("ListNonTerminalBySystem: %v", err)
+			}
+			for _, r := range rows {
+				if r.DedupKey == dedupKey {
+					return r
+				}
+			}
+			t.Fatalf("no row keyed %s", dedupKey)
+			return domain.Deliverable{}
 		}
-		if again, err := s.Deliverables.DeleteSystem(ctx, orgID, gone.ID); err != nil || again {
-			t.Errorf("a second DeleteSystem = (%v, %v), want (false, nil)", again, err)
+
+		plain, err := s.Deliverables.UpsertSystem(ctx, orgID, pr(1, ""))
+		if err != nil || plain.Verification != domain.DeliverableVerificationVerified {
+			t.Fatalf("UpsertSystem with no verification = (%q, %v), want verified", plain.Verification, err)
 		}
-		if removed, err := s.Deliverables.DeleteSystem(ctx, orgID, "not-a-deliverable-id"); err != nil || removed {
-			t.Errorf("DeleteSystem of an unknown id = (%v, %v), want (false, nil)", removed, err)
+		if _, err := s.Deliverables.InsertDeliverableIfAbsentSystem(ctx, orgID, pr(9, "maybe")); !errors.Is(err, db.ErrDeliverableVerification) {
+			t.Errorf("insert with verification %q: err = %v, want ErrDeliverableVerification", "maybe", err)
 		}
-		if got, err := s.Deliverables.Get(ctx, orgID, gone.ID); err != nil || got != nil {
-			t.Errorf("Get after the delete = (%+v, %v), want no row", got, err)
+
+		mine, theirs := pr(2, domain.DeliverableVerificationPending), pr(3, domain.DeliverableVerificationPending)
+		for _, a := range []domain.Deliverable{mine, theirs} {
+			if inserted, err := s.Deliverables.InsertDeliverableIfAbsentSystem(ctx, orgID, a); err != nil || !inserted {
+				t.Fatalf("insert pending %s = (%v, %v)", a.DedupKey, inserted, err)
+			}
 		}
-		if got, err := s.Deliverables.Get(ctx, orgID, kept.ID); err != nil || got == nil {
-			t.Errorf("the other row after the delete = (%+v, %v), want it kept", got, err)
+		mineRow, theirsRow := byKey(mine.DedupKey), byKey(theirs.DedupKey)
+		if mineRow.Verification != domain.DeliverableVerificationPending {
+			t.Fatalf("inserted verification = %q, want pending", mineRow.Verification)
+		}
+		again := mine
+		again.Verification = domain.DeliverableVerificationVerified
+		if up, err := s.Deliverables.UpsertSystem(ctx, orgID, again); err != nil || up.Verification != domain.DeliverableVerificationPending {
+			t.Errorf("upsert over a pending row = (%q, %v), want it left pending", up.Verification, err)
+		}
+
+		if _, err := s.Deliverables.SettleVerificationSystem(ctx, orgID, mineRow.ID, domain.DeliverableVerificationPending, ""); !errors.Is(err, db.ErrDeliverableVerification) {
+			t.Errorf("settle to pending: err = %v, want ErrDeliverableVerification", err)
+		}
+		const details = `{"node_id":"PR_v2","head_branch":"from-github","base":"main"}`
+		if moved, err := s.Deliverables.SettleVerificationSystem(ctx, orgID, mineRow.ID, domain.DeliverableVerificationVerified, details); err != nil || !moved {
+			t.Fatalf("settle verified = (%v, %v), want (true, nil)", moved, err)
+		}
+		if got := get(mineRow.ID); got.Verification != domain.DeliverableVerificationVerified || got.State != domain.DeliverableStatePRDraft || got.DetailsJSON != details {
+			t.Errorf("verified row = (%q, %q, %s), want verified, still draft, details replaced", got.Verification, got.State, got.DetailsJSON)
+		}
+		if moved, err := s.Deliverables.SettleVerificationSystem(ctx, orgID, mineRow.ID, domain.DeliverableVerificationForeign, ""); err != nil || moved {
+			t.Errorf("a second settle = (%v, %v), want (false, nil)", moved, err)
+		}
+		if moved, err := s.Deliverables.SettleVerificationSystem(ctx, orgID, plain.ID, domain.DeliverableVerificationForeign, ""); err != nil || moved {
+			t.Errorf("settle of a row inserted verified = (%v, %v), want (false, nil)", moved, err)
+		}
+
+		if moved, err := s.Deliverables.SettleVerificationSystem(ctx, orgID, theirsRow.ID, domain.DeliverableVerificationForeign, ""); err != nil || !moved {
+			t.Fatalf("settle foreign = (%v, %v), want (true, nil)", moved, err)
+		}
+		if got := get(theirsRow.ID); got.Verification != domain.DeliverableVerificationForeign || got.State != domain.DeliverableStatePRClosed || got.DetailsJSON != theirsRow.DetailsJSON {
+			t.Errorf("foreign row = (%q, %q, %s), want foreign, closed, details kept", got.Verification, got.State, got.DetailsJSON)
+		}
+		if moved, err := s.Deliverables.SettleVerificationSystem(ctx, orgID, "not-a-deliverable-id", domain.DeliverableVerificationVerified, ""); err != nil || moved {
+			t.Errorf("settle of an unknown id = (%v, %v), want (false, nil)", moved, err)
 		}
 	})
 

@@ -312,19 +312,24 @@ func (m *Manager) sealSources(ctx context.Context, orgID string, claim db.Awaiti
 	// may clone, push and read a pull request, so it is resolved whatever the
 	// availability answer says about it.
 	resolvable[eventsource.KindGitHub] = true
+	// The account the sealed tokens act as, which authors every pull request
+	// the run opens, read on both sides of the mint and recorded only when the
+	// two reads agree, so an App bound between them cannot leave the tokens
+	// of one App recorded as another's. Recorded per seal, so a run's pull
+	// requests are checked against the App it held rather than whichever the
+	// org holds when the reconciler reads them. A seal that learns no account
+	// records none, and nothing is confirmed as the run's through it.
+	accountBefore, accountKnown := ghclient.AppBotAccount(ctx, m.ghResolver, orgID)
 	gh, err := m.resolveGitHub(ctx, orgID, claim.TeamID, claim.TaskID, conversationID)
 	if err != nil {
 		return nil, fmt.Errorf("credprovision: resolve github credentials for conversation %s: %w", conversationID, err)
 	}
 	bundle.GitHub = gh
 	ghEntry := githubEntry(gh)
-	if gh != nil && gh.Mode == credbundle.GitHubModeApp {
-		// The account the sealed tokens act as, which authors every pull
-		// request the run opens. Recorded per seal, so a run's pull requests
-		// are checked against the App it held rather than whichever the org
-		// holds when the reconciler reads them. A seal that cannot learn a
-		// real id records none, and nothing is attributed through it.
-		ghEntry.AccountID, _ = ghclient.AppAccount(ctx, m.ghResolver, orgID)
+	if gh != nil && gh.Mode == credbundle.GitHubModeApp && accountKnown {
+		if after, ok := ghclient.AppBotAccount(ctx, m.ghResolver, orgID); ok && after == accountBefore {
+			ghEntry.AccountID, ghEntry.AccountLogin = after.ID, after.Login
+		}
 	}
 	manifest[eventsource.KindGitHub] = ghEntry
 

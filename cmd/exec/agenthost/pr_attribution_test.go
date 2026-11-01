@@ -11,11 +11,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// A pull request create records the run's deliverable and links it to the
-// pull request's entity, and attributes nothing: the owner and commissioner
-// are the deliverable reconciler's to stamp, once GitHub's answer shows the
-// run opened it, so neither a create recorded here nor one relayed from a
-// sidecar changes an org-wide entity beyond linking it.
+// A pull request create records the run's deliverable pending and links it to
+// the pull request's entity, and attributes nothing: the owner and
+// commissioner are the deliverable reconciler's to stamp when it settles the
+// row from GitHub's answer, so neither a create recorded here nor one relayed
+// from a sidecar changes an org-wide entity beyond linking it.
 
 // botOpenedPR is the deliverable the recording funnel receives when the agent
 // opens a PR through the exec verb (recordGithubPR), the one door that mints
@@ -68,8 +68,8 @@ func prEntity(t *testing.T, stores db.Stores) *domain.Entity {
 }
 
 // assertLinkedAndUnattributed checks that the run holds one pull request
-// deliverable, linked to the pull request's entity, and that the entity has
-// no owner and no commissioner.
+// deliverable, pending and linked to the pull request's entity, and that the
+// entity has no owner and no commissioner.
 func assertLinkedAndUnattributed(t *testing.T, conn *sql.DB, stores db.Stores, info ConversationInfo) {
 	t.Helper()
 	ent := prEntity(t, stores)
@@ -77,8 +77,8 @@ func assertLinkedAndUnattributed(t *testing.T, conn *sql.DB, stores db.Stores, i
 		t.Fatal("no entity for the opened PR")
 	}
 	mine := listConversationDeliverables(t, stores, info.ConversationID)
-	if len(mine) != 1 || mine[0].EntityID != ent.ID {
-		t.Errorf("the run's deliverables = %+v, want one linked to entity %s", mine, ent.ID)
+	if len(mine) != 1 || mine[0].EntityID != ent.ID || mine[0].Verification != domain.DeliverableVerificationPending {
+		t.Errorf("the run's deliverables = %+v, want one pending, linked to entity %s", mine, ent.ID)
 	}
 	if got := ownerOf(t, stores, ent.ID); got != "" {
 		t.Errorf("owning team = %q, want none", got)

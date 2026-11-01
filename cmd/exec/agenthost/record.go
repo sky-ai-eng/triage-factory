@@ -121,7 +121,10 @@ var errFunnelDeliverable = errors.New("agenthost: the recording funnel records o
 // request as a draft or open, so a deliverable in any other state was not
 // built by one; and the row's id is the store's to mint, as it is for every
 // other insert. Anything but a GitHub pull request keyed on its node id, as a
-// draft or open, is refused with errFunnelDeliverable.
+// draft or open, is refused with errFunnelDeliverable. The row is admitted
+// pending (domain.DeliverableVerificationPending): it is the recording run's
+// word, which nothing that applies a relayed record can check, so it is acted
+// on through TF only once the reconciler has settled it from GitHub's answer.
 func keyFunnelDeliverable(a *domain.Deliverable) error {
 	if a.Kind != domain.DeliverableKindPullRequest {
 		return errFunnelDeliverable
@@ -135,6 +138,7 @@ func keyFunnelDeliverable(a *domain.Deliverable) error {
 	}
 	a.ID = ""
 	a.DedupKey, a.NodeID = domain.PullRequestDedupKey(nodeID), nodeID
+	a.Verification = domain.DeliverableVerificationPending
 	return nil
 }
 
@@ -196,9 +200,9 @@ func recordActionAlone(ctx context.Context, stores db.Stores, info ConversationI
 //
 // It changes no org-wide entity beyond linking it. A relayed create is the
 // sidecar's word, and nothing on this side can confirm the run opened the pull
-// request it names, so the pull request's owner and commissioner are the
-// deliverable reconciler's to stamp once GitHub's answer shows the run opened
-// it (internal/reconcile).
+// request it names, so its deliverable is recorded pending, and the pull
+// request's owner and commissioner are the deliverable reconciler's to stamp
+// when it settles the row from GitHub's answer (internal/reconcile).
 //
 // Best-effort throughout: every write here already happened against the
 // external system (GitHub/Jira/Slack) before this is called, so a recording

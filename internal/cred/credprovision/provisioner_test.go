@@ -48,15 +48,16 @@ type fakeScopedResolver struct {
 	name      string
 	email     string
 	accountID string
-	// appAccountID is the bot user the App credential acts as (AppAccountFor),
-	// "" for none.
-	appAccountID string
-	hasCred      bool
-	token        githubapp.Token
-	identity     ghclient.Identity // the tier TokenForRepoScoped reports
-	errFor       map[string]error  // keyed by "owner/repo" (single) or "owner" (repos-scoped); returned instead of token
-	calls        []scopedCall
-	reposCalls   []reposScopedCall
+	// appAccounts are the bot accounts the App credential acts as
+	// (AppBotAccountFor), answered one per call, the last repeated; none
+	// answers ok=false.
+	appAccounts []ghclient.BotAccount
+	hasCred     bool
+	token       githubapp.Token
+	identity    ghclient.Identity // the tier TokenForRepoScoped reports
+	errFor      map[string]error  // keyed by "owner/repo" (single) or "owner" (repos-scoped); returned instead of token
+	calls       []scopedCall
+	reposCalls  []reposScopedCall
 }
 
 func (f *fakeScopedResolver) BaseURLFor(context.Context, string) (string, error) {
@@ -71,8 +72,15 @@ func (f *fakeScopedResolver) OrgIdentityAccountFor(context.Context, string) (ghc
 	return ghclient.OrgIdentity{Name: f.name, Email: f.email, AccountID: f.accountID}, f.name != ""
 }
 
-func (f *fakeScopedResolver) AppAccountFor(context.Context, string) (string, bool) {
-	return f.appAccountID, f.appAccountID != ""
+func (f *fakeScopedResolver) AppBotAccountFor(context.Context, string) (ghclient.BotAccount, bool) {
+	if len(f.appAccounts) == 0 {
+		return ghclient.BotAccount{}, false
+	}
+	a := f.appAccounts[0]
+	if len(f.appAccounts) > 1 {
+		f.appAccounts = f.appAccounts[1:]
+	}
+	return a, true
 }
 
 func (f *fakeScopedResolver) HasAnyCredential(context.Context, string) (bool, error) {

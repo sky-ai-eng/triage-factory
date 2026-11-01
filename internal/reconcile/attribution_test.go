@@ -4,11 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
-	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
@@ -20,21 +20,25 @@ import (
 
 // The bot accounts two Apps act as, and a person's account.
 const (
-	botA   = "41898282"
-	botB   = "29110"
-	person = "583231"
+	botA      = "41898282"
+	botALogin = "acme-bot[bot]"
+	botB      = "29110"
+	person    = "583231"
 )
 
 var attrT0 = time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 
 // engagement is one claim of a conversation from `from` until `to` (nil for a
-// live one), whose seal recorded account on its github entry ("" for none).
-func engagement(account string, from time.Time, to *time.Time) domain.ExecutorClaim {
+// live one), whose seal recorded the bot account (id, login) on its github
+// entry; both empty for a seal that recorded none.
+func engagement(id, login string, from time.Time, to *time.Time) domain.ExecutorClaim {
 	return domain.ExecutorClaim{
-		ID:         fmt.Sprintf("claim-%s-%d", account, from.Unix()),
+		ID:         fmt.Sprintf("claim-%s-%d", id, from.Unix()),
 		ClaimedAt:  from,
 		ReleasedAt: to,
-		Sources:    domain.SourceManifest{eventsource.KindGitHub: {State: domain.SourceSealed, AccountID: account}},
+		Sources: domain.SourceManifest{eventsource.KindGitHub: {
+			State: domain.SourceSealed, AccountID: id, AccountLogin: login,
+		}},
 	}
 }
 
@@ -44,93 +48,110 @@ func at(d time.Duration) *time.Time {
 }
 
 func TestJudgeSealedAuthor(t *testing.T) {
-	unsealed := engagement("", attrT0, at(time.Hour))
-	unsealed.Sources = nil
+	unsealed := engagement("", "", attrT0, at(time.Hour))
 	for _, tc := range []struct {
-		name       string
-		claims     []domain.ExecutorClaim
-		author     string
-		created    time.Time
-		want       verdict
-		wantReason string
+		name          string
+		claims        []domain.ExecutorClaim
+		author, login string
+		created       time.Time
+		want          verdict
+		wantReason    string
 	}{
 		{
 			name:   "the live engagement's account authored it",
-			claims: []domain.ExecutorClaim{engagement(botA, attrT0, nil)},
-			author: botA, created: attrT0.Add(10 * time.Minute),
+			claims: []domain.ExecutorClaim{engagement(botA, botALogin, attrT0, nil)},
+			author: botA, login: botALogin, created: attrT0.Add(10 * time.Minute),
 			want: verdictRun,
 		},
 		{
 			name:   "a person authored it while the run was live",
-			claims: []domain.ExecutorClaim{engagement(botA, attrT0, nil)},
-			author: person, created: attrT0.Add(10 * time.Minute),
+			claims: []domain.ExecutorClaim{engagement(botA, botALogin, attrT0, nil)},
+			author: person, login: "octocat", created: attrT0.Add(10 * time.Minute),
+			want: verdictForeign, wantReason: foreignAuthor,
+		},
+		{
+			name:   "the ids decide when both sides have one, whatever the logins say",
+			claims: []domain.ExecutorClaim{engagement(botA, botALogin, attrT0, nil)},
+			author: person, login: botALogin, created: attrT0.Add(10 * time.Minute),
+			want: verdictForeign, wantReason: foreignAuthor,
+		},
+		{
+			name:   "a seal with no bot id is matched by the bot's login",
+			claims: []domain.ExecutorClaim{engagement("", botALogin, attrT0, nil)},
+			author: botA, login: "Acme-Bot[bot]", created: attrT0.Add(10 * time.Minute),
+			want: verdictRun,
+		},
+		{
+			name:   "a seal with no bot id and another author's login",
+			claims: []domain.ExecutorClaim{engagement("", botALogin, attrT0, nil)},
+			author: person, login: "octocat", created: attrT0.Add(10 * time.Minute),
 			want: verdictForeign, wantReason: foreignAuthor,
 		},
 		{
 			name:   "opened before the conversation was ever claimed",
-			claims: []domain.ExecutorClaim{engagement(botA, attrT0, nil)},
-			author: botA, created: attrT0.Add(-time.Hour),
+			claims: []domain.ExecutorClaim{engagement(botA, botALogin, attrT0, nil)},
+			author: botA, login: botALogin, created: attrT0.Add(-time.Hour),
 			want: verdictForeign, wantReason: foreignNoEngagement,
 		},
 		{
 			name:   "opened after its only engagement was released",
-			claims: []domain.ExecutorClaim{engagement(botA, attrT0, at(time.Hour))},
-			author: botA, created: attrT0.Add(2 * time.Hour),
+			claims: []domain.ExecutorClaim{engagement(botA, botALogin, attrT0, at(time.Hour))},
+			author: botA, login: botALogin, created: attrT0.Add(2 * time.Hour),
 			want: verdictForeign, wantReason: foreignNoEngagement,
 		},
 		{
 			name:   "no engagements at all",
-			author: botA, created: attrT0,
+			author: botA, login: botALogin, created: attrT0,
 			want: verdictForeign, wantReason: foreignNoEngagement,
 		},
 		{
 			name:   "GitHub's clock a minute behind the claim",
-			claims: []domain.ExecutorClaim{engagement(botA, attrT0, at(time.Hour))},
-			author: botA, created: attrT0.Add(-time.Minute),
+			claims: []domain.ExecutorClaim{engagement(botA, botALogin, attrT0, at(time.Hour))},
+			author: botA, login: botALogin, created: attrT0.Add(-time.Minute),
 			want: verdictRun,
 		},
 		{
 			name:   "GitHub's clock a minute past the release",
-			claims: []domain.ExecutorClaim{engagement(botA, attrT0, at(time.Hour))},
-			author: botA, created: attrT0.Add(time.Hour + time.Minute),
+			claims: []domain.ExecutorClaim{engagement(botA, botALogin, attrT0, at(time.Hour))},
+			author: botA, login: botALogin, created: attrT0.Add(time.Hour + time.Minute),
 			want: verdictRun,
 		},
 		{
 			name:   "the live engagement sealed no account",
 			claims: []domain.ExecutorClaim{unsealed},
-			author: botA, created: attrT0.Add(10 * time.Minute),
+			author: botA, login: botALogin, created: attrT0.Add(10 * time.Minute),
 			want: verdictUnknown,
 		},
 		{
 			name: "a handover: one engagement unsealed, the other the author's",
 			claims: []domain.ExecutorClaim{
 				func() domain.ExecutorClaim { c := unsealed; c.ReleasedAt = at(time.Minute); return c }(),
-				engagement(botA, attrT0.Add(time.Minute), nil),
+				engagement(botA, botALogin, attrT0.Add(time.Minute), nil),
 			},
-			author: botA, created: attrT0.Add(time.Minute),
+			author: botA, login: botALogin, created: attrT0.Add(time.Minute),
 			want: verdictRun,
 		},
 		{
 			name: "an earlier engagement's App authored it after the org bound another",
 			claims: []domain.ExecutorClaim{
-				engagement(botA, attrT0, at(time.Hour)),
-				engagement(botB, attrT0.Add(2*time.Hour), nil),
+				engagement(botA, botALogin, attrT0, at(time.Hour)),
+				engagement(botB, "other-bot[bot]", attrT0.Add(2*time.Hour), nil),
 			},
-			author: botA, created: attrT0.Add(30 * time.Minute),
+			author: botA, login: botALogin, created: attrT0.Add(30 * time.Minute),
 			want: verdictRun,
 		},
 		{
 			name: "the later engagement's App did not author one opened under the earlier",
 			claims: []domain.ExecutorClaim{
-				engagement(botA, attrT0, at(time.Hour)),
-				engagement(botB, attrT0.Add(2*time.Hour), nil),
+				engagement(botA, botALogin, attrT0, at(time.Hour)),
+				engagement(botB, "other-bot[bot]", attrT0.Add(2*time.Hour), nil),
 			},
-			author: botB, created: attrT0.Add(30 * time.Minute),
+			author: botB, login: "other-bot[bot]", created: attrT0.Add(30 * time.Minute),
 			want: verdictForeign, wantReason: foreignAuthor,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, reason := judgeSealedAuthor(tc.claims, tc.author, tc.created)
+			got, reason := judgeSealedAuthor(tc.claims, tc.author, tc.login, tc.created)
 			if got != tc.want || reason != tc.wantReason {
 				t.Errorf("judgeSealedAuthor = (%v, %q), want (%v, %q)", got, reason, tc.want, tc.wantReason)
 			}
@@ -149,9 +170,24 @@ func (f fakeEngagements) ClaimsForConversationSystem(_ context.Context, _, conve
 	return f.claims[conversationID], nil
 }
 
-// authoredPRNode is an open pull request node as RefreshPRs' fragment returns
-// it, PR_<number> in octo/repo, opened at created by the account authorID
-// (a Bot when bot is set).
+// flakyCommissioner fails its first commissioned-by stamp, and leaves every
+// other entity method to the real store.
+type flakyCommissioner struct {
+	db.EntityStore
+	failures int
+}
+
+func (f *flakyCommissioner) StampCommissionedByIfUnsetSystem(ctx context.Context, orgID, entityID, userID string) (bool, error) {
+	if f.failures > 0 {
+		f.failures--
+		return false, errors.New("connection reset")
+	}
+	return f.EntityStore.StampCommissionedByIfUnsetSystem(ctx, orgID, entityID, userID)
+}
+
+// authoredPRNode is an open draft pull request node as RefreshPRs' fragment
+// returns it, PR_<number> in octo/repo on head feat-<number>, opened at
+// created by the account authorID (the acme bot when bot is set).
 func authoredPRNode(number int, authorID string, bot bool, created time.Time) string {
 	typename, login := "User", "octocat"
 	if bot {
@@ -161,7 +197,7 @@ func authoredPRNode(number int, authorID string, bot bool, created time.Time) st
 	b, _ := json.Marshal(map[string]any{
 		"id": fmt.Sprintf("PR_%d", number), "number": number, "title": "t", "body": "b",
 		"state": "OPEN", "isDraft": true, "merged": false,
-		"headRefName": "feat", "baseRefName": "main",
+		"headRefName": fmt.Sprintf("feat-%d", number), "baseRefName": "main",
 		"url":        fmt.Sprintf("https://github.com/octo/repo/pull/%d", number),
 		"repository": map[string]any{"nameWithOwner": "octo/repo"},
 		"author":     map[string]any{"__typename": typename, "login": login, "databaseId": id},
@@ -176,6 +212,7 @@ type attributionRig struct {
 	conn    *sql.DB
 	stores  db.Stores
 	seedArt func(domain.Deliverable)
+	stub    *backstopStub
 	rc      *Reconciler
 }
 
@@ -189,8 +226,8 @@ func newAttributionRig(t *testing.T, nodes map[string]string, claims []domain.Ex
 		ConversationQueueStore: stores.ConversationQueue,
 		claims:                 map[string][]domain.ExecutorClaim{attrConversation: claims},
 	}
-	_, client := newBackstopStub(t, nodes)
-	return &attributionRig{conn: conn, stores: stores, seedArt: seedArt,
+	stub, client := newBackstopStub(t, nodes)
+	return &attributionRig{conn: conn, stores: stores, seedArt: seedArt, stub: stub,
 		rc: NewReconciler(&fakeResolver{client: client}, stores, SealedAuthor, nil)}
 }
 
@@ -210,13 +247,14 @@ func (r *attributionRig) seedEntity(t *testing.T, number int) string {
 	return entityID
 }
 
-// seedPR records the run's pull request deliverable for PR_<number>, linked to
-// its entity (seedEntity), and returns both.
+// seedPR records the run's pending pull request deliverable for PR_<number>,
+// as the create records it, linked to its entity (seedEntity), and returns
+// both.
 func (r *attributionRig) seedPR(t *testing.T, number int) (domain.Deliverable, string) {
 	t.Helper()
 	entityID := r.seedEntity(t, number)
-	pr := domain.NewPullRequestDeliverable("octo/repo", number, fmt.Sprintf("PR_%d", number), "feat", "main", "u", "t", "b", true)
-	pr.ConversationID, pr.EntityID = attrConversation, entityID
+	pr := domain.NewPullRequestDeliverable("octo/repo", number, fmt.Sprintf("PR_%d", number), "recorded-head", "main", "u", "t", "b", true)
+	pr.ConversationID, pr.EntityID, pr.Verification = attrConversation, entityID, domain.DeliverableVerificationPending
 	r.seedArt(pr)
 	return pr, entityID
 }
@@ -238,16 +276,25 @@ func (r *attributionRig) attribution(t *testing.T, entityID string) (team, user 
 	return tm.String, us.String
 }
 
+// row reads PR_<number>'s deliverable back, failing when there is none.
+func (r *attributionRig) row(t *testing.T, number int) domain.Deliverable {
+	t.Helper()
+	got := prDeliverableFor(t, r.conn, "octo/repo", number)
+	if got == nil {
+		t.Fatalf("no deliverable for PR_%d", number)
+	}
+	return *got
+}
+
 // countForeignWith swaps the foreign counter for one backed by a manual
-// reader for the rest of the test, and returns a read of its total for
-// disposition.
-func countForeignWith(t *testing.T) func(disposition string) int64 {
+// reader for the rest of the test, and returns a read of its total.
+func countForeignWith(t *testing.T) func() int64 {
 	t.Helper()
 	reader := sdkmetric.NewManualReader()
 	prev := foreignStats.Load()
 	foreignStats.Store(newForeignCounters(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
 	t.Cleanup(func() { foreignStats.Store(prev) })
-	return func(disposition string) int64 {
+	return func() int64 {
 		var rm metricdata.ResourceMetrics
 		if err := reader.Collect(context.Background(), &rm); err != nil {
 			t.Fatalf("collect: %v", err)
@@ -255,12 +302,8 @@ func countForeignWith(t *testing.T) func(disposition string) int64 {
 		var n int64
 		for _, sm := range rm.ScopeMetrics {
 			for _, m := range sm.Metrics {
-				sum, ok := m.Data.(metricdata.Sum[int64])
-				if !ok {
-					continue
-				}
-				for _, dp := range sum.DataPoints {
-					if v, _ := dp.Attributes.Value(attribute.Key("disposition")); v.AsString() == disposition {
+				if sum, ok := m.Data.(metricdata.Sum[int64]); ok {
+					for _, dp := range sum.DataPoints {
 						n += dp.Value
 					}
 				}
@@ -271,39 +314,46 @@ func countForeignWith(t *testing.T) func(disposition string) int64 {
 }
 
 // A run's own pull request — authored by the account sealed into the
-// engagement live when it was opened — is attributed to the run: its entity
-// gets the run's team as owner and the conversation's creator as
-// commissioner.
-func TestReconcile_SealedAuthor_AttributesTheRunsOwnPullRequest(t *testing.T) {
+// engagement live when it was opened — is settled verified: its entity gets
+// the run's team as owner and the conversation's creator as commissioner, and
+// the row's head branch is GitHub's, not the one the run recorded.
+func TestReconcile_SealedAuthor_VerifiesTheRunsOwnPullRequest(t *testing.T) {
 	rig := newAttributionRig(t,
 		map[string]string{"PR_11": authoredPRNode(11, botA, true, attrT0.Add(10*time.Minute))},
-		[]domain.ExecutorClaim{engagement(botA, attrT0, nil)})
-	pr, entityID := rig.seedPR(t, 11)
+		[]domain.ExecutorClaim{engagement(botA, botALogin, attrT0, nil)})
+	_, entityID := rig.seedPR(t, 11)
 
 	rig.reconcile(t)
 
+	got := rig.row(t, 11)
+	if got.Verification != domain.DeliverableVerificationVerified || got.State != domain.DeliverableStatePRDraft {
+		t.Errorf("row = (%q, %q), want verified and still draft", got.Verification, got.State)
+	}
+	if d, _ := domain.ParsePRDeliverableDetails(got.DetailsJSON); d.HeadBranch != "feat-11" || d.NodeID != "PR_11" {
+		t.Errorf("details = %+v, want GitHub's head feat-11 and node PR_11", d)
+	}
 	if team, user := rig.attribution(t, entityID); team != runmode.LocalDefaultTeamID || user != runmode.LocalDefaultUserID {
 		t.Errorf("attribution = (%q, %q), want (%s, %s)", team, user, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID)
 	}
-	if got := prDeliverableFor(t, rig.conn, "octo/repo", 11); got == nil || got.ID == "" || got.DedupKey != pr.DedupKey {
-		t.Errorf("deliverable after the pass = %+v, want it kept", got)
-	}
 }
 
-// The done-when of the change: a run's own pull request is still attributed
-// after the org binds a different App, because the check reads the account
-// the run's own engagement sealed, not the org's current one.
-func TestReconcile_SealedAuthor_AttributesAcrossAnAppRebind(t *testing.T) {
+// The done-when: a run's own pull request is still verified after the org
+// binds a different App, because the check reads the account the run's own
+// engagement sealed, not the org's current one.
+func TestReconcile_SealedAuthor_VerifiesAcrossAnAppRebind(t *testing.T) {
 	rig := newAttributionRig(t,
 		map[string]string{"PR_12": authoredPRNode(12, botA, true, attrT0.Add(10*time.Minute))},
 		[]domain.ExecutorClaim{
-			engagement(botA, attrT0, at(time.Hour)),
-			engagement(botB, attrT0.Add(3*time.Hour), nil),
+			engagement(botA, botALogin, attrT0, at(time.Hour)),
+			engagement(botB, "other-bot[bot]", attrT0.Add(3*time.Hour), nil),
 		})
 	_, entityID := rig.seedPR(t, 12)
 
 	rig.reconcile(t)
 
+	if got := rig.row(t, 12); got.Verification != domain.DeliverableVerificationVerified {
+		t.Errorf("verification = %q, want verified", got.Verification)
+	}
 	if team, _ := rig.attribution(t, entityID); team != runmode.LocalDefaultTeamID {
 		t.Errorf("owning team = %q, want %s", team, runmode.LocalDefaultTeamID)
 	}
@@ -311,80 +361,121 @@ func TestReconcile_SealedAuthor_AttributesAcrossAnAppRebind(t *testing.T) {
 
 // The other half of the done-when: a relayed create naming a pull request
 // someone else authored leaves no owner or commissioner on it, and its
-// deliverable, which offers actions on that pull request, is deleted and
-// counted. The ledger row is not the reconciler's to touch.
-func TestReconcile_SealedAuthor_DeletesAPullRequestTheRunDidNotOpen(t *testing.T) {
+// deliverable is settled foreign and closed, counted once however many passes
+// see it. Closing a draft runs the resolved hook, so a task holding open on it
+// is not left waiting on an approval nobody can give.
+func TestReconcile_SealedAuthor_SettlesAPullRequestTheRunDidNotOpenForeign(t *testing.T) {
 	foreign := countForeignWith(t)
 	rig := newAttributionRig(t,
 		map[string]string{"PR_13": authoredPRNode(13, person, false, attrT0.Add(10*time.Minute))},
-		[]domain.ExecutorClaim{engagement(botA, attrT0, nil)})
+		[]domain.ExecutorClaim{engagement(botA, botALogin, attrT0, nil)})
 	_, entityID := rig.seedPR(t, 13)
+	var resolved []string
+	rig.rc.SetPullRequestResolvedHook(func(_ context.Context, _, id string) { resolved = append(resolved, id) })
 
 	rig.reconcile(t)
+	rig.reconcile(t)
 
+	got := rig.row(t, 13)
+	if got.Verification != domain.DeliverableVerificationForeign || got.State != domain.DeliverableStatePRClosed {
+		t.Errorf("row = (%q, %q), want foreign and closed", got.Verification, got.State)
+	}
 	if team, user := rig.attribution(t, entityID); team != "" || user != "" {
 		t.Errorf("attribution = (%q, %q), want none", team, user)
 	}
-	if got := prDeliverableFor(t, rig.conn, "octo/repo", 13); got != nil {
-		t.Errorf("deliverable after the pass = %+v, want it deleted", got)
+	if n := foreign(); n != 1 {
+		t.Errorf("foreign count after two passes = %d, want 1", n)
 	}
-	if n := foreign(foreignDeleted); n != 1 {
-		t.Errorf("foreign deleted count = %d, want 1", n)
+	if len(resolved) != 1 || resolved[0] != attrConversation {
+		t.Errorf("resolved hook ran for %v, want [%s]", resolved, attrConversation)
+	}
+}
+
+// A row keyed on one pull request with another's node id in its details is
+// checked against the pull request its key names, the one its entity is: a
+// sidecar cannot pass the check with its own pull request's id and have the
+// person's pull request stamped.
+func TestReconcile_SealedAuthor_ChecksThePullRequestTheKeyNames(t *testing.T) {
+	rig := newAttributionRig(t,
+		map[string]string{
+			"PR_14": authoredPRNode(14, person, false, attrT0.Add(10*time.Minute)),
+			"PR_15": authoredPRNode(15, botA, true, attrT0.Add(10*time.Minute)),
+		},
+		[]domain.ExecutorClaim{engagement(botA, botALogin, attrT0, nil)})
+	entityID := rig.seedEntity(t, 14)
+	forged := domain.NewPullRequestDeliverable("octo/repo", 14, "PR_14", "feat", "main", "u", "t", "b", true)
+	forged.DetailsJSON = domain.MarshalPRDeliverableDetails(domain.PRDeliverableDetails{NodeID: "PR_15", HeadBranch: "feat", Base: "main"})
+	forged.ConversationID, forged.EntityID, forged.Verification = attrConversation, entityID, domain.DeliverableVerificationPending
+	rig.seedArt(forged)
+
+	rig.reconcile(t)
+
+	if got := rig.row(t, 14); got.Verification != domain.DeliverableVerificationForeign {
+		t.Errorf("verification = %q, want foreign", got.Verification)
+	}
+	if team, user := rig.attribution(t, entityID); team != "" || user != "" {
+		t.Errorf("the person's pull request was attributed (%q, %q)", team, user)
 	}
 }
 
 // An answer the reconciler cannot read — the engagement live at the creation
-// sealed no account — attributes nothing and deletes nothing.
-func TestReconcile_SealedAuthor_LeavesAnUnsettledPullRequestAlone(t *testing.T) {
-	unsealed := engagement("", attrT0, nil)
-	unsealed.Sources = domain.SourceManifest{eventsource.KindGitHub: {State: domain.SourceSealed}}
+// sealed no account — settles nothing, and the row stays pending.
+func TestReconcile_SealedAuthor_LeavesAnUnsettledPullRequestPending(t *testing.T) {
 	rig := newAttributionRig(t,
-		map[string]string{"PR_14": authoredPRNode(14, botA, true, attrT0.Add(10*time.Minute))},
-		[]domain.ExecutorClaim{unsealed})
-	_, entityID := rig.seedPR(t, 14)
+		map[string]string{"PR_16": authoredPRNode(16, botA, true, attrT0.Add(10*time.Minute))},
+		[]domain.ExecutorClaim{engagement("", "", attrT0, nil)})
+	_, entityID := rig.seedPR(t, 16)
 
 	rig.reconcile(t)
 
+	if got := rig.row(t, 16); got.Verification != domain.DeliverableVerificationPending || got.State != domain.DeliverableStatePRDraft {
+		t.Errorf("row = (%q, %q), want pending and still draft", got.Verification, got.State)
+	}
 	if team, user := rig.attribution(t, entityID); team != "" || user != "" {
 		t.Errorf("attribution = (%q, %q), want none", team, user)
 	}
-	if got := prDeliverableFor(t, rig.conn, "octo/repo", 14); got == nil {
-		t.Error("an unsettled deliverable was deleted")
-	}
 }
 
-// An entity that already has an owner is not judged again: a deliverable
-// attributed on an earlier pass is not deleted by a later one that reads a
-// manifest a re-seal has since replaced.
-func TestReconcile_SealedAuthor_DoesNotRejudgeAnOwnedPullRequest(t *testing.T) {
+// A stamp that fails leaves the row pending, so the next pass stamps again
+// rather than leaving the commissioner unset for good behind an owner that
+// landed.
+func TestReconcile_SealedAuthor_RetriesAFailedStamp(t *testing.T) {
 	rig := newAttributionRig(t,
-		map[string]string{"PR_15": authoredPRNode(15, botA, true, attrT0.Add(10*time.Minute))},
-		[]domain.ExecutorClaim{engagement(botB, attrT0, nil)})
-	_, entityID := rig.seedPR(t, 15)
-	if _, err := rig.stores.Entities.StampOwningTeamIfUnsetSystem(context.Background(), runmode.LocalDefaultOrgID, entityID, runmode.LocalDefaultTeamID); err != nil {
-		t.Fatalf("stamp owner: %v", err)
-	}
+		map[string]string{"PR_17": authoredPRNode(17, botA, true, attrT0.Add(10*time.Minute))},
+		[]domain.ExecutorClaim{engagement(botA, botALogin, attrT0, nil)})
+	_, entityID := rig.seedPR(t, 17)
+	stores := rig.stores
+	stores.Entities = &flakyCommissioner{EntityStore: stores.Entities, failures: 1}
+	_, client := newBackstopStub(t, map[string]string{"PR_17": authoredPRNode(17, botA, true, attrT0.Add(10*time.Minute))})
+	rig.rc = NewReconciler(&fakeResolver{client: client}, stores, SealedAuthor, nil)
 
 	rig.reconcile(t)
+	if got := rig.row(t, 17); got.Verification != domain.DeliverableVerificationPending {
+		t.Fatalf("after a failed stamp, verification = %q, want pending", got.Verification)
+	}
+	rig.reconcile(t)
 
-	if got := prDeliverableFor(t, rig.conn, "octo/repo", 15); got == nil {
-		t.Error("an owned pull request's deliverable was deleted")
+	if got := rig.row(t, 17); got.Verification != domain.DeliverableVerificationVerified {
+		t.Errorf("after the retry, verification = %q, want verified", got.Verification)
+	}
+	if team, user := rig.attribution(t, entityID); team != runmode.LocalDefaultTeamID || user != runmode.LocalDefaultUserID {
+		t.Errorf("attribution = (%q, %q), want (%s, %s)", team, user, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID)
 	}
 }
 
-// The backstop records a deliverable from a pr_created row only for a pull
-// request the row's run opened: a row naming someone else's pull request is
-// counted and never recorded, and the run's own is recorded and, in the same
-// cycle, attributed.
-func TestBackstop_SealedAuthor_RecordsOnlyTheRunsOwnPullRequests(t *testing.T) {
+// The backstop records a pull request from a pr_created row pending, like the
+// create's own row, and the same cycle settles it: the run's own is verified
+// and attributed, someone else's is settled foreign. A foreign row is still a
+// row, so a later cycle neither reads its ledger row again nor counts it again.
+func TestBackstop_SealedAuthor_RecordsPendingAndSettlesInTheSameCycle(t *testing.T) {
 	foreign := countForeignWith(t)
 	rig := newAttributionRig(t,
 		map[string]string{
-			"PR_16": authoredPRNode(16, botA, true, attrT0.Add(10*time.Minute)),
-			"PR_17": authoredPRNode(17, person, false, attrT0.Add(10*time.Minute)),
+			"PR_18": authoredPRNode(18, botA, true, attrT0.Add(10*time.Minute)),
+			"PR_19": authoredPRNode(19, person, false, attrT0.Add(10*time.Minute)),
 		},
-		[]domain.ExecutorClaim{engagement(botA, attrT0, nil)})
-	for _, n := range []int{16, 17} {
+		[]domain.ExecutorClaim{engagement(botA, botALogin, attrT0, nil)})
+	for _, n := range []int{18, 19} {
 		rig.seedEntity(t, n)
 		recordPRCreated(t, rig.stores, reconcileTestHost, attrConversation, "octo/repo", n, fmt.Sprintf("PR_%d", n),
 			domain.DeliverableStatePRDraft, fmt.Sprintf("https://github.com/octo/repo/pull/%d", n))
@@ -392,39 +483,80 @@ func TestBackstop_SealedAuthor_RecordsOnlyTheRunsOwnPullRequests(t *testing.T) {
 
 	rig.reconcile(t)
 
-	if got := prDeliverableFor(t, rig.conn, "octo/repo", 16); got == nil {
-		t.Error("the run's own pull request was not backfilled")
+	if got := rig.row(t, 18); got.Verification != domain.DeliverableVerificationVerified {
+		t.Errorf("the run's own backfilled pull request = %q, want verified", got.Verification)
 	}
-	if team, user := rig.attribution(t, "ent-pr-16"); team != runmode.LocalDefaultTeamID || user != runmode.LocalDefaultUserID {
+	if team, user := rig.attribution(t, "ent-pr-18"); team != runmode.LocalDefaultTeamID || user != runmode.LocalDefaultUserID {
 		t.Errorf("backfilled pull request attribution = (%q, %q), want (%s, %s)", team, user, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID)
 	}
-	if got := prDeliverableFor(t, rig.conn, "octo/repo", 17); got != nil {
-		t.Errorf("someone else's pull request was backfilled: %+v", got)
+	if got := rig.row(t, 19); got.Verification != domain.DeliverableVerificationForeign || got.State != domain.DeliverableStatePRClosed {
+		t.Errorf("someone else's backfilled pull request = (%q, %q), want foreign and closed", got.Verification, got.State)
 	}
-	if team, user := rig.attribution(t, "ent-pr-17"); team != "" || user != "" {
+	if team, user := rig.attribution(t, "ent-pr-19"); team != "" || user != "" {
 		t.Errorf("someone else's pull request attribution = (%q, %q), want none", team, user)
 	}
-	if n := foreign(foreignNotRecorded); n != 1 {
-		t.Errorf("foreign not-recorded count = %d, want 1", n)
+
+	before := len(rig.stub.requested())
+	rig.reconcile(t)
+	if calls := rig.stub.requested()[before:]; len(calls) != 1 || calls[0] != "nodes PR_18" {
+		t.Errorf("second cycle's GitHub calls = %v, want only PR_18's reconcile", calls)
+	}
+	if n := foreign(); n != 1 {
+		t.Errorf("foreign count after two cycles = %d, want 1", n)
 	}
 }
 
-// Local mode takes its records' word: a run's pull request is attributed with
-// no engagement to check it against, whoever GitHub says authored it.
-func TestReconcile_TrustRecords_AttributesWithoutACheck(t *testing.T) {
+// SettleDeliverable settles a pending row on demand, for a person about to
+// act on it: verified for the run's own pull request, foreign for another's.
+func TestSettleDeliverable_SettlesOnDemand(t *testing.T) {
 	rig := newAttributionRig(t,
-		map[string]string{"PR_18": authoredPRNode(18, person, false, attrT0)},
+		map[string]string{
+			"PR_20": authoredPRNode(20, botA, true, attrT0.Add(10*time.Minute)),
+			"PR_21": authoredPRNode(21, person, false, attrT0.Add(10*time.Minute)),
+		},
+		[]domain.ExecutorClaim{engagement(botA, botALogin, attrT0, nil)})
+	rig.seedPR(t, 20)
+	rig.seedPR(t, 21)
+	var resolved []string
+	rig.rc.SetPullRequestResolvedHook(func(_ context.Context, _, id string) { resolved = append(resolved, id) })
+
+	ctx := context.Background()
+	rig.rc.SettleDeliverable(ctx, runmode.LocalDefaultOrgID, rig.row(t, 20))
+	rig.rc.SettleDeliverable(ctx, runmode.LocalDefaultOrgID, rig.row(t, 21))
+
+	if got := rig.row(t, 20); got.Verification != domain.DeliverableVerificationVerified {
+		t.Errorf("the run's own = %q, want verified", got.Verification)
+	}
+	if got := rig.row(t, 21); got.Verification != domain.DeliverableVerificationForeign || got.State != domain.DeliverableStatePRClosed {
+		t.Errorf("someone else's = (%q, %q), want foreign and closed", got.Verification, got.State)
+	}
+	if len(resolved) != 1 || resolved[0] != attrConversation {
+		t.Errorf("resolved hook ran for %v, want [%s] once, for the foreign draft", resolved, attrConversation)
+	}
+}
+
+// Local mode takes its records' word: a run's pending pull request is
+// verified and attributed with no engagement to check it against, whoever
+// GitHub says authored it, and on demand without reading GitHub at all.
+func TestTrustRecords_VerifiesWithoutACheck(t *testing.T) {
+	rig := newAttributionRig(t,
+		map[string]string{"PR_22": authoredPRNode(22, person, false, attrT0)},
 		nil)
-	_, entityID := rig.seedPR(t, 18)
-	_, client := newBackstopStub(t, map[string]string{"PR_18": authoredPRNode(18, person, false, attrT0)})
+	_, entityID := rig.seedPR(t, 22)
+	rig.seedPR(t, 23)
+	_, client := newBackstopStub(t, map[string]string{"PR_22": authoredPRNode(22, person, false, attrT0)})
 	rig.rc = NewReconciler(&fakeResolver{client: client}, rig.stores, TrustRecords, nil)
 
 	rig.reconcile(t)
-
+	if got := rig.row(t, 22); got.Verification != domain.DeliverableVerificationVerified {
+		t.Errorf("verification = %q, want verified", got.Verification)
+	}
 	if team, user := rig.attribution(t, entityID); team != runmode.LocalDefaultTeamID || user != runmode.LocalDefaultUserID {
 		t.Errorf("attribution = (%q, %q), want (%s, %s)", team, user, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID)
 	}
-	if got := prDeliverableFor(t, rig.conn, "octo/repo", 18); got == nil {
-		t.Error("a trusted record's deliverable was deleted")
+
+	rig.rc.SettleDeliverable(context.Background(), runmode.LocalDefaultOrgID, rig.row(t, 23))
+	if got := rig.row(t, 23); got.Verification != domain.DeliverableVerificationVerified {
+		t.Errorf("on demand, verification = %q, want verified", got.Verification)
 	}
 }

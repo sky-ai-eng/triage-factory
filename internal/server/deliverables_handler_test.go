@@ -1078,3 +1078,63 @@ func TestDeliverableRoutes_AnDeliverableOnAnotherHost(t *testing.T) {
 		t.Errorf("deliverable state = %q, want draft (unchanged)", got)
 	}
 }
+
+// TestDeliverableActions_RefuseAnUnverifiedPullRequest: every route that
+// writes to a pull request under TF's credential refuses a row TF has not
+// confirmed its run opened, before it reaches GitHub. A pending row with no
+// reconciler to settle it is refused as not yet confirmed, and a foreign one
+// as never to be acted on.
+func TestDeliverableActions_RefuseAnUnverifiedPullRequest(t *testing.T) {
+	for _, verification := range []string{domain.DeliverableVerificationPending, domain.DeliverableVerificationForeign} {
+		t.Run(verification, func(t *testing.T) {
+			keyring.MockInit()
+			srv := newTestServer(t)
+			artID, _, _ := seedDraftPRDeliverableWithConversation(t, srv, "unv-"+verification, "acme", "api", 42)
+			execSQL(t, srv.db, `UPDATE deliverables SET verification = ? WHERE id = ?`, verification, artID)
+
+			for _, call := range []struct{ method, path string }{
+				{http.MethodPost, "/api/deliverables/" + artID + "/approve"},
+				{http.MethodPost, "/api/deliverables/" + artID + "/dismiss"},
+				{http.MethodPost, "/api/deliverables/" + artID + "/reject"},
+				{http.MethodPatch, "/api/deliverables/" + artID + "/pr"},
+			} {
+				var body any
+				if call.method == http.MethodPatch {
+					body = map[string]any{"title": "t", "body": "b"}
+				}
+				rec := doJSON(t, srv, call.method, call.path, body)
+				var resp struct {
+					Errors []struct {
+						Reason string `json:"reason"`
+					} `json:"errors"`
+				}
+				_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+				if rec.Code != http.StatusConflict || len(resp.Errors) != 1 || resp.Errors[0].Reason != httpx.ReasonDeliverableUnverified {
+					t.Errorf("%s %s = %d %s, want 409 %s", call.method, call.path, rec.Code, rec.Body.String(), httpx.ReasonDeliverableUnverified)
+				}
+			}
+			if got := getDeliverable(t, srv, artID); got.State != domain.DeliverableStatePRDraft {
+				t.Errorf("deliverable state = %q, want the draft untouched", got.State)
+			}
+		})
+	}
+}
+
+// TestDeliverableReject_SettlesAPendingRowOnDemand: a pending row is settled
+// by the click itself, so a person acting on a run's pull request does not
+// wait on the reconciler's next pass.
+func TestDeliverableReject_SettlesAPendingRowOnDemand(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	newRejectStub(t, srv, livePR("open", true, false), liveNode("OPEN", true, false), http.StatusNoContent, "")
+	artID, _, _ := seedDraftPRDeliverableWithConversation(t, srv, "rejpend", "acme", "api", 42)
+	execSQL(t, srv.db, `UPDATE deliverables SET verification = ? WHERE id = ?`, domain.DeliverableVerificationPending, artID)
+
+	rec := doJSON(t, srv, http.MethodPost, "/api/deliverables/"+artID+"/reject", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reject = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := getDeliverable(t, srv, artID); got.Verification != domain.DeliverableVerificationVerified || got.State != domain.DeliverableStatePRClosed {
+		t.Errorf("deliverable = (%q, %q), want verified and closed", got.Verification, got.State)
+	}
+}

@@ -41,9 +41,10 @@ type clientResolver interface {
 // non-terminal deliverables. Writes route through the admin pool (UpsertSystem) —
 // the reconciler has no JWT-claims context in either tier.
 //
-// It is also where a run's pull request is attributed to the run: the
-// reconciler holds GitHub's copy of every pull request it reconciles, which
-// is what its Authorship checks the run's record against (attribute).
+// It is also where a pull request create's deliverable, recorded pending, is
+// settled: the reconciler holds GitHub's copy of every pull request it
+// reconciles, which is what its Authorship checks the run's record against
+// (settle).
 //
 // The resolver's clients reach the org's current GitHub host and no other, so
 // only deliverables recorded on that host (their scope) are reconciled. Another
@@ -157,8 +158,7 @@ const prBackstopWindow = 7 * 24 * time.Hour
 // nothing to find; recovering that record is the recording path's job, and
 // once its row lands this pass handles it like any other.
 //
-// The ledger row decides both questions the pass answers, under SealedAuthor
-// only where GitHub's answer agrees (below). Whether TF opened
+// The ledger row decides both questions the pass answers. Whether TF opened
 // the pull request: one with no pr_created row was opened by someone else (a
 // person working from a branch a run pushed, for example) and gets no
 // deliverable, because a deliverable for it would hold its task open on an approval
@@ -181,17 +181,11 @@ const prBackstopWindow = 7 * 24 * time.Hour
 // repository with; its target is the current name. When every pull request
 // already has its deliverable, the pass makes no GitHub call.
 //
-// Under SealedAuthor the row is the sidecar's word, relayed like the
-// deliverable it stands in for, so it is taken only where GitHub's answer
-// agrees (judge): a pull request is recorded only when its author is the
-// account sealed into the engagement of the row's conversation that was live
-// when it was opened. One GitHub's answer shows the run did not open is
-// counted and never recorded, and one the answer cannot settle is left for a
-// later pass.
-//
-// The deliverable is recorded in the state the verb opened the pull request in,
-// and the reconcile that follows applies any transition since and attributes
-// it. The write is insert-if-absent, so a pull request recorded after the read
+// The deliverable is recorded pending, like the create's own, in the state the
+// verb opened the pull request in: the row is relayed, like the deliverable it
+// stands in for, so whether its run opened the pull request is settled by the
+// reconcile that follows (settle), which also applies any transition since. A
+// row settled foreign is still a row, so its ledger row is not read again. The write is insert-if-absent, so a pull request recorded after the read
 // is left untouched and repeating the pass changes nothing. Best-effort per
 // owner and per pull request: a credential or GitHub failure skips it this
 // pass.
@@ -221,7 +215,6 @@ func (rc *Reconciler) BackfillPRDeliverables(ctx context.Context, orgID string) 
 		addNodeID(nodeIDsByOwner, owner, act.NodeID)
 	}
 
-	reads := newAttributionReads(rc)
 	for _, owner := range sortedOwners(nodeIDsByOwner) {
 		client, err := rc.resolver.ClientFor(ctx, orgID, owner)
 		if err != nil {
@@ -244,14 +237,7 @@ func (rc *Reconciler) BackfillPRDeliverables(ctx context.Context, orgID string) 
 					"org", orgID, "target", act.Target, "node_id", nodeID)
 				continue
 			}
-			switch v, reason := rc.judge(ctx, orgID, act.ConversationID, snap, reads); v {
-			case verdictRun:
-				rc.recordBackfilledPR(ctx, orgID, host, act, snap)
-			case verdictForeign:
-				countForeign(ctx, orgID, reason, foreignNotRecorded)
-				reconcileLog.ErrorContext(ctx, "backstop: a pr_created row names a pull request its run did not open; not recording it",
-					"org", orgID, "conversation", act.ConversationID, "target", act.Target, "node_id", nodeID, "reason", reason)
-			}
+			rc.recordBackfilledPR(ctx, orgID, host, act, snap)
 		}
 	}
 	return nil
@@ -308,6 +294,7 @@ func (rc *Reconciler) recordBackfilledPR(ctx context.Context, orgID, host string
 	art.OrgID = orgID
 	art.TeamID = act.TeamID
 	art.Scope = host
+	art.Verification = domain.DeliverableVerificationPending
 	if rc.entities != nil {
 		entity, err := rc.entities.GetByExternalIDSystem(ctx, orgID, domain.ProviderGitHub, host, act.NodeID)
 		if err != nil {
@@ -336,9 +323,9 @@ func (rc *Reconciler) recordBackfilledPR(ctx context.Context, orgID, host string
 // transition broadcasts over the WS hub (as
 // deliverable_updated on the owning conversation, so the conversation view's
 // deliverable-derived surface refreshes), and a draft pull request that stops
-// being unresolved runs the resolved hook. A pull request whose entity has no
-// owner yet is attributed first (attribute), which may delete its deliverable
-// instead. Returns the deliverables that transitioned, carrying their new
+// being unresolved runs the resolved hook. A pending pull request is settled
+// first (settle); one settled foreign is closed by it and transitions no
+// further. Returns the deliverables that transitioned, carrying their new
 // state.
 //
 // Best-effort per deliverable: a single GitHub or write failure is logged and
@@ -364,7 +351,7 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 	reads := newRegistryReads(rc)
 	prNodeIDsByOwner := map[string]map[string]bool{}
 	for _, a := range arts {
-		nodeID := deliverablePRNodeID(a)
+		nodeID := prNodeID(a)
 		if nodeID == "" {
 			continue
 		}
@@ -407,10 +394,10 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 		}
 	}
 
-	// Pass 3 — attribute each pull request whose entity has no owner yet,
-	// apply each transition, then run the draft-resolved closure once per
-	// conversation whose draft pull request stopped being unresolved this
-	// cycle. A deliverable attribution deletes is not transitioned.
+	// Pass 3 — settle each pending pull request, apply each transition, then
+	// run the draft-resolved closure once per conversation whose draft pull
+	// request stopped being unresolved this cycle, including by being settled
+	// foreign.
 	//
 	// The write-back runs on a detached ctx (the fetches above stayed
 	// cancellable). A terminal deliverable drops out of BOTH tiers' non-terminal
@@ -426,8 +413,18 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 	resolvedConversations := map[string]bool{}
 	attribution := newAttributionReads(rc)
 	for _, a := range arts {
-		if snap, ok := snapshots[deliverablePRNodeID(a)]; ok && rc.attribute(writeCtx, orgID, a, snap, attribution) {
-			continue
+		if snap, ok := snapshots[prNodeID(a)]; ok && a.Verification == domain.DeliverableVerificationPending {
+			prev := a
+			var v verdict
+			var moved bool
+			if a, v, moved = rc.settle(writeCtx, orgID, a, &snap, attribution); moved && v == verdictForeign {
+				rc.broadcast(orgID, a)
+				transitioned = append(transitioned, a)
+				if a.ConversationID != "" && isDraftResolved(prev, a.State) {
+					resolvedConversations[a.ConversationID] = true
+				}
+				continue
+			}
 		}
 		newState, ok := nextState(a, snapshots)
 		if !ok || newState == a.State {
@@ -496,21 +493,14 @@ func (rc *Reconciler) applyTransition(ctx context.Context, orgID string, a domai
 // refetch the conversation on this event without touching status. Skipped for a
 // detached deliverable (no conversation) or unset hub.
 func (rc *Reconciler) broadcast(orgID string, a domain.Deliverable) {
-	rc.publish(orgID, a.ConversationID, map[string]any{"deliverable_id": a.ID, "state": a.State})
-}
-
-// publish sends a deliverable_updated event carrying data on conversationID,
-// and the resource-wide ping beside it. A deleted deliverable is published
-// with no state, so the conversation view refetches and finds it gone.
-func (rc *Reconciler) publish(orgID, conversationID string, data map[string]any) {
-	if rc.ws == nil || conversationID == "" {
+	if rc.ws == nil || a.ConversationID == "" {
 		return
 	}
 	rc.ws.Broadcast(websocket.Event{
 		Type:           "deliverable_updated",
 		OrgID:          orgID,
-		ConversationID: conversationID,
-		Data:           data,
+		ConversationID: a.ConversationID,
+		Data:           map[string]any{"deliverable_id": a.ID, "state": a.State},
 	})
 	// And the resource-wide ping beside it, for the counters that follow a SET
 	// rather than one conversation. The event above is addressed to whoever is
@@ -528,8 +518,7 @@ func (rc *Reconciler) publish(orgID, conversationID string, data map[string]any)
 func nextState(a domain.Deliverable, snapshots map[string]domain.PRSnapshot) (string, bool) {
 	switch a.Kind {
 	case domain.DeliverableKindPullRequest:
-		d, _ := domain.ParsePRDeliverableDetails(a.DetailsJSON)
-		snap, ok := snapshots[d.NodeID]
+		snap, ok := snapshots[prNodeID(a)]
 		if !ok {
 			return "", false
 		}
@@ -606,12 +595,19 @@ func prOwner(target string) (string, bool) {
 	return owner, ok
 }
 
-// deliverablePRNodeID is the node id of the pull request a pull request or review
-// deliverable is about, from its details; "" when the row carries none.
-func deliverablePRNodeID(a domain.Deliverable) string {
+// prNodeID is the node id of the pull request a pull request or review
+// deliverable is about; "" when the row carries none. A pull request's is the
+// one its key names (domain.DeliverablePullRequestNodeID), the pull request
+// its entity is linked to, and its details only where the key names none:
+// details are the recording run's to fill, so a pull request read through
+// them could be another than the one the row is about.
+func prNodeID(a domain.Deliverable) string {
 	if a.Kind == domain.DeliverableKindReview {
 		d, _ := domain.ParseReviewDeliverableDetails(a.DetailsJSON)
 		return d.NodeID
+	}
+	if nodeID, ok := domain.DeliverablePullRequestNodeID(a); ok {
+		return nodeID
 	}
 	d, _ := domain.ParsePRDeliverableDetails(a.DetailsJSON)
 	return d.NodeID

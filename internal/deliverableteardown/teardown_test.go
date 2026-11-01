@@ -133,6 +133,7 @@ func draftPRIn(conversationID, repoPath string, number int, id string) domain.De
 	a.ID = id
 	a.ConversationID = conversationID
 	a.TeamID = "team"
+	a.Verification = domain.DeliverableVerificationVerified
 	return a
 }
 
@@ -141,6 +142,7 @@ func stagedReview(conversationID string) domain.Deliverable {
 	a.ID = "art_review"
 	a.ConversationID = conversationID
 	a.TeamID = "team"
+	a.Verification = domain.DeliverableVerificationVerified
 	rd, _ := domain.ParseReviewDeliverableDetails(a.DetailsJSON)
 	rd.ReviewBody = "agent draft body"
 	rd.ReviewEvent = "COMMENT"
@@ -206,6 +208,31 @@ func TestTeardown_ResolvesBothKinds(t *testing.T) {
 	// probe between them can reach GitHub and must not run inside a write tx.
 	if deps.batches != 2 {
 		t.Errorf("batches = %d, want 2 (the credential pre-read, then the writes)", deps.batches)
+	}
+}
+
+// TestTeardown_ClosesAnUnverifiedDraftTFSideOnly: a draft TF has not
+// confirmed its run opened is flipped to closed with the rest, but its pull
+// request is not closed on GitHub and no org-credential write is audited,
+// since the pull request may be someone else's.
+func TestTeardown_ClosesAnUnverifiedDraftTFSideOnly(t *testing.T) {
+	client, closes := closingGitHub(t)
+	pending := draftPR("conv")
+	pending.Verification = domain.DeliverableVerificationPending
+	stores := &fakeStores{
+		convs:        []domain.Conversation{{ID: "conv"}},
+		deliverables: map[string][]domain.Deliverable{"conv": {pending}},
+	}
+	deps := &fakeDeps{stores: stores, resolver: oneClientResolver{client: client}}
+
+	if err := Teardown(context.Background(), deps, "org", "task", domain.PerformedByPerson, "user-1"); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if len(stores.upserted) != 1 || stores.upserted[0].State != domain.DeliverableStatePRClosed {
+		t.Errorf("upserts = %+v, want the draft flipped to closed", stores.upserted)
+	}
+	if *closes != 0 || len(stores.recorded) != 0 {
+		t.Errorf("GitHub closes = %d, audit rows = %d, want neither for an unverified draft", *closes, len(stores.recorded))
 	}
 }
 

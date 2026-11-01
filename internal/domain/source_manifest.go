@@ -67,14 +67,16 @@ type SourceEntry struct {
 	// state. The refresh sweep re-seals an engagement whose sealed credential
 	// is close to it.
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
-	// AccountID is the provider's id for the account the sealed credential
-	// acts as, for a sealed source whose seal learned one. On the GitHub entry
-	// it is the bot user of the App the engagement's tokens were minted from,
-	// the author of every pull request the run opens, which is what the
-	// reconciler checks a pull request's author against before attributing it
-	// to the run. Empty for every other source and state, and for a seal that
-	// could not learn a real id.
-	AccountID string `json:"account_id,omitempty"`
+	// AccountID and AccountLogin are the account the sealed credential acts
+	// as, for a sealed source whose seal learned it. On the GitHub entry they
+	// are the bot user of the App the engagement's tokens were minted from,
+	// the author of every pull request the run opens: GitHub's id for it,
+	// empty where the App's bot id is not stored, and its "<slug>[bot]"
+	// login. The reconciler checks a pull request's author against them
+	// before it treats the pull request as the run's. Both empty for every
+	// other source and state, and for a seal that could not learn the account.
+	AccountID    string `json:"account_id,omitempty"`
+	AccountLogin string `json:"account_login,omitempty"`
 }
 
 // SourceManifest is the record of which source credentials one executor

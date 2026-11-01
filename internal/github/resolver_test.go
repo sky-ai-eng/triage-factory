@@ -1085,27 +1085,29 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 	})
 }
 
-// TestResolver_AppAccountFor pins whose account the App credential reports:
-// the bot user of the App the org mints from, and nothing for an org whose
-// tokens come from anything else, however its commit identity resolves.
-func TestResolver_AppAccountFor(t *testing.T) {
+// TestResolver_AppBotAccountFor pins whose account the App credential
+// reports: the bot of the App the org mints from, with its id where stored,
+// and nothing for an org whose tokens come from anything else, however its
+// commit identity resolves.
+func TestResolver_AppBotAccountFor(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		apps   *fakeApps
 		agents *fakeAgents
-		want   string
+		want   BotAccount
 		wantOK bool
 	}{
 		{
-			name:   "active App reports its bot user",
+			name:   "active App reports its bot",
 			apps:   &fakeApps{app: &domain.OrgGitHubApp{OrgID: "org-1", Active: true, Slug: "acme-bot", BotUserID: 41898282}},
 			agents: &fakeAgents{},
-			want:   "41898282", wantOK: true,
+			want:   BotAccount{ID: "41898282", Login: "acme-bot[bot]"}, wantOK: true,
 		},
 		{
-			name:   "active App with no stored bot user reports none",
+			name:   "active App with no stored bot user id reports the login alone",
 			apps:   &fakeApps{app: &domain.OrgGitHubApp{OrgID: "org-1", Active: true, Slug: "acme-bot"}},
 			agents: &fakeAgents{},
+			want:   BotAccount{Login: "acme-bot[bot]"}, wantOK: true,
 		},
 		{
 			name:   "staged App mints nothing, so reports none",
@@ -1123,9 +1125,9 @@ func TestResolver_AppAccountFor(t *testing.T) {
 			// and only the App's own answer is reported.
 			secrets := &fakeSecrets{vals: map[string]string{integrations.KeyGitHubPAT: "ghp_test"}}
 			r := newTestResolver(secrets, tc.apps, &fakeOrgs{base: "https://github.com"}, tc.agents, nil)
-			got, ok := AppAccount(context.Background(), r, "org-1")
+			got, ok := AppBotAccount(context.Background(), r, "org-1")
 			if got != tc.want || ok != tc.wantOK {
-				t.Errorf("AppAccount = (%q, %v), want (%q, %v)", got, ok, tc.want, tc.wantOK)
+				t.Errorf("AppBotAccount = (%+v, %v), want (%+v, %v)", got, ok, tc.want, tc.wantOK)
 			}
 		})
 	}

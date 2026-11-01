@@ -231,6 +231,35 @@ func (ah *Handler) loadDeliverable(w http.ResponseWriter, r *http.Request, orgID
 	return art, true
 }
 
+// actionableOr409 answers whether a person may act on pull request deliverable
+// art through TF, writing a 409 when they may not. A pending row is settled
+// first, through the reconciler, so the click does not wait on its next pass,
+// and read back under the caller's claims; a row still pending, or one GitHub
+// showed its run did not open, is refused. Only a verified row's pull request
+// is known to be the run's. ok is false when a response has been written; the
+// row returned is the one read back.
+func (ah *Handler) actionableOr409(w http.ResponseWriter, r *http.Request, orgID, userID string, art *domain.Deliverable) (*domain.Deliverable, bool) {
+	if art.Verification == domain.DeliverableVerificationPending && ah.reconciler != nil {
+		if rc := ah.reconciler(); rc != nil {
+			rc.SettleDeliverable(r.Context(), orgID, *art)
+			fresh, ok := ah.loadDeliverable(w, r, orgID, userID, art.ID)
+			if !ok {
+				return nil, false
+			}
+			art = fresh
+		}
+	}
+	if art.Actionable() {
+		return art, true
+	}
+	msg := "TF has not yet confirmed that this run opened this pull request; try again shortly"
+	if art.Verification == domain.DeliverableVerificationForeign {
+		msg = "GitHub shows this run did not open this pull request, so TF will not act on it"
+	}
+	httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonDeliverableUnverified, Message: msg})
+	return nil, false
+}
+
 // deliverablePullRequest resolves the pull request a PR or review deliverable is
 // about under the caller's claims: the repository registry row its entity
 // references, read by id, and the number the entity's key carries
@@ -436,6 +465,9 @@ func (ah *Handler) handleDeliverablePRUpdate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if !requireDeliverableKind(w, art, domain.DeliverableKindPullRequest, "a pull request") {
+		return
+	}
+	if art, ok = ah.actionableOr409(w, r, orgID, userID, art); !ok {
 		return
 	}
 
@@ -784,6 +816,9 @@ func (ah *Handler) handleDeliverableApprove(w http.ResponseWriter, r *http.Reque
 		httpx.Conflict(w, "deliverables of kind "+art.Kind+" cannot be approved")
 		return
 	}
+	if art, ok = ah.actionableOr409(w, r, orgID, userID, art); !ok {
+		return
+	}
 	gh, prRef, ok := ah.ghForDeliverable(w, r, orgID, art)
 	if !ok {
 		return
@@ -924,6 +959,9 @@ func (ah *Handler) handleDeliverableDismiss(w http.ResponseWriter, r *http.Reque
 	if !requireDeliverableKind(w, art, domain.DeliverableKindPullRequest, "a pull request") {
 		return
 	}
+	if art, ok = ah.actionableOr409(w, r, orgID, userID, art); !ok {
+		return
+	}
 
 	// Only a draft PR can be dismissed. An already-open / merged / closed PR is
 	// terminal — there's no draft to abandon — so 409 rather than re-closing a PR
@@ -1032,6 +1070,9 @@ func (ah *Handler) handleDeliverableReject(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if !requireDeliverableKind(w, art, domain.DeliverableKindPullRequest, "a pull request") {
+		return
+	}
+	if art, ok = ah.actionableOr409(w, r, orgID, userID, art); !ok {
 		return
 	}
 	// Only a draft awaits a decision. A PR the user already opened, or one a

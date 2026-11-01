@@ -72,7 +72,9 @@ type Deps interface {
 }
 
 // Teardown resolves EVERY unresolved deliverable the task's conversations hold.
-// Each draft PR is flipped to closed and then closed on GitHub; each pending
+// Each draft PR is flipped to closed and then closed on GitHub, unless TF has
+// not confirmed its run opened it (domain.Deliverable.Actionable), which is
+// closed TF-side only; each pending
 // review (finalized or not) is flipped to dismissed, which is its whole
 // resolution — a review is staged TF-side, so there is no GitHub object to
 // retire and no org-credential write to audit.
@@ -148,6 +150,12 @@ func Teardown(ctx context.Context, deps Deps, orgID, taskID, performedBy, actorU
 				closed.State = domain.DeliverableStatePRClosed
 				if err := st.UpsertDeliverable(ctx, orgID, closed); err != nil {
 					return fmt.Errorf("upsert closed draft pr: %w", err)
+				}
+				// A row not yet confirmed as its run's is closed here only:
+				// closing its pull request on GitHub would act, under TF's
+				// credential, on one the run may not have opened.
+				if !pr.Actionable() {
+					continue
 				}
 				act := domain.DeliverableAction(&pr, performedBy, actorUserID, domain.ActionPRClosed,
 					domain.DeliverableStatePRDraft, domain.DeliverableStatePRClosed,

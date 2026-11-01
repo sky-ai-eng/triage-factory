@@ -2,23 +2,26 @@ package reconcile
 
 import (
 	"context"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 )
 
-// Authorship is how the reconciler decides whether the conversation a pull
-// request deliverable, or a pr_created ledger row, names opened the pull
-// request. It decides it before stamping the pull request's entity with the
-// conversation's team (owning_team_id, the first tier of the router's owner
-// ladder) and creator (commissioned_by_user_id), and before the backstop
-// records a deliverable from a ledger row.
+// Authorship is how the reconciler settles a pending pull request deliverable
+// (domain.DeliverableVerificationPending): whether the conversation that
+// recorded it opened the pull request. A row it settles verified gets the
+// conversation's team stamped on the pull request's entity as its owner
+// (owning_team_id, the first tier of the router's owner ladder) and its
+// creator as commissioner (commissioned_by_user_id), and becomes actionable
+// through TF. A row it settles foreign is closed and never acted on.
 type Authorship int
 
 const (
@@ -28,11 +31,11 @@ const (
 	TrustRecords Authorship = iota
 	// SealedAuthor takes GitHub's word: the pull request's author must be
 	// the GitHub account sealed into the conversation's engagement that was
-	// live when GitHub opened it (domain.SourceEntry.AccountID on the claim's
-	// github entry). Multi mode, where a run's records are relayed from its
-	// sidecar and nothing that applies them saw the create, so a record can
-	// name any pull request. Org GitHub credentials are App-only there, so
-	// the account is a bot only TF acts as.
+	// live when GitHub opened it (the claim's github manifest entry). Multi
+	// mode, where a run's records are relayed from its sidecar and nothing
+	// that applies them saw the create, so a record can name any pull
+	// request. Org GitHub credentials are App-only there, so the account is a
+	// bot only TF acts as.
 	SealedAuthor
 )
 
@@ -41,9 +44,9 @@ type verdict int
 
 const (
 	// verdictUnknown: the answer cannot be read — GitHub returned no author
-	// id or creation time, the conversation is gone, or the engagement live
-	// at the creation sealed no account. Nothing is stamped, deleted or
-	// backfilled, and a later pass asks again.
+	// or creation time, the conversation is gone, or the engagement live at
+	// the creation sealed no account. The row stays pending, and a later pass
+	// asks again.
 	verdictUnknown verdict = iota
 	// verdictRun: the conversation's run opened it.
 	verdictRun
@@ -62,29 +65,21 @@ const (
 	foreignNoEngagement = "no_engagement"
 )
 
-// What the counter records was done with a foreign pull request.
-const (
-	// foreignDeleted: the reconciler deleted the deliverable that named it.
-	foreignDeleted = "deleted"
-	// foreignNotRecorded: the backstop did not record a deliverable from the
-	// ledger row that named it.
-	foreignNotRecorded = "not_recorded"
-)
-
 // claimSkew is how far GitHub's clock and the database's may disagree about
 // when a pull request was opened: an engagement counts as live at a creation
 // up to this long before it was claimed and after it was released.
 const claimSkew = 2 * time.Minute
 
 // judgeSealedAuthor decides whether claims — one conversation's engagements —
-// include the one that opened a pull request authorID opened at created: an
-// engagement live at created, within claimSkew, whose sealed GitHub account is
-// authorID. When none is and every live engagement sealed an account, the
-// answer is foreign, as it is when no engagement was live at all. A live
-// engagement that sealed no account (a seal that could not learn one, or one
-// recorded before seals recorded it) leaves the answer unknown, unless another
-// live engagement's account is the author.
-func judgeSealedAuthor(claims []domain.ExecutorClaim, authorID string, created time.Time) (verdict, string) {
+// include the one that opened a pull request created at created by the
+// account authorID / authorLogin (GitHub's id and login for it): an engagement
+// live at created, within claimSkew, whose sealed GitHub account is that
+// account (sealedAuthorIs). When none is and every live engagement sealed an
+// account, the answer is foreign, as it is when no engagement was live at all.
+// A live engagement that sealed no account (a seal that could not learn one,
+// or one sealed before seals recorded it) leaves the answer unknown, unless
+// another live engagement's account is the author.
+func judgeSealedAuthor(claims []domain.ExecutorClaim, authorID, authorLogin string, created time.Time) (verdict, string) {
 	live, unsealed := false, false
 	for _, c := range claims {
 		if created.Before(c.ClaimedAt.Add(-claimSkew)) {
@@ -94,11 +89,11 @@ func judgeSealedAuthor(claims []domain.ExecutorClaim, authorID string, created t
 			continue
 		}
 		live = true
-		e, ok := c.Sources.Entry(eventsource.KindGitHub)
-		switch {
-		case !ok || e.AccountID == "":
+		e, _ := c.Sources.Entry(eventsource.KindGitHub)
+		switch known, is := sealedAuthorIs(e, authorID, authorLogin); {
+		case !known:
 			unsealed = true
-		case e.AccountID == authorID:
+		case is:
 			return verdictRun, ""
 		}
 	}
@@ -110,6 +105,22 @@ func judgeSealedAuthor(claims []domain.ExecutorClaim, authorID string, created t
 	default:
 		return verdictForeign, foreignAuthor
 	}
+}
+
+// sealedAuthorIs compares the account sealed on github entry e with a pull
+// request's author: by GitHub's id when both carry one, which a rename leaves
+// alone, else by login, case-insensitively as GitHub compares logins. A bot's
+// "<slug>[bot]" login is held by its App alone, so it names the account where
+// the App's bot id was never stored. known is false when either side has
+// neither.
+func sealedAuthorIs(e domain.SourceEntry, authorID, authorLogin string) (known, is bool) {
+	switch {
+	case e.AccountID != "" && authorID != "":
+		return true, e.AccountID == authorID
+	case e.AccountLogin != "" && authorLogin != "":
+		return true, strings.EqualFold(e.AccountLogin, authorLogin)
+	}
+	return false, false
 }
 
 // attributionReads are the claim and conversation reads one pass makes, each
@@ -159,14 +170,14 @@ func (r *attributionReads) creator(ctx context.Context, orgID, conversationID st
 }
 
 // judge decides whether conversationID's run opened the pull request snap is
-// GitHub's copy of, under the reconciler's Authorship. A read failure is
-// unknown: attribution is best-effort, and nothing is stamped or deleted on
-// an answer that was not read.
-func (rc *Reconciler) judge(ctx context.Context, orgID, conversationID string, snap domain.PRSnapshot, reads *attributionReads) (verdict, string) {
+// GitHub's copy of, under the reconciler's Authorship. snap is unread (nil)
+// only under TrustRecords, which needs nothing from it. A read failure is
+// unknown: nothing is settled on an answer that was not read.
+func (rc *Reconciler) judge(ctx context.Context, orgID, conversationID string, snap *domain.PRSnapshot, reads *attributionReads) (verdict, string) {
 	if rc.authorship == TrustRecords {
 		return verdictRun, ""
 	}
-	if conversationID == "" || snap.AuthorID == "" {
+	if conversationID == "" || snap == nil || (snap.AuthorID == "" && snap.Author == "") {
 		return verdictUnknown, ""
 	}
 	created, err := time.Parse(time.RFC3339, snap.CreatedAt)
@@ -175,58 +186,80 @@ func (rc *Reconciler) judge(ctx context.Context, orgID, conversationID string, s
 	}
 	claims, err := reads.conversationClaims(ctx, orgID, conversationID)
 	if err != nil {
-		reconcileLog.WarnContext(ctx, "read the conversation's engagements failed; leaving the pull request unattributed this pass",
+		reconcileLog.WarnContext(ctx, "read the conversation's engagements failed; leaving the pull request pending this pass",
 			"org", orgID, "conversation", conversationID, "error", err)
 		return verdictUnknown, ""
 	}
-	return judgeSealedAuthor(claims, snap.AuthorID, created)
+	return judgeSealedAuthor(claims, snap.AuthorID, snap.Author, created)
 }
 
-// attribute settles who opened pull request deliverable a, from snap, GitHub's
-// copy of it, while its entity has no owning team. When the deliverable's run
-// opened it, the entity is stamped with the deliverable's team as its owner
-// and the conversation's creator as its commissioner, each only if unset.
-// When GitHub's answer shows the run did not, the deliverable is deleted: it
-// offers actions on someone else's pull request, under TF's credential, and
-// a run that opened none could only have recorded it through a sidecar that
-// is not behaving as TF built it. The ledger row stays as the record of the
-// attempt. Reports whether the deliverable was deleted.
+// settle settles pending pull request deliverable a, from snap, GitHub's copy
+// of it, and returns the row as settled, the verdict, and whether this call
+// moved the row. A row is settled once (SettleVerificationSystem), so of two
+// settlers racing on it exactly one acts on the verdict.
 //
-// An entity with an owner is not judged again, so a deliverable attributed
-// once is not deleted by a later pass that reads a manifest a re-seal has
-// since replaced. A deliverable linked to no entity has nothing to stamp, and
-// is judged only to be deleted if it is foreign.
-//
-// Best-effort, like the transition beside it: a read or write failure is
-// logged and the next pass tries again.
-func (rc *Reconciler) attribute(ctx context.Context, orgID string, a domain.Deliverable, snap domain.PRSnapshot, reads *attributionReads) bool {
-	if a.Kind != domain.DeliverableKindPullRequest {
-		return false
+// When the run opened it, the attribution is stamped first, then the row is
+// marked verified with the head, base and node id GitHub answered with in
+// place of the ones the run recorded. A stamp, or the read behind it, that
+// fails leaves the row pending, so the next pass stamps again; each stamp is
+// written only if unset, so a repeat changes nothing. When GitHub's answer
+// shows the run did not open it, the row is marked foreign, which closes it,
+// and counted: a run that opened no pull request could only have recorded one
+// through a sidecar that is not behaving as TF built it. Its ledger row stays
+// as the record of the attempt.
+func (rc *Reconciler) settle(ctx context.Context, orgID string, a domain.Deliverable, snap *domain.PRSnapshot, reads *attributionReads) (domain.Deliverable, verdict, bool) {
+	if a.Kind != domain.DeliverableKindPullRequest || a.Verification != domain.DeliverableVerificationPending {
+		return a, verdictUnknown, false
 	}
-	if a.EntityID != "" {
-		owner, err := rc.entities.OwningTeamForEntitySystem(ctx, orgID, a.EntityID)
-		if err != nil {
-			reconcileLog.WarnContext(ctx, "read the pull request's owner failed; leaving it unattributed this pass",
-				"org", orgID, "deliverable", a.ID, "entity", a.EntityID, "error", err)
-			return false
-		}
-		if owner != "" {
-			return false
-		}
-	} else if rc.authorship == TrustRecords {
-		return false
-	}
-
 	v, reason := rc.judge(ctx, orgID, a.ConversationID, snap, reads)
 	switch v {
 	case verdictRun:
-		if a.EntityID != "" {
-			rc.stampAttribution(ctx, orgID, a, reads)
+		if !rc.stampAttribution(ctx, orgID, a, reads) {
+			return a, verdictUnknown, false
 		}
+		details := ""
+		if snap != nil {
+			details = verifiedDetails(a, *snap)
+		}
+		moved, err := rc.deliverables.SettleVerificationSystem(ctx, orgID, a.ID, domain.DeliverableVerificationVerified, details)
+		if err != nil {
+			reconcileLog.WarnContext(ctx, "settle a run's pull request verified failed; leaving it pending this pass",
+				"org", orgID, "deliverable", a.ID, "error", err)
+			return a, verdictUnknown, false
+		}
+		if moved {
+			a.Verification = domain.DeliverableVerificationVerified
+			if details != "" {
+				a.DetailsJSON = details
+			}
+		}
+		return a, v, moved
 	case verdictForeign:
-		return rc.deleteForeign(ctx, orgID, a, reason)
+		moved, err := rc.deliverables.SettleVerificationSystem(ctx, orgID, a.ID, domain.DeliverableVerificationForeign, "")
+		if err != nil {
+			reconcileLog.WarnContext(ctx, "settle a pull request its run did not open foreign failed; leaving it pending this pass",
+				"org", orgID, "deliverable", a.ID, "error", err)
+			return a, verdictUnknown, false
+		}
+		if moved {
+			a.Verification, a.State = domain.DeliverableVerificationForeign, domain.DeliverableStatePRClosed
+			countForeign(ctx, orgID, reason)
+			reconcileLog.ErrorContext(ctx, "a run recorded a pull request it did not open; closed its deliverable, and TF will not act on it",
+				"org", orgID, "deliverable", a.ID, "conversation", a.ConversationID, "target", a.Target, "reason", reason)
+		}
+		return a, v, moved
 	}
-	return false
+	return a, v, false
+}
+
+// verifiedDetails is a's details with the node id its key names and the head
+// and base snap, GitHub's copy of that pull request, answers with. The run's
+// own record of them is not what a person's action on the row reads once it
+// is verified: rejecting a draft deletes its head branch.
+func verifiedDetails(a domain.Deliverable, snap domain.PRSnapshot) string {
+	d, _ := domain.ParsePRDeliverableDetails(a.DetailsJSON)
+	d.NodeID, d.HeadBranch, d.Base = prNodeID(a), snap.HeadRef, snap.BaseRef
+	return domain.MarshalPRDeliverableDetails(d)
 }
 
 // stampAttribution records on the entity behind pull request deliverable a,
@@ -240,56 +273,102 @@ func (rc *Reconciler) attribute(ctx context.Context, orgID string, a domain.Deli
 // sees the pull request their ask produced.
 //
 // The team is the structural owner routing reads and the user is provenance,
-// never read as a second owner. Each is written only if unset, independently,
-// so an event-triggered run (no creator) stamps only the owner and a failure
-// of one write costs the other nothing.
-func (rc *Reconciler) stampAttribution(ctx context.Context, orgID string, a domain.Deliverable, reads *attributionReads) {
+// never read as a second owner. Each is written only if unset, so an owner
+// chosen elsewhere is kept, and an event-triggered run (no creator) stamps
+// only the owner. Reports whether every write it owed landed; a deliverable
+// linked to no entity has nothing to stamp.
+func (rc *Reconciler) stampAttribution(ctx context.Context, orgID string, a domain.Deliverable, reads *attributionReads) bool {
+	if a.EntityID == "" {
+		return true
+	}
+	user := ""
+	if a.ConversationID != "" {
+		var err error
+		if user, err = reads.creator(ctx, orgID, a.ConversationID); err != nil {
+			reconcileLog.WarnContext(ctx, "read the conversation's creator failed; leaving the pull request pending this pass",
+				"org", orgID, "conversation", a.ConversationID, "entity", a.EntityID, "error", err)
+			return false
+		}
+	}
 	stamped, err := rc.entities.StampOwningTeamIfUnsetSystem(ctx, orgID, a.EntityID, a.TeamID)
 	if err != nil {
-		reconcileLog.WarnContext(ctx, "owning-team stamp failed",
+		reconcileLog.WarnContext(ctx, "owning-team stamp failed; leaving the pull request pending this pass",
 			"org", orgID, "conversation", a.ConversationID, "entity", a.EntityID, "target", a.Target, "error", err)
-	} else if stamped {
+		return false
+	}
+	if stamped {
 		reconcileLog.InfoContext(ctx, "stamped owning team on a run's pull request",
 			"org", orgID, "conversation", a.ConversationID, "entity", a.EntityID, "target", a.Target, "team", a.TeamID)
 	}
-	if a.ConversationID == "" {
-		return
-	}
-	user, err := reads.creator(ctx, orgID, a.ConversationID)
-	if err != nil {
-		reconcileLog.WarnContext(ctx, "read the conversation's creator failed; leaving the pull request's commissioner unset",
-			"org", orgID, "conversation", a.ConversationID, "entity", a.EntityID, "error", err)
-		return
-	}
 	stamped, err = rc.entities.StampCommissionedByIfUnsetSystem(ctx, orgID, a.EntityID, user)
 	if err != nil {
-		reconcileLog.WarnContext(ctx, "commissioned-by stamp failed",
+		reconcileLog.WarnContext(ctx, "commissioned-by stamp failed; leaving the pull request pending this pass",
 			"org", orgID, "conversation", a.ConversationID, "entity", a.EntityID, "target", a.Target, "error", err)
-		return
+		return false
 	}
 	if stamped {
 		reconcileLog.InfoContext(ctx, "stamped commissioning user on a run's pull request",
 			"org", orgID, "conversation", a.ConversationID, "entity", a.EntityID, "target", a.Target, "user", user)
 	}
+	return true
 }
 
-// deleteForeign deletes pull request deliverable a, which GitHub's answer
-// shows its run did not open, and counts it. Reports whether it was deleted.
-func (rc *Reconciler) deleteForeign(ctx context.Context, orgID string, a domain.Deliverable, reason string) bool {
-	removed, err := rc.deliverables.DeleteSystem(ctx, orgID, a.ID)
+// SettleDeliverable settles pending pull request deliverable a now, for a
+// person about to act on it, rather than leaving the click to wait for the
+// next pass: under SealedAuthor it reads GitHub's copy of the pull request
+// itself. Best-effort: when the answer cannot be read the row stays pending,
+// and the caller reads the row back to learn where it stands. A row in any
+// other state, or on another GitHub host than the org's current one, is left
+// as it is. A row settled foreign runs the resolved hook when it was a draft,
+// since closing it may have resolved its task's last approval.
+func (rc *Reconciler) SettleDeliverable(ctx context.Context, orgID string, a domain.Deliverable) {
+	if a.Kind != domain.DeliverableKindPullRequest || a.Verification != domain.DeliverableVerificationPending {
+		return
+	}
+	var snap *domain.PRSnapshot
+	if rc.authorship == SealedAuthor {
+		s, ok := rc.fetchSnapshot(ctx, orgID, a)
+		if !ok {
+			return
+		}
+		snap = &s
+	}
+	settled, v, moved := rc.settle(ctx, orgID, a, snap, newAttributionReads(rc))
+	if !moved || v != verdictForeign {
+		return
+	}
+	rc.broadcast(orgID, settled)
+	if rc.prResolved != nil && a.ConversationID != "" && isDraftResolved(a, settled.State) {
+		rc.prResolved(ctx, orgID, a.ConversationID)
+	}
+}
+
+// fetchSnapshot reads GitHub's copy of pull request deliverable a's pull
+// request, under the owner its repository's registry row names now. ok is
+// false when a is not on the org's current host or the read fails.
+func (rc *Reconciler) fetchSnapshot(ctx context.Context, orgID string, a domain.Deliverable) (domain.PRSnapshot, bool) {
+	_, onHost, err := rc.onCurrentHost(ctx, orgID, []domain.Deliverable{a})
+	if err != nil || len(onHost) == 0 {
+		return domain.PRSnapshot{}, false
+	}
+	nodeID := prNodeID(a)
+	reads := newRegistryReads(rc)
+	pr, err := db.ResolveDeliverablePullRequest(ctx, orgID, a, reads.entity, reads.repository)
+	if err != nil || pr.Retired || nodeID == "" {
+		return domain.PRSnapshot{}, false
+	}
+	client, err := rc.resolver.ClientFor(ctx, orgID, pr.Owner)
 	if err != nil {
-		reconcileLog.WarnContext(ctx, "delete a pull request deliverable its run did not open failed",
-			"org", orgID, "deliverable", a.ID, "conversation", a.ConversationID, "target", a.Target, "error", err)
-		return false
+		reconcileLog.WarnContext(ctx, "resolve github client to settle a pull request failed", "org", orgID, "deliverable", a.ID, "error", err)
+		return domain.PRSnapshot{}, false
 	}
-	if !removed {
-		return false
+	snaps, err := client.RefreshPRs(ctx, []string{nodeID}, false)
+	if err != nil {
+		reconcileLog.WarnContext(ctx, "read a pull request to settle it failed", "org", orgID, "deliverable", a.ID, "error", err)
+		return domain.PRSnapshot{}, false
 	}
-	countForeign(ctx, orgID, reason, foreignDeleted)
-	reconcileLog.ErrorContext(ctx, "deleted a pull request deliverable its run did not open; the run's sidecar recorded a pull request it did not create",
-		"org", orgID, "deliverable", a.ID, "conversation", a.ConversationID, "target", a.Target, "reason", reason)
-	rc.publish(orgID, a.ConversationID, map[string]any{"deliverable_id": a.ID})
-	return true
+	snap, ok := snaps[nodeID]
+	return snap, ok
 }
 
 // foreignStats owns this package's counter of pull requests a run recorded
@@ -312,18 +391,17 @@ type foreignCounters struct {
 // logged rather than propagated.
 func newForeignCounters(mp metric.MeterProvider) *foreignCounters {
 	c, err := mp.Meter("internal/reconcile").Int64Counter("deliverables.foreign_pull_requests",
-		metric.WithDescription("Pull requests a run's record named that GitHub's answer shows the run did not open, by reason and disposition. A working sidecar never records one."))
+		metric.WithDescription("Pull request deliverables settled foreign: a run recorded a pull request that GitHub's answer shows it did not open, by reason. A working sidecar never records one."))
 	if err != nil {
 		reconcileLog.Warn("foreign pull request counter setup failed", "error", err)
 	}
 	return &foreignCounters{foreign: c}
 }
 
-func countForeign(ctx context.Context, orgID, reason, disposition string) {
+func countForeign(ctx context.Context, orgID, reason string) {
 	s := foreignStats.Load()
 	if s == nil || s.foreign == nil {
 		return
 	}
-	s.foreign.Add(ctx, 1, metric.WithAttributes(
-		telemetry.OrgID(orgID), telemetry.Reason(reason), telemetry.Disposition(disposition)))
+	s.foreign.Add(ctx, 1, metric.WithAttributes(telemetry.OrgID(orgID), telemetry.Reason(reason)))
 }
