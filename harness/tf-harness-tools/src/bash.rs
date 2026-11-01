@@ -70,7 +70,9 @@ use serde::Deserialize;
 
 use crate::jsnum::js_num;
 use crate::output_accumulator::{OutputAccumulator, OutputSnapshot};
-use crate::result::{BashToolDetails, ContentBlock, ToolError, ToolResult, ToolResultOrError};
+use crate::result::{
+    BashToolDetails, ContentBlock, ToolError, ToolErrorCause, ToolResult, ToolResultOrError,
+};
 use crate::shell::{get_shell_config, kill_process_tree};
 use crate::truncate::{format_size, DEFAULT_MAX_BYTES};
 
@@ -972,10 +974,13 @@ pub fn execute(
             // the model the limit exists — so it leads, and the partial output
             // it kept follows as evidence.
             let (text, _) = format_output(&snapshot, "", last_line_bytes);
-            return Err(ToolError::new(with_holder_note(prepend_status(
-                &memory_budget_notice(observed_bytes, options.mem_budget_mb),
-                &text,
-            ))));
+            return Err(ToolError::with_cause(
+                with_holder_note(prepend_status(
+                    &memory_budget_notice(observed_bytes, options.mem_budget_mb),
+                    &text,
+                )),
+                ToolErrorCause::MemoryBudget,
+            ));
         }
         None => {}
     }

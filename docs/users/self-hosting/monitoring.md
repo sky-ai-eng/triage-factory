@@ -171,6 +171,24 @@ Failing probes are dropped rather than parked, so `WorkParked` never sees
 them; `MergeabilityProbesFailing` is the warning for an org whose probe reads
 mostly fail.
 
+### Sandbox memory
+
+A native run's sandbox is capped at `TF_CLAIM_MEMORY_LIMIT_MB`, and each
+`bash` command in it at a smaller budget derived from that limit. The agent is
+told when memory ends something it ran; these metrics are the operator's view
+of the same events:
+
+| Metric | What it counts |
+| ------ | -------------- |
+| `tf_sandbox_memory_kills_total` | What memory ended, by `org_id` and `kind`: `bash_budget` (a command over the per-command budget; the sandbox kept running), `ceiling` (a process the kernel killed to hold the sandbox at its limit, usually one left running in the background), `jail_lost` (a sandbox the limit ended, losing every process in it; the run continues in a new sandbox on the same files). |
+| `tf_sandbox_peak_memory_ratio` | A histogram, per sandbox, of its peak memory as a share of its limit, read when it exits. A share near 1 means the sandbox came close to its limit. Sandboxes with no limit are not counted. |
+| `tf_conversations_sandbox_lost_parks_total` | Runs paused for a person after losing their sandbox three times in a row, by `org_id` and `memory_limit` (`true` when the limit ended the last one). A paused run waits for someone to send it a message. |
+
+A steady `bash_budget` rate is the budget doing its job. If `ceiling` and
+`jail_lost` kills are frequent, or the `p95` of
+`tf_sandbox_peak_memory_ratio` stays near 1, the work needs more memory than
+the limit allows: raise `TF_CLAIM_MEMORY_LIMIT_MB` on the executors.
+
 ### Alerts
 
 The bundled Prometheus loads the rules in
@@ -192,6 +210,8 @@ alert's description, shown beside it in Grafana, says what to check.
 | `WorkspaceCheckpointsStale`     | warning  | A live run has gone 45 minutes without a workspace checkpoint.                                                                      |
 | `WorkspaceCheckpointsFailing`   | warning  | A workspace checkpoint failed in the last hour.                                                                                     |
 | `SidecarFrameOversized`         | critical | A run's credential sidecar sent a frame over the size limit. Treat that sidecar as compromised.                                     |
+| `RunPausedAtMemoryLimit`        | warning  | A run paused in the last hour because its sandbox kept reaching `TF_CLAIM_MEMORY_LIMIT_MB`.                                          |
+| `SandboxesLostToMemoryLimit`    | warning  | The memory limit ended more than nine sandboxes in the last hour.                                                                   |
 | `CommitSigningStalled`          | critical | A commit signature request has waited over 5 seconds for a minute.                                                                  |
 | `CommitSignaturesUnanswered`    | warning  | Signature requests went unanswered in the last 15 minutes.                                                                          |
 | `CommitSignaturesRefusedForRun` | warning  | A run asked to sign past its budget, after its engagement ended, or as someone other than the signer.                               |
@@ -267,7 +287,8 @@ Jira and Linear poll cycles, slow API requests and errored spans; request rate,
 errors and p95 latency by span (click an exemplar dot to open its trace);
 per-pod runtime; event routing, deferred firings and score re-evaluations; run
 setup phases; run completions and in-run agent activity; workspace snapshots;
-dropped audit records; and upstream connections and rate-limit waits.
+dropped audit records; upstream connections and rate-limit waits; and sandbox
+memory.
 Dashboards are read-only, provisioned from
 `docker/observability/dashboards/`. Use **Export → Save as copy** to
 experiment, or edit the JSON to change one.

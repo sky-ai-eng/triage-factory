@@ -14,7 +14,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use tf_harness_tools::bash::{execute, tree_resident_bytes, BashArgs, BashOptions};
-use tf_harness_tools::result::{BashToolDetails, ToolError, ToolResult};
+use tf_harness_tools::result::{BashToolDetails, ToolError, ToolErrorCause, ToolResult};
 use tf_harness_tools::shell::kill_process_tree;
 
 const MB: u64 = 1024 * 1024;
@@ -180,6 +180,7 @@ fn a_breach_kills_the_command_and_names_both_numbers() {
     );
     let err = result.expect_err("a breaching command must come back as a tool error");
 
+    assert_eq!(err.cause(), Some(ToolErrorCause::MemoryBudget));
     assert!(
         err.0
             .starts_with("Command killed: exceeded the per-command memory budget"),
@@ -301,6 +302,7 @@ fn a_timeout_under_budget_still_reports_the_timeout() {
         &budget(2048),
     )
     .expect_err("a timeout is an error");
+    assert_eq!(err.cause(), None, "a timeout is not a memory kill");
     assert!(
         err.0.contains("Command timed out after 0.5 seconds"),
         "unexpected timeout text: {}",

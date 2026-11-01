@@ -132,9 +132,18 @@ func (s *Spawner) leaveOnLostJail(ctx context.Context, park liveParkContext, pri
 	if s.insertClaimStopNote(ctx, park.orgID, park.conversationID, park.claimID, creatorUserID, jailLostNote(losses, lost.Reason)) {
 		return engagementDisposition{fenced: true}
 	}
-	if s.parkConversationOpen(ctx, park, "") {
+	fenced, parked := s.parkConversationOpenFlipped(ctx, park, "")
+	if fenced {
 		return engagementDisposition{fenced: true}
 	}
+	if !parked {
+		// Nothing was paused: the row settled under the park, or the write
+		// failed and is logged. Saying the run waits for a message, to the
+		// org or to the operator, would send someone after a run that is
+		// not waiting.
+		return engagementDisposition{}
+	}
+	recordSandboxLostPark(park.orgID, lost.MemoryLimit)
 	if lost.MemoryLimit {
 		toast.Warning(s.wsHub, park.orgID, fmt.Sprintf(
 			"Run %s is paused: its sandbox was lost %d times in a row, the last time at its memory limit. Raise TF_CLAIM_MEMORY_LIMIT_MB if it legitimately needs more, then send a message to continue.",

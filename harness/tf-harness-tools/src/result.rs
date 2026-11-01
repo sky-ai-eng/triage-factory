@@ -53,8 +53,25 @@ impl<D: Serialize> ToolResult<D> {
 
 /// A tool failure: pi throws `Error(message)`; the agent loop renders the
 /// message as an error tool result.
+///
+/// The second field is the failure's [`ToolErrorCause`], when it has one. It
+/// is private so that every failure is built through [`ToolError::new`] or
+/// [`ToolError::with_cause`], and read through [`ToolError::cause`].
 #[derive(Debug)]
-pub struct ToolError(pub String);
+pub struct ToolError(pub String, Option<ToolErrorCause>);
+
+/// Why the host itself ended a tool call, stated as a stable code so the peer
+/// can count it without parsing the message. The message stays the model's
+/// account of it; the code is for the operator's metrics. Serialized in
+/// snake_case: the values are part of the serve protocol, so add variants and
+/// never rename one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolErrorCause {
+    /// The `bash` watchdog killed the command tree for exceeding the
+    /// session's per-command memory budget.
+    MemoryBudget,
+}
 
 impl std::fmt::Display for ToolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -66,7 +83,17 @@ impl std::error::Error for ToolError {}
 
 impl ToolError {
     pub fn new(message: impl Into<String>) -> Self {
-        ToolError(message.into())
+        ToolError(message.into(), None)
+    }
+
+    /// A failure the host caused, carrying `cause` beside the message.
+    pub fn with_cause(message: impl Into<String>, cause: ToolErrorCause) -> Self {
+        ToolError(message.into(), Some(cause))
+    }
+
+    /// The failure's cause, `None` for a tool that failed on its own.
+    pub fn cause(&self) -> Option<ToolErrorCause> {
+        self.1
     }
 }
 

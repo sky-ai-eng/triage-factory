@@ -436,7 +436,7 @@ func runOOMTest(ctx context.Context, cfg benchConfig, getAbort func() string) er
 		}
 		// What the native loop wraps every engagement's tool host in, so
 		// each victim's result below is the text its agent would read.
-		v.tools = agentloop.WatchMemoryKills(v.tools, v.jail, cfg.oomVictimLimitMB)
+		v.tools = agentloop.WatchMemoryKills(v.tools, v.jail, cfg.oomVictimLimitMB, nil)
 		live = append(live, v)
 		victims = append(victims, v)
 	}

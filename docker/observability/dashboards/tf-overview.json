@@ -4739,6 +4739,298 @@
       ],
       "title": "Rate-limit and retry waits",
       "type": "table"
+    },
+    {
+      "collapsed": false,
+      "description": "What memory ended inside native runs' sandboxes, how close each sandbox came to its limit, and the runs that paused because the limit kept ending their sandbox. A sandbox's limit is TF_CLAIM_MEMORY_LIMIT_MB, and a single bash command's budget is derived from it. Counted by the executors and summed across them. The RunPausedAtMemoryLimit and SandboxesLostToMemoryLimit rules in docker/observability/rules/tf-runs.yml alert on the last two kinds of event. Each engagement creates its org's kill and park series at zero, so their panels see the first kill or park after it; a series that first appears inside a panel's window counts at its whole value, for one whose first count lands before its first scrape and for the peak histogram, which has no zero to start from. No data means no native run has reached a limit, or none has run.",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 178
+      },
+      "id": 56,
+      "panels": [],
+      "title": "Sandbox memory \u2014 native runs",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tf-prometheus"
+      },
+      "description": "What memory ended in native runs' sandboxes (tf_sandbox_memory_kills_total). bash_budget: a command the per-command memory budget killed; the sandbox and everything else in it kept running, and the agent was told to use less memory. ceiling: a process the kernel killed to hold a sandbox at its memory limit, which the budget is there to prevent, usually something the agent left running in the background. jail_lost: a sandbox the limit ended, losing every process in it; the run restarts in a new sandbox on the same files. Break it down by org_id in Explore to find the runs.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 6,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "decimals": 0,
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 179
+      },
+      "id": 57,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tf-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum by (kind) ((tf_sandbox_memory_kills_total unless last_over_time(tf_sandbox_memory_kills_total[$__rate_interval] offset $__rate_interval)) or increase(tf_sandbox_memory_kills_total[$__rate_interval]))",
+          "legendFormat": "{{kind}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Memory kills by kind",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tf-prometheus"
+      },
+      "description": "Each sandbox's peak memory as a share of its memory limit, read when the sandbox exits (tf_sandbox_peak_memory_ratio), over the last hour. 100% means a sandbox reached its limit. A p95 that climbs toward 100% while kills stay at zero is the warning before they start. Sandboxes with no limit (TF_CLAIM_MEMORY_LIMIT_MB=0) are not counted.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 6,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 179
+      },
+      "id": 58,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tf-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.5, sum by (le) ((tf_sandbox_peak_memory_ratio_bucket unless last_over_time(tf_sandbox_peak_memory_ratio_bucket[1h] offset 1h)) or increase(tf_sandbox_peak_memory_ratio_bucket[1h])))",
+          "legendFormat": "p50",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tf-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) ((tf_sandbox_peak_memory_ratio_bucket unless last_over_time(tf_sandbox_peak_memory_ratio_bucket[1h] offset 1h)) or increase(tf_sandbox_peak_memory_ratio_bucket[1h])))",
+          "legendFormat": "p95",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Peak memory as a share of the limit",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tf-prometheus"
+      },
+      "description": "Runs paused for a person after losing their sandbox as many times in a row as the jail budget allows (tf_conversations_sandbox_lost_parks_total), by whether the memory limit ended the last one. A paused run waits for someone to send it a message. The RunPausedAtMemoryLimit rule warns on memory_limit=true.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 6,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "decimals": 0,
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 179
+      },
+      "id": 59,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tf-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum by (memory_limit) ((tf_conversations_sandbox_lost_parks_total unless last_over_time(tf_conversations_sandbox_lost_parks_total[$__rate_interval] offset $__rate_interval)) or increase(tf_conversations_sandbox_lost_parks_total[$__rate_interval]))",
+          "legendFormat": "memory limit: {{memory_limit}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Runs paused after losing their sandbox",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",

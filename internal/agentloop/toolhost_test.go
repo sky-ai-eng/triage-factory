@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -28,6 +29,11 @@ func TestClassifyResponse(t *testing.T) {
 			wantOut: ToolOutcome{ToolError: "file not found"},
 		},
 		{
+			name:    "a cause rides beside the tool's message",
+			resp:    serveResponse{Error: json.RawMessage(`"Command killed"`), Cause: "memory_budget"},
+			wantOut: ToolOutcome{ToolError: "Command killed", Cause: ToolErrorCauseMemoryBudget},
+		},
+		{
 			name:    "a kinded object is a protocol error",
 			resp:    serveResponse{Error: json.RawMessage(`{"kind":"unknown_tool","message":"unknown tool: frob"}`)},
 			wantOut: ToolOutcome{Protocol: &ProtocolError{Kind: "unknown_tool", Message: "unknown tool: frob"}},
@@ -39,7 +45,7 @@ func TestClassifyResponse(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.Content != tc.wantOut.Content || got.ToolError != tc.wantOut.ToolError {
+			if got.Content != tc.wantOut.Content || got.ToolError != tc.wantOut.ToolError || got.Cause != tc.wantOut.Cause {
 				t.Fatalf("got %+v, want %+v", got, tc.wantOut)
 			}
 			if (got.Protocol == nil) != (tc.wantOut.Protocol == nil) {
@@ -188,6 +194,29 @@ func TestServeSocket_EndToEnd(t *testing.T) {
 		}
 		if out.Content != "" {
 			t.Errorf("configure answered with content %q, want the empty result", out.Content)
+		}
+	})
+
+	t.Run("a budget kill carries its cause across the socket", func(t *testing.T) {
+		if runtime.GOOS != "linux" {
+			t.Skip("the per-command budget samples /proc")
+		}
+		// The other half of the cross-language contract: the cause string the
+		// Rust host writes is the one this side counts. The hog is the
+		// harness's own: `tail` buffers a newline-free stream, and `sleep`
+		// holds it over the budget until the watchdog samples it.
+		if _, err := host.Call(toolHostConfigureTool, map[string]any{bashMemBudgetArg: 128}); err != nil {
+			t.Fatal(err)
+		}
+		out, err := host.Call("bash", map[string]any{
+			"description": "Running a test command",
+			"command":     "head -c 400M /dev/zero | tail | sleep 30",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out.ToolError == "" || out.Cause != ToolErrorCauseMemoryBudget {
+			t.Fatalf("got (error %q, cause %q), want a tool error with cause %q", out.ToolError, out.Cause, ToolErrorCauseMemoryBudget)
 		}
 	})
 

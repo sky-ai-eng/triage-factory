@@ -207,6 +207,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// budget derived from it, so the two cannot disagree.
 	memoryLimitMB := agentproc.ClaimMemoryLimitMB()
 	timings := s.resolvedActivityTimings()
+	openSandboxMemorySeries(orgID)
 	// Restartable, so a jail that dies under the loop is replaced in this
 	// cell and the loop goes on.
 	launched, err := launchRestartableJail(ctx, runCell, cell.LaunchSpec{
@@ -228,8 +229,10 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	}, func(jail cell.Jail, conn net.Conn) agentloop.ToolHost {
 		// Every result says when the jail's ceiling killed something during
 		// or before the call, and a jail the ceiling ended says so on the
-		// call it ended. Watched against the same ceiling the launch set.
-		return agentloop.WatchMemoryKills(agentloop.NewToolHost(conn, timings.toolSocket()), jail, memoryLimitMB)
+		// call it ended. Watched against the same ceiling the launch set, and
+		// every kill it sees is counted for the operator.
+		return agentloop.WatchMemoryKills(agentloop.NewToolHost(conn, timings.toolSocket()), jail, memoryLimitMB,
+			func(kind agentloop.MemoryKill, n int) { recordMemoryKills(orgID, kind, n) })
 	})
 	if err != nil {
 		return launchFailed(err)

@@ -91,6 +91,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::definitions::ALL_TOOL_NAMES;
+use crate::result::{ToolError, ToolErrorCause};
 use crate::ToolConfig;
 
 /// The serve-layer configuration request: `{"id":N,"tool":"_configure",
@@ -166,7 +167,7 @@ pub struct Request {
 /// ```
 /// Failure:
 /// ```json
-/// { "id": <echoed>, "ok": false, "error": <string | object> }
+/// { "id": <echoed>, "ok": false, "error": <string | object>, "cause"?: <string> }
 /// ```
 ///
 /// Exactly one of `result` / `error` is present. `result` is the tool's
@@ -184,6 +185,11 @@ pub struct Request {
 ///   protocol-level failure the tool layer never sees: an unknown tool, a
 ///   malformed request frame, an over-cap response. The stable `kind`
 ///   discriminator lets the loop branch without string-matching.
+///
+/// `cause` appears only beside a string `error`, and only when the host ended
+/// the tool call itself for a reason the peer counts: a [`ToolErrorCause`]
+/// such as `memory_budget`. It never changes what the model is shown, which is
+/// the string alone.
 #[derive(Debug, Clone, Serialize)]
 pub struct Response {
     /// The originating request's `id`, echoed. `null` when the request could
@@ -198,6 +204,9 @@ pub struct Response {
     /// failure (see the type doc).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<Value>,
+    /// Present only on a tool failure the host caused (see the type doc).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cause: Option<ToolErrorCause>,
 }
 
 impl Response {
@@ -208,17 +217,21 @@ impl Response {
             ok: true,
             result: Some(result),
             error: None,
+            cause: None,
         }
     }
 
     /// A tool that ran and reported failure — `error` is the tool's own
-    /// message string, surfaced to the model as an `is_error` result.
-    pub fn tool_error(id: Value, message: String) -> Self {
+    /// message string, surfaced to the model as an `is_error` result, and
+    /// `cause` its cause when the host ended the call.
+    pub fn tool_error(id: Value, err: ToolError) -> Self {
+        let cause = err.cause();
         Response {
             id,
             ok: false,
             result: None,
-            error: Some(Value::String(message)),
+            error: Some(Value::String(err.0)),
+            cause,
         }
     }
 
@@ -230,6 +243,7 @@ impl Response {
             ok: false,
             result: None,
             error: Some(json!({ "kind": kind.as_str(), "message": message.into() })),
+            cause: None,
         }
     }
 }
@@ -450,7 +464,7 @@ impl Session {
         };
         match crate::run_tool_configured(&request.tool, &self.cwd, args, self.config) {
             Ok(result) => Response::ok(id, result),
-            Err(err) => Response::tool_error(id, err.0),
+            Err(err) => Response::tool_error(id, err),
         }
     }
 
@@ -599,11 +613,24 @@ mod tests {
 
     #[test]
     fn tool_error_is_a_string() {
-        let r = Response::tool_error(json!("abc"), "boom".to_string());
+        let r = Response::tool_error(json!("abc"), ToolError::new("boom"));
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["ok"], json!(false));
         assert_eq!(v["error"], json!("boom"));
         assert!(v.get("result").is_none());
+        assert!(v.get("cause").is_none());
+    }
+
+    #[test]
+    fn a_caused_tool_error_carries_its_cause_beside_the_string() {
+        let r = Response::tool_error(
+            json!(1),
+            ToolError::with_cause("killed", ToolErrorCause::MemoryBudget),
+        );
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["ok"], json!(false));
+        assert_eq!(v["error"], json!("killed"));
+        assert_eq!(v["cause"], json!("memory_budget"));
     }
 
     #[test]
