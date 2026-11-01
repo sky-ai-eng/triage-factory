@@ -53,6 +53,8 @@ func newListingServer(t *testing.T, delay time.Duration) *listingServer {
 			}
 			w.Header().Set("ETag", `"etag-1"`)
 			_, _ = w.Write([]byte(openPRBodyFor(r.URL.Path)))
+		case isBranchRefRead(r):
+			http.NotFound(w, r)
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			http.Error(w, "unexpected", http.StatusNotFound)

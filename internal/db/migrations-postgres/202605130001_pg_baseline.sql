@@ -4573,6 +4573,13 @@ GRANT SELECT,USAGE ON SEQUENCE public.task_rederive_queue_id_seq TO tf_app;
 -- the transaction that writes it. The
 -- poll deletes the rows of entities no longer active.
 --
+-- The path columns are the pull request's changed paths, written only by the
+-- poll's branch watch, which reads them when the pull request's base branch
+-- moves to decide whether the move can have changed its mergeability.
+-- paths_json is a JSON array of {"path", "change", "previous"};
+-- paths_head_sha the head the list was read at; paths_complete whether it
+-- holds every changed file. Each writer's upsert sets its own columns only.
+--
 -- Admin-pool wired with org_id bound per statement; the policy below is
 -- defense-in-depth.
 CREATE TABLE public.pull_request_mergeability (
@@ -4580,7 +4587,10 @@ CREATE TABLE public.pull_request_mergeability (
     org_id              uuid NOT NULL,
     mergeable           text NULL CHECK (mergeable IN ('MERGEABLE','CONFLICTING')),
     mergeable_head_sha  text NULL,
-    checked_at          timestamp with time zone NULL
+    checked_at          timestamp with time zone NULL,
+    paths_json          text NULL,
+    paths_head_sha      text NULL,
+    paths_complete      boolean NOT NULL DEFAULT false
 );
 
 ALTER TABLE ONLY public.pull_request_mergeability
@@ -4604,6 +4614,49 @@ GRANT ALL ON TABLE public.pull_request_mergeability TO anon;
 GRANT ALL ON TABLE public.pull_request_mergeability TO authenticated;
 GRANT ALL ON TABLE public.pull_request_mergeability TO service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.pull_request_mergeability TO tf_app;
+
+
+-- The last tip of each base branch the poll's branch watch processed: one row
+-- per (repository, branch) an open pull request targets, written only by the
+-- watch. tip_sha is the tip whose move has had its mergeability probes
+-- admitted, etag the ref read's from its last 200, and observed_at when the
+-- tip was last checked, a 304 included. Stored so a restart or a brain-lease
+-- move does not take every base branch for newly seen and probe every pull
+-- request on it.
+--
+-- Admin-pool wired with org_id bound per statement; the policy below is
+-- defense-in-depth.
+CREATE TABLE public.branch_tips (
+    repository_id  uuid NOT NULL,
+    branch         text NOT NULL,
+    org_id         uuid NOT NULL,
+    tip_sha        text NOT NULL,
+    etag           text NULL,
+    observed_at    timestamp with time zone NOT NULL
+);
+
+ALTER TABLE ONLY public.branch_tips
+    ADD CONSTRAINT branch_tips_pkey PRIMARY KEY (repository_id, branch);
+
+ALTER TABLE ONLY public.branch_tips
+    ADD CONSTRAINT branch_tips_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.branch_tips
+    ADD CONSTRAINT branch_tips_repository_id_org_id_fkey FOREIGN KEY (repository_id, org_id) REFERENCES public.repositories(id, org_id) ON DELETE CASCADE;
+
+-- Every poll cycle lists an org's rows and deletes the ones no open pull
+-- request targets.
+CREATE INDEX idx_branch_tips_org ON public.branch_tips (org_id, repository_id, branch);
+
+ALTER TABLE public.branch_tips ENABLE ROW LEVEL SECURITY;
+CREATE POLICY branch_tips_all ON public.branch_tips
+    USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)))
+    WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+
+GRANT ALL ON TABLE public.branch_tips TO postgres;
+GRANT ALL ON TABLE public.branch_tips TO anon;
+GRANT ALL ON TABLE public.branch_tips TO authenticated;
+GRANT ALL ON TABLE public.branch_tips TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.branch_tips TO tf_app;
 
 
 -- The queue of pull requests whose mergeability is due to be read, as a work

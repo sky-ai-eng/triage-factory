@@ -1,0 +1,566 @@
+package tracker
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+)
+
+// watchWorld is an org tracking octo/repo with three open pull requests on
+// main, PR_1..PR_3 at heads h1..h3. Each one's stored snapshot is current and
+// its mergeability was read at its head just now, so a cycle refreshes nothing
+// and admits nothing but the branch watch's probes. The fake GitHub answers
+// main's tip, the compares and the changed paths the test sets.
+type watchWorld struct {
+	t      *testing.T
+	db     *sql.DB
+	stores db.Stores
+	tr     *Tracker
+	client *ghclient.Client
+	repoID string
+	prs    []domain.Entity
+
+	mu sync.Mutex
+	// tip is main's tip.
+	tip string
+	// listing304 makes the open-PR listing answer 304 to its stored ETag.
+	listing304 bool
+	// compares maps "base...head" to a compare body, or to "404".
+	compares map[string]string
+	// paths maps a node id to its PRChangedPaths node; a pull request with
+	// none answers that it changes nothing, at its head.
+	paths map[string]string
+	// previous maps a pull request number to its REST files listing.
+	previous map[int]string
+	// refReads, compareReads and pathReads record the watch's requests:
+	// each ref read, each compare's base...head, and each node id whose
+	// paths were asked for.
+	refReads     int
+	compareReads []string
+	pathReads    []string
+}
+
+func newWatchWorld(t *testing.T) *watchWorld {
+	t.Helper()
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	w := &watchWorld{t: t, db: newMigratedSQLite(t), tip: "old", compares: map[string]string{}, paths: map[string]string{}, previous: map[int]string{}}
+	w.stores = sqlitestore.New(w.db)
+	srv := httptest.NewServer(http.HandlerFunc(w.serve))
+	t.Cleanup(srv.Close)
+	w.client = ghclient.NewClient(srv.URL, "tok")
+
+	trackRepos(t, w.stores, org, []string{"octo/repo"})
+	for n := 1; n <= 3; n++ {
+		e, _, err := w.stores.Entities.FindOrCreateSystem(ctx, org, "github", cursorTestHost,
+			fmt.Sprintf("octo/repo#%d", n), fmt.Sprintf("PR_%d", n), "pr", "PR", "")
+		if err != nil {
+			t.Fatalf("seed entity: %v", err)
+		}
+		raw, _ := json.Marshal(domain.PRSnapshot{
+			NodeID: e.ExternalID, Number: n, Title: "PR", Author: "alice", Repo: "octo/repo",
+			State: "OPEN", HeadRef: "feature", BaseRef: "main", HeadSHA: fmt.Sprintf("h%d", n),
+			CreatedAt: "2026-05-20T10:00:00Z", UpdatedAt: "2026-05-29T12:00:00Z", CheckRuns: []domain.CheckRun{},
+		})
+		if ok, err := w.stores.Entities.UpdateSnapshotCASSystem(ctx, org, e.ID, string(raw), e.PollSeq); err != nil || !ok {
+			t.Fatalf("seed snapshot: ok=%v err=%v", ok, err)
+		}
+		if _, err := w.db.Exec(`INSERT INTO pull_request_mergeability (entity_id, mergeable, mergeable_head_sha, checked_at) VALUES (?, 'MERGEABLE', ?, ?)`,
+			e.ID, fmt.Sprintf("h%d", n), time.Now().UTC()); err != nil {
+			t.Fatalf("seed answer: %v", err)
+		}
+		w.prs = append(w.prs, *e)
+		w.repoID = e.RepositoryID
+	}
+	w.tr = New(w.db, &recordingPublisher{}, w.stores.Tasks, w.stores.Entities, w.stores.Repos, w.stores.JiraProjects,
+		w.stores.Deliverables, w.stores.ExternalActions, w.stores.EventQueue, w.stores.PRMergeability, org)
+	return w
+}
+
+func (w *watchWorld) serve(rw http.ResponseWriter, r *http.Request) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	path := strings.TrimPrefix(r.URL.Path, "/api/v3")
+	switch {
+	case path == "/api/graphql":
+		w.serveGraphQL(rw, r)
+	case path == "/repos/octo/repo/pulls":
+		if w.listing304 && r.Header.Get("If-None-Match") == `"listing"` {
+			rw.WriteHeader(http.StatusNotModified)
+			return
+		}
+		rw.Header().Set("ETag", `"listing"`)
+		var prs []map[string]any
+		for n := 1; n <= 3; n++ {
+			prs = append(prs, map[string]any{
+				"number": n, "node_id": fmt.Sprintf("PR_%d", n), "title": "PR", "state": "open",
+				"html_url":   fmt.Sprintf("https://github.com/octo/repo/pull/%d", n),
+				"created_at": "2026-05-20T10:00:00Z", "updated_at": "2026-05-29T12:00:00Z",
+				"user": map[string]string{"login": "alice"},
+				"head": map[string]any{"sha": fmt.Sprintf("h%d", n), "ref": "feature", "repo": map[string]string{"full_name": "octo/repo"}},
+				"base": map[string]any{"ref": "main", "repo": map[string]string{"full_name": "octo/repo"}},
+			})
+		}
+		_ = json.NewEncoder(rw).Encode(prs)
+	case path == "/repos/octo/repo/git/ref/heads/main":
+		w.refReads++
+		etag := `"ref-` + w.tip + `"`
+		if r.Header.Get("If-None-Match") == etag {
+			rw.WriteHeader(http.StatusNotModified)
+			return
+		}
+		rw.Header().Set("ETag", etag)
+		_, _ = fmt.Fprintf(rw, `{"ref":"refs/heads/main","object":{"sha":%q}}`, w.tip)
+	case strings.HasPrefix(path, "/repos/octo/repo/compare/"):
+		key := strings.TrimPrefix(path, "/repos/octo/repo/compare/")
+		w.compareReads = append(w.compareReads, key)
+		body, ok := w.compares[key]
+		if !ok || body == "404" {
+			http.NotFound(rw, r)
+			return
+		}
+		_, _ = rw.Write([]byte(body))
+	case strings.HasPrefix(path, "/repos/octo/repo/pulls/") && strings.HasSuffix(path, "/files"):
+		n, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(path, "/repos/octo/repo/pulls/"), "/files"))
+		body, ok := w.previous[n]
+		if !ok {
+			body = `[]`
+		}
+		_, _ = rw.Write([]byte(body))
+	default:
+		w.t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		http.NotFound(rw, r)
+	}
+}
+
+func (w *watchWorld) serveGraphQL(rw http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Query     string `json:"query"`
+		Variables struct {
+			IDs []string `json:"ids"`
+		} `json:"variables"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	if !strings.Contains(req.Query, "query PRChangedPaths(") {
+		// The refresh of a pull request no listing returned: GitHub no longer
+		// answers for it, which leaves its stored snapshot alone.
+		nulls := strings.TrimSuffix(strings.Repeat("null,", len(req.Variables.IDs)), ",")
+		_, _ = fmt.Fprintf(rw, `{"data":{"nodes":[%s]}}`, nulls)
+		return
+	}
+	nodes := make([]string, len(req.Variables.IDs))
+	for i, id := range req.Variables.IDs {
+		w.pathReads = append(w.pathReads, id)
+		node, ok := w.paths[id]
+		if !ok {
+			node = fmt.Sprintf(`{"id":%q,"headRefOid":"h%s","changedFiles":0,"files":{"pageInfo":{"hasNextPage":false},"nodes":[]}}`, id, strings.TrimPrefix(id, "PR_"))
+		}
+		nodes[i] = node
+	}
+	_, _ = fmt.Fprintf(rw, `{"data":{"nodes":[%s],"rateLimit":{"cost":1}}}`, strings.Join(nodes, ","))
+}
+
+// set changes the fake under its lock.
+func (w *watchWorld) set(f func(*watchWorld)) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	f(w)
+}
+
+// cycle runs one poll cycle and returns the probes it admitted, by pull
+// request number, each a reason. The probes are settled afterwards, so the
+// next cycle's admissions are its own.
+func (w *watchWorld) cycle() map[int]string {
+	w.t.Helper()
+	before := w.probeCount()
+	refreshRepos(w.t, w.tr, w.client, "octo/repo")
+	rows, err := w.db.Query(`SELECT entity_id, reason FROM pr_mergeability_probes WHERE id > ? ORDER BY id`, before)
+	if err != nil {
+		w.t.Fatalf("read probes: %v", err)
+	}
+	defer rows.Close()
+	got := map[int]string{}
+	for rows.Next() {
+		var entityID, reason string
+		if err := rows.Scan(&entityID, &reason); err != nil {
+			w.t.Fatalf("scan probe: %v", err)
+		}
+		for i, e := range w.prs {
+			if e.ID == entityID {
+				got[i+1] = reason
+			}
+		}
+	}
+	if _, err := w.db.Exec(`UPDATE pr_mergeability_probes SET status = 'done', done_at = strftime('%Y-%m-%d %H:%M:%f','now') WHERE status = 'ready'`); err != nil {
+		w.t.Fatalf("settle probes: %v", err)
+	}
+	return got
+}
+
+func (w *watchWorld) probeCount() int64 {
+	var n sql.NullInt64
+	if err := w.db.QueryRow(`SELECT MAX(id) FROM pr_mergeability_probes`).Scan(&n); err != nil {
+		w.t.Fatalf("count probes: %v", err)
+	}
+	return n.Int64
+}
+
+// storedTip is main's branch_tips row, or nil.
+func (w *watchWorld) storedTip() *domain.BranchTip {
+	w.t.Helper()
+	tips, err := w.stores.PRMergeability.ListBranchTipsSystem(context.Background(), runmode.LocalDefaultOrgID)
+	if err != nil {
+		w.t.Fatalf("ListBranchTipsSystem: %v", err)
+	}
+	for _, tip := range tips {
+		if tip.Branch == "main" {
+			return &tip
+		}
+	}
+	return nil
+}
+
+// ageTip moves main's last check back by age.
+func (w *watchWorld) ageTip(age time.Duration) {
+	w.t.Helper()
+	tip := w.storedTip()
+	if tip == nil {
+		w.t.Fatal("no tip to age")
+	}
+	tip.ObservedAt = time.Now().Add(-age)
+	if _, err := w.stores.PRMergeability.UpsertBranchTipSystem(context.Background(), runmode.LocalDefaultOrgID, *tip); err != nil {
+		w.t.Fatalf("age tip: %v", err)
+	}
+}
+
+// pathsNode is a PRChangedPaths node for PR_n at head, changing files.
+func pathsNode(n int, head string, files ...domain.ChangedPath) string {
+	nodes := make([]string, len(files))
+	for i, f := range files {
+		nodes[i] = fmt.Sprintf(`{"path":%q,"changeType":%q}`, f.Path, f.Change)
+	}
+	return fmt.Sprintf(`{"id":"PR_%d","headRefOid":%q,"changedFiles":%d,"files":{"pageInfo":{"hasNextPage":false},"nodes":[%s]}}`,
+		n, head, len(files), strings.Join(nodes, ","))
+}
+
+func modified(p string) domain.ChangedPath {
+	return domain.ChangedPath{Path: p, Change: domain.PathModified}
+}
+
+// compareBody is a compare of status listing files, with total commits and
+// the commits listed.
+func compareBody(status string, total int, commits string, files ...string) string {
+	entries := make([]string, len(files))
+	for i, f := range files {
+		entries[i] = fmt.Sprintf(`{"filename":%q,"status":"modified"}`, f)
+	}
+	return fmt.Sprintf(`{"status":%q,"total_commits":%d,"commits":[%s],"files":[%s]}`, status, total, commits, strings.Join(entries, ","))
+}
+
+// filesOf is n distinct files under dir.
+func filesOf(dir string, n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = fmt.Sprintf("%s/f%d.go", dir, i)
+	}
+	return out
+}
+
+// seenOnce runs the first-sight cycle on tip old and moves main to "new", so
+// the next cycle processes the move old...new. PR_1 changes src/a.go, PR_2
+// docs/b.md and PR_3 lib/c.go.
+func (w *watchWorld) seenOnce() {
+	w.t.Helper()
+	w.cycle()
+	w.set(func(w *watchWorld) {
+		w.tip = "new"
+		w.paths["PR_1"] = pathsNode(1, "h1", modified("src/a.go"))
+		w.paths["PR_2"] = pathsNode(2, "h2", modified("docs/b.md"))
+		w.paths["PR_3"] = pathsNode(3, "h3", modified("lib/c.go"))
+	})
+}
+
+func TestBranchWatch_FirstSightResetsTheBaseOnceAndStoresTheTip(t *testing.T) {
+	w := newWatchWorld(t)
+	if got := w.cycle(); len(got) != 3 || got[1] != domain.MergeabilityProbeBaseReset || got[2] != domain.MergeabilityProbeBaseReset || got[3] != domain.MergeabilityProbeBaseReset {
+		t.Errorf("first sight admitted %v, want base_reset for every pull request on main", got)
+	}
+	if tip := w.storedTip(); tip == nil || tip.TipSHA != "old" || tip.ETag != `"ref-old"` {
+		t.Fatalf("stored tip = %+v, want old with its etag", tip)
+	}
+	if got := w.cycle(); len(got) != 0 {
+		t.Errorf("the next cycle admitted %v, want nothing: the tip did not move", got)
+	}
+}
+
+func TestBranchWatch_CompareStatuses(t *testing.T) {
+	twoSteps := `{"sha":"mid","parents":[{"sha":"old"}]},{"sha":"new","parents":[{"sha":"mid"},{"sha":"side"}]}`
+	cases := []struct {
+		name     string
+		compares map[string]string
+		want     map[int]string
+		reads    []string
+	}{
+		{
+			name:     "ahead uses the files",
+			compares: map[string]string{"old...new": compareBody("ahead", 1, "", "src/a.go", "other/z.go")},
+			want:     map[int]string{1: domain.MergeabilityProbeBaseMoved},
+			reads:    []string{"old...new"},
+		},
+		{
+			name:     "identical probes nothing",
+			compares: map[string]string{"old...new": compareBody("identical", 0, "")},
+			want:     map[int]string{},
+		},
+		{
+			name:     "behind resets the base",
+			compares: map[string]string{"old...new": compareBody("behind", 0, "", "src/a.go")},
+			want:     map[int]string{1: domain.MergeabilityProbeBaseReset, 2: domain.MergeabilityProbeBaseReset, 3: domain.MergeabilityProbeBaseReset},
+		},
+		{
+			name:     "diverged resets the base",
+			compares: map[string]string{"old...new": compareBody("diverged", 2, "", "src/a.go")},
+			want:     map[int]string{1: domain.MergeabilityProbeBaseReset, 2: domain.MergeabilityProbeBaseReset, 3: domain.MergeabilityProbeBaseReset},
+		},
+		{
+			name:     "a previous tip that is gone resets the base",
+			compares: map[string]string{"old...new": "404"},
+			want:     map[int]string{1: domain.MergeabilityProbeBaseReset, 2: domain.MergeabilityProbeBaseReset, 3: domain.MergeabilityProbeBaseReset},
+		},
+		{
+			name: "a truncated list within the commit cap walks the first-parent steps",
+			compares: map[string]string{
+				"old...new": compareBody("ahead", 2, twoSteps, filesOf("gen", ghclient.CompareFileCap)...),
+				"old...mid": compareBody("ahead", 1, "", "docs/b.md"),
+				"mid...new": compareBody("ahead", 1, "", "gen/x.go"),
+			},
+			want:  map[int]string{2: domain.MergeabilityProbeBaseMoved},
+			reads: []string{"old...new", "mid...new", "old...mid"},
+		},
+		{
+			name:     "a truncated list over the commit cap resets the base",
+			compares: map[string]string{"old...new": compareBody("ahead", ghclient.CompareCommitCap+1, twoSteps, filesOf("gen", ghclient.CompareFileCap)...)},
+			want:     map[int]string{1: domain.MergeabilityProbeBaseReset, 2: domain.MergeabilityProbeBaseReset, 3: domain.MergeabilityProbeBaseReset},
+			reads:    []string{"old...new"},
+		},
+		{
+			name: "a truncated step resets the base",
+			compares: map[string]string{
+				"old...new": compareBody("ahead", 2, twoSteps, filesOf("gen", ghclient.CompareFileCap)...),
+				"mid...new": compareBody("ahead", 1, "", filesOf("gen", ghclient.CompareFileCap)...),
+			},
+			want:  map[int]string{1: domain.MergeabilityProbeBaseReset, 2: domain.MergeabilityProbeBaseReset, 3: domain.MergeabilityProbeBaseReset},
+			reads: []string{"old...new", "mid...new"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			w := newWatchWorld(t)
+			w.seenOnce()
+			w.set(func(w *watchWorld) { w.compares = c.compares })
+			if got := w.cycle(); !mapsEqual(got, c.want) {
+				t.Errorf("admitted %v, want %v", got, c.want)
+			}
+			if c.reads != nil && !slices.Equal(w.compareReads, c.reads) {
+				t.Errorf("compares read = %v, want %v", w.compareReads, c.reads)
+			}
+			if tip := w.storedTip(); tip == nil || tip.TipSHA != "new" {
+				t.Errorf("stored tip = %+v, want new", tip)
+			}
+		})
+	}
+}
+
+func mapsEqual(a, b map[int]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+func TestBranchWatch_AListingThatAnswered304WaitsForTheFloor(t *testing.T) {
+	w := newWatchWorld(t)
+	w.set(func(w *watchWorld) { w.listing304 = true })
+	w.cycle()
+	if w.refReads != 1 {
+		t.Fatalf("first cycle read main's tip %d times, want once", w.refReads)
+	}
+
+	w.cycle()
+	if w.refReads != 1 {
+		t.Errorf("a cycle whose listing answered 304 read a tip checked just now")
+	}
+	w.ageTip(staleRefreshFloor + time.Minute)
+	w.cycle()
+	if w.refReads != 2 {
+		t.Errorf("a cycle whose listing answered 304 left a tip last checked past the floor unchecked")
+	}
+
+	w.set(func(w *watchWorld) { w.listing304 = false })
+	w.cycle()
+	if w.refReads != 3 {
+		t.Errorf("a cycle whose listing answered 200 left main unchecked")
+	}
+}
+
+// failingAdmit refuses the branch watch's admissions while fail is set.
+type failingAdmit struct {
+	db.PRMergeabilityStore
+	fail bool
+}
+
+func (f *failingAdmit) AdmitSystem(ctx context.Context, orgID string, probes []db.PRMergeabilityProbe) (int, error) {
+	if f.fail && len(probes) > 0 && probes[0].Reason == domain.MergeabilityProbeBaseMoved {
+		return 0, errors.New("admission refused")
+	}
+	return f.PRMergeabilityStore.AdmitSystem(ctx, orgID, probes)
+}
+
+func TestBranchWatch_TheTipIsStoredOnlyAfterAdmission(t *testing.T) {
+	w := newWatchWorld(t)
+	store := &failingAdmit{PRMergeabilityStore: w.stores.PRMergeability}
+	w.tr.mergeability = store
+	w.seenOnce()
+	w.set(func(w *watchWorld) { w.compares["old...new"] = compareBody("ahead", 1, "", "src/a.go") })
+
+	store.fail = true
+	if got := w.cycle(); len(got) != 0 {
+		t.Fatalf("admitted %v through a refusing store", got)
+	}
+	if tip := w.storedTip(); tip == nil || tip.TipSHA != "old" {
+		t.Fatalf("stored tip after a failed admission = %+v, want old", tip)
+	}
+
+	store.fail = false
+	if got := w.cycle(); !mapsEqual(got, map[int]string{1: domain.MergeabilityProbeBaseMoved}) {
+		t.Errorf("the next cycle admitted %v, want the move processed again", got)
+	}
+	if tip := w.storedTip(); tip == nil || tip.TipSHA != "new" {
+		t.Errorf("stored tip = %+v, want new", tip)
+	}
+}
+
+func TestBranchWatch_StalePathsAreReadAgainAndIncompleteOnesProbed(t *testing.T) {
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	w := newWatchWorld(t)
+	w.seenOnce()
+	write := func(i int, head string, complete bool, paths ...domain.ChangedPath) {
+		t.Helper()
+		if _, err := w.stores.PRMergeability.UpsertPathsSystem(ctx, org, domain.PRPaths{EntityID: w.prs[i].ID, Paths: paths, HeadSHA: head, Complete: complete}); err != nil {
+			t.Fatalf("seed paths: %v", err)
+		}
+	}
+	// PR_1's list was read at an earlier head and names another file; its
+	// current list touches the move. PR_2's is current and does not. PR_3's
+	// is current and incomplete.
+	write(0, "h1-earlier", true, modified("docs/old.md"))
+	write(1, "h2", true, modified("docs/b.md"))
+	write(2, "h3", false, modified("lib/c.go"))
+	w.set(func(w *watchWorld) { w.compares["old...new"] = compareBody("ahead", 1, "", "src/a.go") })
+
+	want := map[int]string{1: domain.MergeabilityProbeBaseMoved, 3: domain.MergeabilityProbeBaseMoved}
+	if got := w.cycle(); !mapsEqual(got, want) {
+		t.Errorf("admitted %v, want %v", got, want)
+	}
+	if !slices.Equal(w.pathReads, []string{"PR_1"}) {
+		t.Errorf("paths read for %v, want PR_1's alone", w.pathReads)
+	}
+	rows, err := w.stores.PRMergeability.ListPathsSystem(ctx, org, []string{w.prs[0].ID})
+	if err != nil || len(rows) != 1 || rows[0].HeadSHA != "h1" || len(rows[0].Paths) != 1 || rows[0].Paths[0].Path != "src/a.go" || !rows[0].Complete {
+		t.Errorf("PR_1's stored paths = %+v (err %v), want src/a.go read at h1", rows, err)
+	}
+}
+
+func TestBranchWatch_RenamesTakeTheirPreviousPathFromREST(t *testing.T) {
+	w := newWatchWorld(t)
+	w.seenOnce()
+	w.set(func(w *watchWorld) {
+		w.paths["PR_2"] = pathsNode(2, "h2", domain.ChangedPath{Path: "docs/new.md", Change: domain.PathRenamed})
+		w.previous[2] = `[{"filename":"docs/new.md","status":"renamed","previous_filename":"src/a.go"}]`
+		w.compares["old...new"] = compareBody("ahead", 1, "", "src/a.go")
+	})
+	want := map[int]string{1: domain.MergeabilityProbeBaseMoved, 2: domain.MergeabilityProbeBaseMoved}
+	if got := w.cycle(); !mapsEqual(got, want) {
+		t.Errorf("admitted %v, want %v: PR_2 renamed the file the move changed", got, want)
+	}
+}
+
+func TestBranchWatch_DeletesTheTipsOfBranchesNoOpenPRTargets(t *testing.T) {
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	w := newWatchWorld(t)
+	if _, err := w.stores.PRMergeability.UpsertBranchTipSystem(ctx, org, domain.BranchTip{
+		RepositoryID: w.repoID, Branch: "release", TipSHA: "r1", ObservedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed tip: %v", err)
+	}
+	w.cycle()
+	tips, err := w.stores.PRMergeability.ListBranchTipsSystem(ctx, org)
+	if err != nil || len(tips) != 1 || tips[0].Branch != "main" {
+		t.Errorf("tips after the cycle = %+v (err %v), want main's alone", tips, err)
+	}
+}
+
+// The poller runs one pass per App installation, each over its own
+// repositories, while every pass sees the org's open pull requests. A pass
+// reads only its repositories' branches, and keeps the tips of the others.
+func TestBranchWatch_APassChecksOnlyItsOwnRepositoriesAndKeepsTheOthersTips(t *testing.T) {
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	w := newWatchWorld(t)
+	trackRepos(t, w.stores, org, []string{"octo/repo", "octo/other"})
+	other, _, err := w.stores.Entities.FindOrCreateSystem(ctx, org, "github", cursorTestHost, "octo/other#9", "PR_other", "pr", "PR", "")
+	if err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	raw, _ := json.Marshal(domain.PRSnapshot{
+		NodeID: "PR_other", Number: 9, Repo: "octo/other", State: "OPEN", BaseRef: "main", HeadSHA: "h9",
+		CreatedAt: "2026-05-20T10:00:00Z", UpdatedAt: "2026-05-29T12:00:00Z", CheckRuns: []domain.CheckRun{},
+	})
+	if ok, err := w.stores.Entities.UpdateSnapshotCASSystem(ctx, org, other.ID, string(raw), other.PollSeq); err != nil || !ok {
+		t.Fatalf("seed snapshot: ok=%v err=%v", ok, err)
+	}
+	if _, err := w.db.Exec(`INSERT INTO pull_request_mergeability (entity_id, mergeable, mergeable_head_sha, checked_at) VALUES (?, 'MERGEABLE', 'h9', ?)`,
+		other.ID, time.Now().UTC()); err != nil {
+		t.Fatalf("seed answer: %v", err)
+	}
+	if _, err := w.stores.PRMergeability.UpsertBranchTipSystem(ctx, org, domain.BranchTip{
+		RepositoryID: other.RepositoryID, Branch: "main", TipSHA: "o1", ObservedAt: time.Now().Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("seed tip: %v", err)
+	}
+
+	// The fake serves octo/repo alone, so a read of octo/other fails the test.
+	w.cycle()
+	tips, err := w.stores.PRMergeability.ListBranchTipsSystem(ctx, org)
+	if err != nil || len(tips) != 2 {
+		t.Fatalf("tips after the pass = %+v (err %v), want octo/repo's main and octo/other's", tips, err)
+	}
+	for _, tip := range tips {
+		if tip.RepositoryID == other.RepositoryID && tip.TipSHA != "o1" {
+			t.Errorf("octo/other's tip = %+v, want it left as stored", tip)
+		}
+	}
+}

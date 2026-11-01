@@ -298,7 +298,7 @@ const PRMergeabilityMaxFailedReads = 5
 // PRMergeabilityProbes is the queue of pull requests whose mergeability is due
 // to be read, as a work kind: one row per (pull request, admission) whose
 // read has not completed. The probe worker is its only consumer and the only
-// writer of pull_request_mergeability.
+// writer of pull_request_mergeability's answer columns.
 //
 // SingleTx: a probe's effect is the pull_request_mergeability row and the
 // conflict events its transition implies, which the completion's closure

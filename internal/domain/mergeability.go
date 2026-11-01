@@ -10,8 +10,9 @@ const (
 	MergeableUnknown     = "UNKNOWN"
 )
 
-// PRMergeability is a pull request's last known mergeability: one
-// pull_request_mergeability row, written only by the probe worker.
+// PRMergeability is a pull request's last known mergeability: the answer
+// columns of one pull_request_mergeability row, which the probe worker is the
+// only writer of. The row's path columns are PRPaths.
 type PRMergeability struct {
 	EntityID string
 	OrgID    string
@@ -32,7 +33,8 @@ type PRMergeability struct {
 // pr_mergeability_probes.reason. A probe that collapses into one already
 // unsettled for its pull request keeps the first reason.
 const (
-	// MergeabilityProbeNew is a pull request with no mergeability row.
+	// MergeabilityProbeNew is a pull request whose mergeability was never
+	// read: it has no row, or only the row its changed paths were written to.
 	MergeabilityProbeNew = "new"
 	// MergeabilityProbeHeadMoved is a pull request whose head is not the one
 	// its row was last read at.
@@ -43,6 +45,14 @@ const (
 	// MergeabilityProbeSweep is a pull request whose row was last read longer
 	// than the sweep interval ago, or never.
 	MergeabilityProbeSweep = "sweep"
+	// MergeabilityProbeBaseMoved is a pull request whose base branch moved
+	// and whose changed paths overlap what the move changed, or whose paths
+	// TF does not hold in full.
+	MergeabilityProbeBaseMoved = "base_moved"
+	// MergeabilityProbeBaseReset is a pull request on a base branch TF cannot
+	// tell the move of: the branch is newly seen, its history was rewritten,
+	// its previous tip is gone, or the move changed too many files to list.
+	MergeabilityProbeBaseReset = "base_reset"
 )
 
 // MergeabilityProbeReasons is the vocabulary above, which an admission is
@@ -52,4 +62,69 @@ var MergeabilityProbeReasons = []string{
 	MergeabilityProbeHeadMoved,
 	MergeabilityProbeUnknownRetry,
 	MergeabilityProbeSweep,
+	MergeabilityProbeBaseMoved,
+	MergeabilityProbeBaseReset,
+}
+
+// GitHub's PatchStatus values: how a pull request, or a move of a branch,
+// changed one file. A compare's file statuses are mapped onto these, so both
+// sides of the overlap rule speak one vocabulary.
+const (
+	PathAdded    = "ADDED"
+	PathDeleted  = "DELETED"
+	PathRenamed  = "RENAMED"
+	PathCopied   = "COPIED"
+	PathModified = "MODIFIED"
+	PathChanged  = "CHANGED"
+)
+
+// ChangedPath is one file a pull request or a branch move changed: its path,
+// how it changed (a PatchStatus value), and for RENAMED and COPIED the path it
+// came from.
+type ChangedPath struct {
+	Path     string `json:"path"`
+	Change   string `json:"change"`
+	Previous string `json:"previous,omitempty"`
+}
+
+// PRPaths is a pull request's changed paths as the base-branch watch last
+// read them: the path columns of its pull_request_mergeability row, which the
+// watch is the only writer of.
+type PRPaths struct {
+	EntityID string
+	OrgID    string
+	// Paths is nil when they were never read.
+	Paths []ChangedPath
+	// HeadSHA is the pull request's head (headRefOid) the list was read at;
+	// empty when it was never read.
+	HeadSHA string
+	// Complete is true when Paths holds every one of the pull request's
+	// changed files.
+	Complete bool
+}
+
+// BranchRef names one branch of one repository registry row. Branch is the
+// name without refs/heads/.
+type BranchRef struct {
+	RepositoryID string
+	Branch       string
+}
+
+// BranchTip is the last tip of a base branch the branch watch processed: one
+// branch_tips row, written only by the watch.
+type BranchTip struct {
+	RepositoryID string
+	Branch       string
+	OrgID        string
+	// TipSHA is the tip whose move, if any, has had its probes admitted.
+	TipSHA string
+	// ETag is the ref read's from its last 200; empty when it sent none.
+	ETag string
+	// ObservedAt is when the tip was last checked, a 304 included.
+	ObservedAt time.Time
+}
+
+// Ref is the branch the tip is of.
+func (b BranchTip) Ref() BranchRef {
+	return BranchRef{RepositoryID: b.RepositoryID, Branch: b.Branch}
 }

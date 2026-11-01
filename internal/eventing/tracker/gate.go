@@ -23,10 +23,11 @@ const staleRefreshFloor = 10 * time.Minute
 
 // mergeabilitySweepInterval is how long after a pull request's last
 // mergeability read the poll admits a probe to read it again, whatever else
-// did or did not move. A merge to the base branch moves neither the pull
-// request's updated_at nor its head, so this is what bounds how late a
-// conflict the base branch caused is seen. It matches staleRefreshFloor.
-const mergeabilitySweepInterval = 10 * time.Minute
+// did or did not move. A new head and a base branch move that touches the pull
+// request's files are probed for when the poll sees them (the branch watch);
+// the sweep catches the changes those miss, such as a rename the base made
+// that git stops pairing after a later rewrite of the file.
+const mergeabilitySweepInterval = 6 * time.Hour
 
 // shouldSkipRefresh reports whether a tracked open PR can keep its
 // stored snapshot for this poll cycle (no follow-up RefreshPRs call

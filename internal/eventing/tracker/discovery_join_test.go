@@ -73,6 +73,8 @@ func TestRefreshGitHub_GatesAnEntityWhoseKeySpellsAnotherName(t *testing.T) {
 					}
 					w.Header().Set("ETag", `"etag-2"`)
 					_, _ = w.Write([]byte(quietPRListing))
+				case isBranchRefRead(r):
+					http.NotFound(w, r)
 				default:
 					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 					http.Error(w, "unexpected", http.StatusNotFound)

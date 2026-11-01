@@ -384,3 +384,153 @@ func (s *prMergeabilityStore) Describe(ctx context.Context, orgID string, ids []
 	}
 	return out, rows.Err()
 }
+
+const sqlitePRPathsColumns = `entity_id, org_id, paths_json, COALESCE(paths_head_sha, ''), paths_complete`
+
+func scanSQLitePRPaths(row interface{ Scan(...any) error }) (domain.PRPaths, error) {
+	var p domain.PRPaths
+	var raw sql.NullString
+	if err := row.Scan(&p.EntityID, &p.OrgID, &raw, &p.HeadSHA, &p.Complete); err != nil {
+		return domain.PRPaths{}, err
+	}
+	paths, err := db.DecodePRPaths(raw)
+	if err != nil {
+		return domain.PRPaths{}, fmt.Errorf("entity %s: %w", p.EntityID, err)
+	}
+	p.Paths = paths
+	return p, nil
+}
+
+func (s *prMergeabilityStore) ListPathsSystem(ctx context.Context, orgID string, entityIDs []string) ([]domain.PRPaths, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	if len(entityIDs) == 0 {
+		return nil, nil
+	}
+	marks := make([]string, len(entityIDs))
+	args := make([]any, len(entityIDs))
+	for i, id := range entityIDs {
+		marks[i] = "?"
+		args[i] = id
+	}
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT `+sqlitePRPathsColumns+` FROM pull_request_mergeability
+		WHERE entity_id IN (`+strings.Join(marks, ", ")+`)
+		ORDER BY entity_id
+	`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.PRPaths
+	for rows.Next() {
+		p, err := scanSQLitePRPaths(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *prMergeabilityStore) UpsertPathsSystem(ctx context.Context, orgID string, p domain.PRPaths) (domain.PRPaths, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return domain.PRPaths{}, err
+	}
+	if err := db.ValidatePRPaths(p); err != nil {
+		return domain.PRPaths{}, err
+	}
+	raw, err := db.EncodePRPaths(p.Paths)
+	if err != nil {
+		return domain.PRPaths{}, err
+	}
+	return scanSQLitePRPaths(s.conn.QueryRowContext(ctx, `
+		INSERT INTO pull_request_mergeability (entity_id, org_id, paths_json, paths_head_sha, paths_complete)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT (entity_id) DO UPDATE SET
+			paths_json = excluded.paths_json,
+			paths_head_sha = excluded.paths_head_sha,
+			paths_complete = excluded.paths_complete
+		RETURNING `+sqlitePRPathsColumns,
+		p.EntityID, orgID, raw, p.HeadSHA, p.Complete))
+}
+
+const sqliteBranchTipColumns = `repository_id, branch, org_id, tip_sha, COALESCE(etag, ''), observed_at`
+
+func scanSQLiteBranchTip(row interface{ Scan(...any) error }) (domain.BranchTip, error) {
+	var b domain.BranchTip
+	err := row.Scan(&b.RepositoryID, &b.Branch, &b.OrgID, &b.TipSHA, &b.ETag, &b.ObservedAt)
+	return b, err
+}
+
+func (s *prMergeabilityStore) ListBranchTipsSystem(ctx context.Context, orgID string) ([]domain.BranchTip, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	return s.listBranchTips(ctx, s.conn)
+}
+
+func (s *prMergeabilityStore) listBranchTips(ctx context.Context, q interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}) ([]domain.BranchTip, error) {
+	rows, err := q.QueryContext(ctx, `
+		SELECT `+sqliteBranchTipColumns+` FROM branch_tips ORDER BY repository_id, branch
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.BranchTip
+	for rows.Next() {
+		b, err := scanSQLiteBranchTip(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+func (s *prMergeabilityStore) UpsertBranchTipSystem(ctx context.Context, orgID string, tip domain.BranchTip) (domain.BranchTip, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return domain.BranchTip{}, err
+	}
+	if err := db.ValidateBranchTip(tip); err != nil {
+		return domain.BranchTip{}, err
+	}
+	return scanSQLiteBranchTip(s.conn.QueryRowContext(ctx, `
+		INSERT INTO branch_tips (repository_id, branch, org_id, tip_sha, etag, observed_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT (repository_id, branch) DO UPDATE SET
+			tip_sha = excluded.tip_sha,
+			etag = excluded.etag,
+			observed_at = excluded.observed_at
+		RETURNING `+sqliteBranchTipColumns,
+		tip.RepositoryID, tip.Branch, orgID, tip.TipSHA, nullIfEmpty(tip.ETag), tip.ObservedAt.UTC()))
+}
+
+func (s *prMergeabilityStore) DeleteBranchTipsExceptSystem(ctx context.Context, orgID string, keep []domain.BranchRef) (int, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return 0, err
+	}
+	deleted := 0
+	err := db.InTx(ctx, s.conn, func(tx *sql.Tx) error {
+		deleted = 0
+		stored, err := s.listBranchTips(ctx, tx)
+		if err != nil {
+			return err
+		}
+		for _, ref := range db.BranchTipsToDelete(stored, keep) {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM branch_tips WHERE repository_id = ? AND branch = ?`, ref.RepositoryID, ref.Branch); err != nil {
+				return fmt.Errorf("delete branch tip %s: %w", ref.Branch, err)
+			}
+			deleted++
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return deleted, nil
+}

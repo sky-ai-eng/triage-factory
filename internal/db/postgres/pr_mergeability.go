@@ -363,3 +363,139 @@ func (s *prMergeabilityStore) Describe(ctx context.Context, orgID string, ids []
 	}
 	return out, rows.Err()
 }
+
+const pgPRPathsColumns = `entity_id::text, org_id::text, paths_json, COALESCE(paths_head_sha, ''), paths_complete`
+
+func scanPgPRPaths(row interface{ Scan(...any) error }) (domain.PRPaths, error) {
+	var p domain.PRPaths
+	var raw sql.NullString
+	if err := row.Scan(&p.EntityID, &p.OrgID, &raw, &p.HeadSHA, &p.Complete); err != nil {
+		return domain.PRPaths{}, err
+	}
+	paths, err := db.DecodePRPaths(raw)
+	if err != nil {
+		return domain.PRPaths{}, fmt.Errorf("entity %s: %w", p.EntityID, err)
+	}
+	p.Paths = paths
+	return p, nil
+}
+
+func (s *prMergeabilityStore) ListPathsSystem(ctx context.Context, orgID string, entityIDs []string) ([]domain.PRPaths, error) {
+	if len(entityIDs) == 0 {
+		return nil, nil
+	}
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT `+pgPRPathsColumns+` FROM public.pull_request_mergeability
+		WHERE org_id = $1 AND entity_id = ANY($2::uuid[])
+		ORDER BY entity_id
+	`, orgID, pgUUIDArray(entityIDs))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.PRPaths
+	for rows.Next() {
+		p, err := scanPgPRPaths(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *prMergeabilityStore) UpsertPathsSystem(ctx context.Context, orgID string, p domain.PRPaths) (domain.PRPaths, error) {
+	if err := db.ValidatePRPaths(p); err != nil {
+		return domain.PRPaths{}, err
+	}
+	raw, err := db.EncodePRPaths(p.Paths)
+	if err != nil {
+		return domain.PRPaths{}, err
+	}
+	return scanPgPRPaths(s.conn.QueryRowContext(ctx, `
+		INSERT INTO public.pull_request_mergeability (entity_id, org_id, paths_json, paths_head_sha, paths_complete)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (entity_id) DO UPDATE SET
+			paths_json = excluded.paths_json,
+			paths_head_sha = excluded.paths_head_sha,
+			paths_complete = excluded.paths_complete
+		RETURNING `+pgPRPathsColumns,
+		p.EntityID, orgID, raw, p.HeadSHA, p.Complete))
+}
+
+const pgBranchTipColumns = `repository_id::text, branch, org_id::text, tip_sha, COALESCE(etag, ''), observed_at`
+
+func scanPgBranchTip(row interface{ Scan(...any) error }) (domain.BranchTip, error) {
+	var b domain.BranchTip
+	if err := row.Scan(&b.RepositoryID, &b.Branch, &b.OrgID, &b.TipSHA, &b.ETag, &b.ObservedAt); err != nil {
+		return domain.BranchTip{}, err
+	}
+	b.ObservedAt = b.ObservedAt.UTC()
+	return b, nil
+}
+
+func (s *prMergeabilityStore) ListBranchTipsSystem(ctx context.Context, orgID string) ([]domain.BranchTip, error) {
+	return s.listBranchTips(ctx, s.conn, orgID, "")
+}
+
+// listBranchTips reads the org's tips through q, locking them when lock is
+// " FOR UPDATE".
+func (s *prMergeabilityStore) listBranchTips(ctx context.Context, q interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, orgID, lock string) ([]domain.BranchTip, error) {
+	rows, err := q.QueryContext(ctx, `
+		SELECT `+pgBranchTipColumns+` FROM public.branch_tips
+		WHERE org_id = $1 ORDER BY repository_id, branch`+lock, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.BranchTip
+	for rows.Next() {
+		b, err := scanPgBranchTip(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+func (s *prMergeabilityStore) UpsertBranchTipSystem(ctx context.Context, orgID string, tip domain.BranchTip) (domain.BranchTip, error) {
+	if err := db.ValidateBranchTip(tip); err != nil {
+		return domain.BranchTip{}, err
+	}
+	return scanPgBranchTip(s.conn.QueryRowContext(ctx, `
+		INSERT INTO public.branch_tips (repository_id, branch, org_id, tip_sha, etag, observed_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (repository_id, branch) DO UPDATE SET
+			tip_sha = excluded.tip_sha,
+			etag = excluded.etag,
+			observed_at = excluded.observed_at
+		RETURNING `+pgBranchTipColumns,
+		tip.RepositoryID, tip.Branch, orgID, tip.TipSHA, nullIfEmpty(tip.ETag), tip.ObservedAt.UTC()))
+}
+
+func (s *prMergeabilityStore) DeleteBranchTipsExceptSystem(ctx context.Context, orgID string, keep []domain.BranchRef) (int, error) {
+	deleted := 0
+	err := inTxRaw(ctx, s.conn, func(tx *sql.Tx) error {
+		deleted = 0
+		stored, err := s.listBranchTips(ctx, tx, orgID, " FOR UPDATE")
+		if err != nil {
+			return err
+		}
+		for _, ref := range db.BranchTipsToDelete(stored, keep) {
+			if _, err := tx.ExecContext(ctx, `
+				DELETE FROM public.branch_tips WHERE org_id = $1 AND repository_id = $2 AND branch = $3
+			`, orgID, ref.RepositoryID, ref.Branch); err != nil {
+				return fmt.Errorf("delete branch tip %s: %w", ref.Branch, err)
+			}
+			deleted++
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return deleted, nil
+}

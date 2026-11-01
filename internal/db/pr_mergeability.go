@@ -15,17 +15,20 @@ import (
 )
 
 // PRMergeabilityStore owns pull_request_mergeability, a pull request's last
-// known mergeability, and pr_mergeability_probes, the queue of reads that are
-// due, on the shared work-item contract as workkinds.PRMergeabilityProbes
-// declares it.
+// known mergeability and its changed paths; pr_mergeability_probes, the queue
+// of reads that are due, on the shared work-item contract as
+// workkinds.PRMergeabilityProbes declares it; and branch_tips, the last tip
+// of each base branch the poll's branch watch processed.
 //
 // The probe worker is the only writer of the row's answer columns, through
 // CompleteProbe, and the row's transitions are what emit
 // github:pr:conflicts and github:pr:conflicts_resolved: the stored answer is
 // those events' re-emit guard, the one the snapshot diff is for every other
-// pull request event. The poll admits probes (AdmitSystem), reads the rows to
-// decide which are due (ListSystem), and deletes the rows of entities no
-// longer active (DeleteInactiveSystem).
+// pull request event. The branch watch is the only writer of the row's path
+// columns (UpsertPathsSystem) and of branch_tips. Each writer's upsert sets
+// its own columns only, so neither overwrites the other's. The poll admits
+// probes (AdmitSystem), reads the rows to decide which are due (ListSystem),
+// and deletes the rows of entities no longer active (DeleteInactiveSystem).
 //
 // Every method is a system method on the admin pool in Postgres, org_id bound
 // by argument or through the receipt; the SQLite impl asserts the local
@@ -105,6 +108,31 @@ type PRMergeabilityStore interface {
 	// cutoff, across every org, and reports how many. Parked probes are kept
 	// for an operator.
 	PruneSettled(ctx context.Context, before time.Time) (int, error)
+
+	// ListPathsSystem is the path columns of the rows of the org's entities
+	// in entityIDs, ordered by entity id. An entity with no row is absent; a
+	// row whose paths were never written has nil Paths.
+	ListPathsSystem(ctx context.Context, orgID string, entityIDs []string) ([]domain.PRPaths, error)
+
+	// UpsertPathsSystem writes one pull request's changed paths, the head
+	// they were read at and whether they are complete, and returns the path
+	// columns as persisted. A pull request with no row gets one with no
+	// answer. The answer columns are never touched.
+	UpsertPathsSystem(ctx context.Context, orgID string, paths domain.PRPaths) (domain.PRPaths, error)
+
+	// ListBranchTipsSystem is every branch_tips row of the org, ordered by
+	// repository and branch. The rows are bounded by the base branches the
+	// org's open pull requests target: DeleteBranchTipsExceptSystem removes
+	// the rest every poll cycle.
+	ListBranchTipsSystem(ctx context.Context, orgID string) ([]domain.BranchTip, error)
+
+	// UpsertBranchTipSystem writes one branch's tip, ETag and observed time,
+	// and returns the row as persisted.
+	UpsertBranchTipSystem(ctx context.Context, orgID string, tip domain.BranchTip) (domain.BranchTip, error)
+
+	// DeleteBranchTipsExceptSystem deletes, in one transaction, the org's
+	// branch_tips rows of branches not in keep, and reports how many.
+	DeleteBranchTipsExceptSystem(ctx context.Context, orgID string, keep []domain.BranchRef) (int, error)
 }
 
 // PRMergeabilityProbe is one admission: the pull request entity and why its
@@ -295,4 +323,83 @@ func PRMergeabilityProbeSubject(entityID, reason string, unknownReads int, sourc
 		"reason":        reason,
 		"unknown_reads": strconv.Itoa(unknownReads),
 	}}
+}
+
+// ValidatePRPaths refuses a path write naming no entity or head, or carrying
+// a path that is empty or whose change is not a PatchStatus value, so both
+// dialects refuse the same writes.
+func ValidatePRPaths(p domain.PRPaths) error {
+	if p.EntityID == "" {
+		return fmt.Errorf("db: changed paths name no entity")
+	}
+	if p.HeadSHA == "" {
+		return fmt.Errorf("db: changed paths of entity %s name no head", p.EntityID)
+	}
+	for _, c := range p.Paths {
+		if c.Path == "" {
+			return fmt.Errorf("db: changed paths of entity %s hold an empty path", p.EntityID)
+		}
+		if !slices.Contains(changeTypes, c.Change) {
+			return fmt.Errorf("db: changed path %q of entity %s has unknown change %q", c.Path, p.EntityID, c.Change)
+		}
+	}
+	return nil
+}
+
+var changeTypes = []string{
+	domain.PathAdded, domain.PathDeleted, domain.PathRenamed,
+	domain.PathCopied, domain.PathModified, domain.PathChanged,
+}
+
+// EncodePRPaths is paths_json for a path list, shared by both dialects so the
+// two store identical text. A nil list encodes as an empty array: a written
+// list is a read, even of a pull request that changes nothing.
+func EncodePRPaths(paths []domain.ChangedPath) (string, error) {
+	if paths == nil {
+		paths = []domain.ChangedPath{}
+	}
+	b, err := json.Marshal(paths)
+	return string(b), err
+}
+
+// DecodePRPaths reads paths_json back; NULL (never written) is nil.
+func DecodePRPaths(raw sql.NullString) ([]domain.ChangedPath, error) {
+	if !raw.Valid {
+		return nil, nil
+	}
+	paths := []domain.ChangedPath{}
+	if err := json.Unmarshal([]byte(raw.String), &paths); err != nil {
+		return nil, fmt.Errorf("db: paths_json: %w", err)
+	}
+	return paths, nil
+}
+
+// ValidateBranchTip refuses a tip naming no repository, branch or tip, or
+// with no observed time, so both dialects refuse the same writes.
+func ValidateBranchTip(tip domain.BranchTip) error {
+	switch {
+	case tip.RepositoryID == "" || tip.Branch == "":
+		return fmt.Errorf("db: branch tip names no repository or branch")
+	case tip.TipSHA == "":
+		return fmt.Errorf("db: branch tip of %s names no tip", tip.Branch)
+	case tip.ObservedAt.IsZero():
+		return fmt.Errorf("db: branch tip of %s has no observed time", tip.Branch)
+	}
+	return nil
+}
+
+// BranchTipsToDelete is the stored tips whose branch is not in keep, shared by
+// both dialects' DeleteBranchTipsExceptSystem.
+func BranchTipsToDelete(stored []domain.BranchTip, keep []domain.BranchRef) []domain.BranchRef {
+	kept := make(map[domain.BranchRef]bool, len(keep))
+	for _, k := range keep {
+		kept[k] = true
+	}
+	var out []domain.BranchRef
+	for _, tip := range stored {
+		if !kept[tip.Ref()] {
+			out = append(out, tip.Ref())
+		}
+	}
+	return out
 }

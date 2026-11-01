@@ -343,6 +343,16 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 	// their stored snapshot through the Phase-2 gate without a refresh.
 	discovery, discoveryErr := t.discoverGitHub(ctx, scope, client, self.Login, repos)
 	discovered, quietRepos, lastListed := discovery.prs, discovery.quiet, discovery.lastListed
+	// listedOK is the set of registry row ids whose open-PR listing answered
+	// 200 this cycle: a merged pull request leaves the listing, so these are
+	// the repositories whose base branches the watch checks at once.
+	listedOK := map[string]bool{}
+	for _, c := range discovery.cursors {
+		if !quietRepos[c.repositoryID] {
+			listedOK[c.repositoryID] = true
+		}
+	}
+	watch := baseWatchScope{passRepos: discovery.passRepos, listedOK: listedOK}
 	var rateLimited *ghclient.ErrRateLimited
 	if discoveryErr != nil {
 		if errors.As(discoveryErr, &rateLimited) {
@@ -643,7 +653,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 			terminalItems = append(terminalItems, item)
 			continue
 		}
-		open = append(open, mergeabilityCandidate{entity: e, nodeID: snap.NodeID})
+		open = append(open, mergeabilityCandidate{entity: e, nodeID: snap.NodeID, snap: snap})
 		// Open path: gate against discovery's fresh snapshot if we have one.
 		// Entities not in this cycle's discovery (rare — e.g. a PR you've
 		// stopped being a reviewer on) fall through to refresh, which is the
@@ -732,6 +742,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		// default 30s+ poll cadence and carries no actionable signal;
 		// liveness is reported independently via /readyz.
 		trackerLog.Debug("github refresh: no-op cycle", "discovered", len(discovered), "entities", len(entities), "skipped", skippedOpen)
+		t.watchBaseBranches(ctx, client, orgID, open, watch, discoveredByNodeID, nil)
 		t.admitMergeabilityProbes(ctx, orgID, open, discoveredByNodeID, nil)
 		if len(entities) > 0 {
 			t.EmitPollComplete(ctx, "github", startedAt, len(entities), 0)
@@ -921,6 +932,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 	diffSpan.SetAttributes(telemetry.Count(eventsEmitted))
 	diffSpan.End()
 
+	t.watchBaseBranches(ctx, client, orgID, open, watch, discoveredByNodeID, refreshed)
 	t.admitMergeabilityProbes(ctx, orgID, open, discoveredByNodeID, refreshed)
 
 	// Info only when the cycle actually produced something (an emitted
@@ -939,18 +951,21 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 	return eventsEmitted, "", nil
 }
 
-// mergeabilityCandidate is one open pull request a cycle knows: its entity
-// and the node id its snapshots are keyed by.
+// mergeabilityCandidate is one open pull request a cycle knows: its entity,
+// the node id its snapshots are keyed by, and its stored snapshot, which is
+// zero for a snapshot-less entity being seeded this cycle.
 type mergeabilityCandidate struct {
 	entity domain.Entity
 	nodeID string
+	snap   domain.PRSnapshot
 }
 
 // admitMergeabilityProbes admits a mergeability probe for every open pull
 // request whose mergeability can have changed since its stored answer was
 // read, and deletes the stored answers of entities no longer active:
 //
-//   - new: the pull request has no row;
+//   - new: the pull request's mergeability was never read: it has no row, or
+//     only the one the branch watch wrote its changed paths to;
 //   - head_moved: its current head is not the one its row was last read at.
 //     The current head is the refresh's when this cycle refreshed it, and the
 //     open-PR listing's otherwise. A repository whose listing answered 304
@@ -958,7 +973,8 @@ type mergeabilityCandidate struct {
 //   - sweep: its row was last read longer than mergeabilitySweepInterval ago.
 //
 // The reasons are tried in that order and a pull request is admitted once. A
-// pull request already holding an unsettled probe collapses into it. A
+// pull request already holding an unsettled probe collapses into it, which
+// the branch watch's probes, admitted first in the cycle, may be. A
 // failure is logged and costs this cycle's admissions: the next cycle decides
 // the same probes again from the same rows.
 //
@@ -1002,7 +1018,7 @@ func (t *Tracker) admitMergeabilityProbes(ctx context.Context, orgID string, ope
 		row, ok := answers[c.entity.ID]
 		var reason string
 		switch {
-		case !ok:
+		case !ok || (row.Mergeable == "" && row.CheckedAt == nil):
 			reason = domain.MergeabilityProbeNew
 		case head != "" && head != row.MergeableHeadSHA:
 			reason = domain.MergeabilityProbeHeadMoved
@@ -1230,6 +1246,12 @@ func (t *Tracker) discoverGitHub(ctx context.Context, scope string, client *ghcl
 	lastListed := map[string]time.Time{}
 	var cursors []pullsCursor
 	trackedIDs := t.trackedRepositoryIDs(ctx, scope)
+	passRepos := make(map[string]bool, len(repos))
+	for _, name := range repos {
+		if id := trackedIDs[strings.ToLower(name)]; id != "" {
+			passRepos[id] = true
+		}
+	}
 
 	// Phase 1a: per-repo conditional open-PR enumeration, fanned out across a
 	// bounded worker pool (TFAC-570) sized by repoConcurrency() — default 4,
@@ -1455,7 +1477,7 @@ func (t *Tracker) discoverGitHub(ctx context.Context, scope string, client *ghcl
 		span.SetStatus(codes.Error, "every listing failed")
 		span.SetAttributes(telemetry.Outcome("failed"))
 	}
-	return githubDiscovery{prs: all, quiet: quiet, lastListed: lastListed, cursors: cursors, resumeFrom: resumeFrom}, discoveryErr
+	return githubDiscovery{prs: all, quiet: quiet, lastListed: lastListed, cursors: cursors, resumeFrom: resumeFrom, passRepos: passRepos}, discoveryErr
 }
 
 // githubDiscovery is what discoverGitHub found.
@@ -1484,6 +1506,10 @@ type githubDiscovery struct {
 	// itself rate-limited) when ErrRateLimited cut the cycle short. It's only
 	// ever non-empty alongside a non-nil error.
 	resumeFrom string
+	// passRepos is the set of registry row ids of the repositories this
+	// discovery was handed: the ones its client is for. The poller hands each
+	// App installation's pass its own.
+	passRepos map[string]bool
 }
 
 // discoveredPR is a pull request discovery found, with the registry row id of

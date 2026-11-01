@@ -17,12 +17,13 @@ func (r *Result) Render(w io.Writer) {
 		comma(r.Repos), comma(r.TotalPRs), comma(r.MaxOpenPRs), comma(r.ExpectedColdEvents))
 
 	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "cycle\twall\treq\tlist\tpages\t304\tgraphql\tteams\tratelimited\tevents\tentities\tallocs")
+	fmt.Fprintln(tw, "cycle\twall\treq\tlist\tpages\t304\tgraphql\tteams\trefs\tref304\tratelimited\tevents\tentities\tallocs")
 	for _, c := range r.Cycles {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			c.Label, fmtDur(c.Wall),
 			comma(c.Requests.Total), comma(c.Requests.PullsList), comma(c.Requests.PullsPages),
 			comma(c.Requests.Pulls304), comma(c.Requests.GraphQL), comma(c.Requests.Teams),
+			comma(c.Requests.Refs), comma(c.Requests.Refs304),
 			comma(c.Requests.RateLimited),
 			comma(c.Events), comma(c.Entities), fmtBytes(int64(c.AllocBytes)))
 	}

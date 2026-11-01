@@ -24,10 +24,12 @@ import (
 // requests admit nothing on the head rule.
 
 // stored is the answer a case seeds before the cycle: the head it was read
-// at and how long ago.
+// at and how long ago. pathsOnly seeds instead the row the branch watch
+// leaves when it writes a pull request's changed paths before any read.
 type storedAnswer struct {
-	head string
-	age  time.Duration
+	head      string
+	age       time.Duration
+	pathsOnly bool
 }
 
 // refreshAdmissions runs one cycle over octo/repo#42 (quietPRListing, head
@@ -52,6 +54,8 @@ func refreshAdmissions(t *testing.T, answer *storedAnswer, notModified bool) []s
 			}
 			w.Header().Set("ETag", `"etag-2"`)
 			_, _ = w.Write([]byte(quietPRListing))
+		case isBranchRefRead(r):
+			http.NotFound(w, r)
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			http.Error(w, "unexpected", http.StatusNotFound)
@@ -77,7 +81,12 @@ func refreshAdmissions(t *testing.T, answer *storedAnswer, notModified bool) []s
 			t.Fatalf("seed listing cursor: %v", err)
 		}
 	}
-	if answer != nil {
+	switch {
+	case answer != nil && answer.pathsOnly:
+		if _, err := stores.PRMergeability.UpsertPathsSystem(ctx, org, domain.PRPaths{EntityID: ent.ID, Paths: []domain.ChangedPath{}, HeadSHA: answer.head}); err != nil {
+			t.Fatalf("seed stored paths: %v", err)
+		}
+	case answer != nil:
 		if _, err := database.Exec(`INSERT INTO pull_request_mergeability (entity_id, mergeable, mergeable_head_sha, checked_at) VALUES (?, 'MERGEABLE', ?, ?)`,
 			ent.ID, answer.head, time.Now().UTC().Add(-answer.age)); err != nil {
 			t.Fatalf("seed stored answer: %v", err)
@@ -106,6 +115,12 @@ func refreshAdmissions(t *testing.T, answer *storedAnswer, notModified bool) []s
 func TestRefreshGitHub_AdmitsNewForAPullRequestWithNoAnswer(t *testing.T) {
 	if got := refreshAdmissions(t, nil, false); !slices.Equal(got, []string{domain.MergeabilityProbeNew}) {
 		t.Errorf("admitted %v, want [new]", got)
+	}
+}
+
+func TestRefreshGitHub_AdmitsNewForAPullRequestWhoseRowHoldsOnlyPaths(t *testing.T) {
+	if got := refreshAdmissions(t, &storedAnswer{head: "deadbeef", pathsOnly: true}, false); !slices.Equal(got, []string{domain.MergeabilityProbeNew}) {
+		t.Errorf("admitted %v, want [new]: the row records no read", got)
 	}
 }
 
@@ -160,6 +175,8 @@ func refreshedAdmissions(t *testing.T, node string, answer bool) (reasons []stri
 			_, _ = w.Write([]byte(node))
 		case strings.HasSuffix(r.URL.Path, "/repos/octo/repo/pulls"):
 			_, _ = w.Write([]byte(quietPRListing))
+		case isBranchRefRead(r):
+			http.NotFound(w, r)
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			http.Error(w, "unexpected", http.StatusNotFound)

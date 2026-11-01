@@ -121,6 +121,10 @@ func (h *fakeGitHubHost) serve(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"nodes": nodes}})
 		return
 	}
+	if isBranchRefRead(r) {
+		http.NotFound(w, r)
+		return
+	}
 	path := strings.TrimPrefix(r.URL.Path, "/api/v3")
 	h.paths = append(h.paths, path)
 	rest, ok := strings.CutPrefix(path, "/repos/")
