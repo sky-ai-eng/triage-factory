@@ -342,6 +342,40 @@ read per base branch and one `PRMergeability` query (1 point) per 100 PRs:
 | `stress` | before | 1,237 | 3,626 | 1m16s |
 | `stress` | after | 1,936 | 3,747 | 1m29s |
 
+### `mono` with all 1,500 PRs tracked
+
+Recorded 2026-11-01 on an Intel Xeon (4 vCPUs at 2.80 GHz, 15 GB) running
+Linux, seed 42, `./scripts/poll-bench.sh --shape mono`, after the open-PR
+listing's cap rose from 1,000 to 10,000 PRs. TF lists all 15 pages and
+tracks every open PR. Counts are exact; wall times do not compare with the
+sections above, which were recorded on other machines.
+
+| | Count |
+| -- | -- |
+| Base moves | 50 |
+| Overlap set per move (mean) | 11.4 PRs, 0.8% of the tracked PRs |
+| Head pushes on tracked PRs | 1,500 |
+| Test merges | 2,800 |
+| … on an overlap-set PR after a base move | 563 |
+| … on a head-pushed PR | 1,500 |
+| … on a PR re-read after `UNKNOWN` | 737 |
+| … unaccounted (shortfall) | 0 |
+| Probing every tracked PR on every move, from base moves | 75,000 |
+
+- Every test merge has a cause. Base moves cost 1,300 test merges (overlap
+  sets plus re-reads), against 75,000 if every tracked PR were probed on
+  every move.
+- The cold cycle read 1,500 probes for 1,500 tracked PRs, no paths, and 1
+  ref for the 1 base branch: 108 requests, 465 points, 13.6 s.
+- The first move read every tracked PR's paths: 82 `PRChangedPaths`
+  queries and 279 REST file-list pages, which made that cycle 16.0 s
+  against a mean of 4.7 s for a cycle with no move. Later moves read 1 to
+  7 queries.
+- The warm cycles cost 2,399 REST requests (50 of them 304s), 401 GraphQL
+  requests and 701 points in all: 7.0 points a cycle.
+- Against the 1,000-PR run above: test merges 1,950 → 2,800, warm-cycle
+  points 547 → 701, cold points 310 → 465.
+
 ## CI
 
 `.github/workflows/poll-bench.yml` runs `--shape smoke --check` on changes
