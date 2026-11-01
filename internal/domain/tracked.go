@@ -100,7 +100,8 @@ type PRSnapshot struct {
 	ClosedByID string `json:"closed_by_id,omitempty"`
 
 	// ChangeSeenAt is when TF last saw the pull request change (its head or
-	// UpdatedAt moved), RFC 3339 in UTC. It is TF's clock, not GitHub's: a
+	// UpdatedAt moved): the time the refresh that saw it returned, RFC 3339
+	// in UTC with sub-second precision. It is TF's clock, not GitHub's: a
 	// push of an old commit carries an old commit date. GitHub never sends
 	// it; only the tracker writes it, and for five minutes after it the
 	// poll refreshes the pull request every cycle, because check runs

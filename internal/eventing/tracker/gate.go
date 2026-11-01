@@ -146,6 +146,13 @@ func shouldSkipRefresh(stored, fresh domain.PRSnapshot, age, sinceChange time.Du
 	return true
 }
 
+// formatChangeSeen is the ChangeSeenAt stamp for a change TF observed by t. It
+// keeps sub-second precision so the stamp is never earlier than the read that
+// saw the change, which truncating to the second would make it.
+func formatChangeSeen(t time.Time) string {
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
 // sinceChangeSeen is how long before now TF last saw the pull request change,
 // read from the stored snapshot's ChangeSeenAt. A snapshot with no stamp
 // (stored before the field existed, or seeded quietly) or an unparseable one

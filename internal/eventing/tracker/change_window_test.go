@@ -41,6 +41,10 @@ type changingPRServer struct {
 	// checks are the head commit's check runs, as the GraphQL rollup's nodes.
 	checks    []string
 	refreshes int
+	// refreshDelay holds every GraphQL refresh before it is answered, and
+	// lastRefreshAt is when the latest one was answered.
+	refreshDelay  time.Duration
+	lastRefreshAt time.Time
 }
 
 func newChangingPRServer(t *testing.T) *changingPRServer {
@@ -59,11 +63,18 @@ func newChangingPRServer(t *testing.T) *changingPRServer {
 }
 
 func (s *changingPRServer) serve(w http.ResponseWriter, r *http.Request) {
+	if strings.HasSuffix(r.URL.Path, "/graphql") {
+		s.mu.Lock()
+		delay := s.refreshDelay
+		s.mu.Unlock()
+		time.Sleep(delay)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch {
 	case strings.HasSuffix(r.URL.Path, "/graphql"):
 		s.refreshes++
+		s.lastRefreshAt = time.Now()
 		_, _ = w.Write([]byte(s.graphQLBody()))
 	case strings.HasSuffix(r.URL.Path, "/repos/octo/repo/pulls"):
 		etag := fmt.Sprintf(`"%t-%t-%s-%s"`, s.listed, s.open, s.head, s.updatedAt)
@@ -176,8 +187,8 @@ func newChangeWindowRig(t *testing.T) *changeWindowRig {
 }
 
 // cycle runs one poll cycle and returns the event types it emitted, and the
-// window the cycle's change stamp must fall in: the cycle's start, truncated
-// to the stamp's second precision, through its end.
+// window a change stamp it writes must fall in: the cycle's start through its
+// end. from is truncated to the second because setStamp writes whole seconds.
 func (r *changeWindowRig) cycle() (emitted []string, from, to time.Time) {
 	r.t.Helper()
 	before := len(r.pub.nonSystemEvents())
@@ -227,10 +238,10 @@ func (r *changeWindowRig) assertStampedIn(from, to time.Time) {
 	stamp := r.snapshot().ChangeSeenAt
 	seen, err := time.Parse(time.RFC3339, stamp)
 	if err != nil {
-		r.t.Fatalf("change_seen_at = %q; want the cycle's time", stamp)
+		r.t.Fatalf("change_seen_at = %q; want a time within the cycle", stamp)
 	}
 	if seen.Before(from) || seen.After(to) {
-		r.t.Fatalf("change_seen_at = %s; want the cycle's time, in [%s, %s]", stamp, from.Format(time.RFC3339), to.Format(time.RFC3339))
+		r.t.Fatalf("change_seen_at = %s; want a time within the cycle, in [%s, %s]", stamp, from.Format(time.RFC3339), to.Format(time.RFC3339))
 	}
 }
 
@@ -311,15 +322,15 @@ func TestRefreshGitHub_ChangeWindowReadsCheckRunsCreatedAfterRefresh(t *testing.
 }
 
 // TestRefreshGitHub_ChangeSeenAtLifecycle pins where the tracker writes the
-// change stamp: a refresh that sees the head or updatedAt move stamps the
-// cycle's time; one that sees no change carries the stored stamp and writes no
+// change stamp: a refresh that sees the head or updatedAt move stamps its own
+// time; one that sees no change carries the stored stamp and writes no
 // snapshot; a newly opened pull request and a reopened one are stamped; a
 // baseline pull request and a quiet seed are not.
 func TestRefreshGitHub_ChangeSeenAtLifecycle(t *testing.T) {
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
 
-	t.Run("a refresh that sees the head move stamps the cycle's time", func(t *testing.T) {
+	t.Run("a refresh that sees the head move stamps the refresh's time", func(t *testing.T) {
 		r := newChangeWindowRig(t)
 		r.cycle()
 		r.srv.set(func(s *changingPRServer) { s.head, s.updatedAt = "sha2", "2026-10-30T12:10:00Z" })
@@ -327,7 +338,7 @@ func TestRefreshGitHub_ChangeSeenAtLifecycle(t *testing.T) {
 		r.assertStampedIn(from, to)
 	})
 
-	t.Run("a refresh that sees only updatedAt move stamps the cycle's time", func(t *testing.T) {
+	t.Run("a refresh that sees only updatedAt move stamps the refresh's time", func(t *testing.T) {
 		r := newChangeWindowRig(t)
 		r.cycle()
 		r.setStamp(time.Now().UTC().Add(-time.Hour).Format(time.RFC3339))
@@ -413,4 +424,78 @@ func TestRefreshGitHub_ChangeSeenAtLifecycle(t *testing.T) {
 			t.Fatalf("change_seen_at = %q; want none on a quiet seed", snap.ChangeSeenAt)
 		}
 	})
+}
+
+// TestRefreshGitHub_ChangeSeenAtIsTheRefreshTime: the stamp is when the refresh
+// that saw the change was answered, not when the cycle started. Discovery and
+// the refresh batches can take minutes at scale; a stamp from the cycle's start
+// would then be expired before the next cycle, which would skip the check runs
+// created just after that refresh. The refresh here answers more than a second
+// after the cycle starts, so a cycle-start stamp fails the test. A newly opened
+// and a reopened pull request are stamped by discovery first, and must be
+// stamped again by the refresh that first reads their check runs.
+func TestRefreshGitHub_ChangeSeenAtIsTheRefreshTime(t *testing.T) {
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	for _, tc := range []struct {
+		name string
+		// setup runs before the delayed cycle; move changes the pull request
+		// on GitHub just before it.
+		setup func(r *changeWindowRig)
+		move  func(s *changingPRServer)
+	}{
+		{
+			name:  "a head push",
+			setup: func(r *changeWindowRig) { r.cycle() },
+			move:  func(s *changingPRServer) { s.head, s.updatedAt = "sha2", "2026-10-30T12:10:00Z" },
+		},
+		{
+			name: "a pull request opened since the last listing",
+			setup: func(r *changeWindowRig) {
+				r.srv.set(func(s *changingPRServer) { s.listed = false })
+				r.cycle()
+			},
+			move: func(s *changingPRServer) {
+				now := time.Now().UTC().Format(time.RFC3339)
+				s.listed, s.createdAt, s.updatedAt = true, now, now
+			},
+		},
+		{
+			name: "a reopened pull request",
+			setup: func(r *changeWindowRig) {
+				ent, _, err := r.stores.Entities.FindOrCreateSystem(ctx, org, "github", changeWindowHost, changeWindowKey, "", "pr", "Add widget", "https://github.com/octo/repo/pull/42")
+				if err != nil {
+					t.Fatalf("FindOrCreateSystem: %v", err)
+				}
+				closed, _ := json.Marshal(domain.PRSnapshot{NodeID: changeWindowNodeID, Number: 42, Repo: "octo/repo", State: "CLOSED"})
+				if ok, err := r.stores.Entities.CloseWithSnapshotCASSystem(ctx, org, ent.ID, string(closed), ent.PollSeq); err != nil || !ok {
+					t.Fatalf("CloseWithSnapshotCASSystem: ok=%v err=%v", ok, err)
+				}
+			},
+			move: func(*changingPRServer) {},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newChangeWindowRig(t)
+			tc.setup(r)
+			r.srv.set(func(s *changingPRServer) {
+				tc.move(s)
+				s.refreshDelay = 1100 * time.Millisecond
+			})
+			r.cycle()
+
+			stamp := r.snapshot().ChangeSeenAt
+			seen, err := time.Parse(time.RFC3339, stamp)
+			if err != nil {
+				t.Fatalf("change_seen_at = %q; want a time", stamp)
+			}
+			r.srv.mu.Lock()
+			answered := r.srv.lastRefreshAt
+			r.srv.mu.Unlock()
+			if seen.Before(answered) {
+				t.Fatalf("change_seen_at = %s, before the refresh that saw the change was answered at %s",
+					stamp, answered.UTC().Format(time.RFC3339Nano))
+			}
+		})
+	}
 }
