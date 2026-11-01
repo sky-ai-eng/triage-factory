@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // TestMeSettings_RejectsUnknownField pins strict decoding on the PATCH: a
@@ -19,7 +21,7 @@ func TestMeSettings_RejectsUnknownField(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("PATCH with an unknown field = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, "UNKNOWN_FIELD", "theme")
+	httpxtest.AssertFirstError(t, rec, "UNKNOWN_FIELD", "theme")
 }
 
 // meSettingsOverviewSeenAt reads the marker off a settings response, and reports
@@ -141,7 +143,7 @@ func TestMeSettings_OverviewSeenAt_RejectsMalformedValue(t *testing.T) {
 			t.Errorf("PATCH overview_seen_at=%v = %d, want 400; body=%s", value, rec.Code, rec.Body.String())
 			continue
 		}
-		assertFirstError(t, rec, "INVALID_FIELD", "user_settings.overview_seen_at")
+		httpxtest.AssertFirstError(t, rec, "INVALID_FIELD", "user_settings.overview_seen_at")
 	}
 
 	// The value never reached the row.
@@ -181,7 +183,7 @@ func TestMeSettings_RejectsNonObjectSettings(t *testing.T) {
 			t.Errorf("PATCH %s = %d, want 400; body=%s", body, rec.Code, rec.Body.String())
 			continue
 		}
-		assertFirstError(t, rec, "INVALID_FIELD", "user_settings")
+		httpxtest.AssertFirstError(t, rec, "INVALID_FIELD", "user_settings")
 	}
 
 	// And the stored marker is untouched by any of them.
@@ -207,7 +209,7 @@ func TestMeSettings_OverviewSeenAt_RejectsUnknownNestedField(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("PATCH with a misspelled nested field = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, "UNKNOWN_FIELD", "overview_seen")
+	httpxtest.AssertFirstError(t, rec, "UNKNOWN_FIELD", "overview_seen")
 }
 
 // TestMeSettings_OverviewSeenAt_RejectsFutureValue: a marker beyond the clock
@@ -223,7 +225,7 @@ func TestMeSettings_OverviewSeenAt_RejectsFutureValue(t *testing.T) {
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("PATCH with a future marker = %d, want 422; body=%s", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, "OUT_OF_RANGE", "user_settings.overview_seen_at")
+	httpxtest.AssertFirstError(t, rec, "OUT_OF_RANGE", "user_settings.overview_seen_at")
 	if got, _ := meSettingsOverviewSeenAt(t, doJSON(t, s, http.MethodGet, "/api/me/settings", nil)); got != "null" {
 		t.Errorf("overview_seen_at after a refused future write = %s, want null", got)
 	}

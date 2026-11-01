@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // Reconnection mutations, the canvas gesture of dragging an arrow's head onto
@@ -76,7 +77,7 @@ func TestBlueprintReconnect_SelfRejected(t *testing.T) {
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("reconnect into self: expected 422, got %d: %s", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, httpx.ReasonInvalidField, "target_blueprint_id")
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonInvalidField, "target_blueprint_id")
 }
 
 func TestBlueprintReconnect_TriggeredTargetRejected(t *testing.T) {
@@ -93,7 +94,7 @@ func TestBlueprintReconnect_TriggeredTargetRejected(t *testing.T) {
 		t.Fatalf("reconnect to triggered target: expected 422, got %d: %s", rec.Code, rec.Body.String())
 	}
 	// A state conflict the caller can clear, unlike the self-reference above.
-	assertFirstError(t, rec, httpx.ReasonConflict, "target_blueprint_id")
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonConflict, "target_blueprint_id")
 	// Host untouched — still its original 3 steps (single transaction).
 	hs := listBlueprintSteps(t, s, b)
 	if len(hs) != 3 {

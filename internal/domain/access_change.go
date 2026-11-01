@@ -243,10 +243,11 @@ func AccessActionsInCategory(category string) []string {
 //
 // The audit row's detail payload is a contract between whoever writes the row
 // and the viewer that renders it. Where those two sit in different halves of
-// the open-core split — every ee write-point — the shape has to live somewhere
-// both can import, which is here. Core-only payloads (role changes, the invite
-// lifecycle, the SSO JIT grant) stay next to their write-points in the server
-// package; only the shapes ee produces are exported.
+// the open-core split — every ee write-point — or in different server
+// packages — the commit signer, whose changes the access-log viewer names — the
+// shape has to live somewhere both can import, which is here. The other
+// core-only payloads (role changes, the invite lifecycle, the SSO JIT grant)
+// stay next to their write-points in the server package.
 
 // AccessDetailCredential builds the {kind, host?, name?} payload every
 // credential_set / credential_removed row carries. host and name are omitted
@@ -362,5 +363,36 @@ func AccessDetailAPITokenRevoked(tokenID, name, prefix, source string) string {
 		Prefix  string `json:"prefix"`
 		Source  string `json:"source,omitempty"`
 	}{TokenID: tokenID, Name: name, Prefix: prefix, Source: source})
+	return string(b)
+}
+
+// The changes a github_commit_signer credential_set row records, carried as
+// its detail's "change". A removal is credential_removed and names none.
+const (
+	CommitSignerRegistered   = "registered"
+	CommitSignerVerified     = "verified"
+	CommitSignerRotated      = "rotated"
+	CommitSignerEmailChanged = "email_changed"
+)
+
+// AccessDetailCommitSigner builds the detail_json for a commit-signer row: the
+// shared {kind, host, name} with the signer's login as the name, plus the
+// change a credential_set row records, the public key it concerns (the one
+// registered, the one a rotation staged, the one Verify made the signer's),
+// and on an email change the address set, absent when it was reset to the
+// derived one. Public keys are public, and naming one is what lets an auditor
+// say which key was signing when.
+func AccessDetailCommitSigner(change, host, login, publicKey, email string) string {
+	b, _ := json.Marshal(struct {
+		Kind      string `json:"kind"`
+		Host      string `json:"host,omitempty"`
+		Name      string `json:"name,omitempty"`
+		Change    string `json:"change,omitempty"`
+		PublicKey string `json:"public_key,omitempty"`
+		Email     string `json:"email,omitempty"`
+	}{
+		Kind: CredentialKindGitHubCommitSigner, Host: host, Name: login,
+		Change: change, PublicKey: publicKey, Email: email,
+	})
 	return string(b)
 }

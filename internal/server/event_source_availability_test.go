@@ -10,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // errorItem is one element of the standard error envelope, decoded whole:
@@ -156,7 +157,7 @@ type eventHandlerListRow struct {
 
 func listRowsByID(t *testing.T, s *Server) map[string]eventHandlerListRow {
 	t.Helper()
-	page := decodeList[eventHandlerListRow](t, doJSON(t, s, http.MethodPost, "/api/event-handlers/list", map[string]any{"page_size": 200}))
+	page := httpxtest.DecodeList[eventHandlerListRow](t, doJSON(t, s, http.MethodPost, "/api/event-handlers/list", map[string]any{"page_size": 200}))
 	out := make(map[string]eventHandlerListRow, len(page.Items))
 	for _, row := range page.Items {
 		out[row.ID] = row

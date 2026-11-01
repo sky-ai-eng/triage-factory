@@ -19,6 +19,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // TestDefaultedCloneProtocolView_ModeAware pins the API GET view:
@@ -722,7 +723,7 @@ func TestOrgSettingsPatch_EnabledModels_Validation(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("unknown keys = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, httpx.ReasonInvalidField, "enabled_models")
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonInvalidField, "enabled_models")
 	for _, want := range []string{"gpt-9", "llama-99"} {
 		if !strings.Contains(rec.Body.String(), want) {
 			t.Errorf("refusal does not name %q: %s", want, rec.Body.String())
@@ -886,7 +887,7 @@ func TestOrgSettingsPatch_LimitsOutOfRange(t *testing.T) {
 			if rec.Code != http.StatusUnprocessableEntity {
 				t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
 			}
-			assertFirstError(t, rec, httpx.ReasonOutOfRange, c.field)
+			httpxtest.AssertFirstError(t, rec, httpx.ReasonOutOfRange, c.field)
 		})
 	}
 	if got := orgDailyCap(t, s); got != 12 {
@@ -939,7 +940,7 @@ func TestTeamSettingsPatch_GraceOutOfBandRejected(t *testing.T) {
 		if rec.Code != http.StatusUnprocessableEntity {
 			t.Fatalf("grace %ds = %d, want 422; body=%s", secs, rec.Code, rec.Body.String())
 		}
-		assertFirstError(t, rec, httpx.ReasonOutOfRange, "permission_absent_grace_seconds")
+		httpxtest.AssertFirstError(t, rec, httpx.ReasonOutOfRange, "permission_absent_grace_seconds")
 		if ms, _, _ := teamGrace(t, s); ms != before {
 			t.Errorf("rejected grace %ds still moved the stored value to %dms", secs, ms)
 		}

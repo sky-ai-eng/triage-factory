@@ -8,6 +8,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // TestMultiModeGates_Return404: in multi mode the prompt import from disk, which
@@ -27,5 +28,5 @@ func TestMultiModeGates_Return404(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("POST /api/prompts/from-disk in multi mode = %d, want 404 (body: %s)", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, httpx.ReasonNotFound, "")
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonNotFound, "")
 }

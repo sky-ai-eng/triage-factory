@@ -10,6 +10,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // jiraAppPath is the org-scoped jira/app endpoint for the local sentinel org.
@@ -145,5 +146,5 @@ func TestJiraApp_ImportRejectsMissingFields(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s, want 400", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, httpx.ReasonMissingField, "client_id")
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonMissingField, "client_id")
 }

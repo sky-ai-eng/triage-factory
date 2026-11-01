@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // POST /api/dashboard/prs/list: the viewer's pull requests, their states
@@ -73,7 +74,7 @@ func TestDashboardPRs_IncludesWhatICommissioned(t *testing.T) {
 
 	mine := func() map[int]domain.PRSummaryRow {
 		t.Helper()
-		out := decodeList[domain.PRSummaryRow](t, doJSON(t, s, "POST", "/api/dashboard/prs/list", map[string]any{}))
+		out := httpxtest.DecodeList[domain.PRSummaryRow](t, doJSON(t, s, "POST", "/api/dashboard/prs/list", map[string]any{}))
 		if out.Total() != len(out.Items) {
 			t.Errorf("total %d, page %d rows", out.Total(), len(out.Items))
 		}
@@ -129,13 +130,13 @@ func TestDashboardPRs_StatesFilterAndCountOnly(t *testing.T) {
 		{[]string{"closed"}, 1},
 		{[]string{"merged", "closed"}, 2},
 	} {
-		paged := decodeList[domain.PRSummaryRow](t, doJSON(t, s, "POST", "/api/dashboard/prs/list", map[string]any{
+		paged := httpxtest.DecodeList[domain.PRSummaryRow](t, doJSON(t, s, "POST", "/api/dashboard/prs/list", map[string]any{
 			"states": tc.states,
 		}))
 		if len(paged.Items) != tc.want || paged.Total() != tc.want {
 			t.Errorf("states=%v: %d rows / total %d, want %d", tc.states, len(paged.Items), paged.Total(), tc.want)
 		}
-		counted := decodeList[domain.PRSummaryRow](t, doJSON(t, s, "POST", "/api/dashboard/prs/list", map[string]any{
+		counted := httpxtest.DecodeList[domain.PRSummaryRow](t, doJSON(t, s, "POST", "/api/dashboard/prs/list", map[string]any{
 			"states": tc.states, "page_size": 0,
 		}))
 		if len(counted.Items) != 0 {
@@ -179,7 +180,7 @@ func TestDashboardPRs_PageTokenIsBoundToItsFilters(t *testing.T) {
 		}, "", "")
 	}
 
-	first := decodeList[domain.PRSummaryRow](t, doJSON(t, s, "POST", "/api/dashboard/prs/list", map[string]any{
+	first := httpxtest.DecodeList[domain.PRSummaryRow](t, doJSON(t, s, "POST", "/api/dashboard/prs/list", map[string]any{
 		"page_size": 2,
 	}))
 	if first.NextPageToken == "" {

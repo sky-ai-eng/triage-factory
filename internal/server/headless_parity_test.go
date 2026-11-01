@@ -6,6 +6,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 	"github.com/zalando/go-keyring"
 )
 
@@ -43,7 +44,7 @@ func TestOrgSettingsPost_BaseURLValidated(t *testing.T) {
 					t.Errorf("POST %s=%q = %d, want 400; body=%s", field, bad, rec.Code, rec.Body.String())
 					continue
 				}
-				assertFirstError(t, rec, httpx.ReasonInvalidField, field)
+				httpxtest.AssertFirstError(t, rec, httpx.ReasonInvalidField, field)
 			}
 
 			patchOrgSettingsOK(t, s, map[string]any{field: tc.good})
@@ -73,7 +74,7 @@ func TestSnooze_PastWakeTimeRejected(t *testing.T) {
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("a past wake time = %d, want 422; body=%s", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, httpx.ReasonOutOfRange, "snooze_until")
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonOutOfRange, "snooze_until")
 	status, until := readSnoozeState(t, s.db, taskID)
 	if status != "queued" || !until.IsZero() {
 		t.Fatalf("task = (%q, %v) after a refused snooze; want it untouched at (queued, NULL)", status, until)
@@ -104,7 +105,7 @@ func TestTaskGestures_NegativeHesitationRejected(t *testing.T) {
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("%s with hesitation_ms=-1 = %d, want 400; body=%s", tc.name, rec.Code, rec.Body.String())
 			}
-			assertFirstError(t, rec, httpx.ReasonOutOfRange, "hesitation_ms")
+			httpxtest.AssertFirstError(t, rec, httpx.ReasonOutOfRange, "hesitation_ms")
 		})
 	}
 }

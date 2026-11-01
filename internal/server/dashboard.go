@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/server/deliverables"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
@@ -56,7 +57,7 @@ func (dh *dashboardHandler) handleDashboardStats(w http.ResponseWriter, r *http.
 	var v httpx.Validation
 	since := time.Now().AddDate(0, 0, -dashboardStatsWindowDays)
 	if raw := strings.TrimSpace(r.URL.Query().Get("since")); raw != "" {
-		t, err := parseUsageTime(raw)
+		t, err := httpx.ParseWindowTime(raw)
 		if err != nil {
 			v.Invalid("since", "must be RFC3339 or YYYY-MM-DD")
 		} else {
@@ -417,7 +418,7 @@ func (dh *dashboardHandler) handleDashboardPRUpdate(w http.ResponseWriter, r *ht
 		PerformedBy: domain.PerformedByPerson,
 	}
 	draftRecord.SetObject(domain.ObjectKindPullRequest, "")
-	recordExternalActionBestEffort(r.Context(), dh.tx, orgID, userID, draftRecord)
+	deliverables.RecordExternalActionBestEffort(r.Context(), dh.tx, orgID, userID, draftRecord)
 
 	// Patch the local entity snapshot to match the state we just pushed to
 	// GitHub. Without this, the frontend's subsequent fetchAll() reads the

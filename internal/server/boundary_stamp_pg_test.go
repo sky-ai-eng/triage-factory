@@ -1,5 +1,5 @@
-// The two boundary cases that only exist in multi mode: the team archive, and
-// the user→user handoff that deliberately is not a boundary at all.
+// The multi-mode user→user handoff, which deliberately is not a boundary at
+// all.
 
 package server
 
@@ -11,9 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
-	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
-	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // pgConversationBoundary reads one conversation's stamp off the admin pool.
@@ -26,26 +24,6 @@ func pgConversationBoundary(t *testing.T, h *pgtest.Harness, conversationID stri
 		t.Fatalf("read boundary of %s: %v", conversationID, err)
 	}
 	return ended, reason
-}
-
-// teamArchiveConversation seeds one conversation on the rig's team.
-// origin='interactive' sidesteps the origin-requires-parents CHECK; the
-// boundary door reads team_id, the boundary column and the parent link, and
-// nothing else.
-func teamArchiveConversation(t *testing.T, r *teamArchiveRig, status any) string {
-	t.Helper()
-	id := uuid.New().String()
-	concluded := false
-	if s, ok := status.(string); ok {
-		status, concluded = dbtest.SeedStatus(s)
-	}
-	pgtest.MustExec(t, r.h.AdminDB, `
-		INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility,
-		                           type, origin, trigger_type, status, completed_at)
-		VALUES ($1, $2, $3, $4, 'team', 'delegation', 'interactive', 'manual', $5,
-		        CASE WHEN $6::boolean THEN now() END)
-	`, id, r.orgID, r.owner, r.teamID, status, concluded)
-	return id
 }
 
 // TestTaskReassign_StampsNothing: a user→user handoff is not a boundary. The
@@ -99,68 +77,5 @@ func TestTaskReassign_StampsNothing(t *testing.T) {
 	if ended, reason := pgConversationBoundary(t, r.h, conversationID); ended || reason != "" {
 		t.Errorf("%s boundary = (ended=%v, reason=%q), want none — a handoff is not a boundary",
 			conversationID, ended, reason)
-	}
-}
-
-// TestTeamArchive_RingsTheMemoryDoorbellForEveryConversationItStamped: archiving
-// a team ends every un-ended conversation it holds, concluded ones included, and
-// rings the memory doorbell once per row it stamped. The rig wires no spawner, so
-// nothing is stopped: the stamp is wider than the stop.
-func TestTeamArchive_RingsTheMemoryDoorbellForEveryConversationItStamped(t *testing.T) {
-	r := newTeamArchiveRig(t)
-	d := &doorbell{}
-	r.th.memoryOwed = d.ring
-
-	midFlight := teamArchiveConversation(t, r, nil)
-	parked := teamArchiveConversation(t, r, "open")
-	concluded := teamArchiveConversation(t, r, dbtest.SeedConcluded)
-
-	// Already ended: it keeps the boundary that ended it, and whatever it owes
-	// was rung for then, so this archive neither stamps nor rings.
-	alreadyEnded := teamArchiveConversation(t, r, "open")
-	pgtest.MustExec(t, r.h.AdminDB,
-		`UPDATE conversations SET ended_at = now(), ended_reason = $2 WHERE id = $1`,
-		alreadyEnded, string(domain.EndedTakenOver))
-	// A subagent ends with its spawner, never with the team.
-	subagent := teamArchiveConversation(t, r, nil)
-	pgtest.MustExec(t, r.h.AdminDB,
-		`UPDATE conversations SET parent_conversation_id = $2 WHERE id = $1`, subagent, midFlight)
-
-	rec := httptest.NewRecorder()
-	r.th.handleTeamArchive(rec, r.req(http.MethodPost, "/api/teams/"+r.teamID+"/archive", r.owner, r.teamID))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-
-	for _, id := range []string{midFlight, parked, concluded} {
-		if ended, reason := pgConversationBoundary(t, r.h, id); !ended || reason != string(domain.EndedTeamArchived) {
-			t.Errorf("%s boundary = (ended=%v, reason=%q), want a stamp with reason %q",
-				id, ended, reason, domain.EndedTeamArchived)
-		}
-	}
-	if ended, reason := pgConversationBoundary(t, r.h, subagent); ended || reason != "" {
-		t.Errorf("subagent %s boundary = (ended=%v, reason=%q), want none", subagent, ended, reason)
-	}
-	if _, reason := pgConversationBoundary(t, r.h, alreadyEnded); reason != string(domain.EndedTakenOver) {
-		t.Errorf("already-ended conversation %s now reads %q, want its original %q",
-			alreadyEnded, reason, domain.EndedTakenOver)
-	}
-
-	got := d.taken()
-	want := map[string]bool{midFlight: true, parked: true, concluded: true}
-	if len(got) != len(want) {
-		t.Fatalf("rang %d times for %d stamped conversations: %v", len(got), len(want), got)
-	}
-	for _, ring := range got {
-		if ring[0] != r.orgID {
-			t.Errorf("rang for org %q, want %q", ring[0], r.orgID)
-		}
-		if !want[ring[1]] {
-			t.Errorf("rang for %s, which the archive did not stamp", ring[1])
-		}
-		delete(want, ring[1])
-	}
-	for id := range want {
-		t.Errorf("archive stamped %s without ringing for it", id)
 	}
 }

@@ -2,10 +2,8 @@ package server
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 
-	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -38,17 +36,9 @@ func requireOrg(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return httpx.RequireOrg(w, r)
 }
 
-// writeNotConfigured answers a route that requires an integration the org
-// hasn't set up: 409 NOT_CONFIGURED. A 409 rather than a 400 because the
-// fault is server-side state, not the request — and never a 500, which is
-// reserved for a backend that failed to *read* the configuration.
-func writeNotConfigured(w http.ResponseWriter, msg string) {
-	httpx.WriteFault(w, notConfiguredFault(msg))
-}
+func writeNotConfigured(w http.ResponseWriter, msg string) { httpx.WriteNotConfigured(w, msg) }
 
-func notConfiguredFault(msg string) *httpx.Fault {
-	return httpx.NewFault(http.StatusConflict, httpx.ReasonNotConfigured, msg)
-}
+func notConfiguredFault(msg string) *httpx.Fault { return httpx.NotConfiguredFault(msg) }
 
 // writeSourceDisabled writes the 409 for a request that needs a source an org
 // admin turned off (eventsource.ErrDisabled): every Jira or Linear client is
@@ -63,61 +53,15 @@ func sourceDisabledFault(kind string) *httpx.Fault {
 		eventsource.Label(kind)+" is turned off for this organization by an org admin; ask an org admin to turn it back on")
 }
 
-// forbidden writes a 403: the caller is authenticated and can see the
-// resource, but the action is refused. Callers that must NOT disclose the
-// resource's existence use notFound instead — the disclosure rule decides
-// which of the two a denial gets, so the two helpers stay distinct.
-func forbidden(w http.ResponseWriter, msg string) {
-	httpx.WriteErrors(w, http.StatusForbidden, httpx.ErrorItem{
-		Reason:  httpx.ReasonForbidden,
-		Message: msg,
-	})
-}
+func forbidden(w http.ResponseWriter, msg string) { httpx.Forbidden(w, msg) }
 
-// conflict writes a 409 under the generic CONFLICT reason — the request is
-// well-formed but the resource's current state refuses it. A conflict with a
-// named class (a duplicate name, an already-terminal row, a missing
-// integration) uses its own reason via WriteErrors instead.
-func conflict(w http.ResponseWriter, msg string) {
-	httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
-		Reason:  httpx.ReasonConflict,
-		Message: msg,
-	})
-}
+func conflict(w http.ResponseWriter, msg string) { httpx.Conflict(w, msg) }
 
-// uuidPathOr404 validates a {param} path value as a UUID and answers 404 for
-// a malformed one. On Postgres these ids are uuid columns, so a malformed
-// value would otherwise surface as SQLSTATE 22P02 from the first store call →
-// 500. Answering "not found" keeps the response identical across dialects
-// (SQLite stores the same ids as TEXT and simply matches nothing) and matches
-// the disclosure rule: a malformed id names nothing the caller may learn
-// about. thing is the noun for the message ("project", "conversation").
 func uuidPathOr404(w http.ResponseWriter, r *http.Request, param, thing string) (string, bool) {
-	id := r.PathValue(param)
-	if _, err := uuid.Parse(id); err != nil {
-		notFound(w, thing)
-		return "", false
-	}
-	return id, true
+	return httpx.UUIDPathOr404(w, r, param, thing)
 }
 
-// teamIDFilterField validates a list body's optional team_id narrow. Empty
-// means "no narrow" (the union of what the caller may see); anything else must
-// be a well-formed team id.
-//
-// It is strict for the reason the whole list contract is: dropping a corrupt
-// filter *widens* the result set, and a read that silently returns more than
-// was asked for is a wrong answer that looks like a right one. The old
-// ?team_id= query param dropped a malformed value, which is how a page scoped
-// to one team could quietly show every team's rows.
-func teamIDFilterField(v *httpx.Validation, teamID string) {
-	if teamID == "" {
-		return
-	}
-	if _, err := uuid.Parse(teamID); err != nil {
-		v.Invalid("team_id", fmt.Sprintf("team_id %q is not a valid team id", teamID))
-	}
-}
+func teamIDFilterField(v *httpx.Validation, teamID string) { httpx.TeamIDFilterField(v, teamID) }
 
 // requireOrg is the Server-method form of the package-level org gate, so
 // handlers written as Server methods use the same path.

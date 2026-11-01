@@ -21,6 +21,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/llm/modelaccess"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/models"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -507,7 +508,7 @@ func (s *Server) handleTeamSettingsPatch(w http.ResponseWriter, r *http.Request)
 		if writeFieldFaults(w, err) {
 			return
 		}
-		if writeModelAccessError(w, err, "ai_model") {
+		if models.WriteAccessError(w, err, "ai_model") {
 			return
 		}
 		internalError(w, "settings/team", err)
@@ -534,7 +535,7 @@ func (s *Server) handleTeamSettingsPatch(w http.ResponseWriter, r *http.Request)
 // success for a configuration whose only observable effect is a failed run
 // later.
 func checkTeamModelSelection(teamSet domain.TeamSettings, orgSet domain.OrgSettings) error {
-	orgEnabled := domain.OrgModelSet(orgSet.EnabledModels, deploymentUniverse().DefaultEnabled())
+	orgEnabled := domain.OrgModelSet(orgSet.EnabledModels, models.DeploymentUniverse().DefaultEnabled())
 	var faults fieldFaults
 	var outside []string
 	for _, m := range teamSet.EnabledModels {
@@ -619,7 +620,7 @@ func resolveTeamSettingsPatch(w http.ResponseWriter, req teamSettingsPatch) (app
 	// mind names the new model; a team that wants fewer choices narrows
 	// enabled_models beside this.
 	if v, st := httpx.PatchString(&shape, req.AIModel, "ai_model"); st != httpx.PatchAbsent {
-		universe := deploymentUniverse()
+		universe := models.DeploymentUniverse()
 		switch {
 		case st == httpx.PatchClear || strings.TrimSpace(v) == "":
 			shape.Invalid("ai_model", "ai_model must name a model this deployment offers and cannot be cleared — a team with no default has no model to run its unpinned steps on: "+strings.Join(universe.Keys(), ", "))
@@ -641,8 +642,8 @@ func resolveTeamSettingsPatch(w http.ResponseWriter, req teamSettingsPatch) (app
 		case httpx.PatchClear:
 			set(func(t *domain.TeamSettings) { t.EnabledModels = nil })
 		case httpx.PatchSet:
-			if models, ok := normalizeModelSet(&shape, deploymentUniverse(), v, "enabled_models"); ok {
-				set(func(t *domain.TeamSettings) { t.EnabledModels = models })
+			if enabled, ok := normalizeModelSet(&shape, models.DeploymentUniverse(), v, "enabled_models"); ok {
+				set(func(t *domain.TeamSettings) { t.EnabledModels = enabled })
 			}
 		}
 	}
@@ -1165,7 +1166,7 @@ func (s *Server) handleOrgSettingsPatch(w http.ResponseWriter, r *http.Request) 
 		orgSet, err = tx.Orgs.UpdateSettingsVersioned(r.Context(), orgID, cur, *req.Version)
 		return err
 	})
-	if writeModelAccessError(w, err, "background_jobs_model") {
+	if models.WriteAccessError(w, err, "background_jobs_model") {
 		return
 	}
 	if errors.Is(err, errLLMAuthMethodHasCredentials) {
@@ -1418,8 +1419,8 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 		case httpx.PatchClear:
 			set(func(o *domain.OrgSettings) { o.EnabledModels = nil })
 		case httpx.PatchSet:
-			if models, ok := normalizeModelSet(&shape, deploymentUniverse(), v, "enabled_models"); ok {
-				set(func(o *domain.OrgSettings) { o.EnabledModels = models })
+			if enabled, ok := normalizeModelSet(&shape, models.DeploymentUniverse(), v, "enabled_models"); ok {
+				set(func(o *domain.OrgSettings) { o.EnabledModels = enabled })
 			}
 		}
 	}
@@ -1441,7 +1442,7 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 	// credential every other feature shares. The jobs then skip with a warning
 	// naming this setting — never a model of TF's choosing.
 	if v, st := httpx.PatchString(&shape, req.BackgroundJobsModel, "background_jobs_model"); st != httpx.PatchAbsent {
-		universe := deploymentUniverse()
+		universe := models.DeploymentUniverse()
 		switch {
 		case st == httpx.PatchClear:
 			set(func(o *domain.OrgSettings) { o.BackgroundJobsModel = "" })
@@ -1618,7 +1619,7 @@ func (s *Server) orgSettingsSSHPreflight(w http.ResponseWriter, r *http.Request,
 // widens to the deployment's whole universe) removes nothing and setting one for the first
 // time removes everything it leaves out.
 func modelsRemovedBySave(before, after domain.OrgSettings) []string {
-	universe := deploymentUniverse()
+	universe := models.DeploymentUniverse()
 	prev := domain.OrgModelSet(before.EnabledModels, universe.DefaultEnabled())
 	next := domain.OrgModelSet(after.EnabledModels, universe.DefaultEnabled())
 	var removed []string

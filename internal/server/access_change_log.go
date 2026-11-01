@@ -79,37 +79,6 @@ func accessDetailCredentialNamed(kind, host, name string) string {
 	return domain.AccessDetailCredential(kind, host, name)
 }
 
-// The changes a github_commit_signer credential_set row records, carried as
-// its detail's "change". A removal is credential_removed and names none.
-const (
-	commitSignerRegistered   = "registered"
-	commitSignerVerified     = "verified"
-	commitSignerRotated      = "rotated"
-	commitSignerEmailChanged = "email_changed"
-)
-
-// accessDetailCommitSigner builds the detail_json for a commit-signer row: the
-// shared {kind, host, name} with the signer's login as the name, plus the
-// change a credential_set row records, the public key it concerns (the one
-// registered, the one a rotation staged, the one Verify made the signer's),
-// and on an email change the address set, absent when it was reset to the
-// derived one. Public keys are public, and naming one is what lets an auditor
-// say which key was signing when.
-func accessDetailCommitSigner(change, host, login, publicKey, email string) string {
-	b, _ := json.Marshal(struct {
-		Kind      string `json:"kind"`
-		Host      string `json:"host,omitempty"`
-		Name      string `json:"name,omitempty"`
-		Change    string `json:"change,omitempty"`
-		PublicKey string `json:"public_key,omitempty"`
-		Email     string `json:"email,omitempty"`
-	}{
-		Kind: domain.CredentialKindGitHubCommitSigner, Host: host, Name: login,
-		Change: change, PublicKey: publicKey, Email: email,
-	})
-	return string(b)
-}
-
 // recordCredentialRemovals writes one host-less credential_removed row per kind
 // through the caller's tx, so the audit rows commit with the removal itself. A
 // nil/empty kinds slice is a no-op.

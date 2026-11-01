@@ -8,6 +8,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // artifactTestScope is the GitHub host seedSteerConversation's entity lives on.
@@ -62,7 +63,7 @@ func TestHandleAgentArtifacts_MatchesDeliverables(t *testing.T) {
 	seedConversationAction(t, s, conversationID, push)
 
 	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/"+conversationID+"/artifacts/list", map[string]any{})
-	page := decodeList[map[string]any](t, rec)
+	page := httpxtest.DecodeList[map[string]any](t, rec)
 	if len(page.Items) != 4 || page.Total() != 4 {
 		t.Fatalf("returned %d artifacts (total %d), want 4: %s", len(page.Items), page.Total(), rec.Body.String())
 	}
@@ -154,7 +155,7 @@ func TestHandleAgentArtifacts_Empty(t *testing.T) {
 	s := newTestServer(t)
 	conversationID := seedSteerConversation(t, s.db, "artnone", dbtest.SeedConcluded)
 	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/"+conversationID+"/artifacts/list", map[string]any{})
-	if page := decodeList[map[string]any](t, rec); len(page.Items) != 0 || page.Total() != 0 {
+	if page := httpxtest.DecodeList[map[string]any](t, rec); len(page.Items) != 0 || page.Total() != 0 {
 		t.Errorf("artifacts = %v (total %d), want an empty page", page.Items, page.Total())
 	}
 }
@@ -177,7 +178,7 @@ func TestHandleAgentActions_ObjectAndRefusedFilters(t *testing.T) {
 
 	list := func(body map[string]any) []map[string]any {
 		t.Helper()
-		page := decodeList[map[string]any](t, doJSON(t, s, http.MethodPost,
+		page := httpxtest.DecodeList[map[string]any](t, doJSON(t, s, http.MethodPost,
 			"/api/agent/conversations/"+conversationID+"/actions/list", body))
 		if page.Total() != len(page.Items) {
 			t.Fatalf("total %d for %d items", page.Total(), len(page.Items))

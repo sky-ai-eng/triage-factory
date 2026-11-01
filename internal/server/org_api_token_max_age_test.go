@@ -7,6 +7,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // The org's ceiling on API-token lifetime. These tests pin the setting; the
@@ -57,7 +58,7 @@ func TestOrgSettingsPatch_APITokenMaxAge_OutOfBandRejected(t *testing.T) {
 		if rec.Code != http.StatusUnprocessableEntity {
 			t.Fatalf("api_token_max_age_days=%d = %d, want 422; body=%s", bad, rec.Code, rec.Body.String())
 		}
-		assertFirstError(t, rec, httpx.ReasonOutOfRange, "api_token_max_age_days")
+		httpxtest.AssertFirstError(t, rec, httpx.ReasonOutOfRange, "api_token_max_age_days")
 		if got := orgAPITokenMaxAge(t, s); got != 30 {
 			t.Errorf("a refused save changed the stored cap to %v", got)
 		}
@@ -73,7 +74,7 @@ func TestOrgSettingsPatch_APITokenMaxAge_NonIntegerRejected(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("api_token_max_age_days=%#v = %d, want 400; body=%s", bad, rec.Code, rec.Body.String())
 		}
-		assertFirstError(t, rec, httpx.ReasonInvalidField, "api_token_max_age_days")
+		httpxtest.AssertFirstError(t, rec, httpx.ReasonInvalidField, "api_token_max_age_days")
 	}
 }
 

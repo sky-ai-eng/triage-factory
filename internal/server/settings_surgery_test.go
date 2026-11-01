@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // The settings routes' shared contracts: the org settings row's optimistic
@@ -45,7 +46,7 @@ func TestOrgSettingsPatch_ConcurrentSaves_OneWinnerOneConflict(t *testing.T) {
 	if second.Code != http.StatusConflict {
 		t.Fatalf("second save at a stale version = %d, want 409; body=%s", second.Code, second.Body.String())
 	}
-	assertFirstError(t, second, httpx.ReasonVersionConflict, "version")
+	httpxtest.AssertFirstError(t, second, httpx.ReasonVersionConflict, "version")
 
 	// The refetch shows the winner's write untouched, and hands out the token
 	// the loser has to re-apply against.
@@ -82,7 +83,7 @@ func TestOrgSettingsPatch_VersionRequired(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("versionless PATCH = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, httpx.ReasonMissingField, "version")
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonMissingField, "version")
 }
 
 // TestSettingsPatch_EmptyBodyRefused: a PATCH that names no field wrote
@@ -266,7 +267,7 @@ func TestTeamSettingsPatch_RangeChecks(t *testing.T) {
 				t.Errorf("%s=%d → %d, want 422; body=%s", field, v, rec.Code, rec.Body.String())
 				continue
 			}
-			assertFirstError(t, rec, httpx.ReasonOutOfRange, field)
+			httpxtest.AssertFirstError(t, rec, httpx.ReasonOutOfRange, field)
 		}
 	}
 	if _, minS, maxS := teamGrace(t, s); minS != delegate.AbsentGraceMinSeconds || maxS != delegate.AbsentGraceMaxSeconds {
@@ -289,7 +290,7 @@ func TestTeamSettingsPatch_RejectsJiraProjects(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("jira_projects on the settings PATCH = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, httpx.ReasonUnknownField, "jira_projects")
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonUnknownField, "jira_projects")
 }
 
 // TestTeamJiraProjectsPut_ReplaceSetRoundTrip: the PUT body is the desired set,
@@ -412,7 +413,7 @@ func TestJiraIdentityPAT_RejectsWrongDeploymentFields(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("Cloud fields against a Data Center org = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, httpx.ReasonUnknownField, "email")
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonUnknownField, "email")
 
 	// The right shape still works, so the rejection is about the field set and
 	// not about the route.
@@ -449,7 +450,7 @@ func TestJiraCredentialPut_RejectsCrossFlavorFields(t *testing.T) {
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 			}
-			assertFirstError(t, rec, httpx.ReasonUnknownField, c.field)
+			httpxtest.AssertFirstError(t, rec, httpx.ReasonUnknownField, c.field)
 		})
 	}
 
