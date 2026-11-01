@@ -261,6 +261,20 @@ tests:
       exp_annotations:
         summary: Workspace checkpoints are failing
         description: At least one live run's workspace checkpoint failed in the last hour, so a hard kill of its executor would lose more work than TF_SNAPSHOT_INTERVAL_SEC allows. Checkpoints are uploaded to the object store, so check that it is reachable and accepting writes, and read the workspace.snapshot spans with reason=checkpoint for the error.
+- name: WorkspaceCheckpointsFailing fires on the first failure after an executor restart, from the series startup opened at zero
+  interval: 1m
+  input_series:
+  - series: 'tf_workspace_checkpoints_total{outcome="failed"}'
+    values: '1x20 stale _x59 0x5 1x30'
+  alert_rule_test:
+  - eval_time: 100m
+    alertname: WorkspaceCheckpointsFailing
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+      exp_annotations:
+        summary: Workspace checkpoints are failing
+        description: At least one live run's workspace checkpoint failed in the last hour, so a hard kill of its executor would lose more work than TF_SNAPSHOT_INTERVAL_SEC allows. Checkpoints are uploaded to the object store, so check that it is reachable and accepting writes, and read the workspace.snapshot spans with reason=checkpoint for the error.
 - name: WorkspaceCheckpointsFailing does not fire for an old series 1h after one failed scrape
   interval: 1m
   input_series:
@@ -300,6 +314,20 @@ tests:
     alertname: SidecarFrameOversized
     exp_alerts: []
   - eval_time: 80m
+    alertname: SidecarFrameOversized
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+      exp_annotations:
+        summary: A run's credential sidecar sent a supervision frame over the size limit
+        description: 'A working sidecar never sends a frame over the limit, so treat this sidecar as compromised. The executor closed that run''s supervision channel. Its ERROR line, "sidecar sent a supervision frame over the size limit; closed its supervision channel", names the conversation.'
+- name: SidecarFrameOversized fires on the first refusal after an executor restart, from the series startup opened at zero
+  interval: 1m
+  input_series:
+  - series: tf_sidecar_frames_oversized_total
+    values: '1x20 stale _x59 0x5 1x30'
+  alert_rule_test:
+  - eval_time: 100m
     alertname: SidecarFrameOversized
     exp_alerts:
     - exp_labels:
