@@ -1819,21 +1819,6 @@ func (s *conversationStore) HasLiveConversationForTaskSystem(ctx context.Context
 	return hasLiveConversationForTask(ctx, s.admin, orgID, taskID)
 }
 
-func (s *conversationStore) HasWorkingConversationForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error) {
-	if !isValidUUID(taskID) {
-		return false, nil
-	}
-	var exists bool
-	err := s.admin.QueryRowContext(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM conversations r
-			WHERE r.org_id = $1 AND r.task_id = $2
-			  AND `+workingConversationSQL+`
-		)
-	`, orgID, taskID).Scan(&exists)
-	return exists, err
-}
-
 func hasLiveConversationForTask(ctx context.Context, q queryer, orgID, taskID string) (bool, error) {
 	if !isValidUUID(taskID) {
 		return false, nil

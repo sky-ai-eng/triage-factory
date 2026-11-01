@@ -99,8 +99,9 @@ func IsStagedInjectionSubtype(subtype string) bool {
 }
 
 // StagedInjectionProducer* tag a staged injection's origin. Free-text (no DB CHECK) so a
-// new producer adds a const without a migration; used for audit/debugging and a
-// future per-producer flush policy, never for control flow today.
+// new producer adds a const without a migration; used for audit/debugging, and
+// the close note's tag is what its dedup and withdrawal match, so renaming one
+// strands the rows already staged under the old value.
 const (
 	// StagedInjectionProducerPRNewCommits tags a head-SHA-change note. Nothing
 	// writes it — the PR coherence feed carries head changes under its own tag
@@ -113,7 +114,10 @@ const (
 	StagedInjectionProducerPRCoherence = "pr_coherence"
 	// StagedInjectionProducerTaskClosing is the note telling a conversation
 	// still working on a task that an event resolved it, and that the task
-	// closes once its conversations finish.
+	// closes once the work on it is finished. A conversation is told once per
+	// closing event (StagedInjectionStore.HasNoteForEventSystem), and a hold
+	// cleared without its close withdraws the notes still waiting
+	// (TaskStore.Bump).
 	StagedInjectionProducerTaskClosing = "task_closing"
 )
 

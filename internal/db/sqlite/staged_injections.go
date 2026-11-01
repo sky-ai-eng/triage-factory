@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -75,6 +76,26 @@ func (s *stagedInjectionStore) FlushPendingSystem(ctx context.Context, orgID, co
 	return out, nil
 }
 
+// withdrawProducerNotesForTask withdraws the notes producer staged on the
+// task's conversations that are still waiting, under any of the staged
+// subtypes, as DeleteSystem withdraws one: delivered stays 0 and the row
+// leaves the window. The task store's clears of a held close call it in
+// their own transactions, since a hold cleared without its close makes its
+// notes false.
+func withdrawProducerNotesForTask(ctx context.Context, q queryer, taskID, producer string) error {
+	subtypes, args := inListArgs(domain.StagedInjectionSubtypes)
+	args = append(args, producer, taskID)
+	if _, err := q.ExecContext(ctx, `
+		UPDATE messages SET window_state = 'inactive'
+		 WHERE delivered = 0 AND role = 'user' AND subtype IN (`+subtypes+`)
+		   AND json_extract(metadata, '$.producer') = ?
+		   AND conversation_id IN (SELECT c.id FROM conversations c WHERE c.task_id = ?)
+	`, args...); err != nil {
+		return fmt.Errorf("withdraw %s notes: %w", producer, err)
+	}
+	return nil
+}
+
 func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
@@ -122,12 +143,8 @@ func (s *stagedInjectionStore) HasNoteForEventSystem(ctx context.Context, orgID,
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
-	subtypes := strings.TrimRight(strings.Repeat("?, ", len(domain.StagedInjectionSubtypes)), ", ")
-	args := []any{orgID, conversationID}
-	for _, st := range domain.StagedInjectionSubtypes {
-		args = append(args, st)
-	}
-	args = append(args, producer, eventID)
+	subtypes, subtypeArgs := inListArgs(domain.StagedInjectionSubtypes)
+	args := append(append([]any{orgID, conversationID}, subtypeArgs...), producer, eventID)
 	var told bool
 	err := s.q.QueryRowContext(ctx, `
 		SELECT EXISTS (

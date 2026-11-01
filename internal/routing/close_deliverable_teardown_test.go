@@ -56,8 +56,9 @@ func (r teardownResolver) OrgIdentityFor(context.Context, string) (string, strin
 }
 
 // seedUnresolvedDeliverables hangs a draft PR and a finalized pending review off
-// conversationID — the two shapes a stopped run strands. Returns their ids.
-func seedUnresolvedDeliverables(t *testing.T, database *sql.DB, conversationID, repoPath string, number int) (prID, reviewID string) {
+// conversationID — the two shapes a stopped run strands — both about the pull
+// request entityID names. Returns their ids.
+func seedUnresolvedDeliverables(t *testing.T, database *sql.DB, conversationID, entityID, repoPath string, number int) (prID, reviewID string) {
 	t.Helper()
 	store := sqlitestore.New(database)
 	pr := domain.NewPullRequestDeliverable(repoPath, number, fmt.Sprintf("PR_%s_%d", repoPath, number), "tf/fix", "main",
@@ -65,6 +66,7 @@ func seedUnresolvedDeliverables(t *testing.T, database *sql.DB, conversationID, 
 	pr.ConversationID = conversationID
 	pr.OrgID = runmode.LocalDefaultOrgID
 	pr.TeamID = runmode.LocalDefaultTeamID
+	pr.EntityID = entityID
 	storedPR, err := store.Deliverables.UpsertSystem(t.Context(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, store.Orgs, runmode.LocalDefaultOrgID, pr))
 	if err != nil {
 		t.Fatalf("seed draft PR deliverable: %v", err)
@@ -74,6 +76,7 @@ func seedUnresolvedDeliverables(t *testing.T, database *sql.DB, conversationID, 
 	rv.ConversationID = conversationID
 	rv.OrgID = runmode.LocalDefaultOrgID
 	rv.TeamID = runmode.LocalDefaultTeamID
+	rv.EntityID = entityID
 	rd, _ := domain.ParseReviewDeliverableDetails(rv.DetailsJSON)
 	rd.ReviewBody = "agent draft body"
 	rd.ReviewEvent = "COMMENT"
@@ -150,9 +153,9 @@ func TestCloseCascade_TearsDownTheTasksDeliverables(t *testing.T) {
 	sp, closes := teardownSpawner(t, database)
 	r.spawner = sp
 
-	entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, "owner/repo#teardown")
+	entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, "owner/repo#7")
 	_, convID := seedRunOnTask(t, database, taskID, "completed", dbtest.SeedConcluded)
-	prID, reviewID := seedUnresolvedDeliverables(t, database, convID, "owner/repo", 7)
+	prID, reviewID := seedUnresolvedDeliverables(t, database, convID, entityID, "owner/repo", 7)
 
 	enqueueMerged(t, database, entityID)
 	if err := r.drainEventQueue(context.Background()); err != nil {
@@ -213,7 +216,7 @@ func TestCloseCascade_ObligationCloseTearsDownToo(t *testing.T) {
 
 	entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, "octo/repo#9")
 	_, convID := seedRunOnTask(t, database, taskID, "completed", dbtest.SeedConcluded)
-	prID, reviewID := seedUnresolvedDeliverables(t, database, convID, "octo/repo", 9)
+	prID, reviewID := seedUnresolvedDeliverables(t, database, convID, entityID, "octo/repo", 9)
 
 	// The divergence the obligation repairs: the entity's snapshot says
 	// merged, but no close ever ran against it. The next poll observes the

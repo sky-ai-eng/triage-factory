@@ -25,9 +25,9 @@ func TestTaskCloseDeferral_Postgres(t *testing.T) {
 		h.Reset(t)
 		orgID, userID, _ := seedPgOrgUserAgent(t, h)
 		return dbtest.TaskCloseDeferralStores{
-			Tasks:         stores.Tasks,
-			Entities:      stores.Entities,
-			Conversations: stores.Conversations,
+			Tasks:            stores.Tasks,
+			Entities:         stores.Entities,
+			StagedInjections: stores.StagedInjections,
 		}, orgID, newPgCloseDeferralSeeder(h.AdminDB, orgID, userID)
 	})
 }
@@ -49,10 +49,12 @@ func TestTaskCloseDeferral_Postgres_ListsEveryOrg(t *testing.T) {
 		seed := newPgCloseDeferralSeeder(h.AdminDB, orgID, userID)
 		taskID := seed.Task(t)
 		eventID := seed.Event(t, taskID)
-		seed.BlueprintAndConversation(t, taskID, "running", "")
+		runID, _ := seed.BlueprintAndConversation(t, taskID, "running", "")
 		if _, err := stores.Tasks.CloseOrHoldSystem(ctx, orgID, taskID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed, eventID); err != nil {
 			t.Fatalf("CloseOrHoldSystem: %v", err)
 		}
+		// Nothing working on it any more, so the sweep's list reads it.
+		seed.CallOff(t, runID)
 		if i == 2 {
 			if _, err := h.AdminDB.Exec(`UPDATE orgs SET deleted_at = now() WHERE id = $1`, orgID); err != nil {
 				t.Fatalf("soft-delete org: %v", err)
@@ -108,11 +110,20 @@ func newPgCloseDeferralSeeder(conn *sql.DB, orgID, userID string) dbtest.TaskClo
 		CallOff: func(t *testing.T, blueprintRunID string) {
 			exec(t, "call off", `UPDATE blueprint_runs SET cancel_requested = true WHERE org_id = $1 AND id = $2`, orgID, blueprintRunID)
 		},
-		DraftPullRequest: func(t *testing.T, conversationID string) {
+		DraftPullRequest: func(t *testing.T, conversationID, entityID string) {
+			var entity any
+			if entityID != "" {
+				entity = entityID
+			}
 			exec(t, "seed draft pull request", `
-				INSERT INTO deliverables (conversation_id, org_id, team_id, provider, kind, scope, target, state, dedup_key)
-				SELECT id, org_id, team_id, 'github', 'pull_request', 'github.com', 'acme/widget#7', 'draft', 'held-close-' || id::text
+				INSERT INTO deliverables (conversation_id, org_id, team_id, provider, kind, scope, target, state, dedup_key, entity_id)
+				SELECT id, org_id, team_id, 'github', 'pull_request', 'github.com', 'acme/widget#7', 'draft', 'held-close-' || id::text, $3
 				  FROM conversations WHERE org_id = $1 AND id = $2
+			`, orgID, conversationID, entity)
+		},
+		ResolveDeliverables: func(t *testing.T, conversationID string) {
+			exec(t, "resolve drafts", `
+				UPDATE deliverables SET state = 'open' WHERE org_id = $1 AND conversation_id = $2 AND state = 'draft'
 			`, orgID, conversationID)
 		},
 	}

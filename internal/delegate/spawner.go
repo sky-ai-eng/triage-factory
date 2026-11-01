@@ -120,8 +120,8 @@ type Spawner struct {
 	artifacts db.ArtifactStore
 	// stagedInjections is the durable, producer-agnostic agent-injection
 	// queue. stageInjection appends here; a native loop reads the rows
-	// itself, and stagedInjectionsAhead flushes them when an SDK engagement
-	// starts.
+	// itself, and stagedInjectionsForEngagement flushes them when an SDK
+	// engagement starts.
 	// Admin-pool System methods only — both the producer (an eventbus
 	// subscriber) and the consumer (a resume goroutine) run without JWT
 	// claims. Nil-safe (tests passing a partial db.Stores{}).

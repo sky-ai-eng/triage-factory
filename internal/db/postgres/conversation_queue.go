@@ -228,8 +228,8 @@ const awaitingDrivingSQL = `r.archived_at IS NULL
 // concluded or failed one its blueprint has moved past, are not working. An
 // event close holds while one of the task's conversations is
 // (TaskStore.CloseOrHoldSystem), and the close-hold sweep applies it once
-// none is (ConversationStore.HasWorkingConversationForTaskSystem), so the two
-// read this one predicate.
+// none is (TaskStore.ListActiveCloseDeferralsSystem), so the two read this
+// one predicate.
 var workingConversationSQL = `r.parent_conversation_id IS NULL
 	  AND r.ended_at IS NULL
 	  AND (` + activeClaimExistsSQL + `

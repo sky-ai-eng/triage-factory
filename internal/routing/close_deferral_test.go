@@ -65,14 +65,15 @@ func failRun(t *testing.T, database *sql.DB, runID, convID string) {
 }
 
 // seedDraftPullRequest gives the conversation a draft pull request
-// deliverable, one that awaits a person's verdict.
-func seedDraftPullRequest(t *testing.T, database *sql.DB, convID string) {
+// deliverable about the pull request entityID names, one that awaits a
+// person's verdict while that entity is open.
+func seedDraftPullRequest(t *testing.T, database *sql.DB, convID, entityID string) {
 	t.Helper()
 	if _, err := database.Exec(`
-		INSERT INTO deliverables (id, conversation_id, org_id, team_id, provider, kind, scope, target, state, dedup_key)
-		SELECT ?, id, org_id, team_id, 'github', 'pull_request', 'github.com', 'acme/widget#7', 'draft', 'held-close-' || id
+		INSERT INTO deliverables (id, conversation_id, org_id, team_id, provider, kind, scope, target, state, dedup_key, entity_id)
+		SELECT ?, id, org_id, team_id, 'github', 'pull_request', 'github.com', 'acme/widget#7', 'draft', 'held-close-' || id, ?
 		  FROM conversations WHERE id = ?
-	`, uuid.New().String(), convID); err != nil {
+	`, uuid.New().String(), entityID, convID); err != nil {
 		t.Fatalf("seed draft pull request on %s: %v", convID, err)
 	}
 }
@@ -317,48 +318,34 @@ func TestCloseHoldSweep_AppliesTheCloseOnceNothingWorks(t *testing.T) {
 	}
 }
 
-// TestCloseHoldSweep_SparesATaskAwaitingAPersonFromATypedClose: once nothing
-// works, a held typed close of a task whose run left a draft pull request for
-// a person is dropped, and the task and its deliverable are left alone. A held
-// terminating close applies anyway: nobody can act on a deliverable for a
-// merged pull request.
-func TestCloseHoldSweep_SparesATaskAwaitingAPersonFromATypedClose(t *testing.T) {
+// TestCloseHoldSweep_WaitsForADeliverableAwaitingAPerson: once nothing works,
+// a draft pull request the run left for a person keeps the close held, with
+// nothing torn down, until the person resolves it; the next pass then closes
+// the task.
+func TestCloseHoldSweep_WaitsForADeliverableAwaitingAPerson(t *testing.T) {
 	f := newHeldCIFixture(t, "owner/repo#sweep-awaiting")
 	failRun(t, f.database, f.runID, f.convID)
-	seedDraftPullRequest(t, f.database, f.convID)
+	seedDraftPullRequest(t, f.database, f.convID, f.entityID)
 
 	f.r.sweepCloseDeferrals(t.Context())
 
 	if status, _, _ := taskRow(t, f.database, f.taskID); status == "done" {
-		t.Error("the typed close closed a task awaiting a person")
+		t.Error("the sweep closed a task whose draft awaits a person")
 	}
-	if ev := heldClose(t, f.database, f.taskID); ev != "" {
-		t.Errorf("held close = %q, want dropped", ev)
+	if heldClose(t, f.database, f.taskID) != f.eventID {
+		t.Error("the sweep dropped the close a draft awaiting a person holds")
 	}
 	if slices.Contains(f.sp.tornDownCopy(), f.taskID) {
-		t.Error("the typed close tore down the deliverable awaiting a person")
+		t.Error("the sweep tore down the draft awaiting a person")
 	}
 
-	database := newTestDB(t)
-	r := newQueueWorkerRouter(t, database)
-	sp := &stoppingSpawner{}
-	r.spawner = sp
-	entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, "owner/repo#merged-awaiting")
-	runID, convID := seedRunOnTask(t, database, taskID, "running", "")
-	enqueueMerged(t, database, entityID)
-	if err := r.drainEventQueue(context.Background()); err != nil {
-		t.Fatalf("drain the merge: %v", err)
+	if _, err := f.database.Exec(`UPDATE deliverables SET state = 'open' WHERE conversation_id = ?`, f.convID); err != nil {
+		t.Fatalf("resolve the draft: %v", err)
 	}
-	failRun(t, database, runID, convID)
-	seedDraftPullRequest(t, database, convID)
+	f.r.sweepCloseDeferrals(t.Context())
 
-	r.sweepCloseDeferrals(t.Context())
-
-	if status, reason, _ := taskRow(t, database, taskID); status != "done" || reason != "entity_closed" {
-		t.Errorf("task = (%q, %q), want closed by the merge", status, reason)
-	}
-	if !slices.Contains(sp.tornDownCopy(), taskID) {
-		t.Error("the terminating close left the deliverable on the merged pull request")
+	if status, reason, _ := taskRow(t, f.database, f.taskID); status != "done" || reason != "auto_closed_by_event" {
+		t.Errorf("task = (%q, %q), want closed by the pass once the draft is resolved", status, reason)
 	}
 }
 

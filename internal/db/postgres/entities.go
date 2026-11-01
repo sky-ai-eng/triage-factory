@@ -1187,6 +1187,20 @@ func (s *entityStore) CloseTerminalSystem(ctx context.Context, orgID, entityID s
 			return nil
 		}
 
+		// The guard on state runs a second time even though this transaction
+		// holds the row lock: a declined flip here means the row changed
+		// under the lock, which is a failure, not a no-op. The flip comes
+		// before the tasks are decided, so a deliverable on this entity
+		// reads as one nobody can act on any more.
+		flipped, err := closeActiveEntity(ctx, q, orgID, entityID)
+		if err != nil {
+			return fmt.Errorf("close entity: %w", err)
+		}
+		if flipped == nil {
+			return errors.New("close entity: row changed under the lock")
+		}
+		res.Closed = true
+
 		taskIDs, err := openTaskIDsByEntityAndTypes(ctx, q, orgID, entityID, closeTypes)
 		if err != nil {
 			return fmt.Errorf("list open tasks: %w", err)
@@ -1200,24 +1214,13 @@ func (s *entityStore) CloseTerminalSystem(ctx context.Context, orgID, entityID s
 			case out.Held:
 				res.HeldTasks = append(res.HeldTasks, db.HeldTaskClose{
 					TaskID: taskID, NewlyHeld: out.NewlyHeld, WorkingConversationIDs: out.WorkingConversationIDs,
+					AwaitingPerson: out.AwaitingPerson,
 				})
 			case out.Closed:
 				res.ClosedTaskIDs = append(res.ClosedTaskIDs, taskID)
 				res.ActiveConversationIDs[taskID] = out.ActiveConversationIDs
 			}
 		}
-
-		// The guard on state runs a second time even though this transaction
-		// holds the row lock: a declined flip here means the row changed
-		// under the lock, which is a failure, not a no-op.
-		flipped, err := closeActiveEntity(ctx, q, orgID, entityID)
-		if err != nil {
-			return fmt.Errorf("close entity: %w", err)
-		}
-		if flipped == nil {
-			return errors.New("close entity: row changed under the lock")
-		}
-		res.Closed = true
 		return nil
 	})
 	if err != nil {

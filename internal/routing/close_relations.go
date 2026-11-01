@@ -478,18 +478,14 @@ func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, 
 				// task per (entity, type, key), so a task held open here
 				// would take the new event as a bump and the new assignee's
 				// team would get no task.
-				err = r.closeTaskWithAudit(ctx, orgID, t.ID, evt.ID, reason, evt.EventType)
-				closedTask = err == nil
+				closedTask, err = r.closeTaskWithAudit(ctx, orgID, t.ID, evt.ID, reason, evt.EventType)
 			} else {
 				var out dbpkg.TaskCloseOutcome
 				out, err = r.closeOrHoldTaskWithAudit(ctx, orgID, t.ID, evt, reason)
 				closedTask = out.Closed
-				switch {
-				case out.Held:
-					routerLog.InfoContext(ctx, "held task close while its conversations work", "task_id", t.ID, "on_event", evt.EventType,
-						"working", len(out.WorkingConversationIDs), "newly_held", out.NewlyHeld)
-				case out.AwaitingPerson:
-					routerLog.InfoContext(ctx, "left task open: a deliverable on it awaits a person", "task_id", t.ID, "on_event", evt.EventType)
+				if out.Held {
+					routerLog.InfoContext(ctx, "held task close", "task_id", t.ID, "on_event", evt.EventType,
+						"working", len(out.WorkingConversationIDs), "awaiting_person", out.AwaitingPerson, "newly_held", out.NewlyHeld)
 				}
 			}
 			if err != nil {
@@ -554,8 +550,8 @@ func (r *Router) runTerminatingClose(ctx context.Context, orgID string, evt doma
 		return false, nil
 	}
 	for _, h := range res.HeldTasks {
-		routerLog.InfoContext(ctx, "held task close while its conversations work", "task_id", h.TaskID, "on_event", evt.EventType,
-			"working", len(h.WorkingConversationIDs), "newly_held", h.NewlyHeld)
+		routerLog.InfoContext(ctx, "held task close", "task_id", h.TaskID, "on_event", evt.EventType,
+			"working", len(h.WorkingConversationIDs), "awaiting_person", h.AwaitingPerson, "newly_held", h.NewlyHeld)
 		if h.NewlyHeld {
 			r.tellTaskClosing(ctx, orgID, evt, h.TaskID, h.WorkingConversationIDs)
 		}
@@ -864,13 +860,12 @@ func (r *Router) stopConversationsOnClosedTask(orgID, taskID string, conversatio
 
 // closeOrHoldTaskWithAudit is a typed relation's close of a task: closed
 // through closeTaskWithAudit's rows and post-commit sequence while nothing on
-// the task is working, and held otherwise (TaskStore.CloseOrHoldSystem), with
-// the note sent to each working conversation the first time the task holds.
-// A closing event that finds the close already held only takes its place,
-// since the conversations were told when it began. A task nothing is working
-// on and one of whose deliverables awaits a person's verdict is left open:
-// the entity is still open, so the person can still act on it, and closing
-// the task would retire the deliverable before they do.
+// the task is working and none of its deliverables awaits a person, and held
+// otherwise (TaskStore.CloseOrHoldSystem), with the note sent to each working
+// conversation the first time the task holds. A closing event that finds the
+// close already held only takes its place, since the conversations were told
+// when it began. A deliverable awaiting a person holds the close because
+// closing the task would retire it before they act on it.
 func (r *Router) closeOrHoldTaskWithAudit(ctx context.Context, orgID, taskID string, evt domain.Event, closeReason string) (dbpkg.TaskCloseOutcome, error) {
 	out, err := r.tasks.CloseOrHoldSystem(ctx, orgID, taskID, closeReason, evt.EventType, evt.ID)
 	if err != nil {
@@ -909,19 +904,20 @@ func (r *Router) closeOrHoldTaskWithAudit(ctx context.Context, orgID, taskID str
 // conversations the close stamped — it is the deliverables of every attempt the
 // task ever made that strand, not just the live one's.
 //
-// Only a close this call actually performed cascades: an already-terminal task
-// returns no conversation ids, so a replayed close neither stamps, stops nor
-// tears down — the conversation under it may be one a user resumed after the
-// close, which the resume ladder deliberately allows.
-func (r *Router) closeTaskWithAudit(ctx context.Context, orgID, taskID, closingEventID, closeReason, closeEventType string) error {
+// Only a close this call actually performed cascades, and closed reports
+// whether it did: an already-terminal task returns no conversation ids, so a
+// replayed close neither stamps, stops nor tears down — the conversation
+// under it may be one a user resumed after the close, which the resume
+// ladder deliberately allows.
+func (r *Router) closeTaskWithAudit(ctx context.Context, orgID, taskID, closingEventID, closeReason, closeEventType string) (closed bool, err error) {
 	closed, activeConversationIDs, err := r.tasks.CloseWithConversationCancelIntentSystem(ctx, orgID, taskID, closeReason, closeEventType, closingEventID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if closed {
 		r.finishTaskClose(ctx, orgID, taskID, activeConversationIDs)
 	}
-	return nil
+	return closed, nil
 }
 
 // finishTaskClose is what follows a close an event performed, once it has

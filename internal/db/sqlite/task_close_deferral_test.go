@@ -51,18 +51,25 @@ func TestTaskCloseDeferral_SQLite(t *testing.T) {
 			CallOff: func(t *testing.T, blueprintRunID string) {
 				exec(t, "call off", `UPDATE blueprint_runs SET cancel_requested = 1 WHERE id = ?`, blueprintRunID)
 			},
-			DraftPullRequest: func(t *testing.T, conversationID string) {
+			DraftPullRequest: func(t *testing.T, conversationID, entityID string) {
+				var entity any
+				if entityID != "" {
+					entity = entityID
+				}
 				exec(t, "seed draft pull request", `
-					INSERT INTO deliverables (id, conversation_id, org_id, team_id, provider, kind, scope, target, state, dedup_key)
-					SELECT ?, id, org_id, team_id, 'github', 'pull_request', 'github.com', 'acme/widget#7', 'draft', 'held-close-' || id
+					INSERT INTO deliverables (id, conversation_id, org_id, team_id, provider, kind, scope, target, state, dedup_key, entity_id)
+					SELECT ?, id, org_id, team_id, 'github', 'pull_request', 'github.com', 'acme/widget#7', 'draft', 'held-close-' || id, ?
 					  FROM conversations WHERE id = ?
-				`, uuid.New().String(), conversationID)
+				`, uuid.New().String(), entity, conversationID)
+			},
+			ResolveDeliverables: func(t *testing.T, conversationID string) {
+				exec(t, "resolve drafts", `UPDATE deliverables SET state = 'open' WHERE conversation_id = ? AND state = 'draft'`, conversationID)
 			},
 		}
 		return dbtest.TaskCloseDeferralStores{
-			Tasks:         stores.Tasks,
-			Entities:      stores.Entities,
-			Conversations: stores.Conversations,
+			Tasks:            stores.Tasks,
+			Entities:         stores.Entities,
+			StagedInjections: stores.StagedInjections,
 		}, runmode.LocalDefaultOrgID, seed
 	})
 }

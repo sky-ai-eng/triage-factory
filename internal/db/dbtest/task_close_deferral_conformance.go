@@ -11,11 +11,11 @@ import (
 
 // TaskCloseDeferralStores are the stores the held-close suite drives: the
 // hold's writes and reads on TaskStore, the terminating close that holds in
-// its transaction, and the working-conversation read the sweep makes.
+// its transaction, and the staged notes a cleared hold withdraws.
 type TaskCloseDeferralStores struct {
-	Tasks         db.TaskStore
-	Entities      db.EntityStore
-	Conversations db.ConversationStore
+	Tasks            db.TaskStore
+	Entities         db.EntityStore
+	StagedInjections db.StagedInjectionStore
 }
 
 // TaskCloseDeferralSeeder stages the graph a held close spans — task, closing
@@ -33,8 +33,12 @@ type TaskCloseDeferralSeeder struct {
 	// CallOff sets the blueprint run's cancel_requested.
 	CallOff func(t *testing.T, blueprintRunID string)
 	// DraftPullRequest gives the conversation a draft pull request
-	// deliverable, one that awaits a person's verdict.
-	DraftPullRequest func(t *testing.T, conversationID string)
+	// deliverable about the pull request entityID names, one that awaits a
+	// person's verdict while that entity is open; "" links it to none.
+	DraftPullRequest func(t *testing.T, conversationID, entityID string)
+	// ResolveDeliverables marks the conversation's draft pull requests open,
+	// as a person marking one ready does.
+	ResolveDeliverables func(t *testing.T, conversationID string)
 }
 
 // TaskCloseDeferralFactory hands the suite a fresh database per subtest: the
@@ -44,10 +48,9 @@ type TaskCloseDeferralFactory func(t *testing.T) (stores TaskCloseDeferralStores
 // RunTaskCloseDeferralConformance is the shared suite for a task's held
 // close: TaskStore.CloseOrHoldSystem, ApplyHeldCloseSystem,
 // CloseDeferralForTaskSystem, ListActiveCloseDeferralsSystem,
-// ClearCloseDeferralSystem and Bump's clear,
-// the hold arm of EntityStore.CloseTerminalSystem, and the working predicate
-// both decide on, read through
-// ConversationStore.HasWorkingConversationForTaskSystem.
+// ClearCloseDeferralSystem and Bump's clear, the hold arm of
+// EntityStore.CloseTerminalSystem, and what holds a close: a working
+// conversation, and a deliverable awaiting a person.
 func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -96,12 +99,14 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 				if tc.stage != nil {
 					tc.stage(t, seed, runID, convID)
 				}
-				got, err := stores.Conversations.HasWorkingConversationForTaskSystem(ctx, orgID, taskID)
+				// Nothing else holds the task, so the close holds exactly
+				// when the conversation is working.
+				out, err := stores.Tasks.CloseOrHoldSystem(ctx, orgID, taskID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed, seed.Event(t, taskID))
 				if err != nil {
-					t.Fatalf("HasWorkingConversationForTaskSystem: %v", err)
+					t.Fatalf("CloseOrHoldSystem: %v", err)
 				}
-				if got != tc.working {
-					t.Errorf("working = %v, want %v", got, tc.working)
+				if out.Held != tc.working {
+					t.Errorf("held = %v, want %v (working)", out.Held, tc.working)
 				}
 			})
 		}
@@ -253,10 +258,11 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 		closed := seed.Task(t)
 		plain := seed.Task(t)
 		for _, taskID := range []string{holding, closed} {
-			seed.BlueprintAndConversation(t, taskID, "running", "")
+			runID, _ := seed.BlueprintAndConversation(t, taskID, "running", "")
 			if _, err := stores.Tasks.CloseOrHoldSystem(ctx, orgID, taskID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed, seed.Event(t, taskID)); err != nil {
 				t.Fatalf("CloseOrHoldSystem(%s): %v", taskID, err)
 			}
+			seed.CallOff(t, runID)
 		}
 		// A close by any other path leaves the column as it is; the reads
 		// are what keep it from being read again.
@@ -282,6 +288,40 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 			if d := held(t, stores.Tasks, orgID, taskID); d != nil {
 				t.Errorf("CloseDeferralForTaskSystem(%s) = %+v, want none", taskID, *d)
 			}
+		}
+	})
+
+	t.Run("The_sweep_list_leaves_out_holds_something_still_holds", func(t *testing.T) {
+		stores, orgID, seed := mk(t)
+		hold := func(taskID string) {
+			t.Helper()
+			if out, err := stores.Tasks.CloseOrHoldSystem(ctx, orgID, taskID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed, seed.Event(t, taskID)); err != nil || !out.Held {
+				t.Fatalf("CloseOrHoldSystem(%s) = %+v (err %v), want held", taskID, out, err)
+			}
+		}
+		working := seed.Task(t)
+		seed.BlueprintAndConversation(t, working, "running", "")
+		hold(working)
+		awaiting := seed.Task(t)
+		awaitingRun, awaitingConv := seed.BlueprintAndConversation(t, awaiting, "running", "")
+		hold(awaiting)
+		seed.CallOff(t, awaitingRun)
+		seed.DraftPullRequest(t, awaitingConv, seed.EntityForTask(t, seed.Task(t)))
+		free := seed.Task(t)
+		freeRun, _ := seed.BlueprintAndConversation(t, free, "running", "")
+		hold(free)
+		seed.CallOff(t, freeRun)
+
+		all, err := stores.Tasks.ListActiveCloseDeferralsSystem(ctx)
+		if err != nil {
+			t.Fatalf("ListActiveCloseDeferralsSystem: %v", err)
+		}
+		var ids []string
+		for _, d := range all {
+			ids = append(ids, d.TaskID)
+		}
+		if !slices.Equal(ids, []string{free}) {
+			t.Errorf("listed tasks = %v, want only %s (working %s and awaiting %s left out)", ids, free, working, awaiting)
 		}
 	})
 
@@ -332,7 +372,7 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 		}
 		apply := func(taskID, eventID string) db.TaskCloseOutcome {
 			t.Helper()
-			out, err := stores.Tasks.ApplyHeldCloseSystem(ctx, orgID, taskID, eventID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed, true)
+			out, err := stores.Tasks.ApplyHeldCloseSystem(ctx, orgID, taskID, eventID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed)
 			if err != nil {
 				t.Fatalf("ApplyHeldCloseSystem: %v", err)
 			}
@@ -382,53 +422,116 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 		}
 	})
 
-	t.Run("A_typed_close_leaves_a_task_awaiting_a_person_open", func(t *testing.T) {
+	t.Run("A_deliverable_awaiting_a_person_holds_the_close", func(t *testing.T) {
 		stores, orgID, seed := mk(t)
-		idle := seed.Task(t)
-		_, idleConv := seed.BlueprintAndConversation(t, idle, "completed", SeedConcluded)
-		seed.DraftPullRequest(t, idleConv)
-		out, err := stores.Tasks.CloseOrHoldSystem(ctx, orgID, idle, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed, seed.Event(t, idle))
+		// A finished run's draft pull request, open on its own entity.
+		taskID := seed.Task(t)
+		eventID := seed.Event(t, taskID)
+		_, convID := seed.BlueprintAndConversation(t, taskID, "completed", SeedConcluded)
+		seed.DraftPullRequest(t, convID, seed.EntityForTask(t, seed.Task(t)))
+		out, err := stores.Tasks.CloseOrHoldSystem(ctx, orgID, taskID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed, eventID)
 		if err != nil {
 			t.Fatalf("CloseOrHoldSystem: %v", err)
 		}
-		if !outcomeEqual(out, db.TaskCloseOutcome{AwaitingPerson: true}) {
-			t.Errorf("close of a task awaiting a person = %+v, want left open", out)
+		if !outcomeEqual(out, db.TaskCloseOutcome{Held: true, NewlyHeld: true, AwaitingPerson: true}) {
+			t.Errorf("close of a task awaiting a person = %+v, want held on the person", out)
 		}
-		if s := seed.TaskStatus(t, idle); s == "done" {
-			t.Error("the close closed a task awaiting a person")
+		if d := held(t, stores.Tasks, orgID, taskID); d == nil || d.EventID != eventID {
+			t.Errorf("held close = %+v, want event %s", d, eventID)
 		}
-		if n := seed.CloseAuditCount(t, idle); n != 0 {
-			t.Errorf("close audit rows = %d, want 0", n)
-		}
-
-		// Held while its run worked, which then stopped with a draft pull
-		// request left for a person: the typed close is dropped, the
-		// terminating one applies.
-		for _, typed := range []bool{true, false} {
-			taskID := seed.Task(t)
-			eventID := seed.Event(t, taskID)
-			runID, convID := seed.BlueprintAndConversation(t, taskID, "running", "")
-			if _, err := stores.Tasks.CloseOrHoldSystem(ctx, orgID, taskID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed, eventID); err != nil {
-				t.Fatalf("CloseOrHoldSystem: %v", err)
-			}
-			seed.CallOff(t, runID)
-			seed.DraftPullRequest(t, convID)
-			out, err := stores.Tasks.ApplyHeldCloseSystem(ctx, orgID, taskID, eventID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed, typed)
+		apply := func() db.TaskCloseOutcome {
+			t.Helper()
+			out, err := stores.Tasks.ApplyHeldCloseSystem(ctx, orgID, taskID, eventID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed)
 			if err != nil {
 				t.Fatalf("ApplyHeldCloseSystem: %v", err)
 			}
-			if typed {
-				if !outcomeEqual(out, db.TaskCloseOutcome{AwaitingPerson: true}) {
-					t.Errorf("typed apply = %+v, want left open", out)
+			return out
+		}
+		if out := apply(); !outcomeEqual(out, db.TaskCloseOutcome{Held: true, AwaitingPerson: true}) {
+			t.Errorf("apply while the draft awaits the person = %+v, want held", out)
+		}
+		seed.ResolveDeliverables(t, convID)
+		if out := apply(); !out.Closed {
+			t.Errorf("apply once the person resolved it = %+v, want closed", out)
+		}
+
+		// A draft whose own pull request is closed awaits nobody, and
+		// neither does one linked to no pull request.
+		closedEntity := seed.EntityForTask(t, seed.Task(t))
+		seed.CloseEntityRaw(t, closedEntity)
+		for _, draftEntity := range []string{closedEntity, ""} {
+			moot := seed.Task(t)
+			_, mootConv := seed.BlueprintAndConversation(t, moot, "completed", SeedConcluded)
+			seed.DraftPullRequest(t, mootConv, draftEntity)
+			if out, err := stores.Tasks.CloseOrHoldSystem(ctx, orgID, moot, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed, seed.Event(t, moot)); err != nil || !out.Closed {
+				t.Errorf("close of a task whose draft is on entity %q, closed or none = %+v (err %v), want closed", draftEntity, out, err)
+			}
+		}
+
+		// The terminating close decides its tasks after it closes the
+		// entity: a deliverable on that entity awaits nobody, one on another
+		// open entity holds its task.
+		onIt := seed.Task(t)
+		entityID := seed.EntityForTask(t, onIt)
+		elsewhere := seed.TaskOnEntity(t, entityID, review)
+		_, onItConv := seed.BlueprintAndConversation(t, onIt, "completed", SeedConcluded)
+		_, elsewhereConv := seed.BlueprintAndConversation(t, elsewhere, "completed", SeedConcluded)
+		seed.DraftPullRequest(t, onItConv, entityID)
+		seed.DraftPullRequest(t, elsewhereConv, seed.EntityForTask(t, seed.Task(t)))
+		_, seq := seed.EntityRow(t, entityID)
+		res, err := stores.Entities.CloseTerminalSystem(ctx, orgID, entityID, &seq, []string{ci, review},
+			"entity_closed", domain.EventGitHubPRMerged, seed.Event(t, onIt))
+		if err != nil {
+			t.Fatalf("CloseTerminalSystem: %v", err)
+		}
+		if !slices.Equal(res.ClosedTaskIDs, []string{onIt}) {
+			t.Errorf("ClosedTaskIDs = %v, want [%s]", res.ClosedTaskIDs, onIt)
+		}
+		if len(res.HeldTasks) != 1 || res.HeldTasks[0].TaskID != elsewhere || !res.HeldTasks[0].AwaitingPerson {
+			t.Errorf("HeldTasks = %+v, want %s held on the person", res.HeldTasks, elsewhere)
+		}
+	})
+
+	t.Run("Clearing_a_hold_withdraws_its_close_notes", func(t *testing.T) {
+		stores, orgID, seed := mk(t)
+		// "unheld" is a bump of a task that holds no close: it clears
+		// nothing, so it withdraws nothing.
+		for _, how := range []string{"bump", "clear", "unheld"} {
+			taskID := seed.Task(t)
+			eventID := seed.Event(t, taskID)
+			_, convID := seed.BlueprintAndConversation(t, taskID, "running", "")
+			if how != "unheld" {
+				if _, err := stores.Tasks.CloseOrHoldSystem(ctx, orgID, taskID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed, eventID); err != nil {
+					t.Fatalf("CloseOrHoldSystem: %v", err)
 				}
-				if s := seed.TaskStatus(t, taskID); s == "done" {
-					t.Error("the typed apply closed a task awaiting a person")
+			}
+			for _, producer := range []string{domain.StagedInjectionProducerTaskClosing, domain.StagedInjectionProducerPRCoherence} {
+				if _, err := stores.StagedInjections.AppendSystem(ctx, orgID, domain.StagedInjection{
+					ConversationID: convID, Subtype: domain.MessageSubtypeInjectionSystemNote,
+					Producer: producer, Body: producer, Provenance: domain.NoteProvenance{EventID: eventID},
+				}); err != nil {
+					t.Fatalf("AppendSystem(%s): %v", producer, err)
 				}
-				if d := held(t, stores.Tasks, orgID, taskID); d != nil {
-					t.Errorf("the dropped hold is still read: %+v", *d)
+			}
+			if how == "clear" {
+				if cleared, err := stores.Tasks.ClearCloseDeferralSystem(ctx, orgID, taskID, eventID); err != nil || !cleared {
+					t.Fatalf("ClearCloseDeferralSystem = %v (err %v), want cleared", cleared, err)
 				}
-			} else if !out.Closed {
-				t.Errorf("terminating apply = %+v, want closed", out)
+			} else if _, err := stores.Tasks.BumpSystem(ctx, orgID, taskID, seed.Event(t, taskID)); err != nil {
+				t.Fatalf("BumpSystem: %v", err)
+			}
+			left, err := stores.StagedInjections.FlushPendingSystem(ctx, orgID, convID)
+			if err != nil {
+				t.Fatalf("FlushPendingSystem: %v", err)
+			}
+			want := 1
+			if how == "unheld" {
+				want = 2
+			}
+			if len(left) != want {
+				t.Errorf("%s: still staged = %+v, want %d", how, left, want)
+			} else if want == 1 && left[0].Producer != domain.StagedInjectionProducerPRCoherence {
+				t.Errorf("%s: still staged = %+v, want only the pull request note", how, left)
 			}
 		}
 	})

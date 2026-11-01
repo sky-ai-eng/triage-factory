@@ -1278,21 +1278,6 @@ func (s *conversationStore) HasLiveConversationForTaskSystem(ctx context.Context
 	return s.HasLiveConversationForTask(ctx, orgID, taskID)
 }
 
-func (s *conversationStore) HasWorkingConversationForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return false, err
-	}
-	var exists bool
-	err := s.q.QueryRowContext(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM conversations r
-			WHERE r.task_id = ?
-			  AND `+workingConversationSQL+`
-		)
-	`, taskID).Scan(&exists)
-	return exists, err
-}
-
 func (s *conversationStore) ActiveIDsForTaskSystem(ctx context.Context, orgID, taskID string) ([]string, error) {
 	return s.ActiveIDsForTask(ctx, orgID, taskID)
 }

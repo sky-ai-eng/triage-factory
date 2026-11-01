@@ -27,25 +27,25 @@ func AdditiveEventInjection(eventType, metadataJSON string) string {
 	)
 }
 
-// TaskClosingGuidance is what an agent working on a task should do once an
+// taskClosingGuidance is what an agent working on a task should do once an
 // event has resolved the situation the task is about.
-const TaskClosingGuidance = "If your own work caused this, finish what you were doing. Otherwise start nothing new on this task and wrap up."
+const taskClosingGuidance = "If your own work caused this, finish what you were doing. Otherwise start nothing new on this task and wrap up."
 
 // TaskClosingInjection is the agent-facing copy telling a conversation on a
 // task whose close is held that an event resolved the situation the task is
-// about, so the task closes once its conversations finish: the conversations
-// working when the close was held, and each one engaged while it still is. metadataJSON is the
-// closing event's metadata JSON; "" renders a body naming the event type
-// alone. Bare, like AdditiveEventInjection.
+// about, so the task closes once the work on it is finished: the
+// conversations working when the close was held, each one engaged while it
+// still is, and a deliverable awaiting a person. metadataJSON is the closing event's metadata JSON; "" renders
+// a body naming the event type alone. Bare, like AdditiveEventInjection.
 func TaskClosingInjection(eventType, metadataJSON string) string {
 	if metadataJSON == "" {
 		return fmt.Sprintf(
-			"A %s event resolved the situation this task is about. %s The task closes once its conversations finish.",
-			eventType, TaskClosingGuidance,
+			"A %s event resolved the situation this task is about. %s The task closes once the work on it is finished.",
+			eventType, taskClosingGuidance,
 		)
 	}
 	return fmt.Sprintf(
-		"A %s event resolved the situation this task is about. Event metadata:\n%s\n%s The task closes once its conversations finish.",
-		eventType, metadataJSON, TaskClosingGuidance,
+		"A %s event resolved the situation this task is about. Event metadata:\n%s\n%s The task closes once the work on it is finished.",
+		eventType, metadataJSON, taskClosingGuidance,
 	)
 }

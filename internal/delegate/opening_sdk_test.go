@@ -235,11 +235,11 @@ func TestComposeLaunchTurn_ResumedSessionSendsTheNoteAndNoOpening(t *testing.T) 
 	}
 }
 
-// TestComposeLaunchTurn_StagedNotesGoAheadOfTheTurn: a launch reads the notes
-// staged for its conversation first, as a resume does: ahead of the opening on
-// a first launch, and of the continuation note on a resumed session. The flush
-// marks them delivered.
-func TestComposeLaunchTurn_StagedNotesGoAheadOfTheTurn(t *testing.T) {
+// TestComposeLaunchTurn_StagedNotesRideTheLaunchTurn: a launch reads the
+// notes staged for its conversation: after the opening on a first launch, as
+// a native engagement does, and ahead of the continuation note on a resumed
+// session, as a resume does. The flush marks them delivered.
+func TestComposeLaunchTurn_StagedNotesRideTheLaunchTurn(t *testing.T) {
 	const convID = "r-sdk-notes"
 	org := runmode.LocalDefaultOrgID
 	database := newDelegateTestDB(t)
@@ -254,8 +254,9 @@ func TestComposeLaunchTurn_StagedNotesGoAheadOfTheTurn(t *testing.T) {
 	if err := s.composeLaunchTurn(ctx, &opening, sink, org, convID, runmode.LocalDefaultUserID, "", openingTestMemories(), openingTestTaskContext); err != nil {
 		t.Fatalf("the opening launch: %v", err)
 	}
-	if len(opening.OpeningBlocks) < 2 || !strings.Contains(opening.OpeningBlocks[0].Text, "the task is resolved") {
-		t.Errorf("opening blocks = %q, want the staged note ahead of the opening", blockTexts(opening.OpeningBlocks))
+	if n := len(opening.OpeningBlocks); n < 2 || !strings.Contains(opening.OpeningBlocks[n-1].Text, "the task is resolved") ||
+		strings.Contains(opening.OpeningBlocks[0].Text, "the task is resolved") {
+		t.Errorf("opening blocks = %q, want the staged note after the opening", blockTexts(opening.OpeningBlocks))
 	}
 
 	stageOne(t, s, org, convID, domain.StagedInjectionProducerTaskClosing, "a later note")

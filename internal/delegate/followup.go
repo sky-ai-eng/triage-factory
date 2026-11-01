@@ -885,7 +885,7 @@ func (s *Spawner) resumeSystemPrepends(ctx context.Context, orgID string, conv *
 	if block := s.deliverableLedgerForResume(ctx, orgID, conv); block != "" {
 		prefix = block + "\n\n"
 	}
-	if block := s.stagedInjectionsAhead(ctx, orgID, conv.ID); block != "" {
+	if block := s.stagedInjectionsForEngagement(ctx, orgID, conv.ID); block != "" {
 		prefix = block + "\n\n" + prefix
 	}
 	return prefix

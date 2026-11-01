@@ -235,9 +235,11 @@ type HeldTaskClose struct {
 	TaskID string
 	// NewlyHeld reports that the task held no close before this call.
 	NewlyHeld bool
-	// WorkingConversationIDs are the task's working conversations, which
-	// made it hold: the set the caller tells.
+	// WorkingConversationIDs are the task's working conversations: the set
+	// the caller tells. AwaitingPerson reports that a deliverable awaiting a
+	// person made it hold instead (TaskCloseOutcome.AwaitingPerson).
 	WorkingConversationIDs []string
+	AwaitingPerson         bool
 }
 
 type EntityStore interface {
@@ -673,9 +675,9 @@ type EntityStore interface {
 	// A task with a working conversation is not closed: it holds the close
 	// exactly as TaskStore.CloseOrHoldSystem holds one, in the same
 	// transaction that closes the others, and is reported in HeldTasks. The
-	// entity closes whether or not any task held. Unlike CloseOrHoldSystem's,
-	// this close does not spare a task awaiting a person's verdict on a
-	// deliverable: on a closed entity nothing can act on one. When the guard misses,
+	// entity closes whether or not any task held, and closes before the
+	// tasks are decided, so a deliverable on this entity reads as one
+	// nobody can act on any more. When the guard misses,
 	// nothing is held either. A hold names its closing event, so with
 	// closingEventID empty every task closes.
 	CloseTerminalSystem(ctx context.Context, orgID, entityID string, expected *int64, closeTypes []string, closeReason, closeEventType, closingEventID string) (TerminalCloseResult, error)

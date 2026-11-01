@@ -5,9 +5,9 @@ package domain
 // the task is about, and closing the task then would stop the work under it.
 // Each working conversation is told instead, and the router's sweep applies
 // the close once none of the task's conversations is working, if it still
-// holds then. A typed close, one that leaves the entity open, is dropped
-// instead when a deliverable on the task awaits a person's verdict. The
-// task's own event arriving again cancels it.
+// holds then. A deliverable on the task that awaits a person's verdict, on
+// a pull request still open, holds it too, until the person resolves it.
+// The task's own event arriving again cancels it.
 //
 // It is the tasks column close_deferred_event_id, read only while the task
 // is active.

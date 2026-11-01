@@ -16,11 +16,14 @@ import (
 // working, if it still holds then. Holding rather than stopping is what lets
 // a run finish the work that resolved its own task (the push CI then passed
 // on, the merge, the move to done), and lets a run someone else's work
-// overtook wrap up rather than die mid-step. The task's own event arriving
-// again cancels the hold (TaskStore.Bump): the situation is live again.
+// overtook wrap up rather than die mid-step. A deliverable awaiting a
+// person's verdict, on a pull request still open, holds the close the same
+// way, so closing the task never retires it before the person acts on it.
+// The task's own event arriving again cancels the hold (TaskStore.Bump): the
+// situation is live again.
 
 // DefaultCloseDeferralSweepInterval is how often the brain looks at the held
-// closes for tasks nothing is working on any more.
+// closes of tasks nothing holds any more.
 const DefaultCloseDeferralSweepInterval = 30 * time.Second
 
 // tellTaskClosing tells each of the task's working conversations that evt
@@ -38,9 +41,10 @@ func (r *Router) tellTaskClosing(ctx context.Context, orgID string, evt domain.E
 
 // --- the sweep --------------------------------------------------------------
 
-// RunCloseDeferralSweep applies the held closes of tasks nothing is working
-// on any more, every interval, across every org, until ctx is cancelled. A
-// brain worker: exactly one process runs it.
+// RunCloseDeferralSweep applies the held closes of tasks nothing holds any
+// more, no conversation working and no deliverable awaiting a person, every
+// interval, across every org, until ctx is cancelled. A brain worker: exactly
+// one process runs it.
 func (r *Router) RunCloseDeferralSweep(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -54,8 +58,9 @@ func (r *Router) RunCloseDeferralSweep(ctx context.Context, interval time.Durati
 	}
 }
 
-// sweepCloseDeferrals runs one pass over every active task holding a close.
-// A failure on one is logged and leaves it for the next pass; its siblings
+// sweepCloseDeferrals runs one pass over every active task holding a close
+// that nothing holds any more (TaskStore.ListActiveCloseDeferralsSystem). A
+// failure on one is logged and leaves it for the next pass; its siblings
 // still settle.
 func (r *Router) sweepCloseDeferrals(ctx context.Context) {
 	deferrals, err := r.tasks.ListActiveCloseDeferralsSystem(ctx)
@@ -83,14 +88,10 @@ func (r *Router) sweepCloseDeferrals(ctx context.Context) {
 	}
 }
 
-// settleCloseDeferral decides one held close. While a conversation on the
-// task is working it is left for the next pass. Otherwise the close applies
-// if the relation still admits it against current state, and is dropped if
-// not (CI failing again, a reopened pull request). A typed relation's close
-// is dropped too while one of the task's deliverables awaits a person's
-// verdict, as it is when nothing held it (closeOrHoldTaskWithAudit): the
-// entity is still open, so the person can still act on it, and resolving
-// the last one closes the task. closed reports whether the task closed.
+// settleCloseDeferral decides one held close the sweep listed, which nothing
+// held when it was read. The close applies if the relation still admits it
+// against current state, and is dropped if not (CI failing again, a reopened
+// pull request). closed reports whether the task closed.
 //
 // The close goes through ApplyHeldCloseSystem, which applies it only while
 // the task still holds this event's close: the list was read before this
@@ -101,13 +102,6 @@ func (r *Router) sweepCloseDeferrals(ctx context.Context) {
 // cancel intent, the teardown and the audit row naming the stored event are
 // what an unheld close writes.
 func (r *Router) settleCloseDeferral(ctx context.Context, d domain.TaskCloseDeferral) (closed bool, err error) {
-	working, err := r.conversations.HasWorkingConversationForTaskSystem(ctx, d.OrgID, d.TaskID)
-	if err != nil {
-		return false, fmt.Errorf("read working conversations: %w", err)
-	}
-	if working {
-		return false, nil
-	}
 	evt, err := r.events.GetSystem(ctx, d.OrgID, d.EventID)
 	if err != nil {
 		return false, fmt.Errorf("read closing event: %w", err)
@@ -135,14 +129,9 @@ func (r *Router) settleCloseDeferral(ctx context.Context, d domain.TaskCloseDefe
 			"task_id", task.ID, "on_event", evt.EventType)
 		return false, r.clearCloseDeferral(ctx, d)
 	}
-	typed := terminatingRelationFor(evt.EventType) == nil
-	out, err := r.tasks.ApplyHeldCloseSystem(ctx, d.OrgID, task.ID, d.EventID, reason, evt.EventType, typed)
+	out, err := r.tasks.ApplyHeldCloseSystem(ctx, d.OrgID, task.ID, d.EventID, reason, evt.EventType)
 	if err != nil {
 		return false, fmt.Errorf("close task: %w", err)
-	}
-	if out.AwaitingPerson {
-		routerLog.InfoContext(ctx, "held close dropped: a deliverable on the task awaits a person",
-			"task_id", task.ID, "on_event", evt.EventType)
 	}
 	if !out.Closed {
 		return false, nil

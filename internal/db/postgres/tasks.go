@@ -892,16 +892,24 @@ func (s *taskStore) BumpSystem(ctx context.Context, orgID, taskID, eventID strin
 	return bumpTask(ctx, s.admin, orgID, taskID)
 }
 
+// bumpTask is one statement on either pool, so the close notes a cleared
+// hold withdraws go in a data-modifying CTE beside the task's UPDATE. Every
+// part of the statement reads the snapshot from before it, so prior is the
+// hold the bump clears, and a bump of a task holding none withdraws nothing.
 func bumpTask(ctx context.Context, q queryer, orgID, taskID string) (domain.Task, error) {
 	var t domain.Task
 	return scanTaskBareRow(q.QueryRowContext(ctx, `
+		WITH prior AS (
+		    SELECT close_deferred_event_id FROM tasks WHERE org_id = $1 AND id = $2
+		), withdrawn AS (`+withdrawProducerNotesForTaskSQL+`
+		       AND EXISTS (SELECT 1 FROM prior WHERE prior.close_deferred_event_id IS NOT NULL))
 		UPDATE tasks
 		SET status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END,
 		    snooze_until = CASE WHEN status = 'snoozed' THEN NULL ELSE snooze_until END,
 		    close_deferred_event_id = NULL
 		WHERE org_id = $1 AND id = $2
 		RETURNING `+pgTaskBareColumns,
-		orgID, taskID), &t)
+		orgID, taskID, domain.StagedInjectionSubtypes, domain.StagedInjectionProducerTaskClosing), &t)
 }
 
 func (s *taskStore) Close(ctx context.Context, orgID, taskID, closeReason, closeEventType string) (domain.Task, error) {
@@ -1042,7 +1050,7 @@ func (s *taskStore) CloseOrHoldSystem(ctx context.Context, orgID, taskID, closeR
 	var out db.TaskCloseOutcome
 	err := inTx(ctx, s.admin, func(q queryer) error {
 		var err error
-		out, err = closeOrHoldTask(ctx, q, orgID, taskID, closeReason, closeEventType, closingEventID, true)
+		out, err = closeOrHoldTask(ctx, q, orgID, taskID, closeReason, closeEventType, closingEventID, false)
 		return err
 	})
 	if err != nil {
@@ -1051,45 +1059,55 @@ func (s *taskStore) CloseOrHoldSystem(ctx context.Context, orgID, taskID, closeR
 	return out, nil
 }
 
-// closeOrHoldTask is CloseOrHoldSystem's body on a transaction the caller
-// owns, so the terminating close holds or closes each of its tasks with the
-// same statements inside its own transaction. spareAwaitingPerson leaves open
-// a task that nothing is working on and that awaits a person's verdict on a
-// deliverable; the terminating close passes false, since its entity is closed
-// and nothing can act on one.
-func closeOrHoldTask(ctx context.Context, q queryer, orgID, taskID, closeReason, closeEventType, closingEventID string, spareAwaitingPerson bool) (db.TaskCloseOutcome, error) {
+// closeOrHoldTask is every event close's body on a transaction the caller
+// owns: CloseOrHoldSystem's, the terminating close's for each of its tasks,
+// and, with applying, ApplyHeldCloseSystem's. The close holds while one of
+// the task's conversations is working or one of its deliverables awaits a
+// person on a pull request still open, and applies otherwise. applying is
+// the sweep's: the hold must still name closingEventID, a hold that stays is
+// left as it is, and the hold is cleared with the close.
+func closeOrHoldTask(ctx context.Context, q queryer, orgID, taskID, closeReason, closeEventType, closingEventID string, applying bool) (db.TaskCloseOutcome, error) {
 	if closingEventID != "" {
-		st, ok, err := readEventClose(ctx, q, orgID, taskID, spareAwaitingPerson)
+		st, ok, err := readEventClose(ctx, q, orgID, taskID)
 		if err != nil {
 			return db.TaskCloseOutcome{}, err
 		}
-		if !ok {
+		if !ok || (applying && st.held.String != closingEventID) {
 			return db.TaskCloseOutcome{}, nil
 		}
-		if len(st.working) > 0 {
+		if len(st.working) > 0 || st.awaitingPerson {
+			out := db.TaskCloseOutcome{Held: true, WorkingConversationIDs: st.working, AwaitingPerson: st.awaitingPerson}
+			if applying {
+				return out, nil
+			}
 			if _, err := q.ExecContext(ctx, `
 				UPDATE tasks SET close_deferred_event_id = $3
 				 WHERE org_id = $1 AND id = $2
 			`, orgID, taskID, closingEventID); err != nil {
 				return db.TaskCloseOutcome{}, fmt.Errorf("hold close: %w", err)
 			}
-			return db.TaskCloseOutcome{Held: true, NewlyHeld: !st.held.Valid, WorkingConversationIDs: st.working}, nil
-		}
-		if st.awaitingPerson {
-			return db.TaskCloseOutcome{AwaitingPerson: true}, nil
+			out.NewlyHeld = !st.held.Valid
+			return out, nil
 		}
 	}
 	closed, conversationIDs, err := closeTaskWithCancelIntent(ctx, q, orgID, taskID, closeReason, closeEventType, closingEventID)
 	if err != nil {
 		return db.TaskCloseOutcome{}, err
 	}
+	if applying {
+		if _, err := q.ExecContext(ctx, `
+			UPDATE tasks SET close_deferred_event_id = NULL WHERE org_id = $1 AND id = $2
+		`, orgID, taskID); err != nil {
+			return db.TaskCloseOutcome{}, fmt.Errorf("clear hold: %w", err)
+		}
+	}
 	return db.TaskCloseOutcome{Closed: closed, ActiveConversationIDs: conversationIDs}, nil
 }
 
 // eventCloseState is what an event close decides on: the close the task
-// holds, its working conversations, and, read only for a close that spares
-// one and only while nothing is working, whether a deliverable on the task
-// awaits a person's verdict.
+// holds, its working conversations, and, read only while none is working,
+// whether one of its deliverables awaits a person on a pull request still
+// open.
 type eventCloseState struct {
 	held           sql.NullString
 	working        []string
@@ -1098,7 +1116,9 @@ type eventCloseState struct {
 
 // readEventClose locks the task's row, as a close's own UPDATE would, then
 // reads its eventCloseState. ok is false for a task that is not active.
-func readEventClose(ctx context.Context, q queryer, orgID, taskID string, spareAwaitingPerson bool) (st eventCloseState, ok bool, err error) {
+//
+// A deliverable awaits a person by awaitingPersonSQL.
+func readEventClose(ctx context.Context, q queryer, orgID, taskID string) (st eventCloseState, ok bool, err error) {
 	err = q.QueryRowContext(ctx, `
 		SELECT close_deferred_event_id::text FROM tasks
 		 WHERE org_id = $1 AND id = $2 AND status NOT IN ('done', 'dismissed')
@@ -1122,48 +1142,40 @@ func readEventClose(ctx context.Context, q queryer, orgID, taskID string, spareA
 	if st.working, err = scanIDs(rows, "conversations.id"); err != nil {
 		return eventCloseState{}, false, fmt.Errorf("list working conversations: %w", err)
 	}
-	if spareAwaitingPerson && len(st.working) == 0 {
-		if err := q.QueryRowContext(ctx, `
-			SELECT EXISTS (
-				SELECT 1 FROM deliverables art
-				  JOIN conversations c ON c.org_id = art.org_id AND c.id = art.conversation_id
-				 WHERE c.org_id = $1 AND c.task_id = $2
-				   AND (`+pgUnresolvedDeliverableSQL+`))
-		`, orgID, taskID).Scan(&st.awaitingPerson); err != nil {
-			return eventCloseState{}, false, fmt.Errorf("read unresolved deliverables: %w", err)
+	if len(st.working) == 0 {
+		if err := q.QueryRowContext(ctx, `SELECT `+awaitingPersonSQL("$1", "$2"),
+			orgID, taskID).Scan(&st.awaitingPerson); err != nil {
+			return eventCloseState{}, false, fmt.Errorf("read deliverables awaiting a person: %w", err)
 		}
 	}
 	return st, true, nil
 }
 
-func (s *taskStore) ApplyHeldCloseSystem(ctx context.Context, orgID, taskID, heldEventID, closeReason, closeEventType string, spareAwaitingPerson bool) (db.TaskCloseOutcome, error) {
+// awaitingPersonSQL is whether a deliverable on one of task taskExpr's
+// conversations, in org orgExpr, awaits a person: unresolved, and about a pull
+// request still open, which is the test of whether anyone can still act on
+// it. A review of a merged pull request is moot, while a Jira task's draft
+// pull request is not when the issue is done. A deliverable linked to no
+// entity counts as on a closed one: TF links every deliverable it records, so
+// a missing link is one whose resolution failed or whose entity is gone, and
+// a close held on it would hold the task for good.
+func awaitingPersonSQL(orgExpr, taskExpr string) string {
+	return `EXISTS (
+		SELECT 1 FROM deliverables art
+		  JOIN conversations c ON c.org_id = art.org_id AND c.id = art.conversation_id
+		 WHERE c.org_id = ` + orgExpr + ` AND c.task_id = ` + taskExpr + `
+		   AND (` + pgUnresolvedDeliverableSQL + `)
+		   AND EXISTS (
+		       SELECT 1 FROM entities e
+		        WHERE e.org_id = art.org_id AND e.id = art.entity_id AND e.state = 'active'))`
+}
+
+func (s *taskStore) ApplyHeldCloseSystem(ctx context.Context, orgID, taskID, heldEventID, closeReason, closeEventType string) (db.TaskCloseOutcome, error) {
 	var out db.TaskCloseOutcome
 	err := inTx(ctx, s.admin, func(q queryer) error {
-		st, ok, err := readEventClose(ctx, q, orgID, taskID, spareAwaitingPerson)
-		if err != nil {
-			return err
-		}
-		if !ok || st.held.String != heldEventID {
-			return nil
-		}
-		if len(st.working) > 0 {
-			out = db.TaskCloseOutcome{Held: true, WorkingConversationIDs: st.working}
-			return nil
-		}
-		out = db.TaskCloseOutcome{AwaitingPerson: st.awaitingPerson}
-		if !st.awaitingPerson {
-			closed, conversationIDs, err := closeTaskWithCancelIntent(ctx, q, orgID, taskID, closeReason, closeEventType, heldEventID)
-			if err != nil {
-				return err
-			}
-			out = db.TaskCloseOutcome{Closed: closed, ActiveConversationIDs: conversationIDs}
-		}
-		if _, err := q.ExecContext(ctx, `
-			UPDATE tasks SET close_deferred_event_id = NULL WHERE org_id = $1 AND id = $2
-		`, orgID, taskID); err != nil {
-			return fmt.Errorf("clear hold: %w", err)
-		}
-		return nil
+		var err error
+		out, err = closeOrHoldTask(ctx, q, orgID, taskID, closeReason, closeEventType, heldEventID, true)
+		return err
 	})
 	if err != nil {
 		return db.TaskCloseOutcome{}, err
@@ -1195,6 +1207,11 @@ func (s *taskStore) ListActiveCloseDeferralsSystem(ctx context.Context) ([]domai
 		 WHERE close_deferred_event_id IS NOT NULL
 		   AND status NOT IN ('done', 'dismissed')
 		   AND EXISTS (SELECT 1 FROM orgs o WHERE o.id = tasks.org_id AND o.deleted_at IS NULL)
+		   AND NOT EXISTS (
+		       SELECT 1 FROM conversations r
+		        WHERE r.org_id = tasks.org_id AND r.task_id = tasks.id
+		          AND `+workingConversationSQL+`)
+		   AND NOT `+awaitingPersonSQL("tasks.org_id", "tasks.id")+`
 		 ORDER BY org_id, id
 	`)
 	if err != nil {
@@ -1213,19 +1230,31 @@ func (s *taskStore) ListActiveCloseDeferralsSystem(ctx context.Context) ([]domai
 }
 
 func (s *taskStore) ClearCloseDeferralSystem(ctx context.Context, orgID, taskID, eventID string) (bool, error) {
-	res, err := s.admin.ExecContext(ctx, `
-		UPDATE tasks
-		   SET close_deferred_event_id = NULL
-		 WHERE org_id = $1 AND id = $2 AND close_deferred_event_id = $3
-	`, orgID, taskID, eventID)
+	var cleared bool
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		res, err := q.ExecContext(ctx, `
+			UPDATE tasks
+			   SET close_deferred_event_id = NULL
+			 WHERE org_id = $1 AND id = $2 AND close_deferred_event_id = $3
+		`, orgID, taskID, eventID)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil || n == 0 {
+			return err
+		}
+		cleared = true
+		if _, err := q.ExecContext(ctx, withdrawProducerNotesForTaskSQL, orgID, taskID,
+			domain.StagedInjectionSubtypes, domain.StagedInjectionProducerTaskClosing); err != nil {
+			return fmt.Errorf("withdraw close notes: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
 		return false, err
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	return n > 0, nil
+	return cleared, nil
 }
 
 func (s *taskStore) SetStatus(ctx context.Context, orgID, taskID, status string) (domain.Task, error) {
