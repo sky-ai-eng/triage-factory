@@ -646,6 +646,35 @@ func TestCloseDeferralSweep_CompletedRunsTerminatingCloseWaitsOnDeliverables(t *
 	}
 }
 
+// TestCloseDeferralSweep_ReplacedCompletedRunsCloseIsDropped pins the
+// hand-over: the completed run's held terminating close waits on a
+// deliverable, the task is delegated again, and the person then resolves the
+// deliverable while the new run works. The held close was the old run's, so
+// it is dropped: the task stays open and the new run is not stopped.
+func TestCloseDeferralSweep_ReplacedCompletedRunsCloseIsDropped(t *testing.T) {
+	f := newDeferredMergeFixture(t, "owner/repo#merged-then-replaced")
+	concludeRun(t, f.database, f.runID, f.convID)
+	replacement, _ := seedRunOnTask(t, f.database, f.taskID, "running", "")
+	if _, err := f.database.Exec(`UPDATE blueprint_runs SET started_at = datetime('now', '+1 minute') WHERE id = ?`, replacement); err != nil {
+		t.Fatalf("start the replacement after the completed run: %v", err)
+	}
+
+	f.r.sweepCloseDeferrals(t.Context())
+
+	if status, _, _ := taskRow(t, f.database, f.taskID); status == "done" {
+		t.Error("the completed run's held close closed the task its replacement is working")
+	}
+	if eventID, _ := taskDeferral(t, f.database, f.taskID); eventID != "" {
+		t.Errorf("deferral = %q after a newer run took the task, want it dropped", eventID)
+	}
+	if got := f.sp.stoppedIDs(); len(got) != 0 {
+		t.Errorf("stopped conversations = %v, want none", got)
+	}
+	if got := f.sp.tornDownCopy(); len(got) != 0 {
+		t.Errorf("teardowns = %v, want none", got)
+	}
+}
+
 // TestCloseDeferralSweep_ReopenedEntityClearsWithoutClosing pins the
 // terminating re-check: the run merged and the pull request was reopened
 // since, so when the run fails its task is live work again and the held

@@ -37,7 +37,7 @@ type ArtifactFactory func(t *testing.T) ArtifactFixture
 // the rows that never form one (TF's own, a person's with no conversation, a
 // refusal, a catch-all, a kind with no identifying column); the display rule,
 // which follows the entity across a rename for the kinds that are or live on
-// one; the per-kind counts and the existence check; the ledger's newest row
+// one; the per-kind counts and the existence check; the ledger's row count
 // per conversation; the read grouped across conversations; the action list's
 // object and refusal filters, which read the same identity and, for an
 // object, the same rows; paging totals that count groups; the team and org
@@ -426,11 +426,14 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 		}
 	})
 
-	t.Run("The_ledgers_latest_row_per_conversation_counts_every_row", func(t *testing.T) {
+	t.Run("The_ledgers_row_count_per_conversation_counts_every_row", func(t *testing.T) {
 		s := setup(t)
 		one, two, none := s.f.NewConversation(t), s.f.NewConversation(t), s.f.NewConversation(t)
-		record(t, s, one, branch(s, domain.ActionBranchPushed, "octo/api", ""), at(1))
-		// A refusal and TF's own row form no artifact, and still move it.
+		push := branch(s, domain.ActionBranchPushed, "octo/api", "")
+		record(t, s, one, push, at(1))
+		// A second row at the same instant, a refusal, and TF's own row form
+		// no new artifact, and each still counts.
+		record(t, s, one, push, at(1))
 		record(t, s, one, domain.ExternalAction{
 			Provider: domain.ProviderGitHub, Scope: TestGitHubHost, Action: domain.ActionGitDenied, Target: "octo/api",
 		}, at(4))
@@ -438,15 +441,15 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 		closed.PerformedBy = domain.PerformedBySystem
 		record(t, s, two, closed, at(7))
 
-		latest, err := s.f.Stores.ExternalActions.LatestByConversations(ctx, s.f.OrgID, []string{one, two, none})
+		counts, err := s.f.Stores.ExternalActions.CountByConversations(ctx, s.f.OrgID, []string{one, two, none})
 		if err != nil {
-			t.Fatalf("LatestByConversations: %v", err)
+			t.Fatalf("CountByConversations: %v", err)
 		}
-		if len(latest) != 2 || !latest[one].Equal(at(4)) || !latest[two].Equal(at(7)) {
-			t.Errorf("LatestByConversations = %v, want %s at %v and %s at %v", latest, one, at(4), two, at(7))
+		if len(counts) != 2 || counts[one] != 3 || counts[two] != 1 {
+			t.Errorf("CountByConversations = %v, want %s: 3 and %s: 1", counts, one, two)
 		}
-		if empty, err := s.f.Stores.ExternalActions.LatestByConversations(ctx, s.f.OrgID, nil); err != nil || len(empty) != 0 {
-			t.Errorf("LatestByConversations(nil) = (%v, %v), want an empty map", empty, err)
+		if empty, err := s.f.Stores.ExternalActions.CountByConversations(ctx, s.f.OrgID, nil); err != nil || len(empty) != 0 {
+			t.Errorf("CountByConversations(nil) = (%v, %v), want an empty map", empty, err)
 		}
 	})
 

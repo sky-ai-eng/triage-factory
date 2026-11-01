@@ -186,18 +186,12 @@ describe('RunArtifacts', () => {
   it('refetches when the run acts again on an object it already changed', async () => {
     const fetchMock = stubReads({ artifacts: [artifact({})] })
     const { rerender } = render(
-      <RunArtifacts
-        conversation={conversation({ artifact_count: 1, last_action_at: '2026-10-31T00:00:00Z' })}
-      />,
+      <RunArtifacts conversation={conversation({ artifact_count: 1, action_count: 1 })} />,
     )
     await screen.findByRole('link', { name: 'org/repo:fix-ci' })
     const before = fetchMock.mock.calls.length
 
-    rerender(
-      <RunArtifacts
-        conversation={conversation({ artifact_count: 1, last_action_at: '2026-10-31T00:00:09Z' })}
-      />,
-    )
+    rerender(<RunArtifacts conversation={conversation({ artifact_count: 1, action_count: 2 })} />)
     await waitFor(() => expect(fetchMock.mock.calls.length).toBe(before + 3))
   })
 

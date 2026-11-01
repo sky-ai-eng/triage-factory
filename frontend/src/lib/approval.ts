@@ -19,7 +19,7 @@ export interface ApprovalCounts {
 // a live conversation acting on an object, new or already listed, or being
 // refused, a resolve landing from another surface or tab — without polling.
 export function artifactSetKey(conversation: Conversation): string {
-  return `${conversation.artifact_count ?? 0}:${conversation.last_action_at ?? ''}:${(conversation.pending_deliverable_ids ?? []).join(',')}`
+  return `${conversation.artifact_count ?? 0}:${conversation.action_count ?? 0}:${(conversation.pending_deliverable_ids ?? []).join(',')}`
 }
 
 // approvalCounts reads the conversation projection's per-kind unresolved counts. Absent

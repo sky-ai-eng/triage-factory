@@ -255,24 +255,23 @@ func (s *externalActionStore) PresentPostedCommentKeysSystem(ctx context.Context
 	return present, rows.Err()
 }
 
-// LatestByConversations is the Postgres impl's grouped MAX (see the
+// CountByConversations is the Postgres impl's grouped COUNT (see the
 // interface). The ids bind as one JSON array read through json_each, so the
-// set needs no chunking against SQLite's variable limit, and MAX returns
-// untyped text, so it is parsed.
-func (s *externalActionStore) LatestByConversations(ctx context.Context, orgID string, conversationIDs []string) (map[string]time.Time, error) {
+// set needs no chunking against SQLite's variable limit.
+func (s *externalActionStore) CountByConversations(ctx context.Context, orgID string, conversationIDs []string) (map[string]int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	latest := make(map[string]time.Time, len(conversationIDs))
+	counts := make(map[string]int, len(conversationIDs))
 	if len(conversationIDs) == 0 {
-		return latest, nil
+		return counts, nil
 	}
 	ids, err := json.Marshal(conversationIDs)
 	if err != nil {
 		return nil, fmt.Errorf("encode conversation ids: %w", err)
 	}
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT conversation_id, MAX(occurred_at)
+		SELECT conversation_id, COUNT(*)
 		  FROM external_actions
 		 WHERE org_id = ? AND conversation_id IN (SELECT value FROM json_each(?))
 		 GROUP BY conversation_id
@@ -282,17 +281,14 @@ func (s *externalActionStore) LatestByConversations(ctx context.Context, orgID s
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var conversationID, at string
-		if err := rows.Scan(&conversationID, &at); err != nil {
+		var conversationID string
+		var n int
+		if err := rows.Scan(&conversationID, &n); err != nil {
 			return nil, err
 		}
-		parsed, err := parseDBDatetime(at)
-		if err != nil {
-			return nil, fmt.Errorf("parse occurred_at %q of conversation %s: %w", at, conversationID, err)
-		}
-		latest[conversationID] = parsed
+		counts[conversationID] = n
 	}
-	return latest, rows.Err()
+	return counts, rows.Err()
 }
 
 // ListAgentActionsForBlueprintRunSystem is the close phase's read of a run's

@@ -363,7 +363,10 @@ func (r *Router) settleCloseDeferral(ctx context.Context, d domain.TaskCloseDefe
 // any deliverable is unresolved, because the task stays open on a closed
 // entity and the deferral is what says why: a Jira issue the run moved to
 // done leaves the run's draft PR, a different entity, waiting for approval.
-// Once nothing is unresolved, the terminating close applies.
+// Once nothing is unresolved, the terminating close applies. A task that has
+// moved past the run in the meantime, to a newer blueprint run, is that
+// run's: the deferral is dropped, so the held close never stops the work
+// that replaced the run it was held for.
 func (r *Router) applyCloseDeferral(ctx context.Context, d domain.TaskCloseDeferral, runCompleted bool) (closed bool, err error) {
 	evt, err := r.events.GetSystem(ctx, d.OrgID, d.EventID)
 	if err != nil {
@@ -374,6 +377,13 @@ func (r *Router) applyCloseDeferral(ctx context.Context, d domain.TaskCloseDefer
 	}
 	if runCompleted {
 		if terminatingRelationFor(evt.EventType) == nil {
+			return false, r.clearCloseDeferral(ctx, d)
+		}
+		newest, err := r.blueprints.IsNewestRunForTaskSystem(ctx, d.OrgID, d.TaskID, d.BlueprintRunID)
+		if err != nil {
+			return false, fmt.Errorf("read the task's newest blueprint run: %w", err)
+		}
+		if !newest {
 			return false, r.clearCloseDeferral(ctx, d)
 		}
 		if r.spawner.TaskHasUnresolvedDeliverablesSystem(ctx, d.OrgID, d.TaskID) {

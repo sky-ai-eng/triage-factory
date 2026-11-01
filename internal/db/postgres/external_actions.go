@@ -240,17 +240,17 @@ func (s *externalActionStore) PresentPostedCommentKeysSystem(ctx context.Context
 	return present, rows.Err()
 }
 
-// LatestByConversations reads each conversation's newest occurred_at (see the
-// interface) with one grouped MAX, which the (org_id, conversation_id,
-// occurred_at) index answers. The ids go through pgUUIDArray, as the artifact
-// store's batch reads do.
-func (s *externalActionStore) LatestByConversations(ctx context.Context, orgID string, conversationIDs []string) (map[string]time.Time, error) {
-	latest := make(map[string]time.Time, len(conversationIDs))
+// CountByConversations counts each conversation's rows (see the interface)
+// with one grouped COUNT, which the (org_id, conversation_id, occurred_at)
+// index answers. The ids go through pgUUIDArray, as the artifact store's
+// batch reads do.
+func (s *externalActionStore) CountByConversations(ctx context.Context, orgID string, conversationIDs []string) (map[string]int, error) {
+	counts := make(map[string]int, len(conversationIDs))
 	if len(conversationIDs) == 0 {
-		return latest, nil
+		return counts, nil
 	}
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT conversation_id::text, MAX(occurred_at)
+		SELECT conversation_id::text, COUNT(*)
 		  FROM external_actions
 		 WHERE org_id = $1 AND conversation_id = ANY($2)
 		 GROUP BY conversation_id
@@ -261,13 +261,13 @@ func (s *externalActionStore) LatestByConversations(ctx context.Context, orgID s
 	defer rows.Close()
 	for rows.Next() {
 		var conversationID string
-		var at time.Time
-		if err := rows.Scan(&conversationID, &at); err != nil {
+		var n int
+		if err := rows.Scan(&conversationID, &n); err != nil {
 			return nil, err
 		}
-		latest[conversationID] = at
+		counts[conversationID] = n
 	}
-	return latest, rows.Err()
+	return counts, rows.Err()
 }
 
 // ListAgentActionsForBlueprintRunSystem is the close phase's read of a run's
