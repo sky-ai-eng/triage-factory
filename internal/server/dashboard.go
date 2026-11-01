@@ -123,7 +123,7 @@ func (dh *dashboardHandler) handleDashboardStats(w http.ResponseWriter, r *http.
 //
 // "Mine" is a union of two legs: pull requests my GitHub login authored, and
 // pull requests a run I commissioned opened under the bot's login
-// (entities.commissioned_by_user_id, stamped at the exec recording funnel).
+// (entities.commissioned_by_user_id, stamped by the deliverable reconciler).
 // The second leg is why an unbound GitHub identity no longer short-circuits
 // the read: a person who has never bound a login can still have asked for work
 // that produced pull requests, and hiding those behind an unrelated missing

@@ -317,7 +317,16 @@ func (m *Manager) sealSources(ctx context.Context, orgID string, claim db.Awaiti
 		return nil, fmt.Errorf("credprovision: resolve github credentials for conversation %s: %w", conversationID, err)
 	}
 	bundle.GitHub = gh
-	manifest[eventsource.KindGitHub] = githubEntry(gh)
+	ghEntry := githubEntry(gh)
+	if gh != nil && gh.Mode == credbundle.GitHubModeApp {
+		// The account the sealed tokens act as, which authors every pull
+		// request the run opens. Recorded per seal, so a run's pull requests
+		// are checked against the App it held rather than whichever the org
+		// holds when the reconciler reads them. A seal that cannot learn a
+		// real id records none, and nothing is attributed through it.
+		ghEntry.AccountID, _ = ghclient.AppAccount(ctx, m.ghResolver, orgID)
+	}
+	manifest[eventsource.KindGitHub] = ghEntry
 
 	// A source turned off after the availability read above is refused by its
 	// resolver's own gate, and recorded as what it now is.

@@ -1003,6 +1003,23 @@ func (s *conversationQueueStore) ClaimByIDSystem(ctx context.Context, claimID st
 	return &out[0], nil
 }
 
+func (s *conversationQueueStore) ClaimsForConversationSystem(ctx context.Context, orgID, conversationID string) ([]domain.ExecutorClaim, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	// rowid breaks a claimed_at tie: the column's default has whole-second
+	// resolution, so two engagements can share one.
+	rows, err := s.conn.QueryContext(ctx, executorClaimCols+`
+		WHERE c.conversation_id = ?
+		ORDER BY c.claimed_at, c.rowid
+	`, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanSqliteExecutorClaims(rows)
+}
+
 func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease time.Duration, activity db.ClaimActivity) (db.ClaimRenewal, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return db.ClaimRenewal{}, err

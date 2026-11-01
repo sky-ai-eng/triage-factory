@@ -31,6 +31,34 @@ groups:
             {{ $labels.stage }} stage. The WARN or ERROR line logged with each
             drop names the target. The write itself is not undone.
 
+      # A run's record named a pull request that GitHub says the run did not
+      # open: its author is not the GitHub account sealed into the run, or no
+      # engagement of the run was live when it was opened. A working sidecar
+      # never records one, so critical at the first sample, as for an
+      # oversized sidecar frame: the sidecar holds one run's credentials.
+      - alert: ForeignPullRequestRecorded
+        expr: |
+          sum by (org_id) (increase(tf_deliverables_foreign_pull_requests_total[1h])) > 0
+          or
+          sum by (org_id) (
+            tf_deliverables_foreign_pull_requests_total
+            unless last_over_time(tf_deliverables_foreign_pull_requests_total[1h] offset 1h)
+          ) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "A run in org {{ $labels.org_id }} recorded a pull request it did not open"
+          description: >-
+            In the last hour, a run's record named a pull request whose GitHub
+            author is not the account Triage Factory sealed into that run. A
+            working run's sidecar never records one, so treat that run's
+            sidecar as compromised. Triage Factory deleted the deliverable, or
+            did not record it, and attributed nothing to the run; the run's
+            audit record of the create is kept. Its ERROR line, "deleted a pull
+            request deliverable its run did not open" or "a pr_created row
+            names a pull request its run did not open", names the conversation
+            and the pull request.
+
       # Closing an entity closes its open tasks in the same transaction, and
       # a task mint refuses a closed entity in its own, so a task open on a
       # closed entity means one of those guards was bypassed. The

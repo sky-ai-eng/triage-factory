@@ -847,7 +847,8 @@ type EntityStore interface {
 
 	// OwningTeamForEntitySystem resolves an entity's *structural* owning
 	// team for author-centric task routing: entities.owning_team_id, an
-	// explicit override set by the transfer op / the TF-origin PR stamp.
+	// explicit override set by the transfer op / the TF-origin PR stamp the
+	// deliverable reconciler writes.
 	//
 	// Returns "" when it is unset so the router falls through to its
 	// prior-task and author-identity tiers. Admin-pool (BYPASSRLS): the
@@ -860,21 +861,18 @@ type EntityStore interface {
 	// Returns stamped=false (no error) when the row already carries an owner,
 	// when teamID is empty, and when no such entity exists.
 	//
-	// Stamp-if-NULL is the whole contract, and it is what lets two unordered
-	// writers converge on one answer. A PR the bot opens has no TF author to
-	// resolve, so the commissioning team is recorded from the conversation
-	// that opened it; that write races the poller, which mints the same entity by natural
-	// key whenever it next sees the PR. Either order lands the same owner —
-	// the conversation's write back-fills a row the poller already created, or
-	// it creates the row the poller later enriches — and neither can overwrite an
-	// owner some *other* writer chose, because the only value this can replace
-	// is NULL. An explicit owner (an operator's transfer) is therefore
-	// permanent as far as this path is concerned, and re-delivery of the same
-	// PR-open write is a no-op rather than a second opinion.
+	// Stamp-if-NULL is the whole contract. A PR the bot opens has no TF author
+	// to resolve, so the commissioning team is recorded from the conversation
+	// that opened it, once the deliverable reconciler has GitHub's word that
+	// the run opened it. That write can never overwrite an owner some *other*
+	// writer chose, because the only value it can replace is NULL. An explicit
+	// owner (an operator's transfer) is therefore permanent as far as this
+	// path is concerned, and a later pass over the same pull request is a
+	// no-op rather than a second opinion.
 	//
-	// Admin-pool (BYPASSRLS): the caller is the exec recording funnel, which
-	// runs on an executor with no JWT claims. There is no app-pool variant
-	// because ownership is never stamped from a request. Postgres keeps org_id
+	// Admin-pool (BYPASSRLS): the caller is the deliverable reconciler, a
+	// background job with no JWT claims. There is no app-pool variant because
+	// ownership is never stamped from a request. Postgres keeps org_id
 	// in the WHERE clause as defense in depth, since BYPASSRLS means nothing
 	// else is scoping the statement; SQLite scopes at the assertLocalOrg gate
 	// like every other method in that store, where a WHERE predicate would
@@ -890,12 +888,11 @@ type EntityStore interface {
 	//
 	// It is provenance, not ownership, and the two columns answer to different
 	// readers: routing reads the owning team, the personal pull-request list
-	// reads this. They are written side by side because the funnel is the one
-	// place both values are in hand, not because either implies the other.
+	// reads this. They are written side by side because the reconciler
+	// attributes both at once, not because either implies the other.
 	//
-	// Admin-pool, and stamp-if-NULL for the same convergence reason as its
-	// neighbour: the funnel races the poller's mint of the same entity, first
-	// commit wins, and re-delivery of the same PR-open write is a no-op.
+	// Admin-pool, and stamp-if-NULL for the same reason as its neighbour: a
+	// later pass over the same pull request is a no-op.
 	StampCommissionedByIfUnsetSystem(ctx context.Context, orgID, entityID, userID string) (stamped bool, err error)
 }
 

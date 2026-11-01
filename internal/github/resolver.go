@@ -188,6 +188,28 @@ func OrgIdentityAccount(ctx context.Context, resolver Resolver, orgID string) (O
 	return OrgIdentity{Name: name, Email: email}, ok
 }
 
+// AppAccountResolver is the optional extension of Resolver, implemented by
+// the production resolver, that reports the GitHub account the org's App
+// credential acts as: GitHub's numeric id for the bot user of the App the
+// org's tokens are minted from (the same App-XOR-PAT gate ClientFor and
+// TokenFor resolve through), in text. ok is false when the org's credential
+// is not an App, when its bot user id is not stored, and when the resolution
+// fails. Unlike OrgIdentityAccountResolver it never answers with a commit
+// signer's or a PAT owner's account, either of which is a person's.
+type AppAccountResolver interface {
+	AppAccountFor(ctx context.Context, orgID string) (accountID string, ok bool)
+}
+
+// AppAccount is the org's App bot account id through AppAccountResolver, and
+// ok=false when resolver does not implement it.
+func AppAccount(ctx context.Context, resolver Resolver, orgID string) (string, bool) {
+	ar, ok := resolver.(AppAccountResolver)
+	if !ok {
+		return "", false
+	}
+	return ar.AppAccountFor(ctx, orgID)
+}
+
 // AccountClientResolver is the optional extension of Resolver, implemented by
 // the production resolver, for a caller that knows the account it acts on by
 // GitHub's numeric account id as well as by login: one holding a repository's
@@ -1185,6 +1207,24 @@ func (r *resolver) BaseURLFor(ctx context.Context, orgID string) (string, error)
 func (r *resolver) OrgIdentityFor(ctx context.Context, orgID string) (name, email string, ok bool) {
 	id, ok := r.OrgIdentityAccountFor(ctx, orgID)
 	return id.Name, id.Email, ok
+}
+
+// AppAccountFor is the bot user id of the App activeApp resolves for the org,
+// which every installation token it mints acts as. See AppAccountResolver.
+func (r *resolver) AppAccountFor(ctx context.Context, orgID string) (string, bool) {
+	class, host, err := r.credentialClassFor(ctx, orgID)
+	if err != nil || !class.Known() {
+		return "", false
+	}
+	app, err := r.activeApp(ctx, orgID, class, host)
+	if err != nil || !app.present() {
+		return "", false
+	}
+	id := app.botUserID()
+	if id == 0 {
+		return "", false
+	}
+	return strconv.FormatInt(id, 10), true
 }
 
 // OrgIdentityAccountFor is OrgIdentityFor with the account id of the identity

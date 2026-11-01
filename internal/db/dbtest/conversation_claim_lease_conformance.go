@@ -305,6 +305,49 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 		}
 	})
 
+	t.Run("ClaimsForConversationSystem_ListsEveryEngagementOfOneConversation", func(t *testing.T) {
+		// Every engagement of the conversation, the released one and the live
+		// one, oldest first, and none of another conversation's.
+		f := mk(t)
+		conversationID, _ := f.StageStep(t)
+		first := claim(t, f, conversationID)
+		q := f.Stores.ConversationQueue
+		f.SetLease(t, first.ClaimID, -time.Minute)
+		if released, err := q.ReleaseExpiredClaimSystem(ctx, f.OrgID, conversationID, first.ClaimID); err != nil || !released {
+			t.Fatalf("ReleaseExpiredClaimSystem = (%v, %v), want (true, nil)", released, err)
+		}
+		second := claim(t, f, conversationID)
+		otherID, _ := f.StageStep(t)
+		other := claim(t, f, otherID)
+
+		got, err := q.ClaimsForConversationSystem(ctx, f.OrgID, conversationID)
+		if err != nil {
+			t.Fatalf("ClaimsForConversationSystem: %v", err)
+		}
+		if len(got) != 2 || got[0].ID != first.ClaimID || got[1].ID != second.ClaimID {
+			t.Fatalf("ClaimsForConversationSystem = %+v, want [%s %s]", got, first.ClaimID, second.ClaimID)
+		}
+		if got[0].ReleasedAt == nil || got[1].ReleasedAt != nil {
+			t.Errorf("released_at = (%v, %v), want the first released and the second live", got[0].ReleasedAt, got[1].ReleasedAt)
+		}
+		for _, c := range got {
+			if c.OrgID != f.OrgID || c.ConversationID != conversationID || c.ExecutorID != claimLeaseExecutor {
+				t.Errorf("claim %s = (org %s, conversation %s, executor %s), want (%s, %s, %s)",
+					c.ID, c.OrgID, c.ConversationID, c.ExecutorID, f.OrgID, conversationID, claimLeaseExecutor)
+			}
+			if c.Sources != nil {
+				t.Errorf("claim %s sources = %+v, want none for an engagement never sealed", c.ID, c.Sources)
+			}
+		}
+
+		if got, err := q.ClaimsForConversationSystem(ctx, f.OrgID, otherID); err != nil || len(got) != 1 || got[0].ID != other.ClaimID {
+			t.Errorf("the other conversation's claims = (%+v, %v), want [%s]", got, err, other.ClaimID)
+		}
+		if got, err := q.ClaimsForConversationSystem(ctx, f.OrgID, "00000000-0000-0000-0000-00000000c1a1"); err != nil || len(got) != 0 {
+			t.Errorf("an unknown conversation's claims = (%+v, %v), want none", got, err)
+		}
+	})
+
 	t.Run("Renew_StampsActivityFromTheIdleItIsPassed", func(t *testing.T) {
 		// The mint leaves both columns NULL; the renewal stamps
 		// last_activity_at as database now minus the idle it is handed, and

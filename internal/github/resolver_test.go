@@ -1085,6 +1085,52 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 	})
 }
 
+// TestResolver_AppAccountFor pins whose account the App credential reports:
+// the bot user of the App the org mints from, and nothing for an org whose
+// tokens come from anything else, however its commit identity resolves.
+func TestResolver_AppAccountFor(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		apps   *fakeApps
+		agents *fakeAgents
+		want   string
+		wantOK bool
+	}{
+		{
+			name:   "active App reports its bot user",
+			apps:   &fakeApps{app: &domain.OrgGitHubApp{OrgID: "org-1", Active: true, Slug: "acme-bot", BotUserID: 41898282}},
+			agents: &fakeAgents{},
+			want:   "41898282", wantOK: true,
+		},
+		{
+			name:   "active App with no stored bot user reports none",
+			apps:   &fakeApps{app: &domain.OrgGitHubApp{OrgID: "org-1", Active: true, Slug: "acme-bot"}},
+			agents: &fakeAgents{},
+		},
+		{
+			name:   "staged App mints nothing, so reports none",
+			apps:   &fakeApps{app: &domain.OrgGitHubApp{OrgID: "org-1", Active: false, Slug: "acme-bot", BotUserID: 41898282}},
+			agents: &fakeAgents{agent: &domain.Agent{GitHubOrgLogin: "octocat", GitHubOrgUserID: "583231", GitHubOrgEmail: "octocat@example.com"}},
+		},
+		{
+			name:   "PAT owner is a person, not reported",
+			apps:   &fakeApps{app: nil},
+			agents: &fakeAgents{agent: &domain.Agent{GitHubOrgLogin: "octocat", GitHubOrgUserID: "583231", GitHubOrgEmail: "octocat@example.com"}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A live PAT beside every App, so the PAT tier is there to resolve
+			// and only the App's own answer is reported.
+			secrets := &fakeSecrets{vals: map[string]string{integrations.KeyGitHubPAT: "ghp_test"}}
+			r := newTestResolver(secrets, tc.apps, &fakeOrgs{base: "https://github.com"}, tc.agents, nil)
+			got, ok := AppAccount(context.Background(), r, "org-1")
+			if got != tc.want || ok != tc.wantOK {
+				t.Errorf("AppAccount = (%q, %v), want (%q, %v)", got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
+
 // TestResolver_TokenForRepoScoped_AppXorPAT pins the scoped path's App-XOR-PAT
 // contract: an active App is the credential (scoped mint or error, never the
 // PAT, even when one is present); only a no-App org uses the PAT (unscoped).

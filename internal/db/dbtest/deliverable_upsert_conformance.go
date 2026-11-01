@@ -106,6 +106,37 @@ func RunDeliverableUpsertConformance(t *testing.T, mk ExternalObjectScopeFactory
 		})
 	}
 
+	// A delete removes the row it names and nothing else, and an id naming no
+	// row removes nothing.
+	t.Run("DeleteSystem_removes_only_the_row_it_names", func(t *testing.T) {
+		s, orgID, teamID := mk(t)
+		seed := func(number int, nodeID string) domain.Deliverable {
+			a := domain.NewPullRequestDeliverable("octo/api", number, nodeID, "feat", "main", "", "Title", "Body", true)
+			a.TeamID, a.Scope = teamID, TestGitHubHost
+			row, err := s.Deliverables.UpsertSystem(ctx, orgID, a)
+			if err != nil {
+				t.Fatalf("seed deliverable %s: %v", nodeID, err)
+			}
+			return row
+		}
+		gone, kept := seed(7, "PR_kw7"), seed(8, "PR_kw8")
+		if removed, err := s.Deliverables.DeleteSystem(ctx, orgID, gone.ID); err != nil || !removed {
+			t.Fatalf("DeleteSystem = (%v, %v), want (true, nil)", removed, err)
+		}
+		if again, err := s.Deliverables.DeleteSystem(ctx, orgID, gone.ID); err != nil || again {
+			t.Errorf("a second DeleteSystem = (%v, %v), want (false, nil)", again, err)
+		}
+		if removed, err := s.Deliverables.DeleteSystem(ctx, orgID, "not-a-deliverable-id"); err != nil || removed {
+			t.Errorf("DeleteSystem of an unknown id = (%v, %v), want (false, nil)", removed, err)
+		}
+		if got, err := s.Deliverables.Get(ctx, orgID, gone.ID); err != nil || got != nil {
+			t.Errorf("Get after the delete = (%+v, %v), want no row", got, err)
+		}
+		if got, err := s.Deliverables.Get(ctx, orgID, kept.ID); err != nil || got == nil {
+			t.Errorf("the other row after the delete = (%+v, %v), want it kept", got, err)
+		}
+	})
+
 	for _, door := range []struct {
 		name   string
 		upsert func(s db.DeliverableStore, orgID string, a domain.Deliverable) (domain.Deliverable, error)

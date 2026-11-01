@@ -91,7 +91,7 @@ func TestSourceManifest_At(t *testing.T) {
 func TestSourceManifest_WireShape(t *testing.T) {
 	exp := time.Date(2026, 10, 11, 13, 0, 0, 0, time.UTC)
 	m := SourceManifest{
-		"github": {State: SourceSealed},
+		"github": {State: SourceSealed, AccountID: "41898282"},
 		"linear": {State: SourceSealed, ExpiresAt: &exp},
 		"jira":   {State: SourceUnresolved, Reason: SourceReasonResolveFailed},
 	}
@@ -99,7 +99,7 @@ func TestSourceManifest_WireShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"github":{"state":"sealed"},"jira":{"state":"unresolved","reason":"resolve_failed"},"linear":{"state":"sealed","expires_at":"2026-10-11T13:00:00Z"}}`
+	want := `{"github":{"state":"sealed","account_id":"41898282"},"jira":{"state":"unresolved","reason":"resolve_failed"},"linear":{"state":"sealed","expires_at":"2026-10-11T13:00:00Z"}}`
 	if string(b) != want {
 		t.Errorf("marshal = %s\nwant      %s", b, want)
 	}

@@ -41,17 +41,24 @@ type clientResolver interface {
 // non-terminal deliverables. Writes route through the admin pool (UpsertSystem) —
 // the reconciler has no JWT-claims context in either tier.
 //
+// It is also where a run's pull request is attributed to the run: the
+// reconciler holds GitHub's copy of every pull request it reconciles, which
+// is what its Authorship checks the run's record against (attribute).
+//
 // The resolver's clients reach the org's current GitHub host and no other, so
 // only deliverables recorded on that host (their scope) are reconciled. Another
 // host's pull request is not where those clients look.
 type Reconciler struct {
-	resolver     clientResolver
-	deliverables db.DeliverableStore
-	actions      db.ExternalActionStore // read for the pr_created rows the backstop works from
-	entities     db.EntityStore         // read for the pull request entity a deliverable is about
-	repos        db.RepositoryStore     // read for the registry row a deliverable's pull request is in
-	orgs         db.OrgsStore           // read for the org's current GitHub host
-	ws           *websocket.Hub         // nil-safe: broadcasts are skipped when unset (tests)
+	resolver      clientResolver
+	deliverables  db.DeliverableStore
+	actions       db.ExternalActionStore    // read for the pr_created rows the backstop works from
+	entities      db.EntityStore            // read for the pull request entity a deliverable is about, and stamped
+	repos         db.RepositoryStore        // read for the registry row a deliverable's pull request is in
+	orgs          db.OrgsStore              // read for the org's current GitHub host
+	conversations db.ConversationStore      // read for the creator a run's pull request is stamped with
+	claims        db.ConversationQueueStore // read for the engagement live when a pull request was opened
+	authorship    Authorship
+	ws            *websocket.Hub // nil-safe: broadcasts are skipped when unset (tests)
 	// prResolved runs after a pull request's draft → open transition commits.
 	// nil skips it (tests, and the window before the spawner is wired).
 	prResolved PullRequestResolvedHook
@@ -65,10 +72,23 @@ type Reconciler struct {
 // approval nobody has left to give.
 type PullRequestResolvedHook func(ctx context.Context, orgID, conversationID string)
 
-// NewReconciler builds the shared reconciler. ws may be nil (broadcasts become
-// no-ops); the stores + resolver are required.
-func NewReconciler(resolver clientResolver, deliverables db.DeliverableStore, actions db.ExternalActionStore, entities db.EntityStore, repos db.RepositoryStore, orgs db.OrgsStore, ws *websocket.Hub) *Reconciler {
-	return &Reconciler{resolver: resolver, deliverables: deliverables, actions: actions, entities: entities, repos: repos, orgs: orgs, ws: ws}
+// NewReconciler builds the shared reconciler over stores, deciding who opened
+// a pull request by authorship: TrustRecords in local mode, SealedAuthor in
+// multi. ws may be nil (broadcasts become no-ops); the stores + resolver are
+// required.
+func NewReconciler(resolver clientResolver, stores db.Stores, authorship Authorship, ws *websocket.Hub) *Reconciler {
+	return &Reconciler{
+		resolver:      resolver,
+		deliverables:  stores.Deliverables,
+		actions:       stores.ExternalActions,
+		entities:      stores.Entities,
+		repos:         stores.Repos,
+		orgs:          stores.Orgs,
+		conversations: stores.Conversations,
+		claims:        stores.ConversationQueue,
+		authorship:    authorship,
+		ws:            ws,
+	}
 }
 
 // onCurrentHost returns the org's current GitHub host and the deliverables of
@@ -137,7 +157,8 @@ const prBackstopWindow = 7 * 24 * time.Hour
 // nothing to find; recovering that record is the recording path's job, and
 // once its row lands this pass handles it like any other.
 //
-// The ledger row decides both questions the pass answers. Whether TF opened
+// The ledger row decides both questions the pass answers, under SealedAuthor
+// only where GitHub's answer agrees (below). Whether TF opened
 // the pull request: one with no pr_created row was opened by someone else (a
 // person working from a branch a run pushed, for example) and gets no
 // deliverable, because a deliverable for it would hold its task open on an approval
@@ -160,11 +181,20 @@ const prBackstopWindow = 7 * 24 * time.Hour
 // repository with; its target is the current name. When every pull request
 // already has its deliverable, the pass makes no GitHub call.
 //
+// Under SealedAuthor the row is the sidecar's word, relayed like the
+// deliverable it stands in for, so it is taken only where GitHub's answer
+// agrees (judge): a pull request is recorded only when its author is the
+// account sealed into the engagement of the row's conversation that was live
+// when it was opened. One GitHub's answer shows the run did not open is
+// counted and never recorded, and one the answer cannot settle is left for a
+// later pass.
+//
 // The deliverable is recorded in the state the verb opened the pull request in,
-// and the reconcile that follows applies any transition since. The write is
-// insert-if-absent, so a pull request recorded after the read is left
-// untouched and repeating the pass changes nothing. Best-effort per owner and
-// per pull request: a credential or GitHub failure skips it this pass.
+// and the reconcile that follows applies any transition since and attributes
+// it. The write is insert-if-absent, so a pull request recorded after the read
+// is left untouched and repeating the pass changes nothing. Best-effort per
+// owner and per pull request: a credential or GitHub failure skips it this
+// pass.
 func (rc *Reconciler) BackfillPRDeliverables(ctx context.Context, orgID string) error {
 	host, err := db.OrgGitHubHostSystem(ctx, rc.orgs, orgID)
 	if err != nil {
@@ -191,6 +221,7 @@ func (rc *Reconciler) BackfillPRDeliverables(ctx context.Context, orgID string) 
 		addNodeID(nodeIDsByOwner, owner, act.NodeID)
 	}
 
+	reads := newAttributionReads(rc)
 	for _, owner := range sortedOwners(nodeIDsByOwner) {
 		client, err := rc.resolver.ClientFor(ctx, orgID, owner)
 		if err != nil {
@@ -213,7 +244,14 @@ func (rc *Reconciler) BackfillPRDeliverables(ctx context.Context, orgID string) 
 					"org", orgID, "target", act.Target, "node_id", nodeID)
 				continue
 			}
-			rc.recordBackfilledPR(ctx, orgID, host, act, snap)
+			switch v, reason := rc.judge(ctx, orgID, act.ConversationID, snap, reads); v {
+			case verdictRun:
+				rc.recordBackfilledPR(ctx, orgID, host, act, snap)
+			case verdictForeign:
+				countForeign(ctx, orgID, reason, foreignNotRecorded)
+				reconcileLog.ErrorContext(ctx, "backstop: a pr_created row names a pull request its run did not open; not recording it",
+					"org", orgID, "conversation", act.ConversationID, "target", act.Target, "node_id", nodeID, "reason", reason)
+			}
 		}
 	}
 	return nil
@@ -298,8 +336,10 @@ func (rc *Reconciler) recordBackfilledPR(ctx context.Context, orgID, host string
 // transition broadcasts over the WS hub (as
 // deliverable_updated on the owning conversation, so the conversation view's
 // deliverable-derived surface refreshes), and a draft pull request that stops
-// being unresolved runs the resolved hook. Returns the deliverables that
-// transitioned, carrying their new state.
+// being unresolved runs the resolved hook. A pull request whose entity has no
+// owner yet is attributed first (attribute), which may delete its deliverable
+// instead. Returns the deliverables that transitioned, carrying their new
+// state.
 //
 // Best-effort per deliverable: a single GitHub or write failure is logged and
 // skipped, never aborting the rest. GitHub work is grouped by repo OWNER —
@@ -367,9 +407,10 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 		}
 	}
 
-	// Pass 3 — apply each transition, then run the draft-resolved closure once
-	// per conversation whose draft pull request stopped being unresolved this
-	// cycle.
+	// Pass 3 — attribute each pull request whose entity has no owner yet,
+	// apply each transition, then run the draft-resolved closure once per
+	// conversation whose draft pull request stopped being unresolved this
+	// cycle. A deliverable attribution deletes is not transitioned.
 	//
 	// The write-back runs on a detached ctx (the fetches above stayed
 	// cancellable). A terminal deliverable drops out of BOTH tiers' non-terminal
@@ -383,7 +424,11 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 	writeCtx := context.WithoutCancel(ctx)
 	var transitioned []domain.Deliverable
 	resolvedConversations := map[string]bool{}
+	attribution := newAttributionReads(rc)
 	for _, a := range arts {
+		if snap, ok := snapshots[deliverablePRNodeID(a)]; ok && rc.attribute(writeCtx, orgID, a, snap, attribution) {
+			continue
+		}
 		newState, ok := nextState(a, snapshots)
 		if !ok || newState == a.State {
 			continue
@@ -451,14 +496,21 @@ func (rc *Reconciler) applyTransition(ctx context.Context, orgID string, a domai
 // refetch the conversation on this event without touching status. Skipped for a
 // detached deliverable (no conversation) or unset hub.
 func (rc *Reconciler) broadcast(orgID string, a domain.Deliverable) {
-	if rc.ws == nil || a.ConversationID == "" {
+	rc.publish(orgID, a.ConversationID, map[string]any{"deliverable_id": a.ID, "state": a.State})
+}
+
+// publish sends a deliverable_updated event carrying data on conversationID,
+// and the resource-wide ping beside it. A deleted deliverable is published
+// with no state, so the conversation view refetches and finds it gone.
+func (rc *Reconciler) publish(orgID, conversationID string, data map[string]any) {
+	if rc.ws == nil || conversationID == "" {
 		return
 	}
 	rc.ws.Broadcast(websocket.Event{
 		Type:           "deliverable_updated",
 		OrgID:          orgID,
-		ConversationID: a.ConversationID,
-		Data:           map[string]any{"deliverable_id": a.ID, "state": a.State},
+		ConversationID: conversationID,
+		Data:           data,
 	})
 	// And the resource-wide ping beside it, for the counters that follow a SET
 	// rather than one conversation. The event above is addressed to whoever is

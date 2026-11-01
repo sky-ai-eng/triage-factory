@@ -189,6 +189,36 @@ func TestProvision_ReSealMovesUnresolvedToSealed(t *testing.T) {
 	}
 }
 
+// TestProvision_GitHubEntryRecordsTheAppAccount pins whose account the GitHub
+// entry records: the bot user the App's tokens act as, which authors the run's
+// pull requests, never the commit identity's account, which for an org with a
+// commit signer is a person's. A seal that learns no bot user records none.
+func TestProvision_GitHubEntryRecordsTheAppAccount(t *testing.T) {
+	avail := eventsource.Availability{eventsource.NewSource(eventsource.KindGitHub, eventsource.StateAvailable)}
+	for _, tc := range []struct {
+		name, appAccount, want string
+	}{
+		{name: "bot user known", appAccount: "41898282", want: "41898282"},
+		{name: "bot user unknown", appAccount: "", want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newProvisionRig(t, avail, &installTokens{})
+			rig.m.ghResolver = &fakeScopedResolver{
+				hasCred: true, base: "https://github.com",
+				name: "Octo Cat", email: "octocat@example.com", accountID: "583231",
+				appAccountID: tc.appAccount,
+			}
+			bundle := rig.provision(t)
+			if got := bundle.Sources[eventsource.KindGitHub]; got.State != domain.SourceSealed || got.AccountID != tc.want {
+				t.Errorf("github = %+v, want sealed with account %q", got, tc.want)
+			}
+			if got := rig.claims.sources[eventsource.KindGitHub].AccountID; got != tc.want {
+				t.Errorf("claims-row github account = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // turnedOffJira is a Jira resolver whose gate refuses, as it does for an org
 // whose admin turned Jira off.
 type turnedOffJira struct{ jira.Resolver }

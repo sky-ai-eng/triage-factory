@@ -118,10 +118,10 @@ func (s *entityStore) OwningTeamForEntitySystem(ctx context.Context, orgID, enti
 
 // StampOwningTeamIfUnsetSystem fills owning_team_id only where it is still
 // NULL. The IS NULL predicate is the concurrency story as much as the semantic
-// one: it lives in the UPDATE rather than in a read-then-write, so an executor
-// recording a bot-opened PR and a control pod's poller minting the same entity
-// cannot lose each other's write — whichever commits first wins the row, and
-// RowsAffected tells the loser it lost.
+// one: it lives in the UPDATE rather than in a read-then-write, so two writers
+// of the column (the reconciler attributing a run's pull request, an
+// operator's transfer) cannot lose each other's write — whichever commits
+// first wins the row, and RowsAffected tells the loser it lost.
 func (s *entityStore) StampOwningTeamIfUnsetSystem(ctx context.Context, orgID, entityID, teamID string) (bool, error) {
 	if teamID == "" {
 		return false, nil

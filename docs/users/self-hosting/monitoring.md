@@ -168,6 +168,7 @@ alert's description, shown beside it in Grafana, says what to check.
 | `CommitSignaturesRefusedForRun` | warning  | A run asked to sign past its budget, after its engagement ended, or as someone other than the signer.                               |
 | `DeploymentCommitSignerDown`    | critical | A control pod's [deployment commit signer](deployment-integrations/deployment-commit-signer.md) has not been active for 15 minutes. |
 | `AuditRecordsDropped`           | warning  | An agent's write landed without its audit record.                                                                                   |
+| `ForeignPullRequestRecorded`    | critical | A run recorded a pull request that GitHub says it did not open. Treat that run's credential sidecar as compromised.                  |
 | `TasksOpenOnClosedEntity`       | warning  | An org has tasks open on a pull request or issue that Triage Factory has closed, which is a bug.                                    |
 | `SlackDeliveriesRetried`        | warning  | Slack retried deliveries to an app in the last 15 minutes.                                                                          |
 | `JiraDeploymentAppQuotaLow`     | warning  | The deployment's shared Atlassian app has reported its Jira quota near its limit, for 10 minutes.                                   |

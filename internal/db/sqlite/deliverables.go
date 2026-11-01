@@ -511,6 +511,21 @@ func (s *deliverableStore) ListNonTerminalBySystem(ctx context.Context, orgID st
 	return scanDeliverableRows(rows)
 }
 
+func (s *deliverableStore) DeleteSystem(ctx context.Context, orgID, id string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	res, err := s.q.ExecContext(ctx, `DELETE FROM deliverables WHERE org_id = ? AND id = ?`, orgID, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // --- Helpers ---
 
 func scanDeliverableRows(rows *sql.Rows) ([]domain.Deliverable, error) {

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -487,6 +488,21 @@ func (s *deliverableStore) ListNonTerminalBySystem(ctx context.Context, orgID st
 		return nil, err
 	}
 	return scanDeliverableRows(rows)
+}
+
+func (s *deliverableStore) DeleteSystem(ctx context.Context, orgID, id string) (bool, error) {
+	if _, err := uuid.Parse(id); err != nil {
+		return false, nil
+	}
+	res, err := s.admin.ExecContext(ctx, `DELETE FROM deliverables WHERE org_id = $1 AND id = $2`, orgID, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // --- Helpers ---

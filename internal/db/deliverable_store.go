@@ -290,4 +290,14 @@ type DeliverableStore interface {
 	// defense in depth.
 	// Identical to a plain org read in SQLite (single-tenant, no RLS).
 	ListNonTerminalBySystem(ctx context.Context, orgID string) ([]domain.Deliverable, error)
+
+	// DeleteSystem removes the deliverable id and reports whether a row was
+	// removed (false for an id that names none). Its one caller is the
+	// reconciler, deleting a pull request deliverable GitHub's answer proves
+	// the recording run did not open: such a row offers actions on someone
+	// else's pull request. The audit-ledger row recorded beside it is not
+	// touched. Admin pool — the reconciler has no JWT-claims context; org_id
+	// stays bound as defense in depth. Exempt from the returned-row rule as a
+	// delete.
+	DeleteSystem(ctx context.Context, orgID, id string) (bool, error)
 }
