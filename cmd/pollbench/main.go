@@ -64,7 +64,7 @@ var shapes = map[string]shapePreset{
 
 func main() {
 	var (
-		shape           = flag.String("shape", "", "preset shape: smoke, dp1, stress, or mono (sets -repos, -prs-mean, -warm-cycles and -base-moves; explicit flags win)")
+		shape           = flag.String("shape", "", "preset shape: smoke, dp1, stress, or mono (sets -repos, -prs-mean, -warm-cycles and -base-moves, and for mono a fixed PR count per repo and kubernetes file counts in place of -prs-mean and -files-mean; explicit flags win)")
 		repos           = flag.Int("repos", 300, "number of tracked repos")
 		prsMean         = flag.Float64("prs-mean", 15, "mean open PRs per repo (mixed distribution with a pathological tail)")
 		commentsMean    = flag.Int("comments-mean", 5, "mean comments per PR")
@@ -94,7 +94,9 @@ func main() {
 	}
 
 	// A shape preset fills -repos / -prs-mean / -warm-cycles / -base-moves
-	// unless they were set explicitly. A custom run moves bases at the
+	// unless they were set explicitly. mono's fixed PR count and file-count
+	// quantiles stand in for -prs-mean and -files-mean, so setting either
+	// flag drops the one it replaces. A custom run moves bases at the
 	// default cadence.
 	preset := shapePreset{moveEvery: defaultMoveEvery, moveRepo: defaultMoveRepoPct}
 	if *shape != "" {
@@ -108,8 +110,13 @@ func main() {
 		if !explicit["repos"] {
 			*repos = preset.repos
 		}
-		if !explicit["prs-mean"] {
+		if explicit["prs-mean"] {
+			preset.prsPerRepo = 0
+		} else {
 			*prsMean = preset.prsMean
+		}
+		if explicit["files-mean"] {
+			preset.fileCounts = nil
 		}
 		if !explicit["warm-cycles"] {
 			*warmCycles = preset.warmCycles

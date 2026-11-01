@@ -114,8 +114,10 @@ func commitSHA(repoIdx, seq int) string {
 // repository's tree (median 4, at most 30), the listing changes as a merge
 // changes it, and each tracked pull request whose paths the move overlaps,
 // under the tracker's own rule, becomes CONFLICTING with
-// ServerConfig.ConflictOnOverlap. A pull request past the listing's cap is
-// never read, so its answer is left alone.
+// ServerConfig.ConflictOnOverlap. The move's paths are the ones the compare
+// from the previous tip answers, so the branch watch reads the same move the
+// overlap was decided on. A pull request past the listing's cap is never
+// read, so its answer is left alone.
 func (s *Server) MoveBase(ri int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -128,11 +130,12 @@ func (s *Server) MoveBase(ri int) {
 	rw.tip = c.sha
 	rw.listGen++
 
+	movePaths := combine([]*commit{c})
 	prs := s.ds.Repos[ri].Listed()
 	w.stats.Moves++
 	w.stats.BaseOpenPRs += len(prs)
 	for pi, pr := range prs {
-		if !tracker.Overlaps(pr.Paths, changes) {
+		if !tracker.Overlaps(pr.Paths, movePaths) {
 			continue
 		}
 		st := w.prs[ri][pi]
@@ -261,10 +264,15 @@ func (rw *repoWorld) compare(base, head string) (cmp comparison, found bool) {
 }
 
 // combine is what a run of commits changed taken together: a file renamed
-// and then modified is one rename, one added and then deleted is nothing.
+// and then modified is one rename, one added and then deleted is nothing, and
+// a copy of a file that existed before the run keeps that file as its source.
 func combine(commits []*commit) []domain.ChangedPath {
 	type entry struct {
 		origin string // the path before the run; empty for a file the run added
+		// copiedFrom is, for a file the run added as a copy, the path its
+		// source had before the run; empty when the source was added in the
+		// run too.
+		copiedFrom string
 	}
 	live := map[string]entry{}
 	removed := map[string]bool{}
@@ -272,10 +280,17 @@ func combine(commits []*commit) []domain.ChangedPath {
 		for _, ch := range c.changes {
 			switch ch.Change {
 			case domain.PathAdded, domain.PathCopied:
-				if removed[ch.Path] {
+				switch {
+				case removed[ch.Path]:
 					delete(removed, ch.Path)
 					live[ch.Path] = entry{origin: ch.Path}
-				} else {
+				case ch.Change == domain.PathCopied:
+					source, ok := live[ch.Previous]
+					if !ok {
+						source = entry{origin: ch.Previous}
+					}
+					live[ch.Path] = entry{copiedFrom: source.origin}
+				default:
 					live[ch.Path] = entry{}
 				}
 			case domain.PathDeleted:
@@ -305,6 +320,10 @@ func combine(commits []*commit) []domain.ChangedPath {
 	for path, e := range live {
 		switch e.origin {
 		case "":
+			if e.copiedFrom != "" {
+				out = append(out, domain.ChangedPath{Path: path, Change: domain.PathCopied, Previous: e.copiedFrom})
+				continue
+			}
 			out = append(out, domain.ChangedPath{Path: path, Change: domain.PathAdded})
 		case path:
 			out = append(out, domain.ChangedPath{Path: path, Change: domain.PathModified})

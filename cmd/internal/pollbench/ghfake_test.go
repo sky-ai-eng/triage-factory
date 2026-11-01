@@ -60,7 +60,9 @@ func TestCompareCapsAndStatuses(t *testing.T) {
 			domain.ChangedPath{Path: fmt.Sprintf("d%03d/b.go", i), Change: domain.PathAdded})
 		line = append(line, head)
 	}
-	renamed := land(head, domain.ChangedPath{Path: "moved/a.go", Change: domain.PathRenamed, Previous: "d000/a.go"})
+	renamed := land(head,
+		domain.ChangedPath{Path: "moved/a.go", Change: domain.PathRenamed, Previous: "d000/a.go"},
+		domain.ChangedPath{Path: "copied/b.go", Change: domain.PathCopied, Previous: "d000/b.go"})
 	fork := land(line[0], domain.ChangedPath{Path: "fork.go", Change: domain.PathAdded})
 	rw.tip = renamed
 
@@ -79,7 +81,10 @@ func TestCompareCapsAndStatuses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []domain.ChangedPath{{Path: "moved/a.go", Change: domain.PathRenamed, Previous: "d000/a.go"}}
+	want := []domain.ChangedPath{
+		{Path: "copied/b.go", Change: domain.PathCopied, Previous: "d000/b.go"},
+		{Path: "moved/a.go", Change: domain.PathRenamed, Previous: "d000/a.go"},
+	}
 	if cmp.Status != "ahead" || fmt.Sprint(cmp.Files) != fmt.Sprint(want) {
 		t.Errorf("head...main = %s, %v; want ahead, %v", cmp.Status, cmp.Files, want)
 	}

@@ -167,7 +167,8 @@ Each driven cycle is one row:
   the ETag hit rate; `graphql` should be 0 at `--inflight-pct 0`.
 - **settle** — probe passes with no poll after the last warm cycle, until
   no probe is owed, so the last moves' answers land. Printed only when
-  something was owed.
+  something was owed. Its wall time includes waiting for probes the worker
+  deferred to a rate limit's reset.
 - **req/list/pages/304/graphql/teams/refs/ref304/compares/ratelimited** —
   request counts by class, from the fake server's counters. Deterministic
   per seed (except retry counts under an active rate limit, which are
@@ -286,14 +287,14 @@ tracks the 1,000 its listing returns.
 | Base moves | 50 |
 | Overlap set per move (mean) | 9.4 PRs, 0.9% of the tracked PRs |
 | Head pushes on tracked PRs | 984 |
-| Test merges | 1,949 |
-| … on an overlap-set PR after a base move | 465 |
+| Test merges | 1,950 |
+| … on an overlap-set PR after a base move | 466 |
 | … on a head-pushed PR | 984 |
 | … on a PR re-read after `UNKNOWN` | 500 |
 | … unaccounted (shortfall) | 0 |
 | Probing every tracked PR on every move, from base moves | 50,000 |
 
-- Every test merge has a cause. Base moves cost 965 test merges (overlap
+- Every test merge has a cause. Base moves cost 966 test merges (overlap
   sets plus re-reads), against 50,000 if every tracked PR were probed on
   every move.
 - The re-reads are about half of what base moves cost. A PR that answers
@@ -311,7 +312,7 @@ tracks the 1,000 its listing returns.
 - The cold cycle read 1,000 probes for 1,000 tracked PRs, no paths (a newly
   seen branch probes every PR without reading paths), and 1 ref for the 1
   base branch: one probe per PR, no path fetches, one ref read per base
-  branch. 310 points, 3.96 s.
+  branch. 310 points, 4.00 s.
 
 ### Warm cycles before and after
 

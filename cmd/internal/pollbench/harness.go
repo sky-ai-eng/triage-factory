@@ -470,12 +470,23 @@ func Run(cfg RunConfig) (*Result, error) {
 
 	// A move's overlap set is answered a cycle after the move, once the
 	// UNKNOWN its first read returns is read again, so the last cycles'
-	// answers are drained here, with no poll and nothing moving.
+	// answers are drained here, with no poll and nothing moving. A probe the
+	// worker deferred for a rate limit cannot be claimed before its next
+	// attempt, so a pass with nothing claimable waits for the first one
+	// rather than spending itself on a drain that reads nothing; the wait is
+	// in the row's wall time, as a rate-limit wait is in the cold sync's.
 	if owed, err := probesOwed(ctx, database); err != nil {
 		res.SanityErrors = append(res.SanityErrors, fmt.Sprintf("counting owed probes: %v", err))
 	} else if owed > 0 {
 		m := measure("settle", false, func() error {
 			for pass := 0; pass < settlePasses; pass++ {
+				wait, err := probesDeferredFor(ctx, database)
+				if err != nil {
+					return err
+				}
+				if wait > 0 {
+					time.Sleep(wait + 100*time.Millisecond)
+				}
 				if err := probe(); err != nil {
 					return err
 				}
@@ -566,6 +577,24 @@ func probesRead(ctx context.Context, database *sql.DB) (map[string]int, error) {
 		out[reason] = n
 	}
 	return out, rows.Err()
+}
+
+// probesDeferredFor is how long until a ready probe can be claimed, when none
+// can be now: each is waiting on its next attempt, which a rate-limit
+// deferral sets to the limit's reset. Zero when one is claimable now or none
+// is ready.
+func probesDeferredFor(ctx context.Context, database *sql.DB) (time.Duration, error) {
+	var secs sql.NullFloat64
+	err := database.QueryRowContext(ctx, `
+		SELECT CASE
+			WHEN SUM(next_attempt_at IS NULL OR next_attempt_at <= strftime('%Y-%m-%d %H:%M:%f', 'now')) > 0 THEN 0
+			ELSE (julianday(MIN(next_attempt_at)) - julianday('now')) * 86400.0
+		END
+		FROM pr_mergeability_probes WHERE status = 'ready'`).Scan(&secs)
+	if err != nil || !secs.Valid || secs.Float64 <= 0 {
+		return 0, err
+	}
+	return time.Duration(secs.Float64 * float64(time.Second)), nil
 }
 
 // probesOwed counts the probes not yet completed.
