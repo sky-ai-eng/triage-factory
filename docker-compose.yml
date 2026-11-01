@@ -170,8 +170,12 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?missing POSTGRES_PASSWORD (see .env.example)}
     volumes:
       - pg-data:/var/lib/postgresql/data
+    # Over TCP, not the socket: on first boot the image runs its init
+    # scripts on a temporary server that listens only on the socket, then
+    # restarts, so a socket check passes before the server the other
+    # services dial is up.
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -h 127.0.0.1"]
       interval: 5s
       timeout: 3s
       retries: 10
