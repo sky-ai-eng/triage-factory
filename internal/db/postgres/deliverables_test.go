@@ -325,6 +325,63 @@ func TestDeliverableStore_Postgres_RLS_WritePath(t *testing.T) {
 	pgtest.AssertRLSViolation(t, err)
 }
 
+// TestDeliverableStore_Postgres_RLS_InsertIfAbsent runs the app-pool
+// InsertDeliverableIfAbsent under tf_app, the path a manual run's pull request
+// create takes: a team writer inserts a deliverable of their team's, a member
+// of another team is refused by the deliverables_insert WITH CHECK, and a
+// writer whose key another team's row already holds inserts nothing, with no
+// error and that row left as it was.
+func TestDeliverableStore_Postgres_RLS_InsertIfAbsent(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+
+	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
+	carol := pgtest.SeedUser(t, h, "carol")
+	teamB := pgtest.SeedTeam(t, h, orgA, "team-b")
+	pgtest.AddOrgMember(t, h, carol, orgA, teamB, "member", "member")
+	ctx := context.Background()
+
+	mkDeliverable := func(teamID, key, state string) domain.Deliverable {
+		return domain.Deliverable{
+			OrgID: orgA, TeamID: teamID,
+			Provider: "github", Scope: "https://github.com", Kind: "pull_request", Target: "octo/repo#7",
+			State: state, DedupKey: key,
+		}
+	}
+	insertAs := func(user string, a domain.Deliverable) (bool, error) {
+		var inserted bool
+		err := h.WithUser(t, user, orgA, func(tx *sql.Tx) error {
+			var e error
+			inserted, e = pgstore.NewForTx(tx, pgtest.SecretKey).Deliverables.InsertDeliverableIfAbsent(ctx, orgA, a)
+			return e
+		})
+		return inserted, err
+	}
+
+	if inserted, err := insertAs(alice, mkDeliverable(teamA, "github:pull_request:PR_a", domain.DeliverableStatePRDraft)); err != nil || !inserted {
+		t.Fatalf("alice (teamA writer) InsertDeliverableIfAbsent under RLS = %v, %v; want an insert", inserted, err)
+	}
+
+	_, err := insertAs(carol, mkDeliverable(teamA, "github:pull_request:PR_c", domain.DeliverableStatePRDraft))
+	pgtest.AssertRLSViolation(t, err)
+
+	admin := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	theirs, err := admin.Deliverables.UpsertSystem(ctx, orgA, mkDeliverable(teamB, "github:pull_request:PR_b", domain.DeliverableStatePRDraft))
+	if err != nil {
+		t.Fatalf("seed teamB's deliverable: %v", err)
+	}
+	if inserted, err := insertAs(alice, mkDeliverable(teamA, "github:pull_request:PR_b", domain.DeliverableStatePROpen)); err != nil || inserted {
+		t.Errorf("alice InsertDeliverableIfAbsent on teamB's key = %v, %v; want no insert and no error", inserted, err)
+	}
+	var team, state string
+	if err := h.AdminDB.QueryRow(`SELECT team_id, state FROM deliverables WHERE id = $1`, theirs.ID).Scan(&team, &state); err != nil {
+		t.Fatalf("read teamB's deliverable: %v", err)
+	}
+	if team != teamB || state != domain.DeliverableStatePRDraft {
+		t.Errorf("teamB's deliverable = team %s state %s, want it unchanged (team %s, draft)", team, state, teamB)
+	}
+}
+
 // TestDeliverableStore_Postgres_SurvivesConversationPurge pins the
 // audit-ledger invariant: a deliverable whose conversation was purged is
 // detached (conversation_id NULL), not deleted, and still reads back as the

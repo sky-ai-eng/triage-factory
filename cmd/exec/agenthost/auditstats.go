@@ -112,11 +112,14 @@ func recordAuditDrops(ctx context.Context, stage, op string, n int64) {
 // no deliverable — the action's discriminator. Both are closed domain
 // vocabularies minted by TF itself, which is what makes either safe as a label;
 // the target they were written against is a repo path and stays out, the same
-// line the artifact.record span draws.
+// line the artifact.record span draws. A relayed deliverable's kind is the
+// sidecar's, so one outside the vocabulary is labeled as other.
 func recordDropOp(a *domain.Deliverable, act *domain.ExternalAction) string {
 	switch {
-	case a != nil && a.Kind != "":
+	case a != nil && slices.Contains(domain.DeliverableKinds(), a.Kind):
 		return a.Kind
+	case a != nil && a.Kind != "":
+		return dropOpOther
 	case act != nil && act.Action != "":
 		return act.Action
 	default:

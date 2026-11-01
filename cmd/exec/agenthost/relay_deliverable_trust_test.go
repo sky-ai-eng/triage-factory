@@ -57,52 +57,45 @@ func assertDeliverableUnchanged(t *testing.T, stores db.Stores, want domain.Deli
 
 // TestRelay_ReviewKeyNamingAnotherConversationLandsOnTheSendersDraft: a review
 // draft relayed under a key naming another conversation is keyed on the
-// sending run's conversation, through either door a sidecar can send one by,
-// so it lands on a row of the run's own and the other conversation's draft is
-// untouched.
+// sending run's conversation, so it lands on a row of the run's own and the
+// other conversation's draft is untouched. A key with no pull request node id
+// cannot be keyed on the run's conversation and is refused.
 func TestRelay_ReviewKeyNamingAnotherConversationLandsOnTheSendersDraft(t *testing.T) {
-	for _, door := range []string{"upsert", "record"} {
-		t.Run(door, func(t *testing.T) {
-			conn, stores, info := newCaptureStoresConn(t, true)
-			ctx := context.Background()
-			other := seedOtherConversation(t, conn)
-			theirs := seedOtherReview(t, stores, info, other, "PR_kw7")
-			rt := newRelayRuntime(directDispatchConn{srv: NewRelayServer(stores, info, nil)}, info, nil)
+	conn, stores, info := newCaptureStoresConn(t, true)
+	ctx := context.Background()
+	other := seedOtherConversation(t, conn)
+	theirs := seedOtherReview(t, stores, info, other, "PR_kw7")
+	rt := newRelayRuntime(directDispatchConn{srv: NewRelayServer(stores, info, nil)}, info, nil)
 
-			forged := domain.NewReviewDeliverable("octo/repo", 7, "PR_kw7", "forged-sha", other)
-			forged.State = domain.DeliverableStateReviewSubmitted
-			forged.DetailsJSON = domain.MarshalReviewDeliverableDetails(domain.ReviewDeliverableDetails{Number: 7, ReviewBody: "forged"})
-			switch door {
-			case "upsert":
-				if _, err := rt.UpsertDeliverable(ctx, forged, domain.GitHubIdentity{}); err != nil {
-					t.Fatalf("UpsertDeliverable: %v", err)
-				}
-			case "record":
-				rt.Record(ctx, &forged, nil, domain.EntityContainer{}, domain.GitHubIdentity{})
-			}
-
-			mine := listConversationDeliverables(t, stores, info.ConversationID)
-			if len(mine) != 1 || mine[0].ID == theirs.ID || mine[0].DedupKey != domain.ReviewDedupKey("PR_kw7", info.ConversationID) {
-				t.Errorf("the run's deliverables = %+v, want one review keyed on its own conversation", mine)
-			}
-			assertDeliverableUnchanged(t, stores, theirs)
-		})
+	forged := domain.NewReviewDeliverable("octo/repo", 7, "PR_kw7", "forged-sha", other)
+	forged.DetailsJSON = domain.MarshalReviewDeliverableDetails(domain.ReviewDeliverableDetails{Number: 7, ReviewBody: "forged"})
+	if _, err := rt.UpsertDeliverable(ctx, forged, domain.GitHubIdentity{}); err != nil {
+		t.Fatalf("UpsertDeliverable: %v", err)
 	}
+	unkeyed := forged
+	unkeyed.DedupKey = "github:review:octo/repo#7:" + other
+	if _, err := rt.UpsertDeliverable(ctx, unkeyed, domain.GitHubIdentity{}); err == nil {
+		t.Error("UpsertDeliverable of a review with no node id = nil error, want a refusal")
+	}
+
+	mine := listConversationDeliverables(t, stores, info.ConversationID)
+	if len(mine) != 1 || mine[0].ID == theirs.ID || mine[0].DedupKey != domain.ReviewDedupKey("PR_kw7", info.ConversationID) {
+		t.Errorf("the run's deliverables = %+v, want one review keyed on its own conversation", mine)
+	}
+	assertDeliverableUnchanged(t, stores, theirs)
 }
 
-// TestRelay_ReviewKeyWithNoNodeIDIsRefused: a review whose key carries no pull
-// request node id cannot be keyed on the run's conversation, so it is refused:
-// an upsert answers an error, and a record writes its action alone.
-func TestRelay_ReviewKeyWithNoNodeIDIsRefused(t *testing.T) {
+// TestRelay_RecordWritesOnlyAPullRequestCreatesDeliverable: the recording
+// funnel writes a pull request create's deliverable and nothing else, so a
+// relayed record carrying a review draft whose state and review id the sender
+// chose writes no deliverable, and its action is recorded alone.
+func TestRelay_RecordWritesOnlyAPullRequestCreatesDeliverable(t *testing.T) {
 	stores, info := newCaptureStores(t, true)
 	ctx := context.Background()
 	rt := newRelayRuntime(directDispatchConn{srv: NewRelayServer(stores, info, nil)}, info, nil)
 
 	forged := domain.NewReviewDeliverable("octo/repo", 7, "PR_kw7", "head-sha", info.ConversationID)
-	forged.DedupKey = "github:review:octo/repo#7:" + info.ConversationID
-	if _, err := rt.UpsertDeliverable(ctx, forged, domain.GitHubIdentity{}); err == nil {
-		t.Error("UpsertDeliverable of a review with no node id = nil error, want a refusal")
-	}
+	forged.State, forged.ExternalID = domain.DeliverableStateReviewSubmitted, "9001"
 	act := &domain.ExternalAction{Provider: domain.ProviderGitHub, Action: domain.ActionReviewSubmitted, Target: "octo/repo#7", Credential: domain.CredentialGitHubApp}
 	rt.Record(ctx, &forged, act, domain.EntityContainer{}, domain.GitHubIdentity{})
 
@@ -143,9 +136,10 @@ func TestRelay_ReviewWritesByIDAreScopedToTheRun(t *testing.T) {
 }
 
 // TestRelay_PRCreateNamingARecordedPullRequestLeavesItsRow: a relayed pull
-// request create naming the node id of a pull request another run recorded
-// leaves that row's state as it was, attributes nothing to the sending run,
-// and still records its pr_created ledger row.
+// request create naming the node id of a pull request another run recorded,
+// under its key or under one with a segment after the node id, leaves that
+// row's state as it was, adds no row of the sending run's, attributes nothing
+// to it, and still records its pr_created ledger row.
 func TestRelay_PRCreateNamingARecordedPullRequestLeavesItsRow(t *testing.T) {
 	for _, eventTriggered := range []bool{true, false} {
 		t.Run(fmt.Sprintf("event_triggered=%v", eventTriggered), func(t *testing.T) {
@@ -173,14 +167,25 @@ func TestRelay_PRCreateNamingARecordedPullRequestLeavesItsRow(t *testing.T) {
 				t.Error("UpsertDeliverable of a pull request = nil error, want a refusal")
 			}
 			rt.Record(ctx, &forged, act, domain.EntityContainer{}, botOpenedPRIdentity)
+			// A key carrying a segment after the node id names the same pull
+			// request, and is keyed back onto the row recorded for it.
+			suffixed, again := forged, *act
+			suffixed.DedupKey = domain.PullRequestDedupKey("PR_kwDOABCD") + ":extra"
+			again.DedupKey = ""
+			rt.Record(ctx, &suffixed, &again, domain.EntityContainer{}, botOpenedPRIdentity)
 
 			assertDeliverableUnchanged(t, stores, seeded)
 			if mine := listConversationDeliverables(t, stores, info.ConversationID); len(mine) != 0 {
 				t.Errorf("the run's deliverables = %+v, want none", mine)
 			}
 			acts := listExternalActions(t, stores)
-			if len(acts) != 1 || acts[0].Action != domain.ActionPRCreated || acts[0].ConversationID != info.ConversationID {
-				t.Errorf("ledger rows = %+v, want the run's one pr_created row", acts)
+			if len(acts) != 2 {
+				t.Errorf("ledger rows = %+v, want the run's two pr_created rows", acts)
+			}
+			for _, a := range acts {
+				if a.Action != domain.ActionPRCreated || a.ConversationID != info.ConversationID {
+					t.Errorf("ledger row = %+v, want a pr_created row of the run's", a)
+				}
 			}
 			ent := prEntity(t, stores)
 			if ent == nil {

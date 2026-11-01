@@ -102,6 +102,34 @@ func keyReviewToConversation(a *domain.Deliverable, info ConversationInfo) error
 	return nil
 }
 
+// errFunnelDeliverable refuses a deliverable the recording funnel does not
+// write: anything but a GitHub pull request keyed on its node id.
+var errFunnelDeliverable = errors.New("agenthost: the recording funnel records only a pull request create's deliverable")
+
+// keyFunnelDeliverable admits a, a deliverable the recording funnel is to
+// write, and rebuilds its key and node id from the pull request node id its
+// key carries (domain.PullRequestDedupKey). Its one writer is the pull request
+// create (recordGithubPR). The key is this side's to build, like the review
+// key (keyReviewToConversation): a key carrying anything after the node id
+// names the same pull request under a key no other row holds, so it would
+// escape the insert's conflict with the row already recorded for it. A review
+// draft is recorded through UpsertDeliverable and moved through its
+// state-guarded writes, never through the funnel, so a review arriving here
+// was not built by TF: refusing it keeps a relayed record from writing a
+// draft whose state and review id the sender chose. Anything but a GitHub
+// pull request keyed on its node id is refused with errFunnelDeliverable.
+func keyFunnelDeliverable(a *domain.Deliverable) error {
+	if a.Kind != domain.DeliverableKindPullRequest {
+		return errFunnelDeliverable
+	}
+	nodeID, ok := domain.DeliverablePullRequestNodeID(*a)
+	if !ok {
+		return errFunnelDeliverable
+	}
+	a.DedupKey, a.NodeID = domain.PullRequestDedupKey(nodeID), nodeID
+	return nil
+}
+
 // recordActionSystemInfo appends act on the admin pool (event-triggered
 // runs). A nil act — or a partial test wiring with no ExternalActions store —
 // is a no-op.
@@ -142,24 +170,21 @@ func recordActionAlone(ctx context.Context, stores db.Stores, info ConversationI
 
 // RecordExternalWrite is the shared recording funnel behind every exec
 // choke-point write: it stamps the run's identity and the org's current scope
-// for each provider (stampScopeInfo) onto a and act (if present), keys a review
-// a on the run's conversation (keyReviewToConversation), links a to the entity
-// it is about (resolveDeliverableEntity) and act to the entity or repository
-// it is about (resolveActionReferences), writes a (if non-nil;
-// writeFunnelDeliverable: a pull request is inserted only when absent) and
-// appends act (if non-nil) in the SAME write — admin pool for event-triggered
+// for each provider (stampScopeInfo) onto a and act (if present), links a to
+// the entity it is about (resolveDeliverableEntity) and act to the entity or
+// repository it is about (resolveActionReferences), inserts a (if non-nil, and
+// only when no row holds its key) and appends act (if non-nil) in the SAME write — admin pool for event-triggered
 // runs, a synthetic-claims tx for manual ones — logs (never fails) a write
 // error, and records the conversation's link to the act's entity once the write
 // settles (recordActionMemoryLink). Both entity resolutions run before the write and
 // outside its transaction (see recordEntityTouch).
 //
-// a is the pull request or review deliverable the write prepared for a
-// person, and nil for every other write, which leaves its ledger row alone. act
-// is nil when the write carries no distinct external action (a review-draft
-// snapshot re-upserting its deliverable with no new external write). The
-// caller is responsible for setting a.Provider (and any other polymorphic
-// fields) before calling — this function only stamps the run-identity fields
-// common to every provider.
+// a is the pull request deliverable a create opened, and nil for every other
+// write, which leaves its ledger row alone; any other deliverable is refused
+// (keyFunnelDeliverable), and its action is recorded without it. act is nil for a
+// write that carries no external action. The caller is responsible for
+// setting a.Provider before calling — this function only stamps the
+// run-identity fields common to every provider.
 //
 // Best-effort throughout: every write here already happened against the
 // external system (GitHub/Jira/Slack) before this is called, so a recording
@@ -226,11 +251,11 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 	defer span.End()
 	if a != nil {
 		span.SetAttributes(telemetry.Op(a.Kind))
-		if kerr := keyReviewToConversation(a, info); kerr != nil {
+		if kerr := keyFunnelDeliverable(a); kerr != nil {
 			recordSpanError(span, kerr)
 			recordWriteDrop(ctx, recordDropOp(a, nil), kerr)
-			agenthostLog.Warn("refusing a review deliverable whose key names no pull request; recording the action without it",
-				"conversation", info.ConversationID, "target", a.Target)
+			agenthostLog.Warn("refusing a deliverable that is not a pull request create's; recording the action without it",
+				"conversation", info.ConversationID, "kind", a.Kind, "target", a.Target)
 			if act == nil {
 				return
 			}
@@ -251,11 +276,13 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 	if act != nil {
 		about = resolveActionReferences(ctx, stores, info, act, container, github, subject)
 	}
-	// existed is whether the last attempt found the pull request deliverable
-	// already recorded, and created whether any attempt inserted it: a retry
-	// after the action's write failed finds the row its own first attempt
-	// inserted.
-	var existed, created bool
+	// The deliverable is a pull request create's (keyFunnelDeliverable),
+	// written by an insert that does nothing when the row is there: GitHub
+	// opens one pull request per node id, and a replay of the same create finds
+	// its own row, so a create that finds a row recorded by another writer
+	// leaves it as it was. written is whether an attempt's insert returned
+	// without error; whose row the key holds is read once the write settles.
+	var written bool
 	if err == nil {
 		var deliverableErr error
 		err = withRecordRetry(ctx, func() error {
@@ -263,24 +290,22 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 				func() error {
 					deliverableErr = nil
 					if a != nil {
-						ex, e := writeFunnelDeliverable(ctx, stores.Deliverables, true, info.OrgID, *a)
-						if e != nil {
+						if _, e := stores.Deliverables.InsertDeliverableIfAbsentSystem(ctx, info.OrgID, *a); e != nil {
 							deliverableErr = e
 							return e
 						}
-						existed, created = ex, created || !ex
+						written = true
 					}
 					return recordActionSystemInfo(ctx, stores, info, act)
 				},
 				func(ts db.TxStores) error {
 					deliverableErr = nil
 					if a != nil {
-						ex, e := writeFunnelDeliverable(ctx, ts.Deliverables, false, info.OrgID, *a)
-						if e != nil {
+						if _, e := ts.Deliverables.InsertDeliverableIfAbsent(ctx, info.OrgID, *a); e != nil {
 							deliverableErr = e
 							return e
 						}
-						existed, created = ex, created || !ex
+						written = true
 					}
 					return recordActionTx(ctx, ts, info.OrgID, act)
 				},
@@ -313,37 +338,33 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 	// Link the conversation to the act's entity outside the audit write.
 	recordActionMemoryLink(ctx, stores, info, act, about)
 	// Same placement, same reason: an admin-pool write, so it must run after
-	// withWriteInfo's tx has settled. A create that found its pull request
-	// already recorded by another writer did not open it, so it attributes
-	// nothing.
-	if !existed || created {
+	// withWriteInfo's tx has settled. A create attributes only a pull request
+	// whose deliverable the run holds: one that found the row recorded by
+	// another writer did not open it.
+	if written && runHoldsDeliverable(ctx, stores, info, *a) {
 		stampPRAttribution(ctx, stores, info, a)
 	}
 }
 
-// writeFunnelDeliverable writes the funnel's deliverable a through ds, on the
-// admin pool when system is set and under the caller's claims otherwise. A
-// pull request is written by its create, which never meets an existing row:
-// GitHub opens one pull request per node id, and a replay of the same create
-// finds its own row. So it is inserted only when absent, and existed reports a
-// row already there, which the write left as it was. A review draft is
-// upserted, keyed on the run's own conversation (keyReviewToConversation).
-func writeFunnelDeliverable(ctx context.Context, ds db.DeliverableStore, system bool, orgID string, a domain.Deliverable) (existed bool, err error) {
-	if a.Kind != domain.DeliverableKindPullRequest {
-		if system {
-			_, err = ds.UpsertSystem(ctx, orgID, a)
-		} else {
-			_, err = ds.Upsert(ctx, orgID, a)
+// runHoldsDeliverable reports whether the run's own deliverables hold a row
+// under a's scope and key. It is read after the write settled, so no attempt
+// that did not land — a rolled-back transaction, a retry, a lost
+// acknowledgement — decides the answer. A read failure answers false:
+// attribution is best-effort, and is stamped only for a row known to be the
+// run's.
+func runHoldsDeliverable(ctx context.Context, stores db.Stores, info ConversationInfo, a domain.Deliverable) bool {
+	rows, err := stores.Deliverables.ListByConversationSystem(ctx, info.OrgID, info.ConversationID)
+	if err != nil {
+		agenthostLog.Warn("reading the run's deliverables failed; attributing nothing to the pull request",
+			"conversation", info.ConversationID, "target", a.Target, "error", err)
+		return false
+	}
+	for _, r := range rows {
+		if r.Scope == a.Scope && r.DedupKey == a.DedupKey {
+			return true
 		}
-		return false, err
 	}
-	var inserted bool
-	if system {
-		inserted, err = ds.InsertDeliverableIfAbsentSystem(ctx, orgID, a)
-	} else {
-		inserted, err = ds.InsertDeliverableIfAbsent(ctx, orgID, a)
-	}
-	return err == nil && !inserted, err
+	return false
 }
 
 // --- touched-entity resolution (TFAC-513 §2) ---
@@ -440,7 +461,11 @@ func resolveEntityInfo(ctx context.Context, stores db.Stores, info ConversationI
 // sidecar, which chose its key and its id alike, so following it would let a
 // relayed write rename another issue's entity onto a key of its choosing. The
 // entity is still resolved by its id and linked as stored; the poll cycle
-// renames it when the provider's own answer says its key moved.
+// renames it when the provider's own answer says its key moved, for an issue
+// in a tracked Jira project or Linear team.
+//
+// TODO(TFAC-1297): an issue outside every tracked set is never polled, so in
+// multi mode its entity keeps the key it had when TF first saw it.
 func followsProviderKey() bool {
 	return runmode.Current() != runmode.ModeMulti
 }

@@ -997,11 +997,11 @@ func (s *RelayServer) dispatchCoreRecord(ctx context.Context, op string, args js
 		// run's deterministic one — a branch push's, an egress denial's — and
 		// the row it wrote first would suppress that run's real one. No action
 		// the sidecar builds carries a key of its own; the ops whose rows have
-		// one build them here. A review deliverable's key is rebuilt under this
-		// run's conversation (keyReviewToConversation), so it cannot name
-		// another run's draft, and a pull request deliverable is only ever
-		// inserted (writeFunnelDeliverable), so a key naming a pull request
-		// another run recorded changes nothing on that row.
+		// one build them here. The only deliverable the funnel writes is a pull
+		// request create's, keyed here on its node id (keyFunnelDeliverable),
+		// and only by an insert that does nothing when its key is taken, so a
+		// key naming a pull request another run recorded changes nothing on
+		// that row.
 		if a.Action != nil {
 			a.Action.DedupKey = ""
 		}

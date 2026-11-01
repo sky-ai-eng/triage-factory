@@ -2568,7 +2568,7 @@ func (c *LocalClient) recordGithubPR(ctx context.Context, owner, repo, head, bas
 	c.upsertGithubDeliverable(ctx, a, act, github)
 }
 
-// upsertGithubDeliverable stamps the provider onto a, a pull request or review
+// upsertGithubDeliverable stamps the provider onto a, a pull request create's
 // deliverable, and writes it best-effort via the shared recording funnel
 // (RecordExternalWrite, record.go): a recording failure is logged and
 // swallowed so it never fails the agent's already-applied GitHub action. act

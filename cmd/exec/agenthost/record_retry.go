@@ -16,8 +16,8 @@ import (
 // failure another attempt can get past (db.IsRetryable).
 //
 // A retry is safe because every write in the funnel is idempotent across
-// attempts. The deliverable is an upsert, or for a pull request an insert that
-// does nothing when the row is there. The ledger row's dedup key is fixed
+// attempts. The deliverable is an insert that does nothing when its row is
+// there. The ledger row's dedup key is fixed
 // before the first attempt (mintActionDedupKey), so an attempt whose commit
 // landed but whose acknowledgement was lost is followed by one that conflicts
 // and does nothing, rather than by a second row.
