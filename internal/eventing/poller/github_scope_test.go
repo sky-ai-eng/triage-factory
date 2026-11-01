@@ -60,7 +60,7 @@ func TestRunGitHubCycleForOrg_RetiresAnotherHostsPullRequestsWithNothingTracked(
 	published := &capturingPublisher{}
 	m := &Manager{
 		database: database, pub: published,
-		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue,
+		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue, mergeability: stores.PRMergeability,
 		orgs: stores.Orgs, users: stores.Users,
 	}
 	m.runGitHubCycleForOrg(context.Background(), org)
@@ -129,7 +129,7 @@ func TestRunGitHubCycleForOrg_RetiresOnceBeforeDiscovery(t *testing.T) {
 
 	m := &Manager{
 		database: database, pub: published,
-		tasks: stores.Tasks, entities: stores.Entities, eventQueue: stores.EventQueue,
+		tasks: stores.Tasks, entities: stores.Entities, eventQueue: stores.EventQueue, mergeability: stores.PRMergeability,
 		repos: stores.Repos, orgs: stores.Orgs,
 		apps: &fakeInstallsStore{
 			app: &domain.OrgGitHubApp{OrgID: org, AppID: "1", Active: true},
@@ -268,7 +268,7 @@ func TestRunGitHubCycleForOrg_WalksOnlyTheCurrentHostsInstallations(t *testing.T
 		resolver := &targetRecordingResolver{freshClientPerCallResolver: &freshClientPerCallResolver{url: srv.URL}}
 		m := &Manager{
 			database: database, pub: &capturingPublisher{},
-			tasks: stores.Tasks, entities: stores.Entities, eventQueue: stores.EventQueue,
+			tasks: stores.Tasks, entities: stores.Entities, eventQueue: stores.EventQueue, mergeability: stores.PRMergeability,
 			repos: stores.Repos, orgs: stores.Orgs,
 			apps: &fakeInstallsStore{
 				app:      &domain.OrgGitHubApp{OrgID: org, AppID: "1", Active: true},

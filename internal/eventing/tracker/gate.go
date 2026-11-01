@@ -21,6 +21,13 @@ import (
 // point is webhooks.
 const staleRefreshFloor = 10 * time.Minute
 
+// mergeabilitySweepInterval is how long after a pull request's last
+// mergeability read the poll admits a probe to read it again, whatever else
+// did or did not move. A merge to the base branch moves neither the pull
+// request's updated_at nor its head, so this is what bounds how late a
+// conflict the base branch caused is seen. It matches staleRefreshFloor.
+const mergeabilitySweepInterval = 10 * time.Minute
+
 // shouldSkipRefresh reports whether a tracked open PR can keep its
 // stored snapshot for this poll cycle (no follow-up RefreshPRs call
 // needed). Skipping means we trust the stored snapshot through this
@@ -33,9 +40,9 @@ const staleRefreshFloor = 10 * time.Minute
 // Why this is safe in the common case:
 //
 //   - Anything that changes the diff scope at the PR level (commits,
-//     reviews, labels, comments, ready_for_review, mergeable, title,
-//     base ref) bumps GitHub's PullRequest.updatedAt. If updatedAt
-//     matches stored, none of those happened.
+//     reviews, labels, comments, ready_for_review, title, base ref) bumps
+//     GitHub's PullRequest.updatedAt. If updatedAt matches stored, none of
+//     those happened.
 //   - Head SHA changes always bump updatedAt (a push is a PR-level
 //     mutation), but we belt-and-brace it because a regression there
 //     would silently drop new_commits events.

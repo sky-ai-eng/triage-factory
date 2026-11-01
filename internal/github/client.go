@@ -164,6 +164,12 @@ func (c *Client) WithCredential(credential string) *Client {
 	return c
 }
 
+// Credential is the credential c's requests are metered against (CredentialPAT
+// or InstallationCredential), or empty when none was set. Two clients for one
+// org with the same credential read the same repositories and spend the same
+// budget, so a caller can batch their reads through either.
+func (c *Client) Credential() string { return c.credential }
+
 // NewProxyClient builds a client that talks to a per-run credential proxy
 // (internal/proxy/apiproxy) rather than to GitHub directly: proxyURL is the proxy's
 // bare address and placeholder is the per-run token the proxy authenticates and
@@ -623,6 +629,12 @@ func (c *Client) postGraphQL(ctx context.Context, body any, idempotent bool) ([]
 			githubLog.Warn("GraphQL partial error; using partial data",
 				"errors", len(gqlResp.Errors), "type", e.Type, "path", e.Path, "message", e.Message)
 			return data, nil
+		}
+		// GitHub can refuse a query on a spent budget with a 200 whose only
+		// content is a RATE_LIMITED error, which is the same refusal as a 403
+		// reporting a spent budget and is returned as one.
+		if e.Type == "RATE_LIMITED" {
+			return nil, &ErrRateLimited{ResumeAt: c.graphQLResumeAt()}
 		}
 		// Surface the first error; note when more were dropped so a multi-error
 		// total failure isn't silently reduced to a single message.

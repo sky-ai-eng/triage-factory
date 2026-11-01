@@ -44,7 +44,7 @@ func TestRefreshJira_FirstDiscoveryAssignedToCurrentUserEmitsAssignment(t *testi
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, org)
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
 	projects := registeredRules(t, stores.JiraProjects, "https://jira.example.com", JiraRules{{Key: "SKY", ProjectID: "10000", DoneMembers: jiraRefs("Done")}})
 
@@ -86,7 +86,7 @@ func TestRefreshJira_FirstDiscoveryAssignedToCurrentUserEmitsAssignment(t *testi
 	// The persisted snapshot is the re-emit fence: rediscovery on the next
 	// cycle must not create a second assignment event.
 	secondPub := &recordingPublisher{}
-	second := New(database, secondPub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, org)
+	second := New(database, secondPub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, org)
 	emitted, err = second.RefreshJira(ctx, "https://jira.example.com", client, srv.URL, projects)
 	if err != nil {
 		t.Fatalf("RefreshJira cycle 2: %v", err)

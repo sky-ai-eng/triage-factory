@@ -30,10 +30,9 @@ type PRSnapshot struct {
 	URL      string `json:"url"`
 
 	// State
-	State     string `json:"state"` // OPEN, CLOSED, MERGED
-	IsDraft   bool   `json:"is_draft"`
-	Merged    bool   `json:"merged"`
-	Mergeable string `json:"mergeable"` // MERGEABLE, CONFLICTING, UNKNOWN
+	State   string `json:"state"` // OPEN, CLOSED, MERGED
+	IsDraft bool   `json:"is_draft"`
+	Merged  bool   `json:"merged"`
 
 	// Branches
 	HeadRef string `json:"head_ref"`

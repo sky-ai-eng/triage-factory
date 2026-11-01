@@ -27,7 +27,7 @@ most one active task exists per entity, event type and `dedup_key`.
 | **Changes Requested** | `github:pr:review_changes_requested` | A review requesting changes was submitted — see [Reviews](#reviews) | — |
 | **Review: Commented** | `github:pr:review_commented` | A review with comments only was submitted, a reply in a review thread included — see [Reviews](#reviews) | — |
 | **CI Check Failed** | `github:pr:ci_check_failed` | A check run on the head commit completes with `failure`, `timed_out`, `cancelled` or `action_required`. One event per check run; a check run already failing last cycle, by id, does not emit again, and a re-run is a new check run | — |
-| **Merge Conflicts** | `github:pr:conflicts` | `mergeable` changes to `CONFLICTING`; an `UNKNOWN` reading in between keeps the last known value | — |
+| **Merge Conflicts** | `github:pr:conflicts` | The PR's stored mergeability changes to `CONFLICTING`, a PR with none included — see [Mergeability](#mergeability) | — |
 | **Ready for Review** | `github:pr:ready_for_review` | `isDraft` changes from `true` to `false` | — |
 | **Label Added** | `github:pr:label_added` | A label is added. Labels are names here — see [Labels](#labels) | label name |
 | **Label Removed** | `github:pr:label_removed` | A label is removed | label name |
@@ -42,7 +42,7 @@ most one active task exists per entity, event type and `dedup_key`.
 | **Review: Dismissed** | `github:pr:review_dismissed` | A reviewer's latest review was dismissed — see [Reviews](#reviews) | — |
 | **Review Request Removed** | `github:pr:review_request_removed` | A reviewer TF knows drops off the review requests, because they reviewed or the request was withdrawn. Closes that reviewer's `review_requested` task, keyed by id or by handle | keyed as `review_requested` |
 | **CI Check Passed** | `github:pr:ci_check_passed` | A check run completes with any other conclusion (`success`, `neutral`, `skipped`, `stale`) and was not already passing | — |
-| **Conflicts Resolved** | `github:pr:conflicts_resolved` | `mergeable` changes from `CONFLICTING` to `MERGEABLE`; an `UNKNOWN` reading in between keeps the last known value. Closes the pull request's conflicts task | — |
+| **Conflicts Resolved** | `github:pr:conflicts_resolved` | The PR's stored mergeability changes from `CONFLICTING` to `MERGEABLE`. Closes the pull request's conflicts task — see [Mergeability](#mergeability) | — |
 | **New Commits** | `github:pr:new_commits` | The head commit changes | — |
 | **PR Body Updated** | `github:pr:body_updated` | The complete PR body changes, including clearing it | — |
 | **PR Merged** | `github:pr:merged` | `merged` changes to `true` | — |
@@ -53,7 +53,8 @@ most one active task exists per entity, event type and `dedup_key`.
 A PR is first stored from the REST listing of open PRs, which carries its
 review requests and body but no check runs, reviews or comments. Its review
 requests emit then, and the GraphQL refresh that follows in the same cycle
-reports the check runs, reviews and merge conflicts already on it. The comments
+reports the check runs and reviews already on it. Whether it conflicts is
+reported by its first mergeability probe, about 15 seconds later. The comments
 already on it are its baseline and emit nothing, and so are the mentions in its
 body unless it was created since TF last listed its repository (see
 [Mentions](#mentions)).
@@ -227,6 +228,39 @@ Some limits:
 - An edit TF makes to the PR body counts like anyone's: no artifact records it.
   So does the body of a PR TF opened when a poll lists the PR before the
   agent's record of it lands.
+
+#### Mergeability
+
+A PR's mergeability is not part of its snapshot, and the refresh does not ask
+for it. GitHub computes it lazily: a read starts a test merge, answers
+`UNKNOWN` until it finishes, and a push to the base branch resets it. So TF
+reads it only when it can have changed, through a probe the poll admits:
+
+- `new`: TF holds no answer for the PR;
+- `head_moved`: the PR's head is not the one TF last read it at. The head
+  comes from the cycle's refresh of the PR, or from the open-PR listing; a
+  repository whose listing is unchanged (a 304) admits nothing on this rule;
+- `sweep`: TF last read it more than 10 minutes ago, which bounds how late a
+  conflict caused by the base branch moving is seen.
+
+A probe is read 15 seconds after its admission, and a PR with a probe already
+waiting collapses into it. The probe worker reads the waiting PRs that share a
+GitHub credential (an App installation, or the org's token) in one GraphQL
+query (`PRMergeability`), whatever repositories they are in, and stores each
+known answer (`MERGEABLE` or `CONFLICTING`) with the head it was read at. The
+two conflict events fire from the stored answer's transitions, in the write
+that stores it, so the stored answer is their re-emit guard. An `UNKNOWN`
+answer is read again 30 seconds later, at most 10 times, and leaves the stored
+answer alone; the tenth records the read's head and time with no answer, so
+the PR waits for its sweep. A read GitHub refuses for a rate limit waits for
+the limit to reset, and the credential's other PRs wait with it without a
+request. A probe whose reads keep failing for another reason is given up after
+its fifth attempt with nothing written, and one whose repository no credential
+the org holds can read (a repository outside the App's grant, say) is given up
+on its first; the next poll admits the PR again, since each admission reason is
+decided from the stored answer every cycle. A probe parks only after ten
+attempts, which takes repeated crashes or failures in the worker itself. The
+events carry no source time.
 
 #### PR Unreachable
 
@@ -922,7 +956,7 @@ the old repository's #N, and the two never merge.
 The tracker stores these fields for each PR and diffs them between cycles:
 
 - `number`, `title`, `author`, `author_id` (GitHub's id for the author's account), `repo`, `head_repo`, `url`
-- `state` (OPEN, CLOSED, MERGED), `is_draft`, `merged`, `mergeable` (MERGEABLE, CONFLICTING, UNKNOWN)
+- `state` (OPEN, CLOSED, MERGED), `is_draft`, `merged`
 - `head_ref`, `base_ref`, `head_sha`
 - `additions`, `deletions`, `changed_files`
 - `check_runs[]` — structured per-check-run data for the current head SHA, deduped by name (latest execution wins). Each entry: `id`, `name`, `status`, `conclusion`, `completed_at`, `details_url`, `workflow_run_id`. `details_url` is GitHub's `details_url` — the CI provider's "more info" link (for Actions: `/actions/runs/N/job/M`; for third-party CI: provider-defined), not GitHub's narrower check-run page URL.

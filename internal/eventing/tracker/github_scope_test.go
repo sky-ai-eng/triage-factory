@@ -183,7 +183,7 @@ func newGitHubScopeFixture(t *testing.T) *githubScopeFixture {
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, runmode.LocalDefaultOrgID)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, runmode.LocalDefaultOrgID)
 	return &githubScopeFixture{database: database, stores: stores, pub: pub, tr: tr}
 }
 

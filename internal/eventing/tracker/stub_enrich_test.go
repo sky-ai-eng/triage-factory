@@ -110,7 +110,7 @@ func TestRefreshGitHub_EnrichesSnapshotlessStub(t *testing.T) {
 			}
 
 			pub := &recordingPublisher{}
-			tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, org)
+			tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, org)
 			client := ghclient.NewClient(srv.URL, "tok")
 
 			// repos=nil → no discovery; the stub is reached only via Phase-2.
@@ -198,7 +198,7 @@ func TestRefreshJira_EnrichesSnapshotlessStub(t *testing.T) {
 			}
 
 			pub := &recordingPublisher{}
-			tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, org)
+			tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, org)
 			client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
 
 			if _, err := tr.RefreshJira(context.Background(), "https://jira.example.com", client, srv.URL, registeredRules(t, stores.JiraProjects, "https://jira.example.com", tc.projects)); err != nil {
@@ -278,7 +278,7 @@ func TestRefreshGitHub_StubExitsSeedModeAndDiffsNextCycle(t *testing.T) {
 	}
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 
 	// Cycle 1: quiet seed — no events, and the snapshot now carries the node_id.

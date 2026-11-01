@@ -526,3 +526,76 @@ func TestGet_BodyReadErrorSurfaced(t *testing.T) {
 		t.Fatal("a body-read failure must not be misclassified as ErrRateLimited")
 	}
 }
+
+// TestGet_RateLimitWaitPastTheDeadline_ReturnsErrRateLimitedPromptly: a wait
+// GitHub names that would end after the caller's deadline is not slept
+// through into the deadline's error. The call stops with ErrRateLimited at
+// once, saying when to resume, whether the wait is a secondary limit's
+// Retry-After or a spent budget's reset, both within maxRateLimitWait.
+func TestGet_RateLimitWaitPastTheDeadline_ReturnsErrRateLimitedPromptly(t *testing.T) {
+	refusals := map[string]func(w http.ResponseWriter){
+		"secondary Retry-After": func(w http.ResponseWriter) {
+			w.Header().Set("Retry-After", "60")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"You have exceeded a secondary rate limit."}`))
+		},
+		"spent budget": func(w http.ResponseWriter) {
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", time.Now().Add(time.Minute).Unix()))
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
+		},
+	}
+	for name, refuse := range refusals {
+		t.Run(name, func(t *testing.T) {
+			var calls int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				atomic.AddInt32(&calls, 1)
+				refuse(w)
+			}))
+			defer srv.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			start := time.Now()
+			_, err := clientAgainst(srv.URL).Get(ctx, "/x")
+			if elapsed := time.Since(start); elapsed > 2*time.Second {
+				t.Errorf("elapsed = %v, want a prompt return rather than a wait into the deadline", elapsed)
+			}
+			var rl *ErrRateLimited
+			if !errors.As(err, &rl) {
+				t.Fatalf("err = %v, want *ErrRateLimited", err)
+			}
+			if until := time.Until(rl.ResumeAt); until < 50*time.Second {
+				t.Errorf("ResumeAt is %v away, want the minute GitHub named", until)
+			}
+			if got := atomic.LoadInt32(&calls); got != 1 {
+				t.Errorf("upstream requests = %d, want 1", got)
+			}
+		})
+	}
+}
+
+// TestPostGraphQL_RateLimitedErrorIn200_ReturnsErrRateLimited: GitHub can
+// refuse a query on a spent budget with a 200 whose only content is a
+// RATE_LIMITED error. It is the same refusal as a 403 reporting a spent
+// budget, and resumes at the budget's reset.
+func TestPostGraphQL_RateLimitedErrorIn200_ReturnsErrRateLimited(t *testing.T) {
+	reset := time.Now().Add(time.Hour)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-RateLimit-Resource", "graphql")
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", reset.Unix()))
+		_, _ = w.Write([]byte(`{"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}`))
+	}))
+	defer srv.Close()
+
+	_, err := clientAgainst(srv.URL).PostGraphQL(context.Background(), "{ __typename }", nil)
+	var rl *ErrRateLimited
+	if !errors.As(err, &rl) {
+		t.Fatalf("err = %v, want *ErrRateLimited", err)
+	}
+	if !rl.ResumeAt.Equal(time.Unix(reset.Unix(), 0)) {
+		t.Errorf("ResumeAt = %v, want the budget's reset %v", rl.ResumeAt, time.Unix(reset.Unix(), 0))
+	}
+}

@@ -822,3 +822,69 @@ func testAdmitUnderRowLock(t *testing.T, mk Factory) {
 	}
 	e.requireStatus(id, "done")
 }
+
+// testCompleteAndAdmit pins the completion that hands its obligation to a
+// successor: the closure's write, the done flip and the successor's ready row
+// under the same key all commit together, and the successor holds the key, so
+// a later admission collapses into it rather than minting a third row. A
+// closure that owes nothing again completes with no successor. A receipt
+// whose lease another holder took writes nothing at all.
+func testCompleteAndAdmit(t *testing.T, mk Factory) {
+	e := setup(t, mk, opts{unique: workitem.UniqueWhileUnsettled, policy: workitem.Policy{MaxAttempts: 5, Lease: shortLease}})
+	id := e.admitWith("owed-again", "original", 0)
+	r := e.claimOne("worker-a", 1)
+
+	successor, err := workitem.CompleteAndAdmit(e.ctx, e.conn, e.kind, r, func(tx *sql.Tx) (map[string]any, error) {
+		_, err := tx.ExecContext(e.ctx, e.q("UPDATE "+e.kind.Table+" SET payload = ? WHERE id = ?"), "domain", id)
+		return map[string]any{"payload": "next", "frozen_col": 1}, err
+	})
+	if err != nil {
+		t.Fatalf("CompleteAndAdmit: %v", err)
+	}
+	if successor == 0 || successor == id {
+		t.Fatalf("successor id = %d, want a new row", successor)
+	}
+	e.requireStatus(id, workitem.StatusDone)
+	if got := asString(e.row(id)["payload"]); got != "domain" {
+		t.Errorf("completed row payload = %q, want the closure's write", got)
+	}
+	next := e.row(successor)
+	if asString(next["status"]) != workitem.StatusReady || asString(next["unique_key"]) != "owed-again" || asString(next["payload"]) != "next" || asInt(next["attempt"]) != 0 {
+		t.Errorf("successor = %v, want a fresh ready row under the same key carrying the given columns", next)
+	}
+	if dupID, dup := e.admitDup("owed-again"); !dup || dupID != successor {
+		t.Errorf("a later admission = (%d, deduplicated %v), want it collapsed into successor %d", dupID, dup, successor)
+	}
+
+	last := e.claimOne("worker-a", 1)
+	if got, err := workitem.CompleteAndAdmit(e.ctx, e.conn, e.kind, last, func(*sql.Tx) (map[string]any, error) { return nil, nil }); err != nil || got != 0 {
+		t.Fatalf("CompleteAndAdmit owing nothing = (%d, %v), want (0, nil)", got, err)
+	}
+	e.requireStatus(successor, workitem.StatusDone)
+	e.admit("owed-again") // the key is free
+
+	// A taken-over receipt: the claim's lease runs out, another holder
+	// reclaims the row, and the straggler's completion writes nothing.
+	stale := e.claimOne("worker-a", 1)
+	e.expireLease()
+	e.claimOne("worker-b", 1)
+	before := e.table()
+	if _, err := workitem.CompleteAndAdmit(e.ctx, e.conn, e.kind, stale, func(tx *sql.Tx) (map[string]any, error) {
+		_, err := tx.ExecContext(e.ctx, e.q("UPDATE "+e.kind.Table+" SET payload = ? WHERE id = ?"), "straggler", stale.ItemID)
+		return map[string]any{"payload": "straggler", "frozen_col": 2}, err
+	}); !errors.Is(err, workitem.ErrLeaseLost) {
+		t.Fatalf("straggler CompleteAndAdmit = %v, want ErrLeaseLost", err)
+	}
+	if after := e.table(); !reflect.DeepEqual(before, after) {
+		t.Errorf("the table changed under a straggler's completion\nbefore: %v\nafter:  %v", before, after)
+	}
+
+	forever := setup(t, mk, opts{table: FixtureForeverTable, unique: workitem.UniqueForever, policy: workitem.Policy{MaxAttempts: 5, Lease: time.Minute}})
+	forever.admitWith("forever", "p", 0)
+	held := forever.claimOne("worker-a", 1)
+	if _, err := workitem.CompleteAndAdmit(forever.ctx, forever.conn, forever.kind, held, func(*sql.Tx) (map[string]any, error) {
+		return map[string]any{"payload": "p", "frozen_col": 0}, nil
+	}); err == nil {
+		t.Error("CompleteAndAdmit on a UniqueForever kind succeeded, want a refusal")
+	}
+}

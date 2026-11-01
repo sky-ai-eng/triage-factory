@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
@@ -12,8 +13,8 @@ import (
 )
 
 // A pull request whose merge conflicts clear closes its conflicts task, gated
-// on the stored snapshot still reading MERGEABLE, and held until the run ends
-// when the run's own push resolved them.
+// on its stored mergeability still reading MERGEABLE, and held until the run
+// ends when the run's own push resolved them.
 
 // seedConflictsTaskOnEntity drains a conflicts event so the entity ends up
 // with exactly one live task, and returns it.
@@ -34,6 +35,19 @@ func seedConflictsTaskOnEntity(t *testing.T, r *Router, database *sql.DB, source
 	return entityID, live[0].ID
 }
 
+// seedMergeability writes the pull request's stored mergeability, standing
+// in for the probe worker's answer.
+func seedMergeability(t *testing.T, database *sql.DB, entityID, mergeable string) {
+	t.Helper()
+	if _, err := database.Exec(`
+		INSERT INTO pull_request_mergeability (entity_id, mergeable, mergeable_head_sha, checked_at)
+		VALUES (?, ?, 'head', ?)
+		ON CONFLICT (entity_id) DO UPDATE SET mergeable = excluded.mergeable
+	`, entityID, mergeable, time.Now().UTC()); err != nil {
+		t.Fatalf("seed mergeability: %v", err)
+	}
+}
+
 // enqueueConflictsResolved durably enqueues a conflicts_resolved event
 // observed at headSHA.
 func enqueueConflictsResolved(t *testing.T, database *sql.DB, entityID, headSHA string) {
@@ -48,7 +62,7 @@ func TestCloseConflictsResolved_ClosesTheConflictsTask(t *testing.T) {
 	r := newQueueWorkerRouter(t, database)
 	entityID, taskID := seedConflictsTaskOnEntity(t, r, database, "owner/repo#resolved")
 
-	seedPRSnapshot(t, database, entityID, domain.PRSnapshot{Mergeable: "MERGEABLE"})
+	seedMergeability(t, database, entityID, domain.MergeableMergeable)
 	enqueueConflictsResolved(t, database, entityID, "after")
 	if err := r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("drain the resolution: %v", err)
@@ -64,14 +78,14 @@ func TestCloseConflictsResolved_ConflictingAgainClosesNothing(t *testing.T) {
 	r := newQueueWorkerRouter(t, database)
 	entityID, taskID := seedConflictsTaskOnEntity(t, r, database, "owner/repo#conflicting-again")
 
-	seedPRSnapshot(t, database, entityID, domain.PRSnapshot{Mergeable: "CONFLICTING"})
+	seedMergeability(t, database, entityID, domain.MergeableConflicting)
 	enqueueConflictsResolved(t, database, entityID, "after")
 	if err := r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("drain the resolution: %v", err)
 	}
 
 	if status, _, _ := taskRow(t, database, taskID); status == "done" {
-		t.Error("the conflicts task closed while the snapshot says CONFLICTING")
+		t.Error("the conflicts task closed while the stored mergeability says CONFLICTING")
 	}
 }
 
@@ -84,7 +98,7 @@ func TestCloseConflictsResolved_RunsOwnPushDefersTheClose(t *testing.T) {
 	runID, convID := seedRunOnTask(t, database, taskID, "running", "")
 	recordAgentPush(t, database, convID, pushedSHA)
 
-	seedPRSnapshot(t, database, entityID, domain.PRSnapshot{Mergeable: "MERGEABLE"})
+	seedMergeability(t, database, entityID, domain.MergeableMergeable)
 	enqueueConflictsResolved(t, database, entityID, pushedSHA)
 	if err := r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("drain the resolution: %v", err)

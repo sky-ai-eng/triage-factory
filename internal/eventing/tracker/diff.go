@@ -84,21 +84,6 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, repositoryID string
 		})
 	}
 
-	// emitNoSource records an event we know has no honest source time
-	// (e.g., pr:conflicts, where GitHub computes mergeable async and
-	// exposes no transition timestamp). occurred_at stays zero so callers
-	// don't mistake the entity's last-edit time for the conflict moment.
-	emitNoSource := func(eventType, dedupKey string, metadata any) {
-		metaJSON, _ := json.Marshal(metadata)
-		evts = append(evts, domain.Event{
-			EventType:    eventType,
-			EntityID:     eid,
-			DedupKey:     dedupKey,
-			MetadataJSON: string(metaJSON),
-			CreatedAt:    now,
-		})
-	}
-
 	// --- First discovery: no previous state to diff against ----------------
 	// On first discovery we DON'T emit events — the entity just gets created
 	// and the snapshot seeds. Events fire on the NEXT poll when we can
@@ -220,29 +205,6 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, repositoryID string
 			IsDraft: curr.IsDraft, CommitCount: 0, // count not available in snapshot
 			HeadSHA: curr.HeadSHA, PrevHeadSHA: prev.HeadSHA,
 			Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number, Labels: curr.Labels,
-		})
-	}
-
-	// --- Merge conflicts ---------------------------------------------------
-
-	if prev.Mergeable != "CONFLICTING" && curr.Mergeable == "CONFLICTING" {
-		// pr:conflicts has no honest source time — GitHub computes
-		// mergeable asynchronously and exposes no transition timestamp.
-		// updatedAt would be a misleading proxy because base-branch
-		// advances that flip mergeable don't always bump it.
-		emitNoSource(domain.EventGitHubPRConflicts, "", events.GitHubPRConflictsMetadata{
-			Author: curr.Author, AuthorID: curr.AuthorID,
-			Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
-			IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
-		})
-	}
-
-	// A resolution has no honest source time either, for the same reason.
-	if prev.Mergeable == "CONFLICTING" && curr.Mergeable == "MERGEABLE" {
-		emitNoSource(domain.EventGitHubPRConflictsResolved, "", events.GitHubPRConflictsResolvedMetadata{
-			Author: curr.Author, AuthorID: curr.AuthorID,
-			Repo: curr.Repo, RepositoryID: repositoryID, PRNumber: curr.Number,
-			IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 		})
 	}
 

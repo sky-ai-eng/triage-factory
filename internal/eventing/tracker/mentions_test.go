@@ -351,7 +351,7 @@ func TestRefreshGitHub_MentionedEndToEnd(t *testing.T) {
 		commentPage, reviewPage)
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, nil, mentionResolver); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
@@ -388,7 +388,7 @@ func TestRefreshGitHub_KeepsBodyMentionsWithoutTheBody(t *testing.T) {
 	reads := 0
 	srv := commentRefreshServer(t, `{"totalCount":0,"nodes":[]}`, `{}`, &reads)
 
-	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, runmode.LocalDefaultOrgID)
+	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, runmode.LocalDefaultOrgID)
 	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, ghclient.NewClient(srv.URL, "tok"), domain.GitHubAccount{}, nil, mentionResolver); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
@@ -479,7 +479,7 @@ func TestRefreshGitHub_OpenedPRBodyMentions(t *testing.T) {
 		openPRJSON(3, "carol", "cc @bob", start.Add(-time.Hour)),
 		openPRJSON(4, "carol", "cc @erin", start.Add(-time.Minute)))
 	client := ghclient.NewClient(openedPRServer(t, first, second).URL, "tok")
-	tr := New(database, &recordingPreEnqueuedPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, org)
+	tr := New(database, &recordingPreEnqueuedPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, org)
 	resolver := knownLogins{"bob": true, "carol": true, "erin": true}
 
 	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, domain.GitHubAccount{}, []string{"octo/repo"}, resolver); err != nil {

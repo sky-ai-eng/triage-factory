@@ -54,8 +54,9 @@ const (
 var transientBackoffBase = 1 * time.Second
 
 // ErrRateLimited is returned when a GitHub rate-limit budget is exhausted:
-// retries for a transient 429/secondary-403 ran out, or a known
-// remaining-budget reset wouldn't land within maxRateLimitWait. It lets
+// retries for a transient 429/secondary-403 ran out, a known
+// remaining-budget reset wouldn't land within maxRateLimitWait, or the wait
+// would end after the caller's deadline. It lets
 // internal/eventing/poller / internal/eventing/tracker distinguish "stop and resume later" from
 // a genuine API failure — the poller-side resume logic is a separate ticket
 // (TFAC-569's parent epic), this type is only the signal.
@@ -176,7 +177,7 @@ func (c *Client) awaitBudget(ctx context.Context, bucket string) error {
 	ctx, span := tracer.Start(ctx, "github.ratelimit.await")
 	defer span.End()
 
-	if wait > maxRateLimitWait {
+	if wait > maxRateLimitWait || outlastsDeadline(ctx, wait) {
 		span.SetAttributes(telemetry.Outcome("refused"))
 		return &ErrRateLimited{ResumeAt: reset}
 	}
@@ -186,6 +187,26 @@ func (c *Client) awaitBudget(ctx context.Context, bucket string) error {
 	}
 	span.SetAttributes(telemetry.Outcome("waited"))
 	return nil
+}
+
+// graphQLResumeAt is when a query GitHub refused for its rate limit may be
+// sent again: the GraphQL budget's reset when c's latest reading of it says
+// it is spent and names one ahead, and the first rate-limit backoff from now
+// otherwise.
+func (c *Client) graphQLResumeAt() time.Time {
+	if remaining, reset, ok := c.RateLimit(bucketGraphQL); ok && remaining == 0 && reset.After(time.Now()) {
+		return reset
+	}
+	return time.Now().Add(rateLimitBackoffBase)
+}
+
+// outlastsDeadline reports whether a wait of d would end after ctx's
+// deadline. Such a wait can only end in the deadline's error, which tells the
+// caller nothing about the rate limit it was waiting out, so the call stops
+// with ErrRateLimited instead and the caller learns when to come back.
+func outlastsDeadline(ctx context.Context, d time.Duration) bool {
+	deadline, ok := ctx.Deadline()
+	return ok && time.Now().Add(d).After(deadline)
 }
 
 // awaitRetry blocks out one backoff between attempts under its own span.
@@ -421,7 +442,7 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent, s
 				wait = upstream.Backoff(attempt, rateLimitBackoffBase, maxRateLimitWait)
 			}
 
-			if !idempotent || wait > maxRateLimitWait || attempt >= maxAttempts || upstream.Unreachable(ctx, host) {
+			if !idempotent || wait > maxRateLimitWait || attempt >= maxAttempts || outlastsDeadline(ctx, wait) || upstream.Unreachable(ctx, host) {
 				return nil, nil, &ErrRateLimited{ResumeAt: time.Now().Add(wait)}
 			}
 			if err := c.retryAfter(ctx, attempt, class, wait); err != nil {
