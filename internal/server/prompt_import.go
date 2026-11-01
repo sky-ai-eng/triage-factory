@@ -18,7 +18,7 @@ import (
 // promptImportHandler serves the two prompt-import routes: the local-mode
 // filesystem scan of the process's ~/.claude/skills (db + prompts, the raw
 // handles the importer still takes) and the mode-agnostic paste/upload flow
-// (tx + az, the same claims-bound path handlePromptCreate uses).
+// (tx + az, the same claims-bound path the prompt create route uses).
 //
 // They live under /api/prompts because that is what they write. A skill is a
 // SKILL.md file — a format an import reads — not a second kind of row: both
@@ -73,9 +73,9 @@ const maxPromptUploadBytes = 256 << 10
 // content — the counterpart of the filesystem scan. Mode-agnostic on
 // purpose: in multi there is no per-tenant filesystem to scan, and in local
 // a paste is just another way to add a prompt. The row is created through
-// the exact WithTx + Prompts.Create path handlePromptCreate uses, scoped to
-// the requesting org and acting team, with source='imported' so the library
-// renders it alongside scan-imported rows.
+// the exact WithTx + Prompts.Create path the prompt create route uses, scoped
+// to the requesting org and acting team, with source='imported' so the
+// library renders it alongside scan-imported rows.
 //
 // POST /api/prompts/upload
 func (sk *promptImportHandler) handlePromptUpload(w http.ResponseWriter, r *http.Request) {
@@ -126,7 +126,7 @@ func (sk *promptImportHandler) handlePromptUpload(w http.ResponseWriter, r *http
 
 	userID := ClaimsFrom(r.Context()).Subject
 
-	// Same viewer gate as handlePromptCreate: resolve read-only first
+	// Same viewer gate as the prompt create route: resolve read-only first
 	// so a viewer gets a clean 403 instead of an RLS 500.
 	var actingTeam string
 	if err := sk.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {

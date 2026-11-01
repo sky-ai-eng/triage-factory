@@ -37,7 +37,7 @@ type eventHandlersHandler struct {
 // (caller should return — a response was written) for a viewer (403) or a load
 // failure (500). A missing handler passes through (returns true) so the
 // handler's own nil-check renders the 404 — never reached for an absent row.
-// The same shape as gateBlueprintWrite.
+// The same shape as the blueprint handlers' write gate.
 func (eh *eventHandlersHandler) gateHandlerWrite(w http.ResponseWriter, r *http.Request, orgID, userID, id string) bool {
 	var existing *domain.EventHandler
 	if err := eh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {

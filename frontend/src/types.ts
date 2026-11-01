@@ -452,8 +452,8 @@ export interface ConversationArtifact {
 }
 
 // ArtifactDeliverableRef names the deliverable that is the same object as an
-// artifact (internal/server artifactDeliverableJSON): enough to address it and
-// show where it stands.
+// artifact (usage.ArtifactDeliverableJSON in internal/server/usage): enough to
+// address it and show where it stands.
 export interface ArtifactDeliverableRef {
   id: string
   kind: DeliverableKind
@@ -1445,7 +1445,7 @@ export type WSEvent =
 // Three role-gated reads over the llm_spend view, each addressed by the scope
 // it reports on: /api/me/usage, /api/teams/{id}/usage, /api/orgs/{id}/usage.
 // snake_case fields mirror the Go response structs in
-// internal/server/usage_handler.go.
+// internal/server/usage/usage.go.
 // `cost` is real USD (SDK token counts × list price; see the TFAC-449 epic),
 // not an estimate.
 // ──────────────────────────────────────────────────────────────────────

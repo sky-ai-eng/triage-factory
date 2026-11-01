@@ -357,7 +357,7 @@ type Stores struct {
 	// boot-launched background goroutine with no JWT-claims context
 	// (system-written, org-scoped — same shape as PendingFirings). The
 	// org-scoped RLS policy gates the app-pool reads the llm_spend view
-	// makes (db.SpendStore, read by internal/server/usage_handler.go).
+	// makes (db.SpendStore, read by internal/server/usage).
 	// See TFAC-451.
 	SystemLLMRuns SystemLLMRunStore
 
@@ -366,7 +366,7 @@ type Stores struct {
 	// membership & role grants/changes/revokes, credential bind/rotate). App
 	// pool in Postgres: every Record composes inside the claims-bearing WithTx
 	// that runs the audited action, gated by an org-scoped RLS policy; the
-	// org-admin audit view (internal/server/usage_access_log.go) reads
+	// org-admin audit view (internal/server/usage/access_log.go) reads
 	// through the same pool. SQLite is N=1 and unscoped. See TFAC-471.
 	AccessChangeLog AccessChangeLogStore
 

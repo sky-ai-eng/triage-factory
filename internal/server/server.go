@@ -924,9 +924,10 @@ func (s *Server) routes() {
 	// The domains that live in their own subpackages register through the
 	// same two mounts, handed over as httpx.Mounts.
 	m := s.mounts()
-	models.New(s.az, s.tx, func() models.Prober { return s.modelProber }).Register(m)
-	deliverables.New(s.tx, s.ws, s.ghResolver,
-		func() *delegate.Spawner { return s.spawner },
+	spawner := func() *delegate.Spawner { return s.spawner }
+	avatars.New(s.tx).Register(m)
+	blueprints.New(s.tx, s.az, spawner).Register(m)
+	deliverables.New(s.tx, s.ws, s.ghResolver, spawner,
 		func() *reconcile.Reconciler { return s.reconciler },
 		func() string {
 			if s.deployCfg == nil {
@@ -935,14 +936,13 @@ func (s *Server) routes() {
 			return s.deployCfg.publicURL
 		},
 	).Register(m)
-	usage.New(s.tx, s.az, s.allStores.ConversationQueue).Register(m)
-	teams.New(s.tx, s.az, s.allStores, func() *delegate.Spawner { return s.spawner }, s.kickMemoryOwed).Register(m)
-	prompts.New(s.db, s.tx, s.az).Register(m)
-	blueprints.New(s.tx, s.az, func() *delegate.Spawner { return s.spawner }).Register(m)
-	work.New(s.az, s.allStores.WorkKinds).Register(m)
-	marketplace.New(s.tx, s.az).Register(m)
-	avatars.New(s.tx).Register(m)
 	factory.New(s.tx, func(t domain.Task) any { return taskToJSON(t) }).Register(m)
+	marketplace.New(s.tx, s.az).Register(m)
+	models.New(s.az, s.tx, func() models.Prober { return s.modelProber }).Register(m)
+	prompts.New(s.db, s.tx, s.az).Register(m)
+	teams.New(s.tx, s.az, s.allStores, spawner, s.kickMemoryOwed).Register(m)
+	usage.New(s.tx, s.az, s.allStores.ConversationQueue).Register(m)
+	work.New(s.az, s.allStores.WorkKinds).Register(m)
 
 	// SSO (connection / domains / break-glass admin surface, the verify-
 	// before-enforce test-start, and the identifier-first discovery probe) is
