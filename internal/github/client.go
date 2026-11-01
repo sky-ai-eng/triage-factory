@@ -170,16 +170,14 @@ type Client struct {
 // NewClient creates a GitHub API client. baseURL is the user-facing URL
 // (e.g. "https://github.com" or "https://github.example.com").
 func NewClient(baseURL, pat string) *Client {
-	// At the transport, so REST, GraphQL, artifact downloads (which
-	// clone this client, keeping its Transport), and the direct-Do
-	// calls that skip the retry core are all covered — none of them
-	// can reach the network any other way.
-	h := telemetry.TracedHTTPClient(30*time.Second, "github")
-	h.CheckRedirect = refuseWriteToRead
 	return &Client{
 		baseURL: ghbase.APIBase(baseURL),
 		pat:     pat,
-		http:    h,
+		// At the transport, so REST, GraphQL, artifact downloads (which
+		// clone this client, keeping its Transport), and the direct-Do
+		// calls that skip the retry core are all covered — none of them
+		// can reach the network any other way.
+		http: telemetry.TracedHTTPClient(30*time.Second, "github"),
 	}
 }
 
@@ -228,15 +226,13 @@ func (c *Client) Credential() string { return c.credential }
 // PostGraphQL fails closed — because the GraphQL endpoint sits beside the REST
 // base, not under it, and the REST proxy does not front it (see viaProxy).
 func NewProxyClient(proxyURL, placeholder string) *Client {
-	// Covers the executor's hop to its own sidecar, not the sidecar's
-	// hop to GitHub — the sidecar is span-free by standing decision,
-	// so this is the only view of the call there is.
-	h := telemetry.TracedHTTPClient(30*time.Second, "github")
-	h.CheckRedirect = refuseWriteToRead
 	return &Client{
-		baseURL:  proxyURL,
-		pat:      placeholder,
-		http:     h,
+		baseURL: proxyURL,
+		pat:     placeholder,
+		// Covers the executor's hop to its own sidecar, not the sidecar's
+		// hop to GitHub — the sidecar is span-free by standing decision,
+		// so this is the only view of the call there is.
+		http:     telemetry.TracedHTTPClient(30*time.Second, "github"),
 		viaProxy: true,
 	}
 }
@@ -251,15 +247,11 @@ func NewProxyClient(proxyURL, placeholder string) *Client {
 // Tracing follows the same ownership: a supplied client replaces the
 // instrumented one NewClient built, so a caller that wants spans wraps its
 // own Transport with telemetry.TracedTransport. The redirect policy does not:
-// the client sends through a copy of hc whose CheckRedirect is
-// refuseWriteToRead, because the request core reads a 3xx as a refused write
-// and a policy that followed one as a GET would report it done.
+// the request core sends with refuseWriteToRead whatever hc's CheckRedirect.
 func NewClientWithHTTPClient(baseURL, pat string, hc *http.Client) *Client {
 	c := NewClient(baseURL, pat)
 	if hc != nil {
-		own := *hc
-		own.CheckRedirect = refuseWriteToRead
-		c.http = &own
+		c.http = hc
 	}
 	return c
 }
@@ -454,7 +446,7 @@ func (c *Client) Delete(ctx context.Context, path string) ([]byte, error) {
 // because http.Client's fields are value types or interfaces that we don't
 // mutate.
 //
-// Redirects are followed automatically: the inherited CheckRedirect
+// Redirects are followed automatically: the request core's redirect policy
 // (refuseWriteToRead) follows every redirect of a GET. Go's stdlib strips
 // the Authorization header on cross-origin redirects, which is the right
 // behavior here — the signed S3 URL would reject our Bearer token anyway.
@@ -471,7 +463,7 @@ func (c *Client) DownloadArtifact(ctx context.Context, path string, dst io.Write
 	}
 
 	// Shallow copy so the long-download timeout doesn't bleed into other
-	// API calls that share the same client. Inherits Transport/Jar/CheckRedirect.
+	// API calls that share the same client. Inherits Transport/Jar.
 	client := *c.http
 	client.Timeout = downloadTimeout
 	resp, errBody, err := c.doStream(ctx, &client, build)

@@ -58,13 +58,18 @@ func TestClient_RedirectThatTurnsAWriteIntoARead(t *testing.T) {
 			}))
 			t.Cleanup(srv.Close)
 
-			err := write(context.Background(), NewClient(srv.URL, "pat"))
+			ctx, tally := upstream.WithTally(context.Background())
+			err := write(ctx, NewClient(srv.URL, "pat"))
 			var he *HTTPError
 			if !errors.As(err, &he) || he.StatusCode != http.StatusFound || he.Class != upstream.Rejected {
 				t.Fatalf("err = %v, want a rejected *HTTPError carrying the 302", err)
 			}
 			if n := loginHits.Load(); n != 0 {
 				t.Errorf("the redirect was followed %d time(s), want none", n)
+			}
+			if tally.Count(upstream.OK) != 0 || tally.Count(upstream.Rejected) != tally.Attempts() {
+				t.Errorf("tally = %d attempts, %d rejected, %d ok; want every attempt rejected",
+					tally.Attempts(), tally.Count(upstream.Rejected), tally.Count(upstream.OK))
 			}
 		})
 	}
@@ -132,8 +137,9 @@ func TestClient_RedirectsThatKeepTheMethodAreFollowed(t *testing.T) {
 	})
 }
 
-// TestNewClientWithHTTPClient_RefusesWriteToRead pins that a caller-supplied
-// client gets the write refusal too, without the caller's own client changing.
+// TestNewClientWithHTTPClient_RefusesWriteToRead pins that a client sending
+// through a caller-supplied *http.Client gets the write refusal too, without
+// the caller's own client changing.
 func TestNewClientWithHTTPClient_RefusesWriteToRead(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/login" {

@@ -319,6 +319,10 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent, s
 	if idempotent {
 		maxAttempts = 1 + maxRateLimitRetries
 	}
+	// Whatever policy hc carries, the core reads a 3xx as a redirect it did
+	// not follow, so it sends with the one that hands back a write's.
+	sender := *hc
+	sender.CheckRedirect = refuseWriteToRead
 
 	// bucket is the rate-limit bucket the request draws on: predicted from
 	// its URL until a response names it.
@@ -341,7 +345,7 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent, s
 			return nil, nil, &upstream.TransportError{Err: upstream.ErrHostSilent}
 		}
 		sent := time.Now()
-		resp, err := hc.Do(req)
+		resp, err := sender.Do(req)
 		if err != nil {
 			if c.viaProxy && dialFailed(err) {
 				// The base is the run's own credential proxy, so a connection
