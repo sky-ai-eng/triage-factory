@@ -51,6 +51,82 @@ func alpineRootfsForArch(arch string) (url, sha string, err error) {
 	}
 }
 
+// rustVersion pins the Rust release installed into the rootfs's /usr/local.
+// It comes from upstream (static.rust-lang.org) rather than apk because
+// every stable Alpine branch packages a Rust several releases behind
+// upstream, and crates raise their minimum Rust fast enough that a
+// repository's lockfile routinely refuses the packaged one. There is no
+// rustup in the rootfs, so a repository's rust-toolchain.toml is not read
+// and every build uses this release. Bumping it means re-pinning every sha
+// in rustComponentSHA256 from the .sha256 file published beside each
+// tarball; the version is folded into rootfsCacheKeyFor, so a bump re-bakes.
+const rustVersion = "1.99.1"
+
+// rustComponents are the parts of rustVersion's release the rootfs installs:
+// the compiler and the host target's standard library, cargo, and the two
+// linters an agent runs before it commits (cargo clippy, cargo fmt).
+var rustComponents = []string{"rustc", "cargo", "rust-std", "clippy", "rustfmt"}
+
+// rustHostTriples is the musl host target each supported GOARCH installs:
+// the rootfs is Alpine, so the toolchain has to run on musl.
+var rustHostTriples = map[string]string{
+	"amd64": "x86_64-unknown-linux-musl",
+	"arm64": "aarch64-unknown-linux-musl",
+}
+
+// rustComponentSHA256 pins each component tarball of rustVersion, by GOARCH.
+var rustComponentSHA256 = map[string]map[string]string{
+	"amd64": {
+		"rustc":    "97e78bf9efd2896f176b15c9d380c9cb19479926693e320b0650a141e68e161f",
+		"cargo":    "7ca474ad63165c5366ed3847c71aa0cdb60ba597f553bb415cd396c92023c8a5",
+		"rust-std": "89703fc52323fad35169fcf649e56844b7dd62bf9dd9a4113bbcd96865690e36",
+		"clippy":   "066f7517ab1be90a171e90fd6b731187d957b733f7090793f1f96b9e0a398f94",
+		"rustfmt":  "9b09be3488330dbacae32ab2089d12c701565b7369d95217a342b2910cae120b",
+	},
+	"arm64": {
+		"rustc":    "2f2e614d586b711913a39e7423d1cc2b58ff136da5e5c2de5eeda1b14864eeca",
+		"cargo":    "cd14d5ddfe977c769f0446efb825133e76b611f3af2d2f8ee084ebff5ad4f314",
+		"rust-std": "5202b22bf78e62f95304f6dfafd7e3e10ac839fb808e01cd12d66bbb99e7c1b8",
+		"clippy":   "f9247ddded27ea21a3426ccbf5d9ad9f0d1da73a806449941cdc46f9bf931303",
+		"rustfmt":  "b4348dcee85110175b9b46c23e093a33ff923380d4818d3967d8112e37b343d7",
+	},
+}
+
+// rustTarball is one component of the pinned Rust release: the tarball's
+// URL and sha256, and dir, the single top-level directory it extracts to.
+type rustTarball struct {
+	component string
+	url       string
+	sha       string
+	dir       string
+}
+
+// rustTarballsForArch returns the component tarballs to install for arch, in
+// rustComponents order. A missing pin is an error rather than a skipped
+// component, so a toolchain that cannot run (rustc without its standard
+// library) is never baked.
+func rustTarballsForArch(arch string) ([]rustTarball, error) {
+	triple, ok := rustHostTriples[arch]
+	if !ok {
+		return nil, fmt.Errorf("sandbox: no Rust toolchain pinned for GOARCH %q (add it to rustHostTriples and rustComponentSHA256)", arch)
+	}
+	tarballs := make([]rustTarball, 0, len(rustComponents))
+	for _, c := range rustComponents {
+		sha, ok := rustComponentSHA256[arch][c]
+		if !ok {
+			return nil, fmt.Errorf("sandbox: no sha256 pinned for Rust %s %s on GOARCH %q", rustVersion, c, arch)
+		}
+		dir := c + "-" + rustVersion + "-" + triple
+		tarballs = append(tarballs, rustTarball{
+			component: c,
+			url:       "https://static.rust-lang.org/dist/" + dir + ".tar.gz",
+			sha:       sha,
+			dir:       dir,
+		})
+	}
+	return tarballs, nil
+}
+
 // majorMinor strips the patch suffix off a semver-ish version string —
 // "3.21.7" → "3.21" — for use in the alpine release-tree URL.
 func majorMinor(version string) string {
@@ -130,11 +206,11 @@ func rootfsCacheKey() (string, error) {
 	return rootfsCacheKeyFor(sha, apkPackages), nil
 }
 
-// rootfsCacheKeyFor hashes (alpine_sha, sorted-package-set, pnpmVersion)
-// and returns the first 12 hex chars. Sorting before hashing means the
-// key depends on the package set, not on slice ordering — a future
-// maintainer reshuffling apkPackages won't silently invalidate a
-// cache that's actually still correct.
+// rootfsCacheKeyFor hashes (alpine_sha, sorted-package-set, pnpmVersion,
+// rustVersion, rustComponents) and returns the first 12 hex chars. Sorting
+// before hashing means the key depends on the package set, not on slice
+// ordering — a future maintainer reshuffling apkPackages won't silently
+// invalidate a cache that's actually still correct.
 //
 // The cache directory is derived from this key, so adding a package
 // (or bumping pnpmVersion) produces a new key, forces a fresh
@@ -152,7 +228,57 @@ func rootfsCacheKeyFor(alpineSha string, packages []string) string {
 		h.Write([]byte{0})
 	}
 	h.Write([]byte(pnpmVersion))
+	h.Write([]byte{0})
+	h.Write([]byte(rustVersion))
+	for _, c := range rustComponents {
+		h.Write([]byte{0})
+		h.Write([]byte(c))
+	}
 	return hex.EncodeToString(h.Sum(nil))[:12]
+}
+
+// mergeRustComponents installs one extracted Rust release tarball, release
+// being its top-level directory, into prefix the way the tarball's own
+// install.sh lays it out: every directory its components file names is moved
+// into prefix with its relative paths kept, less the manifest.in that lists
+// the component's files. Directories two components share (lib/rustlib)
+// merge. The installer's script, licenses, and version files at the top level
+// stay behind. release and prefix must be on one filesystem, since files move
+// by rename.
+func mergeRustComponents(release, prefix string) error {
+	list, err := os.ReadFile(filepath.Join(release, "components"))
+	if err != nil {
+		return err
+	}
+	for _, name := range strings.Fields(string(list)) {
+		// A name with any path structure would walk, and move into the
+		// rootfs, files outside the release.
+		if name == "." || name == ".." || name != filepath.Base(name) {
+			return fmt.Errorf("components names %q, which is not a directory of the release", name)
+		}
+		src := filepath.Join(release, name)
+		err := filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			rel, err := filepath.Rel(src, path)
+			if err != nil {
+				return err
+			}
+			if rel == "manifest.in" {
+				return nil
+			}
+			dst := filepath.Join(prefix, rel)
+			if d.IsDir() {
+				return os.MkdirAll(dst, 0o755)
+			}
+			return os.Rename(path, dst)
+		})
+		if err != nil {
+			return fmt.Errorf("install component %s: %w", name, err)
+		}
+	}
+	return nil
 }
 
 // extractTarGz unpacks a gzip-compressed tar archive into dst.

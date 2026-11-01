@@ -36,6 +36,7 @@ func TestJailEnv_AssemblesEveryInputInOrder(t *testing.T) {
 		"SSL_CERT_FILE=/run/tf-ca-bundle.crt",
 		"NODE_EXTRA_CA_CERTS=/run/tf-ca-bundle.crt",
 		"PIP_CERT=/run/tf-ca-bundle.crt",
+		"CARGO_HTTP_CAINFO=/run/tf-ca-bundle.crt",
 		"GH_HOST=10.42.1.1:443",
 		"GH_ENTERPRISE_TOKEN=placeholder",
 		"GH_PROMPT_DISABLED=1",

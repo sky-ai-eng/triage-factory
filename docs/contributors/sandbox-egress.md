@@ -48,7 +48,7 @@ Probe with a **large** artifact. The Go module proxy serves small zips inline
 and redirects large ones to shared storage, so a small-file test passes while
 real builds fail.
 
-Measured behavior (2026-08):
+Measured behavior:
 
 | Ecosystem | Serving behavior | Lane |
 | --- | --- | --- |
@@ -58,7 +58,8 @@ Measured behavior (2026-08):
 | Hackage | direct 200 | Tunnel, when a rootfs variant ships GHC |
 | Maven Central | direct 200 | Tunnel, when a rootfs variant ships a JDK |
 | GitHub release assets | 302 → `release-assets.githubusercontent.com` (dedicated) | Tunnel, if needed |
-| crates.io, Hugging Face | Not probed yet | Undecided (Hugging Face's presigned-storage redirects suggest the relay) |
+| crates.io | `index.crates.io` (sparse index) and `static.crates.io` (crates), both direct 200 | Tunnel (shipped; the API host `crates.io` stays off) |
+| Hugging Face | Not probed yet | Undecided (its presigned-storage redirects suggest the relay) |
 
 A tunnel entry also needs:
 

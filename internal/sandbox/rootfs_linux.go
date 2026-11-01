@@ -13,9 +13,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
@@ -144,8 +144,9 @@ func doEnsureRootfs(ctx context.Context) (string, error) {
 }
 
 // installToolchain runs `apk add` inside the freshly extracted rootfs
-// via chroot. The bare alpine minirootfs has busybox only; every real
-// agent run needs node + git + rg + python + go + build tools.
+// via chroot, then layers pnpm and the pinned Rust release on top. The
+// bare alpine minirootfs has busybox only; every real agent run needs
+// node + git + rg + python + go + rust + build tools.
 //
 // chroot(2) needs CAP_SYS_CHROOT, which root has. The sandbox path
 // already runs as root in production (netns + iptables manipulation
@@ -184,6 +185,48 @@ func installToolchain(ctx context.Context, rootfsDir string) error {
 
 	if err := installPnpm(ctx, rootfsDir); err != nil {
 		return fmt.Errorf("install pnpm: %w", err)
+	}
+	if err := installRust(ctx, rootfsDir); err != nil {
+		return fmt.Errorf("install rust: %w", err)
+	}
+	return nil
+}
+
+// installRust installs the pinned Rust release (rustVersion) into the
+// rootfs's /usr/local, which the jail's PATH already carries: each component
+// tarball is downloaded, verified against its pinned sha256, extracted, and
+// merged in. Like installPnpm this runs at bake time, on the host's own
+// egress; a jail reaches only the crate registries, never the toolchain
+// host. The staging directory sits inside the rootfs so the merge can move
+// files by rename, and is removed before the bake completes.
+func installRust(ctx context.Context, rootfsDir string) error {
+	tarballs, err := rustTarballsForArch(runtime.GOARCH)
+	if err != nil {
+		return err
+	}
+	staging := filepath.Join(rootfsDir, ".rust-staging")
+	tarball := filepath.Join(rootfsDir, ".rust.tgz.partial")
+	defer func() {
+		_ = os.RemoveAll(staging)
+		_ = os.Remove(tarball)
+	}()
+	prefix := filepath.Join(rootfsDir, "usr", "local")
+	for _, tb := range tarballs {
+		if err := os.RemoveAll(staging); err != nil {
+			return fmt.Errorf("%s: clean staging: %w", tb.component, err)
+		}
+		if err := downloadFile(ctx, tb.url, tarball); err != nil {
+			return fmt.Errorf("%s: download: %w", tb.component, err)
+		}
+		if err := verifySHA256(tarball, tb.sha); err != nil {
+			return fmt.Errorf("%s: verify sha256: %w", tb.component, err)
+		}
+		if err := extractTarGz(tarball, staging); err != nil {
+			return fmt.Errorf("%s: extract: %w", tb.component, err)
+		}
+		if err := mergeRustComponents(filepath.Join(staging, tb.dir), prefix); err != nil {
+			return fmt.Errorf("%s: %w", tb.component, err)
+		}
 	}
 	return nil
 }
@@ -258,13 +301,16 @@ func enableCommunityRepo(repoFile string) error {
 	return os.WriteFile(repoFile, data, 0o644)
 }
 
+// downloadFile fetches url into dst with no deadline of its own: ctx's is the
+// only one. The bake runs inside the broker's rootfsBakeTimeout, and a cap per
+// file would fail a large tarball on a slow link even when the whole bake fits
+// that budget, after which the bake starts over and fails the same way.
 func downloadFile(ctx context.Context, url, dst string) error {
-	client := &http.Client{Timeout: 5 * time.Minute}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
-	resp, err := client.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}

@@ -188,9 +188,11 @@ func (c *IPCClient) AdmitJailPorts(ctx context.Context, conversationID string, s
 	return c.call(ctx, methodAdmitJailPorts, admitJailPortsArgs{ConversationID: conversationID, SubnetIdx: subnetIdx, Ports: ports}, nil)
 }
 
+// EnsureRootfs gives the call the broker's rootfsBakeTimeout rather than
+// callTimeout, because a cold cache bakes the rootfs inside it.
 func (c *IPCClient) EnsureRootfs(ctx context.Context, selector sandbox.RootfsSelector) (string, error) {
 	var res ensureRootfsResult
-	if err := c.call(ctx, methodEnsureRootfs, ensureRootfsArgs{Selector: selector}, &res); err != nil {
+	if err := c.callWithCap(ctx, methodEnsureRootfs, ensureRootfsArgs{Selector: selector}, &res, rootfsBakeTimeout); err != nil {
 		return "", err
 	}
 	return res.Path, nil

@@ -23,12 +23,12 @@ type Registry struct {
 
 // DefaultRegistries is the built-in egress allowlist: the public package
 // registries for the toolchains installed in the sandbox rootfs
-// (internal/sandbox rootfs.go apkPackages). Every entry needs an in-sandbox
-// consumer, so ecosystems the rootfs doesn't ship (cargo, rubygems, ...) stay
-// off the list until a rootfs variant adds their toolchain. Go modules are not
-// here: cmd/go fetches through the per-run fetch relay (internal/proxy/egressrelay),
-// because the module proxy redirects into a shared storage namespace this list
-// must never carry.
+// (internal/sandbox rootfs.go apkPackages and rustVersion). Every entry needs
+// an in-sandbox consumer, so ecosystems the rootfs doesn't ship (rubygems,
+// Maven, ...) stay off the list until a rootfs variant adds their toolchain.
+// Go modules are not here: cmd/go fetches through the per-run fetch relay
+// (internal/proxy/egressrelay), because the module proxy redirects into a
+// shared storage namespace this list must never carry.
 //
 // Deliberately absent:
 //   - github.com / codeload.github.com — git egress goes through the
@@ -56,6 +56,12 @@ func DefaultRegistries() []Registry {
 		// wheel CPython bundles, and the rootfs ships no system pip.
 		{Host: "pypi.org"},
 		{Host: "files.pythonhosted.org"},
+		// crates.io, for cargo: the sparse index cargo reads by default, and
+		// the host the index's config.json names for crate downloads. The
+		// API host, crates.io itself, carries publish, yank, and owner changes,
+		// and stays off.
+		{Host: "index.crates.io"},
+		{Host: "static.crates.io"},
 	}
 }
 

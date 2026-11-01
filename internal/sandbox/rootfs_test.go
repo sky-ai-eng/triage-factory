@@ -280,6 +280,97 @@ func TestRootfsCacheKey_PerArchSeparate(t *testing.T) {
 	}
 }
 
+// TestRustTarballsForArch_PinsEveryComponent: every arch the alpine rootfs
+// supports resolves a concrete sha256 for every component of the pinned Rust
+// release, for its own musl triple. A missing or placeholder pin otherwise
+// surfaces only at the first bake on that arch.
+func TestRustTarballsForArch_PinsEveryComponent(t *testing.T) {
+	for _, arch := range []string{"amd64", "arm64"} {
+		tarballs, err := rustTarballsForArch(arch)
+		if err != nil {
+			t.Fatalf("%s: %v", arch, err)
+		}
+		if len(tarballs) != len(rustComponents) {
+			t.Fatalf("%s: %d tarballs, want one per component (%d)", arch, len(tarballs), len(rustComponents))
+		}
+		for _, tb := range tarballs {
+			assertConcreteSHA256(t, arch+" "+tb.component, tb.sha)
+			if !strings.Contains(tb.dir, rustHostTriples[arch]) || !strings.HasSuffix(tb.url, "/"+tb.dir+".tar.gz") {
+				t.Errorf("%s %s: dir %q, url %q; want the %s tarball", arch, tb.component, tb.dir, tb.url, rustHostTriples[arch])
+			}
+		}
+	}
+}
+
+// TestMergeRustComponents_LaysOutTheRelease: the components a release's
+// components file names land in the prefix with their paths kept, merging
+// where they share a directory, and neither a component's manifest.in nor the
+// installer's own top-level files come along.
+func TestMergeRustComponents_LaysOutTheRelease(t *testing.T) {
+	release, prefix := t.TempDir(), t.TempDir()
+	for rel, content := range map[string]string{
+		"components":        "rustc\nrust-std-x86_64-unknown-linux-musl\n",
+		"install.sh":        "#!/bin/sh\n",
+		"rustc/manifest.in": "file:bin/rustc\n",
+		"rustc/bin/rustc":   "rustc",
+		"rustc/lib/rustlib/etc/gdb_load_rust_pretty_printers.py":                         "",
+		"rust-std-x86_64-unknown-linux-musl/lib/rustlib/x86_64-unknown-linux-musl/lib/a": "std",
+	} {
+		p := filepath.Join(release, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := mergeRustComponents(release, prefix); err != nil {
+		t.Fatalf("mergeRustComponents: %v", err)
+	}
+	for _, rel := range []string{
+		"bin/rustc",
+		"lib/rustlib/etc/gdb_load_rust_pretty_printers.py",
+		"lib/rustlib/x86_64-unknown-linux-musl/lib/a",
+	} {
+		if _, err := os.Stat(filepath.Join(prefix, rel)); err != nil {
+			t.Errorf("%s not installed: %v", rel, err)
+		}
+	}
+	for _, rel := range []string{"manifest.in", "install.sh", "components"} {
+		if _, err := os.Stat(filepath.Join(prefix, rel)); err == nil {
+			t.Errorf("%s was installed into the prefix", rel)
+		}
+	}
+}
+
+// TestMergeRustComponents_RefusesAPathInComponents: a components entry with
+// path structure would walk, and move into the rootfs, files outside the
+// release, so it is refused before anything moves.
+func TestMergeRustComponents_RefusesAPathInComponents(t *testing.T) {
+	root := t.TempDir()
+	release, prefix := filepath.Join(root, "release"), filepath.Join(root, "prefix")
+	outside := filepath.Join(root, "outside", "secret")
+	for _, dir := range []string{release, prefix, filepath.Dir(outside)} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(outside, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(release, "components"), []byte("../outside\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := mergeRustComponents(release, prefix); err == nil {
+		t.Fatal("mergeRustComponents accepted a components entry outside the release")
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Errorf("the file outside the release moved: %v", err)
+	}
+}
+
 func mustWriteFile(t *testing.T, tw *tar.Writer, name, content string) {
 	t.Helper()
 	if err := tw.WriteHeader(&tar.Header{

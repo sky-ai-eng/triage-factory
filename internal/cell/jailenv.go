@@ -109,16 +109,20 @@ func baseEnv(extraEnv []string) []string {
 // caBundleEnv points every toolchain in the rootfs at the run's CA bundle,
 // each through the variable it reads: SSL_CERT_FILE for Go, curl, OpenSSL and
 // pip's system-store default, NODE_EXTRA_CA_CERTS for Node and so npm and
-// pnpm, and PIP_CERT so pip reads it whichever store its version defaults
-// to. The bundle is the system roots plus this run's own certificates, so
-// none of these narrows what a client trusted before. A toolchain added to
-// the rootfs that reads none of them fails the interception integration test
-// until its variable is here.
+// pnpm, PIP_CERT so pip reads it whichever store its version defaults to, and
+// CARGO_HTTP_CAINFO for cargo. Cargo's HTTP client honors SSL_CERT_FILE too,
+// but only by way of how it finds its roots; CARGO_HTTP_CAINFO is the setting
+// cargo itself documents, so a toolchain bump cannot quietly stop it
+// trusting the bundle. The bundle is the system roots plus this run's own
+// certificates, so none of these narrows what a client trusted before. A
+// toolchain added to the rootfs that reads none of them fails the
+// interception integration test until its variable is here.
 func caBundleEnv() []string {
 	return []string{
 		"SSL_CERT_FILE=" + CABundlePath,
 		"NODE_EXTRA_CA_CERTS=" + CABundlePath,
 		"PIP_CERT=" + CABundlePath,
+		"CARGO_HTTP_CAINFO=" + CABundlePath,
 	}
 }
 
