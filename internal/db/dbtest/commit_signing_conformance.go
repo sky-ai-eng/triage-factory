@@ -706,17 +706,6 @@ func RunCommitSignatureStoreConformance(t *testing.T, mk CommitSignatureStoreFac
 		}
 	})
 
-	t.Run("an_unknown_id_reads_as_absent", func(t *testing.T) {
-		store, orgID, _ := mk(t)
-		got, err := store.GetSystem(ctx, orgID, uuid.New().String())
-		if err != nil {
-			t.Fatalf("GetSystem: %v", err)
-		}
-		if got != nil {
-			t.Errorf("GetSystem(unknown) = %+v, want nil", got)
-		}
-	})
-
 	t.Run("a_commit_id_is_written_once", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		conversationID, claimID := seed.Claim(t)
@@ -765,6 +754,16 @@ func RunCommitSignatureStoreConformance(t *testing.T, mk CommitSignatureStoreFac
 		}
 		if _, err := store.SetCommitSHASystem(ctx, orgID, fresh.ID, ""); !errors.Is(err, db.ErrNoSuchCommitSignature) {
 			t.Errorf("SetCommitSHASystem with no commit id = %v, want ErrNoSuchCommitSignature", err)
+		}
+		// An unknown id reads as absent.
+		{
+			got, err := store.GetSystem(ctx, orgID, uuid.New().String())
+			if err != nil {
+				t.Fatalf("GetSystem: %v", err)
+			}
+			if got != nil {
+				t.Errorf("GetSystem(unknown) = %+v, want nil", got)
+			}
 		}
 	})
 

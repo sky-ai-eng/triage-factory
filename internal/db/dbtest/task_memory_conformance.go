@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -297,31 +296,18 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		}
 	})
 
-	t.Run("GetForConversationSystem_is_nil_when_the_conversation_has_no_row", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		conversationID, _ := seed.Conversation(t, "no-memory")
-		mem, err := s.GetForConversationSystem(ctx, orgID, conversationID)
-		if err != nil || mem != nil {
-			t.Errorf("GetForConversationSystem on a conversation with no row = (%v, %v), want (nil, nil)", mem, err)
-		}
-	})
-
 	t.Run("GetMemoriesForEntity_orders_by_created_at_ASC", func(t *testing.T) {
 		// Materializer reads in oldest-first order so the next agent
 		// reading prior memories sees them chronologically. Insert two
-		// conversations on the same entity with a sleep between them and pin
-		// the slice order.
+		// conversations on the same entity and pin the slice order. Both
+		// dialects bind created_at from Go at full resolution, so the two
+		// never tie.
 		s, orgID, seed := mk(t)
 		conv1, entityID := seed.Conversation(t, "order-first")
 		if _, err := s.UpsertAgentMemory(ctx, orgID, conv1, "", "first", domain.MemorySourceAgent); err != nil {
 			t.Fatalf("upsert first: %v", err)
 		}
 		seedPrimary(t, s, orgID, conv1, entityID)
-		// Sleep so SQLite's second-resolution column doesn't tie. The
-		// Postgres impl binds ns-resolution createdAt from Go side
-		// (matches the EventStore precedent) so the sleep is belt +
-		// suspenders.
-		time.Sleep(1100 * time.Millisecond)
 		conv2, _ := seed.Conversation(t, "order-second")
 		// The Conversation seeder returns a fresh entity per call; the test
 		// wants the second memory reachable from the FIRST entity, which the
@@ -514,6 +500,14 @@ func RunTaskMemoryReturnedRowConformance(t *testing.T, mk TaskMemoryStoreFactory
 		AssertWriteReturnedStoredRow(t, "UpsertAgentMemory (conflict)", mem2, read)
 		if mem2.ID != mem.ID || !mem2.CreatedAt.Equal(mem.CreatedAt) {
 			t.Errorf("UpsertAgentMemory (conflict) = %+v, want the original id/created_at preserved from %+v", mem2, mem)
+		}
+		// A conversation with no memory row reads nil.
+		{
+			conversationID, _ := seed.Conversation(t, "no-memory")
+			mem, err := s.GetForConversationSystem(ctx, orgID, conversationID)
+			if err != nil || mem != nil {
+				t.Errorf("GetForConversationSystem on a conversation with no row = (%v, %v), want (nil, nil)", mem, err)
+			}
 		}
 	})
 

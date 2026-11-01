@@ -1228,18 +1228,18 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		if _, ok := got[missing]; ok {
 			t.Errorf("nonexistent id should be absent from result")
 		}
+		// No input reads an empty map.
+		{
+			got, err := s.Descriptions(ctx, orgID, nil)
+			if err != nil {
+				t.Fatalf("Descriptions(nil): %v", err)
+			}
+			if len(got) != 0 {
+				t.Errorf("Descriptions(nil) = %v, want empty map", got)
+			}
+		}
 	})
 
-	t.Run("Descriptions_empty_input_returns_empty_map", func(t *testing.T) {
-		s, orgID, _ := mk(t)
-		got, err := s.Descriptions(ctx, orgID, nil)
-		if err != nil {
-			t.Fatalf("Descriptions(nil): %v", err)
-		}
-		if len(got) != 0 {
-			t.Errorf("Descriptions(nil) = %v, want empty map", got)
-		}
-	})
 }
 
 // TestScope is the scope a conformance test keys an entity of source under: what

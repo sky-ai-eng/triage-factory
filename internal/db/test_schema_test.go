@@ -4,33 +4,91 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
-	"path/filepath"
 	"reflect"
 	"sort"
 	"testing"
+	"testing/fstest"
 
 	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 )
 
-// TestBootstrapSchemaForTest_MatchesMigrate pins the cached bootstrap
-// path to the real Migrate path. Nearly every store and handler test in
-// the repo starts from the cached path, so if the restored page image
-// ever stops reproducing a freshly migrated database — a schema object
-// that doesn't survive the round trip, a migration whose seeded rows
-// land somewhere the template never captured — those tests all start
-// from the wrong state and say nothing about it. This test fails loudly
-// instead, comparing the schema catalog and row-counting every user
-// table on both paths.
-func TestBootstrapSchemaForTest_MatchesMigrate(t *testing.T) {
-	cached := openMem(t)
-	if err := BootstrapSchemaForTest(cached); err != nil {
-		t.Fatalf("BootstrapSchemaForTest: %v", err)
+// imagePinVersion is the version below head at which
+// TestMigrate_MatchesTheTestImages pins the image a migration test restores.
+// It is past a checkpoint and not one itself, so the image is a checkpoint's
+// restored and replayed forward, the way every such image is built.
+const imagePinVersion = 202609130001
+
+// TestMigrate_MatchesTheTestImages replays the SQLite tree from empty once,
+// and checks along the way everything a replay is needed for: the image a
+// migration test restores below head, a fresh install, and the images every
+// other SQLite-backed test restores. Nearly every store and handler test in
+// the repo starts from one of those images, so if a restored image ever stops
+// reproducing what the migrations leave — a schema object that doesn't
+// survive the round trip, a migration whose seeded rows land somewhere the
+// image never captured — those tests all start from the wrong state and say
+// nothing about it. This test fails instead, comparing the schema catalog and
+// row-counting every user table on both paths.
+func TestMigrate_MatchesTheTestImages(t *testing.T) {
+	// The replay starts Migrate from a database goose has already begun, so
+	// the brick check's arm for an empty database is checked on its own.
+	if err := assertFreshOrCurrent(openMem(t), "sqlite3"); err != nil {
+		t.Fatalf("brick check on an empty database: %v", err)
 	}
 
 	real := openMem(t)
-	if err := Migrate(real, "sqlite3"); err != nil {
-		t.Fatalf("Migrate: %v", err)
+	migrateThrough(t, real, imagePinVersion)
+	restored := openMigrationsTestDBAt(t, TestDSNMemory, imagePinVersion)
+	assertSameMigratedDatabase(t, fmt.Sprintf("image at %d", imagePinVersion), restored, real)
+
+	// Migrate takes it the rest of the way. The second Migrate is a launch on
+	// an up-to-date install, and the comparisons below see anything it
+	// changed.
+	for range 2 {
+		if err := Migrate(real, "sqlite3"); err != nil {
+			t.Fatalf("Migrate: %v", err)
+		}
+	}
+
+	var version int64
+	if err := real.QueryRow(
+		`SELECT version_id FROM goose_db_version WHERE version_id = ?`, v1110BaselineVersionID,
+	).Scan(&version); err != nil {
+		t.Fatalf("baseline not stamped in goose_db_version: %v", err)
+	}
+	for _, table := range []string{
+		"entities", "events", "tasks", "conversations", "messages", "claims",
+		"orgs", "users", "event_handlers",
+		"org_settings", "team_settings", "user_settings",
+		"jira_project_status_rules", "linear_team_rules",
+	} {
+		exists, err := tableExists(real, table)
+		if err != nil {
+			t.Fatalf("probe %s: %v", table, err)
+		}
+		if !exists {
+			t.Errorf("%s table missing after Migrate", table)
+		}
+	}
+	// A fresh install must not resurrect any dissolved table.
+	for _, table := range []string{
+		"runs", "run_messages", "curator_requests", "curator_messages",
+		"curator_pending_context", "run_pending_input",
+		"staged_agent_injections", "run_credentials", "curator_turn_credentials",
+		"curator_homes", "projects", "project_pinned_repos",
+	} {
+		exists, err := tableExists(real, table)
+		if err != nil {
+			t.Fatalf("probe %s: %v", table, err)
+		}
+		if exists {
+			t.Errorf("dissolved table %s present after Migrate", table)
+		}
+	}
+
+	cached := openMem(t)
+	if err := BootstrapSchemaForTest(cached); err != nil {
+		t.Fatalf("BootstrapSchemaForTest: %v", err)
 	}
 
 	// 1. sqlite_master must be identical: same DDL for every table,
@@ -96,7 +154,7 @@ func TestBootstrapSchemaForTest_MatchesMigrate(t *testing.T) {
 	}
 
 	// 6. The tenantless image is the same Migrate with no exception for
-	//    the tenant tables. It is built from the version cache's image at
+	//    the tenant tables. It is built from the image cache's image at
 	//    head, so this also pins that image against a replay from empty.
 	tenantless := openMem(t)
 	if err := BootstrapTenantlessSchemaForTest(tenantless); err != nil {
@@ -108,38 +166,42 @@ func TestBootstrapSchemaForTest_MatchesMigrate(t *testing.T) {
 	}
 }
 
-// A file in the shared image cache that is not this tree's head image is
-// treated as absent, so a bad file costs a rebuild rather than failing every
+// A file in the image cache that is not the image it is named for is treated
+// as absent, so a bad file costs a rebuild rather than failing every
 // SQLite-backed test that restores it.
-func TestReadHeadImage_TakesOnlyTheHeadImage(t *testing.T) {
+func TestImageCache_TakesOnlyTheImageItNames(t *testing.T) {
 	head, err := sqliteHeadVersion()
 	if err != nil {
 		t.Fatalf("head version: %v", err)
 	}
-	image, err := sharedHeadImage(head)
+	image, err := migratedImageAt(head)
 	if err != nil {
 		t.Fatalf("head image: %v", err)
 	}
-	write := func(body []byte) string {
+	below := head - 1
+	cache := &imageCache{dir: t.TempDir(), keys: map[int64]string{head: "head", below: "below"}}
+	put := func(version int64, body []byte) {
 		t.Helper()
-		path := filepath.Join(t.TempDir(), "head.img")
+		path, _ := cache.path(version)
 		if err := os.WriteFile(path, body, 0o600); err != nil {
 			t.Fatalf("write %s: %v", path, err)
 		}
-		return path
 	}
 
-	if _, ok := readHeadImage(write(image), head); !ok {
-		t.Error("the head image was rejected")
+	if _, ok := cache.read(head); ok {
+		t.Error("a missing file was taken")
 	}
-	if _, ok := readHeadImage(write(image), head+1); ok {
-		t.Error("an image at another version was taken as head")
+	cache.write(head, image)
+	if _, ok := cache.read(head); !ok {
+		t.Error("the image at head was rejected")
 	}
-	if _, ok := readHeadImage(write([]byte("not a database")), head); ok {
-		t.Error("a file that is not a database was taken as head")
+	put(below, image)
+	if _, ok := cache.read(below); ok {
+		t.Error("the image at head was taken as the image below it")
 	}
-	if _, ok := readHeadImage(filepath.Join(t.TempDir(), "missing.img"), head); ok {
-		t.Error("a missing file was taken as head")
+	put(head, []byte("not a database"))
+	if _, ok := cache.read(head); ok {
+		t.Error("a file that is not a database was taken")
 	}
 
 	// A damaged table page that leaves goose_db_version readable at head.
@@ -168,17 +230,51 @@ func TestReadHeadImage_TakesOnlyTheHeadImage(t *testing.T) {
 		t.Fatalf("the damaged image no longer reads at head (%d, %v), so it checks nothing a version read would miss", version, err)
 	}
 	_ = probe.Close()
-	if _, ok := readHeadImage(write(damaged), head); ok {
-		t.Error("an image with a damaged table page was taken as head")
+	put(head, damaged)
+	if _, ok := cache.read(head); ok {
+		t.Error("an image with a damaged table page was taken")
+	}
+}
+
+// An image's key covers the migrations up to its version and no others, so a
+// new migration leaves every cached image below it in place, and an edit to
+// one rebuilds every image above it.
+func TestImageCacheKeys_CoverTheMigrationsUpToTheirVersion(t *testing.T) {
+	keys := func(bodies ...string) map[int64]string {
+		t.Helper()
+		treeFS := fstest.MapFS{}
+		var tree goose.Migrations
+		for i, body := range bodies {
+			source := fmt.Sprintf("m/%d_m.sql", i+1)
+			treeFS[source] = &fstest.MapFile{Data: []byte(body)}
+			tree = append(tree, &goose.Migration{Version: int64(i + 1), Source: source})
+		}
+		k, ok := imageCacheKeysUnder("module pins\n", treeFS, tree)
+		if !ok {
+			t.Fatal("no keys for the tree")
+		}
+		return k
+	}
+	base := keys("a", "b")
+	appended := keys("a", "b", "c")
+	edited := keys("a", "B")
+	if appended[1] != base[1] || appended[2] != base[2] {
+		t.Error("a new migration changed the keys of the images below it")
+	}
+	if edited[1] != base[1] {
+		t.Error("an edit to migration 2 changed the key of the image at 1")
+	}
+	if edited[2] == base[2] {
+		t.Error("an edit to migration 2 left the key of the image at 2 unchanged")
 	}
 }
 
 // The cache key must change whenever the code of a module that writes the
 // image can, so a go.mod that replaces one with a directory, in any spelling
 // go.mod accepts, turns the cache off.
-func TestHeadImageCachePins(t *testing.T) {
+func TestImageCachePins(t *testing.T) {
 	const requires = "module m\n\ngo 1.26\n\nrequire (\n\tgithub.com/pressly/goose/v3 v3.27.1\n\tmodernc.org/libc v1.72.1\n\tmodernc.org/sqlite v1.50.0\n)\n"
-	base, ok := headImageCachePins([]byte(requires))
+	base, ok := imageCachePins([]byte(requires))
 	if !ok {
 		t.Fatal("refused a go.mod that requires every module")
 	}
@@ -193,7 +289,7 @@ func TestHeadImageCachePins(t *testing.T) {
 		{"one version to a directory", `replace modernc.org/sqlite v1.50.0 => ../sqlite`, false},
 		{"another module", `replace modernc.org/sqlite => example.com/fork/sqlite v1.50.1`, true},
 	} {
-		pins, ok := headImageCachePins([]byte(requires + tc.replace + "\n"))
+		pins, ok := imageCachePins([]byte(requires + tc.replace + "\n"))
 		if ok != tc.ok {
 			t.Errorf("%s: ok = %v, want %v", tc.name, ok, tc.ok)
 		}
@@ -201,55 +297,8 @@ func TestHeadImageCachePins(t *testing.T) {
 			t.Errorf("%s: the replacement left the key unchanged", tc.name)
 		}
 	}
-	if _, ok := headImageCachePins([]byte("module m\n\nrequire modernc.org/sqlite v1.50.0\n")); ok {
+	if _, ok := imageCachePins([]byte("module m\n\nrequire modernc.org/sqlite v1.50.0\n")); ok {
 		t.Error("took a go.mod that does not require every module")
-	}
-}
-
-// TestMigratedImageAt_MatchesUpTo pins the images the migration tests
-// restore in place of replaying the chain: at each version, a restored
-// image must be the database goose.UpTo leaves on an empty one opened
-// with the same DSN — same schema catalog, tables, row counts, applied
-// versions, and foreign-key enforcement.
-//
-// The versions are ascending, so run on its own the second image is
-// built from the first, through the table rebuilds that toggle
-// foreign-key enforcement inside their own migration. The first is
-// staged with enforcement off, as the tests that seed at it are, while
-// every image is built with it on.
-func TestMigratedImageAt_MatchesUpTo(t *testing.T) {
-	for _, tc := range []struct {
-		dsn     string
-		version int64
-	}{
-		{TestDSNMemoryNoForeignKeys, 202607200002},
-		{TestDSNMemory, 202609130001},
-	} {
-		label := fmt.Sprintf("image at %d", tc.version)
-		restored := openMigrationsTestDBAt(t, tc.dsn, tc.version)
-
-		replayed, err := sql.Open("sqlite", tc.dsn)
-		if err != nil {
-			t.Fatalf("open sqlite: %v", err)
-		}
-		replayed.SetMaxOpenConns(1)
-		replayed.SetMaxIdleConns(1)
-		t.Cleanup(func() { _ = replayed.Close() })
-		gooseMu.Lock()
-		goose.SetBaseFS(migrationsSQLiteFS)
-		upErr := goose.SetDialect("sqlite3")
-		if upErr == nil {
-			upErr = goose.UpTo(replayed, "migrations-sqlite", tc.version)
-		}
-		gooseMu.Unlock()
-		if upErr != nil {
-			t.Fatalf("goose.UpTo(%d) from empty: %v", tc.version, upErr)
-		}
-
-		assertSameMigratedDatabase(t, label, restored, replayed)
-		if got, want := foreignKeysEnabled(t, restored), foreignKeysEnabled(t, replayed); got != want {
-			t.Errorf("%s: foreign_keys = %v on the restored database, %v on the replayed one", label, got, want)
-		}
 	}
 }
 
@@ -273,15 +322,6 @@ func assertSameMigratedDatabase(t *testing.T, label string, got, want *sql.DB) {
 	if g, w := dumpMigrationVersions(t, got), dumpMigrationVersions(t, want); !reflect.DeepEqual(g, w) {
 		t.Errorf("%s: goose_db_version versions differ.\nrestored: %v\nreplayed: %v", label, g, w)
 	}
-}
-
-func foreignKeysEnabled(t *testing.T, db *sql.DB) bool {
-	t.Helper()
-	var on bool
-	if err := db.QueryRow(`PRAGMA foreign_keys`).Scan(&on); err != nil {
-		t.Fatalf("read foreign_keys: %v", err)
-	}
-	return on
 }
 
 func openMem(t *testing.T) *sql.DB {

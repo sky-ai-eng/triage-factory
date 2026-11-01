@@ -104,6 +104,16 @@ func RunGitHubPendingBindConformance(t *testing.T, mk GitHubPendingBindFactory) 
 		if got.ConsumedAt.IsZero() {
 			t.Error("ConsumedAt is zero on the returned row; the marker must be stamped by the same statement")
 		}
+		// An unknown nonce is the same nil as an expired one.
+		{
+			got, err := be.Store.ConsumeSystem(ctx, "hash-never-existed", be.UserID, time.Now().UTC())
+			if err != nil {
+				t.Fatalf("ConsumeSystem: %v", err)
+			}
+			if got != nil {
+				t.Errorf("ConsumeSystem returned %+v for an unknown nonce, want nil", got)
+			}
+		}
 	})
 
 	t.Run("ConsumeReturnsTheLegAndTheAccountTheCeremonyWasStartedFor", func(t *testing.T) {
@@ -225,17 +235,6 @@ func RunGitHubPendingBindConformance(t *testing.T, mk GitHubPendingBindFactory) 
 		}
 		if got != nil {
 			t.Errorf("ConsumeSystem returned %+v for an expired record, want nil", got)
-		}
-	})
-
-	t.Run("UnknownNonceIsTheSameNilAsAnExpiredOne", func(t *testing.T) {
-		be := mk(t)
-		got, err := be.Store.ConsumeSystem(ctx, "hash-never-existed", be.UserID, time.Now().UTC())
-		if err != nil {
-			t.Fatalf("ConsumeSystem: %v", err)
-		}
-		if got != nil {
-			t.Errorf("ConsumeSystem returned %+v for an unknown nonce, want nil", got)
 		}
 	})
 

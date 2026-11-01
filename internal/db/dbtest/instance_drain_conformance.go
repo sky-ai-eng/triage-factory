@@ -82,6 +82,16 @@ func RunInstanceDrainConformance(t *testing.T, mk InstanceDrainFactory) {
 		// The value left behind names an epoch that never comes back.
 		epoch = register(t, s, id)
 		wantDrain(t, s, id, epoch, false, false)
+		// An unknown id matches nothing.
+		{
+			matched, err := s.SetDrainUntilRestart(ctx, "never-registered")
+			if err != nil {
+				t.Fatalf("SetDrainUntilRestart: %v", err)
+			}
+			if matched {
+				t.Error("SetDrainUntilRestart on an unregistered id reported a match")
+			}
+		}
 	})
 
 	t.Run("APersistentDrainSurvivesRegister", func(t *testing.T) {
@@ -122,14 +132,4 @@ func RunInstanceDrainConformance(t *testing.T, mk InstanceDrainFactory) {
 		}
 	})
 
-	t.Run("UnknownIDMatchesNothing", func(t *testing.T) {
-		s := mk(t)
-		matched, err := s.SetDrainUntilRestart(ctx, "never-registered")
-		if err != nil {
-			t.Fatalf("SetDrainUntilRestart: %v", err)
-		}
-		if matched {
-			t.Error("SetDrainUntilRestart on an unregistered id reported a match")
-		}
-	})
 }

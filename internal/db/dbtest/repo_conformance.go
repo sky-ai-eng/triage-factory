@@ -208,19 +208,17 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		if got.ProfiledAt == nil {
 			t.Errorf("ProfiledAt should be non-nil after Upsert")
 		}
-	})
-
-	t.Run("GetByRef_returns_nil_on_miss", func(t *testing.T) {
-		// A name nobody has a row for is an answer, not a fault: it is what
-		// `workspace add` reports as "not configured", and what leaves the
-		// universal protected-branch set standing. So it stays a nil.
-		s, orgID, _ := mk(t)
-		got, err := s.GetByRef(ctx, orgID, repoRef("no/such-repo"))
-		if err != nil {
-			t.Fatalf("GetByRef: %v", err)
-		}
-		if got != nil {
-			t.Errorf("GetByRef on a missing repo should be nil, got %+v", got)
+		{
+			// A name nobody has a row for is an answer, not a fault: it is what
+			// `workspace add` reports as "not configured", and what leaves the
+			// universal protected-branch set standing. So it stays a nil.
+			got, err := s.GetByRef(ctx, orgID, repoRef("no/such-repo"))
+			if err != nil {
+				t.Fatalf("GetByRef: %v", err)
+			}
+			if got != nil {
+				t.Errorf("GetByRef on a missing repo should be nil, got %+v", got)
+			}
 		}
 	})
 

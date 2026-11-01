@@ -188,6 +188,13 @@ func sqliteSequenceScaffold(t *testing.T) (db.BlueprintStore, dbtest.BlueprintSe
 			}
 			return idx
 		},
+		BackdateRunStartedAt: func(t *testing.T, blueprintRunID string, age time.Duration) {
+			t.Helper()
+			if _, err := conn.Exec(`UPDATE blueprint_runs SET started_at = datetime('now', ?) WHERE id = ?`,
+				fmt.Sprintf("-%d seconds", int64(age.Seconds())), blueprintRunID); err != nil {
+				t.Fatalf("backdate started_at of %s: %v", blueprintRunID, err)
+			}
+		},
 		ConversationEnded: func(t *testing.T, convID string) bool {
 			t.Helper()
 			var endedAt sql.NullString

@@ -209,18 +209,6 @@ func RunMemoryAttemptStoreConformance(t *testing.T, mk MemoryAttemptStoreFactory
 		}
 	})
 
-	t.Run("complete_on_an_unknown_id_is_the_sentinel", func(t *testing.T) {
-		store, orgID, seed := mk(t)
-		// A well-formed id that names no row — the same shape the dangling
-		// ledger id takes, reused here because the attempts id column has the
-		// same type as the ledger's in both backends.
-		_, err := store.CompleteAttemptSystem(ctx, orgID, seed.DanglingSystemLLMRunID(t),
-			domain.MemoryAttemptEmpty, "", "", "", 0, 0)
-		if !errors.Is(err, db.ErrNoSuchMemoryAttempt) {
-			t.Fatalf("CompleteAttemptSystem on an unknown id err = %v, want ErrNoSuchMemoryAttempt", err)
-		}
-	})
-
 	t.Run("dangling_spend_ledger_id_stores_NULL", func(t *testing.T) {
 		// systemllm's recorder is best-effort, so the provisioner can hold an
 		// id whose ledger row never landed. That must not cost it the record
@@ -243,6 +231,16 @@ func RunMemoryAttemptStoreConformance(t *testing.T, mk MemoryAttemptStoreFactory
 		AssertWriteReturnedStoredRow(t, "CompleteAttemptSystem (dangling ledger id)", done, func() (*domain.MemoryAttempt, error) {
 			return store.NewestAttemptForConversationSystem(ctx, orgID, convID)
 		})
+		{
+			// A well-formed id that names no row — the same shape the dangling
+			// ledger id takes, reused here because the attempts id column has the
+			// same type as the ledger's in both backends.
+			_, err := store.CompleteAttemptSystem(ctx, orgID, seed.DanglingSystemLLMRunID(t),
+				domain.MemoryAttemptEmpty, "", "", "", 0, 0)
+			if !errors.Is(err, db.ErrNoSuchMemoryAttempt) {
+				t.Fatalf("CompleteAttemptSystem on an unknown id err = %v, want ErrNoSuchMemoryAttempt", err)
+			}
+		}
 	})
 
 	t.Run("empty_spend_ledger_id_stores_NULL", func(t *testing.T) {

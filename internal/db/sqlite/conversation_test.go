@@ -339,6 +339,13 @@ func newSQLiteConversationSeeder(conn *sql.DB) dbtest.ConversationSeeder {
 				t.Fatalf("collapse claim times: %v", err)
 			}
 		},
+		BackdateClaimedAt: func(t *testing.T, conversationID string, age time.Duration) {
+			t.Helper()
+			if _, err := conn.Exec(`UPDATE claims SET claimed_at = ? WHERE conversation_id = ?`,
+				time.Now().Add(-age).UTC(), conversationID); err != nil {
+				t.Fatalf("backdate claimed_at of %s: %v", conversationID, err)
+			}
+		},
 		Deliverable: func(t *testing.T, conversationID, kind, state, detailsJSON string) string {
 			t.Helper()
 			id := uuid.New().String()

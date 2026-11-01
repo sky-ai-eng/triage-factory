@@ -172,38 +172,3 @@ func costArg(c *float64) any {
 	}
 	return *c
 }
-
-// TestSpendView_SQLite_MigrationApplies pins that the view migration applies on
-// the shipped baseline chain via a real goose Migrate (not the cached test
-// bundle) and that the view is queryable. Empty DB → empty view, no error.
-func TestSpendView_SQLite_MigrationApplies(t *testing.T) {
-	conn, err := sql.Open("sqlite", db.TestDSNMemory)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-	conn.SetMaxOpenConns(1)
-	conn.SetMaxIdleConns(1)
-
-	if err := db.Migrate(conn, "sqlite3"); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-
-	var isView int
-	if err := conn.QueryRow(
-		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'llm_spend'`,
-	).Scan(&isView); err != nil {
-		t.Fatalf("probe sqlite_master: %v", err)
-	}
-	if isView != 1 {
-		t.Fatalf("llm_spend view missing after Migrate (found %d)", isView)
-	}
-
-	var n int
-	if err := conn.QueryRow(`SELECT COUNT(*) FROM llm_spend`).Scan(&n); err != nil {
-		t.Fatalf("select from llm_spend: %v", err)
-	}
-	if n != 0 {
-		t.Errorf("fresh llm_spend has %d rows, want 0", n)
-	}
-}

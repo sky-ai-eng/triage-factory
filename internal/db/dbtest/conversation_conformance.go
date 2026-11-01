@@ -135,6 +135,11 @@ type ConversationSeeder struct {
 	// calls it must read the claim ids first.
 	CollapseClaimTimes func(t *testing.T, conversationID string)
 
+	// BackdateClaimedAt rewrites claimed_at on every claim the conversation
+	// holds to `age` ago, so a claim minted after it is newer by more than
+	// any column's resolution.
+	BackdateClaimedAt func(t *testing.T, conversationID string, age time.Duration)
+
 	// BlueprintRun mints a blueprint + blueprint_run pair against the
 	// given taskID and returns the blueprint_run id. Every conversation
 	// row carries a NOT NULL blueprint_run_id FK (a single prompt is a
@@ -288,16 +293,11 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Errorf("never-claimed conversation carries claim state: attempts=%d claimedAt=%v executor=%q",
 				got.Attempts, got.ClaimedAt, got.ExecutorID)
 		}
-	})
-
-	t.Run("Get_ReturnsNilForMissingID", func(t *testing.T) {
-		store, orgID, _, _ := mk(t)
-		got, err := store.Get(context.Background(), orgID, uuid.New().String())
-		if err != nil {
-			t.Fatalf("Get missing: %v", err)
+		if got.EndedAt != nil || got.EndedReason != "" {
+			t.Errorf("a conversation nothing ended reads (%v, %q), want NULL/empty", got.EndedAt, got.EndedReason)
 		}
-		if got != nil {
-			t.Errorf("expected nil, got %+v", got)
+		if missing, err := store.Get(ctx, orgID, uuid.New().String()); err != nil || missing != nil {
+			t.Errorf("Get on a missing id = (%+v, %v), want (nil, nil)", missing, err)
 		}
 	})
 
@@ -930,60 +930,6 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	// Tokens derive from the messages ledger at read time, so a conversation
-	// that ends by cancel or infra-failure still reflects the tokens it streamed
-	// with no terminal roll-up at all.
-	t.Run("CancelAndFail_TokensStillDeriveFromLedger", func(t *testing.T) {
-		ptr := func(n int) *int { return &n }
-		seedRunningWithTokens := func(t *testing.T, store db.ConversationStore, orgID string, seed ConversationSeeder) string {
-			t.Helper()
-			ctx := context.Background()
-			conversationID := seedConversationForTest(t, orgID, seed, "running")
-			for _, m := range []*domain.Message{
-				{ConversationID: conversationID, Role: "assistant", Content: "a",
-					InputTokens: ptr(100), OutputTokens: ptr(20), CacheReadTokens: ptr(1000), CacheCreationTokens: ptr(7)},
-				{ConversationID: conversationID, Role: "assistant", Content: "b",
-					InputTokens: ptr(50), OutputTokens: ptr(5), CacheReadTokens: ptr(500), CacheCreationTokens: ptr(3)},
-			} {
-				if _, err := store.InsertMessage(ctx, orgID, m); err != nil {
-					t.Fatalf("InsertMessage: %v", err)
-				}
-			}
-			return conversationID
-		}
-		assertRolledUp := func(t *testing.T, store db.ConversationStore, orgID, conversationID string) {
-			t.Helper()
-			got, err := store.Get(context.Background(), orgID, conversationID)
-			if err != nil || got == nil {
-				t.Fatalf("Get: err=%v got=%v", err, got)
-			}
-			if got.InputTokens != 150 || got.OutputTokens != 25 || got.CacheReadTokens != 1500 || got.CacheCreationTokens != 10 {
-				t.Errorf("token cols = (%d,%d,%d,%d), want (150,25,1500,10) — ledger SUM must survive the terminal write",
-					got.InputTokens, got.OutputTokens, got.CacheReadTokens, got.CacheCreationTokens)
-			}
-		}
-
-		t.Run("ParkOpen_stopped", func(t *testing.T) {
-			store, orgID, _, seed := mk(t)
-			conversationID := seedRunningWithTokens(t, store, orgID, seed)
-			ok, err := HolderPark(store, context.Background(), orgID, conversationID, db.ParkStopped(domain.ParkReasonUserCancelled, "cancelled"))
-			if err != nil || !ok {
-				t.Fatalf("park stopped: ok=%v err=%v", ok, err)
-			}
-			assertRolledUp(t, store, orgID, conversationID)
-		})
-
-		t.Run("MarkFailedIfActive", func(t *testing.T) {
-			store, orgID, _, seed := mk(t)
-			conversationID := seedRunningWithTokens(t, store, orgID, seed)
-			ok, err := HolderMarkFailed(store, context.Background(), orgID, conversationID, "")
-			if err != nil || !ok {
-				t.Fatalf("MarkFailedIfActive: ok=%v err=%v", ok, err)
-			}
-			assertRolledUp(t, store, orgID, conversationID)
-		})
-	})
-
 	t.Run("MarkFailedIfActive_PersistsFailureKind", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
@@ -1085,33 +1031,6 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		got, _ = store.Get(ctx, orgID, conversationID)
 		if got == nil || got.WorktreePath != "/tmp/triagefactory-runs/rebuilt" {
 			t.Errorf("worktree_path after a rehydrate onto a fresh path = %v, want /tmp/triagefactory-runs/rebuilt", got)
-		}
-	})
-
-	t.Run("MarkOpen_FlipsRunning_RefusesTerminal", func(t *testing.T) {
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		// Running → ok=true.
-		conversationID := seedConversationForTest(t, orgID, seed, "running")
-		ok, err := HolderPark(store, ctx, orgID, conversationID, db.ParkIdle())
-		if err != nil || !ok {
-			t.Fatalf("park on running: ok=%v err=%v", ok, err)
-		}
-		got, _ := store.Get(ctx, orgID, conversationID)
-		if got.Status != "open" {
-			t.Errorf("status = %q, want open", got.Status)
-		}
-		// Already open → ok=false (terminal-list excludes open, so an
-		// idempotent re-call refuses).
-		ok, err = HolderPark(store, ctx, orgID, conversationID, db.ParkIdle())
-		if err != nil || ok {
-			t.Errorf("re-call on open: ok=%v err=%v, want false/nil", ok, err)
-		}
-		// Terminal → ok=false.
-		conversationID2 := seedConversationForTest(t, orgID, seed, SeedConcluded)
-		ok, err = HolderPark(store, ctx, orgID, conversationID2, db.ParkIdle())
-		if err != nil || ok {
-			t.Errorf("on completed: ok=%v err=%v, want false/nil", ok, err)
 		}
 	})
 
@@ -1419,8 +1338,15 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if ok, err := HolderPark(store, ctx, orgID, conversationID, db.ParkIdle()); err != nil || !ok {
 			t.Fatalf("idle park: ok=%v err=%v", ok, err)
 		}
+		if got, _ := store.Get(ctx, orgID, conversationID); got.Status != "open" {
+			t.Errorf("status after an idle park = %q, want open", got.Status)
+		}
 		if ok, err := HolderPark(store, ctx, orgID, conversationID, db.ParkIdle()); err != nil || ok {
 			t.Errorf("second idle park: ok=%v err=%v, want false/nil — a re-park must not re-broadcast", ok, err)
+		}
+		done := seedConversationForTest(t, orgID, seed, SeedConcluded)
+		if ok, err := HolderPark(store, ctx, orgID, done, db.ParkIdle()); err != nil || ok {
+			t.Errorf("idle park on a concluded conversation: ok=%v err=%v, want false/nil", ok, err)
 		}
 		// A deliberate stop DOES land on the same parked row: the caller has
 		// to learn it took so it can finalize the blueprint behind it.
@@ -1462,33 +1388,6 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			if got.ParkReason != reason {
 				t.Errorf("park_reason = %q, want %q", got.ParkReason, reason)
 			}
-		}
-	})
-
-	// The discriminator the Park type now carries explicitly. It used to be
-	// inferred from the reason being non-empty, which made "someone stopped
-	// this" and "there is something to display" one bit: an idle park that
-	// wanted to say WHY it parked could only do so by also releasing its claim
-	// as a cancellation. `idle` is exactly such a reason, so this is the arm
-	// that would have silently broken.
-	t.Run("ParkOpen_IdleRecordsItsReasonAndStillReleasesParked", func(t *testing.T) {
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		conversationID := seedConversationForTest(t, orgID, seed, "running")
-		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-idle-park", 1); err != nil {
-			t.Fatalf("SetExecutorSystem: %v", err)
-		}
-
-		if ok, err := HolderPark(store, ctx, orgID, conversationID, db.ParkIdle()); err != nil || !ok {
-			t.Fatalf("idle park: ok=%v err=%v", ok, err)
-		}
-		got, _ := store.Get(ctx, orgID, conversationID)
-		if got.ParkReason != domain.ParkReasonIdle {
-			t.Errorf("park_reason = %q, want idle — an idle park says why it parked too", got.ParkReason)
-		}
-		claims := seed.ClaimRows(t, conversationID)
-		if len(claims) != 1 || !claims[0].Released || claims[0].Outcome != "parked" {
-			t.Fatalf("claims = %+v, want the engagement released as parked, never cancelled", claims)
 		}
 	})
 
@@ -1986,12 +1885,17 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			}
 			assertReleased(t, conversationID, "failed")
 		})
+		// An idle park records why it parked and still releases as parked,
+		// never as a cancellation.
 		t.Run("ParkOpen_idle_parks", func(t *testing.T) {
 			conversationID := stage(t)
 			if ok, err := HolderPark(store, ctx, orgID, conversationID, db.ParkIdle()); err != nil || !ok {
 				t.Fatalf("park: ok=%v err=%v", ok, err)
 			}
 			assertReleased(t, conversationID, "parked")
+			if got, _ := store.Get(ctx, orgID, conversationID); got.ParkReason != domain.ParkReasonIdle {
+				t.Errorf("park_reason = %q, want idle", got.ParkReason)
+			}
 		})
 		t.Run("MarkQueuedForResume_requeues", func(t *testing.T) {
 			conversationID := stage(t)
@@ -2797,14 +2701,14 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if got.ExecutorID != "exec-1" || got.Attempts != 1 || got.ClaimedAt == nil {
 			t.Fatalf("first engagement: executor=%q attempts=%d claimedAt=%v", got.ExecutorID, got.Attempts, got.ClaimedAt)
 		}
-		firstClaimedAt := *got.ClaimedAt
 
 		// Park (releases), then a second engagement — ClaimedAt advances to
 		// the newest claim, Attempts counts both, ExecutorID is the live one.
 		if ok, err := HolderPark(store, ctx, orgID, conversationID, db.ParkIdle()); err != nil || !ok {
 			t.Fatalf("park: ok=%v err=%v", ok, err)
 		}
-		time.Sleep(1100 * time.Millisecond) // SQLite's second-granularity timestamps
+		seed.BackdateClaimedAt(t, conversationID, time.Hour)
+		secondMint := time.Now()
 		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-2", 2); err != nil {
 			t.Fatalf("SetExecutorSystem 2: %v", err)
 		}
@@ -2815,8 +2719,10 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if got.ExecutorID != "exec-2" || got.Attempts != 2 {
 			t.Errorf("second engagement: executor=%q attempts=%d, want exec-2/2", got.ExecutorID, got.Attempts)
 		}
-		if got.ClaimedAt == nil || !got.ClaimedAt.After(firstClaimedAt) {
-			t.Errorf("ClaimedAt = %v, want later than the first claim's %v", got.ClaimedAt, firstClaimedAt)
+		// The first claim is an hour old, so a minute's tolerance tells the two
+		// apart through either clock and SQLite's whole-second column.
+		if got.ClaimedAt == nil || got.ClaimedAt.Before(secondMint.Add(-time.Minute)) {
+			t.Errorf("ClaimedAt = %v, want the second claim's, minted at %v", got.ClaimedAt, secondMint)
 		}
 	})
 
@@ -2911,13 +2817,10 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ent := seed.Entity(t, "list")
 		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
 		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
-		// Two conversations with a >1s sleep — SQLite's CURRENT_TIMESTAMP
-		// default has 1-second granularity, so the gap is needed
-		// for ORDER BY to discriminate. Two conversations are enough to pin
-		// "newest first"; three would risk landing in the same
-		// second slot without making the assertion stronger.
+		// SQLite's CURRENT_TIMESTAMP default has 1-second granularity, so the
+		// first conversation is backdated for ORDER BY to discriminate.
 		first := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
-		time.Sleep(1100 * time.Millisecond)
+		seed.BackdateStartedAt(t, first, time.Hour)
 		second := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
 		convs, err := store.ListForTask(ctx, orgID, taskID)
 		if err != nil {
@@ -3657,24 +3560,6 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	// Task end is NOT a boundary, decided against the spec's first draft: a
-	// done task's last step stays resumable for follow-ups, and a manual
-	// conversation on a task an event closed under it is parked by the stop
-	// rather than ended. So the close doors stamp nothing, and this is the
-	// assertion that keeps a future close path from quietly growing a stamp.
-	t.Run("EndedAtStaysNullOnAFreshConversation", func(t *testing.T) {
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		conversationID := seedConversationForTest(t, orgID, seed, SeedConcluded)
-		got, err := store.Get(ctx, orgID, conversationID)
-		if err != nil || got == nil {
-			t.Fatalf("Get: err=%v got=%v", err, got)
-		}
-		if got.EndedAt != nil || got.EndedReason != "" {
-			t.Errorf("a conversation nothing ended reads (%v, %q), want NULL/empty", got.EndedAt, got.EndedReason)
-		}
-	})
-
 	// The admin-pool twin the delegate failure paths stamp through: same
 	// write, same guard as EndConversation; only the pool differs, and
 	// SQLite's two arms collapse. That the task door then skips the row it
@@ -4181,16 +4066,16 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	t.Run("InsertMessage_StampsCreatedAtAndReturnsID", func(t *testing.T) {
+	// Every caller in the repo leaves Delivered nil and WindowState "": the
+	// insert stamps created_at and the schema defaults for what the caller
+	// leaves unset (delivered, the active window, no seq), and keeps an
+	// explicit created_at.
+	t.Run("InsertMessage_StampsWhatTheCallerLeavesUnset", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
 
-		msg := &domain.Message{
-			ConversationID: conversationID,
-			Role:           "assistant",
-			Content:        "hello",
-		}
+		msg := &domain.Message{ConversationID: conversationID, Role: "assistant", Content: "hello"}
 		id, err := store.InsertMessage(ctx, orgID, msg)
 		if err != nil {
 			t.Fatalf("InsertMessage: %v", err)
@@ -4201,56 +4086,203 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if msg.CreatedAt.IsZero() {
 			t.Errorf("CreatedAt not stamped")
 		}
-	})
-
-	t.Run("InsertMessage_PreservesExplicitCreatedAt", func(t *testing.T) {
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		conversationID := seedConversationForTest(t, orgID, seed, "running")
 		explicit := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-		msg := &domain.Message{
-			ConversationID: conversationID, Role: "assistant", Content: "x",
-			CreatedAt: explicit,
-		}
-		if _, err := store.InsertMessage(ctx, orgID, msg); err != nil {
+		dated := &domain.Message{ConversationID: conversationID, Role: "assistant", Content: "x", CreatedAt: explicit}
+		if _, err := store.InsertMessage(ctx, orgID, dated); err != nil {
 			t.Fatalf("InsertMessage: %v", err)
 		}
-		if !msg.CreatedAt.Equal(explicit) {
-			t.Errorf("CreatedAt rewritten: got %v, want %v", msg.CreatedAt, explicit)
+		if !dated.CreatedAt.Equal(explicit) {
+			t.Errorf("CreatedAt rewritten: got %v, want %v", dated.CreatedAt, explicit)
 		}
-	})
 
-	t.Run("MessagesForConversations_RoundTripsToolCallsAndMetadata", func(t *testing.T) {
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		conversationID := seedConversationForTest(t, orgID, seed, "running")
-		msg := &domain.Message{
-			ConversationID: conversationID,
-			Role:           "assistant",
-			Content:        "calling tool",
-			Subtype:        "tool_use",
-			ToolCalls: []domain.ToolCall{
-				{ID: "call-1", Name: "Edit", Input: map[string]any{"path": "foo.go"}},
-			},
-			Metadata: map[string]any{"k": "v"},
-		}
-		if _, err := store.InsertMessage(ctx, orgID, msg); err != nil {
-			t.Fatalf("InsertMessage: %v", err)
-		}
 		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
 		if err != nil {
 			t.Fatalf("MessagesForConversations: %v", err)
 		}
-		if len(msgs) != 1 {
-			t.Fatalf("len = %d, want 1", len(msgs))
+		var got *domain.Message
+		for i := range msgs {
+			if int64(msgs[i].ID) == id {
+				got = &msgs[i]
+			}
 		}
-		got := msgs[0]
-		if len(got.ToolCalls) != 1 || got.ToolCalls[0].ID != "call-1" {
-			t.Errorf("ToolCalls round-trip: %+v", got.ToolCalls)
+		if got == nil {
+			t.Fatalf("message %d missing from %+v", id, msgs)
 		}
-		if got.Metadata["k"] != "v" {
-			t.Errorf("Metadata round-trip: %+v", got.Metadata)
+		if got.Delivered == nil || !*got.Delivered {
+			t.Errorf("Delivered = %v, want true (the schema default)", got.Delivered)
 		}
+		if got.WindowState != domain.MessageWindowActive {
+			t.Errorf("WindowState = %q, want %q (the schema default)", got.WindowState, domain.MessageWindowActive)
+		}
+		if got.Seq != nil {
+			t.Errorf("Seq = %v, want nil (no backfill, no insert-time dance)", *got.Seq)
+		}
+	})
+
+	// Every column a message carries round-trips through the transcript read. The
+	// fixture is shared; each column gets a conversation of its own.
+	t.Run("MessagesForConversations_RoundTripsEveryColumn", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+
+		t.Run("ToolCallsAndMetadata", func(t *testing.T) {
+			conversationID := seedConversationForTest(t, orgID, seed, "running")
+			msg := &domain.Message{
+				ConversationID: conversationID,
+				Role:           "assistant",
+				Content:        "calling tool",
+				Subtype:        "tool_use",
+				ToolCalls: []domain.ToolCall{
+					{ID: "call-1", Name: "Edit", Input: map[string]any{"path": "foo.go"}},
+				},
+				Metadata: map[string]any{"k": "v"},
+			}
+			if _, err := store.InsertMessage(ctx, orgID, msg); err != nil {
+				t.Fatalf("InsertMessage: %v", err)
+			}
+			msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
+			if err != nil {
+				t.Fatalf("MessagesForConversations: %v", err)
+			}
+			if len(msgs) != 1 {
+				t.Fatalf("len = %d, want 1", len(msgs))
+			}
+			got := msgs[0]
+			if len(got.ToolCalls) != 1 || got.ToolCalls[0].ID != "call-1" {
+				t.Errorf("ToolCalls round-trip: %+v", got.ToolCalls)
+			}
+			if got.Metadata["k"] != "v" {
+				t.Errorf("Metadata round-trip: %+v", got.Metadata)
+			}
+		})
+
+		t.Run("ReasoningContentBlocksAndExplicitOverrides", func(t *testing.T) {
+			conversationID := seedConversationForTest(t, orgID, seed, "running")
+			delivered := false
+			seq := 12.5
+			msg := &domain.Message{
+				ConversationID: conversationID,
+				Role:           "assistant",
+				Content:        "thinking then answering",
+				Reasoning: []domain.ReasoningDetail{
+					{Index: 0, Type: "text", Text: "step one", Signature: "sig-abc"},
+				},
+				ContentBlocks: []domain.ContentBlock{
+					{Type: domain.ContentBlockImage, ImageURL: &domain.ContentImageURL{URL: "https://example/img.png"}},
+				},
+				Delivered:   &delivered,
+				WindowState: domain.MessageWindowElided,
+				Seq:         &seq,
+			}
+			if _, err := store.InsertMessage(ctx, orgID, msg); err != nil {
+				t.Fatalf("InsertMessage: %v", err)
+			}
+			msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
+			if err != nil {
+				t.Fatalf("MessagesForConversations: %v", err)
+			}
+			if len(msgs) != 1 {
+				t.Fatalf("len = %d, want 1", len(msgs))
+			}
+			got := msgs[0]
+			if len(got.Reasoning) != 1 || got.Reasoning[0].Signature != "sig-abc" || got.Reasoning[0].Text != "step one" {
+				t.Errorf("Reasoning round-trip: %+v", got.Reasoning)
+			}
+			if len(got.ContentBlocks) != 1 || got.ContentBlocks[0].Type != domain.ContentBlockImage ||
+				got.ContentBlocks[0].ImageURL == nil || got.ContentBlocks[0].ImageURL.URL != "https://example/img.png" {
+				t.Errorf("ContentBlocks round-trip: %+v", got.ContentBlocks)
+			}
+			if got.Delivered == nil || *got.Delivered {
+				t.Errorf("Delivered = %v, want false (explicit override)", got.Delivered)
+			}
+			if got.WindowState != domain.MessageWindowElided {
+				t.Errorf("WindowState = %q, want %q (explicit override)", got.WindowState, domain.MessageWindowElided)
+			}
+			if got.Seq == nil || *got.Seq != 12.5 {
+				t.Errorf("Seq = %v, want 12.5", got.Seq)
+			}
+		})
+
+		t.Run("DurationMs", func(t *testing.T) {
+			// duration_ms has three distinct states the transcript renders
+			// differently, and the store must keep them apart: a measured value, a
+			// measured zero (fast enough to round to nothing — still a
+			// measurement), and unmeasured (every row written before the runtime
+			// stamped timing, and every non-agent role).
+			conversationID := seedConversationForTest(t, orgID, seed, "running")
+			measured := 4312
+			instant := 0
+			for _, m := range []*domain.Message{
+				{ConversationID: conversationID, Role: "assistant", Content: "thought", DurationMs: &measured},
+				{ConversationID: conversationID, Role: "tool", Subtype: "tool", Content: "ok", ToolCallID: "t1", DurationMs: &instant},
+				{ConversationID: conversationID, Role: "user", Content: "no timing on a user row"},
+			} {
+				if _, err := store.InsertMessage(ctx, orgID, m); err != nil {
+					t.Fatalf("InsertMessage: %v", err)
+				}
+			}
+
+			msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
+			if err != nil {
+				t.Fatalf("MessagesForConversations: %v", err)
+			}
+			if len(msgs) != 3 {
+				t.Fatalf("len = %d, want 3", len(msgs))
+			}
+			if msgs[0].DurationMs == nil || *msgs[0].DurationMs != measured {
+				t.Errorf("assistant DurationMs = %v, want %d", msgs[0].DurationMs, measured)
+			}
+			if msgs[1].DurationMs == nil || *msgs[1].DurationMs != 0 {
+				t.Errorf("tool DurationMs = %v, want a measured 0 (not nil)", msgs[1].DurationMs)
+			}
+			if msgs[2].DurationMs != nil {
+				t.Errorf("unstamped DurationMs = %v, want nil (not measured)", *msgs[2].DurationMs)
+			}
+			if dto := msgs[2].ToDTO(); dto.DurationMs != nil {
+				t.Errorf("unstamped row's DTO carries duration %v; the wire must omit the key entirely", *dto.DurationMs)
+			}
+		})
+
+		t.Run("StopReason", func(t *testing.T) {
+			// The MODEL's stop reason, per turn. Both runtimes write it — the SDK
+			// parser off each assistant event, the native loop off the
+			// completion's finish reason — so a `max_tokens` truncation is visible
+			// whichever engine ran, in either dialect. Its scope is the point: a
+			// conversation of N turns has N of these, which is why recording it at
+			// conversation scope (where the last terminal write won) said nothing.
+			//
+			// The vocabulary is the provider's and it is OPEN — a model ships a new
+			// reason whenever it likes — so the column is a passthrough, not a
+			// closed set like park_reason. Empty stays empty: "the stream reported
+			// none" and "unknown" are the same thing, and a placeholder would make
+			// them look different.
+			conversationID := seedConversationForTest(t, orgID, seed, "running")
+			for _, m := range []*domain.Message{
+				{ConversationID: conversationID, Role: "assistant", Content: "calling", StopReason: "tool_use"},
+				{ConversationID: conversationID, Role: "assistant", Content: "cut off", StopReason: "max_tokens"},
+				{ConversationID: conversationID, Role: "assistant", Content: "unreported"},
+			} {
+				if _, err := store.InsertMessage(ctx, orgID, m); err != nil {
+					t.Fatalf("InsertMessage: %v", err)
+				}
+			}
+
+			msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
+			if err != nil {
+				t.Fatalf("MessagesForConversations: %v", err)
+			}
+			if len(msgs) != 3 {
+				t.Fatalf("len = %d, want 3", len(msgs))
+			}
+			for i, want := range []string{"tool_use", "max_tokens", ""} {
+				if msgs[i].StopReason != want {
+					t.Errorf("message %d StopReason = %q, want %q", i, msgs[i].StopReason, want)
+				}
+			}
+			if dto := msgs[2].ToDTO(); dto.StopReason != "" {
+				t.Errorf("unreported row's DTO carries stop_reason %q; the wire must omit the key entirely", dto.StopReason)
+			}
+		})
 	})
 
 	t.Run("InsertMessage_RoundTripsUserAndClaimAttribution", func(t *testing.T) {
@@ -4368,198 +4400,35 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	t.Run("InsertMessage_DefaultsDeliveredTrueAndWindowStateActive", func(t *testing.T) {
-		// Every existing caller in the repo leaves Delivered nil and
-		// WindowState "" — the columnar-canon columns must not change their
-		// observed behavior: delivered=true, window_state='active', seq=NULL.
+	t.Run("MessagesForConversations_SurfacesDecodeErrors", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
-		conversationID := seedConversationForTest(t, orgID, seed, "running")
-		msg := &domain.Message{ConversationID: conversationID, Role: "assistant", Content: "hi"}
-		if _, err := store.InsertMessage(ctx, orgID, msg); err != nil {
-			t.Fatalf("InsertMessage: %v", err)
-		}
-		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
-		if err != nil {
-			t.Fatalf("MessagesForConversations: %v", err)
-		}
-		if len(msgs) != 1 {
-			t.Fatalf("len = %d, want 1", len(msgs))
-		}
-		got := msgs[0]
-		if got.Delivered == nil || !*got.Delivered {
-			t.Errorf("Delivered = %v, want true (the schema default)", got.Delivered)
-		}
-		if got.WindowState != domain.MessageWindowActive {
-			t.Errorf("WindowState = %q, want %q (the schema default)", got.WindowState, domain.MessageWindowActive)
-		}
-		if got.Seq != nil {
-			t.Errorf("Seq = %v, want nil (no backfill, no insert-time dance)", *got.Seq)
-		}
-	})
 
-	t.Run("MessagesForConversations_RoundTripsReasoningContentBlocksAndExplicitOverrides", func(t *testing.T) {
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		conversationID := seedConversationForTest(t, orgID, seed, "running")
-		delivered := false
-		seq := 12.5
-		msg := &domain.Message{
-			ConversationID: conversationID,
-			Role:           "assistant",
-			Content:        "thinking then answering",
-			Reasoning: []domain.ReasoningDetail{
-				{Index: 0, Type: "text", Text: "step one", Signature: "sig-abc"},
-			},
-			ContentBlocks: []domain.ContentBlock{
-				{Type: domain.ContentBlockImage, ImageURL: &domain.ContentImageURL{URL: "https://example/img.png"}},
-			},
-			Delivered:   &delivered,
-			WindowState: domain.MessageWindowElided,
-			Seq:         &seq,
-		}
-		if _, err := store.InsertMessage(ctx, orgID, msg); err != nil {
-			t.Fatalf("InsertMessage: %v", err)
-		}
-		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
-		if err != nil {
-			t.Fatalf("MessagesForConversations: %v", err)
-		}
-		if len(msgs) != 1 {
-			t.Fatalf("len = %d, want 1", len(msgs))
-		}
-		got := msgs[0]
-		if len(got.Reasoning) != 1 || got.Reasoning[0].Signature != "sig-abc" || got.Reasoning[0].Text != "step one" {
-			t.Errorf("Reasoning round-trip: %+v", got.Reasoning)
-		}
-		if len(got.ContentBlocks) != 1 || got.ContentBlocks[0].Type != domain.ContentBlockImage ||
-			got.ContentBlocks[0].ImageURL == nil || got.ContentBlocks[0].ImageURL.URL != "https://example/img.png" {
-			t.Errorf("ContentBlocks round-trip: %+v", got.ContentBlocks)
-		}
-		if got.Delivered == nil || *got.Delivered {
-			t.Errorf("Delivered = %v, want false (explicit override)", got.Delivered)
-		}
-		if got.WindowState != domain.MessageWindowElided {
-			t.Errorf("WindowState = %q, want %q (explicit override)", got.WindowState, domain.MessageWindowElided)
-		}
-		if got.Seq == nil || *got.Seq != 12.5 {
-			t.Errorf("Seq = %v, want 12.5", got.Seq)
-		}
-	})
-
-	t.Run("MessagesForConversations_RoundTripsDurationMs", func(t *testing.T) {
-		// duration_ms has three distinct states the transcript renders
-		// differently, and the store must keep them apart: a measured value, a
-		// measured zero (fast enough to round to nothing — still a
-		// measurement), and unmeasured (every row written before the runtime
-		// stamped timing, and every non-agent role).
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		conversationID := seedConversationForTest(t, orgID, seed, "running")
-		measured := 4312
-		instant := 0
-		for _, m := range []*domain.Message{
-			{ConversationID: conversationID, Role: "assistant", Content: "thought", DurationMs: &measured},
-			{ConversationID: conversationID, Role: "tool", Subtype: "tool", Content: "ok", ToolCallID: "t1", DurationMs: &instant},
-			{ConversationID: conversationID, Role: "user", Content: "no timing on a user row"},
-		} {
-			if _, err := store.InsertMessage(ctx, orgID, m); err != nil {
-				t.Fatalf("InsertMessage: %v", err)
+		t.Run("Reasoning", func(t *testing.T) {
+			// reasoning/content_blocks are canonical replay context (read via
+			// ListForAssembly by a future native loop) — a decode failure must
+			// return an error, not silently produce an empty slice that reads
+			// identically to "no reasoning on this message".
+			conversationID := seedConversationForTest(t, orgID, seed, "running")
+			seed.SeedRawMessage(t, conversationID, "reasoning", `{"wrong":"shape"}`)
+			if _, err := store.MessagesForConversations(ctx, orgID, []string{conversationID}); err == nil {
+				t.Fatal("MessagesForConversations: want a decode error for wrong-shaped reasoning JSON, got nil")
 			}
-		}
-
-		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
-		if err != nil {
-			t.Fatalf("MessagesForConversations: %v", err)
-		}
-		if len(msgs) != 3 {
-			t.Fatalf("len = %d, want 3", len(msgs))
-		}
-		if msgs[0].DurationMs == nil || *msgs[0].DurationMs != measured {
-			t.Errorf("assistant DurationMs = %v, want %d", msgs[0].DurationMs, measured)
-		}
-		if msgs[1].DurationMs == nil || *msgs[1].DurationMs != 0 {
-			t.Errorf("tool DurationMs = %v, want a measured 0 (not nil)", msgs[1].DurationMs)
-		}
-		if msgs[2].DurationMs != nil {
-			t.Errorf("unstamped DurationMs = %v, want nil (not measured)", *msgs[2].DurationMs)
-		}
-		if dto := msgs[2].ToDTO(); dto.DurationMs != nil {
-			t.Errorf("unstamped row's DTO carries duration %v; the wire must omit the key entirely", *dto.DurationMs)
-		}
-	})
-
-	t.Run("MessagesForConversations_RoundTripsStopReason", func(t *testing.T) {
-		// The MODEL's stop reason, per turn. Both runtimes write it — the SDK
-		// parser off each assistant event, the native loop off the
-		// completion's finish reason — so a `max_tokens` truncation is visible
-		// whichever engine ran, in either dialect. Its scope is the point: a
-		// conversation of N turns has N of these, which is why recording it at
-		// conversation scope (where the last terminal write won) said nothing.
-		//
-		// The vocabulary is the provider's and it is OPEN — a model ships a new
-		// reason whenever it likes — so the column is a passthrough, not a
-		// closed set like park_reason. Empty stays empty: "the stream reported
-		// none" and "unknown" are the same thing, and a placeholder would make
-		// them look different.
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		conversationID := seedConversationForTest(t, orgID, seed, "running")
-		for _, m := range []*domain.Message{
-			{ConversationID: conversationID, Role: "assistant", Content: "calling", StopReason: "tool_use"},
-			{ConversationID: conversationID, Role: "assistant", Content: "cut off", StopReason: "max_tokens"},
-			{ConversationID: conversationID, Role: "assistant", Content: "unreported"},
-		} {
-			if _, err := store.InsertMessage(ctx, orgID, m); err != nil {
-				t.Fatalf("InsertMessage: %v", err)
+			if _, err := store.ListForAssemblySystem(ctx, orgID, conversationID); err == nil {
+				t.Fatal("ListForAssembly: want a decode error for wrong-shaped reasoning JSON, got nil")
 			}
-		}
+		})
 
-		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
-		if err != nil {
-			t.Fatalf("MessagesForConversations: %v", err)
-		}
-		if len(msgs) != 3 {
-			t.Fatalf("len = %d, want 3", len(msgs))
-		}
-		for i, want := range []string{"tool_use", "max_tokens", ""} {
-			if msgs[i].StopReason != want {
-				t.Errorf("message %d StopReason = %q, want %q", i, msgs[i].StopReason, want)
+		t.Run("ContentBlocks", func(t *testing.T) {
+			conversationID := seedConversationForTest(t, orgID, seed, "running")
+			seed.SeedRawMessage(t, conversationID, "content_blocks", `{"wrong":"shape"}`)
+			if _, err := store.MessagesForConversations(ctx, orgID, []string{conversationID}); err == nil {
+				t.Fatal("MessagesForConversations: want a decode error for wrong-shaped content_blocks JSON, got nil")
 			}
-		}
-		if dto := msgs[2].ToDTO(); dto.StopReason != "" {
-			t.Errorf("unreported row's DTO carries stop_reason %q; the wire must omit the key entirely", dto.StopReason)
-		}
-	})
-
-	t.Run("MessagesForConversations_SurfacesReasoningDecodeError", func(t *testing.T) {
-		// reasoning/content_blocks are canonical replay context (read via
-		// ListForAssembly by a future native loop) — a decode failure must
-		// return an error, not silently produce an empty slice that reads
-		// identically to "no reasoning on this message".
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		conversationID := seedConversationForTest(t, orgID, seed, "running")
-		seed.SeedRawMessage(t, conversationID, "reasoning", `{"wrong":"shape"}`)
-		if _, err := store.MessagesForConversations(ctx, orgID, []string{conversationID}); err == nil {
-			t.Fatal("MessagesForConversations: want a decode error for wrong-shaped reasoning JSON, got nil")
-		}
-		if _, err := store.ListForAssemblySystem(ctx, orgID, conversationID); err == nil {
-			t.Fatal("ListForAssembly: want a decode error for wrong-shaped reasoning JSON, got nil")
-		}
-	})
-
-	t.Run("MessagesForConversations_SurfacesContentBlocksDecodeError", func(t *testing.T) {
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		conversationID := seedConversationForTest(t, orgID, seed, "running")
-		seed.SeedRawMessage(t, conversationID, "content_blocks", `{"wrong":"shape"}`)
-		if _, err := store.MessagesForConversations(ctx, orgID, []string{conversationID}); err == nil {
-			t.Fatal("MessagesForConversations: want a decode error for wrong-shaped content_blocks JSON, got nil")
-		}
-		if _, err := store.ListForAssemblySystem(ctx, orgID, conversationID); err == nil {
-			t.Fatal("ListForAssembly: want a decode error for wrong-shaped content_blocks JSON, got nil")
-		}
+			if _, err := store.ListForAssemblySystem(ctx, orgID, conversationID); err == nil {
+				t.Fatal("ListForAssembly: want a decode error for wrong-shaped content_blocks JSON, got nil")
+			}
+		})
 	})
 
 	t.Run("ListForAssembly_OrdersByCoalesceSeqAndIncludesEverythingButInactive", func(t *testing.T) {
