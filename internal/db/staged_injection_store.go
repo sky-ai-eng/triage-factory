@@ -83,5 +83,5 @@ type StagedInjectionStore interface {
 	// that names none, is a no-op that reports consumed=false.
 	//
 	// Exempt from the returned-row rule: it is a delete.
-		DeleteSystem(ctx context.Context, orgID, id string) (consumed bool, err error)
+	DeleteSystem(ctx context.Context, orgID, id string) (consumed bool, err error)
 }
