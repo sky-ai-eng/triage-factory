@@ -76,7 +76,7 @@ func TestHandleEvent_BecameAtomic_ExistingTask_NoDuplicate(t *testing.T) {
 	deps.WS = ws
 	router := newTestRouter(deps)
 
-	router.HandleEvent(context.Background(), domain.Event{
+	mustHandle(t, router, domain.Event{
 		EventType:    domain.EventJiraIssueBecameAtomic,
 		EntityID:     &entity.ID,
 		MetadataJSON: string(atomicJSON),
@@ -134,7 +134,7 @@ func TestHandleEvent_BecameAtomic_NoExistingTask_CreatesTask(t *testing.T) {
 	deps.WS = ws
 	router := newTestRouter(deps)
 
-	router.HandleEvent(context.Background(), domain.Event{
+	mustHandle(t, router, domain.Event{
 		EventType:    domain.EventJiraIssueBecameAtomic,
 		EntityID:     &entity.ID,
 		MetadataJSON: string(metaJSON),

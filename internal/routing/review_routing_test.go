@@ -100,9 +100,10 @@ func reviewEntity(t *testing.T, database *sql.DB, sourceID string) string {
 	return e.ID
 }
 
-func emitReviewRequested(router *Router, entityID, dedupKey string, meta events.GitHubPRReviewRequestedMetadata) {
+func emitReviewRequested(t *testing.T, router *Router, entityID, dedupKey string, meta events.GitHubPRReviewRequestedMetadata) {
+	t.Helper()
 	metaJSON, _ := json.Marshal(meta)
-	router.HandleEvent(context.Background(), domain.Event{
+	mustHandle(t, router, domain.Event{
 		EventType:    domain.EventGitHubPRReviewRequested,
 		EntityID:     &entityID,
 		DedupKey:     dedupKey,
@@ -140,7 +141,7 @@ func TestReviewRequested_UserRoutesToRequestedUsersTeams(t *testing.T) {
 
 	entityID := reviewEntity(t, database, "owner/repo#user")
 	router := reviewRouter(database)
-	emitReviewRequested(router, entityID, "user:alice", events.GitHubPRReviewRequestedMetadata{
+	emitReviewRequested(t, router, entityID, "user:alice", events.GitHubPRReviewRequestedMetadata{
 		Author: "carol", Repo: "owner/repo", PRNumber: 1, RequestedLogin: "alice",
 	})
 
@@ -173,7 +174,7 @@ func TestReviewRequested_NoOrgHost_ResolvesNobody(t *testing.T) {
 
 	entityID := reviewEntity(t, database, "owner/repo#emptyhost")
 	router := reviewRouter(database)
-	emitReviewRequested(router, entityID, "user:alice", events.GitHubPRReviewRequestedMetadata{
+	emitReviewRequested(t, router, entityID, "user:alice", events.GitHubPRReviewRequestedMetadata{
 		Author: "carol", Repo: "owner/repo", PRNumber: 9, RequestedLogin: "alice",
 	})
 
@@ -204,7 +205,7 @@ func TestReviewRequested_SharedLoginUnionsTeams(t *testing.T) {
 
 	entityID := reviewEntity(t, database, "owner/repo#shared")
 	router := reviewRouter(database)
-	emitReviewRequested(router, entityID, "user:sharedbot", events.GitHubPRReviewRequestedMetadata{
+	emitReviewRequested(t, router, entityID, "user:sharedbot", events.GitHubPRReviewRequestedMetadata{
 		Author: "carol", Repo: "owner/repo", PRNumber: 2, RequestedLogin: "sharedbot",
 	})
 
@@ -238,7 +239,7 @@ func TestReviewRequested_TeamRoutesToMappedTFTeams(t *testing.T) {
 
 	entityID := reviewEntity(t, database, "owner/repo#team")
 	router := reviewRouter(database)
-	emitReviewRequested(router, entityID, "team:acme/backend", events.GitHubPRReviewRequestedMetadata{
+	emitReviewRequested(t, router, entityID, "team:acme/backend", events.GitHubPRReviewRequestedMetadata{
 		Author: "carol", Repo: "owner/repo", PRNumber: 3, RequestedTeam: "acme/backend",
 	})
 
@@ -274,11 +275,11 @@ func TestReviewRequested_PerReviewerDistinctTasks(t *testing.T) {
 
 	entityID := reviewEntity(t, database, "owner/repo#multi")
 	router := reviewRouter(database)
-	emitReviewRequested(router, entityID, "user:alice", events.GitHubPRReviewRequestedMetadata{
+	emitReviewRequested(t, router, entityID, "user:alice", events.GitHubPRReviewRequestedMetadata{
 		Author: "carol", Repo: "owner/repo", PRNumber: 4, RequestedLogin: "alice"})
-	emitReviewRequested(router, entityID, "user:bob", events.GitHubPRReviewRequestedMetadata{
+	emitReviewRequested(t, router, entityID, "user:bob", events.GitHubPRReviewRequestedMetadata{
 		Author: "carol", Repo: "owner/repo", PRNumber: 4, RequestedLogin: "bob"})
-	emitReviewRequested(router, entityID, "team:acme/backend", events.GitHubPRReviewRequestedMetadata{
+	emitReviewRequested(t, router, entityID, "team:acme/backend", events.GitHubPRReviewRequestedMetadata{
 		Author: "carol", Repo: "owner/repo", PRNumber: 4, RequestedTeam: "acme/backend"})
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
@@ -325,7 +326,7 @@ func TestReviewRequested_UnknownIdentity_NoTask(t *testing.T) {
 
 	entityID := reviewEntity(t, database, "owner/repo#unknown")
 	router := reviewRouter(database)
-	emitReviewRequested(router, entityID, "user:ghost", events.GitHubPRReviewRequestedMetadata{
+	emitReviewRequested(t, router, entityID, "user:ghost", events.GitHubPRReviewRequestedMetadata{
 		Author: "carol", Repo: "owner/repo", PRNumber: 5, RequestedLogin: "ghost",
 	})
 
@@ -355,16 +356,16 @@ func TestReviewByReviewer_ClosesOnlyTheirTask(t *testing.T) {
 
 	entityID := reviewEntity(t, database, "owner/repo#submit")
 	router := reviewRouter(database)
-	emitReviewRequested(router, entityID, "user:alice", events.GitHubPRReviewRequestedMetadata{
+	emitReviewRequested(t, router, entityID, "user:alice", events.GitHubPRReviewRequestedMetadata{
 		Author: "carol", Repo: "owner/repo", PRNumber: 7, RequestedLogin: "alice"})
-	emitReviewRequested(router, entityID, "user:bob", events.GitHubPRReviewRequestedMetadata{
+	emitReviewRequested(t, router, entityID, "user:bob", events.GitHubPRReviewRequestedMetadata{
 		Author: "carol", Repo: "owner/repo", PRNumber: 7, RequestedLogin: "bob"})
 
 	// Alice reviews (approves).
 	subMeta, _ := json.Marshal(events.GitHubPRReviewApprovedMetadata{
 		Author: "carol", Reviewer: "alice", Repo: "owner/repo", PRNumber: 7,
 	})
-	router.HandleEvent(context.Background(), domain.Event{
+	mustHandle(t, router, domain.Event{
 		EventType:    domain.EventGitHubPRReviewApproved,
 		EntityID:     &entityID,
 		MetadataJSON: string(subMeta),
@@ -399,16 +400,16 @@ func TestReviewRequestRemoved_ClosesOnlyMatchingReviewer(t *testing.T) {
 
 	entityID := reviewEntity(t, database, "owner/repo#remove")
 	router := reviewRouter(database)
-	emitReviewRequested(router, entityID, "user:alice", events.GitHubPRReviewRequestedMetadata{
+	emitReviewRequested(t, router, entityID, "user:alice", events.GitHubPRReviewRequestedMetadata{
 		Author: "carol", Repo: "owner/repo", PRNumber: 6, RequestedLogin: "alice"})
-	emitReviewRequested(router, entityID, "user:bob", events.GitHubPRReviewRequestedMetadata{
+	emitReviewRequested(t, router, entityID, "user:bob", events.GitHubPRReviewRequestedMetadata{
 		Author: "carol", Repo: "owner/repo", PRNumber: 6, RequestedLogin: "bob"})
 
 	// Drop alice's request only.
 	removedMeta, _ := json.Marshal(events.GitHubPRReviewRequestRemovedMetadata{
 		Author: "carol", Repo: "owner/repo", PRNumber: 6, RequestedLogin: "alice",
 	})
-	router.HandleEvent(context.Background(), domain.Event{
+	mustHandle(t, router, domain.Event{
 		EventType:    domain.EventGitHubPRReviewRequestRemoved,
 		EntityID:     &entityID,
 		DedupKey:     "user:alice",
@@ -452,7 +453,7 @@ func TestReviewRequested_MultiTeamReviewer_FiresDeterministically(t *testing.T) 
 	stub := &stubDelegator{db: database}
 	router := firingRouter(database, stub)
 	rec := notifytest.Record(t)
-	emitReviewRequested(router, entityID, "user:alice", events.GitHubPRReviewRequestedMetadata{
+	emitReviewRequested(t, router, entityID, "user:alice", events.GitHubPRReviewRequestedMetadata{
 		Author: "carol", Repo: "owner/repo", PRNumber: 1, RequestedLogin: "alice",
 	})
 
@@ -500,7 +501,7 @@ func TestReviewRequested_SingleTeamReviewer_FiresAndOwns(t *testing.T) {
 	stub := &stubDelegator{db: database}
 	router := firingRouter(database, stub)
 	rec := notifytest.Record(t)
-	emitReviewRequested(router, entityID, "user:alice", events.GitHubPRReviewRequestedMetadata{
+	emitReviewRequested(t, router, entityID, "user:alice", events.GitHubPRReviewRequestedMetadata{
 		Author: "carol", Repo: "owner/repo", PRNumber: 2, RequestedLogin: "alice",
 	})
 

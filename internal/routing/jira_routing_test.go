@@ -137,13 +137,14 @@ func jiraEntity(t *testing.T, database *sql.DB, sourceID string) string {
 
 // emitJiraAssigned fires a jira:issue:assigned event for entityID assigned to
 // the Atlassian accountID.
-func emitJiraAssigned(router *Router, entityID, accountID string) {
+func emitJiraAssigned(t *testing.T, router *Router, entityID, accountID string) {
+	t.Helper()
 	meta := events.JiraIssueAssignedMetadata{
 		Assignee: "Display " + accountID, AssigneeAccountID: accountID,
 		IssueKey: "SKY-1", Project: "SKY", Status: "To Do",
 	}
 	metaJSON, _ := json.Marshal(meta)
-	router.HandleEvent(context.Background(), domain.Event{
+	mustHandle(t, router, domain.Event{
 		EventType:    domain.EventJiraIssueAssigned,
 		EntityID:     &entityID,
 		MetadataJSON: string(metaJSON),
@@ -164,7 +165,7 @@ func TestAssigneeCentric_NonMemberAssignee_NoTask(t *testing.T) {
 	seedSystemJiraRule(t, database, runmode.LocalDefaultTeamID, domain.EventJiraIssueAssigned)
 
 	entityID := jiraEntity(t, database, "SKY-stranger")
-	emitJiraAssigned(reviewRouter(database), entityID, "acct-stranger") // not a TF user
+	emitJiraAssigned(t, reviewRouter(database), entityID, "acct-stranger") // not a TF user
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
@@ -186,7 +187,7 @@ func TestAssigneeCentric_LocalUserAssignee_OneTeam(t *testing.T) {
 	seedSystemJiraRule(t, database, runmode.LocalDefaultTeamID, domain.EventJiraIssueAssigned)
 
 	entityID := jiraEntity(t, database, "SKY-mine")
-	emitJiraAssigned(reviewRouter(database), entityID, "acct-aidan")
+	emitJiraAssigned(t, reviewRouter(database), entityID, "acct-aidan")
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
@@ -212,7 +213,7 @@ func TestAssigneeCentric_AssigneeOnOneTeam_OwnedByThatTeam(t *testing.T) {
 	seedSystemJiraRule(t, database, teamB, domain.EventJiraIssueAssigned)
 
 	entityID := jiraEntity(t, database, "SKY-aonly")
-	emitJiraAssigned(reviewRouter(database), entityID, "acct-aidan")
+	emitJiraAssigned(t, reviewRouter(database), entityID, "acct-aidan")
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
@@ -244,7 +245,7 @@ func TestAssigneeCentric_AssigneeOnTwoTeams_NullOwnerVisibleBoth(t *testing.T) {
 	seedSystemJiraRule(t, database, teamB, domain.EventJiraIssueAssigned)
 
 	entityID := jiraEntity(t, database, "SKY-both")
-	emitJiraAssigned(reviewRouter(database), entityID, "acct-shared")
+	emitJiraAssigned(t, reviewRouter(database), entityID, "acct-shared")
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
@@ -318,7 +319,7 @@ func TestAssigneeCentric_NonAssignedTypes_RouteByAssignee(t *testing.T) {
 			seedSystemJiraRule(t, database, teamB, tc.eventType)
 
 			entityID := jiraEntity(t, database, "SKY-"+tc.name)
-			reviewRouter(database).HandleEvent(context.Background(), domain.Event{
+			mustHandle(t, reviewRouter(database), domain.Event{
 				EventType:    tc.eventType,
 				EntityID:     &entityID,
 				DedupKey:     tc.dedup,
@@ -354,7 +355,7 @@ func TestAssigneeCentric_ExternalAssignee_WatchRuleSurfaces(t *testing.T) {
 	seedUserJiraRule(t, database, teamC, domain.EventJiraIssueAssigned) // user-authored watch rule
 
 	entityID := jiraEntity(t, database, "SKY-external")
-	emitJiraAssigned(reviewRouter(database), entityID, "acct-outsider") // not a TF user
+	emitJiraAssigned(t, reviewRouter(database), entityID, "acct-outsider") // not a TF user
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
@@ -390,7 +391,7 @@ func TestAssigneeCentric_CommenterNotARoutingDriver(t *testing.T) {
 		IssueKey: "SKY-1", Project: "SKY",
 	}
 	metaJSON, _ := json.Marshal(meta)
-	reviewRouter(database).HandleEvent(context.Background(), domain.Event{
+	mustHandle(t, reviewRouter(database), domain.Event{
 		EventType:    domain.EventJiraIssueCommented,
 		EntityID:     &entityID,
 		MetadataJSON: string(metaJSON),
@@ -425,7 +426,7 @@ func TestAssigneeCentric_OverrideOwningTeam(t *testing.T) {
 		t.Fatalf("set owning_team_id: %v", err)
 	}
 
-	emitJiraAssigned(reviewRouter(database), entityID, "acct-aidan")
+	emitJiraAssigned(t, reviewRouter(database), entityID, "acct-aidan")
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
@@ -457,14 +458,14 @@ func TestAssigneeCentric_PriorTaskAnchorsOwner(t *testing.T) {
 	router := reviewRouter(database)
 
 	// First: an assignment to aidan (team A) establishes A as the owner.
-	emitJiraAssigned(router, entityID, "acct-aidan")
+	emitJiraAssigned(t, router, entityID, "acct-aidan")
 
 	// Then: a status_changed whose assignee is bob (team B). Tier 2 (prior
 	// owned assignee-centric task) anchors it to A, not bob's team B.
 	statusMeta, _ := json.Marshal(events.JiraIssueStatusChangedMetadata{
 		Assignee: "bob", AssigneeAccountID: "acct-bob", IssueKey: "SKY-anchor", Project: "SKY", NewStatus: "In Progress",
 	})
-	router.HandleEvent(context.Background(), domain.Event{
+	mustHandle(t, router, domain.Event{
 		EventType:    domain.EventJiraIssueStatusChanged,
 		EntityID:     &entityID,
 		DedupKey:     "In Progress",
@@ -497,7 +498,7 @@ func TestAssigneeCentric_Available_StillCreatesTeamPoolTask(t *testing.T) {
 	entityID := jiraEntity(t, database, "SKY-pool")
 	meta := events.JiraIssueAvailableMetadata{IssueKey: "SKY-pool", Project: "SKY", Status: "To Do"}
 	metaJSON, _ := json.Marshal(meta)
-	reviewRouter(database).HandleEvent(context.Background(), domain.Event{
+	mustHandle(t, reviewRouter(database), domain.Event{
 		EventType:    domain.EventJiraIssueAvailable,
 		EntityID:     &entityID,
 		MetadataJSON: string(metaJSON),
@@ -533,8 +534,8 @@ func TestAssigneeCentric_ReassignToMember_PriorOwnerCloses_NewOwnerMinted(t *tes
 	entityID := jiraEntity(t, database, "SKY-reassign")
 	router := reviewRouter(database)
 
-	emitJiraAssigned(router, entityID, "acct-aidan")
-	emitJiraAssigned(router, entityID, "acct-bob")
+	emitJiraAssigned(t, router, entityID, "acct-aidan")
+	emitJiraAssigned(t, router, entityID, "acct-bob")
 
 	active, err := testTaskStore(database).FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrgID, entityID, domain.EventJiraIssueAssigned)
 	if err != nil || len(active) != 1 {
@@ -565,7 +566,7 @@ func TestAssigneeCentric_AssignClosesAvailablePoolTask(t *testing.T) {
 
 	// The pool task lands first (owned by teamA, the tracking team).
 	availMeta, _ := json.Marshal(events.JiraIssueAvailableMetadata{IssueKey: "SKY-poolclaim", Project: "SKY", Status: "To Do"})
-	router.HandleEvent(context.Background(), domain.Event{
+	mustHandle(t, router, domain.Event{
 		EventType:    domain.EventJiraIssueAvailable,
 		EntityID:     &entityID,
 		MetadataJSON: string(availMeta),
@@ -577,7 +578,7 @@ func TestAssigneeCentric_AssignClosesAvailablePoolTask(t *testing.T) {
 	}
 
 	// Now assigned to aidan, a member of teamA (the pool task's owner).
-	emitJiraAssigned(router, entityID, "acct-aidan")
+	emitJiraAssigned(t, router, entityID, "acct-aidan")
 
 	avail, err := testTaskStore(database).FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrgID, entityID, domain.EventJiraIssueAvailable)
 	if err != nil {
@@ -611,13 +612,13 @@ func TestAssigneeCentric_ReassignSameMember_NoChurn(t *testing.T) {
 	entityID := jiraEntity(t, database, "SKY-rechurn")
 	router := reviewRouter(database)
 
-	emitJiraAssigned(router, entityID, "acct-aidan")
+	emitJiraAssigned(t, router, entityID, "acct-aidan")
 	first, err := testTaskStore(database).FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrgID, entityID, domain.EventJiraIssueAssigned)
 	if err != nil || len(first) != 1 {
 		t.Fatalf("expected 1 task after first assign, got %d (err=%v)", len(first), err)
 	}
 
-	emitJiraAssigned(router, entityID, "acct-aidan") // re-emit, same member
+	emitJiraAssigned(t, router, entityID, "acct-aidan") // re-emit, same member
 
 	second, err := testTaskStore(database).FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrgID, entityID, domain.EventJiraIssueAssigned)
 	if err != nil || len(second) != 1 {

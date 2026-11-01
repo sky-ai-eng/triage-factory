@@ -141,8 +141,8 @@ func TestToolHostJail_StopWaitsForTheRuntime(t *testing.T) {
 	returned := make(chan error, 1)
 	go func() { returned <- jail.Stop() }()
 	select {
-	case <-returned:
-		t.Fatal("Stop returned while the runtime was still alive")
+	case err := <-returned:
+		t.Fatalf("Stop returned (err=%v) while the runtime was still alive", err)
 	case <-time.After(100 * time.Millisecond):
 	}
 	close(done)

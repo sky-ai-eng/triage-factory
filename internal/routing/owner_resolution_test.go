@@ -232,7 +232,7 @@ func TestOwnerResolution_StoreFailure_RequeuesThenRoutesToTheRightTeam(t *testin
 				seedSystemRule(t, database, teamA, domain.EventGitHubPRConflicts)
 				seedSystemRule(t, database, teamB, domain.EventGitHubPRConflicts)
 				entityID := reviewEntity(t, database, "owner/repo#tier3")
-				emitCI(r, entityID, "aidan") // establishes team A as the owner
+				emitCI(t, r, entityID, "aidan") // establishes team A as the owner
 				enqueueRoutedEvent(t, database, entityID, domain.EventGitHubPRConflicts, "",
 					events.GitHubPRConflictsMetadata{Author: "bob", Repo: "owner/repo"})
 				return entityID, teamA
@@ -367,7 +367,7 @@ func TestOwnerResolution_StoreFailure_RequeuesThenRoutesToTheRightTeam(t *testin
 				seedSystemJiraRule(t, database, teamA, domain.EventJiraIssueStatusChanged)
 				seedSystemJiraRule(t, database, teamB, domain.EventJiraIssueStatusChanged)
 				entityID := jiraEntity(t, database, "SKY-tier3")
-				emitJiraAssigned(r, entityID, "acct-aidan") // establishes team A as the owner
+				emitJiraAssigned(t, r, entityID, "acct-aidan") // establishes team A as the owner
 				enqueueRoutedEvent(t, database, entityID, domain.EventJiraIssueStatusChanged, "In Progress",
 					events.JiraIssueStatusChangedMetadata{Assignee: "bob", AssigneeAccountID: "acct-bob", IssueKey: "SKY-tier3", Project: "SKY", NewStatus: "In Progress"})
 				return entityID, teamA

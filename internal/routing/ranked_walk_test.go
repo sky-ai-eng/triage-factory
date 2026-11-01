@@ -124,7 +124,7 @@ func TestRankedWalk_AuthorOnTwoTeams_AllDeferred_TopTeamFiresAfterScoring(t *tes
 	r := walkRouter(t, database, stub, nil)
 	rec := notifytest.Record(t)
 
-	emitCI(r, entityID, "aidan")
+	emitCI(t, r, entityID, "aidan")
 	task := onlyTask(t, database, entityID)
 	requireHeld(t, stub, task)
 
@@ -172,7 +172,7 @@ func TestRankedWalk_AssigneeOnTwoTeams_WatcherWithNewestTrigger_MemberFires(t *t
 	r := walkRouter(t, database, stub, nil)
 	rec := notifytest.Record(t)
 
-	emitJiraAssigned(r, entityID, "acct-shared")
+	emitJiraAssigned(t, r, entityID, "acct-shared")
 	task := onlyTask(t, database, entityID)
 	requireHeld(t, stub, task)
 	if vis := visTeamsOf(t, database, task.ID); len(vis) != 3 {
@@ -273,7 +273,7 @@ func TestRankedWalk_Hold_HigherDeferredPasses_LowerImmediateNeverFires(t *testin
 	r := walkRouter(t, database, stub, nil)
 	rec := notifytest.Record(t)
 
-	emitCI(r, entityID, "aidan")
+	emitCI(t, r, entityID, "aidan")
 	task := onlyTask(t, database, entityID)
 	requireHeld(t, stub, task)
 	rec.Inactive(t, runmode.LocalDefaultOrgID, kinds.AutomationConflict)
@@ -308,7 +308,7 @@ func TestRankedWalk_Hold_HigherDeferredMisses_LowerImmediateFiresFromReDerive(t 
 	r := walkRouter(t, database, stub, nil)
 	rec := notifytest.Record(t)
 
-	emitCI(r, entityID, "aidan")
+	emitCI(t, r, entityID, "aidan")
 	task := onlyTask(t, database, entityID)
 	requireHeld(t, stub, task)
 
@@ -339,7 +339,7 @@ func TestRankedWalk_NoBackgroundModel_NothingHeld(t *testing.T) {
 	r := walkRouter(t, database, stub, nil)
 	rec := notifytest.Record(t)
 
-	emitCI(r, entityID, "aidan")
+	emitCI(t, r, entityID, "aidan")
 
 	if stub.calls != 1 {
 		t.Fatalf("%d fire(s) at event time, want the next team's immediate trigger", stub.calls)
@@ -363,12 +363,12 @@ func TestRankedWalk_BumpOnAScoredTask_DecidesDeferredAtEventTime(t *testing.T) {
 	r := walkRouter(t, database, stub, nil)
 	rec := notifytest.Record(t)
 
-	emitCI(r, entityID, "aidan")
+	emitCI(t, r, entityID, "aidan")
 	task := onlyTask(t, database, entityID)
 	requireHeld(t, stub, task)
 	scoreTask(t, database, task.ID, 0.9)
 
-	emitCI(r, entityID, "aidan")
+	emitCI(t, r, entityID, "aidan")
 
 	if stub.calls != 1 {
 		t.Fatalf("%d fire(s) on the bump, want the top team's deferred trigger", stub.calls)
@@ -448,7 +448,7 @@ func TestRankedWalk_RequeueBeforeScoring_DoesNotReplanAFiredTrigger(t *testing.T
 	stub := &stubDelegator{db: database}
 	r := walkRouter(t, database, stub, nil)
 
-	emitCI(r, entityID, "aidan")
+	emitCI(t, r, entityID, "aidan")
 	if stub.calls != 1 {
 		t.Fatalf("%d fire(s) at event time, want the immediate trigger", stub.calls)
 	}
@@ -579,7 +579,7 @@ func TestRankedWalk_ScoreMovedRollback_PostsNoConflict(t *testing.T) {
 	})
 	rec := notifytest.Record(t)
 
-	emitCI(r, entityID, "aidan")
+	emitCI(t, r, entityID, "aidan")
 	taskID = onlyTask(t, database, entityID).ID
 	scoreTask(t, database, taskID, 0.9)
 

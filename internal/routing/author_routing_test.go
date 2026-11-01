@@ -22,21 +22,27 @@ import (
 // (setReviewHost, seedTeam, seedUserOnTeam, reviewEntity, visTeamsOf,
 // seedMatchAllCIRule) live in review_routing_test.go / gate_test.go.
 
-// emitCI fires a ci_check_failed (author-centric) event for entityID authored
-// by author.
-func emitCI(router *Router, entityID, author string) {
+// ciFailedEvent is a ci_check_failed (author-centric) event for entityID
+// authored by author.
+func ciFailedEvent(entityID, author string) domain.Event {
 	meta := events.GitHubPRCICheckFailedMetadata{
 		Author: author, CheckName: "build", Repo: "owner/repo", HeadSHA: "abc123",
 	}
 	metaJSON, _ := json.Marshal(meta)
-	router.HandleEvent(context.Background(), domain.Event{
+	return domain.Event{
 		EventType:    domain.EventGitHubPRCICheckFailed,
 		EntityID:     &entityID,
 		DedupKey:     "build",
 		MetadataJSON: string(metaJSON),
 		OccurredAt:   time.Now(),
 		OrgID:        runmode.LocalDefaultOrgID,
-	})
+	}
+}
+
+// emitCI routes a ci_check_failed event for entityID authored by author.
+func emitCI(t *testing.T, router *Router, entityID, author string) {
+	t.Helper()
+	mustHandle(t, router, ciFailedEvent(entityID, author))
 }
 
 // seedSystemRule seeds a system-source (shipped-style) match-all rule for the
@@ -79,7 +85,7 @@ func TestAuthorCentric_StrangerPR_NoTask(t *testing.T) {
 	seedSystemCIRule(t, database, runmode.LocalDefaultTeamID)
 
 	entityID := reviewEntity(t, database, "owner/repo#stranger")
-	emitCI(reviewRouter(database), entityID, "stranger") // not a TF user
+	emitCI(t, reviewRouter(database), entityID, "stranger") // not a TF user
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
@@ -101,7 +107,7 @@ func TestAuthorCentric_LocalUserPR_OneTeam(t *testing.T) {
 	seedSystemCIRule(t, database, runmode.LocalDefaultTeamID)
 
 	entityID := reviewEntity(t, database, "owner/repo#mine")
-	emitCI(reviewRouter(database), entityID, "aidan")
+	emitCI(t, reviewRouter(database), entityID, "aidan")
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
@@ -129,7 +135,7 @@ func TestAuthorCentric_AuthorOnOneTeam_OwnedByThatTeam(t *testing.T) {
 	seedSystemCIRule(t, database, teamB)
 
 	entityID := reviewEntity(t, database, "owner/repo#aonly")
-	emitCI(reviewRouter(database), entityID, "aidan")
+	emitCI(t, reviewRouter(database), entityID, "aidan")
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
@@ -160,7 +166,7 @@ func TestAuthorCentric_AuthorOnTwoTeams_NullOwnerVisibleBoth(t *testing.T) {
 	seedSystemCIRule(t, database, teamB)
 
 	entityID := reviewEntity(t, database, "owner/repo#both")
-	emitCI(reviewRouter(database), entityID, "aidan")
+	emitCI(t, reviewRouter(database), entityID, "aidan")
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
@@ -199,7 +205,7 @@ func TestAuthorCentric_OverrideOwningTeam(t *testing.T) {
 		t.Fatalf("stamp owning team: stamped=%v err=%v", stamped, err)
 	}
 
-	emitCI(reviewRouter(database), entityID, "aidan")
+	emitCI(t, reviewRouter(database), entityID, "aidan")
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
@@ -231,12 +237,12 @@ func TestAuthorCentric_PriorTaskAnchorsOwner(t *testing.T) {
 	router := reviewRouter(database)
 
 	// First: a CI failure from aidan (team A) establishes A as the owner.
-	emitCI(router, entityID, "aidan")
+	emitCI(t, router, entityID, "aidan")
 
 	// Then: a conflicts event from bob (team B). Tier 2 (prior owned
 	// author-centric task) anchors it to A, not bob's team B.
 	conflictMeta, _ := json.Marshal(events.GitHubPRConflictsMetadata{Author: "bob", Repo: "owner/repo"})
-	router.HandleEvent(context.Background(), domain.Event{
+	mustHandle(t, router, domain.Event{
 		EventType:    domain.EventGitHubPRConflicts,
 		EntityID:     &entityID,
 		MetadataJSON: string(conflictMeta),
@@ -273,12 +279,12 @@ func TestAuthorCentric_ReviewFirstTrap_CIFallsToAuthor(t *testing.T) {
 	router := reviewRouter(database)
 
 	// Review requested from rachel first → a review task on the reviewer's team.
-	emitReviewRequested(router, entityID, "user:rachel", events.GitHubPRReviewRequestedMetadata{
+	emitReviewRequested(t, router, entityID, "user:rachel", events.GitHubPRReviewRequestedMetadata{
 		Author: "aidan", Repo: "owner/repo", PRNumber: 1, RequestedLogin: "rachel",
 	})
 	// Then CI fails. It must NOT route to the reviewer's team — review tasks
 	// don't confer entity ownership — so it falls to the author (teamAuthor).
-	emitCI(router, entityID, "aidan")
+	emitCI(t, router, entityID, "aidan")
 
 	ci, err := testTaskStore(database).FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrgID, entityID, domain.EventGitHubPRCICheckFailed)
 	if err != nil || len(ci) != 1 {
@@ -304,7 +310,7 @@ func TestAuthorCentric_ExternalAuthor_WatchRuleSurfaces(t *testing.T) {
 	seedMatchAllCIRule(t, database, teamC) // applies_to_unowned=true watch rule
 
 	entityID := reviewEntity(t, database, "owner/repo#dependabot")
-	emitCI(reviewRouter(database), entityID, "dependabot[bot]") // not a TF user
+	emitCI(t, reviewRouter(database), entityID, "dependabot[bot]") // not a TF user
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
@@ -353,7 +359,7 @@ func TestAuthorCentric_ExternalAuthor_FlagOff_NoTask(t *testing.T) {
 	seedFlagOffCIRule(t, database, teamC) // user rule, applies_to_unowned=false
 
 	entityID := reviewEntity(t, database, "owner/repo#dependabot-off")
-	emitCI(reviewRouter(database), entityID, "dependabot[bot]") // not a TF user
+	emitCI(t, reviewRouter(database), entityID, "dependabot[bot]") // not a TF user
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
@@ -382,7 +388,7 @@ func TestAuthorCentric_OwnedEntity_FlagOff_VisibleToTeam(t *testing.T) {
 	seedFlagOffCIRule(t, database, teamB)       // non-owner's rule, flag off → no broadening
 
 	entityID := reviewEntity(t, database, "owner/repo#owned-flagoff")
-	emitCI(reviewRouter(database), entityID, "aidan")
+	emitCI(t, reviewRouter(database), entityID, "aidan")
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
@@ -424,7 +430,7 @@ func TestAuthorCentric_TwoTeams_FiresDeterministically(t *testing.T) {
 	router := firingRouter(database, stub)
 	rec := notifytest.Record(t)
 
-	emitCI(router, entityID, "aidan")
+	emitCI(t, router, entityID, "aidan")
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
@@ -521,7 +527,7 @@ func TestAuthorCentric_TwoTeams_LoserWithoutAnImmediateTrigger(t *testing.T) {
 			stub := &stubDelegator{db: database}
 			router := firingRouter(database, stub)
 			rec := notifytest.Record(t)
-			emitCI(router, entityID, "aidan")
+			emitCI(t, router, entityID, "aidan")
 
 			if stub.calls != 1 {
 				t.Fatalf("expected exactly 1 fire, got %d", stub.calls)
@@ -578,7 +584,7 @@ func TestAuthorCentric_ConsolidatedOwnerAnchorsNextEvent(t *testing.T) {
 
 	// First CI failure: ambiguous owner → deterministic team fires and
 	// consolidates ownership onto itself.
-	emitCI(router, entityID, "aidan")
+	emitCI(t, router, entityID, "aidan")
 	ci, err := testTaskStore(database).FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrgID, entityID, domain.EventGitHubPRCICheckFailed)
 	if err != nil || len(ci) != 1 {
 		t.Fatalf("expected 1 CI task, got %d (err=%v)", len(ci), err)
@@ -591,7 +597,7 @@ func TestAuthorCentric_ConsolidatedOwnerAnchorsNextEvent(t *testing.T) {
 	// Second author-centric event (conflicts): tier 2 anchors it to the
 	// consolidated owner, even though the author still maps to both teams.
 	conflictMeta, _ := json.Marshal(events.GitHubPRConflictsMetadata{Author: "aidan", Repo: "owner/repo"})
-	router.HandleEvent(context.Background(), domain.Event{
+	mustHandle(t, router, domain.Event{
 		EventType:    domain.EventGitHubPRConflicts,
 		EntityID:     &entityID,
 		MetadataJSON: string(conflictMeta),
@@ -744,7 +750,7 @@ func TestAuthorCentric_ExternalAuthor_WatchTriggerFires(t *testing.T) {
 	entityID := reviewEntity(t, database, "owner/repo#extwatch")
 	stub := &stubDelegator{db: database}
 	router := firingRouter(database, stub)
-	emitCI(router, entityID, "dependabot[bot]") // external — no member owns it
+	emitCI(t, router, entityID, "dependabot[bot]") // external — no member owns it
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
@@ -785,7 +791,7 @@ func TestAuthorCentric_ExternalAuthor_WatchTriggerOnly_Fires(t *testing.T) {
 	entityID := reviewEntity(t, database, "owner/repo#trigonly")
 	stub := &stubDelegator{db: database}
 	router := firingRouter(database, stub)
-	emitCI(router, entityID, "dependabot[bot]") // external — no member owns it
+	emitCI(t, router, entityID, "dependabot[bot]") // external — no member owns it
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
@@ -821,7 +827,7 @@ func TestAuthorCentric_ExternalAuthor_PlainTriggerNoReach(t *testing.T) {
 	entityID := reviewEntity(t, database, "owner/repo#plaintrig")
 	stub := &stubDelegator{db: database}
 	router := firingRouter(database, stub)
-	emitCI(router, entityID, "dependabot[bot]") // external, not a TF user
+	emitCI(t, router, entityID, "dependabot[bot]") // external, not a TF user
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
@@ -863,7 +869,7 @@ func TestAuthorCentric_TwoTeams_WatcherDoesNotStealOwnership(t *testing.T) {
 	stub := &stubDelegator{db: database}
 	router := firingRouter(database, stub)
 	rec := notifytest.Record(t)
-	emitCI(router, entityID, "aidan")
+	emitCI(t, router, entityID, "aidan")
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {

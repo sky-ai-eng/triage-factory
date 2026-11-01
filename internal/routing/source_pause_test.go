@@ -52,7 +52,7 @@ func TestHandleEvent_TurnedOffSource_RecordsButCreatesNoTask(t *testing.T) {
 
 	turnOffSource(t, database, eventsource.KindJira)
 	entityID := jiraEntity(t, database, "SKY-off")
-	emitJiraAssigned(reviewRouter(database), entityID, "acct-aidan")
+	emitJiraAssigned(t, reviewRouter(database), entityID, "acct-aidan")
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
@@ -76,7 +76,7 @@ func TestHandleEvent_TurnedOffSource_RecordsButCreatesNoTask(t *testing.T) {
 	if _, err := st.OrgEventSources.SetDisabled(context.Background(), runmode.LocalDefaultOrgID, eventsource.KindJira, false, ""); err != nil {
 		t.Fatalf("turn back on: %v", err)
 	}
-	emitJiraAssigned(reviewRouter(database), entityID, "acct-aidan")
+	emitJiraAssigned(t, reviewRouter(database), entityID, "acct-aidan")
 
 	active, err = testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
@@ -96,14 +96,14 @@ func TestHandleEvent_TurnedOffSource_LeavesExistingTasksAlone(t *testing.T) {
 	seedTurnOffFixtures(t, database)
 
 	entityID := jiraEntity(t, database, "SKY-preexisting")
-	emitJiraAssigned(reviewRouter(database), entityID, "acct-aidan")
+	emitJiraAssigned(t, reviewRouter(database), entityID, "acct-aidan")
 	before, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(before) != 1 {
 		t.Fatalf("precondition: tasks=%d err=%v, want 1 task", len(before), err)
 	}
 
 	turnOffSource(t, database, eventsource.KindJira)
-	emitJiraAssigned(reviewRouter(database), entityID, "acct-aidan")
+	emitJiraAssigned(t, reviewRouter(database), entityID, "acct-aidan")
 
 	after, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
@@ -128,7 +128,7 @@ func TestHandleEvent_TurnedOffSource_PublishesSourceDisabled(t *testing.T) {
 	deps.Publisher = pub
 	router := newTestRouter(deps)
 
-	emitJiraAssigned(router, jiraEntity(t, database, "SKY-disp"), "acct-aidan")
+	emitJiraAssigned(t, router, jiraEntity(t, database, "SKY-disp"), "acct-aidan")
 
 	got := pub.eventsCopy()
 	if len(got) != 1 {
@@ -150,7 +150,7 @@ func TestHandleEvent_TurnedOffSource_IsPerSource(t *testing.T) {
 	turnOffSource(t, database, eventsource.KindJira)
 
 	entityID := reviewEntity(t, database, "owner/repo#other-source")
-	emitCI(reviewRouter(database), entityID, "aidan")
+	emitCI(t, reviewRouter(database), entityID, "aidan")
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
@@ -175,7 +175,7 @@ func TestHandleEvent_RequiredSourceIsNeverDropped(t *testing.T) {
 
 	turnOffSource(t, database, eventsource.KindGitHub)
 	entityID := reviewEntity(t, database, "owner/repo#required")
-	emitCI(reviewRouter(database), entityID, "aidan")
+	emitCI(t, reviewRouter(database), entityID, "aidan")
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {

@@ -33,7 +33,7 @@ func TestHandleEvent_GatedSource_RecordsButCreatesNoTask(t *testing.T) {
 	entitlements.GateEventSource("jira", testGateFeature)
 	t.Cleanup(entitlements.Reset)
 
-	emitJiraAssigned(reviewRouter(database), entityID, "acct-aidan")
+	emitJiraAssigned(t, reviewRouter(database), entityID, "acct-aidan")
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
@@ -54,7 +54,7 @@ func TestHandleEvent_GatedSource_RecordsButCreatesNoTask(t *testing.T) {
 	// Grant the feature — normal task creation resumes on the next event.
 	entitlements.RegisterProvider(entitlements.Static(testGateFeature))
 
-	emitJiraAssigned(reviewRouter(database), entityID, "acct-aidan")
+	emitJiraAssigned(t, reviewRouter(database), entityID, "acct-aidan")
 
 	active, err = testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
@@ -82,7 +82,7 @@ func TestHandleEvent_UngatedSource_Unaffected(t *testing.T) {
 	t.Cleanup(entitlements.Reset)
 
 	entityID := reviewEntity(t, database, "owner/repo#gate")
-	emitCI(reviewRouter(database), entityID, "aidan")
+	emitCI(t, reviewRouter(database), entityID, "aidan")
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
