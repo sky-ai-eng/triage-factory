@@ -553,6 +553,9 @@ services:
       # The executor below never signs, so neither is forwarded to it.
       TF_MAX_COMMIT_SIGNATURES_PER_ORG_MINUTE: ${TF_MAX_COMMIT_SIGNATURES_PER_ORG_MINUTE:-}
       TF_MAX_COMMIT_SIGNATURES_PER_CLAIM: ${TF_MAX_COMMIT_SIGNATURES_PER_CLAIM:-}
+      # How long a held close waits on a run an event started, read by the
+      # background brain, which runs on a control pod. Empty → 20m.
+      TF_CLOSE_HOLD_TIMEOUT: ${TF_CLOSE_HOLD_TIMEOUT:-}
       # supabase_admin is the real superuser in the supabase/postgres
       # image; the `postgres` role is demoted by the image's bundled
       # migrations and supautils blocks reserved-role ALTERs from it.

@@ -9,8 +9,8 @@ import (
 )
 
 // A held close stops the work an event started once it has held for the
-// sweep's limit, then closes the task unless a person's work or deliverable
-// still holds it. A person's work is never stopped on the limit.
+// sweep's limit, and the next pass closes the task unless a person's work or
+// deliverable still holds it. A person's work is never stopped on the limit.
 
 // startedByEvent makes a seeded run event-started, as a fired trigger's is:
 // no person delegated it.
@@ -54,14 +54,27 @@ func TestCloseHoldExpiry_LeavesAYoungHoldAlone(t *testing.T) {
 	}
 }
 
-// TestCloseHoldExpiry_StopsTheWorkAndClosesTheTask: past the limit, with
-// nothing a person does holding the task, the expiry closes it the way any
-// close does: the event's reason and type, its audit row, the run called off
-// and stopped, the teardown.
-func TestCloseHoldExpiry_StopsTheWorkAndClosesTheTask(t *testing.T) {
+// TestCloseHoldExpiry_StopsTheWorkThenClosesTheTask: past the limit, the
+// pass calls the run off and stops it on the limit's own cause, and leaves
+// the close held. With nothing else holding the task, the next pass closes it
+// the way any held close applies: the event's reason and type, its audit row,
+// the teardown.
+func TestCloseHoldExpiry_StopsTheWorkThenClosesTheTask(t *testing.T) {
 	f := newHeldCIFixture(t, "owner/repo#expiry-closes")
 	startedByEvent(t, f.database, f.runID, f.convID)
 	ageHold(t, f.database, f.taskID)
+
+	f.r.sweepCloseDeferrals(t.Context(), DefaultCloseHoldTimeout)
+
+	if status, _, _ := taskRow(t, f.database, f.taskID); status == "done" {
+		t.Error("the expiry closed the task before the stopped run settled")
+	}
+	if !cancelRequested(t, f.database, f.runID) {
+		t.Error("the expired run was not called off")
+	}
+	if got, causes := f.sp.stoppedIDs(), f.sp.stopCauses(); !slices.Equal(got, []string{f.convID}) || !slices.Equal(causes, []delegate.StopCause{delegate.StopCauseCloseHoldExpired}) {
+		t.Errorf("stopped = %v for %v, want [%s] for the expired hold", got, causes, f.convID)
+	}
 
 	f.r.sweepCloseDeferrals(t.Context(), DefaultCloseHoldTimeout)
 
@@ -71,12 +84,6 @@ func TestCloseHoldExpiry_StopsTheWorkAndClosesTheTask(t *testing.T) {
 	}
 	if n := closeAuditCount(t, f.database, f.taskID); n != 1 {
 		t.Errorf("close audit rows = %d, want 1", n)
-	}
-	if !cancelRequested(t, f.database, f.runID) {
-		t.Error("the expired run was not called off")
-	}
-	if got, causes := f.sp.stoppedIDs(), f.sp.stopCauses(); !slices.Equal(got, []string{f.convID}) || !slices.Equal(causes, []delegate.StopCause{delegate.StopCauseTaskClosed}) {
-		t.Errorf("stopped = %v for %v, want [%s] for the close", got, causes, f.convID)
 	}
 	if !slices.Contains(f.sp.tornDownCopy(), f.taskID) {
 		t.Errorf("teardowns = %v, want the task %s among them", f.sp.tornDownCopy(), f.taskID)
@@ -88,7 +95,8 @@ func TestCloseHoldExpiry_StopsTheWorkAndClosesTheTask(t *testing.T) {
 
 // TestCloseHoldExpiry_StopsTheWorkAndKeepsTheCloseADeliverableHolds: a draft
 // pull request awaiting a person does not run out. The run is stopped on the
-// limit's own cause, and the close stays held, with nothing torn down.
+// limit's own cause, and the close stays held across passes, with nothing
+// torn down.
 func TestCloseHoldExpiry_StopsTheWorkAndKeepsTheCloseADeliverableHolds(t *testing.T) {
 	f := newHeldCIFixture(t, "owner/repo#expiry-awaiting")
 	startedByEvent(t, f.database, f.runID, f.convID)
@@ -96,21 +104,22 @@ func TestCloseHoldExpiry_StopsTheWorkAndKeepsTheCloseADeliverableHolds(t *testin
 	ageHold(t, f.database, f.taskID)
 
 	f.r.sweepCloseDeferrals(t.Context(), DefaultCloseHoldTimeout)
+	f.r.sweepCloseDeferrals(t.Context(), DefaultCloseHoldTimeout)
 
 	if status, _, _ := taskRow(t, f.database, f.taskID); status == "done" {
-		t.Error("the expiry closed a task whose draft awaits a person")
+		t.Error("the sweep closed a task whose draft awaits a person")
 	}
 	if heldClose(t, f.database, f.taskID) != f.eventID {
-		t.Error("the expiry dropped the close a draft awaiting a person holds")
+		t.Error("the sweep dropped the close a draft awaiting a person holds")
 	}
 	if !cancelRequested(t, f.database, f.runID) {
 		t.Error("the expired run was not called off")
 	}
 	if got, causes := f.sp.stoppedIDs(), f.sp.stopCauses(); !slices.Equal(got, []string{f.convID}) || !slices.Equal(causes, []delegate.StopCause{delegate.StopCauseCloseHoldExpired}) {
-		t.Errorf("stopped = %v for %v, want [%s] for the expired hold", got, causes, f.convID)
+		t.Errorf("stopped = %v for %v, want [%s] once, for the expired hold", got, causes, f.convID)
 	}
 	if slices.Contains(f.sp.tornDownCopy(), f.taskID) {
-		t.Error("the expiry tore down the draft awaiting a person")
+		t.Error("the sweep tore down the draft awaiting a person")
 	}
 }
 

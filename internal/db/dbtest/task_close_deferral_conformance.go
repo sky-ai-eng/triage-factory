@@ -61,8 +61,8 @@ type TaskCloseDeferralFactory func(t *testing.T) (stores TaskCloseDeferralStores
 // CloseDeferralForTaskSystem, ListActiveCloseDeferralsSystem,
 // ClearCloseDeferralSystem, the clear a bump, a requeue or an undo makes, the
 // hold arm of EntityStore.CloseTerminalSystem, what holds a close: a working
-// conversation, and a deliverable awaiting a person, and the expiry of a
-// hold work an event started has kept too long: when the hold began,
+// conversation, and a deliverable awaiting a person, and the expiry of the
+// work an event started under a hold kept too long: when the hold began,
 // ListExpiredCloseDeferralsSystem and ExpireHeldCloseSystem.
 func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) {
 	t.Helper()
@@ -600,13 +600,21 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 		}
 		return ids
 	}
-	expire := func(t *testing.T, tasks db.TaskStore, orgID, taskID, eventID string) db.TaskCloseOutcome {
+	expire := func(t *testing.T, tasks db.TaskStore, orgID, taskID, eventID string) []string {
 		t.Helper()
-		out, err := tasks.ExpireHeldCloseSystem(ctx, orgID, taskID, eventID, holdFor, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed)
+		expired, err := tasks.ExpireHeldCloseSystem(ctx, orgID, taskID, eventID, holdFor)
 		if err != nil {
 			t.Fatalf("ExpireHeldCloseSystem: %v", err)
 		}
-		return out
+		return expired
+	}
+	listedIdle := func(t *testing.T, tasks db.TaskStore, taskID string) bool {
+		t.Helper()
+		all, err := tasks.ListActiveCloseDeferralsSystem(ctx)
+		if err != nil {
+			t.Fatalf("ListActiveCloseDeferralsSystem: %v", err)
+		}
+		return slices.ContainsFunc(all, func(d domain.TaskCloseDeferral) bool { return d.TaskID == taskID })
 	}
 	personWrites := func(t *testing.T, stores TaskCloseDeferralStores, orgID, conversationID string) {
 		t.Helper()
@@ -686,62 +694,63 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 		}
 	})
 
-	t.Run("ExpireHeldClose_stops_the_work_and_closes_when_nothing_else_holds", func(t *testing.T) {
+	t.Run("ExpireHeldClose_calls_off_the_work_an_event_started_and_keeps_the_close", func(t *testing.T) {
 		stores, orgID, seed := mk(t)
 		taskID := seed.Task(t)
 		eventID := seed.Event(t, taskID)
-		runID, convID := seed.BlueprintAndConversation(t, taskID, "running", "")
+		eventRun, eventConv := seed.BlueprintAndConversation(t, taskID, "running", "")
+		// A person's own delegation on the same task is not the event's work.
+		seed.BareConversation(t, taskID, "")
 		holdNow(t, stores, orgID, taskID, eventID)
 		seed.AgeHold(t, taskID, aged)
 
-		if out := expire(t, stores.Tasks, orgID, taskID, eventID); !outcomeEqual(out, db.TaskCloseOutcome{Closed: true, ActiveConversationIDs: []string{convID}}) {
-			t.Errorf("expire = %+v, want closed over [%s]", out, convID)
+		if got := expire(t, stores.Tasks, orgID, taskID, eventID); !slices.Equal(got, []string{eventConv}) {
+			t.Errorf("expired = %v, want [%s]", got, eventConv)
 		}
-		if s := seed.TaskStatus(t, taskID); s != "done" {
-			t.Errorf("task status = %q, want done", s)
-		}
-		if n := seed.CloseAuditCount(t, taskID); n != 1 {
-			t.Errorf("close audit rows = %d, want 1", n)
-		}
-		if !seed.CancelRequested(t, runID) {
+		if !seed.CancelRequested(t, eventRun) {
 			t.Error("the expired run was not called off")
 		}
-		if d := held(t, stores.Tasks, orgID, taskID); d != nil {
-			t.Errorf("hold still read after the close = %+v", *d)
+		if s := seed.TaskStatus(t, taskID); s != "queued" {
+			t.Errorf("task status = %q, want queued", s)
+		}
+		if n := seed.CloseAuditCount(t, taskID); n != 0 {
+			t.Errorf("close audit rows = %d, want 0", n)
+		}
+		if d := held(t, stores.Tasks, orgID, taskID); d == nil || d.EventID != eventID {
+			t.Errorf("held close = %+v, want event %s", d, eventID)
+		}
+		if listedIdle(t, stores.Tasks, taskID) {
+			t.Error("the sweep would apply the close while the person's work goes on")
 		}
 	})
 
-	t.Run("ExpireHeldClose_keeps_a_close_a_person_still_holds", func(t *testing.T) {
+	t.Run("After_the_expiry_the_close_applies_once_nothing_holds_it", func(t *testing.T) {
 		stores, orgID, seed := mk(t)
-		// A person's own delegation on the task, and a draft pull request
-		// awaiting a person: each keeps the close held once the event's
-		// work is stopped.
-		for _, holder := range []string{"person_work", "deliverable"} {
+		// The expired run called off and nothing else on the task: the
+		// sweep's ordinary apply closes it. With a draft the run left for a
+		// person, the close waits on the person.
+		for _, draft := range []bool{false, true} {
 			taskID := seed.Task(t)
 			eventID := seed.Event(t, taskID)
-			runID, convID := seed.BlueprintAndConversation(t, taskID, "running", "")
-			if holder == "person_work" {
-				seed.BareConversation(t, taskID, "")
-			} else {
+			_, convID := seed.BlueprintAndConversation(t, taskID, "running", "")
+			if draft {
 				seed.DraftPullRequest(t, convID, seed.EntityForTask(t, seed.Task(t)))
 			}
 			holdNow(t, stores, orgID, taskID, eventID)
 			seed.AgeHold(t, taskID, aged)
+			if got := expire(t, stores.Tasks, orgID, taskID, eventID); !slices.Equal(got, []string{convID}) {
+				t.Fatalf("draft %v: expired = %v, want [%s]", draft, got, convID)
+			}
 
-			if out := expire(t, stores.Tasks, orgID, taskID, eventID); !outcomeEqual(out, db.TaskCloseOutcome{Held: true, ExpiredConversationIDs: []string{convID}}) {
-				t.Errorf("%s: expire = %+v, want held with [%s] expired", holder, out, convID)
+			if listed := listedIdle(t, stores.Tasks, taskID); listed == draft {
+				t.Errorf("draft %v: listed for the apply = %v, want %v", draft, listed, !draft)
 			}
-			if !seed.CancelRequested(t, runID) {
-				t.Errorf("%s: the expired run was not called off", holder)
+			out, err := stores.Tasks.ApplyHeldCloseSystem(ctx, orgID, taskID, eventID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed)
+			if err != nil {
+				t.Fatalf("ApplyHeldCloseSystem: %v", err)
 			}
-			if s := seed.TaskStatus(t, taskID); s != "queued" {
-				t.Errorf("%s: task status = %q, want queued", holder, s)
-			}
-			if n := seed.CloseAuditCount(t, taskID); n != 0 {
-				t.Errorf("%s: close audit rows = %d, want 0", holder, n)
-			}
-			if d := held(t, stores.Tasks, orgID, taskID); d == nil || d.EventID != eventID {
-				t.Errorf("%s: held close = %+v, want event %s", holder, d, eventID)
+			if out.Closed == draft {
+				t.Errorf("draft %v: apply after the expiry = %+v", draft, out)
 			}
 		}
 	})
@@ -779,8 +788,8 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 			t.Run(tc.name, func(t *testing.T) {
 				taskID := seed.Task(t)
 				eventID, runID := tc.stage(t, taskID)
-				if out := expire(t, stores.Tasks, orgID, taskID, eventID); !outcomeEqual(out, db.TaskCloseOutcome{}) {
-					t.Errorf("expire = %+v, want nothing", out)
+				if got := expire(t, stores.Tasks, orgID, taskID, eventID); len(got) != 0 {
+					t.Errorf("expired = %v, want none", got)
 				}
 				if seed.CancelRequested(t, runID) {
 					t.Error("the run was called off")
@@ -799,6 +808,5 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 func outcomeEqual(a, b db.TaskCloseOutcome) bool {
 	return a.Closed == b.Closed && a.Held == b.Held && a.NewlyHeld == b.NewlyHeld && a.AwaitingPerson == b.AwaitingPerson &&
 		slices.Equal(a.ActiveConversationIDs, b.ActiveConversationIDs) &&
-		slices.Equal(a.WorkingConversationIDs, b.WorkingConversationIDs) &&
-		slices.Equal(a.ExpiredConversationIDs, b.ExpiredConversationIDs)
+		slices.Equal(a.WorkingConversationIDs, b.WorkingConversationIDs)
 }

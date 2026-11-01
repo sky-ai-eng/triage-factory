@@ -1277,37 +1277,45 @@ func (s *taskStore) ListExpiredCloseDeferralsSystem(ctx context.Context, heldFor
 	return out, rows.Err()
 }
 
-func (s *taskStore) ExpireHeldCloseSystem(ctx context.Context, orgID, taskID, heldEventID string, heldFor time.Duration, closeReason, closeEventType string) (db.TaskCloseOutcome, error) {
-	var out db.TaskCloseOutcome
+func (s *taskStore) ExpireHeldCloseSystem(ctx context.Context, orgID, taskID, heldEventID string, heldFor time.Duration) ([]string, error) {
+	var expired []string
 	err := inTx(ctx, s.admin, func(q queryer) error {
 		var err error
-		out, err = expireHeldClose(ctx, q, orgID, taskID, heldEventID, heldFor, closeReason, closeEventType)
+		expired, err = expireHeldClose(ctx, q, orgID, taskID, heldEventID, heldFor)
 		return err
 	})
 	if err != nil {
-		return db.TaskCloseOutcome{}, err
+		return nil, err
 	}
-	return out, nil
+	return expired, nil
 }
 
-// expireHeldClose is ExpireHeldCloseSystem's body. The expired
-// conversations' blueprint runs are called off in the transaction that
-// decides it, as a close calls off its task's, so a stop that never lands
-// still leaves nothing to drive them on; that covers a blueprint between two
-// steps too, whose settled step no stop reaches.
-func expireHeldClose(ctx context.Context, q queryer, orgID, taskID, heldEventID string, heldFor time.Duration, closeReason, closeEventType string) (db.TaskCloseOutcome, error) {
+// expireHeldClose is ExpireHeldCloseSystem's body.
+//
+// The task's row is locked FOR NO KEY UPDATE, the lock a task UPDATE takes.
+// That orders the expiry against a bump, a hold, a close and a firing, which
+// all lock or write the row, and leaves a blueprint step's advance free to
+// insert its next conversation: the advance holds the blueprint row the
+// cancel stamp below writes, and its insert takes a key-share lock on the
+// task, which FOR UPDATE would refuse, deadlocking the two.
+//
+// The stamp calls the expired conversations' blueprint runs off in the
+// transaction that decides it, so a stop that never lands still leaves
+// nothing to drive them on. It also covers a blueprint between two steps,
+// whose settled step no stop reaches.
+func expireHeldClose(ctx context.Context, q queryer, orgID, taskID, heldEventID string, heldFor time.Duration) ([]string, error) {
 	var expired bool
 	err := q.QueryRowContext(ctx, `
 		SELECT `+heldForSQL(4)+` FROM tasks
 		 WHERE org_id = $1 AND id = $2 AND status NOT IN ('done', 'dismissed')
 		   AND close_deferred_event_id = $3
-		 FOR UPDATE
+		 FOR NO KEY UPDATE
 	`, orgID, taskID, heldEventID, heldFor.Seconds()).Scan(&expired)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && !expired) {
-		return db.TaskCloseOutcome{}, nil
+		return nil, nil
 	}
 	if err != nil {
-		return db.TaskCloseOutcome{}, fmt.Errorf("lock task: %w", err)
+		return nil, fmt.Errorf("lock task: %w", err)
 	}
 	rows, err := q.QueryContext(ctx, `
 		SELECT r.id FROM conversations r
@@ -1316,14 +1324,14 @@ func expireHeldClose(ctx context.Context, q queryer, orgID, taskID, heldEventID 
 		 ORDER BY r.started_at, r.id
 	`, orgID, taskID)
 	if err != nil {
-		return db.TaskCloseOutcome{}, fmt.Errorf("list expired conversations: %w", err)
+		return nil, fmt.Errorf("list expired conversations: %w", err)
 	}
 	ids, err := scanIDs(rows, "conversations.id")
 	if err != nil {
-		return db.TaskCloseOutcome{}, fmt.Errorf("list expired conversations: %w", err)
+		return nil, fmt.Errorf("list expired conversations: %w", err)
 	}
 	if len(ids) == 0 {
-		return db.TaskCloseOutcome{}, nil
+		return nil, nil
 	}
 	if _, err := q.ExecContext(ctx, `
 		UPDATE blueprint_runs br SET cancel_requested = true
@@ -1332,31 +1340,9 @@ func expireHeldClose(ctx context.Context, q queryer, orgID, taskID, heldEventID 
 		   AND br.cancel_requested = false
 		   AND br.id IN (SELECT c.blueprint_run_id FROM conversations c WHERE c.org_id = $1 AND c.id = ANY($2))
 	`, orgID, pgUUIDArray(ids)); err != nil {
-		return db.TaskCloseOutcome{}, fmt.Errorf("stamp run cancel intent: %w", err)
+		return nil, fmt.Errorf("stamp run cancel intent: %w", err)
 	}
-
-	var stillHeld bool
-	if err := q.QueryRowContext(ctx, `
-		SELECT EXISTS (
-		           SELECT 1 FROM conversations r
-		            WHERE r.org_id = $1 AND r.task_id = $2
-		              AND `+workingConversationSQL+`
-		              AND `+personDrivenConversationSQL+`)
-		    OR `+awaitingPersonSQL("$1", "$2"),
-		orgID, taskID).Scan(&stillHeld); err != nil {
-		return db.TaskCloseOutcome{}, fmt.Errorf("read what still holds the close: %w", err)
-	}
-	if stillHeld {
-		return db.TaskCloseOutcome{Held: true, ExpiredConversationIDs: ids}, nil
-	}
-	closed, conversationIDs, err := closeTaskWithCancelIntent(ctx, q, orgID, taskID, closeReason, closeEventType, heldEventID)
-	if err != nil {
-		return db.TaskCloseOutcome{}, err
-	}
-	if err := clearHold(ctx, q, orgID, taskID); err != nil {
-		return db.TaskCloseOutcome{}, err
-	}
-	return db.TaskCloseOutcome{Closed: closed, ActiveConversationIDs: conversationIDs}, nil
+	return ids, nil
 }
 
 func (s *taskStore) ClearCloseDeferralSystem(ctx context.Context, orgID, taskID, eventID string) (bool, error) {

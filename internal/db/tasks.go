@@ -30,9 +30,9 @@ var ErrNoSuchTask = errors.New("no task with that id")
 // insert can no longer strand a task on an entity nothing will close again.
 var ErrEntityClosed = errors.New("entity is closed or does not exist; no task may be minted on it")
 
-// TaskCloseOutcome is what TaskStore.CloseOrHoldSystem,
-// ApplyHeldCloseSystem or ExpireHeldCloseSystem did to one task: closed it,
-// held its close, or neither.
+// TaskCloseOutcome is what TaskStore.CloseOrHoldSystem or
+// ApplyHeldCloseSystem did to one task: closed it, held its close, or
+// neither.
 type TaskCloseOutcome struct {
 	// Closed reports that this call closed the task, and
 	// ActiveConversationIDs are the conversations then active on it, whose
@@ -51,11 +51,6 @@ type TaskCloseOutcome struct {
 	// verdict on a pull request still open, which holds the close until the
 	// person resolves it.
 	AwaitingPerson bool
-	// ExpiredConversationIDs are, for ExpireHeldCloseSystem, the
-	// conversations whose time to finish ran out while the close stays held,
-	// whose blueprint runs' cancel intent it stamped: the set the caller
-	// stops.
-	ExpiredConversationIDs []string
 }
 
 // AgentClaimStamp is the guarded task-claim write that rides *inside*
@@ -857,26 +852,23 @@ type TaskStore interface {
 	// ListActiveCloseDeferralsSystem is.
 	ListExpiredCloseDeferralsSystem(ctx context.Context, heldFor time.Duration) ([]domain.TaskCloseDeferral, error)
 
-	// ExpireHeldCloseSystem ends the wait of the close the task has held on
-	// heldEventID for heldFor or longer, for the close-hold sweep, which read
-	// that hold earlier. In one transaction, the task's row locked first:
+	// ExpireHeldCloseSystem expires the work an event started under the
+	// close the task has held on heldEventID for heldFor or longer, for the
+	// close-hold sweep, which read that hold earlier. In one transaction, the
+	// task's row locked first: a task no longer active, whose hold no longer
+	// names heldEventID, or that has held it for less than heldFor, is left
+	// as it is and expired is empty. Otherwise expired are the conversations
+	// ListExpiredCloseDeferralsSystem would expire, and cancel intent is
+	// stamped on their running blueprint runs.
 	//
-	//   - a task no longer active, whose hold no longer names heldEventID,
-	//     that has held it for less than heldFor, or with no conversation
-	//     ListExpiredCloseDeferralsSystem would expire, is left as it is, and
-	//     the outcome is zero.
-	//   - otherwise those conversations have expired: cancel intent is
-	//     stamped on their running blueprint runs. Then, while a
-	//     conversation a person started or wrote to is still working, or a
-	//     deliverable awaits a person (as CloseOrHoldSystem reads one), the
-	//     close stays held: Held is true and ExpiredConversationIDs are the
-	//     expired conversations, the set the caller stops.
-	//   - with neither, it is CloseWithConversationCancelIntentSystem with
-	//     heldEventID as the closing event, and the hold is cleared with it,
-	//     as ApplyHeldCloseSystem applies it.
-	//
-	// Admin pool. Exempt from the returned-row rule as CloseOrHoldSystem is.
-	ExpireHeldCloseSystem(ctx context.Context, orgID, taskID, heldEventID string, heldFor time.Duration, closeReason, closeEventType string) (TaskCloseOutcome, error)
+	// The close stays held either way. The caller stops the expired
+	// conversations, and the sweep applies the close through
+	// ApplyHeldCloseSystem once nothing on the task is working, reading the
+	// deliverables they left only then; until then a stop that never landed
+	// is retried, since the conversation still works and nobody has asked it
+	// to stop. Admin pool. Exempt from the returned-row rule: it writes no
+	// task row, and the caller acts on the conversations.
+	ExpireHeldCloseSystem(ctx context.Context, orgID, taskID, heldEventID string, heldFor time.Duration) (expired []string, err error)
 
 	// ClearCloseDeferralSystem clears the task's deferral when it still names
 	// eventID — a compare-and-clear on the event the sweep read, so a

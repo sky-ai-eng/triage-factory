@@ -143,6 +143,81 @@ func TestTaskCloseDeferral_Postgres_ExpiredListsEveryLiveOrg(t *testing.T) {
 	}
 }
 
+// TestTaskCloseDeferral_Postgres_ExpiryLetsAStepAdvanceThrough pins the
+// expiry's lock order against a blueprint step's advance, which writes the
+// blueprint row and then inserts the next step's conversation, whose foreign
+// key takes a key-share lock on the task. Here the advance holds the
+// blueprint row, the expiry locks the task and waits on that row, and the
+// advance then takes its key-share lock: both must finish, where a task lock
+// that refused key-share would deadlock them.
+func TestTaskCloseDeferral_Postgres_ExpiryLetsAStepAdvanceThrough(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+	orgID, userID, _ := seedPgOrgUserAgent(t, h)
+	seed := newPgCloseDeferralSeeder(h.AdminDB, orgID, userID)
+	taskID := seed.Task(t)
+	eventID := seed.Event(t, taskID)
+	runID, convID := seed.BlueprintAndConversation(t, taskID, "running", "")
+	if _, err := stores.Tasks.CloseOrHoldSystem(ctx, orgID, taskID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed, eventID); err != nil {
+		t.Fatalf("CloseOrHoldSystem: %v", err)
+	}
+	seed.AgeHold(t, taskID, 2*time.Hour)
+
+	advance, err := h.AdminDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin the advance: %v", err)
+	}
+	defer func() { _ = advance.Rollback() }()
+	if _, err := advance.Exec(`UPDATE blueprint_runs SET current_step_index = current_step_index WHERE id = $1`, runID); err != nil {
+		t.Fatalf("advance: take the blueprint row: %v", err)
+	}
+
+	type result struct {
+		expired []string
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		expired, err := stores.Tasks.ExpireHeldCloseSystem(ctx, orgID, taskID, eventID, time.Hour)
+		done <- result{expired, err}
+	}()
+	// The expiry holds the task's lock and waits on the blueprint row.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var waiting int
+		if err := h.AdminDB.QueryRow(`
+			SELECT count(*) FROM pg_stat_activity
+			 WHERE wait_event_type = 'Lock' AND query LIKE '%UPDATE blueprint_runs br SET cancel_requested%'
+		`).Scan(&waiting); err != nil {
+			t.Fatalf("read waiting backends: %v", err)
+		}
+		if waiting > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the expiry never reached the blueprint row")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// The next step's conversation insert's foreign key check.
+	if _, err := advance.Exec(`SELECT 1 FROM tasks WHERE id = $1 FOR KEY SHARE`, taskID); err != nil {
+		t.Fatalf("advance: key-share lock on the task under the expiry's lock: %v", err)
+	}
+	if err := advance.Commit(); err != nil {
+		t.Fatalf("commit the advance: %v", err)
+	}
+	r := <-done
+	if r.err != nil {
+		t.Fatalf("ExpireHeldCloseSystem: %v", r.err)
+	}
+	if !slices.Equal(r.expired, []string{convID}) {
+		t.Errorf("expired = %v, want [%s]", r.expired, convID)
+	}
+}
+
 func newPgCloseDeferralSeeder(conn *sql.DB, orgID, userID string) dbtest.TaskCloseDeferralSeeder {
 	exec := func(t *testing.T, what, query string, args ...any) {
 		t.Helper()

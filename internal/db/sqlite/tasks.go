@@ -1374,41 +1374,42 @@ func (s *taskStore) ListExpiredCloseDeferralsSystem(ctx context.Context, heldFor
 	return out, rows.Err()
 }
 
-func (s *taskStore) ExpireHeldCloseSystem(ctx context.Context, orgID, taskID, heldEventID string, heldFor time.Duration, closeReason, closeEventType string) (db.TaskCloseOutcome, error) {
+func (s *taskStore) ExpireHeldCloseSystem(ctx context.Context, orgID, taskID, heldEventID string, heldFor time.Duration) ([]string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return db.TaskCloseOutcome{}, err
+		return nil, err
 	}
-	var out db.TaskCloseOutcome
+	var expired []string
 	err := inTx(ctx, s.q, func(q queryer) error {
 		var err error
-		out, err = expireHeldClose(ctx, q, taskID, heldEventID, heldFor, closeReason, closeEventType)
+		expired, err = expireHeldClose(ctx, q, taskID, heldEventID, heldFor)
 		return err
 	})
 	if err != nil {
-		return db.TaskCloseOutcome{}, err
+		return nil, err
 	}
-	return out, nil
+	return expired, nil
 }
 
-// expireHeldClose is the Postgres twin's. The transaction is the lock.
-func expireHeldClose(ctx context.Context, q queryer, taskID, heldEventID string, heldFor time.Duration, closeReason, closeEventType string) (db.TaskCloseOutcome, error) {
+// expireHeldClose is the Postgres twin's. The transaction is the lock: one
+// writer at a time.
+func expireHeldClose(ctx context.Context, q queryer, taskID, heldEventID string, heldFor time.Duration) ([]string, error) {
 	var expired bool
 	err := q.QueryRowContext(ctx, `
 		SELECT `+heldForSQL+` FROM tasks
 		 WHERE id = ? AND status NOT IN ('done', 'dismissed') AND close_deferred_event_id = ?
 	`, sqliteLeaseModifier(-heldFor), taskID, heldEventID).Scan(&expired)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && !expired) {
-		return db.TaskCloseOutcome{}, nil
+		return nil, nil
 	}
 	if err != nil {
-		return db.TaskCloseOutcome{}, fmt.Errorf("read task: %w", err)
+		return nil, fmt.Errorf("read task: %w", err)
 	}
 	ids, err := conversationIDsWhere(ctx, q, taskID, expiringConversationSQL)
 	if err != nil {
-		return db.TaskCloseOutcome{}, fmt.Errorf("list expired conversations: %w", err)
+		return nil, fmt.Errorf("list expired conversations: %w", err)
 	}
 	if len(ids) == 0 {
-		return db.TaskCloseOutcome{}, nil
+		return nil, nil
 	}
 	args := make([]any, len(ids))
 	for i, id := range ids {
@@ -1421,31 +1422,9 @@ func expireHeldClose(ctx context.Context, q queryer, taskID, heldEventID string,
 		   AND id IN (SELECT c.blueprint_run_id FROM conversations c
 		               WHERE c.id IN (`+strings.TrimRight(strings.Repeat("?, ", len(ids)), ", ")+`))
 	`, args...); err != nil {
-		return db.TaskCloseOutcome{}, fmt.Errorf("stamp run cancel intent: %w", err)
+		return nil, fmt.Errorf("stamp run cancel intent: %w", err)
 	}
-
-	var stillHeld bool
-	if err := q.QueryRowContext(ctx, `
-		SELECT EXISTS (
-		           SELECT 1 FROM conversations r
-		            WHERE r.task_id = ?
-		              AND `+workingConversationSQL+`
-		              AND `+personDrivenConversationSQL+`)
-		    OR `+awaitingPersonSQL("?"),
-		taskID, taskID).Scan(&stillHeld); err != nil {
-		return db.TaskCloseOutcome{}, fmt.Errorf("read what still holds the close: %w", err)
-	}
-	if stillHeld {
-		return db.TaskCloseOutcome{Held: true, ExpiredConversationIDs: ids}, nil
-	}
-	closed, conversationIDs, err := closeTaskWithCancelIntent(ctx, q, taskID, closeReason, closeEventType, heldEventID)
-	if err != nil {
-		return db.TaskCloseOutcome{}, err
-	}
-	if err := clearHold(ctx, q, taskID); err != nil {
-		return db.TaskCloseOutcome{}, err
-	}
-	return db.TaskCloseOutcome{Closed: closed, ActiveConversationIDs: conversationIDs}, nil
+	return ids, nil
 }
 
 func (s *taskStore) ClearCloseDeferralSystem(ctx context.Context, orgID, taskID, eventID string) (bool, error) {

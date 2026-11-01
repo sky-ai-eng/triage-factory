@@ -27,10 +27,11 @@ import (
 //
 // The hold does not wait forever on work an event started. That work is told
 // to wrap up, and if it is still going once the close has held for the
-// sweep's limit, the sweep stops it, then closes the task unless a person's
-// work or a deliverable awaiting a person still holds it. Work a person
-// started is told what happened without being told to stop, so it is never
-// stopped on the limit.
+// sweep's limit, the sweep calls it off and stops it; the close applies the
+// usual way once nothing on the task is working, unless a person's work or a
+// deliverable awaiting a person still holds it. Work a person started is told
+// what happened without being told to stop, so it is never stopped on the
+// limit.
 
 // DefaultCloseDeferralSweepInterval is how often the brain looks at the held
 // closes of tasks nothing holds any more, and at the holds that have run out.
@@ -132,14 +133,9 @@ func (r *Router) sweepCloseDeferrals(ctx context.Context, holdTimeout time.Durat
 		if ctx.Err() != nil {
 			return
 		}
-		closed, err := r.expireCloseDeferral(ctx, d, holdTimeout)
-		if err != nil {
+		if err := r.expireCloseDeferral(ctx, d, holdTimeout); err != nil {
 			routerLog.ErrorContext(ctx, "close hold sweep: expire failed",
 				"task_id", d.TaskID, "event_id", d.EventID, "error", err)
-			continue
-		}
-		if closed {
-			closedIn[d.OrgID] = true
 		}
 	}
 }
@@ -174,42 +170,36 @@ func (r *Router) settleCloseDeferral(ctx context.Context, d domain.TaskCloseDefe
 	return true, nil
 }
 
-// expireCloseDeferral ends the wait of one held close the sweep listed as
-// older than holdTimeout. A close that no longer holds is dropped, as the
-// settle drops one, and the work goes on. Otherwise ExpireHeldCloseSystem
-// decides again under the task's lock: it calls off the work an event
-// started, then closes the task if nothing a person does still holds it,
-// through the same post-commit sequence as any close, or leaves the close
-// held and has the expired conversations stopped. closed reports whether
-// the task closed.
-func (r *Router) expireCloseDeferral(ctx context.Context, d domain.TaskCloseDeferral, holdTimeout time.Duration) (closed bool, err error) {
-	evt, reason, holds, err := r.heldCloseStillHolds(ctx, d)
+// expireCloseDeferral expires the work an event started under one held close
+// the sweep listed as older than holdTimeout. A close that no longer holds is
+// dropped, as the settle drops one, and the work goes on. Otherwise
+// ExpireHeldCloseSystem decides again under the task's lock and calls off the
+// expired conversations' blueprint runs, and each is stopped here. The close
+// stays held: a later pass applies it once the stopped work has settled and
+// nothing else holds it, so a deliverable the work recorded on its way out
+// still holds the close for the person it awaits.
+func (r *Router) expireCloseDeferral(ctx context.Context, d domain.TaskCloseDeferral, holdTimeout time.Duration) error {
+	evt, _, holds, err := r.heldCloseStillHolds(ctx, d)
 	if err != nil || !holds {
-		return false, err
+		return err
 	}
-	out, err := r.tasks.ExpireHeldCloseSystem(ctx, d.OrgID, d.TaskID, d.EventID, holdTimeout, reason, evt.EventType)
+	expired, err := r.tasks.ExpireHeldCloseSystem(ctx, d.OrgID, d.TaskID, d.EventID, holdTimeout)
 	if err != nil {
-		return false, fmt.Errorf("expire held close: %w", err)
+		return fmt.Errorf("expire held close: %w", err)
 	}
-	if out.Closed {
-		r.finishTaskClose(ctx, d.OrgID, d.TaskID, out.ActiveConversationIDs)
-		routerLog.InfoContext(ctx, "held close ran out; closed the task", "task_id", d.TaskID,
-			"on_event", evt.EventType, "reason", reason, "hold_timeout", holdTimeout)
-		return true, nil
+	if len(expired) == 0 {
+		return nil
 	}
-	if len(out.ExpiredConversationIDs) == 0 {
-		return false, nil
-	}
-	for _, id := range out.ExpiredConversationIDs {
+	for _, id := range expired {
 		// A blueprint between two steps has a settled step no stop reaches;
 		// the expiry already called its blueprint off.
 		if err := r.spawner.StopConversationAndCancelBlueprint(d.OrgID, id, "", delegate.StopCauseCloseHoldExpired); err != nil && !errors.Is(err, delegate.ErrNoActiveConversation) {
 			routerLog.ErrorContext(ctx, "stop conversation on an expired held close failed", "conversation", id, "task_id", d.TaskID, "error", err)
 		}
 	}
-	routerLog.InfoContext(ctx, "held close ran out; stopped the work an event started, close still held",
-		"task_id", d.TaskID, "on_event", evt.EventType, "stopped", len(out.ExpiredConversationIDs), "hold_timeout", holdTimeout)
-	return false, nil
+	routerLog.InfoContext(ctx, "held close ran out; stopped the work an event started",
+		"task_id", d.TaskID, "on_event", evt.EventType, "stopped", len(expired), "hold_timeout", holdTimeout)
+	return nil
 }
 
 // heldCloseStillHolds reads the closing event of the held close d and asks
