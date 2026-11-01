@@ -34,11 +34,11 @@ func newPRMergeabilityStore(conn *sql.DB) db.PRMergeabilityStore {
 
 var _ db.PRMergeabilityStore = (*prMergeabilityStore)(nil)
 
-const sqlitePRMergeabilityColumns = `entity_id, org_id, COALESCE(mergeable, ''), COALESCE(mergeable_head_sha, ''), checked_at`
+const sqlitePRMergeabilityColumns = `entity_id, org_id, COALESCE(mergeable, ''), COALESCE(mergeable_head_sha, ''), COALESCE(mergeable_base_ref, ''), checked_at`
 
 func scanSQLitePRMergeability(row interface{ Scan(...any) error }) (domain.PRMergeability, error) {
 	var m domain.PRMergeability
-	err := row.Scan(&m.EntityID, &m.OrgID, &m.Mergeable, &m.MergeableHeadSHA, &m.CheckedAt)
+	err := row.Scan(&m.EntityID, &m.OrgID, &m.Mergeable, &m.MergeableHeadSHA, &m.MergeableBaseRef, &m.CheckedAt)
 	return m, err
 }
 
@@ -235,13 +235,14 @@ func (s *prMergeabilityStore) CompleteProbe(ctx context.Context, r workitem.Rece
 				// answer (NULL on a new row), so the poll waits for the
 				// sweep rather than admitting the pull request again.
 				row, err := scanSQLitePRMergeability(tx.QueryRowContext(ctx, `
-					INSERT INTO pull_request_mergeability (entity_id, org_id, mergeable, mergeable_head_sha, checked_at)
-					VALUES (?, ?, NULL, ?, ?)
+					INSERT INTO pull_request_mergeability (entity_id, org_id, mergeable, mergeable_head_sha, mergeable_base_ref, checked_at)
+					VALUES (?, ?, NULL, ?, ?, ?)
 					ON CONFLICT (entity_id) DO UPDATE SET
 						mergeable_head_sha = excluded.mergeable_head_sha,
+						mergeable_base_ref = excluded.mergeable_base_ref,
 						checked_at = excluded.checked_at
 					RETURNING `+sqlitePRMergeabilityColumns,
-					entityID, r.OrgID, nullIfEmpty(answer.HeadSHA), time.Now().UTC()))
+					entityID, r.OrgID, nullIfEmpty(answer.HeadSHA), nullIfEmpty(answer.BaseRef), time.Now().UTC()))
 				if err != nil {
 					return nil, fmt.Errorf("record the give-up for entity %s: %w", entityID, err)
 				}
@@ -261,14 +262,15 @@ func (s *prMergeabilityStore) CompleteProbe(ctx context.Context, r workitem.Rece
 		}
 		now := time.Now().UTC()
 		row, err := scanSQLitePRMergeability(tx.QueryRowContext(ctx, `
-			INSERT INTO pull_request_mergeability (entity_id, org_id, mergeable, mergeable_head_sha, checked_at)
-			VALUES (?, ?, ?, ?, ?)
+			INSERT INTO pull_request_mergeability (entity_id, org_id, mergeable, mergeable_head_sha, mergeable_base_ref, checked_at)
+			VALUES (?, ?, ?, ?, ?, ?)
 			ON CONFLICT (entity_id) DO UPDATE SET
 				mergeable = excluded.mergeable,
 				mergeable_head_sha = excluded.mergeable_head_sha,
+				mergeable_base_ref = excluded.mergeable_base_ref,
 				checked_at = excluded.checked_at
 			RETURNING `+sqlitePRMergeabilityColumns,
-			entityID, r.OrgID, answer.Mergeable, nullIfEmpty(answer.HeadSHA), now))
+			entityID, r.OrgID, answer.Mergeable, nullIfEmpty(answer.HeadSHA), nullIfEmpty(answer.BaseRef), now))
 		if err != nil {
 			return nil, fmt.Errorf("write mergeability of entity %s: %w", entityID, err)
 		}
@@ -385,12 +387,12 @@ func (s *prMergeabilityStore) Describe(ctx context.Context, orgID string, ids []
 	return out, rows.Err()
 }
 
-const sqlitePRPathsColumns = `entity_id, org_id, paths_json, COALESCE(paths_head_sha, ''), paths_complete`
+const sqlitePRPathsColumns = `entity_id, org_id, paths_json, COALESCE(paths_head_sha, ''), COALESCE(paths_base_ref, ''), paths_complete`
 
 func scanSQLitePRPaths(row interface{ Scan(...any) error }) (domain.PRPaths, error) {
 	var p domain.PRPaths
 	var raw sql.NullString
-	if err := row.Scan(&p.EntityID, &p.OrgID, &raw, &p.HeadSHA, &p.Complete); err != nil {
+	if err := row.Scan(&p.EntityID, &p.OrgID, &raw, &p.HeadSHA, &p.BaseRef, &p.Complete); err != nil {
 		return domain.PRPaths{}, err
 	}
 	paths, err := db.DecodePRPaths(raw)
@@ -446,14 +448,15 @@ func (s *prMergeabilityStore) UpsertPathsSystem(ctx context.Context, orgID strin
 		return domain.PRPaths{}, err
 	}
 	return scanSQLitePRPaths(s.conn.QueryRowContext(ctx, `
-		INSERT INTO pull_request_mergeability (entity_id, org_id, paths_json, paths_head_sha, paths_complete)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO pull_request_mergeability (entity_id, org_id, paths_json, paths_head_sha, paths_base_ref, paths_complete)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT (entity_id) DO UPDATE SET
 			paths_json = excluded.paths_json,
 			paths_head_sha = excluded.paths_head_sha,
+			paths_base_ref = excluded.paths_base_ref,
 			paths_complete = excluded.paths_complete
 		RETURNING `+sqlitePRPathsColumns,
-		p.EntityID, orgID, raw, p.HeadSHA, p.Complete))
+		p.EntityID, orgID, raw, p.HeadSHA, p.BaseRef, p.Complete))
 }
 
 const sqliteBranchTipColumns = `repository_id, branch, org_id, tip_sha, COALESCE(etag, ''), observed_at`

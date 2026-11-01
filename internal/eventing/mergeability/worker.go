@@ -359,7 +359,7 @@ func (w *Worker) read(ctx context.Context, orgID string, g *credentialBatch) {
 		if found {
 			recordAnswer(read.Mergeable)
 		}
-		w.complete(ctx, item, db.PRMergeabilityAnswer{Found: found, Mergeable: read.Mergeable, HeadSHA: read.HeadSHA}, traceparent)
+		w.complete(ctx, item, db.PRMergeabilityAnswer{Found: found, Mergeable: read.Mergeable, HeadSHA: read.HeadSHA, BaseRef: read.BaseRef}, traceparent)
 	}
 }
 

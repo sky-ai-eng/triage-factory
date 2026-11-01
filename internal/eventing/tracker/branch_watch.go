@@ -26,9 +26,11 @@ import (
 type basePR struct {
 	entity domain.Entity
 	nodeID string
-	// head is the pull request's current head: the refresh's this cycle, the
-	// listing's, or the stored snapshot's, in that order.
-	head string
+	// head and base are the pull request's current head and base branch: the
+	// refresh's this cycle, the listing's, or the stored snapshot's, in that
+	// order. base differs from the branch the pull request is grouped under
+	// in the cycle that sees it retargeted.
+	head, base string
 }
 
 // baseCheck is one watched branch's check this cycle: what the ref read and
@@ -80,17 +82,15 @@ func (t *Tracker) watchBaseBranches(ctx context.Context, client *ghclient.Client
 		if c.snap.BaseRef == "" || c.entity.RepositoryID == "" {
 			continue
 		}
-		pr := basePR{entity: c.entity, nodeID: c.nodeID, head: c.snap.HeadSHA}
-		if snap, ok := listed[c.nodeID]; ok && snap.HeadSHA != "" {
-			pr.head = snap.HeadSHA
+		pr := basePR{entity: c.entity, nodeID: c.nodeID, head: c.snap.HeadSHA, base: c.snap.BaseRef}
+		if snap, ok := listed[c.nodeID]; ok {
+			pr.head, pr.base = fresher(pr.head, snap.HeadSHA), fresher(pr.base, snap.BaseRef)
 		}
 		if snap, ok := refreshed[c.nodeID]; ok {
 			if prSnapshotTerminal(snap) {
 				continue
 			}
-			if snap.HeadSHA != "" {
-				pr.head = snap.HeadSHA
-			}
+			pr.head, pr.base = fresher(pr.head, snap.HeadSHA), fresher(pr.base, snap.BaseRef)
 		}
 		ref := domain.BranchRef{RepositoryID: c.entity.RepositoryID, Branch: c.snap.BaseRef}
 		bases[ref] = append(bases[ref], pr)
@@ -171,6 +171,14 @@ func (t *Tracker) watchBaseBranches(ctx context.Context, client *ghclient.Client
 			t.admitBaseMove(ctx, orgID, c, bases[c.ref], paths)
 		}
 	}
+}
+
+// fresher is next when a read gave one, and prev otherwise.
+func fresher(prev, next string) string {
+	if next != "" {
+		return next
+	}
+	return prev
 }
 
 // checkBaseBranch reads one branch's tip, conditional on its stored ETag, and
@@ -288,9 +296,10 @@ func describeMove(ctx context.Context, client *ghclient.Client, owner, repo, old
 
 // overlapPaths reads the changed paths of every open pull request on a base
 // whose move is an overlap, keyed by entity id: the stored list when it was
-// read at the pull request's current head, and a fresh read otherwise, which
-// is written back (UpsertPathsSystem). A pull request missing from the result
-// could not be read this cycle.
+// read at the pull request's current head and base, since a list is the
+// difference between the two, and a fresh read otherwise, which is written
+// back (UpsertPathsSystem). A pull request missing from the result could not
+// be read this cycle.
 func (t *Tracker) overlapPaths(ctx context.Context, client *ghclient.Client, orgID string, checks []baseCheck, bases map[domain.BranchRef][]basePR) map[string]domain.PRPaths {
 	var ids []string
 	for _, c := range checks {
@@ -332,7 +341,7 @@ func (t *Tracker) overlapPaths(ctx context.Context, client *ghclient.Client, org
 				continue
 			}
 			seen[pr.entity.ID] = true
-			if row, ok := stored[pr.entity.ID]; ok && row.Paths != nil && row.HeadSHA == pr.head {
+			if row, ok := stored[pr.entity.ID]; ok && row.Paths != nil && row.HeadSHA == pr.head && row.BaseRef == pr.base {
 				out[pr.entity.ID] = row
 				continue
 			}
@@ -378,7 +387,7 @@ func (t *Tracker) readPRPaths(ctx context.Context, client *ghclient.Client, orgI
 			if !ok {
 				continue
 			}
-			paths := domain.PRPaths{EntityID: pr.entity.ID, OrgID: orgID, Paths: read.Paths, HeadSHA: read.HeadSHA, Complete: read.Complete}
+			paths := domain.PRPaths{EntityID: pr.entity.ID, OrgID: orgID, Paths: read.Paths, HeadSHA: read.HeadSHA, BaseRef: read.BaseRef, Complete: read.Complete}
 			if paths.Paths == nil {
 				paths.Paths = []domain.ChangedPath{}
 			}
@@ -395,7 +404,7 @@ func (t *Tracker) readPRPaths(ctx context.Context, client *ghclient.Client, orgI
 				}
 				paths.Paths = withPrevious(paths.Paths, previous, &paths.Complete)
 			}
-			if paths.HeadSHA == "" {
+			if paths.HeadSHA == "" || paths.BaseRef == "" {
 				continue
 			}
 			if written, err := t.mergeability.UpsertPathsSystem(ctx, orgID, paths); err != nil {

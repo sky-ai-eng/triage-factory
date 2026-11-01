@@ -23,13 +23,14 @@ import (
 // repository whose listing answered 304 gives no current head, so its pull
 // requests admit nothing on the head rule.
 
-// stored is the answer a case seeds before the cycle: the head it was read
-// at and how long ago. pathsOnly seeds instead the row the branch watch
-// leaves when it writes a pull request's changed paths before any read.
+// stored is the answer a case seeds before the cycle: the head and base it
+// was read at (no base when base is empty) and how long ago. pathsOnly seeds
+// instead the row the branch watch leaves when it writes a pull request's
+// changed paths before any read.
 type storedAnswer struct {
-	head      string
-	age       time.Duration
-	pathsOnly bool
+	head, base string
+	age        time.Duration
+	pathsOnly  bool
 }
 
 // refreshAdmissions runs one cycle over octo/repo#42 (quietPRListing, head
@@ -83,12 +84,12 @@ func refreshAdmissions(t *testing.T, answer *storedAnswer, notModified bool) []s
 	}
 	switch {
 	case answer != nil && answer.pathsOnly:
-		if _, err := stores.PRMergeability.UpsertPathsSystem(ctx, org, domain.PRPaths{EntityID: ent.ID, Paths: []domain.ChangedPath{}, HeadSHA: answer.head}); err != nil {
+		if _, err := stores.PRMergeability.UpsertPathsSystem(ctx, org, domain.PRPaths{EntityID: ent.ID, Paths: []domain.ChangedPath{}, HeadSHA: answer.head, BaseRef: "main"}); err != nil {
 			t.Fatalf("seed stored paths: %v", err)
 		}
 	case answer != nil:
-		if _, err := database.Exec(`INSERT INTO pull_request_mergeability (entity_id, mergeable, mergeable_head_sha, checked_at) VALUES (?, 'MERGEABLE', ?, ?)`,
-			ent.ID, answer.head, time.Now().UTC().Add(-answer.age)); err != nil {
+		if _, err := database.Exec(`INSERT INTO pull_request_mergeability (entity_id, mergeable, mergeable_head_sha, mergeable_base_ref, checked_at) VALUES (?, 'MERGEABLE', ?, NULLIF(?, ''), ?)`,
+			ent.ID, answer.head, answer.base, time.Now().UTC().Add(-answer.age)); err != nil {
 			t.Fatalf("seed stored answer: %v", err)
 		}
 	}
@@ -132,6 +133,24 @@ func TestRefreshGitHub_AdmitsHeadMovedWhenTheListingNamesAnotherHead(t *testing.
 
 func TestRefreshGitHub_A304ListingAdmitsNoHeadMoved(t *testing.T) {
 	if got := refreshAdmissions(t, &storedAnswer{head: "earlier", age: time.Minute}, true); len(got) != 0 {
+		t.Errorf("admitted %v behind an unchanged listing, want nothing", got)
+	}
+}
+
+func TestRefreshGitHub_AdmitsBaseChangedForARetargetedPullRequest(t *testing.T) {
+	if got := refreshAdmissions(t, &storedAnswer{head: "deadbeef", base: "release", age: time.Minute}, false); !slices.Equal(got, []string{domain.MergeabilityProbeBaseChanged}) {
+		t.Errorf("admitted %v, want [base_changed]: the listing names main", got)
+	}
+	if got := refreshAdmissions(t, &storedAnswer{head: "deadbeef", base: "main", age: time.Minute}, false); len(got) != 0 {
+		t.Errorf("admitted %v for an answer read against the listing's base, want nothing", got)
+	}
+	if got := refreshAdmissions(t, &storedAnswer{head: "deadbeef", age: time.Minute}, false); len(got) != 0 {
+		t.Errorf("admitted %v for an answer that records no base, want nothing", got)
+	}
+}
+
+func TestRefreshGitHub_A304ListingAdmitsNoBaseChanged(t *testing.T) {
+	if got := refreshAdmissions(t, &storedAnswer{head: "deadbeef", base: "release", age: time.Minute}, true); len(got) != 0 {
 		t.Errorf("admitted %v behind an unchanged listing, want nothing", got)
 	}
 }

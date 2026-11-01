@@ -116,22 +116,23 @@ When you combine pods in a query:
 ### Mergeability probes
 
 Triage Factory learns whether a pull request conflicts by asking GitHub only
-when the answer can have changed: a new pull request, a new head, a move of
-its base branch that touches the files it changes, or a sweep, which the first
-poll more than 6 hours after the last read admits. Each poll checks the tip of
+when the answer can have changed: a new pull request, a new head, a new base
+branch (the pull request was retargeted), a move of its base branch that
+touches the files it changes, or a sweep, which the first poll more than 6
+hours after the last read admits. Each poll checks the tip of
 every base branch an open pull request targets when the repository's open
 pull requests changed, and at least every 10 minutes otherwise. These metrics
 show what that costs and how it is going:
 
 | Metric                                | What it counts                                                                                                                                                    |
 | ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tf_mergeability_probes_total`        | Pull requests asked about, by `reason` (`new`, `head_moved`, `base_moved`, `base_reset`, `unknown_retry`, `sweep`). Each read makes GitHub run a test merge, which on GitHub Enterprise Server is your server's work. |
+| `tf_mergeability_probes_total`        | Pull requests asked about, by `reason` (`new`, `head_moved`, `base_changed`, `base_moved`, `base_reset`, `unknown_retry`, `sweep`). Each read makes GitHub run a test merge, which on GitHub Enterprise Server is your server's work. |
 | `tf_mergeability_answers_total`       | GitHub's answers, by `value` (`MERGEABLE`, `CONFLICTING`, `UNKNOWN`). A high share of `UNKNOWN` means GitHub is slow to compute mergeability.                       |
 | `tf_mergeability_unknown_giveups_total` | Pull requests GitHub answered `UNKNOWN` for ten times in a row. Their conflicts are seen at the next sweep instead.                                       |
-| `tf_mergeability_sweep_changes_total` | Sweep reads that found the answer changed. A nonzero rate means mergeability changed without Triage Factory reading it after the push or base-branch move that caused it, so the change was seen up to 6 hours late. |
+| `tf_mergeability_sweep_changes_total` | Sweep reads that found the answer changed. A nonzero rate means mergeability changed without Triage Factory reading it after the push, retarget or base-branch move that caused it, so the change was seen up to 6 hours late. |
 | `tf_mergeability_base_moves_total`    | Base-branch moves processed, by `outcome`: `overlap` (only the pull requests whose changed files overlap the move were asked about), `identical`, or a reset that asked about every open pull request on the branch: `reset_first_sight` (a branch seen for the first time), `reset_truncated` (a move too large to list), `reset_rewritten` (a force-push or rewind), `reset_missing_tip` (the previous tip no longer exists). A steady reset rate on a busy branch costs a test merge per open pull request each time. |
 | `tf_mergeability_overlap_set_size`    | A histogram, per `overlap` move, of the share of the branch's open pull requests that were asked about. About 1% on average in large repositories.                                       |
-| `tf_mergeability_path_fetches_total`  | Requests sent to read pull requests' changed files, by `source`: `graphql` (the files) or `rest_renames` (the previous names of renamed and copied files). A pull request's files are read only when its base branch moves after its head did. |
+| `tf_mergeability_path_fetches_total`  | Requests sent to read pull requests' changed files, by `source`: `graphql` (the files) or `rest_renames` (the previous names of renamed and copied files). A pull request's files are read only when its base branch moves after its head or base changed. |
 | `tf_mergeability_dropped_total`       | Probes given up without an answer, by `org_id` and `outcome`: `dependency_down`, `transient` or `deadline` after five failed reads, or `no_credential` at once when no GitHub credential the organization has connected can read the repository. The next poll queues the pull request again. A steady `no_credential` rate is a tracked repository outside the GitHub App's grant, which the organization's GitHub access settings list; any other steady rate means TF cannot reach GitHub. |
 
 The probe queue is `kind="pr_mergeability_probes"` on the `tf_work_*` gauges

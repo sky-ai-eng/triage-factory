@@ -4573,12 +4573,16 @@ GRANT SELECT,USAGE ON SEQUENCE public.task_rederive_queue_id_seq TO tf_app;
 -- the transaction that writes it. The
 -- poll deletes the rows of entities no longer active.
 --
+-- mergeable_base_ref is the base branch that same read was against, so a
+-- retargeted pull request is read again.
+--
 -- The path columns are the pull request's changed paths, written only by the
 -- poll's branch watch, which reads them when the pull request's base branch
 -- moves to decide whether the move can have changed its mergeability.
 -- paths_json is a JSON array of {"path", "change", "previous"};
--- paths_head_sha the head the list was read at; paths_complete whether it
--- holds every changed file. Each writer's upsert sets its own columns only.
+-- paths_head_sha and paths_base_ref the head and base the list was read at;
+-- paths_complete whether it holds every changed file. Each writer's upsert
+-- sets its own columns only.
 --
 -- Admin-pool wired with org_id bound per statement; the policy below is
 -- defense-in-depth.
@@ -4587,9 +4591,11 @@ CREATE TABLE public.pull_request_mergeability (
     org_id              uuid NOT NULL,
     mergeable           text NULL CHECK (mergeable IN ('MERGEABLE','CONFLICTING')),
     mergeable_head_sha  text NULL,
+    mergeable_base_ref  text NULL,
     checked_at          timestamp with time zone NULL,
     paths_json          text NULL,
     paths_head_sha      text NULL,
+    paths_base_ref      text NULL,
     paths_complete      boolean NOT NULL DEFAULT false
 );
 

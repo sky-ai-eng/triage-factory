@@ -85,8 +85,9 @@ func TestCompare_MapsFilesAndCommits(t *testing.T) {
 
 // TestPRChangedPaths_PagesEachPullRequest: a pull request with more files than
 // the first page is paged through node(id:) and is complete when the list
-// holds all its changedFiles; one whose head moved between pages, or whose
-// files GitHub could not list, is incomplete; an id with no node is absent.
+// holds all its changedFiles; one whose head moved or that was retargeted
+// between pages, or whose files GitHub could not list, is incomplete; an id
+// with no node is absent.
 func TestPRChangedPaths_PagesEachPullRequest(t *testing.T) {
 	file := func(p string) string { return `{"path":"` + p + `","changeType":"MODIFIED"}` }
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -98,31 +99,37 @@ func TestPRChangedPaths_PagesEachPullRequest(t *testing.T) {
 		switch {
 		case strings.Contains(req.Query, "query PRChangedPaths("):
 			_, _ = w.Write([]byte(`{"data":{"nodes":[
-				{"id":"PR_a","headRefOid":"ha","changedFiles":2,"files":{"pageInfo":{"hasNextPage":true,"endCursor":"c1"},"nodes":[` + file("a1") + `]}},
-				{"id":"PR_b","headRefOid":"hb","changedFiles":2,"files":{"pageInfo":{"hasNextPage":true,"endCursor":"c2"},"nodes":[` + file("b1") + `]}},
-				{"id":"PR_c","headRefOid":"hc","changedFiles":4,"files":null},
+				{"id":"PR_a","headRefOid":"ha","baseRefName":"main","changedFiles":2,"files":{"pageInfo":{"hasNextPage":true,"endCursor":"c1"},"nodes":[` + file("a1") + `]}},
+				{"id":"PR_b","headRefOid":"hb","baseRefName":"main","changedFiles":2,"files":{"pageInfo":{"hasNextPage":true,"endCursor":"c2"},"nodes":[` + file("b1") + `]}},
+				{"id":"PR_c","headRefOid":"hc","baseRefName":"main","changedFiles":4,"files":null},
+				{"id":"PR_r","headRefOid":"hr","baseRefName":"main","changedFiles":2,"files":{"pageInfo":{"hasNextPage":true,"endCursor":"c3"},"nodes":[` + file("r1") + `]}},
 				null
 			],"rateLimit":{"cost":1}}}`))
 		case req.Variables["id"] == "PR_a":
-			_, _ = w.Write([]byte(`{"data":{"node":{"headRefOid":"ha","files":{"pageInfo":{"hasNextPage":false},"nodes":[{"path":"a2","changeType":"RENAMED"}]}},"rateLimit":{"cost":1}}}`))
+			_, _ = w.Write([]byte(`{"data":{"node":{"headRefOid":"ha","baseRefName":"main","files":{"pageInfo":{"hasNextPage":false},"nodes":[{"path":"a2","changeType":"RENAMED"}]}},"rateLimit":{"cost":1}}}`))
+		case req.Variables["id"] == "PR_r":
+			_, _ = w.Write([]byte(`{"data":{"node":{"headRefOid":"hr","baseRefName":"release","files":{"pageInfo":{"hasNextPage":false},"nodes":[` + file("r2") + `]}},"rateLimit":{"cost":1}}}`))
 		default:
-			_, _ = w.Write([]byte(`{"data":{"node":{"headRefOid":"moved","files":{"pageInfo":{"hasNextPage":false},"nodes":[` + file("b2") + `]}},"rateLimit":{"cost":1}}}`))
+			_, _ = w.Write([]byte(`{"data":{"node":{"headRefOid":"moved","baseRefName":"main","files":{"pageInfo":{"hasNextPage":false},"nodes":[` + file("b2") + `]}},"rateLimit":{"cost":1}}}`))
 		}
 	}))
 	t.Cleanup(srv.Close)
 
-	got, requests, err := NewClient(srv.URL, "tok").PRChangedPaths(context.Background(), []string{"PR_a", "PR_b", "PR_c", "PR_gone"})
+	got, requests, err := NewClient(srv.URL, "tok").PRChangedPaths(context.Background(), []string{"PR_a", "PR_b", "PR_c", "PR_r", "PR_gone"})
 	if err != nil {
 		t.Fatalf("PRChangedPaths: %v", err)
 	}
-	if requests != 3 {
+	if requests != 4 {
 		t.Errorf("requests = %d, want the batch and one page for each paged pull request", requests)
 	}
-	if a := got["PR_a"]; !a.Complete || a.HeadSHA != "ha" || len(a.Paths) != 2 || a.Paths[1] != (domain.ChangedPath{Path: "a2", Change: domain.PathRenamed}) {
+	if a := got["PR_a"]; !a.Complete || a.HeadSHA != "ha" || a.BaseRef != "main" || len(a.Paths) != 2 || a.Paths[1] != (domain.ChangedPath{Path: "a2", Change: domain.PathRenamed}) {
 		t.Errorf("PR_a = %+v, want both pages, complete", a)
 	}
 	if b := got["PR_b"]; b.Complete || len(b.Paths) != 1 {
 		t.Errorf("PR_b = %+v, want its first page alone, incomplete: its head moved", b)
+	}
+	if r := got["PR_r"]; r.Complete || len(r.Paths) != 1 {
+		t.Errorf("PR_r = %+v, want its first page alone, incomplete: it was retargeted", r)
 	}
 	if c, ok := got["PR_c"]; !ok || c.Complete || c.ChangedFiles != 4 {
 		t.Errorf("PR_c = %+v, want an incomplete read", c)

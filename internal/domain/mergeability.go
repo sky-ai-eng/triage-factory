@@ -25,6 +25,9 @@ type PRMergeability struct {
 	// its retries. It is the head the answer was read at only when that read
 	// answered.
 	MergeableHeadSHA string
+	// MergeableBaseRef is the pull request's base branch (baseRefName) at
+	// that same read; empty on a row whose reads predate the column.
+	MergeableBaseRef string
 	// CheckedAt is when that read was made; nil when it never was.
 	CheckedAt *time.Time
 }
@@ -39,6 +42,9 @@ const (
 	// MergeabilityProbeHeadMoved is a pull request whose head is not the one
 	// its row was last read at.
 	MergeabilityProbeHeadMoved = "head_moved"
+	// MergeabilityProbeBaseChanged is a pull request whose base branch is not
+	// the one its row was last read against: it was retargeted.
+	MergeabilityProbeBaseChanged = "base_changed"
 	// MergeabilityProbeUnknownRetry is the re-read of a probe GitHub answered
 	// UNKNOWN.
 	MergeabilityProbeUnknownRetry = "unknown_retry"
@@ -60,6 +66,7 @@ const (
 var MergeabilityProbeReasons = []string{
 	MergeabilityProbeNew,
 	MergeabilityProbeHeadMoved,
+	MergeabilityProbeBaseChanged,
 	MergeabilityProbeUnknownRetry,
 	MergeabilityProbeSweep,
 	MergeabilityProbeBaseMoved,
@@ -95,9 +102,11 @@ type PRPaths struct {
 	OrgID    string
 	// Paths is nil when they were never read.
 	Paths []ChangedPath
-	// HeadSHA is the pull request's head (headRefOid) the list was read at;
-	// empty when it was never read.
+	// HeadSHA and BaseRef are the pull request's head (headRefOid) and base
+	// branch (baseRefName) the list was read at, since the list is the
+	// difference between the two; empty when it was never read.
 	HeadSHA string
+	BaseRef string
 	// Complete is true when Paths holds every one of the pull request's
 	// changed files.
 	Complete bool

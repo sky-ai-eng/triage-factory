@@ -970,6 +970,9 @@ type mergeabilityCandidate struct {
 //     The current head is the refresh's when this cycle refreshed it, and the
 //     open-PR listing's otherwise. A repository whose listing answered 304
 //     has unchanged heads and gives none, so it admits nothing on this rule;
+//   - base_changed: its current base branch, taken the same way, is not the
+//     one its row was last read against: it was retargeted. A row that
+//     records no base admits nothing on this rule;
 //   - sweep: its row was last read longer than mergeabilitySweepInterval ago.
 //
 // The reasons are tried in that order and a pull request is admitted once. A
@@ -1006,14 +1009,14 @@ func (t *Tracker) admitMergeabilityProbes(ctx context.Context, orgID string, ope
 		if c.entity.ExternalID == "" {
 			continue
 		}
-		var head string
+		var head, base string
 		if snap, ok := refreshed[c.nodeID]; ok {
 			if prSnapshotTerminal(snap) {
 				continue
 			}
-			head = snap.HeadSHA
+			head, base = snap.HeadSHA, snap.BaseRef
 		} else if snap, ok := listed[c.nodeID]; ok {
-			head = snap.HeadSHA
+			head, base = snap.HeadSHA, snap.BaseRef
 		}
 		row, ok := answers[c.entity.ID]
 		var reason string
@@ -1022,6 +1025,8 @@ func (t *Tracker) admitMergeabilityProbes(ctx context.Context, orgID string, ope
 			reason = domain.MergeabilityProbeNew
 		case head != "" && head != row.MergeableHeadSHA:
 			reason = domain.MergeabilityProbeHeadMoved
+		case base != "" && row.MergeableBaseRef != "" && base != row.MergeableBaseRef:
+			reason = domain.MergeabilityProbeBaseChanged
 		case row.CheckedAt == nil || now.Sub(*row.CheckedAt) > mergeabilitySweepInterval:
 			reason = domain.MergeabilityProbeSweep
 		default:

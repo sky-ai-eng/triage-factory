@@ -148,7 +148,7 @@ const prChangedPathsQuery = `
 	query PRChangedPaths($ids: [ID!]!) {
 		nodes(ids: $ids) {
 			... on PullRequest {
-				id headRefOid changedFiles
+				id headRefOid baseRefName changedFiles
 				files(first: 100) { pageInfo { hasNextPage endCursor } nodes { path changeType } }
 			}
 		}
@@ -160,7 +160,7 @@ const prChangedPathsPageQuery = `
 	query PRChangedPathsPage($id: ID!, $cursor: String!) {
 		node(id: $id) {
 			... on PullRequest {
-				headRefOid
+				headRefOid baseRefName
 				files(first: 100, after: $cursor) { pageInfo { hasNextPage endCursor } nodes { path changeType } }
 			}
 		}
@@ -176,12 +176,15 @@ const MaxChangedPathsBatch = 100
 // GraphQL gives no previous path for a rename or copy; PreviousPaths reads
 // those.
 type ChangedPathsRead struct {
-	// HeadSHA is the head (headRefOid) the first page was read at.
+	// HeadSHA and BaseRef are the head (headRefOid) and base branch
+	// (baseRefName) the first page was read at.
 	HeadSHA string
+	BaseRef string
 	// ChangedFiles is how many files GitHub says the pull request changes.
 	ChangedFiles int
 	Paths        []domain.ChangedPath
-	// Complete is true when Paths holds all ChangedFiles, read at one head.
+	// Complete is true when Paths holds all ChangedFiles, read at one head
+	// and base.
 	Complete bool
 }
 
@@ -208,9 +211,9 @@ func (f *gqlChangedFiles) appendTo(paths []domain.ChangedPath) []domain.ChangedP
 // requests, keyed by node id, paging each one with more files through
 // node(id:) up to MaxPRChangedPaths. requests counts the queries sent. An id
 // with no node, or whose node is not a pull request, is absent. A later page
-// that fails, or that reads another head than the first, ends that pull
-// request's list incomplete rather than failing the batch. err is the first
-// page's failure only.
+// that fails, or that reads another head or base than the first, ends that
+// pull request's list incomplete rather than failing the batch. err is the
+// first page's failure only.
 func (c *Client) PRChangedPaths(ctx context.Context, nodeIDs []string) (reads map[string]ChangedPathsRead, requests int, err error) {
 	if len(nodeIDs) == 0 {
 		return nil, 0, nil
@@ -228,6 +231,7 @@ func (c *Client) PRChangedPaths(ctx context.Context, nodeIDs []string) (reads ma
 			Nodes []*struct {
 				ID           string           `json:"id"`
 				HeadRefOid   string           `json:"headRefOid"`
+				BaseRefName  string           `json:"baseRefName"`
 				ChangedFiles int              `json:"changedFiles"`
 				Files        *gqlChangedFiles `json:"files"`
 			} `json:"nodes"`
@@ -241,7 +245,7 @@ func (c *Client) PRChangedPaths(ctx context.Context, nodeIDs []string) (reads ma
 		if i >= len(nodeIDs) || n == nil || n.ID == "" || n.ID != nodeIDs[i] {
 			continue
 		}
-		read := ChangedPathsRead{HeadSHA: n.HeadRefOid, ChangedFiles: n.ChangedFiles}
+		read := ChangedPathsRead{HeadSHA: n.HeadRefOid, BaseRef: n.BaseRefName, ChangedFiles: n.ChangedFiles}
 		// files is null when GitHub could not list them (a field error
 		// beside the node), which leaves the list incomplete.
 		stable := n.Files != nil
@@ -249,9 +253,9 @@ func (c *Client) PRChangedPaths(ctx context.Context, nodeIDs []string) (reads ma
 			read.Paths = n.Files.appendTo(nil)
 			next, cursor := n.Files.PageInfo.HasNextPage, n.Files.PageInfo.EndCursor
 			for next && len(read.Paths) < MaxPRChangedPaths {
-				page, head, err := c.prChangedPathsPage(ctx, n.ID, cursor)
+				page, head, base, err := c.prChangedPathsPage(ctx, n.ID, cursor)
 				requests++
-				if err != nil || page == nil || head != read.HeadSHA {
+				if err != nil || page == nil || head != read.HeadSHA || base != read.BaseRef {
 					stable = false
 					break
 				}
@@ -266,28 +270,30 @@ func (c *Client) PRChangedPaths(ctx context.Context, nodeIDs []string) (reads ma
 }
 
 // prChangedPathsPage reads one page of a pull request's files after cursor,
-// and the head it was read at. A nil page is a pull request GitHub no longer
-// answers for, or whose files it could not list.
-func (c *Client) prChangedPathsPage(ctx context.Context, nodeID, cursor string) (*gqlChangedFiles, string, error) {
+// and the head and base it was read at. A nil page is a pull request GitHub
+// no longer answers for, or whose files it could not list.
+func (c *Client) prChangedPathsPage(ctx context.Context, nodeID, cursor string) (page *gqlChangedFiles, head, base string, err error) {
 	data, err := c.PostGraphQL(ctx, prChangedPathsPageQuery, map[string]any{"id": nodeID, "cursor": cursor})
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
 	var resp struct {
 		Data struct {
 			Node *struct {
-				HeadRefOid string           `json:"headRefOid"`
-				Files      *gqlChangedFiles `json:"files"`
+				HeadRefOid  string           `json:"headRefOid"`
+				BaseRefName string           `json:"baseRefName"`
+				Files       *gqlChangedFiles `json:"files"`
 			} `json:"node"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, "", fmt.Errorf("parse PR changed paths page: %w", err)
+		return nil, "", "", fmt.Errorf("parse PR changed paths page: %w", err)
 	}
 	if resp.Data.Node == nil {
-		return nil, "", nil
+		return nil, "", "", nil
 	}
-	return resp.Data.Node.Files, resp.Data.Node.HeadRefOid, nil
+	n := resp.Data.Node
+	return n.Files, n.HeadRefOid, n.BaseRefName, nil
 }
 
 // PreviousPaths maps each renamed or copied file of pull request number to the

@@ -169,7 +169,7 @@ func (w *watchWorld) serveGraphQL(rw http.ResponseWriter, r *http.Request) {
 		w.pathReads = append(w.pathReads, id)
 		node, ok := w.paths[id]
 		if !ok {
-			node = fmt.Sprintf(`{"id":%q,"headRefOid":"h%s","changedFiles":0,"files":{"pageInfo":{"hasNextPage":false},"nodes":[]}}`, id, strings.TrimPrefix(id, "PR_"))
+			node = fmt.Sprintf(`{"id":%q,"headRefOid":"h%s","baseRefName":"main","changedFiles":0,"files":{"pageInfo":{"hasNextPage":false},"nodes":[]}}`, id, strings.TrimPrefix(id, "PR_"))
 		}
 		nodes[i] = node
 	}
@@ -255,7 +255,7 @@ func pathsNode(n int, head string, files ...domain.ChangedPath) string {
 	for i, f := range files {
 		nodes[i] = fmt.Sprintf(`{"path":%q,"changeType":%q}`, f.Path, f.Change)
 	}
-	return fmt.Sprintf(`{"id":"PR_%d","headRefOid":%q,"changedFiles":%d,"files":{"pageInfo":{"hasNextPage":false},"nodes":[%s]}}`,
+	return fmt.Sprintf(`{"id":"PR_%d","headRefOid":%q,"baseRefName":"main","changedFiles":%d,"files":{"pageInfo":{"hasNextPage":false},"nodes":[%s]}}`,
 		n, head, len(files), strings.Join(nodes, ","))
 }
 
@@ -468,7 +468,7 @@ func TestBranchWatch_StalePathsAreReadAgainAndIncompleteOnesProbed(t *testing.T)
 	w.seenOnce()
 	write := func(i int, head string, complete bool, paths ...domain.ChangedPath) {
 		t.Helper()
-		if _, err := w.stores.PRMergeability.UpsertPathsSystem(ctx, org, domain.PRPaths{EntityID: w.prs[i].ID, Paths: paths, HeadSHA: head, Complete: complete}); err != nil {
+		if _, err := w.stores.PRMergeability.UpsertPathsSystem(ctx, org, domain.PRPaths{EntityID: w.prs[i].ID, Paths: paths, HeadSHA: head, BaseRef: "main", Complete: complete}); err != nil {
 			t.Fatalf("seed paths: %v", err)
 		}
 	}
@@ -490,6 +490,31 @@ func TestBranchWatch_StalePathsAreReadAgainAndIncompleteOnesProbed(t *testing.T)
 	rows, err := w.stores.PRMergeability.ListPathsSystem(ctx, org, []string{w.prs[0].ID})
 	if err != nil || len(rows) != 1 || rows[0].HeadSHA != "h1" || len(rows[0].Paths) != 1 || rows[0].Paths[0].Path != "src/a.go" || !rows[0].Complete {
 		t.Errorf("PR_1's stored paths = %+v (err %v), want src/a.go read at h1", rows, err)
+	}
+}
+
+// A pull request's changed paths are the difference between its head and its
+// base, so a list read against another base is read again, even at the same
+// head.
+func TestBranchWatch_PathsReadAgainstAnotherBaseAreReadAgain(t *testing.T) {
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	w := newWatchWorld(t)
+	w.seenOnce()
+	for i, base := range []string{"release", "main", "main"} {
+		if _, err := w.stores.PRMergeability.UpsertPathsSystem(ctx, org, domain.PRPaths{
+			EntityID: w.prs[i].ID, Paths: []domain.ChangedPath{modified("docs/old.md")}, HeadSHA: fmt.Sprintf("h%d", i+1), BaseRef: base, Complete: true,
+		}); err != nil {
+			t.Fatalf("seed paths: %v", err)
+		}
+	}
+	w.set(func(w *watchWorld) { w.compares["old...new"] = compareBody("ahead", 1, "", "src/a.go") })
+
+	if got := w.cycle(); !mapsEqual(got, map[int]string{1: domain.MergeabilityProbeBaseMoved}) {
+		t.Errorf("admitted %v, want PR_1 alone: its list read against main touches the move", got)
+	}
+	if !slices.Equal(w.pathReads, []string{"PR_1"}) {
+		t.Errorf("paths read for %v, want PR_1's alone", w.pathReads)
 	}
 }
 

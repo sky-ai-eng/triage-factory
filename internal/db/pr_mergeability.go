@@ -73,14 +73,14 @@ type PRMergeabilityStore interface {
 	//   - no answer (Found false), or an entity that is gone or no longer
 	//     active: completed with no write;
 	//   - MERGEABLE or CONFLICTING: the row is upserted with the answer, the
-	//     head it was read at and the time, and the transition from the
+	//     head and base it was read at and the time, and the transition from the
 	//     previous answer is enqueued on the durable event queue, stamped
 	//     with the org and traceparent;
 	//   - UNKNOWN: below workkinds.PRMergeabilityMaxUnknownReads UNKNOWN
 	//     reads, the row is untouched, and the probe is completed and a
 	//     successor admitted under its key with reason unknown_retry, due
 	//     workkinds.PRMergeabilityUnknownRetryDelay from now. At the limit the
-	//     probe is completed with nothing owed, and the row's head and
+	//     probe is completed with nothing owed, and the row's head, base and
 	//     checked_at move to the read's while its answer stays (NULL on a row
 	//     the give-up creates), so the poll's next admission for the pull
 	//     request is its sweep.
@@ -114,8 +114,8 @@ type PRMergeabilityStore interface {
 	// row whose paths were never written has nil Paths.
 	ListPathsSystem(ctx context.Context, orgID string, entityIDs []string) ([]domain.PRPaths, error)
 
-	// UpsertPathsSystem writes one pull request's changed paths, the head
-	// they were read at and whether they are complete, and returns the path
+	// UpsertPathsSystem writes one pull request's changed paths, the head and
+	// base they were read at and whether they are complete, and returns the path
 	// columns as persisted. A pull request with no row gets one with no
 	// answer. The answer columns are never touched.
 	UpsertPathsSystem(ctx context.Context, orgID string, paths domain.PRPaths) (domain.PRPaths, error)
@@ -178,6 +178,8 @@ type PRMergeabilityAnswer struct {
 	Mergeable string
 	// HeadSHA is the pull request's head (headRefOid) at the read.
 	HeadSHA string
+	// BaseRef is the pull request's base branch (baseRefName) at the read.
+	BaseRef string
 }
 
 // PRMergeabilityOutcome is which arm a CompleteProbe took.
@@ -325,15 +327,15 @@ func PRMergeabilityProbeSubject(entityID, reason string, unknownReads int, sourc
 	}}
 }
 
-// ValidatePRPaths refuses a path write naming no entity or head, or carrying
+// ValidatePRPaths refuses a path write naming no entity, head or base, or carrying
 // a path that is empty or whose change is not a PatchStatus value, so both
 // dialects refuse the same writes.
 func ValidatePRPaths(p domain.PRPaths) error {
 	if p.EntityID == "" {
 		return fmt.Errorf("db: changed paths name no entity")
 	}
-	if p.HeadSHA == "" {
-		return fmt.Errorf("db: changed paths of entity %s name no head", p.EntityID)
+	if p.HeadSHA == "" || p.BaseRef == "" {
+		return fmt.Errorf("db: changed paths of entity %s name no head or base", p.EntityID)
 	}
 	for _, c := range p.Paths {
 		if c.Path == "" {

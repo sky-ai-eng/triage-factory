@@ -95,13 +95,17 @@ func RunPRMergeabilityConformance(t *testing.T, mk PRMergeabilityFactory) {
 		}
 		return batch.Items[0]
 	}
-	answer := func(t *testing.T, f PRMergeabilityFixture, item db.ClaimedPRMergeabilityProbe, mergeable, head string) db.PRMergeabilityProbeResult {
+	answerOn := func(t *testing.T, f PRMergeabilityFixture, item db.ClaimedPRMergeabilityProbe, mergeable, head, base string) db.PRMergeabilityProbeResult {
 		t.Helper()
-		res, err := f.Stores.PRMergeability.CompleteProbe(ctx, item.Receipt, db.PRMergeabilityAnswer{Found: true, Mergeable: mergeable, HeadSHA: head}, "")
+		res, err := f.Stores.PRMergeability.CompleteProbe(ctx, item.Receipt, db.PRMergeabilityAnswer{Found: true, Mergeable: mergeable, HeadSHA: head, BaseRef: base}, "")
 		if err != nil {
 			t.Fatalf("CompleteProbe %s: %v", mergeable, err)
 		}
 		return res
+	}
+	answer := func(t *testing.T, f PRMergeabilityFixture, item db.ClaimedPRMergeabilityProbe, mergeable, head string) db.PRMergeabilityProbeResult {
+		t.Helper()
+		return answerOn(t, f, item, mergeable, head, "main")
 	}
 	probe := func(t *testing.T, f PRMergeabilityFixture, entityID, mergeable, head string) db.PRMergeabilityProbeResult {
 		t.Helper()
@@ -169,8 +173,9 @@ func RunPRMergeabilityConformance(t *testing.T, mk PRMergeabilityFactory) {
 		if res.Outcome != db.PRMergeabilityRecorded || res.Previous != "" || res.Row == nil {
 			t.Fatalf("result = %+v, want a recorded answer with no previous one", res)
 		}
-		if res.Row.Mergeable != domain.MergeableConflicting || res.Row.MergeableHeadSHA != "head-3" || res.Row.CheckedAt == nil || res.Row.OrgID != f.OrgID {
-			t.Errorf("row = %+v, want CONFLICTING at head-3, checked now", res.Row)
+		if res.Row.Mergeable != domain.MergeableConflicting || res.Row.MergeableHeadSHA != "head-3" || res.Row.MergeableBaseRef != "main" ||
+			res.Row.CheckedAt == nil || res.Row.OrgID != f.OrgID {
+			t.Errorf("row = %+v, want CONFLICTING at head-3 against main, checked now", res.Row)
 		}
 		AssertWriteReturnedStoredRow(t, "CompleteProbe upsert", *res.Row, stored(f, e.ID))
 
@@ -236,7 +241,8 @@ func RunPRMergeabilityConformance(t *testing.T, mk PRMergeabilityFactory) {
 			if item.UnknownReads != reads {
 				t.Fatalf("read %d claimed a probe with unknown_reads %d", reads, item.UnknownReads)
 			}
-			res := answer(t, f, item, domain.MergeableUnknown, "head-5b")
+			// The pull request was retargeted before these reads.
+			res := answerOn(t, f, item, domain.MergeableUnknown, "head-5b", "release")
 			last := reads == workkinds.PRMergeabilityMaxUnknownReads-1
 			switch {
 			case last && (res.Outcome != db.PRMergeabilityGaveUp || res.SuccessorID != 0):
@@ -260,8 +266,8 @@ func RunPRMergeabilityConformance(t *testing.T, mk PRMergeabilityFactory) {
 		}
 		after, _ := f.Stores.PRMergeability.GetSystem(ctx, f.OrgID, e.ID)
 		if after == nil || before == nil || after.Mergeable != before.Mergeable || after.MergeableHeadSHA != "head-5b" ||
-			after.CheckedAt == nil || before.CheckedAt == nil || after.CheckedAt.Before(*before.CheckedAt) {
-			t.Errorf("row after the give-up = %+v, want %+v's answer at the give-up's head, read no earlier", after, before)
+			after.MergeableBaseRef != "release" || after.CheckedAt == nil || before.CheckedAt == nil || after.CheckedAt.Before(*before.CheckedAt) {
+			t.Errorf("row after the give-up = %+v, want %+v's answer at the give-up's head and base, read no earlier", after, before)
 		}
 	})
 
@@ -443,12 +449,12 @@ func RunPRMergeabilityConformance(t *testing.T, mk PRMergeabilityFactory) {
 		probe(t, f, e.ID, domain.MergeableConflicting, "head-13")
 		answer, _ := f.Stores.PRMergeability.GetSystem(ctx, f.OrgID, e.ID)
 
-		got, err := f.Stores.PRMergeability.UpsertPathsSystem(ctx, f.OrgID, domain.PRPaths{EntityID: e.ID, Paths: samplePaths, HeadSHA: "head-13", Complete: true})
+		got, err := f.Stores.PRMergeability.UpsertPathsSystem(ctx, f.OrgID, domain.PRPaths{EntityID: e.ID, Paths: samplePaths, HeadSHA: "head-13", BaseRef: "main", Complete: true})
 		if err != nil {
 			t.Fatalf("UpsertPathsSystem: %v", err)
 		}
 		AssertWriteReturnedStoredRow(t, "UpsertPathsSystem over a row", got, pathsOf(f, e.ID))
-		if got.EntityID != e.ID || got.OrgID != f.OrgID || got.HeadSHA != "head-13" || !got.Complete || len(got.Paths) != 2 || got.Paths[1] != samplePaths[1] {
+		if got.EntityID != e.ID || got.OrgID != f.OrgID || got.HeadSHA != "head-13" || got.BaseRef != "main" || !got.Complete || len(got.Paths) != 2 || got.Paths[1] != samplePaths[1] {
 			t.Errorf("paths = %+v, want the list as written", got)
 		}
 		after, _ := f.Stores.PRMergeability.GetSystem(ctx, f.OrgID, e.ID)
@@ -456,28 +462,28 @@ func RunPRMergeabilityConformance(t *testing.T, mk PRMergeabilityFactory) {
 			t.Errorf("answer after the path write = %+v, want %+v untouched", after, answer)
 		}
 
-		// A rewrite replaces the list, its head and its completeness.
-		again, err := f.Stores.PRMergeability.UpsertPathsSystem(ctx, f.OrgID, domain.PRPaths{EntityID: e.ID, Paths: samplePaths[:1], HeadSHA: "head-13b"})
+		// A rewrite replaces the list, its head, its base and its completeness.
+		again, err := f.Stores.PRMergeability.UpsertPathsSystem(ctx, f.OrgID, domain.PRPaths{EntityID: e.ID, Paths: samplePaths[:1], HeadSHA: "head-13b", BaseRef: "release"})
 		if err != nil {
 			t.Fatalf("UpsertPathsSystem rewrite: %v", err)
 		}
 		AssertWriteReturnedStoredRow(t, "UpsertPathsSystem rewrite", again, pathsOf(f, e.ID))
-		if again.HeadSHA != "head-13b" || again.Complete || len(again.Paths) != 1 {
-			t.Errorf("rewritten paths = %+v, want one path at head-13b, incomplete", again)
+		if again.HeadSHA != "head-13b" || again.BaseRef != "release" || again.Complete || len(again.Paths) != 1 {
+			t.Errorf("rewritten paths = %+v, want one path at head-13b against release, incomplete", again)
 		}
 	})
 
 	t.Run("The_probe_upserts_leave_the_paths_alone", func(t *testing.T) {
 		f := mk(t)
 		e := pr(t, f, "14")
-		written, err := f.Stores.PRMergeability.UpsertPathsSystem(ctx, f.OrgID, domain.PRPaths{EntityID: e.ID, Paths: samplePaths, HeadSHA: "head-14", Complete: true})
+		written, err := f.Stores.PRMergeability.UpsertPathsSystem(ctx, f.OrgID, domain.PRPaths{EntityID: e.ID, Paths: samplePaths, HeadSHA: "head-14", BaseRef: "main", Complete: true})
 		if err != nil {
 			t.Fatalf("UpsertPathsSystem: %v", err)
 		}
 		// The row the path write created carries no answer, so the first
 		// answer is the pull request's first.
 		row, _ := f.Stores.PRMergeability.GetSystem(ctx, f.OrgID, e.ID)
-		if row == nil || row.Mergeable != "" || row.MergeableHeadSHA != "" || row.CheckedAt != nil {
+		if row == nil || row.Mergeable != "" || row.MergeableHeadSHA != "" || row.MergeableBaseRef != "" || row.CheckedAt != nil {
 			t.Fatalf("row after a path write alone = %+v, want no answer", row)
 		}
 		res := probe(t, f, e.ID, domain.MergeableConflicting, "head-14")
@@ -501,7 +507,7 @@ func RunPRMergeabilityConformance(t *testing.T, mk PRMergeabilityFactory) {
 		f := mk(t)
 		answered, written, none := pr(t, f, "15"), pr(t, f, "16"), pr(t, f, "17")
 		probe(t, f, answered.ID, domain.MergeableMergeable, "h")
-		if _, err := f.Stores.PRMergeability.UpsertPathsSystem(ctx, f.OrgID, domain.PRPaths{EntityID: written.ID, HeadSHA: "h"}); err != nil {
+		if _, err := f.Stores.PRMergeability.UpsertPathsSystem(ctx, f.OrgID, domain.PRPaths{EntityID: written.ID, HeadSHA: "h", BaseRef: "main"}); err != nil {
 			t.Fatalf("UpsertPathsSystem: %v", err)
 		}
 		rows, err := f.Stores.PRMergeability.ListPathsSystem(ctx, f.OrgID, []string{answered.ID, written.ID, none.ID})
@@ -523,9 +529,10 @@ func RunPRMergeabilityConformance(t *testing.T, mk PRMergeabilityFactory) {
 			}
 		}
 		for _, bad := range []domain.PRPaths{
-			{EntityID: written.ID, Paths: samplePaths},
-			{EntityID: written.ID, HeadSHA: "h", Paths: []domain.ChangedPath{{Path: "a", Change: "moved"}}},
-			{EntityID: written.ID, HeadSHA: "h", Paths: []domain.ChangedPath{{Change: domain.PathAdded}}},
+			{EntityID: written.ID, Paths: samplePaths, BaseRef: "main"},
+			{EntityID: written.ID, Paths: samplePaths, HeadSHA: "h"},
+			{EntityID: written.ID, HeadSHA: "h", BaseRef: "main", Paths: []domain.ChangedPath{{Path: "a", Change: "moved"}}},
+			{EntityID: written.ID, HeadSHA: "h", BaseRef: "main", Paths: []domain.ChangedPath{{Change: domain.PathAdded}}},
 		} {
 			if _, err := f.Stores.PRMergeability.UpsertPathsSystem(ctx, f.OrgID, bad); err == nil {
 				t.Errorf("UpsertPathsSystem(%+v) succeeded, want refused", bad)

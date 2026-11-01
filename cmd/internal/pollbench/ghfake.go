@@ -394,7 +394,7 @@ func (s *Server) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 		repo := s.ds.Repos[loc[0]]
 		pr := repo.PRs[loc[1]]
 		if mergeability {
-			nodes = append(nodes, map[string]any{"id": pr.NodeID, "mergeable": pr.Mergeable, "headRefOid": pr.HeadSHA})
+			nodes = append(nodes, map[string]any{"id": pr.NodeID, "mergeable": pr.Mergeable, "headRefOid": pr.HeadSHA, "baseRefName": pr.BaseRef})
 			continue
 		}
 		nodes = append(nodes, gqlPRJSON(repo, pr))
