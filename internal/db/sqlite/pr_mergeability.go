@@ -34,11 +34,11 @@ func newPRMergeabilityStore(conn *sql.DB) db.PRMergeabilityStore {
 
 var _ db.PRMergeabilityStore = (*prMergeabilityStore)(nil)
 
-const sqlitePRMergeabilityColumns = `entity_id, org_id, COALESCE(mergeable, ''), COALESCE(mergeable_head_sha, ''), COALESCE(mergeable_base_ref, ''), checked_at, COALESCE(base_move_reason, ''), gave_up`
+const sqlitePRMergeabilityColumns = `entity_id, org_id, COALESCE(mergeable, ''), COALESCE(mergeable_head_sha, ''), COALESCE(mergeable_base_ref, ''), checked_at, COALESCE(base_move_reason, ''), give_ups`
 
 func scanSQLitePRMergeability(row interface{ Scan(...any) error }) (domain.PRMergeability, error) {
 	var m domain.PRMergeability
-	err := row.Scan(&m.EntityID, &m.OrgID, &m.Mergeable, &m.MergeableHeadSHA, &m.MergeableBaseRef, &m.CheckedAt, &m.BaseMoveReason, &m.GaveUp)
+	err := row.Scan(&m.EntityID, &m.OrgID, &m.Mergeable, &m.MergeableHeadSHA, &m.MergeableBaseRef, &m.CheckedAt, &m.BaseMoveReason, &m.GiveUps)
 	return m, err
 }
 
@@ -243,17 +243,17 @@ func (s *prMergeabilityStore) CompleteProbe(ctx context.Context, r workitem.Rece
 		if answer.Mergeable == domain.MergeableUnknown {
 			if unknownReads+1 >= workkinds.PRMergeabilityMaxUnknownReads {
 				// The give-up moves the row's head and time, leaves its
-				// answer (NULL on a new row) and marks it given up, so the
+				// answer (NULL on a new row) and counts the give-up, so the
 				// poll waits a while before a fresh round of reads rather
 				// than admitting the pull request again at once.
 				row, err := scanSQLitePRMergeability(tx.QueryRowContext(ctx, `
-					INSERT INTO pull_request_mergeability (entity_id, org_id, mergeable, mergeable_head_sha, mergeable_base_ref, checked_at, gave_up)
+					INSERT INTO pull_request_mergeability (entity_id, org_id, mergeable, mergeable_head_sha, mergeable_base_ref, checked_at, give_ups)
 					VALUES (?, ?, NULL, ?, ?, ?, 1)
 					ON CONFLICT (entity_id) DO UPDATE SET
 						mergeable_head_sha = excluded.mergeable_head_sha,
 						mergeable_base_ref = excluded.mergeable_base_ref,
 						checked_at = excluded.checked_at,
-						gave_up = 1,`+sqliteClearBaseMove+`
+						give_ups = pull_request_mergeability.give_ups + 1,`+sqliteClearBaseMove+`
 					RETURNING `+sqlitePRMergeabilityColumns,
 					entityID, r.OrgID, nullIfEmpty(answer.HeadSHA), nullIfEmpty(answer.BaseRef), time.Now().UTC(), r.ItemID, r.ItemID))
 				if err != nil {
@@ -282,7 +282,7 @@ func (s *prMergeabilityStore) CompleteProbe(ctx context.Context, r workitem.Rece
 				mergeable_head_sha = excluded.mergeable_head_sha,
 				mergeable_base_ref = excluded.mergeable_base_ref,
 				checked_at = excluded.checked_at,
-				gave_up = 0,`+sqliteClearBaseMove+`
+				give_ups = 0,`+sqliteClearBaseMove+`
 			RETURNING `+sqlitePRMergeabilityColumns,
 			entityID, r.OrgID, answer.Mergeable, nullIfEmpty(answer.HeadSHA), nullIfEmpty(answer.BaseRef), now, r.ItemID, r.ItemID))
 		if err != nil {
@@ -523,12 +523,20 @@ func (s *prMergeabilityStore) UpsertPathsSystem(ctx context.Context, orgID strin
 		p.EntityID, orgID, raw, p.HeadSHA, p.BaseRef, p.Complete))
 }
 
-const sqliteBranchTipColumns = `repository_id, branch, org_id, tip_sha, COALESCE(etag, ''), observed_at`
+const sqliteBranchTipColumns = `repository_id, branch, org_id, tip_sha, COALESCE(etag, ''), observed_at, compare_failing_since`
 
 func scanSQLiteBranchTip(row interface{ Scan(...any) error }) (domain.BranchTip, error) {
 	var b domain.BranchTip
-	err := row.Scan(&b.RepositoryID, &b.Branch, &b.OrgID, &b.TipSHA, &b.ETag, &b.ObservedAt)
+	err := row.Scan(&b.RepositoryID, &b.Branch, &b.OrgID, &b.TipSHA, &b.ETag, &b.ObservedAt, &b.CompareFailingSince)
 	return b, err
+}
+
+// utcPtrValue binds an optional time as UTC, or NULL.
+func utcPtrValue(t *time.Time) any {
+	if t == nil {
+		return nil
+	}
+	return t.UTC()
 }
 
 func (s *prMergeabilityStore) ListBranchTipsSystem(ctx context.Context, orgID string) ([]domain.BranchTip, error) {
@@ -567,14 +575,15 @@ func (s *prMergeabilityStore) UpsertBranchTipSystem(ctx context.Context, orgID s
 		return domain.BranchTip{}, err
 	}
 	return scanSQLiteBranchTip(s.conn.QueryRowContext(ctx, `
-		INSERT INTO branch_tips (repository_id, branch, org_id, tip_sha, etag, observed_at)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO branch_tips (repository_id, branch, org_id, tip_sha, etag, observed_at, compare_failing_since)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (repository_id, branch) DO UPDATE SET
 			tip_sha = excluded.tip_sha,
 			etag = excluded.etag,
-			observed_at = excluded.observed_at
+			observed_at = excluded.observed_at,
+			compare_failing_since = excluded.compare_failing_since
 		RETURNING `+sqliteBranchTipColumns,
-		tip.RepositoryID, tip.Branch, orgID, tip.TipSHA, nullIfEmpty(tip.ETag), tip.ObservedAt.UTC()))
+		tip.RepositoryID, tip.Branch, orgID, tip.TipSHA, nullIfEmpty(tip.ETag), tip.ObservedAt.UTC(), utcPtrValue(tip.CompareFailingSince)))
 }
 
 func (s *prMergeabilityStore) DeleteBranchTipsExceptSystem(ctx context.Context, orgID string, keep []domain.BranchRef) (int, error) {

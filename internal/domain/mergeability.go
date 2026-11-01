@@ -12,7 +12,8 @@ const (
 
 // PRMergeability is a pull request's last known mergeability: the answer
 // columns of one pull_request_mergeability row, which the probe worker is the
-// only writer of. The row's path columns are PRPaths.
+// only writer of, and the base move the branch watch recorded on it. The
+// row's path columns are PRPaths.
 type PRMergeability struct {
 	EntityID string
 	OrgID    string
@@ -30,9 +31,10 @@ type PRMergeability struct {
 	MergeableBaseRef string
 	// CheckedAt is when that read was made; nil when it never was.
 	CheckedAt *time.Time
-	// GaveUp is true when that read was the UNKNOWN that ended a probe's
-	// retries, so Mergeable, if set, is from an earlier read.
-	GaveUp bool
+	// GiveUps is how many rounds of reads in a row ended in the UNKNOWN that
+	// gives up a probe's retries; above zero, Mergeable, if set, is from an
+	// earlier read.
+	GiveUps int
 	// BaseMoveReason is a base branch move the answer may predate, which the
 	// branch watch recorded for the pull request: MergeabilityProbeBaseMoved
 	// or MergeabilityProbeBaseReset, and empty when none is owed. A read by a
@@ -135,12 +137,17 @@ type BranchTip struct {
 	RepositoryID string
 	Branch       string
 	OrgID        string
-	// TipSHA is the tip whose move, if any, has had its probes admitted.
+	// TipSHA is the tip whose move, if any, has been recorded on the pull
+	// requests it can have affected.
 	TipSHA string
 	// ETag is the ref read's from its last 200; empty when it sent none.
 	ETag string
 	// ObservedAt is when the tip was last checked, a 304 included.
 	ObservedAt time.Time
+	// CompareFailingSince is when comparing TipSHA with the branch's newer
+	// tip first failed, in the run of failures still going; nil when no
+	// compare is failing.
+	CompareFailingSince *time.Time
 }
 
 // Ref is the branch the tip is of.

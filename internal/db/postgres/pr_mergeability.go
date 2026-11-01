@@ -38,7 +38,7 @@ func newPRMergeabilityStore(conn *sql.DB) db.PRMergeabilityStore {
 
 var _ db.PRMergeabilityStore = (*prMergeabilityStore)(nil)
 
-const pgPRMergeabilityColumns = `entity_id::text, org_id::text, COALESCE(mergeable, ''), COALESCE(mergeable_head_sha, ''), COALESCE(mergeable_base_ref, ''), checked_at, COALESCE(base_move_reason, ''), gave_up`
+const pgPRMergeabilityColumns = `entity_id::text, org_id::text, COALESCE(mergeable, ''), COALESCE(mergeable_head_sha, ''), COALESCE(mergeable_base_ref, ''), checked_at, COALESCE(base_move_reason, ''), give_ups`
 
 // pgClearBaseMove is the SET clauses a read's upsert clears the row's
 // recorded base move with when the probe making it, whose id is bound at
@@ -56,7 +56,7 @@ func pgClearBaseMove(param string) string {
 func scanPgPRMergeability(row interface{ Scan(...any) error }) (domain.PRMergeability, error) {
 	var m domain.PRMergeability
 	var checked sql.NullTime
-	if err := row.Scan(&m.EntityID, &m.OrgID, &m.Mergeable, &m.MergeableHeadSHA, &m.MergeableBaseRef, &checked, &m.BaseMoveReason, &m.GaveUp); err != nil {
+	if err := row.Scan(&m.EntityID, &m.OrgID, &m.Mergeable, &m.MergeableHeadSHA, &m.MergeableBaseRef, &checked, &m.BaseMoveReason, &m.GiveUps); err != nil {
 		return domain.PRMergeability{}, err
 	}
 	if checked.Valid {
@@ -235,17 +235,17 @@ func (s *prMergeabilityStore) CompleteProbe(ctx context.Context, r workitem.Rece
 		if answer.Mergeable == domain.MergeableUnknown {
 			if unknownReads+1 >= workkinds.PRMergeabilityMaxUnknownReads {
 				// The give-up moves the row's head and time, leaves its
-				// answer (NULL on a new row) and marks it given up, so the
+				// answer (NULL on a new row) and counts the give-up, so the
 				// poll waits a while before a fresh round of reads rather
 				// than admitting the pull request again at once.
 				row, err := scanPgPRMergeability(tx.QueryRowContext(ctx, `
-					INSERT INTO public.pull_request_mergeability (entity_id, org_id, mergeable, mergeable_head_sha, mergeable_base_ref, checked_at, gave_up)
-					VALUES ($1, $2, NULL, $3, $4, $5, true)
+					INSERT INTO public.pull_request_mergeability (entity_id, org_id, mergeable, mergeable_head_sha, mergeable_base_ref, checked_at, give_ups)
+					VALUES ($1, $2, NULL, $3, $4, $5, 1)
 					ON CONFLICT (entity_id) DO UPDATE SET
 						mergeable_head_sha = excluded.mergeable_head_sha,
 						mergeable_base_ref = excluded.mergeable_base_ref,
 						checked_at = excluded.checked_at,
-						gave_up = true,`+pgClearBaseMove("$6")+`
+						give_ups = pull_request_mergeability.give_ups + 1,`+pgClearBaseMove("$6")+`
 					RETURNING `+pgPRMergeabilityColumns,
 					entityID, r.OrgID, nullIfEmpty(answer.HeadSHA), nullIfEmpty(answer.BaseRef), time.Now().UTC(), r.ItemID))
 				if err != nil {
@@ -278,7 +278,7 @@ func (s *prMergeabilityStore) CompleteProbe(ctx context.Context, r workitem.Rece
 				mergeable_head_sha = excluded.mergeable_head_sha,
 				mergeable_base_ref = excluded.mergeable_base_ref,
 				checked_at = excluded.checked_at,
-				gave_up = false,`+pgClearBaseMove("$7")+`
+				give_ups = 0,`+pgClearBaseMove("$7")+`
 			RETURNING `+pgPRMergeabilityColumns,
 			entityID, r.OrgID, answer.Mergeable, nullIfEmpty(answer.HeadSHA), nullIfEmpty(answer.BaseRef), now, r.ItemID))
 		if err != nil {
@@ -483,14 +483,19 @@ func (s *prMergeabilityStore) UpsertPathsSystem(ctx context.Context, orgID strin
 		p.EntityID, orgID, raw, p.HeadSHA, p.BaseRef, p.Complete))
 }
 
-const pgBranchTipColumns = `repository_id::text, branch, org_id::text, tip_sha, COALESCE(etag, ''), observed_at`
+const pgBranchTipColumns = `repository_id::text, branch, org_id::text, tip_sha, COALESCE(etag, ''), observed_at, compare_failing_since`
 
 func scanPgBranchTip(row interface{ Scan(...any) error }) (domain.BranchTip, error) {
 	var b domain.BranchTip
-	if err := row.Scan(&b.RepositoryID, &b.Branch, &b.OrgID, &b.TipSHA, &b.ETag, &b.ObservedAt); err != nil {
+	var failing sql.NullTime
+	if err := row.Scan(&b.RepositoryID, &b.Branch, &b.OrgID, &b.TipSHA, &b.ETag, &b.ObservedAt, &failing); err != nil {
 		return domain.BranchTip{}, err
 	}
 	b.ObservedAt = b.ObservedAt.UTC()
+	if failing.Valid {
+		t := failing.Time.UTC()
+		b.CompareFailingSince = &t
+	}
 	return b, nil
 }
 
@@ -526,14 +531,15 @@ func (s *prMergeabilityStore) UpsertBranchTipSystem(ctx context.Context, orgID s
 		return domain.BranchTip{}, err
 	}
 	return scanPgBranchTip(s.conn.QueryRowContext(ctx, `
-		INSERT INTO public.branch_tips (repository_id, branch, org_id, tip_sha, etag, observed_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO public.branch_tips (repository_id, branch, org_id, tip_sha, etag, observed_at, compare_failing_since)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (repository_id, branch) DO UPDATE SET
 			tip_sha = excluded.tip_sha,
 			etag = excluded.etag,
-			observed_at = excluded.observed_at
+			observed_at = excluded.observed_at,
+			compare_failing_since = excluded.compare_failing_since
 		RETURNING `+pgBranchTipColumns,
-		tip.RepositoryID, tip.Branch, orgID, tip.TipSHA, nullIfEmpty(tip.ETag), tip.ObservedAt.UTC()))
+		tip.RepositoryID, tip.Branch, orgID, tip.TipSHA, nullIfEmpty(tip.ETag), tip.ObservedAt.UTC(), utcPtr(tip.CompareFailingSince)))
 }
 
 func (s *prMergeabilityStore) DeleteBranchTipsExceptSystem(ctx context.Context, orgID string, keep []domain.BranchRef) (int, error) {

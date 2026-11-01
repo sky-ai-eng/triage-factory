@@ -118,8 +118,9 @@ When you combine pods in a query:
 Triage Factory learns whether a pull request conflicts by asking GitHub only
 when the answer can have changed: a new pull request, a new head, a new base
 branch (the pull request was retargeted), a move of its base branch that
-touches the files it changes, or a sweep, which the first poll more than 6
-hours after the last read admits. Each poll checks the tip of
+touches the files it changes, a fresh round of reads after GitHub kept
+answering `UNKNOWN`, or a sweep, which the first poll more than 6 hours after
+the last read admits. Each poll checks the tip of
 every base branch an open pull request targets when the repository's open
 pull requests changed, and at least every 10 minutes otherwise. These metrics
 show what that costs and how it is going:
@@ -128,7 +129,7 @@ show what that costs and how it is going:
 | ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `tf_mergeability_probes_total`        | Pull requests asked about, by `reason` (`new`, `head_moved`, `base_changed`, `base_moved`, `base_reset`, `unknown_retry`, `sweep`). Each read makes GitHub run a test merge, which on GitHub Enterprise Server is your server's work. |
 | `tf_mergeability_answers_total`       | GitHub's answers, by `value` (`MERGEABLE`, `CONFLICTING`, `UNKNOWN`). A high share of `UNKNOWN` means GitHub is slow to compute mergeability.                       |
-| `tf_mergeability_unknown_giveups_total` | Pull requests GitHub answered `UNKNOWN` for ten times in a row. Each is asked about again 10 minutes later, counted under `reason="unknown_retry"`, so a steady rate means GitHub is persistently slow to compute mergeability. |
+| `tf_mergeability_unknown_giveups_total` | Pull requests GitHub answered `UNKNOWN` for ten times in a row. Each is asked about again 10 minutes later, counted under `reason="unknown_retry"`; the pause doubles with each give-up in a row, up to 6 hours. A steady rate means GitHub is persistently slow to compute mergeability. |
 | `tf_mergeability_sweep_changes_total` | Sweep reads that found the answer changed. A nonzero rate means mergeability changed without Triage Factory reading it after the push, retarget or base-branch move that caused it, so the change was seen up to 6 hours late. |
 | `tf_mergeability_base_moves_total`    | Base-branch moves processed, by `outcome`: `overlap` (only the pull requests whose changed files overlap the move were asked about), `identical`, or a reset that asked about every open pull request on the branch: `reset_first_sight` (a branch seen for the first time), `reset_truncated` (a move too large to list), `reset_rewritten` (a force-push or rewind), `reset_missing_tip` (the previous tip no longer exists), `reset_unreadable` (GitHub kept failing to compare the previous tip with the new one for 20 minutes). A steady reset rate on a busy branch costs a test merge per open pull request each time. |
 | `tf_mergeability_overlap_set_size`    | A histogram, per `overlap` move, of the share of the branch's open pull requests that were asked about. About 1% on average in large repositories.                                       |

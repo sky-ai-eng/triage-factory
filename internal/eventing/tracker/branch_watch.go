@@ -1,6 +1,7 @@
 package tracker
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"log/slog"
@@ -44,6 +45,9 @@ type baseCheck struct {
 	// done is false when a read failed: the stored tip stays and the move,
 	// if any, is processed next cycle.
 	done bool
+	// compareFailed is a compare that failed for a reason other than a rate
+	// limit and has not failed long enough to reset the branch.
+	compareFailed bool
 	// tip and etag are what the branch's row is written with.
 	tip, etag string
 	// outcome is the move's, one of the baseMove* values; empty when the
@@ -76,8 +80,8 @@ type baseWatchScope struct {
 // the cycle knows, and a pull request the refresh found terminal is left out.
 // A pull request in a repository no pass is handed (one no team tracks any
 // more) is left to the sweep. Failures are logged and leave the stored tip, so
-// the move is processed again next cycle, except a compare that has failed
-// past unreadableMoveAfter.
+// the move is processed again next cycle, except a compare that has kept
+// failing for unreadableMoveAfter.
 func (t *Tracker) watchBaseBranches(ctx context.Context, client *ghclient.Client, orgID string, open []mergeabilityCandidate, scope baseWatchScope, listed, refreshed map[string]domain.PRSnapshot) {
 	// Its own span: the watch's ref reads, compares and path reads are
 	// GitHub requests, which a reader of the cycle's trace should find here
@@ -92,13 +96,13 @@ func (t *Tracker) watchBaseBranches(ctx context.Context, client *ghclient.Client
 		}
 		pr := basePR{entity: c.entity, nodeID: c.nodeID, head: c.snap.HeadSHA, base: c.snap.BaseRef}
 		if snap, ok := listed[c.nodeID]; ok {
-			pr.head, pr.base = fresher(pr.head, snap.HeadSHA), fresher(pr.base, snap.BaseRef)
+			pr.head, pr.base = cmp.Or(snap.HeadSHA, pr.head), cmp.Or(snap.BaseRef, pr.base)
 		}
 		if snap, ok := refreshed[c.nodeID]; ok {
 			if prSnapshotTerminal(snap) {
 				continue
 			}
-			pr.head, pr.base = fresher(pr.head, snap.HeadSHA), fresher(pr.base, snap.BaseRef)
+			pr.head, pr.base = cmp.Or(snap.HeadSHA, pr.head), cmp.Or(snap.BaseRef, pr.base)
 		}
 		ref := domain.BranchRef{RepositoryID: c.entity.RepositoryID, Branch: c.snap.BaseRef}
 		bases[ref] = append(bases[ref], pr)
@@ -175,18 +179,27 @@ func (t *Tracker) watchBaseBranches(ctx context.Context, client *ghclient.Client
 
 	paths := t.overlapPaths(ctx, client, orgID, checks, bases)
 	for _, c := range checks {
-		if c.done {
+		switch {
+		case c.done:
 			t.recordBaseMove(ctx, orgID, c, bases[c.ref], paths)
+		case c.compareFailed && c.stored.CompareFailingSince == nil:
+			t.recordCompareFailing(ctx, orgID, c)
 		}
 	}
 }
 
-// fresher is next when a read gave one, and prev otherwise.
-func fresher(prev, next string) string {
-	if next != "" {
-		return next
+// recordCompareFailing stores when a branch's compare started failing, on its
+// stored row with the tip, ETag and observed time left as they are, so the
+// branch is checked again next cycle and reset once the failures have gone on
+// for unreadableMoveAfter.
+func (t *Tracker) recordCompareFailing(ctx context.Context, orgID string, c baseCheck) {
+	tip := *c.stored
+	now := time.Now().UTC()
+	tip.CompareFailingSince = &now
+	if _, err := t.mergeability.UpsertBranchTipSystem(ctx, orgID, tip); err != nil {
+		trackerLog.WarnContext(ctx, "branch watch: recording a branch's failing compare failed; the next failure records it",
+			"repository_id", c.ref.RepositoryID, "branch", c.ref.Branch, "error", err)
 	}
-	return prev
 }
 
 // checkBaseBranch reads one branch's tip, conditional on its stored ETag, and
@@ -219,27 +232,34 @@ func (t *Tracker) checkBaseBranch(ctx context.Context, client *ghclient.Client, 
 	default:
 		outcome, paths, err := describeMove(ctx, client, c.owner, c.repo, c.stored.TipSHA, sha)
 		var rl *ghclient.ErrRateLimited
+		failing := c.stored.CompareFailingSince
 		switch {
 		case err == nil:
-		case errors.As(err, &rl) || time.Since(c.stored.ObservedAt) <= unreadableMoveAfter:
+		case errors.As(err, &rl):
 			t.logBaseReadFailure(ctx, c, "comparing the branch's previous tip with its new one", err, rateLimited)
+			return
+		case failing == nil || time.Since(*failing) <= unreadableMoveAfter:
+			t.logBaseReadFailure(ctx, c, "comparing the branch's previous tip with its new one", err, rateLimited)
+			c.compareFailed = true
 			return
 		default:
 			trackerLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "branch watch: comparing the branch's previous tip with its new one keeps failing; every pull request on it is probed",
-				"repository_id", c.ref.RepositoryID, "branch", c.ref.Branch, "since", c.stored.ObservedAt, "error", err)
+				"repository_id", c.ref.RepositoryID, "branch", c.ref.Branch, "failing_since", *failing, "error", err)
 			outcome, paths = baseMoveUnreadable, nil
 		}
 		c.done, c.outcome, c.movePaths = true, outcome, paths
 	}
 }
 
-// unreadableMoveAfter is how long after a branch's tip was last stored a
-// compare that still fails, for a reason other than a rate limit, resets the
-// branch instead of being tried again. GitHub can fail to generate a
-// comparison whose diff is too large every time it is asked, and the move
-// would otherwise never be processed. Twice staleRefreshFloor, so that a
-// branch checked only at the floor has failed for a whole floor first.
-const unreadableMoveAfter = 2 * staleRefreshFloor
+// unreadableMoveAfter is how long a branch's compare may keep failing, for a
+// reason other than a rate limit, before the branch is reset instead of
+// compared again: GitHub can fail to generate a comparison whose diff is too
+// large every time it is asked, and the move would otherwise never be
+// processed. Measured from the first failure of the run (the stored row's
+// CompareFailingSince), so a gap in checks does not count toward it. A
+// failing branch is checked every cycle, since its observed time stands
+// still.
+const unreadableMoveAfter = 20 * time.Minute
 
 func (t *Tracker) logBaseReadFailure(ctx context.Context, c *baseCheck, what string, err error, rateLimited *atomic.Bool) {
 	var rl *ghclient.ErrRateLimited

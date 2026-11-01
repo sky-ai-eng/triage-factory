@@ -36,6 +36,18 @@ const mergeabilitySweepInterval = 6 * time.Hour
 // and the sweep would leave a conflict unseen for hours.
 const mergeabilityGiveUpRecheck = 10 * time.Minute
 
+// giveUpRecheck is the pause after the n-th give-up in a row before a fresh
+// round: mergeabilityGiveUpRecheck, doubled for each give-up before the n-th,
+// and never longer than mergeabilitySweepInterval, so a pull request GitHub
+// keeps answering UNKNOWN for costs fewer reads the longer it goes on.
+func giveUpRecheck(n int) time.Duration {
+	d := mergeabilityGiveUpRecheck
+	for i := 1; i < n && d < mergeabilitySweepInterval; i++ {
+		d *= 2
+	}
+	return min(d, mergeabilitySweepInterval)
+}
+
 // shouldSkipRefresh reports whether a tracked open PR can keep its
 // stored snapshot for this poll cycle (no follow-up RefreshPRs call
 // needed). Skipping means we trust the stored snapshot through this

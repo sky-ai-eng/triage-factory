@@ -171,8 +171,8 @@ type Stores struct {
 	// PRMergeability owns pull_request_mergeability, a pull request's last
 	// known mergeability and changed paths, the pr_mergeability_probes queue
 	// of reads that are due, and branch_tips, the base-branch tips the poll's
-	// branch watch processed. The poll admits probes and writes the paths and
-	// tips; the probe worker claims the probes and is the only writer of the
+	// branch watch processed. The poll admits probes and writes the paths,
+	// the owed base moves and the tips; the probe worker claims the probes and is the only writer of the
 	// answers. A system-service store (admin pool in Postgres) with no
 	// transaction-bound twin.
 	PRMergeability PRMergeabilityStore

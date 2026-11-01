@@ -978,7 +978,8 @@ type mergeabilityCandidate struct {
 //     watch recorded, earlier in this cycle or before it, that no read since
 //     has settled;
 //   - unknown_retry: GitHub answered UNKNOWN on every retry of its last round
-//     of reads, longer than mergeabilityGiveUpRecheck ago;
+//     of reads, longer ago than giveUpRecheck allows for the give-ups in a
+//     row its row counts;
 //   - sweep: its row was last read longer than mergeabilitySweepInterval ago.
 //
 // The reasons are tried in that order and a pull request is admitted once. A
@@ -1034,7 +1035,7 @@ func (t *Tracker) admitMergeabilityProbes(ctx context.Context, orgID string, ope
 			reason = domain.MergeabilityProbeBaseChanged
 		case row.BaseMoveReason != "":
 			reason = row.BaseMoveReason
-		case row.GaveUp && row.CheckedAt != nil && now.Sub(*row.CheckedAt) > mergeabilityGiveUpRecheck:
+		case row.GiveUps > 0 && row.CheckedAt != nil && now.Sub(*row.CheckedAt) > giveUpRecheck(row.GiveUps):
 			reason = domain.MergeabilityProbeUnknownRetry
 		case row.CheckedAt == nil || now.Sub(*row.CheckedAt) > mergeabilitySweepInterval:
 			reason = domain.MergeabilityProbeSweep

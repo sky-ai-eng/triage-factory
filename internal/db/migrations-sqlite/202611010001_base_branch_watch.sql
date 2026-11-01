@@ -4,7 +4,9 @@
 -- watch. tip_sha is the tip whose move has been recorded on the rows of the
 -- pull requests it can have affected (base_move_reason below), etag the ref
 -- read's from its last 200, and observed_at when the tip was last checked, a
--- 304 included. Stored so a restart does not take
+-- 304 included. compare_failing_since is when comparing tip_sha with a newer
+-- tip first failed, in a run of failures still going: a compare that has
+-- failed for long enough resets the branch. Stored so a restart does not take
 -- every base branch for newly seen and probe every pull request on it.
 CREATE TABLE branch_tips (
     repository_id TEXT NOT NULL,
@@ -13,6 +15,7 @@ CREATE TABLE branch_tips (
     tip_sha       TEXT NOT NULL,
     etag          TEXT NULL,
     observed_at   DATETIME NOT NULL,
+    compare_failing_since DATETIME NULL,
     PRIMARY KEY (repository_id, branch),
     FOREIGN KEY (repository_id, org_id) REFERENCES repositories(id, org_id) ON DELETE CASCADE
 );
@@ -53,11 +56,12 @@ ALTER TABLE pull_request_mergeability ADD COLUMN paths_complete BOOLEAN NOT NULL
 ALTER TABLE pull_request_mergeability ADD COLUMN base_move_reason TEXT NULL CHECK (base_move_reason IN ('base_moved','base_reset'));
 ALTER TABLE pull_request_mergeability ADD COLUMN base_moved_at TEXT NULL;
 
--- Whether the probe worker's last settling read was the UNKNOWN give-up:
--- GitHub answered UNKNOWN on every retry, so mergeable, if set, is from an
--- earlier read. The poll reads such a pull request again once checked_at is
--- old enough, rather than waiting for the sweep; a known answer clears it.
-ALTER TABLE pull_request_mergeability ADD COLUMN gave_up BOOLEAN NOT NULL DEFAULT 0;
+-- How many rounds of the probe worker's reads in a row ended in the UNKNOWN
+-- give-up (GitHub answered UNKNOWN on every retry), so mergeable, if set, is
+-- from an earlier read when it is above zero. The poll reads such a pull
+-- request again after a pause that doubles with each, rather than waiting for
+-- the sweep; a known answer resets it to zero.
+ALTER TABLE pull_request_mergeability ADD COLUMN give_ups INTEGER NOT NULL DEFAULT 0;
 
 -- +goose Down
 SELECT 'down not supported';

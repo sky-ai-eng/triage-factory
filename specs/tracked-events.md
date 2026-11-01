@@ -248,7 +248,7 @@ reads it only when it can have changed, through a probe the poll admits:
 - `base_reset`: the PR's base branch moved and TF cannot tell what the move
   changed, so every open PR on it is read;
 - `unknown_retry`: GitHub answered `UNKNOWN` on every read of TF's last
-  round, more than 10 minutes ago (below);
+  round, long enough ago (below);
 - `sweep`: TF last read it more than 6 hours ago, which catches the changes
   the rules above miss.
 
@@ -275,9 +275,10 @@ tip with the new one:
 
 A branch seen for the first time is `base_reset` too. Any other compare
 failure leaves the stored tip and is tried again next cycle, except a rate
-limit; once the tip was last stored more than 20 minutes ago, a compare that
-still fails is `base_reset` (GitHub can fail every time to generate a
-comparison whose diff is too large).
+limit; once a branch's compares have kept failing for 20 minutes, counted from
+the first failure (stored on the branch's row and cleared by a success), the
+branch is `base_reset` (GitHub can fail every time to generate a comparison
+whose diff is too large).
 
 The watch records each move on the stored row of every PR it affects
 (`base_move_reason`, with the time it was recorded) and then stores the new
@@ -317,10 +318,12 @@ two conflict events fire from the stored answer's transitions, in the write
 that stores it, so the stored answer is their re-emit guard. An `UNKNOWN`
 answer is read again 30 seconds later, at most 10 times, and leaves the stored
 answer alone; the tenth records the read's head, base and time with no answer
-and marks the row given up, and the first poll more than 10 minutes later
-admits a fresh round (`unknown_retry`), so a GitHub slow to compute
-mergeability delays the answer by minutes rather than until the sweep. A known
-answer clears the mark. A read GitHub refuses for a rate limit waits for
+and counts a give-up on the row. The first poll more than 10 minutes later
+admits a fresh round (`unknown_retry`), and each further give-up in a row
+doubles the pause, up to the sweep's 6 hours, so a GitHub slow to compute
+mergeability delays the answer by minutes rather than until the sweep, and one
+that never answers is asked less and less often. A known answer resets the
+count. A read GitHub refuses for a rate limit waits for
 the limit to reset, and the credential's other PRs wait with it without a
 request. A probe whose reads keep failing for another reason is given up after
 its fifth attempt with nothing written, and one whose repository no credential

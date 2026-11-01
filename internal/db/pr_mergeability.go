@@ -85,8 +85,9 @@ type PRMergeabilityStore interface {
 	//     workkinds.PRMergeabilityUnknownRetryDelay from now. At the limit the
 	//     probe is completed with nothing owed, and the row's head, base and
 	//     checked_at move to the read's while its answer stays (NULL on a row
-	//     the give-up creates), gave_up is set, and a base move is cleared as a
-	//     known answer clears it. A known answer clears gave_up.
+	//     the give-up creates), give_ups goes up by one, and a base move is
+	//     cleared as a known answer clears it. A known answer resets give_ups
+	//     to zero.
 	//
 	// A receipt another holder took is workitem.ErrLeaseLost and writes
 	// nothing at all, events included; workitem.ErrCancelled means the
@@ -144,8 +145,8 @@ type PRMergeabilityStore interface {
 	// the rest every poll cycle.
 	ListBranchTipsSystem(ctx context.Context, orgID string) ([]domain.BranchTip, error)
 
-	// UpsertBranchTipSystem writes one branch's tip, ETag and observed time,
-	// and returns the row as persisted.
+	// UpsertBranchTipSystem writes one branch's tip, ETag, observed time and
+	// compare-failing time, and returns the row as persisted.
 	UpsertBranchTipSystem(ctx context.Context, orgID string, tip domain.BranchTip) (domain.BranchTip, error)
 
 	// DeleteBranchTipsExceptSystem deletes, in one transaction, the org's

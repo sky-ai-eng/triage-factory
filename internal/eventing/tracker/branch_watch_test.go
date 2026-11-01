@@ -42,7 +42,8 @@ type watchWorld struct {
 	tip string
 	// listing304 makes the open-PR listing answer 304 to its stored ETag.
 	listing304 bool
-	// compares maps "base...head" to a compare body, or to "404" or "422".
+	// compares maps "base...head" to a compare body, or to "404", "422" or
+	// "rate-limited".
 	compares map[string]string
 	// paths maps a node id to its PRChangedPaths node; a pull request with
 	// none answers that it changes nothing, at its head.
@@ -138,6 +139,12 @@ func (w *watchWorld) serve(rw http.ResponseWriter, r *http.Request) {
 			return
 		case body == "422":
 			http.Error(rw, `{"message":"this comparison could not be generated"}`, http.StatusUnprocessableEntity)
+			return
+		case body == "rate-limited":
+			rw.Header().Set("X-RateLimit-Resource", "core")
+			rw.Header().Set("X-RateLimit-Remaining", "0")
+			rw.Header().Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10))
+			http.Error(rw, `{"message":"API rate limit exceeded"}`, http.StatusForbidden)
 			return
 		}
 		_, _ = rw.Write([]byte(body))
@@ -555,25 +562,60 @@ func TestBranchWatch_AMoveWhoseProbeWasBeingReadIsProbedAgain(t *testing.T) {
 	}
 }
 
-// A compare that keeps failing is tried again until the branch's tip was last
-// stored unreadableMoveAfter ago, and then the base is reset.
+// A compare that keeps failing is tried again, and the base is reset once the
+// failures have gone on for unreadableMoveAfter, counted from the first one: a
+// branch last checked long ago fails once without being reset. The reset
+// clears the base's stored paths, as the other resets that can rewind it do.
 func TestBranchWatch_ACompareThatKeepsFailingResetsTheBase(t *testing.T) {
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
 	w := newWatchWorld(t)
 	w.seenOnce()
+	if _, err := w.stores.PRMergeability.UpsertPathsSystem(ctx, org, domain.PRPaths{
+		EntityID: w.prs[0].ID, Paths: []domain.ChangedPath{modified("src/a.go")}, HeadSHA: "h1", BaseRef: "main", Complete: true,
+	}); err != nil {
+		t.Fatalf("seed paths: %v", err)
+	}
+	w.ageTip(3 * unreadableMoveAfter)
 	w.set(func(w *watchWorld) { w.compares["old...new"] = "422" })
 	if got := w.cycle(); len(got) != 0 {
-		t.Fatalf("a failed compare admitted %v, want nothing yet", got)
+		t.Fatalf("a first failed compare admitted %v, want nothing yet", got)
 	}
-	if tip := w.storedTip(); tip == nil || tip.TipSHA != "old" {
-		t.Fatalf("stored tip = %+v, want old", tip)
+	tip := w.storedTip()
+	if tip == nil || tip.TipSHA != "old" || tip.CompareFailingSince == nil || time.Since(*tip.CompareFailingSince) > time.Minute {
+		t.Fatalf("stored tip = %+v, want old, failing since now", tip)
 	}
-	w.ageTip(unreadableMoveAfter + time.Minute)
+
+	failing := time.Now().Add(-unreadableMoveAfter - time.Minute)
+	tip.CompareFailingSince = &failing
+	if _, err := w.stores.PRMergeability.UpsertBranchTipSystem(ctx, org, *tip); err != nil {
+		t.Fatalf("age the failure: %v", err)
+	}
 	all := map[int]string{1: domain.MergeabilityProbeBaseReset, 2: domain.MergeabilityProbeBaseReset, 3: domain.MergeabilityProbeBaseReset}
 	if got := w.cycle(); !mapsEqual(got, all) {
 		t.Errorf("admitted %v, want %v", got, all)
 	}
-	if tip := w.storedTip(); tip == nil || tip.TipSHA != "new" {
-		t.Errorf("stored tip = %+v, want new", tip)
+	if tip := w.storedTip(); tip == nil || tip.TipSHA != "new" || tip.CompareFailingSince != nil {
+		t.Errorf("stored tip = %+v, want new with no failure", tip)
+	}
+	rows, err := w.stores.PRMergeability.ListPathsSystem(ctx, org, []string{w.prs[0].ID})
+	if err != nil || len(rows) != 1 || rows[0].Paths != nil {
+		t.Errorf("PR_1's paths after the reset = %+v (err %v), want cleared", rows, err)
+	}
+}
+
+// A rate-limited compare is waited out: it neither starts the failure clock
+// nor resets the base, however long ago the branch was last checked.
+func TestBranchWatch_ARateLimitedCompareIsWaitedOut(t *testing.T) {
+	w := newWatchWorld(t)
+	w.seenOnce()
+	w.ageTip(3 * unreadableMoveAfter)
+	w.set(func(w *watchWorld) { w.compares["old...new"] = "rate-limited" })
+	if got := w.cycle(); len(got) != 0 {
+		t.Fatalf("a rate-limited compare admitted %v, want nothing", got)
+	}
+	if tip := w.storedTip(); tip == nil || tip.TipSHA != "old" || tip.CompareFailingSince != nil {
+		t.Errorf("stored tip = %+v, want old with no failure recorded", tip)
 	}
 }
 

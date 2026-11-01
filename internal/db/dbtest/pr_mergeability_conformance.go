@@ -333,8 +333,8 @@ func RunPRMergeabilityConformance(t *testing.T, mk PRMergeabilityFactory) {
 			after.MergeableBaseRef != "release" || after.CheckedAt == nil || before.CheckedAt == nil || after.CheckedAt.Before(*before.CheckedAt) {
 			t.Errorf("row after the give-up = %+v, want %+v's answer at the give-up's head and base, read no earlier", after, before)
 		}
-		if before.GaveUp || !after.GaveUp {
-			t.Errorf("gave_up = %v before and %v after the give-up, want false then true", before.GaveUp, after.GaveUp)
+		if before.GiveUps != 0 || after.GiveUps != 1 {
+			t.Errorf("give_ups = %d before and %d after the give-up, want 0 then 1", before.GiveUps, after.GiveUps)
 		}
 	})
 
@@ -350,9 +350,18 @@ func RunPRMergeabilityConformance(t *testing.T, mk PRMergeabilityFactory) {
 			t.Fatalf("last read = %+v, want a give-up that wrote the row", res)
 		}
 		AssertWriteReturnedStoredRow(t, "CompleteProbe give-up insert", *res.Row, stored(f, e.ID))
-		if res.Row.Mergeable != "" || res.Row.MergeableHeadSHA != "head-5n" || res.Row.CheckedAt == nil || !res.Row.GaveUp {
-			t.Errorf("row = %+v, want no answer at head-5n, read now and given up", *res.Row)
+		if res.Row.Mergeable != "" || res.Row.MergeableHeadSHA != "head-5n" || res.Row.CheckedAt == nil || res.Row.GiveUps != 1 {
+			t.Errorf("row = %+v, want no answer at head-5n, read now, one give-up", *res.Row)
 		}
+		// A second round that gives up too counts a second give-up in a row.
+		admit(t, f, e.ID, domain.MergeabilityProbeUnknownRetry)
+		for reads := 0; reads < workkinds.PRMergeabilityMaxUnknownReads; reads++ {
+			res = answer(t, f, claimOne(t, f), domain.MergeableUnknown, "head-5n")
+		}
+		if res.Outcome != db.PRMergeabilityGaveUp || res.Row == nil || res.Row.GiveUps != 2 {
+			t.Fatalf("second round = %+v, want a second give-up in a row", res)
+		}
+		AssertWriteReturnedStoredRow(t, "CompleteProbe give-up update", *res.Row, stored(f, e.ID))
 		// The next known answer is the pull request's first, so a conflict
 		// emits as it does for a pull request with no row.
 		admit(t, f, e.ID, domain.MergeabilityProbeSweep)
@@ -360,8 +369,8 @@ func RunPRMergeabilityConformance(t *testing.T, mk PRMergeabilityFactory) {
 		if len(got.Events) != 1 || got.Events[0].EventType != domain.EventGitHubPRConflicts || got.Previous != "" {
 			t.Errorf("first answer after the give-up = %+v, want one github:pr:conflicts", got)
 		}
-		if got.Row == nil || got.Row.GaveUp {
-			t.Errorf("row after a known answer = %+v, want it no longer given up", got.Row)
+		if got.Row == nil || got.Row.GiveUps != 0 {
+			t.Errorf("row after a known answer = %+v, want no give-ups", got.Row)
 		}
 	})
 
@@ -665,8 +674,22 @@ func RunPRMergeabilityConformance(t *testing.T, mk PRMergeabilityFactory) {
 			t.Fatalf("UpsertBranchTipSystem update: %v", err)
 		}
 		AssertWriteReturnedStoredRow(t, "UpsertBranchTipSystem update", moved, tips())
-		if moved.TipSHA != "tip-2" || moved.ETag != "" || !moved.ObservedAt.Equal(observed.Add(time.Minute)) {
-			t.Errorf("updated tip = %+v, want tip-2 with no etag", moved)
+		if moved.TipSHA != "tip-2" || moved.ETag != "" || !moved.ObservedAt.Equal(observed.Add(time.Minute)) || moved.CompareFailingSince != nil {
+			t.Errorf("updated tip = %+v, want tip-2 with no etag and no failure", moved)
+		}
+		failing := observed.Add(2 * time.Minute)
+		moved.CompareFailingSince = &failing
+		marked, err := f.Stores.PRMergeability.UpsertBranchTipSystem(ctx, f.OrgID, moved)
+		if err != nil {
+			t.Fatalf("UpsertBranchTipSystem failing: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "UpsertBranchTipSystem failing", marked, tips())
+		if marked.CompareFailingSince == nil || !marked.CompareFailingSince.Equal(failing) {
+			t.Errorf("failing tip = %+v, want failing since %s", marked, failing)
+		}
+		marked.CompareFailingSince = nil
+		if cleared, err := f.Stores.PRMergeability.UpsertBranchTipSystem(ctx, f.OrgID, marked); err != nil || cleared.CompareFailingSince != nil {
+			t.Errorf("clearing the failure = (%+v, %v), want none recorded", cleared, err)
 		}
 		if _, err := f.Stores.PRMergeability.UpsertBranchTipSystem(ctx, f.OrgID, domain.BranchTip{
 			RepositoryID: e.RepositoryID, Branch: "release/1.0", TipSHA: "tip-r", ObservedAt: observed,
