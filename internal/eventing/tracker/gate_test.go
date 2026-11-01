@@ -11,6 +11,67 @@ import (
 // that isn't specifically exercising the floor itself.
 const freshAge = 30 * time.Second
 
+// noRecentChange is "TF last saw the PR change at the window's edge or
+// earlier, or never" — what the caller passes for a snapshot with no
+// stamp, and what every test that isn't exercising the window passes.
+const noRecentChange = changeRefreshWindow
+
+// TestShouldSkipRefresh_ChangeWindow covers the race the window exists for: a
+// refresh right after a change stored the check runs GitHub had created by
+// then, all terminal, and the pull request has not changed since. Every other
+// signal says skip. Inside the window the gate refreshes anyway, so a check
+// run created after that refresh is read; at its edge, past it, or with no
+// stamp, the gate skips as it always has.
+func TestShouldSkipRefresh_ChangeWindow(t *testing.T) {
+	stored := domain.PRSnapshot{
+		UpdatedAt: "2026-05-03T12:00:00Z",
+		HeadSHA:   "abc123",
+		CheckRuns: []domain.CheckRun{{Name: "ci", Status: "completed", Conclusion: "success"}},
+	}
+	fresh := stored
+	cases := []struct {
+		name        string
+		sinceChange time.Duration
+		skip        bool
+	}{
+		{"just changed", 0, false},
+		{"stamp ahead of this pod's clock", -time.Minute, false},
+		{"just inside the window", changeRefreshWindow - time.Second, false},
+		{"at the window's edge", changeRefreshWindow, true},
+		{"past the window", changeRefreshWindow + time.Minute, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldSkipRefresh(stored, fresh, freshAge, tc.sinceChange); got != tc.skip {
+				t.Fatalf("shouldSkipRefresh(sinceChange=%s) = %v; want %v", tc.sinceChange, got, tc.skip)
+			}
+		})
+	}
+
+	// The stamp as the caller reads it. No stamp is a snapshot stored before
+	// the field existed, which the gate decides on its other signals alone.
+	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	stamps := []struct {
+		name  string
+		stamp string
+		skip  bool
+	}{
+		{"stamped a minute ago", now.Add(-time.Minute).Format(time.RFC3339), false},
+		{"stamped ten minutes ago", now.Add(-10 * time.Minute).Format(time.RFC3339), true},
+		{"no stamp", "", true},
+		{"unparseable stamp", "yesterday", true},
+	}
+	for _, tc := range stamps {
+		t.Run(tc.name, func(t *testing.T) {
+			s := stored
+			s.ChangeSeenAt = tc.stamp
+			if got := shouldSkipRefresh(s, fresh, freshAge, sinceChangeSeen(s, now)); got != tc.skip {
+				t.Fatalf("shouldSkipRefresh with change_seen_at %q = %v; want %v", tc.stamp, got, tc.skip)
+			}
+		})
+	}
+}
+
 func TestShouldSkipRefresh_QuietPRSkips(t *testing.T) {
 	stored := domain.PRSnapshot{
 		UpdatedAt: "2026-05-03T12:00:00Z",
@@ -23,7 +84,7 @@ func TestShouldSkipRefresh_QuietPRSkips(t *testing.T) {
 		UpdatedAt: "2026-05-03T12:00:00Z",
 		HeadSHA:   "abc123",
 	}
-	if !shouldSkipRefresh(stored, fresh, freshAge) {
+	if !shouldSkipRefresh(stored, fresh, freshAge, noRecentChange) {
 		t.Fatalf("expected skip when updatedAt + SHA unchanged and CI is terminal")
 	}
 }
@@ -38,7 +99,7 @@ func TestShouldSkipRefresh_UpdatedAtAdvancedRefreshes(t *testing.T) {
 		UpdatedAt: "2026-05-03T12:05:00Z",
 		HeadSHA:   "abc123",
 	}
-	if shouldSkipRefresh(stored, fresh, freshAge) {
+	if shouldSkipRefresh(stored, fresh, freshAge, noRecentChange) {
 		t.Fatalf("expected refresh when updatedAt advanced")
 	}
 }
@@ -53,7 +114,7 @@ func TestShouldSkipRefresh_HeadSHAChangedRefreshes(t *testing.T) {
 		UpdatedAt: "2026-05-03T12:00:00Z",
 		HeadSHA:   "def456",
 	}
-	if shouldSkipRefresh(stored, fresh, freshAge) {
+	if shouldSkipRefresh(stored, fresh, freshAge, noRecentChange) {
 		t.Fatalf("expected refresh when head SHA changed even with same updatedAt")
 	}
 }
@@ -71,7 +132,7 @@ func TestShouldSkipRefresh_InFlightCIRefreshes(t *testing.T) {
 		UpdatedAt: "2026-05-03T12:00:00Z",
 		HeadSHA:   "abc123",
 	}
-	if shouldSkipRefresh(stored, fresh, freshAge) {
+	if shouldSkipRefresh(stored, fresh, freshAge, noRecentChange) {
 		t.Fatalf("expected refresh when stored snapshot has in-flight CI (updatedAt doesn't bump on check completion)")
 	}
 }
@@ -103,7 +164,7 @@ func TestShouldSkipRefresh_NonCompletedStatusesRefresh(t *testing.T) {
 				UpdatedAt: "2026-05-03T12:00:00Z",
 				HeadSHA:   "abc123",
 			}
-			if shouldSkipRefresh(stored, fresh, freshAge) {
+			if shouldSkipRefresh(stored, fresh, freshAge, noRecentChange) {
 				t.Fatalf("expected refresh when stored has non-completed check_run status %q", status)
 			}
 		})
@@ -126,11 +187,11 @@ func TestShouldSkipRefresh_StaleAgeForcesRefresh(t *testing.T) {
 		HeadSHA:   "abc123",
 	}
 	// Just past the floor → must refresh.
-	if shouldSkipRefresh(stored, fresh, staleRefreshFloor+time.Second) {
+	if shouldSkipRefresh(stored, fresh, staleRefreshFloor+time.Second, noRecentChange) {
 		t.Fatalf("expected refresh once age exceeds staleRefreshFloor (catches workflow re-runs)")
 	}
 	// Just under the floor → still skips.
-	if !shouldSkipRefresh(stored, fresh, staleRefreshFloor-time.Second) {
+	if !shouldSkipRefresh(stored, fresh, staleRefreshFloor-time.Second, noRecentChange) {
 		t.Fatalf("expected skip while age is under staleRefreshFloor")
 	}
 }
@@ -148,7 +209,7 @@ func TestShouldSkipRefresh_NilCheckRunsRefreshes(t *testing.T) {
 		UpdatedAt: "2026-05-03T12:00:00Z",
 		HeadSHA:   "abc123",
 	}
-	if shouldSkipRefresh(stored, fresh, freshAge) {
+	if shouldSkipRefresh(stored, fresh, freshAge, noRecentChange) {
 		t.Fatalf("expected refresh on first cycle after discovery (CheckRuns nil)")
 	}
 }
@@ -166,7 +227,7 @@ func TestShouldSkipRefresh_EmptyCheckRunsCanSkip(t *testing.T) {
 		UpdatedAt: "2026-05-03T12:00:00Z",
 		HeadSHA:   "abc123",
 	}
-	if !shouldSkipRefresh(stored, fresh, freshAge) {
+	if !shouldSkipRefresh(stored, fresh, freshAge, noRecentChange) {
 		t.Fatalf("expected skip with empty (non-nil) check_runs")
 	}
 }
@@ -176,7 +237,7 @@ func TestShouldSkipRefresh_MissingUpdatedAtRefreshes(t *testing.T) {
 	// gate signal, so always refresh.
 	stored := domain.PRSnapshot{HeadSHA: "abc123", CheckRuns: []domain.CheckRun{}}
 	fresh := domain.PRSnapshot{UpdatedAt: "2026-05-03T12:00:00Z", HeadSHA: "abc123"}
-	if shouldSkipRefresh(stored, fresh, freshAge) {
+	if shouldSkipRefresh(stored, fresh, freshAge, noRecentChange) {
 		t.Fatalf("expected refresh when stored.UpdatedAt is empty")
 	}
 }
@@ -184,7 +245,7 @@ func TestShouldSkipRefresh_MissingUpdatedAtRefreshes(t *testing.T) {
 func TestShouldSkipRefresh_MissingHeadSHARefreshes(t *testing.T) {
 	stored := domain.PRSnapshot{UpdatedAt: "2026-05-03T12:00:00Z", CheckRuns: []domain.CheckRun{}}
 	fresh := domain.PRSnapshot{UpdatedAt: "2026-05-03T12:00:00Z", HeadSHA: "abc123"}
-	if shouldSkipRefresh(stored, fresh, freshAge) {
+	if shouldSkipRefresh(stored, fresh, freshAge, noRecentChange) {
 		t.Fatalf("expected refresh when stored.HeadSHA is empty")
 	}
 }

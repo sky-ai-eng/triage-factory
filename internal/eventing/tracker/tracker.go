@@ -445,8 +445,14 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 			var backfilled []domain.Event
 			// A pull request opened since TF last listed its repository: the
 			// identities its body mentions were mentioned just now, so they
-			// emit. Any other pull request's body is a baseline.
+			// emit, and its opening is a change that starts CI, so it is
+			// stamped (and stamped again by the refresh that first reads its
+			// check runs). Any other pull request is a baseline: its state
+			// predates the tracking, like a quiet seed's, and stamping every
+			// one a repository's first listing returns would refresh them all
+			// every cycle for changeRefreshWindow.
 			if !terminal && openedSince(snap, lastListed[d.repositoryID]) {
+				snap.ChangeSeenAt = formatChangeSeen(time.Now())
 				backfilled = append(backfilled, openedPRMentions(entity.ID, entity.RepositoryID, snap, resolver)...)
 			}
 			if !terminal && !self.Is(snap.Author, snap.AuthorID) {
@@ -517,8 +523,11 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 			// one fact: an entity active with its old merged snapshot stored
 			// is exactly what a terminating close reads as "close me", and
 			// this cycle's Phase 3 already re-diffs from the snapshot written
-			// here, so no transition is lost by writing it early.
+			// here, so no transition is lost by writing it early. A reopen
+			// starts CI, so the snapshot is stamped as a change, and stamped
+			// again by the refresh that first reads its check runs.
 			if !prSnapshotTerminal(snap) && entity.State == "closed" {
+				snap.ChangeSeenAt = formatChangeSeen(time.Now())
 				snapJSON, _ := json.Marshal(snap)
 				if reactivated, err := t.entities.ReactivateWithSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
 					trackerLog.Error("reactivate entity failed", "source_id", sid, "error", err)
@@ -665,6 +674,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		} else {
 			age = 24 * time.Hour
 		}
+		sinceChange := sinceChangeSeen(snap, time.Now())
 		// Gate against discovery's fresh snapshot when we have one. A repo
 		// that 304'd this cycle has no fresh snapshot, but a 304 means its
 		// open-PR listing (including each PR's updated_at + head sha) is
@@ -687,7 +697,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		if !ok && quietRepos[e.RepositoryID] {
 			fresh, ok = snap, true
 		}
-		if ok && shouldSkipRefresh(snap, fresh, age) {
+		if ok && shouldSkipRefresh(snap, fresh, age, sinceChange) {
 			// Skipped entities won't be diffed, so reconcile stale
 			// per-reviewer review_requested tasks here: for each active
 			// review_requested task whose keyed reviewer is no longer in the
@@ -783,6 +793,12 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 			refreshed[k] = v
 		}
 	}
+	// refreshedAt is no earlier than every snapshot in refreshed was read: the
+	// change stamp Phase 3 writes. Taken here rather than at the cycle's start
+	// because discovery and the refresh batches can take minutes at scale, and
+	// a stamp older than the read that saw the change would expire the window
+	// early, leaving the check runs created just after that read unread.
+	refreshedAt := formatChangeSeen(time.Now())
 
 	allItems := append(openItems, terminalItems...)
 
@@ -905,6 +921,23 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		// written and the winning writer's next cycle re-diffs and emits
 		// the transition, so suppression loses nothing. A refresh that
 		// observed no change commits nothing but its poll stamp.
+		//
+		// The change stamp moves to this refresh's time when it saw the head
+		// or updatedAt move, or when it is the first read of the check runs
+		// of a pull request discovery stamped (opened or reopened, stored
+		// with no check runs). That first read is the one whose empty answer
+		// the window guards, and it can land well after discovery's stamp.
+		// Otherwise the stored stamp is carried, so a refresh the change
+		// window forced on an unchanged pull request stays one that observed
+		// no change. A terminal refresh reads no check runs, so a stamped
+		// snapshot that merged before its first full read is not restamped
+		// on every cycle.
+		changed := newSnap.HeadSHA != item.snap.HeadSHA || newSnap.UpdatedAt != item.snap.UpdatedAt
+		firstCheckRead := item.snap.ChangeSeenAt != "" && item.snap.CheckRuns == nil && newSnap.CheckRuns != nil
+		newSnap.ChangeSeenAt = item.snap.ChangeSeenAt
+		if changed || firstCheckRead {
+			newSnap.ChangeSeenAt = refreshedAt
+		}
 		prevJSON, _ := json.Marshal(item.snap)
 		snapJSON, _ := json.Marshal(newSnap)
 		ok, enqueued, err := t.commitRefresh(ctx, orgID, item.entity.ID, string(prevJSON), string(snapJSON), item.entity.PollSeq, events)
