@@ -29,6 +29,15 @@ func ArtifactPerformerSQL() string {
 		sqlStringLiterals([]string{domain.PerformedByPerson}) + ` OR ea.conversation_id IS NOT NULL)`
 }
 
+// ArtifactRowSQL is the predicate a row of external_actions aliased ea meets
+// to be one of an artifact's rows, whatever its object: performed by an
+// artifact performer (ArtifactPerformerSQL), of an action that can name an
+// object (ArtifactExcludedActionsSQL). The artifact reads add that the row
+// names an object; the action list's object filter adds which.
+func ArtifactRowSQL() string {
+	return ArtifactPerformerSQL() + ` AND ea.action NOT IN (` + ArtifactExcludedActionsSQL() + `)`
+}
+
 func sqlStringLiterals(values []string) string {
 	quoted := make([]string, len(values))
 	for i, v := range values {

@@ -243,7 +243,8 @@ func TestHandleAgentActions_StrictBody(t *testing.T) {
 
 // TestConversationResponse_ArtifactCounts pins artifact_count and
 // artifact_counts on the single read and the batched list: one per object, TF's
-// own rows not counted, and {} for a conversation that changed nothing.
+// own rows not counted, and {} for a conversation that changed nothing; and
+// action_count beside them, every ledger row of the conversation.
 func TestConversationResponse_ArtifactCounts(t *testing.T) {
 	s := newTestServer(t)
 	busy := seedSteerConversation(t, s.db, "artcnt", dbtest.SeedConcluded)
@@ -266,8 +267,11 @@ func TestConversationResponse_ArtifactCounts(t *testing.T) {
 	other.RepositoryID, other.PerformedBy = push.RepositoryID, domain.PerformedBySystem
 	seedConversationAction(t, s, busy, other)
 
-	check := func(name string, m map[string]any, total float64, byKind map[string]float64) {
+	check := func(name string, m map[string]any, total, actions float64, byKind map[string]float64) {
 		t.Helper()
+		if m["action_count"] != actions {
+			t.Errorf("%s action_count = %v, want %v", name, m["action_count"], actions)
+		}
 		if m["artifact_count"] != total {
 			t.Errorf("%s artifact_count = %v, want %v", name, m["artifact_count"], total)
 		}
@@ -283,14 +287,14 @@ func TestConversationResponse_ArtifactCounts(t *testing.T) {
 		}
 	}
 	want := map[string]float64{domain.ObjectKindBranch: 1, domain.ObjectKindPullRequest: 1}
-	check("GET busy", readConversation(t, s, busy), 2, want)
-	check("GET idle", readConversation(t, s, idle), 0, map[string]float64{})
+	check("GET busy", readConversation(t, s, busy), 2, 5, want)
+	check("GET idle", readConversation(t, s, idle), 0, 0, map[string]float64{})
 
 	convs := listConversations(t, s, fixtureUUID("t_artcnt"))
 	if len(convs) != 1 {
 		t.Fatalf("listed %d conversations, want 1", len(convs))
 	}
-	check("list busy", convs[0], 2, want)
+	check("list busy", convs[0], 2, 5, want)
 }
 
 // wireSpelling is raw's object_id on the wire, as a response renders it.

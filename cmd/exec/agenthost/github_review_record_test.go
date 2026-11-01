@@ -326,6 +326,28 @@ func TestLocalClient_FinalizeReviewDraft(t *testing.T) {
 	}
 }
 
+// TestReviewDraft_RecordsTheReviewedPullRequestProduced pins that staging a
+// review gives the conversation its pull request as produced. The draft is
+// the run's output before any action is recorded for it, and the approval that
+// posts it records no memory link of its own.
+func TestReviewDraft_RecordsTheReviewedPullRequestProduced(t *testing.T) {
+	head := "commit_v1"
+	srv := reviewDiffServer(t, &head)
+	conn, stores, info, client := newGithubRecordingClientConn(t, srv.URL, true)
+
+	if _, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "headsha7", nil); err != nil {
+		t.Fatalf("GithubCreatePendingReview: %v", err)
+	}
+
+	arts := listConversationDeliverables(t, stores, info.ConversationID)
+	if len(arts) != 1 || arts[0].EntityID == "" {
+		t.Fatalf("want one review draft linked to its pull request, got %+v", arts)
+	}
+	if role := touchRole(t, conn, info.ConversationID, arts[0].EntityID); role != domain.MemoryRoleProduced {
+		t.Errorf("link role on the reviewed pull request = %q, want %q", role, domain.MemoryRoleProduced)
+	}
+}
+
 // TestLocalClient_MultipleReviewDrafts_ResolveByHandle pins that when one conversation
 // holds several review drafts (conversation-scoped dedup, one per PR — TFAC-494),
 // add-review-comment and finalize-review act on the draft named by the handle, not

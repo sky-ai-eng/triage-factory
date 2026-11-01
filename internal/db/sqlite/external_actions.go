@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -254,6 +255,42 @@ func (s *externalActionStore) PresentPostedCommentKeysSystem(ctx context.Context
 	return present, rows.Err()
 }
 
+// CountByConversations is the Postgres impl's grouped COUNT (see the
+// interface). The ids bind as one JSON array read through json_each, so the
+// set needs no chunking against SQLite's variable limit.
+func (s *externalActionStore) CountByConversations(ctx context.Context, orgID string, conversationIDs []string) (map[string]int, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	counts := make(map[string]int, len(conversationIDs))
+	if len(conversationIDs) == 0 {
+		return counts, nil
+	}
+	ids, err := json.Marshal(conversationIDs)
+	if err != nil {
+		return nil, fmt.Errorf("encode conversation ids: %w", err)
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT conversation_id, COUNT(*)
+		  FROM external_actions
+		 WHERE org_id = ? AND conversation_id IN (SELECT value FROM json_each(?))
+		 GROUP BY conversation_id
+	`, orgID, string(ids))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var conversationID string
+		var n int
+		if err := rows.Scan(&conversationID, &n); err != nil {
+			return nil, err
+		}
+		counts[conversationID] = n
+	}
+	return counts, rows.Err()
+}
+
 // ListAgentActionsForBlueprintRunSystem is the close phase's read of a run's
 // own actions (see the interface). occurred_at is whole seconds here, so the
 // rows of one second break on rowid, which is the order they were written.
@@ -278,13 +315,14 @@ func (s *externalActionStore) ListAgentActionsForBlueprintRunSystem(ctx context.
 
 // appendExternalActionFilters appends opts' optional provider/action/actor/time
 // predicates, the newest-first ORDER BY, and LIMIT/OFFSET to a SELECT whose WHERE
-// is already open. Time bounds wrap both sides in datetime() — the spend/deliverable
-// store pattern — so a bound time.Time compares correctly against the
-// CURRENT_TIMESTAMP-formatted occurred_at regardless of the driver's bind
-// serialization.
+// is already open. occurred_at is whole seconds, so rows of one second break on
+// rowid, newest write first. Time bounds wrap both sides in datetime() — the
+// spend/deliverable store pattern — so a bound time.Time compares correctly
+// against the CURRENT_TIMESTAMP-formatted occurred_at regardless of the
+// driver's bind serialization.
 func appendExternalActionFilters(query string, args []any, opts domain.ExternalActionListOpts) (string, []any) {
 	query, args = appendExternalActionPredicates(query, args, opts)
-	query += ` ORDER BY occurred_at DESC, id DESC`
+	query += ` ORDER BY occurred_at DESC, ea.rowid DESC`
 	if opts.Limit > 0 {
 		query += ` LIMIT ?`
 		args = append(args, opts.Limit)
@@ -314,7 +352,7 @@ func appendExternalActionPredicates(query string, args []any, opts domain.Extern
 		args = append(args, opts.ActorUserID)
 	}
 	if opts.ObjectID != "" {
-		query += ` AND (` + sqliteActionObjectIDSQL + `) = ?`
+		query += ` AND (` + sqliteActionObjectIDSQL + `) = ? AND ` + db.ArtifactRowSQL()
 		args = append(args, opts.ObjectID)
 	}
 	if opts.Refused {

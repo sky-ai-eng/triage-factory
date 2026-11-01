@@ -240,6 +240,36 @@ func (s *externalActionStore) PresentPostedCommentKeysSystem(ctx context.Context
 	return present, rows.Err()
 }
 
+// CountByConversations counts each conversation's rows (see the interface)
+// with one grouped COUNT, which the (org_id, conversation_id, occurred_at)
+// index answers. The ids go through pgUUIDArray, as the artifact store's
+// batch reads do.
+func (s *externalActionStore) CountByConversations(ctx context.Context, orgID string, conversationIDs []string) (map[string]int, error) {
+	counts := make(map[string]int, len(conversationIDs))
+	if len(conversationIDs) == 0 {
+		return counts, nil
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT conversation_id::text, COUNT(*)
+		  FROM external_actions
+		 WHERE org_id = $1 AND conversation_id = ANY($2)
+		 GROUP BY conversation_id
+	`, orgID, pgUUIDArray(conversationIDs))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var conversationID string
+		var n int
+		if err := rows.Scan(&conversationID, &n); err != nil {
+			return nil, err
+		}
+		counts[conversationID] = n
+	}
+	return counts, rows.Err()
+}
+
 // ListAgentActionsForBlueprintRunSystem is the close phase's read of a run's
 // own actions (see the interface), on the admin pool: the router holds no
 // claims.
@@ -301,7 +331,7 @@ func appendPgExternalActionPredicates(query string, args []any, opts domain.Exte
 	}
 	if opts.ObjectID != "" {
 		args = append(args, opts.ObjectID)
-		query += fmt.Sprintf(" AND (%s) = $%d", pgActionObjectIDSQL, len(args))
+		query += fmt.Sprintf(" AND (%s) = $%d AND %s", pgActionObjectIDSQL, len(args), db.ArtifactRowSQL())
 	}
 	if opts.Refused {
 		args = append(args, domain.RefusalOrFailureActions())

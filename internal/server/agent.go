@@ -78,6 +78,10 @@ func (ag *agentHandler) writeConversationResource(w http.ResponseWriter, r *http
 		if e != nil {
 			return e
 		}
+		actionCounts, e := tx.ExternalActions.CountByConversations(r.Context(), orgID, []string{conv.ID})
+		if e != nil {
+			return e
+		}
 		// Derive has_unresolved_deliverables (+ per-kind counts) from the conversation's
 		// deliverable set. Only read the deliverables when the conversation has any —
 		// counts==0 means there's nothing unresolved, so skip the list. A list
@@ -106,7 +110,7 @@ func (ag *agentHandler) writeConversationResource(w http.ResponseWriter, r *http
 				progress = runs[conv.BlueprintRunID]
 			}
 		}
-		resp = conversationResponse(conv, counts[conv.ID], arts, artifactCounts[conv.ID], progress, "")
+		resp = conversationResponse(conv, counts[conv.ID], arts, artifactCounts[conv.ID], actionCounts[conv.ID], progress, "")
 		return nil
 	}); err != nil {
 		internalError(w, "agent", err)
@@ -296,8 +300,9 @@ func (ag *agentHandler) handleAgentDeliverables(w http.ResponseWriter, r *http.R
 
 // conversationActionListRequest is the body of POST
 // /api/agent/conversations/{conversationID}/actions/list. The conversation is
-// the path id. ObjectID keeps the rows that changed one object (an
-// artifact's object_id); Refused keeps the refused and failed writes. Both
+// the path id. ObjectID keeps the rows of one artifact (its object_id): the
+// rows that changed that object and that its count counts, which leaves out
+// TF's own; Refused keeps the refused and failed writes. Both
 // are optional and may be given together. The filters are fields of the body
 // itself rather than an embedded struct, so a type fault names them as the
 // caller spelled them.
@@ -538,6 +543,9 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 //   - artifactCounts is the conversation's artifacts by object kind, from
 //     Artifacts.CountByConversations (batched like deliverableCount; nil for
 //     a conversation with none).
+//   - actionCount is the number of the conversation's ledger rows, from
+//     ExternalActions.CountByConversations (batched the same way; 0 for a
+//     conversation with none).
 //   - progress is the owning blueprint run's plan length and status, from
 //     Blueprints.RunProgress (batched the same way). Zero values when the
 //     conversation has no blueprint, and when the caller could not resolve one
@@ -572,7 +580,7 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 // purpose: that route's client is the run station, whose live transcript
 // already shows the call this line would summarize, and buying it there would
 // add a query to a polled route for a field it does not render.
-func conversationResponse(conv *domain.Conversation, deliverableCount int, arts []domain.Deliverable, artifactCounts map[string]int, progress db.RunProgress, currentAction string) map[string]any {
+func conversationResponse(conv *domain.Conversation, deliverableCount int, arts []domain.Deliverable, artifactCounts map[string]int, actionCount int, progress db.RunProgress, currentAction string) map[string]any {
 	out := map[string]any{
 		"ID":            conv.ID,
 		"TaskID":        conv.TaskID,
@@ -611,6 +619,12 @@ func conversationResponse(conv *domain.Conversation, deliverableCount int, arts 
 		// nothing.
 		"artifact_count":  artifactTotal(artifactCounts),
 		"artifact_counts": artifactCountsOrEmpty(artifactCounts),
+		// How many acts on an outside system the conversation recorded, a
+		// refused one included: its ledger rows, whoever performed them. A
+		// run acting again on an object it already changed moves this and
+		// not the artifact counts, so it is what a view of the
+		// conversation's actions refetches on.
+		"action_count": actionCount,
 		// The token rollups the conversation read already SUMs, alongside the cost /
 		// duration / turns ones above. snake_case like every key added since
 		// the legacy PascalCase set froze. Plain ints — 0 for a conversation that never
@@ -1212,6 +1226,8 @@ func (ag *agentHandler) handleAgentPermissions(w http.ResponseWriter, r *http.Re
 //     conversations need the list below.
 //   - artifact_count and artifact_counts for every conversation: one
 //     Artifacts.CountByConversations (conversation → object kind → count).
+//   - action_count for every conversation: one
+//     ExternalActions.CountByConversations.
 //   - has_unresolved_deliverables for the conversations that have deliverables: one ListByConversations
 //     over just those conversation ids (count>0), grouped per conversation. The derivation needs
 //     the actual deliverables, but a conversation with none can't have an unresolved one, so
@@ -1241,6 +1257,10 @@ func enrichConversations(ctx context.Context, tx db.TxStores, orgID string, conv
 		return nil, err
 	}
 	artifactCounts, err := tx.Artifacts.CountByConversations(ctx, orgID, conversationIDs)
+	if err != nil {
+		return nil, err
+	}
+	actionCounts, err := tx.ExternalActions.CountByConversations(ctx, orgID, conversationIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -1306,7 +1326,7 @@ func enrichConversations(ctx context.Context, tx db.TxStores, orgID string, conv
 	out := make([]map[string]any, len(convs))
 	for i := range convs {
 		out[i] = conversationResponse(&convs[i], counts[convs[i].ID], artsByConv[convs[i].ID],
-			artifactCounts[convs[i].ID], progress[convs[i].BlueprintRunID],
+			artifactCounts[convs[i].ID], actionCounts[convs[i].ID], progress[convs[i].BlueprintRunID],
 			currentAction(toolCalls[convs[i].ID], convs[i].WorktreePath))
 	}
 	return out, nil

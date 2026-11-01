@@ -127,7 +127,7 @@ type artifactActivityListRequest struct {
 func resolveArtifactActivityFilters(v *httpx.Validation, req artifactActivityListRequest) db.ArtifactListOpts {
 	opts := db.ArtifactListOpts{
 		Provider:   resolveActivityProvider(v, req.Provider),
-		ObjectKind: strings.TrimSpace(req.ObjectKind),
+		ObjectKind: req.ObjectKind,
 	}
 	if opts.ObjectKind != "" && !slices.Contains(domain.ObjectKinds(), opts.ObjectKind) {
 		v.Invalid("object_kind", "must be one of: "+strings.Join(domain.ObjectKinds(), ", "))
@@ -137,13 +137,13 @@ func resolveArtifactActivityFilters(v *httpx.Validation, req artifactActivityLis
 }
 
 // resolveActivityProvider validates both feeds' provider filter against
-// domain.Providers.
+// domain.Providers. Like every filter here, a value is taken as sent: one with
+// surrounding whitespace is no provider and is refused.
 func resolveActivityProvider(v *httpx.Validation, raw string) string {
-	provider := strings.TrimSpace(raw)
-	if provider != "" && !slices.Contains(domain.Providers(), provider) {
+	if raw != "" && !slices.Contains(domain.Providers(), raw) {
 		v.Invalid("provider", "must be one of: "+strings.Join(domain.Providers(), ", "))
 	}
-	return provider
+	return raw
 }
 
 // artifactKeys returns what a deliverable carries when it is the same object
@@ -283,16 +283,16 @@ func (h *Handler) handleUsageOrgArtifacts(w http.ResponseWriter, r *http.Request
 // open side is fine), mirroring httpx.ParseWindow.
 func resolveActivityWindow(v *httpx.Validation, since, until string) (time.Time, time.Time) {
 	var sinceT, untilT time.Time
-	if raw := strings.TrimSpace(since); raw != "" {
-		t, err := httpx.ParseWindowTime(raw)
+	if since != "" {
+		t, err := httpx.ParseWindowTime(since)
 		if err != nil {
 			v.Invalid("since", "must be RFC3339 or YYYY-MM-DD")
 		} else {
 			sinceT = t
 		}
 	}
-	if raw := strings.TrimSpace(until); raw != "" {
-		t, err := httpx.ParseWindowTime(raw)
+	if until != "" {
+		t, err := httpx.ParseWindowTime(until)
 		if err != nil {
 			v.Invalid("until", "must be RFC3339 or YYYY-MM-DD")
 		} else {
@@ -476,15 +476,18 @@ type actionActivityListRequest struct {
 func resolveActionActivityFilters(v *httpx.Validation, req actionActivityListRequest) domain.ExternalActionListOpts {
 	opts := domain.ExternalActionListOpts{
 		Provider:    resolveActivityProvider(v, req.Provider),
-		Action:      strings.TrimSpace(req.Action),
-		ActorUserID: strings.TrimSpace(req.Actor),
+		Action:      req.Action,
+		ActorUserID: req.Actor,
 	}
 	if opts.Action != "" && !slices.Contains(domain.ExternalActionTypes(), opts.Action) {
 		v.Invalid("action", "not a known action type")
 	}
+	// The id is bound as sent and stored ids are canonical, so any other
+	// spelling uuid.Parse accepts (uppercase, braces, a urn: prefix) would
+	// match nothing.
 	if opts.ActorUserID != "" {
-		if _, err := uuid.Parse(opts.ActorUserID); err != nil {
-			v.Invalid("actor", "must be a user id")
+		if parsed, err := uuid.Parse(opts.ActorUserID); err != nil || parsed.String() != opts.ActorUserID {
+			v.Invalid("actor", "must be a user id in canonical form")
 		}
 	}
 	opts.Since, opts.Until = resolveActivityWindow(v, req.Since, req.Until)

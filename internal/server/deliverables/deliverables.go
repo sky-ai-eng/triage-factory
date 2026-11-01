@@ -100,12 +100,12 @@ func (ah *Handler) injectDeliverableNote(orgID string, a domain.Deliverable) {
 	sp.InjectDeliverableNote(orgID, a.ConversationID, a)
 }
 
-// JSON is the wire shape of one conversation deliverable in the items of
-// POST /api/agent/conversations/{conversationID}/deliverables/list — the conversation's deliverables as the board /
-// RunDetail UI (TFAC-470) consumes them, across every kind (branch /
-// pull_request / review / issue / comment). details is the PARSED details_json
-// (the kind-specific payload as a JSON object, or null when absent/unparseable)
-// so the client gets structured data, not a string to re-parse. The mutable
+// JSON is the wire shape of one conversation deliverable in the
+// items of POST /api/agent/conversations/{conversationID}/deliverables/list: a
+// pull request or a review, as the Run page's Artifacts section and the
+// approval popover consume it. details is the PARSED details_json (the
+// kind-specific payload as a JSON object, or null when absent/unparseable) so
+// the client gets structured data, not a string to re-parse. The mutable
 // dedup_key / org_id / team_id internals stay off the wire.
 type JSON struct {
 	ID         string          `json:"id"`

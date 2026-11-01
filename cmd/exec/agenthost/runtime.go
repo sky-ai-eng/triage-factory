@@ -627,6 +627,11 @@ func (r *directRuntime) DeleteConversationWorktree(ctx context.Context, reposito
 // retryable error like the recording funnel's (withRecordRetry) — the upsert
 // is idempotent — but on the caller's own context, since the caller is
 // waiting for the result.
+//
+// Once the write lands, the conversation records the deliverable's entity as
+// produced (recordMemoryLink): a staged review is the run's output before any
+// ledger row names it, so this write is where the run records it. The link
+// is best-effort and recorded outside the write's transaction.
 func (r *directRuntime) UpsertDeliverable(ctx context.Context, a domain.Deliverable, github domain.GitHubIdentity) (domain.Deliverable, error) {
 	a.OrgID = r.info.OrgID
 	a.TeamID = r.info.TeamID
@@ -653,6 +658,7 @@ func (r *directRuntime) UpsertDeliverable(ctx context.Context, a domain.Delivera
 	if err != nil {
 		return domain.Deliverable{}, err
 	}
+	recordMemoryLink(ctx, r.stores, r.info, stored.Provider, stored.EntityID, domain.MemoryRoleProduced)
 	return stored, nil
 }
 

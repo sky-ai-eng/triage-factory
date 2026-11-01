@@ -714,10 +714,9 @@ func (s *entityStore) RenameSystem(ctx context.Context, orgID, source, scope, ex
 
 // moveEntityDeliverableTargets sets the target of every deliverable about the
 // entity (deliverables.entity_id) to the entity's key, as the row stands: a
-// deliverable's target is its entity's key, whichever provider recorded it, so
-// every write that moves a key (a rename, a merge, a fold, a repository's or a
-// Slack channel's move) ends with this. The dedup key names the object by an
-// id and does not move.
+// deliverable's target is the key of the pull request it is or reviews, so
+// every write here that moves a key (a rename, a merge, a fold) ends with
+// this. The dedup key names the object by an id and does not move.
 func moveEntityDeliverableTargets(ctx context.Context, q queryer, orgID, entityID string) error {
 	if _, err := q.ExecContext(ctx, `
 		UPDATE deliverables a SET target = e.source_id, updated_at = now()

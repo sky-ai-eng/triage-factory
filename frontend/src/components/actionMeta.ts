@@ -475,13 +475,11 @@ export const ACTION_OPTIONS = Object.keys(ACTION_META).map((value) => ({
   label: ACTION_META[value].label,
 }))
 
-// ACTION_PROVIDERS backs the Actions-lens provider filter. Three of the four are
-// the credentials an action can be performed under — an org github/jira
-// credential or the workspace Slack bot token — and 'network' is the odd one:
-// the sandbox egress denial spends no credential at all, because nothing left
-// the box. It is in the filter for exactly that reason. A refused connection is
-// the row an operator most wants to isolate, and it is the only one no other
-// provider value can reach. ('git'/'linear', which the deliverables feed carries,
-// stay out: a branch push is a github action even though its deliverable is a git
-// one, and nothing writes to Linear.)
-export const ACTION_PROVIDERS = ['github', 'jira', 'slack', 'network'] as const
+// ACTION_PROVIDERS backs the Actions-lens provider filter: the systems an
+// action is recorded against. github, jira, linear and slack are the systems
+// an action is performed on, and 'network' is the odd one: the sandbox egress
+// denial reaches no system at all, because nothing left the box. It is in the
+// filter for exactly that reason. A refused connection is the row an operator
+// most wants to isolate, and it is the only one no other provider value can
+// reach. A branch push is a github action.
+export const ACTION_PROVIDERS = ['github', 'jira', 'linear', 'slack', 'network'] as const

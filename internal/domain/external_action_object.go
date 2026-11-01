@@ -52,7 +52,7 @@ func ObjectKinds() []string {
 
 // actionObjectKinds maps every action that lands a change to the kind of
 // object it changes. The actions absent from it name no object: the
-// refusals and failures (IsRefusalOrFailure), the two catch-alls
+// refusals and failures (RefusalOrFailureActions), the two catch-alls
 // (gh_channel_write, graphql_write), pr_reverted and repo_created.
 var actionObjectKinds = map[string]string{
 	ActionBranchPushed:        ObjectKindBranch,
@@ -182,16 +182,10 @@ var refusalOrFailureActions = []string{
 }
 
 // RefusalOrFailureActions is the actions that record a write that was refused
-// or failed. The ledger's list reads build their refusal filter from it, so
-// the filter and IsRefusalOrFailure cannot disagree.
+// or failed: nothing landed, and the row names no object. The ledger's list
+// reads build their refusal filter from it.
 func RefusalOrFailureActions() []string {
 	return slices.Clone(refusalOrFailureActions)
-}
-
-// IsRefusalOrFailure reports whether action records a write that was refused
-// or failed: nothing landed, and the row names no object.
-func IsRefusalOrFailure(action string) bool {
-	return slices.Contains(refusalOrFailureActions, action)
 }
 
 // ActionsNamingNoObject is every action ActionObjectKind gives no kind: the

@@ -53,6 +53,8 @@ func TestResolveArtifactActivityFilters(t *testing.T) {
 		"unknown_provider":    {artifactActivityListRequest{Provider: "gitlab"}, "provider"},
 		"unknown_object_kind": {artifactActivityListRequest{ObjectKind: "pull_requests"}, "object_kind"},
 		"plural_object_kind":  {artifactActivityListRequest{ObjectKind: domain.ObjectKindIssue + "s"}, "object_kind"},
+		"padded_object_kind":  {artifactActivityListRequest{ObjectKind: " " + domain.ObjectKindBranch}, "object_kind"},
+		"padded_provider":     {artifactActivityListRequest{Provider: "github "}, "provider"},
 		"bad_since":           {artifactActivityListRequest{Since: "yesterday"}, "since"},
 		"bad_until":           {artifactActivityListRequest{Until: "tomorrow"}, "until"},
 		"inverted_window":     {artifactActivityListRequest{Since: "2026-06-30", Until: "2026-06-01"}, "since"},
@@ -116,6 +118,7 @@ func TestResolveActionActivityFilters(t *testing.T) {
 		"unknown_provider": {Provider: "gitlab"},
 		"unknown_action":   {Action: "pr_openedd"},
 		"bad_actor":        {Actor: "not-a-uuid"},
+		"uppercase_actor":  {Actor: "6BA7B810-9DAD-11D1-80B4-00C04FD430C8"},
 		"bad_since":        {Since: "yesterday"},
 		"inverted_window":  {Since: "2026-06-30", Until: "2026-06-01"},
 	} {

@@ -249,7 +249,7 @@ func linearProxyClient(t *testing.T, linearURL string, eventTriggered bool) (*Lo
 	t.Helper()
 	stores, info := newCaptureStores(t, eventTriggered)
 	// The org's Linear workspace, which connecting Linear always records: it is
-	// the scope every Linear deliverable and audit row is written under.
+	// the scope every Linear audit row is written under.
 	if _, err := stores.Orgs.SetLinearWorkspace(context.Background(), info.OrgID, "linear-workspace-uuid", "acme"); err != nil {
 		t.Fatalf("set linear workspace: %v", err)
 	}

@@ -321,6 +321,11 @@ export interface Conversation {
   // strip states kind by kind. See ConversationArtifact.
   artifact_count?: number
   artifact_counts?: Partial<Record<ObjectKind, number>>
+  // action_count is how many acts on an outside system the conversation
+  // recorded, a refused one included: its ledger rows, whoever performed them.
+  // It moves when the run acts again on an object it already changed, which
+  // leaves the counts above where they were.
+  action_count?: number
   // actor_agent_id / actor_agent_name identify the bot that executed this
   // conversation (conversations.actor_agent_id), denormalized from
   // agents.display_name via a JOIN on the conversation read projections. The card

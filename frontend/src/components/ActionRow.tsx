@@ -4,8 +4,8 @@ import { TONE_TEXT, TONE_VAR, type Tone } from './board/cardStyle'
 import { actionDetailSummary, metaForAction } from './actionMeta'
 
 // ActionRow renders one external_actions row for the activity feed's Actions lens
-// (TFAC-483) — the audit log of record. It is the sibling of DeliverableRow (Objects
-// lens), sharing the same row chrome but carrying the action-specific shape: the
+// — the audit log of record. It is the sibling of ObjectRow (Objects lens),
+// sharing the same row chrome but carrying the action-specific shape: the
 // verb (what TF did), a from→to transition where one applies, the target object,
 // the acting identity (the authorizing human on the org feed, else bot/human),
 // and a link-out to the object. Always a link-out — an action row never opens the
