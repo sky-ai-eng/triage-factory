@@ -77,20 +77,33 @@ func (s *stagedInjectionStore) FlushPendingSystem(ctx context.Context, orgID, co
 }
 
 // withdrawProducerNotesForTask withdraws the notes producer staged on the
-// task's conversations that are still waiting, under any of the staged
-// subtypes, as DeleteSystem withdraws one: delivered stays 0 and the row
-// leaves the window. The task store's clears of a held close call it in
-// their own transactions, since a hold cleared without its close makes its
-// notes false.
+// task's conversations that are still waiting (withdrawProducerNotes). The
+// task store's clears of a held close call it in their own transactions,
+// since a hold cleared without its close makes its notes false.
 func withdrawProducerNotesForTask(ctx context.Context, q queryer, taskID, producer string) error {
+	return withdrawProducerNotes(ctx, q, producer, `conversation_id IN (SELECT c.id FROM conversations c WHERE c.task_id = ?)`, taskID)
+}
+
+func (s *stagedInjectionStore) WithdrawPendingSystem(ctx context.Context, orgID, conversationID, producer string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	return withdrawProducerNotes(ctx, s.q, producer, `conversation_id = ?`, conversationID)
+}
+
+// withdrawProducerNotes withdraws the notes producer staged that are still
+// waiting, under any of the staged subtypes, on the conversations scopeSQL
+// names by scopeArg, as DeleteSystem withdraws one: delivered stays 0 and the
+// row leaves the window. scopeSQL is a fragment this file composes, never a
+// caller's string.
+func withdrawProducerNotes(ctx context.Context, q queryer, producer, scopeSQL string, scopeArg any) error {
 	subtypes, args := inListArgs(domain.StagedInjectionSubtypes)
-	args = append(args, producer, taskID)
+	args = append(args, producer, scopeArg)
 	if _, err := q.ExecContext(ctx, `
 		UPDATE messages SET window_state = 'inactive'
 		 WHERE delivered = 0 AND role = 'user' AND subtype IN (`+subtypes+`)
 		   AND json_extract(metadata, '$.producer') = ?
-		   AND conversation_id IN (SELECT c.id FROM conversations c WHERE c.task_id = ?)
-	`, args...); err != nil {
+		   AND `+scopeSQL, args...); err != nil {
 		return fmt.Errorf("withdraw %s notes: %w", producer, err)
 	}
 	return nil

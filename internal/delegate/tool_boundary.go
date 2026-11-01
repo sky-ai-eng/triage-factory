@@ -16,8 +16,35 @@ import (
 // engagement that starts while it holds (tellHeldClose), so both send the
 // same note once. A failed read of whether it was told stages the note
 // anyway: a second copy of it costs the agent less than none.
+//
+// Work a person started (personStarted) is told what happened without what
+// to do about it (domain.TaskClosingNotice): what the person asked for is what
+// the agent acts on. A close note still waiting for such work is withdrawn and
+// the notice staged in its place, since the waiting note would reach the
+// agent beside the person's message. One already delivered stays the agent's
+// history.
 func (s *Spawner) TellTaskClosing(ctx context.Context, orgID, conversationID string, evt domain.Event) bool {
+	person := false
+	if s.conversations != nil {
+		conv, err := s.conversations.GetSystem(ctx, orgID, conversationID)
+		if err != nil {
+			delegateLog.Warn("read the conversation failed; telling it the whole close note", "conversation", conversationID, "error", err)
+		} else if conv != nil {
+			person = s.personStarted(ctx, orgID, conv)
+		}
+	}
+	return s.tellTaskClosing(ctx, orgID, conversationID, person, evt)
+}
+
+// tellTaskClosing is TellTaskClosing with whether a person started the
+// conversation's work already known.
+func (s *Spawner) tellTaskClosing(ctx context.Context, orgID, conversationID string, person bool, evt domain.Event) bool {
 	if s.stagedInjections != nil {
+		if person {
+			if err := s.stagedInjections.WithdrawPendingSystem(ctx, orgID, conversationID, domain.StagedInjectionProducerTaskClosing); err != nil {
+				delegateLog.Warn("withdraw the waiting close note failed; the agent may read it beside the person's message", "conversation", conversationID, "error", err)
+			}
+		}
 		told, err := s.stagedInjections.HasNoteForEventSystem(ctx, orgID, conversationID, domain.StagedInjectionProducerTaskClosing, evt.ID)
 		if err != nil {
 			delegateLog.Warn("read whether the conversation has the close note failed; staging it", "conversation", conversationID, "event_id", evt.ID, "error", err)
@@ -29,8 +56,12 @@ func (s *Spawner) TellTaskClosing(ctx context.Context, orgID, conversationID str
 	if current, err := events.Current(ctx, orgID, evt.EventType, metadataJSON); err == nil {
 		metadataJSON = current
 	}
+	body := domain.TaskClosingInjection(evt.EventType, metadataJSON)
+	if person {
+		body = domain.TaskClosingNotice(evt.EventType, metadataJSON)
+	}
 	return s.stageNoteAtToolBoundary(ctx, orgID, conversationID, domain.StagedInjectionProducerTaskClosing,
-		domain.TaskClosingInjection(evt.EventType, metadataJSON), domain.NoteProvenance{EventID: evt.ID, EventType: evt.EventType})
+		body, domain.NoteProvenance{EventID: evt.ID, EventType: evt.EventType})
 }
 
 // stageNoteAtToolBoundary stages one agent-facing note for a working

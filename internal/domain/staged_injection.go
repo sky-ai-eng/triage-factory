@@ -114,10 +114,11 @@ const (
 	StagedInjectionProducerPRCoherence = "pr_coherence"
 	// StagedInjectionProducerTaskClosing is the note telling a conversation
 	// still working on a task that an event resolved it, and that the task
-	// closes once the work on it is finished. A conversation is told once per
-	// closing event (StagedInjectionStore.HasNoteForEventSystem), and a hold
-	// cleared without its close withdraws the notes still waiting
-	// (TaskStore.Bump).
+	// closes once the work on it is finished, in either version
+	// (TaskClosingInjection, or TaskClosingNotice for work a person started).
+	// A conversation is told once per closing event
+	// (StagedInjectionStore.HasNoteForEventSystem), and a hold cleared
+	// without its close withdraws the notes still waiting (TaskStore.Bump).
 	StagedInjectionProducerTaskClosing = "task_closing"
 )
 

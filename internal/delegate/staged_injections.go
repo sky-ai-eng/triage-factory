@@ -92,14 +92,14 @@ func (s *Spawner) stageInjection(ctx context.Context, orgID, conversationID, sub
 // the conversation's life: the hold can be cancelled after this engagement,
 // and a row says what was true when it was sent.
 //
-// Work a person started is not told: a conversation a person delegated, and
-// an engagement delivering a person's message. The note tells the agent to
-// start nothing new, and what the person asked for is what it acts on. A task
-// held for a person's deliverable is engaged almost only that way, by the
-// person asking for changes before they resolve it. Best effort: a failed
-// read or stage logs, and the engagement runs without the note.
+// Work a person started (a conversation a person delegated, or an engagement
+// delivering a person's message) is told what happened without what to do
+// about it (TellTaskClosing). A task held for a person's deliverable is
+// engaged almost only that way, by the person asking for changes before they
+// resolve it. Best effort: a failed read or stage logs, and the engagement
+// runs without the note.
 func (s *Spawner) tellHeldClose(ctx context.Context, orgID string, conv *domain.Conversation, taskID string) {
-	if s.tasks == nil || s.events == nil || s.personStarted(ctx, orgID, conv) {
+	if s.tasks == nil || s.events == nil {
 		return
 	}
 	hold, err := s.tasks.CloseDeferralForTaskSystem(ctx, orgID, taskID)
@@ -115,7 +115,7 @@ func (s *Spawner) tellHeldClose(ctx context.Context, orgID string, conv *domain.
 		delegateLog.Warn("read the held close's event failed; the engagement starts without the close note", "task_id", taskID, "event_id", hold.EventID, "error", err)
 		return
 	}
-	s.TellTaskClosing(ctx, orgID, conv.ID, *evt)
+	s.tellTaskClosing(ctx, orgID, conv.ID, s.personStarted(ctx, orgID, conv), *evt)
 }
 
 // personStarted reports whether a person started the engagement a claim on

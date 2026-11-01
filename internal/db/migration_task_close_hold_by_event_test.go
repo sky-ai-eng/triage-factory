@@ -6,9 +6,12 @@ import (
 	"testing"
 )
 
-// The version just before the migration that drops a held close's blueprint
-// run.
-const taskCloseHoldByEventPrior = 202611010002
+// The migration that drops a held close's blueprint run, and the version
+// just before it.
+const (
+	taskCloseHoldByEvent      = 202611010003
+	taskCloseHoldByEventPrior = 202611010002
+)
 
 // TestMigrate_TaskCloseHoldByEvent pins what the migration leaves: the
 // blueprint run column and its pairing triggers are gone, and a task that
@@ -23,9 +26,7 @@ func TestMigrate_TaskCloseHoldByEvent(t *testing.T) {
 		t.Fatalf("seed held task: %v", err)
 	}
 
-	if err := Migrate(database, "sqlite3"); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	migrateThrough(t, database, taskCloseHoldByEvent)
 
 	var held sql.NullString
 	if err := database.QueryRow(`SELECT close_deferred_event_id FROM tasks WHERE id = 'held'`).Scan(&held); err != nil {

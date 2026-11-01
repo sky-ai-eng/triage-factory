@@ -10,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -174,16 +175,23 @@ func TestTellHeldClose_StagesTheCloseNoteOncePerClosingEvent(t *testing.T) {
 	}
 }
 
-// TestTellHeldClose_LeavesWorkAPersonStartedUntold: an engagement delivering
-// a person's message, and a conversation a person delegated, get no close
-// note.
-func TestTellHeldClose_LeavesWorkAPersonStartedUntold(t *testing.T) {
+// TestTellHeldClose_TellsWorkAPersonStartedWhatHappenedOnly: an engagement
+// delivering a person's message, and a conversation a person delegated, get
+// the close notice without the line saying what to do about it. A whole note
+// still waiting from before the person's message is replaced by the notice.
+func TestTellHeldClose_TellsWorkAPersonStartedWhatHappenedOnly(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	ctx := context.Background()
 	for _, how := range []string{"message", "delegation"} {
 		t.Run(how, func(t *testing.T) {
-			s, database, conv, taskID, _ := heldCloseFixture(t, "run-held-"+how)
+			s, database, conv, taskID, eventID := heldCloseFixture(t, "run-held-"+how)
+			evt, err := s.events.GetSystem(ctx, org, eventID)
+			if err != nil || evt == nil {
+				t.Fatalf("read the pass: %v", err)
+			}
 			if how == "message" {
+				// Told while no person was asking, then the person writes.
+				s.tellHeldClose(ctx, org, conv, taskID)
 				if _, err := s.conversations.InsertMessage(ctx, org, pendingUserInput(conv.ID, runmode.LocalDefaultUserID, "fix the nits before I approve")); err != nil {
 					t.Fatalf("queue the person's message: %v", err)
 				}
@@ -196,8 +204,16 @@ func TestTellHeldClose_LeavesWorkAPersonStartedUntold(t *testing.T) {
 
 			s.tellHeldClose(ctx, org, conv, taskID)
 
-			if notes, err := s.stagedInjections.FlushPendingSystem(ctx, org, conv.ID); err != nil || len(notes) != 0 {
-				t.Errorf("staged notes = %+v (err %v), want none", notes, err)
+			notes, err := s.stagedInjections.FlushPendingSystem(ctx, org, conv.ID)
+			if err != nil {
+				t.Fatalf("flush: %v", err)
+			}
+			metadataJSON := evt.MetadataJSON
+			if current, err := events.Current(ctx, org, evt.EventType, metadataJSON); err == nil {
+				metadataJSON = current
+			}
+			if want := domain.TaskClosingNotice(evt.EventType, metadataJSON); len(notes) != 1 || notes[0].Body != want {
+				t.Errorf("staged notes = %+v, want the one notice %q", notes, want)
 			}
 		})
 	}
