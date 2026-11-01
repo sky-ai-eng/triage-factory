@@ -1,4 +1,4 @@
-package server
+package usage
 
 import (
 	"encoding/json"
@@ -16,12 +16,13 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // usageRig is the multi-mode fixture for the Usage spend endpoints: a real
-// Postgres-backed Server (RLS live) with four actors —
+// Postgres-backed usage Handler (RLS live) with four actors —
 //
 //   - owner     : org owner + teamA admin (founder).
 //   - orgAdmin  : org admin, member of teamB only (NOT teamA) — exercises the
@@ -35,7 +36,7 @@ import (
 // Docker via the pgtest harness.
 type usageRig struct {
 	h         *pgtest.Harness
-	uh        *usageHandler
+	uh        *Handler
 	orgID     string
 	owner     string
 	orgAdmin  string
@@ -54,7 +55,6 @@ func newUsageRig(t *testing.T) *usageRig {
 	h.Reset(t)
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
-	s := New(h.AdminDB, stores)
 
 	orgID, owner, teamA := pgtest.SeedOrgWithUser(t, h, "usage-founder")
 	teamB := pgtest.SeedTeam(t, h, orgID, "teamB")
@@ -66,7 +66,7 @@ func newUsageRig(t *testing.T) *usageRig {
 	pgtest.AddOrgMember(t, h, member, orgID, teamA, "member", "member") // teamA member, org member
 
 	r := &usageRig{
-		h: h, uh: &usageHandler{tx: s.tx, az: s.az},
+		h: h, uh: New(stores.Tx, authz.New(h.AdminDB, stores.Tx), nil),
 		orgID: orgID, owner: owner, orgAdmin: orgAdmin, teamAdmin: teamAdmin, member: member,
 		teamA: teamA, teamB: teamB, blueprint: "CI Fix",
 	}

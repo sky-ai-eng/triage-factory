@@ -1,4 +1,7 @@
-package server
+// Package usage serves the Usage page: spend at the caller, team and org
+// scopes, the org's operations subset, the per-team daily spend caps, and the
+// governance-gated activity feeds and access change log.
+package usage
 
 import (
 	"context"
@@ -13,7 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// usageHandler serves the core Usage page's spend layer: three role-gated read
+// Handler serves the core Usage page's spend layer: three role-gated read
 // endpoints over the llm_spend view. Spend is core at every scope; the SCOPE is
 // what's role-gated, and each route is addressed by the scope it is about — a
 // team's spend is a fact about the team, like its roster:
@@ -36,7 +39,7 @@ import (
 // org-admin governance rollup, a cross-team ListSpendSystem read with no
 // per-rule detail. Aggregation happens in Go from the rows; per-org/-team/-month
 // volumes are modest, so we materialize nothing here.
-type usageHandler struct {
+type Handler struct {
 	tx db.TxRunner
 	az *authz.Checker
 	// conversationQueue backs the org-scoped operations subset (TFAC-589): an org
@@ -44,6 +47,13 @@ type usageHandler struct {
 	// bound by argument, gated by the HTTP org-admin check — SaaS-safe, no
 	// cross-tenant machine truth.
 	conversationQueue db.ConversationQueueStore
+}
+
+// New builds the usage handler. conversationQueue may be nil on a deployment
+// that holds no conversation-queue reader; the ops route then answers that it
+// is not configured.
+func New(tx db.TxRunner, az *authz.Checker, conversationQueue db.ConversationQueueStore) *Handler {
+	return &Handler{tx: tx, az: az, conversationQueue: conversationQueue}
 }
 
 // --- response shapes ---
@@ -164,14 +174,14 @@ type usageOrgResponse struct {
 // the caller's claims, narrowed by CreatorUserID = self.
 //
 // GET /api/me/usage?since=&until=
-func (h *usageHandler) handleUsageMe(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleUsageMe(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := h.resolveCaller(w, r)
 	if !ok {
 		return
 	}
 	since, until, errMsg := httpx.ParseWindow(r.URL.Query(), time.Now().UTC())
 	if errMsg != "" {
-		badRequest(w, errMsg)
+		httpx.BadRequest(w, errMsg)
 		return
 	}
 
@@ -184,11 +194,11 @@ func (h *usageHandler) handleUsageMe(w http.ResponseWriter, r *http.Request) {
 		})
 		return e
 	}); err != nil {
-		internalError(w, "usage", err)
+		httpx.InternalError(w, "usage", err)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, usageMeResponse{
+	httpx.WriteJSON(w, http.StatusOK, usageMeResponse{
 		TotalCostUSD: sumSpendCost(rows),
 		ByCategory:   spendByCategory(rows),
 		ByModel:      spendByModel(rows),
@@ -219,7 +229,7 @@ func (h *usageHandler) handleUsageMe(w http.ResponseWriter, r *http.Request) {
 // (the TeamID filter excludes them).
 //
 // GET /api/teams/{team_id}/usage?since=&until=
-func (h *usageHandler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := h.resolveCaller(w, r)
 	if !ok {
 		return
@@ -244,12 +254,12 @@ func (h *usageHandler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
 	// admin (N=1).
 	isTeamAdmin, err := h.az.UserIsTeamAdmin(r.Context(), userID, orgID, teamID)
 	if err != nil {
-		internalError(w, "usage", err)
+		httpx.InternalError(w, "usage", err)
 		return
 	}
 	since, until, errMsg := httpx.ParseWindow(r.URL.Query(), time.Now().UTC())
 	if errMsg != "" {
-		badRequest(w, errMsg)
+		httpx.BadRequest(w, errMsg)
 		return
 	}
 
@@ -289,7 +299,7 @@ func (h *usageHandler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
 		ruleNames, e = resolveSpendRuleNames(r.Context(), tx, orgID, rows)
 		return e
 	}); err != nil {
-		internalError(w, "usage", err)
+		httpx.InternalError(w, "usage", err)
 		return
 	}
 
@@ -307,7 +317,7 @@ func (h *usageHandler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
 		byUser := spendByUser(rows, userProfiles)
 		resp.ByUser = &byUser
 	}
-	writeJSON(w, http.StatusOK, resp)
+	httpx.WriteJSON(w, http.StatusOK, resp)
 }
 
 // handleUsageOrg returns the org rollup across every team + system job. Gate:
@@ -321,14 +331,14 @@ func (h *usageHandler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
 // into another team's event_handlers.
 //
 // GET /api/orgs/{org_id}/usage?since=&until=
-func (h *usageHandler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := h.az.RequireOrgAdmin(w, r)
 	if !ok {
 		return
 	}
 	since, until, errMsg := httpx.ParseWindow(r.URL.Query(), time.Now().UTC())
 	if errMsg != "" {
-		badRequest(w, errMsg)
+		httpx.BadRequest(w, errMsg)
 		return
 	}
 
@@ -361,7 +371,7 @@ func (h *usageHandler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
 		}
 		return e
 	}); err != nil {
-		internalError(w, "usage", err)
+		httpx.InternalError(w, "usage", err)
 		return
 	}
 
@@ -378,7 +388,7 @@ func (h *usageHandler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
 	if local {
 		resp.ByRule = spendByRule(rows, ruleNames)
 	}
-	writeJSON(w, http.StatusOK, resp)
+	httpx.WriteJSON(w, http.StatusOK, resp)
 }
 
 // teamCapUpdate is the PUT /api/teams/{team_id}/usage/cap body. A pointer so an
@@ -402,7 +412,7 @@ type teamCapUpdate struct {
 // update in place.
 //
 // PUT /api/teams/{team_id}/usage/cap
-func (h *usageHandler) handleUsageTeamCap(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleUsageTeamCap(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := h.resolveCaller(w, r)
 	if !ok {
 		return
@@ -444,7 +454,7 @@ func (h *usageHandler) handleUsageTeamCap(w http.ResponseWriter, r *http.Request
 		capUSD = *req.MaxDailyCostUSD
 	}
 	if capUSD < 0 {
-		badRequest(w, "max_daily_cost_usd must be >= 0 (or null to clear the cap)")
+		httpx.BadRequest(w, "max_daily_cost_usd must be >= 0 (or null to clear the cap)")
 		return
 	}
 
@@ -466,11 +476,11 @@ func (h *usageHandler) handleUsageTeamCap(w http.ResponseWriter, r *http.Request
 		}
 		return nil
 	}); err != nil {
-		internalError(w, "usage", err)
+		httpx.InternalError(w, "usage", err)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"max_daily_cost_usd": stored})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"max_daily_cost_usd": stored})
 }
 
 // usageTeamCapEntry is one team in the team-caps list: its id, name, and
@@ -492,7 +502,7 @@ type usageTeamCapEntry struct {
 // /api/orgs/{org_id}/usage by_team (0 if idle).
 //
 // POST /api/orgs/{org_id}/usage/team-caps/list
-func (h *usageHandler) handleUsageTeamCaps(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleUsageTeamCaps(w http.ResponseWriter, r *http.Request) {
 	// Org admin (403) then the EE gate (404 unlicensed) — mirrors the PUT.
 	orgID, userID, ok := h.resolveGovernedOrgAdmin(w, r)
 	if !ok {
@@ -520,7 +530,7 @@ func (h *usageHandler) handleUsageTeamCaps(w http.ResponseWriter, r *http.Reques
 		caps, total, e = tx.Teams.ListActiveCapsForOrgSystem(r.Context(), orgID, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
 	}); err != nil {
-		internalError(w, "usage", err)
+		httpx.InternalError(w, "usage", err)
 		return
 	}
 
@@ -537,19 +547,19 @@ func (h *usageHandler) handleUsageTeamCaps(w http.ResponseWriter, r *http.Reques
 // from the claims — the shared prefix for the viewer-relative read and for the
 // team-scoped ones, which name their team in the path but still resolve it
 // within the caller's org. The active org is one the user belongs to (set at
-// login / active-org switch), so requireOrg is the org-member floor for /me.
+// login / active-org switch), so httpx.RequireOrg is the org-member floor for /me.
 //
 // The org-scoped reads do NOT use it: they name their org in the path and
 // authorize against that value — see resolveGovernedOrgAdmin and the direct
 // az.RequireOrgAdmin calls.
-func (h *usageHandler) resolveCaller(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
-	orgID, ok = requireOrg(w, r)
+func (h *Handler) resolveCaller(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
+	orgID, ok = httpx.RequireOrg(w, r)
 	if !ok {
 		return "", "", false
 	}
-	claims := ClaimsFrom(r.Context())
+	claims := httpx.ClaimsFrom(r.Context())
 	if claims == nil {
-		writeUnauth(w)
+		httpx.WriteUnauth(w)
 		return "", "", false
 	}
 	return orgID, claims.Subject, true
@@ -569,7 +579,7 @@ func (h *usageHandler) resolveCaller(w http.ResponseWriter, r *http.Request) (or
 //
 // An org admin on an unlicensed deployment still gets the 404 that hides the
 // feature, which is what the frontend's own entitlement gate renders.
-func (h *usageHandler) resolveGovernedOrgAdmin(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
+func (h *Handler) resolveGovernedOrgAdmin(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
 	orgID, userID, ok = h.az.RequireOrgAdmin(w, r)
 	if !ok {
 		return "", "", false
@@ -882,7 +892,8 @@ func resolveSpendTeamNames(ctx context.Context, tx db.TxStores, orgID string, ro
 	return names, nil
 }
 
-func (s *Server) registerUsageRoutes() {
+// Register mounts the usage routes.
+func (h *Handler) Register(m httpx.Mounts) {
 	// Usage (spend layer) — the core Usage page's read API, each route under
 	// the scope it reports on: usage is a fact about a caller, a team, or an
 	// org, the same way a roster is. /api/me/usage is viewer-relative and
@@ -893,34 +904,33 @@ func (s *Server) registerUsageRoutes() {
 	// held to team admin), /orgs/{id} is org-admin. The team/org reads use the
 	// admin-pool ListSpendSystem (the route's gate is the authorization for
 	// crossing RLS).
-	uh := &usageHandler{tx: s.tx, az: s.az, conversationQueue: s.allStores.ConversationQueue}
-	s.api("GET /api/me/usage", uh.handleUsageMe)
-	s.api("GET /api/teams/{team_id}/usage", uh.handleUsageTeam)
-	s.api("GET /api/orgs/{org_id}/usage", uh.handleUsageOrg)
+	m.API("GET /api/me/usage", h.handleUsageMe)
+	m.API("GET /api/teams/{team_id}/usage", h.handleUsageTeam)
+	m.API("GET /api/orgs/{org_id}/usage", h.handleUsageOrg)
 	// Org-scoped operations subset: an org admin's own queue waits + run
 	// durations + failure rates. Org-admin gated, SaaS-safe (no cross-tenant
 	// machine truth) — the org-facing complement to the operator-only fleet
 	// console.
-	s.api("GET /api/orgs/{org_id}/usage/ops", uh.handleUsageOrgOps)
+	m.API("GET /api/orgs/{org_id}/usage/ops", h.handleUsageOrgOps)
 	// Activity feed (EE, FeatureGovernance): the team/org Actions
 	// (external-action audit log) + Objects (artifacts across runs) lenses — same
 	// scope gates as the spend reads above, plus the entitlement (unlicensed →
 	// 404). Two resources, two routes each: the row shapes and the filter
 	// vocabularies differ, so one address cannot honestly serve both.
-	s.apiMutating("POST /api/teams/{team_id}/usage/artifacts/list", uh.handleUsageTeamArtifacts)
-	s.apiMutating("POST /api/teams/{team_id}/usage/actions/list", uh.handleUsageTeamActions)
-	s.apiMutating("POST /api/orgs/{org_id}/usage/artifacts/list", uh.handleUsageOrgArtifacts)
-	s.apiMutating("POST /api/orgs/{org_id}/usage/actions/list", uh.handleUsageOrgActions)
+	m.APIMutating("POST /api/teams/{team_id}/usage/artifacts/list", h.handleUsageTeamArtifacts)
+	m.APIMutating("POST /api/teams/{team_id}/usage/actions/list", h.handleUsageTeamActions)
+	m.APIMutating("POST /api/orgs/{org_id}/usage/artifacts/list", h.handleUsageOrgArtifacts)
+	m.APIMutating("POST /api/orgs/{org_id}/usage/actions/list", h.handleUsageOrgActions)
 	// Per-team daily spend cap — org-admin-set, EE/governance-gated (the
 	// handlers 404 when unlicensed). The GET lists every active team + its cap
 	// for the editor (so an idle team can be pre-capped); the PUT writes one
 	// cap and is mutating, so it runs through the CSRF + session wrap. Both
 	// write/read the admin pool: an org admin may cap a team they don't belong
 	// to.
-	s.apiMutating("POST /api/orgs/{org_id}/usage/team-caps/list", uh.handleUsageTeamCaps)
-	s.apiMutating("PUT /api/teams/{team_id}/usage/cap", uh.handleUsageTeamCap)
+	m.APIMutating("POST /api/orgs/{org_id}/usage/team-caps/list", h.handleUsageTeamCaps)
+	m.APIMutating("PUT /api/teams/{team_id}/usage/cap", h.handleUsageTeamCap)
 	// EE governance audit surface: the access & credential change-log viewer.
 	// Org-admin-gated AND FeatureGovernance-gated (404 unlicensed) inside the
 	// handler — the data is core, only the cross-team lens is Enterprise.
-	s.apiMutating("POST /api/orgs/{org_id}/usage/access-log/list", uh.handleUsageAccessLog)
+	m.APIMutating("POST /api/orgs/{org_id}/usage/access-log/list", h.handleUsageAccessLog)
 }

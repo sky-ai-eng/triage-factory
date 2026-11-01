@@ -1,4 +1,4 @@
-package server
+package usage
 
 import (
 	"net/http"
@@ -321,7 +321,7 @@ func TestAccessChangeLabel(t *testing.T) {
 // and an unknown field are each a 400, never a filter matching nothing or a
 // clamp.
 func TestAccessLogList_StrictBody(t *testing.T) {
-	s := newLicensedAccessLogServer(t)
+	s := newLicensedAccessLogRig(t)
 	for _, tc := range []struct {
 		name string
 		body map[string]any
@@ -342,32 +342,32 @@ func TestAccessLogList_StrictBody(t *testing.T) {
 }
 
 // postAccessLog calls the access-log list and decodes the shared envelope.
-func postAccessLog(t *testing.T, s *Server, body map[string]any) httpxtest.ListEnvelope[accessChangeJSON] {
+func postAccessLog(t *testing.T, s *localRig, body map[string]any) httpxtest.ListEnvelope[accessChangeJSON] {
 	t.Helper()
 	return httpxtest.DecodeList[accessChangeJSON](t, doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/usage/access-log/list", body))
 }
 
-// newLicensedAccessLogServer is a local-mode server with the governance
+// newLicensedAccessLogRig is a local-mode rig with the governance
 // entitlement granted, so the route is reachable.
-func newLicensedAccessLogServer(t *testing.T) *Server {
+func newLicensedAccessLogRig(t *testing.T) *localRig {
 	t.Helper()
 	runmode.SetForTest(t, runmode.ModeLocal)
 	entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureGovernance))
 	t.Cleanup(entitlements.Reset)
-	return newUsageTestServer(t)
+	return newLocalRig(t)
 }
 
 // --- local-mode end-to-end (SQLite, no Docker) ---
 
-// TestUsageAccessLog_Local drives the access log through the real router in
-// local mode with governance licensed: newest-first order, rendered names and
-// labels, each category filter, and paging.
+// TestUsageAccessLog_Local drives the access log through the route Register
+// mounts in local mode with governance licensed: newest-first order, rendered
+// names and labels, each category filter, and paging.
 func TestUsageAccessLog_Local(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureGovernance))
 	t.Cleanup(entitlements.Reset)
 
-	s := newUsageTestServer(t)
+	s := newLocalRig(t)
 	seedAccessLogLocal(t, s)
 
 	t.Run("all_categories_newest_first_with_names_and_labels", func(t *testing.T) {
@@ -493,7 +493,7 @@ func TestUsageAccessLog_Unlicensed404(t *testing.T) {
 	entitlements.Reset() // community checker: governance not licensed
 	t.Cleanup(entitlements.Reset)
 
-	s := newUsageTestServer(t)
+	s := newLocalRig(t)
 	seedAccessLogLocal(t, s)
 
 	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/usage/access-log/list", map[string]any{})
@@ -511,7 +511,7 @@ func TestUsageAccessLog_MalformedDetailDoesNotBreakResponse(t *testing.T) {
 	entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureGovernance))
 	t.Cleanup(entitlements.Reset)
 
-	s := newUsageTestServer(t)
+	s := newLocalRig(t)
 	if _, err := s.db.Exec(`
 		INSERT INTO access_change_log (id, org_id, actor_user_id, action, target_user_id, detail_json, created_at)
 		VALUES ('bad-1', ?, ?, ?, 'u-x', 'not-json', '2026-06-20 10:00:00')`,
@@ -542,7 +542,7 @@ func TestUsageAccessLog_MalformedDetailDoesNotBreakResponse(t *testing.T) {
 // newest-first read order is deterministic: a credential bind, an org role change,
 // a team add, and an org revoke. The actor is the seeded local user ("You"); the
 // team rows reference the local default team (named "Default").
-func seedAccessLogLocal(t *testing.T, s *Server) {
+func seedAccessLogLocal(t *testing.T, s *localRig) {
 	t.Helper()
 	org := runmode.LocalDefaultOrgID
 	actor := runmode.LocalDefaultUserID
@@ -581,14 +581,14 @@ func ptrInt(n int) *int              { return &n }
 
 // TestUsageAccessLog_PolicyCategory_Local covers the policy bucket end to end:
 // the SSO rows ee/sso writes are core-renderable and reachable through the
-// category filter. Its own server + seed rather than an extra row in
+// category filter. Its own rig + seed rather than an extra row in
 // seedAccessLogLocal, whose subtests assert on exact row counts.
 func TestUsageAccessLog_PolicyCategory_Local(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureGovernance))
 	t.Cleanup(entitlements.Reset)
 
-	s := newUsageTestServer(t)
+	s := newLocalRig(t)
 	org := runmode.LocalDefaultOrgID
 	actor := runmode.LocalDefaultUserID
 	if _, err := s.db.Exec(`INSERT INTO users (id, display_name) VALUES ('u-alice', 'Alice')`); err != nil {

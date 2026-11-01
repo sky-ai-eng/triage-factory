@@ -1,4 +1,4 @@
-package server
+package usage
 
 import (
 	"math"
@@ -39,7 +39,7 @@ type opsFailureKind struct {
 // handleUsageOrgOps serves GET /api/orgs/{org_id}/usage/ops — org-admin gated
 // against the org in the path. Reuses the usage window parsing and the
 // ConversationQueue's org-scoped timing reads.
-func (h *usageHandler) handleUsageOrgOps(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleUsageOrgOps(w http.ResponseWriter, r *http.Request) {
 	orgID, _, ok := h.az.RequireOrgAdmin(w, r)
 	if !ok {
 		return
@@ -47,7 +47,7 @@ func (h *usageHandler) handleUsageOrgOps(w http.ResponseWriter, r *http.Request)
 	if h.conversationQueue == nil {
 		// This pod holds no conversation-queue reader — deployment shape, not
 		// an outage.
-		writeNotConfigured(w, "the conversation queue reader is not configured on this deployment")
+		httpx.WriteNotConfigured(w, "the conversation queue reader is not configured on this deployment")
 		return
 	}
 	since, until, errMsg := httpx.ParseWindow(r.URL.Query(), time.Now().UTC())
@@ -60,12 +60,12 @@ func (h *usageHandler) handleUsageOrgOps(w http.ResponseWriter, r *http.Request)
 
 	timings, err := h.conversationQueue.RecentConversationTimingsForOrgSystem(r.Context(), orgID, since, until, 0)
 	if err != nil {
-		internalError(w, "usage-ops-timings", err)
+		httpx.InternalError(w, "usage-ops-timings", err)
 		return
 	}
 	queued, err := h.conversationQueue.QueuedConversationAgesForOrgSystem(r.Context(), orgID)
 	if err != nil {
-		internalError(w, "usage-ops-queue", err)
+		httpx.InternalError(w, "usage-ops-queue", err)
 		return
 	}
 
@@ -110,7 +110,7 @@ func (h *usageHandler) handleUsageOrgOps(w http.ResponseWriter, r *http.Request)
 	resp.DurationP95MS = usagePercentileMS(durations, 95)
 	resp.FailureKinds = sortedOpsFailureKinds(failureCounts)
 
-	writeJSON(w, http.StatusOK, resp)
+	httpx.WriteJSON(w, http.StatusOK, resp)
 }
 
 // usagePercentileMS is the nearest-rank (ceil) percentile — the same convention

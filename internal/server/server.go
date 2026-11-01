@@ -37,6 +37,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/models"
+	"github.com/sky-ai-eng/triage-factory/internal/server/usage"
 	"github.com/sky-ai-eng/triage-factory/internal/wsevent/knowledgeevent"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -888,7 +889,6 @@ func (s *Server) routes() {
 	s.registerTeamKnowledgeRoutes()
 	s.registerTeamMemberRoutes()
 	s.registerOrgMemberRoutes()
-	s.registerUsageRoutes()
 	s.registerAvatarRoutes()
 	s.registerInviteRoutes()
 	s.registerTaskRoutes()
@@ -923,6 +923,7 @@ func (s *Server) routes() {
 	// same two mounts, handed over as httpx.Mounts.
 	m := s.mounts()
 	models.New(s.az, s.tx, func() models.Prober { return s.modelProber }).Register(m)
+	usage.New(s.tx, s.az, s.allStores.ConversationQueue).Register(m)
 
 	// SSO (connection / domains / break-glass admin surface, the verify-
 	// before-enforce test-start, and the identifier-first discovery probe) is

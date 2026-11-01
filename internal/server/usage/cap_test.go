@@ -1,4 +1,4 @@
-package server
+package usage
 
 import (
 	"net/http"
@@ -18,7 +18,7 @@ import (
 // withCSRF/withSession would normally seed. The handler is invoked directly (not
 // via the mux) so the test exercises the governance + role gates and the
 // admin-pool write without the cookie-session dance. Reuses the usageRig from
-// usage_handler_gates_test.go (same package, same four actors + seeded spend).
+// gates_test.go (same package, same four actors + seeded spend).
 func (r *usageRig) putCapReq(caller, teamID, body string) *http.Request {
 	req := httptest.NewRequest(http.MethodPut, "/api/teams/"+teamID+"/usage/cap", strings.NewReader(body))
 	req.SetPathValue("team_id", teamID)

@@ -1,4 +1,4 @@
-package server
+package usage
 
 import (
 	"context"
@@ -61,7 +61,17 @@ type objectActivityJSON struct {
 	ActionCount       int                      `json:"action_count"`
 	ConversationCount int                      `json:"run_count"`
 	LastAt            time.Time                `json:"last_at"`
-	Deliverable       *artifactDeliverableJSON `json:"deliverable"`
+	Deliverable       *ArtifactDeliverableJSON `json:"deliverable"`
+}
+
+// ArtifactDeliverableJSON names the deliverable an artifact matched: enough
+// to address it and read where it stands, with the deliverable's own read
+// for the rest. The artifacts feeds here and a conversation's artifacts list
+// both carry it.
+type ArtifactDeliverableJSON struct {
+	ID    string `json:"id"`
+	Kind  string `json:"kind"`
+	State string `json:"state"`
 }
 
 // orgObjectActivityJSON is the org feed's item: the teams whose runs changed
@@ -92,7 +102,7 @@ func toObjectActivityJSON(a domain.ObjectActivity, deliverables []domain.Deliver
 		LastAt:            a.LastAt,
 	}
 	if d, ok := domain.ArtifactDeliverable(a.Artifact, deliverables); ok {
-		out.Deliverable = &artifactDeliverableJSON{ID: d.ID, Kind: d.Kind, State: d.State}
+		out.Deliverable = &ArtifactDeliverableJSON{ID: d.ID, Kind: d.Kind, State: d.State}
 	}
 	return out
 }
@@ -156,7 +166,7 @@ func artifactKeys(items []domain.ObjectActivity) (entityIDs, reviewIDs []string,
 // The team feed carries no teams (it is one team).
 //
 // POST /api/teams/{team_id}/usage/artifacts/list
-func (h *usageHandler) handleUsageTeamArtifacts(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleUsageTeamArtifacts(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, teamID, ok := h.resolveTeamActivityCaller(w, r)
 	if !ok {
 		return
@@ -191,7 +201,7 @@ func (h *usageHandler) handleUsageTeamArtifacts(w http.ResponseWriter, r *http.R
 		deliverables, e = tx.Deliverables.ListArtifactMatchesByTeamSystem(r.Context(), orgID, teamID, entityIDs, reviewIDs)
 		return e
 	}); err != nil {
-		internalError(w, "usage", err)
+		httpx.InternalError(w, "usage", err)
 		return
 	}
 
@@ -209,7 +219,7 @@ func (h *usageHandler) handleUsageTeamArtifacts(w http.ResponseWriter, r *http.R
 // Teams.GetSystem.
 //
 // POST /api/orgs/{org_id}/usage/artifacts/list
-func (h *usageHandler) handleUsageOrgArtifacts(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleUsageOrgArtifacts(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := h.resolveGovernedOrgAdmin(w, r)
 	if !ok {
 		return
@@ -252,7 +262,7 @@ func (h *usageHandler) handleUsageOrgArtifacts(w http.ResponseWriter, r *http.Re
 		deliverables, e = tx.Deliverables.ListArtifactMatchesByOrgSystem(r.Context(), orgID, entityIDs, reviewIDs)
 		return e
 	}); err != nil {
-		internalError(w, "usage", err)
+		httpx.InternalError(w, "usage", err)
 		return
 	}
 
@@ -302,7 +312,7 @@ func resolveActivityWindow(v *httpx.Validation, since, until string) (time.Time,
 // Role before licence, for the reason resolveGovernedOrgAdmin gives: a caller
 // who fails the role check gets the same 403 licensed or not, so no non-admin
 // can read the org's plan tier off a status code.
-func (h *usageHandler) resolveTeamActivityCaller(w http.ResponseWriter, r *http.Request) (orgID, userID, teamID string, ok bool) {
+func (h *Handler) resolveTeamActivityCaller(w http.ResponseWriter, r *http.Request) (orgID, userID, teamID string, ok bool) {
 	orgID, userID, ok = h.resolveCaller(w, r)
 	if !ok {
 		return "", "", "", false
@@ -342,7 +352,7 @@ func (h *usageHandler) resolveTeamActivityCaller(w http.ResponseWriter, r *http.
 // tell a licensed deployment from an unlicensed one by the status they get.
 func requireGovernance(w http.ResponseWriter, r *http.Request, orgID string) bool {
 	if !entitlements.For(orgID).Has(entitlements.FeatureGovernance) {
-		notFound(w, "route")
+		httpx.NotFound(w, "route")
 		return false
 	}
 	return true
@@ -356,13 +366,13 @@ func requireGovernance(w http.ResponseWriter, r *http.Request, orgID string) boo
 // confirmed teamID is in the caller's org, so a non-admin here is a clean 403,
 // never a cross-org probe. The raw probes don't short-circuit local, hence the
 // guard.
-func (h *usageHandler) requireTeamOrOrgAdmin(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string) bool {
+func (h *Handler) requireTeamOrOrgAdmin(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string) bool {
 	if runmode.Current() == runmode.ModeLocal {
 		return true
 	}
 	isTeamAdmin, err := h.az.UserIsTeamAdmin(r.Context(), userID, orgID, teamID)
 	if err != nil {
-		internalError(w, "usage", err)
+		httpx.InternalError(w, "usage", err)
 		return false
 	}
 	if isTeamAdmin {
@@ -370,23 +380,26 @@ func (h *usageHandler) requireTeamOrOrgAdmin(w http.ResponseWriter, r *http.Requ
 	}
 	isOrgAdmin, err := h.az.UserIsOrgAdmin(r.Context(), userID, orgID)
 	if err != nil {
-		internalError(w, "usage", err)
+		httpx.InternalError(w, "usage", err)
 		return false
 	}
 	if isOrgAdmin {
 		return true
 	}
-	forbidden(w, "team admin or org admin role required")
+	httpx.Forbidden(w, "team admin or org admin role required")
 	return false
 }
 
 // --- The actions feed (the external-action audit log) ---
 
-// actionJSON is the action-log feed's wire shape — one external_actions row
+// ActionJSON is the action-log feed's wire shape — one external_actions row
 // projected for the FE. The team_id/team_name/actor_name fields populate ONLY the
 // org-wide feed (so an org-admin row shows which team's bot acted and who
-// authorized it) and are omitted (omitempty) on the team-scoped feed.
-type actionJSON struct {
+// authorized it) and are omitted (omitempty) on the team-scoped feed. A
+// conversation's actions list (POST
+// /api/agent/conversations/{conversationID}/actions/list) serves the same shape
+// and sets none of the three.
+type ActionJSON struct {
 	ID             string `json:"id"`
 	Provider       string `json:"provider"`
 	Scope          string `json:"scope"`
@@ -414,16 +427,16 @@ type actionJSON struct {
 	ActorName string `json:"actor_name,omitempty"`
 }
 
-// toActionJSON projects a stored action onto the wire shape, emitting detail_json
+// ToActionJSON projects a stored action onto the wire shape, emitting detail_json
 // as embedded JSON (omitted when absent/corrupt — the row's who/what/when/from→to
 // stand on their own).
-func toActionJSON(a domain.ExternalAction) actionJSON {
+func ToActionJSON(a domain.ExternalAction) ActionJSON {
 	var details json.RawMessage
 	if a.DetailJSON != "" && json.Valid([]byte(a.DetailJSON)) {
 		details = json.RawMessage(a.DetailJSON)
 	}
 	objectID, _ := domain.ObjectID(a)
-	return actionJSON{
+	return ActionJSON{
 		ID:             a.ID,
 		Provider:       a.Provider,
 		Scope:          a.Scope,
@@ -486,7 +499,7 @@ func resolveActionActivityFilters(v *httpx.Validation, req actionActivityListReq
 // distinct-actor set is cheap.
 //
 // POST /api/teams/{team_id}/usage/actions/list
-func (h *usageHandler) handleUsageTeamActions(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleUsageTeamActions(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, teamID, ok := h.resolveTeamActivityCaller(w, r)
 	if !ok {
 		return
@@ -518,12 +531,12 @@ func (h *usageHandler) handleUsageTeamActions(w http.ResponseWriter, r *http.Req
 		actorNames, e = resolveActionActorNames(r.Context(), tx, actions)
 		return e
 	}); err != nil {
-		internalError(w, "usage", err)
+		httpx.InternalError(w, "usage", err)
 		return
 	}
-	out := make([]actionJSON, len(actions))
+	out := make([]ActionJSON, len(actions))
 	for i, a := range actions {
-		j := toActionJSON(a)
+		j := ToActionJSON(a)
 		j.ActorName = actorNames[a.ActorUserID]
 		out[i] = j
 	}
@@ -538,7 +551,7 @@ func (h *usageHandler) handleUsageTeamActions(w http.ResponseWriter, r *http.Req
 // "team X's bot did Y, authorized by Z".
 //
 // POST /api/orgs/{org_id}/usage/actions/list
-func (h *usageHandler) handleUsageOrgActions(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleUsageOrgActions(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := h.resolveGovernedOrgAdmin(w, r)
 	if !ok {
 		return
@@ -575,12 +588,12 @@ func (h *usageHandler) handleUsageOrgActions(w http.ResponseWriter, r *http.Requ
 		actorNames, e = resolveActionActorNames(r.Context(), tx, actions)
 		return e
 	}); err != nil {
-		internalError(w, "usage", err)
+		httpx.InternalError(w, "usage", err)
 		return
 	}
-	out := make([]actionJSON, len(actions))
+	out := make([]ActionJSON, len(actions))
 	for i, a := range actions {
-		j := toActionJSON(a)
+		j := ToActionJSON(a)
 		j.TeamID = a.TeamID
 		j.TeamName = teamNames[a.TeamID]
 		j.ActorName = actorNames[a.ActorUserID]

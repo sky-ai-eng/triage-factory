@@ -1,4 +1,4 @@
-package server
+package usage
 
 import (
 	"net/http"
@@ -565,7 +565,7 @@ func TestUsageActionsActivityHandler_Postgres(t *testing.T) {
 		license()
 		rec := httptest.NewRecorder()
 		r.uh.handleUsageTeamActions(rec, r.activityReq(r.teamAdmin, r.teamA, ""))
-		out := httpxtest.DecodeList[actionJSON](t, rec)
+		out := httpxtest.DecodeList[ActionJSON](t, rec)
 		if len(out.Items) != 2 || out.Total() != 2 {
 			t.Fatalf("teamA actions = %d rows / total %d, want 2/2 (created + marked-ready)", len(out.Items), out.Total())
 		}
@@ -597,7 +597,7 @@ func TestUsageActionsActivityHandler_Postgres(t *testing.T) {
 		license()
 		rec := httptest.NewRecorder()
 		r.uh.handleUsageOrgActions(rec, r.activityReq(r.orgAdmin, "", ""))
-		out := httpxtest.DecodeList[actionJSON](t, rec)
+		out := httpxtest.DecodeList[ActionJSON](t, rec)
 		if len(out.Items) != 3 || out.Total() != 3 {
 			t.Fatalf("org actions = %d rows / total %d, want 3/3 (cross-team)", len(out.Items), out.Total())
 		}
@@ -661,7 +661,7 @@ func TestUsageActionsActivityHandler_Postgres(t *testing.T) {
 		license()
 		rec := httptest.NewRecorder()
 		r.uh.handleUsageOrgActions(rec, r.activityReq(r.orgAdmin, "", `{"action":"pr_created"}`))
-		out := httpxtest.DecodeList[actionJSON](t, rec)
+		out := httpxtest.DecodeList[ActionJSON](t, rec)
 		if len(out.Items) != 1 || out.Items[0].Action != "pr_created" {
 			t.Errorf("action=pr_created returned %d rows (%+v), want exactly the one", len(out.Items), out.Items)
 		}

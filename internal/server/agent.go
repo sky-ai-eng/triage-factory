@@ -18,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/usage"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -460,9 +461,9 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	out := make([]actionJSON, len(actions))
+	out := make([]usage.ActionJSON, len(actions))
 	for i, a := range actions {
-		out[i] = toActionJSON(a)
+		out[i] = usage.ToActionJSON(a)
 	}
 	httpx.WriteList(w, page, out, total)
 }
@@ -473,27 +474,18 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 // conversation's deliverable that is the same object
 // (domain.ArtifactDeliverable), or null.
 type artifactJSON struct {
-	ObjectID    domain.ObjectRef         `json:"object_id"`
-	ObjectKind  string                   `json:"object_kind"`
-	Provider    string                   `json:"provider"`
-	Scope       string                   `json:"scope"`
-	Target      string                   `json:"target"`
-	URL         string                   `json:"url"`
-	EntityID    string                   `json:"entity_id,omitempty"`
-	LastAction  string                   `json:"last_action"`
-	ActionCount int                      `json:"action_count"`
-	FirstAt     time.Time                `json:"first_at"`
-	LastAt      time.Time                `json:"last_at"`
-	Deliverable *artifactDeliverableJSON `json:"deliverable"`
-}
-
-// artifactDeliverableJSON names the deliverable an artifact matched: enough
-// to address it and read where it stands, with the deliverable's own read
-// for the rest.
-type artifactDeliverableJSON struct {
-	ID    string `json:"id"`
-	Kind  string `json:"kind"`
-	State string `json:"state"`
+	ObjectID    domain.ObjectRef               `json:"object_id"`
+	ObjectKind  string                         `json:"object_kind"`
+	Provider    string                         `json:"provider"`
+	Scope       string                         `json:"scope"`
+	Target      string                         `json:"target"`
+	URL         string                         `json:"url"`
+	EntityID    string                         `json:"entity_id,omitempty"`
+	LastAction  string                         `json:"last_action"`
+	ActionCount int                            `json:"action_count"`
+	FirstAt     time.Time                      `json:"first_at"`
+	LastAt      time.Time                      `json:"last_at"`
+	Deliverable *usage.ArtifactDeliverableJSON `json:"deliverable"`
 }
 
 func toArtifactJSON(a domain.Artifact, deliverables []domain.Deliverable) artifactJSON {
@@ -511,7 +503,7 @@ func toArtifactJSON(a domain.Artifact, deliverables []domain.Deliverable) artifa
 		LastAt:      a.LastAt,
 	}
 	if d, ok := domain.ArtifactDeliverable(a, deliverables); ok {
-		out.Deliverable = &artifactDeliverableJSON{ID: d.ID, Kind: d.Kind, State: d.State}
+		out.Deliverable = &usage.ArtifactDeliverableJSON{ID: d.ID, Kind: d.Kind, State: d.State}
 	}
 	return out
 }

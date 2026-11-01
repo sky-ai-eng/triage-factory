@@ -1,17 +1,23 @@
-package server
+package usage
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // --- pure: aggregation shapes ---
@@ -203,12 +209,13 @@ func TestSpendOrgLevel_NullTeamRowsByCategory(t *testing.T) {
 
 // --- local-mode end-to-end (SQLite, no Docker) ---
 
-// TestUsageEndpoints_Local drives the three endpoints through the real router in
-// local mode, where the gates admit the single implicit admin, to exercise the
-// read, aggregation and JSON path; the role-gate 403s are in the Postgres rig.
+// TestUsageEndpoints_Local drives the three endpoints through the routes
+// Register mounts in local mode, where the gates admit the single implicit
+// admin, to exercise the read, aggregation and JSON path; the role-gate 403s
+// are in the Postgres rig.
 func TestUsageEndpoints_Local(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
-	s := newUsageTestServer(t)
+	s := newLocalRig(t)
 	_, blueprintName := seedUsageLocal(t, s)
 
 	t.Run("me_own_spend_only", func(t *testing.T) {
@@ -316,9 +323,9 @@ func TestUsageEndpoints_Local(t *testing.T) {
 
 // --- local e2e helpers ---
 
-// doUsage performs a GET against the server's mux and decodes a 200 JSON body
+// doUsage performs a GET against the rig's mux and decodes a 200 JSON body
 // into out.
-func doUsage(t *testing.T, s *Server, path string, out any) {
+func doUsage(t *testing.T, s *localRig, path string, out any) {
 	t.Helper()
 	rec := doJSON(t, s, "GET", path, nil)
 	if rec.Code != http.StatusOK {
@@ -357,12 +364,21 @@ func floatEq(a, b float64) bool {
 	return d < 1e-9 && d > -1e-9
 }
 
-// newUsageTestServer mirrors newTestServer but opens SQLite with the production
-// _time_format=sqlite DSN (the same db.OpenAt uses), so a time.Time window bind
-// wrapped in datetime() round-trips against stored datetimes. The bare
-// newTestServer DSN serializes a bound time.Time to an unparseable form, which
-// would silently drop every spend row from the windowed reads.
-func newUsageTestServer(t *testing.T) *Server {
+// localRig is the usage handler over a local-mode SQLite store, mounted on a
+// mux of its own through Register, so a request reaches its handler by the
+// same pattern and path values it would on the server. Every mount seeds the
+// identity the session middleware seeds in local mode.
+type localRig struct {
+	db  *sql.DB
+	mux *http.ServeMux
+}
+
+// newLocalRig opens SQLite with db.TestDSNMemory, which carries the production
+// _time_format=sqlite parameter, so a time.Time window bind wrapped in
+// datetime() round-trips against stored datetimes. Without it the driver
+// serializes a bound time.Time to a form datetime() cannot parse, which would
+// silently drop every spend row from the windowed reads.
+func newLocalRig(t *testing.T) *localRig {
 	t.Helper()
 	database, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
@@ -374,20 +390,44 @@ func newUsageTestServer(t *testing.T) *Server {
 	if err := db.BootstrapSchemaForTest(database); err != nil {
 		t.Fatalf("bootstrap schema: %v", err)
 	}
-	if _, err := database.Exec(
-		`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`,
-		runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID,
-	); err != nil {
-		t.Fatalf("seed local agent: %v", err)
+	stores := sqlitestore.New(database)
+	mux := http.NewServeMux()
+	mount := func(pattern string, h http.HandlerFunc) {
+		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+			ctx := httpx.WithClaims(r.Context(), &verify.Claims{Subject: runmode.LocalDefaultUserID})
+			ctx = httpx.WithOrgID(ctx, runmode.LocalDefaultOrgID)
+			h(w, r.WithContext(ctx))
+		})
 	}
-	return New(database, sqlitestore.New(database))
+	New(stores.Tx, authz.New(database, stores.Tx), stores.ConversationQueue).
+		Register(httpx.Mounts{API: mount, APIMutating: mount})
+	return &localRig{db: database, mux: mux}
+}
+
+// doJSON sends method + path to the rig's mux with body JSON-encoded (none
+// when nil) and returns the recorded response.
+func doJSON(t *testing.T, s *localRig, method, path string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	var reqBody io.Reader = http.NoBody
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal body: %v", err)
+		}
+		reqBody = bytes.NewReader(b)
+	}
+	req := httptest.NewRequest(method, path, reqBody)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.mux.ServeHTTP(rec, req)
+	return rec
 }
 
 // seedUsageLocal seeds a cross-source spend fixture on the local sentinel
 // org/team/user: a manual run + an autonomous run (fired by a seeded trigger
 // whose blueprint is named) + a system job. Returns the trigger id and its
 // blueprint name.
-func seedUsageLocal(t *testing.T, s *Server) (triggerID, blueprintName string) {
+func seedUsageLocal(t *testing.T, s *localRig) (triggerID, blueprintName string) {
 	t.Helper()
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID

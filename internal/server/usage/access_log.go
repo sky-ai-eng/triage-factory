@@ -1,4 +1,4 @@
-package server
+package usage
 
 import (
 	"context"
@@ -24,7 +24,7 @@ import (
 // The data + store are core (access_change_log lives in the baseline schema); the
 // VIEWER is Enterprise — a cross-team, org-wide lens gated by FeatureGovernance.
 // Only the gate is EE, so the endpoint lives next to the spend rollup in the core
-// usageHandler rather than in the ee/ subtree.
+// usage Handler rather than in the ee/ subtree.
 
 // accessChangeJSON is one rendered audit row. ActionLabel is the server-rendered
 // human predicate the FE shows after the actor + timestamp ("changed Alice from
@@ -75,7 +75,7 @@ type accessLogFilterKey struct {
 // rows the filter matches, not merely that another page exists.
 //
 // POST /api/orgs/{org_id}/usage/access-log/list
-func (h *usageHandler) handleUsageAccessLog(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleUsageAccessLog(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := h.az.RequireOrgAdmin(w, r)
 	if !ok {
 		return
@@ -121,7 +121,7 @@ func (h *usageHandler) handleUsageAccessLog(w http.ResponseWriter, r *http.Reque
 		teams, e = resolveAccessTeamNames(r.Context(), tx, orgID, rows)
 		return e
 	}); err != nil {
-		internalError(w, "usage-access-log", err)
+		httpx.InternalError(w, "usage-access-log", err)
 		return
 	}
 
