@@ -1,4 +1,6 @@
-package server
+// Package factory serves the factory view's snapshot: station throughput,
+// active runs, and the active entities on the belt.
+package factory
 
 import (
 	"encoding/json"
@@ -7,13 +9,26 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 )
 
-// factoryHandler serves the factory snapshot endpoint, holding the
+var factoryLog = logging.Component("factory")
+
+// Handler serves the factory snapshot endpoint, holding the
 // transactional store runner it reads through.
-type factoryHandler struct {
+type Handler struct {
 	tx db.TxRunner
+	// taskJSON projects a task onto the wire shape the task routes serve,
+	// so a run on the belt carries the same task object they do.
+	taskJSON func(domain.Task) any
+}
+
+// New builds the factory handler. taskJSON is the task routes' wire
+// projection; each active run in the snapshot embeds its task through it.
+func New(tx db.TxRunner, taskJSON func(domain.Task) any) *Handler {
+	return &Handler{tx: tx, taskJSON: taskJSON}
 }
 
 // factoryEntityLimit caps how many active entities we ship per snapshot.
@@ -51,7 +66,7 @@ type factoryStationJSON struct {
 
 type factoryRunJSON struct {
 	Run  factoryRunSummaryJSON `json:"run"`
-	Task taskJSON              `json:"task"`
+	Task any                   `json:"task"`
 	Mine bool                  `json:"mine"`
 }
 
@@ -207,12 +222,12 @@ type factorySnapshotJSON struct {
 // active entities into a single payload for the /factory view. All data
 // derived from existing persistence — no new event stream, no state
 // projection — so repeated calls are cheap and idempotent.
-func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (fh *Handler) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
+	userID := httpx.ClaimsFrom(r.Context()).Subject
 	since := time.Now().UTC().Add(-24 * time.Hour)
 	// Optional per-page team filter. Empty = the union of the
 	// viewer's teams; a team id narrows the entity belt to that team.
@@ -306,7 +321,7 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 		openRunsByEntity, e = tx.Conversations.EntitiesWithOpenConversations(r.Context(), orgID, entityIDs)
 		return e
 	}); err != nil {
-		internalError(w, "factory", err)
+		httpx.InternalError(w, "factory", err)
 		return
 	}
 
@@ -342,7 +357,7 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 		st.ActiveRuns++
 		st.Runs = append(st.Runs, factoryRunJSON{
 			Run:  toFactoryRunSummary(ar.Conversation),
-			Task: taskToJSON(ar.Task),
+			Task: fh.taskJSON(ar.Task),
 			Mine: me.Is(runAuthors[ar.Task.EntityID].Login, runAuthors[ar.Task.EntityID].ID),
 		})
 		stations[ar.Task.EventType] = st
@@ -442,7 +457,7 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 		entities = append(entities, ej)
 	}
 
-	writeJSON(w, http.StatusOK, factorySnapshotJSON{
+	httpx.WriteJSON(w, http.StatusOK, factorySnapshotJSON{
 		Stations: stations,
 		Entities: entities,
 	})
@@ -466,7 +481,7 @@ func extractEntityAuthor(e *domain.Entity) domain.GitHubAccount {
 	return domain.GitHubAccount{Login: snap.Author, ID: snap.AuthorID}
 }
 
-func (s *Server) registerFactoryRoutes() {
-	fh := &factoryHandler{tx: s.tx}
-	s.api("GET /api/factory/snapshot", fh.handleFactorySnapshot)
+// Register mounts the factory snapshot route.
+func (fh *Handler) Register(m httpx.Mounts) {
+	m.API("GET /api/factory/snapshot", fh.handleFactorySnapshot)
 }

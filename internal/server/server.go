@@ -38,6 +38,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/avatars"
 	"github.com/sky-ai-eng/triage-factory/internal/server/blueprints"
 	"github.com/sky-ai-eng/triage-factory/internal/server/deliverables"
+	"github.com/sky-ai-eng/triage-factory/internal/server/factory"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/marketplace"
 	"github.com/sky-ai-eng/triage-factory/internal/server/models"
@@ -916,7 +917,6 @@ func (s *Server) routes() {
 	s.registerJiraRoutes()
 	s.registerLinearRoutes()
 	s.registerStockRoutes()
-	s.registerFactoryRoutes()
 	s.registerEventHandlerRoutes()
 	s.registerGitHubRoutes()
 	s.registerSourceRoutes()
@@ -942,6 +942,7 @@ func (s *Server) routes() {
 	work.New(s.az, s.allStores.WorkKinds).Register(m)
 	marketplace.New(s.tx, s.az).Register(m)
 	avatars.New(s.tx).Register(m)
+	factory.New(s.tx, func(t domain.Task) any { return taskToJSON(t) }).Register(m)
 
 	// SSO (connection / domains / break-glass admin surface, the verify-
 	// before-enforce test-start, and the identifier-first discovery probe) is

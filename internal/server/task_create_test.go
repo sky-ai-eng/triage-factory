@@ -238,6 +238,10 @@ func TestFactorySnapshot_PendingTasksRoundtrip(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("snapshot status = %d", rec.Code)
 	}
+	type pendingTaskRef struct {
+		TaskID   string `json:"task_id"`
+		DedupKey string `json:"dedup_key"`
+	}
 	type snapshotShape struct {
 		Entities []struct {
 			ID           string                      `json:"id"`

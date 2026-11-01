@@ -13,7 +13,6 @@ var (
 	dashboardLog       = logging.Component("dashboard")
 	delegateSpawnLog   = logging.Component("delegate-spawn")
 	eventHandlersLog   = logging.Component("event_handlers")
-	factoryLog         = logging.Component("factory")
 	githubAccessLog    = logging.Component("github-access")
 	githubAppLog       = logging.Component("github-app")
 	githubConnectLog   = logging.Component("github-connect")
