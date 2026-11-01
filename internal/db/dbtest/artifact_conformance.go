@@ -359,9 +359,9 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 			t.Fatalf("read %d artifacts, want 2: %+v", len(got), got)
 		}
 		c, i := got[0], got[1]
-		if c.Target != "octo/api#7" || c.URL != posted.URL || c.LastAction != domain.ActionReactionAdded {
-			t.Errorf("comment = (%q, %q, %q), want the pull request's key, the post's url and the reaction",
-				c.Target, c.URL, c.LastAction)
+		if c.Target != "octo/api#7" || c.EntityID != s.pr.ID || c.URL != posted.URL || c.LastAction != domain.ActionReactionAdded {
+			t.Errorf("comment = (%q, %q, %q, %q), want the pull request's key and id, the post's url and the reaction",
+				c.Target, c.EntityID, c.URL, c.LastAction)
 		}
 		if i.Target != "ENG-2" || i.URL != "https://linear.app/t/issue/ENG-2" {
 			t.Errorf("issue display = (%q, %q), want the renamed key and url", i.Target, i.URL)

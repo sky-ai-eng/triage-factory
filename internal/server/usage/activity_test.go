@@ -118,6 +118,7 @@ func TestResolveActionActivityFilters(t *testing.T) {
 		"unknown_provider": {Provider: "gitlab"},
 		"unknown_action":   {Action: "pr_openedd"},
 		"bad_actor":        {Actor: "not-a-uuid"},
+		"uppercase_actor":  {Actor: "6BA7B810-9DAD-11D1-80B4-00C04FD430C8"},
 		"bad_since":        {Since: "yesterday"},
 		"inverted_window":  {Since: "2026-06-30", Until: "2026-06-01"},
 	} {

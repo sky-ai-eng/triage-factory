@@ -35,6 +35,9 @@ func ArtifactPerformers() []string {
 //     group carries (current_url when a rename has moved the object), since a
 //     reaction's row carries none.
 //
+// EntityID is that same entity, the one Target names, so a comment whose
+// latest row is a reaction still carries the pull request it is on.
+//
 // "Latest row" is the row with the greatest occurred_at. SQLite, whose
 // occurred_at is whole seconds, breaks a tie in write order.
 type Artifact struct {

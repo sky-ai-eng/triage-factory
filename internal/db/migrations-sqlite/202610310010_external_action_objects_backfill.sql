@@ -1,10 +1,9 @@
 -- +goose Up
 -- Ledger rows recorded before object_kind and object_key existed name no
--- object, so their runs show no artifact for what they changed. A pull
--- request's rows and a review's carry the object's identity in their own
--- columns, so those name it here, and the pull request and review
--- deliverables that outlived the narrowing match their artifacts again. Every
--- other kind's identity lived in a deliverable's key, and those rows stay as
+-- object, so their runs show no artifact for what they changed, and their
+-- pull request and review deliverables match none. A pull request's rows and
+-- a review's carry the object's identity in their own columns, so those name
+-- it here. No other kind's row carries its identity, and those rows stay as
 -- they are.
 
 -- A pull request is identified by its entity.

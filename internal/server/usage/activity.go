@@ -482,9 +482,12 @@ func resolveActionActivityFilters(v *httpx.Validation, req actionActivityListReq
 	if opts.Action != "" && !slices.Contains(domain.ExternalActionTypes(), opts.Action) {
 		v.Invalid("action", "not a known action type")
 	}
+	// The id is bound as sent and stored ids are canonical, so any other
+	// spelling uuid.Parse accepts (uppercase, braces, a urn: prefix) would
+	// match nothing.
 	if opts.ActorUserID != "" {
-		if _, err := uuid.Parse(opts.ActorUserID); err != nil {
-			v.Invalid("actor", "must be a user id")
+		if parsed, err := uuid.Parse(opts.ActorUserID); err != nil || parsed.String() != opts.ActorUserID {
+			v.Invalid("actor", "must be a user id in canonical form")
 		}
 	}
 	opts.Since, opts.Until = resolveActivityWindow(v, req.Since, req.Until)

@@ -58,7 +58,7 @@ func sqliteArtifactCTEs(where string) string {
 // comes out of a window aggregate with no declared type, so both timestamps
 // are scanned as text and parsed.
 const sqliteArtifactColumns = `g.object_id, g.object_kind, g.provider, g.scope,
-	       COALESCE(g.entity_id, ''), COALESCE(g.repository_id, ''), COALESCE(g.object_key, ''),
+	       COALESCE(g.display_entity_id, ''), COALESCE(g.repository_id, ''), COALESCE(g.object_key, ''),
 	       COALESCE(e.source_id, g.target),
 	       CASE WHEN g.object_kind IN ('pull_request', 'issue') THEN COALESCE(NULLIF(e.url, ''), g.display_url)
 	            ELSE g.display_url END,

@@ -628,11 +628,10 @@ func (r *directRuntime) DeleteConversationWorktree(ctx context.Context, reposito
 // is idempotent — but on the caller's own context, since the caller is
 // waiting for the result.
 //
-// Once the write lands, the conversation records the entity as produced: a
-// staged review is the run's output before any action is recorded for it,
-// and the approval that posts it writes its ledger row outside the funnel,
-// which records no memory link. Like the funnel's, the link is best-effort
-// and recorded outside the write's transaction (recordEntityTouch).
+// Once the write lands, the conversation records the deliverable's entity as
+// produced (recordMemoryLink): a staged review is the run's output before any
+// ledger row names it, so this write is where the run records it. The link
+// is best-effort and recorded outside the write's transaction.
 func (r *directRuntime) UpsertDeliverable(ctx context.Context, a domain.Deliverable, github domain.GitHubIdentity) (domain.Deliverable, error) {
 	a.OrgID = r.info.OrgID
 	a.TeamID = r.info.TeamID

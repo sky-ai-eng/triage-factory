@@ -58,12 +58,13 @@ func pgArtifactCTEs(where string) string {
 	)`
 }
 
-// pgArtifactColumns is what scanPgArtifacts reads, off the latest row g.
-// The entity's key wins over the row's target, and for a pull request or an
-// issue, which the entity is, its url wins over the rows'; the row's values
-// stand in when the entity is not readable or has no url yet.
+// pgArtifactColumns is what scanPgArtifacts reads, off the latest row g,
+// except the entity id, which is the entity the display values are read
+// from. The entity's key wins over the row's target, and for a pull request
+// or an issue, which the entity is, its url wins over the rows'; the row's
+// values stand in when the entity is not readable or has no url yet.
 const pgArtifactColumns = `g.object_id, g.object_kind, g.provider, g.scope,
-	       COALESCE(g.entity_id::text, ''), COALESCE(g.repository_id::text, ''), COALESCE(g.object_key, ''),
+	       COALESCE(g.display_entity_id::text, ''), COALESCE(g.repository_id::text, ''), COALESCE(g.object_key, ''),
 	       COALESCE(e.source_id, g.target),
 	       CASE WHEN g.object_kind IN ('pull_request', 'issue') THEN COALESCE(NULLIF(e.url, ''), g.display_url)
 	            ELSE g.display_url END,
