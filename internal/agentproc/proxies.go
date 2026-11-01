@@ -1049,10 +1049,10 @@ const gitProxyBasicUser = "x-run"
 // names the CA: gh finds it through the process-global SSL_CERT_FILE, but git
 // resolves TLS trust from its own config.
 //
-// Two more pairs name <base> and the upstream base for TF's prepare-commit-msg
-// hook (githooks.ProxyBaseKey, githooks.UpstreamBaseKey): git builds a merge
-// title from the URL it fetched from, which is the rewritten one, and the hook
-// puts the upstream back.
+// Two more pairs record <base> and the upstream base (githooks.ProxyBaseKey,
+// githooks.UpstreamBaseKey), because git writes the rewritten URL into the
+// merge messages it builds and the prepare-commit-msg hook needs both to undo
+// it.
 //
 // The caller folds these into the single GIT_CONFIG_* block (with
 // core.hooksPath) via encodeGitConfigEnv. Delivered via env-config

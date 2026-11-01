@@ -1150,10 +1150,13 @@ func TestGitProxyPairs_MergeTitleNamesUpstream(t *testing.T) {
 	git(filepath.Join(dir, "upstream"), "commit", "-q", "--allow-empty", "-m", "second")
 	git(filepath.Join(dir, "upstream"), "push", "-q", "origin", "main")
 	git(work, "fetch", "-q", "origin", "main")
-	git(work, "merge", "-q", "--no-edit", "FETCH_HEAD")
+	git(work, "-c", "merge.log=true", "merge", "-q", "--no-edit", "FETCH_HEAD")
 
 	if got, want := git(work, "log", "-1", "--format=%s"), "Merge branch 'main' of https://github.com/octo/repo into feature-x"; got != want {
 		t.Errorf("merge title = %q, want %q", got, want)
+	}
+	if msg := git(work, "log", "-1", "--format=%B"); strings.Contains(msg, proxyBase) {
+		t.Errorf("merge message names the proxy base in its merge.log summary:\n%s", msg)
 	}
 
 	// Only git's closing " into <branch>" is renamed: an authored title that
@@ -1165,6 +1168,22 @@ func TestGitProxyPairs_MergeTitleNamesUpstream(t *testing.T) {
 	git(work, "merge", "-q", "-m", authored, "FETCH_HEAD")
 	if got := git(work, "log", "-1", "--format=%s"); got != authored {
 		t.Errorf("authored merge title = %q, want it unchanged", got)
+	}
+
+	// A cherry-pick finished with `git commit` reaches the hook as "merge" too,
+	// and is not one: it keeps the picked commit's title.
+	picked := "Fold fixes into triagefactory/conv-1/pr-7"
+	if err := os.WriteFile(filepath.Join(dir, "upstream", "fix.txt"), []byte("fix"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(filepath.Join(dir, "upstream"), "add", "fix.txt")
+	git(filepath.Join(dir, "upstream"), "commit", "-q", "-m", picked)
+	git(filepath.Join(dir, "upstream"), "push", "-q", "origin", "main")
+	git(work, "fetch", "-q", "origin", "main")
+	git(work, "cherry-pick", "-n", "FETCH_HEAD")
+	git(work, "commit", "-q", "--no-edit")
+	if got := git(work, "log", "-1", "--format=%s"); got != picked {
+		t.Errorf("cherry-picked title = %q, want %q", got, picked)
 	}
 }
 

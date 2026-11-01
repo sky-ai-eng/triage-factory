@@ -3,22 +3,25 @@
 #
 # Two jobs, both best-effort and non-blocking by contract: the hook always exits
 # 0, so it never aborts a commit. git invokes it with the path to the
-# commit-message file as $1 and the message's source as $2 ("merge" for any
-# merge commit, including `git pull`'s).
+# commit-message file as $1 and the message's source as $2.
 #
-#  1. Merge titles. Git names a merged remote by the URL it fetched from, and
+#  1. Merge messages. Git names a merged remote by the URL it fetched from, and
 #     a run's managed remote resolves to the per-run git proxy through the
 #     insteadOf rewrite TF puts in its git config. That rewrite's config block
 #     also carries triagefactory.proxyBase and triagefactory.upstreamBase, and
-#     the hook puts the upstream base back in the title. Git also ends the
-#     title with " into <branch>" for the local branch HEAD is on, and a PR
-#     checkout's local branch is a name nobody outside the run knows: TF
+#     the hook puts the upstream base back on every line, so the `merge.log`
+#     summary (`git pull --log`) is covered along with the title. Git also
+#     ends the title with " into <branch>" for the local branch HEAD is on, and
+#     a PR checkout's local branch is a name nobody outside the run knows: TF
 #     pushes it to the pull request's head branch through an explicit push
 #     refspec. When a push refspec sends the branch to a branch of another
 #     name, the hook names that branch instead. A branch pushed under its own
-#     name has no such mapping and keeps its title, and a title that only
-#     mentions the branch somewhere else (a `git merge -m` message, say)
-#     keeps every word. A commit that is not a merge is left alone.
+#     name has no such mapping and keeps its title. git passes the same $2 for
+#     `git merge -m`, so an authored title ending in " into <local branch>" is
+#     renamed too; the branch named anywhere else in it is left as written.
+#     git also passes "merge" when a cherry-pick or revert it stopped is
+#     finished with `git commit`, so the hook acts only while MERGE_HEAD says a
+#     merge is being committed.
 #
 #  2. Co-authored-by trailer. Credits the delegating human on MANUAL
 #     delegated-agent runs, so a commit authored by the org's GitHub identity
@@ -37,39 +40,53 @@
 
 f="$1"
 
-if [ "$2" = merge ]; then
-	title=$(sed -n 1p "$f" 2>/dev/null)
-	new=$title
+if [ "$2" = merge ] && git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
 	base=$(git config --get triagefactory.proxyBase)
 	upstream=$(git config --get triagefactory.upstreamBase)
-	if [ -n "$base" ] && [ -n "$upstream" ]; then
-		rest=$new
-		new=
-		while :; do
-			case $rest in
-			*"$base"*)
-				new=$new${rest%%"$base"*}$upstream
-				rest=${rest#*"$base"}
-				;;
-			*) break ;;
-			esac
-		done
-		new=$new$rest
-	fi
+	[ -n "$upstream" ] || base=
 	branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null)
+	dest=
 	if [ -n "$branch" ]; then
 		dest=$(git for-each-ref --format='%(push:remoteref)' "refs/heads/$branch" 2>/dev/null)
-		dest=${dest#refs/heads/}
-		case $new in
-		*" into $branch")
-			if [ -n "$dest" ] && [ "$dest" != "$branch" ]; then
-				new="${new%" into $branch"} into $dest"
-			fi
-			;;
+		case $dest in
+		refs/heads/*) dest=${dest#refs/heads/} ;;
+		*) dest= ;;
 		esac
+		[ "$dest" != "$branch" ] || dest=
 	fi
-	if [ "$new" != "$title" ]; then
-		{ printf '%s\n' "$new"; sed 1d "$f"; } >"$f.tf" && mv "$f.tf" "$f" || rm -f "$f.tf"
+	if [ -n "$base" ] || [ -n "$dest" ]; then
+		changed=
+		n=0
+		while IFS= read -r line || [ -n "$line" ]; do
+			n=$((n + 1))
+			new=$line
+			if [ -n "$base" ]; then
+				rest=$new
+				new=
+				while :; do
+					case $rest in
+					*"$base"*)
+						new=$new${rest%%"$base"*}$upstream
+						rest=${rest#*"$base"}
+						;;
+					*) break ;;
+					esac
+				done
+				new=$new$rest
+			fi
+			if [ "$n" = 1 ] && [ -n "$dest" ]; then
+				case $new in
+				*" into $branch") new="${new%" into $branch"} into $dest" ;;
+				esac
+			fi
+			[ "$new" = "$line" ] || changed=1
+			printf '%s\n' "$new"
+		done <"$f" >"$f.tf"
+		if [ -n "$changed" ]; then
+			mv "$f.tf" "$f" || rm -f "$f.tf"
+		else
+			rm -f "$f.tf"
+		fi
 	fi
 fi
 
