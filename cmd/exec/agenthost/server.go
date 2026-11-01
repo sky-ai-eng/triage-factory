@@ -16,7 +16,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	linearclient "github.com/sky-ai-eng/triage-factory/internal/linear"
 )
@@ -629,25 +628,14 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		}
 		return createWorkspaceCheckoutResult{Path: path}, nil
 
-	case methodUpsertDeliverable:
-		var a upsertDeliverableArgs
+	case methodRecordBranchPush:
+		var a recordBranchPushArgs
 		if err := dec(&a); err != nil {
 			return nil, err
 		}
-		// The sandbox records the branches its pre-push hook sees and nothing
-		// else: every other deliverable is composed host-side from what the
-		// provider answered. A deliverable is linked to the entity its key and
-		// target name, and that resolution follows the target onto the entity,
-		// so a row the sandbox composed could link to, and rename, any entity
-		// in the org.
-		if a.Deliverable.Provider != domain.ProviderGit || a.Deliverable.Kind != domain.DeliverableKindBranch {
-			return nil, fmt.Errorf("the sandbox records branch deliverables only, not %s %s", a.Deliverable.Provider, a.Deliverable.Kind)
-		}
-		stored, err := client.UpsertDeliverable(ctx, a.Deliverable)
-		if err != nil {
-			return nil, err
-		}
-		return upsertDeliverableResult{Deliverable: stored}, nil
+		// The jail names the push and nothing else: the identity GitHub
+		// answers for the repository is read here, never taken from the jail.
+		return nil, client.RecordBranchPush(ctx, a.Repo, a.Ref, a.SHA, a.Created)
 
 	// --- jira: build ForSystem host-side, make the REST call, return the
 	// result / error. The per-request LocalClient reads the credential

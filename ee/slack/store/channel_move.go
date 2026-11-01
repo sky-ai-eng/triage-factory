@@ -19,10 +19,8 @@ type ChannelMove struct {
 	// Superseded are the ids of the entities closed because an older entity
 	// for the same thread stayed active; see MoveSystem.
 	Superseded []string
-	// Deliverables and Actions count the deliverables and external action pointers
-	// rewritten.
-	Deliverables int
-	Actions      int
+	// Actions counts the external action pointers rewritten.
+	Actions int
 	// Trackers is how many team tracking rows, and Handlers how many
 	// slack:message handler filters, named the absorbed row.
 	Trackers int
@@ -31,44 +29,6 @@ type ChannelMove struct {
 	// whose stored filter could not be decoded. They are left as stored, still
 	// naming it.
 	SkippedHandlers []string
-}
-
-// MoveThreadKey moves a key of the form "<channel>/<rest>" from oldID to
-// newID: a deliverable's target, a thread key (domain.SlackSourceID) spelling
-// the channel's Slack id, or a Slack deliverable's dedup resource, which names
-// the channel's registry row instead. Reports false, with key unchanged, for
-// a key under any other channel.
-func MoveThreadKey(key, oldID, newID string) (string, bool) {
-	if oldID == "" || newID == "" || oldID == newID || !strings.HasPrefix(key, oldID+"/") {
-		return key, false
-	}
-	return newID + key[len(oldID):], true
-}
-
-// MoveDeliverableKey moves a Slack deliverable's dedup key
-// ("slack:<kind>:<channel row>/<ts>[:anchor]", see domain.ObjectKey)
-// whose resource names the registry row oldID to name newID: the absorb of one
-// registry row into another is the one change that moves it. Reports false
-// for a key of another provider or another row.
-func MoveDeliverableKey(key, oldID, newID string) (string, bool) {
-	provider, rest, ok := strings.Cut(key, ":")
-	if !ok || provider != "slack" {
-		return key, false
-	}
-	kind, rest, ok := strings.Cut(rest, ":")
-	if !ok {
-		return key, false
-	}
-	resource, anchor, hasAnchor := strings.Cut(rest, ":")
-	moved, ok := MoveThreadKey(resource, oldID, newID)
-	if !ok {
-		return key, false
-	}
-	out := provider + ":" + kind + ":" + moved
-	if hasAnchor {
-		out += ":" + anchor
-	}
-	return out, true
 }
 
 // MovePermalink moves a Slack permalink into oldID's archive

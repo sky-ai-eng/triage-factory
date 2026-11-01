@@ -380,7 +380,7 @@ func TestServer_ConcurrentSockets_NoCrossContamination(t *testing.T) {
 }
 
 // TestLocalClient_RoutingByTriggerType_Manual pins the per-write
-// routing: a manual conversation's UpsertDeliverable wraps in synthetic-claims
+// routing: a manual conversation's deliverable upsert wraps in synthetic-claims
 // (so RLS sees the kicking-off user), an event-triggered conversation's
 // goes through the admin-pool ...System variant. We can't observe
 // the pool directly in SQLite (one connection) but we can confirm
@@ -402,15 +402,15 @@ func TestLocalClient_RoutingByTriggerType_Manual(t *testing.T) {
 	}
 	client := NewLocal(stores, info)
 
-	// UpsertDeliverable routes through the same withWrite branch the retired
-	// pending-PR writer used: a synthetic-claims tx for a manual conversation.
-	if _, err := client.UpsertDeliverable(context.Background(), domain.Deliverable{
+	// The deliverable upsert routes through the withWrite branch: a
+	// synthetic-claims tx for a manual conversation.
+	if _, err := client.upsertDeliverable(context.Background(), domain.Deliverable{
 		Provider: domain.ProviderGitHub,
 		Kind:     domain.DeliverableKindPullRequest,
 		Target:   "octocat/hello#1",
 		State:    domain.DeliverableStatePRDraft,
 		DedupKey: "github:pull_request:octocat/hello#1",
-	}); err != nil {
+	}, domain.GitHubIdentity{}); err != nil {
 		t.Fatalf("UpsertDeliverable (manual): %v", err)
 	}
 	got := listConversationDeliverables(t, stores, "conv-1")
@@ -433,16 +433,16 @@ func TestLocalClient_RoutingByTriggerType_Event(t *testing.T) {
 	}
 	client := NewLocal(stores, info)
 
-	// Event-triggered conversations have no user, so UpsertDeliverable must route
+	// Event-triggered conversations have no user, so the upsert must route
 	// through the admin-pool ...System variant (the case Postgres RLS would reject under
 	// tf_app). SQLite collapses both, but the same shape runs against Postgres.
-	if _, err := client.UpsertDeliverable(context.Background(), domain.Deliverable{
+	if _, err := client.upsertDeliverable(context.Background(), domain.Deliverable{
 		Provider: domain.ProviderGitHub,
 		Kind:     domain.DeliverableKindPullRequest,
 		Target:   "octocat/hello#2",
 		State:    domain.DeliverableStatePRDraft,
 		DedupKey: "github:pull_request:octocat/hello#2",
-	}); err != nil {
+	}, domain.GitHubIdentity{}); err != nil {
 		t.Fatalf("UpsertDeliverable (event): %v", err)
 	}
 	got := listConversationDeliverables(t, stores, "conv-2")

@@ -53,8 +53,9 @@ func TestMigrate_ProviderScopesMatchGo(t *testing.T) {
 		{name: "jira with no authority", jiraBase: ptr("https:///jira")},
 		{name: "jira with another scheme", jiraBase: ptr("ftp://jira.example.com")},
 	}
+	// "git" was a branch deliverable's provider when this migration ran.
 	providers := []string{
-		domain.ProviderGitHub, domain.ProviderGit, domain.ProviderJira,
+		domain.ProviderGitHub, "git", domain.ProviderJira,
 		domain.ProviderLinear, domain.ProviderSlack, domain.ProviderNetwork,
 	}
 	for _, tc := range cases {
@@ -114,6 +115,10 @@ func TestMigrate_ProviderScopesMatchGo(t *testing.T) {
 			}
 			for _, p := range providers {
 				scope := domain.ExternalObjectScope(p, settings)
+				if p == "git" {
+					// A branch was pushed to a GitHub repository.
+					scope = domain.EntityScope(domain.ProviderGitHub, settings)
+				}
 				want[`SELECT scope FROM artifacts WHERE id = 'a-`+p+`'`] = scope
 				want[`SELECT scope FROM external_actions WHERE id = 'x-`+p+`'`] = scope
 			}
@@ -1164,7 +1169,7 @@ func TestMigrate_ProviderScopesKeyDeliverablesOnIDs(t *testing.T) {
 	for id, want := range map[string]string{
 		"pr-3":   domain.PullRequestDedupKey("PR_3"),
 		"rv-3":   domain.ReviewDedupKey("PR_3", "conv-a"),
-		"br-api": domain.BranchDedupKey("repo-api", "refs/heads/octo/api-fix"),
+		"br-api": "git:branch:repo-api:refs/heads/octo/api-fix",
 	} {
 		if got := queryString(t, database, `SELECT dedup_key FROM artifacts WHERE id = ?`, id); got != want {
 			t.Errorf("%s dedup_key = %q, want the Go key %q", id, got, want)

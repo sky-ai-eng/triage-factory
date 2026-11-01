@@ -36,11 +36,13 @@ func TestRecorders_NameTheObjectALandedChangeChanged(t *testing.T) {
 					}
 				}))
 				t.Cleanup(gh.Close)
-				stores, _, client := newGithubRecordingClient(t, gh.URL, false)
+				stores, info, client := newGithubRecordingClient(t, gh.URL, false)
 				repoID := registerRepo(t, stores, "octo", "repo", testRepoID("octo/repo"))
-				branch, _ := domain.NewBranchDeliverable("octo/repo", "refs/heads/feat", "abc123", true)
-				if _, err := client.UpsertDeliverable(ctx, branch); err != nil {
-					t.Fatalf("UpsertDeliverable: %v", err)
+				if err := client.RecordBranchPush(ctx, "octo/repo", "refs/heads/feat", "abc123", true); err != nil {
+					t.Fatalf("RecordBranchPush: %v", err)
+				}
+				if got := listConversationDeliverables(t, stores, info.ConversationID); len(got) != 0 {
+					t.Fatalf("the push wrote deliverables %+v", got)
 				}
 				return stores, "branch|" + repoID + "|refs/heads/feat"
 			},
@@ -89,20 +91,19 @@ func TestRecorders_NameTheObjectALandedChangeChanged(t *testing.T) {
 			},
 		},
 		{
-			// The transition's row recorded alone: its issue's entity comes
-			// from the row's own object key.
-			name:   "Jira transition with no deliverable",
+			// The transition's row: its issue's entity comes from the row's
+			// own object key.
+			name:   "Jira transition",
 			action: domain.ActionIssueTransitioned,
 			record: func(t *testing.T) (db.Stores, string) {
 				stores, info := newCaptureStores(t, true)
 				site := testScope("jira")
 				key := domain.IssueObjectKey(domain.ProviderJira, site, "10042")
-				act := jiraAction(domain.Deliverable{
-					Kind:       domain.DeliverableKindIssue,
-					Target:     "SKY-42",
-					ExternalID: "10042",
-					DedupKey:   key,
-				}, domain.ActionIssueTransitioned, "", "Done")
+				act := &domain.ExternalAction{
+					Provider: domain.ProviderJira, Action: domain.ActionIssueTransitioned,
+					Target: "SKY-42", ExternalID: "10042", ToState: "Done", Credential: domain.CredentialJiraOrg,
+				}
+				act.SetObject(domain.ObjectKindIssue, key)
 				recordExternalWrite(ctx, stores, info, nil, act,
 					jiraContainer(jiraclient.Project{ID: "10000", Key: "SKY", Name: "Sky"}), domain.GitHubIdentity{})
 
@@ -130,7 +131,7 @@ func TestRecorders_NameTheObjectALandedChangeChanged(t *testing.T) {
 				if _, err := lc.LinearAddComment(ctx, "ENG-7", "on it"); err != nil {
 					t.Fatalf("LinearAddComment: %v", err)
 				}
-				key := domain.ObjectKey(domain.ProviderLinear, domain.DeliverableKindComment, fakeLinearIssueUUID, fakeLinearCommentID)
+				key := domain.ObjectKey(domain.ProviderLinear, domain.ObjectKindComment, fakeLinearIssueUUID, fakeLinearCommentID)
 				return stores, "comment|linear-workspace-uuid|" + key
 			},
 		},

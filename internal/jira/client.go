@@ -365,10 +365,42 @@ type Client struct {
 // caller-supplied-client constructor and no second place a *Client comes
 // from — so instrumenting this one transport covers the whole surface.
 func NewClient(cfg Config) *Client {
-	return &Client{
-		cfg:  cfg,
-		http: telemetry.TracedHTTPClient(15*time.Second, "jira"),
+	h := telemetry.TracedHTTPClient(15*time.Second, "jira")
+	h.CheckRedirect = refuseWriteToRead
+	return &Client{cfg: cfg, http: h}
+}
+
+// classifyResponse is upstream.ClassifyResponse, except that a redirect is
+// Rejected rather than OK: the client follows every redirect but the ones
+// refuseWriteToRead hands back, so a 3xx that reaches here is a write a
+// gateway turned away.
+func classifyResponse(status int, header http.Header, body []byte) upstream.Class {
+	if status >= 300 && status < 400 {
+		return upstream.Rejected
 	}
+	return upstream.ClassifyResponse(status, header, body)
+}
+
+// maxRedirects is net/http's own limit, kept for the redirects
+// refuseWriteToRead follows.
+const maxRedirects = 10
+
+// refuseWriteToRead stops a redirect that would turn a write into a read.
+// net/http answers a 301, 302 or 303 to a POST, PUT or DELETE by sending a GET
+// to the new location, so a gateway that redirects a write (an SSO proxy
+// sending it to a login page) comes back as a 2xx from a page that never saw
+// the write. A write path that does not need the response body then reports a
+// change that did not happen. Refusing hands back the redirect itself, which
+// every write path treats as a failed status. A read, and a 307 or 308 (which
+// resend the write's method and body to the new location), are followed.
+func refuseWriteToRead(req *http.Request, via []*http.Request) error {
+	if req.Method != via[0].Method {
+		return http.ErrUseLastResponse
+	}
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("stopped after %d redirects", maxRedirects)
+	}
+	return nil
 }
 
 // WithOrg sets the org c makes its calls for, so its requests are counted
@@ -1739,7 +1771,7 @@ func (c *Client) doRequest(ctx context.Context, method string, ep endpoint, body
 			continue
 		}
 
-		class := upstream.ClassifyResponse(resp.StatusCode, resp.Header, data)
+		class := classifyResponse(resp.StatusCode, resp.Header, data)
 		upstream.Record(ctx, upstream.Jira, c.orgID, class)
 		// A wait longer than maxRateLimitWait is not honored inline: the
 		// response goes back to the caller, which turns it into its normal
@@ -1816,7 +1848,7 @@ func newStatusError(method, url string, status int, body []byte) *StatusError {
 		URL:    url,
 		Status: status,
 		Body:   string(body),
-		Class:  upstream.ClassifyResponse(status, nil, body),
+		Class:  classifyResponse(status, nil, body),
 	}
 }
 

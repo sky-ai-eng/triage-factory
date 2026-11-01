@@ -70,14 +70,7 @@ func TestRelocation_RelayRuntimeOverRealConn(t *testing.T) {
 	}
 
 	// A write op (upsert_deliverable) relays over the wire and lands in the store.
-	stored, err := rt.UpsertDeliverable(ctx, domain.Deliverable{
-		Provider:   domain.ProviderGitHub,
-		Kind:       domain.DeliverableKindComment,
-		Target:     "octo/repo#5",
-		ExternalID: "5",
-		State:      domain.DeliverableStateCommentPosted,
-		DedupKey:   domain.ObjectKey(domain.ProviderGitHub, domain.DeliverableKindComment, "5", ""),
-	}, domain.GitHubIdentity{})
+	stored, err := rt.UpsertDeliverable(ctx, domain.NewReviewDeliverable("octo/repo", 5, "PR_5", "head-sha", info.ConversationID), domain.GitHubIdentity{})
 	if err != nil {
 		t.Fatalf("UpsertDeliverable over wire: %v", err)
 	}

@@ -297,18 +297,17 @@ type Client interface {
 	// invoking this (materializeWorkspace's ordering).
 	CreateWorkspaceCheckout(ctx context.Context, owner, repo, ref string, prNumber int) (string, error)
 
-	// --- deliverables (capture writers: pre-push hook, ...) ---
+	// --- branch pushes (the pre-push hook) ---
 	//
-	// UpsertDeliverable records one durable run deliverable (a pushed branch, or a
-	// review draft the host composes) at the host-side choke point. The
-	// caller supplies the polymorphic fields (Provider/Kind/Target/State/
-	// DedupKey/...); the client stamps conversation_id/org_id/team_id off the conversation
-	// identity, so the agent never has to know them. Routed admin-pool for
-	// event-triggered runs and synthetic-claims for manual runs, exactly
-	// like the pending-PR writer. Returns the stored row; best-effort
-	// callers (the pre-push hook) ignore it. Over the sandbox's socket it
-	// records a branch and refuses every other kind (Server). See TFAC-460.
-	UpsertDeliverable(ctx context.Context, a domain.Deliverable) (domain.Deliverable, error)
+	// RecordBranchPush records the branch_pushed ledger row for one pushed
+	// ref at the host-side choke point: repo is the "owner/repo" pushed to,
+	// ref the remote ref, sha the commit it now points to, and created whether
+	// the push created it. The host reads what GitHub calls the repository
+	// and builds the row from that and the run's identity, so the hook never
+	// has to know either. A ref that is not a branch records nothing. The
+	// recording is best-effort; the error reports only a request that could
+	// not be delivered.
+	RecordBranchPush(ctx context.Context, repo, ref, sha string, created bool) error
 
 	// --- jira (exec jira ticket ...) ---
 	//

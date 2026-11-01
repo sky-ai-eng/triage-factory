@@ -8,13 +8,13 @@ import { awaitsDecision, metaForKind, overlayKindFor, rowTone } from './delivera
 // conversation-scoped fetch, and the state badge the activity feed's object
 // rows carry for a matched deliverable. DeliverableList owns the fetch.
 
-// A single deliverable row. A still-ACTIONABLE pull_request / review row (a draft
-// PR / pending review awaiting an approve-or-dismiss decision) WITH a wired
-// onOpenApproval handler renders as a button that opens the approval overlay
-// (the external link stays reachable as a trailing affordance). Every other row
-// — resolved PRs/reviews, other kinds, and any row with no handler wired — is
-// the link itself: a submitted review links to the posted review's GitHub
-// anchor, not back into the stale TF-side draft editor.
+// A single deliverable row. A still-ACTIONABLE row (a draft PR / pending review
+// awaiting an approve-or-dismiss decision) WITH a wired onOpenApproval handler
+// renders as a button that opens the approval overlay (the external link stays
+// reachable as a trailing affordance). Every other row — a resolved PR or
+// review, and any row with no handler wired — is the link itself: a submitted
+// review links to the posted review's GitHub anchor, not back into the stale
+// TF-side draft editor.
 export function DeliverableRow({
   deliverable,
   onOpenApproval,
@@ -85,7 +85,7 @@ export function DeliverableRow({
     )
   }
 
-  // Link-out rows (branch / issue / comment, or any row with no overlay
+  // Link-out rows (a resolved PR or review, or any row with no overlay
   // handler). The whole row is the anchor; no external object means a plain,
   // non-interactive row.
   if (deliverable.url) {
@@ -177,29 +177,25 @@ export function StateBadge({ state }: { state: string }) {
 }
 
 // stateTone maps a deliverable state to the card tone vocabulary. Landed-good
-// outcomes read green — merged / submitted / posted / created, plus 'open' (an
-// agent-filed PR/issue now live on GitHub/Jira, a done-and-waiting success).
-// In-flight / awaiting-you states (draft / pending) read amber; retired states
-// (closed / deleted / dismissed) read as the dismiss tone; the rest stay
-// neutral. The distinct values are unambiguous across kinds, so the tone keys
-// off state alone — the kind icon already carries the type.
+// outcomes read green — merged / submitted, plus 'open' (an agent-filed PR now
+// live on GitHub, a done-and-waiting success). In-flight / awaiting-you states
+// (draft / pending) read amber; retired states (closed / dismissed) read as
+// the dismiss tone; any unknown state stays neutral. The distinct values are
+// unambiguous across kinds, so the tone keys off state alone — the kind icon
+// already carries the type.
 function stateTone(state: string): Tone {
   switch (state) {
     case 'merged':
     case 'submitted':
-    case 'posted':
-    case 'created':
     case 'open':
       return 'good'
     case 'draft':
     case 'pending':
       return 'attention'
     case 'closed':
-    case 'deleted':
     case 'dismissed':
       return 'problem'
     default:
-      // pushed / updated and any unknown state.
       return 'neutral'
   }
 }

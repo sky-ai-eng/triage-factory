@@ -159,19 +159,13 @@ func TestCapture_BranchPush_RecordsActionAndDedupsTwin(t *testing.T) {
 			ctx := context.Background()
 			repoID := registerRepo(t, stores, "octo", "repo", testRepoID("octo/repo"))
 
-			branch, ok := domain.NewBranchDeliverable("octo/repo", "refs/heads/feat", "abc123", true)
-			if !ok {
-				t.Fatal("NewBranchDeliverable returned ok=false")
-			}
 			// The hook fires, reading the repository's id, then the proxy
 			// backstop observes the same push with the id it read.
-			if _, err := client.UpsertDeliverable(ctx, branch); err != nil {
-				t.Fatalf("hook UpsertDeliverable: %v", err)
+			if err := client.RecordBranchPush(ctx, "octo/repo", "refs/heads/feat", "abc123", true); err != nil {
+				t.Fatalf("hook RecordBranchPush: %v", err)
 			}
 			read := domain.GitHubIdentity{RepositoryID: testRepoID("octo/repo"), Repository: "octo/repo"}
-			if _, err := client.UpsertDeliverableFor(ctx, branch, read); err != nil {
-				t.Fatalf("proxy UpsertDeliverableFor (twin): %v", err)
-			}
+			client.RecordBranchPushFor(ctx, "octo/repo", "refs/heads/feat", "abc123", true, read)
 
 			acts := listExternalActions(t, stores)
 			if len(acts) != 1 {
@@ -189,18 +183,22 @@ func TestCapture_BranchPush_RecordsActionAndDedupsTwin(t *testing.T) {
 			if want := domain.BranchPushDedupKey(info.ConversationID, repoID, "refs/heads/feat", "abc123"); a.DedupKey != want {
 				t.Errorf("branch dedup_key = %q, want %q", a.DedupKey, want)
 			}
+			if a.ObjectKind != domain.ObjectKindBranch || a.ObjectKey != "refs/heads/feat" {
+				t.Errorf("branch action object = %q %q, want the branch", a.ObjectKind, a.ObjectKey)
+			}
+			if got := listConversationDeliverables(t, stores, info.ConversationID); len(got) != 0 {
+				t.Errorf("the push wrote deliverables %+v, want none", got)
+			}
 			// A genuinely new push (new sha) is recorded distinctly.
-			next, _ := domain.NewBranchDeliverable("octo/repo", "refs/heads/feat", "def456", false)
-			if _, err := client.UpsertDeliverable(ctx, next); err != nil {
-				t.Fatalf("new-push UpsertDeliverable: %v", err)
+			if err := client.RecordBranchPush(ctx, "octo/repo", "refs/heads/feat", "def456", false); err != nil {
+				t.Fatalf("new-push RecordBranchPush: %v", err)
 			}
 			if got := len(listExternalActions(t, stores)); got != 2 {
 				t.Errorf("a new push (new sha) should append: want 2 actions, got %d", got)
 			}
 			registerRepo(t, stores, "octo", "other", testRepoID("octo/other"))
-			other, _ := domain.NewBranchDeliverable("octo/other", "refs/heads/feat", "abc123", true)
-			if _, err := client.UpsertDeliverable(ctx, other); err != nil {
-				t.Fatalf("other-repository UpsertDeliverable: %v", err)
+			if err := client.RecordBranchPush(ctx, "octo/other", "refs/heads/feat", "abc123", true); err != nil {
+				t.Fatalf("other-repository RecordBranchPush: %v", err)
 			}
 			if got := len(listExternalActions(t, stores)); got != 3 {
 				t.Errorf("the same ref and sha in another repository should append: want 3 actions, got %d", got)
@@ -209,50 +207,35 @@ func TestCapture_BranchPush_RecordsActionAndDedupsTwin(t *testing.T) {
 	}
 }
 
-// TestCapture_BranchPush_AnchorsURLToOrgHost pins that the host-side sink
-// re-anchors a branch deliverable's web link to the org's own GitHub host. The URL
-// is synthesized against github.com where the host can't be known (the sandbox
-// pre-push hook, the domain constructor), so without this an org on GHES/GHEC
-// would get a dead github.com "open branch" link. Both the deliverable URL and the
-// branch-push audit action's deep link (built from the same deliverable) are
-// corrected. The push arrives as the git proxy hands it over, with the
+// TestCapture_BranchPush_AnchorsURLToOrgHost pins that a push's link is the
+// branch on the org's own GitHub host. Neither observer of a push can know the
+// host (the sandbox pre-push hook holds no credentials, the push names a proxy
+// address), so the row's link is built host-side from the org's GitHub host,
+// and an org on GHES/GHEC gets a link on its own host rather than a dead
+// github.com one. The push arrives as the git proxy hands it over, with the
 // repository's id read where its credential is.
 func TestCapture_BranchPush_AnchorsURLToOrgHost(t *testing.T) {
-	stores, info := newCaptureStores(t, false)
+	conn, stores, info := newCaptureStoresConn(t, false)
+	if _, err := conn.Exec(`UPDATE org_event_sources SET base_url = 'https://ghe.example.com' WHERE org_id = ? AND kind = 'github'`, info.OrgID); err != nil {
+		t.Fatalf("move the org to GHES: %v", err)
+	}
 	client := NewLocal(stores, info)
-	client.SetGitHubResolver(fakeGitHubResolver{baseURL: "https://ghe.example.com", token: "org-pat"})
-	registerRepo(t, stores, "octo", "repo", testRepoID("octo/repo"))
 
-	branch, ok := domain.NewBranchDeliverable("octo/repo", "refs/heads/feat/x", "abc123", true)
-	if !ok {
-		t.Fatal("NewBranchDeliverable returned ok=false")
-	}
-	// The constructor can't know the org host, so it builds no link...
-	if branch.URL != "" {
-		t.Fatalf("precondition: constructor URL = %q, want none", branch.URL)
-	}
-
-	stored, err := client.UpsertDeliverableFor(context.Background(), branch, domain.GitHubIdentity{RepositoryID: testRepoID("octo/repo"), Repository: "octo/repo"})
-	if err != nil {
-		t.Fatalf("UpsertDeliverableFor: %v", err)
-	}
-	// ...and the sink sets it on the org's GHES host, segments preserved.
-	if stored.URL != "https://ghe.example.com/octo/repo/tree/feat/x" {
-		t.Errorf("stored branch URL = %q, want the org GHES host", stored.URL)
-	}
+	client.RecordBranchPushFor(context.Background(), "octo/repo", "refs/heads/feat/x", "abc123", true,
+		domain.GitHubIdentity{RepositoryID: testRepoID("octo/repo"), Repository: "octo/repo"})
 
 	acts := listExternalActions(t, stores)
 	if len(acts) != 1 {
 		t.Fatalf("want 1 branch action, got %d: %+v", len(acts), acts)
 	}
 	if acts[0].URL != "https://ghe.example.com/octo/repo/tree/feat/x" {
-		t.Errorf("branch action URL = %q, want the org GHES host", acts[0].URL)
+		t.Errorf("branch action URL = %q, want the org GHES host, segments preserved", acts[0].URL)
 	}
 }
 
 // TestCapture_GithubReply_RecordsCommentAction pins that a review-thread reply
-// is captured as a comment_posted external action beside its own comment
-// deliverable, with the in_reply_to context in detail_json.
+// is captured as a comment_posted external action naming the reply, with the
+// in_reply_to context in detail_json, and no deliverable.
 func TestCapture_GithubReply_RecordsCommentAction(t *testing.T) {
 	for _, eventTriggered := range []bool{true, false} {
 		name := "manual"
@@ -270,12 +253,9 @@ func TestCapture_GithubReply_RecordsCommentAction(t *testing.T) {
 			if replyID != 777 {
 				t.Fatalf("reply id = %d, want 777", replyID)
 			}
-			// The reply's own comment deliverable.
-			arts := listConversationDeliverables(t, stores, info.ConversationID)
-			if len(arts) != 1 || arts[0].DedupKey != domain.GitHubCommentKey(domain.GitHubReviewComment, 777) {
-				t.Errorf("a review-thread reply should record its own comment deliverable, got %+v", arts)
+			if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 0 {
+				t.Errorf("a review-thread reply should record no deliverable, got %+v", arts)
 			}
-			// And exactly one external action beside it.
 			acts := listExternalActions(t, stores)
 			if len(acts) != 1 {
 				t.Fatalf("want 1 action, got %d: %+v", len(acts), acts)
@@ -283,7 +263,8 @@ func TestCapture_GithubReply_RecordsCommentAction(t *testing.T) {
 			a := acts[0]
 			if a.Action != domain.ActionCommentPosted || a.Provider != domain.ProviderGitHub ||
 				a.Credential != domain.CredentialGitHubApp || a.Target != "octo/repo#1" ||
-				a.ExternalID != "777" || a.ConversationID != info.ConversationID {
+				a.ExternalID != "777" || a.ConversationID != info.ConversationID ||
+				a.ObjectKind != domain.ObjectKindComment || a.ObjectKey != domain.GitHubCommentKey(domain.GitHubReviewComment, 777) {
 				t.Errorf("reply action mismatch: %+v", a)
 			}
 			// The audit row deep-links to the reply on the PR, on the org's GitHub.
@@ -467,8 +448,8 @@ func TestCapture_GithubStandaloneCommentEditDelete_StillRecordsCommentAction(t *
 
 // TestCapture_EventPath_RecordFailure_DoesNotFailAction pins the event-path
 // best-effort contract: a forced RecordSystem failure is swallowed (the action
-// row is absent) while the deliverable still lands and the call returns success —
-// the external write already took effect, so recording must never fail it.
+// row is absent) and the call returns success — the external write already
+// took effect, so recording must never fail it.
 func TestCapture_EventPath_RecordFailure_DoesNotFailAction(t *testing.T) {
 	jira := startFakeJira(t)
 	stores, info := newJiraRecordingStoresForCapture(t, jira.URL, true) // event-triggered → admin pool
@@ -478,9 +459,8 @@ func TestCapture_EventPath_RecordFailure_DoesNotFailAction(t *testing.T) {
 	if err := client.JiraTransitionTo(context.Background(), "SKY-9", "Done"); err != nil {
 		t.Fatalf("transition must not fail when action recording fails: %v", err)
 	}
-	// The deliverable (the separate admin write) still committed.
-	if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 1 {
-		t.Errorf("deliverable should persist despite the action-record failure, got %d", len(arts))
+	if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 0 {
+		t.Errorf("deliverables = %+v, want none", arts)
 	}
 }
 

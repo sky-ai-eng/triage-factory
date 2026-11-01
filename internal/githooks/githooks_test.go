@@ -258,7 +258,7 @@ func TestPrePushHook_RecordFailureDoesNotFailPush(t *testing.T) {
 // TestPrePushHook_PolicyRefusalAbortsPush drives the real embedded hook over a
 // real push with a fake binary whose check-push verb answers "refused by
 // policy" (exit 3). The push must abort, and nothing may be recorded — a push
-// that never happens must not leave a branch deliverable behind.
+// that never happens must not leave a branch_pushed row behind.
 func TestPrePushHook_PolicyRefusalAbortsPush(t *testing.T) {
 	requireGit(t)
 	env, recLog := setupEmbeddedHookBody(t, "#!/bin/sh\n"+

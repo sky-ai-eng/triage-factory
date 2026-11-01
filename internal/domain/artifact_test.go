@@ -7,8 +7,7 @@ func TestArtifactDeliverable(t *testing.T) {
 	pr := Deliverable{ID: "d-pr", Kind: DeliverableKindPullRequest, Scope: host, EntityID: "e1"}
 	review := Deliverable{ID: "d-review", Kind: DeliverableKindReview, Scope: host, ExternalID: "4242"}
 	unsent := Deliverable{ID: "d-unsent", Kind: DeliverableKindReview, Scope: host, ExternalID: "0"}
-	branch := Deliverable{ID: "d-branch", Kind: DeliverableKindBranch, Scope: host, EntityID: "e1"}
-	all := []Deliverable{branch, pr, review, unsent}
+	all := []Deliverable{pr, review, unsent}
 
 	cases := []struct {
 		name     string

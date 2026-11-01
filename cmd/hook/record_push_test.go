@@ -20,15 +20,36 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// pushDetails mirrors a branch deliverable's details_json payload for assertions;
-// the producing type is unexported in internal/domain (NewBranchDeliverable).
+// pushDetails mirrors a branch_pushed row's detail_json payload for
+// assertions; the producing type is unexported in internal/domain
+// (NewBranchPushAction).
 type pushDetails struct {
 	SHA string `json:"sha"`
 	New bool   `json:"new"`
 }
 
+// pushRows returns the conversation's branch_pushed ledger rows and requires
+// it to hold no deliverable: a push leaves its ledger row alone.
+func pushRows(t *testing.T, stores db.Stores, conversationID string) []domain.ExternalAction {
+	t.Helper()
+	ctx := context.Background()
+	acts, _, err := stores.ExternalActions.ListByConversation(ctx, runmode.LocalDefaultOrgID, conversationID,
+		domain.ExternalActionListOpts{Action: domain.ActionBranchPushed})
+	if err != nil {
+		t.Fatalf("ExternalActions.ListByConversation: %v", err)
+	}
+	arts, _, err := stores.Deliverables.ListByConversation(ctx, runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
+	if err != nil {
+		t.Fatalf("Deliverables.ListByConversation: %v", err)
+	}
+	if len(arts) != 0 {
+		t.Errorf("a push wrote %d deliverables, want none: %+v", len(arts), arts)
+	}
+	return acts
+}
+
 // newTestStores opens an in-memory SQLite, migrates it, and seeds one
-// conversations row the deliverables FK (conversation_id) can point at. Returns the
+// conversations row a ledger row's conversation_id can point at. Returns the
 // stores plus the conversation id to wire into ConversationInfo.
 func newTestStores(t *testing.T) (db.Stores, string) {
 	t.Helper()
@@ -51,7 +72,7 @@ func newTestStores(t *testing.T) (db.Stores, string) {
 	// Minimal valid conversation: event-triggered (creator_user_id NULL) + a
 	// non-blueprint origin so the parent-pairing CHECKs don't demand a
 	// task/prompt/blueprint chain. org_id/team_id default to the local
-	// sentinels. The deliverable only needs conversation_id to satisfy its FK.
+	// sentinels.
 	if _, err := conn.Exec(`INSERT INTO conversations (id, trigger_type, creator_user_id, origin, status) VALUES ('r1', 'event', NULL, 'interactive', 'running')`); err != nil {
 		t.Fatalf("seed conversation: %v", err)
 	}
@@ -60,7 +81,7 @@ func newTestStores(t *testing.T) (db.Stores, string) {
 
 // registerOctoRepo gives the registry a row for octo/repo on host, carrying
 // GitHub's id for it, as the repository of a run's checkout has one: the
-// branch sink keys a branch on the row. Returns the row's id.
+// recorder names the pushed repository by the row. Returns the row's id.
 func registerOctoRepo(t *testing.T, stores db.Stores, host string) string {
 	t.Helper()
 	ctx := context.Background()
@@ -132,7 +153,7 @@ func (f fakeResolver) OrgIdentityFor(context.Context, string) (string, string, b
 	panic("OrgIdentityFor is not used by the hook")
 }
 
-func TestRecordPush_UpsertsBranchDeliverable(t *testing.T) {
+func TestRecordPush_RecordsTheBranchPush(t *testing.T) {
 	stores, conversationID := newTestStores(t)
 	repoID := registerOctoRepo(t, stores, "https://github.com")
 	host := hostFor(t, stores, conversationID, false)
@@ -144,66 +165,62 @@ func TestRecordPush_UpsertsBranchDeliverable(t *testing.T) {
 		"--new=true",
 	})
 
-	arts, _, err := stores.Deliverables.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
-	if err != nil {
-		t.Fatalf("ListByConversation: %v", err)
+	acts := pushRows(t, stores, conversationID)
+	if len(acts) != 1 {
+		t.Fatalf("got %d branch_pushed rows, want 1", len(acts))
 	}
-	if len(arts) != 1 {
-		t.Fatalf("got %d deliverables, want 1", len(arts))
+	a := acts[0]
+	if a.Provider != domain.ProviderGitHub || a.Target != "octo/repo" || a.ExternalID != "refs/heads/feature/x" {
+		t.Errorf("row = provider %q target %q external_id %q, want github, octo/repo, refs/heads/feature/x", a.Provider, a.Target, a.ExternalID)
 	}
-	a := arts[0]
-	if a.Provider != domain.ProviderGit || a.Kind != domain.DeliverableKindBranch {
-		t.Errorf("provider/kind = %q/%q, want git/branch", a.Provider, a.Kind)
-	}
-	if a.Target != "octo/repo" {
-		t.Errorf("target = %q, want octo/repo", a.Target)
-	}
-	if a.ExternalID != "refs/heads/feature/x" {
-		t.Errorf("external_id = %q, want refs/heads/feature/x", a.ExternalID)
+	if a.ObjectKind != domain.ObjectKindBranch || a.ObjectKey != "refs/heads/feature/x" || a.RepositoryID != repoID {
+		t.Errorf("object = %q %q in repository %q, want the branch keyed on its ref in %s", a.ObjectKind, a.ObjectKey, a.RepositoryID, repoID)
 	}
 	if want := "https://github.com/octo/repo/tree/feature/x"; a.URL != want {
 		t.Errorf("url = %q, want %q", a.URL, want)
 	}
-	if a.State != domain.DeliverableStateBranchPushed {
-		t.Errorf("state = %q, want pushed", a.State)
-	}
-	if want := domain.BranchDedupKey(repoID, "refs/heads/feature/x"); a.DedupKey != want {
+	if want := domain.BranchPushDedupKey(conversationID, repoID, "refs/heads/feature/x", "abc123"); a.DedupKey != want {
 		t.Errorf("dedup_key = %q, want %q", a.DedupKey, want)
 	}
 	if a.ConversationID != conversationID || a.OrgID != runmode.LocalDefaultOrgID || a.TeamID != runmode.LocalDefaultTeamID {
 		t.Errorf("identity not stamped: conversation=%q org=%q team=%q", a.ConversationID, a.OrgID, a.TeamID)
 	}
 	var d pushDetails
-	if err := json.Unmarshal([]byte(a.DetailsJSON), &d); err != nil {
-		t.Fatalf("details_json %q: %v", a.DetailsJSON, err)
+	if err := json.Unmarshal([]byte(a.DetailJSON), &d); err != nil {
+		t.Fatalf("detail_json %q: %v", a.DetailJSON, err)
 	}
 	if d.SHA != "abc123" || !d.New {
 		t.Errorf("details = %+v, want sha=abc123 new=true", d)
 	}
 }
 
-// TestRecordPush_RepushUpsertsOneRow proves a second push of the same branch
-// lands on the one deduped row, updating the volatile payload (sha, new)
-// rather than minting a second deliverable.
-func TestRecordPush_RepushUpsertsOneRow(t *testing.T) {
+// TestRecordPush_RepushIsItsOwnRow proves a second push of the same branch, of
+// another commit, is recorded as a push of its own, and the same push observed
+// twice is one row.
+func TestRecordPush_RepushIsItsOwnRow(t *testing.T) {
 	stores, conversationID := newTestStores(t)
 	registerOctoRepo(t, stores, "https://github.com")
 	host := hostFor(t, stores, conversationID, false)
 
 	runRecordPush(host, []string{"--remote", "git@github.com:octo/repo.git", "--ref", "refs/heads/main", "--sha", "aaa", "--new=true"})
+	runRecordPush(host, []string{"--remote", "git@github.com:octo/repo.git", "--ref", "refs/heads/main", "--sha", "aaa", "--new=true"})
 	runRecordPush(host, []string{"--remote", "git@github.com:octo/repo.git", "--ref", "refs/heads/main", "--sha", "bbb", "--new=false"})
 
-	arts, _, err := stores.Deliverables.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
-	if err != nil {
-		t.Fatalf("ListByConversation: %v", err)
+	acts := pushRows(t, stores, conversationID)
+	if len(acts) != 2 {
+		t.Fatalf("got %d branch_pushed rows, want 2 (one per commit pushed)", len(acts))
 	}
-	if len(arts) != 1 {
-		t.Fatalf("got %d deliverables, want 1 (re-push must upsert)", len(arts))
+	shas := map[string]bool{}
+	for _, a := range acts {
+		var d pushDetails
+		_ = json.Unmarshal([]byte(a.DetailJSON), &d)
+		shas[d.SHA] = d.New
 	}
-	var d pushDetails
-	_ = json.Unmarshal([]byte(arts[0].DetailsJSON), &d)
-	if d.SHA != "bbb" || d.New {
-		t.Errorf("details after re-push = %+v, want sha=bbb new=false", d)
+	if created, ok := shas["aaa"]; !ok || !created {
+		t.Errorf("pushes = %v, want aaa recorded as creating the branch", shas)
+	}
+	if created, ok := shas["bbb"]; !ok || created {
+		t.Errorf("pushes = %v, want bbb recorded as a push to the existing branch", shas)
 	}
 }
 
@@ -218,37 +235,28 @@ func TestRecordPush_EventTriggeredUsesSystemPool(t *testing.T) {
 
 	runRecordPush(host, []string{"--remote", "https://github.com/octo/repo", "--ref", "refs/heads/main", "--sha", "ccc", "--new=true"})
 
-	arts, _, err := stores.Deliverables.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
-	if err != nil {
-		t.Fatalf("ListByConversation: %v", err)
-	}
-	if len(arts) != 1 {
-		t.Fatalf("got %d deliverables, want 1", len(arts))
+	if acts := pushRows(t, stores, conversationID); len(acts) != 1 {
+		t.Fatalf("got %d branch_pushed rows, want 1", len(acts))
 	}
 }
 
 // TestRecordPush_SkipsNonBranchRef confirms a tag (or any non refs/heads ref)
-// is not recorded as a branch deliverable.
+// is not recorded as a branch push.
 func TestRecordPush_SkipsNonBranchRef(t *testing.T) {
 	stores, conversationID := newTestStores(t)
 	host := hostFor(t, stores, conversationID, false)
 
 	runRecordPush(host, []string{"--remote", "https://github.com/octo/repo", "--ref", "refs/tags/v1.0", "--sha", "ddd", "--new=true"})
 
-	arts, _, err := stores.Deliverables.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
-	if err != nil {
-		t.Fatalf("ListByConversation: %v", err)
-	}
-	if len(arts) != 0 {
-		t.Fatalf("got %d deliverables, want 0 (tags are not branches)", len(arts))
+	if acts := pushRows(t, stores, conversationID); len(acts) != 0 {
+		t.Fatalf("got %d branch_pushed rows, want 0 (tags are not branches)", len(acts))
 	}
 }
 
 // TestRecordPush_GHESHostRecordsAndAnchorsURL is the end-to-end proof for the
 // local-mode GHES path: with the org's GitHub base set to a GHES host, a push to
 // that host is captured (the gate accepts it) AND the recorded branch link is
-// anchored to the GHES host, not github.com. This is the scenario the earlier
-// github.com-only gate silently dropped before a deliverable was ever written.
+// anchored to the GHES host, not github.com.
 func TestRecordPush_GHESHostRecordsAndAnchorsURL(t *testing.T) {
 	stores, conversationID := newTestStores(t)
 	dbtest.SeedOrgSettings(t, stores.Orgs, runmode.LocalDefaultOrgID,
@@ -263,15 +271,12 @@ func TestRecordPush_GHESHostRecordsAndAnchorsURL(t *testing.T) {
 		"--new=true",
 	})
 
-	arts, _, err := stores.Deliverables.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
-	if err != nil {
-		t.Fatalf("ListByConversation: %v", err)
+	acts := pushRows(t, stores, conversationID)
+	if len(acts) != 1 {
+		t.Fatalf("got %d branch_pushed rows, want 1 (a GHES push must be captured in local mode)", len(acts))
 	}
-	if len(arts) != 1 {
-		t.Fatalf("got %d deliverables, want 1 (a GHES push must be captured in local mode)", len(arts))
-	}
-	if want := "https://github.corp.example.com/octo/repo/tree/feature/x"; arts[0].URL != want {
-		t.Errorf("url = %q, want %q (anchored to the GHES host, not github.com)", arts[0].URL, want)
+	if want := "https://github.corp.example.com/octo/repo/tree/feature/x"; acts[0].URL != want {
+		t.Errorf("url = %q, want %q (anchored to the GHES host, not github.com)", acts[0].URL, want)
 	}
 }
 
@@ -287,12 +292,8 @@ func TestRecordPush_GHESOrgSkipsForeignHost(t *testing.T) {
 
 	runRecordPush(host, []string{"--remote", "https://github.com/octo/repo", "--ref", "refs/heads/main", "--sha", "xyz", "--new=true"})
 
-	arts, _, err := stores.Deliverables.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID, db.Unwindowed)
-	if err != nil {
-		t.Fatalf("ListByConversation: %v", err)
-	}
-	if len(arts) != 0 {
-		t.Fatalf("got %d deliverables, want 0 (github.com is not the GHES org's host)", len(arts))
+	if acts := pushRows(t, stores, conversationID); len(acts) != 0 {
+		t.Fatalf("got %d branch_pushed rows, want 0 (github.com is not the GHES org's host)", len(acts))
 	}
 }
 

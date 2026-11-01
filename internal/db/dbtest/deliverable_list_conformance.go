@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"testing"
 
@@ -33,9 +34,9 @@ func RunDeliverableConversationListConformance(t *testing.T, mk func(t *testing.
 		t.Helper()
 		a := domain.Deliverable{
 			ConversationID: conversationID, OrgID: f.OrgID, TeamID: f.TeamID,
-			Provider: domain.ProviderGitHub, Scope: TestGitHubHost, Kind: domain.DeliverableKindComment,
-			Target: "octo/api#7", State: domain.DeliverableStateCommentPosted,
-			DedupKey: domain.GitHubCommentKey(domain.GitHubIssueComment, n),
+			Provider: domain.ProviderGitHub, Scope: TestGitHubHost, Kind: domain.DeliverableKindPullRequest,
+			Target: fmt.Sprintf("octo/api#%d", n), State: domain.DeliverableStatePRDraft,
+			DedupKey: domain.PullRequestDedupKey(fmt.Sprintf("PR_%d", n)),
 		}
 		if _, err := f.Stores.Deliverables.UpsertSystem(ctx, f.OrgID, a); err != nil {
 			t.Fatalf("record deliverable %d: %v", n, err)

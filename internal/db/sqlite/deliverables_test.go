@@ -57,21 +57,21 @@ func TestDeliverableStore_SQLite_RoundTrip(t *testing.T) {
 	if _, err := stores.Deliverables.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Deliverable{
 		OrgID:    runmode.LocalDefaultOrgID,
 		TeamID:   runmode.LocalDefaultTeamID,
-		Provider: domain.ProviderGit,
+		Provider: domain.ProviderGitHub,
 		Scope:    "https://github.com",
-		Kind:     domain.DeliverableKindBranch,
+		Kind:     domain.DeliverableKindPullRequest,
 		Target:   "octo/repo",
-		State:    domain.DeliverableStateBranchPushed,
-		DedupKey: "git:branch:octo/repo:refs/heads/x",
+		State:    domain.DeliverableStatePRPending,
+		DedupKey: "github:pull_request:PR_pending",
 	}); err != nil {
-		t.Fatalf("Upsert branch: %v", err)
+		t.Fatalf("Upsert pending pull request: %v", err)
 	}
 	var extID, url, details sql.NullString
 	var nullConversation sql.NullString
 	if err := conn.QueryRow(
-		`SELECT conversation_id, external_id, url, details_json FROM deliverables WHERE dedup_key = 'git:branch:octo/repo:refs/heads/x'`,
+		`SELECT conversation_id, external_id, url, details_json FROM deliverables WHERE dedup_key = 'github:pull_request:PR_pending'`,
 	).Scan(&nullConversation, &extID, &url, &details); err != nil {
-		t.Fatalf("read back branch: %v", err)
+		t.Fatalf("read back pending pull request: %v", err)
 	}
 	if nullConversation.Valid || extID.Valid || url.Valid || details.Valid {
 		t.Errorf("empty optionals should be NULL: conversation=%v ext=%v url=%v details=%v", nullConversation, extID, url, details)
@@ -234,21 +234,20 @@ func TestDeliverableStore_SQLite_PendingToReal(t *testing.T) {
 
 // TestDeliverableStore_SQLite_UpsertPreservesExternalIDAndURL pins that an
 // upsert leaving external_id/url empty does NOT blank values an earlier upsert
-// stored — they only ever fill in (PR number / issue key, html link). A
-// reconciliation pass, or a Jira mutation whose conversation can't compute the
-// browse URL, must not erase them. State/target still follow the latest writer.
+// stored — they only ever fill in (PR number, html link). A reconciliation
+// pass must not erase them. State/target still follow the latest writer.
 func TestDeliverableStore_SQLite_UpsertPreservesExternalIDAndURL(t *testing.T) {
 	conn := newSQLiteForDeliverableTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 	conversationID := seedDeliverableConversation(t, conn)
 
-	key := domain.ObjectKey("jira", "issue", "SKY-1", "")
+	key := domain.PullRequestDedupKey("PR_1")
 	if _, err := stores.Deliverables.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Deliverable{
 		ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
-		Provider: "jira", Scope: "https://acme.atlassian.net", Kind: "issue", Target: "SKY-1",
-		ExternalID: "SKY-1", URL: "https://jira.example.com/browse/SKY-1",
-		State: domain.DeliverableStateIssueCreated, DedupKey: key,
+		Provider: "github", Scope: "https://github.com", Kind: "pull_request", Target: "octo/repo#1",
+		ExternalID: "1", URL: "https://github.com/octo/repo/pull/1",
+		State: domain.DeliverableStatePRDraft, DedupKey: key,
 	}); err != nil {
 		t.Fatalf("first Upsert: %v", err)
 	}
@@ -256,76 +255,75 @@ func TestDeliverableStore_SQLite_UpsertPreservesExternalIDAndURL(t *testing.T) {
 	// A later mutation that can't supply external_id/url (both empty).
 	out, err := stores.Deliverables.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Deliverable{
 		ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
-		Provider: "jira", Scope: "https://acme.atlassian.net", Kind: "issue", Target: "SKY-1",
-		State: domain.DeliverableStateIssueUpdated, DedupKey: key,
+		Provider: "github", Scope: "https://github.com", Kind: "pull_request", Target: "octo/repo#1",
+		State: domain.DeliverableStatePROpen, DedupKey: key,
 	})
 	if err != nil {
 		t.Fatalf("second Upsert: %v", err)
 	}
-	if out.ExternalID != "SKY-1" || out.URL != "https://jira.example.com/browse/SKY-1" {
+	if out.ExternalID != "1" || out.URL != "https://github.com/octo/repo/pull/1" {
 		t.Errorf("external_id/url were blanked by an empty upsert: ext=%q url=%q", out.ExternalID, out.URL)
 	}
-	if out.State != domain.DeliverableStateIssueUpdated {
+	if out.State != domain.DeliverableStatePROpen {
 		t.Errorf("state should still follow the latest writer, got %q", out.State)
 	}
 
 	// A non-empty value still overwrites (intentional change path).
 	out, err = stores.Deliverables.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Deliverable{
 		ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
-		Provider: "jira", Scope: "https://acme.atlassian.net", Kind: "issue", Target: "SKY-1",
-		ExternalID: "SKY-1", URL: "https://jira.example.com/browse/SKY-1?focusedId=9",
-		State: domain.DeliverableStateIssueUpdated, DedupKey: key,
+		Provider: "github", Scope: "https://github.com", Kind: "pull_request", Target: "octo/repo#1",
+		ExternalID: "1", URL: "https://github.com/octo/repo/pull/1/files",
+		State: domain.DeliverableStatePROpen, DedupKey: key,
 	})
 	if err != nil {
 		t.Fatalf("third Upsert: %v", err)
 	}
-	if out.URL != "https://jira.example.com/browse/SKY-1?focusedId=9" {
+	if out.URL != "https://github.com/octo/repo/pull/1/files" {
 		t.Errorf("non-empty url did not overwrite: %q", out.URL)
 	}
 }
 
 // TestDeliverableStore_SQLite_UpsertPreservesTargetOnEmpty pins that an upsert
-// leaving target empty does NOT blank the resource key an earlier upsert
-// stored — a GitHub comment-update/delete knows only the comment id, not the
-// PR number, so it can't recompute owner/repo#N and must inherit it. A
-// non-empty target still migrates (the pending→real PR path).
+// leaving target empty does NOT blank the target an earlier upsert stored — a
+// review's submit stamps its id and link and need not restate the pull
+// request. A non-empty target still overwrites.
 func TestDeliverableStore_SQLite_UpsertPreservesTargetOnEmpty(t *testing.T) {
 	conn := newSQLiteForDeliverableTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 	conversationID := seedDeliverableConversation(t, conn)
 
-	key := domain.ObjectKey("github", "comment", "555", "")
+	key := domain.ReviewDedupKey("PR_7", conversationID)
 	if _, err := stores.Deliverables.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Deliverable{
 		ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
-		Provider: "github", Scope: "https://github.com", Kind: "comment", Target: "octo/repo#7",
-		ExternalID: "555", URL: "https://github.com/octo/repo/pull/7#issuecomment-555",
-		State: domain.DeliverableStateCommentPosted, DedupKey: key,
+		Provider: "github", Scope: "https://github.com", Kind: "review", Target: "octo/repo#7",
+		URL:   "https://github.com/octo/repo/pull/7",
+		State: domain.DeliverableStateReviewPending, DedupKey: key,
 	}); err != nil {
 		t.Fatalf("first Upsert: %v", err)
 	}
 
-	// A comment-delete that only carries the id (empty target/url).
+	// A write that carries the review's id but no target or link.
 	out, err := stores.Deliverables.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Deliverable{
 		ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
-		Provider: "github", Scope: "https://github.com", Kind: "comment", ExternalID: "555",
-		State: domain.DeliverableStateCommentDeleted, DedupKey: key,
+		Provider: "github", Scope: "https://github.com", Kind: "review", ExternalID: "555",
+		State: domain.DeliverableStateReviewSubmitted, DedupKey: key,
 	})
 	if err != nil {
 		t.Fatalf("second Upsert: %v", err)
 	}
-	if out.Target != "octo/repo#7" || out.URL != "https://github.com/octo/repo/pull/7#issuecomment-555" {
+	if out.Target != "octo/repo#7" || out.URL != "https://github.com/octo/repo/pull/7" {
 		t.Errorf("empty upsert blanked stable coordinates: target=%q url=%q", out.Target, out.URL)
 	}
-	if out.State != domain.DeliverableStateCommentDeleted {
+	if out.State != domain.DeliverableStateReviewSubmitted {
 		t.Errorf("state should follow the latest writer, got %q", out.State)
 	}
 
-	// A non-empty target still overwrites (migration path).
+	// A non-empty target still overwrites.
 	out, err = stores.Deliverables.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Deliverable{
 		ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
-		Provider: "github", Scope: "https://github.com", Kind: "comment", Target: "octo/repo#8",
-		State: domain.DeliverableStateCommentPosted, DedupKey: key,
+		Provider: "github", Scope: "https://github.com", Kind: "review", Target: "octo/repo#8",
+		State: domain.DeliverableStateReviewSubmitted, DedupKey: key,
 	})
 	if err != nil {
 		t.Fatalf("third Upsert: %v", err)
@@ -345,8 +343,8 @@ func TestDeliverableStore_SQLite_ListByConversation(t *testing.T) {
 	for i, k := range []string{"a", "b", "c"} {
 		if _, err := stores.Deliverables.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Deliverable{
 			ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
-			Provider: "github", Scope: "https://github.com", Kind: "comment", Target: "octo/repo",
-			State: domain.DeliverableStateCommentPosted, DedupKey: "k" + k,
+			Provider: "github", Scope: "https://github.com", Kind: "pull_request", Target: "octo/repo",
+			State: domain.DeliverableStatePRDraft, DedupKey: "k" + k,
 		}); err != nil {
 			t.Fatalf("seed %d: %v", i, err)
 		}
@@ -378,8 +376,8 @@ func TestDeliverableStore_SQLite_CountByConversation(t *testing.T) {
 	seed := func(conversationID, key string) {
 		if _, err := stores.Deliverables.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Deliverable{
 			ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
-			Provider: "github", Scope: "https://github.com", Kind: "comment", Target: "octo/repo",
-			State: domain.DeliverableStateCommentPosted, DedupKey: key,
+			Provider: "github", Scope: "https://github.com", Kind: "pull_request", Target: "octo/repo",
+			State: domain.DeliverableStatePRDraft, DedupKey: key,
 		}); err != nil {
 			t.Fatalf("seed %s: %v", key, err)
 		}
@@ -432,8 +430,8 @@ func TestDeliverableStore_SQLite_ListByConversations(t *testing.T) {
 	seed := func(conversationID, key string) {
 		if _, err := stores.Deliverables.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Deliverable{
 			ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
-			Provider: "github", Scope: "https://github.com", Kind: "comment", Target: "octo/repo",
-			State: domain.DeliverableStateCommentPosted, DedupKey: key,
+			Provider: "github", Scope: "https://github.com", Kind: "pull_request", Target: "octo/repo",
+			State: domain.DeliverableStatePRDraft, DedupKey: key,
 		}); err != nil {
 			t.Fatalf("seed %s: %v", key, err)
 		}
@@ -480,8 +478,8 @@ func TestDeliverableStore_SQLite_SurvivesConversationPurge(t *testing.T) {
 
 	art, err := stores.Deliverables.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Deliverable{
 		ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
-		Provider: "git", Scope: "https://github.com", Kind: "branch", Target: "octo/repo",
-		State: domain.DeliverableStateBranchPushed, DedupKey: "git:branch:octo/repo:refs/heads/x",
+		Provider: "github", Scope: "https://github.com", Kind: "pull_request", Target: "octo/repo#3",
+		State: domain.DeliverableStatePROpen, DedupKey: domain.PullRequestDedupKey("PR_3"),
 	})
 	if err != nil {
 		t.Fatalf("Upsert: %v", err)
@@ -532,12 +530,12 @@ func TestDeliverableStore_SQLite_DropsRunDeliverables(t *testing.T) {
 	}
 }
 
-// TestDeliverableStore_SQLite_ListNonTerminal pins the reconciler's working set
-// (TFAC-464): seed one deliverable in every state across kinds, then assert
+// TestDeliverableStore_SQLite_ListNonTerminal pins the reconciler's working
+// set: seed one deliverable in every state of both kinds, then assert
 // ListNonTerminalBySystem returns EXACTLY the rows domain.IsReconcilableNonTerminal
-// marks — PR draft|open, review pending, branch pushed — and nothing terminal
-// (merged/closed/submitted/dismissed/deleted) or unreconcilable (PR pending,
-// comment, issue). Doubles as the SQL-predicate ⇔ domain-predicate drift guard.
+// marks — PR draft|open — and nothing terminal (merged/closed/submitted/
+// dismissed) or unreconcilable (PR pending, any review). Doubles as the
+// SQL-predicate ⇔ domain-predicate drift guard.
 func TestDeliverableStore_SQLite_ListNonTerminal(t *testing.T) {
 	conn := newSQLiteForDeliverableTest(t)
 	stores := sqlitestore.New(conn)
@@ -554,10 +552,6 @@ func TestDeliverableStore_SQLite_ListNonTerminal(t *testing.T) {
 		{domain.DeliverableKindReview, domain.DeliverableStateReviewPending},
 		{domain.DeliverableKindReview, domain.DeliverableStateReviewSubmitted},
 		{domain.DeliverableKindReview, domain.DeliverableStateReviewDismissed},
-		{domain.DeliverableKindBranch, domain.DeliverableStateBranchPushed},
-		{domain.DeliverableKindBranch, domain.DeliverableStateBranchDeleted},
-		{domain.DeliverableKindComment, domain.DeliverableStateCommentPosted},
-		{domain.DeliverableKindIssue, domain.DeliverableStateIssueCreated},
 	}
 	want := map[string]bool{}
 	for i, s := range seeds {

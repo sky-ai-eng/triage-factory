@@ -67,10 +67,10 @@ process in both modes:
      aborts the push only when `check-push` exits `3` ("refused by
      policy"); any other status allows it, so a missing binary or an
      unreadable database can never block a push. Runs first: a push about
-     to be aborted must not leave a branch deliverable behind.
+     to be aborted must not be recorded as pushed.
   2. **Branch recording** via `triagefactory hook record-push` — each
-     pushed branch as a durable `branch` deliverable. Skips deletes, marks
-     new branches, guarded so it can never change the exit status.
+     pushed branch as a `branch_pushed` audit-ledger row. Skips deletes,
+     marks new branches, guarded so it can never change the exit status.
 
   Rewritten by `Ensure` on every startup so an upgraded binary refreshes a
   stale on-disk copy.

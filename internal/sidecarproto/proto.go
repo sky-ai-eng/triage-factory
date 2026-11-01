@@ -81,8 +81,8 @@ const (
 	//
 	// A Conn serves these frames on a lane of their own, one at a time and in
 	// arrival order (see Conn), because the order records are applied in is
-	// visible: several deliverable fields are last-writer-wins, and a comment's
-	// delete finds nothing to update if its post has not been applied yet.
+	// visible: several deliverable fields are last-writer-wins, and the
+	// ledger's rows read in the order their acts happened.
 	KindRelayRecord Kind = "relay_record"
 
 	// KindDrainRecords is the orchestrator's request, at the end of a run, that

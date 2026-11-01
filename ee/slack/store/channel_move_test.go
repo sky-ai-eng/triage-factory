@@ -5,46 +5,6 @@ import (
 	"testing"
 )
 
-func TestMoveThreadKey(t *testing.T) {
-	cases := []struct {
-		key, want string
-		ok        bool
-	}{
-		{"G01/1700000000.000100", "C01/1700000000.000100", true},
-		{"G019/1700000000.000100", "G019/1700000000.000100", false}, // id that merely starts with the old one
-		{"G01", "G01", false},
-		{"C02/1700000000.000100", "C02/1700000000.000100", false},
-	}
-	for _, tc := range cases {
-		got, ok := MoveThreadKey(tc.key, "G01", "C01")
-		if got != tc.want || ok != tc.ok {
-			t.Errorf("MoveThreadKey(%q) = %q, %v; want %q, %v", tc.key, got, ok, tc.want, tc.ok)
-		}
-	}
-	if got, ok := MoveThreadKey("G01/1.0", "G01", "G01"); ok || got != "G01/1.0" {
-		t.Errorf("MoveThreadKey onto the same id = %q, %v; want unchanged", got, ok)
-	}
-}
-
-func TestMoveDeliverableKey(t *testing.T) {
-	cases := []struct {
-		key, want string
-		ok        bool
-	}{
-		{"slack:message:G01/1700000000.000300", "slack:message:C01/1700000000.000300", true},
-		{"slack:message:G01/1700000000.000300:anchor", "slack:message:C01/1700000000.000300:anchor", true},
-		{"slack:message:G019/1700000000.000300", "slack:message:G019/1700000000.000300", false},
-		{"github:comment:G01/1", "github:comment:G01/1", false},
-		{"slack:message", "slack:message", false},
-	}
-	for _, tc := range cases {
-		got, ok := MoveDeliverableKey(tc.key, "G01", "C01")
-		if got != tc.want || ok != tc.ok {
-			t.Errorf("MoveDeliverableKey(%q) = %q, %v; want %q, %v", tc.key, got, ok, tc.want, tc.ok)
-		}
-	}
-}
-
 func TestMovePermalink(t *testing.T) {
 	cases := []struct {
 		name, u, want string

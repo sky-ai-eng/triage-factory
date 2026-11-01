@@ -308,17 +308,12 @@ func (c *IPCClient) CreateWorkspaceCheckout(ctx context.Context, owner, repo, re
 	return res.Path, nil
 }
 
-// --- deliverables ---
+// --- branch pushes ---
 
-// UpsertDeliverable ships the polymorphic deliverable to the daemon, which stamps
-// the run identity and upserts it host-side (admin- or app-pool per the run's
-// trigger shape). Returns the stored row. See TFAC-460.
-func (c *IPCClient) UpsertDeliverable(ctx context.Context, a domain.Deliverable) (domain.Deliverable, error) {
-	var res upsertDeliverableResult
-	if err := c.call(ctx, methodUpsertDeliverable, upsertDeliverableArgs{Deliverable: a}, &res); err != nil {
-		return domain.Deliverable{}, err
-	}
-	return res.Deliverable, nil
+// RecordBranchPush ships one pushed ref to the daemon, which builds and records
+// its ledger row host-side.
+func (c *IPCClient) RecordBranchPush(ctx context.Context, repo, ref, sha string, created bool) error {
+	return c.call(ctx, methodRecordBranchPush, recordBranchPushArgs{BranchPush: BranchPush{Repo: repo, Ref: ref, SHA: sha, Created: created}}, nil)
 }
 
 // --- jira ---

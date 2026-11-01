@@ -3,7 +3,6 @@ package agenthost
 import (
 	"context"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -142,72 +141,5 @@ func TestLocalClient_MemoryLoad_OldJiraKeyFindsTheEntity(t *testing.T) {
 	miss, err := NewLocal(stores, info).MemoryLoad(ctx, "jira", "GONE-1", 20)
 	if err != nil || miss.EntityID != "" {
 		t.Errorf("load of an unknown key = %+v err=%v, want a miss", miss, err)
-	}
-}
-
-// TestServer_SandboxUpsertDeliverable_RecordsBranchesOnly pins the sandbox's
-// deliverable door: over the socket it records a branch and refuses every other
-// kind. A deliverable is linked to the entity its key names, and that
-// resolution follows the target onto the entity, so a Jira issue deliverable the
-// sandbox composed, keyed on an existing issue's id under a key of its own
-// choosing, would rename that issue's entity.
-func TestServer_SandboxUpsertDeliverable_RecordsBranchesOnly(t *testing.T) {
-	const site = "https://jira.example.test"
-	_, stores, info := newJiraRecordingStoresConn(t, site, true)
-	ctx := context.Background()
-	if _, _, err := stores.Entities.FindOrCreateJiraSystem(ctx, info.OrgID, site, "ABC-1", "10001", dbseed.JiraIssueProject("ABC-1"), "Issue", site+"/browse/ABC-1"); err != nil {
-		t.Fatal(err)
-	}
-	registerRepo(t, stores, "octo", "repo", testRepoID("octo/repo"))
-
-	sockPath := tempSocket(t)
-	listener, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	// The daemon reads the pushed repository's id with its own credential.
-	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !answerPRRead(w, r) {
-			t.Errorf("unexpected GitHub call: %s %s", r.Method, r.URL.Path)
-		}
-	}))
-	t.Cleanup(gh.Close)
-	srv := NewServer(stores, info, nil)
-	srv.SetGitHubResolver(fakeGitHubResolver{baseURL: gh.URL, token: "org-pat"})
-	go func() { _ = srv.Serve(listener) }()
-	t.Cleanup(func() {
-		_ = listener.Close()
-		_ = srv.Shutdown(context.Background())
-	})
-	sandbox := Dial(sockPath)
-	t.Cleanup(func() { _ = sandbox.Close() })
-
-	forged := domain.Deliverable{
-		Provider: domain.ProviderJira,
-		Kind:     domain.DeliverableKindIssue,
-		Target:   "EVIL-9",
-		State:    domain.DeliverableStateIssueUpdated,
-		DedupKey: domain.ObjectKey(domain.ProviderJira, domain.DeliverableKindIssue, domain.JiraIssueResource(site, "10001"), ""),
-	}
-	if _, err := sandbox.UpsertDeliverable(ctx, forged); err == nil {
-		t.Fatal("the sandbox recorded a Jira issue deliverable; want it refused")
-	}
-	issue, err := stores.Entities.GetByExternalIDSystem(ctx, info.OrgID, domain.ProviderJira, site, "10001")
-	if err != nil || issue == nil || issue.SourceID != "ABC-1" {
-		t.Fatalf("issue entity after the refused write = %+v, %v; want it still keyed ABC-1", issue, err)
-	}
-	if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 0 {
-		t.Fatalf("deliverables after the refused write = %+v, want none", arts)
-	}
-
-	branch, ok := domain.NewBranchDeliverable("octo/repo", "refs/heads/feature/x", "abc123", true)
-	if !ok {
-		t.Fatal("build branch deliverable")
-	}
-	if _, err := sandbox.UpsertDeliverable(ctx, branch); err != nil {
-		t.Fatalf("UpsertDeliverable (branch): %v", err)
-	}
-	if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 1 || arts[0].Kind != domain.DeliverableKindBranch {
-		t.Fatalf("deliverables after the branch = %+v, want the one branch", arts)
 	}
 }

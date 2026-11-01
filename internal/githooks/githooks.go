@@ -58,10 +58,10 @@ const BinEnvVar = "TRIAGE_FACTORY_BIN"
 // proxy is wired), the hook stands down entirely: the proxy's ref gate already
 // adjudicates the team's base-branch push policy, so a second judgment there
 // would be redundant; and every push transits the proxy, whose receive-pack
-// capture observes the upstream's actual outcome — so deliverables are written
-// only for pushes that landed, and refused pushes leave an audit failure row.
-// The hook fires BEFORE the transfer and cannot know the outcome; letting it
-// record under a proxy would mint branch deliverables for pushes GitHub refused.
+// capture observes the upstream's actual outcome — so a branch_pushed row is
+// written only for a push that landed, and a refused push leaves an audit
+// failure row. The hook fires BEFORE the transfer and cannot know the outcome;
+// letting it record under a proxy would record pushes GitHub refused as pushed.
 // Unset (a run with no git proxy), the hook is the fallback capture point AND
 // policy gate: it records at pre-push time, accepting that it cannot observe
 // the outcome, and refuses a protected-ref push itself.
@@ -79,7 +79,7 @@ var readmeContent []byte
 // team's base-branch push policy via `triagefactory hook check-push` (a safety
 // guard against a mistaken agent, aborting only on that verb's
 // dedicated "refused by policy" status, so every operational failure allows
-// the push), then records each pushed branch as a durable deliverable via
+// the push), then records each pushed branch as a branch_pushed ledger row via
 // `triagefactory hook record-push`. Recording stays best-effort and can never
 // change the exit status.
 //

@@ -73,14 +73,7 @@ func TestRelayRuntime_RoundTripsCoreOps(t *testing.T) {
 	// A write op relays as one op (the tx stays orchestrator-side) and lands in
 	// the store; the stored row — with its minted id and the org bound from the
 	// orchestrator's ConversationInfo — comes back.
-	art := domain.Deliverable{
-		Provider:   domain.ProviderGitHub,
-		Kind:       domain.DeliverableKindComment,
-		Target:     "octo/repo#7",
-		ExternalID: "123",
-		State:      domain.DeliverableStateCommentPosted,
-		DedupKey:   domain.ObjectKey(domain.ProviderGitHub, domain.DeliverableKindComment, "123", ""),
-	}
+	art := domain.NewReviewDeliverable("octo/repo", 7, "PR_7", "head-sha", info.ConversationID)
 	stored, err := rt.UpsertDeliverable(ctx, art, domain.GitHubIdentity{})
 	if err != nil {
 		t.Fatalf("UpsertDeliverable relay: %v", err)
@@ -115,6 +108,37 @@ func TestRelayRuntime_RoundTripsCoreOps(t *testing.T) {
 	}
 	if tracks {
 		t.Fatal("expected the un-seeded repo to be untracked through the relay")
+	}
+}
+
+// TestRelayRuntime_RecordBranchPush_RoundTrips proves the sidecar path for a
+// branch push: the capless runtime relays the push as the record_branch_push
+// op, carrying only what the push named and the identity the sidecar read, and
+// the orchestrator writes its one branch_pushed row — about the registry row
+// the identity names, keyed on it, naming the branch — and no deliverable.
+func TestRelayRuntime_RecordBranchPush_RoundTrips(t *testing.T) {
+	stores, info := newCaptureStores(t, true)
+	repoID := registerRepo(t, stores, "octo", "repo", "1")
+	srv := NewRelayServer(stores, info, nil)
+	srv.SetGitHubCredential(domain.CredentialGitHubPAT)
+	rt := newRelayRuntime(directDispatchConn{srv: srv}, info, nil)
+
+	rt.RecordBranchPush(context.Background(), BranchPush{Repo: "octo/repo", Ref: "refs/heads/feat", SHA: "abc123", Created: true},
+		domain.GitHubIdentity{RepositoryID: "1", Repository: "octo/repo"})
+
+	acts := listExternalActions(t, stores)
+	if len(acts) != 1 {
+		t.Fatalf("ledger rows = %+v, want the one push row", acts)
+	}
+	a := acts[0]
+	if a.Action != domain.ActionBranchPushed || a.RepositoryID != repoID || a.ConversationID != info.ConversationID ||
+		a.ObjectKind != domain.ObjectKindBranch || a.ObjectKey != "refs/heads/feat" ||
+		a.DedupKey != domain.BranchPushDedupKey(info.ConversationID, repoID, "refs/heads/feat", "abc123") ||
+		a.Credential != domain.CredentialGitHubPAT {
+		t.Errorf("push row = %+v, want branch_pushed about %s under the run's credential", a, repoID)
+	}
+	if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 0 {
+		t.Errorf("deliverables = %+v, want none", arts)
 	}
 }
 
@@ -155,14 +179,12 @@ func TestRelayRuntime_LinearTouchCarriesTheTeam(t *testing.T) {
 	ctx := context.Background()
 
 	rt.RecordReadTouch(ctx, domain.ProviderLinear, "ENG-1", "uuid-read", domain.EntityContainer{LinearTeamID: "team-eng"}, domain.GitHubIdentity{}, "")
-	rt.Record(ctx, &domain.Deliverable{
-		Provider: domain.ProviderLinear, Kind: domain.DeliverableKindIssue,
-		Target: "OPS-2", ExternalID: "uuid-write", State: domain.DeliverableStateIssueCreated,
-		DedupKey: domain.ObjectKey(domain.ProviderLinear, domain.DeliverableKindIssue, "uuid-write", ""),
-	}, &domain.ExternalAction{
+	created := &domain.ExternalAction{
 		Provider: domain.ProviderLinear, Action: domain.ActionIssueCreated,
 		Target: "OPS-2", ExternalID: "uuid-write", Credential: domain.CredentialLinearOrg,
-	}, domain.EntityContainer{LinearTeamID: "team-ops"}, domain.GitHubIdentity{})
+	}
+	created.SetObject(domain.ObjectKindIssue, domain.IssueObjectKey(domain.ProviderLinear, "", "uuid-write"))
+	rt.Record(ctx, nil, created, domain.EntityContainer{LinearTeamID: "team-ops"}, domain.GitHubIdentity{})
 	rt.RecordReadTouch(ctx, domain.ProviderLinear, "ENG-3", "uuid-teamless", domain.EntityContainer{}, domain.GitHubIdentity{}, "")
 
 	for uuid, team := range map[string]string{"uuid-read": "team-eng", "uuid-write": "team-ops"} {
@@ -192,14 +214,12 @@ func TestRelayRuntime_JiraTouchCarriesTheProject(t *testing.T) {
 
 	rt.RecordReadTouch(ctx, domain.ProviderJira, "ENG-1", "20001", eng, domain.GitHubIdentity{}, "")
 	resource := domain.JiraIssueResource(site, "20002")
-	rt.Record(ctx, &domain.Deliverable{
-		Provider: domain.ProviderJira, Kind: domain.DeliverableKindIssue,
-		Target: "OPS-2", ExternalID: "20002", State: domain.DeliverableStateIssueCreated,
-		DedupKey: domain.ObjectKey(domain.ProviderJira, domain.DeliverableKindIssue, resource, ""),
-	}, &domain.ExternalAction{
+	created := &domain.ExternalAction{
 		Provider: domain.ProviderJira, Action: domain.ActionIssueCreated,
 		Target: "OPS-2", Credential: domain.CredentialJiraOrg,
-	}, ops, domain.GitHubIdentity{})
+	}
+	created.SetObject(domain.ObjectKindIssue, domain.ObjectKey(domain.ProviderJira, domain.ObjectKindIssue, resource, ""))
+	rt.Record(ctx, nil, created, ops, domain.GitHubIdentity{})
 	rt.RecordReadTouch(ctx, domain.ProviderJira, "ENG-3", "20003", domain.EntityContainer{}, domain.GitHubIdentity{}, "")
 
 	for issueID, want := range map[string]domain.JiraProjectRef{"20001": eng.JiraProject, "20002": ops.JiraProject} {
@@ -232,14 +252,8 @@ func TestRelayServer_BindsOrgFromConversationInfoNotArgs(t *testing.T) {
 	bogus.OrgID = "attacker-controlled-org"
 	rt := newRelayRuntime(directDispatchConn{srv: srv}, bogus, nil)
 
-	stored, err := rt.UpsertDeliverable(context.Background(), domain.Deliverable{
-		Provider:   domain.ProviderGitHub,
-		Kind:       domain.DeliverableKindComment,
-		Target:     "octo/repo#9",
-		ExternalID: "9",
-		State:      domain.DeliverableStateCommentPosted,
-		DedupKey:   domain.ObjectKey(domain.ProviderGitHub, domain.DeliverableKindComment, "9", ""),
-	}, domain.GitHubIdentity{})
+	stored, err := rt.UpsertDeliverable(context.Background(),
+		domain.NewReviewDeliverable("octo/repo", 9, "PR_9", "head-sha", info.ConversationID), domain.GitHubIdentity{})
 	if err != nil {
 		t.Fatalf("UpsertDeliverable relay: %v", err)
 	}

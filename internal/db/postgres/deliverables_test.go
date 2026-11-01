@@ -339,8 +339,8 @@ func TestDeliverableStore_Postgres_SurvivesConversationPurge(t *testing.T) {
 
 	art, err := stores.Deliverables.Upsert(ctx, orgID, domain.Deliverable{
 		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
-		Provider: "git", Scope: "https://github.com", Kind: "branch", Target: "octo/repo",
-		State: domain.DeliverableStateBranchPushed, DedupKey: "git:branch:octo/repo:refs/heads/x",
+		Provider: "github", Scope: "https://github.com", Kind: "pull_request", Target: "octo/repo#3",
+		State: domain.DeliverableStatePROpen, DedupKey: domain.PullRequestDedupKey("PR_3"),
 	})
 	if err != nil {
 		t.Fatalf("Upsert: %v", err)
@@ -381,51 +381,50 @@ func TestDeliverableStore_Postgres_UpsertPreservesExternalIDAndURL(t *testing.T)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
-	key := domain.ObjectKey("jira", "issue", "SKY-1", "")
+	key := domain.PullRequestDedupKey("PR_1")
 	if _, err := stores.Deliverables.Upsert(ctx, orgID, domain.Deliverable{
 		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
-		Provider: "jira", Scope: "https://acme.atlassian.net", Kind: "issue", Target: "SKY-1",
-		ExternalID: "SKY-1", URL: "https://jira.example.com/browse/SKY-1",
-		State: domain.DeliverableStateIssueCreated, DedupKey: key,
+		Provider: "github", Scope: "https://github.com", Kind: "pull_request", Target: "octo/repo#1",
+		ExternalID: "1", URL: "https://github.com/octo/repo/pull/1",
+		State: domain.DeliverableStatePRDraft, DedupKey: key,
 	}); err != nil {
 		t.Fatalf("first Upsert: %v", err)
 	}
 
 	out, err := stores.Deliverables.Upsert(ctx, orgID, domain.Deliverable{
 		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
-		Provider: "jira", Scope: "https://acme.atlassian.net", Kind: "issue", Target: "SKY-1",
-		State: domain.DeliverableStateIssueUpdated, DedupKey: key,
+		Provider: "github", Scope: "https://github.com", Kind: "pull_request", Target: "octo/repo#1",
+		State: domain.DeliverableStatePROpen, DedupKey: key,
 	})
 	if err != nil {
 		t.Fatalf("second Upsert: %v", err)
 	}
-	if out.ExternalID != "SKY-1" || out.URL != "https://jira.example.com/browse/SKY-1" {
+	if out.ExternalID != "1" || out.URL != "https://github.com/octo/repo/pull/1" {
 		t.Errorf("external_id/url were blanked by an empty upsert: ext=%q url=%q", out.ExternalID, out.URL)
 	}
-	if out.State != domain.DeliverableStateIssueUpdated {
+	if out.State != domain.DeliverableStatePROpen {
 		t.Errorf("state should follow the latest writer, got %q", out.State)
 	}
 
 	// A non-empty value still overwrites.
 	out, err = stores.Deliverables.Upsert(ctx, orgID, domain.Deliverable{
 		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
-		Provider: "jira", Scope: "https://acme.atlassian.net", Kind: "issue", Target: "SKY-1",
-		ExternalID: "SKY-1", URL: "https://jira.example.com/browse/SKY-1?focusedId=9",
-		State: domain.DeliverableStateIssueUpdated, DedupKey: key,
+		Provider: "github", Scope: "https://github.com", Kind: "pull_request", Target: "octo/repo#1",
+		ExternalID: "1", URL: "https://github.com/octo/repo/pull/1/files",
+		State: domain.DeliverableStatePROpen, DedupKey: key,
 	})
 	if err != nil {
 		t.Fatalf("third Upsert: %v", err)
 	}
-	if out.URL != "https://jira.example.com/browse/SKY-1?focusedId=9" {
+	if out.URL != "https://github.com/octo/repo/pull/1/files" {
 		t.Errorf("non-empty url did not overwrite: %q", out.URL)
 	}
 }
 
-// TestDeliverableStore_Postgres_UpsertPreservesTargetOnEmpty pins that an upsert
-// leaving target empty does NOT blank the resource key an earlier upsert
-// stored — a GitHub comment-update/delete knows only the comment id, not the
-// PR number, so it can't recompute owner/repo#N and must inherit it. A
-// non-empty target still migrates (the pending→real PR path).
+// TestDeliverableStore_Postgres_UpsertPreservesTargetOnEmpty pins that an
+// upsert leaving target empty does NOT blank the target an earlier upsert
+// stored — a review's submit stamps its id and link and need not restate the
+// pull request. A non-empty target still overwrites.
 func TestDeliverableStore_Postgres_UpsertPreservesTargetOnEmpty(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -434,37 +433,37 @@ func TestDeliverableStore_Postgres_UpsertPreservesTargetOnEmpty(t *testing.T) {
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
-	key := domain.ObjectKey("github", "comment", "555", "")
+	key := domain.ReviewDedupKey("PR_7", conversationID)
 	if _, err := stores.Deliverables.Upsert(ctx, orgID, domain.Deliverable{
 		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
-		Provider: "github", Scope: "https://github.com", Kind: "comment", Target: "octo/repo#7",
-		ExternalID: "555", URL: "https://github.com/octo/repo/pull/7#issuecomment-555",
-		State: domain.DeliverableStateCommentPosted, DedupKey: key,
+		Provider: "github", Scope: "https://github.com", Kind: "review", Target: "octo/repo#7",
+		URL:   "https://github.com/octo/repo/pull/7",
+		State: domain.DeliverableStateReviewPending, DedupKey: key,
 	}); err != nil {
 		t.Fatalf("first Upsert: %v", err)
 	}
 
-	// A comment-delete that only carries the id (empty target/url).
+	// A write that carries the review's id but no target or link.
 	out, err := stores.Deliverables.Upsert(ctx, orgID, domain.Deliverable{
 		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
-		Provider: "github", Scope: "https://github.com", Kind: "comment", ExternalID: "555",
-		State: domain.DeliverableStateCommentDeleted, DedupKey: key,
+		Provider: "github", Scope: "https://github.com", Kind: "review", ExternalID: "555",
+		State: domain.DeliverableStateReviewSubmitted, DedupKey: key,
 	})
 	if err != nil {
 		t.Fatalf("second Upsert: %v", err)
 	}
-	if out.Target != "octo/repo#7" || out.URL != "https://github.com/octo/repo/pull/7#issuecomment-555" {
+	if out.Target != "octo/repo#7" || out.URL != "https://github.com/octo/repo/pull/7" {
 		t.Errorf("empty upsert blanked stable coordinates: target=%q url=%q", out.Target, out.URL)
 	}
-	if out.State != domain.DeliverableStateCommentDeleted {
+	if out.State != domain.DeliverableStateReviewSubmitted {
 		t.Errorf("state should follow the latest writer, got %q", out.State)
 	}
 
-	// A non-empty target still overwrites (migration path).
+	// A non-empty target still overwrites.
 	out, err = stores.Deliverables.Upsert(ctx, orgID, domain.Deliverable{
 		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
-		Provider: "github", Scope: "https://github.com", Kind: "comment", Target: "octo/repo#8",
-		State: domain.DeliverableStateCommentPosted, DedupKey: key,
+		Provider: "github", Scope: "https://github.com", Kind: "review", Target: "octo/repo#8",
+		State: domain.DeliverableStateReviewSubmitted, DedupKey: key,
 	})
 	if err != nil {
 		t.Fatalf("third Upsert: %v", err)
@@ -495,9 +494,9 @@ func TestDeliverableStore_Postgres_UpsertSystem_BypassesRLS(t *testing.T) {
 	// from the conversations FK.
 	art := domain.Deliverable{
 		OrgID: orgID, TeamID: teamID,
-		Provider: domain.ProviderJira, Scope: "https://acme.atlassian.net", Kind: domain.DeliverableKindIssue,
-		Target: "SKY-1", ExternalID: "SKY-1", State: domain.DeliverableStateIssueCreated,
-		DedupKey: domain.ObjectKey("jira", "issue", "SKY-1", ""),
+		Provider: domain.ProviderGitHub, Scope: "https://github.com", Kind: domain.DeliverableKindPullRequest,
+		Target: "octo/repo#1", ExternalID: "1", State: domain.DeliverableStatePRDraft,
+		DedupKey: domain.PullRequestDedupKey("PR_1"),
 	}
 
 	// The app-pool write with no claims context fails — exactly why the
@@ -511,13 +510,13 @@ func TestDeliverableStore_Postgres_UpsertSystem_BypassesRLS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpsertSystem: %v", err)
 	}
-	if out.ID == "" || out.Target != "SKY-1" || out.State != domain.DeliverableStateIssueCreated {
+	if out.ID == "" || out.Target != "octo/repo#1" || out.State != domain.DeliverableStatePRDraft {
 		t.Errorf("UpsertSystem row malformed: %+v", out)
 	}
 
 	var count int
 	if err := h.AdminDB.QueryRow(
-		`SELECT COUNT(*) FROM deliverables WHERE team_id = $1 AND dedup_key = 'jira:issue:SKY-1'`, teamID,
+		`SELECT COUNT(*) FROM deliverables WHERE team_id = $1 AND dedup_key = 'github:pull_request:PR_1'`, teamID,
 	).Scan(&count); err != nil {
 		t.Fatalf("count: %v", err)
 	}
@@ -527,10 +526,10 @@ func TestDeliverableStore_Postgres_UpsertSystem_BypassesRLS(t *testing.T) {
 }
 
 // TestDeliverableStore_Postgres_ListNonTerminalBySystem pins the reconciler's
-// org-wide admin read (TFAC-464): on the admin pool it returns EXACTLY the
-// reconcilable non-terminal rows for the org (PR draft|open, review pending,
-// branch pushed — domain.IsReconcilableNonTerminal), excludes terminal /
-// unreconcilable states, and never crosses org boundaries.
+// org-wide admin read: on the admin pool it returns EXACTLY the reconcilable
+// non-terminal rows for the org (PR draft|open —
+// domain.IsReconcilableNonTerminal), excludes terminal / unreconcilable
+// states, and never crosses org boundaries.
 func TestDeliverableStore_Postgres_ListNonTerminalBySystem(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -549,10 +548,6 @@ func TestDeliverableStore_Postgres_ListNonTerminalBySystem(t *testing.T) {
 		{domain.DeliverableKindReview, domain.DeliverableStateReviewPending},
 		{domain.DeliverableKindReview, domain.DeliverableStateReviewSubmitted},
 		{domain.DeliverableKindReview, domain.DeliverableStateReviewDismissed},
-		{domain.DeliverableKindBranch, domain.DeliverableStateBranchPushed},
-		{domain.DeliverableKindBranch, domain.DeliverableStateBranchDeleted},
-		{domain.DeliverableKindComment, domain.DeliverableStateCommentPosted},
-		{domain.DeliverableKindIssue, domain.DeliverableStateIssueCreated},
 	}
 	want := map[string]bool{}
 	for i, s := range seeds {
@@ -619,8 +614,8 @@ func TestDeliverableStore_Postgres_CountByConversation(t *testing.T) {
 	seed := func(conversationID, key string) {
 		if _, err := stores.Deliverables.Upsert(ctx, orgID, domain.Deliverable{
 			ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
-			Provider: "github", Scope: "https://github.com", Kind: "comment", Target: "octo/repo",
-			State: domain.DeliverableStateCommentPosted, DedupKey: key,
+			Provider: "github", Scope: "https://github.com", Kind: "pull_request", Target: "octo/repo",
+			State: domain.DeliverableStatePRDraft, DedupKey: key,
 		}); err != nil {
 			t.Fatalf("seed %s: %v", key, err)
 		}
@@ -667,10 +662,10 @@ func TestDeliverableStore_Postgres_CountByConversation_TeamScoped(t *testing.T) 
 	conversationID := seedPgDeliverableConversation(t, h, orgA, teamA, alice)
 
 	// Two teamA-scoped deliverables on the conversation (admin insert bypasses RLS for setup).
-	for _, key := range []string{"github:comment:octo/repo:1", "github:comment:octo/repo:2"} {
+	for _, key := range []string{"github:pull_request:PR_1", "github:pull_request:PR_2"} {
 		if _, err := h.AdminDB.Exec(`
 			INSERT INTO deliverables (org_id, conversation_id, team_id, provider, scope, kind, target, state, dedup_key)
-			VALUES ($1, $2, $3, 'github', 'https://github.com', 'comment', 'octo/repo', 'posted', $4)
+			VALUES ($1, $2, $3, 'github', 'https://github.com', 'pull_request', 'octo/repo', 'draft', $4)
 		`, orgA, conversationID, teamA, key); err != nil {
 			t.Fatalf("seed deliverable: %v", err)
 		}
@@ -726,8 +721,8 @@ func TestDeliverableStore_Postgres_ListByConversations(t *testing.T) {
 	seed := func(conversationID, key string) {
 		if _, err := stores.Deliverables.Upsert(ctx, orgID, domain.Deliverable{
 			ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
-			Provider: "github", Scope: "https://github.com", Kind: "comment", Target: "octo/repo",
-			State: domain.DeliverableStateCommentPosted, DedupKey: key,
+			Provider: "github", Scope: "https://github.com", Kind: "pull_request", Target: "octo/repo",
+			State: domain.DeliverableStatePRDraft, DedupKey: key,
 		}); err != nil {
 			t.Fatalf("seed %s: %v", key, err)
 		}
@@ -781,10 +776,10 @@ func TestDeliverableStore_Postgres_ListByConversations_TeamScoped(t *testing.T) 
 	conversationID := seedPgDeliverableConversation(t, h, orgA, teamA, alice)
 
 	// Two teamA-scoped deliverables on the conversation (admin insert bypasses RLS for setup).
-	for _, key := range []string{"github:comment:octo/repo:1", "github:comment:octo/repo:2"} {
+	for _, key := range []string{"github:pull_request:PR_1", "github:pull_request:PR_2"} {
 		if _, err := h.AdminDB.Exec(`
 			INSERT INTO deliverables (org_id, conversation_id, team_id, provider, scope, kind, target, state, dedup_key)
-			VALUES ($1, $2, $3, 'github', 'https://github.com', 'comment', 'octo/repo', 'posted', $4)
+			VALUES ($1, $2, $3, 'github', 'https://github.com', 'pull_request', 'octo/repo', 'draft', $4)
 		`, orgA, conversationID, teamA, key); err != nil {
 			t.Fatalf("seed deliverable: %v", err)
 		}
