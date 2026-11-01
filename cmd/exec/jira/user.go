@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/execout"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
 )
@@ -20,7 +21,7 @@ var userHelp = map[string]string{
 
 func handleUser(host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: " + prog.Prefix() + " jira user <action> [args]")
+		execout.ExitErr("usage: " + prog.Prefix() + " jira user <action> [args]")
 	}
 	action := args[0]
 	rest := args[1:]
@@ -39,15 +40,15 @@ func handleUser(host agenthost.Client, args []string) {
 	switch action {
 	case "search":
 		query, issue, err := parseUserSearchArgs(rest)
-		exitOnErr(err)
+		execout.ExitOnErr(err)
 		matches, err := host.JiraSearchUsers(context.Background(), issue, query)
-		exitOnErr(err)
+		execout.ExitOnErr(err)
 		if matches.Users == nil {
 			matches.Users = []jiraclient.User{}
 		}
-		printJSON(matches)
+		execout.PrintJSON(matches)
 	default:
-		exitErr(unknownUserActionMessage(prog.Prefix(), action))
+		execout.ExitErr(unknownUserActionMessage(prog.Prefix(), action))
 	}
 }
 

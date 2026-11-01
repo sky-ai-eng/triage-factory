@@ -20,10 +20,10 @@ package workspace
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/execflags"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/execout"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
 )
 
@@ -88,7 +88,7 @@ func Handle(host agenthost.Client, args []string) {
 	case "list":
 		runList(host, args[1:])
 	default:
-		exitErr("unknown workspace command: " + args[0])
+		execout.ExitErr("unknown workspace command: " + args[0])
 	}
 }
 
@@ -99,9 +99,4 @@ func printHelp() {
 // helpText renders the `workspace` usage under the invoked prefix.
 func helpText(prefix string) string {
 	return fmt.Sprintf("Usage: %s workspace <command> [args]\n\n%s\n", prefix, HelpText)
-}
-
-func exitErr(msg string) {
-	fmt.Fprintln(os.Stderr, msg)
-	os.Exit(1)
 }

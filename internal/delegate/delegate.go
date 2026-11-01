@@ -21,8 +21,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
-	"github.com/sky-ai-eng/triage-factory/internal/prskeleton"
+	"github.com/sky-ai-eng/triage-factory/internal/github/prskeleton"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 	"github.com/sky-ai-eng/triage-factory/internal/wsevent/toast"
 )
@@ -745,7 +746,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 	endFetch := s.activityFor(conversationID).begin("fetch_pr", fetchPROpDeadline)
 	pr, err := ghClient.GetPR(fetchCtx, owner, repo, prNumber, false)
 	endFetch()
-	recordSpanError(fetchSpan, err)
+	telemetry.RecordSpanError(fetchSpan, err)
 	fetchSpan.End()
 	if err != nil {
 		return runConfig{}, fmt.Errorf("failed to fetch PR: %w", err)
@@ -867,7 +868,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 		// current base instead of a clone-time-frozen ref (TFAC-505).
 		worktree.WithBaseBranch(pr.BaseRef))
 	endClone()
-	recordSpanError(cloneSpan, err)
+	telemetry.RecordSpanError(cloneSpan, err)
 	cloneSpan.End()
 	if err != nil {
 		return runConfig{}, fmt.Errorf("failed to create worktree: %w", err)

@@ -385,10 +385,10 @@ func TestProxyStartRejectsNonLoopback(t *testing.T) {
 }
 
 // TestProxyStartAllowsNonLoopbackOptIn pins the opt-in path: when
-// AllowNonLoopback=true, assertLoopback is skipped and Start accepts
+// AllowNonLoopback=true, the loopback check is skipped and Start accepts
 // non-loopback addresses. We bind to 0.0.0.0:0 (all-interfaces) —
-// assertLoopback rejects that address without the flag, so a successful
-// Start with the flag proves the bypass is working. The test also
+// bindaddr.RequireLoopback rejects that address without the flag, so a
+// successful Start with the flag proves the bypass is working. The test also
 // verifies the inverse: without AllowNonLoopback, the same address
 // is rejected before net.Listen is called.
 func TestProxyStartAllowsNonLoopbackOptIn(t *testing.T) {

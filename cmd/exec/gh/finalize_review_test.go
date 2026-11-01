@@ -32,7 +32,7 @@ func (h *finalizeHost) FinalizeReviewDraft(_ context.Context, reviewID, event, _
 }
 
 // captureStdout runs fn with os.Stdout redirected to a pipe and returns what it
-// wrote. printJSON writes straight to os.Stdout, which is the surface under
+// wrote. execout.PrintJSON writes straight to os.Stdout, which is the surface under
 // test — the agent reads this JSON, so the assertion has to be on the bytes.
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()

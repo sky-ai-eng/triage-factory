@@ -44,9 +44,9 @@ const baseFraming = "Reference data about the task that fired this run. Values c
 // metadataJSON is the primary event's metadata blob — "" is fine and simply
 // yields a block with no event fields (and no raw-metadata fence).
 //
-// skeleton is the pre-rendered PR history block (internal/prskeleton), or ""
-// for a task with no PR behind it. It is external content of exactly the same
-// class as the fields above — commit subjects and PR titles authored by
+// skeleton is the pre-rendered PR history block (internal/github/prskeleton),
+// or "" for a task with no PR behind it. It is external content of exactly the
+// same class as the fields above — commit subjects and PR titles authored by
 // whoever opened the pull request — so it rides inside the marker-bracketed
 // region rather than alongside it.
 //

@@ -18,6 +18,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/execflags"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/execout"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
 	"github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
@@ -56,7 +57,7 @@ const (
 // (Get / DownloadArtifact) needs them for the host's credential resolution.
 func handleActions(ctx context.Context, host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: " + prog.Prefix() + " gh actions <action> [flags]")
+		execout.ExitErr("usage: " + prog.Prefix() + " gh actions <action> [flags]")
 	}
 
 	action := args[0]
@@ -75,7 +76,7 @@ func handleActions(ctx context.Context, host agenthost.Client, args []string) {
 	case "list-runs":
 		actionsListRuns(ctx, host, flags)
 	default:
-		exitErr(unknownVerbMessage("actions action", "actions", action,
+		execout.ExitErr(unknownVerbMessage("actions action", "actions", action,
 			[]string{"download-logs", "list-runs"}, prog.Prefix()+" gh actions --help"))
 	}
 }
@@ -142,19 +143,19 @@ func actionsListRuns(ctx context.Context, host agenthost.Client, args []string) 
 	sha := flagVal(args, "--sha")
 
 	if (prStr == "") == (sha == "") {
-		exitErr("usage: " + prog.Prefix() + " gh actions list-runs (--pr <N> | --sha <SHA>) [--repo owner/repo]")
+		execout.ExitErr("usage: " + prog.Prefix() + " gh actions list-runs (--pr <N> | --sha <SHA>) [--repo owner/repo]")
 	}
 
 	owner, repo, err := resolveRepo(ctx, host, args)
 	if err != nil {
-		exitErr(err.Error())
+		execout.ExitErr(err.Error())
 	}
 	client := newHostAPI(host, owner, repo)
 
 	if prStr != "" {
 		prNum, err := strconv.Atoi(prStr)
 		if err != nil || prNum <= 0 {
-			exitErr(fmt.Sprintf("invalid --pr value %q: expected a positive integer", prStr))
+			execout.ExitErr(fmt.Sprintf("invalid --pr value %q: expected a positive integer", prStr))
 		}
 		// Compact fetch — GetPR is heavier than we need (pulls reviews and
 		// comments) but it's the existing path that correctly handles auth,
@@ -163,17 +164,17 @@ func actionsListRuns(ctx context.Context, host agenthost.Client, args []string) 
 		// discovery command agents run at most once per task.
 		pr, err := client.GetPR(ctx, owner, repo, prNum, false)
 		if err != nil {
-			exitErr(fmt.Sprintf("fetch PR #%d: %v", prNum, err))
+			execout.ExitErr(fmt.Sprintf("fetch PR #%d: %v", prNum, err))
 		}
 		if pr.HeadSHA == "" {
-			exitErr(fmt.Sprintf("PR #%d has no head SHA — can't list runs for it", prNum))
+			execout.ExitErr(fmt.Sprintf("PR #%d has no head SHA — can't list runs for it", prNum))
 		}
 		sha = pr.HeadSHA
 	}
 
 	runs, err := fetchRunsForSHA(ctx, client, owner, repo, sha)
 	if err != nil {
-		exitErr(err.Error())
+		execout.ExitErr(err.Error())
 	}
 
 	filter := listRunFilter{SHA: sha}
@@ -183,7 +184,7 @@ func actionsListRuns(ctx context.Context, host agenthost.Client, args []string) 
 		filter.PR = n
 	}
 
-	printJSON(listRunsResult{
+	execout.PrintJSON(listRunsResult{
 		Owner:   owner,
 		Repo:    repo,
 		Filter:  filter,
@@ -308,7 +309,7 @@ type jobInfo struct {
 //
 // The resource-owning work (temp file + destination directory) lives in
 // downloadAndExtractLogs / downloadPerJobLogsToDir so defers actually fire
-// on error — exitErr calls os.Exit, which skips defers, so inlining the
+// on error — execout.ExitErr calls os.Exit, which skips defers, so inlining the
 // logic here would leak the temp zip (and leave a half-extracted destDir)
 // on every failure path.
 func actionsDownloadLogs(ctx context.Context, host agenthost.Client, args []string) {
@@ -319,16 +320,16 @@ func actionsDownloadLogs(ctx context.Context, host agenthost.Client, args []stri
 	// over resolution errors.
 	runIDStr := firstPositional(args)
 	if runIDStr == "" {
-		exitErr("usage: " + prog.Prefix() + " gh actions download-logs <run_id> [--repo owner/repo]")
+		execout.ExitErr("usage: " + prog.Prefix() + " gh actions download-logs <run_id> [--repo owner/repo]")
 	}
 	runID, err := strconv.ParseInt(runIDStr, 10, 64)
 	if err != nil || runID <= 0 {
-		exitErr(fmt.Sprintf("invalid run_id %q: expected a positive integer", runIDStr))
+		execout.ExitErr(fmt.Sprintf("invalid run_id %q: expected a positive integer", runIDStr))
 	}
 
 	owner, repo, err := resolveRepo(ctx, host, args)
 	if err != nil {
-		exitErr(err.Error())
+		execout.ExitErr(err.Error())
 	}
 	client := newHostAPI(host, owner, repo)
 
@@ -340,11 +341,11 @@ func actionsDownloadLogs(ctx context.Context, host agenthost.Client, args []stri
 	// RemoveAll / MkdirAll / zip extraction escape the run root.
 	root, err := runRoot()
 	if err != nil {
-		exitErr(err.Error())
+		execout.ExitErr(err.Error())
 	}
 	destDir, err := safeDestDirForRun(root, runID)
 	if err != nil {
-		exitErr(err.Error())
+		execout.ExitErr(err.Error())
 	}
 
 	// Always fetch the job list up front. Cheap (single JSON GET) and the
@@ -352,7 +353,7 @@ func actionsDownloadLogs(ctx context.Context, host agenthost.Client, args []stri
 	// branch on whether Jobs[] is present.
 	jobs, err := fetchJobsForRun(ctx, client, owner, repo, runID)
 	if err != nil {
-		exitErr(err.Error())
+		execout.ExitErr(err.Error())
 	}
 	runStatus := deriveRunStatus(jobs)
 
@@ -363,12 +364,12 @@ func actionsDownloadLogs(ctx context.Context, host agenthost.Client, args []stri
 	if err == nil {
 		entries, listErr := topLevelEntries(destDir)
 		if listErr != nil {
-			exitErr(fmt.Sprintf("list extracted entries: %v", listErr))
+			execout.ExitErr(fmt.Sprintf("list extracted entries: %v", listErr))
 		}
 		if entries == nil {
 			entries = []string{} // JSON null would be misleading; empty archive is an empty list
 		}
-		printJSON(downloadLogsResult{
+		execout.PrintJSON(downloadLogsResult{
 			RunID:           runID,
 			Owner:           owner,
 			Repo:            repo,
@@ -387,15 +388,15 @@ func actionsDownloadLogs(ctx context.Context, host agenthost.Client, args []stri
 	// real problem and should propagate so the agent sees it.
 	var he *github.HTTPError
 	if !errors.As(err, &he) || he.StatusCode != http.StatusNotFound {
-		exitErr(err.Error())
+		execout.ExitErr(err.Error())
 	}
 
 	bytesDownloaded, jobs, err = downloadPerJobLogsToDir(ctx, client, owner, repo, destDir, jobs)
 	if err != nil {
-		exitErr(err.Error())
+		execout.ExitErr(err.Error())
 	}
 
-	printJSON(downloadLogsResult{
+	execout.PrintJSON(downloadLogsResult{
 		RunID:           runID,
 		Owner:           owner,
 		Repo:            repo,
@@ -573,7 +574,7 @@ func downloadPerJobLogsToDir(ctx context.Context, client ghAPI, owner, repo, des
 // downloadAndExtractLogs owns every on-disk resource the command needs: the
 // destination directory and the temp zip file. It's split out from
 // actionsDownloadLogs specifically so that defers actually run on failure —
-// the outer function uses exitErr (→ os.Exit), which skips defers, so any
+// the outer function uses execout.ExitErr (→ os.Exit), which skips defers, so any
 // cleanup logic has to live under a function that can return an error.
 //
 // Cleanup semantics:
