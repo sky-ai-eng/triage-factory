@@ -304,7 +304,8 @@ tracks the 1,000 its listing returns.
   a re-read 30 seconds after the `UNKNOWN`, about 1 in 6 would.
 - The first move reads every tracked PR's paths: 63 `PRChangedPaths`
   queries and 201 REST file-list pages for the PRs with a rename or copy,
-  9.3 s of the cycle at 30 ms per request. Later moves read only the PRs
+  which make that cycle 9.3 s at 30 ms per request, against about 1.1 s
+  for a cycle with no move. Later moves read only the PRs
   pushed since the last one: 1 to 6 queries.
 - The warm cycles cost 1,644 REST requests (50 of them 304s), 365 GraphQL
   requests and 547 points in all: 5.5 points a cycle. The listing changes
