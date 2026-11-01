@@ -185,3 +185,37 @@ func TestJailLost_TheLastLossTheBudgetAllowsParksForAPerson(t *testing.T) {
 		t.Errorf("claim after the park = (%+v, %v), want nothing until someone sends a message", next, err)
 	}
 }
+
+// A park that lands nothing is not counted as one. The fence held, so the
+// engagement is not fenced, but the row had settled under it and the park
+// flipped nothing: the conversation is not paused, and an operator alert
+// saying it is would send someone after a run that is not waiting.
+func TestJailLost_AParkThatLandsNothingIsNotCounted(t *testing.T) {
+	f := newStallFixture(t, "r-jail-lost-settled", activityTimings{idle: time.Hour})
+	collect := sandboxMemoryMetrics(t)
+	if _, err := f.database.Exec(`UPDATE conversations SET status = ? WHERE id = ?`, domain.StatusFailed, f.conversationID); err != nil {
+		t.Fatalf("settle the conversation: %v", err)
+	}
+
+	disp := f.s.recordNativeResult(f.claimCtx, runmode.LocalDefaultOrgID, f.conversationID, f.task,
+		runConfig{orgID: runmode.LocalDefaultOrgID, claimID: f.claimID, jailLosses: maxJailLosses - 1},
+		"", "", "manual", runmode.LocalDefaultUserID, time.Now(),
+		agentloop.Result{Kind: agentloop.ResultToolHostLost, Err: &agentloop.ToolHostLostError{
+			Reason: "the sandbox reached its 4096 MB memory limit and the kernel ended it", MemoryLimit: true, Err: io.EOF,
+		}}, nil)
+	if disp.fenced {
+		t.Fatalf("disposition = %+v, want unfenced: the claim was still this engagement's", disp)
+	}
+
+	var status string
+	if err := f.database.QueryRow(`SELECT COALESCE(status, '') FROM conversations WHERE id = ?`, f.conversationID).Scan(&status); err != nil {
+		t.Fatalf("read conversation: %v", err)
+	}
+	if status != domain.StatusFailed {
+		t.Fatalf("status = %q, want the settled row left as it was", status)
+	}
+	if got := counterAt(t, collect(), "conversations.sandbox_lost_parks",
+		attribute.String("memory_limit", "true"), attribute.String("org.id", runmode.LocalDefaultOrgID)); got != 0 {
+		t.Errorf("sandbox-lost parks = %d, want 0 for a park that flipped nothing", got)
+	}
+}

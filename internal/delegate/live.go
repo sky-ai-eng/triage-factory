@@ -410,13 +410,22 @@ func invalidEnvelopeCorrection() string {
 // act on the run's state either — it belongs to whoever holds the claim now,
 // or, for a pending stop, to the dispatcher's settlement.
 func (s *Spawner) markConversationOpen(ctx context.Context, park liveParkContext) (fenced bool) {
+	fenced, _ = s.markConversationOpenFlipped(ctx, park)
+	return fenced
+}
+
+// markConversationOpenFlipped is markConversationOpen, also reporting whether
+// this call flipped the row open. flipped is false whenever fenced is, and
+// also for a write that failed and for a row a racing terminal or an earlier
+// park had already settled: none of those parked anything.
+func (s *Spawner) markConversationOpenFlipped(ctx context.Context, park liveParkContext) (fenced, flipped bool) {
 	if s.conversations == nil {
-		return false // test fixture with no DB wired
+		return false, false // test fixture with no DB wired
 	}
 	if park.claimID == "" {
 		delegateLog.Error("park without a claim id — every park is the holder's fenced write; recording nothing",
 			"conversation", park.conversationID, "org_id", park.orgID)
-		return true
+		return true, false
 	}
 	// The same detachment this always had — a park must land even when the
 	// run's ctx is already cancelled, which is the ordinary case here (a user
@@ -434,19 +443,19 @@ func (s *Spawner) markConversationOpen(ctx context.Context, park liveParkContext
 		delegateLog.Error("claim fence refused the park — this engagement no longer holds the conversation; recording nothing",
 			"conversation", park.conversationID, "claim_id", park.claimID, "org_id", park.orgID,
 			"deliberate", park.reason.Deliberate, "error", err)
-		return true
+		return true, false
 	}
 	if err != nil {
 		delegateLog.Warn("mark conversation open failed", "conversation", park.conversationID, "error", err)
-		return false
+		return false, false
 	}
 	if !flipped {
 		// A racing terminal flip won, or this is an idle re-park of a row
 		// already `open` — leave its status and say nothing.
-		return false
+		return false, false
 	}
 	s.broadcastConversationUpdate(park.orgID, park.conversationID, "open")
-	return false
+	return false, true
 }
 
 // parkConversationOpen records a run as `open` when its process is gone — a
@@ -464,8 +473,22 @@ func (s *Spawner) markConversationOpen(ctx context.Context, park liveParkContext
 // out, which threw away the one thing a user who just killed a wedged run is
 // likely to want back. A stop is a park with a reason attached.
 func (s *Spawner) parkConversationOpen(ctx context.Context, park liveParkContext, sessionID string) (fenced bool) {
-	if s.leaveConversation(ctx, park, sessionID, snapshotReasonPark, s.markConversationOpen) {
-		return true
+	fenced, _ = s.parkConversationOpenFlipped(ctx, park, sessionID)
+	return fenced
+}
+
+// parkConversationOpenFlipped is parkConversationOpen, also reporting whether
+// this call is the one that parked the row, in markConversationOpenFlipped's
+// sense: a caller that counts or announces a park reads flipped, because
+// fenced false does not mean the park landed.
+func (s *Spawner) parkConversationOpenFlipped(ctx context.Context, park liveParkContext, sessionID string) (fenced, flipped bool) {
+	release := func(ctx context.Context, park liveParkContext) bool {
+		var refused bool
+		refused, flipped = s.markConversationOpenFlipped(ctx, park)
+		return refused
+	}
+	if s.leaveConversation(ctx, park, sessionID, snapshotReasonPark, release) {
+		return true, false
 	}
 	// Only the idle park toasts. A deliberate stop terminates the blueprint
 	// behind it, so "resumes on the next message" would be a promise this
@@ -475,7 +498,7 @@ func (s *Spawner) parkConversationOpen(ctx context.Context, park liveParkContext
 	if !park.reason.Deliberate && park.reason.Reason != domain.ParkReasonInvalidEnvelope {
 		toast.Info(s.wsHub, park.orgID, fmt.Sprintf("Run %s is open — resumes on the next message", shortConversationID(park.conversationID)))
 	}
-	return false
+	return false, flipped
 }
 
 // handBackOnShutdown is the park an engagement takes when its dispatcher is

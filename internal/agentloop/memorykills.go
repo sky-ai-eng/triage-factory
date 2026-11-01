@@ -84,6 +84,11 @@ type memoryKillWatch struct {
 	// told is the count every notice so far accounts for: kills at or
 	// below it have been reported, or happened before the engagement began.
 	told int
+	// lostCounted is set once the watch has counted its jail's end. A watch
+	// wraps one jail, which ends once, however many calls go on to fail
+	// against it: the configure frame's failure is not fatal, so the call
+	// after it can be explained by the same death.
+	lostCounted bool
 }
 
 func (w *memoryKillWatch) Call(name string, args map[string]any) (ToolOutcome, error) {
@@ -153,11 +158,18 @@ func (w *memoryKillWatch) Close() error { return w.host.Close() }
 // stands in, but only while no kill had been accounted for: it reports any
 // kill in the jail's life, so after one the jail survived it cannot say what
 // ended the jail.
+//
+// The kills a sent call shows the jail survived are counted as the ceiling's
+// whatever ended it, and accounted for, so no later call counts them again.
+// A request that was never sent leaves them unsorted: one of them ended the
+// jail, and nothing says which.
 func (w *memoryKillWatch) explainLostHost(name string, before int, beforeOK bool, err error) error {
 	sent := !errors.Is(err, errRequestNotSent)
 	start := w.told
 	if sent && beforeOK && before > start {
+		w.count(MemoryKillCeiling, before-start)
 		start = before
+		w.told = before
 	}
 	ended := false
 	if n, ok := w.jail.OOMKills(); ok {
@@ -172,7 +184,10 @@ func (w *memoryKillWatch) explainLostHost(name string, before int, beforeOK bool
 	if !ended {
 		return err
 	}
-	w.count(MemoryKillJailLost, 1)
+	if !w.lostCounted {
+		w.lostCounted = true
+		w.count(MemoryKillJailLost, 1)
+	}
 	return &ToolHostLostError{
 		Notice:      w.lostNotice(name, sent),
 		Reason:      "the sandbox reached " + w.limitPhrase() + " and the kernel ended it",

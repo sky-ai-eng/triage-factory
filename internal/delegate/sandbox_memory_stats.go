@@ -73,8 +73,8 @@ func recordMemoryKills(orgID string, kind agentloop.MemoryKill, n int) {
 
 // recordSandboxLostPark counts one of orgID's conversations parked because its
 // sandbox kept being lost, memoryLimit saying whether the ceiling ended the
-// last one. Called after the park landed, so a fenced or failed one counts
-// nothing.
+// last one. Called only for a park that flipped the row open, so a fenced,
+// failed or no-op one counts nothing.
 func recordSandboxLostPark(orgID string, memoryLimit bool) {
 	stats := sandboxMemory.Load()
 	if stats == nil || stats.lostParks == nil {

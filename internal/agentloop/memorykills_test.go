@@ -222,6 +222,35 @@ func TestWatchMemoryKills_CountsEveryKillOnceByKind(t *testing.T) {
 	}
 }
 
+// A jail ends once, however many calls fail against it. The configure frame
+// is the call that can die first without ending the engagement, and the call
+// after it then meets the same dead jail.
+func TestWatchMemoryKills_AJailsEndIsCountedOnce(t *testing.T) {
+	jail := &fakeJail{}
+	notSent := fmt.Errorf("agentloop: write tool request: %w: %w", errRequestNotSent, io.ErrClosedPipe)
+	w := watch(jail, 4096, func(name string, _ map[string]any) (ToolOutcome, error) {
+		if name == toolHostConfigureTool {
+			jail.kills++
+			jail.exited, jail.oomKilled = true, true
+			return ToolOutcome{}, io.EOF
+		}
+		return ToolOutcome{}, notSent
+	})
+	got, count := tally()
+	w.count = count
+
+	for _, tool := range []string{toolHostConfigureTool, "bash"} {
+		if _, err := w.Call(tool, nil); err == nil {
+			t.Fatalf("%s against a dead jail returned no error", tool)
+		} else if _, explained := lostToolHost(err); !explained {
+			t.Errorf("%s: the ceiling's end went unexplained: %v", tool, err)
+		}
+	}
+	if got[MemoryKillJailLost] != 1 || got[MemoryKillCeiling] != 0 {
+		t.Errorf("counted %v, want the one jail's end once", got)
+	}
+}
+
 // A jail with no ceiling of its own can still lose a process to the host
 // running out of memory, and the notice must not invent a limit.
 func TestWatchMemoryKills_AnUncappedJailNamesNoLimit(t *testing.T) {
@@ -269,6 +298,8 @@ func TestWatchMemoryKills_ExplainsAJailTheCeilingEnded(t *testing.T) {
 		during func(j *fakeJail)
 		// notice is how the explanation opens; empty means unexplained.
 		notice string
+		// ceiling is how many kills the call shows the jail survived.
+		ceiling int
 	}{
 		{
 			name:   "the live count rose",
@@ -287,9 +318,17 @@ func TestWatchMemoryKills_ExplainsAJailTheCeilingEnded(t *testing.T) {
 			notice: "While this tool call ran, the sandbox reached its 4096 MB memory limit, most likely because of a process you left running in the background",
 		},
 		{
-			name:   "the jail has exited, but a kill was already counted before the call",
-			before: func(j *fakeJail) { j.kills = 1 },
-			during: func(j *fakeJail) { j.exited = true; j.oomKilled = true },
+			name:    "the jail has exited, but a kill was already counted before the call",
+			before:  func(j *fakeJail) { j.kills = 1 },
+			during:  func(j *fakeJail) { j.exited = true; j.oomKilled = true },
+			ceiling: 1,
+		},
+		{
+			name:    "background kills the jail survived, then one during the call that ended it",
+			before:  func(j *fakeJail) { j.kills = 2 },
+			during:  func(j *fakeJail) { j.kills++ },
+			notice:  "This command ran, and while it ran the sandbox reached its 4096 MB memory limit.",
+			ceiling: 2,
 		},
 		{
 			name:   "the jail is still running and nothing was killed",
@@ -349,8 +388,8 @@ func TestWatchMemoryKills_ExplainsAJailTheCeilingEnded(t *testing.T) {
 			if ok {
 				wantLost = 1
 			}
-			if counted[MemoryKillJailLost] != wantLost || counted[MemoryKillCeiling] != 0 {
-				t.Errorf("counted %v, want jail_lost %d and no ceiling kills", counted, wantLost)
+			if counted[MemoryKillJailLost] != wantLost || counted[MemoryKillCeiling] != tc.ceiling {
+				t.Errorf("counted %v, want jail_lost %d and ceiling %d", counted, wantLost, tc.ceiling)
 			}
 			if !ok {
 				return

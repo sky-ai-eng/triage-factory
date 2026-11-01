@@ -132,10 +132,13 @@ func (s *Spawner) leaveOnLostJail(ctx context.Context, park liveParkContext, pri
 	if s.insertClaimStopNote(ctx, park.orgID, park.conversationID, park.claimID, creatorUserID, jailLostNote(losses, lost.Reason)) {
 		return engagementDisposition{fenced: true}
 	}
-	if s.parkConversationOpen(ctx, park, "") {
+	fenced, parked := s.parkConversationOpenFlipped(ctx, park, "")
+	if fenced {
 		return engagementDisposition{fenced: true}
 	}
-	recordSandboxLostPark(park.orgID, lost.MemoryLimit)
+	if parked {
+		recordSandboxLostPark(park.orgID, lost.MemoryLimit)
+	}
 	if lost.MemoryLimit {
 		toast.Warning(s.wsHub, park.orgID, fmt.Sprintf(
 			"Run %s is paused: its sandbox was lost %d times in a row, the last time at its memory limit. Raise TF_CLAIM_MEMORY_LIMIT_MB if it legitimately needs more, then send a message to continue.",

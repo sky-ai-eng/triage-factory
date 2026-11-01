@@ -784,6 +784,83 @@ tests:
       exp_annotations:
         summary: Sandboxes are being ended by their memory limit
         description: 'The memory limit ended about 60 sandboxes in the last hour. Each one cost its run every process it had running. Break tf_sandbox_memory_kills_total down by org_id to find the runs, and compare tf_sandbox_peak_memory_ratio across runs: if most come close to the limit, raise TF_CLAIM_MEMORY_LIMIT_MB on the executors.'
+- name: SandboxesLostToMemoryLimit counts ten new series first scraped at 1, and clears once 1h has passed
+  interval: 1m
+  input_series:
+  - series: 'tf_sandbox_memory_kills_total{kind="jail_lost",org_id="o0"}'
+    values: '_x3 1x90'
+  - series: 'tf_sandbox_memory_kills_total{kind="jail_lost",org_id="o1"}'
+    values: '_x3 1x90'
+  - series: 'tf_sandbox_memory_kills_total{kind="jail_lost",org_id="o2"}'
+    values: '_x3 1x90'
+  - series: 'tf_sandbox_memory_kills_total{kind="jail_lost",org_id="o3"}'
+    values: '_x3 1x90'
+  - series: 'tf_sandbox_memory_kills_total{kind="jail_lost",org_id="o4"}'
+    values: '_x3 1x90'
+  - series: 'tf_sandbox_memory_kills_total{kind="jail_lost",org_id="o5"}'
+    values: '_x3 1x90'
+  - series: 'tf_sandbox_memory_kills_total{kind="jail_lost",org_id="o6"}'
+    values: '_x3 1x90'
+  - series: 'tf_sandbox_memory_kills_total{kind="jail_lost",org_id="o7"}'
+    values: '_x3 1x90'
+  - series: 'tf_sandbox_memory_kills_total{kind="jail_lost",org_id="o8"}'
+    values: '_x3 1x90'
+  - series: 'tf_sandbox_memory_kills_total{kind="jail_lost",org_id="o9"}'
+    values: '_x3 1x90'
+  alert_rule_test:
+  - eval_time: 2m
+    alertname: SandboxesLostToMemoryLimit
+    exp_alerts: []
+  - eval_time: 5m
+    alertname: SandboxesLostToMemoryLimit
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+      exp_annotations:
+        summary: Sandboxes are being ended by their memory limit
+        description: 'The memory limit ended about 10 sandboxes in the last hour. Each one cost its run every process it had running. Break tf_sandbox_memory_kills_total down by org_id to find the runs, and compare tf_sandbox_peak_memory_ratio across runs: if most come close to the limit, raise TF_CLAIM_MEMORY_LIMIT_MB on the executors.'
+  - eval_time: 75m
+    alertname: SandboxesLostToMemoryLimit
+    exp_alerts: []
+- name: SandboxesLostToMemoryLimit counts a new series' later increments once, inside its value
+  interval: 1m
+  input_series:
+  - series: 'tf_sandbox_memory_kills_total{kind="jail_lost",org_id="o1"}'
+    values: '_x3 4+1x8 12x60'
+  alert_rule_test:
+  - eval_time: 20m
+    alertname: SandboxesLostToMemoryLimit
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+      exp_annotations:
+        summary: Sandboxes are being ended by their memory limit
+        description: 'The memory limit ended about 12 sandboxes in the last hour. Each one cost its run every process it had running. Break tf_sandbox_memory_kills_total down by org_id to find the runs, and compare tf_sandbox_peak_memory_ratio across runs: if most come close to the limit, raise TF_CLAIM_MEMORY_LIMIT_MB on the executors.'
+- name: SandboxesLostToMemoryLimit stays quiet for nine new series
+  interval: 1m
+  input_series:
+  - series: 'tf_sandbox_memory_kills_total{kind="jail_lost",org_id="o0"}'
+    values: '_x3 1x90'
+  - series: 'tf_sandbox_memory_kills_total{kind="jail_lost",org_id="o1"}'
+    values: '_x3 1x90'
+  - series: 'tf_sandbox_memory_kills_total{kind="jail_lost",org_id="o2"}'
+    values: '_x3 1x90'
+  - series: 'tf_sandbox_memory_kills_total{kind="jail_lost",org_id="o3"}'
+    values: '_x3 1x90'
+  - series: 'tf_sandbox_memory_kills_total{kind="jail_lost",org_id="o4"}'
+    values: '_x3 1x90'
+  - series: 'tf_sandbox_memory_kills_total{kind="jail_lost",org_id="o5"}'
+    values: '_x3 1x90'
+  - series: 'tf_sandbox_memory_kills_total{kind="jail_lost",org_id="o6"}'
+    values: '_x3 1x90'
+  - series: 'tf_sandbox_memory_kills_total{kind="jail_lost",org_id="o7"}'
+    values: '_x3 1x90'
+  - series: 'tf_sandbox_memory_kills_total{kind="jail_lost",org_id="o8"}'
+    values: '_x3 1x90'
+  alert_rule_test:
+  - eval_time: 5m
+    alertname: SandboxesLostToMemoryLimit
+    exp_alerts: []
 - name: SandboxesLostToMemoryLimit stays quiet at one run's worth, and for kills the sandbox survived
   interval: 1m
   input_series:

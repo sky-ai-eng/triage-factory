@@ -140,8 +140,24 @@ groups:
       # sees it. A run that does pause can lose up to nine sandboxes first
       # (three in place on each of three claims), so the threshold is more
       # than one run's worth in an hour.
+      #
+      # Every org and executor has its own series, and each appears at its
+      # first increment, which increase() cannot see. So a series that is new
+      # in the window (the same test as above: no sample in the hour before)
+      # counts its whole value, and every other series its increase. The
+      # `or` takes the new series' value in place of its increase, never
+      # beside it, because set operators match on labels without the
+      # metric name.
       - alert: SandboxesLostToMemoryLimit
-        expr: sum(increase(tf_sandbox_memory_kills_total{kind="jail_lost"}[1h])) > 9
+        expr: |
+          sum(
+            (
+              tf_sandbox_memory_kills_total{kind="jail_lost"}
+              unless last_over_time(tf_sandbox_memory_kills_total{kind="jail_lost"}[1h] offset 1h)
+            )
+            or
+            increase(tf_sandbox_memory_kills_total{kind="jail_lost"}[1h])
+          ) > 9
         labels:
           severity: warning
         annotations:
