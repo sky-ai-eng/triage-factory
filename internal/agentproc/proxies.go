@@ -1049,6 +1049,11 @@ const gitProxyBasicUser = "x-run"
 // names the CA: gh finds it through the process-global SSL_CERT_FILE, but git
 // resolves TLS trust from its own config.
 //
+// Two more pairs record <base> and the upstream base (githooks.ProxyBaseKey,
+// githooks.UpstreamBaseKey), because git writes the rewritten URL into the
+// merge messages it builds and the prepare-commit-msg hook needs both to undo
+// it.
+//
 // The caller folds these into the single GIT_CONFIG_* block (with
 // core.hooksPath) via encodeGitConfigEnv. Delivered via env-config
 // rather than a .git/config write because the bind-mounted worktree
@@ -1105,7 +1110,10 @@ func appendGitProxyPairs(pairs [][2]string, base, upstreamPrefix, upstream, extr
 	if caPath != "" {
 		pairs = append(pairs, [2]string{"http." + base + ".sslCAInfo", caPath})
 	}
-	return pairs
+	return append(pairs,
+		[2]string{githooks.ProxyBaseKey, base},
+		[2]string{githooks.UpstreamBaseKey, upstreamPrefix},
+	)
 }
 
 // encodeGitConfigEnv encodes git config (key, value) pairs into git's

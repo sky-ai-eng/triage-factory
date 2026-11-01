@@ -86,12 +86,19 @@ var readmeContent []byte
 //go:embed pre-push
 var prePushHook []byte
 
-// prepareCommitMsgHook is the embedded prepare-commit-msg hook (TFAC-452)
-// Ensure writes into the hooks dir. It appends a Co-authored-by: trailer
-// crediting the delegating human on manual runs, gated on the
-// TRIAGE_FACTORY_GIT_COAUTHOR_TRAILER run env var. Generic + idempotent: a
-// no-op when the var is unset (autonomous/event runs), so shipping it
-// unconditionally never affects those runs or the pre-push behavior.
+// ProxyBaseKey and UpstreamBaseKey name TF's own insteadOf rewrite to the
+// prepare-commit-msg hook, which reads them to undo it in merge messages. They
+// are set beside the rewrite rather than read off its url.<base>.insteadOf
+// entry because an operator's git config can carry insteadOf rules of its own,
+// which the hook must leave alone; set in the same config block, they exist
+// exactly when the rewrite does.
+const (
+	ProxyBaseKey    = "triagefactory.proxyBase"
+	UpstreamBaseKey = "triagefactory.upstreamBase"
+)
+
+// prepareCommitMsgHook is the embedded prepare-commit-msg hook Ensure writes
+// into the hooks dir. Its header documents what it does.
 //
 //go:embed prepare-commit-msg
 var prepareCommitMsgHook []byte

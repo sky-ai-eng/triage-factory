@@ -86,6 +86,23 @@ process in both modes:
   no proxy, so the hook keeps both roles there (push outcome unobservable
   — accepted).
 
+- `prepare-commit-msg` — two edits to the commit message, neither of which
+  can abort the commit.
+
+  1. **Merge messages.** For a merge commit (`git merge`, `git pull`), every
+     line names the upstream URL in place of the per-run git proxy address
+     the run's `insteadOf` rewrite resolved the remote to. The title's
+     closing ` into <branch>` names the branch a push refspec sends the local
+     branch to, when that branch has another name (a PR checkout's local
+     branch pushes to the pull request's head branch); this applies to a
+     `git merge -m` title too. The two URL bases come from
+     `triagefactory.proxyBase` and `triagefactory.upstreamBase`, which the
+     rewrite's config block carries. A cherry-pick or revert finished with
+     `git commit` is not a merge and is left alone.
+  2. **Co-author trailer.** On a manual run, appends the
+     `TRIAGE_FACTORY_GIT_COAUTHOR_TRAILER` line once, crediting the person
+     who started the run.
+
 ## The signing program
 
 - `ssh-sign` — not a hook. A run whose org has an active commit signer has
