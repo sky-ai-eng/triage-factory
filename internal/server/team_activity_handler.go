@@ -6,6 +6,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // --------------------------------------------------------------------
@@ -18,7 +19,7 @@ import (
 // per-source totals band (events, became-tasks, runs) plus each poller's
 // last completed cycle; by_tracked is the same totals per unit of the team's
 // tracked set, for the source pages' per-row figures. The window grammar is the usage node's own
-// (parseUsageWindow): RFC3339 or YYYY-MM-DD, defaulting to month-to-date,
+// (httpx.ParseWindow): RFC3339 or YYYY-MM-DD, defaulting to month-to-date,
 // half-open [since, until) — so a caller asking in RFC3339 windows rows,
 // not whole days.
 //
@@ -96,7 +97,7 @@ func (s *Server) handleTeamActivity(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now().UTC()
-	since, until, errMsg := parseUsageWindow(r.URL.Query(), now)
+	since, until, errMsg := httpx.ParseWindow(r.URL.Query(), now)
 	if errMsg != "" {
 		badRequest(w, errMsg)
 		return

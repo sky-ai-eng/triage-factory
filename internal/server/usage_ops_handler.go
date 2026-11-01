@@ -50,7 +50,7 @@ func (h *usageHandler) handleUsageOrgOps(w http.ResponseWriter, r *http.Request)
 		writeNotConfigured(w, "the conversation queue reader is not configured on this deployment")
 		return
 	}
-	since, until, errMsg := parseUsageWindow(r.URL.Query(), time.Now().UTC())
+	since, until, errMsg := httpx.ParseWindow(r.URL.Query(), time.Now().UTC())
 	if errMsg != "" {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
 			Reason: httpx.ReasonInvalidParam, Message: errMsg,

@@ -270,11 +270,11 @@ func (h *usageHandler) handleUsageOrgArtifacts(w http.ResponseWriter, r *http.Re
 // resolveActivityWindow parses the shared half-open [since, until) filter. Each
 // side applies only when supplied, so the zero value is unbounded; a
 // non-positive window is rejected only when BOTH bounds are present (a single
-// open side is fine), mirroring parseUsageWindow.
+// open side is fine), mirroring httpx.ParseWindow.
 func resolveActivityWindow(v *httpx.Validation, since, until string) (time.Time, time.Time) {
 	var sinceT, untilT time.Time
 	if raw := strings.TrimSpace(since); raw != "" {
-		t, err := parseUsageTime(raw)
+		t, err := httpx.ParseWindowTime(raw)
 		if err != nil {
 			v.Invalid("since", "must be RFC3339 or YYYY-MM-DD")
 		} else {
@@ -282,7 +282,7 @@ func resolveActivityWindow(v *httpx.Validation, since, until string) (time.Time,
 		}
 	}
 	if raw := strings.TrimSpace(until); raw != "" {
-		t, err := parseUsageTime(raw)
+		t, err := httpx.ParseWindowTime(raw)
 		if err != nil {
 			v.Invalid("until", "must be RFC3339 or YYYY-MM-DD")
 		} else {

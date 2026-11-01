@@ -94,7 +94,7 @@ func (s *Server) answerGitHubAccount(w http.ResponseWriter, r *http.Request, org
 			httpx.WriteErrors(w, http.StatusNotFound, httpx.ErrorItem{Reason: httpx.ReasonNotFound, Message: notFoundMessage})
 			return
 		}
-		writeUpstreamGitHub(w, "could not read the account from GitHub", err)
+		httpx.WriteUpstreamUnavailable(w, "could not read the account from GitHub", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, gitHubAccountJSON{GitHubUserID: account.ID, Login: account.Login})

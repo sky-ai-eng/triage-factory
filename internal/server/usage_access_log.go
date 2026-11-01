@@ -436,16 +436,16 @@ func commitSignerLabel(d accessDetail) string {
 		signer += " " + d.Name
 	}
 	switch d.Change {
-	case commitSignerRegistered:
+	case domain.CommitSignerRegistered:
 		if d.Host != "" {
 			return "registered " + signer + " for " + d.Host
 		}
 		return "registered " + signer
-	case commitSignerVerified:
+	case domain.CommitSignerVerified:
 		return "verified " + signer
-	case commitSignerRotated:
+	case domain.CommitSignerRotated:
 		return "started rotating " + signer + "'s key"
-	case commitSignerEmailChanged:
+	case domain.CommitSignerEmailChanged:
 		if d.Email == "" {
 			return "reset " + signer + "'s commit email to its noreply address"
 		}

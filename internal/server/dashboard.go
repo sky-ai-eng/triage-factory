@@ -56,7 +56,7 @@ func (dh *dashboardHandler) handleDashboardStats(w http.ResponseWriter, r *http.
 	var v httpx.Validation
 	since := time.Now().AddDate(0, 0, -dashboardStatsWindowDays)
 	if raw := strings.TrimSpace(r.URL.Query().Get("since")); raw != "" {
-		t, err := parseUsageTime(raw)
+		t, err := httpx.ParseWindowTime(raw)
 		if err != nil {
 			v.Invalid("since", "must be RFC3339 or YYYY-MM-DD")
 		} else {

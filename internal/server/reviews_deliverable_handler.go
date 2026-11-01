@@ -388,7 +388,7 @@ func (ah *deliverablesHandler) reviewApprove(w http.ResponseWriter, r *http.Requ
 		outdated, err := ah.reconcileForApprove(r.Context(), gh, owner, repo, number, &details)
 		if err != nil {
 			releaseClaim()
-			writeUpstreamGitHub(w, "couldn't reconcile the review against the pull request's current head", err)
+			httpx.WriteUpstreamUnavailable(w, "couldn't reconcile the review against the pull request's current head", err)
 			return
 		}
 		if outdated > 0 {
@@ -456,7 +456,7 @@ func (ah *deliverablesHandler) reviewApprove(w http.ResponseWriter, r *http.Requ
 			"deliverable", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
 		// Release the claim so the user can retry — nothing reached GitHub.
 		releaseClaim()
-		writeUpstreamGitHub(w, "GitHub API error", err)
+		httpx.WriteUpstreamUnavailable(w, "GitHub API error", err)
 		return
 	}
 	submittedEvent := res.Event
@@ -701,7 +701,7 @@ func (ah *deliverablesHandler) reviewRefresh(w http.ResponseWriter, r *http.Requ
 	if err != nil || pr.HeadSHA == "" {
 		deliverablesLog.Warn("review refresh: live PR head unavailable",
 			"deliverable", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
-		writeUpstreamGitHub(w, "couldn't fetch the PR's current head from GitHub", err)
+		httpx.WriteUpstreamUnavailable(w, "couldn't fetch the PR's current head from GitHub", err)
 		return
 	}
 	liveHead := pr.HeadSHA
@@ -728,7 +728,7 @@ func (ah *deliverablesHandler) reviewRefresh(w http.ResponseWriter, r *http.Requ
 		// head we couldn't fully verify.
 		if o.MapErr != nil {
 			deliverablesLog.Warn("review refresh: reconcile failed", "deliverable", art.ID, "head", liveHead, "error", o.MapErr)
-			writeUpstreamGitHub(w, "couldn't reconcile a comment against the current head", o.MapErr)
+			httpx.WriteUpstreamUnavailable(w, "couldn't reconcile a comment against the current head", o.MapErr)
 			return
 		}
 		if o.Outdated() {

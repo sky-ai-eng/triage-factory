@@ -131,7 +131,7 @@ func (eh *eventHandlersHandler) handleEventHandlersList(w http.ResponseWriter, r
 	// this org isn't licensed for. It rides into the query as a filter, not a
 	// post-read trim, so the page and total_count agree about what the caller
 	// can see.
-	filter := db.EventHandlerListFilter{Kind: req.Kind, TeamID: req.TeamID, GatedEventTypes: gatedEventTypes(orgID)}
+	filter := db.EventHandlerListFilter{Kind: req.Kind, TeamID: req.TeamID, GatedEventTypes: entitlements.GatedEventTypes(orgID)}
 
 	var (
 		handlers []domain.EventHandler
@@ -1315,7 +1315,7 @@ func (eh *eventHandlersHandler) handleEventHandlerReorder(w http.ResponseWriter,
 	if err := eh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		visible, _, e = tx.EventHandlers.List(r.Context(), orgID,
-			db.EventHandlerListFilter{GatedEventTypes: gatedEventTypes(orgID)}, db.Unwindowed)
+			db.EventHandlerListFilter{GatedEventTypes: entitlements.GatedEventTypes(orgID)}, db.Unwindowed)
 		return e
 	}); err != nil {
 		internalError(w, "event_handlers", err)

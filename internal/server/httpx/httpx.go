@@ -137,6 +137,17 @@ func WriteUnauth(w http.ResponseWriter) {
 	WriteErrors(w, http.StatusUnauthorized, ErrorItem{Reason: ReasonUnauthenticated, Message: "unauthenticated"})
 }
 
+// WriteUpstreamUnavailable answers an upstream call that failed: 502 with a
+// static, author-written prefix and the raw detail appended only in local mode
+// (LocalDetail). The caller logs the error itself — this only shapes the
+// response.
+func WriteUpstreamUnavailable(w http.ResponseWriter, msg string, err error) {
+	WriteErrors(w, http.StatusBadGateway, ErrorItem{
+		Reason:  ReasonUpstreamUnavailable,
+		Message: msg + LocalDetail(err),
+	})
+}
+
 // Forbidden writes a 403: the caller is authenticated and can see the
 // resource, but the action is refused. Callers that must NOT disclose the
 // resource's existence use NotFound instead — the disclosure rule decides

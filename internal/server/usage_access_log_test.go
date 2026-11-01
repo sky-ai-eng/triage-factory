@@ -199,32 +199,32 @@ func TestAccessChangeLabel(t *testing.T) {
 		},
 		{
 			name:   "commit signer registration names the account and host",
-			change: domain.AccessChange{Action: domain.AccessActionCredentialSet, DetailJSON: accessDetailCommitSigner(commitSignerRegistered, "https://github.com", "octocat", "ssh-ed25519 AAAA", "")},
+			change: domain.AccessChange{Action: domain.AccessActionCredentialSet, DetailJSON: domain.AccessDetailCommitSigner(domain.CommitSignerRegistered, "https://github.com", "octocat", "ssh-ed25519 AAAA", "")},
 			want:   "registered the commit signer octocat for https://github.com",
 		},
 		{
 			name:   "commit signer verify",
-			change: domain.AccessChange{Action: domain.AccessActionCredentialSet, DetailJSON: accessDetailCommitSigner(commitSignerVerified, "https://github.com", "octocat", "ssh-ed25519 AAAA", "")},
+			change: domain.AccessChange{Action: domain.AccessActionCredentialSet, DetailJSON: domain.AccessDetailCommitSigner(domain.CommitSignerVerified, "https://github.com", "octocat", "ssh-ed25519 AAAA", "")},
 			want:   "verified the commit signer octocat",
 		},
 		{
 			name:   "commit signer rotation",
-			change: domain.AccessChange{Action: domain.AccessActionCredentialSet, DetailJSON: accessDetailCommitSigner(commitSignerRotated, "https://github.com", "octocat", "ssh-ed25519 BBBB", "")},
+			change: domain.AccessChange{Action: domain.AccessActionCredentialSet, DetailJSON: domain.AccessDetailCommitSigner(domain.CommitSignerRotated, "https://github.com", "octocat", "ssh-ed25519 BBBB", "")},
 			want:   "started rotating the commit signer octocat's key",
 		},
 		{
 			name:   "commit signer email set names the address",
-			change: domain.AccessChange{Action: domain.AccessActionCredentialSet, DetailJSON: accessDetailCommitSigner(commitSignerEmailChanged, "https://github.com", "octocat", "", "bot@acme.example")},
+			change: domain.AccessChange{Action: domain.AccessActionCredentialSet, DetailJSON: domain.AccessDetailCommitSigner(domain.CommitSignerEmailChanged, "https://github.com", "octocat", "", "bot@acme.example")},
 			want:   "set the commit signer octocat's commit email to bot@acme.example",
 		},
 		{
 			name:   "commit signer email reset",
-			change: domain.AccessChange{Action: domain.AccessActionCredentialSet, DetailJSON: accessDetailCommitSigner(commitSignerEmailChanged, "https://github.com", "octocat", "", "")},
+			change: domain.AccessChange{Action: domain.AccessActionCredentialSet, DetailJSON: domain.AccessDetailCommitSigner(domain.CommitSignerEmailChanged, "https://github.com", "octocat", "", "")},
 			want:   "reset the commit signer octocat's commit email to its noreply address",
 		},
 		{
 			name:   "commit signer removal",
-			change: domain.AccessChange{Action: domain.AccessActionCredentialRemoved, DetailJSON: accessDetailCommitSigner("", "https://github.com", "octocat", "", "")},
+			change: domain.AccessChange{Action: domain.AccessActionCredentialRemoved, DetailJSON: domain.AccessDetailCommitSigner("", "https://github.com", "octocat", "", "")},
 			want:   "removed the commit signer octocat for https://github.com",
 		},
 		{

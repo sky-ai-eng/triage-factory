@@ -3,9 +3,7 @@ package server
 import (
 	"context"
 	"net/http"
-	"net/url"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -171,7 +169,7 @@ func (h *usageHandler) handleUsageMe(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	since, until, errMsg := parseUsageWindow(r.URL.Query(), time.Now().UTC())
+	since, until, errMsg := httpx.ParseWindow(r.URL.Query(), time.Now().UTC())
 	if errMsg != "" {
 		badRequest(w, errMsg)
 		return
@@ -249,7 +247,7 @@ func (h *usageHandler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "usage", err)
 		return
 	}
-	since, until, errMsg := parseUsageWindow(r.URL.Query(), time.Now().UTC())
+	since, until, errMsg := httpx.ParseWindow(r.URL.Query(), time.Now().UTC())
 	if errMsg != "" {
 		badRequest(w, errMsg)
 		return
@@ -328,7 +326,7 @@ func (h *usageHandler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	since, until, errMsg := parseUsageWindow(r.URL.Query(), time.Now().UTC())
+	since, until, errMsg := httpx.ParseWindow(r.URL.Query(), time.Now().UTC())
 	if errMsg != "" {
 		badRequest(w, errMsg)
 		return
@@ -583,57 +581,6 @@ func (h *usageHandler) resolveGovernedOrgAdmin(w http.ResponseWriter, r *http.Re
 }
 
 // --- window parsing ---
-
-// parseUsageWindow resolves the [since, until) read window from the query
-// string. Both absent → the current calendar month (UTC) up to now. Each
-// present value parses as RFC3339 or YYYY-MM-DD (a bare date → UTC midnight).
-// Returns a non-empty errMsg on a malformed value (the handler 400s with it).
-func parseUsageWindow(q url.Values, now time.Time) (since, until time.Time, errMsg string) {
-	sinceStr := strings.TrimSpace(q.Get("since"))
-	untilStr := strings.TrimSpace(q.Get("until"))
-	if sinceStr == "" && untilStr == "" {
-		since = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
-		until = now
-		return since, until, ""
-	}
-	if sinceStr != "" {
-		t, err := parseUsageTime(sinceStr)
-		if err != nil {
-			return time.Time{}, time.Time{}, "invalid 'since': want RFC3339 or YYYY-MM-DD"
-		}
-		since = t
-	}
-	if untilStr != "" {
-		t, err := parseUsageTime(untilStr)
-		if err != nil {
-			return time.Time{}, time.Time{}, "invalid 'until': want RFC3339 or YYYY-MM-DD"
-		}
-		until = t
-	}
-	// When both bounds are supplied, reject a non-positive window (since >=
-	// until). The read is half-open [since, until), so since == until is empty
-	// and since > until is inverted — both would otherwise return a misleading
-	// 200 with no rows and mask a client bug. Single-bound requests leave the
-	// other side open (zero), so there's no ordering to check.
-	if !since.IsZero() && !until.IsZero() && !since.Before(until) {
-		return time.Time{}, time.Time{}, "'since' must be before 'until'"
-	}
-	return since, until, ""
-}
-
-// parseUsageTime accepts a full RFC3339 timestamp or a bare YYYY-MM-DD date
-// (interpreted as UTC midnight). Always returns UTC so the day-bucketing and
-// the view's occurred_at compare in one zone.
-func parseUsageTime(s string) (time.Time, error) {
-	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		return t.UTC(), nil
-	}
-	t, err := time.Parse("2006-01-02", s)
-	if err != nil {
-		return time.Time{}, err
-	}
-	return t.UTC(), nil
-}
 
 // --- aggregation (pure) ---
 

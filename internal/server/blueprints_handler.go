@@ -96,7 +96,7 @@ func (bh *blueprintsHandler) handleBlueprintsList(w http.ResponseWriter, r *http
 	// into the query as a filter rather than trimming the page afterwards:
 	// a post-window trim makes the page short and total_count a lie about
 	// rows the caller cannot see.
-	filter := db.BlueprintListFilter{TeamID: req.TeamID, GatedEventTypes: gatedEventTypes(orgID)}
+	filter := db.BlueprintListFilter{TeamID: req.TeamID, GatedEventTypes: entitlements.GatedEventTypes(orgID)}
 
 	var (
 		blueprints []domain.Blueprint
@@ -111,20 +111,6 @@ func (bh *blueprintsHandler) handleBlueprintsList(w http.ResponseWriter, r *http
 		return
 	}
 	httpx.WriteList(w, page, blueprints, total)
-}
-
-// gatedEventTypes returns the event types orgID is NOT entitled to fire on.
-// The catalog is a fixed, small registry, so deriving the complement here is
-// cheaper than teaching the store about entitlements — and it keeps the gate's
-// policy in one place while the store only applies a set.
-func gatedEventTypes(orgID string) []string {
-	var gated []string
-	for _, et := range domain.AllEventTypes() {
-		if !entitlements.EventTypeAllowed(orgID, et.ID) {
-			gated = append(gated, et.ID)
-		}
-	}
-	return gated
 }
 
 // handleBlueprintGet is the canonical single read: one blueprint, in the

@@ -2,37 +2,11 @@ package server
 
 import (
 	"net/http"
-	"slices"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
-
-// --- gatedEventTypes (pure unit test) ------------------------------------
-//
-// The store's query applies the visibility rule (hide a blueprint iff it has
-// at least one trigger and every one fires on a gated type); the handler
-// derives which event types the org is not entitled to.
-
-func TestGatedEventTypes_ListsOnlyUnlicensedTypes(t *testing.T) {
-	gateJiraForTest(t)
-	gated := gatedEventTypes("any-org")
-	if !slices.Contains(gated, domain.EventJiraIssueAssigned) {
-		t.Errorf("gated = %v, want it to contain the unlicensed jira type", gated)
-	}
-	if slices.Contains(gated, domain.EventGitHubPROpened) {
-		t.Errorf("gated = %v, want it NOT to contain an ungated github type", gated)
-	}
-}
-
-func TestGatedEventTypes_FeatureGranted_IsEmptyOfThatType(t *testing.T) {
-	gateJiraForTest(t)
-	grantTestGateFeature(t)
-	if gated := gatedEventTypes("any-org"); slices.Contains(gated, domain.EventJiraIssueAssigned) {
-		t.Errorf("gated = %v, want the jira type absent once the org holds the feature", gated)
-	}
-}
 
 // --- the blueprint list filter (HTTP-level, single-trigger reality) ---
 

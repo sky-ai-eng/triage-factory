@@ -66,17 +66,6 @@ func deliverableIDOr404(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return uuidPathOr404(w, r, "id", "deliverable")
 }
 
-// writeUpstreamGitHub answers a GitHub call that failed: 502 with a static,
-// author-written prefix and the raw detail appended only in local mode (the
-// LocalDetail seam). The caller logs the error itself — this only shapes the
-// response.
-func writeUpstreamGitHub(w http.ResponseWriter, msg string, err error) {
-	httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{
-		Reason:  httpx.ReasonUpstreamUnavailable,
-		Message: msg + httpx.LocalDetail(err),
-	})
-}
-
 // injectDeliverableNote feeds the deliverable's drafting conversation the agent-
 // facing <system-note> for a just-completed resolution. Fully decoupled from
 // the resolution itself: a live conversation is steered (the actual delivery
@@ -404,7 +393,7 @@ func (ah *deliverablesHandler) handleDeliverablePRUpdate(w http.ResponseWriter, 
 			// We can't reconstruct the omitted field without the current PR state,
 			// and guessing from a stale snapshot risks clobbering. Fail loudly.
 			deliverablesLog.Warn("GetPR for partial-edit baseline failed", "deliverable", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
-			writeUpstreamGitHub(w, "couldn't read the current PR to apply a partial edit", err)
+			httpx.WriteUpstreamUnavailable(w, "couldn't read the current PR to apply a partial edit", err)
 			return
 		}
 		title = live.Title
@@ -432,7 +421,7 @@ func (ah *deliverablesHandler) handleDeliverablePRUpdate(w http.ResponseWriter, 
 	// a readable reason.
 	if err := gh.UpdatePR(r.Context(), owner, repo, number, title, body); err != nil {
 		deliverablesLog.Warn("UpdatePR failed", "deliverable", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
-		writeUpstreamGitHub(w, "GitHub API error", err)
+		httpx.WriteUpstreamUnavailable(w, "GitHub API error", err)
 		return
 	}
 
@@ -550,7 +539,7 @@ func (ah *deliverablesHandler) handleDeliverableDiff(w http.ResponseWriter, r *h
 	if err != nil {
 		deliverablesLog.Error("deliverable diff failed",
 			"deliverable", art.ID, "owner", owner, "repo", repo, "number", number, "finalize_frame", useFin, "error", err)
-		writeUpstreamGitHub(w, "GitHub API error", err)
+		httpx.WriteUpstreamUnavailable(w, "GitHub API error", err)
 		return
 	}
 
@@ -619,7 +608,7 @@ func (ah *deliverablesHandler) liveDraftOr409(w http.ResponseWriter, r *http.Req
 	live, err := gh.GetPRBasic(r.Context(), owner, repo, number)
 	if err != nil {
 		deliverablesLog.Warn("live PR read before resolve failed", "deliverable", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
-		writeUpstreamGitHub(w, "couldn't read the PR on GitHub", err)
+		httpx.WriteUpstreamUnavailable(w, "couldn't read the PR on GitHub", err)
 		return nil, false
 	}
 	stillDraft := live.Draft && !live.Merged && strings.EqualFold(live.State, "open")
@@ -755,7 +744,7 @@ func (ah *deliverablesHandler) handleDeliverableApprove(w http.ResponseWriter, r
 
 	if err := gh.MarkPRReady(r.Context(), owner, repo, number); err != nil {
 		deliverablesLog.Warn("MarkPRReady failed", "deliverable", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
-		writeUpstreamGitHub(w, "GitHub API error", err)
+		httpx.WriteUpstreamUnavailable(w, "GitHub API error", err)
 		return
 	}
 
@@ -1011,7 +1000,7 @@ func (ah *deliverablesHandler) handleDeliverableReject(w http.ResponseWriter, r 
 		return
 	default:
 		deliverablesLog.Warn("reject: DeleteBranchRef failed; nothing changed", "deliverable", art.ID, "owner", owner, "repo", repo, "branch", details.HeadBranch, "error", err)
-		writeUpstreamGitHub(w, "GitHub refused to delete branch "+details.HeadBranch+"; the PR is still a draft", err)
+		httpx.WriteUpstreamUnavailable(w, "GitHub refused to delete branch "+details.HeadBranch+"; the PR is still a draft", err)
 		return
 	}
 
