@@ -249,7 +249,7 @@ func TestImageCacheKeys_CoverTheMigrationsUpToTheirVersion(t *testing.T) {
 			treeFS[source] = &fstest.MapFile{Data: []byte(body)}
 			tree = append(tree, &goose.Migration{Version: int64(i + 1), Source: source})
 		}
-		k, ok := imageCacheKeys(treeFS, tree)
+		k, ok := imageCacheKeysUnder("module pins\n", treeFS, tree)
 		if !ok {
 			t.Fatal("no keys for the tree")
 		}

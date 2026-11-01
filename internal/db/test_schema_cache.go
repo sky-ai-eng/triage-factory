@@ -145,24 +145,36 @@ var imageCacheModules = map[string]bool{
 
 // imageCacheKeys keys the image at each version of tree by everything it
 // depends on: the DSN images are built under, how go.mod pins each module in
-// imageCacheModules, and every migration up to that version, path and body.
-// A test binary's build info lists no dependencies, so the pins come from the
-// go.mod beside this file's source; ok is false when that cannot be read (a
-// -trimpath build, or a binary run away from its source tree), when
-// imageCachePins refuses it, or when a migration cannot be read.
+// imageCacheModules (sourceImageCachePins), and every migration up to that
+// version. ok is false when the pins or a migration cannot be read.
 func imageCacheKeys(treeFS fs.FS, tree goose.Migrations) (map[int64]string, bool) {
-	_, self, _, ok := runtime.Caller(0)
+	pins, ok := sourceImageCachePins()
 	if !ok {
 		return nil, false
+	}
+	return imageCacheKeysUnder(pins, treeFS, tree)
+}
+
+// sourceImageCachePins reads the module pins from the go.mod beside this
+// file's source: a test binary's build info lists no dependencies. ok is false
+// when that cannot be read (a -trimpath build, or a binary run away from its
+// source tree) or imageCachePins refuses it.
+func sourceImageCachePins() (string, bool) {
+	_, self, _, ok := runtime.Caller(0)
+	if !ok {
+		return "", false
 	}
 	gomod, err := os.ReadFile(filepath.Join(filepath.Dir(self), "..", "..", "go.mod"))
 	if err != nil {
-		return nil, false
+		return "", false
 	}
-	pins, ok := imageCachePins(gomod)
-	if !ok {
-		return nil, false
-	}
+	return imageCachePins(gomod)
+}
+
+// imageCacheKeysUnder chains the key of each version's image from the one
+// below it: pins and the DSN first, then each migration's path and body, so a
+// key covers the migrations up to its version and no others.
+func imageCacheKeysUnder(pins string, treeFS fs.FS, tree goose.Migrations) (map[int64]string, bool) {
 	keys := make(map[int64]string, len(tree))
 	link := sha256.Sum256([]byte("dsn " + TestDSNMemory + "\n" + pins))
 	for _, m := range tree {
