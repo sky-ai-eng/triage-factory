@@ -16,7 +16,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
@@ -302,13 +301,16 @@ func enableCommunityRepo(repoFile string) error {
 	return os.WriteFile(repoFile, data, 0o644)
 }
 
+// downloadFile fetches url into dst with no deadline of its own: ctx's is the
+// only one. The bake runs inside the broker's rootfsBakeTimeout, and a cap per
+// file would fail a large tarball on a slow link even when the whole bake fits
+// that budget, after which the bake starts over and fails the same way.
 func downloadFile(ctx context.Context, url, dst string) error {
-	client := &http.Client{Timeout: 5 * time.Minute}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
-	resp, err := client.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}
