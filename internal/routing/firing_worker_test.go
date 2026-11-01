@@ -102,7 +102,7 @@ func stubDelegateRun(database *sql.DB, task domain.Task, opts delegate.DelegateO
 	// insert's transaction, so a stub that split them would hide the very
 	// coupling the router now depends on.
 	stepIdx := 0
-	inserted, _, _, err := store.Blueprints.CreateRunWithFirstStepSystem(context.Background(), runmode.LocalDefaultOrgID, br, opts.TaskClaim, opts.OwnerTeamID,
+	inserted, _, _, _, err := store.Blueprints.CreateRunWithFirstStepSystem(context.Background(), runmode.LocalDefaultOrgID, br, opts.TaskClaim, opts.OwnerTeamID,
 		domain.Conversation{
 			ID: uuid.New().String(), TaskID: task.ID, PromptID: promptID, Model: "stub",
 			TriggerType: opts.TriggerType, TriggerID: opts.TriggerID, CreatorUserID: opts.CreatorUserID,
@@ -114,6 +114,9 @@ func stubDelegateRun(database *sql.DB, task domain.Task, opts delegate.DelegateO
 		// router branches on rather than a raw store error.
 		if errors.Is(err, dbpkg.ErrTaskBusyActiveRun) {
 			return "", delegate.ErrTaskBusy
+		}
+		if errors.Is(err, dbpkg.ErrTaskClosedForEventRun) {
+			return "", delegate.ErrTaskClosed
 		}
 		return "", err
 	}

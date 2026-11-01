@@ -92,9 +92,9 @@ func (s *Spawner) stageInjection(ctx context.Context, orgID, conversationID, sub
 // the conversation's life: the hold can be cancelled after this engagement,
 // and a row says what was true when it was sent.
 //
-// Work a person started (a conversation a person delegated, or an engagement
-// delivering a person's message) is told what happened without what to do
-// about it (TellTaskClosing). A task held for a person's deliverable is
+// Work a person drives (a conversation a person delegated, or one a person has
+// written to) is told what happened without what to do about it
+// (personStarted). A task held for a person's deliverable is
 // engaged almost only that way, by the person asking for changes before they
 // resolve it. Best effort: a failed read or stage logs, and the engagement
 // runs without the note.
@@ -118,23 +118,26 @@ func (s *Spawner) tellHeldClose(ctx context.Context, orgID string, conv *domain.
 	s.tellTaskClosing(ctx, orgID, conv.ID, s.personStarted(ctx, orgID, conv), *evt)
 }
 
-// personStarted reports whether a person started the engagement a claim on
-// conv begins: they delegated the conversation, which every step of its
-// blueprint inherits, or a message of theirs is waiting for it. A failed read
-// of the waiting input answers false, and the engagement is told.
+// personStarted reports whether a person drives the work on conv: they
+// delegated the conversation, which every step of its blueprint inherits, or
+// they have written to it. Only a person's message wakes a conversation that
+// has run (staged notes ride whatever engagement runs next), so once one has
+// written, every engagement after is theirs, and the answer holds before
+// their message is delivered and after. A failed read answers false, and the
+// engagement is told to wrap up.
 func (s *Spawner) personStarted(ctx context.Context, orgID string, conv *domain.Conversation) bool {
 	if conv.CreatorUserID != "" {
 		return true
 	}
-	if s.pendingInput == nil {
+	if s.conversations == nil {
 		return false
 	}
-	_, userID, ok, err := s.pendingInput.Peek(ctx, orgID, conv.ID)
+	wrote, err := s.conversations.HasPersonMessageSystem(ctx, orgID, conv.ID)
 	if err != nil {
-		delegateLog.Warn("read the conversation's waiting input failed; telling it of the held close", "conversation", conv.ID, "error", err)
+		delegateLog.Warn("read whether a person wrote to the conversation failed; telling it of the held close", "conversation", conv.ID, "error", err)
 		return false
 	}
-	return ok && userID != ""
+	return wrote
 }
 
 // stagedInjectionsForEngagement flushes the conversation's durable

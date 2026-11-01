@@ -11,11 +11,16 @@ import (
 
 // TaskCloseDeferralStores are the stores the held-close suite drives: the
 // hold's writes and reads on TaskStore, the terminating close that holds in
-// its transaction, and the staged notes a cleared hold withdraws.
+// its transaction, the staged notes a cleared hold withdraws, and the requeue
+// and undo that return a task to the queue.
 type TaskCloseDeferralStores struct {
 	Tasks            db.TaskStore
 	Entities         db.EntityStore
 	StagedInjections db.StagedInjectionStore
+	Swipes           db.SwipeStore
+	// SwipeUserID is who a swipe written through Swipes is attributed to,
+	// which an undo's guard keys on.
+	SwipeUserID string
 }
 
 // TaskCloseDeferralSeeder stages the graph a held close spans — task, closing
@@ -48,9 +53,9 @@ type TaskCloseDeferralFactory func(t *testing.T) (stores TaskCloseDeferralStores
 // RunTaskCloseDeferralConformance is the shared suite for a task's held
 // close: TaskStore.CloseOrHoldSystem, ApplyHeldCloseSystem,
 // CloseDeferralForTaskSystem, ListActiveCloseDeferralsSystem,
-// ClearCloseDeferralSystem and Bump's clear, the hold arm of
-// EntityStore.CloseTerminalSystem, and what holds a close: a working
-// conversation, and a deliverable awaiting a person.
+// ClearCloseDeferralSystem, the clear a bump, a requeue or an undo makes, the
+// hold arm of EntityStore.CloseTerminalSystem, and what holds a close: a
+// working conversation, and a deliverable awaiting a person.
 func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -287,6 +292,35 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 		for _, taskID := range []string{closed, plain} {
 			if d := held(t, stores.Tasks, orgID, taskID); d != nil {
 				t.Errorf("CloseDeferralForTaskSystem(%s) = %+v, want none", taskID, *d)
+			}
+		}
+	})
+
+	t.Run("Returning_a_task_to_the_queue_cancels_its_hold", func(t *testing.T) {
+		stores, orgID, seed := mk(t)
+		// A requeue of a task still working, and an undo of a person's
+		// dismiss of one: either way the person's gesture outranks the event.
+		for _, door := range []string{"requeue", "undo"} {
+			taskID := seed.Task(t)
+			seed.BlueprintAndConversation(t, taskID, "running", "")
+			if out, err := stores.Tasks.CloseOrHoldSystem(ctx, orgID, taskID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed, seed.Event(t, taskID)); err != nil || !out.Held {
+				t.Fatalf("%s: CloseOrHoldSystem = %+v (err %v), want held", door, out, err)
+			}
+			var ok bool
+			var err error
+			if door == "requeue" {
+				ok, err = stores.Swipes.RequeueTask(ctx, orgID, taskID)
+			} else {
+				if _, dismissed, derr := stores.Swipes.RecordSwipe(ctx, orgID, taskID, "dismiss", 0, nil); derr != nil || !dismissed {
+					t.Fatalf("undo: dismiss = %v (err %v)", dismissed, derr)
+				}
+				ok, err = stores.Swipes.UndoLastSwipe(ctx, orgID, taskID, stores.SwipeUserID)
+			}
+			if err != nil || !ok {
+				t.Fatalf("%s = %v (err %v), want the task back in the queue", door, ok, err)
+			}
+			if d := held(t, stores.Tasks, orgID, taskID); d != nil {
+				t.Errorf("held close after a %s = %+v, want none", door, *d)
 			}
 		}
 	})

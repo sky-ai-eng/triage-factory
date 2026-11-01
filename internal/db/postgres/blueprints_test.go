@@ -61,6 +61,24 @@ func TestBlueprintStore_Postgres_OneActiveRunPerTaskConformance(t *testing.T) {
 	})
 }
 
+// TestBlueprintStore_Postgres_EventFiringOnAResolvedTask runs the shared
+// resolved-task firing suite against the Postgres impl.
+func TestBlueprintStore_Postgres_EventFiringOnAResolvedTask(t *testing.T) {
+	h := pgtest.Shared(t)
+	dbtest.RunEventFiringOnAResolvedTaskConformance(t, func(t *testing.T) (db.BlueprintStore, dbtest.BlueprintSequenceScaffold) {
+		return pgSequenceScaffold(t, h)
+	})
+}
+
+// TestBlueprintStore_Postgres_FiringDelegationBoundary runs the shared
+// delegation-boundary suite against the Postgres impl.
+func TestBlueprintStore_Postgres_FiringDelegationBoundary(t *testing.T) {
+	h := pgtest.Shared(t)
+	dbtest.RunFiringDelegationBoundaryConformance(t, func(t *testing.T) (db.BlueprintStore, dbtest.BlueprintSequenceScaffold) {
+		return pgSequenceScaffold(t, h)
+	})
+}
+
 // TestBlueprintStore_Postgres_IsNewestRunForTask runs the shared newest-run
 // suite against the Postgres impl, on the admin pool. Its creator-scoped
 // sibling below covers what only a claims-carrying connection can show.

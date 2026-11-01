@@ -238,7 +238,7 @@ func TestFiringWorker_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
 	priorBlueprintRunID := uuid.New().String()
 	priorStepID := uuid.New().String()
 	stepIdx := 0
-	inserted, _, _, err := sqlitestore.New(database).Blueprints.CreateRunWithFirstStepSystem(t.Context(), runmode.LocalDefaultOrgID, domain.BlueprintRun{
+	inserted, _, _, _, err := sqlitestore.New(database).Blueprints.CreateRunWithFirstStepSystem(t.Context(), runmode.LocalDefaultOrgID, domain.BlueprintRun{
 		ID:                priorBlueprintRunID,
 		BlueprintID:       blueprintID,
 		TaskID:            taskID,

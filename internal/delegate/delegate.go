@@ -170,6 +170,12 @@ var ErrTaskBusy = errors.New("delegate: another run is active on this task")
 // there is nothing to re-fire and the original run's claim still stands.
 var ErrAlreadyFired = errors.New("delegate: run already fired for this (event, trigger)")
 
+// ErrTaskClosed is returned by Delegate on the event path when the task had
+// closed, or an event held its close, by the time the firing locked it — a
+// close that landed after the router's own check. No run starts, and the
+// router skips the firing as it skips one on a closed task.
+var ErrTaskClosed = errors.New("delegate: the task closed, or its close is held")
+
 // DelegateOpts carries the per-call inputs to Delegate that grew past
 // the comfortable positional-arg threshold. The struct exists so
 // adding a field (CreatorUserID, future multi-mode session context)
@@ -482,47 +488,17 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 		Status:       domain.BlueprintRunStatusRunning,
 		StepPlan:     stepPlan,
 	}
-	// The delegation boundary, and it lives here rather than at any one door so
-	// that every door inherits it: a person's re-delegate, the router's fire on
-	// a matching event, the pending-firings drain, and whatever calls this next.
-	// Step 0 must never open on a task whose prior conversation is still
-	// un-ended, or the task carries two and nothing can say which it is about —
-	// with the concrete costs that a concluded step still passes the follow-up
-	// composer while the claim arm reaches only the newest row, so a person's
-	// message strands, and an un-ended conversation owes no memory, so the new
-	// run opens without its predecessor's account of the work.
-	//
-	// Terminal rows only, and before the insert. A LIVE row belongs to whoever
-	// is driving it: the delegate route stops its conversations before calling
-	// here, the router never reaches this with one live (the task gate folds
-	// the event into it instead), and a race that made one live meets the
-	// one-active-run index below, which refuses the insert outright. Ending
-	// before the insert is what keeps the row this call is about to mint out of
-	// the set.
-	if s.conversations != nil {
-		ended, err := s.conversations.EndTerminalConversationsForTaskSystem(bgCtx, orgID, task.ID, domain.EndedDelegated)
-		if err != nil {
-			// Best-effort, like every other boundary stamp: an unstamped row is
-			// one the provisioner's sweep reaches later, while refusing the
-			// delegation would strand work a trigger asked for.
-			delegateLog.Warn("stamp the delegation boundary on the task's concluded conversations failed",
-				"task", task.ID, "error", err)
-		}
-		for _, c := range ended {
-			// One ring per row, after the stamp commits — the same shape the
-			// step-advance stamper uses. A conversation that ended owing memory
-			// is one the next run reads, so the sooner the brain starts the
-			// shorter the gap before step 0 can be claimed.
-			s.kickMemoryOwed(orgID, c.ID)
-		}
-	}
-
-	// The firing is ONE transaction: the task's owner consolidation, the
-	// blueprint_run insert, the task's agent claim, and step 0's conversations
-	// row. Each of those is implied by the one before it — a run without its
-	// first step is a 'running' parent nothing drives, holding the
-	// one-active-run index against its task — so the store commits them
-	// together or not at all.
+	// The firing is ONE transaction: the blueprint_run insert, the delegation
+	// boundary on the task's settled conversations, the task's owner
+	// consolidation, its agent claim, and step 0's conversations row. Each of
+	// those is implied by the one before it — a run without its first step is
+	// a 'running' parent nothing drives, holding the one-active-run index
+	// against its task, and a boundary without its run ends conversations
+	// nothing replaced — so the store commits them together or not at all.
+	// The boundary lives in that door rather than any one caller so that
+	// every door inherits it: a person's re-delegate, the router's fire on a
+	// matching event, the pending-firings drain, and whatever calls this
+	// next.
 	//
 	// Event-triggered firings are fenced on (triggering_event_id, trigger_id):
 	// a replay under the at-least-once router queue returns inserted=false, so
@@ -535,34 +511,38 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	//
 	// opts.TaskClaim rides the same transaction: the firing is the commitment
 	// point, so the task's claim commits with it or not at all. A claim
-	// *refusal* (a user won the race, the bot already owns it, the task went
-	// terminal) leaves the run and its step committed — the claim race has a
-	// winner either way and the run must still stand.
+	// *refusal* (a user won the race, the bot already owns it, or, for a
+	// person's delegation, the task went terminal) leaves the run and its step
+	// committed — the claim race has a winner either way and the run must
+	// still stand. An event firing on a terminal task is refused before the
+	// claim (ErrTaskClosed).
 	firstStep := s.buildStepConversation(bgCtx, orgID, blueprintRunID, task, steps[0], stepModel, triggerType, triggerID, creatorUserID, brRow.ActorAgentID)
-	inserted, _, _, err := s.blueprints.CreateRunWithFirstStepSystem(bgCtx, orgID, brRow, opts.TaskClaim, opts.OwnerTeamID, firstStep)
+	inserted, _, _, ended, err := s.blueprints.CreateRunWithFirstStepSystem(bgCtx, orgID, brRow, opts.TaskClaim, opts.OwnerTeamID, firstStep)
 	if err != nil {
 		// The one-active-run-per-task index refused: this task already holds a
 		// live engagement. The delegate route tears the prior one down before
 		// it calls here, so reaching this means something landed in between —
-		// a second gesture, or an auto-fire.
-		//
-		// The boundary stamp above has already run, and that is fine rather
-		// than something to unwind: it touched terminal rows only, which the
-		// winning engagement is not, and ending a finished transcript is
-		// idempotent — whoever wins the race stamps the same set to the same
-		// values.
+		// a second gesture, or an auto-fire. The refusal rolled the boundary
+		// back with the run, as it does for a task that closed under the fire.
 		if errors.Is(err, db.ErrTaskBusyActiveRun) {
 			return "", ErrTaskBusy
+		}
+		if errors.Is(err, db.ErrTaskClosedForEventRun) {
+			return "", ErrTaskClosed
 		}
 		return "", fmt.Errorf("fire blueprint run: %w", err)
 	}
 	if !inserted {
 		// The (event, trigger) fence caught a replay: this firing's run, its
-		// claim and its first step committed already, and the stamp that ran
-		// with it ended the task's prior conversations then. The stamp above
-		// found nothing this time round, which is the correct answer, not a
-		// missed one.
+		// claim, its first step and its boundary committed already.
 		return "", ErrAlreadyFired
+	}
+	for _, c := range ended {
+		// One ring per row, after the boundary commits — the same shape the
+		// step-advance stamper uses. A conversation that ended owing memory is
+		// one the next run reads, so the sooner the brain starts the shorter
+		// the gap before step 0 can be claimed.
+		s.kickMemoryOwed(orgID, c.ID)
 	}
 
 	// The blueprint advances entirely through the run queue from here: the

@@ -86,7 +86,7 @@ func newLaunchFixtureWithWorktree(t *testing.T, suffix, wt string) *launchFixtur
 
 	brID := "lfbr-" + suffix
 	step0 := 0
-	if _, _, _, err := stores.Blueprints.CreateRunWithFirstStepSystem(ctx, org, domain.BlueprintRun{
+	if _, _, _, _, err := stores.Blueprints.CreateRunWithFirstStepSystem(ctx, org, domain.BlueprintRun{
 		ID: brID, BlueprintID: bpID, TaskID: task.ID,
 		TriggerType: domain.BlueprintTriggerManual, WorktreePath: wt,
 		StepPlan: []domain.BlueprintPlanStep{{

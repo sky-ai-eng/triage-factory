@@ -45,6 +45,18 @@ func TestBlueprintStore_SQLite_OneActiveRunPerTask(t *testing.T) {
 	dbtest.RunOneActiveRunPerTaskConformance(t, sqliteSequenceScaffold)
 }
 
+// TestBlueprintStore_SQLite_EventFiringOnAResolvedTask runs the shared
+// resolved-task firing suite against the SQLite impl.
+func TestBlueprintStore_SQLite_EventFiringOnAResolvedTask(t *testing.T) {
+	dbtest.RunEventFiringOnAResolvedTaskConformance(t, sqliteSequenceScaffold)
+}
+
+// TestBlueprintStore_SQLite_FiringDelegationBoundary runs the shared
+// delegation-boundary suite against the SQLite impl.
+func TestBlueprintStore_SQLite_FiringDelegationBoundary(t *testing.T) {
+	dbtest.RunFiringDelegationBoundaryConformance(t, sqliteSequenceScaffold)
+}
+
 // TestBlueprintStore_SQLite_IsNewestRunForTask runs the shared newest-run suite
 // against the SQLite impl.
 func TestBlueprintStore_SQLite_IsNewestRunForTask(t *testing.T) {
@@ -330,7 +342,7 @@ func TestBlueprintStore_SQLite_ActorAgentRoundTrip(t *testing.T) {
 	`, domain.EventGitHubPRCICheckFailed, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID); err != nil {
 		t.Fatalf("seed trigger: %v", err)
 	}
-	if inserted, _, _, err := stores.Blueprints.CreateRunWithFirstStepSystem(ctx, org, domain.BlueprintRun{
+	if inserted, _, _, _, err := stores.Blueprints.CreateRunWithFirstStepSystem(ctx, org, domain.BlueprintRun{
 		ID: "actor-bpr-ev", BlueprintID: "actor-bp", TaskID: eventTask.ID,
 		TriggerType: domain.BlueprintTriggerEvent, TriggerID: "actor-trig", TriggeringEventID: eventID,
 		Status: domain.BlueprintRunStatusRunning, WorktreePath: "/tmp/wt-actor-ev", ActorAgentID: agentID,
@@ -404,7 +416,7 @@ func TestBlueprintStore_SQLite_FiringCarriesTaskClaim(t *testing.T) {
 		if prep != nil {
 			prep(task.ID)
 		}
-		inserted, claimed, _, err := stores.Blueprints.CreateRunWithFirstStepSystem(ctx, org, domain.BlueprintRun{
+		inserted, claimed, _, _, err := stores.Blueprints.CreateRunWithFirstStepSystem(ctx, org, domain.BlueprintRun{
 			ID: "bpr-" + suffix, BlueprintID: "claim-bp-" + suffix, TaskID: task.ID,
 			TriggerType: domain.BlueprintTriggerEvent, TriggerID: "trig-" + suffix, TriggeringEventID: eventID,
 			Status: domain.BlueprintRunStatusRunning, WorktreePath: "/tmp/wt-" + suffix, ActorAgentID: claim.AgentID,
@@ -472,7 +484,7 @@ func TestBlueprintStore_SQLite_FiringCarriesTaskClaim(t *testing.T) {
 				Status: domain.BlueprintRunStatusRunning, WorktreePath: "/tmp/wt-replay", ActorAgentID: agentID,
 			}
 		}
-		if inserted, _, _, err := stores.Blueprints.CreateRunWithFirstStepSystem(ctx, org, row("bpr-replay-1"), db.AgentClaimStamp{AgentID: agentID}, "",
+		if inserted, _, _, _, err := stores.Blueprints.CreateRunWithFirstStepSystem(ctx, org, row("bpr-replay-1"), db.AgentClaimStamp{AgentID: agentID}, "",
 			firstStepConv("bpr-replay-1-s0", task.ID, "bpr-replay-1", "trig-claim-replay")); err != nil || !inserted {
 			t.Fatalf("first fire: inserted=%v err=%v", inserted, err)
 		}
@@ -482,7 +494,7 @@ func TestBlueprintStore_SQLite_FiringCarriesTaskClaim(t *testing.T) {
 		if ok, err := stores.Swipes.RequeueTask(ctx, org, task.ID); err != nil || !ok {
 			t.Fatalf("RequeueTask: ok=%v err=%v", ok, err)
 		}
-		inserted, claimed, conv, err := stores.Blueprints.CreateRunWithFirstStepSystem(ctx, org, row("bpr-replay-2"), db.AgentClaimStamp{AgentID: agentID}, "",
+		inserted, claimed, conv, _, err := stores.Blueprints.CreateRunWithFirstStepSystem(ctx, org, row("bpr-replay-2"), db.AgentClaimStamp{AgentID: agentID}, "",
 			firstStepConv("bpr-replay-2-s0", task.ID, "bpr-replay-2", "trig-claim-replay"))
 		if err != nil {
 			t.Fatalf("replay fire: %v", err)

@@ -310,6 +310,11 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 		// materialization.
 		skip(domain.PendingFiringSkipAlreadyFired)
 		return
+	case errors.Is(err, delegate.ErrTaskClosed):
+		// The task closed, or an event held its close, after the reads
+		// above: the skip they make for a closed or held task.
+		skip(domain.PendingFiringSkipTaskClosed)
+		return
 	case errors.Is(err, delegate.ErrTaskBusy):
 		// Another run went live on the task between the claim and the
 		// fenced insert. Routine waiting, not a failure: the deferral refunds
