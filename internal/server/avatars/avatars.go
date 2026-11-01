@@ -1,4 +1,7 @@
-package server
+// Package avatars serves the same-origin avatar proxy: a user's OAuth avatar,
+// fetched and cached by the server so it renders under the app's
+// `img-src 'self'` CSP.
+package avatars
 
 import (
 	"context"
@@ -27,8 +30,8 @@ import (
 // Avatar proxy. User/member avatars come from OAuth metadata (users.avatar_url
 // — GitHub's avatars.githubusercontent.com, the org's Jira host, and so on),
 // all of them cross-origin. The app's CSP is `img-src 'self' data:`
-// (security_headers.go), so a direct cross-origin <img> is blocked as a CSP
-// violation and the picture never loads.
+// (internal/server/security_headers.go), so a direct cross-origin <img> is
+// blocked as a CSP violation and the picture never loads.
 //
 // Rather than widen img-src to a per-deployment allowlist of provider CDNs,
 // the image is proxied through this same-origin endpoint: the browser only
@@ -367,8 +370,8 @@ func normalizeImageType(data []byte) string {
 	return mt
 }
 
-// avatarsHandler serves GET /api/avatars/{user_id}.
-type avatarsHandler struct {
+// Handler serves GET /api/avatars/{user_id}.
+type Handler struct {
 	tx      db.TxRunner
 	fetcher *avatarFetcher
 }
@@ -376,7 +379,7 @@ type avatarsHandler struct {
 // handleAvatar proxies one user's OAuth avatar same-origin so it renders under
 // the app's `img-src 'self'` CSP.
 //
-// Gate: any authenticated org member (the session wrap + requireOrg). The
+// Gate: any authenticated org member (the session wrap + httpx.RequireOrg). The
 // target user's avatar_url is resolved on the APP pool under the caller's
 // claims, so users_select RLS scopes visibility to the caller's own row +
 // co-org-members — a cross-org {user_id} resolves to no row (empty avatar →
@@ -384,20 +387,20 @@ type avatarsHandler struct {
 // shows its monogram.
 //
 // GET /api/avatars/{user_id}
-func (h *avatarsHandler) handleAvatar(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (h *Handler) handleAvatar(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	claims := ClaimsFrom(r.Context())
+	claims := httpx.ClaimsFrom(r.Context())
 	if claims == nil {
-		writeUnauth(w)
+		httpx.WriteUnauth(w)
 		return
 	}
 
 	// A malformed id is "not found" (parity with the other id-path handlers),
 	// not a 500 from a uuid cast.
-	targetID, ok := uuidPathOr404(w, r, "user_id", "avatar")
+	targetID, ok := httpx.UUIDPathOr404(w, r, "user_id", "avatar")
 	if !ok {
 		return
 	}
@@ -408,13 +411,13 @@ func (h *avatarsHandler) handleAvatar(w http.ResponseWriter, r *http.Request) {
 		avatarURL = avatar
 		return e
 	}); err != nil {
-		internalError(w, "avatars", err)
+		httpx.InternalError(w, "avatars", err)
 		return
 	}
 	if avatarURL == "" {
 		// No avatar configured, or the target isn't visible under the caller's
 		// org-scoped RLS. Either way the frontend falls back to a monogram.
-		notFound(w, "avatar")
+		httpx.NotFound(w, "avatar")
 		return
 	}
 
@@ -442,7 +445,13 @@ func (h *avatarsHandler) handleAvatar(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(img.data)
 }
 
-func (s *Server) registerAvatarRoutes() {
+// New builds the avatar handler with its own process-lifetime fetcher.
+func New(tx db.TxRunner) *Handler {
+	return &Handler{tx: tx, fetcher: newAvatarFetcher()}
+}
+
+// Register mounts the avatar route.
+func (h *Handler) Register(m httpx.Mounts) {
 	// Avatar proxy: serves a user's OAuth-captured avatar same-origin so it
 	// renders under the app's tight `img-src 'self'` CSP instead of being
 	// blocked as a cross-origin image. Any authenticated org member; the
@@ -450,6 +459,5 @@ func (s *Server) registerAvatarRoutes() {
 	// to the caller + co-org-members (a cross-org id 404s). One
 	// process-lifetime fetcher owns the upstream fetch + cache. Consumed by
 	// Usage's by-user roster and the topbar UserMenu.
-	avh := &avatarsHandler{tx: s.tx, fetcher: newAvatarFetcher()}
-	s.api("GET /api/avatars/{user_id}", avh.handleAvatar)
+	m.API("GET /api/avatars/{user_id}", h.handleAvatar)
 }

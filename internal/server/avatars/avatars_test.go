@@ -1,4 +1,4 @@
-package server
+package avatars
 
 import (
 	"bytes"
@@ -15,7 +15,10 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
+	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
@@ -226,11 +229,36 @@ func TestAvatarFetcher_BoundsNegativeEntries(t *testing.T) {
 	}
 }
 
+// avatarRig is the multi-mode fixture for the handler test: one org with its
+// founder (owner) and a plain member, read through the RLS-enforced app pool.
+type avatarRig struct {
+	h      *pgtest.Harness
+	tx     db.TxRunner
+	orgID  string
+	owner  string
+	member string
+}
+
+func newAvatarRig(t *testing.T) *avatarRig {
+	t.Helper()
+	runmode.SetForTest(t, runmode.ModeMulti)
+
+	h := pgtest.Shared(t)
+	h.Reset(t)
+
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, h, "avatar-founder")
+	member := pgtest.SeedUser(t, h, "avatar-member")
+	pgtest.AddOrgMember(t, h, member, orgID, teamID, "member", "member")
+
+	return &avatarRig{h: h, tx: stores.Tx, orgID: orgID, owner: owner, member: member}
+}
+
 // TestAvatarsHandler_Postgres: under RLS a member proxies their own and a
 // co-member's avatar, a cross-org caller gets 404, and an absent avatar or a
 // malformed id is a 404 so the frontend falls back to a monogram.
 func TestAvatarsHandler_Postgres(t *testing.T) {
-	r := newUsageRig(t)
+	r := newAvatarRig(t)
 
 	want := tinyPNG(t)
 	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -247,7 +275,7 @@ func TestAvatarsHandler_Postgres(t *testing.T) {
 
 	f := newAvatarFetcher()
 	f.client = ts.Client()
-	h := &avatarsHandler{tx: r.uh.tx, fetcher: f}
+	h := &Handler{tx: r.tx, fetcher: f}
 
 	avatarReq := func(orgID, caller, target string) *http.Request {
 		req := httptest.NewRequest(http.MethodGet, "/api/avatars/"+target, nil)
