@@ -1,6 +1,7 @@
 # Alerting rules for the background brain and its work queues: the event
-# queue (event_queue), queued auto-delegations (pending_firings) and trigger
-# re-evaluation after scoring (task_rederive_queue), told apart by work_kind.
+# queue (event_queue), queued auto-delegations (pending_firings), trigger
+# re-evaluation after scoring (task_rederive_queue) and pull request
+# mergeability reads (pr_mergeability_probes), told apart by work_kind.
 # The queue gauges are measured every 30 seconds by the control pod holding
 # the background-brain lease. Severity and delivery follow
 # tf-connections.yml.
@@ -86,3 +87,52 @@ groups:
             {{ $labels.org_id }} failed permanently or ran out of retries, and
             will not run until someone redrives or cancels them under Parked
             work in the org's settings.
+
+      # The mergeability probe queue gives up a probe whose reads keep failing
+      # rather than parking it, and the next poll queues the pull request
+      # again, so WorkParked never sees its failures and neither do the depth
+      # alerts: a backed-off probe is not ready, and a dropped one counts as
+      # completed. This rule reads the failures instead: requeued attempts,
+      # and drops other than no_credential, which is a repository outside the
+      # credentials' reach rather than a failed read. A GitHub outage shows on
+      # the connection alerts too; what only this rule catches is reads GitHub
+      # answers unusably (a GraphQL error with no data), which count as
+      # successful requests there.
+      #
+      # Per org, so a warning. A failure counter has no series until its
+      # first increment, so each is read as zero beside the org's claims
+      # until then; the claims floor keeps one probe's first failures from
+      # being a majority.
+      - alert: MergeabilityProbesFailing
+        expr: |
+          (
+            (
+              sum by (org_id) (increase(tf_work_requeues_total{work_kind="pr_mergeability_probes"}[15m]))
+              or
+              sum by (org_id) (increase(tf_work_claims_total{work_kind="pr_mergeability_probes"}[15m])) * 0
+            )
+            +
+            (
+              sum by (org_id) (increase(tf_mergeability_dropped_total{outcome!="no_credential"}[15m]))
+              or
+              sum by (org_id) (increase(tf_work_claims_total{work_kind="pr_mergeability_probes"}[15m])) * 0
+            )
+          )
+          /
+          sum by (org_id) (increase(tf_work_claims_total{work_kind="pr_mergeability_probes"}[15m]))
+          > 0.5
+          and on (org_id)
+          sum by (org_id) (increase(tf_work_claims_total{work_kind="pr_mergeability_probes"}[15m])) >= 10
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Mergeability reads for org {{ $labels.org_id }} are failing"
+          description: >-
+            {{ $value | humanizePercentage }} of the mergeability probe
+            attempts for org {{ $labels.org_id }} failed over the last 15
+            minutes, for 15 minutes, so its merge conflicts are not being
+            seen. If tf_upstream_up for the org is 0, GitHub is unreachable
+            for it; otherwise GitHub is answering reads TF cannot use. Compare
+            tf_work_requeues_total and tf_mergeability_dropped_total for the
+            org by outcome, then the probe worker's logs.

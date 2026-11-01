@@ -152,7 +152,7 @@ func TestRunGitHubCycleForOrg_StagedAppPollsViaPAT(t *testing.T) {
 		database: database,
 		pub:      busPublisher{bus: bus},
 		tasks:    stores.Tasks,
-		entities: stores.Entities, eventQueue: stores.EventQueue,
+		entities: stores.Entities, eventQueue: stores.EventQueue, mergeability: stores.PRMergeability,
 		repos: stores.Repos,
 		orgs:  stores.Orgs,
 		// A staged App: registered (a row exists) but active=false, plus an
@@ -203,7 +203,7 @@ func TestRunGitHubCycleForOrg_ActiveAppNoFunctionalInstallationDegrades(t *testi
 		database: database,
 		pub:      busPublisher{bus: bus},
 		tasks:    stores.Tasks,
-		entities: stores.Entities, eventQueue: stores.EventQueue,
+		entities: stores.Entities, eventQueue: stores.EventQueue, mergeability: stores.PRMergeability,
 		repos: stores.Repos,
 		orgs:  stores.Orgs,
 		apps: &fakeInstallsStore{

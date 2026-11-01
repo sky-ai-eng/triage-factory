@@ -110,7 +110,7 @@ func costServer(t *testing.T, rateLimit func(op string) string) *httptest.Server
 func TestQueryCost_ByOperationForEveryClient(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	upstream.SetMeterProviderForTest(t, sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
-	costs := map[string]int{"DiscoverPRs": 13, "RefreshPRsWithChecks": 6, "RefreshPRsWithoutChecks": 5, "": 1}
+	costs := map[string]int{"DiscoverPRs": 13, "RefreshPRsWithChecks": 6, "RefreshPRsWithoutChecks": 5, "PRMergeability": 1, "": 1}
 	srv := costServer(t, func(op string) string { return fmt.Sprintf(`{"cost":%d}`, costs[op]) })
 	ghes := costServer(t, func(string) string { return "null" })
 	ctx := context.Background()
@@ -124,6 +124,9 @@ func TestQueryCost_ByOperationForEveryClient(t *testing.T) {
 		if _, err := patClient(srv.URL).RefreshPRs(ctx, []string{"PR_1"}, withChecks); err != nil {
 			t.Fatalf("RefreshPRs(%v): %v", withChecks, err)
 		}
+	}
+	if _, err := patClient(srv.URL).PRMergeability(ctx, []string{"PR_1"}); err != nil {
+		t.Fatalf("PRMergeability: %v", err)
 	}
 	if _, err := patClient(srv.URL).PostGraphQL(ctx, gqlProbe, nil); err != nil {
 		t.Fatalf("PostGraphQL: %v", err)
@@ -155,6 +158,7 @@ func TestQueryCost_ByOperationForEveryClient(t *testing.T) {
 		"DiscoverPRs":             {2, 26},
 		"RefreshPRsWithChecks":    {1, 6},
 		"RefreshPRsWithoutChecks": {1, 5},
+		"PRMergeability":          {1, 1},
 	}
 	if len(got) != len(want) {
 		t.Errorf("series = %v, want %v", got, want)

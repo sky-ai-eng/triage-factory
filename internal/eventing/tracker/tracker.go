@@ -91,6 +91,10 @@ type Tracker struct {
 	// tracker makes — an unreachable Jira key, poll-complete sentinels —
 	// has no snapshot to pair with and goes through pub.
 	queue db.EventQueueStore
+	// mergeability is where a refresh admits the mergeability probes its
+	// pull requests are due. The tracker never reads mergeability from
+	// GitHub: the probe worker does, and owns the conflict events.
+	mergeability db.PRMergeabilityStore
 	// orgID is the tenant this tracker emits events and reads/writes
 	// entities for. Set at construction and stable for the Tracker's
 	// lifetime; the poller's per-org loop constructs a fresh Tracker
@@ -111,8 +115,8 @@ type Tracker struct {
 // loop calls this once per active org per cycle; the resulting
 // Tracker handles all event-emission for that org and stamps every
 // published event with the tenant via publish() below.
-func New(database *sql.DB, pub Publisher, tasks db.TaskStore, entities db.EntityStore, repos db.RepositoryStore, jiraProjects db.JiraProjectStore, deliverables db.DeliverableStore, externalActions db.ExternalActionStore, queue db.EventQueueStore, orgID string) *Tracker {
-	return &Tracker{database: database, pub: pub, tasks: tasks, entities: entities, repos: repos, jiraProjects: jiraProjects, deliverables: deliverables, externalActions: externalActions, queue: queue, orgID: orgID}
+func New(database *sql.DB, pub Publisher, tasks db.TaskStore, entities db.EntityStore, repos db.RepositoryStore, jiraProjects db.JiraProjectStore, deliverables db.DeliverableStore, externalActions db.ExternalActionStore, queue db.EventQueueStore, mergeability db.PRMergeabilityStore, orgID string) *Tracker {
+	return &Tracker{database: database, pub: pub, tasks: tasks, entities: entities, repos: repos, jiraProjects: jiraProjects, deliverables: deliverables, externalActions: externalActions, queue: queue, mergeability: mergeability, orgID: orgID}
 }
 
 // publish stamps evt.OrgID with the tracker's configured tenant before
@@ -596,6 +600,9 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 	}
 	var openItems, terminalItems []entityWithSnap
 	skippedOpen := 0
+	// open is every open pull request this cycle knows, refreshed or
+	// skipped, which is the set the mergeability probes are decided over.
+	var open []mergeabilityCandidate
 
 	for _, e := range entities {
 		var snap domain.PRSnapshot
@@ -626,6 +633,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 				terminalItems = append(terminalItems, seedItem)
 			} else {
 				openItems = append(openItems, seedItem)
+				open = append(open, mergeabilityCandidate{entity: e, nodeID: nodeID})
 			}
 			continue
 		}
@@ -635,6 +643,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 			terminalItems = append(terminalItems, item)
 			continue
 		}
+		open = append(open, mergeabilityCandidate{entity: e, nodeID: snap.NodeID})
 		// Open path: gate against discovery's fresh snapshot if we have one.
 		// Entities not in this cycle's discovery (rare — e.g. a PR you've
 		// stopped being a reviewer on) fall through to refresh, which is the
@@ -723,6 +732,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		// default 30s+ poll cadence and carries no actionable signal;
 		// liveness is reported independently via /readyz.
 		trackerLog.Debug("github refresh: no-op cycle", "discovered", len(discovered), "entities", len(entities), "skipped", skippedOpen)
+		t.admitMergeabilityProbes(ctx, orgID, open, discoveredByNodeID, nil)
 		if len(entities) > 0 {
 			t.EmitPollComplete(ctx, "github", startedAt, len(entities), 0)
 		}
@@ -741,11 +751,11 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		for i, item := range openItems {
 			nodeIDs[i] = item.nodeID
 		}
-		open, err := t.refreshPRBatch(ctx, client, nodeIDs, true)
+		openSnaps, err := t.refreshPRBatch(ctx, client, nodeIDs, true)
 		if err != nil {
 			return 0, "", fmt.Errorf("refresh open PRs: %w", err)
 		}
-		for k, v := range open {
+		for k, v := range openSnaps {
 			refreshed[k] = v
 		}
 	}
@@ -822,12 +832,6 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		bodyFetched := newSnap.BodyHash != ""
 		if !bodyFetched {
 			newSnap.BodyHash, newSnap.BodyMentions = item.snap.BodyHash, item.snap.BodyMentions
-		}
-		// GitHub answers UNKNOWN while it computes mergeability. That is no
-		// answer, so the stored snapshot keeps the last known one, and the
-		// diff sees CONFLICTING → UNKNOWN → CONFLICTING as no change.
-		if newSnap.Mergeable == "" || newSnap.Mergeable == "UNKNOWN" {
-			newSnap.Mergeable = item.snap.Mergeable
 		}
 
 		if item.seed {
@@ -917,6 +921,8 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 	diffSpan.SetAttributes(telemetry.Count(eventsEmitted))
 	diffSpan.End()
 
+	t.admitMergeabilityProbes(ctx, orgID, open, discoveredByNodeID, refreshed)
+
 	// Info only when the cycle actually produced something (an emitted
 	// event) — a cycle that fetched fresh state but found no transitions is
 	// routine, not noteworthy. See the no-op branch above for the same call.
@@ -931,6 +937,91 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 	}
 
 	return eventsEmitted, "", nil
+}
+
+// mergeabilityCandidate is one open pull request a cycle knows: its entity
+// and the node id its snapshots are keyed by.
+type mergeabilityCandidate struct {
+	entity domain.Entity
+	nodeID string
+}
+
+// admitMergeabilityProbes admits a mergeability probe for every open pull
+// request whose mergeability can have changed since its stored answer was
+// read, and deletes the stored answers of entities no longer active:
+//
+//   - new: the pull request has no row;
+//   - head_moved: its current head is not the one its row was last read at.
+//     The current head is the refresh's when this cycle refreshed it, and the
+//     open-PR listing's otherwise. A repository whose listing answered 304
+//     has unchanged heads and gives none, so it admits nothing on this rule;
+//   - sweep: its row was last read longer than mergeabilitySweepInterval ago.
+//
+// The reasons are tried in that order and a pull request is admitted once. A
+// pull request already holding an unsettled probe collapses into it. A
+// failure is logged and costs this cycle's admissions: the next cycle decides
+// the same probes again from the same rows.
+//
+// listed is this cycle's discovery by node id; refreshed is this cycle's
+// refresh by node id, nil on a cycle that refreshed nothing. A pull request
+// the refresh found terminal is not admitted; its close is the router's.
+func (t *Tracker) admitMergeabilityProbes(ctx context.Context, orgID string, open []mergeabilityCandidate, listed, refreshed map[string]domain.PRSnapshot) {
+	if _, err := t.mergeability.DeleteInactiveSystem(ctx, orgID); err != nil {
+		trackerLog.WarnContext(ctx, "mergeability: deleting the answers of inactive pull requests failed; the next cycle retries", "error", err)
+	}
+	if len(open) == 0 {
+		return
+	}
+	rows, err := t.mergeability.ListSystem(ctx, orgID)
+	if err != nil {
+		trackerLog.WarnContext(ctx, "mergeability: reading the stored answers failed; no probes admitted this cycle", "error", err)
+		return
+	}
+	answers := make(map[string]domain.PRMergeability, len(rows))
+	for _, row := range rows {
+		answers[row.EntityID] = row
+	}
+
+	now := time.Now()
+	var probes []db.PRMergeabilityProbe
+	for _, c := range open {
+		// The probe reads the pull request by the entity's node id, so one
+		// without it has nothing to be read by yet.
+		if c.entity.ExternalID == "" {
+			continue
+		}
+		var head string
+		if snap, ok := refreshed[c.nodeID]; ok {
+			if prSnapshotTerminal(snap) {
+				continue
+			}
+			head = snap.HeadSHA
+		} else if snap, ok := listed[c.nodeID]; ok {
+			head = snap.HeadSHA
+		}
+		row, ok := answers[c.entity.ID]
+		var reason string
+		switch {
+		case !ok:
+			reason = domain.MergeabilityProbeNew
+		case head != "" && head != row.MergeableHeadSHA:
+			reason = domain.MergeabilityProbeHeadMoved
+		case row.CheckedAt == nil || now.Sub(*row.CheckedAt) > mergeabilitySweepInterval:
+			reason = domain.MergeabilityProbeSweep
+		default:
+			continue
+		}
+		probes = append(probes, db.PRMergeabilityProbe{EntityID: c.entity.ID, Reason: reason})
+	}
+	if len(probes) == 0 {
+		return
+	}
+	admitted, err := t.mergeability.AdmitSystem(ctx, orgID, probes)
+	if err != nil {
+		trackerLog.WarnContext(ctx, "mergeability: admitting probes failed; the next cycle decides them again", "probes", len(probes), "error", err)
+		return
+	}
+	trackerLog.DebugContext(ctx, "mergeability: probes due", "due", len(probes), "admitted", admitted)
 }
 
 // refreshPRBatch is client.RefreshPRs under a span, wrapped rather than

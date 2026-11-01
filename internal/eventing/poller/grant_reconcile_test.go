@@ -95,6 +95,7 @@ func TestRunGitHubCycleForOrg_GrantReconcileFailureDoesNotSkipThePoll(t *testing
 		users:          stores.Users,
 		apps:           &fakeInstallsStore{},
 		eventQueue:     stores.EventQueue,
+		mergeability:   stores.PRMergeability,
 		resolver:       &fakeResolver{client: ghclient.NewClient(srv.URL, "pat")},
 		ReconcileGrant: func(context.Context, string) error { return errors.New("github unreachable") },
 	}

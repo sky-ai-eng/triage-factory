@@ -108,7 +108,7 @@ func TestRefreshJira_BatchDescriptionLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.JiraProjects, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, org)
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
 	long := strings.Repeat("é", 2100)
 	quote := func(s string) string { b, _ := json.Marshal(s); return string(b) }

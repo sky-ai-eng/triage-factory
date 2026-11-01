@@ -6,10 +6,12 @@ import (
 	"os"
 
 	"github.com/sky-ai-eng/triage-factory/internal/cred/llmcred"
+	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventbus"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/ingest"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/mergeability"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/github/grantmirror"
 	"github.com/sky-ai-eng/triage-factory/internal/github/reachcache"
@@ -474,6 +476,7 @@ func (a *App) buildRouting() error {
 		LinearRules:     a.stores.LinearTeamRules,
 		GitHubGroups:    a.stores.TeamGitHubGroups,
 		ReDerive:        a.stores.TaskReDerive,
+		Mergeability:    a.stores.PRMergeability,
 		// The event-source pause: the answer is cached per org behind a short
 		// TTL and invalidated by the admin write (in process, or over the
 		// tf_ctl relay).
@@ -492,6 +495,13 @@ func (a *App) buildRouting() error {
 		return fmt.Errorf("build event router: %w", err)
 	}
 	a.router = router
+
+	// The mergeability probe worker: claims the probes the poll admits, reads
+	// them from GitHub, and enqueues conflict events through the same
+	// ingestor the poll's commits forward through. Claims under the same
+	// instance identity as the router's workers.
+	a.mergeability = mergeability.NewWorker(a.stores.PRMergeability, a.stores.Orgs, a.ghResolver, a.ingestor,
+		workitem.Owner{ID: a.identity.ID, Epoch: a.bootEpoch})
 	return nil
 }
 
@@ -533,7 +543,7 @@ func (a *App) scorerCallbacks() scorer.RunnerCallbacks {
 func (a *App) newPollerManager() *poller.Manager {
 	// An installed org polls as its app user, through the process's one Linear
 	// token cache (buildRunCredentials).
-	m := poller.NewManager(a.database, a.ingestor, a.stores.Users, a.stores.Tasks, a.stores.Entities, a.stores.Repos, a.stores.Deliverables, a.stores.ExternalActions, a.stores.EventQueue, a.stores.Orgs, a.stores.JiraStatusRules, a.stores.JiraProjects, a.stores.LinearTeamRules, a.stores.TeamGitHubGroups, a.stores.Secrets, a.stores.GitHubApps, a.stores.PollReadiness, a.ghResolver, a.linearResolver)
+	m := poller.NewManager(a.database, a.ingestor, a.stores.Users, a.stores.Tasks, a.stores.Entities, a.stores.Repos, a.stores.Deliverables, a.stores.ExternalActions, a.stores.EventQueue, a.stores.PRMergeability, a.stores.Orgs, a.stores.JiraStatusRules, a.stores.JiraProjects, a.stores.LinearTeamRules, a.stores.TeamGitHubGroups, a.stores.Secrets, a.stores.GitHubApps, a.stores.PollReadiness, a.ghResolver, a.linearResolver)
 	// The App-installation grant mirror, refreshed by pull at the head of every
 	// GitHub cycle. Deliberately NOT a system:poll: subscriber like the scorer /
 	// profiler / reconciler: those all hang off a poll COMPLETION,

@@ -113,6 +113,36 @@ When you combine pods in a query:
   count, so take `min`. Slack's `tf_upstream_rate_limit_used` is the
   exception: `sum` it.
 
+### Mergeability probes
+
+Triage Factory learns whether a pull request conflicts by asking GitHub only
+when the answer can have changed: a new pull request, a new head, or a
+sweep, which the first poll more than 10 minutes after the last read admits
+(about every 15 minutes at the default 5-minute poll interval). These counters
+show what that costs and how it is going:
+
+| Metric                                | What it counts                                                                                                                                                    |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tf_mergeability_probes_total`        | Pull requests asked about, by `reason` (`new`, `head_moved`, `unknown_retry`, `sweep`). Each read makes GitHub run a test merge, which on GitHub Enterprise Server is your server's work. |
+| `tf_mergeability_answers_total`       | GitHub's answers, by `value` (`MERGEABLE`, `CONFLICTING`, `UNKNOWN`). A high share of `UNKNOWN` means GitHub is slow to compute mergeability.                       |
+| `tf_mergeability_unknown_giveups_total` | Pull requests GitHub answered `UNKNOWN` for ten times in a row. Their conflicts are seen at the next sweep instead.                                       |
+| `tf_mergeability_sweep_changes_total` | Sweep reads that found the answer changed. Today these are mostly merges to the base branch.                                                                  |
+| `tf_mergeability_dropped_total`       | Probes given up without an answer, by `org_id` and `outcome`: `dependency_down`, `transient` or `deadline` after five failed reads, or `no_credential` at once when no GitHub credential the organization has connected can read the repository. The next poll queues the pull request again. A steady `no_credential` rate is a tracked repository outside the GitHub App's grant, which the organization's GitHub access settings list; any other steady rate means TF cannot reach GitHub. |
+
+The probe queue is `work_kind="pr_mergeability_probes"` on the `tf_work_*`
+metrics and alerts. A probe is not read until 15 seconds after it is queued, so its
+objective for the oldest ready probe is two minutes. A probe that hits a
+GitHub rate limit waits for the limit to reset and counts as deferred, not
+failed. A probe whose reads keep failing is given up after five attempts and
+queued again by the next poll, so an outage delays conflict detection rather
+than stopping it. A probe parks only when it reaches ten attempts, which takes
+repeated crashes or failures inside Triage Factory itself, since a failed read
+from the fifth attempt on drops it instead; a parked probe stops that pull
+request's conflict detection until an admin redrives it under **Parked work**.
+Failing probes are dropped rather than parked, so `WorkParked` never sees
+them; `MergeabilityProbesFailing` is the warning for an org whose probe reads
+mostly fail.
+
 ### Alerts
 
 The bundled Prometheus loads the rules in
@@ -128,6 +158,7 @@ alert's description, shown beside it in Grafana, says what to check.
 | `WorkQueueStopped`              | critical | A queue has ready work that nothing has claimed for about 10 minutes.                                                               |
 | `WorkQueueBehind`               | warning  | An org's oldest ready item has waited past the queue's objective, for 5 minutes.                                                    |
 | `WorkParked`                    | warning  | An org has work parked for 15 minutes, waiting for an admin under **Parked work** in the org settings.                              |
+| `MergeabilityProbesFailing`     | warning  | Most of an org's mergeability reads have failed for 30 minutes, so its merge conflicts are not being seen.                          |
 | `ClaimsExpiredUnreleased`       | critical | A run's claim has stayed expired with no executor taking it over.                                                                   |
 | `WorkspaceCheckpointsStale`     | warning  | A live run has gone 45 minutes without a workspace checkpoint.                                                                      |
 | `WorkspaceCheckpointsFailing`   | warning  | A workspace checkpoint failed in the last hour.                                                                                     |

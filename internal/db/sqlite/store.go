@@ -58,6 +58,8 @@ func New(conn *sql.DB) db.Stores {
 		// TaskReDerive holds the connection directly: its verbs open their
 		// own transactions and nothing composes them into a caller's.
 		TaskReDerive: newTaskReDeriveStore(conn),
+		// PRMergeability holds the connection directly for the same reason.
+		PRMergeability: newPRMergeabilityStore(conn),
 		// Events wires both args to conn — SQLite has one connection
 		// so the dual-pool constructor collapses, same as TaskStore.
 		Events: newEventStore(conn, conn),
@@ -240,6 +242,7 @@ func New(conn *sql.DB) db.Stores {
 		s.stores.EventQueue.(db.WorkKindHandle),
 		s.stores.PendingFirings.(db.WorkKindHandle),
 		s.stores.TaskReDerive.(db.WorkKindHandle),
+		s.stores.PRMergeability.(db.WorkKindHandle),
 	}
 	return s.stores
 }

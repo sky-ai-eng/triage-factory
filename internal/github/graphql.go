@@ -30,7 +30,6 @@ const prBaseFields = `
 	isDraft
 	merged
 	mergedBy { ` + actorFields + ` }
-	mergeable
 	headRefName
 	baseRefName
 	url
@@ -380,7 +379,6 @@ type gqlPR struct {
 	IsDraft        bool             `json:"isDraft"`
 	Merged         bool             `json:"merged"`
 	MergedBy       gqlAuthor        `json:"mergedBy"`
-	Mergeable      string           `json:"mergeable"`
 	HeadRefName    string           `json:"headRefName"`
 	BaseRefName    string           `json:"baseRefName"`
 	URL            string           `json:"url"`
@@ -685,7 +683,6 @@ func (pr gqlPR) buildSnapshot(includeCheckRuns bool) domain.PRSnapshot {
 		State:        pr.State,
 		IsDraft:      pr.IsDraft,
 		Merged:       pr.Merged,
-		Mergeable:    pr.Mergeable,
 		HeadRef:      pr.HeadRefName,
 		BaseRef:      pr.BaseRefName,
 		Additions:    pr.Additions,
@@ -868,4 +865,74 @@ func addReviewRequest(snap *domain.PRSnapshot, handle string, id int64) {
 		}
 		snap.ReviewRequestIDs[handle] = id
 	}
+}
+
+// prMergeabilityQuery reads only what a mergeability probe needs. Named so its
+// cost is recorded apart from the refresh documents', and asking for nothing
+// else so GitHub's cost for it is the nodes lookup alone.
+const prMergeabilityQuery = `
+	query PRMergeability($ids: [ID!]!) {
+		nodes(ids: $ids) { ... on PullRequest { id mergeable headRefOid } }
+		rateLimit { cost }
+	}
+`
+
+// MaxMergeabilityBatch is how many pull requests one PRMergeability query
+// reads: GitHub's limit on nodes(ids:). The refresh documents stay at
+// refreshBatchSize because their fragments are heavy; this one asks for
+// three fields.
+const MaxMergeabilityBatch = 100
+
+// MergeabilityRead is one pull request's mergeability as GitHub answered it:
+// MERGEABLE, CONFLICTING or UNKNOWN, and the head (headRefOid) at the read.
+type MergeabilityRead struct {
+	Mergeable string
+	HeadSHA   string
+}
+
+// PRMergeability reads the mergeability of up to MaxMergeabilityBatch pull
+// requests in one query, keyed by node id. The ids may come from any
+// repositories the client can read. An id with no node, or whose node is not
+// a pull request, is absent from the map. Reading starts GitHub's computation
+// for a pull request it has not computed, which is why the answer can be
+// UNKNOWN; a pull request whose mergeable came back as anything other than
+// MERGEABLE or CONFLICTING (null beside a field error, say) is UNKNOWN too,
+// since it is no answer either.
+func (c *Client) PRMergeability(ctx context.Context, nodeIDs []string) (map[string]MergeabilityRead, error) {
+	if len(nodeIDs) == 0 {
+		return nil, nil
+	}
+	if len(nodeIDs) > MaxMergeabilityBatch {
+		return nil, fmt.Errorf("PR mergeability: %d ids, at most %d per query", len(nodeIDs), MaxMergeabilityBatch)
+	}
+	data, err := c.PostGraphQL(ctx, prMergeabilityQuery, map[string]any{"ids": nodeIDs})
+	if err != nil {
+		return nil, fmt.Errorf("PR mergeability: %w", err)
+	}
+	var resp struct {
+		Data struct {
+			Nodes []*struct {
+				ID         string `json:"id"`
+				Mergeable  string `json:"mergeable"`
+				HeadRefOid string `json:"headRefOid"`
+			} `json:"nodes"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, fmt.Errorf("parse PR mergeability response: %w", err)
+	}
+	out := make(map[string]MergeabilityRead, len(nodeIDs))
+	for i, n := range resp.Data.Nodes {
+		// A deleted or inaccessible id answers null, and a node of another
+		// type answers an object with none of the fields asked for.
+		if i >= len(nodeIDs) || n == nil || n.ID == "" || n.ID != nodeIDs[i] {
+			continue
+		}
+		mergeable := n.Mergeable
+		if mergeable != domain.MergeableMergeable && mergeable != domain.MergeableConflicting {
+			mergeable = domain.MergeableUnknown
+		}
+		out[n.ID] = MergeabilityRead{Mergeable: mergeable, HeadSHA: n.HeadRefOid}
+	}
+	return out, nil
 }

@@ -62,3 +62,27 @@ func TestTaskReDeriveValidates(t *testing.T) {
 		t.Errorf("defer reason = %q", TaskReDeriveDeferScoreMoved)
 	}
 }
+
+// TestPRMergeabilityProbesValidates pins the probe kind on both dialects: the
+// package accepts it, it completes in one transaction, and its claim filter
+// is the probe_after gate in each dialect's spelling.
+func TestPRMergeabilityProbesValidates(t *testing.T) {
+	for _, d := range []workitem.Dialect{workitem.SQLite, workitem.Postgres} {
+		k := PRMergeabilityProbes(d)
+		if err := k.Validate(); err != nil {
+			t.Errorf("%s: %v", d, err)
+		}
+		if k.Strategy != workitem.SingleTx || k.Unique != workitem.UniqueWhileUnsettled {
+			t.Errorf("%s: strategy %s unique %d, want single_tx keyed while unsettled", d, k.Strategy, k.Unique)
+		}
+	}
+	if got := PRMergeabilityProbesClaimFilter(workitem.Postgres); got != "t.probe_after <= statement_timestamp()" {
+		t.Errorf("postgres claim filter = %q", got)
+	}
+	if got := PRMergeabilityProbesClaimFilter(workitem.SQLite); got != "t.probe_after <= strftime('%Y-%m-%d %H:%M:%f','now')" {
+		t.Errorf("sqlite claim filter = %q", got)
+	}
+	if got := PRMergeabilityProbeKey("e1"); got != "e1" {
+		t.Errorf("probe key = %q", got)
+	}
+}

@@ -168,6 +168,13 @@ type Stores struct {
 	// twin: nothing composes its verbs into a caller's transaction.
 	TaskReDerive TaskReDeriveStore
 
+	// PRMergeability owns pull_request_mergeability, a pull request's last
+	// known mergeability, and the pr_mergeability_probes queue of reads that
+	// are due. The poll admits probes; the probe worker claims them and is the
+	// only writer of the answers. A system-service store (admin pool in
+	// Postgres) with no transaction-bound twin.
+	PRMergeability PRMergeabilityStore
+
 	// WorkKinds is the registry of every adopting work table, as the
 	// operator surface and the metrics depth observer see them. Each
 	// dialect's constructor fills it from the stores that implement

@@ -9,6 +9,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/workkinds"
 )
 
+// The SQLite migration that creates the mergeability probe queue.
+const prMergeabilityFile = "migrations-sqlite/202610310009_pr_mergeability.sql"
+
 // The SQLite migration that moves each kind's table onto the work-item block,
 // and the status literals and index names its previous lifecycle used, which
 // the Postgres baseline's block for the table must no longer carry.
@@ -34,6 +37,11 @@ var workKindSchemas = []struct {
 		name:       "task_rederive_queue",
 		sqliteFile: taskReDeriveQueueFile,
 		kind:       workkinds.TaskReDerive,
+	},
+	{
+		name:       "pr_mergeability_probes",
+		sqliteFile: prMergeabilityFile,
+		kind:       workkinds.PRMergeabilityProbes,
 	},
 }
 

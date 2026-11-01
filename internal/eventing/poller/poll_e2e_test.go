@@ -49,8 +49,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/mergeability"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/poller"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/github/githubapp"
@@ -242,7 +244,11 @@ func runPollScenario(t *testing.T, bin string, shape deploymentShape) {
 // --- the poller --------------------------------------------------------------
 
 type pollRig struct {
-	mgr    *poller.Manager
+	mgr *poller.Manager
+	// prober is the mergeability probe worker, which reads the pull requests
+	// each cycle's poll admitted; ripen stands in for the admission delay.
+	prober *mergeability.Worker
+	ripen  func() error
 	stores db.Stores
 	orgID  string
 	teamID string
@@ -259,10 +265,13 @@ type deploymentShape func(t *testing.T, ctx context.Context) deployment
 
 type deployment struct {
 	database *sql.DB
-	stores   db.Stores
-	orgID    string
-	teamID   string
-	adminID  string
+	// ripen moves every ready mergeability probe's probe_after into the past,
+	// in the shape's own SQL.
+	ripen   func() error
+	stores  db.Stores
+	orgID   string
+	teamID  string
+	adminID string
 	// pollerLogin is the GitHub login the poll credential belongs to.
 	pollerLogin string
 	// identitySource is how the admin's GitHub identity was captured.
@@ -283,7 +292,11 @@ func multiOnPostgres(t *testing.T, ctx context.Context) deployment {
 	h.Reset(t)
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, h, "acme-tf")
 	return deployment{
-		database:       h.AdminDB,
+		database: h.AdminDB,
+		ripen: func() error {
+			_, err := h.AdminDB.Exec(`UPDATE pr_mergeability_probes SET probe_after = statement_timestamp() - interval '1 second' WHERE status = 'ready'`)
+			return err
+		},
 		stores:         pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey),
 		orgID:          orgID,
 		teamID:         teamID,
@@ -309,7 +322,11 @@ func localOnSQLite(t *testing.T, ctx context.Context) deployment {
 		t.Fatal(err)
 	}
 	return deployment{
-		database:       database,
+		database: database,
+		ripen: func() error {
+			_, err := database.Exec(`UPDATE pr_mergeability_probes SET probe_after = strftime('%Y-%m-%d %H:%M:%f','now','-1 seconds') WHERE status = 'ready'`)
+			return err
+		},
 		stores:         sqlitestore.New(database),
 		orgID:          runmode.LocalDefaultOrgID,
 		teamID:         runmode.LocalDefaultTeamID,
@@ -361,9 +378,10 @@ func newPollRig(t *testing.T, ctx context.Context, w *orreryWorld, shape deploym
 		client: ghclient.NewClientWithHTTPClient(w.base, token, &http.Client{Transport: tr}),
 		base:   w.base,
 	}
-	r := &pollRig{stores: stores, orgID: d.orgID, teamID: d.teamID, host: host, pub: &recordingPublisher{}, tr: tr}
+	r := &pollRig{stores: stores, orgID: d.orgID, teamID: d.teamID, host: host, pub: &recordingPublisher{}, tr: tr, ripen: d.ripen}
+	r.prober = mergeability.NewWorker(stores.PRMergeability, stores.Orgs, resolver, r.pub, workitem.Owner{ID: "poll-e2e", Epoch: 1})
 	r.mgr = poller.NewManager(d.database, r.pub,
-		stores.Users, stores.Tasks, stores.Entities, stores.Repos, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.Orgs,
+		stores.Users, stores.Tasks, stores.Entities, stores.Repos, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, stores.Orgs,
 		stores.JiraStatusRules, stores.JiraProjects, stores.LinearTeamRules, stores.TeamGitHubGroups, stores.Secrets, stores.GitHubApps, stores.PollReadiness,
 		resolver, nil)
 	r.mgr.OnError = func(source, org string, err error) {
@@ -374,13 +392,20 @@ func newPollRig(t *testing.T, ctx context.Context, w *orreryWorld, shape deploym
 	return r
 }
 
-// cycle runs one GitHub poll cycle and compares the github:* events it
-// emitted, keyed "<source id> <event type>" plus " <dedup key>" when the event
-// has one, with want, and returns them.
+// cycle runs one GitHub poll cycle and the mergeability probe pass after it,
+// and compares the github:* events they emitted, keyed "<source id> <event
+// type>" plus " <dedup key>" when the event has one, with want, and returns
+// them.
 func (r *pollRig) cycle(t *testing.T, ctx context.Context, want map[string]int) []domain.Event {
 	t.Helper()
 	r.pub.take()
 	r.mgr.PollGitHubOnce(ctx, r.orgID)
+	if err := r.ripen(); err != nil {
+		t.Fatalf("ripen mergeability probes: %v", err)
+	}
+	if err := r.prober.Drain(ctx); err != nil {
+		t.Errorf("mergeability probe pass: %v", err)
+	}
 	r.errsMu.Lock()
 	errs := r.errs
 	r.errs = nil

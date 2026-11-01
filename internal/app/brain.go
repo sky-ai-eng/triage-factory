@@ -6,6 +6,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
 	"github.com/sky-ai-eng/triage-factory/internal/cred/credprovision"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/eventing/mergeability"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/instance"
 	"github.com/sky-ai-eng/triage-factory/internal/notify"
@@ -83,6 +84,12 @@ func (a *App) startBrain(term int64) {
 	// inside its completion. The scorer's completion callback wakes it; the
 	// scan tick is the floor. Same single-worker discipline.
 	go a.router.RunReDeriveQueue(brainCtx, routing.DefaultReDeriveScanInterval)
+	// Mergeability probe worker: claims the probes the poll admits for pull
+	// requests whose mergeability can have changed, reads the ones that share a
+	// GitHub credential in one query, and records each answer with the conflict event
+	// its transition implies. The scan is its only schedule: a probe is not
+	// ripe until well after its admission. Same single-worker discipline.
+	go a.mergeability.RunMergeabilityProbes(brainCtx, mergeability.DefaultScanInterval)
 	// Close-deferral sweep: applies the closes the router held on tasks
 	// whose own run caused the closing event, once that run has ended, and
 	// drops them when the run completed and its own ending closes the task.

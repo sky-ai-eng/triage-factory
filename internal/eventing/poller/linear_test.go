@@ -261,7 +261,7 @@ func linearManager(t *testing.T, stub *linearStub) (*Manager, *recordingErrors) 
 	errs := &recordingErrors{}
 	m := &Manager{
 		database: database, pub: busPublisher{bus: newTestBus(t)},
-		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue,
+		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue, mergeability: stores.PRMergeability,
 		orgs: stores.Orgs, users: stores.Users,
 		secrets:        linearSecrets{key: "lin_api_test"},
 		linearRules:    linearRulesStore{rules: []domain.LinearTeamRules{armedLinear("team-a", "eng", []string{"Todo"}, []string{"Done"})}},
@@ -287,7 +287,7 @@ func TestRunLinearCycleForOrg_SkipsTurnedOffSource(t *testing.T) {
 	turnOffSource(t, database, "linear")
 	m := &Manager{
 		database: database, pub: busPublisher{bus: newTestBus(t)},
-		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue,
+		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue, mergeability: stores.PRMergeability,
 		orgs: stores.Orgs, users: stores.Users, secrets: linearSecrets{key: "lin_api_test"},
 		linearRules:  linearRulesStore{rules: []domain.LinearTeamRules{armedLinear("team-a", "eng", []string{"Todo"}, []string{"Done"})}},
 		EventSources: stores.OrgEventSources,
@@ -306,7 +306,7 @@ func TestRunLinearCycleForOrg_PolicyReadFails_SkipsRatherThanPolls(t *testing.T)
 	stores := sqlitestore.New(database)
 	m := &Manager{
 		database: database, pub: busPublisher{bus: newTestBus(t)},
-		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue,
+		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue, mergeability: stores.PRMergeability,
 		orgs: stores.Orgs, users: stores.Users, secrets: linearSecrets{key: "lin_api_test"},
 		EventSources: erroringSourceStore{},
 	}
@@ -340,7 +340,7 @@ func TestRunLinearCycleForOrg_Skips(t *testing.T) {
 			stores := sqlitestore.New(database)
 			m := &Manager{
 				database: database, pub: busPublisher{bus: newTestBus(t)},
-				tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue,
+				tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue, mergeability: stores.PRMergeability,
 				orgs: stores.Orgs, users: stores.Users, secrets: linearSecrets{key: tc.key},
 				linearRules: linearRulesStore{rules: tc.rules},
 			}
@@ -412,7 +412,7 @@ func TestRunLinearCycleForOrg_UnreadableRulesKeepCondition(t *testing.T) {
 	stores := sqlitestore.New(database)
 	m := &Manager{
 		database: database, pub: busPublisher{bus: newTestBus(t)},
-		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue,
+		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue, mergeability: stores.PRMergeability,
 		orgs: stores.Orgs, users: stores.Users, secrets: linearSecrets{key: "lin_api_test"},
 		linearRules: failingLinearRulesStore{},
 	}
@@ -441,7 +441,7 @@ func TestRunLinearCycleForOrg_AnotherWorkspacesRulesDoNotApply(t *testing.T) {
 	published := &capturingPublisher{}
 	m := &Manager{
 		database: database, pub: published,
-		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue,
+		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue, mergeability: stores.PRMergeability,
 		orgs: stores.Orgs, users: stores.Users, secrets: linearSecrets{key: "lin_api_test"},
 		linearRules:  linearRulesStore{rules: []domain.LinearTeamRules{armedLinear("team-a", "eng", []string{"Todo"}, []string{"Done"})}},
 		EventSources: stores.OrgEventSources,

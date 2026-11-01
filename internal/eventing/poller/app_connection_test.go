@@ -132,7 +132,7 @@ func TestGitHubAppCycle_MintOutageIsAConnectionLoss(t *testing.T) {
 	pub := &eventRecorder{}
 	m := &Manager{
 		database: database, pub: pub,
-		tasks: stores.Tasks, entities: stores.Entities, eventQueue: stores.EventQueue,
+		tasks: stores.Tasks, entities: stores.Entities, eventQueue: stores.EventQueue, mergeability: stores.PRMergeability,
 		repos: stores.Repos, orgs: stores.Orgs, users: stores.Users,
 		connections: stores.PollReadiness,
 		apps: &fakeInstallsStore{

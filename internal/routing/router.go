@@ -114,6 +114,7 @@ type Router struct {
 	linearRules     dbpkg.LinearTeamRulesStore
 	githubGroups    dbpkg.TeamGitHubGroupsStore
 	rederive        dbpkg.TaskReDeriveStore
+	mergeability    dbpkg.PRMergeabilityStore
 	sourceGate      *sourceGate // built over RouterDeps.EventSources; see source_gate.go
 	spawner         Delegator
 	scorer          Scorer
@@ -205,6 +206,9 @@ type RouterDeps struct {
 	// ReDerive is the score re-evaluation queue the re-derive worker
 	// (RunReDeriveQueue) claims from. Required.
 	ReDerive dbpkg.TaskReDeriveStore
+	// Mergeability is a pull request's last known mergeability, which a
+	// conflicts resolution's close reads. Required.
+	Mergeability dbpkg.PRMergeabilityStore
 	// EventSources is the org event-source policy store the router's pause
 	// gate reads, so a source an org admin turned off mints no tasks. Required:
 	// this is the one funnel every source's events cross.
@@ -254,6 +258,7 @@ func (d RouterDeps) missing() []string {
 		{"JiraRules", d.JiraRules},
 		{"LinearRules", d.LinearRules},
 		{"ReDerive", d.ReDerive},
+		{"Mergeability", d.Mergeability},
 		{"EventSources", d.EventSources},
 		{"Spawner", d.Spawner},
 		{"Scorer", d.Scorer},
@@ -313,6 +318,7 @@ func NewRouter(deps RouterDeps) (*Router, error) {
 		linearRules:     deps.LinearRules,
 		githubGroups:    deps.GitHubGroups,
 		rederive:        deps.ReDerive,
+		mergeability:    deps.Mergeability,
 		sourceGate:      newSourceGate(deps.EventSources),
 		spawner:         deps.Spawner,
 		scorer:          deps.Scorer,
