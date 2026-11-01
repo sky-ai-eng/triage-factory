@@ -1133,8 +1133,8 @@ CREATE TABLE public.deliverables (
     -- Whether the recording run is known to have opened the pull request.
     -- 'pending' on a pull request create's row until the reconciler settles
     -- it from GitHub's answer: 'verified', or 'foreign' when GitHub shows the
-    -- run did not open it, which also closes the row. Only a verified row is
-    -- acted on through TF. Every other writer's row is 'verified'.
+    -- run did not open it, which also closes a draft or open row. Only a
+    -- verified row is acted on through TF. Every other writer's row is 'verified'.
     verification text DEFAULT 'verified' NOT NULL
         CONSTRAINT deliverables_verification_check CHECK (verification IN ('pending', 'verified', 'foreign')),
     created_at timestamp with time zone DEFAULT now() NOT NULL,

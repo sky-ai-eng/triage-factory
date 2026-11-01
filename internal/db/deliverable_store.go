@@ -328,8 +328,9 @@ type DeliverableStore interface {
 	// verification, once: it moves a row still pending to verdict
 	// (domain.DeliverableVerificationVerified or ...Foreign) and reports
 	// whether this call moved it, so of two settlers exactly one acts on the
-	// verdict. A foreign verdict also closes the row, so nothing waits on it or
-	// reconciles it again. detailsJSON, when non-empty, replaces the row's
+	// verdict. A foreign verdict also closes a draft or open row, so nothing
+	// waits on it or reconciles it again; a merged or closed one keeps its
+	// state. detailsJSON, when non-empty, replaces the row's
 	// details: a verified row's head, base and node id are rewritten from
 	// GitHub's answer rather than kept as the recording run sent them. Its one
 	// writer is the deliverable reconciler. Admin pool — it has no JWT-claims

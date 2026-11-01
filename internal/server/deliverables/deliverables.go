@@ -467,9 +467,6 @@ func (ah *Handler) handleDeliverablePRUpdate(w http.ResponseWriter, r *http.Requ
 	if !requireDeliverableKind(w, art, domain.DeliverableKindPullRequest, "a pull request") {
 		return
 	}
-	if art, ok = ah.actionableOr409(w, r, orgID, userID, art); !ok {
-		return
-	}
 
 	var req struct {
 		Title *string `json:"title"`
@@ -483,6 +480,9 @@ func (ah *Handler) handleDeliverablePRUpdate(w http.ResponseWriter, r *http.Requ
 			Reason:  httpx.ReasonMissingField,
 			Message: "no fields to update: provide title, body, or both",
 		})
+		return
+	}
+	if art, ok = ah.actionableOr409(w, r, orgID, userID, art); !ok {
 		return
 	}
 
@@ -816,15 +816,6 @@ func (ah *Handler) handleDeliverableApprove(w http.ResponseWriter, r *http.Reque
 		httpx.Conflict(w, "deliverables of kind "+art.Kind+" cannot be approved")
 		return
 	}
-	if art, ok = ah.actionableOr409(w, r, orgID, userID, art); !ok {
-		return
-	}
-	gh, prRef, ok := ah.ghForDeliverable(w, r, orgID, art)
-	if !ok {
-		return
-	}
-	owner, repo, number := prRef.Owner, prRef.Repo, prRef.Number
-
 	// Approval only makes sense on a draft awaiting it. A stale/double "Open PR"
 	// click on an already-open or closed deliverable would otherwise re-run a
 	// no-op MarkPRReady and record a second approval, so reject it as a
@@ -838,6 +829,14 @@ func (ah *Handler) handleDeliverableApprove(w http.ResponseWriter, r *http.Reque
 		})
 		return
 	}
+	if art, ok = ah.actionableOr409(w, r, orgID, userID, art); !ok {
+		return
+	}
+	gh, prRef, ok := ah.ghForDeliverable(w, r, orgID, art)
+	if !ok {
+		return
+	}
+	owner, repo, number := prRef.Owner, prRef.Repo, prRef.Number
 
 	// Parse the deliverable details so the flip below can carry the row's own
 	// snapshot and resolution forward. A parse failure is non-fatal: the PR is
@@ -959,9 +958,6 @@ func (ah *Handler) handleDeliverableDismiss(w http.ResponseWriter, r *http.Reque
 	if !requireDeliverableKind(w, art, domain.DeliverableKindPullRequest, "a pull request") {
 		return
 	}
-	if art, ok = ah.actionableOr409(w, r, orgID, userID, art); !ok {
-		return
-	}
 
 	// Only a draft PR can be dismissed. An already-open / merged / closed PR is
 	// terminal — there's no draft to abandon — so 409 rather than re-closing a PR
@@ -971,6 +967,9 @@ func (ah *Handler) handleDeliverableDismiss(w http.ResponseWriter, r *http.Reque
 			Reason:  httpx.ReasonAlreadyTerminal,
 			Message: "this PR is no longer a draft awaiting resolution (state: " + art.State + ")",
 		})
+		return
+	}
+	if art, ok = ah.actionableOr409(w, r, orgID, userID, art); !ok {
 		return
 	}
 
@@ -1072,9 +1071,6 @@ func (ah *Handler) handleDeliverableReject(w http.ResponseWriter, r *http.Reques
 	if !requireDeliverableKind(w, art, domain.DeliverableKindPullRequest, "a pull request") {
 		return
 	}
-	if art, ok = ah.actionableOr409(w, r, orgID, userID, art); !ok {
-		return
-	}
 	// Only a draft awaits a decision. A PR the user already opened, or one a
 	// prior dismiss/reject retired, is terminal here — and an open PR's branch
 	// is shipped work, never something this verb deletes.
@@ -1083,6 +1079,9 @@ func (ah *Handler) handleDeliverableReject(w http.ResponseWriter, r *http.Reques
 			Reason:  httpx.ReasonAlreadyTerminal,
 			Message: "this PR is no longer a draft awaiting resolution (state: " + art.State + ")",
 		})
+		return
+	}
+	if art, ok = ah.actionableOr409(w, r, orgID, userID, art); !ok {
 		return
 	}
 

@@ -333,7 +333,7 @@ tests:
         severity: critical
       exp_annotations:
         summary: A run in org o1 recorded a pull request it did not open
-        description: 'In the last hour, a run recorded a pull request whose GitHub author is not the account Triage Factory sealed into that run. A working run''s sidecar never records one, so treat that run''s sidecar as compromised. Triage Factory closed the deliverable, will not act on the pull request, and attributed nothing to the run; the run''s audit record of the create is kept. Its ERROR line, "a run recorded a pull request it did not open", names the conversation and the pull request.'
+        description: 'In the last hour, a run recorded a pull request that GitHub shows it did not open: either its GitHub author is not the account Triage Factory sealed into the run, or none of the run''s sandboxes was running when it was opened. A working run''s sidecar never records one, so treat that run''s sidecar as compromised. Triage Factory will not act on the pull request, closed its deliverable if it was still open, and attributed nothing to the run; the run''s audit record of the create is kept. Its ERROR line, "a run recorded a pull request it did not open", names the conversation and the pull request.'
   - eval_time: 75m
     alertname: ForeignPullRequestRecorded
     exp_alerts: []
@@ -354,7 +354,7 @@ tests:
         severity: critical
       exp_annotations:
         summary: A run in org o1 recorded a pull request it did not open
-        description: 'In the last hour, a run recorded a pull request whose GitHub author is not the account Triage Factory sealed into that run. A working run''s sidecar never records one, so treat that run''s sidecar as compromised. Triage Factory closed the deliverable, will not act on the pull request, and attributed nothing to the run; the run''s audit record of the create is kept. Its ERROR line, "a run recorded a pull request it did not open", names the conversation and the pull request.'
+        description: 'In the last hour, a run recorded a pull request that GitHub shows it did not open: either its GitHub author is not the account Triage Factory sealed into the run, or none of the run''s sandboxes was running when it was opened. A working run''s sidecar never records one, so treat that run''s sidecar as compromised. Triage Factory will not act on the pull request, closed its deliverable if it was still open, and attributed nothing to the run; the run''s audit record of the create is kept. Its ERROR line, "a run recorded a pull request it did not open", names the conversation and the pull request.'
 - name: ForeignPullRequestRecorded does not fire for an old series 1h after one failed scrape
   interval: 1m
   input_series:

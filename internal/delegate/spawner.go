@@ -787,6 +787,15 @@ func (s *Spawner) SetDeliverableSettler(d DeliverableSettler) {
 	s.deliverableSettler = d
 }
 
+// HasDeliverableSettler reports whether a settler is wired — the wiring's own
+// check that the system teardown was not left closing every pending draft
+// TF-side only.
+func (s *Spawner) HasDeliverableSettler() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.deliverableSettler != nil
+}
+
 // SetOnMemoryOwed wires the memory doorbell. Post-construction, same pattern
 // as SetFiringWaker; nil (the default, and every test) leaves each boundary
 // stamping its row and ringing nothing, which costs the brain's sweep one

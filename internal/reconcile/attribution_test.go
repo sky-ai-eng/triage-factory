@@ -627,3 +627,39 @@ func TestReconcile_StampsOnlyWhatIsUnsetAndKnown(t *testing.T) {
 		t.Errorf("owner = %q, want the one chosen elsewhere, %s", team, otherTeam)
 	}
 }
+
+// A row recorded on another GitHub host than the org's current one is left
+// pending by an on-demand settle in either mode, as Reconcile leaves it.
+func TestSettleDeliverable_LeavesARowOnAnotherHost(t *testing.T) {
+	rig := newAttributionRig(t, nil, nil)
+	_, entityID := rig.seedPR(t, 28)
+	rig.rc = NewReconciler(&fakeResolver{}, rig.stores, TrustRecords, nil)
+	if err := db.SetLocalGitHubURLForTest(rig.conn, "https://ghe.example"); err != nil {
+		t.Fatalf("move the org's host: %v", err)
+	}
+
+	rig.rc.SettleDeliverable(context.Background(), runmode.LocalDefaultOrgID, rig.row(t, 28))
+
+	if got := rig.row(t, 28); got.Verification != domain.DeliverableVerificationPending {
+		t.Errorf("verification = %q, want pending", got.Verification)
+	}
+	if team, user := rig.attribution(t, entityID); team != "" || user != "" {
+		t.Errorf("attribution = (%q, %q), want none", team, user)
+	}
+}
+
+// A verified row's details are rewritten from GitHub's answer when they
+// parse, and kept as stored when they do not, rather than replaced with the
+// three fields the rewrite sets.
+func TestVerifiedDetails(t *testing.T) {
+	a := domain.NewPullRequestDeliverable("octo/repo", 29, "PR_29", "recorded-head", "main", "u", "Title", "Body", true)
+	snap := domain.PRSnapshot{HeadRef: "feat-29", BaseRef: "trunk"}
+	d, err := domain.ParsePRDeliverableDetails(verifiedDetails(a, snap))
+	if err != nil || d.HeadBranch != "feat-29" || d.Base != "trunk" || d.NodeID != "PR_29" {
+		t.Errorf("rewritten details = (%+v, %v), want GitHub's head and base and the key's node id", d, err)
+	}
+	a.DetailsJSON = "{not json"
+	if got := verifiedDetails(a, snap); got != "" {
+		t.Errorf("verifiedDetails of unparseable details = %q, want \"\" (kept as stored)", got)
+	}
+}

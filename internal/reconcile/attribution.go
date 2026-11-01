@@ -21,7 +21,8 @@ import (
 // conversation's team stamped on the pull request's entity as its owner
 // (owning_team_id, the first tier of the router's owner ladder) and its
 // creator as commissioner (commissioned_by_user_id), and becomes actionable
-// through TF. A row it settles foreign is closed and never acted on.
+// through TF. A row it settles foreign is closed, if still a draft or open,
+// and never acted on.
 type Authorship int
 
 const (
@@ -204,10 +205,10 @@ func (rc *Reconciler) judge(ctx context.Context, orgID, conversationID string, s
 // place of the ones the run recorded. A stamp, or the read behind it, that
 // fails leaves the row pending, so the next pass stamps again; each stamp is
 // written only if unset, so a repeat changes nothing. When GitHub's answer
-// shows the run did not open it, the row is marked foreign, which closes it,
-// and counted: a run that opened no pull request could only have recorded one
-// through a sidecar that is not behaving as TF built it. Its ledger row stays
-// as the record of the attempt.
+// shows the run did not open it, the row is marked foreign, which closes it
+// unless it is already merged or closed, and counted: a run that opened no
+// pull request could only have recorded one through a sidecar that is not
+// behaving as TF built it. Its ledger row stays as the record of the attempt.
 func (rc *Reconciler) settle(ctx context.Context, orgID string, a domain.Deliverable, snap *domain.PRSnapshot, reads *attributionReads) (domain.Deliverable, verdict, bool) {
 	if a.Kind != domain.DeliverableKindPullRequest || a.Verification != domain.DeliverableVerificationPending {
 		return a, verdictUnknown, false
@@ -243,10 +244,13 @@ func (rc *Reconciler) settle(ctx context.Context, orgID string, a domain.Deliver
 			return a, verdictUnknown, false
 		}
 		if moved {
-			a.Verification, a.State = domain.DeliverableVerificationForeign, domain.DeliverableStatePRClosed
+			a.Verification = domain.DeliverableVerificationForeign
+			if a.State == domain.DeliverableStatePRDraft || a.State == domain.DeliverableStatePROpen {
+				a.State = domain.DeliverableStatePRClosed
+			}
 			countForeign(ctx, orgID, reason)
-			reconcileLog.ErrorContext(ctx, "a run recorded a pull request it did not open; closed its deliverable, and TF will not act on it",
-				"org", orgID, "deliverable", a.ID, "conversation", a.ConversationID, "target", a.Target, "reason", reason)
+			reconcileLog.ErrorContext(ctx, "a run recorded a pull request it did not open; TF will not act on it",
+				"org", orgID, "deliverable", a.ID, "conversation", a.ConversationID, "target", a.Target, "reason", reason, "state", a.State)
 		}
 		return a, v, moved
 	}
@@ -256,9 +260,14 @@ func (rc *Reconciler) settle(ctx context.Context, orgID string, a domain.Deliver
 // verifiedDetails is a's details with the node id its key names and the head
 // and base snap, GitHub's copy of that pull request, answers with. The run's
 // own record of them is not what a person's action on the row reads once it
-// is verified: rejecting a draft deletes its head branch.
+// is verified: rejecting a draft deletes its head branch. Details that do not
+// parse answer "", which keeps them as stored: nothing reads a head branch
+// out of them, and a rewrite would erase the rest.
 func verifiedDetails(a domain.Deliverable, snap domain.PRSnapshot) string {
-	d, _ := domain.ParsePRDeliverableDetails(a.DetailsJSON)
+	d, err := domain.ParsePRDeliverableDetails(a.DetailsJSON)
+	if err != nil {
+		return ""
+	}
 	d.NodeID, d.HeadBranch, d.Base = prNodeID(a), snap.HeadRef, snap.BaseRef
 	return domain.MarshalPRDeliverableDetails(d)
 }
@@ -324,11 +333,20 @@ func (rc *Reconciler) stampAttribution(ctx context.Context, orgID string, a doma
 // resolved hook when it was a draft, since closing it may have resolved its
 // task's last approval.
 //
-// The writes and the hook run detached from ctx, as Reconcile's do: a row
-// settled foreign is terminal at once, so a hook a cancelled caller skipped
-// would never run.
+// Only the GitHub read is bound to ctx. The store reads and writes and the
+// hook run detached from it, as Reconcile's writes do: a row settled foreign
+// is terminal at once, so a hook a cancelled caller skipped would never run.
 func (rc *Reconciler) SettleDeliverable(ctx context.Context, orgID string, a domain.Deliverable) {
 	if a.Kind != domain.DeliverableKindPullRequest || a.Verification != domain.DeliverableVerificationPending {
+		return
+	}
+	writeCtx := context.WithoutCancel(ctx)
+	_, onHost, err := rc.onCurrentHost(writeCtx, orgID, []domain.Deliverable{a})
+	if err != nil {
+		reconcileLog.WarnContext(ctx, "resolve github host to settle a pull request failed", "org", orgID, "deliverable", a.ID, "error", err)
+		return
+	}
+	if len(onHost) == 0 {
 		return
 	}
 	var snap *domain.PRSnapshot
@@ -339,7 +357,6 @@ func (rc *Reconciler) SettleDeliverable(ctx context.Context, orgID string, a dom
 		}
 		snap = &s
 	}
-	writeCtx := context.WithoutCancel(ctx)
 	settled, v, moved := rc.settle(writeCtx, orgID, a, snap, newAttributionReads(rc))
 	if !moved || v != verdictForeign {
 		return
@@ -351,16 +368,11 @@ func (rc *Reconciler) SettleDeliverable(ctx context.Context, orgID string, a dom
 }
 
 // fetchSnapshot reads GitHub's copy of pull request deliverable a's pull
-// request, under the owner its repository's registry row names now. ok is
-// false when a is not on the org's current host or the read fails.
+// request, a on the org's current host, under the owner its repository's
+// registry row names now. ok is false when the read fails.
 func (rc *Reconciler) fetchSnapshot(ctx context.Context, orgID string, a domain.Deliverable) (domain.PRSnapshot, bool) {
-	_, onHost, err := rc.onCurrentHost(ctx, orgID, []domain.Deliverable{a})
-	if err != nil {
-		reconcileLog.WarnContext(ctx, "resolve github host to settle a pull request failed", "org", orgID, "deliverable", a.ID, "error", err)
-		return domain.PRSnapshot{}, false
-	}
 	nodeID := prNodeID(a)
-	if len(onHost) == 0 || nodeID == "" {
+	if nodeID == "" {
 		return domain.PRSnapshot{}, false
 	}
 	reads := newRegistryReads(rc)

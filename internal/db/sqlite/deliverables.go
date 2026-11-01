@@ -532,11 +532,12 @@ func (s *deliverableStore) SettleVerificationSystem(ctx context.Context, orgID, 
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE deliverables
 		SET verification = ?,
-		    state        = CASE WHEN ? = ? THEN ? ELSE state END,
+		    state        = CASE WHEN ? = ? AND state IN (?, ?) THEN ? ELSE state END,
 		    details_json = COALESCE(NULLIF(?, ''), details_json),
 		    updated_at   = CURRENT_TIMESTAMP
 		WHERE org_id = ? AND id = ? AND kind = ? AND verification = ?
-	`, verdict, verdict, domain.DeliverableVerificationForeign, domain.DeliverableStatePRClosed, detailsJSON,
+	`, verdict, verdict, domain.DeliverableVerificationForeign,
+		domain.DeliverableStatePRDraft, domain.DeliverableStatePROpen, domain.DeliverableStatePRClosed, detailsJSON,
 		orgID, id, domain.DeliverableKindPullRequest, domain.DeliverableVerificationPending)
 	if err != nil {
 		return false, err

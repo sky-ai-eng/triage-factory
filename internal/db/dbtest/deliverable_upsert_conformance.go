@@ -195,6 +195,18 @@ func RunDeliverableUpsertConformance(t *testing.T, mk ExternalObjectScopeFactory
 		if got := get(theirsRow.ID); got.Verification != domain.DeliverableVerificationForeign || got.State != domain.DeliverableStatePRClosed || got.DetailsJSON != theirsRow.DetailsJSON {
 			t.Errorf("foreign row = (%q, %q, %s), want foreign, closed, details kept", got.Verification, got.State, got.DetailsJSON)
 		}
+		merged := pr(4, domain.DeliverableVerificationPending)
+		merged.State = domain.DeliverableStatePRMerged
+		mergedRow, err := s.Deliverables.UpsertSystem(ctx, orgID, merged)
+		if err != nil {
+			t.Fatalf("seed merged pending row: %v", err)
+		}
+		if moved, err := s.Deliverables.SettleVerificationSystem(ctx, orgID, mergedRow.ID, domain.DeliverableVerificationForeign, ""); err != nil || !moved {
+			t.Fatalf("settle merged row foreign = (%v, %v), want (true, nil)", moved, err)
+		}
+		if got := get(mergedRow.ID); got.Verification != domain.DeliverableVerificationForeign || got.State != domain.DeliverableStatePRMerged {
+			t.Errorf("foreign merged row = (%q, %q), want foreign and still merged", got.Verification, got.State)
+		}
 		if moved, err := s.Deliverables.SettleVerificationSystem(ctx, orgID, "not-a-deliverable-id", domain.DeliverableVerificationVerified, ""); err != nil || moved {
 			t.Errorf("settle of an unknown id = (%v, %v), want (false, nil)", moved, err)
 		}

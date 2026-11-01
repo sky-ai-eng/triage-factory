@@ -40,7 +40,8 @@ func TestHookReconcilerToSpawner_ExecutorHasNoReconciler(t *testing.T) {
 }
 
 // TestHookReconcilerToSpawner_BrainWiresTheClosure is the contrast: where the
-// brain built a reconciler, the spawner's closure is what it runs.
+// brain built a reconciler, the spawner's closure is what it runs, and the
+// reconciler is what the spawner's teardown settles a pending draft through.
 func TestHookReconcilerToSpawner_BrainWiresTheClosure(t *testing.T) {
 	a := &App{
 		plan:           planForRole(runmode.RoleControl),
@@ -50,5 +51,8 @@ func TestHookReconcilerToSpawner_BrainWiresTheClosure(t *testing.T) {
 	a.hookReconcilerToSpawner()
 	if !a.reconcilerCore.HasPullRequestResolvedHook() {
 		t.Error("the brain's reconciler was left without the task-closure hook")
+	}
+	if !a.spawner.HasDeliverableSettler() {
+		t.Error("the spawner was left without the reconciler to settle a pending draft through")
 	}
 }
