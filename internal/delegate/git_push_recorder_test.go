@@ -41,12 +41,11 @@ func newRecorderStoresConn(t *testing.T) (db.Stores, *sql.DB, string) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
+	conn.SetMaxOpenConns(1)
+	conn.SetMaxIdleConns(1)
 	t.Cleanup(func() { _ = conn.Close() })
-	if err := db.Migrate(conn, "sqlite3"); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	if err := db.SeedLocalTenantRows(context.Background(), conn); err != nil {
-		t.Fatalf("seed local tenant: %v", err)
+	if err := db.BootstrapSchemaForTest(conn); err != nil {
+		t.Fatalf("bootstrap schema: %v", err)
 	}
 	if err := db.SetLocalGitHubURLForTest(conn, "https://github.com"); err != nil {
 		t.Fatalf("set github url: %v", err)

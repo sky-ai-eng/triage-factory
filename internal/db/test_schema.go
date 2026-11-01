@@ -281,14 +281,15 @@ func cachedSchemaImage() ([]byte, error) {
 }
 
 // buildTenantlessImage is Migrate on an empty database, taken in two
-// steps so the goose half lands in the version cache: the image at head,
-// then Migrate over it, which finds nothing pending and does the rest.
+// steps so the goose half can come from the image binaries share
+// (sharedHeadImage): the image at head, then Migrate over it, which finds
+// nothing pending and does the rest.
 func buildTenantlessImage() ([]byte, error) {
 	head, err := sqliteHeadVersion()
 	if err != nil {
 		return nil, fmt.Errorf("head migration version: %w", err)
 	}
-	headImage, err := migratedImageAt(head)
+	headImage, err := sharedHeadImage(head)
 	if err != nil {
 		return nil, err
 	}

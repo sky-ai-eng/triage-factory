@@ -3,6 +3,8 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"testing"
@@ -103,6 +105,41 @@ func TestBootstrapSchemaForTest_MatchesMigrate(t *testing.T) {
 	assertSameMigratedDatabase(t, "tenantless image", tenantless, real)
 	if got, want := dumpEventsCatalog(t, tenantless), dumpEventsCatalog(t, real); !reflect.DeepEqual(got, want) {
 		t.Errorf("tenantless image: events_catalog content differs.\nrestored: %v\nreal:     %v", got, want)
+	}
+}
+
+// A file in the shared image cache that is not this tree's head image is
+// treated as absent, so a bad file costs a rebuild rather than failing every
+// SQLite-backed test that restores it.
+func TestReadHeadImage_TakesOnlyTheHeadImage(t *testing.T) {
+	head, err := sqliteHeadVersion()
+	if err != nil {
+		t.Fatalf("head version: %v", err)
+	}
+	image, err := sharedHeadImage(head)
+	if err != nil {
+		t.Fatalf("head image: %v", err)
+	}
+	write := func(body []byte) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "head.img")
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+		return path
+	}
+
+	if _, ok := readHeadImage(write(image), head); !ok {
+		t.Error("the head image was rejected")
+	}
+	if _, ok := readHeadImage(write(image), head+1); ok {
+		t.Error("an image at another version was taken as head")
+	}
+	if _, ok := readHeadImage(write([]byte("not a database")), head); ok {
+		t.Error("a file that is not a database was taken as head")
+	}
+	if _, ok := readHeadImage(filepath.Join(t.TempDir(), "missing.img"), head); ok {
+		t.Error("a missing file was taken as head")
 	}
 }
 

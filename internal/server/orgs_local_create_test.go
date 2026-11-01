@@ -26,8 +26,8 @@ func newTenantlessServer(t *testing.T) (*Server, *sql.DB) {
 	database.SetMaxOpenConns(1)
 	database.SetMaxIdleConns(1)
 	t.Cleanup(func() { database.Close() })
-	if err := db.Migrate(database, "sqlite3"); err != nil {
-		t.Fatalf("migrate: %v", err)
+	if err := db.BootstrapTenantlessSchemaForTest(database); err != nil {
+		t.Fatalf("bootstrap tenantless schema: %v", err)
 	}
 	return New(database, sqlitestore.New(database)), database
 }

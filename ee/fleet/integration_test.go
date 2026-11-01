@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -46,13 +45,15 @@ func openMigratedStores(t *testing.T) db.Stores {
 // end state).
 func openMigratedStoresWithConn(t *testing.T) (db.Stores, *sql.DB) {
 	t.Helper()
-	conn, err := db.OpenAt(filepath.Join(t.TempDir(), "fleet-test.db"))
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
+	conn.SetMaxOpenConns(1)
+	conn.SetMaxIdleConns(1)
 	t.Cleanup(func() { _ = conn.Close() })
-	if err := db.Migrate(conn, "sqlite3"); err != nil {
-		t.Fatalf("migrate: %v", err)
+	if err := db.BootstrapTenantlessSchemaForTest(conn); err != nil {
+		t.Fatalf("bootstrap schema: %v", err)
 	}
 	return sqlitestore.New(conn), conn
 }
