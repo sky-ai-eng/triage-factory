@@ -174,8 +174,19 @@ sync_mirror() {
   return "$failed"
 }
 
+prefetch_one() {
+  local ref=$1 src err
+  src=$(mirror_ref "$ref")
+  # stderr alone is kept, for the warning to say why a pull failed.
+  if err=$(docker pull -q "$src" 2>&1 >/dev/null) && err=$(docker tag "$src" "$ref" 2>&1); then
+    echo "  ✓ ${ref} (from ${src})"
+  else
+    echo "::warning::ci-images: cannot use ${src} for ${ref} (${err%%$'\n'*}); Docker Hub will be used"
+  fi
+}
+
 prefetch() {
-  local refs ref src err registry=${MIRROR%%/*}
+  local refs ref registry=${MIRROR%%/*}
   if ! refs=$(list_refs "$@"); then
     echo "::warning::ci-images: cannot list the images; Docker Hub will be used for all of them"
     return 0
@@ -184,15 +195,12 @@ prefetch() {
     echo "$GITHUB_TOKEN" | docker login "$registry" -u "${GITHUB_ACTOR:-github-actions}" --password-stdin >/dev/null 2>&1 ||
       echo "ci-images: cannot log in to ${registry}; pulling anonymously"
   fi
+  # Concurrently. The daemon downloads a layer two pulls share only once, and
+  # each pull reports in a single line, so the output doesn't interleave.
   for ref in $refs; do
-    src=$(mirror_ref "$ref")
-    # stderr alone is kept, for the warning to say why a pull failed.
-    if err=$(docker pull -q "$src" 2>&1 >/dev/null) && err=$(docker tag "$src" "$ref" 2>&1); then
-      echo "  ✓ ${ref} (from ${src})"
-    else
-      echo "::warning::ci-images: cannot use ${src} for ${ref} (${err%%$'\n'*}); Docker Hub will be used"
-    fi
+    prefetch_one "$ref" &
   done
+  wait
 }
 
 cmd=${1:-}

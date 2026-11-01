@@ -16,12 +16,9 @@
 # allow-all) were caught only by bringing the stack up by hand; this automates
 # that so the next person editing a wrapper has a regression net.
 #
-# Run locally (needs Docker + a host binary for jwk-init — build per README):
-#   cd frontend && pnpm install && pnpm run build && cd ..
-#   go build -o triagefactory .
+# Run locally (needs Docker; jwk-init runs from the image this builds, so no
+# host binary is needed):
 #   ./scripts/compose-smoke.sh
-# Point at an existing binary instead:
-#   TRIAGEFACTORY_BIN=/path/to/triagefactory ./scripts/compose-smoke.sh
 #
 # CI runs this same script (.github/workflows/compose-smoke.yml). Everything is
 # isolated under a dedicated compose project + throwaway env file and torn down
@@ -35,7 +32,13 @@ cd "$ROOT"
 # Override-able so concurrent runs (or a coincidental real project of the same
 # name) don't collide; the default is an obvious throwaway.
 PROJECT="${TF_SMOKE_PROJECT:-tf-smoke}"
-ENV_FILE=$(mktemp "${TMPDIR:-/tmp}/tf-smoke-env.XXXXXX")
+# The env file sits in a directory of its own: jwk-init runs in a container
+# that writes the file through a temp file and a rename, which a bind mount
+# of the file alone cannot take.
+ENV_DIR=$(mktemp -d "${TMPDIR:-/tmp}/tf-smoke-env.XXXXXX")
+ENV_FILE="$ENV_DIR/smoke.env"
+# compose.dev.yml's image for control and executor.
+TF_IMAGE=triagefactory:dev
 WORKSPACE_BUCKET=tf-workspaces  # matches docker-compose.yml's TF_WORKSPACE_BUCKET default
 KNOWLEDGE_BUCKET=tf-knowledge    # matches docker-compose.yml's TF_KNOWLEDGE_BUCKET default
 PUBLIC_URL=http://localhost:3000
@@ -57,7 +60,8 @@ cleanup() {
     dc logs --no-color --tail 200 2>/dev/null || true
   fi
   dc down -v --remove-orphans >/dev/null 2>&1 || true
-  rm -f "$ENV_FILE" "${unauth_out:-}"
+  rm -rf "$ENV_DIR"
+  rm -f "${unauth_out:-}"
 }
 trap cleanup EXIT
 
@@ -70,19 +74,6 @@ command -v docker >/dev/null 2>&1 || fail "docker not found on PATH"
 docker compose version >/dev/null 2>&1 || fail "'docker compose' (v2) not available"
 command -v openssl >/dev/null 2>&1 || fail "openssl not found on PATH (needed to generate throwaway secrets)"
 command -v curl >/dev/null 2>&1 || fail "curl not found on PATH (needed for the /api/health probe)"
-
-# jwk-init must run from a built TF binary — GoTrue won't boot without valid
-# RS256 signing material, and re-implementing the keygen here would drift from
-# the real one. Resolve an explicit override, then the repo-root build, then PATH.
-BIN=${TRIAGEFACTORY_BIN:-}
-if [ -z "$BIN" ]; then
-  if [ -x "$ROOT/triagefactory" ]; then
-    BIN="$ROOT/triagefactory"
-  elif command -v triagefactory >/dev/null 2>&1; then
-    BIN=$(command -v triagefactory)
-  fi
-fi
-[ -n "$BIN" ] && [ -x "$BIN" ] || fail "no triagefactory binary found — build one first (cd frontend && pnpm install && pnpm run build && cd .. && go build -o triagefactory .) or set TRIAGEFACTORY_BIN"
 
 # --- Throwaway secrets -----------------------------------------------------
 #
@@ -119,23 +110,38 @@ SEAWEEDFS_ADMIN_ACCESS_KEY=$(openssl rand -hex 32)
 SEAWEEDFS_ADMIN_SECRET_KEY=$(openssl rand -hex 32)
 EOF
 
+# --- Build the TF image ----------------------------------------------------
+#
+# From the working tree, not a published image. compose.dev.yml is read on its
+# own here: with docker-compose.yml beside it, compose refuses every command,
+# build included, until the ${GOTRUE_JWT_KEYS:?} values jwk-init writes below
+# exist, and jwk-init runs from this image.
+echo "Building the TF image (first run is slow)..."
+docker compose -p "$PROJECT" --env-file "$ENV_FILE" -f compose.dev.yml build
+
 # Mint the GoTrue RS256 keypair + service-role token into the same file (the
-# documented operator step). TF_PUBLIC_URL is exported so the token's iss claim
-# matches; the file has no GOTRUE_JWT_KEYS yet, so this generates fresh material.
+# documented operator step), with the jwk-init of the binary under test, so
+# the keygen here can't drift from the real one. TF_PUBLIC_URL is set so the
+# token's iss claim matches; the file has no GOTRUE_JWT_KEYS yet, so this
+# generates fresh material. Run as the caller so the rewritten file stays
+# theirs to read.
 echo "Running jwk-init..."
-TF_PUBLIC_URL="$PUBLIC_URL" "$BIN" jwk-init --write-env "$ENV_FILE"
+docker run --rm --pull never --user "$(id -u):$(id -g)" \
+  --entrypoint /usr/local/bin/triagefactory \
+  -e TF_PUBLIC_URL="$PUBLIC_URL" -v "$ENV_DIR:/smoke" \
+  "$TF_IMAGE" jwk-init --write-env /smoke/smoke.env
 
 # --- Bring the stack up ----------------------------------------------------
 #
-# Build from the working tree (compose.dev.yml, see dc above), not a published
-# image. depends_on conditions make `up` wait for postgres/gotrue healthy and
-# both postinit sidecars to complete successfully before starting control — so
-# a sidecar that errors aborts `up` here with a non-zero exit.
+# depends_on conditions make `up` wait for postgres/gotrue healthy and both
+# postinit sidecars to complete successfully before starting control — so a
+# sidecar that errors aborts `up` here with a non-zero exit. --no-build: the
+# image was built above, and compose.dev.yml's pull_policy would rebuild it.
 # Clear any leftovers from a previously-crashed run so stale named volumes (an
 # old bucket, an old migration set) from a reused project can't taint this run.
 dc down -v --remove-orphans >/dev/null 2>&1 || true
-echo "Building + starting the stack (this builds the TF image; first run is slow)..."
-dc up -d --build
+echo "Starting the stack..."
+dc up -d --no-build
 
 # control is the long pole: its depends_on transitively gates on every
 # other service, and its healthcheck curls /api/health, which only answers once
