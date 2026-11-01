@@ -248,3 +248,17 @@ func (s *Server) handleOrgSourcePatch(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, eventsource.NewSource(kind, state))
 }
+
+func (s *Server) registerSourceRoutes() {
+	// Which event sources can reach this org — derived on every read, never
+	// stored, and member-gated like the org settings read: it is the signal
+	// the authoring surfaces and the source cards render from, and every
+	// member renders those. See sources_handler.go.
+	s.api("GET /api/orgs/{org_id}/sources", s.handleOrgSources)
+	// The same collection addressed one element at a time. The read is
+	// member-gated like the list; the write is org admin, because a source is
+	// in no team's tracked set and pausing one lands on every team in the org
+	// — and because unbinding its credential already takes an org admin.
+	s.api("GET /api/orgs/{org_id}/sources/{kind}", s.handleOrgSource)
+	s.apiMutating("PATCH /api/orgs/{org_id}/sources/{kind}", s.handleOrgSourcePatch)
+}

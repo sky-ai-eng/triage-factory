@@ -170,3 +170,12 @@ func (sk *promptImportHandler) handlePromptUpload(w http.ResponseWriter, r *http
 	}
 	writeJSON(w, http.StatusCreated, created)
 }
+
+func (s *Server) registerPromptImportRoutes() {
+	// Prompt imports. Two routes rather than one with a source field: they
+	// take different bodies (a paste vs. nothing) and only one of them can
+	// exist in multi mode, where the process has no per-tenant disk to scan.
+	pi := &promptImportHandler{db: s.db, prompts: s.prompts, tx: s.tx, az: s.az}
+	s.apiMutating("POST /api/prompts/from-disk", pi.handlePromptImportFromDisk)
+	s.apiMutating("POST /api/prompts/upload", pi.handlePromptUpload)
+}

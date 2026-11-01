@@ -33,9 +33,9 @@ type teamsHandler struct {
 	spawner func() *delegate.Spawner
 	// memoryOwed rings the memory doorbell for a conversation the archive
 	// cascade just ended. The relay callbacks live on the Server, so the single
-	// construction site in routes() hands this handler the one method rather
-	// than a back-reference to the whole server — the same shape settingsHandler
-	// takes kickJira in.
+	// construction site in registerTeamRoutes hands this handler the one method
+	// rather than a back-reference to the whole server — the same shape
+	// settingsHandler takes kickJira in.
 	memoryOwed func(orgID, conversationID string)
 }
 
@@ -455,4 +455,48 @@ func (th *teamsHandler) handleTeamCreate(w http.ResponseWriter, r *http.Request)
 	// lets a freshly-created team surface there without waiting on a refetch.
 	created.Role = "admin"
 	writeJSON(w, http.StatusCreated, teamToJSON(created, ""))
+}
+
+func (s *Server) registerTeamRoutes() {
+	// Teams. The list read is the data source for the per-page read filter and
+	// the write-time picker (count-gated to ≥2 teams in the frontend); it
+	// carries the last-acting-team the picker seeds from, maintained
+	// server-side on each write — a recency signal, not a user preference, so
+	// there is no endpoint to set it explicitly. POST /api/teams is the
+	// org-admin "add team" affordance (multi-only; 404 in local).
+	th := &teamsHandler{
+		tx:         s.tx,
+		az:         s.az,
+		allStores:  s.allStores,
+		spawner:    func() *delegate.Spawner { return s.spawner },
+		memoryOwed: s.kickMemoryOwed,
+	}
+	s.apiMutating("POST /api/teams/list", th.handleTeamsList)
+	s.apiMutating("POST /api/teams", th.handleTeamCreate)
+	// The canonical single read, and the only reader of a team's description.
+	// Any org member may read any team in their org; a cross-org id 404s under
+	// RLS. {team_id} takes the literal "default" in local mode
+	// (authz.ResolveTeamID).
+	s.api("GET /api/teams/{team_id}", th.handleTeamGet)
+	// PATCH /api/teams/{team_id} renames a team / edits its description
+	// (multi-only; 404 in local). Gated team-admin-or-org-admin; a plain
+	// member 403s, a cross-org team_id 404s (VerifyTeamInOrg).
+	s.apiMutating("PATCH /api/teams/{team_id}", th.handleTeamUpdate)
+	// Team archive/restore lifecycle, org-admin only, multi-mode. Archive
+	// soft-deletes + force-stops the team's in-flight delegations and blocks
+	// further writes; restore flips it back, and dead conversations stay dead.
+	// The preview + archived-list back the confirm modal and the org-admin
+	// restore surface.
+	s.apiMutating("POST /api/teams/archived/list", th.handleTeamArchivedList)
+	s.api("GET /api/teams/{team_id}/archive/preview", th.handleTeamArchivePreview)
+	s.apiMutating("POST /api/teams/{team_id}/archive", th.handleTeamArchive)
+	s.apiMutating("POST /api/teams/{team_id}/restore", th.handleTeamRestore)
+	// The team's flow node — events/tasks/runs cuts over a window, the
+	// spend node's sibling on the same member-level gate: both are the team
+	// page's figures, and the team page is every member's.
+	s.api("GET /api/teams/{team_id}/activity", s.handleTeamActivity)
+	// The team's pull requests — the PR page's team arm, and (as its
+	// count-only read) the Overview's OPEN PRS figure. Same member-level
+	// gate as the flow node beside it.
+	s.apiMutating("POST /api/teams/{team_id}/prs/list", s.handleTeamPRList)
 }

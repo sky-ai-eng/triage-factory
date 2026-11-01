@@ -18,9 +18,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 )
 
-// promptsHandler serves the prompt and event-type endpoints. It holds only
-// the deps these routes need — the DB handle (for the event-types catalog
-// read) and the transactional store runner — and routes() registers its
+// promptsHandler serves the prompt and event-type endpoints. It holds only the
+// deps these routes need — the DB handle (for the event-types catalog read) and
+// the transactional store runner — and registerPromptRoutes registers its
 // methods through the api()/apiMutating() middleware wrappers.
 type promptsHandler struct {
 	db *sql.DB
@@ -476,4 +476,23 @@ func (ph *promptsHandler) handlePromptStats(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	writeJSON(w, http.StatusOK, stats)
+}
+
+func (s *Server) registerPromptRoutes() {
+	ph := &promptsHandler{db: s.db, tx: s.tx, az: s.az}
+	// **Declared exceptions to the paginated-list rule.** These two are not
+	// lists of rows a tenant owns; they are the build's own vocabulary —
+	// domain.AllEventTypes() and the schemas derived from it, fixed at compile
+	// time and identical for every caller. There is nothing to filter by,
+	// nothing that grows with usage, and a page token would address a set that
+	// only changes when the binary does. A client reads them once and caches.
+	// Their shape stays a bare list on purpose: paginating a constant is
+	// ceremony that makes the surface look mutable.
+	s.api("GET /api/event-types", ph.handleEventTypes)
+	s.apiMutating("POST /api/prompts/list", ph.handlePromptsList)
+	s.apiMutating("POST /api/prompts", ph.handlePromptCreate)
+	s.api("GET /api/prompts/{id}", ph.handlePromptGet)
+	s.apiMutating("PUT /api/prompts/{id}", ph.handlePromptPut)
+	s.apiMutating("DELETE /api/prompts/{id}", ph.handlePromptDelete)
+	s.api("GET /api/prompts/{id}/stats", ph.handlePromptStats)
 }

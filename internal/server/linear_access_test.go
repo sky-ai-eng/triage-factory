@@ -720,7 +720,7 @@ func TestLinearAccessRoutes_Registration(t *testing.T) {
 		"DELETE /api/orgs/{org_id}/linear/access/credential":   "apiMutating",
 	}
 	got := map[string]string{}
-	for _, route := range discoverProtectedRoutes(t) {
+	for _, route := range protectedRoutes(newTestServer(t)) {
 		if _, ok := want[route.pattern]; ok {
 			got[route.pattern] = route.via
 		}

@@ -597,3 +597,21 @@ func (s *Server) handleAPITokenRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
+
+func (s *Server) registerAPITokenRoutes() {
+	// The caller's own API tokens — the headless credential surface.
+	// Viewer-relative like the caller's settings row (/api/me/settings): a
+	// token acts AS its minter, so nobody may address another's and there is no
+	// id in the path. The org a token is sealed to is a field on the row, not
+	// the route's scope, which is why create takes org_id in its body.
+	// Multi-mode only (404 in local). Both credentials reach these: a session
+	// mints the first token, and a token rotates itself within its own org.
+	s.apiMutating("POST /api/me/tokens", s.handleAPITokenCreate)
+	s.apiMutating("POST /api/me/tokens/list", s.handleAPITokenList)
+	s.apiMutating("PATCH /api/me/tokens/{id}", s.handleAPITokenRename)
+	s.apiMutating("DELETE /api/me/tokens/{id}", s.handleAPITokenRevoke)
+	// The policy those tokens live under is the org's, so it is addressed at
+	// the org and readable by any member — the cap binds everyone's tokens,
+	// and a member picking an expiry should learn it before the 422 does.
+	s.api("GET /api/orgs/{org_id}/api-token-policy", s.handleAPITokenPolicy)
+}

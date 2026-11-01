@@ -1,12 +1,8 @@
 package server
 
 import (
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -17,9 +13,10 @@ import (
 
 // TestAllProtectedRoutes_RejectUnauthenticated probes every /api/* route
 // registered via s.api / s.apiMutating with three flavors of unauth and
-// asserts each comes back as 401. Routes are discovered by AST-parsing
-// server.go so coverage can't drift behind new mounts — if someone adds
-// a route via s.api/s.apiMutating, the test picks it up on the next run.
+// asserts each comes back as 401. Routes come from the server's own record
+// of its mounts (routeMux), so coverage can't drift behind new mounts — if
+// someone adds a route via s.api/s.apiMutating, the test picks it up on the
+// next run, whichever file registers it.
 //
 // The variants:
 //
@@ -51,9 +48,9 @@ func TestAllProtectedRoutes_RejectUnauthenticated(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	rig := newAuthRig(t)
 
-	protected := discoverProtectedRoutes(t)
+	protected := protectedRoutes(rig.srv)
 	if len(protected) == 0 {
-		t.Fatalf("AST discovered 0 protected routes — parser broken")
+		t.Fatalf("server mounted no protected routes")
 	}
 
 	sidName := rig.srv.sidCookieName()
@@ -118,15 +115,14 @@ func TestAllMutatingRoutes_RejectCrossOrigin(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	rig := newAuthRig(t)
 
-	all := discoverProtectedRoutes(t)
-	var mutating []protectedRoute
-	for _, r := range all {
-		if r.via == "apiMutating" {
+	var mutating []routeMount
+	for _, r := range protectedRoutes(rig.srv) {
+		if r.via == mountAPIMutating {
 			mutating = append(mutating, r)
 		}
 	}
 	if len(mutating) == 0 {
-		t.Fatalf("AST discovered 0 apiMutating routes — parser broken")
+		t.Fatalf("server mounted no apiMutating routes")
 	}
 
 	for _, route := range mutating {
@@ -158,72 +154,16 @@ func TestAllMutatingRoutes_RejectCrossOrigin(t *testing.T) {
 	}
 }
 
-// protectedRoute is one route discovered by AST inspection of
-// (s *Server).routes().
-type protectedRoute struct {
-	pattern string // e.g. "POST /api/tasks/{id}/swipe"
-	via     string // "api" or "apiMutating"
-}
-
-// discoverProtectedRoutes parses server.go, walks (s *Server).routes(),
-// and returns every mount registered via s.api / s.apiMutating. Raw
-// s.mux.Handle* calls (pre-auth allowlist + the SPA / GoTrue proxy) are
-// excluded — those are already covered by routes_coverage_test.go.
-//
-// Reuses the same parsing approach so the two tests can't disagree
-// about what counts as "a route mount."
-func discoverProtectedRoutes(t *testing.T) []protectedRoute {
-	t.Helper()
-	const sourceFile = "server.go"
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, sourceFile, nil, parser.ParseComments)
-	if err != nil {
-		t.Fatalf("parse %s: %v", sourceFile, err)
+// protectedRoutes returns every route s mounted through api or apiMutating.
+// Raw mounts (the pre-auth allowlist, the SPA, the GoTrue proxy) are left
+// out; routes_coverage_test.go covers those.
+func protectedRoutes(s *Server) []routeMount {
+	var out []routeMount
+	for _, m := range s.mux.mounts {
+		if m.via == mountAPI || m.via == mountAPIMutating {
+			out = append(out, m)
+		}
 	}
-
-	var routesFn *ast.FuncDecl
-	for _, decl := range file.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Recv == nil || fn.Name.Name != "routes" {
-			continue
-		}
-		routesFn = fn
-		break
-	}
-	if routesFn == nil {
-		t.Fatalf("could not find (s *Server).routes() in %s", sourceFile)
-	}
-
-	var out []protectedRoute
-	ast.Inspect(routesFn.Body, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok || len(call.Args) == 0 {
-			return true
-		}
-		lit, ok := call.Args[0].(*ast.BasicLit)
-		if !ok || lit.Kind != token.STRING {
-			return true
-		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok {
-			return true
-		}
-		ident, ok := sel.X.(*ast.Ident)
-		if !ok || ident.Name != "s" {
-			return true
-		}
-		switch sel.Sel.Name {
-		case "api", "apiMutating":
-		default:
-			return true
-		}
-		pattern, err := strconv.Unquote(lit.Value)
-		if err != nil {
-			return true
-		}
-		out = append(out, protectedRoute{pattern: pattern, via: sel.Sel.Name})
-		return true
-	})
 	return out
 }
 

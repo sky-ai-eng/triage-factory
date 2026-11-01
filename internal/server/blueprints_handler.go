@@ -1442,3 +1442,23 @@ func (bh *blueprintsHandler) handleBlueprintRunCancel(w http.ResponseWriter, r *
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "cancelling"})
 }
+
+func (s *Server) registerBlueprintRoutes() {
+	bh := &blueprintsHandler{tx: s.tx, az: s.az, spawner: func() *delegate.Spawner { return s.spawner }}
+	s.apiMutating("POST /api/blueprints/list", bh.handleBlueprintsList)
+	s.api("GET /api/blueprints/{id}", bh.handleBlueprintGet)
+	s.apiMutating("POST /api/blueprints", bh.handleBlueprintCreate)
+	s.apiMutating("PUT /api/blueprints/{id}", bh.handleBlueprintUpdate)
+	s.apiMutating("DELETE /api/blueprints/{id}", bh.handleBlueprintDelete)
+	// One route for the canvas's bulk read and the per-blueprint read: they
+	// differ only by a filter, and a filter is what a list body is for.
+	s.apiMutating("POST /api/blueprint-steps/list", bh.handleBlueprintStepsAll)
+	s.apiMutating("PUT /api/blueprints/{id}/steps", bh.handleBlueprintStepsPut)
+	s.apiMutating("POST /api/blueprints/{id}/merge", bh.handleBlueprintMerge)
+	s.apiMutating("POST /api/blueprints/{id}/split", bh.handleBlueprintSplit)
+	s.apiMutating("POST /api/blueprints/{id}/reconnect", bh.handleBlueprintReconnect)
+	s.apiMutating("POST /api/blueprints/duplicate", bh.handleBlueprintDuplicate)
+	s.apiMutating("POST /api/blueprint-runs/list", bh.handleBlueprintRunsList)
+	s.api("GET /api/blueprint-runs/{id}", bh.handleBlueprintRunGet)
+	s.apiMutating("POST /api/blueprint-runs/{id}/cancel", bh.handleBlueprintRunCancel)
+}

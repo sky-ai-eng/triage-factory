@@ -41,8 +41,9 @@ const maxWebhookBody = 25 << 20
 //
 // Every refusal that depends on the org — no App, a PAT org, a bad signature —
 // is the same bare 401, so the reply carries no information about which orgs
-// exist or which of them have an App. The mount is rate-limited (routes(),
-// signed-webhook tier) because everything up to that 401 costs reads.
+// exist or which of them have an App. The mount is rate-limited
+// (registerGitHubRoutes, signed-webhook tier) because everything up to that 401
+// costs reads.
 //
 // A verified delivery is then deduped on its X-GitHub-Delivery GUID before any
 // of the work above runs — see the gate below, which sits inside the rate limit

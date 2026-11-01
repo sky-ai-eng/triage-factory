@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/mail"
@@ -760,4 +761,47 @@ func displayEmail(e string) string {
 		return "an account with no email"
 	}
 	return e
+}
+
+func (s *Server) registerInviteRoutes() {
+	// Org invites (multi-mode only — each handler 404s in local). The
+	// admin-facing create/list/revoke gate on org-admin and write through the
+	// app pool; preview + accept are the redeem surfaces and run on the admin
+	// pool (the redeem actor holds a token but no membership). publicURL +
+	// setActiveOrg are read lazily because deployCfg/authDeps land after
+	// routes() runs. GET /api/invites/preview is intentionally pre-auth (the
+	// recipient hasn't authenticated yet) — see the pre-auth note at the top of
+	// routes() and routes_coverage_test.
+	ih := &invitesHandler{
+		tx:      s.tx,
+		az:      s.az,
+		admin:   s.db,
+		invites: s.allStores.Invites,
+		users:   s.allStores.Users,
+		publicURL: func() string {
+			if s.deployCfg == nil {
+				return ""
+			}
+			return s.deployCfg.publicURL
+		},
+		setActiveOrg: func(ctx context.Context, sessID, orgID uuid.UUID) error {
+			if s.authDeps == nil {
+				return errors.New("auth not wired")
+			}
+			return s.authDeps.sessions.UpdateActiveOrgSystem(ctx, sessID, orgID)
+		},
+		refuseSSOBarred: s.refuseSSOBarred,
+	}
+	s.apiMutating("POST /api/invites/list", ih.handleInviteList)
+	s.apiMutating("POST /api/invites", ih.handleInviteCreate)
+	// The single read carries no token and no accept URL — those live only in
+	// the create response. Registered after /preview, which is a literal and
+	// so wins the {id} segment on GET.
+	s.api("GET /api/invites/{id}", ih.handleInviteGet)
+	s.apiMutating("POST /api/invites/{id}/revoke", ih.handleInviteRevoke)
+	s.apiMutating("POST /api/invites/accept", ih.handleInviteAccept)
+	// Pre-auth: the invitee previews the token before signing in. The handler
+	// runs on the admin pool and discloses only org name + role to the token
+	// holder. Listed in preAuthAllowlist; IP-rate-limited.
+	s.mux.Handle("GET /api/invites/preview", s.preAuthRateLimit(http.HandlerFunc(ih.handleInvitePreview)))
 }

@@ -17,8 +17,8 @@ import (
 
 // dashboardHandler serves the personal dashboard endpoints: PR stats, the
 // user's open PRs, and live per-PR status / draft toggles. It holds the
-// transactional store runner and the GitHub credential resolver the live
-// per-PR calls use; routes() registers its methods through the
+// transactional store runner and the GitHub credential resolver the live per-PR
+// calls use; registerDashboardRoutes registers its methods through the
 // api()/apiMutating() middleware wrappers.
 type dashboardHandler struct {
 	tx         db.TxRunner
@@ -450,4 +450,12 @@ func (dh *dashboardHandler) handleDashboardPRUpdate(w http.ResponseWriter, r *ht
 	row := domain.PRSummaryFromSnapshot(snap)
 	row.EntityID = pr.entity.ID
 	writeJSON(w, http.StatusOK, row)
+}
+
+func (s *Server) registerDashboardRoutes() {
+	dh := &dashboardHandler{tx: s.tx, ghResolver: s.ghResolver, backfill: s.kickDashboardBackfill}
+	s.api("GET /api/dashboard/stats", dh.handleDashboardStats)
+	s.apiMutating("POST /api/dashboard/prs/list", dh.handleDashboardPRs)
+	s.api("GET /api/dashboard/prs/{entity_id}/status", dh.handleDashboardPRStatus)
+	s.apiMutating("PATCH /api/dashboard/prs/{entity_id}", dh.handleDashboardPRUpdate)
 }
