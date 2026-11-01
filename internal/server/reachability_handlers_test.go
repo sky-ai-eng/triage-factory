@@ -129,3 +129,23 @@ func TestNormalizeReachabilityURL(t *testing.T) {
 		}
 	}
 }
+
+func TestHandleGitHubReachability_Reachable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	// srv.URL is a non-github host, so APIBase derives the GHES /api/v3 mount;
+	// the test server answers 200 on any path.
+	code, res := postReachability(t, handleGitHubReachability, `{"url":"`+srv.URL+`"}`)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", code)
+	}
+	if !res.Reachable {
+		t.Errorf("Reachable=false, want true; reason=%q", res.Reason)
+	}
+	if !strings.HasSuffix(res.ProbedURL, "/api/v3") {
+		t.Errorf("ProbedURL = %q, want it to end with /api/v3 (derived API base)", res.ProbedURL)
+	}
+}

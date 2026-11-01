@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
@@ -169,6 +170,13 @@ func TestTeamRename_Refusals(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newTeamRenameRig(t)
 			caller, teamID := tc.setup(t, r)
+			// Another org's team is the PATCH target in the cross-org case, so
+			// its row is checked against what it held before the request.
+			otherTarget := teamID != r.teamID && uuid.Validate(teamID) == nil
+			var before [3]string
+			if otherTarget {
+				before[0], before[1], before[2] = r.nameSlugDescOf(t, teamID)
+			}
 
 			rec := httptest.NewRecorder()
 			r.th.handleTeamUpdate(rec, r.req(caller, teamID, tc.body))
@@ -177,6 +185,11 @@ func TestTeamRename_Refusals(t *testing.T) {
 			}
 			if name, slug, desc := r.nameSlugDescOf(t, r.teamID); name != "default" || slug != "default" || desc != "" {
 				t.Errorf("team = (%q, %q, %q) after a refused PATCH, want it as seeded", name, slug, desc)
+			}
+			if otherTarget {
+				if name, slug, desc := r.nameSlugDescOf(t, teamID); [3]string{name, slug, desc} != before {
+					t.Errorf("targeted team = (%q, %q, %q) after a refused PATCH, want %q", name, slug, desc, before)
+				}
 			}
 		})
 	}

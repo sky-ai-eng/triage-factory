@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -679,5 +680,41 @@ func TestTaskRequeue_LinearTask_NothingRecorded(t *testing.T) {
 	}
 	if n := fake.Requests(); n != 0 {
 		t.Errorf("Linear received %d requests, want none", n)
+	}
+}
+
+// TestTaskClaim_GitHubTask_SkipsLinearResolver: only a Linear-backed claim
+// consults the Linear resolver, so a user without Linear can still claim
+// everything else.
+func TestTaskClaim_GitHubTask_SkipsLinearResolver(t *testing.T) {
+	res := &recordingLinearResolver{userErr: linear.ErrNoLinearUserCredential}
+	s := newTestServer(t)
+	s.linearResolver = res
+	const eventType = "github:pr:opened"
+	repoID := dbseed.GitHubRepository(t, s.db, runmode.LocalDefaultOrgID, "https://github.com", "sky", "repo")
+	if _, err := s.db.Exec(
+		`INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id)
+		 VALUES ('e_gh_lin', 'github', 'sky/repo#3', 'pr', 'active', 'https://github.com', ?)`, repoID,
+	); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO events (id, entity_id, event_type, dedup_key) VALUES ('ev_gh_lin', 'e_gh_lin', ?, '')`, eventType,
+	); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
+		 VALUES ('00000000-0000-4000-8000-000000000304', 'e_gh_lin', ?, 'ev_gh_lin', 'queued')`, eventType,
+	); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000304/claim", map[string]any{"hesitation_ms": 0})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if userCalls, _, _, _ := res.snapshot(); userCalls != 0 {
+		t.Errorf("ForUser called %d times for a GitHub task, want 0", userCalls)
 	}
 }

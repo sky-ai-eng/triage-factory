@@ -247,3 +247,21 @@ func TestLinearStateGet(t *testing.T) {
 	assertOneFault(t, doJSON(t, s, http.MethodGet, linearStatePath(linearTeamEng, "Done"), nil),
 		http.StatusNotFound, "NOT_FOUND", "")
 }
+
+// TestLinearCatalog_NotConnected: with no service credential every read is a
+// 409 naming the fix, never an empty list or a 404 for a team that may exist.
+func TestLinearCatalog_NotConnected(t *testing.T) {
+	s, _ := newServerWithUnconnectedLinear(t, linearFixtureEng)
+	for name, rec := range map[string]*httptest.ResponseRecorder{
+		"teams list":  doJSON(t, s, http.MethodPost, linearTeamsListPath, map[string]any{}),
+		"team":        doJSON(t, s, http.MethodGet, linearTeamPath(linearTeamEng), nil),
+		"states list": doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamEng), map[string]any{}),
+		"state":       doJSON(t, s, http.MethodGet, linearStatePath(linearTeamEng, linearStateDone), nil),
+		"users list":  doJSON(t, s, http.MethodPost, linearUsersListPath, map[string]any{}),
+		"user":        doJSON(t, s, http.MethodGet, linearUserPath(linearUserAda), nil),
+	} {
+		t.Run(name, func(t *testing.T) {
+			assertOneFault(t, rec, http.StatusConflict, "NOT_CONFIGURED", "")
+		})
+	}
+}

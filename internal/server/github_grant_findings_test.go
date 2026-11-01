@@ -307,3 +307,33 @@ func TestNewGitHubAppStatusResponse_InstallationGrantFields(t *testing.T) {
 		t.Error("deployment_app_available=true from the constructor alone")
 	}
 }
+
+// The wire contract the frontend's list hook relies on: no bare arrays, every
+// paging key present even on an empty finding.
+func TestGitHubGrantFindings_EmptyFindingIsAnEnvelope(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	ctx := context.Background()
+	stores := sqlitestore.New(s.db)
+	if _, err := stores.Orgs.SetGitHubCredentialClass(ctx, runmode.LocalDefaultOrgID, domain.GitHubCredentialClassBYOApp); err != nil {
+		t.Fatalf("set credential class: %v", err)
+	}
+	rec := doJSON(t, s, "POST", reachWithoutPurposePath, map[string]any{"page_size": 10})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// next_page_token is omitted on the last page, which an empty finding is;
+	// the client normalizes that to "". The other two keys are unconditional.
+	for _, key := range []string{"items", "total_count"} {
+		if _, ok := raw[key]; !ok {
+			t.Errorf("empty finding lacks %q: %s", key, rec.Body.String())
+		}
+	}
+	if string(raw["items"]) != "[]" {
+		t.Errorf("items=%s, want [] (never null)", raw["items"])
+	}
+}

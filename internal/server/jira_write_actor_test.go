@@ -204,3 +204,43 @@ func TestStockClaim_UserClientFailureAnsweredByWhoCanFixIt(t *testing.T) {
 		})
 	}
 }
+
+// TestTaskClaim_GitHubTask_SkipsJiraResolver pins that the resolver is only
+// consulted for Jira-backed claims — a GitHub task claim must not touch the
+// Jira write path at all (no spurious ForUser, no 409 on a GitHub claim from a
+// user without Jira).
+func TestTaskClaim_GitHubTask_SkipsJiraResolver(t *testing.T) {
+	s := newTestServer(t)
+	res := &recordingJiraResolver{userErr: jira.ErrNoJiraUserCredential}
+	s.jiraResolver = res
+
+	const eventType = "github:pr:opened"
+	repoID := dbseed.GitHubRepository(t, s.db, runmode.LocalDefaultOrgID, "https://github.com", "sky", "repo")
+	if _, err := s.db.Exec(
+		`INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id)
+		 VALUES ('e_gh', 'github', 'sky/repo#1', 'pr', 'active', 'https://github.com', ?)`, repoID,
+	); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO events (id, entity_id, event_type, dedup_key)
+		 VALUES ('ev_gh', 'e_gh', ?, '')`, eventType,
+	); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
+		 VALUES ('00000000-0000-4000-8000-000000000022', 'e_gh', ?, 'ev_gh', 'queued')`, eventType,
+	); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000022/claim",
+		map[string]any{"hesitation_ms": 0})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (GitHub claim unaffected by Jira cred); body=%s", rec.Code, rec.Body.String())
+	}
+	if calls, _, _ := res.snapshot(); calls != 0 {
+		t.Errorf("ForUser called %d times for a GitHub task; want 0", calls)
+	}
+}

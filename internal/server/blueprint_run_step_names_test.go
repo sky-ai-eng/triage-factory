@@ -53,8 +53,8 @@ func TestBlueprintRunGet_StepNamesFromFrozenPlan(t *testing.T) {
 		if *steps[i].Step.Name != want {
 			t.Errorf("step %d name = %q, want %q", i, *steps[i].Step.Name, want)
 		}
-		// A plan step has no created_at, so the key is omitted rather than
-		// serialized as a zero "0001-01-01" timestamp.
+		// A plan step has no created_at, so none is reported: never a zero
+		// "0001-01-01" timestamp leaking out of the frozen plan.
 		if steps[i].Step.CreatedAt != nil {
 			t.Errorf("step %d created_at = %q, want omitted", i, *steps[i].Step.CreatedAt)
 		}

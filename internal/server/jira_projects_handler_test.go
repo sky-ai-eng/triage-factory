@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/zalando/go-keyring"
 )
 
 func jiraOrgPath(orgID string) string { return "/api/orgs/" + orgID + "/jira" }
@@ -241,5 +242,24 @@ func TestJiraStatusGet(t *testing.T) {
 	}
 	if fake.Calls() != before {
 		t.Errorf("a path outside the grammar reached Jira %d times", fake.Calls()-before)
+	}
+}
+
+// TestJiraCatalog_NotConnectedEverywhere: with no service credential every
+// read is a 409 naming the fix, never an empty list or a 404 for a project
+// that may exist.
+func TestJiraCatalog_NotConnectedEverywhere(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+	for name, rec := range map[string]*httptest.ResponseRecorder{
+		"projects list": doJSON(t, s, http.MethodPost, jiraProjectsListPath, map[string]any{}),
+		"project":       doJSON(t, s, http.MethodGet, jiraProjectPath("SKY"), nil),
+		"statuses list": doJSON(t, s, http.MethodPost, jiraStatusesListPath("SKY"), map[string]any{}),
+		"status":        doJSON(t, s, http.MethodGet, jiraStatusPath("SKY", statusDoneID), nil),
+	} {
+		t.Run(name, func(t *testing.T) {
+			assertOneFault(t, rec, http.StatusConflict, "NOT_CONFIGURED", "")
+		})
 	}
 }

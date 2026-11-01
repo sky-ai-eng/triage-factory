@@ -577,3 +577,52 @@ func nullable(s string) any {
 
 func ptrTime(t time.Time) *time.Time { return &t }
 func ptrInt(n int) *int              { return &n }
+
+// TestUsageAccessLog_PolicyCategory_Local covers the policy bucket end to end:
+// the SSO rows ee/sso writes are core-renderable and reachable through the
+// category filter. Its own server + seed rather than an extra row in
+// seedAccessLogLocal, whose subtests assert on exact row counts.
+func TestUsageAccessLog_PolicyCategory_Local(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureGovernance))
+	t.Cleanup(entitlements.Reset)
+
+	s := newUsageTestServer(t)
+	org := runmode.LocalDefaultOrgID
+	actor := runmode.LocalDefaultUserID
+	if _, err := s.db.Exec(`INSERT INTO users (id, display_name) VALUES ('u-alice', 'Alice')`); err != nil {
+		t.Fatalf("seed users: %v", err)
+	}
+	row := func(id, action, target, detail, when string) {
+		t.Helper()
+		if _, err := s.db.Exec(`INSERT INTO access_change_log (id, org_id, actor_user_id, action, target_user_id, detail_json, created_at)
+		      VALUES (?, ?, ?, ?, ?, ?, ?)`, id, org, actor, action, nullable(target), nullable(detail), when); err != nil {
+			t.Fatalf("seed access row: %v", err)
+		}
+	}
+	row("pol-1", domain.AccessActionOrgMemberRevoked, "u-alice", "", "2026-06-20 10:00:00")
+	row("pol-2", domain.AccessActionSSOEnforcementEnabled, "", domain.AccessDetailSSOConnection("p-1"), "2026-06-20 11:00:00")
+	row("pol-3", domain.AccessActionSSODomainVerified, "", domain.AccessDetailSSODomain("corp.example"), "2026-06-20 12:00:00")
+	row("pol-4", domain.AccessActionSSOBreakGlassAdded, "u-alice", "", "2026-06-20 13:00:00")
+
+	resp := postAccessLog(t, s, map[string]any{"category": "policy"})
+	if len(resp.Items) != 3 {
+		t.Fatalf("category=policy items = %d, want 3 (the SSO rows only): %+v", len(resp.Items), resp.Items)
+	}
+	labels := map[string]bool{}
+	for _, it := range resp.Items {
+		if it.Action == domain.AccessActionOrgMemberRevoked {
+			t.Errorf("policy filter leaked a membership row: %+v", it)
+		}
+		labels[it.ActionLabel] = true
+	}
+	for _, want := range []string{
+		"started requiring SSO for this org",
+		"verified the domain corp.example",
+		"added Alice as an SSO break-glass principal",
+	} {
+		if !labels[want] {
+			t.Errorf("missing rendered label %q in %v", want, labels)
+		}
+	}
+}
