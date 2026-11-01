@@ -32,6 +32,13 @@ func openMigrationsTestDB(t *testing.T) *sql.DB {
 // wrote them and then migrate forward: the replay up to the seeding
 // version is the expensive part, and none of them is about it.
 //
+// Such a test migrates through the migration it is about and stops
+// (migrateThrough), never to head: a replay to head makes every such test
+// slower with each migration that lands after it. And it is deleted once
+// its migration ships in a release. A released migration's text is what
+// every install that upgrades through it runs, so its test can only ever
+// re-check SQL nothing may change.
+//
 // The foreign-key pragma is the connection's, from dsn. On return goose
 // is pointed at the SQLite tree with the sqlite3 dialect, the state the
 // goose.UpTo this replaces left behind, so a test's own goose.Up or
@@ -62,9 +69,25 @@ func openMigrationsTestDBAt(t *testing.T, dsn string, version int64) *sql.DB {
 	return database
 }
 
+// migrateThrough applies the SQLite migrations after database's current
+// version up to and including version.
+func migrateThrough(t *testing.T, database *sql.DB, version int64) {
+	t.Helper()
+	gooseMu.Lock()
+	defer gooseMu.Unlock()
+	goose.SetBaseFS(migrationsSQLiteFS)
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatalf("set dialect: %v", err)
+	}
+	if err := goose.UpTo(database, "migrations-sqlite", version); err != nil {
+		t.Fatalf("goose.UpTo(%d): %v", version, err)
+	}
+}
+
 // TestMigrate_FreshInstall pins the bootstrap path: a blank DB ends up
 // with all baseline tables and a goose_db_version row stamping the
-// v1.11.0 baseline as applied.
+// v1.11.0 baseline as applied, and a second Migrate on the result (a
+// launch on an up-to-date DB) changes nothing.
 func TestMigrate_FreshInstall(t *testing.T) {
 	database := openMigrationsTestDB(t)
 	if err := Migrate(database, "sqlite3"); err != nil {
@@ -111,19 +134,10 @@ func TestMigrate_FreshInstall(t *testing.T) {
 			t.Errorf("dissolved table %s present after fresh Migrate", table)
 		}
 	}
-}
 
-// TestMigrate_Idempotent guards the "launch on an up-to-date DB" case.
-// Two Migrate calls in a row leave the post-state unchanged.
-func TestMigrate_Idempotent(t *testing.T) {
-	database := openMigrationsTestDB(t)
-	if err := Migrate(database, "sqlite3"); err != nil {
-		t.Fatalf("first Migrate: %v", err)
-	}
 	if err := Migrate(database, "sqlite3"); err != nil {
 		t.Fatalf("second Migrate: %v", err)
 	}
-
 	var n int
 	if err := database.QueryRow(
 		`SELECT COUNT(*) FROM goose_db_version WHERE version_id = ?`, v1110BaselineVersionID,
@@ -131,7 +145,7 @@ func TestMigrate_Idempotent(t *testing.T) {
 		t.Fatalf("count: %v", err)
 	}
 	if n != 1 {
-		t.Errorf("goose_db_version[%d] count = %d, want 1", v1110BaselineVersionID, n)
+		t.Errorf("goose_db_version[%d] count = %d after a second Migrate, want 1", v1110BaselineVersionID, n)
 	}
 }
 
@@ -256,506 +270,5 @@ func TestMigrate_MessagesAreTheOnlyAccountingLedger(t *testing.T) {
 		if _, err := database.Exec(`SELECT ` + probe.col + ` FROM ` + probe.table + ` LIMIT 0`); err == nil {
 			t.Errorf("%s.%s survived the migration; the accounting cache must be gone", probe.table, probe.col)
 		}
-	}
-}
-
-// TestMigrate_BackfillsRunTokensFromRunMessages pins the TFAC-473 SQLite
-// backfill: a run that completed BEFORE the migration (its per-message
-// tokens already in run_messages, but no denormalized total) gets its four
-// token columns populated from the run_messages SUM when the migration
-// runs. Driven through goose directly so we can land the pre-migration
-// fixture between the prior migration and the new one.
-func TestMigrate_BackfillsRunTokensFromRunMessages(t *testing.T) {
-	// TestDSNMemoryNoForeignKeys so the fixture needs no entity / task /
-	// prompt / blueprint scaffolding — the backfill is pure SQL over
-	// runs ⋈ run_messages and doesn't care about FK targets. The CHECK
-	// constraints still apply, so the run carries origin='blueprint' parents.
-	//
-	// Migrate up to the migration *before* the token-breakdown one, so the
-	// runs table does not yet have the token columns.
-	const priorVersion = 202606250002
-	database := openMigrationsTestDBAt(t, TestDSNMemoryNoForeignKeys, priorVersion)
-
-	// A completed run with two token-bearing run_messages rows — history
-	// that predates the backfill.
-	if _, err := database.Exec(`
-		INSERT INTO runs (id, task_id, prompt_id, blueprint_run_id, status)
-		VALUES ('r1', 't1', 'p1', 'b1', 'completed')
-	`); err != nil {
-		t.Fatalf("seed run: %v", err)
-	}
-	if _, err := database.Exec(`
-		INSERT INTO run_messages (run_id, role, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens)
-		VALUES ('r1', 'assistant', 100, 20, 1000, 7),
-		       ('r1', 'assistant',  50,  5,  500, 3)
-	`); err != nil {
-		t.Fatalf("seed run_messages: %v", err)
-	}
-
-	// Apply the rest (the token-breakdown migration + backfill).
-	if err := goose.Up(database, "migrations-sqlite"); err != nil {
-		t.Fatalf("goose Up: %v", err)
-	}
-
-	// The refactor made messages the ledger: the per-message tokens survive
-	// the run_messages → messages copy and SUM to the historical totals.
-	var in, out, cr, cc int
-	if err := database.QueryRow(`
-		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
-		       COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(cache_creation_tokens), 0)
-		FROM messages WHERE conversation_id = 'r1'
-	`).Scan(&in, &out, &cr, &cc); err != nil {
-		t.Fatalf("read ledger tokens: %v", err)
-	}
-	if in != 150 || out != 25 || cr != 1500 || cc != 10 {
-		t.Errorf("ledger tokens = (%d,%d,%d,%d), want (150,25,1500,10)", in, out, cr, cc)
-	}
-}
-
-// TestMigrate_BackfillsCuratorTokensFromMessages pins the TFAC-473 SQLite
-// backfill for the curator side: a request that completed BEFORE the
-// migration (its per-message tokens already in curator_messages) gets its
-// four token columns populated from the curator_messages SUM when the
-// migration runs. Symmetric with the runs backfill — the per-message data
-// was on disk all along, so historical curator spend is recovered, not just
-// going-forward.
-func TestMigrate_BackfillsCuratorTokensFromMessages(t *testing.T) {
-	// TestDSNMemoryNoForeignKeys so the fixture needs no projects
-	// scaffolding — the backfill is pure SQL over
-	// curator_requests ⋈ curator_messages and doesn't care about FK targets.
-	//
-	// Migrate up to the migration *before* the token-breakdown one, so
-	// curator_requests does not yet have the token columns.
-	const priorVersion = 202606250002
-	database := openMigrationsTestDBAt(t, TestDSNMemoryNoForeignKeys, priorVersion)
-
-	// The conversations refactor re-parents each request under a curator
-	// conversation whose project FK is enforced mid-migration, so the
-	// project row must exist.
-	if _, err := database.Exec(`
-		INSERT INTO users (id) VALUES ('00000000-0000-0000-0000-000000000100');
-		INSERT INTO projects (id, name, team_id) VALUES ('proj1', 'P1', '00000000-0000-0000-0000-000000000010');
-	`); err != nil {
-		t.Fatalf("seed project: %v", err)
-	}
-	// A completed request with two token-bearing curator_messages rows —
-	// history that predates the backfill.
-	if _, err := database.Exec(`
-		INSERT INTO curator_requests (id, project_id, status, user_input)
-		VALUES ('cr1', 'proj1', 'done', 'hi')
-	`); err != nil {
-		t.Fatalf("seed curator_request: %v", err)
-	}
-	if _, err := database.Exec(`
-		INSERT INTO curator_messages (request_id, role, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens)
-		VALUES ('cr1', 'assistant', 100, 20, 1000, 7),
-		       ('cr1', 'assistant',  50,  5,  500, 3)
-	`); err != nil {
-		t.Fatalf("seed curator_messages: %v", err)
-	}
-
-	// Apply the rest (the token-breakdown migration + backfill).
-	if err := goose.Up(database, "migrations-sqlite"); err != nil {
-		t.Fatalf("goose Up: %v", err)
-	}
-
-	// The conversations refactor turns the request into a claim (claim id =
-	// request id) whose stream rows keep their per-message tokens — the
-	// ledger the per-turn accounting now derives from.
-	var in, out, cr, cc int
-	if err := database.QueryRow(`
-		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
-		       COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(cache_creation_tokens), 0)
-		FROM messages WHERE claim_id = 'cr1'
-	`).Scan(&in, &out, &cr, &cc); err != nil {
-		t.Fatalf("read ledger tokens: %v", err)
-	}
-	if in != 150 || out != 25 || cr != 1500 || cc != 10 {
-		t.Errorf("ledger tokens = (%d,%d,%d,%d), want (150,25,1500,10)", in, out, cr, cc)
-	}
-}
-
-// TestMigrate_RunsTriggerIDBackfill pins the 202607060001 backfill: step conversations
-// minted while the reactor dropped the firing trigger (trigger_type =
-// 'event' with a NULL trigger_id — the shape every autonomous run carried
-// after the blueprint orchestrator unification) are healed from their parent
-// blueprint_run's frozen trigger_id, so historical autonomous spend regains
-// its by-rule attribution in llm_spend. Manual step conversations (parent carries no
-// trigger) stay NULL.
-func TestMigrate_RunsTriggerIDBackfill(t *testing.T) {
-	// Up to the migration *before* the backfill, then seed the legacy shape.
-	const priorVersion = 202607030001
-	database := openMigrationsTestDBAt(t, TestDSNMemory, priorVersion)
-	// events_catalog is seeded by Migrate (not by goose alone), and the seed
-	// chain below FKs into it via events / tasks / event_handlers.
-	if err := SeedEventTypes(database, "sqlite3"); err != nil {
-		t.Fatalf("seed event types: %v", err)
-	}
-
-	// Minimal FK chain for two step conversations: one under an event-fired
-	// blueprint_run (trigger frozen on the parent only — the bug shape), one
-	// under a manual blueprint_run. The sentinel user satisfies
-	// conversations.creator_user_id's FK (pure-goose DBs carry no tenant rows); the
-	// event_type FKs reuse the catalog rows seeded above.
-	const userID = "00000000-0000-0000-0000-000000000100"
-	for _, stmt := range []string{
-		`INSERT INTO users (id) VALUES ('` + userID + `')`,
-		`INSERT INTO entities (id, source, source_id, kind) VALUES ('e1', 'github', 'o/r#1', 'pr')`,
-		`INSERT INTO events (id, event_type) VALUES ('ev1', (SELECT id FROM events_catalog LIMIT 1))`,
-		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id)
-			VALUES ('t1', 'e1', (SELECT id FROM events_catalog LIMIT 1), 'ev1')`,
-		`INSERT INTO blueprints (id, name, creator_user_id) VALUES ('bp1', 'BP', '` + userID + `')`,
-		`INSERT INTO event_handlers (id, creator_user_id, kind, event_type, blueprint_id, breaker_threshold, min_autonomy_suitability)
-			VALUES ('trig1', '` + userID + `', 'trigger', (SELECT id FROM events_catalog LIMIT 1), 'bp1', 3, 0.5)`,
-		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, trigger_id, creator_user_id, step_plan, worktree_path)
-			VALUES ('br-ev', 'bp1', 't1', 'event', 'trig1', NULL, '[]', '')`,
-		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, step_plan, worktree_path)
-			VALUES ('br-man', 'bp1', 't1', '[]', '')`,
-		`INSERT INTO prompts (id, name, body, creator_user_id) VALUES ('p1', 'P', 'b', '` + userID + `')`,
-		`INSERT INTO runs (id, task_id, prompt_id, trigger_type, creator_user_id, status, blueprint_run_id, blueprint_step_index, total_cost_usd)
-			VALUES ('run-ev', 't1', 'p1', 'event', NULL, 'completed', 'br-ev', 0, 1.0)`,
-		`INSERT INTO runs (id, task_id, prompt_id, status, blueprint_run_id, blueprint_step_index, total_cost_usd)
-			VALUES ('run-man', 't1', 'p1', 'completed', 'br-man', 0, 2.0)`,
-		`INSERT INTO run_messages (run_id, role, content) VALUES ('run-ev', 'assistant', 'work')`,
-	} {
-		if _, err := database.Exec(stmt); err != nil {
-			t.Fatalf("seed %q: %v", stmt, err)
-		}
-	}
-
-	// Apply the backfill.
-	if err := goose.Up(database, "migrations-sqlite"); err != nil {
-		t.Fatalf("goose Up: %v", err)
-	}
-
-	assertRunTriggerID(t, database, `SELECT trigger_id FROM conversations WHERE id = 'run-ev'`, "trig1")
-	assertRunTriggerID(t, database, `SELECT trigger_id FROM conversations WHERE id = 'run-man'`, "")
-	// And through the spend layer: the autonomous run's ledger row (its one
-	// streamed message, now carrying the historical cost stamp) is
-	// rule-attributed.
-	assertRunTriggerID(t, database,
-		`SELECT trigger_id FROM llm_spend WHERE source = 'run'
-		   AND source_id = (SELECT id FROM messages WHERE conversation_id = 'run-ev')`, "trig1")
-	var cat string
-	var cost float64
-	if err := database.QueryRow(
-		`SELECT category, total_cost_usd FROM llm_spend WHERE source = 'run'
-		   AND source_id = (SELECT id FROM messages WHERE conversation_id = 'run-ev')`,
-	).Scan(&cat, &cost); err != nil {
-		t.Fatalf("scan llm_spend category: %v", err)
-	}
-	if cat != "autonomous" {
-		t.Errorf("llm_spend category = %q, want autonomous", cat)
-	}
-	if cost != 1.0 {
-		t.Errorf("llm_spend cost = %v, want 1.0 (the historical stamp on the last message)", cost)
-	}
-}
-
-// assertRunTriggerID runs a single-row trigger_id query and checks it against
-// want ("" means SQL NULL is expected).
-func assertRunTriggerID(t *testing.T, database *sql.DB, query, want string) {
-	t.Helper()
-	var got sql.NullString
-	if err := database.QueryRow(query).Scan(&got); err != nil {
-		t.Fatalf("query %q: %v", query, err)
-	}
-	if want == "" {
-		if got.Valid {
-			t.Errorf("%q = %q, want NULL", query, got.String)
-		}
-		return
-	}
-	if !got.Valid || got.String != want {
-		t.Errorf("%q = %v (valid=%t), want %q", query, got.String, got.Valid, want)
-	}
-}
-
-// TestMigrate_StampsHistoricalCostOntoLastMessage pins the refactor's
-// historical dollars re-key: a pre-migration run's total_cost_usd lands as
-// ONE lump on the conversation's last message row (never the earlier rows),
-// and a curator request's cost_usd lands on the turn's last stream row —
-// falling back to the turn's user message row when nothing streamed. A row
-// with dollars but zero messages loses the stamp by design (accepted
-// residue).
-func TestMigrate_StampsHistoricalCostOntoLastMessage(t *testing.T) {
-	database := openMigrationsTestDBAt(t, TestDSNMemoryNoForeignKeys, 202607200002)
-
-	seed := []string{
-		`INSERT INTO users (id) VALUES ('00000000-0000-0000-0000-000000000100')`,
-		`INSERT INTO projects (id, name, visibility) VALUES ('proj1', 'P', 'private')`,
-		// A settled run with two streamed rows: the lump must land on the
-		// SECOND row only.
-		`INSERT INTO runs (id, task_id, prompt_id, blueprint_run_id, status, total_cost_usd)
-		 VALUES ('r-cost', 't1', 'p1', 'b1', 'completed', 1.5)`,
-		`INSERT INTO run_messages (run_id, role, content) VALUES ('r-cost', 'assistant', 'first')`,
-		`INSERT INTO run_messages (run_id, role, content) VALUES ('r-cost', 'assistant', 'last')`,
-		// A settled run with no rows: the residue is dropped, not misfiled.
-		`INSERT INTO runs (id, task_id, prompt_id, blueprint_run_id, status, total_cost_usd)
-		 VALUES ('r-empty', 't1', 'p1', 'b2', 'completed', 9.9)`,
-		// A curator turn WITH stream rows: the lump lands on its last stream
-		// row, not the user row.
-		`INSERT INTO curator_requests (id, project_id, status, user_input, cost_usd)
-		 VALUES ('cq-stream', 'proj1', 'done', 'streamed turn', 0.5)`,
-		`INSERT INTO curator_messages (request_id, role, content) VALUES ('cq-stream', 'assistant', 'ack one')`,
-		`INSERT INTO curator_messages (request_id, role, content) VALUES ('cq-stream', 'assistant', 'ack two')`,
-		// A curator turn with NO stream rows: the lump falls back to the
-		// user message row.
-		`INSERT INTO curator_requests (id, project_id, status, user_input, cost_usd)
-		 VALUES ('cq-bare', 'proj1', 'done', 'bare turn', 0.25)`,
-	}
-	for _, q := range seed {
-		if _, err := database.Exec(q); err != nil {
-			t.Fatalf("seed %q: %v", q, err)
-		}
-	}
-
-	if err := goose.Up(database, "migrations-sqlite"); err != nil {
-		t.Fatalf("goose Up: %v", err)
-	}
-
-	assertCost := func(desc, query string, want float64) {
-		t.Helper()
-		var got sql.NullFloat64
-		if err := database.QueryRow(query).Scan(&got); err != nil {
-			t.Fatalf("%s: %v", desc, err)
-		}
-		if !got.Valid {
-			t.Errorf("%s = NULL, want %v", desc, want)
-			return
-		}
-		if got.Float64 != want {
-			t.Errorf("%s = %v, want %v", desc, got.Float64, want)
-		}
-	}
-	assertCost("run last-row lump",
-		`SELECT cost_usd FROM messages WHERE conversation_id = 'r-cost' AND content = 'last'`, 1.5)
-	var n int
-	if err := database.QueryRow(
-		`SELECT COUNT(*) FROM messages WHERE conversation_id = 'r-cost' AND cost_usd IS NOT NULL`,
-	).Scan(&n); err != nil {
-		t.Fatalf("count stamped conversation rows: %v", err)
-	}
-	if n != 1 {
-		t.Errorf("stamped conversation rows = %d, want 1 (one lump, no proration)", n)
-	}
-	assertCost("run total via SUM",
-		`SELECT SUM(cost_usd) FROM messages WHERE conversation_id = 'r-cost'`, 1.5)
-
-	assertCost("curator stream lump",
-		`SELECT cost_usd FROM messages WHERE claim_id = 'cq-stream' AND content = 'ack two'`, 0.5)
-	if err := database.QueryRow(
-		`SELECT COUNT(*) FROM messages WHERE claim_id = 'cq-stream' AND cost_usd IS NOT NULL`,
-	).Scan(&n); err != nil {
-		t.Fatalf("count stamped curator rows: %v", err)
-	}
-	if n != 1 {
-		t.Errorf("stamped curator rows = %d, want 1", n)
-	}
-	assertCost("curator user-row fallback",
-		`SELECT cost_usd FROM messages WHERE claim_id = 'cq-bare' AND role = 'user'`, 0.25)
-}
-
-// TestMigrate_ConvertsPendingSideTablesToUndeliveredMessages pins the
-// refactor's pending unification: rows that were waiting in
-// run_pending_input / staged_agent_injections when the upgrade ran must
-// surface as delivered=0 message rows — the exactly-once delivery contract
-// transfers to the messages table, nothing silently drops.
-func TestMigrate_ConvertsPendingSideTablesToUndeliveredMessages(t *testing.T) {
-	// Everything before the conversations refactor: the pending side-tables
-	// still exist and carry waiting rows.
-	database := openMigrationsTestDBAt(t, TestDSNMemoryNoForeignKeys, 202607200002)
-
-	seed := []string{
-		`INSERT INTO users (id) VALUES ('u1')`,
-		`INSERT INTO runs (id, task_id, prompt_id, blueprint_run_id, status) VALUES ('r1', 't1', 'p1', 'b1', 'open')`,
-		`INSERT INTO run_pending_input (run_id, org_id, message, user_id) VALUES ('r1', '00000000-0000-0000-0000-000000000001', 'resume me', 'u1')`,
-		`INSERT INTO staged_agent_injections (id, run_id, producer, body) VALUES ('si1', 'r1', 'new_commits', 'PR gained commits')`,
-	}
-	for _, q := range seed {
-		if _, err := database.Exec(q); err != nil {
-			t.Fatalf("seed %q: %v", q, err)
-		}
-	}
-
-	if err := goose.Up(database, "migrations-sqlite"); err != nil {
-		t.Fatalf("goose Up: %v", err)
-	}
-
-	assertUndelivered := func(desc, query string, want int) {
-		t.Helper()
-		var n int
-		if err := database.QueryRow(query).Scan(&n); err != nil {
-			t.Fatalf("%s: %v", desc, err)
-		}
-		if n != want {
-			t.Errorf("%s = %d, want %d", desc, n, want)
-		}
-	}
-	assertUndelivered("pending follow-up",
-		`SELECT COUNT(*) FROM messages WHERE conversation_id='r1' AND role='user' AND content='resume me' AND user_id='u1' AND delivered=0 AND subtype=''`, 1)
-	assertUndelivered("staged injection",
-		`SELECT COUNT(*) FROM messages WHERE conversation_id='r1' AND subtype='injection:system-note' AND content='PR gained commits' AND delivered=0 AND json_extract(metadata,'$.producer')='new_commits'`, 1)
-}
-
-// TestMigrate_CollapsesSetupTransientOntoClaimPhase covers the in-flight-run
-// conversion: a claimed run seeded in a runs-era setup transient reads back
-// as a 'running' conversation whose ACTIVE claim carries the transient as
-// its phase — so the boot sweep still sees claimed work and the display
-// coalesce still renders the setup sub-state.
-func TestMigrate_CollapsesSetupTransientOntoClaimPhase(t *testing.T) {
-	// Everything before the conversations refactor: runs still carries the
-	// flattened claim columns and the granular setup statuses.
-	database := openMigrationsTestDBAt(t, TestDSNMemoryNoForeignKeys, 202607200002)
-
-	if _, err := database.Exec(`
-		INSERT INTO runs (id, task_id, prompt_id, blueprint_run_id, status,
-		                  executor_id, boot_epoch, claimed_at)
-		VALUES ('r-mid', 't1', 'p1', 'b1', 'cloning', 'exec-mig', 3, CURRENT_TIMESTAMP)
-	`); err != nil {
-		t.Fatalf("seed mid-setup run: %v", err)
-	}
-
-	if err := goose.Up(database, "migrations-sqlite"); err != nil {
-		t.Fatalf("goose Up: %v", err)
-	}
-
-	var status sql.NullString
-	if err := database.QueryRow(
-		`SELECT status FROM conversations WHERE id = 'r-mid'`,
-	).Scan(&status); err != nil {
-		t.Fatalf("read conversation: %v", err)
-	}
-	if status.Valid {
-		t.Errorf("conversation status = %q, want no stored status (a mid-setup run is mid-flight, and mid-flight is the absence of an outcome)", status.String)
-	}
-
-	var (
-		phase      string
-		executorID string
-		released   bool
-	)
-	if err := database.QueryRow(`
-		SELECT COALESCE(phase, ''), executor_id, released_at IS NOT NULL
-		FROM claims WHERE conversation_id = 'r-mid'
-	`).Scan(&phase, &executorID, &released); err != nil {
-		t.Fatalf("read claim: %v", err)
-	}
-	if phase != "cloning" {
-		t.Errorf("claim phase = %q, want cloning (the staged transient)", phase)
-	}
-	if executorID != "exec-mig" {
-		t.Errorf("claim executor_id = %q, want exec-mig", executorID)
-	}
-	if released {
-		t.Error("claim released, want active (mid-flight at migration time)")
-	}
-}
-
-// TestMigrate_RepairsBlueprintRunsWithNoCurrentStep pins the one-time repair in
-// 202609180001. A firing now commits its blueprint_run and its first step
-// conversation in one transaction, and an advance commits its
-// current_step_index bump and the conversation that pointer names in another,
-// so neither shape below can be produced any more — but an installed local
-// database may still hold one from the window where those were separate
-// writes, where it holds blueprint_runs_one_active_run_per_task against its
-// task forever and nothing can drive it. The migration fails both, freeing the
-// index; a run whose pointer names a conversation that exists is ordinary work
-// at any age and must survive.
-func TestMigrate_RepairsBlueprintRunsWithNoCurrentStep(t *testing.T) {
-	// Up to the migration *before* the repair, then seed both shapes.
-	const priorVersion = 202609130001
-	database := openMigrationsTestDBAt(t, TestDSNMemory, priorVersion)
-	if err := SeedEventTypes(database, "sqlite3"); err != nil {
-		t.Fatalf("seed event types: %v", err)
-	}
-
-	// One task per run: the one-active-run index refuses a second 'running'
-	// row on a task, which is the very thing the orphan is holding.
-	const userID = "00000000-0000-0000-0000-000000000100"
-	for _, stmt := range []string{
-		`INSERT INTO users (id) VALUES ('` + userID + `')`,
-		`INSERT INTO entities (id, source, source_id, kind) VALUES ('e1', 'github', 'o/r#1', 'pr')`,
-		`INSERT INTO events (id, event_type) VALUES ('ev1', (SELECT id FROM events_catalog LIMIT 1))`,
-		`INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id)
-			VALUES ('t-orphan', 'e1', (SELECT id FROM events_catalog LIMIT 1), 'orphan', 'ev1')`,
-		`INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id)
-			VALUES ('t-healthy', 'e1', (SELECT id FROM events_catalog LIMIT 1), 'healthy', 'ev1')`,
-		`INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id)
-			VALUES ('t-settled', 'e1', (SELECT id FROM events_catalog LIMIT 1), 'settled', 'ev1')`,
-		`INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id)
-			VALUES ('t-advanced', 'e1', (SELECT id FROM events_catalog LIMIT 1), 'advanced', 'ev1')`,
-		`INSERT INTO blueprints (id, name, creator_user_id) VALUES ('bp1', 'BP', '` + userID + `')`,
-		`INSERT INTO prompts (id, name, body, creator_user_id) VALUES ('p1', 'P', 'b', '` + userID + `')`,
-		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, creator_user_id, status, step_plan, worktree_path)
-			VALUES ('br-orphan', 'bp1', 't-orphan', 'manual', '` + userID + `', 'running', '[]', '')`,
-		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, creator_user_id, status, step_plan, worktree_path)
-			VALUES ('br-healthy', 'bp1', 't-healthy', 'manual', '` + userID + `', 'running', '[]', '')`,
-		// Childless, but already settled: the repair claims 'running' rows
-		// only, so a finished run keeps the verdict it recorded.
-		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, creator_user_id, status, abort_reason, step_plan, worktree_path)
-			VALUES ('br-settled', 'bp1', 't-settled', 'manual', '` + userID + `', 'cancelled', 'user_cancelled', '[]', '')`,
-		// Mid-advance orphan: the pointer moved to step 1 but the step-1
-		// conversation never landed. It has a child, so only the pointer
-		// tells it apart from ordinary work.
-		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, creator_user_id, status, step_plan, worktree_path, current_step_index)
-			VALUES ('br-advanced', 'bp1', 't-advanced', 'manual', '` + userID + `', 'running', '[]', '', 1)`,
-		`INSERT INTO conversations (id, task_id, prompt_id, trigger_type, creator_user_id, blueprint_run_id, blueprint_step_index)
-			VALUES ('conv-healthy', 't-healthy', 'p1', 'manual', '` + userID + `', 'br-healthy', 0)`,
-		`INSERT INTO conversations (id, task_id, prompt_id, trigger_type, creator_user_id, blueprint_run_id, blueprint_step_index)
-			VALUES ('conv-advanced-0', 't-advanced', 'p1', 'manual', '` + userID + `', 'br-advanced', 0)`,
-	} {
-		if _, err := database.Exec(stmt); err != nil {
-			t.Fatalf("seed %q: %v", stmt, err)
-		}
-	}
-
-	if err := goose.Up(database, "migrations-sqlite"); err != nil {
-		t.Fatalf("goose Up: %v", err)
-	}
-
-	readRun := func(id string) (status, abortReason string, completedAtSet bool) {
-		t.Helper()
-		var reason sql.NullString
-		var completedAt any
-		if err := database.QueryRow(
-			`SELECT status, abort_reason, completed_at FROM blueprint_runs WHERE id = ?`, id,
-		).Scan(&status, &reason, &completedAt); err != nil {
-			t.Fatalf("read blueprint_run %s: %v", id, err)
-		}
-		return status, reason.String, completedAt != nil
-	}
-
-	status, reason, completed := readRun("br-orphan")
-	if status != "failed" {
-		t.Errorf("orphan status = %q, want failed", status)
-	}
-	// The literal the migration writes. No Go constant names it: nothing in
-	// the product produces this abort_reason any more, so the migration and
-	// this assertion are the only two places the value exists.
-	if reason != "orphaned_step" {
-		t.Errorf("orphan abort_reason = %q, want %q", reason, "orphaned_step")
-	}
-	if !completed {
-		t.Error("orphan completed_at is NULL on a terminal blueprint_run")
-	}
-
-	if status, reason, completed := readRun("br-advanced"); status != "failed" || reason != "orphaned_step" || !completed {
-		t.Errorf("mid-advance orphan = (%q, %q, completed=%v), want (failed, orphaned_step, true) — a run whose pointer names no conversation is undrivable", status, reason, completed)
-	}
-
-	if status, reason, completed := readRun("br-healthy"); status != "running" || reason != "" || completed {
-		t.Errorf("run with a step = (%q, %q, completed=%v), want (running, \"\", false) — ordinary work was swept", status, reason, completed)
-	}
-	if status, reason, _ := readRun("br-settled"); status != "cancelled" || reason != "user_cancelled" {
-		t.Errorf("settled childless run = (%q, %q), want (cancelled, user_cancelled) — the repair overwrote a recorded verdict", status, reason)
-	}
-
-	// The freed index is the whole point: the orphan's task can fire again.
-	if _, err := database.Exec(`
-		INSERT INTO blueprint_runs (id, blueprint_id, task_id, trigger_type, creator_user_id, status, step_plan, worktree_path)
-		VALUES ('br-refire', 'bp1', 't-orphan', 'manual', '` + userID + `', 'running', '[]', '')
-	`); err != nil {
-		t.Fatalf("re-fire after the repair: %v — the orphan is still holding the one-active-run index", err)
 	}
 }

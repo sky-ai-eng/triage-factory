@@ -44,9 +44,7 @@ func TestMigrate_DeliverablesPullRequestsAndReviews(t *testing.T) {
 		}
 	}
 
-	if err := Migrate(database, "sqlite3"); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	migrateThrough(t, database, 202610310008)
 
 	rows, err := database.Query(`SELECT id FROM deliverables ORDER BY id`)
 	if err != nil {
