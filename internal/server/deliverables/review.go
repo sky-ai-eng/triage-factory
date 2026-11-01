@@ -1,4 +1,4 @@
-package server
+package deliverables
 
 import (
 	"context"
@@ -44,7 +44,7 @@ type reviewDeliverableCommentJSON struct {
 	Body      string `json:"body"`
 	Severity  string `json:"severity,omitempty"`
 	// Freshness is the per-comment staleness vs. the live PR head (TFAC-500):
-	// "current", "moved", "outdated", or "unknown". See review_freshness.go.
+	// "current", "moved", "outdated", or "unknown". See freshness.go.
 	Freshness string `json:"freshness"`
 	// MappedLine / MappedPath carry the comment's new-side position on the live
 	// head when Freshness is "moved" (the anchored code relocated). Zero/empty for
@@ -64,10 +64,10 @@ type reviewDeliverableCommentJSON struct {
 //
 // The pull request is the one the review's entity is about, under its
 // repository's current name (deliverablePullRequest).
-func (ah *deliverablesHandler) reviewDeliverableDetails(w http.ResponseWriter, r *http.Request, orgID string, art *domain.Deliverable) (reviewDeliverableDetailsJSON, bool) {
+func (ah *Handler) reviewDeliverableDetails(w http.ResponseWriter, r *http.Request, orgID string, art *domain.Deliverable) (reviewDeliverableDetailsJSON, bool) {
 	prRef, err := ah.deliverablePullRequest(r.Context(), orgID, art)
 	if err != nil {
-		internalError(w, "deliverables", err)
+		httpx.InternalError(w, "deliverables", err)
 		return reviewDeliverableDetailsJSON{}, false
 	}
 	owner, repo, number := prRef.Owner, prRef.Repo, prRef.Number
@@ -75,7 +75,7 @@ func (ah *deliverablesHandler) reviewDeliverableDetails(w http.ResponseWriter, r
 	// empty review (no body, no comments) the user might approve or act on.
 	details, err := domain.ParseReviewDeliverableDetails(art.DetailsJSON)
 	if err != nil {
-		internalError(w, "deliverables", fmt.Errorf("parse review deliverable details (deliverable %s): %w", art.ID, err))
+		httpx.InternalError(w, "deliverables", fmt.Errorf("parse review deliverable details (deliverable %s): %w", art.ID, err))
 		return reviewDeliverableDetailsJSON{}, false
 	}
 
@@ -134,12 +134,12 @@ type patchReviewRequest struct {
 // GitHub call on any arm.
 //
 // PATCH /api/deliverables/{id}/review
-func (ah *deliverablesHandler) handleDeliverableReviewUpdate(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (ah *Handler) handleDeliverableReviewUpdate(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
+	userID := httpx.ClaimsFrom(r.Context()).Subject
 	id, ok := deliverableIDOr404(w, r)
 	if !ok {
 		return
@@ -208,7 +208,7 @@ func (ah *deliverablesHandler) handleDeliverableReviewUpdate(w http.ResponseWrit
 
 	details, err := domain.ParseReviewDeliverableDetails(art.DetailsJSON)
 	if err != nil {
-		internalError(w, "deliverables", fmt.Errorf("parse review deliverable details: %w", err))
+		httpx.InternalError(w, "deliverables", fmt.Errorf("parse review deliverable details: %w", err))
 		return
 	}
 	if req.Body != nil {
@@ -221,7 +221,7 @@ func (ah *deliverablesHandler) handleDeliverableReviewUpdate(w http.ResponseWrit
 	if !ah.updateReviewDetailsPending(w, r, orgID, userID, art.ID, details) {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // updateReviewDetailsPending persists mutated review-draft details through the
@@ -233,18 +233,18 @@ func (ah *deliverablesHandler) handleDeliverableReviewUpdate(w http.ResponseWrit
 // posted review approvable (and submittable) again. A lost race is a 409, the
 // same conflict the upfront check reports. Writes the HTTP error response and
 // returns false on any failure.
-func (ah *deliverablesHandler) updateReviewDetailsPending(w http.ResponseWriter, r *http.Request, orgID, userID, deliverableID string, details domain.ReviewDeliverableDetails) bool {
+func (ah *Handler) updateReviewDetailsPending(w http.ResponseWriter, r *http.Request, orgID, userID, deliverableID string, details domain.ReviewDeliverableDetails) bool {
 	var updated bool
 	if err := ah.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		updated, e = tx.Deliverables.UpdateReviewDetailsIfPending(r.Context(), orgID, deliverableID, domain.MarshalReviewDeliverableDetails(details))
 		return e
 	}); err != nil {
-		internalError(w, "deliverables", err)
+		httpx.InternalError(w, "deliverables", err)
 		return false
 	}
 	if !updated {
-		conflict(w, "this review is no longer pending — it was just submitted or dismissed")
+		httpx.Conflict(w, "this review is no longer pending — it was just submitted or dismissed")
 		return false
 	}
 	return true
@@ -284,7 +284,7 @@ func writeReviewNotPending(w http.ResponseWriter, state string) {
 // state=pending, so an edit racing the approve click either commits before the
 // claim (and is included in the re-read) or loses to it (409); submitting the
 // pre-claim snapshot would post content the user had already edited away.
-func (ah *deliverablesHandler) reviewApprove(w http.ResponseWriter, r *http.Request, orgID, userID string, art *domain.Deliverable) {
+func (ah *Handler) reviewApprove(w http.ResponseWriter, r *http.Request, orgID, userID string, art *domain.Deliverable) {
 	gh, prRef, ok := ah.ghForDeliverable(w, r, orgID, art)
 	if !ok {
 		return
@@ -318,17 +318,17 @@ func (ah *deliverablesHandler) reviewApprove(w http.ResponseWriter, r *http.Requ
 		fresh, e = tx.Deliverables.Get(r.Context(), orgID, art.ID)
 		return e
 	}); err != nil {
-		internalError(w, "deliverables", err)
+		httpx.InternalError(w, "deliverables", err)
 		return
 	}
 	if !claimed {
-		conflict(w, "this review is no longer pending approval — it was just submitted or dismissed")
+		httpx.Conflict(w, "this review is no longer pending approval — it was just submitted or dismissed")
 		return
 	}
 	if fresh == nil {
 		// The row vanished between the claim UPDATE and the re-read in the same
 		// tx — not a state anything in the system produces.
-		internalError(w, "deliverables", fmt.Errorf("review deliverable %s unreadable immediately after claim", art.ID))
+		httpx.InternalError(w, "deliverables", fmt.Errorf("review deliverable %s unreadable immediately after claim", art.ID))
 		return
 	}
 
@@ -352,7 +352,7 @@ func (ah *deliverablesHandler) reviewApprove(w http.ResponseWriter, r *http.Requ
 	details, err := domain.ParseReviewDeliverableDetails(fresh.DetailsJSON)
 	if err != nil {
 		releaseClaim()
-		internalError(w, "deliverables", fmt.Errorf("parse review deliverable details: %w", err))
+		httpx.InternalError(w, "deliverables", fmt.Errorf("parse review deliverable details: %w", err))
 		return
 	}
 	// The ready sentinel must be set — the agent finalized the review via
@@ -361,7 +361,7 @@ func (ah *deliverablesHandler) reviewApprove(w http.ResponseWriter, r *http.Requ
 	// approve.
 	if details.ReviewEvent == "" {
 		releaseClaim()
-		conflict(w, "this review has not been finalized by the agent yet")
+		httpx.Conflict(w, "this review has not been finalized by the agent yet")
 		return
 	}
 	// The agent's finalize refused an empty draft; the human can empty one after
@@ -393,7 +393,7 @@ func (ah *deliverablesHandler) reviewApprove(w http.ResponseWriter, r *http.Requ
 		}
 		if outdated > 0 {
 			releaseClaim()
-			conflict(w, fmt.Sprintf("the pull request has moved past this review's head and %d inline comment(s) no longer match the current diff — refresh the review, then approve again", outdated))
+			httpx.Conflict(w, fmt.Sprintf("the pull request has moved past this review's head and %d inline comment(s) no longer match the current diff — refresh the review, then approve again", outdated))
 			return
 		}
 	}
@@ -522,7 +522,7 @@ func (ah *deliverablesHandler) reviewApprove(w http.ResponseWriter, r *http.Requ
 	// so the note references the id it already knows.
 	ah.injectDeliverableNote(orgID, submitted)
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"review_id": submitted.ExternalID,
 		"url":       submitted.URL,
 		"event":     submittedEvent,
@@ -543,7 +543,7 @@ func (ah *deliverablesHandler) reviewApprove(w http.ResponseWriter, r *http.Requ
 // It is the state="dismissed" arm of the review PATCH, which has already
 // established the kind and the pending state; a terminal row never reaches
 // here.
-func (ah *deliverablesHandler) reviewDismiss(w http.ResponseWriter, r *http.Request, orgID, userID string, art *domain.Deliverable) {
+func (ah *Handler) reviewDismiss(w http.ResponseWriter, r *http.Request, orgID, userID string, art *domain.Deliverable) {
 	// Flip pending → dismissed, pessimistic — the flip is the resolution. A CAS,
 	// not an upsert: a dismiss racing an approve must lose cleanly (409) rather
 	// than overwrite a just-submitted review as dismissed. The proposed snapshot
@@ -559,11 +559,11 @@ func (ah *deliverablesHandler) reviewDismiss(w http.ResponseWriter, r *http.Requ
 			domain.DeliverableStateReviewPending, domain.DeliverableStateReviewDismissed, "", "", "")
 		return e
 	}); err != nil {
-		internalError(w, "deliverables", err)
+		httpx.InternalError(w, "deliverables", err)
 		return
 	}
 	if !flipped {
-		conflict(w, "this review is no longer pending — it was just submitted or dismissed")
+		httpx.Conflict(w, "this review is no longer pending — it was just submitted or dismissed")
 		return
 	}
 
@@ -576,7 +576,7 @@ func (ah *deliverablesHandler) reviewDismiss(w http.ResponseWriter, r *http.Requ
 	// Tell the drafting agent its review was dismissed (live or via the ledger).
 	ah.injectDeliverableNote(orgID, dismissed)
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"review_id": art.ExternalID,
 		"state":     domain.DeliverableStateReviewDismissed,
 	})
@@ -595,7 +595,7 @@ func (ah *deliverablesHandler) reviewDismiss(w http.ResponseWriter, r *http.Requ
 // blocked approval. A compare that fails once the head is KNOWN to have moved
 // is an error: the comments are known-stale and unmappable, and the only
 // alternative is posting them mis-anchored.
-func (ah *deliverablesHandler) reconcileForApprove(ctx context.Context, gh *ghclient.Client, owner, repo string, number int, details *domain.ReviewDeliverableDetails) (outdated int, err error) {
+func (ah *Handler) reconcileForApprove(ctx context.Context, gh *ghclient.Client, owner, repo string, number int, details *domain.ReviewDeliverableDetails) (outdated int, err error) {
 	pr, err := gh.GetPRBasic(ctx, owner, repo, number)
 	if err != nil || pr.HeadSHA == "" {
 		deliverablesLog.Warn("review approve: live PR head unavailable; submitting under the recorded anchor",
@@ -639,12 +639,12 @@ func (ah *deliverablesHandler) reconcileForApprove(ctx context.Context, gh *ghcl
 // head (POST /api/deliverables/{id}/review/refresh, TFAC-500) — the human-driven
 // counterpart to the agent's finalize gate, sharing the same forward-map
 // (internal/review). Review-only; dispatches to reviewRefresh.
-func (ah *deliverablesHandler) handleReviewRefresh(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (ah *Handler) handleReviewRefresh(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
+	userID := httpx.ClaimsFrom(r.Context()).Subject
 	id, ok := deliverableIDOr404(w, r)
 	if !ok {
 		return
@@ -675,7 +675,7 @@ func (ah *deliverablesHandler) handleReviewRefresh(w http.ResponseWriter, r *htt
 // Refresh is optional — a review submits fine without it (GitHub renders
 // post-finalize drift as "outdated" once submitted); this just clears that drift
 // up front.
-func (ah *deliverablesHandler) reviewRefresh(w http.ResponseWriter, r *http.Request, orgID, userID string, art *domain.Deliverable) {
+func (ah *Handler) reviewRefresh(w http.ResponseWriter, r *http.Request, orgID, userID string, art *domain.Deliverable) {
 	// Only a finalized, still-pending review can be refreshed: a submitted/dismissed
 	// one is terminal, and an unfinalized draft is still the agent's to shape.
 	if art.State != domain.DeliverableStateReviewPending {
@@ -684,11 +684,11 @@ func (ah *deliverablesHandler) reviewRefresh(w http.ResponseWriter, r *http.Requ
 	}
 	details, err := domain.ParseReviewDeliverableDetails(art.DetailsJSON)
 	if err != nil {
-		internalError(w, "deliverables", fmt.Errorf("parse review deliverable details (deliverable %s): %w", art.ID, err))
+		httpx.InternalError(w, "deliverables", fmt.Errorf("parse review deliverable details (deliverable %s): %w", art.ID, err))
 		return
 	}
 	if details.ReviewEvent == "" {
-		conflict(w, "this review has not been finalized by the agent yet")
+		httpx.Conflict(w, "this review has not been finalized by the agent yet")
 		return
 	}
 
@@ -742,7 +742,7 @@ func (ah *deliverablesHandler) reviewRefresh(w http.ResponseWriter, r *http.Requ
 	}
 
 	if review.Empty(details.ReviewEvent, details.ReviewBody, survivors) {
-		conflict(w, "refreshing would drop every inline comment and this review has no summary body — add a summary, then refresh again")
+		httpx.Conflict(w, "refreshing would drop every inline comment and this review has no summary body — add a summary, then refresh again")
 		return
 	}
 
@@ -756,7 +756,7 @@ func (ah *deliverablesHandler) reviewRefresh(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"moved":   moved,
 		"dropped": dropped,
 		"head":    liveHead,
@@ -777,12 +777,12 @@ func (ah *deliverablesHandler) reviewRefresh(w http.ResponseWriter, r *http.Requ
 // the read hands it.
 //
 // PATCH /api/deliverables/{id}/comments/{commentId}
-func (ah *deliverablesHandler) handleDeliverableCommentUpdate(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (ah *Handler) handleDeliverableCommentUpdate(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
+	userID := httpx.ClaimsFrom(r.Context()).Subject
 	id, ok := deliverableIDOr404(w, r)
 	if !ok {
 		return
@@ -832,7 +832,7 @@ func (ah *deliverablesHandler) handleDeliverableCommentUpdate(w http.ResponseWri
 	}
 	details, err := domain.ParseReviewDeliverableDetails(art.DetailsJSON)
 	if err != nil {
-		internalError(w, "deliverables", fmt.Errorf("parse review deliverable details: %w", err))
+		httpx.InternalError(w, "deliverables", fmt.Errorf("parse review deliverable details: %w", err))
 		return
 	}
 	// Find the staged comment by its local id and re-bake its current severity onto
@@ -845,7 +845,7 @@ func (ah *deliverablesHandler) handleDeliverableCommentUpdate(w http.ResponseWri
 		}
 	}
 	if idx < 0 {
-		notFound(w, "review comment")
+		httpx.NotFound(w, "review comment")
 		return
 	}
 	severity, _ := domain.ParseSeverityBadge(details.StagedComments[idx].Body)
@@ -854,18 +854,18 @@ func (ah *deliverablesHandler) handleDeliverableCommentUpdate(w http.ResponseWri
 	if !ah.updateReviewDetailsPending(w, r, orgID, userID, art.ID, details) {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // handleDeliverableCommentDelete removes one staged inline comment from the review
 // draft (DELETE /api/deliverables/{id}/comments/{commentId}). Review-only, no GitHub
 // call — the staged set is local until approval (TFAC-494).
-func (ah *deliverablesHandler) handleDeliverableCommentDelete(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (ah *Handler) handleDeliverableCommentDelete(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
+	userID := httpx.ClaimsFrom(r.Context()).Subject
 	id, ok := deliverableIDOr404(w, r)
 	if !ok {
 		return
@@ -885,7 +885,7 @@ func (ah *deliverablesHandler) handleDeliverableCommentDelete(w http.ResponseWri
 	}
 	details, err := domain.ParseReviewDeliverableDetails(art.DetailsJSON)
 	if err != nil {
-		internalError(w, "deliverables", fmt.Errorf("parse review deliverable details: %w", err))
+		httpx.InternalError(w, "deliverables", fmt.Errorf("parse review deliverable details: %w", err))
 		return
 	}
 	idx := -1
@@ -896,7 +896,7 @@ func (ah *deliverablesHandler) handleDeliverableCommentDelete(w http.ResponseWri
 		}
 	}
 	if idx < 0 {
-		notFound(w, "review comment")
+		httpx.NotFound(w, "review comment")
 		return
 	}
 	details.StagedComments = append(details.StagedComments[:idx], details.StagedComments[idx+1:]...)
@@ -904,7 +904,7 @@ func (ah *deliverablesHandler) handleDeliverableCommentDelete(w http.ResponseWri
 	if !ah.updateReviewDetailsPending(w, r, orgID, userID, art.ID, details) {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // derefInt returns the pointed-to int, or 0 for a nil pointer (a GitHub comment

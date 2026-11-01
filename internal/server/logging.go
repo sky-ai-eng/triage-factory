@@ -9,12 +9,10 @@ import "github.com/sky-ai-eng/triage-factory/internal/logging"
 // component names.
 var (
 	approvalDiscardLog = logging.Component("approval-discard")
-	deliverablesLog    = logging.Component("deliverables")
 	authLog            = logging.Component("auth/server")
 	dashboardLog       = logging.Component("dashboard")
 	delegateSpawnLog   = logging.Component("delegate-spawn")
 	eventHandlersLog   = logging.Component("event_handlers")
-	externalActionLog  = logging.Component("external-action")
 	factoryLog         = logging.Component("factory")
 	githubAccessLog    = logging.Component("github-access")
 	githubAppLog       = logging.Component("github-app")

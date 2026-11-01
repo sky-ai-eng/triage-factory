@@ -1,4 +1,4 @@
-package server
+package deliverables
 
 import (
 	"context"
@@ -6,7 +6,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
 )
+
+var externalActionLog = logging.Component("external-action")
 
 // External-action audit recording for the human-authorized, org-executed GitHub
 // approval lifecycle (TFAC-483). These are writes a human triggers from the
@@ -25,7 +28,7 @@ import (
 //   - Where the action is a pure GitHub mutation with no critical flip (the PR
 //     title/body edit, the dashboard board-drag draft toggle — their only DB
 //     write is a best-effort snapshot refresh), the caller uses
-//     recordExternalActionBestEffort, which records in its own claims-set tx
+//     RecordExternalActionBestEffort, which records in its own claims-set tx
 //     AFTER the pessimistic GitHub write succeeds, so it always fires (even when
 //     the snapshot path early-returns) and never fails the user's applied edit.
 
@@ -42,11 +45,11 @@ func githubCredentialForPullRequest(ctx context.Context, resolver ghclient.Resol
 	return ghclient.CredentialForRepo(ctx, resolver, orgID, pr.Owner, pr.Repo)
 }
 
-// recordExternalActionBestEffort records act in its own claims-set tx (app pool),
+// RecordExternalActionBestEffort records act in its own claims-set tx (app pool),
 // logging-and-swallowing any failure. For the approval/board sites whose action
 // is a pure GitHub mutation that already landed pessimistically — the audit row
 // is recorded after success and must never fail the user's applied write.
-func recordExternalActionBestEffort(ctx context.Context, tx db.TxRunner, orgID, userID string, act domain.ExternalAction) {
+func RecordExternalActionBestEffort(ctx context.Context, tx db.TxRunner, orgID, userID string, act domain.ExternalAction) {
 	if err := tx.WithTx(ctx, orgID, userID, func(t db.TxStores) error {
 		return t.ExternalActions.Record(ctx, orgID, act)
 	}); err != nil {

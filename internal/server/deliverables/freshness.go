@@ -1,4 +1,4 @@
-package server
+package deliverables
 
 import (
 	"context"
@@ -25,7 +25,7 @@ import (
 //
 // Freshness joins each out-comment to its staged comment by stable TF-local id, so
 // it never depends on slice ordering.
-func (ah *deliverablesHandler) annotateReviewFreshness(ctx context.Context, orgID string, art *domain.Deliverable, reviewed db.DeliverablePullRequest, details domain.ReviewDeliverableDetails, out *reviewDeliverableDetailsJSON) {
+func (ah *Handler) annotateReviewFreshness(ctx context.Context, orgID string, art *domain.Deliverable, reviewed db.DeliverablePullRequest, details domain.ReviewDeliverableDetails, out *reviewDeliverableDetailsJSON) {
 	// reviewed is the pull request under review, resolved by the registry row
 	// its entity references (deliverablePullRequest). A retired row's name is
 	// another repository's now, with no head of this pull request to compare

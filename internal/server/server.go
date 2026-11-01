@@ -35,6 +35,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/deliverables"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/models"
 	"github.com/sky-ai-eng/triage-factory/internal/server/usage"
@@ -909,7 +910,6 @@ func (s *Server) routes() {
 	s.registerJiraRoutes()
 	s.registerLinearRoutes()
 	s.registerStockRoutes()
-	s.registerDeliverableRoutes()
 	s.registerFactoryRoutes()
 	s.registerPromptRoutes()
 	s.registerEventHandlerRoutes()
@@ -923,6 +923,16 @@ func (s *Server) routes() {
 	// same two mounts, handed over as httpx.Mounts.
 	m := s.mounts()
 	models.New(s.az, s.tx, func() models.Prober { return s.modelProber }).Register(m)
+	deliverables.New(s.tx, s.ws, s.ghResolver,
+		func() *delegate.Spawner { return s.spawner },
+		func() *reconcile.Reconciler { return s.reconciler },
+		func() string {
+			if s.deployCfg == nil {
+				return ""
+			}
+			return s.deployCfg.publicURL
+		},
+	).Register(m)
 	usage.New(s.tx, s.az, s.allStores.ConversationQueue).Register(m)
 
 	// SSO (connection / domains / break-glass admin surface, the verify-

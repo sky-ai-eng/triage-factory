@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -17,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
+	"github.com/sky-ai-eng/triage-factory/internal/server/deliverables"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/usage"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -224,73 +224,6 @@ func (ag *agentHandler) handleDeliverableRefresh(w http.ResponseWriter, r *http.
 	writeJSON(w, http.StatusOK, map[string]any{"updated": len(updated)})
 }
 
-// deliverableJSON is the wire shape of one conversation deliverable in the items of
-// POST /api/agent/conversations/{conversationID}/deliverables/list — the conversation's deliverables as the board /
-// RunDetail UI (TFAC-470) consumes them, across every kind (branch /
-// pull_request / review / issue / comment). details is the PARSED details_json
-// (the kind-specific payload as a JSON object, or null when absent/unparseable)
-// so the client gets structured data, not a string to re-parse. The mutable
-// dedup_key / org_id / team_id internals stay off the wire.
-type deliverableJSON struct {
-	ID         string          `json:"id"`
-	Kind       string          `json:"kind"`
-	Provider   string          `json:"provider"`
-	Scope      string          `json:"scope"`
-	State      string          `json:"state"`
-	Target     string          `json:"target"`
-	ExternalID string          `json:"external_id"`
-	URL        string          `json:"url"`
-	Details    json.RawMessage `json:"details"`
-	CreatedAt  time.Time       `json:"created_at"`
-}
-
-// toDeliverableJSON projects a stored deliverable onto the read-API wire shape,
-// emitting details_json as embedded JSON (or null when absent/corrupt).
-func toDeliverableJSON(a domain.Deliverable) deliverableJSON {
-	out := deliverableEnvelope(a)
-	out.Details = storedDeliverableDetails(a)
-	return out
-}
-
-// deliverableEnvelope fills the kind-independent half of the read shape, leaving
-// Details to the caller. The single read (GET /api/deliverables/{id}) composes a
-// live representation for two of the kinds, so it fills that slot itself
-// rather than passing the stored payload through.
-func deliverableEnvelope(a domain.Deliverable) deliverableJSON {
-	return deliverableJSON{
-		ID:         a.ID,
-		Kind:       a.Kind,
-		Provider:   a.Provider,
-		Scope:      a.Scope,
-		State:      a.State,
-		Target:     a.Target,
-		ExternalID: a.ExternalID,
-		URL:        a.URL,
-		CreatedAt:  a.CreatedAt,
-	}
-}
-
-// storedDeliverableDetails is the details_json a row already holds, as the
-// embedded JSON object it is.
-func storedDeliverableDetails(a domain.Deliverable) json.RawMessage {
-	switch {
-	case a.DetailsJSON == "":
-		// No details — nil, which marshals to null.
-		return nil
-	case json.Valid([]byte(a.DetailsJSON)):
-		return json.RawMessage(a.DetailsJSON)
-	default:
-		// Corrupt payload: serve null rather than fail the whole response's
-		// marshal (json.Marshal validates a RawMessage). details_json is written
-		// by our own marshaled structs, so an invalid value is a real upstream
-		// bug worth a trace, not an expected empty — mirror the deliverable handler's
-		// "details unparseable" warning so it isn't a silent drop.
-		deliverablesLog.Warn("deliverable details_json is not valid JSON; serving null",
-			"deliverable", a.ID, "dedup_key", a.DedupKey)
-		return nil
-	}
-}
-
 // conversationDeliverableListRequest is the body of POST
 // /api/agent/conversations/{conversationID}/deliverables/list. The
 // conversation is the path id and the read has no filters of its own, so the
@@ -354,9 +287,9 @@ func (ag *agentHandler) handleAgentDeliverables(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	out := make([]deliverableJSON, len(arts))
+	out := make([]deliverables.JSON, len(arts))
 	for i, a := range arts {
-		out[i] = toDeliverableJSON(a)
+		out[i] = deliverables.ToJSON(a)
 	}
 	httpx.WriteList(w, page, out, total)
 }

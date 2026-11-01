@@ -1,4 +1,8 @@
-package server
+// Package deliverables serves the deliverable-id-addressed routes under
+// /api/deliverables — the pull request and review previews, their edits, and
+// the approve, dismiss and reject verbs that resolve them — and owns the
+// deliverable read shape the conversation-scoped list serves too.
+package deliverables
 
 import (
 	"context"
@@ -7,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentmeta"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -14,13 +19,16 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/deliverableteardown"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/wsevent/conversationevent"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
-// deliverablesHandler serves the deliverable-id-addressed endpoints that back the
+var deliverablesLog = logging.Component("deliverables")
+
+// Handler serves the deliverable-id-addressed endpoints that back the
 // GitHub-native PR preview. It replaces the local pending_prs path:
 // the draft PR is a real GitHub object created at `pr create` time and recorded
 // as a `pull_request` deliverable, so these handlers read/edit/approve that live
@@ -28,14 +36,14 @@ import (
 //
 // ghResolver picks the right GitHub client (org App installation token → PAT)
 // per repo at call time, so App-only orgs work identically to PAT orgs. Mirrors
-// dashboardHandler's deps.
-type deliverablesHandler struct {
+// the server's dashboardHandler deps.
+type Handler struct {
 	tx         db.TxRunner
 	ws         *websocket.Hub
 	ghResolver ghclient.Resolver
-	// spawner is a lazy delegation-spawner accessor (wired by Server.routes via a
-	// closure over s.spawner) used to feed the drafting agent a <system-note> when
-	// a human resolves one of its deliverables.
+	// spawner is a lazy delegation-spawner accessor (wired by the server's
+	// routes() via a closure over its spawner field) used to feed the drafting
+	// agent a <system-note> when a human resolves one of its deliverables.
 	spawner func() *delegate.Spawner
 	// reconciler is the Tier-2 deliverable reconciler (nil where the deployment
 	// runs none), read lazily like spawner. The resolve verbs use it when the
@@ -49,11 +57,17 @@ type deliverablesHandler struct {
 	publicURL func() string
 }
 
+// New builds the deliverables handler. spawner, reconciler and publicURL are
+// read on every request, not once here; see the Handler fields.
+func New(tx db.TxRunner, ws *websocket.Hub, ghResolver ghclient.Resolver, spawner func() *delegate.Spawner, reconciler func() *reconcile.Reconciler, publicURL func() string) *Handler {
+	return &Handler{tx: tx, ws: ws, ghResolver: ghResolver, spawner: spawner, reconciler: reconciler, publicURL: publicURL}
+}
+
 // footerFor is the disclosure footer for content a conversation authored — the
 // same shape the agenthost appends when the run itself publishes, so a review
 // posted by a human's approval and one auto-posted at finalize disclose
 // identically. Empty with no conversation: nothing to disclose.
-func (ah *deliverablesHandler) footerFor(kind, orgID, conversationID string) string {
+func (ah *Handler) footerFor(kind, orgID, conversationID string) string {
 	if conversationID == "" {
 		return ""
 	}
@@ -61,9 +75,9 @@ func (ah *deliverablesHandler) footerFor(kind, orgID, conversationID string) str
 }
 
 // deliverableIDOr404 guards the {id} path value on every deliverable-addressed route
-// — deliverables.id is a uuid column on Postgres. See uuidPathOr404.
+// — deliverables.id is a uuid column on Postgres. See httpx.UUIDPathOr404.
 func deliverableIDOr404(w http.ResponseWriter, r *http.Request) (string, bool) {
-	return uuidPathOr404(w, r, "id", "deliverable")
+	return httpx.UUIDPathOr404(w, r, "id", "deliverable")
 }
 
 // injectDeliverableNote feeds the deliverable's drafting conversation the agent-
@@ -75,7 +89,7 @@ func deliverableIDOr404(w http.ResponseWriter, r *http.Request) (string, bool) {
 // the next resume. Never gates the blueprint (TFAC-379 #2). The deliverable
 // passed must carry its post-resolution State so the right kind-specific copy
 // is rendered.
-func (ah *deliverablesHandler) injectDeliverableNote(orgID string, a domain.Deliverable) {
+func (ah *Handler) injectDeliverableNote(orgID string, a domain.Deliverable) {
 	if a.ConversationID == "" || ah.spawner == nil {
 		return
 	}
@@ -84,6 +98,73 @@ func (ah *deliverablesHandler) injectDeliverableNote(orgID string, a domain.Deli
 		return
 	}
 	sp.InjectDeliverableNote(orgID, a.ConversationID, a)
+}
+
+// JSON is the wire shape of one conversation deliverable in the items of
+// POST /api/agent/conversations/{conversationID}/deliverables/list — the conversation's deliverables as the board /
+// RunDetail UI (TFAC-470) consumes them, across every kind (branch /
+// pull_request / review / issue / comment). details is the PARSED details_json
+// (the kind-specific payload as a JSON object, or null when absent/unparseable)
+// so the client gets structured data, not a string to re-parse. The mutable
+// dedup_key / org_id / team_id internals stay off the wire.
+type JSON struct {
+	ID         string          `json:"id"`
+	Kind       string          `json:"kind"`
+	Provider   string          `json:"provider"`
+	Scope      string          `json:"scope"`
+	State      string          `json:"state"`
+	Target     string          `json:"target"`
+	ExternalID string          `json:"external_id"`
+	URL        string          `json:"url"`
+	Details    json.RawMessage `json:"details"`
+	CreatedAt  time.Time       `json:"created_at"`
+}
+
+// ToJSON projects a stored deliverable onto the read-API wire shape,
+// emitting details_json as embedded JSON (or null when absent/corrupt).
+func ToJSON(a domain.Deliverable) JSON {
+	out := envelope(a)
+	out.Details = storedDeliverableDetails(a)
+	return out
+}
+
+// envelope fills the kind-independent half of the read shape, leaving
+// Details to the caller. The single read (GET /api/deliverables/{id}) composes a
+// live representation for two of the kinds, so it fills that slot itself
+// rather than passing the stored payload through.
+func envelope(a domain.Deliverable) JSON {
+	return JSON{
+		ID:         a.ID,
+		Kind:       a.Kind,
+		Provider:   a.Provider,
+		Scope:      a.Scope,
+		State:      a.State,
+		Target:     a.Target,
+		ExternalID: a.ExternalID,
+		URL:        a.URL,
+		CreatedAt:  a.CreatedAt,
+	}
+}
+
+// storedDeliverableDetails is the details_json a row already holds, as the
+// embedded JSON object it is.
+func storedDeliverableDetails(a domain.Deliverable) json.RawMessage {
+	switch {
+	case a.DetailsJSON == "":
+		// No details — nil, which marshals to null.
+		return nil
+	case json.Valid([]byte(a.DetailsJSON)):
+		return json.RawMessage(a.DetailsJSON)
+	default:
+		// Corrupt payload: serve null rather than fail the whole response's
+		// marshal (json.Marshal validates a RawMessage). details_json is written
+		// by our own marshaled structs, so an invalid value is a real upstream
+		// bug worth a trace, not an expected empty — mirror the deliverable handler's
+		// "details unparseable" warning so it isn't a silent drop.
+		deliverablesLog.Warn("deliverable details_json is not valid JSON; serving null",
+			"deliverable", a.ID, "dedup_key", a.DedupKey)
+		return nil
+	}
 }
 
 // prDeliverableDetailsJSON is the `details` payload for a pull_request deliverable.
@@ -108,7 +189,7 @@ type prDeliverableDetailsJSON struct {
 func composedDeliverableDetails(w http.ResponseWriter, art *domain.Deliverable, details any) (json.RawMessage, bool) {
 	raw, err := json.Marshal(details)
 	if err != nil {
-		internalError(w, "deliverables", fmt.Errorf("marshal %s details (deliverable %s): %w", art.Kind, art.ID, err))
+		httpx.InternalError(w, "deliverables", fmt.Errorf("marshal %s details (deliverable %s): %w", art.Kind, art.ID, err))
 		return nil, false
 	}
 	return raw, true
@@ -126,7 +207,7 @@ func requireDeliverableKind(w http.ResponseWriter, art *domain.Deliverable, kind
 	if art.Kind == kind {
 		return true
 	}
-	conflict(w, "deliverable is not "+article+" (kind: "+art.Kind+")")
+	httpx.Conflict(w, "deliverable is not "+article+" (kind: "+art.Kind+")")
 	return false
 }
 
@@ -134,17 +215,17 @@ func requireDeliverableKind(w http.ResponseWriter, art *domain.Deliverable, kind
 // first step of every deliverable-id-addressed route; the caller then dispatches on
 // art.Kind (pull_request vs review). Returns ok=false (after writing the error
 // response) so callers can `if ...; !ok { return }`.
-func (ah *deliverablesHandler) loadDeliverable(w http.ResponseWriter, r *http.Request, orgID, userID, id string) (art *domain.Deliverable, ok bool) {
+func (ah *Handler) loadDeliverable(w http.ResponseWriter, r *http.Request, orgID, userID, id string) (art *domain.Deliverable, ok bool) {
 	if err := ah.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		art, e = tx.Deliverables.Get(r.Context(), orgID, id)
 		return e
 	}); err != nil {
-		internalError(w, "deliverables", err)
+		httpx.InternalError(w, "deliverables", err)
 		return nil, false
 	}
 	if art == nil {
-		notFound(w, "deliverable")
+		httpx.NotFound(w, "deliverable")
 		return nil, false
 	}
 	return art, true
@@ -154,9 +235,9 @@ func (ah *deliverablesHandler) loadDeliverable(w http.ResponseWriter, r *http.Re
 // about under the caller's claims: the repository registry row its entity
 // references, read by id, and the number the entity's key carries
 // (db.ResolveDeliverablePullRequest).
-func (ah *deliverablesHandler) deliverablePullRequest(ctx context.Context, orgID string, art *domain.Deliverable) (db.DeliverablePullRequest, error) {
+func (ah *Handler) deliverablePullRequest(ctx context.Context, orgID string, art *domain.Deliverable) (db.DeliverablePullRequest, error) {
 	var pr db.DeliverablePullRequest
-	err := ah.tx.WithReadTx(ctx, orgID, ClaimsFrom(ctx).Subject, func(tx db.TxStores) error {
+	err := ah.tx.WithReadTx(ctx, orgID, httpx.ClaimsFrom(ctx).Subject, func(tx db.TxStores) error {
 		var e error
 		pr, e = db.ResolveDeliverablePullRequest(ctx, orgID, *art, tx.Entities.Get, tx.Repos.Get)
 		return e
@@ -178,18 +259,18 @@ const retiredRepositoryMessage = "this pull request's repository is no longer on
 // is one whose repository's registry row is retired: GitHub serves its name as
 // another repository now, and a request under it would reach that one's pull
 // request of the same number.
-func (ah *deliverablesHandler) ghForDeliverable(w http.ResponseWriter, r *http.Request, orgID string, art *domain.Deliverable) (gh *ghclient.Client, pr db.DeliverablePullRequest, ok bool) {
+func (ah *Handler) ghForDeliverable(w http.ResponseWriter, r *http.Request, orgID string, art *domain.Deliverable) (gh *ghclient.Client, pr db.DeliverablePullRequest, ok bool) {
 	pr, err := ah.deliverablePullRequest(r.Context(), orgID, art)
 	if err != nil {
 		// A deliverable that names no pull request can't be acted on. Treat it
 		// as a server-side data error rather than guessing — the writers always
 		// link a pull request's deliverable to its entity.
-		internalError(w, "deliverables", err)
+		httpx.InternalError(w, "deliverables", err)
 		return nil, db.DeliverablePullRequest{}, false
 	}
 	onHost, host, err := ah.deliverableOnCurrentHost(r.Context(), orgID, art)
 	if err != nil {
-		internalError(w, "deliverables", err)
+		httpx.InternalError(w, "deliverables", err)
 		return nil, db.DeliverablePullRequest{}, false
 	}
 	if !onHost {
@@ -210,28 +291,28 @@ func (ah *deliverablesHandler) ghForDeliverable(w http.ResponseWriter, r *http.R
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
 			deliverablesLog.Warn("github not configured", "org", orgID, "owner", pr.Owner, "repo", pr.Repo, "error", err)
-			writeNotConfigured(w, "GitHub is not connected for this organization")
+			httpx.WriteNotConfigured(w, "GitHub is not connected for this organization")
 			return nil, db.DeliverablePullRequest{}, false
 		}
-		internalError(w, "deliverables", err)
+		httpx.InternalError(w, "deliverables", err)
 		return nil, db.DeliverablePullRequest{}, false
 	}
 	return client, pr, true
 }
 
 // handleDeliverableGet serves one deliverable in the same shape the
-// conversation-scoped list serves it (deliverableJSON): the kind-independent
+// conversation-scoped list serves it (JSON): the kind-independent
 // envelope, with `kind` as the explicit discriminator over a kind-shaped
 // `details` payload — a pull request read live from GitHub, a review assembled
 // from its staged draft.
 //
 // GET /api/deliverables/{id}
-func (ah *deliverablesHandler) handleDeliverableGet(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (ah *Handler) handleDeliverableGet(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
+	userID := httpx.ClaimsFrom(r.Context()).Subject
 	id, ok := deliverableIDOr404(w, r)
 	if !ok {
 		return
@@ -241,7 +322,7 @@ func (ah *deliverablesHandler) handleDeliverableGet(w http.ResponseWriter, r *ht
 	if !ok {
 		return
 	}
-	out := deliverableEnvelope(*art)
+	out := envelope(*art)
 	switch art.Kind {
 	case domain.DeliverableKindPullRequest:
 		details, ok := ah.prDeliverableDetails(w, r, orgID, art)
@@ -260,7 +341,7 @@ func (ah *deliverablesHandler) handleDeliverableGet(w http.ResponseWriter, r *ht
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, out)
+	httpx.WriteJSON(w, http.StatusOK, out)
 }
 
 // prDeliverableDetails composes the pull_request `details` payload: the live PR
@@ -276,16 +357,16 @@ func (ah *deliverablesHandler) handleDeliverableGet(w http.ResponseWriter, r *ht
 // fetch: the org's client would read a different pull request under the same
 // coordinates. So does one whose repository's registry row is retired, whose
 // name GitHub now serves as another repository.
-func (ah *deliverablesHandler) prDeliverableDetails(w http.ResponseWriter, r *http.Request, orgID string, art *domain.Deliverable) (prDeliverableDetailsJSON, bool) {
+func (ah *Handler) prDeliverableDetails(w http.ResponseWriter, r *http.Request, orgID string, art *domain.Deliverable) (prDeliverableDetailsJSON, bool) {
 	resolved, err := ah.deliverablePullRequest(r.Context(), orgID, art)
 	if err != nil {
-		internalError(w, "deliverables", err)
+		httpx.InternalError(w, "deliverables", err)
 		return prDeliverableDetailsJSON{}, false
 	}
 	owner, repo, number := resolved.Owner, resolved.Repo, resolved.Number
 	onHost, _, err := ah.deliverableOnCurrentHost(r.Context(), orgID, art)
 	if err != nil {
-		internalError(w, "deliverables", err)
+		httpx.InternalError(w, "deliverables", err)
 		return prDeliverableDetailsJSON{}, false
 	}
 
@@ -339,12 +420,12 @@ func (ah *deliverablesHandler) prDeliverableDetails(w http.ResponseWriter, r *ht
 // with its own current content and record an audit row for it.
 //
 // PATCH /api/deliverables/{id}/pr
-func (ah *deliverablesHandler) handleDeliverablePRUpdate(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (ah *Handler) handleDeliverablePRUpdate(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
+	userID := httpx.ClaimsFrom(r.Context()).Subject
 	id, ok := deliverableIDOr404(w, r)
 	if !ok {
 		return
@@ -429,7 +510,7 @@ func (ah *deliverablesHandler) handleDeliverablePRUpdate(w http.ResponseWriter, 
 	// (pessimistic); record best-effort in its own tx so it fires regardless of
 	// the snapshot refresh below (which is itself best-effort and skipped when
 	// details don't parse). No state transition — it's an in-place title/body edit.
-	recordExternalActionBestEffort(r.Context(), ah.tx, orgID, userID,
+	RecordExternalActionBestEffort(r.Context(), ah.tx, orgID, userID,
 		domain.DeliverableAction(art, domain.PerformedByPerson, userID, domain.ActionPREdited, "", "",
 			ghclient.CredentialForRepo(r.Context(), ah.ghResolver, orgID, owner, repo)))
 
@@ -447,7 +528,7 @@ func (ah *deliverablesHandler) handleDeliverablePRUpdate(w http.ResponseWriter, 
 		}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // handleDeliverableDiff returns the unified diff the overlay renders. A PR deliverable
@@ -459,12 +540,12 @@ func (ah *deliverablesHandler) handleDeliverablePRUpdate(w http.ResponseWriter, 
 // commits-since-finalize count, and reconciled by Refresh. Both frames port the
 // 406→per-file fallback: GitHub refuses the verbatim diff media type on very large
 // diffs, so reassemble from the files API rather than 502-ing the overlay.
-func (ah *deliverablesHandler) handleDeliverableDiff(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (ah *Handler) handleDeliverableDiff(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
+	userID := httpx.ClaimsFrom(r.Context()).Subject
 	id, ok := deliverableIDOr404(w, r)
 	if !ok {
 		return
@@ -475,7 +556,7 @@ func (ah *deliverablesHandler) handleDeliverableDiff(w http.ResponseWriter, r *h
 		return
 	}
 	if art.Kind != domain.DeliverableKindPullRequest && art.Kind != domain.DeliverableKindReview {
-		notFound(w, "deliverable")
+		httpx.NotFound(w, "deliverable")
 		return
 	}
 	gh, prRef, ok := ah.ghForDeliverable(w, r, orgID, art)
@@ -604,7 +685,7 @@ func diffTruncationNote(fileCount int) string {
 // answered 409 ALREADY_TERMINAL naming what GitHub holds — the same fault a
 // stale click on an already-resolved row gets, because that is what it is. A
 // read failure is a 502: nothing can be safely promoted or deleted unread.
-func (ah *deliverablesHandler) liveDraftOr409(w http.ResponseWriter, r *http.Request, gh *ghclient.Client, orgID, userID string, art *domain.Deliverable, owner, repo string, number int) (*ghclient.PRView, bool) {
+func (ah *Handler) liveDraftOr409(w http.ResponseWriter, r *http.Request, gh *ghclient.Client, orgID, userID string, art *domain.Deliverable, owner, repo string, number int) (*ghclient.PRView, bool) {
 	live, err := gh.GetPRBasic(r.Context(), owner, repo, number)
 	if err != nil {
 		deliverablesLog.Warn("live PR read before resolve failed", "deliverable", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
@@ -643,7 +724,7 @@ func liveStateWord(live *ghclient.PRView) string {
 // refetch. Best-effort and detached from the request: the 409 the
 // caller is about to send is correct whether or not this lands, and the next
 // reconcile pass repairs a miss.
-func (ah *deliverablesHandler) reconcileDeliverableOutOfBand(r *http.Request, orgID, userID string, art *domain.Deliverable) {
+func (ah *Handler) reconcileDeliverableOutOfBand(r *http.Request, orgID, userID string, art *domain.Deliverable) {
 	if ah.reconciler == nil {
 		return
 	}
@@ -676,12 +757,12 @@ func (ah *deliverablesHandler) reconcileDeliverableOutOfBand(r *http.Request, or
 	}
 }
 
-func (ah *deliverablesHandler) handleDeliverableApprove(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (ah *Handler) handleDeliverableApprove(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
+	userID := httpx.ClaimsFrom(r.Context()).Subject
 	id, ok := deliverableIDOr404(w, r)
 	if !ok {
 		return
@@ -700,7 +781,7 @@ func (ah *deliverablesHandler) handleDeliverableApprove(w http.ResponseWriter, r
 	default:
 		// The row exists; its kind has nothing to submit. 409, not 404 — a
 		// deliverable of a kind this verb does not know is not a missing one.
-		conflict(w, "deliverables of kind "+art.Kind+" cannot be approved")
+		httpx.Conflict(w, "deliverables of kind "+art.Kind+" cannot be approved")
 		return
 	}
 	gh, prRef, ok := ah.ghForDeliverable(w, r, orgID, art)
@@ -805,7 +886,7 @@ func (ah *deliverablesHandler) handleDeliverableApprove(w http.ResponseWriter, r
 	// closure until reconciliation).
 	ah.injectDeliverableNote(orgID, openArt)
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"number":   number,
 		"html_url": art.URL,
 		"state":    domain.DeliverableStatePROpen,
@@ -821,12 +902,12 @@ func (ah *deliverablesHandler) handleDeliverableApprove(w http.ResponseWriter, r
 // terminal-on-last task-closure check.
 //
 // POST /api/deliverables/{id}/dismiss
-func (ah *deliverablesHandler) handleDeliverableDismiss(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (ah *Handler) handleDeliverableDismiss(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
+	userID := httpx.ClaimsFrom(r.Context()).Subject
 	id, ok := deliverableIDOr404(w, r)
 	if !ok {
 		return
@@ -874,7 +955,7 @@ func (ah *deliverablesHandler) handleDeliverableDismiss(w http.ResponseWriter, r
 	case errors.Is(err, db.ErrDeliverableNamesNoPullRequest):
 		deliverablesLog.Warn("dismiss: deliverable names no pull request; dismissing without a GitHub close", "deliverable", art.ID, "error", err)
 	default:
-		internalError(w, "deliverables", err)
+		httpx.InternalError(w, "deliverables", err)
 		return
 	}
 	credential := githubCredentialForPullRequest(r.Context(), ah.ghResolver, orgID, prRef)
@@ -888,7 +969,7 @@ func (ah *deliverablesHandler) handleDeliverableDismiss(w http.ResponseWriter, r
 		return tx.ExternalActions.Record(r.Context(), orgID,
 			domain.DeliverableAction(art, domain.PerformedByPerson, userID, domain.ActionPRClosed, domain.DeliverableStatePRDraft, domain.DeliverableStatePRClosed, credential))
 	}); err != nil {
-		internalError(w, "deliverables", err)
+		httpx.InternalError(w, "deliverables", err)
 		return
 	}
 
@@ -905,7 +986,7 @@ func (ah *deliverablesHandler) handleDeliverableDismiss(w http.ResponseWriter, r
 	// Tell the drafting agent its draft PR was dismissed (live or via the ledger).
 	ah.injectDeliverableNote(orgID, closed)
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"number":   number,
 		"html_url": art.URL,
 		"state":    domain.DeliverableStatePRClosed,
@@ -935,12 +1016,12 @@ func (ah *deliverablesHandler) handleDeliverableDismiss(w http.ResponseWriter, r
 // draft, and a retry finds the branch gone and reconciles.
 //
 // POST /api/deliverables/{id}/reject
-func (ah *deliverablesHandler) handleDeliverableReject(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (ah *Handler) handleDeliverableReject(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
+	userID := httpx.ClaimsFrom(r.Context()).Subject
 	id, ok := deliverableIDOr404(w, r)
 	if !ok {
 		return
@@ -970,11 +1051,11 @@ func (ah *deliverablesHandler) handleDeliverableReject(w http.ResponseWriter, r 
 	// dismiss still can.
 	details, derr := domain.ParsePRDeliverableDetails(art.DetailsJSON)
 	if derr != nil || details.HeadBranch == "" {
-		conflict(w, "this PR's head branch is not recorded, so its branch cannot be deleted; dismiss it instead to close the PR and keep the branch")
+		httpx.Conflict(w, "this PR's head branch is not recorded, so its branch cannot be deleted; dismiss it instead to close the PR and keep the branch")
 		return
 	}
 	if details.HeadBranch == details.Base {
-		conflict(w, "this PR's head branch is its base branch, which is never deleted; dismiss it instead")
+		httpx.Conflict(w, "this PR's head branch is its base branch, which is never deleted; dismiss it instead")
 		return
 	}
 
@@ -1038,7 +1119,7 @@ func (ah *deliverablesHandler) handleDeliverableReject(w http.ResponseWriter, r 
 		return tx.ExternalActions.Record(cleanupCtx, orgID,
 			branchDeletedAction(art, userID, prRef.RepositoryID, repoPath, headRef, details.HeadBranch, credential))
 	}); err != nil {
-		internalError(w, "deliverables", err)
+		httpx.InternalError(w, "deliverables", err)
 		return
 	}
 
@@ -1048,7 +1129,7 @@ func (ah *deliverablesHandler) handleDeliverableReject(w http.ResponseWriter, r 
 	// which re-derives the rejection from the resolution on the row.
 	ah.injectDeliverableNote(orgID, closed)
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"number":   number,
 		"html_url": art.URL,
 		"state":    domain.DeliverableStatePRClosed,
@@ -1100,7 +1181,7 @@ func branchDeletedAction(art *domain.Deliverable, userID, repositoryID, repoPath
 // blueprint that aborted, or one with another unresolved deliverable left, emits
 // nothing at all, and the rail's `needs` would sit a decision stale until the
 // next unrelated event.
-func (ah *deliverablesHandler) pingConversationsResolved(orgID string) {
+func (ah *Handler) pingConversationsResolved(orgID string) {
 	conversationevent.Publish(ah.ws, orgID)
 }
 
@@ -1149,7 +1230,7 @@ func (ah *deliverablesHandler) pingConversationsResolved(orgID string) {
 // the close direction — any read error leaves the task open (recoverable; the
 // next resolve or conversation termination re-checks) rather than closing a
 // task that may still hold unresolved work.
-func (ah *deliverablesHandler) closeTaskIfTerminalAndResolved(ctx context.Context, orgID, userID, conversationID string) {
+func (ah *Handler) closeTaskIfTerminalAndResolved(ctx context.Context, orgID, userID, conversationID string) {
 	if conversationID == "" {
 		return
 	}
@@ -1266,7 +1347,7 @@ func conversationsHaveUnresolvedDeliverables(ctx context.Context, tx db.TxStores
 // upsertPRDetails writes the deliverable back with new details_json, inside a
 // claims-set tx (app pool / RLS). State and coordinates are carried unchanged
 // from the existing row; only DetailsJSON moves.
-func (ah *deliverablesHandler) upsertPRDetails(ctx context.Context, orgID, userID string, art *domain.Deliverable, details domain.PRDeliverableDetails) error {
+func (ah *Handler) upsertPRDetails(ctx context.Context, orgID, userID string, art *domain.Deliverable, details domain.PRDeliverableDetails) error {
 	next := *art
 	next.DetailsJSON = domain.MarshalPRDeliverableDetails(details)
 	return ah.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
@@ -1278,9 +1359,9 @@ func (ah *deliverablesHandler) upsertPRDetails(ctx context.Context, orgID, userI
 // deliverableOnCurrentHost reports whether art was recorded on the org's GitHub
 // host now, the host every client this handler resolves talks to, and returns
 // that host.
-func (ah *deliverablesHandler) deliverableOnCurrentHost(ctx context.Context, orgID string, art *domain.Deliverable) (bool, string, error) {
+func (ah *Handler) deliverableOnCurrentHost(ctx context.Context, orgID string, art *domain.Deliverable) (bool, string, error) {
 	var host string
-	if err := ah.tx.WithReadTx(ctx, orgID, ClaimsFrom(ctx).Subject, func(tx db.TxStores) error {
+	if err := ah.tx.WithReadTx(ctx, orgID, httpx.ClaimsFrom(ctx).Subject, func(tx db.TxStores) error {
 		set, err := tx.Orgs.GetSettings(ctx, orgID)
 		host = domain.ExternalObjectScope(domain.ProviderGitHub, set)
 		return err
@@ -1298,41 +1379,32 @@ func hostOrNotConfigured(host string) string {
 	return host
 }
 
-func (s *Server) registerDeliverableRoutes() {
+// Register mounts the deliverable routes.
+func (ah *Handler) Register(m httpx.Mounts) {
 	// Deliverable-id-addressed endpoints back both the GitHub-native PR preview
 	// and the review preview (kind-dispatched inside the handlers). A review
 	// lives on GitHub rather than locally: GET serves the deliverable + its live
 	// pending-review comments, PATCH stages body/event, the comment routes
 	// edit/delete inline comments on that pending review, approve submits it,
 	// and dismiss resolves a single deliverable. The task-level resolve-all runs
-	// once, when the task itself ends (drag-to-Done / dismiss), through
-	// teardownTaskDeliverables.
-	ah := &deliverablesHandler{
-		tx: s.tx, ws: s.ws, ghResolver: s.ghResolver,
-		spawner:    func() *delegate.Spawner { return s.spawner },
-		reconciler: func() *reconcile.Reconciler { return s.reconciler },
-		publicURL: func() string {
-			if s.deployCfg == nil {
-				return ""
-			}
-			return s.deployCfg.publicURL
-		},
-	}
+	// once, when the task itself ends (drag-to-Done / dismiss), through the
+	// server's teardownTaskDeliverables.
+	//
 	// One read for every kind; the writes are kind-scoped sub-resources, so a
 	// review-shaped body can never reach the PR write path.
-	s.api("GET /api/deliverables/{id}", ah.handleDeliverableGet)
-	s.apiMutating("PATCH /api/deliverables/{id}/pr", ah.handleDeliverablePRUpdate)
-	s.apiMutating("PATCH /api/deliverables/{id}/review", ah.handleDeliverableReviewUpdate)
-	s.api("GET /api/deliverables/{id}/diff", ah.handleDeliverableDiff)
-	s.apiMutating("POST /api/deliverables/{id}/approve", ah.handleDeliverableApprove)
+	m.API("GET /api/deliverables/{id}", ah.handleDeliverableGet)
+	m.APIMutating("PATCH /api/deliverables/{id}/pr", ah.handleDeliverablePRUpdate)
+	m.APIMutating("PATCH /api/deliverables/{id}/review", ah.handleDeliverableReviewUpdate)
+	m.API("GET /api/deliverables/{id}/diff", ah.handleDeliverableDiff)
+	m.APIMutating("POST /api/deliverables/{id}/approve", ah.handleDeliverableApprove)
 	// Pull requests only: closing one is a real GitHub write. A review is
 	// abandoned through PATCH …/review {state:"dismissed"}.
-	s.apiMutating("POST /api/deliverables/{id}/dismiss", ah.handleDeliverableDismiss)
+	m.APIMutating("POST /api/deliverables/{id}/dismiss", ah.handleDeliverableDismiss)
 	// Dismiss's irreversible sibling: the head branch is deleted from the
 	// upstream as well. Its own verb because the branch delete is the one PR
 	// write that cannot be undone, so the client confirms it explicitly.
-	s.apiMutating("POST /api/deliverables/{id}/reject", ah.handleDeliverableReject)
-	s.apiMutating("POST /api/deliverables/{id}/review/refresh", ah.handleReviewRefresh)
-	s.apiMutating("PATCH /api/deliverables/{id}/comments/{commentId}", ah.handleDeliverableCommentUpdate)
-	s.apiMutating("DELETE /api/deliverables/{id}/comments/{commentId}", ah.handleDeliverableCommentDelete)
+	m.APIMutating("POST /api/deliverables/{id}/reject", ah.handleDeliverableReject)
+	m.APIMutating("POST /api/deliverables/{id}/review/refresh", ah.handleReviewRefresh)
+	m.APIMutating("PATCH /api/deliverables/{id}/comments/{commentId}", ah.handleDeliverableCommentUpdate)
+	m.APIMutating("DELETE /api/deliverables/{id}/comments/{commentId}", ah.handleDeliverableCommentDelete)
 }

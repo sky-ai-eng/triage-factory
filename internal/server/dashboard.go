@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/server/deliverables"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
@@ -417,7 +418,7 @@ func (dh *dashboardHandler) handleDashboardPRUpdate(w http.ResponseWriter, r *ht
 		PerformedBy: domain.PerformedByPerson,
 	}
 	draftRecord.SetObject(domain.ObjectKindPullRequest, "")
-	recordExternalActionBestEffort(r.Context(), dh.tx, orgID, userID, draftRecord)
+	deliverables.RecordExternalActionBestEffort(r.Context(), dh.tx, orgID, userID, draftRecord)
 
 	// Patch the local entity snapshot to match the state we just pushed to
 	// GitHub. Without this, the frontend's subsequent fetchAll() reads the
