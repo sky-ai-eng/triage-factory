@@ -2573,9 +2573,8 @@ func (c *LocalClient) recordGithubPR(ctx context.Context, owner, repo, head, bas
 // (RecordExternalWrite, record.go): a recording failure is logged and
 // swallowed so it never fails the agent's already-applied GitHub action. act
 // is the external-action audit row to append in the SAME write as the
-// deliverable (the audit log of record) — nil when this upsert carries no
-// distinct external action. github is what GitHub answered for the write's
-// objects (githubObject).
+// deliverable (the audit log of record). github is what GitHub answered for
+// the write's objects (githubObject).
 func (c *LocalClient) upsertGithubDeliverable(ctx context.Context, a domain.Deliverable, act *domain.ExternalAction, github domain.GitHubIdentity) {
 	a.Provider = domain.ProviderGitHub
 	c.rt.Record(ctx, &a, act, domain.EntityContainer{}, github)
@@ -2583,9 +2582,9 @@ func (c *LocalClient) upsertGithubDeliverable(ctx context.Context, a domain.Deli
 
 // --- external-action recording (TFAC-483) ---
 //
-// The bot funnels append an external_actions row for every write, beside the
-// deliverable upsert of a pull request or review (the audit log of record for
-// every org-credential write). The
+// The bot funnels append an external_actions row for every write, beside a
+// pull request create's deliverable (the audit log of record for every
+// org-credential write). The
 // credential is the org GitHub App / org Jira service account / Slack bot
 // token by construction — exec resolves the org's system credential, never a
 // user's own — so every bot write qualifies. conversation_id is this conversation, actor_user_id

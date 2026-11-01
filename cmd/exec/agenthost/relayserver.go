@@ -180,7 +180,9 @@ func (s *RelayServer) SetGitHubCredential(credential string) {
 
 // NewRelayServer builds the run's relay op server. git may be nil (no git
 // surface); stores/info are the run's own, admin-pool + ConversationInfo-bound.
+// Every op is applied under info marked Relayed.
 func NewRelayServer(stores db.Stores, info ConversationInfo, git *agentproc.GitProxyConfig) *RelayServer {
+	info.Relayed = true
 	return &RelayServer{
 		rt:     newDirectRuntime(stores, info),
 		stores: stores,

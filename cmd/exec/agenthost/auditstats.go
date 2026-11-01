@@ -109,18 +109,19 @@ func recordAuditDrops(ctx context.Context, stage, op string, n int64) {
 
 // recordDropOp names what the write funnel was recording, for a drop at the
 // write stage: the deliverable's kind, or — for an audit-only write, which carries
-// no deliverable — the action's discriminator. Both are closed domain
-// vocabularies minted by TF itself, which is what makes either safe as a label;
-// the target they were written against is a repo path and stays out, the same
-// line the artifact.record span draws. A relayed deliverable's kind is the
-// sidecar's, so one outside the vocabulary is labeled as other.
+// no deliverable — the action's discriminator. Each is used as a label only
+// when it is in its closed domain vocabulary (domain.DeliverableKinds,
+// domain.ExternalActionTypes), since a relayed record's kind and action are
+// the sidecar's to send; anything else is labeled as other. The target they
+// were written against is a repo path and stays out, the same line the
+// artifact.record span draws.
 func recordDropOp(a *domain.Deliverable, act *domain.ExternalAction) string {
 	switch {
 	case a != nil && (a.Kind == domain.DeliverableKindPullRequest || a.Kind == domain.DeliverableKindReview):
 		return a.Kind
 	case a != nil && a.Kind != "":
 		return dropOpOther
-	case act != nil && act.Action != "":
+	case act != nil && slices.Contains(domain.ExternalActionTypes(), act.Action):
 		return act.Action
 	default:
 		return dropOpOther

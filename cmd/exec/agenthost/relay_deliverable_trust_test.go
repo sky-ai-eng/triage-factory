@@ -10,7 +10,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // These tests drive the relay the way a compromised sidecar would: every
@@ -107,6 +106,39 @@ func TestRelay_RecordWritesOnlyAPullRequestCreatesDeliverable(t *testing.T) {
 	}
 }
 
+// TestRelay_PRCreateDeliverableIsWhatACreateOpens: a relayed pull request
+// create's deliverable is written only as a draft or open, the states a create
+// opens one in, and under an id the store mints, whatever id the sender chose.
+func TestRelay_PRCreateDeliverableIsWhatACreateOpens(t *testing.T) {
+	stores, info := newCaptureStores(t, true)
+	ctx := context.Background()
+	rt := newRelayRuntime(directDispatchConn{srv: NewRelayServer(stores, info, nil)}, info, nil)
+	create := func(nodeID string) (domain.Deliverable, *domain.ExternalAction) {
+		a := domain.NewPullRequestDeliverable("octo/repo", 7, nodeID, "feat", "main", "https://github.com/octo/repo/pull/7", "Title", "Body", true)
+		act := &domain.ExternalAction{Provider: domain.ProviderGitHub, Action: domain.ActionPRCreated, Target: "octo/repo#7", ToState: a.State, Credential: domain.CredentialGitHubApp, NodeID: nodeID}
+		return a, act
+	}
+
+	merged, act := create("PR_kw7")
+	merged.State = domain.DeliverableStatePRMerged
+	rt.Record(ctx, &merged, act, domain.EntityContainer{}, domain.GitHubIdentity{})
+	if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 0 {
+		t.Fatalf("deliverables after a merged create = %+v, want none", arts)
+	}
+
+	const chosen = "33333333-3333-3333-3333-333333333333"
+	draft, act := create("PR_kw7")
+	draft.ID = chosen
+	rt.Record(ctx, &draft, act, domain.EntityContainer{}, domain.GitHubIdentity{})
+	arts := listConversationDeliverables(t, stores, info.ConversationID)
+	if len(arts) != 1 || arts[0].ID == chosen || arts[0].State != domain.DeliverableStatePRDraft {
+		t.Errorf("deliverables = %+v, want one draft under an id the store minted", arts)
+	}
+	if acts := listExternalActions(t, stores); len(acts) != 2 {
+		t.Errorf("ledger rows = %+v, want both pr_created rows", acts)
+	}
+}
+
 // TestRelay_ReviewWritesByIDAreScopedToTheRun: a relayed draft rewrite or
 // state move naming another conversation's deliverable id is refused with an
 // error naming the id, and the row is left as it was.
@@ -198,12 +230,10 @@ func TestRelay_PRCreateNamingARecordedPullRequestLeavesItsRow(t *testing.T) {
 	}
 }
 
-// TestRelay_IssueKeyIsNotFollowedInMultiMode: in multi mode a relayed Jira
-// action or read touch names an issue by an id and a key the sidecar chose, so
-// the entity the id names is linked as stored and never renamed onto the
-// relayed key.
-func TestRelay_IssueKeyIsNotFollowedInMultiMode(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeMulti)
+// TestRelay_IssueKeyIsNotFollowed: a relayed Jira action or read touch names
+// an issue by an id and a key the sidecar chose, so the entity the id names is
+// linked as stored and never renamed onto the relayed key.
+func TestRelay_IssueKeyIsNotFollowed(t *testing.T) {
 	stores, info := newCaptureStores(t, true)
 	ctx := context.Background()
 	site := testScope("jira")

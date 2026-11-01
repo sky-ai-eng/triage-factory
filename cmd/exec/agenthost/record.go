@@ -103,7 +103,8 @@ func keyReviewToConversation(a *domain.Deliverable, info ConversationInfo) error
 }
 
 // errFunnelDeliverable refuses a deliverable the recording funnel does not
-// write: anything but a GitHub pull request keyed on its node id.
+// write: anything but a GitHub pull request, keyed on its node id, in the
+// state a create opens one in.
 var errFunnelDeliverable = errors.New("agenthost: the recording funnel records only a pull request create's deliverable")
 
 // keyFunnelDeliverable admits a, a deliverable the recording funnel is to
@@ -116,16 +117,23 @@ var errFunnelDeliverable = errors.New("agenthost: the recording funnel records o
 // draft is recorded through UpsertDeliverable and moved through its
 // state-guarded writes, never through the funnel, so a review arriving here
 // was not built by TF: refusing it keeps a relayed record from writing a
-// draft whose state and review id the sender chose. Anything but a GitHub
-// pull request keyed on its node id is refused with errFunnelDeliverable.
+// draft whose state and review id the sender chose. A create opens a pull
+// request as a draft or open, so a deliverable in any other state was not
+// built by one; and the row's id is the store's to mint, as it is for every
+// other insert. Anything but a GitHub pull request keyed on its node id, as a
+// draft or open, is refused with errFunnelDeliverable.
 func keyFunnelDeliverable(a *domain.Deliverable) error {
 	if a.Kind != domain.DeliverableKindPullRequest {
+		return errFunnelDeliverable
+	}
+	if a.State != domain.DeliverableStatePRDraft && a.State != domain.DeliverableStatePROpen {
 		return errFunnelDeliverable
 	}
 	nodeID, ok := domain.DeliverablePullRequestNodeID(*a)
 	if !ok {
 		return errFunnelDeliverable
 	}
+	a.ID = ""
 	a.DedupKey, a.NodeID = domain.PullRequestDedupKey(nodeID), nodeID
 	return nil
 }
@@ -244,22 +252,24 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 	// the span makes it a trace with an error status and the drop counter
 	// beside it makes it a number, which is how "the PR was opened but TF has
 	// no deliverable for it" stops being invisible and starts being measurable.
-	// The deliverable kind is a closed domain vocabulary; its target is a repo
-	// path, and stays out.
+	// The deliverable kind is set on the span once the deliverable is
+	// admitted (keyFunnelDeliverable), which keeps it in the closed domain
+	// vocabulary; its target is a repo path, and stays out.
 	ctx, span := tracer.Start(ctx, "artifact.record",
 		trace.WithAttributes(telemetry.ConversationID(info.ConversationID), telemetry.OrgID(info.OrgID)))
 	defer span.End()
 	if a != nil {
-		span.SetAttributes(telemetry.Op(a.Kind))
 		if kerr := keyFunnelDeliverable(a); kerr != nil {
 			telemetry.RecordSpanError(span, kerr)
 			recordWriteDrop(ctx, recordDropOp(a, nil), kerr)
 			agenthostLog.Warn("refusing a deliverable that is not a pull request create's; recording the action without it",
-				"conversation", info.ConversationID, "kind", a.Kind, "target", a.Target)
+				"conversation", info.ConversationID, "kind", a.Kind, "state", a.State, "target", a.Target)
 			if act == nil {
 				return
 			}
 			a = nil
+		} else {
+			span.SetAttributes(telemetry.Op(a.Kind))
 		}
 	}
 
@@ -341,6 +351,10 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 	// withWriteInfo's tx has settled. A create attributes only a pull request
 	// whose deliverable the run holds: one that found the row recorded by
 	// another writer did not open it.
+	//
+	// TODO(TFAC-1302): a relayed create is the sidecar's word, and nothing on
+	// this side can confirm the run opened the pull request it names, so one
+	// naming a pull request no row holds yet is attributed to this run.
 	if written && runHoldsDeliverable(ctx, stores, info, *a) {
 		stampPRAttribution(ctx, stores, info, a)
 	}
@@ -406,9 +420,10 @@ type entityCoordinate struct {
 //
 // A coordinate carrying a provider id resolves the entity carrying it,
 // whatever key it is stored under: an agent touching a moved Jira issue by its
-// old key resolves the issue's existing entity, never a second one. In local
-// mode the coordinate's key is what the provider answered with at the time of
-// the write or read, so the entity is renamed onto it (followsProviderKey). A
+// old key resolves the issue's existing entity, never a second one. When the
+// coordinate was not relayed, its key is what the provider answered with at
+// the time of the write or read, so the entity is renamed onto it
+// (followsProviderKey). A
 // GitHub coordinate is resolved by its ids instead (resolveGitHubEntity).
 //
 // The Slack case finds or mints a "message" entity for the thread target
@@ -451,23 +466,23 @@ func resolveEntityInfo(ctx context.Context, stores db.Stores, info ConversationI
 	// The poll cycle (or, for Slack, the ingest pipeline) seeds the title from
 	// context; neither an ExternalAction nor an addressed read carries one.
 	// url rides through when present.
-	return entityscope.Resolve(ctx, stores, info.OrgID, ref, c.container, kind, c.url, followsProviderKey())
+	return entityscope.Resolve(ctx, stores, info.OrgID, ref, c.container, kind, c.url, followsProviderKey(info))
 }
 
 // followsProviderKey reports whether a coordinate's key is taken as the key
 // its provider answers with now, so an entity found by the coordinate's id
-// under another key is renamed onto it (entityscope.Resolve with follow). Only
-// in local mode. In multi mode the coordinate was relayed by the run's
-// sidecar, which chose its key and its id alike, so following it would let a
-// relayed write rename another issue's entity onto a key of its choosing. The
-// entity is still resolved by its id and linked as stored; the poll cycle
-// renames it when the provider's own answer says its key moved, for an issue
-// in a tracked Jira project or Linear team.
+// under another key is renamed onto it (entityscope.Resolve with follow): only
+// when the coordinate was not relayed (info.Relayed). A relayed coordinate
+// came from the run's sidecar, which chose its key and its id alike, so
+// following it would let a relayed write rename another issue's entity onto a
+// key of its choosing. The entity is still resolved by its id and linked as
+// stored; the poll cycle renames it when the provider's own answer says its
+// key moved, for an issue in a tracked Jira project or Linear team.
 //
-// TODO(TFAC-1297): an issue outside every tracked set is never polled, so in
-// multi mode its entity keeps the key it had when TF first saw it.
-func followsProviderKey() bool {
-	return runmode.Current() != runmode.ModeMulti
+// TODO(TFAC-1297): an issue outside every tracked set is never polled, so an
+// entity only relayed writes reach keeps the key it had when TF first saw it.
+func followsProviderKey(info ConversationInfo) bool {
+	return !info.Relayed
 }
 
 // resolveGitHubEntity maps a GitHub coordinate to the entity of the pull
@@ -759,8 +774,8 @@ func deliverableGitHubIdentity(a domain.Deliverable, github domain.GitHubIdentit
 // identified by github, the identity its observer read. A Jira or Linear
 // action's object key names the issue it is about, a comment's key the issue
 // the comment is on, so the coordinate is identified by the site and issue id
-// or the UUID the key carries (domain.ObjectKeyEntityIdentity). In multi mode
-// the key was relayed, so the entity it names is linked as stored and never
+// or the UUID the key carries (domain.ObjectKeyEntityIdentity). A relayed key
+// is the sidecar's, so the entity it names is linked as stored and never
 // renamed onto the act's target (followsProviderKey). A failure another attempt can
 // get past is retried like the write (withRecordRetry); resolving only finds,
 // creates or renames toward what the provider answered, so a second attempt

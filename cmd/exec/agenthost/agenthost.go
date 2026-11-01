@@ -96,6 +96,11 @@ type ConversationInfo struct {
 	// everything this run publishes then carries no link rather than one
 	// nobody else can open.
 	RunURL string `json:"run_url,omitempty"`
+	// Relayed is set on the info a RelayServer applies a sidecar's ops under
+	// (NewRelayServer): every key, id and coordinate those ops carry was
+	// chosen by the run's sidecar rather than read from a provider by this
+	// process. Never on the wire.
+	Relayed bool `json:"-"`
 }
 
 // RunURLEnvVar carries ConversationInfo.RunURL to a host-CLI invocation, which
