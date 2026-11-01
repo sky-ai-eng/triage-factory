@@ -8,7 +8,7 @@ import (
 
 // The version just before the migration that drops a held close's blueprint
 // run.
-const taskCloseHoldByEventPrior = 202610310010
+const taskCloseHoldByEventPrior = 202611010001
 
 // TestMigrate_TaskCloseHoldByEvent pins what the migration leaves: the
 // blueprint run column and its pairing triggers are gone, and a task that
