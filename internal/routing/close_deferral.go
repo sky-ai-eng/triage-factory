@@ -355,12 +355,15 @@ func (r *Router) settleCloseDeferral(ctx context.Context, d domain.TaskCloseDefe
 // close writes. A relation that no longer admits it (CI failing again, a
 // reopened pull request) drops the deferral without closing.
 //
-// runCompleted narrows that to terminating events. A completed run has
-// finished its work, so a task still open after it is waiting on a person to
-// act on a deliverable. That still works while the entity is live, so a
-// typed deferral is dropped. On a closed entity nothing can act on the task
-// any more, so the terminating close still applies, with the teardown the
-// undeferred close would have run.
+// runCompleted narrows that. A completed run has finished its work, so a
+// task still open after it is waiting on a person to act on a deliverable,
+// and the run's own ending closes the task once that person has (the
+// terminal-on-last close). A typed deferral is dropped: its entity is live,
+// so the task is an ordinary open task. A terminating deferral is kept while
+// any deliverable is unresolved, because the task stays open on a closed
+// entity and the deferral is what says why: a Jira issue the run moved to
+// done leaves the run's draft PR, a different entity, waiting for approval.
+// Once nothing is unresolved, the terminating close applies.
 func (r *Router) applyCloseDeferral(ctx context.Context, d domain.TaskCloseDeferral, runCompleted bool) (closed bool, err error) {
 	evt, err := r.events.GetSystem(ctx, d.OrgID, d.EventID)
 	if err != nil {
@@ -369,8 +372,13 @@ func (r *Router) applyCloseDeferral(ctx context.Context, d domain.TaskCloseDefer
 	if evt == nil {
 		return false, fmt.Errorf("closing event %s not found", d.EventID)
 	}
-	if runCompleted && terminatingRelationFor(evt.EventType) == nil {
-		return false, r.clearCloseDeferral(ctx, d)
+	if runCompleted {
+		if terminatingRelationFor(evt.EventType) == nil {
+			return false, r.clearCloseDeferral(ctx, d)
+		}
+		if r.spawner.TaskHasUnresolvedDeliverablesSystem(ctx, d.OrgID, d.TaskID) {
+			return false, nil
+		}
 	}
 	task, err := r.tasks.GetSystem(ctx, d.OrgID, d.TaskID)
 	if err != nil {

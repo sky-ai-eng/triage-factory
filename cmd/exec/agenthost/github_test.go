@@ -70,9 +70,9 @@ func (f fakeGitHubResolver) TokenFor(_ context.Context, _, _ string) (githubapp.
 }
 
 func (f fakeGitHubResolver) BaseURLFor(_ context.Context, _ string) (string, error) {
-	// Reached by UpsertDeliverable when it re-anchors a branch deliverable's URL to the
-	// org host; returns the configured base so a branch-capture test can assert
-	// the rewrite.
+	// Reached wherever the host builds a link on the org's GitHub (an action's
+	// anchor link, an auto-posted review) and by the pre-push hook's capture
+	// gate; returns the configured base so a test can assert the host.
 	return f.baseURL, nil
 }
 

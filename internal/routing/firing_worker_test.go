@@ -40,6 +40,9 @@ type stubDelegator struct {
 	// tornDown is every task id handed to TeardownTaskDeliverablesSystem, so a
 	// test can assert a close reached the deliverable pass.
 	tornDown []string
+	// unresolved is the tasks TaskHasUnresolvedDeliverablesSystem reports as
+	// holding a deliverable a person has not resolved.
+	unresolved map[string]bool
 }
 
 var errStubDelegate = errors.New("stub: delegation refused")
@@ -139,6 +142,23 @@ func (s *stubDelegator) TeardownTaskDeliverablesSystem(_ context.Context, orgID,
 	s.mu.Lock()
 	s.tornDown = append(s.tornDown, taskID)
 	s.mu.Unlock()
+}
+
+func (s *stubDelegator) TaskHasUnresolvedDeliverablesSystem(_ context.Context, _, taskID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.unresolved[taskID]
+}
+
+// setUnresolved sets whether TaskHasUnresolvedDeliverablesSystem reports taskID
+// as holding an unresolved deliverable.
+func (s *stubDelegator) setUnresolved(taskID string, unresolved bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.unresolved == nil {
+		s.unresolved = map[string]bool{}
+	}
+	s.unresolved[taskID] = unresolved
 }
 
 // tornDownCopy is the task ids TeardownTaskDeliverablesSystem was called with.

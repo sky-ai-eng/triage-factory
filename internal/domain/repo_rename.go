@@ -182,29 +182,6 @@ func identityKey(r RepoRef) (repoIdentityKey, bool) {
 	return repoIdentityKey{source, r.Host, r.ExternalID}, true
 }
 
-// RewriteRepoSlugPrefix rewrites a leading repository slug in a slug-prefixed
-// identifier — an entity's source_id ("owner/repo#18"), a deliverable target
-// ("owner/repo" or "owner/repo#18"). Reports false when s does not start with
-// oldSlug at a boundary, in which case s is returned unchanged.
-//
-// The boundary is what keeps "octo/api" from matching "octo/api-gateway#3".
-// A slug ends at the end of the string or at the '#' that introduces a PR
-// number, and never mid-token, so a prefix that happens to spell another
-// repository's name is not a match.
-func RewriteRepoSlugPrefix(s, oldSlug, newSlug string) (string, bool) {
-	if oldSlug == "" || len(s) < len(oldSlug) {
-		return s, false
-	}
-	if !strings.EqualFold(s[:len(oldSlug)], oldSlug) {
-		return s, false
-	}
-	rest := s[len(oldSlug):]
-	if rest != "" && rest[0] != '#' {
-		return s, false
-	}
-	return newSlug + rest, true
-}
-
 // RewriteRepoURL rewrites the repository slug inside a link on host, a
 // GitHubHost value: "<host>/<owner>/<repo>[/...]", where host carries the
 // scheme, the authority and any context path. The slug is the two path

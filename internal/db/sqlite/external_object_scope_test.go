@@ -10,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -110,6 +111,49 @@ func sqliteExternalActionFixture(t *testing.T) dbtest.ExternalActionNodeIDFixtur
 			}
 			return id.String, id.Valid
 		},
+	}
+}
+
+// TestArtifacts_SQLite_SameSecondRowsBreakInWriteOrder pins the tie-break
+// SQLite needs and Postgres does not: occurred_at is whole seconds here, so two
+// rows on one object in one second are told apart by write order, never by
+// their random ids. The edit is written second under the smaller id, and it
+// is both the artifact's last action and the first row of its action list.
+func TestArtifacts_SQLite_SameSecondRowsBreakInWriteOrder(t *testing.T) {
+	ctx := t.Context()
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	conv := seedDeliverableConversationWithID(t, conn, uuid.NewString())
+	for _, row := range []struct{ id, action string }{
+		{"ffffffff-0000-4000-8000-000000000000", domain.ActionCommentPosted},
+		{"00000000-0000-4000-8000-000000000000", domain.ActionCommentEdited},
+	} {
+		if err := stores.ExternalActions.Record(ctx, runmode.LocalDefaultOrgID, domain.ExternalAction{
+			ID: row.id, TeamID: runmode.LocalDefaultTeamID, ConversationID: conv,
+			Provider: domain.ProviderGitHub, Scope: dbtest.TestGitHubHost, Action: row.action, Target: "octo/api#7",
+			Credential: domain.CredentialGitHubApp, PerformedBy: domain.PerformedByAgent,
+			ObjectKind: domain.ObjectKindComment, ObjectKey: domain.GitHubCommentKey(domain.GitHubIssueComment, 5),
+		}); err != nil {
+			t.Fatalf("record %s: %v", row.action, err)
+		}
+	}
+	if _, err := conn.Exec(`UPDATE external_actions SET occurred_at = '2026-10-01 12:00:00'`); err != nil {
+		t.Fatalf("put both rows in one second: %v", err)
+	}
+
+	artifacts, _, err := stores.Artifacts.ListByConversation(ctx, runmode.LocalDefaultOrgID, conv, db.Unwindowed)
+	if err != nil || len(artifacts) != 1 {
+		t.Fatalf("ListByConversation = %+v, %v; want one artifact", artifacts, err)
+	}
+	if artifacts[0].LastAction != domain.ActionCommentEdited {
+		t.Errorf("last action = %q, want the later write %q", artifacts[0].LastAction, domain.ActionCommentEdited)
+	}
+	rows, _, err := stores.ExternalActions.ListByConversation(ctx, runmode.LocalDefaultOrgID, conv, domain.ExternalActionListOpts{})
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("actions = %+v, %v; want two rows", rows, err)
+	}
+	if rows[0].Action != domain.ActionCommentEdited {
+		t.Errorf("newest action = %q, want the later write %q", rows[0].Action, domain.ActionCommentEdited)
 	}
 }
 

@@ -28,14 +28,14 @@ var _ db.ArtifactStore = (*artifactStore)(nil)
 // pgArtifactRowFilter is what every artifact read adds to its own WHERE: the
 // rows of an artifact performer that name an object, of an action that can
 // name one.
-var pgArtifactRowFilter = ` AND ` + db.ArtifactPerformerSQL() + ` AND ea.action NOT IN (` + db.ArtifactExcludedActionsSQL() +
-	`) AND (` + pgActionObjectIDSQL + `) IS NOT NULL`
+var pgArtifactRowFilter = ` AND ` + db.ArtifactRowSQL() + ` AND (` + pgActionObjectIDSQL + `) IS NOT NULL`
 
 // pgArtifactCTEs opens the grouped read over the rows where selects: scoped
 // holds the rows with their object id, and grouped ranks each object's rows.
-// Each group's latest row (greatest occurred_at, id) supplies the action,
-// target and url; the window aggregates supply the count and the earliest
-// occurred_at.
+// Each group's latest row (greatest occurred_at, id) supplies the action and
+// the target; the window aggregates supply the count, the earliest
+// occurred_at, and for the display rule (pgArtifactColumns) the latest url
+// any row carries and the entity of the latest row that names one.
 func pgArtifactCTEs(where string) string {
 	return `
 	WITH scoped AS (
@@ -49,25 +49,34 @@ func pgArtifactCTEs(where string) string {
 		SELECT s.*,
 		       ROW_NUMBER() OVER (PARTITION BY s.object_id ORDER BY s.occurred_at DESC, s.id DESC) AS rn,
 		       COUNT(*) OVER (PARTITION BY s.object_id) AS action_count,
-		       MIN(s.occurred_at) OVER (PARTITION BY s.object_id) AS first_at
+		       MIN(s.occurred_at) OVER (PARTITION BY s.object_id) AS first_at,
+		       FIRST_VALUE(s.url) OVER (PARTITION BY s.object_id
+		           ORDER BY s.url = '', s.occurred_at DESC, s.id DESC) AS display_url,
+		       FIRST_VALUE(s.entity_id) OVER (PARTITION BY s.object_id
+		           ORDER BY s.entity_id IS NULL, s.occurred_at DESC, s.id DESC) AS display_entity_id
 		  FROM scoped s
 	)`
 }
 
 // pgArtifactColumns is what scanPgArtifacts reads, off the latest row g.
-// The entity's key and url win over the row's; the row's stand in when the
-// entity is not readable or has no url yet.
+// The entity's key wins over the row's target, and for a pull request or an
+// issue, which the entity is, its url wins over the rows'; the row's values
+// stand in when the entity is not readable or has no url yet.
 const pgArtifactColumns = `g.object_id, g.object_kind, g.provider, g.scope,
 	       COALESCE(g.entity_id::text, ''), COALESCE(g.repository_id::text, ''), COALESCE(g.object_key, ''),
-	       COALESCE(e.source_id, g.target), COALESCE(NULLIF(e.url, ''), g.url),
+	       COALESCE(e.source_id, g.target),
+	       CASE WHEN g.object_kind IN ('pull_request', 'issue') THEN COALESCE(NULLIF(e.url, ''), g.display_url)
+	            ELSE g.display_url END,
 	       g.action, g.action_count, g.first_at, g.occurred_at`
 
-// pgArtifactEntityJoin joins the entity only for a kind identified by
-// entity_id (the kinds and the split on provider are pgActionObjectIDSQL's
-// entity arms).
+// pgArtifactEntityJoin joins the entity the group's rows name, for a kind
+// that is one or lives on one: a pull request or an issue, and a comment,
+// review or message, whose rows name the entity it is on. A comment's edit
+// and reaction rows name only the repository, so the entity is the latest
+// row's that names one.
 const pgArtifactEntityJoin = `
-	  LEFT JOIN entities e ON e.id = g.entity_id AND e.org_id = g.org_id
-	       AND (g.object_kind = 'pull_request' OR (g.object_kind = 'issue' AND g.provider = 'github'))`
+	  LEFT JOIN entities e ON e.id = g.display_entity_id AND e.org_id = g.org_id
+	       AND g.object_kind IN ('pull_request', 'issue', 'comment', 'review', 'message')`
 
 // pgArtifactSelect is the grouped read over the rows where selects, ending
 // in a WHERE the caller may extend with ORDER BY and a window.

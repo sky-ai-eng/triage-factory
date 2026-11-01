@@ -240,6 +240,36 @@ func (s *externalActionStore) PresentPostedCommentKeysSystem(ctx context.Context
 	return present, rows.Err()
 }
 
+// LatestByConversations reads each conversation's newest occurred_at (see the
+// interface) with one grouped MAX, which the (org_id, conversation_id,
+// occurred_at) index answers. The ids go through pgUUIDArray, as the artifact
+// store's batch reads do.
+func (s *externalActionStore) LatestByConversations(ctx context.Context, orgID string, conversationIDs []string) (map[string]time.Time, error) {
+	latest := make(map[string]time.Time, len(conversationIDs))
+	if len(conversationIDs) == 0 {
+		return latest, nil
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT conversation_id::text, MAX(occurred_at)
+		  FROM external_actions
+		 WHERE org_id = $1 AND conversation_id = ANY($2)
+		 GROUP BY conversation_id
+	`, orgID, pgUUIDArray(conversationIDs))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var conversationID string
+		var at time.Time
+		if err := rows.Scan(&conversationID, &at); err != nil {
+			return nil, err
+		}
+		latest[conversationID] = at
+	}
+	return latest, rows.Err()
+}
+
 // ListAgentActionsForBlueprintRunSystem is the close phase's read of a run's
 // own actions (see the interface), on the admin pool: the router holds no
 // claims.
@@ -301,7 +331,7 @@ func appendPgExternalActionPredicates(query string, args []any, opts domain.Exte
 	}
 	if opts.ObjectID != "" {
 		args = append(args, opts.ObjectID)
-		query += fmt.Sprintf(" AND (%s) = $%d", pgActionObjectIDSQL, len(args))
+		query += fmt.Sprintf(" AND (%s) = $%d AND %s", pgActionObjectIDSQL, len(args), db.ArtifactRowSQL())
 	}
 	if opts.Refused {
 		args = append(args, domain.RefusalOrFailureActions())

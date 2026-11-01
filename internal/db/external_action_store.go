@@ -150,6 +150,15 @@ type ExternalActionStore interface {
 	// whichever team's run posted the comment.
 	PresentPostedCommentKeysSystem(ctx context.Context, orgID, scope string, keys []string) (map[string]bool, error)
 
+	// LatestByConversations returns, for each of conversationIDs that has any
+	// row, the occurred_at of its newest row, whoever performed it and
+	// whatever its action: the moment the conversation last acted on, or was
+	// refused by, an outside system, which a reader holding a conversation
+	// compares to tell that its actions changed. A conversation with no row
+	// has no entry, and an empty conversationIDs returns an empty map without
+	// touching the database. App pool, under the caller's claims.
+	LatestByConversations(ctx context.Context, orgID string, conversationIDs []string) (map[string]time.Time, error)
+
 	// ListAgentActionsForBlueprintRunSystem returns orgID's rows of one
 	// action that a run's agent performed (performed_by 'agent') in any of
 	// blueprintRunID's step conversations, newest first: by occurred_at, and

@@ -14,7 +14,7 @@ func TestActionObjectKind_ClassifiesEveryAction(t *testing.T) {
 	for _, action := range ExternalActionTypes() {
 		kind := ActionObjectKind(action)
 		switch {
-		case IsRefusalOrFailure(action) || slices.Contains(none, action):
+		case slices.Contains(RefusalOrFailureActions(), action) || slices.Contains(none, action):
 			if kind != "" {
 				t.Errorf("%s names object kind %q, want none", action, kind)
 			}

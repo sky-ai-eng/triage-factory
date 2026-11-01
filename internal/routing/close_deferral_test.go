@@ -611,15 +611,30 @@ func concludeRun(t *testing.T, database *sql.DB, runID, convID string) {
 	}
 }
 
-// TestCloseDeferralSweep_CompletedRunAppliesATerminatingClose pins the
-// terminating arm of a completed run: the run merged its pull request and
-// completed, and its task is still open (a deliverable waiting on a person).
-// The entity is closed, so nothing can act on that deliverable any more: the
-// task closes with entity_closed and the ordinary teardown.
-func TestCloseDeferralSweep_CompletedRunAppliesATerminatingClose(t *testing.T) {
+// TestCloseDeferralSweep_CompletedRunsTerminatingCloseWaitsOnDeliverables pins
+// the terminating arm of a completed run: the run closed its entity and
+// completed with a deliverable still waiting on a person, which can sit on
+// another entity (the draft PR of a run that moved its Jira issue to done).
+// The held close waits, tearing nothing down, and applies with entity_closed
+// and the ordinary teardown once nothing is unresolved.
+func TestCloseDeferralSweep_CompletedRunsTerminatingCloseWaitsOnDeliverables(t *testing.T) {
 	f := newDeferredMergeFixture(t, "owner/repo#merged-then-completed")
 	concludeRun(t, f.database, f.runID, f.convID)
+	f.sp.setUnresolved(f.taskID, true)
 
+	f.r.sweepCloseDeferrals(t.Context())
+
+	if status, _, _ := taskRow(t, f.database, f.taskID); status == "done" {
+		t.Fatal("the sweep closed a task whose deliverable still waits on a person")
+	}
+	if eventID, _ := taskDeferral(t, f.database, f.taskID); eventID != f.eventID {
+		t.Fatalf("deferral = %q while a deliverable is unresolved, want %s kept", eventID, f.eventID)
+	}
+	if got := f.sp.tornDownCopy(); len(got) != 0 {
+		t.Fatalf("teardowns = %v while a deliverable is unresolved, want none", got)
+	}
+
+	f.sp.setUnresolved(f.taskID, false)
 	f.r.sweepCloseDeferrals(t.Context())
 
 	status, reason, eventType := taskRow(t, f.database, f.taskID)

@@ -774,15 +774,14 @@ func (c *Client) DismissReview(ctx context.Context, owner, repo string, number, 
 }
 
 // CommentRef is a comment a write made or acted on, as far as GitHub's
-// response named it: which numbering it is in, its number, its GraphQL node id,
-// and its page link. The host-side deliverable recorder (cmd/exec/agenthost) keys
-// the comment's deliverable on the space and the number, and stores the node id so
-// a later GraphQL edit or delete naming only that id finds the row. A field the
-// response did not carry is zero; a delete's response carries none.
+// response named it: which numbering it is in, its number, and its page link.
+// The host-side recorder (cmd/exec/agenthost) names the comment in the ledger
+// by the space and the number (domain.GitHubCommentKey), since the two
+// numberings overlap. A field the response did not carry is zero; a delete's
+// response carries none.
 type CommentRef struct {
 	Space   domain.GitHubCommentSpace
 	ID      int
-	NodeID  string
 	HTMLURL string
 }
 
@@ -793,7 +792,7 @@ func commentRefFrom(space domain.GitHubCommentSpace, data []byte) (CommentRef, e
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return CommentRef{}, err
 	}
-	return CommentRef{Space: space, ID: intVal(raw, "id"), NodeID: strVal(raw, "node_id"), HTMLURL: strVal(raw, "html_url")}, nil
+	return CommentRef{Space: space, ID: intVal(raw, "id"), HTMLURL: strVal(raw, "html_url")}, nil
 }
 
 // AddComment adds a top-level issue comment to a PR and returns its id.
@@ -864,9 +863,8 @@ func (c *Client) UpdateComment(ctx context.Context, owner, repo string, commentI
 
 // UpdateCommentScoped is UpdateComment that also returns the comment it
 // updated: a conversation comment, or a review comment reached through the
-// pulls/comments fallback, with the node id and link from the edited object.
-// The host-side deliverable recorder keys the comment's row on which of the two it
-// was. The ref is meaningful only when err is nil; a body that does not parse
+// pulls/comments fallback, with the link from the edited object. The
+// host-side recorder names the comment by which of the two it was. The ref is meaningful only when err is nil; a body that does not parse
 // still leaves its Space and ID set, since the edit landed.
 func (c *Client) UpdateCommentScoped(ctx context.Context, owner, repo string, commentID int, body string) (CommentRef, error) {
 	payload := map[string]any{"body": body}

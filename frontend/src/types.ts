@@ -321,6 +321,11 @@ export interface Conversation {
   // strip states kind by kind. See ConversationArtifact.
   artifact_count?: number
   artifact_counts?: Partial<Record<ObjectKind, number>>
+  // last_action_at is when the conversation last acted on an outside system,
+  // or was refused: its newest ledger row, whoever performed it. null when it
+  // has none. It moves when the run acts again on an object it already
+  // changed, which leaves the counts above where they were.
+  last_action_at?: string | null
   // actor_agent_id / actor_agent_name identify the bot that executed this
   // conversation (conversations.actor_agent_id), denormalized from
   // agents.display_name via a JOIN on the conversation read projections. The card

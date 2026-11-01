@@ -5,8 +5,9 @@ package domain
 // reports (pushed the fix CI then passed on, merged the pull request, moved
 // the issue to done), and closing the task under it would stop that run
 // before it finishes. The router's deferral sweep applies the close once the
-// run ends, or drops it when the run completed and its own ending closes the
-// task.
+// run ends. When the run completed, its own ending closes the task once a
+// person resolves the deliverables it left: a typed close is dropped, and a
+// terminating one waits while any deliverable is unresolved.
 //
 // It is the pair of tasks columns close_deferred_event_id and
 // close_deferred_blueprint_run_id, which are both set or both NULL.

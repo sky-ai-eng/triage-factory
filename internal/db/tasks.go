@@ -426,7 +426,8 @@ type TaskStore interface {
 	// mints on the entity it closed (domain.TaskMayRideClosedEntity) is
 	// excluded: it is on a closed entity by design, and so is a task holding
 	// a deferred close (domain.TaskCloseDeferral), which stays open on the
-	// entity its own run closed until that run ends. Ordered by created_at
+	// entity its own run closed until that run ends, and past it while one of
+	// the task's deliverables waits on a person. Ordered by created_at
 	// then id so the oldest violation is reported first. Read-only, org-bound
 	// by argument on the admin pool: the checker is a background job with no
 	// JWT claims.

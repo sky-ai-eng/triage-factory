@@ -117,7 +117,7 @@ type artifactActivityListRequest struct {
 func resolveArtifactActivityFilters(v *httpx.Validation, req artifactActivityListRequest) db.ArtifactListOpts {
 	opts := db.ArtifactListOpts{
 		Provider:   resolveActivityProvider(v, req.Provider),
-		ObjectKind: strings.TrimSpace(req.ObjectKind),
+		ObjectKind: req.ObjectKind,
 	}
 	if opts.ObjectKind != "" && !slices.Contains(domain.ObjectKinds(), opts.ObjectKind) {
 		v.Invalid("object_kind", "must be one of: "+strings.Join(domain.ObjectKinds(), ", "))
@@ -127,13 +127,13 @@ func resolveArtifactActivityFilters(v *httpx.Validation, req artifactActivityLis
 }
 
 // resolveActivityProvider validates both feeds' provider filter against
-// domain.Providers.
+// domain.Providers. Like every filter here, a value is taken as sent: one with
+// surrounding whitespace is no provider and is refused.
 func resolveActivityProvider(v *httpx.Validation, raw string) string {
-	provider := strings.TrimSpace(raw)
-	if provider != "" && !slices.Contains(domain.Providers(), provider) {
+	if raw != "" && !slices.Contains(domain.Providers(), raw) {
 		v.Invalid("provider", "must be one of: "+strings.Join(domain.Providers(), ", "))
 	}
-	return provider
+	return raw
 }
 
 // artifactKeys returns what a deliverable carries when it is the same object
@@ -273,16 +273,16 @@ func (h *usageHandler) handleUsageOrgArtifacts(w http.ResponseWriter, r *http.Re
 // open side is fine), mirroring parseUsageWindow.
 func resolveActivityWindow(v *httpx.Validation, since, until string) (time.Time, time.Time) {
 	var sinceT, untilT time.Time
-	if raw := strings.TrimSpace(since); raw != "" {
-		t, err := parseUsageTime(raw)
+	if since != "" {
+		t, err := parseUsageTime(since)
 		if err != nil {
 			v.Invalid("since", "must be RFC3339 or YYYY-MM-DD")
 		} else {
 			sinceT = t
 		}
 	}
-	if raw := strings.TrimSpace(until); raw != "" {
-		t, err := parseUsageTime(raw)
+	if until != "" {
+		t, err := parseUsageTime(until)
 		if err != nil {
 			v.Invalid("until", "must be RFC3339 or YYYY-MM-DD")
 		} else {
@@ -463,8 +463,8 @@ type actionActivityListRequest struct {
 func resolveActionActivityFilters(v *httpx.Validation, req actionActivityListRequest) domain.ExternalActionListOpts {
 	opts := domain.ExternalActionListOpts{
 		Provider:    resolveActivityProvider(v, req.Provider),
-		Action:      strings.TrimSpace(req.Action),
-		ActorUserID: strings.TrimSpace(req.Actor),
+		Action:      req.Action,
+		ActorUserID: req.Actor,
 	}
 	if opts.Action != "" && !slices.Contains(domain.ExternalActionTypes(), opts.Action) {
 		v.Invalid("action", "not a known action type")

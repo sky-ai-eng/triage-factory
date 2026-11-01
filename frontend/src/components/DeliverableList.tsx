@@ -24,12 +24,12 @@ import { DeliverableRow } from './DeliverableRow'
 // deliverable is work waiting on a person, and the objects a run changed are its
 // artifacts, which the Run page's rail lists (RunArtifacts).
 //
-// The row rendering itself lives in DeliverableRow.tsx, shared with the
-// bot-activity audit feed. pull_request / review rows open their approval
-// overlays (PendingPROverlay / ReviewOverlay) by deliverable id via
+// The row rendering itself lives in DeliverableRow.tsx, shared with the Run
+// page's Artifacts section. A row awaiting a decision opens its approval
+// overlay (PendingPROverlay / ReviewOverlay) by deliverable id via
 // onOpenApproval — those overlays are owned by RunDetail, so this list never
-// duplicates them. Every other kind (branch / issue /
-// comment), and any row when no handler is wired, just links out to `url`.
+// duplicates them. A resolved row, and any row when no handler is wired, just
+// links out to `url`.
 interface Props {
   conversationId: string
   onOpenApproval?: (kind: 'review' | 'pr', deliverableId: string) => void

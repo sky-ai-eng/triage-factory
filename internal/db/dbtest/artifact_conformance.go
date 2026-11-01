@@ -30,17 +30,20 @@ type ArtifactFixture struct {
 // ArtifactFactory builds a fresh fixture per subtest.
 type ArtifactFactory func(t *testing.T) ArtifactFixture
 
-// RunArtifactConformance covers db.ArtifactStore: a conversation's agent rows
-// that name an object, grouped per object, with the latest row's fields, the
-// row count and the first and last times; a second conversation's artifact
-// for the same object; the rows that never form one (a person's, TF's own, a
-// refusal, a catch-all, a kind with no identifying column); the
-// entity-backed display rule across a rename; the per-kind counts and the
-// existence check; the read grouped across conversations; the action list's
-// object and refusal filters, which read the same identity; paging totals
-// that count groups; the team and org reads, grouped by object across runs
-// with their run counts and teams, windowed and filtered by row; and the
-// deliverable reads that answer an artifact's match.
+// RunArtifactConformance covers db.ArtifactStore: a conversation's rows by
+// its agent, and by a person acting on its deliverables, that name an object,
+// grouped per object, with the latest row's fields, the row count and the
+// first and last times; a second conversation's artifact for the same object;
+// the rows that never form one (TF's own, a person's with no conversation, a
+// refusal, a catch-all, a kind with no identifying column); the display rule,
+// which follows the entity across a rename for the kinds that are or live on
+// one; the per-kind counts and the existence check; the ledger's newest row
+// per conversation; the read grouped across conversations; the action list's
+// object and refusal filters, which read the same identity and, for an
+// object, the same rows; paging totals that count groups; the team and org
+// reads, grouped by object across runs with their run counts and teams,
+// windowed and filtered by row; and the deliverable reads that answer an
+// artifact's match.
 func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -151,8 +154,9 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 		conv := s.f.NewConversation(t)
 		first := record(t, s, conv, branch(s, domain.ActionBranchPushed, "octo/old", TestGitHubHost+"/octo/old/tree/fix"), at(1))
 		latest := record(t, s, conv, branch(s, domain.ActionBranchPushed, "octo/api", TestGitHubHost+"/octo/api/tree/fix"), at(5))
-		// Two rows of one comment at the same instant: the greater id is the
-		// latest row.
+		// Two rows of one comment at the same instant, the edit written second
+		// and under the greater id, so it is the latest row in either
+		// dialect: Postgres breaks the tie on id, SQLite in write order.
 		lo, hi := uuid.NewString(), uuid.NewString()
 		if hi < lo {
 			lo, hi = hi, lo
@@ -187,7 +191,7 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 			t.Errorf("branch first/last = %v/%v, want %v/%v", b.FirstAt, b.LastAt, at(1), at(5))
 		}
 		if c.ObjectID != objectRef(t, edited) || c.ActionCount != 2 || c.LastAction != domain.ActionCommentEdited {
-			t.Errorf("comment = %+v, want object %q with 2 rows, last %q (the greater id at a tied instant)",
+			t.Errorf("comment = %+v, want object %q with 2 rows, last %q (the later row at a tied instant)",
 				c, objectID(t, edited), domain.ActionCommentEdited)
 		}
 		if !c.FirstAt.Equal(at(3)) || !c.LastAt.Equal(at(3)) {
@@ -325,6 +329,45 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 		}
 	})
 
+	t.Run("Kinds_on_an_entity_display_its_current_key_and_the_latest_url", func(t *testing.T) {
+		s := setup(t)
+		conv := s.f.NewConversation(t)
+		scope := TestScope("linear")
+		issue, _, err := s.f.Stores.Entities.FindOrCreateLinearSystem(ctx, s.f.OrgID, scope, "ENG-1", "uuid-art-1", "team-art", "An issue", "https://linear.app/t/issue/ENG-1")
+		if err != nil {
+			t.Fatalf("seed linear issue: %v", err)
+		}
+		record(t, s, conv, domain.ExternalAction{
+			Provider: domain.ProviderLinear, Scope: scope, Action: domain.ActionIssueTransitioned,
+			Target: "ENG-1", URL: "https://linear.app/t/issue/ENG-1", EntityID: issue.ID,
+			ObjectKind: domain.ObjectKindIssue, ObjectKey: domain.IssueObjectKey(domain.ProviderLinear, scope, "uuid-art-1"),
+		}, at(1))
+		if _, err := s.f.Stores.Entities.RenameSystem(ctx, s.f.OrgID, "linear", scope, "uuid-art-1", "ENG-2", "https://linear.app/t/issue/ENG-2"); err != nil {
+			t.Fatalf("rename linear issue: %v", err)
+		}
+		// A reaction to the run's comment: its row names the repository and no
+		// url.
+		posted := comment(77)
+		posted.EntityID, posted.URL = s.pr.ID, TestGitHubHost+"/octo/api/pull/7#issuecomment-77"
+		record(t, s, conv, posted, at(2))
+		reacted := comment(77)
+		reacted.Action, reacted.Target = domain.ActionReactionAdded, "octo/api"
+		record(t, s, conv, reacted, at(3))
+
+		got, _ := list(t, s, conv, db.Unwindowed)
+		if len(got) != 2 {
+			t.Fatalf("read %d artifacts, want 2: %+v", len(got), got)
+		}
+		c, i := got[0], got[1]
+		if c.Target != "octo/api#7" || c.URL != posted.URL || c.LastAction != domain.ActionReactionAdded {
+			t.Errorf("comment = (%q, %q, %q), want the pull request's key, the post's url and the reaction",
+				c.Target, c.URL, c.LastAction)
+		}
+		if i.Target != "ENG-2" || i.URL != "https://linear.app/t/issue/ENG-2" {
+			t.Errorf("issue display = (%q, %q), want the renamed key and url", i.Target, i.URL)
+		}
+	})
+
 	t.Run("An_entity_with_no_url_displays_the_latest_rows_url", func(t *testing.T) {
 		s := setup(t)
 		conv := s.f.NewConversation(t)
@@ -383,6 +426,30 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 		}
 	})
 
+	t.Run("The_ledgers_latest_row_per_conversation_counts_every_row", func(t *testing.T) {
+		s := setup(t)
+		one, two, none := s.f.NewConversation(t), s.f.NewConversation(t), s.f.NewConversation(t)
+		record(t, s, one, branch(s, domain.ActionBranchPushed, "octo/api", ""), at(1))
+		// A refusal and TF's own row form no artifact, and still move it.
+		record(t, s, one, domain.ExternalAction{
+			Provider: domain.ProviderGitHub, Scope: TestGitHubHost, Action: domain.ActionGitDenied, Target: "octo/api",
+		}, at(4))
+		closed := pullRequest(s, domain.ActionPRClosed)
+		closed.PerformedBy = domain.PerformedBySystem
+		record(t, s, two, closed, at(7))
+
+		latest, err := s.f.Stores.ExternalActions.LatestByConversations(ctx, s.f.OrgID, []string{one, two, none})
+		if err != nil {
+			t.Fatalf("LatestByConversations: %v", err)
+		}
+		if len(latest) != 2 || !latest[one].Equal(at(4)) || !latest[two].Equal(at(7)) {
+			t.Errorf("LatestByConversations = %v, want %s at %v and %s at %v", latest, one, at(4), two, at(7))
+		}
+		if empty, err := s.f.Stores.ExternalActions.LatestByConversations(ctx, s.f.OrgID, nil); err != nil || len(empty) != 0 {
+			t.Errorf("LatestByConversations(nil) = (%v, %v), want an empty map", empty, err)
+		}
+	})
+
 	t.Run("Grouped_across_conversations_one_artifact_per_object", func(t *testing.T) {
 		s := setup(t)
 		one, two, other := s.f.NewConversation(t), s.f.NewConversation(t), s.f.NewConversation(t)
@@ -418,6 +485,10 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 		conv := s.f.NewConversation(t)
 		push := record(t, s, conv, branch(s, domain.ActionBranchPushed, "octo/api", ""), at(1))
 		again := record(t, s, conv, branch(s, domain.ActionBranchPushed, "octo/api", ""), at(2))
+		// TF's own row on the branch, which the artifact does not count.
+		deleted := branch(s, domain.ActionBranchDeleted, "octo/api", "")
+		deleted.PerformedBy = domain.PerformedBySystem
+		record(t, s, conv, deleted, at(6))
 		record(t, s, conv, comment(1), at(3))
 		denied := record(t, s, conv, domain.ExternalAction{
 			Provider: domain.ProviderGitHub, Scope: TestGitHubHost, Action: domain.ActionGitDenied, Target: "octo/api",
@@ -439,7 +510,7 @@ func RunArtifactConformance(t *testing.T, mk ArtifactFactory) {
 			return out, total
 		}
 		if got, total := ids(t, domain.ExternalActionListOpts{ObjectID: objectID(t, push)}); !slices.Equal(got, []string{again.ID, push.ID}) || total != 2 {
-			t.Errorf("object filter = %v (total %d), want the branch's two rows newest first", got, total)
+			t.Errorf("object filter = %v (total %d), want the branch's two agent rows newest first, not TF's", got, total)
 		}
 		if got, total := ids(t, domain.ExternalActionListOpts{Refused: true}); !slices.Equal(got, []string{failed.ID, denied.ID}) || total != 2 {
 			t.Errorf("refusal filter = %v (total %d), want the two refused or failed rows", got, total)

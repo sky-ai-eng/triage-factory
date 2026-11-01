@@ -23,12 +23,20 @@ func ArtifactPerformers() []string {
 // It describes what the run did to the object, not the object's current
 // state. It is not stored.
 //
-// Target and URL are display values. For a kind identified by EntityID (a
-// pull request, a GitHub issue) they are the entity's current key and url,
-// which follow a rename, with the latest row's url standing in while the
-// entity has none. For every other kind they are the latest row's target and
-// its url, current_url when a rename has moved the object.
-// "Latest row" is the greatest (occurred_at, id) in the group.
+// Target and URL are display values, read so that they follow a rename:
+//   - Target is the current key of the entity the group's rows name, for a
+//     kind that is an entity (a pull request, an issue) or lives on one (a
+//     comment, a review, a message), taken from the latest row that names one:
+//     a comment's edit and reaction rows name only its repository. For every
+//     other kind, and when no row names an entity, it is the latest row's
+//     target.
+//   - URL is the entity's url for a pull request or an issue. For every other
+//     kind, and while the entity has none, it is the latest url any row in the
+//     group carries (current_url when a rename has moved the object), since a
+//     reaction's row carries none.
+//
+// "Latest row" is the row with the greatest occurred_at. SQLite, whose
+// occurred_at is whole seconds, breaks a tie in write order.
 type Artifact struct {
 	ObjectID   ObjectRef
 	ObjectKind string

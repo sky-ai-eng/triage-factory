@@ -580,7 +580,10 @@ type ExternalActionListOpts struct {
 	Provider    string
 	Action      string
 	ActorUserID string
-	// ObjectID keeps the rows whose ObjectID equals it. Empty means no filter.
+	// ObjectID keeps the rows of the artifact whose ObjectID equals it: the
+	// rows naming that object that the artifact reads group (performed by one
+	// of ArtifactPerformers, of an action that can name an object), so TF's
+	// own rows on the object are left out. Empty means no filter.
 	ObjectID string
 	// Refused keeps the rows whose action is a refusal or failure
 	// (RefusalOrFailureActions). False means no filter.

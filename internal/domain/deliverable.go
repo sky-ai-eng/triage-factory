@@ -123,45 +123,8 @@ const (
 	DeliverableStateReviewDismissed = "dismissed"
 )
 
-// DeliverableKinds is the closed kind vocabulary, and DeliverableStates the
-// union of every per-kind state above.
-func DeliverableKinds() []string {
-	return []string{DeliverableKindPullRequest, DeliverableKindReview}
-}
-
-// deliverableStatesByKind is every kind's full lifecycle, one entry per kind in
-// DeliverableKinds. DeliverableStates is derived from it rather than hand-listed,
-// so a state added to a kind above joins the vocabulary with it.
-var deliverableStatesByKind = map[string][]string{
-	DeliverableKindPullRequest: {
-		DeliverableStatePRPending, DeliverableStatePRDraft, DeliverableStatePROpen,
-		DeliverableStatePRMerged, DeliverableStatePRClosed,
-	},
-	DeliverableKindReview: {
-		DeliverableStateReviewPending, DeliverableStateReviewSubmitted, DeliverableStateReviewDismissed,
-	},
-}
-
-// DeliverableStates is the deduplicated union of the per-kind lifecycles. A state
-// is only meaningful read with its kind (values alias across kinds), so this is
-// a vocabulary, not a per-kind contract. Iteration is over DeliverableKinds
-// rather than the map, so the order is stable.
-func DeliverableStates() []string {
-	out := make([]string, 0, len(deliverableStatesByKind))
-	seen := map[string]bool{}
-	for _, kind := range DeliverableKinds() {
-		for _, state := range deliverableStatesByKind[kind] {
-			if seen[state] {
-				continue
-			}
-			seen[state] = true
-			out = append(out, state)
-		}
-	}
-	return out
-}
-
-// Providers is the closed provider vocabulary, for the same use.
+// Providers is the closed provider vocabulary: what the audit ledger records an
+// action against, which the Usage feeds' provider filter validates with.
 func Providers() []string {
 	return []string{
 		ProviderGitHub, ProviderJira, ProviderLinear,

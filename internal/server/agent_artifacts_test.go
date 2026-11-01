@@ -242,7 +242,9 @@ func TestHandleAgentActions_StrictBody(t *testing.T) {
 
 // TestConversationResponse_ArtifactCounts pins artifact_count and
 // artifact_counts on the single read and the batched list: one per object, TF's
-// own rows not counted, and {} for a conversation that changed nothing.
+// own rows not counted, and {} for a conversation that changed nothing; and
+// last_action_at beside them, set for a conversation with any ledger row and
+// null for one with none.
 func TestConversationResponse_ArtifactCounts(t *testing.T) {
 	s := newTestServer(t)
 	busy := seedSteerConversation(t, s.db, "artcnt", dbtest.SeedConcluded)
@@ -267,6 +269,9 @@ func TestConversationResponse_ArtifactCounts(t *testing.T) {
 
 	check := func(name string, m map[string]any, total float64, byKind map[string]float64) {
 		t.Helper()
+		if at, acted := m["last_action_at"].(string); acted != (total > 0) || (acted && at == "") {
+			t.Errorf("%s last_action_at = %v, want a time exactly when the conversation has rows", name, m["last_action_at"])
+		}
 		if m["artifact_count"] != total {
 			t.Errorf("%s artifact_count = %v, want %v", name, m["artifact_count"], total)
 		}
