@@ -1,19 +1,25 @@
 // Package pollbench is the poll-scale benchmark harness: a deterministic
 // fake GitHub API server plus a driver that points a real poller.Manager +
-// tracker.Tracker at it and measures a cold-start sync at large-org shape
-// (hundreds of repos, thousands of open PRs — the GHES large-org
-// profile). See docs/contributors/benchmarks/poll-bench.md for how to run it and cmd/pollbench for
-// the CLI entrypoint.
+// tracker.Tracker and the mergeability probe worker at it and measures a
+// cold-start sync at large-org shape (hundreds of repos, thousands of open
+// PRs — the GHES large-org profile), or mergeability probing on one large
+// monorepo whose base branch keeps moving. See
+// docs/contributors/benchmarks/poll-bench.md for how to run it and
+// cmd/pollbench for the CLI entrypoint.
 //
 // The harness exists to answer "what does the first full poll of a large
-// tracked set cost, and what do conditional requests save on the second?"
-// — and to measure before/after for rate-limit backoff, bounded refresh
+// tracked set cost, and what do conditional requests save on the second?",
+// "how many test merges does TF make GitHub run as the base moves?" — and
+// to measure before/after for rate-limit backoff, bounded refresh
 // concurrency, and budgeted-cycle work on the polling path.
 package pollbench
 
 import (
 	"fmt"
 	"math/rand"
+
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 )
 
 // DatasetConfig shapes the synthetic org. Every field feeds the seeded RNG,
@@ -30,12 +36,25 @@ type DatasetConfig struct {
 	// the tail is what exercises multi-page REST listings (>100 open PRs).
 	AvgPRs float64
 
+	// PRsPerRepo, when set, gives every repo exactly this many open PRs in
+	// place of the AvgPRs draw: the monorepo shape's one repository.
+	PRsPerRepo int
+
 	// CommentsMean / FilesMean shape the per-PR comment and changed-file
-	// counts. On the tracker path these surface only as snapshot integers
-	// (comments.totalCount, changedFiles), so they affect payload size and
-	// diff work, not request counts.
+	// counts. Comments surface only as a snapshot integer; the changed
+	// files are also each PR's paths, which the branch watch reads when a
+	// base move lands.
 	CommentsMean int
 	FilesMean    int
+
+	// FileCounts, when set, draws each PR's changed-file count from these
+	// quantiles in place of FilesMean (KubernetesFileCounts for the
+	// monorepo shape).
+	FileCounts []Quantile
+
+	// Tree shapes each repo's file tree, which PR paths and base moves are
+	// drawn from. Zero takes defaultTree.
+	Tree TreeConfig
 
 	// InflightPct is the fraction of PRs carrying one in-flight (not yet
 	// completed) check run. In-flight CI forces a refresh every cycle (the
@@ -45,8 +64,9 @@ type DatasetConfig struct {
 	InflightPct float64
 
 	// ConflictPct is the fraction of PRs whose GraphQL mergeable state is
-	// CONFLICTING. Each one emits a github:pr:conflicts event from its first
-	// mergeability probe, which finds no stored answer to compare against.
+	// CONFLICTING when the run starts. Each one emits a github:pr:conflicts
+	// event from its first mergeability probe, which finds no stored answer
+	// to compare against.
 	ConflictPct float64
 
 	// Seed drives all randomness. Same seed + same config → same dataset.
@@ -87,10 +107,11 @@ type PR struct {
 	HeadSHA        string
 	CreatedAt      string
 	UpdatedAt      string
-	Mergeable      string // the mergeability probe's answer: MERGEABLE / CONFLICTING
+	Mergeable      string // the mergeability probe's answer before any base move: MERGEABLE / CONFLICTING
 	Additions      int
 	Deletions      int
 	ChangedFiles   int
+	Paths          []domain.ChangedPath // the ChangedFiles files, as GraphQL and REST list them
 	CommentCount   int
 	Labels         []string
 	ReviewRequests []string // requested reviewer logins
@@ -103,27 +124,48 @@ type Repo struct {
 	Owner string
 	Name  string
 	PRs   []PR
+	// tree is the repo's files when the dataset was generated.
+	tree *tree
 }
 
 // FullName returns the "owner/repo" slug.
 func (r Repo) FullName() string { return r.Owner + "/" + r.Name }
+
+// Listed is the PRs of r the poll discovers. Its open-PR listing stops at
+// ghclient.MaxOpenPRs, so a repo with more has PRs TF never tracks; the fake
+// lists PRs in dataset order, so the tracked ones are the first.
+func (r Repo) Listed() []PR { return r.PRs[:min(len(r.PRs), ghclient.MaxOpenPRs)] }
 
 // Dataset is the full synthetic org the fake server serves.
 type Dataset struct {
 	Cfg      DatasetConfig
 	Repos    []Repo
 	TotalPRs int
+	// TrackedPRs is how many of them the poll discovers (Repo.Listed).
+	TrackedPRs int
 
 	// byNodeID maps a PR's GraphQL node ID to its location, for the
 	// nodes(ids:) refresh lookup.
 	byNodeID map[string][2]int // nodeID → (repo index, pr index)
 }
 
+// defaultTree is the file tree of a repo in the shapes that are not the
+// monorepo: a few hundred files.
+var defaultTree = TreeConfig{Dirs: 20, HotFiles: 3, HotFilePct: 0.05}
+
+// pathsSeedSalt separates the draws for trees and paths from the ones for
+// everything else, so for a given seed the PRs' other fields do not depend on
+// how their paths are drawn.
+const pathsSeedSalt = 0x7061746873
+
 // Generate builds the synthetic org from cfg. Deterministic: all draws come
-// from one seeded RNG consumed in a fixed order.
+// from two seeded RNGs, each consumed in a fixed order.
 func Generate(cfg DatasetConfig) *Dataset {
 	if cfg.Owner == "" {
 		cfg.Owner = "benchorg"
+	}
+	if cfg.Tree == (TreeConfig{}) {
+		cfg.Tree = defaultTree
 	}
 	rng := rand.New(rand.NewSource(cfg.Seed))
 	ds := &Dataset{
@@ -134,7 +176,10 @@ func Generate(cfg DatasetConfig) *Dataset {
 
 	for ri := 0; ri < cfg.Repos; ri++ {
 		repo := Repo{Owner: cfg.Owner, Name: fmt.Sprintf("repo-%04d", ri)}
-		n := drawPRCount(rng, cfg.AvgPRs)
+		n := cfg.PRsPerRepo
+		if n <= 0 {
+			n = drawPRCount(rng, cfg.AvgPRs)
+		}
 		repo.PRs = make([]PR, 0, n)
 		for pi := 0; pi < n; pi++ {
 			pr := generatePR(rng, cfg, ri, pi)
@@ -142,7 +187,21 @@ func Generate(cfg DatasetConfig) *Dataset {
 			repo.PRs = append(repo.PRs, pr)
 		}
 		ds.TotalPRs += n
+		ds.TrackedPRs += len(repo.Listed())
 		ds.Repos = append(ds.Repos, repo)
+	}
+
+	paths := rand.New(rand.NewSource(cfg.Seed ^ pathsSeedSalt))
+	for ri := range ds.Repos {
+		repo := &ds.Repos[ri]
+		repo.tree = newTree(paths, cfg.Tree)
+		for pi := range repo.PRs {
+			pr := &repo.PRs[pi]
+			if cfg.FileCounts != nil {
+				pr.ChangedFiles = drawQuantiles(paths, cfg.FileCounts)
+			}
+			pr.Paths = repo.tree.draw(paths, pr.ChangedFiles)
+		}
 	}
 	return ds
 }
@@ -280,10 +339,10 @@ func (d *Dataset) RepoNames() []string {
 }
 
 // ExpectedColdEvents computes the number of events one full cold-start sync
-// must emit. Discovery seeds each PR's snapshot from the REST listing (no
-// CI, no reviews); the same cycle's GraphQL refresh then diffs the full
-// snapshot against that seed, and the probe pass after it reads every new
-// PR's mergeability, emitting:
+// of the tracked PRs must emit. Discovery seeds each PR's snapshot from the
+// REST listing (no CI, no reviews); the same cycle's GraphQL refresh then
+// diffs the full snapshot against that seed, and the probe pass after it
+// reads every new PR's mergeability, emitting:
 //
 //   - one ci_check_failed / ci_check_passed per COMPLETED check run
 //     (in-flight checks have no conclusion yet → no event),
@@ -296,7 +355,7 @@ func (d *Dataset) RepoNames() []string {
 func (d *Dataset) ExpectedColdEvents() int {
 	total := 0
 	for _, repo := range d.Repos {
-		for _, pr := range repo.PRs {
+		for _, pr := range repo.Listed() {
 			for _, c := range pr.Checks {
 				if c.Status == "completed" && c.Conclusion != "" {
 					total++
@@ -309,6 +368,32 @@ func (d *Dataset) ExpectedColdEvents() int {
 		}
 	}
 	return total
+}
+
+// BaseBranches is how many base branches the open PRs target: one per repo
+// with any, since every PR targets main.
+func (d *Dataset) BaseBranches() int {
+	n := 0
+	for _, r := range d.Repos {
+		if len(r.PRs) > 0 {
+			n++
+		}
+	}
+	return n
+}
+
+// Conflicting is the node ids of the tracked PRs that are CONFLICTING when
+// the run starts.
+func (d *Dataset) Conflicting() []string {
+	var ids []string
+	for _, r := range d.Repos {
+		for _, pr := range r.Listed() {
+			if pr.Mergeable == domain.MergeableConflicting {
+				ids = append(ids, pr.NodeID)
+			}
+		}
+	}
+	return ids
 }
 
 // MaxOpenPRs returns the largest per-repo open-PR count — >100 means the

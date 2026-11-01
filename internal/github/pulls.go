@@ -950,6 +950,10 @@ type restPR struct {
 	} `json:"labels"`
 }
 
+// MaxOpenPRs is the most open PRs ListOpenPRs returns for one repo: its
+// listing stops at maxFetchPages pages of 100.
+const MaxOpenPRs = maxFetchPages * 100
+
 // ListOpenPRs lists a repo's open PRs via REST with a conditional request,
 // returning them as DiscoveredPRs (node ID + discovery snapshot) ready to
 // feed the existing two-phase tracker (Phase-2 GraphQL refresh keys on the

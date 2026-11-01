@@ -3,8 +3,10 @@ name: poll-bench
 # Regression tripwire for the GitHub polling path: runs the poll-scale
 # benchmark's smoke shape (20 repos, ~100 open PRs) against the in-process
 # fake GitHub API and fails on any sanity violation — event counts diverging
-# from the dataset's expected transitions, an incomplete cold sync, warm
-# cycles emitting events, poll-cycle errors, requests to endpoints the fake
+# from the dataset's expected transitions, a github:pr:conflicts the dataset
+# implies not emitted exactly once, an incomplete cold sync, warm cycles
+# emitting events, a test merge no probe needed, more than one probe per PR
+# in the cold cycle, poll-cycle errors, requests to endpoints the fake
 # doesn't model (the poll path's call set changed — update the fake), a warm
 # 304 hit rate under 100%, or request counts differing between
 # identically-seeded runs (determinism). See docs/contributors/benchmarks/poll-bench.md.
@@ -20,6 +22,7 @@ on:
     paths:
       - 'internal/eventing/poller/**'
       - 'internal/eventing/tracker/**'
+      - 'internal/eventing/mergeability/**'
       - 'internal/github/*'
       - 'internal/github/ghbase/**'
       - 'cmd/internal/pollbench/**'
