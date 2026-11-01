@@ -153,10 +153,17 @@ func (m *Manager) runLinearCycleForOrg(ctx context.Context, orgID string, now ti
 	bound := integrations.LinearSystemConfigured(creds) && workspaceID != ""
 	rules, rulesRead := m.loadLinearRules(ctx, orgID, workspaceID)
 	teams := toTrackerLinearRules(rules)
-	if bound && len(teams) == 0 {
+	// With no armed team the cycle still refreshes the entities TF holds in
+	// this workspace (followsEntities), but only from rules it read, for
+	// Jira's reason: refreshing a tracked issue as if no team were armed
+	// would advance its snapshot past the transitions its rules would have
+	// emitted.
+	refreshOnly := bound && rulesRead && len(teams) == 0 && m.followsEntities(ctx, linearLog, "linear", orgID, workspaceID)
+	if bound && len(teams) == 0 && !refreshOnly {
 		// Nothing in this workspace to poll, but issues a previous workspace
 		// left tracked still retire: that needs no Linear call, and nothing
-		// else would ever close them.
+		// else would ever close them. A refresh-only cycle's RefreshLinear
+		// retires them itself, first.
 		m.trackerForOrg(orgID).RetireLinearOutOfScope(ctx, workspaceID)
 	}
 	if !bound || (rulesRead && len(teams) == 0) {
@@ -166,15 +173,20 @@ func (m *Manager) runLinearCycleForOrg(ctx context.Context, orgID string, now ti
 		// disarmed, since no RefreshLinear runs to do it.
 		kinds.LinearTeamUnreadable.Sync(ctx, orgID, nil)
 	}
-	if !bound || len(rules) == 0 {
+	if !bound || (len(rules) == 0 && !refreshOnly) {
 		span.SetAttributes(telemetry.Outcome("unconfigured"))
 		conn.skip("unconfigured")
 		return
 	}
 	if len(teams) == 0 {
-		span.SetAttributes(telemetry.Outcome("no_armed_teams"))
-		conn.skip("no_armed_teams")
-		return
+		if !refreshOnly {
+			span.SetAttributes(telemetry.Outcome("no_armed_teams"))
+			conn.skip("no_armed_teams")
+			return
+		}
+		// RefreshLinear with no teams: discovery and the visibility check
+		// ask nothing, and the refresh reads the entities by UUID.
+		span.SetAttributes(telemetry.Disposition("refresh_only"))
 	}
 	if m.linearResolver == nil {
 		span.SetStatus(codes.Error, "resolve system client")
