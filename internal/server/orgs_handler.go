@@ -228,7 +228,7 @@ func (s *Server) handleOrgCreate(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	slugBase := slugify(name)
+	slugBase := domain.Slugify(name)
 	if slugBase == "" {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
 			Reason: httpx.ReasonInvalidField, Message: "name must contain letters or numbers", Field: "name",

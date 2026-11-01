@@ -18,8 +18,7 @@ var ErrNoSuchPrompt = errors.New("no prompt with that id")
 
 // PromptStore owns the prompts table. Three audiences:
 //
-//   - HTTP handlers (server/prompts_handler.go, server/triggers_handler.go,
-//     server/projects.go) — full CRUD.
+//   - HTTP handlers (server/prompts, server/blueprints) — full CRUD.
 //   - Delegated agents (delegate/*) — read prompt body before dispatch +
 //     bump usage_count.
 //   - Skills importer (skills/importer.go) — Get/Create/UpdateImported/Hide

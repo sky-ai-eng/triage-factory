@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // TestHandleConversations_Batched pins the board's batched read: one list call
@@ -158,7 +159,7 @@ func TestHandleConversations_StatusFilter(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("status %q = %d, want 400; body=%s", unknown, rec.Code, rec.Body.String())
 		}
-		assertFirstError(t, rec, httpx.ReasonInvalidField, "statuses")
+		httpxtest.AssertFirstError(t, rec, httpx.ReasonInvalidField, "statuses")
 	}
 }
 
@@ -241,7 +242,7 @@ func TestHandleConversations_TeamFilter(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("malformed team_ids = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, httpx.ReasonInvalidField, "team_ids")
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonInvalidField, "team_ids")
 
 	// The cap is on DISTINCT teams and rejects rather than truncates: a
 	// dropped team is a count that reads as work having disappeared.
@@ -270,7 +271,7 @@ func TestHandleConversations_TeamFilter(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("team_ids over cap = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, httpx.ReasonOutOfRange, "team_ids")
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonOutOfRange, "team_ids")
 
 	// The token is bound to the filter set it was minted for: a page-2 token
 	// from one team replayed against another is refused rather than served a
@@ -285,7 +286,7 @@ func TestHandleConversations_TeamFilter(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("token replayed against another team = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, httpx.ReasonInvalidParam, "page_token")
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonInvalidParam, "page_token")
 }
 
 // TestHandleConversations_AttentionFilter pins the rail's `needs` read: a
@@ -364,7 +365,7 @@ func TestHandleConversations_BatchedCap(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("batched list over cap = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, httpx.ReasonOutOfRange, "task_ids")
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonOutOfRange, "task_ids")
 }
 
 // TestHandleConversations_BatchedRejectsMalformedIDs: task_ids is a selector,
@@ -377,7 +378,7 @@ func TestHandleConversations_BatchedRejectsMalformedIDs(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, httpx.ReasonInvalidField, "task_ids")
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonInvalidField, "task_ids")
 }
 
 // TestHandleConversations_RejectsUnknownField: the body takes a typed
@@ -391,7 +392,7 @@ func TestHandleConversations_RejectsUnknownField(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, httpx.ReasonUnknownField, "include")
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonUnknownField, "include")
 }
 
 // TestHandleMessages_SinceID pins the transcript read's optional watermark:

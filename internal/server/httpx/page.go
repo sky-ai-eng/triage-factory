@@ -7,6 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
+
+	"github.com/google/uuid"
 )
 
 // --- list pagination ---
@@ -126,6 +129,36 @@ func FilterFingerprint(filters any) string {
 	}
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:6])
+}
+
+// CanonicalStrings sorts and dedups a filter list so the same query always
+// produces the same page-token fingerprint however the client ordered it, and
+// so a repeated value can't multiply an IN-list. Nil in, nil out — an absent
+// filter and an empty one mean the same thing (no narrowing) and must
+// fingerprint the same.
+func CanonicalStrings(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := slices.Clone(in)
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// TeamIDFilterField validates a list body's optional team_id narrow. Empty
+// means "no narrow" (the union of what the caller may see); anything else must
+// be a well-formed team id.
+//
+// It is strict for the reason the whole list contract is: dropping a corrupt
+// filter *widens* the result set, and a read that silently returns more than
+// was asked for is a wrong answer that looks like a right one.
+func TeamIDFilterField(v *Validation, teamID string) {
+	if teamID == "" {
+		return
+	}
+	if _, err := uuid.Parse(teamID); err != nil {
+		v.Invalid("team_id", fmt.Sprintf("team_id %q is not a valid team id", teamID))
+	}
 }
 
 // ResolvePage validates a list body's paging fields and returns the window the

@@ -9,6 +9,7 @@ import (
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // seedConversationAction appends one external action to conversationID on the local-default
@@ -52,7 +53,7 @@ func TestHandleAgentActions(t *testing.T) {
 		PerformedBy: domain.PerformedByAgent,
 	})
 
-	page := decodeList[map[string]any](t, doJSON(t, s, http.MethodPost,
+	page := httpxtest.DecodeList[map[string]any](t, doJSON(t, s, http.MethodPost,
 		"/api/agent/conversations/"+conversationID+"/actions/list", map[string]any{}))
 	got := page.Items
 	if len(got) != 2 || page.Total() != 2 {
@@ -116,7 +117,7 @@ func TestHandleAgentActions_CorruptDetails(t *testing.T) {
 		t.Fatalf("corrupt detail: %v", err)
 	}
 
-	got := decodeList[map[string]any](t, doJSON(t, s, http.MethodPost,
+	got := httpxtest.DecodeList[map[string]any](t, doJSON(t, s, http.MethodPost,
 		"/api/agent/conversations/"+conversationID+"/actions/list", map[string]any{})).Items
 	if len(got) != 1 {
 		t.Fatalf("returned %d actions, want 1", len(got))

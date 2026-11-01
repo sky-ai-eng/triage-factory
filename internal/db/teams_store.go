@@ -256,9 +256,9 @@ type TeamsStore interface {
 	// updated row. Each argument is optional (nil = leave that column
 	// untouched, the partial-PATCH contract) and applied via COALESCE; a
 	// non-nil empty-string description clears the blurb. The caller computes
-	// slug from the new name (slugify, the same derivation Create uses) and
-	// passes it alongside name so the two stay in sync — the body carries no
-	// slug of its own. Returns ErrTeamNotFound when no row matches under RLS,
+	// slug from the new name (domain.Slugify, the same derivation Create uses)
+	// and passes it alongside name so the two stay in sync — the body carries
+	// no slug of its own. Returns ErrTeamNotFound when no row matches under RLS,
 	// and surfaces the UNIQUE (org_id, slug) collision verbatim (the handler
 	// maps it to 409, mirroring Create). Postgres routes through the app pool:
 	// the teams_update RLS policy gates the write to team-admin-or-org-admin.

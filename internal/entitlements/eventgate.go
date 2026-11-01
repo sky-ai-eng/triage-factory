@@ -3,6 +3,8 @@ package entitlements
 import (
 	"slices"
 	"strings"
+
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // eventSourceGates maps an event source prefix (the segment before the first
@@ -69,4 +71,18 @@ func RegisteredEventGateFeatures() []Feature {
 	}
 	slices.Sort(out)
 	return out
+}
+
+// GatedEventTypes returns the event types orgID is NOT entitled to fire on.
+// The catalog is a fixed, small registry, so deriving the complement here is
+// cheaper than teaching the store about entitlements — and it keeps the gate's
+// policy in one place while the store only applies a set.
+func GatedEventTypes(orgID string) []string {
+	var gated []string
+	for _, et := range domain.AllEventTypes() {
+		if !EventTypeAllowed(orgID, et.ID) {
+			gated = append(gated, et.ID)
+		}
+	}
+	return gated
 }

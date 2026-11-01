@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // A multi org's GitHub access is an App: the routes that bind an org token do
@@ -65,7 +66,7 @@ func TestOrgTokenRoutes_MultiModeIs404(t *testing.T) {
 			t.Errorf("%s %s in multi mode = %d, want 404 (body: %s)", c.method, c.route, rec.Code, rec.Body.String())
 			continue
 		}
-		assertFirstError(t, rec, httpx.ReasonNotFound, "")
+		httpxtest.AssertFirstError(t, rec, httpx.ReasonNotFound, "")
 	}
 	if rig.gh.callCount() != calls {
 		t.Error("a token was checked against GitHub on a route that does not exist")
@@ -144,7 +145,7 @@ func TestGitHubAppImport_MultiModeRequiresClientSecret(t *testing.T) {
 		if rec.Code != http.StatusUnprocessableEntity {
 			t.Fatalf("import with a rejected client secret = %d, want 422 (body: %s)", rec.Code, rec.Body.String())
 		}
-		assertFirstError(t, rec, httpx.ReasonUpstreamRejected, "client_secret")
+		httpxtest.AssertFirstError(t, rec, httpx.ReasonUpstreamRejected, "client_secret")
 		if rig.hasAppRow(t) {
 			t.Error("an import with a rejected client secret wrote an App row")
 		}

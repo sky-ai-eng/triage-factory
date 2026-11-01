@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -154,12 +155,12 @@ func decodeNotificationItem(t *testing.T, body []byte) notificationItemWire {
 	return out
 }
 
-func listNotifications(t *testing.T, s *Server, path string, body map[string]any) listEnvelope[notificationItemWire] {
+func listNotifications(t *testing.T, s *Server, path string, body map[string]any) httpxtest.ListEnvelope[notificationItemWire] {
 	t.Helper()
 	if body == nil {
 		body = map[string]any{}
 	}
-	return decodeList[notificationItemWire](t, doJSON(t, s, http.MethodPost, path, body))
+	return httpxtest.DecodeList[notificationItemWire](t, doJSON(t, s, http.MethodPost, path, body))
 }
 
 const meNotifications = "/api/me/notifications"

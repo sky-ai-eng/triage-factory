@@ -18,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // listedTask is the slice of the task payload these tests assert on: which rows
@@ -37,7 +38,7 @@ type taskListBody struct {
 // on a non-200, a null items list or a null total_count.
 func postTaskList(t *testing.T, s *Server, body map[string]any) taskListBody {
 	t.Helper()
-	page := decodeList[listedTask](t, doJSON(t, s, http.MethodPost, "/api/tasks/list", body))
+	page := httpxtest.DecodeList[listedTask](t, doJSON(t, s, http.MethodPost, "/api/tasks/list", body))
 	if page.TotalCount == nil {
 		t.Fatalf("total_count is null")
 	}
@@ -351,7 +352,7 @@ func TestTaskList_OffsetTokenIsRefused(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, "INVALID_PARAM", "page_token")
+	httpxtest.AssertFirstError(t, rec, "INVALID_PARAM", "page_token")
 
 	// And the route's own tokens still walk it, so the refusal is about the
 	// form and not about tokens.
@@ -388,7 +389,7 @@ func TestTaskList_UnusablePageTokenIsA400(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, "INVALID_PARAM", "page_token")
+	httpxtest.AssertFirstError(t, rec, "INVALID_PARAM", "page_token")
 }
 
 // TestTaskList_StrictBody is the negative space: every malformed filter is
@@ -525,7 +526,7 @@ func TestTaskList_StrictBody(t *testing.T) {
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 			}
-			assertFirstError(t, rec, tc.wantReason, tc.wantField)
+			httpxtest.AssertFirstError(t, rec, tc.wantReason, tc.wantField)
 		})
 	}
 
@@ -745,7 +746,7 @@ func TestTaskList_TokenIsBoundToItsSearchAndSort(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 		}
-		assertFirstError(t, rec, "INVALID_PARAM", "page_token")
+		httpxtest.AssertFirstError(t, rec, "INVALID_PARAM", "page_token")
 	}
 
 	searchToken := mint(map[string]any{"search": "bound-search"})

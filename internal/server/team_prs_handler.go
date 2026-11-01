@@ -79,3 +79,10 @@ func (s *Server) handleTeamPRList(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.WriteList(w, page, prs, total)
 }
+
+func (s *Server) registerTeamPRRoutes() {
+	// The team's pull requests — the PR page's team arm, and (as its
+	// count-only read) the Overview's OPEN PRS figure. Same member-level
+	// gate as the flow node beside it.
+	s.apiMutating("POST /api/teams/{team_id}/prs/list", s.handleTeamPRList)
+}

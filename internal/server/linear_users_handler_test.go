@@ -8,6 +8,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 var (
@@ -61,7 +62,7 @@ func TestLinearUsersList_FindsActiveUsersByNameDisplayNameOrEmail(t *testing.T) 
 		"":                 linearUserAda + "," + linearUserAdam + "," + linearUserBot,
 		"  adam@example  ": linearUserAdam,
 	} {
-		page := decodeList[linearUserJSON](t, doJSON(t, s, http.MethodPost, linearUsersListPath, map[string]any{"q": q}))
+		page := httpxtest.DecodeList[linearUserJSON](t, doJSON(t, s, http.MethodPost, linearUsersListPath, map[string]any{"q": q}))
 		if got := linearUserIDsOf(page.Items); got != want {
 			t.Errorf("q %q = %s, want %s", q, got, want)
 		}
@@ -71,19 +72,19 @@ func TestLinearUsersList_FindsActiveUsersByNameDisplayNameOrEmail(t *testing.T) 
 	if strings.Contains(rec.Body.String(), "example.com") {
 		t.Errorf("the list returned an email: %s", rec.Body.String())
 	}
-	first := decodeList[linearUserJSON](t, rec)
+	first := httpxtest.DecodeList[linearUserJSON](t, rec)
 	if want := (linearUserJSON{ID: linearUserAda, Name: "Ada Lovelace", DisplayName: "ada", Active: true}); len(first.Items) != 1 || first.Items[0] != want {
 		t.Fatalf("page 1 = %+v, want [%+v]", first.Items, want)
 	}
 	if first.TotalCount != nil || first.NextPageToken == "" {
 		t.Fatalf("page 1 total_count = %v, next_page_token = %q; want null and a token", first.TotalCount, first.NextPageToken)
 	}
-	second := decodeList[linearUserJSON](t, doJSON(t, s, http.MethodPost, linearUsersListPath,
+	second := httpxtest.DecodeList[linearUserJSON](t, doJSON(t, s, http.MethodPost, linearUsersListPath,
 		map[string]any{"q": "ada", "page_size": 1, "page_token": first.NextPageToken}))
 	if got := linearUserIDsOf(second.Items); got != linearUserAdam || second.NextPageToken == "" {
 		t.Fatalf("page 2 = %s (next %q), want Adam and a token", got, second.NextPageToken)
 	}
-	third := decodeList[linearUserJSON](t, doJSON(t, s, http.MethodPost, linearUsersListPath,
+	third := httpxtest.DecodeList[linearUserJSON](t, doJSON(t, s, http.MethodPost, linearUsersListPath,
 		map[string]any{"q": "ada", "page_size": 1, "page_token": second.NextPageToken}))
 	if want := (linearUserJSON{ID: linearUserBot, Name: "Adabot", DisplayName: "adabot", Active: true, App: true}); len(third.Items) != 1 || third.Items[0] != want || third.NextPageToken != "" {
 		t.Errorf("page 3 = %+v (next %q), want [%+v] and no token", third.Items, third.NextPageToken, want)

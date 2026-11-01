@@ -269,11 +269,11 @@ type taskLaneKeys struct {
 // the first — so a caller sees the whole bad body at once.
 func resolveTaskLane(v *httpx.Validation, req taskLaneRequest) (db.TaskListFilter, taskLaneKeys) {
 	f := db.TaskListFilter{
-		Statuses:       canonicalStrings(req.Statuses),
-		TeamIDs:        canonicalStrings(req.TeamIDs),
+		Statuses:       httpx.CanonicalStrings(req.Statuses),
+		TeamIDs:        httpx.CanonicalStrings(req.TeamIDs),
 		OnlyUnclaimed:  req.OnlyUnclaimed,
 		IncludeSnoozed: req.IncludeSnoozed,
-		Sources:        canonicalStrings(req.Sources),
+		Sources:        httpx.CanonicalStrings(req.Sources),
 	}
 	for _, st := range f.Statuses {
 		if !slices.Contains(db.TaskListStatuses, st) {
@@ -657,7 +657,7 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 	filter, laneKeys := resolveTaskLane(&v, req.taskLaneRequest)
 	var createdBeforeKey string
 	filter.CreatedBefore, createdBeforeKey = parseTaskWindow(&v, "created_before", req.CreatedBefore)
-	filter.EventTypes = canonicalStrings(req.EventTypes)
+	filter.EventTypes = httpx.CanonicalStrings(req.EventTypes)
 	validEventTypes := domain.EventTypeIDs()
 	for _, et := range filter.EventTypes {
 		if !slices.Contains(validEventTypes, et) {
@@ -866,21 +866,6 @@ func (s *Server) handleTaskFacets(w http.ResponseWriter, r *http.Request) {
 		out.EventTypes[i] = taskFacet{Value: f.Value, Count: f.Count}
 	}
 	writeJSON(w, http.StatusOK, out)
-}
-
-// canonicalStrings sorts and dedups a filter list so the same query always
-// produces the same page-token fingerprint however the client ordered it, and
-// so a repeated value can't multiply an IN-list. Nil in, nil out — an absent
-// filter and an empty one mean the same thing (no narrowing) and must
-// fingerprint the same.
-func canonicalStrings(in []string) []string {
-	if len(in) == 0 {
-		return nil
-	}
-	out := slices.Clone(in)
-	slices.Sort(out)
-	out = slices.Compact(out)
-	return out
 }
 
 func (s *Server) handleTaskGet(w http.ResponseWriter, r *http.Request) {

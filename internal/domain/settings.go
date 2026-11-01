@@ -364,8 +364,8 @@ type OrgSettings struct {
 	// MarketplaceEnabled was originally scoped as a ship-dark toggle for the
 	// within-org prompt marketplace (TFAC-535); that turned out to be the
 	// wrong surface to gate — the within-org marketplace has no toggle and
-	// is always on for every multi-mode org (internal/server/
-	// marketplace_handler.go's gateMarketplace doesn't read this field).
+	// is always on for every multi-mode org (gateMarketplace in
+	// internal/server/marketplace doesn't read this field).
 	// This column is reserved for the future cross-org marketplace gate
 	// instead (TFAC-92 phase 2 / TFAC-539). NOT NULL DEFAULT false on both
 	// backends — no NULL-round-trip subtlety like the fields above.

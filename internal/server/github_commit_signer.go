@@ -222,7 +222,7 @@ func (s *Server) handleCommitSignerCreate(w http.ResponseWriter, r *http.Request
 			})
 			return
 		}
-		writeUpstreamGitHub(w, "could not read the account from GitHub", err)
+		httpx.WriteUpstreamUnavailable(w, "could not read the account from GitHub", err)
 		return
 	}
 	if account.Type != ghclient.AccountTypeUser {
@@ -234,7 +234,7 @@ func (s *Server) handleCommitSignerCreate(w http.ResponseWriter, r *http.Request
 	}
 	accountID, err := strconv.ParseInt(account.ID, 10, 64)
 	if err != nil {
-		writeUpstreamGitHub(w, "GitHub answered the account with an id that is not a number", err)
+		httpx.WriteUpstreamUnavailable(w, "GitHub answered the account with an id that is not a number", err)
 		return
 	}
 	// The listing is fetched only to learn the GitHub serves it: the key
@@ -245,7 +245,7 @@ func (s *Server) handleCommitSignerCreate(w http.ResponseWriter, r *http.Request
 			writeSSHSigningUnsupported(w, host)
 			return
 		}
-		writeUpstreamGitHub(w, "could not read the account's signing keys from GitHub", err)
+		httpx.WriteUpstreamUnavailable(w, "could not read the account's signing keys from GitHub", err)
 		return
 	}
 
@@ -304,7 +304,7 @@ func (s *Server) handleCommitSignerCreate(w http.ResponseWriter, r *http.Request
 		return tx.AccessChangeLog.Record(ctx, orgID, domain.AccessChange{
 			ActorUserID: userID,
 			Action:      domain.AccessActionCredentialSet,
-			DetailJSON:  accessDetailCommitSigner(commitSignerRegistered, host, account.Login, publicKey, email),
+			DetailJSON:  domain.AccessDetailCommitSigner(domain.CommitSignerRegistered, host, account.Login, publicKey, email),
 		})
 	}); err != nil {
 		if restore != nil {
@@ -475,7 +475,7 @@ func (s *Server) handleCommitSignerVerify(w http.ResponseWriter, r *http.Request
 		return tx.AccessChangeLog.Record(ctx, orgID, domain.AccessChange{
 			ActorUserID: userID,
 			Action:      domain.AccessActionCredentialSet,
-			DetailJSON:  accessDetailCommitSigner(commitSignerVerified, updated.Host, updated.Login, key, ""),
+			DetailJSON:  domain.AccessDetailCommitSigner(domain.CommitSignerVerified, updated.Host, updated.Login, key, ""),
 		})
 	}); err != nil {
 		if restore != nil {
@@ -650,7 +650,7 @@ func (s *Server) handleCommitSignerRotate(w http.ResponseWriter, r *http.Request
 		return tx.AccessChangeLog.Record(ctx, orgID, domain.AccessChange{
 			ActorUserID: userID,
 			Action:      domain.AccessActionCredentialSet,
-			DetailJSON:  accessDetailCommitSigner(commitSignerRotated, updated.Host, updated.Login, publicKey, ""),
+			DetailJSON:  domain.AccessDetailCommitSigner(domain.CommitSignerRotated, updated.Host, updated.Login, publicKey, ""),
 		})
 	}); err != nil {
 		if restore != nil {
@@ -740,7 +740,7 @@ func (s *Server) handleCommitSignerPatch(w http.ResponseWriter, r *http.Request)
 		return tx.AccessChangeLog.Record(ctx, orgID, domain.AccessChange{
 			ActorUserID: userID,
 			Action:      domain.AccessActionCredentialSet,
-			DetailJSON:  accessDetailCommitSigner(commitSignerEmailChanged, updated.Host, updated.Login, "", email),
+			DetailJSON:  domain.AccessDetailCommitSigner(domain.CommitSignerEmailChanged, updated.Host, updated.Login, "", email),
 		})
 	}); err != nil {
 		switch {
@@ -811,7 +811,7 @@ func (s *Server) handleCommitSignerDelete(w http.ResponseWriter, r *http.Request
 		return tx.AccessChangeLog.Record(ctx, orgID, domain.AccessChange{
 			ActorUserID: userID,
 			Action:      domain.AccessActionCredentialRemoved,
-			DetailJSON:  accessDetailCommitSigner("", cur.Host, cur.Login, "", ""),
+			DetailJSON:  domain.AccessDetailCommitSigner("", cur.Host, cur.Login, "", ""),
 		})
 	}); err != nil {
 		if restore != nil {

@@ -8,6 +8,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // testGateFeature is the synthetic feature these tests gate the "jira" event
@@ -227,7 +228,7 @@ func TestEventHandlerList_DropsGatedKeepsUngated(t *testing.T) {
 
 	gateJiraForTest(t)
 
-	page := decodeList[domain.EventHandler](t, doJSON(t, s, http.MethodPost, "/api/event-handlers/list", map[string]any{}))
+	page := httpxtest.DecodeList[domain.EventHandler](t, doJSON(t, s, http.MethodPost, "/api/event-handlers/list", map[string]any{}))
 	ids := map[string]bool{}
 	for _, h := range page.Items {
 		ids[h.ID] = true

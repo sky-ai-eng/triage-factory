@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 	"github.com/zalando/go-keyring"
 )
 
@@ -38,7 +39,7 @@ func jiraStatusPath(key, statusID string) string {
 func TestJiraProjectsList_TokenIsFingerprintedOnQ(t *testing.T) {
 	s, _ := newServerWithJiraCatalog(t, "SKY", "OPS", "DESK")
 
-	first := decodeList[jiraProjectJSON](t, doJSON(t, s, http.MethodPost, jiraProjectsListPath,
+	first := httpxtest.DecodeList[jiraProjectJSON](t, doJSON(t, s, http.MethodPost, jiraProjectsListPath,
 		map[string]any{"q": "sk", "page_size": 1}))
 	if want := []jiraProjectJSON{{JiraID: fakeJiraProjectID("SKY"), Key: "SKY", Name: "SKY Project"}}; !slices.Equal(first.Items, want) ||
 		first.NextPageToken == "" || first.TotalCount != nil {
@@ -55,7 +56,7 @@ func TestJiraProjectsList_TokenIsFingerprintedOnQ(t *testing.T) {
 	}
 
 	// OPS does not match, so the second and last page is DESK.
-	second := decodeList[jiraProjectJSON](t, doJSON(t, s, http.MethodPost, jiraProjectsListPath,
+	second := httpxtest.DecodeList[jiraProjectJSON](t, doJSON(t, s, http.MethodPost, jiraProjectsListPath,
 		map[string]any{"q": "  SK  ", "page_size": 1, "page_token": first.NextPageToken}))
 	if got := projectKeysOf(second.Items); got != "DESK" || second.NextPageToken != "" {
 		t.Errorf("page 2 under a re-spelled filter = %s (token %q), want DESK and no token", got, second.NextPageToken)

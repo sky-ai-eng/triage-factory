@@ -233,7 +233,13 @@ func signerAuditRows(t *testing.T, s *Server) []string {
 		if err := rows.Scan(&action, &detail); err != nil {
 			t.Fatalf("scan access log: %v", err)
 		}
-		d := parseAccessDetail(detail)
+		// An empty or malformed detail decodes to the zero value, which names
+		// no kind and is skipped.
+		var d struct {
+			Kind   string `json:"kind"`
+			Change string `json:"change"`
+		}
+		_ = json.Unmarshal([]byte(detail), &d)
 		if d.Kind != domain.CredentialKindGitHubCommitSigner {
 			continue
 		}

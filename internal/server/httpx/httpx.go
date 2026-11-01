@@ -19,6 +19,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/google/uuid"
+
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -133,6 +135,71 @@ func BadRequest(w http.ResponseWriter, msg string) {
 // can't read.
 func WriteUnauth(w http.ResponseWriter) {
 	WriteErrors(w, http.StatusUnauthorized, ErrorItem{Reason: ReasonUnauthenticated, Message: "unauthenticated"})
+}
+
+// WriteUpstreamUnavailable answers an upstream call that failed: 502 with a
+// static, author-written prefix and the raw detail appended only in local mode
+// (LocalDetail). The caller logs the error itself — this only shapes the
+// response.
+func WriteUpstreamUnavailable(w http.ResponseWriter, msg string, err error) {
+	WriteErrors(w, http.StatusBadGateway, ErrorItem{
+		Reason:  ReasonUpstreamUnavailable,
+		Message: msg + LocalDetail(err),
+	})
+}
+
+// Forbidden writes a 403: the caller is authenticated and can see the
+// resource, but the action is refused. Callers that must NOT disclose the
+// resource's existence use NotFound instead — the disclosure rule decides
+// which of the two a denial gets, so the two helpers stay distinct.
+func Forbidden(w http.ResponseWriter, msg string) {
+	WriteErrors(w, http.StatusForbidden, ErrorItem{Reason: ReasonForbidden, Message: msg})
+}
+
+// Conflict writes a 409 under the generic CONFLICT reason — the request is
+// well-formed but the resource's current state refuses it. A conflict with a
+// named class (a duplicate name, an already-terminal row, a missing
+// integration) uses its own reason via WriteErrors instead.
+func Conflict(w http.ResponseWriter, msg string) {
+	WriteErrors(w, http.StatusConflict, ErrorItem{Reason: ReasonConflict, Message: msg})
+}
+
+// WriteNotConfigured answers a route that requires an integration the org
+// hasn't set up: 409 NOT_CONFIGURED. A 409 rather than a 400 because the
+// fault is server-side state, not the request — and never a 500, which is
+// reserved for a backend that failed to *read* the configuration.
+func WriteNotConfigured(w http.ResponseWriter, msg string) {
+	WriteFault(w, NotConfiguredFault(msg))
+}
+
+// NotConfiguredFault is WriteNotConfigured's answer as a Fault, for a body
+// that returns its refusal rather than writing it.
+func NotConfiguredFault(msg string) *Fault {
+	return NewFault(http.StatusConflict, ReasonNotConfigured, msg)
+}
+
+// WriteDelegationUnavailable answers the routes that need a wired spawner on a
+// deployment that has none (delegation disabled). Server-side configuration,
+// not a request fault, and not a transient upstream — 409 NOT_CONFIGURED, the
+// same answer every other unconfigured-integration route gives.
+func WriteDelegationUnavailable(w http.ResponseWriter) {
+	WriteNotConfigured(w, "delegation is not configured on this deployment")
+}
+
+// UUIDPathOr404 validates a {param} path value as a UUID and answers 404 for
+// a malformed one. On Postgres these ids are uuid columns, so a malformed
+// value would otherwise surface as SQLSTATE 22P02 from the first store call →
+// 500. Answering "not found" keeps the response identical across dialects
+// (SQLite stores the same ids as TEXT and simply matches nothing) and matches
+// the disclosure rule: a malformed id names nothing the caller may learn
+// about. thing is the noun for the message ("project", "conversation").
+func UUIDPathOr404(w http.ResponseWriter, r *http.Request, param, thing string) (string, bool) {
+	id := r.PathValue(param)
+	if _, err := uuid.Parse(id); err != nil {
+		NotFound(w, thing)
+		return "", false
+	}
+	return id, true
 }
 
 // DefaultMaxBodyBytes is DecodeJSONStrict's request-body cap. 1 MiB clears

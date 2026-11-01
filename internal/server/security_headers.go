@@ -104,7 +104,7 @@ func (s *Server) buildCSP() string {
 
 	// img-src: 'self' covers the favicon, the app's own assets, AND
 	// user/member avatars — those render through the same-origin
-	// /api/avatars/{id} proxy (avatars_handler.go), which fetches + caches the
+	// /api/avatars/{id} proxy (internal/server/avatars), which fetches + caches the
 	// OAuth-CDN image server-side. `data:` covers base64-embedded SVGs that
 	// some libs emit.
 	//

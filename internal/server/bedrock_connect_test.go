@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 	"github.com/zalando/go-keyring"
 )
 
@@ -96,7 +97,7 @@ func TestBedrockPut_BlankSecretIsRefusedNotKept(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("blank-secret status=%d body=%s, want 400", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, httpx.ReasonMissingField, "access_key_id")
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonMissingField, "access_key_id")
 
 	// Nothing moved — not the secrets, and not the config the request also
 	// carried.

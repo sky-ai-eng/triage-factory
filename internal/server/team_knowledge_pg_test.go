@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // The half of the team-KB contract N=1 cannot express: two teams, real
@@ -251,7 +252,7 @@ func TestTeamKnowledge_ViewerReadsButDoesNotWrite(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("viewer upload = %d, want 403; body=%s", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, httpx.ReasonForbidden, "")
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonForbidden, "")
 }
 
 // TestTeamKnowledge_PublishMakesItOrgReadable is the round trip the two-root

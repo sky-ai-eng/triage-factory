@@ -24,6 +24,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/publicip"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
@@ -54,20 +55,6 @@ func gitHubWebOrigin(base string) (string, bool) {
 	return u.Scheme + "://" + u.Host, true
 }
 
-// nonPublicPrefixes are address ranges that are not reachable over the
-// public Internet but that IsGlobalUnicast / IsPrivate don't already
-// exclude: carrier-grade NAT, documentation/test ranges, benchmarking,
-// and the reserved-for-future block.
-var nonPublicPrefixes = []netip.Prefix{
-	netip.MustParsePrefix("100.64.0.0/10"),   // RFC 6598 carrier-grade NAT / shared
-	netip.MustParsePrefix("192.0.2.0/24"),    // RFC 5737 TEST-NET-1
-	netip.MustParsePrefix("198.51.100.0/24"), // RFC 5737 TEST-NET-2
-	netip.MustParsePrefix("203.0.113.0/24"),  // RFC 5737 TEST-NET-3
-	netip.MustParsePrefix("198.18.0.0/15"),   // RFC 2544 benchmarking
-	netip.MustParsePrefix("240.0.0.0/4"),     // RFC 1112 reserved (future use)
-	netip.MustParsePrefix("2001:db8::/32"),   // RFC 3849 documentation
-}
-
 // isPubliclyReachable reports whether rawURL's host could be reached from
 // GitHub's servers over the public Internet. A DNS name is assumed to
 // resolve publicly; an IP literal must be globally-routable unicast and
@@ -92,10 +79,8 @@ func isPubliclyReachable(rawURL string) bool {
 		// Not an IP literal — a DNS name we assume resolves publicly.
 		return true
 	}
-	// Same public-unicast predicate the avatar proxy's dial-time SSRF guard
-	// uses (isPublicUnicastIP, avatars_handler.go) — single-sourced so the two
-	// reachability checks can't drift.
-	return isPublicUnicastIP(ip)
+	// The avatar proxy's dial-time SSRF guard asks the same predicate.
+	return publicip.Is(ip)
 }
 
 // buildManifestAndState assembles the GitHub App manifest JSON and the

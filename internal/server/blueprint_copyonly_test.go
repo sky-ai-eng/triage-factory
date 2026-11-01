@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // --- B: auto-wrap "New Prompt" -------------------------------------------
@@ -43,7 +44,7 @@ func TestBlueprintCreate_AutoWrapFirstPrompt(t *testing.T) {
 	}
 
 	// And the prompt is visible in the prompts list.
-	prompts := decodeList[map[string]any](t, doJSON(t, s, http.MethodPost, "/api/prompts/list", map[string]any{}))
+	prompts := httpxtest.DecodeList[map[string]any](t, doJSON(t, s, http.MethodPost, "/api/prompts/list", map[string]any{}))
 	found := false
 	for _, p := range prompts.Items {
 		if p["id"] == created.FirstPromptID {

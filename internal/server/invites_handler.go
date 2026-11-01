@@ -29,7 +29,7 @@ const inviteTTL = 7 * 24 * time.Hour
 // invitesHandler serves /api/invites — the org-admin invite lifecycle
 // (create/list/revoke) plus the two redeem surfaces (preview/accept).
 //
-// The admin-facing handlers follow teams_handler.go: requireOrg for the
+// The admin-facing handlers follow the teams handlers: requireOrg for the
 // active org, ClaimsFrom for the user, az.UserIsOrgAdmin for the gate (404
 // not 403 on non-admin — non-disclosure), tx.WithTx for app-pool writes.
 //

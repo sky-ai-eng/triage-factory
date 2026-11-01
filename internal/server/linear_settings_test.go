@@ -7,6 +7,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 	"github.com/zalando/go-keyring"
 )
 
@@ -47,7 +48,7 @@ func TestOrgSettingsPatch_LinearPollInterval(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("PATCH naming %s = %d, want 400; body=%s", field, rec.Code, rec.Body.String())
 		}
-		assertFirstError(t, rec, httpx.ReasonUnknownField, field)
+		httpxtest.AssertFirstError(t, rec, httpx.ReasonUnknownField, field)
 	}
 }
 
@@ -65,7 +66,7 @@ func TestOrgSettingsPatch_PollIntervalFloor(t *testing.T) {
 			if rec.Code != http.StatusUnprocessableEntity {
 				t.Fatalf("%s = %q: status %d, want 422; body=%s", field, short, rec.Code, rec.Body.String())
 			}
-			assertFirstError(t, rec, httpx.ReasonOutOfRange, field)
+			httpxtest.AssertFirstError(t, rec, httpx.ReasonOutOfRange, field)
 		}
 		patchOrgSettingsOK(t, s, map[string]any{field: poller.MinPollInterval.String()})
 		if got := orgSettingsSnapshot(t, s)[field]; got != "30s" {
