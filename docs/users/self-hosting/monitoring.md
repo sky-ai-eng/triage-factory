@@ -122,10 +122,12 @@ Factory does not poll them, so their pull requests produce no tasks or runs.
 It is the count the org's **Organization → Settings → GitHub access** page
 lists, and is refreshed with each GitHub poll.
 
-Only an org whose GitHub App grant is selective (some repositories, not all)
-has a series, from its first GitHub poll on. An org connected with a token, or
-whose installations grant every repository, has none, so a missing series is
-not a zero. `GitHubScopeDrift` warns when an org's count stays above zero for
+It counts repositories on an account the App was uninstalled from as well as
+ones a selective grant leaves out. An org connected with a GitHub App has a
+series from its first GitHub poll on. An org connected with a token has none,
+and neither does an org that would read 0 while GitHub has not yet told Triage
+Factory whether one of its installations grants every repository, so a
+missing series is not a zero. `GitHubScopeDrift` warns when an org's count stays above zero for
 an hour. The org's admin fixes it: add the repositories to the App's
 installation on GitHub (installing the App on their account if it has none
 there), or untrack them.

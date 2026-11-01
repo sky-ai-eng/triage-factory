@@ -160,9 +160,10 @@ groups:
       # events, tasks or runs. The count is the one the org's GitHub access
       # settings list, read from the grant mirror each GitHub poll cycle
       # refreshes, so it trails GitHub by at most a poll interval and a
-      # minute. Only an org with an App and a selective grant has a series: a
-      # token holds no grant, a grant of every repository cannot be drifted
-      # out of, and one of unknown width is not reported.
+      # minute. It counts repositories on an account the App was uninstalled
+      # from as well as ones a selective grant leaves out. An org connected
+      # with a token has no series, nor does one whose grant mirror has never
+      # been refreshed, so a missing series is not a zero.
       #
       # A warning, not a page: the fault is one org's configuration, which the
       # org's admin fixes on GitHub, and nothing an operator does changes it.

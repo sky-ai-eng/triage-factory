@@ -57,39 +57,47 @@ func grant(selection string) []domain.OrgGitHubAppInstallation {
 }
 
 // TestScopeDriftObserver_ReportsOnlyOrgsWhoseFindingCanBeTrusted: an org with
-// an App, a selective grant and a refreshed mirror reports its count, 0
-// included. Every org whose 0 would mean something other than an all-clear
-// has no series. The count is read count-only.
+// an App and a refreshed mirror reports its count, whatever its grants'
+// width, and a 0 only while none of its grants is of unknown width. Every org
+// whose 0 would mean something other than an all-clear has no series. The
+// count is read count-only.
 func TestScopeDriftObserver_ReportsOnlyOrgsWhoseFindingCanBeTrusted(t *testing.T) {
 	provider, registry := newScrapedProvider(t)
 	noHost := appOrg(domain.GitHubCredentialClassBYOApp)
 	noHost.GitHubBaseURL = ""
+	byo := appOrg(domain.GitHubCredentialClassBYOApp)
 	src := &fakeScopeDriftSource{
-		orgs: []string{"drift", "clear", "pat", "all", "unknown", "mixed", "unrefreshed", "nohost"},
+		orgs: []string{"drift", "clear", "uninstalled", "allclear", "unknowndrift", "unknownclear", "pat", "unrefreshed", "nohost"},
 		settings: map[string]domain.OrgSettings{
-			"drift":       appOrg(domain.GitHubCredentialClassBYOApp),
-			"clear":       appOrg(domain.GitHubCredentialClassManagedApp),
-			"pat":         appOrg(domain.GitHubCredentialClassPAT),
-			"all":         appOrg(domain.GitHubCredentialClassBYOApp),
-			"unknown":     appOrg(domain.GitHubCredentialClassBYOApp),
-			"mixed":       appOrg(domain.GitHubCredentialClassBYOApp),
-			"unrefreshed": appOrg(domain.GitHubCredentialClassBYOApp),
-			"nohost":      noHost,
+			"drift":        byo,
+			"clear":        appOrg(domain.GitHubCredentialClassManagedApp),
+			"uninstalled":  byo,
+			"allclear":     byo,
+			"unknowndrift": byo,
+			"unknownclear": byo,
+			"pat":          appOrg(domain.GitHubCredentialClassPAT),
+			"unrefreshed":  byo,
+			"nohost":       noHost,
 		},
 		installs: map[string][]domain.OrgGitHubAppInstallation{
-			"drift":       grant(domain.RepositorySelectionSelected),
-			"clear":       grant(domain.RepositorySelectionSelected),
-			"pat":         grant(domain.RepositorySelectionSelected),
-			"all":         grant(domain.RepositorySelectionAll),
-			"unknown":     grant(""),
-			"mixed":       append(grant(domain.RepositorySelectionAll), grant(domain.RepositorySelectionSelected)...),
-			"unrefreshed": grant(domain.RepositorySelectionSelected),
-			"nohost":      grant(domain.RepositorySelectionSelected),
+			"drift":        grant(domain.RepositorySelectionSelected),
+			"clear":        grant(domain.RepositorySelectionSelected),
+			"uninstalled":  grant(domain.RepositorySelectionAll),
+			"allclear":     grant(domain.RepositorySelectionAll),
+			"unknowndrift": append(grant(domain.RepositorySelectionSelected), grant("")...),
+			"unknownclear": append(grant(domain.RepositorySelectionAll), grant("")...),
+			"pat":          grant(domain.RepositorySelectionSelected),
+			"unrefreshed":  grant(domain.RepositorySelectionSelected),
+			"nohost":       grant(domain.RepositorySelectionSelected),
 		},
 		refreshed: map[string]bool{
-			"drift": true, "clear": true, "pat": true, "all": true, "unknown": true, "mixed": true, "nohost": true,
+			"drift": true, "clear": true, "uninstalled": true, "allclear": true,
+			"unknowndrift": true, "unknownclear": true, "pat": true, "nohost": true,
 		},
-		drift: map[string]int{"drift": 3, "pat": 9, "all": 9, "unknown": 9, "mixed": 1, "unrefreshed": 9, "nohost": 9},
+		// "uninstalled" tracks repositories on an account its App was
+		// uninstalled from, which its remaining all-repository grant does not
+		// cover.
+		drift: map[string]int{"drift": 3, "uninstalled": 2, "unknowndrift": 4, "pat": 9, "unrefreshed": 9, "nohost": 9},
 	}
 	c := NewScopeDriftObserver(provider, src)
 	defer c.Close()
@@ -102,7 +110,9 @@ func TestScopeDriftObserver_ReportsOnlyOrgsWhoseFindingCanBeTrusted(t *testing.T
 	assertLines(t, scrapeMetric(t, registry, scopeDriftMetric), []string{
 		`tf_github_scope_drift_repos{org_id="drift"} 3`,
 		`tf_github_scope_drift_repos{org_id="clear"} 0`,
-		`tf_github_scope_drift_repos{org_id="mixed"} 1`,
+		`tf_github_scope_drift_repos{org_id="uninstalled"} 2`,
+		`tf_github_scope_drift_repos{org_id="allclear"} 0`,
+		`tf_github_scope_drift_repos{org_id="unknowndrift"} 4`,
 	})
 	for _, opts := range src.driftOpts {
 		if !opts.CountOnly || opts.Limit != 0 || opts.Offset != 0 || opts.After != nil {
