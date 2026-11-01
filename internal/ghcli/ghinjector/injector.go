@@ -151,12 +151,8 @@
 // reports nothing at all, which is nearly all of this endpoint's traffic.
 //
 // The injector makes requests of its own, all reads, through the upstream and
-// credential the write itself used, before reporting an accepted write. When a
-// comment create's response lacks the comment's node id, which is the case for
-// every `gh pr comment`, it reads the comment back (fillCommentNodeID): the
-// comment's deliverable needs that id before a GraphQL delete that names the
-// comment by node id alone can arrive. And it reads what GitHub calls the
-// objects the write names (fillIdentity): the repository's id, and the pull
+// credential the write itself used, before reporting an accepted write: it
+// reads what GitHub calls the objects the write names (fillIdentity): the repository's id, and the pull
 // request's or issue's node id and kind for a write that names one by number,
 // which is what the audit row's entity and repository are resolved from. A
 // GraphQL mutation whose subject is always a pull request or always an issue,
@@ -265,10 +261,9 @@ type Config struct {
 
 	// ObserveWrite, when non-nil, is called for every mutating REST request the
 	// injector forwarded, whatever the outcome — the write audit's callback.
-	// Called inline on the response path, so the callback must not block. A
-	// comment create whose response lacked the comment's node id has it read
-	// back first (fillCommentNodeID), and an accepted write has what GitHub
-	// calls its objects read (fillIdentity), so the observation carries both.
+	// Called inline on the response path, so the callback must not block. An
+	// accepted write has what GitHub calls its objects read first
+	// (fillIdentity), so the observation carries them.
 	ObserveWrite func(ctx context.Context, w ObservedWrite)
 
 	// AuthorizeWrite decides the gated shapes and records their refusals. See
@@ -688,7 +683,6 @@ func (s *Server) auditWrite(resp *http.Response, graphql bool, body []byte) {
 	if len(body) > 0 {
 		w.ExternalID, w.NodeID, w.URL = parseCreatedObject(body)
 	}
-	s.fillCommentNodeID(&w)
 	s.fillIdentity(&w)
 	s.cfg.ObserveWrite(context.Background(), w)
 }
@@ -718,66 +712,8 @@ func (s *Server) auditGraphQLWrite(resp *http.Response, facts *ghwrite.GraphQLFa
 	} else {
 		w.ResponseUnread = true
 	}
-	s.fillCommentNodeID(&w)
 	s.fillIdentity(&w)
 	s.cfg.ObserveWrite(context.Background(), w)
-}
-
-// commentNodeIDTimeout bounds the read fillCommentNodeID makes. The agent's
-// response waits on it, so it is short: reading one comment takes well under a
-// second on a healthy GitHub, and past this the write is reported without the
-// id rather than held.
-const commentNodeIDTimeout = 5 * time.Second
-
-// fillCommentNodeID reads back the node id of a comment the write just
-// created, when the create's response did not carry it. gh's `pr comment`
-// selects only the new comment's url, so its response never does. The id is
-// needed before anything else about the comment arrives: a GraphQL delete
-// names the comment by node id alone and its response names nothing
-// (deleteIssueComment returns only clientMutationId), so the comment's deliverable
-// has to hold the node id first.
-//
-// One GET of the comment, through the upstream and credential the write itself
-// used, made before the write is reported and so before the agent's response is
-// released. Every other write, and a create whose response carried the id, is
-// untouched. A failed read is logged and leaves the id empty; the write is
-// reported either way.
-func (s *Server) fillCommentNodeID(w *ObservedWrite) {
-	if w.NodeID != "" || !w.Succeeded() {
-		return
-	}
-	shape, ok := ghwrite.Resolve(*w)
-	if !ok || shape.Action != domain.ActionCommentPosted || shape.Comment == "" {
-		return
-	}
-	path, ok := ghwrite.CommentPath(shape.Owner, shape.Repo, shape.Comment, shape.ExternalID)
-	if !ok {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), commentNodeIDTimeout)
-	defer cancel()
-	nodeID, err := s.readCommentNodeID(ctx, path, shape.ExternalID)
-	if err != nil {
-		injectorLog.Warn("read back a created comment's node id failed; recording the comment without it",
-			"conversation", s.cfg.ConversationID, "comment", shape.ExternalID, "error", err)
-		return
-	}
-	w.NodeID = nodeID
-}
-
-// readCommentNodeID GETs the comment at path from the REST upstream and returns
-// its node id. The object read back must be the comment asked for: a body
-// naming another id, or no node id, is an error rather than a value.
-func (s *Server) readCommentNodeID(ctx context.Context, path, wantID string) (string, error) {
-	body, err := s.reads.Get(ctx, path)
-	if err != nil {
-		return "", err
-	}
-	id, nodeID, _ := parseCreatedObject(body)
-	if id != wantID || nodeID == "" {
-		return "", fmt.Errorf("GET %s: response names comment %q with node id %q", path, id, nodeID)
-	}
-	return nodeID, nil
 }
 
 // proxyTransport sends the injector's own reads through the transport the
@@ -792,9 +728,9 @@ func (t proxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return http.DefaultTransport.RoundTrip(req)
 }
 
-// identityReadTimeout bounds the reads fillIdentity makes, for the reason
-// commentNodeIDTimeout bounds the comment read: the agent's response waits on
-// them, and past this the write is reported unlinked rather than held.
+// identityReadTimeout bounds the reads fillIdentity makes: the agent's
+// response waits on them, and past this the write is reported unlinked rather
+// than held.
 const identityReadTimeout = 5 * time.Second
 
 // fillIdentity reads what GitHub calls the objects an accepted write names,

@@ -85,7 +85,7 @@ func TestTracedHandlerDropsConcretePathFromServerSpans(t *testing.T) {
 	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
 	t.Cleanup(func() { otel.SetTracerProvider(noop.NewTracerProvider()) })
 
-	s := &Server{mux: http.NewServeMux()}
+	s := &Server{mux: &routeMux{ServeMux: http.NewServeMux()}}
 	s.mux.HandleFunc("PATCH /api/repos/{owner}/{repo}", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})

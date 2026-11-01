@@ -105,7 +105,7 @@ func TestExternalActionStore_SQLite_BranchTwinDedup(t *testing.T) {
 			OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 			Provider: domain.ProviderGitHub, Scope: "https://github.com", Action: domain.ActionBranchPushed,
 			Target: "octo/repo", ExternalID: "refs/heads/feat", URL: url, ConversationID: conversationID,
-			ToState: domain.DeliverableStateBranchPushed, Credential: domain.CredentialGitHubApp, DedupKey: key,
+			ToState: domain.BranchStatePushed, Credential: domain.CredentialGitHubApp, DedupKey: key,
 			PerformedBy: domain.PerformedByAgent,
 		}
 	}

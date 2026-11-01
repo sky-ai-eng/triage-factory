@@ -18,11 +18,11 @@ const (
 	GitHubReviewComment GitHubCommentSpace = "review"
 )
 
-// GitHubCommentKey is the key a GitHub comment's `comment` deliverable is
-// recorded under, from its space and its number: github:comment:<id> for a
-// conversation comment, which is the shape stored rows carry, and
-// github:comment:review:<id> for a review comment. "" for a space outside the
-// two or a number that is not positive, since neither names a comment.
+// GitHubCommentKey is the object_key a GitHub comment is named by, from its
+// space and its number: github:comment:<id> for a conversation comment, which
+// is the shape stored rows carry, and github:comment:review:<id> for a review
+// comment. "" for a space outside the two or a number that is not positive,
+// since neither names a comment.
 func GitHubCommentKey(space GitHubCommentSpace, id int64) string {
 	if id <= 0 {
 		return ""
@@ -30,9 +30,9 @@ func GitHubCommentKey(space GitHubCommentSpace, id int64) string {
 	n := strconv.FormatInt(id, 10)
 	switch space {
 	case GitHubIssueComment:
-		return ObjectKey(ProviderGitHub, DeliverableKindComment, n, "")
+		return ObjectKey(ProviderGitHub, ObjectKindComment, n, "")
 	case GitHubReviewComment:
-		return ObjectKey(ProviderGitHub, DeliverableKindComment, string(GitHubReviewComment), n)
+		return ObjectKey(ProviderGitHub, ObjectKindComment, string(GitHubReviewComment), n)
 	}
 	return ""
 }

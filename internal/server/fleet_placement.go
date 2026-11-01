@@ -194,3 +194,13 @@ func (s *Server) handleFleetPlacement(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, dto)
 }
+
+func (s *Server) registerFleetRoutes() {
+	// Placement explainer: the computed rendezvous candidate order for a key.
+	// Org-admin gated inside the handler on ?org=. Read-only.
+	s.api("GET /api/fleet/placement", s.handleFleetPlacement)
+	// Fleet queue view: per-org active/queued shares + the org's concurrency
+	// cap. Org-admin gated inside the handler on ?org=, like the placement
+	// explainer above. Read-only.
+	s.api("GET /api/fleet/queue", s.handleFleetQueue)
+}

@@ -270,8 +270,8 @@ func decodeMeta[T any](t *testing.T, evt domain.Event) T {
 
 // TestRefreshJira_MoveBetweenConfiguredProjects: an issue moved from one
 // configured project to another is the same entity under its new key. Diffing
-// never pauses, its tasks stay on it, its url and its deliverables' targets follow
-// it, and the move is key_changed, emitted before anything else the cycle
+// never pauses, its tasks stay on it, its url follows it, and the move is
+// key_changed, emitted before anything else the cycle
 // diffs — never unreachable, never a second entity.
 func TestRefreshJira_MoveBetweenConfiguredProjects(t *testing.T) {
 	is := &fakeJiraIssue{ID: "10001", Keys: []string{"ENG-1"}, ProjectID: "100", Status: "In Progress", Assignee: "Alice", Summary: "Fix it", Updated: "2026-10-01T10:00:00.000+0000"}
@@ -284,15 +284,6 @@ func TestRefreshJira_MoveBetweenConfiguredProjects(t *testing.T) {
 		t.Fatalf("entity = %+v, want it created carrying the issue id", before)
 	}
 	taskID := fx.seedTask(t, before.ID)
-	art, err := fx.stores.Deliverables.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, domain.Deliverable{
-		TeamID: runmode.LocalDefaultTeamID, Provider: domain.ProviderJira, Kind: domain.DeliverableKindIssue,
-		Scope: before.Scope, Target: "ENG-1", ExternalID: "10001", State: domain.DeliverableStateIssueUpdated,
-		DedupKey: domain.ObjectKey(domain.ProviderJira, domain.DeliverableKindIssue, domain.JiraIssueResource(jiraSite, "10001"), ""),
-		EntityID: before.ID,
-	})
-	if err != nil {
-		t.Fatalf("seed deliverable: %v", err)
-	}
 
 	fx.jira.update(func() {
 		is.Keys, is.ProjectID, is.Status, is.Updated = append(is.Keys, "OPS-7"), "200", "Review", "2026-10-01T11:00:00.000+0000"
@@ -331,9 +322,6 @@ func TestRefreshJira_MoveBetweenConfiguredProjects(t *testing.T) {
 	}
 	if task, err := fx.stores.Tasks.GetSystem(context.Background(), runmode.LocalDefaultOrgID, taskID); err != nil || task == nil || task.EntityID != before.ID || task.Status != "queued" {
 		t.Errorf("task = %+v err=%v, want it still on the entity and open", task, err)
-	}
-	if a, err := fx.stores.Deliverables.Get(context.Background(), runmode.LocalDefaultOrgID, art.ID); err != nil || a.Target != "OPS-7" || a.DedupKey != art.DedupKey {
-		t.Errorf("deliverable = %+v err=%v, want its target moved and its key kept", a, err)
 	}
 
 	if evts := fx.cycle(t, jiraSite, engAndOps()); len(evts) != 0 {

@@ -249,8 +249,8 @@ type AuthorizeGHWriteReply struct {
 
 // RecordPushArgs is record_push's payload: one branch ref a receive-pack
 // transited plus the upstream's answer for it, mirroring gitproxy.PushedRef
-// across the wire. The orchestrator reshapes it into the same branch deliverable /
-// push-failed row the in-process backstop writes. Repo is the "owner/repo" the
+// across the wire. The orchestrator reshapes it into the same branch_pushed /
+// branch_push_failed row the in-process backstop writes. Repo is the "owner/repo" the
 // proxy parsed from the request path; Created marks a newly-created ref; Status
 // is the receive-pack response code; Rejected, Reason and RemoteMessage carry
 // the response's report-status refusal of the ref and the remote's message

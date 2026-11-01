@@ -322,3 +322,29 @@ func (s *Server) createLocalOrg(w http.ResponseWriter, r *http.Request) {
 		AlreadyProvisioned: alreadyProvisioned,
 	})
 }
+
+func (s *Server) registerOrgRoutes() {
+	// Create the org — the "Start your Factory" onboarding CTA in
+	// both modes. Multi mints a net-new org (403 when org creation is
+	// disabled on the instance); local provisions its single synthetic
+	// tenant, idempotently.
+	s.apiMutating("POST /api/orgs", s.handleOrgCreate)
+	// The canonical single read for an org: the same {id, name, role} row
+	// /api/me carries per membership. Member-visible; a non-member 404s.
+	s.api("GET /api/orgs/{org_id}", s.handleOrgGet)
+
+	// Entitlements probe — the deployment's licensed EE feature set. CORE (it
+	// reports the entitlements checker's state and is NOT itself
+	// license-gated), authenticated-session-only: the answer is
+	// deployment-level (process-global TF_LICENSE), so no org/role scoping.
+	// The frontend's useEntitlements hook reads this once to decide which EE
+	// surfaces to render; [] in a community / unlicensed build. See
+	// entitlements_handler.go.
+	s.api("GET /api/entitlements", s.handleEntitlements)
+
+	// How much of each rate-limit budget the org's credentials have left, as
+	// the processes making its requests last saw it — member-gated like the
+	// sources read, since every member renders an integration's settings card.
+	// See rate_limits_handler.go.
+	s.api("GET /api/orgs/{org_id}/integrations/rate-limits", s.handleOrgRateLimits)
+}

@@ -350,7 +350,7 @@ func (fx *jiraCommentFixture) cycle(t *testing.T) []domain.Event {
 func (fx *jiraCommentFixture) postedByTF(t *testing.T, commentID string) {
 	t.Helper()
 	site, _ := domain.JiraHost(jiraCommentSite)
-	key := domain.ObjectKey(domain.ProviderJira, domain.DeliverableKindComment, domain.JiraIssueResource(site, "10001"), commentID)
+	key := domain.ObjectKey(domain.ProviderJira, domain.ObjectKindComment, domain.JiraIssueResource(site, "10001"), commentID)
 	recordTFComment(t, fx.stores, domain.ProviderJira, site, "SKY-1", key)
 }
 
@@ -608,7 +608,7 @@ func (fx *linearFixture) addComments(n int, cs ...linear.Comment) {
 // `linear issue comment` verb records it with.
 func (fx *linearFixture) postedByTF(t *testing.T, n int, commentID string) {
 	t.Helper()
-	key := domain.ObjectKey(domain.ProviderLinear, domain.DeliverableKindComment, linIssue(n).ID, commentID)
+	key := domain.ObjectKey(domain.ProviderLinear, domain.ObjectKindComment, linIssue(n).ID, commentID)
 	recordTFComment(t, fx.stores, domain.ProviderLinear, fx.workspace, linIssue(n).Identifier, key)
 }
 
@@ -766,7 +766,7 @@ func TestRefreshLinear_FailedCommentReadIsRetried(t *testing.T) {
 	onlyCommented(t, evts, domain.EventLinearIssueCommented)
 }
 
-// TestMarkTFComments_ReadsOnlyItsScope: a comment deliverable recorded in another
+// TestMarkTFComments_ReadsOnlyItsScope: a comment recorded in another
 // workspace does not make a comment TF's.
 func TestMarkTFComments_ReadsOnlyItsScope(t *testing.T) {
 	database := newMigratedSQLite(t)

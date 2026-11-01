@@ -21,7 +21,7 @@ const (
 	// truncated: refs past the cap are missed, never mis-recorded (best-effort).
 	maxReceivePackCapture = 64 << 10
 
-	// recordPushTimeout bounds the deliverable write the backstop kicks off after
+	// recordPushTimeout bounds the ledger write the backstop kicks off after
 	// a push completes, mirroring the pre-push hook's own 30s cap so a wedged
 	// store can never hold the proxy's request handler open indefinitely.
 	recordPushTimeout = 30 * time.Second
@@ -47,7 +47,7 @@ func isReceivePackPush(r *http.Request) bool {
 // path "/owner/repo[.git]/git-receive-pack". The host is definitionally the
 // proxy's configured upstream, so — unlike the pre-push hook, which parses an
 // untrusted remote string and must host-gate it — no host check is needed here;
-// the owner/repo shape is validated downstream by domain.NewBranchDeliverable.
+// the owner/repo shape is validated downstream by domain.IsBranchPush.
 func receivePackRepoPath(p string) string {
 	p = strings.TrimSuffix(p, receivePackSuffix)
 	p = strings.TrimPrefix(p, "/")
@@ -63,7 +63,7 @@ func receivePackRepoPath(p string) string {
 // alive until recording finishes, so a graceful Shutdown waits for it (bounded
 // by recordPushTimeout); the integration test relies on exactly that to
 // synchronize. Every outcome is reported, success and failure alike: the
-// wiring gates deliverable creation on PushedRef.Succeeded and records a refused
+// wiring gates the branch_pushed row on PushedRef.Succeeded and records a refused
 // attempt (a 401/403/5xx, or a ref the report-status refused inside a 2xx —
 // nothing landed) as an audit-only failure row, so the external action log
 // never silently omits a push attempt.
@@ -323,8 +323,8 @@ func isZeroOID(s string) bool {
 // closed. On success it reconstructs the body (buffered block + the still-
 // unread packfile) and proxies it, then reports each ref + the upstream's
 // answer for it to RecordPush exactly like the observe path (the wiring gates
-// deliverables on PushedRef.Succeeded and records a refused push as an audit
-// failure row).
+// the branch_pushed row on PushedRef.Succeeded and records a refused push as
+// an audit failure row).
 func (s *Server) serveReceivePackGated(w http.ResponseWriter, r *http.Request, owner, repo string, decision Decision) {
 	allowedRefs := decision.AllowedRefs
 	block, sawFlush, err := readCommandBlock(r.Body, maxReceivePackCapture)
@@ -380,7 +380,7 @@ func (s *Server) serveReceivePackGated(w http.ResponseWriter, r *http.Request, o
 	rr := &responseRecorder{ResponseWriter: w}
 	s.proxy.ServeHTTP(rr, r)
 
-	// Outcome record (success deliverable / failure audit — the wiring branches
+	// Outcome record (branch_pushed / branch_push_failed — the wiring branches
 	// on each ref's outcome), same contract as the observe path. The command
 	// block is already in hand, so re-parse the non-delete refs and the
 	// capabilities from it rather than re-reading the (consumed) body.

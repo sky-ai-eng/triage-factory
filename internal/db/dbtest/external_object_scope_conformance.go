@@ -3,7 +3,6 @@ package dbtest
 import (
 	"context"
 	"errors"
-	"maps"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -165,41 +164,6 @@ func RunExternalObjectScopeConformance(t *testing.T, mk ExternalObjectScopeFacto
 		}
 		if got, err := s.Deliverables.ListPendingReviewsByEntitySystem(ctx, orgID, ""); err != nil || len(got) != 0 {
 			t.Errorf("ListPendingReviewsByEntitySystem with no entity = %+v, %v; want nothing", got, err)
-		}
-	})
-
-	t.Run("Present_dedup_keys_are_read_on_one_scope", func(t *testing.T) {
-		s, orgID, teamID := mk(t)
-		comment := func(scope, commentID string) string {
-			key := domain.ObjectKey(domain.ProviderLinear, domain.DeliverableKindComment, "uuid-1", commentID)
-			if _, err := s.Deliverables.UpsertSystem(ctx, orgID, domain.Deliverable{
-				TeamID: teamID, Provider: domain.ProviderLinear, Kind: domain.DeliverableKindComment,
-				Scope: scope, Target: "ENG-1", ExternalID: commentID,
-				State: domain.DeliverableStateCommentPosted, DedupKey: key,
-			}); err != nil {
-				t.Fatalf("seed comment %s on %s: %v", commentID, scope, err)
-			}
-			return key
-		}
-		both := comment(hostA, "c-1")
-		comment(hostB, "c-1")
-		onlyA := comment(hostA, "c-2")
-		onlyB := comment(hostB, "c-3")
-		absent := domain.ObjectKey(domain.ProviderLinear, domain.DeliverableKindComment, "uuid-1", "c-4")
-
-		got, err := s.Deliverables.PresentDedupKeysSystem(ctx, orgID, hostA, []string{both, onlyA, onlyB, absent})
-		if err != nil {
-			t.Fatalf("PresentDedupKeysSystem: %v", err)
-		}
-		if want := map[string]bool{both: true, onlyA: true}; !maps.Equal(got, want) {
-			t.Errorf("present on %s = %v, want %v", hostA, got, want)
-		}
-		got, err = s.Deliverables.PresentDedupKeysSystem(ctx, orgID, hostA, nil)
-		if err != nil || len(got) != 0 {
-			t.Errorf("PresentDedupKeysSystem with no keys = %v, %v; want an empty set", got, err)
-		}
-		if _, err := s.Deliverables.PresentDedupKeysSystem(ctx, orgID, "", []string{both}); !errors.Is(err, db.ErrExternalObjectScopeRequired) {
-			t.Errorf("PresentDedupKeysSystem with no scope: err = %v, want ErrExternalObjectScopeRequired", err)
 		}
 	})
 

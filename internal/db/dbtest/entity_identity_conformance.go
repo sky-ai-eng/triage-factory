@@ -335,17 +335,6 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		taskID := seed.Task(t, row.ID, "rename")
 		before, _ := s.Entities.GetSystem(ctx, orgID, row.ID)
 
-		issueArt := upsertIdentityDeliverable(t, s, orgID, seed.TeamID, scope, domain.DeliverableKindIssue, "uuid-4", "ENG-4", "")
-		commentArt := upsertIdentityDeliverable(t, s, orgID, seed.TeamID, scope, domain.DeliverableKindComment, "uuid-4", "ENG-4", "c-1")
-		neighbourArt := upsertIdentityDeliverable(t, s, orgID, seed.TeamID, scope, domain.DeliverableKindIssue, "uuid-41", "ENG-41", "")
-		otherArt := upsertIdentityDeliverable(t, s, orgID, seed.TeamID, "ws-b", domain.DeliverableKindIssue, "uuid-4b", "ENG-4", "")
-		// The scope control: the renamed issue's own dedup key, target and link,
-		// recorded in another workspace's scope. Only the scope separates it,
-		// so it is a second row and the rename leaves it alone.
-		foreignArt := upsertIdentityDeliverable(t, s, orgID, seed.TeamID, "ws-b", domain.DeliverableKindIssue, "uuid-4", "ENG-4", "")
-		if foreignArt == issueArt {
-			t.Fatalf("the ws-b deliverable landed on the ws-a row: the same dedup key in two scopes is two rows")
-		}
 		otherRow, err := s.Entities.GetBySourceSystem(ctx, orgID, "linear", "ws-b", "ENG-4")
 		if err != nil || otherRow == nil {
 			t.Fatalf("read the other workspace's ENG-4: %v, %v", otherRow, err)
@@ -391,25 +380,6 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 			t.Errorf("task = %+v err=%v, want it still on the entity", task, err)
 		}
 
-		// The key carries the UUID, so only the target moves.
-		for _, c := range []struct {
-			id, wantTarget, wantKey string
-		}{
-			{issueArt, "OPS-77", "linear:issue:uuid-4"},
-			{commentArt, "OPS-77", "linear:comment:uuid-4:c-1"},
-			{neighbourArt, "ENG-41", "linear:issue:uuid-41"},
-			{otherArt, "ENG-4", "linear:issue:uuid-4b"},
-			{foreignArt, "ENG-4", "linear:issue:uuid-4"},
-		} {
-			got, err := s.Deliverables.Get(ctx, orgID, c.id)
-			if err != nil || got == nil {
-				t.Fatalf("deliverable %s: %v", c.id, err)
-			}
-			if got.Target != c.wantTarget || got.DedupKey != c.wantKey {
-				t.Errorf("deliverable = target %q key %q, want %q / %q", got.Target, got.DedupKey, c.wantTarget, c.wantKey)
-			}
-		}
-
 		if u, cur := seed.RawActionURL(t, "rename-moved"); u != oldURL+"#comment-c1" || cur != newURL+"#comment-c1" {
 			t.Errorf("moved action url=%q current_url=%q, want the record kept and the pointer moved", u, cur)
 		}
@@ -437,52 +407,6 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		}
 		if _, cur := seed.RawActionURL(t, "rename-non-ascii"); cur != newURL+"#comment-c9" {
 			t.Errorf("current_url = %q, want the pointer moved", cur)
-		}
-	})
-
-	t.Run("RenameSystem_moves_the_renamed_jira_entitys_deliverables", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		const site = "https://acme.atlassian.net"
-		const otherSite = "https://other.atlassian.net"
-		row, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, site, "ENG-5", "10005", TestJiraProject, "t", site+"/browse/ENG-5")
-		if err != nil {
-			t.Fatalf("create: %v", err)
-		}
-		// The same key and id on another site: a different issue.
-		if _, _, err := s.Entities.FindOrCreateJiraSystem(ctx, orgID, otherSite, "ENG-5", "10005", TestJiraProject, "t", otherSite+"/browse/ENG-5"); err != nil {
-			t.Fatalf("create the other site's ENG-5: %v", err)
-		}
-		issueArt := upsertJiraIdentityDeliverable(t, s, orgID, seed.TeamID, domain.DeliverableKindIssue, site, "10005", "ENG-5", "")
-		commentArt := upsertJiraIdentityDeliverable(t, s, orgID, seed.TeamID, domain.DeliverableKindComment, site, "10005", "ENG-5", "20001")
-		otherArt := upsertJiraIdentityDeliverable(t, s, orgID, seed.TeamID, domain.DeliverableKindIssue, otherSite, "10005", "ENG-5", "")
-		// A deliverable linked to no entity is left alone, whatever its target
-		// spells.
-		legacy, err := s.Deliverables.UpsertSystem(ctx, orgID, domain.Deliverable{
-			TeamID: seed.TeamID, Provider: domain.ProviderJira, Kind: domain.DeliverableKindIssue, Scope: site,
-			Target: "ENG-5", ExternalID: "ENG-5", State: domain.DeliverableStateIssueUpdated,
-			DedupKey: domain.ObjectKey(domain.ProviderJira, domain.DeliverableKindIssue, "ENG-5", ""),
-		})
-		if err != nil {
-			t.Fatalf("seed key-shaped deliverable: %v", err)
-		}
-
-		out, err := s.Entities.RenameSystem(ctx, orgID, "jira", site, "10005", "OPS-9", site+"/browse/OPS-9")
-		if err != nil || !out.Renamed || out.EntityID != row.ID {
-			t.Fatalf("rename = %+v err=%v", out, err)
-		}
-		for _, c := range []struct{ id, wantTarget string }{
-			{issueArt, "OPS-9"},
-			{commentArt, "OPS-9"},
-			{otherArt, "ENG-5"},
-			{legacy.ID, "ENG-5"},
-		} {
-			got, err := s.Deliverables.Get(ctx, orgID, c.id)
-			if err != nil || got == nil {
-				t.Fatalf("deliverable %s: %v", c.id, err)
-			}
-			if got.Target != c.wantTarget {
-				t.Errorf("deliverable %s target = %q, want %q", got.DedupKey, got.Target, c.wantTarget)
-			}
 		}
 	})
 
@@ -533,10 +457,6 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 			}
 		}
 		newerRefs := seed.Referents(t, newer.ID)
-		// The newer row's deliverable moves onto the survivor and takes the key
-		// it keeps, NEW-1; a deliverable of no entity under the same key stays.
-		movedArt := upsertJiraIdentityDeliverable(t, s, orgID, seed.TeamID, domain.DeliverableKindIssue, jiraScope, "10001", "OLD-1", "")
-		otherArt := upsertJiraIdentityDeliverable(t, s, orgID, seed.TeamID, domain.DeliverableKindIssue, jiraScope, "10009", "OLD-1", "")
 		// The survivor's own act under the key it stops answering to moves its
 		// link onto the key it keeps; the newer row's act moves onto the
 		// survivor with its link, which already is that key's.
@@ -561,11 +481,6 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		}
 		if byKey, _ := s.Entities.GetBySourceSystem(ctx, orgID, "jira", jiraScope, "NEW-1"); byKey == nil || byKey.ID != older.ID {
 			t.Errorf("NEW-1 resolves to %+v, want the survivor", byKey)
-		}
-		for _, c := range []struct{ id, wantTarget, wantEntity string }{{movedArt, "NEW-1", older.ID}, {otherArt, "OLD-1", ""}} {
-			if a, err := s.Deliverables.Get(ctx, orgID, c.id); err != nil || a == nil || a.Target != c.wantTarget || a.EntityID != c.wantEntity {
-				t.Errorf("deliverable %s = %+v err=%v, want target %q on entity %q", c.id, a, err, c.wantTarget, c.wantEntity)
-			}
 		}
 		for key, wantCurrent := range map[string]string{"merge-moved": jiraScope + "/browse/NEW-1", "merge-repointed": ""} {
 			a := findActionByKey(t, s, orgID, key)
@@ -624,9 +539,8 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		if _, err := s.Entities.MarkClosed(ctx, orgID, newer.ID); err != nil {
 			t.Fatalf("close newer: %v", err)
 		}
-		// The survivor keeps OLD-2, so the closed row's deliverable, recorded
-		// under NEW-2, moves onto it.
-		art := upsertJiraIdentityDeliverable(t, s, orgID, seed.TeamID, domain.DeliverableKindIssue, jiraScope, "10002", "NEW-2", "")
+		// The survivor keeps OLD-2, so the closed row's act, recorded under
+		// NEW-2, moves onto it.
 		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ProviderJira, jiraScope, newer.ID, "NEW-2", jiraScope+"/browse/NEW-2", "merge-closed")
 
 		survivor, err := s.Entities.MergeDuplicateEntitiesSystem(ctx, orgID, older.ID, newer.ID)
@@ -644,9 +558,6 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		}
 		if ok, err := s.Entities.UpdateSnapshotCASSystem(ctx, orgID, older.ID, `{"key":"OLD-2"}`, older.PollSeq); err != nil || ok {
 			t.Errorf("a snapshot CAS on the version read before the merge = ok %v err %v, want a miss", ok, err)
-		}
-		if a, err := s.Deliverables.Get(ctx, orgID, art); err != nil || a == nil || a.Target != "OLD-2" || a.EntityID != older.ID {
-			t.Errorf("deliverable = %+v err=%v, want target OLD-2 on the survivor %s", a, err, older.ID)
 		}
 		if _, cur := seed.RawActionURL(t, "merge-closed"); cur != jiraScope+"/browse/OLD-2" || findActionByKey(t, s, orgID, "merge-closed").EntityID != older.ID {
 			t.Errorf("action current_url = %q, want it on the survivor %s under the survivor's link", cur, older.ID)
@@ -729,17 +640,17 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 				t.Fatalf("seed memory link: %v", err)
 			}
 		}
-		// A comment the run recorded against the stub, under the old name.
-		comment, err := s.Deliverables.UpsertSystem(ctx, orgID, domain.Deliverable{
-			TeamID: seed.TeamID, Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindComment, Scope: scope,
-			Target: "acme/old#5", State: domain.DeliverableStateCommentPosted,
-			DedupKey: domain.GitHubCommentKey(domain.GitHubIssueComment, 9005), EntityID: stub.ID,
+		// A review the run staged against the stub, under the old name.
+		review, err := s.Deliverables.UpsertSystem(ctx, orgID, domain.Deliverable{
+			TeamID: seed.TeamID, Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindReview, Scope: scope,
+			Target: "acme/old#5", State: domain.DeliverableStateReviewPending,
+			DedupKey: domain.ReviewDedupKey("PR_5", "conv-fold"), EntityID: stub.ID,
 		})
 		if err != nil {
-			t.Fatalf("seed the stub's comment deliverable: %v", err)
+			t.Fatalf("seed the stub's review deliverable: %v", err)
 		}
-		// The audit row of that comment, about the stub, linked under the old
-		// name.
+		// The audit row of a comment the run posted on the stub, linked under
+		// the old name.
 		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ProviderGitHub, scope, stub.ID, "acme/old#5",
 			"https://github.com/acme/old/pull/5#issuecomment-9005", "fold-comment")
 		before, _ := s.Entities.GetSystem(ctx, orgID, into.ID)
@@ -782,8 +693,8 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 					c.id, task.EntityID, task.Status, task.CloseReason, c.wantStatus, c.wantReason)
 			}
 		}
-		if a, err := s.Deliverables.Get(ctx, orgID, comment.ID); err != nil || a == nil || a.EntityID != into.ID || a.Target != "acme/new#5" {
-			t.Errorf("comment deliverable = %+v err=%v, want it on the entity %s under its key acme/new#5", a, err, into.ID)
+		if a, err := s.Deliverables.Get(ctx, orgID, review.ID); err != nil || a == nil || a.EntityID != into.ID || a.Target != "acme/new#5" {
+			t.Errorf("review deliverable = %+v err=%v, want it on the entity %s under its key acme/new#5", a, err, into.ID)
 		}
 		// Its audit row moves onto the entity, and its link onto the entity's;
 		// the record of the act keeps the old name.
@@ -1220,64 +1131,6 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 			t.Errorf("a Linear row took the Jira project %q from its snapshot", got)
 		}
 	})
-}
-
-// upsertIdentityDeliverable records a Linear deliverable in workspace scope the way
-// domain.ObjectKey says to key one: on the issue's UUID, with the
-// identifier as its target, linked to the entity carrying the UUID in the
-// scope (identityDeliverableEntity).
-func upsertIdentityDeliverable(t *testing.T, s db.Stores, orgID, teamID, scope, kind, issueID, key, anchor string) string {
-	t.Helper()
-	a, err := s.Deliverables.UpsertSystem(context.Background(), orgID, domain.Deliverable{
-		TeamID: teamID, Provider: domain.ProviderLinear, Kind: kind, Scope: scope,
-		Target: key, ExternalID: issueID + anchor, State: identityDeliverableState(kind),
-		DedupKey: domain.ObjectKey(domain.ProviderLinear, kind, issueID, anchor),
-		EntityID: identityDeliverableEntity(t, s, orgID, domain.ProviderLinear, scope, issueID),
-	})
-	if err != nil {
-		t.Fatalf("seed %s deliverable on %s: %v", kind, key, err)
-	}
-	return a.ID
-}
-
-// upsertJiraIdentityDeliverable records a Jira deliverable the way
-// domain.ObjectKey says to key one: on the issue's site and id, with the
-// key as its target, linked to the entity carrying the id on the site
-// (identityDeliverableEntity).
-func upsertJiraIdentityDeliverable(t *testing.T, s db.Stores, orgID, teamID, kind, site, issueID, key, anchor string) string {
-	t.Helper()
-	a, err := s.Deliverables.UpsertSystem(context.Background(), orgID, domain.Deliverable{
-		TeamID: teamID, Provider: domain.ProviderJira, Kind: kind, Scope: site,
-		Target: key, ExternalID: issueID + anchor, State: identityDeliverableState(kind),
-		DedupKey: domain.ObjectKey(domain.ProviderJira, kind, domain.JiraIssueResource(site, issueID), anchor),
-		EntityID: identityDeliverableEntity(t, s, orgID, domain.ProviderJira, site, issueID),
-	})
-	if err != nil {
-		t.Fatalf("seed jira %s deliverable on %s: %v", kind, key, err)
-	}
-	return a.ID
-}
-
-// identityDeliverableEntity is the entity a deliverable about the issue issueID is
-// linked to, as the exec funnel links it: the one carrying the id in scope, or
-// "" when none does.
-func identityDeliverableEntity(t *testing.T, s db.Stores, orgID, source, scope, issueID string) string {
-	t.Helper()
-	e, err := s.Entities.GetByExternalIDSystem(context.Background(), orgID, source, scope, issueID)
-	if err != nil {
-		t.Fatalf("read the entity carrying %s in %s: %v", issueID, scope, err)
-	}
-	if e == nil {
-		return ""
-	}
-	return e.ID
-}
-
-func identityDeliverableState(kind string) string {
-	if kind == domain.DeliverableKindComment {
-		return domain.DeliverableStateCommentPosted
-	}
-	return domain.DeliverableStateIssueUpdated
 }
 
 func recordIdentityAction(t *testing.T, s db.Stores, orgID, teamID, provider, scope, entityID, key, url, dedupKey string) {

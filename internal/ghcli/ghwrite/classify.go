@@ -94,7 +94,7 @@ type Shape struct {
 	// is in: a conversation comment or a review comment. Empty for every act
 	// that is not one of those three on a comment, a reaction to a comment
 	// included. It is what decides which of the two id spaces ExternalID is
-	// in, so the comment's deliverable is keyed on the pair.
+	// in, so the comment's object key is built from the pair.
 	Comment domain.GitHubCommentSpace
 
 	// ReactsTo is the numbering of the comment a reaction lands on, for a
@@ -348,34 +348,6 @@ func ParseRepoURL(raw string) (owner, repo string, ok bool) {
 		return "", "", false
 	}
 	return segs[0], segs[1], true
-}
-
-// CommentPath is the REST path a comment is read at, from its repository, its
-// numbering and its number: /repos/{o}/{r}/issues/comments/{id} for a
-// conversation comment, /repos/{o}/{r}/pulls/comments/{id} for a review
-// comment. The path is unescaped, for a url's Path. ok is false for a
-// numbering outside the two, a number that is not a positive integer, or an
-// owner or repo that is empty or a dot segment, none of which names a comment.
-func CommentPath(owner, repo string, space domain.GitHubCommentSpace, id string) (string, bool) {
-	n, err := strconv.ParseInt(id, 10, 64)
-	if err != nil || n <= 0 {
-		return "", false
-	}
-	for _, seg := range []string{owner, repo} {
-		if seg == "" || seg == "." || seg == ".." || strings.Contains(seg, "/") {
-			return "", false
-		}
-	}
-	collection := ""
-	switch space {
-	case domain.GitHubIssueComment:
-		collection = "issues"
-	case domain.GitHubReviewComment:
-		collection = "pulls"
-	default:
-		return "", false
-	}
-	return fmt.Sprintf("/repos/%s/%s/%s/comments/%d", owner, repo, collection, n), true
 }
 
 // parseObjectURL scans for the first of the given collection segments with two

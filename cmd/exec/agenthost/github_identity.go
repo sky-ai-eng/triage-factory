@@ -10,9 +10,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/proxy/gitproxy"
 )
 
-// errNoRegistryRow refuses a branch deliverable whose repository no registry row
-// answers for: a branch is keyed on its repository's row id
-// (domain.BranchDedupKey), so without a row there is nothing to key it on.
+// errNoRegistryRow reports a pushed commit whose repository no registry row the
+// run may record against answers for: its signature is stamped with the
+// repository's row (MarkPushedSignature), so without a row there is nothing
+// to stamp.
 var errNoRegistryRow = errors.New("no registry row the run may record against answers to the branch's repository")
 
 // identityReadTimeout bounds the read an exec verb makes for what GitHub calls

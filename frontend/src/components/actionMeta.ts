@@ -266,7 +266,7 @@ export const ACTION_META: Record<string, ActionMeta> = {
     text: 'text-ink-3',
     tone: 'problem',
   },
-  // The push the upstream turned down — nothing landed, so no branch deliverable
+  // The push the upstream turned down — nothing landed, so no branch_pushed row
   // exists and this row is the only trace of the attempt. 'problem' rather than
   // the denials' 'attention' below: those are Triage Factory declining to do
   // something, this is work the agent believed it had done and had not.

@@ -33,8 +33,8 @@ type DeliverablePullRequest struct {
 // Slug is the repository's "owner/repo".
 func (p DeliverablePullRequest) Slug() string { return p.Owner + "/" + p.Repo }
 
-// ResolveDeliverablePullRequest returns the pull request a GitHub pull request,
-// review or comment deliverable is about: the deliverable's entity
+// ResolveDeliverablePullRequest returns the pull request a pull request or
+// review deliverable is about: the deliverable's entity
 // (deliverables.entity_id), the registry row that entity references
 // (entities.repository_id), and the number the entity's key carries. Both are
 // read by id, so the answer is the repository's current name whatever the

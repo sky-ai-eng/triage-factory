@@ -1702,3 +1702,25 @@ func parseMinDuration(s string, floor time.Duration) (time.Duration, error) {
 	}
 	return d, nil
 }
+
+func (s *Server) registerSettingsRoutes() {
+	// The caller's own settings row. Viewer-relative, so the subject comes
+	// from the session and there is no id to address.
+	s.api("GET /api/me/settings", s.handleMeSettingsGet)
+	s.apiMutating("PATCH /api/me/settings", s.handleMeSettingsPatch)
+	// The team's settings row and its Jira project rules, under the team
+	// resource so the path segment the caller asserts is the one the
+	// authorization check is about. The rules are their own replace-set write
+	// rather than a key inside the settings body — a child collection, like
+	// the tracked repos and the github-group mappings, not a field.
+	s.api("GET /api/teams/{team_id}/settings", s.handleTeamSettingsGet)
+	s.apiMutating("PATCH /api/teams/{team_id}/settings", s.handleTeamSettingsPatch)
+
+	// The org's pure CONFIG — hosts, poller cadence, clone transport, spend
+	// governance. Path-scoped like the org's credential resources because
+	// the write is admin-gated, and PATCH rather than POST because it is a
+	// partial update: absent keeps, null clears, and the caller's `version`
+	// makes a concurrent save a 409 instead of a silent overwrite.
+	s.api("GET /api/orgs/{org_id}/settings", s.handleOrgSettingsGet)
+	s.apiMutating("PATCH /api/orgs/{org_id}/settings", s.handleOrgSettingsPatch)
+}

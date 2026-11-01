@@ -475,9 +475,9 @@ func TestGate_UngatedWriteStillTransitsAndAudits(t *testing.T) {
 	g := newGatedRun(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		if r.Method == http.MethodGet {
-			// The injector's read-back of the comment's node id, which the
-			// mutation's selection did not return.
-			_, _ = w.Write([]byte(`{"id":7,"node_id":"IC_kwGate","html_url":"` + commentURL + `"}`))
+			// The injector's identity read of the pull request the comment is
+			// on, which TestInjector_AcceptedWriteCarriesItsIdentity covers.
+			_, _ = w.Write([]byte(`{}`))
 			return
 		}
 		_, _ = w.Write([]byte(`{"data":{"addComment":{"commentEdge":{"node":{"url":"` + commentURL + `"}}}}}`))
@@ -491,8 +491,8 @@ func TestGate_UngatedWriteStillTransitsAndAudits(t *testing.T) {
 	}
 
 	forwarded, decisions := g.snap()
-	if want := []string{"POST /graphql", "GET /repos/acme/widgets/issues/comments/7", "GET /repos/acme/widgets/pulls/841"}; !slices.Equal(forwarded, want) {
-		t.Fatalf("forwarded = %q, want the comment to reach GitHub and then the injector's reads of it and of the pull request it is on %q", forwarded, want)
+	if want := []string{"POST /graphql", "GET /repos/acme/widgets/pulls/841"}; !slices.Equal(forwarded, want) {
+		t.Fatalf("forwarded = %q, want the comment to reach GitHub and then the injector's read of the pull request it is on %q", forwarded, want)
 	}
 	if len(decisions) != 0 {
 		t.Errorf("decisions = %+v, want none — an ungated write is never asked about", decisions)
@@ -507,8 +507,8 @@ func TestGate_UngatedWriteStillTransitsAndAudits(t *testing.T) {
 		if shape.Action != "comment_posted" {
 			t.Errorf("audited act = %q, want comment_posted — its own semantic row", shape.Action)
 		}
-		if shape.ExternalID != "7" || shape.NodeID != "IC_kwGate" {
-			t.Errorf("audited comment = %q / %q, want 7 and the node id read back", shape.ExternalID, shape.NodeID)
+		if shape.ExternalID != "7" {
+			t.Errorf("audited comment = %q, want 7", shape.ExternalID)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("an ungated write left no audit row")

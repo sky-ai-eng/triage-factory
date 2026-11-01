@@ -868,3 +868,22 @@ func (mh *marketplaceHandler) handleMarketplaceInstall(w http.ResponseWriter, r 
 
 	writeJSON(w, http.StatusCreated, resp)
 }
+
+func (s *Server) registerMarketplaceRoutes() {
+	// Within-org prompt marketplace — multi-mode only; every handler opens
+	// with gateMarketplace, which 404s in local mode (see
+	// marketplace_handler.go).
+	mh := &marketplaceHandler{tx: s.tx, az: s.az}
+	s.apiMutating("POST /api/marketplace/listings/list", mh.handleMarketplaceList)
+	s.apiMutating("POST /api/marketplace/listings", mh.handleMarketplacePublish)
+	s.api("GET /api/marketplace/listings/{id}", mh.handleMarketplaceGet)
+	s.apiMutating("POST /api/marketplace/listings/{id}/versions", mh.handleMarketplaceListingVersionCreate)
+	s.apiMutating("POST /api/marketplace/listings/{id}/delist", mh.handleMarketplaceListingDelist)
+	s.apiMutating("POST /api/marketplace/listings/{id}/relist", mh.handleMarketplaceListingRelist)
+	s.apiMutating("PUT /api/marketplace/listings/{id}/vote", mh.handleMarketplaceVote)
+	s.apiMutating("DELETE /api/marketplace/listings/{id}/vote", mh.handleMarketplaceUnvote)
+	s.api("GET /api/marketplace/listings/by-source/{source_id}", mh.handleMarketplaceListingBySource)
+	// Install/"copy to my team" — materializes the listing's
+	// current snapshot into the caller's team as a brand-new fork.
+	s.apiMutating("POST /api/marketplace/listings/{id}/install", mh.handleMarketplaceInstall)
+}

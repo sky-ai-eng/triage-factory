@@ -53,8 +53,8 @@ func RunExternalActionCommentKeysConformance(t *testing.T, mk ExternalActionNode
 		reactedTo     = domain.GitHubCommentKey(domain.GitHubIssueComment, 1004)
 		otherHost     = domain.GitHubCommentKey(domain.GitHubIssueComment, 1005)
 		absent        = domain.GitHubCommentKey(domain.GitHubIssueComment, 1006)
-		jiraComment   = domain.ObjectKey(domain.ProviderJira, domain.DeliverableKindComment, domain.JiraIssueResource(jiraSite, "10042"), "20001")
-		linearComment = domain.ObjectKey(domain.ProviderLinear, domain.DeliverableKindComment, "issue-uuid-1", "comment-uuid-1")
+		jiraComment   = domain.ObjectKey(domain.ProviderJira, domain.ObjectKindComment, domain.JiraIssueResource(jiraSite, "10042"), "20001")
+		linearComment = domain.ObjectKey(domain.ProviderLinear, domain.ObjectKindComment, "issue-uuid-1", "comment-uuid-1")
 	)
 	for _, a := range []domain.ExternalAction{
 		comment(gh, hostA, domain.ActionCommentPosted, domain.PerformedByAgent, conversation),

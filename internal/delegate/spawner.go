@@ -1258,21 +1258,22 @@ func gitDenyNotMaterialized(repoID string) gitproxy.Decision {
 // with the upstream's answer for it; this is where the outcome splits:
 //
 //   - accepted (PushedRef.Succeeded: a 2xx whose report-status did not refuse
-//     the ref — the push landed): shape it into a branch deliverable and upsert
-//     it through the same host-side path the pre-push hook uses —
-//     agenthost.NewLocal → UpsertDeliverableFor, with the repository's GitHub
-//     id the push's observer read (PushedRef.RepositoryID) — so the write routes to the right
-//     pool (admin for an event-triggered run, the kicking-off user's synthetic
-//     claims for a manual one) and lands the ActionBranchPushed audit row in
-//     the same write. The same constructor and sink as the hook, which keys
-//     the row on the repository's registry row, so an (out-of-mode) hook twin
-//     still converges on one row. When one of the org's signatures produced
-//     the tip, it is stamped with the push (MarkPushedSignature), which is
-//     what has the post-push check read the commit.
+//     the ref — the push landed): record its branch_pushed ledger row through
+//     the same host-side path the pre-push hook uses —
+//     agenthost.LocalClient.RecordBranchPushFor, with the repository's GitHub
+//     id the push's observer read (PushedRef.RepositoryID) — which names the
+//     repository by its registry row and keys the row on it, so an
+//     (out-of-mode) hook twin converges on one row. When one of the org's
+//     signatures produced the tip, it is stamped with the push
+//     (MarkPushedSignature), which is what has the post-push check read the
+//     commit.
 //   - refused (a non-2xx, or an "ng" ref inside a 200 — nothing landed):
 //     record ONLY the branch_push_failed audit row, carrying the report's
-//     reason and the remote's message. The audit log never omits an attempt;
-//     the deliverable ledger never gains a branch that doesn't exist.
+//     reason and the remote's message. The audit log never omits an attempt,
+//     and never records a branch as pushed that didn't land.
+//
+// A ref that is not a branch (a tag), or a push to a repository path that is
+// not owner/repo, records neither.
 //
 // host is the run's shared audit client rather than one built here, so the
 // credential the sidecar reports after bring-up reaches this recorder and the
@@ -1282,25 +1283,21 @@ func gitDenyNotMaterialized(repoID string) gitproxy.Decision {
 // every ordinary push transits the proxy (even `git push --no-verify`, which
 // skips client hooks), and the pre-push hook stands down there
 // (githooks.PushCaptureEnvVar) because it fires before the transfer and would
-// record failed pushes as deliverables.
+// record failed pushes as pushed.
 //
-// Best-effort: a non-branch ref or a record failure is dropped (logged), never
-// surfaced. By the time this runs the push has already completed upstream, so
-// nothing it does can block, alter, or fail the push.
-func gitPushRecorder(host *agenthost.LocalClient, info agenthost.ConversationInfo) func(context.Context, gitproxy.PushedRef) {
+// Best-effort: a record failure is dropped (logged and counted by the funnel),
+// never surfaced. By the time this runs the push has already completed
+// upstream, so nothing it does can block, alter, or fail the push.
+func gitPushRecorder(host *agenthost.LocalClient) func(context.Context, gitproxy.PushedRef) {
 	return func(ctx context.Context, push gitproxy.PushedRef) {
-		art, ok := domain.NewBranchDeliverable(push.Repo, push.Ref, push.NewSHA, push.Created)
-		if !ok {
-			return // not a branch ref (tag/other) or an unparseable repo path
+		if !domain.IsBranchPush(push.Repo, push.Ref) {
+			return
 		}
 		if !push.Succeeded() {
 			host.RecordGitPushFailed(ctx, push)
 			return
 		}
-		if _, err := host.UpsertDeliverableFor(ctx, art, agenthost.PushIdentity(push)); err != nil {
-			delegateLog.Warn("git-proxy push capture: record branch deliverable failed",
-				"conversation", info.ConversationID, "repo", push.Repo, "ref", push.Ref, "error", err)
-		}
+		host.RecordBranchPushFor(ctx, push.Repo, push.Ref, push.NewSHA, push.Created, agenthost.PushIdentity(push))
 		host.MarkPushedSignature(ctx, push)
 	}
 }

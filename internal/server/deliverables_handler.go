@@ -230,18 +230,11 @@ func (ah *deliverablesHandler) ghForDeliverable(w http.ResponseWriter, r *http.R
 	return client, pr, true
 }
 
-// handleDeliverableGet serves one deliverable of ANY kind, in the same shape the
+// handleDeliverableGet serves one deliverable in the same shape the
 // conversation-scoped list serves it (deliverableJSON): the kind-independent
 // envelope, with `kind` as the explicit discriminator over a kind-shaped
-// `details` payload. Only the two kinds with a composed representation — a
-// pull request read live from GitHub, a review assembled from its staged draft
-// — do work here; every other kind hands back the details_json the row already
-// stores.
-//
-// Serving every kind is what keeps this route from answering not-found for a
-// deliverable that plainly exists: nonexistence and "no representation for that
-// kind" are different answers, and a branch or comment deliverable reads the same
-// way here as it does in the conversation-scoped list.
+// `details` payload — a pull request read live from GitHub, a review assembled
+// from its staged draft.
 //
 // GET /api/deliverables/{id}
 func (ah *deliverablesHandler) handleDeliverableGet(w http.ResponseWriter, r *http.Request) {
@@ -277,8 +270,6 @@ func (ah *deliverablesHandler) handleDeliverableGet(w http.ResponseWriter, r *ht
 		if out.Details, ok = composedDeliverableDetails(w, art, details); !ok {
 			return
 		}
-	default:
-		out.Details = storedDeliverableDetails(*art)
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -719,7 +710,7 @@ func (ah *deliverablesHandler) handleDeliverableApprove(w http.ResponseWriter, r
 		// fall through to the PR path below
 	default:
 		// The row exists; its kind has nothing to submit. 409, not 404 — a
-		// branch deliverable is not a missing deliverable.
+		// deliverable of a kind this verb does not know is not a missing one.
 		conflict(w, "deliverables of kind "+art.Kind+" cannot be approved")
 		return
 	}
@@ -1036,11 +1027,10 @@ func (ah *deliverablesHandler) handleDeliverableReject(w http.ResponseWriter, r 
 	}
 
 	// Flip the PR deliverable to closed with the rejection recorded on the row (the
-	// resolution note is derived from this row alone), retire the run's branch
-	// deliverable for the same ref rather than leaving it for the reconciler to
-	// notice, and audit both writes — all in one tx, so the audit never
-	// disagrees with the state. The credential is classified before the tx
-	// opens: it can reach GitHub, and the tx must not wait on a round trip.
+	// resolution note is derived from this row alone), and audit the close and
+	// the branch delete — all in one tx, so the audit never disagrees with the
+	// state. The credential is classified before the tx opens: it can reach
+	// GitHub, and the tx must not wait on a round trip.
 	credential := ghclient.CredentialForRepo(cleanupCtx, ah.ghResolver, orgID, owner, repo)
 	details.Resolution = domain.PRResolutionRejected
 	closed := *art
@@ -1052,16 +1042,12 @@ func (ah *deliverablesHandler) handleDeliverableReject(w http.ResponseWriter, r 
 		if _, e := tx.Deliverables.Upsert(cleanupCtx, orgID, closed); e != nil {
 			return e
 		}
-		branchURL, e := retireBranchDeliverable(cleanupCtx, tx, orgID, art.ConversationID, art.Scope, prRef.RepositoryID, repoPath, headRef)
-		if e != nil {
-			return e
-		}
 		if e := tx.ExternalActions.Record(cleanupCtx, orgID,
 			domain.DeliverableAction(art, domain.PerformedByPerson, userID, domain.ActionPRClosed, domain.DeliverableStatePRDraft, domain.DeliverableStatePRClosed, credential)); e != nil {
 			return e
 		}
 		return tx.ExternalActions.Record(cleanupCtx, orgID,
-			branchDeletedAction(art, userID, prRef.RepositoryID, repoPath, headRef, details.HeadBranch, branchURL, credential))
+			branchDeletedAction(art, userID, prRef.RepositoryID, repoPath, headRef, details.HeadBranch, credential))
 	}); err != nil {
 		internalError(w, "deliverables", err)
 		return
@@ -1081,54 +1067,17 @@ func (ah *deliverablesHandler) handleDeliverableReject(w http.ResponseWriter, r 
 	})
 }
 
-// retireBranchDeliverable flips the conversation's `branch` deliverable for headRef
-// in the repository whose registry row is repositoryID, on the GitHub host
-// scope, to deleted, returning its web URL for the audit row. The repository is
-// the pull request's (deliverablePullRequest) — the one the branch delete just
-// went to under its current name, repoPath — and the deliverable is the one keyed
-// on that row and headRef (domain.BranchDedupKey), whatever name its target
-// spells. A conversation with no such deliverable — a push the capture writers
-// missed, a pull request recorded unlinked (no repositoryID), or no
-// conversation at all — is not an error: the PR deliverable carries the rejection
-// on its own, and the returned URL falls back to the branch link on scope's
-// host so the audit row still links somewhere.
-func retireBranchDeliverable(ctx context.Context, tx db.TxStores, orgID, conversationID, scope, repositoryID, repoPath, headRef string) (string, error) {
-	fallbackURL, _ := domain.BranchDeliverableWebURL(scope, repoPath, headRef)
-	if conversationID == "" || repositoryID == "" {
-		return fallbackURL, nil
-	}
-	key := domain.BranchDedupKey(repositoryID, headRef)
-	arts, _, err := tx.Deliverables.ListByConversation(ctx, orgID, conversationID, db.Unwindowed)
-	if err != nil {
-		return "", err
-	}
-	for i := range arts {
-		a := arts[i]
-		if a.Kind != domain.DeliverableKindBranch || a.Scope != scope || a.DedupKey != key {
-			continue
-		}
-		if a.State != domain.DeliverableStateBranchDeleted {
-			a.State = domain.DeliverableStateBranchDeleted
-			if _, err := tx.Deliverables.Upsert(ctx, orgID, a); err != nil {
-				return "", err
-			}
-		}
-		if a.URL != "" {
-			return a.URL, nil
-		}
-		return fallbackURL, nil
-	}
-	return fallbackURL, nil
-}
-
 // branchDeletedAction builds the external_actions row for a rejection's branch
 // delete: a human-authorized, org-executed GitHub write against the PR's repo,
-// keyed on the ref the way branch_pushed is so the two read as one branch's
-// history, and about the repository's registry row (repositoryID, empty for a
-// pull request recorded unlinked). ConversationID is the drafting conversation, the
-// actor the rejecting human, the team the deliverable's.
-func branchDeletedAction(art *domain.Deliverable, userID, repositoryID, repoPath, headRef, branch, url, credential string) domain.ExternalAction {
+// naming the branch by its ref the way branch_pushed does so the two read as
+// one branch's history, and about the repository's registry row (repositoryID,
+// empty for a pull request recorded unlinked). ConversationID is the drafting
+// conversation, the actor the rejecting human, the team the deliverable's. The
+// link is the branch on the deliverable's GitHub host, under the name the
+// delete went to.
+func branchDeletedAction(art *domain.Deliverable, userID, repositoryID, repoPath, headRef, branch, credential string) domain.ExternalAction {
 	detail, _ := json.Marshal(map[string]string{"branch": branch})
+	url, _ := domain.BranchWebURL(art.Scope, repoPath, headRef)
 	act := domain.ExternalAction{
 		TeamID:         art.TeamID,
 		Provider:       domain.ProviderGitHub,
@@ -1138,8 +1087,8 @@ func branchDeletedAction(art *domain.Deliverable, userID, repositoryID, repoPath
 		RepositoryID:   repositoryID,
 		ExternalID:     headRef,
 		URL:            url,
-		FromState:      domain.DeliverableStateBranchPushed,
-		ToState:        domain.DeliverableStateBranchDeleted,
+		FromState:      domain.BranchStatePushed,
+		ToState:        domain.BranchStateDeleted,
 		ConversationID: art.ConversationID,
 		ActorUserID:    userID,
 		Credential:     credential,
@@ -1358,4 +1307,43 @@ func hostOrNotConfigured(host string) string {
 		return "not configured"
 	}
 	return host
+}
+
+func (s *Server) registerDeliverableRoutes() {
+	// Deliverable-id-addressed endpoints back both the GitHub-native PR preview
+	// and the review preview (kind-dispatched inside the handlers). A review
+	// lives on GitHub rather than locally: GET serves the deliverable + its live
+	// pending-review comments, PATCH stages body/event, the comment routes
+	// edit/delete inline comments on that pending review, approve submits it,
+	// and dismiss resolves a single deliverable. The task-level resolve-all runs
+	// once, when the task itself ends (drag-to-Done / dismiss), through
+	// teardownTaskDeliverables.
+	ah := &deliverablesHandler{
+		tx: s.tx, ws: s.ws, ghResolver: s.ghResolver,
+		spawner:    func() *delegate.Spawner { return s.spawner },
+		reconciler: func() *reconcile.Reconciler { return s.reconciler },
+		publicURL: func() string {
+			if s.deployCfg == nil {
+				return ""
+			}
+			return s.deployCfg.publicURL
+		},
+	}
+	// One read for every kind; the writes are kind-scoped sub-resources, so a
+	// review-shaped body can never reach the PR write path.
+	s.api("GET /api/deliverables/{id}", ah.handleDeliverableGet)
+	s.apiMutating("PATCH /api/deliverables/{id}/pr", ah.handleDeliverablePRUpdate)
+	s.apiMutating("PATCH /api/deliverables/{id}/review", ah.handleDeliverableReviewUpdate)
+	s.api("GET /api/deliverables/{id}/diff", ah.handleDeliverableDiff)
+	s.apiMutating("POST /api/deliverables/{id}/approve", ah.handleDeliverableApprove)
+	// Pull requests only: closing one is a real GitHub write. A review is
+	// abandoned through PATCH …/review {state:"dismissed"}.
+	s.apiMutating("POST /api/deliverables/{id}/dismiss", ah.handleDeliverableDismiss)
+	// Dismiss's irreversible sibling: the head branch is deleted from the
+	// upstream as well. Its own verb because the branch delete is the one PR
+	// write that cannot be undone, so the client confirms it explicitly.
+	s.apiMutating("POST /api/deliverables/{id}/reject", ah.handleDeliverableReject)
+	s.apiMutating("POST /api/deliverables/{id}/review/refresh", ah.handleReviewRefresh)
+	s.apiMutating("PATCH /api/deliverables/{id}/comments/{commentId}", ah.handleDeliverableCommentUpdate)
+	s.apiMutating("DELETE /api/deliverables/{id}/comments/{commentId}", ah.handleDeliverableCommentDelete)
 }

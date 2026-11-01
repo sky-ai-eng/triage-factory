@@ -525,24 +525,6 @@ func TestBuildTaskContext_UnmatchedDeliverablesRenderAfterTheArtifacts(t *testin
 	})
 }
 
-func TestBuildTaskContext_OnlyPullRequestAndReviewDeliverablesRenderAlone(t *testing.T) {
-	// A branch or comment deliverable records an object the agent changed,
-	// which the ledger already lists as an artifact; a line of its own would
-	// name the object twice.
-	got := BuildTaskContext(domain.Task{}, "", "", "", []domain.Artifact{
-		artifactAt("branch|r1|refs/heads/fix", domain.ObjectKindBranch, "owner/repo", domain.ActionBranchPushed, "", 5),
-	}, []domain.Deliverable{
-		deliverableAt("d1", domain.DeliverableKindBranch, "owner/repo", "pushed", "", 5),
-		deliverableAt("d2", domain.DeliverableKindComment, "owner/repo#3", "posted", "", 6),
-		deliverableAt("d3", domain.DeliverableKindPullRequest, "owner/repo#3", "draft", "", 7),
-	})
-
-	assertLinesInOrder(t, got, []string{
-		"- Artifact: branch owner/repo — branch_pushed",
-		"- Artifact: pull_request owner/repo#3 — draft",
-	})
-}
-
 func TestBuildTaskContext_NoArtifactsRendersNoLine(t *testing.T) {
 	// The first conversation on a task inherits nothing, which is the common
 	// case: the block must be byte-identical to the pre-artifact contract.
@@ -766,8 +748,7 @@ func TestTaskContext_AnObjectTwoConversationsChangedRendersOnce(t *testing.T) {
 	arts, dels := f.spawner.taskArtifacts(context.Background(), runmode.LocalDefaultOrgID, f.taskID)
 	got := BuildTaskContext(domain.Task{}, "", "", "", arts, dels)
 
-	// The pushes also leave a branch deliverable, pinned to run-1; it names the
-	// same branch, so it adds no line.
+	// Both pushes name one branch, so it is one line.
 	assertLinesInOrder(t, got, []string{
 		"- Artifact: branch octo/repo — branch_pushed — https://github.com/octo/repo/tree/fix",
 		"- Artifact: review octo/repo#7 — pending",

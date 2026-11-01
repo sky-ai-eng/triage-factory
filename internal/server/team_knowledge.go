@@ -829,3 +829,17 @@ func windowEntries(entries []kbstore.FileInfo, offset, limit int) []kbstore.File
 func (s *Server) knowledge() kbstore.KB { return s.teamKB }
 
 func (s *Server) knowledgeNotifier() *knowledgeevent.Notifier { return s.teamKBNotifier }
+
+func (s *Server) registerTeamKnowledgeRoutes() {
+	// The team knowledge base. Addressed at the team that OWNS the knowledge,
+	// in both modes: `shared/` is org-readable, so an org member browsing
+	// another team's published notes calls these same routes on THAT team id
+	// and the roots they may read narrow to shared alone (team_knowledge.go).
+	// The per-file routes carry "<root>/<path…>" in one wildcard segment,
+	// which is the address a listing entry renders and a person can copy.
+	s.apiMutating("POST /api/teams/{team_id}/kb/list", s.handleTeamKnowledgeList)
+	s.apiMutating("POST /api/teams/{team_id}/kb/files", s.handleTeamKnowledgeUpload)
+	s.apiMutating("POST /api/teams/{team_id}/kb/move", s.handleTeamKnowledgeMove)
+	s.api("GET /api/teams/{team_id}/kb/{path...}", s.handleTeamKnowledgeRead)
+	s.apiMutating("DELETE /api/teams/{team_id}/kb/{path...}", s.handleTeamKnowledgeDelete)
+}

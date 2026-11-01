@@ -272,6 +272,12 @@ func (c *Client) request(ctx context.Context, method, path string, body any, acc
 	if err != nil {
 		return nil, fmt.Errorf("request %s: %w", path, err)
 	}
+	// TODO(TFAC-1294): a write a gateway redirects with a 301, 302 or 303 is
+	// followed as a GET and arrives here as that page's 2xx, so a write that
+	// discards its body (DeleteComment, DeleteBranchRef, ClosePR, ...) reports
+	// a change that never happened. Fixing it needs a CheckRedirect that hands
+	// such a redirect back, and this check (and the GraphQL path's) failing
+	// the 3xx it passes.
 	if resp.StatusCode >= 400 {
 		return nil, newStatusError(method+" "+path, resp, data)
 	}

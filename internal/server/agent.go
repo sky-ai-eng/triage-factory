@@ -306,8 +306,8 @@ type conversationDeliverableListRequest struct {
 	httpx.PageRequest
 }
 
-// handleAgentDeliverables returns the deliverables a conversation produced — branch, PR,
-// review, issue, comment — newest first, one page at a time. It reads the
+// handleAgentDeliverables returns the deliverables a conversation prepared — its
+// pull requests and reviews — newest first, one page at a time. It reads the
 // conversation first under request claims, so a conversation the caller's team
 // can't see is a 404 (RLS scopes both reads), never a leak; a member of the
 // owning team gets the list. Backs the conversation detail surface; team-level
@@ -1606,4 +1606,38 @@ func flattenConversationGroups(groups map[string][]map[string]any) []map[string]
 // WSHub returns the websocket hub for use by the delegation spawner.
 func (s *Server) WSHub() *websocket.Hub {
 	return s.ws
+}
+
+func (s *Server) registerAgentRoutes() {
+	ag := &agentHandler{tx: s.tx, ws: s.ws, spawner: func() *delegate.Spawner { return s.spawner }, reconciler: func() *reconcile.Reconciler { return s.reconciler }}
+	s.api("GET /api/agent/conversations/{conversationID}", ag.handleAgentStatus)
+	s.api("GET /api/agent/conversations/{conversationID}/messages", ag.handleMessages)
+	// Conversation-scoped deliverable read: the conversation's deliverables across
+	// every kind, team-scoped via the conversation. Backs the conversation
+	// detail surface.
+	s.apiMutating("POST /api/agent/conversations/{conversationID}/deliverables/list", ag.handleAgentDeliverables)
+	// Conversation-scoped external-action read — the audit log filtered to
+	// this conversation. Its sibling above answers "what objects does this
+	// conversation own"; this answers "what did it do", including the writes
+	// that produce no object at all (a review-thread reply, a refused merge, a
+	// denied push).
+	s.apiMutating("POST /api/agent/conversations/{conversationID}/actions/list", ag.handleAgentActions)
+	// Conversation-scoped artifact read — the objects this conversation
+	// changed, read from the same ledger as the action list above and
+	// grouped per object.
+	s.apiMutating("POST /api/agent/conversations/{conversationID}/artifacts/list", ag.handleAgentArtifacts)
+	// The one conversation-level stop. A second address for it is how `open`
+	// acquires two meanings.
+	s.apiMutating("POST /api/agent/conversations/{conversationID}/stop", ag.handleAgentStop)
+	s.apiMutating("POST /api/agent/conversations/{conversationID}/message", ag.handleMessage)
+	// The pending set behind the demoted `permission_request` frame: the frame
+	// carries only the tool_call_id and every surface reads the prompt from
+	// here, so a refresh / second tab / cold load reconstructs it.
+	s.api("GET /api/agent/conversations/{conversationID}/permissions", ag.handleAgentPermissions)
+	s.apiMutating("POST /api/agent/conversations/{conversationID}/permissions/{toolCallID}", ag.handleAgentPermission)
+	// Tier-2 conversation-scoped deliverable reconcile: the conversation view
+	// polls this while open to refresh that conversation's non-terminal
+	// deliverables against GitHub.
+	s.apiMutating("POST /api/agent/conversations/{conversationID}/deliverables/refresh", ag.handleDeliverableRefresh)
+	s.apiMutating("POST /api/agent/conversations/list", ag.handleConversations)
 }

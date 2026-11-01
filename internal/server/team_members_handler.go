@@ -496,3 +496,20 @@ func writeTeamMemberMutationResult(w http.ResponseWriter, err error) bool {
 	}
 	return false
 }
+
+func (s *Server) registerTeamMemberRoutes() {
+	// Team roster: list members + add + change role + remove/leave. The list
+	// read is the one roster on the surface — the management roster, the
+	// assignee picker and the predicate editor all read it — and answers in
+	// both modes, where {team_id} takes the "default" alias at N=1. The
+	// MUTATORS are multi-mode only (each 404s in local, which has nobody to
+	// enrol). List is any org member; POST/PATCH/DELETE gate
+	// team-admin-or-org-admin (DELETE also allows a self-leave).
+	// VerifyTeamInOrg 404s a cross-org team_id; the last-admin guard is a DB
+	// trigger surfaced as a 409.
+	tmh := &teamMembersHandler{tx: s.tx, az: s.az}
+	s.apiMutating("POST /api/teams/{team_id}/members/list", tmh.handleTeamRosterList)
+	s.apiMutating("POST /api/teams/{team_id}/members", tmh.handleTeamMemberAdd)
+	s.apiMutating("PATCH /api/teams/{team_id}/members/{user_id}", tmh.handleTeamMemberRoleChange)
+	s.apiMutating("DELETE /api/teams/{team_id}/members/{user_id}", tmh.handleTeamMemberRemove)
+}
