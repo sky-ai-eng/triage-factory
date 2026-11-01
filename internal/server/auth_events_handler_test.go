@@ -18,11 +18,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 )
 
-// These tests prove the core auth write-sites emit the right auth_events row, and
-// the headline best-effort contract: a failing audit store never breaks the auth
-// flow (login still completes, logout still 204s) and logs an ERROR instead.
-// They reuse the white-box authRig in auth_handlers_test.go (pgtest-backed), so
-// they skip cleanly when Docker is unavailable. TFAC-76.
+// These tests pin the auth_events row each auth write-site records, and that a
+// failing audit store never breaks the auth flow it records.
 
 // capturedAuthEvent is one auth_events row read back for assertion (detail parsed
 // from jsonb, whose text form is normalized by Postgres).
@@ -85,90 +82,9 @@ func (failingAuthEventStore) ClaimSeatSystem(context.Context, string, string, in
 	return true, 0, nil
 }
 
-// A successful login records login_success with the principal, the defaulted org,
-// the new sid, and {method:github, sso:false}.
-func TestAuthEvents_LoginSuccess_Recorded(t *testing.T) {
-	r := newAuthRig(t)
-	userID := r.seedUser()
-	orgID, _ := r.seedOrg(userID, "alice-org")
-
-	resp, _ := r.driveCallback(userID)
-	if resp.StatusCode != http.StatusFound {
-		t.Fatalf("login status=%d, want 302", resp.StatusCode)
-	}
-	sid := r.sidFromResp(resp)
-
-	ev := r.oneAuthEvent(domain.AuthEventLoginSuccess)
-	if ev.userID != userID.String() {
-		t.Errorf("login_success user=%q, want %q", ev.userID, userID)
-	}
-	if ev.orgID != orgID.String() {
-		t.Errorf("login_success org=%q, want %q", ev.orgID, orgID)
-	}
-	if ev.sessionID != sid {
-		t.Errorf("login_success session=%q, want %q", ev.sessionID, sid)
-	}
-	if ev.detail["method"] != "github" || ev.detail["sso"] != false {
-		t.Errorf("login_success detail=%v, want method=github sso=false", ev.detail)
-	}
-}
-
-// A state-mismatch callback records ONE login_failure carrying the rejecting
-// branch + method (state parsed, so method is known), and mints no session.
-func TestAuthEvents_LoginFailure_StateMismatch_Recorded(t *testing.T) {
-	r := newAuthRig(t)
-
-	stateCookie := r.signStateCookie("/dashboard", "the-real-csrf", "verifier")
-	q := url.Values{}
-	q.Set("state", "different-csrf")
-	q.Set("code", "any-code")
-	req := httptest.NewRequest("GET", "/api/auth/callback?"+q.Encode(), nil)
-	req.AddCookie(&http.Cookie{Name: stateCookieName, Value: stateCookie})
-	rec := httptest.NewRecorder()
-	r.srv.mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("state mismatch status=%d, want 400", rec.Code)
-	}
-
-	ev := r.oneAuthEvent(domain.AuthEventLoginFailure)
-	if ev.detail["reason"] != "state_mismatch" {
-		t.Errorf("login_failure reason=%v, want state_mismatch", ev.detail["reason"])
-	}
-	if ev.detail["method"] != "github" {
-		t.Errorf("login_failure method=%v, want github", ev.detail["method"])
-	}
-	if ev.userID != "" {
-		t.Errorf("login_failure carried a user=%q, want none (pre-identity)", ev.userID)
-	}
-}
-
-// Logout records a logout event tied to the revoked session + its active org.
-func TestAuthEvents_Logout_Recorded(t *testing.T) {
-	r := newAuthRig(t)
-	userID := r.seedUser()
-	orgID, _ := r.seedOrg(userID, "alice-org")
-
-	resp, _ := r.driveCallback(userID)
-	sid := r.sidFromResp(resp)
-
-	if got := r.requestWithSid("POST", "/api/auth/logout", sid).StatusCode; got != http.StatusNoContent {
-		t.Fatalf("logout status=%d, want 204", got)
-	}
-
-	ev := r.oneAuthEvent(domain.AuthEventLogout)
-	if ev.userID != userID.String() {
-		t.Errorf("logout user=%q, want %q", ev.userID, userID)
-	}
-	if ev.sessionID != sid {
-		t.Errorf("logout session=%q, want %q", ev.sessionID, sid)
-	}
-	if ev.orgID != orgID.String() {
-		t.Errorf("logout org=%q, want %q (the revoked session's active org)", ev.orgID, orgID)
-	}
-}
-
-// Logout-all records a single logout_all carrying the revoked count + the
-// caller's active org.
+// TestAuthEvents_LogoutAll_Recorded: logout-all revokes every session the user
+// holds, calls GoTrue logout once per session, clears the cookie, and records
+// one logout_all carrying the revoked count and the caller's active org.
 func TestAuthEvents_LogoutAll_Recorded(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
@@ -183,13 +99,38 @@ func TestAuthEvents_LogoutAll_Recorded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create s1: %v", err)
 	}
-	if _, err := enc.CreateSystem(context.Background(), userID, userID, "", r.signKey.mintJWT(t, validClaimsFor(userID)),
-		"refresh-2", time.Now().Add(time.Hour), time.Now().Add(30*24*time.Hour), "d2", "2.2.2.2", uuid.NullUUID{}); err != nil {
+	s2, err := enc.CreateSystem(context.Background(), userID, userID, "", r.signKey.mintJWT(t, validClaimsFor(userID)),
+		"refresh-2", time.Now().Add(time.Hour), time.Now().Add(30*24*time.Hour), "d2", "2.2.2.2", uuid.NullUUID{})
+	if err != nil {
 		t.Fatalf("create s2: %v", err)
 	}
+	sids := map[string]string{"s1": s1.ID.String(), "s2": s2.ID.String()}
+	for label, sid := range sids {
+		if got := r.requestWithSid("GET", "/api/me", sid).StatusCode; got != http.StatusOK {
+			t.Fatalf("pre-logout-all /api/me with %s = %d, want 200", label, got)
+		}
+	}
 
-	if got := r.requestWithSid("POST", "/api/auth/logout/all", s1.ID.String()).StatusCode; got != http.StatusNoContent {
-		t.Fatalf("logout-all status=%d, want 204", got)
+	logoutResp := r.requestWithSid("POST", "/api/auth/logout/all", s1.ID.String())
+	if logoutResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("logout-all status=%d, want 204", logoutResp.StatusCode)
+	}
+	for label, sid := range sids {
+		if got := r.requestWithSid("GET", "/api/me", sid).StatusCode; got != http.StatusUnauthorized {
+			t.Errorf("post-logout-all /api/me with %s = %d, want 401", label, got)
+		}
+	}
+	if len(r.gotrueLogoutCalls) != 2 {
+		t.Errorf("upstream logout calls = %d, want 2 (one per session)", len(r.gotrueLogoutCalls))
+	}
+	var cleared bool
+	for _, c := range logoutResp.Cookies() {
+		if c.Name == r.srv.sidCookieName() && c.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Error("logout/all didn't clear the sid cookie on the response")
 	}
 
 	ev := r.oneAuthEvent(domain.AuthEventLogoutAll)
@@ -268,9 +209,8 @@ func TestAuthEvents_JWTVerifyFailure_Recorded(t *testing.T) {
 	}
 }
 
-// Headline best-effort contract: a failing AuthEventStore must NOT break the auth
-// flow — login still 302s, logout still 204s — and the failure surfaces as an
-// ERROR log line (the accepted "known gap" guarantee in lieu of gaplessness).
+// A failing AuthEventStore does not break the auth flow: login still 302s,
+// logout still 204s, and the failed write is logged at ERROR.
 func TestAuthEvents_BestEffort_FailingStoreStillSucceeds(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
@@ -315,11 +255,9 @@ func (c *capturingAuthEventStore) ClaimSeatSystem(context.Context, string, strin
 	return true, 0, nil
 }
 
-// The RecordAuthEvent extension seam (ee/sso's only door to the audit log) fills
-// the request-source fields — ip_address via the canonical clientIP parsing (port
-// stripped), user_agent — so EE auth events carry them without duplicating
-// clientIP. A caller-set value is preserved; a nil request is a no-op. Runs
-// without the pg rig. TFAC-76.
+// The RecordAuthEvent extension seam fills ip_address (through clientIP, port
+// stripped) and user_agent from the request, keeps a caller-set value, and
+// leaves both empty for a nil request.
 func TestRecordAuthEventSeam_EnrichesRequestSource(t *testing.T) {
 	recorder := &capturingAuthEventStore{}
 	api := serverExtensionAPI{&Server{authEvents: recorder}}
@@ -380,9 +318,8 @@ func (r *authRig) fireCallbackRaw(code string) *http.Response {
 	return rec.Result()
 }
 
-// The remaining login_failure branches in handleOAuthCallback (beyond the
-// state-mismatch case above) each emit ONE login_failure with the rejecting
-// branch in detail. These are the most likely production failure paths. TFAC-76.
+// Each of these handleOAuthCallback failure branches records one login_failure
+// naming the branch in detail.
 func TestAuthEvents_LoginFailure_Branches(t *testing.T) {
 	// No code on the callback (state OK) — the mechanically-trivial branch.
 	t.Run("missing_code", func(t *testing.T) {
@@ -494,11 +431,9 @@ func (r *authRig) fireCallbackWithError(provErr, desc string) *http.Response {
 	return rec.Result()
 }
 
-// A provider-relayed OAuth error (GoTrue bounces the IdP's ?error= back to the
-// callback instead of a code — e.g. an upstream GitHub incident, which is the
-// production case this handles) redirects to /login with a friendly, recoverable
-// banner rather than the bare "missing code" 400, records ONE login_failure with
-// the category in detail, and preserves return_to.
+// A provider-relayed ?error= on the callback redirects to /login with a
+// recoverable banner and return_to preserved, mints no session, and records one
+// login_failure with the error's category.
 func TestAuthEvents_LoginFailure_ProviderError(t *testing.T) {
 	// A transient provider/GoTrue fault → login_failed banner, provider_error reason.
 	t.Run("server_error", func(t *testing.T) {

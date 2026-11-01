@@ -2,7 +2,6 @@ package server
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"net/http"
 	"testing"
 
@@ -24,12 +23,10 @@ func artifactRow(action, kind, key string) domain.ExternalAction {
 	}
 }
 
-// TestHandleAgentArtifacts_MatchesDeliverables pins the artifact list's item
-// shape and its deliverable match: the pull request's two rows are one
-// artifact matched to the PR deliverable on the entity, the posted review
-// matches the review deliverable carrying its id, and a branch and a review
-// no deliverable carries match nothing. A staged review has no artifact. A
-// pull request displays its entity's key, not the row's.
+// TestHandleAgentArtifacts_MatchesDeliverables pins the artifact item shape and
+// its deliverable match: the PR's two rows are one artifact shown under its
+// entity's key, a posted review matches its deliverable, and a branch, an
+// unmatched review and a staged review match nothing or have no artifact.
 func TestHandleAgentArtifacts_MatchesDeliverables(t *testing.T) {
 	s := newTestServer(t)
 	conversationID := seedSteerConversation(t, s.db, "artmatch", dbtest.SeedConcluded)
@@ -244,9 +241,8 @@ func TestHandleAgentActions_StrictBody(t *testing.T) {
 }
 
 // TestConversationResponse_ArtifactCounts pins artifact_count and
-// artifact_counts on the single read and the batched list: the run's rows
-// counted once per object, TF's own rows not at all, and {} for a
-// conversation that changed nothing.
+// artifact_counts on the single read and the batched list: one per object, TF's
+// own rows not counted, and {} for a conversation that changed nothing.
 func TestConversationResponse_ArtifactCounts(t *testing.T) {
 	s := newTestServer(t)
 	busy := seedSteerConversation(t, s.db, "artcnt", dbtest.SeedConcluded)
@@ -285,22 +281,9 @@ func TestConversationResponse_ArtifactCounts(t *testing.T) {
 			}
 		}
 	}
-	get := func(id string) map[string]any {
-		t.Helper()
-		rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+id, nil)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("GET conversation = %d; body=%s", rec.Code, rec.Body.String())
-		}
-		var m map[string]any
-		if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
-			t.Fatalf("decode: %v", err)
-		}
-		return m
-	}
 	want := map[string]float64{domain.ObjectKindBranch: 1, domain.ObjectKindPullRequest: 1}
-	check("GET busy", get(busy), 2, want)
-	idleResp := get(idle)
-	check("GET idle", idleResp, 0, map[string]float64{})
+	check("GET busy", readConversation(t, s, busy), 2, want)
+	check("GET idle", readConversation(t, s, idle), 0, map[string]float64{})
 
 	convs := listConversations(t, s, fixtureUUID("t_artcnt"))
 	if len(convs) != 1 {

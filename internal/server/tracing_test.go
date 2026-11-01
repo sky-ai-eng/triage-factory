@@ -70,16 +70,9 @@ func TestTraceableRequestExcludesSocketAndProbes(t *testing.T) {
 	}
 }
 
-// TestTracedHandlerDropsConcretePathFromServerSpans drives the real handler
-// chain, so it covers the wiring rather than the scrubber in isolation:
-// tracedHandler has to actually be built against the scrubbing provider.
-//
-// The route matters. TF's API is not all opaque ids — this one is keyed by
-// repository — so the concrete path is a customer's repo name, and
-// otelhttp attaches it as a span-START option, which a SetAttributes-only
-// filter would miss entirely. The span name is what carries the route
-// dimension afterwards, since otelhttp resolves http.route at span start,
-// before ServeMux has populated r.Pattern, and so never sets it.
+// TestTracedHandlerDropsConcretePathFromServerSpans: through the real handler
+// chain, a server span is named by the route pattern and carries no attribute
+// holding the concrete path, which on a repo-keyed route is a customer's repo name.
 func TestTracedHandlerDropsConcretePathFromServerSpans(t *testing.T) {
 	recorder := tracetest.NewSpanRecorder()
 	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))

@@ -19,10 +19,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// orgMembersRig is the multi-mode fixture for the org People roster handler:
-// a real Postgres-backed Server (so RLS + the guard_org_owners trigger are
-// live) plus a fully-wired org with three roles to act as/against — owner O,
-// admin A, member M, all on one default team.
+// orgMembersRig is a Postgres-backed org roster handler, with RLS and the
+// guard_org_owners trigger live, over an org with an owner, an admin and a
+// member on one default team.
 type orgMembersRig struct {
 	h     *pgtest.Harness
 	omh   *orgMembersHandler
@@ -49,9 +48,8 @@ func newOrgMembersRig(t *testing.T) *orgMembersRig {
 	memb := pgtest.SeedUser(t, h, "member")
 	pgtest.AddOrgMember(t, h, memb, orgID, teamID, "member", "member")
 
-	// A real sessions store so the TFAC-487 deprovisioning revoke can be
-	// exercised end-to-end. The closure mirrors server.go's wiring: parse the
-	// string ids the handler carries and call the org-scoped revoke.
+	// A real sessions store, so a removal's session revoke runs end to end. The
+	// closure mirrors server.go's wiring of the org-scoped revoke.
 	var encKey [32]byte
 	if _, err := rand.Read(encKey[:]); err != nil {
 		t.Fatalf("seed session key: %v", err)
@@ -111,11 +109,8 @@ func (r *orgMembersRig) sessionRevoked(t *testing.T, sid uuid.UUID) bool {
 	return revoked
 }
 
-// req builds a request to the roster handler as callerID, with the org_id (and
-// optional user_id) path values set and the caller's claims injected — the
-// state withSession/withOrg would normally seed. We invoke the handler method
-// directly (not through the mux) so the test doesn't need the full cookie-
-// session dance just to exercise authz + RLS.
+// req builds a request as callerID with the org_id (and optional user_id) path
+// values and the claims withSession would seed, for calling the handler directly.
 func (r *orgMembersRig) req(method, callerID, targetID string, body any) *http.Request {
 	var rdr *bytes.Reader
 	if body != nil {
@@ -175,19 +170,14 @@ func (r *orgMembersRig) ownerUserID(t *testing.T) string {
 	return id
 }
 
-// transferReq builds a POST to the transfer-ownership handler as callerID with
-// the { new_owner_user_id } body. It reuses req's path-value + claims wiring;
-// the cosmetic "/members" path is irrelevant since the test invokes the
-// handler method directly (it reads org_id from the path value + the body, not
-// a {user_id} segment).
+// transferReq builds a transfer-ownership POST as callerID naming newOwnerID.
+// The handler reads org_id from the path value and the target from the body.
 func (r *orgMembersRig) transferReq(callerID, newOwnerID string) *http.Request {
 	return r.req(http.MethodPost, callerID, "", map[string]string{"new_owner_user_id": newOwnerID})
 }
 
-// TestOrgMembersList_AnyMemberReads: a plain member (no admin role) can GET
-// the full roster, and each row carries its org role + host-scoped identity
-// readiness — the admin's seeded GitHub login resolves; the others read as
-// "Not connected" (null).
+// TestOrgMembersList_AnyMemberReads: a plain member reads the full roster, each
+// row with its org role and its GitHub login on the org's host, or null.
 func TestOrgMembersList_AnyMemberReads(t *testing.T) {
 	r := newOrgMembersRig(t)
 
@@ -253,9 +243,8 @@ func TestOrgMembersList_AnyMemberReads(t *testing.T) {
 }
 
 // TestOrgMemberRoleChange_NonAdminIsForbidden: a plain member cannot change
-// roles — the org-admin gate answers 403 naming the missing role (a member can
-// see their own org, so a 404 would deny something they can list), and the row
-// is untouched.
+// roles; the answer is 403, not 404, since they can list the roster, and the
+// row is untouched.
 func TestOrgMemberRoleChange_NonAdminIsForbidden(t *testing.T) {
 	r := newOrgMembersRig(t)
 
@@ -358,10 +347,8 @@ func TestOrgMemberRemove_AdminRemovesMember(t *testing.T) {
 	}
 }
 
-// TestOrgMemberRemove_RevokesOrgSession: removing a member revokes the
-// member's session whose active_org_id is this org (TFAC-487 deprovisioning
-// hygiene), but leaves a session of theirs active in ANOTHER org alone
-// (org-scoped revoke, mirroring the WS-kick's org filter).
+// TestOrgMemberRemove_RevokesOrgSession: removing a member revokes their session
+// whose active org is this one, and leaves their session in another org alone.
 func TestOrgMemberRemove_RevokesOrgSession(t *testing.T) {
 	r := newOrgMembersRig(t)
 
@@ -417,10 +404,8 @@ func TestOrgMemberRemove_NonAdminCantRemoveOther(t *testing.T) {
 	}
 }
 
-// TestOrgMemberRemove_SoleOwnerSelfLeaveIs409: the sole owner clicking Leave
-// (a self-delete) trips guard_org_owners — 409, owner still present. This is
-// the dead-end TFAC-420's frontend turns into a "transfer ownership first"
-// prompt instead of a bare error.
+// TestOrgMemberRemove_SoleOwnerSelfLeaveIs409: the sole owner leaving trips
+// guard_org_owners: 409, and the owner is still a member.
 func TestOrgMemberRemove_SoleOwnerSelfLeaveIs409(t *testing.T) {
 	r := newOrgMembersRig(t)
 
@@ -434,10 +419,9 @@ func TestOrgMemberRemove_SoleOwnerSelfLeaveIs409(t *testing.T) {
 	}
 }
 
-// TestOrgOwnershipTransfer_PromotesReassignsDemotes: the owner hands ownership
-// to the admin. The endpoint promotes the target to owner, repoints the
-// founder sentinel orgs.owner_user_id, and demotes the former owner to admin —
-// all in one transaction.
+// TestOrgOwnershipTransfer_PromotesReassignsDemotes: transferring ownership to
+// the admin promotes them to owner, repoints orgs.owner_user_id, and demotes the
+// former owner to admin.
 func TestOrgOwnershipTransfer_PromotesReassignsDemotes(t *testing.T) {
 	r := newOrgMembersRig(t)
 
@@ -457,10 +441,8 @@ func TestOrgOwnershipTransfer_PromotesReassignsDemotes(t *testing.T) {
 	}
 }
 
-// TestOrgOwnershipTransfer_NonOwnerIs403: a non-owner caller can't transfer
-// ownership — whether they're an org admin or a plain member, both hit the same
-// UserOwnsOrg gate, get 403, and nothing moves. (Ownership is the founder
-// sentinel, not the admin role — being an org admin is not enough.)
+// TestOrgOwnershipTransfer_NonOwnerIs403: an org admin and a plain member alike
+// get 403 transferring ownership, and nothing moves; only the owner may.
 func TestOrgOwnershipTransfer_NonOwnerIs403(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

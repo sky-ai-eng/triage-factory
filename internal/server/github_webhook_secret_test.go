@@ -14,10 +14,8 @@ func putFresh(s *Server, orgID, secret string) {
 	s.webhookSecretCachePut(orgID, secret, gen)
 }
 
-// TestWebhookSecretCache_ExpiredEntryIsAMiss pins the TTL as the backstop it
-// is: explicit invalidation is what makes a rotation take effect immediately,
-// but a secret rotated by any path that forgets to call it must still stop
-// being served once the entry ages out.
+// TestWebhookSecretCache_ExpiredEntryIsAMiss: the TTL is the backstop for a
+// rotation path that forgets to invalidate, so an aged-out entry is a miss.
 func TestWebhookSecretCache_ExpiredEntryIsAMiss(t *testing.T) {
 	s := &Server{}
 	const org = "org-1"
@@ -40,11 +38,9 @@ func TestWebhookSecretCache_ExpiredEntryIsAMiss(t *testing.T) {
 	}
 }
 
-// TestWebhookSecretCache_NegativeIsCached distinguishes the two empty answers.
-// A cached negative — "this org has nothing to verify against" — has to be a
-// hit, or the flood it exists to absorb (deliveries aimed at an org with no
-// App, the cheapest one to mount since the caller picks the org id) re-reads
-// the stores on every request.
+// TestWebhookSecretCache_NegativeIsCached: a cached "nothing to verify against"
+// is a hit, distinct from an org never resolved, so a flood at an org with no
+// App does not re-read the stores.
 func TestWebhookSecretCache_NegativeIsCached(t *testing.T) {
 	s := &Server{}
 	putFresh(s, "org-1", "")
@@ -75,11 +71,9 @@ func TestWebhookSecretCache_Invalidate(t *testing.T) {
 	s.invalidateWebhookSecret("org-never-seen")
 }
 
-// TestWebhookSecretCache_BoundedUnderDistinctOrgIDs is the flood case for the
-// cache itself. The org id comes from an unauthenticated URL, so the key space
-// is attacker-chosen: a run of well-formed ids that resolve to nothing must not
-// grow the map without limit, even though every entry inserted is still inside
-// its TTL and so survives the sweep.
+// TestWebhookSecretCache_BoundedUnderDistinctOrgIDs: the org id comes from an
+// unauthenticated URL, so a run of distinct ids, all still within their TTL,
+// must not grow the cache past its bound.
 func TestWebhookSecretCache_BoundedUnderDistinctOrgIDs(t *testing.T) {
 	s := &Server{}
 	for i := 0; i < webhookSecretCacheMax*2; i++ {
@@ -99,17 +93,9 @@ func TestWebhookSecretCache_BoundedUnderDistinctOrgIDs(t *testing.T) {
 	}
 }
 
-// TestWebhookSecretCache_InFlightResolutionCannotOutliveAnInvalidation is the
-// interleaving that makes explicit invalidation worth having at all. A
-// resolution runs outside the lock, so a rotation can land while one is in
-// flight; if that older resolution's write were taken, it would reinstate the
-// pre-rotation secret AFTER the invalidation and serve it for a full TTL — the
-// exact staleness the invalidation was added to prevent, on the exact
-// deliveries that matter (the first ones under the new secret).
-//
-// Sequenced by hand rather than with goroutines: the generation is what orders
-// these two writers, so the test drives the order directly instead of racing
-// for it.
+// TestWebhookSecretCache_InFlightResolutionCannotOutliveAnInvalidation: a
+// resolution started before an invalidation must not cache the old secret
+// after it. Sequenced by hand, since the generation is what orders the writers.
 func TestWebhookSecretCache_InFlightResolutionCannotOutliveAnInvalidation(t *testing.T) {
 	s := &Server{}
 	const org = "org-1"

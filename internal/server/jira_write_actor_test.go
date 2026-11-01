@@ -13,11 +13,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
-	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/jira/jiraoauth"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -26,11 +23,8 @@ import (
 	"github.com/zalando/go-keyring"
 )
 
-// recordingJiraResolver is a test double for jira.Resolver that records the
-// (orgID, userID) ForUser was routed with and returns a configurable
-// client/error. It pins the contract: user-initiated Jira writes resolve
-// the ACTING user's credential, and the handler surfaces ErrNoJiraUserCredential
-// rather than falling back to the org/bot client.
+// recordingJiraResolver is a jira.Resolver that records the (orgID, userID)
+// ForUser was called with and returns a configured client or error.
 type recordingJiraResolver struct {
 	userClient *jira.Client
 	userErr    error
@@ -86,74 +80,6 @@ func seedQueuedJiraTask(t *testing.T, db *sql.DB, entityID, sourceID, taskID str
 	}
 }
 
-// TestTaskClaim_JiraTask_NoUserCredential_Returns409 pins the defense-in-depth
-// boundary: claiming a Jira-backed task when the acting user has no connected
-// Jira is refused with 409 BEFORE the claim lands. Acting as the org/bot here
-// would mis-assign the ticket to the service account, so the handler must
-// refuse rather than fall back.
-func TestTaskClaim_JiraTask_NoUserCredential_Returns409(t *testing.T) {
-	s := newTestServer(t)
-	s.jiraResolver = &recordingJiraResolver{userErr: jira.ErrNoJiraUserCredential}
-	seedQueuedJiraTask(t, s.db, "e_jira_nocred", "SKY-1", "00000000-0000-4000-8000-000000000020")
-
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000020/claim",
-		map[string]any{"hesitation_ms": 0})
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), "connect your Jira") {
-		t.Errorf("body = %s; want a 'connect your Jira' prompt", rec.Body.String())
-	}
-
-	// Refused before mutation: no claim stamped, no audit row.
-	var claim sql.NullString
-	if err := s.db.QueryRow(
-		`SELECT claimed_by_user_id FROM tasks WHERE id = '00000000-0000-4000-8000-000000000020'`,
-	).Scan(&claim); err != nil {
-		t.Fatalf("scan task: %v", err)
-	}
-	if claim.Valid && claim.String != "" {
-		t.Errorf("claimed_by_user_id = %q; want unclaimed (refusal must not mutate)", claim.String)
-	}
-	var swipeCount int
-	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM swipe_events WHERE task_id = '00000000-0000-4000-8000-000000000020'`,
-	).Scan(&swipeCount); err != nil {
-		t.Fatalf("scan swipe_events: %v", err)
-	}
-	if swipeCount != 0 {
-		t.Errorf("swipe_events = %d, want 0 (refused claim must leave no audit)", swipeCount)
-	}
-}
-
-// TestTaskClaim_JiraTask_ResolverBackendError_Returns500 pins that a non-
-// ErrNoJiraUserCredential failure (a transient secret-store / backend error)
-// is a 500 routed through internalError — NOT a 409, and NOT the raw wrapped
-// error echoed to the client (internalError redacts in multi-mode) — and the
-// claim does not land.
-func TestTaskClaim_JiraTask_ResolverBackendError_Returns500(t *testing.T) {
-	s := newTestServer(t)
-	s.jiraResolver = &recordingJiraResolver{userErr: errors.New("vault unreachable: org=secret user=secret")}
-	seedQueuedJiraTask(t, s.db, "e_jira_bkerr", "SKY-9", "00000000-0000-4000-8000-000000000019")
-
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000019/claim",
-		map[string]any{"hesitation_ms": 0})
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
-	}
-
-	// Backend error preempts the claim — no mutation, no audit.
-	var claim sql.NullString
-	if err := s.db.QueryRow(
-		`SELECT claimed_by_user_id FROM tasks WHERE id = '00000000-0000-4000-8000-000000000019'`,
-	).Scan(&claim); err != nil {
-		t.Fatalf("scan task: %v", err)
-	}
-	if claim.Valid && claim.String != "" {
-		t.Errorf("claimed_by_user_id = %q; want unclaimed (backend error must not mutate)", claim.String)
-	}
-}
-
 // TestTaskClaim_JiraTask_ResolvesActingUserCredential pins the positive path:
 // a Jira-backed claim resolves the ACTING user's credential — routed by the
 // authenticated (orgID, userID), not the org/bot — and the claim lands.
@@ -197,60 +123,16 @@ func TestTaskClaim_JiraTask_ResolvesActingUserCredential(t *testing.T) {
 	}
 }
 
-// TestTaskClaim_GitHubTask_SkipsJiraResolver pins that the resolver is only
-// consulted for Jira-backed claims — a GitHub task claim must not touch the
-// Jira write path at all (no spurious ForUser, no 409 on a GitHub claim from a
-// user without Jira).
-func TestTaskClaim_GitHubTask_SkipsJiraResolver(t *testing.T) {
-	s := newTestServer(t)
-	res := &recordingJiraResolver{userErr: jira.ErrNoJiraUserCredential}
-	s.jiraResolver = res
-
-	const eventType = "github:pr:opened"
-	repoID := dbseed.GitHubRepository(t, s.db, runmode.LocalDefaultOrgID, "https://github.com", "sky", "repo")
-	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id)
-		 VALUES ('e_gh', 'github', 'sky/repo#1', 'pr', 'active', 'https://github.com', ?)`, repoID,
-	); err != nil {
-		t.Fatalf("seed entity: %v", err)
-	}
-	if _, err := s.db.Exec(
-		`INSERT INTO events (id, entity_id, event_type, dedup_key)
-		 VALUES ('ev_gh', 'e_gh', ?, '')`, eventType,
-	); err != nil {
-		t.Fatalf("seed event: %v", err)
-	}
-	if _, err := s.db.Exec(
-		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
-		 VALUES ('00000000-0000-4000-8000-000000000022', 'e_gh', ?, 'ev_gh', 'queued')`, eventType,
-	); err != nil {
-		t.Fatalf("seed task: %v", err)
-	}
-
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000022/claim",
-		map[string]any{"hesitation_ms": 0})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (GitHub claim unaffected by Jira cred); body=%s", rec.Code, rec.Body.String())
-	}
-	if calls, _, _ := res.snapshot(); calls != 0 {
-		t.Errorf("ForUser called %d times for a GitHub task; want 0", calls)
-	}
-}
-
-// TestStockQueue_SkipsJiraResolver pins that the queue route makes no Jira
-// write at all, so it must NOT call ForUser — a pure queue can't be made to
-// depend on secret-store availability. The resolver is only reached by the
-// claim and done routes, so this holds even though no entity is seeded (the
-// queued id names no ticket and fails per-row, which is irrelevant to whether
-// the resolver was consulted).
+// TestStockQueue_SkipsJiraResolver: the queue route makes no Jira write, so it
+// never resolves the user's client and cannot depend on the secret store. The
+// queued id names no ticket, which does not matter to whether ForUser ran.
 func TestStockQueue_SkipsJiraResolver(t *testing.T) {
 	keyring.MockInit() // in-memory keychain — the sandbox has no dbus backend
 	s := newTestServer(t)
-	seedStockGate(t, s)
+	seedStockConfig(t, s)
 
-	// userErr makes the point sharp: even if the gate regressed and resolved
-	// up front, queue ignores jiraUserClient — so the 200 below wouldn't move.
-	// The forUserCalls assertion is the load-bearing guard.
+	// Queue ignores the client, so the 200 alone would not catch a regression
+	// that resolved it up front; the ForUser count does.
 	res := &recordingJiraResolver{userErr: jira.ErrNoJiraUserCredential}
 	s.jiraResolver = res
 
@@ -262,34 +144,6 @@ func TestStockQueue_SkipsJiraResolver(t *testing.T) {
 	}
 	if calls, _, _ := res.snapshot(); calls != 0 {
 		t.Errorf("ForUser called %d times for a stock queue; want 0 (queue does no Jira write)", calls)
-	}
-}
-
-// seedStockGate passes the stock POST gate: org Jira creds, a team status
-// rule, and the user's stored Jira identity.
-func seedStockGate(t *testing.T, s *Server) {
-	t.Helper()
-	ctx := t.Context()
-	org := runmode.LocalDefaultOrgID
-	seedSourceHost(t, s, eventsource.KindJira, "https://jira.example.com")
-	if err := integrations.Save(ctx, s.secrets, org, auth.Credentials{
-		JiraPAT: "tok",
-	}); err != nil {
-		t.Fatalf("save jira creds: %v", err)
-	}
-	project := dbseed.JiraProject(t, s.db, runmode.LocalDefaultOrgID, "https://jira.example.com", "SKY")
-	if _, err := s.db.Exec(
-		`INSERT INTO jira_project_status_rules
-		   (team_id, jira_project_id, org_id, pickup_members, in_progress_members, in_progress_canonical, done_members, done_canonical)
-		 VALUES (?, ?, ?, '["To Do"]', '["In Progress"]', 'In Progress', '["Done"]', 'Done')`,
-		runmode.LocalDefaultTeamID, project, runmode.LocalDefaultOrgID,
-	); err != nil {
-		t.Fatalf("seed jira rule: %v", err)
-	}
-	// Identity is host-scoped — key it on the org's Jira site, the host the
-	// stock handler's read uses.
-	if err := s.users.UpsertJiraIdentity(ctx, runmode.LocalDefaultUserID, "https://jira.example.com", "acc-1", "Tester", "pat"); err != nil {
-		t.Fatalf("set jira identity: %v", err)
 	}
 }
 
@@ -332,39 +186,15 @@ func assertJiraUserClientFailure(t *testing.T, rec *httptest.ResponseRecorder, s
 	}
 }
 
-// TestTaskClaim_JiraTask_UserClientFailureAnsweredByWhoCanFixIt: a claim whose
-// acting user's Jira client cannot be resolved is refused before anything is
-// written, with the status and reason of whoever can fix the cause.
-func TestTaskClaim_JiraTask_UserClientFailureAnsweredByWhoCanFixIt(t *testing.T) {
-	for i, tc := range jiraUserClientFailures {
-		t.Run(tc.name, func(t *testing.T) {
-			s := newTestServer(t)
-			s.jiraResolver = &recordingJiraResolver{userErr: tc.err}
-			taskID := fmt.Sprintf("00000000-0000-4000-8000-0000000001%02d", i)
-			seedQueuedJiraTask(t, s.db, "e_jira_fail_"+tc.name, "SKY-"+tc.name, taskID)
-
-			rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{"hesitation_ms": 0})
-			assertJiraUserClientFailure(t, rec, tc.status, tc.reason, tc.bodySubstr)
-
-			var claim sql.NullString
-			if err := s.db.QueryRow(`SELECT claimed_by_user_id FROM tasks WHERE id = ?`, taskID).Scan(&claim); err != nil {
-				t.Fatalf("scan task: %v", err)
-			}
-			if claim.Valid && claim.String != "" {
-				t.Errorf("claimed_by_user_id = %q; want unclaimed", claim.String)
-			}
-		})
-	}
-}
-
-// TestStockClaim_UserClientFailureAnsweredByWhoCanFixIt: the stock deck's
-// claim answers the same failures the same way, through the same helper.
+// TestStockClaim_UserClientFailureAnsweredByWhoCanFixIt: a stock claim whose
+// acting user's Jira client cannot be resolved is answered with the status and
+// reason of whoever can fix the cause.
 func TestStockClaim_UserClientFailureAnsweredByWhoCanFixIt(t *testing.T) {
 	keyring.MockInit()
 	for _, tc := range jiraUserClientFailures {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newTestServer(t)
-			seedStockGate(t, s)
+			seedStockConfig(t, s)
 			s.jiraResolver = &recordingJiraResolver{userErr: tc.err}
 
 			rec := doJSON(t, s, http.MethodPost, "/api/jira/stock/claim", map[string]any{

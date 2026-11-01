@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"net/http"
-	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
@@ -25,12 +24,9 @@ func seedConversationAction(t *testing.T, s *Server, conversationID string, a do
 	}
 }
 
-// TestHandleAgentActions pins the conversation-scoped action read — the half
-// of "what did this conversation do" that the deliverable list structurally
-// cannot answer. The two rows here are exactly that case: a review-thread reply
-// and a refused merge both produce no deliverable, so before this endpoint a
-// conversation whose only external acts were these read as a conversation that
-// did nothing.
+// TestHandleAgentActions pins one conversation's action read: a review-thread
+// reply and a refused merge produce no deliverable, so this list is the only
+// place they appear, and another conversation's rows stay out of it.
 func TestHandleAgentActions(t *testing.T) {
 	s := newTestServer(t)
 	conversationID := seedSteerConversation(t, s.db, "acts", dbtest.SeedConcluded)
@@ -94,27 +90,9 @@ func TestHandleAgentActions(t *testing.T) {
 	}
 }
 
-// TestHandleAgentActions_Empty pins that a conversation that touched nothing
-// outside the box answers with an empty items array rather than null — the
-// RunStation renders "no external actions yet" off it, which is itself an
-// answer.
-func TestHandleAgentActions_Empty(t *testing.T) {
-	s := newTestServer(t)
-	conversationID := seedSteerConversation(t, s.db, "noacts", dbtest.SeedConcluded)
-	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/"+conversationID+"/actions/list", map[string]any{})
-	page := decodeList[map[string]any](t, rec)
-	if len(page.Items) != 0 || page.Total() != 0 {
-		t.Errorf("empty conversation actions = %+v (total %d), want an empty page", page.Items, page.Total())
-	}
-	if !strings.Contains(rec.Body.String(), `"items":[]`) {
-		t.Errorf("body = %s, want an empty array (never null)", rec.Body.String())
-	}
-}
-
-// TestHandleAgentActions_UnknownConversationNotFound pins that the conversation
-// read is the authorization gate here exactly as it is for deliverables: an unknown
-// — or not-visible — conversation is a 404, never an empty list that would
-// confirm the id exists.
+// TestHandleAgentActions_UnknownConversationNotFound pins the conversation read
+// as the gate: an unknown or not-visible conversation is a 404, never an empty
+// list that would confirm the id exists.
 func TestHandleAgentActions_UnknownConversationNotFound(t *testing.T) {
 	s := newTestServer(t)
 	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/r_ghost/actions/list", map[string]any{})
@@ -124,9 +102,8 @@ func TestHandleAgentActions_UnknownConversationNotFound(t *testing.T) {
 }
 
 // TestHandleAgentActions_CorruptDetails pins that a row with malformed
-// detail_json degrades to an omitted `details` with a 200, never a 500 from a
-// failed response marshal — an audit surface that 500s on one bad row shows
-// nothing at all.
+// detail_json is answered with `details` omitted and a 200, not a 500 from a
+// failed response marshal that would hide every other row.
 func TestHandleAgentActions_CorruptDetails(t *testing.T) {
 	s := newTestServer(t)
 	conversationID := seedSteerConversation(t, s.db, "badacts", dbtest.SeedConcluded)

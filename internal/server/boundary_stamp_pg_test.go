@@ -48,55 +48,9 @@ func teamArchiveConversation(t *testing.T, r *teamArchiveRig, status any) string
 	return id
 }
 
-// TestTeamArchive_EndsEveryUnEndedConversationTheTeamHolds: archiving a team
-// ends its work, and the stamp is wider than the stop it follows on both
-// axes. This rig wires no spawner, so nothing is stopped at all — which is
-// exactly the case that matters: a conversation left un-ended because its
-// executor was unreachable, and one left un-ended because its blueprint had
-// already finished, both stay resumable on a team nobody can see.
-func TestTeamArchive_EndsEveryUnEndedConversationTheTeamHolds(t *testing.T) {
-	r := newTeamArchiveRig(t)
-
-	midFlight := teamArchiveConversation(t, r, nil)
-	parked := teamArchiveConversation(t, r, "open")
-	concluded := teamArchiveConversation(t, r, dbtest.SeedConcluded)
-
-	// A boundary that already happened is the one that happened.
-	alreadyEnded := teamArchiveConversation(t, r, dbtest.SeedConcluded)
-	pgtest.MustExec(t, r.h.AdminDB,
-		`UPDATE conversations SET ended_at = now(), ended_reason = $2 WHERE id = $1`,
-		alreadyEnded, string(domain.EndedTakenOver))
-	// A subagent ends with its spawner, never with the team.
-	subagent := teamArchiveConversation(t, r, nil)
-	pgtest.MustExec(t, r.h.AdminDB,
-		`UPDATE conversations SET parent_conversation_id = $2 WHERE id = $1`, subagent, midFlight)
-
-	rec := httptest.NewRecorder()
-	r.th.handleTeamArchive(rec, r.req(http.MethodPost, "/api/teams/"+r.teamID+"/archive", r.owner, r.teamID))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-
-	for _, id := range []string{midFlight, parked, concluded} {
-		if ended, reason := pgConversationBoundary(t, r.h, id); !ended || reason != string(domain.EndedTeamArchived) {
-			t.Errorf("%s boundary = (ended=%v, reason=%q), want a stamp with reason %q",
-				id, ended, reason, domain.EndedTeamArchived)
-		}
-	}
-	if ended, reason := pgConversationBoundary(t, r.h, subagent); ended || reason != "" {
-		t.Errorf("subagent %s boundary = (ended=%v, reason=%q), want none — it is its spawner's",
-			subagent, ended, reason)
-	}
-	if _, reason := pgConversationBoundary(t, r.h, alreadyEnded); reason != string(domain.EndedTakenOver) {
-		t.Errorf("already-ended conversation %s now reads %q, want its original %q",
-			alreadyEnded, reason, domain.EndedTakenOver)
-	}
-}
-
 // TestTaskReassign_StampsNothing: a user→user handoff is not a boundary. The
-// task does not move on — the same work continues under a new owner — so the
-// conversation it is about is still the one it is about, and a stamp would
-// tell the next reader the work restarted when it did not.
+// same work continues under a new owner, so a stamp would tell the next reader
+// the work restarted when it did not.
 func TestTaskReassign_StampsNothing(t *testing.T) {
 	r := newViewerRig(t)
 
@@ -148,15 +102,10 @@ func TestTaskReassign_StampsNothing(t *testing.T) {
 	}
 }
 
-// TestTeamArchive_RingsTheMemoryDoorbellForEveryConversationItStamped: an
-// archived team's runs are the clearest case for generating a memory from the
-// transcript — nobody is going back to write one by hand — so each stamp rings.
-//
-// Once per stamped row and no more: the door returns what it stamped, so a row
-// that had already ended is not among them — whatever it owes was rung for by
-// the boundary that actually ended it. A conversation whose transcript had
-// concluded IS among them: it was still un-ended, and the archive is the
-// boundary it never got.
+// TestTeamArchive_RingsTheMemoryDoorbellForEveryConversationItStamped: archiving
+// a team ends every un-ended conversation it holds, concluded ones included, and
+// rings the memory doorbell once per row it stamped. The rig wires no spawner, so
+// nothing is stopped: the stamp is wider than the stop.
 func TestTeamArchive_RingsTheMemoryDoorbellForEveryConversationItStamped(t *testing.T) {
 	r := newTeamArchiveRig(t)
 	d := &doorbell{}
@@ -166,17 +115,35 @@ func TestTeamArchive_RingsTheMemoryDoorbellForEveryConversationItStamped(t *test
 	parked := teamArchiveConversation(t, r, "open")
 	concluded := teamArchiveConversation(t, r, dbtest.SeedConcluded)
 
-	// Already ended: whatever it owes was rung for by the boundary that
-	// actually ended it, so this archive neither stamps nor rings.
+	// Already ended: it keeps the boundary that ended it, and whatever it owes
+	// was rung for then, so this archive neither stamps nor rings.
 	alreadyEnded := teamArchiveConversation(t, r, "open")
 	pgtest.MustExec(t, r.h.AdminDB,
 		`UPDATE conversations SET ended_at = now(), ended_reason = $2 WHERE id = $1`,
 		alreadyEnded, string(domain.EndedTakenOver))
+	// A subagent ends with its spawner, never with the team.
+	subagent := teamArchiveConversation(t, r, nil)
+	pgtest.MustExec(t, r.h.AdminDB,
+		`UPDATE conversations SET parent_conversation_id = $2 WHERE id = $1`, subagent, midFlight)
 
 	rec := httptest.NewRecorder()
 	r.th.handleTeamArchive(rec, r.req(http.MethodPost, "/api/teams/"+r.teamID+"/archive", r.owner, r.teamID))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	for _, id := range []string{midFlight, parked, concluded} {
+		if ended, reason := pgConversationBoundary(t, r.h, id); !ended || reason != string(domain.EndedTeamArchived) {
+			t.Errorf("%s boundary = (ended=%v, reason=%q), want a stamp with reason %q",
+				id, ended, reason, domain.EndedTeamArchived)
+		}
+	}
+	if ended, reason := pgConversationBoundary(t, r.h, subagent); ended || reason != "" {
+		t.Errorf("subagent %s boundary = (ended=%v, reason=%q), want none", subagent, ended, reason)
+	}
+	if _, reason := pgConversationBoundary(t, r.h, alreadyEnded); reason != string(domain.EndedTakenOver) {
+		t.Errorf("already-ended conversation %s now reads %q, want its original %q",
+			alreadyEnded, reason, domain.EndedTakenOver)
 	}
 
 	got := d.taken()

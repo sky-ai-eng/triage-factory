@@ -10,13 +10,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// TestSteerErrorStatus locks the SendMessage/Interrupt error → (HTTP code,
-// reason) map the message and interrupt endpoints depend on: a not-right-now
-// run state (no live process, not steerable, lost resume race) is 409 CONFLICT
-// so the client re-checks, a concluded conversation is 409 ALREADY_TERMINAL
-// (the same answer /stop gives), an expired workspace is 410 Gone (retry won't
-// help), and everything else is 500 — which the handler routes through
-// internalError rather than surfacing the raw text.
+// TestSteerErrorStatus pins the SendMessage error → (status, reason) map: a
+// not-right-now state is 409 CONFLICT, a concluded or cancelled one 409
+// ALREADY_TERMINAL, an expired workspace 410, and anything else 500.
 func TestSteerErrorStatus(t *testing.T) {
 	cases := []struct {
 		name       string

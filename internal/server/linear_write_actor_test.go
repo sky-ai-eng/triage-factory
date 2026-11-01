@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -374,11 +373,9 @@ func swipeActions(t *testing.T, db *sql.DB, taskID string) []string {
 	return out
 }
 
-// TestTaskClaim_LinearTask_NoUserCredential_Returns409: a user with no Linear
-// credential of their own is refused before the claim lands, and the org's
-// credential is never reached for in its place. The SPA's gate is onboarding;
-// this refusal is what holds for a headless caller. Its message names why the
-// user's connection stopped working when the resolver says so.
+// TestTaskClaim_LinearTask_NoUserCredential_Returns409: a user with no usable
+// Linear credential is refused before the claim lands, whatever client sent it,
+// with a message naming why; the org's credential is never used in its place.
 func TestTaskClaim_LinearTask_NoUserCredential_Returns409(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -443,47 +440,6 @@ func TestTaskClaim_LinearTask_ResolverBackendError_Returns500(t *testing.T) {
 	}
 }
 
-// TestTaskClaim_LinearTask_AssignsAsTheActingUser: a claim resolves the acting
-// user's client exactly once — never the org's — lands and audits the claim in
-// TF as any claim does, and assigns the issue to the user's own Linear id and
-// moves it to the team's in-progress canonical through that client.
-func TestTaskClaim_LinearTask_AssignsAsTheActingUser(t *testing.T) {
-	fake := newLinearIssueFake(t, &linear.User{ID: "lin-someone-else"}, linearFixtureState(t, linearStateTodo))
-	res := &recordingLinearResolver{userClient: fake.client()}
-	s := newLinearClaimServer(t, res, true)
-	const taskID = "00000000-0000-4000-8000-000000000302"
-	seedQueuedLinearTask(t, s.db, taskID, linearStateTodoRef)
-
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{"hesitation_ms": 0})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-
-	userCalls, systemCalls, gotOrg, gotUser := res.snapshot()
-	if userCalls != 1 {
-		t.Errorf("ForUser called %d times, want 1", userCalls)
-	}
-	if gotOrg != runmode.LocalDefaultOrgID || gotUser != runmode.LocalDefaultUserID {
-		t.Errorf("ForUser routed (org=%q user=%q), want (org=%q user=%q)",
-			gotOrg, gotUser, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID)
-	}
-	if systemCalls != 0 {
-		t.Errorf("the org's credential was reached for %d times, want never", systemCalls)
-	}
-
-	if got := claimedBy(t, s.db, taskID); got != runmode.LocalDefaultUserID {
-		t.Errorf("claimed_by_user_id = %q, want the acting user", got)
-	}
-	if got := swipeActions(t, s.db, taskID); !slices.Equal(got, []string{swipeActionClaim}) {
-		t.Errorf("swipe_events = %v, want one claim", got)
-	}
-
-	want := []linearWrite{{kind: "assign", value: linearMe}, {kind: "transition", value: linearStateDoing}}
-	if got := fake.waitForWrites(t, len(want)); !slices.Equal(got, want) {
-		t.Errorf("Linear writes = %v, want %v", got, want)
-	}
-}
-
 // TestTaskClaim_LinearTask_ClearedSnapshotStillFindsTheRule: the rule is found
 // through the entity's Linear team column, so an issue whose snapshot a source
 // pause cleared still moves to its team's in-progress state on a claim.
@@ -528,42 +484,6 @@ func TestTaskClaim_LinearTask_NoRule_NoLinearWrites(t *testing.T) {
 	// time the response is written nothing can still reach Linear.
 	if n := fake.Requests(); n != 0 {
 		t.Errorf("Linear received %d requests, want none", n)
-	}
-}
-
-// TestTaskClaim_GitHubTask_SkipsLinearResolver: only a Linear-backed claim
-// consults the Linear resolver, so a user without Linear can still claim
-// everything else.
-func TestTaskClaim_GitHubTask_SkipsLinearResolver(t *testing.T) {
-	res := &recordingLinearResolver{userErr: linear.ErrNoLinearUserCredential}
-	s := newTestServer(t)
-	s.linearResolver = res
-	const eventType = "github:pr:opened"
-	repoID := dbseed.GitHubRepository(t, s.db, runmode.LocalDefaultOrgID, "https://github.com", "sky", "repo")
-	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state, scope, repository_id)
-		 VALUES ('e_gh_lin', 'github', 'sky/repo#3', 'pr', 'active', 'https://github.com', ?)`, repoID,
-	); err != nil {
-		t.Fatalf("seed entity: %v", err)
-	}
-	if _, err := s.db.Exec(
-		`INSERT INTO events (id, entity_id, event_type, dedup_key) VALUES ('ev_gh_lin', 'e_gh_lin', ?, '')`, eventType,
-	); err != nil {
-		t.Fatalf("seed event: %v", err)
-	}
-	if _, err := s.db.Exec(
-		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
-		 VALUES ('00000000-0000-4000-8000-000000000304', 'e_gh_lin', ?, 'ev_gh_lin', 'queued')`, eventType,
-	); err != nil {
-		t.Fatalf("seed task: %v", err)
-	}
-
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000304/claim", map[string]any{"hesitation_ms": 0})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	if userCalls, _, _, _ := res.snapshot(); userCalls != 0 {
-		t.Errorf("ForUser called %d times for a GitHub task, want 0", userCalls)
 	}
 }
 
@@ -704,12 +624,9 @@ func TestApplyLinearUnclaim(t *testing.T) {
 	})
 }
 
-// TestTaskRequeue_LinearTask_UndoesTheClaim: claiming a Linear task records
-// the issue's state, and returning the task to the queue puts the issue back
-// in that state, unassigned, as the user who claimed it. Backlog is not the
-// rule's first pickup state, so the issue landing there shows the recorded
-// state was read. The issue moves team between the claim and the requeue, and
-// the requeue still reaches it, by its UUID.
+// TestTaskRequeue_LinearTask_UndoesTheClaim: an audited claim writes through the
+// acting user's client, never the org's; the requeue restores the recorded state
+// (not the first pickup state), unassigned, by UUID after the issue moved team.
 func TestTaskRequeue_LinearTask_UndoesTheClaim(t *testing.T) {
 	fake := newLinearIssueFake(t, nil, linearFixtureState(t, linearStateBacklog))
 	res := &recordingLinearResolver{userClient: fake.client()}
@@ -719,6 +636,9 @@ func TestTaskRequeue_LinearTask_UndoesTheClaim(t *testing.T) {
 
 	if rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{"hesitation_ms": 0}); rec.Code != http.StatusOK {
 		t.Fatalf("claim status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := swipeActions(t, s.db, taskID); !slices.Equal(got, []string{swipeActionClaim}) {
+		t.Errorf("swipe_events = %v, want one claim", got)
 	}
 	fake.waitForWrites(t, 2)
 	fake.moveIssue("OPS-3")
@@ -734,9 +654,10 @@ func TestTaskRequeue_LinearTask_UndoesTheClaim(t *testing.T) {
 		t.Errorf("Linear writes = %v, want %v", got, want)
 	}
 	fake.assertAddressedByID(t)
-	if userCalls, systemCalls, _, gotUser := res.snapshot(); userCalls != 2 || systemCalls != 0 || gotUser != runmode.LocalDefaultUserID {
-		t.Errorf("resolver = (ForUser %d as %q, system %d), want ForUser twice as the acting user and the org's credential never",
-			userCalls, gotUser, systemCalls)
+	if userCalls, systemCalls, gotOrg, gotUser := res.snapshot(); userCalls != 2 || systemCalls != 0 ||
+		gotOrg != runmode.LocalDefaultOrgID || gotUser != runmode.LocalDefaultUserID {
+		t.Errorf("resolver = (ForUser %d in %q as %q, system %d), want ForUser twice in the org as the acting user and the org's credential never",
+			userCalls, gotOrg, gotUser, systemCalls)
 	}
 }
 

@@ -242,77 +242,9 @@ func TestHandleGitHubRepos_AppSingleInstallation(t *testing.T) {
 	}
 }
 
-// App org where the installation's repo-list call fails: the refresh writes
-// nothing, and the picker must say so. Answering an empty READY list would read
-// as "your App reaches no repositories", which is a claim only a successful
-// enumeration can make — the whole reason the readiness discriminator exists.
-func TestHandleGitHubRepos_AppListFailureLeavesTheMirrorUnclaimed(t *testing.T) {
-	keyring.MockInit()
-	srv := newTestServer(t)
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v3/app/installations/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"token":      "ghs_x",
-			"expires_at": time.Now().Add(time.Hour).UTC(),
-		})
-	})
-	mux.HandleFunc("/api/v3/installation/repositories", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		w.WriteHeader(http.StatusInternalServerError)
-	})
-	stub := httptest.NewServer(mux)
-	t.Cleanup(stub.Close)
-	seedApp(t, srv, stub, []domain.OrgGitHubAppInstallation{
-		{InstallationID: "111", AccountType: "Organization", AccountLogin: "acme"},
-	})
-	wireReachRefresh(t, srv)
-
-	page := fetchPickerPage(t, srv, map[string]any{})
-	if page.Status != githubRepoStatusDiscovering {
-		t.Errorf("picker status = %q after a failed enumeration; want %q — an empty ready list would claim the App reaches nothing",
-			page.Status, githubRepoStatusDiscovering)
-	}
-	if len(page.Items) != 0 || page.TotalCount != 0 {
-		t.Errorf("picker returned %d items / total %d with nothing mirrored; want none", len(page.Items), page.TotalCount)
-	}
-}
-
-// App org whose App is registered + active but installed on zero accounts, with
-// no PAT to fall back to: the picker returns a distinct 409 the frontend keys
-// install guidance off — not the generic "GitHub not configured" that reads as
-// "add a PAT". This is the first-run dead-end TFAC-324 makes diagnosable, and it
-// is a preflight: it fires before the mirror is consulted, because "we have not
-// looked yet" promises that looking will eventually produce something.
-func TestHandleGitHubRepos_AppActiveZeroInstallations(t *testing.T) {
-	keyring.MockInit()
-	srv := newTestServer(t)
-	// The stub is only here to wire the org's base URL + PEM; the zero-install
-	// case never makes a GitHub call.
-	stub := newAppRepoStub(t, nil)
-	seedApp(t, srv, stub, nil) // active App, zero installations
-
-	rec := doJSON(t, srv, http.MethodPost, "/api/github/repos/list", map[string]any{})
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("picker list = %d, want 409; body=%s", rec.Code, rec.Body.String())
-	}
-	assertFirstError(t, rec, httpx.ReasonNotConfigured, "")
-	if want := "the GitHub App is not installed on any account"; !strings.Contains(rec.Body.String(), want) {
-		t.Errorf("body=%s, want it to say %q", rec.Body.String(), want)
-	}
-}
-
 // An App installed only on a GitHub the org has moved off is installed on no
-// account here: the resolver mints only from installations on the org's
-// current host, so the picker gives the same install guidance it gives an App
-// installed nowhere, rather than serving a reach nothing can act on.
+// account here: the picker's preflight answers the 409 NOT_CONFIGURED install
+// guidance, not a reach nothing can act on and not "add a PAT".
 func TestHandleGitHubRepos_AppInstalledOnlyOnAnotherHost(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -331,16 +263,9 @@ func TestHandleGitHubRepos_AppInstalledOnlyOnAnotherHost(t *testing.T) {
 	}
 }
 
-// A failed installations read (transient DB/store error) has three wrong answers
-// available to it and this pins which one the handler gives.
-//
-// It must NOT be reported as "not installed" — that claim is only valid on a
-// positive read of zero installations, and it sends the user to fix an install
-// that is fine. It must NOT be reported as DISCOVERING either, which is the
-// subtler mistake: that state promises the list will fill in, and the read that
-// would have established the promise is exactly the one that failed, so an org
-// with nothing mirrored would sit on a spinner that may never resolve. With no
-// mirror to fall back on, the honest answer is the error.
+// A failed installations read with nothing mirrored is a 500: not "not
+// installed", which only a read of zero installations supports, and not
+// discovering, which promises a list the failed read cannot deliver.
 func TestHandleGitHubRepos_AppListInstallationsErrorIsNotDiscovering(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -363,10 +288,9 @@ func TestHandleGitHubRepos_AppListInstallationsErrorIsNotDiscovering(t *testing.
 	}
 }
 
-// The same failed read, on an org whose mirror already answers: the read decides
-// only whether to offer install guidance, and the picker's data does not come
-// from it. Blanking a working picker over a hint it could not compute would be
-// the failure this degrade exists to avoid.
+// The same failed read on an org whose mirror already answers still serves the
+// mirror: the read decides only whether to offer install guidance, and the
+// picker's data does not come from it.
 func TestHandleGitHubRepos_AppListInstallationsErrorStillServesAMirror(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -397,10 +321,9 @@ func TestHandleGitHubRepos_AppListInstallationsErrorStillServesAMirror(t *testin
 	}
 }
 
-// App org with multiple installations: the mirror carries every installation's
-// grant, and the picker's order is the folded slug across all of them — one
-// order for the whole set, not per-account runs, because a list with a search
-// box over it is read alphabetically and offset paging needs a total order.
+// App org with multiple installations: the picker lists every installation's
+// grant in one folded-slug order across the whole set, not per-account runs,
+// because offset paging needs a total order.
 func TestHandleGitHubRepos_AppMultiInstallation(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)

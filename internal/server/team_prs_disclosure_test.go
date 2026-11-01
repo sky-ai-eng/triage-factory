@@ -125,12 +125,9 @@ func TestTeamPRList_MemberReadsTheTeamsPullRequests(t *testing.T) {
 	}
 }
 
-// TestTeamPRList_NonMemberSeesAnEmptyList pins the in-org denial. The team is
-// org-visible, so its existence is not a secret and the route answers 200 —
-// but the population is gated by the tracked-set semi-join, which
-// team_github_repos RLS bounds to members, so a non-member reads nothing. This
-// is the /activity audience line: a read the store scopes, not a gate the
-// handler refuses.
+// TestTeamPRList_NonMemberSeesAnEmptyList: the team is org-visible, so a
+// non-member gets 200, but the tracked-set semi-join is bounded to members by
+// team_github_repos RLS, so the list is empty.
 func TestTeamPRList_NonMemberSeesAnEmptyList(t *testing.T) {
 	r := newTeamPRsRig(t)
 	r.bindIdentity(t, r.member, "octocat")

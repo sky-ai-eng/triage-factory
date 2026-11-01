@@ -173,8 +173,8 @@ func TestEventHandlerLinearTeamIn_OnlyTheCurrentWorkspaceCounts(t *testing.T) {
 	}
 }
 
-// The key field is gone from the predicate schema, so a caller still sending
-// it is told so rather than having it dropped.
+// The predicate schema has no team key fields, so a caller sending one is told
+// so rather than having it dropped.
 func TestEventHandlerLinearTeamIn_RefusesTeamKey(t *testing.T) {
 	s := newLinearTeamInServer(t, linearTeamEng)
 
@@ -186,10 +186,9 @@ func TestEventHandlerLinearTeamIn_RefusesTeamKey(t *testing.T) {
 	}
 }
 
-// The check runs inside the write's transaction under the caller's claims, so
-// a plain team member, with no admin role anywhere, must be able to read the
-// org's Linear workspace and the team's tracked Linear teams through RLS. A
-// policy that hid either would refuse every entry that member writes.
+// The check runs under the caller's claims, so a plain team member must be able
+// to read the org's Linear workspace and the team's tracked Linear teams through
+// RLS, or every entry that member writes would be refused.
 func TestLinearTeamInFaults_PlainMemberUnderRLS_Postgres(t *testing.T) {
 	rig := newRepoScopeRig(t)
 	pgtest.MustExec(t, rig.h.AdminDB,

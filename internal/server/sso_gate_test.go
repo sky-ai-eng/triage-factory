@@ -112,11 +112,9 @@ func TestSSOGate_SweepClosesBarredTokenSocket(t *testing.T) {
 	}
 }
 
-// TestSSOGate_BarredCursorAndPathOrg pins the request-path answers with the
-// seam stubbed: a barred cursor org is withheld from handlers (RequireOrg
-// answers 403 SSO_REQUIRED, /api/me omits it as the active org and flags the
-// row), a barred path org answers 403 to a member, and a non-member naming the
-// same org still gets the route's own 404.
+// TestSSOGate_BarredCursorAndPathOrg: a barred cursor org is withheld (RequireOrg
+// 403 SSO_REQUIRED, /api/me flags it and omits it as active), a barred path org is
+// 403 to a member, and a non-member naming it gets the route's own 404.
 func TestSSOGate_BarredCursorAndPathOrg(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)

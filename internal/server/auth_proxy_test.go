@@ -6,11 +6,9 @@ import (
 	"testing"
 )
 
-// TestNewGotrueProxy_DeniesAdmin is the TFAC-409 item-3 contract: the GoTrue
-// reverse proxy refuses /auth/v1/admin/* (GoTrue's service-role user-management
-// API) with a 404, while every other /auth/v1/* path forwards upstream. The
-// 404 (not 403) keeps the deny indistinguishable from "no such route" so a
-// prober can't confirm an admin surface exists.
+// TestNewGotrueProxy_DeniesAdmin: the GoTrue proxy answers /auth/v1/admin/* with
+// a 404, so a prober cannot tell the admin API exists, and forwards every other
+// /auth/v1/* path upstream.
 func TestNewGotrueProxy_DeniesAdmin(t *testing.T) {
 	// A stand-in upstream so a forwarded request is observable without a real
 	// GoTrue. denyGotrueAdmin runs before the proxy's own transport, so denied

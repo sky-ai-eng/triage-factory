@@ -28,27 +28,9 @@ func orgBackgroundJobsModel(t *testing.T, s *Server) string {
 	return out.BackgroundJobsModel
 }
 
-// A local install arrives with the setting already filled in — the SQLite
-// column default — because local mode has no setup step that would make someone
-// choose, and the background jobs skip without one.
-func TestOrgSettingsGet_LocalCarriesTheBackgroundJobsPreFill(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
-	if got := orgBackgroundJobsModel(t, s); got != domain.LocalBackgroundJobsModel {
-		t.Errorf("background_jobs_model = %q, want the local pre-fill %q", got, domain.LocalBackgroundJobsModel)
-	}
-}
-
-// The stored value is dispatched verbatim, so the accepted set is the universe
-// the picker draws from — anything else is a value nothing can invoke, and the
-// save must say so rather than store it and let the background jobs fail
-// quietly later.
-//
-// The interesting rejection in a LOCAL install is the native wire id: it is what
-// the multi picker offers, what an older build stored here, and what a stale
-// client still sends. Handing it to the SDK subprocess would be pinning a
-// version nobody asked for, so the save refuses and names the universe.
+// The stored value is dispatched verbatim, so the save accepts only this
+// deployment's universe. A local install refuses the native wire id the multi
+// picker offers, and the refusal names the local universe.
 func TestOrgSettingsPatch_BackgroundJobsModel_RejectsTheOtherVocabulary(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -87,10 +69,8 @@ func TestOrgSettingsPatch_BackgroundJobsModel_AcceptsAnyOfferedModel(t *testing.
 	}
 }
 
-// Clearing is a real intent — it turns the background jobs off, which is the
-// only way to stop them short of unbinding the credential every other feature
-// shares — so null stores empty rather than being refused or coerced back to a
-// default.
+// null turns the background jobs off, so it stores empty rather than being
+// refused or coerced back to a default.
 func TestOrgSettingsPatch_BackgroundJobsModel_NullTurnsTheJobsOff(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()

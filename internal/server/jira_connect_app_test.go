@@ -173,10 +173,9 @@ func TestJiraConnectCallback_StoresTheIssuingApp(t *testing.T) {
 	}
 }
 
-// TestJiraIdentityStatus_IssuingAppRemoved_NotConnected: a Cloud OAuth
-// credential whose app the org can no longer authenticate as cannot be
-// refreshed, so it reports not connected, says the app was removed, and the
-// user gets the Connect button. Configuring the same app again brings it back.
+// TestJiraIdentityStatus_IssuingAppRemoved_NotConnected: a Cloud OAuth credential
+// whose app the org no longer has reports not connected, reason app removed, with
+// Connect offered; configuring the same app again brings it back.
 func TestJiraIdentityStatus_IssuingAppRemoved_NotConnected(t *testing.T) {
 	s := newJiraOAuthOrg(t)
 	saveJiraApp(t, s, "atl-client")
@@ -207,10 +206,9 @@ func TestJiraIdentityStatus_IssuingAppRemoved_NotConnected(t *testing.T) {
 	}
 }
 
-// TestJiraIdentityStatus_UnattributedOAuthCredential: a credential that does
-// not record its app reports connected while the org has any app, since its
-// next refresh tries each one. With no app configured at all, no refresh can
-// succeed, so it reads as the app having been removed.
+// TestJiraIdentityStatus_UnattributedOAuthCredential: a credential that records
+// no app reads connected while the org has any app, since a refresh tries each
+// one, and as app removed while it has none.
 func TestJiraIdentityStatus_UnattributedOAuthCredential(t *testing.T) {
 	s := newJiraOAuthOrg(t)
 	seedJiraOAuthCredential(t, s, "")

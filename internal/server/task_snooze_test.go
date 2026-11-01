@@ -26,12 +26,9 @@ func readSnoozeState(t *testing.T, database *sql.DB, taskID string) (string, tim
 	return status, time.Time{}
 }
 
-// TestTaskPatchSnooze_RejectsUnusableWakeTimes pins the negative space around
-// snooze_until: no route may persist status='snoozed' without a wake time the
-// sweep will actually fire on. An empty or unparseable value is a 400 (the
-// shape is wrong), a past instant is a 422 (the shape is right and the value
-// can't be one), and the presets the picker offers are the picker's own
-// vocabulary — the API takes timestamps.
+// TestTaskPatchSnooze_RejectsUnusableWakeTimes: no write persists a snooze the
+// wake sweep cannot fire on. An empty, unparseable, preset ("2h") or non-string
+// value is a 400, and a past instant is a 422.
 func TestTaskPatchSnooze_RejectsUnusableWakeTimes(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -65,49 +62,25 @@ func TestTaskPatchSnooze_RejectsUnusableWakeTimes(t *testing.T) {
 	}
 }
 
-// TestTaskPatchSnooze_WritesWakeTime pins the accepted shape: an RFC3339
-// instant lands on the row as a real snooze_until, because the queue's wake
-// sweep requeues on that column and nothing else.
-func TestTaskPatchSnooze_WritesWakeTime(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	s := newTestServer(t)
-
-	want := time.Now().Add(90 * time.Minute).UTC().Truncate(time.Second)
-	taskID := seedLifecycleTask(t, s.db, "snoozed", lifecycleTaskOpts{})
-	rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID, map[string]any{
-		"snooze_until": want.Format(time.RFC3339), "hesitation_ms": 120,
-	})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("patch = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	status, until := readSnoozeState(t, s.db, taskID)
-	if status != "snoozed" {
-		t.Fatalf("status = %q, want snoozed", status)
-	}
-	if until.IsZero() {
-		t.Fatal("snooze_until is NULL — the wake sweep would never requeue this task")
-	}
-	if delta := until.Sub(want); delta < -time.Minute || delta > time.Minute {
-		t.Fatalf("snooze_until = %v, want ~%v (delta=%v)", until, want, delta)
-	}
-	// The gesture keeps its historical action string so the swipe analytics
-	// stay comparable across the route change.
-	if got := readSwipeActions(t, s.db, taskID); !equalStrings(got, []string{"snooze"}) {
-		t.Fatalf("swipe_events actions = %v, want [snooze]", got)
-	}
-}
-
-// TestTaskPatchSnooze_ClearWakesTheTask pins the null arm: clearing the wake
-// time returns the task to the queue, and clearing one a task doesn't have is
-// a 409 rather than a silent drag out of whatever lane it was in.
+// TestTaskPatchSnooze_ClearWakesTheTask: an RFC3339 snooze_until lands on the
+// row as the wake time the sweep requeues on; clearing it returns the task to
+// the queue, and clearing one the task does not have is a 409.
 func TestTaskPatchSnooze_ClearWakesTheTask(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
 
 	taskID := seedLifecycleTask(t, s.db, "wake", lifecycleTaskOpts{})
-	until := time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339)
-	if rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID, map[string]any{"snooze_until": until}); rec.Code != http.StatusOK {
-		t.Fatalf("seed snooze = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	want := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
+	if rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID, map[string]any{"snooze_until": want.Format(time.RFC3339)}); rec.Code != http.StatusOK {
+		t.Fatalf("snooze = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	status, until := readSnoozeState(t, s.db, taskID)
+	if delta := until.Sub(want); status != "snoozed" || until.IsZero() || delta < -time.Minute || delta > time.Minute {
+		t.Fatalf("task = (%q, %v) after the snooze, want (snoozed, ~%v)", status, until, want)
+	}
+	// The snooze is recorded as the 'snooze' gesture.
+	if got := readSwipeActions(t, s.db, taskID); !equalStrings(got, []string{"snooze"}) {
+		t.Fatalf("swipe_events actions = %v, want [snooze]", got)
 	}
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID, map[string]any{"snooze_until": nil})
@@ -130,9 +103,9 @@ func TestTaskPatchSnooze_ClearWakesTheTask(t *testing.T) {
 	}
 }
 
-// TestTaskPatchClose_ClearsSnooze pins that closing a snoozed task clears its
-// wake time: a dismissed or completed row that kept snooze_until would stay
-// hidden from the queue's own filters on a later re-open.
+// TestTaskPatchClose_ClearsSnooze: closing a snoozed task clears its wake time,
+// which would otherwise hide it from the queue on a re-open, and records the
+// close as the 'dismiss' or 'complete' gesture with its hesitation.
 func TestTaskPatchClose_ClearsSnooze(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -144,26 +117,31 @@ func TestTaskPatchClose_ClearsSnooze(t *testing.T) {
 			if rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID, map[string]any{"snooze_until": until}); rec.Code != http.StatusOK {
 				t.Fatalf("seed snooze = %d, want 200; body=%s", rec.Code, rec.Body.String())
 			}
-			rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID, map[string]any{"status": status})
+			rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID, map[string]any{"status": status, "hesitation_ms": 900})
 			if rec.Code != http.StatusOK {
 				t.Fatalf("%s = %d, want 200; body=%s", status, rec.Code, rec.Body.String())
 			}
-			if _, until := readSnoozeState(t, s.db, taskID); !until.IsZero() {
-				t.Fatalf("snooze_until = %v after %s, want NULL", until, status)
+			if got, until := readSnoozeState(t, s.db, taskID); got != status || !until.IsZero() {
+				t.Fatalf("task = (%q, %v) after %s, want (%s, NULL)", got, until, status, status)
 			}
-			// Analytics continuity: the close arms keep the action strings
-			// the swipe deck has written since it shipped.
 			if got := readSwipeActions(t, s.db, taskID); !equalStrings(got, []string{"snooze", wantAction}) {
 				t.Fatalf("swipe_events actions = %v, want [snooze %s]", got, wantAction)
+			}
+			var hesitation sql.NullInt64
+			if err := s.db.QueryRow(
+				`SELECT hesitation_ms FROM swipe_events WHERE task_id = ? AND action = ?`, taskID, wantAction,
+			).Scan(&hesitation); err != nil {
+				t.Fatalf("scan hesitation_ms: %v", err)
+			}
+			if !hesitation.Valid || hesitation.Int64 != 900 {
+				t.Errorf("hesitation_ms = %v, want 900", hesitation)
 			}
 		})
 	}
 }
 
-// readSwipeActions returns a task's swipe_events action strings, oldest first.
-// Audit rows are append-only and observed in insertion order, so the callers'
-// equalStrings comparison against an expected slice is order-sensitive on
-// purpose.
+// readSwipeActions returns a task's swipe_events action strings, oldest first,
+// so a comparison against an expected slice is order-sensitive.
 func readSwipeActions(t *testing.T, database *sql.DB, taskID string) []string {
 	t.Helper()
 	rows, err := database.Query(`SELECT action FROM swipe_events WHERE task_id = ? ORDER BY id`, taskID)

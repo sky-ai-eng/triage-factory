@@ -11,15 +11,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestMovedRoutes_OldPathsAreGone pins the half of a route move that is easy to
-// skip: deleting the address it moved from. An alias kept "briefly" is a second
-// way to do one thing, and the pair drifts — so every path here must 404, and a
-// caller that hasn't been updated learns it at the door rather than by reading
-// stale data from a route nobody maintains.
-//
-// The org and team segments carry the local sentinels because that is what a
-// local-mode caller would address; the point is that the PATH doesn't resolve,
-// not that the scope doesn't exist.
+// TestMovedRoutes_OldPathsAreGone: every address a route moved away from answers
+// 404, so a caller that has not updated finds out at once. The org and team
+// segments carry the local sentinels, so only the path can fail to resolve.
 func TestMovedRoutes_OldPathsAreGone(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()

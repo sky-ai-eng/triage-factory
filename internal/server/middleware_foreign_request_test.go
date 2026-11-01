@@ -79,12 +79,9 @@ func TestHandleWS_OriginGate(t *testing.T) {
 	}
 }
 
-// TestForeignOrigin_LocalAddress pins the local-mode rule that a page served
-// from the address a request was sent to is not foreign, though publicURL
-// names a different one. That is what lets a --host 0.0.0.0 instance browsed
-// by its LAN address, or a loopback one browsed by 127.0.0.1, make writes. A
-// DNS-rebinding page also sends an Origin matching its Host, so the rule must
-// hold only for a Host the foreign-host check accepts.
+// TestForeignOrigin_LocalAddress: in local mode an Origin naming the address the
+// request was sent to is not foreign, even when publicURL names another, but
+// only for a Host the foreign-host check accepts, which a rebinding page fails.
 func TestForeignOrigin_LocalAddress(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	newServer := func(publicURL string, local bool) *Server {

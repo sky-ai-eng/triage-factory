@@ -42,10 +42,9 @@ func tinyJPEG(t *testing.T) []byte {
 	return buf.Bytes()
 }
 
-// TestIsPublicUnicastIP pins the SSRF predicate shared by the avatar dial guard
-// and the GitHub manifest reachability check: only globally-routable public
-// unicast is allowed; loopback / private / link-local / CGNAT / doc / reserved
-// are not.
+// TestIsPublicUnicastIP pins the SSRF predicate the avatar dial guard and the
+// GitHub manifest reachability check share: only globally-routable public unicast
+// is allowed.
 func TestIsPublicUnicastIP(t *testing.T) {
 	cases := []struct {
 		ip   string
@@ -106,10 +105,8 @@ func TestSafeAvatarDialControl(t *testing.T) {
 	}
 }
 
-// TestNormalizeImageType pins the content-type resolution: it SNIFFS the bytes
-// and ignores any upstream header, so only data that really is an allowed raster
-// image is served (the response carries a real image type under the global
-// nosniff header, and a spoofed header can't smuggle non-image content).
+// TestNormalizeImageType: the content type is sniffed from the bytes and the
+// upstream header ignored, so a spoofed header cannot serve non-image content.
 func TestNormalizeImageType(t *testing.T) {
 	cases := []struct {
 		name string
@@ -129,11 +126,9 @@ func TestNormalizeImageType(t *testing.T) {
 	}
 }
 
-// TestAvatarFetcher_FetchAndCache covers the fetcher's core contract without a
-// DB: a first fetch hits the upstream and caches the bytes; a second is served
-// from cache (no second upstream hit). Uses a TLS test server (https-only) with
-// its own client, so the production SSRF dial guard (which would reject the
-// loopback upstream) is bypassed — that guard is unit-tested separately.
+// TestAvatarFetcher_FetchAndCache: a first fetch hits the upstream and caches
+// the bytes, and a second is served from cache. A TLS test server with its own
+// client bypasses the SSRF dial guard, which would reject the loopback upstream.
 func TestAvatarFetcher_FetchAndCache(t *testing.T) {
 	want := tinyPNG(t)
 	var hits int32
@@ -211,10 +206,9 @@ func TestAvatarFetcher_RejectsNonHTTPS(t *testing.T) {
 	}
 }
 
-// TestAvatarFetcher_BlockedHostIsClassified verifies a dial-time SSRF rejection
-// is detectable via errors.Is(errBlockedAvatarHost) through the full net/http
-// error chain — the signal fetch() keys its Warn log on. Uses the REAL SSRF-
-// guarded client (not a test client) against a loopback target the guard blocks.
+// TestAvatarFetcher_BlockedHostIsClassified: through the real SSRF-guarded
+// client, a dial-time rejection survives net/http's error chain as
+// errBlockedAvatarHost, which fetch() keys its Warn log on.
 func TestAvatarFetcher_BlockedHostIsClassified(t *testing.T) {
 	f := newAvatarFetcher()
 	_, err := f.doFetch(context.Background(), "https://127.0.0.1:9/avatar.png")
@@ -271,11 +265,9 @@ func TestAvatarFetcher_BoundsNegativeEntries(t *testing.T) {
 	}
 }
 
-// TestAvatarsHandler_Postgres pins the handler's authz + RLS scoping under real
-// Postgres RLS: a member proxies their own and a co-member's avatar (200), a
-// cross-org caller cannot (404 — the row is invisible, never a leak), and an
-// absent avatar / malformed id 404 so the frontend falls back to a monogram.
-// Skips without Docker via the pgtest harness (reused usage rig).
+// TestAvatarsHandler_Postgres: under RLS a member proxies their own and a
+// co-member's avatar, a cross-org caller gets 404, and an absent avatar or a
+// malformed id is a 404 so the frontend falls back to a monogram.
 func TestAvatarsHandler_Postgres(t *testing.T) {
 	r := newUsageRig(t)
 

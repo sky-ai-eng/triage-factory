@@ -44,8 +44,8 @@ func putBedrock(t *testing.T, s *Server, shape string, body map[string]any) *htt
 	return doJSON(t, s, http.MethodPut, llmPath("bedrock/"+shape), body)
 }
 
-// clearedList reads the `cleared` enumeration off a bind response — the
-// provider material this write removed, which used to happen silently.
+// clearedList reads the `cleared` enumeration off a bind response: the
+// provider material this write removed.
 func clearedList(t *testing.T, rec *httptest.ResponseRecorder) []string {
 	t.Helper()
 	var out struct {
@@ -70,94 +70,9 @@ func mustSecret(t *testing.T, s *Server, key string) string {
 	return v
 }
 
-// TestBedrockBearerPut_StoresAndSetsRef drives the Bedrock API-key
-// happy path: the token lands in the vault under aws_bearer_token_bedrock,
-// the non-secret config is stored alongside, BedrockCredentialsRef flips
-// the presence flag, and GET echoes the config for the form.
-func TestBedrockBearerPut_StoresAndSetsRef(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
-
-	rec := putBedrock(t, s, "bearer", map[string]any{
-		"bearer_token": "  bdrk-token-1  ",
-		"region":       "us-west-2",
-		"model_id":     "us.anthropic.claude-haiku-4-5",
-		"base_url":     "https://vpce-0abc.bedrock-runtime.us-west-2.vpce.amazonaws.com/",
-	})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
-	}
-	if got := clearedList(t, rec); len(got) != 0 {
-		t.Errorf("cleared = %v on a fresh org, want empty", got)
-	}
-
-	if got := mustSecret(t, s, integrations.KeyAWSBearerTokenBedrock); got != "bdrk-token-1" {
-		t.Errorf("stored bearer = %q, want the trimmed token", got)
-	}
-	if got := mustSecret(t, s, integrations.KeyAWSRegion); got != "us-west-2" {
-		t.Errorf("stored region = %q, want us-west-2", got)
-	}
-	if got := mustSecret(t, s, integrations.KeyBedrockModelID); got != "us.anthropic.claude-haiku-4-5" {
-		t.Errorf("stored model = %q", got)
-	}
-	// Trailing slash stripped before storage — the proxy upstream
-	// validation rejects a path component.
-	if got := mustSecret(t, s, integrations.KeyBedrockBaseURL); got != "https://vpce-0abc.bedrock-runtime.us-west-2.vpce.amazonaws.com" {
-		t.Errorf("stored base URL = %q, want the trailing slash stripped", got)
-	}
-
-	view := getOrgBedrockView(t, s)
-	if !view.Has || view.Method != "bearer" {
-		t.Errorf("view = %+v, want has_bedrock_credentials + method bearer", view)
-	}
-	if view.Region != "us-west-2" || view.ModelID != "us.anthropic.claude-haiku-4-5" {
-		t.Errorf("GET did not echo the non-secret config: %+v", view)
-	}
-}
-
-// TestBedrockAccessKeysPut_StoresTriple drives the IAM path: the full
-// triple (with session token) lands in the vault and the method marker
-// reads back access_keys.
-func TestBedrockAccessKeysPut_StoresTriple(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
-
-	rec := putBedrock(t, s, "access-keys", map[string]any{
-		"access_key_id":     "AKIAEXAMPLE",
-		"secret_access_key": "secret-example",
-		"session_token":     "session-example",
-		"region":            "us-gov-west-1",
-	})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
-	}
-
-	if got := mustSecret(t, s, integrations.KeyAWSAccessKeyID); got != "AKIAEXAMPLE" {
-		t.Errorf("stored access key = %q", got)
-	}
-	if got := mustSecret(t, s, integrations.KeyAWSSecretAccessKey); got != "secret-example" {
-		t.Errorf("stored secret key = %q", got)
-	}
-	if got := mustSecret(t, s, integrations.KeyAWSSessionToken); got != "session-example" {
-		t.Errorf("stored session token = %q", got)
-	}
-	view := getOrgBedrockView(t, s)
-	if !view.Has || view.Method != "access_keys" {
-		t.Errorf("view = %+v, want has_bedrock_credentials + method access_keys", view)
-	}
-	if view.Region != "us-gov-west-1" {
-		t.Errorf("region = %q, want us-gov-west-1 (GovCloud regions must pass validation)", view.Region)
-	}
-}
-
-// TestBedrockPut_BlankSecretIsRefusedNotKept is the negative space of the
-// "leave blank to keep current" convention this surface used to speak. A blank
-// secret meant "keep" here and "destroy every LLM credential" on the Anthropic
-// sibling, and nothing on the wire told the two apart. Each shape's bind now
-// REPLACES the credential, so a blank secret is a 400 naming the field and the
-// stored credential is left exactly as it was.
+// TestBedrockPut_BlankSecretIsRefusedNotKept: each shape's bind replaces the
+// credential, so a blank secret is a 400 naming the field and leaves the stored
+// credential and its config exactly as they were.
 func TestBedrockPut_BlankSecretIsRefusedNotKept(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -167,7 +82,7 @@ func TestBedrockPut_BlankSecretIsRefusedNotKept(t *testing.T) {
 		"access_key_id":     "AKIAKEEP",
 		"secret_access_key": "secret-keep",
 		"session_token":     "session-keep",
-		"region":            "us-east-1",
+		"region":            "us-gov-west-1", // GovCloud regions pass validation
 		"model_id":          "old-model",
 	})
 	if seed.Code != http.StatusOK {
@@ -184,22 +99,24 @@ func TestBedrockPut_BlankSecretIsRefusedNotKept(t *testing.T) {
 	assertFirstError(t, rec, httpx.ReasonMissingField, "access_key_id")
 
 	// Nothing moved — not the secrets, and not the config the request also
-	// carried. A refused write writes nothing.
-	if got := mustSecret(t, s, integrations.KeyAWSAccessKeyID); got != "AKIAKEEP" {
-		t.Errorf("access key = %q, want untouched by the refused write", got)
+	// carried.
+	for k, want := range map[string]string{
+		integrations.KeyAWSAccessKeyID:     "AKIAKEEP",
+		integrations.KeyAWSSecretAccessKey: "secret-keep",
+		integrations.KeyAWSSessionToken:    "session-keep",
+	} {
+		if got := mustSecret(t, s, k); got != want {
+			t.Errorf("%s = %q, want %q untouched by the refused write", k, got, want)
+		}
 	}
-	if got := mustSecret(t, s, integrations.KeyAWSSessionToken); got != "session-keep" {
-		t.Errorf("session token = %q, want untouched by the refused write", got)
-	}
-	if view := getOrgBedrockView(t, s); view.Region != "us-east-1" || view.ModelID != "old-model" {
-		t.Errorf("config moved on a refused write: %+v", view)
+	if view := getOrgBedrockView(t, s); !view.Has || view.Method != "access_keys" || view.Region != "us-gov-west-1" || view.ModelID != "old-model" {
+		t.Errorf("view = %+v, want the seeded access_keys config untouched by the refused write", view)
 	}
 }
 
-// TestBedrockAccessKeysPut_ReplaceClearsSessionToken pins the replace
-// semantics: submitting a new key pair with no session token means "no session
-// token" (long-lived keys), not "keep the old one" — a stale token would 403
-// every AWS call.
+// TestBedrockAccessKeysPut_ReplaceClearsSessionToken: a new key pair with no
+// session token means long-lived keys, not "keep the old token" — a stale
+// token would 403 every AWS call.
 func TestBedrockAccessKeysPut_ReplaceClearsSessionToken(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -231,9 +148,10 @@ func TestBedrockAccessKeysPut_ReplaceClearsSessionToken(t *testing.T) {
 	}
 }
 
-// TestBedrockPut_ShapeSwitchClearsOtherShape pins that binding one shape
-// removes the previous shape's secret material — no stale credentials linger in
-// the vault — and that the response SAYS which stored material it removed.
+// TestBedrockPut_ShapeSwitchClearsOtherShape: binding one Bedrock shape removes
+// the previous shape's material in both directions, and the response's `cleared`
+// names it. The resolver picks a shape by which keys are stored, so a leftover
+// would be used instead of the shape just bound.
 func TestBedrockPut_ShapeSwitchClearsOtherShape(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -273,20 +191,43 @@ func TestBedrockPut_ShapeSwitchClearsOtherShape(t *testing.T) {
 	}
 }
 
-// TestBedrockDelete pins the explicit unbind: it removes every Bedrock key and
-// the ref, flipping the presence flag off, and it is idempotent.
+// TestBedrockDelete: a bearer bind stores the trimmed token and its config and
+// GET echoes the config; the unbind removes every Bedrock key and the ref, and
+// repeating it is a success.
 func TestBedrockDelete(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
 
-	if rec := putBedrock(t, s, "bearer", map[string]any{
-		"bearer_token": "bdrk-1", "region": "us-east-1", "model_id": "m",
-	}); rec.Code != http.StatusOK {
+	rec := putBedrock(t, s, "bearer", map[string]any{
+		"bearer_token": "  bdrk-token-1  ",
+		"region":       "us-west-2",
+		"model_id":     "us.anthropic.claude-haiku-4-5",
+		"base_url":     "https://vpce-0abc.bedrock-runtime.us-west-2.vpce.amazonaws.com/",
+	})
+	if rec.Code != http.StatusOK {
 		t.Fatalf("seed: %d %s", rec.Code, rec.Body.String())
 	}
+	if got := clearedList(t, rec); len(got) != 0 {
+		t.Errorf("cleared = %v on a fresh org, want empty", got)
+	}
+	for k, want := range map[string]string{
+		integrations.KeyAWSBearerTokenBedrock: "bdrk-token-1",
+		integrations.KeyAWSRegion:             "us-west-2",
+		integrations.KeyBedrockModelID:        "us.anthropic.claude-haiku-4-5",
+		// The trailing slash is stripped: the proxy's upstream validation
+		// rejects a path component.
+		integrations.KeyBedrockBaseURL: "https://vpce-0abc.bedrock-runtime.us-west-2.vpce.amazonaws.com",
+	} {
+		if got := mustSecret(t, s, k); got != want {
+			t.Errorf("stored %s = %q, want %q", k, got, want)
+		}
+	}
+	if view := getOrgBedrockView(t, s); !view.Has || view.Method != "bearer" || view.Region != "us-west-2" || view.ModelID != "us.anthropic.claude-haiku-4-5" {
+		t.Errorf("view = %+v, want bearer with the stored region and model echoed", view)
+	}
 
-	rec := doJSON(t, s, http.MethodDelete, llmPath("bedrock"), nil)
+	rec = doJSON(t, s, http.MethodDelete, llmPath("bedrock"), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("clear status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -304,12 +245,9 @@ func TestBedrockDelete(t *testing.T) {
 	}
 }
 
-// TestLLMCredentials_BothProvidersCoexist pins that the two providers are
-// independent: binding one does not disturb the other's stored material in
-// either direction, both secrets survive, and each disconnect removes only its
-// own. An org running some models on Anthropic and others on Bedrock needs both
-// live at once — which run uses which is decided by the run's model, not by
-// which credential was bound last.
+// TestLLMCredentials_BothProvidersCoexist: Anthropic and Bedrock credentials
+// are independent. Binding either leaves the other's material in place, and
+// each DELETE removes only its own.
 func TestLLMCredentials_BothProvidersCoexist(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -374,62 +312,33 @@ func TestLLMCredentials_BothProvidersCoexist(t *testing.T) {
 	}
 }
 
-// A second Bedrock shape still replaces the first: the two are one credential
-// wearing different clothes, and the resolver detects role mode by a stored ARN
-// — so a leftover shape is material that would be used instead of the one just
-// bound. The `cleared` list names it.
-func TestBedrockPut_ReplacingAShapeClearsThePrevious(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
-
-	if rec := putBedrock(t, s, "bearer", map[string]any{"bearer_token": "bdrk-1", "region": "us-east-1"}); rec.Code != http.StatusOK {
-		t.Fatalf("bedrock bearer bind: %d %s", rec.Code, rec.Body.String())
-	}
-	rec := putBedrock(t, s, "access-keys", map[string]any{
-		"access_key_id": "AKIA1", "secret_access_key": "sk", "region": "us-east-1",
-	})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("bedrock access-keys bind: %d %s", rec.Code, rec.Body.String())
-	}
-	if got := clearedList(t, rec); len(got) != 1 || got[0] != "bedrock:bearer" {
-		t.Errorf("cleared = %v, want [bedrock:bearer]", got)
-	}
-	if got := mustSecret(t, s, integrations.KeyAWSBearerTokenBedrock); got != "" {
-		t.Errorf("bedrock bearer = %q after binding the access-key pair, want cleared", got)
-	}
-}
-
-// TestBedrockPut_ValidationErrors pins the rejections. Everything here is a
-// shape fault — a missing required field, a value that doesn't parse as what it
-// claims to be — so everything is a 400, which is also the point of the split:
-// each route's required set is fixed, so "which fields does this need" is never
-// a function of what else was sent.
+// TestBedrockPut_ValidationErrors: every shape fault is a 400 naming each
+// failing field, and each route's strict decode rejects another shape's field
+// by name. Nothing a rejected request carried is stored.
 func TestBedrockPut_ValidationErrors(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
 
 	cases := []struct {
-		name  string
-		shape string
-		body  map[string]any
-		field string
+		name   string
+		shape  string
+		body   map[string]any
+		fields []string
 	}{
-		{"missing_region", "bearer", map[string]any{"bearer_token": "b"}, "region"},
-		{"malformed_region", "bearer", map[string]any{"bearer_token": "b", "region": "US EAST"}, "region"},
-		{"base_url_with_path", "bearer", map[string]any{"bearer_token": "b", "region": "us-east-1", "base_url": "https://x.example.com/v1"}, "base_url"},
-		{"base_url_http", "bearer", map[string]any{"bearer_token": "b", "region": "us-east-1", "base_url": "http://x.example.com"}, "base_url"},
-		{"base_url_no_scheme", "bearer", map[string]any{"bearer_token": "b", "region": "us-east-1", "base_url": "x.example.com"}, "base_url"},
-		{"missing_bearer", "bearer", map[string]any{"region": "us-east-1"}, "bearer_token"},
-		{"partial_pair_id_only", "access-keys", map[string]any{"access_key_id": "AKIA", "region": "us-east-1"}, "secret_access_key"},
-		{"partial_pair_secret_only", "access-keys", map[string]any{"secret_access_key": "s", "region": "us-east-1"}, "access_key_id"},
-		{"missing_pair", "access-keys", map[string]any{"region": "us-east-1"}, "access_key_id"},
-		// The wrong shape's field is not merely ignored — the strict decode
-		// against THIS shape's struct rejects it by name, which is the property
-		// the one-route-with-a-discriminator body could not have.
-		{"cross_shape_field", "bearer", map[string]any{"bearer_token": "b", "region": "us-east-1", "access_key_id": "AKIA"}, "access_key_id"},
-		{"role_arn_on_bearer", "bearer", map[string]any{"bearer_token": "b", "region": "us-east-1", "role_arn": "arn:aws:iam::123456789012:role/x"}, "role_arn"},
+		{"missing_region", "bearer", map[string]any{"bearer_token": "b"}, []string{"region"}},
+		{"malformed_region", "bearer", map[string]any{"bearer_token": "b", "region": "US EAST"}, []string{"region"}},
+		{"base_url_with_path", "bearer", map[string]any{"bearer_token": "b", "region": "us-east-1", "base_url": "https://x.example.com/v1"}, []string{"base_url"}},
+		{"base_url_http", "bearer", map[string]any{"bearer_token": "b", "region": "us-east-1", "base_url": "http://x.example.com"}, []string{"base_url"}},
+		{"base_url_no_scheme", "bearer", map[string]any{"bearer_token": "b", "region": "us-east-1", "base_url": "x.example.com"}, []string{"base_url"}},
+		{"missing_bearer", "bearer", map[string]any{"region": "us-east-1"}, []string{"bearer_token"}},
+		{"partial_pair_id_only", "access-keys", map[string]any{"access_key_id": "AKIA", "region": "us-east-1"}, []string{"secret_access_key"}},
+		{"partial_pair_secret_only", "access-keys", map[string]any{"secret_access_key": "s", "region": "us-east-1"}, []string{"access_key_id"}},
+		{"missing_pair", "access-keys", map[string]any{"region": "us-east-1"}, []string{"access_key_id"}},
+		// Several faults in one body are all reported, not the first one hit.
+		{"every_fault_reported", "access-keys", map[string]any{"region": "not a region"}, []string{"region", "access_key_id", "secret_access_key"}},
+		{"cross_shape_field", "bearer", map[string]any{"bearer_token": "b", "region": "us-east-1", "access_key_id": "AKIA"}, []string{"access_key_id"}},
+		{"role_arn_on_bearer", "bearer", map[string]any{"bearer_token": "b", "region": "us-east-1", "role_arn": "arn:aws:iam::123456789012:role/x"}, []string{"role_arn"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -437,63 +346,15 @@ func TestBedrockPut_ValidationErrors(t *testing.T) {
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("status=%d body=%s, want 400", rec.Code, rec.Body.String())
 			}
-			if got := errorFields(t, rec); !containsString(got, c.field) {
-				t.Errorf("error fields = %v, want one naming %q; body=%s", got, c.field, rec.Body.String())
+			got := errorFields(t, rec)
+			for _, want := range c.fields {
+				if !containsString(got, want) {
+					t.Errorf("error fields = %v, want one naming %q; body=%s", got, want, rec.Body.String())
+				}
 			}
 		})
 	}
-	// Nothing was stored by any of the rejected requests.
 	if view := getOrgBedrockView(t, s); view.Has {
 		t.Errorf("view = %+v, want unconfigured after only-rejected requests", view)
-	}
-}
-
-// TestBedrockPut_ReportsEveryBadField pins the accumulator: a body with two
-// faults reports two, rather than the first one hit.
-func TestBedrockPut_ReportsEveryBadField(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
-
-	rec := putBedrock(t, s, "access-keys", map[string]any{"region": "not a region"})
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status=%d body=%s, want 400", rec.Code, rec.Body.String())
-	}
-	fields := errorFields(t, rec)
-	for _, want := range []string{"region", "access_key_id", "secret_access_key"} {
-		if !containsString(fields, want) {
-			t.Errorf("error fields = %v, want one naming %q", fields, want)
-		}
-	}
-}
-
-// TestBedrockPut_SettingsPatchNoBackDoor pins that the org-settings PATCH is
-// not a write path for any Bedrock field — the validated bind routes are the
-// only door, mirroring the Anthropic rule. Strict decoding rejects the attempt
-// outright rather than ignoring the fields.
-func TestBedrockPut_SettingsPatchNoBackDoor(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
-
-	rec := patchOrgSettings(t, s, map[string]any{
-		"github_base_url":          "https://github.com",
-		"aws_bearer_token_bedrock": "bdrk-sneaky",
-		"aws_access_key_id":        "AKIA-sneaky",
-		"aws_secret_access_key":    "secret-sneaky",
-		"bedrock_base_url":         "https://sneaky.example.com",
-		"github_poll_interval":     "5m0s",
-		"jira_poll_interval":       "5m0s",
-	})
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("settings patch status=%d body=%s, want 400", rec.Code, rec.Body.String())
-	}
-	for _, k := range integrations.BedrockKeys() {
-		if got := mustSecret(t, s, k); got != "" {
-			t.Errorf("the settings PATCH stored %s = %q (back door)", k, got)
-		}
-	}
-	if view := getOrgBedrockView(t, s); view.Has {
-		t.Error("has_bedrock_credentials=true after a settings PATCH (back door)")
 	}
 }

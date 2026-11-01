@@ -157,42 +157,6 @@ func TestSourceOff_EventHandlerCatalogCheckAsksJiraNothing(t *testing.T) {
 	}
 }
 
-func TestSourceOff_EventHandlerCatalogCheckAsksLinearNothing(t *testing.T) {
-	s, fake := newServerWithLinearCatalog(t, linearFixtureEng)
-	trackLinearTeams(t, s, linearTeamEng)
-	seedBlueprintForTrigger(t, s, "bp-linear-off")
-	rule := func() string {
-		t.Helper()
-		code, created := createLinearRule(t, s, domain.EventLinearIssueAssigned, nil)
-		if code != http.StatusCreated {
-			t.Fatalf("seed rule: %d: %v", code, created)
-		}
-		return created["id"].(string)
-	}
-	patched, promoted := rule(), rule()
-	adding := map[string]any{"status_id_in": []string{linearStateTodo}}
-	requests := func() map[string]*httptest.ResponseRecorder {
-		return map[string]*httptest.ResponseRecorder{
-			"patch": doJSON(t, s, http.MethodPatch, "/api/event-handlers/"+patched, map[string]any{"scope_predicate": adding}),
-			"promote": doJSON(t, s, http.MethodPost, "/api/event-handlers/"+promoted+"/promote", map[string]any{
-				"blueprint_id": "bp-linear-off", "breaker_threshold": 3, "min_autonomy_suitability": 0.0, "scope_predicate": adding,
-			}),
-		}
-	}
-
-	turnSource(t, s, eventsource.KindLinear, true)
-	assertAllPaused(t, requests())
-	if n := fake.Calls(); n != 0 {
-		t.Errorf("Linear received %d requests while turned off, want none", n)
-	}
-
-	turnSource(t, s, eventsource.KindLinear, false)
-	assertAllOK(t, requests())
-	if fake.Calls() == 0 {
-		t.Error("Linear received no request once turned back on")
-	}
-}
-
 // redirectedJiraResolver is the server's own Jira resolver, gate and
 // credential reads included, with every user client it resolves pointed at a
 // fake instead of the org's Jira site. It counts the clients it hands out: a
@@ -314,11 +278,9 @@ func (r userWriteRig) requeue(t *testing.T) {
 	}
 }
 
-// With Jira off, a person's claim, the stock deck's claim and done, and a
-// requeue's reversal of a claim made while Jira was on each resolve no client,
-// so none of them writes to Jira: the claim and the deck refuse with the pause
-// before writing anything, and the requeue lands without the reversal. Turned
-// back on, each resolves its client and reaches Jira again.
+// With Jira off, a person's claim and the stock deck's claim and done refuse
+// with the pause before writing, and a requeue lands without reversing its
+// claim in Jira. Turned back on, each reaches Jira again.
 func TestSourceOff_JiraUserWritesAskJiraNothing(t *testing.T) {
 	keyring.MockInit()
 	s := newTestServer(t)

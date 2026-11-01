@@ -44,9 +44,9 @@ func TestGitHubConnect_NilDeployConfig_Returns404(t *testing.T) {
 	}
 }
 
-// TestGitHubConnect_StateToken_RoundTrip verifies the HMAC-signed connect
-// state signs + parses, and that expired / tampered / malformed tokens are
-// rejected — the CSRF + session-binding carrier for the OAuth dance.
+// TestGitHubConnect_StateToken_RoundTrip: the HMAC-signed connect state, the
+// OAuth flow's CSRF and session binding, round-trips, and expired, wrongly keyed
+// and malformed tokens are rejected.
 func TestGitHubConnect_StateToken_RoundTrip(t *testing.T) {
 	var key [32]byte
 	if _, err := rand.Read(key[:]); err != nil {
@@ -112,12 +112,9 @@ func TestConnectErrCode(t *testing.T) {
 	}
 }
 
-// TestResolveGitHubHost pins that the identity key is path-preserving — it
-// must agree with the raw orgSet.GitHubBaseURL key the PAT writer and the
-// factory/me/settings readers use, so a base URL with a path component keys
-// identically across all of them. A bare-origin derivation (gitHubWebOrigin)
-// would strip the path, splitting Connect's writes from the other sites'
-// reads. An empty base is no host, and malformed bases are rejected.
+// TestResolveGitHubHost: the identity key keeps a base URL's path, so it agrees
+// with every other reader of the org's GitHub URL; an empty base is no host and
+// malformed ones are rejected.
 func TestResolveGitHubHost(t *testing.T) {
 	cases := []struct {
 		in     string
@@ -140,55 +137,10 @@ func TestResolveGitHubHost(t *testing.T) {
 	}
 }
 
-// TestGitHubConnect_ManifestIncludesConnectCallback pins that a freshly-built
-// App manifest registers the Connect callback in callback_urls — without it,
-// GitHub would reject the user-to-server redirect_uri at consent time. The
-// register redirect_url stays the manifest-conversion callback.
-func TestGitHubConnect_ManifestIncludesConnectCallback(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	s := newTestServer(t)
-	var key [32]byte
-	if _, err := rand.Read(key[:]); err != nil {
-		t.Fatalf("seed key: %v", err)
-	}
-	s.SetDeployConfig("http://localhost:3000", key)
-
-	org := runmode.LocalDefaultOrgID
-	_, manifestJSON, _, err := s.buildManifestAndState(context.Background(), org, runmode.LocalDefaultUserID, "user", "testuser", "settings")
-	if err != nil {
-		t.Fatalf("buildManifestAndState: %v", err)
-	}
-	var m map[string]any
-	if err := json.Unmarshal([]byte(manifestJSON), &m); err != nil {
-		t.Fatalf("unmarshal manifest: %v", err)
-	}
-
-	rawCBs, ok := m["callback_urls"].([]any)
-	if !ok {
-		t.Fatalf("callback_urls missing or not a list: %s", manifestJSON)
-	}
-	cbs := make(map[string]bool, len(rawCBs))
-	for _, c := range rawCBs {
-		cbs[c.(string)] = true
-	}
-	wantConnect := "http://localhost:3000/api/orgs/" + org + "/github/connect/callback"
-	wantRegister := "http://localhost:3000/api/orgs/" + org + "/github/app/register/callback"
-	if !cbs[wantConnect] {
-		t.Errorf("callback_urls missing the Connect callback %q: %v", wantConnect, rawCBs)
-	}
-	if !cbs[wantRegister] {
-		t.Errorf("callback_urls missing the register callback %q: %v", wantRegister, rawCBs)
-	}
-	if got, _ := m["redirect_url"].(string); got != wantRegister {
-		t.Errorf("redirect_url = %q, want the register callback %q", got, wantRegister)
-	}
-}
-
 // ---- multi-mode (Postgres-backed) ----
 
-// seedGitHubApp registers an org_github_apps row and stores its client_secret
-// in the org's Vault, mirroring the state a completed register flow leaves —
-// the precondition for Connect (which reuses the App's client_id/secret).
+// seedGitHubApp leaves what a completed registration does: the org's App row,
+// its class, and its client secret in the vault, which Connect reuses.
 func seedGitHubApp(t *testing.T, rig *authRig, orgID, userID, clientID, clientSecret string) {
 	t.Helper()
 	const ref = "github_app_999_client_secret"
@@ -204,8 +156,6 @@ func seedGitHubApp(t *testing.T, rig *authRig, orgID, userID, clientID, clientSe
 		}); err != nil {
 			return err
 		}
-		// The class registration writes alongside the row, in the same
-		// transaction — a fixture that skips it models an unreachable state.
 		if _, err := tx.Orgs.SetGitHubCredentialClass(context.Background(), orgID, domain.GitHubCredentialClassBYOApp); err != nil {
 			return err
 		}
@@ -226,10 +176,9 @@ func seedOrgGitHubHost(t *testing.T, rig *authRig, orgID, host string) {
 	}
 }
 
-// TestGitHubConnect_StartRedirectsToHost proves Connect targets the org's
-// actual host (a GHES host here), NOT github.com — the whole reason the
-// social-login path can't be the capture mechanism. Asserts the authorize
-// URL carries the App's client_id + a CSRF state, and a state cookie is set.
+// TestGitHubConnect_StartRedirectsToHost: Connect for an org's own App sends
+// the browser to the org's host (GHES here), not github.com, with the App's
+// client_id and a CSRF state, and sets the state cookie.
 func TestGitHubConnect_StartRedirectsToHost(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	rig := newAuthRig(t)
@@ -280,9 +229,8 @@ func TestGitHubConnect_StartRedirectsToHost(t *testing.T) {
 	}
 }
 
-// TestGitHubConnect_StartNoApp_RedirectsToGate verifies that an org without a
-// registered App can't Connect (no client_id to reuse) and is bounced to the
-// gate page with no_app — distinguishable copy, not a dead end.
+// TestGitHubConnect_StartNoApp_RedirectsToGate: an org with no App has no
+// client to Connect through and is sent to the gate page with error=no_app.
 func TestGitHubConnect_StartNoApp_RedirectsToGate(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	rig := newAuthRig(t)
@@ -302,10 +250,9 @@ func TestGitHubConnect_StartNoApp_RedirectsToGate(t *testing.T) {
 	}
 }
 
-// TestGitHubConnect_CallbackBindsIdentity drives the full callback against a
-// stubbed GitHub host: code → ghu token → GET /user → login. Asserts the
-// user_github_identities row lands with source='connect_oauth' against the
-// GHES host, and the browser is redirected to the original return_to.
+// TestGitHubConnect_CallbackBindsIdentity: the own-App callback exchanges the
+// code, reads the account, writes a connect_oauth identity on the org's host
+// beside the login's github.com row, and returns to return_to.
 func TestGitHubConnect_CallbackBindsIdentity(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	rig := newAuthRig(t)
@@ -407,6 +354,8 @@ func TestGitHubConnect_CallbackBindsIdentity(t *testing.T) {
 	}
 }
 
+// TestGitHubLoginClaimCapturesVerifiedEmail: a GitHub sign-in with a verified
+// email records it on the login_claim identity.
 func TestGitHubLoginClaimCapturesVerifiedEmail(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	rig := newAuthRig(t)
@@ -431,10 +380,9 @@ func TestGitHubLoginClaimCapturesVerifiedEmail(t *testing.T) {
 	}
 }
 
-// TestGitHubConnect_CallbackHostUnreachable proves the infra state is
-// distinguished: when the host can't be reached, the callback redirects to
-// the gate with error=host_unreachable (not connect_failed), and writes no
-// identity row.
+// TestGitHubConnect_CallbackHostUnreachable: an unreachable host sends the
+// browser to the gate with error=host_unreachable, not connect_failed, and
+// writes no identity.
 func TestGitHubConnect_CallbackHostUnreachable(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	rig := newAuthRig(t)
@@ -532,9 +480,9 @@ func TestGitHubConnect_CallbackCSRFMismatch(t *testing.T) {
 	}
 }
 
-// TestGitHubIdentityStatus exercises the onboarding gate's status read: a
-// bound user reports connected=true with the login; an unbound user reports
-// connected=false. connect_available reflects whether an App is registered.
+// TestGitHubIdentityStatus: a GHES org's member is not connected by their
+// github.com login, is connected once bound on the org's host, and is offered
+// no Connect with no App registered.
 func TestGitHubIdentityStatus(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	rig := newAuthRig(t)
@@ -584,12 +532,9 @@ func TestGitHubIdentityStatus(t *testing.T) {
 	}
 }
 
-// TestGitHubConnect_LoginMirrorYieldsToUserBinding pins the mirror's place in
-// the order of authority: a github.com binding the user made themselves (by
-// Connect or a pasted PAT) survives their next GitHub sign-in with a different
-// handle, while a binding the mirror wrote is still refreshed by it. Without
-// the first half, "Change" on the settings page is a verb the next login
-// silently undoes.
+// TestGitHubConnect_LoginMirrorYieldsToUserBinding: the sign-in mirror refreshes
+// a github.com binding it wrote, but leaves one the user made by Connect or a
+// PAT, or the next login would undo it.
 func TestGitHubConnect_LoginMirrorYieldsToUserBinding(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	rig := newAuthRig(t)
@@ -649,10 +594,9 @@ func TestGitHubConnect_LoginMirrorYieldsToUserBinding(t *testing.T) {
 	}
 }
 
-// TestGitHubConnect_IdentityPersistsAcrossLoginProvider closes a
-// regression by construction: a connect_oauth binding must survive a
-// subsequent login under a non-GitHub provider (no user_name claim), where
-// the login-claim writer deliberately writes nothing.
+// TestGitHubConnect_IdentityPersistsAcrossLoginProvider: a connect_oauth binding
+// survives a later sign-in through a non-GitHub provider, whose claims carry no
+// user_name for the mirror to write.
 func TestGitHubConnect_IdentityPersistsAcrossLoginProvider(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	rig := newAuthRig(t)
@@ -696,9 +640,8 @@ func TestGitHubConnect_IdentityPersistsAcrossLoginProvider(t *testing.T) {
 		t.Fatalf("SAML re-login resolved to principal %v, want alice %v", got, alice)
 	}
 
-	// The saml row was seeded without a provider id (a row from before the
-	// stamp existed); the login refresh heals it, so the identities read can
-	// name the IdP behind it from now on.
+	// The saml row was seeded without a provider id; the login refresh stamps
+	// it, so the identities read can name the IdP behind it.
 	var stamped string
 	if err := rig.h.AdminDB.QueryRow(`
 		SELECT COALESCE(sso_provider_id, '') FROM user_identities WHERE auth_user_id = $1
@@ -720,10 +663,10 @@ func TestGitHubConnect_IdentityPersistsAcrossLoginProvider(t *testing.T) {
 	}
 }
 
-// ---- PAT_2 capture-and-discard endpoint (local-mode SQLite) ----
+// ---- identity PAT capture (local mode) ----
 
-// seedLocalOrgGitHubHost sets the local sentinel org's github_base_url via the
-// store (the value the PAT-capture handler resolves + keys identity under).
+// seedLocalOrgGitHubHost sets the local org's github_base_url, the host the
+// PAT capture keys the identity under, keeping its other settings.
 func seedLocalOrgGitHubHost(t *testing.T, s *Server, host string) {
 	t.Helper()
 	ctx := context.Background()
@@ -740,11 +683,9 @@ func seedLocalOrgGitHubHost(t *testing.T, s *Server, host string) {
 	}
 }
 
-// TestGitHubIdentityPAT_BindsIdentityAndDiscardsToken drives the capture-and-
-// discard path against a stubbed GHES host: the supplied PAT validates (GET
-// /user), the login is bound with source='pat' keyed on the org host, and the
-// token is NOT written into the org credential store — PAT_2 leaves no stored
-// credential, byte-for-byte the Connect end state.
+// TestGitHubIdentityPAT_BindsIdentityAndDiscardsToken: the pasted PAT proves
+// the account, whose login, numeric id and email are bound with source='pat' on
+// the org's host, and the token itself is stored nowhere.
 func TestGitHubIdentityPAT_BindsIdentityAndDiscardsToken(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit() // in-memory keychain — the sandbox has no dbus backend
@@ -763,7 +704,7 @@ func TestGitHubIdentityPAT_BindsIdentityAndDiscardsToken(t *testing.T) {
 		}
 		gotAuth = r.Header.Get("Authorization")
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"login":"octo-pat"}`)
+		fmt.Fprint(w, `{"id":583231,"login":"octo-pat"}`)
 	}))
 	t.Cleanup(ghStub.Close)
 	seedLocalOrgGitHubHost(t, s, ghStub.URL)
@@ -797,133 +738,76 @@ func TestGitHubIdentityPAT_BindsIdentityAndDiscardsToken(t *testing.T) {
 		t.Errorf("stored login = %q, want octo-pat", login)
 	}
 	var source string
+	var githubUserID, email sql.NullString
 	if err := s.db.QueryRowContext(ctx,
-		`SELECT source FROM user_github_identities WHERE user_id = ? AND github_base_url = ?`,
-		runmode.LocalDefaultUserID, ghStub.URL).Scan(&source); err != nil {
-		t.Fatalf("read source: %v", err)
+		`SELECT source, github_user_id, email FROM user_github_identities WHERE user_id = ? AND github_base_url = ?`,
+		runmode.LocalDefaultUserID, ghStub.URL).Scan(&source, &githubUserID, &email); err != nil {
+		t.Fatalf("read identity: %v", err)
 	}
 	if source != "pat" {
 		t.Errorf("source = %q, want pat", source)
-	}
-
-	// The token is discarded — never written into the org credential store (the
-	// only secret store in play), proving PAT_2 retains no usable credential.
-	creds, _ := integrations.Load(ctx, s.secrets, runmode.LocalDefaultOrgID)
-	if creds.GitHubPAT != "" {
-		t.Errorf("org GitHub PAT = %q, want empty (the user PAT must not be stored)", creds.GitHubPAT)
-	}
-}
-
-// TestGitHubIdentityPAT_BadToken_Returns422 pins the "your action" failure
-// shape: a token the host rejects is a 422 (not the infra 502), and no identity
-// row is written.
-func TestGitHubIdentityPAT_BadToken_Returns422(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
-	ctx := context.Background()
-
-	ghStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
-	}))
-	t.Cleanup(ghStub.Close)
-	seedLocalOrgGitHubHost(t, s, ghStub.URL)
-
-	rec := doJSON(t, s, "POST",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/github/identity/pat",
-		map[string]any{"pat": "ghp_bad"})
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("status=%d body=%s, want 422", rec.Code, rec.Body.String())
-	}
-	if login, _ := s.users.GetGitHubLogin(ctx, runmode.LocalDefaultUserID, ghStub.URL); login != "" {
-		t.Errorf("identity row written on a bad token: login=%q", login)
-	}
-}
-
-// TestGitHubIdentityPAT_EmptyToken_Returns400 pins that an empty PAT is
-// rejected before any host round-trip.
-func TestGitHubIdentityPAT_EmptyToken_Returns400(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit() // in-memory keychain — consistent with the sibling PAT tests
-	s := newTestServer(t)
-
-	rec := doJSON(t, s, "POST",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/github/identity/pat",
-		map[string]any{"pat": "   "})
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status=%d, want 400", rec.Code)
-	}
-}
-
-// TestGitHubIdentityPAT_HostUnreachable_Returns502 pins the infra failure shape:
-// when TF can't reach the host, the response is a 502 (distinct from a bad
-// token) and no identity row is written.
-func TestGitHubIdentityPAT_HostUnreachable_Returns502(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	s := newTestServer(t)
-	ctx := context.Background()
-
-	// Stand a stub up to claim a port, then close it so dials are refused.
-	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	deadURL := dead.URL
-	dead.Close()
-	seedLocalOrgGitHubHost(t, s, deadURL)
-
-	rec := doJSON(t, s, "POST",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/github/identity/pat",
-		map[string]any{"pat": "ghp_whatever"})
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("status=%d body=%s, want 502", rec.Code, rec.Body.String())
-	}
-	if login, _ := s.users.GetGitHubLogin(ctx, runmode.LocalDefaultUserID, deadURL); login != "" {
-		t.Errorf("identity row written despite unreachable host: %q", login)
-	}
-}
-
-// TestGitHubIdentityPAT_CapturesNumericUserID pins the second of the two
-// writers of user_github_identities.github_user_id (the Connect OAuth callback
-// is the other): the whoami that proves the token also reports which account it
-// is, and both halves of that answer are persisted. The login is what the rest
-// of the product matches on today; the id is what stays true if the user
-// renames.
-func TestGitHubIdentityPAT_CapturesNumericUserID(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
-	ctx := context.Background()
-
-	ghStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v3/user/emails" {
-			writeGitHubPrimaryEmail(w, "octo-pat@example.com")
-			return
-		}
-		if r.URL.Path != "/api/v3/user" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"id":583231,"login":"octo-pat"}`)
-	}))
-	t.Cleanup(ghStub.Close)
-	seedLocalOrgGitHubHost(t, s, ghStub.URL)
-
-	rec := doJSON(t, s, "POST",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/github/identity/pat",
-		map[string]any{"pat": "ghp_secret_token"})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
-	}
-
-	var githubUserID, email sql.NullString
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT github_user_id, email FROM user_github_identities WHERE user_id = ? AND github_base_url = ?`,
-		runmode.LocalDefaultUserID, ghStub.URL).Scan(&githubUserID, &email); err != nil {
-		t.Fatalf("read GitHub identity: %v", err)
 	}
 	if githubUserID.String != "583231" {
 		t.Errorf("github_user_id = %q, want %q", githubUserID.String, "583231")
 	}
 	if email.String != "octo-pat@example.com" {
 		t.Errorf("email = %q, want %q", email.String, "octo-pat@example.com")
+	}
+
+	// The org credential store is the only secret store in play, and the user
+	// PAT is not in it.
+	creds, _ := integrations.Load(ctx, s.secrets, runmode.LocalDefaultOrgID)
+	if creds.GitHubPAT != "" {
+		t.Errorf("org GitHub PAT = %q, want empty (the user PAT must not be stored)", creds.GitHubPAT)
+	}
+}
+
+// TestGitHubIdentityPAT_Refusals: an empty token is a 400 before any host call,
+// a token the host rejects is the caller's 422, an unreachable host is a 502,
+// and none of them writes an identity.
+func TestGitHubIdentityPAT_Refusals(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		host   func(t *testing.T) string
+		pat    string
+		status int
+	}{
+		{"empty token", func(t *testing.T) string { return "" }, "   ", http.StatusBadRequest},
+		{"token rejected", func(t *testing.T) string {
+			ghStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
+			}))
+			t.Cleanup(ghStub.Close)
+			return ghStub.URL
+		}, "ghp_bad", http.StatusUnprocessableEntity},
+		{"host unreachable", func(t *testing.T) string {
+			// Claim a port, then close it so dials are refused.
+			dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+			dead.Close()
+			return dead.URL
+		}, "ghp_whatever", http.StatusBadGateway},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runmode.SetForTest(t, runmode.ModeLocal)
+			keyring.MockInit()
+			s := newTestServer(t)
+			host := tc.host(t)
+			if host != "" {
+				seedLocalOrgGitHubHost(t, s, host)
+			}
+
+			rec := doJSON(t, s, "POST",
+				"/api/orgs/"+runmode.LocalDefaultOrgID+"/github/identity/pat",
+				map[string]any{"pat": tc.pat})
+			if rec.Code != tc.status {
+				t.Fatalf("status=%d body=%s, want %d", rec.Code, rec.Body.String(), tc.status)
+			}
+			if host == "" {
+				return
+			}
+			if login, _ := s.users.GetGitHubLogin(context.Background(), runmode.LocalDefaultUserID, host); login != "" {
+				t.Errorf("a refused capture wrote an identity: login=%q", login)
+			}
+		})
 	}
 }

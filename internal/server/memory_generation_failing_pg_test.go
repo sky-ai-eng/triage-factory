@@ -12,12 +12,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 )
 
-// TestMemoryGenerationFailing_Postgres_RetryNow runs memory.generation_failing
-// through the inbox and the invoke route on the Postgres stores: the org's
-// admin is sent an urgent, undismissible row for no_model with the settings
-// link first and "Retry now" allowed, an org member is sent nothing, and the
-// invoke rings the org-wide memory doorbell and leaves the row open for the
-// next attempt to decide.
+// TestMemoryGenerationFailing_Postgres_RetryNow: a no_model failure sends the org
+// admin an urgent, undismissible row with the settings link and "Retry now",
+// sends a member nothing, and Retry now rings the org-wide doorbell, leaving
+// the row open.
 func TestMemoryGenerationFailing_Postgres_RetryNow(t *testing.T) {
 	rig := newAuthRig(t)
 	owner := rig.seedUser()

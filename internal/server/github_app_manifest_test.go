@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/zalando/go-keyring"
@@ -11,26 +12,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestGitHubAppManifest_RequestsMembersRead guards the single line in the
-// manifest that two unrelated things hang off, only one of which is visible
-// from the call site that uses it.
-//
-// The visible reason is GET /orgs/{org}/teams: the team-mapping import and the
-// poller's deletion-reconcile both need it, and both 403 into a silent zero
-// without it in an App-only org.
-//
-// The invisible one is that `members` is the ONLY organization permission the
-// manifest requests, and GitHub restricts installing an App on an organization
-// to that organization's owners exactly when the App asks for organization
-// permissions. That guard is enforced entirely by GitHub in response to this
-// one line — there is no code anywhere in this repository that implements it,
-// so nothing but this test would fail if a scope-minimization pass removed the
-// permission.
-//
-// The set-equality test next door holds the manifest and the bring-your-own-App
-// import bar to the same permissions, so this assertion covers both doors: it
-// is the one that fails when the permission leaves BOTH of them together, which
-// is exactly how a scope-minimization pass would remove it.
+// TestGitHubAppManifest_RequestsMembersRead: the manifest asks for exactly the
+// import bar's permissions, including members:read, its only organization
+// permission, which is what makes GitHub let only an org's owners install it.
 func TestGitHubAppManifest_RequestsMembersRead(t *testing.T) {
 	keyring.MockInit()
 	runmode.SetForTest(t, runmode.ModeLocal)
@@ -60,5 +44,13 @@ func TestGitHubAppManifest_RequestsMembersRead(t *testing.T) {
 	}
 	if got != "read" {
 		t.Errorf("members = %q, want \"read\" — TF lists teams and never edits membership", got)
+	}
+
+	want := make(map[string]string, len(importRequiredPermissions))
+	for _, req := range importRequiredPermissions {
+		want[req.name] = req.level
+	}
+	if !reflect.DeepEqual(manifest.DefaultPermissions, want) {
+		t.Errorf("manifest default_permissions = %v, want the import bar %v", manifest.DefaultPermissions, want)
 	}
 }

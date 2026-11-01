@@ -81,15 +81,9 @@ func providersOf(items []modelCatalogRow) map[string]bool {
 	return out
 }
 
-// A team that has narrowed nothing sees its org's whole enable-set; narrowing
-// the team removes the rest from the picker's options entirely, and clearing it
-// puts them back. The org's own narrowing shows through the team read too, which
-// is the intersection doing its job.
-//
-// Local mode, so the sets are written in the vocabulary a local deployment
-// dispatches — the harness's aliases, not native wire ids. That is not a detail
-// of the fixture: a set names models the deployment will be asked to run, so the
-// save refuses the other vocabulary outright (pinned both ways below).
+// The team read is the intersection of the org's and the team's enable-sets:
+// narrowing the team removes the rest from the picker and clearing puts them
+// back. Local mode, so the sets are written in the harness's aliases.
 func TestTeamModelsList_NarrowsToTheEnabledSets(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -169,16 +163,9 @@ func TestTeamModelsList_NarrowsToTheEnabledSets(t *testing.T) {
 	}
 }
 
-// An enable-set names models the deployment will be asked to dispatch, so it is
-// written in that deployment's own vocabulary and the other one is refused —
-// on both settings scopes, and whichever way round the mismatch runs.
-//
-// This is the gate that keeps the two registries from mixing in stored config.
-// A local org that stored a native wire id would hand the Claude Code harness a
-// word it cannot resolve; a multi org that stored an alias would put it on the
-// bifrost wire unresolved, and every message it produced would persist unpriced.
-// Neither is a spelling the set resolution could recover from later, because
-// nothing translates a stored value.
+// An enable-set is written in its deployment's own vocabulary and the other is
+// refused, on both settings scopes and in both directions: nothing translates a
+// stored value, so a wire id in local or an alias in multi would never resolve.
 func TestSettingsPatch_EnabledModels_RefusesTheOtherVocabulary(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -223,11 +210,9 @@ func assertFieldError(t *testing.T, rec *httptest.ResponseRecorder, field string
 	t.Errorf("no error names field %q: %s", field, rec.Body.String())
 }
 
-// TestTeamModelsRead_ScopeAndSets_Postgres pins the multi-mode read the local
-// short-circuits hide: the team's stored set shapes its catalog on the Postgres
-// dialect too, it shapes it for the ORG ADMIN who is not a member of that team
-// (the reason the read crosses the admin pool), one team's set does not narrow
-// another's, and a team in another org is invisible. Skips without Docker.
+// TestTeamModelsRead_ScopeAndSets_Postgres: on Postgres the team's set shapes
+// its catalog, including for an org admin not on the team; one team's set does
+// not narrow another's, and a team in another org is invisible.
 func TestTeamModelsRead_ScopeAndSets_Postgres(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	h := pgtest.Shared(t)
@@ -304,14 +289,9 @@ func TestTeamModelsRead_ScopeAndSets_Postgres(t *testing.T) {
 	})
 }
 
-// A manual delegation refused for its model's provider answers 422 with the
-// refusal itself — the provider to connect and where. The 500 arm beside it
-// redacts its message in multi mode, so landing there would strip exactly the
-// text this refusal exists to deliver; the status is what distinguishes them.
-//
-// The model here is a step's pin, saved while its provider was connected and
-// disconnected afterwards. That is the case no save-time check can catch, and
-// the reason the dispatch gate exists.
+// A manual delegation refused for its model's provider answers 422 naming the
+// provider to connect, not a 500 whose message multi mode redacts. The model is
+// a step pin whose provider was disconnected after the save.
 func TestDelegate_ModelProviderUnavailable_SurfacesTheRemedy(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()

@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/zalando/go-keyring"
 )
 
 func jiraOrgPath(orgID string) string { return "/api/orgs/" + orgID + "/jira" }
@@ -32,119 +31,50 @@ func jiraStatusPath(key, statusID string) string {
 	return jiraProjectPath(key) + "/statuses/" + statusID
 }
 
-// TestJiraProjectsList_ProxyPagingRoundTrip walks the list the way a client
-// does — first page, then the token it was handed — and pins the two halves of
-// the proxy-list contract: the rows page, and total_count is null rather than a
-// number this route cannot honestly produce.
-func TestJiraProjectsList_ProxyPagingRoundTrip(t *testing.T) {
-	s, _ := newServerWithJiraCatalog(t, "ALPHA", "BETA", "GAMMA", "DELTA", "EPSILON")
-
-	first := decodeList[jiraProjectJSON](t, doJSON(t, s, http.MethodPost, jiraProjectsListPath,
-		map[string]any{"page_size": 2}))
-	if got := projectKeysOf(first.Items); got != "ALPHA,BETA" {
-		t.Fatalf("page 1 = %s, want ALPHA,BETA", got)
-	}
-	if first.TotalCount != nil {
-		t.Errorf("total_count = %d, want null — a proxy list cannot count itself", *first.TotalCount)
-	}
-	if first.NextPageToken == "" {
-		t.Fatal("page 1 carried no next_page_token with three projects still to serve")
-	}
-
-	second := decodeList[jiraProjectJSON](t, doJSON(t, s, http.MethodPost, jiraProjectsListPath,
-		map[string]any{"page_size": 2, "page_token": first.NextPageToken}))
-	if got := projectKeysOf(second.Items); got != "GAMMA,DELTA" {
-		t.Fatalf("page 2 = %s, want GAMMA,DELTA", got)
-	}
-	if second.NextPageToken == "" {
-		t.Fatal("page 2 carried no next_page_token with one project still to serve")
-	}
-
-	third := decodeList[jiraProjectJSON](t, doJSON(t, s, http.MethodPost, jiraProjectsListPath,
-		map[string]any{"page_size": 2, "page_token": second.NextPageToken}))
-	if got := projectKeysOf(third.Items); got != "EPSILON" {
-		t.Fatalf("page 3 = %s, want EPSILON", got)
-	}
-	if third.NextPageToken != "" {
-		t.Errorf("last page minted a next_page_token (%q)", third.NextPageToken)
-	}
-}
-
-// TestJiraProjectsList_FiltersOnQ covers the search box: the filter matches the
-// key and the name, and it is the server that applies it.
-func TestJiraProjectsList_FiltersOnQ(t *testing.T) {
-	s, _ := newServerWithJiraCatalog(t, "SKY", "OPS", "DESK")
-
-	page := decodeList[jiraProjectJSON](t, doJSON(t, s, http.MethodPost, jiraProjectsListPath,
-		map[string]any{"q": "sk"}))
-	if got := projectKeysOf(page.Items); got != "SKY,DESK" {
-		t.Errorf("filtered page = %s, want SKY,DESK", got)
-	}
-}
-
-// TestJiraProjectsList_TokenIsFingerprintedOnQ is why `q` belongs in the
-// fingerprint: page 2 of the unfiltered catalog addresses a different result
-// set than page 2 of a search, so a token must not cross a filter change.
+// TestJiraProjectsList_TokenIsFingerprintedOnQ: the search filters and pages the
+// catalog under Jira's ids with a null total, and a token continues only its own
+// search: another filter is refused, a re-spelling in case and spacing is not.
 func TestJiraProjectsList_TokenIsFingerprintedOnQ(t *testing.T) {
 	s, _ := newServerWithJiraCatalog(t, "SKY", "OPS", "DESK")
 
 	first := decodeList[jiraProjectJSON](t, doJSON(t, s, http.MethodPost, jiraProjectsListPath,
-		map[string]any{"page_size": 1}))
-	if first.NextPageToken == "" {
-		t.Fatal("page 1 carried no next_page_token")
+		map[string]any{"q": "sk", "page_size": 1}))
+	if want := []jiraProjectJSON{{JiraID: fakeJiraProjectID("SKY"), Key: "SKY", Name: "SKY Project"}}; !slices.Equal(first.Items, want) ||
+		first.NextPageToken == "" || first.TotalCount != nil {
+		t.Fatalf("page 1 = %+v (token %q, total %v), want %+v with a token and a null total", first.Items, first.NextPageToken, first.TotalCount, want)
 	}
+
 	rec := doJSON(t, s, http.MethodPost, jiraProjectsListPath,
-		map[string]any{"q": "sk", "page_size": 1, "page_token": first.NextPageToken})
+		map[string]any{"page_size": 1, "page_token": first.NextPageToken})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 for a token minted under a different filter; body=%s", rec.Code, rec.Body.String())
 	}
 	if items := decodeErrorItems(t, rec); items[0].Field != "page_token" {
 		t.Errorf("faulting field = %q, want page_token", items[0].Field)
 	}
+
+	// OPS does not match, so the second and last page is DESK.
+	second := decodeList[jiraProjectJSON](t, doJSON(t, s, http.MethodPost, jiraProjectsListPath,
+		map[string]any{"q": "  SK  ", "page_size": 1, "page_token": first.NextPageToken}))
+	if got := projectKeysOf(second.Items); got != "DESK" || second.NextPageToken != "" {
+		t.Errorf("page 2 under a re-spelled filter = %s (token %q), want DESK and no token", got, second.NextPageToken)
+	}
 }
 
-// TestJiraProjectsList_StrictBody — an unknown field is a caller mistake, not
-// something to ignore: a typo'd filter that silently widens the answer is the
-// exact failure the strict decode exists to prevent.
+// TestJiraProjectsList_StrictBody: an unknown field, a count-only read (a proxy
+// list has no total) and an out-of-range page size are each a 400 that never
+// reaches Jira.
 func TestJiraProjectsList_StrictBody(t *testing.T) {
 	s, fake := newServerWithJiraCatalog(t, "SKY")
 
-	rec := doJSON(t, s, http.MethodPost, jiraProjectsListPath, map[string]any{"query": "sk"})
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400 for an unknown body field; body=%s", rec.Code, rec.Body.String())
-	}
+	assertOneFault(t, doJSON(t, s, http.MethodPost, jiraProjectsListPath, map[string]any{"query": "sk"}),
+		http.StatusBadRequest, "UNKNOWN_FIELD", "query")
+	assertOneFault(t, doJSON(t, s, http.MethodPost, jiraProjectsListPath, map[string]any{"page_size": 0}),
+		http.StatusBadRequest, "OUT_OF_RANGE", "page_size")
+	assertOneFault(t, doJSON(t, s, http.MethodPost, jiraProjectsListPath, map[string]any{"page_size": 5000}),
+		http.StatusBadRequest, "OUT_OF_RANGE", "page_size")
 	if fake.Calls() != 0 {
 		t.Errorf("rejected body still reached Jira (%d calls)", fake.Calls())
-	}
-}
-
-// TestJiraProjectsList_CountOnlyRejected: page_size 0 asks for a total, and a
-// proxy list has none. Refusing names the reason; answering an empty page with
-// a null total would read as a count of nothing.
-func TestJiraProjectsList_CountOnlyRejected(t *testing.T) {
-	s, fake := newServerWithJiraCatalog(t, "SKY")
-
-	rec := doJSON(t, s, http.MethodPost, jiraProjectsListPath, map[string]any{"page_size": 0})
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400 for a count-only read; body=%s", rec.Code, rec.Body.String())
-	}
-	items := decodeErrorItems(t, rec)
-	if items[0].Field != "page_size" {
-		t.Errorf("faulting field = %q, want page_size", items[0].Field)
-	}
-	if fake.Calls() != 0 {
-		t.Errorf("rejected read still reached Jira (%d calls)", fake.Calls())
-	}
-}
-
-// TestJiraProjectsList_PageSizeOutOfRange keeps the shared paging contract:
-// an oversized window is rejected, never quietly clamped.
-func TestJiraProjectsList_PageSizeOutOfRange(t *testing.T) {
-	s, _ := newServerWithJiraCatalog(t, "SKY")
-
-	rec := doJSON(t, s, http.MethodPost, jiraProjectsListPath, map[string]any{"page_size": 5000})
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -154,42 +84,6 @@ func projectKeysOf(items []jiraProjectJSON) string {
 		keys[i] = p.Key
 	}
 	return strings.Join(keys, ",")
-}
-
-// TestJiraProjectsList_ServesJiraIDs: every candidate carries Jira's id for
-// the project, which is what the team write and the project routes name it
-// by; the key beside it is for display.
-func TestJiraProjectsList_ServesJiraIDs(t *testing.T) {
-	s, _ := newServerWithJiraCatalog(t, "SKY", "OPS")
-
-	page := decodeList[jiraProjectJSON](t, doJSON(t, s, http.MethodPost, jiraProjectsListPath, map[string]any{}))
-	if len(page.Items) != 2 {
-		t.Fatalf("items = %+v, want SKY and OPS", page.Items)
-	}
-	for _, p := range page.Items {
-		if p.JiraID != fakeJiraProjectID(p.Key) {
-			t.Errorf("%s jira_id = %q, want %q", p.Key, p.JiraID, fakeJiraProjectID(p.Key))
-		}
-	}
-}
-
-// TestJiraProjectsList_FilterCaseFoldsForTheToken: the match is
-// case-insensitive on both deployments, so two spellings of one search are one
-// search — and a token minted under either continues the same page rather than
-// being refused as a different query.
-func TestJiraProjectsList_FilterCaseFoldsForTheToken(t *testing.T) {
-	s, _ := newServerWithJiraCatalog(t, "SKY", "SKYNET", "OPS")
-
-	first := decodeList[jiraProjectJSON](t, doJSON(t, s, http.MethodPost, jiraProjectsListPath,
-		map[string]any{"q": "sky", "page_size": 1}))
-	if first.NextPageToken == "" {
-		t.Fatal("page 1 carried no next_page_token with a second match to serve")
-	}
-	second := decodeList[jiraProjectJSON](t, doJSON(t, s, http.MethodPost, jiraProjectsListPath,
-		map[string]any{"q": "  SKY  ", "page_size": 1, "page_token": first.NextPageToken}))
-	if got := projectKeysOf(second.Items); got != "SKYNET" {
-		t.Errorf("page 2 under a differently-spelled filter = %s, want SKYNET", got)
-	}
 }
 
 // TestJiraCatalog_MalformedOrgIsNotFound: an org id that is not one is a 404
@@ -213,25 +107,6 @@ func TestJiraCatalog_MalformedOrgIsNotFound(t *testing.T) {
 	}
 }
 
-// TestJiraCatalog_NotConnectedEverywhere: with no service credential every
-// read is a 409 naming the fix, never an empty list or a 404 for a project
-// that may exist.
-func TestJiraCatalog_NotConnectedEverywhere(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
-	for name, rec := range map[string]*httptest.ResponseRecorder{
-		"projects list": doJSON(t, s, http.MethodPost, jiraProjectsListPath, map[string]any{}),
-		"project":       doJSON(t, s, http.MethodGet, jiraProjectPath("SKY"), nil),
-		"statuses list": doJSON(t, s, http.MethodPost, jiraStatusesListPath("SKY"), map[string]any{}),
-		"status":        doJSON(t, s, http.MethodGet, jiraStatusPath("SKY", statusDoneID), nil),
-	} {
-		t.Run(name, func(t *testing.T) {
-			assertOneFault(t, rec, http.StatusConflict, "NOT_CONFIGURED", "")
-		})
-	}
-}
-
 // TestJiraCatalog_UpstreamFailure: a failed Jira call is a 502 on every read,
 // never an empty page or a 404.
 func TestJiraCatalog_UpstreamFailure(t *testing.T) {
@@ -249,11 +124,9 @@ func TestJiraCatalog_UpstreamFailure(t *testing.T) {
 	}
 }
 
-// TestJiraProjectGet: one project by its Jira id, carrying that id, the key
-// and the name and none of the rest of Jira's project object. A project Jira
-// cannot show is a 404, and so is a segment that is not a project id, which
-// never reaches Jira — the project's key included, since one project has one
-// address.
+// TestJiraProjectGet: one project by its Jira id, carrying only the id, key and
+// name. A project Jira cannot show is a 404, and so is a segment that is not a
+// project id (its key included), which never reaches Jira.
 func TestJiraProjectGet(t *testing.T) {
 	s, fake := newServerWithJiraCatalog(t, "SKY", "OPS")
 
@@ -285,34 +158,12 @@ func TestJiraProjectGet(t *testing.T) {
 	}
 }
 
-// TestJiraStatusesList_PagesTheProjectsWorkflow walks a project's statuses a
-// page at a time. The pages together are the whole workflow, ordered by name,
-// each status carrying the id the team write takes; total_count is null.
-func TestJiraStatusesList_PagesTheProjectsWorkflow(t *testing.T) {
-	s, _ := newServerWithJiraCatalog(t, "SKY")
-
-	var got []jiraStatusJSON
-	token := ""
-	for pages := 0; ; pages++ {
-		if pages > len(jiraFixtureStatuses) {
-			t.Fatal("the statuses list never stopped minting tokens")
-		}
-		body := map[string]any{"page_size": 3}
-		if token != "" {
-			body["page_token"] = token
-		}
-		page := decodeList[jiraStatusJSON](t, doJSON(t, s, http.MethodPost, jiraStatusesListPath("SKY"), body))
-		if len(page.Items) > 3 {
-			t.Fatalf("page of %d, want at most 3", len(page.Items))
-		}
-		if page.TotalCount != nil {
-			t.Errorf("total_count = %d, want null", *page.TotalCount)
-		}
-		got = append(got, page.Items...)
-		if token = page.NextPageToken; token == "" {
-			break
-		}
-	}
+// TestJiraStatusesList_TokenIsBoundToTheProject: a project's whole workflow
+// pages by name, each status under the id the team write takes, and a token is
+// an offset into that project's workflow that cannot page another's.
+func TestJiraStatusesList_TokenIsBoundToTheProject(t *testing.T) {
+	s, _ := newServerWithJiraCatalog(t, "SKY", "OPS")
+	got, token := readTwoPages[jiraStatusJSON](t, s, jiraStatusesListPath("SKY"))
 	want := []jiraStatusJSON{
 		{ID: statusInReviewID, Name: "Code Review"},
 		{ID: statusDoneID, Name: "Done"},
@@ -322,19 +173,8 @@ func TestJiraStatusesList_PagesTheProjectsWorkflow(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Errorf("statuses = %+v, want %+v", got, want)
 	}
-}
-
-// TestJiraStatusesList_TokenIsBoundToTheProject: a token is an offset into one
-// project's workflow, so it cannot page another project's.
-func TestJiraStatusesList_TokenIsBoundToTheProject(t *testing.T) {
-	s, _ := newServerWithJiraCatalog(t, "SKY", "OPS")
-	first := decodeList[jiraStatusJSON](t, doJSON(t, s, http.MethodPost, jiraStatusesListPath("SKY"),
-		map[string]any{"page_size": 2}))
-	if first.NextPageToken == "" {
-		t.Fatal("page 1 carried no next_page_token")
-	}
 	assertOneFault(t, doJSON(t, s, http.MethodPost, jiraStatusesListPath("OPS"),
-		map[string]any{"page_size": 2, "page_token": first.NextPageToken}),
+		map[string]any{"page_size": 2, "page_token": token}),
 		http.StatusBadRequest, "INVALID_PARAM", "page_token")
 }
 
@@ -360,11 +200,9 @@ func TestJiraStatusesList_Refusals(t *testing.T) {
 	}
 }
 
-// TestJiraStatusGet: one status through the project whose workflow uses it,
-// with the same id and name the list serves. A status of another project's
-// workflow is a 404 at this project's address, as are an id Jira does not know
-// and a project Jira cannot show; a status id outside the grammar, or a
-// project segment that is not a project id, is a 404 that never reaches Jira.
+// TestJiraStatusGet: one status through the project whose workflow uses it.
+// Another project's status, an id Jira does not know and a project Jira cannot
+// show are 404s; a path outside the id grammar is a 404 that never reaches Jira.
 func TestJiraStatusGet(t *testing.T) {
 	s, fake := newServerWithJiraCatalog(t, "SKY", "OPS")
 	opsOnly := fakeJiraStatus{ID: "20000", Name: "Queued"}

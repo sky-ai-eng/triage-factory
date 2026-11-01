@@ -48,13 +48,9 @@ func decodeJiraPage[T any](t *testing.T, resp *http.Response) listEnvelope[T] {
 	return out
 }
 
-// TestJiraCatalog_Postgres_AddressedAndGatedByOrg: the catalog routes answer
-// for the org in the path, so a caller in two orgs reads the second without
-// moving their active org, and a page token minted under one org does not page
-// the other's. The gate is live membership: a member removed from the org gets
-// a 404 from every route, with their session still naming the org, and Jira is
-// never asked. The credential is a real one in org_secrets, so the read the
-// gate protects is the one production makes.
+// TestJiraCatalog_Postgres_AddressedAndGatedByOrg: the catalog routes answer for
+// the org in the path, and a token from one org does not page another's. A member
+// removed while their session still names the org gets 404s and Jira is not asked.
 func TestJiraCatalog_Postgres_AddressedAndGatedByOrg(t *testing.T) {
 	rig := newAuthRig(t)
 	alice := rig.seedUser()

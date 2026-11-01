@@ -126,12 +126,9 @@ func deliveryRows(t *testing.T, s *Server) int {
 	return n
 }
 
-// serveExpectingNoStore fires the request with every store the receiver could
-// reach unwired. A nil interface panics on its first method call, so any read
-// or write at all — on any method, not just the ones a spy remembered to
-// count — surfaces as a recovered panic and fails the test. The four are the
-// receiver's whole reach: the installation mirror, the dedup table, org
-// settings, and the vault.
+// serveExpectingNoStore fires the request with the receiver's four stores
+// (installation mirror, dedup table, org settings, vault) set to nil, so any
+// call on any of them panics and fails the test.
 func serveExpectingNoStore(t *testing.T, s *Server, event, sigHeader string, body []byte) *httptest.ResponseRecorder {
 	t.Helper()
 	s.githubApps, s.githubDeliveries, s.orgs, s.secrets = nil, nil, nil, nil
@@ -149,11 +146,9 @@ func serveExpectingNoStore(t *testing.T, s *Server, event, sigHeader string, bod
 
 const boundPRBody = `{"action":"synchronize","number":7,"installation":{"id":4242},"sender":{"login":"octocat","html_url":"https://github.com/octocat"}}`
 
-// TestDeploymentWebhook_BoundInstallation_PublishesUnderOrg is the route
-// working: a delivery GitHub signed, for an installation an org bound,
-// lands on the bus under that org's id — an id the payload never
-// carried. The same delivery to the per-org URL is still refused, because the
-// two receivers coexist and a managed org's deliveries do not arrive there.
+// TestDeploymentWebhook_BoundInstallation_PublishesUnderOrg: a signed delivery
+// for a bound installation is published under the binding org's id, and the
+// same delivery to that org's per-org URL is still refused.
 func TestDeploymentWebhook_BoundInstallation_PublishesUnderOrg(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	s := newTestServer(t)
@@ -198,12 +193,9 @@ func TestDeploymentWebhook_BoundInstallation_AppliesLifecycle(t *testing.T) {
 	}
 }
 
-// TestDeploymentWebhook_UnboundInstallation_AcknowledgedWithoutSideEffect is
-// the ordinary-state rule. An installation nobody has bound is not an attack
-// and not an error: the delivery is 2xx, nothing is published, nothing is
-// written — not an installation row (creation is the bind's job alone) and not
-// a dedup row either, which is what lets the same delivery apply once the
-// org binds the installation and the operator redelivers it.
+// TestDeploymentWebhook_UnboundInstallation_AcknowledgedWithoutSideEffect: a
+// delivery for an unbound installation is a 204 that publishes and writes
+// nothing, not even a dedup row, so a redelivery after the bind applies.
 func TestDeploymentWebhook_UnboundInstallation_AcknowledgedWithoutSideEffect(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	s := newTestServer(t)
@@ -238,13 +230,9 @@ func TestDeploymentWebhook_UnboundInstallation_AcknowledgedWithoutSideEffect(t *
 	}
 }
 
-// TestDeploymentWebhook_UnboundInstallation_OneOperatorLine is the trace an
-// unbound delivery is allowed to leave: exactly one log line, at a level a
-// self-hoster reads by default, naming the installation and the account it
-// targets — and nothing the payload's author wrote. The operator is the only
-// person placed to notice an install that landed nowhere (no tenant surface
-// may list it), so the line has to be findable; and the payload is text from
-// GitHub's side of the fence, so none of it rides along.
+// TestDeploymentWebhook_UnboundInstallation_OneOperatorLine: an unbound delivery
+// leaves exactly one INFO line naming the installation and its account, and
+// nothing the payload's author wrote.
 func TestDeploymentWebhook_UnboundInstallation_OneOperatorLine(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	s := newTestServer(t)
@@ -298,52 +286,35 @@ func TestDeploymentWebhook_UnboundInstallation_OneOperatorLine(t *testing.T) {
 	}
 }
 
-// TestDeploymentWebhook_BadSignature_TouchesNoStore is the property the
-// inverted order buys: on this route a forgery costs a hash and nothing else.
-// Asserted structurally — every store is unwired, so any read at all panics.
-func TestDeploymentWebhook_BadSignature_TouchesNoStore(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeMulti)
-	s := newTestServer(t)
-	seedDeploymentWebhook(t, s)
-
+// TestDeploymentWebhook_UnverifiedIs401: the receiver verifies before it reads
+// anything, so an unverifiable delivery is a bare 401 that touches no store.
+func TestDeploymentWebhook_UnverifiedIs401(t *testing.T) {
 	body := []byte(boundPRBody)
-	rec := serveExpectingNoStore(t, s, "pull_request", "sha256=deadbeef", body)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", rec.Code)
-	}
-	if rec.Body.Len() != 0 {
-		t.Errorf("401 response has body %q, want empty", rec.Body.String())
-	}
-}
+	for _, tc := range []struct {
+		name   string
+		secret string // the deployment App's webhook secret; "" is no deployment App
+		sig    string
+	}{
+		{"bad signature", deploymentWebhookSecret, "sha256=deadbeef"},
+		{"missing signature", deploymentWebhookSecret, ""},
+		// Signed under the empty key: the one signature a receiver that ran the
+		// HMAC check with no secret would accept.
+		{"no deployment secret", "", signWith("", body)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runmode.SetForTest(t, runmode.ModeMulti)
+			keyring.MockInit()
+			s := newTestServer(t)
+			s.deploymentApp = githubapp.DeploymentApp{WebhookSecret: tc.secret}
 
-// TestDeploymentWebhook_NoDeploymentSecret_Is401: a deployment without a
-// deployment App has nothing to verify against and refuses. The delivery is
-// signed under the EMPTY key — the one signature a receiver that fell into the
-// HMAC check with no secret would accept — and no store is reachable, so the
-// refusal happens before anything else.
-func TestDeploymentWebhook_NoDeploymentSecret_Is401(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeMulti)
-	s := newTestServer(t)
-	s.deploymentApp = githubapp.DeploymentApp{}
-
-	body := []byte(boundPRBody)
-	rec := serveExpectingNoStore(t, s, "pull_request", signWith("", body), body)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401 — an empty key must never verify", rec.Code)
-	}
-	if rec.Body.Len() != 0 {
-		t.Errorf("401 response has body %q, want empty", rec.Body.String())
-	}
-}
-
-func TestDeploymentWebhook_MissingSignature_Is401(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeMulti)
-	s := newTestServer(t)
-	seedDeploymentWebhook(t, s)
-
-	rec := serveExpectingNoStore(t, s, "pull_request", "", []byte(boundPRBody))
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", rec.Code)
+			rec := serveExpectingNoStore(t, s, "pull_request", tc.sig, body)
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", rec.Code)
+			}
+			if rec.Body.Len() != 0 {
+				t.Errorf("401 response has body %q, want empty", rec.Body.String())
+			}
+		})
 	}
 }
 
@@ -371,12 +342,9 @@ func TestDeploymentWebhook_Redelivery_AppliesOnce(t *testing.T) {
 	}
 }
 
-// TestDeploymentWebhook_HostDisambiguates: the binding key is (host,
-// installation id), because two GitHub deployments can issue the same id, and
-// the host half is the deployment's default GitHub — never anything the
-// payload says. An installation bound under another host is unreachable from
-// this route whatever the delivery's sender claims; the same id bound under
-// the default applies.
+// TestDeploymentWebhook_HostDisambiguates: a binding is keyed on (host,
+// installation id) with the host taken from the deployment's default, never the
+// payload, so the id bound under another host is unreachable from this route.
 func TestDeploymentWebhook_HostDisambiguates(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	s := newTestServer(t)
@@ -410,10 +378,8 @@ func TestDeploymentWebhook_HostDisambiguates(t *testing.T) {
 	}
 }
 
-// TestDeploymentWebhook_KeysOnTheDeploymentDefault is the GHES self-hoster's
-// shape: with TF_DEFAULT_GITHUB_HOST naming their GitHub, an installation
-// bound under it applies — including for a delivery whose sender URL says
-// github.com, which proves the payload plays no part in the host — and the
+// TestDeploymentWebhook_KeysOnTheDeploymentDefault: with the default host set to
+// a GHES, a binding under it applies even for a sender on github.com, and the
 // same id bound under github.com does not.
 func TestDeploymentWebhook_KeysOnTheDeploymentDefault(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
@@ -438,10 +404,9 @@ func TestDeploymentWebhook_KeysOnTheDeploymentDefault(t *testing.T) {
 	}
 }
 
-// TestDeploymentWebhook_MalformedInstallation_StaysBadRequest pins the gate's
-// position on this route too: structural validation runs before any store is
-// read, so a malformed installation delivery is 400 on every attempt and
-// records nothing.
+// TestDeploymentWebhook_MalformedInstallation_StaysBadRequest: structural
+// validation runs before the dedup gate, so a malformed delivery is 400 on
+// every attempt and records nothing.
 func TestDeploymentWebhook_MalformedInstallation_StaysBadRequest(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	s := newTestServer(t)

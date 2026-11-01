@@ -83,10 +83,8 @@ func firstErrorMessage(t *testing.T, rec *httptest.ResponseRecorder) string {
 	return body.Errors[0].Message
 }
 
-// decodeErrorItems returns every item in the error envelope. Its reason for
-// existing beside firstErrorMessage is the accumulating validators: a body
-// with several bad fields answers with several items, and asserting only the
-// first would pass a handler that stopped at it.
+// decodeErrorItems returns every item in the error envelope, so a test of an
+// accumulating validator can tell a handler that stopped at the first fault.
 func decodeErrorItems(t *testing.T, rec *httptest.ResponseRecorder) []httpx.ErrorItem {
 	t.Helper()
 	var body struct {
@@ -107,14 +105,9 @@ func firstErrorReason(t *testing.T, rec *httptest.ResponseRecorder) string {
 	return decodeErrorItems(t, rec)[0].Reason
 }
 
-// TestTaskRoutes_404OnMalformedID pins the family-wide contract: every
-// /api/tasks/{id} route validates the path id as a UUID before any store
-// call and answers 404 for a malformed one. Production ids are UUIDs in both
-// dialects; on Postgres tasks.id is the uuid column type, so without the
-// guard a malformed id surfaces as SQLSTATE 22P02 → 500 (the store-level
-// reality is pinned by TestTaskStore_Postgres_MalformedIDErrors). Treating
-// it as not-found keeps the answer identical across dialects and discloses
-// nothing.
+// TestTaskRoutes_404OnMalformedID: every /api/tasks/{id} route answers 404 for a
+// path id that is not a UUID before any store call, rather than the 500 a
+// Postgres uuid column would raise, so both dialects answer the same.
 func TestTaskRoutes_404OnMalformedID(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -140,13 +133,9 @@ func TestTaskRoutes_404OnMalformedID(t *testing.T) {
 	}
 }
 
-// TestEntityDeckReads_StrictQueryParams is the negative space of the
-// strict-params contract on the query-param-carrying reads next to the tasks
-// family: a filter that fails to parse is rejected, never resolved to a
-// default — a corrupt team filter must not widen a result set back to the
-// union, and must not silently retarget a single-team deck to the caller's
-// default team. The tasks list's own filters travel in a body now; their
-// negative space is TestTaskList_StrictBody.
+// TestEntityDeckReads_StrictQueryParams: a query filter on the entity deck reads
+// that fails to parse is rejected, never resolved to a default that widens the
+// result or retargets the deck to the caller's default team.
 func TestEntityDeckReads_StrictQueryParams(t *testing.T) {
 	cases := []struct {
 		name string
@@ -171,11 +160,8 @@ func TestEntityDeckReads_StrictQueryParams(t *testing.T) {
 	}
 }
 
-// TestTaskWrites_StrictBodies pins strict decoding on the family's write
-// bodies: an unknown field is a 400 naming the field, on every route that
-// takes one. The former `action` and `to` discriminators are among the
-// unknown fields now, so a stale client's body is rejected rather than
-// half-understood.
+// TestTaskWrites_StrictBodies: an unknown field on any task write body, `action`
+// and `to` among them, is a 400 naming the field.
 func TestTaskWrites_StrictBodies(t *testing.T) {
 	const taskID = "/api/tasks/00000000-0000-4000-8000-0000000000aa"
 	for _, tc := range []struct {

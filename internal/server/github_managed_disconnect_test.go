@@ -20,15 +20,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// Leaving the managed class, end to end against the bind rig: the disconnect
-// verbs, and the door guards that keep every other credential bind from
-// leaving an org's live installation rows under a class that says it has
-// no App.
-//
-// One assertion runs after every transition here: an org has live managed
-// rows if and only if its class is managed_app. A verb that moved one without
-// the other is the failure this file exists to catch, and a status code alone
-// would not catch it.
+// Leaving the managed class against the bind rig: the disconnect verbs and the
+// door guards on every other credential bind. After every transition an org
+// has live managed rows if and only if its class is managed_app.
 
 // bindManaged runs the ceremony for each installation id, on a distinct
 // account per id, and returns with every one of them bound.
@@ -49,16 +43,11 @@ func (r *bindRig) bindManaged(t *testing.T, ids ...int64) {
 // disconnect drives the whole-org verb (only == "") or the narrowed one.
 func (r *bindRig) disconnect(t *testing.T, only string) *httptest.ResponseRecorder {
 	t.Helper()
-	path := "/api/orgs/" + r.orgID.String() + "/github/managed/disconnect"
+	route := "/github/managed/disconnect"
 	if only != "" {
-		path = "/api/orgs/" + r.orgID.String() + "/github/managed/installations/" + only + "/disconnect"
+		route = "/github/managed/installations/" + only + "/disconnect"
 	}
-	req := httptest.NewRequest("POST", path, nil)
-	req.AddCookie(&http.Cookie{Name: r.srv.sidCookieName(), Value: r.sid})
-	req.Header.Set("Origin", r.srv.deployCfg.publicURL)
-	rec := httptest.NewRecorder()
-	r.srv.mux.ServeHTTP(rec, req)
-	return rec
+	return r.sendOrg(t, http.MethodPost, route, nil)
 }
 
 // liveInstallations reads the org's live installation ids.
@@ -257,9 +246,8 @@ func TestManagedDisconnect_RowsRemovedClassResetChangeRecorded(t *testing.T) {
 	}
 }
 
-// TestManagedDisconnect_ReceiverStopsRouting is the consequence the hole was
-// about: a delivery for the formerly bound installation is acknowledged as
-// unbound the moment the row is gone, with nothing changed in the receiver.
+// TestManagedDisconnect_ReceiverStopsRouting: once the row is gone, a delivery
+// for the formerly bound installation is acknowledged as unbound.
 func TestManagedDisconnect_ReceiverStopsRouting(t *testing.T) {
 	gh := newFakeGitHub()
 	rig := newBindRig(t, gh)
@@ -354,10 +342,9 @@ func TestManagedDisconnect_PerInstallation(t *testing.T) {
 	}
 }
 
-// TestManagedDisconnect_NeverTouchesAnotherOrg: the verb answers about
-// this org's rows only. A sibling holding its own installation keeps it
-// through the caller's disconnect, and the caller cannot name the sibling's
-// installation through the narrowed verb.
+// TestManagedDisconnect_NeverTouchesAnotherOrg: a sibling org keeps its
+// installation through the caller's disconnect, and the caller cannot name it
+// through the narrowed verb.
 func TestManagedDisconnect_NeverTouchesAnotherOrg(t *testing.T) {
 	gh := newFakeGitHub()
 	first := newBindRig(t, gh)
@@ -380,17 +367,12 @@ func TestManagedDisconnect_NeverTouchesAnotherOrg(t *testing.T) {
 	second.assertRowsAgreeWithClass(t)
 }
 
+// TestManagedDisconnect_RefusesABYOOrg: a BYO org's rows belong to its own App,
+// so the managed verb refuses with 409 rather than a 204 for a class it was
+// never in.
 func TestManagedDisconnect_RefusesABYOOrg(t *testing.T) {
-	// A BYO org's installation rows belong to its own App and are torn
-	// down by its own switch flow. The managed verb refuses rather than
-	// no-ops: a 204 would say the org left a class it was never in.
 	rig := newBindRig(t, newFakeGitHub())
-	if _, err := rig.h.AdminDB.Exec(`
-		INSERT INTO org_settings (org_id, github_credential_class) VALUES ($1, 'byo_app')
-		ON CONFLICT (org_id) DO UPDATE SET github_credential_class = 'byo_app'
-	`, rig.orgID.String()); err != nil {
-		t.Fatalf("seed byo class: %v", err)
-	}
+	seedPGBYOAppCredentialClass(t, rig.authRig, rig.orgID.String())
 	rec := rig.disconnect(t, "")
 	if rec.Code != http.StatusConflict {
 		t.Errorf("disconnect on a byo_app org status=%d body=%s, want 409", rec.Code, rec.Body.String())
@@ -405,11 +387,7 @@ func TestManagedDisconnect_RequiresOrgAdmin(t *testing.T) {
 	rig.bindManaged(t, 4242)
 
 	member := rig.seedUser()
-	if _, err := rig.h.AdminDB.Exec(`
-		INSERT INTO org_memberships (org_id, user_id, role) VALUES ($1, $2, 'member')
-	`, rig.orgID.String(), member.String()); err != nil {
-		t.Fatalf("seed member: %v", err)
-	}
+	rig.addMember(t, member)
 	resp, _ := rig.driveCallback(member)
 	req := httptest.NewRequest("POST", "/api/orgs/"+rig.orgID.String()+"/github/managed/disconnect", nil)
 	req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: rig.sidFromResp(resp)})
@@ -447,13 +425,9 @@ func TestManagedDisconnect_LocalModeIs404(t *testing.T) {
 
 // --- The door guards -------------------------------------------------------
 
-// TestManagedClass_DoorsRefuseAManagedOrg is the test set that catches
-// the hole: before the guards, a managed org — known class, no App row —
-// walked through every other credential bind, acquired the credential, and
-// kept its bound installation rows live under a class that said it had no App.
-// Each door refuses now, names the disconnect as the way out, and writes
-// nothing: no PAT stored, no App row, class and rows untouched. The org
-// token bind is no door at all in multi mode, where the managed class lives.
+// TestManagedClass_DoorsRefuseAManagedOrg: every other credential bind refuses
+// an org holding live managed rows, names the disconnect as the way out, and
+// writes nothing; the org token bind does not exist in multi mode at all.
 func TestManagedClass_DoorsRefuseAManagedOrg(t *testing.T) {
 	assertUntouched := func(t *testing.T, rig *bindRig) {
 		t.Helper()
@@ -576,10 +550,8 @@ func TestManagedClass_DoorsRefuseAManagedOrg(t *testing.T) {
 	})
 
 	t.Run("a_managed_org_with_no_live_row_is_not_in_the_way", func(t *testing.T) {
-		// The guard is about live rows, not the class alone: once every row is
-		// gone (an uninstall reported by webhook, say) the org is free
-		// to bring an App of its own, so registering one gets the manifest
-		// page rather than the refusal.
+		// The guard is about live rows, not the class: with every row gone the
+		// org may register its own App.
 		rig := newBindRig(t, newFakeGitHub())
 		rig.bindManaged(t, 4242)
 		if _, err := rig.srv.githubApps.MarkInstallationRemoved(context.Background(), rig.orgID.String(), ghbase.DefaultBaseURL(), "4242"); err != nil {

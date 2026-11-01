@@ -25,8 +25,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // ---------- JWKS test rig (mirrors internal/auth/verify/verifier_test.go) ----------
@@ -386,112 +388,17 @@ func (r *authRig) requestWithSid(method, path, sid string) *http.Response {
 	return rec.Result()
 }
 
-// ---------- tests: acceptance bullets ----------
+// ---------- tests: session flow ----------
 
-// Bullet 1: Login → /api/me returns user + org list.
-func TestAuthFlow_LoginToMe(t *testing.T) {
-	r := newAuthRig(t)
-
-	userID := r.seedUser()
-	orgID, _ := r.seedOrg(userID, "alice-org")
-
-	// PKCE flow: TF exchanges an auth code with gotrue for the JWT;
-	// the test stubs the exchange to return a JWT minted by signKey.
-	resp, _ := r.driveCallback(userID)
-	if resp.StatusCode != http.StatusFound {
-		t.Fatalf("callback status=%d, want 302", resp.StatusCode)
-	}
-	sid := r.sidFromResp(resp)
-
-	// GET /api/me with the sid cookie.
-	meResp := r.requestWithSid("GET", "/api/me", sid)
-	if meResp.StatusCode != http.StatusOK {
-		t.Fatalf("/api/me status=%d, want 200", meResp.StatusCode)
-	}
-	var me struct {
-		ID             string `json:"id"`
-		Email          string `json:"email"`
-		GitHubUsername string `json:"github_username"`
-		Orgs           []struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
-			Role string `json:"role"`
-		} `json:"orgs"`
-		ActiveOrgID string `json:"active_org_id"`
-	}
-	if err := json.NewDecoder(meResp.Body).Decode(&me); err != nil {
-		t.Fatalf("decode /api/me: %v", err)
-	}
-	if me.ID != userID.String() {
-		t.Errorf("me.id = %q, want %q", me.ID, userID)
-	}
-	if me.Email != userID.String()+"@test" {
-		t.Errorf("me.email = %q", me.Email)
-	}
-	if want := "test-user-" + userID.String()[:8]; me.GitHubUsername != want {
-		t.Errorf("me.github_username = %q, want %q", me.GitHubUsername, want)
-	}
-	if len(me.Orgs) != 1 || me.Orgs[0].ID != orgID.String() {
-		t.Errorf("me.orgs = %v, want one org %s", me.Orgs, orgID)
-	}
-	if me.Orgs[0].Role != "owner" {
-		t.Errorf("me.orgs[0].role = %q, want owner", me.Orgs[0].Role)
-	}
-	if me.ActiveOrgID != orgID.String() {
-		t.Errorf("me.active_org_id = %q, want %q (OAuth callback defaults to earliest membership)",
-			me.ActiveOrgID, orgID)
-	}
-}
-
-// TestAuthFlow_Me_LinearIdentityNeedsActiveOrgWorkspace: the multi-mode
-// /api/me reads the Linear pair against the active org's workspace only. A
-// binding the user holds in some other workspace is not reported in its place,
-// because a Linear user id names nobody outside the workspace that issued it.
-func TestAuthFlow_Me_LinearIdentityNeedsActiveOrgWorkspace(t *testing.T) {
-	r := newAuthRig(t)
-
-	userID := r.seedUser()
-	r.seedOrg(userID, "linear-org")
-	pgtest.MustExec(t, r.h.AdminDB,
-		`INSERT INTO user_linear_identities (user_id, workspace_id, linear_user_id, display_name, source, verified_at)
-		 VALUES ($1, 'ws-elsewhere', 'lin-elsewhere', 'Elsewhere', 'api_key', now())`, userID)
-
-	resp, _ := r.driveCallback(userID)
-	if resp.StatusCode != http.StatusFound {
-		t.Fatalf("callback status=%d, want 302", resp.StatusCode)
-	}
-	meResp := r.requestWithSid("GET", "/api/me", r.sidFromResp(resp))
-	if meResp.StatusCode != http.StatusOK {
-		t.Fatalf("/api/me status=%d, want 200", meResp.StatusCode)
-	}
-	var me map[string]any
-	if err := json.NewDecoder(meResp.Body).Decode(&me); err != nil {
-		t.Fatalf("decode /api/me: %v", err)
-	}
-	if me["active_org_id"] == nil {
-		t.Fatalf("active_org_id absent; the Linear read under test needs an active org: %v", me)
-	}
-	for _, field := range []string{"linear_user_id", "linear_display_name"} {
-		if v, ok := me[field]; ok {
-			t.Errorf("%s = %v, want absent (the active org has no Linear workspace)", field, v)
-		}
-	}
-}
-
-// TestAuthFlow_Me_LinearIdentityFromActiveOrgWorkspace: with the active org in
-// a Linear workspace, the multi-mode /api/me reports the user's binding in
-// that workspace and not the one they hold elsewhere. Once the user leaves the
-// org the pair is gone with it, even though the session still points there.
+// TestAuthFlow_Me_LinearIdentityFromActiveOrgWorkspace: multi-mode /api/me
+// reports the user's Linear binding in the active org's workspace only: none
+// while the org has no workspace, never one from another workspace, and none
+// once the user leaves the org the session still points at.
 func TestAuthFlow_Me_LinearIdentityFromActiveOrgWorkspace(t *testing.T) {
 	r := newAuthRig(t)
 
 	userID := r.seedUser()
 	orgID, teamID := r.seedOrg(userID, "linear-ws-org")
-	pgtest.MustExec(t, r.h.AdminDB,
-		`INSERT INTO org_settings (org_id, linear_workspace_id, linear_workspace_url_key)
-		 VALUES ($1, 'ws-org', 'acme')
-		 ON CONFLICT (org_id) DO UPDATE SET linear_workspace_id = EXCLUDED.linear_workspace_id,
-		                                    linear_workspace_url_key = EXCLUDED.linear_workspace_url_key`, orgID)
 	pgtest.MustExec(t, r.h.AdminDB,
 		`INSERT INTO user_linear_identities (user_id, workspace_id, linear_user_id, display_name, source, verified_at)
 		 VALUES ($1, 'ws-elsewhere', 'lin-elsewhere', 'Elsewhere', 'api_key', now() + interval '1 hour'),
@@ -517,7 +424,24 @@ func TestAuthFlow_Me_LinearIdentityFromActiveOrgWorkspace(t *testing.T) {
 		return me
 	}
 
+	// The org has no Linear workspace yet, so neither binding is reported: a
+	// Linear user id names nobody outside the workspace that issued it.
 	me := readMe()
+	if me["active_org_id"] == nil {
+		t.Fatalf("active_org_id absent; the Linear read under test needs an active org: %v", me)
+	}
+	for _, field := range []string{"linear_user_id", "linear_display_name"} {
+		if v, ok := me[field]; ok {
+			t.Errorf("%s = %v, want absent (the active org has no Linear workspace)", field, v)
+		}
+	}
+
+	pgtest.MustExec(t, r.h.AdminDB,
+		`INSERT INTO org_settings (org_id, linear_workspace_id, linear_workspace_url_key)
+		 VALUES ($1, 'ws-org', 'acme')
+		 ON CONFLICT (org_id) DO UPDATE SET linear_workspace_id = EXCLUDED.linear_workspace_id,
+		                                    linear_workspace_url_key = EXCLUDED.linear_workspace_url_key`, orgID)
+	me = readMe()
 	if me["active_org_id"] != orgID.String() {
 		t.Fatalf("active_org_id = %v, want %s", me["active_org_id"], orgID)
 	}
@@ -536,14 +460,9 @@ func TestAuthFlow_Me_LinearIdentityFromActiveOrgWorkspace(t *testing.T) {
 	}
 }
 
-// TestAuthFlow_LoginToMe_DisplayNameFallsBackToGitHubLogin covers TFAC-560: a
-// brand-new GitHub login whose profile has no "Name" set (full_name and name
-// both empty in user_metadata — the common case for a just-accepted invite)
-// must not persist a NULL display_name. resolveOrCreatePrincipal falls back
-// to the captured login handle so the org roster never renders "Unnamed
-// user" for someone whose identity we actually have. Deliberately skips
-// seedUser/seedOrg's pre-linked user_identities row so this exercises the
-// brand-new-principal INSERT path, not the returning-identity refresh.
+// A brand-new GitHub login with no profile name gets its login handle as
+// display_name, not NULL. It skips seedUser's pre-linked identity so the callback
+// takes the new-principal insert path.
 func TestAuthFlow_LoginToMe_DisplayNameFallsBackToGitHubLogin(t *testing.T) {
 	r := newAuthRig(t)
 
@@ -596,10 +515,8 @@ func TestAuthFlow_LoginToMe_DisplayNameFallsBackToGitHubLogin(t *testing.T) {
 	}
 }
 
-// TestAuthFlow_Me_NoMemberships_OmitsActiveOrgID covers the multi-mode
-// edge case: a freshly-logged-in user with zero org_memberships rows
-// gets a session whose active_org_id is NULL. /api/me must omit the
-// field (omitempty) rather than render it as an empty string.
+// A user with no memberships gets /api/me with active_org_id omitted, not empty,
+// and teams present as [].
 func TestAuthFlow_Me_NoMemberships_OmitsActiveOrgID(t *testing.T) {
 	r := newAuthRig(t)
 	// Signup provisions nothing, so a fresh user with no seedOrg lands
@@ -641,12 +558,8 @@ func TestAuthFlow_Me_NoMemberships_OmitsActiveOrgID(t *testing.T) {
 	}
 }
 
-// TestAuthFlow_Me_StaleActiveOrgMembership_OmitsActiveOrgID covers the
-// race where sessions.active_org_id outlives the user's membership in
-// that org: the FK only references orgs(id), not org_memberships, so
-// revoking a membership leaves the session pointing at an org that no
-// longer appears in /api/me's orgs list. handleMe must drop the stale
-// reference so an FE honoring the active_org_id contract can't route
+// A session whose active org the user has since left gets /api/me with
+// active_org_id omitted and that org absent from orgs, so a client cannot route
 // to an org the caller no longer belongs to.
 func TestAuthFlow_Me_StaleActiveOrgMembership_OmitsActiveOrgID(t *testing.T) {
 	r := newAuthRig(t)
@@ -702,14 +615,9 @@ func TestAuthFlow_Me_StaleActiveOrgMembership_OmitsActiveOrgID(t *testing.T) {
 	}
 }
 
-// TestAuthFlow_Me_SentinelSubjectInMultiMode_HitsDBPath pins comment 1
-// from PR #201 review: the local-mode synthesis branch must be gated
-// on s.authDeps == nil, not on Subject alone. A multi-mode caller
-// whose real GoTrue user UUID collides with the sentinel (seeded
-// fixtures, deterministic test users) must NOT receive the fabricated
-// Local org — it would mis-route them away from their real
-// memberships. With the gate, they fall through to the normal DB path
-// and get their actual data.
+// A multi-mode user whose id equals the local sentinel gets their real /api/me
+// from the database, never the synthesized Local response: the synthesis is
+// gated on authDeps being nil, not on the subject.
 func TestAuthFlow_Me_SentinelSubjectInMultiMode_HitsDBPath(t *testing.T) {
 	r := newAuthRig(t)
 
@@ -740,11 +648,13 @@ func TestAuthFlow_Me_SentinelSubjectInMultiMode_HitsDBPath(t *testing.T) {
 	}
 	var body struct {
 		ID          string `json:"id"`
+		Email       string `json:"email"`
 		DisplayName string `json:"display_name"`
 		ActiveOrgID string `json:"active_org_id"`
 		Orgs        []struct {
 			ID   string `json:"id"`
 			Name string `json:"name"`
+			Role string `json:"role"`
 		} `json:"orgs"`
 	}
 	if err := json.NewDecoder(meResp.Body).Decode(&body); err != nil {
@@ -752,6 +662,9 @@ func TestAuthFlow_Me_SentinelSubjectInMultiMode_HitsDBPath(t *testing.T) {
 	}
 	if body.ID != sentinelID.String() {
 		t.Errorf("id = %q, want %q", body.ID, sentinelID)
+	}
+	if body.Email != sentinelID.String()+"@test" {
+		t.Errorf("email = %q, want the principal's identity email", body.Email)
 	}
 	// The hallmark of the synthesis path is DisplayName="Local" + the
 	// sentinel org. Either of those leaking through here means we
@@ -769,31 +682,58 @@ func TestAuthFlow_Me_SentinelSubjectInMultiMode_HitsDBPath(t *testing.T) {
 	if body.Orgs[0].Name == "Local" {
 		t.Error("orgs[0].name = \"Local\" — sentinel org leaked into multi-mode response")
 	}
+	if body.Orgs[0].Role != "owner" {
+		t.Errorf("orgs[0].role = %q, want owner", body.Orgs[0].Role)
+	}
 }
 
-// Bullet 2: Logout flips revoked_at; subsequent requests 401; row persists.
+// TestAuthFlow_LogoutFlipsRevoked: login records login_success; logout calls
+// GoTrue logout with the session's JWT, revokes the session (later requests
+// 401, the row stays with revoked_at set) and records a logout event.
 func TestAuthFlow_LogoutFlipsRevoked(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
-	r.seedOrg(userID, "alice-org")
+	orgID, _ := r.seedOrg(userID, "alice-org")
 
-	resp, _ := r.driveCallback(userID)
+	resp, jwt := r.driveCallback(userID)
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("login status=%d, want 302", resp.StatusCode)
+	}
 	sid := r.sidFromResp(resp)
+
+	login := r.oneAuthEvent(domain.AuthEventLoginSuccess)
+	if login.userID != userID.String() || login.orgID != orgID.String() || login.sessionID != sid {
+		t.Errorf("login_success (user, org, session) = (%q, %q, %q), want (%q, %q, %q)",
+			login.userID, login.orgID, login.sessionID, userID, orgID, sid)
+	}
+	if login.detail["method"] != "github" || login.detail["sso"] != false {
+		t.Errorf("login_success detail=%v, want method=github sso=false", login.detail)
+	}
 
 	// Sanity: /api/me works before logout.
 	if got := r.requestWithSid("GET", "/api/me", sid).StatusCode; got != http.StatusOK {
 		t.Fatalf("pre-logout /api/me = %d, want 200", got)
 	}
 
-	// Logout.
 	logoutResp := r.requestWithSid("POST", "/api/auth/logout", sid)
 	if logoutResp.StatusCode != http.StatusNoContent {
 		t.Fatalf("logout status=%d, want 204", logoutResp.StatusCode)
 	}
 
-	// /api/me now 401.
+	// Upstream logout runs with the access token, so an exfiltrated JWT cannot
+	// keep refreshing after the user logs out.
+	if len(r.gotrueLogoutCalls) != 1 || r.gotrueLogoutCalls[0] != jwt {
+		t.Errorf("upstream logout calls = %d, want 1 carrying the session's JWT", len(r.gotrueLogoutCalls))
+	}
+
 	if got := r.requestWithSid("GET", "/api/me", sid).StatusCode; got != http.StatusUnauthorized {
 		t.Fatalf("post-logout /api/me = %d, want 401", got)
+	}
+
+	logout := r.oneAuthEvent(domain.AuthEventLogout)
+	if logout.userID != userID.String() || logout.sessionID != sid || logout.orgID != orgID.String() {
+		t.Errorf("logout (user, session, org) = (%q, %q, %q), want (%q, %q, %q): the revoked session's active org",
+			logout.userID, logout.sessionID, logout.orgID, userID, sid, orgID)
 	}
 
 	// Row persists with revoked_at NOT NULL.
@@ -809,12 +749,7 @@ func TestAuthFlow_LogoutFlipsRevoked(t *testing.T) {
 	}
 }
 
-// Bullet 3: ciphertext at rest. Covered in sessions/store_test.go
-// (TestStore_CiphertextAtRest) — re-asserting in this test file would
-// duplicate without adding signal.
-
-// Bullet 4: force-expiry. Setting expires_at in the past forces re-login
-// even if the JWT is still individually valid.
+// A session whose expires_at has passed is a 401 even while its JWT is valid.
 func TestAuthFlow_ForceExpiryReturns401(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
@@ -840,17 +775,9 @@ func TestAuthFlow_ForceExpiryReturns401(t *testing.T) {
 	}
 }
 
-// Bullet 5: cross-org leakage. User A in Org A; hits /api/orgs/{B}/probe
-// → 404 (not 403 — don't leak Org B's existence).
-//
-// Bullet 6: within-org role. User as 'viewer' in Org A; verb-restricted
-// op returns 403. (Within-org existence is already disclosed by
-// membership.)
-//
-// The probe route below is mounted the way every org-scoped route in the
-// product is: withSession for the cookie, then RequireOrgMember inside the
-// handler for the org. That gate is the one thing under test — the assertions
-// are about its three answers, not about this route.
+// RequireOrgMember answers a member's org 200, another org 404 (not 403, which
+// would disclose that it exists), and a malformed org id 404. The probe route is
+// mounted the way every org-scoped route is.
 func TestAuthFlow_OrgMiddleware_CrossOrg404AndMember200(t *testing.T) {
 	r := newAuthRig(t)
 
@@ -909,21 +836,9 @@ func TestAuthFlow_GarbageSidCookie_Returns401(t *testing.T) {
 	}
 }
 
-// Concurrent requests against a session in its JWT-refresh window
-// must serialize through the per-session mutex: the gotrue refresh
-// call happens exactly once, and all concurrent callers end up using
-// the new JWT. Without serialization, GoTrue's refresh-token-family
-// rotation invalidates the second caller's refresh attempt and the
-// user gets a spurious 401.
-//
-// Deterministic by:
-//   - stubbing the refresh closure to block on a release channel
-//   - launching N goroutines that hit /api/me
-//   - waiting until all N are stuck on the lock OR in gotrueRefresh
-//   - releasing the channel — first caller's refresh completes, the
-//     rest acquire the lock in turn, observe the fresh DB row, and
-//     skip the refresh
-//   - asserting refresh-call count == 1 and all N responses == 200
+// Concurrent requests on a session in its refresh window call GoTrue refresh
+// once and all succeed. Without serialization, refresh-token rotation fails the
+// second refresh and the user gets a spurious 401.
 func TestAuthFlow_ConcurrentRefresh_SerializesAndDedupes(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
@@ -1010,10 +925,8 @@ func TestAuthFlow_ConcurrentRefresh_SerializesAndDedupes(t *testing.T) {
 	}
 }
 
-// Codex #3: when several requests share a refresh via singleflight, the
-// first caller's context cancellation must NOT poison the in-flight
-// gotrue call (and therefore every waiter). Proves the detach: fn runs
-// against its own context, indifferent to whichever caller raced first.
+// A shared refresh runs on its own context: the first caller cancelling its
+// request does not cancel the in-flight GoTrue call the other waiters share.
 func TestAuthFlow_RefreshIgnoresCallerCtxCancellation(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
@@ -1089,106 +1002,6 @@ func TestAuthFlow_RefreshIgnoresCallerCtxCancellation(t *testing.T) {
 	// Sanity: aSess got the rotated JWT.
 	if aSess.JWT != newJWT {
 		t.Errorf("aSess.JWT not updated to rotated value")
-	}
-}
-
-// Logout-everywhere revokes all of the caller's sessions, invokes
-// gotrue /logout for each (best-effort), and clears the current
-// request's cookie. Subsequent access via ANY previously-issued sid
-// returns 401.
-func TestAuthFlow_LogoutAll_RevokesEverySessionForUser(t *testing.T) {
-	r := newAuthRig(t)
-	userID := r.seedUser()
-	r.seedOrg(userID, "alice-org")
-
-	// Create two sessions directly via the store to simulate
-	// "logged in on two devices" — driving the callback handler
-	// twice would also work but is heavier.
-	jwt1 := r.signKey.mintJWT(t, validClaimsFor(userID))
-	jwt2 := r.signKey.mintJWT(t, validClaimsFor(userID))
-	encStore := r.srv.authDeps.sessions
-	s1, err := encStore.CreateSystem(t.Context(), userID, userID, "", jwt1, "refresh-1",
-		time.Now().Add(1*time.Hour), time.Now().Add(30*24*time.Hour), "device-1", "1.1.1.1", uuid.NullUUID{})
-	if err != nil {
-		t.Fatalf("Create s1: %v", err)
-	}
-	s2, err := encStore.CreateSystem(t.Context(), userID, userID, "", jwt2, "refresh-2",
-		time.Now().Add(1*time.Hour), time.Now().Add(30*24*time.Hour), "device-2", "2.2.2.2", uuid.NullUUID{})
-	if err != nil {
-		t.Fatalf("Create s2: %v", err)
-	}
-
-	// Sanity: both sessions accept /api/me.
-	for label, sid := range map[string]string{"s1": s1.ID.String(), "s2": s2.ID.String()} {
-		if got := r.requestWithSid("GET", "/api/me", sid).StatusCode; got != http.StatusOK {
-			t.Fatalf("pre-logout-all /api/me with %s = %d, want 200", label, got)
-		}
-	}
-
-	// POST /api/auth/logout/all using s1's cookie. The handler kills
-	// both s1 and s2.
-	logoutResp := r.requestWithSid("POST", "/api/auth/logout/all", s1.ID.String())
-	if logoutResp.StatusCode != http.StatusNoContent {
-		t.Fatalf("logout/all status=%d, want 204", logoutResp.StatusCode)
-	}
-
-	// Both sids now 401.
-	for label, sid := range map[string]string{"s1": s1.ID.String(), "s2": s2.ID.String()} {
-		if got := r.requestWithSid("GET", "/api/me", sid).StatusCode; got != http.StatusUnauthorized {
-			t.Errorf("post-logout-all /api/me with %s = %d, want 401", label, got)
-		}
-	}
-
-	// Upstream gotrue /logout called twice (once per session).
-	if len(r.gotrueLogoutCalls) != 2 {
-		t.Errorf("upstream logout calls = %d, want 2", len(r.gotrueLogoutCalls))
-	}
-
-	// Cookie cleared on the response (MaxAge<0 → browser deletes).
-	var cleared bool
-	for _, c := range logoutResp.Cookies() {
-		if c.Name == r.srv.sidCookieName() && c.MaxAge < 0 {
-			cleared = true
-			break
-		}
-	}
-	if !cleared {
-		t.Error("logout/all didn't clear the sid cookie on the response")
-	}
-}
-
-// Logout-everywhere requires authentication (otherwise anyone could
-// nuke an arbitrary user's sessions). No sid cookie → 401, NOT 204.
-func TestAuthFlow_LogoutAll_RequiresAuth(t *testing.T) {
-	r := newAuthRig(t)
-	got := r.requestWithSid("POST", "/api/auth/logout/all", "").StatusCode
-	if got != http.StatusUnauthorized {
-		t.Errorf("unauthed logout/all = %d, want 401", got)
-	}
-}
-
-// Logout invokes the gotrue /logout endpoint with the access token
-// before flipping revoked_at locally. Defends against an exfiltrated
-// JWT continuing to refresh upstream after the user logs out.
-func TestAuthFlow_Logout_CallsGoTrueUpstream(t *testing.T) {
-	r := newAuthRig(t)
-	userID := r.seedUser()
-	r.seedOrg(userID, "alice-org")
-
-	resp, jwt := r.driveCallback(userID)
-	sid := r.sidFromResp(resp)
-
-	logoutResp := r.requestWithSid("POST", "/api/auth/logout", sid)
-	if logoutResp.StatusCode != http.StatusNoContent {
-		t.Fatalf("logout status=%d, want 204", logoutResp.StatusCode)
-	}
-
-	if len(r.gotrueLogoutCalls) != 1 {
-		t.Fatalf("upstream logout calls = %d, want 1", len(r.gotrueLogoutCalls))
-	}
-	if r.gotrueLogoutCalls[0] != jwt {
-		t.Errorf("upstream logout token mismatch — got prefix %q, want prefix %q",
-			r.gotrueLogoutCalls[0][:20], jwt[:20])
 	}
 }
 
@@ -1273,9 +1086,19 @@ func TestAuthFlow_Callback_RejectsBadState(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("state mismatch status = %d, want 400", rec.Code)
 	}
+
+	// One login_failure naming the branch and the method, which the parsed
+	// state carries; no identity is known yet, so no user.
+	ev := r.oneAuthEvent(domain.AuthEventLoginFailure)
+	if ev.detail["reason"] != "state_mismatch" || ev.detail["method"] != "github" {
+		t.Errorf("login_failure detail=%v, want reason=state_mismatch method=github", ev.detail)
+	}
+	if ev.userID != "" {
+		t.Errorf("login_failure carried a user=%q, want none (pre-identity)", ev.userID)
+	}
 }
 
-// ---------- standalone tests: state cookie + return_to normalization ----------
+// ---------- standalone tests: cookies, return_to, client IP, GoTrue client ----------
 
 // Cookie names follow the deployment scheme: HTTPS uses the __Host-
 // prefix (browser-enforced Secure + Path=/ + no Domain), HTTP keeps
@@ -1311,10 +1134,8 @@ func TestSidCookieName_DependsOnPublicURL(t *testing.T) {
 	}
 }
 
-// secureCookies=true (HTTPS deployment) forces Secure on every
-// auth-flow cookie, even when an individual request happens to land
-// over HTTP at the Go layer (e.g. behind a TLS-terminating reverse
-// proxy that doesn't set X-Forwarded-Proto).
+// An HTTPS deployment marks auth cookies Secure even for a request that reaches
+// Go over plain HTTP, as behind a TLS-terminating proxy.
 func TestCookieSecure_FromPublicURL(t *testing.T) {
 	s := &Server{deployCfg: &deployConfig{secureCookies: true}}
 	r := httptest.NewRequest("GET", "http://internal/auth", nil)
@@ -1394,13 +1215,9 @@ func TestNormalizeReturnTo(t *testing.T) {
 	}
 }
 
-// clientIP must (a) produce a value Postgres `inet` accepts — IPv6
-// `RemoteAddr` is `[addr]:port`; naive last-colon stripping leaves brackets
-// that fail the cast and 500 the OAuth callback, so net.SplitHostPort
-// unwraps both v4 + bracketed v6 — and (b) be non-spoofable: X-Forwarded-For
-// is honored only behind a configured trusted proxy, via a right→left walk
-// (TFAC-488). The cases cover the secure default, spoof attempts, multi-hop
-// chains, IPv6, and the capture opt-out.
+// clientIP returns a value Postgres inet accepts (bracketed v6 unwrapped) and
+// honors X-Forwarded-For only behind a configured trusted proxy, walking it right
+// to left so a forged left-hand entry is never reached.
 func TestClientIP(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -1468,13 +1285,9 @@ func TestClientIP(t *testing.T) {
 	}
 }
 
-// A proxied deployment trusts X-Forwarded-For, but the header is
-// attacker-controlled — clientIP must not do work (or allocate a slice)
-// proportional to its comma count, which would be a cheap pre-auth DoS
-// amplifier. It scans right→left with no Split, an early return, and a hop
-// cap, so even a megabyte of commas resolves in O(1): the proxy-appended
-// client sits at the far right and is found first, and an all-empty header
-// stops at the cap and falls back to the trusted peer.
+// clientIP does constant work on an attacker-sized X-Forwarded-For: it scans
+// right to left with a hop cap, so a megabyte of commas cannot amplify a
+// pre-auth request.
 func TestClientIP_LargeXFFHeaderBounded(t *testing.T) {
 	runmode.SetClientIPPolicyForTest(t, "10.0.0.0/8", true)
 
@@ -1515,10 +1328,8 @@ func TestClientIP_LargeXFFHeaderBounded(t *testing.T) {
 	})
 }
 
-// gotrueHTTPClient must carry a bounded timeout. Without one, a hung
-// GoTrue upstream blocks user-facing requests indefinitely on the
-// /token exchange + /logout paths. This test locks the intent so a
-// future "drop-in DefaultClient" regression gets caught.
+// gotrueHTTPClient has a timeout between zero and two minutes, so a hung GoTrue
+// cannot block the token exchange or logout indefinitely.
 func TestGoTrueHTTPClient_HasTimeout(t *testing.T) {
 	if gotrueHTTPClient.Timeout <= 0 {
 		t.Fatalf("gotrueHTTPClient.Timeout = %v, want > 0", gotrueHTTPClient.Timeout)
@@ -1529,30 +1340,6 @@ func TestGoTrueHTTPClient_HasTimeout(t *testing.T) {
 	// bound deliberately.
 	if gotrueHTTPClient.Timeout > 2*time.Minute {
 		t.Errorf("gotrueHTTPClient.Timeout = %v, suspicious (>2m); confirm units", gotrueHTTPClient.Timeout)
-	}
-}
-
-// TestHandleConfig_MultiMode_Unauthenticated returns deployment_mode=multi
-// when no session cookie is present. AuthGate on the SPA calls
-// /api/config before the user logs in to decide which auth flow to
-// render, so the endpoint must succeed without auth.
-func TestHandleConfig_MultiMode_Unauthenticated(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeMulti)
-	r := newAuthRig(t)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
-	rec := httptest.NewRecorder()
-	r.srv.mux.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	var resp configResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.DeploymentMode != string(runmode.ModeMulti) {
-		t.Errorf("deployment_mode=%q want %q", resp.DeploymentMode, runmode.ModeMulti)
 	}
 }
 
@@ -1587,12 +1374,8 @@ func TestGoTrueHTTPClient_EnforcesTimeout(t *testing.T) {
 	}
 }
 
-// TestGoTrueTokenRequests_AreJSON asserts both the PKCE exchange and
-// refresh-token requests send a JSON body with Content-Type:
-// application/json. GoTrue's /token handler parses every grant_type
-// as JSON; a form-encoded body decodes to an empty struct and the
-// handler errors out with 400 bad_json. Regression for the latent
-// "OAuth login dies at token exchange" bug.
+// The PKCE exchange and refresh requests send a JSON body with Content-Type
+// application/json, which GoTrue's /token handler requires for every grant type.
 func TestGoTrueTokenRequests_AreJSON(t *testing.T) {
 	type captured struct {
 		path        string
@@ -1695,14 +1478,9 @@ func (r *authRig) seedTeam(orgID uuid.UUID, name, role string, userID uuid.UUID)
 	return uuid.MustParse(tID)
 }
 
-// TestAuthFlow_Me_TeamMemberships covers /api/me's teams field: the viewer's
-// own membership rows, org-tagged and spanning every org they belong to, with
-// the role they hold. It pins the four boundaries of that set at once — both
-// orgs' teams appear with their own org_id, a viewer role rides through
-// verbatim rather than being flattened to "member", an archived team's
-// membership is gone (the same read filter the teams list applies), and a team
-// the caller can see through org access but never joined is absent, because
-// this field answers membership and not visibility.
+// /api/me's teams are the caller's own memberships across every org, each with
+// its org_id and the role held (viewer included), excluding archived teams and
+// teams the caller can see but never joined.
 func TestAuthFlow_Me_TeamMemberships(t *testing.T) {
 	r := newAuthRig(t)
 
@@ -1764,12 +1542,9 @@ func TestAuthFlow_Me_TeamMemberships(t *testing.T) {
 	}
 }
 
-// TestAuthFlow_Me_NoActiveOrg_StillCarriesTeams is the reachability point the
-// field exists for. POST /api/teams/list resolves its org from the session's
-// active-org cursor and answers 409 NO_ACTIVE_ORG without one — and moving
-// that cursor is a session verb, so a caller holding no session state could
-// not enumerate its teams at all. /api/me is keyed on the identity alone, so
-// it answers regardless.
+// TestAuthFlow_Me_NoActiveOrg_StillCarriesTeams: with no active org,
+// POST /api/teams/list answers 409 NO_ACTIVE_ORG, but /api/me is keyed on the
+// identity alone and still lists the caller's teams.
 func TestAuthFlow_Me_NoActiveOrg_StillCarriesTeams(t *testing.T) {
 	r := newAuthRig(t)
 
@@ -1789,6 +1564,18 @@ func TestAuthFlow_Me_NoActiveOrg_StillCarriesTeams(t *testing.T) {
 	if listResp.StatusCode != http.StatusConflict {
 		t.Fatalf("POST /api/teams/list status=%d, want 409 (the gap this field closes)", listResp.StatusCode)
 	}
+	var conflict struct {
+		Errors []struct {
+			Reason  string `json:"reason"`
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.NewDecoder(listResp.Body).Decode(&conflict); err != nil {
+		t.Fatalf("decode 409 body: %v", err)
+	}
+	if len(conflict.Errors) != 1 || conflict.Errors[0].Reason != httpx.ReasonNoActiveOrg || conflict.Errors[0].Message == "" {
+		t.Errorf("409 errors = %+v, want one NO_ACTIVE_ORG item with a message saying how to pick an org", conflict.Errors)
+	}
 
 	teams := r.fetchMeTeams(sid)
 	if len(teams) != 1 || teams[0].ID != teamID.String() {
@@ -1799,10 +1586,9 @@ func TestAuthFlow_Me_NoActiveOrg_StillCarriesTeams(t *testing.T) {
 	}
 }
 
-// TestAuthFlow_LoginClaim_DecidesTheAccountByGitHubID: the sign-in mirror
-// hands UsersStore.UpsertGitHubIdentity the GitHub id the login claim carries,
-// so a renamed login under the same id keeps the email it recorded, while a
-// login another id now signs in with takes the sign-in's email (none, here).
+// The login-claim mirror is keyed by the claim's GitHub id: a renamed login under
+// the same id keeps its recorded email, and a login another id now signs in with
+// takes that sign-in's email.
 func TestAuthFlow_LoginClaim_DecidesTheAccountByGitHubID(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
@@ -1862,11 +1648,8 @@ func TestAuthFlow_LoginClaim_DecidesTheAccountByGitHubID(t *testing.T) {
 	}
 }
 
-// TestAuthFlow_LoginClaim_KeysUnderTheDeploymentHost pins the host the login
-// claim mirrors a GitHub sign-in under: the deployment's GitHub, which GoTrue's
-// GitHub provider signs people in against. Unset is github.com; a GitHub
-// Enterprise Server default puts the link on that server, where the deployment
-// GitHub App lives.
+// The login claim is recorded under the deployment's GitHub host: github.com
+// when unset, or the configured GitHub Enterprise Server.
 func TestAuthFlow_LoginClaim_KeysUnderTheDeploymentHost(t *testing.T) {
 	for _, tc := range []struct {
 		name, setDefault, wantHost string

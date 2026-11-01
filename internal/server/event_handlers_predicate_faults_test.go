@@ -114,9 +114,9 @@ func TestEventHandlerPredicateFaults_EnumMissIs422(t *testing.T) {
 }
 
 // Every 422 a write meets comes back in one answer: the body's own, the
-// predicate's value faults, and what the reference check refuses, last, each
-// on its own field. The check reads the predicate with its refused entries
-// taken out, and nothing is written.
+// predicate's value faults, and the reference check's, last, each on its own
+// field, with nothing written. The check is handed the acting team, the
+// canonical predicate without its refused entries, and the stored one as prior.
 func TestEventHandlerPredicateFaults_OneAnswerForEvery422(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
@@ -129,25 +129,30 @@ func TestEventHandlerPredicateFaults_OneAnswerForEvery422(t *testing.T) {
 	var created map[string]any
 	_ = json.Unmarshal(seeded.Body.Bytes(), &created)
 	id := created["id"].(string)
+	const stored = `{"has_label":"ok"}`
+	if want := (checkCall{teamID: runmode.LocalDefaultTeamID, predicate: stored, prior: "<nil>"}); len(*calls) != 1 || (*calls)[0] != want {
+		t.Errorf("calls after the seed = %+v, want one %+v", *calls, want)
+	}
+	rules := len(listEventHandlers(t, s, "rule"))
 
 	predicate := map[string]any{"author_id_in": []string{"583231", "583231"}, "has_label": "forbidden"}
 	for _, tc := range []struct {
 		route, method, path string
 		body                map[string]any
-		tuning              string
+		tuning, prior       string
 	}{
 		{"create rule", http.MethodPost, "/api/event-handlers/rules", map[string]any{
 			"event_type": referenceCheckEventType, "name": "every 422", "default_priority": 2, "scope_predicate": predicate,
-		}, "default_priority"},
+		}, "default_priority", "<nil>"},
 		{"create trigger", http.MethodPost, "/api/event-handlers/triggers", map[string]any{
 			"event_type": referenceCheckEventType, "blueprint_id": "p-every-422", "breaker_threshold": -1, "scope_predicate": predicate,
-		}, "breaker_threshold"},
+		}, "breaker_threshold", "<nil>"},
 		{"patch", http.MethodPatch, "/api/event-handlers/" + id, map[string]any{
 			"default_priority": 2, "scope_predicate": predicate,
-		}, "default_priority"},
+		}, "default_priority", stored},
 		{"promote", http.MethodPost, "/api/event-handlers/" + id + "/promote", map[string]any{
 			"blueprint_id": "p-every-422", "breaker_threshold": -1, "scope_predicate": predicate,
-		}, "breaker_threshold"},
+		}, "breaker_threshold", stored},
 	} {
 		t.Run(tc.route, func(t *testing.T) {
 			rec := doJSON(t, s, tc.method, tc.path, tc.body)
@@ -160,17 +165,22 @@ func TestEventHandlerPredicateFaults_OneAnswerForEvery422(t *testing.T) {
 				got[item.Field] = item.Reason
 			}
 			if len(items) != 3 || got[tc.tuning] != "OUT_OF_RANGE" || got["scope_predicate.author_id_in"] != "INVALID_FIELD" ||
-				items[2].Field != "scope_predicate.has_label" || items[2].Reason != "INVALID_FIELD" {
+				items[2].Field != "scope_predicate.has_label" || items[2].Reason != "INVALID_FIELD" ||
+				items[2].Message != `has_label: "forbidden" is refused` {
 				t.Errorf("items = %+v, want %s, the repeated author_id_in entry, and the check's has_label fault last", items, tc.tuning)
 			}
-			if last := (*calls)[len(*calls)-1]; last.predicate != `{"author_id_in":["583231"],"has_label":"forbidden"}` {
-				t.Errorf("the check read %s, want the predicate without its repeated entry", last.predicate)
+			want := checkCall{teamID: runmode.LocalDefaultTeamID, predicate: `{"author_id_in":["583231"],"has_label":"forbidden"}`, prior: tc.prior}
+			if last := (*calls)[len(*calls)-1]; last != want {
+				t.Errorf("the check was handed %+v, want %+v", last, want)
 			}
 		})
 	}
 
 	if n := len(listEventHandlers(t, s, "trigger")); n != 0 {
 		t.Errorf("refused writes left %d triggers", n)
+	}
+	if n := len(listEventHandlers(t, s, "rule")); n != rules {
+		t.Errorf("refused writes changed the rule count from %d to %d", rules, n)
 	}
 	rec := doJSON(t, s, http.MethodGet, "/api/event-handlers/"+id, nil)
 	if !strings.Contains(rec.Body.String(), `"scope_predicate_json":"{\"has_label\":\"ok\"}"`) {

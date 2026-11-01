@@ -15,12 +15,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// newTenantlessServer returns a server backed by a freshly-migrated but
-// UNPROVISIONED SQLite DB — the genuine fresh-install shape now that
-// nothing provisions at boot. Unlike newTestServer (which seeds the
-// tenant + agent via BootstrapSchemaForTest), this uses Migrate directly
-// so there are zero tenant rows, exercising the first-run + provision
-// paths. Returns the raw DB so tests can assert row state.
+// newTenantlessServer returns a server over a migrated SQLite DB with no tenant
+// rows, the fresh-install shape, and the raw DB for asserting row state.
 func newTenantlessServer(t *testing.T) (*Server, *sql.DB) {
 	t.Helper()
 	database, err := sql.Open("sqlite", db.TestDSNMemory)
@@ -45,10 +41,8 @@ func countTable(t *testing.T, database *sql.DB, table string) int {
 	return n
 }
 
-// TestIntegrationsStatus_TenantlessNotConfigured pins the first-run
-// detection: a tenant-less install reports configured=false so the
-// AuthGate routes to the "Start your factory" screen. The server
-// must serve the endpoint cleanly with zero tenant rows.
+// TestIntegrationsStatus_TenantlessNotConfigured: an install with no tenant rows
+// serves the status endpoint and reports configured=false.
 func TestIntegrationsStatus_TenantlessNotConfigured(t *testing.T) {
 	keyring.MockInit()
 	s, database := newTenantlessServer(t)
@@ -73,10 +67,8 @@ func TestIntegrationsStatus_TenantlessNotConfigured(t *testing.T) {
 	}
 }
 
-// TestLocalOrgCreate_ProvisionsAndSeeds pins the explicit provision action:
-// POST /api/orgs on an empty DB creates the synthetic tenant +
-// materializes the shipped defaults through the org template, and the
-// status endpoint flips to configured=true.
+// TestLocalOrgCreate_ProvisionsAndSeeds: POST /api/orgs on an empty DB creates
+// the local tenant and its shipped defaults, and status reports configured.
 func TestLocalOrgCreate_ProvisionsAndSeeds(t *testing.T) {
 	keyring.MockInit()
 	s, database := newTenantlessServer(t)
@@ -128,11 +120,9 @@ func TestLocalOrgCreate_ProvisionsAndSeeds(t *testing.T) {
 	}
 }
 
-// TestLocalOrgCreate_PartialProvisionRecovery pins that the provision action
-// completes a crash-mid-provision state (CreateLocalTenant committed, binary
-// died before BootstrapNewOrg ran) without requiring a clean-slate reinstall.
-// The endpoint must not treat "org row exists, no agent" as
-// "already_provisioned".
+// TestLocalOrgCreate_PartialProvisionRecovery: a tenant whose bootstrap never ran
+// (org row present, no agent) is completed by the provision action rather than
+// reported as already provisioned.
 func TestLocalOrgCreate_PartialProvisionRecovery(t *testing.T) {
 	keyring.MockInit()
 	s, database := newTenantlessServer(t)
@@ -167,11 +157,9 @@ func TestLocalOrgCreate_PartialProvisionRecovery(t *testing.T) {
 	}
 }
 
-// TestLocalOrgCreate_NonResurrection is the durability guarantee the whole
-// provision action exists for: provision, delete a shipped (system) handler,
-// then re-call it. Because the endpoint no-ops once a tenant exists, the
-// deleted handler stays deleted — it does not resurrect (the analog of
-// "survives a restart" now that boot seeds nothing).
+// TestLocalOrgCreate_NonResurrection: once the tenant exists the provision
+// action is a 200 no-op, so a deleted shipped handler stays deleted, and a name
+// in the body is ignored rather than half-applied.
 func TestLocalOrgCreate_NonResurrection(t *testing.T) {
 	keyring.MockInit()
 	s, database := newTenantlessServer(t)
@@ -196,9 +184,8 @@ func TestLocalOrgCreate_NonResurrection(t *testing.T) {
 		t.Fatalf("delete victim: %v", err)
 	}
 
-	// Re-call the provision endpoint — must be a no-op (tenant exists), and
-	// say so with 200 rather than the 201 a fresh provision answers.
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs", nil)
+	// Re-call the provision endpoint with the name a multi-mode client sends.
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs", map[string]string{"name": "Acme"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("second POST /api/orgs: got=%d want=200, body=%s", rec.Code, rec.Body.String())
 	}
@@ -208,6 +195,9 @@ func TestLocalOrgCreate_NonResurrection(t *testing.T) {
 	}
 	if resp["already_provisioned"] != true {
 		t.Errorf("already_provisioned=%v on re-call; want true (no-op)", resp["already_provisioned"])
+	}
+	if resp["id"] != runmode.LocalDefaultOrgID || resp["name"] == "Acme" {
+		t.Errorf("re-call answered id=%v name=%v; want the local org, not renamed from the body", resp["id"], resp["name"])
 	}
 
 	// The deleted handler stays deleted.

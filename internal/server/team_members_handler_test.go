@@ -14,11 +14,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// teamMembersRig is the multi-mode fixture for the team roster handler: a real
-// Postgres-backed Server (so RLS + the guard_team_admins trigger are live) plus
-// a fully-wired org with a founder (org owner + sole team admin), a plain team
-// member, and an org admin who is NOT on the team — enough to exercise the
-// team-admin, org-admin, self, and non-manager branches of every endpoint.
+// teamMembersRig is a Postgres-backed team roster handler, with RLS and the
+// guard_team_admins trigger live, over an org with a founder (owner, sole team
+// admin), a plain team member, and an org admin who is not on the team.
 type teamMembersRig struct {
 	h        *pgtest.Harness
 	tmh      *teamMembersHandler
@@ -59,11 +57,9 @@ func newTeamMembersRig(t *testing.T) *teamMembersRig {
 	}
 }
 
-// req builds a request to the team roster handler as callerID with the team_id
-// (and optional user_id) path values set, the caller's claims injected, and the
-// active org seeded in context — the state withSession/withOrg would normally
-// supply. We invoke the handler methods directly (not through the mux) so the
-// test exercises authz + RLS without the cookie-session dance.
+// req builds a request as callerID with the team_id (and optional user_id) path
+// values, claims and active org withSession would supply, for calling a handler
+// directly.
 func (r *teamMembersRig) req(method, callerID, targetID string, body any) *http.Request {
 	return r.reqTeam(method, callerID, r.teamID, targetID, body)
 }
@@ -483,11 +479,9 @@ func TestTeamMembers_CrossOrgTeamIs404(t *testing.T) {
 	}
 }
 
-// TestTeamMembers_LocalMutatorsAre404: the roster WRITES are multi-only —
-// every mutator 404s in local mode regardless of identity, because N=1 has
-// nobody to enrol, promote or remove. The list read is deliberately absent
-// from this table: it is the one roster every consumer reads, in both modes,
-// and TestTeamRosterList_LocalSingleMember covers it there.
+// TestTeamMembers_LocalMutatorsAre404: every roster mutator 404s in local mode,
+// which has nobody to enrol, promote or remove. The list read answers in both
+// modes and is not in this table.
 func TestTeamMembers_LocalMutatorsAre404(t *testing.T) {
 	r := newTeamMembersRig(t)
 	runmode.SetForTest(t, runmode.ModeLocal)

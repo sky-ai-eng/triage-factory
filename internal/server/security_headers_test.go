@@ -153,11 +153,9 @@ func TestSecurityHeaders_StandardSet(t *testing.T) {
 	}
 }
 
-// TestSecurityHeaders_HandlerCanOverrideCSP pins the override-hook
-// contract the GitHub App launch page relies on: the wrapper sets the
-// global CSP, THEN calls next, so a handler that re-Sets
-// Content-Security-Policy on its own response wins. Regression guard for
-// the bounce-page per-response CSP.
+// TestSecurityHeaders_HandlerCanOverrideCSP: the wrapper sets the global CSP
+// before calling next, so a handler that sets its own, as the GitHub App launch
+// page does, wins.
 func TestSecurityHeaders_HandlerCanOverrideCSP(t *testing.T) {
 	s := &Server{deployCfg: &deployConfig{}}
 	const override = "default-src 'none'; form-action https://github.com; base-uri 'none'"
@@ -173,60 +171,44 @@ func TestSecurityHeaders_HandlerCanOverrideCSP(t *testing.T) {
 	}
 }
 
-// TestSecurityHeaders_HSTSOnlyInHTTPS — HSTS must not be emitted in
-// local/test deployments (publicURL is http://), otherwise the browser
-// caches "always-HTTPS this host" and breaks neighbor projects on the
-// same port.
+// TestSecurityHeaders_HSTSOnlyInHTTPS: HSTS is sent only for an HTTPS
+// deployment, since a browser that caches it for an http:// host breaks other
+// projects on the same port. The universal headers are sent in every case,
+// including with no deploy config.
 func TestSecurityHeaders_HSTSOnlyInHTTPS(t *testing.T) {
 	cases := []struct {
 		name    string
-		secure  bool
+		cfg     *deployConfig
 		wantSet bool
 	}{
-		{"http deployment", false, false},
-		{"https deployment", true, true},
+		{"http deployment", &deployConfig{secureCookies: false}, false},
+		{"https deployment", &deployConfig{secureCookies: true}, true},
+		{"no deploy config", nil, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			s := &Server{deployCfg: &deployConfig{secureCookies: tc.secure}}
+			s := &Server{deployCfg: tc.cfg}
 			handler := s.withSecurityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+			if rec.Header().Get("X-Frame-Options") != "DENY" || rec.Header().Get("Content-Security-Policy") == "" {
+				t.Errorf("universal headers missing: X-Frame-Options=%q CSP=%q",
+					rec.Header().Get("X-Frame-Options"), rec.Header().Get("Content-Security-Policy"))
+			}
 			got := rec.Header().Get("Strict-Transport-Security")
 			if tc.wantSet && got == "" {
 				t.Error("HTTPS deployment: HSTS missing")
 			}
 			if !tc.wantSet && got != "" {
-				t.Errorf("HTTP deployment: HSTS leaked = %q", got)
+				t.Errorf("%s: HSTS leaked = %q", tc.name, got)
 			}
 		})
 	}
 }
 
-// TestSecurityHeaders_NilDeployCfg — edge case where deployCfg is nil.
-// The middleware must still emit the universal headers (X-Frame-Options
-// etc.) and just skip HSTS.
-func TestSecurityHeaders_NilDeployCfg(t *testing.T) {
-	s := &Server{} // no deployCfg
-	handler := s.withSecurityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
-
-	if rec.Header().Get("X-Frame-Options") != "DENY" {
-		t.Error("X-Frame-Options missing in local mode")
-	}
-	if rec.Header().Get("Content-Security-Policy") == "" {
-		t.Error("CSP missing in local mode")
-	}
-	if rec.Header().Get("Strict-Transport-Security") != "" {
-		t.Error("HSTS leaked in local mode")
-	}
-}
-
-// TestBuildHSTS pins the TFAC-409 item-4 contract: no header without HTTPS,
-// base directive under HTTPS, and "; preload" appended ONLY when the explicit
-// opt-in env is truthy. preload is never default-on (it's a near-irreversible
-// domain-wide commitment) and never emitted on plain HTTP.
+// TestBuildHSTS: no header without HTTPS, the base directive under HTTPS, and
+// "; preload" only when TF_HSTS_PRELOAD is truthy, since preload is a
+// near-irreversible domain-wide commitment.
 func TestBuildHSTS(t *testing.T) {
 	const base = "max-age=31536000; includeSubDomains"
 	cases := []struct {

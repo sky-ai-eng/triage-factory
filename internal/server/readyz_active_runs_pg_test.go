@@ -9,18 +9,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 )
 
-// TestCountActiveRuns_Postgres runs the active_runs COUNT against real
-// Postgres. Two things need proving there and cannot be proven by the
-// SQLite-backed handler tests:
-//
-//   - The query is dialect-neutral. /readyz holds one *sql.DB and does not
-//     know which backend it is, so `delivered = false` and the correlated
-//     EXISTS clauses have to parse and run identically on both.
-//   - The waiting arm is the full needs-driving predicate. A delegation
-//     conversation parked at `open` and woken by a follow-up is claimable
-//     and displays as queued, so it is waiting work; its twin with nothing
-//     queued is not. Counting only the mid-flight arm would silently
-//     undercount exactly the runs an operator watches this signal for.
+// TestCountActiveRuns_Postgres: the active_runs count runs unchanged on Postgres,
+// and counts a conversation parked at open but woken by a follow-up as waiting,
+// while its twin with nothing queued is not.
 func TestCountActiveRuns_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)

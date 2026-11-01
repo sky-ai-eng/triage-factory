@@ -31,11 +31,8 @@ func TestTeamsList_LocalReturnsSoleTeam(t *testing.T) {
 	}
 }
 
-// TestTeamsList_TwoTeams: with a second team seeded into the local org, the
-// list surfaces both (the SQLite store returns every org team as the single
-// user's set), which is what flips the frontend into rendering the selectors.
-// A one-row window then proves the pages partition that set rather than
-// repeating its head.
+// TestTeamsList_TwoTeams: with a second team seeded the list returns both, and
+// one-row pages partition the set rather than repeating its head.
 func TestTeamsList_TwoTeams(t *testing.T) {
 	s := newTestServer(t)
 	second := seedTeam(t, s, runmode.LocalDefaultOrgID, "second")
@@ -107,12 +104,8 @@ func TestTeamCreate_LocalIsNotFound(t *testing.T) {
 	}
 }
 
-// TestPromptCreate_AmbiguousTeamIs400: with two teams visible and no
-// team_id supplied, the create is refused (400) rather than silently
-// guessing — the server-side mirror of the required picker. (The
-// positive "a write lands on the picked team" assertion is a pgtest:
-// the SQLite store pins the sole local team by design, so honoring an
-// explicit pick is a Postgres/multi-mode behavior.)
+// TestPromptCreate_AmbiguousTeamIs400: with two teams and no team_id, a create
+// is refused with 400 rather than landing on a guessed team.
 func TestPromptCreate_AmbiguousTeamIs400(t *testing.T) {
 	s := newTestServer(t)
 	seedTeam(t, s, runmode.LocalDefaultOrgID, "second")

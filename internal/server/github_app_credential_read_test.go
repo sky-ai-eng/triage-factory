@@ -19,11 +19,8 @@ import (
 // blip, an RLS/session fault, a dropped pool connection.
 var errVaultDown = errors.New("vault unavailable")
 
-// getFailingSecrets is a SecretStore whose Get always fails; every other
-// method delegates to the real store through the embedded interface. That's
-// the narrow shape the App staging decision reads through
-// (integrations.Load), so a test can fail exactly that read without
-// disturbing the resolver reads the same request makes outside the tx.
+// getFailingSecrets is a SecretStore whose Get always fails and whose other
+// methods reach the real store, so a test can fail the staging decision's read.
 type getFailingSecrets struct {
 	db.SecretStore
 }
@@ -68,11 +65,8 @@ func (f failingSecretsTx) SystemWithTx(ctx context.Context, orgID string, fn fun
 	return f.inner.SystemWithTx(ctx, orgID, fn)
 }
 
-// assertNoAppRow fails the test if any org_github_apps row exists. The
-// staging decision reads the org's PAT to choose active=true/false; when
-// that read fails the request must leave no App row at all, in either
-// activation state — an App written active beside a live PAT breaks the
-// App-XOR-PAT invariant.
+// assertNoAppRow fails if any org_github_apps row exists: when the PAT read
+// that decides staging fails, writing either state could break App-XOR-PAT.
 func assertNoAppRow(t *testing.T, s *Server) {
 	t.Helper()
 	app, err := s.githubApps.GetForOrgSystem(context.Background(), runmode.LocalDefaultOrgID)

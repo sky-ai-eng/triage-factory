@@ -10,16 +10,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// TestMultiModeGates_Return404 pins the local-only endpoints that read
-// the orchestrator process's own filesystem. Skills scan-import walks
-// this process's ~/.claude/skills, which is only meaningful when the
-// process runs on the single trusted user's machine — multi mode must
-// refuse cleanly instead of scanning shared-infrastructure $HOME. The
-// refusal is a 404: a route that doesn't exist in this deployment mode
-// answers the same way as one that doesn't exist at all (the marketplace's
-// mode gate already did), rather than the 501 this used to give.
-// (Project bundle import/export were gated here too until the
-// store-layer port made them mode-agnostic.)
+// TestMultiModeGates_Return404: in multi mode the prompt import from disk, which
+// walks this process's ~/.claude/skills, answers 404 like a route that does not
+// exist, rather than scanning shared infrastructure's $HOME.
 func TestMultiModeGates_Return404(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	sk := &promptImportHandler{}

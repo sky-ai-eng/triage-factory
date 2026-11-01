@@ -13,11 +13,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// The rule most likely to be broken by a well-meaning filter: nothing on the
-// GitHub settings surface is derived from the viewer's own GitHub access. Two
-// admins of one org, bound to different GitHub identities — one of them
-// to a login that can see none of the repositories — receive byte-identical
-// payloads for the status read and both findings.
+// Nothing on the GitHub settings surface depends on the viewer's own GitHub
+// access: two admins bound to different identities, one seeing none of the
+// repositories, get byte-identical status and findings payloads.
 func TestGitHubGrantFindings_MultiMode_AdminsSeeTheSameBytes(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	rig := newAuthRig(t)

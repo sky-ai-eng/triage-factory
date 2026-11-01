@@ -6,15 +6,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 )
 
-// TestSecretKeyLiteralsMatchIntegrations pins the cross-package secret-key
-// literals the local uninstall sweep (integrations.AllLocalSweepKeys) depends
-// on. integrations can't import server (server imports integrations — cycle), so
-// these keys are hand-copied into integrations with "keep in sync" comments. A
-// silent rename on either side would make `triagefactory uninstall` sweep the
-// wrong key and leave the real secret in the keychain, with no compile error.
-// server sees both its own unexported write-path constants and the integrations
-// exports, so it can hold the two together — the same drift-guard discipline
-// internal/jira/keys_drift_test.go uses for the Jira keys.
+// TestSecretKeyLiteralsMatchIntegrations: integrations cannot import server, so
+// it hand-copies the secret keys the local uninstall sweep needs; a rename on
+// either side would leave the real secret in the keychain with no compile error.
 func TestSecretKeyLiteralsMatchIntegrations(t *testing.T) {
 	if integrations.KeyAnthropicAPIKey != secretKeyAnthropicAPIKey {
 		t.Errorf("anthropic key drift: integrations.KeyAnthropicAPIKey=%q, server.secretKeyAnthropicAPIKey=%q\n"+

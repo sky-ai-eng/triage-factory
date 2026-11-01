@@ -5,10 +5,8 @@ import (
 	"testing"
 )
 
-// TestInviteRoutes_LocalAreNotFound: org invites are a multi-mode concept.
-// In local mode (N=1) every invite route 404s — the "feature absent"
-// posture matching teams_handler's multi-only create. This is the guard
-// the ticket calls for (runmode.ModeLocal → http.NotFound on every route).
+// TestInviteRoutes_LocalAreNotFound: org invites are multi-mode only, so every
+// invite route 404s in local mode.
 func TestInviteRoutes_LocalAreNotFound(t *testing.T) {
 	s := newTestServer(t)
 

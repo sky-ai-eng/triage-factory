@@ -9,69 +9,6 @@ import (
 	"time"
 )
 
-// TestMeSettings_PatchAnswersTheResource pins the two things the settings
-// route owes a caller: a PATCH answers the settings resource — the same shape
-// the GET returns — rather than a status word, and it answers it even when the
-// body describes no change, so a client's post-save state is exact either way.
-func TestMeSettings_PatchAnswersTheResource(t *testing.T) {
-	s := newTestServer(t)
-
-	get := doJSON(t, s, http.MethodGet, "/api/me/settings", nil)
-	if get.Code != http.StatusOK {
-		t.Fatalf("GET /api/me/settings = %d, want 200; body=%s", get.Code, get.Body.String())
-	}
-
-	for _, tc := range []struct {
-		name string
-		body map[string]any
-	}{
-		{"no_change", map[string]any{}},
-		{"writes_settings", map[string]any{"user_settings": map[string]any{}}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			rec := doJSON(t, s, http.MethodPatch, "/api/me/settings", tc.body)
-			if rec.Code != http.StatusOK {
-				t.Fatalf("PATCH = %d, want 200; body=%s", rec.Code, rec.Body.String())
-			}
-			var resp map[string]json.RawMessage
-			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-				t.Fatalf("decode: %v", err)
-			}
-			if _, ok := resp["status"]; ok {
-				t.Errorf("response carries a status word: %s", rec.Body.String())
-			}
-			if _, ok := resp["user_settings"]; !ok {
-				t.Errorf("response is missing user_settings: %s", rec.Body.String())
-			}
-			if rec.Body.String() != get.Body.String() {
-				t.Errorf("PATCH body = %s, want the GET's %s (a write answers what a read would)", rec.Body.String(), get.Body.String())
-			}
-		})
-	}
-}
-
-// TestMeSettings_OmitsIdentityFields pins the split: a user's GitHub / Jira
-// identity is what the identity reads answer, host and all. Carrying a copy
-// here would be one fact in two namespaces, drifting the moment the org's host
-// changes under one of them.
-func TestMeSettings_OmitsIdentityFields(t *testing.T) {
-	s := newTestServer(t)
-
-	rec := doJSON(t, s, http.MethodGet, "/api/me/settings", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var resp map[string]json.RawMessage
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	for _, field := range []string{"github_username", "jira_account_id"} {
-		if _, ok := resp[field]; ok {
-			t.Errorf("response carries %q; it belongs to the identity reads", field)
-		}
-	}
-}
-
 // TestMeSettings_RejectsUnknownField pins strict decoding on the PATCH: a
 // caller that misspells a field learns it, rather than having the value
 // silently dropped and reading a 200 as "saved".
@@ -85,11 +22,9 @@ func TestMeSettings_RejectsUnknownField(t *testing.T) {
 	assertFirstError(t, rec, "UNKNOWN_FIELD", "theme")
 }
 
-// meSettingsOverviewSeenAt reads the marker off a settings response, telling
-// "the route answered null" (the JSON literal, which is what never-opened
-// looks like on the wire) from "the route omitted the key" — a field that can
-// legitimately be null must still always be present, or a client cannot tell
-// an answer from a version that does not know the question.
+// meSettingsOverviewSeenAt reads the marker off a settings response, and reports
+// whether the key was present at all: a never-opened marker is the JSON literal
+// null, which a client must be able to tell from an omitted key.
 func meSettingsOverviewSeenAt(t *testing.T, rec *httptest.ResponseRecorder) (value string, present bool) {
 	t.Helper()
 	var body struct {
@@ -105,14 +40,9 @@ func meSettingsOverviewSeenAt(t *testing.T, rec *httptest.ResponseRecorder) (val
 	return string(raw), true
 }
 
-// TestMeSettings_OverviewSeenAt_SetKeepClear walks the marker through the
-// three things a PATCH can say about a field, in the order a real client hits
-// them: never written, written, left alone by a body that does not name it,
-// and cleared back to never-written.
-//
-// The last one is the reason the field is read through json.RawMessage rather
-// than a *time.Time: "the Overview has never been opened" is a state the page
-// renders as its own sentence, so a client has to be able to ask for it.
+// TestMeSettings_OverviewSeenAt_SetKeepClear walks the marker from never written
+// to set, kept by bodies that do not name it, and cleared back to null, with each
+// PATCH answering what the following GET does.
 func TestMeSettings_OverviewSeenAt_SetKeepClear(t *testing.T) {
 	s := newTestServer(t)
 
@@ -123,6 +53,17 @@ func TestMeSettings_OverviewSeenAt_SetKeepClear(t *testing.T) {
 	value, present := meSettingsOverviewSeenAt(t, initial)
 	if !present {
 		t.Fatalf("GET omits overview_seen_at entirely; body=%s", initial.Body.String())
+	}
+	// A user's GitHub / Jira identity belongs to the identity reads, which key
+	// it by host; a copy here would drift when the org's host changes.
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(initial.Body.Bytes(), &top); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, field := range []string{"github_username", "jira_account_id"} {
+		if _, ok := top[field]; ok {
+			t.Errorf("response carries %q; it belongs to the identity reads", field)
+		}
 	}
 	if value != "null" {
 		t.Errorf("overview_seen_at before any write = %s, want null (never opened)", value)
@@ -137,9 +78,7 @@ func TestMeSettings_OverviewSeenAt_SetKeepClear(t *testing.T) {
 	}
 	stored, _ := meSettingsOverviewSeenAt(t, set)
 
-	// The write answers what a read would — the acceptance the whole route is
-	// shaped around, and the reason the PATCH hands back the row its own write
-	// returned rather than composing an answer of its own.
+	// The write answers what a read would.
 	afterSet := doJSON(t, s, http.MethodGet, "/api/me/settings", nil)
 	if afterSet.Body.String() != set.Body.String() {
 		t.Errorf("PATCH body = %s, want the follow-up GET's %s", set.Body.String(), afterSet.Body.String())
@@ -152,10 +91,9 @@ func TestMeSettings_OverviewSeenAt_SetKeepClear(t *testing.T) {
 		t.Errorf("stored overview_seen_at = %v, want %v", got, seen)
 	}
 
-	// A body that names user_settings but not this field keeps it. The write
-	// still happens (the row is touched), so this is the case that would break
-	// if the store's end-state write were handed the request rather than the
-	// stored row applied onto.
+	// A body that names user_settings but not this field keeps it. The row is
+	// still written, so this breaks if the store writes the request rather than
+	// the request applied onto the stored row.
 	keep := doJSON(t, s, http.MethodPatch, "/api/me/settings", map[string]any{"user_settings": map[string]any{}})
 	if keep.Code != http.StatusOK {
 		t.Fatalf("PATCH keep = %d, want 200; body=%s", keep.Code, keep.Body.String())
@@ -164,10 +102,14 @@ func TestMeSettings_OverviewSeenAt_SetKeepClear(t *testing.T) {
 		t.Errorf("overview_seen_at after a body that doesn't name it = %s, want the stored %s", kept, stored)
 	}
 
-	// And a body that names no settings object at all leaves the row alone.
+	// A body that names no settings object at all leaves the row alone, and
+	// still answers the resource.
 	untouched := doJSON(t, s, http.MethodPatch, "/api/me/settings", map[string]any{})
 	if got, _ := meSettingsOverviewSeenAt(t, untouched); got != stored {
 		t.Errorf("overview_seen_at after an empty PATCH = %s, want the stored %s", got, stored)
+	}
+	if after := doJSON(t, s, http.MethodGet, "/api/me/settings", nil); after.Body.String() != untouched.Body.String() {
+		t.Errorf("empty PATCH body = %s, want the follow-up GET's %s", untouched.Body.String(), after.Body.String())
 	}
 
 	cleared := doJSON(t, s, http.MethodPatch, "/api/me/settings", map[string]any{
@@ -208,15 +150,9 @@ func TestMeSettings_OverviewSeenAt_RejectsMalformedValue(t *testing.T) {
 	}
 }
 
-// TestMeSettings_RejectsNonObjectSettings pins the container's own shape. A
-// typed pointer here would read an explicit null as nil — the same thing it
-// reads "absent" as — so a client asking to write settings would get a 200 for
-// a request that wrote nothing, which is the one answer it cannot tell from a
-// real save.
-//
-// null is refused rather than read as "reset everything": the object is the
-// resource, and a reset spelling would silently widen with every pref added,
-// so a client clearing today's one marker would wipe tomorrow's theme.
+// TestMeSettings_RejectsNonObjectSettings: user_settings must be an object.
+// null is refused rather than read as "absent" (a 200 that wrote nothing) or as
+// "reset everything" (a reset that would widen with every pref added).
 func TestMeSettings_RejectsNonObjectSettings(t *testing.T) {
 	s := newTestServer(t)
 
@@ -274,11 +210,9 @@ func TestMeSettings_OverviewSeenAt_RejectsUnknownNestedField(t *testing.T) {
 	assertFirstError(t, rec, "UNKNOWN_FIELD", "overview_seen")
 }
 
-// TestMeSettings_OverviewSeenAt_RejectsFutureValue pins the range fault. The
-// timestamp is the client's own now, so a machine a few seconds fast is
-// ordinary and accepted; a value beyond that is a broken clock, and storing it
-// would invert the away line until real time caught up — nothing walks a
-// future marker back, because the next visit writes an EARLIER timestamp.
+// TestMeSettings_OverviewSeenAt_RejectsFutureValue: a marker beyond the clock
+// skew window is a 422, since nothing would walk a future marker back; one
+// within the window is accepted.
 func TestMeSettings_OverviewSeenAt_RejectsFutureValue(t *testing.T) {
 	s := newTestServer(t)
 

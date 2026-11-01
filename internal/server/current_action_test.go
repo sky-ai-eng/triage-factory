@@ -7,9 +7,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TestCurrentAction covers every row of the composition table plus the three
-// ways it declines to answer. Both runtimes' spellings are exercised on every
-// tool that has two, because the whole point of the field is that a run reads
+// TestCurrentAction covers every row of the composition table and the three
+// ways it declines to answer, in both runtimes' tool spellings, so a run reads
 // the same whichever engine drove it.
 func TestCurrentAction(t *testing.T) {
 	call := func(name string, input map[string]any) []domain.ToolCall {
@@ -135,11 +134,9 @@ func TestCurrentAction_Cap(t *testing.T) {
 	}
 }
 
-// TestCurrentAction_WorktreeStrip pins the path collapse: the agent's absolute
-// worktree paths read worktree-relative on the composed line, under the same
-// semantics the client's transcript helper applies (frontend/src/lib/
-// worktree.ts) — /private symlink variants both directions, paths embedded in
-// bash commands, and the bare root as ".".
+// TestCurrentAction_WorktreeStrip pins that absolute worktree paths read
+// worktree-relative, as frontend/src/lib/worktree.ts renders them: /private
+// symlink variants, paths inside bash commands, and the bare root as ".".
 func TestCurrentAction_WorktreeStrip(t *testing.T) {
 	const wt = "/var/folders/kx/abc/T/triagefactory-runs/r1"
 	call := func(name string, input map[string]any) []domain.ToolCall {

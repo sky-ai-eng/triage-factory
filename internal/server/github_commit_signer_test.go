@@ -203,15 +203,6 @@ func mustSigner(t *testing.T, s *Server, method, suffix string, body any, status
 	return decodeSigner(t, rec)
 }
 
-func localSecret(t *testing.T, s *Server, key string) string {
-	t.Helper()
-	v, err := s.secrets.Get(t.Context(), runmode.LocalDefaultOrgID, key)
-	if err != nil {
-		t.Fatalf("read %s: %v", key, err)
-	}
-	return v
-}
-
 // publicHalf is the public key of a stored private key, as GitHub lists it.
 func publicHalf(t *testing.T, privatePEM string) string {
 	t.Helper()
@@ -280,10 +271,9 @@ func signerChecks(t *testing.T) func() map[string]int64 {
 	}
 }
 
-// TestCommitSigner_RegisterAndVerify walks a github.com signer from nothing to
-// active: registration stores a pending signer and its private key and answers
-// the public half to add, Verify refuses until the key is on the account, and
-// the identity a run commits as follows the signer through it.
+// TestCommitSigner_RegisterAndVerify: registration stores a pending signer and
+// its private key, Verify refuses until the public half is on the account, and
+// the identity a run commits as follows the signer throughout.
 func TestCommitSigner_RegisterAndVerify(t *testing.T) {
 	s, gh := newSignerServer(t, "https://github.com")
 	checks := signerChecks(t)
@@ -304,7 +294,7 @@ func TestCommitSigner_RegisterAndVerify(t *testing.T) {
 	if created.KeyTitle != "Triage Factory commit signing" || created.PendingPublicKey != nil {
 		t.Errorf("key title %q, pending %v; want the suggested title and no rotation", created.KeyTitle, created.PendingPublicKey)
 	}
-	if got := publicHalf(t, localSecret(t, s, integrations.KeyGitHubCommitSigningKey)); got != created.PublicKey {
+	if got := publicHalf(t, getSecret(t, s, integrations.KeyGitHubCommitSigningKey)); got != created.PublicKey {
 		t.Errorf("stored private key's public half = %q, want the answered %q", got, created.PublicKey)
 	}
 	if got := mustSigner(t, s, http.MethodGet, "", nil, http.StatusOK); got.PublicKey != created.PublicKey {
@@ -407,7 +397,7 @@ func TestCommitSigner_RegisterRefusals(t *testing.T) {
 		http.StatusConflict, "NOT_CONFIGURED", "")
 
 	assertOneFault(t, doJSON(t, s, http.MethodGet, commitSignerPath(""), nil), http.StatusNotFound, "NOT_FOUND", "")
-	if k := localSecret(t, s, integrations.KeyGitHubCommitSigningKey); k != "" {
+	if k := getSecret(t, s, integrations.KeyGitHubCommitSigningKey); k != "" {
 		t.Error("a refused registration left a signing key behind")
 	}
 	if rows := signerAuditRows(t, s); len(rows) != 0 {
@@ -506,7 +496,7 @@ func TestCommitSigner_RotationPromotesOnVerify(t *testing.T) {
 	assertOneFault(t, doJSON(t, s, http.MethodPost, commitSignerPath("/rotate"), nil), http.StatusNotFound, "NOT_FOUND", "")
 
 	active := registerActiveSigner(t, s, gh)
-	oldPrivate := localSecret(t, s, integrations.KeyGitHubCommitSigningKey)
+	oldPrivate := getSecret(t, s, integrations.KeyGitHubCommitSigningKey)
 
 	first := mustSigner(t, s, http.MethodPost, "/rotate", nil, http.StatusOK)
 	rotated := mustSigner(t, s, http.MethodPost, "/rotate", nil, http.StatusOK)
@@ -517,10 +507,10 @@ func TestCommitSigner_RotationPromotesOnVerify(t *testing.T) {
 	if rotated.Status != "active" || rotated.PublicKey != active.PublicKey {
 		t.Errorf("rotated = %+v, want the current key still active", rotated)
 	}
-	if got := publicHalf(t, localSecret(t, s, integrations.KeyGitHubCommitSigningKeyPending)); got != newKey {
+	if got := publicHalf(t, getSecret(t, s, integrations.KeyGitHubCommitSigningKeyPending)); got != newKey {
 		t.Errorf("pending secret's public half = %q, want the pending key %q", got, newKey)
 	}
-	if localSecret(t, s, integrations.KeyGitHubCommitSigningKey) != oldPrivate {
+	if getSecret(t, s, integrations.KeyGitHubCommitSigningKey) != oldPrivate {
 		t.Error("staging a rotation replaced the key that signs")
 	}
 
@@ -539,11 +529,11 @@ func TestCommitSigner_RotationPromotesOnVerify(t *testing.T) {
 	if promoted.PublicKey != newKey || promoted.PendingPublicKey != nil || promoted.Status != "active" {
 		t.Errorf("promoted = %+v, want the new key signing and no rotation", promoted)
 	}
-	signing := localSecret(t, s, integrations.KeyGitHubCommitSigningKey)
+	signing := getSecret(t, s, integrations.KeyGitHubCommitSigningKey)
 	if signing == oldPrivate || publicHalf(t, signing) != newKey {
 		t.Error("the signing secret is not the new key's private half")
 	}
-	if pending := localSecret(t, s, integrations.KeyGitHubCommitSigningKeyPending); pending != "" {
+	if pending := getSecret(t, s, integrations.KeyGitHubCommitSigningKeyPending); pending != "" {
 		t.Error("the pending secret outlived the promotion")
 	}
 	want := []string{"credential_set registered", "credential_set verified", "credential_set rotated",
@@ -577,42 +567,9 @@ func breakSigner(t *testing.T, s *Server, reason, key string) {
 	}
 }
 
-// TestCommitSigner_VerifyRereadsTheFailingCommit: for a signer the post-push
-// check broke, Verify also re-reads the commit that failed, which GitHub
-// evaluates again on every read, and the signer stays broken while it still
-// fails.
-func TestCommitSigner_VerifyRereadsTheFailingCommit(t *testing.T) {
-	s, gh := newSignerServer(t, "https://github.com")
-	checks := signerChecks(t)
-	active := registerActiveSigner(t, s, gh)
-	breakSigner(t, s, "unverified_email", active.PublicKey)
-
-	gh.setCommit(&ghclient.CommitVerification{Reason: "unverified_email", CommitterEmail: active.CommitEmail})
-	rec := doJSON(t, s, http.MethodPost, commitSignerPath("/verify"), nil)
-	assertOneFault(t, rec, http.StatusConflict, "COMMIT_UNVERIFIED", "")
-	if msg := decodeErrorItems(t, rec)[0].Message; !strings.Contains(msg, "unverified_email") {
-		t.Errorf("COMMIT_UNVERIFIED message %q does not carry GitHub's reason", msg)
-	}
-	if got := mustSigner(t, s, http.MethodGet, "", nil, http.StatusOK); got.Status != "broken" {
-		t.Errorf("status = %q after a failing re-read, want broken", got.Status)
-	}
-
-	// The admin verifies the address on the account; GitHub now reads the
-	// same commit as valid.
-	gh.setCommit(&ghclient.CommitVerification{Verified: true, Reason: "valid", CommitterEmail: active.CommitEmail})
-	if got := mustSigner(t, s, http.MethodPost, "/verify", nil, http.StatusOK); got.Status != "active" || got.StatusReason != nil {
-		t.Errorf("verified = %+v, want active with no reason", got)
-	}
-	if got, want := checks(), map[string]int64{"verify valid": 2, "verify unverified_email": 1}; !maps.Equal(got, want) {
-		t.Errorf("checks = %v, want %v", got, want)
-	}
-}
-
-// TestCommitSigner_VerifySkipsAFailureAlreadyReplaced: a failing commit that
-// cannot say anything about the signer as it is now does not hold it broken —
-// one committed under an address the signer no longer uses, one signed with a
-// key a rotation replaced, one GitHub no longer has — and a signer broken for
-// a missing key has no commit to re-read.
+// TestCommitSigner_VerifySkipsAFailureAlreadyReplaced: a failing commit from an
+// old address or a rotated-away key, or one GitHub no longer has, does not hold
+// the signer broken, and a missing-key break has no commit to re-read.
 func TestCommitSigner_VerifySkipsAFailureAlreadyReplaced(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -658,11 +615,9 @@ func TestCommitSigner_VerifySkipsAFailureAlreadyReplaced(t *testing.T) {
 	}
 }
 
-// TestCommitSigner_PostPushBreakClearedByVerify follows a signer from the
-// post-push check to Verify: a pushed commit GitHub reads as unverified_email
-// breaks the signer, Verify refuses while that commit still fails, and once
-// the address is verified on the account, Verify's re-read of the same commit
-// clears it.
+// TestCommitSigner_PostPushBreakClearedByVerify: a pushed commit GitHub reads
+// as unverified_email breaks the signer, Verify re-reads it and refuses while it
+// still fails, and clears the signer once GitHub reads it as valid.
 func TestCommitSigner_PostPushBreakClearedByVerify(t *testing.T) {
 	s, gh := newSignerServer(t, "https://github.com")
 	checks := signerChecks(t)
@@ -698,7 +653,11 @@ func TestCommitSigner_PostPushBreakClearedByVerify(t *testing.T) {
 		t.Fatalf("after the post-push check = %+v, want broken for unverified_email", broken)
 	}
 
-	assertOneFault(t, doJSON(t, s, http.MethodPost, commitSignerPath("/verify"), nil), http.StatusConflict, "COMMIT_UNVERIFIED", "")
+	rec := doJSON(t, s, http.MethodPost, commitSignerPath("/verify"), nil)
+	assertOneFault(t, rec, http.StatusConflict, "COMMIT_UNVERIFIED", "")
+	if msg := decodeErrorItems(t, rec)[0].Message; !strings.Contains(msg, "unverified_email") {
+		t.Errorf("COMMIT_UNVERIFIED message %q does not carry GitHub's reason", msg)
+	}
 
 	// GitHub's verification service failing is no verdict: Verify asks for a
 	// retry and the signer stays broken.
@@ -718,8 +677,8 @@ func TestCommitSigner_PostPushBreakClearedByVerify(t *testing.T) {
 	}
 }
 
-// TestCommitSigner_Delete removes the signer and both private keys, and the
-// org can register again.
+// TestCommitSigner_Delete removes the signer and both private keys, keeps the
+// host the org's token still uses, and lets the org register again.
 func TestCommitSigner_Delete(t *testing.T) {
 	s, gh := newSignerServer(t, "https://github.com")
 	// The org's own credential, which keeps its host once the signer goes.
@@ -735,9 +694,12 @@ func TestCommitSigner_Delete(t *testing.T) {
 	}
 	assertOneFault(t, doJSON(t, s, http.MethodGet, commitSignerPath(""), nil), http.StatusNotFound, "NOT_FOUND", "")
 	for _, key := range commitSigningKeys {
-		if localSecret(t, s, key) != "" {
+		if getSecret(t, s, key) != "" {
 			t.Errorf("%s outlived the signer", key)
 		}
+	}
+	if host := seedRepoHost(t, s); host != "https://github.com" {
+		t.Errorf("host after the signer's removal = %q, want it kept for the token", host)
 	}
 	if got := commitIdentity(t, s); got.Signing != "none" || got.Identity == nil || got.Identity.Name != "acme-tf[bot]" {
 		t.Errorf("identity after removal = %+v, want the bot again", got)
@@ -780,22 +742,6 @@ func TestCommitSigner_HoldsTheGitHubHost(t *testing.T) {
 	}
 	if host := seedRepoHost(t, s); host != "" {
 		t.Errorf("host after the signer's removal = %q, want it cleared: nothing is connected", host)
-	}
-}
-
-// TestCommitSigner_DeleteKeepsAHostStillInUse: removing the signer clears the
-// host only when nothing else is connected on it.
-func TestCommitSigner_DeleteKeepsAHostStillInUse(t *testing.T) {
-	s, _ := newSignerServer(t, "https://github.com")
-	if err := integrations.Save(t.Context(), s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{GitHubPAT: "ghp_bound"}); err != nil {
-		t.Fatalf("seed token: %v", err)
-	}
-	mustSigner(t, s, http.MethodPost, "", map[string]any{"login": "octocat"}, http.StatusCreated)
-	if rec := doJSON(t, s, http.MethodDelete, commitSignerPath(""), nil); rec.Code != http.StatusNoContent {
-		t.Fatalf("DELETE signer = %d; body=%s", rec.Code, rec.Body.String())
-	}
-	if host := seedRepoHost(t, s); host != "https://github.com" {
-		t.Errorf("host after the signer's removal = %q, want it kept for the token", host)
 	}
 }
 

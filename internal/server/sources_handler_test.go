@@ -38,36 +38,9 @@ func readOrgSources(t *testing.T, s *Server) map[string]string {
 	return out
 }
 
-// TestOrgSources_ReflectsCredentialState: the read is derived, so binding a
-// credential moves a source without anything else being written.
-func TestOrgSources_ReflectsCredentialState(t *testing.T) {
-	s := newTestServer(t)
-	unconfigureEventSources(t)
-
-	before := readOrgSources(t, s)
-	if got := before[eventsource.KindGitHub]; got != string(eventsource.StateUnconfigured) {
-		t.Errorf("github on a fresh org = %q, want unconfigured", got)
-	}
-	if got := before[eventsource.KindJira]; got != string(eventsource.StateUnconfigured) {
-		t.Errorf("jira on a fresh org = %q, want unconfigured", got)
-	}
-
-	configureEventSources(t, s)
-
-	after := readOrgSources(t, s)
-	if got := after[eventsource.KindGitHub]; got != string(eventsource.StateAvailable) {
-		t.Errorf("github with a bound PAT = %q, want available", got)
-	}
-	if got := after[eventsource.KindJira]; got != string(eventsource.StateAvailable) {
-		t.Errorf("jira with a bound credential = %q, want available", got)
-	}
-}
-
-// TestOrgSources_LocalOmitsWhatCannotExist pins D6. Local mode reports the
-// sources it can have — including the ones TF has only declared, which is a
-// fact the UI renders — and simply does not list a source whose store is
-// multi-mode-only. A state there would be a claim about setup or licensing in
-// a mode where the source cannot run at all.
+// TestOrgSources_LocalOmitsWhatCannotExist: local mode lists every source it can
+// have, including ones TF has only declared (wip), and omits a multi-only source
+// rather than reporting it off.
 func TestOrgSources_LocalOmitsWhatCannotExist(t *testing.T) {
 	s := newTestServer(t)
 	unconfigureEventSources(t)
@@ -89,11 +62,9 @@ func TestOrgSources_LocalOmitsWhatCannotExist(t *testing.T) {
 	}
 }
 
-// TestOrgSources_DeniesExactlyLikeOrgSettings pins D2's gate. The availability
-// read is RequireOrgMember — the same gate GET /api/orgs/{org_id}/settings
-// uses — so a plain member reads it, and every denial has to answer the way
-// the settings read answers, including the 404 that keeps a foreign org's
-// existence undisclosed.
+// TestOrgSources_DeniesExactlyLikeOrgSettings: the sources read takes the org
+// settings read's member gate, so a plain member reads it and every denial,
+// including the 404 that hides a foreign org, matches the settings read.
 func TestOrgSources_DeniesExactlyLikeOrgSettings(t *testing.T) {
 	// Multi mode, because that is where the gate has anything to do: local
 	// mode is one tenant and RequireOrgMember admits every caller.

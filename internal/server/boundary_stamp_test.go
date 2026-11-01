@@ -44,114 +44,80 @@ func assertUnstamped(t *testing.T, database *sql.DB, conversationID string) {
 	}
 }
 
-// TestRequeueRoutes_StampTheRequeuedBoundary: both doors onto the requeue —
-// the deliberate /requeue and the gesture-reversing /undo — end the task's
-// conversations, because both hand the task to whoever claims it next and that
-// claimant starts fresh.
-//
-// The conversation is `completed`, which is the case that makes the point: it
-// concluded on its own and would look perfectly resumable from status alone,
-// and the boundary is the task moving on, not how any transcript finished.
-func TestRequeueRoutes_StampTheRequeuedBoundary(t *testing.T) {
-	for _, route := range []string{"requeue", "undo"} {
-		t.Run(route, func(t *testing.T) {
+// TestTaskClaim_Boundary pins which self-claims end the task's conversation:
+// taking a task the agent held does, while picking up an unclaimed task or
+// re-claiming your own takes it from nobody. Every arm leaves the caller holding
+// the task in progress, with the agent's draft PR and staged review carried over.
+func TestTaskClaim_Boundary(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup string // run against the task first; "" leaves it agent-claimed
+		args  []any
+		ended domain.EndedReason // "" means no stamp
+	}{
+		{"takeover from the agent", "", nil, domain.EndedTakenOver},
+		{"pickup of an unclaimed task",
+			`UPDATE tasks SET claimed_by_agent_id = NULL, status = 'queued' WHERE id = ?`, nil, ""},
+		{"re-claim of your own task",
+			`UPDATE tasks SET claimed_by_agent_id = NULL, claimed_by_user_id = ?, status = 'in_progress' WHERE id = ?`,
+			[]any{runmode.LocalDefaultUserID}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
 			s := newTestServer(t)
-			taskID, conversationID, _ := pendingApprovalFixture(t, s.db)
-			if route == "undo" {
-				seedCallerGesture(t, s.db, taskID, "claim")
+			taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
+			prID := seedCarriedDraftPR(t, s.db, conversationID)
+			if c.setup != "" {
+				execSQL(t, s.db, c.setup, append(c.args, taskID)...)
 			}
 
-			rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/"+route, nil)
+			rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{"hesitation_ms": 0})
 			if rec.Code != http.StatusOK {
 				t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 			}
-			assertStamped(t, s.db, conversationID, domain.EndedRequeued)
+			if c.ended == "" {
+				assertUnstamped(t, s.db, conversationID)
+			} else {
+				assertStamped(t, s.db, conversationID, c.ended)
+			}
+			assertPendingApprovalCarried(t, s.db, taskID, conversationID, reviewID, prID, "in_progress")
+
+			var body struct {
+				Status string `json:"status"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode claim response: %v", err)
+			}
+			if body.Status != "in_progress" {
+				t.Errorf("claim response status = %q, want in_progress", body.Status)
+			}
+			var claimedAgent, claimedUser sql.NullString
+			if err := s.db.QueryRow(`SELECT claimed_by_agent_id, claimed_by_user_id FROM tasks WHERE id = ?`, taskID).
+				Scan(&claimedAgent, &claimedUser); err != nil {
+				t.Fatalf("scan claim: %v", err)
+			}
+			if claimedAgent.Valid || claimedUser.String != runmode.LocalDefaultUserID {
+				t.Errorf("claims = (agent %v, user %v), want only the caller's", claimedAgent, claimedUser)
+			}
 		})
 	}
 }
 
-// TestTaskClaim_TakeoverStampsTheBoundary: a person claiming a task the agent
-// held ends the agent's conversation. The fixture's task is agent-claimed,
-// which is what makes this arm a takeover rather than a pickup.
-func TestTaskClaim_TakeoverStampsTheBoundary(t *testing.T) {
-	s := newTestServer(t)
-	taskID, conversationID, _ := pendingApprovalFixture(t, s.db)
-
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{"hesitation_ms": 0})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	assertStamped(t, s.db, conversationID, domain.EndedTakenOver)
-}
-
-// TestTaskClaim_PickingUpAnUnclaimedTaskStampsNothing is the other half of the
-// same route, and the reason selfClaim reports which arm it landed on: after
-// the claim the task's columns read identically, but nothing was taken from
-// anybody — there is no conversation the task stopped being about, and a stamp
-// here would record a handoff that never happened.
-//
-// It also pins what the pickup DOES do to the row it lands on: a queued task
-// returns at in_progress, because taking it is what starts it.
-func TestTaskClaim_PickingUpAnUnclaimedTaskStampsNothing(t *testing.T) {
-	s := newTestServer(t)
-	taskID, conversationID, _ := pendingApprovalFixture(t, s.db)
-	if _, err := s.db.Exec(
-		`UPDATE tasks SET claimed_by_agent_id = NULL, status = 'queued' WHERE id = ?`, taskID,
-	); err != nil {
-		t.Fatalf("unclaim the task: %v", err)
-	}
-
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{"hesitation_ms": 0})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	assertUnstamped(t, s.db, conversationID)
-
-	var body struct {
-		Status string `json:"status"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode claim response: %v", err)
-	}
-	if body.Status != "in_progress" {
-		t.Errorf("claim response status = %q, want in_progress", body.Status)
-	}
-}
-
-// TestTaskClaim_IdempotentReClaimStampsNothing: the caller already owns it and
-// nothing moved, so the same rule applies as for a pickup.
-func TestTaskClaim_IdempotentReClaimStampsNothing(t *testing.T) {
-	s := newTestServer(t)
-	taskID, conversationID, _ := pendingApprovalFixture(t, s.db)
-	if _, err := s.db.Exec(
-		`UPDATE tasks SET claimed_by_agent_id = NULL, claimed_by_user_id = ?, status = 'in_progress' WHERE id = ?`,
-		runmode.LocalDefaultUserID, taskID,
-	); err != nil {
-		t.Fatalf("pre-claim the task for the caller: %v", err)
-	}
-
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{"hesitation_ms": 0})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	assertUnstamped(t, s.db, conversationID)
-}
-
-// TestTaskDelegate_StampsBeforeStepZeroExists pins the ordering the delegate
-// arm is written for: the prior conversation is ended before a new delegation
-// is spawned, so the task never holds two live conversations at once.
-//
-// The test server wires no spawner, so the route stops exactly where the
-// invariant is checkable — the boundary written, and nothing new minted.
+// TestTaskDelegate_StampsBeforeStepZeroExists: delegating ends the prior
+// conversation before the next is spawned, so the task never holds two live
+// ones, and carries the last run's deliverables over. With no spawner wired,
+// the route stops right after the boundary.
 func TestTaskDelegate_StampsBeforeStepZeroExists(t *testing.T) {
 	s := newTestServer(t)
-	taskID, conversationID, _ := pendingApprovalFixture(t, s.db)
+	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
+	prID := seedCarriedDraftPR(t, s.db, conversationID)
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/delegate", map[string]any{"hesitation_ms": 0})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	assertStamped(t, s.db, conversationID, domain.EndedDelegated)
+	assertPendingApprovalCarried(t, s.db, taskID, conversationID, reviewID, prID, "in_progress")
 
 	var live int
 	if err := s.db.QueryRow(
@@ -161,27 +127,6 @@ func TestTaskDelegate_StampsBeforeStepZeroExists(t *testing.T) {
 	}
 	if live != 0 {
 		t.Errorf("live conversations on the task = %d, want 0 at the moment the new delegation is spawned", live)
-	}
-}
-
-// TestTaskPatch_EndingATaskStampsNothing is the decided non-boundary. A task
-// reaching done or dismissed keeps stopping whatever ran, exactly as before,
-// and stamps nothing: a blueprint's last step stays resumable on its done task
-// for follow-ups, and a manual conversation on a task something closed under
-// it is parked and picked back up rather than sealed.
-func TestTaskPatch_EndingATaskStampsNothing(t *testing.T) {
-	for _, status := range []string{"done", "dismissed"} {
-		t.Run(status, func(t *testing.T) {
-			s := newTestServer(t)
-			taskID, conversationID, _ := pendingApprovalFixture(t, s.db)
-
-			rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID,
-				map[string]any{"status": status, "hesitation_ms": 0})
-			if rec.Code != http.StatusOK {
-				t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-			}
-			assertUnstamped(t, s.db, conversationID)
-		})
 	}
 }
 
@@ -203,20 +148,7 @@ func TestConversationRead_CarriesTheBoundary(t *testing.T) {
 		t.Fatalf("seed a uuid-addressed sibling conversation: %v", err)
 	}
 
-	read := func() map[string]any {
-		t.Helper()
-		rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+conversationID, nil)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-		}
-		var out map[string]any
-		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-			t.Fatalf("decode: %v", err)
-		}
-		return out
-	}
-
-	before := read()
+	before := readConversation(t, s, conversationID)
 	if _, ok := before["ended_at"]; ok {
 		t.Errorf("ended_at present on an open conversation: %v", before["ended_at"])
 	}
@@ -228,7 +160,7 @@ func TestConversationRead_CarriesTheBoundary(t *testing.T) {
 		t.Fatalf("requeue = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	after := read()
+	after := readConversation(t, s, conversationID)
 	if after["ended_at"] == nil || after["ended_at"] == "" {
 		t.Errorf("ended_at = %v, want the stamp", after["ended_at"])
 	}

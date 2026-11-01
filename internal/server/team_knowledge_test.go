@@ -459,11 +459,9 @@ func TestTeamKnowledge_BadCallsFail(t *testing.T) {
 	})
 }
 
-// TestTeamKnowledge_UploadFieldOrdering: both scalar fields decide WHERE the
-// parts after them land, and the body is consumed as it streams — so a field
-// arriving after a file cannot apply to it. Letting one upload straddle two
-// folders silently is the caller getting a different result from the one they
-// described.
+// TestTeamKnowledge_UploadFieldOrdering: the body streams, so a path_prefix
+// after a file cannot apply to it; one upload may not straddle two folders, and
+// the refusal names the file it already saved.
 func TestTeamKnowledge_UploadFieldOrdering(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -501,10 +499,9 @@ func TestTeamKnowledge_UploadFieldOrdering(t *testing.T) {
 	}
 }
 
-// TestTeamKnowledge_PartialUploadNamesWhatLanded is the inverse of the rule
-// against reporting success for work that did not happen: a batch that partly
-// succeeded must not be reported as if nothing had. The parts are durable as
-// they stream, so a later refusal cannot roll them back.
+// TestTeamKnowledge_PartialUploadNamesWhatLanded: parts are durable as they
+// stream, so a refusal after some landed names them and says they were not
+// rolled back.
 func TestTeamKnowledge_PartialUploadNamesWhatLanded(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)

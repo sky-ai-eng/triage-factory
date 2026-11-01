@@ -41,10 +41,9 @@ func requireLanded(t *testing.T, landed <-chan *httptest.ResponseRecorder) {
 	}
 }
 
-// TestLinearTeamsPut_ConflictsWithASaveMidGate: a save that lands while
-// another waits on Linear is not reverted by it. The waiting write named ENG
-// by id alone, so it would carry ENG's done rule from the read it made before
-// the other landed. It answers 409 and stores nothing.
+// TestLinearTeamsPut_ConflictsWithASaveMidGate: a write waiting on Linear while
+// another save lands answers 409 and stores nothing, rather than carrying ENG's
+// done rule from the read it made before that save.
 func TestLinearTeamsPut_ConflictsWithASaveMidGate(t *testing.T) {
 	s, fake := newServerWithLinearCatalog(t, linearFixtureEng, linearFixtureOps)
 	mustPutLinearTeams(t, s, armedLinearTeam(linearTeamEng), map[string]any{"id": linearTeamOps})

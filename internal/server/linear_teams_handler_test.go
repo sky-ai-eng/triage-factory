@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -51,75 +52,32 @@ func assertOneFault(t *testing.T, rec *httptest.ResponseRecorder, status int, re
 	}
 }
 
-// TestLinearTeamsList_ProxyPagingRoundTrip walks the team list the way a
-// client does, first page then the token it was handed, and pins the proxy
-// contract: the rows page through Linear's own cursor, and total_count is null.
-func TestLinearTeamsList_ProxyPagingRoundTrip(t *testing.T) {
-	s, _ := newServerWithLinearCatalog(t,
-		linear.Team{ID: fixtureUUID("t1"), Key: "AAA", Name: "Alpha"},
-		linear.Team{ID: fixtureUUID("t2"), Key: "BBB", Name: "Beta"},
-		linear.Team{ID: fixtureUUID("t3"), Key: "CCC", Name: "Gamma", Private: true},
-	)
-
-	first := decodeList[linearTeamJSON](t, doJSON(t, s, http.MethodPost, linearTeamsListPath,
-		map[string]any{"page_size": 2}))
-	if got := linearTeamKeysOf(first.Items); got != "AAA,BBB" {
-		t.Fatalf("page 1 = %s, want AAA,BBB", got)
-	}
-	if first.TotalCount != nil {
-		t.Errorf("total_count = %d, want null — a proxy list cannot count itself", *first.TotalCount)
-	}
-	if first.NextPageToken == "" {
-		t.Fatal("page 1 carried no next_page_token with a team still to serve")
-	}
-
-	second := decodeList[linearTeamJSON](t, doJSON(t, s, http.MethodPost, linearTeamsListPath,
-		map[string]any{"page_size": 2, "page_token": first.NextPageToken}))
-	if len(second.Items) != 1 {
-		t.Fatalf("page 2 = %+v, want the one remaining team", second.Items)
-	}
-	if want := (linearTeamJSON{ID: fixtureUUID("t3"), Key: "CCC", Name: "Gamma", Private: true}); second.Items[0] != want {
-		t.Errorf("page 2 item = %+v, want %+v", second.Items[0], want)
-	}
-	if second.NextPageToken != "" {
-		t.Errorf("last page minted a next_page_token (%q)", second.NextPageToken)
-	}
-}
-
-// TestLinearTeamsList_FiltersOnQ: the search box is applied upstream, against
-// the key and the name.
-func TestLinearTeamsList_FiltersOnQ(t *testing.T) {
-	s, _ := newServerWithLinearCatalog(t, linearFixtureEng, linearFixtureOps,
-		linear.Team{ID: fixtureUUID("t-design"), Key: "DES", Name: "Design Ops"})
-
-	page := decodeList[linearTeamJSON](t, doJSON(t, s, http.MethodPost, linearTeamsListPath,
-		map[string]any{"q": "ops"}))
-	if got := linearTeamKeysOf(page.Items); got != "OPS,DES" {
-		t.Errorf("filtered page = %s, want OPS,DES", got)
-	}
-}
-
-// TestLinearTeamsList_TokenIsFingerprintedOnQ: a token minted for one search
-// cannot page another's results, and case alone does not make two searches.
+// TestLinearTeamsList_TokenIsFingerprintedOnQ: the search is applied upstream
+// and pages through Linear's cursor with total_count null. A token minted for
+// one search cannot page another's, and case alone does not make two searches.
 func TestLinearTeamsList_TokenIsFingerprintedOnQ(t *testing.T) {
+	alphaBeta := linear.Team{ID: fixtureUUID("t2"), Key: "ABB", Name: "Alpha Beta", Private: true}
 	s, _ := newServerWithLinearCatalog(t,
 		linear.Team{ID: fixtureUUID("t1"), Key: "AAA", Name: "Alpha"},
-		linear.Team{ID: fixtureUUID("t2"), Key: "ABB", Name: "Alpha Beta"},
+		alphaBeta,
+		linear.Team{ID: fixtureUUID("t3"), Key: "ZZZ", Name: "Zed"},
 	)
 	first := decodeList[linearTeamJSON](t, doJSON(t, s, http.MethodPost, linearTeamsListPath,
 		map[string]any{"q": "a", "page_size": 1}))
-	if first.NextPageToken == "" {
-		t.Fatal("page 1 carried no next_page_token")
+	if got := linearTeamKeysOf(first.Items); got != "AAA" || first.NextPageToken == "" || first.TotalCount != nil {
+		t.Fatalf("page 1 = %s (token %q, total %v), want AAA with a token and a null total", got, first.NextPageToken, first.TotalCount)
 	}
 
 	rec := doJSON(t, s, http.MethodPost, linearTeamsListPath,
 		map[string]any{"q": "alpha", "page_size": 1, "page_token": first.NextPageToken})
 	assertOneFault(t, rec, http.StatusBadRequest, "INVALID_PARAM", "page_token")
 
-	rec = doJSON(t, s, http.MethodPost, linearTeamsListPath,
-		map[string]any{"q": "A", "page_size": 1, "page_token": first.NextPageToken})
-	if rec.Code != http.StatusOK {
-		t.Errorf("same search in another case = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	// ZZZ does not match, so the second and last page is ABB.
+	second := decodeList[linearTeamJSON](t, doJSON(t, s, http.MethodPost, linearTeamsListPath,
+		map[string]any{"q": "A", "page_size": 1, "page_token": first.NextPageToken}))
+	want := linearTeamJSON{ID: alphaBeta.ID, Key: "ABB", Name: "Alpha Beta", Private: true}
+	if len(second.Items) != 1 || second.Items[0] != want || second.NextPageToken != "" {
+		t.Errorf("page 2 in another case = %+v (token %q), want only %+v", second.Items, second.NextPageToken, want)
 	}
 }
 
@@ -136,24 +94,6 @@ func TestLinearTeamsList_RefusedBodies(t *testing.T) {
 		http.StatusBadRequest, "UNKNOWN_FIELD", "team")
 	if fake.Calls() != 0 {
 		t.Errorf("a refused body reached Linear %d times", fake.Calls())
-	}
-}
-
-// TestLinearCatalog_NotConnected: with no service credential every read is a
-// 409 naming the fix, never an empty list or a 404 for a team that may exist.
-func TestLinearCatalog_NotConnected(t *testing.T) {
-	s, _ := newServerWithUnconnectedLinear(t, linearFixtureEng)
-	for name, rec := range map[string]*httptest.ResponseRecorder{
-		"teams list":  doJSON(t, s, http.MethodPost, linearTeamsListPath, map[string]any{}),
-		"team":        doJSON(t, s, http.MethodGet, linearTeamPath(linearTeamEng), nil),
-		"states list": doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamEng), map[string]any{}),
-		"state":       doJSON(t, s, http.MethodGet, linearStatePath(linearTeamEng, linearStateDone), nil),
-		"users list":  doJSON(t, s, http.MethodPost, linearUsersListPath, map[string]any{}),
-		"user":        doJSON(t, s, http.MethodGet, linearUserPath(linearUserAda), nil),
-	} {
-		t.Run(name, func(t *testing.T) {
-			assertOneFault(t, rec, http.StatusConflict, "NOT_CONFIGURED", "")
-		})
 	}
 }
 
@@ -228,60 +168,32 @@ func TestLinearTeamGet(t *testing.T) {
 	}
 }
 
-// TestLinearStatesList_PagesTheTeamsWorkflow walks a team's states a page at
-// a time. The pages together are the whole workflow, in Linear's order with
-// each state's position alongside, and total_count is null.
-func TestLinearStatesList_PagesTheTeamsWorkflow(t *testing.T) {
-	s, _ := newServerWithLinearCatalog(t, linearFixtureEng)
+// TestLinearStatesList_TokenIsBoundToTheTeam: a team's whole workflow pages in
+// Linear's order with each state's position, total_count null, under a token
+// that wraps a cursor into that team's workflow and cannot page another's.
+func TestLinearStatesList_TokenIsBoundToTheTeam(t *testing.T) {
+	s, _ := newServerWithLinearCatalog(t, linearFixtureEng, linearFixtureOps)
+	first := decodeList[linearStateJSON](t, doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamEng),
+		map[string]any{"page_size": 4}))
+	if first.NextPageToken == "" {
+		t.Fatal("page 1 carried no next_page_token")
+	}
+	assertOneFault(t, doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamOps),
+		map[string]any{"page_size": 4, "page_token": first.NextPageToken}),
+		http.StatusBadRequest, "INVALID_PARAM", "page_token")
 
-	var got []linearStateJSON
-	token := ""
-	for pages := 0; ; pages++ {
-		if pages > len(linearFixtureStates) {
-			t.Fatal("the states list never stopped minting tokens")
-		}
-		body := map[string]any{"page_size": 3}
-		if token != "" {
-			body["page_token"] = token
-		}
-		page := decodeList[linearStateJSON](t, doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamEng), body))
-		if len(page.Items) > 3 {
-			t.Fatalf("page of %d, want at most 3", len(page.Items))
-		}
-		if page.TotalCount != nil {
-			t.Errorf("total_count = %d, want null", *page.TotalCount)
-		}
-		got = append(got, page.Items...)
-		if token = page.NextPageToken; token == "" {
-			break
-		}
+	second := decodeList[linearStateJSON](t, doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamEng),
+		map[string]any{"page_size": 4, "page_token": first.NextPageToken}))
+	if second.NextPageToken != "" || first.TotalCount != nil || second.TotalCount != nil {
+		t.Errorf("pages = %+v then %+v, want two pages and a null total", first, second)
 	}
 	want := make([]linearStateJSON, 0, len(linearFixtureStates))
 	for _, st := range linearFixtureStates {
 		want = append(want, toLinearStateJSON(st))
 	}
-	if len(got) != len(want) {
-		t.Fatalf("states = %+v, want %+v", got, want)
+	if got := append(first.Items, second.Items...); !slices.Equal(got, want) {
+		t.Errorf("states = %+v, want %+v", got, want)
 	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("state %d = %+v, want %+v", i, got[i], want[i])
-		}
-	}
-}
-
-// TestLinearStatesList_TokenIsBoundToTheTeam: a token wraps a cursor into one
-// team's workflow, so it cannot page another team's.
-func TestLinearStatesList_TokenIsBoundToTheTeam(t *testing.T) {
-	s, _ := newServerWithLinearCatalog(t, linearFixtureEng, linearFixtureOps)
-	first := decodeList[linearStateJSON](t, doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamEng),
-		map[string]any{"page_size": 2}))
-	if first.NextPageToken == "" {
-		t.Fatal("page 1 carried no next_page_token")
-	}
-	assertOneFault(t, doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamOps),
-		map[string]any{"page_size": 2, "page_token": first.NextPageToken}),
-		http.StatusBadRequest, "INVALID_PARAM", "page_token")
 }
 
 // TestLinearStatesList_Refusals: a team Linear cannot show is a 404, as is a

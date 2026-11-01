@@ -22,9 +22,8 @@ func newTestPollerManager(t *testing.T, s *Server) *poller.Manager {
 		s.allStores.TeamGitHubGroups, s.allStores.Secrets, s.allStores.GitHubApps, s.allStores.PollReadiness, nil, nil)
 }
 
-// TestHandleReadyz_Healthy is the happy path (acceptance criterion 1):
-// 200 + well-formed JSON when every hard check passes and no soft signal
-// is stale.
+// TestHandleReadyz_Healthy: 200 with every check ok when every hard check
+// passes and no soft signal is stale.
 func TestHandleReadyz_Healthy(t *testing.T) {
 	s := newTestServer(t)
 	s.SetMigrationsOK(true)
@@ -59,16 +58,15 @@ func TestHandleReadyz_Healthy(t *testing.T) {
 			t.Errorf("checks[%s]: got %q want %q", check, got, "ok")
 		}
 	}
-	// TFAC-583: a Server with no SetLeaseStatus call (every role=all /
-	// local boot, and this bare test construction) must omit `lease`
-	// entirely — the frozen single-process contract.
+	// With no SetLeaseStatus call, as at role=all and local, `lease` is
+	// omitted entirely.
 	if resp.Lease != nil {
 		t.Errorf("lease: got %+v, want nil (SetLeaseStatus was never called)", resp.Lease)
 	}
 }
 
-// TestHandleReadyz_DBDown covers acceptance criterion 2: a dead DB pool
-// hard-fails with 503 and checks.db == "failed".
+// TestHandleReadyz_DBDown: a dead DB pool hard-fails with 503 and checks.db
+// "failed".
 func TestHandleReadyz_DBDown(t *testing.T) {
 	s := newTestServer(t)
 	s.SetMigrationsOK(true)
@@ -99,72 +97,54 @@ func TestHandleReadyz_DBDown(t *testing.T) {
 	}
 }
 
-// TestHandleReadyz_PollerHeartbeatStale covers acceptance criterion 3: a
-// GitHub base-tick heartbeat aged past 3x basePollInterval hard-fails
-// with 503, via the injectable test seam rather than a real 90s+ sleep.
-func TestHandleReadyz_PollerHeartbeatStale(t *testing.T) {
-	s := newTestServer(t)
-	s.SetMigrationsOK(true)
+// TestHandleReadyz_HeartbeatStale: a poll loop whose heartbeat is older than
+// 3x its base interval is a hard failure on the holder: 503, not_ready, that
+// source's check failed and the others ok.
+func TestHandleReadyz_HeartbeatStale(t *testing.T) {
+	for _, stale := range []string{"poller_github", "poller_linear"} {
+		t.Run(stale, func(t *testing.T) {
+			s := newTestServer(t)
+			s.SetMigrationsOK(true)
 
-	pm := newTestPollerManager(t, s)
-	now := time.Now()
-	pm.SetGitHubHeartbeatForTest(now.Add(-10 * time.Minute)) // well past 90s
-	pm.SetJiraHeartbeatForTest(now)                          // stays alive
-	pm.SetLinearHeartbeatForTest(now)                        // stays alive
-	s.SetPollerManager(pm.Health)
+			pm := newTestPollerManager(t, s)
+			now := time.Now()
+			beat := func(check string) time.Time {
+				if check == stale {
+					return now.Add(-10 * time.Minute) // well past 90s
+				}
+				return now
+			}
+			pm.SetGitHubHeartbeatForTest(beat("poller_github"))
+			pm.SetJiraHeartbeatForTest(beat("poller_jira"))
+			pm.SetLinearHeartbeatForTest(beat("poller_linear"))
+			s.SetPollerManager(pm.Health)
 
-	rec := doJSON(t, s, http.MethodGet, "/readyz", nil)
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var resp readyzResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if resp.Checks["poller_github"] != "failed" {
-		t.Errorf("checks[poller_github]: got %q want %q", resp.Checks["poller_github"], "failed")
-	}
-	if resp.Checks["poller_jira"] != "ok" {
-		t.Errorf("checks[poller_jira]: got %q want %q", resp.Checks["poller_jira"], "ok")
-	}
-	if resp.Status != "not_ready" {
-		t.Errorf("status: got %q want %q", resp.Status, "not_ready")
+			rec := doJSON(t, s, http.MethodGet, "/readyz", nil)
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
+			}
+			var resp readyzResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if resp.Status != "not_ready" {
+				t.Errorf("status: got %q want %q", resp.Status, "not_ready")
+			}
+			for _, check := range []string{"poller_github", "poller_jira", "poller_linear"} {
+				want := "ok"
+				if check == stale {
+					want = "failed"
+				}
+				if got := resp.Checks[check]; got != want {
+					t.Errorf("checks[%s]: got %q want %q", check, got, want)
+				}
+			}
+		})
 	}
 }
 
-// TestHandleReadyz_LinearHeartbeatStale: the Linear loop is a hard check on
-// the holder like the other two — a dead Linear loop is a 503 even while
-// GitHub and Jira poll.
-func TestHandleReadyz_LinearHeartbeatStale(t *testing.T) {
-	s := newTestServer(t)
-	s.SetMigrationsOK(true)
-
-	pm := newTestPollerManager(t, s)
-	now := time.Now()
-	pm.SetGitHubHeartbeatForTest(now)
-	pm.SetJiraHeartbeatForTest(now)
-	pm.SetLinearHeartbeatForTest(now.Add(-10 * time.Minute))
-	s.SetPollerManager(pm.Health)
-
-	rec := doJSON(t, s, http.MethodGet, "/readyz", nil)
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var resp readyzResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	want := map[string]string{"poller_github": "ok", "poller_jira": "ok", "poller_linear": "failed"}
-	for check, w := range want {
-		if got := resp.Checks[check]; got != w {
-			t.Errorf("checks[%s]: got %q want %q", check, got, w)
-		}
-	}
-}
-
-// TestHandleReadyz_StaleLastSuccessIsDegradedNot503 covers acceptance
-// criterion 4: a stale last_successful_poll is a soft signal — still 200,
-// age reported, top-level status "degraded".
+// TestHandleReadyz_StaleLastSuccessIsDegradedNot503: a stale last successful
+// poll is a soft signal: 200, status "degraded", the age reported per org.
 func TestHandleReadyz_StaleLastSuccessIsDegradedNot503(t *testing.T) {
 	s := newTestServer(t)
 	s.SetMigrationsOK(true)
@@ -208,8 +188,8 @@ func TestHandleReadyz_StaleLastSuccessIsDegradedNot503(t *testing.T) {
 	}
 }
 
-// TestHandleReadyz_ActiveRunsCount covers acceptance criterion 5:
-// active_runs reflects actual queued/running rows via the indexed count.
+// TestHandleReadyz_ActiveRunsCount: on SQLite, active_runs counts waiting,
+// working and parked-but-woken conversations, not idle parked or finished ones.
 func TestHandleReadyz_ActiveRunsCount(t *testing.T) {
 	s := newTestServer(t)
 	s.SetMigrationsOK(true)
@@ -277,11 +257,9 @@ func TestHandleReadyz_ActiveRunsCount(t *testing.T) {
 	}
 }
 
-// TestHandleReadyz_HolderLeaseFieldPresent pins the holder-side contract
-// (TFAC-583, spec §8.3): when SetLeaseStatus reports is_holder=true, the
-// `lease` field appears with the reported values AND the poller hard
-// checks behave exactly as an unwired (role=all) Server would — a holder
-// is byte-identical to today plus the added lease field.
+// TestHandleReadyz_HolderLeaseFieldPresent: on the lease holder, `lease`
+// carries the reported values and the poller hard checks run as they do on a
+// Server with no lease wired.
 func TestHandleReadyz_HolderLeaseFieldPresent(t *testing.T) {
 	s := newTestServer(t)
 	s.SetMigrationsOK(true)
@@ -316,22 +294,24 @@ func TestHandleReadyz_HolderLeaseFieldPresent(t *testing.T) {
 	}
 }
 
-// TestHandleReadyz_StandbyIsAlwaysReady pins the standby contract (TFAC-573
-// shipped, TFAC-583 conditionality): a standby control pod hard-checks only
-// db + migrations, reports poller_github/poller_jira/poller_linear as the literal string
-// "standby" (not ok/failed), and MUST return 200 even though it runs no
-// pollers at all (SetPollerManager is never even called here) — an LB must
-// keep every standby in rotation.
-func TestHandleReadyz_StandbyIsAlwaysReady(t *testing.T) {
+// TestHandleReadyz_StandbyIgnoresDeadPollerHealth: a standby control pod
+// answers 200 "ok" with a dead poller snapshot, because it hard-checks only db
+// and migrations. Its poller checks read "standby", its sources are empty, and
+// lease reports is_holder false.
+func TestHandleReadyz_StandbyIgnoresDeadPollerHealth(t *testing.T) {
 	s := newTestServer(t)
 	s.SetMigrationsOK(true)
+	pm := newTestPollerManager(t, s)
+	// Heartbeats never set: Health() reports every source dead, which would
+	// 503 a holder.
+	s.SetPollerManager(pm.Health)
 	s.SetLeaseStatus(func() (string, string, int64, bool) {
-		return "background-brain", "pod-b", 7, false
+		return "background-brain", "pod-b", 3, false
 	})
 
 	rec := doJSON(t, s, http.MethodGet, "/readyz", nil)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 on a standby regardless of poller state, got %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("expected 200 on a standby even with a dead poller snapshot, got %d: %s", rec.Code, rec.Body.String())
 	}
 	var resp readyzResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
@@ -356,30 +336,8 @@ func TestHandleReadyz_StandbyIsAlwaysReady(t *testing.T) {
 	}
 }
 
-// TestHandleReadyz_StandbyIgnoresDeadPollerHealth pins that a standby's
-// 200 doesn't depend on pollerHealth being wired or healthy at all — the
-// poller-alive check is skipped entirely, not "checked and happens to
-// pass".
-func TestHandleReadyz_StandbyIgnoresDeadPollerHealth(t *testing.T) {
-	s := newTestServer(t)
-	s.SetMigrationsOK(true)
-	pm := newTestPollerManager(t, s)
-	// Heartbeats never set — Health() reports both sources dead, which
-	// would 503 a holder (see TestHandleReadyz_PollerHeartbeatStale).
-	s.SetPollerManager(pm.Health)
-	s.SetLeaseStatus(func() (string, string, int64, bool) {
-		return "background-brain", "pod-b", 3, false
-	})
-
-	rec := doJSON(t, s, http.MethodGet, "/readyz", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 on a standby even with a dead poller snapshot, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
-// TestHandleReadyz_NoAuthRequired covers acceptance criterion 6: reachable
-// with no auth cookie/session context (doJSON never seeds one), and the
-// response carries no tenant data beyond the opaque org ID key.
+// TestHandleReadyz_NoAuthRequired: /readyz answers 200 with no session
+// context (doJSON never seeds one).
 func TestHandleReadyz_NoAuthRequired(t *testing.T) {
 	s := newTestServer(t)
 	s.SetMigrationsOK(true)

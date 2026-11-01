@@ -54,20 +54,15 @@ func sign(body []byte) string {
 	return signWith(testWebhookSecret, body)
 }
 
-// signWith is sign for a delivery keyed by some other secret — what a rotation
-// test needs, since the whole question there is which of two secrets the
-// receiver is currently verifying against.
+// signWith is sign for a delivery keyed by some other secret.
 func signWith(secret string, body []byte) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write(body)
 	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
 }
 
-// postWebhook fires a delivery at the receiver with the given event name,
-// signature header, and raw body, under a delivery GUID no other call reuses.
-// GitHub mints one GUID per delivery, so distinct calls are distinct
-// deliveries; a test that means to send the SAME delivery twice says so with
-// postWebhookDelivery.
+// postWebhook fires a delivery at the receiver under a fresh delivery GUID, so
+// distinct calls are distinct deliveries; postWebhookDelivery replays one.
 func postWebhook(s *Server, event, sigHeader string, body []byte) *httptest.ResponseRecorder {
 	return postWebhookDelivery(s, event, sigHeader, body, uuid.NewString())
 }
@@ -97,51 +92,100 @@ func installations(t *testing.T, s *Server) []domain.OrgGitHubAppInstallation {
 	return got
 }
 
+// TestGitHubWebhook_InstallationCreated pins what an installation.created
+// delivery mirrors: the account's id and the grant's width when the payload
+// names them (unknown when it does not), on the org's GitHub host.
 func TestGitHubWebhook_InstallationCreated(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	s := newTestServer(t)
-	seedWebhookApp(t, s)
+	for _, tc := range []struct {
+		name          string
+		base          string // the org's GitHub URL; "" leaves the test server's
+		account       string
+		selection     string
+		wantAccountID string
+		wantHost      string
+	}{
+		{name: "minimal payload", account: `{"login":"acme","type":"Organization"}`, wantHost: "https://github.com"},
+		{name: "account id", account: `{"id":1234,"login":"acme","type":"Organization"}`, wantAccountID: "1234", wantHost: "https://github.com"},
+		{name: "selected grant", account: `{"login":"acme","type":"Organization"}`, selection: domain.RepositorySelectionSelected, wantHost: "https://github.com"},
+		{name: "GHES org", base: "https://git.example.com/github/", account: `{"login":"acme","type":"Organization"}`, wantHost: "https://git.example.com/github"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runmode.SetForTest(t, runmode.ModeLocal)
+			s := newTestServer(t)
+			seedWebhookApp(t, s)
+			if tc.base != "" {
+				setOrgGitHubBase(t, s, tc.base)
+			}
 
-	body := []byte(`{"action":"created","installation":{"id":4242,"account":{"login":"acme","type":"Organization"},"created_at":"2026-01-01T00:00:00Z"}}`)
-	rec := postWebhook(s, "installation", sign(body), body)
+			inst := `"id":4242,"account":` + tc.account + `,"created_at":"2026-01-01T00:00:00Z"`
+			if tc.selection != "" {
+				inst += `,"repository_selection":"` + tc.selection + `"`
+			}
+			body := []byte(`{"action":"created","installation":{` + inst + `}}`)
+			if rec := postWebhook(s, "installation", sign(body), body); rec.Code != http.StatusNoContent {
+				t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+			}
 
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
-	}
-	got := installations(t, s)
-	if len(got) != 1 || got[0].InstallationID != "4242" || got[0].AccountLogin != "acme" {
-		t.Fatalf("installations = %+v, want one acme/4242 row", got)
+			got := onlyInstallation(t, s)
+			if got.InstallationID != "4242" || got.AccountLogin != "acme" || got.AccountID != tc.wantAccountID {
+				t.Errorf("installation = %+v, want acme/4242 with account id %q", got, tc.wantAccountID)
+			}
+			if got.RepositorySelection != tc.selection {
+				t.Errorf("RepositorySelection = %q, want %q", got.RepositorySelection, tc.selection)
+			}
+			if tc.selection == domain.RepositorySelectionSelected && got.GrantsEveryRepository() {
+				t.Error("GrantsEveryRepository() = true for a selective grant")
+			}
+			if got.GitHubHost != tc.wantHost {
+				t.Errorf("GitHubHost = %q, want %q", got.GitHubHost, tc.wantHost)
+			}
+		})
 	}
 }
 
-func TestGitHubWebhook_BadSignature_NoWrite(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	s := newTestServer(t)
-	seedWebhookApp(t, s)
-
+// TestGitHubWebhook_UnverifiedDeliveryIs401 pins the per-org receiver's refusal:
+// a delivery it cannot verify against the org's own App secret is a bare 401
+// that writes nothing.
+func TestGitHubWebhook_UnverifiedDeliveryIs401(t *testing.T) {
 	body := []byte(`{"action":"created","installation":{"id":4242,"account":{"login":"acme","type":"Organization"}}}`)
-	rec := postWebhook(s, "installation", "sha256=deadbeef", body)
+	for _, tc := range []struct {
+		name    string
+		seedApp bool                         // register the org's own App and its secret
+		class   domain.GitHubCredentialClass // then move the org to this class; "" leaves it
+		sig     string
+	}{
+		{"bad signature", true, "", "sha256=deadbeef"},
+		{"missing signature", true, "", ""},
+		// A PAT org has no App deliveries to verify, whatever rows exist.
+		{"PAT org with an App row", true, domain.GitHubCredentialClassPAT, sign(body)},
+		// The deployment App signs every tenant's deliveries with one secret; if
+		// this route verified against it, any org id in the path would pass.
+		{"managed org, deployment-signed", false, domain.GitHubCredentialClassManagedApp, signWith("whsec_the_deployment_app", body)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runmode.SetForTest(t, runmode.ModeLocal)
+			keyring.MockInit()
+			s := newTestServer(t)
+			if tc.seedApp {
+				seedWebhookApp(t, s)
+			}
+			if tc.class != "" {
+				if _, err := s.orgs.SetGitHubCredentialClass(context.Background(), runmode.LocalDefaultOrgID, tc.class); err != nil {
+					t.Fatalf("set credential class: %v", err)
+				}
+			}
 
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", rec.Code)
-	}
-	if rec.Body.Len() != 0 {
-		t.Errorf("401 response has body %q, want empty", rec.Body.String())
-	}
-	if got := installations(t, s); len(got) != 0 {
-		t.Errorf("bad-signature delivery wrote %d installations, want 0", len(got))
-	}
-}
-
-func TestGitHubWebhook_MissingSignature(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	s := newTestServer(t)
-	seedWebhookApp(t, s)
-
-	body := []byte(`{"action":"created","installation":{"id":1,"account":{"login":"x","type":"User"}}}`)
-	rec := postWebhook(s, "installation", "", body)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", rec.Code)
+			rec := postWebhook(s, "installation", tc.sig, body)
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401; body=%s", rec.Code, rec.Body.String())
+			}
+			if rec.Body.Len() != 0 {
+				t.Errorf("401 response has body %q, want empty", rec.Body.String())
+			}
+			if got := installations(t, s); len(got) != 0 {
+				t.Errorf("a refused delivery wrote %d installations, want 0", len(got))
+			}
+		})
 	}
 }
 
@@ -189,48 +233,9 @@ func TestGitHubWebhook_InstallationDeleted_FiresHook(t *testing.T) {
 	}
 }
 
-func TestGitHubWebhook_NonInstallationEvent_PublishesToBus(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	s := newTestServer(t)
-	seedWebhookApp(t, s)
-
-	bus := eventbus.New()
-	s.SetEventBus(bus)
-
-	got := make(chan domain.Event, 1)
-	bus.Subscribe(eventbus.Subscriber{
-		Name:   "test-webhook-capture",
-		Filter: []string{"webhook:github:"},
-		Handle: func(e domain.Event) { got <- e },
-	})
-
-	body := []byte(`{"action":"synchronize","number":7}`)
-	rec := postWebhook(s, "pull_request", sign(body), body)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want 204", rec.Code)
-	}
-
-	select {
-	case e := <-got:
-		if e.EventType != "webhook:github:pull_request" {
-			t.Errorf("published event type = %q, want webhook:github:pull_request", e.EventType)
-		}
-		if e.OrgID != runmode.LocalDefaultOrgID {
-			t.Errorf("published event org = %q, want %q", e.OrgID, runmode.LocalDefaultOrgID)
-		}
-	case <-t.Context().Done():
-		t.Fatal("timed out waiting for published webhook event")
-	}
-}
-
-// TestGitHubWebhook_NoApp_IndistinguishableFromBadSignature closes the
-// org-existence oracle. The receiver is pre-auth, so anything its reply reveals
-// is revealed to anyone: a 404 for "this org has no App" against a 401 for
-// "your signature is wrong" lets an unauthenticated caller walk a list of org
-// ids and learn which orgs have a GitHub App registered. Both refusals
-// have to be the same answer, byte for byte — status, body, and the headers
-// that would otherwise differ (a 404 carries a Content-Type the bare 401 does
-// not).
+// TestGitHubWebhook_NoApp_IndistinguishableFromBadSignature: the receiver is
+// pre-auth, so an org with no App must get the bad signature's answer byte for
+// byte (status, body, headers), or callers could probe which orgs have an App.
 func TestGitHubWebhook_NoApp_IndistinguishableFromBadSignature(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 
@@ -263,30 +268,6 @@ func TestGitHubWebhook_NoApp_IndistinguishableFromBadSignature(t *testing.T) {
 	}
 }
 
-// TestGitHubWebhook_PATOrg_IndistinguishableFromBadSignature is the same
-// invariant for the org that HAS a registered App row but is not in the App
-// credential system. It gets the same 401 — the receiver's reply never
-// distinguishes which credential system an org is in either.
-func TestGitHubWebhook_PATOrg_IndistinguishableFromBadSignature(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	s := newTestServer(t)
-	seedWebhookApp(t, s)
-	// Flip the class out from under the registration: a PAT org has no App and
-	// so no deliveries to verify, whatever rows exist.
-	if _, err := s.orgs.SetGitHubCredentialClass(context.Background(), runmode.LocalDefaultOrgID, domain.GitHubCredentialClassPAT); err != nil {
-		t.Fatalf("set credential class: %v", err)
-	}
-
-	body := []byte(`{"action":"created","installation":{"id":1,"account":{"login":"x","type":"User"}}}`)
-	rec := postWebhook(s, "installation", sign(body), body)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401 (indistinguishable from a bad signature)", rec.Code)
-	}
-	if rec.Body.Len() != 0 {
-		t.Errorf("401 response has body %q, want empty", rec.Body.String())
-	}
-}
-
 // onlyInstallation returns the org's single live installation, failing on any
 // other count.
 func onlyInstallation(t *testing.T, s *Server) domain.OrgGitHubAppInstallation {
@@ -298,45 +279,9 @@ func onlyInstallation(t *testing.T, s *Server) domain.OrgGitHubAppInstallation {
 	return got[0]
 }
 
-// TestGitHubWebhook_InstallationSuspend records the suspension on the mirrored
-// row without removing it. The negative half matters as much as the positive:
-// a suspension is not an uninstall, so the row stays live and the account
-// fields are untouched — what changed is that GitHub will now refuse every
-// token minted from this installation.
-func TestGitHubWebhook_InstallationSuspend(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	s := newTestServer(t)
-	seedWebhookApp(t, s)
-	seedInstallation(t, s, 4242, "acme")
-
-	body := []byte(`{"action":"suspend","installation":{"id":4242,"account":{"login":"acme","type":"Organization"},` +
-		`"suspended_at":"2026-08-15T12:00:00Z","suspended_by":{"login":"octocat"}}}`)
-	rec := postWebhook(s, "installation", sign(body), body)
-
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
-	}
-	got := onlyInstallation(t, s)
-	if !got.Suspended() {
-		t.Error("Suspended() = false after a suspend delivery; want true")
-	}
-	if want := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC); !got.SuspendedAt.Equal(want) {
-		t.Errorf("SuspendedAt = %s, want the payload's %s", got.SuspendedAt, want)
-	}
-	if got.SuspendedBy != "octocat" {
-		t.Errorf("SuspendedBy = %q, want %q", got.SuspendedBy, "octocat")
-	}
-	if got.AccountLogin != "acme" {
-		t.Errorf("AccountLogin = %q, want the untouched %q", got.AccountLogin, "acme")
-	}
-}
-
-// TestGitHubWebhook_InstallationSuspend_InvalidatesCachedToken is the invariant
-// the ticket exists for: an installation token minted before the suspension is
-// dead the moment it lands, and the cache would otherwise keep serving it for
-// up to an hour — presenting a suspension as generic 403s on a row that still
-// reads as connected. Asserted through the real wiring (New's hook over the
-// resolver's own cache), not a stand-in.
+// TestGitHubWebhook_InstallationSuspend_InvalidatesCachedToken: a token minted
+// before a suspension is dead once it lands, so the suspend drops it from the
+// real resolver cache (on every host) instead of serving it for up to an hour.
 func TestGitHubWebhook_InstallationSuspend_InvalidatesCachedToken(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -381,9 +326,7 @@ func TestGitHubWebhook_InstallationSuspend_InvalidatesCachedToken(t *testing.T) 
 }
 
 // TestGitHubWebhook_InstallationSuspend_NoSuspendedAt falls back to the receipt
-// time. A delivery that names no timestamp still describes an installation
-// that is suspended right now, and a zero timestamp IS "not suspended" in the
-// mirror — so recording nothing would silently drop the state.
+// time, since a zero timestamp reads as "not suspended" in the mirror.
 func TestGitHubWebhook_InstallationSuspend_NoSuspendedAt(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -399,8 +342,9 @@ func TestGitHubWebhook_InstallationSuspend_NoSuspendedAt(t *testing.T) {
 	}
 }
 
-// TestGitHubWebhook_InstallationUnsuspend restores exactly the prior state:
-// both columns cleared, nothing else on the row disturbed.
+// TestGitHubWebhook_InstallationUnsuspend: a suspend records the payload's
+// time and actor on the live row, and an unsuspend clears both, each leaving
+// the rest of the row untouched.
 func TestGitHubWebhook_InstallationUnsuspend(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -411,6 +355,13 @@ func TestGitHubWebhook_InstallationUnsuspend(t *testing.T) {
 		`"suspended_at":"2026-08-15T12:00:00Z","suspended_by":{"login":"octocat"}}}`)
 	if rec := postWebhook(s, "installation", sign(suspend), suspend); rec.Code != http.StatusNoContent {
 		t.Fatalf("suspend status = %d, want 204", rec.Code)
+	}
+	suspended := onlyInstallation(t, s)
+	if want := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC); !suspended.Suspended() || !suspended.SuspendedAt.Equal(want) {
+		t.Errorf("SuspendedAt = %s after a suspend, want the payload's %s", suspended.SuspendedAt, want)
+	}
+	if suspended.SuspendedBy != "octocat" || suspended.AccountLogin != "acme" {
+		t.Errorf("after a suspend SuspendedBy=%q AccountLogin=%q, want octocat and the untouched acme", suspended.SuspendedBy, suspended.AccountLogin)
 	}
 
 	unsuspend := []byte(`{"action":"unsuspend","installation":{"id":4242,"account":{"login":"acme","type":"Organization"}}}`)
@@ -430,11 +381,9 @@ func TestGitHubWebhook_InstallationUnsuspend(t *testing.T) {
 	}
 }
 
-// TestGitHubWebhook_ReinstallAfterSuspendedDelete is the lifecycle arrow with
-// the sharp edge: an installation is suspended, then deleted, then the account
-// re-installs the App. The revived row must not inherit the suspension of the
-// installation it replaced — otherwise a user who re-installed to fix things
-// gets an org that reads as suspended and no gesture that clears it.
+// TestGitHubWebhook_ReinstallAfterSuspendedDelete: suspended, deleted, then
+// re-installed, the revived row must not inherit the old suspension, which no
+// later gesture would clear.
 func TestGitHubWebhook_ReinstallAfterSuspendedDelete(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -469,14 +418,9 @@ func TestGitHubWebhook_ReinstallAfterSuspendedDelete(t *testing.T) {
 	}
 }
 
-// TestGitHubWebhook_RedeliveredInstallation_AppliesOnce is the defect the
-// dedup table exists for. GitHub never auto-retries, but an operator
-// redelivers — and a replayed installation.created used to re-run the upsert,
-// reviving a row a later delete had removed.
-//
-// A byte-identical replay of an idempotent write is invisible on its own, so
-// the sequence puts a state change between the two copies: created, deleted,
-// then the created delivery again. If the replay applied, the row comes back.
+// TestGitHubWebhook_RedeliveredInstallation_AppliesOnce: an operator's
+// redelivery of an applied installation.created must not re-run the upsert.
+// A delete between the two copies makes a replay that applied visible.
 func TestGitHubWebhook_RedeliveredInstallation_AppliesOnce(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -511,39 +455,9 @@ func TestGitHubWebhook_RedeliveredInstallation_AppliesOnce(t *testing.T) {
 	}
 }
 
-// TestGitHubWebhook_DistinctDeliveriesSameInstallation_BothApply is the
-// negative space, and the half a reader is most likely to get wrong: dedup is
-// per delivery, never per subject. One installation produces many deliveries
-// over its life, and every one of them has to take effect — a receiver that
-// deduped on the installation id would apply the first and silently discard
-// the rest, leaving the mirror permanently stale.
-func TestGitHubWebhook_DistinctDeliveriesSameInstallation_BothApply(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	s := newTestServer(t)
-	seedWebhookApp(t, s)
-
-	first := []byte(`{"action":"created","installation":{"id":4242,"account":{"id":1234,"login":"acme","type":"Organization"},"created_at":"2026-01-01T00:00:00Z"}}`)
-	// The same installation, seen again under the account's new handle — two
-	// deliveries, two upserts, one row.
-	second := []byte(`{"action":"created","installation":{"id":4242,"account":{"id":1234,"login":"acme-renamed","type":"Organization"},"created_at":"2026-01-01T00:00:00Z"}}`)
-
-	for _, body := range [][]byte{first, second} {
-		if rec := postWebhook(s, "installation", sign(body), body); rec.Code != http.StatusNoContent {
-			t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
-		}
-	}
-
-	got := onlyInstallation(t, s)
-	if got.AccountLogin != "acme-renamed" {
-		t.Errorf("AccountLogin = %q, want %q — the second delivery never reached the mirror", got.AccountLogin, "acme-renamed")
-	}
-}
-
-// TestGitHubWebhook_RedeliveredEvent_PublishesOnce covers the other side
-// effect a duplicate must not have. Ordering carries the assertion: the bus
-// hands one subscriber its events in publish order, so a third, distinct
-// delivery arriving as the second event proves the replay in between published
-// nothing.
+// TestGitHubWebhook_RedeliveredEvent_PublishesOnce: a replayed delivery is not
+// published again. The bus delivers in publish order, so a distinct delivery
+// arriving second proves the replay before it published nothing.
 func TestGitHubWebhook_RedeliveredEvent_PublishesOnce(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -583,16 +497,18 @@ func TestGitHubWebhook_RedeliveredEvent_PublishesOnce(t *testing.T) {
 			if e.EventType != want {
 				t.Fatalf("published event type = %q, want %q — the redelivery published its own copy", e.EventType, want)
 			}
+			if e.OrgID != runmode.LocalDefaultOrgID {
+				t.Errorf("published event org = %q, want %q", e.OrgID, runmode.LocalDefaultOrgID)
+			}
 		case <-t.Context().Done():
 			t.Fatal("timed out waiting for published webhook event")
 		}
 	}
 }
 
-// TestGitHubWebhook_BadSignatureDoesNotClaimDeliveryID is why the gate sits
-// after signature verification rather than before it. If an unverified request
-// could record a delivery id, anyone who could reach the route would be able to
-// burn a GUID and have the genuine delivery dropped as a duplicate.
+// TestGitHubWebhook_BadSignatureDoesNotClaimDeliveryID: the dedup gate sits
+// after verification, so a forged request cannot burn a delivery id and have
+// the genuine delivery dropped as a duplicate.
 func TestGitHubWebhook_BadSignatureDoesNotClaimDeliveryID(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -612,12 +528,9 @@ func TestGitHubWebhook_BadSignatureDoesNotClaimDeliveryID(t *testing.T) {
 	}
 }
 
-// TestGitHubWebhook_MalformedPayload_StaysBadRequestOnRedelivery pins the
-// ordering between structural validation and the dedup gate. A delivery that
-// is bad on its face must answer 4xx every time it is sent — if recording it
-// came first, the operator's redelivery would be answered 204 as a
-// "duplicate", which is the receiver reporting success for a payload it never
-// applied and never could.
+// TestGitHubWebhook_MalformedPayload_StaysBadRequestOnRedelivery: structural
+// validation runs before the dedup gate, so a redelivered bad payload is 400
+// again rather than a 204 "duplicate" of something never applied.
 func TestGitHubWebhook_MalformedPayload_StaysBadRequestOnRedelivery(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -645,10 +558,8 @@ func TestGitHubWebhook_MalformedPayload_StaysBadRequestOnRedelivery(t *testing.T
 	}
 }
 
-// TestGitHubWebhook_MissingDeliveryID refuses a verified delivery that carries
-// no GUID. There is nothing to dedup it on, so applying it would quietly void
-// the exactly-once promise for that delivery; 4xx keeps it from looking
-// applied.
+// TestGitHubWebhook_MissingDeliveryID refuses a verified delivery with no GUID,
+// since there is nothing to dedup it on.
 func TestGitHubWebhook_MissingDeliveryID(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -708,44 +619,11 @@ func TestGitHubWebhook_InstallationlessDeliveryDedups(t *testing.T) {
 	}
 }
 
-// TestGitHubWebhook_InstallationCreated_CapturesAccountID pins that the
-// account's numeric id rides in from the delivery, since the webhook is one of
-// only two writers of it (the reconcile is the other) and is the one that sees
-// a brand-new installation first. The sibling test above covers the payload
-// that names no id: it stays NULL and the row resolves by login as before.
-func TestGitHubWebhook_InstallationCreated_CapturesAccountID(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	s := newTestServer(t)
-	seedWebhookApp(t, s)
-
-	body := []byte(`{"action":"created","installation":{"id":4242,"account":{"id":1234,"login":"acme","type":"Organization"},"created_at":"2026-01-01T00:00:00Z"}}`)
-	rec := postWebhook(s, "installation", sign(body), body)
-
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
-	}
-	got := installations(t, s)
-	if len(got) != 1 {
-		t.Fatalf("installations = %+v, want one row", got)
-	}
-	if got[0].AccountID != "1234" {
-		t.Errorf("AccountID = %q, want %q", got[0].AccountID, "1234")
-	}
-	if got[0].AccountLogin != "acme" {
-		t.Errorf("AccountLogin = %q, want %q", got[0].AccountLogin, "acme")
-	}
-}
-
 // --- rate limiting -------------------------------------------------------
 
-// retuneSignedWebhookLimiter re-tunes the server's live signed-webhook limiter
-// in place and freezes its clock, so a test can reach the burst boundary in a
-// few requests instead of a hundred.
-//
-// In place, not swapped: routes() passed the limiter POINTER to the wrapper
-// when the route was mounted, so assigning a new limiter to the field after New
-// would leave the mounted route consulting the old one and the test asserting
-// nothing.
+// retuneSignedWebhookLimiter re-tunes the live signed-webhook limiter and
+// freezes its clock. It edits the limiter in place because the mounted route
+// holds a pointer to it; a replacement assigned after New would go unread.
 func retuneSignedWebhookLimiter(t *testing.T, s *Server, rate, burst float64, clk *time.Time) {
 	t.Helper()
 	s.signedWebhookLimiter.rate = rate
@@ -753,11 +631,9 @@ func retuneSignedWebhookLimiter(t *testing.T, s *Server, rate, burst float64, cl
 	s.signedWebhookLimiter.now = func() time.Time { return *clk }
 }
 
-// TestGitHubWebhook_RateLimited is the ticket's headline: the receiver is
-// mounted THROUGH the signed-webhook limiter, so a flood against a valid org
-// URL is throttled. The positive half matters as much as the 429 — a delivery
-// inside the budget still lands, and the budget refills — because a limiter
-// that throttled real deliveries would take webhook ingest down with it.
+// TestGitHubWebhook_RateLimited: the receiver is mounted through the
+// signed-webhook limiter, so a flood is refused with 429 before the handler,
+// while deliveries inside the budget land and the budget refills.
 func TestGitHubWebhook_RateLimited(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	s := newTestServer(t)
@@ -809,12 +685,8 @@ func TestGitHubWebhook_RateLimited(t *testing.T) {
 	}
 }
 
-// TestGitHubWebhook_NotRateLimitedInLocalMode asserts the limiter is inert in
-// local mode, directly and on this route rather than by reading the wrapper. A
-// local install is N=1 — one user, one org, their own laptop — so there
-// is nothing to throttle and a cap could only cost them deliveries. Driven with
-// the PRODUCTION burst untouched: 3x more requests than the multi-mode budget
-// would allow, all of them served.
+// TestGitHubWebhook_NotRateLimitedInLocalMode: a local install has one org and
+// nothing to throttle, so three times the production burst is all served.
 func TestGitHubWebhook_NotRateLimitedInLocalMode(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -853,12 +725,9 @@ func (c *countingSecrets) count() int {
 	return c.n
 }
 
-// TestGitHubWebhook_SecretCached_UnderFloodOfForgedDeliveries is why the cache
-// is in this ticket rather than a later one. Every request to this pre-auth
-// route resolves the org's webhook secret BEFORE it can check a signature, so
-// without a cache a flood of garbage aimed at one org URL turns into a vault
-// read per request — the rate limiter caps the rate, and this caps the cost of
-// each one that gets through.
+// TestGitHubWebhook_SecretCached_UnderFloodOfForgedDeliveries: the pre-auth
+// route reads the org's secret before it can check a signature, so the secret
+// is cached and a flood of forgeries costs one vault read.
 func TestGitHubWebhook_SecretCached_UnderFloodOfForgedDeliveries(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -878,12 +747,9 @@ func TestGitHubWebhook_SecretCached_UnderFloodOfForgedDeliveries(t *testing.T) {
 	}
 }
 
-// TestGitHubWebhook_NoAppSecretCached_UnderFlood is the same property for the
-// org that has nothing to verify against. The negative is worth caching for
-// exactly the reason the positive is: an unauthenticated caller picks the org
-// id in the URL, so the cheapest flood to mount is one aimed at an org with no
-// App at all, and that must not cost a settings read plus a registration read
-// per request either.
+// TestGitHubWebhook_NoAppSecretCached_UnderFlood: "this org has no App" is
+// cached too, since the caller picks the org id and a flood at an org with no
+// App is the cheapest one to mount.
 func TestGitHubWebhook_NoAppSecretCached_UnderFlood(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -900,10 +766,8 @@ func TestGitHubWebhook_NoAppSecretCached_UnderFlood(t *testing.T) {
 	}
 }
 
-// TestGitHubWebhook_TeardownInvalidatesCachedSecret is one half of "the cache
-// never serves a stale secret past a rotation": the App is torn down through
-// the real discard route, and the secret that verified deliveries a moment ago
-// stops verifying them immediately — not at the end of the TTL.
+// TestGitHubWebhook_TeardownInvalidatesCachedSecret: once the App is discarded,
+// its secret stops verifying deliveries immediately, not at the end of the TTL.
 func TestGitHubWebhook_TeardownInvalidatesCachedSecret(t *testing.T) {
 	keyring.MockInit()
 	runmode.SetForTest(t, runmode.ModeLocal)
@@ -926,12 +790,9 @@ func TestGitHubWebhook_TeardownInvalidatesCachedSecret(t *testing.T) {
 	}
 }
 
-// TestGitHubWebhook_RegistrationInvalidatesCachedSecret is the other half, and
-// the one a cache-only-positives design would fail: a delivery that arrives
-// before the App is registered caches "this org verifies nothing", and GitHub
-// starts delivering the moment registration completes. Without invalidation on
-// the write path, every one of those first deliveries is rejected until the
-// entry expires.
+// TestGitHubWebhook_RegistrationInvalidatesCachedSecret: a delivery before
+// registration caches "no App", and registering must drop that entry so the
+// first deliveries after it verify.
 func TestGitHubWebhook_RegistrationInvalidatesCachedSecret(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()

@@ -231,7 +231,7 @@ func decodeLinearAccess(t *testing.T, rec *httptest.ResponseRecorder) linearAcce
 
 // TestLinearCredentialPut_Binds walks a bind end to end: what it stores, the
 // workspace it learns, the audit row, the re-due, and every read that reflects
-// it — the status route, the integrations status, and the org's sources.
+// it. A second bind replaces the key and re-learns the workspace.
 func TestLinearCredentialPut_Binds(t *testing.T) {
 	r := newLinearAccessRig(t)
 	// A stale install envelope with no marker naming it: the bind must not
@@ -283,27 +283,16 @@ func TestLinearCredentialPut_Binds(t *testing.T) {
 	if integ["linear"] != true || integ["linear_workspace_url_key"] != "acme" {
 		t.Errorf("integrations status linear = %v, url key = %v; want true, acme", integ["linear"], integ["linear_workspace_url_key"])
 	}
-}
 
-// TestLinearCredentialPut_Rotates: binding a second key replaces the first,
-// re-learns the workspace, and records a second row.
-func TestLinearCredentialPut_Rotates(t *testing.T) {
-	r := newLinearAccessRig(t)
-	r.bind(t, "lin_api_one")
 	r.fake.setWorkspace(linear.Organization{ID: "org-beta", Name: "Beta", URLKey: "beta"})
-	got := r.bind(t, "lin_api_two")
-
-	if got.WorkspaceURLKey != "beta" || got.WorkspaceName != "Beta" {
-		t.Errorf("rotation answered %+v, want the new workspace", got)
+	if got := r.bind(t, "lin_api_two"); got.WorkspaceURLKey != "beta" || got.WorkspaceName != "Beta" {
+		t.Errorf("second bind answered %+v, want the new workspace", got)
 	}
-	if v := r.secret(t, integrations.KeyLinearAPIKey); v != "lin_api_two" {
-		t.Errorf("stored key = %q, want the rotated key", v)
-	}
-	if set := r.orgSettings(t); set.LinearWorkspaceID != "org-beta" {
-		t.Errorf("workspace id = %q, want org-beta", set.LinearWorkspaceID)
+	if v, set := r.secret(t, integrations.KeyLinearAPIKey), r.orgSettings(t); v != "lin_api_two" || set.LinearWorkspaceID != "org-beta" {
+		t.Errorf("after the second bind key = %q, workspace = %q; want lin_api_two in org-beta", v, set.LinearWorkspaceID)
 	}
 	if rows := r.credentialRows(t); len(rows) != 2 {
-		t.Errorf("linear credential rows = %d, want 2", len(rows))
+		t.Errorf("linear credential rows = %d after two binds, want 2", len(rows))
 	}
 }
 
@@ -408,11 +397,15 @@ func TestLinearCredentialPut_RefusesOverInstalledApp(t *testing.T) {
 }
 
 // TestLinearCredentialDelete_Unbinds: the disconnect clears the credential,
-// its bound-as record and the workspace columns, audits once, and is a
-// no-audit 200 when there is nothing left to remove.
+// its bound-as record and the workspace columns, audits once, leaves a person's
+// own Linear credential alone, and is a no-audit 200 when nothing is left.
 func TestLinearCredentialDelete_Unbinds(t *testing.T) {
 	r := newLinearAccessRig(t)
 	r.bind(t, "lin_api_ada")
+	userKey := linear.UserTokenKey("org-acme")
+	if err := r.stores.Secrets.PutUser(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, userKey, `{"method":"api_key","token":"lin_api_mine"}`, ""); err != nil {
+		t.Fatalf("put user credential: %v", err)
+	}
 
 	rec := doJSON(t, r.s, http.MethodDelete, linearCredentialPath(), nil)
 	if rec.Code != http.StatusOK {
@@ -445,6 +438,9 @@ func TestLinearCredentialDelete_Unbinds(t *testing.T) {
 	if st := readOrgSources(t, r.s)[eventsource.KindLinear]; st != string(eventsource.StateUnconfigured) {
 		t.Errorf("linear source = %q after the unbind, want unconfigured", st)
 	}
+	if v, err := r.stores.Secrets.GetUser(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, userKey); err != nil || v == "" {
+		t.Errorf("user credential = %q (err %v) after the org unbind, want it kept", v, err)
+	}
 
 	again := doJSON(t, r.s, http.MethodDelete, linearCredentialPath(), nil)
 	if again.Code != http.StatusOK {
@@ -453,27 +449,6 @@ func TestLinearCredentialDelete_Unbinds(t *testing.T) {
 	r.expectNoKick(t)
 	if rows := r.credentialRows(t); len(rows) != 2 {
 		t.Errorf("linear credential rows = %d after an idempotent unbind, want still 2", len(rows))
-	}
-}
-
-// TestLinearCredentialDelete_LeavesUserCredentials: a person's own Linear
-// credential is theirs and is cleared only by its own surface.
-func TestLinearCredentialDelete_LeavesUserCredentials(t *testing.T) {
-	r := newLinearAccessRig(t)
-	r.bind(t, "lin_api_ada")
-	ctx := t.Context()
-	userKey := linear.UserTokenKey("org-acme")
-	if err := r.stores.Secrets.PutUser(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, userKey, `{"method":"api_key","token":"lin_api_mine"}`, ""); err != nil {
-		t.Fatalf("put user credential: %v", err)
-	}
-
-	if rec := doJSON(t, r.s, http.MethodDelete, linearCredentialPath(), nil); rec.Code != http.StatusOK {
-		t.Fatalf("DELETE: %d: %s", rec.Code, rec.Body.String())
-	}
-	r.expectKick(t)
-	v, err := r.stores.Secrets.GetUser(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, userKey)
-	if err != nil || v == "" {
-		t.Errorf("user credential = %q (err %v) after the org unbind, want it kept", v, err)
 	}
 }
 
@@ -536,10 +511,9 @@ func TestLinearCredential_FailedWriteRestoresKeys(t *testing.T) {
 	}
 }
 
-// TestLinearCredential_LeavesSettingsVersion: the workspace columns are the
-// credential's, not the settings page's, so a bind or unbind leaves the
-// settings version alone. A settings save loaded before the bind still lands,
-// and it cannot put the old workspace back.
+// TestLinearCredential_LeavesSettingsVersion: the workspace columns belong to
+// the credential, so a bind or unbind leaves the settings version alone, and a
+// settings save loaded before the bind lands without reverting the workspace.
 func TestLinearCredential_LeavesSettingsVersion(t *testing.T) {
 	r := newLinearAccessRig(t)
 	loaded := orgSettingsVersion(t, r.s)
@@ -593,10 +567,9 @@ func TestLinearCredential_UnreadableSnapshotRefuses(t *testing.T) {
 	}
 }
 
-// TestLinearCredential_MultiMode_AdminGate pins the routes' authorization
-// against the Postgres auth rig: the two credential writes are org-admin only
-// (403 to a member, 404 to a non-member), and the status read answers any
-// member.
+// TestLinearCredential_MultiMode_AdminGate: on Postgres the two credential
+// writes are org-admin only (403 to a member, 404 to a non-member), and the
+// status read answers any member.
 func TestLinearCredential_MultiMode_AdminGate(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	rig := newAuthRig(t)
@@ -653,10 +626,9 @@ func TestLinearCredential_MultiMode_AdminGate(t *testing.T) {
 	}
 }
 
-// TestLinearSource_PauseAndCreateGate pins what the source flip buys for free
-// once Linear can be configured: the off switch applies to it and clears its
-// tracker snapshots, and a linear:* handler is authorable only while the
-// source is available.
+// TestLinearSource_PauseAndCreateGate: the off switch applies to Linear and
+// clears its tracker snapshots, and a linear:* handler can be created only
+// while the source is available.
 func TestLinearSource_PauseAndCreateGate(t *testing.T) {
 	r := newLinearAccessRig(t)
 	createRule := func() int {

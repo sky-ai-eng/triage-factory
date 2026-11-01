@@ -18,12 +18,9 @@ import (
 	"github.com/zalando/go-keyring"
 )
 
-// TestResolveJiraHost pins the host canonicalization the per-user credential is
-// keyed under: a trailing slash and surrounding whitespace are trimmed so the
-// status reader and PAT writer compose the same "jira_token/<host>" key; an
-// empty config (Jira not configured) and a malformed/non-http base are
-// rejected (no host to key a lookup off). Unlike GitHub there's no default
-// host — empty is genuinely "not configured."
+// TestResolveJiraHost pins the canonical host the per-user credential is keyed
+// under, so the status reader and the PAT writer compose the same key. An empty
+// or non-http base has no host, and there is no default.
 func TestResolveJiraHost(t *testing.T) {
 	cases := []struct {
 		in     string
@@ -116,10 +113,9 @@ func seedLocalOrgJiraAuthMethod(t *testing.T, s *Server, method string) {
 	}
 }
 
-// TestJiraIdentityPAT_Cloud_StoresEnvelopeAndBindsIdentity drives the Cloud
-// capture path: an org marked cloud_api_token binds the user's email + API token
-// (validated via Basic / REST v3 /myself), stores a cloud_api_token envelope,
-// and derives the identity from /myself.
+// TestJiraIdentityPAT_Cloud_StoresEnvelopeAndBindsIdentity: on a cloud_api_token
+// org the email and API token are validated with Basic auth against REST v3
+// /myself, stored as a cloud_api_token envelope, and bind the identity it names.
 func TestJiraIdentityPAT_Cloud_StoresEnvelopeAndBindsIdentity(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -150,7 +146,6 @@ func TestJiraIdentityPAT_Cloud_StoresEnvelopeAndBindsIdentity(t *testing.T) {
 		t.Errorf("myself Authorization = %q, want %q (Basic email:token)", gotAuth, wantAuth)
 	}
 
-	// The stored secret is a cloud_api_token envelope carrying the email + token.
 	stored, err := s.secrets.GetUserSystem(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "jira_token/"+jiraStub.URL)
 	if err != nil {
 		t.Fatalf("GetUserSystem: %v", err)
@@ -163,7 +158,6 @@ func TestJiraIdentityPAT_Cloud_StoresEnvelopeAndBindsIdentity(t *testing.T) {
 		t.Errorf("stored credential = %+v, want a cloud_api_token envelope", cred)
 	}
 
-	// Identity is derived from /myself, keyed on the org host.
 	accountID, displayName, err := s.users.GetJiraIdentity(ctx, runmode.LocalDefaultUserID, jiraStub.URL)
 	if err != nil {
 		t.Fatalf("GetJiraIdentity: %v", err)
@@ -199,59 +193,16 @@ func TestJiraIdentityPAT_Cloud_MissingHalf_Returns400(t *testing.T) {
 	}
 }
 
-// TestJiraIdentityStatus_Cloud_Connected pins the positive Cloud status read:
-// after a Cloud user binds their email + API token, the status endpoint reports
-// connected=true with deployment="cloud" and the bound account — the Cloud
-// mirror of the DC happy path in TestJiraIdentityStatus.
-func TestJiraIdentityStatus_Cloud_Connected(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
-
-	jiraStub := jiraCloudMyselfStub(t, `{"accountId":"acc-cloud","displayName":"Cloud User"}`, nil)
-	seedLocalOrgJiraHost(t, s, jiraStub.URL)
-	seedLocalOrgJiraAuthMethod(t, s, "cloud_api_token")
-
-	rec := doJSON(t, s, "POST",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity/pat",
-		map[string]any{"email": "me@acme.com", "token": "cloud-tok"})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("capture status=%d body=%s, want 200", rec.Code, rec.Body.String())
-	}
-
-	statusRec := doJSON(t, s, "GET", "/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity", nil)
-	if statusRec.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s, want 200", statusRec.Code, statusRec.Body.String())
-	}
-	var out jiraIdentityStatusResponse
-	if err := json.Unmarshal(statusRec.Body.Bytes(), &out); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if !out.Connected {
-		t.Errorf("connected=false after a Cloud bind: %+v", out)
-	}
-	if out.Deployment != "cloud" {
-		t.Errorf("deployment = %q, want cloud", out.Deployment)
-	}
-	if out.Account != "Cloud User" {
-		t.Errorf("account = %q, want Cloud User", out.Account)
-	}
-}
-
-// TestJiraIdentityPAT_StoresCredentialAndBindsIdentity drives the capture path
-// against a stubbed DC host: the supplied PAT validates (GET /rest/api/2/myself
-// with Bearer auth), the credential is STORED under "jira_token/<host>" (the
-// Jira difference — GitHub discards), and the user's Jira identity is derived
-// from the /myself response. The stored credential round-trips via
-// GetUserSystem.
+// TestJiraIdentityPAT_StoresCredentialAndBindsIdentity: a Data Center PAT is
+// validated with Bearer auth against REST v2 /myself, stored as a dc_pat envelope,
+// and binds the identity it names (accountId over key); the status reads connected.
 func TestJiraIdentityPAT_StoresCredentialAndBindsIdentity(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit() // in-memory keychain — the sandbox has no dbus backend
+	keyring.MockInit()
 	s := newTestServer(t)
 	ctx := context.Background()
 
 	var gotAuth string
-	// Cloud-shaped: accountId present, so StableID() prefers it over key.
 	jiraStub := jiraMyselfStub(t, `{"key":"jdoe","accountId":"acc-123","displayName":"Jane Doe"}`, &gotAuth)
 	seedLocalOrgJiraHost(t, s, jiraStub.URL)
 
@@ -276,10 +227,6 @@ func TestJiraIdentityPAT_StoresCredentialAndBindsIdentity(t *testing.T) {
 		t.Errorf("myself Authorization = %q, want the supplied PAT (Bearer)", gotAuth)
 	}
 
-	// The credential is STORED — round-trips via GetUserSystem under the
-	// host-scoped key. This is the structural difference from GitHub (PAT_2),
-	// which retains no credential. It is now a UserCredential envelope (a dc_pat
-	// for a Data Center host), not the bare token the original DC bind wrote.
 	stored, err := s.secrets.GetUserSystem(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "jira_token/"+jiraStub.URL)
 	if err != nil {
 		t.Fatalf("GetUserSystem: %v", err)
@@ -292,8 +239,6 @@ func TestJiraIdentityPAT_StoresCredentialAndBindsIdentity(t *testing.T) {
 		t.Errorf("stored credential = %+v, want dc_pat envelope with the supplied PAT", cred)
 	}
 
-	// Identity is derived from the validated /myself response (accountId wins),
-	// keyed on the org's Jira host.
 	accountID, displayName, err := s.users.GetJiraIdentity(ctx, runmode.LocalDefaultUserID, jiraStub.URL)
 	if err != nil {
 		t.Fatalf("GetJiraIdentity: %v", err)
@@ -301,77 +246,24 @@ func TestJiraIdentityPAT_StoresCredentialAndBindsIdentity(t *testing.T) {
 	if accountID != "acc-123" || displayName != "Jane Doe" {
 		t.Errorf("identity = (%q, %q), want (acc-123, Jane Doe)", accountID, displayName)
 	}
-}
 
-// TestJiraIdentityStatus exercises the gate's status read: a fresh user reports
-// connected=false; after a credential is stored, connected=true with the
-// account + host. connect_available is false because this test's org has no
-// Atlassian OAuth app configured.
-func TestJiraIdentityStatus(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
-
-	jiraStub := jiraMyselfStub(t, `{"accountId":"acc-9","displayName":"Octo Jira"}`, nil)
-	seedLocalOrgJiraHost(t, s, jiraStub.URL)
-
-	get := func() jiraIdentityStatusResponse {
-		rec := doJSON(t, s, "GET", "/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity", nil)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status endpoint=%d body=%s", rec.Code, rec.Body.String())
-		}
-		var out jiraIdentityStatusResponse
-		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-			t.Fatalf("decode: %v", err)
-		}
-		return out
-	}
-
-	if out := get(); out.Connected {
-		t.Errorf("fresh user reported connected=true: %+v", out)
-	}
-
-	// Bind via the PAT endpoint; the status must then resume connected.
-	rec := doJSON(t, s, "POST",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity/pat",
-		map[string]any{"pat": "tok"})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("capture status=%d body=%s, want 200", rec.Code, rec.Body.String())
-	}
-
-	out := get()
-	if !out.Connected {
-		t.Errorf("after capture, connected=false: %+v", out)
-	}
-	if out.Account != "Octo Jira" {
-		t.Errorf("account = %q, want Octo Jira", out.Account)
-	}
-	if out.Host != jiraStub.URL {
-		t.Errorf("host = %q, want %q", out.Host, jiraStub.URL)
-	}
-	// No auth-method marker seeded + a non-*.atlassian.net host → deployment
-	// resolves Data Center, so the paste surfaces render the PAT field.
-	if out.Deployment != "data_center" {
-		t.Errorf("deployment = %q, want data_center", out.Deployment)
-	}
-	if out.ConnectAvailable {
-		t.Errorf("connect_available=true, want false (no Atlassian OAuth app configured for this org): %+v", out)
+	// No auth-method marker and a non-*.atlassian.net host resolve Data
+	// Center, and the org has no Atlassian OAuth app to offer Connect through.
+	st := jiraIdentityStatus(t, s)
+	if !st.Connected || st.Account != "Jane Doe" || st.Host != jiraStub.URL || st.Deployment != "data_center" || st.ConnectAvailable {
+		t.Errorf("status after the bind = %+v, want connected as Jane Doe on the Data Center host with no Connect", st)
 	}
 }
 
-// TestJiraIdentityStatus_StaleCrossSchemeCredential_NotConnected pins the
-// status reader's deployment-match guard: a user with a stored Data Center PAT
-// whose org later flips to Cloud (a DC→Cloud cutover) reports connected=false —
-// the stale cred isn't usable for the resolved Cloud deployment, so the paste UI
-// re-renders for a re-bind rather than reporting connected and failing every
-// write. Also pins that the status deployment follows the marker (cloud).
+// TestJiraIdentityStatus_StaleCrossSchemeCredential_NotConnected: a stored Data
+// Center PAT on an org that has since moved to Cloud reports not connected, so
+// the paste UI asks for a re-bind, and the deployment follows the marker.
 func TestJiraIdentityStatus_StaleCrossSchemeCredential_NotConnected(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
 
-	// Bind a DC PAT first (no marker yet → host-shape DC), storing a dc_pat
-	// envelope under the host-scoped key.
+	// No marker yet, so the host shape resolves Data Center.
 	jiraStub := jiraMyselfStub(t, `{"accountId":"acc-9","displayName":"Octo Jira"}`, nil)
 	seedLocalOrgJiraHost(t, s, jiraStub.URL)
 	rec := doJSON(t, s, "POST",
@@ -381,17 +273,9 @@ func TestJiraIdentityStatus_StaleCrossSchemeCredential_NotConnected(t *testing.T
 		t.Fatalf("capture status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
 
-	// Org cuts over to Cloud — the marker is now authoritative.
 	seedLocalOrgJiraAuthMethod(t, s, "cloud_api_token")
 
-	statusRec := doJSON(t, s, "GET", "/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity", nil)
-	if statusRec.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s, want 200", statusRec.Code, statusRec.Body.String())
-	}
-	var out jiraIdentityStatusResponse
-	if err := json.Unmarshal(statusRec.Body.Bytes(), &out); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	out := jiraIdentityStatus(t, s)
 	if out.Deployment != "cloud" {
 		t.Errorf("deployment = %q, want cloud (marker authoritative)", out.Deployment)
 	}
@@ -403,13 +287,9 @@ func TestJiraIdentityStatus_StaleCrossSchemeCredential_NotConnected(t *testing.T
 	}
 }
 
-// TestJiraIdentityStatus_ConfiguredHostNoCredential scopes the status reader's
-// "Jira host configured, but this user hasn't bound a credential yet" branch —
-// the common initial state for every new member. It deliberately seeds a STATIC
-// host (no live stub): the status reader never round-trips to Jira (it resolves
-// the URL and reads the secret store), so connected=false must report against a
-// configured host without any server alive. account stays empty (the 0575c1a
-// early-return skips the identity read when not connected).
+// TestJiraIdentityStatus_ConfiguredHostNoCredential: with a host configured and
+// no credential bound, the status reports not connected under that host, with
+// no account and no reason. The host is never contacted.
 func TestJiraIdentityStatus_ConfiguredHostNoCredential(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -418,20 +298,10 @@ func TestJiraIdentityStatus_ConfiguredHostNoCredential(t *testing.T) {
 	const host = "https://jira.corp.example.com"
 	seedLocalOrgJiraHost(t, s, host)
 
-	rec := doJSON(t, s, "GET", "/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status endpoint=%d body=%s", rec.Code, rec.Body.String())
-	}
-	var out jiraIdentityStatusResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-
+	out := jiraIdentityStatus(t, s)
 	if out.Connected {
 		t.Errorf("connected=true with no stored credential: %+v", out)
 	}
-	// The resolved host is still reported (the FE needs it for the bind copy),
-	// even though the user isn't connected.
 	if out.Host != host {
 		t.Errorf("host = %q, want the configured host %q", out.Host, host)
 	}
@@ -447,26 +317,15 @@ func TestJiraIdentityStatus_ConfiguredHostNoCredential(t *testing.T) {
 	}
 }
 
-// TestJiraIdentityStatus_NoJiraConfigured_EmptyHost pins the contract the
-// RequireJiraIdentity gate keys "GitHub-only org → no Jira gate" off: with no
-// jira_base_url configured, the status read reports host="" (and connected=false)
-// on a 200 — NOT an error. The gate derives "is Jira configured" from this same
-// fetch (host==""), so a real read failure stays distinguishable from a
-// GitHub-only org and the gate can fail closed on the former.
+// TestJiraIdentityStatus_NoJiraConfigured_EmptyHost: with no jira_base_url the
+// status is a 200 with host "" and not connected, not an error, so the
+// RequireJiraIdentity gate can tell a GitHub-only org from a failed read.
 func TestJiraIdentityStatus_NoJiraConfigured_EmptyHost(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
-	// Deliberately do NOT seed a Jira host — a GitHub-only org.
 
-	rec := doJSON(t, s, "GET", "/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status endpoint=%d body=%s", rec.Code, rec.Body.String())
-	}
-	var out jiraIdentityStatusResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	out := jiraIdentityStatus(t, s)
 	if out.Host != "" {
 		t.Errorf("host = %q, want empty for a GitHub-only org (no jira_base_url)", out.Host)
 	}
@@ -475,66 +334,52 @@ func TestJiraIdentityStatus_NoJiraConfigured_EmptyHost(t *testing.T) {
 	}
 }
 
-// TestJiraIdentityPAT_BadToken_Returns422 pins the "your action" failure shape:
-// a token the host rejects is a 422 (not the infra 502), and no credential is
-// stored.
-func TestJiraIdentityPAT_BadToken_Returns422(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
-	ctx := context.Background()
+// TestJiraIdentityPAT_RefusalsStoreNothing: a token the host rejects, or one
+// that authenticates but names no account, is the caller's to fix (422); a
+// host TF cannot reach is not (502). None of them stores a credential.
+func TestJiraIdentityPAT_RefusalsStoreNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		host func(t *testing.T) string
+		want int
+	}{
+		{"bad token", func(t *testing.T) string {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, `{"message":"Unauthorized"}`, http.StatusUnauthorized)
+			}))
+			t.Cleanup(srv.Close)
+			return srv.URL
+		}, http.StatusUnprocessableEntity},
+		{"no account", func(t *testing.T) string { return jiraMyselfStub(t, `{}`, nil).URL }, http.StatusUnprocessableEntity},
+		{"host unreachable", func(t *testing.T) string {
+			// A closed stub's port refuses every dial.
+			dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+			dead.Close()
+			return dead.URL
+		}, http.StatusBadGateway},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runmode.SetForTest(t, runmode.ModeLocal)
+			keyring.MockInit()
+			s := newTestServer(t)
+			host := tc.host(t)
+			seedLocalOrgJiraHost(t, s, host)
 
-	jiraStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, `{"message":"Unauthorized"}`, http.StatusUnauthorized)
-	}))
-	t.Cleanup(jiraStub.Close)
-	seedLocalOrgJiraHost(t, s, jiraStub.URL)
-
-	rec := doJSON(t, s, "POST",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity/pat",
-		map[string]any{"pat": "bad"})
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("status=%d body=%s, want 422", rec.Code, rec.Body.String())
-	}
-	// A rejected token leaves no stored credential.
-	stored, _ := s.secrets.GetUserSystem(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "jira_token/"+jiraStub.URL)
-	if stored != "" {
-		t.Errorf("credential stored on a bad token: %q", stored)
-	}
-}
-
-// TestJiraIdentityPAT_HostUnreachable_Returns502 pins the infra failure shape:
-// when TF can't reach the host, the response is a 502 (distinct from a bad
-// token) and no credential is stored.
-func TestJiraIdentityPAT_HostUnreachable_Returns502(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
-	ctx := context.Background()
-
-	// Stand a stub up to claim a port, then close it so dials are refused.
-	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	deadURL := dead.URL
-	dead.Close()
-	seedLocalOrgJiraHost(t, s, deadURL)
-
-	rec := doJSON(t, s, "POST",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity/pat",
-		map[string]any{"pat": "whatever"})
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("status=%d body=%s, want 502", rec.Code, rec.Body.String())
-	}
-	stored, _ := s.secrets.GetUserSystem(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "jira_token/"+deadURL)
-	if stored != "" {
-		t.Errorf("credential stored despite unreachable host: %q", stored)
+			rec := doJSON(t, s, "POST",
+				"/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity/pat",
+				map[string]any{"pat": "tok"})
+			if rec.Code != tc.want {
+				t.Fatalf("status=%d body=%s, want %d", rec.Code, rec.Body.String(), tc.want)
+			}
+			if stored, _ := s.secrets.GetUserSystem(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "jira_token/"+host); stored != "" {
+				t.Errorf("credential stored on a refused bind: %q", stored)
+			}
+		})
 	}
 }
 
-// TestJiraIdentityPAT_EmptyToken_Returns400 pins that an empty PAT for a Data
-// Center org is rejected before any host round-trip (the empty check precedes
-// validation). A DC host is seeded so the handler resolves the DC branch and
-// checks the PAT field; no /myself call happens because the empty PAT short-
-// circuits first.
+// TestJiraIdentityPAT_EmptyToken_Returns400: a blank PAT for a Data Center org
+// is rejected before any round-trip to the host.
 func TestJiraIdentityPAT_EmptyToken_Returns400(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -550,15 +395,12 @@ func TestJiraIdentityPAT_EmptyToken_Returns400(t *testing.T) {
 	}
 }
 
-// TestJiraIdentityPAT_NoJiraHost_ReturnsNotConfigured pins that capturing before Jira is
-// configured (no jira_base_url) is a 409 NOT_CONFIGURED with the "ask your
-// admin" shape — server-side configuration the caller can't fix by resending —
-// not a host round-trip against an empty URL.
+// TestJiraIdentityPAT_NoJiraHost_ReturnsNotConfigured: a bind before the org has
+// a jira_base_url is a 409 NOT_CONFIGURED, which only an admin can fix.
 func TestJiraIdentityPAT_NoJiraHost_ReturnsNotConfigured(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
-	// Deliberately do NOT seed a Jira host.
 
 	rec := doJSON(t, s, "POST",
 		"/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity/pat",
@@ -569,39 +411,9 @@ func TestJiraIdentityPAT_NoJiraHost_ReturnsNotConfigured(t *testing.T) {
 	assertFirstError(t, rec, httpx.ReasonNotConfigured, "jira_pat")
 }
 
-// TestJiraIdentityPAT_EmptyAccount_Returns422 covers the guard for a 200 from
-// /myself that carries no stable identifier (neither accountId nor key): a
-// token that authenticates but yields no account is a 422, and no credential is
-// stored (the StableID() check precedes the store).
-func TestJiraIdentityPAT_EmptyAccount_Returns422(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
-	ctx := context.Background()
-
-	// Valid 200 but an empty body — StableID() resolves to "".
-	jiraStub := jiraMyselfStub(t, `{}`, nil)
-	seedLocalOrgJiraHost(t, s, jiraStub.URL)
-
-	rec := doJSON(t, s, "POST",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity/pat",
-		map[string]any{"pat": "tok"})
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("status=%d body=%s, want 422", rec.Code, rec.Body.String())
-	}
-	// No account ⇒ no credential stored (and no identity bound).
-	stored, _ := s.secrets.GetUserSystem(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "jira_token/"+jiraStub.URL)
-	if stored != "" {
-		t.Errorf("credential stored despite empty account: %q", stored)
-	}
-}
-
-// TestJiraConnectStart_DataCenterOrg_BouncesToPaste pins that the OAuth Connect
-// start handler refuses a Data Center org BEFORE any external round-trip: even
-// though the host is a well-formed http(s) URL, a DC deployment has no Atlassian
-// OAuth app to authenticate against, so the user is redirected straight back to
-// the paste path with error=not_cloud rather than into auth.atlassian.com (where
-// it could only fail later at the cloud_id match).
+// TestJiraConnectStart_DataCenterOrg_BouncesToPaste: a Data Center org has no
+// Atlassian OAuth app to authorize against, so Connect start redirects back to
+// the paste page with error=not_cloud instead of to auth.atlassian.com.
 func TestJiraConnectStart_DataCenterOrg_BouncesToPaste(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()

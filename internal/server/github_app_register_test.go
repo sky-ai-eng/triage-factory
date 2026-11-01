@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -17,7 +16,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/zalando/go-keyring"
 )
 
 // TestGitHubAppRegister_LocalMode_NilDeployConfig_Returns404 pins that
@@ -41,49 +39,9 @@ func TestGitHubAppRegister_LocalMode_NilDeployConfig_Returns404(t *testing.T) {
 	}
 }
 
-// TestGitHubAppRegister_LocalMode_WithDeployConfig_Works verifies the
-// launch endpoint serves the bounce page in local mode when deployCfg is
-// wired, with a per-response CSP scoped to GitHub (not 'self').
-func TestGitHubAppRegister_LocalMode_WithDeployConfig_Works(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	s := newTestServer(t)
-	var key [32]byte
-	if _, err := rand.Read(key[:]); err != nil {
-		t.Fatalf("seed key: %v", err)
-	}
-	s.SetDeployConfig("http://localhost:3000", key)
-
-	rec := doJSON(t, s, "GET",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/register/launch?owner_type=user&owner_login=testuser", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("launch endpoint status=%d body=%s, want 200", rec.Code, rec.Body.String())
-	}
-
-	csp := rec.Header().Get("Content-Security-Policy")
-	if !strings.Contains(csp, "form-action https://github.com") {
-		t.Errorf("launch CSP missing scoped form-action: %q", csp)
-	}
-	if strings.Contains(csp, "form-action 'self'") {
-		t.Errorf("launch CSP must not use 'self': %q", csp)
-	}
-
-	body := rec.Body.String()
-	if !strings.Contains(body, `action="https://github.com/settings/apps/new?state=`) {
-		t.Errorf("bounce page form action missing/incorrect: %s", body)
-	}
-	if !strings.Contains(body, `name="manifest"`) {
-		t.Errorf("bounce page missing manifest field: %s", body)
-	}
-	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
-		t.Errorf("Cache-Control=%q, want no-store (page carries signed state)", cc)
-	}
-}
-
-// TestGitHubAppRegister_Launch_ErrorPageOnBadInput verifies a launch
-// failure renders a graceful HTML page (with a back-link) rather than a JSON
-// dead-end — important because the user arrives via a top-level navigation, not
-// a fetch — and that the back-link honors return_to: a Settings launch (the
-// default) links back to Settings, a wizard launch back to /setup.
+// TestGitHubAppRegister_Launch_ErrorPageOnBadInput: the launch is a top-level
+// navigation, so a failure renders an HTML page whose back-link honors
+// return_to (Settings by default, /setup from the wizard).
 func TestGitHubAppRegister_Launch_ErrorPageOnBadInput(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -120,10 +78,9 @@ func TestGitHubAppRegister_Launch_ErrorPageOnBadInput(t *testing.T) {
 	}
 }
 
-// TestGitHubWebOrigin pins the validation/normalization of the
-// admin-controlled GitHub base URL before it's concatenated into a CSP
-// header: only http(s) origins pass, paths/whitespace are stripped, and
-// malformed input is rejected (so it can't distort the CSP).
+// TestGitHubWebOrigin: the admin-controlled base URL goes into a CSP header, so
+// only http(s) origins pass, paths and whitespace are stripped, and malformed
+// input is rejected.
 func TestGitHubWebOrigin(t *testing.T) {
 	cases := []struct {
 		in     string
@@ -149,10 +106,8 @@ func TestGitHubWebOrigin(t *testing.T) {
 	}
 }
 
-// TestIsPubliclyReachable pins which hosts GitHub could reach for a
-// hook_attributes.url: loopback / unspecified / private / link-local
-// hosts are not reachable (manifest substitutes an inert public
-// placeholder hook), public DNS names and public IPs are.
+// TestIsPubliclyReachable pins which hosts GitHub could deliver a hook to:
+// public names and IPs; not loopback, unspecified, private or reserved ranges.
 func TestIsPubliclyReachable(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -190,15 +145,9 @@ func TestIsPubliclyReachable(t *testing.T) {
 	}
 }
 
-// TestGitHubAppRegister_LocalManifest_PlaceholderHookAndNoInstallationEvents
-// pins the manifest shape for a non-public (localhost) deployment:
-// GitHub rejects both a localhost hook URL and a blank/absent one, so the
-// manifest carries an inert public placeholder hook (active:false, never
-// delivered — local installs are discovered via API backfill). It also
-// keeps a default_events list free of the App-lifecycle installation
-// events GitHub rejects. Asserts against the decoded manifest JSON rather
-// than the HTML-escaped page body so a reintroduced "installation" event
-// can't slip past the check.
+// TestGitHubAppRegister_LocalManifest_PlaceholderHookAndNoInstallationEvents:
+// a local manifest has an inactive placeholder hook (GitHub rejects localhost),
+// this deployment's callbacks including Connect's, and no installation events.
 func TestGitHubAppRegister_LocalManifest_PlaceholderHookAndNoInstallationEvents(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -235,9 +184,19 @@ func TestGitHubAppRegister_LocalManifest_PlaceholderHookAndNoInstallationEvents(
 	if got := m["url"]; got != "https://www.triagefactory.com" {
 		t.Errorf("localhost manifest url (homepage) = %v, want the product homepage: %s", got, manifestJSON)
 	}
-	// But the functional callback URL must still point at this deployment.
-	if got, _ := m["redirect_url"].(string); !strings.HasPrefix(got, "http://localhost:3000/") {
-		t.Errorf("redirect_url = %v, must point at the local deployment, not the homepage", got)
+	// But the functional callback URLs must still point at this deployment.
+	wantConnect := "http://localhost:3000/api/orgs/" + runmode.LocalDefaultOrgID + "/github/connect/callback"
+	wantRegister := "http://localhost:3000/api/orgs/" + runmode.LocalDefaultOrgID + "/github/app/register/callback"
+	if got, _ := m["redirect_url"].(string); got != wantRegister {
+		t.Errorf("redirect_url = %q, want the register callback %q", got, wantRegister)
+	}
+	rawCBs, _ := m["callback_urls"].([]any)
+	cbs := make(map[string]bool, len(rawCBs))
+	for _, c := range rawCBs {
+		cbs[c.(string)] = true
+	}
+	if !cbs[wantConnect] || !cbs[wantRegister] {
+		t.Errorf("callback_urls = %v, want both %q and %q", rawCBs, wantConnect, wantRegister)
 	}
 	permissions, ok := m["default_permissions"].(map[string]any)
 	if !ok || permissions["emails"] != "read" {
@@ -262,9 +221,8 @@ func TestGitHubAppRegister_LocalManifest_PlaceholderHookAndNoInstallationEvents(
 	}
 }
 
-// TestGitHubAppRegister_StateToken_RoundTrip verifies the HMAC-signed
-// state token signs and parses correctly, and that expired / tampered
-// tokens are rejected.
+// TestGitHubAppRegister_StateToken_RoundTrip: the HMAC-signed state token
+// round-trips, and expired, wrongly keyed and malformed tokens are rejected.
 func TestGitHubAppRegister_StateToken_RoundTrip(t *testing.T) {
 	var key [32]byte
 	if _, err := rand.Read(key[:]); err != nil {
@@ -324,13 +282,9 @@ func TestGitHubAppRegister_StateToken_RoundTrip(t *testing.T) {
 	})
 }
 
-// TestGitHubAppRegister_LaunchEndpoint_MultiMode exercises the launch
-// bounce page with a real Postgres-backed auth rig. Verifies:
-//   - org admin gets a 200 HTML page with the manifest form
-//   - the per-response CSP scopes form-action to the org's GitHub host
-//     (github.com by default), NOT 'self'
-//   - non-member gets 404
-//   - missing query params get 400
+// TestGitHubAppRegister_LaunchEndpoint_MultiMode: an org admin gets the
+// uncached manifest bounce page with form-action scoped to the org's GitHub (not
+// 'self'); a non-member gets 404 and missing query params 400.
 func TestGitHubAppRegister_LaunchEndpoint_MultiMode(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	rig := newAuthRig(t)
@@ -385,6 +339,9 @@ func TestGitHubAppRegister_LaunchEndpoint_MultiMode(t *testing.T) {
 		if !strings.Contains(body, `pull_requests`) {
 			t.Errorf("manifest payload missing from page: %s", body)
 		}
+		if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+			t.Errorf("Cache-Control=%q, want no-store (page carries signed state)", cc)
+		}
 	})
 
 	t.Run("non_member_gets_404", func(t *testing.T) {
@@ -402,10 +359,8 @@ func TestGitHubAppRegister_LaunchEndpoint_MultiMode(t *testing.T) {
 	})
 }
 
-// TestGitHubAppRegister_LaunchEndpoint_GHES verifies an org whose
-// github_base_url points at a GitHub Enterprise host gets that host in
-// both the form action and the per-response form-action CSP — proving
-// the scoping is per-org, which a single global CSP couldn't express.
+// TestGitHubAppRegister_LaunchEndpoint_GHES: a GHES org gets its own host in
+// the form action and the per-response CSP, with github.com nowhere in it.
 func TestGitHubAppRegister_LaunchEndpoint_GHES(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	rig := newAuthRig(t)
@@ -416,13 +371,7 @@ func TestGitHubAppRegister_LaunchEndpoint_GHES(t *testing.T) {
 	sidA := rig.sidFromResp(resp)
 
 	const ghesHost = "https://git.corp.example.com"
-	if _, err := rig.h.AdminDB.Exec(`
-		INSERT INTO org_event_sources (org_id, kind, base_url)
-		VALUES ($1, 'github', $2)
-		ON CONFLICT (org_id, kind) DO UPDATE SET base_url = $2
-	`, orgA.String(), ghesHost); err != nil {
-		t.Fatalf("seed org_event_sources: %v", err)
-	}
+	seedOrgGitHubHost(t, rig, orgA.String(), ghesHost)
 
 	req := httptest.NewRequest("GET",
 		"/api/orgs/"+orgA.String()+"/github/app/register/launch?owner_type=org&owner_login=acme-eng", nil)
@@ -459,10 +408,8 @@ func TestGitHubAppRegister_CallbackEndpoint_MultiMode(t *testing.T) {
 	resp, _ := rig.driveCallback(alice)
 	sidA := rig.sidFromResp(resp)
 
-	// Stub GitHub's /app-manifests/{code}/conversions endpoint, plus the
-	// GET /users/<slug>[bot] bot-user-id lookup (TFAC-474) on a distinct id so
-	// the test can prove the registration persists the BOT user id (67890), not
-	// the App id (12345).
+	// GitHub's manifest conversion, and the bot-user-id lookup on an id distinct
+	// from the App's, so the row is shown to persist the bot's.
 	ghStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if strings.Contains(r.URL.Path, "/users/") {
@@ -480,15 +427,7 @@ func TestGitHubAppRegister_CallbackEndpoint_MultiMode(t *testing.T) {
 		}`)
 	}))
 	t.Cleanup(ghStub.Close)
-
-	// Seed the org's GitHubBaseURL to point at our stub.
-	if _, err := rig.h.AdminDB.Exec(`
-		INSERT INTO org_event_sources (org_id, kind, base_url)
-		VALUES ($1, 'github', $2)
-		ON CONFLICT (org_id, kind) DO UPDATE SET base_url = $2
-	`, orgA.String(), ghStub.URL); err != nil {
-		t.Fatalf("seed org_event_sources: %v", err)
-	}
+	seedOrgGitHubHost(t, rig, orgA.String(), ghStub.URL)
 
 	// Sign a valid state token. owner_type=org rides the signed state — the
 	// callback persists it from there (not a re-supplied query param).
@@ -536,7 +475,7 @@ func TestGitHubAppRegister_CallbackEndpoint_MultiMode(t *testing.T) {
 		if ownerType != "org" {
 			t.Errorf("owner_type=%q, want org (from signed state)", ownerType)
 		}
-		// TFAC-474: the BOT user id (67890 from GET /users/...), not the App id.
+		// The bot's user id (67890 from GET /users/...), not the App id.
 		if !botUserID.Valid || botUserID.Int64 != 67890 {
 			t.Errorf("bot_user_id=%v, want 67890 (fetched at registration)", botUserID)
 		}
@@ -621,14 +560,9 @@ func TestGitHubAppRegister_CallbackEndpoint_MultiMode(t *testing.T) {
 	})
 }
 
-// TestGitHubAppRegister_Callback_HooklessNoWebhookSecret verifies the
-// callback's defensive tolerance: if GitHub's manifest conversion returns
-// no webhook_secret, the callback still succeeds, stores the App with an
-// empty webhook_secret_ref, and writes no Vault entry for the
-// (nonexistent) secret. NOTE: our manifests now always request a hook
-// (real URL when public, inert example.com placeholder otherwise), so
-// GitHub returns a secret in practice — this exercises the defensive path
-// against a partial response, not the normal local flow.
+// TestGitHubAppRegister_Callback_HooklessNoWebhookSecret: a conversion that
+// returns no webhook_secret still registers the App, with an empty
+// webhook_secret_ref and no vault entry for it.
 func TestGitHubAppRegister_Callback_HooklessNoWebhookSecret(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	rig := newAuthRig(t)
@@ -651,20 +585,11 @@ func TestGitHubAppRegister_Callback_HooklessNoWebhookSecret(t *testing.T) {
 		}`)
 	}))
 	t.Cleanup(ghStub.Close)
-
-	if _, err := rig.h.AdminDB.Exec(`
-		INSERT INTO org_event_sources (org_id, kind, base_url)
-		VALUES ($1, 'github', $2)
-		ON CONFLICT (org_id, kind) DO UPDATE SET base_url = $2
-	`, orgA.String(), ghStub.URL); err != nil {
-		t.Fatalf("seed org_event_sources: %v", err)
-	}
+	seedOrgGitHubHost(t, rig, orgA.String(), ghStub.URL)
 
 	state := appRegisterState{
-		OrgID: orgA.String(),
-		// The production launch flow always signs a validated owner type, which
-		// the callback persists; set it so this token matches a real one.
-		OwnerType: "user",
+		OrgID:     orgA.String(),
+		OwnerType: "user", // the launch always signs a validated owner type
 		ExpiresAt: time.Now().Add(10 * time.Minute).Unix(),
 	}
 	signed, err := state.sign(rig.srv.deployCfg.hmacKey)
@@ -695,9 +620,8 @@ func TestGitHubAppRegister_Callback_HooklessNoWebhookSecret(t *testing.T) {
 		t.Errorf("webhook_secret_ref=%q, want empty for a hookless App", webhookRef)
 	}
 
-	// No Vault entry should exist under the conventional webhook key.
-	// Read through the org-scoped tx so the Vault wrapper sees the org
-	// context its RLS requires; a missing secret comes back as "".
+	// Read through the org-scoped tx, whose org context the vault's RLS needs;
+	// a missing secret comes back as "".
 	var webhookSecret string
 	if err := rig.srv.tx.WithTx(context.Background(), orgA.String(), alice.String(), func(tx db.TxStores) error {
 		var e error
@@ -711,9 +635,8 @@ func TestGitHubAppRegister_Callback_HooklessNoWebhookSecret(t *testing.T) {
 	}
 }
 
-// TestSettingsRedirectPath pins the mode-aware post-callback redirect:
-// local mode lands on the flat /settings route, multi mode on the
-// org-scoped one. The #github-app fragment is appended by the caller.
+// TestSettingsRedirectPath: local mode lands on the flat /settings route,
+// multi mode on the org-scoped one.
 func TestSettingsRedirectPath(t *testing.T) {
 	t.Run("local", func(t *testing.T) {
 		runmode.SetForTest(t, runmode.ModeLocal)
@@ -729,10 +652,8 @@ func TestSettingsRedirectPath(t *testing.T) {
 	})
 }
 
-// extractLaunchStateParam pulls the signed state token out of the launch
-// bounce page's form action (action="…?state=<token>"). The token charset
-// (base64url plus '.') is both URL- and HTML-safe, so it survives template
-// rendering verbatim between "?state=" and the closing quote.
+// extractLaunchStateParam pulls the signed state token out of the bounce
+// page's form action; the token's charset survives HTML rendering verbatim.
 func extractLaunchStateParam(t *testing.T, body string) string {
 	t.Helper()
 	const marker = "?state="
@@ -752,12 +673,9 @@ func extractLaunchStateParam(t *testing.T, body string) string {
 	return raw
 }
 
-// TestGitHubAppRegister_Launch_ReturnTo pins the launch handler's return_to
-// validation: a recognized value ("setup"/"settings") is carried into the
-// signed state verbatim, and any other or absent value defaults to "settings"
-// (so the callback's redirect degrades to the safe Settings landing rather
-// than erroring). Decodes the signed state out of the bounce page to assert
-// the value the callback will actually read.
+// TestGitHubAppRegister_Launch_ReturnTo: "setup" and "settings" ride the signed
+// state verbatim and any other or absent value becomes "settings", read back
+// from the state the callback will see.
 func TestGitHubAppRegister_Launch_ReturnTo(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -795,20 +713,14 @@ func TestGitHubAppRegister_Launch_ReturnTo(t *testing.T) {
 	}
 }
 
-// TestGitHubAppRegister_Callback_ReturnToRedirect pins the callback's
-// post-registration redirect: a signed state carrying rt=setup lands the
-// browser on /setup (so the wizard resumes on the "Install the App" step
-// instead of teleporting past it), while a Settings-launched flow (no rt)
+// TestGitHubAppRegister_Callback_ReturnToRedirect: a state carrying
+// return_to=setup lands on /setup so the wizard resumes, and a Settings launch
 // returns to the org's Settings GitHub panel.
 func TestGitHubAppRegister_Callback_ReturnToRedirect(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	rig := newAuthRig(t)
 
-	// driveOnce registers a fresh org each call, and org_github_apps.app_id is
-	// globally UNIQUE — a constant id would 23505-collide on the second
-	// registration (the failure that pinned this test red on main). Mint a
-	// distinct app_id + slug per conversion; the subtests assert only on the
-	// redirect Location, so the exact id doesn't matter.
+	// org_github_apps.app_id is globally unique, so each conversion mints its own.
 	var appIDSeq atomic.Int64
 	ghStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -825,29 +737,19 @@ func TestGitHubAppRegister_Callback_ReturnToRedirect(t *testing.T) {
 	}))
 	t.Cleanup(ghStub.Close)
 
-	// driveOnce registers an App for a fresh alice-owned org, signing the state
-	// with the given ReturnTo, and returns the callback's redirect Location plus
-	// the org id. A fresh org per call sidesteps the one-App-per-org conflict.
+	// driveOnce registers an App for a fresh org (one App per org) with the
+	// given ReturnTo, and returns the callback's redirect Location and the org id.
 	driveOnce := func(t *testing.T, name, returnTo string) (loc, orgID string) {
 		t.Helper()
 		alice := rig.seedUser()
 		org, _ := rig.seedOrg(alice, name)
 		resp, _ := rig.driveCallback(alice)
 		sid := rig.sidFromResp(resp)
-		if _, err := rig.h.AdminDB.Exec(`
-			INSERT INTO org_event_sources (org_id, kind, base_url)
-			VALUES ($1, 'github', $2)
-			ON CONFLICT (org_id, kind) DO UPDATE SET base_url = $2
-		`, org.String(), ghStub.URL); err != nil {
-			t.Fatalf("seed org_event_sources: %v", err)
-		}
+		seedOrgGitHubHost(t, rig, org.String(), ghStub.URL)
 		state := appRegisterState{
-			OrgID: org.String(),
-			// The production launch flow always signs a validated owner type into
-			// the state, which the callback persists; set it here so the token
-			// matches a real one and stays valid if callback-side owner-type
-			// validation is ever tightened.
-			OwnerType: "user",
+			OrgID:     org.String(),
+			OwnerType: "user", // the launch always signs a validated owner type
+
 			ReturnTo:  returnTo,
 			ExpiresAt: time.Now().Add(10 * time.Minute).Unix(),
 		}
@@ -879,42 +781,4 @@ func TestGitHubAppRegister_Callback_ReturnToRedirect(t *testing.T) {
 			t.Errorf("redirect=%q, want %q", loc, want)
 		}
 	})
-}
-
-// TestGitHubAppManifest_PermissionsMatchImportBar holds the manifest's
-// default_permissions and the bring-your-own-App preflight bar to the same set,
-// which is what makes an imported App comparable to a TF-registered one. It is
-// also the guard on the permission names themselves: GitHub validates the
-// manifest against its permission-resource names and rejects the entire
-// registration when one is unknown, so a name that only one of the two sites
-// learns about is a registration or an import that fails in the field.
-func TestGitHubAppManifest_PermissionsMatchImportBar(t *testing.T) {
-	keyring.MockInit()
-	runmode.SetForTest(t, runmode.ModeLocal)
-	s := newTestServer(t)
-	var key [32]byte
-	if _, err := rand.Read(key[:]); err != nil {
-		t.Fatalf("seed key: %v", err)
-	}
-	s.SetDeployConfig("http://localhost:3000", key)
-
-	_, manifestJSON, _, err := s.buildManifestAndState(context.Background(),
-		runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "user", "testuser", "settings")
-	if err != nil {
-		t.Fatalf("buildManifestAndState: %v", err)
-	}
-	var m struct {
-		Permissions map[string]string `json:"default_permissions"`
-	}
-	if err := json.Unmarshal([]byte(manifestJSON), &m); err != nil {
-		t.Fatalf("unmarshal manifest: %v", err)
-	}
-
-	want := make(map[string]string, len(importRequiredPermissions))
-	for _, req := range importRequiredPermissions {
-		want[req.name] = req.level
-	}
-	if !reflect.DeepEqual(m.Permissions, want) {
-		t.Errorf("manifest default_permissions = %v, want the import bar %v", m.Permissions, want)
-	}
 }

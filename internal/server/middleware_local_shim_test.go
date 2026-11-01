@@ -16,48 +16,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestWithSession_LocalShim_InjectsSentinels pins the "handlers read
-// identity uniformly via ClaimsFrom/OrgIDFrom in both modes" contract.
-// In local mode (TF_MODE=local, authDeps nil) the wrapper must inject
-// a synthetic Claims with Subject = LocalDefaultUserID and ctxKeyOrgID
-// = LocalDefaultOrgID before delegating. A regression that drops the
-// injection would put every handler back into "branch on mode" land —
-// every per-handler sweep PR depends on this.
-func TestWithSession_LocalShim_InjectsSentinels(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-
-	s := &Server{} // authDeps deliberately nil — local-mode boot
-
-	var gotSubject, gotOrgID string
-	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if c := ClaimsFrom(r.Context()); c != nil {
-			gotSubject = c.Subject
-		}
-		gotOrgID = OrgIDFrom(r.Context())
-		w.WriteHeader(http.StatusOK)
-	})
-
-	rec := httptest.NewRecorder()
-	s.withSession(inner).ServeHTTP(rec, httptest.NewRequest("GET", "/api/anything", nil))
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (local-mode shim should pass through)", rec.Code)
-	}
-	if gotSubject != runmode.LocalDefaultUserID {
-		t.Errorf("ClaimsFrom().Subject = %q, want %q", gotSubject, runmode.LocalDefaultUserID)
-	}
-	if gotOrgID != runmode.LocalDefaultOrgID {
-		t.Errorf("OrgIDFrom() = %q, want %q", gotOrgID, runmode.LocalDefaultOrgID)
-	}
-}
-
-// TestHandleMe_LocalMode_SynthesizesSentinelResponse pins the
-// local-equals-multi-at-N=1 contract: the withSession shim injects a
-// synthetic claim with Subject = LocalDefaultUserID, and handleMe
-// detects that and returns a synthesized response built from sentinel
-// constants instead of hitting Postgres-only queries (public.users,
-// tf.current_user_id()) that would 500 against local SQLite. The FE
-// gets one signed-in shape across both modes.
+// TestHandleMe_LocalMode_SynthesizesSentinelResponse: in local mode withSession
+// injects the sentinel claims and /api/me answers a synthesized signed-in shape
+// built from the sentinel constants, without the Postgres-only queries.
 func TestHandleMe_LocalMode_SynthesizesSentinelResponse(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 
@@ -118,13 +79,9 @@ func TestHandleMe_LocalMode_SynthesizesSentinelResponse(t *testing.T) {
 	}
 }
 
-// TestWithSession_MultiMode_NilAuthDeps_PassesThroughWithoutClaims
-// pins the boot-race safety. SetAuthDeps lands after routes() in
-// multi mode — a request that races in during that window must NOT
-// receive the local-mode sentinel (that would let an unauthenticated
-// caller masquerade as the synthetic local user once authDeps lands
-// for a different identity model). The correct posture is the prior
-// pass-through: handlers see nil claims and write 401 themselves.
+// TestWithSession_MultiMode_NilAuthDeps_PassesThroughWithoutClaims: a multi-mode
+// request arriving before SetAuthDeps gets no sentinel claims or org, so the
+// handler answers 401 itself rather than serving the synthetic local user.
 func TestWithSession_MultiMode_NilAuthDeps_PassesThroughWithoutClaims(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 
@@ -151,12 +108,9 @@ func TestWithSession_MultiMode_NilAuthDeps_PassesThroughWithoutClaims(t *testing
 	}
 }
 
-// TestHandleMe_LocalMode_CarriesSoleTeamAsAdmin pins the local half of the
-// teams field. Local mode is N=1 — one org, one team, and the single user owns
-// it — so the synthesized response reports that team at role admin, which is
-// the same answer the teams list gives the per-team gates. Runs against the
-// real SQLite stores rather than the bare rig above, because the row it reports
-// comes from the teams store rather than a sentinel constant.
+// TestHandleMe_LocalMode_CarriesSoleTeamAsAdmin: local /api/me reports the one
+// local team at role admin, read from the teams store, which is the answer the
+// per-team gates get.
 func TestHandleMe_LocalMode_CarriesSoleTeamAsAdmin(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 
@@ -197,17 +151,9 @@ func TestHandleMe_LocalMode_CarriesSoleTeamAsAdmin(t *testing.T) {
 	}
 }
 
-// TestHandleMe_LocalMode_UnprovisionedInstall_AnswersEmptyTeams pins the
-// fresh-install shape. Nothing creates tenant rows at boot or in a migration —
-// provisioning is the explicit "Start your factory" action — so a local DB has
-// no org and no team until the user takes it, and /api/me is answerable that
-// whole time. The teams field is [] there, not an error: an unprovisioned
-// install is a state, not a fault, and 500ing the identity read would break
-// first run. (The teams store's own doc calls a TEAMLESS ORG a bootstrap bug,
-// which this is not — there is no org here either.)
-//
-// Migrates directly rather than going through newTestServer, whose fixture
-// seeds the synthetic local tenant.
+// TestHandleMe_LocalMode_UnprovisionedInstall_AnswersEmptyTeams: a local install
+// nobody has provisioned has no org or team, and /api/me still answers 200 with
+// teams []. It migrates directly because newTestServer seeds the local tenant.
 func TestHandleMe_LocalMode_UnprovisionedInstall_AnswersEmptyTeams(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 
@@ -258,12 +204,9 @@ type teamGetMiss struct{ db.TeamsStore }
 
 func (teamGetMiss) Get(context.Context, string, string) (*domain.Team, error) { return nil, nil }
 
-// TestHandleMe_LocalMode_VanishedDefaultTeam_Errors is the other side of the
-// test above. An empty default team is a state; a default team that names a row
-// which is not there is not — the id came from the teams table one statement
-// earlier, and this read is the same table by (id, org_id) with no further
-// filter. Answering [] would withdraw the viewer's team grants and report
-// success for a read that found nothing, so it fails instead.
+// TestHandleMe_LocalMode_VanishedDefaultTeam_Errors: a default team id that reads
+// back as no row is corruption, so /api/me answers 500 rather than [], which
+// would withdraw the viewer's team grants.
 func TestHandleMe_LocalMode_VanishedDefaultTeam_Errors(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 

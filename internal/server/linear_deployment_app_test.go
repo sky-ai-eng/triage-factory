@@ -35,11 +35,9 @@ func (r *linearInstallRig) getLinearAppStatus(t *testing.T) (linearAppStatusResp
 	return got, raw
 }
 
-// TestLinearApp_StatusFollowsTheResolvedSource pins the app and access status
-// shapes in each of the three states the precedence resolves to. The org's own
-// app wins over the deployment app; the deployment app alone offers Install
-// with nothing for the admin to create; with neither there is nothing to
-// install and the card offers the pre-filled create link.
+// TestLinearApp_StatusFollowsTheResolvedSource: the org's own app wins over the
+// deployment app; the deployment app alone offers Install with nothing to
+// create; with neither, the card offers only the pre-filled create link.
 func TestLinearApp_StatusFollowsTheResolvedSource(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
@@ -95,9 +93,8 @@ func TestLinearApp_StatusFollowsTheResolvedSource(t *testing.T) {
 }
 
 // TestLinearInstall_DeploymentApp: an org with no app of its own installs
-// through the deployment app, and the install records that app as the one its
-// tokens belong to. Disconnecting revokes with it. With the deployment app
-// gone, the same org's card falls back to registering its own.
+// through the deployment app, records it as the tokens' app and revokes with it
+// on disconnect; once the deployment app is gone, its card offers the create link.
 func TestLinearInstall_DeploymentApp(t *testing.T) {
 	r := newLinearInstallRigWith(t, testLinearDeploymentApp)
 	r.install(t)

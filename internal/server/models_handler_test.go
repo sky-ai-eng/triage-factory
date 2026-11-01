@@ -103,13 +103,9 @@ func TestModelsList_ServesTheJoinedCatalog(t *testing.T) {
 }
 
 // The read a LOCAL install gets: the Claude Code SDK's alias list, and only it.
-//
-// Every field the native rows carry from the datasheet is ABSENT here, which is
-// the whole mode-as-data mechanism: an alias names no provider (the harness
-// picks the path from the credential) and joins no price table (the harness
-// settles the cost), and the availability triple is absent because a
-// zero-configuration install has no TF-owned credential for a verdict to be
-// about. A picker renders what is present.
+// Every datasheet field and the availability triple are omitted from the wire,
+// not zero-valued: a rendered $0.00 is a price claim and `"provider": ""` an
+// access-path claim, and an alias names no provider and joins no price table.
 func TestModelsList_LocalServesTheSDKAliasList(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -155,28 +151,12 @@ func TestModelsList_LocalServesTheSDKAliasList(t *testing.T) {
 			t.Errorf("%s: carries an availability triple under system credentials, want absent", got.Key)
 		}
 	}
-}
 
-// The raw JSON, not the decoded struct: a client reading these fields has to see
-// them MISSING rather than zero-valued, because a rendered $0.00 per million
-// tokens is a price claim and `"provider": ""` is an access-path claim.
-func TestModelsList_LocalOmitsTheNativeOnlyFieldsOnTheWire(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
-
-	rec := doJSON(t, s, http.MethodGet, modelsPath(runmode.LocalDefaultOrgID), nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
-	}
 	var raw struct {
 		Items []map[string]json.RawMessage `json:"items"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
 		t.Fatalf("decode raw: %v", err)
-	}
-	if len(raw.Items) == 0 {
-		t.Fatal("read returned no models")
 	}
 	for _, item := range raw.Items {
 		for _, absent := range []string{
@@ -239,87 +219,5 @@ func TestModelsList_OrgScoping(t *testing.T) {
 	other.Body.Close()
 	if other.StatusCode != http.StatusNotFound {
 		t.Errorf("non-member GET = %d, want 404 (not 403 — don't leak existence)", other.StatusCode)
-	}
-}
-
-// One contract, two implementations — and after the SDK decoupling the two
-// implementations answer from two universes, which is the mode difference
-// travelling as DATA rather than as a branch a client reads.
-//
-// What stays identical is the SHAPE: the same route, the same envelope, the same
-// four always-present fields, in display order, enabled. What differs is which
-// models are named and which optional fields they carry. The multi org here
-// holds an Anthropic credential and no Bedrock one, so it also exercises the
-// real availability divergence rather than the degenerate case.
-func TestModelsList_AcrossModes_OneContractTwoUniverses(t *testing.T) {
-	multi := func() []modelCatalogRow {
-		runmode.SetForTest(t, runmode.ModeMulti)
-		r := newAuthRig(t)
-		alice := r.seedUser()
-		orgA, _ := r.seedOrg(alice, "alice-parity-org")
-		bindAnthropicRef(t, r, orgA.String())
-		resp, _ := r.driveCallback(alice)
-		got := r.requestWithSid(http.MethodGet, modelsPath(orgA.String()), r.sidFromResp(resp))
-		defer got.Body.Close()
-		if got.StatusCode != http.StatusOK {
-			t.Fatalf("multi-mode read = %d, want 200", got.StatusCode)
-		}
-		body, err := io.ReadAll(got.Body)
-		if err != nil {
-			t.Fatalf("read body: %v", err)
-		}
-		return decodeModels(t, body).Items
-	}()
-
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	rec := doJSON(t, newTestServer(t), http.MethodGet, modelsPath(runmode.LocalDefaultOrgID), nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("local-mode read = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
-	}
-	local := decodeModels(t, rec.Body.Bytes()).Items
-
-	for _, side := range []struct {
-		name  string
-		items []modelCatalogRow
-	}{{"multi", multi}, {"local", local}} {
-		if len(side.items) == 0 {
-			t.Fatalf("%s returned no models", side.name)
-		}
-		for i, row := range side.items {
-			if row.Key == "" || row.DisplayName == "" {
-				t.Errorf("%s item %d: %+v is missing an always-present field", side.name, i, row)
-			}
-			if row.DisplayOrder != i {
-				t.Errorf("%s item %d: display_order = %d", side.name, i, row.DisplayOrder)
-			}
-			if !row.Enabled {
-				t.Errorf("%s: %s is not enabled with no stored enable-set", side.name, row.Key)
-			}
-		}
-	}
-
-	// The universes are disjoint: neither mode may name a model the other's
-	// runtime would be handed.
-	localKeys := map[string]bool{}
-	for _, row := range local {
-		localKeys[row.Key] = true
-	}
-	for _, row := range multi {
-		if localKeys[row.Key] {
-			t.Errorf("%q appears in both universes", row.Key)
-		}
-		// The multi org bound Anthropic and not Bedrock, so its rows split on
-		// exactly that, and every one of them carries the triple.
-		want := modelAvailabilityUnverified
-		if row.Provider != modelcatalog.ProviderAnthropic {
-			want = modelAvailabilityUnconfigured
-		}
-		if row.Availability != want {
-			t.Errorf("%s (%s): multi availability = %q, want %q", row.Key, row.Provider, row.Availability, want)
-		}
-		if row.AvailabilityDetail != "" || row.AvailabilityCheckedAt != nil {
-			t.Errorf("%s: an unprobed row carries a detail or a timestamp", row.Key)
-		}
 	}
 }

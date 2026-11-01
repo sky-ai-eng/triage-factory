@@ -23,13 +23,9 @@ func listEventHandlers(t *testing.T, s *Server, kind string) []map[string]any {
 	return decodeList[map[string]any](t, doJSON(t, s, http.MethodPost, "/api/event-handlers/list", body)).Items
 }
 
-// seedBlueprintForTrigger inserts a user-source blueprint that trigger
-// fixtures point at. event_handlers.blueprint_id has composite FKs to
-// blueprints(id, org_id) AND the same-team blueprints(id, team_id); the
-// handler also validates the id via Blueprints.Get before insert. Without a
-// real blueprint row, creating a trigger fails the FK (or the handler-level
-// lookup, whichever fires first). Existence-guarded so a test that seeds the
-// same id twice is a no-op (Create is not idempotent on its own).
+// seedBlueprintForTrigger inserts the user-source blueprint a trigger fixture
+// points at, which the handler and the same-team FKs both require. Seeding an
+// id twice is a no-op.
 func seedBlueprintForTrigger(t *testing.T, s *Server, id string) {
 	t.Helper()
 	ctx := t.Context()
@@ -45,95 +41,9 @@ func seedBlueprintForTrigger(t *testing.T, s *Server, id string) {
 
 // --- POST /api/event-handlers/rules + /triggers ---------------------------
 
-func TestHandleEventHandlerCreate_RuleHappyPath(t *testing.T) {
-	s := newTestServer(t)
-	configureEventSources(t, s)
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
-		"event_type":       "github:pr:new_commits",
-		"name":             "Heads-up on new commits",
-		"default_priority": 0.6,
-		"sort_order":       3,
-	})
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var got map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if got["kind"] != "rule" {
-		t.Errorf("kind=%v want rule", got["kind"])
-	}
-	if got["name"] != "Heads-up on new commits" {
-		t.Errorf("name=%v", got["name"])
-	}
-	if got["source"] != "user" {
-		t.Errorf("source=%v want user", got["source"])
-	}
-	// Rule rows have NULL trigger-only fields on the wire.
-	if got["blueprint_id"] != "" {
-		t.Errorf("blueprint_id=%v; rule rows must serialize empty", got["blueprint_id"])
-	}
-	if got["breaker_threshold"] != nil {
-		t.Errorf("breaker_threshold=%v; rule rows must serialize null", got["breaker_threshold"])
-	}
-}
-
-func TestHandleEventHandlerCreate_TriggerHappyPath(t *testing.T) {
-	s := newTestServer(t)
-	configureEventSources(t, s)
-	seedBlueprintForTrigger(t, s, "p-trigger-create")
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
-		"event_type":               "github:pr:ci_check_failed",
-		"blueprint_id":             "p-trigger-create",
-		"breaker_threshold":        5,
-		"min_autonomy_suitability": 0.4,
-	})
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var got map[string]any
-	_ = json.Unmarshal(rec.Body.Bytes(), &got)
-	if got["kind"] != "trigger" {
-		t.Errorf("kind=%v want trigger", got["kind"])
-	}
-	if got["blueprint_id"] != "p-trigger-create" {
-		t.Errorf("blueprint_id=%v", got["blueprint_id"])
-	}
-	// Triggers default to disabled (project convention — users opt in).
-	if got["enabled"] != false {
-		t.Errorf("enabled=%v; new triggers must default to false", got["enabled"])
-	}
-}
-
-func TestHandleEventHandlerCreate_TriggerAppliesDefaults(t *testing.T) {
-	// breaker_threshold and min_autonomy_suitability are optional with
-	// defaults (4 and 0.0), so the canvas drag-to-create gesture can supply
-	// only blueprint_id + event_type.
-	s := newTestServer(t)
-	configureEventSources(t, s)
-	seedBlueprintForTrigger(t, s, "p-defaults")
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
-		"event_type":   "github:pr:ci_check_failed",
-		"blueprint_id": "p-defaults",
-	})
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var got map[string]any
-	_ = json.Unmarshal(rec.Body.Bytes(), &got)
-	if got["breaker_threshold"] != float64(4) {
-		t.Errorf("breaker_threshold=%v; want default 4", got["breaker_threshold"])
-	}
-	if got["min_autonomy_suitability"] != float64(0) {
-		t.Errorf("min_autonomy_suitability=%v; want default 0", got["min_autonomy_suitability"])
-	}
-}
-
-// TestHandleEventHandlerCreate_RejectsCrossKindFields: the path names the kind
-// now, so each create body is decoded against exactly one schema. The other
-// kind's fields — and `kind` itself, which no longer exists anywhere on the
-// wire — come back as UNKNOWN_FIELD rather than being accepted and dropped.
+// TestHandleEventHandlerCreate_RejectsCrossKindFields: the path names the kind,
+// so each create body is decoded against one schema, and the other kind's fields
+// or a `kind` field are UNKNOWN_FIELD rather than accepted and dropped.
 func TestHandleEventHandlerCreate_RejectsCrossKindFields(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
@@ -259,10 +169,9 @@ func TestHandleEventHandlerCreate_CanonicalizesPredicate(t *testing.T) {
 	}
 }
 
-// TestHandleEventHandlerCreate_PredicateIsAnObject pins the one wire type the
-// predicate has on every write: a JSON object. The string-wrapped object the
-// old create took is refused rather than unwrapped — one field with two
-// spellings is how two callers end up disagreeing about which is canonical.
+// TestHandleEventHandlerCreate_PredicateIsAnObject: the predicate's one wire
+// type is a JSON object, stored canonically; a string-wrapped object is refused
+// rather than unwrapped, so the field has one spelling.
 func TestHandleEventHandlerCreate_PredicateIsAnObject(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
@@ -287,23 +196,10 @@ func TestHandleEventHandlerCreate_PredicateIsAnObject(t *testing.T) {
 	}
 }
 
-func TestHandleEventHandlerCreate_RejectsInvalidPredicate(t *testing.T) {
-	s := newTestServer(t)
-	configureEventSources(t, s)
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
-		"event_type":       "github:pr:new_commits",
-		"name":             "bad",
-		"default_priority": 0.5,
-		"sort_order":       0,
-		"scope_predicate":  map[string]any{"not_a_real_field": true},
-	})
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
 // --- PATCH /api/event-handlers/{id} --------------------------------------
 
+// TestHandleEventHandlerUpdate_PatchesRule: PATCH writes the named fields,
+// enabled among them, and the list reads the write back.
 func TestHandleEventHandlerUpdate_PatchesRule(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
@@ -312,6 +208,7 @@ func TestHandleEventHandlerUpdate_PatchesRule(t *testing.T) {
 	rec := doJSON(t, s, http.MethodPatch, "/api/event-handlers/"+id, map[string]any{
 		"name":             "renamed",
 		"default_priority": 0.9,
+		"enabled":          false,
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
@@ -323,6 +220,15 @@ func TestHandleEventHandlerUpdate_PatchesRule(t *testing.T) {
 	}
 	if got["default_priority"] != 0.9 {
 		t.Errorf("default_priority=%v", got["default_priority"])
+	}
+	var listed map[string]any
+	for _, h := range listEventHandlers(t, s, "rule") {
+		if h["id"] == id {
+			listed = h
+		}
+	}
+	if listed == nil || listed["enabled"] != false {
+		t.Errorf("listed rule = %v, want it present with enabled=false", listed)
 	}
 }
 
@@ -336,11 +242,9 @@ func TestHandleEventHandlerUpdate_NotFound(t *testing.T) {
 	}
 }
 
-// TestHandleEventHandlerUpdate_RejectsOtherKindsFields: the row's kind picks
-// the schema the PATCH body is decoded against, so a trigger knob aimed at a
-// rule (and the reverse) is an UNKNOWN_FIELD instead of a field silently
-// dropped behind a 200. `kind` is in neither schema, which is what keeps it
-// immutable here.
+// TestHandleEventHandlerUpdate_RejectsOtherKindsFields: the row's kind picks the
+// PATCH schema, so the other kind's fields, `kind`, event_type and blueprint_id
+// are UNKNOWN_FIELD rather than dropped behind a 200.
 func TestHandleEventHandlerUpdate_RejectsOtherKindsFields(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
@@ -371,39 +275,9 @@ func TestHandleEventHandlerUpdate_RejectsOtherKindsFields(t *testing.T) {
 	}
 }
 
-// TestHandleEventHandlerUpdate_FlipsEnabled: the enabled bit is a field write
-// on the resource. It had three doors (PATCH, PUT, and a /toggle verb whose
-// non-pointer bool turned an empty body into a silent disable); this is the
-// one that is left.
-func TestHandleEventHandlerUpdate_FlipsEnabled(t *testing.T) {
-	s := newTestServer(t)
-	configureEventSources(t, s)
-	id := createUserRule(t, s)
-
-	rec := doJSON(t, s, http.MethodPatch, "/api/event-handlers/"+id, map[string]any{"enabled": false})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-	// Re-read to confirm.
-	got := listEventHandlers(t, s, "rule")
-	var found bool
-	for _, h := range got {
-		if h["id"] == id {
-			found = true
-			if h["enabled"] != false {
-				t.Errorf("after disabling, enabled=%v want false", h["enabled"])
-			}
-		}
-	}
-	if !found {
-		t.Error("created rule missing from list")
-	}
-}
-
-// TestHandleEventHandlerRemovedRoutes: the PUT alias (replacement semantics it
-// never delivered — every field was absent-means-keep) and the /toggle verb (a
-// strict duplicate of PATCH {enabled}) are gone, along with the polymorphic
-// create. A removed route answers 404/405, never the old behaviour.
+// TestHandleEventHandlerRemovedRoutes: PATCH is the one update and the path
+// names the kind on create, so PUT, a /toggle verb and an untyped create answer
+// 404/405 and leave the rule as it was.
 func TestHandleEventHandlerRemovedRoutes(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
@@ -458,11 +332,9 @@ func TestHandleEventHandlerDelete_UserRowHardDeletes(t *testing.T) {
 	}
 }
 
-// TestHandleEventHandlerDelete_SystemRowSoftDeletes pins the current
-// behavior: a shipped (system_slug) handler soft-deletes — deleted_at is
-// stamped, but the row survives so its (org_id, team_id, system_slug)
-// identity stays occupied and the boot-time shipped-content sync never
-// resurrects it.
+// TestHandleEventHandlerDelete_SystemRowSoftDeletes: a shipped (system_slug)
+// handler is soft-deleted, so its slug stays occupied and the boot-time sync
+// never resurrects it, while every read answers 404 as for a hard delete.
 func TestHandleEventHandlerDelete_SystemRowSoftDeletes(t *testing.T) {
 	s := newTestServer(t)
 	// Insert a system-source handler directly (newTestServer seeds the
@@ -506,37 +378,6 @@ func TestHandleEventHandlerDelete_SystemRowSoftDeletes(t *testing.T) {
 
 // --- POST /api/event-handlers/{id}/promote -------------------------------
 
-func TestHandleEventHandlerPromote_RuleToTrigger(t *testing.T) {
-	s := newTestServer(t)
-	configureEventSources(t, s)
-	seedBlueprintForTrigger(t, s, "p-promote")
-	id := createUserRule(t, s)
-
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/"+id+"/promote", map[string]any{
-		"blueprint_id":             "p-promote",
-		"breaker_threshold":        3,
-		"min_autonomy_suitability": 0.2,
-	})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var got map[string]any
-	_ = json.Unmarshal(rec.Body.Bytes(), &got)
-	if got["kind"] != "trigger" {
-		t.Errorf("kind=%v want trigger", got["kind"])
-	}
-	if got["blueprint_id"] != "p-promote" {
-		t.Errorf("blueprint_id=%v", got["blueprint_id"])
-	}
-	// Rule-only fields must be cleared on the promoted row.
-	if got["name"] != "" {
-		t.Errorf("name=%v; promoted trigger must have no name", got["name"])
-	}
-	if got["default_priority"] != nil {
-		t.Errorf("default_priority=%v; promoted trigger must serialize null", got["default_priority"])
-	}
-}
-
 func TestHandleEventHandlerPromote_RejectsAlreadyTrigger(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
@@ -555,9 +396,7 @@ func TestHandleEventHandlerPromote_RejectsAlreadyTrigger(t *testing.T) {
 }
 
 // TestHandleEventHandlerPromote_ValidatesTriggerFields: promote enforces the
-// ranges create and PATCH already applied, and whose absence here let it
-// persist a negative breaker threshold or an out-of-band autonomy floor. 422:
-// the body is well-formed, the values can't be applied.
+// ranges create and PATCH apply, with a 422 for a well-formed value out of range.
 func TestHandleEventHandlerPromote_ValidatesTriggerFields(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
@@ -583,11 +422,9 @@ func TestHandleEventHandlerPromote_ValidatesTriggerFields(t *testing.T) {
 	}
 }
 
-// TestEventHandlerTriggerParity_CreateAndPromote: the two doors into
-// trigger-hood mint the same row for the same body. Promote used to REQUIRE
-// the tuning fields create defaults, so a caller who omitted them got a 422 on
-// one path and a fully-defaulted trigger on the other — the same logical
-// trigger described two ways depending on how it was born.
+// TestEventHandlerTriggerParity_CreateAndPromote: create and promote mint the
+// same trigger for the same body, with the tuning fields defaulted (breaker 4,
+// autonomy 0), new triggers disabled, and the rule-only fields cleared.
 func TestEventHandlerTriggerParity_CreateAndPromote(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
@@ -613,6 +450,13 @@ func TestEventHandlerTriggerParity_CreateAndPromote(t *testing.T) {
 	var a, b map[string]any
 	_ = json.Unmarshal(created.Body.Bytes(), &a)
 	_ = json.Unmarshal(promoted.Body.Bytes(), &b)
+	if a["kind"] != "trigger" || a["blueprint_id"] != "p-parity-created" || a["enabled"] != false ||
+		a["breaker_threshold"] != float64(4) || a["min_autonomy_suitability"] != float64(0) {
+		t.Errorf("created trigger = %v, want kind trigger on its blueprint, disabled, breaker 4, autonomy 0", a)
+	}
+	if b["blueprint_id"] != "p-parity-promoted" || b["name"] != "" || b["default_priority"] != nil {
+		t.Errorf("promoted trigger = %v, want it on its blueprint with no name or default_priority", b)
+	}
 	// Everything the body didn't name must agree. id / blueprint_id / the
 	// timestamps and the sync's user_modified flag are properties of which row
 	// it is and how it got there, not of the trigger the caller described.
@@ -668,12 +512,9 @@ func TestHandleEventHandlerReorder_RejectsEmpty(t *testing.T) {
 	}
 }
 
-// TestHandleEventHandlerReorder_RejectsInexactSet pins the negative space the
-// route used to swallow: every id the store would have skipped with zero rows
-// — an unknown id, a trigger id, a duplicate — and every rule the body left
-// out. All of them used to answer an unconditional {"status":"reordered"} over
-// an order that half-applied. Each fault names its own id, and one request
-// reports all of them.
+// TestHandleEventHandlerReorder_RejectsInexactSet: the body must name every
+// visible rule exactly once, so an unknown id, a trigger id, a duplicate or an
+// omitted rule is a 422, each fault naming its id and all reported at once.
 func TestHandleEventHandlerReorder_RejectsInexactSet(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
@@ -826,11 +667,9 @@ func createUserTrigger(t *testing.T, s *Server, blueprintID string) string {
 
 // --- GET /api/event-handlers/{id} ----------------------------------------
 
-// TestHandleEventHandlerGet_ShapeParityAndNotFound pins the single read the
-// five mutation routes needed and nobody had: it answers with the LIST's row,
-// field for field, and a well-formed-but-unknown id and a malformed one are
-// both 404 (a path id that names nothing must not disclose which it was, nor
-// reach the store as a bad cast).
+// TestHandleEventHandlerGet_ShapeParityAndNotFound: the single read answers the
+// list's row field for field, the created row is a user rule with null trigger
+// fields, and an unknown or malformed id is a 404 either way.
 func TestHandleEventHandlerGet_ShapeParityAndNotFound(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
@@ -849,6 +688,11 @@ func TestHandleEventHandlerGet_ShapeParityAndNotFound(t *testing.T) {
 	id, _ := row["id"].(string)
 	if id == "" {
 		t.Fatalf("created handler has no id: %v", row)
+	}
+	// A rule row carries the trigger-only fields empty on the wire.
+	if row["kind"] != "rule" || row["name"] != "Heads-up on new commits" || row["source"] != "user" ||
+		row["blueprint_id"] != "" || row["breaker_threshold"] != nil {
+		t.Errorf("created rule = %v, want a user rule with empty blueprint_id and null breaker_threshold", row)
 	}
 
 	rec := doJSON(t, s, http.MethodGet, "/api/event-handlers/"+id, nil)

@@ -1,30 +1,17 @@
 package server
 
-// Pins the load-bearing invariant that delegate trigger_type is
-// server-side provenance, never derived from caller input. If a
-// future contributor adds a "trigger_type" / "triggerType" JSON tag
-// to a delegate-request struct, a multi-tenant caller could set
-// triggerType="event" and bypass resolvePrompt's app-pool branch,
-// reading prompts they have no RLS visibility into. This test
-// reflects on every delegate-related request struct and refuses
-// any tag that would open that hole.
-//
-// New delegate-related request types must be added to the
-// `delegateRequestTypes` list below so the assertion sees them.
-// The DelegateOpts.TriggerType doc comment in internal/delegate
-// names this file directly so the linkage is discoverable from
-// both sides.
-
 import (
 	"reflect"
 	"strings"
 	"testing"
 )
 
+// TestDelegateRequestStructs_NoTriggerTypeFieldFromAPI pins trigger_type as
+// server-side provenance: a request struct carrying a trigger_type tag would let
+// a caller send "event" and bypass resolvePrompt's app-pool branch, reading
+// prompts outside its RLS visibility.
 func TestDelegateRequestStructs_NoTriggerTypeFieldFromAPI(t *testing.T) {
-	// Add every request body type a delegate-related HTTP handler
-	// unmarshals into. The reflection check refuses any tag that
-	// would let a caller drive Spawner.Delegate's triggerType branch.
+	// Every request body type a delegate-related handler unmarshals into.
 	delegateRequestTypes := []any{
 		taskCreateRequest{},
 		taskDelegateRequest{},

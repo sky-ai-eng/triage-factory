@@ -8,10 +8,9 @@ import (
 	"testing"
 )
 
-// TestExchangeManifestCode_ErrorCarriesOnlyAnExcerpt: the handler logs the
-// exchange's error at ERROR, so a failed exchange's message carries the status
-// and GitHub's own message from a JSON body, and only the size of anything
-// else, such as a proxy's HTML page.
+// TestExchangeManifestCode_ErrorCarriesOnlyAnExcerpt: the error is logged, so
+// it carries the status and GitHub's JSON message, and of any other body (a
+// proxy's HTML page) only that it was not JSON.
 func TestExchangeManifestCode_ErrorCarriesOnlyAnExcerpt(t *testing.T) {
 	page := "<!DOCTYPE html><html><body><h1>502 Bad Gateway</h1>" + strings.Repeat("<p>upstream</p>", 10000) + "</body></html>"
 	for _, tc := range []struct {

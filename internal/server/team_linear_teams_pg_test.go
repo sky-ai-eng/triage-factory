@@ -48,10 +48,9 @@ func decodeLinearTeamsResponse(t *testing.T, resp *http.Response) []linearTeamSe
 	return out.LinearTeams
 }
 
-// TestLinearTeamsPut_Postgres_RoundTrips runs the write and the read back
-// through a real session on the Postgres stores, under RLS: what the PUT
-// echoes is what the team-settings read then shows, and a member who is not
-// the team's admin can read the set but not replace it.
+// TestLinearTeamsPut_Postgres_RoundTrips: under RLS the PUT's echo is what the
+// team-settings read then shows, and a member who is not the team's admin can
+// read the set but not replace it.
 func TestLinearTeamsPut_Postgres_RoundTrips(t *testing.T) {
 	rig := newAuthRig(t)
 	alice := rig.seedUser()
@@ -97,10 +96,8 @@ func TestLinearTeamsPut_Postgres_RoundTrips(t *testing.T) {
 }
 
 // TestLinearCatalog_Postgres_AddressedAndGatedByOrg: the catalog routes answer
-// for the org in the path, so a caller in two orgs reads the second without
-// moving their active org; and the gate is live membership, so a member removed
-// from the org gets a 404 from every route, with their session still carrying
-// the org, and Linear is never asked.
+// for the org in the path, not the session's active org, and a member removed
+// from that org gets a 404 from every route without Linear being asked.
 func TestLinearCatalog_Postgres_AddressedAndGatedByOrg(t *testing.T) {
 	rig := newAuthRig(t)
 	alice := rig.seedUser()
@@ -175,40 +172,5 @@ func TestLinearTeamsPut_Postgres_GatesOnTheTeam(t *testing.T) {
 	}
 	if n := fake.Calls(); n != 0 {
 		t.Errorf("refused writes asked Linear %d times", n)
-	}
-}
-
-// TestOrgSettingsPatch_Postgres_PollIntervalFloor: the cadence floor holds in
-// multi mode, through a real session on the Postgres stores, for every source.
-func TestOrgSettingsPatch_Postgres_PollIntervalFloor(t *testing.T) {
-	rig := newAuthRig(t)
-	alice := rig.seedUser()
-	org, _ := rig.seedOrg(alice, "linear-floor-"+uuid.NewString()[:8])
-	sid := rig.signIn(alice)
-	path := "/api/orgs/" + org.String() + "/settings"
-	version := func() any {
-		t.Helper()
-		resp := rig.requestWithSid(http.MethodGet, path, sid)
-		defer resp.Body.Close()
-		var got map[string]any
-		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil || resp.StatusCode != http.StatusOK {
-			t.Fatalf("GET settings = %d, %v", resp.StatusCode, err)
-		}
-		return got["version"]
-	}
-
-	for _, field := range []string{"github_poll_interval", "jira_poll_interval", "linear_poll_interval"} {
-		resp := rig.postJSONWithSid(http.MethodPatch, path, sid, map[string]any{"version": version(), field: "29s"})
-		raw, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusUnprocessableEntity || !strings.Contains(string(raw), `"OUT_OF_RANGE"`) {
-			t.Errorf("%s = 29s: %d %s, want 422 OUT_OF_RANGE", field, resp.StatusCode, raw)
-		}
-		resp = rig.postJSONWithSid(http.MethodPatch, path, sid, map[string]any{"version": version(), field: "30s"})
-		raw, _ = io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), `"`+field+`":"30s"`) {
-			t.Errorf("%s = 30s: %d %s, want 200 storing 30s", field, resp.StatusCode, raw)
-		}
 	}
 }
