@@ -1,4 +1,4 @@
-package server
+package teams
 
 import (
 	"context"
@@ -50,16 +50,16 @@ type teamArchiveResultJSON struct {
 // belongs — the team isn't in this org, or the id isn't an id. Returns the
 // resolved (orgID, userID, teamID) and ok=false when a response was already
 // written.
-func (th *teamsHandler) resolveTeamForLifecycle(w http.ResponseWriter, r *http.Request) (orgID, userID, teamID string, ok bool) {
+func (th *Handler) resolveTeamForLifecycle(w http.ResponseWriter, r *http.Request) (orgID, userID, teamID string, ok bool) {
 	if runmode.Current() == runmode.ModeLocal {
-		notFound(w, "route")
+		httpx.NotFound(w, "route")
 		return "", "", "", false
 	}
-	orgID, ok = requireOrg(w, r)
+	orgID, ok = httpx.RequireOrg(w, r)
 	if !ok {
 		return "", "", "", false
 	}
-	userID = ClaimsFrom(r.Context()).Subject
+	userID = httpx.ClaimsFrom(r.Context()).Subject
 
 	teamID, ok = th.az.TeamIDFromPath(w, r, "teams", orgID, userID)
 	if !ok {
@@ -71,11 +71,11 @@ func (th *teamsHandler) resolveTeamForLifecycle(w http.ResponseWriter, r *http.R
 	}
 	isAdmin, err := th.az.UserIsOrgAdmin(r.Context(), userID, orgID)
 	if err != nil {
-		internalError(w, "teams", err)
+		httpx.InternalError(w, "teams", err)
 		return "", "", "", false
 	}
 	if !isAdmin {
-		forbidden(w, "org admin role required")
+		httpx.Forbidden(w, "org admin role required")
 		return "", "", "", false
 	}
 	return orgID, userID, teamID, true
@@ -86,7 +86,7 @@ func (th *teamsHandler) resolveTeamForLifecycle(w http.ResponseWriter, r *http.R
 // Org-admin only, multi-mode only.
 //
 // GET /api/teams/{team_id}/archive/preview
-func (th *teamsHandler) handleTeamArchivePreview(w http.ResponseWriter, r *http.Request) {
+func (th *Handler) handleTeamArchivePreview(w http.ResponseWriter, r *http.Request) {
 	orgID, _, teamID, ok := th.resolveTeamForLifecycle(w, r)
 	if !ok {
 		return
@@ -94,20 +94,20 @@ func (th *teamsHandler) handleTeamArchivePreview(w http.ResponseWriter, r *http.
 
 	team, err := th.allStores.Teams.GetSystem(r.Context(), orgID, teamID)
 	if err != nil {
-		internalError(w, "teams", err)
+		httpx.InternalError(w, "teams", err)
 		return
 	}
 	if team == nil {
-		notFound(w, "team")
+		httpx.NotFound(w, "team")
 		return
 	}
 
 	activeRuns, err := th.teamActiveWork(r, orgID, teamID)
 	if err != nil {
-		internalError(w, "teams", err)
+		httpx.InternalError(w, "teams", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, teamArchivePreviewJSON{
+	httpx.WriteJSON(w, http.StatusOK, teamArchivePreviewJSON{
 		TeamID:     teamID,
 		Name:       team.Name,
 		Archived:   team.DeletedAt != nil,
@@ -125,7 +125,7 @@ func (th *teamsHandler) handleTeamArchivePreview(w http.ResponseWriter, r *http.
 // count of work stopped.
 //
 // POST /api/teams/{team_id}/archive
-func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request) {
+func (th *Handler) handleTeamArchive(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, teamID, ok := th.resolveTeamForLifecycle(w, r)
 	if !ok {
 		return
@@ -133,15 +133,15 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 
 	team, err := th.allStores.Teams.GetSystem(r.Context(), orgID, teamID)
 	if err != nil {
-		internalError(w, "teams", err)
+		httpx.InternalError(w, "teams", err)
 		return
 	}
 	if team == nil {
-		notFound(w, "team")
+		httpx.NotFound(w, "team")
 		return
 	}
 	if team.DeletedAt != nil {
-		conflict(w, "team is already archived")
+		httpx.Conflict(w, "team is already archived")
 		return
 	}
 
@@ -153,10 +153,10 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 		return e
 	}); err != nil {
 		if errors.Is(err, db.ErrTeamNotFound) {
-			conflict(w, "team is already archived")
+			httpx.Conflict(w, "team is already archived")
 			return
 		}
-		internalError(w, "teams", err)
+		httpx.InternalError(w, "teams", err)
 		return
 	}
 
@@ -165,7 +165,7 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 	// terminal).
 	conversationIDs, err := th.allStores.Conversations.ActiveIDsForTeamSystem(r.Context(), orgID, teamID)
 	if err != nil {
-		internalError(w, "teams", err)
+		httpx.InternalError(w, "teams", err)
 		return
 	}
 
@@ -216,7 +216,7 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 
 	teamsLog.Info("team archived",
 		"org", orgID, "team", teamID, "cancelled_runs", cancelledRuns)
-	writeJSON(w, http.StatusOK, teamArchiveResultJSON{
+	httpx.WriteJSON(w, http.StatusOK, teamArchiveResultJSON{
 		CancelledRuns: cancelledRuns,
 	})
 }
@@ -226,7 +226,7 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 // terminal by design. Org-admin only, multi-mode only.
 //
 // POST /api/teams/{team_id}/restore
-func (th *teamsHandler) handleTeamRestore(w http.ResponseWriter, r *http.Request) {
+func (th *Handler) handleTeamRestore(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, teamID, ok := th.resolveTeamForLifecycle(w, r)
 	if !ok {
 		return
@@ -234,15 +234,15 @@ func (th *teamsHandler) handleTeamRestore(w http.ResponseWriter, r *http.Request
 
 	team, err := th.allStores.Teams.GetSystem(r.Context(), orgID, teamID)
 	if err != nil {
-		internalError(w, "teams", err)
+		httpx.InternalError(w, "teams", err)
 		return
 	}
 	if team == nil {
-		notFound(w, "team")
+		httpx.NotFound(w, "team")
 		return
 	}
 	if team.DeletedAt == nil {
-		conflict(w, "team is not archived")
+		httpx.Conflict(w, "team is not archived")
 		return
 	}
 
@@ -254,10 +254,10 @@ func (th *teamsHandler) handleTeamRestore(w http.ResponseWriter, r *http.Request
 	}); err != nil {
 		if errors.Is(err, db.ErrTeamNotFound) {
 			// Restored in a race past GetSystem — treat as already-restored.
-			conflict(w, "team is not archived")
+			httpx.Conflict(w, "team is not archived")
 			return
 		}
-		internalError(w, "teams", err)
+		httpx.InternalError(w, "teams", err)
 		return
 	}
 
@@ -265,7 +265,7 @@ func (th *teamsHandler) handleTeamRestore(w http.ResponseWriter, r *http.Request
 	// The row the write returned, not the copy read before it: that copy still
 	// carries the tombstone this request removed, and patching the field off it
 	// by hand was a response asserting a state nobody had read.
-	writeJSON(w, http.StatusOK, teamToJSON(restored, ""))
+	httpx.WriteJSON(w, http.StatusOK, teamToJSON(restored, ""))
 }
 
 // archivedTeamListRequest is the body of POST /api/teams/archived/list. The
@@ -289,26 +289,26 @@ type archivedTeamListRequest struct {
 // they were never on has no membership to report.
 //
 // POST /api/teams/archived/list
-func (th *teamsHandler) handleTeamArchivedList(w http.ResponseWriter, r *http.Request) {
+func (th *Handler) handleTeamArchivedList(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
-		notFound(w, "route")
+		httpx.NotFound(w, "route")
 		return
 	}
-	orgID, ok := requireOrg(w, r)
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
+	userID := httpx.ClaimsFrom(r.Context()).Subject
 	isAdmin, err := th.az.UserIsOrgAdmin(r.Context(), userID, orgID)
 	if err != nil {
-		internalError(w, "teams", err)
+		httpx.InternalError(w, "teams", err)
 		return
 	}
 	if !isAdmin {
-		// The caller is an org member by construction (requireOrg resolved
+		// The caller is an org member by construction (httpx.RequireOrg resolved
 		// their active org), so the org is visible and the denial names the
 		// role rather than hiding the surface.
-		forbidden(w, "org admin role required")
+		httpx.Forbidden(w, "org admin role required")
 		return
 	}
 
@@ -325,7 +325,7 @@ func (th *teamsHandler) handleTeamArchivedList(w http.ResponseWriter, r *http.Re
 	teams, total, err := th.allStores.Teams.ListArchivedForOrgSystem(r.Context(), orgID,
 		db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 	if err != nil {
-		internalError(w, "teams", err)
+		httpx.InternalError(w, "teams", err)
 		return
 	}
 	out := make([]teamJSON, 0, len(teams))
@@ -338,7 +338,7 @@ func (th *teamsHandler) handleTeamArchivedList(w http.ResponseWriter, r *http.Re
 // teamActiveWork returns the count of active conversations for the team —
 // the preview's active_runs wire field. Read on the admin pool
 // (ActiveIDsForTeamSystem).
-func (th *teamsHandler) teamActiveWork(r *http.Request, orgID, teamID string) (runs int, err error) {
+func (th *Handler) teamActiveWork(r *http.Request, orgID, teamID string) (runs int, err error) {
 	conversationIDs, err := th.allStores.Conversations.ActiveIDsForTeamSystem(r.Context(), orgID, teamID)
 	if err != nil {
 		return 0, err
@@ -349,9 +349,9 @@ func (th *teamsHandler) teamActiveWork(r *http.Request, orgID, teamID string) (r
 // spawnerRuntime resolves the wired delegation spawner, or nil. It guards the
 // getter func ITSELF being nil (not just the pointer it returns) so the
 // archive cascade degrades to "nothing to cancel" instead of panicking on a
-// teamsHandler constructed without the getter wired (early startup, a future
+// Handler constructed without the getter wired (early startup, a future
 // refactor, or a test fixture that doesn't need it).
-func (th *teamsHandler) spawnerRuntime() *delegate.Spawner {
+func (th *Handler) spawnerRuntime() *delegate.Spawner {
 	if th.spawner == nil {
 		return nil
 	}

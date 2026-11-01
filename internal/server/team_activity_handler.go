@@ -156,3 +156,10 @@ func (s *Server) handleTeamActivity(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
+
+func (s *Server) registerTeamActivityRoutes() {
+	// The team's flow node — events/tasks/runs cuts over a window, the
+	// spend node's sibling on the same member-level gate: both are the team
+	// page's figures, and the team page is every member's.
+	s.api("GET /api/teams/{team_id}/activity", s.handleTeamActivity)
+}

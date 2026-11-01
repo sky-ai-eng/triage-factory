@@ -1,4 +1,4 @@
-package server
+package teams
 
 import (
 	"bytes"
@@ -13,15 +13,16 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// teamRenameRig is a Postgres-backed teamsHandler with RLS live, and an org
+// teamRenameRig is a Postgres-backed Handler with RLS live, and an org
 // with a founder (org owner, team admin), a plain team member, and an org admin
 // who is not on the team.
 type teamRenameRig struct {
 	h        *pgtest.Harness
-	th       *teamsHandler
+	th       *Handler
 	orgID    string
 	teamID   string
 	admin    string // founder: org owner + team admin
@@ -37,7 +38,6 @@ func newTeamRenameRig(t *testing.T) *teamRenameRig {
 	h.Reset(t)
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
-	s := New(h.AdminDB, stores)
 
 	orgID, founder, teamID := pgtest.SeedOrgWithUser(t, h, "founder")
 	memb := pgtest.SeedUser(t, h, "member")
@@ -48,7 +48,7 @@ func newTeamRenameRig(t *testing.T) *teamRenameRig {
 
 	return &teamRenameRig{
 		h:        h,
-		th:       &teamsHandler{tx: s.tx, az: s.az, allStores: stores},
+		th:       New(stores.Tx, authz.New(h.AdminDB, stores.Tx), stores, nil, nil),
 		orgID:    orgID,
 		teamID:   teamID,
 		admin:    founder,

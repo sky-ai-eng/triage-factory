@@ -1,28 +1,30 @@
-package server
+package teams
 
 import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
-	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
-// teamArchiveRig is a Postgres-backed teamsHandler, with RLS live, over an org
+// teamArchiveRig is a Postgres-backed Handler, with RLS live, over an org
 // with an owner and a plain member. spawner is nil: the no-active-work path
 // does not need it.
 type teamArchiveRig struct {
 	h      *pgtest.Harness
-	s      *Server
-	th     *teamsHandler
+	th     *Handler
 	orgID  string
 	teamID string
 	owner  string // org owner (org admin)
@@ -37,19 +39,14 @@ func newTeamArchiveRig(t *testing.T) *teamArchiveRig {
 	h.Reset(t)
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
-	s := New(h.AdminDB, stores)
 
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, h, "owner")
 	member := pgtest.SeedUser(t, h, "member")
 	pgtest.AddOrgMember(t, h, member, orgID, teamID, "member", "member")
 
-	th := &teamsHandler{
-		tx:        s.tx,
-		az:        s.az,
-		allStores: stores,
-		spawner:   func() *delegate.Spawner { return nil },
-	}
-	return &teamArchiveRig{h: h, s: s, th: th, orgID: orgID, teamID: teamID, owner: owner, member: member}
+	th := New(stores.Tx, authz.New(h.AdminDB, stores.Tx), stores,
+		func() *delegate.Spawner { return nil }, nil)
+	return &teamArchiveRig{h: h, th: th, orgID: orgID, teamID: teamID, owner: owner, member: member}
 }
 
 // req builds a request as callerID with the team_id path value + claims + org
@@ -175,59 +172,112 @@ func TestTeamRestore_RevivesTeam(t *testing.T) {
 	}
 }
 
-// TestTeamArchive_BlocksTeamSettingsWrite: an archived team rejects a
-// team-settings write with 403 TEAM_ARCHIVED, and a restore re-opens it. This
-// is the VerifyTeamNotArchived gate end-to-end.
-func TestTeamArchive_BlocksTeamSettingsWrite(t *testing.T) {
-	r := newTeamArchiveRig(t)
-
-	arc := httptest.NewRecorder()
-	r.th.handleTeamArchive(arc, r.req(http.MethodPost, "/api/teams/"+r.teamID+"/archive", r.owner, r.teamID))
-	if arc.Code != http.StatusOK {
-		t.Fatalf("archive = %d, want 200; body=%s", arc.Code, arc.Body.String())
-	}
-
-	// A team-settings PATCH (gated on user_is_team_admin) must now be blocked by
-	// VerifyTeamNotArchived with a clear archived 403.
-	wreq := httptest.NewRequest(http.MethodPatch, "/api/teams/"+r.teamID+"/settings", strings.NewReader(`{"ai_model":"opus"}`))
-	wreq.Header.Set("Content-Type", "application/json")
-	wreq.SetPathValue("team_id", r.teamID)
-	ctx := httpx.WithClaims(wreq.Context(), &verify.Claims{Subject: r.owner})
-	ctx = httpx.WithOrgID(ctx, r.orgID)
-	wreq = wreq.WithContext(ctx)
-
-	wrec := httptest.NewRecorder()
-	r.s.handleTeamSettingsPatch(wrec, wreq)
-	if wrec.Code != http.StatusForbidden {
-		t.Fatalf("team-settings write on archived team = %d, want 403; body=%s", wrec.Code, wrec.Body.String())
-	}
-	httpxtest.AssertFirstError(t, wrec, httpx.ReasonTeamArchived, "")
+// doorbell records every ring the archive cascade made, in order.
+type doorbell struct {
+	rings [][2]string
 }
 
-// TestTeamArchive_BlocksMembershipWrite: an archived team's member add is a 403
-// TEAM_ARCHIVED. The membership handlers' RLS does not filter archived teams,
-// so the handler's own archived check is what refuses it.
-func TestTeamArchive_BlocksMembershipWrite(t *testing.T) {
-	r := newTeamArchiveRig(t)
+func (d *doorbell) ring(orgID, conversationID string) {
+	d.rings = append(d.rings, [2]string{orgID, conversationID})
+}
 
-	arc := httptest.NewRecorder()
-	r.th.handleTeamArchive(arc, r.req(http.MethodPost, "/api/teams/"+r.teamID+"/archive", r.owner, r.teamID))
-	if arc.Code != http.StatusOK {
-		t.Fatalf("archive = %d, want 200; body=%s", arc.Code, arc.Body.String())
+func (d *doorbell) taken() [][2]string {
+	out := d.rings
+	d.rings = nil
+	return out
+}
+
+// pgConversationBoundary reads one conversation's stamp off the admin pool.
+func pgConversationBoundary(t *testing.T, h *pgtest.Harness, conversationID string) (ended bool, reason string) {
+	t.Helper()
+	if err := h.AdminDB.QueryRow(
+		`SELECT ended_at IS NOT NULL, COALESCE(ended_reason, '') FROM conversations WHERE id = $1`,
+		conversationID,
+	).Scan(&ended, &reason); err != nil {
+		t.Fatalf("read boundary of %s: %v", conversationID, err)
+	}
+	return ended, reason
+}
+
+// teamArchiveConversation seeds one conversation on the rig's team.
+// origin='interactive' sidesteps the origin-requires-parents CHECK; the
+// boundary door reads team_id, the boundary column and the parent link, and
+// nothing else.
+func teamArchiveConversation(t *testing.T, r *teamArchiveRig, status any) string {
+	t.Helper()
+	id := uuid.New().String()
+	concluded := false
+	if s, ok := status.(string); ok {
+		status, concluded = dbtest.SeedStatus(s)
+	}
+	pgtest.MustExec(t, r.h.AdminDB, `
+		INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility,
+		                           type, origin, trigger_type, status, completed_at)
+		VALUES ($1, $2, $3, $4, 'team', 'delegation', 'interactive', 'manual', $5,
+		        CASE WHEN $6::boolean THEN now() END)
+	`, id, r.orgID, r.owner, r.teamID, status, concluded)
+	return id
+}
+
+// TestTeamArchive_RingsTheMemoryDoorbellForEveryConversationItStamped: archiving
+// a team ends every un-ended conversation it holds, concluded ones included, and
+// rings the memory doorbell once per row it stamped. The rig wires no spawner, so
+// nothing is stopped: the stamp is wider than the stop.
+func TestTeamArchive_RingsTheMemoryDoorbellForEveryConversationItStamped(t *testing.T) {
+	r := newTeamArchiveRig(t)
+	d := &doorbell{}
+	r.th.memoryOwed = d.ring
+
+	midFlight := teamArchiveConversation(t, r, nil)
+	parked := teamArchiveConversation(t, r, "open")
+	concluded := teamArchiveConversation(t, r, dbtest.SeedConcluded)
+
+	// Already ended: it keeps the boundary that ended it, and whatever it owes
+	// was rung for then, so this archive neither stamps nor rings.
+	alreadyEnded := teamArchiveConversation(t, r, "open")
+	pgtest.MustExec(t, r.h.AdminDB,
+		`UPDATE conversations SET ended_at = now(), ended_reason = $2 WHERE id = $1`,
+		alreadyEnded, string(domain.EndedTakenOver))
+	// A subagent ends with its spawner, never with the team.
+	subagent := teamArchiveConversation(t, r, nil)
+	pgtest.MustExec(t, r.h.AdminDB,
+		`UPDATE conversations SET parent_conversation_id = $2 WHERE id = $1`, subagent, midFlight)
+
+	rec := httptest.NewRecorder()
+	r.th.handleTeamArchive(rec, r.req(http.MethodPost, "/api/teams/"+r.teamID+"/archive", r.owner, r.teamID))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	tmh := &teamMembersHandler{tx: r.s.tx, az: r.s.az}
-	body := strings.NewReader(`{"user_id":"` + r.member + `","role":"member"}`)
-	mreq := httptest.NewRequest(http.MethodPost, "/api/teams/"+r.teamID+"/members", body)
-	mreq.Header.Set("Content-Type", "application/json")
-	mreq.SetPathValue("team_id", r.teamID)
-	ctx := httpx.WithClaims(mreq.Context(), &verify.Claims{Subject: r.owner})
-	ctx = httpx.WithOrgID(ctx, r.orgID)
-	mreq = mreq.WithContext(ctx)
+	for _, id := range []string{midFlight, parked, concluded} {
+		if ended, reason := pgConversationBoundary(t, r.h, id); !ended || reason != string(domain.EndedTeamArchived) {
+			t.Errorf("%s boundary = (ended=%v, reason=%q), want a stamp with reason %q",
+				id, ended, reason, domain.EndedTeamArchived)
+		}
+	}
+	if ended, reason := pgConversationBoundary(t, r.h, subagent); ended || reason != "" {
+		t.Errorf("subagent %s boundary = (ended=%v, reason=%q), want none", subagent, ended, reason)
+	}
+	if _, reason := pgConversationBoundary(t, r.h, alreadyEnded); reason != string(domain.EndedTakenOver) {
+		t.Errorf("already-ended conversation %s now reads %q, want its original %q",
+			alreadyEnded, reason, domain.EndedTakenOver)
+	}
 
-	mrec := httptest.NewRecorder()
-	tmh.handleTeamMemberAdd(mrec, mreq)
-	if mrec.Code != http.StatusForbidden {
-		t.Fatalf("member add on archived team = %d, want 403; body=%s", mrec.Code, mrec.Body.String())
+	got := d.taken()
+	want := map[string]bool{midFlight: true, parked: true, concluded: true}
+	if len(got) != len(want) {
+		t.Fatalf("rang %d times for %d stamped conversations: %v", len(got), len(want), got)
+	}
+	for _, ring := range got {
+		if ring[0] != r.orgID {
+			t.Errorf("rang for org %q, want %q", ring[0], r.orgID)
+		}
+		if !want[ring[1]] {
+			t.Errorf("rang for %s, which the archive did not stamp", ring[1])
+		}
+		delete(want, ring[1])
+	}
+	for id := range want {
+		t.Errorf("archive stamped %s without ringing for it", id)
 	}
 }

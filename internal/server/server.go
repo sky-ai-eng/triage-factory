@@ -38,6 +38,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/deliverables"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/models"
+	"github.com/sky-ai-eng/triage-factory/internal/server/teams"
 	"github.com/sky-ai-eng/triage-factory/internal/server/usage"
 	"github.com/sky-ai-eng/triage-factory/internal/wsevent/knowledgeevent"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -885,7 +886,8 @@ func (s *Server) routes() {
 	s.registerSettingsRoutes()
 	s.registerNotificationRoutes()
 	s.registerOrgRoutes()
-	s.registerTeamRoutes()
+	s.registerTeamActivityRoutes()
+	s.registerTeamPRRoutes()
 	s.registerTrackedSetRoutes()
 	s.registerTeamKnowledgeRoutes()
 	s.registerTeamMemberRoutes()
@@ -934,6 +936,7 @@ func (s *Server) routes() {
 		},
 	).Register(m)
 	usage.New(s.tx, s.az, s.allStores.ConversationQueue).Register(m)
+	teams.New(s.tx, s.az, s.allStores, func() *delegate.Spawner { return s.spawner }, s.kickMemoryOwed).Register(m)
 
 	// SSO (connection / domains / break-glass admin surface, the verify-
 	// before-enforce test-start, and the identifier-first discovery probe) is

@@ -1,4 +1,6 @@
-package server
+// Package teams serves /api/teams: the caller's team list, the single read,
+// the org-admin create and rename, and the archive/restore lifecycle.
+package teams
 
 import (
 	"errors"
@@ -10,18 +12,21 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/promptseed"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// teamsHandler serves /api/teams — the caller's team list and the org-admin
+var teamsLog = logging.Component("teams")
+
+// Handler serves /api/teams — the caller's team list and the org-admin
 // "add team" affordance. It reads/writes through the transactional store
 // runner, gates the create on az.UserIsOrgAdmin, and runs the post-commit
 // new-team bootstrap (prompts/rules/bot defaults) against the full store
 // bundle, which must run outside the request transaction.
-type teamsHandler struct {
+type Handler struct {
 	tx        db.TxRunner
 	az        *authz.Checker
 	allStores db.Stores
@@ -33,10 +38,17 @@ type teamsHandler struct {
 	spawner func() *delegate.Spawner
 	// memoryOwed rings the memory doorbell for a conversation the archive
 	// cascade just ended. The relay callbacks live on the Server, so the single
-	// construction site in registerTeamRoutes hands this handler the one method
-	// rather than a back-reference to the whole server — the same shape
-	// settingsHandler takes kickJira in.
+	// construction site in the server's routes() hands this handler the one
+	// method rather than a back-reference to the whole server — the same shape
+	// the server's settingsHandler takes kickJira in.
 	memoryOwed func(orgID, conversationID string)
+}
+
+// New builds the teams handler. spawner is read on every archive, not once
+// here; see Handler.spawner. Either func may be nil: the archive cascade then
+// stops no process, or rings no doorbell.
+func New(tx db.TxRunner, az *authz.Checker, allStores db.Stores, spawner func() *delegate.Spawner, memoryOwed func(orgID, conversationID string)) *Handler {
+	return &Handler{tx: tx, az: az, allStores: allStores, spawner: spawner, memoryOwed: memoryOwed}
 }
 
 // teamJSON is the one wire shape for a team: the list rows, the single read,
@@ -116,12 +128,12 @@ type teamListRequest struct {
 // `last_acting_team_id` gave.
 //
 // POST /api/teams/list
-func (th *teamsHandler) handleTeamsList(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (th *Handler) handleTeamsList(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
+	userID := httpx.ClaimsFrom(r.Context()).Subject
 
 	var req teamListRequest
 	if !httpx.DecodeJSONStrict(w, r, &req) {
@@ -147,7 +159,7 @@ func (th *teamsHandler) handleTeamsList(w http.ResponseWriter, r *http.Request) 
 		lastActing, e = tx.Users.GetLastActingTeam(r.Context(), userID)
 		return e
 	}); err != nil {
-		internalError(w, "teams", err)
+		httpx.InternalError(w, "teams", err)
 		return
 	}
 
@@ -170,12 +182,12 @@ func (th *teamsHandler) handleTeamsList(w http.ResponseWriter, r *http.Request) 
 // the disclosure rule's own answer rather than a handler predicate's.
 //
 // GET /api/teams/{team_id}
-func (th *teamsHandler) handleTeamGet(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (th *Handler) handleTeamGet(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
+	userID := httpx.ClaimsFrom(r.Context()).Subject
 	teamID, ok := th.az.TeamIDFromPath(w, r, "teams", orgID, userID)
 	if !ok {
 		return
@@ -194,14 +206,14 @@ func (th *teamsHandler) handleTeamGet(w http.ResponseWriter, r *http.Request) {
 		lastActing, e = tx.Users.GetLastActingTeam(r.Context(), userID)
 		return e
 	}); err != nil {
-		internalError(w, "teams", err)
+		httpx.InternalError(w, "teams", err)
 		return
 	}
 	if team == nil {
-		notFound(w, "team")
+		httpx.NotFound(w, "team")
 		return
 	}
-	writeJSON(w, http.StatusOK, teamToJSON(*team, lastActing))
+	httpx.WriteJSON(w, http.StatusOK, teamToJSON(*team, lastActing))
 }
 
 // maxTeamNameLen caps a team name's length (in runes). A generous bound that
@@ -247,19 +259,19 @@ func validateTeamName(v *httpx.Validation, name string) string {
 // sync — there's no separate slug field. At least one field must be present.
 //
 // PATCH /api/teams/{team_id}  body: { "name"?: "...", "description"?: "..." }
-func (th *teamsHandler) handleTeamUpdate(w http.ResponseWriter, r *http.Request) {
+func (th *Handler) handleTeamUpdate(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
 		// Multi-only: local mode has exactly one team by construction and
 		// hides the whole team-management surface. A route that doesn't
 		// exist in this deployment mode is a 404, not a 501.
-		notFound(w, "route")
+		httpx.NotFound(w, "route")
 		return
 	}
-	orgID, ok := requireOrg(w, r)
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
+	userID := httpx.ClaimsFrom(r.Context()).Subject
 
 	teamID, ok := th.az.TeamIDFromPath(w, r, "teams", orgID, userID)
 	if !ok {
@@ -322,16 +334,16 @@ func (th *teamsHandler) handleTeamUpdate(w http.ResponseWriter, r *http.Request)
 		// The list row shape, with role left empty: the write carries no
 		// membership lookup, and the caller already knows their relationship
 		// to a team they just had the role to edit.
-		writeJSON(w, http.StatusOK, teamToJSON(updated, ""))
+		httpx.WriteJSON(w, http.StatusOK, teamToJSON(updated, ""))
 	case errors.Is(err, db.ErrTeamNotFound):
 		// Raced past VerifyTeamInOrg (deleted between gate and write) — 404.
-		notFound(w, "team")
-	case isUniqueViolation(err):
+		httpx.NotFound(w, "team")
+	case httpx.IsUniqueViolation(err):
 		// Re-deriving slug from the new name collided with a sibling team —
 		// same 409 + generic message as Create.
 		writeDuplicateTeamName(w)
 	default:
-		internalError(w, "teams", err)
+		httpx.InternalError(w, "teams", err)
 	}
 }
 
@@ -340,10 +352,10 @@ func (th *teamsHandler) handleTeamUpdate(w http.ResponseWriter, r *http.Request)
 // 403 and returns false — unlike the roster's non-disclosure 404, the caller is
 // already inside the org and the cross-org case 404'd at VerifyTeamInOrg, so a
 // plain member learns only that they lack the role, not whether the team exists.
-func (th *teamsHandler) requireTeamAdminOrOrgAdmin(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string) bool {
+func (th *Handler) requireTeamAdminOrOrgAdmin(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string) bool {
 	isTeamAdmin, err := th.az.UserIsTeamAdmin(r.Context(), userID, orgID, teamID)
 	if err != nil {
-		internalError(w, "teams", err)
+		httpx.InternalError(w, "teams", err)
 		return false
 	}
 	if isTeamAdmin {
@@ -351,11 +363,11 @@ func (th *teamsHandler) requireTeamAdminOrOrgAdmin(w http.ResponseWriter, r *htt
 	}
 	isOrgAdmin, err := th.az.UserIsOrgAdmin(r.Context(), userID, orgID)
 	if err != nil {
-		internalError(w, "teams", err)
+		httpx.InternalError(w, "teams", err)
 		return false
 	}
 	if !isOrgAdmin {
-		forbidden(w, "team admin or org admin role required")
+		httpx.Forbidden(w, "team admin or org admin role required")
 		return false
 	}
 	return true
@@ -368,30 +380,30 @@ func (th *teamsHandler) requireTeamAdminOrOrgAdmin(w http.ResponseWriter, r *htt
 // the new team enrolls the creator so it shows up in their team list.
 //
 // POST /api/teams  body: { "name": "<display name>", "slug"?: "<slug>" }
-func (th *teamsHandler) handleTeamCreate(w http.ResponseWriter, r *http.Request) {
+func (th *Handler) handleTeamCreate(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
 		// Multi-only: local mode has exactly one team by construction. A
 		// route absent in this mode is a 404, not a 501.
-		notFound(w, "route")
+		httpx.NotFound(w, "route")
 		return
 	}
-	orgID, ok := requireOrg(w, r)
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
+	userID := httpx.ClaimsFrom(r.Context()).Subject
 
 	isAdmin, err := th.az.UserIsOrgAdmin(r.Context(), userID, orgID)
 	if err != nil {
-		internalError(w, "teams", err)
+		httpx.InternalError(w, "teams", err)
 		return
 	}
 	if !isAdmin {
-		// The caller is a member of the org (requireOrg resolved it from
+		// The caller is a member of the org (httpx.RequireOrg resolved it from
 		// their own session), so the org is visible to them and the denial
 		// names the role they lack. A 404 here would report their own
 		// org missing.
-		forbidden(w, "org admin role required")
+		httpx.Forbidden(w, "org admin role required")
 		return
 	}
 
@@ -429,11 +441,11 @@ func (th *teamsHandler) handleTeamCreate(w http.ResponseWriter, r *http.Request)
 		// per-driver strings. The constraint is on the *slug*, not the
 		// name, so two distinct names can collide ("Engineering" and
 		// "Engineering!" both slugify to "engineering") — say so.
-		if isUniqueViolation(err) {
+		if httpx.IsUniqueViolation(err) {
 			writeDuplicateTeamName(w)
 			return
 		}
-		internalError(w, "teams", err)
+		httpx.InternalError(w, "teams", err)
 		return
 	}
 
@@ -454,49 +466,35 @@ func (th *teamsHandler) handleTeamCreate(w http.ResponseWriter, r *http.Request)
 	// the response — the settings Team selector lists admin'd teams, and this
 	// lets a freshly-created team surface there without waiting on a refetch.
 	created.Role = "admin"
-	writeJSON(w, http.StatusCreated, teamToJSON(created, ""))
+	httpx.WriteJSON(w, http.StatusCreated, teamToJSON(created, ""))
 }
 
-func (s *Server) registerTeamRoutes() {
+// Register mounts the teams routes.
+func (th *Handler) Register(m httpx.Mounts) {
 	// Teams. The list read is the data source for the per-page read filter and
 	// the write-time picker (count-gated to ≥2 teams in the frontend); it
 	// carries the last-acting-team the picker seeds from, maintained
 	// server-side on each write — a recency signal, not a user preference, so
 	// there is no endpoint to set it explicitly. POST /api/teams is the
 	// org-admin "add team" affordance (multi-only; 404 in local).
-	th := &teamsHandler{
-		tx:         s.tx,
-		az:         s.az,
-		allStores:  s.allStores,
-		spawner:    func() *delegate.Spawner { return s.spawner },
-		memoryOwed: s.kickMemoryOwed,
-	}
-	s.apiMutating("POST /api/teams/list", th.handleTeamsList)
-	s.apiMutating("POST /api/teams", th.handleTeamCreate)
+	m.APIMutating("POST /api/teams/list", th.handleTeamsList)
+	m.APIMutating("POST /api/teams", th.handleTeamCreate)
 	// The canonical single read, and the only reader of a team's description.
 	// Any org member may read any team in their org; a cross-org id 404s under
 	// RLS. {team_id} takes the literal "default" in local mode
 	// (authz.ResolveTeamID).
-	s.api("GET /api/teams/{team_id}", th.handleTeamGet)
+	m.API("GET /api/teams/{team_id}", th.handleTeamGet)
 	// PATCH /api/teams/{team_id} renames a team / edits its description
 	// (multi-only; 404 in local). Gated team-admin-or-org-admin; a plain
 	// member 403s, a cross-org team_id 404s (VerifyTeamInOrg).
-	s.apiMutating("PATCH /api/teams/{team_id}", th.handleTeamUpdate)
+	m.APIMutating("PATCH /api/teams/{team_id}", th.handleTeamUpdate)
 	// Team archive/restore lifecycle, org-admin only, multi-mode. Archive
 	// soft-deletes + force-stops the team's in-flight delegations and blocks
 	// further writes; restore flips it back, and dead conversations stay dead.
 	// The preview + archived-list back the confirm modal and the org-admin
 	// restore surface.
-	s.apiMutating("POST /api/teams/archived/list", th.handleTeamArchivedList)
-	s.api("GET /api/teams/{team_id}/archive/preview", th.handleTeamArchivePreview)
-	s.apiMutating("POST /api/teams/{team_id}/archive", th.handleTeamArchive)
-	s.apiMutating("POST /api/teams/{team_id}/restore", th.handleTeamRestore)
-	// The team's flow node — events/tasks/runs cuts over a window, the
-	// spend node's sibling on the same member-level gate: both are the team
-	// page's figures, and the team page is every member's.
-	s.api("GET /api/teams/{team_id}/activity", s.handleTeamActivity)
-	// The team's pull requests — the PR page's team arm, and (as its
-	// count-only read) the Overview's OPEN PRS figure. Same member-level
-	// gate as the flow node beside it.
-	s.apiMutating("POST /api/teams/{team_id}/prs/list", s.handleTeamPRList)
+	m.APIMutating("POST /api/teams/archived/list", th.handleTeamArchivedList)
+	m.API("GET /api/teams/{team_id}/archive/preview", th.handleTeamArchivePreview)
+	m.APIMutating("POST /api/teams/{team_id}/archive", th.handleTeamArchive)
+	m.APIMutating("POST /api/teams/{team_id}/restore", th.handleTeamRestore)
 }

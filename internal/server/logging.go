@@ -41,6 +41,5 @@ var (
 	stockLog           = logging.Component("stock")
 	taskActionLog      = logging.Component("task-action")
 	tasksLog           = logging.Component("tasks")
-	teamsLog           = logging.Component("teams")
 	workLog            = logging.Component("work")
 )
