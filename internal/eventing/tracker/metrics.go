@@ -27,6 +27,7 @@ const (
 	baseMoveTruncated  = "reset_truncated"
 	baseMoveRewritten  = "reset_rewritten"
 	baseMoveMissingTip = "reset_missing_tip"
+	baseMoveUnreadable = "reset_unreadable"
 	baseMoveIdentical  = "identical"
 )
 
@@ -65,7 +66,7 @@ func newInstruments(mp metric.MeterProvider) *instruments {
 	in := &instruments{}
 	var err error
 	if in.baseMoves, err = m.Int64Counter(baseMovesMetric,
-		metric.WithDescription("Base branch moves the poll processed, by outcome: overlap (the pull requests whose changed paths overlap the move were probed), identical, or a reset that probed every pull request on the base (first_sight, truncated, rewritten, missing_tip).")); err != nil {
+		metric.WithDescription("Base branch moves the poll processed, by outcome: overlap (the pull requests whose changed paths overlap the move were probed), identical, or a reset that probed every pull request on the base (reset_first_sight, reset_truncated, reset_rewritten, reset_missing_tip, reset_unreadable).")); err != nil {
 		trackerLog.Warn("tracker instrument setup failed", "instrument", baseMovesMetric, "error", err)
 	}
 	if in.overlapSetSize, err = m.Float64Histogram(overlapSetSizeMetric,
@@ -80,7 +81,7 @@ func newInstruments(mp metric.MeterProvider) *instruments {
 	return in
 }
 
-func recordBaseMove(outcome string) {
+func recordBaseMoveOutcome(outcome string) {
 	if s := stats.Load(); s != nil {
 		s.baseMoves.Add(context.Background(), 1, metric.WithAttributes(attribute.String("outcome", outcome)))
 	}

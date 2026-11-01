@@ -42,7 +42,7 @@ type watchWorld struct {
 	tip string
 	// listing304 makes the open-PR listing answer 304 to its stored ETag.
 	listing304 bool
-	// compares maps "base...head" to a compare body, or to "404".
+	// compares maps "base...head" to a compare body, or to "404" or "422".
 	compares map[string]string
 	// paths maps a node id to its PRChangedPaths node; a pull request with
 	// none answers that it changes nothing, at its head.
@@ -132,8 +132,12 @@ func (w *watchWorld) serve(rw http.ResponseWriter, r *http.Request) {
 		key := strings.TrimPrefix(path, "/repos/octo/repo/compare/")
 		w.compareReads = append(w.compareReads, key)
 		body, ok := w.compares[key]
-		if !ok || body == "404" {
+		switch {
+		case !ok || body == "404":
 			http.NotFound(rw, r)
+			return
+		case body == "422":
+			http.Error(rw, `{"message":"this comparison could not be generated"}`, http.StatusUnprocessableEntity)
 			return
 		}
 		_, _ = rw.Write([]byte(body))
@@ -185,8 +189,8 @@ func (w *watchWorld) set(f func(*watchWorld)) {
 }
 
 // cycle runs one poll cycle and returns the probes it admitted, by pull
-// request number, each a reason. The probes are settled afterwards, so the
-// next cycle's admissions are its own.
+// request number, each a reason. The ready probes are then read as the worker
+// would read them (settle), so the next cycle's admissions are its own.
 func (w *watchWorld) cycle() map[int]string {
 	w.t.Helper()
 	before := w.probeCount()
@@ -208,10 +212,36 @@ func (w *watchWorld) cycle() map[int]string {
 			}
 		}
 	}
-	if _, err := w.db.Exec(`UPDATE pr_mergeability_probes SET status = 'done', done_at = strftime('%Y-%m-%d %H:%M:%f','now') WHERE status = 'ready'`); err != nil {
-		w.t.Fatalf("settle probes: %v", err)
-	}
+	w.settle()
 	return got
+}
+
+// settle claims every ready probe and completes it with its pull request's
+// stored answer, as a read that comes after the cycle's base moves does, which
+// settles the moves recorded on the rows. A probe someone else holds leased is
+// left alone.
+func (w *watchWorld) settle() {
+	w.t.Helper()
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	if _, err := w.db.Exec(`UPDATE pr_mergeability_probes SET probe_after = strftime('%Y-%m-%d %H:%M:%f','now','-1 seconds') WHERE status = 'ready'`); err != nil {
+		w.t.Fatalf("ripen probes: %v", err)
+	}
+	claim, err := w.stores.PRMergeability.Claim(ctx, workitem.Owner{ID: "watch-world", Epoch: 1}, org, 100)
+	if err != nil {
+		w.t.Fatalf("claim probes: %v", err)
+	}
+	for _, item := range claim.Items {
+		row, err := w.stores.PRMergeability.GetSystem(ctx, org, item.EntityID)
+		if err != nil || row == nil {
+			w.t.Fatalf("read the answer of %s: %+v (err %v)", item.EntityID, row, err)
+		}
+		if _, err := w.stores.PRMergeability.CompleteProbe(ctx, item.Receipt, db.PRMergeabilityAnswer{
+			Found: true, Mergeable: domain.MergeableMergeable, HeadSHA: row.MergeableHeadSHA, BaseRef: row.MergeableBaseRef,
+		}, ""); err != nil {
+			w.t.Fatalf("settle probe %d: %v", item.Receipt.ItemID, err)
+		}
+	}
 }
 
 func (w *watchWorld) probeCount() int64 {
@@ -317,6 +347,8 @@ func TestBranchWatch_CompareStatuses(t *testing.T) {
 		compares map[string]string
 		want     map[int]string
 		reads    []string
+		// noPaths is a move whose pull requests' paths need not be read.
+		noPaths bool
 	}{
 		{
 			name:     "ahead uses the files",
@@ -328,6 +360,17 @@ func TestBranchWatch_CompareStatuses(t *testing.T) {
 			name:     "identical probes nothing",
 			compares: map[string]string{"old...new": compareBody("identical", 0, "")},
 			want:     map[int]string{},
+		},
+		{
+			name:     "an ahead move that changed no file probes nothing",
+			compares: map[string]string{"old...new": compareBody("ahead", 1, "")},
+			want:     map[int]string{},
+			noPaths:  true,
+		},
+		{
+			name:     "an ahead compare with no file list resets the base",
+			compares: map[string]string{"old...new": `{"status":"ahead","total_commits":40,"commits":[]}`},
+			want:     map[int]string{1: domain.MergeabilityProbeBaseReset, 2: domain.MergeabilityProbeBaseReset, 3: domain.MergeabilityProbeBaseReset},
 		},
 		{
 			name:     "behind resets the base",
@@ -381,6 +424,9 @@ func TestBranchWatch_CompareStatuses(t *testing.T) {
 			if c.reads != nil && !slices.Equal(w.compareReads, c.reads) {
 				t.Errorf("compares read = %v, want %v", w.compareReads, c.reads)
 			}
+			if c.noPaths && len(w.pathReads) != 0 {
+				t.Errorf("changed paths read for %v, want none", w.pathReads)
+			}
 			if tip := w.storedTip(); tip == nil || tip.TipSHA != "new" {
 				t.Errorf("stored tip = %+v, want new", tip)
 			}
@@ -425,22 +471,23 @@ func TestBranchWatch_AListingThatAnswered304WaitsForTheFloor(t *testing.T) {
 	}
 }
 
-// failingAdmit refuses the branch watch's admissions while fail is set.
-type failingAdmit struct {
+// failingMark refuses the branch watch's records of a base move while fail
+// is set.
+type failingMark struct {
 	db.PRMergeabilityStore
 	fail bool
 }
 
-func (f *failingAdmit) AdmitSystem(ctx context.Context, orgID string, probes []db.PRMergeabilityProbe) (db.PRMergeabilityAdmission, error) {
-	if f.fail && len(probes) > 0 && probes[0].Reason == domain.MergeabilityProbeBaseMoved {
-		return db.PRMergeabilityAdmission{}, errors.New("admission refused")
+func (f *failingMark) MarkBaseMovedSystem(ctx context.Context, orgID string, entityIDs []string, reason string) (int, error) {
+	if f.fail {
+		return 0, errors.New("write refused")
 	}
-	return f.PRMergeabilityStore.AdmitSystem(ctx, orgID, probes)
+	return f.PRMergeabilityStore.MarkBaseMovedSystem(ctx, orgID, entityIDs, reason)
 }
 
-func TestBranchWatch_TheTipIsStoredOnlyAfterAdmission(t *testing.T) {
+func TestBranchWatch_TheTipIsStoredOnlyAfterTheMoveIsRecorded(t *testing.T) {
 	w := newWatchWorld(t)
-	store := &failingAdmit{PRMergeabilityStore: w.stores.PRMergeability}
+	store := &failingMark{PRMergeabilityStore: w.stores.PRMergeability}
 	w.tr.mergeability = store
 	w.seenOnce()
 	w.set(func(w *watchWorld) { w.compares["old...new"] = compareBody("ahead", 1, "", "src/a.go") })
@@ -450,7 +497,7 @@ func TestBranchWatch_TheTipIsStoredOnlyAfterAdmission(t *testing.T) {
 		t.Fatalf("admitted %v through a refusing store", got)
 	}
 	if tip := w.storedTip(); tip == nil || tip.TipSHA != "old" {
-		t.Fatalf("stored tip after a failed admission = %+v, want old", tip)
+		t.Fatalf("stored tip after a failed record = %+v, want old", tip)
 	}
 
 	store.fail = false
@@ -462,10 +509,10 @@ func TestBranchWatch_TheTipIsStoredOnlyAfterAdmission(t *testing.T) {
 	}
 }
 
-// A probe a worker is reading may have read GitHub before the move, so a
-// move whose probe collapses into it keeps the previous tip, and the branch's
-// next check processes the move again with a fresh probe.
-func TestBranchWatch_AMoveWhoseProbeIsBeingReadIsProcessedAgain(t *testing.T) {
+// A probe a worker was reading when the move was recorded may have read
+// GitHub before it, so its answer leaves the move owed and the next cycle
+// admits a fresh probe, with no second look at the branch.
+func TestBranchWatch_AMoveWhoseProbeWasBeingReadIsProbedAgain(t *testing.T) {
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
 	w := newWatchWorld(t)
@@ -482,20 +529,48 @@ func TestBranchWatch_AMoveWhoseProbeIsBeingReadIsProcessedAgain(t *testing.T) {
 	if err != nil || len(claim.Items) != 1 {
 		t.Fatalf("Claim = %d items (err %v), want PR_1's probe", len(claim.Items), err)
 	}
+	// Apart on SQLite's millisecond clock from the record the cycle writes.
+	time.Sleep(5 * time.Millisecond)
 
 	if got := w.cycle(); len(got) != 0 {
 		t.Fatalf("admitted %v, want PR_1's probe collapsed into the one being read", got)
 	}
-	if tip := w.storedTip(); tip == nil || tip.TipSHA != "old" {
-		t.Fatalf("stored tip = %+v, want old: the move's probe was being read", tip)
+	if tip := w.storedTip(); tip == nil || tip.TipSHA != "new" {
+		t.Fatalf("stored tip = %+v, want new: the move is recorded on PR_1", tip)
 	}
 
 	if _, err := w.stores.PRMergeability.CompleteProbe(ctx, claim.Items[0].Receipt,
-		db.PRMergeabilityAnswer{Found: true, Mergeable: domain.MergeableMergeable, HeadSHA: "h1", BaseRef: "main"}, ""); err != nil {
+		db.PRMergeabilityAnswer{Found: true, Mergeable: domain.MergeableMergeable, HeadSHA: "h1"}, ""); err != nil {
 		t.Fatalf("CompleteProbe: %v", err)
 	}
+	reads := len(w.compareReads)
 	if got := w.cycle(); !mapsEqual(got, map[int]string{1: domain.MergeabilityProbeBaseMoved}) {
-		t.Errorf("the next check admitted %v, want a fresh base_moved for PR_1", got)
+		t.Errorf("the next cycle admitted %v, want a fresh base_moved for PR_1", got)
+	}
+	if len(w.compareReads) != reads {
+		t.Errorf("the next cycle compared %v again, want the owed move read off PR_1's row", w.compareReads[reads:])
+	}
+	if got := w.cycle(); len(got) != 0 {
+		t.Errorf("a cycle after the fresh read admitted %v, want nothing", got)
+	}
+}
+
+// A compare that keeps failing is tried again until the branch's tip was last
+// stored unreadableMoveAfter ago, and then the base is reset.
+func TestBranchWatch_ACompareThatKeepsFailingResetsTheBase(t *testing.T) {
+	w := newWatchWorld(t)
+	w.seenOnce()
+	w.set(func(w *watchWorld) { w.compares["old...new"] = "422" })
+	if got := w.cycle(); len(got) != 0 {
+		t.Fatalf("a failed compare admitted %v, want nothing yet", got)
+	}
+	if tip := w.storedTip(); tip == nil || tip.TipSHA != "old" {
+		t.Fatalf("stored tip = %+v, want old", tip)
+	}
+	w.ageTip(unreadableMoveAfter + time.Minute)
+	all := map[int]string{1: domain.MergeabilityProbeBaseReset, 2: domain.MergeabilityProbeBaseReset, 3: domain.MergeabilityProbeBaseReset}
+	if got := w.cycle(); !mapsEqual(got, all) {
+		t.Errorf("admitted %v, want %v", got, all)
 	}
 	if tip := w.storedTip(); tip == nil || tip.TipSHA != "new" {
 		t.Errorf("stored tip = %+v, want new", tip)

@@ -30,6 +30,11 @@ type PRMergeability struct {
 	MergeableBaseRef string
 	// CheckedAt is when that read was made; nil when it never was.
 	CheckedAt *time.Time
+	// BaseMoveReason is a base branch move the answer may predate, which the
+	// branch watch recorded for the pull request: MergeabilityProbeBaseMoved
+	// or MergeabilityProbeBaseReset, and empty when none is owed. A read by a
+	// probe leased after the watch recorded it clears it.
+	BaseMoveReason string
 }
 
 // The reasons a mergeability probe is admitted for: the closed vocabulary of
@@ -57,7 +62,8 @@ const (
 	MergeabilityProbeBaseMoved = "base_moved"
 	// MergeabilityProbeBaseReset is a pull request on a base branch TF cannot
 	// tell the move of: the branch is newly seen, its history was rewritten,
-	// its previous tip is gone, or the move changed too many files to list.
+	// its previous tip is gone, the move changed too many files to list, or
+	// GitHub kept failing to compare it.
 	MergeabilityProbeBaseReset = "base_reset"
 )
 

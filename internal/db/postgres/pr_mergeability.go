@@ -38,12 +38,25 @@ func newPRMergeabilityStore(conn *sql.DB) db.PRMergeabilityStore {
 
 var _ db.PRMergeabilityStore = (*prMergeabilityStore)(nil)
 
-const pgPRMergeabilityColumns = `entity_id::text, org_id::text, COALESCE(mergeable, ''), COALESCE(mergeable_head_sha, ''), COALESCE(mergeable_base_ref, ''), checked_at`
+const pgPRMergeabilityColumns = `entity_id::text, org_id::text, COALESCE(mergeable, ''), COALESCE(mergeable_head_sha, ''), COALESCE(mergeable_base_ref, ''), checked_at, COALESCE(base_move_reason, '')`
+
+// pgClearBaseMove is the SET clauses a read's upsert clears the row's
+// recorded base move with when the probe making it, whose id is bound at
+// param, was leased at or after the move was recorded. The probe's lease is
+// still held, since the completion's closure runs before its terminal flip.
+func pgClearBaseMove(param string) string {
+	leased := `(SELECT leased_at FROM public.pr_mergeability_probes WHERE id = ` + param + `)`
+	return `
+				base_move_reason = CASE WHEN pull_request_mergeability.base_moved_at <= ` + leased + `
+					THEN NULL ELSE pull_request_mergeability.base_move_reason END,
+				base_moved_at = CASE WHEN pull_request_mergeability.base_moved_at <= ` + leased + `
+					THEN NULL ELSE pull_request_mergeability.base_moved_at END`
+}
 
 func scanPgPRMergeability(row interface{ Scan(...any) error }) (domain.PRMergeability, error) {
 	var m domain.PRMergeability
 	var checked sql.NullTime
-	if err := row.Scan(&m.EntityID, &m.OrgID, &m.Mergeable, &m.MergeableHeadSHA, &m.MergeableBaseRef, &checked); err != nil {
+	if err := row.Scan(&m.EntityID, &m.OrgID, &m.Mergeable, &m.MergeableHeadSHA, &m.MergeableBaseRef, &checked, &m.BaseMoveReason); err != nil {
 		return domain.PRMergeability{}, err
 	}
 	if checked.Valid {
@@ -108,43 +121,33 @@ func probeAfter(delay time.Duration) time.Time {
 	return time.Now().UTC().Add(delay)
 }
 
-func (s *prMergeabilityStore) AdmitSystem(ctx context.Context, orgID string, probes []db.PRMergeabilityProbe) (db.PRMergeabilityAdmission, error) {
+func (s *prMergeabilityStore) AdmitSystem(ctx context.Context, orgID string, probes []db.PRMergeabilityProbe) (int, error) {
 	if err := db.ValidatePRMergeabilityProbes(probes); err != nil {
-		return db.PRMergeabilityAdmission{}, err
+		return 0, err
 	}
 	if len(probes) == 0 {
-		return db.PRMergeabilityAdmission{}, nil
+		return 0, nil
 	}
-	var res db.PRMergeabilityAdmission
+	admitted := 0
 	err := inTxRaw(ctx, s.conn, func(tx *sql.Tx) error {
-		res = db.PRMergeabilityAdmission{}
+		admitted = 0
 		after := probeAfter(workkinds.PRMergeabilityProbeDelay)
 		for _, p := range probes {
-			id, deduplicated, err := workitem.Admit(ctx, tx, s.kind, orgID, workkinds.PRMergeabilityProbeKey(p.EntityID),
+			_, deduplicated, err := workitem.Admit(ctx, tx, s.kind, orgID, workkinds.PRMergeabilityProbeKey(p.EntityID),
 				db.PRMergeabilityProbeCols(p.EntityID, p.Reason, after, 0))
 			if err != nil {
 				return fmt.Errorf("admit mergeability probe for entity %s: %w", p.EntityID, err)
 			}
 			if !deduplicated {
-				res.Admitted++
-				continue
-			}
-			// The collapse wrote the existing row, so this transaction holds its
-			// lock and the status cannot change under the read.
-			var status string
-			if err := tx.QueryRowContext(ctx, `SELECT status FROM public.pr_mergeability_probes WHERE id = $1`, id).Scan(&status); err != nil {
-				return fmt.Errorf("read the probe entity %s collapsed into: %w", p.EntityID, err)
-			}
-			if status == workitem.StatusLeased {
-				res.InFlight++
+				admitted++
 			}
 		}
 		return nil
 	})
 	if err != nil {
-		return db.PRMergeabilityAdmission{}, err
+		return 0, err
 	}
-	return res, nil
+	return admitted, nil
 }
 
 func (s *prMergeabilityStore) Claim(ctx context.Context, owner workitem.Owner, orgID string, n int) (db.PRMergeabilityClaim, error) {
@@ -240,9 +243,9 @@ func (s *prMergeabilityStore) CompleteProbe(ctx context.Context, r workitem.Rece
 					ON CONFLICT (entity_id) DO UPDATE SET
 						mergeable_head_sha = excluded.mergeable_head_sha,
 						mergeable_base_ref = excluded.mergeable_base_ref,
-						checked_at = excluded.checked_at
+						checked_at = excluded.checked_at,`+pgClearBaseMove("$6")+`
 					RETURNING `+pgPRMergeabilityColumns,
-					entityID, r.OrgID, nullIfEmpty(answer.HeadSHA), nullIfEmpty(answer.BaseRef), time.Now().UTC()))
+					entityID, r.OrgID, nullIfEmpty(answer.HeadSHA), nullIfEmpty(answer.BaseRef), time.Now().UTC(), r.ItemID))
 				if err != nil {
 					return nil, fmt.Errorf("record the give-up for entity %s: %w", entityID, err)
 				}
@@ -272,9 +275,9 @@ func (s *prMergeabilityStore) CompleteProbe(ctx context.Context, r workitem.Rece
 				mergeable = excluded.mergeable,
 				mergeable_head_sha = excluded.mergeable_head_sha,
 				mergeable_base_ref = excluded.mergeable_base_ref,
-				checked_at = excluded.checked_at
+				checked_at = excluded.checked_at,`+pgClearBaseMove("$7")+`
 			RETURNING `+pgPRMergeabilityColumns,
-			entityID, r.OrgID, answer.Mergeable, nullIfEmpty(answer.HeadSHA), nullIfEmpty(answer.BaseRef), now))
+			entityID, r.OrgID, answer.Mergeable, nullIfEmpty(answer.HeadSHA), nullIfEmpty(answer.BaseRef), now, r.ItemID))
 		if err != nil {
 			return nil, fmt.Errorf("write mergeability of entity %s: %w", entityID, err)
 		}
@@ -425,6 +428,31 @@ func (s *prMergeabilityStore) ClearPathsSystem(ctx context.Context, orgID string
 		SET paths_json = NULL, paths_head_sha = NULL, paths_base_ref = NULL, paths_complete = false
 		WHERE org_id = $1 AND entity_id = ANY($2::uuid[]) AND paths_json IS NOT NULL
 	`, orgID, pgUUIDArray(entityIDs))
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
+func (s *prMergeabilityStore) MarkBaseMovedSystem(ctx context.Context, orgID string, entityIDs []string, reason string) (int, error) {
+	if err := db.ValidateBaseMoveReason(reason); err != nil {
+		return 0, err
+	}
+	if len(entityIDs) == 0 {
+		return 0, nil
+	}
+	// base_moved_at is the statement's time on the server's clock, the one
+	// the probe queue's leased_at is stamped with. DISTINCT because an upsert
+	// may not write one row twice.
+	res, err := s.conn.ExecContext(ctx, `
+		INSERT INTO public.pull_request_mergeability (entity_id, org_id, base_move_reason, base_moved_at)
+		SELECT DISTINCT id, $1::uuid, $3, statement_timestamp() FROM unnest($2::uuid[]) AS id
+		ON CONFLICT (entity_id) DO UPDATE SET
+			base_move_reason = excluded.base_move_reason,
+			base_moved_at = excluded.base_moved_at
+		WHERE public.pull_request_mergeability.org_id = excluded.org_id
+	`, orgID, pgUUIDArray(entityIDs), reason)
 	if err != nil {
 		return 0, err
 	}

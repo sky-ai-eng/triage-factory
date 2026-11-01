@@ -64,7 +64,8 @@ type Comparison struct {
 	TotalCommits int
 	// Files is what the range changed, mapped onto GitHub's PatchStatus
 	// vocabulary; Previous is the compare's previous_filename where it gave
-	// one.
+	// one. nil when the compare carried no file list at all, which is not
+	// the empty list of a range that changed nothing.
 	Files []domain.ChangedPath
 	// Commits is the range's commits as the compare lists them, at most
 	// CompareCommitCap.
@@ -104,7 +105,9 @@ func (c *Client) Compare(ctx context.Context, owner, repo, base, head string) (*
 		return nil, fmt.Errorf("parse compare %s...%s: %w", base, head, err)
 	}
 	out := &Comparison{Status: raw.Status, TotalCommits: raw.TotalCommits}
-	out.Files = make([]domain.ChangedPath, 0, len(raw.Files))
+	if raw.Files != nil {
+		out.Files = make([]domain.ChangedPath, 0, len(raw.Files))
+	}
 	for _, f := range raw.Files {
 		out.Files = append(out.Files, domain.ChangedPath{Path: f.Filename, Change: patchStatus(f.Status), Previous: f.PreviousFilename})
 	}
@@ -211,9 +214,11 @@ func (f *gqlChangedFiles) appendTo(paths []domain.ChangedPath) []domain.ChangedP
 // PRChangedPaths reads the changed paths of up to MaxChangedPathsBatch pull
 // requests, keyed by node id, paging each one with more files through
 // node(id:) up to MaxPRChangedPaths. requests counts the queries sent. An id
-// with no node, or whose node is not a pull request, is absent. A later page
-// that fails, or that reads another head or base than the first, ends that
-// pull request's list incomplete rather than failing the batch. err is the
+// with no node, or whose node is not a pull request, is absent, and so is one
+// whose later page failed: a list that read short only for this cycle is not
+// one to keep. A later page that GitHub answers with no files, or at another
+// head or base than the first, ends that pull request's list incomplete
+// rather than failing the batch. err is the
 // first page's failure, or a rate limit on any page: every request after one
 // would be refused the same way, and a GraphQL secondary limit does not stop
 // the client's own budget check from sending them, so the batch ends there and
@@ -252,7 +257,7 @@ func (c *Client) PRChangedPaths(ctx context.Context, nodeIDs []string) (reads ma
 		read := ChangedPathsRead{HeadSHA: n.HeadRefOid, BaseRef: n.BaseRefName, ChangedFiles: n.ChangedFiles}
 		// files is null when GitHub could not list them (a field error
 		// beside the node), which leaves the list incomplete.
-		stable := n.Files != nil
+		stable, failed := n.Files != nil, false
 		if n.Files != nil {
 			read.Paths = n.Files.appendTo(nil)
 			next, cursor := n.Files.PageInfo.HasNextPage, n.Files.PageInfo.EndCursor
@@ -263,13 +268,20 @@ func (c *Client) PRChangedPaths(ctx context.Context, nodeIDs []string) (reads ma
 				if errors.As(err, &rl) {
 					return nil, requests, fmt.Errorf("PR changed paths: %w", err)
 				}
-				if err != nil || page == nil || head != read.HeadSHA || base != read.BaseRef {
+				if err != nil {
+					failed = true
+					break
+				}
+				if page == nil || head != read.HeadSHA || base != read.BaseRef {
 					stable = false
 					break
 				}
 				read.Paths = page.appendTo(read.Paths)
 				next, cursor = page.PageInfo.HasNextPage, page.PageInfo.EndCursor
 			}
+		}
+		if failed {
+			continue
 		}
 		read.Complete = stable && len(read.Paths) == read.ChangedFiles
 		reads[n.ID] = read

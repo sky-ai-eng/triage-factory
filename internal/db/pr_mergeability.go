@@ -25,10 +25,12 @@ import (
 // github:pr:conflicts and github:pr:conflicts_resolved: the stored answer is
 // those events' re-emit guard, the one the snapshot diff is for every other
 // pull request event. The branch watch is the only writer of the row's path
-// columns (UpsertPathsSystem) and of branch_tips. Each writer's upsert sets
-// its own columns only, so neither overwrites the other's. The poll admits
-// probes (AdmitSystem), reads the rows to decide which are due (ListSystem),
-// and deletes the rows of entities no longer active (DeleteInactiveSystem).
+// columns (UpsertPathsSystem) and of branch_tips, and records the base moves
+// a row's answer may predate (MarkBaseMovedSystem), which the worker's next
+// read after them clears. Each writer's upsert sets its own columns only, so
+// neither overwrites the other's. The poll admits probes (AdmitSystem), reads
+// the rows to decide which are due (ListSystem), and deletes the rows of
+// entities no longer active (DeleteInactiveSystem).
 //
 // Every method is a system method on the admin pool in Postgres, org_id bound
 // by argument or through the receipt; the SQLite impl asserts the local
@@ -52,8 +54,8 @@ type PRMergeabilityStore interface {
 	// An entry whose pull request already has an unsettled probe collapses
 	// into it, which keeps that probe's reason and probe_after. A reason
 	// outside domain.MergeabilityProbeReasons is refused before anything is
-	// written.
-	AdmitSystem(ctx context.Context, orgID string, probes []PRMergeabilityProbe) (PRMergeabilityAdmission, error)
+	// written. admitted counts the entries that inserted a row.
+	AdmitSystem(ctx context.Context, orgID string, probes []PRMergeabilityProbe) (admitted int, err error)
 
 	// Claim leases up to n ripe probes of the org and reads, beside each, its
 	// own columns, the entity's node id and state, and the owner and name of
@@ -75,15 +77,17 @@ type PRMergeabilityStore interface {
 	//   - MERGEABLE or CONFLICTING: the row is upserted with the answer, the
 	//     head and base it was read at and the time, and the transition from the
 	//     previous answer is enqueued on the durable event queue, stamped
-	//     with the org and traceparent;
+	//     with the org and traceparent. A base move recorded on the row at or
+	//     before the probe was leased is cleared: the read came after it;
 	//   - UNKNOWN: below workkinds.PRMergeabilityMaxUnknownReads UNKNOWN
 	//     reads, the row is untouched, and the probe is completed and a
 	//     successor admitted under its key with reason unknown_retry, due
 	//     workkinds.PRMergeabilityUnknownRetryDelay from now. At the limit the
 	//     probe is completed with nothing owed, and the row's head, base and
 	//     checked_at move to the read's while its answer stays (NULL on a row
-	//     the give-up creates), so the poll's next admission for the pull
-	//     request is its sweep.
+	//     the give-up creates), and a base move is cleared as a known answer
+	//     clears it, so the poll's next admission for the pull request is its
+	//     sweep.
 	//
 	// A receipt another holder took is workitem.ErrLeaseLost and writes
 	// nothing at all, events included; workitem.ErrCancelled means the
@@ -120,6 +124,15 @@ type PRMergeabilityStore interface {
 	// from the returned-row rule.
 	ClearPathsSystem(ctx context.Context, orgID string, entityIDs []string) (int, error)
 
+	// MarkBaseMovedSystem records on the rows of the org's entities in
+	// entityIDs a base branch move their answers may predate, with reason
+	// domain.MergeabilityProbeBaseMoved or domain.MergeabilityProbeBaseReset,
+	// replacing any recorded before; it reports how many rows it wrote. A
+	// pull request with no row gets one with no answer. Another reason is
+	// refused before anything is written. A bulk write, exempt from the
+	// returned-row rule.
+	MarkBaseMovedSystem(ctx context.Context, orgID string, entityIDs []string, reason string) (int, error)
+
 	// UpsertPathsSystem writes one pull request's changed paths, the head and
 	// base they were read at and whether they are complete, and returns the path
 	// columns as persisted. A pull request with no row gets one with no
@@ -146,19 +159,6 @@ type PRMergeabilityStore interface {
 type PRMergeabilityProbe struct {
 	EntityID string
 	Reason   string
-}
-
-// PRMergeabilityAdmission is what one AdmitSystem call did with its entries.
-type PRMergeabilityAdmission struct {
-	// Admitted counts the entries that inserted a probe.
-	Admitted int
-	// InFlight counts the entries that collapsed into a probe a worker holds
-	// leased. Its read may already have happened, so its answer can predate
-	// whatever the entry was admitted for: a caller whose reason is not
-	// decided again from the stored row each cycle admits it again once that
-	// probe settles. An entry that collapsed into a ready probe is answered
-	// by that probe's read, which is still to come.
-	InFlight int
 }
 
 // ClaimedPRMergeabilityProbe is one leased probe and what reading it needs.
@@ -244,6 +244,15 @@ func ValidatePRMergeabilityProbes(probes []PRMergeabilityProbe) error {
 		if !slices.Contains(domain.MergeabilityProbeReasons, p.Reason) {
 			return fmt.Errorf("db: mergeability probe for entity %s has unknown reason %q", p.EntityID, p.Reason)
 		}
+	}
+	return nil
+}
+
+// ValidateBaseMoveReason refuses a recorded base move whose reason is not one
+// of the branch watch's two.
+func ValidateBaseMoveReason(reason string) error {
+	if reason != domain.MergeabilityProbeBaseMoved && reason != domain.MergeabilityProbeBaseReset {
+		return fmt.Errorf("db: base move reason %q is neither %s nor %s", reason, domain.MergeabilityProbeBaseMoved, domain.MergeabilityProbeBaseReset)
 	}
 	return nil
 }

@@ -828,6 +828,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 	// No network here — snapshot comparison plus the entity writes each
 	// transition implies. A cycle slow in this phase and fast in the one
 	// before it is a database problem, not a GitHub one.
+	cycleCtx := ctx
 	ctx, diffSpan := tracer.Start(ctx, "tracker.github.diff_emit")
 
 	eventsEmitted := 0
@@ -932,8 +933,8 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 	diffSpan.SetAttributes(telemetry.Count(eventsEmitted))
 	diffSpan.End()
 
-	t.watchBaseBranches(ctx, client, orgID, open, watch, discoveredByNodeID, refreshed)
-	t.admitMergeabilityProbes(ctx, orgID, open, discoveredByNodeID, refreshed)
+	t.watchBaseBranches(cycleCtx, client, orgID, open, watch, discoveredByNodeID, refreshed)
+	t.admitMergeabilityProbes(cycleCtx, orgID, open, discoveredByNodeID, refreshed)
 
 	// Info only when the cycle actually produced something (an emitted
 	// event) — a cycle that fetched fresh state but found no transitions is
@@ -973,11 +974,13 @@ type mergeabilityCandidate struct {
 //   - base_changed: its current base branch, taken the same way, is not the
 //     one its row was last read against: it was retargeted. A row that
 //     records no base admits nothing on this rule;
+//   - base_moved or base_reset: its row owes a base branch move the branch
+//     watch recorded, earlier in this cycle or before it, that no read since
+//     has settled;
 //   - sweep: its row was last read longer than mergeabilitySweepInterval ago.
 //
 // The reasons are tried in that order and a pull request is admitted once. A
-// pull request already holding an unsettled probe collapses into it, which
-// the branch watch's probes, admitted first in the cycle, may be. A
+// pull request already holding an unsettled probe collapses into it. A
 // failure is logged and costs this cycle's admissions: the next cycle decides
 // the same probes again from the same rows.
 //
@@ -1027,6 +1030,8 @@ func (t *Tracker) admitMergeabilityProbes(ctx context.Context, orgID string, ope
 			reason = domain.MergeabilityProbeHeadMoved
 		case base != "" && row.MergeableBaseRef != "" && base != row.MergeableBaseRef:
 			reason = domain.MergeabilityProbeBaseChanged
+		case row.BaseMoveReason != "":
+			reason = row.BaseMoveReason
 		case row.CheckedAt == nil || now.Sub(*row.CheckedAt) > mergeabilitySweepInterval:
 			reason = domain.MergeabilityProbeSweep
 		default:
@@ -1040,12 +1045,12 @@ func (t *Tracker) admitMergeabilityProbes(ctx context.Context, orgID string, ope
 	// A probe that collapses into one a worker is reading needs nothing
 	// more: every reason here is decided again from the stored row next
 	// cycle, so a read that predates its cause is followed by another.
-	res, err := t.mergeability.AdmitSystem(ctx, orgID, probes)
+	admitted, err := t.mergeability.AdmitSystem(ctx, orgID, probes)
 	if err != nil {
 		trackerLog.WarnContext(ctx, "mergeability: admitting probes failed; the next cycle decides them again", "probes", len(probes), "error", err)
 		return
 	}
-	trackerLog.DebugContext(ctx, "mergeability: probes due", "due", len(probes), "admitted", res.Admitted)
+	trackerLog.DebugContext(ctx, "mergeability: probes due", "due", len(probes), "admitted", admitted)
 }
 
 // refreshPRBatch is client.RefreshPRs under a span, wrapped rather than

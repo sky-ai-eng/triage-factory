@@ -34,13 +34,24 @@ func newPRMergeabilityStore(conn *sql.DB) db.PRMergeabilityStore {
 
 var _ db.PRMergeabilityStore = (*prMergeabilityStore)(nil)
 
-const sqlitePRMergeabilityColumns = `entity_id, org_id, COALESCE(mergeable, ''), COALESCE(mergeable_head_sha, ''), COALESCE(mergeable_base_ref, ''), checked_at`
+const sqlitePRMergeabilityColumns = `entity_id, org_id, COALESCE(mergeable, ''), COALESCE(mergeable_head_sha, ''), COALESCE(mergeable_base_ref, ''), checked_at, COALESCE(base_move_reason, '')`
 
 func scanSQLitePRMergeability(row interface{ Scan(...any) error }) (domain.PRMergeability, error) {
 	var m domain.PRMergeability
-	err := row.Scan(&m.EntityID, &m.OrgID, &m.Mergeable, &m.MergeableHeadSHA, &m.MergeableBaseRef, &m.CheckedAt)
+	err := row.Scan(&m.EntityID, &m.OrgID, &m.Mergeable, &m.MergeableHeadSHA, &m.MergeableBaseRef, &m.CheckedAt, &m.BaseMoveReason)
 	return m, err
 }
+
+// sqliteClearBaseMove is the SET clauses a read's upsert clears the row's
+// recorded base move with when the probe making it was leased at or after the
+// move was recorded, its one bind being the probe's id. Both columns are
+// leased_at's text shape, so they compare as text; the probe's lease is still
+// held, since the completion's closure runs before its terminal flip.
+const sqliteClearBaseMove = `
+				base_move_reason = CASE WHEN pull_request_mergeability.base_moved_at <= (SELECT leased_at FROM pr_mergeability_probes WHERE id = ?)
+					THEN NULL ELSE pull_request_mergeability.base_move_reason END,
+				base_moved_at = CASE WHEN pull_request_mergeability.base_moved_at <= (SELECT leased_at FROM pr_mergeability_probes WHERE id = ?)
+					THEN NULL ELSE pull_request_mergeability.base_moved_at END`
 
 func (s *prMergeabilityStore) GetSystem(ctx context.Context, orgID, entityID string) (*domain.PRMergeability, error) {
 	if err := assertLocalOrg(orgID); err != nil {
@@ -104,44 +115,36 @@ func probeAfter(delay time.Duration) string {
 	return time.Now().UTC().Add(delay).Format(blockTimeLayout)
 }
 
-func (s *prMergeabilityStore) AdmitSystem(ctx context.Context, orgID string, probes []db.PRMergeabilityProbe) (db.PRMergeabilityAdmission, error) {
+func (s *prMergeabilityStore) AdmitSystem(ctx context.Context, orgID string, probes []db.PRMergeabilityProbe) (int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return db.PRMergeabilityAdmission{}, err
+		return 0, err
 	}
 	if err := db.ValidatePRMergeabilityProbes(probes); err != nil {
-		return db.PRMergeabilityAdmission{}, err
+		return 0, err
 	}
 	if len(probes) == 0 {
-		return db.PRMergeabilityAdmission{}, nil
+		return 0, nil
 	}
-	var res db.PRMergeabilityAdmission
+	admitted := 0
 	err := db.InTx(ctx, s.conn, func(tx *sql.Tx) error {
-		res = db.PRMergeabilityAdmission{}
+		admitted = 0
 		after := probeAfter(workkinds.PRMergeabilityProbeDelay)
 		for _, p := range probes {
-			id, deduplicated, err := workitem.Admit(ctx, tx, s.kind, orgID, workkinds.PRMergeabilityProbeKey(p.EntityID),
+			_, deduplicated, err := workitem.Admit(ctx, tx, s.kind, orgID, workkinds.PRMergeabilityProbeKey(p.EntityID),
 				db.PRMergeabilityProbeCols(p.EntityID, p.Reason, after, 0))
 			if err != nil {
 				return fmt.Errorf("admit mergeability probe for entity %s: %w", p.EntityID, err)
 			}
 			if !deduplicated {
-				res.Admitted++
-				continue
-			}
-			var status string
-			if err := tx.QueryRowContext(ctx, `SELECT status FROM pr_mergeability_probes WHERE id = ?`, id).Scan(&status); err != nil {
-				return fmt.Errorf("read the probe entity %s collapsed into: %w", p.EntityID, err)
-			}
-			if status == workitem.StatusLeased {
-				res.InFlight++
+				admitted++
 			}
 		}
 		return nil
 	})
 	if err != nil {
-		return db.PRMergeabilityAdmission{}, err
+		return 0, err
 	}
-	return res, nil
+	return admitted, nil
 }
 
 func (s *prMergeabilityStore) Claim(ctx context.Context, owner workitem.Owner, orgID string, n int) (db.PRMergeabilityClaim, error) {
@@ -248,9 +251,9 @@ func (s *prMergeabilityStore) CompleteProbe(ctx context.Context, r workitem.Rece
 					ON CONFLICT (entity_id) DO UPDATE SET
 						mergeable_head_sha = excluded.mergeable_head_sha,
 						mergeable_base_ref = excluded.mergeable_base_ref,
-						checked_at = excluded.checked_at
+						checked_at = excluded.checked_at,`+sqliteClearBaseMove+`
 					RETURNING `+sqlitePRMergeabilityColumns,
-					entityID, r.OrgID, nullIfEmpty(answer.HeadSHA), nullIfEmpty(answer.BaseRef), time.Now().UTC()))
+					entityID, r.OrgID, nullIfEmpty(answer.HeadSHA), nullIfEmpty(answer.BaseRef), time.Now().UTC(), r.ItemID, r.ItemID))
 				if err != nil {
 					return nil, fmt.Errorf("record the give-up for entity %s: %w", entityID, err)
 				}
@@ -276,9 +279,9 @@ func (s *prMergeabilityStore) CompleteProbe(ctx context.Context, r workitem.Rece
 				mergeable = excluded.mergeable,
 				mergeable_head_sha = excluded.mergeable_head_sha,
 				mergeable_base_ref = excluded.mergeable_base_ref,
-				checked_at = excluded.checked_at
+				checked_at = excluded.checked_at,`+sqliteClearBaseMove+`
 			RETURNING `+sqlitePRMergeabilityColumns,
-			entityID, r.OrgID, answer.Mergeable, nullIfEmpty(answer.HeadSHA), nullIfEmpty(answer.BaseRef), now))
+			entityID, r.OrgID, answer.Mergeable, nullIfEmpty(answer.HeadSHA), nullIfEmpty(answer.BaseRef), now, r.ItemID, r.ItemID))
 		if err != nil {
 			return nil, fmt.Errorf("write mergeability of entity %s: %w", entityID, err)
 		}
@@ -418,15 +421,10 @@ func (s *prMergeabilityStore) ListPathsSystem(ctx context.Context, orgID string,
 	if len(entityIDs) == 0 {
 		return nil, nil
 	}
-	marks := make([]string, len(entityIDs))
-	args := make([]any, len(entityIDs))
-	for i, id := range entityIDs {
-		marks[i] = "?"
-		args[i] = id
-	}
+	marks, args := inListArgs(entityIDs)
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT `+sqlitePRPathsColumns+` FROM pull_request_mergeability
-		WHERE entity_id IN (`+strings.Join(marks, ", ")+`)
+		WHERE entity_id IN (`+marks+`)
 		ORDER BY entity_id
 	`, args...)
 	if err != nil {
@@ -451,22 +449,52 @@ func (s *prMergeabilityStore) ClearPathsSystem(ctx context.Context, orgID string
 	if len(entityIDs) == 0 {
 		return 0, nil
 	}
-	marks := make([]string, len(entityIDs))
-	args := make([]any, len(entityIDs))
-	for i, id := range entityIDs {
-		marks[i] = "?"
-		args[i] = id
-	}
+	marks, args := inListArgs(entityIDs)
 	res, err := s.conn.ExecContext(ctx, `
 		UPDATE pull_request_mergeability
 		SET paths_json = NULL, paths_head_sha = NULL, paths_base_ref = NULL, paths_complete = 0
-		WHERE entity_id IN (`+strings.Join(marks, ", ")+`) AND paths_json IS NOT NULL
+		WHERE entity_id IN (`+marks+`) AND paths_json IS NOT NULL
 	`, args...)
 	if err != nil {
 		return 0, err
 	}
 	n, err := res.RowsAffected()
 	return int(n), err
+}
+
+func (s *prMergeabilityStore) MarkBaseMovedSystem(ctx context.Context, orgID string, entityIDs []string, reason string) (int, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return 0, err
+	}
+	if err := db.ValidateBaseMoveReason(reason); err != nil {
+		return 0, err
+	}
+	if len(entityIDs) == 0 {
+		return 0, nil
+	}
+	written := 0
+	err := db.InTx(ctx, s.conn, func(tx *sql.Tx) error {
+		written = 0
+		for _, id := range entityIDs {
+			// base_moved_at is written in the probe queue's leased_at shape,
+			// which the read's upsert compares it with.
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO pull_request_mergeability (entity_id, org_id, base_move_reason, base_moved_at)
+				VALUES (?, ?, ?, `+sqliteNowExpr+`)
+				ON CONFLICT (entity_id) DO UPDATE SET
+					base_move_reason = excluded.base_move_reason,
+					base_moved_at = excluded.base_moved_at
+			`, id, orgID, reason); err != nil {
+				return fmt.Errorf("record the base move of entity %s: %w", id, err)
+			}
+			written++
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return written, nil
 }
 
 func (s *prMergeabilityStore) UpsertPathsSystem(ctx context.Context, orgID string, p domain.PRPaths) (domain.PRPaths, error) {

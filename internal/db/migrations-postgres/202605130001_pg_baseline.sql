@@ -4584,6 +4584,12 @@ GRANT SELECT,USAGE ON SEQUENCE public.task_rederive_queue_id_seq TO tf_app;
 -- paths_complete whether it holds every changed file. Each writer's upsert
 -- sets its own columns only.
 --
+-- base_move_reason and base_moved_at are a base branch move the stored answer
+-- may predate, written by the branch watch for each pull request the move can
+-- have affected. The poll admits a probe for it every cycle until a probe
+-- leased at or after base_moved_at settles a read, which clears both; a probe
+-- dropped or read before the move leaves them.
+--
 -- Admin-pool wired with org_id bound per statement; the policy below is
 -- defense-in-depth.
 CREATE TABLE public.pull_request_mergeability (
@@ -4596,7 +4602,9 @@ CREATE TABLE public.pull_request_mergeability (
     paths_json          text NULL,
     paths_head_sha      text NULL,
     paths_base_ref      text NULL,
-    paths_complete      boolean NOT NULL DEFAULT false
+    paths_complete      boolean NOT NULL DEFAULT false,
+    base_move_reason    text NULL CHECK (base_move_reason IN ('base_moved','base_reset')),
+    base_moved_at       timestamp with time zone NULL
 );
 
 ALTER TABLE ONLY public.pull_request_mergeability
@@ -4624,9 +4632,10 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.pull_request_mergeability T
 
 -- The last tip of each base branch the poll's branch watch processed: one row
 -- per (repository, branch) an open pull request targets, written only by the
--- watch. tip_sha is the tip whose move has had its mergeability probes
--- admitted, etag the ref read's from its last 200, and observed_at when the
--- tip was last checked, a 304 included. Stored so a restart or a brain-lease
+-- watch. tip_sha is the tip whose move has been recorded on the rows of the
+-- pull requests it can have affected (pull_request_mergeability's
+-- base_move_reason), etag the ref read's from its last 200, and observed_at
+-- when the tip was last checked, a 304 included. Stored so a restart or a brain-lease
 -- move does not take every base branch for newly seen and probe every pull
 -- request on it.
 --

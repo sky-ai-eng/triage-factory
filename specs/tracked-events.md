@@ -260,7 +260,9 @@ direct push that changes no PR. When the tip moved it compares the previous
 tip with the new one:
 
 - `ahead` with fewer than 300 files: the move's paths are those files and
-  each one's previous name; the overlapping PRs get `base_moved`;
+  each one's previous name; the overlapping PRs get `base_moved`. A move that
+  changed no file overlaps nothing, and no PR's paths are read for it. A
+  compare that carries no file list is read as one with 300;
 - `ahead` with 300 files (the compare's cap): over 250 commits, `base_reset`.
   Otherwise the range's first-parent chain is compared one step at a time and
   the move's paths are the union of the steps' files; a step with 300 files
@@ -269,19 +271,31 @@ tip with the new one:
 - `behind` or `diverged` (a rewound or force-pushed base), or a 404 (the
   previous tip is gone): `base_reset`.
 
-A branch seen for the first time is `base_reset` too. The new tip is stored
-only after the move's probes are admitted, so a failure between the two
-processes the move again next cycle; a failed read leaves the stored tip. A
-probe that collapses into one the worker is reading leaves the stored tip too,
-since that read may predate the move, and the move is processed again at the
-branch's next check.
+A branch seen for the first time is `base_reset` too. Any other compare
+failure leaves the stored tip and is tried again next cycle, except a rate
+limit; once the tip was last stored more than 20 minutes ago, a compare that
+still fails is `base_reset` (GitHub can fail every time to generate a
+comparison whose diff is too large).
+
+The watch records each move on the stored row of every PR it affects
+(`base_move_reason`, with the time it was recorded) and then stores the new
+tip, so a failure between the two processes the move again next cycle. The
+poll's admission, which runs after the watch, admits `base_moved` or
+`base_reset` for every row that owes a move, every cycle, until a read by a
+probe leased at or after the move was recorded settles: a known answer, or the
+`UNKNOWN` give-up. A probe that is given up with nothing written, or that the
+worker was already reading when the move was recorded and so may have read
+GitHub before it, leaves the move owed, and the next cycle admits another.
 
 A PR's paths are its changed files plus the previous path of each file it
 renamed or copied, read (GraphQL `PRChangedPaths`, with REST for the previous
 paths) only for a moved base, and only for a PR whose stored list was read at
-another head or against another base. A reset that can have taken commits out
-of the base (a rewrite, a previous tip that is gone, or a branch seen for the
-first time) clears the stored lists of the PRs on it, because a merge base
+another head or against another base. A PR whose later page of files fails
+to read is probed and its list is not stored, so the next move reads it
+again. A reset that can have taken commits out
+of the base (a rewrite, a previous tip that is gone, a compare that would not
+answer, or a branch seen for the first time) clears the stored lists of the
+PRs on it, because a merge base
 that moves back adds files to a list at an unchanged head. A merge base that
 moves forward at an unchanged head (the base took in commits the PR's head
 already has) can add a file only when those commits changed it and the head

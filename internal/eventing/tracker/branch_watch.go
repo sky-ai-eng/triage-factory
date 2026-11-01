@@ -10,7 +10,6 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/upstream"
@@ -18,9 +17,11 @@ import (
 
 // The branch watch: a base branch's move can change the mergeability of the
 // pull requests on it without moving their heads or updated_at, so the poll
-// watches each base branch's tip and probes the pull requests a move can have
-// affected. It is the only writer of branch_tips and of the pull requests'
-// changed paths.
+// watches each base branch's tip and records the move on the row of each pull
+// request it can have affected, which admitMergeabilityProbes admits a probe
+// for until a read after the move settles. It is the only writer of
+// branch_tips, of the pull requests' changed paths and of their recorded base
+// moves.
 
 // basePR is one open pull request on a watched base branch.
 type basePR struct {
@@ -63,20 +64,27 @@ type baseWatchScope struct {
 }
 
 // watchBaseBranches checks the tip of each base branch the org's open pull
-// requests target in the pass's repositories, and admits mergeability probes
-// for the pull requests a move can have affected (see describeMove and
-// admitBaseMove). A branch is checked when its repository's open-PR listing
-// answered 200 this cycle, since a merged pull request leaves the listing, or
-// when it was last checked longer than staleRefreshFloor ago, which catches a
-// push that changes no pull request. Branches no open pull request in the org
+// requests target in the pass's repositories, and records each move on the
+// pull requests it can have affected (see describeMove and recordBaseMove). A
+// branch is checked when its repository's open-PR listing answered 200 this
+// cycle, since a merged pull request leaves the listing, or when it was last
+// checked longer than staleRefreshFloor ago, which catches a push that changes
+// no pull request. Branches no open pull request in the org
 // targets lose their row, whichever pass sees it.
 //
 // The base is the stored snapshot's base_ref; open is every open pull request
 // the cycle knows, and a pull request the refresh found terminal is left out.
 // A pull request in a repository no pass is handed (one no team tracks any
 // more) is left to the sweep. Failures are logged and leave the stored tip, so
-// the move is processed again next cycle.
+// the move is processed again next cycle, except a compare that has failed
+// past unreadableMoveAfter.
 func (t *Tracker) watchBaseBranches(ctx context.Context, client *ghclient.Client, orgID string, open []mergeabilityCandidate, scope baseWatchScope, listed, refreshed map[string]domain.PRSnapshot) {
+	// Its own span: the watch's ref reads, compares and path reads are
+	// GitHub requests, which a reader of the cycle's trace should find here
+	// rather than under the network-free diff phase.
+	ctx, span := tracer.Start(ctx, "tracker.github.base_watch")
+	defer span.End()
+
 	bases := map[domain.BranchRef][]basePR{}
 	for _, c := range open {
 		if c.snap.BaseRef == "" || c.entity.RepositoryID == "" {
@@ -168,7 +176,7 @@ func (t *Tracker) watchBaseBranches(ctx context.Context, client *ghclient.Client
 	paths := t.overlapPaths(ctx, client, orgID, checks, bases)
 	for _, c := range checks {
 		if c.done {
-			t.admitBaseMove(ctx, orgID, c, bases[c.ref], paths)
+			t.recordBaseMove(ctx, orgID, c, bases[c.ref], paths)
 		}
 	}
 }
@@ -210,13 +218,28 @@ func (t *Tracker) checkBaseBranch(ctx context.Context, client *ghclient.Client, 
 		c.done = true
 	default:
 		outcome, paths, err := describeMove(ctx, client, c.owner, c.repo, c.stored.TipSHA, sha)
-		if err != nil {
+		var rl *ghclient.ErrRateLimited
+		switch {
+		case err == nil:
+		case errors.As(err, &rl) || time.Since(c.stored.ObservedAt) <= unreadableMoveAfter:
 			t.logBaseReadFailure(ctx, c, "comparing the branch's previous tip with its new one", err, rateLimited)
 			return
+		default:
+			trackerLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "branch watch: comparing the branch's previous tip with its new one keeps failing; every pull request on it is probed",
+				"repository_id", c.ref.RepositoryID, "branch", c.ref.Branch, "since", c.stored.ObservedAt, "error", err)
+			outcome, paths = baseMoveUnreadable, nil
 		}
 		c.done, c.outcome, c.movePaths = true, outcome, paths
 	}
 }
+
+// unreadableMoveAfter is how long after a branch's tip was last stored a
+// compare that still fails, for a reason other than a rate limit, resets the
+// branch instead of being tried again. GitHub can fail to generate a
+// comparison whose diff is too large every time it is asked, and the move
+// would otherwise never be processed. Twice staleRefreshFloor, so that a
+// branch checked only at the floor has failed for a whole floor first.
+const unreadableMoveAfter = 2 * staleRefreshFloor
 
 func (t *Tracker) logBaseReadFailure(ctx context.Context, c *baseCheck, what string, err error, rateLimited *atomic.Bool) {
 	var rl *ghclient.ErrRateLimited
@@ -232,7 +255,7 @@ func (t *Tracker) logBaseReadFailure(ctx context.Context, c *baseCheck, what str
 // its paths:
 //
 //   - ahead with fewer than CompareFileCap files: an overlap move of those
-//     files;
+//     files. A compare carrying no file list is read as truncated;
 //   - ahead with CompareFileCap files: the list may be truncated. Over
 //     CompareCommitCap commits, the range cannot be walked and the base is
 //     reset; otherwise its first-parent chain is walked from tip to old, one
@@ -245,7 +268,8 @@ func (t *Tracker) logBaseReadFailure(ctx context.Context, c *baseCheck, what str
 //     removed. Reset;
 //   - a 404, the old tip no longer existing: reset.
 //
-// Any other failure is err, and the move is processed again next cycle.
+// Any other failure is err: the move is processed again next cycle, or reset
+// once it has failed past unreadableMoveAfter (checkBaseBranch).
 func describeMove(ctx context.Context, client *ghclient.Client, owner, repo, old, tip string) (outcome string, paths []domain.ChangedPath, err error) {
 	cmp, err := client.Compare(ctx, owner, repo, old, tip)
 	if ghclient.IsHTTP404(err) {
@@ -263,7 +287,7 @@ func describeMove(ctx context.Context, client *ghclient.Client, owner, repo, old
 		// cannot tell what the move removed.
 		return baseMoveRewritten, nil, nil
 	}
-	if len(cmp.Files) < ghclient.CompareFileCap {
+	if cmp.Files != nil && len(cmp.Files) < ghclient.CompareFileCap {
 		return baseMoveOverlap, cmp.Files, nil
 	}
 	if cmp.TotalCommits > ghclient.CompareCommitCap {
@@ -285,7 +309,7 @@ func describeMove(ctx context.Context, client *ghclient.Client, owner, repo, old
 		if err != nil {
 			return "", nil, err
 		}
-		if len(step.Files) >= ghclient.CompareFileCap {
+		if step.Files == nil || len(step.Files) >= ghclient.CompareFileCap {
 			return baseMoveTruncated, nil, nil
 		}
 		paths = append(paths, step.Files...)
@@ -303,7 +327,7 @@ func describeMove(ctx context.Context, client *ghclient.Client, owner, repo, old
 func (t *Tracker) overlapPaths(ctx context.Context, client *ghclient.Client, orgID string, checks []baseCheck, bases map[domain.BranchRef][]basePR) map[string]domain.PRPaths {
 	var ids []string
 	for _, c := range checks {
-		if c.done && c.outcome == baseMoveOverlap {
+		if readsPaths(c) {
 			for _, pr := range bases[c.ref] {
 				if pr.entity.ExternalID != "" {
 					ids = append(ids, pr.entity.ID)
@@ -332,7 +356,7 @@ func (t *Tracker) overlapPaths(ctx context.Context, client *ghclient.Client, org
 	stale := map[repoKey][]basePR{}
 	seen := map[string]bool{}
 	for _, c := range checks {
-		if !c.done || c.outcome != baseMoveOverlap {
+		if !readsPaths(c) {
 			continue
 		}
 		key := repoKey{c.owner, c.repo}
@@ -357,6 +381,12 @@ func (t *Tracker) overlapPaths(ctx context.Context, client *ghclient.Client, org
 		}
 	}
 	return out
+}
+
+// readsPaths reports whether deciding c's move needs its pull requests'
+// changed paths: an overlap move that changed at least one file.
+func readsPaths(c baseCheck) bool {
+	return c.done && c.outcome == baseMoveOverlap && len(c.movePaths) > 0
 }
 
 // readPRPaths reads prs' changed paths, up to ghclient.MaxChangedPathsBatch
@@ -445,30 +475,36 @@ func withPrevious(paths []domain.ChangedPath, previous map[string]string, comple
 	return out
 }
 
-// admitBaseMove admits the probes one checked branch owes and then stores its
-// tip, in that order: a failure between the two leaves the previous tip, so
-// the next cycle processes the move again and admission collapses the repeat.
+// recordBaseMove records a checked branch's move on the rows of the pull
+// requests it can have affected (MarkBaseMovedSystem) and then stores its tip,
+// in that order: a failure between the two leaves the previous tip, so the
+// next cycle processes the move again.
 //
 //   - no move: the tip's ETag and observed time are written;
-//   - identical: nothing is probed;
+//   - identical: nothing is recorded;
 //   - a reset: every open pull request on the base, base_reset. A reset that
 //     can have taken commits out of the base (a rewrite, a previous tip that
-//     is gone, or a branch whose history TF has not seen) can also move a
-//     pull request's merge base back at an unchanged head, which adds files
-//     to its list, so the stored lists are cleared first and read again at
-//     the next move;
+//     is gone, a compare that would not answer, or a branch whose history TF
+//     has not seen) can also move a pull request's merge base back at an
+//     unchanged head, which adds files to its list, so the stored lists are
+//     cleared first and read again at the next move;
 //   - an overlap: base_moved for each pull request whose paths overlap the
 //     move's, and for each whose paths could not be read or are incomplete.
+//     A move that changed no file overlaps nothing.
 //
-// A probe that collapses into one a worker holds leased also leaves the
-// previous tip: that probe may have read GitHub before the move, and nothing
-// else decides a base move again once its tip is stored. The next check of
-// the branch processes the move again and admits a fresh probe.
-func (t *Tracker) admitBaseMove(ctx context.Context, orgID string, c baseCheck, prs []basePR, paths map[string]domain.PRPaths) {
-	var probes []db.PRMergeabilityProbe
+// The probe is the cycle's admission's, which runs after the watch and admits
+// one for every row owing a move until a read leased after the move settles,
+// so a probe that is dropped, or was being read when the move was recorded,
+// is followed by another.
+func (t *Tracker) recordBaseMove(ctx context.Context, orgID string, c baseCheck, prs []basePR, paths map[string]domain.PRPaths) {
+	var owed []string
+	reason := domain.MergeabilityProbeBaseMoved
 	switch c.outcome {
 	case "", baseMoveIdentical:
 	case baseMoveOverlap:
+		if len(c.movePaths) == 0 {
+			break
+		}
 		move := indexMove(c.movePaths)
 		for _, pr := range prs {
 			if pr.entity.ExternalID == "" {
@@ -476,14 +512,15 @@ func (t *Tracker) admitBaseMove(ctx context.Context, orgID string, c baseCheck, 
 			}
 			p, ok := paths[pr.entity.ID]
 			if !ok || !p.Complete || move.overlaps(p.Paths) {
-				probes = append(probes, db.PRMergeabilityProbe{EntityID: pr.entity.ID, Reason: domain.MergeabilityProbeBaseMoved})
+				owed = append(owed, pr.entity.ID)
 			}
 		}
 	default:
+		reason = domain.MergeabilityProbeBaseReset
 		ids := make([]string, 0, len(prs))
 		for _, pr := range prs {
 			if pr.entity.ExternalID != "" {
-				probes = append(probes, db.PRMergeabilityProbe{EntityID: pr.entity.ID, Reason: domain.MergeabilityProbeBaseReset})
+				owed = append(owed, pr.entity.ID)
 			}
 			ids = append(ids, pr.entity.ID)
 		}
@@ -495,26 +532,20 @@ func (t *Tracker) admitBaseMove(ctx context.Context, orgID string, c baseCheck, 
 			}
 		}
 	}
-	if len(probes) > 0 {
-		res, err := t.mergeability.AdmitSystem(ctx, orgID, probes)
-		if err != nil {
-			trackerLog.WarnContext(ctx, "branch watch: admitting a moved base's probes failed; the move is processed again next cycle",
-				"repository_id", c.ref.RepositoryID, "branch", c.ref.Branch, "probes", len(probes), "error", err)
-			return
-		}
-		if res.InFlight > 0 {
-			trackerLog.DebugContext(ctx, "branch watch: a probe the move owes was being read; the move is processed again at the branch's next check",
-				"repository_id", c.ref.RepositoryID, "branch", c.ref.Branch, "in_flight", res.InFlight)
+	if len(owed) > 0 {
+		if _, err := t.mergeability.MarkBaseMovedSystem(ctx, orgID, owed, reason); err != nil {
+			trackerLog.WarnContext(ctx, "branch watch: recording a moved base on its pull requests failed; the move is processed again next cycle",
+				"repository_id", c.ref.RepositoryID, "branch", c.ref.Branch, "pull_requests", len(owed), "error", err)
 			return
 		}
 	}
 	if c.outcome != "" {
-		recordBaseMove(c.outcome)
+		recordBaseMoveOutcome(c.outcome)
 		if c.outcome == baseMoveOverlap {
-			recordOverlapSetSize(len(probes), len(prs))
+			recordOverlapSetSize(len(owed), len(prs))
 		}
 		trackerLog.DebugContext(ctx, "branch watch: base moved", "repository_id", c.ref.RepositoryID, "branch", c.ref.Branch,
-			"outcome", c.outcome, "open", len(prs), "probes", len(probes))
+			"outcome", c.outcome, "open", len(prs), "owed", len(owed))
 	}
 	if _, err := t.mergeability.UpsertBranchTipSystem(ctx, orgID, domain.BranchTip{
 		RepositoryID: c.ref.RepositoryID, Branch: c.ref.Branch, TipSHA: c.tip, ETag: c.etag, ObservedAt: time.Now().UTC(),

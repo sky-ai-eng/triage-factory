@@ -75,17 +75,19 @@ func RunPRMergeabilityConformance(t *testing.T, mk PRMergeabilityFactory) {
 		}
 		return e
 	}
-	admission := func(t *testing.T, f PRMergeabilityFixture, entityID, reason string) db.PRMergeabilityAdmission {
+	admit := func(t *testing.T, f PRMergeabilityFixture, entityID, reason string) int {
 		t.Helper()
-		res, err := f.Stores.PRMergeability.AdmitSystem(ctx, f.OrgID, []db.PRMergeabilityProbe{{EntityID: entityID, Reason: reason}})
+		n, err := f.Stores.PRMergeability.AdmitSystem(ctx, f.OrgID, []db.PRMergeabilityProbe{{EntityID: entityID, Reason: reason}})
 		if err != nil {
 			t.Fatalf("AdmitSystem: %v", err)
 		}
-		return res
+		return n
 	}
-	admit := func(t *testing.T, f PRMergeabilityFixture, entityID, reason string) int {
+	markMoved := func(t *testing.T, f PRMergeabilityFixture, reason string, entityIDs ...string) {
 		t.Helper()
-		return admission(t, f, entityID, reason).Admitted
+		if n, err := f.Stores.PRMergeability.MarkBaseMovedSystem(ctx, f.OrgID, entityIDs, reason); err != nil || n != len(entityIDs) {
+			t.Fatalf("MarkBaseMovedSystem = (%d, %v), want %d rows written", n, err, len(entityIDs))
+		}
 	}
 	claimOne := func(t *testing.T, f PRMergeabilityFixture) db.ClaimedPRMergeabilityProbe {
 		t.Helper()
@@ -151,22 +153,61 @@ func RunPRMergeabilityConformance(t *testing.T, mk PRMergeabilityFactory) {
 		}
 	})
 
-	t.Run("Admit_reports_a_collapse_into_a_leased_probe_as_in_flight", func(t *testing.T) {
+	t.Run("A_base_move_holds_until_a_read_leased_after_it_settles", func(t *testing.T) {
 		f := mk(t)
-		e := pr(t, f, "1f")
-		if got := admission(t, f, e.ID, domain.MergeabilityProbeNew); got != (db.PRMergeabilityAdmission{Admitted: 1}) {
-			t.Fatalf("first admission = %+v, want one admitted", got)
+		e, fresh := pr(t, f, "1f"), pr(t, f, "1g")
+		probe(t, f, e.ID, domain.MergeableMergeable, "h")
+		before, _ := f.Stores.PRMergeability.GetSystem(ctx, f.OrgID, e.ID)
+
+		// A read leased before the move was recorded may have read GitHub
+		// before it, so its answer leaves the move owed. The pause keeps the
+		// two timestamps apart on SQLite's millisecond clock.
+		admit(t, f, e.ID, domain.MergeabilityProbeSweep)
+		early := claimOne(t, f)
+		time.Sleep(5 * time.Millisecond)
+		markMoved(t, f, domain.MergeabilityProbeBaseMoved, e.ID, fresh.ID)
+		row, _ := f.Stores.PRMergeability.GetSystem(ctx, f.OrgID, e.ID)
+		if row == nil || before == nil || row.BaseMoveReason != domain.MergeabilityProbeBaseMoved || row.Mergeable != before.Mergeable || row.MergeableHeadSHA != before.MergeableHeadSHA {
+			t.Fatalf("row after the move = %+v, want %+v's answer with base_moved owed", row, before)
 		}
-		if got := admission(t, f, e.ID, domain.MergeabilityProbeBaseMoved); got != (db.PRMergeabilityAdmission{}) {
-			t.Errorf("an admission into a ready probe = %+v, want it collapsed and not in flight: that probe's read is still to come", got)
+		if res := answer(t, f, early, domain.MergeableMergeable, "h"); res.Row == nil || res.Row.BaseMoveReason != domain.MergeabilityProbeBaseMoved {
+			t.Errorf("answer leased before the move = %+v, want the move still owed", res.Row)
 		}
-		item := claimOne(t, f)
-		if got := admission(t, f, e.ID, domain.MergeabilityProbeBaseMoved); got != (db.PRMergeabilityAdmission{InFlight: 1}) {
-			t.Errorf("an admission into a leased probe = %+v, want it in flight", got)
+
+		// A probe dropped with no answer leaves it too, and a reset replaces it.
+		admit(t, f, e.ID, domain.MergeabilityProbeBaseMoved)
+		if _, err := f.Stores.PRMergeability.CompleteProbe(ctx, claimOne(t, f).Receipt, db.PRMergeabilityAnswer{}, ""); err != nil {
+			t.Fatalf("CompleteProbe with no answer: %v", err)
 		}
-		answer(t, f, item, domain.MergeableMergeable, "h")
-		if got := admission(t, f, e.ID, domain.MergeabilityProbeBaseMoved); got != (db.PRMergeabilityAdmission{Admitted: 1}) {
-			t.Errorf("an admission once the probe settled = %+v, want one admitted", got)
+		markMoved(t, f, domain.MergeabilityProbeBaseReset, e.ID)
+		if row, _ := f.Stores.PRMergeability.GetSystem(ctx, f.OrgID, e.ID); row == nil || row.BaseMoveReason != domain.MergeabilityProbeBaseReset {
+			t.Errorf("row after a drop and a reset = %+v, want base_reset owed", row)
+		}
+
+		time.Sleep(5 * time.Millisecond)
+		admit(t, f, e.ID, domain.MergeabilityProbeBaseReset)
+		res := answer(t, f, claimOne(t, f), domain.MergeableConflicting, "h")
+		if res.Row == nil || res.Row.BaseMoveReason != "" {
+			t.Errorf("answer leased after the move = %+v, want nothing owed", res.Row)
+		}
+		AssertWriteReturnedStoredRow(t, "CompleteProbe after a base move", *res.Row, stored(f, e.ID))
+
+		// A pull request with no row gets one owing the move and no answer,
+		// and an UNKNOWN give-up read after the move settles it.
+		row, _ = f.Stores.PRMergeability.GetSystem(ctx, f.OrgID, fresh.ID)
+		if row == nil || row.Mergeable != "" || row.CheckedAt != nil || row.BaseMoveReason != domain.MergeabilityProbeBaseMoved {
+			t.Fatalf("row of a pull request marked with no answer = %+v, want only the move", row)
+		}
+		admit(t, f, fresh.ID, domain.MergeabilityProbeNew)
+		for reads := 0; reads < workkinds.PRMergeabilityMaxUnknownReads; reads++ {
+			res = answer(t, f, claimOne(t, f), domain.MergeableUnknown, "h")
+		}
+		if res.Outcome != db.PRMergeabilityGaveUp || res.Row == nil || res.Row.BaseMoveReason != "" {
+			t.Errorf("give-up after the move = %+v, want nothing owed", res)
+		}
+
+		if _, err := f.Stores.PRMergeability.MarkBaseMovedSystem(ctx, f.OrgID, []string{e.ID}, domain.MergeabilityProbeSweep); err == nil {
+			t.Error("a base move recorded with a reason other than base_moved or base_reset succeeded")
 		}
 	})
 
