@@ -107,11 +107,31 @@ When you combine pods in a query:
 - **Counters and histograms** are per process, so `sum` them.
 - **Gauges about the deployment's queues and claims** (`tf_claims_*`,
   `tf_work_*`, `tf_conversations_deferred`, `tf_upstream_up`,
+  `tf_github_scope_drift_repos`,
   `tf_commit_signing_oldest_pending_age_seconds`) come only from the control
   pod holding the background-brain lease. Don't sum them.
 - **Rate-limit readings** (`tf_upstream_rate_limit_*`) are the upstream's own
   count, so take `min`. Slack's `tf_upstream_rate_limit_used` is the
   exception: `sum` it.
+
+### Repositories outside the GitHub App grant
+
+`tf_github_scope_drift_repos` is, per `org_id`, the number of repositories
+teams in the org track that its GitHub App grant does not contain. Triage
+Factory does not poll them, so their pull requests produce no tasks or runs.
+It is the count the org's **Organization → Settings → GitHub access** page
+lists, and is refreshed with each GitHub poll.
+
+It counts repositories on an account the App was uninstalled from as well as
+ones a selective grant leaves out. An org connected with a GitHub App has a
+series from its first GitHub poll on, while the App is installed on at least
+one account. An org connected with a token has none,
+and neither does an org that would read 0 while GitHub has not yet told Triage
+Factory whether one of its installations grants every repository, so a
+missing series is not a zero. `GitHubScopeDrift` warns when an org's count stays above zero for
+an hour. The org's admin fixes it: add the repositories to the App's
+installation on GitHub (installing the App on their account if it has none
+there), or untrack them.
 
 ### Mergeability probes
 
@@ -135,7 +155,7 @@ show what that costs and how it is going:
 | `tf_mergeability_base_read_failures_total` | Base-branch reads GitHub failed, other than rate limits, by `read`: `tip` (a branch's tip, per branch checked), `compare` (what a move changed, per branch) or `paths` (a pull request's changed files, per pull request). A steady `tip` rate means the GitHub credential cannot read the branch: its moves are not processed, so a conflict a merge to it causes is seen up to 6 hours late. A steady `compare` rate resets the branch after 20 minutes (`reset_unreadable`). A steady `paths` rate asks about those pull requests on every move of their base. |
 | `tf_mergeability_overlap_set_size`    | A histogram, per `overlap` move, of the share of the branch's open pull requests that were asked about. About 1% on average in large repositories.                                       |
 | `tf_mergeability_path_fetches_total`  | Requests sent to read pull requests' changed files, by `source`: `graphql` (the files) or `rest_renames` (the previous names of renamed and copied files). A pull request's files are read only when its base branch moves after its head or base changed. |
-| `tf_mergeability_dropped_total`       | Probes given up without an answer, by `org_id` and `outcome`: `dependency_down`, `transient` or `deadline` after five failed reads, or `no_credential` at once when no GitHub credential the organization has connected can read the repository. The next poll queues the pull request again. A steady `no_credential` rate is a tracked repository outside the GitHub App's grant, which the organization's GitHub access settings list; any other steady rate means TF cannot reach GitHub. |
+| `tf_mergeability_dropped_total`       | Probes given up without an answer, by `org_id` and `outcome`: `dependency_down`, `transient` or `deadline` after five failed reads, or `no_credential` at once when no GitHub credential the organization has connected can read the repository. The next poll queues the pull request again. A steady `no_credential` rate is usually a tracked repository outside the GitHub App's grant, which [`tf_github_scope_drift_repos`](#repositories-outside-the-github-app-grant) counts per org; any other steady rate means TF cannot reach GitHub. |
 
 The probe queue is `work_kind="pr_mergeability_probes"` on the `tf_work_*`
 metrics and alerts. A probe is not read until 15 seconds after it is queued, so its
@@ -162,6 +182,7 @@ alert's description, shown beside it in Grafana, says what to check.
 | `UpstreamFailingFleetWide`      | critical | More than half of the orgs using an upstream are failing against it, for 10 minutes.                                                |
 | `UpstreamDownFleetWide`         | critical | More than half of the orgs' last polls got no answer from GitHub or Jira, for 5 minutes.                                            |
 | `ConversationsDeferred`         | warning  | Runs have waited 30 minutes on an unavailable model provider, or on GitHub during setup.                                            |
+| `GitHubScopeDrift`              | warning  | An org's teams have tracked repositories outside its GitHub App grant for an hour, so they are not polled.                          |
 | `BackgroundBrainNotRunning`     | critical | No control pod has run polling, routing and scoring for 5 minutes.                                                                  |
 | `WorkQueueStopped`              | critical | A queue has ready work that nothing has claimed for about 10 minutes.                                                               |
 | `WorkQueueBehind`               | warning  | An org's oldest ready item has waited past the queue's objective, for 5 minutes.                                                    |
