@@ -104,13 +104,9 @@ func (a *App) startWorkers(ctx context.Context) {
 	// there.
 	if a.plan.dispatcher {
 		// Opened before the dispatcher claims anything, so the first
-		// increment after a restart is a change from zero. Multi mode only:
-		// sidecars and workspace checkpoints exist only in native
-		// engagements, which local mode never runs.
-		if !a.local() {
-			agentproc.OpenOversizedFrameSeries()
-			delegate.OpenWorkspaceCheckpointSeries()
-		}
+		// increment after a restart is a change from zero.
+		agentproc.OpenOversizedFrameSeries()
+		delegate.OpenWorkspaceCheckpointSeries()
 		go a.spawner.RunDispatcher(ctx, delegate.DefaultDispatchScanInterval)
 		go a.spawner.RunSnapshotReaper(ctx, delegate.DefaultSnapshotReapInterval)
 		evictAfter, eerr := delegate.ParseWorkspaceEvictAfter(os.Getenv("TF_WORKSPACE_EVICT_AFTER_SEC"), a.local())

@@ -87,6 +87,10 @@ const (
 	checkpointFailed           = "failed"
 )
 
+// checkpointOutcomes is every outcome above. OpenWorkspaceCheckpointSeries
+// opens each at zero, so a new outcome belongs here as well.
+var checkpointOutcomes = []string{checkpointWritten, checkpointSkippedUnchanged, checkpointSkippedBusy, checkpointFailed}
+
 // ParseSnapshotInterval interprets the TF_SNAPSHOT_INTERVAL_SEC env value.
 // Empty → the default. 0 → checkpoints disabled. Non-numeric or negative → the
 // default plus an error the caller logs; a bad value must not brick boot, the
@@ -718,7 +722,7 @@ func OpenWorkspaceCheckpointSeries() {
 	if stats == nil || stats.checkpoints == nil {
 		return
 	}
-	for _, outcome := range []string{checkpointWritten, checkpointSkippedUnchanged, checkpointSkippedBusy, checkpointFailed} {
+	for _, outcome := range checkpointOutcomes {
 		stats.checkpoints.Add(context.Background(), 0, metric.WithAttributes(attribute.String("outcome", outcome)))
 	}
 }
