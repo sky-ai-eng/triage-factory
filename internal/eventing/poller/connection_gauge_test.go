@@ -26,17 +26,17 @@ func (f *fakeConnectionSource) ListConnectionStatuses(context.Context) ([]dbpkg.
 	return f.statuses, f.err
 }
 
-// scrapeUpstreamUp pushes the observer's gauge through a Prometheus exporter
-// configured exactly as internal/telemetry configures production's and returns
-// the tf_upstream_up lines, so the name the docs, the dashboard and the alert
-// rule use is the name asserted on.
-func scrapeUpstreamUp(t *testing.T, registry *prometheus.Registry) []string {
+// scrapeMetric scrapes a registry fed by a Prometheus exporter configured
+// exactly as internal/telemetry configures production's and returns the sample
+// lines of the named metric, so the name the docs, the dashboard and the alert
+// rules use is the name asserted on.
+func scrapeMetric(t *testing.T, registry *prometheus.Registry, name string) []string {
 	t.Helper()
 	rec := httptest.NewRecorder()
 	promhttp.HandlerFor(registry, promhttp.HandlerOpts{}).ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
 	var lines []string
 	for _, line := range strings.Split(rec.Body.String(), "\n") {
-		if strings.HasPrefix(line, "tf_upstream_up") {
+		if strings.HasPrefix(line, name+"{") || strings.HasPrefix(line, name+" ") {
 			lines = append(lines, line)
 		}
 	}
@@ -87,12 +87,12 @@ func TestConnectionObserver_ExportsTheStoredState(t *testing.T) {
 	c := NewConnectionObserver(provider, src)
 	defer c.Close()
 
-	if lines := scrapeUpstreamUp(t, registry); len(lines) != 0 {
+	if lines := scrapeMetric(t, registry, "tf_upstream_up"); len(lines) != 0 {
 		t.Errorf("reported before any read: %v", lines)
 	}
 
 	c.Tick(context.Background())
-	assertLines(t, scrapeUpstreamUp(t, registry), []string{
+	assertLines(t, scrapeMetric(t, registry, "tf_upstream_up"), []string{
 		`tf_upstream_up{org_id="org-1",upstream="github"} 0`,
 		`tf_upstream_up{org_id="org-1",upstream="jira"} 1`,
 	})
@@ -113,11 +113,11 @@ func TestConnectionObserver_DropsVanishedOrgsAndKeepsValuesOnAFailedRead(t *test
 
 	src.statuses = src.statuses[1:]
 	c.Tick(context.Background())
-	assertLines(t, scrapeUpstreamUp(t, registry), []string{`tf_upstream_up{org_id="org-2",upstream="github"} 1`})
+	assertLines(t, scrapeMetric(t, registry, "tf_upstream_up"), []string{`tf_upstream_up{org_id="org-2",upstream="github"} 1`})
 
 	src.statuses, src.err = nil, errors.New("database unreachable")
 	c.Tick(context.Background())
-	assertLines(t, scrapeUpstreamUp(t, registry), []string{`tf_upstream_up{org_id="org-2",upstream="github"} 1`})
+	assertLines(t, scrapeMetric(t, registry, "tf_upstream_up"), []string{`tf_upstream_up{org_id="org-2",upstream="github"} 1`})
 }
 
 // TestConnectionObserver_CloseStopsReporting is the lease-flap case: a
@@ -131,7 +131,7 @@ func TestConnectionObserver_CloseStopsReporting(t *testing.T) {
 	c := NewConnectionObserver(provider, src)
 	c.Tick(context.Background())
 	c.Close()
-	if lines := scrapeUpstreamUp(t, registry); len(lines) != 0 {
+	if lines := scrapeMetric(t, registry, "tf_upstream_up"); len(lines) != 0 {
 		t.Errorf("a closed observer still reports: %v", lines)
 	}
 }

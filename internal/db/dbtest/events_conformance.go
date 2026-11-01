@@ -336,16 +336,15 @@ func RunEventStoreConformance(t *testing.T, mk EventStoreFactory) {
 		if !jsonEqual(t, got, want) {
 			t.Errorf("GetMetadataSystem = %q, want JSON-equivalent to %q", got, want)
 		}
-	})
-
-	t.Run("GetMetadataSystem_returns_empty_on_miss", func(t *testing.T) {
-		s, orgID, _ := mk(t)
-		got, err := s.GetMetadataSystem(ctx, orgID, "00000000-0000-0000-0000-000000000000")
-		if err != nil {
-			t.Fatalf("GetMetadataSystem: %v", err)
-		}
-		if got != "" {
-			t.Errorf("GetMetadataSystem on miss should be empty, got %q", got)
+		// A miss reads empty.
+		{
+			got, err := s.GetMetadataSystem(ctx, orgID, "00000000-0000-0000-0000-000000000000")
+			if err != nil {
+				t.Fatalf("GetMetadataSystem: %v", err)
+			}
+			if got != "" {
+				t.Errorf("GetMetadataSystem on miss should be empty, got %q", got)
+			}
 		}
 	})
 
@@ -417,16 +416,15 @@ func RunEventStoreConformance(t *testing.T, mk EventStoreFactory) {
 		if got.OrgID != orgID {
 			t.Errorf("OrgID = %q, want %q (stamped for the worker)", got.OrgID, orgID)
 		}
-	})
-
-	t.Run("GetSystem_returns_nil_on_miss", func(t *testing.T) {
-		s, orgID, _ := mk(t)
-		got, err := s.GetSystem(ctx, orgID, "00000000-0000-0000-0000-000000000000")
-		if err != nil {
-			t.Fatalf("GetSystem: %v", err)
-		}
-		if got != nil {
-			t.Errorf("GetSystem on miss should be nil, got %+v", got)
+		// A miss reads nil.
+		{
+			got, err := s.GetSystem(ctx, orgID, "00000000-0000-0000-0000-000000000000")
+			if err != nil {
+				t.Fatalf("GetSystem: %v", err)
+			}
+			if got != nil {
+				t.Errorf("GetSystem on miss should be nil, got %+v", got)
+			}
 		}
 	})
 }

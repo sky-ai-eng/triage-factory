@@ -303,6 +303,14 @@ func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID stri
 				t.Fatalf("collapse claim times: %v", err)
 			}
 		},
+		BackdateClaimedAt: func(t *testing.T, conversationID string, age time.Duration) {
+			t.Helper()
+			if _, err := conn.Exec(
+				`UPDATE claims SET claimed_at = now() - make_interval(secs => $2) WHERE conversation_id = $1`,
+				conversationID, age.Seconds()); err != nil {
+				t.Fatalf("backdate claimed_at of %s: %v", conversationID, err)
+			}
+		},
 		Deliverable: func(t *testing.T, conversationID, kind, state, detailsJSON string) string {
 			t.Helper()
 			id := uuid.New().String()

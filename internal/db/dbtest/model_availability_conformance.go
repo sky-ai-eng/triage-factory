@@ -89,6 +89,18 @@ func RunModelAvailabilityStoreConformance(t *testing.T, mk ModelAvailabilityStor
 		if red.CheckedAt.Before(before) {
 			t.Errorf("checked_at = %s, want a stamp from this write (after %s)", red.CheckedAt, before)
 		}
+		{
+			// model_key is deliberately FK-free: the catalog is a compiled-in file,
+			// not a table, so a row for a retired key resolves to nothing (callers
+			// iterate the catalog) rather than being refused at write time.
+			row, err := store.Record(ctx, orgID, anthropic, "claude-retired-9", domain.ModelAvailabilityGreen, "")
+			if err != nil {
+				t.Fatalf("Record for an unoffered key: %v", err)
+			}
+			if row.ModelKey != "claude-retired-9" {
+				t.Errorf("Record stored %q, want the key as written", row.ModelKey)
+			}
+		}
 	})
 
 	t.Run("green_carries_no_detail", func(t *testing.T) {
@@ -163,17 +175,4 @@ func RunModelAvailabilityStoreConformance(t *testing.T, mk ModelAvailabilityStor
 		}
 	})
 
-	t.Run("a_key_this_build_does_not_offer_stores_inertly", func(t *testing.T) {
-		// model_key is deliberately FK-free: the catalog is a compiled-in file,
-		// not a table, so a row for a retired key resolves to nothing (callers
-		// iterate the catalog) rather than being refused at write time.
-		store, orgID := mk(t)
-		row, err := store.Record(ctx, orgID, anthropic, "claude-retired-9", domain.ModelAvailabilityGreen, "")
-		if err != nil {
-			t.Fatalf("Record for an unoffered key: %v", err)
-		}
-		if row.ModelKey != "claude-retired-9" {
-			t.Errorf("Record stored %q, want the key as written", row.ModelKey)
-		}
-	})
 }

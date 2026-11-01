@@ -27,12 +27,29 @@ func TestModelAvailabilityStore_SQLite_Conformance(t *testing.T) {
 // the lifecycle: green is permanent, and "permanent" has to mean across a
 // process restart or the save gate re-offers a paid test on every boot.
 //
-// It runs against a file on disk rather than the shared in-memory fixture,
+// It runs against a copy of the fixture on disk rather than in memory,
 // closing the handle entirely between the write and the read — which is the
 // only shape in which an in-memory implementation of this store would fail.
 func TestModelAvailabilityStore_SQLite_SurvivesReopen(t *testing.T) {
-	dsn := "file:" + filepath.Join(t.TempDir(), "availability.db") +
-		"?_pragma=foreign_keys(on)&" + db.SQLiteTimeFormatParam
+	path := filepath.Join(t.TempDir(), "availability.db")
+	dsn := "file:" + path + "?_pragma=foreign_keys(on)&" + db.SQLiteTimeFormatParam
+
+	// The file starts as the fixture every other test restores.
+	fixture, err := sql.Open("sqlite", db.TestDSNMemory)
+	if err != nil {
+		t.Fatalf("open fixture: %v", err)
+	}
+	fixture.SetMaxOpenConns(1)
+	fixture.SetMaxIdleConns(1)
+	if err := db.BootstrapSchemaForTest(fixture); err != nil {
+		t.Fatalf("bootstrap schema: %v", err)
+	}
+	if _, err := fixture.Exec(`VACUUM INTO ?`, path); err != nil {
+		t.Fatalf("write the fixture to %s: %v", path, err)
+	}
+	if err := fixture.Close(); err != nil {
+		t.Fatalf("close fixture: %v", err)
+	}
 
 	open := func() *sql.DB {
 		t.Helper()
@@ -46,12 +63,6 @@ func TestModelAvailabilityStore_SQLite_SurvivesReopen(t *testing.T) {
 	}
 
 	first := open()
-	if err := db.Migrate(first, "sqlite3"); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	if err := db.SeedLocalTenantRows(t.Context(), first); err != nil {
-		t.Fatalf("seed local tenant: %v", err)
-	}
 	written, err := sqlitestore.New(first).ModelAvailability.Record(
 		t.Context(), runmode.LocalDefaultOrgID, "anthropic", "claude-sonnet-5", domain.ModelAvailabilityGreen, "")
 	if err != nil {

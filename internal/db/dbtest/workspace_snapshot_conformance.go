@@ -56,19 +56,6 @@ func RunWorkspaceSnapshotStoreConformance(t *testing.T, mk WorkspaceSnapshotStor
 	t.Helper()
 	ctx := context.Background()
 
-	t.Run("no_row_until_a_snapshot_begins", func(t *testing.T) {
-		store, orgID, seed := mk(t)
-		task := seed.Task(t, "silent")
-
-		got, err := store.GetSnapshotStateSystem(ctx, orgID, task)
-		if err != nil {
-			t.Fatalf("get before begin: %v", err)
-		}
-		if got != nil {
-			t.Fatalf("a key nobody has snapshotted reads as %+v, want nil — absence is what distinguishes 'never owed' from 'owed'", got)
-		}
-	})
-
 	t.Run("begin_then_finish_ok_records_written", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		task := seed.Task(t, "written")
@@ -115,6 +102,18 @@ func RunWorkspaceSnapshotStoreConformance(t *testing.T, mk WorkspaceSnapshotStor
 		}
 		if done.UpdatedAt.Before(pending.UpdatedAt) {
 			t.Errorf("updated_at went backwards: %v then %v", pending.UpdatedAt, done.UpdatedAt)
+		}
+		// A task has no row until a snapshot begins.
+		{
+			task := seed.Task(t, "silent")
+
+			got, err := store.GetSnapshotStateSystem(ctx, orgID, task)
+			if err != nil {
+				t.Fatalf("get before begin: %v", err)
+			}
+			if got != nil {
+				t.Fatalf("a key nobody has snapshotted reads as %+v, want nil — absence is what distinguishes 'never owed' from 'owed'", got)
+			}
 		}
 	})
 

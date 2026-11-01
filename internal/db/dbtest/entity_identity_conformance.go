@@ -60,6 +60,15 @@ func RunEntityKeyConformance(t *testing.T, mk EntityKeyFactory) {
 		if err != nil || got == nil || got.ID != second.ID {
 			t.Errorf("GetBySource with both closed = %+v err=%v, want the most recently closed %s", got, err, second.ID)
 		}
+		// With no scope, nothing is created and nothing matches.
+		{
+			if _, _, err := s.FindOrCreate(ctx, orgID, "github", "", "acme/key#6", "uuid-k6", "pr", "t", ""); !errors.Is(err, db.ErrEntityScopeRequired) {
+				t.Errorf("FindOrCreate with no scope: err=%v, want ErrEntityScopeRequired", err)
+			}
+			if got, err := s.GetBySource(ctx, orgID, "github", "", "acme/key#6"); err != nil || got != nil {
+				t.Errorf("GetBySource with no scope = %+v err=%v, want (nil, nil)", got, err)
+			}
+		}
 	})
 
 	t.Run("an_active_key_refuses_a_different_object", func(t *testing.T) {
@@ -127,15 +136,6 @@ func RunEntityKeyConformance(t *testing.T, mk EntityKeyFactory) {
 		}
 	})
 
-	t.Run("no_scope_creates_nothing_and_matches_nothing", func(t *testing.T) {
-		s, orgID := mk(t)
-		if _, _, err := s.FindOrCreate(ctx, orgID, "github", "", "acme/key#6", "uuid-k6", "pr", "t", ""); !errors.Is(err, db.ErrEntityScopeRequired) {
-			t.Errorf("FindOrCreate with no scope: err=%v, want ErrEntityScopeRequired", err)
-		}
-		if got, err := s.GetBySource(ctx, orgID, "github", "", "acme/key#6"); err != nil || got != nil {
-			t.Errorf("GetBySource with no scope = %+v err=%v, want (nil, nil)", got, err)
-		}
-	})
 }
 
 // EntityIdentityFactory is what a per-backend test file hands to

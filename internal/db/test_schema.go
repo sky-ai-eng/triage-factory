@@ -12,10 +12,10 @@ import (
 
 // BootstrapSchemaForTest applies the full schema and seed data to db
 // from a cached page image. Equivalent to Migrate followed by
-// SeedLocalTenantRows, but the image is built once per process — each
-// test pays one deserialize (a copy of ~1MB of pages) instead of
-// running goose's full Up cycle, or even replaying the schema as DDL
-// text.
+// SeedLocalTenantRows, but the image is built once per process, over the
+// migrated image test binaries share (migratedImageAt) — each test pays one
+// deserialize (a copy of ~1MB of pages) instead of running goose's full Up
+// cycle, or even replaying the schema as DDL text.
 //
 // The image is captured by restoring the tenantless image (see
 // BootstrapTenantlessSchemaForTest) into an in-memory template, seeding
@@ -23,10 +23,9 @@ import (
 // serialized pages. Deserializing hands the target connection those
 // bytes wholesale — tables, indexes, triggers, views, and every seeded
 // row — so the fixture equals the template by construction, with no
-// hand-maintained list of which tables are worth carrying across. The
-// migration runner itself is still covered by migrations_test.go, which
-// uses Migrate directly, and TestBootstrapSchemaForTest_MatchesMigrate
-// pins this path against it.
+// hand-maintained list of which tables are worth carrying across.
+// TestMigrate_MatchesTheTestImages runs Migrate itself and pins this path
+// against it.
 //
 // Deserializing replaces the database behind one connection, so db is
 // expected to be an in-memory handle pinned to a single connection —
@@ -176,18 +175,19 @@ var (
 // migratedImageAt returns the page image of an empty database after
 // goose.UpTo(version) over the SQLite migration tree — goose alone, so
 // none of what Migrate does after goose (events_catalog) and no tenant.
-// Migration tests restore it in place of replaying the chain up to the
-// version they seed at.
+// Every test schema is built from the image at head, and migration tests
+// restore an earlier one in place of replaying the chain up to the version
+// they seed at.
 //
-// Images are cached by version and built lazily: a build restores the
-// highest cached image below version, applies only the migrations after
-// it, and caches the checkpoints it passes (see checkpointEvery). The
-// image carries goose_db_version, so goose continues from the restored
-// version exactly as it would on the database the image was taken from.
+// Images are cached by version, in the process and across test binaries
+// (imageCache), and built lazily: a build restores the highest image
+// cached below version, applies only the migrations after it, and caches
+// the checkpoints it passes (see checkpointEvery). The image carries
+// goose_db_version, so goose continues from the restored version exactly
+// as it would on the database the image was taken from.
 //
 // Every image is built under TestDSNMemory, foreign keys on. A restore
-// keeps the target connection's own pragmas, so a connection opened
-// with foreign keys off stays off.
+// keeps the target connection's own pragmas.
 func migratedImageAt(version int64) ([]byte, error) {
 	migratedImagesMu.Lock()
 	defer migratedImagesMu.Unlock()
@@ -195,11 +195,47 @@ func migratedImageAt(version int64) ([]byte, error) {
 	if image, ok := migratedImages[version]; ok {
 		return image, nil
 	}
+
+	treeFS, dir, err := migrationsFor("sqlite3")
+	if err != nil {
+		return nil, err
+	}
+	gooseMu.Lock()
+	goose.SetBaseFS(treeFS)
+	tree, err := goose.CollectMigrations(dir, 0, goose.MaxVersion)
+	gooseMu.Unlock()
+	if err != nil {
+		return nil, fmt.Errorf("collect migrations: %w", err)
+	}
+
+	cache := openImageCache(treeFS, tree)
+	if image, ok := cache.read(version); ok {
+		migratedImages[version] = image
+		return image, nil
+	}
+	defer cache.lock()()
+	// Another binary may have built it while this one waited.
+	if image, ok := cache.read(version); ok {
+		migratedImages[version] = image
+		return image, nil
+	}
+
 	var base []byte
 	baseVersion := int64(-1)
 	for v, image := range migratedImages {
 		if v < version && v > baseVersion {
 			base, baseVersion = image, v
+		}
+	}
+	// A checkpoint another binary left saves replaying up to it.
+	for i := len(tree) - 1; i >= 0 && tree[i].Version > baseVersion; i-- {
+		if (i+1)%checkpointEvery != 0 || tree[i].Version >= version {
+			continue
+		}
+		if image, ok := cache.read(tree[i].Version); ok {
+			migratedImages[tree[i].Version] = image
+			base, baseVersion = image, tree[i].Version
+			break
 		}
 	}
 
@@ -209,21 +245,12 @@ func migratedImageAt(version int64) ([]byte, error) {
 	}
 	defer template.Close()
 
-	treeFS, dir, err := migrationsFor("sqlite3")
-	if err != nil {
-		return nil, err
-	}
 	gooseMu.Lock()
 	defer gooseMu.Unlock()
 	goose.SetBaseFS(treeFS)
 	if err := goose.SetDialect("sqlite3"); err != nil {
 		return nil, fmt.Errorf("set dialect: %w", err)
 	}
-	tree, err := goose.CollectMigrations(dir, 0, goose.MaxVersion)
-	if err != nil {
-		return nil, fmt.Errorf("collect migrations: %w", err)
-	}
-
 	var stops []int64
 	for i, m := range tree {
 		if (i+1)%checkpointEvery == 0 && m.Version > baseVersion && m.Version < version {
@@ -239,6 +266,7 @@ func migratedImageAt(version int64) ([]byte, error) {
 			return nil, fmt.Errorf("image at %d: %w", stop, err)
 		}
 		migratedImages[stop] = image
+		cache.write(stop, image)
 	}
 	return migratedImages[version], nil
 }
@@ -281,15 +309,15 @@ func cachedSchemaImage() ([]byte, error) {
 }
 
 // buildTenantlessImage is Migrate on an empty database, taken in two
-// steps so the goose half can come from the image binaries share
-// (sharedHeadImage): the image at head, then Migrate over it, which finds
+// steps so the goose half can come from the images binaries share
+// (migratedImageAt): the image at head, then Migrate over it, which finds
 // nothing pending and does the rest.
 func buildTenantlessImage() ([]byte, error) {
 	head, err := sqliteHeadVersion()
 	if err != nil {
 		return nil, fmt.Errorf("head migration version: %w", err)
 	}
-	headImage, err := sharedHeadImage(head)
+	headImage, err := migratedImageAt(head)
 	if err != nil {
 		return nil, err
 	}

@@ -18,13 +18,6 @@ type SettingsLockFactory func(t *testing.T) (stores db.Stores, orgID, userID, te
 // the first has committed, and then reads what the first stored; and outside a
 // transaction, where nothing would hold it, it is refused.
 func RunSettingsLockConformance(t *testing.T, mk SettingsLockFactory) {
-	t.Run("refused_outside_a_transaction", func(t *testing.T) {
-		stores, _, _, teamID := mk(t)
-		if err := stores.Teams.LockSettings(t.Context(), teamID); err == nil {
-			t.Error("LockSettings outside a transaction = nil; want a refusal")
-		}
-	})
-
 	t.Run("second_writer_waits_for_the_first_to_commit", func(t *testing.T) {
 		stores, orgID, userID, teamID := mk(t)
 		ctx := t.Context()
@@ -87,6 +80,12 @@ func RunSettingsLockConformance(t *testing.T, mk SettingsLockFactory) {
 			}
 		case <-time.After(10 * time.Second):
 			t.Fatal("second writer never got past the lock after the first committed")
+		}
+		// LockSettings outside a transaction is refused.
+		{
+			if err := stores.Teams.LockSettings(t.Context(), teamID); err == nil {
+				t.Error("LockSettings outside a transaction = nil; want a refusal")
+			}
 		}
 	})
 }

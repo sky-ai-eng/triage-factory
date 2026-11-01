@@ -719,6 +719,76 @@ tests:
   - eval_time: 16m
     alertname: JiraDeploymentAppQuotaLow
     exp_alerts: []
+- name: GitHubScopeDrift fires per org after an hour of drift
+  interval: 1m
+  input_series:
+  - series: 'tf_github_scope_drift_repos{org_id="o1",instance="control-1:9464"}'
+    values: 0 2x70
+  - series: 'tf_github_scope_drift_repos{org_id="o2",instance="control-1:9464"}'
+    values: 0x71
+  alert_rule_test:
+  - eval_time: 60m
+    alertname: GitHubScopeDrift
+    exp_alerts: []
+  - eval_time: 61m
+    alertname: GitHubScopeDrift
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        org_id: o1
+      exp_annotations:
+        summary: Org o1 tracks repositories outside its GitHub App grant
+        description: 'For an hour, teams in org o1 have tracked repositories that the org''s GitHub App grant does not contain, 2 in the last 5 minutes. Triage Factory does not poll them, so their pull requests produce no tasks or runs. An admin of the org fixes it: add the repositories to the App''s installation on GitHub (installing the App on their account if it has none there), or untrack them. The org''s GitHub access settings (Organization → Settings → GitHub access) list them, with a link to each installation''s settings page on GitHub.'
+- name: GitHubScopeDrift ignores a grant fixed within the hour
+  interval: 1m
+  input_series:
+  - series: 'tf_github_scope_drift_repos{org_id="o1",instance="control-1:9464"}'
+    values: 2x40 0x40
+  alert_rule_test:
+  - eval_time: 61m
+    alertname: GitHubScopeDrift
+    exp_alerts: []
+  - eval_time: 80m
+    alertname: GitHubScopeDrift
+    exp_alerts: []
+- name: GitHubScopeDrift holds its hour over a lease handoff between pods
+  interval: 1m
+  input_series:
+  - series: 'tf_github_scope_drift_repos{org_id="o1",instance="control-1:9464"}'
+    values: 2x30 stale
+  - series: 'tf_github_scope_drift_repos{org_id="o1",instance="control-2:9464"}'
+    values: _x32 2x40
+  alert_rule_test:
+  - eval_time: 59m
+    alertname: GitHubScopeDrift
+    exp_alerts: []
+  - eval_time: 60m
+    alertname: GitHubScopeDrift
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        org_id: o1
+      exp_annotations:
+        summary: Org o1 tracks repositories outside its GitHub App grant
+        description: 'For an hour, teams in org o1 have tracked repositories that the org''s GitHub App grant does not contain, 2 in the last 5 minutes. Triage Factory does not poll them, so their pull requests produce no tasks or runs. An admin of the org fixes it: add the repositories to the App''s installation on GitHub (installing the App on their account if it has none there), or untrack them. The org''s GitHub access settings (Organization → Settings → GitHub access) list them, with a link to each installation''s settings page on GitHub.'
+- name: GitHubScopeDrift clears within 5 minutes of the fix
+  interval: 1m
+  input_series:
+  - series: 'tf_github_scope_drift_repos{org_id="o1",instance="control-1:9464"}'
+    values: 2x70 0x10
+  alert_rule_test:
+  - eval_time: 72m
+    alertname: GitHubScopeDrift
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        org_id: o1
+      exp_annotations:
+        summary: Org o1 tracks repositories outside its GitHub App grant
+        description: 'For an hour, teams in org o1 have tracked repositories that the org''s GitHub App grant does not contain, 2 in the last 5 minutes. Triage Factory does not poll them, so their pull requests produce no tasks or runs. An admin of the org fixes it: add the repositories to the App''s installation on GitHub (installing the App on their account if it has none there), or untrack them. The org''s GitHub access settings (Organization → Settings → GitHub access) list them, with a link to each installation''s settings page on GitHub.'
+  - eval_time: 77m
+    alertname: GitHubScopeDrift
+    exp_alerts: []
 - name: RunPausedAtMemoryLimit fires on a new series' first sample for its org, and clears once 1h has passed
   interval: 1m
   input_series:

@@ -173,6 +173,18 @@ func RunConversationReturnedRowConformance(t *testing.T, mk ConversationReturned
 			t.Fatal("SettleCompactionRequestForClaimSystem returned nil for its own request row")
 		}
 		AssertWriteReturnedStoredRow(t, "SettleCompactionRequestForClaimSystem", *msg, readMsg)
+		// A write naming a missing conversation reports it.
+		{
+			ctx := context.Background()
+			missingID := "00000000-0000-4000-8000-000000000000"
+
+			if _, err := store.SetSession(ctx, orgID, missingID, "sess"); !errors.Is(err, db.ErrNoSuchConversation) {
+				t.Errorf("SetSession on a missing conversation id = %v, want db.ErrNoSuchConversation", err)
+			}
+			if _, err := store.SetWorktreePath(ctx, orgID, missingID, "/tmp/x"); !errors.Is(err, db.ErrNoSuchConversation) {
+				t.Errorf("SetWorktreePath on a missing conversation id = %v, want db.ErrNoSuchConversation", err)
+			}
+		}
 	})
 
 	t.Run("SetExecutorSystem_release_arm_returns_the_released_claim", func(t *testing.T) {
@@ -235,18 +247,6 @@ func RunConversationReturnedRowConformance(t *testing.T, mk ConversationReturned
 		})
 	}
 
-	t.Run("miss_semantics", func(t *testing.T) {
-		store, _, orgID, _, _ := mk(t)
-		ctx := context.Background()
-		missingID := "00000000-0000-4000-8000-000000000000"
-
-		if _, err := store.SetSession(ctx, orgID, missingID, "sess"); !errors.Is(err, db.ErrNoSuchConversation) {
-			t.Errorf("SetSession on a missing conversation id = %v, want db.ErrNoSuchConversation", err)
-		}
-		if _, err := store.SetWorktreePath(ctx, orgID, missingID, "/tmp/x"); !errors.Is(err, db.ErrNoSuchConversation) {
-			t.Errorf("SetWorktreePath on a missing conversation id = %v, want db.ErrNoSuchConversation", err)
-		}
-	})
 }
 
 // ConversationAppPoolFactory is what the Postgres app-pool test file hands to

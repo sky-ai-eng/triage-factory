@@ -123,6 +123,13 @@ func (a *App) startBrain(term int64) {
 	// process exports it, beside the poller that owns the state.
 	a.connectionGauge = poller.NewConnectionObserver(otel.GetMeterProvider(), a.stores.PollReadiness)
 	go a.connectionGauge.Run(brainCtx, poller.DefaultConnectionInterval)
+	// Scope drift gauge (tf_github_scope_drift_repos): per org, the tracked
+	// repositories outside the GitHub App grant, which the poll skips. The
+	// settings panel's count, read from the grant mirror the GitHub cycle
+	// refreshes. Brain-gated so one process exports it.
+	a.scopeDriftGauge = poller.NewScopeDriftObserver(otel.GetMeterProvider(),
+		poller.ScopeDriftStores(a.stores.Orgs, a.stores.GitHubApps, a.stores.ReachableRepos))
+	go a.scopeDriftGauge.Run(brainCtx, poller.DefaultScopeDriftInterval)
 	// Commit-signing queue gauges: the requests no control pod has claimed,
 	// and how long the oldest has waited. Here rather than beside the
 	// signers, which run on every control pod: a queue every signer stopped
@@ -332,6 +339,10 @@ func (a *App) stopBrain(reason string) {
 	if a.connectionGauge != nil {
 		a.connectionGauge.Close()
 		a.connectionGauge = nil
+	}
+	if a.scopeDriftGauge != nil {
+		a.scopeDriftGauge.Close()
+		a.scopeDriftGauge = nil
 	}
 	if a.commitSignQueue != nil {
 		a.commitSignQueue.Close()

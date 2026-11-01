@@ -310,6 +310,10 @@ type App struct {
 	// (tf_upstream_up), on the same lifecycle and for the same reason as
 	// workDepth above. nil when the brain isn't running.
 	connectionGauge *poller.ConnectionObserver
+	// scopeDriftGauge is the brain's scope drift observer
+	// (tf_github_scope_drift_repos), on the same lifecycle and for the same
+	// reason as workDepth above. nil when the brain isn't running.
+	scopeDriftGauge *poller.ScopeDriftObserver
 	// commitSignQueue is the brain's commit-signing queue observer, on the
 	// same lifecycle and for the same reason as workDepth above. nil when the
 	// brain isn't running, and in local mode, which queues no requests.

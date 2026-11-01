@@ -64,17 +64,6 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
 
-	t.Run("Get_returns_nil_for_missing_id", func(t *testing.T) {
-		s, orgID, _, _, _, _, _ := mk(t)
-		task, err := s.Get(ctx, orgID, "00000000-0000-0000-0000-000000000bad")
-		if err != nil {
-			t.Fatalf("Get on missing id: %v", err)
-		}
-		if task != nil {
-			t.Errorf("expected nil task for missing id, got %+v", task)
-		}
-	})
-
 	t.Run("Get_returns_seeded_task_with_entity_join", func(t *testing.T) {
 		s, orgID, _, _, _, seed, _ := mk(t)
 		_, _, taskID := seed(t, "get-happy")
@@ -90,6 +79,10 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 		if task.EntitySource == "" {
 			t.Error("entity JOIN didn't populate EntitySource")
+		}
+		missing, err := s.Get(ctx, orgID, "00000000-0000-0000-0000-000000000bad")
+		if err != nil || missing != nil {
+			t.Errorf("Get on a missing id = (%+v, %v), want (nil, nil)", missing, err)
 		}
 	})
 
@@ -121,6 +114,11 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 			t.Fatalf("List count-only: %v", err)
 		}
 		AssertCountOnlyList(t, "tasks.List", len(coRows), coTotal, total)
+		cancelled, cancel := context.WithCancel(ctx)
+		cancel()
+		if _, _, err := s.List(cancelled, orgID, queueFilter(), db.ListOpts{Limit: 50}); err == nil {
+			t.Errorf("List with a cancelled ctx: want error, got nil")
+		}
 	})
 
 	t.Run("List_created_since_and_sources_filters", func(t *testing.T) {
@@ -452,8 +450,8 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		if err != nil {
 			t.Fatalf("FindOrCreate first call: %v", err)
 		}
-		if !created1 {
-			t.Error("first FindOrCreate should return created=true")
+		if !created1 || task1.ID == "" {
+			t.Errorf("first FindOrCreate = (id %q, created %v), want a new task", task1.ID, created1)
 		}
 		task2, created2, err := s.FindOrCreate(ctx, orgID, teamID, entityID, domain.EventGitHubPRCICheckPassed, "dedup-x", eventID, 0.5)
 		if err != nil {
@@ -468,23 +466,6 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	})
 
 	// --- One task per situation; team is visibility, not count ---
-
-	t.Run("FindOrCreate_single_team_one_task", func(t *testing.T) {
-		// Regression baseline: in a single-team scenario the dedup
-		// index collapses repeat calls to one task.
-		s, orgID, teamID, _, _, seed, _ := mk(t)
-		entityID, eventID, _ := seed(t, "single-team")
-		task, created, err := s.FindOrCreate(ctx, orgID, teamID, entityID, domain.EventGitHubPRCICheckPassed, "build", eventID, 0.5)
-		if err != nil {
-			t.Fatalf("FindOrCreate: %v", err)
-		}
-		if !created {
-			t.Fatal("expected created=true on first call")
-		}
-		if task.ID == "" {
-			t.Fatal("FindOrCreate returned task with empty ID")
-		}
-	})
 
 	t.Run("FindOrCreate_cross_team_collapses_to_one", func(t *testing.T) {
 		// Same (entity, event_type, dedup_key) in two teams → ONE
@@ -516,31 +497,6 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 		if taskA.ID != taskB.ID {
 			t.Errorf("expected the SAME task id across teams; got %q vs %q", taskA.ID, taskB.ID)
-		}
-	})
-
-	t.Run("FindOrCreate_same_team_dedup_collapses", func(t *testing.T) {
-		// Within one team, repeat calls on the same key collapse to
-		// one task — the basic dedup invariant.
-		s, orgID, teamID, _, _, seed, _ := mk(t)
-		entityID, eventID, _ := seed(t, "same-team-dedup")
-
-		task1, created1, err := s.FindOrCreate(ctx, orgID, teamID, entityID, domain.EventGitHubPRCICheckPassed, "build", eventID, 0.5)
-		if err != nil {
-			t.Fatalf("first FindOrCreate: %v", err)
-		}
-		if !created1 {
-			t.Error("first call should create")
-		}
-		task2, created2, err := s.FindOrCreate(ctx, orgID, teamID, entityID, domain.EventGitHubPRCICheckPassed, "build", eventID, 0.5)
-		if err != nil {
-			t.Fatalf("second FindOrCreate: %v", err)
-		}
-		if created2 {
-			t.Error("second call within same team should dedup (created=false)")
-		}
-		if task1.ID != task2.ID {
-			t.Errorf("same-team second call returned different ID %q (want %q)", task2.ID, task1.ID)
 		}
 	})
 
@@ -576,42 +532,6 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 	})
 
-	t.Run("Bump_wakes_snoozed_task", func(t *testing.T) {
-		s, orgID, _, _, _, seed, _ := mk(t)
-		_, eventID, taskID := seed(t, "bump-wake")
-		// Force task into snoozed via SetStatus (sufficient for this
-		// invariant — claim cols stay empty, satisfying the
-		// "snoozed ↔ unclaimed" invariant trivially).
-		if _, err := s.SetStatus(ctx, orgID, taskID, "snoozed"); err != nil {
-			t.Fatalf("SetStatus snoozed: %v", err)
-		}
-		if _, err := s.Bump(ctx, orgID, taskID, eventID); err != nil {
-			t.Fatalf("Bump: %v", err)
-		}
-		got, err := s.Get(ctx, orgID, taskID)
-		if err != nil || got == nil {
-			t.Fatalf("Get post-bump: task=%v err=%v", got, err)
-		}
-		if got.Status != "queued" {
-			t.Errorf("status=%q post-bump, want queued (snooze should clear)", got.Status)
-		}
-	})
-
-	t.Run("Close_terminates_task", func(t *testing.T) {
-		s, orgID, _, _, _, seed, _ := mk(t)
-		_, _, taskID := seed(t, "close")
-		if _, err := s.Close(ctx, orgID, taskID, "test_close", ""); err != nil {
-			t.Fatalf("Close: %v", err)
-		}
-		got, _ := s.Get(ctx, orgID, taskID)
-		if got.Status != "done" {
-			t.Errorf("status=%q post-close, want done", got.Status)
-		}
-		if got.ClosedAt == nil {
-			t.Error("closed_at not set")
-		}
-	})
-
 	t.Run("FindActiveByEntity_excludes_terminal", func(t *testing.T) {
 		s, orgID, _, _, _, seed, _ := mk(t)
 		entityID, _, taskID := seed(t, "fab")
@@ -629,19 +549,13 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 	})
 
-	t.Run("ListActiveRefsForEntities_empty_input", func(t *testing.T) {
-		s, orgID, _, _, _, _, _ := mk(t)
-		refs, err := s.ListActiveRefsForEntities(ctx, orgID, nil, nil)
-		if err != nil {
-			t.Fatalf("ListActiveRefsForEntities(nil): %v", err)
-		}
-		if len(refs) != 0 {
-			t.Errorf("got %d refs, want 0 on empty input", len(refs))
-		}
-	})
-
 	t.Run("ListActiveRefsForEntities_filters_terminal", func(t *testing.T) {
 		s, orgID, _, _, _, seed, _ := mk(t)
+		for _, none := range [][]string{nil, {}} {
+			if refs, err := s.ListActiveRefsForEntities(ctx, orgID, none, nil); err != nil || len(refs) != 0 {
+				t.Errorf("ListActiveRefsForEntities(%#v) = (%d refs, %v), want none", none, len(refs), err)
+			}
+		}
 		entityA, _, taskA := seed(t, "ref-a")
 		entityB, _, taskB := seed(t, "ref-b")
 		// Close B; only A should remain.
@@ -715,19 +629,36 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 	})
 
-	t.Run("ClaimQueuedForUser_rejects_terminal_task", func(t *testing.T) {
-		s, orgID, _, _, userID, seed, _ := mk(t)
-		_, _, taskID := seed(t, "cqfu-term")
-		if _, err := s.Close(ctx, orgID, taskID, "test", ""); err != nil {
-			t.Fatalf("Close: %v", err)
-		}
-		ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID)
-		if err != nil {
-			t.Fatalf("claim on terminal: %v", err)
-		}
-		if ok {
-			t.Error("ok=true claiming a closed task; status guard broken")
-		}
+	t.Run("ClaimWrites_refuse_a_terminal_task", func(t *testing.T) {
+		s, orgID, _, agentID, userID, seed, _ := mk(t)
+
+		t.Run("ClaimQueuedForUser", func(t *testing.T) {
+			_, _, taskID := seed(t, "cqfu-term")
+			if _, err := s.Close(ctx, orgID, taskID, "test", ""); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID)
+			if err != nil {
+				t.Fatalf("claim on terminal: %v", err)
+			}
+			if ok {
+				t.Error("ok=true claiming a closed task; status guard broken")
+			}
+		})
+
+		t.Run("StampAgentClaimIfUnclaimed", func(t *testing.T) {
+			_, _, taskID := seed(t, "stamp-term")
+			if _, err := s.Close(ctx, orgID, taskID, "test", ""); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			ok, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID, "")
+			if err != nil {
+				t.Fatalf("StampAgentClaimIfUnclaimed on terminal: %v", err)
+			}
+			if ok {
+				t.Error("ok=true stamping a terminal task; status guard broken")
+			}
+		})
 	})
 
 	t.Run("StampAgentClaimIfUnclaimed_lands_then_skips_same_agent", func(t *testing.T) {
@@ -760,21 +691,6 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 		if ok {
 			t.Error("second stamp returned ok=true; same-agent no-op guard broken")
-		}
-	})
-
-	t.Run("StampAgentClaimIfUnclaimed_refuses_terminal", func(t *testing.T) {
-		s, orgID, _, agentID, _, seed, _ := mk(t)
-		_, _, taskID := seed(t, "stamp-term")
-		if _, err := s.Close(ctx, orgID, taskID, "test", ""); err != nil {
-			t.Fatalf("Close: %v", err)
-		}
-		ok, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID, "")
-		if err != nil {
-			t.Fatalf("StampAgentClaimIfUnclaimed on terminal: %v", err)
-		}
-		if ok {
-			t.Error("ok=true stamping a terminal task; status guard broken")
 		}
 	})
 
@@ -923,97 +839,80 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 	})
 
-	t.Run("AdvanceStatusForUser_refuses_bot_claim", func(t *testing.T) {
+	t.Run("AdvanceStatusForUser_refusals", func(t *testing.T) {
 		s, orgID, _, agentID, userID, seed, _ := mk(t)
-		_, _, taskID := seed(t, "adv-bot")
-		if _, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID, ""); err != nil {
-			t.Fatalf("stamp agent: %v", err)
-		}
-		ok, err := s.AdvanceStatusForUser(ctx, orgID, taskID, userID, "in_progress")
-		if err != nil {
-			t.Fatalf("AdvanceStatusForUser: %v", err)
-		}
-		if ok {
-			t.Error("AdvanceStatusForUser landed on bot-claimed task; should refuse (status owned by the conversation lifecycle)")
-		}
-		got, _ := s.Get(ctx, orgID, taskID)
-		if got.Status != "in_progress" {
-			t.Errorf("status=%q, want in_progress (the bot's own claim placed it; the refusal changes nothing)", got.Status)
-		}
-	})
 
-	t.Run("AdvanceStatusForUser_refuses_different_user", func(t *testing.T) {
-		s, orgID, _, _, userID, seed, _ := mk(t)
-		_, _, taskID := seed(t, "adv-other")
-		if ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID); err != nil || !ok {
-			t.Fatalf("claim: ok=%v err=%v", ok, err)
-		}
-		// A different user's id — must not be able to advance someone
-		// else's task. Use a syntactic-only mismatch so the FK-shape
-		// constant the seeder uses for userID still distinguishes.
-		otherUserID := "00000000-0000-0000-0000-0000000000ff"
-		ok, err := s.AdvanceStatusForUser(ctx, orgID, taskID, otherUserID, "in_progress")
-		if err != nil {
-			t.Fatalf("AdvanceStatusForUser: %v", err)
-		}
-		if ok {
-			t.Error("AdvanceStatusForUser landed on someone else's task; should refuse")
-		}
-	})
-
-	t.Run("AdvanceStatusForUser_refuses_terminal_task", func(t *testing.T) {
-		s, orgID, _, _, userID, seed, _ := mk(t)
-		_, _, taskID := seed(t, "adv-term")
-		if ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID); err != nil || !ok {
-			t.Fatalf("claim: ok=%v err=%v", ok, err)
-		}
-		if _, err := s.Close(ctx, orgID, taskID, "test_close", ""); err != nil {
-			t.Fatalf("close: %v", err)
-		}
-		ok, err := s.AdvanceStatusForUser(ctx, orgID, taskID, userID, "in_progress")
-		if err != nil {
-			t.Fatalf("AdvanceStatusForUser: %v", err)
-		}
-		if ok {
-			t.Error("AdvanceStatusForUser landed on terminal task; should refuse")
-		}
-	})
-
-	t.Run("AdvanceStatusForUser_rejects_invalid_target", func(t *testing.T) {
-		s, orgID, _, _, userID, seed, _ := mk(t)
-		_, _, taskID := seed(t, "adv-bad")
-		if ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID); err != nil || !ok {
-			t.Fatalf("claim: ok=%v err=%v", ok, err)
-		}
-		// in_review is in the list because it WAS a target: the value left
-		// the vocabulary, and a store that still accepted it would write a
-		// status the CHECK constraint no longer admits.
-		for _, bad := range []string{"done", "dismissed", "queued", "snoozed", "in_review", "wat"} {
-			ok, err := s.AdvanceStatusForUser(ctx, orgID, taskID, userID, bad)
+		t.Run("bot_claim", func(t *testing.T) {
+			_, _, taskID := seed(t, "adv-bot")
+			if _, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID, ""); err != nil {
+				t.Fatalf("stamp agent: %v", err)
+			}
+			ok, err := s.AdvanceStatusForUser(ctx, orgID, taskID, userID, "in_progress")
 			if err != nil {
-				t.Errorf("to=%q: unexpected err: %v", bad, err)
+				t.Fatalf("AdvanceStatusForUser: %v", err)
 			}
 			if ok {
-				t.Errorf("to=%q: AdvanceStatusForUser returned ok=true; should only accept in_progress", bad)
+				t.Error("AdvanceStatusForUser landed on bot-claimed task; should refuse (status owned by the conversation lifecycle)")
 			}
-		}
-	})
+			got, _ := s.Get(ctx, orgID, taskID)
+			if got.Status != "in_progress" {
+				t.Errorf("status=%q, want in_progress (the bot's own claim placed it; the refusal changes nothing)", got.Status)
+			}
+		})
 
-	// The status CHECK is the backstop behind every guarded helper: a write
-	// path that skipped one — SetStatus is the unguarded one — must not be
-	// able to put a retired value back on the board. in_review left the
-	// vocabulary, so the constraint is what makes that unwritable rather
-	// than merely unwritten.
-	t.Run("SetStatus_refuses_the_retired_in_review_value", func(t *testing.T) {
-		s, orgID, _, _, _, seed, _ := mk(t)
-		_, _, taskID := seed(t, "check-in-review")
-		if _, err := s.SetStatus(ctx, orgID, taskID, "in_review"); err == nil {
-			t.Error("SetStatus(in_review) succeeded; the tasks status CHECK must refuse it")
-		}
-		got, _ := s.Get(ctx, orgID, taskID)
-		if got.Status != "queued" {
-			t.Errorf("status=%q, want queued (a refused write must not land)", got.Status)
-		}
+		t.Run("different_user", func(t *testing.T) {
+			_, _, taskID := seed(t, "adv-other")
+			if ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID); err != nil || !ok {
+				t.Fatalf("claim: ok=%v err=%v", ok, err)
+			}
+			// A different user's id — must not be able to advance someone
+			// else's task. Use a syntactic-only mismatch so the FK-shape
+			// constant the seeder uses for userID still distinguishes.
+			otherUserID := "00000000-0000-0000-0000-0000000000ff"
+			ok, err := s.AdvanceStatusForUser(ctx, orgID, taskID, otherUserID, "in_progress")
+			if err != nil {
+				t.Fatalf("AdvanceStatusForUser: %v", err)
+			}
+			if ok {
+				t.Error("AdvanceStatusForUser landed on someone else's task; should refuse")
+			}
+		})
+
+		t.Run("terminal_task", func(t *testing.T) {
+			_, _, taskID := seed(t, "adv-term")
+			if ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID); err != nil || !ok {
+				t.Fatalf("claim: ok=%v err=%v", ok, err)
+			}
+			if _, err := s.Close(ctx, orgID, taskID, "test_close", ""); err != nil {
+				t.Fatalf("close: %v", err)
+			}
+			ok, err := s.AdvanceStatusForUser(ctx, orgID, taskID, userID, "in_progress")
+			if err != nil {
+				t.Fatalf("AdvanceStatusForUser: %v", err)
+			}
+			if ok {
+				t.Error("AdvanceStatusForUser landed on terminal task; should refuse")
+			}
+		})
+
+		t.Run("invalid_target", func(t *testing.T) {
+			_, _, taskID := seed(t, "adv-bad")
+			if ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID); err != nil || !ok {
+				t.Fatalf("claim: ok=%v err=%v", ok, err)
+			}
+			// in_review is in the list because it WAS a target: the value left
+			// the vocabulary, and a store that still accepted it would write a
+			// status the CHECK constraint no longer admits.
+			for _, bad := range []string{"done", "dismissed", "queued", "snoozed", "in_review", "wat"} {
+				ok, err := s.AdvanceStatusForUser(ctx, orgID, taskID, userID, bad)
+				if err != nil {
+					t.Errorf("to=%q: unexpected err: %v", bad, err)
+				}
+				if ok {
+					t.Errorf("to=%q: AdvanceStatusForUser returned ok=true; should only accept in_progress", bad)
+				}
+			}
+		})
 	})
 
 	// The snoozed lane — the board's "show snoozed" toggle asks for it by
@@ -1216,28 +1115,6 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 	})
 
-	// --- Empty-arg / ctx-cancel quick guards ---
-
-	t.Run("CtxCancellation_fails_fast", func(t *testing.T) {
-		s, orgID, _, _, _, _, _ := mk(t)
-		cancelled, cancel := context.WithCancel(ctx)
-		cancel()
-		if _, _, err := s.List(cancelled, orgID, queueFilter(), db.ListOpts{Limit: 50}); err == nil {
-			t.Errorf("List with cancelled ctx: want error, got nil")
-		}
-	})
-
-	t.Run("ListActiveRefs_empty_orgID_check_does_not_panic", func(t *testing.T) {
-		s, orgID, _, _, _, _, _ := mk(t)
-		refs, err := s.ListActiveRefsForEntities(ctx, orgID, []string{}, nil)
-		if err != nil {
-			t.Fatalf("empty slice: %v", err)
-		}
-		if len(refs) != 0 {
-			t.Errorf("got %d refs, want 0", len(refs))
-		}
-	})
-
 	// --- Returned-row standard ---
 
 	t.Run("lifecycle_writes_return_the_stored_row", func(t *testing.T) {
@@ -1337,6 +1214,21 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 				t.Errorf("%s(missing id) = %v, want db.ErrNoSuchTask", m.name, err)
 			}
 		}
+		// The status CHECK is the backstop behind every guarded helper: a write
+		// path that skipped one — SetStatus is the unguarded one — must not be
+		// able to put a retired value back on the board. in_review left the
+		// vocabulary, so the constraint is what makes that unwritable rather
+		// than merely unwritten.
+		{
+			_, _, taskID := seed(t, "check-in-review")
+			if _, err := s.SetStatus(ctx, orgID, taskID, "in_review"); err == nil {
+				t.Error("SetStatus(in_review) succeeded; the tasks status CHECK must refuse it")
+			}
+			got, _ := s.Get(ctx, orgID, taskID)
+			if got.Status != "queued" {
+				t.Errorf("status=%q, want queued (a refused write must not land)", got.Status)
+			}
+		}
 	})
 }
 
@@ -1395,6 +1287,13 @@ func runTaskListConformance(ctx context.Context, t *testing.T, mk TaskStoreFacto
 		ids, total := listIDs(t, s, orgID, db.TaskListFilter{Statuses: []string{"dismissed"}}, db.ListOpts{Limit: 50})
 		if len(ids) != 0 || total != 0 {
 			t.Errorf("empty lane returned %d ids / total %d, want 0 / 0", len(ids), total)
+		}
+		// The HTTP layer rejects a status outside the vocabulary; the store
+		// is not the validator, and must answer an honest empty rather than
+		// widening to everything.
+		ids, total = listIDs(t, s, orgID, db.TaskListFilter{Statuses: []string{"not_a_status"}}, db.ListOpts{Limit: 50})
+		if len(ids) != 0 || total != 0 {
+			t.Errorf("unknown status returned %d ids / total %d, want 0 / 0", len(ids), total)
 		}
 	})
 
@@ -1739,17 +1638,6 @@ func runTaskListConformance(ctx context.Context, t *testing.T, mk TaskStoreFacto
 		}
 	})
 
-	t.Run("List_unknown_status_matches_nothing", func(t *testing.T) {
-		s, orgID, _, _, _, seed, _ := mk(t)
-		seed(t, "bogus-status")
-		// The HTTP layer rejects a status outside the vocabulary; the store
-		// is not the validator, and must answer an honest empty rather than
-		// widening to everything.
-		ids, total := listIDs(t, s, orgID, db.TaskListFilter{Statuses: []string{"not_a_status"}}, db.ListOpts{Limit: 50})
-		if len(ids) != 0 || total != 0 {
-			t.Errorf("unknown status returned %d ids / total %d, want 0 / 0", len(ids), total)
-		}
-	})
 }
 
 // runTaskFacetConformance pins FacetEventTypes against the lane it is handed.

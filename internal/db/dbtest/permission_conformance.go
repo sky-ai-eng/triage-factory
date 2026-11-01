@@ -485,31 +485,16 @@ func RunPermissionStoreConformance(t *testing.T, mk PermissionStoreFactory) {
 				t.Fatalf("prompt %d = %q, want %q (pending set must be oldest-first)", i, got[i].ToolCallID, want)
 			}
 		}
-	})
-
-	t.Run("conversation_with_no_claim_has_nothing_pending", func(t *testing.T) {
-		store, orgID, _, seed := mk(t)
-		conversationID := seed.Conversation(t)
-		got, err := store.ListPending(ctx, orgID, conversationID)
-		if err != nil {
-			t.Fatalf("list pending on a claimless conversation must not error: %v", err)
-		}
-		if len(got) != 0 {
-			t.Fatalf("expected no prompts, got %+v", got)
-		}
-	})
-
-	t.Run("create_refuses_a_non_pending_state", func(t *testing.T) {
-		store, orgID, _, seed := mk(t)
-		conversationID := seed.Conversation(t)
-		claimID := seed.Claim(t, conversationID)
-		// A prompt is born pending. Minting one already-decided would mean a
-		// decision nobody made.
-		if _, err := store.Create(ctx, orgID, domain.ConversationPermission{
-			ConversationID: conversationID, ClaimID: claimID, ToolCallID: "toolu_prebaked",
-			ToolName: "Read", State: domain.PermissionStateAllowed,
-		}); err == nil {
-			t.Fatal("Create must refuse a non-pending state")
+		// A conversation with no claim has nothing pending.
+		{
+			conversationID := seed.Conversation(t)
+			got, err := store.ListPending(ctx, orgID, conversationID)
+			if err != nil {
+				t.Fatalf("list pending on a claimless conversation must not error: %v", err)
+			}
+			if len(got) != 0 {
+				t.Fatalf("expected no prompts, got %+v", got)
+			}
 		}
 	})
 
@@ -535,6 +520,18 @@ func RunPermissionStoreConformance(t *testing.T, mk PermissionStoreFactory) {
 		}
 		if got, err := store.ListPending(ctx, orgID, conversationID); err != nil || len(got) != 0 {
 			t.Fatalf("nothing should have been written: %+v (err %v)", got, err)
+		}
+		{
+			conversationID := seed.Conversation(t)
+			claimID := seed.Claim(t, conversationID)
+			// A prompt is born pending. Minting one already-decided would mean a
+			// decision nobody made.
+			if _, err := store.Create(ctx, orgID, domain.ConversationPermission{
+				ConversationID: conversationID, ClaimID: claimID, ToolCallID: "toolu_prebaked",
+				ToolName: "Read", State: domain.PermissionStateAllowed,
+			}); err == nil {
+				t.Fatal("Create must refuse a non-pending state")
+			}
 		}
 	})
 

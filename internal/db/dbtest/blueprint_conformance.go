@@ -382,17 +382,8 @@ func RunIsNewestRunForTaskConformance(t *testing.T, mk BlueprintSequenceFactory)
 		}
 		// SQLite stamps started_at to the second, so two runs minted back to
 		// back tie and the id tiebreaker — not the ordering under test — would
-		// decide. A zero nanosecond field is how a backend says it truncated;
-		// Postgres keeps microseconds and waits for nothing. (It can land
-		// exactly on a second boundary and pay the wait, which costs a second
-		// and changes no answer.)
-		firstRow, err := store.GetRunSystem(ctx, sc.OrgID, first)
-		if err != nil || firstRow == nil {
-			t.Fatalf("GetRunSystem (first): (%v, %v)", firstRow, err)
-		}
-		if firstRow.StartedAt.Nanosecond() == 0 {
-			time.Sleep(1100 * time.Millisecond)
-		}
+		// decide.
+		sc.BackdateRunStartedAt(t, first, time.Hour)
 		second := mustFireRun(t, store, sc, taskID, domain.BlueprintTriggerEvent)
 		if isNewest(t, first, "superseded") {
 			t.Errorf("a run a later delegation superseded still reports as the task's newest")
