@@ -807,6 +807,10 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		return
 	}
 
+	// Ahead of the fork between the resume path and the step launch, so the
+	// note reaches the agent whichever one drives it.
+	s.tellHeldClose(gateCtx, orgID, conv.ID, task.ID)
+
 	// Resume-by-enqueue: queued input means this claim is NOT a
 	// fresh/crash-reclaimed blueprint step — it's a parked/terminal-resumable
 	// run woken by a user message and re-queued onto its own row

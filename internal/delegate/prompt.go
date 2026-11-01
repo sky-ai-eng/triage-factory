@@ -302,13 +302,7 @@ func resolveCLIPath(text, binaryPath string) string {
 // block, because it is a listing rather than a line — and only when something
 // was actually staged, so a run with no knowledge behind it says nothing about
 // knowledge at all.
-//
-// heldClose is the line telling a run that starts while its task's close is
-// held (heldCloseLine) that an event has resolved the task. It is TF's word
-// on the task's state and comes with an instruction, so it goes here rather
-// than in the task context, whose every line is external data the agent is
-// told never to take as instructions.
-func runContext(scope, runRoot, prCheckout, branchTemplate, runURL, sourceNotes, heldClose, knowledge string) string {
+func runContext(scope, runRoot, prCheckout, branchTemplate, runURL, sourceNotes, knowledge string) string {
 	var lines []string
 	if s := strings.TrimSpace(scope); s != "" {
 		lines = append(lines, s)
@@ -331,9 +325,6 @@ func runContext(scope, runRoot, prCheckout, branchTemplate, runURL, sourceNotes,
 	if n := strings.TrimSpace(sourceNotes); n != "" {
 		lines = append(lines, n)
 	}
-	if heldClose != "" {
-		lines = append(lines, heldClose)
-	}
 	if k := strings.TrimSpace(knowledge); k != "" {
 		lines = append(lines, k)
 	}
@@ -352,35 +343,6 @@ func joinSections(sections ...string) string {
 		}
 	}
 	return strings.Join(kept, "\n\n")
-}
-
-// heldCloseLine is the run-context line for a launch on a task whose close is
-// held, or "" when the task holds none. A conversation that starts while the
-// close is held was not among the working ones the close told, so this line
-// is how it learns. Best effort like the launch's other reads: a failed read
-// renders no line.
-func (s *Spawner) heldCloseLine(ctx context.Context, orgID, taskID string) string {
-	if s.tasks == nil || s.events == nil || taskID == "" {
-		return ""
-	}
-	hold, err := s.tasks.CloseDeferralForTaskSystem(ctx, orgID, taskID)
-	if err != nil {
-		delegateLog.Warn("read the task's held close for the run context failed", "task_id", taskID, "error", err)
-		return ""
-	}
-	if hold == nil {
-		return ""
-	}
-	evt, err := s.events.GetSystem(ctx, orgID, hold.EventID)
-	if err != nil || evt == nil {
-		delegateLog.Warn("read the held close's event for the run context failed", "task_id", taskID, "event_id", hold.EventID, "error", err)
-		return ""
-	}
-	at := evt.OccurredAt
-	if at.IsZero() {
-		at = evt.CreatedAt
-	}
-	return domain.TaskClosingContextLine(evt.EventType, at)
 }
 
 // resolveBranchTemplate returns the team's branch-naming convention with the

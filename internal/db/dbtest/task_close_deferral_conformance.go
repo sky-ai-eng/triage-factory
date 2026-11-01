@@ -39,8 +39,9 @@ type TaskCloseDeferralSeeder struct {
 type TaskCloseDeferralFactory func(t *testing.T) (stores TaskCloseDeferralStores, orgID string, seed TaskCloseDeferralSeeder)
 
 // RunTaskCloseDeferralConformance is the shared suite for a task's held
-// close: TaskStore.CloseOrHoldSystem, CloseDeferralForTaskSystem,
-// ListActiveCloseDeferralsSystem, ClearCloseDeferralSystem and Bump's clear,
+// close: TaskStore.CloseOrHoldSystem, ApplyHeldCloseSystem,
+// CloseDeferralForTaskSystem, ListActiveCloseDeferralsSystem,
+// ClearCloseDeferralSystem and Bump's clear,
 // the hold arm of EntityStore.CloseTerminalSystem, and the working predicate
 // both decide on, read through
 // ConversationStore.HasWorkingConversationForTaskSystem.
@@ -308,6 +309,66 @@ func RunTaskCloseDeferralConformance(t *testing.T, mk TaskCloseDeferralFactory) 
 		}
 		if d := held(t, stores.Tasks, orgID, taskID); d != nil {
 			t.Errorf("hold still read after its clear: %+v", *d)
+		}
+	})
+
+	t.Run("ApplyHeldClose_applies_only_the_hold_it_names", func(t *testing.T) {
+		stores, orgID, seed := mk(t)
+		hold := func(taskID, eventID string) {
+			t.Helper()
+			if _, err := stores.Tasks.CloseOrHoldSystem(ctx, orgID, taskID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed, eventID); err != nil {
+				t.Fatalf("CloseOrHoldSystem: %v", err)
+			}
+		}
+		apply := func(taskID, eventID string) db.TaskCloseOutcome {
+			t.Helper()
+			out, err := stores.Tasks.ApplyHeldCloseSystem(ctx, orgID, taskID, eventID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed)
+			if err != nil {
+				t.Fatalf("ApplyHeldCloseSystem: %v", err)
+			}
+			return out
+		}
+
+		stale := seed.Task(t)
+		first, second := seed.Event(t, stale), seed.Event(t, stale)
+		staleRun, staleConv := seed.BlueprintAndConversation(t, stale, "running", "")
+		hold(stale, first)
+		if out := apply(stale, first); !outcomeEqual(out, db.TaskCloseOutcome{Held: true, WorkingConversationIDs: []string{staleConv}}) {
+			t.Errorf("apply under a working conversation = %+v, want held", out)
+		}
+		// The hold the sweep read is replaced, then cancelled, and by the
+		// time the cancelled one is applied nothing is working.
+		hold(stale, second)
+		if out := apply(stale, first); !outcomeEqual(out, db.TaskCloseOutcome{}) {
+			t.Errorf("apply of a replaced hold = %+v, want nothing", out)
+		}
+		if _, err := stores.Tasks.BumpSystem(ctx, orgID, stale, seed.Event(t, stale)); err != nil {
+			t.Fatalf("BumpSystem: %v", err)
+		}
+		seed.CallOff(t, staleRun)
+		if out := apply(stale, second); !outcomeEqual(out, db.TaskCloseOutcome{}) {
+			t.Errorf("apply of a cancelled hold = %+v, want nothing", out)
+		}
+		if s := seed.TaskStatus(t, stale); s == "done" {
+			t.Error("a cancelled hold closed the task")
+		}
+		if d := held(t, stores.Tasks, orgID, stale); d != nil {
+			t.Errorf("the cancelled hold came back: %+v", *d)
+		}
+
+		current := seed.Task(t)
+		eventID := seed.Event(t, current)
+		currentRun, _ := seed.BlueprintAndConversation(t, current, "running", "")
+		hold(current, eventID)
+		seed.CallOff(t, currentRun)
+		if out := apply(current, eventID); !out.Closed {
+			t.Errorf("apply of the current hold with nothing working = %+v, want closed", out)
+		}
+		if s := seed.TaskStatus(t, current); s != "done" {
+			t.Errorf("task status = %q, want done", s)
+		}
+		if n := seed.CloseAuditCount(t, current); n != 1 {
+			t.Errorf("close audit rows = %d, want 1", n)
 		}
 	})
 }

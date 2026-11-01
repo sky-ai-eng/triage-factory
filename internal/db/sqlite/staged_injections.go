@@ -118,6 +118,29 @@ func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id strin
 	return consumed, err
 }
 
+func (s *stagedInjectionStore) HasNoteForEventSystem(ctx context.Context, orgID, conversationID, producer, eventID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	subtypes := strings.TrimRight(strings.Repeat("?, ", len(domain.StagedInjectionSubtypes)), ", ")
+	args := []any{orgID, conversationID}
+	for _, st := range domain.StagedInjectionSubtypes {
+		args = append(args, st)
+	}
+	args = append(args, producer, eventID)
+	var told bool
+	err := s.q.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM messages
+			WHERE org_id = ? AND conversation_id = ?
+			  AND role = 'user' AND subtype IN (`+subtypes+`)
+			  AND json_extract(metadata, '$.producer') = ? AND json_extract(metadata, '$.event_id') = ?
+			  AND (delivered = 1 OR window_state = 'active')
+		)
+	`, args...).Scan(&told)
+	return told, err
+}
+
 // stagedInjectionIDLess orders decimal message-row ids numerically (a
 // lexical sort would put "10" before "9").
 func stagedInjectionIDLess(a, b string) bool {

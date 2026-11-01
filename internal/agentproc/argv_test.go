@@ -93,6 +93,21 @@ func TestBuildArgs_PermissionPromptsFlag(t *testing.T) {
 	}
 }
 
+// TestBuildArgs_ToolBatchNotesFlag: the wrapper registers its PostToolBatch
+// hook only for an interactive run whose caller answers it.
+func TestBuildArgs_ToolBatchNotesFlag(t *testing.T) {
+	answer := func() string { return "" }
+	if args := BuildArgs(RunOptions{Interactive: true, OnToolBatch: answer}); !slices.Contains(args, "--tool-batch-notes") {
+		t.Errorf("expected --tool-batch-notes with a tool-batch answer: %v", args)
+	}
+	if args := BuildArgs(RunOptions{Interactive: true}); slices.Contains(args, "--tool-batch-notes") {
+		t.Errorf("expected --tool-batch-notes omitted with no answer: %v", args)
+	}
+	if args := BuildArgs(RunOptions{OnToolBatch: answer, Message: "hi"}); slices.Contains(args, "--tool-batch-notes") {
+		t.Errorf("expected --tool-batch-notes omitted in one-shot mode: %v", args)
+	}
+}
+
 func TestBuildArgs_DisallowsAskUserQuestion(t *testing.T) {
 	// AskUserQuestion is removed from the model's context on every path,
 	// not just left off the allowlist: one-shot, interactive, and resume

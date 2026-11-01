@@ -30,9 +30,9 @@ var ErrNoSuchTask = errors.New("no task with that id")
 // insert can no longer strand a task on an entity nothing will close again.
 var ErrEntityClosed = errors.New("entity is closed or does not exist; no task may be minted on it")
 
-// TaskCloseOutcome is what TaskStore.CloseOrHoldSystem did to one task:
-// closed it, held its close, or neither, because the task was already
-// terminal.
+// TaskCloseOutcome is what TaskStore.CloseOrHoldSystem or
+// ApplyHeldCloseSystem did to one task: closed it, held its close, or
+// neither.
 type TaskCloseOutcome struct {
 	// Closed reports that this call closed the task, and
 	// ActiveConversationIDs are the conversations then active on it, whose
@@ -791,6 +791,22 @@ type TaskStore interface {
 	// three things happened and on the conversations behind it, not on the
 	// task row.
 	CloseOrHoldSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (TaskCloseOutcome, error)
+
+	// ApplyHeldCloseSystem applies the close the task holds on heldEventID,
+	// for the close-hold sweep, which read that hold earlier. In one
+	// transaction, the task's row locked first:
+	//
+	//   - a task no longer active, or whose hold no longer names heldEventID
+	//     (the task's own event cancelled it, or a newer closing event
+	//     replaced it, since the sweep read it), is left as it is, and the
+	//     outcome is zero.
+	//   - a task with a working conversation keeps its hold unwritten: Held
+	//     is true, NewlyHeld false, and WorkingConversationIDs name them.
+	//   - otherwise it is CloseWithConversationCancelIntentSystem with
+	//     heldEventID as the closing event, and the hold is cleared with it.
+	//
+	// Admin pool. Exempt from the returned-row rule as CloseOrHoldSystem is.
+	ApplyHeldCloseSystem(ctx context.Context, orgID, taskID, heldEventID, closeReason, closeEventType string) (TaskCloseOutcome, error)
 
 	// CloseDeferralForTaskSystem returns the close the task holds, or nil
 	// when it holds none or is no longer active. Admin pool: its readers

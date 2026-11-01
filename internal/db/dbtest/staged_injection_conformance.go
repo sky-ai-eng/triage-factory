@@ -309,6 +309,53 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 		}
 	})
 
+	t.Run("HasNoteForEvent_counts_staged_and_delivered_notes_only", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		conversationID := seed.Conversation(t, "told")
+		const producer = domain.StagedInjectionProducerTaskClosing
+		told := func(eventID string) bool {
+			t.Helper()
+			got, err := store.HasNoteForEventSystem(ctx, orgID, conversationID, producer, eventID)
+			if err != nil {
+				t.Fatalf("HasNoteForEventSystem: %v", err)
+			}
+			return got
+		}
+		stage := func(eventID string) domain.StagedInjection {
+			t.Helper()
+			n, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{
+				ConversationID: conversationID, Subtype: domain.MessageSubtypeInjectionSystemNote, Producer: producer,
+				Body: "resolved", Provenance: domain.NoteProvenance{EventID: eventID, EventType: domain.EventGitHubPRCICheckPassed},
+			})
+			if err != nil {
+				t.Fatalf("append: %v", err)
+			}
+			return n
+		}
+
+		stage("evt-told")
+		if !told("evt-told") {
+			t.Error("a staged note did not count")
+		}
+		if got, err := store.HasNoteForEventSystem(ctx, orgID, conversationID, "pr_note", "evt-told"); err != nil || got {
+			t.Errorf("another producer's question = (%v, %v), want not told", got, err)
+		}
+		if _, err := store.FlushPendingSystem(ctx, orgID, conversationID); err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+		if !told("evt-told") {
+			t.Error("a delivered note did not count")
+		}
+
+		withdrawn := stage("evt-withdrawn")
+		if _, err := store.DeleteSystem(ctx, orgID, withdrawn.ID); err != nil {
+			t.Fatalf("withdraw: %v", err)
+		}
+		if told("evt-withdrawn") {
+			t.Error("a withdrawn note counted")
+		}
+	})
+
 	t.Run("Conversation_delete_cascades_pending_notes", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		conversationID := seed.Conversation(t, "cascade")

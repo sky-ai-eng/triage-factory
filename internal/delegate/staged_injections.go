@@ -5,9 +5,10 @@
 // injection:event for a new-event injection, injection:system-note for every
 // other note. A native loop reads the rows itself before its next model call.
 // An SDK conversation has them flushed — bundled into one <system-note> ahead
-// of the user's message — on its next resume (stagedInjectionsForResume,
-// wired into SendMessage); a new-event injection for a live SDK process is
-// steered in instead (deliverInjectionLive).
+// of its first message — when its next engagement starts
+// (stagedInjectionsAhead, read by a resume's prepends and a launch's opening
+// turn); a new-event injection for a live SDK process is steered in instead
+// (deliverInjectionLive).
 //
 // Unlike the deliverable-change ledger (which DERIVES its terminal injections from
 // the deliverable rows, so it needs no queue), a producer here has no durable row
@@ -20,6 +21,7 @@ import (
 	"context"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 )
 
 // stageOrDeliverInjection routes one agent-facing note for an SDK
@@ -83,16 +85,59 @@ func (s *Spawner) stageInjection(ctx context.Context, orgID, conversationID, sub
 	return stored.ID, true
 }
 
-// stagedInjectionsForResume flushes a resuming run's durable staged-injection queue and
-// returns the bundled <system-note> block to prepend ahead of its user message —
-// every injection staged while the run was not running (TFAC-501). Returns ""
-// (prepend nothing) when nothing is staged or on any read error: feedback never
-// blocks a resume.
+// tellHeldClose stages the close note on a conversation an engagement is
+// starting, when its task's close is held and the conversation has not had
+// the note for that closing event. Every runtime reads staged notes before
+// its agent's first model call of an engagement, so the agent learns the
+// task is resolved before it does anything. The note is a transcript row
+// rather than a line in the conversation's system block, which is fixed for
+// the conversation's life: the hold can be cancelled after this engagement,
+// and a row says what was true when it was sent. Best effort: a failed read
+// or stage logs, and the engagement runs without the note.
+func (s *Spawner) tellHeldClose(ctx context.Context, orgID, conversationID, taskID string) {
+	if s.tasks == nil || s.events == nil || s.stagedInjections == nil {
+		return
+	}
+	hold, err := s.tasks.CloseDeferralForTaskSystem(ctx, orgID, taskID)
+	if err != nil {
+		delegateLog.Warn("read the task's held close failed; the engagement starts without the close note", "task_id", taskID, "error", err)
+		return
+	}
+	if hold == nil {
+		return
+	}
+	told, err := s.stagedInjections.HasNoteForEventSystem(ctx, orgID, conversationID, domain.StagedInjectionProducerTaskClosing, hold.EventID)
+	if err != nil {
+		delegateLog.Warn("read whether the conversation has the close note failed; the engagement starts without it", "conversation", conversationID, "error", err)
+		return
+	}
+	if told {
+		return
+	}
+	evt, err := s.events.GetSystem(ctx, orgID, hold.EventID)
+	if err != nil || evt == nil {
+		delegateLog.Warn("read the held close's event failed; the engagement starts without the close note", "task_id", taskID, "event_id", hold.EventID, "error", err)
+		return
+	}
+	metadataJSON := evt.MetadataJSON
+	if current, err := events.Current(ctx, orgID, evt.EventType, metadataJSON); err == nil {
+		metadataJSON = current
+	}
+	s.stageInjection(ctx, orgID, conversationID, domain.MessageSubtypeInjectionSystemNote, domain.StagedInjectionProducerTaskClosing,
+		domain.TaskClosingInjection(evt.EventType, metadataJSON), domain.NoteProvenance{EventID: evt.ID, EventType: evt.EventType})
+}
+
+// stagedInjectionsAhead flushes the conversation's durable staged-injection
+// queue and returns the bundled <system-note> block an SDK engagement puts
+// ahead of its first message — a resume's user message, a launch's opening or
+// continuation note: every injection staged while the run was not running.
+// Returns "" (prepend nothing) when nothing is staged or on any read error:
+// feedback never blocks an engagement.
 //
 // This is the durable sibling of deliverableLedgerForResume — SendMessage
 // prepends both, so a resume that has both a resolved deliverable and a staged
 // injection carries two <system-note> blocks ahead of the user's text.
-func (s *Spawner) stagedInjectionsForResume(ctx context.Context, orgID, conversationID string) string {
+func (s *Spawner) stagedInjectionsAhead(ctx context.Context, orgID, conversationID string) string {
 	return domain.StagedInjectionBlock(s.flushStagedInjections(ctx, orgID, conversationID))
 }
 

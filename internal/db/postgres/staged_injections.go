@@ -96,3 +96,17 @@ func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id strin
 	`, orgID, rowID, domain.StagedInjectionSubtypes).Scan(&consumed)
 	return consumed, err
 }
+
+func (s *stagedInjectionStore) HasNoteForEventSystem(ctx context.Context, orgID, conversationID, producer, eventID string) (bool, error) {
+	var told bool
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM messages
+			WHERE org_id = $1::uuid AND conversation_id = $2::uuid
+			  AND role = 'user' AND subtype = ANY($3::text[])
+			  AND metadata->>'producer' = $4 AND metadata->>'event_id' = $5
+			  AND (delivered OR window_state = 'active')
+		)
+	`, orgID, conversationID, domain.StagedInjectionSubtypes, producer, eventID).Scan(&told)
+	return told, err
+}

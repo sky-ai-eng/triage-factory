@@ -19,7 +19,7 @@ import (
 func launchBlock(mission string) string {
 	return composeConversationSystemBlock(
 		mission,
-		runContext("Repository: owner/repo\nPR: #7", "/work", "", "tfac/SKY-9", "https://tf.example/runs/r-1", "", "", ""),
+		runContext("Repository: owner/repo\nPR: #7", "/work", "", "tfac/SKY-9", "https://tf.example/runs/r-1", "", ""),
 		agentprompt.GitHubToolsReference(),
 		agentprompt.NonTerminalCompletion(machinistSpec()),
 	)

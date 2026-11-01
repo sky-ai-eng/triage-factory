@@ -96,11 +96,14 @@ func (r *Router) sweepCloseDeferrals(ctx context.Context) {
 // not (CI failing again, a reopened pull request). closed reports whether
 // the task closed.
 //
-// The close is the ordinary one (closeOrHoldTaskWithAudit), so the stop, the
+// The close goes through ApplyHeldCloseSystem, which applies it only while
+// the task still holds this event's close: the list was read before this
+// task's turn, and since then the task's own event may have cancelled the
+// hold, or a newer closing event replaced it. Either way nothing closes, and
+// a replaced hold is the next pass's. A conversation that started working
+// since keeps the hold as it is, so nobody is told twice. The stop, the
 // cancel intent, the teardown and the audit row naming the stored event are
-// what an unheld close writes. A conversation that started working since the
-// read above makes it hold again instead, under the hold the task already
-// has, so nobody is told twice and the next pass looks again.
+// what an unheld close writes.
 func (r *Router) settleCloseDeferral(ctx context.Context, d domain.TaskCloseDeferral) (closed bool, err error) {
 	working, err := r.conversations.HasWorkingConversationForTaskSystem(ctx, d.OrgID, d.TaskID)
 	if err != nil {
@@ -136,18 +139,17 @@ func (r *Router) settleCloseDeferral(ctx context.Context, d domain.TaskCloseDefe
 			"task_id", task.ID, "on_event", evt.EventType)
 		return false, r.clearCloseDeferral(ctx, d)
 	}
-	out, err := r.closeOrHoldTaskWithAudit(ctx, d.OrgID, task.ID, *evt, reason)
+	out, err := r.tasks.ApplyHeldCloseSystem(ctx, d.OrgID, task.ID, d.EventID, reason, evt.EventType)
 	if err != nil {
 		return false, fmt.Errorf("close task: %w", err)
 	}
 	if !out.Closed {
 		return false, nil
 	}
+	r.stopConversationsOnClosedTask(d.OrgID, task.ID, out.ActiveConversationIDs)
+	// Behind the stop, never beside it — see closeTaskWithAudit.
+	r.spawner.TeardownTaskDeliverablesSystem(ctx, d.OrgID, task.ID)
 	routerLog.InfoContext(ctx, "closed task on its held close", "task_id", task.ID, "on_event", evt.EventType, "reason", reason)
-	// The task is no longer active, so a failed clear is never read again.
-	if err := r.clearCloseDeferral(ctx, d); err != nil {
-		routerLog.WarnContext(ctx, "close hold sweep: clear after close failed", "task_id", task.ID, "error", err)
-	}
 	return true, nil
 }
 

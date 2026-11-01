@@ -1088,6 +1088,25 @@ func holdTaskCloseIfWorking(ctx context.Context, q queryer, orgID, taskID, closi
 	if err != nil {
 		return nil, fmt.Errorf("lock task: %w", err)
 	}
+	working, err := workingConversationIDs(ctx, q, orgID, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if len(working) == 0 {
+		return nil, nil
+	}
+	if _, err := q.ExecContext(ctx, `
+		UPDATE tasks SET close_deferred_event_id = $3
+		 WHERE org_id = $1 AND id = $2
+	`, orgID, taskID, closingEventID); err != nil {
+		return nil, fmt.Errorf("hold close: %w", err)
+	}
+	return &db.TaskCloseOutcome{Held: true, NewlyHeld: !prior.Valid, WorkingConversationIDs: working}, nil
+}
+
+// workingConversationIDs lists the task's working conversation ids, oldest
+// first.
+func workingConversationIDs(ctx context.Context, q queryer, orgID, taskID string) ([]string, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT r.id FROM conversations r
 		 WHERE r.org_id = $1 AND r.task_id = $2
@@ -1101,16 +1120,48 @@ func holdTaskCloseIfWorking(ctx context.Context, q queryer, orgID, taskID, closi
 	if err != nil {
 		return nil, fmt.Errorf("list working conversations: %w", err)
 	}
-	if len(working) == 0 {
-		return nil, nil
+	return working, nil
+}
+
+func (s *taskStore) ApplyHeldCloseSystem(ctx context.Context, orgID, taskID, heldEventID, closeReason, closeEventType string) (db.TaskCloseOutcome, error) {
+	var out db.TaskCloseOutcome
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		var held sql.NullString
+		err := q.QueryRowContext(ctx, `
+			SELECT close_deferred_event_id::text FROM tasks
+			 WHERE org_id = $1 AND id = $2 AND status NOT IN ('done', 'dismissed')
+			 FOR UPDATE
+		`, orgID, taskID).Scan(&held)
+		if errors.Is(err, sql.ErrNoRows) || (err == nil && held.String != heldEventID) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("lock task: %w", err)
+		}
+		working, err := workingConversationIDs(ctx, q, orgID, taskID)
+		if err != nil {
+			return err
+		}
+		if len(working) > 0 {
+			out = db.TaskCloseOutcome{Held: true, WorkingConversationIDs: working}
+			return nil
+		}
+		closed, conversationIDs, err := closeTaskWithCancelIntent(ctx, q, orgID, taskID, closeReason, closeEventType, heldEventID)
+		if err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `
+			UPDATE tasks SET close_deferred_event_id = NULL WHERE org_id = $1 AND id = $2
+		`, orgID, taskID); err != nil {
+			return fmt.Errorf("clear hold: %w", err)
+		}
+		out = db.TaskCloseOutcome{Closed: closed, ActiveConversationIDs: conversationIDs}
+		return nil
+	})
+	if err != nil {
+		return db.TaskCloseOutcome{}, err
 	}
-	if _, err := q.ExecContext(ctx, `
-		UPDATE tasks SET close_deferred_event_id = $3
-		 WHERE org_id = $1 AND id = $2
-	`, orgID, taskID, closingEventID); err != nil {
-		return nil, fmt.Errorf("hold close: %w", err)
-	}
-	return &db.TaskCloseOutcome{Held: true, NewlyHeld: !prior.Valid, WorkingConversationIDs: working}, nil
+	return out, nil
 }
 
 func (s *taskStore) CloseDeferralForTaskSystem(ctx context.Context, orgID, taskID string) (*domain.TaskCloseDeferral, error) {

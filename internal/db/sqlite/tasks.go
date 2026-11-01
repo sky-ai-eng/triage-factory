@@ -1189,6 +1189,47 @@ func holdTaskCloseIfWorking(ctx context.Context, q queryer, taskID, closingEvent
 	return &db.TaskCloseOutcome{Held: true, NewlyHeld: !prior.Valid, WorkingConversationIDs: working}, nil
 }
 
+func (s *taskStore) ApplyHeldCloseSystem(ctx context.Context, orgID, taskID, heldEventID, closeReason, closeEventType string) (db.TaskCloseOutcome, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return db.TaskCloseOutcome{}, err
+	}
+	var out db.TaskCloseOutcome
+	err := inTx(ctx, s.q, func(q queryer) error {
+		var held sql.NullString
+		err := q.QueryRowContext(ctx, `
+			SELECT close_deferred_event_id FROM tasks
+			 WHERE id = ? AND status NOT IN ('done', 'dismissed')
+		`, taskID).Scan(&held)
+		if errors.Is(err, sql.ErrNoRows) || (err == nil && held.String != heldEventID) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read task: %w", err)
+		}
+		working, err := workingConversationIDs(ctx, q, taskID)
+		if err != nil {
+			return fmt.Errorf("list working conversations: %w", err)
+		}
+		if len(working) > 0 {
+			out = db.TaskCloseOutcome{Held: true, WorkingConversationIDs: working}
+			return nil
+		}
+		closed, conversationIDs, err := closeTaskWithCancelIntent(ctx, q, taskID, closeReason, closeEventType, heldEventID)
+		if err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `UPDATE tasks SET close_deferred_event_id = NULL WHERE id = ?`, taskID); err != nil {
+			return fmt.Errorf("clear hold: %w", err)
+		}
+		out = db.TaskCloseOutcome{Closed: closed, ActiveConversationIDs: conversationIDs}
+		return nil
+	})
+	if err != nil {
+		return db.TaskCloseOutcome{}, err
+	}
+	return out, nil
+}
+
 // workingConversationIDs drains the task's working conversation ids, oldest
 // first, and closes the cursor before returning.
 func workingConversationIDs(ctx context.Context, q queryer, taskID string) ([]string, error) {

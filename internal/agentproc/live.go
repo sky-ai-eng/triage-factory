@@ -22,6 +22,7 @@ import (
 //	{"kind":"interrupt"}
 //	{"kind":"set_mode","mode":"default|acceptEdits|plan|bypassPermissions|dontAsk|auto"}
 //	{"kind":"permission_response","tool_call_id":"<id>","behavior":"allow"|"deny","message":"...","updated_input":{...}}
+//	{"kind":"tool_batch_reply","id":"<id>","context":"..."}
 //	{"kind":"end"}
 //
 // A user_message spells its content one way or the other — text is a plain
@@ -39,6 +40,11 @@ import (
 //	{"type":"control","subtype":"ready"}
 //	{"type":"control","subtype":"permission_request","tool_call_id":"<id>","tool_name":"...","input":{...},"title":"...","display_name":"...","description":"..."}
 //	{"type":"control","subtype":"interrupted"}
+//	{"type":"control","subtype":"tool_batch","id":"<id>"}
+//
+// A tool_batch is the SDK's PostToolBatch hook: every tool call of a batch
+// has resolved and the model's next request waits on the reply, whose
+// context (empty for none) the model reads with the batch's results.
 
 // PermissionRequest is one canUseTool round-trip surfaced from the
 // wrapper. The handler decides allow/deny; the reader writes the
@@ -129,6 +135,10 @@ type LiveRun struct {
 	// parked between turns would otherwise bill the whole wait to the first
 	// assistant message of the next one.
 	stream *StreamState
+
+	// toolBatch answers each tool_batch (RunOptions.OnToolBatch); nil
+	// answers with nothing.
+	toolBatch func() string
 
 	// Close phase bounds; zero falls back to the package consts. Fields
 	// (not just consts) so tests can drive the timeout paths quickly.
@@ -225,12 +235,13 @@ func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms Permi
 	}
 
 	l := &LiveRun{
-		stdin:   proc.Stdin(),
-		cancel:  cancel,
-		cleanup: func() {},
-		done:    make(chan struct{}),
-		ready:   make(chan struct{}),
-		stream:  NewStreamState(),
+		stdin:     proc.Stdin(),
+		cancel:    cancel,
+		cleanup:   func() {},
+		done:      make(chan struct{}),
+		ready:     make(chan struct{}),
+		stream:    NewStreamState(),
+		toolBatch: opts.OnToolBatch,
 	}
 
 	// opts travels whole because the teardown stamp at the end of the loop
@@ -569,6 +580,8 @@ func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *
 					l.handlePermission(ctl, perms)
 					permissionDone()
 					stream.DiscountGate(gateAt)
+				case "tool_batch":
+					l.handleToolBatch(ctl)
 				}
 				// Control lines are not sink content.
 			} else {
@@ -680,9 +693,23 @@ func (l *LiveRun) handlePermission(ctl controlLine, perms PermissionHandler) {
 	}
 }
 
+// handleToolBatch answers one tool_batch with the text the caller hands the
+// model, keyed by the hook's id. Runs on the reader goroutine, where the
+// stream has already delivered the batch's results to the sink.
+func (l *LiveRun) handleToolBatch(ctl controlLine) {
+	text := ""
+	if l.toolBatch != nil {
+		text = l.toolBatch()
+	}
+	if err := l.writeControl(map[string]any{"kind": "tool_batch_reply", "id": ctl.ID, "context": text}); err != nil {
+		agentprocLog.Error("tool batch reply write failed", "error", err)
+	}
+}
+
 // controlLine is the decoded shape of a `type:"control"` stdout line.
 type controlLine struct {
 	Subtype     string
+	ID          string
 	ToolCallID  string
 	ToolName    string
 	Input       map[string]any
@@ -698,6 +725,7 @@ func parseControlLine(line []byte) (controlLine, bool) {
 	var raw struct {
 		Type        string         `json:"type"`
 		Subtype     string         `json:"subtype"`
+		ID          string         `json:"id"`
 		ToolCallID  string         `json:"tool_call_id"`
 		ToolName    string         `json:"tool_name"`
 		Input       map[string]any `json:"input"`
@@ -713,6 +741,7 @@ func parseControlLine(line []byte) (controlLine, bool) {
 	}
 	return controlLine{
 		Subtype:     raw.Subtype,
+		ID:          raw.ID,
 		ToolCallID:  raw.ToolCallID,
 		ToolName:    raw.ToolName,
 		Input:       raw.Input,

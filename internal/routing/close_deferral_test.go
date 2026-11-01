@@ -229,6 +229,32 @@ func TestCloseHold_OwnEventArrivingAgainCancelsTheHold(t *testing.T) {
 	}
 }
 
+// TestCloseHoldSweep_LeavesAHoldCancelledSinceItsReadAlone: the sweep settles
+// the holds it listed, and the task's own event can cancel one in between.
+// The pass still admitting the close by then (the checks still pass) does not
+// close the task or bring the hold back.
+func TestCloseHoldSweep_LeavesAHoldCancelledSinceItsReadAlone(t *testing.T) {
+	f := newHeldCIFixture(t, "owner/repo#sweep-cancelled")
+	read := domain.TaskCloseDeferral{OrgID: runmode.LocalDefaultOrgID, TaskID: f.taskID, EventID: f.eventID}
+
+	enqueueCIFailedCheck(t, f.database, f.entityID, "build")
+	if err := f.r.drainEventQueue(context.Background()); err != nil {
+		t.Fatalf("drain the second failure: %v", err)
+	}
+	setConversationStatus(t, f.database, f.convID, domain.StatusFailed)
+	closed, err := f.r.settleCloseDeferral(t.Context(), read)
+	if err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+
+	if status, _, _ := taskRow(t, f.database, f.taskID); closed || status == "done" {
+		t.Error("the sweep closed a task on a hold its own event cancelled")
+	}
+	if ev := heldClose(t, f.database, f.taskID); ev != "" {
+		t.Errorf("held close = %q after settling a cancelled hold, want none", ev)
+	}
+}
+
 // TestCloseHoldSweep_LeavesAWorkingTaskHeld: while the conversation works,
 // the sweep closes nothing and stops nothing.
 func TestCloseHoldSweep_LeavesAWorkingTaskHeld(t *testing.T) {

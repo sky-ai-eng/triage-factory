@@ -84,4 +84,10 @@ type StagedInjectionStore interface {
 	//
 	// Exempt from the returned-row rule: it is a delete.
 	DeleteSystem(ctx context.Context, orgID, id string) (consumed bool, err error)
+
+	// HasNoteForEventSystem reports whether producer has told the
+	// conversation of eventID: a note it staged with that event in its
+	// provenance, delivered or still waiting to be. A withdrawn note
+	// (DeleteSystem) never happened and does not count.
+	HasNoteForEventSystem(ctx context.Context, orgID, conversationID, producer, eventID string) (bool, error)
 }
