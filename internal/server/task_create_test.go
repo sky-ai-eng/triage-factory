@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -88,7 +89,7 @@ func TestTaskCreate_400OnBadBody(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 		}
-		assertFirstError(t, rec, "UNKNOWN_FIELD", "blueprint_id")
+		httpxtest.AssertFirstError(t, rec, "UNKNOWN_FIELD", "blueprint_id")
 	})
 
 	t.Run("malformed_json", func(t *testing.T) {
@@ -133,7 +134,7 @@ func TestFactoryDropGesture_CreateThenDelegate(t *testing.T) {
 	}
 	// SPAWN_FAILED is the claim-survived marker the FE keys the retry
 	// affordance on — a plain INTERNAL here would read as "nothing landed".
-	assertFirstError(t, rec, "SPAWN_FAILED", "blueprint_id")
+	httpxtest.AssertFirstError(t, rec, "SPAWN_FAILED", "blueprint_id")
 
 	stored, err := s.tasks.Get(t.Context(), runmode.LocalDefaultOrgID, task.ID)
 	if err != nil || stored == nil {

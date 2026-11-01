@@ -19,6 +19,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // fakePRGitHub answers the status reads and the draft mutation for one pull
@@ -266,7 +267,7 @@ func TestDashboardPRRoutes_RegisteredOnTheServer(t *testing.T) {
 	s := newTestServer(t)
 	pr := dashboardPRFixture(t, s)
 
-	out := decodeList[domain.PRSummaryRow](t, doJSON(t, s, "POST", "/api/dashboard/prs/list", map[string]any{}))
+	out := httpxtest.DecodeList[domain.PRSummaryRow](t, doJSON(t, s, "POST", "/api/dashboard/prs/list", map[string]any{}))
 	if len(out.Items) != 1 || out.Items[0].EntityID != pr.ID {
 		t.Fatalf("list = %+v, want the one pull request carrying entity id %s", out.Items, pr.ID)
 	}

@@ -10,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // putCapReq builds a PUT /api/teams/{team_id}/usage/cap carrying the session org,
@@ -69,7 +70,7 @@ func TestUsageTeamCap_GovernanceAndRoleGates_Postgres(t *testing.T) {
 		// The cap landed: the editor's source (team-caps/list) reports it on teamA.
 		capsRec := httptest.NewRecorder()
 		r.uh.handleUsageTeamCaps(capsRec, r.activityReq(r.orgAdmin, "", ""))
-		caps := decodeList[usageTeamCapEntry](t, capsRec)
+		caps := httpxtest.DecodeList[usageTeamCapEntry](t, capsRec)
 		var sawTeamA bool
 		for _, e := range caps.Items {
 			if e.TeamID == r.teamA {
@@ -180,7 +181,7 @@ func TestUsageTeamCaps_ListsEveryActiveTeam_Postgres(t *testing.T) {
 
 		rec := httptest.NewRecorder()
 		r.uh.handleUsageTeamCaps(rec, r.activityReq(r.orgAdmin, "", ""))
-		resp := decodeList[usageTeamCapEntry](t, rec)
+		resp := httpxtest.DecodeList[usageTeamCapEntry](t, rec)
 		if resp.Total() != 3 {
 			t.Errorf("team-caps total = %d, want 3 (every active team)", resp.Total())
 		}

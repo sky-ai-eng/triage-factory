@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // TestTaskPatchStage_RejectsUnclaimedTask: a stage is the claimant's own
@@ -245,7 +246,7 @@ func TestTaskPatchStage_RefusesInReview(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, httpx.ReasonInvalidField, "status")
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonInvalidField, "status")
 	if got := readTaskStatus(t, s.db, taskID); got != "in_progress" {
 		t.Errorf("task.status = %q, want the seeded in_progress (a refusal writes nothing)", got)
 	}

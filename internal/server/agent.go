@@ -38,14 +38,6 @@ func conversationIDOr404(w http.ResponseWriter, r *http.Request) (string, bool) 
 	return uuidPathOr404(w, r, "conversationID", "conversation")
 }
 
-// writeDelegationUnavailable answers the routes that need a wired spawner on a
-// deployment that has none (delegation disabled). Server-side configuration,
-// not a request fault, and not a transient upstream — 409 NOT_CONFIGURED, the
-// same answer every other unconfigured-integration route gives.
-func writeDelegationUnavailable(w http.ResponseWriter) {
-	writeNotConfigured(w, "delegation is not configured on this deployment")
-}
-
 func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -935,7 +927,7 @@ func (ag *agentHandler) handleAgentStop(w http.ResponseWriter, r *http.Request) 
 	}
 	spawner := ag.spawner()
 	if spawner == nil {
-		writeDelegationUnavailable(w)
+		httpx.WriteDelegationUnavailable(w)
 		return
 	}
 	visible, err := ag.conversationVisible(r.Context(), orgID, userID, conversationID)
@@ -1018,7 +1010,7 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 
 	spawner := ag.spawner()
 	if spawner == nil {
-		writeDelegationUnavailable(w)
+		httpx.WriteDelegationUnavailable(w)
 		return
 	}
 
@@ -1154,7 +1146,7 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 
 	spawner := ag.spawner()
 	if spawner == nil {
-		writeDelegationUnavailable(w)
+		httpx.WriteDelegationUnavailable(w)
 		return
 	}
 
@@ -1501,7 +1493,7 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var v httpx.Validation
-	taskIDs := canonicalStrings(req.TaskIDs)
+	taskIDs := httpx.CanonicalStrings(req.TaskIDs)
 	if len(taskIDs) > maxBatchTaskIDs {
 		v.OutOfRange("task_ids", fmt.Sprintf("task_ids accepts at most %d ids per request; got %d", maxBatchTaskIDs, len(taskIDs)))
 	}
@@ -1512,7 +1504,7 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 			v.Invalid("task_ids", fmt.Sprintf("task_ids contains %q, which is not a valid task id", id))
 		}
 	}
-	teamIDs := canonicalStrings(req.TeamIDs)
+	teamIDs := httpx.CanonicalStrings(req.TeamIDs)
 	// Counted after canonicalization, so a client that repeated a team id
 	// spends the cap on distinct teams rather than on its own duplicates.
 	if len(teamIDs) > maxBatchTeamIDs {
@@ -1525,7 +1517,7 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 			v.Invalid("team_ids", fmt.Sprintf("team id %q is not a valid team id", id))
 		}
 	}
-	statuses := canonicalStrings(req.Statuses)
+	statuses := httpx.CanonicalStrings(req.Statuses)
 	validStatuses := domain.AllConversationStatuses()
 	for _, st := range statuses {
 		if !slices.Contains(validStatuses, st) {

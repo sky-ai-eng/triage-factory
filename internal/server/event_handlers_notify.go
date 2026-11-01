@@ -142,7 +142,7 @@ func (eh *eventHandlersHandler) handleEventHandlerCreateNotify(w http.ResponseWr
 	if !ok {
 		return
 	}
-	teamID, ok := actingTeamForWrite(w, r, eh.tx, eh.az, orgID, userID, req.TeamID, "event_handlers")
+	teamID, ok := eh.az.ActingTeamForWrite(w, r, orgID, userID, req.TeamID, "event_handlers")
 	if !ok {
 		return
 	}

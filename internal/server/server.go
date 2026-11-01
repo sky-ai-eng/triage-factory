@@ -698,6 +698,11 @@ func (s *Server) api(pattern string, h http.HandlerFunc) {
 	s.mux.mount(pattern, mountAPI, s.withSession(h))
 }
 
+// mounts hands a handler subpackage the two mounts above.
+func (s *Server) mounts() httpx.Mounts {
+	return httpx.Mounts{API: s.api, APIMutating: s.apiMutating}
+}
+
 // apiMutating mounts a state-changing /api/* route through both the
 // CSRF same-origin check (outer) and withSession (inner). Use for
 // POST/PUT/PATCH/DELETE — anything that changes server-side state when

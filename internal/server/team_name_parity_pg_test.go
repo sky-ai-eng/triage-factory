@@ -10,6 +10,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // createReq builds a POST /api/teams as callerID, seeded with the same claims +
@@ -44,14 +45,14 @@ func TestTeamName_SameRuleAtBothDoors(t *testing.T) {
 			if create.Code != http.StatusBadRequest {
 				t.Fatalf("create = %d, want 400; body=%s", create.Code, create.Body.String())
 			}
-			assertFirstError(t, create, tc.reason, "name")
+			httpxtest.AssertFirstError(t, create, tc.reason, "name")
 
 			rename := httptest.NewRecorder()
 			r.th.handleTeamUpdate(rename, r.req(r.admin, r.teamID, map[string]string{"name": tc.name}))
 			if rename.Code != http.StatusBadRequest {
 				t.Fatalf("rename = %d, want 400; body=%s", rename.Code, rename.Body.String())
 			}
-			assertFirstError(t, rename, tc.reason, "name")
+			httpxtest.AssertFirstError(t, rename, tc.reason, "name")
 
 			if name, _, _ := r.nameSlugDescOf(t, r.teamID); name == tc.name {
 				t.Errorf("team renamed to the refused name %q", tc.name)

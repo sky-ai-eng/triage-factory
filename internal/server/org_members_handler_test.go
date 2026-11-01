@@ -17,6 +17,7 @@ import (
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // orgMembersRig is a Postgres-backed org roster handler, with RLS and the
@@ -199,7 +200,7 @@ func TestOrgMembersList_AnyMemberReads(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	r.omh.handleOrgMembersList(rec, r.req(http.MethodPost, r.memb, "", map[string]any{}))
-	page := decodeList[orgMemberRow](t, rec)
+	page := httpxtest.DecodeList[orgMemberRow](t, rec)
 	if len(page.Items) != 3 || page.Total() != 3 {
 		t.Fatalf("members = %d (total %d), want 3 (owner, admin, member)", len(page.Items), page.Total())
 	}

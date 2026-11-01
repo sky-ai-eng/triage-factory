@@ -19,6 +19,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // The disclosure half of POST /api/teams/{team_id}/prs/list, which only multi
@@ -119,7 +120,7 @@ func TestTeamPRList_MemberReadsTheTeamsPullRequests(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	r.s.handleTeamPRList(rec, r.req(r.member, r.teamID, map[string]any{}))
-	out := decodeList[domain.PRSummaryRow](t, rec)
+	out := httpxtest.DecodeList[domain.PRSummaryRow](t, rec)
 	if len(out.Items) != 1 || out.Total() != 1 {
 		t.Fatalf("member got %d rows / total %d, want 1/1; body=%s", len(out.Items), out.Total(), rec.Body.String())
 	}
@@ -135,7 +136,7 @@ func TestTeamPRList_NonMemberSeesAnEmptyList(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	r.s.handleTeamPRList(rec, r.req(r.outsider, r.teamID, map[string]any{}))
-	out := decodeList[domain.PRSummaryRow](t, rec)
+	out := httpxtest.DecodeList[domain.PRSummaryRow](t, rec)
 	if len(out.Items) != 0 || out.Total() != 0 {
 		t.Fatalf("a non-member read %d rows / total %d of the team's work; body=%s",
 			len(out.Items), out.Total(), rec.Body.String())

@@ -1,4 +1,4 @@
-package server
+package domain
 
 import (
 	"strings"
@@ -23,9 +23,9 @@ func TestSlugify(t *testing.T) {
 		{"A_B_C", "a-b-c"},
 	}
 	for _, tc := range cases {
-		got := slugify(tc.in)
+		got := Slugify(tc.in)
 		if got != tc.want {
-			t.Errorf("slugify(%q) = %q, want %q", tc.in, got, tc.want)
+			t.Errorf("Slugify(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }

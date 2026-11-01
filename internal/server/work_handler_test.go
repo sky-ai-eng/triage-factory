@@ -25,6 +25,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // fakeWorkKind is a db.WorkKindHandle over the work-item conformance
@@ -234,7 +235,7 @@ func TestWorkItemsList_LocalMode(t *testing.T) {
 	}
 
 	t.Run("parked_row_with_subject", func(t *testing.T) {
-		page := decodeList[workItemJSON](t, list(`{"status":"parked"}`))
+		page := httpxtest.DecodeList[workItemJSON](t, list(`{"status":"parked"}`))
 		if page.Total() != 1 || len(page.Items) != 1 {
 			t.Fatalf("total=%d items=%d, want 1 and 1", page.Total(), len(page.Items))
 		}
@@ -271,7 +272,7 @@ func TestWorkItemsList_LocalMode(t *testing.T) {
 	})
 
 	t.Run("count_only", func(t *testing.T) {
-		page := decodeList[workItemJSON](t, list(`{"status":"parked","page_size":0}`))
+		page := httpxtest.DecodeList[workItemJSON](t, list(`{"status":"parked","page_size":0}`))
 		if page.Total() != 1 || len(page.Items) != 0 {
 			t.Errorf("count-only: total=%d items=%d, want 1 and none", page.Total(), len(page.Items))
 		}
@@ -279,7 +280,7 @@ func TestWorkItemsList_LocalMode(t *testing.T) {
 
 	t.Run("token_fingerprint_refuses_another_status", func(t *testing.T) {
 		parkLocalEvent(t, database, "Another")
-		page := decodeList[workItemJSON](t, list(`{"status":"parked","page_size":1}`))
+		page := httpxtest.DecodeList[workItemJSON](t, list(`{"status":"parked","page_size":1}`))
 		if page.NextPageToken == "" {
 			t.Fatal("no next page token with two parked rows and a page of one")
 		}
@@ -325,7 +326,7 @@ func TestWorkItemGet_LocalMode(t *testing.T) {
 	}
 	listRec := httptest.NewRecorder()
 	h.handleItemsList(listRec, workReq(http.MethodPost, "/api/orgs/x/work/event_queue/items/list", runmode.LocalDefaultOrgID, "local-user", `{}`, map[string]string{"kind": "event_queue"}))
-	page := decodeList[workItemJSON](t, listRec)
+	page := httpxtest.DecodeList[workItemJSON](t, listRec)
 	if len(page.Items) != 1 {
 		t.Fatalf("list = %+v", page.Items)
 	}
@@ -736,7 +737,7 @@ func TestWorkHandler_Gate_Postgres(t *testing.T) {
 	t.Run("admin_reads_and_redrives", func(t *testing.T) {
 		rec := httptest.NewRecorder()
 		wh.handleItemsList(rec, workReq(http.MethodPost, "/", orgID, owner, `{"status":"parked"}`, pv))
-		page := decodeList[workItemJSON](t, rec)
+		page := httpxtest.DecodeList[workItemJSON](t, rec)
 		if page.Total() != 1 || len(page.Items) != 1 || page.Items[0].ID != claimed.ID {
 			t.Fatalf("admin list = %+v (total %d), want the one parked row", page.Items, page.Total())
 		}
@@ -849,7 +850,7 @@ func TestWorkHandler_RegistryListsEveryKindAndRedrivesAParkedFiring(t *testing.T
 
 	rec = httptest.NewRecorder()
 	h.handleItemsList(rec, workReq(http.MethodPost, "/api/orgs/x/work/pending_firings/items/list", runmode.LocalDefaultOrgID, "local-user", `{"status":"parked"}`, map[string]string{"kind": workkinds.PendingFiringsName}))
-	page := decodeList[workItemJSON](t, rec)
+	page := httpxtest.DecodeList[workItemJSON](t, rec)
 	if page.Total() != 1 || len(page.Items) != 1 || page.Items[0].ID != parkedID {
 		t.Fatalf("parked list = total %d items %+v, want the parked firing", page.Total(), page.Items)
 	}
@@ -885,7 +886,7 @@ func TestWorkHandler_RedrivesAParkedReEvaluation(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	h.handleItemsList(rec, workReq(http.MethodPost, "/api/orgs/x/work/task_rederive_queue/items/list", runmode.LocalDefaultOrgID, "local-user", `{"status":"parked"}`, pv))
-	page := decodeList[workItemJSON](t, rec)
+	page := httpxtest.DecodeList[workItemJSON](t, rec)
 	if page.Total() != 1 || len(page.Items) != 1 || page.Items[0].ID != parkedID {
 		t.Fatalf("parked list = total %d items %+v, want the parked re-evaluation", page.Total(), page.Items)
 	}

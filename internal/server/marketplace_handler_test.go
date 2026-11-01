@@ -18,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // marketplaceRig is the multi-mode fixture for the marketplace handlers: a
@@ -214,7 +215,7 @@ func (r *marketplaceRig) list(t *testing.T, callerID, query string) []domain.Lis
 		body[k] = decoded
 	}
 	rec := doMarketplaceJSON(r.mh.handleMarketplaceList, r.req(http.MethodPost, "/api/marketplace/listings/list", callerID, body))
-	return decodeList[domain.ListingSummary](t, rec).Items
+	return httpxtest.DecodeList[domain.ListingSummary](t, rec).Items
 }
 
 func listingIDs(summaries []domain.ListingSummary) []string {

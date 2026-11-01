@@ -20,6 +20,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/llm/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -341,7 +342,7 @@ func TestDelegate_ModelProviderUnavailable_SurfacesTheRemedy(t *testing.T) {
 	// SPAWN_FAILED, like the other 422 arm: the claim stamped before Delegate
 	// ran, and the reason is what tells the client it survived. No field —
 	// nothing the caller sent is wrong.
-	assertFirstError(t, rec, "SPAWN_FAILED", "")
+	httpxtest.AssertFirstError(t, rec, "SPAWN_FAILED", "")
 	body := rec.Body.String()
 	for _, want := range []string{modelcatalog.ProviderDisplayName(modelcatalog.ProviderBedrock), bedrockModel, "Settings"} {
 		if !strings.Contains(body, want) {

@@ -756,7 +756,7 @@ func (mh *marketplaceHandler) handleMarketplaceUnvote(w http.ResponseWriter, r *
 // installListingRequest is the POST /api/marketplace/listings/{id}/install
 // body. TeamID is the acting team the write picker supplied — optional; a
 // solo/single-team caller omits it and teamscope resolves their sole team
-// (see gateActingTeamWrite / teamscope.ResolveActing).
+// (see authz.Checker.RequireActingTeamWrite / teamscope.ResolveActing).
 type installListingRequest struct {
 	TeamID string `json:"team_id"`
 }
@@ -777,7 +777,7 @@ type installListingResponse struct {
 // brand-new team-owned object(s) — a fork, not a live reference; it never
 // updates when the listing republishes and surviving the listing being
 // delisted/deleted later. Write role on the *installing* team (not the
-// publisher's) is required: gateActingTeamWrite gives a clean 403 for a
+// publisher's) is required: RequireActingTeamWrite gives a clean 403 for a
 // viewer before anything is read; RLS enforces the same gate on the
 // marketplace_installs INSERT (marketplace_installs_insert) as defense in
 // depth. Repeat installs by the same team are allowed — each is a fresh
@@ -803,7 +803,7 @@ func (mh *marketplaceHandler) handleMarketplaceInstall(w http.ResponseWriter, r 
 	// Reject a viewer on the target team before touching the listing
 	// (TFAC-447 shape) — this gates the *installing* team, independent of
 	// the listing/publisher, so it can run before any listing lookup.
-	if !gateActingTeamWrite(w, r, mh.tx, mh.az, orgID, userID, req.TeamID, "marketplace") {
+	if !mh.az.RequireActingTeamWrite(w, r, orgID, userID, req.TeamID, "marketplace") {
 		return
 	}
 

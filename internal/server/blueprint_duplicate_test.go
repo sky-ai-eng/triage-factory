@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // Blueprint duplication: a flat set of prompt ids deep-copies into new
@@ -104,7 +105,7 @@ func TestBlueprintDuplicate_EmptyAndUnknownRejected(t *testing.T) {
 	if empty.Code != http.StatusBadRequest {
 		t.Fatalf("empty prompt_ids: expected 400, got %d: %s", empty.Code, empty.Body.String())
 	}
-	assertFirstError(t, empty, httpx.ReasonMissingField, "prompt_ids")
+	httpxtest.AssertFirstError(t, empty, httpx.ReasonMissingField, "prompt_ids")
 
 	unknown := doJSON(t, s, http.MethodPost, "/api/blueprints/duplicate", map[string]any{
 		"prompt_ids": []string{"00000000-0000-0000-0000-0000000000ff"},
@@ -112,5 +113,5 @@ func TestBlueprintDuplicate_EmptyAndUnknownRejected(t *testing.T) {
 	if unknown.Code != http.StatusNotFound {
 		t.Fatalf("unknown prompt id: expected 404, got %d: %s", unknown.Code, unknown.Body.String())
 	}
-	assertFirstError(t, unknown, httpx.ReasonNotFound, "prompt_ids")
+	httpxtest.AssertFirstError(t, unknown, httpx.ReasonNotFound, "prompt_ids")
 }

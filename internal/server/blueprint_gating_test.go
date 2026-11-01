@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // --- gatedEventTypes (pure unit test) ------------------------------------
@@ -46,7 +47,7 @@ func TestHandleBlueprintsList_HidesBlueprintWithOnlyGatedTrigger(t *testing.T) {
 
 	gateJiraForTest(t)
 
-	page := decodeList[map[string]any](t, doJSON(t, s, http.MethodPost, "/api/blueprints/list", map[string]any{}))
+	page := httpxtest.DecodeList[map[string]any](t, doJSON(t, s, http.MethodPost, "/api/blueprints/list", map[string]any{}))
 	seen := map[string]bool{}
 	for _, bp := range page.Items {
 		seen[bp["id"].(string)] = true
@@ -78,7 +79,7 @@ func TestHandleBlueprintsList_GatedBlueprintVisibleWithFeature(t *testing.T) {
 	gateJiraForTest(t)
 	grantTestGateFeature(t)
 
-	page := decodeList[map[string]any](t, doJSON(t, s, http.MethodPost, "/api/blueprints/list", map[string]any{}))
+	page := httpxtest.DecodeList[map[string]any](t, doJSON(t, s, http.MethodPost, "/api/blueprints/list", map[string]any{}))
 	var seen bool
 	for _, bp := range page.Items {
 		if bp["id"] == gatedBP {

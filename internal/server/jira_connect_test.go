@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 	"github.com/zalando/go-keyring"
 )
 
@@ -408,7 +409,7 @@ func TestJiraIdentityPAT_NoJiraHost_ReturnsNotConfigured(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status=%d body=%s, want 409", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, httpx.ReasonNotConfigured, "jira_pat")
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonNotConfigured, "jira_pat")
 }
 
 // TestJiraConnectStart_DataCenterOrg_BouncesToPaste: a Data Center org has no

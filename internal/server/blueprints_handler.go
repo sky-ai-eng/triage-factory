@@ -228,7 +228,7 @@ func (bh *blueprintsHandler) handleBlueprintCreate(w http.ResponseWriter, r *htt
 	// Reject viewers before authoring a blueprint (TFAC-447): resolve the acting
 	// team read-only (no last-acting stamp — we may 403) and gate. The main tx
 	// re-resolves (and stamps) only for callers that pass.
-	if !gateActingTeamWrite(w, r, bh.tx, bh.az, orgID, userID, req.TeamID, "blueprints") {
+	if !bh.az.RequireActingTeamWrite(w, r, orgID, userID, req.TeamID, "blueprints") {
 		return
 	}
 
@@ -475,7 +475,7 @@ func (bh *blueprintsHandler) handleBlueprintStepsAll(w http.ResponseWriter, r *h
 	}
 	var v httpx.Validation
 	teamIDFilterField(&v, req.TeamID)
-	blueprintIDs := canonicalStrings(req.BlueprintIDs)
+	blueprintIDs := httpx.CanonicalStrings(req.BlueprintIDs)
 	if len(blueprintIDs) > maxBlueprintStepIDs {
 		v.OutOfRange("blueprint_ids", fmt.Sprintf("at most %d blueprint ids per request", maxBlueprintStepIDs))
 	}
@@ -541,7 +541,7 @@ func (bh *blueprintsHandler) handleBlueprintRunsList(w http.ResponseWriter, r *h
 			v.Invalid("blueprint_id", fmt.Sprintf("blueprint_id %q is not a valid blueprint id", req.BlueprintID))
 		}
 	}
-	statuses := canonicalStrings(req.Statuses)
+	statuses := httpx.CanonicalStrings(req.Statuses)
 	for _, st := range statuses {
 		if !domain.ValidBlueprintRunStatus(st) {
 			v.Invalid("statuses", fmt.Sprintf("unknown status %q; must be one of: %s",
@@ -1178,7 +1178,7 @@ func (bh *blueprintsHandler) handleBlueprintDuplicate(w http.ResponseWriter, r *
 	}
 
 	// Viewers can't duplicate prompts into a new blueprint (TFAC-447).
-	if !gateActingTeamWrite(w, r, bh.tx, bh.az, orgID, userID, req.TeamID, "blueprints") {
+	if !bh.az.RequireActingTeamWrite(w, r, orgID, userID, req.TeamID, "blueprints") {
 		return
 	}
 
@@ -1433,7 +1433,7 @@ func (bh *blueprintsHandler) handleBlueprintRunCancel(w http.ResponseWriter, r *
 	// already-terminal run gets a 404/409 rather than a 503.
 	spawner := bh.spawner()
 	if spawner == nil {
-		writeDelegationUnavailable(w)
+		httpx.WriteDelegationUnavailable(w)
 		return
 	}
 	if err := spawner.CancelBlueprintRun(orgID, id, userID); err != nil {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // listEventHandlers reads one page of the handler list. kind is "", "rule", or
@@ -20,7 +21,7 @@ func listEventHandlers(t *testing.T, s *Server, kind string) []map[string]any {
 	if kind != "" {
 		body["kind"] = kind
 	}
-	return decodeList[map[string]any](t, doJSON(t, s, http.MethodPost, "/api/event-handlers/list", body)).Items
+	return httpxtest.DecodeList[map[string]any](t, doJSON(t, s, http.MethodPost, "/api/event-handlers/list", body)).Items
 }
 
 // seedBlueprintForTrigger inserts the user-source blueprint a trigger fixture

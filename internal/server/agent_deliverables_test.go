@@ -12,6 +12,7 @@ import (
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // seedConversationDeliverable stamps a deliverable onto conversationID on the local-default org/team
@@ -47,7 +48,7 @@ func TestHandleAgentDeliverables(t *testing.T) {
 		DedupKey: domain.ReviewDedupKey("PR_node", conversationID),
 	})
 
-	page := decodeList[map[string]any](t, doJSON(t, s, http.MethodPost,
+	page := httpxtest.DecodeList[map[string]any](t, doJSON(t, s, http.MethodPost,
 		"/api/agent/conversations/"+conversationID+"/deliverables/list", map[string]any{}))
 	got := page.Items
 	if len(got) != 2 || page.Total() != 2 {
@@ -106,7 +107,7 @@ func TestHandleAgentDeliverables_CorruptDetails(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST = %d, want 200 (corrupt details must not 500); body=%s", rec.Code, rec.Body.String())
 	}
-	got := decodeList[map[string]any](t, rec).Items
+	got := httpxtest.DecodeList[map[string]any](t, rec).Items
 	if len(got) != 1 {
 		t.Fatalf("returned %d deliverables, want 1", len(got))
 	}
@@ -140,12 +141,12 @@ func TestHandleAgentDeliverables_Pages(t *testing.T) {
 	}
 
 	path := "/api/agent/conversations/" + conversationID + "/deliverables/list"
-	first := decodeList[map[string]any](t, doJSON(t, s, http.MethodPost, path, map[string]any{"page_size": 2}))
+	first := httpxtest.DecodeList[map[string]any](t, doJSON(t, s, http.MethodPost, path, map[string]any{"page_size": 2}))
 	if len(first.Items) != 2 || first.Total() != 3 || first.NextPageToken == "" {
 		t.Fatalf("first page = %d rows, total %d, token %q; want 2 rows of 3 and a token",
 			len(first.Items), first.Total(), first.NextPageToken)
 	}
-	second := decodeList[map[string]any](t, doJSON(t, s, http.MethodPost, path,
+	second := httpxtest.DecodeList[map[string]any](t, doJSON(t, s, http.MethodPost, path,
 		map[string]any{"page_size": 2, "page_token": first.NextPageToken}))
 	if len(second.Items) != 1 || second.Total() != 3 || second.NextPageToken != "" {
 		t.Fatalf("second page = %d rows, total %d, token %q; want the last row and no token",
@@ -160,7 +161,7 @@ func TestHandleAgentDeliverables_Pages(t *testing.T) {
 		t.Errorf("paged ids = %v, want newest first %v", got, want)
 	}
 
-	count := decodeList[map[string]any](t, doJSON(t, s, http.MethodPost, path, map[string]any{"page_size": 0}))
+	count := httpxtest.DecodeList[map[string]any](t, doJSON(t, s, http.MethodPost, path, map[string]any{"page_size": 0}))
 	if len(count.Items) != 0 || count.Total() != 3 {
 		t.Errorf("count-only = %d rows, total %d; want no rows and 3", len(count.Items), count.Total())
 	}

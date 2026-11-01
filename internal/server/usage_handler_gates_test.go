@@ -17,6 +17,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // usageRig is the multi-mode fixture for the Usage spend endpoints: a real
@@ -349,7 +350,7 @@ func TestUsageAccessLog_GatesAndEntitlement_Postgres(t *testing.T) {
 	t.Run("org_admin_200_reads_log_with_names", func(t *testing.T) {
 		rec := httptest.NewRecorder()
 		r.uh.handleUsageAccessLog(rec, r.activityReq(r.orgAdmin, "", ""))
-		resp := decodeList[accessChangeJSON](t, rec)
+		resp := httpxtest.DecodeList[accessChangeJSON](t, rec)
 		if len(resp.Items) != 1 || resp.Total() != 1 {
 			t.Fatalf("items = %d / total %d, want 1/1: %+v", len(resp.Items), resp.Total(), resp.Items)
 		}

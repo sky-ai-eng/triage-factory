@@ -47,7 +47,7 @@ type prListFilterKey struct {
 // over. Faults are appended to v, which the caller flushes with the rest of
 // its field errors so one response reports every problem.
 func canonicalPRStates(v *httpx.Validation, states []string) []string {
-	out := canonicalStrings(states)
+	out := httpx.CanonicalStrings(states)
 	for _, st := range out {
 		if !slices.Contains(domain.PRListStates, st) {
 			v.Invalid("states", fmt.Sprintf("unknown state %q; must be one of: %s",

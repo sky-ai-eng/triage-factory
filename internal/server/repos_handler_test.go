@@ -21,6 +21,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // newAppRepoStub stands in for GitHub's REST API for the App-mode repo picker: it
@@ -170,7 +171,8 @@ func seedApp(t *testing.T, s *Server, stub *httptest.Server, installs []domain.O
 
 // pickerPage is the picker's response envelope: the shared list keys plus the
 // readiness discriminator. Decoded as its own type rather than through
-// decodeList because `status` is the field most of these assertions are about.
+// httpxtest.DecodeList because `status` is the field most of these
+// assertions are about.
 type pickerPage struct {
 	Items         []githubRepoJSON `json:"items"`
 	NextPageToken string           `json:"next_page_token"`
@@ -257,7 +259,7 @@ func TestHandleGitHubRepos_AppInstalledOnlyOnAnotherHost(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("picker list = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, httpx.ReasonNotConfigured, "")
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonNotConfigured, "")
 	if want := "the GitHub App is not installed on any account"; !strings.Contains(rec.Body.String(), want) {
 		t.Errorf("body=%s, want it to say %q", rec.Body.String(), want)
 	}

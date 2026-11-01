@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	"github.com/sky-ai-eng/triage-factory/internal/eventing/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // seedJiraCredential makes baseURL the org's Jira site and stores a Data
@@ -34,14 +35,14 @@ func (r *authRig) seedJiraCredential(orgID, userID uuid.UUID, baseURL string) {
 }
 
 // decodeJiraPage reads a list response, failing unless it is a 200.
-func decodeJiraPage[T any](t *testing.T, resp *http.Response) listEnvelope[T] {
+func decodeJiraPage[T any](t *testing.T, resp *http.Response) httpxtest.ListEnvelope[T] {
 	t.Helper()
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, raw)
 	}
-	var out listEnvelope[T]
+	var out httpxtest.ListEnvelope[T]
 	if err := json.Unmarshal(raw, &out); err != nil {
 		t.Fatalf("decode: %v; body=%s", err, raw)
 	}

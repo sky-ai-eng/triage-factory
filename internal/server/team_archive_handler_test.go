@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // teamArchiveRig is a Postgres-backed teamsHandler, with RLS live, over an org
@@ -200,7 +201,7 @@ func TestTeamArchive_BlocksTeamSettingsWrite(t *testing.T) {
 	if wrec.Code != http.StatusForbidden {
 		t.Fatalf("team-settings write on archived team = %d, want 403; body=%s", wrec.Code, wrec.Body.String())
 	}
-	assertFirstError(t, wrec, httpx.ReasonTeamArchived, "")
+	httpxtest.AssertFirstError(t, wrec, httpx.ReasonTeamArchived, "")
 }
 
 // TestTeamArchive_BlocksMembershipWrite: an archived team's member add is a 403

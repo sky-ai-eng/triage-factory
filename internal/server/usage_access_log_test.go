@@ -9,6 +9,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // --- pure: label rendering ---
@@ -341,9 +342,9 @@ func TestAccessLogList_StrictBody(t *testing.T) {
 }
 
 // postAccessLog calls the access-log list and decodes the shared envelope.
-func postAccessLog(t *testing.T, s *Server, body map[string]any) listEnvelope[accessChangeJSON] {
+func postAccessLog(t *testing.T, s *Server, body map[string]any) httpxtest.ListEnvelope[accessChangeJSON] {
 	t.Helper()
-	return decodeList[accessChangeJSON](t, doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/usage/access-log/list", body))
+	return httpxtest.DecodeList[accessChangeJSON](t, doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/usage/access-log/list", body))
 }
 
 // newLicensedAccessLogServer is a local-mode server with the governance
@@ -460,7 +461,7 @@ func TestUsageAccessLog_Local(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("category=bogus = %d, want 400; body=%s", rec.Code, rec.Body.String())
 		}
-		assertFirstError(t, rec, httpx.ReasonInvalidField, "category")
+		httpxtest.AssertFirstError(t, rec, httpx.ReasonInvalidField, "category")
 	})
 
 	t.Run("pages_partition_the_log", func(t *testing.T) {

@@ -227,7 +227,7 @@ func validateTeamName(v *httpx.Validation, name string) string {
 	if len([]rune(name)) > maxTeamNameLen {
 		v.OutOfRange("name", fmt.Sprintf("name must be at most %d characters", maxTeamNameLen))
 	}
-	slug := slugify(name)
+	slug := domain.Slugify(name)
 	if slug == "" {
 		v.Invalid("name", "name must contain letters or numbers")
 	}
@@ -243,8 +243,8 @@ func validateTeamName(v *httpx.Validation, name string) string {
 //
 // Body is a partial PATCH: { "name"?: "<display name>", "description"?: "<blurb>" }.
 // A present name must be non-empty and within the length cap, and its slug is
-// re-derived (the same slugify Create uses) so name and slug stay in sync —
-// there's no separate slug field. At least one field must be present.
+// re-derived (the same domain.Slugify Create uses) so name and slug stay in
+// sync — there's no separate slug field. At least one field must be present.
 //
 // PATCH /api/teams/{team_id}  body: { "name"?: "...", "description"?: "..." }
 func (th *teamsHandler) handleTeamUpdate(w http.ResponseWriter, r *http.Request) {
@@ -409,7 +409,7 @@ func (th *teamsHandler) handleTeamCreate(w http.ResponseWriter, r *http.Request)
 	// slugify, so a value that survives it is a value the column can hold.
 	slug := derived
 	if raw := strings.TrimSpace(body.Slug); raw != "" {
-		slug = slugify(raw)
+		slug = domain.Slugify(raw)
 		if slug == "" {
 			v.Invalid("slug", "slug must contain letters or numbers")
 		}

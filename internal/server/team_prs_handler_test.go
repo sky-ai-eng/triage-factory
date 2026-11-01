@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbseed"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // POST /api/teams/{team_id}/prs/list, whose count-only read is the Overview's
@@ -70,7 +71,7 @@ func TestTeamPRList_MemberSeesBothLegs(t *testing.T) {
 		Number: 3, Repo: "acme/widget", Author: "stranger", State: "OPEN", Title: "Not ours",
 	}, "", "")
 
-	out := decodeList[domain.PRSummaryRow](t, doJSON(t, s, "POST", teamPRsPath, map[string]any{}))
+	out := httpxtest.DecodeList[domain.PRSummaryRow](t, doJSON(t, s, "POST", teamPRsPath, map[string]any{}))
 	if len(out.Items) != 2 || out.Total() != 2 {
 		t.Fatalf("got %d rows / total %d, want 2/2; body items = %+v", len(out.Items), out.Total(), out.Items)
 	}
@@ -103,7 +104,7 @@ func TestTeamPRList_OpenCountIsTheOverviewFigure(t *testing.T) {
 		Number: 12, Repo: "acme/widget", Author: "octocat", State: "MERGED", Merged: true,
 	}, "", "closed")
 
-	figure := decodeList[domain.PRSummaryRow](t, doJSON(t, s, "POST", teamPRsPath, map[string]any{
+	figure := httpxtest.DecodeList[domain.PRSummaryRow](t, doJSON(t, s, "POST", teamPRsPath, map[string]any{
 		"states": []string{"open"}, "page_size": 0,
 	}))
 	if len(figure.Items) != 0 {
@@ -113,7 +114,7 @@ func TestTeamPRList_OpenCountIsTheOverviewFigure(t *testing.T) {
 		t.Fatalf("OPEN PRS = %d, want 2", figure.Total())
 	}
 
-	paged := decodeList[domain.PRSummaryRow](t, doJSON(t, s, "POST", teamPRsPath, map[string]any{
+	paged := httpxtest.DecodeList[domain.PRSummaryRow](t, doJSON(t, s, "POST", teamPRsPath, map[string]any{
 		"states": []string{"open"},
 	}))
 	if paged.Total() != figure.Total() || len(paged.Items) != 2 {
@@ -154,7 +155,7 @@ func TestTeamPRList_PageTokenIsBoundToItsFilters(t *testing.T) {
 		}, "", "")
 	}
 
-	first := decodeList[domain.PRSummaryRow](t, doJSON(t, s, "POST", teamPRsPath, map[string]any{
+	first := httpxtest.DecodeList[domain.PRSummaryRow](t, doJSON(t, s, "POST", teamPRsPath, map[string]any{
 		"page_size": 2,
 	}))
 	if first.NextPageToken == "" {
@@ -170,7 +171,7 @@ func TestTeamPRList_PageTokenIsBoundToItsFilters(t *testing.T) {
 	assertFieldError(t, rec, "page_token")
 
 	// And the token IS good for the query that minted it.
-	second := decodeList[domain.PRSummaryRow](t, doJSON(t, s, "POST", teamPRsPath, map[string]any{
+	second := httpxtest.DecodeList[domain.PRSummaryRow](t, doJSON(t, s, "POST", teamPRsPath, map[string]any{
 		"page_size": 2, "page_token": first.NextPageToken,
 	}))
 	if len(second.Items) != 1 || second.Total() != 3 {

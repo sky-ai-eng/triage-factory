@@ -560,7 +560,7 @@ func (eh *eventHandlersHandler) handleEventHandlerCreateRule(w http.ResponseWrit
 	// Reject viewers before authoring a rule: resolve the acting team read-only
 	// and gate, so a viewer gets a clean 403 rather than the
 	// event_handlers_insert RLS WITH CHECK surfacing as a 500.
-	teamID, ok := actingTeamForWrite(w, r, eh.tx, eh.az, orgID, userID, req.TeamID, "event_handlers")
+	teamID, ok := eh.az.ActingTeamForWrite(w, r, orgID, userID, req.TeamID, "event_handlers")
 	if !ok {
 		return
 	}
@@ -637,7 +637,7 @@ func (eh *eventHandlersHandler) handleEventHandlerCreateTrigger(w http.ResponseW
 		return
 	}
 
-	teamID, ok := actingTeamForWrite(w, r, eh.tx, eh.az, orgID, userID, req.TeamID, "event_handlers")
+	teamID, ok := eh.az.ActingTeamForWrite(w, r, orgID, userID, req.TeamID, "event_handlers")
 	if !ok {
 		return
 	}

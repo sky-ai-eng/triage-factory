@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // TestResolveArtifactActivityFilters is a Docker-free unit test for the
@@ -336,7 +337,7 @@ func TestUsageArtifactsActivityHandler_Postgres(t *testing.T) {
 		for _, caller := range []string{r.teamAdmin, r.orgAdmin} {
 			rec := httptest.NewRecorder()
 			r.uh.handleUsageTeamArtifacts(rec, r.activityReq(caller, r.teamA, ""))
-			out := decodeList[objectActivityJSON](t, rec)
+			out := httpxtest.DecodeList[objectActivityJSON](t, rec)
 			if len(out.Items) != 3 || out.Total() != 3 {
 				t.Fatalf("teamA feed = %d items / total %d, want 3/3 (the branch, the PR, the review): %+v", len(out.Items), out.Total(), out.Items)
 			}
@@ -372,7 +373,7 @@ func TestUsageArtifactsActivityHandler_Postgres(t *testing.T) {
 		license()
 		rec := httptest.NewRecorder()
 		r.uh.handleUsageOrgArtifacts(rec, r.activityReq(r.orgAdmin, "", ""))
-		out := decodeList[orgObjectActivityJSON](t, rec)
+		out := httpxtest.DecodeList[orgObjectActivityJSON](t, rec)
 		if len(out.Items) != 4 || out.Total() != 4 {
 			t.Fatalf("org feed = %d items / total %d, want 4/4: %+v", len(out.Items), out.Total(), out.Items)
 		}
@@ -428,7 +429,7 @@ func TestUsageArtifactsActivityHandler_Postgres(t *testing.T) {
 		} {
 			rec := httptest.NewRecorder()
 			r.uh.handleUsageOrgArtifacts(rec, r.activityReq(r.orgAdmin, "", body))
-			out := decodeList[orgObjectActivityJSON](t, rec)
+			out := httpxtest.DecodeList[orgObjectActivityJSON](t, rec)
 			if len(out.Items) != 1 || out.Total() != 1 || out.Items[0].ObjectID != want {
 				t.Errorf("%s = %d items / total %d (%+v), want %q alone", body, len(out.Items), out.Total(), out.Items, want)
 			}
@@ -436,7 +437,7 @@ func TestUsageArtifactsActivityHandler_Postgres(t *testing.T) {
 		// The window selects rows: before 12:30 only the first two pushes.
 		rec := httptest.NewRecorder()
 		r.uh.handleUsageOrgArtifacts(rec, r.activityReq(r.orgAdmin, "", `{"until":"2026-06-10T11:30:00Z"}`))
-		if out := decodeList[orgObjectActivityJSON](t, rec); len(out.Items) != 1 || out.Items[0].ConversationCount != 2 || len(out.Items[0].Teams) != 1 {
+		if out := httpxtest.DecodeList[orgObjectActivityJSON](t, rec); len(out.Items) != 1 || out.Items[0].ConversationCount != 2 || len(out.Items[0].Teams) != 1 {
 			t.Errorf("windowed branch = %+v, want 2 runs on one team", out.Items)
 		}
 	})
@@ -476,7 +477,7 @@ func TestUsageArtifactsActivityHandler_Postgres(t *testing.T) {
 			}
 			rec := httptest.NewRecorder()
 			r.uh.handleUsageOrgArtifacts(rec, r.activityReq(r.orgAdmin, "", body))
-			out := decodeList[orgObjectActivityJSON](t, rec)
+			out := httpxtest.DecodeList[orgObjectActivityJSON](t, rec)
 			if out.Total() != 4 {
 				t.Fatalf("page %d total = %d, want 4", page, out.Total())
 			}
@@ -495,7 +496,7 @@ func TestUsageArtifactsActivityHandler_Postgres(t *testing.T) {
 		}
 		rec := httptest.NewRecorder()
 		r.uh.handleUsageOrgArtifacts(rec, r.activityReq(r.orgAdmin, "", `{"page_size":0}`))
-		if out := decodeList[orgObjectActivityJSON](t, rec); len(out.Items) != 0 || out.Total() != 4 {
+		if out := httpxtest.DecodeList[orgObjectActivityJSON](t, rec); len(out.Items) != 0 || out.Total() != 4 {
 			t.Errorf("count-only read = %d items / total %d, want 0/4", len(out.Items), out.Total())
 		}
 	})
@@ -564,7 +565,7 @@ func TestUsageActionsActivityHandler_Postgres(t *testing.T) {
 		license()
 		rec := httptest.NewRecorder()
 		r.uh.handleUsageTeamActions(rec, r.activityReq(r.teamAdmin, r.teamA, ""))
-		out := decodeList[actionJSON](t, rec)
+		out := httpxtest.DecodeList[actionJSON](t, rec)
 		if len(out.Items) != 2 || out.Total() != 2 {
 			t.Fatalf("teamA actions = %d rows / total %d, want 2/2 (created + marked-ready)", len(out.Items), out.Total())
 		}
@@ -596,7 +597,7 @@ func TestUsageActionsActivityHandler_Postgres(t *testing.T) {
 		license()
 		rec := httptest.NewRecorder()
 		r.uh.handleUsageOrgActions(rec, r.activityReq(r.orgAdmin, "", ""))
-		out := decodeList[actionJSON](t, rec)
+		out := httpxtest.DecodeList[actionJSON](t, rec)
 		if len(out.Items) != 3 || out.Total() != 3 {
 			t.Fatalf("org actions = %d rows / total %d, want 3/3 (cross-team)", len(out.Items), out.Total())
 		}
@@ -660,7 +661,7 @@ func TestUsageActionsActivityHandler_Postgres(t *testing.T) {
 		license()
 		rec := httptest.NewRecorder()
 		r.uh.handleUsageOrgActions(rec, r.activityReq(r.orgAdmin, "", `{"action":"pr_created"}`))
-		out := decodeList[actionJSON](t, rec)
+		out := httpxtest.DecodeList[actionJSON](t, rec)
 		if len(out.Items) != 1 || out.Items[0].Action != "pr_created" {
 			t.Errorf("action=pr_created returned %d rows (%+v), want exactly the one", len(out.Items), out.Items)
 		}

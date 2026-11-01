@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // TestTeamsList_LocalReturnsSoleTeam: in local mode (N=1) the teams list
@@ -14,7 +15,7 @@ import (
 func TestTeamsList_LocalReturnsSoleTeam(t *testing.T) {
 	s := newTestServer(t)
 
-	page := decodeList[teamJSON](t, doJSON(t, s, http.MethodPost, "/api/teams/list", map[string]any{}))
+	page := httpxtest.DecodeList[teamJSON](t, doJSON(t, s, http.MethodPost, "/api/teams/list", map[string]any{}))
 	if len(page.Items) != 1 || page.Total() != 1 {
 		t.Fatalf("teams = %d (total %d), want 1 / 1", len(page.Items), page.Total())
 	}
@@ -37,7 +38,7 @@ func TestTeamsList_TwoTeams(t *testing.T) {
 	s := newTestServer(t)
 	second := seedTeam(t, s, runmode.LocalDefaultOrgID, "second")
 
-	page := decodeList[teamJSON](t, doJSON(t, s, http.MethodPost, "/api/teams/list", map[string]any{}))
+	page := httpxtest.DecodeList[teamJSON](t, doJSON(t, s, http.MethodPost, "/api/teams/list", map[string]any{}))
 	if len(page.Items) != 2 || page.Total() != 2 {
 		t.Fatalf("teams = %d (total %d), want 2 / 2", len(page.Items), page.Total())
 	}
@@ -49,12 +50,12 @@ func TestTeamsList_TwoTeams(t *testing.T) {
 		t.Errorf("teams = %+v; want both default and %s", page.Items, second)
 	}
 
-	first := decodeList[teamJSON](t, doJSON(t, s, http.MethodPost, "/api/teams/list", map[string]any{"page_size": 1}))
+	first := httpxtest.DecodeList[teamJSON](t, doJSON(t, s, http.MethodPost, "/api/teams/list", map[string]any{"page_size": 1}))
 	if len(first.Items) != 1 || first.Total() != 2 || first.NextPageToken == "" {
 		t.Fatalf("page 1 = %+v (total %d, token %q), want one row, total 2, a next token",
 			first.Items, first.Total(), first.NextPageToken)
 	}
-	next := decodeList[teamJSON](t, doJSON(t, s, http.MethodPost, "/api/teams/list",
+	next := httpxtest.DecodeList[teamJSON](t, doJSON(t, s, http.MethodPost, "/api/teams/list",
 		map[string]any{"page_size": 1, "page_token": first.NextPageToken}))
 	if len(next.Items) != 1 || next.Items[0].ID == first.Items[0].ID {
 		t.Errorf("page 2 = %+v, want the other team (pages must partition the set)", next.Items)

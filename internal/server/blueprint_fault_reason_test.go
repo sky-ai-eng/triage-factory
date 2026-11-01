@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // TestBlueprintStepsPut_FaultReasons pins the reason on each 422 a steps-PUT
@@ -21,7 +22,7 @@ func TestBlueprintStepsPut_FaultReasons(t *testing.T) {
 		if rec.Code != http.StatusUnprocessableEntity {
 			t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
 		}
-		assertFirstError(t, rec, httpx.ReasonNotFound, "steps")
+		httpxtest.AssertFirstError(t, rec, httpx.ReasonNotFound, "steps")
 	})
 
 	t.Run("prompt owned by another blueprint", func(t *testing.T) {
@@ -35,7 +36,7 @@ func TestBlueprintStepsPut_FaultReasons(t *testing.T) {
 		}
 		// A conflict over who owns the prompt, not a team-boundary fault: both
 		// blueprints are on the same team here.
-		assertFirstError(t, rec, httpx.ReasonConflict, "steps")
+		httpxtest.AssertFirstError(t, rec, httpx.ReasonConflict, "steps")
 
 		// The owner re-saving its own step list is not a reuse.
 		if ok := doJSON(t, s, http.MethodPut, "/api/blueprints/"+owner+"/steps", map[string]any{

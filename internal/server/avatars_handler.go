@@ -20,6 +20,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/publicip"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 )
 
@@ -101,27 +102,6 @@ var allowedAvatarTypes = map[string]bool{
 	"image/webp": true,
 }
 
-// isPublicUnicastIP reports whether ip is a globally-routable public unicast
-// address — outside loopback/link-local/multicast/unspecified
-// (IsGlobalUnicast), RFC 1918 / ULA (IsPrivate), and the
-// CGNAT/doc/benchmark/reserved ranges in nonPublicPrefixes (shared with the
-// GitHub manifest reachability check). It is the single SSRF predicate behind
-// both the manifest pre-check and the avatar proxy's dial-time guard.
-func isPublicUnicastIP(ip netip.Addr) bool {
-	ip = ip.Unmap()
-	// IsGlobalUnicast rejects loopback, unspecified, multicast, and link-local
-	// in one predicate; IsPrivate adds RFC 1918 / unique-local.
-	if !ip.IsGlobalUnicast() || ip.IsPrivate() {
-		return false
-	}
-	for _, p := range nonPublicPrefixes {
-		if p.Contains(ip) {
-			return false
-		}
-	}
-	return true
-}
-
 // safeAvatarDialControl is the net.Dialer.Control hook for the avatar HTTP
 // client: it runs with the RESOLVED address just before connect, so rejecting
 // non-public IPs here defeats SSRF — including DNS rebinding, where a hostname
@@ -135,7 +115,7 @@ func safeAvatarDialControl(_, address string, _ syscall.RawConn) error {
 	if err != nil {
 		return fmt.Errorf("avatar dial: non-IP address %q: %w", host, errBlockedAvatarHost)
 	}
-	if !isPublicUnicastIP(ip) {
+	if !publicip.Is(ip) {
 		return fmt.Errorf("avatar dial: refusing non-public address %s: %w", ip, errBlockedAvatarHost)
 	}
 	return nil

@@ -10,6 +10,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/notify"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // notificationsRig is one org with three people in it: its owner, who is an
@@ -75,12 +76,12 @@ func newNotificationsRig(t *testing.T) *notificationsRig {
 	return r
 }
 
-func (r *notificationsRig) list(sid, bearer, path string, body map[string]any) listEnvelope[notificationItemWire] {
+func (r *notificationsRig) list(sid, bearer, path string, body map[string]any) httpxtest.ListEnvelope[notificationItemWire] {
 	r.t.Helper()
 	if body == nil {
 		body = map[string]any{}
 	}
-	return decodeList[notificationItemWire](r.t, r.tokensJSON(http.MethodPost, path, body, sid, bearer))
+	return httpxtest.DecodeList[notificationItemWire](r.t, r.tokensJSON(http.MethodPost, path, body, sid, bearer))
 }
 
 // TestNotifications_Postgres_SentAndReadable pins the two predicates apart:

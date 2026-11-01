@@ -20,6 +20,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // The deliverable and branch handlers reach GitHub through the credential
@@ -169,7 +170,7 @@ func TestDeliverableGet_NoCredentials_NotConfigured(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("get = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, httpx.ReasonNotConfigured, "")
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonNotConfigured, "")
 	assertLogged(t, logs, "github not configured")
 }
 
@@ -189,7 +190,7 @@ func TestRepoBranches_AppOnlyOrg_Success(t *testing.T) {
 	repoID := seedConfiguredRepo(t, srv, "acme", "api")
 
 	rec := doJSON(t, srv, http.MethodPost, "/api/repos/"+repoID+"/branches/list", map[string]any{})
-	page := decodeList[branchJSON](t, rec)
+	page := httpxtest.DecodeList[branchJSON](t, rec)
 	// A proxy list cannot count its upstream, so total_count is null.
 	if page.TotalCount != nil {
 		t.Errorf("total_count = %d, want null on a proxy list", *page.TotalCount)
@@ -218,7 +219,7 @@ func TestRepoBranches_NoCredentials_NotConfigured(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("branches = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, httpx.ReasonNotConfigured, "")
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonNotConfigured, "")
 	assertLogged(t, logs, "github not configured")
 }
 

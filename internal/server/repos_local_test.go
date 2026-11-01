@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 	"github.com/zalando/go-keyring"
 )
 
@@ -54,7 +55,7 @@ func TestHandleRepoUpdate_LocalMode(t *testing.T) {
 		t.Errorf("PATCH response = %+v, want the updated acme/api row", patched)
 	}
 
-	page := decodeList[repoJSON](t, doJSON(t, s, http.MethodPost, "/api/repos/list", map[string]any{}))
+	page := httpxtest.DecodeList[repoJSON](t, doJSON(t, s, http.MethodPost, "/api/repos/list", map[string]any{}))
 	var found bool
 	for _, row := range page.Items {
 		if row.Owner != "acme" || row.Repo != "api" {
@@ -213,7 +214,7 @@ func TestRepoRoutes_RowOnAnotherHostIsInvisible(t *testing.T) {
 			t.Errorf("%s for a row on another host = %d, want 404; body=%s", tc.name, rec.Code, rec.Body.String())
 		}
 	}
-	page := decodeList[repoJSON](t, doJSON(t, s, http.MethodPost, "/api/repos/list", map[string]any{}))
+	page := httpxtest.DecodeList[repoJSON](t, doJSON(t, s, http.MethodPost, "/api/repos/list", map[string]any{}))
 	if len(page.Items) != 0 {
 		t.Errorf("list on the new host = %v, want no rows from the host the org left", listedRepoSlugs(page))
 	}
@@ -246,7 +247,7 @@ func TestHandleRepositories_LocalModeLeavesOutUntrackedRows(t *testing.T) {
 		t.Fatalf("untrack acme/gone: %v", err)
 	}
 
-	page := decodeList[repoJSON](t, doJSON(t, s, http.MethodPost, "/api/repos/list", map[string]any{}))
+	page := httpxtest.DecodeList[repoJSON](t, doJSON(t, s, http.MethodPost, "/api/repos/list", map[string]any{}))
 	if got := listedRepoSlugs(page); !equalSlugs(got, []string{"acme/api"}) || page.Total() != 1 {
 		t.Errorf("list = %v (total %d), want only the tracked acme/api", got, page.Total())
 	}
@@ -263,7 +264,7 @@ func TestHandleRepositories_TeamFilter(t *testing.T) {
 	s := newTestServer(t)
 	apiID := seedConfiguredRepo(t, s, "acme", "api")
 
-	page := decodeList[repoJSON](t, doJSON(t, s, http.MethodPost, "/api/repos/list", map[string]any{"team_id": runmode.LocalDefaultTeamID}))
+	page := httpxtest.DecodeList[repoJSON](t, doJSON(t, s, http.MethodPost, "/api/repos/list", map[string]any{"team_id": runmode.LocalDefaultTeamID}))
 	if len(page.Items) != 1 || page.Items[0].ID != apiID || page.Total() != 1 {
 		t.Errorf("team list = %v (total %d), want only acme/api by its registry id", listedRepoSlugs(page), page.Total())
 	}
@@ -283,7 +284,7 @@ func TestRepoRoutes_NoGitHubURL(t *testing.T) {
 	repoID := seedConfiguredRepo(t, s, "acme", "api")
 	setOrgGitHubBase(t, s, "")
 
-	if page := decodeList[repoJSON](t, doJSON(t, s, http.MethodPost, "/api/repos/list", map[string]any{})); len(page.Items) != 0 || page.TotalCount == nil || *page.TotalCount != 0 {
+	if page := httpxtest.DecodeList[repoJSON](t, doJSON(t, s, http.MethodPost, "/api/repos/list", map[string]any{})); len(page.Items) != 0 || page.TotalCount == nil || *page.TotalCount != 0 {
 		t.Errorf("list = %v (total %v), want empty", listedRepoSlugs(page), page.TotalCount)
 	}
 	for _, path := range []string{"/api/repos/" + repoID, "/api/repos/by-name/acme/api"} {
