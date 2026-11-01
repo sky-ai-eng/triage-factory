@@ -501,7 +501,7 @@ func (w *Worker) drop(ctx context.Context, item db.ClaimedPRMergeabilityProbe, o
 	_, err := w.store.CompleteProbe(ctx, item.Receipt, db.PRMergeabilityAnswer{}, "")
 	switch {
 	case err == nil:
-		recordDrop(outcome)
+		recordDrop(item.Receipt.OrgID, outcome)
 		// A drop for no credential was logged once for its repository; a
 		// drop after failed reads ends an outage the probe could not outlast.
 		level := slog.LevelWarn
