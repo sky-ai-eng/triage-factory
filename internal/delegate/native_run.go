@@ -651,8 +651,8 @@ const artifactNudgeNote = artifactNudgeTag + "\n" +
 // an external artifact, that is about to conclude having produced none, is
 // asked whether it meant to.
 //
-// "Produced" is an artifact (an object the run's agent changed, read from the
-// ledger) or a deliverable the conversation owns. The deliverable half is for a
+// "Produced" is an artifact (an object the run changed, read from the ledger)
+// or a deliverable the conversation owns. The deliverable half is for a
 // staged review: it is the run's output, and it has no artifact until a person
 // approves it and it is posted.
 //

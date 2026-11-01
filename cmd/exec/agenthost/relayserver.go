@@ -17,6 +17,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/ghcli/ghwrite"
 	"github.com/sky-ai-eng/triage-factory/internal/proxy/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -202,7 +203,7 @@ func (s *RelayServer) DispatchCall(ctx context.Context, namespace, op string, ar
 	defer span.End()
 
 	res, err := s.dispatch(ctx, namespace, op, args)
-	recordSpanError(span, err)
+	telemetry.RecordSpanError(span, err)
 	return res, err
 }
 
@@ -265,7 +266,7 @@ func (s *RelayServer) DispatchRecord(ctx context.Context, namespace, op, key str
 	defer cancel()
 	defer func() {
 		if r := recover(); r != nil {
-			recordSpanError(span, errRecordPanicked)
+			telemetry.RecordSpanError(span, errRecordPanicked)
 			recordAuditDrop(ctx, dropStageRelayDispatch, relayDropOp(namespace, op))
 			agenthostLog.Error("applying a relayed audit record panicked; record dropped",
 				"namespace", namespace, "op", op, "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
@@ -289,14 +290,14 @@ func (s *RelayServer) DispatchRecord(ctx context.Context, namespace, op, key str
 		_, err = dispatchProviderOp(withRelayedRecord(ctx, rec), s.stores, s.info, namespace, op, args)
 	}
 	if err != nil {
-		recordSpanError(span, err)
+		telemetry.RecordSpanError(span, err)
 		recordAuditDrop(ctx, stage, relayDropOp(namespace, op))
 		agenthostLog.Warn("relayed audit record failed; record dropped",
 			"namespace", namespace, "op", op, "error", err)
 		return nil
 	}
 	if rec.deferred {
-		recordSpanError(span, errRecordDeferred)
+		telemetry.RecordSpanError(span, errRecordDeferred)
 		agenthostLog.Warn("relayed audit record deferred; the sidecar will send it again",
 			"namespace", namespace, "op", op, "conversation", s.info.ConversationID)
 		return errRecordDeferred

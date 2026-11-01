@@ -570,13 +570,18 @@ export function useConversationDetail(conversationID: string | undefined): Conve
             })
             .catch(() => {})
         }
-        if (event.type === 'deliverable_updated' && event.conversation_id === conversationID) {
-          // A deliverable this conversation produced changed state on GitHub
-          // (the reconciler) or another tab approved/dismissed it. Refetch the
+        if (
+          (event.type === 'deliverable_updated' && event.conversation_id === conversationID) ||
+          event.type === 'conversations_updated'
+        ) {
+          // A deliverable this conversation produced may have changed state:
+          // deliverable_updated names the conversation when the object moved on
+          // GitHub, and a person approving or dismissing one sends only the
+          // org-wide conversations_updated, which names none. Refetch the
           // conversation so its derived approval signal (has_unresolved_deliverables,
-          // counts, pending ids) updates; the lists the station mounts key their
-          // own refetch off that row. The conversation's own status is unchanged,
-          // so no permission-queue drop here.
+          // counts, pending ids) updates. A settled conversation's row is read on
+          // no tick, so these events are what keep it current. The conversation's
+          // own status is unchanged, so no permission-queue drop here.
           apiJSON<Conversation>(`/api/agent/conversations/${conversationID}`)
             .then((data) => {
               if (conversationID === lastConversationIDRef.current) setConversation(data)

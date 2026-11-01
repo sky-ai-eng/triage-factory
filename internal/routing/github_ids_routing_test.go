@@ -39,9 +39,10 @@ func bindGitHubID(t *testing.T, database *sql.DB, userID, login, githubUserID st
 	}
 }
 
-func emitGitHubEvent(router *Router, entityID, eventType, dedupKey string, meta any) {
+func emitGitHubEvent(t *testing.T, router *Router, entityID, eventType, dedupKey string, meta any) {
+	t.Helper()
 	metaJSON, _ := json.Marshal(meta)
-	router.HandleEvent(context.Background(), domain.Event{
+	mustHandle(t, router, domain.Event{
 		EventType:    eventType,
 		EntityID:     &entityID,
 		DedupKey:     dedupKey,
@@ -75,7 +76,7 @@ func TestReviewRequested_RoutesTheReviewerByGitHubID(t *testing.T) {
 	} {
 		entityID := reviewEntity(t, database, "owner/repo#"+c.name)
 		c.meta.Author, c.meta.Repo, c.meta.PRNumber = "carol", "owner/repo", 3
-		emitReviewRequested(router, entityID, c.key, c.meta)
+		emitReviewRequested(t, router, entityID, c.key, c.meta)
 
 		active := activeTasksOfType(t, database, entityID, domain.EventGitHubPRReviewRequested)
 		if len(active) != 1 {
@@ -94,7 +95,7 @@ func TestAuthorCentric_AuthorResolvedByGitHubID(t *testing.T) {
 	seedSystemCIRule(t, database, teamA)
 
 	entityID := reviewEntity(t, database, "owner/repo#authorid")
-	emitGitHubEvent(router, entityID, domain.EventGitHubPRCICheckFailed, "build", events.GitHubPRCICheckFailedMetadata{
+	emitGitHubEvent(t, router, entityID, domain.EventGitHubPRCICheckFailed, "build", events.GitHubPRCICheckFailedMetadata{
 		Author: "aidan-renamed", AuthorID: "583231", CheckName: "build", Repo: "owner/repo", HeadSHA: "abc123",
 	})
 
@@ -115,7 +116,7 @@ func TestReviewRequestClosers_MatchATaskKeyedEitherWay(t *testing.T) {
 	}
 	entityID := reviewEntity(t, database, "owner/repo#either")
 	request := func(key, login, id string) {
-		emitReviewRequested(router, entityID, key, events.GitHubPRReviewRequestedMetadata{
+		emitReviewRequested(t, router, entityID, key, events.GitHubPRReviewRequestedMetadata{
 			Author: "carol", Repo: "owner/repo", PRNumber: 7, RequestedLogin: login, RequestedUserID: id})
 	}
 	request(events.ReviewerDedupKeyUserID("5"), "alice", "5")
@@ -128,11 +129,11 @@ func TestReviewRequestClosers_MatchATaskKeyedEitherWay(t *testing.T) {
 
 	// Alice reviews under a new login, bob under his own now with his id, and
 	// erin's request is removed by her id.
-	emitGitHubEvent(router, entityID, domain.EventGitHubPRReviewApproved, "", events.GitHubPRReviewApprovedMetadata{
+	emitGitHubEvent(t, router, entityID, domain.EventGitHubPRReviewApproved, "", events.GitHubPRReviewApprovedMetadata{
 		Author: "carol", Reviewer: "alice-renamed", ReviewerID: "5", Repo: "owner/repo", PRNumber: 7})
-	emitGitHubEvent(router, entityID, domain.EventGitHubPRReviewCommented, "", events.GitHubPRReviewCommentedMetadata{
+	emitGitHubEvent(t, router, entityID, domain.EventGitHubPRReviewCommented, "", events.GitHubPRReviewCommentedMetadata{
 		Author: "carol", Reviewer: "bob", ReviewerID: "6", Repo: "owner/repo", PRNumber: 7})
-	emitGitHubEvent(router, entityID, domain.EventGitHubPRReviewRequestRemoved, events.ReviewerDedupKeyUserID("8"), events.GitHubPRReviewRequestRemovedMetadata{
+	emitGitHubEvent(t, router, entityID, domain.EventGitHubPRReviewRequestRemoved, events.ReviewerDedupKeyUserID("8"), events.GitHubPRReviewRequestRemovedMetadata{
 		Author: "carol", Repo: "owner/repo", PRNumber: 7, RequestedLogin: "erin", RequestedUserID: "8"})
 
 	active := activeTasksOfType(t, database, entityID, domain.EventGitHubPRReviewRequested)

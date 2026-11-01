@@ -84,6 +84,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/cred/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
+	"github.com/sky-ai-eng/triage-factory/internal/proxy/bindaddr"
 	"github.com/sky-ai-eng/triage-factory/internal/proxy/credmiss"
 )
 
@@ -751,8 +752,8 @@ func (s *Server) Start(addr string) (string, error) {
 		addr = "127.0.0.1:0"
 	}
 	if !s.cfg.AllowNonLoopback {
-		if err := assertLoopback(addr); err != nil {
-			return "", err
+		if err := bindaddr.RequireLoopback(addr); err != nil {
+			return "", fmt.Errorf("gitproxy: %w", err)
 		}
 	}
 	ln, err := net.Listen("tcp", addr)
@@ -825,38 +826,4 @@ func (s *Server) timeNow() time.Time {
 		return s.now()
 	}
 	return time.Now()
-}
-
-// assertLoopback returns nil iff addr binds to a loopback interface.
-// Hostnames resolve via the OS resolver; every resolved IP must be
-// loopback for the check to pass. The empty-host case (":NNNN" form
-// binds to all interfaces) is rejected explicitly.
-//
-// Used by Start to enforce the safety default of loopback-only when
-// AllowNonLoopback is false. The veth-IP sandbox case opts out.
-func assertLoopback(addr string) error {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return fmt.Errorf("gitproxy: parse bind address %q: %w", addr, err)
-	}
-	if host == "" || host == "0.0.0.0" || host == "::" {
-		return fmt.Errorf("gitproxy: bind address %q binds to all interfaces — set AllowNonLoopback=true to confirm intent", addr)
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		if !ip.IsLoopback() {
-			return fmt.Errorf("gitproxy: bind address %q is not loopback — set AllowNonLoopback=true to confirm intent", addr)
-		}
-		return nil
-	}
-	addrs, err := net.LookupHost(host)
-	if err != nil {
-		return fmt.Errorf("gitproxy: resolve %q: %w", host, err)
-	}
-	for _, a := range addrs {
-		ip := net.ParseIP(a)
-		if ip == nil || !ip.IsLoopback() {
-			return fmt.Errorf("gitproxy: bind host %q resolves to %s (not loopback) — set AllowNonLoopback=true to confirm intent", host, a)
-		}
-	}
-	return nil
 }

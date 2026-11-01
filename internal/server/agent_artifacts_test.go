@@ -8,6 +8,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // artifactTestScope is the GitHub host seedSteerConversation's entity lives on.
@@ -62,7 +63,7 @@ func TestHandleAgentArtifacts_MatchesDeliverables(t *testing.T) {
 	seedConversationAction(t, s, conversationID, push)
 
 	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/"+conversationID+"/artifacts/list", map[string]any{})
-	page := decodeList[map[string]any](t, rec)
+	page := httpxtest.DecodeList[map[string]any](t, rec)
 	if len(page.Items) != 4 || page.Total() != 4 {
 		t.Fatalf("returned %d artifacts (total %d), want 4: %s", len(page.Items), page.Total(), rec.Body.String())
 	}
@@ -154,7 +155,7 @@ func TestHandleAgentArtifacts_Empty(t *testing.T) {
 	s := newTestServer(t)
 	conversationID := seedSteerConversation(t, s.db, "artnone", dbtest.SeedConcluded)
 	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/"+conversationID+"/artifacts/list", map[string]any{})
-	if page := decodeList[map[string]any](t, rec); len(page.Items) != 0 || page.Total() != 0 {
+	if page := httpxtest.DecodeList[map[string]any](t, rec); len(page.Items) != 0 || page.Total() != 0 {
 		t.Errorf("artifacts = %v (total %d), want an empty page", page.Items, page.Total())
 	}
 }
@@ -177,7 +178,7 @@ func TestHandleAgentActions_ObjectAndRefusedFilters(t *testing.T) {
 
 	list := func(body map[string]any) []map[string]any {
 		t.Helper()
-		page := decodeList[map[string]any](t, doJSON(t, s, http.MethodPost,
+		page := httpxtest.DecodeList[map[string]any](t, doJSON(t, s, http.MethodPost,
 			"/api/agent/conversations/"+conversationID+"/actions/list", body))
 		if page.Total() != len(page.Items) {
 			t.Fatalf("total %d for %d items", page.Total(), len(page.Items))
@@ -242,7 +243,8 @@ func TestHandleAgentActions_StrictBody(t *testing.T) {
 
 // TestConversationResponse_ArtifactCounts pins artifact_count and
 // artifact_counts on the single read and the batched list: one per object, TF's
-// own rows not counted, and {} for a conversation that changed nothing.
+// own rows not counted, and {} for a conversation that changed nothing; and
+// action_count beside them, every ledger row of the conversation.
 func TestConversationResponse_ArtifactCounts(t *testing.T) {
 	s := newTestServer(t)
 	busy := seedSteerConversation(t, s.db, "artcnt", dbtest.SeedConcluded)
@@ -265,8 +267,11 @@ func TestConversationResponse_ArtifactCounts(t *testing.T) {
 	other.RepositoryID, other.PerformedBy = push.RepositoryID, domain.PerformedBySystem
 	seedConversationAction(t, s, busy, other)
 
-	check := func(name string, m map[string]any, total float64, byKind map[string]float64) {
+	check := func(name string, m map[string]any, total, actions float64, byKind map[string]float64) {
 		t.Helper()
+		if m["action_count"] != actions {
+			t.Errorf("%s action_count = %v, want %v", name, m["action_count"], actions)
+		}
 		if m["artifact_count"] != total {
 			t.Errorf("%s artifact_count = %v, want %v", name, m["artifact_count"], total)
 		}
@@ -282,14 +287,14 @@ func TestConversationResponse_ArtifactCounts(t *testing.T) {
 		}
 	}
 	want := map[string]float64{domain.ObjectKindBranch: 1, domain.ObjectKindPullRequest: 1}
-	check("GET busy", readConversation(t, s, busy), 2, want)
-	check("GET idle", readConversation(t, s, idle), 0, map[string]float64{})
+	check("GET busy", readConversation(t, s, busy), 2, 5, want)
+	check("GET idle", readConversation(t, s, idle), 0, 0, map[string]float64{})
 
 	convs := listConversations(t, s, fixtureUUID("t_artcnt"))
 	if len(convs) != 1 {
 		t.Fatalf("listed %d conversations, want 1", len(convs))
 	}
-	check("list busy", convs[0], 2, want)
+	check("list busy", convs[0], 2, 5, want)
 }
 
 // wireSpelling is raw's object_id on the wire, as a response renders it.

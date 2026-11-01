@@ -14,6 +14,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/execflags"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/execout"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
@@ -23,7 +24,7 @@ import (
 // lookupConversation is the per-subcommand entry point for routing-sensitive
 // state access. The result carries OrgID / UserID / ConversationID + the
 // IsEventTriggered discriminator. Errors surface via the same
-// exitErr/os.Exit shape the rest of the file uses so the agent sees a
+// execout.ExitErr/os.Exit shape the rest of the file uses so the agent sees a
 // clear message and the subcommand exits non-zero.
 //
 // On the host CLI this resolves identity from TRIAGE_FACTORY_CONVERSATION_ID at
@@ -34,7 +35,7 @@ import (
 func lookupConversation(host agenthost.Client) agenthost.ConversationInfo {
 	info, err := host.LookupConversation(context.Background())
 	if err != nil {
-		exitErr(err.Error())
+		execout.ExitErr(err.Error())
 	}
 	return info
 }
@@ -83,7 +84,7 @@ var prHelp = map[string]string{
 
 func handlePR(ctx context.Context, host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: " + prog.Prefix() + " gh pr <action> [flags]")
+		execout.ExitErr("usage: " + prog.Prefix() + " gh pr <action> [flags]")
 	}
 
 	action := args[0]
@@ -144,7 +145,7 @@ func handlePR(ctx context.Context, host agenthost.Client, args []string) {
 	case "comment-delete":
 		prCommentDelete(ctx, api, host, flags)
 	default:
-		exitErr(unknownVerbMessage("pr action", "pr actions", action, prActions,
+		execout.ExitErr(unknownVerbMessage("pr action", "pr actions", action, prActions,
 			prog.Prefix()+" gh pr --help"))
 	}
 }
@@ -165,8 +166,8 @@ func prView(ctx context.Context, client ghAPI, host agenthost.Client, args []str
 	owner, repo, number := parseRepoAndNumber(ctx, host, args)
 	verbose := hasFlag(args, "-v") || hasFlag(args, "--verbose")
 	pr, err := client.GetPR(ctx, owner, repo, number, verbose)
-	exitOnErr(err)
-	printJSON(pr)
+	execout.ExitOnErr(err)
+	execout.PrintJSON(pr)
 }
 
 // diffManifest is the JSON envelope `pr diff` prints to stdout (and writes
@@ -269,11 +270,11 @@ func prDiff(ctx context.Context, host agenthost.Client, args []string) {
 	}
 
 	root, err := runRoot()
-	exitOnErr(err)
+	execout.ExitOnErr(err)
 	checkout := prCheckout(ctx, host, owner, repo, number)
 	manifest, err := persistPRDiff(ctx, client, checkout, root, owner, repo, number)
-	exitOnErr(err)
-	printJSON(manifest)
+	execout.ExitOnErr(err)
+	execout.PrintJSON(manifest)
 }
 
 // inlineDiff returns the diff text for the --file / --stdout escape hatches.
@@ -286,7 +287,7 @@ func inlineDiff(ctx context.Context, client ghAPI, checkout localCheckout, owner
 			if base, ok := resolveDiffBase(checkout.dir, pr.BaseSHA, pr.BaseRef); ok {
 				if diff, err := localUnifiedDiff(checkout.dir, base, file); err == nil {
 					if file != "" && strings.TrimSpace(diff) == "" {
-						exitErr(fmt.Sprintf("file %q is not part of PR #%d's diff", file, number))
+						execout.ExitErr(fmt.Sprintf("file %q is not part of PR #%d's diff", file, number))
 					}
 					return diff
 				}
@@ -298,14 +299,14 @@ func inlineDiff(ctx context.Context, client ghAPI, checkout localCheckout, owner
 	diff, err := client.GetPRDiff(ctx, owner, repo, number, file)
 	if err != nil {
 		if !ghclient.IsHTTP406(err) {
-			exitOnErr(err)
+			execout.ExitOnErr(err)
 		}
 		files, ferr := client.GetPRFiles(ctx, owner, repo, number)
-		exitOnErr(ferr)
+		execout.ExitOnErr(ferr)
 		if file != "" {
 			diff = ghclient.SingleFileDiff(files, file)
 			if diff == "" {
-				exitErr(fmt.Sprintf("file %q is not part of PR #%d's diff", file, number))
+				execout.ExitErr(fmt.Sprintf("file %q is not part of PR #%d's diff", file, number))
 			}
 		} else {
 			diff = ghclient.ReassemblePRDiff(files)
@@ -540,13 +541,13 @@ func buildPRFilesResult(files []ghclient.PRFile) prFilesResult {
 func prFiles(ctx context.Context, client ghAPI, host agenthost.Client, args []string) {
 	owner, repo, number := parseRepoAndNumber(ctx, host, args)
 	files, err := client.GetPRFiles(ctx, owner, repo, number)
-	exitOnErr(err)
-	printJSON(buildPRFilesResult(files))
+	execout.ExitOnErr(err)
+	execout.PrintJSON(buildPRFilesResult(files))
 }
 
 func prThreadView(ctx context.Context, client ghAPI, host agenthost.Client, args []string) {
 	if len(args) < 2 {
-		exitErr("usage: gh pr thread-view <pr_number> <comment_id> [--page N]")
+		execout.ExitErr("usage: gh pr thread-view <pr_number> <comment_id> [--page N]")
 	}
 	// Resolve owner/repo from the FULL args so an explicit --repo is honored
 	// (resolveRepo scans for it); firstPositional already skips flags, so the
@@ -559,18 +560,18 @@ func prThreadView(ctx context.Context, client ghAPI, host agenthost.Client, args
 		page = mustInt(v, "page")
 	}
 	thread, err := client.GetCommentThread(ctx, owner, repo, commentID, page)
-	exitOnErr(err)
+	execout.ExitOnErr(err)
 	// The PR is the addressed entity; the comment thread is an attribute. The
 	// ghAPI seam (a mirror of *github.Client, which fetches a thread by comment
 	// id) can't carry the PR number, so the touch is recorded here from the CLI
 	// positional the agent supplied, after the read succeeds. Best-effort.
 	host.RecordReadTouch(ctx, domain.ProviderGitHub, domain.PullRequestTarget(owner+"/"+repo, number), "")
-	printJSON(thread)
+	execout.PrintJSON(thread)
 }
 
 func prReviewView(ctx context.Context, client ghAPI, host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: gh pr review-view <review_id> --pr <pr_number> [-v]")
+		execout.ExitErr("usage: gh pr review-view <review_id> --pr <pr_number> [-v]")
 	}
 	reviewID := mustInt(args[0], "review_id")
 	// Explicit --pr-missing message: the most common mistake here is
@@ -581,7 +582,7 @@ func prReviewView(ctx context.Context, client ghAPI, host agenthost.Client, args
 	// shape on the next attempt.
 	prFlag := flagVal(args, "--pr")
 	if prFlag == "" {
-		exitErr(fmt.Sprintf(
+		execout.ExitErr(fmt.Sprintf(
 			"review-view requires --pr <pr_number>. The positional argument %d is the review_id, not the PR number — they are different ids (review ids come from `gh pr view <pr_number> -v` -> reviews[].id). Canonical shape: gh pr review-view %d --pr <pr_number> [-v]",
 			reviewID, reviewID,
 		))
@@ -590,13 +591,13 @@ func prReviewView(ctx context.Context, client ghAPI, host agenthost.Client, args
 	prNumber := mustInt(prFlag, "pr_number")
 	verbose := hasFlag(args, "-v") || hasFlag(args, "--verbose")
 	detail, err := client.GetReviewDetail(ctx, owner, repo, prNumber, reviewID, verbose)
-	exitOnErr(err)
-	printJSON(detail)
+	execout.ExitOnErr(err)
+	execout.PrintJSON(detail)
 }
 
 func prReviewDismiss(ctx context.Context, client ghAPI, host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: gh pr review-dismiss <review_id> --pr <number> --body <reason>")
+		execout.ExitErr("usage: gh pr review-dismiss <review_id> --pr <number> --body <reason>")
 	}
 	reviewID := mustInt(args[0], "review_id")
 	owner, repo := ownerRepo(ctx, host, args)
@@ -606,8 +607,8 @@ func prReviewDismiss(ctx context.Context, client ghAPI, host agenthost.Client, a
 		body = "Dismissed"
 	}
 	err := client.DismissReview(ctx, owner, repo, prNumber, reviewID, body)
-	exitOnErr(err)
-	printJSON(map[string]any{"ok": true, "review_id": reviewID, "status": "dismissed"})
+	execout.ExitOnErr(err)
+	execout.PrintJSON(map[string]any{"ok": true, "review_id": reviewID, "status": "dismissed"})
 }
 
 // --- Review lifecycle (local staging) ---
@@ -641,9 +642,9 @@ func prStartReview(ctx context.Context, client ghAPI, host agenthost.Client, arg
 		// is the draft's preserved head SHA, echoed so the reset output matches the
 		// shape a normal start-review prints.
 		handle, commitSHA, err := host.ResetReviewDraft(ctx, owner, repo, number)
-		exitOnErr(err)
+		execout.ExitOnErr(err)
 		if handle != "" {
-			printJSON(map[string]any{
+			execout.PrintJSON(map[string]any{
 				"review_id":  handle,
 				"pr_number":  number,
 				"commit_sha": commitSHA,
@@ -656,12 +657,12 @@ func prStartReview(ctx context.Context, client ghAPI, host agenthost.Client, arg
 
 	// Read the head SHA so the review pins to the reviewed commit at submit.
 	pr, err := client.GetPR(ctx, owner, repo, number, false)
-	exitOnErr(err)
+	execout.ExitOnErr(err)
 	// Fail early on a missing head SHA: it's the commit the atomic submit pins to,
 	// so staging it empty just defers an opaque GitHub 422 (surfaced as a 502) to
 	// approval time. Bail here with an actionable message instead.
 	if pr.HeadSHA == "" {
-		exitErr(fmt.Sprintf("PR #%d has no head commit SHA — cannot start a review (push a commit to the PR branch first)", number))
+		execout.ExitErr(fmt.Sprintf("PR #%d has no head commit SHA — cannot start a review (push a commit to the PR branch first)", number))
 	}
 
 	// Record the local review-draft deliverable through the host. No GitHub write,
@@ -669,9 +670,9 @@ func prStartReview(ctx context.Context, client ghAPI, host agenthost.Client, arg
 	// PR never share a row. Seed no inline comments (the agent adds them via
 	// add-review-comment).
 	reviewID, err := host.GithubCreatePendingReview(ctx, owner, repo, number, pr.HeadSHA, nil)
-	exitOnErr(err)
+	execout.ExitOnErr(err)
 
-	printJSON(map[string]any{
+	execout.PrintJSON(map[string]any{
 		"review_id":  reviewID,
 		"pr_number":  number,
 		"commit_sha": pr.HeadSHA,
@@ -695,7 +696,7 @@ func prStartReview(ctx context.Context, client ghAPI, host agenthost.Client, arg
 // the chip).
 func prAddReviewComment(ctx context.Context, host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: gh pr add-review-comment <review_id> --file <path> --line <N> (--body <text> | --body-file <path>) [--start-line <N>] [--severity <blocker|major|minor|clean>]")
+		execout.ExitErr("usage: gh pr add-review-comment <review_id> --file <path> --line <N> (--body <text> | --body-file <path>) [--start-line <N>] [--severity <blocker|major|minor|clean>]")
 	}
 	reviewID := args[0]
 	file := flagVal(args, "--file")
@@ -709,7 +710,7 @@ func prAddReviewComment(ctx context.Context, host agenthost.Client, args []strin
 	// without a fragile heredoc. The blueprint review aggregator relies on this
 	// to relay each reviewer's verbatim body straight from its findings file.
 	if body != "" && bodyFile != "" {
-		exitErr("--body and --body-file are mutually exclusive; pass one or the other")
+		execout.ExitErr("--body and --body-file are mutually exclusive; pass one or the other")
 	}
 	if bodyFile != "" {
 		var data []byte
@@ -720,13 +721,13 @@ func prAddReviewComment(ctx context.Context, host agenthost.Client, args []strin
 			data, err = os.ReadFile(bodyFile)
 		}
 		if err != nil {
-			exitErr("read --body-file: " + err.Error())
+			execout.ExitErr("read --body-file: " + err.Error())
 		}
 		body = string(data)
 	}
 
 	if file == "" || body == "" {
-		exitErr("--file and --body (or --body-file) are required")
+		execout.ExitErr("--file and --body (or --body-file) are required")
 	}
 
 	// --severity tags the finding's level; baked into the comment body as a
@@ -735,7 +736,7 @@ func prAddReviewComment(ctx context.Context, host agenthost.Client, args []strin
 	// just get an un-badged comment.
 	severity, err := domain.NormalizeSeverity(flagVal(args, "--severity"))
 	if err != nil {
-		exitErr(err.Error())
+		execout.ExitErr(err.Error())
 	}
 
 	var startLine *int
@@ -746,16 +747,16 @@ func prAddReviewComment(ctx context.Context, host agenthost.Client, args []strin
 
 	_ = lookupConversation(host)
 	owner, repo, anchorSHA, err := reviewCommentTarget(ctx, host, reviewID, args)
-	exitOnErr(err)
+	execout.ExitOnErr(err)
 
 	// Bake the badge in, then stage onto this run's review draft. The host resolves
 	// the run's review deliverable, validates the range against the anchor commit's
 	// diff, and appends the staged comment — returning a TF-local comment id.
 	badgedBody := domain.SeverityBadgeMarkdown(severity) + body
 	commentID, err := host.GithubAddPendingReviewComment(ctx, owner, repo, reviewID, file, badgedBody, line, startLine, anchorSHA)
-	exitOnErr(err)
+	execout.ExitOnErr(err)
 
-	printJSON(map[string]any{
+	execout.PrintJSON(map[string]any{
 		"comment_id": commentID,
 		"review_id":  reviewID,
 		"severity":   severity,
@@ -823,7 +824,7 @@ func reviewCommentTarget(ctx context.Context, host reviewHost, reviewID string, 
 // sentinel).
 func prFinalizeReview(ctx context.Context, host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: gh pr finalize-review <review_id> --event <approve|comment|request_changes> (--body <text> | --body-file <path>)")
+		execout.ExitErr("usage: gh pr finalize-review <review_id> --event <approve|comment|request_changes> (--body <text> | --body-file <path>)")
 	}
 	reviewID := args[0]
 	event := flagVal(args, "--event")
@@ -834,7 +835,7 @@ func prFinalizeReview(ctx context.Context, host agenthost.Client, args []string)
 	// body from a file (or "-" for stdin), so the blueprint review aggregator
 	// can assemble a multi-line summary without shell escaping.
 	if body != "" && bodyFile != "" {
-		exitErr("--body and --body-file are mutually exclusive; pass one or the other")
+		execout.ExitErr("--body and --body-file are mutually exclusive; pass one or the other")
 	}
 	if bodyFile != "" {
 		var data []byte
@@ -845,13 +846,13 @@ func prFinalizeReview(ctx context.Context, host agenthost.Client, args []string)
 			data, err = os.ReadFile(bodyFile)
 		}
 		if err != nil {
-			exitErr("read --body-file: " + err.Error())
+			execout.ExitErr("read --body-file: " + err.Error())
 		}
 		body = string(data)
 	}
 
 	if event == "" {
-		exitErr("--event is required (approve, comment, request_changes)")
+		execout.ExitErr("--event is required (approve, comment, request_changes)")
 	}
 
 	eventMap := map[string]string{
@@ -872,18 +873,18 @@ func prFinalizeReview(ctx context.Context, host agenthost.Client, args []string)
 	// comments are known.
 	res, err := host.FinalizeReviewDraft(ctx, reviewID, ghEvent, body)
 	if errors.Is(err, agenthost.ErrReviewAlreadyFinalized) {
-		exitErr(fmt.Sprintf(
+		execout.ExitErr(fmt.Sprintf(
 			"review %s has already been finalized. Do not call finalize-review again — your work on this review is complete. Finish the run by writing %s and returning your completion JSON.",
 			reviewID, agentMemoryFile(),
 		))
 	}
-	exitOnErr(err)
+	execout.ExitOnErr(err)
 
 	// Two shapes, one per outcome. Both carry next_step spelling out the same
 	// wrap-up, so an agent that isn't reading the prompt closely still gets the
 	// "your review work is done" signal directly from the tool result.
 	if res.Posted {
-		printJSON(map[string]any{
+		execout.PrintJSON(map[string]any{
 			"status":    "submitted",
 			"review_id": reviewID,
 			"event":     ghEvent,
@@ -892,7 +893,7 @@ func prFinalizeReview(ctx context.Context, host agenthost.Client, args []string)
 		})
 		return
 	}
-	printJSON(map[string]any{
+	execout.PrintJSON(map[string]any{
 		"status":    "drafted_awaiting_approval",
 		"review_id": reviewID,
 		"event":     ghEvent,
@@ -919,17 +920,17 @@ func prCreate(ctx context.Context, client ghAPI, host agenthost.Client, args []s
 	head := flagVal(args, "--head")
 
 	if title == "" {
-		exitErr("usage: gh pr create --title <T> (--body <B> | --body-file <path>) --base <branch> [--head <branch>] [--repo owner/repo]\n--title is required")
+		execout.ExitErr("usage: gh pr create --title <T> (--body <B> | --body-file <path>) --base <branch> [--head <branch>] [--repo owner/repo]\n--title is required")
 	}
 	if base == "" {
-		exitErr("--base is required (the branch to merge into, e.g. main)")
+		execout.ExitErr("--base is required (the branch to merge into, e.g. main)")
 	}
 
 	// --body and --body-file are mutually exclusive: with both set,
 	// the agent's intent is ambiguous and silently picking one risks
 	// dropping the longer/more-recent draft. Force a clean choice.
 	if body != "" && bodyFile != "" {
-		exitErr("--body and --body-file are mutually exclusive; pass one or the other")
+		execout.ExitErr("--body and --body-file are mutually exclusive; pass one or the other")
 	}
 	if bodyFile != "" {
 		// "-" means stdin, matching gh's convention. The file path is
@@ -943,7 +944,7 @@ func prCreate(ctx context.Context, client ghAPI, host agenthost.Client, args []s
 			data, err = os.ReadFile(bodyFile)
 		}
 		if err != nil {
-			exitErr("read --body-file: " + err.Error())
+			execout.ExitErr("read --body-file: " + err.Error())
 		}
 		body = string(data)
 	}
@@ -964,16 +965,16 @@ func prCreate(ctx context.Context, client ghAPI, host agenthost.Client, args []s
 	// If --head wasn't supplied, derive from the current branch. The
 	// agent's cwd inside a materialized worktree is `feature/<KEY>`
 	// after `cd "$(triagefactory exec workspace add ...)"` so this
-	// resolves cleanly. exitErr if we can't determine — would otherwise
+	// resolves cleanly. execout.ExitErr if we can't determine — would otherwise
 	// silently submit the wrong branch to GitHub.
 	if head == "" {
 		out, err := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD").Output()
 		if err != nil {
-			exitErr("could not determine current branch via git rev-parse; pass --head <branch> explicitly. err: " + err.Error())
+			execout.ExitErr("could not determine current branch via git rev-parse; pass --head <branch> explicitly. err: " + err.Error())
 		}
 		head = strings.TrimSpace(string(out))
 		if head == "" || head == "HEAD" {
-			exitErr("current branch is detached or empty; pass --head <branch> explicitly")
+			execout.ExitErr("current branch is detached or empty; pass --head <branch> explicitly")
 		}
 	}
 
@@ -1000,7 +1001,7 @@ func prCreate(ctx context.Context, client ghAPI, host agenthost.Client, args []s
 		var lsStderr strings.Builder
 		lsRemote.Stderr = &lsStderr
 		if err := lsRemote.Run(); err != nil {
-			exitErr(fmt.Sprintf(
+			execout.ExitErr(fmt.Sprintf(
 				"head branch '%s' is not on origin. Run `git push origin %s` first, then retry `pr create`. `pr create` requires the head branch to exist on the upstream — without it the diff cannot be rendered for human approval. (git ls-remote stderr: %s)",
 				head, head, strings.TrimSpace(lsStderr.String()),
 			))
@@ -1011,9 +1012,9 @@ func prCreate(ctx context.Context, client ghAPI, host agenthost.Client, args []s
 	// pull_request deliverable at the host choke point (LocalClient.GithubCreatePR),
 	// so it's discarded here.
 	number, htmlURL, _, err := client.CreatePR(ctx, owner, repo, head, base, title, body, true)
-	exitOnErr(err)
+	execout.ExitOnErr(err)
 
-	printJSON(map[string]any{
+	execout.PrintJSON(map[string]any{
 		"status": "created",
 		"number": number,
 		"url":    htmlURL,
@@ -1027,42 +1028,42 @@ func prAddComment(ctx context.Context, client ghAPI, host agenthost.Client, args
 	owner, repo, number := parseRepoAndNumber(ctx, host, args)
 	body := flagVal(args, "--body")
 	if body == "" {
-		exitErr("--body is required")
+		execout.ExitErr("--body is required")
 	}
 	commentID, err := client.AddComment(ctx, owner, repo, number, body)
-	exitOnErr(err)
-	printJSON(map[string]any{"comment_id": commentID})
+	execout.ExitOnErr(err)
+	execout.PrintJSON(map[string]any{"comment_id": commentID})
 }
 
 func prCommentReply(ctx context.Context, client ghAPI, host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: gh pr comment-reply <comment_id> --body <text> --pr <number>")
+		execout.ExitErr("usage: gh pr comment-reply <comment_id> --body <text> --pr <number>")
 	}
 	commentID := mustInt(args[0], "comment_id")
 	owner, repo := ownerRepo(ctx, host, args)
 	prNumber := mustInt(flagVal(args, "--pr"), "pr_number")
 	body := flagVal(args, "--body")
 	if body == "" {
-		exitErr("--body is required")
+		execout.ExitErr("--body is required")
 	}
 	replyID, err := client.ReplyToComment(ctx, owner, repo, prNumber, commentID, body)
-	exitOnErr(err)
-	printJSON(map[string]any{"reply_id": replyID})
+	execout.ExitOnErr(err)
+	execout.PrintJSON(map[string]any{"reply_id": replyID})
 }
 
 func prCommentReact(ctx context.Context, client ghAPI, host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: gh pr comment-react <comment_id> --emoji <emoji>")
+		execout.ExitErr("usage: gh pr comment-react <comment_id> --emoji <emoji>")
 	}
 	commentID := mustInt(args[0], "comment_id")
 	owner, repo := ownerRepo(ctx, host, args)
 	emoji := flagVal(args, "--emoji")
 	if emoji == "" {
-		exitErr("--emoji is required (+1, -1, laugh, confused, heart, hooray, rocket, eyes)")
+		execout.ExitErr("--emoji is required (+1, -1, laugh, confused, heart, hooray, rocket, eyes)")
 	}
 	err := client.ReactToComment(ctx, owner, repo, commentID, emoji)
-	exitOnErr(err)
-	printJSON(map[string]any{"ok": true})
+	execout.ExitOnErr(err)
+	execout.PrintJSON(map[string]any{"ok": true})
 }
 
 // prCommentUpdate edits a GitHub comment, polymorphic on the id space the agent
@@ -1080,19 +1081,19 @@ func prCommentReact(ctx context.Context, client ghAPI, host agenthost.Client, ar
 // the discriminator. One verb serves both adds.
 func prCommentUpdate(ctx context.Context, client ghAPI, host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: gh pr comment-update <comment_id> --body <text> [--severity <blocker|major|minor|clean>]")
+		execout.ExitErr("usage: gh pr comment-update <comment_id> --body <text> [--severity <blocker|major|minor|clean>]")
 	}
 	body := flagVal(args, "--body")
 	if body == "" {
-		exitErr("--body is required")
+		execout.ExitErr("--body is required")
 	}
 
 	// Numeric → live GitHub comment (REST path, unchanged). --severity is
 	// meaningless for a submitted comment (no chip), so it's ignored there.
 	if id, err := strconv.Atoi(args[0]); err == nil {
 		owner, repo := ownerRepo(ctx, host, args)
-		exitOnErr(client.UpdateComment(ctx, owner, repo, id, body))
-		printJSON(map[string]any{"ok": true})
+		execout.ExitOnErr(client.UpdateComment(ctx, owner, repo, id, body))
+		execout.PrintJSON(map[string]any{"ok": true})
 		return
 	}
 
@@ -1105,13 +1106,13 @@ func prCommentUpdate(ctx context.Context, client ghAPI, host agenthost.Client, a
 	// exactly that badge, omitted → no badge (chip dropped).
 	severity, err := domain.NormalizeSeverity(flagVal(args, "--severity"))
 	if err != nil {
-		exitErr(err.Error())
+		execout.ExitErr(err.Error())
 	}
 	_ = lookupConversation(host)
 	_, unbadged := domain.ParseSeverityBadge(body)
 	badgedBody := domain.SeverityBadgeMarkdown(severity) + unbadged
-	exitOnErr(host.UpdateStagedReviewComment(ctx, args[0], badgedBody))
-	printJSON(map[string]any{"ok": true, "severity": severity})
+	execout.ExitOnErr(host.UpdateStagedReviewComment(ctx, args[0], badgedBody))
+	execout.PrintJSON(map[string]any{"ok": true, "severity": severity})
 }
 
 // prCommentDelete deletes a GitHub comment, polymorphic on the id space exactly
@@ -1120,19 +1121,19 @@ func prCommentUpdate(ctx context.Context, client ghAPI, host agenthost.Client, a
 // host (no GitHub call until the review submits).
 func prCommentDelete(ctx context.Context, client ghAPI, host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: gh pr comment-delete <comment_id>")
+		execout.ExitErr("usage: gh pr comment-delete <comment_id>")
 	}
 
 	if id, err := strconv.Atoi(args[0]); err == nil {
 		owner, repo := ownerRepo(ctx, host, args)
-		exitOnErr(client.DeleteComment(ctx, owner, repo, id))
-		printJSON(map[string]any{"ok": true})
+		execout.ExitOnErr(client.DeleteComment(ctx, owner, repo, id))
+		execout.PrintJSON(map[string]any{"ok": true})
 		return
 	}
 
 	_ = lookupConversation(host)
-	exitOnErr(host.DeleteStagedReviewComment(ctx, args[0]))
-	printJSON(map[string]any{"ok": true})
+	execout.ExitOnErr(host.DeleteStagedReviewComment(ctx, args[0]))
+	execout.PrintJSON(map[string]any{"ok": true})
 }
 
 // --- argument parsing helpers ---
@@ -1142,7 +1143,7 @@ func parseRepoAndNumber(ctx context.Context, host runCheckouts, args []string) (
 	// Find first positional arg (not a flag or flag value)
 	num := firstPositional(args)
 	if num == "" {
-		exitErr("PR number is required")
+		execout.ExitErr("PR number is required")
 	}
 	number := mustInt(num, "pr_number")
 	return owner, repo, number
@@ -1179,7 +1180,7 @@ func firstPositional(args []string) string {
 func ownerRepo(ctx context.Context, host runCheckouts, args []string) (string, string) {
 	owner, repo, err := resolveRepo(ctx, host, args)
 	if err != nil {
-		exitErr(err.Error())
+		execout.ExitErr(err.Error())
 	}
 	return owner, repo
 }
@@ -1204,31 +1205,13 @@ func flagVal(args []string, flag string) string {
 
 func mustInt(s, name string) int {
 	if s == "" {
-		exitErr(name + " is required")
+		execout.ExitErr(name + " is required")
 	}
 	v, err := strconv.Atoi(s)
 	if err != nil {
-		exitErr(fmt.Sprintf("invalid %s: %s", name, s))
+		execout.ExitErr(fmt.Sprintf("invalid %s: %s", name, s))
 	}
 	return v
-}
-
-func printJSON(v any) {
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	enc.Encode(v)
-}
-
-func exitOnErr(err error) {
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-}
-
-func exitErr(msg string) {
-	fmt.Fprintln(os.Stderr, msg)
-	os.Exit(1)
 }
 
 // claudeCodeCitationFragment matches the citation Claude Code

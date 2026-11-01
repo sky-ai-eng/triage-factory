@@ -35,7 +35,17 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/avatars"
+	"github.com/sky-ai-eng/triage-factory/internal/server/blueprints"
+	"github.com/sky-ai-eng/triage-factory/internal/server/deliverables"
+	"github.com/sky-ai-eng/triage-factory/internal/server/factory"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/marketplace"
+	"github.com/sky-ai-eng/triage-factory/internal/server/models"
+	"github.com/sky-ai-eng/triage-factory/internal/server/prompts"
+	"github.com/sky-ai-eng/triage-factory/internal/server/teams"
+	"github.com/sky-ai-eng/triage-factory/internal/server/usage"
+	"github.com/sky-ai-eng/triage-factory/internal/server/work"
 	"github.com/sky-ai-eng/triage-factory/internal/wsevent/knowledgeevent"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -125,7 +135,7 @@ type Server struct {
 	// credentials can invoke a given model. Wired via SetModelProber after
 	// construction; nil in local mode, where nothing probes and the test
 	// routes say the deployment cannot answer.
-	modelProber modelProber
+	modelProber models.Prober
 	// fleetQueue backs the GET /api/fleet/queue view: per-org
 	// conversation-queue shares (active/queued + cap). Satisfied by the
 	// ConversationQueue store; a narrow interface so the handler test can
@@ -698,6 +708,11 @@ func (s *Server) api(pattern string, h http.HandlerFunc) {
 	s.mux.mount(pattern, mountAPI, s.withSession(h))
 }
 
+// mounts hands a handler subpackage the two mounts above.
+func (s *Server) mounts() httpx.Mounts {
+	return httpx.Mounts{API: s.api, APIMutating: s.apiMutating}
+}
+
 // apiMutating mounts a state-changing /api/* route through both the
 // CSRF same-origin check (outer) and withSession (inner). Use for
 // POST/PUT/PATCH/DELETE — anything that changes server-side state when
@@ -877,13 +892,12 @@ func (s *Server) routes() {
 	s.registerSettingsRoutes()
 	s.registerNotificationRoutes()
 	s.registerOrgRoutes()
-	s.registerTeamRoutes()
+	s.registerTeamActivityRoutes()
+	s.registerTeamPRRoutes()
 	s.registerTrackedSetRoutes()
 	s.registerTeamKnowledgeRoutes()
 	s.registerTeamMemberRoutes()
 	s.registerOrgMemberRoutes()
-	s.registerUsageRoutes()
-	s.registerAvatarRoutes()
 	s.registerInviteRoutes()
 	s.registerTaskRoutes()
 	s.registerAgentRoutes()
@@ -903,16 +917,32 @@ func (s *Server) routes() {
 	s.registerJiraRoutes()
 	s.registerLinearRoutes()
 	s.registerStockRoutes()
-	s.registerDeliverableRoutes()
-	s.registerFactoryRoutes()
-	s.registerPromptRoutes()
 	s.registerEventHandlerRoutes()
-	s.registerBlueprintRoutes()
-	s.registerMarketplaceRoutes()
 	s.registerGitHubRoutes()
 	s.registerSourceRoutes()
-	s.registerWorkRoutes()
-	s.registerModelRoutes()
+
+	// The domains that live in their own subpackages register through the
+	// same two mounts, handed over as httpx.Mounts.
+	m := s.mounts()
+	spawner := func() *delegate.Spawner { return s.spawner }
+	avatars.New(s.tx).Register(m)
+	blueprints.New(s.tx, s.az, spawner).Register(m)
+	deliverables.New(s.tx, s.ws, s.ghResolver, spawner,
+		func() *reconcile.Reconciler { return s.reconciler },
+		func() string {
+			if s.deployCfg == nil {
+				return ""
+			}
+			return s.deployCfg.publicURL
+		},
+	).Register(m)
+	factory.New(s.tx, func(t domain.Task) any { return taskToJSON(t) }).Register(m)
+	marketplace.New(s.tx, s.az).Register(m)
+	models.New(s.az, s.tx, func() models.Prober { return s.modelProber }).Register(m)
+	prompts.New(s.db, s.tx, s.az).Register(m)
+	teams.New(s.tx, s.az, s.allStores, spawner, s.kickMemoryOwed).Register(m)
+	usage.New(s.tx, s.az, s.allStores.ConversationQueue).Register(m)
+	work.New(s.az, s.allStores.WorkKinds).Register(m)
 
 	// SSO (connection / domains / break-glass admin surface, the verify-
 	// before-enforce test-start, and the identifier-first discovery probe) is
@@ -1160,7 +1190,7 @@ func (s *Server) SetBedrockRoleResolver(r bedrockRoleResolver) {
 // on every serving process, in either mode — the transport differs (a direct
 // call in multi, the agent runtime in local) but the question and the verdicts
 // do not. Nil until wired: the test routes report the deployment cannot probe.
-func (s *Server) SetModelProber(p modelProber) {
+func (s *Server) SetModelProber(p models.Prober) {
 	s.modelProber = p
 }
 

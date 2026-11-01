@@ -676,7 +676,9 @@ func TestTokenCache_WriteBackNeverOverwritesANewerRotation(t *testing.T) {
 // local mode's restore. The refresh itself, a request to Linear, does not
 // wait.
 func TestTokenCache_WritesWaitOnTheCredentialLock(t *testing.T) {
-	held := func(t *testing.T, r *rig, during func()) {
+	// held runs a read while the credential lock is held, checks it waits for
+	// the release, and returns the read's error.
+	held := func(t *testing.T, r *rig, during func()) error {
 		t.Helper()
 		release, err := NewCredentialLock(nil).Lock(context.Background(), cOrg)
 		if err != nil {
@@ -703,19 +705,23 @@ func TestTokenCache_WritesWaitOnTheCredentialLock(t *testing.T) {
 		during()
 		release()
 		select {
-		case <-done:
+		case err := <-done:
+			return err
 		case <-time.After(5 * time.Second):
 			t.Fatal("the read did not complete after the lock was released")
+			return nil
 		}
 	}
 
 	t.Run("write-back", func(t *testing.T) {
 		r := newRig(t)
-		held(t, r, func() {
+		if err := held(t, r, func() {
 			if stored, _ := storedInstall(t, r.secrets); stored.RefreshToken != "ref-0" {
 				t.Errorf("stored = %q while the lock was held, want ref-0", stored.RefreshToken)
 			}
-		})
+		}); err != nil {
+			t.Fatalf("the read after the release: %v", err)
+		}
 		if stored, _ := storedInstall(t, r.secrets); stored.RefreshToken != "ref-1" {
 			t.Errorf("stored = %q after the release, want ref-1", stored.RefreshToken)
 		}
@@ -723,14 +729,16 @@ func TestTokenCache_WritesWaitOnTheCredentialLock(t *testing.T) {
 	t.Run("revoke", func(t *testing.T) {
 		r := newRig(t)
 		r.ref.refuse = map[string]bool{"ref-0": true}
-		held(t, r, func() {
+		if err := held(t, r, func() {
 			if got := r.installs.Removed(); len(got) != 0 {
 				t.Errorf("install marked removed while the lock was held: %v", got)
 			}
 			if _, ok := storedInstall(t, r.secrets); !ok {
 				t.Error("envelope deleted while the lock was held")
 			}
-		})
+		}); err == nil {
+			t.Fatal("the read after the release succeeded, want the refused install's error")
+		}
 		if got := r.installs.Removed(); len(got) != 1 {
 			t.Errorf("installs removed = %v after the release, want the refused install", got)
 		}

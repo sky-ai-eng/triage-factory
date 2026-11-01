@@ -68,12 +68,18 @@ linters:
     rules:
       - path: _test\.go
         linters:
-          - errcheck
-          - unused
           # Live integration tests resolve the real HOME to build a
           # subprocess env (npm cache, ~/.claude config); that's not TF
           # state, so test files are exempt from the home-dir ban.
           - forbidigo
+      # A test's Close releases a fixture the test is done with (a listener, a
+      # connection, a handle), and `defer x.Close()` is how a test says so: a
+      # failure there says nothing about what the test checked. Every other
+      # unchecked error in a test is a check the test skipped.
+      - path: _test\.go
+        linters:
+          - errcheck
+        text: "Error return value of `[^`]*\\.Close` is not checked"
       # internal/paths is the one place os.UserHomeDir legitimately lives.
       - path: internal/paths/
         linters:

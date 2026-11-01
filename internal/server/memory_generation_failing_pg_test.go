@@ -10,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // TestMemoryGenerationFailing_Postgres_RetryNow: a no_model failure sends the org
@@ -33,9 +34,9 @@ func TestMemoryGenerationFailing_Postgres_RetryNow(t *testing.T) {
 		ErrorKind: domain.MemoryAttemptErrNoModel, TasksWaiting: 2, ErrorMessage: "the background jobs model setting is empty",
 	}})
 
-	openInbox := func(sid string) listEnvelope[notificationItemWire] {
+	openInbox := func(sid string) httpxtest.ListEnvelope[notificationItemWire] {
 		t.Helper()
-		return decodeList[notificationItemWire](t, rig.tokensJSON(http.MethodPost, meNotifications+"/list", map[string]any{"status": "open"}, sid, ""))
+		return httpxtest.DecodeList[notificationItemWire](t, rig.tokensJSON(http.MethodPost, meNotifications+"/list", map[string]any{"status": "open"}, sid, ""))
 	}
 	if got := openInbox(memberSid); got.Total() != 0 {
 		t.Errorf("org member's inbox = %+v, want nothing: the kind is for org admins", got.Items)

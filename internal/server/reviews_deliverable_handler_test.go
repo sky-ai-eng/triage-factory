@@ -18,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // seedReviewDeliverableWithConversation mints a concluded conversation chain and
@@ -610,7 +611,7 @@ func TestReviewDeliverableApprove_EmptyReviewRefused(t *testing.T) {
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("approve = %d, want 422; body=%s", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, httpx.ReasonInvalidField, "")
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonInvalidField, "")
 	if got := getDeliverable(t, srv, artID); got.State != domain.DeliverableStateReviewPending {
 		t.Errorf("state after refused approve = %q, want pending (claim released)", got.State)
 	}

@@ -35,6 +35,11 @@ import { RailSection } from './RailSection'
 //     carries its controls.
 //  3. A count of the refused and failed writes, which changed no object.
 //
+// A row is highlighted while its deliverable waits on a person: its id is in
+// the conversation's pending_deliverable_ids, the server's unresolved set (a
+// draft PR, or a review the agent finalized). A merged PR or a discarded
+// review keeps its state badge and loses the highlight.
+//
 // The section is absent until one of the three has something in it.
 interface Props {
   conversation: Conversation
@@ -167,7 +172,7 @@ export function RunArtifacts({ conversation, onOpenDeliverable, onDeliverableRes
           <DeliverableRow
             key={d.id}
             deliverable={d}
-            highlighted
+            highlighted={pending.has(d.id)}
             onOpenApproval={onOpenDeliverable}
             onDismiss={pending.has(d.id) ? () => void dismiss(d.id, d.kind) : undefined}
             dismissing={!!dismissing[d.id]}
@@ -180,6 +185,7 @@ export function RunArtifacts({ conversation, onOpenDeliverable, onDeliverableRes
               key={a.object_id}
               conversationId={conversationId}
               artifact={a}
+              highlighted={!!d && pending.has(d.id)}
               onOpenDeliverable={onOpenDeliverable}
               onDismiss={d && pending.has(d.id) ? () => void dismiss(d.id, d.kind) : undefined}
               dismissing={!!(d && dismissing[d.id])}
@@ -198,12 +204,15 @@ export function RunArtifacts({ conversation, onOpenDeliverable, onDeliverableRes
 function ArtifactRow({
   conversationId,
   artifact,
+  highlighted,
   onOpenDeliverable,
   onDismiss,
   dismissing,
 }: {
   conversationId: string
   artifact: ConversationArtifact
+  /** Whether its deliverable waits on a person. */
+  highlighted: boolean
   onOpenDeliverable?: (kind: 'review' | 'pr', deliverableId: string) => void
   onDismiss?: () => void
   dismissing: boolean
@@ -219,7 +228,7 @@ function ArtifactRow({
   return (
     <li>
       <div
-        className={`flex items-start gap-1.5 rounded-[4px] border px-2 py-1.5 transition-colors ${rowTone(deliverable != null)}`}
+        className={`flex items-start gap-1.5 rounded-[4px] border px-2 py-1.5 transition-colors ${rowTone(highlighted)}`}
       >
         <button
           type="button"

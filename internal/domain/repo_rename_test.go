@@ -198,32 +198,6 @@ func TestRenamedOwnerExternalID(t *testing.T) {
 	}
 }
 
-func TestRewriteRepoSlugPrefix(t *testing.T) {
-	const from, to = "octo/api", "octo/platform-api"
-	tests := []struct {
-		in      string
-		want    string
-		wantOK  bool
-		because string
-	}{
-		{in: "octo/api", want: "octo/platform-api", wantOK: true, because: "the bare slug"},
-		{in: "octo/api#18", want: "octo/platform-api#18", wantOK: true, because: "a PR composite"},
-		{in: "Octo/API#18", want: "octo/platform-api#18", wantOK: true, because: "matching is case-insensitive"},
-		{in: "octo/api-gateway#4", want: "octo/api-gateway#4", because: "a longer name that merely starts the same"},
-		{in: "octo/ap", want: "octo/ap", because: "shorter than the slug"},
-		{in: "acme/octo/api#1", want: "acme/octo/api#1", because: "the slug is not at the head"},
-		{in: "", want: "", because: "nothing to rewrite"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.because, func(t *testing.T) {
-			got, ok := RewriteRepoSlugPrefix(tc.in, from, to)
-			if got != tc.want || ok != tc.wantOK {
-				t.Errorf("RewriteRepoSlugPrefix(%q) = (%q, %v), want (%q, %v)", tc.in, got, ok, tc.want, tc.wantOK)
-			}
-		})
-	}
-}
-
 func TestRewriteRepoURL(t *testing.T) {
 	const from, to = "octo/api", "octo/platform-api"
 	const dotcom, ghe = "https://github.com", "https://ghe.acme.dev"

@@ -116,7 +116,7 @@ func recordAuditDrops(ctx context.Context, stage, op string, n int64) {
 // sidecar's, so one outside the vocabulary is labeled as other.
 func recordDropOp(a *domain.Deliverable, act *domain.ExternalAction) string {
 	switch {
-	case a != nil && slices.Contains(domain.DeliverableKinds(), a.Kind):
+	case a != nil && (a.Kind == domain.DeliverableKindPullRequest || a.Kind == domain.DeliverableKindReview):
 		return a.Kind
 	case a != nil && a.Kind != "":
 		return dropOpOther

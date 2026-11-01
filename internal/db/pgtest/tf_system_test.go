@@ -53,7 +53,9 @@ func TestTfSystem_DDLDenied(t *testing.T) {
 
 	_, err := h.SystemDB.Exec(`CREATE TABLE tf_system_ddl_probe (id int)`)
 	if err == nil {
-		h.AdminDB.Exec(`DROP TABLE IF EXISTS tf_system_ddl_probe`)
+		if _, err := h.AdminDB.Exec(`DROP TABLE IF EXISTS tf_system_ddl_probe`); err != nil {
+			t.Errorf("drop the probe table: %v", err)
+		}
 		t.Fatalf("tf_system CREATE TABLE succeeded, want permission denied")
 	}
 	assertPgCode(t, err, "42501", "tf_system CREATE TABLE")

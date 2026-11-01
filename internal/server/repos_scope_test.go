@@ -17,6 +17,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // repoScopeRig is a real Postgres-backed Server (RLS live) with two teams, each
@@ -118,22 +119,22 @@ func (r *repoScopeRig) req(method, path, callerID string, body any) *http.Reques
 }
 
 // listRepos calls the registry list as callerID and returns the page.
-func (r *repoScopeRig) listRepos(t *testing.T, callerID string) listEnvelope[repoJSON] {
+func (r *repoScopeRig) listRepos(t *testing.T, callerID string) httpxtest.ListEnvelope[repoJSON] {
 	t.Helper()
 	rec := httptest.NewRecorder()
 	r.s.handleRepositories(rec, r.req(http.MethodPost, "/api/repos/list", callerID, map[string]any{}))
-	return decodeList[repoJSON](t, rec)
+	return httpxtest.DecodeList[repoJSON](t, rec)
 }
 
 // listTeamRepos calls the registry list as callerID, narrowed to teamID.
-func (r *repoScopeRig) listTeamRepos(t *testing.T, callerID, teamID string) listEnvelope[repoJSON] {
+func (r *repoScopeRig) listTeamRepos(t *testing.T, callerID, teamID string) httpxtest.ListEnvelope[repoJSON] {
 	t.Helper()
 	rec := httptest.NewRecorder()
 	r.s.handleRepositories(rec, r.req(http.MethodPost, "/api/repos/list", callerID, map[string]any{"team_id": teamID}))
-	return decodeList[repoJSON](t, rec)
+	return httpxtest.DecodeList[repoJSON](t, rec)
 }
 
-func listedRepoSlugs(page listEnvelope[repoJSON]) []string {
+func listedRepoSlugs(page httpxtest.ListEnvelope[repoJSON]) []string {
 	out := make([]string, len(page.Items))
 	for i, row := range page.Items {
 		out[i] = row.Slug
@@ -147,7 +148,7 @@ func listedRepoSlugs(page listEnvelope[repoJSON]) []string {
 func TestHandleRepositories_TeamScoped(t *testing.T) {
 	rig := newRepoScopeRig(t)
 
-	canEdit := func(page listEnvelope[repoJSON]) map[string]bool {
+	canEdit := func(page httpxtest.ListEnvelope[repoJSON]) map[string]bool {
 		out := make(map[string]bool, len(page.Items))
 		for _, row := range page.Items {
 			out[row.Slug] = row.CanEdit

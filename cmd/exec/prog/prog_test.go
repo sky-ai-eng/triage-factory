@@ -63,7 +63,9 @@ func TestPrefixHonorsArgv0(t *testing.T) {
 	if os.Getenv("TF_PROG_ARGV0_CHILD") == "1" {
 		// Child: report what argv0 resolved to and exit through the normal
 		// test-pass path.
-		os.Stdout.WriteString(prefixMarker + Prefix() + "\n")
+		if _, err := os.Stdout.WriteString(prefixMarker + Prefix() + "\n"); err != nil {
+			t.Fatalf("write the resolved prefix: %v", err)
+		}
 		return
 	}
 	tests := []struct {

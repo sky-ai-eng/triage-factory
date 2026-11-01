@@ -73,11 +73,11 @@ Each event's metadata names the review: `reviewer` (a login, spelled
 inline comments) and `paths` (the distinct files those comments are on). Its
 time is the review's submission.
 
-A review TF submitted emits nothing: its `review` artifact carries the review's
-id once it is posted. Neither does a thread reply TF posted: a comment review
-each of whose comments TF recorded as a `comment` artifact. As with Jira and
-Linear comments, the match is on ids, not on the author. A review read in the
-moment between TF's post and the artifact write counts as a person's. The PR
+A review TF submitted emits nothing: its `review` deliverable carries the
+review's id once it is posted. Neither does a thread reply TF posted: a comment
+review each of whose comments the audit log records as a comment TF posted. As
+with Jira and Linear comments, the match is on ids, not on the author. A review
+read in the moment between TF's post and its record counts as a person's. The PR
 author's own replies emit like anyone's, and so does a bot's review.
 
 `review_dismissed` reports a change to a review already submitted: a
@@ -175,7 +175,8 @@ by a letter, digit or underscore. It does not count when it is:
 - in a fenced or indented code block, in inline code, on a quoted (`>`) line,
   in an HTML comment, or inside an `http(s)` URL;
 - in a comment or review TF posted, told apart as for `commented` and the
-  review events: by its `comment` or `review` artifact. A reply TF posted that
+  review events: by the audit log's record of the comment, or by the review's
+  `review` deliverable. A reply TF posted that
   joined a person's pending review is TF's on its own;
 - a commenter's mention of themselves, and the PR author's mention of
   themselves in the body, which is taken as theirs.
@@ -225,7 +226,8 @@ Some limits:
   indented four spaces under a list item after a blank line reads as a code
   block, and inline code that spans a line break reads as text.
 - Only a review's first 100 inline comments are read.
-- An edit TF makes to the PR body counts like anyone's: no artifact records it.
+- An edit TF makes to the PR body counts like anyone's: nothing marks an edit
+  as TF's.
   So does the body of a PR TF opened when a poll lists the PR before the
   agent's record of it lands.
 
@@ -366,15 +368,15 @@ belongs to a review and emits as one (see [Reviews](#reviews)). Edits to a
 comment emit nothing.
 
 A comment an agent posts with `jira ticket comment` or `linear issue comment`
-is recorded as a `comment` artifact keyed on the comment's id, and a comment
-with that artifact is TF's. So is a PR comment an agent posts through the exec
-verbs or with `gh pr comment`, which records the same artifact. A cycle that finds only TF's comments emits
+is recorded in the audit log under the comment's id, and a comment recorded
+there as posted is TF's. So is a PR comment an agent posts through the exec
+verbs or with `gh pr comment`, which is recorded the same way. A cycle that finds only TF's comments emits
 nothing, so a trigger whose agent replies to comments does not fire again on
 its own reply. The match is on the comment's id, not its author: under a
 personal credential the agent comments as the person who owns it, and
 excluding that author would drop the person's own comments. A comment whose
-artifact was not written (the write is best-effort), or that a cycle reads in
-the moment between the post and the write, counts as a person's.
+record was not written (the write is best-effort), or that a cycle reads in
+the moment between the post and the record, counts as a person's.
 
 How the new comments are found:
 
@@ -533,11 +535,11 @@ project the team has since stopped tracking never blocks an edit that leaves
 it in place.
 
 When a tracked issue answers under a new key, the entity is renamed in the
-same cycle: its `source_id` and `url`, and the target of every artifact
-recorded against it, move to the new key, and it keeps its tasks,
-conversations and memory. A Jira artifact is keyed on the issue's site and id,
-so its key does not move, and an artifact on another site's issue with the
-same id is a different row that the rename does not touch. An agent's write or
+same cycle: its `source_id` and `url`, and the links the audit log holds for
+it, move to the new key, and it keeps its tasks, conversations and memory. The
+audit log names a Jira issue by its site and id, so that name does not move,
+and an issue on another site with the same id is a different object that the
+rename does not touch. An agent's write or
 read naming an old key is answered by Jira under the issue's current key, so
 it records against the issue's existing entity — renaming it, if TF had not
 seen the move yet — and never creates a second one.
@@ -764,11 +766,11 @@ within a `scope`, the org's Linear workspace id, because identifiers repeat
 across workspaces.
 
 When a tracked issue answers under a new identifier, the entity is renamed in
-the same cycle: its `source_id` and `url`, and the target of every artifact
-recorded against it, move to the new identifier, and it keeps its tasks,
-conversations and memory. A Linear artifact is keyed on the issue's UUID, so
-its key does not move, and an artifact on another workspace's issue under the
-same identifier is a different row that the rename does not touch.
+the same cycle: its `source_id` and `url`, and the links the audit log holds
+for it, move to the new identifier, and it keeps its tasks, conversations and
+memory. The audit log names a Linear issue by its UUID, so that name does not
+move, and an issue in another workspace under the same identifier is a
+different object that the rename does not touch.
 
 The refresh emits `identifier_changed` first, ahead of anything else it found
 (a move to another team usually changes the issue's workflow state too), in the
@@ -907,11 +909,11 @@ Follow-up ingestion (the un-mentioned `message.channels` / `message.groups` deli
 
 ### Channel ID changes
 
-TF registers every channel it sees or a team tracks, and everything that refers to a channel holds that registry row: each team's tracking of it, each thread's entity, and the `channel_in` filter of every `slack:message` handler. A thread is identified by its channel's registry row and its root message's timestamp, and found by those; its entity's key (`<channel ID>/<root ts>`) is what it's displayed as. A message the bot posts is recorded as an artifact keyed the same way, by the channel's registry row and the message's timestamp. Slack gives a private channel a new ID when it's shared with another organization through Slack Connect (`G…` becomes `C…`), announces it with `channel_id_changed`, and uses the new ID for everything after. TF follows the change in one transaction: the registry row takes the new ID, and so do the values that display it — the thread entities' keys and permalinks, the targets and permalinks of the Slack artifacts, and the audit-log links that name it. Tracking, handler filters, how a thread is found and how an artifact is keyed need nothing. It emits no event.
+TF registers every channel it sees or a team tracks, and everything that refers to a channel holds that registry row: each team's tracking of it, each thread's entity, and the `channel_in` filter of every `slack:message` handler. A thread is identified by its channel's registry row and its root message's timestamp, and found by those; its entity's key (`<channel ID>/<root ts>`) is what it's displayed as. A message the bot posts is recorded in the audit log under the same pair, the channel's registry row and the message's timestamp. Slack gives a private channel a new ID when it's shared with another organization through Slack Connect (`G…` becomes `C…`), announces it with `channel_id_changed`, and uses the new ID for everything after. TF follows the change in one transaction: the registry row takes the new ID, and so do the values that display it — the thread entities' keys and permalinks, and the audit-log links that name it. Tracking, handler filters, how a thread is found and how the audit log names a message need nothing. It emits no event.
 
 TF also records the change, because event metadata is immutable: a message recorded before the share names the old ID for good. Everything that acts on a recorded message reads its channel as the current ID — handler filters, the team gate and owner resolution, a run's task context and injected follow-ups, the exec verbs, and the bot's own reactions, replies and working indicator — and so does ingest, for a message Slack generated before the change but delivered after it.
 
-Slack doesn't order the change against other deliveries. A message made under the new ID that arrives before the change has no thread to land in yet: an un-mentioned follow-up is dropped, and a mention registers the new ID as a channel of its own and starts a new thread entity. When the change arrives, that registry row is merged into the channel's — its tracking, threads, handler filters and the artifacts keyed on it move onto the channel — the thread's original entity stays the thread's, and the one the mention started is closed beside it, keeping its own task and conversation. A change Slack delivers again, or delivers after a later change to the same channel, leaves the channel on its latest ID.
+Slack doesn't order the change against other deliveries. A message made under the new ID that arrives before the change has no thread to land in yet: an un-mentioned follow-up is dropped, and a mention registers the new ID as a channel of its own and starts a new thread entity. When the change arrives, that registry row is merged into the channel's — its tracking, threads, handler filters and the audit log's messages named under it move onto the channel — the thread's original entity stays the thread's, and the one the mention started is closed beside it, keeping its own task and conversation. A change Slack delivers again, or delivers after a later change to the same channel, leaves the channel on its latest ID.
 
 ## System Events
 

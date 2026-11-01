@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/execout"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
@@ -446,19 +447,19 @@ func refForSpec(spec checkoutSpec) string {
 }
 
 // runAdd is the CLI entrypoint: argv → materializeWorkspace → stdout/stderr.
-// All errors translate into exitErr so the caller process gets a non-zero
+// All errors translate into execout.ExitErr so the caller process gets a non-zero
 // exit and the agent sees a clear message on stderr. Successful resolution
 // (first add or idempotent re-add) prints the absolute worktree path on
 // stdout for `cd "$(... workspace add owner/repo)"`.
 func runAdd(host agenthost.Client, args []string) {
 	ownerRepo, spec, err := parseAddArgs(args)
 	if err != nil {
-		exitErr(err.Error())
+		execout.ExitErr(err.Error())
 	}
 
 	path, err := materializeWorkspace(host, strings.TrimSpace(ownerRepo), spec, defaultAddDeps())
 	if err != nil {
-		exitErr(err.Error())
+		execout.ExitErr(err.Error())
 	}
 	fmt.Println(path)
 }

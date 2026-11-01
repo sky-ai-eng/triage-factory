@@ -280,15 +280,3 @@ func startPunctualLinked(ctx context.Context, sc trace.SpanContext, conversation
 	}
 	return tracer.Start(ctx, name, opts...)
 }
-
-// recordSpanError puts err on span with an error status, and does nothing
-// for a nil error. The shape repeats at every instrumented exit in this
-// package; a helper keeps "an error status means something is wrong" from
-// depending on remembering both calls.
-func recordSpanError(span trace.Span, err error) {
-	if err == nil {
-		return
-	}
-	span.RecordError(err)
-	span.SetStatus(codes.Error, err.Error())
-}

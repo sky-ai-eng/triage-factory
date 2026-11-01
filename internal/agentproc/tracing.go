@@ -3,9 +3,8 @@ package agentproc
 import (
 	"context"
 
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
 )
 
 // tracer owns this package's spans. Conventions in internal/telemetry.
@@ -29,17 +28,6 @@ func ensureSDKTraced(ctx context.Context) (string, error) {
 	_, span := tracer.Start(ctx, "agent.sdk.ensure")
 	defer span.End()
 	path, err := EnsureSDK()
-	recordSpanError(span, err)
+	telemetry.RecordSpanError(span, err)
 	return path, err
-}
-
-// recordSpanError puts err on span with an error status, and does nothing
-// for a nil error — so an instrumented step reads as one statement rather
-// than a branch repeated at every exit.
-func recordSpanError(span trace.Span, err error) {
-	if err == nil {
-		return
-	}
-	span.RecordError(err)
-	span.SetStatus(codes.Error, err.Error())
 }

@@ -649,7 +649,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		}
 		gateOpen = false
 		gateSpan.SetAttributes(telemetry.Outcome(outcome))
-		recordSpanError(gateSpan, err)
+		telemetry.RecordSpanError(gateSpan, err)
 		gateSpan.End()
 	}
 	// Backstop only: every exit below closes the gate span with its own answer,
@@ -1079,7 +1079,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	slug := skills.SlugForBlueprintStep(stepIdx, stepPrompt.Name)
 	_, skillSpan := tracer.Start(ctx, "engagement.stage_skill")
 	skillErr := s.materializeStepSkill(&cfg, conv.ID, slug, stepPrompt, step.Brief)
-	recordSpanError(skillSpan, skillErr)
+	telemetry.RecordSpanError(skillSpan, skillErr)
 	skillSpan.End()
 	if skillErr != nil {
 		s.failEngagement(conv.ID, skillErr)

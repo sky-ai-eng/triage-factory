@@ -29,8 +29,8 @@ func RequireExternalObjectScope(scope string) error {
 // run changes is an artifact, read from the external-action ledger.
 var ErrDeliverableKind = errors.New("a deliverable is a pull request or a review")
 
-// RequireDeliverableKind refuses a kind outside domain.DeliverableKinds with
-// ErrDeliverableKind. Both dialects' deliverable writes call it before touching
+// RequireDeliverableKind refuses a kind other than a pull request or a review
+// with ErrDeliverableKind. Both dialects' deliverable writes call it before touching
 // the database; the Postgres table's CHECK says the same.
 func RequireDeliverableKind(kind string) error {
 	switch kind {

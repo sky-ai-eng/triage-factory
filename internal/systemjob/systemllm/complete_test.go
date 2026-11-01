@@ -29,7 +29,9 @@ func TestComplete_LocalMode_DelegatesToSubprocess(t *testing.T) {
 	runLocal = func(_ context.Context, opts agentproc.RunOptions, sink agentproc.Sink) (*agentproc.Outcome, error) {
 		called = true
 		gotOpts = opts
-		sink.OnSession("sess-1")
+		if err := sink.OnSession("sess-1"); err != nil {
+			return nil, err
+		}
 		return &agentproc.Outcome{
 			SessionID: "sess-1",
 			Result:    &agentproc.Result{Result: `{"score":42}`, CostUSD: 0.01, DurationMs: 500, NumTurns: 1},
@@ -108,7 +110,9 @@ func TestComplete_LocalMode_ErrorResultIsAnError(t *testing.T) {
 
 	orig := runLocal
 	runLocal = func(_ context.Context, _ agentproc.RunOptions, sink agentproc.Sink) (*agentproc.Outcome, error) {
-		sink.OnSession("sess-refused")
+		if err := sink.OnSession("sess-refused"); err != nil {
+			return nil, err
+		}
 		return &agentproc.Outcome{
 			SessionID: "sess-refused",
 			// The shape a client-side refusal actually arrives in: the

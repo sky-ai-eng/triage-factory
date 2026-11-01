@@ -156,6 +156,45 @@ describe('RunArtifacts', () => {
     expect(onOpen).toHaveBeenCalledWith('pr', 'pr1')
   })
 
+  it('drops the highlight from deliverables nothing waits on', async () => {
+    stubReads({
+      deliverables: [deliverable({ id: 'rv1', kind: 'review', state: 'dismissed' })],
+      artifacts: [
+        artifact({
+          object_id: 'cHIx',
+          object_kind: 'pull_request',
+          target: 'org/repo#18',
+          url: 'https://github.com/org/repo/pull/18',
+          last_action: 'pr_created',
+          deliverable: { id: 'pr1', kind: 'pull_request', state: 'merged' },
+        }),
+      ],
+    })
+    render(<RunArtifacts conversation={conversation({ artifact_count: 1 })} />)
+
+    const pr = await screen.findByRole('link', { name: 'org/repo#18' })
+    const rows = screen.getAllByRole('listitem')
+    expect(rows).toHaveLength(2)
+    // The discarded review, which no artifact names, and the merged PR.
+    expect(within(rows[0]).getByText('dismissed')).toBeInTheDocument()
+    expect(rows[0].className).toContain(rowTone(false))
+    expect(rows[1]).toBe(pr.closest('li'))
+    expect(rows[1].firstElementChild!.className).toContain(rowTone(false))
+    expect(within(rows[1]).getByText('merged')).toBeInTheDocument()
+  })
+
+  it('refetches when the run acts again on an object it already changed', async () => {
+    const fetchMock = stubReads({ artifacts: [artifact({})] })
+    const { rerender } = render(
+      <RunArtifacts conversation={conversation({ artifact_count: 1, action_count: 1 })} />,
+    )
+    await screen.findByRole('link', { name: 'org/repo:fix-ci' })
+    const before = fetchMock.mock.calls.length
+
+    rerender(<RunArtifacts conversation={conversation({ artifact_count: 1, action_count: 2 })} />)
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBe(before + 3))
+  })
+
   it('expands an artifact into the actions on its object', async () => {
     const fetchMock = stubReads({
       artifacts: [artifact({ object_id: 'YnIx', action_count: 2 })],

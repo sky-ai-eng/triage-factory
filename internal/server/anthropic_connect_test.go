@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 	"github.com/zalando/go-keyring"
 )
 
@@ -79,7 +80,7 @@ func TestAnthropicDelete_ClearsStoredKey(t *testing.T) {
 	if blank.Code != http.StatusBadRequest {
 		t.Fatalf("blank key status=%d body=%s, want 400", blank.Code, blank.Body.String())
 	}
-	assertFirstError(t, blank, httpx.ReasonMissingField, "api_key")
+	httpxtest.AssertFirstError(t, blank, httpx.ReasonMissingField, "api_key")
 	if !orgHasAnthropicKey(t, s) {
 		t.Fatal("the refused blank PUT cleared the stored key")
 	}
@@ -153,7 +154,7 @@ func TestSettingsPatch_NoLLMCredentialBackDoor(t *testing.T) {
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("settings patch status=%d body=%s, want 400", rec.Code, rec.Body.String())
 			}
-			assertFirstError(t, rec, httpx.ReasonUnknownField, field)
+			httpxtest.AssertFirstError(t, rec, httpx.ReasonUnknownField, field)
 		})
 	}
 	for _, k := range append([]string{"anthropic_api_key"}, integrations.BedrockKeys()...) {

@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // TestLinearTeamUnreadable_Postgres_StopTracking: the org admin gets the org row
@@ -45,9 +46,9 @@ func TestLinearTeamUnreadable_Postgres_StopTracking(t *testing.T) {
 	ctx := context.Background()
 	kinds.LinearTeamUnreadable.Sync(ctx, org.String(), []kinds.LinearTeam{{LinearTeamID: linearTeamEng, TeamKey: "ENG"}})
 
-	openInbox := func(sid string) listEnvelope[notificationItemWire] {
+	openInbox := func(sid string) httpxtest.ListEnvelope[notificationItemWire] {
 		t.Helper()
-		return decodeList[notificationItemWire](t, rig.tokensJSON(http.MethodPost, meNotifications+"/list", map[string]any{"status": "open"}, sid, ""))
+		return httpxtest.DecodeList[notificationItemWire](t, rig.tokensJSON(http.MethodPost, meNotifications+"/list", map[string]any{"status": "open"}, sid, ""))
 	}
 	ownerInbox := openInbox(ownerSid)
 	if ownerInbox.Total() != 1 || ownerInbox.Items[0].Audience.Scope != "org" {
@@ -119,7 +120,7 @@ func TestLinearTeamUnreadable_Postgres_StopTrackingRebuildsAfterAConcurrentSave(
 	installNotify(t, rig.srv)
 	ctx := context.Background()
 	kinds.LinearTeamUnreadable.Sync(ctx, org.String(), []kinds.LinearTeam{{LinearTeamID: linearTeamEng, TeamKey: "ENG"}})
-	inbox := decodeList[notificationItemWire](t, rig.tokensJSON(http.MethodPost, meNotifications+"/list", map[string]any{"status": "open"}, adminSid, ""))
+	inbox := httpxtest.DecodeList[notificationItemWire](t, rig.tokensJSON(http.MethodPost, meNotifications+"/list", map[string]any{"status": "open"}, adminSid, ""))
 	if inbox.Total() != 1 {
 		t.Fatalf("infra admin's inbox = %+v, want the team row alone", inbox.Items)
 	}

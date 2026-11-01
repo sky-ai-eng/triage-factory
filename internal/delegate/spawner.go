@@ -114,7 +114,7 @@ type Spawner struct {
 	// read and written by TeardownTaskDeliverablesSystem, which retires a
 	// closed task's unresolved rows. Admin-pool System methods only.
 	deliverables db.DeliverableStore
-	// artifacts reads the objects a conversation's agent changed, from the
+	// artifacts reads the objects a conversation changed, from the
 	// ledger: the turn-end nudge and the task context read it. Admin-pool
 	// System methods only.
 	artifacts db.ArtifactStore

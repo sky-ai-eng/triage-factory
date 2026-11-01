@@ -106,8 +106,9 @@ describe('actionMeta', () => {
     expect(metaForAction('review_dismissed')).not.toBe(metaForAction('review_request_removed'))
   })
 
-  it('surfaces slack in the Actions-lens provider filter', () => {
+  it('surfaces slack and linear in the Actions-lens provider filter', () => {
     expect(ACTION_PROVIDERS).toContain('slack')
+    expect(ACTION_PROVIDERS).toContain('linear')
   })
 
   it('names the refusals and the failed push, and lets them be filtered for', () => {

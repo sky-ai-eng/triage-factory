@@ -26,16 +26,16 @@ var _ db.ArtifactStore = (*artifactStore)(nil)
 // sqliteArtifactRowFilter is what every artifact read adds to its own WHERE:
 // the rows of an artifact performer that name an object, of an action that
 // can name one.
-var sqliteArtifactRowFilter = ` AND ` + db.ArtifactPerformerSQL() + ` AND ea.action NOT IN (` + db.ArtifactExcludedActionsSQL() +
-	`) AND (` + sqliteActionObjectIDSQL + `) IS NOT NULL`
+var sqliteArtifactRowFilter = ` AND ` + db.ArtifactRowSQL() + ` AND (` + sqliteActionObjectIDSQL + `) IS NOT NULL`
 
 // sqliteArtifactCTEs is the Postgres impl's pgArtifactCTEs (see there for
 // the model). occurred_at is text here, ordered as text the way the ledger's
-// list reads order it.
+// list reads order it, and whole seconds, so rows of one second break on
+// rowid, the order they were written in.
 func sqliteArtifactCTEs(where string) string {
 	return `
 	WITH scoped AS (
-		SELECT ea.id, ea.org_id, ea.provider, ea.scope, ea.action, ea.target,
+		SELECT ea.id, ea.rowid AS seq, ea.org_id, ea.provider, ea.scope, ea.action, ea.target,
 		       COALESCE(ea.current_url, ea.url, '') AS url, ea.entity_id, ea.repository_id,
 		       ea.object_kind, ea.object_key, ea.occurred_at, ea.conversation_id, ea.team_id,
 		       ` + sqliteActionObjectIDSQL + ` AS object_id
@@ -43,9 +43,13 @@ func sqliteArtifactCTEs(where string) string {
 		 WHERE ` + where + sqliteArtifactRowFilter + `
 	), grouped AS (
 		SELECT s.*,
-		       ROW_NUMBER() OVER (PARTITION BY s.object_id ORDER BY s.occurred_at DESC, s.id DESC) AS rn,
+		       ROW_NUMBER() OVER (PARTITION BY s.object_id ORDER BY s.occurred_at DESC, s.seq DESC) AS rn,
 		       COUNT(*) OVER (PARTITION BY s.object_id) AS action_count,
-		       MIN(s.occurred_at) OVER (PARTITION BY s.object_id) AS first_at
+		       MIN(s.occurred_at) OVER (PARTITION BY s.object_id) AS first_at,
+		       FIRST_VALUE(s.url) OVER (PARTITION BY s.object_id
+		           ORDER BY s.url = '', s.occurred_at DESC, s.seq DESC) AS display_url,
+		       FIRST_VALUE(s.entity_id) OVER (PARTITION BY s.object_id
+		           ORDER BY s.entity_id IS NULL, s.occurred_at DESC, s.seq DESC) AS display_entity_id
 		  FROM scoped s
 	)`
 }
@@ -54,13 +58,16 @@ func sqliteArtifactCTEs(where string) string {
 // comes out of a window aggregate with no declared type, so both timestamps
 // are scanned as text and parsed.
 const sqliteArtifactColumns = `g.object_id, g.object_kind, g.provider, g.scope,
-	       COALESCE(g.entity_id, ''), COALESCE(g.repository_id, ''), COALESCE(g.object_key, ''),
-	       COALESCE(e.source_id, g.target), COALESCE(NULLIF(e.url, ''), g.url),
+	       COALESCE(g.display_entity_id, ''), COALESCE(g.repository_id, ''), COALESCE(g.object_key, ''),
+	       COALESCE(e.source_id, g.target),
+	       CASE WHEN g.object_kind IN ('pull_request', 'issue') THEN COALESCE(NULLIF(e.url, ''), g.display_url)
+	            ELSE g.display_url END,
 	       g.action, g.action_count, g.first_at, g.occurred_at`
 
+// sqliteArtifactEntityJoin is the Postgres impl's pgArtifactEntityJoin.
 const sqliteArtifactEntityJoin = `
-	  LEFT JOIN entities e ON e.id = g.entity_id AND e.org_id = g.org_id
-	       AND (g.object_kind = 'pull_request' OR (g.object_kind = 'issue' AND g.provider = 'github'))`
+	  LEFT JOIN entities e ON e.id = g.display_entity_id AND e.org_id = g.org_id
+	       AND g.object_kind IN ('pull_request', 'issue', 'comment', 'review', 'message')`
 
 // sqliteArtifactSelect is the Postgres impl's pgArtifactSelect.
 func sqliteArtifactSelect(where string) string {

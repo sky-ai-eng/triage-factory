@@ -7,28 +7,8 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
-
-// assertFirstError decodes the error envelope off rec and asserts the first
-// item's reason and field.
-func assertFirstError(t *testing.T, rec *httptest.ResponseRecorder, wantReason, wantField string) {
-	t.Helper()
-	var body struct {
-		Errors []struct {
-			Reason string `json:"reason"`
-			Field  string `json:"field"`
-		} `json:"errors"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode envelope: %v (body=%s)", err, rec.Body.String())
-	}
-	if len(body.Errors) == 0 {
-		t.Fatalf("empty errors list; body=%s", rec.Body.String())
-	}
-	if body.Errors[0].Reason != wantReason || body.Errors[0].Field != wantField {
-		t.Errorf("first error = %+v, want {%s, field %q}", body.Errors[0], wantReason, wantField)
-	}
-}
 
 // errorFields decodes the error envelope off rec and returns every item's
 // field — for the accumulating validators, where the contract is that a body
@@ -183,7 +163,7 @@ func TestTaskWrites_StrictBodies(t *testing.T) {
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 			}
-			assertFirstError(t, rec, "UNKNOWN_FIELD", tc.field)
+			httpxtest.AssertFirstError(t, rec, "UNKNOWN_FIELD", tc.field)
 		})
 	}
 }

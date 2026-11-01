@@ -32,9 +32,10 @@ func seedMentionRule(t *testing.T, database *sql.DB, teamID string) {
 	}
 }
 
-func emitMentioned(router *Router, entityID, dedupKey string, meta events.GitHubPRMentionedMetadata) {
+func emitMentioned(t *testing.T, router *Router, entityID, dedupKey string, meta events.GitHubPRMentionedMetadata) {
+	t.Helper()
 	metaJSON, _ := json.Marshal(meta)
-	router.HandleEvent(context.Background(), domain.Event{
+	mustHandle(t, router, domain.Event{
 		EventType:    domain.EventGitHubPRMentioned,
 		EntityID:     &entityID,
 		DedupKey:     dedupKey,
@@ -65,9 +66,9 @@ func TestMentioned_RoutesToMentionedUserAndBumps(t *testing.T) {
 		Author: "carol", Commenter: "dave", CommentID: 11, MentionedLogin: "bob",
 		MentionSource: events.MentionSourceComment, Repo: "owner/repo", PRNumber: 5,
 	}
-	emitMentioned(router, entityID, "user:bob", meta)
+	emitMentioned(t, router, entityID, "user:bob", meta)
 	meta.CommentID = 12
-	emitMentioned(router, entityID, "user:bob", meta)
+	emitMentioned(t, router, entityID, "user:bob", meta)
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
@@ -108,7 +109,7 @@ func TestMentioned_TeamRoutesToMappedTFTeams(t *testing.T) {
 	seedMentionRule(t, database, runmode.LocalDefaultTeamID)
 
 	entityID := reviewEntity(t, database, "owner/repo#teammention")
-	emitMentioned(reviewRouter(database), entityID, "team:acme/backend", events.GitHubPRMentionedMetadata{
+	emitMentioned(t, reviewRouter(database), entityID, "team:acme/backend", events.GitHubPRMentionedMetadata{
 		Author: "carol", MentionedTeam: "acme/backend", MentionSource: events.MentionSourceBody, Repo: "owner/repo", PRNumber: 6,
 	})
 

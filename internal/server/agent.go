@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -17,7 +16,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
+	"github.com/sky-ai-eng/triage-factory/internal/server/deliverables"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/usage"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -36,14 +37,6 @@ type agentHandler struct {
 // is a uuid column on Postgres. See uuidPathOr404.
 func conversationIDOr404(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return uuidPathOr404(w, r, "conversationID", "conversation")
-}
-
-// writeDelegationUnavailable answers the routes that need a wired spawner on a
-// deployment that has none (delegation disabled). Server-side configuration,
-// not a request fault, and not a transient upstream — 409 NOT_CONFIGURED, the
-// same answer every other unconfigured-integration route gives.
-func writeDelegationUnavailable(w http.ResponseWriter) {
-	writeNotConfigured(w, "delegation is not configured on this deployment")
 }
 
 func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request) {
@@ -85,6 +78,10 @@ func (ag *agentHandler) writeConversationResource(w http.ResponseWriter, r *http
 		if e != nil {
 			return e
 		}
+		actionCounts, e := tx.ExternalActions.CountByConversations(r.Context(), orgID, []string{conv.ID})
+		if e != nil {
+			return e
+		}
 		// Derive has_unresolved_deliverables (+ per-kind counts) from the conversation's
 		// deliverable set. Only read the deliverables when the conversation has any —
 		// counts==0 means there's nothing unresolved, so skip the list. A list
@@ -113,7 +110,7 @@ func (ag *agentHandler) writeConversationResource(w http.ResponseWriter, r *http
 				progress = runs[conv.BlueprintRunID]
 			}
 		}
-		resp = conversationResponse(conv, counts[conv.ID], arts, artifactCounts[conv.ID], progress, "")
+		resp = conversationResponse(conv, counts[conv.ID], arts, artifactCounts[conv.ID], actionCounts[conv.ID], progress, "")
 		return nil
 	}); err != nil {
 		internalError(w, "agent", err)
@@ -231,73 +228,6 @@ func (ag *agentHandler) handleDeliverableRefresh(w http.ResponseWriter, r *http.
 	writeJSON(w, http.StatusOK, map[string]any{"updated": len(updated)})
 }
 
-// deliverableJSON is the wire shape of one conversation deliverable in the items of
-// POST /api/agent/conversations/{conversationID}/deliverables/list — the conversation's deliverables as the board /
-// RunDetail UI (TFAC-470) consumes them, across every kind (branch /
-// pull_request / review / issue / comment). details is the PARSED details_json
-// (the kind-specific payload as a JSON object, or null when absent/unparseable)
-// so the client gets structured data, not a string to re-parse. The mutable
-// dedup_key / org_id / team_id internals stay off the wire.
-type deliverableJSON struct {
-	ID         string          `json:"id"`
-	Kind       string          `json:"kind"`
-	Provider   string          `json:"provider"`
-	Scope      string          `json:"scope"`
-	State      string          `json:"state"`
-	Target     string          `json:"target"`
-	ExternalID string          `json:"external_id"`
-	URL        string          `json:"url"`
-	Details    json.RawMessage `json:"details"`
-	CreatedAt  time.Time       `json:"created_at"`
-}
-
-// toDeliverableJSON projects a stored deliverable onto the read-API wire shape,
-// emitting details_json as embedded JSON (or null when absent/corrupt).
-func toDeliverableJSON(a domain.Deliverable) deliverableJSON {
-	out := deliverableEnvelope(a)
-	out.Details = storedDeliverableDetails(a)
-	return out
-}
-
-// deliverableEnvelope fills the kind-independent half of the read shape, leaving
-// Details to the caller. The single read (GET /api/deliverables/{id}) composes a
-// live representation for two of the kinds, so it fills that slot itself
-// rather than passing the stored payload through.
-func deliverableEnvelope(a domain.Deliverable) deliverableJSON {
-	return deliverableJSON{
-		ID:         a.ID,
-		Kind:       a.Kind,
-		Provider:   a.Provider,
-		Scope:      a.Scope,
-		State:      a.State,
-		Target:     a.Target,
-		ExternalID: a.ExternalID,
-		URL:        a.URL,
-		CreatedAt:  a.CreatedAt,
-	}
-}
-
-// storedDeliverableDetails is the details_json a row already holds, as the
-// embedded JSON object it is.
-func storedDeliverableDetails(a domain.Deliverable) json.RawMessage {
-	switch {
-	case a.DetailsJSON == "":
-		// No details — nil, which marshals to null.
-		return nil
-	case json.Valid([]byte(a.DetailsJSON)):
-		return json.RawMessage(a.DetailsJSON)
-	default:
-		// Corrupt payload: serve null rather than fail the whole response's
-		// marshal (json.Marshal validates a RawMessage). details_json is written
-		// by our own marshaled structs, so an invalid value is a real upstream
-		// bug worth a trace, not an expected empty — mirror the deliverable handler's
-		// "details unparseable" warning so it isn't a silent drop.
-		deliverablesLog.Warn("deliverable details_json is not valid JSON; serving null",
-			"deliverable", a.ID, "dedup_key", a.DedupKey)
-		return nil
-	}
-}
-
 // conversationDeliverableListRequest is the body of POST
 // /api/agent/conversations/{conversationID}/deliverables/list. The
 // conversation is the path id and the read has no filters of its own, so the
@@ -361,17 +291,18 @@ func (ag *agentHandler) handleAgentDeliverables(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	out := make([]deliverableJSON, len(arts))
+	out := make([]deliverables.JSON, len(arts))
 	for i, a := range arts {
-		out[i] = toDeliverableJSON(a)
+		out[i] = deliverables.ToJSON(a)
 	}
 	httpx.WriteList(w, page, out, total)
 }
 
 // conversationActionListRequest is the body of POST
 // /api/agent/conversations/{conversationID}/actions/list. The conversation is
-// the path id. ObjectID keeps the rows that changed one object (an
-// artifact's object_id); Refused keeps the refused and failed writes. Both
+// the path id. ObjectID keeps the rows of one artifact (its object_id): the
+// rows that changed that object and that its count counts, which leaves out
+// TF's own; Refused keeps the refused and failed writes. Both
 // are optional and may be given together. The filters are fields of the body
 // itself rather than an embedded struct, so a type fault names them as the
 // caller spelled them.
@@ -468,9 +399,9 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	out := make([]actionJSON, len(actions))
+	out := make([]usage.ActionJSON, len(actions))
 	for i, a := range actions {
-		out[i] = toActionJSON(a)
+		out[i] = usage.ToActionJSON(a)
 	}
 	httpx.WriteList(w, page, out, total)
 }
@@ -481,27 +412,18 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 // conversation's deliverable that is the same object
 // (domain.ArtifactDeliverable), or null.
 type artifactJSON struct {
-	ObjectID    domain.ObjectRef         `json:"object_id"`
-	ObjectKind  string                   `json:"object_kind"`
-	Provider    string                   `json:"provider"`
-	Scope       string                   `json:"scope"`
-	Target      string                   `json:"target"`
-	URL         string                   `json:"url"`
-	EntityID    string                   `json:"entity_id,omitempty"`
-	LastAction  string                   `json:"last_action"`
-	ActionCount int                      `json:"action_count"`
-	FirstAt     time.Time                `json:"first_at"`
-	LastAt      time.Time                `json:"last_at"`
-	Deliverable *artifactDeliverableJSON `json:"deliverable"`
-}
-
-// artifactDeliverableJSON names the deliverable an artifact matched: enough
-// to address it and read where it stands, with the deliverable's own read
-// for the rest.
-type artifactDeliverableJSON struct {
-	ID    string `json:"id"`
-	Kind  string `json:"kind"`
-	State string `json:"state"`
+	ObjectID    domain.ObjectRef               `json:"object_id"`
+	ObjectKind  string                         `json:"object_kind"`
+	Provider    string                         `json:"provider"`
+	Scope       string                         `json:"scope"`
+	Target      string                         `json:"target"`
+	URL         string                         `json:"url"`
+	EntityID    string                         `json:"entity_id,omitempty"`
+	LastAction  string                         `json:"last_action"`
+	ActionCount int                            `json:"action_count"`
+	FirstAt     time.Time                      `json:"first_at"`
+	LastAt      time.Time                      `json:"last_at"`
+	Deliverable *usage.ArtifactDeliverableJSON `json:"deliverable"`
 }
 
 func toArtifactJSON(a domain.Artifact, deliverables []domain.Deliverable) artifactJSON {
@@ -519,7 +441,7 @@ func toArtifactJSON(a domain.Artifact, deliverables []domain.Deliverable) artifa
 		LastAt:      a.LastAt,
 	}
 	if d, ok := domain.ArtifactDeliverable(a, deliverables); ok {
-		out.Deliverable = &artifactDeliverableJSON{ID: d.ID, Kind: d.Kind, State: d.State}
+		out.Deliverable = &usage.ArtifactDeliverableJSON{ID: d.ID, Kind: d.Kind, State: d.State}
 	}
 	return out
 }
@@ -621,6 +543,9 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 //   - artifactCounts is the conversation's artifacts by object kind, from
 //     Artifacts.CountByConversations (batched like deliverableCount; nil for
 //     a conversation with none).
+//   - actionCount is the number of the conversation's ledger rows, from
+//     ExternalActions.CountByConversations (batched the same way; 0 for a
+//     conversation with none).
 //   - progress is the owning blueprint run's plan length and status, from
 //     Blueprints.RunProgress (batched the same way). Zero values when the
 //     conversation has no blueprint, and when the caller could not resolve one
@@ -655,7 +580,7 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 // purpose: that route's client is the run station, whose live transcript
 // already shows the call this line would summarize, and buying it there would
 // add a query to a polled route for a field it does not render.
-func conversationResponse(conv *domain.Conversation, deliverableCount int, arts []domain.Deliverable, artifactCounts map[string]int, progress db.RunProgress, currentAction string) map[string]any {
+func conversationResponse(conv *domain.Conversation, deliverableCount int, arts []domain.Deliverable, artifactCounts map[string]int, actionCount int, progress db.RunProgress, currentAction string) map[string]any {
 	out := map[string]any{
 		"ID":            conv.ID,
 		"TaskID":        conv.TaskID,
@@ -694,6 +619,12 @@ func conversationResponse(conv *domain.Conversation, deliverableCount int, arts 
 		// nothing.
 		"artifact_count":  artifactTotal(artifactCounts),
 		"artifact_counts": artifactCountsOrEmpty(artifactCounts),
+		// How many acts on an outside system the conversation recorded, a
+		// refused one included: its ledger rows, whoever performed them. A
+		// run acting again on an object it already changed moves this and
+		// not the artifact counts, so it is what a view of the
+		// conversation's actions refetches on.
+		"action_count": actionCount,
 		// The token rollups the conversation read already SUMs, alongside the cost /
 		// duration / turns ones above. snake_case like every key added since
 		// the legacy PascalCase set froze. Plain ints — 0 for a conversation that never
@@ -935,7 +866,7 @@ func (ag *agentHandler) handleAgentStop(w http.ResponseWriter, r *http.Request) 
 	}
 	spawner := ag.spawner()
 	if spawner == nil {
-		writeDelegationUnavailable(w)
+		httpx.WriteDelegationUnavailable(w)
 		return
 	}
 	visible, err := ag.conversationVisible(r.Context(), orgID, userID, conversationID)
@@ -1018,7 +949,7 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 
 	spawner := ag.spawner()
 	if spawner == nil {
-		writeDelegationUnavailable(w)
+		httpx.WriteDelegationUnavailable(w)
 		return
 	}
 
@@ -1154,7 +1085,7 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 
 	spawner := ag.spawner()
 	if spawner == nil {
-		writeDelegationUnavailable(w)
+		httpx.WriteDelegationUnavailable(w)
 		return
 	}
 
@@ -1295,6 +1226,8 @@ func (ag *agentHandler) handleAgentPermissions(w http.ResponseWriter, r *http.Re
 //     conversations need the list below.
 //   - artifact_count and artifact_counts for every conversation: one
 //     Artifacts.CountByConversations (conversation → object kind → count).
+//   - action_count for every conversation: one
+//     ExternalActions.CountByConversations.
 //   - has_unresolved_deliverables for the conversations that have deliverables: one ListByConversations
 //     over just those conversation ids (count>0), grouped per conversation. The derivation needs
 //     the actual deliverables, but a conversation with none can't have an unresolved one, so
@@ -1324,6 +1257,10 @@ func enrichConversations(ctx context.Context, tx db.TxStores, orgID string, conv
 		return nil, err
 	}
 	artifactCounts, err := tx.Artifacts.CountByConversations(ctx, orgID, conversationIDs)
+	if err != nil {
+		return nil, err
+	}
+	actionCounts, err := tx.ExternalActions.CountByConversations(ctx, orgID, conversationIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -1389,7 +1326,7 @@ func enrichConversations(ctx context.Context, tx db.TxStores, orgID string, conv
 	out := make([]map[string]any, len(convs))
 	for i := range convs {
 		out[i] = conversationResponse(&convs[i], counts[convs[i].ID], artsByConv[convs[i].ID],
-			artifactCounts[convs[i].ID], progress[convs[i].BlueprintRunID],
+			artifactCounts[convs[i].ID], actionCounts[convs[i].ID], progress[convs[i].BlueprintRunID],
 			currentAction(toolCalls[convs[i].ID], convs[i].WorktreePath))
 	}
 	return out, nil
@@ -1501,7 +1438,7 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var v httpx.Validation
-	taskIDs := canonicalStrings(req.TaskIDs)
+	taskIDs := httpx.CanonicalStrings(req.TaskIDs)
 	if len(taskIDs) > maxBatchTaskIDs {
 		v.OutOfRange("task_ids", fmt.Sprintf("task_ids accepts at most %d ids per request; got %d", maxBatchTaskIDs, len(taskIDs)))
 	}
@@ -1512,7 +1449,7 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 			v.Invalid("task_ids", fmt.Sprintf("task_ids contains %q, which is not a valid task id", id))
 		}
 	}
-	teamIDs := canonicalStrings(req.TeamIDs)
+	teamIDs := httpx.CanonicalStrings(req.TeamIDs)
 	// Counted after canonicalization, so a client that repeated a team id
 	// spends the cap on distinct teams rather than on its own duplicates.
 	if len(teamIDs) > maxBatchTeamIDs {
@@ -1525,7 +1462,7 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 			v.Invalid("team_ids", fmt.Sprintf("team id %q is not a valid team id", id))
 		}
 	}
-	statuses := canonicalStrings(req.Statuses)
+	statuses := httpx.CanonicalStrings(req.Statuses)
 	validStatuses := domain.AllConversationStatuses()
 	for _, st := range statuses {
 		if !slices.Contains(validStatuses, st) {

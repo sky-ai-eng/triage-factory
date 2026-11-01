@@ -1,10 +1,8 @@
-// Package prompts holds the prompt primitives shared across the handler
-// surfaces that read or write prompts — the standalone prompts API and the
-// blueprint editor (whose steps are prompts). These are the pieces the
-// handler packages need in common: the model-override allow-list, the
-// create/update request shapes, and the source-aware soft delete. The
-// prompt HTTP handlers themselves will migrate into this package; for now
-// it is the shared contract they all import.
+// Package prompts serves the prompts API — prompt list, read, create, update,
+// delete and stats — and the event-types catalog read. It also holds the
+// prompt primitives the blueprint editor (whose steps are prompts) shares with
+// it: the model-override allow-list, the create/update request shapes, and the
+// source-aware soft delete.
 package prompts
 
 import (

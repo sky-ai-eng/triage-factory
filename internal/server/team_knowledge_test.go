@@ -11,6 +11,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // The team knowledge base's HTTP surface, in local mode: the shape of the five
@@ -288,7 +289,7 @@ func TestTeamKnowledge_MoveOntoAnOccupiedPathIsAConflict(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("colliding move = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, httpx.ReasonConflict, "")
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonConflict, "")
 
 	// Nothing moved: both documents are where they were.
 	items, _ := listKnowledge(t, s, map[string]any{})
@@ -349,7 +350,7 @@ func TestTeamKnowledge_BadCallsFail(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("= %d, want 400; body=%s", rec.Code, rec.Body.String())
 		}
-		assertFirstError(t, rec, httpx.ReasonUnknownField, "roots")
+		httpxtest.AssertFirstError(t, rec, httpx.ReasonUnknownField, "roots")
 	})
 
 	t.Run("unknown root", func(t *testing.T) {
@@ -357,7 +358,7 @@ func TestTeamKnowledge_BadCallsFail(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("= %d, want 400; body=%s", rec.Code, rec.Body.String())
 		}
-		assertFirstError(t, rec, httpx.ReasonInvalidField, "root")
+		httpxtest.AssertFirstError(t, rec, httpx.ReasonInvalidField, "root")
 	})
 
 	t.Run("traversal prefix", func(t *testing.T) {
@@ -365,7 +366,7 @@ func TestTeamKnowledge_BadCallsFail(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("= %d, want 400; body=%s", rec.Code, rec.Body.String())
 		}
-		assertFirstError(t, rec, httpx.ReasonInvalidField, "path_prefix")
+		httpxtest.AssertFirstError(t, rec, httpx.ReasonInvalidField, "path_prefix")
 	})
 
 	t.Run("page_size out of range is rejected, not clamped", func(t *testing.T) {
@@ -373,7 +374,7 @@ func TestTeamKnowledge_BadCallsFail(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("= %d, want 400; body=%s", rec.Code, rec.Body.String())
 		}
-		assertFirstError(t, rec, httpx.ReasonOutOfRange, "page_size")
+		httpxtest.AssertFirstError(t, rec, httpx.ReasonOutOfRange, "page_size")
 	})
 
 	t.Run("move without a destination", func(t *testing.T) {
@@ -393,7 +394,7 @@ func TestTeamKnowledge_BadCallsFail(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("= %d, want 400; body=%s", rec.Code, rec.Body.String())
 		}
-		assertFirstError(t, rec, httpx.ReasonInvalidField, "to_path")
+		httpxtest.AssertFirstError(t, rec, httpx.ReasonInvalidField, "to_path")
 	})
 
 	t.Run("upload with no root", func(t *testing.T) {
@@ -401,7 +402,7 @@ func TestTeamKnowledge_BadCallsFail(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("= %d, want 400; body=%s", rec.Code, rec.Body.String())
 		}
-		assertFirstError(t, rec, httpx.ReasonInvalidField, "root")
+		httpxtest.AssertFirstError(t, rec, httpx.ReasonInvalidField, "root")
 	})
 
 	t.Run("upload with an unknown form field", func(t *testing.T) {
@@ -416,7 +417,7 @@ func TestTeamKnowledge_BadCallsFail(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("= %d, want 400; body=%s", rec.Code, rec.Body.String())
 		}
-		assertFirstError(t, rec, httpx.ReasonInvalidField, "")
+		httpxtest.AssertFirstError(t, rec, httpx.ReasonInvalidField, "")
 	})
 
 	t.Run("upload of a traversal filename", func(t *testing.T) {
@@ -424,7 +425,7 @@ func TestTeamKnowledge_BadCallsFail(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("= %d, want 400; body=%s", rec.Code, rec.Body.String())
 		}
-		assertFirstError(t, rec, httpx.ReasonInvalidField, "files")
+		httpxtest.AssertFirstError(t, rec, httpx.ReasonInvalidField, "files")
 	})
 
 	t.Run("read of a path that is not an address", func(t *testing.T) {
@@ -486,7 +487,7 @@ func TestTeamKnowledge_UploadFieldOrdering(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("= %d, want 400; an upload must not straddle two folders", rec.Code)
 	}
-	assertFirstError(t, rec, httpx.ReasonInvalidField, "path_prefix")
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonInvalidField, "path_prefix")
 
 	// And the refusal names what it already wrote, because that is durable now.
 	if !strings.Contains(rec.Body.String(), "private/first/a.md") {

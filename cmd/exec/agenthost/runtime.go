@@ -649,6 +649,11 @@ func (r *directRuntime) DeleteConversationWorktree(ctx context.Context, reposito
 // a must be a review draft. A pull request deliverable is written only by its
 // create, through the funnel, which never overwrites a recorded one; an upsert
 // of one here would let a relayed write move another run's pull request row.
+//
+// Once the write lands, the conversation records the deliverable's entity as
+// produced (recordMemoryLink): a staged review is the run's output before any
+// ledger row names it, so this write is where the run records it. The link
+// is best-effort and recorded outside the write's transaction.
 func (r *directRuntime) UpsertDeliverable(ctx context.Context, a domain.Deliverable, github domain.GitHubIdentity) (domain.Deliverable, error) {
 	if a.Kind != domain.DeliverableKindReview {
 		return domain.Deliverable{}, fmt.Errorf("agenthost: a deliverable upsert records a review draft, not a %q", a.Kind)
@@ -681,6 +686,7 @@ func (r *directRuntime) UpsertDeliverable(ctx context.Context, a domain.Delivera
 	if err != nil {
 		return domain.Deliverable{}, err
 	}
+	recordMemoryLink(ctx, r.stores, r.info, stored.Provider, stored.EntityID, domain.MemoryRoleProduced)
 	return stored, nil
 }
 

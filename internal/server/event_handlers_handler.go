@@ -37,7 +37,7 @@ type eventHandlersHandler struct {
 // (caller should return — a response was written) for a viewer (403) or a load
 // failure (500). A missing handler passes through (returns true) so the
 // handler's own nil-check renders the 404 — never reached for an absent row.
-// The same shape as gateBlueprintWrite.
+// The same shape as the blueprint handlers' write gate.
 func (eh *eventHandlersHandler) gateHandlerWrite(w http.ResponseWriter, r *http.Request, orgID, userID, id string) bool {
 	var existing *domain.EventHandler
 	if err := eh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -131,7 +131,7 @@ func (eh *eventHandlersHandler) handleEventHandlersList(w http.ResponseWriter, r
 	// this org isn't licensed for. It rides into the query as a filter, not a
 	// post-read trim, so the page and total_count agree about what the caller
 	// can see.
-	filter := db.EventHandlerListFilter{Kind: req.Kind, TeamID: req.TeamID, GatedEventTypes: gatedEventTypes(orgID)}
+	filter := db.EventHandlerListFilter{Kind: req.Kind, TeamID: req.TeamID, GatedEventTypes: entitlements.GatedEventTypes(orgID)}
 
 	var (
 		handlers []domain.EventHandler
@@ -560,7 +560,7 @@ func (eh *eventHandlersHandler) handleEventHandlerCreateRule(w http.ResponseWrit
 	// Reject viewers before authoring a rule: resolve the acting team read-only
 	// and gate, so a viewer gets a clean 403 rather than the
 	// event_handlers_insert RLS WITH CHECK surfacing as a 500.
-	teamID, ok := actingTeamForWrite(w, r, eh.tx, eh.az, orgID, userID, req.TeamID, "event_handlers")
+	teamID, ok := eh.az.ActingTeamForWrite(w, r, orgID, userID, req.TeamID, "event_handlers")
 	if !ok {
 		return
 	}
@@ -637,7 +637,7 @@ func (eh *eventHandlersHandler) handleEventHandlerCreateTrigger(w http.ResponseW
 		return
 	}
 
-	teamID, ok := actingTeamForWrite(w, r, eh.tx, eh.az, orgID, userID, req.TeamID, "event_handlers")
+	teamID, ok := eh.az.ActingTeamForWrite(w, r, orgID, userID, req.TeamID, "event_handlers")
 	if !ok {
 		return
 	}
@@ -1315,7 +1315,7 @@ func (eh *eventHandlersHandler) handleEventHandlerReorder(w http.ResponseWriter,
 	if err := eh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		visible, _, e = tx.EventHandlers.List(r.Context(), orgID,
-			db.EventHandlerListFilter{GatedEventTypes: gatedEventTypes(orgID)}, db.Unwindowed)
+			db.EventHandlerListFilter{GatedEventTypes: entitlements.GatedEventTypes(orgID)}, db.Unwindowed)
 		return e
 	}); err != nil {
 		internalError(w, "event_handlers", err)

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // facetsBody is the shape POST /api/tasks/facets answers with: named cuts,
@@ -151,7 +152,7 @@ func TestTaskFacets_RefusesTheFieldsItDoesNotAnswerFor(t *testing.T) {
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 			}
-			assertFirstError(t, rec, "INVALID_FIELD", tc.field)
+			httpxtest.AssertFirstError(t, rec, "INVALID_FIELD", tc.field)
 		})
 	}
 
@@ -163,7 +164,7 @@ func TestTaskFacets_RefusesTheFieldsItDoesNotAnswerFor(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 		}
-		assertFirstError(t, rec, "INVALID_FIELD", "search")
+		httpxtest.AssertFirstError(t, rec, "INVALID_FIELD", "search")
 	})
 
 	// A field of neither route is still a spelling fault.
@@ -173,7 +174,7 @@ func TestTaskFacets_RefusesTheFieldsItDoesNotAnswerFor(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 		}
-		assertFirstError(t, rec, "UNKNOWN_FIELD", "bogus")
+		httpxtest.AssertFirstError(t, rec, "UNKNOWN_FIELD", "bogus")
 	})
 }
 

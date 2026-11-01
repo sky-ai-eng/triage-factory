@@ -5,7 +5,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -44,14 +43,4 @@ func (s *RelayServer) startRelayOp(ctx context.Context, name, namespace, op stri
 		opts = append(opts, trace.WithLinks(trace.Link{SpanContext: s.engagement}))
 	}
 	return tracer.Start(ctx, name, opts...)
-}
-
-// recordSpanError puts err on span with an error status, and does nothing
-// for a nil error.
-func recordSpanError(span trace.Span, err error) {
-	if err == nil {
-		return
-	}
-	span.RecordError(err)
-	span.SetStatus(codes.Error, err.Error())
 }

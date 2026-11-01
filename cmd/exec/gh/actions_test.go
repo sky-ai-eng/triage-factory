@@ -478,7 +478,7 @@ func TestDownloadAndExtractLogs_HappyPath(t *testing.T) {
 // TestDownloadAndExtractLogs_FailureCleansUp is the regression test for the
 // exit-defer-cleanup bug: when the download step fails, both the temp zip
 // file AND the destination directory must be cleaned up. A previous version
-// used exitErr (→ os.Exit) inline, which skipped defers and leaked both.
+// used execout.ExitErr (→ os.Exit) inline, which skipped defers and leaked both.
 func TestDownloadAndExtractLogs_FailureCleansUp(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)

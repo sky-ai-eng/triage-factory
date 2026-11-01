@@ -150,6 +150,16 @@ type ExternalActionStore interface {
 	// whichever team's run posted the comment.
 	PresentPostedCommentKeysSystem(ctx context.Context, orgID, scope string, keys []string) (map[string]bool, error)
 
+	// CountByConversations returns, for each of conversationIDs that has any
+	// row, its number of rows, whoever performed them and whatever their
+	// action. The ledger is append-only, so the number moves with every act
+	// the conversation records, a refused one included, whatever its
+	// occurred_at says; a reader holding a conversation compares it to tell
+	// that its actions changed. A conversation with no row has no entry, and
+	// an empty conversationIDs returns an empty map without touching the
+	// database. App pool, under the caller's claims.
+	CountByConversations(ctx context.Context, orgID string, conversationIDs []string) (map[string]int, error)
+
 	// ListAgentActionsForBlueprintRunSystem returns orgID's rows of one
 	// action that a run's agent performed (performed_by 'agent') in any of
 	// blueprintRunID's step conversations, newest first: by occurred_at, and

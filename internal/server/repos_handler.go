@@ -527,7 +527,7 @@ func optRFC3339(t *time.Time) *string {
 	if t == nil {
 		return nil
 	}
-	s := rfc3339(*t)
+	s := t.UTC().Format(time.RFC3339)
 	return &s
 }
 
@@ -1260,7 +1260,7 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 	branches, rawCount, err := client.ListBranchesPage(r.Context(), owner, repo, req.Q, page.Limit, upstreamPage)
 	if err != nil {
 		reposLog.Warn("fetch branches failed", "org", orgID, "owner", owner, "repo", repo, "error", err)
-		writeUpstreamGitHub(w, "failed to fetch branches from GitHub", err)
+		httpx.WriteUpstreamUnavailable(w, "failed to fetch branches from GitHub", err)
 		return
 	}
 

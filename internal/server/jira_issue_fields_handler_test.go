@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 func jiraPrioritiesPath() string { return jiraOrgPath(runmode.LocalDefaultOrgID) + "/priorities" }
@@ -18,8 +19,8 @@ func jiraIssueTypesListPath(key string) string { return jiraProjectPath(key) + "
 // and serves a null total_count.
 func readTwoPages[T any](t *testing.T, s *Server, path string) ([]T, string) {
 	t.Helper()
-	first := decodeList[T](t, doJSON(t, s, http.MethodPost, path, map[string]any{"page_size": 2}))
-	second := decodeList[T](t, doJSON(t, s, http.MethodPost, path, map[string]any{"page_size": 2, "page_token": first.NextPageToken}))
+	first := httpxtest.DecodeList[T](t, doJSON(t, s, http.MethodPost, path, map[string]any{"page_size": 2}))
+	second := httpxtest.DecodeList[T](t, doJSON(t, s, http.MethodPost, path, map[string]any{"page_size": 2, "page_token": first.NextPageToken}))
 	if first.NextPageToken == "" || second.NextPageToken != "" || first.TotalCount != nil || second.TotalCount != nil {
 		t.Fatalf("pages = %+v then %+v, want two pages and a null total", first, second)
 	}

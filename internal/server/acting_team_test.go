@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 
 	"github.com/google/uuid"
@@ -104,5 +105,20 @@ func TestResolveReadTeam_DefaultsNeverBlock(t *testing.T) {
 	}
 	if got != runmode.LocalDefaultTeamID {
 		t.Errorf("read team with stale filter = %q; want fallback to first team %q", got, runmode.LocalDefaultTeamID)
+	}
+}
+
+// TestPromptCreate_AmbiguousTeamIs400: with two teams and no team_id, a create
+// is refused with 400 rather than landing on a guessed team.
+func TestPromptCreate_AmbiguousTeamIs400(t *testing.T) {
+	s := newTestServer(t)
+	seedTeam(t, s, runmode.LocalDefaultOrgID, "second")
+
+	rec := doJSON(t, s, http.MethodPost, "/api/prompts", map[string]string{
+		"name": "Unscoped prompt",
+		"body": "do the thing",
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (ambiguous team); body=%s", rec.Code, rec.Body.String())
 	}
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 func linearOrgPath(orgID string) string { return "/api/orgs/" + orgID + "/linear" }
@@ -62,7 +63,7 @@ func TestLinearTeamsList_TokenIsFingerprintedOnQ(t *testing.T) {
 		alphaBeta,
 		linear.Team{ID: fixtureUUID("t3"), Key: "ZZZ", Name: "Zed"},
 	)
-	first := decodeList[linearTeamJSON](t, doJSON(t, s, http.MethodPost, linearTeamsListPath,
+	first := httpxtest.DecodeList[linearTeamJSON](t, doJSON(t, s, http.MethodPost, linearTeamsListPath,
 		map[string]any{"q": "a", "page_size": 1}))
 	if got := linearTeamKeysOf(first.Items); got != "AAA" || first.NextPageToken == "" || first.TotalCount != nil {
 		t.Fatalf("page 1 = %s (token %q, total %v), want AAA with a token and a null total", got, first.NextPageToken, first.TotalCount)
@@ -73,7 +74,7 @@ func TestLinearTeamsList_TokenIsFingerprintedOnQ(t *testing.T) {
 	assertOneFault(t, rec, http.StatusBadRequest, "INVALID_PARAM", "page_token")
 
 	// ZZZ does not match, so the second and last page is ABB.
-	second := decodeList[linearTeamJSON](t, doJSON(t, s, http.MethodPost, linearTeamsListPath,
+	second := httpxtest.DecodeList[linearTeamJSON](t, doJSON(t, s, http.MethodPost, linearTeamsListPath,
 		map[string]any{"q": "A", "page_size": 1, "page_token": first.NextPageToken}))
 	want := linearTeamJSON{ID: alphaBeta.ID, Key: "ABB", Name: "Alpha Beta", Private: true}
 	if len(second.Items) != 1 || second.Items[0] != want || second.NextPageToken != "" {
@@ -173,7 +174,7 @@ func TestLinearTeamGet(t *testing.T) {
 // that wraps a cursor into that team's workflow and cannot page another's.
 func TestLinearStatesList_TokenIsBoundToTheTeam(t *testing.T) {
 	s, _ := newServerWithLinearCatalog(t, linearFixtureEng, linearFixtureOps)
-	first := decodeList[linearStateJSON](t, doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamEng),
+	first := httpxtest.DecodeList[linearStateJSON](t, doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamEng),
 		map[string]any{"page_size": 4}))
 	if first.NextPageToken == "" {
 		t.Fatal("page 1 carried no next_page_token")
@@ -182,7 +183,7 @@ func TestLinearStatesList_TokenIsBoundToTheTeam(t *testing.T) {
 		map[string]any{"page_size": 4, "page_token": first.NextPageToken}),
 		http.StatusBadRequest, "INVALID_PARAM", "page_token")
 
-	second := decodeList[linearStateJSON](t, doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamEng),
+	second := httpxtest.DecodeList[linearStateJSON](t, doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamEng),
 		map[string]any{"page_size": 4, "page_token": first.NextPageToken}))
 	if second.NextPageToken != "" || first.TotalCount != nil || second.TotalCount != nil {
 		t.Errorf("pages = %+v then %+v, want two pages and a null total", first, second)

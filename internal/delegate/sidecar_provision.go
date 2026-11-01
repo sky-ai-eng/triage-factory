@@ -306,7 +306,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 		},
 	})
 	if err != nil {
-		recordSpanError(bringUpSpan, err)
+		telemetry.RecordSpanError(bringUpSpan, err)
 		return nil, err
 	}
 
@@ -384,7 +384,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 	res, conn, err := agentproc.BringUpRunSidecar(ctx, c.Sidecar(), s.sidecarProvisionFor(orgID, conv.ID), params)
 	endBringUp()
 	if err != nil {
-		recordSpanError(bringUpSpan, err)
+		telemetry.RecordSpanError(bringUpSpan, err)
 		_ = c.Close()
 		return nil, fmt.Errorf("bring up credential sidecar: %w", err)
 	}
@@ -584,7 +584,7 @@ func (s *Spawner) managedGitGate(info agenthost.ConversationInfo, stores db.Stor
 			ctx, span := startPunctualLinked(ctx, engagement, info.ConversationID, "git.authorize", telemetry.OrgID(info.OrgID))
 			defer span.End()
 			dec, err := gitAuthorizeDecision(ctx, stores, info, owner, repo)
-			recordSpanError(span, err)
+			telemetry.RecordSpanError(span, err)
 			if err == nil {
 				span.SetAttributes(telemetry.Outcome(gitAuthorizeOutcome(dec)))
 			}
@@ -653,7 +653,7 @@ func (s *Spawner) sidecarProvisionFor(orgID, conversationID string) agentproc.Si
 		// old pre-sandbox gate used, now carrying the recipient key so the
 		// brain seals to it (credprovision reads claim.CredPubKey).
 		if _, err := s.conversationQueue.MarkAwaitingCredentials(provCtx, orgID, conversationID, sidecarPubKeyB64); err != nil {
-			recordSpanError(span, err)
+			telemetry.RecordSpanError(span, err)
 			return nil, 0, fmt.Errorf("mark awaiting-credentials for conversation %s: %w", conversationID, err)
 		}
 
@@ -688,13 +688,13 @@ func (s *Spawner) sidecarProvisionFor(orgID, conversationID string) agentproc.Si
 			}
 			select {
 			case <-provCtx.Done():
-				recordSpanError(span, provCtx.Err())
+				telemetry.RecordSpanError(span, provCtx.Err())
 				return nil, 0, provCtx.Err()
 			case <-ticker.C:
 				if time.Now().After(deadline) {
 					err := fmt.Errorf("%w: conversation %s after %s (brain not provisioning)", errAwaitingCredentialsTimeout, conversationID, timeout)
 					span.SetAttributes(telemetry.Count(polls))
-					recordSpanError(span, err)
+					telemetry.RecordSpanError(span, err)
 					return nil, 0, err
 				}
 			}

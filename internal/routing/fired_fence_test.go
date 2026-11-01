@@ -163,7 +163,7 @@ func TestHandleEvent_ReplayedEvent_FiresExactlyOnce(t *testing.T) {
 	evt := recordFenceEvent(t, database, entityID)
 
 	// First delivery: immediate fire creates conversation R1.
-	router.HandleEvent(context.Background(), evt)
+	mustHandle(t, router, evt)
 	if n := fenceConversationCount(t, database, entityID); n != 1 {
 		t.Fatalf("after first delivery: want 1 conversation, got %d", n)
 	}
@@ -172,7 +172,7 @@ func TestHandleEvent_ReplayedEvent_FiresExactlyOnce(t *testing.T) {
 	fenceCompleteConversations(t, database, entityID)
 
 	// Replay the same event instance (same evt.ID, as boot recovery would).
-	router.HandleEvent(context.Background(), evt)
+	mustHandle(t, router, evt)
 
 	if n := fenceConversationCount(t, database, entityID); n != 1 {
 		t.Errorf("after replay: want exactly 1 conversation (fence dedups the replay), got %d", n)
@@ -195,7 +195,7 @@ func TestHandleEvent_DistinctEvents_FireIndependently(t *testing.T) {
 	router := fenceRouter(database, stub)
 
 	e1 := recordFenceEvent(t, database, entityID)
-	router.HandleEvent(context.Background(), e1)
+	mustHandle(t, router, e1)
 	// Terminal so the second event immediate-fires too (rather than queueing
 	// behind an active conversation — that's the drain path, tested
 	// separately).
@@ -205,7 +205,7 @@ func TestHandleEvent_DistinctEvents_FireIndependently(t *testing.T) {
 	if e2.ID == e1.ID {
 		t.Fatal("expected two distinct event instances")
 	}
-	router.HandleEvent(context.Background(), e2)
+	mustHandle(t, router, e2)
 
 	if n := fenceConversationCount(t, database, entityID); n != 2 {
 		t.Errorf("two distinct events on one entity: want 2 conversations, got %d", n)

@@ -830,6 +830,25 @@ describe('useConversationDetail deliverable refresh', () => {
     )
   })
 
+  it('re-reads a settled conversation row on the org-wide conversations ping', async () => {
+    // A person resolving a deliverable in another tab sends only
+    // conversations_updated, and a settled conversation's row is read on no
+    // tick, so without this read its pending ids would stay stale.
+    serverConversation = conversation({ Status: 'completed', TotalCostUSD: 0.2 })
+    const fetchMock = mockFetch()
+    render(<RefreshProbe id={CONVERSATION_ID} />)
+    await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('completed'))
+    await tick()
+    const reads = urlsEndingWith(fetchMock, `/conversations/${CONVERSATION_ID}`).length
+
+    send({ type: 'conversations_updated', data: {} })
+    await waitFor(() =>
+      expect(urlsEndingWith(fetchMock, `/conversations/${CONVERSATION_ID}`)).toHaveLength(
+        reads + 1,
+      ),
+    )
+  })
+
   it('discards a refresh answer for a conversation the page has left', async () => {
     // r1's refresh is still in flight when the page moves to r2. Its answer
     // reports a transition, but re-reading and installing r1's row now would

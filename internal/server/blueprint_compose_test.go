@@ -6,12 +6,19 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // Composition mutations: merge absorbs a trigger-less source onto a host's
 // tail, split partitions a blueprint at an index into the trigger-retaining
 // upstream and a new trigger-less downstream, and a second trigger on one
 // blueprint is a clean 409.
+
+// maxBlueprintSteps is the step cap the blueprints API enforces on the steps
+// PUT, merge and reconnect. TestBlueprintMerge_ExceedsStepCapRejected fails if
+// it drifts from that cap: a lower API cap refuses the steps PUT that builds
+// the host, and a higher one lets the over-cap merge through.
+const maxBlueprintSteps = 50
 
 type composeSteps []map[string]any
 
@@ -26,7 +33,7 @@ func listBlueprintSteps(t *testing.T, s *Server, blueprintID string) composeStep
 	rec := doJSON(t, s, http.MethodPost, "/api/blueprint-steps/list", map[string]any{
 		"blueprint_ids": []string{blueprintID},
 	})
-	return decodeList[map[string]any](t, rec).Items
+	return httpxtest.DecodeList[map[string]any](t, rec).Items
 }
 
 // listAllBlueprintSteps reads every in-scope blueprint's steps — the canvas's
@@ -35,7 +42,7 @@ func listAllBlueprintSteps(t *testing.T, s *Server) map[string]composeSteps {
 	t.Helper()
 	rec := doJSON(t, s, http.MethodPost, "/api/blueprint-steps/list", map[string]any{})
 	out := map[string]composeSteps{}
-	for _, st := range decodeList[map[string]any](t, rec).Items {
+	for _, st := range httpxtest.DecodeList[map[string]any](t, rec).Items {
 		id, _ := st["blueprint_id"].(string)
 		out[id] = append(out[id], st)
 	}
@@ -61,7 +68,7 @@ func blueprintExists(t *testing.T, s *Server, blueprintID string) bool {
 // blueprintListed reports whether the blueprint list serves blueprintID.
 func blueprintListed(t *testing.T, s *Server, blueprintID string) bool {
 	t.Helper()
-	page := decodeList[map[string]any](t, doJSON(t, s, http.MethodPost, "/api/blueprints/list", map[string]any{}))
+	page := httpxtest.DecodeList[map[string]any](t, doJSON(t, s, http.MethodPost, "/api/blueprints/list", map[string]any{}))
 	for _, b := range page.Items {
 		if b["id"] == blueprintID {
 			return true
@@ -88,7 +95,7 @@ func TestBlueprintMerge_TriggeredSourceRejected(t *testing.T) {
 		t.Fatalf("merge triggered source: expected 422, got %d: %s", rec.Code, rec.Body.String())
 	}
 	// A state conflict the caller can clear, not a team-boundary fault.
-	assertFirstError(t, rec, httpx.ReasonConflict, "source_blueprint_id")
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonConflict, "source_blueprint_id")
 	// The host is untouched (single transaction, nothing reparented).
 	hostSteps := listBlueprintSteps(t, s, host)
 	if len(hostSteps) != 1 {
@@ -110,7 +117,7 @@ func TestBlueprintMerge_ExceedsStepCapRejected(t *testing.T) {
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("merge over cap: expected 422, got %d: %s", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, httpx.ReasonOutOfRange, "source_blueprint_id")
+	httpxtest.AssertFirstError(t, rec, httpx.ReasonOutOfRange, "source_blueprint_id")
 	// Both blueprints untouched — host still at the cap, source not retired.
 	hs := listBlueprintSteps(t, s, host)
 	if len(hs) != maxBlueprintSteps {
@@ -202,7 +209,7 @@ func TestBlueprintSplit_AtEndsRejected(t *testing.T) {
 			t.Fatalf("split at %d: expected 422, got %d: %s", k, rec.Code, rec.Body.String())
 		}
 		// An index outside (0, N) is a bound, not a team fault.
-		assertFirstError(t, rec, httpx.ReasonOutOfRange, "at_step_index")
+		httpxtest.AssertFirstError(t, rec, httpx.ReasonOutOfRange, "at_step_index")
 	}
 	// The blueprint is untouched after the rejected splits.
 	got := listBlueprintSteps(t, s, bp)
