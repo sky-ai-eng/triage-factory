@@ -107,6 +107,16 @@ func RunEntityTerminalCloseConformance(t *testing.T, mk EntityTerminalCloseFacto
 		if n := seed.CloseAuditCount(t, taskB); n != 1 {
 			t.Errorf("close-audit rows on %s = %d, want 1", taskB, n)
 		}
+		// A missing entity declines.
+		{
+			res, err := entities.CloseTerminalSystem(ctx, orgID, "00000000-0000-0000-0000-00000000dead", nil, []string{ci}, "entity_closed", domain.EventGitHubPRMerged, "", nil)
+			if err != nil {
+				t.Fatalf("CloseTerminalSystem: %v", err)
+			}
+			if res.Closed {
+				t.Error("Closed = true for an entity that does not exist")
+			}
+		}
 	})
 
 	t.Run("Version_guard_miss_writes_nothing", func(t *testing.T) {
@@ -162,17 +172,6 @@ func RunEntityTerminalCloseConformance(t *testing.T, mk EntityTerminalCloseFacto
 			if res.Closed {
 				t.Error("Closed = true on an already-closed entity")
 			}
-		}
-	})
-
-	t.Run("Missing_entity_declines", func(t *testing.T) {
-		entities, _, orgID, _ := mk(t)
-		res, err := entities.CloseTerminalSystem(ctx, orgID, "00000000-0000-0000-0000-00000000dead", nil, []string{ci}, "entity_closed", domain.EventGitHubPRMerged, "", nil)
-		if err != nil {
-			t.Fatalf("CloseTerminalSystem: %v", err)
-		}
-		if res.Closed {
-			t.Error("Closed = true for an entity that does not exist")
 		}
 	})
 

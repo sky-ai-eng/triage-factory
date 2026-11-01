@@ -60,18 +60,17 @@ func RunPlacementOverrideStoreConformance(t *testing.T, mk PlacementOverrideStor
 				t.Errorf("Upsert(%+v) returned %+v, want exactly its pin and replica count, stamped", ov, got)
 			}
 		}
-	})
-
-	t.Run("absent_get_is_nil_not_error", func(t *testing.T) {
-		store, repos, orgID := mk(t)
-		repo := register(t, repos, orgID, TestGitHubHost, "acme", "ghost")
-		for _, id := range []string{repo, unregisteredRepositoryID, "acme/ghost", ""} {
-			ov, err := store.Get(ctx, orgID, id)
-			if err != nil {
-				t.Fatalf("get %q: %v", id, err)
-			}
-			if ov != nil {
-				t.Fatalf("absent override for %q must be nil, got %+v", id, ov)
+		// Get on an absent override is nil, not an error.
+		{
+			repo := register(t, repos, orgID, TestGitHubHost, "acme", "ghost")
+			for _, id := range []string{repo, unregisteredRepositoryID, "acme/ghost", ""} {
+				ov, err := store.Get(ctx, orgID, id)
+				if err != nil {
+					t.Fatalf("get %q: %v", id, err)
+				}
+				if ov != nil {
+					t.Fatalf("absent override for %q must be nil, got %+v", id, ov)
+				}
 			}
 		}
 	})

@@ -119,29 +119,53 @@ func RunStopIntentConformance(t *testing.T, mk ClaimLeaseFactory) {
 		}
 	})
 
-	t.Run("Request_IsIdempotentAndKeepsTheFirstActor", func(t *testing.T) {
+	t.Run("Request_TheFirstStands", func(t *testing.T) {
 		f := mk(t)
-		id, _ := f.StageStep(t)
-		request(t, f, id, stopTestUser)
-		first := get(t, f, id)
-		request(t, f, id, "")
-		second := get(t, f, id)
-		if second.StopRequestedBy != stopTestUser {
-			t.Errorf("actor after a second request = %q, want the first's %q", second.StopRequestedBy, stopTestUser)
-		}
-		if first.StopRequestedAt == nil || second.StopRequestedAt == nil || !second.StopRequestedAt.Equal(*first.StopRequestedAt) {
-			t.Errorf("time after a second request = %v, want the first's %v", second.StopRequestedAt, first.StopRequestedAt)
-		}
 
-		// A system stop records no actor, and a user request after it must
-		// not supply one: the park reason is derived from the actor, so the
-		// stop would read as the user's.
-		sys, _ := f.StageStep(t)
-		request(t, f, sys, "")
-		request(t, f, sys, stopTestUser)
-		if got := get(t, f, sys); got.StopRequestedAt == nil || got.StopRequestedBy != "" {
-			t.Errorf("system-first intent after a user request = (%v, %q), want set with no actor", got.StopRequestedAt, got.StopRequestedBy)
-		}
+		t.Run("Actor", func(t *testing.T) {
+			id, _ := f.StageStep(t)
+			request(t, f, id, stopTestUser)
+			first := get(t, f, id)
+			request(t, f, id, "")
+			second := get(t, f, id)
+			if second.StopRequestedBy != stopTestUser {
+				t.Errorf("actor after a second request = %q, want the first's %q", second.StopRequestedBy, stopTestUser)
+			}
+			if first.StopRequestedAt == nil || second.StopRequestedAt == nil || !second.StopRequestedAt.Equal(*first.StopRequestedAt) {
+				t.Errorf("time after a second request = %v, want the first's %v", second.StopRequestedAt, first.StopRequestedAt)
+			}
+
+			// A system stop records no actor, and a user request after it must
+			// not supply one: the park reason is derived from the actor, so the
+			// stop would read as the user's.
+			sys, _ := f.StageStep(t)
+			request(t, f, sys, "")
+			request(t, f, sys, stopTestUser)
+			if got := get(t, f, sys); got.StopRequestedAt == nil || got.StopRequestedBy != "" {
+				t.Errorf("system-first intent after a user request = (%v, %q), want set with no actor", got.StopRequestedAt, got.StopRequestedBy)
+			}
+		})
+
+		t.Run("Reason", func(t *testing.T) {
+			stalled, _ := f.StageStep(t)
+			requestStall(t, f, stalled)
+			if got := get(t, f, stalled); got.StopRequestedAt == nil || got.StopRequestedReason != string(domain.ParkReasonStalled) || got.StopRequestedBy != "" {
+				t.Errorf("stall intent = (%v, by %q, reason %q), want set, no actor, stalled", got.StopRequestedAt, got.StopRequestedBy, got.StopRequestedReason)
+			}
+			// A user stop after the stall keeps the stall's reason and actor.
+			request(t, f, stalled, stopTestUser)
+			if got := get(t, f, stalled); got.StopRequestedReason != string(domain.ParkReasonStalled) || got.StopRequestedBy != "" {
+				t.Errorf("stall intent after a user request = (by %q, reason %q), want the stall's", got.StopRequestedBy, got.StopRequestedReason)
+			}
+
+			// A user stop first: the stall after it records no reason.
+			user, _ := f.StageStep(t)
+			request(t, f, user, stopTestUser)
+			requestStall(t, f, user)
+			if got := get(t, f, user); got.StopRequestedReason != "" || got.StopRequestedBy != stopTestUser {
+				t.Errorf("user intent after a stall request = (by %q, reason %q), want the user's with no reason", got.StopRequestedBy, got.StopRequestedReason)
+			}
+		})
 	})
 
 	t.Run("Request_RefusesATerminalRow", func(t *testing.T) {
@@ -426,28 +450,6 @@ func RunStopIntentConformance(t *testing.T, mk ClaimLeaseFactory) {
 		}
 		if released, _ := claimOutcome(t, f, conv.ClaimID); released {
 			t.Error("the settlement released a live claim")
-		}
-	})
-
-	t.Run("Request_StoresAReasonAndTheFirstStands", func(t *testing.T) {
-		f := mk(t)
-		stalled, _ := f.StageStep(t)
-		requestStall(t, f, stalled)
-		if got := get(t, f, stalled); got.StopRequestedAt == nil || got.StopRequestedReason != string(domain.ParkReasonStalled) || got.StopRequestedBy != "" {
-			t.Errorf("stall intent = (%v, by %q, reason %q), want set, no actor, stalled", got.StopRequestedAt, got.StopRequestedBy, got.StopRequestedReason)
-		}
-		// A user stop after the stall keeps the stall's reason and actor.
-		request(t, f, stalled, stopTestUser)
-		if got := get(t, f, stalled); got.StopRequestedReason != string(domain.ParkReasonStalled) || got.StopRequestedBy != "" {
-			t.Errorf("stall intent after a user request = (by %q, reason %q), want the stall's", got.StopRequestedBy, got.StopRequestedReason)
-		}
-
-		// A user stop first: the stall after it records no reason.
-		user, _ := f.StageStep(t)
-		request(t, f, user, stopTestUser)
-		requestStall(t, f, user)
-		if got := get(t, f, user); got.StopRequestedReason != "" || got.StopRequestedBy != stopTestUser {
-			t.Errorf("user intent after a stall request = (by %q, reason %q), want the user's with no reason", got.StopRequestedBy, got.StopRequestedReason)
 		}
 	})
 

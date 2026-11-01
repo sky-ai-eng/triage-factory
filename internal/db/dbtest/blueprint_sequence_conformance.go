@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -67,6 +68,10 @@ type BlueprintSequenceScaffold struct {
 	// RunCurrentStep reads blueprint_runs.current_step_index — the pointer
 	// the claim gate drives, and the one an advance moves.
 	RunCurrentStep func(t *testing.T, blueprintRunID string) int
+	// BackdateRunStartedAt rewrites blueprint_runs.started_at to `age` ago,
+	// so a run fired after it is newer by more than SQLite's whole-second
+	// column.
+	BackdateRunStartedAt func(t *testing.T, blueprintRunID string, age time.Duration)
 	// ConversationEnded reports whether a conversation carries an ended_at
 	// stamp: the boundary an advance writes on the step it concludes.
 	ConversationEnded func(t *testing.T, convID string) bool

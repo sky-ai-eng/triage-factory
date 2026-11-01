@@ -78,6 +78,17 @@ func RunConversationPendingInputStoreConformance(t *testing.T, mk ConversationPe
 		if ok {
 			t.Error("second consume ok=true, want false (consume must drain)")
 		}
+		// Consuming a conversation with nothing staged is ok=false, not an error.
+		{
+			conversationID := seed.Conversation(t, "empty")
+			_, _, ok, err := store.Consume(ctx, orgID, conversationID)
+			if err != nil {
+				t.Fatalf("consume: %v", err)
+			}
+			if ok {
+				t.Error("consume of an unstaged conversation reported ok=true")
+			}
+		}
 	})
 
 	t.Run("Peek_returns_without_draining_then_Consume_deletes", func(t *testing.T) {
@@ -101,18 +112,6 @@ func RunConversationPendingInputStoreConformance(t *testing.T, mk ConversationPe
 		}
 		if _, _, ok, err := store.Peek(ctx, orgID, conversationID); err != nil || ok {
 			t.Fatalf("peek after consume = (ok=%v, err=%v); want ok=false", ok, err)
-		}
-	})
-
-	t.Run("Consume_absent_is_ok_false_not_an_error", func(t *testing.T) {
-		store, orgID, _, seed := mk(t)
-		conversationID := seed.Conversation(t, "empty")
-		_, _, ok, err := store.Consume(ctx, orgID, conversationID)
-		if err != nil {
-			t.Fatalf("consume: %v", err)
-		}
-		if ok {
-			t.Error("consume of an unstaged conversation reported ok=true")
 		}
 	})
 

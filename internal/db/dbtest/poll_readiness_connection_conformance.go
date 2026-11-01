@@ -73,6 +73,12 @@ func RunPollReadinessConnectionConformance(t *testing.T, mk PollReadinessStoreFa
 		if prev.ChangedAt == nil || !prev.ChangedAt.Equal(*down.ChangedAt) {
 			t.Errorf("previous ChangedAt = %v, want the first record's %v", prev.ChangedAt, down.ChangedAt)
 		}
+		// An unknown state is refused.
+		{
+			if _, _, err := store.RecordConnection(ctx, orgID, "github", db.ConnectionState("sideways"), ""); err == nil {
+				t.Error("RecordConnection accepted a state outside the vocabulary")
+			}
+		}
 	})
 
 	t.Run("ChangedAt_moves_only_on_a_change_of_state", func(t *testing.T) {
@@ -127,13 +133,6 @@ func RunPollReadinessConnectionConformance(t *testing.T, mk PollReadinessStoreFa
 		}
 		if up.FailureClass != "" {
 			t.Errorf("FailureClass on an up row given a class = %q, want empty", up.FailureClass)
-		}
-	})
-
-	t.Run("an_unknown_state_is_refused", func(t *testing.T) {
-		store, orgID := mk(t)
-		if _, _, err := store.RecordConnection(ctx, orgID, "github", db.ConnectionState("sideways"), ""); err == nil {
-			t.Error("RecordConnection accepted a state outside the vocabulary")
 		}
 	})
 

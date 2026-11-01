@@ -204,6 +204,13 @@ func RunConversationWorktreeStoreConformance(t *testing.T, mk ConversationWorktr
 		if len(rows) != 1 || rows[0].RepositoryID != ghe {
 			t.Errorf("after deleting the github.com row: %+v, want only the ghe row", rows)
 		}
+		// DeleteByRepoRef on a missing row is a no-op.
+		{
+			conversationID := seed.Conversation(t, "del-repo")
+			if err := store.DeleteByRepoRef(ctx, orgID, conversationID, seed.Repo(t, TestGitHubHost, "no/such-repo"), "pr-1"); err != nil {
+				t.Errorf("DeleteByRepoRef(missing) = %v, want nil", err)
+			}
+		}
 	})
 
 	t.Run("Insert_refuses_a_repository_id_no_row_answers_to", func(t *testing.T) {
@@ -293,14 +300,6 @@ func RunConversationWorktreeStoreConformance(t *testing.T, mk ConversationWorktr
 			if r.ConversationID != r1 {
 				t.Errorf("scope leak: r1 list contains %s", r.ConversationID)
 			}
-		}
-	})
-
-	t.Run("DeleteByRepoRef_idempotent_on_missing_row", func(t *testing.T) {
-		store, orgID, seed := mk(t)
-		conversationID := seed.Conversation(t, "del-repo")
-		if err := store.DeleteByRepoRef(ctx, orgID, conversationID, seed.Repo(t, TestGitHubHost, "no/such-repo"), "pr-1"); err != nil {
-			t.Errorf("DeleteByRepoRef(missing) = %v, want nil", err)
 		}
 	})
 

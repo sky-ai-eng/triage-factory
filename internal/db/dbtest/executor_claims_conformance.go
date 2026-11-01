@@ -104,6 +104,17 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 		if len(capped) != 2 || capped[0].ID != ids[2] || capped[1].ID != ids[1] {
 			t.Fatalf("limit=2 must return the two newest, got %+v", capped)
 		}
+		// An executor with no claims reads empty.
+		{
+			_ = seed.Conversation(t, SeedConcluded, "")
+			got, err := store.RecentClaimsForExecutorSystem(ctx, "control-pod-1", 25)
+			if err != nil {
+				t.Fatalf("a control pod with no claims must read empty, not error: %v", err)
+			}
+			if len(got) != 0 {
+				t.Fatalf("expected no claims, got %+v", got)
+			}
+		}
 	})
 
 	t.Run("projects_actuals_lifetime_and_conversation_state", func(t *testing.T) {
@@ -197,18 +208,6 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 		}
 		if got[0].CPUUsec == nil || *got[0].CPUUsec != 7 {
 			t.Errorf("measured cpu lost: %+v", got[0])
-		}
-	})
-
-	t.Run("empty_for_an_executor_with_no_claims", func(t *testing.T) {
-		store, seed := mk(t)
-		_ = seed.Conversation(t, SeedConcluded, "")
-		got, err := store.RecentClaimsForExecutorSystem(ctx, "control-pod-1", 25)
-		if err != nil {
-			t.Fatalf("a control pod with no claims must read empty, not error: %v", err)
-		}
-		if len(got) != 0 {
-			t.Fatalf("expected no claims, got %+v", got)
 		}
 	})
 

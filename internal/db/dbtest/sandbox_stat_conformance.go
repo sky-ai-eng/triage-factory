@@ -78,6 +78,15 @@ func RunSandboxStatStoreConformance(t *testing.T, mk SandboxStatStoreFactory) {
 		if gotB[0].CPUUsecCum == nil || *gotB[0].CPUUsecCum != 9 {
 			t.Fatalf("partial sample's cpu lost: %+v", gotB[0])
 		}
+		// An empty batch is a no-op.
+		{
+			if err := store.RecordBatch(ctx, nil); err != nil {
+				t.Fatalf("nil batch must be a no-op, got %v", err)
+			}
+			if err := store.RecordBatch(ctx, []domain.SandboxStat{}); err != nil {
+				t.Fatalf("empty batch must be a no-op, got %v", err)
+			}
+		}
 	})
 
 	t.Run("series_is_per_claim_and_time_ordered", func(t *testing.T) {
@@ -115,16 +124,6 @@ func RunSandboxStatStoreConformance(t *testing.T, mk SandboxStatStoreFactory) {
 			if *got[i].CPUUsecCum < *got[i-1].CPUUsecCum {
 				t.Fatalf("cumulative cpu went backwards: %+v", got)
 			}
-		}
-	})
-
-	t.Run("empty_batch_is_a_noop", func(t *testing.T) {
-		store := mk(t)
-		if err := store.RecordBatch(ctx, nil); err != nil {
-			t.Fatalf("nil batch must be a no-op, got %v", err)
-		}
-		if err := store.RecordBatch(ctx, []domain.SandboxStat{}); err != nil {
-			t.Fatalf("empty batch must be a no-op, got %v", err)
 		}
 	})
 

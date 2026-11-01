@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -203,6 +204,14 @@ func pgSequenceScaffold(t *testing.T, h *pgtest.Harness) (db.BlueprintStore, dbt
 				t.Fatalf("read current_step_index: %v", err)
 			}
 			return idx
+		},
+		BackdateRunStartedAt: func(t *testing.T, blueprintRunID string, age time.Duration) {
+			t.Helper()
+			if _, err := h.AdminDB.Exec(
+				`UPDATE blueprint_runs SET started_at = now() - make_interval(secs => $2) WHERE id = $1`,
+				blueprintRunID, age.Seconds()); err != nil {
+				t.Fatalf("backdate started_at of %s: %v", blueprintRunID, err)
+			}
 		},
 		ConversationEnded: func(t *testing.T, convID string) bool {
 			t.Helper()

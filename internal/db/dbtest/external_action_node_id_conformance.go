@@ -177,12 +177,12 @@ func RunExternalActionNodeIDConformance(t *testing.T, mk ExternalActionNodeIDFac
 			a.ToState != domain.DeliverableStatePRDraft || a.Action != domain.ActionPRCreated {
 			t.Errorf("returned row = %+v, want the pr_created row for %s as recorded", a, missing.Target)
 		}
-	})
-
-	t.Run("Refuses_an_empty_scope", func(t *testing.T) {
-		f := mk(t)
-		if _, err := f.Stores.ExternalActions.ListPRCreatedWithoutDeliverableSystem(ctx, f.OrgID, "", time.Now().UTC()); !errors.Is(err, db.ErrExternalObjectScopeRequired) {
-			t.Errorf("err = %v, want ErrExternalObjectScopeRequired", err)
+		// An empty scope is refused.
+		{
+			if _, err := f.Stores.ExternalActions.ListPRCreatedWithoutDeliverableSystem(ctx, f.OrgID, "", time.Now().UTC()); !errors.Is(err, db.ErrExternalObjectScopeRequired) {
+				t.Errorf("err = %v, want ErrExternalObjectScopeRequired", err)
+			}
 		}
 	})
+
 }

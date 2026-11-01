@@ -410,17 +410,17 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 		if len(crossed) != 0 {
 			t.Errorf("MemberIDsSystem(cross-org) = %v; want empty", crossed)
 		}
+		// An empty team has no members.
+		{
+			org := seed.Org(t, seed.User(t, "owner"))
+			got, err := stores.Teams.MemberIDsSystem(ctx, org, seed.Team(t, org))
+			if err != nil {
+				t.Fatalf("MemberIDsSystem: %v", err)
+			}
+			if len(got) != 0 {
+				t.Errorf("MemberIDsSystem(empty team) = %v; want empty slice", got)
+			}
+		}
 	})
 
-	t.Run("MemberIDsSystem_EmptyTeam", func(t *testing.T) {
-		stores, seed := mk(t)
-		org := seed.Org(t, seed.User(t, "owner"))
-		got, err := stores.Teams.MemberIDsSystem(ctx, org, seed.Team(t, org))
-		if err != nil {
-			t.Fatalf("MemberIDsSystem: %v", err)
-		}
-		if len(got) != 0 {
-			t.Errorf("MemberIDsSystem(empty team) = %v; want empty slice", got)
-		}
-	})
 }

@@ -74,6 +74,17 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 		if got[0].Producer != domain.StagedInjectionProducerPRCoherence {
 			t.Errorf("flushed producer = %q, want %q", got[0].Producer, domain.StagedInjectionProducerPRCoherence)
 		}
+		// A flush with nothing staged returns nothing.
+		{
+			conversationID := seed.Conversation(t, "empty")
+			got, err := store.FlushPendingSystem(ctx, orgID, conversationID)
+			if err != nil {
+				t.Fatalf("flush: %v", err)
+			}
+			if len(got) != 0 {
+				t.Errorf("flush of an unstaged conversation returned %d injections, want 0", len(got))
+			}
+		}
 	})
 
 	t.Run("A_note_with_no_originating_event_stays_valid", func(t *testing.T) {
@@ -222,18 +233,6 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 		}
 		if len(again) != 0 {
 			t.Errorf("second flush returned %d injections, want 0 (flush must drain)", len(again))
-		}
-	})
-
-	t.Run("Flush_empty_when_nothing_staged", func(t *testing.T) {
-		store, orgID, seed := mk(t)
-		conversationID := seed.Conversation(t, "empty")
-		got, err := store.FlushPendingSystem(ctx, orgID, conversationID)
-		if err != nil {
-			t.Fatalf("flush: %v", err)
-		}
-		if len(got) != 0 {
-			t.Errorf("flush of an unstaged conversation returned %d injections, want 0", len(got))
 		}
 	})
 

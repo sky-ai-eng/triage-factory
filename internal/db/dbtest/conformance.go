@@ -126,6 +126,19 @@ func RunScoreStoreConformance(t *testing.T, mk ScoreStoreFactory) {
 				t.Errorf("task %s: status=%q, want queued", task.ID, task.Status)
 			}
 		}
+		// Quick guard: every method accepts a ctx with a deadline and
+		// honors it for at least the round-trip — both backends call
+		// ExecContext / QueryContext under the hood, so a ctx that's
+		// already cancelled should fail fast.
+		{
+			cancelled, cancel := context.WithCancel(ctx)
+			cancel()
+			// Give the cancellation a moment to propagate through the driver.
+			time.Sleep(time.Millisecond)
+			if _, err := f.Store.UnscoredTasks(cancelled, f.OrgID); err == nil {
+				t.Errorf("UnscoredTasks with cancelled ctx: want error, got nil")
+			}
+		}
 	})
 
 	t.Run("MarkScoring_flips_to_in_progress", func(t *testing.T) {
@@ -145,6 +158,12 @@ func RunScoreStoreConformance(t *testing.T, mk ScoreStoreFactory) {
 				if task.ID == id {
 					t.Errorf("task %s still listed as unscored after MarkScoring", id)
 				}
+			}
+		}
+		// An empty slice is a no-op.
+		{
+			if err := f.Store.MarkScoring(ctx, f.OrgID, nil); err != nil {
+				t.Errorf("MarkScoring(nil): %v", err)
 			}
 		}
 	})
@@ -432,25 +451,4 @@ func RunScoreStoreConformance(t *testing.T, mk ScoreStoreFactory) {
 		}
 	})
 
-	t.Run("MarkScoring_empty_slice_is_noop", func(t *testing.T) {
-		f := mk(t)
-		if err := f.Store.MarkScoring(ctx, f.OrgID, nil); err != nil {
-			t.Errorf("MarkScoring(nil): %v", err)
-		}
-	})
-
-	// Quick guard: every method accepts a ctx with a deadline and
-	// honors it for at least the round-trip — both backends call
-	// ExecContext / QueryContext under the hood, so a ctx that's
-	// already cancelled should fail fast.
-	t.Run("CtxCancellation_fails_fast", func(t *testing.T) {
-		f := mk(t)
-		cancelled, cancel := context.WithCancel(ctx)
-		cancel()
-		// Give the cancellation a moment to propagate through the driver.
-		time.Sleep(time.Millisecond)
-		if _, err := f.Store.UnscoredTasks(cancelled, f.OrgID); err == nil {
-			t.Errorf("UnscoredTasks with cancelled ctx: want error, got nil")
-		}
-	})
 }
