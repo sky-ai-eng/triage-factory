@@ -356,8 +356,8 @@ func TestLocalClient_JiraActionURLs_WhenSiteConfigured(t *testing.T) {
 
 // TestLocalClient_JiraComment_NoID_RecordsTheRowNamingNoObject pins that when
 // Jira's response carries no comment id, the comment still posts (action
-// succeeds) and its ledger row is recorded naming no object — there's no
-// stable key to name the comment by.
+// succeeds), and its ledger row is recorded naming no object, since there's
+// no stable key to name the comment by, and counted as an unnamed comment.
 func TestLocalClient_JiraComment_NoID_RecordsTheRowNamingNoObject(t *testing.T) {
 	jira := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -365,6 +365,7 @@ func TestLocalClient_JiraComment_NoID_RecordsTheRowNamingNoObject(t *testing.T) 
 		_, _ = io.WriteString(w, `{}`)
 	}))
 	t.Cleanup(jira.Close)
+	counted := unnamedComments(t)
 
 	stores, info := newJiraRecordingStores(t, jira.URL, true)
 	client := NewLocal(stores, info)
@@ -375,6 +376,9 @@ func TestLocalClient_JiraComment_NoID_RecordsTheRowNamingNoObject(t *testing.T) 
 	a := onlyJiraAction(t, stores, info)
 	if a.Action != domain.ActionIssueCommentPosted || a.ObjectKind != "" || a.ObjectKey != "" {
 		t.Errorf("comment action = %+v, want issue_comment_posted naming no object", a)
+	}
+	if got := counted(); got["jira/issue_comment_posted"] != 1 || len(got) != 1 {
+		t.Errorf("unnamed comments = %v, want one jira/issue_comment_posted", got)
 	}
 }
 

@@ -175,3 +175,37 @@ func isRegisteredRelayRecordOp(namespace, op string) bool {
 	_, ok = ops[op]
 	return ok
 }
+
+// auditUnnamedComments counts posted-comment rows recorded naming no comment:
+// the provider accepted the comment but its response carried no comment id,
+// or the issue it was posted on could not be read back to key it under. The
+// row still lands, so the drop counter never sees it, and a row naming no
+// object is left out of the run's artifacts.
+var auditUnnamedComments = newUnnamedCommentCounter(otel.GetMeterProvider())
+
+// newUnnamedCommentCounter builds the instrument against mp, on the same terms
+// as newAuditDropStats.
+func newUnnamedCommentCounter(mp metric.MeterProvider) metric.Int64Counter {
+	c, err := mp.Meter("cmd/exec/agenthost").Int64Counter("audit.comments.unnamed",
+		metric.WithDescription("Posted-comment audit rows recorded naming no comment, by provider and action."))
+	if err != nil {
+		agenthostLog.Warn("unnamed comment counter setup failed", "error", err)
+	}
+	return c
+}
+
+// countUnnamedComment counts act when it is a posted comment that landed
+// naming no object. provider and action are closed domain vocabularies; the
+// target stays out, as it does from the drop counter.
+func countUnnamedComment(ctx context.Context, act *domain.ExternalAction) {
+	if act == nil || act.ObjectKind != "" || auditUnnamedComments == nil {
+		return
+	}
+	if act.Action != domain.ActionCommentPosted && act.Action != domain.ActionIssueCommentPosted {
+		return
+	}
+	auditUnnamedComments.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("provider", act.Provider),
+		attribute.String("action", act.Action),
+	))
+}

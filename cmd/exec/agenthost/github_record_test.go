@@ -346,14 +346,15 @@ func TestLocalClient_GithubUpdateDeleteComment_PersonsComment_LeavesNoDeliverabl
 
 // TestLocalClient_GithubAddComment_NoID_RecordsTheRowNamingNoObject pins that
 // when GitHub's response carries no comment id, the comment still posts (action
-// succeeds) and its row is recorded naming no object — there's no stable key
-// to name the comment by.
+// succeeds), and its row is recorded naming no object, since there's no stable
+// key to name the comment by, and counted as an unnamed comment.
 func TestLocalClient_GithubAddComment_NoID_RecordsTheRowNamingNoObject(t *testing.T) {
 	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{}`) // POST returns a body with no id
 	}))
 	t.Cleanup(gh.Close)
+	counted := unnamedComments(t)
 
 	stores, info, client := newGithubRecordingClient(t, gh.URL, true)
 	if _, err := client.GithubAddComment(context.Background(), "octo", "repo", 1, "no id back"); err != nil {
@@ -362,6 +363,9 @@ func TestLocalClient_GithubAddComment_NoID_RecordsTheRowNamingNoObject(t *testin
 	rows := commentRows(t, stores, info, domain.ActionCommentPosted)
 	if len(rows) != 1 || rows[0].ObjectKind != "" || rows[0].ObjectKey != "" || rows[0].ExternalID != "" {
 		t.Errorf("rows = %+v, want one comment_posted row naming no object", rows)
+	}
+	if got := counted(); got["github/comment_posted"] != 1 || len(got) != 1 {
+		t.Errorf("unnamed comments = %v, want one github/comment_posted", got)
 	}
 }
 

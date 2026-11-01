@@ -262,6 +262,8 @@ func recordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 		recordWriteDrop(ctx, recordDropOp(lost, act), err)
 		agenthostLog.Warn("external write recording failed (action already applied)",
 			"conversation", info.ConversationID, "kind", kind, "target", target, "error", err)
+	} else {
+		countUnnamedComment(ctx, act)
 	}
 	// Link the conversation to the act's entity outside the audit write.
 	recordActionMemoryLink(ctx, stores, info, act, about)
