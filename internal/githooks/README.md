@@ -86,6 +86,19 @@ process in both modes:
   no proxy, so the hook keeps both roles there (push outcome unobservable
   — accepted).
 
+- `prepare-commit-msg` — two edits to the commit message, neither of which
+  can abort the commit.
+
+  1. **Merge titles.** For a merge commit (`git merge`, `git pull`), the
+     title names the upstream URL in place of the per-run git proxy address
+     the run's `insteadOf` rewrite resolved the remote to, and drops a
+     trailing `into triagefactory/…`. The two URL bases come from
+     `triagefactory.proxyBase` and `triagefactory.upstreamBase`, which the
+     rewrite's config block carries.
+  2. **Co-author trailer.** On a manual run, appends the
+     `TRIAGE_FACTORY_GIT_COAUTHOR_TRAILER` line once, crediting the person
+     who started the run.
+
 ## The signing program
 
 - `ssh-sign` — not a hook. A run whose org has an active commit signer has

@@ -9,6 +9,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -17,10 +20,12 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/proxy/egressproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/proxy/egressrelay"
 	"github.com/sky-ai-eng/triage-factory/internal/proxy/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/proxy/llmproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // TestProxyConfigFromCreds_AnthropicDirect pins the resolver → proxy
@@ -1038,8 +1043,8 @@ func TestSandboxGitProxyPairs_Shape(t *testing.T) {
 		got[p[0]] = p[1]
 	}
 
-	if len(pairs) != 2 {
-		t.Errorf("len(pairs) = %d, want 2", len(pairs))
+	if len(pairs) != 4 {
+		t.Errorf("len(pairs) = %d, want 4 (insteadOf + extraHeader + the hook's two bases)", len(pairs))
 	}
 	if v := got["url.http://10.42.7.1:5123/.insteadOf"]; v != "https://github.com/" {
 		t.Errorf("insteadOf value = %q, want https://github.com/ (rewrites this prefix)", v)
@@ -1064,8 +1069,8 @@ func TestSandboxGitProxyPairs_SharedOrigin(t *testing.T) {
 		got[p[0]] = p[1]
 	}
 
-	if len(pairs) != 3 {
-		t.Fatalf("len(pairs) = %d, want 3 (insteadOf + extraHeader + sslCAInfo)", len(pairs))
+	if len(pairs) != 5 {
+		t.Fatalf("len(pairs) = %d, want 5 (insteadOf + extraHeader + sslCAInfo + the hook's two bases)", len(pairs))
 	}
 	if v := got["url.https://10.42.7.1/.insteadOf"]; v != "https://github.com/" {
 		t.Errorf("insteadOf value = %q, want https://github.com/ rewritten onto the shared origin", v)
@@ -1093,9 +1098,61 @@ func TestSandboxGitProxyPairs_SharedOrigin(t *testing.T) {
 		{"", "/run/tf-ca-bundle.crt"},
 	} {
 		half := sandboxGitProxyPairs("http://10.42.7.1:5123", "https://github.com", "per-run-secret", c.host, c.ca)
-		if len(half) != 2 || half[0][0] != "url.http://10.42.7.1:5123/.insteadOf" {
+		if len(half) != 4 || half[0][0] != "url.http://10.42.7.1:5123/.insteadOf" {
 			t.Errorf("half-wired shared origin (host=%q ca=%q) produced %v; want the git proxy's own routing", c.host, c.ca, half)
 		}
+	}
+}
+
+// TestGitProxyPairs_MergeTitleNamesUpstream drives a real merge of a fetched
+// branch through the rewrite and the shipped prepare-commit-msg hook. Git
+// titles that merge with the URL it fetched from, which the rewrite made the
+// proxy's, and with the TF checkout's local branch; the commit that lands must
+// name neither.
+func TestGitProxyPairs_MergeTitleNamesUpstream(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	runmode.SetForTest(t, runmode.ModeLocal)
+	paths.SetForTest(t, t.TempDir())
+	if err := githooks.Ensure(); err != nil {
+		t.Fatalf("Ensure() = %v", err)
+	}
+
+	// The proxy base is a directory, so the rewritten remote is a bare repo git
+	// fetches from directly while the configured remote stays the upstream URL.
+	dir := t.TempDir()
+	proxyBase := filepath.Join(dir, "proxy")
+	bare := filepath.Join(proxyBase, "octo", "repo.git")
+	env := []string{"HOME=" + dir, "PATH=" + os.Getenv("PATH"), "GIT_CONFIG_NOSYSTEM=1",
+		"GIT_AUTHOR_NAME=a", "GIT_AUTHOR_EMAIL=a@x.test", "GIT_COMMITTER_NAME=a", "GIT_COMMITTER_EMAIL=a@x.test"}
+	env = githooks.DirectAgentEnv(env, sandboxGitProxyPairs(proxyBase, "https://github.com", "tok", "", "")...)
+	git := func(cwd string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir, cmd.Env = cwd, env
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	git(dir, "init", "-q", "--bare", "-b", "main", bare)
+	git(dir, "clone", "-q", "https://github.com/octo/repo", "upstream")
+	git(filepath.Join(dir, "upstream"), "commit", "-q", "--allow-empty", "-m", "first")
+	git(filepath.Join(dir, "upstream"), "push", "-q", "origin", "main")
+
+	work := filepath.Join(dir, "work")
+	git(dir, "clone", "-q", "https://github.com/octo/repo", work)
+	git(work, "switch", "-q", "-c", "triagefactory/conv-1/pr-7")
+	git(work, "commit", "-q", "--allow-empty", "-m", "side")
+	git(filepath.Join(dir, "upstream"), "commit", "-q", "--allow-empty", "-m", "second")
+	git(filepath.Join(dir, "upstream"), "push", "-q", "origin", "main")
+	git(work, "fetch", "-q", "origin", "main")
+	git(work, "merge", "-q", "--no-edit", "FETCH_HEAD")
+
+	if got, want := git(work, "log", "-1", "--format=%s"), "Merge branch 'main' of https://github.com/octo/repo"; got != want {
+		t.Errorf("merge title = %q, want %q", got, want)
 	}
 }
 
@@ -1108,8 +1165,8 @@ func TestEncodeGitConfigEnv_HooksAlwaysPresent(t *testing.T) {
 		sandboxGitProxyPairs("http://10.42.7.1:5123", "https://github.com", "tok", "", "")...)
 	env := encodeGitConfigEnv(pairs)
 
-	if got := envValue(env, "GIT_CONFIG_COUNT"); got != "3" {
-		t.Errorf("GIT_CONFIG_COUNT = %q, want 3 (hooks + 2 proxy pairs)", got)
+	if got := envValue(env, "GIT_CONFIG_COUNT"); got != "5" {
+		t.Errorf("GIT_CONFIG_COUNT = %q, want 5 (hooks + 4 proxy pairs)", got)
 	}
 	cfg := gitConfigMap(t, env)
 	if cfg[githooks.ConfigKey] != githooks.SandboxDir {
