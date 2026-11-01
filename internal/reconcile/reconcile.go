@@ -185,10 +185,10 @@ const prBackstopWindow = 7 * 24 * time.Hour
 // verb opened the pull request in: the row is relayed, like the deliverable it
 // stands in for, so whether its run opened the pull request is settled by the
 // reconcile that follows (settle), which also applies any transition since. A
-// row settled foreign is still a row, so its ledger row is not read again. The write is insert-if-absent, so a pull request recorded after the read
-// is left untouched and repeating the pass changes nothing. Best-effort per
-// owner and per pull request: a credential or GitHub failure skips it this
-// pass.
+// row settled foreign is still a row, so its ledger row is not read again. The
+// write is insert-if-absent, so a pull request recorded after the read is left
+// untouched and repeating the pass changes nothing. Best-effort per owner and
+// per pull request: a credential or GitHub failure skips it this pass.
 func (rc *Reconciler) BackfillPRDeliverables(ctx context.Context, orgID string) error {
 	host, err := db.OrgGitHubHostSystem(ctx, rc.orgs, orgID)
 	if err != nil {
@@ -394,10 +394,11 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 		}
 	}
 
-	// Pass 3 — settle each pending pull request, apply each transition, then
-	// run the draft-resolved closure once per conversation whose draft pull
-	// request stopped being unresolved this cycle, including by being settled
-	// foreign.
+	// Pass 3 — settle each pending pull request (under TrustRecords whether or
+	// not GitHub's copy was read, since nothing is checked against it), apply
+	// each transition, then run the draft-resolved closure once per
+	// conversation whose draft pull request stopped being unresolved this
+	// cycle, including by being settled foreign.
 	//
 	// The write-back runs on a detached ctx (the fetches above stayed
 	// cancellable). A terminal deliverable drops out of BOTH tiers' non-terminal
@@ -413,18 +414,27 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 	resolvedConversations := map[string]bool{}
 	attribution := newAttributionReads(rc)
 	for _, a := range arts {
-		if snap, ok := snapshots[prNodeID(a)]; ok && a.Verification == domain.DeliverableVerificationPending {
-			prev := a
-			var v verdict
-			var moved bool
-			if a, v, moved = rc.settle(writeCtx, orgID, a, &snap, attribution); moved && v == verdictForeign {
-				rc.broadcast(orgID, a)
-				transitioned = append(transitioned, a)
-				if a.ConversationID != "" && isDraftResolved(prev, a.State) {
-					resolvedConversations[a.ConversationID] = true
+		if a.Verification == domain.DeliverableVerificationPending {
+			var snap *domain.PRSnapshot
+			if s, ok := snapshots[prNodeID(a)]; ok {
+				snap = &s
+			}
+			settled, v, moved := rc.settle(writeCtx, orgID, a, snap, attribution)
+			switch {
+			case moved && v == verdictForeign:
+				rc.broadcast(orgID, settled)
+				transitioned = append(transitioned, settled)
+				if settled.ConversationID != "" && isDraftResolved(a, settled.State) {
+					resolvedConversations[settled.ConversationID] = true
 				}
 				continue
+			case !moved && v != verdictUnknown:
+				// Another settler moved the row first, so this copy of it is
+				// stale: writing a transition from it would put back what
+				// that settle replaced. The next pass reads the row as it is.
+				continue
 			}
+			a = settled
 		}
 		newState, ok := nextState(a, snapshots)
 		if !ok || newState == a.State {

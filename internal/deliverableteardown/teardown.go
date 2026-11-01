@@ -69,15 +69,22 @@ type Deps interface {
 	// skipped and every audit row records the App, exactly as an
 	// unclassifiable repo does.
 	GitHub() ghclient.Resolver
+	// SettlePullRequest settles pull request deliverable a when it is still
+	// pending (reconcile.Reconciler.SettleDeliverable), reading whether its
+	// run opened the pull request, so a draft the run did open is closed on
+	// GitHub rather than TF-side only. Called outside any batch, since a
+	// settle can reach GitHub. Best-effort: an adapter with nothing to settle
+	// through does nothing, and the draft is then closed TF-side only.
+	SettlePullRequest(ctx context.Context, orgID string, a domain.Deliverable)
 }
 
 // Teardown resolves EVERY unresolved deliverable the task's conversations hold.
-// Each draft PR is flipped to closed and then closed on GitHub, unless TF has
-// not confirmed its run opened it (domain.Deliverable.Actionable), which is
-// closed TF-side only; each pending
-// review (finalized or not) is flipped to dismissed, which is its whole
-// resolution — a review is staged TF-side, so there is no GitHub object to
-// retire and no org-credential write to audit.
+// Each draft PR is flipped to closed and then closed on GitHub. A draft TF has
+// not yet confirmed its run opened is settled first (Deps.SettlePullRequest),
+// and one still not confirmed after that (domain.Deliverable.Actionable) is
+// closed TF-side only. Each pending review (finalized or not) is flipped to
+// dismissed, which is its whole resolution — a review is staged TF-side, so
+// there is no GitHub object to retire and no org-credential write to audit.
 //
 // performedBy names who performs the close on each audit row: a person
 // closing the card, or TF itself for an event-driven close. actorUserID is the
@@ -101,10 +108,11 @@ func Teardown(ctx context.Context, deps Deps, orgID, taskID, performedBy, actorU
 	// swap land between them and file a row asserting a tier no close used.
 	resolver := deps.GitHub()
 
-	// Which credential each draft PR's close is made under is classified
-	// BEFORE the write batch opens, for the same reason the closes themselves
-	// run after it: the audit rows are composed inside that batch, and a
-	// classification can reach GitHub.
+	// Which credential each draft PR's close is made under is classified, and
+	// each pending draft settled, BEFORE the write batch opens, for the same
+	// reason the closes themselves run after it: the audit rows are composed
+	// inside that batch, and both can reach GitHub. The batch re-reads the
+	// drafts, so it sees each settle's outcome.
 	credentials := credentialsForTask(ctx, deps, resolver, orgID, taskID)
 
 	// Draft PRs captured inside the batch (state already flipped), each with
@@ -203,7 +211,9 @@ type draftClose struct {
 // under the name GitHub serves it now. It exists so the teardown's audit rows
 // can name that credential without probing GitHub from inside the write batch
 // those rows are composed into — the read pass and the classification both
-// finish before that batch opens.
+// finish before that batch opens. Its read pass is also where each pending
+// draft is settled (Deps.SettlePullRequest), after the read and before the
+// write batch.
 //
 // Best-effort: a read failure yields an empty map and every row falls back to
 // the App, exactly as an unclassifiable repo does; so does a pull request that
@@ -216,6 +226,7 @@ type draftClose struct {
 func credentialsForTask(ctx context.Context, deps Deps, resolver ghclient.Resolver, orgID, taskID string) map[string]string {
 	type ownerRepo struct{ owner, repo string }
 	repoOf := map[string]ownerRepo{} // deliverable id → repository
+	var pending []domain.Deliverable
 	if err := deps.Batch(ctx, orgID, func(st Stores) error {
 		convs, err := st.ConversationsForTask(ctx, orgID, taskID)
 		if err != nil {
@@ -227,6 +238,9 @@ func credentialsForTask(ctx context.Context, deps Deps, resolver ghclient.Resolv
 				return artErr
 			}
 			for _, pr := range domain.AllDraftPullRequests(arts) {
+				if pr.Verification == domain.DeliverableVerificationPending {
+					pending = append(pending, pr)
+				}
 				resolved, err := db.ResolveDeliverablePullRequest(ctx, orgID, pr, st.Entity, st.Repository)
 				if err != nil || resolved.Retired {
 					continue
@@ -239,6 +253,9 @@ func credentialsForTask(ctx context.Context, deps Deps, resolver ghclient.Resolv
 		teardownLog.Warn("pre-read draft PRs for credential attribution failed; teardown rows will record the app",
 			"task", taskID, "error", err)
 		return nil
+	}
+	for _, pr := range pending {
+		deps.SettlePullRequest(ctx, orgID, pr)
 	}
 	// One classification per repository, however many draft PRs it holds.
 	byRepo := map[ownerRepo]string{}

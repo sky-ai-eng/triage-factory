@@ -97,7 +97,7 @@ func (s *deliverableStore) insertIfAbsent(ctx context.Context, q queryer, orgID 
 	if err := db.RequireDeliverableKind(a.Kind); err != nil {
 		return false, err
 	}
-	verification, err := db.DeliverableVerificationOrDefault(a.Verification)
+	verification, err := db.DeliverableVerificationOrDefault(a.Kind, a.Verification)
 	if err != nil {
 		return false, err
 	}
@@ -132,7 +132,7 @@ func (s *deliverableStore) upsert(ctx context.Context, q queryer, orgID string, 
 	if err := db.RequireDeliverableKind(a.Kind); err != nil {
 		return domain.Deliverable{}, err
 	}
-	verification, err := db.DeliverableVerificationOrDefault(a.Verification)
+	verification, err := db.DeliverableVerificationOrDefault(a.Kind, a.Verification)
 	if err != nil {
 		return domain.Deliverable{}, err
 	}

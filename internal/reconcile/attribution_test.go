@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -537,26 +538,92 @@ func TestSettleDeliverable_SettlesOnDemand(t *testing.T) {
 
 // Local mode takes its records' word: a run's pending pull request is
 // verified and attributed with no engagement to check it against, whoever
-// GitHub says authored it, and on demand without reading GitHub at all.
+// GitHub says authored it, whether or not GitHub answered for it, and on
+// demand without reading GitHub at all, for a caller already cancelled too.
 func TestTrustRecords_VerifiesWithoutACheck(t *testing.T) {
 	rig := newAttributionRig(t,
 		map[string]string{"PR_22": authoredPRNode(22, person, false, attrT0)},
 		nil)
 	_, entityID := rig.seedPR(t, 22)
-	rig.seedPR(t, 23)
+	_, unreadEntityID := rig.seedPR(t, 23)
 	_, client := newBackstopStub(t, map[string]string{"PR_22": authoredPRNode(22, person, false, attrT0)})
 	rig.rc = NewReconciler(&fakeResolver{client: client}, rig.stores, TrustRecords, nil)
 
 	rig.reconcile(t)
-	if got := rig.row(t, 22); got.Verification != domain.DeliverableVerificationVerified {
-		t.Errorf("verification = %q, want verified", got.Verification)
-	}
-	if team, user := rig.attribution(t, entityID); team != runmode.LocalDefaultTeamID || user != runmode.LocalDefaultUserID {
-		t.Errorf("attribution = (%q, %q), want (%s, %s)", team, user, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID)
+	for number, entity := range map[int]string{22: entityID, 23: unreadEntityID} {
+		if got := rig.row(t, number); got.Verification != domain.DeliverableVerificationVerified {
+			t.Errorf("PR_%d verification = %q, want verified", number, got.Verification)
+		}
+		if team, user := rig.attribution(t, entity); team != runmode.LocalDefaultTeamID || user != runmode.LocalDefaultUserID {
+			t.Errorf("PR_%d attribution = (%q, %q), want (%s, %s)", number, team, user, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID)
+		}
 	}
 
-	rig.rc.SettleDeliverable(context.Background(), runmode.LocalDefaultOrgID, rig.row(t, 23))
-	if got := rig.row(t, 23); got.Verification != domain.DeliverableVerificationVerified {
+	rig.seedPR(t, 25)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	rig.rc.SettleDeliverable(cancelled, runmode.LocalDefaultOrgID, rig.row(t, 25))
+	if got := rig.row(t, 25); got.Verification != domain.DeliverableVerificationVerified {
 		t.Errorf("on demand, verification = %q, want verified", got.Verification)
+	}
+}
+
+// A pass holding a copy of a pending row that another settler has since moved
+// writes nothing from that copy: here a person's on-demand settle closed the
+// row foreign after the pass listed it, and GitHub shows the pull request
+// marked ready, which the stale copy, still a draft, would otherwise apply
+// over the closed row.
+func TestReconcile_SkipsARowAnotherSettlerMoved(t *testing.T) {
+	ready := strings.Replace(authoredPRNode(24, person, false, attrT0.Add(10*time.Minute)), `"isDraft":true`, `"isDraft":false`, 1)
+	rig := newAttributionRig(t,
+		map[string]string{"PR_24": ready},
+		[]domain.ExecutorClaim{engagement(botA, botALogin, attrT0, nil)})
+	rig.seedPR(t, 24)
+	stale := rig.row(t, 24)
+	rig.rc.SettleDeliverable(context.Background(), runmode.LocalDefaultOrgID, stale)
+
+	if _, err := rig.rc.Reconcile(context.Background(), runmode.LocalDefaultOrgID, []domain.Deliverable{stale}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if got := rig.row(t, 24); got.Verification != domain.DeliverableVerificationForeign || got.State != domain.DeliverableStatePRClosed {
+		t.Errorf("row = (%q, %q), want still foreign and closed", got.Verification, got.State)
+	}
+}
+
+// A verified row's stamps are written only where unset, and only with what
+// the run knows: an event-triggered run, which nobody asked for, stamps its
+// team as owner and no commissioner, and an owner chosen elsewhere is kept.
+func TestReconcile_StampsOnlyWhatIsUnsetAndKnown(t *testing.T) {
+	rig := newAttributionRig(t,
+		map[string]string{
+			"PR_26": authoredPRNode(26, botA, true, attrT0.Add(10*time.Minute)),
+			"PR_27": authoredPRNode(27, botA, true, attrT0.Add(10*time.Minute)),
+		},
+		[]domain.ExecutorClaim{engagement(botA, botALogin, attrT0, nil)})
+	if _, err := rig.conn.Exec(`UPDATE conversations SET trigger_type = 'event', creator_user_id = NULL WHERE id = ?`, attrConversation); err != nil {
+		t.Fatalf("make the conversation event-triggered: %v", err)
+	}
+	_, unowned := rig.seedPR(t, 26)
+	_, owned := rig.seedPR(t, 27)
+	const otherTeam = "99999999-9999-9999-9999-999999999999"
+	if _, err := rig.conn.Exec(`INSERT INTO teams (id, org_id, slug, name) VALUES (?, ?, 'other', 'Other')`, otherTeam, runmode.LocalDefaultOrgID); err != nil {
+		t.Fatalf("seed team: %v", err)
+	}
+	if _, err := rig.conn.Exec(`UPDATE entities SET owning_team_id = ? WHERE id = ?`, otherTeam, owned); err != nil {
+		t.Fatalf("seed owner: %v", err)
+	}
+
+	rig.reconcile(t)
+
+	for _, number := range []int{26, 27} {
+		if got := rig.row(t, number); got.Verification != domain.DeliverableVerificationVerified {
+			t.Errorf("PR_%d verification = %q, want verified", number, got.Verification)
+		}
+	}
+	if team, user := rig.attribution(t, unowned); team != runmode.LocalDefaultTeamID || user != "" {
+		t.Errorf("event-triggered attribution = (%q, %q), want (%s, none)", team, user, runmode.LocalDefaultTeamID)
+	}
+	if team, _ := rig.attribution(t, owned); team != otherTeam {
+		t.Errorf("owner = %q, want the one chosen elsewhere, %s", team, otherTeam)
 	}
 }

@@ -191,6 +191,9 @@ func (a *App) hookReconcilerToSpawner() {
 		return
 	}
 	a.reconcilerCore.SetPullRequestResolvedHook(a.spawner.CloseTaskIfTerminalAndResolved)
+	// And the edge back: the system teardown settles a pending draft through
+	// the reconciler before it decides whether to close it on GitHub.
+	a.spawner.SetDeliverableSettler(a.reconcilerCore)
 }
 
 // buildExecution constructs the delegation spawner, wiring it to the

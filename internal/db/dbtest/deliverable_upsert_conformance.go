@@ -147,6 +147,14 @@ func RunDeliverableUpsertConformance(t *testing.T, mk ExternalObjectScopeFactory
 		if _, err := s.Deliverables.InsertDeliverableIfAbsentSystem(ctx, orgID, pr(9, "maybe")); !errors.Is(err, db.ErrDeliverableVerification) {
 			t.Errorf("insert with verification %q: err = %v, want ErrDeliverableVerification", "maybe", err)
 		}
+		// Nothing settles a review, so one is never stored unsettled.
+		for _, v := range []string{domain.DeliverableVerificationPending, domain.DeliverableVerificationForeign} {
+			review := domain.NewReviewDeliverable("octo/api", 9, "PR_v9", "abc123", "")
+			review.TeamID, review.Scope, review.Verification = teamID, TestGitHubHost, v
+			if _, err := s.Deliverables.UpsertSystem(ctx, orgID, review); !errors.Is(err, db.ErrDeliverableVerification) {
+				t.Errorf("review upsert with verification %q: err = %v, want ErrDeliverableVerification", v, err)
+			}
+		}
 
 		mine, theirs := pr(2, domain.DeliverableVerificationPending), pr(3, domain.DeliverableVerificationPending)
 		for _, a := range []domain.Deliverable{mine, theirs} {

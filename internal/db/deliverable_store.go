@@ -45,17 +45,21 @@ func RequireDeliverableKind(kind string) error {
 // to anything but verified or foreign.
 var ErrDeliverableVerification = errors.New("deliverable verification is pending, verified or foreign")
 
-// DeliverableVerificationOrDefault is the verification a deliverable insert
-// stores for v: v itself when it is in the vocabulary, verified when it is
-// empty, so every writer but a pull request create, which inserts pending,
-// writes a row TF acts on. Anything else is refused with
+// DeliverableVerificationOrDefault is the verification an insert of a
+// deliverable of kind stores for v: v itself when it is in the vocabulary,
+// verified when it is empty, so every writer but a pull request create, which
+// inserts pending, writes a row TF acts on. Only a pull request is ever
+// settled, so a review is verified or refused. Anything else is refused with
 // ErrDeliverableVerification. Both dialects' inserts call it.
-func DeliverableVerificationOrDefault(v string) (string, error) {
+func DeliverableVerificationOrDefault(kind, v string) (string, error) {
 	switch v {
-	case "":
+	case "", domain.DeliverableVerificationVerified:
 		return domain.DeliverableVerificationVerified, nil
-	case domain.DeliverableVerificationPending, domain.DeliverableVerificationVerified, domain.DeliverableVerificationForeign:
-		return v, nil
+	case domain.DeliverableVerificationPending, domain.DeliverableVerificationForeign:
+		if kind == domain.DeliverableKindPullRequest {
+			return v, nil
+		}
+		return "", fmt.Errorf("%w; only a pull request is %q", ErrDeliverableVerification, v)
 	}
 	return "", fmt.Errorf("%w, not %q", ErrDeliverableVerification, v)
 }

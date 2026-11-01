@@ -55,7 +55,7 @@ func (s *deliverableStore) Upsert(ctx context.Context, orgID string, a domain.De
 	if err := db.RequireDeliverableKind(a.Kind); err != nil {
 		return domain.Deliverable{}, err
 	}
-	verification, err := db.DeliverableVerificationOrDefault(a.Verification)
+	verification, err := db.DeliverableVerificationOrDefault(a.Kind, a.Verification)
 	if err != nil {
 		return domain.Deliverable{}, err
 	}
@@ -154,7 +154,7 @@ func (s *deliverableStore) InsertDeliverableIfAbsent(ctx context.Context, orgID 
 	if err := db.RequireDeliverableKind(a.Kind); err != nil {
 		return false, err
 	}
-	verification, err := db.DeliverableVerificationOrDefault(a.Verification)
+	verification, err := db.DeliverableVerificationOrDefault(a.Kind, a.Verification)
 	if err != nil {
 		return false, err
 	}

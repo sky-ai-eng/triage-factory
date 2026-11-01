@@ -80,6 +80,8 @@ func TestDeliverableResolutionNote_NonResolutionStatesEmpty(t *testing.T) {
 		{Kind: DeliverableKindPullRequest, State: DeliverableStatePRDraft, Target: "o/r#1"},  // unresolved draft
 		{Kind: DeliverableKindPullRequest, State: DeliverableStatePRMerged, Target: "o/r#1"}, // merged (out of scope)
 		{Kind: DeliverableKindReview, State: DeliverableStateReviewPending, Target: "o/r#1"}, // still pending
+		{Kind: DeliverableKindPullRequest, State: DeliverableStatePRClosed, Target: "o/r#1", // settled foreign
+			Verification: DeliverableVerificationForeign},
 	}
 	for _, a := range cases {
 		if note := DeliverableResolutionNote(a); note != "" {

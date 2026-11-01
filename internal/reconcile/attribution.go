@@ -170,9 +170,10 @@ func (r *attributionReads) creator(ctx context.Context, orgID, conversationID st
 }
 
 // judge decides whether conversationID's run opened the pull request snap is
-// GitHub's copy of, under the reconciler's Authorship. snap is unread (nil)
-// only under TrustRecords, which needs nothing from it. A read failure is
-// unknown: nothing is settled on an answer that was not read.
+// GitHub's copy of, under the reconciler's Authorship. snap is nil when
+// GitHub's copy was not read, which only TrustRecords, needing nothing from it,
+// can settle without. A read failure is unknown: nothing is settled on an
+// answer that was not read.
 func (rc *Reconciler) judge(ctx context.Context, orgID, conversationID string, snap *domain.PRSnapshot, reads *attributionReads) (verdict, string) {
 	if rc.authorship == TrustRecords {
 		return verdictRun, ""
@@ -314,13 +315,18 @@ func (rc *Reconciler) stampAttribution(ctx context.Context, orgID string, a doma
 }
 
 // SettleDeliverable settles pending pull request deliverable a now, for a
-// person about to act on it, rather than leaving the click to wait for the
-// next pass: under SealedAuthor it reads GitHub's copy of the pull request
-// itself. Best-effort: when the answer cannot be read the row stays pending,
-// and the caller reads the row back to learn where it stands. A row in any
-// other state, or on another GitHub host than the org's current one, is left
-// as it is. A row settled foreign runs the resolved hook when it was a draft,
-// since closing it may have resolved its task's last approval.
+// person about to act on it or a teardown about to close it, rather than
+// leaving either to wait for the next pass: under SealedAuthor it reads
+// GitHub's copy of the pull request itself. Best-effort: when the answer
+// cannot be read the row stays pending, and the caller reads the row back to
+// learn where it stands. A row in any other state, or on another GitHub host
+// than the org's current one, is left as it is. A row settled foreign runs the
+// resolved hook when it was a draft, since closing it may have resolved its
+// task's last approval.
+//
+// The writes and the hook run detached from ctx, as Reconcile's do: a row
+// settled foreign is terminal at once, so a hook a cancelled caller skipped
+// would never run.
 func (rc *Reconciler) SettleDeliverable(ctx context.Context, orgID string, a domain.Deliverable) {
 	if a.Kind != domain.DeliverableKindPullRequest || a.Verification != domain.DeliverableVerificationPending {
 		return
@@ -333,13 +339,14 @@ func (rc *Reconciler) SettleDeliverable(ctx context.Context, orgID string, a dom
 		}
 		snap = &s
 	}
-	settled, v, moved := rc.settle(ctx, orgID, a, snap, newAttributionReads(rc))
+	writeCtx := context.WithoutCancel(ctx)
+	settled, v, moved := rc.settle(writeCtx, orgID, a, snap, newAttributionReads(rc))
 	if !moved || v != verdictForeign {
 		return
 	}
 	rc.broadcast(orgID, settled)
 	if rc.prResolved != nil && a.ConversationID != "" && isDraftResolved(a, settled.State) {
-		rc.prResolved(ctx, orgID, a.ConversationID)
+		rc.prResolved(writeCtx, orgID, a.ConversationID)
 	}
 }
 
@@ -348,13 +355,21 @@ func (rc *Reconciler) SettleDeliverable(ctx context.Context, orgID string, a dom
 // false when a is not on the org's current host or the read fails.
 func (rc *Reconciler) fetchSnapshot(ctx context.Context, orgID string, a domain.Deliverable) (domain.PRSnapshot, bool) {
 	_, onHost, err := rc.onCurrentHost(ctx, orgID, []domain.Deliverable{a})
-	if err != nil || len(onHost) == 0 {
+	if err != nil {
+		reconcileLog.WarnContext(ctx, "resolve github host to settle a pull request failed", "org", orgID, "deliverable", a.ID, "error", err)
 		return domain.PRSnapshot{}, false
 	}
 	nodeID := prNodeID(a)
+	if len(onHost) == 0 || nodeID == "" {
+		return domain.PRSnapshot{}, false
+	}
 	reads := newRegistryReads(rc)
 	pr, err := db.ResolveDeliverablePullRequest(ctx, orgID, a, reads.entity, reads.repository)
-	if err != nil || pr.Retired || nodeID == "" {
+	if err != nil {
+		reconcileLog.WarnContext(ctx, "resolve a pull request to settle it failed", "org", orgID, "deliverable", a.ID, "error", err)
+		return domain.PRSnapshot{}, false
+	}
+	if pr.Retired {
 		return domain.PRSnapshot{}, false
 	}
 	client, err := rc.resolver.ClientFor(ctx, orgID, pr.Owner)
