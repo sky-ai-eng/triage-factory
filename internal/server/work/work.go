@@ -1,4 +1,7 @@
-package server
+// Package work serves durable work across every registered kind: the
+// catalogue of kinds, each kind's depth, its rows, and the operator controls
+// over them.
+package work
 
 import (
 	"errors"
@@ -12,12 +15,15 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// workHandler serves durable work across every registered kind: the
+var workLog = logging.Component("work")
+
+// Handler serves durable work across every registered kind: the
 // catalogue of kinds, each kind's depth, its rows, and the operator controls
 // over them. The event queue is the one registered kind today; the next
 // adopter registers a db.WorkKindHandle and inherits every route here.
@@ -32,13 +38,13 @@ import (
 // uses — with org_id bound by argument, so there is no RLS backstop: the
 // per-kind access switch in authorize is the whole enforcement, and the
 // handler test is the authorization test.
-type workHandler struct {
+type Handler struct {
 	az    *authz.Checker
 	kinds []db.WorkKindHandle
 }
 
 // find returns the registered kind by name, or nil.
-func (h *workHandler) find(name string) db.WorkKindHandle {
+func (h *Handler) find(name string) db.WorkKindHandle {
 	for _, k := range h.kinds {
 		if k.Name() == name {
 			return k
@@ -57,20 +63,20 @@ func (h *workHandler) find(name string) db.WorkKindHandle {
 // the kind's connection with org_id bound by argument, and a well-formed id
 // that is not the local org would otherwise answer an empty page or a zero
 // count as if the org existed.
-func (h *workHandler) resolveOrg(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
+func (h *Handler) resolveOrg(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
 	orgID = r.PathValue("org_id")
 	parsed, err := uuid.Parse(orgID)
 	if err != nil {
-		notFound(w, "org")
+		httpx.NotFound(w, "org")
 		return "", "", false
 	}
 	if runmode.Current() == runmode.ModeLocal && parsed != uuid.MustParse(runmode.LocalDefaultOrgID) {
-		notFound(w, "org")
+		httpx.NotFound(w, "org")
 		return "", "", false
 	}
-	claims := ClaimsFrom(r.Context())
+	claims := httpx.ClaimsFrom(r.Context())
 	if claims == nil {
-		writeUnauth(w)
+		httpx.WriteUnauth(w)
 		return "", "", false
 	}
 	return orgID, claims.Subject, true
@@ -81,26 +87,26 @@ func (h *workHandler) resolveOrg(w http.ResponseWriter, r *http.Request) (orgID,
 // must not be reachable — a permissive default would turn a new policy into
 // an open door — so the default answers 500 naming the policy rather than
 // falling through to any gate.
-func (h *workHandler) authorize(w http.ResponseWriter, r *http.Request, orgID, userID string, access db.WorkAccess) bool {
+func (h *Handler) authorize(w http.ResponseWriter, r *http.Request, orgID, userID string, access db.WorkAccess) bool {
 	switch access {
 	case db.WorkAccessOrgAdmin:
 		return h.az.RequireOrgAdminRole(w, r, orgID, userID)
 	default:
-		internalError(w, "work", fmt.Errorf("work kind declares access policy %d, which this handler has no gate for", access))
+		httpx.InternalError(w, "work", fmt.Errorf("work kind declares access policy %d, which this handler has no gate for", access))
 		return false
 	}
 }
 
 // resolveKind is the front gate for every kind-addressed route: the org, the
 // caller, the kind by its path segment, and the kind's own access policy.
-func (h *workHandler) resolveKind(w http.ResponseWriter, r *http.Request) (orgID string, k db.WorkKindHandle, ok bool) {
+func (h *Handler) resolveKind(w http.ResponseWriter, r *http.Request) (orgID string, k db.WorkKindHandle, ok bool) {
 	orgID, userID, ok := h.resolveOrg(w, r)
 	if !ok {
 		return "", nil, false
 	}
 	k = h.find(r.PathValue("kind"))
 	if k == nil {
-		notFound(w, "work kind")
+		httpx.NotFound(w, "work kind")
 		return "", nil, false
 	}
 	if !h.authorize(w, r, orgID, userID, k.Access()) {
@@ -132,7 +138,7 @@ type workObjectiveJSON struct {
 // policy the registry declares — one today — and, with nothing registered,
 // the org-admin gate, so an empty registry still answers the way a populated
 // one would to the same caller.
-func (h *workHandler) handleCatalogue(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleCatalogue(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := h.resolveOrg(w, r)
 	if !ok {
 		return
@@ -160,7 +166,7 @@ func (h *workHandler) handleCatalogue(w http.ResponseWriter, r *http.Request) {
 			Objective: workObjectiveJSON{OldestReadyAgeSeconds: int64(k.Objective().OldestReadyAge.Seconds())},
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"kinds": kinds})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"kinds": kinds})
 }
 
 // workDepthJSON is the depth node: numbers about rows, on their own path.
@@ -174,17 +180,17 @@ type workDepthJSON struct {
 }
 
 // handleDepth serves GET /api/orgs/{org_id}/work/{kind}/depth.
-func (h *workHandler) handleDepth(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleDepth(w http.ResponseWriter, r *http.Request) {
 	orgID, k, ok := h.resolveKind(w, r)
 	if !ok {
 		return
 	}
 	d, err := workitem.Measure(r.Context(), k.Conn(), k.Kind(), orgID)
 	if err != nil {
-		internalError(w, "work", err)
+		httpx.InternalError(w, "work", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, workDepthJSON{
+	httpx.WriteJSON(w, http.StatusOK, workDepthJSON{
 		Ready: d.Ready, Leased: d.Leased, Parked: d.Parked, Deferred: d.Deferred,
 		OldestReadyAgeSeconds:    int64(d.OldestReadyAge.Seconds()),
 		OldestDeferredAgeSeconds: int64(d.OldestDeferredAge.Seconds()),
@@ -330,7 +336,7 @@ type workItemsFilter struct {
 // handleItemsList serves POST /api/orgs/{org_id}/work/{kind}/items/list —
 // the kind's rows for the org, newest first. total_count is the org's whole
 // population under the filter, which is the number the panel's badge wants.
-func (h *workHandler) handleItemsList(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleItemsList(w http.ResponseWriter, r *http.Request) {
 	orgID, k, ok := h.resolveKind(w, r)
 	if !ok {
 		return
@@ -354,12 +360,12 @@ func (h *workHandler) handleItemsList(w http.ResponseWriter, r *http.Request) {
 	}
 	items, total, err := workitem.List(r.Context(), k.Conn(), k.Kind(), orgID, req.Status, limit, page.Offset)
 	if err != nil {
-		internalError(w, "work", err)
+		httpx.InternalError(w, "work", err)
 		return
 	}
 	out, err := describeItems(r, k, orgID, items)
 	if err != nil {
-		internalError(w, "work", err)
+		httpx.InternalError(w, "work", err)
 		return
 	}
 	httpx.WriteList(w, page, out, total)
@@ -390,7 +396,7 @@ func parseItemID(w http.ResponseWriter, r *http.Request) (int64, bool) {
 
 // handleItemGet serves GET /api/orgs/{org_id}/work/{kind}/items/{id}: one
 // row in any status, in the shape the list serves it.
-func (h *workHandler) handleItemGet(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleItemGet(w http.ResponseWriter, r *http.Request) {
 	orgID, k, ok := h.resolveKind(w, r)
 	if !ok {
 		return
@@ -401,19 +407,19 @@ func (h *workHandler) handleItemGet(w http.ResponseWriter, r *http.Request) {
 	}
 	it, err := workitem.Get(r.Context(), k.Conn(), k.Kind(), orgID, id)
 	if err != nil {
-		internalError(w, "work", err)
+		httpx.InternalError(w, "work", err)
 		return
 	}
 	if it == nil {
-		notFound(w, "work item")
+		httpx.NotFound(w, "work item")
 		return
 	}
 	out, err := describeItems(r, k, orgID, []workitem.Item{*it})
 	if err != nil {
-		internalError(w, "work", err)
+		httpx.InternalError(w, "work", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, out[0])
+	httpx.WriteJSON(w, http.StatusOK, out[0])
 }
 
 // workIDsRequest is the redrive body: the row ids an operator selected.
@@ -450,7 +456,7 @@ func refuseControl(w http.ResponseWriter, k db.WorkKindHandle, control string) {
 // (already redriven, or driven to done by another path since the page loaded)
 // are counted out rather than erroring: a stale selection is the normal case
 // for a table an operator reads and then acts on, not a client bug.
-func (h *workHandler) handleRedrive(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleRedrive(w http.ResponseWriter, r *http.Request) {
 	orgID, k, ok := h.resolveKind(w, r)
 	if !ok {
 		return
@@ -469,7 +475,7 @@ func (h *workHandler) handleRedrive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	by := ClaimsFrom(r.Context()).Subject
+	by := httpx.ClaimsFrom(r.Context()).Subject
 	moved := 0
 	for _, id := range req.IDs {
 		switch err := workitem.Redrive(r.Context(), k.Conn(), k.Kind(), orgID, id, by); {
@@ -479,7 +485,7 @@ func (h *workHandler) handleRedrive(w http.ResponseWriter, r *http.Request) {
 		default:
 			workLog.ErrorContext(r.Context(), "redrive failed partway",
 				"org", orgID, "kind", k.Name(), "requested", len(req.IDs), "moved", moved, "error", err)
-			internalError(w, "work", err)
+			httpx.InternalError(w, "work", err)
 			return
 		}
 	}
@@ -487,7 +493,7 @@ func (h *workHandler) handleRedrive(w http.ResponseWriter, r *http.Request) {
 	// the next thing in the log is that work running.
 	workLog.InfoContext(r.Context(), "operator redrove parked work",
 		"org", orgID, "kind", k.Name(), "requested", len(req.IDs), "redriven", moved)
-	writeJSON(w, http.StatusOK, map[string]any{"redriven": moved})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"redriven": moved})
 }
 
 // workCancelRequest is the cancel body: the ids and the reason the terminal
@@ -505,7 +511,7 @@ const maxCancelReasonLen = 500
 // renewal, which is what lets a request land safely against a row somebody
 // is mid-way through executing. Ids that are settled or already requested
 // are counted out.
-func (h *workHandler) handleCancel(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleCancel(w http.ResponseWriter, r *http.Request) {
 	orgID, k, ok := h.resolveKind(w, r)
 	if !ok {
 		return
@@ -531,7 +537,7 @@ func (h *workHandler) handleCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	by := ClaimsFrom(r.Context()).Subject
+	by := httpx.ClaimsFrom(r.Context()).Subject
 	requested := 0
 	for _, id := range req.IDs {
 		switch err := workitem.RequestCancel(r.Context(), k.Conn(), k.Kind(), orgID, id, by, reason); {
@@ -541,13 +547,13 @@ func (h *workHandler) handleCancel(w http.ResponseWriter, r *http.Request) {
 		default:
 			workLog.ErrorContext(r.Context(), "cancel request failed partway",
 				"org", orgID, "kind", k.Name(), "requested", requested, "error", err)
-			internalError(w, "work", err)
+			httpx.InternalError(w, "work", err)
 			return
 		}
 	}
 	workLog.InfoContext(r.Context(), "operator requested cancellation of work",
 		"org", orgID, "kind", k.Name(), "named", len(req.IDs), "requested", requested)
-	writeJSON(w, http.StatusOK, map[string]any{"requested": requested})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"requested": requested})
 }
 
 // workSupersedeRequest is the supersede body: the replacement row.
@@ -562,7 +568,7 @@ type workSupersedeRequest struct {
 // answers 422 here. A row that is not parked is counted out like a redrive
 // miss — the answer is the count, zero or one — because a stale selection is
 // the normal case for an operator table.
-func (h *workHandler) handleSupersede(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleSupersede(w http.ResponseWriter, r *http.Request) {
 	orgID, k, ok := h.resolveKind(w, r)
 	if !ok {
 		return
@@ -594,7 +600,7 @@ func (h *workHandler) handleSupersede(w http.ResponseWriter, r *http.Request) {
 	// the parked row against a replacement that does not exist.
 	replacement, err := workitem.Get(r.Context(), k.Conn(), k.Kind(), orgID, req.SupersededBy)
 	if err != nil {
-		internalError(w, "work", err)
+		httpx.InternalError(w, "work", err)
 		return
 	}
 	if replacement == nil {
@@ -604,33 +610,38 @@ func (h *workHandler) handleSupersede(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	by := ClaimsFrom(r.Context()).Subject
+	by := httpx.ClaimsFrom(r.Context()).Subject
 	superseded := 0
 	switch err := workitem.Supersede(r.Context(), k.Conn(), k.Kind(), orgID, id, by, req.SupersededBy); {
 	case err == nil:
 		superseded = 1
 	case errors.Is(err, workitem.ErrNotParked):
 	default:
-		internalError(w, "work", err)
+		httpx.InternalError(w, "work", err)
 		return
 	}
 	workLog.InfoContext(r.Context(), "operator superseded parked work",
 		"org", orgID, "kind", k.Name(), "id", id, "superseded_by", req.SupersededBy, "superseded", superseded)
-	writeJSON(w, http.StatusOK, map[string]any{"superseded": superseded})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"superseded": superseded})
 }
 
-func (s *Server) registerWorkRoutes() {
+// New builds the work handler over the registered kinds.
+func New(az *authz.Checker, kinds []db.WorkKindHandle) *Handler {
+	return &Handler{az: az, kinds: kinds}
+}
+
+// Register mounts the work routes.
+func (h *Handler) Register(m httpx.Mounts) {
 	// Durable work across every registered kind — the depth of each queue
 	// and the operator controls over its rows. Gated per kind's declared
 	// access policy inside the handler; every kind runs on the admin pool
 	// with org_id bound by argument, so the handler's predicate is the whole
-	// enforcement. See work_handler.go.
-	wh := &workHandler{az: s.az, kinds: s.allStores.WorkKinds}
-	s.api("GET /api/orgs/{org_id}/work", wh.handleCatalogue)
-	s.api("GET /api/orgs/{org_id}/work/{kind}/depth", wh.handleDepth)
-	s.apiMutating("POST /api/orgs/{org_id}/work/{kind}/items/list", wh.handleItemsList)
-	s.api("GET /api/orgs/{org_id}/work/{kind}/items/{id}", wh.handleItemGet)
-	s.apiMutating("POST /api/orgs/{org_id}/work/{kind}/items/redrive", wh.handleRedrive)
-	s.apiMutating("POST /api/orgs/{org_id}/work/{kind}/items/cancel", wh.handleCancel)
-	s.apiMutating("POST /api/orgs/{org_id}/work/{kind}/items/{id}/supersede", wh.handleSupersede)
+	// enforcement. See work.go.
+	m.API("GET /api/orgs/{org_id}/work", h.handleCatalogue)
+	m.API("GET /api/orgs/{org_id}/work/{kind}/depth", h.handleDepth)
+	m.APIMutating("POST /api/orgs/{org_id}/work/{kind}/items/list", h.handleItemsList)
+	m.API("GET /api/orgs/{org_id}/work/{kind}/items/{id}", h.handleItemGet)
+	m.APIMutating("POST /api/orgs/{org_id}/work/{kind}/items/redrive", h.handleRedrive)
+	m.APIMutating("POST /api/orgs/{org_id}/work/{kind}/items/cancel", h.handleCancel)
+	m.APIMutating("POST /api/orgs/{org_id}/work/{kind}/items/{id}/supersede", h.handleSupersede)
 }

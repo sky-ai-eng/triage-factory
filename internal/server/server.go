@@ -42,6 +42,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/prompts"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teams"
 	"github.com/sky-ai-eng/triage-factory/internal/server/usage"
+	"github.com/sky-ai-eng/triage-factory/internal/server/work"
 	"github.com/sky-ai-eng/triage-factory/internal/wsevent/knowledgeevent"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -919,7 +920,6 @@ func (s *Server) routes() {
 	s.registerMarketplaceRoutes()
 	s.registerGitHubRoutes()
 	s.registerSourceRoutes()
-	s.registerWorkRoutes()
 
 	// The domains that live in their own subpackages register through the
 	// same two mounts, handed over as httpx.Mounts.
@@ -939,6 +939,7 @@ func (s *Server) routes() {
 	teams.New(s.tx, s.az, s.allStores, func() *delegate.Spawner { return s.spawner }, s.kickMemoryOwed).Register(m)
 	prompts.New(s.db, s.tx, s.az).Register(m)
 	blueprints.New(s.tx, s.az, func() *delegate.Spawner { return s.spawner }).Register(m)
+	work.New(s.az, s.allStores.WorkKinds).Register(m)
 
 	// SSO (connection / domains / break-glass admin surface, the verify-
 	// before-enforce test-start, and the identifier-first discovery probe) is

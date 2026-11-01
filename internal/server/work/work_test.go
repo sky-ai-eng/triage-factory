@@ -1,4 +1,4 @@
-package server
+package work
 
 import (
 	"context"
@@ -24,6 +24,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/workkinds"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
@@ -149,10 +150,10 @@ func workReq(method, path, orgID, caller, body string, pathValues map[string]str
 // localWorkRig wires the handler in local mode, where the org-admin gate
 // short-circuits to allowed, so these cases exercise the handler's own
 // behaviour with no authz store in the way.
-func localWorkRig(t *testing.T, kinds ...db.WorkKindHandle) *workHandler {
+func localWorkRig(t *testing.T, kinds ...db.WorkKindHandle) *Handler {
 	t.Helper()
 	runmode.SetForTest(t, runmode.ModeLocal)
-	return &workHandler{az: nil, kinds: kinds}
+	return New(nil, kinds)
 }
 
 func localEventQueueKind(t *testing.T) (db.WorkKindHandle, *sql.DB) {
@@ -637,7 +638,7 @@ func TestWorkHandler_Gate_Postgres(t *testing.T) {
 	h.Reset(t)
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
-	s := New(h.AdminDB, stores)
+	az := authz.New(h.AdminDB, stores.Tx)
 
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, h, "work-founder")
 	member := pgtest.SeedUser(t, h, "work-member")
@@ -665,7 +666,7 @@ func TestWorkHandler_Gate_Postgres(t *testing.T) {
 	}
 	handle := stores.EventQueue.(db.WorkKindHandle)
 
-	wh := &workHandler{az: s.az, kinds: stores.WorkKinds}
+	wh := New(az, stores.WorkKinds)
 	pv := map[string]string{"kind": "event_queue", "id": fmt.Sprint(claimed.ID)}
 	redriveBody := fmt.Sprintf(`{"ids":[%d]}`, claimed.ID)
 	cancelBody := fmt.Sprintf(`{"ids":[%d],"reason":"stop"}`, claimed.ID)

@@ -42,4 +42,5 @@ var (
 	taskActionLog      = logging.Component("task-action")
 	tasksLog           = logging.Component("tasks")
 	workLog            = logging.Component("work")
+	teamsLog           = logging.Component("teams")
 )
