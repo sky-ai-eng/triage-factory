@@ -270,8 +270,9 @@ func TestGetPRFiles_MultiPage(t *testing.T) {
 	}
 }
 
-func TestGetPRFiles_CapAt1000(t *testing.T) {
-	// Every page returns 100 files; should stop after 10 pages (1000 total).
+func TestGetPRFiles_CapAtMaxPRFiles(t *testing.T) {
+	// Every page returns 100 files; should stop at MaxPRFiles, GitHub's own
+	// limit of 3,000 (30 pages).
 	var callCount int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++

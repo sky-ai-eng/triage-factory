@@ -30,10 +30,9 @@ func makeOpenPRPage(n, base int) []map[string]any {
 	return out
 }
 
-// TestListOpenPRs_TruncatesAtPageCap is TFAC-571's pagination-cap acceptance:
-// a repo with more open PRs than maxFetchPages*100 must truncate rather than
-// paginate unbounded, and the truncation must be logged at WARN (never
-// silent) — a pathological repo must not amplify call volume without bound.
+// TestListOpenPRs_TruncatesAtPageCap: a listing that never ends stops at
+// maxOpenPRPages rather than paginating unbounded, and the truncation is
+// logged at WARN (never silent).
 func TestListOpenPRs_TruncatesAtPageCap(t *testing.T) {
 	logs := &captureHandler{}
 	prev := githubLog
@@ -57,11 +56,11 @@ func TestListOpenPRs_TruncatesAtPageCap(t *testing.T) {
 	if notModified {
 		t.Fatal("notModified = true; want false (every page returns a full page)")
 	}
-	if len(prs) != maxFetchPages*100 {
-		t.Errorf("got %d PRs; want %d (capped at maxFetchPages)", len(prs), maxFetchPages*100)
+	if len(prs) != maxOpenPRPages*100 {
+		t.Errorf("got %d PRs; want %d (capped at maxOpenPRPages)", len(prs), maxOpenPRPages*100)
 	}
-	if got := atomic.LoadInt32(&calls); got != int32(maxFetchPages) {
-		t.Errorf("made %d HTTP calls; want exactly %d (page cap)", got, maxFetchPages)
+	if got := atomic.LoadInt32(&calls); got != int32(maxOpenPRPages) {
+		t.Errorf("made %d HTTP calls; want exactly %d (page cap)", got, maxOpenPRPages)
 	}
 
 	warned := false
@@ -76,8 +75,8 @@ func TestListOpenPRs_TruncatesAtPageCap(t *testing.T) {
 }
 
 // TestGetPRFiles_TruncationLogsWarning pins the WARN-log half of GetPRFiles'
-// existing MaxPRFiles cap (see TestGetPRFiles_CapAt1000 for the count
-// assertions) — truncation must be visible, not silent (TFAC-571).
+// MaxPRFiles cap (see TestGetPRFiles_CapAtMaxPRFiles for the count
+// assertions) — truncation must be visible, not silent.
 func TestGetPRFiles_TruncationLogsWarning(t *testing.T) {
 	logs := &captureHandler{}
 	prev := githubLog

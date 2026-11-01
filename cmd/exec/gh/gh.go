@@ -27,7 +27,7 @@ const PRHelpText = `GitHub PR Commands:
                                                           +/-, binary). No patch (use pr diff for
                                                           content); PR-level totals come from
                                                           pr view. "truncated":true means the list
-                                                          hit the 1000-file cap.
+                                                          hit the 3000-file cap.
   gh pr thread-view <number> <comment_id> [--page N]      Comment thread with replies
   gh pr review-view <review_id> --pr <N> [--repo o/r] [-v]  Expand a review + inline comments
   gh pr review-dismiss <review_id> --pr <N> [--repo o/r] [--body <reason>]
