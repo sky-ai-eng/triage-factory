@@ -30,14 +30,12 @@ func (f *fakeLaunchedSidecar) Close() error          { return f.conn.Close() }
 
 // scriptedSidecar drives the sidecar side of the supervision channel with the
 // real protocol + real sealed-box crypto: it announces a per-run key, unseals
-// what the orchestrator relays, and answers StartProxies. It optionally calls
-// the orchestrator back to authorize a repo, exercising the reverse direction.
+// what the orchestrator relays, and answers StartProxies.
 type scriptedSidecar struct {
-	kp          *credseal.KeyPair
-	conn        *sidecarproto.Conn
-	gotBundle   chan *credbundle.Bundle
-	startEnv    []string
-	authorizeCB func(t *testing.T)
+	kp        *credseal.KeyPair
+	conn      *sidecarproto.Conn
+	gotBundle chan *credbundle.Bundle
+	startEnv  []string
 }
 
 func (s *scriptedSidecar) Handle(_ context.Context, kind sidecarproto.Kind, body json.RawMessage) (any, error) {

@@ -15,7 +15,6 @@ import (
 )
 
 func ip(v int) *int             { return &v }
-func fp(v float64) *float64     { return &v }
 func tp(v time.Time) *time.Time { return &v }
 
 func TestPercentileMS(t *testing.T) {

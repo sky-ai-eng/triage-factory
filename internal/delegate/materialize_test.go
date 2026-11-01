@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -233,29 +232,6 @@ func writeFileT(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
-}
-
-// initTestRepo makes cwd a git working tree, skipping the test when git isn't
-// installed (the same posture the worktree package's git-backed tests take).
-func initTestRepo(t *testing.T, cwd string) {
-	t.Helper()
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
-	}
-	runTestGit(t, cwd, "init", "-q", ".")
-	runTestGit(t, cwd, "config", "user.email", "test@example.com")
-	runTestGit(t, cwd, "config", "user.name", "Test")
-}
-
-func runTestGit(t *testing.T, dir string, args ...string) string {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, out)
-	}
-	return string(out)
 }
 
 func TestMemorySlug(t *testing.T) {

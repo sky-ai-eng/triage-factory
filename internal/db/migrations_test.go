@@ -11,8 +11,8 @@ import (
 )
 
 // openMigrationsTestDB returns a fresh, schema-less in-memory SQLite
-// for migration tests. Distinct from newTestDB (which calls Migrate
-// for you) — these tests exercise Migrate itself.
+// for migration tests. Distinct from newTenantlessTestDB (which restores an
+// already-migrated image) — these tests exercise Migrate itself.
 func openMigrationsTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	database, err := sql.Open("sqlite", TestDSNMemory)

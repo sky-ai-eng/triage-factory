@@ -69,7 +69,6 @@ linters:
       - path: _test\.go
         linters:
           - errcheck
-          - unused
           # Live integration tests resolve the real HOME to build a
           # subprocess env (npm cache, ~/.claude config); that's not TF
           # state, so test files are exempt from the home-dir ban.
