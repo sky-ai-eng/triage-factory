@@ -1,4 +1,4 @@
-package server
+package prompts
 
 import (
 	"database/sql"
@@ -15,18 +15,23 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/models"
-	"github.com/sky-ai-eng/triage-factory/internal/server/prompts"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 )
 
-// promptsHandler serves the prompt and event-type endpoints. It holds only the
-// deps these routes need — the DB handle (for the event-types catalog read) and
-// the transactional store runner — and registerPromptRoutes registers its
-// methods through the api()/apiMutating() middleware wrappers.
-type promptsHandler struct {
+// Handler serves the prompt and event-type endpoints. It holds only the deps
+// these routes need — the DB handle (for the event-types catalog read), the
+// transactional store runner and the authorization checker — and Register
+// mounts its methods through httpx.Mounts.
+type Handler struct {
 	db *sql.DB
 	tx db.TxRunner
 	az *authz.Checker
+}
+
+// New builds the prompts handler. database is the handle the event-types
+// catalog read uses.
+func New(database *sql.DB, tx db.TxRunner, az *authz.Checker) *Handler {
+	return &Handler{db: database, tx: tx, az: az}
 }
 
 // eventTypeResponse is the /api/event-types wire shape: the catalog row plus a
@@ -41,14 +46,14 @@ type eventTypeResponse struct {
 	SupportsWatch bool `json:"supports_watch"`
 }
 
-func (ph *promptsHandler) handleEventTypes(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (h *Handler) handleEventTypes(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	types, err := db.ListEventTypes(ph.db)
+	types, err := db.ListEventTypes(h.db)
 	if err != nil {
-		internalError(w, "prompts", err)
+		httpx.InternalError(w, "prompts", err)
 		return
 	}
 	// make(_, 0, len(types)) + append yields a non-nil empty slice when the
@@ -62,7 +67,7 @@ func (ph *promptsHandler) handleEventTypes(w http.ResponseWriter, r *http.Reques
 		}
 		out = append(out, eventTypeResponse{EventType: t, SupportsWatch: routing.EventSupportsWatch(t.ID)})
 	}
-	writeJSON(w, http.StatusOK, out)
+	httpx.WriteJSON(w, http.StatusOK, out)
 }
 
 // promptListRequest is the body of POST /api/prompts/list. TeamID narrows to
@@ -79,19 +84,19 @@ type promptListFilterKey struct {
 }
 
 // POST /api/prompts/list
-func (ph *promptsHandler) handlePromptsList(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (h *Handler) handlePromptsList(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
+	userID := httpx.ClaimsFrom(r.Context()).Subject
 
 	var req promptListRequest
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	var v httpx.Validation
-	teamIDFilterField(&v, req.TeamID)
+	httpx.TeamIDFilterField(&v, req.TeamID)
 	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(promptListFilterKey{TeamID: req.TeamID}), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
@@ -101,50 +106,50 @@ func (ph *promptsHandler) handlePromptsList(w http.ResponseWriter, r *http.Reque
 		list  []domain.Prompt
 		total int
 	)
-	if err := ph.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		list, total, e = tx.Prompts.List(r.Context(), orgID, req.TeamID, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
 	}); err != nil {
-		internalError(w, "prompts", err)
+		httpx.InternalError(w, "prompts", err)
 		return
 	}
 	httpx.WriteList(w, page, list, total)
 }
 
-func (ph *promptsHandler) handlePromptGet(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (h *Handler) handlePromptGet(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
-	id, ok := uuidPathOr404(w, r, "id", "prompt")
+	userID := httpx.ClaimsFrom(r.Context()).Subject
+	id, ok := httpx.UUIDPathOr404(w, r, "id", "prompt")
 	if !ok {
 		return
 	}
 	var prompt *domain.Prompt
-	if err := ph.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		prompt, e = tx.Prompts.Get(r.Context(), orgID, id)
 		return e
 	}); err != nil {
-		internalError(w, "prompts", err)
+		httpx.InternalError(w, "prompts", err)
 		return
 	}
 	if prompt == nil {
-		notFound(w, "prompt")
+		httpx.NotFound(w, "prompt")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, prompt)
+	httpx.WriteJSON(w, http.StatusOK, prompt)
 }
 
-func (ph *promptsHandler) handlePromptCreate(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (h *Handler) handlePromptCreate(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	var req prompts.CreateRequest
+	var req CreateRequest
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
@@ -163,9 +168,9 @@ func (ph *promptsHandler) handlePromptCreate(w http.ResponseWriter, r *http.Requ
 		})
 		return
 	}
-	if universe := models.DeploymentUniverse(); !prompts.ValidModel(universe, req.Model) {
+	if universe := models.DeploymentUniverse(); !ValidModel(universe, req.Model) {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason: httpx.ReasonInvalidField, Message: prompts.InvalidModelError(universe), Field: "model",
+			Reason: httpx.ReasonInvalidField, Message: InvalidModelError(universe), Field: "model",
 		})
 		return
 	}
@@ -179,14 +184,14 @@ func (ph *promptsHandler) handlePromptCreate(w http.ResponseWriter, r *http.Requ
 		Model:  req.Model,
 	}
 
-	userID := ClaimsFrom(r.Context()).Subject
+	userID := httpx.ClaimsFrom(r.Context()).Subject
 
 	// Resolve the acting team read-only and reject viewers up front (TFAC-447):
 	// a viewer can't author prompts. Gating here yields a clean 403 instead of
 	// the prompts_insert RLS WITH CHECK surfacing as a 500. The main tx below
 	// re-resolves (and stamps last-acting) only for callers that pass.
 	var actingTeam string
-	if err := ph.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		actingTeam, e = teamscope.ResolveActingNoStamp(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		return e
@@ -194,15 +199,15 @@ func (ph *promptsHandler) handlePromptCreate(w http.ResponseWriter, r *http.Requ
 		if teamscope.WriteIfSelectionError(w, err) {
 			return
 		}
-		internalError(w, "prompts", err)
+		httpx.InternalError(w, "prompts", err)
 		return
 	}
-	if !ph.az.RequireTeamWrite(w, r, orgID, userID, actingTeam) {
+	if !h.az.RequireTeamWrite(w, r, orgID, userID, actingTeam) {
 		return
 	}
 
 	var created domain.Prompt
-	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		if e != nil {
 			return e
@@ -213,24 +218,24 @@ func (ph *promptsHandler) handlePromptCreate(w http.ResponseWriter, r *http.Requ
 		if teamscope.WriteIfSelectionError(w, err) {
 			return
 		}
-		internalError(w, "prompts", err)
+		httpx.InternalError(w, "prompts", err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, created)
+	httpx.WriteJSON(w, http.StatusCreated, created)
 }
 
-func (ph *promptsHandler) handlePromptPut(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (h *Handler) handlePromptPut(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
-	id, ok := uuidPathOr404(w, r, "id", "prompt")
+	userID := httpx.ClaimsFrom(r.Context()).Subject
+	id, ok := httpx.UUIDPathOr404(w, r, "id", "prompt")
 	if !ok {
 		return
 	}
 
-	var req prompts.UpdateRequest
+	var req UpdateRequest
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
@@ -246,34 +251,34 @@ func (ph *promptsHandler) handlePromptPut(w http.ResponseWriter, r *http.Request
 		})
 		return
 	}
-	if universe := models.DeploymentUniverse(); !prompts.ValidModel(universe, req.Model) {
+	if universe := models.DeploymentUniverse(); !ValidModel(universe, req.Model) {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason: httpx.ReasonInvalidField, Message: prompts.InvalidModelError(universe), Field: "model",
+			Reason: httpx.ReasonInvalidField, Message: InvalidModelError(universe), Field: "model",
 		})
 		return
 	}
 
 	var existing *domain.Prompt
-	if err := ph.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		existing, e = tx.Prompts.Get(r.Context(), orgID, id)
 		return e
 	}); err != nil {
-		internalError(w, "prompts", err)
+		httpx.InternalError(w, "prompts", err)
 		return
 	}
 	if existing == nil {
-		notFound(w, "prompt")
+		httpx.NotFound(w, "prompt")
 		return
 	}
 	// A viewer of the prompt's team can read it but not rewrite it (TFAC-447).
 	// Gate after the 404 so a missing prompt still reads as not-found.
-	if !ph.az.RequireTeamWrite(w, r, orgID, userID, existing.TeamID) {
+	if !h.az.RequireTeamWrite(w, r, orgID, userID, existing.TeamID) {
 		return
 	}
 
 	var updated domain.Prompt
-	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		updated, e = tx.Prompts.Update(r.Context(), orgID, id, req.Name, req.Body, req.Model)
 		return e
@@ -282,22 +287,22 @@ func (ph *promptsHandler) handlePromptPut(w http.ResponseWriter, r *http.Request
 		// between the two transactions rather than a caller naming nothing —
 		// still a 404, because the resource the response would describe is gone.
 		if errors.Is(err, db.ErrNoSuchPrompt) {
-			notFound(w, "prompt")
+			httpx.NotFound(w, "prompt")
 			return
 		}
-		internalError(w, "prompts", err)
+		httpx.InternalError(w, "prompts", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, updated)
+	httpx.WriteJSON(w, http.StatusOK, updated)
 }
 
-func (ph *promptsHandler) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (h *Handler) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
-	id, ok := uuidPathOr404(w, r, "id", "prompt")
+	userID := httpx.ClaimsFrom(r.Context()).Subject
+	id, ok := httpx.UUIDPathOr404(w, r, "id", "prompt")
 	if !ok {
 		return
 	}
@@ -307,12 +312,12 @@ func (ph *promptsHandler) handlePromptDelete(w http.ResponseWriter, r *http.Requ
 	// to the 404 the mutation tx below already renders (RequireTeamWrite isn't
 	// reached). The extra read is cheap and human-paced (canvas delete gesture).
 	var existing *domain.Prompt
-	if err := ph.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		existing, e = tx.Prompts.Get(r.Context(), orgID, id)
 		return e
 	}); err != nil {
-		internalError(w, "prompts", err)
+		httpx.InternalError(w, "prompts", err)
 		return
 	}
 	// The existing != nil guard is semantically load-bearing, not just defensive:
@@ -321,7 +326,7 @@ func (ph *promptsHandler) handlePromptDelete(w http.ResponseWriter, r *http.Requ
 	// under the same RLS context and renders the 404 — so a viewer probing a
 	// prompt they can't see learns "not found", never "view-only". RequireTeamWrite
 	// needs a real team_id and must not be reached for an absent row.
-	if existing != nil && !ph.az.RequireTeamWrite(w, r, orgID, userID, existing.TeamID) {
+	if existing != nil && !h.az.RequireTeamWrite(w, r, orgID, userID, existing.TeamID) {
 		return
 	}
 
@@ -332,7 +337,7 @@ func (ph *promptsHandler) handlePromptDelete(w http.ResponseWriter, r *http.Requ
 	// delete) — the canvas surfaces a toast so the now-untriggered downstream
 	// doesn't go unnoticed.
 	var orphaned bool
-	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		prompt, e = tx.Prompts.Get(r.Context(), orgID, id)
 		if e != nil {
@@ -378,8 +383,8 @@ func (ph *promptsHandler) handlePromptDelete(w http.ResponseWriter, r *http.Requ
 				}
 				// Head delete: the trigger fired into the entry prompt that's going
 				// away, so detach it (the downstream wasn't authored as the trigger's
-				// target) via EventHandlers.Delete, matching handleEventHandlerDelete
-				// — a system_slug (shipped) trigger soft-deletes so the
+				// target) via EventHandlers.Delete, matching DELETE
+				// /api/event-handlers/{id} — a system_slug (shipped) trigger soft-deletes so the
 				// shipped-content sync never resurrects it, a user-created trigger
 				// hard-deletes.
 				if stepIndex == 0 {
@@ -420,17 +425,17 @@ func (ph *promptsHandler) handlePromptDelete(w http.ResponseWriter, r *http.Requ
 		// the row + the conversations referencing it so historical timelines
 		// still resolve the prompt.
 		var de error
-		status, de = prompts.SoftDeleteBySource(r.Context(), tx, orgID, prompt)
+		status, de = SoftDeleteBySource(r.Context(), tx, orgID, prompt)
 		return de
 	}); err != nil {
-		internalError(w, "prompts", err)
+		httpx.InternalError(w, "prompts", err)
 		return
 	}
 	if prompt == nil {
-		notFound(w, "prompt")
+		httpx.NotFound(w, "prompt")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": status, "orphaned_blueprint": orphaned})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"status": status, "orphaned_blueprint": orphaned})
 }
 
 // indexOfStep returns the position of the step whose prompt is promptID, or -1.
@@ -443,13 +448,13 @@ func indexOfStep(steps []domain.BlueprintStep, promptID string) int {
 	return -1
 }
 
-func (ph *promptsHandler) handlePromptStats(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
+func (h *Handler) handlePromptStats(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := httpx.RequireOrg(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
-	id, ok := uuidPathOr404(w, r, "id", "prompt")
+	userID := httpx.ClaimsFrom(r.Context()).Subject
+	id, ok := httpx.UUIDPathOr404(w, r, "id", "prompt")
 	if !ok {
 		return
 	}
@@ -457,7 +462,7 @@ func (ph *promptsHandler) handlePromptStats(w http.ResponseWriter, r *http.Reque
 		stats  *domain.PromptStats
 		prompt *domain.Prompt
 	)
-	if err := ph.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		// Read the prompt first: Stats aggregates over runs, so a prompt that
 		// doesn't exist (or isn't visible) produced an all-zero row that read
 		// as a real, quiet prompt — while the sibling GET 404s the same id.
@@ -469,18 +474,18 @@ func (ph *promptsHandler) handlePromptStats(w http.ResponseWriter, r *http.Reque
 		stats, e = tx.Prompts.Stats(r.Context(), orgID, id)
 		return e
 	}); err != nil {
-		internalError(w, "prompts", err)
+		httpx.InternalError(w, "prompts", err)
 		return
 	}
 	if prompt == nil {
-		notFound(w, "prompt")
+		httpx.NotFound(w, "prompt")
 		return
 	}
-	writeJSON(w, http.StatusOK, stats)
+	httpx.WriteJSON(w, http.StatusOK, stats)
 }
 
-func (s *Server) registerPromptRoutes() {
-	ph := &promptsHandler{db: s.db, tx: s.tx, az: s.az}
+// Register mounts the prompt and event-type routes.
+func (h *Handler) Register(m httpx.Mounts) {
 	// **Declared exceptions to the paginated-list rule.** These two are not
 	// lists of rows a tenant owns; they are the build's own vocabulary —
 	// domain.AllEventTypes() and the schemas derived from it, fixed at compile
@@ -489,11 +494,11 @@ func (s *Server) registerPromptRoutes() {
 	// only changes when the binary does. A client reads them once and caches.
 	// Their shape stays a bare list on purpose: paginating a constant is
 	// ceremony that makes the surface look mutable.
-	s.api("GET /api/event-types", ph.handleEventTypes)
-	s.apiMutating("POST /api/prompts/list", ph.handlePromptsList)
-	s.apiMutating("POST /api/prompts", ph.handlePromptCreate)
-	s.api("GET /api/prompts/{id}", ph.handlePromptGet)
-	s.apiMutating("PUT /api/prompts/{id}", ph.handlePromptPut)
-	s.apiMutating("DELETE /api/prompts/{id}", ph.handlePromptDelete)
-	s.api("GET /api/prompts/{id}/stats", ph.handlePromptStats)
+	m.API("GET /api/event-types", h.handleEventTypes)
+	m.APIMutating("POST /api/prompts/list", h.handlePromptsList)
+	m.APIMutating("POST /api/prompts", h.handlePromptCreate)
+	m.API("GET /api/prompts/{id}", h.handlePromptGet)
+	m.APIMutating("PUT /api/prompts/{id}", h.handlePromptPut)
+	m.APIMutating("DELETE /api/prompts/{id}", h.handlePromptDelete)
+	m.API("GET /api/prompts/{id}/stats", h.handlePromptStats)
 }
