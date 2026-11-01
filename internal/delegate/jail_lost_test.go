@@ -186,13 +186,16 @@ func TestJailLost_TheLastLossTheBudgetAllowsParksForAPerson(t *testing.T) {
 	}
 }
 
-// A park that lands nothing is not counted as one. The fence held, so the
-// engagement is not fenced, but the row had settled under it and the park
-// flipped nothing: the conversation is not paused, and an operator alert
-// saying it is would send someone after a run that is not waiting.
-func TestJailLost_AParkThatLandsNothingIsNotCounted(t *testing.T) {
+// A park that lands nothing is neither counted nor announced. The fence
+// held, so the engagement is not fenced, but the row had settled under it and
+// the park flipped nothing: the conversation is not paused, and an operator
+// alert or an org toast saying it is would send someone after a run that is
+// not waiting.
+func TestJailLost_AParkThatLandsNothingIsNotCountedOrAnnounced(t *testing.T) {
 	f := newStallFixture(t, "r-jail-lost-settled", activityTimings{idle: time.Hour})
 	collect := sandboxMemoryMetrics(t)
+	hub, captured := capturingHub(t)
+	f.s.wsHub = hub
 	if _, err := f.database.Exec(`UPDATE conversations SET status = ? WHERE id = ?`, domain.StatusFailed, f.conversationID); err != nil {
 		t.Fatalf("settle the conversation: %v", err)
 	}
@@ -217,5 +220,8 @@ func TestJailLost_AParkThatLandsNothingIsNotCounted(t *testing.T) {
 	if got := counterAt(t, collect(), "conversations.sandbox_lost_parks",
 		attribute.String("memory_limit", "true"), attribute.String("org.id", runmode.LocalDefaultOrgID)); got != 0 {
 		t.Errorf("sandbox-lost parks = %d, want 0 for a park that flipped nothing", got)
+	}
+	if got := captured.toasts(); len(got) != 0 {
+		t.Errorf("toasts = %q, want none for a run that is not paused", got)
 	}
 }
