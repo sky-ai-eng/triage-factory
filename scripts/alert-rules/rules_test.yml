@@ -828,6 +828,21 @@ tests:
       exp_annotations:
         summary: A run is paused because its sandbox kept reaching its memory limit
         description: A run in org o1 kept losing its sandbox, the last time at TF_CLAIM_MEMORY_LIMIT_MB, and is paused until someone sends it a message. If the work needs more memory, raise TF_CLAIM_MEMORY_LIMIT_MB on the executors. tf_sandbox_peak_memory_ratio shows how close other runs come to the limit.
+- name: RunPausedAtMemoryLimit fires on the first park after an executor restart, from the series the engagement opened at zero
+  interval: 1m
+  input_series:
+  - series: 'tf_conversations_sandbox_lost_parks_total{memory_limit="true",org_id="o1"}'
+    values: '1x20 stale _x59 0x5 1x30'
+  alert_rule_test:
+  - eval_time: 100m
+    alertname: RunPausedAtMemoryLimit
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        org_id: o1
+      exp_annotations:
+        summary: A run is paused because its sandbox kept reaching its memory limit
+        description: A run in org o1 kept losing its sandbox, the last time at TF_CLAIM_MEMORY_LIMIT_MB, and is paused until someone sends it a message. If the work needs more memory, raise TF_CLAIM_MEMORY_LIMIT_MB on the executors. tf_sandbox_peak_memory_ratio shows how close other runs come to the limit.
 - name: RunPausedAtMemoryLimit ignores a sandbox-lost park the memory limit did not cause
   interval: 1m
   input_series:
@@ -931,6 +946,34 @@ tests:
   - eval_time: 5m
     alertname: SandboxesLostToMemoryLimit
     exp_alerts: []
+- name: SandboxesLostToMemoryLimit counts jails lost after an executor restart, from the series the engagement opened at zero
+  interval: 1m
+  input_series:
+  - series: 'tf_sandbox_memory_kills_total{kind="jail_lost",org_id="o1"}'
+    values: '5x20 stale _x59 0x5 12x30'
+  alert_rule_test:
+  - eval_time: 100m
+    alertname: SandboxesLostToMemoryLimit
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+      exp_annotations:
+        summary: Sandboxes are being ended by their memory limit
+        description: 'The memory limit ended about 12 sandboxes in the last hour. Each one cost its run every process it had running. Break tf_sandbox_memory_kills_total down by org_id to find the runs, and compare tf_sandbox_peak_memory_ratio across runs: if most come close to the limit, raise TF_CLAIM_MEMORY_LIMIT_MB on the executors.'
+- name: SandboxesLostToMemoryLimit keeps a series' jails after it stops being scraped
+  interval: 1m
+  input_series:
+  - series: 'tf_sandbox_memory_kills_total{kind="jail_lost",org_id="o1"}'
+    values: '_x3 0x3 12x7 stale'
+  alert_rule_test:
+  - eval_time: 30m
+    alertname: SandboxesLostToMemoryLimit
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+      exp_annotations:
+        summary: Sandboxes are being ended by their memory limit
+        description: 'The memory limit ended about 13 sandboxes in the last hour. Each one cost its run every process it had running. Break tf_sandbox_memory_kills_total down by org_id to find the runs, and compare tf_sandbox_peak_memory_ratio across runs: if most come close to the limit, raise TF_CLAIM_MEMORY_LIMIT_MB on the executors.'
 - name: SandboxesLostToMemoryLimit stays quiet at one run's worth, and for kills the sandbox survived
   interval: 1m
   input_series:

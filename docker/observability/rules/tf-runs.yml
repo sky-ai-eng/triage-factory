@@ -112,8 +112,10 @@ groups:
       # in a row as the jail budget allows, and memory_limit="true" says the
       # memory limit ended the last one. The run then waits for a person, and
       # the toast the org sees tells them to raise a limit only an operator
-      # can set, so this is the operator's copy of that toast. A warning that
-      # fires on the counter's first sample, like the rules above.
+      # can set, so this is the operator's copy of that toast. Each
+      # engagement creates the series at zero, so a park after an executor
+      # restart is an increase; the first-sample branch covers a park before
+      # the series' first scrape.
       - alert: RunPausedAtMemoryLimit
         expr: |
           sum by (org_id) (increase(tf_conversations_sandbox_lost_parks_total{memory_limit="true"}[1h])) > 0
@@ -141,13 +143,15 @@ groups:
       # (three in place on each of three claims), so the threshold is more
       # than one run's worth in an hour.
       #
-      # Every org and executor has its own series, and each appears at its
-      # first increment, which increase() cannot see. So a series that is new
-      # in the window (the same test as above: no sample in the hour before)
-      # counts its whole value, and every other series its increase. The
-      # `or` takes the new series' value in place of its increase, never
-      # beside it, because set operators match on labels without the
-      # metric name.
+      # Every org and executor has its own series. Each engagement creates
+      # its org's series at zero when it starts, so increase() sees the kills
+      # that follow, across an executor restart and after a series stops
+      # being scraped. A kill that lands before the series' first scrape
+      # still appears already counted, so a series that is new in the window
+      # (the same test as above: no sample in the hour before) counts its
+      # whole value, and every other series its increase. The `or` takes the
+      # new series' value in place of its increase, never beside it, because
+      # set operators match on labels without the metric name.
       - alert: SandboxesLostToMemoryLimit
         expr: |
           sum(

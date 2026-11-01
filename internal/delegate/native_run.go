@@ -207,6 +207,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// budget derived from it, so the two cannot disagree.
 	memoryLimitMB := agentproc.ClaimMemoryLimitMB()
 	timings := s.resolvedActivityTimings()
+	openSandboxMemorySeries(orgID)
 	// Restartable, so a jail that dies under the loop is replaced in this
 	// cell and the loop goes on.
 	launched, err := launchRestartableJail(ctx, runCell, cell.LaunchSpec{

@@ -61,6 +61,32 @@ func newSandboxMemoryStats(mp metric.MeterProvider) *sandboxMemoryStats {
 	return &sandboxMemoryStats{kills: kills, lostParks: lostParks, peak: peak}
 }
 
+// openSandboxMemorySeries creates orgID's kill and park series at zero, ahead
+// of anything they count. A counter series otherwise appears at its first
+// increment, already at 1, and increase() over a series that starts at 1
+// reads 0 — so the first kill or park after an executor restart, or on a
+// series that stops being scraped within the window, would never reach an
+// alert. Called at each engagement's start, which is ahead of any kill or park
+// that engagement counts.
+func openSandboxMemorySeries(orgID string) {
+	stats := sandboxMemory.Load()
+	if stats == nil {
+		return
+	}
+	org := telemetry.OrgID(orgID)
+	if stats.kills != nil {
+		for _, kind := range []agentloop.MemoryKill{agentloop.MemoryKillBashBudget, agentloop.MemoryKillCeiling, agentloop.MemoryKillJailLost} {
+			stats.kills.Add(context.Background(), 0, metric.WithAttributes(attribute.String("kind", string(kind)), org))
+		}
+	}
+	if stats.lostParks != nil {
+		for _, memoryLimit := range []bool{true, false} {
+			stats.lostParks.Add(context.Background(), 0,
+				metric.WithAttributes(attribute.String("memory_limit", strconv.FormatBool(memoryLimit)), org))
+		}
+	}
+}
+
 // recordMemoryKills counts n kills of kind in one of orgID's sandboxes.
 func recordMemoryKills(orgID string, kind agentloop.MemoryKill, n int) {
 	stats := sandboxMemory.Load()

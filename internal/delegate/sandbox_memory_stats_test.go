@@ -159,3 +159,48 @@ func TestRestartableJail_EachJailsPeakIsObservedAgainstItsCeiling(t *testing.T) 
 		}
 	})
 }
+
+// An engagement's start creates its org's series at zero, so the first kill or
+// park after them is a change increase() can see rather than a series that
+// appears already counted.
+func TestOpenSandboxMemorySeries_CreatesEachSeriesAtZero(t *testing.T) {
+	collect := sandboxMemoryMetrics(t)
+	openSandboxMemorySeries("org-a")
+	openSandboxMemorySeries("org-a") // a later engagement adds nothing
+
+	type point struct{ name, label, value string }
+	got := map[point]int64{}
+	for _, sm := range collect().ScopeMetrics {
+		for _, m := range sm.Metrics {
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				continue
+			}
+			for _, dp := range sum.DataPoints {
+				if org, _ := dp.Attributes.Value("org.id"); org.AsString() != "org-a" {
+					continue
+				}
+				for _, key := range []attribute.Key{"kind", "memory_limit"} {
+					if v, ok := dp.Attributes.Value(key); ok {
+						got[point{m.Name, string(key), v.AsString()}] = dp.Value
+					}
+				}
+			}
+		}
+	}
+	want := []point{
+		{"sandbox.memory_kills", "kind", "bash_budget"},
+		{"sandbox.memory_kills", "kind", "ceiling"},
+		{"sandbox.memory_kills", "kind", "jail_lost"},
+		{"conversations.sandbox_lost_parks", "memory_limit", "true"},
+		{"conversations.sandbox_lost_parks", "memory_limit", "false"},
+	}
+	if len(got) != len(want) {
+		t.Errorf("series = %v, want exactly %v", got, want)
+	}
+	for _, p := range want {
+		if v, ok := got[p]; !ok || v != 0 {
+			t.Errorf("%s{%s=%q} = (%d, present %v), want present at 0", p.name, p.label, p.value, v, ok)
+		}
+	}
+}

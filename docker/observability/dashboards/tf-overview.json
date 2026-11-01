@@ -4742,7 +4742,7 @@
     },
     {
       "collapsed": false,
-      "description": "What memory ended inside native runs' sandboxes, how close each sandbox came to its limit, and the runs that paused because the limit kept ending their sandbox. A sandbox's limit is TF_CLAIM_MEMORY_LIMIT_MB, and a single bash command's budget is derived from it. Counted by the executors and summed across them. The RunPausedAtMemoryLimit and SandboxesLostToMemoryLimit rules in docker/observability/rules/tf-runs.yml alert on the last two kinds of event. A counter's series appears at its first increment, which increase() cannot see, so each panel counts a series that first appears inside its window at its whole value and every other series by its increase. No data means no native run has reached a limit, or none has run.",
+      "description": "What memory ended inside native runs' sandboxes, how close each sandbox came to its limit, and the runs that paused because the limit kept ending their sandbox. A sandbox's limit is TF_CLAIM_MEMORY_LIMIT_MB, and a single bash command's budget is derived from it. Counted by the executors and summed across them. The RunPausedAtMemoryLimit and SandboxesLostToMemoryLimit rules in docker/observability/rules/tf-runs.yml alert on the last two kinds of event. Each engagement creates its org's kill and park series at zero, so their panels see the first kill or park after it; a series that first appears inside a panel's window counts at its whole value, for one whose first count lands before its first scrape and for the peak histogram, which has no zero to start from. No data means no native run has reached a limit, or none has run.",
       "gridPos": {
         "h": 1,
         "w": 24,
