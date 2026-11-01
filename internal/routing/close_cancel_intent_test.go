@@ -33,12 +33,14 @@ type stoppingSpawner struct {
 	stubDelegator
 	mu      sync.Mutex
 	stopped []string
+	causes  []delegate.StopCause
 	fail    bool
 }
 
 func (s *stoppingSpawner) StopConversationAndCancelBlueprint(orgID, conversationID, userID string, cause delegate.StopCause) error {
 	s.mu.Lock()
 	s.stopped = append(s.stopped, conversationID)
+	s.causes = append(s.causes, cause)
 	s.mu.Unlock()
 	if s.fail {
 		return errors.New("boom: the executor holding this run is unreachable")
@@ -50,6 +52,13 @@ func (s *stoppingSpawner) stoppedIDs() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.stopped...)
+}
+
+// stopCauses is the cause of each stop, in stoppedIDs' order.
+func (s *stoppingSpawner) stopCauses() []delegate.StopCause {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]delegate.StopCause(nil), s.causes...)
 }
 
 // seedRunOnTask stages one blueprint_run in blueprintStatus with its step-0

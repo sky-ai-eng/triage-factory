@@ -218,7 +218,8 @@ func (s *swipeStore) RequeueTask(ctx context.Context, orgID string, taskID strin
 			        source_status = NULL,
 			        closed_at = NULL,
 			        close_reason = NULL,
-			        close_deferred_event_id = NULL
+			        close_deferred_event_id = NULL,
+			        close_deferred_at = NULL
 			  WHERE org_id = $1 AND id = $2`,
 			orgID, taskID,
 		)
@@ -294,7 +295,8 @@ func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID, us
 			        source_status = NULL,
 			        closed_at = NULL,
 			        close_reason = NULL,
-			        close_deferred_event_id = NULL
+			        close_deferred_event_id = NULL,
+			        close_deferred_at = NULL
 			  WHERE org_id = $1 AND id = $2
 			    AND (SELECT creator_user_id FROM swipe_events
 			          WHERE org_id = $1 AND task_id = $2 ORDER BY id DESC LIMIT 1) = $3

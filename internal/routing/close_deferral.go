@@ -2,10 +2,13 @@ package routing
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
@@ -21,10 +24,39 @@ import (
 // way, so closing the task never retires it before the person acts on it.
 // The task's own event arriving again cancels the hold (TaskStore.Bump): the
 // situation is live again.
+//
+// The hold does not wait forever on work an event started. That work is told
+// to wrap up, and if it is still going once the close has held for the
+// sweep's limit, the sweep stops it, then closes the task unless a person's
+// work or a deliverable awaiting a person still holds it. Work a person
+// started is told what happened without being told to stop, so it is never
+// stopped on the limit.
 
 // DefaultCloseDeferralSweepInterval is how often the brain looks at the held
-// closes of tasks nothing holds any more.
+// closes of tasks nothing holds any more, and at the holds that have run out.
 const DefaultCloseDeferralSweepInterval = 30 * time.Second
+
+// DefaultCloseHoldTimeout is how long a held close waits on work an event
+// started before the sweep stops it: long enough for a slow tool call to
+// return, the agent to read the close note, and a turn or two to wrap up.
+const DefaultCloseHoldTimeout = 20 * time.Minute
+
+// ParseCloseHoldTimeout interprets the TF_CLOSE_HOLD_TIMEOUT env value.
+// Empty → the default. Non-positive or unparseable → the default plus an
+// error the caller logs.
+func ParseCloseHoldTimeout(raw string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return DefaultCloseHoldTimeout, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return DefaultCloseHoldTimeout, fmt.Errorf(
+			"invalid TF_CLOSE_HOLD_TIMEOUT %q (want a positive duration like \"20m\"); using default %s",
+			raw, DefaultCloseHoldTimeout)
+	}
+	return d, nil
+}
 
 // tellTaskClosing tells each of the task's working conversations that evt
 // resolved it, delivered where the conversation's runtime reads it without
@@ -42,14 +74,15 @@ func (r *Router) tellTaskClosing(ctx context.Context, orgID string, evt domain.E
 // --- the sweep --------------------------------------------------------------
 
 // RunCloseDeferralSweep applies the held closes of tasks nothing holds any
-// more, no conversation working and no deliverable awaiting a person, every
-// interval, across every org, until ctx is cancelled. A brain worker: exactly
-// one process runs it.
-func (r *Router) RunCloseDeferralSweep(ctx context.Context, interval time.Duration) {
+// more, no conversation working and no deliverable awaiting a person, and
+// expires the holds older than holdTimeout that work an event started still
+// holds, every interval, across every org, until ctx is cancelled. A brain
+// worker: exactly one process runs it.
+func (r *Router) RunCloseDeferralSweep(ctx context.Context, interval, holdTimeout time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
-		r.sweepCloseDeferrals(ctx)
+		r.sweepCloseDeferrals(ctx, holdTimeout)
 		select {
 		case <-ctx.Done():
 			return
@@ -59,16 +92,22 @@ func (r *Router) RunCloseDeferralSweep(ctx context.Context, interval time.Durati
 }
 
 // sweepCloseDeferrals runs one pass over every active task holding a close
-// that nothing holds any more (TaskStore.ListActiveCloseDeferralsSystem). A
-// failure on one is logged and leaves it for the next pass; its siblings
-// still settle.
-func (r *Router) sweepCloseDeferrals(ctx context.Context) {
+// that nothing holds any more (TaskStore.ListActiveCloseDeferralsSystem),
+// then over every hold older than holdTimeout that work an event started
+// still holds (TaskStore.ListExpiredCloseDeferralsSystem). A failure on one
+// is logged and leaves it for the next pass; its siblings still settle.
+func (r *Router) sweepCloseDeferrals(ctx context.Context, holdTimeout time.Duration) {
+	closedIn := map[string]bool{}
+	defer func() {
+		for orgID := range closedIn {
+			r.broadcastTasksUpdated(orgID)
+		}
+	}()
+
 	deferrals, err := r.tasks.ListActiveCloseDeferralsSystem(ctx)
 	if err != nil {
 		routerLog.ErrorContext(ctx, "close hold sweep: list held closes failed", "error", err)
-		return
 	}
-	closedIn := map[string]bool{}
 	for _, d := range deferrals {
 		if ctx.Err() != nil {
 			return
@@ -83,8 +122,25 @@ func (r *Router) sweepCloseDeferrals(ctx context.Context) {
 			closedIn[d.OrgID] = true
 		}
 	}
-	for orgID := range closedIn {
-		r.broadcastTasksUpdated(orgID)
+
+	expired, err := r.tasks.ListExpiredCloseDeferralsSystem(ctx, holdTimeout)
+	if err != nil {
+		routerLog.ErrorContext(ctx, "close hold sweep: list expired holds failed", "error", err)
+		return
+	}
+	for _, d := range expired {
+		if ctx.Err() != nil {
+			return
+		}
+		closed, err := r.expireCloseDeferral(ctx, d, holdTimeout)
+		if err != nil {
+			routerLog.ErrorContext(ctx, "close hold sweep: expire failed",
+				"task_id", d.TaskID, "event_id", d.EventID, "error", err)
+			continue
+		}
+		if closed {
+			closedIn[d.OrgID] = true
+		}
 	}
 }
 
@@ -102,43 +158,92 @@ func (r *Router) sweepCloseDeferrals(ctx context.Context) {
 // cancel intent, the teardown and the audit row naming the stored event are
 // what an unheld close writes.
 func (r *Router) settleCloseDeferral(ctx context.Context, d domain.TaskCloseDeferral) (closed bool, err error) {
-	evt, err := r.events.GetSystem(ctx, d.OrgID, d.EventID)
-	if err != nil {
-		return false, fmt.Errorf("read closing event: %w", err)
-	}
-	if evt == nil {
-		return false, fmt.Errorf("closing event %s not found", d.EventID)
-	}
-	task, err := r.tasks.GetSystem(ctx, d.OrgID, d.TaskID)
-	if err != nil {
-		return false, fmt.Errorf("read task: %w", err)
-	}
-	// The list read only active tasks, but one can close between that read
-	// and this one, and a close attempt on it would still write an audit
-	// row naming this event.
-	if task == nil || task.Status == "done" || task.Status == "dismissed" {
-		return false, nil
-	}
-
-	reason, admitted, err := r.deferredCloseReason(ctx, d.OrgID, *evt, *task)
-	if err != nil {
+	evt, reason, holds, err := r.heldCloseStillHolds(ctx, d)
+	if err != nil || !holds {
 		return false, err
 	}
-	if !admitted {
-		routerLog.InfoContext(ctx, "held close no longer holds; dropped",
-			"task_id", task.ID, "on_event", evt.EventType)
-		return false, r.clearCloseDeferral(ctx, d)
-	}
-	out, err := r.tasks.ApplyHeldCloseSystem(ctx, d.OrgID, task.ID, d.EventID, reason, evt.EventType)
+	out, err := r.tasks.ApplyHeldCloseSystem(ctx, d.OrgID, d.TaskID, d.EventID, reason, evt.EventType)
 	if err != nil {
 		return false, fmt.Errorf("close task: %w", err)
 	}
 	if !out.Closed {
 		return false, nil
 	}
-	r.finishTaskClose(ctx, d.OrgID, task.ID, out.ActiveConversationIDs)
-	routerLog.InfoContext(ctx, "closed task on its held close", "task_id", task.ID, "on_event", evt.EventType, "reason", reason)
+	r.finishTaskClose(ctx, d.OrgID, d.TaskID, out.ActiveConversationIDs)
+	routerLog.InfoContext(ctx, "closed task on its held close", "task_id", d.TaskID, "on_event", evt.EventType, "reason", reason)
 	return true, nil
+}
+
+// expireCloseDeferral ends the wait of one held close the sweep listed as
+// older than holdTimeout. A close that no longer holds is dropped, as the
+// settle drops one, and the work goes on. Otherwise ExpireHeldCloseSystem
+// decides again under the task's lock: it calls off the work an event
+// started, then closes the task if nothing a person does still holds it,
+// through the same post-commit sequence as any close, or leaves the close
+// held and has the expired conversations stopped. closed reports whether
+// the task closed.
+func (r *Router) expireCloseDeferral(ctx context.Context, d domain.TaskCloseDeferral, holdTimeout time.Duration) (closed bool, err error) {
+	evt, reason, holds, err := r.heldCloseStillHolds(ctx, d)
+	if err != nil || !holds {
+		return false, err
+	}
+	out, err := r.tasks.ExpireHeldCloseSystem(ctx, d.OrgID, d.TaskID, d.EventID, holdTimeout, reason, evt.EventType)
+	if err != nil {
+		return false, fmt.Errorf("expire held close: %w", err)
+	}
+	if out.Closed {
+		r.finishTaskClose(ctx, d.OrgID, d.TaskID, out.ActiveConversationIDs)
+		routerLog.InfoContext(ctx, "held close ran out; closed the task", "task_id", d.TaskID,
+			"on_event", evt.EventType, "reason", reason, "hold_timeout", holdTimeout)
+		return true, nil
+	}
+	if len(out.ExpiredConversationIDs) == 0 {
+		return false, nil
+	}
+	for _, id := range out.ExpiredConversationIDs {
+		// A blueprint between two steps has a settled step no stop reaches;
+		// the expiry already called its blueprint off.
+		if err := r.spawner.StopConversationAndCancelBlueprint(d.OrgID, id, "", delegate.StopCauseCloseHoldExpired); err != nil && !errors.Is(err, delegate.ErrNoActiveConversation) {
+			routerLog.ErrorContext(ctx, "stop conversation on an expired held close failed", "conversation", id, "task_id", d.TaskID, "error", err)
+		}
+	}
+	routerLog.InfoContext(ctx, "held close ran out; stopped the work an event started, close still held",
+		"task_id", d.TaskID, "on_event", evt.EventType, "stopped", len(out.ExpiredConversationIDs), "hold_timeout", holdTimeout)
+	return false, nil
+}
+
+// heldCloseStillHolds reads the closing event of the held close d and asks
+// its relation whether the close still holds against current state
+// (deferredCloseReason). holds is false for a task no longer active, which
+// can close between the sweep's list read and this one (a close attempt on
+// it would still write an audit row naming the event), and for a close that
+// no longer holds, which is dropped here with a compare-and-clear on d's
+// event.
+func (r *Router) heldCloseStillHolds(ctx context.Context, d domain.TaskCloseDeferral) (evt domain.Event, reason string, holds bool, err error) {
+	e, err := r.events.GetSystem(ctx, d.OrgID, d.EventID)
+	if err != nil {
+		return domain.Event{}, "", false, fmt.Errorf("read closing event: %w", err)
+	}
+	if e == nil {
+		return domain.Event{}, "", false, fmt.Errorf("closing event %s not found", d.EventID)
+	}
+	task, err := r.tasks.GetSystem(ctx, d.OrgID, d.TaskID)
+	if err != nil {
+		return domain.Event{}, "", false, fmt.Errorf("read task: %w", err)
+	}
+	if task == nil || task.Status == "done" || task.Status == "dismissed" {
+		return domain.Event{}, "", false, nil
+	}
+	reason, admitted, err := r.deferredCloseReason(ctx, d.OrgID, *e, *task)
+	if err != nil {
+		return domain.Event{}, "", false, err
+	}
+	if !admitted {
+		routerLog.InfoContext(ctx, "held close no longer holds; dropped",
+			"task_id", task.ID, "on_event", e.EventType)
+		return domain.Event{}, "", false, r.clearCloseDeferral(ctx, d)
+	}
+	return *e, reason, true, nil
 }
 
 // deferredCloseReason finds the relation that held the close of task on evt

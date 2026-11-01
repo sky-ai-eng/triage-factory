@@ -260,6 +260,7 @@ func TestStopCause_NotesNameTheLifecycleEvent(t *testing.T) {
 		{StopCauseTaskDelegated, "Run stopped: the task was handed to a new delegation."},
 		{StopCauseTaskTakenOver, "Run stopped: a person took the task over."},
 		{StopCauseTaskRequeued, "Run stopped: the task it was working on was returned to the queue."},
+		{StopCauseCloseHoldExpired, "Run stopped: the task it was working on was resolved, and the run had not finished in the time allowed after that."},
 	} {
 		if got := tc.cause.note(); got != tc.want {
 			t.Errorf("%s.note() = %q, want %q", tc.cause, got, tc.want)

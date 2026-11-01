@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
@@ -29,6 +30,7 @@ func TestTaskCloseDeferral_Postgres(t *testing.T) {
 			Entities:         stores.Entities,
 			StagedInjections: stores.StagedInjections,
 			Swipes:           stores.Swipes,
+			Conversations:    stores.Conversations,
 			SwipeUserID:      userID,
 		}, orgID, newPgCloseDeferralSeeder(h.AdminDB, orgID, userID)
 	})
@@ -89,6 +91,58 @@ func TestTaskCloseDeferral_Postgres_ListsEveryOrg(t *testing.T) {
 	}
 }
 
+// TestTaskCloseDeferral_Postgres_ExpiredListsEveryLiveOrg pins the expired
+// list's scope the same way: every live org's expired holds, each row naming
+// its org, and none of a deleted org's.
+func TestTaskCloseDeferral_Postgres_ExpiredListsEveryLiveOrg(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	want := map[string]string{} // task id → org id
+	for i := range 3 {
+		orgID, userID, _ := seedPgOrgUserAgent(t, h)
+		seed := newPgCloseDeferralSeeder(h.AdminDB, orgID, userID)
+		taskID := seed.Task(t)
+		eventID := seed.Event(t, taskID)
+		seed.BlueprintAndConversation(t, taskID, "running", "")
+		if _, err := stores.Tasks.CloseOrHoldSystem(ctx, orgID, taskID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed, eventID); err != nil {
+			t.Fatalf("CloseOrHoldSystem: %v", err)
+		}
+		seed.AgeHold(t, taskID, 2*time.Hour)
+		if i == 2 {
+			if _, err := h.AdminDB.Exec(`UPDATE orgs SET deleted_at = now() WHERE id = $1`, orgID); err != nil {
+				t.Fatalf("soft-delete org: %v", err)
+			}
+			continue
+		}
+		want[taskID] = orgID
+	}
+
+	all, err := stores.Tasks.ListExpiredCloseDeferralsSystem(ctx, time.Hour)
+	if err != nil {
+		t.Fatalf("ListExpiredCloseDeferralsSystem: %v", err)
+	}
+	got := map[string]string{}
+	var orgs []string
+	for _, d := range all {
+		got[d.TaskID] = d.OrgID
+		orgs = append(orgs, d.OrgID)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("listed %d expired holds, want %d: %+v", len(got), len(want), all)
+	}
+	for taskID, orgID := range want {
+		if got[taskID] != orgID {
+			t.Errorf("task %s listed under org %q, want %q", taskID, got[taskID], orgID)
+		}
+	}
+	if !slices.IsSorted(orgs) {
+		t.Errorf("expired holds not ordered by org: %v", orgs)
+	}
+}
+
 func newPgCloseDeferralSeeder(conn *sql.DB, orgID, userID string) dbtest.TaskCloseDeferralSeeder {
 	exec := func(t *testing.T, what, query string, args ...any) {
 		t.Helper()
@@ -127,6 +181,11 @@ func newPgCloseDeferralSeeder(conn *sql.DB, orgID, userID string) dbtest.TaskClo
 			exec(t, "resolve drafts", `
 				UPDATE deliverables SET state = 'open' WHERE org_id = $1 AND conversation_id = $2 AND state = 'draft'
 			`, orgID, conversationID)
+		},
+		AgeHold: func(t *testing.T, taskID string, d time.Duration) {
+			exec(t, "age hold", `
+				UPDATE tasks SET close_deferred_at = close_deferred_at - make_interval(secs => $3) WHERE org_id = $1 AND id = $2
+			`, orgID, taskID, d.Seconds())
 		},
 	}
 }

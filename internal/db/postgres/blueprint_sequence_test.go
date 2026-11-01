@@ -183,7 +183,7 @@ func pgSequenceScaffold(t *testing.T, h *pgtest.Harness) (db.BlueprintStore, dbt
 		},
 		HoldTaskClose: func(t *testing.T, taskID string) {
 			t.Helper()
-			if _, err := h.AdminDB.Exec(`UPDATE tasks SET close_deferred_event_id = primary_event_id WHERE id = $1`, taskID); err != nil {
+			if _, err := h.AdminDB.Exec(`UPDATE tasks SET close_deferred_event_id = primary_event_id, close_deferred_at = now() WHERE id = $1`, taskID); err != nil {
 				t.Fatalf("hold the task's close: %v", err)
 			}
 		},

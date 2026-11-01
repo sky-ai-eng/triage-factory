@@ -128,7 +128,7 @@ func sqliteSequenceScaffold(t *testing.T) (db.BlueprintStore, dbtest.BlueprintSe
 		},
 		HoldTaskClose: func(t *testing.T, taskID string) {
 			t.Helper()
-			if _, err := conn.Exec(`UPDATE tasks SET close_deferred_event_id = primary_event_id WHERE id = ?`, taskID); err != nil {
+			if _, err := conn.Exec(`UPDATE tasks SET close_deferred_event_id = primary_event_id, close_deferred_at = CURRENT_TIMESTAMP WHERE id = ?`, taskID); err != nil {
 				t.Fatalf("hold the task's close: %v", err)
 			}
 		},
