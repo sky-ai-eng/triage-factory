@@ -6,7 +6,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// overlaps reports whether a base branch's move can have changed the
+// Overlaps reports whether a base branch's move can have changed the
 // mergeability of a pull request on it, from the paths each changed. No I/O,
 // so the tests and pollbench run the rule the poll runs.
 //
@@ -22,7 +22,7 @@ import (
 // request's added files are its ADDED entries and the new path of each
 // RENAMED or COPIED one. D counts as vacated whether or not the move emptied
 // it.
-func overlaps(prPaths, movePaths []domain.ChangedPath) bool {
+func Overlaps(prPaths, movePaths []domain.ChangedPath) bool {
 	return indexMove(movePaths).overlaps(prPaths)
 }
 
@@ -63,7 +63,7 @@ func indexMove(movePaths []domain.ChangedPath) moveIndex {
 	return m
 }
 
-// overlaps is the rule overlaps states, for a pull request on this move's
+// overlaps is the rule Overlaps states, for a pull request on this move's
 // base.
 func (m moveIndex) overlaps(prPaths []domain.ChangedPath) bool {
 	for p := range pathSet(prPaths, func(c domain.ChangedPath) bool {

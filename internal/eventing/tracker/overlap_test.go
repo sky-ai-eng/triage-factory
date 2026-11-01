@@ -45,7 +45,7 @@ func TestOverlaps(t *testing.T) {
 		{"no overlap", []domain.ChangedPath{mod("src/a.go"), add("docs/b.md")}, []domain.ChangedPath{mod("lib/c.go")}, false},
 	}
 	for _, c := range cases {
-		if got := overlaps(c.pr, c.move); got != c.want {
+		if got := Overlaps(c.pr, c.move); got != c.want {
 			t.Errorf("%s: overlaps = %v, want %v", c.name, got, c.want)
 		}
 	}

@@ -234,6 +234,9 @@ type PRFile struct {
 // pages (maxFetchPages × 100). Exported so callers can detect a truncated
 // listing (len(files) >= MaxPRFiles means GetPRFiles hit the cap and the
 // result may be incomplete).
+//
+// TODO(TFAC-1305): GitHub lists up to 3,000 of a PR's files, so a PR with
+// more than 1,000 reads as truncated when GitHub would list them all.
 const MaxPRFiles = maxFetchPages * 100
 
 // GetPRFiles lists files changed in a PR, including per-file patch content.
@@ -949,6 +952,15 @@ type restPR struct {
 		Name string `json:"name"`
 	} `json:"labels"`
 }
+
+// MaxOpenPRs is the most open PRs ListOpenPRs returns for one repo: its
+// listing stops at maxFetchPages pages of 100.
+//
+// TODO(TFAC-1305): a repository with more open PRs than this has its older
+// ones never discovered, and a tracked one pushed past the last page is
+// refreshed in full on every cycle its listing changes; the listing gets a
+// cap of its own above any real repository.
+const MaxOpenPRs = maxFetchPages * 100
 
 // ListOpenPRs lists a repo's open PRs via REST with a conditional request,
 // returning them as DiscoveredPRs (node ID + discovery snapshot) ready to

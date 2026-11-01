@@ -6,7 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"math"
+	"math/rand"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -25,10 +29,12 @@ import (
 )
 
 // RunConfig is one benchmark run: a dataset shape, the fake server's
-// behavior, and how many cycles to drive.
+// behavior, what changes during the warm cycles, and how many cycles to
+// drive.
 type RunConfig struct {
-	Dataset DatasetConfig
-	Server  ServerConfig
+	Dataset  DatasetConfig
+	Server   ServerConfig
+	Scenario Scenario
 
 	// WarmCycles is how many additional cycles to run after the cold sync
 	// completes — the conditional-request (ETag 304) measurement.
@@ -39,26 +45,67 @@ type RunConfig struct {
 	MaxCycles int
 }
 
+// Scenario is what changes on GitHub at the start of each warm cycle, before
+// the poll: base moves, which change the moved repositories' listings as a
+// merge does, and head pushes. The cold sync sees a world that does not
+// move.
+type Scenario struct {
+	// BaseMoves lands a base move every MoveEvery warm cycles on
+	// MoveRepoPct of the repositories, drawn afresh each time.
+	BaseMoves   bool
+	MoveEvery   int
+	MoveRepoPct float64
+	// HeadPushPct is the fraction of all open PRs whose head is pushed at
+	// the start of every warm cycle.
+	HeadPushPct float64
+}
+
+// scenarioSeedSalt separates the scenario's draws (which repositories move,
+// which heads are pushed) from the dataset's and the world's.
+const scenarioSeedSalt = 0x7363656e
+
 // CycleMetrics is what one driven poll cycle cost: the poll and the
 // mergeability probe pass after it.
 type CycleMetrics struct {
 	Label      string
 	Wall       time.Duration
-	Requests   Counters // request-count delta for this cycle
-	Events     int      // github:* events emitted this cycle
-	Entities   int      // active github entities after this cycle
-	AllocBytes uint64   // Go heap bytes allocated during this cycle
-	Errors     []string // poll-cycle errors surfaced via Manager.OnError
+	Requests   Counters       // request-count delta for this cycle
+	Probes     map[string]int // mergeability probes read this cycle, by reason
+	Moves      int            // base moves that landed before this cycle's poll
+	HeadPushes int            // head pushes that landed before this cycle's poll
+	Events     int            // github:* events emitted this cycle
+	Entities   int            // active github entities after this cycle
+	AllocBytes uint64         // Go heap bytes allocated during this cycle
+	Errors     []string       // poll-cycle errors surfaced via Manager.OnError
+}
+
+// ProbeTotal is how many mergeability probes were read in the cycle.
+func (m CycleMetrics) ProbeTotal() int {
+	n := 0
+	for _, v := range m.Probes {
+		n += v
+	}
+	return n
 }
 
 // Result is the full benchmark output.
 type Result struct {
 	Repos              int
 	TotalPRs           int
+	TrackedPRs         int
 	MaxOpenPRs         int
+	BaseBranches       int
 	ExpectedColdEvents int
 
+	// Cycles is the cold cycles, the warm cycles, and a final settle row
+	// when probes were still owed after the last warm cycle: probe passes
+	// with no poll, until none is ready, so the last moves' answers land.
 	Cycles []CycleMetrics
+
+	// Totals is the server's counters over the whole run, and World what
+	// the scenario's moves and pushes did.
+	Totals Counters
+	World  WorldStats
 
 	// ColdCycles is how many cycles the cold sync took to complete (1 unless
 	// a rate limit forced resumption); ColdSyncWall is the summed cold-cycle
@@ -67,7 +114,6 @@ type Result struct {
 	ColdCycles   int
 	ColdSyncWall time.Duration
 	ColdEvents   int
-	WarmEvents   int
 
 	PeakRSSBytes int64          // process high-water RSS; 0 when the platform doesn't expose it
 	EventTypes   map[string]int // emitted github:* events by type, whole run
@@ -91,6 +137,8 @@ type countingPublisher struct {
 	mu     sync.Mutex
 	total  int
 	byType map[string]int
+	// conflicts counts github:pr:conflicts by entity id.
+	conflicts map[string]int
 }
 
 func (p *countingPublisher) Publish(_ context.Context, evt domain.Event) {
@@ -103,6 +151,12 @@ func (p *countingPublisher) Publish(_ context.Context, evt domain.Event) {
 		p.byType = make(map[string]int)
 	}
 	p.byType[evt.EventType]++
+	if evt.EventType == domain.EventGitHubPRConflicts && evt.EntityID != nil {
+		if p.conflicts == nil {
+			p.conflicts = make(map[string]int)
+		}
+		p.conflicts[*evt.EntityID]++
+	}
 	p.mu.Unlock()
 }
 
@@ -124,11 +178,13 @@ func (p *countingPublisher) snapshot() int {
 func (p *countingPublisher) types() map[string]int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	out := make(map[string]int, len(p.byType))
-	for k, v := range p.byType {
-		out[k] = v
-	}
-	return out
+	return maps.Clone(p.byType)
+}
+
+func (p *countingPublisher) conflictsByEntity() map[string]int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return maps.Clone(p.conflicts)
 }
 
 // benchResolver satisfies ghclient.Resolver with a single fixed client
@@ -165,8 +221,9 @@ func (r *benchResolver) OrgIdentityFor(ctx context.Context, orgID string) (name,
 }
 
 // Run executes one benchmark: generate the dataset, start the fake server,
-// wire a real Manager over real (in-memory SQLite) stores, drive the cold
-// sync to completion plus WarmCycles warm cycles, and report.
+// wire a real Manager and probe worker over real (in-memory SQLite) stores,
+// drive the cold sync to completion plus WarmCycles warm cycles, each after
+// the scenario's changes for it, settle the probes still owed, and report.
 //
 // The caller must have initialized runmode to multi before calling — the
 // scenario being modeled is a multi-mode GHES deployment, and multi is the
@@ -287,33 +344,48 @@ func Run(cfg RunConfig) (*Result, error) {
 	res := &Result{
 		Repos:              cfg.Dataset.Repos,
 		TotalPRs:           ds.TotalPRs,
+		TrackedPRs:         ds.TrackedPRs,
 		MaxOpenPRs:         ds.MaxOpenPRs(),
+		BaseBranches:       ds.BaseBranches(),
 		ExpectedColdEvents: ds.ExpectedColdEvents(),
 	}
 
-	runCycle := func(label string) CycleMetrics {
+	// measure runs one cycle's work and records what it cost. poll is false
+	// for the settle row, which only drains probes.
+	measure := func(label string, poll bool, work func() error) CycleMetrics {
 		reqBefore := srv.Snapshot()
 		evtBefore := pub.snapshot()
+		probesBefore, probesErr := probesRead(ctx, database)
 		var msBefore runtime.MemStats
 		runtime.ReadMemStats(&msBefore)
 
 		start := time.Now()
-		mgr.PollGitHubOnce(ctx, orgID)
-		probeErr := probe()
+		if poll {
+			mgr.PollGitHubOnce(ctx, orgID)
+		}
+		probeErr := work()
 		wall := time.Since(start)
 
 		var msAfter runtime.MemStats
 		runtime.ReadMemStats(&msAfter)
-		entities, _, _ := syncState(ctx, stores, orgID, ds.TotalPRs)
+		entities, _, _ := syncState(ctx, stores, orgID, ds.TrackedPRs)
 		display, unexpected := takeErrs()
+		probesAfter, err := probesRead(ctx, database)
+		probesErr = errors.Join(probesErr, err)
 		m := CycleMetrics{
 			Label:      label,
 			Wall:       wall,
 			Requests:   countersDelta(reqBefore, srv.Snapshot()),
+			Probes:     map[string]int{},
 			Events:     pub.snapshot() - evtBefore,
 			Entities:   entities,
 			AllocBytes: msAfter.TotalAlloc - msBefore.TotalAlloc,
 			Errors:     display,
+		}
+		for reason, n := range probesAfter {
+			if d := n - probesBefore[reason]; d > 0 {
+				m.Probes[reason] = d
+			}
 		}
 		for _, e := range unexpected {
 			res.SanityErrors = append(res.SanityErrors, fmt.Sprintf("cycle %s: unexpected poll error: %s", label, e))
@@ -322,7 +394,9 @@ func Run(cfg RunConfig) (*Result, error) {
 			m.Errors = append(m.Errors, "mergeability: "+probeErr.Error())
 			res.SanityErrors = append(res.SanityErrors, fmt.Sprintf("cycle %s: mergeability probe pass: %v", label, probeErr))
 		}
-		res.Cycles = append(res.Cycles, m)
+		if probesErr != nil {
+			res.SanityErrors = append(res.SanityErrors, fmt.Sprintf("cycle %s: counting probes: %v", label, probesErr))
+		}
 		return m
 	}
 
@@ -338,10 +412,11 @@ func Run(cfg RunConfig) (*Result, error) {
 	// entity, counter/memstats snapshots) into a metric that claims to be
 	// poll cost. At low latency the bookkeeping would dominate.
 	for cycle := 1; ; cycle++ {
-		m := runCycle(fmt.Sprintf("cold #%d", cycle))
+		m := measure(fmt.Sprintf("cold #%d", cycle), true, probe)
+		res.Cycles = append(res.Cycles, m)
 		res.ColdEvents += m.Events
 		res.ColdSyncWall += m.Wall
-		entities, refreshed, done := syncState(ctx, stores, orgID, ds.TotalPRs)
+		entities, refreshed, done := syncState(ctx, stores, orgID, ds.TrackedPRs)
 		if done {
 			res.ColdCycles = cycle
 			break
@@ -349,7 +424,7 @@ func Run(cfg RunConfig) (*Result, error) {
 		if cycle >= cfg.MaxCycles {
 			res.SanityErrors = append(res.SanityErrors,
 				fmt.Sprintf("cold sync incomplete after %d cycles: %d/%d entities, %d fully refreshed",
-					cycle, entities, ds.TotalPRs, refreshed))
+					cycle, entities, ds.TrackedPRs, refreshed))
 			break
 		}
 		if reset := srv.NextReset(); !reset.IsZero() {
@@ -360,25 +435,112 @@ func Run(cfg RunConfig) (*Result, error) {
 		}
 	}
 
+	coldTypes := pub.types()
+
+	// Each warm cycle starts with the scenario's changes, then polls and
+	// drains probes like a cold one.
+	scenario := rand.New(rand.NewSource(cfg.Dataset.Seed ^ scenarioSeedSalt))
+	var prIndex [][2]int
+	for ri, repo := range ds.Repos {
+		for pi := range repo.PRs {
+			prIndex = append(prIndex, [2]int{ri, pi})
+		}
+	}
+	sc := cfg.Scenario
 	for i := 1; i <= cfg.WarmCycles; i++ {
-		m := runCycle(fmt.Sprintf("warm #%d", i))
-		res.WarmEvents += m.Events
+		moves, pushes := 0, 0
+		if sc.BaseMoves && sc.MoveEvery > 0 && i%sc.MoveEvery == 0 {
+			n := int(math.Ceil(sc.MoveRepoPct * float64(len(ds.Repos))))
+			for _, ri := range scenario.Perm(len(ds.Repos))[:min(n, len(ds.Repos))] {
+				srv.MoveBase(ri)
+				moves++
+			}
+		}
+		if sc.HeadPushPct > 0 {
+			n := int(math.Round(sc.HeadPushPct * float64(len(prIndex))))
+			for _, k := range scenario.Perm(len(prIndex))[:min(n, len(prIndex))] {
+				srv.PushHead(prIndex[k][0], prIndex[k][1])
+				pushes++
+			}
+		}
+		m := measure(fmt.Sprintf("warm #%d", i), true, probe)
+		m.Moves, m.HeadPushes = moves, pushes
+		res.Cycles = append(res.Cycles, m)
+	}
+
+	// A move's overlap set is answered a cycle after the move, once the
+	// UNKNOWN its first read returns is read again, so the last cycles'
+	// answers are drained here, with no poll and nothing moving. A probe the
+	// worker deferred for a rate limit cannot be claimed before its next
+	// attempt, so a pass with nothing claimable waits for the first one
+	// rather than spending itself on a drain that reads nothing; the wait is
+	// in the row's wall time, as a rate-limit wait is in the cold sync's.
+	if owed, err := probesOwed(ctx, database); err != nil {
+		res.SanityErrors = append(res.SanityErrors, fmt.Sprintf("counting owed probes: %v", err))
+	} else if owed > 0 {
+		m := measure("settle", false, func() error {
+			for pass := 0; pass < settlePasses; pass++ {
+				wait, err := probesDeferredFor(ctx, database)
+				if err != nil {
+					return err
+				}
+				if wait > 0 {
+					time.Sleep(wait + 100*time.Millisecond)
+				}
+				if err := probe(); err != nil {
+					return err
+				}
+				if owed, err := probesOwed(ctx, database); err != nil || owed == 0 {
+					return err
+				}
+			}
+			return fmt.Errorf("probes still owed after %d passes", settlePasses)
+		})
+		res.Cycles = append(res.Cycles, m)
 	}
 
 	res.PeakRSSBytes = peakRSSBytes()
 	res.EventTypes = pub.types()
+	res.Totals = srv.Snapshot()
+	res.World = srv.Stats()
 
 	// Sanity: the cold sync must emit exactly the transitions the dataset
-	// predicts, and warm cycles (nothing changed) must emit none. These
-	// failing means the harness (or the tracker) isn't doing what this
-	// benchmark claims to measure.
+	// predicts, and the warm cycles exactly the ones the scenario's changes
+	// do: a new_commits per head push and a conflicts per PR a move made
+	// CONFLICTING. These failing means the harness (or the tracker) isn't
+	// doing what this benchmark claims to measure.
 	if res.ColdCycles > 0 && res.ColdEvents != res.ExpectedColdEvents {
 		res.SanityErrors = append(res.SanityErrors,
 			fmt.Sprintf("cold-sync events = %d, expected %d", res.ColdEvents, res.ExpectedColdEvents))
 	}
-	if res.WarmEvents != 0 {
+	expectedWarm := map[string]int{}
+	for typ := range res.EventTypes {
+		expectedWarm[typ] = 0
+	}
+	expectedWarm[domain.EventGitHubPRNewCommits] = res.World.HeadPushes
+	expectedWarm[domain.EventGitHubPRConflicts] = len(res.World.Conflicted)
+	for _, typ := range slices.Sorted(maps.Keys(expectedWarm)) {
+		if got, want := res.EventTypes[typ]-coldTypes[typ], expectedWarm[typ]; got != want {
+			res.SanityErrors = append(res.SanityErrors,
+				fmt.Sprintf("warm cycles emitted %d %s events, expected %d", got, typ, want))
+		}
+	}
+	res.SanityErrors = append(res.SanityErrors, conflictErrors(ctx, stores, orgID, pub.conflictsByEntity(), append(ds.Conflicting(), res.World.Conflicted...))...)
+	// Every test merge must be one a probe needed: a pull request whose head
+	// was pushed or whose paths a move overlapped, or one read again after
+	// an UNKNOWN. Anything else is a read TF made that it did not need.
+	if n := res.Totals.TestMergesUnaccounted; n > 0 {
 		res.SanityErrors = append(res.SanityErrors,
-			fmt.Sprintf("warm cycles emitted %d events, expected 0", res.WarmEvents))
+			fmt.Sprintf("%d test merge(s) not accounted for by a head push, an overlapping move, or a re-read after UNKNOWN", n))
+	}
+	if cfg.Server.RateLimit <= 0 && res.ColdCycles > 0 {
+		cold := res.Cycles[0]
+		if probes := cold.ProbeTotal(); probes > res.TrackedPRs {
+			res.SanityErrors = append(res.SanityErrors, fmt.Sprintf("cold cycle read %d probes for %d tracked PRs", probes, res.TrackedPRs))
+		}
+		if refs := cold.Requests.Refs + cold.Requests.Refs304; refs > res.BaseBranches {
+			res.SanityErrors = append(res.SanityErrors, fmt.Sprintf("cold cycle read %d refs for %d base branches", refs, res.BaseBranches))
+		}
 	}
 	// The Other counter is the fake server's bug tripwire: the poll path
 	// reached an endpoint the fake doesn't model (path-shape drift, an
@@ -390,6 +552,96 @@ func Run(cfg RunConfig) (*Result, error) {
 			fmt.Sprintf("%d request(s) hit endpoints the fake server doesn't model (other)", other))
 	}
 	return res, nil
+}
+
+// settlePasses bounds the settle row's probe passes. What is owed after the
+// last warm cycle is the re-reads of its UNKNOWNs, which one pass answers
+// once nothing moves; the rest is headroom.
+const settlePasses = 10
+
+// probesRead counts the probes the worker has completed, by reason. Nothing
+// in the bench closes a pull request, so every completed probe was read.
+func probesRead(ctx context.Context, database *sql.DB) (map[string]int, error) {
+	rows, err := database.QueryContext(ctx, `SELECT reason, COUNT(*) FROM pr_mergeability_probes WHERE status = 'done' GROUP BY reason`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var reason string
+		var n int
+		if err := rows.Scan(&reason, &n); err != nil {
+			return nil, err
+		}
+		out[reason] = n
+	}
+	return out, rows.Err()
+}
+
+// probesDeferredFor is how long until a ready probe can be claimed, when none
+// can be now: each is waiting on its next attempt, which a rate-limit
+// deferral sets to the limit's reset. Zero when one is claimable now or none
+// is ready.
+func probesDeferredFor(ctx context.Context, database *sql.DB) (time.Duration, error) {
+	var secs sql.NullFloat64
+	err := database.QueryRowContext(ctx, `
+		SELECT CASE
+			WHEN SUM(next_attempt_at IS NULL OR next_attempt_at <= strftime('%Y-%m-%d %H:%M:%f', 'now')) > 0 THEN 0
+			ELSE (julianday(MIN(next_attempt_at)) - julianday('now')) * 86400.0
+		END
+		FROM pr_mergeability_probes WHERE status = 'ready'`).Scan(&secs)
+	if err != nil || !secs.Valid || secs.Float64 <= 0 {
+		return 0, err
+	}
+	return time.Duration(secs.Float64 * float64(time.Second)), nil
+}
+
+// probesOwed counts the probes not yet completed.
+func probesOwed(ctx context.Context, database *sql.DB) (int, error) {
+	var n int
+	err := database.QueryRowContext(ctx, `SELECT COUNT(*) FROM pr_mergeability_probes WHERE status IN ('ready','leased')`).Scan(&n)
+	return n, err
+}
+
+// conflictErrors checks that every PR in implied (by node id) emitted
+// github:pr:conflicts exactly once, and no other PR emitted one. emitted
+// counts the events by entity id.
+func conflictErrors(ctx context.Context, stores db.Stores, orgID string, emitted map[string]int, implied []string) []string {
+	entities, err := stores.Entities.ListActiveSystem(ctx, orgID, "github")
+	if err != nil {
+		return []string{fmt.Sprintf("listing entities for the conflicts check: %v", err)}
+	}
+	byNode := make(map[string]int, len(emitted))
+	for _, e := range entities {
+		if n, ok := emitted[e.ID]; ok {
+			byNode[e.ExternalID] = n
+		}
+	}
+	want := make(map[string]bool, len(implied))
+	for _, id := range implied {
+		want[id] = true
+	}
+	missing, repeated, unexpected := 0, 0, 0
+	for id := range want {
+		switch n := byNode[id]; {
+		case n == 0:
+			missing++
+		case n > 1:
+			repeated++
+		}
+	}
+	for id := range byNode {
+		if !want[id] {
+			unexpected++
+		}
+	}
+	var out []string
+	if missing+repeated+unexpected > 0 {
+		out = append(out, fmt.Sprintf("github:pr:conflicts: %d of %d implied PRs never emitted, %d emitted more than once, %d emitted for PRs the dataset never made conflicting",
+			missing, len(want), repeated, unexpected))
+	}
+	return out
 }
 
 // syncState reports cold-sync progress: how many active github entities
@@ -415,17 +667,32 @@ func syncState(ctx context.Context, stores db.Stores, orgID string, expectedTota
 	return entities, refreshed, entities == expectedTotal && refreshed == entities
 }
 
+// countersSum is a + b, as a − (−b).
+func countersSum(a, b Counters) Counters {
+	neg := countersDelta(b, Counters{})
+	return countersDelta(neg, a)
+}
+
 func countersDelta(before, after Counters) Counters {
 	return Counters{
-		Total:       after.Total - before.Total,
-		PullsList:   after.PullsList - before.PullsList,
-		PullsPages:  after.PullsPages - before.PullsPages,
-		Pulls304:    after.Pulls304 - before.Pulls304,
-		GraphQL:     after.GraphQL - before.GraphQL,
-		Teams:       after.Teams - before.Teams,
-		Refs:        after.Refs - before.Refs,
-		Refs304:     after.Refs304 - before.Refs304,
-		RateLimited: after.RateLimited - before.RateLimited,
-		Other:       after.Other - before.Other,
+		Total:                 after.Total - before.Total,
+		PullsList:             after.PullsList - before.PullsList,
+		PullsPages:            after.PullsPages - before.PullsPages,
+		Pulls304:              after.Pulls304 - before.Pulls304,
+		GraphQL:               after.GraphQL - before.GraphQL,
+		Points:                after.Points - before.Points,
+		Teams:                 after.Teams - before.Teams,
+		Refs:                  after.Refs - before.Refs,
+		Refs304:               after.Refs304 - before.Refs304,
+		Compares:              after.Compares - before.Compares,
+		PathReads:             after.PathReads - before.PathReads,
+		FileLists:             after.FileLists - before.FileLists,
+		RateLimited:           after.RateLimited - before.RateLimited,
+		Other:                 after.Other - before.Other,
+		TestMerges:            after.TestMerges - before.TestMerges,
+		TestMergesHeadPushed:  after.TestMergesHeadPushed - before.TestMergesHeadPushed,
+		TestMergesOverlap:     after.TestMergesOverlap - before.TestMergesOverlap,
+		TestMergesReread:      after.TestMergesReread - before.TestMergesReread,
+		TestMergesUnaccounted: after.TestMergesUnaccounted - before.TestMergesUnaccounted,
 	}
 }
