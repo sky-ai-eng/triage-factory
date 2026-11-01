@@ -223,14 +223,12 @@ func TestRelayServer_GHWriteClassifiesTheCreate(t *testing.T) {
 	if !strings.Contains(a.DetailJSON, `"in_reply_to":555`) || !strings.Contains(a.DetailJSON, `"node_id":"PRRC_kwRelay"`) {
 		t.Errorf("detail_json = %q, want the thread the reply landed on and the reply's node id", a.DetailJSON)
 	}
-	// The reply's own comment deliverable lands beside the row, on this side.
-	arts := listConversationDeliverables(t, stores, info.ConversationID)
-	if len(arts) != 1 {
-		t.Fatalf("want 1 comment deliverable for the relayed reply, got %d: %+v", len(arts), arts)
+	// The row names the reply, and no deliverable is written beside it.
+	if a.ObjectKind != domain.ObjectKindComment || a.ObjectKey != domain.GitHubCommentKey(domain.GitHubReviewComment, 777) {
+		t.Errorf("relayed reply row names %q %q, want the reply", a.ObjectKind, a.ObjectKey)
 	}
-	if c := arts[0]; c.DedupKey != domain.GitHubCommentKey(domain.GitHubReviewComment, 777) ||
-		c.ExternalID != "777" || c.NodeID != "PRRC_kwRelay" {
-		t.Errorf("relayed reply deliverable = %+v, want the reply's numbers", c)
+	if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 0 {
+		t.Errorf("deliverables = %+v, want none", arts)
 	}
 }
 

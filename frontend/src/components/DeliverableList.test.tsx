@@ -16,11 +16,11 @@ function mockDeliverables(arts: Deliverable[]) {
 
 const art = (over: Partial<Deliverable>): Deliverable => ({
   id: 'a1',
-  kind: 'branch',
-  provider: 'git',
-  state: 'pushed',
-  target: 'org/repo',
-  external_id: 'refs/heads/x',
+  kind: 'pull_request',
+  provider: 'github',
+  state: 'merged',
+  target: 'org/repo#7',
+  external_id: '7',
   url: 'https://example.test/x',
   details: null,
   created_at: '2026-06-25T00:00:00Z',
@@ -33,11 +33,10 @@ describe('DeliverableList', () => {
   it('fetches the conversation-scoped endpoint and renders each deliverable (kind / state / link)', async () => {
     const fetchMock = mockDeliverables([
       art({
-        id: 'b1',
-        kind: 'branch',
-        state: 'pushed',
-        target: 'org/repo',
-        url: 'https://gh/branch',
+        id: 'm1',
+        state: 'merged',
+        target: 'org/repo#7',
+        url: 'https://gh/merged',
       }),
       art({
         id: 'pr1',
@@ -51,8 +50,8 @@ describe('DeliverableList', () => {
 
     // Targets + state badges for both rows render once the fetch resolves.
     expect(await screen.findByText('org/repo#18')).toBeInTheDocument()
-    expect(screen.getByText('org/repo')).toBeInTheDocument()
-    expect(screen.getByText('pushed')).toBeInTheDocument()
+    expect(screen.getByText('org/repo#7')).toBeInTheDocument()
+    expect(screen.getByText('merged')).toBeInTheDocument()
     expect(screen.getByText('draft')).toBeInTheDocument()
 
     // The conversation-scoped read API was hit.
@@ -61,10 +60,10 @@ describe('DeliverableList', () => {
       expect.objectContaining({ method: 'POST' }),
     )
 
-    // The branch row links out to its url; the PR row carries an external link too.
+    // The merged row links out to its url; the draft row carries an external link too.
     const links = screen.getAllByRole('link')
     const hrefs = links.map((l) => l.getAttribute('href'))
-    expect(hrefs).toContain('https://gh/branch')
+    expect(hrefs).toContain('https://gh/merged')
     expect(hrefs).toContain('https://gh/pr')
   })
 
@@ -113,31 +112,9 @@ describe('DeliverableList', () => {
     expect(onOpen).not.toHaveBeenCalled()
   })
 
-  it('renders branch / issue / comment rows as plain link-outs, not overlay openers', async () => {
-    const onOpen = vi.fn()
-    mockDeliverables([
-      art({ id: 'b1', kind: 'branch', target: 'org/repo', url: 'https://gh/branch' }),
-      art({
-        id: 'i1',
-        kind: 'issue',
-        provider: 'jira',
-        state: 'created',
-        target: 'SKY-1',
-        url: 'https://jira/1',
-      }),
-    ])
-    render(<DeliverableList conversationId="r1" onOpenApproval={onOpen} />)
-
-    const branch = await screen.findByRole('link', { name: /Open branch/ })
-    expect(branch).toHaveAttribute('href', 'https://gh/branch')
-    // No overlay-opening buttons exist for these kinds.
-    expect(screen.queryByRole('button')).not.toBeInTheDocument()
-    expect(onOpen).not.toHaveBeenCalled()
-  })
-
   it('sorts the pending set to the top in the projection order, with a dismiss on those rows only', async () => {
     mockDeliverables([
-      art({ id: 'b1', kind: 'branch', state: 'pushed', target: 'branch-row' }),
+      art({ id: 'm1', state: 'merged', target: 'merged-row' }),
       art({ id: 'rv1', kind: 'review', state: 'pending', target: 'review-row' }),
       art({ id: 'pr1', kind: 'pull_request', state: 'draft', target: 'pr-row' }),
     ])
@@ -154,12 +131,11 @@ describe('DeliverableList', () => {
     const rows = await screen.findAllByRole('listitem')
     expect(rows[0]).toHaveTextContent('pr-row')
     expect(rows[1]).toHaveTextContent('review-row')
-    expect(rows[2]).toHaveTextContent('branch-row')
+    expect(rows[2]).toHaveTextContent('merged-row')
 
-    // Only the unresolved rows carry the in-place [x] — the branch never does.
+    // Only the unresolved rows carry the in-place [x] — the merged PR never does.
     expect(screen.getByRole('button', { name: /dismiss pull request/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /dismiss review/i })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /dismiss branch/i })).not.toBeInTheDocument()
   })
 
   it('dismisses a pending row in place: POST, refetch, onResolved', async () => {
@@ -272,7 +248,7 @@ describe('DeliverableList', () => {
   })
 
   it('ignores the previous conversation’s in-flight response after a conversation change', async () => {
-    const oldRow = art({ id: 'a-old', kind: 'branch', target: 'old-run-row' })
+    const oldRow = art({ id: 'a-old', target: 'old-run-row' })
     let resolveOld!: (v: unknown) => void
     const fetchMock = vi
       .fn()

@@ -115,39 +115,20 @@ func TestReviewState_ChangesRequestedIsSubmitted(t *testing.T) {
 	}
 }
 
-func TestBranchRefOf(t *testing.T) {
-	a, _ := keyedBranch("octo/repo", "refs/heads/feature/x", "sha", true)
-	ref, ok := branchRefOf(a)
-	if !ok || ref.Owner != "octo" || ref.Repo != "repo" || ref.Branch != "feature/x" {
-		t.Errorf("branchRefOf = (%+v, %v), want octo/repo/feature/x", ref, ok)
-	}
-	// Malformed coordinates are rejected, not guessed.
-	if _, ok := branchRefOf(domain.Deliverable{Target: "octo", ExternalID: "refs/heads/x"}); ok {
-		t.Error("single-segment target should be rejected")
-	}
-	if _, ok := branchRefOf(domain.Deliverable{Target: "octo/repo", ExternalID: "refs/tags/v1"}); ok {
-		t.Error("non-branch ref should be rejected")
-	}
-}
-
 // --- integration: Reconcile end-to-end against a stub GitHub + real SQLite ---
 
-// stubGH is a canned GitHub endpoint for RefreshPRs (GraphQL nodes query) and
-// BranchesExist (GraphQL aliased repository query). It records which PR node
-// ids and branch refs were queried so a test can assert terminal deliverables are
-// never fetched.
+// stubGH is a canned GitHub endpoint for RefreshPRs (GraphQL nodes query). It
+// records which PR node ids were queried so a test can assert terminal
+// deliverables are never fetched.
 type stubGH struct {
-	prs      map[string]string // PR node id → JSON node body (RefreshPRs)
-	branches map[string]bool   // "owner/repo/branch" → exists; absent key = unknown
-	reviews  map[string]string // review node id → PullRequestReview JSON body (GetReview); absent → node null
-	prCalls  map[string]bool   // PR node ids actually requested
-	refCalls map[string]bool   // branch refs actually requested ("owner/repo/branch")
+	prs     map[string]string // PR node id → JSON node body (RefreshPRs)
+	reviews map[string]string // review node id → PullRequestReview JSON body (GetReview); absent → node null
+	prCalls map[string]bool   // PR node ids actually requested
 }
 
 func newStubServer(t *testing.T, s *stubGH) *httptest.Server {
 	t.Helper()
 	s.prCalls = map[string]bool{}
-	s.refCalls = map[string]bool{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
@@ -171,28 +152,6 @@ func newStubServer(t *testing.T, s *stubGH) *httptest.Server {
 				}
 			}
 			fmt.Fprintf(w, `{"data":{"nodes":[%s]}}`, strings.Join(parts, ","))
-
-		case strings.Contains(req.Query, "repository("):
-			var fields []string
-			for i := 0; ; i++ {
-				ov, ok := req.Variables[fmt.Sprintf("o%d", i)].(string)
-				if !ok {
-					break
-				}
-				nv, _ := req.Variables[fmt.Sprintf("n%d", i)].(string)
-				qv, _ := req.Variables[fmt.Sprintf("q%d", i)].(string)
-				key := ov + "/" + nv + "/" + strings.TrimPrefix(qv, "refs/heads/")
-				s.refCalls[key] = true
-				switch exists, known := s.branches[key]; {
-				case !known:
-					fields = append(fields, fmt.Sprintf(`"r%d":null`, i)) // unknown
-				case exists:
-					fields = append(fields, fmt.Sprintf(`"r%d":{"ref":{"id":"REF"}}`, i))
-				default:
-					fields = append(fields, fmt.Sprintf(`"r%d":{"ref":null}`, i)) // gone
-				}
-			}
-			fmt.Fprintf(w, `{"data":{%s}}`, strings.Join(fields, ","))
 
 		case strings.Contains(req.Query, "PullRequestReview"):
 			// GetReview(node(id:)). Return the canned review body, or node:null.
@@ -320,10 +279,10 @@ func reconcileTestDB(t *testing.T) (*sql.DB, db.Stores, func(entityID, conversat
 }
 
 // The reconciler reaches GitHub under the name a registry row holds now,
-// whatever the deliverable's target or its entity's key still spells: a branch
-// through the row its key carries, a pull request through its entity's row
-// (the owner the client is resolved for). A retired row's name is another
-// repository's, so its deliverables are neither probed nor refreshed.
+// whatever the deliverable's target or its entity's key still spells: a pull
+// request through its entity's row (the owner the client is resolved for). A
+// retired row's name is another repository's, so its deliverables are not
+// refreshed.
 func TestReconcile_AddressesRepositoriesByTheirRegistryRows(t *testing.T) {
 	conn, stores, seedConversation, seedArt := reconcileTestDB(t)
 	ctx := context.Background()
@@ -331,31 +290,26 @@ func TestReconcile_AddressesRepositoriesByTheirRegistryRows(t *testing.T) {
 	seedConversation("ent-6", conversationID)
 	orgID := runmode.LocalDefaultOrgID
 
-	// seed records a pull request with its entity, and a pushed feature branch,
-	// in the repository registered as repositoryID.
-	seed := func(entityID, repositoryID, repoPath string, number int) (pr, branch domain.Deliverable) {
+	// seed records a pull request with its entity in the repository
+	// registered as repositoryID.
+	seed := func(entityID, repositoryID, repoPath string, number int) domain.Deliverable {
 		t.Helper()
 		nodeID, sourceID := fmt.Sprintf("PR_%d", number), domain.PullRequestTarget(repoPath, number)
 		if _, err := conn.Exec(`INSERT INTO entities (id, source, source_id, kind, scope, repository_id, external_id) VALUES (?, 'github', ?, 'pull_request', ?, ?, ?)`,
 			entityID, sourceID, reconcileTestHost, repositoryID, nodeID); err != nil {
 			t.Fatalf("seed entity %s: %v", sourceID, err)
 		}
-		pr = domain.NewPullRequestDeliverable(repoPath, number, nodeID, "feat", "main", "u", "t", "b", false)
+		pr := domain.NewPullRequestDeliverable(repoPath, number, nodeID, "feat", "main", "u", "t", "b", false)
 		pr.ConversationID, pr.EntityID = conversationID, entityID
 		seedArt(pr)
-		branch, _ = domain.NewBranchDeliverable(repoPath, "refs/heads/feature", "sha", true)
-		branch.DedupKey = domain.BranchDedupKey(repositoryID, branch.ExternalID)
-		branch.ConversationID = conversationID
-		seedArt(branch)
-		return pr, branch
+		return pr
 	}
 	moved := dbseed.GitHubRepository(t, conn, orgID, reconcileTestHost, "octo", "old")
 	retired := dbseed.GitHubRepository(t, conn, orgID, reconcileTestHost, "octo", "gone")
-	movedPR, movedBranch := seed("ent-moved", moved, "octo/old", 7)
-	retiredPR, retiredBranch := seed("ent-retired", retired, "octo/gone", 8)
+	movedPR := seed("ent-moved", moved, "octo/old", 7)
+	retiredPR := seed("ent-retired", retired, "octo/gone", 8)
 
-	// GitHub serves the retired row's name as another repository, whose own
-	// feature branch is gone.
+	// GitHub serves the retired row's name as another repository.
 	dbseed.RenameRepositoryOnly(t, conn, moved, "acme", "new")
 	if _, err := conn.Exec(`UPDATE repositories SET retired_at = CURRENT_TIMESTAMP WHERE id = ?`, retired); err != nil {
 		t.Fatalf("retire repository: %v", err)
@@ -366,11 +320,6 @@ func TestReconcile_AddressesRepositoriesByTheirRegistryRows(t *testing.T) {
 			"PR_7": prNodeJSON("PR_7", 7, "MERGED", false, true),
 			"PR_8": prNodeJSON("PR_8", 8, "MERGED", false, true),
 		},
-		branches: map[string]bool{
-			"acme/new/feature":  false,
-			"octo/old/feature":  true,
-			"octo/gone/feature": false,
-		},
 	}
 	res := &fakeResolver{client: newStubClient(t, stub)}
 	rc := NewReconciler(res, stores.Deliverables, stores.ExternalActions, stores.Entities, stores.Repos, stores.Orgs, nil)
@@ -379,18 +328,13 @@ func TestReconcile_AddressesRepositoriesByTheirRegistryRows(t *testing.T) {
 	}
 
 	assertState(t, conn, orgID, movedPR.DedupKey, domain.DeliverableStatePRMerged)
-	assertState(t, conn, orgID, movedBranch.DedupKey, domain.DeliverableStateBranchDeleted)
-	if !stub.refCalls["acme/new/feature"] || stub.refCalls["octo/old/feature"] {
-		t.Errorf("branch probes = %v, want acme/new/feature alone: the row's current name", stub.refCalls)
-	}
 	if !res.owners["acme"] {
 		t.Errorf("client owners = %v, want acme: the moved pull request's row is owned there now", res.owners)
 	}
 
 	assertState(t, conn, orgID, retiredPR.DedupKey, domain.DeliverableStatePROpen)
-	assertState(t, conn, orgID, retiredBranch.DedupKey, domain.DeliverableStateBranchPushed)
-	if stub.prCalls["PR_8"] || stub.refCalls["octo/gone/feature"] {
-		t.Errorf("a retired row's deliverables reached GitHub: prs %v, branches %v", stub.prCalls, stub.refCalls)
+	if stub.prCalls["PR_8"] {
+		t.Errorf("a retired row's deliverables reached GitHub: prs %v", stub.prCalls)
 	}
 	if res.owners["octo"] {
 		t.Errorf("client owners = %v: nothing on this pass is owned by octo any more", res.owners)
@@ -398,10 +342,9 @@ func TestReconcile_AddressesRepositoriesByTheirRegistryRows(t *testing.T) {
 }
 
 // TestReconcile_Transitions is the headline end-to-end: a draft PR that merged
-// and a pushed branch that was deleted reflect their new state, and a terminal
-// deliverable already in the set is never re-queried. A review-draft deliverable is
-// seeded too and must stay pending — reviews are staged TF-side and never
-// reconciled (TFAC-494 §8).
+// reflects its new state, and a terminal deliverable already in the set is
+// never re-queried. A review-draft deliverable is seeded too and must stay
+// pending — reviews are staged TF-side and never reconciled.
 func TestReconcile_Transitions(t *testing.T) {
 	conn, stores, seedConversation, seedArt := reconcileTestDB(t)
 	ctx := context.Background()
@@ -412,8 +355,6 @@ func TestReconcile_Transitions(t *testing.T) {
 	prArt.ConversationID = conversationID
 	reviewArt := domain.NewReviewDeliverable("octo/repo", 2, "PR_2", "headsha2", conversationID)
 	reviewArt.ConversationID = conversationID
-	branchArt, _ := keyedBranch("octo/repo", "refs/heads/feature", "sha", true)
-	branchArt.ConversationID = conversationID
 	// A terminal PR already merged — it must NOT be in the non-terminal set and
 	// must never be fetched.
 	mergedArt := domain.NewPullRequestDeliverable("octo/repo", 9, "PR_9", "old", "main", "https://github.com/octo/repo/pull/9", "t", "b", false)
@@ -421,14 +362,12 @@ func TestReconcile_Transitions(t *testing.T) {
 	mergedArt.ConversationID = conversationID
 	seedArt(prArt)
 	seedArt(reviewArt)
-	seedArt(branchArt)
 	seedArt(mergedArt)
 
 	stub := &stubGH{
 		prs: map[string]string{
 			"PR_1": prNodeJSON("PR_1", 1, "MERGED", false, true),
 		},
-		branches: map[string]bool{"octo/repo/feature": false}, // gone
 	}
 	res := &fakeResolver{client: newStubClient(t, stub)}
 	rc := NewReconciler(res, stores.Deliverables, stores.ExternalActions, stores.Entities, stores.Repos, stores.Orgs, nil)
@@ -439,7 +378,6 @@ func TestReconcile_Transitions(t *testing.T) {
 
 	// States transitioned.
 	assertState(t, conn, runmode.LocalDefaultOrgID, prArt.DedupKey, domain.DeliverableStatePRMerged)
-	assertState(t, conn, runmode.LocalDefaultOrgID, branchArt.DedupKey, domain.DeliverableStateBranchDeleted)
 	// The review draft is staged TF-side and never reconciled — it stays pending.
 	assertState(t, conn, runmode.LocalDefaultOrgID, reviewArt.DedupKey, domain.DeliverableStateReviewPending)
 
@@ -482,8 +420,8 @@ func TestReconcile_PRClosed(t *testing.T) {
 	assertState(t, conn, runmode.LocalDefaultOrgID, reviewArt.DedupKey, domain.DeliverableStateReviewPending)
 }
 
-// TestReconcile_NoOpWhenUnchanged pins that an open PR still open, a pending
-// review still private, and a present branch all stay put.
+// TestReconcile_NoOpWhenUnchanged pins that an open PR still open and a
+// pending review still private both stay put.
 func TestReconcile_NoOpWhenUnchanged(t *testing.T) {
 	conn, stores, seedConversation, seedArt := reconcileTestDB(t)
 	const conversationID = "33333333-3333-3333-3333-333333333333"
@@ -493,17 +431,13 @@ func TestReconcile_NoOpWhenUnchanged(t *testing.T) {
 	prArt.ConversationID = conversationID
 	reviewArt := domain.NewReviewDeliverable("octo/repo", 6, "PR_6", "headsha6", conversationID) // pending draft
 	reviewArt.ConversationID = conversationID
-	branchArt, _ := keyedBranch("octo/repo", "refs/heads/keep", "sha", true)
-	branchArt.ConversationID = conversationID
 	seedArt(prArt)
 	seedArt(reviewArt)
-	seedArt(branchArt)
 
 	stub := &stubGH{
 		prs: map[string]string{
 			"PR_5": prNodeJSON("PR_5", 5, "OPEN", false, false),
 		},
-		branches: map[string]bool{"octo/repo/keep": true}, // still there
 	}
 	updated, err := reconcileSet(t, stores, &fakeResolver{client: newStubClient(t, stub)}, runmode.LocalDefaultOrgID)
 	if err != nil {
@@ -514,7 +448,6 @@ func TestReconcile_NoOpWhenUnchanged(t *testing.T) {
 	}
 	assertState(t, conn, runmode.LocalDefaultOrgID, prArt.DedupKey, domain.DeliverableStatePROpen)
 	assertState(t, conn, runmode.LocalDefaultOrgID, reviewArt.DedupKey, domain.DeliverableStateReviewPending)
-	assertState(t, conn, runmode.LocalDefaultOrgID, branchArt.DedupKey, domain.DeliverableStateBranchPushed)
 }
 
 // TestReconcile_DraftMarkedReadyRunsTheResolvedHook pins resolution from any
@@ -590,28 +523,6 @@ func TestReconcile_OpenNeverReturnsToDraft(t *testing.T) {
 	if hookRan {
 		t.Error("resolved hook ran for a PR that was already resolved")
 	}
-}
-
-// TestReconcile_UnknownBranchNotDeleted pins the safety rule: a branch whose
-// repository didn't resolve (inaccessible) is left as-is, never flipped to
-// deleted on a non-answer.
-func TestReconcile_UnknownBranchNotDeleted(t *testing.T) {
-	conn, stores, seedConversation, seedArt := reconcileTestDB(t)
-	const conversationID = "44444444-4444-4444-4444-444444444444"
-	seedConversation("ent-4", conversationID)
-	branchArt, _ := keyedBranch("octo/repo", "refs/heads/maybe", "sha", true)
-	branchArt.ConversationID = conversationID
-	seedArt(branchArt)
-
-	stub := &stubGH{branches: map[string]bool{}} // empty → repository alias null → unknown
-	updated, err := reconcileSet(t, stores, &fakeResolver{client: newStubClient(t, stub)}, runmode.LocalDefaultOrgID)
-	if err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-	if len(updated) != 0 {
-		t.Errorf("unknown branch should not transition, got %+v", updated)
-	}
-	assertState(t, conn, runmode.LocalDefaultOrgID, branchArt.DedupKey, domain.DeliverableStateBranchPushed)
 }
 
 // TestReconcile_SingleConversationScope pins the Tier-2 shape: Reconcile over
@@ -972,18 +883,12 @@ func runBackstop(t *testing.T, stores db.Stores, client *github.Client) *fakeRes
 // create verb opened a draft PR and wrote its pr_created row, but the deliverable
 // write beside it failed. The backstop records the deliverable, owned by the
 // conversation the ledger row names — not the one that pushed the PR's branch
-// first, whose branch deliverable keeps its owner.
+// first.
 func TestBackstop_RecordsPRFromItsLedgerRow(t *testing.T) {
-	conn, stores, seedConversation, seedArt := reconcileTestDB(t)
+	conn, stores, seedConversation, _ := reconcileTestDB(t)
 	seedConversation("octo/repo#1", "conv-pusher")
 	seedConversation("octo/repo#2", "conv-opener")
 
-	br, ok := keyedBranch("octo/repo", "refs/heads/feature-x", "sha1", true)
-	if !ok {
-		t.Fatal("branch deliverable builder rejected a valid ref")
-	}
-	br.ConversationID = "conv-pusher"
-	seedArt(br)
 	recordPRCreated(t, stores, reconcileTestHost, "conv-opener", "octo/repo", 5, "PR_5",
 		domain.DeliverableStatePRDraft, "https://github.com/octo/repo/pull/5")
 
@@ -1009,9 +914,6 @@ func TestBackstop_RecordsPRFromItsLedgerRow(t *testing.T) {
 	if calls := stub.requested(); len(calls) != 1 || calls[0] != "nodes PR_5" {
 		t.Errorf("GitHub calls = %v, want one node fetch of PR_5", calls)
 	}
-	if br := findDeliverable(t, conn, runmode.LocalDefaultOrgID, br.DedupKey); br.ConversationID != "conv-pusher" {
-		t.Errorf("branch deliverable owner = %q, want conv-pusher left as it was", br.ConversationID)
-	}
 }
 
 // TestBackstop_IgnoresPRWithoutLedgerRow pins that a PR TF never opened gets no
@@ -1019,15 +921,8 @@ func TestBackstop_RecordsPRFromItsLedgerRow(t *testing.T) {
 // pr_created row for it, so nothing is recorded, nothing is fetched, and the
 // conversation that pushed the branch owes no approval for it.
 func TestBackstop_IgnoresPRWithoutLedgerRow(t *testing.T) {
-	conn, stores, seedConversation, seedArt := reconcileTestDB(t)
+	conn, stores, seedConversation, _ := reconcileTestDB(t)
 	seedConversation("octo/repo#5", "conv-1")
-
-	br, ok := keyedBranch("octo/repo", "refs/heads/feature-x", "sha1", true)
-	if !ok {
-		t.Fatal("branch deliverable builder rejected a valid ref")
-	}
-	br.ConversationID = "conv-1"
-	seedArt(br)
 
 	stub, client := newBackstopStub(t, map[string]string{"PR_5": backstopPRNode("octo/repo", 5, "feature-x", "A person's draft", "", true)})
 	runBackstop(t, stores, client)
@@ -1195,15 +1090,6 @@ func TestBackstop_AndCreateWriterShareOneRowAcrossNames(t *testing.T) {
 	}
 }
 
-// keyedBranch is domain.NewBranchDeliverable keyed the way the host sink keys
-// it, on its repository's registry row; "repo-" + repoPath stands in for the
-// row's id.
-func keyedBranch(repoPath, ref, sha string, created bool) (domain.Deliverable, bool) {
-	a, ok := domain.NewBranchDeliverable(repoPath, ref, sha, created)
-	a.DedupKey = domain.BranchDedupKey("repo-"+repoPath, ref)
-	return a, ok
-}
-
 // countPRDeliverables counts the org's pull_request deliverables on the test host.
 func countPRDeliverables(t *testing.T, conn *sql.DB) int {
 	t.Helper()
@@ -1292,32 +1178,27 @@ const reconcileTestHost = "https://github.com"
 
 // TestReconcile_SkipsDeliverablesOnAnotherHost pins that only deliverables on the
 // org's current GitHub host are reconciled. The resolver's client reaches that
-// host alone, so another host's branch, absent there, would otherwise read as
-// deleted, and another host's pull request would be refreshed from a stranger.
+// host alone, so another host's pull request would be refreshed from a
+// stranger.
 func TestReconcile_SkipsDeliverablesOnAnotherHost(t *testing.T) {
 	conn, stores, seedConversation, seedArt := reconcileTestDB(t)
 	ctx := context.Background()
 	const conversationID = "55555555-5555-5555-5555-555555555555"
 	seedConversation("ent-5", conversationID)
 
-	elsewhereBranch, _ := keyedBranch("octo/repo", "refs/heads/elsewhere", "sha", true)
-	elsewhereBranch.ConversationID = conversationID
-	elsewhereBranch.Scope = "https://ghe.example.com"
 	elsewherePR := domain.NewPullRequestDeliverable("octo/repo", 21, "PR_21", "x", "main", "https://ghe.example.com/octo/repo/pull/21", "t", "b", false)
 	elsewherePR.ConversationID = conversationID
 	elsewherePR.Scope = "https://ghe.example.com"
-	ownBranch, _ := keyedBranch("octo/repo", "refs/heads/own", "sha", true)
-	ownBranch.ConversationID = conversationID
-	ownBranch.Scope = reconcileTestHost
-	seedArt(elsewhereBranch)
+	ownPR := domain.NewPullRequestDeliverable("octo/repo", 22, "PR_22", "y", "main", "https://github.com/octo/repo/pull/22", "t", "b", false)
+	ownPR.ConversationID = conversationID
+	ownPR.Scope = reconcileTestHost
 	seedArt(elsewherePR)
-	seedArt(ownBranch)
+	seedArt(ownPR)
 
 	stub := &stubGH{
-		prs: map[string]string{"PR_21": prNodeJSON("PR_21", 21, "MERGED", false, true)},
-		branches: map[string]bool{
-			"octo/repo/elsewhere": false,
-			"octo/repo/own":       false,
+		prs: map[string]string{
+			"PR_21": prNodeJSON("PR_21", 21, "MERGED", false, true),
+			"PR_22": prNodeJSON("PR_22", 22, "MERGED", false, true),
 		},
 	}
 	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Deliverables, stores.ExternalActions, stores.Entities, stores.Repos, stores.Orgs, nil)
@@ -1325,9 +1206,8 @@ func TestReconcile_SkipsDeliverablesOnAnotherHost(t *testing.T) {
 		t.Fatalf("ReconcileOrg: %v", err)
 	}
 
-	assertScopedState(t, conn, elsewhereBranch, domain.DeliverableStateBranchPushed)
 	assertScopedState(t, conn, elsewherePR, domain.DeliverableStatePROpen)
-	assertScopedState(t, conn, ownBranch, domain.DeliverableStateBranchDeleted)
+	assertScopedState(t, conn, ownPR, domain.DeliverableStatePRMerged)
 	if stub.prCalls["PR_21"] {
 		t.Error("a pull request on another host was refreshed through the current host's client")
 	}

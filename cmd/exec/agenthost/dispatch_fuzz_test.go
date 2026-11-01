@@ -140,7 +140,7 @@ func FuzzHandleConn(f *testing.F) {
 		{methodMemoryLoad, `{"source":"github","source_id":"o/r#1","limit":-5}`},
 		{methodSignCommit, `{"payload":"dHJlZSB4Cgo="}`},
 		{methodCallExtension, `{"namespace":"n","method":"m","args":{"a":1}}`},
-		{methodUpsertDeliverable, `{"deliverable":{"provider":"github","kind":"comment","target":"o/r#1"}}`},
+		{methodRecordBranchPush, `{"repo":"o/r","ref":"refs/heads/topic","sha":"abc","created":true}`},
 		{"", ``},
 		{"NotAMethod", `[]`},
 	}

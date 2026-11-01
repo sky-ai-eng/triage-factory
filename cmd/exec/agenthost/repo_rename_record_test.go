@@ -2,7 +2,6 @@ package agenthost
 
 import (
 	"context"
-	"errors"
 	"io"
 	"maps"
 	"net/http"
@@ -239,48 +238,41 @@ func TestLocalClient_BranchPushedUnderOldName_RecordedUnderCurrent(t *testing.T)
 	registerRepo(t, stores, "octo", "old-name", renamedRepoID)
 	renameRepo(t, stores)
 
-	branch, ok := domain.NewBranchDeliverable("octo/old-name", "refs/heads/feature/x", "abc123", true)
-	if !ok {
-		t.Fatal("NewBranchDeliverable refused the fixture branch")
+	if err := client.RecordBranchPush(context.Background(), "octo/old-name", "refs/heads/feature/x", "abc123", true); err != nil {
+		t.Fatalf("RecordBranchPush: %v", err)
 	}
-	if _, err := client.UpsertDeliverable(context.Background(), branch); err != nil {
-		t.Fatalf("UpsertDeliverable: %v", err)
+	acts := listExternalActions(t, stores)
+	if len(acts) != 1 {
+		t.Fatalf("want 1 push row, got %d: %+v", len(acts), acts)
 	}
-	arts := listConversationDeliverables(t, stores, info.ConversationID)
-	if len(arts) != 1 {
-		t.Fatalf("want 1 deliverable, got %d: %+v", len(arts), arts)
-	}
-	a := arts[0]
+	a := acts[0]
 	row, err := stores.Repos.GetByRefSystem(context.Background(), info.OrgID, domain.RepoRefFromSlug(testScope("github"), "octo/new-name"))
 	if err != nil || row == nil {
 		t.Fatalf("resolve octo/new-name: %v, %v", row, err)
 	}
-	wantURL, _ := domain.BranchDeliverableWebURL(gh.URL, "octo/new-name", "refs/heads/feature/x")
-	if a.Target != "octo/new-name" || a.DedupKey != domain.BranchDedupKey(row.ID, "refs/heads/feature/x") || a.URL != wantURL {
-		t.Errorf("branch deliverable = target %q key %q url %q, want it under octo/new-name, keyed on row %s, linked at %q", a.Target, a.DedupKey, a.URL, row.ID, wantURL)
+	wantURL, _ := domain.BranchWebURL(testScope("github"), "octo/new-name", "refs/heads/feature/x")
+	if a.Target != "octo/new-name" || a.RepositoryID != row.ID ||
+		a.DedupKey != domain.BranchPushDedupKey(info.ConversationID, row.ID, "refs/heads/feature/x", "abc123") || a.URL != wantURL {
+		t.Errorf("push row = target %q repository %q key %q url %q, want it under octo/new-name, keyed on row %s, linked at %q",
+			a.Target, a.RepositoryID, a.DedupKey, a.URL, row.ID, wantURL)
 	}
 }
 
-// TestLocalClient_BranchWithAFailedIdentityRead_RecordsOnlyThePush pins that a
-// branch whose repository's identity could not be read is refused as a
-// deliverable, since its key is the row GitHub's id names, and that its push
-// still leaves its ledger row, unlinked.
-func TestLocalClient_BranchWithAFailedIdentityRead_RecordsOnlyThePush(t *testing.T) {
+// TestLocalClient_BranchWithAFailedIdentityRead_RecordsThePushUnlinked pins
+// that a push whose repository's identity could not be read still leaves its
+// ledger row, naming no repository.
+func TestLocalClient_BranchWithAFailedIdentityRead_RecordsThePushUnlinked(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	}))
 	t.Cleanup(srv.Close)
 	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
 
-	branch, ok := domain.NewBranchDeliverable("octo/unregistered", "refs/heads/feature/x", "abc123", true)
-	if !ok {
-		t.Fatal("NewBranchDeliverable refused the fixture branch")
-	}
-	if _, err := client.UpsertDeliverable(context.Background(), branch); !errors.Is(err, errNoRegistryRow) {
-		t.Fatalf("UpsertDeliverable err = %v, want errNoRegistryRow", err)
+	if err := client.RecordBranchPush(context.Background(), "octo/unregistered", "refs/heads/feature/x", "abc123", true); err != nil {
+		t.Fatalf("RecordBranchPush: %v", err)
 	}
 	if arts := listConversationDeliverables(t, stores, info.ConversationID); len(arts) != 0 {
-		t.Errorf("deliverables = %+v, want none for a branch with no registry row", arts)
+		t.Errorf("deliverables = %+v, want none", arts)
 	}
 	acts, _, err := stores.ExternalActions.ListByOrgSystem(context.Background(), info.OrgID, domain.ExternalActionListOpts{})
 	if err != nil {
@@ -320,28 +312,21 @@ func TestLocalClient_RegistryHeldName_ResolvedFromTheRegistry(t *testing.T) {
 // TestLocalClient_BranchPushedUnderAnUnappliedNewName_LinksItsRowByID pins a
 // push through a checkout that spells the repository's new name before TF has
 // applied the rename: GitHub's id for the repository names the row TF holds
-// under the old name, so the branch is keyed on that row and recorded under
-// its name, and no second registry row is created for the new one.
+// under the old name, so the push is keyed on that row and recorded under its
+// name, and no second registry row is created for the new one.
 func TestLocalClient_BranchPushedUnderAnUnappliedNewName_LinksItsRowByID(t *testing.T) {
 	gh := startRenamedRepoGitHub(t)
 	stores, info, client := newGithubRecordingClient(t, gh.URL, true)
 	repoID := registerRepo(t, stores, "octo", "old-name", renamedRepoID)
 	ctx := context.Background()
 
-	branch, ok := domain.NewBranchDeliverable("octo/new-name", "refs/heads/feature/x", "abc123", true)
-	if !ok {
-		t.Fatal("NewBranchDeliverable refused the fixture branch")
-	}
-	if _, err := client.UpsertDeliverable(ctx, branch); err != nil {
-		t.Fatalf("UpsertDeliverable: %v", err)
-	}
-	arts := listConversationDeliverables(t, stores, info.ConversationID)
-	if len(arts) != 1 || arts[0].Target != "octo/old-name" || arts[0].DedupKey != domain.BranchDedupKey(repoID, "refs/heads/feature/x") {
-		t.Fatalf("branch deliverables = %+v, want one keyed on row %s under octo/old-name", arts, repoID)
+	if err := client.RecordBranchPush(ctx, "octo/new-name", "refs/heads/feature/x", "abc123", true); err != nil {
+		t.Fatalf("RecordBranchPush: %v", err)
 	}
 	acts := listExternalActions(t, stores)
-	if len(acts) != 1 || acts[0].RepositoryID != repoID {
-		t.Errorf("push rows = %+v, want one referencing row %s", acts, repoID)
+	if len(acts) != 1 || acts[0].RepositoryID != repoID || acts[0].Target != "octo/old-name" ||
+		acts[0].DedupKey != domain.BranchPushDedupKey(info.ConversationID, repoID, "refs/heads/feature/x", "abc123") {
+		t.Errorf("push rows = %+v, want one keyed on row %s under octo/old-name", acts, repoID)
 	}
 	if row, err := stores.Repos.GetByRefSystem(ctx, info.OrgID, domain.RepoRefFromSlug(testScope("github"), "octo/new-name")); err != nil || row != nil {
 		t.Errorf("octo/new-name = %+v, %v; want no second registry row", row, err)

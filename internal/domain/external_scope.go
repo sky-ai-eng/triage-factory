@@ -6,7 +6,6 @@ package domain
 // record about an entity and the entity itself name one namespace.
 //
 //   - github, jira, linear, slack: EntityScope of the same source.
-//   - git: the GitHub host. A branch is pushed to a GitHub repository.
 //   - network: NetworkScope.
 //
 // "" for a provider with no scope in the org (its source is not configured)
@@ -17,10 +16,7 @@ package domain
 // entity's scope instead, and a write that updates a stored row keeps the
 // row's own.
 func ExternalObjectScope(provider string, s OrgSettings) string {
-	switch provider {
-	case ProviderGit:
-		return EntityScope(ProviderGitHub, s)
-	case ProviderNetwork:
+	if provider == ProviderNetwork {
 		return NetworkScope
 	}
 	return EntityScope(provider, s)

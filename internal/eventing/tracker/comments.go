@@ -121,7 +121,7 @@ func issueCommentKey(provider, resource string) func(string) string {
 		if resource == "" {
 			return ""
 		}
-		return domain.ObjectKey(provider, domain.DeliverableKindComment, resource, commentID)
+		return domain.ObjectKey(provider, domain.ObjectKindComment, resource, commentID)
 	}
 }
 

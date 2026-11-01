@@ -416,11 +416,11 @@ func TestRelayServer_ResentRecordWritesOneRow(t *testing.T) {
 // TestRelayedRecords_RetriedRecordStaysAheadOfLaterOnes runs the whole relayed
 // path — the sidecar's record sender, the supervision channel, the
 // orchestrator's record lane and the write funnel — through an outage that
-// outlasts the write stage's retries. A comment is posted and then deleted.
-// The post's deliverable cannot be written, so its record is deferred and resent;
-// the delete, sent after it, must not be applied until the post has been. Were
-// it applied first it would find no comment row and write nothing, and the
-// post would then create the row as posted.
+// outlasts the write stage's retries. A draft pull request is recorded and
+// then marked ready. The create's deliverable cannot be written, so its record
+// is deferred and resent; the ready mark, sent after it, must not be applied
+// until the create has been. Were it applied first, the create would then
+// write the row back as a draft.
 func TestRelayedRecords_RetriedRecordStaysAheadOfLaterOnes(t *testing.T) {
 	fastRecordRetry(t)
 	reader := installTestAuditDrops(t)
@@ -450,35 +450,35 @@ func TestRelayedRecords_RetriedRecordStaysAheadOfLaterOnes(t *testing.T) {
 	})
 	rt := NewRelayRuntime(sidecarConn, agentproc.NewRecordSender(sidecarConn), info, nil, nil)
 
-	key := domain.GitHubCommentKey(domain.GitHubIssueComment, 7)
+	key := domain.PullRequestDedupKey("PR_1")
 	rt.Record(context.Background(),
 		&domain.Deliverable{
-			Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindComment,
-			Target: "octo/repo#1", ExternalID: "7", State: domain.DeliverableStateCommentPosted, DedupKey: key,
+			Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindPullRequest,
+			Target: "octo/repo#1", ExternalID: "1", State: domain.DeliverableStatePRDraft, DedupKey: key,
 		},
 		&domain.ExternalAction{
-			Provider: domain.ProviderGitHub, Action: domain.ActionCommentPosted,
-			Target: "octo/repo#1", ExternalID: "7", Credential: domain.CredentialGitHubApp,
+			Provider: domain.ProviderGitHub, Action: domain.ActionPRCreated,
+			Target: "octo/repo#1", ExternalID: "1", Credential: domain.CredentialGitHubApp,
 		}, domain.EntityContainer{}, domain.GitHubIdentity{})
 	rt.Record(context.Background(),
 		&domain.Deliverable{
-			Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindComment,
-			ExternalID: "7", State: domain.DeliverableStateCommentDeleted, DedupKey: key,
+			Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindPullRequest,
+			Target: "octo/repo#1", ExternalID: "1", State: domain.DeliverableStatePROpen, DedupKey: key,
 		},
 		&domain.ExternalAction{
-			Provider: domain.ProviderGitHub, Action: domain.ActionCommentDeleted,
-			Target: "octo/repo", ExternalID: "7", Credential: domain.CredentialGitHubApp,
+			Provider: domain.ProviderGitHub, Action: domain.ActionPRMarkedReady,
+			Target: "octo/repo#1", ExternalID: "1", Credential: domain.CredentialGitHubApp,
 		}, domain.EntityContainer{}, domain.GitHubIdentity{})
 
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		arts := listConversationDeliverables(t, base, info.ConversationID)
 		acts := listExternalActions(t, base)
-		if len(arts) == 1 && arts[0].State == domain.DeliverableStateCommentDeleted && len(acts) == 2 {
+		if len(arts) == 1 && arts[0].State == domain.DeliverableStatePROpen && len(acts) == 2 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("deliverables = %+v, ledger rows = %d; want the comment deleted and both rows written", arts, len(acts))
+			t.Fatalf("deliverables = %+v, ledger rows = %d; want the pull request open and both rows written", arts, len(acts))
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -488,21 +488,16 @@ func TestRelayedRecords_RetriedRecordStaysAheadOfLaterOnes(t *testing.T) {
 }
 
 // pushRelayServer is a RelayServer whose git gate records a relayed push the
-// way the executor's does: through UpsertDeliverableFor, as a branch deliverable
-// with its ledger row composed in, keyed on the repository id the push relays.
-// The pushed repository, octo/repo, has its registry row, as a run's checkout
-// does.
+// way the executor's does: through RecordBranchPushFor, with the repository id
+// the push relays. The pushed repository, octo/repo, has its registry row, as a
+// run's checkout does.
 func pushRelayServer(t *testing.T, stores db.Stores, info ConversationInfo) *RelayServer {
 	t.Helper()
 	registerRepo(t, stores, "octo", "repo", "1")
 	host := NewLocal(stores, info)
 	git := &agentproc.GitProxyConfig{
 		RecordPush: func(ctx context.Context, push gitproxy.PushedRef) {
-			art, ok := domain.NewBranchDeliverable(push.Repo, push.Ref, push.NewSHA, push.Created)
-			if !ok {
-				return
-			}
-			_, _ = host.UpsertDeliverableFor(ctx, art, PushIdentity(push))
+			host.RecordBranchPushFor(ctx, push.Repo, push.Ref, push.NewSHA, push.Created, PushIdentity(push))
 		},
 	}
 	return NewRelayServer(stores, info, git)
@@ -517,67 +512,115 @@ func pushArgs(t *testing.T) json.RawMessage {
 	return args
 }
 
-// TestRelayedPush_TransientDeliverableFailureDefersTheRecord: a relayed push
-// whose branch deliverable cannot be written past the write stage's retries is
-// deferred like any other relayed record, so the sidecar's resend retries the
-// deliverable — rather than the record being acknowledged with only its ledger
-// row written. Nothing is counted lost, and the resend lands the deliverable
-// beside the one ledger row.
-func TestRelayedPush_TransientDeliverableFailureDefersTheRecord(t *testing.T) {
+// TestRelayedPush_TransientLedgerFailureDefersTheRecord: a relayed push whose
+// branch_pushed row cannot be written past the write stage's retries is
+// deferred like any other relayed record, so the sidecar's resend retries it.
+// Nothing is counted lost, and the resend lands the one row.
+func TestRelayedPush_TransientLedgerFailureDefersTheRecord(t *testing.T) {
 	fastRecordRetry(t)
 	reader := installTestAuditDrops(t)
 	base, info := newCaptureStores(t, true)
-	deliverableFaults := &faults{fail: -1}
+	actionFaults := &faults{fail: -1}
 	stores := base
-	stores.Deliverables = flakyDeliverables{DeliverableStore: base.Deliverables, f: deliverableFaults}
+	stores.ExternalActions = flakyActions{ExternalActionStore: base.ExternalActions, f: actionFaults}
 	s := pushRelayServer(t, stores, info)
 
 	key := uuid.NewString()
 	if err := s.DispatchRecord(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordPush, key, pushArgs(t)); !errors.Is(err, errRecordDeferred) {
-		t.Fatalf("push with an unwritable deliverable = %v; want %v", err, errRecordDeferred)
+		t.Fatalf("push with an unwritable ledger row = %v; want %v", err, errRecordDeferred)
 	}
-	if arts := listConversationDeliverables(t, base, info.ConversationID); len(arts) != 0 {
-		t.Fatalf("deliverables = %+v; want none during the outage", arts)
+	if acts := listExternalActions(t, base); len(acts) != 0 {
+		t.Fatalf("ledger rows = %+v; want none during the outage", acts)
 	}
 	if got := collectDrops(t, reader); len(got) != 0 {
 		t.Fatalf("drops = %v; a deferred record is not lost, and must not be counted", got)
 	}
 
-	deliverableFaults.set(0, 0)
+	actionFaults.set(0, 0)
 	if err := s.DispatchRecord(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordPush, key, pushArgs(t)); err != nil {
 		t.Fatalf("resend = %v", err)
 	}
-	arts := listConversationDeliverables(t, base, info.ConversationID)
-	if len(arts) != 1 || arts[0].Kind != domain.DeliverableKindBranch {
-		t.Fatalf("deliverables = %+v; want the branch deliverable landed by the resend", arts)
-	}
 	if acts := listExternalActions(t, base); len(acts) != 1 || acts[0].Action != domain.ActionBranchPushed {
-		t.Fatalf("ledger rows = %+v; want one branch_pushed row across both applications", acts)
+		t.Fatalf("ledger rows = %+v; want the one branch_pushed row landed by the resend", acts)
+	}
+	if arts := listConversationDeliverables(t, base, info.ConversationID); len(arts) != 0 {
+		t.Fatalf("deliverables = %+v; a push writes none", arts)
 	}
 	if got := collectDrops(t, reader); len(got) != 0 {
 		t.Fatalf("drops = %v; want none", got)
 	}
 }
 
-// TestRelayedPush_RefusedDeliverableIsCountedOnce: a deliverable refused for good
-// is not resent. The record is acknowledged with its ledger row written, and
-// the deliverable is counted lost once, at the write stage, under its kind.
-func TestRelayedPush_RefusedDeliverableIsCountedOnce(t *testing.T) {
+// flakyRepos is a RepositoryStore whose registry read by GitHub's id goes
+// through faults.
+type flakyRepos struct {
+	db.RepositoryStore
+	f *faults
+}
+
+func (s flakyRepos) GetByExternalIDSystem(ctx context.Context, orgID, host, externalID string) (*domain.Repository, error) {
+	if skip, err := s.f.next(); skip {
+		return nil, err
+	}
+	return s.RepositoryStore.GetByExternalIDSystem(ctx, orgID, host, externalID)
+}
+
+// TestRelayedPush_TransientRegistryFailureDefersTheRecord: a relayed push
+// whose repository cannot be read past the retries is deferred rather than
+// recorded under the name it was pushed to, so the resend keys the one row on
+// the registry row, as the other observer of the same push does.
+func TestRelayedPush_TransientRegistryFailureDefersTheRecord(t *testing.T) {
 	fastRecordRetry(t)
 	reader := installTestAuditDrops(t)
-	conn, stores, info := newCaptureStoresConn(t, true)
-	refuseDeliverableWrites(t, conn)
+	base, info := newCaptureStores(t, true)
+	repoFaults := &faults{fail: -1}
+	stores := base
+	stores.Repos = flakyRepos{RepositoryStore: base.Repos, f: repoFaults}
+	s := pushRelayServer(t, stores, info)
+
+	key := uuid.NewString()
+	if err := s.DispatchRecord(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordPush, key, pushArgs(t)); !errors.Is(err, errRecordDeferred) {
+		t.Fatalf("push with an unreadable registry = %v; want %v", err, errRecordDeferred)
+	}
+	if acts := listExternalActions(t, base); len(acts) != 0 {
+		t.Fatalf("ledger rows = %+v; want none during the outage", acts)
+	}
+	if got := collectDrops(t, reader); len(got) != 0 {
+		t.Fatalf("drops = %v; a deferred record is not lost, and must not be counted", got)
+	}
+
+	repoFaults.set(0, 0)
+	if err := s.DispatchRecord(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordPush, key, pushArgs(t)); err != nil {
+		t.Fatalf("resend = %v", err)
+	}
+	row, err := base.Repos.GetByExternalIDSystem(context.Background(), info.OrgID, testScope("github"), "1")
+	if err != nil || row == nil {
+		t.Fatalf("registry row = %v, %v", row, err)
+	}
+	acts := listExternalActions(t, base)
+	if len(acts) != 1 || acts[0].RepositoryID != row.ID ||
+		acts[0].DedupKey != domain.BranchPushDedupKey(info.ConversationID, row.ID, "refs/heads/feat", "abc123") {
+		t.Fatalf("ledger rows = %+v; want the one push keyed on registry row %s", acts, row.ID)
+	}
+}
+
+// TestRelayedPush_RefusedLedgerRowIsCountedOnce: a ledger row refused for good
+// is not resent. The record is acknowledged, and the row is counted lost once,
+// at the write stage, under its action.
+func TestRelayedPush_RefusedLedgerRowIsCountedOnce(t *testing.T) {
+	fastRecordRetry(t)
+	reader := installTestAuditDrops(t)
+	base, info := newCaptureStores(t, true)
+	stores := base
+	stores.ExternalActions = flakyActions{ExternalActionStore: base.ExternalActions, f: &faults{fail: -1, err: errors.New("ledger write refused")}}
 	s := pushRelayServer(t, stores, info)
 
 	if err := relayRecord(t, s, agentproc.RelayNamespaceCore, agentproc.OpRecordPush, pushArgs(t)); err != nil {
-		t.Fatalf("push with a refused deliverable = %v; want it acknowledged", err)
-	}
-	if acts := listExternalActions(t, stores); len(acts) != 1 || acts[0].Action != domain.ActionBranchPushed {
-		t.Fatalf("ledger rows = %+v; want the branch_pushed row despite the refused deliverable", acts)
+		t.Fatalf("push with a refused ledger row = %v; want it acknowledged", err)
 	}
 	got := collectDrops(t, reader)
-	if len(got[dropStageRecord]) != 1 || got[dropStageRecord][domain.DeliverableKindBranch] != 1 {
-		t.Fatalf("drops = %v; want exactly one %s drop under op=%s", got, dropStageRecord, domain.DeliverableKindBranch)
+	if len(got[dropStageRecord]) != 1 || got[dropStageRecord][domain.ActionBranchPushed] != 1 {
+		t.Fatalf("drops = %v; want exactly one %s drop under op=%s", got, dropStageRecord, domain.ActionBranchPushed)
 	}
 }
 
@@ -590,11 +633,8 @@ func TestUpsertDeliverable_DirectFailureIsTheCallersToHandle(t *testing.T) {
 	conn, stores, info := newCaptureStoresConn(t, true)
 	refuseDeliverableWrites(t, conn)
 
-	branch, ok := domain.NewBranchDeliverable("octo/repo", "refs/heads/feat", "abc123", true)
-	if !ok {
-		t.Fatal("NewBranchDeliverable refused the fixture branch")
-	}
-	if _, err := newDirectRuntime(stores, info).UpsertDeliverable(context.Background(), branch, domain.GitHubIdentity{}); err == nil {
+	review := domain.NewReviewDeliverable("octo/repo", 1, "PR_1", "head-sha", info.ConversationID)
+	if _, err := newDirectRuntime(stores, info).UpsertDeliverable(context.Background(), review, domain.GitHubIdentity{}); err == nil {
 		t.Fatal("UpsertDeliverable = nil error, want the refused deliverable's error")
 	}
 	if got := collectDrops(t, reader); len(got) != 0 {

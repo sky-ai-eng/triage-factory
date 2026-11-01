@@ -23,15 +23,6 @@ func TestExternalObjectScope_SQLite(t *testing.T) {
 	})
 }
 
-// TestCommentDeliverables_SQLite runs the shared comment-deliverable conformance
-// suite against the SQLite backend, a fresh in-memory DB per subtest.
-func TestCommentDeliverables_SQLite(t *testing.T) {
-	dbtest.RunCommentDeliverableConformance(t, func(t *testing.T) (db.Stores, string, string) {
-		t.Helper()
-		return sqlitestore.New(openSQLiteForTest(t)), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
-	})
-}
-
 // TestDeliverableUpsert_SQLite runs the shared deliverable upsert conformance suite
 // against the SQLite backend, a fresh in-memory DB per subtest.
 func TestDeliverableUpsert_SQLite(t *testing.T) {

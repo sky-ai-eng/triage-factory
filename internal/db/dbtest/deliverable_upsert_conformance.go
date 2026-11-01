@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -12,20 +13,15 @@ import (
 // to every deliverable kind on a conflict. details_json is preserve-on-empty: a
 // write that passes no details keeps the ones the row holds, and a write that
 // passes details replaces them. The rule is store-wide, so it is checked for
-// each kind a writer gives details to, built by the constructors those
-// writers use, through both Upsert and UpsertSystem. entity_id is
-// preserve-on-empty the same way. The factory is ExternalObjectScopeFactory's:
-// a fresh, empty org and a team per call.
+// each kind, built by the constructors its writers use, through both Upsert
+// and UpsertSystem. entity_id is preserve-on-empty the same way. A kind other
+// than a pull request or a review is refused through every write door. The
+// factory is ExternalObjectScopeFactory's: a fresh, empty org and a team per
+// call.
 func RunDeliverableUpsertConformance(t *testing.T, mk ExternalObjectScopeFactory) {
 	t.Helper()
 	ctx := context.Background()
 
-	branch, ok := domain.NewBranchDeliverable("octo/api", "refs/heads/feat", "abc123", true)
-	if !ok {
-		t.Fatal("NewBranchDeliverable refused the fixture branch")
-	}
-	// The host sink keys a branch on its repository's registry row.
-	branch.DedupKey = domain.BranchDedupKey("repo-octo-api", branch.ExternalID)
 	kinds := []struct {
 		name string
 		a    domain.Deliverable
@@ -42,32 +38,27 @@ func RunDeliverableUpsertConformance(t *testing.T, mk ExternalObjectScopeFactory
 			a:        domain.NewReviewDeliverable("octo/api", 7, "PR_kw7", "abc123", ""),
 			replaced: `{"head_sha":"def456"}`,
 		},
-		{
-			name:     "branch",
-			a:        branch,
-			replaced: `{"sha":"def456","new":false}`,
-		},
-		{
-			name: "jira issue",
-			a: domain.Deliverable{
-				Provider: domain.ProviderJira, Kind: domain.DeliverableKindIssue,
-				Target: "ENG-1", ExternalID: "10042", State: domain.DeliverableStateIssueCreated,
-				DedupKey:    domain.ObjectKey(domain.ProviderJira, domain.DeliverableKindIssue, "10042", ""),
-				DetailsJSON: `{"summary":"First"}`,
-			},
-			replaced: `{"summary":"Second"}`,
-		},
-		{
-			name: "github reply",
-			a: domain.Deliverable{
-				Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindComment,
-				Target: "octo/api#7", ExternalID: "11", State: domain.DeliverableStateCommentPosted,
-				DedupKey:    domain.GitHubCommentKey(domain.GitHubReviewComment, 11),
-				DetailsJSON: `{"in_reply_to":10}`,
-			},
-			replaced: `{"in_reply_to":12}`,
-		},
 	}
+
+	t.Run("Other_kinds_are_refused", func(t *testing.T) {
+		s, orgID, teamID := mk(t)
+		for _, kind := range []string{"branch", "issue", "comment", "message", ""} {
+			a := domain.Deliverable{
+				TeamID: teamID, Provider: domain.ProviderGitHub, Kind: kind, Scope: TestGitHubHost,
+				Target: "octo/api", ExternalID: "refs/heads/feat", State: "pushed",
+				DedupKey: "git:branch:repo-octo-api:refs/heads/feat",
+			}
+			if _, err := s.Deliverables.Upsert(ctx, orgID, a); !errors.Is(err, db.ErrDeliverableKind) {
+				t.Errorf("Upsert(kind %q): err = %v, want ErrDeliverableKind", kind, err)
+			}
+			if _, err := s.Deliverables.UpsertSystem(ctx, orgID, a); !errors.Is(err, db.ErrDeliverableKind) {
+				t.Errorf("UpsertSystem(kind %q): err = %v, want ErrDeliverableKind", kind, err)
+			}
+			if _, err := s.Deliverables.InsertDeliverableIfAbsentSystem(ctx, orgID, a); !errors.Is(err, db.ErrDeliverableKind) {
+				t.Errorf("InsertDeliverableIfAbsentSystem(kind %q): err = %v, want ErrDeliverableKind", kind, err)
+			}
+		}
+	})
 
 	for _, door := range []struct {
 		name   string

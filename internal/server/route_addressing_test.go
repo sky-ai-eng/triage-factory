@@ -31,9 +31,9 @@ func TestMovedRoutes_OldPathsAreGone(t *testing.T) {
 	// were still mounted would answer for them rather than 404 on the lookup.
 	conversationID := seedSteerConversation(t, s.db, "moved", dbtest.SeedConcluded)
 	deliverable := seedConversationDeliverable(t, s, conversationID, domain.Deliverable{
-		Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindComment,
-		Target: "octo/repo#1", State: domain.DeliverableStateCommentPosted,
-		DedupKey: domain.GitHubCommentKey(domain.GitHubIssueComment, 1),
+		Provider: domain.ProviderGitHub, Kind: domain.DeliverableKindPullRequest,
+		Target: "octo/repo#1", State: domain.DeliverableStatePROpen,
+		DedupKey: domain.PullRequestDedupKey("PR_1"),
 	})
 
 	for _, c := range []struct{ method, path string }{

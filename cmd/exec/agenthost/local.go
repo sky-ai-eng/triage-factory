@@ -122,7 +122,7 @@ func NewLocal(stores db.Stores, info ConversationInfo) *LocalClient {
 
 // SetGitHubCredential records which GitHub credential this client's writes act
 // under, for the audit rows it builds — and on the runtime beneath it, which
-// owns the branch-push row a deliverable upsert composes.
+// builds the branch-push row (RecordBranchPush).
 //
 // Injected late on the executor, for the same reason the relay server's proxy
 // coordinates are: the classification lives in the sealed bundle, which does
@@ -823,77 +823,38 @@ func (c *LocalClient) footer(kind string) string {
 	return agentmeta.Build(kind, c.info.RunURL)
 }
 
-// --- deliverables ---
+// --- deliverables and branch pushes ---
 
-// UpsertDeliverable stamps the run identity onto the caller's polymorphic deliverable
-// and upserts it, composing the branch-push external action into the same write
-// (TFAC-483). Routes through the runtime — directRuntime does the event-vs-manual
-// pool/tx branch in-process; relayRuntime relays it as one op so the tx stays
-// orchestrator-side. Returns the stored row. See TFAC-460.
-//
-// This client is the deliverable's observer, so it reads what GitHub calls the
-// deliverable's repository and pull request (targetIdentity) with its own
-// credential, and the runtime keys a branch on the registry row GitHub's
-// repository id names. It is the door the local-mode pre-push hook records a
-// push through, in process or over the agent socket. A caller that read the
-// identity already passes it to UpsertDeliverableFor instead.
-func (c *LocalClient) UpsertDeliverable(ctx context.Context, a domain.Deliverable) (domain.Deliverable, error) {
-	return c.UpsertDeliverableFor(ctx, a, c.targetIdentity(ctx, a.Target))
-}
-
-// UpsertDeliverableFor is UpsertDeliverable with github, the identity the
-// deliverable's observer read (the git proxy's push capture reads its
-// repository's id where it holds the credential, and relays it). A branch
-// whose identity names no registry row the run may record against is not
-// recorded, as the runtime handles a deliverable write that fails: the loss is
-// the relayed record's when there is one, and the push still leaves its
-// ledger row.
-func (c *LocalClient) UpsertDeliverableFor(ctx context.Context, a domain.Deliverable, github domain.GitHubIdentity) (domain.Deliverable, error) {
-	if a.Kind == domain.DeliverableKindBranch {
-		// Keyed by the runtime, never by its caller: in a sandbox the caller
-		// is the jail's pre-push hook.
-		a.DedupKey = ""
-	}
-	a = c.hostAnchorBranchURL(ctx, a, github.Repository)
+// upsertDeliverable records a, a review draft this client composed, through the
+// runtime — directRuntime does the event-vs-manual pool/tx branch in-process;
+// relayRuntime relays it as one op so the tx stays orchestrator-side. github is
+// what GitHub answers for the draft's pull request, which the runtime links the
+// draft's entity by. Returns the stored row.
+func (c *LocalClient) upsertDeliverable(ctx context.Context, a domain.Deliverable, github domain.GitHubIdentity) (domain.Deliverable, error) {
 	return c.rt.UpsertDeliverable(ctx, a, github)
 }
 
-// hostAnchorBranchURL re-anchors a branch deliverable's web URL to the org's own
-// GitHub host — github.com, a GHES host, or a GHEC data-residency host. A branch
-// deliverable's URL is synthesized where the host isn't knowable (the sandbox
-// pre-push hook holds no credentials; the domain constructor has no org
-// context), so it is composed against github.com and corrected here. This is the
-// one host-side choke point every branch write funnels through — the local
-// mode hook's in-process client and the multi-mode git-proxy push recorder both
-// upsert through this LocalClient — and it holds the credential resolver, so the
-// link is fixed before the row is written.
-//
-// Branch is the only deliverable kind with a synthesized URL: a PR carries GitHub's
-// own html_url and a review's link is resolved server-side, so both already name
-// the right host and pass through untouched. A base-resolve failure drops the
-// synthesized URL (the link goes; the record does not) rather than keep one on
-// a host nobody resolved, and a non-branch ref leaves the URL as-is rather
-// than clobber it. repository is the owner/repo GitHub answered with the
-// repository's id, which the link takes when the observer read it, so a push
-// spelled under an old name links to where the branch is now.
-func (c *LocalClient) hostAnchorBranchURL(ctx context.Context, a domain.Deliverable, repository string) domain.Deliverable {
-	if a.Kind != domain.DeliverableKindBranch {
-		return a
+// RecordBranchPush records the branch_pushed ledger row for one pushed ref.
+// This client is the push's observer, so it reads what GitHub calls the pushed
+// repository (targetIdentity) with its own credential, and the runtime keys the
+// row on the registry row GitHub's repository id names. It is the door the
+// local-mode pre-push hook records a push through, in process or over the agent
+// socket. A ref that is not a branch records nothing, and is not read for.
+// Best-effort: the runtime logs and counts a recording failure, so the error
+// is always nil here; an IPC client's reports a request it could not deliver.
+func (c *LocalClient) RecordBranchPush(ctx context.Context, repo, ref, sha string, created bool) error {
+	if !domain.IsBranchPush(repo, ref) {
+		return nil
 	}
-	base, err := c.githubResolver().BaseURLFor(ctx, c.info.OrgID)
-	if err != nil {
-		agenthostLog.Warn("resolve github base for branch URL failed; recording no link",
-			"conversation", c.info.ConversationID, "target", a.Target, "ref", a.ExternalID, "error", err)
-		a.URL = ""
-		return a
-	}
-	if repository == "" {
-		repository = a.Target
-	}
-	if u, ok := domain.BranchDeliverableWebURL(base, repository, a.ExternalID); ok {
-		a.URL = u
-	}
-	return a
+	c.RecordBranchPushFor(ctx, repo, ref, sha, created, c.targetIdentity(ctx, repo))
+	return nil
+}
+
+// RecordBranchPushFor is RecordBranchPush with github, the identity the push's
+// observer read: the git proxy's push capture reads its repository's id where
+// it holds the credential, and relays it.
+func (c *LocalClient) RecordBranchPushFor(ctx context.Context, repo, ref, sha string, created bool, github domain.GitHubIdentity) {
+	c.rt.RecordBranchPush(ctx, BranchPush{Repo: repo, Ref: ref, SHA: sha, Created: created}, github)
 }
 
 // githubPullAnchorURL is the web link to an anchor on a pull request on the
@@ -1091,7 +1052,7 @@ func (c *LocalClient) JiraTransitionTo(ctx context.Context, key, status string) 
 	if err := client.TransitionTo(ctx, key, jiraclient.Status{Name: status}); err != nil {
 		return err
 	}
-	c.recordJiraIssue(ctx, client, key, domain.ActionIssueTransitioned, domain.DeliverableStateIssueUpdated, status, deliverableDetailsJSON(map[string]any{"status": status}))
+	c.recordJiraIssue(ctx, client, key, domain.ActionIssueTransitioned, status, actionDetailJSON(map[string]any{"status": status}))
 	return nil
 }
 
@@ -1131,8 +1092,8 @@ func (c *LocalClient) JiraAssign(ctx context.Context, key, userID string) (_ jir
 	if err != nil {
 		return jiraclient.User{}, err
 	}
-	c.recordJiraIssue(ctx, client, key, domain.ActionIssueAssigned, domain.DeliverableStateIssueUpdated, "",
-		deliverableDetailsJSON(map[string]any{"assignee": map[string]any{"id": user.ID, "name": user.DisplayName}}))
+	c.recordJiraIssue(ctx, client, key, domain.ActionIssueAssigned, "",
+		actionDetailJSON(map[string]any{"assignee": map[string]any{"id": user.ID, "name": user.DisplayName}}))
 	return user, nil
 }
 
@@ -1145,7 +1106,7 @@ func (c *LocalClient) JiraUnassign(ctx context.Context, key string) (err error) 
 	if err := client.Unassign(ctx, key); err != nil {
 		return err
 	}
-	c.recordJiraIssue(ctx, client, key, domain.ActionIssueUpdated, domain.DeliverableStateIssueUpdated, "", deliverableDetailsJSON(map[string]any{"assignee": nil}))
+	c.recordJiraIssue(ctx, client, key, domain.ActionIssueUpdated, "", actionDetailJSON(map[string]any{"assignee": nil}))
 	return nil
 }
 
@@ -1177,7 +1138,7 @@ func (c *LocalClient) JiraCreateIssue(ctx context.Context, project, issueType, s
 	default:
 		ref = back
 	}
-	c.recordJiraIssueRef(ctx, ref, created.Key, domain.ActionIssueCreated, domain.DeliverableStateIssueCreated, "", "")
+	c.recordJiraIssueRef(ctx, ref, created.Key, domain.ActionIssueCreated, "", "")
 	return created.Key, nil
 }
 
@@ -1190,7 +1151,7 @@ func (c *LocalClient) JiraUpdateIssue(ctx context.Context, key string, fields ji
 	if err := client.UpdateIssue(ctx, key, fields); err != nil {
 		return err
 	}
-	c.recordJiraIssue(ctx, client, key, domain.ActionIssueUpdated, domain.DeliverableStateIssueUpdated, "", deliverableDetailsJSON(map[string]any{"fields": updatedFieldNames(fields)}))
+	c.recordJiraIssue(ctx, client, key, domain.ActionIssueUpdated, "", actionDetailJSON(map[string]any{"fields": updatedFieldNames(fields)}))
 	return nil
 }
 
@@ -1203,7 +1164,7 @@ func (c *LocalClient) JiraSetParent(ctx context.Context, key, parentKey string) 
 	if err := client.SetParent(ctx, key, parentKey); err != nil {
 		return err
 	}
-	c.recordJiraIssue(ctx, client, key, domain.ActionIssueUpdated, domain.DeliverableStateIssueUpdated, "", deliverableDetailsJSON(map[string]any{"parent": parentKey}))
+	c.recordJiraIssue(ctx, client, key, domain.ActionIssueUpdated, "", actionDetailJSON(map[string]any{"parent": parentKey}))
 	return nil
 }
 
@@ -1243,7 +1204,7 @@ func (c *LocalClient) JiraSetPriority(ctx context.Context, key, priority string)
 	if err := client.SetPriority(ctx, key, priority); err != nil {
 		return err
 	}
-	c.recordJiraIssue(ctx, client, key, domain.ActionIssueUpdated, domain.DeliverableStateIssueUpdated, "", deliverableDetailsJSON(map[string]any{"priority": priority}))
+	c.recordJiraIssue(ctx, client, key, domain.ActionIssueUpdated, "", actionDetailJSON(map[string]any{"priority": priority}))
 	return nil
 }
 
@@ -1287,9 +1248,9 @@ func (c *LocalClient) JiraListIssueTypes(ctx context.Context, project string) (_
 	return client.ListIssueTypes(ctx, project)
 }
 
-// --- jira deliverable recording (TFAC-459) ---
+// --- jira recording ---
 //
-// Record one durable `deliverables` row per successful Jira mutation the agent
+// Record one external-action ledger row per successful Jira mutation the agent
 // performs, attributed to this run. Jira writes are not preview-gated — they
 // execute immediately — so this is straight record-on-success: the call above
 // already took effect, and recording is best-effort, never able to fail or
@@ -1317,137 +1278,103 @@ func (c *LocalClient) JiraListIssueTypes(ctx context.Context, project string) (_
 func (c *LocalClient) resolveJiraIssue(ctx context.Context, client *jiraclient.Client, key string) jiraclient.IssueRef {
 	ref, err := client.GetIssueRef(ctx, key)
 	if err != nil || ref.ID == "" || ref.Key == "" {
-		agenthostLog.Warn("could not read back the jira issue a write named; recording the action without a deliverable",
+		agenthostLog.Warn("could not read back the jira issue a write named; recording the action naming no object",
 			"conversation", c.info.ConversationID, "issue", key, "error", err)
 		return jiraclient.IssueRef{}
 	}
 	return ref
 }
 
-// jiraIssueResource is the dedup-key resource every deliverable on the issue is
+// jiraIssueResource is the object-key resource every object on the issue is
 // keyed under: the org's Jira site and the issue's id. "" when the site is
-// unreadable, which leaves the deliverable nothing stable to key on.
+// unreadable, which leaves nothing stable to key on.
 func (c *LocalClient) jiraIssueResource(ctx context.Context, issueID string) string {
 	site, _ := domain.JiraHost(c.jiraSiteBase(ctx))
 	return domain.JiraIssueResource(site, issueID)
 }
 
-// recordJiraIssue upserts the single deduped `issue` deliverable for the issue
-// key names. Every issue mutation (create / transition / assign / unassign /
-// update / set-parent / set-priority) collapses onto one row keyed on the
-// issue's site and id (domain.JiraIssueResource), never its key: the key
-// changes when the issue moves or its project's key is renamed, and the id
-// repeats across sites. target is the issue's current key and url its link,
-// both of which an entity rename moves; external_id is the issue id. The store
-// preserves target/url on empty either way — see DeliverableStore.Upsert. state +
-// details_json carry the most recent action — by design the row tracks the
-// last action, not the first (domain.Deliverable).
+// recordJiraIssue records the ledger row for an issue mutation (create /
+// transition / assign / unassign / update / set-parent / set-priority) on the
+// issue key names. Each row names the issue by its site and id
+// (domain.IssueObjectKey), never its key: the key changes when the issue moves
+// or its project's key is renamed, and the id repeats across sites. target is
+// the issue's current key and url its link; external_id is the issue id.
 // action is the audit discriminator (issue_created / issue_transitioned /
-// issue_assigned / issue_updated) — finer-grained than the deliverable's
-// created/updated state, which can't distinguish a transition from an assign from
-// a field edit. toState carries a transition's target status (the Jira status the
-// agent moved the ticket to), empty otherwise; the agent's exec transition can't
-// cheaply know the prior status, so no from-state is recorded.
-func (c *LocalClient) recordJiraIssue(ctx context.Context, client *jiraclient.Client, key, action, state, toState, detailsJSON string) {
-	c.recordJiraIssueRef(ctx, c.resolveJiraIssue(ctx, client, key), key, action, state, toState, detailsJSON)
+// issue_assigned / issue_updated). toState carries a transition's target status
+// (the Jira status the agent moved the ticket to), empty otherwise; the agent's
+// exec transition can't cheaply know the prior status, so no from-state is
+// recorded. detailsJSON is the concise detail (status / assignee / fields).
+func (c *LocalClient) recordJiraIssue(ctx context.Context, client *jiraclient.Client, key, action, toState, detailsJSON string) {
+	c.recordJiraIssueRef(ctx, c.resolveJiraIssue(ctx, client, key), key, action, toState, detailsJSON)
 }
 
 // recordJiraIssueRef is recordJiraIssue for an issue whose id and current key
 // are already known (ref), as a create's response gives them. A zero ref — the
-// read-back failed — records the action alone, against the key the verb named:
-// a deliverable keyed on the key could not be found again once the issue moved.
-func (c *LocalClient) recordJiraIssueRef(ctx context.Context, ref jiraclient.IssueRef, named, action, state, toState, detailsJSON string) {
-	dedupKey := ""
+// read-back failed — records the action against the key the verb named,
+// naming no object: a key could not identify the issue once it moved.
+func (c *LocalClient) recordJiraIssueRef(ctx context.Context, ref jiraclient.IssueRef, named, action, toState, detailsJSON string) {
+	act := &domain.ExternalAction{
+		Provider: domain.ProviderJira, Action: action, ToState: toState,
+		Credential: domain.CredentialJiraOrg, DetailJSON: detailsJSON,
+	}
+	objectKey := ""
 	if ref.ID != "" {
 		site, _ := domain.JiraHost(c.jiraSiteBase(ctx))
-		dedupKey = domain.IssueObjectKey(domain.ProviderJira, site, ref.ID)
+		objectKey = domain.IssueObjectKey(domain.ProviderJira, site, ref.ID)
 	}
-	if dedupKey == "" {
+	if objectKey == "" {
 		// Folded before it reaches the audit row's target, like every Jira key
 		// TF stores. See NormalizeJiraKey.
 		named = domain.NormalizeJiraKey(named)
 		if named == "" {
 			return
 		}
-		c.upsertJiraDeliverable(ctx, nil, &domain.ExternalAction{
-			Provider: domain.ProviderJira, Action: action, Target: named,
-			URL: c.jiraBrowseURL(ctx, named), ToState: toState,
-			Credential: domain.CredentialJiraOrg, DetailJSON: detailsJSON,
-		}, domain.EntityContainer{})
+		act.Target, act.URL = named, c.jiraBrowseURL(ctx, named)
+		c.recordJiraAction(ctx, act, domain.EntityContainer{})
 		return
 	}
-	key := domain.NormalizeJiraKey(ref.Key)
-	a := domain.Deliverable{
-		Kind:        domain.DeliverableKindIssue,
-		Target:      key,
-		ExternalID:  ref.ID,
-		URL:         c.jiraBrowseURL(ctx, key),
-		State:       state,
-		DedupKey:    dedupKey,
-		DetailsJSON: detailsJSON,
-	}
-	c.upsertJiraDeliverable(ctx, &a, jiraAction(a, action, "", toState), jiraContainer(ref.Project))
+	current := domain.NormalizeJiraKey(ref.Key)
+	act.Target, act.ExternalID, act.URL = current, ref.ID, c.jiraBrowseURL(ctx, current)
+	act.SetObject(domain.ObjectKindIssue, objectKey)
+	c.recordJiraAction(ctx, act, jiraContainer(ref.Project))
 }
 
-// recordJiraComment upserts a `comment` deliverable keyed on the issue's site and
-// id with the comment's id as its anchor (jira:comment:<site/issue id>:<comment
-// id>), so an entity rename moves its target with the issue's other deliverables.
-// A missing comment id (the POST landed but its body didn't parse) means
-// there's no stable key to dedup on, so recording is skipped — the comment
-// still posted; only its audit row is best-effort dropped. The skip is logged
-// at debug so a future Jira response-shape change surfaces as missing rows with
-// a breadcrumb, not silently. An issue whose id cannot be read back records
-// the action alone, as recordJiraIssueRef does.
+// recordJiraComment records the issue_comment_posted row for a comment on the
+// issue key names, naming the comment by the issue's site and id and the
+// comment's id (jira:comment:<site/issue id>:<comment id>). A missing comment
+// id (the POST landed but its body didn't parse), or an issue whose id cannot
+// be read back, records the row naming no object, against the key the verb
+// named when the issue was not read back.
 func (c *LocalClient) recordJiraComment(ctx context.Context, client *jiraclient.Client, key, commentID, body string) {
-	if commentID == "" {
-		agenthostLog.Debug("jira comment recorded without an id; skipping deliverable",
-			"conversation", c.info.ConversationID, "issue", key)
-		return
-	}
-	detail := deliverableDetailsJSON(map[string]any{"body": deliverableBodySnippet(body)})
 	ref := c.resolveJiraIssue(ctx, client, key)
 	resource := ""
 	if ref.ID != "" {
 		resource = c.jiraIssueResource(ctx, ref.ID)
 	}
-	if resource == "" {
-		named := domain.NormalizeJiraKey(key)
-		c.upsertJiraDeliverable(ctx, nil, &domain.ExternalAction{
-			Provider: domain.ProviderJira, Action: domain.ActionIssueCommentPosted, Target: named,
-			ExternalID: commentID, URL: c.jiraCommentURL(ctx, named, commentID),
-			Credential: domain.CredentialJiraOrg, DetailJSON: detail,
-		}, domain.EntityContainer{})
-		return
+	target, container := domain.NormalizeJiraKey(key), domain.EntityContainer{}
+	if resource != "" {
+		target, container = domain.NormalizeJiraKey(ref.Key), jiraContainer(ref.Project)
 	}
-	// Deduped on the issue and the comment id, so the key only rides along as
-	// the target — but that target is what the funnel resolves the comment's
-	// entity against.
-	current := domain.NormalizeJiraKey(ref.Key)
-	a := domain.Deliverable{
-		Kind:        domain.DeliverableKindComment,
-		Target:      current,
-		ExternalID:  commentID,
-		URL:         c.jiraCommentURL(ctx, current, commentID),
-		State:       domain.DeliverableStateCommentPosted,
-		DedupKey:    domain.ObjectKey(domain.ProviderJira, domain.DeliverableKindComment, resource, commentID),
-		DetailsJSON: detail,
+	act := &domain.ExternalAction{
+		Provider: domain.ProviderJira, Action: domain.ActionIssueCommentPosted, Target: target,
+		ExternalID: commentID, URL: c.jiraCommentURL(ctx, target, commentID),
+		Credential: domain.CredentialJiraOrg,
+		DetailJSON: actionDetailJSON(map[string]any{"body": actionBodySnippet(body)}),
 	}
-	c.upsertJiraDeliverable(ctx, &a, jiraAction(a, domain.ActionIssueCommentPosted, "", ""), jiraContainer(ref.Project))
+	if resource != "" && commentID != "" {
+		act.SetObject(domain.ObjectKindComment, domain.ObjectKey(domain.ProviderJira, domain.ObjectKindComment, resource, commentID))
+	}
+	c.recordJiraAction(ctx, act, container)
 }
 
-// upsertJiraDeliverable stamps the provider onto a and writes it best-effort via
-// the shared recording funnel (RecordExternalWrite, record.go): a recording
-// failure is logged and swallowed so it never fails the agent's already-
-// applied Jira action. act is the external-action audit row appended in the
-// SAME write as the deliverable (TFAC-483), under the org Jira service-account
-// credential. A nil a records the action alone. See upsertGithubDeliverable.
-// container is the project the touched issue sits in, which the funnel's
-// touch creates the issue's entity in.
-func (c *LocalClient) upsertJiraDeliverable(ctx context.Context, a *domain.Deliverable, act *domain.ExternalAction, container domain.EntityContainer) {
-	if a != nil {
-		a.Provider = domain.ProviderJira
-	}
-	c.rt.Record(ctx, a, act, container, domain.GitHubIdentity{})
+// recordJiraAction writes act, a Jira write's ledger row under the org Jira
+// service-account credential, best-effort via the shared recording funnel
+// (RecordExternalWrite, record.go): a recording failure is logged and swallowed
+// so it never fails the agent's already-applied Jira action. container is the
+// project the touched issue sits in, which the funnel's touch creates the
+// issue's entity in.
+func (c *LocalClient) recordJiraAction(ctx context.Context, act *domain.ExternalAction, container domain.EntityContainer) {
+	c.rt.Record(ctx, nil, act, container, domain.GitHubIdentity{})
 }
 
 // jiraContainer is what a Jira issue's entity is created in: the project a
@@ -1482,8 +1409,12 @@ func (c *LocalClient) jiraBrowseURL(ctx context.Context, key string) string {
 
 // jiraCommentURL builds a deep link to the comment —
 // {site}/browse/<KEY>?focusedCommentId=<id> — which both Cloud and Server/DC
-// honor. Empty when the site URL is unavailable.
+// honor, or the issue's link for a comment whose id is unknown. Empty when the
+// site URL is unavailable.
 func (c *LocalClient) jiraCommentURL(ctx context.Context, key, commentID string) string {
+	if commentID == "" {
+		return c.jiraBrowseURL(ctx, key)
+	}
 	base := c.jiraSiteBase(ctx)
 	if base == "" {
 		return ""
@@ -1506,11 +1437,11 @@ func validateUserID(tracker, lookup, userID string) error {
 	return nil
 }
 
-// deliverableDetailsJSON marshals a small kind-specific payload for a deliverable's
-// details_json. Returns "" (→ SQL NULL) on an empty map or a marshal error —
-// details are descriptive metadata, never load-bearing, so a failure here must
-// not break recording.
-func deliverableDetailsJSON(m map[string]any) string {
+// actionDetailJSON marshals a small action-specific payload for a ledger
+// row's detail_json. Returns "" (→ SQL NULL) on an empty map or a marshal
+// error — details are descriptive metadata, never load-bearing, so a failure
+// here must not break recording.
+func actionDetailJSON(m map[string]any) string {
 	if len(m) == 0 {
 		return ""
 	}
@@ -1522,7 +1453,7 @@ func deliverableDetailsJSON(m map[string]any) string {
 }
 
 // updatedFieldNames lists which issue fields an update touched, for the
-// deliverable's details_json — the names only, never the (potentially large)
+// ledger row's detail_json — the names only, never the (potentially large)
 // values. Order is stable so the recorded payload is deterministic.
 func updatedFieldNames(f jiraclient.UpdateIssueFields) []string {
 	names := []string{}
@@ -1547,9 +1478,9 @@ func updatedFieldNames(f jiraclient.UpdateIssueFields) []string {
 	return names
 }
 
-// deliverableBodySnippet trims a comment body to a short, stored-once reference for
-// the deliverable's details_json. Rune-aware so a multibyte char isn't split.
-func deliverableBodySnippet(body string) string {
+// actionBodySnippet trims a comment body to a short, stored-once reference for
+// the ledger row's detail_json. Rune-aware so a multibyte char isn't split.
+func actionBodySnippet(body string) string {
 	const max = 200
 	body = strings.TrimSpace(body)
 	r := []rune(body)
@@ -1589,10 +1520,10 @@ func (c *LocalClient) githubResolver() ghclient.Resolver {
 // GithubWebHostBase returns the org's user-facing GitHub host base (github.com,
 // a GHES host, or a GHEC data-residency host) for this run. The pre-push hook's
 // branch-capture gate uses it to decide whether a push's remote belongs to the
-// org's GitHub before recording a branch deliverable — local mode's only capture
-// point, where the hook holds this in-process client. Same resolution
-// (org_settings.github_base_url) hostAnchorBranchURL uses to anchor the
-// recorded branch link, so the gate and the corrected URL agree on the host.
+// org's GitHub before recording the push — local mode's only capture point,
+// where the hook holds this in-process client. Same setting
+// (org_settings.github_base_url) the recorded branch link is built on, so the
+// gate and the link agree on the host.
 func (c *LocalClient) GithubWebHostBase(ctx context.Context) (string, error) {
 	return c.githubResolver().BaseURLFor(ctx, c.info.OrgID)
 }
@@ -2039,7 +1970,7 @@ func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo
 		return "", err
 	}
 	a := domain.NewReviewDeliverable(owner+"/"+repo, number, pr.NodeID, commitSHA, c.info.ConversationID)
-	stored, err := c.UpsertDeliverableFor(ctx, a, pr)
+	stored, err := c.upsertDeliverable(ctx, a, pr)
 	if err != nil {
 		return "", fmt.Errorf("record review draft deliverable: %w", err)
 	}
@@ -2436,11 +2367,10 @@ func (c *LocalClient) GithubReplyToComment(ctx context.Context, owner, repo stri
 	if reply.HTMLURL == "" && reply.ID > 0 {
 		reply.HTMLURL = c.githubPullAnchorURL(ctx, owner, repo, number, fmt.Sprintf("discussion_r%d", reply.ID))
 	}
-	// A reply is its own comment, recorded under its own deliverable. Unlike a
-	// comment inside a review TF submitted, which belongs to that review's
-	// deliverable because the review was drafted and submitted as one object, a
-	// reply is posted on its own and usually into a thread on someone else's
-	// review, which TF holds no deliverable for.
+	// A reply is its own comment, recorded as a comment of its own. Unlike a
+	// comment inside a review TF submitted, which belongs to that review
+	// because the review was drafted and submitted as one object, a reply is
+	// posted on its own and usually into a thread on someone else's review.
 	c.recordGithubComment(ctx, owner, repo, number, reply, commentID, c.githubObject(ctx, client, owner, repo, number))
 	return reply.ID, nil
 }
@@ -2454,12 +2384,6 @@ func (c *LocalClient) GithubReactToComment(ctx context.Context, owner, repo stri
 	if err != nil {
 		return err
 	}
-	// A reaction produces no deliverable — there is no object to track the lifecycle
-	// of — so the audit log is the only place it can appear, exactly as for a
-	// review-thread reply. Its Slack sibling has recorded one all along; leaving
-	// this verb silent meant the same act was audited or not depending on which
-	// system it landed in.
-	//
 	// Target and ExternalID match what the same reaction records when it arrives
 	// as a raw REST call, so one act reads one way whichever channel carried it.
 	// The emoji is the one thing this path knows and that one does not: it lives
@@ -2508,7 +2432,8 @@ func (c *LocalClient) GithubDeleteComment(ctx context.Context, owner, repo strin
 	if err != nil {
 		return err
 	}
-	c.recordGithubCommentDelete(ctx, owner, repo, deleted, c.githubRepository(ctx, client, owner, repo))
+	c.recordGitHubAction(ctx, githubCommentAction(owner, repo, deleted, true, c.githubCredential()),
+		c.githubRepository(ctx, client, owner, repo))
 	return nil
 }
 
@@ -2528,64 +2453,45 @@ func (c *LocalClient) GithubDownloadArtifact(ctx context.Context, owner, repo, p
 	return client.DownloadArtifact(ctx, path, dst, maxBytes)
 }
 
-// --- github deliverable recording (TFAC-466) ---
+// --- github comment recording ---
 //
-// Record one durable `comment` deliverable per GitHub comment the agent posts via
-// `exec gh pr` — a conversation comment, or a review comment posted on its own
-// (a thread reply). Comments inside a review TF
-// submitted are the exception: they belong to that review's deliverable. Like the
-// Jira recording above this lives on the LocalClient, the single seam the multi
-// daemon dispatches every host-routed call through, so it covers both the
-// sandbox (daemon) and the local-mode CLI; and like it, recording is
-// best-effort and on-success-only — the comment already posted, so a store
-// failure is logged and swallowed, never able to fail the action.
+// Record the ledger row for each GitHub comment the agent posts, edits or
+// deletes via `exec gh pr` — a conversation comment, or a review comment posted
+// on its own (a thread reply). Comments inside a review TF submitted are the
+// exception: they belong to that review. Like the Jira recording above this
+// lives on the LocalClient, the single seam the multi daemon dispatches every
+// host-routed call through, so it covers both the sandbox (daemon) and the
+// local-mode CLI; and like it, recording is best-effort and on-success-only —
+// the comment already posted, so a store failure is logged and swallowed,
+// never able to fail the action.
 //
-// The row is keyed on the comment's space and number
-// (domain.GitHubCommentKey), so a comment posted through these verbs and
-// deleted through the raw gh channel, or the reverse, is one row. The post
-// stamps the full coordinates (target owner/repo#N, the comment's number and
-// node id, its html_url). An edit records only its audit row: the row stores no
-// body, so an edit has nothing on it to change. A delete retires the row to the
-// deleted state, and leaves no row for a comment TF did not post
-// (RecordExternalWrite).
+// Each row names the comment by its space and number (domain.GitHubCommentKey),
+// so a comment posted through these verbs and deleted through the raw gh
+// channel, or the reverse, is one object.
 
-// recordGithubComment upserts the `comment` deliverable for a comment this run
+// recordGithubComment records the comment_posted row for a comment this run
 // just posted, with every coordinate the post knows. inReplyTo is the review
 // comment a thread reply answers, 0 for a conversation comment, and github the
 // identity of the pull request or issue the comment is on. A zero id (a 2xx
-// whose body didn't parse) has no stable key to dedup on, so recording is
-// skipped with a debug breadcrumb — the comment still posted.
+// whose body didn't parse) names no comment, so the row records the post
+// naming no object.
 func (c *LocalClient) recordGithubComment(ctx context.Context, owner, repo string, number int, posted ghclient.CommentRef, inReplyTo int, github domain.GitHubIdentity) {
-	a := newGithubCommentDeliverable(posted, domain.DeliverableStateCommentPosted)
-	if a == nil {
-		agenthostLog.Debug("github comment recorded without an id; skipping deliverable",
-			"conversation", c.info.ConversationID, "repo", owner+"/"+repo, "pr", number)
-		return
+	act := &domain.ExternalAction{
+		Provider:   domain.ProviderGitHub,
+		Action:     domain.ActionCommentPosted,
+		Target:     fmt.Sprintf("%s/%s#%d", owner, repo, number),
+		URL:        posted.HTMLURL,
+		Credential: c.githubCredential(),
 	}
-	a.Provider = domain.ProviderGitHub
-	a.Target = fmt.Sprintf("%s/%s#%d", owner, repo, number)
-	act := githubAction(*a, domain.ActionCommentPosted, "", "", c.githubCredential())
+	if posted.ID > 0 {
+		act.ExternalID = strconv.Itoa(posted.ID)
+	}
 	act.SetObject(domain.ObjectKindComment, domain.GitHubCommentKey(posted.Space, int64(posted.ID)))
 	if inReplyTo > 0 {
 		detail, _ := json.Marshal(map[string]any{"in_reply_to": inReplyTo})
-		a.DetailsJSON = string(detail)
 		act.DetailJSON = string(detail)
 	}
-	c.upsertGithubDeliverable(ctx, *a, act, github)
-}
-
-// recordGithubCommentDelete retires the deliverable of the comment ref names to
-// the deleted state, beside the delete's audit row. The delete carries the
-// comment's number but not its PR number, so it leaves the row's target for the
-// store to preserve; github is the identity of its repository.
-func (c *LocalClient) recordGithubCommentDelete(ctx context.Context, owner, repo string, ref ghclient.CommentRef, github domain.GitHubIdentity) {
-	act := githubCommentAction(owner, repo, ref, true, c.githubCredential())
-	a := newGithubCommentDeliverable(ref, domain.DeliverableStateCommentDeleted)
-	if a == nil {
-		c.recordGitHubAction(ctx, act, github)
-		return
-	}
-	c.upsertGithubDeliverable(ctx, *a, act, github)
+	c.recordGitHubAction(ctx, act, github)
 }
 
 // githubCommentAction is the audit row for an edit or a delete of the comment
@@ -2602,38 +2508,24 @@ func githubCommentAction(owner, repo string, ref ghclient.CommentRef, deleted bo
 	case deleted:
 		action = domain.ActionCommentDeleted
 	}
-	a := domain.Deliverable{Target: owner + "/" + repo, URL: ref.HTMLURL}
-	if ref.ID > 0 {
-		a.ExternalID = strconv.Itoa(ref.ID)
+	act := &domain.ExternalAction{
+		Provider:   domain.ProviderGitHub,
+		Action:     action,
+		Target:     owner + "/" + repo,
+		URL:        ref.HTMLURL,
+		Credential: credential,
 	}
-	act := githubAction(a, action, "", "", credential)
+	if ref.ID > 0 {
+		act.ExternalID = strconv.Itoa(ref.ID)
+	}
 	act.SetObject(domain.ObjectKindComment, domain.GitHubCommentKey(ref.Space, int64(ref.ID)))
 	return act
-}
-
-// newGithubCommentDeliverable is the `comment` deliverable one act on the comment ref
-// names leaves, keyed on its space and number, carrying its node id and link
-// where the response gave them. nil when ref names no comment, which leaves
-// nothing to key the row on.
-func newGithubCommentDeliverable(ref ghclient.CommentRef, state string) *domain.Deliverable {
-	key := domain.GitHubCommentKey(ref.Space, int64(ref.ID))
-	if key == "" {
-		return nil
-	}
-	return &domain.Deliverable{
-		Kind:       domain.DeliverableKindComment,
-		ExternalID: strconv.Itoa(ref.ID),
-		NodeID:     ref.NodeID,
-		URL:        ref.HTMLURL,
-		State:      state,
-		DedupKey:   key,
-	}
 }
 
 // --- github PR deliverable recording ---
 //
 // Record the durable `pull_request` deliverable when the agent opens a draft PR via
-// `exec gh pr create`. Like the comment/Jira recording above this lives on the
+// `exec gh pr create`. Like the comment and Jira recording above this lives on the
 // LocalClient — the single seam the multi daemon dispatches every host-routed
 // GitHub call through (server.go's dispatch builds NewLocal) — so it covers both
 // the sandbox (daemon) and the local-mode CLI. Best-effort and on-success-only:
@@ -2676,14 +2568,14 @@ func (c *LocalClient) recordGithubPR(ctx context.Context, owner, repo, head, bas
 	c.upsertGithubDeliverable(ctx, a, act, github)
 }
 
-// upsertGithubDeliverable stamps the provider onto a and writes it best-effort via
-// the shared recording funnel (RecordExternalWrite, record.go): a recording
-// failure is logged and swallowed so it never fails the agent's already-
-// applied GitHub action. act is the external-action audit row to append in the
-// SAME write as the deliverable (the audit log of record, TFAC-483) — nil when
-// this upsert carries no distinct external action (a review reuse that
-// re-records the deliverable without a new GitHub write). github is what
-// GitHub answered for the write's objects (githubObject).
+// upsertGithubDeliverable stamps the provider onto a, a pull request or review
+// deliverable, and writes it best-effort via the shared recording funnel
+// (RecordExternalWrite, record.go): a recording failure is logged and
+// swallowed so it never fails the agent's already-applied GitHub action. act
+// is the external-action audit row to append in the SAME write as the
+// deliverable (the audit log of record) — nil when this upsert carries no
+// distinct external action. github is what GitHub answered for the write's
+// objects (githubObject).
 func (c *LocalClient) upsertGithubDeliverable(ctx context.Context, a domain.Deliverable, act *domain.ExternalAction, github domain.GitHubIdentity) {
 	a.Provider = domain.ProviderGitHub
 	c.rt.Record(ctx, &a, act, domain.EntityContainer{}, github)
@@ -2691,8 +2583,9 @@ func (c *LocalClient) upsertGithubDeliverable(ctx context.Context, a domain.Deli
 
 // --- external-action recording (TFAC-483) ---
 //
-// The bot funnels compose an append-only external_actions row alongside the
-// deliverable upsert (the audit log of record for every org-credential write). The
+// The bot funnels append an external_actions row for every write, beside the
+// deliverable upsert of a pull request or review (the audit log of record for
+// every org-credential write). The
 // credential is the org GitHub App / org Jira service account / Slack bot
 // token by construction — exec resolves the org's system credential, never a
 // user's own — so every bot write qualifies. conversation_id is this conversation, actor_user_id
@@ -2704,9 +2597,9 @@ func (c *LocalClient) upsertGithubDeliverable(ctx context.Context, a domain.Deli
 // c.rt.Record, so the write hits db.Stores in-process (all/local) or relays to
 // the orchestrator (sidecar) without this file threading stores by hand.
 
-// recordBotAction records one STANDALONE external-action audit row for a bot
-// write that produces no deliverable to compose with — a review-thread reply, a
-// Slack reaction. Routes through the shared recording funnel
+// recordBotAction records one external-action audit row for a bot write that
+// produces no deliverable to compose with — every write but a pull request
+// create and a review. Routes through the shared recording funnel
 // (RecordExternalWrite, record.go) with a nil deliverable; best-effort like every
 // other funnel here.
 func (c *LocalClient) recordBotAction(ctx context.Context, act *domain.ExternalAction) {
@@ -2982,11 +2875,24 @@ func ghFallbackWriteAction(obs ghwrite.Observation, credential string) *domain.E
 	}
 }
 
+// RecordGHChannelWrite records one write the real-`gh` channel forwarded: its
+// audit row (GHChannelWriteAction), every attempt included, so an edit, a
+// merge, a close and a refusal are all in the log, through the shared funnel.
+//
+// Exported because local mode records it without a LocalClient in hand (the
+// delegate holds stores + ConversationInfo), while the sandbox path reaches it
+// through LocalClient.RecordGHChannelWrite on the side that holds the stores:
+// one function, so a write recorded from either mode leaves the same row.
+// credential is the tier the injector attached upstream, and obs.Identity what
+// GitHub answered it for the write's objects, which the row is linked by.
+// Best-effort.
+func RecordGHChannelWrite(ctx context.Context, stores db.Stores, info ConversationInfo, obs ghwrite.Observation, credential string) {
+	recordExternalWrite(ctx, stores, info, nil, GHChannelWriteAction(obs, credential), domain.EntityContainer{}, obs.Identity)
+}
+
 // RecordGHChannelWrite records one write the agent made through the real-`gh`
-// channel: its audit row, every attempt included, so an edit, a merge, a close
-// and a refusal are all in the log, and the comment deliverable a comment write
-// leaves. Host-side only: the injector that observes it runs outside the jail,
-// and this side holds the stores the node id lookup reads. Best-effort.
+// channel (RecordGHChannelWrite). Host-side only: the injector that observes it
+// runs outside the jail. Best-effort.
 func (c *LocalClient) RecordGHChannelWrite(ctx context.Context, obs ghwrite.Observation) {
 	RecordGHChannelWrite(ctx, c.stores, c.info, obs, c.githubCredential())
 }
@@ -3061,9 +2967,8 @@ func (c *LocalClient) RecordGHWriteDenied(ctx context.Context, req ghwrite.Reque
 // row for a branch push the upstream refused (a non-2xx receive-pack response,
 // or a ref its report-status refused inside a 2xx — observed by the git
 // proxy's outcome capture). The audit log records every attempted external
-// write, success or failure; the branch DELIVERABLE is deliberately not written
-// here — deliverables track only work that landed, and the proxy wiring only
-// upserts one for a ref that landed. The detail carries the report's reason
+// write, success or failure; a branch_pushed row is written only for a ref
+// that landed (RecordBranchPushFor). The detail carries the report's reason
 // and the remote's message when the response had them: that is where GitHub
 // says which rule refused the push. Host-side only (not on the Client
 // interface): like RecordGitDenied, the observer runs on the host, never in
@@ -3115,83 +3020,6 @@ func githubAction(a domain.Deliverable, action, from, to, credential string) *do
 		ToState:    to,
 		Credential: credential,
 	}
-}
-
-// jiraAction builds the external-action row for a Jira write, carrying the
-// deliverable's concise details (status / assignee / fields / comment snippet) into
-// the audit detail_json. Its object is the issue or comment the deliverable is,
-// under the deliverable's key (issueObject).
-func jiraAction(a domain.Deliverable, action, from, to string) *domain.ExternalAction {
-	act := &domain.ExternalAction{
-		Provider:   domain.ProviderJira,
-		Action:     action,
-		Target:     a.Target,
-		ExternalID: a.ExternalID,
-		URL:        a.URL,
-		FromState:  from,
-		ToState:    to,
-		Credential: domain.CredentialJiraOrg,
-		DetailJSON: a.DetailsJSON,
-	}
-	act.SetObject(issueObject(a))
-	return act
-}
-
-// issueObject names the object a Jira or Linear issue or comment deliverable
-// is: its kind and its dedup key, which is the object's key
-// (jira:issue:<site/issue id>, jira:comment:<site/issue id>:<comment id>, and
-// their Linear twins on the issue's UUID). Nothing for any other kind.
-func issueObject(a domain.Deliverable) (kind, key string) {
-	switch a.Kind {
-	case domain.DeliverableKindIssue:
-		return domain.ObjectKindIssue, a.DedupKey
-	case domain.DeliverableKindComment:
-		return domain.ObjectKindComment, a.DedupKey
-	}
-	return "", ""
-}
-
-// branchPushActionInfo builds the ActionBranchPushed row for a branch deliverable,
-// or nil for any other kind. The row is about the repository the deliverable's key
-// names (domain.BranchDeliverableRepositoryID), so the key must be one the writer
-// built: directRuntime.UpsertDeliverable keys a branch on its registry row
-// (keyBranch) before building this, discarding the key it arrived with, and
-// both observers of one push name the same row. The dedup key is deterministic —
-// branch:<conversationID>:<repository>:<ref>:<sha> (domain.BranchPushDedupKey) —
-// so the git pre-push hook and the git-proxy backstop, which both observe the
-// same push, collapse to one row; a force-push (new sha) is recorded
-// distinctly, and so is the same ref and sha pushed to another repository. A
-// branch with no registry row is keyed on the name it was recorded under. The
-// push lands on GitHub under whichever org credential the conversation's git
-// path carries, which is why the caller supplies it. Free-function form (the
-// counterpart of the LocalClient method) so the direct runtime — which owns
-// UpsertDeliverable but holds no LocalClient — can build it from a
-// ConversationInfo directly.
-func branchPushActionInfo(a domain.Deliverable, info ConversationInfo, credential string) *domain.ExternalAction {
-	if a.Kind != domain.DeliverableKindBranch {
-		return nil
-	}
-	sha := domain.ParseBranchDeliverableSHA(a.DetailsJSON)
-	repositoryID, _ := domain.BranchDeliverableRepositoryID(a)
-	repository := repositoryID
-	if repository == "" {
-		repository = a.Target
-	}
-	act := &domain.ExternalAction{
-		Provider:     domain.ProviderGitHub,
-		Action:       domain.ActionBranchPushed,
-		Target:       a.Target,
-		RepositoryID: repositoryID,
-		ExternalID:   a.ExternalID, // the ref (refs/heads/...)
-		URL:          a.URL,
-		ToState:      domain.DeliverableStateBranchPushed,
-		Credential:   credential,
-		DedupKey:     domain.BranchPushDedupKey(info.ConversationID, repository, a.ExternalID, sha),
-		DetailJSON:   a.DetailsJSON, // {"sha":...,"new":...}
-	}
-	act.SetObject(domain.ObjectKindBranch, a.ExternalID)
-	stampActionIdentityInfo(act, info)
-	return act
 }
 
 // --- extensions ---

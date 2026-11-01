@@ -22,7 +22,7 @@ func TestUpstreamForMethod(t *testing.T) {
 		methodLookupConversation:      upstreamNone,
 		methodGetTask:                 upstreamNone,
 		methodCreateWorkspaceCheckout: upstreamNone,
-		methodUpsertDeliverable:       upstreamNone,
+		methodRecordBranchPush:        upstreamNone,
 	}
 	for method, want := range cases {
 		if got := upstreamForMethod(method); got != want {

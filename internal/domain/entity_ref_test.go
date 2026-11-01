@@ -108,7 +108,7 @@ func TestEntityRefForExternal(t *testing.T) {
 			// PR-shaped target under an unmapped provider — proves the skip is
 			// on the provider (default arm), not the target shape.
 			name:     "unmapped provider skipped",
-			provider: ProviderGit, target: "octo/repo#9",
+			provider: ProviderNetwork, target: "octo/repo#9",
 		},
 	}
 

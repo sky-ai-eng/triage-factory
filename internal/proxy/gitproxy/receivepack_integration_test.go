@@ -145,7 +145,7 @@ func wantBasicXAccessToken(token string) string {
 }
 
 // TestReceivePackBackstop_RecordsNonDeleteRefs is the core assertion: a push
-// transiting the proxy records a branch deliverable per non-delete ref (a delete
+// transiting the proxy reports a push per non-delete ref (a delete
 // is dropped; a tag is forwarded — the branch filter is downstream), and the
 // upstream still receives the body byte-for-byte with the injected credential.
 func TestReceivePackBackstop_RecordsNonDeleteRefs(t *testing.T) {

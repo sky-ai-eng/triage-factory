@@ -1017,12 +1017,11 @@ func TestInjector_BufferRequestOverCapKeepsTheStrongerPromise(t *testing.T) {
 	}
 }
 
-// TestInjector_CreatedCommentNodeIDIsReadBack pins the comment read the
-// injector makes of its own: a comment created without its node id in the
-// response is read back once, with the run's real credential, and the node id
-// rides the observation. A read that fails or names another comment leaves the
-// id empty and the write reported, and no other write reads a comment.
-func TestInjector_CreatedCommentNodeIDIsReadBack(t *testing.T) {
+// TestInjector_CreatedCommentIsNotReadBack pins that the injector makes no
+// read of a comment a write created: the comment is reported with the node id
+// its response carried, or none, and only the write's pull request and
+// repository are read.
+func TestInjector_CreatedCommentIsNotReadBack(t *testing.T) {
 	const commentURL = "https://github.com/acme/widgets/pull/841#issuecomment-7"
 	addComment := graphQLEnvelope(t,
 		`mutation CommentCreate($input:AddCommentInput!){addComment(input:$input){commentEdge{node{url}}}}`,
@@ -1035,38 +1034,12 @@ func TestInjector_CreatedCommentNodeIDIsReadBack(t *testing.T) {
 		name     string
 		body     string
 		response string
-		readBack func(w http.ResponseWriter)
-		wantRead bool
 		wantNode string
 	}{
 		{
 			name:     "a comment created without its node id",
 			body:     addComment,
 			response: `{"data":{"addComment":{"commentEdge":{"node":{"url":"` + commentURL + `"}}}}}`,
-			readBack: func(w http.ResponseWriter) {
-				_, _ = w.Write([]byte(`{"id":7,"node_id":"IC_kwReadBack","html_url":"` + commentURL + `"}`))
-			},
-			wantRead: true,
-			wantNode: "IC_kwReadBack",
-		},
-		{
-			name:     "a read-back that fails",
-			body:     addComment,
-			response: `{"data":{"addComment":{"commentEdge":{"node":{"url":"` + commentURL + `"}}}}}`,
-			readBack: func(w http.ResponseWriter) {
-				w.WriteHeader(http.StatusNotFound)
-				_, _ = w.Write([]byte(`{"message":"Not Found"}`))
-			},
-			wantRead: true,
-		},
-		{
-			name:     "a read-back naming another comment",
-			body:     addComment,
-			response: `{"data":{"addComment":{"commentEdge":{"node":{"url":"` + commentURL + `"}}}}}`,
-			readBack: func(w http.ResponseWriter) {
-				_, _ = w.Write([]byte(`{"id":8,"node_id":"IC_kwOther"}`))
-			},
-			wantRead: true,
 		},
 		{
 			name:     "a comment created with its node id",
@@ -1088,22 +1061,16 @@ func TestInjector_CreatedCommentNodeIDIsReadBack(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var reads []string
-			var readAuth string
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				if r.Method == http.MethodGet && !strings.Contains(r.URL.Path, "/comments/") {
+				if r.Method == http.MethodGet {
 					// The identity reads of the write's pull request and
 					// repository, which TestInjector_AcceptedWriteCarriesItsIdentity
-					// covers.
-					w.WriteHeader(http.StatusNotFound)
-					return
-				}
-				if r.Method == http.MethodGet {
-					reads = append(reads, r.URL.Path)
-					readAuth = r.Header.Get("Authorization")
-					if tc.readBack != nil {
-						tc.readBack(w)
+					// covers, answer nothing; a comment read is recorded.
+					if strings.Contains(r.URL.Path, "/comments/") {
+						reads = append(reads, r.URL.Path)
 					}
+					w.WriteHeader(http.StatusNotFound)
 					return
 				}
 				_, _ = w.Write([]byte(tc.response))
@@ -1128,13 +1095,8 @@ func TestInjector_CreatedCommentNodeIDIsReadBack(t *testing.T) {
 			case <-time.After(2 * time.Second):
 				t.Fatal("no write audit")
 			}
-			switch {
-			case tc.wantRead && (len(reads) != 1 || reads[0] != "/repos/acme/widgets/issues/comments/7"):
-				t.Errorf("reads = %q, want the one read of comment 7", reads)
-			case tc.wantRead && readAuth != "token ghs_realtoken":
-				t.Errorf("read-back authorization = %q, want the run's real credential", readAuth)
-			case !tc.wantRead && len(reads) != 0:
-				t.Errorf("reads = %q, want none", reads)
+			if len(reads) != 0 {
+				t.Errorf("comment reads = %q, want none", reads)
 			}
 		})
 	}

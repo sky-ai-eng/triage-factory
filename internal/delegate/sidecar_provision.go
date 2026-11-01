@@ -557,7 +557,7 @@ func (s *Spawner) relayCredentialRefreshes(subject string, getter credBundleGett
 // the sandbox (the sidecar's StartRunProxies sets PushCaptureProxy), so the
 // proxy's relayed capture is the ONLY path a branch push reaches the audit log
 // — the same gitPushRecorder the in-process (all/local) backstop uses, so both
-// modes land the identical branch deliverable / push-failed row.
+// modes land the identical branch_pushed / branch_push_failed row.
 //
 // auditHost is the caller's — not built here — because the run's acting GitHub
 // credential is not known until the sidecar reports it, and the caller is the
@@ -574,7 +574,7 @@ func (s *Spawner) managedGitGate(info agenthost.ConversationInfo, stores db.Stor
 	// operation the agent performed. Same reason the permission handler
 	// captures at construction.
 	engagement := s.engagementSpanContext(info.ConversationID)
-	recordPush := gitPushRecorder(auditHost, info)
+	recordPush := gitPushRecorder(auditHost)
 	return &agentproc.GitProxyConfig{
 		Authorize: func(ctx context.Context, owner, repo string) (gitproxy.Decision, error) {
 			// The push gate is synchronous in front of the agent's git — a

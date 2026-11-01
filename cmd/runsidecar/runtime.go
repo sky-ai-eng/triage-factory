@@ -1141,7 +1141,7 @@ func (r *credRuntime) gitProxyConfig(upstream, apiUpstream string) *agentproc.Gi
 		},
 		RecordPush: func(ctx context.Context, push gitproxy.PushedRef) {
 			// Relay the completed push up so the orchestrator records the
-			// branch deliverable / push-failed row. The pre-push hook stands down
+			// branch_pushed / branch_push_failed row. The pre-push hook stands down
 			// in this sandbox (StartRunProxies sets PushCaptureProxy), so this
 			// relay is the sole push-capture path on the executor — without it
 			// no executor push reaches the audit log.

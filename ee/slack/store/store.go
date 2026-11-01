@@ -402,17 +402,12 @@ type ChannelRegistryStore interface {
 	//     thread's original, which carries its tasks, conversations, memory
 	//     and kind, stays active, and the newer is closed
 	//     (ChannelMove.Superseded) and keeps what it collected. A Slack
-	//     deliverable's dedup key names the registry row, so the keys naming the
-	//     absorbed row are rewritten to name the channel's; a key the
-	//     channel's row already holds for the same message is left as it is;
+	//     message's object key in the audit ledger names the registry row, so
+	//     the keys naming the absorbed row are rewritten to name the
+	//     channel's;
 	//   - the key and permalink of each of the channel's thread entities,
 	//     which spell the channel's Slack id. A thread is found by its
 	//     channel's row and root ts, so these are display values;
-	//   - the Slack deliverables naming the channel: the target, which takes the
-	//     key of the thread entity the deliverable is about (deliverables.entity_id)
-	//     and, on a deliverable linked to none, moves by the channel id it
-	//     spells, and the permalink. The dedup key names the channel's row
-	//     and the message's ts, which the move leaves alone;
 	//   - external_actions.current_url, the audit ledger's pointer, for
 	//     actions whose link points into the channel: those about one of its
 	//     thread entities (external_actions.entity_id) and those linked to no
