@@ -154,6 +154,7 @@ type notificationItemWire struct {
 		Confirm      string `json:"confirm"`
 		Allowed      *bool  `json:"allowed"`
 	} `json:"actions"`
+	Sent      bool `json:"sent"`
 	Read      bool `json:"read"`
 	Dismissed bool `json:"dismissed"`
 }
@@ -242,6 +243,9 @@ func TestNotificationList_Item(t *testing.T) {
 	}
 	if it.Read || it.Dismissed {
 		t.Errorf("a fresh row reads read=%v dismissed=%v", it.Read, it.Dismissed)
+	}
+	if !it.Sent {
+		t.Error("an inbox row reads as not sent")
 	}
 	if len(it.Actions) != 2 {
 		t.Fatalf("actions = %+v, want the link and the invoke", it.Actions)

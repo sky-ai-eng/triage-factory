@@ -455,6 +455,18 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 		if want := []string{urgent.ID, team.ID, mine.ID}; total != 3 || !slices.Equal(ids(items), want) {
 			t.Fatalf("inbox = %v (total %d); want %v in order", ids(items), total, want)
 		}
+		for _, v := range items {
+			if !v.Sent {
+				t.Errorf("inbox row %s reads as not sent", v.ID)
+			}
+		}
+		// The archived team's row is one the viewer may read and is not sent.
+		if v := get(t, f, archived.ID); v == nil || v.Sent {
+			t.Errorf("archived team's row = %+v; want it readable and not sent", v)
+		}
+		if v := get(t, f, team.ID); v == nil || !v.Sent {
+			t.Errorf("team row = %+v; want it sent", v)
+		}
 		if _, err := setMarks(t, f, urgent.ID, db.NotificationMarksPatch{Read: &yes}); err != nil {
 			t.Fatal(err)
 		}
@@ -481,6 +493,17 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 			items, total, err = s.ListForOrg(ctx, f.OrgID, f.Viewer, db.NotificationOrgListFilter{TeamIDIn: []string{f.ArchivedTeam}}, db.ListOpts{Limit: 50})
 			if err != nil || total != 1 || items[0].ID != archived.ID {
 				t.Errorf("ListForOrg team_id_in = %v, %v; want the archived team's row", ids(items), err)
+			} else if items[0].Sent {
+				t.Errorf("ListForOrg: the archived team's row reads as sent")
+			}
+			items, _, err = s.ListForOrg(ctx, f.OrgID, f.Viewer, db.NotificationOrgListFilter{}, db.ListOpts{Limit: 50})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, v := range items {
+				if v.Sent != (v.ID != archived.ID) {
+					t.Errorf("ListForOrg row %s sent = %v", v.ID, v.Sent)
+				}
 			}
 			counted, countTotal, err := s.ListForViewer(ctx, f.OrgID, f.Viewer, db.NotificationListFilter{}, db.ListOpts{CountOnly: true})
 			if err != nil {

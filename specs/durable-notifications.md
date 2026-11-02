@@ -276,7 +276,7 @@ The inbox is viewer-relative, so it lives under `/api/me` and answers for the or
 | `PATCH /api/me/notifications/{id}`                    | The caller's marks: `{"read": bool, "dismissed": bool}`. Absent keeps a mark; `false` (or `null`) clears it. Answers the item as the caller now sees it.                                                                                         |
 | `POST /api/me/notifications/mark-read`                | `{"ids": [...]}` — the rows the client actually rendered, so a row that arrived after rendering is not marked. Multi-row transition, hence a verb route. Answers `{"ids": [...]}`, the ids it marked; one the caller cannot read is left out.   |
 | `POST /api/me/notifications/{id}/actions/{action_id}` | Run a declared invoke action. No body. 403 when the caller lacks the action's permission; 404 for an unknown action id or an unreadable row; 409 once the condition has resolved; a handler's own refusal (`*httpx.Fault`) with its status. Answers `{"notification": item, "outcome": "…"}`: what the action did, in a sentence, and the item as the caller now sees it, `null` when the row has since left what they may read. |
-| `POST /api/orgs/{org_id}/notifications/list`          | Org admins: every notification in the org, team rows included (the "All teams" view). Same filters plus `team_id_in`. Items carry the caller's marks.                                                                                           |
+| `POST /api/orgs/{org_id}/notifications/list`          | Org admins: every notification in the org, team rows included (the "All teams" view). Same filters plus `team_id_in`. Items carry the caller's marks, and `sent: false` on a row the caller is not sent.                                          |
 
 The badge is `status=open, dismissed=false, unread=true, priority_in=[urgent, high], page_size=0`. The banner is `status=open, dismissed=false, priority_in=[urgent]`.
 
@@ -316,9 +316,12 @@ An item:
     }
   ],
   "read": false,
-  "dismissed": false
+  "dismissed": false,
+  "sent": true
 }
 ```
+
+`sent` is whether the caller is in the row's audience. Every inbox row is sent; on the All-teams list and the single read, a team's row an org admin may read without being sent it is `false`.
 
 ### Actions
 

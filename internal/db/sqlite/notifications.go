@@ -41,7 +41,7 @@ var (
 
 	sqliteNotificationViewCols = strings.ReplaceAll(sqliteNotificationColsTmpl, "{p}", "n.") + `,
 	m.notification_id, m.user_id, m.org_id, m.read_at, m.dismissed_at,
-	` + db.NotificationReadSQL + `, ` + db.NotificationDismissedSQL
+	` + db.NotificationReadSQL + `, ` + db.NotificationDismissedSQL + `, ` + sqliteNotificationSent
 )
 
 const sqliteNotificationMarksCols = `notification_id, user_id, org_id, read_at, dismissed_at`
@@ -49,6 +49,12 @@ const sqliteNotificationMarksCols = `notification_id, user_id, org_id, read_at, 
 // sqliteNotificationReadable binds org, now, viewer.
 const sqliteNotificationReadable = `n.org_id = ? AND (n.expires_at IS NULL OR n.expires_at > ?)
 	AND (n.audience_scope <> 'user' OR n.user_id = ?)`
+
+// sqliteNotificationSent narrows a readable row to one the viewer is sent,
+// binding nothing. N=1: the one user is in every audience but an archived
+// team's.
+const sqliteNotificationSent = `(n.audience_scope <> 'team'
+	OR EXISTS (SELECT 1 FROM teams t WHERE t.id = n.team_id AND t.deleted_at IS NULL))`
 
 func (s *notificationStore) UpsertOpenSystem(ctx context.Context, o db.NotificationOccurrence) (db.NotificationUpsert, error) {
 	o, err := db.ValidateNotificationOccurrence(o)
@@ -319,10 +325,7 @@ func (s *notificationStore) ListForViewer(ctx context.Context, orgID, userID str
 	if err := f.Validate(); err != nil {
 		return nil, 0, err
 	}
-	// N=1: "is sent" is "may read" minus archived teams.
-	where, args, err := sqliteNotificationFilters(sqliteNotificationReadable+`
-		AND (n.audience_scope <> 'team'
-		     OR EXISTS (SELECT 1 FROM teams t WHERE t.id = n.team_id AND t.deleted_at IS NULL))`,
+	where, args, err := sqliteNotificationFilters(sqliteNotificationReadable+` AND `+sqliteNotificationSent,
 		[]any{orgID, time.Now().UTC(), userID}, f)
 	if err != nil {
 		return nil, 0, err
