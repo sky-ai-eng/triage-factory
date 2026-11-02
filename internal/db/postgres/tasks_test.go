@@ -65,6 +65,49 @@ func TestTaskStore_Postgres(t *testing.T) {
 	})
 }
 
+// TestTaskRuleOrder_Postgres runs the task-list rule-order suite against the
+// Postgres impl, both pools on AdminDB like the suite above.
+func TestTaskRuleOrder_Postgres(t *testing.T) {
+	h := pgtest.Shared(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+
+	dbtest.RunTaskRuleOrderConformance(t, func(t *testing.T) dbtest.TaskRuleOrderFixture {
+		t.Helper()
+		h.Reset(t)
+		orgID, userID, _ := seedPgOrgUserAgent(t, h)
+		return dbtest.TaskRuleOrderFixture{
+			Tasks:    stores.Tasks,
+			Handlers: stores.EventHandlers,
+			Teams:    stores.Teams,
+			OrgID:    orgID,
+			TeamID:   firstTeamForOrg(t, h, orgID),
+			SeedTask: func(t *testing.T, eventType string) string {
+				t.Helper()
+				_, _, taskID := seedPgTaskChainOfType(t, h.AdminDB, orgID, userID, "rule-order", eventType)
+				return taskID
+			},
+			HandlerID: shippedHandlerIDBySlug(h, orgID),
+			SeedTeam: func(t *testing.T) string {
+				t.Helper()
+				return pgtest.SeedTeam(t, h, orgID, "order-"+uuid.New().String()[:8])
+			},
+			SeedRule: func(t *testing.T, teamID, eventType string, sortOrder int) string {
+				t.Helper()
+				priority := 0.5
+				rule, err := stores.EventHandlers.Create(t.Context(), orgID, teamID, domain.EventHandler{
+					ID: uuid.New().String(), Kind: domain.EventHandlerKindRule,
+					EventType: eventType, Enabled: true,
+					Name: "rule " + teamID[:8], DefaultPriority: &priority, SortOrder: &sortOrder,
+				})
+				if err != nil {
+					t.Fatalf("seed rule on team %s: %v", teamID, err)
+				}
+				return rule.ID
+			},
+		}
+	})
+}
+
 // seedPgOrgUserAgent builds the (auth.user, public.user, org,
 // membership, default team, agent, team_agents-membership) graph the
 // claim methods FK into. Mirrors the shape ScoreStore tests use for
@@ -113,16 +156,18 @@ func seedPgOrgUserAgent(t *testing.T, h *pgtest.Harness) (orgID, userID, agentID
 // conformance harness can address them in subsequent calls.
 func seedPgTaskChain(t *testing.T, conn *sql.DB, orgID, userID, suffix string) (entityID, eventID, taskID string) {
 	t.Helper()
+	return seedPgTaskChainOfType(t, conn, orgID, userID, suffix, domain.EventGitHubPRCICheckFailed)
+}
+
+// seedPgTaskChainOfType is seedPgTaskChain with the event type named. It must
+// be in the seeded events_catalog, which events.event_type references.
+func seedPgTaskChainOfType(t *testing.T, conn *sql.DB, orgID, userID, suffix, eventType string) (entityID, eventID, taskID string) {
+	t.Helper()
 	now := time.Now().UTC()
 	entityID = uuid.New().String()
 	taskID = uuid.New().String()
 	eventID = uuid.New().String()
 	sourceID := fmt.Sprintf("octo/conformance-%s#%d", suffix, now.UnixNano())
-	// EventGitHubPRCICheckFailed is in the seeded events_catalog; using
-	// it keeps the catalog FK happy without re-seeding inline. The
-	// dashboard / "passed" variants are also catalogued in case future
-	// expansions of the conformance suite need them.
-	eventType := "github:pr:ci_check_failed"
 
 	repositoryID := dbseed.GitHubEntityRepository(t, conn, orgID, "https://github.com", sourceID)
 	if _, err := conn.Exec(`
