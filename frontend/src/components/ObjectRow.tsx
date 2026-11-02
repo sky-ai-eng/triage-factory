@@ -7,8 +7,9 @@ import { metaForObjectKind, rowTone } from './deliverableMeta'
 
 // ObjectRow renders one item of the activity feed's Objects lens: an object
 // the scope's runs changed, once however many runs changed it. It reads as
-// what the runs did — the kind glyph, the last action's verb, the target, and
-// how many runs when more than one did — and an object that is also a
+// what the runs did — the kind glyph, the last action's verb, the object's
+// name (a branch or a label followed by its repository, any other kind by its
+// target), and how many runs when more than one did — and an object that is also a
 // deliverable (a pull request, a posted review) is highlighted, carrying the
 // deliverable's state. Always a link-out when the object has a url.
 
@@ -16,7 +17,7 @@ export function ObjectRow({ object, note }: { object: ActivityObject; note?: Rea
   const kind = metaForObjectKind(object.object_kind)
   const action = metaForAction(object.last_action)
   const Icon = kind.icon
-  const subject = object.target || kind.label
+  const subject = object.name ? `${object.name} in ${object.target}` : object.target || kind.label
   const runs = object.run_count > 1 ? `${object.run_count} runs` : null
   const deliverable = object.deliverable
 
@@ -24,7 +25,15 @@ export function ObjectRow({ object, note }: { object: ActivityObject; note?: Rea
     <>
       <Icon size={13} className={`shrink-0 ${kind.text}`} aria-hidden />
       <VerbPill label={action.label} tone={action.tone} />
-      <span className="min-w-0 flex-1 truncate font-mono text-reported text-ink-2">{subject}</span>
+      <span className="min-w-0 flex-1 truncate font-mono text-reported text-ink-2">
+        {object.name ? (
+          <>
+            {object.name} <span className="text-ink-3">{object.target}</span>
+          </>
+        ) : (
+          subject
+        )}
+      </span>
       {runs && (
         <span
           className="shrink-0 font-mono text-label-sm tabular-nums text-ink-3"

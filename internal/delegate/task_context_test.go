@@ -492,6 +492,19 @@ func TestBuildTaskContext_ArtifactLinesRenderOldestFirst(t *testing.T) {
 	})
 }
 
+func TestBuildTaskContext_ABranchLineNamesTheBranchAndItsRepository(t *testing.T) {
+	// A branch's target is its repository, so two branches of one repository
+	// would read as the same line; the line names the branch first.
+	branch := artifactAt("branch|r1|refs/heads/tftest-multi-pages", domain.ObjectKindBranch, "sky-ai-eng/demo-repository", domain.ActionBranchPushed, "https://github.com/sky-ai-eng/demo-repository/tree/tftest-multi-pages", 5)
+	branch.ObjectKey = "refs/heads/tftest-multi-pages"
+
+	got := BuildTaskContext(domain.Task{}, "", "", "", []domain.Artifact{branch}, nil)
+
+	assertLinesInOrder(t, got, []string{
+		"- Artifact: branch tftest-multi-pages in sky-ai-eng/demo-repository — branch_pushed — https://github.com/sky-ai-eng/demo-repository/tree/tftest-multi-pages",
+	})
+}
+
 func TestBuildTaskContext_AMatchedDeliverableStatesWhereTheObjectStands(t *testing.T) {
 	// A pull request the task's runs opened is both an artifact (the run
 	// created it) and a deliverable (a person acts on it). It is one object, so
@@ -752,7 +765,7 @@ func TestTaskContext_AnObjectTwoConversationsChangedRendersOnce(t *testing.T) {
 
 	// Both pushes name one branch, so it is one line.
 	assertLinesInOrder(t, got, []string{
-		"- Artifact: branch octo/repo — branch_pushed — https://github.com/octo/repo/tree/fix",
+		"- Artifact: branch fix in octo/repo — branch_pushed — https://github.com/octo/repo/tree/fix",
 		"- Artifact: review octo/repo#7 — pending",
 	})
 }

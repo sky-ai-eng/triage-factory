@@ -440,7 +440,9 @@ export type ObjectKind =
 // artifactJSON): one object the conversation changed, however many
 // actions it took on it. It says what the run did (last_action, action_count),
 // not the object's current state. object_id is opaque and safe in a URL; it
-// is the value the actions list's object_id filter takes. deliverable is the
+// is the value the actions list's object_id filter takes. name is the object's
+// name within its repository (a branch, a label), with target then naming the
+// repository; '' for a kind target already names. deliverable is the
 // conversation's deliverable that is the same object, or null.
 export interface ConversationArtifact {
   object_id: string
@@ -448,6 +450,7 @@ export interface ConversationArtifact {
   provider: string
   scope: string
   target: string
+  name: string
   url: string
   entity_id?: string
   last_action: string
@@ -470,7 +473,9 @@ export interface ArtifactDeliverableRef {
 // scope's runs changed, however many runs and actions changed it
 // (POST …/usage/artifacts/list, internal/server objectActivityJSON). It says
 // what the runs did (last_action, action_count, run_count), not the object's
-// current state. deliverable is the most recently created deliverable in the
+// current state. name is the object's name within its repository (a branch, a
+// label), with target then naming the repository; '' for a kind target already
+// names. deliverable is the most recently created deliverable in the
 // scope that is the same object, or null. teams is present on the org feed
 // alone: the teams whose runs changed the object, sorted by id; a team whose
 // row is gone has an empty name.
@@ -479,6 +484,7 @@ export interface ActivityObject {
   object_kind: ObjectKind
   provider: string
   target: string
+  name: string
   url: string
   last_action: string
   action_count: number

@@ -410,13 +410,15 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 // /api/agent/conversations/{conversationID}/artifacts/list: an object the
 // conversation changed (domain.Artifact). Deliverable is the
 // conversation's deliverable that is the same object
-// (domain.ArtifactDeliverable), or null.
+// (domain.ArtifactDeliverable), or null. Name is the object's name within
+// its repository (domain.Artifact.Name), "" for a kind Target already names.
 type artifactJSON struct {
 	ObjectID    domain.ObjectRef               `json:"object_id"`
 	ObjectKind  string                         `json:"object_kind"`
 	Provider    string                         `json:"provider"`
 	Scope       string                         `json:"scope"`
 	Target      string                         `json:"target"`
+	Name        string                         `json:"name"`
 	URL         string                         `json:"url"`
 	EntityID    string                         `json:"entity_id,omitempty"`
 	LastAction  string                         `json:"last_action"`
@@ -433,6 +435,7 @@ func toArtifactJSON(a domain.Artifact, deliverables []domain.Deliverable) artifa
 		Provider:    a.Provider,
 		Scope:       a.Scope,
 		Target:      a.Target,
+		Name:        a.Name(),
 		URL:         a.URL,
 		EntityID:    a.EntityID,
 		LastAction:  a.LastAction,

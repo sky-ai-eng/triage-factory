@@ -21,6 +21,7 @@ const object = (over: Partial<ActivityObject>): ActivityObject => ({
   object_kind: 'pull_request',
   provider: 'github',
   target: 'org/repo#9',
+  name: '',
   url: 'https://example.test/9',
   last_action: 'pr_created',
   action_count: 1,
@@ -136,6 +137,29 @@ describe('ActivityFeed', () => {
     expect(pr?.textContent).toContain('merged')
     // The team feed is one team: no chips.
     expect(screen.queryByTitle('Platform')).not.toBeInTheDocument()
+  })
+
+  it('names two branches of one repository by their branches', async () => {
+    const branch = (name: string) =>
+      object({
+        object_id: `YnJhbmNo-${name}`,
+        object_kind: 'branch',
+        target: 'org/repo',
+        name,
+        url: `https://gh/tree/${name}`,
+        last_action: 'branch_pushed',
+      })
+    stubByLens([], [branch('fix-ci'), branch('add-docs')])
+
+    render(<ActivityFeed basePath="/api/teams/t1/usage" />)
+    fireEvent.click(screen.getByRole('tab', { name: /objects/i }))
+
+    const fix = await screen.findByRole('link', { name: /^branch fix-ci in org\/repo,/ })
+    const docs = screen.getByRole('link', { name: /^branch add-docs in org\/repo,/ })
+    expect(fix.getAttribute('href')).toBe('https://gh/tree/fix-ci')
+    expect(docs.getAttribute('href')).toBe('https://gh/tree/add-docs')
+    expect(fix.textContent).toContain('fix-ci org/repo')
+    expect(docs.textContent).toContain('add-docs org/repo')
   })
 
   it('renders an object once, as the later page read it, when that page serves it again', async () => {
