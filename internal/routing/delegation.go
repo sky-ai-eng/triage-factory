@@ -152,6 +152,11 @@ func (r *Router) tryAutoDelegateTrackingInjection(ctx context.Context, orgID str
 	// run committed and the owner unmoved. A refusal is otherwise not a
 	// rollback: the human wins the claim, the conversation still runs, and the
 	// firing worker's claim_changed guard keeps later firings off it.
+	//
+	// TODO(TFAC-1323): nothing between the handler match and this insert reads
+	// teams.deleted_at, so a team archived in between gets a run its archive
+	// never stops. The insert's transaction needs to lock the team row
+	// (FOR SHARE) and refuse an archived team.
 	if _, err := r.fireDelegate(ctx, orgID, task, trigger, triggeringEventID, agentID, claimStamp(agentID, actingTeamID), actingTeamID); err != nil {
 		// A replayed event (at-least-once queue) whose first blueprint run
 		// already committed hits the (event, trigger) fence and comes back
