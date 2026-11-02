@@ -71,8 +71,8 @@ func TestLinearTeamUnreadable_Postgres_StopTracking(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("untrack = %d: %s", rec.Code, rec.Body.String())
 	}
-	if it := decodeNotificationItem(t, rec.Body.Bytes()); it.ResolvedAt == nil {
-		t.Errorf("invoked row = %+v, want it resolved", it)
+	if ans := decodeNotificationAction(t, rec.Body.Bytes()); ans.Notification == nil || ans.Notification.ResolvedAt == nil {
+		t.Errorf("invoke answered %+v, want the row resolved", ans)
 	}
 	if got := fake.Calls(); got != before {
 		t.Errorf("Linear calls during the untrack = %d, want none", got-before)
@@ -179,8 +179,8 @@ func TestLinearTeamUnreadable_Postgres_StopTrackingRebuildsAfterAConcurrentSave(
 	if rec.Code != http.StatusOK {
 		t.Fatalf("untrack = %d: %s", rec.Code, rec.Body.String())
 	}
-	if it := decodeNotificationItem(t, rec.Body.Bytes()); it.ResolvedAt == nil {
-		t.Errorf("invoked row = %+v, want it resolved", it)
+	if ans := decodeNotificationAction(t, rec.Body.Bytes()); ans.Notification == nil || ans.Notification.ResolvedAt == nil {
+		t.Errorf("invoke answered %+v, want the row resolved", ans)
 	}
 	if got := fake.Calls(); got != before {
 		t.Errorf("Linear calls during the untrack = %d, want none", got-before)

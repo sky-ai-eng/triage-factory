@@ -53,7 +53,7 @@ func renderResolution(r Resolution, resolved func(Resolution) string) (out Examp
 	out.Resolution = r
 	defer func() {
 		if p := recover(); p != nil {
-			out.Text, out.Err = "", fmt.Errorf("Resolved panicked: %v", p)
+			out.Text, out.Err = "", fmt.Errorf("resolved panicked: %v", p)
 		}
 	}()
 	out.Text = resolved(r)

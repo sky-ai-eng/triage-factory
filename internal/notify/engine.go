@@ -289,7 +289,7 @@ func (e *engine) describe(ctx context.Context, tx db.NotificationStore, changed 
 func (e *engine) why(n domain.Notification, closedBy string) (text string, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			text, err = "", fmt.Errorf("Resolved panicked: %v", r)
+			text, err = "", fmt.Errorf("resolved panicked: %v", r)
 		}
 	}()
 	r := Resolution{Reason: n.ResolvedReason, Recipient: n.Audience, ClosedBy: closedBy}
@@ -314,7 +314,7 @@ func (e *engine) why(n domain.Notification, closedBy string) (text string, err e
 		text = k.resolved(p, r)
 	}
 	if strings.TrimSpace(text) == "" {
-		return "", errors.New("Resolved returned no text")
+		return "", errors.New("resolved returned no text")
 	}
 	return text, nil
 }
