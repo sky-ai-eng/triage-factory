@@ -69,8 +69,9 @@ func giveUpRecheck(n int) time.Duration {
 // pull request change (time.Since of the stored snapshot's ChangeSeenAt,
 // with a missing or unparseable stamp treated as changeRefreshWindow,
 // outside the window; a negative value, from a pod whose clock runs
-// ahead, is inside it). The caller computes both; tests pass them
-// directly.
+// ahead, is inside it, and sinceChangeSeen gives changeRefreshWindow for a
+// stamp more than a window ahead). The caller computes both; tests pass
+// them directly.
 //
 // Why this is safe in the common case:
 //
@@ -157,14 +158,21 @@ func formatChangeSeen(t time.Time) string {
 // read from the stored snapshot's ChangeSeenAt. A snapshot with no stamp
 // (stored before the field existed, or seeded quietly) or an unparseable one
 // gives changeRefreshWindow, outside the window, so the gate decides on its
-// other signals alone. A stamp ahead of now gives a negative duration, inside
-// the window.
+// other signals alone. A stamp ahead of now, from a pod whose clock runs
+// ahead, gives a negative duration, inside the window, unless it is more than
+// a window ahead. That is a clock that is wrong rather than fast, and since a
+// refresh that sees no change carries the stamp, honoring it would refresh the
+// pull request every cycle until it next changed; it counts as outside.
 func sinceChangeSeen(snap domain.PRSnapshot, now time.Time) time.Duration {
 	seen, err := time.Parse(time.RFC3339, snap.ChangeSeenAt)
 	if err != nil {
 		return changeRefreshWindow
 	}
-	return now.Sub(seen)
+	d := now.Sub(seen)
+	if d < -changeRefreshWindow {
+		return changeRefreshWindow
+	}
+	return d
 }
 
 // hasInFlightCI reports whether the snapshot contains any check_run

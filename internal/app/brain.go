@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"os"
 
 	"github.com/sky-ai-eng/triage-factory/internal/commitsigner"
 	"github.com/sky-ai-eng/triage-factory/internal/cred/credprovision"
@@ -96,11 +95,7 @@ func (a *App) startBrain(term int64) {
 	// still holds, and drops the ones that no longer do. Work an event started
 	// that is still going once a close has held for TF_CLOSE_HOLD_TIMEOUT is
 	// stopped. One sweeper across every org, like the workers above.
-	holdTimeout, herr := routing.ParseCloseHoldTimeout(os.Getenv("TF_CLOSE_HOLD_TIMEOUT"))
-	if herr != nil {
-		appLog.Warn("close hold timeout", "error", herr)
-	}
-	go a.router.RunCloseDeferralSweep(brainCtx, routing.DefaultCloseDeferralSweepInterval, holdTimeout)
+	go a.router.RunCloseDeferralSweep(brainCtx, routing.DefaultCloseDeferralSweepInterval, a.closeHoldTimeout)
 	// Terminal-state invariant checker: read-only. Counts the entities the
 	// poll's enforcement should have closed and did not — active with a
 	// terminal snapshot, past the grace, no close in flight — and the tasks

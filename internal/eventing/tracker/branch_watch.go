@@ -411,12 +411,21 @@ func (t *Tracker) overlapPaths(ctx context.Context, client *ghclient.Client, org
 			stale[key] = append(stale[key], pr)
 		}
 	}
+	var limits pathReadLimits
 	for _, key := range order {
-		if !t.readPRPaths(ctx, client, orgID, key.owner, key.repo, stale[key], out) {
+		t.readPRPaths(ctx, client, orgID, key.owner, key.repo, stale[key], out, &limits)
+		if limits.graphQL {
 			break
 		}
 	}
 	return out
+}
+
+// pathReadLimits is which of the path reads GitHub rate-limited this cycle.
+// GitHub meters GraphQL and REST separately, so a REST limit stops only the
+// reads of renamed files' previous paths.
+type pathReadLimits struct {
+	graphQL, rest bool
 }
 
 // readsPaths reports whether deciding c's move needs its pull requests'
@@ -427,10 +436,11 @@ func readsPaths(c baseCheck) bool {
 
 // readPRPaths reads prs' changed paths, up to ghclient.MaxChangedPathsBatch
 // per query, and the previous path of each renamed or copied file, adding
-// each pull request read to out and writing it back. It reports false once
-// GitHub rate-limited a read, after which nothing more is sent this cycle.
-// A pull request whose read failed is left out of out.
-func (t *Tracker) readPRPaths(ctx context.Context, client *ghclient.Client, orgID, owner, repo string, prs []basePR, out map[string]domain.PRPaths) bool {
+// each pull request read to out and writing it back. A rate limit is recorded
+// on limits, and nothing more is sent on what it limited this cycle. A pull
+// request whose read failed, or whose renamed files a REST limit left
+// unread, is left out of out.
+func (t *Tracker) readPRPaths(ctx context.Context, client *ghclient.Client, orgID, owner, repo string, prs []basePR, out map[string]domain.PRPaths, limits *pathReadLimits) {
 	var rl *ghclient.ErrRateLimited
 	for start := 0; start < len(prs); start += ghclient.MaxChangedPathsBatch {
 		chunk := prs[start:min(start+ghclient.MaxChangedPathsBatch, len(prs))]
@@ -444,7 +454,8 @@ func (t *Tracker) readPRPaths(ctx context.Context, client *ghclient.Client, orgI
 			trackerLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "branch watch: reading changed paths failed; their pull requests are probed",
 				"owner", owner, "repo", repo, "pull_requests", len(chunk), "error", err)
 			if errors.As(err, &rl) {
-				return false
+				limits.graphQL = true
+				return
 			}
 			recordBaseReadFailures(baseReadPaths, len(chunk))
 			continue
@@ -460,15 +471,19 @@ func (t *Tracker) readPRPaths(ctx context.Context, client *ghclient.Client, orgI
 				paths.Paths = []domain.ChangedPath{}
 			}
 			if hasRenameOrCopy(read.Paths) {
+				if limits.rest {
+					continue
+				}
 				previous, requests, err := client.PreviousPaths(ctx, owner, repo, domain.GitHubPRNumber(pr.entity.SourceID))
 				recordPathFetches(pathFetchRESTRenames, requests)
 				if err != nil {
 					trackerLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "branch watch: reading a pull request's renamed files failed; it is probed",
 						"source_id", pr.entity.SourceID, "error", err)
 					if errors.As(err, &rl) {
-						return false
+						limits.rest = true
+					} else {
+						recordBaseReadFailures(baseReadPaths, 1)
 					}
-					recordBaseReadFailures(baseReadPaths, 1)
 					continue
 				}
 				paths.Paths = withPrevious(paths.Paths, previous, &paths.Complete)
@@ -486,7 +501,6 @@ func (t *Tracker) readPRPaths(ctx context.Context, client *ghclient.Client, orgI
 			out[pr.entity.ID] = paths
 		}
 	}
-	return true
 }
 
 func hasRenameOrCopy(paths []domain.ChangedPath) bool {

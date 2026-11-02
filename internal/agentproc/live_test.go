@@ -27,6 +27,20 @@ func TestRunInteractive_RefusesMultiMode(t *testing.T) {
 	}
 }
 
+// TestRunInteractive_ALaunchThatFailsReportsTheOpeningUnsent: a launch that
+// never starts a process tells its caller the opening message was not sent,
+// so what it composed into the message can go back where it came from.
+func TestRunInteractive_ALaunchThatFailsReportsTheOpeningUnsent(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	unsent := false
+	if _, err := RunInteractive(context.Background(), RunOptions{Message: "hi", OnOpeningUnsent: func() { unsent = true }}, nil, nil); err == nil {
+		t.Fatal("RunInteractive() in multi mode succeeded, want the refusal")
+	}
+	if !unsent {
+		t.Error("the failed launch did not report its opening unsent")
+	}
+}
+
 // nopWriteCloser stands in for the wrapper's stdin pipe in unit tests
 // that don't spawn a subprocess.
 type nopWriteCloser struct{}

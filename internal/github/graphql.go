@@ -926,16 +926,18 @@ func (c *Client) PRMergeability(ctx context.Context, nodeIDs []string) (map[stri
 	}
 	out := make(map[string]MergeabilityRead, len(nodeIDs))
 	for i, n := range resp.Data.Nodes {
-		// A deleted or inaccessible id answers null, and a node of another
-		// type answers an object with none of the fields asked for.
-		if i >= len(nodeIDs) || n == nil || n.ID == "" || n.ID != nodeIDs[i] {
+		// nodes(ids:) answers in the order it was asked, so each node is the
+		// id at its position, whatever form of the id it reports. A deleted
+		// or inaccessible id answers null, and a node of another type answers
+		// an object with none of the fields asked for.
+		if i >= len(nodeIDs) || n == nil || n.ID == "" {
 			continue
 		}
 		mergeable := n.Mergeable
 		if mergeable != domain.MergeableMergeable && mergeable != domain.MergeableConflicting {
 			mergeable = domain.MergeableUnknown
 		}
-		out[n.ID] = MergeabilityRead{Mergeable: mergeable, HeadSHA: n.HeadRefOid, BaseRef: n.BaseRefName}
+		out[nodeIDs[i]] = MergeabilityRead{Mergeable: mergeable, HeadSHA: n.HeadRefOid, BaseRef: n.BaseRefName}
 	}
 	return out, nil
 }

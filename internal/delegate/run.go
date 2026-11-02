@@ -782,7 +782,9 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 // opening comes first, as a native engagement's does (mintOpeningRows): a
 // model that knows nothing reads what the task is before what happened to
 // it. They are flushed only once the turn's own rows are written, so a
-// refused write leaves them staged.
+// refused write leaves them staged, and opts.OnOpeningUnsent puts them back
+// on the queue if the message never reaches the agent; it is nil when no
+// note was flushed.
 func (s *Spawner) composeLaunchTurn(
 	ctx context.Context,
 	opts *agentproc.RunOptions,
@@ -798,7 +800,9 @@ func (s *Spawner) composeLaunchTurn(
 		}
 		opts.OpeningBlocks = nil
 		opts.Message = note
-		if notes := s.stagedInjectionsForEngagement(ctx, orgID, conversationID); notes != "" {
+		notes, unsent := s.stagedInjectionsForEngagement(ctx, orgID, conversationID)
+		opts.OnOpeningUnsent = unsent
+		if notes != "" {
 			opts.Message = notes + "\n\n" + note
 		}
 		return nil
@@ -807,7 +811,9 @@ func (s *Spawner) composeLaunchTurn(
 	if err != nil {
 		return err
 	}
-	if notes := s.stagedInjectionsForEngagement(ctx, orgID, conversationID); notes != "" {
+	notes, unsent := s.stagedInjectionsForEngagement(ctx, orgID, conversationID)
+	opts.OnOpeningUnsent = unsent
+	if notes != "" {
 		blocks = append(blocks, agentproc.ContentBlock{Type: "text", Text: notes})
 	}
 	opts.Message = ""

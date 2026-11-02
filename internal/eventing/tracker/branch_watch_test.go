@@ -56,7 +56,8 @@ type watchWorld struct {
 	// paths maps a node id to its PRChangedPaths node; a pull request with
 	// none answers that it changes nothing, at its head.
 	paths map[string]string
-	// previous maps a pull request number to its REST files listing.
+	// previous maps a pull request number to its REST files listing, or to
+	// "rate-limited".
 	previous map[int]string
 	// refReads, compareReads and pathReads record the watch's requests:
 	// each ref read, each compare's base...head, and each node id whose
@@ -165,6 +166,13 @@ func (w *watchWorld) serve(rw http.ResponseWriter, r *http.Request) {
 		body, ok := w.previous[n]
 		if !ok {
 			body = `[]`
+		}
+		if body == "rate-limited" {
+			rw.Header().Set("X-RateLimit-Resource", "core")
+			rw.Header().Set("X-RateLimit-Remaining", "0")
+			rw.Header().Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10))
+			http.Error(rw, `{"message":"API rate limit exceeded"}`, http.StatusForbidden)
+			return
 		}
 		_, _ = rw.Write([]byte(body))
 	default:
@@ -860,6 +868,23 @@ func TestBranchWatch_RenamesTakeTheirPreviousPathFromREST(t *testing.T) {
 	want := map[int]string{1: domain.MergeabilityProbeBaseMoved, 2: domain.MergeabilityProbeBaseMoved}
 	if got := w.cycle(); !mapsEqual(got, want) {
 		t.Errorf("admitted %v, want %v: PR_2 renamed the file the move changed", got, want)
+	}
+}
+
+// GitHub meters REST and GraphQL apart, so a REST rate limit on one pull
+// request's renamed files costs only that pull request its read: the others,
+// whose paths GraphQL already returned, are decided on them.
+func TestBranchWatch_ARESTRateLimitOnRenamesProbesOnlyThePullRequestsItLeftUnread(t *testing.T) {
+	w := newWatchWorld(t)
+	w.seenOnce()
+	w.set(func(w *watchWorld) {
+		w.paths["PR_1"] = pathsNode(1, "h1", domain.ChangedPath{Path: "src/new.go", Change: domain.PathRenamed})
+		w.previous[1] = "rate-limited"
+		w.compares["old...new"] = compareBody("ahead", 1, "", "other/z.go")
+	})
+	want := map[int]string{1: domain.MergeabilityProbeBaseMoved}
+	if got := w.cycle(); !mapsEqual(got, want) {
+		t.Errorf("admitted %v, want %v: only PR_1's paths went unread", got, want)
 	}
 }
 

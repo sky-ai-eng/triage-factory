@@ -41,6 +41,10 @@ type WorldStats struct {
 	// Conflicted is the node ids of the tracked pull requests the moves
 	// made CONFLICTING.
 	Conflicted []string
+	// Unread is how many tracked pull requests owe a read no probe made: a
+	// head push or an overlapping move made their answer stale, or their
+	// last read answered UNKNOWN, and nothing read them after.
+	Unread int
 }
 
 // repoWorld is one repository's base branch: its commits and its tip.
@@ -175,6 +179,13 @@ func (s *Server) Stats() WorldStats {
 	defer s.mu.Unlock()
 	st := s.world.stats
 	st.Conflicted = append([]string(nil), st.Conflicted...)
+	for ri := range s.ds.Repos {
+		for pi := range s.ds.Repos[ri].Listed() {
+			if p := s.world.prs[ri][pi]; p.pushed || p.overlapped || p.lastUnknown {
+				st.Unread++
+			}
+		}
+	}
 	return st
 }
 

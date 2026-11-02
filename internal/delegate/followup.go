@@ -879,14 +879,16 @@ func (s *Spawner) blueprintCalledOffNow(ctx context.Context, orgID string, conv 
 // front). Both are out-of-band <system-note> blocks, so their order relative to
 // each other is cosmetic. Returns "" (prepend nothing) when neither has anything
 // pending; a read failure in either source degrades to no block for that source,
-// never blocking the resume.
-func (s *Spawner) resumeSystemPrepends(ctx context.Context, orgID string, conv *domain.Conversation) string {
+// never blocking the resume. The callback is the staged injections' opening-unsent
+// return (stagedInjectionsForEngagement), nil when none were flushed.
+func (s *Spawner) resumeSystemPrepends(ctx context.Context, orgID string, conv *domain.Conversation) (string, func()) {
 	var prefix string
 	if block := s.deliverableLedgerForResume(ctx, orgID, conv); block != "" {
 		prefix = block + "\n\n"
 	}
-	if block := s.stagedInjectionsForEngagement(ctx, orgID, conv.ID); block != "" {
+	block, unsent := s.stagedInjectionsForEngagement(ctx, orgID, conv.ID)
+	if block != "" {
 		prefix = block + "\n\n" + prefix
 	}
-	return prefix
+	return prefix, unsent
 }

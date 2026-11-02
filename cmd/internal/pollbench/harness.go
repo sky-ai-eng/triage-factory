@@ -43,7 +43,19 @@ type RunConfig struct {
 	// MaxCycles bounds the cold-sync resume loop when a rate limit forces
 	// the sync across multiple cycles.
 	MaxCycles int
+
+	// PollInterval is the time each polled cycle stands for on the refresh
+	// gate's change window, which counts its 5 minutes on a clock that
+	// advances this much per cycle rather than on the wall clock. Cycles run
+	// back to back, so on the wall clock the window would hold every pull
+	// request changed in the last 5 minutes of the run, a count that depends
+	// on how fast the machine is. Zero is TF's default poll interval.
+	PollInterval time.Duration
 }
+
+// defaultPollInterval is TF's default GitHub poll interval, which the bench
+// models when RunConfig.PollInterval is zero.
+const defaultPollInterval = 5 * time.Minute
 
 // Scenario is what changes on GitHub at the start of each warm cycle, before
 // the poll: base moves, which change the moved repositories' listings as a
@@ -306,6 +318,15 @@ func Run(cfg RunConfig) (*Result, error) {
 		stores.Users, stores.Tasks, stores.Entities, stores.Repos, stores.Deliverables, stores.ExternalActions, stores.EventQueue, stores.PRMergeability, stores.Orgs,
 		stores.JiraStatusRules, stores.JiraProjects, stores.LinearTeamRules, stores.TeamGitHubGroups, stores.Secrets, stores.GitHubApps, stores.PollReadiness,
 		resolver, nil)
+	pollInterval := cfg.PollInterval
+	if pollInterval == 0 {
+		pollInterval = defaultPollInterval
+	}
+	// The change window's clock: real time at the start of the run, plus one
+	// poll interval for every polled cycle so far. Only the poll reads it.
+	changeEpoch := time.Now()
+	var polledCycles time.Duration
+	mgr.ChangeClock = func() time.Time { return changeEpoch.Add(polledCycles * pollInterval) }
 
 	// Poll-cycle errors surfaced via OnError are classified at capture: an
 	// ErrRateLimited on a run that configured a rate limit is the expected
@@ -361,6 +382,7 @@ func Run(cfg RunConfig) (*Result, error) {
 
 		start := time.Now()
 		if poll {
+			polledCycles++
 			mgr.PollGitHubOnce(ctx, orgID)
 		}
 		probeErr := work()
@@ -532,6 +554,13 @@ func Run(cfg RunConfig) (*Result, error) {
 	if n := res.Totals.TestMergesUnaccounted; n > 0 {
 		res.SanityErrors = append(res.SanityErrors,
 			fmt.Sprintf("%d test merge(s) not accounted for by a head push, an overlapping move, or a re-read after UNKNOWN", n))
+	}
+	// And every read a probe owed was made: by the end of the settle row, no
+	// tracked pull request a head push or an overlapping move made stale, or
+	// whose last read answered UNKNOWN, is still unread.
+	if n := res.World.Unread; n > 0 {
+		res.SanityErrors = append(res.SanityErrors,
+			fmt.Sprintf("%d tracked PR(s) a head push, an overlapping move, or an UNKNOWN answer left owing a read that no probe made", n))
 	}
 	if cfg.Server.RateLimit <= 0 && res.ColdCycles > 0 {
 		cold := res.Cycles[0]

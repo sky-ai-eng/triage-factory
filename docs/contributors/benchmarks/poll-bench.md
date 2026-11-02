@@ -120,6 +120,13 @@ flags (see `go run ./cmd/pollbench -h` for all):
 - `--conflict-on-overlap` — the chance a move makes a PR whose paths it
   overlaps conflicting, default 0.03 (1–3% was measured on real
   repositories).
+- `--poll-interval` — the poll interval each cycle stands for, default 5m
+  (TF's default). The refresh gate refreshes a PR every cycle for 5 minutes
+  after TF sees it change, and the bench counts those 5 minutes on a clock
+  that advances this much per cycle, since its cycles run back to back. At
+  5m the window adds no refresh; at 1m it adds four after each change. The
+  gate's 10-minute floor stays on the wall clock, so a run longer than
+  10 minutes refreshes PRs on it at cycles that depend on the machine.
 - `--seed` — dataset seed. Same seed + shape ⇒ identical request counts;
   only wall time varies.
 - `--check` — CI mode: runs twice and fails on any sanity violation or on
@@ -196,6 +203,9 @@ Each driven cycle is one row:
 - a `github:pr:conflicts` the dataset implies is not emitted exactly once,
   or one is emitted for a PR the dataset never made conflicting;
 - a test merge has no cause (above);
+- a read was owed and never made: by the end of the run, a tracked PR
+  whose head was pushed, whose paths a move overlapped, or whose last read
+  answered `UNKNOWN` has not been read since;
 - the cold cycle read more than one probe per tracked PR, or more than one
   ref per base branch (runs without `--rate-limit`);
 - any request reaches an endpoint the fake doesn't model (`other` > 0
@@ -280,41 +290,41 @@ times do not compare across the two sections.
 ### Test merges on `mono`
 
 `./scripts/poll-bench.sh --shape mono`: 100 warm cycles, a base move every
-2 cycles, 1% of the open PRs pushed every cycle. Of the 1,500 open PRs, TF
-tracks the 1,000 its listing returns.
+2 cycles, 1% of the open PRs pushed every cycle, each cycle standing for the
+default 5-minute poll interval. TF tracks all 1,500 open PRs.
 
 | | Count |
 | -- | -- |
 | Base moves | 50 |
-| Overlap set per move (mean) | 9.4 PRs, 0.9% of the tracked PRs |
-| Head pushes on tracked PRs | 984 |
-| Test merges | 1,950 |
-| … on an overlap-set PR after a base move | 466 |
-| … on a head-pushed PR | 984 |
-| … on a PR re-read after `UNKNOWN` | 500 |
+| Overlap set per move (mean) | 11.7 PRs, 0.8% of the tracked PRs |
+| Head pushes on tracked PRs | 1,500 |
+| Test merges | 2,823 |
+| … on an overlap-set PR after a base move | 581 |
+| … on a head-pushed PR | 1,500 |
+| … on a PR re-read after `UNKNOWN` | 742 |
 | … unaccounted (shortfall) | 0 |
-| Probing every tracked PR on every move, from base moves | 50,000 |
+| Probing every tracked PR on every move, from base moves | 75,000 |
 
-- Every test merge has a cause. Base moves cost 966 test merges (overlap
-  sets plus re-reads), against 50,000 if every tracked PR were probed on
-  every move.
+- Every test merge has a cause, and every read a probe owed was made. Base
+  moves cost 1,323 test merges (overlap sets plus re-reads), against 75,000
+  if every tracked PR were probed on every move.
 - The re-reads are about half of what base moves cost. A PR that answers
   `UNKNOWN` is read again in the next cycle, and since the bench drives
   cycles back to back, the next base move lands before that read half the
   time and makes the answer stale again. With a merge every 3 minutes and
   a re-read 30 seconds after the `UNKNOWN`, about 1 in 6 would.
-- The first move reads every tracked PR's paths: 63 `PRChangedPaths`
-  queries and 201 REST file-list pages for the PRs with a rename or copy,
-  which make that cycle 9.3 s at 30 ms per request, against about 1.1 s
-  for a cycle with no move. Later moves read only the PRs
-  pushed since the last one: 1 to 6 queries.
-- The warm cycles cost 1,644 REST requests (50 of them 304s), 365 GraphQL
-  requests and 547 points in all: 5.5 points a cycle. The listing changes
-  every cycle, so every cycle lists all 10 pages.
-- The cold cycle read 1,000 probes for 1,000 tracked PRs, no paths (a newly
+- The first move reads every tracked PR's paths: 82 `PRChangedPaths`
+  queries and 279 REST file-list pages for the PRs with a rename or copy,
+  which make that cycle 13.1 s at 30 ms per request, against a mean of
+  2.2 s for a cycle with no move. Later moves read only the PRs pushed
+  since the last one: 1 to 7 queries.
+- The warm cycles cost 2,399 REST requests (50 of them 304s), 400 GraphQL
+  requests and 700 points in all: 7.0 points a cycle. The listing changes
+  every cycle, so every cycle lists all 15 pages.
+- The cold cycle read 1,500 probes for 1,500 tracked PRs, no paths (a newly
   seen branch probes every PR without reading paths), and 1 ref for the 1
   base branch: one probe per PR, no path fetches, one ref read per base
-  branch. 310 points, 4.00 s.
+  branch. 108 requests, 465 points, 6.33 s.
 
 ### Warm cycles before and after
 
@@ -342,44 +352,10 @@ read per base branch and one `PRMergeability` query (1 point) per 100 PRs:
 | `stress` | before | 1,237 | 3,626 | 1m16s |
 | `stress` | after | 1,936 | 3,747 | 1m29s |
 
-### `mono` with all 1,500 PRs tracked
-
-Recorded 2026-11-01 on an Intel Xeon (4 vCPUs at 2.80 GHz, 15 GB) running
-Linux, seed 42, `./scripts/poll-bench.sh --shape mono`, after the open-PR
-listing's cap rose from 1,000 to 10,000 PRs. TF lists all 15 pages and
-tracks every open PR. Counts are exact; wall times do not compare with the
-sections above, which were recorded on other machines.
-
-| | Count |
-| -- | -- |
-| Base moves | 50 |
-| Overlap set per move (mean) | 11.4 PRs, 0.8% of the tracked PRs |
-| Head pushes on tracked PRs | 1,500 |
-| Test merges | 2,800 |
-| … on an overlap-set PR after a base move | 563 |
-| … on a head-pushed PR | 1,500 |
-| … on a PR re-read after `UNKNOWN` | 737 |
-| … unaccounted (shortfall) | 0 |
-| Probing every tracked PR on every move, from base moves | 75,000 |
-
-- Every test merge has a cause. Base moves cost 1,300 test merges (overlap
-  sets plus re-reads), against 75,000 if every tracked PR were probed on
-  every move.
-- The cold cycle read 1,500 probes for 1,500 tracked PRs, no paths, and 1
-  ref for the 1 base branch: 108 requests, 465 points, 13.6 s.
-- The first move read every tracked PR's paths: 82 `PRChangedPaths`
-  queries and 279 REST file-list pages, which made that cycle 16.0 s
-  against a mean of 4.7 s for a cycle with no move. Later moves read 1 to
-  7 queries.
-- The warm cycles cost 2,399 REST requests (50 of them 304s), 401 GraphQL
-  requests and 701 points in all: 7.0 points a cycle.
-- Against the 1,000-PR run above: test merges 1,950 → 2,800, warm-cycle
-  points 547 → 701, cold points 310 → 465.
-
 ## CI
 
-`.github/workflows/poll-bench.yml` runs `--shape smoke --check` on changes
-to the polling surface (poller, tracker, probe worker, GitHub client, the
-bench itself) and on pushes to main. It is deliberately not part of the
-PR-blocking `test.yml`; dispatch it manually for ad-hoc runs. `mono` is not
-run in CI.
+`.github/workflows/poll-bench.yml` runs `--shape smoke --check` and
+`--shape mono --warm-cycles 10 --check` (five base moves) on changes to the
+polling surface (poller, tracker, probe worker, GitHub client, the bench
+itself) and on pushes to main. It is deliberately not part of the
+PR-blocking `test.yml`; dispatch it manually for ad-hoc runs.

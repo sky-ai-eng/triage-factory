@@ -191,7 +191,9 @@ func (s *Spawner) runLiveAndDrive(ctx context.Context, spec liveRunSpec) liveOut
 		}
 	}
 	// The notes stageNoteAtToolBoundary armed ride the next tool batch.
-	spec.opts.OnToolBatch = func() string { return s.notesAtToolBatch(spec.park.orgID, spec.park.conversationID) }
+	spec.opts.OnToolBatch = func() agentproc.ToolBatchNotes {
+		return s.notesAtToolBatch(spec.park.orgID, spec.park.conversationID)
+	}
 	sink := newActivitySink(spec.sink, spec.mirror, s.activityFor(spec.park.conversationID), s.resolvedActivityTimings())
 
 	lr, err := agentproc.RunInteractive(ctx, spec.opts, sink, spec.perms)

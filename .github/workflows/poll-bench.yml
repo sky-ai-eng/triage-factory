@@ -1,14 +1,17 @@
 name: poll-bench
 
 # Regression tripwire for the GitHub polling path: runs the poll-scale
-# benchmark's smoke shape (20 repos, ~100 open PRs) against the in-process
-# fake GitHub API and fails on any sanity violation — event counts diverging
-# from the dataset's expected transitions, a github:pr:conflicts the dataset
-# implies not emitted exactly once, an incomplete cold sync, warm cycles
-# emitting events, a test merge no probe needed, more than one probe per PR
-# in the cold cycle, poll-cycle errors, requests to endpoints the fake
+# benchmark's smoke shape (20 repos, ~100 open PRs) and a short run of its
+# mono shape (1,500 PRs on one base branch that moves every other cycle)
+# against the in-process fake GitHub API, and fails on any sanity violation —
+# event counts diverging from the dataset's expected transitions, a
+# github:pr:conflicts the dataset implies not emitted exactly once, an
+# incomplete cold sync, warm cycles emitting events the scenario's changes do
+# not imply, a test merge no probe needed, a read a head push, an overlapping
+# base move or an UNKNOWN answer owed that no probe made, more than one probe
+# per PR in the cold cycle, poll-cycle errors, requests to endpoints the fake
 # doesn't model (the poll path's call set changed — update the fake), a warm
-# 304 hit rate under 100%, or request counts differing between
+# 304 hit rate under 100% (smoke), or request counts differing between
 # identically-seeded runs (determinism). See docs/contributors/benchmarks/poll-bench.md.
 #
 # Deliberately NOT part of the PR-blocking test.yml: it triggers only on
@@ -56,3 +59,8 @@ jobs:
       # bench twice and asserts determinism + sanity.
       - name: Poll bench (smoke shape)
         run: go run ./cmd/pollbench --shape smoke --latency 2ms --check
+
+      # The mono shape is the one whose base branch moves, so it is the run
+      # that exercises base-move probing. Ten warm cycles are five moves.
+      - name: Poll bench (mono shape, 10 warm cycles)
+        run: go run ./cmd/pollbench --shape mono --warm-cycles 10 --latency 2ms --check

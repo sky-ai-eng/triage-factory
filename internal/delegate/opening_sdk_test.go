@@ -272,6 +272,33 @@ func TestComposeLaunchTurn_StagedNotesRideTheLaunchTurn(t *testing.T) {
 	}
 }
 
+// TestComposeLaunchTurn_AnOpeningThatNeverReachedTheAgentReturnsItsNotes: the
+// launch's opening-unsent callback puts the notes it flushed into the opening
+// back on the queue, so the next engagement carries them.
+func TestComposeLaunchTurn_AnOpeningThatNeverReachedTheAgentReturnsItsNotes(t *testing.T) {
+	const convID = "r-sdk-unsent"
+	org := runmode.LocalDefaultOrgID
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, convID, "", "/tmp/wt-sdk-unsent")
+	claimID := markEngaged(t, database, convID)
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	sink := newConversationSink(s, org, convID, claimID, "event", runmode.LocalDefaultUserID)
+	ctx := context.Background()
+
+	stageOne(t, s, org, convID, domain.StagedInjectionProducerTaskClosing, "the task is resolved")
+	opening := agentproc.RunOptions{}
+	if err := s.composeLaunchTurn(ctx, &opening, sink, org, convID, runmode.LocalDefaultUserID, "", openingTestMemories(), openingTestTaskContext); err != nil {
+		t.Fatalf("the opening launch: %v", err)
+	}
+	if opening.OnOpeningUnsent == nil {
+		t.Fatal("an opening carrying a note has no opening-unsent callback")
+	}
+	opening.OnOpeningUnsent()
+	if got := pendingRows(t, s, convID); len(got) != 1 {
+		t.Errorf("undelivered rows = %d, want the note back on the queue: %+v", len(got), got)
+	}
+}
+
 // TestComposeLaunchTurn_ReclaimWithNoSessionResendsTheOpening is the other
 // crash re-claim: the session did not survive, so the SDK process starts on a
 // model that knows nothing and has to be sent the opening its predecessor was

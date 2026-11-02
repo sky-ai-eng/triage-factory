@@ -78,6 +78,27 @@ const withdrawProducerNotesSQL = `
 const withdrawProducerNotesForTaskSQL = withdrawProducerNotesSQL + `
 	   AND conversation_id IN (SELECT c.id FROM conversations c WHERE c.org_id = $1 AND c.task_id = $2)`
 
+func (s *stagedInjectionStore) RestorePendingSystem(ctx context.Context, orgID, conversationID string, ids []string) error {
+	rowIDs := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if n, err := strconv.ParseInt(id, 10, 64); err == nil {
+			rowIDs = append(rowIDs, n)
+		}
+	}
+	if len(rowIDs) == 0 {
+		return nil
+	}
+	if _, err := s.admin.ExecContext(ctx, `
+		UPDATE messages SET delivered = false
+		WHERE org_id = $1::uuid AND conversation_id = $2::uuid AND id = ANY($3::bigint[])
+		  AND delivered = true AND window_state = 'active'
+		  AND role = 'user' AND subtype = ANY($4::text[])
+	`, orgID, conversationID, rowIDs, domain.StagedInjectionSubtypes); err != nil {
+		return fmt.Errorf("restore staged injections: %w", err)
+	}
+	return nil
+}
+
 func (s *stagedInjectionStore) WithdrawPendingSystem(ctx context.Context, orgID, conversationID, producer string) error {
 	if _, err := s.admin.ExecContext(ctx, withdrawProducerNotesSQL+`
 	   AND conversation_id = $2`, orgID, conversationID, domain.StagedInjectionSubtypes, producer); err != nil {
@@ -110,8 +131,7 @@ func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id strin
 	if n, err := res.RowsAffected(); err != nil || n > 0 {
 		return false, err
 	}
-	// Nothing was withdrawn. delivered only ever flips to true, so reading it
-	// after the update cannot disagree with what stopped the update.
+	// Nothing was withdrawn: report whether a reader had flushed the row.
 	var consumed bool
 	err = s.admin.QueryRowContext(ctx, `
 		SELECT EXISTS (

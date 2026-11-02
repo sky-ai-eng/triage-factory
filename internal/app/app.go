@@ -75,6 +75,11 @@ type App struct {
 	// predicates; the executor exclusion test asserts against it.
 	plan subsystemPlan
 
+	// closeHoldTimeout is TF_CLOSE_HOLD_TIMEOUT, read in New on a
+	// brain-capable process: how long the close-hold sweep lets a held close
+	// wait on work an event started.
+	closeHoldTimeout time.Duration
+
 	// identity is this process's persistent instance identity — resolved
 	// first thing in New, held for the process lifetime via an
 	// exclusive file lock, released in Close. bootEpoch is the fleet
@@ -354,6 +359,11 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 	// before anything acquires a lock or opens a pool.
 	if err = checkModelCatalog(cfg.Version, errors.Join(modelcatalog.JoinError(), modelcatalog.SDKLoadError())); err != nil {
 		return nil, err
+	}
+	if a.plan.brain {
+		if a.closeHoldTimeout, err = routing.ParseCloseHoldTimeout(os.Getenv("TF_CLOSE_HOLD_TIMEOUT")); err != nil {
+			return nil, err
+		}
 	}
 	if a.plan.signsCommits {
 		if a.commitSigningBudgets, err = commitsigner.ParseBudgets(os.Getenv); err != nil {

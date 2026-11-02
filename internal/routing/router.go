@@ -171,8 +171,7 @@ type RouterDeps struct {
 	// Tasks is task lifecycle: dedup, claims, closes and the breaker. Required.
 	Tasks dbpkg.TaskStore
 	// Conversations finds a task's live conversation: the busy half of the
-	// task gate, and the conversation an additive event folds into. The
-	// close-hold sweep reads whether a task's conversations still work.
+	// task gate, and the conversation an additive event folds into.
 	// Required.
 	Conversations dbpkg.ConversationStore
 	// Entities is the closed-entity guard, the structural owner tier and the

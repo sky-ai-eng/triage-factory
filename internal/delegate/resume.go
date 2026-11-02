@@ -312,6 +312,11 @@ type ResumeOptions struct {
 	// mirror takes the final check at every exit the dispatcher owns, from a
 	// resume that never came up to the completion gate it hands the result to.
 	mirror *memoryMirror
+
+	// openingUnsent returns the staged notes the message carries to the
+	// queue if the message never reaches the agent
+	// (agentproc.RunOptions.OnOpeningUnsent); nil when it carries none.
+	openingUnsent func()
 }
 
 // ResumeOutcome bundles what ResumeWithMessage returns: the raw
@@ -458,11 +463,12 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 	defer func() { _ = localSbx.Close() }()
 
 	baseOpts := agentproc.RunOptions{
-		Cwd:            cwd,
-		Model:          model,
-		PermissionMode: s.resolveSDKPermissionMode(ctx, opts.TeamID),
-		SessionID:      sessionID,
-		Message:        message,
+		Cwd:             cwd,
+		Model:           model,
+		PermissionMode:  s.resolveSDKPermissionMode(ctx, opts.TeamID),
+		SessionID:       sessionID,
+		Message:         message,
+		OnOpeningUnsent: opts.openingUnsent,
 		// The append the launch gave this conversation, through the composer the
 		// launch used. The harness replays the session's own history but not the
 		// prompt that was appended to it, so a turn sent without this one wakes

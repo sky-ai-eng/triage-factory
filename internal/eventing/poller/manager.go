@@ -131,6 +131,10 @@ type Manager struct {
 	// tests observe cycle failures through it.
 	OnError func(source, orgID string, err error)
 
+	// ChangeClock, when set, keeps every tracker's refresh change window on
+	// it (tracker.Tracker.WithChangeClock); nil keeps it on time.Now.
+	ChangeClock func() time.Time
+
 	// connections persists each (org, source)'s connection state at the end
 	// of every cycle (see recordConnection). nil disables the write and the
 	// lost/restored log lines that come from it (tests that construct a
@@ -238,7 +242,8 @@ func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, ta
 // allocation is fine.
 func (m *Manager) trackerForOrg(orgID string) *tracker.Tracker {
 	return tracker.New(m.database, m.pub, m.tasks, m.entities, m.repos, m.jiraProjects, m.deliverables, m.externalActions, m.eventQueue, m.mergeability, orgID).
-		WithJiraDiscoveryStreaks(&m.jiraDiscovery)
+		WithJiraDiscoveryStreaks(&m.jiraDiscovery).
+		WithChangeClock(m.ChangeClock)
 }
 
 // sourceDisabled reports whether this cycle must not run, and the span outcome

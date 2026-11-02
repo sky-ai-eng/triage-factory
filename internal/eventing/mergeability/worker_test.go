@@ -15,6 +15,9 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	_ "modernc.org/sqlite"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -495,5 +498,47 @@ func TestWorker_AProbeWhoseLeaseLapsedOnItsLastReadIsDroppedNotParked(t *testing
 	r.drain(domain.MergeableConflicting)
 	if p := r.probes(pr.ID); len(p) != 1 || p[0].status != workitem.StatusDone || p[0].attempt != workkinds.PRMergeabilityMaxFailedReads+1 {
 		t.Errorf("probes = %+v, want the probe reclaimed and dropped, not parked", p)
+	}
+}
+
+// GitHub answers null for an id its credential cannot see, which is how a
+// credential that lost access to a repository answers. The probe is dropped
+// and counted, so the failing-probes alert sees a credential that stopped
+// seeing its pull requests.
+func TestWorker_AProbeGitHubFindsNoPullRequestForIsDroppedAndCounted(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	prev := stats.Swap(newInstruments(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
+	t.Cleanup(func() { stats.Store(prev) })
+
+	r := newRig(t)
+	pr := r.pullRequest("9")
+	r.admit(pr.ID, domain.MergeabilityProbeNew)
+	r.mu.Lock()
+	r.refuse = func(w http.ResponseWriter) {
+		_, _ = w.Write([]byte(`{"data":{"nodes":[null],"rateLimit":{"cost":1}}}`))
+	}
+	r.mu.Unlock()
+	r.drain(domain.MergeableConflicting)
+
+	if probes := r.probes(pr.ID); len(probes) != 1 || probes[0].status != workitem.StatusDone {
+		t.Errorf("probes = %+v, want the one probe done", probes)
+	}
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	dropped := map[string]int64{}
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if sum, ok := m.Data.(metricdata.Sum[int64]); ok && m.Name == "mergeability.dropped" {
+				for _, dp := range sum.DataPoints {
+					outcome, _ := dp.Attributes.Value(attribute.Key("outcome"))
+					dropped[outcome.AsString()] += dp.Value
+				}
+			}
+		}
+	}
+	if dropped[dropNotFound] != 1 {
+		t.Errorf("dropped = %v, want one %s", dropped, dropNotFound)
 	}
 }

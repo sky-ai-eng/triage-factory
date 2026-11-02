@@ -329,6 +329,9 @@ func TestWrapperToolBatchHookCarriesTheReply(t *testing.T) {
 	if _, err := w.stdin.Write(append(reply, '\n')); err != nil {
 		t.Fatalf("write tool_batch_reply: %v", err)
 	}
+	if res := w.next(); res["subtype"] != "tool_batch_result" || res["id"] != id || res["delivered"] != true {
+		t.Errorf("after the reply the wrapper said %v, want a tool_batch_result delivered to %s", res, id)
+	}
 	out := w.next()
 	output, _ := out["output"].(map[string]any)
 	specific, _ := output["hookSpecificOutput"].(map[string]any)
@@ -337,11 +340,90 @@ func TestWrapperToolBatchHookCarriesTheReply(t *testing.T) {
 	}
 }
 
+// toolBatchAbortStubSDK gives up its tool batch's hook, as an interrupt does,
+// before any reply can arrive, then stays up until its input ends so a late
+// reply can be read.
+const toolBatchAbortStubSDK = `
+export function query({ prompt, options }) {
+  return {
+    async *[Symbol.asyncIterator]() {
+      const hook = options.hooks.PostToolBatch[0].hooks[0]
+      const abort = new AbortController()
+      const pending = hook({ hook_event_name: "PostToolBatch", tool_calls: [] }, undefined, { signal: abort.signal })
+      abort.abort()
+      yield { type: "stub_hook", output: await pending }
+      for await (const _ of prompt) {}
+    },
+    async interrupt() {},
+    async setPermissionMode() {},
+  }
+}
+`
+
+// TestWrapperToolBatchReplyAfterAnAbortIsReportedUndelivered: a reply that
+// arrives after the hook was given up reaches nobody, and the wrapper says
+// so, so its text can be offered again.
+func TestWrapperToolBatchReplyAfterAnAbortIsReportedUndelivered(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed")
+	}
+	w := startWrapper(t, node, toolBatchAbortStubSDK, "--tool-batch-notes")
+	req := w.next()
+	id, _ := req["id"].(string)
+	if req["subtype"] != "tool_batch" || id == "" {
+		t.Fatalf("first non-ready line = %v, want a tool_batch with an id", req)
+	}
+	if out := w.next(); out["type"] != "stub_hook" {
+		t.Fatalf("second line = %v, want the given-up hook's output", out)
+	}
+	reply, err := json.Marshal(map[string]any{"kind": "tool_batch_reply", "id": id, "context": "the task is resolved"})
+	if err != nil {
+		t.Fatalf("marshal tool_batch_reply: %v", err)
+	}
+	if _, err := w.stdin.Write(append(reply, '\n')); err != nil {
+		t.Fatalf("write tool_batch_reply: %v", err)
+	}
+	if res := w.next(); res["subtype"] != "tool_batch_result" || res["id"] != id || res["delivered"] != false {
+		t.Errorf("after the late reply the wrapper said %v, want a tool_batch_result undelivered to %s", res, id)
+	}
+}
+
+// TestToolBatchUndo_RunsForTextTheModelNeverRead: a reply with text the
+// wrapper reports undelivered is undone, one it reports delivered is not, and
+// one it never reports on is undone when the stream ends.
+func TestToolBatchUndo_RunsForTextTheModelNeverRead(t *testing.T) {
+	undone := map[string]bool{}
+	var next string
+	l := &LiveRun{stdin: captureWriteCloser{newSyncBuffer()}, done: make(chan struct{}), toolBatch: func() ToolBatchNotes {
+		id := next
+		return ToolBatchNotes{Text: "note for " + id, Undo: func() { undone[id] = true }}
+	}}
+	for _, id := range []string{"abandoned", "delivered", "unsettled"} {
+		next = id
+		l.handleToolBatch(controlLine{Subtype: "tool_batch", ID: id})
+	}
+	for _, line := range []string{
+		`{"type":"control","subtype":"tool_batch_result","id":"abandoned","delivered":false}`,
+		`{"type":"control","subtype":"tool_batch_result","id":"delivered","delivered":true}`,
+	} {
+		ctl, ok := parseControlLine([]byte(line))
+		if !ok {
+			t.Fatalf("parseControlLine(%s) rejected it", line)
+		}
+		l.handleToolBatchResult(ctl)
+	}
+	l.abandonToolBatches()
+	if !undone["abandoned"] || undone["delivered"] || !undone["unsettled"] {
+		t.Errorf("undone = %v, want the abandoned and the unsettled batches only", undone)
+	}
+}
+
 // TestHandleToolBatch_RepliesByID: the reader answers a tool_batch with the
 // caller's text, keyed by the hook's id.
 func TestHandleToolBatch_RepliesByID(t *testing.T) {
 	stdin := newSyncBuffer()
-	l := &LiveRun{stdin: captureWriteCloser{stdin}, done: make(chan struct{}), toolBatch: func() string { return "the task is resolved" }}
+	l := &LiveRun{stdin: captureWriteCloser{stdin}, done: make(chan struct{}), toolBatch: func() ToolBatchNotes { return ToolBatchNotes{Text: "the task is resolved"} }}
 
 	l.handleToolBatch(controlLine{Subtype: "tool_batch", ID: "batch-1"})
 

@@ -41,10 +41,14 @@ import (
 //	{"type":"control","subtype":"permission_request","tool_call_id":"<id>","tool_name":"...","input":{...},"title":"...","display_name":"...","description":"..."}
 //	{"type":"control","subtype":"interrupted"}
 //	{"type":"control","subtype":"tool_batch","id":"<id>"}
+//	{"type":"control","subtype":"tool_batch_result","id":"<id>","delivered":true|false}
 //
 // A tool_batch is the SDK's PostToolBatch hook: every tool call of a batch
 // has resolved and the model's next request waits on the reply, whose
-// context (empty for none) the model reads with the batch's results.
+// context (empty for none) the model reads with the batch's results. A reply
+// with context gets a tool_batch_result saying whether the hook was still
+// waiting for it: an interrupt gives the hook up, and a reply that arrives
+// after that reaches nobody.
 
 // PermissionRequest is one canUseTool round-trip surfaced from the
 // wrapper. The handler decides allow/deny; the reader writes the
@@ -138,7 +142,11 @@ type LiveRun struct {
 
 	// toolBatch answers each tool_batch (RunOptions.OnToolBatch); nil
 	// answers with nothing.
-	toolBatch func() string
+	toolBatch func() ToolBatchNotes
+	// batchUndos holds, by batch id, the Undo of each reply with text the
+	// wrapper has not yet said it delivered. Touched only on the reader
+	// goroutine.
+	batchUndos map[string]func()
 
 	// Close phase bounds; zero falls back to the package consts. Fields
 	// (not just consts) so tests can drive the timeout paths quickly.
@@ -189,7 +197,14 @@ func InteractiveSupported() bool {
 // unsandboxed on the host — see refuseMultiModeSDKLoop. Otherwise always the
 // direct subprocess; the streaming-input flags are set on opts before the
 // command is built, so BuildArgs carries them.
-func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms PermissionHandler) (*LiveRun, error) {
+func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms PermissionHandler) (lr *LiveRun, err error) {
+	if opts.OnOpeningUnsent != nil {
+		defer func() {
+			if err != nil {
+				opts.OnOpeningUnsent()
+			}
+		}()
+	}
 	if err := refuseMultiModeSDKLoop(); err != nil {
 		return nil, err
 	}
@@ -264,6 +279,9 @@ func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms Permi
 		go func() {
 			if err := opening(); err != nil {
 				agentprocLog.Error("initial message send failed", "error", err)
+				if opts.OnOpeningUnsent != nil {
+					opts.OnOpeningUnsent()
+				}
 			}
 		}()
 	}
@@ -546,6 +564,7 @@ func (l *LiveRun) runCleanup() {
 func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *StreamState, perms PermissionHandler, onResult func(*Result), traceID string) (*Result, error) {
 	reader := bufio.NewReader(stdout)
 	observer := stream.observeSink(sink)
+	defer l.abandonToolBatches()
 
 	sessionDelivered := false
 	interruptPending := false
@@ -582,6 +601,8 @@ func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *
 					stream.DiscountGate(gateAt)
 				case "tool_batch":
 					l.handleToolBatch(ctl)
+				case "tool_batch_result":
+					l.handleToolBatchResult(ctl)
 				}
 				// Control lines are not sink content.
 			} else {
@@ -697,12 +718,46 @@ func (l *LiveRun) handlePermission(ctl controlLine, perms PermissionHandler) {
 // model, keyed by the hook's id. Runs on the reader goroutine, where the
 // stream has already delivered the batch's results to the sink.
 func (l *LiveRun) handleToolBatch(ctl controlLine) {
-	text := ""
+	var notes ToolBatchNotes
 	if l.toolBatch != nil {
-		text = l.toolBatch()
+		notes = l.toolBatch()
 	}
-	if err := l.writeControl(map[string]any{"kind": "tool_batch_reply", "id": ctl.ID, "context": text}); err != nil {
+	if err := l.writeControl(map[string]any{"kind": "tool_batch_reply", "id": ctl.ID, "context": notes.Text}); err != nil {
 		agentprocLog.Error("tool batch reply write failed", "error", err)
+		if notes.Undo != nil {
+			notes.Undo()
+		}
+		return
+	}
+	if notes.Text != "" && notes.Undo != nil {
+		if l.batchUndos == nil {
+			l.batchUndos = map[string]func(){}
+		}
+		l.batchUndos[ctl.ID] = notes.Undo
+	}
+}
+
+// handleToolBatchResult settles one reply with text: the wrapper says whether
+// the hook was still waiting for it, and a reply that reached nobody is taken
+// back.
+func (l *LiveRun) handleToolBatchResult(ctl controlLine) {
+	undo, ok := l.batchUndos[ctl.ID]
+	if !ok {
+		return
+	}
+	delete(l.batchUndos, ctl.ID)
+	if !ctl.Delivered {
+		undo()
+	}
+}
+
+// abandonToolBatches takes back every reply with text the wrapper never
+// settled, once the stream has ended. Whether the model read one is then
+// unknown, and offering a note twice costs the agent less than never.
+func (l *LiveRun) abandonToolBatches() {
+	for id, undo := range l.batchUndos {
+		delete(l.batchUndos, id)
+		undo()
 	}
 }
 
@@ -716,6 +771,8 @@ type controlLine struct {
 	Title       string
 	DisplayName string
 	Description string
+	// Delivered is a tool_batch_result's answer.
+	Delivered bool
 }
 
 // parseControlLine reports whether line is a control envelope and, if
@@ -732,6 +789,7 @@ func parseControlLine(line []byte) (controlLine, bool) {
 		Title       string         `json:"title"`
 		DisplayName string         `json:"display_name"`
 		Description string         `json:"description"`
+		Delivered   bool           `json:"delivered"`
 	}
 	if err := json.Unmarshal(line, &raw); err != nil {
 		return controlLine{}, false
@@ -748,6 +806,7 @@ func parseControlLine(line []byte) (controlLine, bool) {
 		Title:       raw.Title,
 		DisplayName: raw.DisplayName,
 		Description: raw.Description,
+		Delivered:   raw.Delivered,
 	}, true
 }
 

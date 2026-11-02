@@ -52,7 +52,7 @@ func newInstruments(mp metric.MeterProvider) *instruments {
 	mk(&in.answers, "mergeability.answers", "Mergeability answers GitHub gave the probe worker, by value: MERGEABLE, CONFLICTING or UNKNOWN.")
 	mk(&in.unknownGiveUp, "mergeability.unknown_giveups", "Rounds of reads given up after GitHub answered UNKNOWN on every retry; the poll reads the pull request again after a pause that doubles with each give-up in a row.")
 	mk(&in.sweepChanges, "mergeability.sweep_changes", "Sweep reads that changed a pull request's known mergeability: a change nothing else probed for.")
-	mk(&in.dropped, "mergeability.dropped", "Probes completed without a read, by org and outcome: the failure that ended their last attempt, or no_credential when no credential the org holds reaches their repository. The poll queues the pull request again.")
+	mk(&in.dropped, "mergeability.dropped", "Probes completed without a read, by org and outcome: the failure that ended their last attempt, no_credential when no credential the org holds reaches their repository, or not_found when GitHub answered their id with no pull request. The poll queues the pull request again.")
 	return in
 }
 
