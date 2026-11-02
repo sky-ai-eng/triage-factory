@@ -217,7 +217,10 @@ export default function Factory() {
   useEffect(() => {
     if (!picked) return
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setPicked(null)
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setPicked(null)
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)

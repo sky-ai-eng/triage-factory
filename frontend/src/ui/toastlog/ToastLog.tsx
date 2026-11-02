@@ -79,31 +79,68 @@ function ease(el: Element, token: '--ease-default' | '--ease-fold'): string | un
   return getComputedStyle(el).getPropertyValue(token).trim() || undefined
 }
 
+// What a row is worth keeping once the panel is over its limit, lowest first.
+// A confirmation has done its job the moment it is seen; a note about a side
+// effect says something the viewer did not ask for; a warning or an error is
+// something they may still have to act on.
+const WORTH: Record<ToastLevel, number> = {
+  success: 0,
+  info: 1,
+  warning: 2,
+  error: 3,
+}
+
+/**
+ * The rows that leave early when more than `max` are showing. Never the newest
+ * — it is the reply to what the viewer just did — nor the one holding focus.
+ * Of the rest, the lowest level goes first, and the oldest within a level.
+ */
+function overflow(showing: ToastLogItem[], max: number, focusId: string | null): Set<string> {
+  const over = showing.length - max
+  if (over <= 0) return new Set()
+  const newest = showing[showing.length - 1].id
+  return new Set(
+    showing
+      .map((t, age) => ({ t, age }))
+      .filter(({ t }) => t.id !== newest && t.id !== focusId)
+      .sort((a, b) => WORTH[a.t.level] - WORTH[b.t.level] || a.age - b.age)
+      .slice(0, over)
+      .map(({ t }) => t.id),
+  )
+}
+
+const adding = (id: string) => (s: ReadonlySet<string>) => (s.has(id) ? s : new Set(s).add(id))
+const removing = (id: string) => (s: ReadonlySet<string>) => {
+  if (!s.has(id)) return s
+  const next = new Set(s)
+  next.delete(id)
+  return next
+}
+
 // ToastLog — one panel of short replies to what the viewer just did, newest on
 // top. Each row's lifetime is the 1px clock line at its foot, and the panel
 // holds every clock while the viewer is reading it or is somewhere else.
 export function ToastLog({ items, onDone, max = 5, interactive = true }: ToastLogProps) {
   const reduced = useReducedMotion()
   const [hovered, setHovered] = useState(false)
-  const [focused, setFocused] = useState(false)
+  const [focusId, setFocusId] = useState<string | null>(null)
   const [away, setAway] = useState(() => !attending())
-  const [escaped, setEscaped] = useState<ReadonlySet<string>>(() => new Set())
-  // Rows whose exit has begun, for any reason. Escape skips them, so each
-  // press takes a row that is still showing.
-  const leavingRef = useRef(new Set<string>())
+  // Rows whose exit has begun, whatever started it: the clock, Escape or the
+  // limit. They no longer count toward the limit, and Escape passes over them.
+  const [leaving, setLeaving] = useState<ReadonlySet<string>>(() => new Set())
 
-  // An emptied panel collapses from under a pointer that has not moved, and a
-  // row removed without its exit takes focus with it; neither fires a leave
-  // event. Without this the next toast would arrive held and never run out.
+  // An emptied panel collapses from under a pointer that has not moved, and
+  // nothing fires pointerleave for it. Without this the next toast would
+  // arrive held and never run out.
   const empty = items.length === 0
   const [wasEmpty, setWasEmpty] = useState(empty)
   if (empty !== wasEmpty) {
     setWasEmpty(empty)
-    if (empty) {
-      setHovered(false)
-      setFocused(false)
-    }
+    if (empty) setHovered(false)
   }
+  // A row removed without its exit (the store trimming its backlog) takes
+  // focus with it and fires no focusout, which would hold every clock.
+  if (focusId !== null && !items.some((t) => t.id === focusId)) setFocusId(null)
 
   useEffect(() => {
     const sync = () => setAway(!attending())
@@ -118,33 +155,42 @@ export function ToastLog({ items, onDone, max = 5, interactive = true }: ToastLo
     }
   }, [])
 
-  // Escape dismisses the newest row still showing. It is listened for on the
-  // window so a row with no link (no tab stop) can still be dismissed, but it
-  // only claims the key when nothing nearer did: a dialog, menu or the shell
-  // palette that handles Escape marks it defaultPrevented first, and a press
-  // typed in a field is left alone. Claiming it marks it, so one press never
-  // does two things.
+  // Escape dismisses the row holding focus, else the newest row still
+  // showing. It is listened for on the window so a row with no link (no tab
+  // stop) can still be dismissed, and a press typed in a field is left alone.
+  //
+  // Everything else that answers Escape — a dialog, a menu, a drawer, a page —
+  // marks the press defaultPrevented when it acts, and the log leaves a marked
+  // press alone, so one press never does two things. The log decides only
+  // after the press has reached every listener: one registered after this one
+  // has to get its chance to mark it first, and registration order is not
+  // something any of them controls.
   useEffect(() => {
     if (!interactive) return
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape' || e.defaultPrevented) return
+      if (e.key !== 'Escape') return
       const t = e.target
       if (t instanceof HTMLElement && (t.isContentEditable || t.matches('input, textarea, select')))
         return
-      const top = [...items].reverse().find((x) => !leavingRef.current.has(x.id))
-      if (!top) return
-      e.preventDefault()
-      leavingRef.current.add(top.id)
-      setEscaped((s) => new Set(s).add(top.id))
+      const target =
+        focusId !== null && !leaving.has(focusId)
+          ? focusId
+          : [...items].reverse().find((x) => !leaving.has(x.id))?.id
+      if (!target) return
+      setTimeout(() => {
+        if (!e.defaultPrevented) setLeaving(adding(target))
+      }, 0)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [interactive, items])
+  }, [interactive, items, leaving, focusId])
 
-  const paused = away || (interactive && (hovered || focused))
-  // An escaped row already counts as gone, so it does not push out an older one.
-  const showing = items.filter((t) => !escaped.has(t.id))
-  const evicted = new Set(showing.slice(0, Math.max(0, showing.length - max)).map((t) => t.id))
+  const paused = away || (interactive && (hovered || focusId !== null))
+  const evicted = overflow(
+    items.filter((t) => !leaving.has(t.id)),
+    max,
+    focusId,
+  )
   const rows = [...items].reverse()
 
   // The panel stays mounted while empty, so its list is already a live region
@@ -158,14 +204,9 @@ export function ToastLog({ items, onDone, max = 5, interactive = true }: ToastLo
       data-empty={empty || undefined}
       onPointerEnter={interactive ? () => setHovered(true) : undefined}
       onPointerLeave={interactive ? () => setHovered(false) : undefined}
-      onFocus={interactive ? () => setFocused(true) : undefined}
-      onBlur={
-        interactive
-          ? (e) => {
-              if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setFocused(false)
-            }
-          : undefined
-      }
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setFocusId(null)
+      }}
     >
       <ol className="tl-list" aria-live="polite" aria-relevant="additions">
         {rows.map((t) => (
@@ -174,16 +215,11 @@ export function ToastLog({ items, onDone, max = 5, interactive = true }: ToastLo
             item={t}
             paused={paused}
             reduced={reduced}
-            leaving={evicted.has(t.id) || escaped.has(t.id)}
-            onLeave={(id) => leavingRef.current.add(id)}
+            leaving={leaving.has(t.id) || evicted.has(t.id)}
+            onFocus={setFocusId}
+            onLeave={(id) => setLeaving(adding(id))}
             onDone={(id) => {
-              leavingRef.current.delete(id)
-              setEscaped((s) => {
-                if (!s.has(id)) return s
-                const next = new Set(s)
-                next.delete(id)
-                return next
-              })
+              setLeaving(removing(id))
               onDone(id)
             }}
           />
@@ -198,18 +234,19 @@ type RowProps = {
   paused: boolean
   reduced: boolean
   leaving: boolean
+  onFocus: (id: string) => void
   onLeave: (id: string) => void
   onDone: (id: string) => void
 }
 
-function Row({ item, paused, reduced, leaving, onLeave, onDone }: RowProps) {
+function Row({ item, paused, reduced, leaving, onFocus, onLeave, onDone }: RowProps) {
   const outer = useRef<HTMLLIElement>(null)
   const inner = useRef<HTMLDivElement>(null)
   const fill = useRef<HTMLSpanElement>(null)
   const clock = useRef<Animation | null>(null)
-  // Latched the moment the exit starts. `leaving` can fall back to false
-  // mid-exit — an evicted row stops being the sixth once a newer one is
-  // removed — and nothing may restart the clock or the exit after that.
+  // Set the moment the exit starts. The exit effect re-runs whenever its
+  // callbacks change identity, which is every render of the panel; the exit
+  // itself runs once, and the clock is never played again after it.
   const exiting = useRef(false)
   const [expired, setExpired] = useState(false)
   const out = expired || leaving
@@ -296,7 +333,7 @@ function Row({ item, paused, reduced, leaving, onLeave, onDone }: RowProps) {
   const action = item.action
 
   return (
-    <li ref={outer} className="tl-row" data-level={item.level}>
+    <li ref={outer} className="tl-row" data-level={item.level} onFocus={() => onFocus(item.id)}>
       {/* The alert role sits inside the item rather than on it: an <li>
           carrying another role is no longer a list item. */}
       <div ref={inner} className="tl-in" role={item.level === 'error' ? 'alert' : undefined}>
@@ -310,6 +347,11 @@ function Row({ item, paused, reduced, leaving, onLeave, onDone }: RowProps) {
           {item.title && <span className="tl-title">{item.title}</span>}
           <span className="tl-body">
             {item.body}
+            {/* A real space, so copied text and a screen reader do not run the
+                body's last word into the time; it is drawn at no width, so the
+                gap stays the time's own margin. A no-break space, so the time
+                still wraps with that word. */}
+            <span className="tl-gap">{'\u00a0'}</span>
             <time className="tl-time" dateTime={new Date(item.at).toISOString()}>
               {stamp(item.at)}
             </time>

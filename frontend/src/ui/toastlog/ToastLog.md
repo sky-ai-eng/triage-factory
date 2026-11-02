@@ -24,8 +24,19 @@ treatment: `--color-raised`, `--edge-float`, `--shadow-float`, radius 8.
 
 It sits 12px below the 55px shell header at `right: 16px`, and is 360px wide.
 
-**At most five rows.** Past five, the oldest leaves early through the normal
-exit. A row already dismissed with Escape does not count toward the five.
+**At most five rows.** Past five, a row leaves early through the normal exit,
+chosen by what the reader can most afford to lose:
+
+- never the newest row, which is the reply to what the viewer just did, and
+  never the row holding focus;
+- of the rest, the lowest level first: success, then info, then warning, then
+  error;
+- within a level, the oldest.
+
+So a burst of confirmations that lands while the viewer is in another tab
+pushes out other confirmations, not the error that arrived before them. Only
+when every other row outranks it does an error leave early. A row already
+leaving, for any reason, does not count toward the five.
 
 The panel stays mounted while it is empty and draws nothing. Its list is the
 live region, and a live region inserted together with its first content is
@@ -43,9 +54,13 @@ A 14px glyph column, then the text:
   - error: `--color-alarm` ×
 - **Title (optional):** 600 12.5/1.45, ink-1.
 - **Body:** 400 12.5/1.45, ink-1, `text-wrap: pretty`. A 160-character run
-  failure wraps across the full measure.
+  failure wraps across the full measure, and keeps the line breaks it arrived
+  with (`white-space: pre-line`).
 - **Time:** follows the body's last word in 10px mono ink-4, `HH:MM`. It wraps
-  with the text, so it never takes a column.
+  with the text, so it never takes a column. The 8px before it is its margin;
+  a zero-width no-break space sits there too, so copied text and a screen
+  reader keep the time apart from the last word without the gap growing or
+  the time wrapping on its own.
 - **Action (optional):** under the body in 11px mono, underlined. **Navigation
   only.** It always has an `href`, so it is a tab stop and a modified click
   opens a new tab; `onSelect` takes a plain primary click in-app. A toast never
@@ -116,14 +131,17 @@ reach it. The component reads `useReducedMotion` itself. Its answers:
 - **Clicking a row does nothing.** People select and copy toast text,
   especially errors, and a click that dismissed would take the text away
   mid-selection. Hovering pauses the clock while they do it.
-- **Escape dismisses the top row**: the newest one that is not already leaving.
-  It is listened for on the window, so rows without a link (no tab stop) can
-  still be dismissed.
-  - It defers to anything nearer: if a dialog, a menu or the shell palette
-    already handled Escape and marked it (`defaultPrevented`), the log ignores
-    it.
-  - It ignores Escape typed in a text field, and marks the event when it does
-    claim it, so one press never does two things.
+- **Escape dismisses a row**: the one holding focus, else the newest one not
+  already leaving. It is listened for on the window, so rows without a link
+  (no tab stop) can still be dismissed.
+  - It yields to everything else that answers Escape. A dialog, menu, drawer
+    or page that acts on Escape marks the press `defaultPrevented`, and the
+    log leaves a marked press alone, so one press never does two things.
+  - It decides only after the press has reached every listener, so a handler
+    registered after the log's still gets to mark it first. A new handler
+    that acts on Escape has to mark it, or one press will close it and
+    dismiss a toast.
+  - It ignores Escape typed in a text field.
   - Each press takes one row, so repeated presses walk down the list.
 - **Keyboard:** the action link is the only tab stop.
 - **Screen readers:** the list is `aria-live="polite"` with

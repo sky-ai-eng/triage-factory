@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { render, screen, act, fireEvent, within } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import ToastLog, { type ToastLevel, type ToastLogItem } from './ToastLog'
@@ -109,13 +109,19 @@ function item(id: string, level: ToastLevel = 'success', extra: Partial<ToastLog
   return { id, level, body: `body ${id}`, at: Date.UTC(2026, 10, 1, 14, 32), ...extra }
 }
 
-function escape(target: Element | Window = window) {
+/** Press Escape, and let the log's decision — taken once the press is done — land. */
+async function escape(target: Element | Window = window) {
   fireEvent.keyDown(target, { key: 'Escape' })
+  await tick(0)
 }
 
 /** The store's side of the contract: a row is removed at onDone, and only then. */
+let pushToStore: (t: ToastLogItem) => void = () => {}
 function Store({ initial, onDone }: { initial: ToastLogItem[]; onDone: (id: string) => void }) {
   const [items, setItems] = useState(initial)
+  useEffect(() => {
+    pushToStore = (t) => setItems((xs) => [...xs, t])
+  })
   return (
     <ToastLog
       items={items}
@@ -231,25 +237,63 @@ describe('ToastLog', () => {
     })
   })
 
-  it('sends the oldest row out early once a sixth arrives', async () => {
-    const onDone = vi.fn()
-    const five = ['a', 'b', 'c', 'd', 'e'].map((id) => item(id))
-    const { rerender } = render(<ToastLog items={five} onDone={onDone} />)
+  describe('past five rows', () => {
+    it('sends out the oldest row of the lowest level, keeping the error', async () => {
+      const onDone = vi.fn()
+      const five = [
+        item('a', 'error'),
+        item('b', 'success'),
+        item('c', 'info'),
+        item('d', 'success'),
+        item('e', 'warning'),
+      ]
+      const { rerender } = render(<ToastLog items={five} onDone={onDone} />)
 
-    rerender(<ToastLog items={[...five, item('f')]} onDone={onDone} />)
-    await tick(EXIT)
-    expect(onDone).toHaveBeenCalledExactlyOnceWith('a')
+      rerender(<ToastLog items={[...five, item('f')]} onDone={onDone} />)
+      await tick(EXIT)
+      expect(onDone).toHaveBeenCalledExactlyOnceWith('b')
+    })
+
+    it('never sends out the newest row or the row holding focus', async () => {
+      const onDone = vi.fn()
+      const five = [
+        item('a', 'success', { action: { label: 'open run', href: '/runs/7f3a21' } }),
+        ...['b', 'c', 'd', 'e'].map((id) => item(id, 'error')),
+      ]
+      const { rerender } = render(<ToastLog items={five} onDone={onDone} />)
+      act(() => screen.getByRole('link', { name: 'open run' }).focus())
+
+      // 'f' is the lowest level and 'a' the lowest and oldest of the rest.
+      rerender(<ToastLog items={[...five, item('f')]} onDone={onDone} />)
+      await tick(EXIT)
+      expect(onDone).toHaveBeenCalledExactlyOnceWith('b')
+    })
+
+    it('does not count a row that is already leaving', async () => {
+      const onDone = vi.fn()
+      render(
+        <Store initial={['b', 'c', 'd', 'e'].map((id) => item(id, 'error'))} onDone={onDone} />,
+      )
+      await tick(LIFETIME.error - 1000)
+      act(() => pushToStore(item('a')))
+      // The errors run out together and start leaving; 'a' has 2s to live. A
+      // sixth row arriving now is the second of two showing, not the sixth.
+      await tick(1000)
+      act(() => pushToStore(item('f')))
+      await tick(EXIT)
+      expect(onDone.mock.calls.flat().sort()).toEqual(['b', 'c', 'd', 'e'])
+    })
   })
 
   it('dismisses the newest row on Escape, the next on a second press, and never on a click', async () => {
     const onDone = vi.fn()
     render(<Store initial={[item('a'), item('b'), item('c')]} onDone={onDone} />)
 
-    escape()
+    await escape()
     await tick(EXIT)
     expect(onDone.mock.calls).toEqual([['c']])
 
-    escape()
+    await escape()
     await tick(EXIT)
     expect(onDone.mock.calls).toEqual([['c'], ['b']])
 
@@ -257,6 +301,26 @@ describe('ToastLog', () => {
     fireEvent.click(screen.getByText('body a'))
     await tick(EXIT)
     expect(onDone.mock.calls).toEqual([['c'], ['b']])
+  })
+
+  it('dismisses the row holding focus on Escape, rather than the newest', async () => {
+    const onDone = vi.fn()
+    render(
+      <Store
+        initial={[
+          item('a', 'error', { action: { label: 'open run', href: '/runs/7f3a21' } }),
+          item('b'),
+          item('c'),
+        ]}
+        onDone={onDone}
+      />,
+    )
+    const link = screen.getByRole('link', { name: 'open run' })
+    act(() => link.focus())
+
+    await escape(link)
+    await tick(EXIT)
+    expect(onDone.mock.calls).toEqual([['a']])
   })
 
   describe('leaves Escape alone', () => {
@@ -273,6 +337,20 @@ describe('ToastLog', () => {
       expect(onDone).not.toHaveBeenCalled()
     })
 
+    it('when a listener registered after it marks the press', async () => {
+      const onDone = vi.fn()
+      render(<ToastLog items={[item('a')]} onDone={onDone} />)
+      // Registered after the log's own listener, so it runs after it: the log
+      // can only know the press was taken once the press is over.
+      const claim = (e: KeyboardEvent) => e.preventDefault()
+      window.addEventListener('keydown', claim)
+
+      await escape()
+      await tick(EXIT)
+      window.removeEventListener('keydown', claim)
+      expect(onDone).not.toHaveBeenCalled()
+    })
+
     it('when it was typed in a field', async () => {
       const onDone = vi.fn()
       render(
@@ -282,7 +360,7 @@ describe('ToastLog', () => {
         </>,
       )
 
-      escape(screen.getByRole('textbox', { name: 'Search' }))
+      await escape(screen.getByRole('textbox', { name: 'Search' }))
       await tick(EXIT)
       expect(onDone).not.toHaveBeenCalled()
     })
@@ -291,7 +369,7 @@ describe('ToastLog', () => {
       const onDone = vi.fn()
       render(<ToastLog items={[item('a')]} onDone={onDone} interactive={false} />)
 
-      escape()
+      await escape()
       await tick(EXIT)
       expect(onDone).not.toHaveBeenCalled()
 
@@ -306,7 +384,7 @@ describe('ToastLog', () => {
     const onDone = vi.fn()
     render(<ToastLog items={[item('a', 'success')]} onDone={onDone} />)
 
-    escape()
+    await escape()
     // An opacity change and nothing after it: no height to close.
     await tick(FADE)
     expect(onDone).toHaveBeenCalledExactlyOnceWith('a')
@@ -331,7 +409,7 @@ describe('ToastLog', () => {
 
     // Unmounting a focused element fires no focusout. Without the row giving
     // focus up, 'a' would stay held by a focus that no longer exists.
-    escape(link)
+    await escape(link)
     expect(link).not.toHaveFocus()
     await tick(LIFETIME.success)
     expect(exits()).toBe(2)
@@ -340,7 +418,7 @@ describe('ToastLog', () => {
   it('starts the next toast running after the panel empties under the pointer', async () => {
     const { rerender } = render(<ToastLog items={[item('a')]} onDone={() => {}} />)
     fireEvent.pointerEnter(screen.getByRole('region', { name: 'Messages' }))
-    escape()
+    await escape()
     await tick(EXIT)
 
     // Nothing fires pointerleave for a panel that collapses from under a
@@ -360,6 +438,11 @@ describe('ToastLog', () => {
     rerender(<ToastLog items={[item('a', 'error')]} onDone={() => {}} />)
     expect(screen.getByRole('list')).toBe(list)
     expect(within(list).getByRole('alert')).toHaveTextContent('Error: body a')
+  })
+
+  it('keeps the time apart from the last word in copied and spoken text', () => {
+    render(<ToastLog items={[item('a')]} onDone={() => {}} />)
+    expect(screen.getByRole('listitem').textContent).toMatch(/body a\u00a0\d\d:\d\d$/)
   })
 
   it('keeps a plain click on the action in-app and a modified click on the anchor', () => {

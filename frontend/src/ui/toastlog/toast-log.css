@@ -83,11 +83,17 @@
   font: 600 12.5px/1.45 var(--font-sans);
   color: var(--color-ink-1);
 }
+/* pre-line: a run failure's summary arrives with the agent's own line breaks. */
 .tl-body {
   font: 400 12.5px/1.45 var(--font-sans);
   color: var(--color-ink-1);
+  white-space: pre-line;
   text-wrap: pretty;
   overflow-wrap: anywhere;
+}
+/* The no-break space between the body and its time, at no width. */
+.tl-gap {
+  font-size: 0;
 }
 .tl-time {
   margin-left: 8px;

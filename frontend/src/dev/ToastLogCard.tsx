@@ -39,6 +39,10 @@ export function ToastLogCard() {
     const id = String(++n.current.id)
     setItems((xs) => [...xs, { id, level, body: COPY[level][k], at: Date.now(), ...extra }])
   }
+  const flood = () =>
+    (['error', 'success', 'success', 'success', 'success', 'success'] as const).forEach((l, i) =>
+      setTimeout(() => push(l), i * 120),
+    )
   const burst = () =>
     (['success', 'info', 'error'] as const).forEach((l, i) => setTimeout(() => push(l), i * 120))
 
@@ -53,8 +57,9 @@ export function ToastLogCard() {
 
       <p className="gal-note">
         <strong>Replies only.</strong> A toast answers something the viewer just did. One panel,
-        newest on top, 12px under the header&rsquo;s right end; past five rows the oldest leaves
-        early.
+        newest on top, 12px under the header&rsquo;s right end. Past five rows one leaves early:
+        never the newest, and of the rest the lowest level, oldest first &mdash; fire an error and
+        then five saves, and the saves push each other out while the error stays.
       </p>
 
       <div className="gal-chips">
@@ -89,6 +94,9 @@ export function ToastLogCard() {
         </button>
         <button type="button" className="gal-btn" onClick={burst}>
           burst of 3
+        </button>
+        <button type="button" className="gal-btn" onClick={flood}>
+          error, then 5 saves
         </button>
         <button
           type="button"
@@ -127,9 +135,9 @@ export function ToastLogCard() {
       </p>
       <p className="gal-note">
         A click does nothing, so the text can be selected and copied. <kbd>Esc</kbd> dismisses the
-        top row; press again for the next. Read-only takes away Escape and the hover hold. Under
-        reduced motion rows appear and leave with an opacity change only, and the clock steps once a
-        second.
+        row holding focus, else the top row; press again for the next. Read-only takes away Escape
+        and the hover hold. Under reduced motion rows appear and leave with an opacity change only,
+        and the clock steps once a second.
       </p>
     </div>
   )

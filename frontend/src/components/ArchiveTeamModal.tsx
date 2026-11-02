@@ -41,7 +41,10 @@ export default function ArchiveTeamModal({
   // Escape closes unless an archive is in flight.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !submitting) onClose()
+      if (e.key === 'Escape' && !submitting) {
+        e.preventDefault()
+        onClose()
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)

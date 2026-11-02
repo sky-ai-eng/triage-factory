@@ -15,8 +15,7 @@ import (
 )
 
 // Level is the severity tier. The frontend picks the visual treatment and
-// lifetime off this value: success/info ~3s, warning ~6s, error ~10s, each
-// held while the viewer is away from the tab.
+// lifetime off this value.
 type Level string
 
 const (

@@ -72,7 +72,10 @@ function GateBody({ request }: { request: ModelGateRequest }) {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !busy) close(false)
+      if (e.key === 'Escape' && !busy) {
+        e.preventDefault()
+        close(false)
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
