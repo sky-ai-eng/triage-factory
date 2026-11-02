@@ -109,6 +109,38 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		}
 	})
 
+	// The org's list is every active team, the caller's role on each they
+	// are on and none on the rest. The teams it adds are none of the
+	// founder's, so the subtests after it, which list those, are unchanged.
+	t.Run("list_for_org_includes_teams_the_caller_is_not_on", func(t *testing.T) {
+		outside := pgtest.SeedTeam(t, h, orgID, "list-outside")
+		gone := pgtest.SeedTeam(t, h, orgID, "list-archived")
+		pgtest.MustExec(t, h.AdminDB, `UPDATE teams SET deleted_at = now() WHERE id = $1`, gone)
+		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+			teams, total, e := pgstore.NewForTx(tx, pgtest.SecretKey).Teams.ListForOrg(ctx, orgID, db.ListOpts{Limit: 50})
+			if e != nil {
+				return e
+			}
+			roles := map[string]string{}
+			for _, tm := range teams {
+				roles[tm.ID] = tm.Role
+			}
+			want := map[string]string{teamA: "admin", teamB: "member", outside: ""}
+			if total != len(teams) || len(roles) != len(want) {
+				t.Errorf("ListForOrg = %+v (total %d); want %v", teams, total, want)
+			}
+			for id, role := range want {
+				if got, ok := roles[id]; !ok || got != role {
+					t.Errorf("team %s role = %q (listed %v); want %q", id, got, ok, role)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("list_for_org: %v", err)
+		}
+	})
+
 	t.Run("union_by_default_one_team_when_filtered", func(t *testing.T) {
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 			store := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks

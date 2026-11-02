@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -153,6 +154,65 @@ func (th *Handler) handleTeamsList(w http.ResponseWriter, r *http.Request) {
 	if err := th.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		teams, total, e = tx.Teams.ListForUser(r.Context(), orgID, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
+		if e != nil {
+			return e
+		}
+		lastActing, e = tx.Users.GetLastActingTeam(r.Context(), userID)
+		return e
+	}); err != nil {
+		httpx.InternalError(w, "teams", err)
+		return
+	}
+
+	out := make([]teamJSON, len(teams))
+	for i, t := range teams {
+		out[i] = teamToJSON(t, lastActing)
+	}
+	httpx.WriteList(w, page, out, total)
+}
+
+// orgTeamsListKey is the org list's page-token fingerprint. It names the list
+// and the org, so a token minted by the caller's own list, or by another
+// org's, is refused here.
+type orgTeamsListKey struct {
+	List  string `json:"list"`
+	OrgID string `json:"org_id"`
+}
+
+// handleOrgTeamsList returns every active team in the org the path names, for
+// a caller who has to name teams they may not be on: an org admin's views
+// across the org's teams. Any member of the org may read it, as they may read
+// any one of its teams, and each row is the caller's own list's row: their
+// role on a team they are on, none on the rest.
+//
+// POST /api/orgs/{org_id}/teams/list
+func (th *Handler) handleOrgTeamsList(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := th.az.RequireOrgMember(w, r)
+	if !ok {
+		return
+	}
+	// The path spells the org as the caller typed it; the rows carry its
+	// canonical form. RequireOrgMember has parsed it.
+	orgID = uuid.MustParse(orgID).String()
+
+	var req teamListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(orgTeamsListKey{List: "org", OrgID: orgID}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
+	var (
+		teams      []domain.Team
+		total      int
+		lastActing string
+	)
+	if err := th.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		teams, total, e = tx.Teams.ListForOrg(r.Context(), orgID, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		if e != nil {
 			return e
 		}
@@ -478,6 +538,10 @@ func (th *Handler) Register(m httpx.Mounts) {
 	// there is no endpoint to set it explicitly. POST /api/teams is the
 	// org-admin "add team" affordance (multi-only; 404 in local).
 	m.APIMutating("POST /api/teams/list", th.handleTeamsList)
+	// Every active team in the org, for any of its members, with the caller's
+	// role on the ones they are on: the names an org-wide view needs for the
+	// teams the caller's own list leaves out.
+	m.APIMutating("POST /api/orgs/{org_id}/teams/list", th.handleOrgTeamsList)
 	m.APIMutating("POST /api/teams", th.handleTeamCreate)
 	// The canonical single read, and the only reader of a team's description.
 	// Any org member may read any team in their org; a cross-org id 404s under

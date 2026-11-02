@@ -206,6 +206,14 @@ type TeamsStore interface {
 	// is the same set. Routes through the app pool in Postgres.
 	ListForUser(ctx context.Context, orgID string, opts ListOpts) ([]domain.Team, int, error)
 
+	// ListForOrg returns one page of every active team in the org plus the
+	// unpaged total, in ListForUser's order. Role is the requesting user's
+	// membership role, empty on a team they are not on: teams_select gates on
+	// org access, so any member of the org reads the whole set. SQLite is
+	// N=1, where the org's teams are the user's, and answers as ListForUser
+	// does. Routes through the app pool in Postgres.
+	ListForOrg(ctx context.Context, orgID string, opts ListOpts) ([]domain.Team, int, error)
+
 	// Get returns a single team by id under the caller's claims, or (nil,
 	// nil) when no row matches. Role carries the CALLER's membership role and
 	// is empty when they are not on the team — teams_select RLS gates on org

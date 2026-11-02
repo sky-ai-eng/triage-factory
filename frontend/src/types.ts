@@ -82,9 +82,11 @@ export interface TranscriptPage {
   next_page_token?: string
 }
 
-// TeamSummary is one row of POST /api/teams/list, GET /api/teams/{id}, and
-// POST /api/teams/archived/list — one team shape across all three. The team
-// count drives whether a team control renders at all (the ≥2 gate).
+// TeamSummary is one row of POST /api/teams/list, POST
+// /api/orgs/{org_id}/teams/list, GET /api/teams/{id}, and POST
+// /api/teams/archived/list — one team shape across all four. The count of the
+// caller's own teams drives whether a team control renders at all (the ≥2
+// gate).
 export interface TeamSummary {
   id: string
   name: string

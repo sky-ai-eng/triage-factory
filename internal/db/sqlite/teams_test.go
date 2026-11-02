@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -183,6 +184,34 @@ func TestTeamsStore_SQLite_Update_NotFound(t *testing.T) {
 	_, err := stores.Teams.Update(context.Background(), "no-such-team", strptr("X"), strptr("x"), nil)
 	if !errors.Is(err, db.ErrTeamNotFound) {
 		t.Fatalf("Update on missing team = %v; want ErrTeamNotFound", err)
+	}
+}
+
+// TestTeamsStore_SQLite_ListForOrg: at N=1 the org's teams are the sole
+// user's, as ListForUser answers them, archived teams left out of both.
+func TestTeamsStore_SQLite_ListForOrg(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	orgID, teamID := seedSQLiteTeam(t, conn)
+	seedSQLiteSiblingTeam(t, conn, orgID)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	if _, err := stores.Teams.Archive(ctx, teamID); err != nil {
+		t.Fatalf("Archive: %v", err)
+	}
+
+	mine, mineTotal, err := stores.Teams.ListForUser(ctx, orgID, db.ListOpts{Limit: 50})
+	if err != nil {
+		t.Fatalf("ListForUser: %v", err)
+	}
+	org, orgTotal, err := stores.Teams.ListForOrg(ctx, orgID, db.ListOpts{Limit: 50})
+	if err != nil {
+		t.Fatalf("ListForOrg: %v", err)
+	}
+	if orgTotal != mineTotal || !slices.EqualFunc(org, mine, func(a, b domain.Team) bool { return a.ID == b.ID && a.Role == b.Role }) {
+		t.Errorf("ListForOrg = %+v (total %d); want ListForUser's %+v (total %d)", org, orgTotal, mine, mineTotal)
+	}
+	if containsTeam(org, teamID) {
+		t.Errorf("archived team %s in ListForOrg", teamID)
 	}
 }
 
