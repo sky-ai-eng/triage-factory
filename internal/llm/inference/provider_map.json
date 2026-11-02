@@ -13,8 +13,10 @@
  "bedrock": "bedrock",
  "bedrock_converse": "bedrock",
  "bedrock_mantle": "unsupported",
+ "bigmodel": "unsupported",
  "cerebras": "cerebras",
  "chatgpt": "unsupported",
+ "clf_ai_gateway": "unsupported",
  "cloudflare": "unsupported",
  "codestral": "unsupported",
  "cohere": "unsupported",
@@ -36,9 +38,11 @@
  "gradient_ai": "unsupported",
  "groq": "groq",
  "heroku": "unsupported",
+ "hostinger_router": "unsupported",
  "hyperbolic": "unsupported",
  "inception": "unsupported",
  "inferenceapis": "unsupported",
+ "kyma": "unsupported",
  "lambda_ai": "unsupported",
  "lemonade": "unsupported",
  "libertai": "unsupported",
@@ -76,6 +80,7 @@
  "scaleway": "unsupported",
  "scx-ai": "unsupported",
  "snowflake": "unsupported",
+ "streamlake": "unsupported",
  "tencent": "unsupported",
  "tensormesh": "unsupported",
  "text-completion-codestral": "unsupported",
@@ -102,5 +107,6 @@
  "watsonx": "unsupported",
  "xai": "xai",
  "xiaomi_mimo": "unsupported",
- "zai": "unsupported"
+ "zai": "unsupported",
+ "zerogpu": "unsupported"
 }
