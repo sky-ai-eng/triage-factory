@@ -14,7 +14,7 @@ const (
 	eventQueueWorkItemFile     = "migrations-sqlite/202609210001_event_queue_work_item.sql"
 	pendingFiringsWorkItemFile = "migrations-sqlite/202609220001_pending_firings_work_item.sql"
 	taskReDeriveQueueFile      = "migrations-sqlite/202609220002_task_rederive_queue.sql"
-	prMergeabilityFile         = "migrations-sqlite/202610310009_pr_mergeability.sql"
+	prMergeabilityFile         = "migrations-sqlite/202610300001_notifications_deliverables_and_mergeability.sql"
 )
 
 // The SQLite migration that moves each kind's table onto the work-item block,

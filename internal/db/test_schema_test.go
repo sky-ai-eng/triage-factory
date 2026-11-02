@@ -38,7 +38,7 @@ func TestMigrate_MatchesTheTestImages(t *testing.T) {
 
 	real := openMem(t)
 	migrateThrough(t, real, imagePinVersion)
-	restored := openMigrationsTestDBAt(t, TestDSNMemory, imagePinVersion)
+	restored := openMigrationsTestDBAt(t, imagePinVersion)
 	assertSameMigratedDatabase(t, fmt.Sprintf("image at %d", imagePinVersion), restored, real)
 
 	// Migrate takes it the rest of the way. The second Migrate is a launch on
