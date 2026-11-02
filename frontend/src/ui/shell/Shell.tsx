@@ -57,6 +57,12 @@ export type ShellProps = {
   needs?: number | null
   running?: number | null
   queued?: number | null
+  /**
+   * Unread, open, undismissed urgent + high notifications for this viewer —
+   * the band's count. `null` is not known yet. Drawn only with
+   * `flags.notifications`.
+   */
+  notifications?: number | null
   /** Rail readouts, per route. */
   counts?: RailCounts
   user?: { name: string; email: string } | null
@@ -71,6 +77,13 @@ export type ShellProps = {
    * changes size.
    */
   immersive?: boolean
+  /**
+   * The strip slot at the top of the page column, above the header. The rail
+   * stays full height. Pass `NotifyStrip`; the slot draws nothing of its own
+   * and collapses to 0 when empty. Its height is published as `--sh-banner-h`
+   * on <html> so fixed layers outside the shell (ToastLog) can clear it.
+   */
+  banner?: ReactNode
   children?: ReactNode
 }
 
@@ -107,6 +120,8 @@ export function Shell({
   needs = null,
   running = null,
   queued = null,
+  notifications = null,
+  banner = null,
   counts = {},
   user = null,
   onSignOut,
@@ -196,6 +211,26 @@ export function Shell({
     }
     if (keyboard) tipOn(name)(e)
   }
+
+  // The banner's height, published on <html> for the fixed layers that live
+  // outside the shell's tree (the toast log). Only a shell that was handed a
+  // banner publishes it, and it takes the value back on unmount, so a page
+  // with no shell, or a shell with no banner, leaves no stale offset behind.
+  const bannerRef = useRef<HTMLDivElement | null>(null)
+  const hasBanner = banner != null
+  useEffect(() => {
+    const el = bannerRef.current
+    if (!hasBanner || !el) return
+    const root = document.documentElement
+    const set = () => root.style.setProperty('--sh-banner-h', el.offsetHeight + 'px')
+    set()
+    const ro = new ResizeObserver(set)
+    ro.observe(el)
+    return () => {
+      ro.disconnect()
+      root.style.removeProperty('--sh-banner-h')
+    }
+  }, [hasBanner])
 
   // A tip describes what the pointer (or focus) is on RIGHT NOW, so leaving
   // the window ends it: mouseleave never fires on a Cmd+Tab, and a label that
@@ -319,6 +354,10 @@ export function Shell({
   const deepRow = deep ? secs.flatMap((s) => s.rows).find((r) => r.id === deep) || null : null
   const readout = (v: number | null) => (offline || v === null ? '--' : String(v))
   const queueTip = offline || queued === null ? 'Queue · count unavailable' : `${queued} in queue`
+  const notifTip =
+    offline || notifications === null
+      ? 'Notifications · count unavailable'
+      : `${notifications} unread notification${notifications === 1 ? '' : 's'}`
 
   const enter = (fn: () => void) => (e: ReactKeyboardEvent) => {
     if (e.key === 'Enter' || e.key === ' ') {
@@ -532,6 +571,36 @@ export function Shell({
 
         <div className="sh-rule" />
 
+        {flags.notifications && (
+          <div
+            className={'sh-queue sh-notif' + (route === 'notifications' ? ' on' : '')}
+            data-unread={!offline && !!notifications ? '' : undefined}
+            onClick={() => go('notifications')}
+            tabIndex={0}
+            role="link"
+            aria-current={route === 'notifications' ? 'page' : undefined}
+            onKeyDown={enter(() => go('notifications'))}
+            onMouseEnter={tipOn(notifTip)}
+            onMouseLeave={tipOff}
+            onFocus={tipOnKeyFocus(notifTip)}
+            onBlur={tipOff}
+          >
+            <div className="sh-qico">
+              <Ico d="bell" size={17} />
+              <span className="sh-ndot" />
+            </div>
+            <div className="sh-qtext">
+              <b key={String(notifications)} className="sh-tick">
+                {readout(notifications)}
+              </b>{' '}
+              {notifications === 1 ? 'notification' : 'notifications'}
+            </div>
+            <div className="sh-qchev">
+              <Ico d="chev" size={12} />
+            </div>
+          </div>
+        )}
+
         <div
           className={'sh-queue' + (route === 'queue' ? ' on' : '')}
           onClick={() => go('queue')}
@@ -717,6 +786,9 @@ export function Shell({
       )}
 
       <div className="sh-main">
+        <div className="sh-banner" ref={bannerRef} inert={immersive || undefined}>
+          {banner}
+        </div>
         <div className="sh-head" inert={immersive || undefined}>
           {/* Crumbs, title and subtitle share a baseline inside one group, and
               the group is centered in the band. Centering them individually

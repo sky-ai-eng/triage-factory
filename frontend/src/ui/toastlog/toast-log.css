@@ -1,11 +1,10 @@
 /* ToastLog — one panel, newest on top. Read ToastLog.md first. */
 
 .tl {
-  /* 12px under the 55px shell header's right end. */
+  /* 12px under the 55px shell header's right end, and under the shell's
+     banner: the shell publishes the banner's height as --sh-banner-h, and the
+     top's transition is the log moving down as a strip opens. */
   position: fixed;
-  /* TODO(TFAC-1239): the shell's urgent banner sets --sh-banner-h to its own
-     height so the log clears it, and the top's transition is the log moving
-     down when it appears. Nothing sets it yet, so it is 0. */
   top: calc(55px + 12px + var(--sh-banner-h, 0px));
   right: 16px;
   z-index: 100;

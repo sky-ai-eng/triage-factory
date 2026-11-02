@@ -1199,7 +1199,53 @@
    Covered by the reduced-motion blanket in tokens/motion.css: the transition
    drops and the chrome simply is or is not present, which is the information. */
 .sh[data-immersive] .sh-rail,
+.sh[data-immersive] .sh-banner,
 .sh[data-immersive] .sh-head {
   opacity: 0;
   pointer-events: none;
+}
+
+/* ---- the notifications band ----------------------------------------
+   Drawn as the queue is — one line, one number, one door — and sitting just
+   above it, so the two counts that are about you read as a pair. The queue
+   keeps its warm glyph; here the glyph is ink and the warm part is the count
+   and the dot, so the rail still has exactly two warm marks. */
+.sh-notif {
+  margin-bottom: -4px;
+}
+.sh-notif .sh-qico {
+  position: relative;
+  color: var(--color-ink-3);
+}
+/* On the bell's right shoulder, not the 26px box's corner: 1.5px right of
+   center, 2px down. The ground ring separates it from the stroke. */
+.sh-ndot {
+  display: none;
+  position: absolute;
+  left: calc(50% + 1.5px);
+  top: 2px;
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--color-warm);
+  box-shadow: 0 0 0 1.5px var(--color-ground);
+}
+.sh-notif[data-unread] .sh-ndot {
+  display: block;
+}
+.sh-notif[data-unread] .sh-qtext b {
+  color: var(--color-warm);
+}
+
+/* ---- the banner slot ------------------------------------------------
+   Top of the page column, above the header; the rail stays full height. The
+   slot owns no chrome — NotifyStrip draws its own ground and edge. */
+.sh-banner {
+  flex: none;
+  position: relative;
+  z-index: 2;
+  transition: opacity 0.3s linear;
+}
+.sh-banner:empty {
+  display: none;
 }

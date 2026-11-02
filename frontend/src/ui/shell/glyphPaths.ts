@@ -53,6 +53,9 @@ export const GLYPH_PATHS = {
     'M11.25 11.25l1.2 1.2M4.75 11.25l-1.2 1.2M4.75 4.75l-1.2-1.2M11.25 4.75l1.2-1.2',
   wide: 'M4 3.5v9M7 8h5.5M10 5.5L12.5 8 10 10.5',
   narrow: 'M12 3.5v9M9.5 8H4M6.5 5.5L4 8l2.5 2.5',
+  // The notifications band. A bell: `inbox` is the queue's mark and `alert`
+  // is the governance tail, so neither can also mean this.
+  bell: 'M4.2 11.3V7.4a3.8 3.8 0 017.6 0v3.9l1.2 1.4H3zM6.7 14.2h2.6',
   inbox:
     'M2.5 8.5H6l1.2 2h1.6l1.2-2h3.5M3.6 4.2L2.5 8.5v3a1.2 1.2 0 001.2 1.2h8.6a1.2 1.2 0 001.2-1.2v-3l-1.1-4.3a1.2 1.2 0 00-1.1-.8H4.8a1.2 1.2 0 00-1.2.8z',
   back: 'M9.5 3.5L5 8l4.5 4.5',

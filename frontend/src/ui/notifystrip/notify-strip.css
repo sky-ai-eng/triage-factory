@@ -1,0 +1,175 @@
+/* NotifyStrip — the strip in Shell's banner slot. Read NotifyStrip.md first. */
+
+/* With no lines it stays mounted, as the live region its first line will be
+   announced through; at no height its ground and edge paint nothing. */
+.ns {
+  background: var(--color-warm-1);
+  box-shadow: inset 0 -1px 0 var(--color-warm-3);
+}
+
+.ns-slide {
+  overflow: hidden;
+}
+/* Urgent above, high below: a warm hairline between them. */
+.ns-slide + .ns-slide .ns-line {
+  box-shadow: inset 0 1px 0 var(--color-warm-2);
+}
+
+.ns-line {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 26px;
+  padding: 0 14px 0 16px;
+  min-width: 0;
+}
+
+/* Unread urgent: 40px. Read: the 26px line, until the condition resolves. */
+.ns-urgent {
+  transition: height 160ms var(--ease-default);
+}
+.ns-urgent[data-full] {
+  height: 40px;
+  gap: 14px;
+}
+
+.ns-label {
+  flex: none;
+  font: 500 9px/1 var(--font-mono);
+  letter-spacing: 0.14em;
+  color: var(--color-warm);
+  white-space: nowrap;
+}
+.ns-urgent[data-full] .ns-label {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+}
+
+.ns-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 500 12px/1.2 var(--font-sans);
+  color: var(--color-ink-1);
+}
+.ns-urgent[data-full] .ns-title {
+  font: 600 12.5px/1.2 var(--font-sans);
+}
+button.ns-title {
+  all: unset;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 2px;
+  transition: text-decoration-color var(--dur-hover);
+}
+.ns-line button.ns-title {
+  font: 500 12px/1.2 var(--font-sans);
+  color: var(--color-ink-1);
+}
+.ns-urgent[data-full] button.ns-title {
+  font: 600 12.5px/1.2 var(--font-sans);
+}
+button.ns-title:hover {
+  text-decoration-color: var(--color-ink-3);
+}
+
+.ns-since,
+.ns-more {
+  flex: none;
+  font: 400 10.5px/1 var(--font-mono);
+  color: var(--color-ink-4);
+  white-space: nowrap;
+}
+.ns-more {
+  margin-left: -6px;
+}
+
+.ns-end {
+  margin-left: auto;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+/* The action: a solid warm button in the full band, a mono link in the line. */
+.ns-act {
+  all: unset;
+  cursor: pointer;
+  font: 400 10.5px/1 var(--font-mono);
+  color: var(--color-ink-1);
+  text-decoration: underline;
+  text-decoration-color: var(--color-line-2);
+  text-underline-offset: 2px;
+  white-space: nowrap;
+}
+.ns-act:hover {
+  text-decoration-color: var(--color-ink-1);
+}
+.ns-urgent[data-full] .ns-act {
+  padding: 6px 10px;
+  border-radius: var(--radius-nested);
+  background: var(--color-warm);
+  color: var(--color-warm-ink);
+  font: 500 11.5px/1 var(--font-sans);
+  text-decoration: none;
+}
+.ns-link {
+  all: unset;
+  cursor: pointer;
+  font: 400 10.5px/1 var(--font-mono);
+  color: var(--color-ink-1);
+  text-decoration: underline;
+  text-decoration-color: var(--color-line-2);
+  text-underline-offset: 2px;
+}
+.ns-link:hover {
+  text-decoration-color: var(--color-ink-1);
+}
+
+.ns-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font: 400 10.5px/1 var(--font-mono);
+  color: var(--color-ink-3);
+}
+.ns-step button {
+  all: unset;
+  cursor: pointer;
+  padding: 2px 3px;
+  color: var(--color-ink-1);
+}
+.ns-step button:disabled {
+  cursor: default;
+  color: var(--color-ink-4);
+}
+
+.ns button:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+/* The arrival's 8s, running out left to right. */
+.ns-clock {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1.5px;
+}
+.ns-clock > span {
+  display: block;
+  height: 100%;
+  background: var(--color-warm-4);
+  transform-origin: left center;
+}

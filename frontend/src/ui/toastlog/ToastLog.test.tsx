@@ -2,16 +2,15 @@ import { useEffect, useState } from 'react'
 import { render, screen, act, fireEvent, within } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import ToastLog, { type ToastLevel, type ToastLogItem } from './ToastLog'
+import { installFakeAnimations, type FakeAnimation } from '../shared/fakeAnimation'
 
 // The clock line is the timer, so what gets pinned is when a row leaves and
 // what holds it: its level's lifetime, then the exit, then onDone — and
 // nothing in between that dismisses early or holds forever.
 //
-// jsdom implements no Web Animations, so Element.prototype.animate is a fake
-// whose `finished` resolves on the (fake) timers: it pauses, resumes with the
-// time it had left, and rejects on cancel, which is all the component asks of
-// a real one. Every animation it creates is kept, so a test can ask what was
-// animated as well as when.
+// jsdom implements no Web Animations, so Element.prototype.animate is
+// FakeAnimation, whose `finished` resolves on the fake timers. Every animation
+// it creates is kept, so a test can ask what was animated as well as when.
 
 const LIFETIME: Record<ToastLevel, number> = {
   success: 3000,
@@ -22,60 +21,6 @@ const LIFETIME: Record<ToastLevel, number> = {
 const FADE = 120
 const CLOSE = 160
 const EXIT = FADE + CLOSE
-
-class FakeAnimation {
-  playState: AnimationPlayState = 'running'
-  readonly finished: Promise<FakeAnimation>
-  private resolve!: (a: FakeAnimation) => void
-  private reject!: (e: unknown) => void
-  private left: number
-  private since = 0
-  private timer: ReturnType<typeof setTimeout> | undefined
-  readonly keyframes: Keyframe[]
-  readonly options: KeyframeAnimationOptions
-
-  constructor(keyframes: Keyframe[], options: KeyframeAnimationOptions) {
-    this.keyframes = keyframes
-    this.options = options
-    this.left = Number(options.duration ?? 0)
-    this.finished = new Promise((res, rej) => {
-      this.resolve = res
-      this.reject = rej
-    })
-    // A real animation's finished promise is marked handled, so cancelling one
-    // nobody awaited is not an unhandled rejection.
-    this.finished.catch(() => {})
-    this.run()
-  }
-
-  private run() {
-    this.since = Date.now()
-    this.timer = setTimeout(() => {
-      this.playState = 'finished'
-      this.resolve(this)
-    }, this.left)
-  }
-
-  pause() {
-    if (this.playState !== 'running') return
-    clearTimeout(this.timer)
-    this.left -= Date.now() - this.since
-    this.playState = 'paused'
-  }
-
-  play() {
-    if (this.playState !== 'paused') return
-    this.playState = 'running'
-    this.run()
-  }
-
-  cancel() {
-    if (this.playState === 'idle' || this.playState === 'finished') return
-    clearTimeout(this.timer)
-    this.playState = 'idle'
-    this.reject(new DOMException('cancelled', 'AbortError'))
-  }
-}
 
 let animations: FakeAnimation[] = []
 
@@ -137,12 +82,7 @@ describe('ToastLog', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     setReducedMotion(false)
-    animations = []
-    Element.prototype.animate = function (keyframes, options) {
-      const a = new FakeAnimation(keyframes as Keyframe[], options as KeyframeAnimationOptions)
-      animations.push(a)
-      return a as unknown as Animation
-    }
+    animations = installFakeAnimations()
     // jsdom's document never has focus; the log would read every test as the
     // viewer being away and hold every clock.
     vi.spyOn(document, 'hasFocus').mockReturnValue(true)
