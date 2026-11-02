@@ -4741,13 +4741,100 @@
       "type": "table"
     },
     {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tf-prometheus"
+      },
+      "description": "Per source, the number of active orgs in each state (tf_source_orgs): `available` (connected), `unconfigured` (not connected) or `disabled` (turned off by the org's admin; GitHub can't be turned off). GitHub's `no_installations` is an org whose own GitHub App is installed on no account on its GitHub host, which every GitHub poll skips; it is not counted under `available`. An org in any state but `available` is not polled for that source. None of these states is a fault, and no alert reads them: connecting a source is a setup step for the org's admin, and turning one off is the admin's choice. Every state a source can take always has a series, reading 0 when no org is in it. Counted every 5 minutes by the control pod holding the background-brain lease.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 6,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "decimals": 0,
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 178
+      },
+      "id": 60,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tf-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max by (source, state) (tf_source_orgs)",
+          "legendFormat": "{{source}} {{state}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Orgs by source state",
+      "type": "timeseries"
+    },
+    {
       "collapsed": false,
       "description": "What memory ended inside native runs' sandboxes, how close each sandbox came to its limit, and the runs that paused because the limit kept ending their sandbox. A sandbox's limit is TF_CLAIM_MEMORY_LIMIT_MB, and a single bash command's budget is derived from it. Counted by the executors and summed across them. The RunPausedAtMemoryLimit and SandboxesLostToMemoryLimit rules in docker/observability/rules/tf-runs.yml alert on the last two kinds of event. Each engagement creates its org's kill and park series at zero, so their panels see the first kill or park after it; a series that first appears inside a panel's window counts at its whole value, for one whose first count lands before its first scrape and for the peak histogram, which has no zero to start from. No data means no native run has reached a limit, or none has run.",
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 178
+        "y": 186
       },
       "id": 56,
       "panels": [],
@@ -4807,7 +4894,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 179
+        "y": 187
       },
       "id": 57,
       "options": {
@@ -4896,7 +4983,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 179
+        "y": 187
       },
       "id": 58,
       "options": {
@@ -4996,7 +5083,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 179
+        "y": 187
       },
       "id": 59,
       "options": {
