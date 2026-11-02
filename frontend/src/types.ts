@@ -12,8 +12,9 @@ export interface Task {
   event_type: string
   dedup_key?: string
   // On a github:pr:review_requested task, the requested user's login or
-  // team's org/slug, as the event that last bumped the task named it. Display
-  // only: dedup_key identifies the reviewer, by GitHub's id when known.
+  // team's org/slug, as the event that spawned the task named it. Display
+  // only: dedup_key identifies the reviewer, by GitHub's id when known, and
+  // pins it, so every event that bumps the task names the same one.
   requested_reviewer?: string
   severity?: string
   relevance_reason?: string

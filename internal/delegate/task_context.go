@@ -41,8 +41,9 @@ const baseFraming = "Reference data about the task that fired this run. Values c
 // a Jira task's project key (runConfig.jiraProject, from taskJiraProject); ""
 // for a task of any other source, or when the row could not be read.
 //
-// metadataJSON is the primary event's metadata blob — "" is fine and simply
-// yields a block with no event fields (and no raw-metadata fence).
+// metadataJSON is the metadata blob of the newest event that spawned or bumped
+// the task (taskEventMetadata) — "" is fine and simply yields a block with no
+// event fields (and no raw-metadata fence).
 //
 // skeleton is the pre-rendered PR history block (internal/github/prskeleton),
 // or "" for a task with no PR behind it. It is external content of exactly the
@@ -132,26 +133,50 @@ func BuildTaskContext(task domain.Task, container, metadataJSON, skeleton string
 	return "<task_context>\n" + body + "\n</task_context>"
 }
 
-// taskEventMetadata reads the task's primary event metadata for the task
-// context, through the event type's current view: the run acts on the ids the
-// metadata names, and the source may have replaced one since the event was
-// recorded (a Slack channel moved to a new id). Best-effort like the rest of
-// the block: a failed read renders no event fields, and a failed view renders
-// the metadata as recorded.
+// taskEventMetadata reads, for the task context, the metadata of the newest
+// event that spawned or bumped the task (taskBriefingEventID), through the
+// event type's current view: the run acts on the ids the metadata names, and
+// the source may have replaced one since the event was recorded (a Slack
+// channel moved to a new id). Best-effort like the rest of the block: a failed
+// read renders no event fields, and a failed view renders the metadata as
+// recorded.
 func (s *Spawner) taskEventMetadata(ctx context.Context, orgID string, task domain.Task) string {
-	metadataJSON, err := s.events.GetMetadataSystem(ctx, orgID, task.PrimaryEventID)
+	eventID := s.taskBriefingEventID(ctx, orgID, task)
+	metadataJSON, err := s.events.GetMetadataSystem(ctx, orgID, eventID)
 	if err != nil {
 		delegateLog.Warn("load event metadata for task failed; the task context will carry no event fields",
-			"task", task.ID, "event", task.PrimaryEventID, "error", err)
+			"task", task.ID, "event", eventID, "error", err)
 		return ""
 	}
 	current, err := events.Current(ctx, orgID, task.EventType, metadataJSON)
 	if err != nil {
 		delegateLog.Warn("resolve event metadata for task failed; the task context will carry it as recorded",
-			"task", task.ID, "event", task.PrimaryEventID, "error", err)
+			"task", task.ID, "event", eventID, "error", err)
 		return metadataJSON
 	}
 	return current
+}
+
+// taskBriefingEventID is the event a run is briefed with: the newest one that
+// spawned or bumped the task. primary_event_id is the spawning event and a bump
+// never moves it, so a CI task bumped by a second failing check would otherwise
+// brief its run with the first check, head and run ids. Falls back to
+// primary_event_id when the task has no timeline row (a task minted without
+// one) or the read fails.
+func (s *Spawner) taskBriefingEventID(ctx context.Context, orgID string, task domain.Task) string {
+	if s.tasks == nil || task.ID == "" {
+		return task.PrimaryEventID
+	}
+	eventID, err := s.tasks.LatestEventIDSystem(ctx, orgID, task.ID)
+	if err != nil {
+		delegateLog.Warn("load the task's newest event failed; the task context will carry the event that spawned it",
+			"task", task.ID, "event", task.PrimaryEventID, "error", err)
+		return task.PrimaryEventID
+	}
+	if eventID == "" {
+		return task.PrimaryEventID
+	}
+	return eventID
 }
 
 // taskArtifacts reads what the task's conversations have produced, for the

@@ -494,3 +494,12 @@ func TestTaskRequestedReviewer_SQLite(t *testing.T) {
 		return sqlitestore.New(openSQLiteForTest(t)), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
 	})
 }
+
+// TestTaskLatestEvent_SQLite runs the LatestEventIDSystem suite against the
+// SQLite TaskStore.
+func TestTaskLatestEvent_SQLite(t *testing.T) {
+	dbtest.RunTaskLatestEventConformance(t, func(t *testing.T) (db.Stores, string, string) {
+		t.Helper()
+		return sqlitestore.New(openSQLiteForTest(t)), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
+	})
+}

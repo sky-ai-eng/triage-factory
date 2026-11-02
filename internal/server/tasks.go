@@ -75,10 +75,11 @@ type taskJSON struct {
 	// TODO: board row color-coding consumes this.
 	TeamID string `json:"team_id,omitempty"`
 	// RequestedReviewer is, on a github:pr:review_requested task, the
-	// requested user's login or team's org/slug as the event that last bumped
-	// the task named it, for display. dedup_key identifies the reviewer, by
+	// requested user's login or team's org/slug as the event that spawned the
+	// task named it, for display. dedup_key identifies the reviewer, by
 	// GitHub's id ("user_id:<id>" / "team_id:<id>") when the request carried
-	// one. Omitted on every other task.
+	// one, and pins it, so every event that bumps the task names the same one.
+	// Omitted on every other task.
 	RequestedReviewer string `json:"requested_reviewer,omitempty"`
 	// MemoryPending says a conversation on this task ended without leaving
 	// the memory its successor is owed, and the dispatcher will not claim the

@@ -17,8 +17,9 @@ type TaskRequestedReviewerFactory func(t *testing.T) (stores db.Stores, orgID, t
 
 // RunTaskRequestedReviewerConformance pins domain.Task.RequestedReviewer
 // across the task reads: a review_requested task reads the requested user's
-// login, or the requested team's org/slug, off the event that last bumped it,
-// whatever its dedup_key holds; every other task reads empty.
+// login, or the requested team's org/slug, off the event that spawned it,
+// whatever its dedup_key holds; every other task reads empty. The dedup_key
+// pins the reviewer, so every event that bumps the task names the same one.
 func RunTaskRequestedReviewerConformance(t *testing.T, mk TaskRequestedReviewerFactory) {
 	t.Helper()
 	ctx := context.Background()

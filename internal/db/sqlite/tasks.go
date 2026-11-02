@@ -661,6 +661,29 @@ func (s *taskStore) RecordEventSystem(ctx context.Context, orgID, taskID, eventI
 	return s.RecordEvent(ctx, orgID, taskID, eventID, kind)
 }
 
+func (s *taskStore) LatestEventIDSystem(ctx context.Context, orgID, taskID string) (string, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return "", err
+	}
+	var eventID string
+	err := s.q.QueryRowContext(ctx, `
+		SELECT te.event_id
+		FROM task_events te
+		JOIN events ev ON ev.id = te.event_id
+		WHERE te.task_id = ?
+		  AND te.kind IN ('spawned', 'bumped', 'injected')
+		ORDER BY ev.created_at DESC, ev.id DESC
+		LIMIT 1
+	`, taskID).Scan(&eventID)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return eventID, nil
+}
+
 func (s *taskStore) CountConsecutiveFailedConversationsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error) {
 	return s.CountConsecutiveFailedConversations(ctx, orgID, entityID, promptID)
 }
@@ -1994,9 +2017,10 @@ var sqliteTaskColumnsWithEntity = `
 		)
 		ELSE 0
 	END,
-	-- The requested reviewer's handle, from the event that last bumped a
-	-- review_requested task (domain.Task.RequestedReviewer). A primary-key
-	-- seek, gated on the event type.
+	-- The requested reviewer's handle, from the event that spawned a
+	-- review_requested task (domain.Task.RequestedReviewer). The task's
+	-- dedup_key pins the reviewer, so every event that bumps it names the same
+	-- one. A primary-key seek, gated on the event type.
 	CASE
 		WHEN t.event_type = 'github:pr:review_requested' THEN COALESCE((
 			SELECT COALESCE(NULLIF(json_extract(ev.metadata_json, '$.requested_login'), ''),
