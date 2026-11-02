@@ -303,7 +303,10 @@ export function StatusRules({
   useEffect(() => {
     if (!staged) return
     const esc = (e: globalThis.KeyboardEvent) => {
-      if (e.key === 'Escape') setStaged(null)
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setStaged(null)
+      }
     }
     window.addEventListener('keydown', esc)
     return () => window.removeEventListener('keydown', esc)

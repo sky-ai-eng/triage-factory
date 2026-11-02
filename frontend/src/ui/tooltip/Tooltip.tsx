@@ -343,7 +343,10 @@ export function Tooltip({
       onKeyDown={
         live
           ? (e: KeyboardEvent) => {
-              if (e.key === 'Escape') hide()
+              if (e.key === 'Escape' && open) {
+                e.preventDefault()
+                hide()
+              }
             }
           : undefined
       }

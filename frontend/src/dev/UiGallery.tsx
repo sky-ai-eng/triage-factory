@@ -36,6 +36,7 @@ import SourcePartsCard from './SourcePartsCard'
 import SpendRingCard from './SpendRingCard'
 import TableCard from './TableCard'
 import TeamPartsCard from './TeamPartsCard'
+import ToastLogCard from './ToastLogCard'
 import TooltipCard from './TooltipCard'
 import './gallery.css'
 
@@ -324,6 +325,7 @@ export default function UiGallery() {
             <AcquireCard />
             <PrimitivesCard />
             <TooltipCard />
+            <ToastLogCard />
             <ScanCard />
             <FlapCountCard />
             <CratePileCard />
