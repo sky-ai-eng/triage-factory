@@ -41,7 +41,16 @@ function stripItem(n: NotificationItem, teams: Team[], act: NotificationFeed['ac
   }
 }
 
-export function NotificationStrip({ feed, teams }: { feed: NotificationFeed; teams: Team[] }) {
+export function NotificationStrip({
+  feed,
+  teams,
+  held,
+}: {
+  feed: NotificationFeed
+  teams: Team[]
+  /** The shell's chrome is hidden, so an arrival's clock waits. */
+  held: boolean
+}) {
   const { urgent: items, arrival: next, act } = feed
   const urgent = useMemo(() => items.map((n) => stripItem(n, teams, act)), [items, teams, act])
   const arrival = useMemo(() => (next ? stripItem(next, teams, act) : null), [next, teams, act])
@@ -51,6 +60,7 @@ export function NotificationStrip({ feed, teams }: { feed: NotificationFeed; tea
       arrival={arrival}
       onArrivalDone={feed.arrivalDone}
       onOpen={feed.open}
+      held={held}
     />
   )
 }

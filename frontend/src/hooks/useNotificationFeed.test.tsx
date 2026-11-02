@@ -30,6 +30,11 @@ const LIST = '/api/me/notifications/list'
 // What the server holds, per read.
 let badge: number
 let urgent: NotificationItem[]
+// The server's clock, from its Date header. A test moves it to model a viewer
+// whose own clock is off.
+let serverNow: () => number
+// A gate the urgent read waits on, for a read that is still in flight.
+let urgentGate: Promise<void> | null
 let high: NotificationItem[]
 
 function note(id: string, over: Partial<NotificationItem> = {}): NotificationItem {
@@ -57,15 +62,27 @@ function note(id: string, over: Partial<NotificationItem> = {}): NotificationIte
 }
 
 const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+  const headers = new Headers({ Date: new Date(serverNow()).toUTCString() })
   if (url === LIST) {
     const body = JSON.parse(String(init?.body))
     if (body.page_size === 0) {
-      return { ok: true, status: 200, ...jsonBody({ items: [], total_count: badge }) }
+      return { ok: true, status: 200, headers, ...jsonBody({ items: [], total_count: badge }) }
     }
-    const items = body.priority_in[0] === 'urgent' ? urgent : high
-    return { ok: true, status: 200, ...jsonBody({ items, total_count: items.length }) }
+    if (body.priority_in[0] === 'urgent') {
+      const items = urgent
+      if (urgentGate) await urgentGate
+      return { ok: true, status: 200, headers, ...jsonBody({ items, total_count: items.length }) }
+    }
+    return {
+      ok: true,
+      status: 200,
+      headers,
+      ...jsonBody({ items: high, total_count: high.length }),
+    }
   }
-  return { ok: true, status: 200, ...jsonBody(note(url.split('/')[4])) }
+  if (url.endsWith('/actions/gone'))
+    return { ok: true, status: 204, headers, ...jsonBody(undefined) }
+  return { ok: true, status: 200, headers, ...jsonBody(note(url.split('/')[4])) }
 })
 
 /** A ping, and the debounced read it starts. */
@@ -80,6 +97,8 @@ beforeEach(() => {
   badge = 0
   urgent = []
   high = []
+  serverNow = () => Date.now()
+  urgentGate = null
   fetchMock.mockClear()
   navigate.mockClear()
   toastError.mockClear()
@@ -187,5 +206,67 @@ describe('useNotificationFeed', () => {
       expect.objectContaining({ method: 'PATCH' }),
     )
     open.mockRestore()
+  })
+
+  it("measures an arrival on the server's clock, not the viewer's", async () => {
+    // The viewer's clock runs two minutes fast: measured on it, an item the
+    // server has just seen would already be two minutes old.
+    serverNow = () => Date.now() - 120_000
+    const { result } = renderHook(() => useNotificationFeed())
+    await waitFor(() => expect(result.current.count).toBe(0))
+
+    high = [note('h1', { first_seen_at: new Date(serverNow()).toISOString() })]
+    await ping()
+    expect(result.current.arrival?.id).toBe('h1')
+  })
+
+  it('drops a waiting arrival once it is no longer unread', async () => {
+    const { result } = renderHook(() => useNotificationFeed())
+    await waitFor(() => expect(result.current.count).toBe(0))
+
+    high = [note('h3'), note('h2')]
+    await ping()
+    expect(result.current.arrival?.id).toBe('h2')
+
+    // h3 was read in another tab before its turn came.
+    high = [note('h2')]
+    await ping()
+    act(() => result.current.arrivalDone('h2'))
+    expect(result.current.arrival).toBeNull()
+  })
+
+  it('does not let a read already in flight undo an item it has just opened', async () => {
+    urgent = [note('u1', { priority: 'urgent' })]
+    const { result } = renderHook(() => useNotificationFeed())
+    await waitFor(() => expect(result.current.urgent).toHaveLength(1))
+
+    let release = () => {}
+    urgentGate = new Promise((r) => (release = r))
+    await ping()
+    act(() => result.current.open('u1'))
+
+    // The parked read answers with the item as it was before the mark.
+    await act(async () => {
+      release()
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    expect(result.current.urgent[0].read).toBe(true)
+  })
+
+  it('sends no read mark for an action whose row has left what the viewer may read', async () => {
+    const item = note('u1', { priority: 'urgent' })
+    const { result } = renderHook(() => useNotificationFeed())
+    await waitFor(() => expect(result.current.count).toBe(0))
+
+    await act(async () =>
+      result.current.act(item, { id: 'gone', type: 'invoke', label: 'Untrack', allowed: true }),
+    )
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/me/notifications/u1/actions/gone',
+        expect.anything(),
+      ),
+    )
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'PATCH')).toBe(false)
   })
 })

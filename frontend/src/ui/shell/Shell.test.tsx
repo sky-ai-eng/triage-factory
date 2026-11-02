@@ -285,7 +285,8 @@ describe('Shell — the notifications band', () => {
     expect(band()).toHaveTextContent('-- notifications')
     expect(band()).not.toHaveAttribute('data-unread')
 
-    rerender(<Shell mode="multi" notifications={4} offline flags={{ notifications: true }} />)
+    // The noun follows what is drawn: one unread, offline, still reads as unknown.
+    rerender(<Shell mode="multi" notifications={1} offline flags={{ notifications: true }} />)
     expect(band()).toHaveTextContent('-- notifications')
     expect(band()).not.toHaveAttribute('data-unread')
   })

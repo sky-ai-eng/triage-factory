@@ -593,7 +593,7 @@ export function Shell({
               <b key={String(notifications)} className="sh-tick">
                 {readout(notifications)}
               </b>{' '}
-              {notifications === 1 ? 'notification' : 'notifications'}
+              {readout(notifications) === '1' ? 'notification' : 'notifications'}
             </div>
             <div className="sh-qchev">
               <Ico d="chev" size={12} />

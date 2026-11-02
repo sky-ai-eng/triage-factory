@@ -148,7 +148,7 @@ button.ns-title:hover {
   padding: 2px 3px;
   color: var(--color-ink-1);
 }
-.ns-step button:disabled {
+.ns-step button[aria-disabled='true'] {
   cursor: default;
   color: var(--color-ink-4);
 }

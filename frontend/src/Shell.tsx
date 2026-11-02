@@ -220,7 +220,7 @@ export default function Shell() {
             running={running}
             queued={queued}
             notifications={notes.count}
-            banner={<NotificationStrip feed={notes} teams={teamRows} />}
+            banner={<NotificationStrip feed={notes} teams={teamRows} held={immersive} />}
             counts={counts}
             user={
               isMulti && auth?.me

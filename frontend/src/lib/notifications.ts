@@ -67,6 +67,25 @@ export function listNotifications(
   return apiList<NotificationItem>(LIST_PATH, { ...filter, page_size: pageSize })
 }
 
+/**
+ * One page of the inbox, with the server's clock when it answered (its `Date`
+ * header), for comparing the items' timestamps against: the viewer's own clock
+ * may be minutes off the server's.
+ */
+export async function listNotificationsAt(
+  filter: NotificationFilter,
+  pageSize: number,
+): Promise<{ items: NotificationItem[]; at: number }> {
+  const res = await apiFetch(LIST_PATH, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...filter, page_size: pageSize }),
+  })
+  const page = await readJSON<Partial<ListPage<NotificationItem>>>(res, LIST_PATH)
+  const at = Date.parse(res.headers.get('Date') ?? '')
+  return { items: page.items ?? [], at: Number.isNaN(at) ? Date.now() : at }
+}
+
 /** Mark one item read for this viewer. Answers the item as they now see it. */
 export function markNotificationRead(id: string): Promise<NotificationItem> {
   return apiJSON<NotificationItem>(itemPath(id), {

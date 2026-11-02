@@ -37,18 +37,23 @@ the page's top edge.
   edge. Urgent is warm, not `--color-alarm`: alarm sits 9° of hue from warm and
   reads as a mismatch beside the rail's warm marks, and alarm belongs on a
   container's frame, never a badge.
-- **Unread: 40px**, gap 14.
+- **Unread: 40px**, gap 14, while any of the open urgent items is unread.
   - Label: `URGENT · ORG` in 10px mono, 0.12em, warm.
   - Title: 600 12.5 ink-1, a button that calls `onOpen`.
   - Since: 10.5 mono ink-4.
   - Action: the item's first permitted action, as a solid warm button
     (`--color-warm` / `--color-warm-ink`).
-  - With several urgent items open, a `‹ 1 of 2 ›` stepper.
-- **Read: 26px**, gap 12. The same facts, smaller: a 9px label, a 500 12px
-  title, the since, `· +N urgent` when there are more, and the action as a mono
-  link. It keeps the warm ground until the condition resolves.
-- **Which item:** the line starts on the first unread item, so an unread
-  condition is never hidden behind a read one's `+N urgent`.
+  - With several urgent items open, a `‹ 1 of 2 ›` stepper. It stays while
+    any of them is unread, so each unread one stays reachable, and its ends
+    are `aria-disabled` rather than `disabled`: a disabled button drops the
+    focus it holds without a focusout.
+- **Read: 26px**, gap 12, once every one is read. The same facts, smaller: a
+  9px label, a 500 12px title, the since, `· +N urgent` when there are more,
+  and the action as a mono link. It keeps the warm ground until the condition
+  resolves.
+- **Which item:** the line starts on the first unread item. A stepped-to item
+  is held by id, so a condition arriving or resolving around it does not move
+  the line onto another.
 - **Read** means this viewer opened the item, took its action, or rendered it on
   the page (`mark-read`). Seeing the strip doesn't count.
 - **No dismiss.** An urgent condition that can be dismissed is dismissed from
@@ -64,7 +69,9 @@ the page's top edge.
   `ARRIVAL_MS` (8s). Its WAAPI `finished` is the timer: it starts the close,
   and `onArrivalDone` fires once the line has closed.
 - **Pausing:** it pauses while the pointer is over the strip or focus is inside
-  it, and while the tab is hidden or the window blurred. Focus holds it for the
+  it, while the tab is hidden or the window blurred, and while `held` says the
+  strip cannot be seen (the shell passes it in immersive mode, where its chrome
+  is hidden). Focus holds it for the
   same reason the pointer does: a button should not leave from under the
   keyboard that reached it.
 - **Opening it** calls `onOpen`, then closes the line.
@@ -102,7 +109,9 @@ The open, the close and the clock are JS-timed (WAAPI), so the component reads
 ## Keyboard and assistive tech
 
 - **Live region:** `aria-live="polite"` with `aria-relevant="additions"`, so a
-  new line is announced once and a ticking `since` is not. It stays mounted at
+  new line is announced once and a ticking `since` is not. The urgent line's
+  label, title and since are keyed by the item, so a different condition
+  taking the line is an addition too. It stays mounted at
   no height when empty, because a live region inserted together with its
   content is often not announced. It is a region named "Notifications" only
   while it shows something.

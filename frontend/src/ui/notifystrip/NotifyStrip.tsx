@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { ease } from '../shared/ease'
 import { useAway } from '../shared/useAway'
@@ -29,6 +29,8 @@ export type NotifyStripProps = {
   onOpen: (id: string) => void
   /** false: titles, actions and the stepper's arrows are text, and only an inactive tab holds the clock. */
   interactive?: boolean
+  /** The strip cannot be seen right now (the shell's chrome is hidden): hold the arrival's clock. */
+  held?: boolean
 }
 
 /** How long a high arrival is announced, while the viewer is attending. */
@@ -48,6 +50,7 @@ export function NotifyStrip({
   onArrivalDone,
   onOpen,
   interactive = true,
+  held = false,
 }: NotifyStripProps) {
   const reduced = useReducedMotion()
   const away = useAway()
@@ -72,7 +75,7 @@ export function NotifyStrip({
     }
   }
 
-  const paused = away || (interactive && (hovered || focused))
+  const paused = away || held || (interactive && (hovered || focused))
 
   // The strip stays mounted while empty, at no height, so it is already a live
   // region when its first line arrives: a region inserted together with its
@@ -215,32 +218,43 @@ type UrgentProps = {
 }
 
 function Urgent({ items, onOpen, interactive }: UrgentProps) {
-  // Starts on the first unread item, so an unread condition is never hidden
-  // behind a read one's "+N urgent".
-  const [at, setAt] = useState<number | null>(null)
-  const k = Math.min(
-    at ??
-      Math.max(
-        0,
-        items.findIndex((x) => !x.read),
-      ),
-    items.length - 1,
-  )
+  // The item on show, held by id so a condition arriving or resolving around it
+  // does not move the line onto another. Until the viewer steps, it is the
+  // first unread item, so an unread condition is never hidden behind a read
+  // one.
+  const [at, setAt] = useState<string | null>(null)
+  const stepped = at === null ? -1 : items.findIndex((x) => x.id === at)
+  const k =
+    stepped >= 0
+      ? stepped
+      : Math.max(
+          0,
+          items.findIndex((x) => !x.read),
+        )
   const it = items[k]
-  const full = !it.read
+  // Full while any of them is unread, and the stepper with it, so every
+  // unread one stays reachable.
+  const full = items.some((x) => !x.read)
   const many = items.length > 1
+  const step = (to: number) => {
+    if (to >= 0 && to < items.length) setAt(items[to].id)
+  }
 
   return (
     <div className="ns-line ns-urgent" data-full={full || undefined}>
-      <span className="ns-label">URGENT · {it.scope}</span>
-      {interactive ? (
-        <button type="button" className="ns-title" onClick={() => onOpen(it.id)}>
-          {it.title}
-        </button>
-      ) : (
-        <span className="ns-title">{it.title}</span>
-      )}
-      {it.since != null && <span className="ns-since">{it.since}</span>}
+      {/* Keyed by the item, so a different condition taking the line is new
+          content to the live region rather than a silent change of text. */}
+      <Fragment key={it.id}>
+        <span className="ns-label">URGENT · {it.scope}</span>
+        {interactive ? (
+          <button type="button" className="ns-title" onClick={() => onOpen(it.id)}>
+            {it.title}
+          </button>
+        ) : (
+          <span className="ns-title">{it.title}</span>
+        )}
+        {it.since != null && <span className="ns-since">{it.since}</span>}
+      </Fragment>
       {!full && many && <span className="ns-more">· +{items.length - 1} urgent</span>}
       <span className="ns-end">
         {interactive && it.action && (
@@ -250,12 +264,15 @@ function Urgent({ items, onOpen, interactive }: UrgentProps) {
         )}
         {full && many && (
           <span className="ns-step">
+            {/* aria-disabled rather than disabled at the ends: a disabled
+                button drops the focus it holds without a focusout, and the
+                strip would go on holding the arrival's clock for it. */}
             {interactive && (
               <button
                 type="button"
                 aria-label="Previous urgent notification"
-                disabled={k === 0}
-                onClick={() => setAt(k - 1)}
+                aria-disabled={k === 0 || undefined}
+                onClick={() => step(k - 1)}
               >
                 ‹
               </button>
@@ -267,8 +284,8 @@ function Urgent({ items, onOpen, interactive }: UrgentProps) {
               <button
                 type="button"
                 aria-label="Next urgent notification"
-                disabled={k === items.length - 1}
-                onClick={() => setAt(k + 1)}
+                aria-disabled={k === items.length - 1 || undefined}
+                onClick={() => step(k + 1)}
               >
                 ›
               </button>

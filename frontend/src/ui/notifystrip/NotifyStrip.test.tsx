@@ -76,16 +76,50 @@ describe('NotifyStrip', () => {
       expect(screen.getByText('2 of 3')).toBeInTheDocument()
     })
 
-    it('steps between unread items within its bounds', () => {
+    it('steps between items within its bounds', () => {
       render(<NotifyStrip urgent={[item('a'), item('b')]} onOpen={() => {}} />)
       const prev = screen.getByRole('button', { name: 'Previous urgent notification' })
       const next = screen.getByRole('button', { name: 'Next urgent notification' })
-      expect(prev).toBeDisabled()
+      expect(prev).toHaveAttribute('aria-disabled', 'true')
 
       fireEvent.click(next)
       expect(screen.getByRole('button', { name: 'title b' })).toBeInTheDocument()
-      expect(next).toBeDisabled()
-      expect(prev).toBeEnabled()
+      expect(next).toHaveAttribute('aria-disabled', 'true')
+      expect(prev).not.toHaveAttribute('aria-disabled')
+
+      // An end is a no-op, not a wrap.
+      fireEvent.click(next)
+      expect(screen.getByRole('button', { name: 'title b' })).toBeInTheDocument()
+    })
+
+    it('keeps the stepper while any item is unread, so each stays reachable', () => {
+      render(<NotifyStrip urgent={[item('a'), item('b', { read: true })]} onOpen={() => {}} />)
+      fireEvent.click(screen.getByRole('button', { name: 'Next urgent notification' }))
+      expect(screen.getByRole('button', { name: 'title b' })).toBeInTheDocument()
+      expect(urgentLine()).toHaveAttribute('data-full')
+
+      fireEvent.click(screen.getByRole('button', { name: 'Previous urgent notification' }))
+      expect(screen.getByRole('button', { name: 'title a' })).toBeInTheDocument()
+    })
+
+    it('stays on the item the viewer stepped to when another arrives', () => {
+      const { rerender } = render(<NotifyStrip urgent={[item('a'), item('b')]} onOpen={() => {}} />)
+      fireEvent.click(screen.getByRole('button', { name: 'Next urgent notification' }))
+
+      rerender(<NotifyStrip urgent={[item('c'), item('a'), item('b')]} onOpen={() => {}} />)
+      expect(screen.getByRole('button', { name: 'title b' })).toBeInTheDocument()
+      expect(screen.getByText('3 of 3')).toBeInTheDocument()
+    })
+
+    it('draws a condition that takes the line as new content, for the live region', () => {
+      const { rerender } = render(<NotifyStrip urgent={[item('a')]} onOpen={() => {}} />)
+      const before = screen.getByRole('button', { name: 'title a' })
+
+      rerender(<NotifyStrip urgent={[item('c'), item('a')]} onOpen={() => {}} />)
+      const after = screen.getByRole('button', { name: 'title c' })
+      // A rewritten text node is a change the polite region does not announce;
+      // a new node is an addition it does.
+      expect(after).not.toBe(before)
     })
 
     it('counts the rest instead of stepping once read', () => {
@@ -212,6 +246,33 @@ describe('NotifyStrip', () => {
       act(() => {
         document.dispatchEvent(new Event('visibilitychange'))
       })
+      await tick(ARRIVAL_MS)
+      await tick(FADE + CLOSE)
+      expect(onArrivalDone).toHaveBeenCalledExactlyOnceWith('h')
+    })
+
+    it('holds its clock while the strip cannot be seen', async () => {
+      const onArrivalDone = vi.fn()
+      const { rerender } = render(
+        <NotifyStrip
+          urgent={[]}
+          arrival={item('h')}
+          onArrivalDone={onArrivalDone}
+          onOpen={() => {}}
+          held
+        />,
+      )
+      await tick(60_000)
+      expect(onArrivalDone).not.toHaveBeenCalled()
+
+      rerender(
+        <NotifyStrip
+          urgent={[]}
+          arrival={item('h')}
+          onArrivalDone={onArrivalDone}
+          onOpen={() => {}}
+        />,
+      )
       await tick(ARRIVAL_MS)
       await tick(FADE + CLOSE)
       expect(onArrivalDone).toHaveBeenCalledExactlyOnceWith('h')

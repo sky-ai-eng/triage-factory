@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router'
 import { httpErrorMessage } from '../lib/apiClient'
 import {
   listNotifications,
+  listNotificationsAt,
   markNotificationRead,
   runNotificationAction,
   type NotificationAction,
@@ -111,22 +112,25 @@ export function useNotificationFeed(): NotificationFeed {
     const [count, urgent, high] = await Promise.allSettled([
       listNotifications(BADGE, 0),
       listNotifications(URGENT, PAGE),
-      listNotifications(HIGH_UNREAD, PAGE),
+      listNotificationsAt(HIGH_UNREAD, PAGE),
     ])
     if (orgRef.current !== org || n < applied.current) return
     applied.current = n
 
     let fresh: NotificationItem[] = []
+    let unread: Set<string> | null = null
     if (high.status === 'fulfilled') {
+      const { items, at } = high.value
+      unread = new Set(items.map((i) => i.id))
       const prev = seen.current?.org === org ? seen.current.ids : null
       if (prev) {
-        const now = Date.now()
-        fresh = high.value.items
-          .filter((i) => !prev.has(i.id) && now - Date.parse(i.first_seen_at) < ARRIVAL_WINDOW_MS)
+        // Measured on the server's clock, which first_seen_at is also on.
+        fresh = items
+          .filter((i) => !prev.has(i.id) && at - Date.parse(i.first_seen_at) < ARRIVAL_WINDOW_MS)
           // The list is newest first; arrivals are shown in the order they came.
           .reverse()
       }
-      seen.current = { org, ids: new Set(high.value.items.map((i) => i.id)) }
+      seen.current = { org, ids: unread }
     }
 
     // A read that fails keeps what the last one answered: stale until the
@@ -141,7 +145,9 @@ export function useNotificationFeed(): NotificationFeed {
             : base.count,
         urgent: urgent.status === 'fulfilled' ? urgent.value.items : base.urgent,
         arrivals: [
-          ...base.arrivals,
+          // A waiting arrival that has since been read, dismissed or resolved
+          // is no longer news. The one on show finishes its own close.
+          ...(unread ? base.arrivals.filter((a, i) => i === 0 || unread.has(a.id)) : base.arrivals),
           ...fresh.filter((f) => !base.arrivals.some((a) => a.id === f.id)),
         ],
       }
@@ -185,10 +191,12 @@ export function useNotificationFeed(): NotificationFeed {
   }, [connected, read])
 
   // Read is shown at once, so an urgent line drops to its read size without
-  // waiting on the round trip. A mark that fails is put right by reading back
-  // what the server holds.
+  // waiting on the round trip. A read already in flight predates the mark and
+  // would put it back, so it is dropped; the mark's own ping brings the next.
+  // A mark that fails is put right by reading back what the server holds.
   const markRead = useCallback(
     (id: string) => {
+      applied.current = issued.current + 1
       setAnswer((prev) => ({
         ...prev,
         urgent: prev.urgent.map((i) => (i.id === id ? { ...i, read: true } : i)),
@@ -213,8 +221,9 @@ export function useNotificationFeed(): NotificationFeed {
   const run = useCallback(
     async (item: NotificationItem, action: NotificationAction) => {
       try {
-        await runNotificationAction(item.id, action.id)
-        markRead(item.id)
+        // null: the row has left what the viewer may read, so there is nothing
+        // left to mark.
+        if (await runNotificationAction(item.id, action.id)) markRead(item.id)
       } catch (e) {
         toast.error(httpErrorMessage(e, 'Could not run that action.'))
       }
