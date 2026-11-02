@@ -233,7 +233,7 @@ export default function Shell() {
           >
             <Outlet context={scope} />
           </UiShell>
-          <NotificationConfirm feed={notes} />
+          <NotificationConfirm />
         </>
       )}
     </ChromeProvider>

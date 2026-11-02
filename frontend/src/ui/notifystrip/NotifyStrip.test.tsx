@@ -148,6 +148,20 @@ describe('NotifyStrip', () => {
       expect(onSelect).toHaveBeenCalledTimes(1)
     })
 
+    it('takes no press on an action already out', () => {
+      const onSelect = vi.fn()
+      render(
+        <NotifyStrip
+          urgent={[item('a', { action: { label: 'Retrying…', onSelect, busy: true } })]}
+          onOpen={vi.fn()}
+        />,
+      )
+      const button = screen.getByRole('button', { name: 'Retrying…' })
+      expect(button).toHaveAttribute('aria-disabled', 'true')
+      fireEvent.click(button)
+      expect(onSelect).not.toHaveBeenCalled()
+    })
+
     it('leaves showing what it was when its last condition resolves', async () => {
       const { rerender } = render(<NotifyStrip urgent={[item('a')]} onOpen={() => {}} />)
 

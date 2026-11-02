@@ -46,6 +46,9 @@ export interface NotificationItem {
   actions: NotificationAction[]
   read: boolean
   dismissed: boolean
+  /** Whether this viewer is in the row's audience. False only on a team's row
+   *  an org admin reads without being sent it. */
+  sent: boolean
 }
 
 /** The inbox's filters. An absent field does not filter. */
@@ -61,6 +64,12 @@ const LIST_PATH = '/api/me/notifications/list'
 
 function itemPath(id: string): string {
   return `/api/me/notifications/${encodeURIComponent(id)}`
+}
+
+/** Where an item opens in the app: the notifications page, on that item. The
+ *  org prefix is the caller's (useOrgHref). */
+export function notificationPath(id: string): string {
+  return `/notifications?id=${encodeURIComponent(id)}`
 }
 
 /** One page of the inbox; `pageSize` 0 is the count-only read. */
@@ -79,12 +88,58 @@ export function listNotificationsAt(
   return apiListAt<NotificationItem>(LIST_PATH, { ...filter, page_size: pageSize })
 }
 
-/** Mark one item read for this viewer. Answers the item as they now see it. */
-export function markNotificationRead(id: string): Promise<NotificationItem> {
+/** Every notification in the org this org admin may read, team rows
+ *  included: the All teams view. */
+export function listOrgNotifications(
+  orgID: string,
+  filter: NotificationFilter,
+  pageSize: number,
+): Promise<ListPage<NotificationItem>> {
+  return apiList<NotificationItem>(
+    `/api/orgs/${encodeURIComponent(orgID)}/notifications/list`,
+    { ...filter, page_size: pageSize },
+  )
+}
+
+/** One item this viewer may read. A 404 is an HttpError: gone, or not theirs. */
+export function getNotification(id: string): Promise<NotificationItem> {
+  return apiJSON<NotificationItem>(itemPath(id))
+}
+
+/** This viewer's marks. An absent mark is kept. Answers the item as they now
+ *  see it; dismissing one that is not dismissible is a 422. */
+export function setNotificationMarks(
+  id: string,
+  marks: { read?: boolean; dismissed?: boolean },
+  init: { keepalive?: boolean } = {},
+): Promise<NotificationItem> {
   return apiJSON<NotificationItem>(itemPath(id), {
+    ...init,
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ read: true }),
+    body: JSON.stringify(marks),
+  })
+}
+
+/** Mark one item read for this viewer. Answers the item as they now see it. */
+export function markNotificationRead(id: string): Promise<NotificationItem> {
+  return setNotificationMarks(id, { read: true })
+}
+
+/** The most ids one mark-read call takes: the largest page a client renders. */
+export const MARK_READ_MAX = 200
+
+/** Mark the rendered items read, at most MARK_READ_MAX of them. Answers the
+ *  ids it marked; one the viewer cannot read is left out. */
+export function markNotificationsRead(
+  ids: string[],
+  init: { keepalive?: boolean } = {},
+): Promise<{ ids: string[] }> {
+  return apiJSON<{ ids: string[] }>('/api/me/notifications/mark-read', {
+    ...init,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids }),
   })
 }
 

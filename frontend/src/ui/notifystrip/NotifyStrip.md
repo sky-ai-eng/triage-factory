@@ -48,7 +48,9 @@ waits. When the hold ends it catches up.
   - Title: 600 12.5 ink-1, a button that calls `onOpen`.
   - Since: 10.5 mono ink-4.
   - Action: the item's first permitted action, as a solid warm button
-    (`--color-warm` / `--color-warm-ink`).
+    (`--color-warm` / `--color-warm-ink`). While it is out (`busy`), the
+    button shows the caller's running label at 60% and takes no press;
+    `aria-disabled`, for the stepper's reason below.
   - With several urgent items open, a `‹ 1 of 2 ›` stepper. It stays while
     any of them is unread, so each unread one stays reachable, and its ends
     are `aria-disabled` rather than `disabled`: a disabled button drops the

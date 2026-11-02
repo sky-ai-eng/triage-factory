@@ -1,16 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
-import { httpErrorMessage } from '../lib/apiClient'
 import {
   listNotifications,
   listNotificationsAt,
   markNotificationRead,
-  runNotificationAction,
+  notificationPath,
   type NotificationAction,
   type NotificationFilter,
   type NotificationItem,
 } from '../lib/notifications'
-import { toast } from '../components/Toast/toastStore'
+import { requestInvoke } from './useNotificationActions'
 import { useApiOrgId } from './useApiOrgId'
 import { useOrgHref } from './useOrgHref'
 import { useWebSocket, useWsConnected } from './useWebSocket'
@@ -50,9 +49,6 @@ const ARRIVAL_WINDOW_MS = 60_000
 /** Pings come in bursts (a sweep resolving several rows); one read answers a burst. */
 const HINT_DEBOUNCE_MS = 250
 
-/** Where an item opens: the notifications page. */
-const PAGE_PATH = '/notifications'
-
 export interface NotificationFeed {
   /** The band's count. `null` until the first answer. */
   count: number | null
@@ -62,14 +58,11 @@ export interface NotificationFeed {
   arrival: NotificationItem | null
   /** The arrival has finished; show the next. */
   arrivalDone: (id: string) => void
-  /** Mark the item read and go to the notifications page. */
+  /** Mark the item read and open it on the notifications page. */
   open: (id: string) => void
-  /** Follow a link, or run an invoke. An invoke that asks first waits in `pending`. */
+  /** Follow a link, or run an invoke through the shared runner, which asks
+   *  first when the invoke does. */
   act: (item: NotificationItem, action: NotificationAction) => void
-  /** An invoke waiting on the viewer's confirmation. */
-  pending: { item: NotificationItem; action: NotificationAction } | null
-  confirm: () => void
-  cancel: () => void
 }
 
 type Answer = {
@@ -89,12 +82,6 @@ export function useNotificationFeed(): NotificationFeed {
   // The answers are stored with the org they answer for, so an org switch
   // reads as nothing known until the new org's answers land.
   const [answer, setAnswer] = useState<Answer>(() => blank(''))
-  // An invoke asked about in one org is never confirmed in another: the
-  // dialog is outside the routed page, and stays open across a switch.
-  const [pending, setPending] = useState<
-    (NonNullable<NotificationFeed['pending']> & { org: string }) | null
-  >(null)
-  if (pending && pending.org !== orgID) setPending(null)
 
   const orgRef = useRef(orgID)
   useEffect(() => {
@@ -215,7 +202,7 @@ export function useNotificationFeed(): NotificationFeed {
   const open = useCallback(
     (id: string) => {
       markRead(id)
-      navigate(orgHref(PAGE_PATH))
+      navigate(orgHref(notificationPath(id)))
     },
     [markRead, navigate, orgHref],
   )
@@ -223,23 +210,6 @@ export function useNotificationFeed(): NotificationFeed {
   const arrivalDone = useCallback((id: string) => {
     setAnswer((prev) => ({ ...prev, arrivals: prev.arrivals.filter((a) => a.id !== id) }))
   }, [])
-
-  const run = useCallback(
-    async (item: NotificationItem, action: NotificationAction) => {
-      try {
-        const { notification, outcome } = await runNotificationAction(item.id, action.id)
-        if (notification?.resolved_at) toast.success(outcome)
-        else toast.info(outcome)
-        // A row that has left what the viewer may read has nothing left to
-        // mark.
-        if (notification) markRead(item.id)
-      } catch (e) {
-        toast.error(httpErrorMessage(e, 'Could not run that action.'))
-      }
-      void read(orgRef.current)
-    },
-    [markRead, read],
-  )
 
   const act = useCallback(
     (item: NotificationItem, action: NotificationAction) => {
@@ -252,19 +222,15 @@ export function useNotificationFeed(): NotificationFeed {
         else navigate(action.href)
         return
       }
-      if (action.confirm) setPending({ org: orgRef.current, item, action })
-      else void run(item, action)
+      requestInvoke(orgRef.current, item, action, (notification) => {
+        // A row that has left what the viewer may read has nothing left to
+        // mark.
+        if (notification) markRead(item.id)
+        void read(orgRef.current)
+      })
     },
-    [markRead, navigate, run],
+    [markRead, navigate, read],
   )
-
-  const confirm = useCallback(() => {
-    if (!pending) return
-    setPending(null)
-    void run(pending.item, pending.action)
-  }, [pending, run])
-
-  const cancel = useCallback(() => setPending(null), [])
 
   const current = answer.org === orgID ? answer : blank(orgID)
   return {
@@ -274,8 +240,5 @@ export function useNotificationFeed(): NotificationFeed {
     arrivalDone,
     open,
     act,
-    pending,
-    confirm,
-    cancel,
   }
 }
