@@ -1,0 +1,139 @@
+/* ToastLog — one panel, newest on top. Read ToastLog.md first. */
+
+.tl {
+  /* 12px under the 55px shell header's right end. */
+  position: fixed;
+  /* TODO(TFAC-1239): the shell's urgent banner sets --sh-banner-h to its own
+     height so the log clears it, and the top's transition is the log moving
+     down when it appears. Nothing sets it yet, so it is 0. */
+  top: calc(55px + 12px + var(--sh-banner-h, 0px));
+  right: 16px;
+  z-index: 100;
+  width: 360px;
+  max-width: calc(100vw - 32px);
+  background: var(--color-raised);
+  border: var(--edge-float);
+  border-radius: 8px;
+  box-shadow: var(--shadow-float);
+  overflow: hidden;
+  transition: top 160ms var(--ease-default);
+}
+
+/* Mounted with no rows so its list is already a live region; it draws nothing. */
+.tl[data-empty] {
+  border: 0;
+  box-shadow: none;
+}
+
+.tl-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.tl-row {
+  overflow: hidden;
+  --tl-tone: var(--color-ink-1);
+  --tl-clock: var(--color-line-2);
+}
+.tl-row[data-level='info'] {
+  --tl-tone: var(--color-ink-3);
+}
+.tl-row[data-level='warning'] {
+  --tl-tone: var(--color-warm);
+}
+.tl-row[data-level='error'] {
+  --tl-tone: var(--color-alarm);
+  --tl-clock: var(--color-alarm-2);
+}
+
+.tl-in {
+  position: relative;
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 9px 12px 9px 13px;
+}
+
+/* 18px = the body's first line (12.5px × 1.45), so the glyph centers on it. */
+.tl-ico {
+  display: flex;
+  align-items: center;
+  height: 18px;
+  color: var(--tl-tone);
+}
+.tl-ico svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tl-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.tl-title {
+  font: 600 12.5px/1.45 var(--font-sans);
+  color: var(--color-ink-1);
+}
+.tl-body {
+  font: 400 12.5px/1.45 var(--font-sans);
+  color: var(--color-ink-1);
+  text-wrap: pretty;
+  overflow-wrap: anywhere;
+}
+.tl-time {
+  margin-left: 8px;
+  font: 400 10px/1 var(--font-mono);
+  color: var(--color-ink-4);
+  white-space: nowrap;
+}
+
+.tl-act {
+  align-self: flex-start;
+  margin-top: 4px;
+  font: 400 11px/1 var(--font-mono);
+  color: var(--color-ink-1);
+  text-decoration: underline;
+  text-decoration-color: var(--color-line-2);
+  text-underline-offset: 2px;
+}
+.tl-act:hover {
+  text-decoration-color: var(--color-ink-1);
+}
+.tl-act:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+.tl-bar {
+  position: absolute;
+  left: 13px;
+  right: 12px;
+  bottom: 0;
+  height: 1px;
+}
+.tl-fill {
+  display: block;
+  height: 100%;
+  background: var(--tl-clock);
+  transform-origin: left center;
+}
+
+/* Out of flow, so it takes no gap in the text column. */
+.tl-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
