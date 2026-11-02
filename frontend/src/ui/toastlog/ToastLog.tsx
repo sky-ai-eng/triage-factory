@@ -1,4 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { ease } from '../shared/ease'
+import { useAway } from '../shared/useAway'
 import { useReducedMotion } from '../shared/useReducedMotion'
 import './toast-log.css'
 
@@ -63,20 +65,9 @@ const SPOKEN: Record<ToastLevel, string> = {
   error: 'Error:',
 }
 
-function attending(): boolean {
-  if (typeof document === 'undefined') return true
-  return document.visibilityState === 'visible' && document.hasFocus()
-}
-
 function stamp(at: number): string {
   const d = new Date(at)
   return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0')
-}
-
-// WAAPI takes an easing as a string, not a var(), so the curve is read off the
-// token layer when the animation starts rather than restated here.
-function ease(el: Element, token: '--ease-default' | '--ease-fold'): string | undefined {
-  return getComputedStyle(el).getPropertyValue(token).trim() || undefined
 }
 
 // What a row is worth keeping once the panel is over its limit, lowest first.
@@ -124,7 +115,7 @@ export function ToastLog({ items, onDone, max = 5, interactive = true }: ToastLo
   const reduced = useReducedMotion()
   const [hovered, setHovered] = useState(false)
   const [focusId, setFocusId] = useState<string | null>(null)
-  const [away, setAway] = useState(() => !attending())
+  const away = useAway()
   // Rows whose exit has begun, whatever started it: the clock, Escape or the
   // limit. They no longer count toward the limit, and Escape passes over them.
   const [leaving, setLeaving] = useState<ReadonlySet<string>>(() => new Set())
@@ -141,19 +132,6 @@ export function ToastLog({ items, onDone, max = 5, interactive = true }: ToastLo
   // A row removed without its exit (the store trimming its backlog) takes
   // focus with it and fires no focusout, which would hold every clock.
   if (focusId !== null && !items.some((t) => t.id === focusId)) setFocusId(null)
-
-  useEffect(() => {
-    const sync = () => setAway(!attending())
-    const blur = () => setAway(true)
-    document.addEventListener('visibilitychange', sync)
-    window.addEventListener('focus', sync)
-    window.addEventListener('blur', blur)
-    return () => {
-      document.removeEventListener('visibilitychange', sync)
-      window.removeEventListener('focus', sync)
-      window.removeEventListener('blur', blur)
-    }
-  }, [])
 
   // Escape dismisses the row holding focus, else the newest row still
   // showing. It is listened for on the window so a row with no link (no tab

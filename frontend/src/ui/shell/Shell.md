@@ -63,6 +63,9 @@ draws immediately and never guesses at what is about to fill it.
   verbs live.
 - Animate the rail on route change. Navigation is not an event that needs
   marking; it is a thing the reader just did.
+- Put a notification anywhere but the banner slot and the band. A rail tail, a
+  header chip and a toast were each tried, and each competed with something the
+  shell already owns.
 
 ## Readouts on rail rows
 
@@ -76,8 +79,46 @@ and a count, because an org credential changing is not a tally that drifts, it i
 a thing that happened and needs somebody. Collapsed, the count disappears but a
 warm dot stays on the glyph: the detail can be hidden by width, the fact cannot.
 
-Only two things in the whole rail are warm — the queue and a governance alert.
-If a third appears, one of them is wrong.
+Only two things in the whole rail are warm: the queue and the notifications
+band. If a third appears, one of them is wrong. The governance tail above is
+flagged off with no page; when it gets one, its alert arrives through the band
+as a notification rather than as a third warm mark.
+
+## The notifications band
+
+`flags.notifications` draws a second queue-style line **above** the queue: a
+bell, `{n} notifications`, and the chevron. It links to the notifications page,
+keyed by the route id `notifications`, and it uses the queue's own classes so
+the two read as a pair.
+
+- **The count** (`notifications`) is this viewer's unread, open, undismissed
+  urgent and high notifications. The adapter reads it as a count-only list
+  (`page_size: 0`).
+  - `null` reads `--`. Offline reads `--` too, and the dot goes, like every
+    other readout.
+- **Colors:** the bell stays ink-3; the warm parts are the count and a 5px dot
+  on the bell's right shoulder. A warm glyph would make a third warm mark
+  beside the queue's.
+  - The dot sits 1.5px right of center and 2px down, ringed in
+    `--color-ground`: on the bell's shoulder, not the 26px box's corner.
+  - Collapsed, the text hides and the dot stays: the detail can be hidden by
+    width, the fact can't.
+- **The count marks itself** once on change (`sh-tick`), like the others.
+- **The flag** stays off until the page exists, since the band links to it.
+
+## The banner slot
+
+`banner` renders at the top of `.sh-main`, above the header. The rail stays
+full height, and the header and page move down by the banner's height. The slot
+owns no chrome and collapses when empty. `NotifyStrip` is its only intended
+occupant. In immersive mode it fades and goes inert with the rest of the
+chrome, and keeps its height.
+
+A shell handed a banner publishes the slot's height as `--sh-banner-h` on
+`<html>` (a ResizeObserver, taken back on unmount). Fixed layers outside the
+shell's tree, today `ToastLog`, read it to stay clear. That makes it the
+shell's one write outside its own subtree, and it is deliberate: the toast log
+mounts beside the shell, not inside it.
 
 ## When the connection is gone
 

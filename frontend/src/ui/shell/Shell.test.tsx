@@ -1,6 +1,6 @@
-import { render, screen, within } from '@testing-library/react'
+import { act, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest'
 import Shell from './Shell'
 
 // What is worth pinning here is the permission model and the layer discipline —
@@ -203,6 +203,7 @@ describe('Shell — a page can ask for the whole screen', () => {
     // the reader tabs into a rail they cannot see.
     expect(rail()).toHaveAttribute('inert')
     expect(document.querySelector('.sh-head')).toHaveAttribute('inert')
+    expect(document.querySelector('.sh-banner')).toHaveAttribute('inert')
     expect(document.querySelector('.sh')).toHaveAttribute('data-immersive')
 
     // Nothing changed size. A collapse would reflow the page, which is the
@@ -261,5 +262,92 @@ describe('Shell — the scope switcher trades in team ids', () => {
 
     await user.click(rows[1])
     expect(onTeamChange).toHaveBeenCalledWith('t2')
+  })
+})
+
+describe('Shell — the notifications band', () => {
+  function band() {
+    return document.querySelector('.sh-notif')
+  }
+
+  it('is absent until the flag says the page exists', () => {
+    const { rerender } = render(<Shell mode="multi" notifications={3} />)
+    expect(band()).not.toBeInTheDocument()
+
+    rerender(<Shell mode="multi" notifications={3} flags={{ notifications: true }} />)
+    expect(band()).toBeInTheDocument()
+  })
+
+  it('reads -- with no dot while the count is unknown or the connection is gone', () => {
+    const { rerender } = render(
+      <Shell mode="multi" notifications={null} flags={{ notifications: true }} />,
+    )
+    expect(band()).toHaveTextContent('-- notifications')
+    expect(band()).not.toHaveAttribute('data-unread')
+
+    // The noun follows what is drawn: one unread, offline, still reads as unknown.
+    rerender(<Shell mode="multi" notifications={1} offline flags={{ notifications: true }} />)
+    expect(band()).toHaveTextContent('-- notifications')
+    expect(band()).not.toHaveAttribute('data-unread')
+  })
+
+  it('is unread exactly while the count is above zero', () => {
+    const { rerender } = render(
+      <Shell mode="multi" notifications={0} flags={{ notifications: true }} />,
+    )
+    expect(band()).not.toHaveAttribute('data-unread')
+
+    rerender(<Shell mode="multi" notifications={1} flags={{ notifications: true }} />)
+    expect(band()).toHaveAttribute('data-unread')
+    expect(band()).toHaveTextContent('1 notification')
+  })
+
+  it('is a door to its route', async () => {
+    const onRoute = vi.fn()
+    render(
+      <Shell mode="multi" notifications={2} flags={{ notifications: true }} onRoute={onRoute} />,
+    )
+    await userEvent.setup().click(screen.getByRole('link', { name: /2 notifications/ }))
+    expect(onRoute).toHaveBeenCalledWith('notifications')
+  })
+})
+
+describe('Shell — the banner slot', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('publishes its height for layers outside the shell, and takes it back on unmount', () => {
+    // The shell observes more than the slot, so every callback is kept.
+    const observed: Array<() => void> = []
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(cb: () => void) {
+          observed.push(cb)
+        }
+        observe() {}
+        disconnect() {}
+      },
+    )
+    const height = vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(40)
+    const root = document.documentElement
+
+    const { unmount } = render(<Shell mode="multi" banner={<div>strip</div>} />)
+    expect(root.style.getPropertyValue('--sh-banner-h')).toBe('40px')
+
+    height.mockReturnValue(26)
+    act(() => observed.forEach((cb) => cb()))
+    expect(root.style.getPropertyValue('--sh-banner-h')).toBe('26px')
+
+    // A page without a shell must not inherit a stale offset.
+    unmount()
+    expect(root.style.getPropertyValue('--sh-banner-h')).toBe('')
+  })
+
+  it('publishes nothing when it was handed no banner', () => {
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(40)
+    render(<Shell mode="multi" />)
+    expect(document.documentElement.style.getPropertyValue('--sh-banner-h')).toBe('')
   })
 })

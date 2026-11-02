@@ -20,6 +20,11 @@ export type Flags = {
    * exists — the same absent-not-disabled rule, applied to ourselves.
    */
   governance?: boolean
+  /**
+   * The notifications band above the queue. Off until the /notifications page
+   * exists, since the band links to it.
+   */
+  notifications?: boolean
 }
 
 export type RailCounts = {

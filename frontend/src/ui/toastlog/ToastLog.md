@@ -23,6 +23,9 @@ one block and a single toast is about 38px tall. The surface is the float
 treatment: `--color-raised`, `--edge-float`, `--shadow-float`, radius 8.
 
 It sits 12px below the 55px shell header at `right: 16px`, and is 360px wide.
+When the shell's banner slot is showing a notification strip, the log sits
+below that too: the shell publishes the slot's height as `--sh-banner-h`, and
+the log's `top` follows it over 160ms.
 
 **At most five rows.** Past five, a row leaves early through the normal exit,
 chosen by what the reader can most afford to lose:

@@ -26,6 +26,7 @@ import BoardCard from './BoardCard'
 import ConvergeCard from './ConvergeCard'
 import CratePileCard from './CratePileCard'
 import FlapCountCard from './FlapCountCard'
+import NotifyStripCard from './NotifyStripCard'
 import PrimitivesCard from './PrimitivesCard'
 import RunRowsCard from './RunRowsCard'
 import ScanCard from './ScanCard'
@@ -326,6 +327,7 @@ export default function UiGallery() {
             <PrimitivesCard />
             <TooltipCard />
             <ToastLogCard />
+            <NotifyStripCard />
             <ScanCard />
             <FlapCountCard />
             <CratePileCard />

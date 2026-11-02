@@ -1391,6 +1391,10 @@ export type WSEvent =
   // org-scoped: the client refetches GET /api/orgs/{org}/sources, which is
   // where the scoping lives.
   | { type: 'sources_updated'; data: Record<string, never> }
+  // A notification this viewer is sent opened, escalated or resolved, or their
+  // own marks changed in another tab. Payload-free: the client refetches the
+  // inbox reads, which carry the scoping.
+  | { type: 'notifications_updated'; data: Record<string, never> }
   // Something about the conversations resource changed in a way its read
   // projections would show. Payload-free and org-scoped — the invalidation
   // tier, the client refetches through POST /api/agent/conversations/list. Not

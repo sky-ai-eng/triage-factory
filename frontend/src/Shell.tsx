@@ -4,6 +4,7 @@ import UiShell from './ui/shell/Shell'
 import type { Grant, RailCounts } from './ui/shell/routes'
 import { useOrgHref } from './hooks/useOrgHref'
 import { useRailCounts } from './hooks/useRailCounts'
+import { useNotificationFeed } from './hooks/useNotificationFeed'
 import { useWsConnected } from './hooks/useWebSocket'
 import { useOptionalAuth } from './contexts/AuthContext'
 import { useOrgRole } from './hooks/useOrgRole'
@@ -11,6 +12,7 @@ import { useActiveTeam, useTeams } from './hooks/useTeams'
 import type { ShellScope } from './hooks/useShellScope'
 import { FeatureFleet, useEntitlements } from './hooks/useEntitlements'
 import { ChromeProvider } from './contexts/ChromeContext'
+import { NotificationConfirm, NotificationStrip } from './components/ShellNotifications'
 
 // The application frame. This file is the ADAPTER: it resolves who the viewer
 // is, translates the design system's route ids into this app's paths, and hands
@@ -46,6 +48,7 @@ const PATHS: Record<string, string> = {
   org: '/org',
   fleet: '/fleet',
   queue: '/triage',
+  notifications: '/notifications',
   settings: '/settings',
 }
 
@@ -85,6 +88,7 @@ const TITLES: Record<string, string> = {
   org: 'Organization',
   fleet: 'Fleet',
   queue: 'Queue',
+  notifications: 'Notifications',
   settings: 'Settings',
 }
 
@@ -165,6 +169,10 @@ export default function Shell() {
   const { needs, running, queued } = useRailCounts()
   const connected = useWsConnected()
 
+  // The band's count, the strip's urgent items and its arrivals, kept fresh
+  // off the same websocket.
+  const notes = useNotificationFeed()
+
   const route = routeIdFor(pathname)
 
   // Full-bleed routes (the agent run station) drop the frame so the page owns
@@ -178,44 +186,55 @@ export default function Shell() {
     // ask for the whole screen and have the answer reach the chrome above it.
     <ChromeProvider>
       {({ immersive, header }) => (
-        <UiShell
-          immersive={immersive}
-          offline={!connected}
-          mode={isMulti ? 'multi' : 'local'}
-          grants={grants}
-          flags={{
-            marketplace: isMulti,
-            // Governance has a rail row and a warm alert tail in the design, and no
-            // page. Off until one exists — absent, not disabled, applied to us.
-            governance: false,
-          }}
-          org={activeOrg?.name ?? (isMulti ? '' : 'Triage Factory')}
-          team={scope.teamId ? { id: scope.teamId, name: scope.teamName } : null}
-          teams={teamRows}
-          onTeamChange={onTeamChange}
-          route={route}
-          onRoute={onRoute}
-          // The header band is the shell's; what fills it is the page's. A page
-          // that has something better to say sends it over ChromeContext; until
-          // one does, the rail's name for where you are is the honest answer.
-          crumbs={header?.crumbs}
-          title={header?.title ?? TITLES[route] ?? ''}
-          subtitle={header?.subtitle}
-          actions={header?.actions}
-          onTitleSave={header?.onTitleSave}
-          needs={needs}
-          running={running}
-          queued={queued}
-          counts={counts}
-          user={
-            isMulti && auth?.me
-              ? { name: auth.me.display_name || auth.me.email || 'You', email: auth.me.email || '' }
-              : null
-          }
-          onSignOut={isMulti ? () => void auth?.logout() : undefined}
-        >
-          <Outlet context={scope} />
-        </UiShell>
+        <>
+          <UiShell
+            immersive={immersive}
+            offline={!connected}
+            mode={isMulti ? 'multi' : 'local'}
+            grants={grants}
+            flags={{
+              marketplace: isMulti,
+              // Governance has a rail row and a warm alert tail in the design, and no
+              // page. Off until one exists — absent, not disabled, applied to us.
+              governance: false,
+              // TODO(TFAC-1239): on once the notifications page exists, since
+              // the band links to it. The strip's titles already open it.
+              notifications: false,
+            }}
+            org={activeOrg?.name ?? (isMulti ? '' : 'Triage Factory')}
+            team={scope.teamId ? { id: scope.teamId, name: scope.teamName } : null}
+            teams={teamRows}
+            onTeamChange={onTeamChange}
+            route={route}
+            onRoute={onRoute}
+            // The header band is the shell's; what fills it is the page's. A page
+            // that has something better to say sends it over ChromeContext; until
+            // one does, the rail's name for where you are is the honest answer.
+            crumbs={header?.crumbs}
+            title={header?.title ?? TITLES[route] ?? ''}
+            subtitle={header?.subtitle}
+            actions={header?.actions}
+            onTitleSave={header?.onTitleSave}
+            needs={needs}
+            running={running}
+            queued={queued}
+            notifications={notes.count}
+            banner={<NotificationStrip feed={notes} teams={teamRows} held={immersive} />}
+            counts={counts}
+            user={
+              isMulti && auth?.me
+                ? {
+                    name: auth.me.display_name || auth.me.email || 'You',
+                    email: auth.me.email || '',
+                  }
+                : null
+            }
+            onSignOut={isMulti ? () => void auth?.logout() : undefined}
+          >
+            <Outlet context={scope} />
+          </UiShell>
+          <NotificationConfirm feed={notes} />
+        </>
       )}
     </ChromeProvider>
   )

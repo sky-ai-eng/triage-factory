@@ -176,12 +176,36 @@ export async function apiList<T>(
   body: ListRequest,
   options: ApiFetchOptions = {},
 ): Promise<ListPage<T>> {
-  const page = await apiJSON<Partial<ListPage<T>>>(path, {
+  return listPage(await apiJSON<Partial<ListPage<T>>>(path, listInit(body, options)))
+}
+
+/** apiListAt is `apiList`, also answering the server's clock when it answered
+ *  (its `Date` header), for a caller comparing the rows' timestamps with now:
+ *  the viewer's own clock may be minutes off the server's. Without the header
+ *  it answers the viewer's clock. */
+export async function apiListAt<T>(
+  path: string,
+  body: ListRequest,
+  options: ApiFetchOptions = {},
+): Promise<{ page: ListPage<T>; at: number }> {
+  const res = await apiFetch(path, listInit(body, options))
+  const page = listPage(await readJSON<Partial<ListPage<T>>>(res, path))
+  const at = Date.parse(res.headers.get('Date') ?? '')
+  return { page, at: Number.isNaN(at) ? Date.now() : at }
+}
+
+/** The request every list read sends. See `apiList` for why the caller's
+ *  headers go first. */
+function listInit(body: ListRequest, options: ApiFetchOptions): ApiFetchOptions {
+  return {
     ...options,
     method: 'POST',
     headers: { ...options.headers, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-  })
+  }
+}
+
+function listPage<T>(page: Partial<ListPage<T>>): ListPage<T> {
   return {
     items: page.items ?? [],
     next_page_token: page.next_page_token ?? '',

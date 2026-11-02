@@ -23,6 +23,7 @@ export function ShellCard() {
   const [grants, setGrants] = useState<Grant[]>(['org-admin', 'team-admin'])
   const [marketplace, setMarketplace] = useState(true)
   const [governance, setGovernance] = useState(true)
+  const [notifications, setNotifications] = useState(true)
   const [offline, setOffline] = useState(false)
   const [known, setKnown] = useState(true)
   const [route, setRoute] = useState('board')
@@ -63,6 +64,7 @@ export function ShellCard() {
         {CHIPS.map((c) => chip(grants.includes(c.key), c.label, () => toggle(c.key)))}
         {chip(marketplace, 'marketplace', () => setMarketplace((m) => !m))}
         {chip(governance, 'governance', () => setGovernance((g) => !g))}
+        {chip(notifications, 'notifications', () => setNotifications((v) => !v))}
       </div>
 
       <p className="gal-note">
@@ -94,7 +96,7 @@ export function ShellCard() {
         <Shell
           mode={multi ? 'multi' : 'local'}
           grants={multi ? grants : []}
-          flags={{ marketplace: marketplace && multi, governance }}
+          flags={{ marketplace: marketplace && multi, governance, notifications }}
           offline={offline}
           org={multi ? 'sky-ai-eng' : 'Triage Factory'}
           team={{ id: 't-platform', name: 'platform' }}
@@ -112,6 +114,7 @@ export function ShellCard() {
           needs={known ? needs : null}
           running={known ? 3 : null}
           queued={known ? 18 : null}
+          notifications={known ? 2 : null}
           counts={known ? { repos: 8, pulls: 23, usage: '$41', fleet: 6, gov: 2 } : {}}
           user={multi ? { name: 'Aidan', email: 'aidan@allchin.com' } : null}
         >
