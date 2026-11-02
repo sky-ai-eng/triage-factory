@@ -103,6 +103,9 @@ func TestNotify_ConditionRaisedAndResolvedByItsCloseRelation(t *testing.T) {
 	if got := rec.Events(runmode.LocalDefaultOrgID); len(got) != 0 {
 		t.Errorf("after a green suite: %+v; want the condition resolved", got)
 	}
+	if got := rec.ResolvedEvents(runmode.LocalDefaultOrgID); len(got) != 1 || got[0].ClosedBy != domain.EventGitHubPRCICheckPassed {
+		t.Errorf("resolved %+v; want the condition, closed by the pass", got)
+	}
 }
 
 // A type no typed close relation closes posts a notice; a terminating close
@@ -133,6 +136,30 @@ func TestNotify_NoticeAndTerminatingClose(t *testing.T) {
 	}
 	if got := rec.Events(runmode.LocalDefaultOrgID); len(got) != 1 || got[0].EventType != domain.EventGitHubPRReviewCommented {
 		t.Errorf("after the merge: %+v; want only the notice left", got)
+	}
+	if got := rec.ResolvedEvents(runmode.LocalDefaultOrgID); len(got) != 1 || got[0].ClosedBy != domain.EventGitHubPRMerged {
+		t.Errorf("resolved %+v; want the CI condition, closed by the merge", got)
+	}
+}
+
+// The poll's close obligation resolves the entity's conditions as the merge
+// it stands in for would, naming no closer: the obligation is TF's own
+// bookkeeping, and to a reader the entity closed.
+func TestNotify_CloseOwedNamesNoCloser(t *testing.T) {
+	rec := notifytest.Record(t)
+	database, r, entityID := notifyFixture(t)
+	ctx := context.Background()
+	seedNotifyRule(t, database, runmode.LocalDefaultTeamID, domain.EventGitHubPRCICheckFailed, domain.NotifyAudienceTeam)
+
+	if err := r.HandleEvent(ctx, ciEvent(t, entityID, "owner/repo")); err != nil {
+		t.Fatalf("route ci_check_failed: %v", err)
+	}
+	owed := events.SystemEntityCloseOwedMetadata{Reason: events.SystemEntityCloseOwedReasonTerminalSnapshot}
+	if err := r.HandleEvent(ctx, githubEvent(entityID, domain.EventSystemEntityCloseOwed, "", owed)); err != nil {
+		t.Fatalf("route close_owed: %v", err)
+	}
+	if got := rec.ResolvedEvents(runmode.LocalDefaultOrgID); len(got) != 1 || got[0].EventType != domain.EventGitHubPRCICheckFailed || got[0].ClosedBy != "" {
+		t.Errorf("resolved %+v; want the CI condition, with no closer", got)
 	}
 }
 

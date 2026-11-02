@@ -46,6 +46,13 @@ type EventOccurrence struct {
 	Seen int
 }
 
+// ResolvedEvent is an event condition the close phase resolved, with the
+// event type it named as the closer: empty when none did.
+type ResolvedEvent struct {
+	EventOccurrence
+	ClosedBy string
+}
+
 // Recorder holds the occurrences the verbs left open.
 type Recorder struct {
 	mu sync.Mutex
@@ -54,6 +61,8 @@ type Recorder struct {
 	kinds map[string]sink.Kind
 	// events is org → event key → occurrence.
 	events map[string]map[sink.EventKey]EventOccurrence
+	// resolved is org → the event conditions resolved, in order.
+	resolved map[string][]ResolvedEvent
 	// closedSweeps counts ResolveClosedEntities calls per org.
 	closedSweeps map[string]int
 }
@@ -71,7 +80,7 @@ func Record(t testing.TB) *Recorder {
 	t.Helper()
 	r := &Recorder{
 		open: map[string]map[string]map[string]Occurrence{}, kinds: map[string]sink.Kind{},
-		events: map[string]map[sink.EventKey]EventOccurrence{}, closedSweeps: map[string]int{},
+		events: map[string]map[sink.EventKey]EventOccurrence{}, resolved: map[string][]ResolvedEvent{}, closedSweeps: map[string]int{},
 	}
 	installed.mu.Lock()
 	if len(installed.recorders) == 0 {
@@ -187,12 +196,21 @@ func (r *Recorder) openEvents(orgID, entityID string, kinds []string) []sink.Eve
 	return out
 }
 
-func (r *Recorder) resolveEvents(orgID string, keys []sink.EventKey) {
+// ResolvedEvents returns the event conditions resolved in orgID, in the order
+// they resolved.
+func (r *Recorder) ResolvedEvents(orgID string) []ResolvedEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.resolved[orgID])
+}
+
+func (r *Recorder) resolveEvents(orgID, closedBy string, keys []sink.EventKey) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, key := range keys {
 		if occ, ok := r.events[orgID][key]; ok && occ.Condition {
 			delete(r.events[orgID], key)
+			r.resolved[orgID] = append(r.resolved[orgID], ResolvedEvent{EventOccurrence: occ, ClosedBy: closedBy})
 		}
 	}
 }
@@ -369,9 +387,9 @@ func (fanout) ResolveClosedEntities(_ context.Context, orgID string) {
 	}
 }
 
-func (fanout) ResolveEvents(_ context.Context, orgID, _ string, keys []sink.EventKey) {
+func (fanout) ResolveEvents(_ context.Context, orgID, closedBy string, keys []sink.EventKey) {
 	for _, r := range recorders() {
-		r.resolveEvents(orgID, keys)
+		r.resolveEvents(orgID, closedBy, keys)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"slices"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -89,6 +90,27 @@ func TestBuildNotify_InstallsTheVerbs(t *testing.T) {
 	}
 	if len(resolved) != 1 || resolved[0].Resolution != "CI Check Passed on acme/widgets#18." {
 		t.Errorf("resolved rows = %+v; want the event row, resolved in the event rendering's words", resolved)
+	}
+
+	// An event of the row's own type closing it (a reassignment, in the
+	// catalog's close relations) is told apart from the one that raised it.
+	kinds.Event.Raise(ctx, org, notify.EventRaise{EventType: domain.EventGitHubPRCICheckFailed, Source: "github", Entity: *entity, Condition: true,
+		Rules: []notify.EventRule{{HandlerID: "h1", TeamID: runmode.LocalDefaultTeamID, Name: "Mine", Audience: domain.NotifyAudienceCreator, CreatorUserID: user}}})
+	targets, err = notify.OpenEventConditions(ctx, org, entity.ID, []string{domain.EventGitHubPRCICheckFailed})
+	if err != nil || len(targets) != 1 {
+		t.Fatalf("OpenEventConditions = %+v, %v; want the second CI condition", targets, err)
+	}
+	notify.ResolveEvents(ctx, org, entity.ID, domain.EventGitHubPRCICheckFailed, targets)
+	resolved, _, err = stores.Notifications.ListForViewer(ctx, org, user, db.NotificationListFilter{Status: domain.NotificationResolved}, db.ListOpts{Limit: 50})
+	if err != nil {
+		t.Fatalf("ListForViewer: %v", err)
+	}
+	var again []string
+	for _, n := range resolved {
+		again = append(again, n.Resolution)
+	}
+	if !slices.Contains(again, "CI Check Failed again on acme/widgets#18.") {
+		t.Errorf("resolutions = %q; want the second row closed by its own type", again)
 	}
 }
 

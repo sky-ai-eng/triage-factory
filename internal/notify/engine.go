@@ -265,7 +265,7 @@ func (e *engine) commitClosedBy(ctx context.Context, label, orgID, closedBy stri
 // logged and counted and left without one: the resolution itself stands.
 func (e *engine) describe(ctx context.Context, tx db.NotificationStore, changed []domain.Notification, closedBy string) error {
 	for _, n := range changed {
-		if n.ResolvedAt == nil || n.Resolution != "" {
+		if n.ResolvedAt == nil {
 			continue
 		}
 		text, err := e.why(n, closedBy)

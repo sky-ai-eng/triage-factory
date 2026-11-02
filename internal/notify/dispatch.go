@@ -218,8 +218,9 @@ func (c *Caller) Actions(ctx context.Context, n domain.Notification) ([]ActionVi
 // and resolves n when the handler reports the condition resolved. n is a row
 // the caller may read, read under their claims, and ctx carries those claims
 // to the handler. The handler's error is returned unchanged; a result with no
-// outcome, or a resolution reason outside the vocabulary, is the handler's
-// bug and an error.
+// outcome, or a resolution reason other than cleared or audience_removed, is
+// the handler's bug and an error: a source turned off resolves its rows
+// through ClearSource, not through an action.
 //
 // A failed resolve is logged and counted as a verb's write is, and the result
 // is still returned: the effect happened, and the producer's next evaluation
@@ -256,10 +257,10 @@ func (c *Caller) RunAction(ctx context.Context, n domain.Notification, actionID 
 	}
 	switch res.Resolved {
 	case "":
-	case domain.NotificationResolvedCleared, domain.NotificationResolvedAudienceRemoved, domain.NotificationResolvedSourceOff:
+	case domain.NotificationResolvedCleared, domain.NotificationResolvedAudienceRemoved:
 		resolveRow(context.WithoutCancel(ctx), n, res.Resolved)
 	default:
-		return ActionResult{}, fmt.Errorf("%s action %q resolved for reason %q, which is not one notify records", n.Kind, actionID, res.Resolved)
+		return ActionResult{}, fmt.Errorf("%s action %q resolved for reason %q, which is not one an action reports", n.Kind, actionID, res.Resolved)
 	}
 	return res, nil
 }

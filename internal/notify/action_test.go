@@ -391,11 +391,12 @@ func TestLocal_RunAction(t *testing.T) {
 		t.Errorf("RunAction with a failing handler: err = %v; want it unchanged", err)
 	}
 
-	// A result that says nothing, or resolves for a reason notify does not
-	// record, is the handler's bug, and resolves nothing.
+	// A result that says nothing, or resolves for a reason an action does not
+	// report, is the handler's bug, and resolves nothing.
 	for _, bad := range []ActionResult{
 		{Outcome: " ", Resolved: domain.NotificationResolvedCleared},
 		{Outcome: "Fixed.", Resolved: "fixed"},
+		{Outcome: "Turned off.", Resolved: domain.NotificationResolvedSourceOff},
 	} {
 		recordingHandler(t, bad, nil)
 		if _, err := caller.RunAction(ctx, row, "retry"); err == nil {

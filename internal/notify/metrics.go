@@ -26,7 +26,7 @@ type counters struct {
 // logged rather than propagated.
 func newCounters(mp metric.MeterProvider) *counters {
 	c, err := mp.Meter("internal/notify").Int64Counter("notify.write_failures",
-		metric.WithDescription("Notification verb calls that wrote nothing because an audience, a write or the kind itself failed, by kind."))
+		metric.WithDescription("Notification verb calls that wrote nothing because an audience, a write or the kind itself failed, and resolved rows left without their resolution sentence, by kind."))
 	if err != nil {
 		notifyLog.Warn("notification failure counter setup failed", "error", err)
 	}
