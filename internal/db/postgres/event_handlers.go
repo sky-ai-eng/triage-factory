@@ -225,6 +225,13 @@ func (s *eventHandlerStore) GetEnabledForEventSystem(ctx context.Context, orgID,
 	return getEnabledEventHandlers(ctx, s.admin, orgID, eventType)
 }
 
+// pgMatchableHandler is the WHERE fragment for a handler an event can match:
+// enabled, live, and on a team that isn't archived. It is shared with the task
+// list's rule order so that order counts exactly the handlers
+// GetEnabledForEvent returns.
+const pgMatchableHandler = `enabled = TRUE AND deleted_at IS NULL
+	AND NOT EXISTS (SELECT 1 FROM teams tm WHERE tm.id = event_handlers.team_id AND tm.deleted_at IS NOT NULL)`
+
 func getEnabledEventHandlers(ctx context.Context, q queryer, orgID, eventType string) ([]domain.EventHandler, error) {
 	// Rules before triggers is the invariant the router relies on (same
 	// observable behavior as the pre-unification two-phase loop); notify
@@ -234,8 +241,7 @@ func getEnabledEventHandlers(ctx context.Context, q queryer, orgID, eventType st
 	rows, err := q.QueryContext(ctx, `
 		SELECT `+pgEventHandlerColumns+`
 		FROM event_handlers
-		WHERE org_id = $1 AND event_type = $2 AND enabled = TRUE AND deleted_at IS NULL
-		  AND NOT EXISTS (SELECT 1 FROM teams t WHERE t.id = event_handlers.team_id AND t.deleted_at IS NOT NULL)
+		WHERE org_id = $1 AND event_type = $2 AND `+pgMatchableHandler+`
 		ORDER BY `+pgHandlerKindOrder+`,
 		         CASE WHEN kind = 'rule' THEN sort_order ELSE 0 END ASC,
 		         created_at DESC, id

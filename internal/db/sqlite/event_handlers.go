@@ -203,6 +203,13 @@ func (s *eventHandlerStore) Get(ctx context.Context, orgID, id string) (*domain.
 	return &h, nil
 }
 
+// sqliteMatchableHandler is the WHERE fragment for a handler an event can
+// match: enabled, live, and on a team that isn't archived. It is shared with
+// the task list's rule order so that order counts exactly the handlers
+// GetEnabledForEvent returns.
+const sqliteMatchableHandler = `enabled = 1 AND deleted_at IS NULL
+	AND NOT EXISTS (SELECT 1 FROM teams tm WHERE tm.id = event_handlers.team_id AND tm.deleted_at IS NOT NULL)`
+
 func (s *eventHandlerStore) GetEnabledForEvent(ctx context.Context, orgID, eventType string) ([]domain.EventHandler, error) {
 	// Rules-before-triggers order (same as Postgres impl) — preserves
 	// the pre-unification observable shape. An archived team's handlers are
@@ -210,8 +217,7 @@ func (s *eventHandlerStore) GetEnabledForEvent(ctx context.Context, orgID, event
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+sqliteEventHandlerColumns+`
 		FROM event_handlers
-		WHERE org_id = ? AND event_type = ? AND enabled = 1 AND deleted_at IS NULL
-		  AND NOT EXISTS (SELECT 1 FROM teams t WHERE t.id = event_handlers.team_id AND t.deleted_at IS NOT NULL)
+		WHERE org_id = ? AND event_type = ? AND `+sqliteMatchableHandler+`
 		ORDER BY `+sqliteHandlerKindOrder+`,
 		         CASE WHEN kind = 'rule' THEN sort_order ELSE 0 END ASC,
 		         created_at DESC, id
