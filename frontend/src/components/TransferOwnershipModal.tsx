@@ -50,7 +50,10 @@ export default function TransferOwnershipModal({
   // contract so a mid-request dismiss can't strand the user.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !submitting) onClose()
+      if (e.key === 'Escape' && !submitting) {
+        e.preventDefault()
+        onClose()
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)

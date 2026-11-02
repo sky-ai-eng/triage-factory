@@ -610,7 +610,7 @@ func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, trigg
 	s.updateBreakerCounter(taskID, triggerType, "failed")
 	s.broadcastConversationFailed(orgID, conversationID, kind)
 
-	// Surface as a sticky error toast so the user sees the failure even when
+	// Surface as an error toast so the user sees the failure even when
 	// they're not watching the runs page. A memory-limit kill gets copy that
 	// says what happened and which knob to turn instead of echoing the raw
 	// error prefix; everything else truncates the message — full stderr dumps

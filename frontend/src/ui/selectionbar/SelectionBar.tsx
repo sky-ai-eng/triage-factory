@@ -212,7 +212,11 @@ function Picker({
     // The canvas can be zoomed while the picker is already open, and a resize
     // is the only signal that gives.
     window.addEventListener('resize', measure)
-    const onKey = (e: globalThis.KeyboardEvent) => e.key === 'Escape' && onToggle(false)
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      e.preventDefault()
+      onToggle(false)
+    }
     window.addEventListener('keydown', onKey)
     return () => {
       window.removeEventListener('resize', measure)

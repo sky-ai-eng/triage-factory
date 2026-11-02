@@ -13,4 +13,4 @@ export function useToast(): ToastItem[] {
 
 // Re-export the fire helpers so consumers can import from one place.
 export { toast } from './toastStore'
-export type { ToastLevel, ToastItem } from './toastStore'
+export type { ToastAction, ToastLevel, ToastItem } from './toastStore'

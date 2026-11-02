@@ -1689,7 +1689,10 @@ function BindingGraphInner({
   useEffect(() => {
     if (!deleteConfirm) return
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !bulkDeleteGuard.isPending()) setDeleteConfirm(null)
+      if (e.key === 'Escape' && !bulkDeleteGuard.isPending()) {
+        e.preventDefault()
+        setDeleteConfirm(null)
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)

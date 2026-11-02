@@ -479,7 +479,10 @@ export default function AssigneePicker({
       close()
     }
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') close(true)
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        close(true)
+      }
     }
     document.addEventListener('pointerdown', swallow, true)
     document.addEventListener('click', swallow, true)
