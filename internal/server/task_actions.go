@@ -1040,10 +1040,10 @@ func writeDelegateSpawnError(w http.ResponseWriter, err error) {
 	}
 	// The task's team was archived, so its run would belong to a team nobody
 	// can see and nothing stops. A conflict with the task's state, not a
-	// fault in the body. The handoff never lands a claim on an archived team,
-	// so this answers only an archive that landed between the handoff and the
-	// run insert. The bot claim that leaves stays: the task is on an archived
-	// team either way, and a claimed task there is visible to nobody.
+	// fault in the body. The handoff refuses a team that is archived when it
+	// reads it, so this answers an archive that committed after that read and
+	// before the run insert. The bot claim that leaves stays: the task is on an
+	// archived team either way, and a claimed task there is visible to nobody.
 	if errors.Is(err, delegate.ErrTeamArchived) {
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 			Reason:  httpx.ReasonSpawnFailed,

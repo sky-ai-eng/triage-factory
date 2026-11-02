@@ -62,8 +62,8 @@ func RunClaimArchivedTeamConformance(t *testing.T, factory ClaimArchivedTeamFact
 	ctx := context.Background()
 
 	// The case a member of an active team and an archived one meets: the
-	// archived team owns the task and both teams can see it. The doors used
-	// to prefer the owner, which kept the task on the archived team.
+	// archived team owns the task and both teams can see it. The claimant
+	// belongs to the owner, and the owner is still not kept.
 	t.Run("EachClaimMovesTheTaskOffAnArchivedOwnerOntoTheActiveTeam", func(t *testing.T) {
 		fx := factory(t)
 		seed := func(t *testing.T) string {
