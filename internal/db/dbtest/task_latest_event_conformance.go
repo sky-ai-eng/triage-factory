@@ -106,6 +106,31 @@ func RunTaskLatestEventConformance(t *testing.T, mk TaskLatestEventFactory) {
 		}
 	})
 
+	// A closed task can still be resumed, and a resume writes its row just
+	// before the claim that builds the briefing, so both rows are newer than
+	// any event that bumped the task.
+	t.Run("a_close_or_resume_does_not_count", func(t *testing.T) {
+		stores, orgID, task, _ := seed(t, "close-resume")
+		if err := stores.Tasks.RecordEventSystem(ctx, orgID, task.ID, task.PrimaryEventID, "spawned"); err != nil {
+			t.Fatalf("record spawned row: %v", err)
+		}
+		for kind, eventType := range map[string]string{
+			"closed":  domain.EventGitHubPRMerged,
+			"resumed": domain.EventSystemConversationResumed,
+		} {
+			id, err := stores.Events.RecordSystem(ctx, orgID, domain.Event{EventType: eventType, MetadataJSON: `{}`})
+			if err != nil {
+				t.Fatalf("record %s event: %v", kind, err)
+			}
+			if err := stores.Tasks.RecordEventSystem(ctx, orgID, task.ID, id, kind); err != nil {
+				t.Fatalf("record %s row: %v", kind, err)
+			}
+		}
+		if got := latest(t, stores, orgID, task.ID); got != task.PrimaryEventID {
+			t.Errorf("LatestEventIDSystem = %q, want the spawning event %q", got, task.PrimaryEventID)
+		}
+	})
+
 	t.Run("empty_for_a_task_with_no_row", func(t *testing.T) {
 		stores, orgID, task, _ := seed(t, "none")
 		if got := latest(t, stores, orgID, task.ID); got != "" {

@@ -866,8 +866,17 @@ func TestTaskContext_ABumpedTaskIsBriefedWithItsNewestEvent(t *testing.T) {
 		}
 	}
 	// The spawning failure's values appear nowhere, the raw metadata block
-	// included.
-	for _, stale := range []string{"29f4327", `"run"`, "101", "201"} {
+	// included. Each is matched with its label or key: the untrusted-region
+	// markers are hex, so a bare number could match one.
+	for _, stale := range []string{
+		"29f4327",
+		"- Check: run",
+		"- Check run ID: 101",
+		"- Actions run ID: 201",
+		`"check_name":"run"`,
+		`"check_run_id":101`,
+		`"workflow_run_id":201`,
+	} {
 		if strings.Contains(got, stale) {
 			t.Errorf("task context carries the spawning event's %s;\n%s", stale, got)
 		}
