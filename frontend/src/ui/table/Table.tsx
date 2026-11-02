@@ -278,6 +278,9 @@ export function Table({
   mark = null,
 }: TableProps) {
   const RH = lines === 1 ? ROW_H : ROW_H2
+  // Whether the mark column is drawn: a caller's inline function is a new
+  // value every render, and the layout depends only on its presence.
+  const marked = !!mark
   const cols = useMemo(() => columns.map(columnDef), [columns])
   const [working, setWorking] = useState(rows)
   const [sel, setSel] = useState<Record<string, boolean>>({})
@@ -613,11 +616,11 @@ export function Table({
     for (const f of framesOf(box.current!)) ro.observe(f)
     if (box.current && box.current.parentElement) ro.observe(box.current.parentElement)
     return () => ro.disconnect()
-  }, [pageSize])
+  }, [pageSize, RH])
 
   const shown = useMemo(() => {
     const gap = 10
-    const fixed = (selectable ? 20 + gap : 0) + (mark ? MARK_W + gap : 0)
+    const fixed = (selectable ? 20 + gap : 0) + (marked ? MARK_W + gap : 0)
     let keep = sizes.slice()
     const cost = () =>
       keep.reduce((n, s) => n + s.px, 0) + gap * Math.max(0, keep.length - 1) + fixed
@@ -632,17 +635,17 @@ export function Table({
       keep = keep.filter((s) => s !== next)
     }
     return keep
-  }, [sizes, room, selectable])
+  }, [sizes, room, selectable, marked])
 
   // The one genuinely computed style in the component: the grid comes out of
   // measurement, so it is handed to CSS as a custom property rather than as a
   // rule this file would otherwise have to write three times.
   const grid = useMemo(
     () =>
-      (mark ? MARK_W + 'px ' : '') +
+      (marked ? MARK_W + 'px ' : '') +
       (selectable ? '20px ' : '') +
       shown.map((s) => s.track).join(' '),
-    [shown, selectable, mark],
+    [shown, selectable, marked],
   )
 
   const sorted = useMemo(() => {
