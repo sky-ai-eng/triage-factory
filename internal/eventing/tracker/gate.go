@@ -69,8 +69,9 @@ func giveUpRecheck(n int) time.Duration {
 // pull request change (time.Since of the stored snapshot's ChangeSeenAt,
 // with a missing or unparseable stamp treated as changeRefreshWindow,
 // outside the window; a negative value, from a pod whose clock runs
-// ahead, is inside it). The caller computes both; tests pass them
-// directly.
+// ahead, is inside it, and sinceChangeSeen gives changeRefreshWindow for a
+// stamp more than a window ahead). The caller computes both; tests pass
+// them directly.
 //
 // Why this is safe in the common case:
 //

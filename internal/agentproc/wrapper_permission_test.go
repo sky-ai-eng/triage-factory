@@ -341,9 +341,10 @@ func TestWrapperToolBatchHookCarriesTheReply(t *testing.T) {
 }
 
 // toolBatchAbortStubSDK gives up its tool batch's hook, as an interrupt does,
-// before any reply can arrive, then stays up so a late reply can be read.
+// before any reply can arrive, then stays up until its input ends so a late
+// reply can be read.
 const toolBatchAbortStubSDK = `
-export function query({ options }) {
+export function query({ prompt, options }) {
   return {
     async *[Symbol.asyncIterator]() {
       const hook = options.hooks.PostToolBatch[0].hooks[0]
@@ -351,7 +352,7 @@ export function query({ options }) {
       const pending = hook({ hook_event_name: "PostToolBatch", tool_calls: [] }, undefined, { signal: abort.signal })
       abort.abort()
       yield { type: "stub_hook", output: await pending }
-      await new Promise((resolve) => setTimeout(resolve, 20000))
+      for await (const _ of prompt) {}
     },
     async interrupt() {},
     async setPermissionMode() {},

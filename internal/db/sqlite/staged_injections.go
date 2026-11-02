@@ -167,8 +167,7 @@ func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id strin
 	if n, err := res.RowsAffected(); err != nil || n > 0 {
 		return false, err
 	}
-	// Nothing was withdrawn. delivered only ever flips to 1, so reading it
-	// after the update cannot disagree with what stopped the update.
+	// Nothing was withdrawn: report whether a reader had flushed the row.
 	var consumed bool
 	err = s.q.QueryRowContext(ctx, `
 		SELECT EXISTS (
