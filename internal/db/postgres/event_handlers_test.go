@@ -110,6 +110,42 @@ func TestTriggerDelete_Postgres(t *testing.T) {
 	})
 }
 
+// TestArchivedTeamHandlers_Postgres runs the archived-team handler suite
+// against the Postgres impl, both pools on AdminDB like the suites above.
+func TestArchivedTeamHandlers_Postgres(t *testing.T) {
+	h := pgtest.Shared(t)
+
+	dbtest.RunArchivedTeamHandlersConformance(t, func(t *testing.T) dbtest.ArchivedTeamHandlersFixture {
+		t.Helper()
+		h.Reset(t)
+		orgID := seedPgOrgForAgents(t, h)
+		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+		return dbtest.ArchivedTeamHandlersFixture{
+			Handlers: stores.EventHandlers,
+			Teams:    stores.Teams,
+			OrgID:    orgID,
+			TeamID:   firstTeamForOrg(t, h, orgID),
+			SeedTeam: func(t *testing.T) string {
+				t.Helper()
+				return pgtest.SeedTeam(t, h, orgID, "archived-"+uuid.New().String()[:8])
+			},
+			SeedRule: func(t *testing.T, teamID string) string {
+				t.Helper()
+				priority, sortOrder := 0.5, 0
+				rule, err := stores.EventHandlers.Create(t.Context(), orgID, teamID, domain.EventHandler{
+					ID: uuid.New().String(), Kind: domain.EventHandlerKindRule,
+					EventType: domain.EventGitHubPRCICheckFailed, Enabled: true,
+					Name: "rule " + teamID[:8], DefaultPriority: &priority, SortOrder: &sortOrder,
+				})
+				if err != nil {
+					t.Fatalf("seed rule on team %s: %v", teamID, err)
+				}
+				return rule.ID
+			},
+		}
+	})
+}
+
 // shippedHandlerIDBySlug is the Postgres dbtest.ShippedHandlerIDBySlug: a raw
 // admin-pool read of event_handlers by (org_id, team_id, system_slug), live
 // rows only.

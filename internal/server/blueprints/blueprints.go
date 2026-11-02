@@ -1201,7 +1201,7 @@ func (h *Handler) handleBlueprintDuplicate(w http.ResponseWriter, r *http.Reques
 				return nil
 			case errors.Is(e, db.ErrDuplicateCrossTeam):
 				fault.raise(http.StatusUnprocessableEntity, httpx.ReasonCrossTeamRef,
-					"prompt_ids span more than one team", "prompt_ids")
+					"prompt_ids include a prompt outside the acting team", "prompt_ids")
 				return nil
 			}
 			return e

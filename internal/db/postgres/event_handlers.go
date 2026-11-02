@@ -229,11 +229,13 @@ func getEnabledEventHandlers(ctx context.Context, q queryer, orgID, eventType st
 	// Rules before triggers is the invariant the router relies on (same
 	// observable behavior as the pre-unification two-phase loop); notify
 	// rules come last. sort_order then breaks ties among rules; created_at
-	// DESC orders the rest.
+	// DESC orders the rest. An archived team's handlers are left out (see the
+	// interface doc).
 	rows, err := q.QueryContext(ctx, `
 		SELECT `+pgEventHandlerColumns+`
 		FROM event_handlers
 		WHERE org_id = $1 AND event_type = $2 AND enabled = TRUE AND deleted_at IS NULL
+		  AND NOT EXISTS (SELECT 1 FROM teams t WHERE t.id = event_handlers.team_id AND t.deleted_at IS NOT NULL)
 		ORDER BY `+pgHandlerKindOrder+`,
 		         CASE WHEN kind = 'rule' THEN sort_order ELSE 0 END ASC,
 		         created_at DESC, id

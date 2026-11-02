@@ -91,6 +91,47 @@ func TestTriggerDelete_SQLite(t *testing.T) {
 	})
 }
 
+// TestArchivedTeamHandlers_SQLite runs the archived-team handler suite against
+// the SQLite impl. Local mode never archives its team, but the store's read
+// answers the same, so a second team is seeded raw.
+func TestArchivedTeamHandlers_SQLite(t *testing.T) {
+	dbtest.RunArchivedTeamHandlersConformance(t, func(t *testing.T) dbtest.ArchivedTeamHandlersFixture {
+		t.Helper()
+		conn := openSQLiteForTest(t)
+		stores := sqlitestore.New(conn)
+		orgID := runmode.LocalDefaultOrgID
+		return dbtest.ArchivedTeamHandlersFixture{
+			Handlers: stores.EventHandlers,
+			Teams:    stores.Teams,
+			OrgID:    orgID,
+			TeamID:   runmode.LocalDefaultTeamID,
+			SeedTeam: func(t *testing.T) string {
+				t.Helper()
+				id := uuid.New().String()
+				if _, err := conn.ExecContext(t.Context(),
+					`INSERT INTO teams (id, org_id, slug, name) VALUES (?, ?, ?, ?)`, id, orgID, "archived-"+id[:8], "Archived",
+				); err != nil {
+					t.Fatalf("seed team: %v", err)
+				}
+				return id
+			},
+			SeedRule: func(t *testing.T, teamID string) string {
+				t.Helper()
+				id := uuid.New().String()
+				if _, err := conn.ExecContext(t.Context(), `
+					INSERT INTO event_handlers
+						(id, org_id, team_id, creator_user_id, kind, event_type, enabled, source,
+						 name, default_priority, sort_order, created_at, updated_at)
+					VALUES (?, ?, ?, ?, 'rule', ?, 1, 'user', ?, 0.5, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+				`, id, orgID, teamID, runmode.LocalDefaultUserID, domain.EventGitHubPRCICheckFailed, "rule "+id[:8]); err != nil {
+					t.Fatalf("seed rule on team %s: %v", teamID, err)
+				}
+				return id
+			},
+		}
+	})
+}
+
 // shippedHandlerIDBySlug is the SQLite dbtest.ShippedHandlerIDBySlug: a raw
 // read of event_handlers by (org_id, team_id, system_slug), live rows only.
 func shippedHandlerIDBySlug(conn *sql.DB, orgID string) dbtest.ShippedHandlerIDBySlug {

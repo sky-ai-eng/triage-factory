@@ -556,7 +556,7 @@ func (r *Router) resolveTeamRouting(ctx context.Context, orgID string, evt domai
 	case events.OwnershipOwned:
 		routing, ok, err = r.resolveOwnedRouting(ctx, orgID, evt, entityID, matchedRules, matchedTriggers, scopeCache)
 	case events.OwnershipRequestedParty:
-		routing, ok, err = r.resolveRequestedPartyRouting(ctx, orgID, evt, entityID, matchedRules, matchedTriggers)
+		routing, ok, err = r.resolveRequestedPartyRouting(ctx, orgID, evt, entityID, matchedRules, matchedTriggers, scopeCache)
 	default: // events.OwnershipPool, events.OwnershipUnrouted
 		routing, ok = resolvePoolRouting(matchedRules, matchedTriggers), true
 	}
@@ -629,6 +629,14 @@ func (r *Router) resolveOwnedRouting(ctx context.Context, orgID string, evt doma
 	var err error
 	if hooks, ok := sourceHooksFor(evt.EventType); ok {
 		owner, ownerSet, err = resolveSourceOwner(ctx, hooks, eventSourcePrefix(evt.EventType), orgID, evt, entityID)
+		// The hook answers for the whole ladder, so an archived team it names
+		// is taken out here, where the built-in ladders take it out per tier.
+		if err == nil {
+			owner, err = r.liveTeam(ctx, orgID, owner, scopeCache)
+		}
+		if err == nil {
+			ownerSet, err = r.liveTeams(ctx, orgID, ownerSet, scopeCache)
+		}
 	} else if isAuthorCentricGitHubEvent(evt.EventType) {
 		owner, ownerSet, err = r.authorCentricOwner(ctx, orgID, evt, entityID, scopeCache)
 	} else if eventSourcePrefix(evt.EventType) == "linear" {
@@ -663,14 +671,20 @@ func (r *Router) resolveOwnedRouting(ctx context.Context, orgID string, evt doma
 // An unresolvable identity read errors instead of falling into either arm: the
 // scoped-and-empty drop is the answer for an identity that really maps to no
 // team, and letting a failed lookup borrow it would consume the event with no
-// task at all.
-func (r *Router) resolveRequestedPartyRouting(ctx context.Context, orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler) (eventRouting, bool, error) {
+// task at all. An archived team is dropped from the set, and a failed read of
+// whether one is archived errors for the same reason.
+func (r *Router) resolveRequestedPartyRouting(ctx context.Context, orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler, scopeCache teamScopeCache) (eventRouting, bool, error) {
 	reqTeams, scoped, err := r.requestedPartyTeams(ctx, orgID, evt)
 	if err != nil {
 		return eventRouting{}, false, err
 	}
 	if !scoped {
 		return resolvePoolRouting(matchedRules, matchedTriggers), true, nil
+	}
+	reqTeams, err = r.liveTeams(ctx, orgID, reqTeams, scopeCache)
+	if err != nil {
+		routerLog.Error("requested party: team read failed", "event_type", evt.EventType, "error", err)
+		return eventRouting{}, false, err
 	}
 	if len(reqTeams) == 0 {
 		routerLog.Warn("requested party maps to no tf team, recording event but no task", "event_type", evt.EventType, "entity_id", entityID)

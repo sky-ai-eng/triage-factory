@@ -49,21 +49,99 @@ func (r *Router) handlerScopeMatchesEvent(ctx context.Context, evt domain.Event,
 // cannot tell the person.
 type teamScope struct{ open, strict bool }
 
-// teamScopeCache memoizes teamScope per team id for a single event. matchHandlers'
-// per-handler gate, the owner ladder's identity-tier gate (trackingTeams) and
-// the notify gate share one cache per event (created in routeEvent), so a team
-// referenced by any of them costs at most one store lookup per event. The
-// empty team id is never looked up — handlerScopeMatchesEvent and the notify
-// gate short-circuit it, and ladder team sets never contain it.
-type teamScopeCache map[string]teamScope
+// teamScopeCache memoizes, per team id for a single event, whether the team is
+// archived and its teamScope. matchHandlers' per-handler gate, the owner
+// ladders (their structural and prior-task tiers, and the identity tier's gate,
+// trackingTeams), the requested-party set and the notify gate share one cache
+// per event (created in routeEvent), so a team referenced by any of them costs
+// at most one team read and one tracking lookup per event. A failed team read
+// is not cached, so the next asker reads again. The empty team id is never
+// looked up — handlerScopeMatchesEvent and the notify gate short-circuit it,
+// and ladder team sets never contain it.
+type teamScopeCache map[string]teamCacheEntry
 
-func (r *Router) teamScopeCached(ctx context.Context, evt domain.Event, teamID string, cache teamScopeCache) teamScope {
-	if s, ok := cache[teamID]; ok {
-		return s
+// teamCacheEntry is what one event has learned about one team. Each half is
+// set on its own: a ladder tier reads only whether the team is archived.
+type teamCacheEntry struct {
+	archivedRead bool
+	archived     bool
+	scopeRead    bool
+	scope        teamScope
+}
+
+// teamArchivedCached reports whether teamID is archived, through cache. An
+// archived team acts on nothing: it tracks nothing, owns nothing and is added
+// to no task. A team with no row is not archived: only the stamp on a team's
+// row archives it.
+func (r *Router) teamArchivedCached(ctx context.Context, orgID, teamID string, cache teamScopeCache) (bool, error) {
+	if e := cache[teamID]; e.archivedRead {
+		return e.archived, nil
 	}
-	s := r.scopeFor(ctx, evt, teamID)
-	cache[teamID] = s
+	team, err := r.teams.GetSystem(ctx, orgID, teamID)
+	if err != nil {
+		return false, fmt.Errorf("read team %s: %w", teamID, err)
+	}
+	e := cache[teamID]
+	e.archivedRead, e.archived = true, team != nil && team.DeletedAt != nil
+	cache[teamID] = e
+	return e.archived, nil
+}
+
+// teamScopeCached is the team↔scope gate for teamID through cache. An archived
+// team tracks nothing, in both postures, and its gate is not consulted. A team
+// read that fails takes the open posture's fail-open answer, the one the
+// gate's own lookups give, and is not cached.
+func (r *Router) teamScopeCached(ctx context.Context, evt domain.Event, teamID string, cache teamScopeCache) teamScope {
+	if e := cache[teamID]; e.scopeRead {
+		return e.scope
+	}
+	archived, err := r.teamArchivedCached(ctx, evt.OrgID, teamID, cache)
+	if err != nil {
+		routerLog.Warn("team-scope gate: team read failed; undecided", "team_id", teamID, "error", err)
+		return teamScope{open: true}
+	}
+	var s teamScope
+	if !archived {
+		s = r.scopeFor(ctx, evt, teamID)
+	}
+	e := cache[teamID]
+	e.scopeRead, e.scope = true, s
+	cache[teamID] = e
 	return s
+}
+
+// liveTeam is a ladder tier's answer with an archived team taken out: teamID
+// when it names an active team, "" when it names none or an archived one, so
+// the ladder moves to its next tier. A failed team read is returned, as every
+// tier's failed read is (see authorCentricOwner).
+func (r *Router) liveTeam(ctx context.Context, orgID, teamID string, cache teamScopeCache) (string, error) {
+	if teamID == "" {
+		return "", nil
+	}
+	archived, err := r.teamArchivedCached(ctx, orgID, teamID, cache)
+	if err != nil {
+		return "", err
+	}
+	if archived {
+		return "", nil
+	}
+	return teamID, nil
+}
+
+// liveTeams is teams in order with every archived team taken out. A failed
+// team read is returned, as liveTeam's is.
+func (r *Router) liveTeams(ctx context.Context, orgID string, teams []string, cache teamScopeCache) ([]string, error) {
+	out := make([]string, 0, len(teams))
+	for _, teamID := range teams {
+		t, err := r.liveTeam(ctx, orgID, teamID, cache)
+		if err != nil {
+			return nil, err
+		}
+		if t != "" {
+			out = append(out, t)
+		}
+	}
+	return out, nil
 }
 
 // teamTracksEventScopeCached is the open answer through cache.
@@ -508,13 +586,19 @@ func (r *Router) requestedPartyTeams(ctx context.Context, orgID string, evt doma
 // becomes an owner candidate or lands in the visibility set. Tiers 1–2 (a
 // structural override owner, a prior owned task) are already repo-relevant
 // by construction and stay ungated — matching the forward-only tracking-change
-// rule, which never retroactively reassigns an already-owned entity.
+// rule, which never retroactively reassigns an already-owned entity. A tier
+// whose answer is an archived team has no answer (liveTeam), and an archived
+// team tracks nothing, so tier 3's gate drops it too.
 //
 // Claims-free ...System lookups throughout: the router runs on the eventbus
 // goroutine with no JWT context.
 func (r *Router) authorCentricOwner(ctx context.Context, orgID string, evt domain.Event, entityID string, scopeCache teamScopeCache) (owner string, ownerSet []string, err error) {
-	// Tier 1 — structural owner (owning_team_id override). One store query.
+	// Tier 1 — structural owner (owning_team_id override). One store query,
+	// plus the team read that drops an archived owner to the next tier.
 	t, err := r.entities.OwningTeamForEntitySystem(ctx, orgID, entityID)
+	if err == nil {
+		t, err = r.liveTeam(ctx, orgID, t, scopeCache)
+	}
 	if err != nil {
 		routerLog.Error("author-centric owner: structural lookup failed", "entity_id", entityID, "error", err)
 		return "", nil, fmt.Errorf("structural owner for entity %s: %w", entityID, err)
@@ -528,7 +612,12 @@ func (r *Router) authorCentricOwner(ctx context.Context, orgID string, evt domai
 	// type set) and
 	// NULL-owned priors are excluded by the store's team_id filter, so this
 	// can't fall into the review-first trap or be anchored by an unowned task.
+	// An archived team's task anchors nothing, and the ladder goes to tier 3
+	// rather than to an older task.
 	t, err = r.tasks.OwnerTeamForLatestTaskInTypesSystem(ctx, orgID, entityID, authorCentricGitHubEventTypes)
+	if err == nil {
+		t, err = r.liveTeam(ctx, orgID, t, scopeCache)
+	}
 	if err != nil {
 		routerLog.Error("author-centric owner: prior-task lookup failed", "entity_id", entityID, "error", err)
 		return "", nil, fmt.Errorf("prior-task owner for entity %s: %w", entityID, err)
@@ -658,8 +747,12 @@ func (r *Router) authorTeams(ctx context.Context, orgID string, evt domain.Event
 // Claims-free ...System lookups throughout: the router runs on the eventbus
 // goroutine with no JWT context.
 func (r *Router) assigneeCentricOwner(ctx context.Context, orgID string, evt domain.Event, entityID string, ownedTypes map[string]bool, scopeCache teamScopeCache) (owner string, ownerSet []string, err error) {
-	// Tier 1 — structural owner (owning_team_id override). One store query.
+	// Tier 1 — structural owner (owning_team_id override). One store query,
+	// plus the team read that drops an archived owner to the next tier.
 	t, err := r.entities.OwningTeamForEntitySystem(ctx, orgID, entityID)
+	if err == nil {
+		t, err = r.liveTeam(ctx, orgID, t, scopeCache)
+	}
 	if err != nil {
 		routerLog.Error("assignee-centric owner: structural lookup failed", "entity_id", entityID, "error", err)
 		return "", nil, fmt.Errorf("structural owner for entity %s: %w", entityID, err)
@@ -678,8 +771,13 @@ func (r *Router) assigneeCentricOwner(ctx context.Context, orgID string, evt dom
 	// gives related events on a stably-assigned issue (a comment whose
 	// metadata omits the assignee, an ambiguous-but-pinned owner) the same
 	// consistency GitHub gets without re-attaching to retired ownership. NULL-
-	// owned active tasks are skipped (an unresolved owner can't anchor).
+	// owned active tasks are skipped (an unresolved owner can't anchor). An
+	// archived team's task anchors nothing either, and the ladder goes to tier
+	// 3 rather than to an older task.
 	t, err = r.latestActiveOwnedTaskTeam(ctx, orgID, entityID, ownedTypes)
+	if err == nil {
+		t, err = r.liveTeam(ctx, orgID, t, scopeCache)
+	}
 	if err != nil {
 		return "", nil, fmt.Errorf("prior-task owner for entity %s: %w", entityID, err)
 	}

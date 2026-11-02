@@ -3,8 +3,10 @@ package pgtest
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 )
@@ -58,13 +60,14 @@ func TestConversationStore_Postgres_ActiveIDsForTeamSystem(t *testing.T) {
 	}
 }
 
-// TestRLS_ArchivedTeamBlocksWrites is the row-level backstop for team archive
-// (TFAC-448): once a team is archived (teams.deleted_at IS NOT NULL),
-// tf.user_can_write_team returns false even for an admin, so every team-scoped
-// write policy keyed on it rejects the write — while reads (teams_select,
-// user_in_team) still resolve the archived team so the restore path can find it.
-// Restoring re-enables writes. This is what makes "block all further writes"
-// hold for the task-scoped mutations whose team isn't in the URL.
+// TestRLS_ArchivedTeamBlocksWrites is the row-level backstop for team archive:
+// once a team is archived (teams.deleted_at IS NOT NULL), tf.user_can_write_team
+// returns false even for an admin, so every team-scoped write policy keyed on it
+// rejects the write. teams_select still resolves the archived team so the
+// restore path can find it, while tf.user_in_team, the read gate for the team's
+// own rows, answers false. Restoring re-enables writes. This is what makes
+// "block all further writes" hold for the task-scoped mutations whose team isn't
+// in the URL.
 func TestRLS_ArchivedTeamBlocksWrites(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
@@ -98,8 +101,9 @@ func TestRLS_ArchivedTeamBlocksWrites(t *testing.T) {
 	// Archive the team.
 	MustExec(t, h.AdminDB, `UPDATE teams SET deleted_at = now() WHERE id = $1`, teamA)
 
-	// The write helper now returns false even for the admin, and reads still see
-	// the team (the restore path depends on it).
+	// The write helper now returns false even for the admin, membership grants
+	// no read of the team's rows, and the team itself is still visible (the
+	// restore path depends on it).
 	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
 		var canWrite, inTeam, visible bool
 		if err := tx.QueryRow(
@@ -112,8 +116,8 @@ func TestRLS_ArchivedTeamBlocksWrites(t *testing.T) {
 		if canWrite {
 			t.Error("archived team: user_can_write_team = true, want false")
 		}
-		if !inTeam {
-			t.Error("archived team: user_in_team = false, want true (reads must still resolve it)")
+		if inTeam {
+			t.Error("archived team: user_in_team = true, want false (membership in an archived team grants no read)")
 		}
 		if !visible {
 			t.Error("archived team: not visible to teams_select, want visible (restore needs it)")
@@ -167,4 +171,108 @@ func TestRLS_ArchivedTeamBlocksWrites(t *testing.T) {
 	if body != "mission" {
 		t.Errorf("prompt body = %q, want %q (archived-team write must not have landed)", body, "mission")
 	}
+}
+
+// TestRLS_ArchivedTeamHidesItsRows pins the read half of team archive: for a
+// person's request, membership in an archived team grants no read of its
+// blueprints, prompts, event handlers or team-visibility tasks, and neither
+// does having written them — the creator arm of the blueprint, prompt and
+// event-handler policies is cut by tf.team_active. Restoring the team brings
+// every row back, because archiving keeps the memberships.
+func TestRLS_ArchivedTeamHidesItsRows(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+
+	orgID, alice, teamA := SeedOrgWithUser(t, h, "alice")
+	teamB := SeedTeam(t, h, orgID, "team-b")
+	MustExec(t, h.AdminDB, `INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'admin')`, alice, teamB)
+
+	type teamRows struct{ blueprint, prompt, handler, task string }
+	seed := func(teamID, suffix string) teamRows {
+		var r teamRows
+		if err := h.AdminDB.QueryRow(`
+			INSERT INTO blueprints (org_id, creator_user_id, team_id, name, source)
+			VALUES ($1, $2, $3, $4, 'user') RETURNING id
+		`, orgID, alice, teamID, "bp-"+suffix).Scan(&r.blueprint); err != nil {
+			t.Fatalf("seed blueprint %s: %v", suffix, err)
+		}
+		if err := h.AdminDB.QueryRow(`
+			INSERT INTO prompts (org_id, creator_user_id, team_id, name, body, source)
+			VALUES ($1, $2, $3, $4, 'mission', 'user') RETURNING id
+		`, orgID, alice, teamID, "prompt-"+suffix).Scan(&r.prompt); err != nil {
+			t.Fatalf("seed prompt %s: %v", suffix, err)
+		}
+		if err := h.AdminDB.QueryRow(`
+			INSERT INTO event_handlers (org_id, creator_user_id, team_id, kind, event_type, name, default_priority, sort_order)
+			VALUES ($1, $2, $3, 'rule', 'github:pr:opened', $4, 0.5, 0) RETURNING id
+		`, orgID, alice, teamID, "rule-"+suffix).Scan(&r.handler); err != nil {
+			t.Fatalf("seed rule %s: %v", suffix, err)
+		}
+		r.task = seedMarketplaceStatsTask(t, h, orgID, alice, teamID)
+		return r
+	}
+	a := seed(teamA, "a")
+	b := seed(teamB, "b")
+
+	// visible reads every list as alice, in one claims-carrying transaction.
+	visible := func() map[string]bool {
+		t.Helper()
+		all := map[string]bool{}
+		if err := h.WithUser(t, alice, orgID, func(tx *sql.Tx) error {
+			st := pgstore.NewForTx(tx, SecretKey)
+			bps, _, err := st.Blueprints.List(ctx, orgID, db.BlueprintListFilter{}, db.ListOpts{Limit: 200})
+			if err != nil {
+				return fmt.Errorf("blueprints: %w", err)
+			}
+			for _, x := range bps {
+				all[x.ID] = true
+			}
+			prompts, _, err := st.Prompts.List(ctx, orgID, "", db.ListOpts{Limit: 200})
+			if err != nil {
+				return fmt.Errorf("prompts: %w", err)
+			}
+			for _, x := range prompts {
+				all[x.ID] = true
+			}
+			handlers, _, err := st.EventHandlers.List(ctx, orgID, db.EventHandlerListFilter{}, db.ListOpts{Limit: 200})
+			if err != nil {
+				return fmt.Errorf("event handlers: %w", err)
+			}
+			for _, x := range handlers {
+				all[x.ID] = true
+			}
+			tasks, _, err := st.Tasks.List(ctx, orgID, db.TaskListFilter{Statuses: []string{"queued"}}, db.ListOpts{Limit: 200})
+			if err != nil {
+				return fmt.Errorf("tasks: %w", err)
+			}
+			for _, x := range tasks {
+				all[x.ID] = true
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("list as alice: %v", err)
+		}
+		return all
+	}
+	expect := func(when string, rows teamRows, want bool) {
+		t.Helper()
+		all := visible()
+		for kind, id := range map[string]string{"blueprint": rows.blueprint, "prompt": rows.prompt, "event handler": rows.handler, "task": rows.task} {
+			if all[id] != want {
+				t.Errorf("%s: %s %s visible = %v, want %v", when, kind, id, all[id], want)
+			}
+		}
+	}
+
+	expect("both active", a, true)
+	expect("both active", b, true)
+
+	MustExec(t, h.AdminDB, `UPDATE teams SET deleted_at = now() WHERE id = $1`, teamB)
+	expect("B archived", a, true)
+	expect("B archived", b, false)
+
+	MustExec(t, h.AdminDB, `UPDATE teams SET deleted_at = NULL WHERE id = $1`, teamB)
+	expect("B restored", a, true)
+	expect("B restored", b, true)
 }

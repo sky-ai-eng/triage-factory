@@ -190,9 +190,10 @@ type RouterDeps struct {
 	// settings team routing reads (hosts, the background jobs model).
 	// Required.
 	Orgs dbpkg.OrgsStore
-	// Teams reads a team's auto_delegate_enabled switch, the teams an
-	// identity's users belong to for owner routing, and the winning team's
-	// name for an automation-conflict notice. Required.
+	// Teams reads a team's auto_delegate_enabled switch, whether a team is
+	// archived, the teams an identity's users belong to for owner routing,
+	// and the winning team's name for an automation-conflict notice.
+	// Required.
 	Teams dbpkg.TeamsStore
 	// TeamRepos is the team↔repository tracking gate. Required.
 	TeamRepos dbpkg.TeamGitHubReposStore
