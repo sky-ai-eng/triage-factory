@@ -87,6 +87,13 @@ var (
 	// is the check no close can land between. A manual delegation is a
 	// person's decision and is never refused for it.
 	ErrTaskClosedForEventRun = errors.New("db: an event-triggered run names a closed task, or one whose close is held")
+	// ErrTeamArchived is returned by CreateRunWithFirstStepSystem, in both
+	// dialects and on both arms, when the team the run's conversation would
+	// belong to — the owner the firing consolidates to, or the task's own
+	// team when it names none — is archived by the time the firing reads it
+	// under the task's lock. Archiving a team stops its work, and a run
+	// committed on an archived team is one nobody stops and nobody can see.
+	ErrTeamArchived = errors.New("db: the run's team is archived")
 )
 
 // DuplicationStep is one selected prompt resolved to its place in a source
@@ -569,7 +576,16 @@ type BlueprintStore interface {
 	//     such task aborts the firing here, before anything is written. An
 	//     event-triggered firing on a task that is closed or holds a close,
 	//     read under that lock, aborts as ErrTaskClosedForEventRun once the
-	//     fence below has passed it, so a replay still reads as one.
+	//     fence below has passed it, so a replay still reads as one. Then the
+	//     run's team — ownerTeamID when non-empty, otherwise the task's team —
+	//     is read under a share lock on its teams row; an archived one aborts
+	//     either arm as ErrTeamArchived at the same point. The lock is what
+	//     orders the firing against an archive, which writes that row and
+	//     only then lists the team's conversations to stop: a firing that
+	//     holds it first commits before the archive's write lands, so the
+	//     listing finds its conversation, and a firing that waits for it reads
+	//     the team archived and writes nothing. A team id with no row takes
+	//     no lock and is left to step 4's foreign key.
 	//  2. The blueprint_runs insert, which requires a trigger type: the arm
 	//     is chosen by that value, so an empty one selects the manual arm by
 	//     omission rather than by intent and impls reject it with

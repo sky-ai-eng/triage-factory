@@ -70,6 +70,15 @@ func TestBlueprintStore_Postgres_EventFiringOnAResolvedTask(t *testing.T) {
 	})
 }
 
+// TestBlueprintStore_Postgres_FiringOnAnArchivedTeam runs the shared
+// archived-team firing suite against the Postgres impl.
+func TestBlueprintStore_Postgres_FiringOnAnArchivedTeam(t *testing.T) {
+	h := pgtest.Shared(t)
+	dbtest.RunFiringOnAnArchivedTeamConformance(t, func(t *testing.T) (db.BlueprintStore, dbtest.BlueprintSequenceScaffold) {
+		return pgSequenceScaffold(t, h)
+	})
+}
+
 // TestBlueprintStore_Postgres_FiringDelegationBoundary runs the shared
 // delegation-boundary suite against the Postgres impl.
 func TestBlueprintStore_Postgres_FiringDelegationBoundary(t *testing.T) {

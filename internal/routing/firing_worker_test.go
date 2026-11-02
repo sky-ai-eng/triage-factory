@@ -44,6 +44,10 @@ type stubDelegator struct {
 	// noted is every conversation id handed to TellTaskClosing, so a
 	// test can tell a close that held and told its conversations.
 	noted []string
+	// beforeRun, when set, runs after the router's checks and before the
+	// firing transaction, which is where a concurrent write such as a team
+	// archive lands between the two.
+	beforeRun func()
 }
 
 var errStubDelegate = errors.New("stub: delegation refused")
@@ -62,7 +66,11 @@ func (s *stubDelegator) Delegate(task domain.Task, opts delegate.DelegateOpts) (
 	if opts.OwnerTeamID != "" {
 		s.lastRunTeamID = opts.OwnerTeamID
 	}
+	beforeRun := s.beforeRun
 	s.mu.Unlock()
+	if beforeRun != nil {
+		beforeRun()
+	}
 	return stubDelegateRun(s.db, task, opts)
 }
 
@@ -117,6 +125,9 @@ func stubDelegateRun(database *sql.DB, task domain.Task, opts delegate.DelegateO
 		}
 		if errors.Is(err, dbpkg.ErrTaskClosedForEventRun) {
 			return "", delegate.ErrTaskClosed
+		}
+		if errors.Is(err, dbpkg.ErrTeamArchived) {
+			return "", delegate.ErrTeamArchived
 		}
 		return "", err
 	}

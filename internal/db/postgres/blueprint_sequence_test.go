@@ -187,6 +187,12 @@ func pgSequenceScaffold(t *testing.T, h *pgtest.Harness) (db.BlueprintStore, dbt
 				t.Fatalf("hold the task's close: %v", err)
 			}
 		},
+		ArchiveTeam: func(t *testing.T, teamID string) {
+			t.Helper()
+			if _, err := h.AdminDB.Exec(`UPDATE teams SET deleted_at = now() WHERE id = $1`, teamID); err != nil {
+				t.Fatalf("archive the team: %v", err)
+			}
+		},
 		SetConversationStatus: func(t *testing.T, convID, status string) {
 			t.Helper()
 			stored, concluded := dbtest.SeedStatus(status)

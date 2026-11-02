@@ -171,6 +171,111 @@ func RunEventFiringOnAResolvedTaskConformance(t *testing.T, mk BlueprintSequence
 	}
 }
 
+// RunFiringOnAnArchivedTeamConformance pins the check every firing makes on
+// the run's team under the task's lock: a team archived after the caller's
+// reads starts no run on either arm, whether it is the task's own team or the
+// owner the firing consolidates to, and writes nothing — no boundary, no
+// claim, no consolidation. A replay of a firing that committed before the
+// archive still reads as one, and a firing that consolidates a task off an
+// archived team onto an active one runs on the active one.
+func RunFiringOnAnArchivedTeamConformance(t *testing.T, mk BlueprintSequenceFactory) {
+	t.Helper()
+	ctx := context.Background()
+
+	t.Run("the_tasks_own_team", func(t *testing.T) {
+		store, sc := mk(t)
+		taskID := sc.NewTask(t)
+		fired := sc.Firing(t, taskID)
+		fired.ID = uuid.New().String()
+		_, _, firstConv, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, fired, db.AgentClaimStamp{}, "", sc.Step(fired, 0))
+		if err != nil || firstConv == nil {
+			t.Fatalf("first firing = (%v, %v), want inserted", firstConv, err)
+		}
+		if _, err := store.MarkRunStatusSystem(ctx, sc.OrgID, fired.ID, domain.BlueprintRunStatusCancelled, "system_cancelled", nil); err != nil {
+			t.Fatalf("cancel the first run: %v", err)
+		}
+		// Concluded, so a firing that got past the check would end it.
+		sc.SetConversationStatus(t, firstConv.ID, SeedConcluded)
+		sc.ArchiveTeam(t, sc.TaskOwnerTeam(t, taskID))
+
+		replay := fired
+		replay.ID = uuid.New().String()
+		if inserted, _, _, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, replay, db.AgentClaimStamp{}, "", sc.Step(replay, 0)); err != nil || inserted {
+			t.Errorf("a replay of the committed firing on an archived team = (%v, %v), want the fence's inserted=false", inserted, err)
+		}
+		for _, trigger := range []domain.BlueprintTriggerType{domain.BlueprintTriggerEvent, domain.BlueprintTriggerManual} {
+			if _, err := fireRun(t, store, sc, taskID, trigger); !errors.Is(err, db.ErrTeamArchived) {
+				t.Errorf("a %s firing on an archived team = %v, want db.ErrTeamArchived", trigger, err)
+			}
+		}
+		if n := sc.RunCount(t, taskID); n != 1 {
+			t.Errorf("blueprint_runs on the task = %d, want only the first", n)
+		}
+		if n := sc.ConversationCount(t, taskID); n != 1 {
+			t.Errorf("conversations on the task = %d, want only the first's", n)
+		}
+		if sc.ConversationEnded(t, firstConv.ID) {
+			t.Error("a refused firing ended the task's settled conversation")
+		}
+	})
+
+	t.Run("the_consolidation_target", func(t *testing.T) {
+		store, sc := mk(t)
+		taskID := sc.NewTask(t)
+		ownerBefore := sc.TaskOwnerTeam(t, taskID)
+		sc.ArchiveTeam(t, sc.ConsolidateTeamID)
+
+		br := sc.Firing(t, taskID)
+		br.ID = uuid.New().String()
+		_, claimed, conv, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br,
+			db.AgentClaimStamp{AgentID: sc.AgentID, ActingTeamID: sc.ConsolidateTeamID}, sc.ConsolidateTeamID, sc.Step(br, 0))
+		if !errors.Is(err, db.ErrTeamArchived) {
+			t.Fatalf("a firing consolidating onto an archived team = %v, want db.ErrTeamArchived", err)
+		}
+		if claimed || conv != nil {
+			t.Errorf("a refused firing returned (claimed=%v, conv=%v)", claimed, conv != nil)
+		}
+		if n := sc.RunCount(t, taskID); n != 0 {
+			t.Errorf("blueprint_runs on the task = %d, want 0", n)
+		}
+		if n := sc.ConversationCount(t, taskID); n != 0 {
+			t.Errorf("conversations on the task = %d, want 0", n)
+		}
+		if got := sc.TaskAgentClaim(t, taskID); got != "" {
+			t.Errorf("claimed_by_agent_id = %q, want empty", got)
+		}
+		if got := sc.TaskOwnerTeam(t, taskID); got != ownerBefore {
+			t.Errorf("task owner team = %q, want %q (unchanged)", got, ownerBefore)
+		}
+	})
+
+	t.Run("consolidation_off_an_archived_owner", func(t *testing.T) {
+		store, sc := mk(t)
+		taskID := sc.NewTask(t)
+		owner := sc.TaskOwnerTeam(t, taskID)
+		if owner == sc.ConsolidateTeamID {
+			t.Skip("single-team backend: the task's team is the consolidation target")
+		}
+		sc.ArchiveTeam(t, owner)
+
+		br := sc.Firing(t, taskID)
+		br.ID = uuid.New().String()
+		inserted, _, conv, _, err := store.CreateRunWithFirstStepSystem(ctx, sc.OrgID, br,
+			db.AgentClaimStamp{AgentID: sc.AgentID, ActingTeamID: sc.ConsolidateTeamID}, sc.ConsolidateTeamID, sc.Step(br, 0))
+		if err != nil || !inserted || conv == nil {
+			t.Fatalf("a firing consolidating onto an active team = (%v, %v, %v), want inserted", inserted, conv != nil, err)
+		}
+		if got := sc.TaskOwnerTeam(t, taskID); got != sc.ConsolidateTeamID {
+			t.Errorf("task owner team = %q, want %q", got, sc.ConsolidateTeamID)
+		}
+		if sc.ConversationTeam != nil {
+			if got := sc.ConversationTeam(t, conv.ID); got != sc.ConsolidateTeamID {
+				t.Errorf("conversation team_id = %q, want %q", got, sc.ConsolidateTeamID)
+			}
+		}
+	})
+}
+
 // RunFiringDelegationBoundaryConformance pins the delegation boundary a firing
 // commits with its run: the task's settled conversations end as delegated and
 // come back as stored, while live, parked, subagent and already-ended ones are

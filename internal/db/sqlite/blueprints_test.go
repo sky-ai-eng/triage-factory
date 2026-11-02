@@ -51,6 +51,12 @@ func TestBlueprintStore_SQLite_EventFiringOnAResolvedTask(t *testing.T) {
 	dbtest.RunEventFiringOnAResolvedTaskConformance(t, sqliteSequenceScaffold)
 }
 
+// TestBlueprintStore_SQLite_FiringOnAnArchivedTeam runs the shared
+// archived-team firing suite against the SQLite impl.
+func TestBlueprintStore_SQLite_FiringOnAnArchivedTeam(t *testing.T) {
+	dbtest.RunFiringOnAnArchivedTeamConformance(t, sqliteSequenceScaffold)
+}
+
 // TestBlueprintStore_SQLite_FiringDelegationBoundary runs the shared
 // delegation-boundary suite against the SQLite impl.
 func TestBlueprintStore_SQLite_FiringDelegationBoundary(t *testing.T) {

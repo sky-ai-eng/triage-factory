@@ -328,6 +328,11 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 		// above: the skip they make for a closed or held task.
 		skip(domain.PendingFiringSkipTaskClosed)
 		return
+	case errors.Is(err, delegate.ErrTeamArchived):
+		// The run's team was archived after the team read above and before
+		// the insert's locked read of it.
+		skip(domain.PendingFiringSkipTeamArchived)
+		return
 	case errors.Is(err, delegate.ErrTaskBusy):
 		// Another run went live on the task between the claim and the
 		// fenced insert. Routine waiting, not a failure: the deferral refunds

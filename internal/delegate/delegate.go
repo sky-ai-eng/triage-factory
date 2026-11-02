@@ -176,6 +176,13 @@ var ErrAlreadyFired = errors.New("delegate: run already fired for this (event, t
 // router skips the firing as it skips one on a closed task.
 var ErrTaskClosed = errors.New("delegate: the task closed, or its close is held")
 
+// ErrTeamArchived is returned by Delegate, on either path, when the team the
+// run would belong to was archived by the time the firing read it under the
+// task's lock — an archive that landed after the caller's own checks. No run
+// starts: the router and the firing worker skip the firing, and the delegate
+// route answers 409.
+var ErrTeamArchived = errors.New("delegate: the run's team is archived")
+
 // DelegateOpts carries the per-call inputs to Delegate that grew past
 // the comfortable positional-arg threshold. The struct exists so
 // adding a field (CreatorUserID, future multi-mode session context)
@@ -529,6 +536,9 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 		}
 		if errors.Is(err, db.ErrTaskClosedForEventRun) {
 			return "", ErrTaskClosed
+		}
+		if errors.Is(err, db.ErrTeamArchived) {
+			return "", ErrTeamArchived
 		}
 		return "", fmt.Errorf("fire blueprint run: %w", err)
 	}

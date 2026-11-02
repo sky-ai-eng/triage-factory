@@ -319,3 +319,60 @@ func TestFiringWorker_ArchivedTeamsTrigger(t *testing.T) {
 		t.Errorf("conversations on the task = %d, want 0", conversations)
 	}
 }
+
+// TestArchivedTeam_ArchivedUnderTheEventTimeFire: the trigger matched while its
+// team was active, and the team was archived before the firing's insert read
+// it. The firing is a decided skip — no error for the event queue to retry —
+// and no run or conversation is created.
+func TestArchivedTeam_ArchivedUnderTheEventTimeFire(t *testing.T) {
+	s := setupClaimScenario(t, "archived-under-fire")
+	s.stub.beforeRun = func() { archiveTeam(t, s.db, runmode.LocalDefaultTeamID) }
+
+	if fired := mustAutoDelegate(t, s.router, s.task, s.trigger, s.entity, s.event, runmode.LocalDefaultTeamID); fired {
+		t.Error("fired = true, want the firing skipped")
+	}
+	if n := atomic.LoadInt64(&s.stub.calls); n != 1 {
+		t.Fatalf("Delegate called %d times, want 1 (the archive must land after the router's checks)", n)
+	}
+	if n := s.autoRuns(t); n != 0 {
+		t.Errorf("auto runs = %d, want 0", n)
+	}
+	var conversations int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM conversations WHERE task_id = ?`, s.task.ID).Scan(&conversations); err != nil {
+		t.Fatalf("count conversations: %v", err)
+	}
+	if conversations != 0 {
+		t.Errorf("conversations on the task = %d, want 0", conversations)
+	}
+	if agent, _ := s.claim(t); agent != "" {
+		t.Errorf("claimed_by_agent_id = %q, want empty: the claim rides the refused firing", agent)
+	}
+}
+
+// TestFiringWorker_TeamArchivedUnderTheFire: the trigger's team was active when
+// the worker read it and archived before the insert did. The firing is skipped
+// as team_archived rather than requeued.
+func TestFiringWorker_TeamArchivedUnderTheFire(t *testing.T) {
+	database := newTestDB(t)
+	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
+	enqueueFiring(t, database, entityID, taskID, triggerID, eventID)
+
+	stub := &stubDelegator{db: database, beforeRun: func() { archiveTeam(t, database, runmode.LocalDefaultTeamID) }}
+	drainOnce(t, drainRouter(database, sqlitestore.New(database).PendingFirings, stub))
+
+	rows := firingsFor(t, database, entityID)
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 firing row, got %d", len(rows))
+	}
+	requireSkipped(t, rows[0], domain.PendingFiringSkipTeamArchived)
+	if n := atomic.LoadInt64(&stub.calls); n != 1 {
+		t.Errorf("Delegate called %d times, want 1 (the archive must land after the worker's team read)", n)
+	}
+	var conversations int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM conversations WHERE task_id = ?`, taskID).Scan(&conversations); err != nil {
+		t.Fatalf("count conversations: %v", err)
+	}
+	if conversations != 0 {
+		t.Errorf("conversations on the task = %d, want 0", conversations)
+	}
+}
