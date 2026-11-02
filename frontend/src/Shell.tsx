@@ -197,9 +197,8 @@ export default function Shell() {
               // Governance has a rail row and a warm alert tail in the design, and no
               // page. Off until one exists — absent, not disabled, applied to us.
               governance: false,
-              // The band is a door to the notifications page.
-              // TODO(TFAC-1239): on once the page exists. The strip's titles
-              // already open it.
+              // TODO(TFAC-1239): on once the notifications page exists, since
+              // the band links to it. The strip's titles already open it.
               notifications: false,
             }}
             org={activeOrg?.name ?? (isMulti ? '' : 'Triage Factory')}

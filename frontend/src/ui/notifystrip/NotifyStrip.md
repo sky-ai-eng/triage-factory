@@ -31,6 +31,12 @@ Two other placements were tried and rejected: across the whole window, which
 moved the rail too, and under the header, which cost the header its place as
 the page's top edge.
 
+**`held`** says the strip cannot be seen: the shell passes it in immersive mode,
+where its chrome fades but keeps its size. While held, the strip goes on
+showing what it showed when the hold began, so no line opens, closes or changes
+size under a page that asked for the chrome to go, and the arrival's clock
+waits. When the hold ends it catches up.
+
 ## The urgent line
 
 - **Ground:** the strip is `--color-warm-1` with a `--color-warm-3` bottom
@@ -69,11 +75,9 @@ the page's top edge.
   `ARRIVAL_MS` (8s). Its WAAPI `finished` is the timer: it starts the close,
   and `onArrivalDone` fires once the line has closed.
 - **Pausing:** it pauses while the pointer is over the strip or focus is inside
-  it, while the tab is hidden or the window blurred, and while `held` says the
-  strip cannot be seen (the shell passes it in immersive mode, where its chrome
-  is hidden). Focus holds it for the
-  same reason the pointer does: a button should not leave from under the
-  keyboard that reached it.
+  it, while the tab is hidden or the window blurred, and while `held`. Focus
+  holds it for the same reason the pointer does: a button should not leave from
+  under the keyboard that reached it.
 - **Opening it** calls `onOpen`, then closes the line.
 - **One at a time.** The caller queues the rest, and the next one opens as the
   last one closes.

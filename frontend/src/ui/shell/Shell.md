@@ -87,9 +87,9 @@ as a notification rather than as a third warm mark.
 ## The notifications band
 
 `flags.notifications` draws a second queue-style line **above** the queue: a
-bell, `{n} notifications`, and the chevron. It is a door to the notifications
-page, keyed by the route id `notifications`, and it uses the queue's own classes
-so the two read as a pair.
+bell, `{n} notifications`, and the chevron. It links to the notifications page,
+keyed by the route id `notifications`, and it uses the queue's own classes so
+the two read as a pair.
 
 - **The count** (`notifications`) is this viewer's unread, open, undismissed
   urgent and high notifications. The adapter reads it as a count-only list
@@ -104,8 +104,7 @@ so the two read as a pair.
   - Collapsed, the text hides and the dot stays: the detail can be hidden by
     width, the fact can't.
 - **The count marks itself** once on change (`sh-tick`), like the others.
-- **The flag** stays off until the page exists, because a door to nowhere is
-  the thing flags exist to prevent.
+- **The flag** stays off until the page exists, since the band links to it.
 
 ## The banner slot
 

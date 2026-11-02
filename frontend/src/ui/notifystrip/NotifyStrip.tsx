@@ -29,7 +29,7 @@ export type NotifyStripProps = {
   onOpen: (id: string) => void
   /** false: titles, actions and the stepper's arrows are text, and only an inactive tab holds the clock. */
   interactive?: boolean
-  /** The strip cannot be seen right now (the shell's chrome is hidden): hold the arrival's clock. */
+  /** The strip cannot be seen right now (the shell's chrome is hidden): it keeps what it shows, and the arrival's clock waits. */
   held?: boolean
 }
 
@@ -45,13 +45,23 @@ const CLOSE = 160
 // until they resolve; a high one is announced for 8s when it arrives. See
 // NotifyStrip.md.
 export function NotifyStrip({
-  urgent,
-  arrival = null,
+  urgent: liveUrgent,
+  arrival: liveArrival = null,
   onArrivalDone,
   onOpen,
   interactive = true,
   held = false,
 }: NotifyStripProps) {
+  // While held, the strip shows what it showed when the hold began. The page
+  // below is laid out against the strip's height, and a page that hides the
+  // chrome is often one a resize is expensive for, so no line opens, closes or
+  // changes size until the hold ends.
+  const [kept, setKept] = useState({ urgent: liveUrgent, arrival: liveArrival })
+  if (!held && (kept.urgent !== liveUrgent || kept.arrival !== liveArrival)) {
+    setKept({ urgent: liveUrgent, arrival: liveArrival })
+  }
+  const { urgent, arrival } = held ? kept : { urgent: liveUrgent, arrival: liveArrival }
+
   const reduced = useReducedMotion()
   const away = useAway()
   const [hovered, setHovered] = useState(false)

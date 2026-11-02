@@ -296,6 +296,22 @@ describe('NotifyStrip', () => {
     })
   })
 
+  it('changes nothing while held, and catches up when the hold ends', async () => {
+    const onOpen = () => {}
+    const { rerender } = render(<NotifyStrip urgent={[item('u')]} onOpen={onOpen} />)
+
+    // Held: the resolved line stays, and the arrival does not open.
+    rerender(<NotifyStrip urgent={[]} arrival={item('h')} onOpen={onOpen} held />)
+    await tick(FADE + CLOSE)
+    expect(urgentLine()).not.toBeNull()
+    expect(document.querySelector('.ns-high')).toBeNull()
+
+    rerender(<NotifyStrip urgent={[]} arrival={item('h')} onOpen={onOpen} />)
+    await tick(FADE + CLOSE)
+    expect(urgentLine()).toBeNull()
+    expect(document.querySelector('.ns-high')).not.toBeNull()
+  })
+
   it('renders no buttons when read-only', () => {
     render(
       <NotifyStrip

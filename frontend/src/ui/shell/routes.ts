@@ -21,9 +21,8 @@ export type Flags = {
    */
   governance?: boolean
   /**
-   * The notifications band above the queue. Off until the
-   * /notifications page exists: the band is a door, and a door to nowhere is
-   * the thing this flag exists to prevent.
+   * The notifications band above the queue. Off until the /notifications page
+   * exists, since the band links to it.
    */
   notifications?: boolean
 }

@@ -89,7 +89,12 @@ export function useNotificationFeed(): NotificationFeed {
   // The answers are stored with the org they answer for, so an org switch
   // reads as nothing known until the new org's answers land.
   const [answer, setAnswer] = useState<Answer>(() => blank(''))
-  const [pending, setPending] = useState<NotificationFeed['pending']>(null)
+  // An invoke asked about in one org is never confirmed in another: the
+  // dialog is outside the routed page, and stays open across a switch.
+  const [pending, setPending] = useState<
+    (NonNullable<NotificationFeed['pending']> & { org: string }) | null
+  >(null)
+  if (pending && pending.org !== orgID) setPending(null)
 
   const orgRef = useRef(orgID)
   useEffect(() => {
@@ -120,7 +125,8 @@ export function useNotificationFeed(): NotificationFeed {
     let fresh: NotificationItem[] = []
     let unread: Set<string> | null = null
     if (high.status === 'fulfilled') {
-      const { items, at } = high.value
+      const { page, at } = high.value
+      const items = page.items
       unread = new Set(items.map((i) => i.id))
       const prev = seen.current?.org === org ? seen.current.ids : null
       if (prev) {
@@ -243,7 +249,7 @@ export function useNotificationFeed(): NotificationFeed {
         else navigate(action.href)
         return
       }
-      if (action.confirm) setPending({ item, action })
+      if (action.confirm) setPending({ org: orgRef.current, item, action })
       else void run(item, action)
     },
     [markRead, navigate, run],

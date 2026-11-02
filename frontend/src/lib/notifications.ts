@@ -1,4 +1,4 @@
-import { apiFetch, apiJSON, apiList, readJSON, type ListPage } from './apiClient'
+import { apiFetch, apiJSON, apiList, apiListAt, readJSON, type ListPage } from './apiClient'
 
 // The notifications inbox (specs/durable-notifications.md, HTTP API). It is
 // viewer-relative, so every route is under /api/me and answers for the org the
@@ -67,23 +67,12 @@ export function listNotifications(
   return apiList<NotificationItem>(LIST_PATH, { ...filter, page_size: pageSize })
 }
 
-/**
- * One page of the inbox, with the server's clock when it answered (its `Date`
- * header), for comparing the items' timestamps against: the viewer's own clock
- * may be minutes off the server's.
- */
-export async function listNotificationsAt(
+/** One page of the inbox, with the server's clock when it answered. */
+export function listNotificationsAt(
   filter: NotificationFilter,
   pageSize: number,
-): Promise<{ items: NotificationItem[]; at: number }> {
-  const res = await apiFetch(LIST_PATH, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...filter, page_size: pageSize }),
-  })
-  const page = await readJSON<Partial<ListPage<NotificationItem>>>(res, LIST_PATH)
-  const at = Date.parse(res.headers.get('Date') ?? '')
-  return { items: page.items ?? [], at: Number.isNaN(at) ? Date.now() : at }
+): Promise<{ page: ListPage<NotificationItem>; at: number }> {
+  return apiListAt<NotificationItem>(LIST_PATH, { ...filter, page_size: pageSize })
 }
 
 /** Mark one item read for this viewer. Answers the item as they now see it. */

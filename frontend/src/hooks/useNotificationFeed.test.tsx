@@ -16,7 +16,8 @@ vi.mock('./useWebSocket', () => ({
   },
   useWsConnected: () => true,
 }))
-vi.mock('./useApiOrgId', () => ({ useApiOrgId: () => 'org-1' }))
+let orgId: string
+vi.mock('./useApiOrgId', () => ({ useApiOrgId: () => orgId }))
 vi.mock('./useOrgHref', () => ({ useOrgHref: () => (path: string) => '/orgs/org-1' + path }))
 const navigate = vi.fn()
 vi.mock('react-router', () => ({ useNavigate: () => navigate }))
@@ -94,6 +95,7 @@ async function ping() {
 }
 
 beforeEach(() => {
+  orgId = 'org-1'
   badge = 0
   urgent = []
   high = []
@@ -174,6 +176,29 @@ describe('useNotificationFeed', () => {
     await act(async () => result.current.confirm())
     expect(result.current.pending).toBeNull()
     await waitFor(() => expect(ran()).toBe(true))
+  })
+
+  it('drops an invoke waiting on confirmation when the org changes', async () => {
+    const item = note('u1', { priority: 'urgent' })
+    const action = {
+      id: 'untrack',
+      type: 'invoke' as const,
+      label: 'Stop tracking ENG',
+      confirm: 'Stops polling ENG.',
+      allowed: true,
+    }
+    const { result, rerender } = renderHook(() => useNotificationFeed())
+    await waitFor(() => expect(result.current.count).toBe(0))
+
+    act(() => result.current.act(item, action))
+    expect(result.current.pending).not.toBeNull()
+    orgId = 'org-2'
+    rerender()
+    expect(result.current.pending).toBeNull()
+    // Gone, not hidden: switching back does not bring the dialog back.
+    orgId = 'org-1'
+    rerender()
+    expect(result.current.pending).toBeNull()
   })
 
   it('follows an in-app link in place and an external one in a new tab, marking it read', async () => {

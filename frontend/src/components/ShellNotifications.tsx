@@ -48,7 +48,7 @@ export function NotificationStrip({
 }: {
   feed: NotificationFeed
   teams: Team[]
-  /** The shell's chrome is hidden, so an arrival's clock waits. */
+  /** The shell's chrome is hidden: the strip keeps what it shows until it is back. */
   held: boolean
 }) {
   const { urgent: items, arrival: next, act } = feed
