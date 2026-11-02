@@ -27,7 +27,12 @@ import (
 // the canonical site, which lowercases the scheme and host, the token moves to
 // the canonical key, so a user who bound under a capitalised site stays
 // connected.
+//
+// Before the org exists it does nothing; see orgExists.
 func AdoptSavedJiraSite(ctx context.Context, secrets db.SecretStore, orgs db.OrgsStore, orgID, userID string) error {
+	if ok, err := orgExists(ctx, orgs, orgID); err != nil || !ok {
+		return err
+	}
 	saved, err := secrets.GetSystem(ctx, orgID, legacyJiraURL)
 	if err != nil {
 		return fmt.Errorf("read the saved jira site: %w", err)
@@ -61,6 +66,19 @@ func AdoptSavedJiraSite(ctx context.Context, secrets db.SecretStore, orgs db.Org
 		return fmt.Errorf("delete the saved jira site: %w", err)
 	}
 	return nil
+}
+
+// orgExists reports whether orgID has its orgs row. A local database has none
+// until "Start your factory", and org_settings references it, so there is no
+// setting to adopt a host into. The keychain is not reset with the database,
+// so a fresh one can start beside an earlier install's keys; they are left for
+// the first boot after the org exists.
+func orgExists(ctx context.Context, orgs db.OrgsStore, orgID string) (bool, error) {
+	org, err := orgs.GetOrgSystem(ctx, orgID)
+	if err != nil {
+		return false, fmt.Errorf("read the org: %w", err)
+	}
+	return org != nil, nil
 }
 
 // moveUserJiraToken moves userID's token from one key to another. A token
@@ -103,7 +121,12 @@ func moveUserJiraToken(ctx context.Context, secrets db.SecretStore, orgID, userI
 // deployment's GitHub (ghbase.DefaultBaseURL), and that becomes it. An org
 // using none of them is left with no URL, to set when it connects. A set
 // setting is never changed: it is what every client already talked to.
+//
+// Before the org exists it does nothing; see orgExists.
 func AdoptSavedGitHubHost(ctx context.Context, stores db.Stores, orgID string) error {
+	if ok, err := orgExists(ctx, stores.Orgs, orgID); err != nil || !ok {
+		return err
+	}
 	saved, err := stores.Secrets.GetSystem(ctx, orgID, legacyGitHubURL)
 	if err != nil {
 		return fmt.Errorf("read the saved github url: %w", err)

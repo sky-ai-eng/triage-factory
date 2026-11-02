@@ -38,6 +38,22 @@ func openStores(t *testing.T) db.Stores {
 	return sqlitestore.New(conn)
 }
 
+// openTenantlessStores is openStores on the database a fresh local install
+// boots with: the schema, and no org until "Start your factory".
+func openTenantlessStores(t *testing.T) db.Stores {
+	t.Helper()
+	keyring.MockInit()
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	if err := db.BootstrapTenantlessSchemaForTest(conn); err != nil {
+		t.Fatalf("bootstrap schema: %v", err)
+	}
+	return sqlitestore.New(conn)
+}
+
 func TestLoadSave_Roundtrip(t *testing.T) {
 	stores := openStores(t)
 	ctx := context.Background()

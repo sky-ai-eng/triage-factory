@@ -269,3 +269,31 @@ func TestAdoptSavedGitHubHost_WithNothingSaved(t *testing.T) {
 		})
 	}
 }
+
+// A fresh database can start beside a keychain that still holds an earlier
+// install's keys. With no org yet there is nothing to adopt a host into, so
+// boot adopts nothing and leaves the keys for the first boot after the org
+// exists.
+func TestAdoptSaved_BeforeTheOrgExists(t *testing.T) {
+	ghbase.SetDefaultBaseURLForTest(t, "")
+	stores := openTenantlessStores(t)
+	putSecret(t, stores.Secrets, savedGitHubURLKey, "https://ghe.example.com")
+	putSecret(t, stores.Secrets, integrations.KeyGitHubPAT, "ghp-test")
+	putSecret(t, stores.Secrets, savedJiraURLKey, "https://jira.example.com")
+	putSecret(t, stores.Secrets, integrations.KeyJiraPAT, "jira-pat")
+
+	adoptGitHub(t, stores)
+	adopt(t, stores)
+
+	if got := githubURL(t, stores); got != "" {
+		t.Errorf("github url = %q, want none", got)
+	}
+	if got := jiraSite(t, stores); got != "" {
+		t.Errorf("jira site = %q, want none", got)
+	}
+	for _, key := range []string{savedGitHubURLKey, savedJiraURLKey} {
+		if getSecret(t, stores.Secrets, key) == "" {
+			t.Errorf("saved key %s was deleted before the org existed", key)
+		}
+	}
+}
