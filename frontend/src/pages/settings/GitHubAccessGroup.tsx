@@ -10,6 +10,7 @@ import {
 import GitHubAppPanel from './GitHubAppPanel'
 import type { CloneProtocol } from './orgConfig'
 import { apiJSON, httpErrorMessage } from '../../lib/apiClient'
+import { isHttpUrl } from '../../lib/reachability'
 
 interface GitHubAccessValue {
   github_url: string
@@ -90,6 +91,8 @@ export default function GitHubAccessGroup({
     }
   }
 
+  const patURL = classicPatURL(value.github_url)
+
   const inner = (
     <>
       {showHeading && <h2 className="text-body font-medium text-ink-2 mb-4">GitHub</h2>}
@@ -115,14 +118,18 @@ export default function GitHubAccessGroup({
           />
           <p className="text-reported text-ink-3 mt-1">
             Requires a{' '}
-            <a
-              href="https://github.com/settings/tokens/new?scopes=repo,read:org,user:email&description=Triage+Factory"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-warm hover:underline"
-            >
-              classic PAT
-            </a>{' '}
+            {patURL ? (
+              <a
+                href={patURL}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-warm hover:underline"
+              >
+                classic PAT
+              </a>
+            ) : (
+              'classic PAT'
+            )}{' '}
             with <code className="text-ink-2">repo</code>,{' '}
             <code className="text-ink-2">read:org</code>, and{' '}
             <code className="text-ink-2">user:email</code> scopes — the token Triage Factory&rsquo;s
@@ -208,6 +215,17 @@ export default function GitHubAccessGroup({
       {showAppPanel && orgId && <GitHubAppPanel orgId={orgId} returnTo="settings" />}
     </>
   )
+}
+
+// classicPatURL is the "new classic token" page on the org's GitHub, prefilled
+// with the scopes the token needs. github.com, *.ghe.com and GitHub Enterprise
+// Server all serve it at the host root with the same query parameters. A URL
+// that isn't http(s) with a host yields undefined, and the caller renders plain
+// text: a link to github.com would send an Enterprise user to the wrong host.
+function classicPatURL(githubURL: string): string | undefined {
+  if (!isHttpUrl(githubURL)) return undefined
+  const origin = new URL(githubURL.trim()).origin
+  return `${origin}/settings/tokens/new?scopes=repo,read:org,user:email&description=Triage+Factory`
 }
 
 // sshEndpoint names the SSH endpoint the preflight reached for the org's
