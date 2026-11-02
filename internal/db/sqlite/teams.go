@@ -357,37 +357,58 @@ func (s *teamsStore) Update(ctx context.Context, teamID string, name, slug, desc
 }
 
 func (s *teamsStore) Archive(ctx context.Context, teamID string) (domain.Team, error) {
-	return setTeamArchived(ctx, s.q, teamID, true)
+	return archiveTeam(ctx, s.q, teamID)
 }
 
 func (s *teamsStore) Restore(ctx context.Context, teamID string) (domain.Team, error) {
-	return setTeamArchived(ctx, s.q, teamID, false)
+	return restoreTeam(ctx, s.q, teamID)
 }
 
-// setTeamArchived flips teams.deleted_at, mirroring the Postgres impl: archive
-// stamps CURRENT_TIMESTAMP WHERE deleted_at IS NULL, restore clears it WHERE
-// deleted_at IS NOT NULL. The state-guarded WHERE makes a no-op flip affect zero
-// rows → ErrTeamNotFound (already archived / already active / missing).
-func setTeamArchived(ctx context.Context, q queryer, teamID string, archive bool) (domain.Team, error) {
-	stmt := `
-			UPDATE teams SET deleted_at = NULL, updated_at = CURRENT_TIMESTAMP
-			WHERE id = ? AND deleted_at IS NOT NULL
-			RETURNING ` + teamRowColumns
-	if archive {
-		stmt = `
-			UPDATE teams SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-			WHERE id = ? AND deleted_at IS NULL
-			RETURNING ` + teamRowColumns
+// archiveTeam stamps CURRENT_TIMESTAMP on an active team's deleted_at unless no
+// other active team would be left in its org, mirroring the Postgres impl. One
+// statement carries the guard, and SQLite serializes writers, so there is no
+// concurrent archive to lock out.
+func archiveTeam(ctx context.Context, q queryer, teamID string) (domain.Team, error) {
+	t, err := scanTeamRow(q.QueryRowContext(ctx, `
+		UPDATE teams SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ? AND deleted_at IS NULL
+		   AND EXISTS (
+		       SELECT 1 FROM teams o
+		        WHERE o.org_id = teams.org_id AND o.id <> teams.id AND o.deleted_at IS NULL)
+		RETURNING `+teamRowColumns, teamID).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Nothing archived: a team still active is its org's last active team;
+		// otherwise it is archived already or missing.
+		var active bool
+		if err := q.QueryRowContext(ctx,
+			`SELECT EXISTS (SELECT 1 FROM teams WHERE id = ? AND deleted_at IS NULL)`, teamID,
+		).Scan(&active); err != nil {
+			return domain.Team{}, fmt.Errorf("read team state after refused archive: %w", err)
+		}
+		if active {
+			return domain.Team{}, db.ErrLastActiveTeam
+		}
+		return domain.Team{}, db.ErrTeamNotFound
 	}
-	// No row scanned means the state-guarded WHERE matched nothing — already
-	// archived, already active, or missing — which is db.ErrTeamNotFound, the
-	// same answer the rows-affected probe here used to synthesize.
-	t, err := scanTeamRow(q.QueryRowContext(ctx, stmt, teamID).Scan)
+	if err != nil {
+		return domain.Team{}, fmt.Errorf("archive team: %w", err)
+	}
+	return t, nil
+}
+
+// restoreTeam clears an archived team's deleted_at. The state-guarded WHERE
+// makes restoring a live team match nothing, which is db.ErrTeamNotFound, as is
+// a missing team.
+func restoreTeam(ctx context.Context, q queryer, teamID string) (domain.Team, error) {
+	t, err := scanTeamRow(q.QueryRowContext(ctx, `
+		UPDATE teams SET deleted_at = NULL, updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ? AND deleted_at IS NOT NULL
+		RETURNING `+teamRowColumns, teamID).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Team{}, db.ErrTeamNotFound
 	}
 	if err != nil {
-		return domain.Team{}, fmt.Errorf("set team archived=%v: %w", archive, err)
+		return domain.Team{}, fmt.Errorf("restore team: %w", err)
 	}
 	return t, nil
 }

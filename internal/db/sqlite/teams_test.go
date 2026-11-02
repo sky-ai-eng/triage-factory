@@ -111,6 +111,20 @@ func seedSQLiteTeam(t *testing.T, conn *sql.DB) (orgID, teamID string) {
 	return orgID, teamID
 }
 
+// seedSQLiteSiblingTeam adds a second team to orgID and returns its id. An org
+// keeps one active team, so a test that archives a team seeds one beside it.
+func seedSQLiteSiblingTeam(t *testing.T, conn *sql.DB, orgID string) string {
+	t.Helper()
+	const siblingID = "team-archive-sibling"
+	if _, err := conn.Exec(
+		`INSERT INTO teams (id, org_id, slug, name) VALUES ($1, $2, $3, $4)`,
+		siblingID, orgID, "sibling", "Sibling",
+	); err != nil {
+		t.Fatalf("seed sibling team: %v", err)
+	}
+	return siblingID
+}
+
 // TestTeamsStore_SQLite_Update_RenamesAndSetsDescription: a full rename — name,
 // slug, and description all supplied — round-trips through the returned row and
 // the persisted columns.
@@ -181,6 +195,7 @@ func TestTeamsStore_SQLite_Update_NotFound(t *testing.T) {
 func TestTeamsStore_SQLite_Archive_HidesFromReadsButResolvesViaSystem(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	orgID, teamID := seedSQLiteTeam(t, conn)
+	seedSQLiteSiblingTeam(t, conn, orgID)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 
@@ -224,7 +239,8 @@ func TestTeamsStore_SQLite_Archive_HidesFromReadsButResolvesViaSystem(t *testing
 // to 409 "already archived").
 func TestTeamsStore_SQLite_Archive_AlreadyArchivedIsNotFound(t *testing.T) {
 	conn := openSQLiteForTest(t)
-	_, teamID := seedSQLiteTeam(t, conn)
+	orgID, teamID := seedSQLiteTeam(t, conn)
+	seedSQLiteSiblingTeam(t, conn, orgID)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 
@@ -241,6 +257,7 @@ func TestTeamsStore_SQLite_Archive_AlreadyArchivedIsNotFound(t *testing.T) {
 func TestTeamsStore_SQLite_Restore_RevivesTeam(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	orgID, teamID := seedSQLiteTeam(t, conn)
+	seedSQLiteSiblingTeam(t, conn, orgID)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 
@@ -280,7 +297,8 @@ func TestTeamsStore_SQLite_Restore_NotArchivedIsNotFound(t *testing.T) {
 }
 
 // TestTeamsStore_SQLite_GetDefaultForOrg_SkipsArchived: an archived team is never
-// the org's default — the default-team pick filters deleted_at IS NULL.
+// the org's default — the default-team pick filters deleted_at IS NULL, so it
+// moves to the team left active.
 func TestTeamsStore_SQLite_GetDefaultForOrg_SkipsArchived(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	orgID, teamID := seedSQLiteTeam(t, conn)
@@ -290,11 +308,12 @@ func TestTeamsStore_SQLite_GetDefaultForOrg_SkipsArchived(t *testing.T) {
 	if got, _ := stores.Teams.GetDefaultForOrg(ctx, orgID); got != teamID {
 		t.Fatalf("default before archive = %q; want %q", got, teamID)
 	}
+	sibling := seedSQLiteSiblingTeam(t, conn, orgID)
 	if _, err := stores.Teams.Archive(ctx, teamID); err != nil {
 		t.Fatalf("Archive: %v", err)
 	}
-	if got, _ := stores.Teams.GetDefaultForOrg(ctx, orgID); got != "" {
-		t.Errorf("default after archiving sole team = %q; want \"\"", got)
+	if got, _ := stores.Teams.GetDefaultForOrg(ctx, orgID); got != sibling {
+		t.Errorf("default after archiving %s = %q; want the active sibling %q", teamID, got, sibling)
 	}
 }
 
@@ -446,6 +465,7 @@ func TestTeamsStore_SQLite_NamesForIDsSystem_EmptyInput(t *testing.T) {
 func TestTeamsStore_SQLite_TeamIDsForUserInOrgSystem_ExcludesArchived(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	orgID, teamID := seedSQLiteTeam(t, conn)
+	seedSQLiteSiblingTeam(t, conn, orgID)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 

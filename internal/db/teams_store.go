@@ -31,6 +31,12 @@ var ErrLastTeamAdminGuard = errors.New("db: each team must retain at least one a
 // defensive backstop rather than the primary not-found path.
 var ErrTeamNotFound = errors.New("db: team not found")
 
+// ErrLastActiveTeam is returned by TeamsStore.Archive when the team is the
+// only active team in its org. An org with no active team has nowhere for its
+// members to work, and nothing that defaults to a team can resolve one; the
+// handler maps it to a 409.
+var ErrLastActiveTeam = errors.New("db: an org must keep at least one active team")
+
 // ErrTeamMemberExists is returned by TeamsStore.AddMember when the user is
 // already on the team (the memberships PK (user_id, team_id) collides). The
 // member-picker only offers org members not already on the team, so this is
@@ -267,7 +273,9 @@ type TeamsStore interface {
 	// Archive soft-deletes teamID by stamping deleted_at = now(), but only when
 	// the team is currently active (deleted_at IS NULL). Returns ErrTeamNotFound
 	// when no active row matches under RLS — already archived, or invisible /
-	// cross-org. The team's durable work (tasks, runs, memory) is never touched;
+	// cross-org — and ErrLastActiveTeam when no other team in the org is active,
+	// leaving the team as it was. Archives within one org are serialized, so two
+	// concurrent archives of its last two teams cannot both land. The team's durable work (tasks, runs, memory) is never touched;
 	// archive only sets the tombstone, and the force-stop cascade runs in the
 	// handler. Postgres routes through the app pool: teams_update RLS gates the
 	// write to team-admin-or-org-admin, and the handler additionally restricts to

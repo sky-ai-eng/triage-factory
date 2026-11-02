@@ -418,8 +418,8 @@ type linearTeamVisibility struct {
 
 // handleLinearTeamVisibility reports which of the org's tracked Linear teams
 // its current credential can read, and which of those are private. The
-// tracked set is every TF team's in the org's current workspace, watched or
-// armed. The settings card reads it before a credential switch, to name the
+// tracked set is every active TF team's in the org's current workspace,
+// watched or armed. The settings card reads it before a credential switch, to name the
 // private teams the next credential may not see, and after one, to name the
 // teams this credential does not.
 //

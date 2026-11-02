@@ -88,6 +88,9 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			bare.Role = ""
 			return &bare, nil
 		}
+		// An org keeps one active team, so the team is archivable only beside
+		// another.
+		stores.SeedTeam(t, "archive-sibling")
 
 		archived, err := stores.Teams.Archive(ctx, ids.TeamID)
 		if err != nil {
@@ -111,6 +114,47 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 		if _, err := stores.Teams.Restore(ctx, ids.TeamID); !errors.Is(err, db.ErrTeamNotFound) {
 			t.Errorf("re-restore: got %v, want db.ErrTeamNotFound", err)
+		}
+	})
+
+	t.Run("team_archive_refuses_the_orgs_last_active_team", func(t *testing.T) {
+		// An org always keeps one active team: archiving its only active team
+		// is refused with ErrLastActiveTeam and changes nothing, whether it is
+		// the org's only team or the last one left after the others were
+		// archived. Restoring a team makes another archivable again.
+		stores, ids := factory(t)
+		active := func(label, teamID string) bool {
+			t.Helper()
+			got, err := stores.Teams.GetSystem(ctx, ids.OrgID, teamID)
+			if err != nil || got == nil {
+				t.Fatalf("GetSystem(%s) (%s): got=%v err=%v", teamID, label, got, err)
+			}
+			return got.DeletedAt == nil
+		}
+
+		if _, err := stores.Teams.Archive(ctx, ids.TeamID); !errors.Is(err, db.ErrLastActiveTeam) {
+			t.Fatalf("Archive(only team) = %v; want db.ErrLastActiveTeam", err)
+		}
+		if !active("refused archive", ids.TeamID) {
+			t.Fatal("a refused archive stamped deleted_at")
+		}
+
+		other := stores.SeedTeam(t, "last-team-other")
+		if _, err := stores.Teams.Archive(ctx, ids.TeamID); err != nil {
+			t.Fatalf("Archive(team) beside another active team: %v", err)
+		}
+		if _, err := stores.Teams.Archive(ctx, other); !errors.Is(err, db.ErrLastActiveTeam) {
+			t.Fatalf("Archive(last active team) = %v; want db.ErrLastActiveTeam", err)
+		}
+		if !active("refused archive", other) {
+			t.Fatal("a refused archive of the last active team stamped deleted_at")
+		}
+
+		if _, err := stores.Teams.Restore(ctx, ids.TeamID); err != nil {
+			t.Fatalf("Restore: %v", err)
+		}
+		if _, err := stores.Teams.Archive(ctx, other); err != nil {
+			t.Fatalf("Archive(other) after a restore: %v", err)
 		}
 	})
 
