@@ -87,6 +87,11 @@ func TestRepoRecipients_Postgres(t *testing.T) {
 				pgtest.MustExec(t, h.AdminDB,
 					`UPDATE teams SET deleted_at = now() WHERE id = $1`, teamID)
 			},
+			RestoreTeam: func(t *testing.T, teamID string) {
+				t.Helper()
+				pgtest.MustExec(t, h.AdminDB,
+					`UPDATE teams SET deleted_at = NULL WHERE id = $1`, teamID)
+			},
 		}
 		return stores.TeamGitHubRepos, seed
 	})

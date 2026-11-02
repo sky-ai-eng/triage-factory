@@ -31,6 +31,10 @@ type RepositorySeeder struct {
 	// tracking one repository is how the suite stages two creators of the
 	// same row.
 	Team func(t *testing.T, slug string) string
+
+	// Teams is the team store wired against the same backend; the archive
+	// case archives and restores a team through it.
+	Teams db.TeamsStore
 }
 
 // RunRepositoryStoreConformance covers the repo-store contract every
@@ -54,6 +58,9 @@ type RepositorySeeder struct {
 //   - The tracked reads (ListTrackedSystem, ListTrackedByTeamSystem,
 //     ListTeamScoped) leave out a registry row no team tracks, which List
 //     and ListSystem keep.
+//   - An archived team tracks nothing in the org-wide tracked reads
+//     (ListTrackedSystem, ListTrackedNamesSystem, ListTeamScoped) until it
+//     is restored, while the reads that name the team still list its set.
 //   - UpdateBaseBranch + UpdateCloneStatusSystem mutate only the targeted
 //     fields, and every name-keyed method folds case on owner/repo.
 //   - The by-name door mints one bare identity row per repository, however
@@ -510,6 +517,80 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		if got := slugs(scoped); !equalStringSlice(got, tracked) {
 			t.Errorf("ListTeamScoped = %v, want %v", got, tracked)
 		}
+	})
+
+	t.Run("An_archived_team_tracks_nothing_until_it_is_restored", func(t *testing.T) {
+		// Each team tracks one repository. Archiving team-b takes its
+		// repository out of every org-wide tracked read — the names the poll
+		// and the profiler enumerate, the admin's list, the member's list —
+		// while the reads that name team-b still list it, and a restore puts
+		// it back. Both pools are the same connection here, so in Postgres
+		// ListTeamScoped's "the viewer's teams" is every team.
+		s, orgID, seed := mk(t)
+		teamB := seed.Team(t, "team-b")
+		trackRepos(t, s, seed, orgID, seed.TeamID, "a/one")
+		trackRepos(t, s, seed, orgID, teamB, "b/two")
+
+		slugs := func(rows []domain.Repository) []string {
+			out := make([]string, len(rows))
+			for i, r := range rows {
+				out[i] = r.Slug()
+			}
+			return out
+		}
+		orgWide := func(label string, want []string) {
+			t.Helper()
+			rows, total, err := s.ListTrackedSystem(ctx, orgID, TestGitHubHost, db.Unwindowed)
+			if err != nil {
+				t.Fatalf("ListTrackedSystem (%s): %v", label, err)
+			}
+			if got := slugs(rows); !equalStringSlice(got, want) || total != len(want) {
+				t.Errorf("ListTrackedSystem (%s) = %v (total %d), want %v", label, got, total, want)
+			}
+			names, err := s.ListTrackedNamesSystem(ctx, orgID, TestGitHubHost)
+			if err != nil {
+				t.Fatalf("ListTrackedNamesSystem (%s): %v", label, err)
+			}
+			if !equalStringSlice(names, want) {
+				t.Errorf("ListTrackedNamesSystem (%s) = %v, want %v", label, names, want)
+			}
+			scoped, scopedTotal, err := s.ListTeamScoped(ctx, orgID, TestGitHubHost, db.Unwindowed)
+			if err != nil {
+				t.Fatalf("ListTeamScoped (%s): %v", label, err)
+			}
+			if got := slugs(scoped); !equalStringSlice(got, want) || scopedTotal != len(want) {
+				t.Errorf("ListTeamScoped (%s) = %v (total %d), want %v", label, got, scopedTotal, want)
+			}
+		}
+		named := func(label string) {
+			t.Helper()
+			sys, total, err := s.ListTrackedByTeamSystem(ctx, orgID, teamB, TestGitHubHost, db.Unwindowed)
+			if err != nil {
+				t.Fatalf("ListTrackedByTeamSystem (%s): %v", label, err)
+			}
+			if got := slugs(sys); !equalStringSlice(got, []string{"b/two"}) || total != 1 {
+				t.Errorf("ListTrackedByTeamSystem(team-b) (%s) = %v (total %d), want [b/two]", label, got, total)
+			}
+			app, appTotal, err := s.ListTrackedByTeam(ctx, orgID, teamB, TestGitHubHost, db.Unwindowed)
+			if err != nil {
+				t.Fatalf("ListTrackedByTeam (%s): %v", label, err)
+			}
+			if got := slugs(app); !equalStringSlice(got, []string{"b/two"}) || appTotal != 1 {
+				t.Errorf("ListTrackedByTeam(team-b) (%s) = %v (total %d), want [b/two]", label, got, appTotal)
+			}
+		}
+
+		orgWide("both teams live", []string{"a/one", "b/two"})
+		if _, err := seed.Teams.Archive(ctx, teamB); err != nil {
+			t.Fatalf("Archive(team-b): %v", err)
+		}
+		orgWide("team-b archived", []string{"a/one"})
+		named("team-b archived")
+		if _, err := seed.Teams.Restore(ctx, teamB); err != nil {
+			t.Fatalf("Restore(team-b): %v", err)
+		}
+		orgWide("team-b restored", []string{"a/one", "b/two"})
+		named("team-b restored")
 	})
 
 	t.Run("Tracking_an_already_registered_repository_keeps_its_row", func(t *testing.T) {

@@ -20,12 +20,20 @@ type ReachableReposBackend struct {
 	Apps   db.GitHubAppsStore
 	Mirror db.ReachableReposStore
 	Repos  db.RepositoryStore
+	// Teams is the team store wired against the same backend; the archive
+	// case archives and restores a team through it.
+	Teams db.TeamsStore
 	// OrgID every call in the suite passes. SQLite pins the local sentinel;
 	// Postgres mints a real org.
 	OrgID string
-	// TrackRepository records that some team in the org tracks the registry row
+	// TeamID is a team in the org, the one a case tracks through unless it
+	// needs a second.
+	TeamID string
+	// SeedTeam adds another team to the org and returns its id.
+	SeedTeam func(t *testing.T, slug string) string
+	// TrackRepository records that teamID tracks the registry row
 	// repositoryID.
-	TrackRepository func(t *testing.T, repositoryID string)
+	TrackRepository func(t *testing.T, teamID, repositoryID string)
 }
 
 // ReachableReposFactory returns a fresh, isolated backend per subtest.
@@ -51,7 +59,8 @@ type ReachableReposFactory func(t *testing.T) ReachableReposBackend
 //   - 'all' and 'selected' are distinguishable, and a writer that did not look
 //     does not erase a width already established.
 //   - Both derived states — reach without purpose and scope drift — including
-//     the case-folding both comparisons need, the gate that keeps an
+//     the case-folding both comparisons need, an archived team's tracking
+//     counting for nothing in them or in the tracked-in-grants read, the gate that keeps an
 //     un-mirrored org from reporting its entire tracked set as drift, the
 //     three-way rule on a grant's width, the owner account matched to its
 //     installation by account id before login, and the paging both are served
@@ -102,16 +111,20 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 	}
 	track := func(t *testing.T, b ReachableReposBackend, repositoryID string) string {
 		t.Helper()
-		b.TrackRepository(t, repositoryID)
+		b.TrackRepository(t, b.TeamID, repositoryID)
 		return repositoryID
 	}
-	trackRepo := func(t *testing.T, b ReachableReposBackend, owner, repo string) {
+	trackRepoFor := func(t *testing.T, b ReachableReposBackend, teamID, owner, repo string) {
 		t.Helper()
 		row, err := b.Repos.FindOrCreateByRefSystem(ctx, b.OrgID, domain.RepoRef{Host: TestGitHubHost, Owner: owner, Repo: repo})
 		if err != nil {
 			t.Fatalf("FindOrCreateByRefSystem(%s/%s): %v", owner, repo, err)
 		}
-		track(t, b, row.ID)
+		b.TrackRepository(t, teamID, row.ID)
+	}
+	trackRepo := func(t *testing.T, b ReachableReposBackend, owner, repo string) {
+		t.Helper()
+		trackRepoFor(t, b, b.TeamID, owner, repo)
 	}
 	replace := func(t *testing.T, b ReachableReposBackend, installationID string, entries ...domain.ReachableRepository) {
 		t.Helper()
@@ -496,6 +509,63 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			t.Fatalf("ListScopeDriftSystem: %v", err)
 		}
 		equal(t, "scope drift", trackedSlugs(got), []string{"acme/legacy"})
+	})
+
+	t.Run("AnArchivedTeamTracksNothingInTheFindings", func(t *testing.T) {
+		// Each team tracks one repository the grant holds and one it does not.
+		// Archiving the second team turns its granted repository into reach
+		// without purpose, takes its ungranted one out of scope drift (nothing
+		// would poll it either way), and drops its granted one from the
+		// tracked-in-grants read; a restore puts all three back.
+		b := mk(t)
+		other := b.SeedTeam(t, "grant-archive-other")
+		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
+		trackRepoFor(t, b, b.TeamID, "acme", "api")
+		trackRepoFor(t, b, b.TeamID, "acme", "legacy")
+		trackRepoFor(t, b, other, "acme", "web")
+		trackRepoFor(t, b, other, "acme", "old")
+		replace(t, b, "1",
+			entry(b, "1", "acme", "api", "10"),
+			entry(b, "1", "acme", "web", "11"),
+			entry(b, "1", "acme", "secrets", "12"),
+		)
+		findings := func(label string, reach, drift, inGrants []string) {
+			t.Helper()
+			gotReach, total, err := b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.Unwindowed)
+			if err != nil {
+				t.Fatalf("ListReachWithoutPurposeSystem (%s): %v", label, err)
+			}
+			equal(t, "reach without purpose ("+label+")", slugs(t, gotReach), reach)
+			if total != len(reach) {
+				t.Errorf("reach without purpose (%s) total = %d; want %d", label, total, len(reach))
+			}
+			gotDrift, total, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.Unwindowed)
+			if err != nil {
+				t.Fatalf("ListScopeDriftSystem (%s): %v", label, err)
+			}
+			equal(t, "scope drift ("+label+")", trackedSlugs(gotDrift), drift)
+			if total != len(drift) {
+				t.Errorf("scope drift (%s) total = %d; want %d", label, total, len(drift))
+			}
+			gotInGrants, err := b.Mirror.ListTrackedInGrantsSystem(ctx, b.OrgID, TestGitHubHost, []string{"1"})
+			if err != nil {
+				t.Fatalf("ListTrackedInGrantsSystem (%s): %v", label, err)
+			}
+			equal(t, "tracked in grants ("+label+")", gotInGrants, inGrants)
+		}
+
+		findings("both teams live",
+			[]string{"acme/secrets"}, []string{"acme/legacy", "acme/old"}, []string{"acme/api", "acme/web"})
+		if _, err := b.Teams.Archive(ctx, other); err != nil {
+			t.Fatalf("Archive: %v", err)
+		}
+		findings("other team archived",
+			[]string{"acme/secrets", "acme/web"}, []string{"acme/legacy"}, []string{"acme/api"})
+		if _, err := b.Teams.Restore(ctx, other); err != nil {
+			t.Fatalf("Restore: %v", err)
+		}
+		findings("other team restored",
+			[]string{"acme/secrets"}, []string{"acme/legacy", "acme/old"}, []string{"acme/api", "acme/web"})
 	})
 
 	t.Run("ScopeDriftReportsOneRepositoryOnce", func(t *testing.T) {

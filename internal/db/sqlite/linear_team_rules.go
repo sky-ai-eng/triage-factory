@@ -42,13 +42,14 @@ func (s *linearTeamRulesStore) ListForOrgSystem(ctx context.Context, orgID, work
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	// Single-org, so the union is the workspace's every row; no teams join
-	// needed. An empty workspace id matches no row, since every row carries
-	// the one it was saved under.
+	// Single-org, so the union is every live team's row in the workspace; the
+	// teams lookup only leaves out an archived team. An empty workspace id
+	// matches no row, since every row carries the one it was saved under.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+linearRuleCols+`
 		FROM linear_team_rules
 		WHERE linear_workspace_id = ? AND linear_workspace_id <> ''
+		  AND EXISTS (SELECT 1 FROM teams t WHERE t.id = linear_team_rules.team_id AND t.deleted_at IS NULL)
 		ORDER BY linear_team_id ASC, team_id ASC
 	`, workspaceID)
 	return db.ScanLinearTeamRulesRows(rows, err)

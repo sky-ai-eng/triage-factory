@@ -2,6 +2,7 @@ package postgres_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -207,5 +208,61 @@ func TestTeamsStore_Postgres_SettingsLock_PerTeam(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("another team's lock waited on this team's")
+	}
+}
+
+// TestTeamsStore_Postgres_Archive_SerializesTheLastTwoTeams: archives within
+// one org are serialized, so two concurrent archives of an org's last two
+// teams cannot both land. The first archive's transaction is held open after
+// it has stamped its team; the second, of the other team, must wait for it
+// rather than read the first team as still active, and is refused once the
+// first commits.
+func TestTeamsStore_Postgres_Archive_SerializesTheLastTwoTeams(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+
+	orgID, _, teamA := pgtest.SeedOrgWithUser(t, h, "archive-race")
+	teamB := pgtest.SeedTeam(t, h, orgID, "other")
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+
+	tx, err := h.AdminDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := pgstore.NewForTx(tx, pgtest.SecretKey).Teams.Archive(ctx, teamA); err != nil {
+		t.Fatalf("Archive(A) in the held transaction: %v", err)
+	}
+
+	second := make(chan error, 1)
+	go func() {
+		_, err := stores.Teams.Archive(ctx, teamB)
+		second <- err
+	}()
+	select {
+	case err := <-second:
+		t.Fatalf("Archive(B) returned %v while the archive of A was uncommitted; want it to wait", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit Archive(A): %v", err)
+	}
+	select {
+	case err := <-second:
+		if !errors.Is(err, db.ErrLastActiveTeam) {
+			t.Fatalf("Archive(B) after A committed = %v; want db.ErrLastActiveTeam", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Archive(B) never returned after Archive(A) committed")
+	}
+
+	var activeB bool
+	if err := h.AdminDB.QueryRow(`SELECT deleted_at IS NULL FROM teams WHERE id = $1`, teamB).Scan(&activeB); err != nil {
+		t.Fatalf("read team B: %v", err)
+	}
+	if !activeB {
+		t.Error("team B was archived too; the org has no active team left")
 	}
 }

@@ -48,7 +48,8 @@ func (s *linearTeamRulesStore) ListForOrgSystem(ctx context.Context, orgID, work
 		SELECT `+linearRuleCols+`
 		FROM linear_team_rules r
 		JOIN teams t ON t.id = r.team_id
-		WHERE t.org_id = $1 AND r.linear_workspace_id = $2 AND r.linear_workspace_id <> ''
+		WHERE t.org_id = $1 AND t.deleted_at IS NULL
+		  AND r.linear_workspace_id = $2 AND r.linear_workspace_id <> ''
 		ORDER BY r.linear_team_id ASC, r.team_id ASC
 	`, orgID, workspaceID)
 	return db.ScanLinearTeamRulesRows(rows, err)

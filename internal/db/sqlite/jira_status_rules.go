@@ -53,12 +53,13 @@ func (s *jiraStatusRulesStore) ListForOrgSystem(ctx context.Context, orgID, site
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	// SQLite is single-org, so the union is every rule on the site. team_id
-	// rides each row and is scanned into TeamID for the poller's per-project
-	// merge tie-break.
+	// SQLite is single-org, so the union is every live team's rule on the
+	// site. team_id rides each row and is scanned into TeamID for the poller's
+	// per-project merge tie-break.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+jiraRuleCols+`
 		`+jiraRuleFrom+`
+		  AND EXISTS (SELECT 1 FROM teams t WHERE t.id = r.team_id AND t.deleted_at IS NULL)
 		ORDER BY p.project_key ASC, r.jira_project_id ASC, r.team_id ASC
 	`, site)
 	return scanJiraStatusRules(rows, err)

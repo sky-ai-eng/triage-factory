@@ -40,6 +40,7 @@ func TestRepositoryStore_SQLite(t *testing.T) {
 				seedExtraTeam(t, conn, id, slug)
 				return id
 			},
+			Teams: stores.Teams,
 		}
 		return stores.Repos, runmode.LocalDefaultOrgID, seed
 	})

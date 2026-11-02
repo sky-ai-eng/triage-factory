@@ -255,40 +255,79 @@ func (s *teamsStore) Get(ctx context.Context, orgID, teamID string) (*domain.Tea
 }
 
 func (s *teamsStore) Archive(ctx context.Context, teamID string) (domain.Team, error) {
-	return setTeamArchived(ctx, s.app, teamID, true)
+	return archiveTeam(ctx, s.app, teamID)
 }
 
 func (s *teamsStore) Restore(ctx context.Context, teamID string) (domain.Team, error) {
-	return setTeamArchived(ctx, s.app, teamID, false)
+	return restoreTeam(ctx, s.app, teamID)
 }
 
-// setTeamArchived flips teams.deleted_at: archive stamps now() WHERE deleted_at
-// IS NULL, restore clears it WHERE deleted_at IS NOT NULL. The state-guarded
-// WHERE makes both idempotent-safe — a no-op flip (re-archiving an archived
-// team, restoring a live one) affects zero rows and surfaces as ErrTeamNotFound
-// so the handler answers 404/409 rather than silently succeeding. App pool:
-// teams_update RLS gates org-admin via the handler.
-func setTeamArchived(ctx context.Context, q queryer, teamID string, archive bool) (domain.Team, error) {
-	stmt := `
-			UPDATE teams SET deleted_at = NULL, updated_at = now()
-			WHERE id = $1 AND deleted_at IS NOT NULL
-			RETURNING ` + pgTeamRowColumns
-	if archive {
-		stmt = `
+// archiveTeam stamps now() on an active team's deleted_at unless no other
+// active team would be left in its org. A per-org transaction advisory lock
+// serializes archives within the org: without it, two concurrent archives of
+// an org's last two teams would each see the other still active and both
+// land. The guard reads the teams rows under the SELECT policy, which shows an
+// org member every team in the org, so it counts the same teams whoever calls.
+// App pool: teams_update RLS gates org-admin via the handler.
+func archiveTeam(ctx context.Context, q queryer, teamID string) (domain.Team, error) {
+	var out domain.Team
+	err := inTx(ctx, q, func(tx queryer) error {
+		var orgID string
+		err := tx.QueryRowContext(ctx, `SELECT org_id::text FROM teams WHERE id = $1`, teamID).Scan(&orgID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return db.ErrTeamNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("resolve team org: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "team-archive:"+orgID); err != nil {
+			return fmt.Errorf("lock org for team archive: %w", err)
+		}
+		t, err := scanTeamRow(tx.QueryRowContext(ctx, `
 			UPDATE teams SET deleted_at = now(), updated_at = now()
-			WHERE id = $1 AND deleted_at IS NULL
-			RETURNING ` + pgTeamRowColumns
-	}
-	// No row scanned means the state-guarded WHERE matched nothing — already
-	// archived, already active, missing, or invisible under RLS — which is
-	// db.ErrTeamNotFound, the same answer the rows-affected probe here used to
-	// synthesize.
-	t, err := scanTeamRow(q.QueryRowContext(ctx, stmt, teamID).Scan)
+			 WHERE id = $1 AND deleted_at IS NULL
+			   AND EXISTS (
+			       SELECT 1 FROM teams o
+			        WHERE o.org_id = teams.org_id AND o.id <> teams.id AND o.deleted_at IS NULL)
+			RETURNING `+pgTeamRowColumns, teamID).Scan)
+		if errors.Is(err, sql.ErrNoRows) {
+			// Nothing archived. An active team with no active sibling is the
+			// org's last active team; anything else is a team already archived
+			// or one the caller may not write under RLS.
+			var active, others bool
+			if err := tx.QueryRowContext(ctx, `
+				SELECT EXISTS (SELECT 1 FROM teams WHERE id = $1 AND deleted_at IS NULL),
+				       EXISTS (SELECT 1 FROM teams WHERE org_id = $2 AND id <> $1 AND deleted_at IS NULL)
+			`, teamID, orgID).Scan(&active, &others); err != nil {
+				return fmt.Errorf("read team state after refused archive: %w", err)
+			}
+			if active && !others {
+				return db.ErrLastActiveTeam
+			}
+			return db.ErrTeamNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("archive team: %w", err)
+		}
+		out = t
+		return nil
+	})
+	return out, err
+}
+
+// restoreTeam clears an archived team's deleted_at. The state-guarded WHERE
+// makes restoring a live team match nothing, which is db.ErrTeamNotFound, as is
+// a missing team or one invisible under RLS.
+func restoreTeam(ctx context.Context, q queryer, teamID string) (domain.Team, error) {
+	t, err := scanTeamRow(q.QueryRowContext(ctx, `
+		UPDATE teams SET deleted_at = NULL, updated_at = now()
+		 WHERE id = $1 AND deleted_at IS NOT NULL
+		RETURNING `+pgTeamRowColumns, teamID).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Team{}, db.ErrTeamNotFound
 	}
 	if err != nil {
-		return domain.Team{}, fmt.Errorf("set team archived=%v: %w", archive, err)
+		return domain.Team{}, fmt.Errorf("restore team: %w", err)
 	}
 	return t, nil
 }

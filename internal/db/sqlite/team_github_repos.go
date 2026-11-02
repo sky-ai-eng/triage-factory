@@ -79,7 +79,8 @@ func (s *teamGitHubReposStore) ListOrgReposWithTeamsSystem(ctx context.Context, 
 		FROM team_github_repos g
 		JOIN teams t ON t.id = g.team_id
 		JOIN repositories r ON r.id = g.repository_id
-		WHERE r.host = ? AND r.retired_at IS NULL
+		WHERE t.deleted_at IS NULL
+		  AND r.host = ? AND r.retired_at IS NULL
 		ORDER BY r.owner ASC, r.repo ASC, r.id ASC, t.name ASC
 	`, host)
 	if err != nil {
@@ -236,9 +237,8 @@ func (s *teamGitHubReposStore) TracksRepositorySystem(ctx context.Context, teamI
 // exercises it, so N=1 must not be assumed here.
 func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, orgID, repositoryID string) ([]string, error) {
 	// UNION (not UNION ALL) dedups a user who is both an org admin and a
-	// tracking-team member. No teams.deleted_at filter, deliberately —
-	// see the Postgres impl's comment: the tracking arm mirrors the REST
-	// read's visibility scoping, and archiving hides nothing.
+	// tracking-team member. The tracking arm leaves out an archived team and a
+	// retired row, as the Postgres impl's does.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT user_id FROM (
 			SELECT om.user_id
@@ -250,7 +250,8 @@ func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, o
 			JOIN teams t ON t.id = g.team_id
 			JOIN repositories r ON r.id = g.repository_id
 			JOIN memberships m ON m.team_id = g.team_id
-			WHERE t.org_id = ? AND g.repository_id = ?
+			WHERE t.org_id = ? AND t.deleted_at IS NULL
+			  AND g.repository_id = ?
 			  AND r.retired_at IS NULL
 		)
 		ORDER BY user_id ASC

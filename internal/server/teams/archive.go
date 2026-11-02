@@ -156,6 +156,10 @@ func (th *Handler) handleTeamArchive(w http.ResponseWriter, r *http.Request) {
 			httpx.Conflict(w, "team is already archived")
 			return
 		}
+		if errors.Is(err, db.ErrLastActiveTeam) {
+			httpx.Conflict(w, "can't archive the organization's only active team — create or restore another team first")
+			return
+		}
 		httpx.InternalError(w, "teams", err)
 		return
 	}

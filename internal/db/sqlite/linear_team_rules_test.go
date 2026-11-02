@@ -34,6 +34,11 @@ func TestLinearTeamRulesStore_SQLite(t *testing.T) {
 					t.Fatalf("archive team: %v", err)
 				}
 			},
+			RestoreTeam: func(t *testing.T, teamID string) {
+				if _, err := conn.Exec(`UPDATE teams SET deleted_at = NULL WHERE id = ?`, teamID); err != nil {
+					t.Fatalf("restore team: %v", err)
+				}
+			},
 		}
 	})
 }

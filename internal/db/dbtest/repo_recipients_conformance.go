@@ -45,6 +45,9 @@ type RepoRecipientsSeeder struct {
 
 	// ArchiveTeam soft-deletes teamID (sets teams.deleted_at).
 	ArchiveTeam func(t *testing.T, teamID string)
+
+	// RestoreTeam clears teamID's teams.deleted_at.
+	RestoreTeam func(t *testing.T, teamID string)
 }
 
 // RepoRecipientsFactory hands the suite a wired TeamGitHubReposStore plus
@@ -55,9 +58,9 @@ type RepoRecipientsFactory func(t *testing.T) (db.TeamGitHubReposStore, RepoReci
 // TeamGitHubReposStore.RepoUpdateRecipientsSystem — the websocket
 // delivery scope for repository_updated events. It pins the visibility
 // contract the method mirrors from the REST read (handleRepositories):
-// org admins/owners always receive; members receive only through a team
-// that tracks the registry row (archived or not — archive hides nothing);
-// nobody else does. The row is named by its id, so a rename moves nothing
+// org admins/owners always receive; members receive only through a live team
+// that tracks the registry row (an archived team tracks nothing there, as in
+// the REST read); nobody else does. The row is named by its id, so a rename moves nothing
 // and a same-named row on another host is another repository. Both
 // backends run the identical subtests so SQLite and Postgres pin to one
 // result.
@@ -137,28 +140,34 @@ func RunRepoRecipientsConformance(t *testing.T, mk RepoRecipientsFactory) {
 		}
 	})
 
-	t.Run("RepoRecipients_ArchivedTeamStillIncluded", func(t *testing.T) {
-		// Archiving a team force-stops its work but hides nothing: it
-		// tombstones the teams row without touching memberships or
-		// tracking rows, the repo keeps being polled/profiled, and the
-		// REST read's scoping (repoTrackedByATeam / the
-		// team_github_repos_select RLS policy) carries no deleted_at
-		// filter — so the member still sees the repo on GET /api/repos.
-		// The WS audience must match, or their Repos page goes silently
-		// stale. (Contrast TeamIDsForUserInOrgSystem, a ROUTING read,
-		// which does exclude archived teams so they receive no new work.)
+	t.Run("RepoRecipients_ArchivedTeamLeavesUntilRestored", func(t *testing.T) {
+		// Each team tracks one repository. An archived team tracks nothing in
+		// the REST read's scoping (repoTrackedByATeam), so its member no longer
+		// sees its repository on GET /api/repos and leaves that repository's
+		// audience; the live team's audience is untouched, and a restore puts
+		// the member back.
 		s, seed := mk(t)
 		founder := seed.User(t)
 		org := seed.Org(t, founder)
-		team := seed.Team(t, org)
-		member := seed.User(t)
-		seed.OrgMembership(t, member, org, "member")
-		seed.TeamMembership(t, member, team)
-		api := seed.TrackRepo(t, team, TestGitHubHost, "acme", "api")
+		teamA := seed.Team(t, org)
+		teamB := seed.Team(t, org)
+		userA := seed.User(t)
+		userB := seed.User(t)
+		seed.OrgMembership(t, userA, org, "member")
+		seed.OrgMembership(t, userB, org, "member")
+		seed.TeamMembership(t, userA, teamA)
+		seed.TeamMembership(t, userB, teamB)
+		api := seed.TrackRepo(t, teamA, TestGitHubHost, "acme", "api")
+		web := seed.TrackRepo(t, teamB, TestGitHubHost, "acme", "web")
 
-		assertSameSet(t, "recipients(live team)", recipients(t, s, org, api), []string{member})
-		seed.ArchiveTeam(t, team)
-		assertSameSet(t, "recipients(archived team)", recipients(t, s, org, api), []string{member})
+		assertSameSet(t, "recipients(web, live team)", recipients(t, s, org, web), []string{userB})
+		seed.ArchiveTeam(t, teamB)
+		if got := recipients(t, s, org, web); len(got) != 0 {
+			t.Errorf("recipients(web, archived team) = %v; want empty slice", got)
+		}
+		assertSameSet(t, "recipients(api, other team archived)", recipients(t, s, org, api), []string{userA})
+		seed.RestoreTeam(t, teamB)
+		assertSameSet(t, "recipients(web, restored team)", recipients(t, s, org, web), []string{userB})
 	})
 
 	t.Run("RepoRecipients_OrgScoped", func(t *testing.T) {

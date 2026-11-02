@@ -17,18 +17,20 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
 
 // teamArchiveRig is a Postgres-backed Handler, with RLS live, over an org
 // with an owner and a plain member. spawner is nil: the no-active-work path
 // does not need it.
 type teamArchiveRig struct {
-	h      *pgtest.Harness
-	th     *Handler
-	orgID  string
-	teamID string
-	owner  string // org owner (org admin)
-	member string // org + team member, NOT an org admin
+	h       *pgtest.Harness
+	th      *Handler
+	orgID   string
+	teamID  string
+	sibling string // the org's other active team
+	owner   string // org owner (org admin)
+	member  string // org + team member, NOT an org admin
 }
 
 func newTeamArchiveRig(t *testing.T) *teamArchiveRig {
@@ -43,10 +45,13 @@ func newTeamArchiveRig(t *testing.T) *teamArchiveRig {
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, h, "owner")
 	member := pgtest.SeedUser(t, h, "member")
 	pgtest.AddOrgMember(t, h, member, orgID, teamID, "member", "member")
+	// An org keeps one active team, so the rig's team is archivable only
+	// beside another.
+	sibling := pgtest.SeedTeam(t, h, orgID, "sibling")
 
 	th := New(stores.Tx, authz.New(h.AdminDB, stores.Tx), stores,
 		func() *delegate.Spawner { return nil }, nil)
-	return &teamArchiveRig{h: h, th: th, orgID: orgID, teamID: teamID, owner: owner, member: member}
+	return &teamArchiveRig{h: h, th: th, orgID: orgID, teamID: teamID, sibling: sibling, owner: owner, member: member}
 }
 
 // req builds a request as callerID with the team_id path value + claims + org
@@ -141,6 +146,27 @@ func TestTeamArchive_AlreadyArchivedIs409(t *testing.T) {
 	r.th.handleTeamArchive(second, r.req(http.MethodPost, "/api/teams/"+r.teamID+"/archive", r.owner, r.teamID))
 	if second.Code != http.StatusConflict {
 		t.Fatalf("second archive = %d, want 409; body=%s", second.Code, second.Body.String())
+	}
+}
+
+// TestTeamArchive_LastActiveTeamIs409: with its sibling archived, the rig's team
+// is the org's only active team, so archiving it is a 409 that leaves it active.
+func TestTeamArchive_LastActiveTeamIs409(t *testing.T) {
+	r := newTeamArchiveRig(t)
+
+	sib := httptest.NewRecorder()
+	r.th.handleTeamArchive(sib, r.req(http.MethodPost, "/api/teams/"+r.sibling+"/archive", r.owner, r.sibling))
+	if sib.Code != http.StatusOK {
+		t.Fatalf("archive sibling = %d, want 200; body=%s", sib.Code, sib.Body.String())
+	}
+	last := httptest.NewRecorder()
+	r.th.handleTeamArchive(last, r.req(http.MethodPost, "/api/teams/"+r.teamID+"/archive", r.owner, r.teamID))
+	if last.Code != http.StatusConflict {
+		t.Fatalf("archive last active team = %d, want 409; body=%s", last.Code, last.Body.String())
+	}
+	httpxtest.AssertFirstError(t, last, httpx.ReasonConflict, "")
+	if r.deletedAt(t, r.teamID) {
+		t.Error("a refused archive stamped deleted_at on the last active team")
 	}
 }
 

@@ -38,6 +38,9 @@ func newArchivedTeamRig(t *testing.T) *archivedTeamRig {
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, h, "owner")
 	member := pgtest.SeedUser(t, h, "member")
 	pgtest.AddOrgMember(t, h, member, orgID, teamID, "member", "member")
+	// An org keeps one active team, so the rig's team is archivable only
+	// beside another.
+	pgtest.SeedTeam(t, h, orgID, "sibling")
 
 	return &archivedTeamRig{s: s, orgID: orgID, teamID: teamID, owner: owner, member: member}
 }
