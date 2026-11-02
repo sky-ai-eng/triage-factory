@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -795,5 +797,88 @@ func TestTaskEventMetadata_ReadsThroughTheCurrentView(t *testing.T) {
 	s.events = metadataEvents{err: errors.New("db down")}
 	if got := s.taskEventMetadata(ctx, "org-1", task); got != "" {
 		t.Errorf("taskEventMetadata with a failed read = %q, want no metadata", got)
+	}
+}
+
+// TestTaskContext_ABumpedTaskIsBriefedWithItsNewestEvent: a CI task spawned by
+// one failing check and bumped by a second briefs its run with the second
+// failure's check, head and run ids, in both the event fields and the raw
+// metadata block, while primary_event_id still names the first.
+func TestTaskContext_ABumpedTaskIsBriefedWithItsNewestEvent(t *testing.T) {
+	ctx := context.Background()
+	orgID := runmode.LocalDefaultOrgID
+	stores := sqlitestore.New(newDelegateTestDB(t))
+
+	entity, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "github", dbtest.TestGitHubHost,
+		"octo/repo#18", "", "pr", "Fix CI", "")
+	if err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	record := func(check, head string, checkRunID, workflowRunID int) string {
+		t.Helper()
+		meta, _ := json.Marshal(map[string]any{
+			"check_name": check, "head_sha": head, "check_run_id": checkRunID, "workflow_run_id": workflowRunID,
+		})
+		id, err := stores.Events.RecordSystem(ctx, orgID, domain.Event{
+			EntityID: &entity.ID, EventType: domain.EventGitHubPRCICheckFailed, MetadataJSON: string(meta),
+		})
+		if err != nil {
+			t.Fatalf("record event: %v", err)
+		}
+		return id
+	}
+
+	spawnID := record("run", "29f4327", 101, 201)
+	task, _, err := stores.Tasks.FindOrCreateAtSystem(ctx, orgID, runmode.LocalDefaultTeamID, entity.ID,
+		domain.EventGitHubPRCICheckFailed, "", spawnID, 0.5, time.Now().UTC())
+	if err != nil || task == nil {
+		t.Fatalf("seed task: %+v, %v", task, err)
+	}
+	if err := stores.Tasks.RecordEventSystem(ctx, orgID, task.ID, spawnID, "spawned"); err != nil {
+		t.Fatalf("record spawned row: %v", err)
+	}
+	bumpID := record("links", "076cea7", 102, 202)
+	if _, err := stores.Tasks.BumpSystem(ctx, orgID, task.ID, bumpID); err != nil {
+		t.Fatalf("BumpSystem: %v", err)
+	}
+	if err := stores.Tasks.RecordEventSystem(ctx, orgID, task.ID, bumpID, "bumped"); err != nil {
+		t.Fatalf("record bumped row: %v", err)
+	}
+	bumped, err := stores.Tasks.GetSystem(ctx, orgID, task.ID)
+	if err != nil || bumped == nil {
+		t.Fatalf("GetSystem = %+v, %v", bumped, err)
+	}
+	if bumped.PrimaryEventID != spawnID {
+		t.Fatalf("primary_event_id = %q, want the spawning event %q", bumped.PrimaryEventID, spawnID)
+	}
+
+	s := &Spawner{events: stores.Events, tasks: stores.Tasks}
+	got := BuildTaskContext(*bumped, "octo/repo", s.taskEventMetadata(ctx, orgID, *bumped), "", nil, nil)
+
+	for _, want := range []string{
+		"- Check: links",
+		"- Head commit: 076cea7",
+		"- Check run ID: 102",
+		"- Actions run ID: 202",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("task context is missing %q;\n%s", want, got)
+		}
+	}
+	// The spawning failure's values appear nowhere, the raw metadata block
+	// included. Each is matched with its label or key: the untrusted-region
+	// markers are hex, so a bare number could match one.
+	for _, stale := range []string{
+		"29f4327",
+		"- Check: run",
+		"- Check run ID: 101",
+		"- Actions run ID: 201",
+		`"check_name":"run"`,
+		`"check_run_id":101`,
+		`"workflow_run_id":201`,
+	} {
+		if strings.Contains(got, stale) {
+			t.Errorf("task context carries the spawning event's %s;\n%s", stale, got)
+		}
 	}
 }

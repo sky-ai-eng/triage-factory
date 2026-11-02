@@ -892,6 +892,15 @@ type TaskStore interface {
 	// comment.
 	RecordEventSystem(ctx context.Context, orgID, taskID, eventID, kind string) error
 
+	// LatestEventIDSystem returns the id of the newest event that spawned or
+	// bumped the task: its newest task_events row of kind 'spawned', 'bumped'
+	// or 'injected' (a bump folded into a live conversation, whose row
+	// MarkEventInjectedSystem rewrote), ordered by the event's created_at,
+	// newest first, ties broken by event id descending. "" when the task has
+	// no such row. primary_event_id stays the spawning event; this is what a
+	// delegated run is briefed with. Admin pool, org_id bound by argument.
+	LatestEventIDSystem(ctx context.Context, orgID, taskID string) (string, error)
+
 	// MarkEventInjectedSystem flips the (task_id, event_id) timeline row's
 	// kind to "injected" in place — the event bumped the task AND was folded
 	// into the live conversation, and the fold is the fact worth surfacing over the

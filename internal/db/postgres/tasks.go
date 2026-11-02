@@ -1422,6 +1422,27 @@ func recordTaskEvent(ctx context.Context, q queryer, orgID, taskID, eventID, kin
 	return err
 }
 
+func (s *taskStore) LatestEventIDSystem(ctx context.Context, orgID, taskID string) (string, error) {
+	var eventID string
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT te.event_id
+		FROM task_events te
+		JOIN events ev ON ev.org_id = te.org_id AND ev.id = te.event_id
+		WHERE te.org_id = $1
+		  AND te.task_id = $2
+		  AND te.kind IN ('spawned', 'bumped', 'injected')
+		ORDER BY ev.created_at DESC, ev.id DESC
+		LIMIT 1
+	`, orgID, taskID).Scan(&eventID)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return eventID, nil
+}
+
 // MarkEventInjectedSystem flips the timeline row AND stamps the task's
 // agent claim in one transaction — see db.AgentClaimStamp for why the two
 // writes are inseparable. A stamp refusal (user owns it, bot already owns
@@ -1931,9 +1952,10 @@ var pgTaskColumnsWithEntity = `
 		)
 		ELSE 0
 	END,
-	-- The requested reviewer's handle, from the event that last bumped a
-	-- review_requested task (domain.Task.RequestedReviewer). A primary-key
-	-- seek, gated on the event type.
+	-- The requested reviewer's handle, from the event that spawned a
+	-- review_requested task (domain.Task.RequestedReviewer). The task's
+	-- dedup_key pins the reviewer, so every event that bumps it names the same
+	-- one. A primary-key seek, gated on the event type.
 	CASE
 		WHEN t.event_type = 'github:pr:review_requested' THEN COALESCE((
 			SELECT COALESCE(NULLIF(ev.metadata_json ->> 'requested_login', ''),

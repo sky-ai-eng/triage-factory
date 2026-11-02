@@ -403,11 +403,12 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		return engagementDisposition{fenced: fail("failed to resolve own binary path: "+err.Error(), domain.ConversationFailureUnclassified)}
 	}
 
-	// Load the primary event's metadata so the task context can carry the
-	// event's own fields (workflow run id, head sha, check name, ...). A DB
-	// failure here is non-fatal: the block just renders without them. FKs
-	// guarantee the event exists, so a real miss would be a DB-level problem we
-	// want to log and continue through rather than aborting the run.
+	// Load the metadata of the newest event that spawned or bumped the task so
+	// the task context can carry its fields (workflow run id, head sha, check
+	// name, ...). A DB failure here is non-fatal: the block just renders
+	// without them. FKs guarantee the event exists, so a real miss would be a
+	// DB-level problem we want to log and continue through rather than
+	// aborting the run.
 	metadataJSON := s.taskEventMetadata(context.WithoutCancel(ctx), orgID, task)
 
 	// Resolve the paths the agent will actually observe, which differ from the

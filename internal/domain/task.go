@@ -16,7 +16,7 @@ type Task struct {
 	EntityID       string `json:"entity_id"`        // FK to entities.id
 	EventType      string `json:"event_type"`       // FK to events_catalog.id — the event that spawned this task
 	DedupKey       string `json:"dedup_key"`        // open-set discriminator; empty for most event types
-	PrimaryEventID string `json:"primary_event_id"` // FK to events.id — the specific event that spawned/last bumped
+	PrimaryEventID string `json:"primary_event_id"` // FK to events.id — the event that spawned the task; the events that bumped it are task_events rows (TaskStore.RecordEvent)
 	// TeamID is the owning/attributed team for this task, or nil when the
 	// owner is unresolved (author-centric routing couldn't pick a single
 	// team). Pointer-for-nullable: nil = "no owner yet" — distinct from a
