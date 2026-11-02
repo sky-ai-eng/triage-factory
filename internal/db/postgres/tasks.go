@@ -137,7 +137,8 @@ const pgTaskRuleOrderJoin = `
 	LEFT JOIN (
 		SELECT org_id, event_type, MIN(sort_order) AS sort_order
 		FROM event_handlers
-		WHERE enabled = true AND kind = 'rule'
+		WHERE enabled = true AND kind = 'rule' AND deleted_at IS NULL
+		  AND NOT EXISTS (SELECT 1 FROM teams tm WHERE tm.id = event_handlers.team_id AND tm.deleted_at IS NOT NULL)
 		GROUP BY org_id, event_type
 	) tr ON t.event_type = tr.event_type AND t.org_id = tr.org_id`
 
