@@ -34,6 +34,17 @@ type ContentBlock struct {
 	Text string `json:"text"`
 }
 
+// ToolBatchNotes is OnToolBatch's answer for one tool batch: Text, which the
+// model reads with the batch's results, and Undo, called when the text did
+// not reach the model, so the caller can offer it again. That is when the
+// SDK gave up the batch before the reply arrived (an interrupt does), the
+// reply could not be written, or the process ended before the wrapper said
+// what it did with the reply. A nil Undo has nothing to take back.
+type ToolBatchNotes struct {
+	Text string
+	Undo func()
+}
+
 // RunOptions configures one `claude -p` invocation. Callers populate
 // every field they care about; zero-values fall back to claude's
 // defaults (model unset, no resume, default max turns).
@@ -245,13 +256,21 @@ type RunOptions struct {
 	// threads it through.
 	OnResult func(*Result)
 
-	// OnToolBatch, when non-nil, is asked for text to hand the model each
+	// OnToolBatch, when non-nil, is asked for the notes to hand the model each
 	// time every tool call of a batch has resolved, before the model's next
-	// request (the SDK's PostToolBatch hook). "" hands nothing. Called from
-	// the reader goroutine while the agent's turn waits on the answer, so it
-	// may read the database but must return promptly. Only RunInteractive
-	// threads it through.
-	OnToolBatch func() string
+	// request (the SDK's PostToolBatch hook). Empty text hands nothing. Called
+	// from the reader goroutine while the agent's turn waits on the answer,
+	// so it may read the database but must return promptly. Only
+	// RunInteractive threads it through.
+	OnToolBatch func() ToolBatchNotes
+
+	// OnOpeningUnsent, when non-nil, is called when the opening message
+	// (Message or OpeningBlocks) never reached the agent: the process failed
+	// to start, or it ended before the wrapper was ready to take the message.
+	// The caller can then return what it composed into the message to
+	// wherever the next engagement reads it from. Only RunInteractive calls
+	// it.
+	OnOpeningUnsent func()
 
 	// LLMResolver, when non-nil, resolves the org's LLM env map instead of
 	// Run's built-in raw-secret resolution — the seam the brain wires to

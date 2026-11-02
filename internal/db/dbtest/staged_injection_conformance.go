@@ -308,6 +308,37 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 		}
 	})
 
+	t.Run("Restore_returns_flushed_injections_to_the_next_flush", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		conversationID := seed.Conversation(t, "restore")
+		other := seed.Conversation(t, "restore-other")
+		for _, c := range []string{conversationID, other} {
+			if _, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{ConversationID: c, Subtype: domain.MessageSubtypeInjectionSystemNote, Producer: "p", Body: "note"}); err != nil {
+				t.Fatalf("append: %v", err)
+			}
+		}
+		flushed, err := store.FlushPendingSystem(ctx, orgID, conversationID)
+		if err != nil || len(flushed) != 1 {
+			t.Fatalf("flush = (%+v, %v), want the one note", flushed, err)
+		}
+		otherFlushed, err := store.FlushPendingSystem(ctx, orgID, other)
+		if err != nil || len(otherFlushed) != 1 {
+			t.Fatalf("flush other = (%+v, %v), want the one note", otherFlushed, err)
+		}
+
+		// The other conversation's id rides along and is skipped: a restore
+		// names its own conversation's rows only.
+		if err := store.RestorePendingSystem(ctx, orgID, conversationID, []string{flushed[0].ID, otherFlushed[0].ID}); err != nil {
+			t.Fatalf("restore: %v", err)
+		}
+		if again, err := store.FlushPendingSystem(ctx, orgID, conversationID); err != nil || len(again) != 1 || again[0].ID != flushed[0].ID {
+			t.Errorf("flush after restore = (%+v, %v), want the restored note", again, err)
+		}
+		if again, err := store.FlushPendingSystem(ctx, orgID, other); err != nil || len(again) != 0 {
+			t.Errorf("other conversation's flush after restore = (%+v, %v), want nothing", again, err)
+		}
+	})
+
 	t.Run("HasNoteForEvent_counts_staged_and_delivered_notes_only", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		conversationID := seed.Conversation(t, "told")

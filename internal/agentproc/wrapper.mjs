@@ -424,12 +424,14 @@ async function runStreamingInput(options, permissionPrompts, toolBatchNotes) {
       }
 
       case "tool_batch_reply": {
+        // A reply with context says whether it reached the hook, so Go can
+        // take back context that arrived after an interrupt gave the hook
+        // up.
         const settle = pendingBatches.get(ctl.id)
-        if (!settle) {
-          process.stderr.write(`wrapper: no pending tool batch ${ctl.id}\n`)
-          break
-        }
-        settle(ctl.context ?? "")
+        const context = ctl.context ?? ""
+        if (settle) settle(context)
+        else process.stderr.write(`wrapper: no pending tool batch ${ctl.id}\n`)
+        if (context) emit({ type: "control", subtype: "tool_batch_result", id: ctl.id, delivered: Boolean(settle) })
         break
       }
 

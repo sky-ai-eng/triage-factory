@@ -43,8 +43,9 @@ const DefaultCloseDeferralSweepInterval = 30 * time.Second
 const DefaultCloseHoldTimeout = 20 * time.Minute
 
 // ParseCloseHoldTimeout interprets the TF_CLOSE_HOLD_TIMEOUT env value.
-// Empty → the default. Non-positive or unparseable → the default plus an
-// error the caller logs.
+// Empty is the default. A value that is not a positive duration is an error,
+// which refuses the boot: a typo must not run every pod on a limit nobody
+// chose.
 func ParseCloseHoldTimeout(raw string) (time.Duration, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -52,9 +53,7 @@ func ParseCloseHoldTimeout(raw string) (time.Duration, error) {
 	}
 	d, err := time.ParseDuration(raw)
 	if err != nil || d <= 0 {
-		return DefaultCloseHoldTimeout, fmt.Errorf(
-			"invalid TF_CLOSE_HOLD_TIMEOUT %q (want a positive duration like \"20m\"); using default %s",
-			raw, DefaultCloseHoldTimeout)
+		return 0, fmt.Errorf("invalid TF_CLOSE_HOLD_TIMEOUT=%q (want a positive duration like \"20m\")", raw)
 	}
 	return d, nil
 }

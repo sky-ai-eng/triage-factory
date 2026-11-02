@@ -58,6 +58,7 @@ func TestShouldSkipRefresh_ChangeWindow(t *testing.T) {
 	}{
 		{"stamped a minute ago", now.Add(-time.Minute).Format(time.RFC3339), false},
 		{"stamped ten minutes ago", now.Add(-10 * time.Minute).Format(time.RFC3339), true},
+		{"stamped by a clock an hour ahead", now.Add(time.Hour).Format(time.RFC3339), true},
 		{"no stamp", "", true},
 		{"unparseable stamp", "yesterday", true},
 	}

@@ -306,9 +306,12 @@ an unchanged head (the base took in commits the PR's head already has) can add
 a file only when those commits changed it and the head later changed it back;
 that case is left to the sweep. A move's paths are its files plus each one's
 previous path. They overlap when a PR path equals a move path or one is a
-parent directory of the other, or when the move deleted a file, or renamed one
-into another directory, and the PR added a file anywhere under the directory
-the old file was in (never the repository root).
+parent directory of the other, or when one side added a file anywhere under a
+directory the other side vacated. A side vacates the directory of a file it
+deleted, and, for a file it renamed into another directory, the directory the
+file left and each parent of it whose name the rename kept (renaming
+`D/sub/x` to `E/sub/x` vacates `D/sub` and `D`, as git's directory-rename
+detection reads it), never the repository root.
 
 A probe is read 15 seconds after its admission, and a PR with a probe already
 waiting collapses into it. The probe worker reads the waiting PRs that share a

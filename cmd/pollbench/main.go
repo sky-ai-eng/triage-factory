@@ -79,6 +79,7 @@ func main() {
 		seed            = flag.Int64("seed", 42, "dataset seed; same seed + shape → same request counts")
 		warmCycles      = flag.Int("warm-cycles", 1, "warm cycles to run after the cold sync completes")
 		maxCycles       = flag.Int("max-cycles", 20, "cold-sync cycle cap when a rate limit forces resumption")
+		pollInterval    = flag.Duration("poll-interval", 5*time.Minute, "the poll interval each cycle stands for on the refresh gate's 5-minute change window (TF's default is 5m); the window is kept on a clock that advances this much per cycle")
 		check           = flag.Bool("check", false, "CI mode: run twice, assert determinism (identical request counts) and sanity, exit non-zero on failure")
 		verbose         = flag.Bool("v", false, "keep info-level component logs (schema bootstrap, per-cycle tracker lines)")
 	)
@@ -90,6 +91,10 @@ func main() {
 
 	if flag.NArg() > 0 {
 		fmt.Fprintf(os.Stderr, "unexpected argument %q (flags only)\n", flag.Arg(0))
+		os.Exit(2)
+	}
+	if *pollInterval <= 0 {
+		fmt.Fprintf(os.Stderr, "-poll-interval must be positive, got %v\n", *pollInterval)
 		os.Exit(2)
 	}
 
@@ -165,8 +170,9 @@ func main() {
 			MoveRepoPct: preset.moveRepo,
 			HeadPushPct: preset.headPush,
 		},
-		WarmCycles: *warmCycles,
-		MaxCycles:  *maxCycles,
+		WarmCycles:   *warmCycles,
+		MaxCycles:    *maxCycles,
+		PollInterval: *pollInterval,
 	}
 
 	name := *shape

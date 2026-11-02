@@ -107,7 +107,7 @@ func TestStagedInjectionsForEngagement_FlushesAndDrains(t *testing.T) {
 	stageOne(t, s, runmode.LocalDefaultOrgID, "run-resume", "p", "injection one")
 	stageOne(t, s, runmode.LocalDefaultOrgID, "run-resume", "p", "injection two")
 
-	block := s.stagedInjectionsForEngagement(ctx, runmode.LocalDefaultOrgID, "run-resume")
+	block, _ := s.stagedInjectionsForEngagement(ctx, runmode.LocalDefaultOrgID, "run-resume")
 	if !strings.HasPrefix(block, "<system-note>") || !strings.HasSuffix(block, "</system-note>") {
 		t.Fatalf("block not wrapped: %q", block)
 	}
@@ -115,7 +115,7 @@ func TestStagedInjectionsForEngagement_FlushesAndDrains(t *testing.T) {
 		t.Errorf("block missing a staged injection: %q", block)
 	}
 	// Destructive: the flush drained the queue.
-	if again := s.stagedInjectionsForEngagement(ctx, runmode.LocalDefaultOrgID, "run-resume"); again != "" {
+	if again, _ := s.stagedInjectionsForEngagement(ctx, runmode.LocalDefaultOrgID, "run-resume"); again != "" {
 		t.Errorf("second resume should prepend nothing (queue drained), got %q", again)
 	}
 }
@@ -260,7 +260,7 @@ func TestResumeSystemPrepends_OrdersInjectionsThenLedger(t *testing.T) {
 	if err != nil || conv == nil {
 		t.Fatalf("GetSystem: err=%v conversation=%v", err, conv)
 	}
-	prefix := s.resumeSystemPrepends(ctx, runmode.LocalDefaultOrgID, conv)
+	prefix, _ := s.resumeSystemPrepends(ctx, runmode.LocalDefaultOrgID, conv)
 
 	inj := strings.Index(prefix, "the staged injection body")
 	ledger := strings.Index(prefix, "o/r#1")
@@ -286,7 +286,7 @@ func TestResumeSystemPrepends_EmptyWhenNothingPending(t *testing.T) {
 	if err != nil || conv == nil {
 		t.Fatalf("GetSystem: err=%v conversation=%v", err, conv)
 	}
-	if got := s.resumeSystemPrepends(ctx, runmode.LocalDefaultOrgID, conv); got != "" {
+	if got, _ := s.resumeSystemPrepends(ctx, runmode.LocalDefaultOrgID, conv); got != "" {
 		t.Errorf("want empty prefix when nothing pending, got %q", got)
 	}
 }
@@ -295,7 +295,7 @@ func TestResumeSystemPrepends_EmptyWhenNothingPending(t *testing.T) {
 // (partial test bundle) degrades to "" rather than panicking.
 func TestStagedInjectionsForEngagement_NilStoreSafe(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	if got := s.stagedInjectionsForEngagement(context.Background(), runmode.LocalDefaultOrgID, "r"); got != "" {
+	if got, _ := s.stagedInjectionsForEngagement(context.Background(), runmode.LocalDefaultOrgID, "r"); got != "" {
 		t.Errorf("nil store should yield empty block, got %q", got)
 	}
 }

@@ -141,24 +141,33 @@ func (s *Spawner) personStarted(ctx context.Context, orgID string, conv *domain.
 }
 
 // stagedInjectionsForEngagement flushes the conversation's durable
-// staged-injection queue and returns the bundled <system-note> block an SDK
-// engagement sends with its first message: every injection staged while the
-// run was not running. A resume puts it ahead of the person's message, and a
-// launch ahead of its continuation note or after its opening
-// (composeLaunchTurn). Returns "" (nothing to send) when nothing is staged or
-// on any read error: feedback never blocks an engagement.
+// staged-injection queue for an SDK engagement's first message: every
+// injection staged while the run was not running. A resume puts the block
+// ahead of the person's message, and a launch ahead of its continuation note
+// or after its opening (composeLaunchTurn). It returns the bundled
+// <system-note> block, "" when nothing is staged or on any read error
+// (feedback never blocks an engagement), and the opening-unsent callback
+// (agentproc.RunOptions.OnOpeningUnsent) that returns the flushed injections
+// to the queue if the message never reaches the agent, nil when nothing was
+// flushed.
 //
 // This is the durable sibling of deliverableLedgerForResume — SendMessage
 // prepends both, so a resume that has both a resolved deliverable and a staged
 // injection carries two <system-note> blocks ahead of the user's text.
-func (s *Spawner) stagedInjectionsForEngagement(ctx context.Context, orgID, conversationID string) string {
-	return domain.StagedInjectionBlock(s.flushStagedInjections(ctx, orgID, conversationID))
+func (s *Spawner) stagedInjectionsForEngagement(ctx context.Context, orgID, conversationID string) (string, func()) {
+	injections := s.flushStagedInjections(ctx, orgID, conversationID)
+	if len(injections) == 0 {
+		return "", nil
+	}
+	return domain.StagedInjectionBlock(injections), func() { s.restoreStagedInjections(orgID, conversationID, injections) }
 }
 
 // flushStagedInjections claims every pending staged injection on the
 // conversation, oldest first, or none when nothing is staged or on any read
 // error. The flush marks the rows delivered in the statement that returns
-// them, so an injection is delivered exactly once even if two readers race.
+// them, so an injection is delivered exactly once even if two readers race;
+// a caller that learns its flush never reached the agent hands them back
+// (restoreStagedInjections).
 func (s *Spawner) flushStagedInjections(ctx context.Context, orgID, conversationID string) []domain.StagedInjection {
 	if s.stagedInjections == nil {
 		return nil
@@ -169,4 +178,23 @@ func (s *Spawner) flushStagedInjections(ctx context.Context, orgID, conversation
 		return nil
 	}
 	return injections
+}
+
+// restoreStagedInjections returns flushed injections to the queue, so the
+// next flush delivers them: what was to carry them to the agent never did.
+// Detached from any caller's context, since it runs as the engagement that
+// flushed them fails or ends.
+func (s *Spawner) restoreStagedInjections(orgID, conversationID string, injections []domain.StagedInjection) {
+	if s.stagedInjections == nil || len(injections) == 0 {
+		return
+	}
+	ids := make([]string, len(injections))
+	for i, inj := range injections {
+		ids[i] = inj.ID
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), detachedWriteDeadline)
+	defer cancel()
+	if err := s.stagedInjections.RestorePendingSystem(ctx, orgID, conversationID, ids); err != nil {
+		delegateLog.Warn("returning undelivered notes to the queue failed; the agent does not read them", "conversation", conversationID, "notes", len(ids), "error", err)
+	}
 }

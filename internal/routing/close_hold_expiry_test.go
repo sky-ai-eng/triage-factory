@@ -173,7 +173,7 @@ func TestCloseHoldExpiry_LeavesAPersonsWorkRunning(t *testing.T) {
 }
 
 // TestParseCloseHoldTimeout: unset is the default, and a value that is not a
-// positive duration falls back to it with an error to log.
+// positive duration is refused.
 func TestParseCloseHoldTimeout(t *testing.T) {
 	for _, tc := range []struct {
 		raw     string
@@ -182,9 +182,9 @@ func TestParseCloseHoldTimeout(t *testing.T) {
 	}{
 		{raw: "", want: "20m0s"},
 		{raw: " 45m ", want: "45m0s"},
-		{raw: "0s", want: "20m0s", wantErr: true},
-		{raw: "-5m", want: "20m0s", wantErr: true},
-		{raw: "twenty", want: "20m0s", wantErr: true},
+		{raw: "0s", want: "0s", wantErr: true},
+		{raw: "-5m", want: "0s", wantErr: true},
+		{raw: "20", want: "0s", wantErr: true},
 	} {
 		got, err := ParseCloseHoldTimeout(tc.raw)
 		if got.String() != tc.want || (err != nil) != tc.wantErr {

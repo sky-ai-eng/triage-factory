@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -77,14 +78,19 @@ type Publisher interface {
 }
 
 // Worker drains pr_mergeability_probes. Exactly one process runs it at a
-// time, which is what makes it a brain component, and one goroutine drives
-// it: Drain is not safe for concurrent use.
+// time, which is what makes it a brain component. Within that process two
+// drains can overlap: a brain that loses the lease and wins it back starts a
+// second loop on the same worker while the first is still reading the batch
+// it holds, since a read outlives its brain's cancellation. The leases fence
+// the probes themselves, and limitMu guards the one state the two share.
 type Worker struct {
 	store    db.PRMergeabilityStore
 	orgs     OrgLister
 	resolver ClientResolver
 	pub      Publisher
 	owner    workitem.Owner
+
+	limitMu sync.Mutex
 	// limited is when each credential GitHub rate-limited may be read again.
 	limited map[limitKey]time.Time
 }
@@ -281,13 +287,10 @@ func (w *Worker) read(ctx context.Context, orgID string, g *credentialBatch) {
 	defer span.End()
 
 	key := limitKey{orgID: orgID, credential: g.credential}
-	if until, ok := w.limited[key]; ok {
-		if time.Now().Before(until) {
-			span.SetAttributes(telemetry.Outcome("rate_limited"))
-			w.deferAll(ctx, g.items, until)
-			return
-		}
-		delete(w.limited, key)
+	if until, ok := w.limitedUntil(key, time.Now()); ok {
+		span.SetAttributes(telemetry.Outcome("rate_limited"))
+		w.deferAll(ctx, g.items, until)
+		return
 	}
 
 	// Renewal is the fence check before the read, and where a cancellation
@@ -334,7 +337,7 @@ func (w *Worker) read(ctx context.Context, orgID string, g *credentialBatch) {
 	cancel()
 	if err != nil {
 		if until, ok := rateLimitedUntil(err); ok {
-			w.limited[key] = until
+			w.limitUntil(key, until)
 			span.SetAttributes(telemetry.Outcome("rate_limited"))
 			log.WarnContext(ctx, "mergeability probes: GitHub rate-limited the read; the credential's probes wait for the reset",
 				"credential", g.credential, "probes", len(held), "resume_at", until, "error", err)
@@ -354,12 +357,22 @@ func (w *Worker) read(ctx context.Context, orgID string, g *credentialBatch) {
 	// Every event an answer enqueues is stamped with this batch's span, so
 	// its routing links back to the read that found it.
 	traceparent := telemetry.TraceparentFrom(ctx)
+	missing := 0
 	for _, item := range held {
 		read, found := reads[item.NodeID]
-		if found {
-			recordAnswer(read.Mergeable)
+		if !found {
+			missing++
+			termCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), terminalWriteTimeout)
+			w.drop(termCtx, item, dropNotFound, nil)
+			cancel()
+			continue
 		}
-		w.complete(ctx, item, db.PRMergeabilityAnswer{Found: found, Mergeable: read.Mergeable, HeadSHA: read.HeadSHA, BaseRef: read.BaseRef}, traceparent)
+		recordAnswer(read.Mergeable)
+		w.complete(ctx, item, db.PRMergeabilityAnswer{Found: true, Mergeable: read.Mergeable, HeadSHA: read.HeadSHA, BaseRef: read.BaseRef}, traceparent)
+	}
+	if missing > 0 {
+		log.WarnContext(ctx, "mergeability probes: GitHub returned no pull request for some ids; their probes are dropped and the poll queues them again",
+			"credential", g.credential, "missing", missing, "probes", len(held))
 	}
 }
 
@@ -367,6 +380,29 @@ func (w *Worker) read(ctx context.Context, orgID string, g *credentialBatch) {
 // installation or a token on its own, and an org's credentials are its own.
 type limitKey struct {
 	orgID, credential string
+}
+
+// limitedUntil reports when the credential key names may be read again, while
+// a rate limit still holds it at now. A hold that has passed is forgotten.
+func (w *Worker) limitedUntil(key limitKey, now time.Time) (time.Time, bool) {
+	w.limitMu.Lock()
+	defer w.limitMu.Unlock()
+	until, ok := w.limited[key]
+	if !ok {
+		return time.Time{}, false
+	}
+	if !now.Before(until) {
+		delete(w.limited, key)
+		return time.Time{}, false
+	}
+	return until, true
+}
+
+// limitUntil holds the credential key names off GitHub until until.
+func (w *Worker) limitUntil(key limitKey, until time.Time) {
+	w.limitMu.Lock()
+	defer w.limitMu.Unlock()
+	w.limited[key] = until
 }
 
 // minRateLimitWait is the shortest wait a rate limit defers probes for, so
@@ -490,10 +526,14 @@ func (w *Worker) failReads(ctx context.Context, items []db.ClaimedPRMergeability
 	}
 }
 
-// dropNoCredential is the drop outcome of a probe whose repository no
-// credential the org holds can read. The others are the read's
-// workitem.Outcome.
-const dropNoCredential = "no_credential"
+// The drop outcomes that are not a failed read's workitem.Outcome:
+// dropNoCredential, a probe whose repository no credential the org holds can
+// read, and dropNotFound, one whose id GitHub answered with no pull request,
+// which is how a credential that lost access to the repository sees it.
+const (
+	dropNoCredential = "no_credential"
+	dropNotFound     = "not_found"
+)
 
 // drop completes a probe that will not be read, writing nothing: the store's
 // completion with no answer. outcome is why, as the dropped counter labels
@@ -503,10 +543,11 @@ func (w *Worker) drop(ctx context.Context, item db.ClaimedPRMergeabilityProbe, o
 	switch {
 	case err == nil:
 		recordDrop(item.Receipt.OrgID, outcome)
-		// A drop for no credential was logged once for its repository; a
-		// drop after failed reads ends an outage the probe could not outlast.
+		// A drop for no credential or no pull request was logged once for its
+		// repository or batch; a drop after failed reads ends an outage the
+		// probe could not outlast.
 		level := slog.LevelWarn
-		if outcome == dropNoCredential {
+		if outcome == dropNoCredential || outcome == dropNotFound {
 			level = slog.LevelDebug
 		}
 		log.Log(ctx, level, "mergeability probes: dropped a probe; the poll queues the pull request again",

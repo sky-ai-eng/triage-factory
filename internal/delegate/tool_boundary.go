@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 )
@@ -123,13 +124,27 @@ func (b *toolBoundary) take() bool {
 // armed, and nothing otherwise, so an ordinary batch reads no rows. The
 // model's next request waits on the answer and reads the bundle with the
 // batch's results. The flush marks the rows delivered, so a later resume does
-// not repeat them.
-func (s *Spawner) notesAtToolBatch(orgID, conversationID string) string {
+// not repeat them. A bundle that never reached the model (an interrupt gave
+// the batch up first, say) is undone: the rows go back to the queue and the
+// boundary re-arms, so the next batch, or the next resume, carries them.
+func (s *Spawner) notesAtToolBatch(orgID, conversationID string) agentproc.ToolBatchNotes {
 	h := s.getProc(conversationID)
 	if h == nil || !h.boundary.take() {
-		return ""
+		return agentproc.ToolBatchNotes{}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), detachedWriteDeadline)
 	defer cancel()
-	return domain.StagedInjectionBoundaryBlock(s.flushStagedInjections(ctx, orgID, conversationID))
+	notes := s.flushStagedInjections(ctx, orgID, conversationID)
+	if len(notes) == 0 {
+		return agentproc.ToolBatchNotes{}
+	}
+	return agentproc.ToolBatchNotes{
+		Text: domain.StagedInjectionBoundaryBlock(notes),
+		Undo: func() {
+			s.restoreStagedInjections(orgID, conversationID, notes)
+			if h := s.getProc(conversationID); h != nil {
+				h.boundary.arm()
+			}
+		},
+	}
 }

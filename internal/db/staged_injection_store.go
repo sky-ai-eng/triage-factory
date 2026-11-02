@@ -65,6 +65,16 @@ type StagedInjectionStore interface {
 	// prepended ahead of the resuming user's message.
 	FlushPendingSystem(ctx context.Context, orgID, conversationID string) ([]domain.StagedInjection, error)
 
+	// RestorePendingSystem returns injections a flush claimed to waiting, by
+	// the ids FlushPendingSystem returned, so the next flush delivers them:
+	// the caller learned that what it flushed never reached the agent (the
+	// tool batch that was to carry it was abandoned, or the launch it opened
+	// never started). An id that names no delivered injection of the
+	// conversation is skipped.
+	//
+	// Exempt from the returned-row rule: it is a bulk write.
+	RestorePendingSystem(ctx context.Context, orgID, conversationID string, ids []string) error
+
 	// DeleteSystem withdraws one staged injection of either subtype by id
 	// (the decimal message row id AppendSystem returned). Used to clean up a
 	// row staged onto a conversation that a post-stage recheck then decided
