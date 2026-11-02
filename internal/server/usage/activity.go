@@ -50,12 +50,14 @@ import (
 // scope's runs changed (domain.ObjectActivity). object_id is the spelling the
 // actions lists' object_id filter takes. deliverable is the most recently
 // created deliverable in the scope that is the same object
-// (domain.ArtifactDeliverable), or null.
+// (domain.ArtifactDeliverable), or null. name is the object's name within its
+// repository (domain.Artifact.Name), "" for a kind target already names.
 type objectActivityJSON struct {
 	ObjectID          domain.ObjectRef         `json:"object_id"`
 	ObjectKind        string                   `json:"object_kind"`
 	Provider          string                   `json:"provider"`
 	Target            string                   `json:"target"`
+	Name              string                   `json:"name"`
 	URL               string                   `json:"url"`
 	LastAction        string                   `json:"last_action"`
 	ActionCount       int                      `json:"action_count"`
@@ -95,6 +97,7 @@ func toObjectActivityJSON(a domain.ObjectActivity, deliverables []domain.Deliver
 		ObjectKind:        a.ObjectKind,
 		Provider:          a.Provider,
 		Target:            a.Target,
+		Name:              a.Name(),
 		URL:               a.URL,
 		LastAction:        a.LastAction,
 		ActionCount:       a.ActionCount,

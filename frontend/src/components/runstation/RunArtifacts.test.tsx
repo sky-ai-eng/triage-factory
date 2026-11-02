@@ -52,6 +52,7 @@ const artifact = (over: Partial<ConversationArtifact>): ConversationArtifact => 
   provider: 'github',
   scope: 'https://github.com',
   target: 'org/repo:fix-ci',
+  name: '',
   url: 'https://github.com/org/repo/tree/fix-ci',
   last_action: 'branch_pushed',
   action_count: 1,
@@ -154,6 +155,28 @@ describe('RunArtifacts', () => {
 
     fireEvent.click(within(prRow).getByRole('button', { name: 'Open pull request: org/repo#18' }))
     expect(onOpen).toHaveBeenCalledWith('pr', 'pr1')
+  })
+
+  it('titles a branch by its name, with its repository on the secondary line', async () => {
+    stubReads({
+      artifacts: [
+        artifact({
+          object_id: 'YnIy',
+          target: 'sky-ai-eng/demo-repository',
+          name: 'tftest-multi-pages',
+          url: 'https://github.com/sky-ai-eng/demo-repository/tree/tftest-multi-pages',
+        }),
+      ],
+    })
+    render(<RunArtifacts conversation={conversation({ artifact_count: 1 })} />)
+
+    const link = await screen.findByRole('link', { name: 'tftest-multi-pages' })
+    const row = link.closest('li')!
+    expect(
+      within(row).getByRole('button', { name: 'Show the actions on tftest-multi-pages' }),
+    ).toBeInTheDocument()
+    expect(within(row).getByText('sky-ai-eng/demo-repository')).toBeInTheDocument()
+    expect(within(row).getByText('Branch pushed')).toBeInTheDocument()
   })
 
   it('drops the highlight from deliverables nothing waits on', async () => {

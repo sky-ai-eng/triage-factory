@@ -198,9 +198,11 @@ export function RunArtifacts({ conversation, onOpenDeliverable, onDeliverableRes
   )
 }
 
-// ArtifactRow — one object the run changed: its kind, its target linked out,
+// ArtifactRow — one object the run changed: its kind, its name linked out,
 // the last thing the run did to it, and how many times it acted on it.
-// Expanding it lists those actions.
+// Expanding it lists those actions. A branch or a label is named within its
+// repository, which then reads on the secondary line; any other kind's target
+// is its name.
 function ArtifactRow({
   conversationId,
   artifact,
@@ -220,7 +222,8 @@ function ArtifactRow({
   const [expanded, setExpanded] = useState(false)
   const meta = metaForObjectKind(artifact.object_kind)
   const Icon = meta.icon
-  const target = artifact.target || meta.label
+  const repository = artifact.name ? artifact.target : ''
+  const title = artifact.name || artifact.target || meta.label
   const deliverable = artifact.deliverable
   const overlayKind = deliverable ? overlayKindFor(deliverable.kind) : null
   const decision = deliverable != null && awaitsDecision(deliverable.kind, deliverable.state)
@@ -234,7 +237,7 @@ function ArtifactRow({
           type="button"
           onClick={() => setExpanded((v) => !v)}
           aria-expanded={expanded}
-          aria-label={`${expanded ? 'Hide' : 'Show'} the actions on ${target}`}
+          aria-label={`${expanded ? 'Hide' : 'Show'} the actions on ${title}`}
           className="mt-0.5 shrink-0 rounded-[3px] text-ink-3/70 transition-colors hover:text-ink-2"
         >
           <ChevronRight
@@ -254,10 +257,10 @@ function ArtifactRow({
                 title={`Open ${meta.label} (new tab)`}
                 className="min-w-0 truncate font-mono text-reported text-ink-2 hover:text-ink-1 hover:underline"
               >
-                {target}
+                {title}
               </a>
             ) : (
-              <span className="min-w-0 truncate font-mono text-reported text-ink-2">{target}</span>
+              <span className="min-w-0 truncate font-mono text-reported text-ink-2">{title}</span>
             )}
             {/* Where the deliverable stands now, which the last action does
                 not say: a draft the reconciler saw merged on GitHub reads
@@ -271,6 +274,12 @@ function ArtifactRow({
           <div className="mt-0.5 flex items-baseline gap-1.5 font-mono text-label text-ink-3">
             <span className="shrink-0">{meta.label}</span>
             <span aria-hidden>·</span>
+            {repository && (
+              <>
+                <span className="min-w-0 truncate">{repository}</span>
+                <span aria-hidden>·</span>
+              </>
+            )}
             <span className="min-w-0 truncate">{metaForAction(artifact.last_action).label}</span>
             {artifact.action_count > 1 && (
               <span className="shrink-0 tabular-nums">×{artifact.action_count}</span>
@@ -281,7 +290,7 @@ function ArtifactRow({
           <button
             type="button"
             onClick={() => onOpenDeliverable(overlayKind, deliverable.id)}
-            aria-label={`Open ${metaForKind(deliverable.kind).label}: ${target}`}
+            aria-label={`Open ${metaForKind(deliverable.kind).label}: ${title}`}
             className="shrink-0 rounded-[4px] px-1.5 py-0.5 font-mono text-label font-semibold text-warm transition-colors hover:bg-warm/[0.1]"
           >
             Open

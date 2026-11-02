@@ -73,3 +73,24 @@ func TestArtifactDeliverableKeys(t *testing.T) {
 		t.Errorf("no artifacts = (%v, %v), want none", e, r)
 	}
 }
+
+func TestArtifactName(t *testing.T) {
+	cases := []struct {
+		name     string
+		artifact Artifact
+		want     string
+	}{
+		{"branch ref", Artifact{ObjectKind: ObjectKindBranch, ObjectKey: "refs/heads/feature/retry", Target: "owner/repo"}, "feature/retry"},
+		{"ref outside refs/heads/", Artifact{ObjectKind: ObjectKindBranch, ObjectKey: "refs/pull/7/head", Target: "owner/repo"}, "refs/pull/7/head"},
+		{"label", Artifact{ObjectKind: ObjectKindLabel, ObjectKey: "needs triage", Target: "owner/repo"}, "needs triage"},
+		{"release", Artifact{ObjectKind: ObjectKindRelease, ObjectKey: "901", Target: "owner/repo"}, "901"},
+		{"pull request", Artifact{ObjectKind: ObjectKindPullRequest, EntityID: "e1", Target: "owner/repo#3"}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.artifact.Name(); got != c.want {
+				t.Errorf("Name() = %q, want %q", got, c.want)
+			}
+		})
+	}
+}

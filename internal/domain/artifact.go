@@ -62,6 +62,21 @@ type Artifact struct {
 	LastAt      time.Time
 }
 
+// Name is the object's name within its repository, for a kind identified by a
+// repository and a key: a branch's ref without its refs/heads/ prefix (a ref
+// in another namespace stays whole), a label's name, and GitHub's id for a
+// release, a workflow or a workflow run, the only thing the ledger records of
+// them. "" for every other kind, whose Target already names it.
+func (a Artifact) Name() string {
+	switch a.ObjectKind {
+	case ObjectKindBranch:
+		return strings.TrimPrefix(a.ObjectKey, branchRefPrefix)
+	case ObjectKindLabel, ObjectKindRelease, ObjectKindWorkflow, ObjectKindWorkflowRun:
+		return a.ObjectKey
+	}
+	return ""
+}
+
 // ObjectActivity is one object the runs of a team or an org changed: the
 // artifact rows of the scope that name it, grouped by the object alone rather
 // than per conversation. The Artifact fields and their display rule are read

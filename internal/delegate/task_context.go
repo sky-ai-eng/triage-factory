@@ -209,6 +209,10 @@ func (s *Spawner) taskArtifacts(ctx context.Context, orgID, taskID string) ([]do
 // stands now. A deliverable no artifact matches is one whose object no run has
 // changed yet, such as a staged review, and renders its own state.
 //
+// An artifact with a name within its repository (domain.Artifact.Name, a
+// branch's or a label's) reads "<name> in <target>", so two branches of one
+// repository are two different lines.
+//
 // A segment with no value is omitted, and every value is flattened, because a
 // target and a URL are provider-authored strings reaching the same bullet list
 // the task's own fields do.
@@ -239,7 +243,11 @@ func artifactLines(artifacts []domain.Artifact, deliverables []domain.Deliverabl
 			status = d.State
 			matched[d.ID] = true
 		}
-		out = append(out, artifactLine(a.ObjectKind, a.Target, status, a.URL))
+		subject := a.Target
+		if name := a.Name(); name != "" {
+			subject = name + " in " + a.Target
+		}
+		out = append(out, artifactLine(a.ObjectKind, subject, status, a.URL))
 	}
 	for _, d := range orderedDeliverables {
 		if matched[d.ID] {
