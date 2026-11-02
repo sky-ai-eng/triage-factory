@@ -101,10 +101,9 @@ func TestPRMergeabilityWorkItem_SQLite(t *testing.T) {
 
 // TestMigrate_PRMergeabilityBackfill_SQLite pins the upgrade from v1.17.0: an
 // active pull request whose stored snapshot reads a known answer starts with
-// that answer at its snapshot's head and base, so its first probe after the
-// upgrade emits nothing and no pull request is probed as retargeted. A
-// snapshot naming no base leaves the row with none; a snapshot reading
-// UNKNOWN, and a closed pull request, start with no row.
+// that answer at its snapshot's head and base, and its first probe after the
+// upgrade emits nothing. A snapshot naming no base leaves the row with none;
+// a snapshot reading UNKNOWN, and a closed pull request, start with no row.
 func TestMigrate_PRMergeabilityBackfill_SQLite(t *testing.T) {
 	ctx := context.Background()
 	conn, err := sql.Open("sqlite", db.TestDSNMemory)

@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pressly/goose/v3"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -22,7 +21,7 @@ const (
 // and the GitHub pull request entity e1 in repository r1.
 func openBeforeNotificationsDeliverablesMergeability(t *testing.T) *sql.DB {
 	t.Helper()
-	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeNotificationsDeliverablesMergeability)
+	database := openMigrationsTestDBAt(t, beforeNotificationsDeliverablesMergeability)
 	execAll(t, database,
 		`INSERT INTO orgs (id, slug, name) VALUES ('`+runmode.LocalDefaultOrgID+`', 'local', 'Local')`,
 		`INSERT INTO teams (id, org_id, slug, name) VALUES ('`+runmode.LocalDefaultTeamID+`', '`+runmode.LocalDefaultOrgID+`', 'default', 'Default')`,
@@ -288,14 +287,7 @@ func TestMigrate_NotificationsDeliverablesMergeabilityFailureCommitsNothing(t *t
 		`CREATE TABLE branch_tips (id TEXT)`,
 	)
 
-	gooseMu.Lock()
-	goose.SetBaseFS(migrationsSQLiteFS)
-	upErr := goose.SetDialect("sqlite3")
-	if upErr == nil {
-		upErr = goose.UpTo(database, "migrations-sqlite", notificationsDeliverablesMergeability)
-	}
-	gooseMu.Unlock()
-	if upErr == nil || !strings.Contains(upErr.Error(), "branch_tips") {
+	if upErr := upThrough(database, notificationsDeliverablesMergeability); upErr == nil || !strings.Contains(upErr.Error(), "branch_tips") {
 		t.Fatalf("goose.UpTo = %v, want the forced failure on branch_tips", upErr)
 	}
 
@@ -310,6 +302,14 @@ func TestMigrate_NotificationsDeliverablesMergeabilityFailureCommitsNothing(t *t
 	}
 	if n := queryInt(t, database, `SELECT COUNT(*) FROM artifacts WHERE id = 'branch'`); n != 1 {
 		t.Error("the branch artifact was deleted by the failed migration")
+	}
+	for _, c := range []struct{ table, column string }{
+		{"external_actions", "performed_by"},
+		{"tasks", "close_deferred_event_id"},
+	} {
+		if n := queryInt(t, database, `SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, c.table, c.column); n != 0 {
+			t.Errorf("%s.%s exists after the failed migration", c.table, c.column)
+		}
 	}
 	if n := queryInt(t, database, `SELECT COUNT(*) FROM goose_db_version WHERE version_id = ?`, notificationsDeliverablesMergeability); n != 0 {
 		t.Error("the failed migration was recorded as applied")

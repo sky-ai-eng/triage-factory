@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -26,7 +27,7 @@ func openMigrationsTestDB(t *testing.T) *sql.DB {
 }
 
 // openMigrationsTestDBAt returns a private in-memory SQLite opened with
-// dsn and holding the schema goose.UpTo(version) leaves on an empty
+// TestDSNMemory and holding the schema goose.UpTo(version) leaves on an empty
 // database, restored from a cached image (migratedImageAt) rather than
 // replayed. It is for the tests that seed rows the way an older build
 // wrote them and then migrate forward: the replay up to the seeding
@@ -39,17 +40,16 @@ func openMigrationsTestDB(t *testing.T) *sql.DB {
 // every install that upgrades through it runs, so its test can only ever
 // re-check SQL nothing may change.
 //
-// The foreign-key pragma is the connection's, from dsn. On return goose
-// is pointed at the SQLite tree with the sqlite3 dialect, the state the
-// goose.UpTo this replaces left behind, so a test's own goose.Up or
-// goose.UpTo afterwards runs as it did.
-func openMigrationsTestDBAt(t *testing.T, dsn string, version int64) *sql.DB {
+// On return goose is pointed at the SQLite tree with the sqlite3 dialect,
+// the state the goose.UpTo this replaces left behind, so a test's own
+// goose.Up or goose.UpTo afterwards runs as it did.
+func openMigrationsTestDBAt(t *testing.T, version int64) *sql.DB {
 	t.Helper()
 	image, err := migratedImageAt(version)
 	if err != nil {
 		t.Fatalf("migrated image at %d: %v", version, err)
 	}
-	database, err := sql.Open("sqlite", dsn)
+	database, err := sql.Open("sqlite", TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite memory: %v", err)
 	}
@@ -73,15 +73,21 @@ func openMigrationsTestDBAt(t *testing.T, dsn string, version int64) *sql.DB {
 // version up to and including version.
 func migrateThrough(t *testing.T, database *sql.DB, version int64) {
 	t.Helper()
+	if err := upThrough(database, version); err != nil {
+		t.Fatalf("goose.UpTo(%d): %v", version, err)
+	}
+}
+
+// upThrough is migrateThrough returning the migration's error, for a test
+// about a migration that fails.
+func upThrough(database *sql.DB, version int64) error {
 	gooseMu.Lock()
 	defer gooseMu.Unlock()
 	goose.SetBaseFS(migrationsSQLiteFS)
 	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("set dialect: %v", err)
+		return fmt.Errorf("set dialect: %w", err)
 	}
-	if err := goose.UpTo(database, "migrations-sqlite", version); err != nil {
-		t.Fatalf("goose.UpTo(%d): %v", version, err)
-	}
+	return goose.UpTo(database, "migrations-sqlite", version)
 }
 
 // TestMigrate_BricksPreV1110_GooseStampedAtOldBaseline covers the
