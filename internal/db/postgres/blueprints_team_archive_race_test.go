@@ -38,6 +38,10 @@ func TestBlueprintStore_Postgres_FiringRacesTeamArchive(t *testing.T) {
 		if err := h.AdminDB.QueryRow(`SELECT team_id::text FROM tasks WHERE id = $1`, taskID).Scan(&teamID); err != nil {
 			t.Fatalf("read the task's team: %v", err)
 		}
+		// The archive refuses an org's last active team without writing the
+		// row, and so without waiting on the firing's lock; a second active
+		// team is what lets it reach the write this test races.
+		seedPgTeam(t, h, fx.orgID, "sibling")
 		return stores, fx, taskID, teamID
 	}
 	// fireAsync starts the firing on its own goroutine. The firing is

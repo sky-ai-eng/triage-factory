@@ -43,6 +43,12 @@ type memTranscript struct {
 	// write it stands in for — a context kill, most of all, which is how a
 	// stop is really observed by a flush that was already in flight.
 	failMarkDelivered func() error
+	// failCompact, when set, runs before the next Compact, and an error it
+	// returns fails that Compact with nothing written. A function for the
+	// same reason as failMarkDelivered: a test cancels the engagement's
+	// context inside the commit, which is how a shutdown or a stop is really
+	// observed by a commit that was already in flight.
+	failCompact func() error
 }
 
 func newMemTranscript(seed ...domain.Message) *memTranscript {
@@ -125,6 +131,13 @@ func (t *memTranscript) Insert(_ context.Context, _ string, msg *domain.Message)
 // inactive), insert the result row, flip the span, re-seq undelivered rows
 // to fractions after the result row in their existing relative order.
 func (t *memTranscript) Compact(_ context.Context, _, conversationID string, replyRow, resultRow *domain.Message, inactiveIDs []int) error {
+	if t.failCompact != nil {
+		fail := t.failCompact
+		t.failCompact = nil
+		if err := fail(); err != nil {
+			return err
+		}
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	insert := func(msg *domain.Message) {
