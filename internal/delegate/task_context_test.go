@@ -763,7 +763,7 @@ func TestTaskContext_AnObjectTwoConversationsChangedRendersOnce(t *testing.T) {
 
 	// Both pushes name one branch, so it is one line.
 	assertLinesInOrder(t, got, []string{
-		"- Artifact: branch octo/repo — branch_pushed — https://github.com/octo/repo/tree/fix",
+		"- Artifact: branch fix in octo/repo — branch_pushed — https://github.com/octo/repo/tree/fix",
 		"- Artifact: review octo/repo#7 — pending",
 	})
 }
