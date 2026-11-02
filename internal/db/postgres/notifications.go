@@ -31,7 +31,8 @@ const pgNotificationColsTmpl = `{p}id::text, {p}org_id::text, {p}origin, {p}life
 	{p}audience_scope, COALESCE({p}audience_role, ''), COALESCE({p}team_id::text, ''), COALESCE({p}user_id::text, ''),
 	COALESCE({p}source, ''), {p}priority, {p}dismissible, {p}title, {p}body, {p}actions, {p}params,
 	{p}first_seen_at, {p}last_seen_at, {p}seen_count, {p}escalated_at,
-	{p}resolved_at, COALESCE({p}resolved_reason, ''), {p}expires_at, COALESCE({p}entity_id::text, '')`
+	{p}resolved_at, COALESCE({p}resolved_reason, ''), COALESCE({p}resolution, ''), {p}expires_at,
+	COALESCE({p}entity_id::text, '')`
 
 var (
 	pgNotificationCols = strings.ReplaceAll(pgNotificationColsTmpl, "{p}", "")
@@ -174,15 +175,32 @@ func (s *notificationStore) ClosedEntityEventOrgsSystem(ctx context.Context) ([]
 	return scanIDs(rows, "org with an event condition on a closed entity")
 }
 
-func (s *notificationStore) ResolveIDSystem(ctx context.Context, orgID, id string) (*domain.Notification, error) {
+func (s *notificationStore) ResolveIDSystem(ctx context.Context, orgID, id string, reason domain.NotificationResolvedReason) (*domain.Notification, error) {
 	if !isValidUUID(id) {
 		return nil, nil
 	}
-	got, err := s.resolve(ctx, domain.NotificationResolvedCleared, `org_id = $2 AND id = $3::uuid`, orgID, id)
+	got, err := s.resolve(ctx, reason, `org_id = $2 AND id = $3::uuid`, orgID, id)
 	if err != nil || len(got) == 0 {
 		return nil, err
 	}
 	return &got[0], nil
+}
+
+func (s *notificationStore) SetResolutionSystem(ctx context.Context, orgID, id, resolution string) (*domain.Notification, error) {
+	if !isValidUUID(id) {
+		return nil, nil
+	}
+	n, err := db.ScanNotification(s.admin.QueryRowContext(ctx, `
+		UPDATE notifications SET resolution = $3
+		WHERE org_id = $1 AND id = $2::uuid AND resolved_at IS NOT NULL
+		RETURNING `+pgNotificationCols, orgID, id, resolution).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &n, nil
 }
 
 // resolve resolves the open conditions where selects; $1 is the reason.

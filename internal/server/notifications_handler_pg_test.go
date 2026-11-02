@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/notify"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
@@ -53,9 +54,9 @@ func newNotificationsRig(t *testing.T) *notificationsRig {
 	r.pings = installNotify(t, r.srv)
 	// Registered before anything reads the rows: an action is allowed only
 	// where a handler exists.
-	teamCondition.HandleAction("untrack", func(_ context.Context, call notify.ActionCall[notificationTestParams]) (bool, error) {
+	teamCondition.HandleAction("untrack", func(_ context.Context, call notify.ActionCall[notificationTestParams]) (notify.ActionResult, error) {
 		r.untracks = append(r.untracks, call)
-		return true, nil
+		return notify.ActionResult{Outcome: "Untracked.", Resolved: domain.NotificationResolvedAudienceRemoved}, nil
 	})
 	teamCondition.Set(context.Background(), r.orgID.String(), notificationTestParams{ID: "t1", TeamID: r.infra.String()}, true)
 
@@ -212,8 +213,10 @@ func TestNotifications_Postgres_Invoke(t *testing.T) {
 	if got := r.untracks; len(got) != 1 || got[0].UserID != r.infraAdmin.String() || got[0].Recipient.TeamID != r.infra.String() || got[0].Params.TeamID != r.infra.String() {
 		t.Errorf("handler calls = %+v", got)
 	}
-	if it := decodeNotificationItem(t, rec.Body.Bytes()); it.ResolvedAt == nil {
-		t.Errorf("invoked row = %+v; want it resolved", it)
+	ans := decodeNotificationAction(t, rec.Body.Bytes())
+	if ans.Outcome != "Untracked." || ans.Notification == nil || ans.Notification.ResolvedAt == nil ||
+		ans.Notification.Resolution == nil || *ans.Notification.Resolution != "t1 resolved: audience_removed." {
+		t.Errorf("invoke answered %+v; want the outcome and the row resolved, saying why", ans)
 	}
 	// The resolve pings the team row's recipients; the org row waits for the
 	// producer's next evaluation.

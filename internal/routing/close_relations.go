@@ -461,7 +461,7 @@ func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, 
 				resolve = append(resolve, n)
 			}
 		}
-		notify.ResolveEvents(ctx, orgID, entityID, resolve)
+		notify.ResolveEvents(ctx, orgID, entityID, evt.EventType, resolve)
 		for i := range targets {
 			t := targets[i]
 			if rel.keep != nil && !rel.keep(evt, cctx, taskTarget(t)) {
@@ -556,7 +556,7 @@ func (r *Router) runTerminatingClose(ctx context.Context, orgID string, evt doma
 			r.tellTaskClosing(ctx, orgID, evt, h.TaskID, h.WorkingConversationIDs)
 		}
 	}
-	notify.ResolveEvents(ctx, orgID, entityID, r.openEventNotifications(ctx, orgID, entityID, rel.closes))
+	notify.ResolveEvents(ctx, orgID, entityID, evt.EventType, r.openEventNotifications(ctx, orgID, entityID, rel.closes))
 	for _, taskID := range res.ClosedTaskIDs {
 		routerLog.InfoContext(ctx, "closed task", "task_id", taskID, "on_event", evt.EventType, "reason", reason)
 		r.finishTaskClose(ctx, orgID, taskID, res.ActiveConversationIDs[taskID])

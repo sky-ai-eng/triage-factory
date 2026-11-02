@@ -252,7 +252,8 @@ func (s *Server) saveTeamLinearTeams(ctx context.Context, orgID, userID, teamID 
 // untrackUnreadableLinearTeam is linear.team_unreadable's "Stop tracking"
 // action: it removes the row's Linear team from the tracked set of the team
 // the row is for, through the route's own gate and write, and reports the
-// condition resolved for that team, which no longer tracks it. Every other
+// row resolved as out of the condition's audience, since that team no longer
+// tracks it. Every other
 // Linear team in the set is resent as stored, so the write asks Linear
 // nothing.
 //
@@ -260,10 +261,10 @@ func (s *Server) saveTeamLinearTeams(ctx context.Context, orgID, userID, teamID 
 // between this one's read and its write, it rebuilds from the set as it then
 // stands and writes once more. A second change in that window is answered
 // with the route's 409.
-func (s *Server) untrackUnreadableLinearTeam(ctx context.Context, call notify.ActionCall[kinds.LinearTeam]) (bool, error) {
+func (s *Server) untrackUnreadableLinearTeam(ctx context.Context, call notify.ActionCall[kinds.LinearTeam]) (notify.ActionResult, error) {
 	teamID := call.Recipient.TeamID
 	if err := s.az.TeamAdminWrite(ctx, call.OrgID, call.UserID, teamID); err != nil {
-		return false, err
+		return notify.ActionResult{}, err
 	}
 	without := func(stored []domain.LinearTeamRules) []linearTeamWish {
 		keep := make([]linearTeamWish, 0, len(stored))
@@ -278,7 +279,13 @@ func (s *Server) untrackUnreadableLinearTeam(ctx context.Context, call notify.Ac
 	if errors.Is(err, errIssueTrackerSetMoved) {
 		_, err = s.saveTeamLinearTeams(ctx, call.OrgID, call.UserID, teamID, without)
 	}
-	return err == nil, err
+	if err != nil {
+		return notify.ActionResult{}, err
+	}
+	return notify.ActionResult{
+		Outcome:  "This team stopped tracking " + call.Params.DisplayKey() + ".",
+		Resolved: domain.NotificationResolvedAudienceRemoved,
+	}, nil
 }
 
 // resolveLinearMirrorsOnSave resolves kinds.LinearMirrorFailing for every

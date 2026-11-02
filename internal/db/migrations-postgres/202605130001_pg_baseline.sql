@@ -7021,6 +7021,10 @@ CREATE TABLE public.notifications (
     escalated_at    timestamp with time zone NOT NULL,
     resolved_at     timestamp with time zone,
     resolved_reason text,
+    -- Why the row resolved, in a sentence its kind renders. Written after
+    -- resolved_at in the same transaction, so it is NULL on an open row but
+    -- not required on a resolved one.
+    resolution      text,
     expires_at      timestamp with time zone,
     -- The entity an event row is about; set exactly on origin = 'event' rows.
     entity_id       uuid,
@@ -7040,6 +7044,7 @@ CREATE TABLE public.notifications (
     )),
     CONSTRAINT notifications_notice_check CHECK (((lifecycle = 'condition'::text) OR (dismissible AND (resolved_at IS NULL)))),
     CONSTRAINT notifications_resolved_check CHECK (((resolved_at IS NULL) = (resolved_reason IS NULL))),
+    CONSTRAINT notifications_resolution_check CHECK (((resolution IS NULL) OR (resolved_at IS NOT NULL))),
     CONSTRAINT notifications_entity_check CHECK (((origin = 'event'::text) = (entity_id IS NOT NULL)))
 );
 

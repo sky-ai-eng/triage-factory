@@ -45,13 +45,10 @@ var JiraMirrorFailing = notify.Condition(notify.ConditionSpec[JiraMirror]{
 	Key:         func(m JiraMirror) string { return m.TeamID + ":" + m.JiraProjectID },
 	Audience:    notify.TeamAdmins(func(m JiraMirror) string { return m.TeamID }),
 	Render: func(m JiraMirror, _ notify.Recipient) notify.Content {
-		tickets, workflow, status, issue := "tickets", "the project's workflow", "its in-progress status", ""
+		tickets, workflow, status, issue := "tickets", "the project's workflow", m.status(), ""
 		if m.ProjectKey != "" {
 			tickets = m.ProjectKey + " tickets"
 			workflow = "the " + m.ProjectKey + " workflow"
-		}
-		if m.Status != "" {
-			status = `"` + m.Status + `"`
 		}
 		if m.IssueKey != "" {
 			issue = " (last tried on " + m.IssueKey + ")"
@@ -65,6 +62,15 @@ var JiraMirrorFailing = notify.Condition(notify.ConditionSpec[JiraMirror]{
 			Actions: []notify.Action{notify.Link("Open Jira status rules", notify.Routes.TeamJiraRules(m.TeamID))},
 		}
 	},
+	Resolved: func(m JiraMirror, r notify.Resolution) string {
+		switch r.Reason {
+		case domain.NotificationResolvedSourceOff:
+			return sourceOff(domain.ProviderJira)
+		case domain.NotificationResolvedAudienceRemoved:
+			return noLongerApplies(r.Recipient)
+		}
+		return "Jira accepts moves into " + m.status() + " again, or the team's Jira status rules no longer use it."
+	},
 	Example: JiraMirror{
 		TeamID:        "00000000-0000-0000-0000-000000000000",
 		JiraProjectID: "00000000-0000-0000-0000-000000000001",
@@ -73,6 +79,14 @@ var JiraMirrorFailing = notify.Condition(notify.ConditionSpec[JiraMirror]{
 		IssueKey:      "SKY-12",
 	},
 })
+
+// status is how copy names the rule's in-progress status.
+func (m JiraMirror) status() string {
+	if m.Status != "" {
+		return `"` + m.Status + `"`
+	}
+	return "its in-progress status"
+}
 
 // JiraProject is a project TF polls, by its jira_projects registry row.
 type JiraProject struct {
@@ -94,12 +108,8 @@ var JiraDiscoveryFailing = notify.Condition(notify.ConditionSpec[JiraProject]{
 	Key:         func(p JiraProject) string { return p.JiraProjectID },
 	Audience:    notify.TeamsArmingJiraProject(func(p JiraProject) string { return p.JiraProjectID }, notify.Admins),
 	Render: func(p JiraProject, to notify.Recipient) notify.Content {
-		project := "a project"
-		if p.ProjectKey != "" {
-			project = "project " + p.ProjectKey
-		}
 		return notify.Content{
-			Title: "Jira rejects the search for " + project,
+			Title: "Jira rejects the search for " + p.name(),
 			Body: "Jira refuses a query Triage Factory finds this project's new issues with, so new work from " +
 				"it is being missed. Usually a status named in a team's rules for the project no longer exists " +
 				"in Jira, or the Jira credential can no longer see the project.",
@@ -108,8 +118,30 @@ var JiraDiscoveryFailing = notify.Condition(notify.ConditionSpec[JiraProject]{
 			Actions: []notify.Action{notify.Link("Open Jira status rules", notify.Routes.TeamJiraRules(to.TeamID))},
 		}
 	},
+	// The occurrence is open while a team's rules arm the project, so it also
+	// clears when none does.
+	Resolved: func(p JiraProject, r notify.Resolution) string {
+		switch r.Reason {
+		case domain.NotificationResolvedSourceOff:
+			return sourceOff(domain.ProviderJira)
+		case domain.NotificationResolvedAudienceRemoved:
+			if r.Recipient.Scope == domain.NotificationScopeTeam {
+				return "This team's rules no longer use " + p.name() + "."
+			}
+			return noLongerApplies(r.Recipient)
+		}
+		return "Jira accepts the search for " + p.name() + " again, or no team's rules use it any more."
+	},
 	Example: JiraProject{JiraProjectID: "00000000-0000-0000-0000-000000000000", ProjectKey: "SKY"},
 })
+
+// name is how copy names the project.
+func (p JiraProject) name() string {
+	if p.ProjectKey != "" {
+		return "project " + p.ProjectKey
+	}
+	return "a project"
+}
 
 // JiraStatusRule is one team's status rules for one project, with the statuses
 // they name that the project's workflow no longer has.
@@ -171,6 +203,19 @@ var JiraStatusDrift = notify.Condition(notify.ConditionSpec[JiraStatusRule]{
 			Actions: []notify.Action{notify.Link("Open Jira status rules", notify.Routes.TeamJiraRules(d.TeamID))},
 		}
 	},
+	Resolved: func(d JiraStatusRule, r notify.Resolution) string {
+		switch r.Reason {
+		case domain.NotificationResolvedSourceOff:
+			return sourceOff(domain.ProviderJira)
+		case domain.NotificationResolvedAudienceRemoved:
+			return noLongerApplies(r.Recipient)
+		}
+		project := "the project"
+		if d.ProjectKey != "" {
+			project = d.ProjectKey
+		}
+		return "The team's Jira status rules for " + project + " no longer name a status the project lacks."
+	},
 	Example: JiraStatusRule{
 		TeamID:        "00000000-0000-0000-0000-000000000000",
 		JiraProjectID: "00000000-0000-0000-0000-000000000001",
@@ -222,22 +267,14 @@ var JiraPredicateDrift = notify.Condition(notify.ConditionSpec[JiraHandlerFilter
 	Key:         func(d JiraHandlerFilter) string { return d.HandlerID },
 	Audience:    notify.TeamAdmins(func(d JiraHandlerFilter) string { return d.TeamID }),
 	Render: func(d JiraHandlerFilter, _ notify.Recipient) notify.Content {
-		subject := "The trigger on " + eventLabel(d.EventType)
+		subject := d.subject()
 		stopped, working := "It can't fire until the filter is changed.", "It still fires on the filter's other values."
 		link := notify.Link("Open trigger", notify.Routes.Trigger(d.HandlerID))
 		switch d.HandlerKind {
 		case domain.EventHandlerKindRule:
-			subject = "A task rule"
-			if d.RuleName != "" {
-				subject = `Task rule "` + d.RuleName + `"`
-			}
 			stopped, working = "It matches no event until the filter is changed.", "It still matches the filter's other values."
 			link = notify.Link("Open task rule", notify.Routes.TaskRule(d.HandlerID))
 		case domain.EventHandlerKindNotify:
-			subject = "A notify rule"
-			if d.RuleName != "" {
-				subject = `Notify rule "` + d.RuleName + `"`
-			}
 			stopped, working = "It tells no one until the filter is changed.", "It still matches the filter's other values."
 			link = notify.Link("Open notify rule", notify.Routes.NotifyRule(d.HandlerID))
 		}
@@ -267,6 +304,16 @@ var JiraPredicateDrift = notify.Condition(notify.ConditionSpec[JiraHandlerFilter
 			Actions: []notify.Action{link},
 		}
 	},
+	// A handler disabled or deleted resolves too: it filters on nothing.
+	Resolved: func(d JiraHandlerFilter, r notify.Resolution) string {
+		switch r.Reason {
+		case domain.NotificationResolvedSourceOff:
+			return sourceOff(domain.ProviderJira)
+		case domain.NotificationResolvedAudienceRemoved:
+			return noLongerApplies(r.Recipient)
+		}
+		return d.subject() + " no longer filters on Jira values that are gone, or was disabled or deleted."
+	},
 	Example: JiraHandlerFilter{
 		HandlerID:   "00000000-0000-0000-0000-000000000000",
 		TeamID:      "00000000-0000-0000-0000-000000000001",
@@ -278,6 +325,23 @@ var JiraPredicateDrift = notify.Condition(notify.ConditionSpec[JiraHandlerFilter
 		Stopped:     true,
 	},
 })
+
+// subject is how copy names the handler.
+func (d JiraHandlerFilter) subject() string {
+	switch d.HandlerKind {
+	case domain.EventHandlerKindRule:
+		if d.RuleName != "" {
+			return `Task rule "` + d.RuleName + `"`
+		}
+		return "A task rule"
+	case domain.EventHandlerKindNotify:
+		if d.RuleName != "" {
+			return `Notify rule "` + d.RuleName + `"`
+		}
+		return "A notify rule"
+	}
+	return "The trigger on " + eventLabel(d.EventType)
+}
 
 // goneIDs is one catalog's gone ids for a predicate drift's copy, or "" when
 // there are none: "a status no Jira project this team tracks has (id 10010)".

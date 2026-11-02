@@ -41,13 +41,10 @@ var LinearMirrorFailing = notify.Condition(notify.ConditionSpec[LinearMirror]{
 	Key:         func(m LinearMirror) string { return m.TeamID + ":" + m.LinearTeamID },
 	Audience:    notify.TeamAdmins(func(m LinearMirror) string { return m.TeamID }),
 	Render: func(m LinearMirror, _ notify.Recipient) notify.Content {
-		issues, workflow, state, issue := "issues", "the Linear team's workflow", "its in-progress state", ""
+		issues, workflow, state, issue := "issues", "the Linear team's workflow", m.state(), ""
 		if m.LinearTeamKey != "" {
 			issues = m.LinearTeamKey + " issues"
 			workflow = "the " + m.LinearTeamKey + " workflow"
-		}
-		if m.State != "" {
-			state = `"` + m.State + `"`
 		}
 		if m.Identifier != "" {
 			issue = " (last tried on " + m.Identifier + ")"
@@ -61,6 +58,15 @@ var LinearMirrorFailing = notify.Condition(notify.ConditionSpec[LinearMirror]{
 			Actions: []notify.Action{notify.Link("Open Linear rules", notify.Routes.TeamLinearRules(m.TeamID))},
 		}
 	},
+	Resolved: func(m LinearMirror, r notify.Resolution) string {
+		switch r.Reason {
+		case domain.NotificationResolvedSourceOff:
+			return sourceOff(domain.ProviderLinear)
+		case domain.NotificationResolvedAudienceRemoved:
+			return noLongerApplies(r.Recipient)
+		}
+		return "Linear accepts moves into " + m.state() + " again, or the team's Linear rules no longer use it."
+	},
 	Example: LinearMirror{
 		TeamID:        "00000000-0000-0000-0000-000000000000",
 		LinearTeamID:  "00000000-0000-0000-0000-000000000001",
@@ -69,6 +75,14 @@ var LinearMirrorFailing = notify.Condition(notify.ConditionSpec[LinearMirror]{
 		Identifier:    "ENG-12",
 	},
 })
+
+// state is how copy names the rule's in-progress state.
+func (m LinearMirror) state() string {
+	if m.State != "" {
+		return `"` + m.State + `"`
+	}
+	return "its in-progress state"
+}
 
 // LinearTeam is an armed Linear team the org's Linear credential cannot read.
 type LinearTeam struct {
@@ -93,10 +107,7 @@ var LinearTeamUnreadable = notify.Condition(notify.ConditionSpec[LinearTeam]{
 		notify.TeamsTrackingLinearTeam(func(t LinearTeam) string { return t.LinearTeamID }, notify.Admins),
 	),
 	Render: func(t LinearTeam, to notify.Recipient) notify.Content {
-		key := t.TeamKey
-		if key == "" {
-			key = t.LinearTeamID
-		}
+		key := t.DisplayKey()
 		c := notify.Content{Title: "Linear team " + key + " can't be read"}
 		settings := notify.Link("Open Linear settings", notify.Routes.OrgSettings())
 		if to.TeamID == "" {
@@ -113,7 +124,7 @@ var LinearTeamUnreadable = notify.Condition(notify.ConditionSpec[LinearTeam]{
 			"changes to its issues or finding new ones for this team. An org admin can fix the connection. " +
 			"If the team was deleted in Linear, stop tracking it; its issues then retire."
 		c.Actions = []notify.Action{
-			notify.Invoke("untrack", "Stop tracking "+key, notify.RequiresTeamAdmin, notify.Confirm(
+			notify.Invoke("untrack", "Stop tracking "+key, "Stopping…", notify.RequiresTeamAdmin, notify.Confirm(
 				"This team stops tracking the Linear team "+key+", and its state mappings for it are deleted. "+
 					"Unless another team has "+key+"'s states mapped, Triage Factory stops holding its issues, "+
 					"so the ones it can't read can retire and their tasks close.")),
@@ -121,5 +132,29 @@ var LinearTeamUnreadable = notify.Condition(notify.ConditionSpec[LinearTeam]{
 		}
 		return c
 	},
+	// The occurrence is open while a team tracks the Linear team, so it also
+	// clears when none does; a team that stops tracking it is out of the
+	// audience, whether through its rules or this kind's own action.
+	Resolved: func(t LinearTeam, r notify.Resolution) string {
+		switch r.Reason {
+		case domain.NotificationResolvedSourceOff:
+			return sourceOff(domain.ProviderLinear)
+		case domain.NotificationResolvedAudienceRemoved:
+			if r.Recipient.Scope == domain.NotificationScopeTeam {
+				return "This team stopped tracking " + t.DisplayKey() + "."
+			}
+			return noLongerApplies(r.Recipient)
+		}
+		return "The organization's Linear connection can read " + t.DisplayKey() + " again, or no team tracks it any more."
+	},
 	Example: LinearTeam{LinearTeamID: "00000000-0000-0000-0000-000000000000", TeamKey: "ENG"},
 })
+
+// DisplayKey is how copy names the Linear team: its key, or its id when the
+// key was not read.
+func (t LinearTeam) DisplayKey() string {
+	if t.TeamKey != "" {
+		return t.TeamKey
+	}
+	return t.LinearTeamID
+}

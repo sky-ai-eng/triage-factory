@@ -195,24 +195,54 @@ func RunNotificationStoreConformance(t *testing.T, mk NotificationFactory) {
 
 		// One row by id: its sibling audience of the same key stays open.
 		sibling := raise(t, f, db.NotificationOccurrence{Key: "a", Audience: teamAdmins}).Notification
-		one, err := s.ResolveIDSystem(ctx, f.OrgID, again.Notification.ID)
+		one, err := s.ResolveIDSystem(ctx, f.OrgID, again.Notification.ID, domain.NotificationResolvedAudienceRemoved)
 		if err != nil || one == nil || one.ID != again.Notification.ID || one.ResolvedAt == nil ||
-			one.ResolvedReason != domain.NotificationResolvedCleared {
-			t.Fatalf("ResolveIDSystem = %+v, %v; want the org admins row cleared", one, err)
+			one.ResolvedReason != domain.NotificationResolvedAudienceRemoved {
+			t.Fatalf("ResolveIDSystem = %+v, %v; want the org admins row resolved for the reason given", one, err)
 		}
 		AssertWriteReturnedStoredRow(t, "ResolveIDSystem", *one, stored(t, f, one.ID))
 		if v := get(t, f, sibling.ID); v == nil || v.ResolvedAt != nil {
 			t.Errorf("sibling audience after ResolveIDSystem = %+v; want it open", v)
 		}
 		for _, id := range []string{again.Notification.ID, "not-a-uuid", "00000000-0000-4000-8000-000000000000"} {
-			if got, err := s.ResolveIDSystem(ctx, f.OrgID, id); err != nil || got != nil {
+			if got, err := s.ResolveIDSystem(ctx, f.OrgID, id, domain.NotificationResolvedCleared); err != nil || got != nil {
 				t.Errorf("ResolveIDSystem(%q) = %+v, %v; want nil for a row that is not open", id, got, err)
 			}
 		}
 		expires := time.Now().Add(time.Hour)
 		n := raise(t, f, db.NotificationOccurrence{Key: "n", Lifecycle: domain.NotificationNotice, Dismissible: true, ExpiresAt: &expires}).Notification
-		if got, err := s.ResolveIDSystem(ctx, f.OrgID, n.ID); err != nil || got != nil {
+		if got, err := s.ResolveIDSystem(ctx, f.OrgID, n.ID, domain.NotificationResolvedCleared); err != nil || got != nil {
 			t.Errorf("ResolveIDSystem on a notice = %+v, %v; want nil: a notice expires", got, err)
+		}
+	})
+
+	t.Run("resolution", func(t *testing.T) {
+		f := mk(t)
+		s := f.Stores.Notifications
+		open := raise(t, f, db.NotificationOccurrence{Key: "open"}).Notification
+		done := raise(t, f, db.NotificationOccurrence{Key: "done"}).Notification
+		if got, err := s.ResolveIDSystem(ctx, f.OrgID, done.ID, domain.NotificationResolvedCleared); err != nil || got == nil || got.Resolution != "" {
+			t.Fatalf("ResolveIDSystem = %+v, %v; want the row resolved with no resolution yet", got, err)
+		}
+
+		got, err := s.SetResolutionSystem(ctx, f.OrgID, done.ID, "GitHub was connected again.")
+		if err != nil || got == nil || got.Resolution != "GitHub was connected again." {
+			t.Fatalf("SetResolutionSystem = %+v, %v; want the row with its resolution", got, err)
+		}
+		AssertWriteReturnedStoredRow(t, "SetResolutionSystem", *got, stored(t, f, done.ID))
+		if v := get(t, f, done.ID); v == nil || v.Resolution != "GitHub was connected again." {
+			t.Errorf("viewer read = %+v; want the resolution", v)
+		}
+
+		// An open row has no resolution to describe, and a row that is not
+		// there answers nothing.
+		for _, id := range []string{open.ID, "not-a-uuid", "00000000-0000-4000-8000-000000000000"} {
+			if got, err := s.SetResolutionSystem(ctx, f.OrgID, id, "x"); err != nil || got != nil {
+				t.Errorf("SetResolutionSystem(%q) = %+v, %v; want nil for a row that is not resolved", id, got, err)
+			}
+		}
+		if v := get(t, f, open.ID); v == nil || v.Resolution != "" {
+			t.Errorf("open row = %+v; want no resolution", v)
 		}
 	})
 

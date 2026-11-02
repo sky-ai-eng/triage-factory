@@ -44,35 +44,40 @@ func testRender(p testParams, to Recipient) Content {
 	return Content{Title: "thing " + p.ID + " is wrong", Body: "for " + string(to.Scope)}
 }
 
+func testResolved(p testParams, r Resolution) string {
+	return "thing " + p.ID + " is fine: " + string(r.Reason) + " for " + string(r.Recipient.Scope)
+}
+
 var (
 	// teamCondition is for the org's admins and the admins of the team its
 	// params name.
 	teamCondition = Condition(ConditionSpec[testParams]{
 		Name: "test.team_condition", Source: "linear", Priority: PriorityOf(testLevel), Dismissible: true,
 		Key: testID, Audience: Audiences(OrgAdmins(), TeamAdmins(testTeamID)),
-		Render: testRender, Example: testParams{ID: "x", TeamID: exampleTeamID},
+		Render: testRender, Resolved: testResolved, Example: testParams{ID: "x", TeamID: exampleTeamID},
 	})
 	// linearCondition is for the org's admins and the admins of every team
 	// tracking the Linear team its ID names.
 	linearCondition = Condition(ConditionSpec[testParams]{
 		Name: "test.linear_condition", Source: "linear", Priority: Always(High),
 		Key: testID, Audience: Audiences(OrgAdmins(), TeamsTrackingLinearTeam(testID, Admins)),
-		Render: testRender, Example: testParams{ID: "lt-1"},
+		Render: testRender, Resolved: testResolved, Example: testParams{ID: "lt-1"},
 	})
 	// jiraCondition is for the admins of every team whose rules arm the Jira
 	// project its ID names.
 	jiraCondition = Condition(ConditionSpec[testParams]{
 		Name: "test.jira_condition", Source: "jira", Priority: Always(High),
 		Key: testID, Audience: TeamsArmingJiraProject(testID, Admins),
-		Render: testRender, Example: testParams{ID: "jp-1"},
+		Render: testRender, Resolved: testResolved, Example: testParams{ID: "jp-1"},
 	})
 	onlyTeamCondition = Condition(ConditionSpec[testParams]{
 		Name: "test.only_team_condition", Priority: Always(High),
-		Key: testID, Audience: TeamAdmins(testTeamID), Render: testRender, Example: testParams{ID: "x", TeamID: exampleTeamID},
+		Key: testID, Audience: TeamAdmins(testTeamID), Render: testRender, Resolved: testResolved,
+		Example: testParams{ID: "x", TeamID: exampleTeamID},
 	})
 	membersCondition = Condition(ConditionSpec[testParams]{
 		Name: "test.members_condition", Source: "jira", Priority: Always(High),
-		Key: testID, Audience: OrgMembers(), Render: testRender, Example: testParams{ID: "x"},
+		Key: testID, Audience: OrgMembers(), Render: testRender, Resolved: testResolved, Example: testParams{ID: "x"},
 	})
 	testNotice = Notice(NoticeSpec[testParams]{
 		Name: "test.notice", TTL: DefaultNoticeTTL, Key: testID, Audience: OrgMembers(),
@@ -83,11 +88,18 @@ var (
 		},
 		Example: testParams{ID: "x"},
 	})
+	panicResolved = Condition(ConditionSpec[testParams]{
+		Name: "test.panic_resolved", Priority: Always(Low),
+		Key: testID, Audience: OrgMembers(), Render: testRender,
+		Resolved: func(p testParams, _ Resolution) string { panic("resolved " + p.ID) },
+		Example:  testParams{ID: "x"},
+	})
 	panicCondition = Condition(ConditionSpec[testParams]{
 		Name: "test.panic_condition", Priority: Always(Low),
 		Key: testID, Audience: OrgMembers(),
-		Render:  func(p testParams, _ Recipient) Content { panic("render " + p.ID) },
-		Example: testParams{ID: "x"},
+		Render:   func(p testParams, _ Recipient) Content { panic("render " + p.ID) },
+		Resolved: testResolved,
+		Example:  testParams{ID: "x"},
 	})
 )
 
@@ -203,7 +215,7 @@ func localBackend(t *testing.T) (db.Stores, *hubRecorder, *sql.DB) {
 	hub := &hubRecorder{}
 	install(t, Backend{
 		Tx: stores.Tx, Notifications: stores.Notifications, Orgs: stores.Orgs,
-		LinearTeamRules: stores.LinearTeamRules, Hub: hub, Local: true,
+		LinearTeamRules: stores.LinearTeamRules, Hub: hub, Events: testEvent, Local: true,
 	})
 	return stores, hub, conn
 }
@@ -323,6 +335,11 @@ func TestLocal_SyncResolvesWhatIsNotActive(t *testing.T) {
 	if got := open(rows(t, stores, org, user, teamCondition)); len(got) != 0 {
 		t.Fatalf("after Sync(nil): %+v; want nothing open", got)
 	}
+	for _, n := range rows(t, stores, org, user, teamCondition) {
+		if want := "thing " + n.Key + " is fine: cleared for user"; n.Resolution != want {
+			t.Errorf("%s resolution = %q; want %q, from the params it was raised with", n.Key, n.Resolution, want)
+		}
+	}
 }
 
 // OpenOrgs names the org while any occurrence of the kind is open there, and
@@ -398,14 +415,33 @@ func TestLocal_PostAndClearSource(t *testing.T) {
 	membersCondition.Set(ctx, org, testParams{ID: "j"}, true)
 	teamCondition.Set(ctx, org, testParams{ID: "l", TeamID: runmode.LocalDefaultTeamID}, true)
 	ClearSource(ctx, org, "jira")
-	if got := rows(t, stores, org, user, membersCondition); len(got) != 1 || got[0].ResolvedReason != domain.NotificationResolvedSourceOff {
-		t.Errorf("jira condition after ClearSource(jira): %+v; want it resolved source_off", got)
+	if got := rows(t, stores, org, user, membersCondition); len(got) != 1 || got[0].ResolvedReason != domain.NotificationResolvedSourceOff ||
+		got[0].Resolution != "thing j is fine: source_off for user" {
+		t.Errorf("jira condition after ClearSource(jira): %+v; want it resolved source_off, saying so", got)
 	}
 	if got := open(rows(t, stores, org, user, teamCondition)); len(got) != 1 {
 		t.Errorf("linear condition after ClearSource(jira): %+v; want it still open", got)
 	}
 	if got := rows(t, stores, org, user, testNotice); len(got) != 1 || got[0].ResolvedAt != nil {
 		t.Errorf("notice after ClearSource(jira): %+v; want it untouched", got)
+	}
+}
+
+// A Resolved that fails is counted and leaves the row without a sentence:
+// the resolution itself stands.
+func TestLocal_FailingResolvedLeavesTheResolution(t *testing.T) {
+	stores, _, _ := localBackend(t)
+	count := failureCounter(t)
+	ctx := context.Background()
+	org, user := runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID
+	panicResolved.Set(ctx, org, testParams{ID: "x"}, true)
+	panicResolved.Set(ctx, org, testParams{ID: "x"}, false)
+	got := rows(t, stores, org, user, panicResolved)
+	if len(got) != 1 || got[0].ResolvedAt == nil || got[0].Resolution != "" {
+		t.Fatalf("rows = %+v; want the row resolved with no resolution", got)
+	}
+	if n := count()[panicResolved.Name()]; n != 1 {
+		t.Errorf("failures counted = %d; want 1", n)
 	}
 }
 
@@ -600,28 +636,32 @@ func TestRegistration_Refusals(t *testing.T) {
 		register   func()
 	}{
 		{"duplicate name", "already registered", func() {
-			Condition(ConditionSpec[testParams]{Name: teamCondition.Name(), Priority: Always(Low), Key: testID, Audience: OrgMembers(), Render: render})
+			Condition(ConditionSpec[testParams]{Name: teamCondition.Name(), Priority: Always(Low), Key: testID, Audience: OrgMembers(), Render: render, Resolved: testResolved})
 		}},
 		{"notice without a TTL", "needs a TTL", func() {
 			Notice(NoticeSpec[testParams]{Name: "test.no_ttl", Key: testID, Audience: OrgMembers(), Render: render})
 		}},
 		{"condition without a priority", "needs a Priority", func() {
-			Condition(ConditionSpec[testParams]{Name: "test.no_priority", Key: testID, Audience: OrgMembers(), Render: render})
+			Condition(ConditionSpec[testParams]{Name: "test.no_priority", Key: testID, Audience: OrgMembers(), Render: render, Resolved: testResolved})
+		}},
+		{"condition without Resolved", "needs Resolved", func() {
+			Condition(ConditionSpec[testParams]{Name: "test.no_resolved", Priority: Always(Low), Key: testID, Audience: OrgMembers(), Render: render})
 		}},
 		{"no audience", "Audience is required", func() {
-			Condition(ConditionSpec[testParams]{Name: "test.no_audience", Priority: Always(Low), Key: testID, Render: render})
+			Condition(ConditionSpec[testParams]{Name: "test.no_audience", Priority: Always(Low), Key: testID, Render: render, Resolved: testResolved})
 		}},
 		{"audience reads other params", "audience team admins reads", func() {
-			Condition(ConditionSpec[testParams]{Name: "test.wrong_audience", Priority: Always(Low), Key: testID, Render: render,
+			Condition(ConditionSpec[testParams]{Name: "test.wrong_audience", Priority: Always(Low), Key: testID, Render: render, Resolved: testResolved,
 				Audience: TeamAdmins(func(s struct{ T string }) string { return s.T })})
 		}},
 		{"priority reads other params", "Priority reads", func() {
-			Condition(ConditionSpec[testParams]{Name: "test.wrong_priority", Key: testID, Audience: OrgMembers(), Render: render,
+			Condition(ConditionSpec[testParams]{Name: "test.wrong_priority", Key: testID, Audience: OrgMembers(), Render: render, Resolved: testResolved,
 				Priority: PriorityOf(func(string) Priority { return Low })})
 		}},
 		{"params not an object", "JSON object", func() {
 			Condition(ConditionSpec[string]{Name: "test.string_params", Priority: Always(Low), Audience: OrgMembers(),
-				Key: func(s string) string { return s }, Render: func(string, Recipient) Content { return Content{Title: "t"} }})
+				Key: func(s string) string { return s }, Render: func(string, Recipient) Content { return Content{Title: "t"} },
+				Resolved: func(string, Resolution) string { return "fine" }})
 		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {

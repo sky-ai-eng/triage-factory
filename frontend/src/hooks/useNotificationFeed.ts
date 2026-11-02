@@ -227,9 +227,12 @@ export function useNotificationFeed(): NotificationFeed {
   const run = useCallback(
     async (item: NotificationItem, action: NotificationAction) => {
       try {
-        // null: the row has left what the viewer may read, so there is nothing
-        // left to mark.
-        if (await runNotificationAction(item.id, action.id)) markRead(item.id)
+        const { notification, outcome } = await runNotificationAction(item.id, action.id)
+        if (notification?.resolved_at) toast.success(outcome)
+        else toast.info(outcome)
+        // A row that has left what the viewer may read has nothing left to
+        // mark.
+        if (notification) markRead(item.id)
       } catch (e) {
         toast.error(httpErrorMessage(e, 'Could not run that action.'))
       }

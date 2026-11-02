@@ -369,7 +369,7 @@ func (fanout) ResolveClosedEntities(_ context.Context, orgID string) {
 	}
 }
 
-func (fanout) ResolveEvents(_ context.Context, orgID string, keys []sink.EventKey) {
+func (fanout) ResolveEvents(_ context.Context, orgID, _ string, keys []sink.EventKey) {
 	for _, r := range recorders() {
 		r.resolveEvents(orgID, keys)
 	}

@@ -57,6 +57,10 @@ CREATE TABLE notifications (
     escalated_at    DATETIME NOT NULL,
     resolved_at     DATETIME,
     resolved_reason TEXT CHECK (resolved_reason IN ('cleared', 'source_off', 'audience_removed')),
+    -- Why the row resolved, in a sentence its kind renders. Written after
+    -- resolved_at in the same transaction, so it is NULL on an open row but
+    -- not required on a resolved one.
+    resolution      TEXT CHECK (resolution IS NULL OR resolved_at IS NOT NULL),
     expires_at      DATETIME,
     entity_id       TEXT REFERENCES entities(id) ON DELETE CASCADE
         CHECK ((origin = 'event') = (entity_id IS NOT NULL)),

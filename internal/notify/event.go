@@ -78,14 +78,26 @@ type EventParams struct {
 type EventSpec struct {
 	// Render is called once per row, for the recipient it is written for.
 	Render func(EventParams, Recipient) Content
+	// Resolved says in a sentence why an event condition resolved: Reason
+	// cleared with ClosedBy set when a close relation resolved it on that
+	// event type's routing, cleared with no ClosedBy when its entity closed
+	// without one routing, and source_off when its source was turned off or
+	// disconnected.
+	Resolved func(EventParams, Resolution) string
 	// Example is a representative row for the conformance test.
 	Example EventParams
+	// ExampleClosedBy is an event type whose routing resolves Example's, for
+	// the conformance test's rendering of a close relation's resolution.
+	ExampleClosedBy string
 }
 
-// EventKind renders and writes event rows. Raise is its verb.
+// EventKind renders and writes event rows. Raise is its verb. The one the
+// server installs, as Backend.Events, also says why its rows resolved.
 type EventKind struct {
-	render  func(EventParams, Recipient) Content
-	example EventParams
+	render          func(EventParams, Recipient) Content
+	resolved        func(EventParams, Resolution) string
+	example         EventParams
+	exampleClosedBy string
 }
 
 // Event declares the event rendering. Call it from a package-level var.
@@ -93,7 +105,10 @@ func Event(s EventSpec) *EventKind {
 	if s.Render == nil {
 		panic("notify: an event kind needs Render")
 	}
-	return &EventKind{render: s.Render, example: s.Example}
+	if s.Resolved == nil {
+		panic("notify: an event kind needs Resolved")
+	}
+	return &EventKind{render: s.Render, resolved: s.Resolved, example: s.Example, exampleClosedBy: s.ExampleClosedBy}
 }
 
 // Raise writes the event's rows: one for each matched team rule's team, and
@@ -123,6 +138,13 @@ func (k *EventKind) Examples() []Example {
 		}()
 		ex.Content = k.render(p, to)
 		_, ex.Err = renderActions(domain.NotificationNotice, to, ex.Content.Actions, exampleOrgID, local, func(*url.URL) error { return nil })
+		for _, r := range []Resolution{
+			{Reason: domain.NotificationResolvedCleared, Recipient: to, ClosedBy: k.exampleClosedBy},
+			{Reason: domain.NotificationResolvedCleared, Recipient: to},
+			{Reason: domain.NotificationResolvedSourceOff, Recipient: to},
+		} {
+			ex.Resolutions = append(ex.Resolutions, renderResolution(r, func(r Resolution) string { return k.resolved(p, r) }))
+		}
 	}
 	team, personal := k.example, k.example
 	team.TeamRule, personal.TeamRule = true, false
@@ -166,8 +188,9 @@ func OpenEventConditions(ctx context.Context, orgID, entityID string, eventTypes
 }
 
 // ResolveEvents resolves, for every audience, the open event conditions about
-// entityID that targets name. A failure is logged and counted.
-func ResolveEvents(ctx context.Context, orgID, entityID string, targets []EventTarget) {
+// entityID that targets name, on the routing of an event of type closedBy. A
+// failure is logged and counted.
+func ResolveEvents(ctx context.Context, orgID, entityID, closedBy string, targets []EventTarget) {
 	s := sink.Load()
 	if s == nil || len(targets) == 0 {
 		return
@@ -176,7 +199,7 @@ func ResolveEvents(ctx context.Context, orgID, entityID string, targets []EventT
 	for i, t := range targets {
 		keys[i] = sink.EventKey{Kind: t.EventType, Key: EventKey(entityID, t.DedupKey)}
 	}
-	s.ResolveEvents(ctx, orgID, keys)
+	s.ResolveEvents(ctx, orgID, closedBy, keys)
 }
 
 // ResolveClosedEntities resolves, for every audience, orgID's open event
@@ -437,9 +460,9 @@ func (e *engine) ResolveClosedEntities(ctx context.Context, orgID string) {
 	})
 }
 
-func (e *engine) ResolveEvents(ctx context.Context, orgID string, keys []sink.EventKey) {
+func (e *engine) ResolveEvents(ctx context.Context, orgID, closedBy string, keys []sink.EventKey) {
 	defer e.recoverPanic(eventLabel, orgID)
-	e.commit(ctx, eventLabel, orgID, func(tx db.NotificationStore) ([]domain.Notification, error) {
+	e.commitClosedBy(ctx, eventLabel, orgID, closedBy, func(tx db.NotificationStore) ([]domain.Notification, error) {
 		var resolved []domain.Notification
 		for _, k := range keys {
 			got, err := tx.ResolveSystem(ctx, orgID, domain.NotificationOriginEvent, k.Kind, k.Key)

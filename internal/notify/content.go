@@ -35,6 +35,40 @@ type Example struct {
 	// to allow, so here only its shape is checked. A Render that panics is
 	// reported here too, with empty Content.
 	Err error
+	// Resolutions is, on a condition, Resolved for each way the row can
+	// resolve; nil on a notice, which expires.
+	Resolutions []ExampleResolution
+}
+
+// ExampleResolution is one rendering of a row's Resolved.
+type ExampleResolution struct {
+	Resolution Resolution
+	Text       string
+	// Err is a Resolved that panicked.
+	Err error
+}
+
+// renderResolution renders one Resolved, reporting a panic as its Err.
+func renderResolution(r Resolution, resolved func(Resolution) string) (out ExampleResolution) {
+	out.Resolution = r
+	defer func() {
+		if p := recover(); p != nil {
+			out.Text, out.Err = "", fmt.Errorf("Resolved panicked: %v", p)
+		}
+	}()
+	out.Text = resolved(r)
+	return out
+}
+
+// resolutionReasons are the reasons a condition can resolve for: cleared and
+// audience_removed always, since an action may report either, and source_off
+// when the kind has a source for ClearSource to resolve it by.
+func resolutionReasons(source string) []domain.NotificationResolvedReason {
+	rs := []domain.NotificationResolvedReason{domain.NotificationResolvedCleared, domain.NotificationResolvedAudienceRemoved}
+	if source != "" {
+		rs = append(rs, domain.NotificationResolvedSourceOff)
+	}
+	return rs
 }
 
 // Examples renders k's Example for every recipient its audience can produce in
@@ -52,6 +86,12 @@ func Examples(k Kind) []Example {
 		}()
 		ex.Content = c.render(c.example, to)
 		_, ex.Err = renderActions(c.lifecycle, to, ex.Content.Actions, exampleOrgID, local, func(*url.URL) error { return nil })
+		if c.resolved != nil {
+			for _, reason := range resolutionReasons(c.source) {
+				ex.Resolutions = append(ex.Resolutions, renderResolution(Resolution{Reason: reason, Recipient: to},
+					func(r Resolution) string { return c.resolved(c.example, r) }))
+			}
+		}
 	}
 	for _, to := range c.audience.examples(c.example) {
 		render(to, false)

@@ -21,7 +21,13 @@ var testEvent = Event(EventSpec{
 		return Content{Title: p.EventType + " " + p.EntityKey, Body: p.RuleName,
 			Actions: []Action{Link("Open", External(p.EntityURL))}}
 	},
+	Resolved: testEventResolved,
 })
+
+// testEventResolved names the reason and the event that resolved a row.
+func testEventResolved(p EventParams, r Resolution) string {
+	return p.EntityKey + " " + string(r.Reason) + " by " + r.ClosedBy
+}
 
 // eventRowsOf lists the org's event rows of eventType, open and resolved:
 // the ones an org admin may read, which are every row but another user's, and
@@ -75,7 +81,7 @@ func TestMulti_EventRaise(t *testing.T) {
 		t.Fatalf("create entity: %v", err)
 	}
 	hub := &hubRecorder{}
-	install(t, Backend{Tx: stores.Tx, Notifications: stores.Notifications, Orgs: stores.Orgs, Hub: hub})
+	install(t, Backend{Tx: stores.Tx, Notifications: stores.Notifications, Orgs: stores.Orgs, Hub: hub, Events: testEvent})
 
 	rules := []EventRule{
 		{HandlerID: "h-infra", TeamID: infra, Name: "Infra CI", Audience: domain.NotifyAudienceTeam},
@@ -135,10 +141,11 @@ func TestMulti_EventRaise(t *testing.T) {
 	if err != nil || !slices.Equal(targets, []EventTarget{{EventType: domain.EventGitHubPRCICheckFailed}}) {
 		t.Fatalf("OpenEventConditions = %+v, %v; want only the CI condition", targets, err)
 	}
-	ResolveEvents(ctx, orgID, entity.ID, targets)
+	ResolveEvents(ctx, orgID, entity.ID, domain.EventGitHubPRCICheckPassed, targets)
 	for _, n := range eventRowsOf(t, stores, orgID, owner, domain.EventGitHubPRCICheckFailed, alice, bob, carol, dave) {
-		if n.ResolvedAt == nil || n.ResolvedReason != domain.NotificationResolvedCleared {
-			t.Errorf("after ResolveEvents = %+v; want every audience's row cleared", n)
+		if n.ResolvedAt == nil || n.ResolvedReason != domain.NotificationResolvedCleared ||
+			n.Resolution != "acme/widgets#18 cleared by "+domain.EventGitHubPRCICheckPassed {
+			t.Errorf("after ResolveEvents = %+v; want every audience's row cleared, naming the event that did", n)
 		}
 	}
 	if pings, want := hub.take(t), sorted(alice, bob, dave); !slices.Equal(pings, want) {
@@ -183,6 +190,11 @@ func TestLocal_EventRaise(t *testing.T) {
 	if err != nil || !slices.Equal(targets, []EventTarget{{EventType: domain.EventGitHubPRReviewRequested, DedupKey: "user:1"}}) {
 		t.Fatalf("OpenEventConditions = %+v, %v; want the request, with its dedup key", targets, err)
 	}
+	ResolveEvents(ctx, org, entity.ID, domain.EventGitHubPRReviewApproved, targets)
+	got = eventRowsOf(t, stores, org, user, domain.EventGitHubPRReviewRequested)
+	if len(got) != 1 || got[0].Resolution != "acme/widgets#18 cleared by "+domain.EventGitHubPRReviewApproved {
+		t.Errorf("rows after ResolveEvents = %+v; want the row saying which event resolved it", got)
+	}
 }
 
 // An event row whose entity link cannot be shown keeps its other actions
@@ -203,7 +215,7 @@ func TestLocal_EventRowOutlivesItsLinkAndItsEntity(t *testing.T) {
 	linked := Event(EventSpec{Render: func(p EventParams, _ Recipient) Content {
 		return Content{Title: p.EntityKey, Body: p.RuleName, Actions: []Action{
 			Link("Open", External(p.EntityURL)), Link("Edit your rule", Routes.NotifyRule(p.HandlerID))}}
-	}})
+	}, Resolved: testEventResolved})
 	linked.Raise(ctx, org, EventRaise{EventType: domain.EventGitHubPRCICheckFailed, Source: "github", Entity: *entity, Condition: true,
 		Rules: []EventRule{{HandlerID: "h1", TeamID: team, Name: "Mine", Audience: domain.NotifyAudienceCreator, CreatorUserID: user}}})
 	got := eventRowsOf(t, stores, org, user, domain.EventGitHubPRCICheckFailed)
@@ -244,7 +256,7 @@ func (failingSettings) GetSettingsSystem(context.Context, string) (domain.OrgSet
 // the row without its link for as long as it stays open.
 func TestLocal_EventRaiseFailsOnUnreadableSettings(t *testing.T) {
 	stores, hub, _ := localBackend(t)
-	install(t, Backend{Tx: stores.Tx, Notifications: stores.Notifications, Orgs: failingSettings{stores.Orgs}, Hub: hub, Local: true})
+	install(t, Backend{Tx: stores.Tx, Notifications: stores.Notifications, Orgs: failingSettings{stores.Orgs}, Hub: hub, Events: testEvent, Local: true})
 	failures := failureCounter(t)
 	ctx := context.Background()
 	org, user, team := runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID
@@ -256,7 +268,7 @@ func TestLocal_EventRaiseFailsOnUnreadableSettings(t *testing.T) {
 	linked := Event(EventSpec{Render: func(p EventParams, _ Recipient) Content {
 		return Content{Title: p.EntityKey, Body: p.RuleName, Actions: []Action{
 			Link("Open", External(p.EntityURL)), Link("Edit your rule", Routes.NotifyRule(p.HandlerID))}}
-	}})
+	}, Resolved: testEventResolved})
 	linked.Raise(ctx, org, EventRaise{EventType: domain.EventGitHubPRCICheckFailed, Source: "github", Entity: *entity, Condition: true,
 		Rules: []EventRule{{HandlerID: "h1", TeamID: team, Name: "Mine", Audience: domain.NotifyAudienceCreator, CreatorUserID: user}}})
 	if got := eventRowsOf(t, stores, org, user, domain.EventGitHubPRCICheckFailed); len(got) != 0 {
@@ -297,6 +309,10 @@ func TestRunClosedEntitySweep_ResolvesOnStart(t *testing.T) {
 	for {
 		got := eventRowsOf(t, stores, org, user, domain.EventGitHubPRCICheckFailed)
 		if len(got) == 1 && got[0].ResolvedAt != nil {
+			// No event routed, so the row names none.
+			if got[0].Resolution != "acme/widgets#21 cleared by " {
+				t.Errorf("resolution = %q; want the sweep's, naming no event", got[0].Resolution)
+			}
 			return
 		}
 		if time.Now().After(deadline) {

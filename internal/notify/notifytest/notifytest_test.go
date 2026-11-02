@@ -17,18 +17,20 @@ func teamID(t team) string { return t.ID }
 
 func render(t team, _ notify.Recipient) notify.Content { return notify.Content{Title: t.ID} }
 
+func resolved(t team, _ notify.Resolution) string { return t.ID + " is fine" }
+
 var (
 	linearKind = notify.Condition(notify.ConditionSpec[team]{
 		Name: "notifytest.linear", Source: "linear", Priority: notify.Always(notify.High),
-		Key: teamID, Audience: notify.OrgAdmins(), Render: render, Example: team{ID: "x"},
+		Key: teamID, Audience: notify.OrgAdmins(), Render: render, Resolved: resolved, Example: team{ID: "x"},
 	})
 	jiraKind = notify.Condition(notify.ConditionSpec[team]{
 		Name: "notifytest.jira", Source: "jira", Priority: notify.Always(notify.High),
-		Key: teamID, Audience: notify.OrgAdmins(), Render: render, Example: team{ID: "x"},
+		Key: teamID, Audience: notify.OrgAdmins(), Render: render, Resolved: resolved, Example: team{ID: "x"},
 	})
 	sourcelessKind = notify.Condition(notify.ConditionSpec[team]{
 		Name: "notifytest.sourceless", Priority: notify.Always(notify.High),
-		Key: teamID, Audience: notify.OrgAdmins(), Render: render, Example: team{ID: "x"},
+		Key: teamID, Audience: notify.OrgAdmins(), Render: render, Resolved: resolved, Example: team{ID: "x"},
 	})
 	linearNotice = notify.Notice(notify.NoticeSpec[team]{
 		Name: "notifytest.notice", Source: "linear", TTL: notify.DefaultNoticeTTL,

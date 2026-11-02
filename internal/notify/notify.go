@@ -53,6 +53,9 @@ type Backend struct {
 	LinearTeamRules db.LinearTeamRulesStore
 	JiraStatusRules db.JiraStatusRulesStore
 	Hub             Broadcaster
+	// Events is the event rendering, which says why an event row resolved.
+	// Without it an event row resolves with no sentence for why.
+	Events *EventKind
 	// Local is N=1: an occurrence is one row for the one user, written when
 	// any of its audiences is sent to them.
 	Local bool

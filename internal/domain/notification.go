@@ -148,7 +148,11 @@ type Notification struct {
 	EscalatedAt    time.Time
 	ResolvedAt     *time.Time
 	ResolvedReason NotificationResolvedReason
-	ExpiresAt      *time.Time
+	// Resolution says in a sentence why the row resolved, rendered by its
+	// kind once it has; empty while it is open, and on a row whose kind
+	// could not render one.
+	Resolution string
+	ExpiresAt  *time.Time
 	// EntityID is the entity an event row is about; set exactly when Origin
 	// is NotificationOriginEvent.
 	EntityID string

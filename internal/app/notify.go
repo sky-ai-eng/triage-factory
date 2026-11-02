@@ -1,6 +1,9 @@
 package app
 
-import "github.com/sky-ai-eng/triage-factory/internal/notify"
+import (
+	"github.com/sky-ai-eng/triage-factory/internal/notify"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
+)
 
 // buildNotify installs durable notifications, on every server role: a
 // producer raises a notification from whichever process it runs in, and the
@@ -14,6 +17,7 @@ func (a *App) buildNotify() {
 		LinearTeamRules: a.stores.LinearTeamRules,
 		JiraStatusRules: a.stores.JiraStatusRules,
 		Hub:             a.wsHub,
+		Events:          kinds.Event,
 		Local:           a.local(),
 	})
 }

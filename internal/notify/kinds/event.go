@@ -14,10 +14,7 @@ import (
 // is where the reader acts on any of them.
 var Event = notify.Event(notify.EventSpec{
 	Render: func(p notify.EventParams, to notify.Recipient) notify.Content {
-		subject := p.EntityKey
-		if subject == "" {
-			subject = "an issue or pull request"
-		}
+		subject := eventSubject(p)
 		rule := `From the team rule "` + p.RuleName + `".`
 		ruleLink := notify.Link("Open the team rule", notify.Routes.NotifyRule(p.HandlerID))
 		if !p.TeamRule && to.Scope == domain.NotificationScopeUser {
@@ -38,6 +35,27 @@ var Event = notify.Event(notify.EventSpec{
 			Actions: []notify.Action{notify.Link(openEntityLabel(p.EntitySource), notify.External(p.EntityURL)), ruleLink},
 		}
 	},
+	// A close relation names the event that resolved the row; an entity
+	// closed without one routing is the sweep's.
+	Resolved: func(p notify.EventParams, r notify.Resolution) string {
+		switch r.Reason {
+		case domain.NotificationResolvedSourceOff:
+			return sourceOff(p.EntitySource)
+		case domain.NotificationResolvedAudienceRemoved:
+			return noLongerApplies(r.Recipient)
+		}
+		if r.ClosedBy == "" {
+			if p.EntityKey == "" {
+				return "The issue or pull request is no longer open."
+			}
+			return p.EntityKey + " is no longer open."
+		}
+		label, ok := catalogLabel(r.ClosedBy)
+		if !ok {
+			label = r.ClosedBy
+		}
+		return label + " on " + eventSubject(p) + "."
+	},
 	Example: notify.EventParams{
 		EventID:      "00000000-0000-0000-0000-000000000001",
 		EventType:    domain.EventGitHubPRCICheckFailed,
@@ -49,7 +67,16 @@ var Event = notify.Event(notify.EventSpec{
 		EntityTitle:  "Retry the webhook on a 502",
 		EntityURL:    "https://github.com/acme/widgets/pull/18",
 	},
+	ExampleClosedBy: domain.EventGitHubPRCICheckPassed,
 })
+
+// eventSubject is how copy names the entity an event row is about.
+func eventSubject(p notify.EventParams) string {
+	if p.EntityKey != "" {
+		return p.EntityKey
+	}
+	return "an issue or pull request"
+}
 
 // catalogLabel is an event type's label in the catalog, and whether the
 // catalog lists the type.

@@ -65,6 +65,16 @@ func (r PriorityRule) at(p any) Priority {
 	return r.fixed
 }
 
+// Resolution is why one row resolved, for a kind's Resolved to say.
+type Resolution struct {
+	Reason domain.NotificationResolvedReason
+	// Recipient is the audience the row is for.
+	Recipient Recipient
+	// ClosedBy is, on an event row a close relation resolved, the event type
+	// whose routing did; empty on every other row.
+	ClosedBy string
+}
+
 // ConditionSpec declares a condition: open while the producer says it is
 // true, resolved by the system when it stops being true.
 type ConditionSpec[P any] struct {
@@ -81,6 +91,12 @@ type ConditionSpec[P any] struct {
 	Audience Audience
 	// Render is called once per recipient the audience resolves to.
 	Render func(P, Recipient) Content
+	// Resolved says in a sentence why a row resolved: Reason cleared when the
+	// condition stopped being true, audience_removed when it no longer
+	// applies to the row's audience, source_off when its source was turned
+	// off or disconnected. It is called once per resolved row, with the
+	// params the row was last raised with.
+	Resolved func(P, Resolution) string
 	// Example is a representative P for the kinds conformance test.
 	Example P
 }
@@ -114,7 +130,11 @@ type kind struct {
 	key         func(any) string
 	audience    Audience
 	render      func(any, Recipient) Content
-	example     any
+	// resolved is a condition's Resolved; nil on a notice, which expires.
+	resolved func(any, Resolution) string
+	// decode reads a row's stored params as the kind's params.
+	decode  func(json.RawMessage) (any, error)
+	example any
 
 	handlersMu sync.RWMutex
 	handlers   map[string]handler
@@ -152,7 +172,11 @@ func Condition[P any](s ConditionSpec[P]) *ConditionKind[P] {
 	if !s.Priority.set() {
 		refuse(s.Name, "a condition needs a Priority")
 	}
+	if s.Resolved == nil {
+		refuse(s.Name, "a condition needs Resolved")
+	}
 	k.key, k.render = erase(s.Name, s.Key, s.Render)
+	k.resolved = func(p any, r Resolution) string { return s.Resolved(p.(P), r) }
 	c := &ConditionKind[P]{k: k}
 	register[P](c)
 	return c
@@ -217,6 +241,13 @@ func register[P any](kd Kind) {
 			refuse(k.name, "audience %s reads %v, the kind's params are %v", part.name, part.param, want)
 		}
 	}
+	k.decode = func(raw json.RawMessage) (any, error) {
+		var p P
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, fmt.Errorf("decode %s params: %w", k.name, err)
+		}
+		return p, nil
+	}
 	raw, err := json.Marshal(k.example)
 	var obj map[string]json.RawMessage
 	if err == nil {
@@ -232,6 +263,16 @@ func register[P any](kd Kind) {
 		refuse(k.name, "the name is already registered")
 	}
 	registry.byName[k.name] = kd
+}
+
+// kindNamed is the registered kind called name, or nil.
+func kindNamed(name string) *kind {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	if kd, ok := registry.byName[name]; ok {
+		return kd.core()
+	}
+	return nil
 }
 
 // Kinds returns every registered kind, ordered by name.
