@@ -50,17 +50,15 @@ func (a *App) buildInfra() {
 // (driven by the system:poll: bus subscribers), never an explicit Start in
 // startWorkers.
 func (a *App) buildAI() {
-	// Shared system-job sandbox cap: one limiter injected into both
-	// background Managers so their per-org runners can't fan out an
-	// unbounded number of gVisor sandboxes across tenants in multi-mode. It
-	// deliberately does NOT gate interactive sessions or delegated runs
-	// (delegated has its own cap). Threaded the same way
-	// a.llmRecorder is.
+	// Shared system-job cap: one limiter injected into both background
+	// Managers so their per-org runners can't fan out an unbounded number of
+	// concurrent LLM calls across tenants. It deliberately does NOT gate
+	// interactive sessions or delegated runs (delegated has its own cap).
+	// Threaded the same way a.llmRecorder is.
 	//
-	// Applied in both modes (a real cap, not nil): in multi it bounds gVisor
-	// sandboxes; in local — where agentproc.Run is a direct subprocess with no
-	// sandbox — it's still a modest ceiling on concurrent background LLM
-	// processes. nil (unlimited) is reserved for callers that opt out (tests).
+	// Applied in both modes (a real cap, not nil): in multi each call is a
+	// direct, toolless request to the provider; in local it is an SDK
+	// subprocess. nil (unlimited) is reserved for callers that opt out (tests).
 	sysLimiter := syslimit.New(syslimit.DefaultMaxConcurrentSystemRuns)
 
 	// The org's background-jobs model, read per cycle from org_settings. One

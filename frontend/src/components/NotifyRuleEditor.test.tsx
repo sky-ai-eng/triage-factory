@@ -88,6 +88,43 @@ describe('NotifyRuleEditor', () => {
       scope_predicate_json: null,
     }) as NotifyHandler
 
+  it('disables every form control for a reader, and leaves Close usable', async () => {
+    // A schema with one field of each widget kind, so the predicate editor's
+    // pills, select and text input are under test alongside the editor's own.
+    const schema = {
+      fields: [
+        { name: 'is_draft', type: 'bool' },
+        { name: 'conclusion', type: 'string', enum_values: ['failure', 'timed_out'] },
+        { name: 'check_name', type: 'string' },
+      ],
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) =>
+        Promise.resolve({
+          ok: true,
+          status: 200,
+          ...jsonBody(url.startsWith('/api/event-schemas/') ? schema : []),
+        }),
+      ),
+    )
+    render(<NotifyRuleEditor {...props} writable={false} rule={personalRule('bob')} />)
+    await screen.findByRole('button', { name: 'Yes' })
+
+    const controls = [
+      ...screen.getAllByRole('textbox'),
+      ...screen.getAllByRole('combobox'),
+      ...screen.getAllByRole('radio'),
+      ...['Any', 'Yes', 'No'].map((name) => screen.getByRole('button', { name })),
+    ]
+    // The rule's name and check_name; the event type and conclusion; the two
+    // audiences; the bool's three pills.
+    expect(controls).toHaveLength(9)
+    for (const control of controls) expect(control).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Close' })).toBeEnabled()
+    expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull()
+  })
+
   it('reads "Just me" on a personal rule while the viewer is still loading', () => {
     meStore.current = null
     render(<NotifyRuleEditor {...props} rule={personalRule('me')} />)

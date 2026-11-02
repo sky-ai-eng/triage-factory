@@ -1,12 +1,10 @@
-// Package syslimit bounds the number of concurrent headless system-job runs
-// (scorer, repo-profiler, classifier) so the background fleet can't spawn an
-// unbounded number of gVisor sandboxes across orgs in multi-mode.
+// Package syslimit bounds the number of concurrent system-job LLM calls made
+// by the scorer and the repo profiler, across all orgs.
 //
 // It is deliberately a small, self-contained seam: a single shared limiter is
-// injected into the three background Managers and nothing else. It does NOT
-// gate delegated runs, which have their own cap in internal/delegate. The
-// horizontal-scaling work will eventually replace it with fleet-wide sandbox
-// accounting without touching the call sites.
+// injected into the scorer's and the repo profiler's Managers and nothing else.
+// It does NOT gate delegated runs, which have their own cap in
+// internal/delegate.
 package syslimit
 
 import (
@@ -16,19 +14,13 @@ import (
 )
 
 // DefaultMaxConcurrentSystemRuns is the process-wide cap on concurrent
-// background system-job sandboxes, shared across the scorer, repo-profiler,
-// and classifier and across all orgs. 8 is chosen to clear the classifier's
-// own per-entity fan-out (maxConcurrentVotes = 8) so a single entity's vote
-// burst isn't artificially halved, while still bounding the total fleet
-// (background + delegated, separately capped at 4, stays ≤ 12 sandboxes).
-// Operators on small machines can tune it down.
+// system-job LLM calls, shared by the scorer's and the repo profiler's
+// Managers and across all orgs.
 //
 // This is a single shared (not per-org) cap by design: it bounds the *total*
-// fleet so the aggregate can't overwhelm the host. Per-org runners already
-// prevent head-of-line blocking between tenants; per-org *fairness* (stopping
-// one org from transiently monopolizing these shared slots) is deliberately
-// deferred to the horizontal-scaling work — fleet-wide, DB-backed sandbox
-// accounting that subsumes this process-local cap.
+// so the aggregate can't overwhelm the host. Per-org runners already prevent
+// head-of-line blocking between tenants; per-org *fairness* (stopping one org
+// from transiently monopolizing these shared slots) is not provided.
 const DefaultMaxConcurrentSystemRuns = 8
 
 // Limiter bounds concurrent headless system-job runs. A nil *Limiter is
