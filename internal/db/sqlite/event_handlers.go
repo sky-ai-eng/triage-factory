@@ -205,11 +205,13 @@ func (s *eventHandlerStore) Get(ctx context.Context, orgID, id string) (*domain.
 
 func (s *eventHandlerStore) GetEnabledForEvent(ctx context.Context, orgID, eventType string) ([]domain.EventHandler, error) {
 	// Rules-before-triggers order (same as Postgres impl) — preserves
-	// the pre-unification observable shape.
+	// the pre-unification observable shape. An archived team's handlers are
+	// left out (see the interface doc).
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+sqliteEventHandlerColumns+`
 		FROM event_handlers
 		WHERE org_id = ? AND event_type = ? AND enabled = 1 AND deleted_at IS NULL
+		  AND NOT EXISTS (SELECT 1 FROM teams t WHERE t.id = event_handlers.team_id AND t.deleted_at IS NOT NULL)
 		ORDER BY `+sqliteHandlerKindOrder+`,
 		         CASE WHEN kind = 'rule' THEN sort_order ELSE 0 END ASC,
 		         created_at DESC, id

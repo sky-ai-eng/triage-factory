@@ -283,6 +283,19 @@ func (r *Router) processFiring(ctx context.Context, cf dbpkg.ClaimedFiring) {
 		skip(domain.PendingFiringSkipTriggerDisabled)
 		return
 	}
+	// Archiving a team stops its work, and a firing it queued before the
+	// archive is part of that work.
+	if trigger.TeamID != "" {
+		team, err := r.teams.GetSystem(unitCtx, f.OrgID, trigger.TeamID)
+		if err != nil {
+			requeue(workitem.OutcomeTransient, fmt.Errorf("trigger team lookup: %w", err))
+			return
+		}
+		if team != nil && team.DeletedAt != nil {
+			skip(domain.PendingFiringSkipTeamArchived)
+			return
+		}
+	}
 	breakerThreshold := derefIntDefault(trigger.BreakerThreshold, 0)
 	failures, err := r.tasks.CountConsecutiveFailedConversationsSystem(unitCtx, f.OrgID, f.EntityID, r.breakerPromptID(unitCtx, f.OrgID, trigger.BlueprintID))
 	if err != nil {

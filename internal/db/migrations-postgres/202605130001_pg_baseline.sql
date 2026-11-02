@@ -271,21 +271,46 @@ $$;
 -- +goose StatementEnd
 
 
+-- The read gate for team-scoped rows: membership in an active team. The join
+-- to teams adds deleted_at IS NULL, so membership in an archived team grants no
+-- read. Archiving keeps the memberships, so restoring the team makes its rows
+-- readable again.
+
 -- +goose StatementBegin
 CREATE FUNCTION tf.user_in_team(target_team uuid) RETURNS boolean
     LANGUAGE sql STABLE SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'public'
     AS $$
   SELECT EXISTS (
-    SELECT 1 FROM memberships
-    WHERE user_id = tf.current_user_id()
-      AND team_id = target_team
+    SELECT 1 FROM memberships m
+    JOIN teams t ON t.id = m.team_id
+    WHERE m.user_id = tf.current_user_id()
+      AND m.team_id = target_team
+      AND t.deleted_at IS NULL
   );
 $$;
 -- +goose StatementEnd
 
 
--- Write-path sibling of user_in_team: membership exists AND the role can write.
+-- Whether target_team exists and is not archived. A select policy whose
+-- creator arm grants a row without membership ANDs this in, so an archived
+-- team's rows are hidden from the person who wrote them too.
+
+-- +goose StatementBegin
+CREATE FUNCTION tf.team_active(target_team uuid) RETURNS boolean
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM teams
+    WHERE id = target_team
+      AND deleted_at IS NULL
+  );
+$$;
+-- +goose StatementEnd
+
+
+-- Write-path sibling of user_in_team: active-team membership AND the role can write.
 -- Team-scoped write policies gate on this, read policies keep user_in_team; that
 -- split is what makes the viewer role read-only. The join to teams adds
 -- deleted_at IS NULL, so an archived team is write-blocked at the row level for
@@ -2797,9 +2822,7 @@ CREATE POLICY event_handlers_delete ON public.event_handlers FOR DELETE USING ((
 CREATE POLICY event_handlers_insert ON public.event_handlers FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND tf.user_can_write_team(team_id) AND ((kind <> 'notify'::text) OR tf.user_is_team_admin(team_id) OR ((notify_audience = 'creator'::text) AND (creator_user_id = tf.current_user_id())))));
 
 
-CREATE POLICY event_handlers_select ON public.event_handlers FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND ((creator_user_id = tf.current_user_id()) OR (EXISTS ( SELECT 1
-   FROM public.memberships m
-  WHERE ((m.user_id = tf.current_user_id()) AND (m.team_id = event_handlers.team_id)))))));
+CREATE POLICY event_handlers_select ON public.event_handlers FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.team_active(team_id) AND ((creator_user_id = tf.current_user_id()) OR tf.user_in_team(team_id))));
 
 
 CREATE POLICY event_handlers_update ON public.event_handlers FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id) AND ((kind <> 'notify'::text) OR tf.user_is_team_admin(team_id) OR ((notify_audience = 'creator'::text) AND (creator_user_id = tf.current_user_id()))))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id) AND ((kind <> 'notify'::text) OR tf.user_is_team_admin(team_id) OR ((notify_audience = 'creator'::text) AND (creator_user_id = tf.current_user_id())))));
@@ -2829,9 +2852,7 @@ CREATE POLICY jira_rules_delete ON public.jira_project_status_rules FOR DELETE U
 CREATE POLICY jira_rules_insert ON public.jira_project_status_rules FOR INSERT WITH CHECK ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id)));
 
 
-CREATE POLICY jira_rules_select ON public.jira_project_status_rules FOR SELECT USING ((tf.team_in_current_org(team_id) AND (EXISTS ( SELECT 1
-   FROM public.memberships m
-  WHERE ((m.team_id = jira_project_status_rules.team_id) AND (m.user_id = tf.current_user_id()))))));
+CREATE POLICY jira_rules_select ON public.jira_project_status_rules FOR SELECT USING ((tf.team_in_current_org(team_id) AND tf.user_in_team(team_id)));
 
 
 CREATE POLICY jira_rules_update ON public.jira_project_status_rules FOR UPDATE USING ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id))) WITH CHECK ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id)));
@@ -2846,9 +2867,7 @@ CREATE POLICY linear_rules_delete ON public.linear_team_rules FOR DELETE USING (
 CREATE POLICY linear_rules_insert ON public.linear_team_rules FOR INSERT WITH CHECK ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id)));
 
 
-CREATE POLICY linear_rules_select ON public.linear_team_rules FOR SELECT USING ((tf.team_in_current_org(team_id) AND (EXISTS ( SELECT 1
-   FROM public.memberships m
-  WHERE ((m.team_id = linear_team_rules.team_id) AND (m.user_id = tf.current_user_id()))))));
+CREATE POLICY linear_rules_select ON public.linear_team_rules FOR SELECT USING ((tf.team_in_current_org(team_id) AND tf.user_in_team(team_id)));
 
 
 CREATE POLICY linear_rules_update ON public.linear_team_rules FOR UPDATE USING ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id))) WITH CHECK ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id)));
@@ -2857,9 +2876,7 @@ CREATE POLICY linear_rules_update ON public.linear_team_rules FOR UPDATE USING (
 ALTER TABLE public.team_github_groups ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY team_github_groups_select ON public.team_github_groups FOR SELECT USING ((tf.team_in_current_org(team_id) AND (EXISTS ( SELECT 1
-   FROM public.memberships m
-  WHERE ((m.team_id = team_github_groups.team_id) AND (m.user_id = tf.current_user_id()))))));
+CREATE POLICY team_github_groups_select ON public.team_github_groups FOR SELECT USING ((tf.team_in_current_org(team_id) AND tf.user_in_team(team_id)));
 
 
 CREATE POLICY team_github_groups_insert ON public.team_github_groups FOR INSERT WITH CHECK ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id)));
@@ -2871,9 +2888,7 @@ CREATE POLICY team_github_groups_delete ON public.team_github_groups FOR DELETE 
 ALTER TABLE public.team_github_repos ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY team_github_repos_select ON public.team_github_repos FOR SELECT USING ((tf.team_in_current_org(team_id) AND (EXISTS ( SELECT 1
-   FROM public.memberships m
-  WHERE ((m.team_id = team_github_repos.team_id) AND (m.user_id = tf.current_user_id()))))));
+CREATE POLICY team_github_repos_select ON public.team_github_repos FOR SELECT USING ((tf.team_in_current_org(team_id) AND tf.user_in_team(team_id)));
 
 
 CREATE POLICY team_github_repos_insert ON public.team_github_repos FOR INSERT WITH CHECK ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id)));
@@ -2963,9 +2978,7 @@ CREATE POLICY prompts_delete ON public.prompts FOR DELETE USING (((org_id = tf.c
 CREATE POLICY prompts_insert ON public.prompts FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND tf.user_can_write_team(team_id)));
 
 
-CREATE POLICY prompts_select ON public.prompts FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND ((creator_user_id = tf.current_user_id()) OR (EXISTS ( SELECT 1
-   FROM public.memberships m
-  WHERE ((m.user_id = tf.current_user_id()) AND (m.team_id = prompts.team_id)))))));
+CREATE POLICY prompts_select ON public.prompts FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.team_active(team_id) AND ((creator_user_id = tf.current_user_id()) OR tf.user_in_team(team_id))));
 
 
 CREATE POLICY prompts_update ON public.prompts FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
@@ -3163,9 +3176,7 @@ CREATE POLICY team_settings_delete ON public.team_settings FOR DELETE USING ((tf
 CREATE POLICY team_settings_insert ON public.team_settings FOR INSERT WITH CHECK ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id)));
 
 
-CREATE POLICY team_settings_select ON public.team_settings FOR SELECT USING ((tf.team_in_current_org(team_id) AND (EXISTS ( SELECT 1
-   FROM public.memberships m
-  WHERE ((m.team_id = team_settings.team_id) AND (m.user_id = tf.current_user_id()))))));
+CREATE POLICY team_settings_select ON public.team_settings FOR SELECT USING ((tf.team_in_current_org(team_id) AND tf.user_in_team(team_id)));
 
 
 CREATE POLICY team_settings_update ON public.team_settings FOR UPDATE USING ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id))) WITH CHECK ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id)));
@@ -3279,6 +3290,10 @@ GRANT ALL ON FUNCTION tf.user_can_write_team(target_team uuid) TO tf_app;
 
 REVOKE ALL ON FUNCTION tf.user_in_team(target_team uuid) FROM PUBLIC;
 GRANT ALL ON FUNCTION tf.user_in_team(target_team uuid) TO tf_app;
+
+
+REVOKE ALL ON FUNCTION tf.team_active(target_team uuid) FROM PUBLIC;
+GRANT ALL ON FUNCTION tf.team_active(target_team uuid) TO tf_app;
 
 
 REVOKE ALL ON FUNCTION tf.user_is_org_admin(target_org uuid) FROM PUBLIC;
@@ -3708,9 +3723,8 @@ ALTER TABLE public.blueprints ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY blueprints_select ON public.blueprints FOR SELECT
   USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)
-          AND ((creator_user_id = tf.current_user_id())
-               OR (EXISTS (SELECT 1 FROM public.memberships m
-                           WHERE ((m.user_id = tf.current_user_id()) AND (m.team_id = blueprints.team_id)))))));
+          AND tf.team_active(team_id)
+          AND ((creator_user_id = tf.current_user_id()) OR tf.user_in_team(team_id))));
 CREATE POLICY blueprints_insert ON public.blueprints FOR INSERT
   WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND tf.user_can_write_team(team_id)));
 CREATE POLICY blueprints_update ON public.blueprints FOR UPDATE
@@ -5638,9 +5652,7 @@ ALTER TABLE public.team_slack_channels ENABLE ROW LEVEL SECURITY;
 
 -- Mirrors team_github_repos_select plus the org guard: team members only.
 CREATE POLICY team_slack_channels_select ON public.team_slack_channels FOR SELECT TO tf_app
-  USING ((org_id = tf.current_org_id()) AND tf.team_in_current_org(team_id) AND (EXISTS ( SELECT 1
-   FROM public.memberships m
-  WHERE ((m.team_id = team_slack_channels.team_id) AND (m.user_id = tf.current_user_id())))));
+  USING ((org_id = tf.current_org_id()) AND tf.team_in_current_org(team_id) AND tf.user_in_team(team_id));
 
 CREATE POLICY team_slack_channels_insert ON public.team_slack_channels FOR INSERT TO tf_app
   WITH CHECK ((org_id = tf.current_org_id()) AND tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id));

@@ -129,7 +129,11 @@ type EventHandlerStore interface {
 	// GetEnabledForEvent returns enabled, non-deleted handlers (every kind)
 	// matching event_type, ordered rules, then triggers, then notify rules, so
 	// the router can process them in one pass with the same observable shape
-	// as the pre-unification two-phase loop.
+	// as the pre-unification two-phase loop. A handler whose team is archived
+	// is left out: an archived team mints no task and fires nothing, and
+	// every reader of this set (the router's match, the Jira drift check, a
+	// hand-made task's priority) is deciding what a live team would do. Get
+	// and GetSystem by id still return it.
 	GetEnabledForEvent(ctx context.Context, orgID string, eventType string) ([]domain.EventHandler, error)
 
 	// ListForBlueprint returns all non-deleted trigger handlers referencing
