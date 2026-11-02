@@ -72,10 +72,38 @@ func TestTaskStore_SQLite(t *testing.T) {
 	})
 }
 
+// TestTaskRuleOrder_SQLite runs the task-list rule-order suite against the
+// SQLite impl.
+func TestTaskRuleOrder_SQLite(t *testing.T) {
+	dbtest.RunTaskRuleOrderConformance(t, func(t *testing.T) dbtest.TaskRuleOrderFixture {
+		t.Helper()
+		conn := openSQLiteForTest(t)
+		stores := sqlitestore.New(conn)
+		return dbtest.TaskRuleOrderFixture{
+			Tasks:    stores.Tasks,
+			Handlers: stores.EventHandlers,
+			OrgID:    runmode.LocalDefaultOrgID,
+			TeamID:   runmode.LocalDefaultTeamID,
+			SeedTask: func(t *testing.T, eventType string) string {
+				t.Helper()
+				_, _, taskID := seedSQLiteTaskChainOfType(t, conn, "rule-order", eventType)
+				return taskID
+			},
+			HandlerID: shippedHandlerIDBySlug(conn, runmode.LocalDefaultOrgID),
+		}
+	})
+}
+
 // seedSQLiteTaskChain inserts a fresh entity + event + task chain for
 // one conformance subtest. Each call uses a unique source_id so the
 // dedup index doesn't collapse independent seeds across subtests.
 func seedSQLiteTaskChain(t *testing.T, conn *sql.DB, suffix string) (entityID, eventID, taskID string) {
+	t.Helper()
+	return seedSQLiteTaskChainOfType(t, conn, suffix, domain.EventGitHubPRCICheckFailed)
+}
+
+// seedSQLiteTaskChainOfType is seedSQLiteTaskChain with the event type named.
+func seedSQLiteTaskChainOfType(t *testing.T, conn *sql.DB, suffix, eventType string) (entityID, eventID, taskID string) {
 	t.Helper()
 	now := time.Now().UTC()
 	entityID = uuid.New().String()
@@ -83,7 +111,6 @@ func seedSQLiteTaskChain(t *testing.T, conn *sql.DB, suffix string) (entityID, e
 	eventID = uuid.New().String()
 	// suffix + nanos keeps source_id unique within and across subtests.
 	sourceID := fmt.Sprintf("octo/conformance#%s-%d", suffix, now.UnixNano())
-	eventType := domain.EventGitHubPRCICheckFailed
 	repoID := dbseed.GitHubEntityRepository(t, conn, runmode.LocalDefaultOrgID, "https://github.com", sourceID)
 
 	if _, err := conn.Exec(`
