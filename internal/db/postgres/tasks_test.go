@@ -65,6 +65,51 @@ func TestTaskStore_Postgres(t *testing.T) {
 	})
 }
 
+// TestTaskClaimArchivedTeam_Postgres runs the archived-team claim suite
+// against the Postgres impl, both pools on AdminDB like the suite above. The
+// claimant is admin of the org's default team and a member of a second team
+// that is then archived; the holder is a member of the archived team alone.
+func TestTaskClaimArchivedTeam_Postgres(t *testing.T) {
+	h := pgtest.Shared(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+
+	dbtest.RunClaimArchivedTeamConformance(t, func(t *testing.T) dbtest.ClaimArchivedTeamFixture {
+		t.Helper()
+		h.Reset(t)
+		orgID, userID, agentID := seedPgOrgUserAgent(t, h)
+		active := firstTeamForOrg(t, h, orgID)
+		archived := seedPgDefaultTeam(t, h, orgID, userID)
+		holder := pgtest.SeedUser(t, h, "holder")
+		pgtest.AddOrgMember(t, h, holder, orgID, archived, "member", "member")
+		pgtest.MustExec(t, h.AdminDB, `UPDATE teams SET deleted_at = now() WHERE id = $1`, archived)
+
+		return dbtest.ClaimArchivedTeamFixture{
+			Store:          stores.Tasks,
+			OrgID:          orgID,
+			AgentID:        agentID,
+			UserID:         userID,
+			HolderID:       holder,
+			ActiveTeamID:   active,
+			ArchivedTeamID: archived,
+			SeedTask: func(t *testing.T, ownerTeamID string, visibleTeams []string) string {
+				t.Helper()
+				_, _, taskID := seedPgTaskChain(t, h.AdminDB, orgID, userID, "archived-claim")
+				pgtest.MustExec(t, h.AdminDB, `UPDATE tasks SET team_id = $1 WHERE id = $2`, ownerTeamID, taskID)
+				for _, team := range visibleTeams {
+					pgtest.MustExec(t, h.AdminDB,
+						`INSERT INTO task_teams (task_id, team_id) VALUES ($1, $2)`, taskID, team)
+				}
+				return taskID
+			},
+			HoldForUser: func(t *testing.T, taskID, userID string) {
+				t.Helper()
+				pgtest.MustExec(t, h.AdminDB,
+					`UPDATE tasks SET claimed_by_user_id = $1, status = 'in_progress' WHERE id = $2`, userID, taskID)
+			},
+		}
+	})
+}
+
 // TestTaskRuleOrder_Postgres runs the task-list rule-order suite against the
 // Postgres impl, both pools on AdminDB like the suite above.
 func TestTaskRuleOrder_Postgres(t *testing.T) {

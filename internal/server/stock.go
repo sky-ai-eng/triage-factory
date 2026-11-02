@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -901,7 +902,10 @@ func (s *Server) stockClaimTicket(r *http.Request, b *stockBatch, entity *domain
 		// failed row rather than stealing.
 		claimOK, e = tx.Tasks.ClaimQueuedForUser(r.Context(), b.orgID, task.ID, b.userID)
 		return e
-	}); err != nil {
+	}); errors.Is(err, db.ErrNoActiveClaimTeam) {
+		return stockFailed(snap.Key, httpx.ReasonTeamArchived,
+			"the ticket's task is on an archived team, and you're on no active team it can move to")
+	} else if err != nil {
 		stockLog.Error("stock: claim failed", "issue", snap.Key, "error", err)
 		return stockFailed(snap.Key, httpx.ReasonInternal, "could not claim the ticket"+httpx.LocalDetail(err))
 	}
