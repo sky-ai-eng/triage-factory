@@ -107,6 +107,61 @@ describe('usePagedList', () => {
     ])
   })
 
+  it('rereads the same query as deep as it has been read, replacing it at once', async () => {
+    const { bodies } = stubPages([
+      { items: [{ id: 'a' }], next_page_token: 'tok-1', total_count: 3 },
+      { items: [{ id: 'b' }], next_page_token: 'tok-2', total_count: 3 },
+      { items: [{ id: 'a2' }], next_page_token: 'tok-3', total_count: 3 },
+      { items: [{ id: 'b2' }], next_page_token: 'tok-4', total_count: 3 },
+    ])
+    const { result } = renderHook(() => usePagedList<Row>('/api/tasks/list', 'Could not load.'))
+    await act(async () => {
+      await result.current.load({ statuses: ['queued'] })
+    })
+    await act(async () => {
+      await result.current.loadMore()
+    })
+
+    await act(async () => {
+      await result.current.load({ statuses: ['queued'] }, { keepDepth: true })
+    })
+    // Two pages held, two pages reread, and the token is the second's.
+    expect(result.current.items.map((r) => r.id)).toEqual(['a2', 'b2'])
+    expect(bodies[3]).toEqual({ statuses: ['queued'], page_token: 'tok-3' })
+    expect(result.current.hasMore).toBe(true)
+
+    // Under other filters it is a first page.
+    await act(async () => {
+      await result.current.load({ statuses: ['running'] }, { keepDepth: true })
+    })
+    expect(bodies).toHaveLength(5)
+  })
+
+  it('reads another path from its first page, whatever the filters', async () => {
+    const { bodies } = stubPages([
+      { items: [{ id: 'a' }], next_page_token: 'tok-1', total_count: 3 },
+      { items: [{ id: 'b' }], next_page_token: 'tok-2', total_count: 3 },
+      { items: [{ id: 'z' }], next_page_token: 'tok-3', total_count: 3 },
+    ])
+    const { result, rerender } = renderHook(
+      ({ path }) => usePagedList<Row>(path, 'Could not load.'),
+      { initialProps: { path: '/api/me/notifications/list' } },
+    )
+    await act(async () => {
+      await result.current.load({ status: 'open' })
+    })
+    await act(async () => {
+      await result.current.loadMore()
+    })
+
+    rerender({ path: '/api/orgs/o/notifications/list' })
+    await act(async () => {
+      await result.current.load({ status: 'open' }, { keepDepth: true })
+    })
+    expect(bodies).toHaveLength(3)
+    expect(result.current.items.map((r) => r.id)).toEqual(['z'])
+  })
+
   it('does not page past the last page', async () => {
     const { fetchMock } = stubPages([{ items: [{ id: 'a' }], total_count: 1 }])
     const { result } = renderHook(() => usePagedList<Row>('/api/tasks/list', 'Could not load.'))

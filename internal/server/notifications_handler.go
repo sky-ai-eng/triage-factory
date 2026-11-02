@@ -58,6 +58,10 @@ type notificationJSON struct {
 	Actions    []notify.ActionView `json:"actions"`
 	Read       bool                `json:"read"`
 	Dismissed  bool                `json:"dismissed"`
+	// Sent is whether the caller is in the row's audience: true on every
+	// inbox row, and false on a team's row an org admin reads without being
+	// sent it.
+	Sent bool `json:"sent"`
 }
 
 // notificationItems renders views for the caller. Call it outside any
@@ -92,6 +96,7 @@ func notificationItems(r *http.Request, caller *notify.Caller, views []domain.No
 			Actions:        actions,
 			Read:           v.Read,
 			Dismissed:      v.Dismissed,
+			Sent:           v.Sent,
 		}
 	}
 	return out, nil

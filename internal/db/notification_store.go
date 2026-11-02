@@ -426,7 +426,7 @@ func ScanNotification(scan func(...any) error) (domain.Notification, error) {
 }
 
 // ScanNotificationView reads the notification projection, the viewer's marks
-// row (all NULL when absent), then the read and dismissed booleans.
+// row (all NULL when absent), then the read, dismissed and sent booleans.
 func ScanNotificationView(scan func(...any) error) (domain.NotificationView, error) {
 	var (
 		r                         notificationRow
@@ -434,7 +434,7 @@ func ScanNotificationView(scan func(...any) error) (domain.NotificationView, err
 		markID, markUser, markOrg sql.NullString
 		readAt, dismissedAt       sql.NullTime
 	)
-	err := scan(append(r.dest(), &markID, &markUser, &markOrg, &readAt, &dismissedAt, &v.Read, &v.Dismissed)...)
+	err := scan(append(r.dest(), &markID, &markUser, &markOrg, &readAt, &dismissedAt, &v.Read, &v.Dismissed, &v.Sent)...)
 	if err != nil {
 		return domain.NotificationView{}, err
 	}

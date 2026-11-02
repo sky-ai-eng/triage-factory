@@ -54,6 +54,12 @@ Two consequences worth keeping: `mutate` describes the row after the verb (or
 returns `null` to drop it), and `onCommit` is the only place a request belongs.
 Starting a second action commits the first rather than stacking snapshots.
 
+**New rows do not undo a held change.** A caller that refetches while a window
+is open (on a websocket ping, say) hands the table rows that predate the
+request, because it has not been sent. The table applies the held change to
+them again, so the row the reader just dismissed stays gone, and Undo puts back
+the new rows rather than the ones the change was first applied to.
+
 **Everything the table can apply, `onCommit` must be able to send.** It receives
 the picked option alongside the action id, because a caller that can apply a
 role change has to be able to send one — without it the screen shows a change
@@ -278,6 +284,37 @@ Every cell is a query container, so a renderer that wants to say the same thing
 more briefly when it is narrow writes `@container (max-width: 90px)` in its own
 CSS. The table stays out of it.
 
+## Rows that carry a line of detail: `lines`
+
+`lines` is `1` by default: the 35px row this table has always drawn.
+
+- **`2`:** 58px rows. The caller's name column renders its first line, then a
+  `.tb-line2` span: 12px sans, ink-3, clipped to one line with an ellipsis.
+  Use it only when the second line is a summary the reader can get in full
+  elsewhere.
+- **`'wrap'`:** the second line wraps (`text-wrap: pretty`, max 88ch), and rows
+  take the height their text needs, with a 58px minimum. Rows then differ in
+  height, so `pageSize="auto"` can't count them. Pass `pageSize={0}` (no
+  paging, the scroller decides) or a number.
+- **Alignment:** in both modes the other cells center on the row and only the
+  name column stacks. Side cells are a single short line, and top-aligning them
+  makes a tall row read top-heavy.
+
+The notifications page uses `'wrap'`, because a notification's body is its only
+full statement and some run to four sentences (`memory.generation_failing`
+appends the provider's own error). A clipped body would leave nowhere to read
+the rest.
+
+## An unread mark: `mark`
+
+`mark={(row) => boolean}` adds a 14px leading column before the checkbox. Rows
+where it returns true draw a 5px `--color-ink-1` dot at the column's left.
+
+- **The column is there whenever `mark` is passed**, so marked and unmarked
+  rows keep their columns on the same lines. The header carries an empty cell.
+- **The dot is `aria-hidden`.** Say the same thing in the row's own content for
+  assistive tech; the notifications page bolds an unread row's priority.
+
 ## Do not
 
 - Scroll a long estate inside the table. Page it; a bounded scroll container
@@ -307,7 +344,8 @@ import { tableCells, ago } from './cells'
 Every value lives in `table.css`, keyed off data attributes: `[data-on]` for a
 selected row, `[data-align]`, `[data-sans]`, `[data-live]` / `[data-draft]` /
 `[data-on]` on a pager button, `[data-lead]` and `[data-disabled]` on a candidate,
-`[data-locked]` on a toggle that cannot be switched off.
+`[data-locked]` on a toggle that cannot be switched off, `[data-lines]` on the
+table for taller rows, and `[data-on]` on a row's `.tb-mark`.
 
 Four things are handed to CSS as custom properties, because all four are
 measured: `--tb-grid` (the column tracks, out of the sizing pass), `--tb-d` (each

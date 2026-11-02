@@ -1,0 +1,379 @@
+/* The notifications page: a toolbar, then the filters beside the table. The
+   page fills the shell's body and scrolls the table's column alone, so the
+   filters and the toolbar stay put. */
+
+.nt {
+  /* The page owns its gutter, cancelling the shell body's temporary padding
+     with the same negative margin the team surface uses, and fills the body's
+     height so only the table's column scrolls. */
+  margin: -2rem;
+  height: calc(100% + 4rem);
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---- toolbar ------------------------------------------------------- */
+
+.nt-bar {
+  flex: none;
+  /* Holds the height Mark all read takes, so the bar does not move when the
+     last unread row is read. */
+  box-sizing: border-box;
+  min-height: 55px;
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  padding: 14px 28px;
+  border-bottom: 1px solid var(--color-line-1);
+}
+.nt-tabs {
+  display: flex;
+  gap: 18px;
+}
+.nt-tab {
+  all: unset;
+  cursor: pointer;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding-bottom: 6px;
+  margin-bottom: -7px;
+  font: var(--font-weight-regular) 12.5px / 1 var(--font-sans);
+  color: var(--color-ink-3);
+}
+.nt-tab[data-on] {
+  color: var(--color-ink-1);
+  box-shadow: inset 0 -1.5px 0 var(--color-ink-1);
+}
+.nt-tab:focus-visible {
+  outline: 2px solid var(--color-ink-1);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+.nt-tab-tail {
+  font: var(--font-weight-regular) 10.5px / 1 var(--font-mono);
+  color: var(--color-ink-4);
+}
+.nt-spacer {
+  flex: 1;
+}
+.nt-edge {
+  all: unset;
+  cursor: pointer;
+  padding: 7px 11px;
+  border-radius: 5px;
+  box-shadow: var(--shadow-edge-strong);
+  font: 500 11.5px / 1 var(--font-sans);
+  color: var(--color-ink-1);
+}
+.nt-edge:focus-visible {
+  outline: 2px solid var(--color-ink-1);
+  outline-offset: 2px;
+}
+
+/* ---- body ---------------------------------------------------------- */
+
+.nt-main {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 236px minmax(0, 1fr);
+}
+
+.nt-filters {
+  overflow: auto;
+  padding: 18px 18px 24px 24px;
+  border-right: 1px solid var(--color-line-1);
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.nt-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.nt-group-label {
+  font: var(--font-weight-regular) 9.5px / 1 var(--font-mono);
+  letter-spacing: 0.1em;
+  color: var(--color-ink-4);
+  padding: 0 8px 7px;
+}
+.nt-opt {
+  all: unset;
+  cursor: pointer;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  font: var(--font-weight-regular) 12px / 1.25 var(--font-sans);
+  color: var(--color-ink-2);
+}
+.nt-opt[data-none] {
+  color: var(--color-ink-4);
+}
+.nt-opt[data-on] {
+  background: var(--color-tint-3);
+  color: var(--color-ink-1);
+}
+.nt-opt:hover:not([data-on]) {
+  background: var(--color-tint-1);
+}
+.nt-opt:focus-visible {
+  outline: 2px solid var(--color-ink-1);
+  outline-offset: -2px;
+}
+.nt-opt-name {
+  min-width: 0;
+  text-wrap: pretty;
+}
+.nt-opt-count {
+  margin-left: auto;
+  font: var(--font-weight-regular) 10.5px / 1 var(--font-mono);
+  color: var(--color-ink-4);
+}
+.nt-divider {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 8px 4px;
+}
+.nt-divider-rule {
+  height: 1px;
+  background: var(--color-line-1);
+}
+.nt-divider-label {
+  font: var(--font-weight-regular) 9.5px / 1.4 var(--font-mono);
+  color: var(--color-ink-4);
+}
+.nt-dismissed {
+  padding: 0 8px;
+  font: var(--font-weight-regular) 12px / 1 var(--font-sans);
+  color: var(--color-ink-2);
+}
+.nt-clear {
+  all: unset;
+  cursor: pointer;
+  align-self: flex-start;
+  padding: 0 8px;
+  font: var(--font-weight-regular) 11px / 1 var(--font-mono);
+  color: var(--color-ink-2);
+  text-decoration: underline;
+  text-decoration-color: var(--color-line-2);
+  text-underline-offset: 2px;
+}
+
+.nt-scroll {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  box-sizing: border-box;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  padding: 16px 26px 64px;
+}
+.nt-search {
+  all: unset;
+  box-sizing: border-box;
+  width: 240px;
+  padding: 6px 10px;
+  border-radius: 5px;
+  box-shadow: var(--shadow-edge-strong);
+  font: var(--font-weight-regular) 12px / 1 var(--font-sans);
+  color: var(--color-ink-1);
+}
+.nt-search::placeholder {
+  color: var(--color-ink-4);
+}
+.nt-search:focus-visible {
+  box-shadow:
+    var(--shadow-edge-strong),
+    0 0 0 2px var(--color-ink-1);
+}
+.nt-error {
+  margin: 0 0 12px;
+  font: var(--font-weight-regular) 12px / 1.5 var(--font-sans);
+  color: var(--color-alarm);
+}
+.nt-loadmore {
+  padding: 14px 12px 0;
+  font: var(--font-weight-regular) 10.5px / 1 var(--font-mono);
+  color: var(--color-ink-4);
+}
+.nt-loadmore button {
+  all: unset;
+  cursor: pointer;
+  color: var(--color-ink-1);
+  text-decoration: underline;
+  text-decoration-color: var(--color-line-2);
+  text-underline-offset: 2px;
+}
+
+/* ---- rows ---------------------------------------------------------- */
+
+/* Bold only while unread: the dot beside it is aria-hidden, so the word
+   "unread" after the priority says it to assistive tech. */
+.nt-pri {
+  font: var(--font-weight-regular) 9.5px / 1 var(--font-mono);
+  letter-spacing: 0.14em;
+  color: var(--color-warm);
+}
+.nt-pri[data-tone='low'] {
+  color: var(--color-ink-3);
+}
+.nt-pri[data-tone='past'] {
+  color: var(--color-ink-4);
+}
+.nt-pri[data-unread] {
+  font-weight: 600;
+}
+.nt-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.nt-note {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  width: 100%;
+  white-space: normal;
+}
+.nt-title {
+  font: 600 12.5px / 1.5 var(--font-sans);
+  color: var(--color-ink-1);
+}
+.nt-title[data-dismissed] {
+  color: var(--color-ink-3);
+}
+.nt-tag {
+  margin-left: 8px;
+  font: var(--font-weight-regular) 10px / 1 var(--font-mono);
+  color: var(--color-ink-4);
+  white-space: nowrap;
+}
+/* Rule events put the entity's title and the rule on two lines, so the body
+   keeps its line breaks where the table's wrapping line would fold them. */
+.nt .tb[data-lines='wrap'] .nt-body {
+  white-space: pre-line;
+}
+.nt-act {
+  all: unset;
+  cursor: pointer;
+  margin-left: 10px;
+  font: var(--font-weight-regular) 11px / 1.5 var(--font-mono);
+  color: var(--color-ink-1);
+  white-space: nowrap;
+  text-decoration: underline;
+  text-decoration-color: var(--color-line-2);
+  text-underline-offset: 2px;
+}
+.nt-act:hover {
+  text-decoration-color: var(--color-ink-1);
+}
+.nt-act:focus-visible {
+  outline: 2px solid var(--color-ink-1);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+.nt-act[data-busy] {
+  cursor: default;
+  color: var(--color-ink-3);
+  text-decoration: none;
+}
+.nt-more {
+  all: unset;
+  cursor: pointer;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  color: var(--color-ink-3);
+  font: 600 14px / 1 var(--font-sans);
+}
+.nt-more:hover,
+.nt-more[data-open] {
+  background: var(--color-tint-3);
+  color: var(--color-ink-1);
+}
+.nt-more:focus-visible {
+  outline: 2px solid var(--color-ink-1);
+  outline-offset: 1px;
+}
+
+/* ---- the ⋯ menu ---------------------------------------------------- */
+
+.nt-menu {
+  position: fixed;
+  z-index: 60;
+  box-sizing: border-box;
+  padding: 4px;
+  border-radius: 7px;
+  background: var(--color-raised);
+  border: var(--edge-float);
+  box-shadow: var(--shadow-float);
+  display: flex;
+  flex-direction: column;
+}
+.nt-menu-item {
+  all: unset;
+  cursor: pointer;
+  padding: 7px 10px;
+  border-radius: 4px;
+  font: var(--font-weight-regular) 12px / 1.2 var(--font-sans);
+  color: var(--color-ink-1);
+}
+.nt-menu-item:hover,
+.nt-menu-item:focus-visible {
+  background: var(--color-tint-2);
+}
+.nt-menu-item[aria-disabled] {
+  cursor: default;
+  color: var(--color-ink-3);
+  background: transparent;
+}
+.nt-menu-rule {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--color-line-1);
+}
+
+/* ---- nothing open -------------------------------------------------- */
+
+.nt-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  text-align: center;
+}
+.nt-empty-title {
+  font: 600 17px / 1.3 var(--font-sans);
+  letter-spacing: -0.01em;
+  color: var(--color-ink-1);
+}
+.nt-empty-body {
+  max-width: 46ch;
+  font: var(--font-weight-regular) 12.5px / 1.6 var(--font-sans);
+  color: var(--color-ink-3);
+  text-wrap: pretty;
+}
+.nt-empty-last {
+  max-width: 64ch;
+  padding-top: 6px;
+  font: var(--font-weight-regular) 10.5px / 1.5 var(--font-mono);
+  color: var(--color-ink-4);
+}

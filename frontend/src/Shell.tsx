@@ -197,9 +197,7 @@ export default function Shell() {
               // Governance has a rail row and a warm alert tail in the design, and no
               // page. Off until one exists — absent, not disabled, applied to us.
               governance: false,
-              // TODO(TFAC-1239): on once the notifications page exists, since
-              // the band links to it. The strip's titles already open it.
-              notifications: false,
+              notifications: true,
             }}
             org={activeOrg?.name ?? (isMulti ? '' : 'Triage Factory')}
             team={scope.teamId ? { id: scope.teamId, name: scope.teamName } : null}
@@ -233,7 +231,7 @@ export default function Shell() {
           >
             <Outlet context={scope} />
           </UiShell>
-          <NotificationConfirm feed={notes} />
+          <NotificationConfirm />
         </>
       )}
     </ChromeProvider>

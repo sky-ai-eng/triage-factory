@@ -141,6 +141,64 @@ describe('Table — the undo model', () => {
     })
     expect(onCommit).not.toHaveBeenCalled()
   })
+
+  it('keeps a held change on screen over rows that arrive in its window', () => {
+    const onCommit = vi.fn()
+    const props = {
+      columns: COLS,
+      barPosition: 'inline' as const,
+      bar: { actions: [{ id: 'drop', label: 'Stop watching' }] },
+      mutate: () => null,
+      onCommit,
+    }
+    const { rerender } = render(<Table {...props} rows={ROWS} />)
+
+    fireEvent.click(screen.getAllByRole('checkbox')[1])
+    fireEvent.pointerDown(screen.getByRole('button', { name: 'Stop watching' }), {
+      button: 0,
+      clientX: 0,
+      clientY: 0,
+    })
+    act(() => {
+      vi.advanceTimersByTime(300)
+    })
+    expect(screen.queryByText('ana')).not.toBeInTheDocument()
+
+    // A refetch lands mid-window: the server has not heard of the change, so
+    // it still holds ana, and it has a new row besides.
+    rerender(<Table {...props} rows={[...ROWS, { id: '4', name: 'dee', team: '' }]} />)
+    expect(screen.queryByText('ana')).not.toBeInTheDocument()
+    expect(screen.getByText('dee')).toBeInTheDocument()
+
+    // Undo puts back the rows as they now are, the new one included.
+    fireEvent.click(screen.getByRole('button', { name: /Undo/ }))
+    expect(screen.getByText('ana')).toBeInTheDocument()
+    expect(screen.getByText('dee')).toBeInTheDocument()
+    act(() => {
+      vi.advanceTimersByTime(15_000)
+    })
+    expect(onCommit).not.toHaveBeenCalled()
+  })
+})
+
+describe('Table — lines and mark', () => {
+  it('marks the rows mark returns true for, and keeps the column on every row', () => {
+    const { container } = render(
+      <Table columns={COLS} rows={ROWS} mark={(r) => r.id === '2'} selectable={false} />,
+    )
+    const marks = container.querySelectorAll('.tb-row .tb-mark')
+    expect(marks).toHaveLength(3)
+    expect(Array.from(marks).map((m) => m.hasAttribute('data-on'))).toEqual([false, true, false])
+    // The header holds the column's place too.
+    expect(container.querySelector('.tb-head')!.children).toHaveLength(COLS.length + 1)
+  })
+
+  it('names the line mode on the table, and draws nothing for one line', () => {
+    const { container, rerender } = render(<Table columns={COLS} rows={ROWS} lines="wrap" />)
+    expect(container.querySelector('.tb')).toHaveAttribute('data-lines', 'wrap')
+    rerender(<Table columns={COLS} rows={ROWS} />)
+    expect(container.querySelector('.tb')).not.toHaveAttribute('data-lines')
+  })
 })
 
 describe('Table — the floating bar', () => {

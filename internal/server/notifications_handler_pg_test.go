@@ -99,6 +99,9 @@ func TestNotifications_Postgres_SentAndReadable(t *testing.T) {
 	if a := owner.Items[0].Audience; a.Role == nil || *a.Role != "admins" || a.TeamID != nil || a.UserID != nil {
 		t.Errorf("org row audience = %+v", a)
 	}
+	if !owner.Items[0].Sent {
+		t.Error("the org admin's inbox row reads as not sent")
+	}
 
 	infra := r.list(r.infraAdminSid, "", meNotifications+"/list", nil)
 	if infra.Total() != 1 || infra.Items[0].ID != r.teamRowID {
@@ -120,6 +123,11 @@ func TestNotifications_Postgres_SentAndReadable(t *testing.T) {
 		t.Fatalf("All teams for the org admin = %d rows, want 2", all.Total())
 	}
 	for _, it := range all.Items {
+		// The org row is the admin's own; the team's is one they read without
+		// being sent it.
+		if it.Sent != (it.ID == r.orgRowID) {
+			t.Errorf("All teams row %s sent = %v", it.ID, it.Sent)
+		}
 		if it.ID != r.teamRowID {
 			continue
 		}

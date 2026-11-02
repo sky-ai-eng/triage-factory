@@ -122,6 +122,15 @@ button.ns-title:hover {
   font: 500 11.5px/1 var(--font-sans);
   text-decoration: none;
 }
+/* An action already out: its running label, in a quieter ink, taking no press. */
+.ns-act[data-busy] {
+  cursor: default;
+  color: var(--color-ink-3);
+}
+.ns-urgent[data-full] .ns-act[data-busy] {
+  color: var(--color-warm-ink);
+  opacity: 0.6;
+}
 .ns-link {
   all: unset;
   cursor: pointer;

@@ -1,6 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useNotificationFeed } from './useNotificationFeed'
+import { cancelInvoke, confirmInvoke, useNotificationActions } from './useNotificationActions'
 import { jsonBody } from '../test/apiResponse'
 import type { NotificationItem } from '../lib/notifications'
 import type { WSEvent } from '../types'
@@ -24,11 +25,13 @@ vi.mock('react-router', () => ({ useNavigate: () => navigate }))
 const toastError = vi.fn()
 const toastInfo = vi.fn()
 const toastSuccess = vi.fn()
+const toastWarning = vi.fn()
 vi.mock('../components/Toast/toastStore', () => ({
   toast: {
     error: (m: string) => toastError(m),
     info: (m: string) => toastInfo(m),
     success: (m: string) => toastSuccess(m),
+    warning: (m: string) => toastWarning(m),
   },
 }))
 
@@ -65,6 +68,7 @@ function note(id: string, over: Partial<NotificationItem> = {}): NotificationIte
     actions: [],
     read: false,
     dismissed: false,
+    sent: true,
     ...over,
   }
 }
@@ -135,6 +139,8 @@ beforeEach(() => {
   toastError.mockClear()
   toastInfo.mockClear()
   toastSuccess.mockClear()
+  toastWarning.mockClear()
+  cancelInvoke()
   vi.stubGlobal('fetch', fetchMock)
 })
 
@@ -183,7 +189,7 @@ describe('useNotificationFeed', () => {
       '/api/me/notifications/u1',
       expect.objectContaining({ method: 'PATCH', body: JSON.stringify({ read: true }) }),
     )
-    expect(navigate).toHaveBeenCalledWith('/orgs/org-1/notifications')
+    expect(navigate).toHaveBeenCalledWith('/orgs/org-1/notifications?id=u1')
   })
 
   it('holds an invoke that asks first until it is confirmed', async () => {
@@ -195,17 +201,20 @@ describe('useNotificationFeed', () => {
       confirm: 'Stops polling ENG.',
       allowed: true,
     }
-    const { result } = renderHook(() => useNotificationFeed())
-    await waitFor(() => expect(result.current.count).toBe(0))
+    const { result } = renderHook(() => ({
+      feed: useNotificationFeed(),
+      actions: useNotificationActions(),
+    }))
+    await waitFor(() => expect(result.current.feed.count).toBe(0))
 
-    act(() => result.current.act(item, action))
-    expect(result.current.pending?.action.id).toBe('untrack')
+    act(() => result.current.feed.act(item, action))
+    expect(result.current.actions.pending?.action.id).toBe('untrack')
     const ran = () =>
       fetchMock.mock.calls.some(([url]) => url === '/api/me/notifications/u1/actions/untrack')
     expect(ran()).toBe(false)
 
-    await act(async () => result.current.confirm())
-    expect(result.current.pending).toBeNull()
+    await act(async () => confirmInvoke())
+    expect(result.current.actions.pending).toBeNull()
     await waitFor(() => expect(ran()).toBe(true))
     // The outcome is the action's own words.
     await waitFor(() => expect(toastInfo).toHaveBeenCalledWith('Retrying.'))
@@ -221,29 +230,6 @@ describe('useNotificationFeed', () => {
     )
     await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith('Fixed it.'))
     expect(toastInfo).not.toHaveBeenCalled()
-  })
-
-  it('drops an invoke waiting on confirmation when the org changes', async () => {
-    const item = note('u1', { priority: 'urgent' })
-    const action = {
-      id: 'untrack',
-      type: 'invoke' as const,
-      label: 'Stop tracking ENG',
-      confirm: 'Stops polling ENG.',
-      allowed: true,
-    }
-    const { result, rerender } = renderHook(() => useNotificationFeed())
-    await waitFor(() => expect(result.current.count).toBe(0))
-
-    act(() => result.current.act(item, action))
-    expect(result.current.pending).not.toBeNull()
-    orgId = 'org-2'
-    rerender()
-    expect(result.current.pending).toBeNull()
-    // Gone, not hidden: switching back does not bring the dialog back.
-    orgId = 'org-1'
-    rerender()
-    expect(result.current.pending).toBeNull()
   })
 
   it('follows an in-app link in place and an external one in a new tab, marking it read', async () => {

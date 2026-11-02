@@ -173,4 +173,8 @@ type NotificationView struct {
 	Marks     *NotificationMarks
 	Read      bool
 	Dismissed bool
+	// Sent is whether the viewer is in the row's audience. It is false only
+	// on a row they may read without being sent, which an org admin reads
+	// on another team's row.
+	Sent bool
 }

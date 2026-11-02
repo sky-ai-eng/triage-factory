@@ -37,9 +37,10 @@ const pgNotificationColsTmpl = `{p}id::text, {p}org_id::text, {p}origin, {p}life
 var (
 	pgNotificationCols = strings.ReplaceAll(pgNotificationColsTmpl, "{p}", "")
 
+	// The viewer is $2 wherever these are read.
 	pgNotificationViewCols = strings.ReplaceAll(pgNotificationColsTmpl, "{p}", "n.") + `,
 	m.notification_id::text, m.user_id::text, m.org_id::text, m.read_at, m.dismissed_at,
-	` + db.NotificationReadSQL + `, ` + db.NotificationDismissedSQL
+	` + db.NotificationReadSQL + `, ` + db.NotificationDismissedSQL + `, ` + pgNotificationSent
 )
 
 const pgNotificationMarksCols = `notification_id::text, user_id::text, org_id::text, read_at, dismissed_at`

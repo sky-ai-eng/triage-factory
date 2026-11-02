@@ -14,8 +14,9 @@ export type StripItem = {
   since?: ReactNode
   /** This viewer's read mark. An unread urgent item draws the full 40px band. */
   read: boolean
-  /** The item's first action this viewer may use, if any. */
-  action?: { label: string; onSelect: () => void }
+  /** The item's first action this viewer may use, if any. `busy` is an action
+   *  already out: its label says so, and pressing it does nothing. */
+  action?: { label: string; onSelect: () => void; busy?: boolean }
 }
 
 export type NotifyStripProps = {
@@ -268,7 +269,15 @@ function Urgent({ items, onOpen, interactive }: UrgentProps) {
       {!full && many && <span className="ns-more">· +{items.length - 1} urgent</span>}
       <span className="ns-end">
         {interactive && it.action && (
-          <button type="button" className="ns-act" onClick={it.action.onSelect}>
+          <button
+            type="button"
+            className="ns-act"
+            // aria-disabled rather than disabled, for the reason the
+            // stepper's ends give below.
+            aria-disabled={it.action.busy || undefined}
+            data-busy={it.action.busy || undefined}
+            onClick={it.action.busy ? undefined : it.action.onSelect}
+          >
             {it.action.label}
           </button>
         )}
