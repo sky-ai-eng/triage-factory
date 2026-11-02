@@ -146,6 +146,24 @@ export type TableProps = {
    * selection. Absent, the row click toggles as it always has.
    */
   onRowOpen?: ((row: TableRow) => void) | null
+  /**
+   * Rows that carry a line of detail under their name. 2 draws 58px rows:
+   * the name column stacks its first line over the caller's `.tb-line2`,
+   * which is clipped to one line, and the other cells center on the row.
+   * 'wrap' lets that line wrap, so rows take the height their text needs
+   * (min 58px). Rows then differ in height, so pass a number or 0 for
+   * `pageSize`: 'auto' counts rows by a fixed height and would overfill the
+   * frame.
+   */
+  lines?: 1 | 2 | 'wrap'
+  /**
+   * A leading 14px column, before the checkbox, that draws a 5px ink dot on
+   * the rows it returns true for: unread ones. The column is there whenever
+   * `mark` is passed, so marked and unmarked rows keep their columns on the
+   * same lines. The dot is visual; say the same thing in the row's own content
+   * for assistive tech.
+   */
+  mark?: ((row: TableRow) => boolean) | null
 }
 
 // Table — a selectable, sortable table with an undo window on bulk actions.
@@ -172,6 +190,10 @@ const BAR_SLOT = 54
 // One row: 17px of line between 9px of padding. A short last page holds the
 // difference open so the table does not change height as you page through it.
 const ROW_H = 35
+// Two lines: 18.75px of first line, 4px, 16.5px of second, between 9px of padding.
+const ROW_H2 = 58
+// The mark column: a 5px dot with room either side before the checkbox.
+const MARK_W = 14
 
 /** One chip in the pager: a numbered page, an arrow, or the draft page's `+`. */
 type PagerButton = {
@@ -207,6 +229,18 @@ type TablePending = {
   pick?: PickerOption
 }
 
+/** The rows with a held change applied to the ones it names. */
+function applyHeld(
+  rows: TableRow[],
+  held: Pick<TablePending, 'actionId' | 'ids' | 'pick'>,
+  mutate: TableProps['mutate'],
+): TableRow[] {
+  if (!mutate) return rows
+  return rows
+    .map((r) => (held.ids.indexOf(String(r.id)) < 0 ? r : mutate(r, held.actionId, held.pick)))
+    .filter(Boolean) as TableRow[]
+}
+
 // A type supplies defaults; the column overrides them.
 function columnDef(c: TableColumn): TableColumn {
   const t = c.type && tableCells[c.type]
@@ -240,7 +274,10 @@ export function Table({
   rowBg = null,
   build = false,
   onRowOpen = null,
+  lines = 1,
+  mark = null,
 }: TableProps) {
+  const RH = lines === 1 ? ROW_H : ROW_H2
   const cols = useMemo(() => columns.map(columnDef), [columns])
   const [working, setWorking] = useState(rows)
   const [sel, setSel] = useState<Record<string, boolean>>({})
@@ -300,10 +337,21 @@ export function Table({
   // Adjusted during render, not in an effect: an effect would paint the
   // previous rows once and then replace them, which on a table that just
   // received new data is a visible flash of the old estate.
+  //
+  // A change held in its undo window stays on screen over the new rows, and
+  // Undo puts back the new rows rather than the ones it was applied to: the
+  // request has not been sent, so the server's answer is still the rows
+  // before it, and showing them would undo the change on screen for the
+  // reader without telling them.
   const [rowsFor, setRowsFor] = useState(rows)
   if (rows !== rowsFor) {
     setRowsFor(rows)
-    setWorking(rows)
+    if (pending) {
+      setWorking(applyHeld(rows, pending, mutate))
+      setPending({ ...pending, snapshot: rows })
+    } else {
+      setWorking(rows)
+    }
   }
 
   // One sizing rule, so no table needs a hand-tuned pixel width. A
@@ -556,7 +604,7 @@ export function Table({
       // A row within 10px of fitting is taken: the slack it eats is the
       // breathing room above the pager, and a row of real data is worth more
       // than 10px of air. Below that it is left out rather than crowded in.
-      const n = Math.floor((avail + 10) / ROW_H)
+      const n = Math.floor((avail + 10) / RH)
       // Four is the floor: below that the pager costs more than it saves.
       setFit(Math.max(4, n))
     }
@@ -569,7 +617,7 @@ export function Table({
 
   const shown = useMemo(() => {
     const gap = 10
-    const fixed = selectable ? 20 + gap : 0
+    const fixed = (selectable ? 20 + gap : 0) + (mark ? MARK_W + gap : 0)
     let keep = sizes.slice()
     const cost = () =>
       keep.reduce((n, s) => n + s.px, 0) + gap * Math.max(0, keep.length - 1) + fixed
@@ -590,8 +638,11 @@ export function Table({
   // measurement, so it is handed to CSS as a custom property rather than as a
   // rule this file would otherwise have to write three times.
   const grid = useMemo(
-    () => (selectable ? '20px ' : '') + shown.map((s) => s.track).join(' '),
-    [shown, selectable],
+    () =>
+      (mark ? MARK_W + 'px ' : '') +
+      (selectable ? '20px ' : '') +
+      shown.map((s) => s.track).join(' '),
+    [shown, selectable, mark],
   )
 
   const sorted = useMemo(() => {
@@ -679,10 +730,7 @@ export function Table({
       if (pending) finish()
       const snapshot = working
       const ids = selIds.slice()
-      const next = working
-        .map((r) => (ids.indexOf(String(r.id)) < 0 ? r : mutate ? mutate(r, action.id, pick) : r))
-        .filter(Boolean) as TableRow[]
-      setWorking(next)
+      setWorking(applyHeld(working, { actionId: action.id, ids, pick }, mutate))
       setSel({})
       anchor.current = null
       setPending({
@@ -811,6 +859,7 @@ export function Table({
     <div
       className="tb"
       ref={box}
+      data-lines={lines === 1 ? undefined : String(lines)}
       data-tbuild={building ? '1' : undefined}
       style={{ '--tb-grid': grid } as CSSProperties}
     >
@@ -878,6 +927,7 @@ export function Table({
       ) : null}
 
       <div className="tb-head" ref={headRef} role="row">
+        {mark ? <span /> : null}
         {selectable ? (
           <Checkbox
             checked={allOn}
@@ -944,7 +994,7 @@ export function Table({
             className="tb-beam"
             data-tbeam=""
             aria-hidden="true"
-            style={{ '--tb-run': view.length * ROW_H + 'px' } as CSSProperties}
+            style={{ '--tb-run': view.length * RH + 'px' } as CSSProperties}
           />
         ) : null}
 
@@ -958,6 +1008,7 @@ export function Table({
               <span className="tb-draft-edge" />
               <span className="tb-draft-sweep" />
               <span className="tb-draft-underline" />
+              {mark ? <span /> : null}
               {selectable ? <span /> : null}
               {shown.map(({ c }, ci) => {
                 if (ci === 0) {
@@ -1092,6 +1143,7 @@ export function Table({
                       onMouseLeave={() => setHov((k) => (k === key(o) ? null : k))}
                       onClick={() => commitDraft(o)}
                     >
+                      {mark ? <span /> : null}
                       {selectable ? <span /> : null}
                       {shown.map(({ c }, ci) => {
                         if (ci === 0) {
@@ -1166,6 +1218,9 @@ export function Table({
               // checkbox's alone, which stops its own click below.
               onClick={(e) => (onRowOpen ? onRowOpen(r) : selectable && toggle(r.id, e.shiftKey))}
             >
+              {mark ? (
+                <span className="tb-mark" data-on={mark(r) || undefined} aria-hidden="true" />
+              ) : null}
               {selectable ? (
                 <Checkbox
                   checked={on}
@@ -1235,12 +1290,12 @@ export function Table({
           hole. */}
       {drafting ? (
         size ? (
-          <div className="tb-fill" style={{ height: Math.max(0, (size - draftCost) * ROW_H) }} />
+          <div className="tb-fill" style={{ height: Math.max(0, (size - draftCost) * RH) }} />
         ) : null
       ) : size && view.length < Math.min(size, sorted.length) ? (
         <div
           className="tb-fill"
-          style={{ height: (Math.min(size, sorted.length) - view.length) * ROW_H }}
+          style={{ height: (Math.min(size, sorted.length) - view.length) * RH }}
         />
       ) : null}
 

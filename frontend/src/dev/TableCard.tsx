@@ -30,6 +30,31 @@ const MEMBERS: TableRow[] = NAMES.map(([name, email, role, tasks], i) => ({
   lastMin: 40 + i * 260,
 }))
 
+// Rows with a line of detail, read and unread: the notifications page's shape.
+const NOTES: TableRow[] = [
+  {
+    id: 'n1',
+    title: 'Linear team SEC can’t be read',
+    body: 'The organization’s Linear connection can’t read this team, so Triage Factory isn’t seeing changes to its issues or finding new ones. Share the team with the Linear app on its page in Linear, or connect an API key whose owner is a member.',
+    unread: true,
+    pri: 'HIGH',
+  },
+  {
+    id: 'n2',
+    title: 'CI check failed: acme/api#4201',
+    body: 'Retry the webhook on a 502\nFrom your rule "CI failed on my PR".',
+    unread: false,
+    pri: 'HIGH',
+  },
+  {
+    id: 'n3',
+    title: 'Review requested: acme/api#4188',
+    body: 'Cache the org’s model catalog\nFrom the team rule "Reviews for Infra".',
+    unread: true,
+    pri: 'LOW',
+  },
+]
+
 const CANDIDATES = [
   { id: 'c1', name: 'Cassidy Bloom' },
   { id: 'c2', name: 'Casper Weiss' },
@@ -158,6 +183,37 @@ export function TableCard() {
             return row
           }}
           onCommit={(id, ids) => setLog(id + ' committed for ' + ids.length)}
+        />
+      </div>
+
+      <p className="gal-note">
+        <code>lines=&quot;wrap&quot;</code> and <code>mark</code>: the name column stacks a line of
+        detail that wraps to its own height, the other cells center on the row, and a leading column
+        dots the unread rows without moving the columns of the read ones.
+      </p>
+      <div className="gal-tablemount">
+        <Table
+          label="SENT TO YOU"
+          lines="wrap"
+          mark={(r) => r.unread}
+          selectable={false}
+          columns={[
+            { key: 'pri', label: 'PRIORITY', width: '84px' },
+            {
+              key: 'title',
+              label: 'NOTIFICATION',
+              floor: 320,
+              render: (r) => (
+                <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+                  <span style={{ font: '600 12.5px/1.5 var(--font-sans)' }}>{r.title}</span>
+                  <span className="tb-line2" style={{ whiteSpace: 'pre-line' }}>
+                    {r.body}
+                  </span>
+                </span>
+              ),
+            },
+          ]}
+          rows={NOTES}
         />
       </div>
 

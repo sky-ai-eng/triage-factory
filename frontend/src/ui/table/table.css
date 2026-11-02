@@ -852,3 +852,47 @@
   z-index: 2;
   animation: tb-beam 0.46s cubic-bezier(0.33, 0, 0.2, 1) 0.17s both;
 }
+
+/* lines: taller rows whose name column carries a line of detail. The row
+   already centers its cells, so only the name column, the tallest, stacks. */
+.tb[data-lines='2'] .tb-row {
+  height: 58px;
+}
+.tb[data-lines='wrap'] .tb-row {
+  height: auto;
+  min-height: 58px;
+  padding-top: 11px;
+  padding-bottom: 11px;
+}
+/* The caller's detail line. One line under lines=2 (clipped); full text under 'wrap'. */
+.tb-line2 {
+  display: block;
+  margin-top: 3px;
+  font: var(--font-weight-regular) 12px / 1.5 var(--font-sans);
+  color: var(--color-ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tb[data-lines='wrap'] .tb-line2 {
+  white-space: normal;
+  overflow: visible;
+  text-wrap: pretty;
+  max-width: 88ch;
+}
+
+/* mark: a leading 14px column. The dot sits at its left, so the track's right
+   side and the grid gap give it room before the checkbox. */
+.tb-mark {
+  display: flex;
+  align-items: center;
+  align-self: center;
+  height: 100%;
+}
+.tb-mark[data-on]::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--color-ink-1);
+}
