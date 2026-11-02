@@ -738,6 +738,253 @@ func TestCompactionReentry_AFailedWarmAttemptIsNotRepeated(t *testing.T) {
 	}
 }
 
+// TestUncommittedWarmSummary_Shapes pins which transcript tails read as a warm
+// summary that was persisted and never committed: the reply immediately after
+// its request, with only queued input around it and only stop-notes after it.
+func TestUncommittedWarmSummary_Shapes(t *testing.T) {
+	request := func() domain.Message {
+		return domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionCompactionRequest, Content: warmCompactionRequest}
+	}
+	reply := func() domain.Message {
+		return domain.Message{Role: "assistant", Content: canonicalCompactionArtifact("thinking it through", "the summary")}
+	}
+	stopNote := func() domain.Message {
+		return domain.Message{Role: "user", Subtype: domain.MessageSubtypeStopNote, Content: "Stopped by a person."}
+	}
+	// Every case opens on the mission and a worked turn, so a shape is read
+	// off the tail of a real-looking transcript rather than an empty one.
+	transcript := func(tail ...domain.Message) []domain.Message {
+		rows := []domain.Message{
+			{Role: "user", Content: "the mission"},
+			usedAssistant("worked a lot", overThreshold, time.Now().UTC()),
+		}
+		return append(rows, tail...)
+	}
+	withCalls := reply()
+	withCalls.ToolCalls = []domain.ToolCall{{ID: "call-1", Name: "bash", Input: map[string]any{"cmd": "ls"}}}
+
+	accepted := map[string][]domain.Message{
+		"request, reply": transcript(request(), reply()),
+		"request, queued, reply, queued, queued": transcript(
+			request(), pendingUser("arrived mid-call"), reply(), pendingUser("after"), pendingUser("and after"),
+		),
+		"request, reply, stop-note":            transcript(request(), reply(), stopNote()),
+		"request, reply, stop-note, stop-note": transcript(request(), reply(), stopNote(), stopNote()),
+	}
+	for name, rows := range accepted {
+		t.Run("accepts "+name, func(t *testing.T) {
+			summary, ok := uncommittedWarmSummary(rows)
+			if !ok || summary != "the summary" {
+				t.Fatalf("uncommittedWarmSummary = (%q, %v), want (%q, true)", summary, ok, "the summary")
+			}
+		})
+	}
+
+	rejected := map[string][]domain.Message{
+		"an empty transcript":      nil,
+		"a request with no reply":  transcript(request()),
+		"a reply with tool calls":  transcript(request(), withCalls),
+		"a reply with no summary":  transcript(request(), domain.Message{Role: "assistant", Content: "I will keep working instead."}),
+		"a follow-up after it":     transcript(request(), reply(), domain.Message{Role: "user", Content: "and another thing"}),
+		"a summary not asked for":  transcript(domain.Message{Role: "user", Content: "please summarize"}, reply()),
+		"a stop-note before reply": transcript(request(), stopNote(), reply()),
+	}
+	for name, rows := range rejected {
+		t.Run("rejects "+name, func(t *testing.T) {
+			if summary, ok := uncommittedWarmSummary(rows); ok {
+				t.Fatalf("uncommittedWarmSummary = (%q, true), want no persisted summary", summary)
+			}
+		})
+	}
+}
+
+// TestCompactionReentry_PersistedSummaryIsCommittedWithoutACall: a warm reply
+// that was persisted and priced, with the commit that would have folded it in
+// never landing. The next engagement commits that summary at claim start, on a
+// live cache or a cold one and with or without a stop's note after it, and
+// makes no summarize call of its own.
+func TestCompactionReentry_PersistedSummaryIsCommittedWithoutACall(t *testing.T) {
+	recent, old := time.Now().UTC(), time.Now().UTC().Add(-time.Hour)
+	cases := map[string]struct {
+		at       time.Time
+		stopNote bool
+	}{
+		"warm":                            {recent, false},
+		"cold":                            {old, false},
+		"warm, stopped during the commit": {recent, true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			replyTokens, replyCost := overThreshold, 0.123
+			seed := []domain.Message{
+				{Role: "user", Content: "the mission", CreatedAt: tc.at},
+				usedAssistant("worked a lot", overThreshold, tc.at),
+				{Role: "user", Subtype: domain.MessageSubtypeInjectionCompactionRequest, Content: warmCompactionRequest, CreatedAt: tc.at},
+				{
+					Role:        "assistant",
+					Content:     canonicalCompactionArtifact("thinking it through", "the persisted summary"),
+					InputTokens: &replyTokens, CostUSD: &replyCost, CreatedAt: tc.at,
+				},
+			}
+			if tc.stopNote {
+				seed = append(seed, domain.Message{Role: "user", Subtype: domain.MessageSubtypeStopNote, Content: "Stopped by a person.", CreatedAt: tc.at})
+			}
+			seed = append(seed, pendingUser("go on"))
+			tr := newMemTranscript(seed...)
+			seeded := len(tr.snapshot())
+			provider := &scriptedProvider{turns: []scriptedTurn{
+				{text: "done", usage: inference.Usage{PromptTokens: 2000, OutputTokens: 300}},
+			}}
+
+			result := newTestEngine(tr, provider, newScriptedToolHost()).Run(context.Background(), testParams())
+			if result.Kind != ResultConcluded {
+				t.Fatalf("result = %+v, want concluded", result)
+			}
+
+			if len(provider.requests) != 1 {
+				t.Fatalf("provider calls = %d, want the working call alone", len(provider.requests))
+			}
+			if got := provider.requests[0].SystemPrompt; got != testParams().SystemPrompt {
+				t.Fatalf("the one call's system prompt = %.40q..., want the working call's", got)
+			}
+
+			resultRow := tr.find(func(m domain.Message) bool { return m.Subtype == domain.MessageSubtypeInjectionCompactionResult })
+			if resultRow == nil {
+				t.Fatal("no result row: the persisted summary was not committed")
+			}
+			if want := compactionPreamble + "\n\n<summary>\nthe persisted summary\n</summary>"; resultRow.Content != want {
+				t.Errorf("result row content = %q, want %q", resultRow.Content, want)
+			}
+
+			spanned := []func(domain.Message) bool{
+				func(m domain.Message) bool { return m.Content == "the mission" },
+				func(m domain.Message) bool { return m.Content == "worked a lot" },
+				func(m domain.Message) bool { return m.Subtype == domain.MessageSubtypeInjectionCompactionRequest },
+				func(m domain.Message) bool {
+					return strings.Contains(m.Content, "the persisted summary") && m.Role == "assistant"
+				},
+			}
+			if tc.stopNote {
+				spanned = append(spanned, func(m domain.Message) bool { return m.Subtype == domain.MessageSubtypeStopNote })
+			}
+			for i, pred := range spanned {
+				if m := tr.find(pred); m == nil || m.WindowState != domain.MessageWindowInactive {
+					t.Errorf("spanned row %d = %+v, want inactive after the commit", i, m)
+				}
+			}
+
+			queued := tr.find(func(m domain.Message) bool { return m.Content == "go on" })
+			if queued == nil || !isDelivered(*queued) || queued.Seq == nil || *queued.Seq <= float64(resultRow.ID) {
+				t.Fatalf("queued row = %+v, want delivered with seq after the result row %d", queued, resultRow.ID)
+			}
+
+			requests := 0
+			for _, m := range tr.snapshot() {
+				if m.Subtype == domain.MessageSubtypeInjectionCompactionRequest {
+					requests++
+				}
+			}
+			if requests != 1 {
+				t.Errorf("request rows = %d, want the one the earlier engagement wrote", requests)
+			}
+
+			reply := tr.find(func(m domain.Message) bool {
+				return m.Role == "assistant" && strings.Contains(m.Content, "the persisted summary")
+			})
+			if reply == nil || reply.CostUSD == nil || *reply.CostUSD != replyCost {
+				t.Errorf("reply = %+v, want its cost %v unchanged", reply, replyCost)
+			}
+			if want := tr.ledgerSpend(seeded); math.Abs(result.CostUSD-want) > 1e-12 {
+				t.Errorf("CostUSD = %v, want %v, the sum of this engagement's rows", result.CostUSD, want)
+			}
+		})
+	}
+}
+
+// TestCompactionReentry_ACommitCancelledMidwayIsCommittedByTheNextEngagement:
+// engagement 1's warm attempt succeeds and its reply is persisted, and the
+// commit is cancelled from inside, the way a shutdown or a stop reaches it.
+// Engagement 2 claims while the cache is still live and commits that summary
+// rather than asking for a second one.
+func TestCompactionReentry_ACommitCancelledMidwayIsCommittedByTheNextEngagement(t *testing.T) {
+	tr := newMemTranscript(
+		domain.Message{Role: "user", Content: "the mission"},
+		usedAssistant("worked a lot", overThreshold, time.Now().UTC()),
+	)
+	seeded := len(tr.snapshot())
+	isRequest := func(m domain.Message) bool { return m.Subtype == domain.MessageSubtypeInjectionCompactionRequest }
+	isResult := func(m domain.Message) bool { return m.Subtype == domain.MessageSubtypeInjectionCompactionResult }
+	isReply := func(m domain.Message) bool {
+		return m.Role == "assistant" && strings.Contains(m.Content, "first summary")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// The summarize call's prompt is the whole full window, so the reply it
+	// leaves reads as over the threshold: the trip is what engagement 2 used
+	// to reach a second warm attempt through.
+	warm := summaryReply("first summary")
+	warm.usage = inference.Usage{PromptTokens: overThreshold, OutputTokens: 500, CacheReadTokens: overThreshold - 20000, CacheCreationTokens: 10000}
+	first := &scriptedProvider{turns: []scriptedTurn{warm}}
+	tr.failCompact = func() error {
+		cancel()
+		return context.Canceled
+	}
+
+	r1 := newTestEngine(tr, first, newScriptedToolHost()).Run(ctx, testParams())
+	if r1.Kind != ResultCancelled {
+		t.Fatalf("engagement 1 = %v (err %v), want ResultCancelled", r1.Kind, r1.Err)
+	}
+	persisted := tr.find(isReply)
+	if persisted == nil || persisted.WindowState == domain.MessageWindowInactive || persisted.CostUSD == nil {
+		t.Fatalf("reply after engagement 1 = %+v, want persisted, priced and still active", persisted)
+	}
+	if m := tr.find(isResult); m != nil {
+		t.Fatalf("result row after engagement 1 = %+v, want none: the commit did not land", m)
+	}
+	if math.Abs(r1.CostUSD-*persisted.CostUSD) > 1e-12 {
+		t.Errorf("engagement 1 CostUSD = %v, want its reply's %v", r1.CostUSD, *persisted.CostUSD)
+	}
+
+	rows, err := tr.ListForAssembly(context.Background(), "org", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !warmCacheLive(rows) || !newTestEngine(tr, nil, nil).compactionDue(testParams(), rows) {
+		t.Fatal("engagement 2 must claim on a live cache with compaction due, the re-entry that used to make a second warm attempt")
+	}
+	second := &scriptedProvider{turns: []scriptedTurn{
+		{text: "done", usage: inference.Usage{PromptTokens: 2000, OutputTokens: 300}},
+	}}
+	r2 := newTestEngine(tr, second, newScriptedToolHost()).Run(context.Background(), testParams())
+	if r2.Kind != ResultConcluded {
+		t.Fatalf("engagement 2 = %+v, want concluded", r2)
+	}
+
+	if len(second.requests) != 1 {
+		t.Fatalf("engagement 2 provider calls = %d, want the working call alone", len(second.requests))
+	}
+	resultRow := tr.find(isResult)
+	if resultRow == nil || !strings.Contains(resultRow.Content, "first summary") {
+		t.Fatalf("result row = %+v, want engagement 1's summary", resultRow)
+	}
+	requests := 0
+	for _, m := range tr.snapshot() {
+		if isRequest(m) {
+			requests++
+		}
+	}
+	if requests != 1 {
+		t.Errorf("request rows = %d, want engagement 1's alone", requests)
+	}
+	if reply := tr.find(isReply); reply == nil || reply.WindowState != domain.MessageWindowInactive {
+		t.Errorf("reply after engagement 2 = %+v, want folded into the span", reply)
+	}
+	if want, got := r1.CostUSD+r2.CostUSD, tr.ledgerSpend(seeded); math.Abs(got-want) > 1e-12 {
+		t.Errorf("ledger = %v, want %v, the sum of both engagements' spend", got, want)
+	}
+}
+
 // TestIsHumanInput_StopNoteIsNotHuman pins the vocabulary invariant for the
 // stop-note row, which has two producers: the loop's own park decisions and
 // a user pressing stop. Both write a role=user row, and neither is somebody

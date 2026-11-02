@@ -117,10 +117,24 @@ func warmCacheLive(rows []domain.Message) bool {
 // previous engagement left, and queued input stays queued through it. A
 // warm-cache resume (a fast retry) defers to the loop's own trip instead of
 // paying a full-price re-read the warm path exists to avoid.
+//
+// First, it commits a warm summary an earlier engagement persisted but did
+// not commit. That needs no provider call, so it runs ahead of the threshold
+// and the warmth check, whatever the model or the cache. Claim start is the
+// only place the state can be met: every error out of compactWarm ends the
+// engagement, so only a new engagement finds it.
 func (e *Engine) compactOnResume(ctx context.Context, params Params, spent *spend) error {
 	rows, err := e.Transcript.ListForAssembly(ctx, params.OrgID, params.ConversationID)
 	if err != nil {
 		return err
+	}
+	if summary, ok := uncommittedWarmSummary(rows); ok {
+		// The reply is already a row, priced and counted by the engagement
+		// that persisted it, so nothing is added to spent and the reply is
+		// passed as nil: the span flips it inactive with everything else.
+		e.info("committing a compaction summary an earlier engagement persisted",
+			"conversation", params.ConversationID)
+		return e.commitCompaction(ctx, params, nil, summary, compactionSpan(rows))
 	}
 	if !e.compactionDue(params, rows) {
 		return nil
@@ -372,7 +386,7 @@ func compactionSpan(rows []domain.Message) []int {
 
 // unansweredCompactionRequest finds a delivered compaction request with no
 // assistant reply after it — the derived "compaction in flight" state a
-// crash between the ask and the commit leaves behind. The transcript is
+// crash between the ask and its reply leaves behind. The transcript is
 // the state; nothing remembers it.
 func unansweredCompactionRequest(rows []domain.Message) *domain.Message {
 	for i := len(rows) - 1; i >= 0; i-- {
@@ -386,6 +400,66 @@ func unansweredCompactionRequest(rows []domain.Message) *domain.Message {
 		}
 	}
 	return nil
+}
+
+// uncommittedWarmSummary finds a warm compaction reply that was persisted and
+// never committed — the state a commit that did not land leaves behind (the
+// claim fence refusing it, a shutdown or a stop cancelling it, the executor
+// dying between the two writes) — and returns the summary it carries.
+//
+// Walking from the end, in assembly order: undelivered rows are skipped, since
+// pending input survives the commit as queued input on every compaction path,
+// and so are delivered stop-notes, the only delivered rows that can land after
+// the reply before a new engagement reads it. The first other row must be an assistant row with no tool calls and a parseable
+// summary, and the delivered row before it, with only undelivered rows
+// between, must be a compaction request.
+//
+// The request immediately before the reply is what separates a warm reply
+// from an ordinary turn that happens to contain summary tags. The one other
+// call that can answer a request directly is a working call made on a
+// standing request with nothing queued, and buildRequest builds that over the
+// same rows a warm attempt would use, so it is a warm attempt and committing
+// its summary is correct.
+// Stop-notes are not skipped between the request and the reply: one
+// engagement writes both around one call, and a stop during that call
+// persists no reply. Any other shape is not this state, and the caller
+// re-summarizes, which is the safe answer when the summary might not cover
+// what follows it.
+//
+// The summary comes from the stored content. sanitizeForStore removes only
+// NUL bytes, which composeResultRow removes anyway, so the result row is the
+// one the original commit would have written.
+func uncommittedWarmSummary(rows []domain.Message) (summary string, ok bool) {
+	i := len(rows) - 1
+	for ; i >= 0; i-- {
+		r := rows[i]
+		if !isDelivered(r) || r.Subtype == domain.MessageSubtypeStopNote {
+			continue
+		}
+		break
+	}
+	if i < 0 {
+		return "", false
+	}
+	reply := rows[i]
+	if reply.Role != "assistant" || len(reply.ToolCalls) > 0 {
+		return "", false
+	}
+	summary, ok = extractSummary(reply.Content)
+	if !ok {
+		return "", false
+	}
+	for i--; i >= 0; i-- {
+		r := rows[i]
+		if !isDelivered(r) {
+			continue
+		}
+		if r.Role == "user" && r.Subtype == domain.MessageSubtypeInjectionCompactionRequest {
+			return summary, true
+		}
+		return "", false
+	}
+	return "", false
 }
 
 // warmAttemptSettled reports whether a compaction request already carries a
