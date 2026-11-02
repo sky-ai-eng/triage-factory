@@ -274,9 +274,12 @@ function ArtifactRow({
           <div className="mt-0.5 flex items-baseline gap-1.5 font-mono text-label text-ink-3">
             <span className="shrink-0">{meta.label}</span>
             <span aria-hidden>·</span>
+            {/* The repository gives up its width before the action does: the
+                rail is too narrow for both, and the action is what the line
+                reports. */}
             {repository && (
               <>
-                <span className="min-w-0 truncate">{repository}</span>
+                <span className="min-w-0 shrink-[100] truncate">{repository}</span>
                 <span aria-hidden>·</span>
               </>
             )}
