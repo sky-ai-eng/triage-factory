@@ -86,14 +86,17 @@ func sqliteTaskTeamFilter(teamIDs []string, args []any) (string, []any) {
 // sqliteTaskRuleOrderJoin attaches each task's matching event_handler rule
 // sort_order (the lowest, when several rules cover the event type) so the list
 // ordering can put "CI is broken" above "someone asked for a review" without
-// the caller knowing the rule set. LEFT JOIN: a task whose event type no
-// live, enabled rule covers still lists, ordered by the COALESCE default. The
-// derived table is org-scoped so another org's rules can't influence ordering.
+// the caller knowing the rule set. Only rules that would match an event count:
+// live, enabled, and on a team that isn't archived. LEFT JOIN: a task whose
+// event type no such rule covers still lists, ordered by the COALESCE default.
+// The derived table is org-scoped so another org's rules can't influence
+// ordering.
 const sqliteTaskRuleOrderJoin = `
 	LEFT JOIN (
 		SELECT org_id, event_type, MIN(sort_order) AS sort_order
 		FROM event_handlers
 		WHERE enabled = 1 AND kind = 'rule' AND deleted_at IS NULL
+		  AND NOT EXISTS (SELECT 1 FROM teams tm WHERE tm.id = event_handlers.team_id AND tm.deleted_at IS NOT NULL)
 		GROUP BY org_id, event_type
 	) tr ON t.event_type = tr.event_type AND t.org_id = tr.org_id`
 

@@ -73,23 +73,49 @@ func TestTaskStore_SQLite(t *testing.T) {
 }
 
 // TestTaskRuleOrder_SQLite runs the task-list rule-order suite against the
-// SQLite impl.
+// SQLite impl. Local mode never archives its team, but the read answers the
+// same, so a second team and its rule are seeded raw.
 func TestTaskRuleOrder_SQLite(t *testing.T) {
 	dbtest.RunTaskRuleOrderConformance(t, func(t *testing.T) dbtest.TaskRuleOrderFixture {
 		t.Helper()
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
+		orgID := runmode.LocalDefaultOrgID
 		return dbtest.TaskRuleOrderFixture{
 			Tasks:    stores.Tasks,
 			Handlers: stores.EventHandlers,
-			OrgID:    runmode.LocalDefaultOrgID,
+			Teams:    stores.Teams,
+			OrgID:    orgID,
 			TeamID:   runmode.LocalDefaultTeamID,
 			SeedTask: func(t *testing.T, eventType string) string {
 				t.Helper()
 				_, _, taskID := seedSQLiteTaskChainOfType(t, conn, "rule-order", eventType)
 				return taskID
 			},
-			HandlerID: shippedHandlerIDBySlug(conn, runmode.LocalDefaultOrgID),
+			HandlerID: shippedHandlerIDBySlug(conn, orgID),
+			SeedTeam: func(t *testing.T) string {
+				t.Helper()
+				id := uuid.New().String()
+				if _, err := conn.ExecContext(t.Context(),
+					`INSERT INTO teams (id, org_id, slug, name) VALUES (?, ?, ?, ?)`, id, orgID, "order-"+id[:8], "Order",
+				); err != nil {
+					t.Fatalf("seed team: %v", err)
+				}
+				return id
+			},
+			SeedRule: func(t *testing.T, teamID, eventType string, sortOrder int) string {
+				t.Helper()
+				id := uuid.New().String()
+				if _, err := conn.ExecContext(t.Context(), `
+					INSERT INTO event_handlers
+						(id, org_id, team_id, creator_user_id, kind, event_type, enabled, source,
+						 name, default_priority, sort_order, created_at, updated_at)
+					VALUES (?, ?, ?, ?, 'rule', ?, 1, 'user', ?, 0.5, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+				`, id, orgID, teamID, runmode.LocalDefaultUserID, eventType, "rule "+id[:8], sortOrder); err != nil {
+					t.Fatalf("seed rule on team %s: %v", teamID, err)
+				}
+				return id
+			},
 		}
 	})
 }

@@ -78,6 +78,7 @@ func TestTaskRuleOrder_Postgres(t *testing.T) {
 		return dbtest.TaskRuleOrderFixture{
 			Tasks:    stores.Tasks,
 			Handlers: stores.EventHandlers,
+			Teams:    stores.Teams,
 			OrgID:    orgID,
 			TeamID:   firstTeamForOrg(t, h, orgID),
 			SeedTask: func(t *testing.T, eventType string) string {
@@ -86,6 +87,23 @@ func TestTaskRuleOrder_Postgres(t *testing.T) {
 				return taskID
 			},
 			HandlerID: shippedHandlerIDBySlug(h, orgID),
+			SeedTeam: func(t *testing.T) string {
+				t.Helper()
+				return pgtest.SeedTeam(t, h, orgID, "order-"+uuid.New().String()[:8])
+			},
+			SeedRule: func(t *testing.T, teamID, eventType string, sortOrder int) string {
+				t.Helper()
+				priority := 0.5
+				rule, err := stores.EventHandlers.Create(t.Context(), orgID, teamID, domain.EventHandler{
+					ID: uuid.New().String(), Kind: domain.EventHandlerKindRule,
+					EventType: eventType, Enabled: true,
+					Name: "rule " + teamID[:8], DefaultPriority: &priority, SortOrder: &sortOrder,
+				})
+				if err != nil {
+					t.Fatalf("seed rule on team %s: %v", teamID, err)
+				}
+				return rule.ID
+			},
 		}
 	})
 }
