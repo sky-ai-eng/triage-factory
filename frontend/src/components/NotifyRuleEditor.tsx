@@ -206,114 +206,116 @@ export default function NotifyRuleEditor({
                 </button>
               </div>
 
-              <fieldset
-                disabled={!writable}
-                className="flex-1 overflow-y-auto px-6 py-4 space-y-5 min-h-0"
-              >
-                {!isEdit && <TeamPicker value={team} onChange={setTeam} label="Team" />}
-                <div>
-                  <label
-                    htmlFor="notify-event-type"
-                    className="block text-ui font-medium text-ink-2 mb-1.5"
-                  >
-                    Event type
-                  </label>
-                  <select
-                    id="notify-event-type"
-                    value={eventType}
-                    onChange={(e) => {
-                      setEventType(e.target.value)
-                      setPredicate({})
-                    }}
-                    disabled={isEdit}
-                    className={fieldClass}
-                  >
-                    <option value="">Select event type…</option>
-                    {eventTypes
-                      .filter(
-                        (et) =>
-                          et.id === eventType ||
-                          (NOTIFY_SOURCES.includes(et.source) && canProduce(et.source)),
-                      )
-                      .map((et) => (
-                        <option key={et.id} value={et.id}>
-                          {et.label} ({et.id})
-                        </option>
-                      ))}
-                  </select>
-                  <p className="text-reported text-ink-3 mt-1.5">
-                    Applies to events from now on. Nothing that already happened sends a
-                    notification.
-                  </p>
-                </div>
-
-                <div>
-                  <label
-                    htmlFor="notify-name"
-                    className="block text-ui font-medium text-ink-2 mb-1.5"
-                  >
-                    Name
-                  </label>
-                  <input
-                    id="notify-name"
-                    type="text"
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    placeholder="e.g. CI failed on my PR"
-                    className={fieldClass}
-                  />
-                </div>
-
-                <div>
-                  <span className="block text-ui font-medium text-ink-2 mb-1.5">Tell</span>
-                  <div className="space-y-1.5">
-                    <label className="flex items-center gap-2 text-body text-ink-2 cursor-pointer">
-                      <input
-                        type="radio"
-                        name="notify-audience"
-                        checked={chosenAudience === 'creator'}
-                        onChange={() => setAudience('creator')}
-                      />
-                      {othersRule ? 'Only the person who made it' : 'Just me'}
-                    </label>
-                    <label className="flex items-center gap-2 text-body text-ink-2 cursor-pointer">
-                      <input
-                        type="radio"
-                        name="notify-audience"
-                        checked={chosenAudience === 'team'}
-                        disabled={!teamAdmin}
-                        onChange={() => setAudience('team')}
-                      />
-                      Everyone on the team
-                    </label>
-                  </div>
-                  {!teamAdmin && (
-                    <p className="text-reported text-ink-3 mt-1.5">
-                      Only a team admin can make a rule that notifies the whole team.
-                    </p>
-                  )}
-                </div>
-
-                {eventType && (
+              {/* The div scrolls and the fieldset only disables: a fieldset as
+                  the scroll container paints its content past its own box,
+                  under the footer. */}
+              <div className="flex-1 overflow-y-auto px-6 py-4 min-h-0">
+                <fieldset disabled={!writable} className="min-w-0 space-y-5">
+                  {!isEdit && <TeamPicker value={team} onChange={setTeam} label="Team" />}
                   <div>
-                    <span className="block text-ui font-medium text-ink-2 mb-2">
-                      When (predicate filter)
-                    </span>
-                    <div className="bg-tint-2 rounded-lg border border-line-1 p-3">
-                      <PredicateEditor
-                        eventType={eventType}
-                        teamId={ruleTeam}
-                        value={predicate}
-                        onChange={setPredicate}
-                      />
-                    </div>
+                    <label
+                      htmlFor="notify-event-type"
+                      className="block text-ui font-medium text-ink-2 mb-1.5"
+                    >
+                      Event type
+                    </label>
+                    <select
+                      id="notify-event-type"
+                      value={eventType}
+                      onChange={(e) => {
+                        setEventType(e.target.value)
+                        setPredicate({})
+                      }}
+                      disabled={isEdit}
+                      className={fieldClass}
+                    >
+                      <option value="">Select event type…</option>
+                      {eventTypes
+                        .filter(
+                          (et) =>
+                            et.id === eventType ||
+                            (NOTIFY_SOURCES.includes(et.source) && canProduce(et.source)),
+                        )
+                        .map((et) => (
+                          <option key={et.id} value={et.id}>
+                            {et.label} ({et.id})
+                          </option>
+                        ))}
+                    </select>
                     <p className="text-reported text-ink-3 mt-1.5">
-                      Leave all fields on &ldquo;Any&rdquo; to be told about every event of this
-                      type on what the team tracks.
+                      Applies to events from now on. Nothing that already happened sends a
+                      notification.
                     </p>
                   </div>
-                )}
-              </fieldset>
+
+                  <div>
+                    <label
+                      htmlFor="notify-name"
+                      className="block text-ui font-medium text-ink-2 mb-1.5"
+                    >
+                      Name
+                    </label>
+                    <input
+                      id="notify-name"
+                      type="text"
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      placeholder="e.g. CI failed on my PR"
+                      className={fieldClass}
+                    />
+                  </div>
+
+                  <div>
+                    <span className="block text-ui font-medium text-ink-2 mb-1.5">Tell</span>
+                    <div className="space-y-1.5">
+                      <label className="flex items-center gap-2 text-body text-ink-2 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="notify-audience"
+                          checked={chosenAudience === 'creator'}
+                          onChange={() => setAudience('creator')}
+                        />
+                        {othersRule ? 'Only the person who made it' : 'Just me'}
+                      </label>
+                      <label className="flex items-center gap-2 text-body text-ink-2 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="notify-audience"
+                          checked={chosenAudience === 'team'}
+                          disabled={!teamAdmin}
+                          onChange={() => setAudience('team')}
+                        />
+                        Everyone on the team
+                      </label>
+                    </div>
+                    {!teamAdmin && (
+                      <p className="text-reported text-ink-3 mt-1.5">
+                        Only a team admin can make a rule that notifies the whole team.
+                      </p>
+                    )}
+                  </div>
+
+                  {eventType && (
+                    <div>
+                      <span className="block text-ui font-medium text-ink-2 mb-2">
+                        When (predicate filter)
+                      </span>
+                      <div className="bg-tint-2 rounded-lg border border-line-1 p-3">
+                        <PredicateEditor
+                          eventType={eventType}
+                          teamId={ruleTeam}
+                          value={predicate}
+                          onChange={setPredicate}
+                        />
+                      </div>
+                      <p className="text-reported text-ink-3 mt-1.5">
+                        Leave all fields on &ldquo;Any&rdquo; to be told about every event of this
+                        type on what the team tracks.
+                      </p>
+                    </div>
+                  )}
+                </fieldset>
+              </div>
 
               <div className="px-6 py-4 border-t border-line-1 flex items-center shrink-0">
                 {isEdit && writable && (

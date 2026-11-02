@@ -62,9 +62,10 @@ export function OrgBackgroundJobsModelStep({
       <div className="space-y-1.5">
         <h2 className="text-[19px] font-medium tracking-tight text-ink-1">Background jobs model</h2>
         <p className="text-[13px] leading-relaxed text-ink-3">
-          Scoring, project classification and repo profiling all run on this one model.
-          They&rsquo;re short, toolless calls, so background jobs can use any model — a cheap one is
-          usually the right answer. Without a model picked, these jobs don&rsquo;t run.
+          Scoring, repo profiling, and task memories all run on this one model. A task memory is
+          written for a conversation that ended without writing its own, and nothing new starts on
+          that task until it exists. These are short, toolless calls, so any model works, and a
+          cheap one is usually the right answer. Without a model picked, none of them run.
         </p>
       </div>
       <ModelPicker

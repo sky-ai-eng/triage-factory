@@ -190,7 +190,7 @@ Four gates enforce it, and they read one predicate — `eventsource.Disabled` (`
 
 ### The background-jobs model
 
-The two system jobs — scorer, repo profiler — run on one org-level setting, `org_settings.background_jobs_model`, a `internal/llm/modelcatalog` key. One knob for both: they are the same kind of work (short, toolless, no transcript) bought from the same budget. The picker is the whole catalog — the delegation gates (tool support, a 64k window) are about running an agent and do not narrow this.
+The three system jobs — scorer, repo profiler, memory provisioner — run on one org-level setting, `org_settings.background_jobs_model`, a `internal/llm/modelcatalog` key. One knob for all three: they are the same kind of work (short, toolless, no transcript) bought from the same budget. The picker is the whole catalog — the delegation gates (tool support, a 64k window) are about running an agent and do not narrow this.
 
 `systemllm.ModelForSettings` is the rule, `systemllm.NewModelFunc` the store-backed adapter for the job that holds no settings row (the profiler instead resolves from the read it already does for the clone protocol). It is resolved **once per cycle** and passed down to the batch seam, so a cycle spends on one model and `system_llm_runs` records it. Unset, not offered by this build, or served by a provider the org has not connected are all one answer — `ErrNoModel`, the cycle skips with a WARN naming the setting — because TF ships no fallback model and a substituted one would spend somebody's money on a model nobody chose.
 
