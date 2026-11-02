@@ -93,10 +93,8 @@ type ScoreStore interface {
 	//
 	// It reads past queued because a task can leave the queue before the
 	// next cycle reaches it (a delegation by hand, or a trigger firing
-	// first), and its card waits on the summary for as long as it is
-	// open. Scoring a task that isn't queued fires nothing: the re-derive
-	// plan matches handlers only for a queued task. A closed task (done
-	// or dismissed) is never scored.
+	// first), and it still needs a summary while it is open. A closed
+	// task has no use for one.
 	UnscoredTasks(ctx context.Context, orgID string) ([]domain.Task, error)
 }
 

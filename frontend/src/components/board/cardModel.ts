@@ -175,7 +175,6 @@ function eventOf(task: Task): { label: string; description: string; tone: EventT
   return { label: info.label, description: info.description, tone: eventTone(task.event_type) }
 }
 
-// The statuses the scorer reads. Done and dismissed are the closed ones.
 function isOpenTask(task: Task): boolean {
   return task.status === 'queued' || task.status === 'in_progress' || task.status === 'snoozed'
 }
