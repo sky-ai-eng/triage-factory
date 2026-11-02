@@ -142,7 +142,8 @@ export function deriveCard(
   return {
     lifecycle,
     summary,
-    summaryPending: !summary && task.scoring_status !== 'scored',
+    // A closed task is never scored, so it waits on no summary.
+    summaryPending: !summary && task.scoring_status !== 'scored' && isOpenTask(task),
     // The event is a fact about the TASK, not the run, so it survives a
     // requeue and it is on a done card too: a settled lane is read to find
     // what got handled, and "what happened" is half of that.
@@ -172,6 +173,10 @@ function eventOf(task: Task): { label: string; description: string; tone: EventT
   if (!task.event_type) return undefined
   const info = eventDisplay(task.event_type)
   return { label: info.label, description: info.description, tone: eventTone(task.event_type) }
+}
+
+function isOpenTask(task: Task): boolean {
+  return task.status === 'queued' || task.status === 'in_progress' || task.status === 'snoozed'
 }
 
 function lifecycleOf(task: Task, run: Conversation | undefined): Lifecycle {

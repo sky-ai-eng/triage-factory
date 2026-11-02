@@ -143,7 +143,7 @@ func (s *scoreStore) UnscoredTasks(ctx context.Context, orgID string) ([]domain.
 		SELECT `+pgTaskColumnsWithEntity+`
 		FROM tasks t
 		JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
-		WHERE t.org_id = $1 AND t.status = 'queued' AND t.scoring_status = 'pending'
+		WHERE t.org_id = $1 AND t.status IN ('queued', 'in_progress', 'snoozed') AND t.scoring_status = 'pending'
 		ORDER BY t.created_at DESC
 	`, orgID)
 	if err != nil {

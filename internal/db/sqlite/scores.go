@@ -168,7 +168,7 @@ func (s *scoreStore) UnscoredTasks(ctx context.Context, orgID string) ([]domain.
 		SELECT `+sqliteTaskColumnsWithEntity+`
 		FROM tasks t
 		JOIN entities e ON t.entity_id = e.id
-		WHERE t.status = 'queued' AND t.scoring_status = 'pending'
+		WHERE t.status IN ('queued', 'in_progress', 'snoozed') AND t.scoring_status = 'pending'
 		ORDER BY t.created_at DESC
 	`)
 	if err != nil {

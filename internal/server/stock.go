@@ -569,10 +569,8 @@ func (s *Server) applyStockAction(w http.ResponseWriter, r *http.Request, action
 	// Carry-over creates tasks without going through the poller, so no
 	// system:poll:completed fires to wake the scorer via its event-bus
 	// subscription. Poke it directly, but only for queued tasks — done
-	// creates no task at all, and claim creates a status='queued' task with
-	// the user claim col stamped, which UnscoredTasks picks up on its next
-	// natural cycle anyway (scoring a user-claimed task is harmless dormant
-	// work rather than a wrong-status skip).
+	// creates no task at all, and claim creates an in-progress task the user
+	// holds, which UnscoredTasks picks up on its next natural cycle anyway.
 	if action == stockActionQueue && applied > 0 && s.scorerTrigger != nil {
 		s.scorerTrigger(orgID)
 	}
