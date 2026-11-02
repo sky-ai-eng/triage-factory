@@ -585,7 +585,7 @@ type BlueprintStore interface {
 	//     holds it first commits before the archive's write lands, so the
 	//     listing finds its conversation, and a firing that waits for it reads
 	//     the team archived and writes nothing. A team id with no row takes
-	//     no lock and is left to step 4's foreign key.
+	//     no lock and is not refused here.
 	//  2. The blueprint_runs insert, which requires a trigger type: the arm
 	//     is chosen by that value, so an empty one selects the manual arm by
 	//     omission rather than by intent and impls reject it with
