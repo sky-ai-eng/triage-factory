@@ -1589,28 +1589,30 @@ func (s *taskStore) VisibilityTeams(ctx context.Context, orgID, taskID string) (
 	return out, rows.Err()
 }
 
-// sqliteActingTeamExpr derives the owning team for a user-initiated
-// claim: a team in the task's visibility set (task_teams) that the
-// claimer belongs to. It prefers the current owner team when the
-// claimer is a member of it — honoring "keep the owner when the choice
-// is ambiguous" — and otherwise picks the lowest-id qualifying team so
-// the result is deterministic. The existing owner team_id is kept only
-// when the intersection is empty. The result is always a team the
-// claimer belongs to, which the RLS update check requires. Bind order
-// is (taskID, userID).
+// sqliteClaimTeamExpr is the team a user-initiated claim lands the task on,
+// for every claim write and ResolveClaimTeam, mirroring pgClaimTeamExpr. task
+// and user are the numbered placeholders (?N) the calling statement binds the
+// task id and the claimant's user id to — numbered so one statement can carry
+// the expression in both its SET and its WHERE — and the statement's row must
+// be reachable as `tasks`.
 //
-// TODO(TFAC-1324): no team here is checked against teams.deleted_at, in this
-// expression or ResolveClaimTeam's copy, so a claim can
-// keep or move the task onto an archived team, and a delegation then leaves a
-// bot claim with no run.
-const sqliteActingTeamExpr = `COALESCE(
+// The claimant's active team in the task's visibility set comes first,
+// preferring the current owner and otherwise the lowest id so the result is
+// deterministic; with none, the current owner while it is active. An archived
+// team is neither chosen nor kept. NULL when neither applies; every write's
+// WHERE clause refuses that case.
+func sqliteClaimTeamExpr(task, user string) string {
+	return `COALESCE(
 		(SELECT tt.team_id
 		   FROM task_teams tt
 		   JOIN memberships m ON m.team_id = tt.team_id
-		  WHERE tt.task_id = ? AND m.user_id = ?
+		   JOIN teams tm ON tm.id = tt.team_id
+		  WHERE tt.task_id = ` + task + ` AND m.user_id = ` + user + `
+		    AND tm.deleted_at IS NULL
 		  ORDER BY (tt.team_id = tasks.team_id) DESC, tt.team_id ASC
 		  LIMIT 1),
-		team_id)`
+		(SELECT tm.id FROM teams tm WHERE tm.id = tasks.team_id AND tm.deleted_at IS NULL))`
+}
 
 // sqliteClaimStageExpr is the stage a claim lands on. Assigning a task — to a
 // person or to the bot — IS the stage marker, so every door that lands a claim
@@ -1711,18 +1713,20 @@ func (s *taskStore) HandoffAgentClaim(ctx context.Context, orgID, taskID, agentI
 	if userID == "" {
 		return db.HandoffRefused, fmt.Errorf("HandoffAgentClaim: empty userID")
 	}
+	claimTeam := sqliteClaimTeamExpr("?2", "?3")
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE tasks
-		   SET claimed_by_agent_id = ?,
+		   SET claimed_by_agent_id = ?1,
 		       claimed_by_user_id  = NULL,
-		       team_id = `+sqliteActingTeamExpr+`,
+		       team_id = `+claimTeam+`,
 		       snooze_until = NULL,
 		       status = `+sqliteClaimStageExpr+`
-		 WHERE id = ?
-		   AND (claimed_by_user_id  IS NULL OR claimed_by_user_id  = ?)
-		   AND (claimed_by_agent_id IS NULL OR claimed_by_agent_id != ?)
+		 WHERE id = ?2
+		   AND (claimed_by_user_id  IS NULL OR claimed_by_user_id  = ?3)
+		   AND (claimed_by_agent_id IS NULL OR claimed_by_agent_id != ?1)
 		   AND status NOT IN ('done', 'dismissed')
-	`, agentID, taskID, userID, taskID, userID, agentID)
+		   AND `+claimTeam+` IS NOT NULL
+	`, agentID, taskID, userID)
 	if err != nil {
 		return db.HandoffRefused, err
 	}
@@ -1736,13 +1740,16 @@ func (s *taskStore) HandoffAgentClaim(ctx context.Context, orgID, taskID, agentI
 	// 0 rows — re-read to figure out which guard tripped. Terminal-status
 	// check takes precedence over the no-op check so a sticky-bot-claim
 	// on a closed task doesn't fall through to HandoffNoOp and let the
-	// caller proceed past a row that mustn't be reopened.
-	var curUser, curAgent sql.NullString
+	// caller proceed past a row that mustn't be reopened; a missing team
+	// comes next, so a caller never proceeds to a run on a task it could
+	// not have handed off.
+	var curUser, curAgent, team sql.NullString
 	var curStatus string
-	err = s.q.QueryRowContext(ctx,
-		`SELECT claimed_by_user_id, claimed_by_agent_id, status FROM tasks WHERE id = ?`,
-		taskID,
-	).Scan(&curUser, &curAgent, &curStatus)
+	err = s.q.QueryRowContext(ctx, `
+		SELECT claimed_by_user_id, claimed_by_agent_id, status, `+sqliteClaimTeamExpr("?1", "?2")+`
+		  FROM tasks WHERE id = ?1`,
+		taskID, userID,
+	).Scan(&curUser, &curAgent, &curStatus, &team)
 	if err == sql.ErrNoRows {
 		return db.HandoffRefused, nil
 	}
@@ -1751,6 +1758,9 @@ func (s *taskStore) HandoffAgentClaim(ctx context.Context, orgID, taskID, agentI
 	}
 	if curStatus == "done" || curStatus == "dismissed" {
 		return db.HandoffRefused, nil
+	}
+	if !team.Valid {
+		return db.HandoffRefused, db.ErrNoActiveClaimTeam
 	}
 	if curAgent.Valid && curAgent.String == agentID {
 		return db.HandoffNoOp, nil
@@ -1762,29 +1772,40 @@ func (s *taskStore) ResolveClaimTeam(ctx context.Context, orgID, taskID, userID 
 	if err := assertLocalOrg(orgID); err != nil {
 		return "", err
 	}
-	// N=1: the local user isn't enrolled via memberships, so the
-	// visibility-set subquery is empty and this collapses to the task's
-	// current team_id — the sole local team in practice. Mirrors the
-	// Postgres derivation shape for interface parity.
-	var team string
-	err := s.q.QueryRowContext(ctx, `
-		SELECT COALESCE(
-		         (SELECT tt.team_id
-		            FROM task_teams tt
-		            JOIN memberships m ON m.team_id = tt.team_id
-		           WHERE tt.task_id = ? AND m.user_id = ?
-		           ORDER BY (tt.team_id = t.team_id) DESC, tt.team_id ASC LIMIT 1),
-		         t.team_id)
-		  FROM tasks t
-		 WHERE t.id = ?
-	`, taskID, userID, taskID).Scan(&team)
+	return resolveClaimTeam(ctx, s.q, taskID, userID)
+}
+
+// resolveClaimTeam reads the team a claim by userID would land the task on,
+// through the same expression the claim writes use. "" when the task is
+// missing, db.ErrNoActiveClaimTeam when the expression finds no team. The
+// local user is usually enrolled in no team, so in practice this is the
+// task's own team while it is active.
+func resolveClaimTeam(ctx context.Context, q queryer, taskID, userID string) (string, error) {
+	var team sql.NullString
+	err := q.QueryRowContext(ctx, `
+		SELECT `+sqliteClaimTeamExpr("?1", "?2")+`
+		  FROM tasks
+		 WHERE id = ?1
+	`, taskID, userID).Scan(&team)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
 	if err != nil {
 		return "", fmt.Errorf("resolve claim team: %w", err)
 	}
-	return team, nil
+	if !team.Valid {
+		return "", db.ErrNoActiveClaimTeam
+	}
+	return team.String, nil
+}
+
+// claimTeamRefusal is the follow-up a person-claim write runs when it matched
+// no row: db.ErrNoActiveClaimTeam when the reason is that the claim has no
+// team to land on, nil when it was one of the write's other guards (or the
+// task is gone), for which the caller answers ok=false.
+func claimTeamRefusal(ctx context.Context, q queryer, taskID, userID string) error {
+	_, err := resolveClaimTeam(ctx, q, taskID, userID)
+	return err
 }
 
 func (s *taskStore) TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, userID string) (bool, error) {
@@ -1794,19 +1815,21 @@ func (s *taskStore) TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, u
 	if userID == "" {
 		return false, fmt.Errorf("TakeoverClaimFromAgent: empty userID")
 	}
+	claimTeam := sqliteClaimTeamExpr("?2", "?1")
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE tasks
-		   SET claimed_by_user_id  = ?,
+		   SET claimed_by_user_id  = ?1,
 		       claimed_by_agent_id = NULL,
-		       team_id = `+sqliteActingTeamExpr+`,
+		       team_id = `+claimTeam+`,
 		       snooze_until = NULL,
 		       status = `+sqliteClaimStageExpr+`,
 		       source_status = `+sqliteSourceStatusExpr+`
-		 WHERE id = ?
+		 WHERE id = ?2
 		   AND claimed_by_agent_id IS NOT NULL
 		   AND claimed_by_user_id  IS NULL
 		   AND status NOT IN ('done', 'dismissed')
-	`, userID, taskID, userID, taskID)
+		   AND `+claimTeam+` IS NOT NULL
+	`, userID, taskID)
 	if err != nil {
 		return false, err
 	}
@@ -1814,7 +1837,10 @@ func (s *taskStore) TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, u
 	if err != nil {
 		return false, err
 	}
-	return n > 0, nil
+	if n == 0 {
+		return false, claimTeamRefusal(ctx, s.q, taskID, userID)
+	}
+	return true, nil
 }
 
 func (s *taskStore) ClaimQueuedForUser(ctx context.Context, orgID, taskID, userID string) (bool, error) {
@@ -1824,18 +1850,20 @@ func (s *taskStore) ClaimQueuedForUser(ctx context.Context, orgID, taskID, userI
 	if userID == "" {
 		return false, fmt.Errorf("ClaimQueuedForUser: empty userID is not a valid claimant")
 	}
+	claimTeam := sqliteClaimTeamExpr("?2", "?1")
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE tasks
-		   SET claimed_by_user_id = ?,
-		       team_id = `+sqliteActingTeamExpr+`,
+		   SET claimed_by_user_id = ?1,
+		       team_id = `+claimTeam+`,
 		       snooze_until = NULL,
 		       status = `+sqliteClaimStageExpr+`,
 		       source_status = `+sqliteSourceStatusExpr+`
-		 WHERE id = ?
+		 WHERE id = ?2
 		   AND status IN ('queued', 'snoozed')
 		   AND claimed_by_user_id  IS NULL
 		   AND claimed_by_agent_id IS NULL
-	`, userID, taskID, userID, taskID)
+		   AND `+claimTeam+` IS NOT NULL
+	`, userID, taskID)
 	if err != nil {
 		return false, err
 	}
@@ -1843,7 +1871,10 @@ func (s *taskStore) ClaimQueuedForUser(ctx context.Context, orgID, taskID, userI
 	if err != nil {
 		return false, err
 	}
-	return n > 0, nil
+	if n == 0 {
+		return false, claimTeamRefusal(ctx, s.q, taskID, userID)
+	}
+	return true, nil
 }
 
 func (s *taskStore) ReassignClaimToUser(ctx context.Context, orgID, taskID, fromUserID, toUserID string) (bool, error) {
@@ -1861,9 +1892,9 @@ func (s *taskStore) ReassignClaimToUserSystem(ctx context.Context, orgID, taskID
 // its (trivial, single-connection) ReassignClaimToUserSystem wrapper. Besides
 // the claim CAS every other claim mutation does, it bakes the target-team-
 // membership guard directly into the WHERE clause — an EXISTS against
-// memberships requiring toUserID to belong to a team associated with the
-// task (its task_teams visibility set or its current team_id) — atomically
-// with the CAS itself, mirroring the Postgres impl. Local mode is N=1 in
+// memberships requiring toUserID to belong to an active team associated
+// with the task (its task_teams visibility set or its current team_id) —
+// atomically with the CAS itself, mirroring the Postgres impl. Local mode is N=1 in
 // practice (no real cross-user memberships), but the guard keeps the SQLite
 // store conformant with the interface contract.
 func reassignClaimToUserSQLite(ctx context.Context, q queryer, taskID, fromUserID, toUserID string) (bool, error) {
@@ -1875,21 +1906,23 @@ func reassignClaimToUserSQLite(ctx context.Context, q queryer, taskID, fromUserI
 	}
 	res, err := q.ExecContext(ctx, `
 		UPDATE tasks
-		   SET claimed_by_user_id = ?,
-		       team_id = `+sqliteActingTeamExpr+`,
+		   SET claimed_by_user_id = ?1,
+		       team_id = `+sqliteClaimTeamExpr("?2", "?1")+`,
 		       snooze_until = NULL
-		 WHERE id = ?
-		   AND claimed_by_user_id = ?
+		 WHERE id = ?2
+		   AND claimed_by_user_id = ?3
 		   AND status NOT IN ('done', 'dismissed')
 		   AND EXISTS (
 		         SELECT 1 FROM memberships m2
-		          WHERE m2.user_id = ?
+		           JOIN teams tm2 ON tm2.id = m2.team_id
+		          WHERE m2.user_id = ?1
+		            AND tm2.deleted_at IS NULL
 		            AND (
-		              m2.team_id IN (SELECT team_id FROM task_teams WHERE task_id = ?)
-		              OR m2.team_id = (SELECT team_id FROM tasks WHERE id = ?)
+		              m2.team_id IN (SELECT team_id FROM task_teams WHERE task_id = ?2)
+		              OR m2.team_id = (SELECT team_id FROM tasks WHERE id = ?2)
 		            )
 		       )
-	`, toUserID, taskID, toUserID, taskID, fromUserID, toUserID, taskID, taskID)
+	`, toUserID, taskID, fromUserID)
 	if err != nil {
 		return false, err
 	}

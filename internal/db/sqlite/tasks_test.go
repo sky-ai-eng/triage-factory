@@ -72,6 +72,67 @@ func TestTaskStore_SQLite(t *testing.T) {
 	})
 }
 
+// TestTaskClaimArchivedTeam_SQLite runs the archived-team claim suite against
+// the SQLite impl. Local mode never archives its one team, but the claim doors
+// answer the same, so the second team, its archive and the memberships are
+// seeded raw: the local user in both teams, a holder in the archived one.
+func TestTaskClaimArchivedTeam_SQLite(t *testing.T) {
+	dbtest.RunClaimArchivedTeamConformance(t, func(t *testing.T) dbtest.ClaimArchivedTeamFixture {
+		t.Helper()
+		conn, err := sql.Open("sqlite", db.TestDSNMemory)
+		if err != nil {
+			t.Fatalf("open in-memory db: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		conn.SetMaxOpenConns(1)
+		conn.SetMaxIdleConns(1)
+		if err := db.BootstrapSchemaForTest(conn); err != nil {
+			t.Fatalf("bootstrap schema: %v", err)
+		}
+		exec := func(query string, args ...any) {
+			t.Helper()
+			if _, err := conn.Exec(query, args...); err != nil {
+				t.Fatalf("seed: %v\n%s", err, query)
+			}
+		}
+		exec(`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`,
+			runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID)
+		archived := uuid.New().String()
+		exec(`INSERT INTO teams (id, org_id, slug, name) VALUES (?, ?, 'archived', 'Archived')`,
+			archived, runmode.LocalDefaultOrgID)
+		holder := uuid.New().String()
+		exec(`INSERT INTO users (id, display_name) VALUES (?, 'Holder')`, holder)
+		exec(`INSERT OR IGNORE INTO memberships (user_id, team_id, role) VALUES (?, ?, 'member'), (?, ?, 'member'), (?, ?, 'member')`,
+			runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID,
+			runmode.LocalDefaultUserID, archived,
+			holder, archived)
+		exec(`UPDATE teams SET deleted_at = ? WHERE id = ?`, time.Now().UTC(), archived)
+
+		return dbtest.ClaimArchivedTeamFixture{
+			Store:          sqlitestore.New(conn).Tasks,
+			OrgID:          runmode.LocalDefaultOrgID,
+			AgentID:        runmode.LocalDefaultAgentID,
+			UserID:         runmode.LocalDefaultUserID,
+			HolderID:       holder,
+			ActiveTeamID:   runmode.LocalDefaultTeamID,
+			ArchivedTeamID: archived,
+			SeedTask: func(t *testing.T, ownerTeamID string, visibleTeams []string) string {
+				t.Helper()
+				_, _, taskID := seedSQLiteTaskChain(t, conn, "archived-claim")
+				exec(`UPDATE tasks SET team_id = ? WHERE id = ?`, ownerTeamID, taskID)
+				for _, team := range visibleTeams {
+					exec(`INSERT INTO task_teams (task_id, team_id) VALUES (?, ?)`, taskID, team)
+				}
+				return taskID
+			},
+			HoldForUser: func(t *testing.T, taskID, userID string) {
+				t.Helper()
+				exec(`UPDATE tasks SET claimed_by_user_id = ?, status = 'in_progress' WHERE id = ?`, userID, taskID)
+			},
+		}
+	})
+}
+
 // TestTaskRuleOrder_SQLite runs the task-list rule-order suite against the
 // SQLite impl. Local mode never archives its team, but the read answers the
 // same, so a second team and its rule are seeded raw.

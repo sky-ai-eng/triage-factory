@@ -1016,22 +1016,28 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	})
 
 	t.Run("ClaimedRequiresTeam_check_rejects_unowned_claim", func(t *testing.T) {
-		s, orgID, _, _, userID, seed, _ := mk(t)
+		s, orgID, _, agentID, userID, seed, _ := mk(t)
 		entityID, eventID, _ := seed(t, "claim-unowned")
 		task, _, err := s.FindOrCreate(ctx, orgID, "", entityID, domain.EventGitHubPRConflicts, "", eventID, 0.5)
 		if err != nil {
 			t.Fatalf("FindOrCreate(empty team): %v", err)
 		}
-		// ClaimQueuedForUser consolidates the owner from the claimer's team in
-		// the task's visibility set, and this task has none: the derivation
-		// keeps the NULL owner, and it is the claimed-⇒-owned CHECK, not the
-		// door, that refuses to land a claim on an unowned row.
-		_, err = s.ClaimQueuedForUser(ctx, orgID, task.ID, userID)
+		// A person's claim takes its team from the claimer's active team in
+		// the task's visibility set, else the active owner, and this task has
+		// neither: the door refuses before it writes.
+		ok, err := s.ClaimQueuedForUser(ctx, orgID, task.ID, userID)
+		if ok || !errors.Is(err, db.ErrNoActiveClaimTeam) {
+			t.Errorf("ClaimQueuedForUser on an unowned task = (%v, %v), want (false, ErrNoActiveClaimTeam)", ok, err)
+		}
+		// The bot's stamp with no acting team keeps the stored NULL owner, so
+		// there it is the claimed-⇒-owned CHECK, not the door, that refuses to
+		// land a claim on an unowned row.
+		_, err = s.StampAgentClaimIfUnclaimed(ctx, orgID, task.ID, agentID, "")
 		if err == nil {
-			t.Fatal("expected the claimed-requires-team CHECK to reject claiming an unowned task, got nil error")
+			t.Fatal("expected the claimed-requires-team CHECK to reject stamping an unowned task, got nil error")
 		}
 		if !strings.Contains(err.Error(), "tasks_claimed_requires_team") {
-			t.Errorf("claim on an unowned task failed with %v, want the tasks_claimed_requires_team CHECK", err)
+			t.Errorf("stamp on an unowned task failed with %v, want the tasks_claimed_requires_team CHECK", err)
 		}
 	})
 

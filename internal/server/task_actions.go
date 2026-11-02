@@ -246,7 +246,10 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 			var e error
 			claimOK, e = tx.Tasks.TakeoverClaimFromAgent(r.Context(), orgID, id, userID)
 			return e
-		}); err != nil {
+		}); errors.Is(err, db.ErrNoActiveClaimTeam) {
+			writeNoActiveClaimTeam(w)
+			return nil, nil, claimLandingIdempotent, false
+		} else if err != nil {
 			taskActionLog.Error("takeover claim flip failed", "task", id, "error", err)
 			httpx.WriteErrors(w, http.StatusInternalServerError, httpx.ErrorItem{
 				Reason: httpx.ReasonInternal, Message: "claim stamp failed" + localDetail(err),
@@ -266,7 +269,10 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 			var e error
 			claimOK, e = tx.Tasks.ClaimQueuedForUser(r.Context(), orgID, id, userID)
 			return e
-		}); err != nil {
+		}); errors.Is(err, db.ErrNoActiveClaimTeam) {
+			writeNoActiveClaimTeam(w)
+			return nil, nil, claimLandingIdempotent, false
+		} else if err != nil {
 			taskActionLog.Error("user claim stamp failed", "task", id, "error", err)
 			httpx.WriteErrors(w, http.StatusInternalServerError, httpx.ErrorItem{
 				Reason: httpx.ReasonInternal, Message: "claim stamp failed" + localDetail(err),
@@ -607,12 +613,17 @@ func (s *Server) stampAgentClaim(w http.ResponseWriter, r *http.Request, orgID, 
 	// pre-handoff task.TeamID: for an unclaimed task visible to several teams
 	// the latter can be a team the caller isn't in, whose team_agents row RLS
 	// hides — wrongly reporting the bot disabled and rejecting a legit delegate.
+	// The same read refuses a delegation with no active team to land on before
+	// anything is written.
 	var claimTeamID string
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		claimTeamID, e = tx.Tasks.ResolveClaimTeam(r.Context(), orgID, id, userID)
 		return e
-	}); err != nil {
+	}); errors.Is(err, db.ErrNoActiveClaimTeam) {
+		writeNoActiveClaimTeam(w)
+		return "", false
+	} else if err != nil {
 		taskActionLog.Error("delegate aborted", "task", id, "error", err)
 		httpx.WriteErrors(w, http.StatusInternalServerError, httpx.ErrorItem{
 			Reason: httpx.ReasonInternal, Message: "delegate failed" + localDetail(err),
@@ -639,7 +650,11 @@ func (s *Server) stampAgentClaim(w http.ResponseWriter, r *http.Request, orgID, 
 		var e error
 		result, e = tx.Tasks.HandoffAgentClaim(r.Context(), orgID, id, a.ID, userID)
 		return e
-	}); err != nil {
+	}); errors.Is(err, db.ErrNoActiveClaimTeam) {
+		// The owner team was archived since the read above.
+		writeNoActiveClaimTeam(w)
+		return "", false
+	} else if err != nil {
 		taskActionLog.Error("failed to stamp agent claim", "task", id, "error", err)
 		httpx.WriteErrors(w, http.StatusInternalServerError, httpx.ErrorItem{
 			Reason: httpx.ReasonInternal, Message: "claim stamp failed" + localDetail(err),
@@ -1025,7 +1040,10 @@ func writeDelegateSpawnError(w http.ResponseWriter, err error) {
 	}
 	// The task's team was archived, so its run would belong to a team nobody
 	// can see and nothing stops. A conflict with the task's state, not a
-	// fault in the body.
+	// fault in the body. The handoff refuses a team that is archived when it
+	// reads it, so this answers an archive that committed after that read and
+	// before the run insert. The bot claim that leaves stays: the task is on an
+	// archived team either way, and a claimed task there is visible to nobody.
 	if errors.Is(err, delegate.ErrTeamArchived) {
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 			Reason:  httpx.ReasonSpawnFailed,
@@ -1052,6 +1070,19 @@ func writeDelegateSpawnError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeDelegateSpawnInternal(w, err)
+}
+
+// writeNoActiveClaimTeam answers a claim or delegation refused because it has
+// no active team to land the task on (db.ErrNoActiveClaimTeam): the task's team
+// is archived and the caller is on no active team that can see it. Nothing was
+// written. 403 TEAM_ARCHIVED, the archive write-block's answer, because the
+// fault is the same one: nothing lands on an archived team, and a retry gets
+// the same refusal until the team is restored.
+func writeNoActiveClaimTeam(w http.ResponseWriter) {
+	httpx.WriteErrors(w, http.StatusForbidden, httpx.ErrorItem{
+		Reason:  httpx.ReasonTeamArchived,
+		Message: "this task's team is archived, and you're on no active team it can move to",
+	})
 }
 
 // writeTaskHeld answers a delegate refused because an executor holds a

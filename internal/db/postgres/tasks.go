@@ -1581,22 +1581,19 @@ func (s *taskStore) HandoffAgentClaim(ctx context.Context, orgID, taskID, agentI
 	if userID == "" {
 		return db.HandoffRefused, errors.New("HandoffAgentClaim: empty userID")
 	}
+	claimTeam := pgClaimTeamExpr("$3", "$4")
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE tasks
 		   SET claimed_by_agent_id = $1,
 		       claimed_by_user_id  = NULL,
-		       team_id = COALESCE(
-		           (SELECT tt.team_id FROM task_teams tt
-		              JOIN memberships m ON m.team_id = tt.team_id
-		             WHERE tt.task_id = $3 AND m.user_id = $4
-		             ORDER BY (tt.team_id = tasks.team_id) DESC, tt.team_id ASC LIMIT 1),
-		           team_id),
+		       team_id = `+claimTeam+`,
 		       snooze_until = NULL,
 		       status = `+pgClaimStageExpr+`
 		 WHERE org_id = $2 AND id = $3
 		   AND (claimed_by_user_id  IS NULL OR claimed_by_user_id  = $4)
 		   AND (claimed_by_agent_id IS NULL OR claimed_by_agent_id != $1)
 		   AND status NOT IN ('done', 'dismissed')
+		   AND `+claimTeam+` IS NOT NULL
 	`, agentID, orgID, taskID, userID)
 	if err != nil {
 		return db.HandoffRefused, err
@@ -1608,15 +1605,17 @@ func (s *taskStore) HandoffAgentClaim(ctx context.Context, orgID, taskID, agentI
 	if n > 0 {
 		return db.HandoffChanged, nil
 	}
-	// 0 rows — re-read to distinguish refused vs no-op. Terminal-status
-	// check takes precedence over same-agent so a sticky-claim on a
-	// closed task doesn't fall through to HandoffNoOp.
-	var curUser, curAgent sql.NullString
+	// 0 rows — re-read to tell the refusals and the no-op apart. A terminal
+	// status takes precedence, so a sticky claim on a closed task doesn't
+	// fall through to HandoffNoOp; a missing team comes next, so a caller
+	// never proceeds to a run on a task it could not have handed off.
+	var curUser, curAgent, team sql.NullString
 	var curStatus string
-	err = s.q.QueryRowContext(ctx,
-		`SELECT claimed_by_user_id, claimed_by_agent_id, status FROM tasks WHERE org_id = $1 AND id = $2`,
-		orgID, taskID,
-	).Scan(&curUser, &curAgent, &curStatus)
+	err = s.q.QueryRowContext(ctx, `
+		SELECT claimed_by_user_id, claimed_by_agent_id, status, (`+pgClaimTeamExpr("$2", "$3")+`)::text
+		  FROM tasks WHERE org_id = $1 AND id = $2`,
+		orgID, taskID, userID,
+	).Scan(&curUser, &curAgent, &curStatus, &team)
 	if err == sql.ErrNoRows {
 		return db.HandoffRefused, nil
 	}
@@ -1626,6 +1625,9 @@ func (s *taskStore) HandoffAgentClaim(ctx context.Context, orgID, taskID, agentI
 	if curStatus == "done" || curStatus == "dismissed" {
 		return db.HandoffRefused, nil
 	}
+	if !team.Valid {
+		return db.HandoffRefused, db.ErrNoActiveClaimTeam
+	}
 	if curAgent.Valid && curAgent.String == agentID {
 		return db.HandoffNoOp, nil
 	}
@@ -1633,20 +1635,19 @@ func (s *taskStore) HandoffAgentClaim(ctx context.Context, orgID, taskID, agentI
 }
 
 func (s *taskStore) ResolveClaimTeam(ctx context.Context, orgID, taskID, userID string) (string, error) {
-	// Mirrors HandoffAgentClaim's team_id COALESCE: the caller's team in
-	// the task's visibility set (preferring the current owner on a tie),
-	// else the current owner. Read-only; under the app pool tasks_select
-	// RLS scopes the row to the viewer.
-	var team string
-	err := s.q.QueryRowContext(ctx, `
-		SELECT COALESCE(
-		         (SELECT tt.team_id::text FROM task_teams tt
-		            JOIN memberships m ON m.team_id = tt.team_id
-		           WHERE tt.task_id = $2 AND m.user_id = $3
-		           ORDER BY (tt.team_id = t.team_id) DESC, tt.team_id ASC LIMIT 1),
-		         t.team_id::text)
-		  FROM tasks t
-		 WHERE t.org_id = $1 AND t.id = $2
+	return resolveClaimTeam(ctx, s.q, orgID, taskID, userID)
+}
+
+// resolveClaimTeam reads the team a claim by userID would land the task on,
+// through the same expression the claim writes use. Read-only; under the app
+// pool tasks_select RLS scopes the row to the viewer. "" when the task is
+// missing, db.ErrNoActiveClaimTeam when the expression finds no team.
+func resolveClaimTeam(ctx context.Context, q queryer, orgID, taskID, userID string) (string, error) {
+	var team sql.NullString
+	err := q.QueryRowContext(ctx, `
+		SELECT (`+pgClaimTeamExpr("$2", "$3")+`)::text
+		  FROM tasks
+		 WHERE org_id = $1 AND id = $2
 	`, orgID, taskID, userID).Scan(&team)
 	if err == sql.ErrNoRows {
 		return "", nil
@@ -1654,37 +1655,54 @@ func (s *taskStore) ResolveClaimTeam(ctx context.Context, orgID, taskID, userID 
 	if err != nil {
 		return "", fmt.Errorf("resolve claim team: %w", err)
 	}
-	return team, nil
+	if !team.Valid {
+		return "", db.ErrNoActiveClaimTeam
+	}
+	return team.String, nil
 }
 
-// pgActingTeamExpr is the shared team-consolidation subquery for the claim
-// mutations that bind the new claimant's userID at $1 and the task id at
-// $3 — ClaimQueuedForUser, TakeoverClaimFromAgent, and reassignClaimToUser
-// all share that exact positional shape, so the literal SQL lives here once
-// instead of being copy-pasted per method. HandoffAgentClaim binds a
-// different argument shape (the agent id occupies $1; the user id is a
-// separate $4) and keeps its own inline copy.
+// claimTeamRefusal is the follow-up a person-claim write runs when it matched
+// no row: db.ErrNoActiveClaimTeam when the reason is that the claim has no
+// team to land on, nil when it was one of the write's other guards (or the
+// task is gone), for which the caller answers ok=false.
+func claimTeamRefusal(ctx context.Context, q queryer, orgID, taskID, userID string) error {
+	_, err := resolveClaimTeam(ctx, q, orgID, taskID, userID)
+	return err
+}
+
+// pgClaimTeamExpr is the team a user-initiated claim lands the task on, for
+// every claim write and ResolveClaimTeam, so the read and the writes cannot
+// disagree. task and user are the placeholders the calling statement binds the
+// task id and the claimant's user id to, and the statement's row must be
+// reachable as `tasks`.
 //
-// TODO(TFAC-1324): no team here is checked against teams.deleted_at, in this
-// expression, HandoffAgentClaim's copy or ResolveClaimTeam, so a claim can
-// keep or move the task onto an archived team, and a delegation then leaves a
-// bot claim with no run.
-const pgActingTeamExpr = `COALESCE(
+// The claimant's active team in the task's visibility set comes first,
+// preferring the current owner and otherwise the lowest id; with none, the
+// current owner while it is active. An archived team is neither chosen nor
+// kept: archiving a team stops its work, and a claimed task on one is a task
+// nobody can see. NULL when neither applies; every write's WHERE clause
+// refuses that case, so a claim with nowhere to go writes nothing.
+func pgClaimTeamExpr(task, user string) string {
+	return `COALESCE(
 		(SELECT tt.team_id FROM task_teams tt
 		   JOIN memberships m ON m.team_id = tt.team_id
-		  WHERE tt.task_id = $3 AND m.user_id = $1
+		   JOIN teams tm ON tm.id = tt.team_id
+		  WHERE tt.task_id = ` + task + ` AND m.user_id = ` + user + `
+		    AND tm.deleted_at IS NULL
 		  ORDER BY (tt.team_id = tasks.team_id) DESC, tt.team_id ASC LIMIT 1),
-		team_id)`
+		(SELECT tm.id FROM teams tm WHERE tm.id = tasks.team_id AND tm.deleted_at IS NULL))`
+}
 
 func (s *taskStore) TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, userID string) (bool, error) {
 	if userID == "" {
 		return false, errors.New("TakeoverClaimFromAgent: empty userID")
 	}
+	claimTeam := pgClaimTeamExpr("$3", "$1")
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE tasks
 		   SET claimed_by_user_id  = $1,
 		       claimed_by_agent_id = NULL,
-		       team_id = `+pgActingTeamExpr+`,
+		       team_id = `+claimTeam+`,
 		       snooze_until = NULL,
 		       status = `+pgClaimStageExpr+`,
 		       source_status = `+pgSourceStatusExpr+`
@@ -1692,6 +1710,7 @@ func (s *taskStore) TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, u
 		   AND claimed_by_agent_id IS NOT NULL
 		   AND claimed_by_user_id  IS NULL
 		   AND status NOT IN ('done', 'dismissed')
+		   AND `+claimTeam+` IS NOT NULL
 	`, userID, orgID, taskID)
 	if err != nil {
 		return false, err
@@ -1700,17 +1719,21 @@ func (s *taskStore) TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, u
 	if err != nil {
 		return false, err
 	}
-	return n > 0, nil
+	if n == 0 {
+		return false, claimTeamRefusal(ctx, s.q, orgID, taskID, userID)
+	}
+	return true, nil
 }
 
 func (s *taskStore) ClaimQueuedForUser(ctx context.Context, orgID, taskID, userID string) (bool, error) {
 	if userID == "" {
 		return false, errors.New("ClaimQueuedForUser: empty userID is not a valid claimant")
 	}
+	claimTeam := pgClaimTeamExpr("$3", "$1")
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE tasks
 		   SET claimed_by_user_id = $1,
-		       team_id = `+pgActingTeamExpr+`,
+		       team_id = `+claimTeam+`,
 		       snooze_until = NULL,
 		       status = `+pgClaimStageExpr+`,
 		       source_status = `+pgSourceStatusExpr+`
@@ -1718,6 +1741,7 @@ func (s *taskStore) ClaimQueuedForUser(ctx context.Context, orgID, taskID, userI
 		   AND status IN ('queued', 'snoozed')
 		   AND claimed_by_user_id  IS NULL
 		   AND claimed_by_agent_id IS NULL
+		   AND `+claimTeam+` IS NOT NULL
 	`, userID, orgID, taskID)
 	if err != nil {
 		return false, err
@@ -1726,7 +1750,10 @@ func (s *taskStore) ClaimQueuedForUser(ctx context.Context, orgID, taskID, userI
 	if err != nil {
 		return false, err
 	}
-	return n > 0, nil
+	if n == 0 {
+		return false, claimTeamRefusal(ctx, s.q, orgID, taskID, userID)
+	}
+	return true, nil
 }
 
 func (s *taskStore) ReassignClaimToUser(ctx context.Context, orgID, taskID, fromUserID, toUserID string) (bool, error) {
@@ -1741,13 +1768,15 @@ func (s *taskStore) ReassignClaimToUserSystem(ctx context.Context, orgID, taskID
 // admin-pool ReassignClaimToUserSystem sibling. Besides the claim CAS every
 // other claim mutation does, it bakes the target-team-membership guard
 // directly into the WHERE clause — an EXISTS against memberships requiring
-// toUserID to belong to a team associated with the task (its task_teams
-// visibility set or its current team_id) — atomically with the CAS itself:
-// no separate round trip, no TOCTOU window between validating the target and
-// landing the write. Without this guard a reassign could hand the claim to a
-// user with zero relationship to the task's team, who would then be unable
-// to even see the row (tasks_select RLS requires team membership once a task
-// is claimed — there's no "or you're the claimant" escape hatch).
+// toUserID to belong to an active team associated with the task (its
+// task_teams visibility set or its current team_id) — atomically with the CAS
+// itself: no separate round trip, no TOCTOU window between validating the
+// target and landing the write. Without this guard a reassign could hand the
+// claim to a user with zero relationship to the task's team, who would then be
+// unable to even see the row (tasks_select RLS requires membership of an
+// active team once a task is claimed — there's no "or you're the claimant"
+// escape hatch). The guard passing is also what keeps pgClaimTeamExpr from
+// coming up NULL here, so this write needs no refusal of its own for that.
 func reassignClaimToUser(ctx context.Context, q queryer, orgID, taskID, fromUserID, toUserID string) (bool, error) {
 	if fromUserID == "" {
 		return false, errors.New("ReassignClaimToUser: empty fromUserID")
@@ -1758,14 +1787,16 @@ func reassignClaimToUser(ctx context.Context, q queryer, orgID, taskID, fromUser
 	res, err := q.ExecContext(ctx, `
 		UPDATE tasks
 		   SET claimed_by_user_id = $1,
-		       team_id = `+pgActingTeamExpr+`,
+		       team_id = `+pgClaimTeamExpr("$3", "$1")+`,
 		       snooze_until = NULL
 		 WHERE org_id = $2 AND id = $3
 		   AND claimed_by_user_id = $4
 		   AND status NOT IN ('done', 'dismissed')
 		   AND EXISTS (
 		         SELECT 1 FROM memberships m2
+		           JOIN teams tm2 ON tm2.id = m2.team_id
 		          WHERE m2.user_id = $1
+		            AND tm2.deleted_at IS NULL
 		            AND (
 		              m2.team_id IN (SELECT team_id FROM task_teams WHERE task_id = $3)
 		              OR m2.team_id = (SELECT team_id FROM tasks WHERE id = $3 AND org_id = $2)
