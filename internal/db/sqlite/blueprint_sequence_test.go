@@ -132,6 +132,12 @@ func sqliteSequenceScaffold(t *testing.T) (db.BlueprintStore, dbtest.BlueprintSe
 				t.Fatalf("hold the task's close: %v", err)
 			}
 		},
+		ArchiveTeam: func(t *testing.T, teamID string) {
+			t.Helper()
+			if _, err := conn.Exec(`UPDATE teams SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`, teamID); err != nil {
+				t.Fatalf("archive the team: %v", err)
+			}
+		},
 		SetConversationStatus: func(t *testing.T, convID, status string) {
 			t.Helper()
 			stored, concluded := dbtest.SeedStatus(status)

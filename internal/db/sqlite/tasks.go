@@ -1598,6 +1598,11 @@ func (s *taskStore) VisibilityTeams(ctx context.Context, orgID, taskID string) (
 // when the intersection is empty. The result is always a team the
 // claimer belongs to, which the RLS update check requires. Bind order
 // is (taskID, userID).
+//
+// TODO(TFAC-1324): no team here is checked against teams.deleted_at, in this
+// expression or ResolveClaimTeam's copy, so a claim can
+// keep or move the task onto an archived team, and a delegation then leaves a
+// bot claim with no run.
 const sqliteActingTeamExpr = `COALESCE(
 		(SELECT tt.team_id
 		   FROM task_teams tt

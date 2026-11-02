@@ -1664,6 +1664,11 @@ func (s *taskStore) ResolveClaimTeam(ctx context.Context, orgID, taskID, userID 
 // instead of being copy-pasted per method. HandoffAgentClaim binds a
 // different argument shape (the agent id occupies $1; the user id is a
 // separate $4) and keeps its own inline copy.
+//
+// TODO(TFAC-1324): no team here is checked against teams.deleted_at, in this
+// expression, HandoffAgentClaim's copy or ResolveClaimTeam, so a claim can
+// keep or move the task onto an archived team, and a delegation then leaves a
+// bot claim with no run.
 const pgActingTeamExpr = `COALESCE(
 		(SELECT tt.team_id FROM task_teams tt
 		   JOIN memberships m ON m.team_id = tt.team_id

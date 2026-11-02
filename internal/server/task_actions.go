@@ -990,9 +990,9 @@ func (s *Server) firstStepConversationID(ctx context.Context, orgID, userID, blu
 // writeDelegateSpawnError maps a spawner.Delegate failure to its status: a
 // bad or missing blueprint reference and a model the org/team cannot run are
 // the request's fault (422 — the body was well-formed, but what it asks for
-// can't back a run), a task that already holds a live run is a conflict (409
-// — nothing about the request is wrong, someone else got there first),
-// anything else is a spawn/DB fault (500, logged + redacted). Shared by the
+// can't back a run), a task that already holds a live run or whose team is
+// archived is a conflict (409 — nothing about the request is wrong, the task's
+// state refuses it), anything else is a spawn/DB fault (500, logged + redacted). Shared by the
 // delegate route and the factory drag-to-delegate so the two gestures fail
 // identically.
 //
@@ -1020,6 +1020,16 @@ func writeDelegateSpawnError(w http.ResponseWriter, err error) {
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 			Reason:  httpx.ReasonSpawnFailed,
 			Message: "another run became active on this task; refresh and try again",
+		})
+		return
+	}
+	// The task's team was archived, so its run would belong to a team nobody
+	// can see and nothing stops. A conflict with the task's state, not a
+	// fault in the body.
+	if errors.Is(err, delegate.ErrTeamArchived) {
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason:  httpx.ReasonSpawnFailed,
+			Message: "this task's team is archived",
 		})
 		return
 	}

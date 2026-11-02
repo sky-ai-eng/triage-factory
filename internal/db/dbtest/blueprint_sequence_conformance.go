@@ -60,6 +60,8 @@ type BlueprintSequenceScaffold struct {
 	// task's own event, as an event close waiting on its work does.
 	CloseTask     func(t *testing.T, taskID string)
 	HoldTaskClose func(t *testing.T, taskID string)
+	// ArchiveTeam stamps a team's deleted_at, as the team archive does.
+	ArchiveTeam func(t *testing.T, teamID string)
 	// SetConversationStatus puts a conversation in a stored state: "" for
 	// mid-flight, SeedConcluded, or "failed", each with no park.
 	SetConversationStatus func(t *testing.T, convID, status string)

@@ -750,7 +750,19 @@ func (s *blueprintStore) CreateRunWithFirstStepSystem(ctx context.Context, orgID
 		// order against and what survives here is the existence check, at the
 		// same point, refusing a firing against a task that is not there, and
 		// the read of whether the task is open.
-		open, err := lockFiringTask(ctx, q, br.TaskID)
+		open, taskTeamID, err := lockFiringTask(ctx, q, br.TaskID)
+		if err != nil {
+			return err
+		}
+		// The run's team, read where the Postgres twin share-locks it. The
+		// transaction began IMMEDIATE, so an archive's write lands wholly
+		// before this read or wholly after this commit; the read alone keeps
+		// the refusal the same in both dialects.
+		runTeamID := ownerTeamID
+		if runTeamID == "" {
+			runTeamID = taskTeamID
+		}
+		teamArchived, err := firingTeamArchived(ctx, q, runTeamID)
 		if err != nil {
 			return err
 		}
@@ -776,9 +788,14 @@ func (s *blueprintStore) CreateRunWithFirstStepSystem(ctx context.Context, orgID
 		if event && !open {
 			return db.ErrTaskClosedForEventRun
 		}
+		// Either arm on an archived team, as the Postgres twin refuses it.
+		if teamArchived {
+			return db.ErrTeamArchived
+		}
 
-		// 3. The delegation boundary, after the closed check, so the settled
-		// conversations it ends are ended only by a run that replaces them.
+		// 3. The delegation boundary, after the closed and archived checks, so
+		// the settled conversations it ends are ended only by a run that
+		// replaces them.
 		ended, err = endSettledConversationsForTask(ctx, q, orgID, br.TaskID)
 		if err != nil {
 			return fmt.Errorf("end the task's settled conversations: %w", err)
@@ -878,15 +895,35 @@ func advanceRunCurrentStep(ctx context.Context, q queryer, id string, from, to i
 // not exist — the firing's first statement, so it is refused before anything
 // is written — and open for a task neither closed nor holding a close. The
 // Postgres twin takes a row lock in the same statement; SQLite has one
-// connection and nothing to order against, so this is the read alone.
-func lockFiringTask(ctx context.Context, q queryer, taskID string) (open bool, err error) {
+// connection and nothing to order against, so this is the read alone. teamID
+// is the task's team ("" for none).
+func lockFiringTask(ctx context.Context, q queryer, taskID string) (open bool, teamID string, err error) {
+	var team sql.NullString
 	err = q.QueryRowContext(ctx, `
-		SELECT status NOT IN ('done', 'dismissed') AND close_deferred_event_id IS NULL
-		  FROM tasks WHERE id = ?`, taskID).Scan(&open)
+		SELECT status NOT IN ('done', 'dismissed') AND close_deferred_event_id IS NULL, team_id
+		  FROM tasks WHERE id = ?`, taskID).Scan(&open, &team)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, db.ErrNoSuchTask
+		return false, "", db.ErrNoSuchTask
 	}
-	return open, err
+	return open, team.String, err
+}
+
+// firingTeamArchived reports whether the team of a firing's run is archived.
+// An empty id, or one naming no row, reports active, as the Postgres twin's
+// lockFiringTeam does.
+func firingTeamArchived(ctx context.Context, q queryer, teamID string) (bool, error) {
+	if teamID == "" {
+		return false, nil
+	}
+	var archived bool
+	err := q.QueryRowContext(ctx, `SELECT deleted_at IS NOT NULL FROM teams WHERE id = ?`, teamID).Scan(&archived)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read the run's team: %w", err)
+	}
+	return archived, nil
 }
 
 // insertFiringRun writes the blueprint_runs row for a firing on the given

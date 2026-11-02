@@ -788,7 +788,20 @@ func (s *blueprintStore) CreateRunWithFirstStepSystem(ctx context.Context, orgID
 		// A lock and not the consolidation write, which is what step 4 is for:
 		// the fence below may end this transaction having written nothing, and
 		// a row locked but never written is exactly that.
-		open, err := lockFiringTask(ctx, q, orgID, br.TaskID)
+		open, taskTeamID, err := lockFiringTask(ctx, q, orgID, br.TaskID)
+		if err != nil {
+			return err
+		}
+		// The run's team — the owner step 4 consolidates to, or the task's
+		// own, which step 6 derives the conversation's team from — locked
+		// against an archive (see the interface for why that orders the two).
+		runTeamID := taskTeamID
+		if ownerTeamID != "" {
+			if runTeamID, err = resolveTeamBind(ctx, q, orgID, ownerTeamID); err != nil {
+				return err
+			}
+		}
+		teamArchived, err := lockFiringTeam(ctx, q, orgID, runTeamID)
 		if err != nil {
 			return err
 		}
@@ -814,9 +827,16 @@ func (s *blueprintStore) CreateRunWithFirstStepSystem(ctx context.Context, orgID
 		if event && !open {
 			return db.ErrTaskClosedForEventRun
 		}
+		// Either arm on an archived team, read under the share lock above. A
+		// person's delegation is refused too: its conversation would belong
+		// to a team nobody can see.
+		if teamArchived {
+			return db.ErrTeamArchived
+		}
 
-		// 3. The delegation boundary, after the closed check, so the settled
-		// conversations it ends are ended only by a run that replaces them.
+		// 3. The delegation boundary, after the closed and archived checks, so
+		// the settled conversations it ends are ended only by a run that
+		// replaces them.
 		ended, err = endSettledConversationsForTask(ctx, q, orgID, br.TaskID)
 		if err != nil {
 			return fmt.Errorf("end the task's settled conversations: %w", err)
@@ -933,14 +953,44 @@ func advanceRunCurrentStep(ctx context.Context, q queryer, orgID, id string, fro
 // call site), and a firing whose fence catches a replay has to leave the task
 // exactly as it found it. Readers are unaffected; only another writer of the
 // same task waits.
-func lockFiringTask(ctx context.Context, q queryer, orgID, taskID string) (open bool, err error) {
+//
+// teamID is the task's team ("" for none), read under the same lock, so no
+// consolidation elsewhere can move it before this firing's own.
+func lockFiringTask(ctx context.Context, q queryer, orgID, taskID string) (open bool, teamID string, err error) {
+	var team sql.NullString
 	err = q.QueryRowContext(ctx, `
-		SELECT status NOT IN ('done', 'dismissed') AND close_deferred_event_id IS NULL
-		  FROM tasks WHERE org_id = $1 AND id = $2 FOR UPDATE`, orgID, taskID).Scan(&open)
+		SELECT status NOT IN ('done', 'dismissed') AND close_deferred_event_id IS NULL, team_id::text
+		  FROM tasks WHERE org_id = $1 AND id = $2 FOR UPDATE`, orgID, taskID).Scan(&open, &team)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, db.ErrNoSuchTask
+		return false, "", db.ErrNoSuchTask
 	}
-	return open, err
+	return open, team.String, err
+}
+
+// lockFiringTeam takes a share lock on the teams row of a firing's run, and
+// reports whether that team is archived. FOR SHARE and not FOR KEY SHARE: the
+// archive writes deleted_at, a non-key column, and a key-share lock lets that
+// write through without waiting. Under READ COMMITTED a lock that waited on a
+// concurrent write returns the row that write committed, so a firing queued
+// behind an archive reads the archive's deleted_at.
+//
+// An empty id, or one naming no row, locks nothing and reports active: a task
+// with no team gives its conversation none to archive, and an owner id with
+// no row is the consolidation's to refuse.
+func lockFiringTeam(ctx context.Context, q queryer, orgID, teamID string) (archived bool, err error) {
+	if !isValidUUID(teamID) {
+		return false, nil
+	}
+	err = q.QueryRowContext(ctx, `
+		SELECT deleted_at IS NOT NULL
+		  FROM teams WHERE org_id = $1 AND id = $2 FOR SHARE`, orgID, teamID).Scan(&archived)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("lock the run's team: %w", err)
+	}
+	return archived, nil
 }
 
 // insertFiringRun writes the blueprint_runs row for a firing on the given

@@ -88,7 +88,8 @@ const (
 	// existing run is the materialization; firing again would duplicate it.
 	PendingFiringSkipAlreadyFired = "already_fired"
 	// PendingFiringSkipTeamArchived: the trigger's team was archived after
-	// the firing was queued. Archiving stops the team's work, so the firing
+	// the firing was queued, or the run's team was archived by the time the
+	// fenced insert read it. Archiving stops the team's work, so the firing
 	// does not start a run; restoring the team does not bring it back.
 	PendingFiringSkipTeamArchived = "team_archived"
 )
