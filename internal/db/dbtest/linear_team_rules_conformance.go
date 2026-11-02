@@ -12,13 +12,14 @@ import (
 // LinearTeamRulesFixture is what a backend hands RunLinearTeamRulesConformance:
 // the store, plus an org holding two teams so the suite can prove a write to
 // one team leaves the other's rows alone. Both teams must start with no rows.
-// ArchiveTeam archives one of them.
+// ArchiveTeam archives one of them, and RestoreTeam restores it.
 type LinearTeamRulesFixture struct {
 	Store       db.LinearTeamRulesStore
 	OrgID       string
 	TeamID      string
 	OtherTeamID string
 	ArchiveTeam func(t *testing.T, teamID string)
+	RestoreTeam func(t *testing.T, teamID string)
 }
 
 // LinearTeamRulesFactory builds a fresh fixture per subtest.
@@ -88,7 +89,8 @@ func linearTeamIDs(rules []domain.LinearTeamRules) []string {
 // db.LinearTeamRulesStore: replace-set semantics (an absent id's row is
 // deleted, a present one upserted, another team's rows untouched), ordering,
 // the stored set ReplaceForTeam returns, the optional in_review rule, the org
-// union, TracksTeamSystem, TrackingTeamIDsSystem, the per-rule complete-or-empty CHECKs, and every
+// union and the archived teams it leaves out, TracksTeamSystem,
+// TrackingTeamIDsSystem, the per-rule complete-or-empty CHECKs, and every
 // read and write confined to the workspace it is given. RLS is the Postgres
 // backend's own test.
 func RunLinearTeamRulesConformance(t *testing.T, factory LinearTeamRulesFactory) {
@@ -361,6 +363,57 @@ func RunLinearTeamRulesConformance(t *testing.T, factory LinearTeamRulesFactory)
 		if !reflect.DeepEqual(gotKeys, wantKeys) {
 			t.Errorf("ListForOrgSystem order = %v, want %v", gotKeys, wantKeys)
 		}
+	})
+
+	t.Run("ListForOrgSystem_ArchivedTeamTracksNothing", func(t *testing.T) {
+		// Each team tracks one Linear team. Archiving the other team takes its
+		// Linear team out of the union the poll discovers in and the terminal
+		// checker merges done states from; the read that names that team still
+		// returns its row, and a restore puts the Linear team back.
+		f := factory(t)
+		if _, err := f.Store.ReplaceForTeam(ctx, f.TeamID, linearWorkspace, []domain.LinearTeamRules{
+			armedLinearRules("lt-a", "AAA"),
+		}); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		if _, err := f.Store.ReplaceForTeam(ctx, f.OtherTeamID, linearWorkspace, []domain.LinearTeamRules{
+			armedLinearRules("lt-b", "BBB"),
+		}); err != nil {
+			t.Fatalf("seed other team: %v", err)
+		}
+		union := func(label string, want []string) {
+			t.Helper()
+			got, err := f.Store.ListForOrgSystem(ctx, f.OrgID, linearWorkspace)
+			if err != nil {
+				t.Fatalf("ListForOrgSystem (%s): %v", label, err)
+			}
+			keys := make([]string, 0, len(got))
+			for _, r := range got {
+				keys = append(keys, r.LinearTeamID+"@"+r.TeamID)
+			}
+			if !reflect.DeepEqual(keys, want) {
+				t.Errorf("ListForOrgSystem (%s) = %v, want %v", label, keys, want)
+			}
+		}
+		named := func(label string) {
+			t.Helper()
+			got, err := f.Store.ListForTeamSystem(ctx, f.OtherTeamID, linearWorkspace)
+			if err != nil {
+				t.Fatalf("ListForTeamSystem (%s): %v", label, err)
+			}
+			if ids := linearTeamIDs(got); !reflect.DeepEqual(ids, []string{"lt-b"}) {
+				t.Errorf("ListForTeamSystem(other) (%s) = %v, want [lt-b]", label, ids)
+			}
+		}
+
+		both := []string{"lt-a@" + f.TeamID, "lt-b@" + f.OtherTeamID}
+		union("both teams live", both)
+		f.ArchiveTeam(t, f.OtherTeamID)
+		union("other team archived", []string{"lt-a@" + f.TeamID})
+		named("other team archived")
+		f.RestoreTeam(t, f.OtherTeamID)
+		union("other team restored", both)
+		named("other team restored")
 	})
 
 	t.Run("TracksTeamSystem", func(t *testing.T) {

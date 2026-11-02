@@ -85,7 +85,8 @@ func (s *teamGitHubReposStore) ListOrgReposWithTeamsSystem(ctx context.Context, 
 		FROM team_github_repos g
 		JOIN teams t ON t.id = g.team_id
 		JOIN repositories r ON r.id = g.repository_id
-		WHERE t.org_id = $1 AND r.host = $2 AND r.retired_at IS NULL
+		WHERE t.org_id = $1 AND t.deleted_at IS NULL
+		  AND r.host = $2 AND r.retired_at IS NULL
 		ORDER BY r.owner ASC, r.repo ASC, r.id ASC, t.name ASC
 	`, orgID, host)
 	if err != nil {
@@ -246,17 +247,10 @@ func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, o
 		trackedID = uuid.Nil.String()
 	}
 	// UNION (not UNION ALL) dedups a user who is both an org admin and a
-	// tracking-team member. The tracking arm mirrors
-	// repoTrackedByATeam (the REST read's scoping) join for
-	// join — including its deliberate LACK of a teams.deleted_at filter:
-	// archiving force-stops a team's work but hides nothing (Archive
-	// touches no memberships/tracking rows, and the repo keeps being
-	// polled), so its members still see the repo on GET /api/repos and
-	// must keep receiving its events. Excluding them here would be
-	// routing semantics (TeamIDsForUserInOrgSystem — no NEW work for an
-	// archived team) misapplied to a visibility read, leaving their
-	// Repos page silently stale. A retired row is left out of the
-	// tracking arm because the REST read leaves it out.
+	// tracking-team member. The tracking arm mirrors repoTrackedByATeam (the
+	// REST read's scoping) join for join: an archived team tracks nothing
+	// there, so the repo is not on its members' GET /api/repos through it,
+	// and a retired row is left out because the REST read leaves it out.
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT user_id::text FROM (
 			SELECT om.user_id
@@ -268,7 +262,7 @@ func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, o
 			JOIN teams t ON t.id = g.team_id
 			JOIN repositories r ON r.id = g.repository_id
 			JOIN memberships m ON m.team_id = g.team_id
-			WHERE t.org_id = $1
+			WHERE t.org_id = $1 AND t.deleted_at IS NULL
 			  AND g.repository_id = $2
 			  AND r.retired_at IS NULL
 		) u
@@ -297,13 +291,14 @@ func (s *teamGitHubReposStore) TracksRepositoryViewerScoped(ctx context.Context,
 	// EXISTS to the caller's own team memberships — no team_id needed, same
 	// RLS-does-the-scoping trick as factoryGitHubRepoTrackedExists /
 	// jiraTeamProjectMembershipExists. The teams join binds org as
-	// defense-in-depth.
+	// defense-in-depth, and leaves out an archived team as repoTrackedByATeam
+	// does, so this answers for exactly the rows ListTeamScoped lists.
 	var ok bool
 	err := s.app.QueryRowContext(ctx, `
 		SELECT EXISTS (
 			SELECT 1 FROM team_github_repos g
 			JOIN teams tm ON tm.id = g.team_id
-			WHERE tm.org_id = $1 AND g.repository_id = $2
+			WHERE tm.org_id = $1 AND tm.deleted_at IS NULL AND g.repository_id = $2
 		)
 	`, orgID, repositoryID).Scan(&ok)
 	if err != nil {
@@ -320,13 +315,14 @@ func (s *teamGitHubReposStore) TracksRepositoryViewerAdminScoped(ctx context.Con
 	// matched row: RLS narrows the EXISTS to the caller's memberships, the
 	// predicate narrows it again to the ones they administer. Both are
 	// needed — the predicate alone would match a team the caller admins in
-	// another org, and RLS alone is plain membership.
+	// another org, and RLS alone is plain membership. An archived team grants
+	// nothing, as in the read gate.
 	var ok bool
 	err := s.app.QueryRowContext(ctx, `
 		SELECT EXISTS (
 			SELECT 1 FROM team_github_repos g
 			JOIN teams tm ON tm.id = g.team_id
-			WHERE tm.org_id = $1 AND g.repository_id = $2
+			WHERE tm.org_id = $1 AND tm.deleted_at IS NULL AND g.repository_id = $2
 			  AND tf.user_is_team_admin(g.team_id)
 		)
 	`, orgID, repositoryID).Scan(&ok)

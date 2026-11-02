@@ -1985,6 +1985,69 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 	})
 
+	t.Run("JiraStatusRules_ListForOrgSystem_ArchivedTeamTracksNothing", func(t *testing.T) {
+		// Each team tracks one project. Archiving the other team takes its
+		// project out of the union the poll discovers in and the terminal
+		// checker merges done statuses from; the read that names that team
+		// still returns its rule, and a restore puts the project back.
+		stores, ids := factory(t)
+		sky := []domain.JiraProjectStatusRules{{
+			ProjectKey: "SKY", PickupMembers: jiraRefs("To Do"),
+			InProgressMembers: jiraRefs("In Progress"), InProgressCanonical: jiraRef("In Progress"),
+			DoneMembers: jiraRefs("Done"), DoneCanonical: jiraRef("Done"),
+		}}
+		eng := []domain.JiraProjectStatusRules{{
+			ProjectKey: "ENG", PickupMembers: jiraRefs("Open"),
+			InProgressMembers: jiraRefs("Doing"), InProgressCanonical: jiraRef("Doing"),
+			DoneMembers: jiraRefs("Closed"), DoneCanonical: jiraRef("Closed"),
+		}}
+		registerJiraProjects(t, stores, ids, sky)
+		registerJiraProjects(t, stores, ids, eng)
+		other := stores.SeedTeam(t, "jira-archive-other")
+		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, jiraSite, sky); err != nil {
+			t.Fatalf("ReplaceForTeam(team): %v", err)
+		}
+		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, other, jiraSite, eng); err != nil {
+			t.Fatalf("ReplaceForTeam(other): %v", err)
+		}
+		union := func(label string, want ...string) {
+			t.Helper()
+			got := mustListJira(t, func() ([]domain.JiraProjectStatusRules, error) {
+				return stores.JiraStatusRules.ListForOrgSystem(ctx, ids.OrgID, jiraSite)
+			})
+			keys := make([]string, 0, len(got))
+			for _, r := range got {
+				keys = append(keys, r.ProjectKey+"@"+r.TeamID)
+			}
+			if !reflect.DeepEqual(keys, want) {
+				t.Errorf("ListForOrgSystem (%s) = %v; want %v", label, keys, want)
+			}
+		}
+		named := func(label string) {
+			t.Helper()
+			got := mustListJira(t, func() ([]domain.JiraProjectStatusRules, error) {
+				return stores.JiraStatusRules.ListForTeamSystem(ctx, other, jiraSite)
+			})
+			if len(got) != 1 || got[0].ProjectKey != "ENG" || got[0].TeamID != other {
+				t.Errorf("ListForTeamSystem(other) (%s) = %+v; want its one ENG rule", label, got)
+			}
+		}
+
+		// Ordered by project key, so ENG before SKY.
+		both := []string{"ENG@" + other, "SKY@" + ids.TeamID}
+		union("both teams live", both...)
+		if _, err := stores.Teams.Archive(ctx, other); err != nil {
+			t.Fatalf("Archive: %v", err)
+		}
+		union("other team archived", "SKY@"+ids.TeamID)
+		named("other team archived")
+		if _, err := stores.Teams.Restore(ctx, other); err != nil {
+			t.Fatalf("Restore: %v", err)
+		}
+		union("other team restored", both...)
+		named("other team restored")
+	})
+
 	t.Run("JiraStatusRules_ReplaceForTeam_PrunesMissingKeys", func(t *testing.T) {
 		// First insert two rules, then re-call with just one — the
 		// missing project_key row must be deleted.
@@ -2529,6 +2592,71 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		if tracksByName(t, stores, ids.OrgID, stores.SeedTeam(t, "team-b"), TestGitHubHost, "acme", "api") {
 			t.Error("a team that tracks nothing tracks acme/api")
 		}
+	})
+
+	t.Run("TeamGitHubRepos_ListOrgReposWithTeamsSystem_ArchivedTeamTracksNothing", func(t *testing.T) {
+		// Each team tracks one repository of its own, and both track acme/api.
+		// Archiving the other team takes its own repository out of the
+		// preflight's tracked set and its name out of acme/api's team list; the
+		// read that names the team still lists its set, and a restore puts
+		// both back.
+		stores, ids := factory(t)
+		other := stores.SeedTeam(t, "repos-archive-other")
+		if err := TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, ids.OrgID, ids.TeamID, TestGitHubHost, []domain.TeamGitHubRepo{
+			{Owner: "acme", Repo: "api"}, {Owner: "acme", Repo: "web"},
+		}); err != nil {
+			t.Fatalf("track for team: %v", err)
+		}
+		if err := TrackRepos(ctx, stores.Repos, stores.TeamGitHubRepos, ids.OrgID, other, TestGitHubHost, []domain.TeamGitHubRepo{
+			{Owner: "acme", Repo: "api"}, {Owner: "acme", Repo: "infra"},
+		}); err != nil {
+			t.Fatalf("track for other: %v", err)
+		}
+		tracked := func(label string) map[string]int {
+			t.Helper()
+			got, err := stores.TeamGitHubRepos.ListOrgReposWithTeamsSystem(ctx, ids.OrgID, TestGitHubHost)
+			if err != nil {
+				t.Fatalf("ListOrgReposWithTeamsSystem (%s): %v", label, err)
+			}
+			out := make(map[string]int, len(got))
+			for _, r := range got {
+				out[r.Slug()] = len(r.Teams)
+			}
+			return out
+		}
+		named := func(label string) {
+			t.Helper()
+			got, err := stores.TeamGitHubRepos.ListForTeamSystem(ctx, other, TestGitHubHost)
+			if err != nil {
+				t.Fatalf("ListForTeamSystem(other) (%s): %v", label, err)
+			}
+			slugs := make([]string, 0, len(got))
+			for _, r := range got {
+				slugs = append(slugs, r.Slug())
+			}
+			if !reflect.DeepEqual(slugs, []string{"acme/api", "acme/infra"}) {
+				t.Errorf("ListForTeamSystem(other) (%s) = %v; want [acme/api acme/infra]", label, slugs)
+			}
+		}
+
+		both := map[string]int{"acme/api": 2, "acme/infra": 1, "acme/web": 1}
+		if got := tracked("both teams live"); !reflect.DeepEqual(got, both) {
+			t.Errorf("ListOrgReposWithTeamsSystem (both teams live) team counts = %v; want %v", got, both)
+		}
+		if _, err := stores.Teams.Archive(ctx, other); err != nil {
+			t.Fatalf("Archive: %v", err)
+		}
+		if got, want := tracked("other team archived"), map[string]int{"acme/api": 1, "acme/web": 1}; !reflect.DeepEqual(got, want) {
+			t.Errorf("ListOrgReposWithTeamsSystem (other team archived) team counts = %v; want %v", got, want)
+		}
+		named("other team archived")
+		if _, err := stores.Teams.Restore(ctx, other); err != nil {
+			t.Fatalf("Restore: %v", err)
+		}
+		if got := tracked("other team restored"); !reflect.DeepEqual(got, both) {
+			t.Errorf("ListOrgReposWithTeamsSystem (other team restored) team counts = %v; want %v", got, both)
+		}
+		named("other team restored")
 	})
 
 	t.Run("TeamGitHubRepos_ViewerAdminScoped_NeverBroaderThanViewerScoped", func(t *testing.T) {

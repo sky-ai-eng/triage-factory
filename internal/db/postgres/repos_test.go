@@ -37,6 +37,7 @@ func TestRepositoryStore_Postgres(t *testing.T) {
 				t.Helper()
 				return pgtest.SeedTeam(t, h, orgID, slug)
 			},
+			Teams: stores.Teams,
 		}
 		return stores.Repos, orgID, seed
 	})

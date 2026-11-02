@@ -197,8 +197,10 @@ func (s *reachableReposStore) ListReachWithoutPurposeSystem(ctx context.Context,
 		   AND i.github_host = ?
 		   AND NOT EXISTS (
 		       SELECT 1 FROM team_github_repos g
+		        JOIN teams t ON t.id = g.team_id
 		        JOIN repositories reg ON reg.id = g.repository_id
-		        WHERE reg.host = i.github_host AND reg.retired_at IS NULL
+		        WHERE t.deleted_at IS NULL
+		          AND reg.host = i.github_host AND reg.retired_at IS NULL
 		          AND ` + registryMatchesMirror("reg", "r") + `)`
 	args := []any{orgID, string(class), host}
 
@@ -276,7 +278,10 @@ func (s *reachableReposStore) ListScopeDriftSystem(ctx context.Context, orgID, h
 		    ON cov.org_id = ? AND cov.removed_at IS NULL AND cov.github_host = ?
 		   AND ` + installationOnOwner("cov", "reg") + `
 		 WHERE reg.host = ? AND reg.retired_at IS NULL
-		   AND EXISTS (SELECT 1 FROM team_github_repos g WHERE g.repository_id = reg.id)
+		   AND EXISTS (
+		       SELECT 1 FROM team_github_repos g
+		         JOIN teams t ON t.id = g.team_id
+		        WHERE g.repository_id = reg.id AND t.deleted_at IS NULL)
 		   AND EXISTS (
 		       SELECT 1 FROM reachable_scopes sc
 		        WHERE sc.org_id = ? AND sc.credential_class = ? AND sc.host = ?)
@@ -522,7 +527,10 @@ func (s *reachableReposStore) ListTrackedInGrantsSystem(ctx context.Context, org
 		SELECT reg.owner || '/' || reg.repo
 		  FROM repositories reg
 		 WHERE reg.host = ? AND reg.retired_at IS NULL
-		   AND EXISTS (SELECT 1 FROM team_github_repos g WHERE g.repository_id = reg.id)
+		   AND EXISTS (
+		       SELECT 1 FROM team_github_repos g
+		         JOIN teams t ON t.id = g.team_id
+		        WHERE g.repository_id = reg.id AND t.deleted_at IS NULL)
 		   AND EXISTS (
 		       SELECT 1 FROM reachable_repositories m
 		        WHERE m.org_id = ? AND m.host = ?

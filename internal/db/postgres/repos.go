@@ -431,6 +431,8 @@ func (s *repoStore) ListSystem(ctx context.Context, orgID, host string) ([]domai
 // entities.go's jiraTeamProjectMembershipExists use for the same class of
 // org-wide-entity-list leak. Under the admin pool every team in the
 // org counts, and the teams join on rp.org_id is what keeps it to that org.
+// Under either pool an archived team tracks nothing: its rows are kept for
+// its restore, and ListTrackedByTeam reads them by the team's id.
 //
 // The match is on the row id rather than a folded slug comparison, so it is an
 // index lookup on team_github_repos_repository_idx and cannot disagree with
@@ -439,6 +441,7 @@ const repoTrackedByATeam = `EXISTS (
 	SELECT 1 FROM team_github_repos g
 	JOIN teams tm ON tm.id = g.team_id
 	WHERE tm.org_id = rp.org_id
+	  AND tm.deleted_at IS NULL
 	  AND g.repository_id = rp.id
 )`
 
@@ -526,7 +529,7 @@ func (s *repoStore) ListTrackedNamesSystem(ctx context.Context, orgID, host stri
 		SELECT DISTINCT rp.owner || '/' || rp.repo
 		  FROM repositories rp
 		  JOIN team_github_repos g ON g.repository_id = rp.id
-		  JOIN teams tm ON tm.id = g.team_id AND tm.org_id = rp.org_id
+		  JOIN teams tm ON tm.id = g.team_id AND tm.org_id = rp.org_id AND tm.deleted_at IS NULL
 		 WHERE rp.org_id = $1 AND rp.host = $2 AND rp.retired_at IS NULL
 		 ORDER BY 1
 	`, orgID, host)

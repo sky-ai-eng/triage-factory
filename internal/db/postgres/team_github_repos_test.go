@@ -195,6 +195,18 @@ func TestTeamGitHubRepos_Postgres_TracksRepositoryViewerScoped_RLS(t *testing.T)
 		t.Error("a value that was never a registry id names nothing; want false")
 	}
 
+	// An archived team tracks nothing, so the gate answers as alice's repo list
+	// does (ListTeamScoped): acme/api is out while her only tracking team is
+	// archived, and back once it is restored.
+	pgtest.MustExec(t, h.AdminDB, `UPDATE teams SET deleted_at = now() WHERE id = $1`, teamA)
+	if tracksAs(alice, api.ID) {
+		t.Error("alice's only tracking team is archived; want false")
+	}
+	pgtest.MustExec(t, h.AdminDB, `UPDATE teams SET deleted_at = NULL WHERE id = $1`, teamA)
+	if !tracksAs(alice, api.ID) {
+		t.Error("alice's tracking team is restored; want true")
+	}
+
 	// acme/api is deleted on GitHub and recreated under the same name: TF
 	// retires its row, and the new repository gets a row of its own.
 	if _, err := stores.Repos.FillMissingExternalIDsSystem(ctx, orgA, []domain.RepoRef{
@@ -291,6 +303,17 @@ func TestTeamGitHubRepos_Postgres_TracksRepositoryViewerAdminScoped_RLS(t *testi
 	}
 	if adminTracksAs(carol, api.ID) {
 		t.Error("carol admins teamB, which doesn't track acme/api; want false")
+	}
+
+	// Administering an archived team grants nothing: the team tracks nothing
+	// in the read gate, so the write gate cannot be broader than it.
+	pgtest.MustExec(t, h.AdminDB, `UPDATE teams SET deleted_at = now() WHERE id = $1`, teamA)
+	if adminTracksAs(alice, api.ID) {
+		t.Error("alice administers only an archived team tracking acme/api; want false")
+	}
+	pgtest.MustExec(t, h.AdminDB, `UPDATE teams SET deleted_at = NULL WHERE id = $1`, teamA)
+	if !adminTracksAs(alice, api.ID) {
+		t.Error("alice's team is restored; want true")
 	}
 }
 

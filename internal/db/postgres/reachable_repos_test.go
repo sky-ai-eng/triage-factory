@@ -36,8 +36,14 @@ func TestReachableRepos_Postgres(t *testing.T) {
 			Apps:   stores.GitHubApps,
 			Mirror: stores.ReachableRepos,
 			Repos:  stores.Repos,
+			Teams:  stores.Teams,
 			OrgID:  orgID,
-			TrackRepository: func(t *testing.T, repositoryID string) {
+			TeamID: teamID,
+			SeedTeam: func(t *testing.T, slug string) string {
+				t.Helper()
+				return pgtest.SeedTeam(t, h, orgID, slug)
+			},
+			TrackRepository: func(t *testing.T, teamID, repositoryID string) {
 				t.Helper()
 				pgtest.MustExec(t, h.AdminDB, `
 					INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES ($1, $2, $3)

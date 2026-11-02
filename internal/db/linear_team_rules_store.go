@@ -49,10 +49,13 @@ type LinearTeamRulesStore interface {
 	// ListForTeamSystem is ListForTeam on the admin pool.
 	ListForTeamSystem(ctx context.Context, teamID, workspaceID string) ([]domain.LinearTeamRules, error)
 
-	// ListForOrgSystem returns every team's rows in workspaceID across the
-	// org, ordered by (linear_team_id, team_id): the union the poller merges
-	// per Linear team. Admin pool; the org scope rides the teams join, since
-	// the table carries no org_id of its own.
+	// ListForOrgSystem returns every active team's rows in workspaceID across
+	// the org, ordered by (linear_team_id, team_id): the union the poller and
+	// the terminal checker merge per Linear team. An archived team's rows are
+	// left out, as in TrackingTeamIDsSystem, so a Linear team only it tracks
+	// is not polled until the team is restored; ListForTeamSystem still reads
+	// them by the team's id. Admin pool; the org scope rides the teams join,
+	// since the table carries no org_id of its own.
 	ListForOrgSystem(ctx context.Context, orgID, workspaceID string) ([]domain.LinearTeamRules, error)
 
 	// TracksTeamSystem reports whether the team has a row for linearTeamID in

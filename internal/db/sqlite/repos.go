@@ -363,10 +363,12 @@ func (s *repoStore) List(ctx context.Context, orgID, host string, opts db.ListOp
 
 // repoTrackedByATeam scopes a repositories row to the rows at least one team
 // tracks. Without RLS every team counts, so it is the Postgres predicate's
-// admin-pool reading.
+// admin-pool reading, archived teams left out as there.
 const repoTrackedByATeam = `EXISTS (
 	SELECT 1 FROM team_github_repos g
+	  JOIN teams tm ON tm.id = g.team_id
 	 WHERE g.repository_id = repositories.id
+	   AND tm.deleted_at IS NULL
 )`
 
 // repoTrackedByTeam scopes a repositories row to the rows one team tracks; its
@@ -540,6 +542,7 @@ func (s *repoStore) ListTrackedNamesSystem(ctx context.Context, orgID, host stri
 		SELECT DISTINCT r.owner || '/' || r.repo
 		  FROM repositories r
 		  JOIN team_github_repos g ON g.repository_id = r.id
+		  JOIN teams tm ON tm.id = g.team_id AND tm.deleted_at IS NULL
 		 WHERE r.host = ? AND r.retired_at IS NULL
 		 ORDER BY r.owner, r.repo
 	`, host)

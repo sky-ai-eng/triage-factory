@@ -82,6 +82,9 @@ func TestRepoRecipients_SQLite(t *testing.T) {
 			ArchiveTeam: func(t *testing.T, teamID string) {
 				exec(t, `UPDATE teams SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`, teamID)
 			},
+			RestoreTeam: func(t *testing.T, teamID string) {
+				exec(t, `UPDATE teams SET deleted_at = NULL WHERE id = ?`, teamID)
+			},
 		}
 		return stores.TeamGitHubRepos, seed
 	})

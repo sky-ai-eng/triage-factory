@@ -69,6 +69,7 @@ func (s *jiraStatusRulesStore) ListForOrgSystem(ctx context.Context, orgID, site
 		SELECT `+jiraRuleCols+`
 		`+jiraRuleFrom+`
 		  AND r.org_id = $2
+		  AND EXISTS (SELECT 1 FROM teams t WHERE t.id = r.team_id AND t.deleted_at IS NULL)
 		ORDER BY p.project_key ASC, r.jira_project_id ASC, r.team_id ASC
 	`, site, orgID)
 	return scanJiraStatusRules(rows, err)

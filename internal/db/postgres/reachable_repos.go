@@ -178,8 +178,8 @@ func (s *reachableReposStore) ReplaceForPATSystem(ctx context.Context, orgID, ho
 // repository as untracked purely because someone capitalized the slug
 // differently — a fabricated security finding, which is worse than a missed one.
 //
-// Tracking crosses every team in the org, so the semi-join goes through teams
-// on the admin pool: an org-level fact about the org's own App cannot be
+// Tracking crosses every live team in the org, so the semi-join goes through
+// teams on the admin pool: an org-level fact about the org's own App cannot be
 // rendered from one viewer's team memberships.
 func (s *reachableReposStore) ListReachWithoutPurposeSystem(ctx context.Context, orgID, host string, class domain.GitHubCredentialClass, opts db.ListOpts) ([]domain.ReachableRepository, int, error) {
 	if err := db.RequireGrantClass("list reach without purpose", class); err != nil {
@@ -204,7 +204,7 @@ func (s *reachableReposStore) ListReachWithoutPurposeSystem(ctx context.Context,
 		         FROM team_github_repos g
 		         JOIN teams t ON t.id = g.team_id
 		         JOIN repositories reg ON reg.id = g.repository_id
-		        WHERE t.org_id = r.org_id
+		        WHERE t.org_id = r.org_id AND t.deleted_at IS NULL
 		          AND reg.host = i.github_host AND reg.retired_at IS NULL
 		          AND ` + registryMatchesMirror("reg", "r") + `)`
 	args := []any{orgID, string(class), host}
@@ -287,7 +287,7 @@ func (s *reachableReposStore) ListScopeDriftSystem(ctx context.Context, orgID, h
 		   AND EXISTS (
 		       SELECT 1 FROM team_github_repos g
 		         JOIN teams t ON t.id = g.team_id
-		        WHERE g.repository_id = reg.id AND t.org_id = $1)
+		        WHERE g.repository_id = reg.id AND t.org_id = $1 AND t.deleted_at IS NULL)
 		   AND EXISTS (
 		       SELECT 1 FROM reachable_scopes sc
 		        WHERE sc.org_id = $1 AND sc.credential_class = $2 AND sc.host = $4)
@@ -528,7 +528,7 @@ func (s *reachableReposStore) ListTrackedInGrantsSystem(ctx context.Context, org
 		   AND EXISTS (
 		       SELECT 1 FROM team_github_repos g
 		         JOIN teams t ON t.id = g.team_id
-		        WHERE g.repository_id = reg.id AND t.org_id = $1)
+		        WHERE g.repository_id = reg.id AND t.org_id = $1 AND t.deleted_at IS NULL)
 		   AND EXISTS (
 		       SELECT 1 FROM reachable_repositories m
 		        WHERE m.org_id = $1 AND m.host = $2

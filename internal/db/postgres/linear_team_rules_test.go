@@ -29,6 +29,9 @@ func TestLinearTeamRulesStore_Postgres(t *testing.T) {
 			ArchiveTeam: func(t *testing.T, teamID string) {
 				pgtest.MustExec(t, h.AdminDB, `UPDATE teams SET deleted_at = now() WHERE id = $1`, teamID)
 			},
+			RestoreTeam: func(t *testing.T, teamID string) {
+				pgtest.MustExec(t, h.AdminDB, `UPDATE teams SET deleted_at = NULL WHERE id = $1`, teamID)
+			},
 		}
 	})
 }

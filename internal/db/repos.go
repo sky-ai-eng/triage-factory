@@ -271,7 +271,8 @@ type RepositoryStore interface {
 	// Local mode (SQLite, N=1): returns the same set as ListTrackedSystem —
 	// there is no other team to scope away, mirroring the local-mode
 	// asymmetry of ListActiveJiraTeamScoped / FactoryReadStore.Entities. A
-	// row no team tracks is left out in both dialects.
+	// row no team tracks is left out in both dialects, and an archived team
+	// tracks nothing, as in ListTrackedSystem.
 	//
 	// Confined to host, like List.
 	ListTeamScoped(ctx context.Context, orgID, host string, opts ListOpts) ([]domain.Repository, int, error)
@@ -328,7 +329,10 @@ type RepositoryStore interface {
 	// ListTrackedNamesSystem returns the "owner/repo" of every repository on
 	// host at least one team in the org tracks, ordered and deduplicated — the
 	// set the GitHub poller enumerates, the profiler profiles, and the
-	// dashboard backfill scopes a search to. Callers pass the org's current
+	// dashboard backfill scopes a search to. An archived team tracks nothing
+	// here: a repository only it tracks is not polled or profiled until the
+	// team is restored, and the next cycle after either reads the new set.
+	// Callers pass the org's current
 	// host: a repository tracked on a host the org has since moved away from is
 	// not asked about on the new one, where its name may belong to another
 	// repository.
@@ -363,7 +367,9 @@ type RepositoryStore interface {
 	// team lookups take their owners, and the GitHub tracker keys each
 	// listing's conditional-request state by their ids. A row every team has stopped
 	// tracking is left out; it stays in the registry for the references that
-	// still name it.
+	// still name it. An archived team tracks nothing, so a row only archived
+	// teams track is left out too; ListTrackedByTeamSystem still lists it for
+	// the archived team, whose tracking rows are kept for its restore.
 	//
 	// Admin pool in Postgres, which is what lets "at least one team" reach
 	// teams the caller is not on: the app pool's team_github_repos_select

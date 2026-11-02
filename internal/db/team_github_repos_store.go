@@ -100,7 +100,9 @@ type TeamGitHubReposStore interface {
 	// display names of the teams tracking it, one entry per row, ordered by
 	// (owner, repo, row id) then team name. It is the tracked-set source for
 	// the GitHub-access switch reachability preflights: a repo that goes dark
-	// under the new credential is reported with the teams that own it.
+	// under the new credential is reported with the teams that own it. An
+	// archived team tracks nothing here, so a repo only it tracks is left out
+	// and its name is in no entry's team list.
 	// Admin pool in Postgres — the org admin running a preflight must see every
 	// team's tracking, including teams they don't belong to, so this is a
 	// claims-free system read scoped by org_id in the query.
@@ -162,14 +164,12 @@ type TeamGitHubReposStore interface {
 	// repoevent.Notifier fans one event per returned id onto that axis.
 	// Keyed by the row id the event carries, so a rename between the write
 	// and this read changes nothing, and a retired row's tracking teams are
-	// left out the way the REST read leaves the row out. Mirroring includes
-	// the archived-team case: archive tombstones the team without touching
-	// memberships or tracking rows, so its members still see the repo on GET
-	// /api/repos and stay in this audience — visibility scoping, distinct
-	// from the routing reads (TeamIDsForUserInOrgSystem) that DO exclude
-	// archived teams to keep new work away from them. Admin pool in
-	// Postgres: the emitters are claims-free background jobs. Called fresh
-	// per emission so membership changes take effect immediately; local mode
+	// left out the way the REST read leaves the row out. An archived team's
+	// members are left out the same way: an archived team tracks nothing in
+	// repoTrackedByATeam, so the repo is not on their GET /api/repos through
+	// it, and a restore brings them back. Admin pool in Postgres: the
+	// emitters are claims-free background jobs. Called fresh per emission so
+	// membership and archive changes take effect immediately; local mode
 	// never calls it (N=1 broadcasts org-wide).
 	RepoUpdateRecipientsSystem(ctx context.Context, orgID, repositoryID string) ([]string, error)
 
@@ -182,16 +182,19 @@ type TeamGitHubReposStore interface {
 	// of the repo routes, so a non-admin member can't read or touch a repo
 	// outside their team's tracked set. Keyed by id rather than name because
 	// a name does not pick one row: a retired row keeps the name the
-	// repository now under it holds. Org admins bypass this check entirely at
-	// the handler layer instead of calling it. Local mode (N=1) always
-	// reports true — no team boundary to enforce.
+	// repository now under it holds. An archived team tracks nothing here, as
+	// in ListTeamScoped, so a repo outside this gate is outside the caller's
+	// list too. Org admins bypass this check entirely at the handler layer
+	// instead of calling it. Local mode (N=1) always reports true — no team
+	// boundary to enforce.
 	TracksRepositoryViewerScoped(ctx context.Context, orgID, repositoryID string) (bool, error)
 
 	// TracksRepositoryViewerAdminScoped narrows TracksRepositoryViewerScoped to
 	// teams the calling user *administers*: it reports whether ANY team the
 	// caller is a team admin of tracks the repository with this registry id.
 	// Same app pool, same RLS-does-the-scoping trick, plus an explicit
-	// team-admin predicate on the matched row.
+	// team-admin predicate on the matched row. Administering an archived team
+	// grants nothing, since that team tracks nothing in the read gate.
 	//
 	// This is the mutation gate for org-wide repo configuration
 	// (repositories carries no team_id, so a write by a member of one

@@ -67,12 +67,15 @@ type JiraStatusRulesStore interface {
 	// admin pool in Postgres for callers without a JWT-claims context.
 	ListForTeamSystem(ctx context.Context, teamID, site string) ([]domain.JiraProjectStatusRules, error)
 
-	// ListForOrgSystem returns every team's per-project rules on site across
-	// the org — the UNION the poller discovers, so a non-default team's Jira
-	// config is polled too. One row per (team_id, jira_project_id); the
-	// caller (toTrackerJiraRules) merges members per project. Ordered by
-	// (project key, jira_project_id, team_id) for a deterministic merge.
-	// Admin pool in Postgres: the union spans teams.
+	// ListForOrgSystem returns every active team's per-project rules on site
+	// across the org — the UNION the poller discovers, so a non-default team's
+	// Jira config is polled too, and the one the terminal checker merges done
+	// statuses from. An archived team's rules are left out, so a project only
+	// it tracks is not polled until the team is restored; ListForTeamSystem
+	// still reads them by the team's id. One row per (team_id,
+	// jira_project_id); the caller (toTrackerJiraRules) merges members per
+	// project. Ordered by (project key, jira_project_id, team_id) for a
+	// deterministic merge. Admin pool in Postgres: the union spans teams.
 	ListForOrgSystem(ctx context.Context, orgID, site string) ([]domain.JiraProjectStatusRules, error)
 
 	// TracksJiraProjectSystem reports whether the team has a rule for the

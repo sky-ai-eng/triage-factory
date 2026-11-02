@@ -153,8 +153,9 @@ type ReachableReposStore interface {
 	// Tracking is read from team_github_repos (the union across every team),
 	// never from repositories: that table is a superset, since get-or-create
 	// mints a row for any repository an agent adds to a workspace, and counting
-	// those as "tracked" would under-report the finding. A retired registry row
-	// tracks nothing here: it holds no name, so a team still tracking it says
+	// those as "tracked" would under-report the finding. An archived team tracks
+	// nothing here, so a repository only it tracks is reach without purpose
+	// until the team is restored. A retired registry row tracks nothing here: it holds no name, so a team still tracking it says
 	// nothing about the repository GitHub now serves under that name. An entry
 	// and a tracked row are one repository by GitHub id when both carry one, and
 	// by folded name only when either does not, so a rename TF has not applied
@@ -169,7 +170,9 @@ type ReachableReposStore interface {
 	// ListScopeDriftSystem returns one page of the repositories some team tracks
 	// that no live installation's grant contains — tracked, unreachable, and
 	// therefore silently unpolled — with the total across every page. Same
-	// class rule as ListReachWithoutPurposeSystem.
+	// class rule as ListReachWithoutPurposeSystem, and the same tracking: an
+	// archived team tracks nothing, so a repository only it tracks is not
+	// drift, since nothing would poll it either way.
 	//
 	// Three things keep it a finding rather than a fabrication:
 	//
@@ -257,8 +260,10 @@ type ReachableReposStore interface {
 	ReachableByExternalIDsSystem(ctx context.Context, orgID, host string, class domain.GitHubCredentialClass, externalIDs []string) (map[string]domain.ReachableRepository, error)
 
 	// ListTrackedInGrantsSystem returns the names ("owner/repo", as the
-	// registry spells them) of the live registry rows on host that some team
-	// tracks and that the mirror places in the grant of one of installationIDs.
+	// registry spells them) of the live registry rows on host that some
+	// non-archived team tracks — the tracked set ListTrackedNamesSystem
+	// names — and that the mirror places in the grant of one of
+	// installationIDs.
 	// A row and an entry are one repository by GitHub id when both carry one,
 	// and by folded name only when either does not, so a tracked row is found in
 	// the grant that reaches it whatever either side currently calls it.
