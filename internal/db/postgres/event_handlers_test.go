@@ -58,6 +58,58 @@ func TestEventHandlerStore_Postgres(t *testing.T) {
 	})
 }
 
+// TestTriggerDelete_Postgres runs the trigger-delete conformance suite against
+// the Postgres impl, both pools on AdminDB like the suite above. The
+// conversation is a bare interactive row carrying the trigger_id, which is all
+// conversations_trigger_id_org_id_fkey needs to refuse a hard delete.
+func TestTriggerDelete_Postgres(t *testing.T) {
+	h := pgtest.Shared(t)
+
+	dbtest.RunTriggerDeleteConformance(t, func(t *testing.T) dbtest.TriggerDeleteFixture {
+		t.Helper()
+		h.Reset(t)
+		orgID := seedPgOrgForAgents(t, h)
+		teamID := firstTeamForOrg(t, h, orgID)
+		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+		return dbtest.TriggerDeleteFixture{
+			Handlers: stores.EventHandlers,
+			OrgID:    orgID,
+			TeamID:   teamID,
+			Blueprint: func(t *testing.T) string {
+				t.Helper()
+				id := uuid.New().String()
+				if _, err := stores.Blueprints.Create(t.Context(), orgID, teamID, domain.Blueprint{
+					ID: id, Name: "trigger-delete", Source: "user",
+				}); err != nil {
+					t.Fatalf("seed blueprint: %v", err)
+				}
+				return id
+			},
+			Run: func(t *testing.T, triggerID string) string {
+				t.Helper()
+				id := uuid.New().String()
+				if _, err := h.AdminDB.ExecContext(t.Context(), `
+					INSERT INTO conversations (id, org_id, team_id, trigger_id, trigger_type, origin, status, completed_at)
+					VALUES ($1, $2, $3, $4, 'event', 'interactive', 'open', now())
+				`, id, orgID, teamID, triggerID); err != nil {
+					t.Fatalf("seed conversation: %v", err)
+				}
+				return id
+			},
+			RunTriggerID: func(t *testing.T, conversationID string) string {
+				t.Helper()
+				var triggerID string
+				if err := h.AdminDB.QueryRowContext(t.Context(),
+					`SELECT COALESCE(trigger_id::text, '') FROM conversations WHERE id = $1`, conversationID,
+				).Scan(&triggerID); err != nil {
+					t.Fatalf("read trigger_id of conversation %s: %v", conversationID, err)
+				}
+				return triggerID
+			},
+		}
+	})
+}
+
 // shippedHandlerIDBySlug is the Postgres dbtest.ShippedHandlerIDBySlug: a raw
 // admin-pool read of event_handlers by (org_id, team_id, system_slug), live
 // rows only.

@@ -52,9 +52,11 @@ func (s *blueprintStore) List(ctx context.Context, orgID string, f db.BlueprintL
 		where += `
 		  AND NOT (
 		    EXISTS (SELECT 1 FROM event_handlers h
-		             WHERE h.blueprint_id = blueprints.id AND h.kind = 'trigger')
+		             WHERE h.blueprint_id = blueprints.id AND h.kind = 'trigger'
+		               AND h.deleted_at IS NULL)
 		    AND NOT EXISTS (SELECT 1 FROM event_handlers h
 		                     WHERE h.blueprint_id = blueprints.id AND h.kind = 'trigger'
+		                       AND h.deleted_at IS NULL
 		                       AND h.event_type NOT IN (` + strings.Join(placeholders, ",") + `))
 		  )`
 	}

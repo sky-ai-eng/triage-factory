@@ -425,20 +425,25 @@ func (s *eventHandlerStore) contentChanged(ctx context.Context, orgID string, h 
 	return false, nil
 }
 
-// Delete removes a handler. A system_slug row (shipped copy) soft-deletes so
-// its (org_id, team_id, system_slug) slot stays occupied for the sync's
-// never-resurrect rule; a user-created row (no system_slug) hard-deletes.
+// Delete removes a handler. Two kinds of row soft-delete: a system_slug row
+// (shipped copy), so its (org_id, team_id, system_slug) slot stays occupied
+// for the sync's never-resurrect rule, and every trigger, because
+// conversations.trigger_id and blueprint_runs.trigger_id reference it with no
+// ON DELETE action. A user-created rule or notify rule hard-deletes.
 func (s *eventHandlerStore) Delete(ctx context.Context, orgID, id string) error {
-	var systemSlug sql.NullString
+	var (
+		systemSlug sql.NullString
+		kind       string
+	)
 	switch err := s.q.QueryRowContext(ctx,
-		`SELECT system_slug FROM event_handlers WHERE org_id = ? AND id = ? AND deleted_at IS NULL`, orgID, id,
-	).Scan(&systemSlug); {
+		`SELECT system_slug, kind FROM event_handlers WHERE org_id = ? AND id = ? AND deleted_at IS NULL`, orgID, id,
+	).Scan(&systemSlug, &kind); {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil // already gone; Delete is idempotent
 	case err != nil:
 		return err
 	}
-	if systemSlug.Valid && systemSlug.String != "" {
+	if (systemSlug.Valid && systemSlug.String != "") || kind == domain.EventHandlerKindTrigger {
 		_, err := s.q.ExecContext(ctx,
 			`UPDATE event_handlers SET deleted_at = ? WHERE org_id = ? AND id = ? AND deleted_at IS NULL`,
 			time.Now().UTC(), orgID, id)

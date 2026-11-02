@@ -447,6 +447,7 @@ func hideDuplicateImportedPrompts(ctx context.Context, database *sql.DB, prompts
 		       ON t.blueprint_id = bs.blueprint_id
 		      AND t.org_id       = p.org_id
 		      AND t.kind         = 'trigger'
+		      AND t.deleted_at   IS NULL
 		WHERE p.source = 'imported' AND p.hidden = 0
 		  AND p.org_id = ?
 		GROUP BY p.id, p.name, p.body, p.allowed_tools, p.updated_at, p.created_at

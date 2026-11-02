@@ -344,11 +344,11 @@ func (h *Handler) handleBlueprintUpdate(w http.ResponseWriter, r *http.Request) 
 //     source-dispatch — the other half of the prompt-delete sole-owner pairing.
 //   - The bound trigger is detached: every handler ListForBlueprint resolves is
 //     deleted via EventHandlers.Delete, matching DELETE /api/event-handlers/{id}
-//     and the prompt head-delete path — a system_slug (shipped) trigger
-//     soft-deletes so the shipped-content sync never resurrects it, a
-//     user-created trigger hard-deletes. The blueprint header stays present
-//     (soft-deleted, not gone), so the trigger's (blueprint_id, org_id) /
-//     (blueprint_id, team_id) FKs are always satisfied regardless of order.
+//     and the prompt head-delete path. A trigger is kept as a deleted row, so
+//     the runs that reference it keep their trigger_id. The blueprint header
+//     stays present (soft-deleted, not gone), so the trigger's
+//     (blueprint_id, org_id) / (blueprint_id, team_id) FKs are always
+//     satisfied regardless of order.
 //
 // 404 by re-read (Get filters soft-deleted) when the blueprint is missing or
 // already deleted.
@@ -400,7 +400,8 @@ func (h *Handler) handleBlueprintDelete(w http.ResponseWriter, r *http.Request) 
 			}
 		}
 
-		// Detach the bound trigger(s) — hard-delete, system rows included.
+		// Detach the bound trigger(s). EventHandlers.Delete keeps each one as a
+		// deleted row, system rows included.
 		triggers, e := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, id)
 		if e != nil {
 			return e

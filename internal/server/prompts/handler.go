@@ -384,9 +384,8 @@ func (h *Handler) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 				// Head delete: the trigger fired into the entry prompt that's going
 				// away, so detach it (the downstream wasn't authored as the trigger's
 				// target) via EventHandlers.Delete, matching DELETE
-				// /api/event-handlers/{id} — a system_slug (shipped) trigger soft-deletes so the
-				// shipped-content sync never resurrects it, a user-created trigger
-				// hard-deletes.
+				// /api/event-handlers/{id}, which keeps the trigger as a deleted row
+				// so the runs that reference it keep their trigger_id.
 				if stepIndex == 0 {
 					triggers, te := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, ownerID)
 					if te != nil {

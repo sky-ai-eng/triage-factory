@@ -18,6 +18,13 @@ func TestHandleBlueprintsList_HidesBlueprintWithOnlyGatedTrigger(t *testing.T) {
 	ungatedBP := createBareBlueprint(t, s, "Ungated")
 	attachTrigger(t, s, ungatedBP, domain.EventGitHubPROpened)
 	triggerlessBP := createBareBlueprint(t, s, "TriggerLess")
+	// A deleted trigger is kept as a deleted row; it must not count as the
+	// blueprint's trigger.
+	deletedTriggerBP := createBareBlueprint(t, s, "DeletedGatedTrigger")
+	deletedTrigger := attachTrigger(t, s, deletedTriggerBP, domain.EventJiraIssueAssigned)
+	if rec := doJSON(t, s, http.MethodDelete, "/api/event-handlers/"+deletedTrigger, nil); rec.Code != http.StatusOK {
+		t.Fatalf("delete trigger: %d: %s", rec.Code, rec.Body.String())
+	}
 
 	gateJiraForTest(t)
 
@@ -41,6 +48,9 @@ func TestHandleBlueprintsList_HidesBlueprintWithOnlyGatedTrigger(t *testing.T) {
 	}
 	if !seen[triggerlessBP] {
 		t.Error("trigger-less blueprint must stay visible (unrelated to gating)")
+	}
+	if !seen[deletedTriggerBP] {
+		t.Error("blueprint whose gated trigger was deleted must stay visible")
 	}
 }
 

@@ -377,6 +377,37 @@ func TestHandleEventHandlerDelete_SystemRowSoftDeletes(t *testing.T) {
 	}
 }
 
+// TestHandleEventHandlerDelete_TriggerThatHasRun: a user trigger that has run
+// is referenced by its conversation and blueprint run, so the delete keeps it
+// as a deleted row. It leaves every read, and the runs keep their trigger_id.
+func TestHandleEventHandlerDelete_TriggerThatHasRun(t *testing.T) {
+	s := newTestServer(t)
+	configureEventSources(t, s)
+	bp, _ := createWrappedBlueprint(t, s, "Ran")
+	trigger := attachTrigger(t, s, bp, "github:pr:ci_check_failed")
+	run := seedTriggerRun(t, s, trigger, "trgdel")
+
+	rec := doJSON(t, s, http.MethodDelete, "/api/event-handlers/"+trigger, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if g := doJSON(t, s, http.MethodGet, "/api/event-handlers/"+trigger, nil); g.Code != http.StatusNotFound {
+		t.Errorf("GET after delete = %d, want 404", g.Code)
+	}
+	if n := len(triggersForBlueprint(t, s, bp)); n != 0 {
+		t.Errorf("triggers listed for the blueprint after delete = %d, want 0", n)
+	}
+	if c, br := runTriggerIDs(t, s, run); c != trigger || br != trigger {
+		t.Errorf("run trigger_id after delete = (conversation %q, blueprint run %q), want %q", c, br, trigger)
+	}
+
+	// The one-trigger-per-blueprint index excludes the deleted row, so the
+	// blueprint takes a new trigger.
+	if again := attachTrigger(t, s, bp, "github:pr:ci_check_failed"); again == trigger {
+		t.Errorf("new trigger reused the deleted trigger's id %s", trigger)
+	}
+}
+
 // --- POST /api/event-handlers/{id}/promote -------------------------------
 
 func TestHandleEventHandlerPromote_RejectsAlreadyTrigger(t *testing.T) {
