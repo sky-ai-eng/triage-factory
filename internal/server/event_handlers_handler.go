@@ -941,11 +941,13 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 
 // DELETE /api/event-handlers/{id}
 //
-// A shipped copy (system_slug set) soft-deletes: EventHandlers.Delete stamps
-// deleted_at, leaving the (org_id, team_id, system_slug) slot occupied so the
-// boot-time shipped-content sync never resurrects it. A user-created handler
-// (no system_slug) hard-deletes. Every read path filters deleted_at IS NULL,
-// so the two are indistinguishable to callers other than the sync itself.
+// A shipped copy (system_slug set) and every trigger soft-delete:
+// EventHandlers.Delete stamps deleted_at. A shipped copy's
+// (org_id, team_id, system_slug) slot stays occupied so the boot-time
+// shipped-content sync never resurrects it; a trigger stays because the runs
+// it started reference it. A user-created rule or notify rule hard-deletes.
+// Every read path filters deleted_at IS NULL, so the two are indistinguishable
+// to the API.
 func (eh *eventHandlersHandler) handleEventHandlerDelete(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {

@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'motion/react'
 import * as Switch from '@radix-ui/react-switch'
 import { Tooltip } from '../ui/tooltip/Tooltip'
 import { Info } from 'lucide-react'
-import type { TriggerHandler, EventType } from '../types'
+import type { Blueprint, TriggerHandler, EventType } from '../types'
 import EventBadge from './EventBadge'
 import PredicateEditor from './PredicateEditor'
 import Slider from './Slider'
@@ -95,14 +95,12 @@ export default function TriggerConfigPanel({
     setConfirmDelete(false)
     setPromptName('')
 
-    // Resolve the bound blueprint's name for the badge — blueprints expose
-    // only a list endpoint, so fetch the list and find by id.
-    apiJSON<Array<{ id: string; name: string }>>(blueprintsBase())
-      .then((list) => {
-        const match = Array.isArray(list)
-          ? list.find((b) => b.id === trigger.blueprint_id)
-          : undefined
-        if (!cancelled && match) setPromptName(match.name)
+    // The bound blueprint's name is the badge. A failed read leaves it empty.
+    apiJSON<Pick<Blueprint, 'name'>>(
+      `${blueprintsBase()}/${encodeURIComponent(trigger.blueprint_id)}`,
+    )
+      .then((bp) => {
+        if (!cancelled && bp?.name) setPromptName(bp.name)
       })
       .catch(() => {})
 

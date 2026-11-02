@@ -5,15 +5,16 @@ import (
 	"testing"
 )
 
-// TestBlueprintDelete_CascadesPromptsAndTrigger deletes a multi-step blueprint:
-// the header and every step prompt soft-delete (request reads 404, but the rows
-// survive for the ...System reads of in-flight run timelines), and the bound
-// trigger is hard-deleted.
+// TestBlueprintDelete_CascadesPromptsAndTrigger deletes a multi-step blueprint
+// whose trigger has run: the header, every step prompt and the bound trigger
+// soft-delete (request reads 404, but the rows survive for the ...System reads
+// of in-flight run timelines and for the runs that reference the trigger).
 func TestBlueprintDelete_CascadesPromptsAndTrigger(t *testing.T) {
 	s := newTestServer(t)
 	configureEventSources(t, s)
 	bp, ps := createChainBlueprint(t, s, "DeleteMe", 3)
-	attachTrigger(t, s, bp, "github:pr:ci_check_failed")
+	trigger := attachTrigger(t, s, bp, "github:pr:ci_check_failed")
+	run := seedTriggerRun(t, s, trigger, "bpdel")
 
 	del := doJSON(t, s, http.MethodDelete, "/api/blueprints/"+bp, nil)
 	if del.Code != http.StatusOK {
@@ -40,9 +41,8 @@ func TestBlueprintDelete_CascadesPromptsAndTrigger(t *testing.T) {
 		t.Errorf("trigger count after blueprint delete = %d, want 0 (detached)", n)
 	}
 
-	// Soft vs hard, at the row level: the header + every step prompt survive with
-	// deleted_at stamped (so the ...System reads resolve them), but the trigger
-	// row is physically gone (hard delete, system rows included).
+	// At the row level, the header, every step prompt and the trigger survive
+	// with deleted_at stamped, and the run still names its trigger.
 	if n := countRows(t, s, `SELECT COUNT(*) FROM blueprints WHERE id = ? AND deleted_at IS NOT NULL`, bp); n != 1 {
 		t.Errorf("blueprint header rows with deleted_at = %d, want 1 (soft-delete, row survives)", n)
 	}
@@ -51,8 +51,11 @@ func TestBlueprintDelete_CascadesPromptsAndTrigger(t *testing.T) {
 			t.Errorf("step prompt %s rows with deleted_at = %d, want 1 (soft-delete)", p, n)
 		}
 	}
-	if n := countRows(t, s, `SELECT COUNT(*) FROM event_handlers WHERE blueprint_id = ?`, bp); n != 0 {
-		t.Errorf("trigger rows after blueprint delete = %d, want 0 (hard-deleted)", n)
+	if n := countRows(t, s, `SELECT COUNT(*) FROM event_handlers WHERE id = ? AND deleted_at IS NOT NULL`, trigger); n != 1 {
+		t.Errorf("trigger rows with deleted_at = %d, want 1 (soft-delete)", n)
+	}
+	if c, br := runTriggerIDs(t, s, run); c != trigger || br != trigger {
+		t.Errorf("run trigger_id after blueprint delete = (conversation %q, blueprint run %q), want %q", c, br, trigger)
 	}
 }
 

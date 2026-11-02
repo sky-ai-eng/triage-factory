@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx/httpxtest"
 )
@@ -126,7 +127,7 @@ func TestPromptDelete_SplitsMultiStepBlueprint(t *testing.T) {
 			}
 
 			// A head delete retires the blueprint with its entry prompt and
-			// hard-deletes its trigger rather than leave it on a deleted row.
+			// deletes its trigger rather than leave it on a deleted row.
 			wantTriggers := 1
 			if tc.at == 0 {
 				wantTriggers = 0
@@ -244,6 +245,31 @@ func attachTrigger(t *testing.T, s *Server, blueprintID, eventType string) strin
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &tr)
 	return tr.ID
+}
+
+// seedTriggerRun records a run of triggerID: a conversation and its blueprint
+// run, both carrying the trigger_id that references the trigger. Returns the
+// conversation id.
+func seedTriggerRun(t *testing.T, s *Server, triggerID, suffix string) string {
+	t.Helper()
+	conversationID := seedSteerConversation(t, s.db, suffix, dbtest.SeedConcluded)
+	execSQL(t, s.db, `UPDATE conversations SET trigger_id = ? WHERE id = ?`, triggerID, conversationID)
+	execSQL(t, s.db, `UPDATE blueprint_runs SET trigger_id = ? WHERE id = (SELECT blueprint_run_id FROM conversations WHERE id = ?)`, triggerID, conversationID)
+	return conversationID
+}
+
+// runTriggerIDs returns the trigger_id a conversation and its blueprint run
+// carry.
+func runTriggerIDs(t *testing.T, s *Server, conversationID string) (conversation, blueprintRun string) {
+	t.Helper()
+	if err := s.db.QueryRow(`
+		SELECT COALESCE(c.trigger_id, ''), COALESCE(br.trigger_id, '')
+		FROM conversations c JOIN blueprint_runs br ON br.id = c.blueprint_run_id
+		WHERE c.id = ?`, conversationID,
+	).Scan(&conversation, &blueprintRun); err != nil {
+		t.Fatalf("read trigger_id of conversation %s: %v", conversationID, err)
+	}
+	return conversation, blueprintRun
 }
 
 // triggersForBlueprint returns the trigger handlers bound to blueprintID.

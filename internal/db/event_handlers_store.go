@@ -177,15 +177,26 @@ type EventHandlerStore interface {
 	// held.
 	Update(ctx context.Context, orgID string, h domain.EventHandler) (domain.EventHandler, error)
 
-	// Delete removes a handler. A row with a system_slug (a shipped copy)
-	// soft-deletes — stamps deleted_at, leaving the
-	// (org_id, team_id, system_slug) identity occupied so the shipped-content
-	// sync never re-inserts (never resurrect) and never mistakes the empty
-	// slot for "add this new shipped default." A user-created row (no
-	// system_slug) hard-deletes, matching the pre-sync behavior. Every read
-	// path filters deleted_at IS NULL, so a soft-deleted row is
-	// indistinguishable from a hard-deleted one to every caller except the
-	// sync itself.
+	// Delete removes a handler. Two kinds of row are kept, soft-deleted by
+	// stamping deleted_at:
+	//
+	//   - A row with a system_slug (a shipped copy), leaving the
+	//     (org_id, team_id, system_slug) identity occupied so the
+	//     shipped-content sync never re-inserts it (never resurrect) and never
+	//     mistakes the empty slot for "add this new shipped default."
+	//   - Every trigger, because conversations.trigger_id and
+	//     blueprint_runs.trigger_id reference it with no ON DELETE action.
+	//     Whether a trigger has run is not asked: RLS hides a run from everyone
+	//     but its creator, so the caller cannot see every row that references
+	//     it. Its runs keep their trigger_id.
+	//
+	// A user-created rule or notify rule hard-deletes. Every read path filters
+	// deleted_at IS NULL, so a soft-deleted row is indistinguishable from a
+	// hard-deleted one to every caller except the sync and the rows that
+	// reference it. A deleted trigger never fires again (the firing worker
+	// skips a queued firing whose trigger it cannot read), and the
+	// one-trigger-per-blueprint index excludes it, so its blueprint can take a
+	// new trigger.
 	//
 	// Exempt from the returned-row rule: it is a delete. The soft arm leaves a
 	// row, but one every read path filters out — precisely the row a caller

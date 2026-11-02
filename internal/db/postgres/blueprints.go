@@ -63,10 +63,11 @@ func (s *blueprintStore) List(ctx context.Context, orgID string, f db.BlueprintL
 		  AND NOT (
 		    EXISTS (SELECT 1 FROM event_handlers h
 		             WHERE h.org_id = blueprints.org_id AND h.blueprint_id = blueprints.id
-		               AND h.kind = 'trigger')
+		               AND h.kind = 'trigger' AND h.deleted_at IS NULL)
 		    AND NOT EXISTS (SELECT 1 FROM event_handlers h
 		                     WHERE h.org_id = blueprints.org_id AND h.blueprint_id = blueprints.id
-		                       AND h.kind = 'trigger' AND NOT (h.event_type = ANY(` + gated + `)))
+		                       AND h.kind = 'trigger' AND h.deleted_at IS NULL
+		                       AND NOT (h.event_type = ANY(` + gated + `)))
 		  )`
 	}
 
