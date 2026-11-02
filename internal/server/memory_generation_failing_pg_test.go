@@ -65,8 +65,8 @@ func TestMemoryGenerationFailing_Postgres_RetryNow(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("retry = %d: %s", rec.Code, rec.Body.String())
 	}
-	if it := decodeNotificationItem(t, rec.Body.Bytes()); it.ResolvedAt != nil {
-		t.Errorf("invoked row = %+v, want it still open until an attempt succeeds", it)
+	if ans := decodeNotificationAction(t, rec.Body.Bytes()); ans.Notification == nil || ans.Notification.ResolvedAt != nil {
+		t.Errorf("invoke answered %+v, want the row still open until an attempt succeeds", ans)
 	}
 	if want := org.String() + "/"; len(rung) != 1 || rung[0] != want {
 		t.Errorf("doorbell = %v, want the org-wide ring %q", rung, want)

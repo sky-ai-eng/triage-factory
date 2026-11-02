@@ -81,9 +81,28 @@ var MemoryGenerationFailing = notify.Condition(notify.ConditionSpec[MemoryFailur
 			Body:  body,
 			Actions: []notify.Action{
 				notify.Link("Open background jobs model", notify.Routes.OrgSettings()),
-				notify.Invoke("retry", "Retry now", notify.RequiresOrgAdmin),
+				notify.Invoke("retry", "Retry now", "Retrying…", notify.RequiresOrgAdmin),
 			},
 		}
+	},
+	// An occurrence is one error kind, so it resolves when memories stop
+	// failing that way: they are written, or fail some other way, which is an
+	// occurrence of its own.
+	Resolved: func(f MemoryFailure, r notify.Resolution) string {
+		if r.Reason == domain.NotificationResolvedAudienceRemoved {
+			return noLongerApplies(r.Recipient)
+		}
+		switch f.ErrorKind {
+		case domain.MemoryAttemptErrNoModel:
+			return "A background jobs model is set, so task memories can be generated again."
+		case domain.MemoryAttemptErrProviderError:
+			return "Task memories no longer fail at the model provider."
+		case domain.MemoryAttemptErrTimeout:
+			return "Task memories no longer time out."
+		case domain.MemoryAttemptErrProviderBackoff:
+			return "Triage Factory is no longer holding calls to the model provider back."
+		}
+		return "Task memories no longer fail this way."
 	},
 	Example: MemoryFailure{
 		ErrorKind:    domain.MemoryAttemptErrNoModel,

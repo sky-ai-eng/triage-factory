@@ -140,10 +140,16 @@ var LinearTeamUnreadable = notify.Condition(notify.ConditionSpec[LinearTeam]{
 		// A team admin can untrack, and the settings page is an org admin's,
 		// so the invoke is a team row's primary action.
 		c.Actions = []notify.Action{
-			notify.Invoke("untrack", "Stop tracking "+t.TeamKey, notify.RequiresTeamAdmin, notify.Confirm("…")),
+			notify.Invoke("untrack", "Stop tracking "+t.TeamKey, "Stopping…", notify.RequiresTeamAdmin, notify.Confirm("…")),
 			settings,
 		}
 		return c
+	},
+	Resolved: func(t LinearTeam, r notify.Resolution) string {
+		if r.Reason == domain.NotificationResolvedAudienceRemoved && r.Recipient.Scope == domain.NotificationScopeTeam {
+			return "This team stopped tracking " + t.TeamKey + "."
+		}
+		return "The organization's Linear connection can read " + t.TeamKey + " again, or no team tracks it any more."
 	},
 	Example: LinearTeam{LinearTeamID: "00000000-0000-0000-0000-000000000000", TeamKey: "ENG"},
 })
@@ -159,6 +165,7 @@ var LinearTeamUnreadable = notify.Condition(notify.ConditionSpec[LinearTeam]{
 | `Key`         | ✓         | ✓        | Ids only.                                                                                                                         |
 | `Audience`    | ✓         | ✓        | Composed from the constructors below.                                                                                             |
 | `Render`      | ✓         | ✓        | `func(P, Recipient) Content`. Receives the audience being rendered, so a team row can carry an action an org row does not.        |
+| `Resolved`    | ✓         | —        | `func(P, Resolution) string`: why a row resolved, in a sentence, for its reason and audience. Notices expire instead.             |
 | `Example`     | ✓         | ✓        | A representative `P`, used by the kinds conformance test and a dev page that renders every kind.                                  |
 
 **Where kinds live.** `internal/notify/kinds`, one file per source, so every audience and every line of copy is reviewed in one place. `kinds` imports `notify` and `domain`, never a producer package. `ee/` defines its kinds in its own packages with the same constructors; core never imports them.
@@ -171,20 +178,21 @@ var LinearTeamUnreadable = notify.Condition(notify.ConditionSpec[LinearTeam]{
 - Resolves the audience; inserts rows for audiences newly named and resolves open rows for audiences no longer named (`resolved_reason = 'audience_removed'`) — so a team that stops tracking a subject stops being told about it.
 - Sets `escalated_at` on a priority increase.
 - Stores `P` as the row's `params` and hands it back typed to action handlers.
+- Writes each resolved row's `resolution`: its kind's `Resolved`, from the params the row was last raised with, in the transaction that resolves it. A `Resolved` that fails is counted and leaves the row without one; the resolution stands.
 - Sends the websocket ping on open, escalation and resolution only.
 - Does all of a call's writes in one transaction.
 
 ### Wiring
 
-`app.New` calls `notify.Install(backend)` once — the store, the audience stores, the hub — the same shape as `entitlements.RegisterProvider`. Nothing is threaded through constructors. Before `Install`, every verb is a no-op: that is the correct behavior for the host-cli and jail-cli identities, and a boot test asserts the server installs it.
+`app.New` calls `notify.Install(backend)` once — the store, the audience stores, the hub, and the event rendering (`kinds.Event`) that says why an event row resolved — the same shape as `entitlements.RegisterProvider`. Nothing is threaded through constructors. Before `Install`, every verb is a no-op: that is the correct behavior for the host-cli and jail-cli identities, and a boot test asserts the server installs it.
 
-**Invoke handlers** are the one integration that is more than a line. The kind declares the action (id, label, required permission, optional confirmation text); the effect is registered once at boot, beside the code that owns the operation:
+**Invoke handlers** are the one integration that is more than a line. The kind declares the action (id, label, the label a client shows while the call is out, required permission, optional confirmation text); the effect is registered once at boot, beside the code that owns the operation:
 
 ```go
 kinds.LinearTeamUnreadable.HandleAction("untrack", s.untrackUnreadableLinearTeam)
 ```
 
-`untrackUnreadableLinearTeam` writes through the functions the tracked-set route uses (its gate, `authz.Checker.TeamAdminWrite`, and its write, `saveTeamLinearTeams`), so validation and authorization exist once. A refusal from them is an `*httpx.Fault`, which the invoke route answers with as the tracked-set route would. It receives the request context carrying the caller's claims and a typed `notify.ActionCall[P]` (the row's org, the caller, the row's recipient, the decoded params) and returns whether the effect resolved the condition; if so, `notify` resolves the row the action was invoked on immediately, and the occurrence's other audiences' rows wait for the producer's next evaluation. The dispatcher the route calls is `notify.Caller`: `Actions` for the read, `RunAction` for the invoke, one permission check behind both. Handlers are registered from `internal/server` (in `server.New`) or `internal/app` (in `buildNotify`) because `kinds` cannot import them. A boot test fails if any `Invoke` id a kind's `Example` renders has no handler.
+`untrackUnreadableLinearTeam` writes through the functions the tracked-set route uses (its gate, `authz.Checker.TeamAdminWrite`, and its write, `saveTeamLinearTeams`), so validation and authorization exist once. A refusal from them is an `*httpx.Fault`, which the invoke route answers with as the tracked-set route would. It receives the request context carrying the caller's claims and a typed `notify.ActionCall[P]` (the row's org, the caller, the row's recipient, the decoded params) and returns a `notify.ActionResult`: an `Outcome`, the sentence the caller is told, which is required; and `Resolved`, the reason when the effect resolved the condition (`cleared` when it fixed it, `audience_removed` when it took the row's audience out of it). When set, `notify` resolves the row the action was invoked on immediately, for that reason, and the occurrence's other audiences' rows wait for the producer's next evaluation. The dispatcher the route calls is `notify.Caller`: `Actions` for the read, `RunAction` for the invoke, one permission check behind both. Handlers are registered from `internal/server` (in `server.New`) or `internal/app` (in `buildNotify`) because `kinds` cannot import them. A boot test fails if any `Invoke` id a kind's `Example` renders has no handler.
 
 ### Tests
 
@@ -194,7 +202,7 @@ rec := notifytest.Record(t)
 rec.Active(t, orgID, kinds.LinearTeamUnreadable)
 ```
 
-The recorder is installed for the test and its assertions filter by the test's own org id, so parallel tests do not see each other. It answers `OpenOrgs` from every installed recorder, so a producer test that re-evaluates those orgs can reach another test's. A conformance test in `kinds` renders every kind's `Example` for every audience it can produce and checks: a non-empty title, at most two actions, every notice has an action, every `Link` route resolves, and no two kinds share a name.
+The recorder is installed for the test and its assertions filter by the test's own org id, so parallel tests do not see each other. It answers `OpenOrgs` from every installed recorder, so a producer test that re-evaluates those orgs can reach another test's. A conformance test in `kinds` renders every kind's `Example` for every audience it can produce and checks: a non-empty title, at most two actions, every notice has an action, every `Link` route resolves, every condition's `Resolved` gives a sentence for each way it can resolve, and no two kinds share a name.
 
 ## Data model
 
@@ -225,6 +233,7 @@ Postgres changes go into the baseline; SQLite gets a forward migration. Both beh
 | `escalated_at`                  | timestamptz      | `first_seen_at` until the priority first increases.                                 |
 | `resolved_at`                   | timestamptz NULL |                                                                                     |
 | `resolved_reason`               | text NULL        | `cleared` \| `source_off` \| `audience_removed`                                     |
+| `resolution`                    | text NULL        | Why the row resolved, in a sentence its kind renders. NULL while open.              |
 | `expires_at`                    | timestamptz NULL | Notices only.                                                                       |
 | `entity_id`                     | uuid NULL        | Set iff `origin = 'event'`: the entity the event is about. FK `entities`.           |
 
@@ -266,7 +275,7 @@ The inbox is viewer-relative, so it lives under `/api/me` and answers for the or
 | `GET /api/me/notifications/{id}`                      | One notification the caller may read, with the caller's marks. 404 otherwise.                                                                                                                                                                   |
 | `PATCH /api/me/notifications/{id}`                    | The caller's marks: `{"read": bool, "dismissed": bool}`. Absent keeps a mark; `false` (or `null`) clears it. Answers the item as the caller now sees it.                                                                                         |
 | `POST /api/me/notifications/mark-read`                | `{"ids": [...]}` — the rows the client actually rendered, so a row that arrived after rendering is not marked. Multi-row transition, hence a verb route. Answers `{"ids": [...]}`, the ids it marked; one the caller cannot read is left out.   |
-| `POST /api/me/notifications/{id}/actions/{action_id}` | Run a declared invoke action. No body. 403 when the caller lacks the action's permission; 404 for an unknown action id or an unreadable row; 409 once the condition has resolved; a handler's own refusal (`*httpx.Fault`) with its status. Answers the item as the caller now sees it, or 204 when the row has since left what they may read.  |
+| `POST /api/me/notifications/{id}/actions/{action_id}` | Run a declared invoke action. No body. 403 when the caller lacks the action's permission; 404 for an unknown action id or an unreadable row; 409 once the condition has resolved; a handler's own refusal (`*httpx.Fault`) with its status. Answers `{"notification": item, "outcome": "…"}`: what the action did, in a sentence, and the item as the caller now sees it, `null` when the row has since left what they may read. |
 | `POST /api/orgs/{org_id}/notifications/list`          | Org admins: every notification in the org, team rows included (the "All teams" view). Same filters plus `team_id_in`. Items carry the caller's marks.                                                                                           |
 
 The badge is `status=open, dismissed=false, unread=true, priority_in=[urgent, high], page_size=0`. The banner is `status=open, dismissed=false, priority_in=[urgent]`.
@@ -288,6 +297,7 @@ An item:
   "seen_count": 412,
   "resolved_at": null,
   "resolved_reason": null,
+  "resolution": null,
   "expires_at": null,
   "actions": [
     {
@@ -300,6 +310,7 @@ An item:
       "id": "untrack",
       "type": "invoke",
       "label": "Stop tracking ENG",
+      "running_label": "Stopping…",
       "confirm": "…",
       "allowed": true
     }
@@ -312,7 +323,7 @@ An item:
 ### Actions
 
 - **`link`** — `href` is an in-app path built by `notify.Routes` (one Go table of the SPA's routes, rendered with the org prefixed, so API and later email clients get a working address) or an external URL from `notify.External`. External URLs are accepted only on the org's configured hosts (`github_base_url`, `jira_base_url`, Linear while a workspace is connected), with no dot segments in the path, and checked when the row is written. A rendering that is refused fails a `Set` or `Post`; in a `Sync` it skips only that member, whose key is kept so its open row is neither bumped nor resolved. A link's id is its route's name, or `external`. A test holds the route table to `frontend/src/main.tsx`.
-- **`invoke`** — runs a registered handler (see **Wiring**). Only a condition carries one; a notice's actions are links. The declared permission (`RequiresOrgAdmin`, or `RequiresTeamAdmin`, which only a team row's action may declare) is stored on the row. `allowed` is computed per viewer at read time from it, and is true only while the condition is open, the viewer holds the permission and the process has the handler, so a client never offers a button that answers 403, 404 or 409. A team member can see "team unreadable" without being allowed to untrack the team.
+- **`invoke`** — runs a registered handler (see **Wiring**). Only a condition carries one; a notice's actions are links. `running_label` is what a client shows in the label's place while the call is out. The declared permission (`RequiresOrgAdmin`, or `RequiresTeamAdmin`, which only a team row's action may declare) is stored on the row. `allowed` is computed per viewer at read time from it, and is true only while the condition is open, the viewer holds the permission and the process has the handler, so a client never offers a button that answers 403, 404 or 409. A team member can see "team unreadable" without being allowed to untrack the team.
 
 ## Websocket
 
@@ -441,6 +452,7 @@ One rendering for every event type (`kinds.Event`):
 
 - **Title:** the catalog label and the entity's key, e.g. `CI Check Failed: acme/widgets#18`.
 - **Body:** the entity's title, then `From your rule "…"` or `From the team rule "…"`.
+- **Resolution:** the event whose routing resolved the row, e.g. `CI Check Passed on acme/widgets#18.`, or `Issue Assigned again on SKY-123.` when an event of the row's own type closed it (a reassignment); `acme/widgets#18 is no longer open.` when the closed-entity sweep or the poll's close obligation resolved it; and the source turned off for `ClearSource`. The close phase passes `ResolveEvents` the event type it is routing for this, and none for the close obligation, which stands in for a close that was lost.
 - **Actions:** a link to the entity on its source (an external link, so the host check applies), and a link to the rule: "Edit your rule" on a personal row, which is how a person stops being told until per-person preferences exist, and "Open the team rule" on a team row. The entity's link is data rather than code, so an event row whose link is refused (no stored URL, a host the org no longer configures) is written with its other actions instead of failing the raise. An unreadable org setting is not a refused link: the host check could not run, and the raise fails as any unreadable read does.
 
 No type gets copy of its own in this phase. Where two open rows on one entity share a title (one per requested reviewer, one per label), the entity is where the reader acts on either, and a type that needs more than the label gets a renderer of its own when someone asks for it.

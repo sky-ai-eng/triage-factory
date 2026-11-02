@@ -66,10 +66,15 @@ type NotificationStore interface {
 	// with that source.
 	ResolveSourceSystem(ctx context.Context, orgID, source string) ([]domain.Notification, error)
 
-	// ResolveIDSystem resolves (cleared) the one row id names, leaving the
+	// ResolveIDSystem resolves the one row id names for reason, leaving the
 	// other audiences' rows of its key open, and returns it; nil when it is
 	// not an open condition in orgID.
-	ResolveIDSystem(ctx context.Context, orgID, id string) (*domain.Notification, error)
+	ResolveIDSystem(ctx context.Context, orgID, id string, reason domain.NotificationResolvedReason) (*domain.Notification, error)
+
+	// SetResolutionSystem writes the sentence saying why a resolved row
+	// resolved and returns the row; nil when id is not a resolved row in
+	// orgID.
+	SetResolutionSystem(ctx context.Context, orgID, id, resolution string) (*domain.Notification, error)
 
 	// OpenEventKeysSystem returns the distinct (kind, key) of the open event
 	// conditions about entityID whose kind is in kinds, ordered: what an
@@ -383,7 +388,7 @@ func NotificationAudiencesJSON(audiences []domain.NotificationAudience) (string,
 	return string(b), nil
 }
 
-// notificationRow holds the 25-column projection both dialects emit, with
+// notificationRow holds the 26-column projection both dialects emit, with
 // nullable text COALESCEd to the empty string, while it is scanned.
 type notificationRow struct {
 	n                   domain.Notification
@@ -397,7 +402,7 @@ func (r *notificationRow) dest() []any {
 		&n.Audience.Scope, &n.Audience.Role, &n.Audience.TeamID, &n.Audience.UserID,
 		&n.Source, &n.Priority, &n.Dismissible, &n.Title, &n.Body, &r.actions, &r.params,
 		&n.FirstSeenAt, &n.LastSeenAt, &n.SeenCount, &n.EscalatedAt,
-		&r.resolvedAt, &n.ResolvedReason, &r.expires, &n.EntityID}
+		&r.resolvedAt, &n.ResolvedReason, &n.Resolution, &r.expires, &n.EntityID}
 }
 
 func (r *notificationRow) finish() domain.Notification {

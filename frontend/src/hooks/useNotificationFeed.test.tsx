@@ -22,8 +22,14 @@ vi.mock('./useOrgHref', () => ({ useOrgHref: () => (path: string) => '/orgs/org-
 const navigate = vi.fn()
 vi.mock('react-router', () => ({ useNavigate: () => navigate }))
 const toastError = vi.fn()
+const toastInfo = vi.fn()
+const toastSuccess = vi.fn()
 vi.mock('../components/Toast/toastStore', () => ({
-  toast: { error: (m: string) => toastError(m) },
+  toast: {
+    error: (m: string) => toastError(m),
+    info: (m: string) => toastInfo(m),
+    success: (m: string) => toastSuccess(m),
+  },
 }))
 
 const LIST = '/api/me/notifications/list'
@@ -54,6 +60,7 @@ function note(id: string, over: Partial<NotificationItem> = {}): NotificationIte
     seen_count: 1,
     resolved_at: null,
     resolved_reason: null,
+    resolution: null,
     expires_at: null,
     actions: [],
     read: false,
@@ -81,9 +88,31 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       ...jsonBody({ items: high, total_count: high.length }),
     }
   }
+  const id = url.split('/')[4]
   if (url.endsWith('/actions/gone'))
-    return { ok: true, status: 204, headers, ...jsonBody(undefined) }
-  return { ok: true, status: 200, headers, ...jsonBody(note(url.split('/')[4])) }
+    return {
+      ok: true,
+      status: 200,
+      headers,
+      ...jsonBody({ notification: null, outcome: 'Untracked.' }),
+    }
+  if (url.endsWith('/actions/fixed')) {
+    const resolved = note(id, { resolved_at: new Date().toISOString(), resolution: 'Fixed.' })
+    return {
+      ok: true,
+      status: 200,
+      headers,
+      ...jsonBody({ notification: resolved, outcome: 'Fixed it.' }),
+    }
+  }
+  if (url.includes('/actions/'))
+    return {
+      ok: true,
+      status: 200,
+      headers,
+      ...jsonBody({ notification: note(id), outcome: 'Retrying.' }),
+    }
+  return { ok: true, status: 200, headers, ...jsonBody(note(id)) }
 })
 
 /** A ping, and the debounced read it starts. */
@@ -104,6 +133,8 @@ beforeEach(() => {
   fetchMock.mockClear()
   navigate.mockClear()
   toastError.mockClear()
+  toastInfo.mockClear()
+  toastSuccess.mockClear()
   vi.stubGlobal('fetch', fetchMock)
 })
 
@@ -176,6 +207,20 @@ describe('useNotificationFeed', () => {
     await act(async () => result.current.confirm())
     expect(result.current.pending).toBeNull()
     await waitFor(() => expect(ran()).toBe(true))
+    // The outcome is the action's own words.
+    await waitFor(() => expect(toastInfo).toHaveBeenCalledWith('Retrying.'))
+  })
+
+  it("tells the viewer an action's outcome, as a success once it resolved the row", async () => {
+    const item = note('u1', { priority: 'urgent' })
+    const { result } = renderHook(() => useNotificationFeed())
+    await waitFor(() => expect(result.current.count).toBe(0))
+
+    await act(async () =>
+      result.current.act(item, { id: 'fixed', type: 'invoke', label: 'Fix', allowed: true }),
+    )
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith('Fixed it.'))
+    expect(toastInfo).not.toHaveBeenCalled()
   })
 
   it('drops an invoke waiting on confirmation when the org changes', async () => {
@@ -293,5 +338,6 @@ describe('useNotificationFeed', () => {
       ),
     )
     expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'PATCH')).toBe(false)
+    expect(toastInfo).toHaveBeenCalledWith('Untracked.')
   })
 })

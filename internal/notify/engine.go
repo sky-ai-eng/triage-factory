@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -234,20 +235,88 @@ func (o occurrence) writeCondition(ctx context.Context, orgID string) func(db.No
 	}
 }
 
-// commit runs one call's writes in one transaction and pings what they
-// changed once it commits.
+// commit runs one call's writes in one transaction, with the sentence saying
+// why each row they resolved did, and pings what they changed once it
+// commits.
 func (e *engine) commit(ctx context.Context, label, orgID string, write func(db.NotificationStore) ([]domain.Notification, error)) {
+	e.commitClosedBy(ctx, label, orgID, "", write)
+}
+
+// commitClosedBy is commit for writes that resolve event rows on the routing
+// of an event of type closedBy.
+func (e *engine) commitClosedBy(ctx context.Context, label, orgID, closedBy string, write func(db.NotificationStore) ([]domain.Notification, error)) {
 	var changed []domain.Notification
 	err := e.b.Tx.SystemWithTx(ctx, orgID, func(tx db.SystemTxStores) error {
 		var err error
-		changed, err = write(tx.Notifications)
-		return err
+		if changed, err = write(tx.Notifications); err != nil {
+			return err
+		}
+		return e.describe(ctx, tx.Notifications, changed, closedBy)
 	})
 	if err != nil {
 		e.fail(label, orgID, fmt.Errorf("write: %w", err))
 		return
 	}
 	e.ping(ctx, orgID, changed)
+}
+
+// describe writes, on each row in changed that resolved, its kind's sentence
+// for why. A row whose kind is not registered, or whose Resolved fails, is
+// logged and counted and left without one: the resolution itself stands.
+func (e *engine) describe(ctx context.Context, tx db.NotificationStore, changed []domain.Notification, closedBy string) error {
+	for _, n := range changed {
+		if n.ResolvedAt == nil {
+			continue
+		}
+		text, err := e.why(n, closedBy)
+		if err != nil {
+			label := n.Kind
+			if n.Origin == domain.NotificationOriginEvent {
+				label = eventLabel
+			}
+			notifyLog.Warn("notification resolution not described", "kind", n.Kind, "org", n.OrgID, "id", n.ID, "error", err)
+			recordWriteFailure(label)
+			continue
+		}
+		if _, err := tx.SetResolutionSystem(ctx, n.OrgID, n.ID, text); err != nil {
+			return fmt.Errorf("describe resolution of %s: %w", n.ID, err)
+		}
+	}
+	return nil
+}
+
+// why renders n's Resolved, from the params it was last raised with.
+func (e *engine) why(n domain.Notification, closedBy string) (text string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			text, err = "", fmt.Errorf("resolved panicked: %v", r)
+		}
+	}()
+	r := Resolution{Reason: n.ResolvedReason, Recipient: n.Audience, ClosedBy: closedBy}
+	if n.Origin == domain.NotificationOriginEvent {
+		if e.b.Events == nil {
+			return "", errors.New("no event rendering is installed")
+		}
+		var p EventParams
+		if err := json.Unmarshal(n.Params, &p); err != nil {
+			return "", fmt.Errorf("decode event params: %w", err)
+		}
+		text = e.b.Events.resolved(p, r)
+	} else {
+		k := kindNamed(n.Kind)
+		if k == nil || k.resolved == nil {
+			return "", fmt.Errorf("no condition kind %q is registered", n.Kind)
+		}
+		p, err := k.decode(n.Params)
+		if err != nil {
+			return "", err
+		}
+		text = k.resolved(p, r)
+	}
+	if strings.TrimSpace(text) == "" {
+		return "", errors.New("resolved returned no text")
+	}
+	return text, nil
 }
 
 // ping sends notifications_updated to everyone a changed row is sent to. An

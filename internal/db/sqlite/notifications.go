@@ -33,7 +33,8 @@ const sqliteNotificationColsTmpl = `{p}id, {p}org_id, {p}origin, {p}lifecycle, {
 	{p}audience_scope, COALESCE({p}audience_role, ''), COALESCE({p}team_id, ''), COALESCE({p}user_id, ''),
 	COALESCE({p}source, ''), {p}priority, {p}dismissible, {p}title, {p}body, {p}actions, {p}params,
 	{p}first_seen_at, {p}last_seen_at, {p}seen_count, {p}escalated_at,
-	{p}resolved_at, COALESCE({p}resolved_reason, ''), {p}expires_at, COALESCE({p}entity_id, '')`
+	{p}resolved_at, COALESCE({p}resolved_reason, ''), COALESCE({p}resolution, ''), {p}expires_at,
+	COALESCE({p}entity_id, '')`
 
 var (
 	sqliteNotificationCols = strings.ReplaceAll(sqliteNotificationColsTmpl, "{p}", "")
@@ -177,12 +178,29 @@ func (s *notificationStore) ClosedEntityEventOrgsSystem(ctx context.Context) ([]
 	return out, rows.Err()
 }
 
-func (s *notificationStore) ResolveIDSystem(ctx context.Context, orgID, id string) (*domain.Notification, error) {
-	got, err := s.resolve(ctx, orgID, domain.NotificationResolvedCleared, `id = ?`, id)
+func (s *notificationStore) ResolveIDSystem(ctx context.Context, orgID, id string, reason domain.NotificationResolvedReason) (*domain.Notification, error) {
+	got, err := s.resolve(ctx, orgID, reason, `id = ?`, id)
 	if err != nil || len(got) == 0 {
 		return nil, err
 	}
 	return &got[0], nil
+}
+
+func (s *notificationStore) SetResolutionSystem(ctx context.Context, orgID, id, resolution string) (*domain.Notification, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	n, err := db.ScanNotification(s.q.QueryRowContext(ctx, `
+		UPDATE notifications SET resolution = ?
+		WHERE org_id = ? AND id = ? AND resolved_at IS NOT NULL
+		RETURNING `+sqliteNotificationCols, resolution, orgID, id).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &n, nil
 }
 
 func (s *notificationStore) resolve(ctx context.Context, orgID string, reason domain.NotificationResolvedReason, where string, args ...any) ([]domain.Notification, error) {

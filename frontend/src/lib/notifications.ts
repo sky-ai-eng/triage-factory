@@ -1,4 +1,4 @@
-import { apiFetch, apiJSON, apiList, apiListAt, readJSON, type ListPage } from './apiClient'
+import { apiJSON, apiList, apiListAt, type ListPage } from './apiClient'
 
 // The notifications inbox (specs/durable-notifications.md, HTTP API). It is
 // viewer-relative, so every route is under /api/me and answers for the org the
@@ -15,6 +15,8 @@ export interface NotificationAction {
   href?: string
   /** An invoke's confirmation copy, when it asks for one. */
   confirm?: string
+  /** On an invoke: what to show in the label's place while the call is out. */
+  running_label?: string
   /** On an invoke: whether this viewer may run it, here and now. */
   allowed?: boolean
 }
@@ -38,6 +40,8 @@ export interface NotificationItem {
   seen_count: number
   resolved_at: string | null
   resolved_reason: string | null
+  /** Why the row resolved, in a sentence. null while it is open. */
+  resolution: string | null
   expires_at: string | null
   actions: NotificationAction[]
   read: boolean
@@ -84,15 +88,20 @@ export function markNotificationRead(id: string): Promise<NotificationItem> {
   })
 }
 
-/**
- * Run an invoke action. Answers the item as the viewer now sees it, or null
- * when the row has since left what they may read (the route's 204).
- */
-export async function runNotificationAction(
+/** What an invoke action did: its outcome, in a sentence, and the item as the
+ *  viewer now sees it, null once the row has left what they may read. */
+export interface NotificationActionResult {
+  notification: NotificationItem | null
+  outcome: string
+}
+
+/** Run an invoke action. */
+export function runNotificationAction(
   id: string,
   actionId: string,
-): Promise<NotificationItem | null> {
-  const path = `${itemPath(id)}/actions/${encodeURIComponent(actionId)}`
-  const res = await apiFetch(path, { method: 'POST' })
-  return res.status === 204 ? null : readJSON<NotificationItem>(res, path)
+): Promise<NotificationActionResult> {
+  return apiJSON<NotificationActionResult>(
+    `${itemPath(id)}/actions/${encodeURIComponent(actionId)}`,
+    { method: 'POST' },
+  )
 }

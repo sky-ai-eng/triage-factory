@@ -31,13 +31,14 @@ var (
 			c := testRender(p, to)
 			c.Actions = []Action{Link("Open settings", Routes.OrgSettings())}
 			if to.Scope == domain.NotificationScopeTeam {
-				c.Actions = append(c.Actions, Invoke("untrack", "Stop tracking", RequiresTeamAdmin))
+				c.Actions = append(c.Actions, Invoke("untrack", "Stop tracking", "Working…", RequiresTeamAdmin))
 			} else {
-				c.Actions = append(c.Actions, Invoke("retry", "Retry now", RequiresOrgAdmin, Confirm("Retry every owed memory now?")))
+				c.Actions = append(c.Actions, Invoke("retry", "Retry now", "Working…", RequiresOrgAdmin, Confirm("Retry every owed memory now?")))
 			}
 			return c
 		},
-		Example: testParams{ID: "x", TeamID: exampleTeamID},
+		Resolved: testResolved,
+		Example:  testParams{ID: "x", TeamID: exampleTeamID},
 	})
 	externalCondition = Condition(ConditionSpec[externalParams]{
 		Name: "test.external_condition", Priority: Always(High),
@@ -45,7 +46,8 @@ var (
 		Render: func(p externalParams, _ Recipient) Content {
 			return Content{Title: "t", Actions: []Action{Link("Open it", External(p.URL))}}
 		},
-		Example: externalParams{ID: "x", URL: "https://github.com/acme/widgets/pull/7"},
+		Resolved: func(externalParams, Resolution) string { return "fine" },
+		Example:  externalParams{ID: "x", URL: "https://github.com/acme/widgets/pull/7"},
 	})
 	// unhandledCondition renders "orphan", which nothing handles, and
 	// "handled", which TestUnhandledActions registers.
@@ -53,10 +55,11 @@ var (
 		Name: "test.unhandled_condition", Priority: Always(Low), Key: testID, Audience: OrgAdmins(),
 		Render: func(testParams, Recipient) Content {
 			return Content{Title: "t", Actions: []Action{
-				Invoke("orphan", "Orphan", RequiresOrgAdmin), Invoke("handled", "Handled", RequiresOrgAdmin),
+				Invoke("orphan", "Orphan", "Working…", RequiresOrgAdmin), Invoke("handled", "Handled", "Working…", RequiresOrgAdmin),
 			}}
 		},
-		Example: testParams{ID: "x"},
+		Resolved: testResolved,
+		Example:  testParams{ID: "x"},
 	})
 	// multiOnlyCondition links a page local mode does not have.
 	multiOnlyCondition = Condition(ConditionSpec[testParams]{
@@ -64,7 +67,8 @@ var (
 		Render: func(testParams, Recipient) Content {
 			return Content{Title: "t", Actions: []Action{Link("Open", Href{route: &route{name: "multi_only", multi: "/org"}})}}
 		},
-		Example: testParams{ID: "x"},
+		Resolved: testResolved,
+		Example:  testParams{ID: "x"},
 	})
 )
 
@@ -174,10 +178,10 @@ func TestRenderActions(t *testing.T) {
 	link := Link("Open settings", Routes.OrgSettings())
 
 	got, err := renderActions(domain.NotificationCondition, teamRow,
-		[]Action{link, Invoke("untrack", "Stop tracking", RequiresTeamAdmin, Confirm("Stop?"))}, exampleOrgID, false, none)
+		[]Action{link, Invoke("untrack", "Stop tracking", "Working…", RequiresTeamAdmin, Confirm("Stop?"))}, exampleOrgID, false, none)
 	want := []storedAction{
 		{ID: "org_settings", Type: linkAction, Label: "Open settings", Href: "/orgs/" + exampleOrgID + "/org?tab=settings"},
-		{ID: "untrack", Type: invokeAction, Label: "Stop tracking", Requires: RequiresTeamAdmin, Confirm: "Stop?"},
+		{ID: "untrack", Type: invokeAction, Label: "Stop tracking", RunningLabel: "Working…", Requires: RequiresTeamAdmin, Confirm: "Stop?"},
 	}
 	if err != nil || !slices.Equal(got, want) {
 		t.Fatalf("renderActions = %+v, %v; want %+v", got, err, want)
@@ -191,18 +195,19 @@ func TestRenderActions(t *testing.T) {
 		want      string
 	}{
 		{"three actions", domain.NotificationCondition, orgRow,
-			[]Action{link, Invoke("a", "A", RequiresOrgAdmin), Invoke("b", "B", RequiresOrgAdmin)}, "at most 2"},
+			[]Action{link, Invoke("a", "A", "Working…", RequiresOrgAdmin), Invoke("b", "B", "Working…", RequiresOrgAdmin)}, "at most 2"},
 		{"a notice with none", domain.NotificationNotice, orgRow, nil, "a notice carries an action"},
 		{"an invoke on a notice", domain.NotificationNotice, orgRow,
-			[]Action{Invoke("a", "A", RequiresOrgAdmin)}, "a notice's actions are links"},
+			[]Action{Invoke("a", "A", "Working…", RequiresOrgAdmin)}, "a notice's actions are links"},
 		{"a team admin's action on an org row", domain.NotificationCondition, orgRow,
-			[]Action{Invoke("a", "A", RequiresTeamAdmin)}, "is for no team"},
+			[]Action{Invoke("a", "A", "Working…", RequiresTeamAdmin)}, "is for no team"},
 		{"an id unfit for a path", domain.NotificationCondition, orgRow,
-			[]Action{Invoke("Stop/Track", "A", RequiresOrgAdmin)}, "lowercase letters"},
+			[]Action{Invoke("Stop/Track", "A", "Working…", RequiresOrgAdmin)}, "lowercase letters"},
 		{"a permission notify does not check", domain.NotificationCondition, orgRow,
-			[]Action{Invoke("a", "A", Permission("owner"))}, "not one notify checks"},
+			[]Action{Invoke("a", "A", "Working…", Permission("owner"))}, "not one notify checks"},
 		{"two actions with one id", domain.NotificationCondition, orgRow, []Action{link, link}, "two actions with id"},
-		{"no label", domain.NotificationCondition, orgRow, []Action{Invoke("a", " ", RequiresOrgAdmin)}, "no label"},
+		{"no label", domain.NotificationCondition, orgRow, []Action{Invoke("a", " ", "Working…", RequiresOrgAdmin)}, "no label"},
+		{"no running label", domain.NotificationCondition, orgRow, []Action{Invoke("a", "A", " ", RequiresOrgAdmin)}, "no running label"},
 		{"the zero Action", domain.NotificationCondition, orgRow, []Action{{label: "x"}}, "not built by Link or Invoke"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -229,7 +234,9 @@ func TestExamples_ReportRefusedRenderings(t *testing.T) {
 }
 
 func TestUnhandledActions(t *testing.T) {
-	unhandledCondition.HandleAction("handled", func(context.Context, ActionCall[testParams]) (bool, error) { return false, nil })
+	unhandledCondition.HandleAction("handled", func(context.Context, ActionCall[testParams]) (ActionResult, error) {
+		return ActionResult{Outcome: "Done."}, nil
+	})
 	missing := UnhandledActions()
 	if !slices.Contains(missing, "test.unhandled_condition/orphan") || slices.Contains(missing, "test.unhandled_condition/handled") {
 		t.Errorf("UnhandledActions() = %v; want the orphan listed and the handled action not", missing)
@@ -242,7 +249,9 @@ func TestHandleAction_Refusals(t *testing.T) {
 		register   func()
 	}{
 		{"an id unfit for a path", "lowercase letters", func() {
-			actionCondition.HandleAction("Retry Now", func(context.Context, ActionCall[testParams]) (bool, error) { return false, nil })
+			actionCondition.HandleAction("Retry Now", func(context.Context, ActionCall[testParams]) (ActionResult, error) {
+				return ActionResult{Outcome: "Done."}, nil
+			})
 		}},
 		{"no handler", "needs a handler", func() { actionCondition.HandleAction("retry", nil) }},
 	} {
@@ -272,7 +281,7 @@ func TestLocal_ActionsAreStoredRendered(t *testing.T) {
 	stored, err := decodeActions(got[0].Actions)
 	want := []storedAction{
 		{ID: "org_settings", Type: linkAction, Label: "Open settings", Href: "/settings"},
-		{ID: "retry", Type: invokeAction, Label: "Retry now", Requires: RequiresOrgAdmin, Confirm: "Retry every owed memory now?"},
+		{ID: "retry", Type: invokeAction, Label: "Retry now", RunningLabel: "Working…", Requires: RequiresOrgAdmin, Confirm: "Retry every owed memory now?"},
 	}
 	if err != nil || !slices.Equal(stored, want) {
 		t.Errorf("stored actions = %+v, %v; want %+v", stored, err, want)
@@ -323,13 +332,13 @@ func TestLocal_SyncSkipsAnUnrenderedMember(t *testing.T) {
 }
 
 // recordingHandler registers a handler for actionCondition's "retry" that
-// keeps its calls and answers resolved and err.
-func recordingHandler(t *testing.T, resolved bool, err error) *[]ActionCall[testParams] {
+// keeps its calls and answers res and err.
+func recordingHandler(t *testing.T, res ActionResult, err error) *[]ActionCall[testParams] {
 	t.Helper()
 	var calls []ActionCall[testParams]
-	actionCondition.HandleAction("retry", func(_ context.Context, call ActionCall[testParams]) (bool, error) {
+	actionCondition.HandleAction("retry", func(_ context.Context, call ActionCall[testParams]) (ActionResult, error) {
 		calls = append(calls, call)
-		return resolved, err
+		return res, err
 	})
 	return &calls
 }
@@ -344,19 +353,20 @@ func TestLocal_RunAction(t *testing.T) {
 
 	// Nothing an unauthorized caller is offered runs, and nothing runs that
 	// the row does not declare.
-	calls := recordingHandler(t, true, nil)
+	fixed := ActionResult{Outcome: "Fixed.", Resolved: domain.NotificationResolvedAudienceRemoved}
+	calls := recordingHandler(t, fixed, nil)
 	denied := NewCaller(&fakeAuthz{}, org, user)
 	views, err := denied.Actions(ctx, row)
 	if err != nil || len(views) != 2 || views[0].Allowed != nil || views[1].Allowed == nil || *views[1].Allowed {
 		t.Fatalf("Actions for a non-admin = %+v, %v; want the link and a disallowed retry", views, err)
 	}
-	if err := denied.RunAction(ctx, row, "retry"); !errors.Is(err, ErrActionForbidden) {
+	if _, err := denied.RunAction(ctx, row, "retry"); !errors.Is(err, ErrActionForbidden) {
 		t.Errorf("RunAction for a non-admin: err = %v; want ErrActionForbidden", err)
 	}
 	admin := &fakeAuthz{orgAdmin: true}
 	caller := NewCaller(admin, org, user)
 	for _, id := range []string{"org_settings", "untrack", "nope"} {
-		if err := caller.RunAction(ctx, row, id); !errors.Is(err, ErrNoSuchAction) {
+		if _, err := caller.RunAction(ctx, row, id); !errors.Is(err, ErrNoSuchAction) {
 			t.Errorf("RunAction(%q): err = %v; want ErrNoSuchAction", id, err)
 		}
 	}
@@ -365,8 +375,9 @@ func TestLocal_RunAction(t *testing.T) {
 	}
 
 	views, err = caller.Actions(ctx, row)
-	if err != nil || views[1].Allowed == nil || !*views[1].Allowed || views[1].Confirm != "Retry every owed memory now?" {
-		t.Fatalf("Actions for an admin = %+v, %v; want retry allowed, with its confirmation", views, err)
+	if err != nil || views[1].Allowed == nil || !*views[1].Allowed || views[1].Confirm != "Retry every owed memory now?" ||
+		views[1].RunningLabel != "Working…" {
+		t.Fatalf("Actions for an admin = %+v, %v; want retry allowed, with its confirmation and running label", views, err)
 	}
 	wire, _ := json.Marshal(views)
 	if strings.Contains(string(wire), "requires") {
@@ -375,15 +386,29 @@ func TestLocal_RunAction(t *testing.T) {
 
 	// A handler's error is the caller's, and the row stays open.
 	boom := errors.New("boom")
-	recordingHandler(t, true, boom)
-	if err := caller.RunAction(ctx, row, "retry"); !errors.Is(err, boom) {
+	recordingHandler(t, fixed, boom)
+	if _, err := caller.RunAction(ctx, row, "retry"); !errors.Is(err, boom) {
 		t.Errorf("RunAction with a failing handler: err = %v; want it unchanged", err)
 	}
 
-	// Not fixed: the handler is given the row, and the row stays open.
-	calls = recordingHandler(t, false, nil)
-	if err := caller.RunAction(ctx, row, "retry"); err != nil {
-		t.Fatalf("RunAction: %v", err)
+	// A result that says nothing, or resolves for a reason an action does not
+	// report, is the handler's bug, and resolves nothing.
+	for _, bad := range []ActionResult{
+		{Outcome: " ", Resolved: domain.NotificationResolvedCleared},
+		{Outcome: "Fixed.", Resolved: "fixed"},
+		{Outcome: "Turned off.", Resolved: domain.NotificationResolvedSourceOff},
+	} {
+		recordingHandler(t, bad, nil)
+		if _, err := caller.RunAction(ctx, row, "retry"); err == nil {
+			t.Errorf("RunAction answering %+v: no error", bad)
+		}
+	}
+
+	// Not fixed: the handler is given the row, its outcome is the answer, and
+	// the row stays open.
+	calls = recordingHandler(t, ActionResult{Outcome: "Retrying."}, nil)
+	if res, err := caller.RunAction(ctx, row, "retry"); err != nil || res.Outcome != "Retrying." {
+		t.Fatalf("RunAction = %+v, %v; want the handler's outcome", res, err)
 	}
 	wantCall := ActionCall[testParams]{OrgID: org, UserID: user, Recipient: row.Audience, Params: testParams{ID: "a", TeamID: runmode.LocalDefaultTeamID}}
 	if len(*calls) != 1 || (*calls)[0] != wantCall {
@@ -396,14 +421,16 @@ func TestLocal_RunAction(t *testing.T) {
 		t.Errorf("an unfixed action pinged %v", pings)
 	}
 
-	// Fixed: the row resolves at once, and its audience hears.
-	recordingHandler(t, true, nil)
-	if err := caller.RunAction(ctx, row, "retry"); err != nil {
-		t.Fatalf("RunAction: %v", err)
+	// Fixed: the row resolves at once, for the handler's reason and with its
+	// kind's sentence for it, and its audience hears.
+	recordingHandler(t, fixed, nil)
+	if res, err := caller.RunAction(ctx, row, "retry"); err != nil || res != fixed {
+		t.Fatalf("RunAction = %+v, %v; want %+v", res, err, fixed)
 	}
 	all := rows(t, stores, org, user, actionCondition)
-	if len(all) != 1 || all[0].ResolvedAt == nil || all[0].ResolvedReason != domain.NotificationResolvedCleared {
-		t.Errorf("rows after a fixing action = %+v; want the row cleared", all)
+	if len(all) != 1 || all[0].ResolvedAt == nil || all[0].ResolvedReason != domain.NotificationResolvedAudienceRemoved ||
+		all[0].Resolution != "thing a is fine: audience_removed for user" {
+		t.Errorf("rows after a fixing action = %+v; want the row resolved for the handler's reason, saying why", all)
 	}
 	if pings := hub.take(t); !slices.Equal(pings, []string{user}) {
 		t.Errorf("a fixing action pinged %v; want the local user", pings)
@@ -413,12 +440,12 @@ func TestLocal_RunAction(t *testing.T) {
 	}
 
 	// Resolved: the fix no longer applies, to anyone.
-	calls = recordingHandler(t, true, nil)
+	calls = recordingHandler(t, fixed, nil)
 	views, err = caller.Actions(ctx, all[0])
 	if err != nil || views[1].Allowed == nil || *views[1].Allowed {
 		t.Errorf("Actions on a resolved row = %+v, %v; want retry disallowed", views, err)
 	}
-	if err := caller.RunAction(ctx, all[0], "retry"); !errors.Is(err, ErrConditionResolved) {
+	if _, err := caller.RunAction(ctx, all[0], "retry"); !errors.Is(err, ErrConditionResolved) {
 		t.Errorf("RunAction on a resolved row: err = %v; want ErrConditionResolved", err)
 	}
 	if len(*calls) != 0 {
@@ -432,9 +459,9 @@ func TestCaller_TeamAdmin(t *testing.T) {
 	ctx := context.Background()
 	const org, teamA, teamB = "11111111-1111-4111-8111-111111111111", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 	var untracked []string
-	actionCondition.HandleAction("untrack", func(_ context.Context, call ActionCall[testParams]) (bool, error) {
+	actionCondition.HandleAction("untrack", func(_ context.Context, call ActionCall[testParams]) (ActionResult, error) {
 		untracked = append(untracked, call.Recipient.TeamID)
-		return false, nil
+		return ActionResult{Outcome: "Untracked."}, nil
 	})
 	row := func(teamID string) domain.Notification {
 		to := Recipient{Scope: domain.NotificationScopeTeam, Role: Admins, TeamID: teamID}
@@ -456,7 +483,7 @@ func TestCaller_TeamAdmin(t *testing.T) {
 		if err != nil || views[1].ID != "untrack" || *views[1].Allowed != c.allowed {
 			t.Errorf("Actions on team %s = %+v, %v; want untrack allowed=%v", c.team, views, err, c.allowed)
 		}
-		err = caller.RunAction(ctx, row(c.team), "untrack")
+		_, err = caller.RunAction(ctx, row(c.team), "untrack")
 		if c.allowed && err != nil || !c.allowed && !errors.Is(err, ErrActionForbidden) {
 			t.Errorf("RunAction on team %s: err = %v", c.team, err)
 		}
@@ -472,12 +499,12 @@ func TestCaller_TeamAdmin(t *testing.T) {
 	// nothing.
 	other := row(teamA)
 	other.OrgID = "22222222-2222-4222-8222-222222222222"
-	if err := caller.RunAction(ctx, other, "untrack"); !errors.Is(err, ErrNoSuchAction) {
+	if _, err := caller.RunAction(ctx, other, "untrack"); !errors.Is(err, ErrNoSuchAction) {
 		t.Errorf("RunAction on another org's row: err = %v; want ErrNoSuchAction", err)
 	}
 	orgRow := row(teamA)
 	orgRow.Audience = Recipient{Scope: domain.NotificationScopeOrg, Role: Admins}
-	if err := caller.RunAction(ctx, orgRow, "untrack"); !errors.Is(err, ErrActionForbidden) {
+	if _, err := caller.RunAction(ctx, orgRow, "untrack"); !errors.Is(err, ErrActionForbidden) {
 		t.Errorf("a team admin's action on an org row: err = %v; want ErrActionForbidden", err)
 	}
 }

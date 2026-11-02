@@ -1097,11 +1097,13 @@ func (s *Server) kickMemoryOwed(orgID, conversationID string) {
 }
 
 // retryFailingMemoryGeneration is kinds.MemoryGenerationFailing's "Retry now",
-// the org-wide doorbell a background jobs model save rings. It reports the
-// condition unresolved, because the attempts the re-sweep makes decide that.
-func (s *Server) retryFailingMemoryGeneration(_ context.Context, call notify.ActionCall[kinds.MemoryFailure]) (bool, error) {
+// the org-wide doorbell a background jobs model save rings. It leaves the
+// condition open, because the attempts the re-sweep makes decide that.
+func (s *Server) retryFailingMemoryGeneration(_ context.Context, call notify.ActionCall[kinds.MemoryFailure]) (notify.ActionResult, error) {
 	s.kickMemoryOwed(call.OrgID, "")
-	return false, nil
+	return notify.ActionResult{
+		Outcome: "Triage Factory is retrying the waiting memories now. This resolves once they are written.",
+	}, nil
 }
 
 // SetOnJiraChanged registers a callback for Jira config changes. This restarts

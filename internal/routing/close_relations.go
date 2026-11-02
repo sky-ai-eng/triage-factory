@@ -461,7 +461,7 @@ func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, 
 				resolve = append(resolve, n)
 			}
 		}
-		notify.ResolveEvents(ctx, orgID, entityID, resolve)
+		notify.ResolveEvents(ctx, orgID, entityID, evt.EventType, resolve)
 		for i := range targets {
 			t := targets[i]
 			if rel.keep != nil && !rel.keep(evt, cctx, taskTarget(t)) {
@@ -556,7 +556,13 @@ func (r *Router) runTerminatingClose(ctx context.Context, orgID string, evt doma
 			r.tellTaskClosing(ctx, orgID, evt, h.TaskID, h.WorkingConversationIDs)
 		}
 	}
-	notify.ResolveEvents(ctx, orgID, entityID, r.openEventNotifications(ctx, orgID, entityID, rel.closes))
+	// The close obligation stands in for a close that was lost, so it is not
+	// what a reader would recognize as the closer: to them the entity closed.
+	closedBy := evt.EventType
+	if evt.EventType == domain.EventSystemEntityCloseOwed {
+		closedBy = ""
+	}
+	notify.ResolveEvents(ctx, orgID, entityID, closedBy, r.openEventNotifications(ctx, orgID, entityID, rel.closes))
 	for _, taskID := range res.ClosedTaskIDs {
 		routerLog.InfoContext(ctx, "closed task", "task_id", taskID, "on_event", evt.EventType, "reason", reason)
 		r.finishTaskClose(ctx, orgID, taskID, res.ActiveConversationIDs[taskID])

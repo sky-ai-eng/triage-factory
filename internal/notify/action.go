@@ -19,6 +19,7 @@ type Action struct {
 	typ      actionType
 	id       string
 	label    string
+	running  string
 	href     Href
 	requires Permission
 	confirm  string
@@ -38,10 +39,11 @@ func Link(label string, href Href) Action {
 }
 
 // Invoke is an action that runs the handler the kind registers for id with
-// HandleAction, for a caller who holds requires. Only a condition carries one:
-// a notice's actions are links.
-func Invoke(id, label string, requires Permission, opts ...InvokeOption) Action {
-	a := Action{typ: invokeAction, id: id, label: label, requires: requires}
+// HandleAction, for a caller who holds requires. running is what a client
+// shows in label's place while the call is out ("Retrying…"). Only a
+// condition carries one: a notice's actions are links.
+func Invoke(id, label, running string, requires Permission, opts ...InvokeOption) Action {
+	a := Action{typ: invokeAction, id: id, label: label, running: running, requires: requires}
 	for _, opt := range opts {
 		opt(&a)
 	}
@@ -78,12 +80,13 @@ var actionIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 // storedAction is an action as the row's actions column holds it. Requires is
 // stored so a read computes allowed from the row alone.
 type storedAction struct {
-	ID       string     `json:"id"`
-	Type     actionType `json:"type"`
-	Label    string     `json:"label"`
-	Href     string     `json:"href,omitempty"`
-	Requires Permission `json:"requires,omitempty"`
-	Confirm  string     `json:"confirm,omitempty"`
+	ID           string     `json:"id"`
+	Type         actionType `json:"type"`
+	Label        string     `json:"label"`
+	RunningLabel string     `json:"running_label,omitempty"`
+	Href         string     `json:"href,omitempty"`
+	Requires     Permission `json:"requires,omitempty"`
+	Confirm      string     `json:"confirm,omitempty"`
 }
 
 // renderActions checks the actions Render returned for one recipient and
@@ -129,6 +132,9 @@ func (a Action) render(lc domain.NotificationLifecycle, to Recipient, orgID stri
 		if !actionIDPattern.MatchString(a.id) {
 			return storedAction{}, fmt.Errorf("invoke id %q is not lowercase letters, digits and underscores", a.id)
 		}
+		if strings.TrimSpace(a.running) == "" {
+			return storedAction{}, fmt.Errorf("invoke %q has no running label", a.id)
+		}
 		switch a.requires {
 		case RequiresOrgAdmin:
 		case RequiresTeamAdmin:
@@ -138,7 +144,7 @@ func (a Action) render(lc domain.NotificationLifecycle, to Recipient, orgID stri
 		default:
 			return storedAction{}, fmt.Errorf("invoke %q: permission %q is not one notify checks", a.id, a.requires)
 		}
-		return storedAction{ID: a.id, Type: invokeAction, Label: a.label, Requires: a.requires, Confirm: a.confirm}, nil
+		return storedAction{ID: a.id, Type: invokeAction, Label: a.label, RunningLabel: a.running, Requires: a.requires, Confirm: a.confirm}, nil
 	}
 	return storedAction{}, fmt.Errorf("action %q is not built by Link or Invoke", a.label)
 }

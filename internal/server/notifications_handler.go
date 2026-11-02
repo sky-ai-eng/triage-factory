@@ -51,10 +51,13 @@ type notificationJSON struct {
 	SeenCount      int                                `json:"seen_count"`
 	ResolvedAt     *time.Time                         `json:"resolved_at"`
 	ResolvedReason *domain.NotificationResolvedReason `json:"resolved_reason"`
-	ExpiresAt      *time.Time                         `json:"expires_at"`
-	Actions        []notify.ActionView                `json:"actions"`
-	Read           bool                               `json:"read"`
-	Dismissed      bool                               `json:"dismissed"`
+	// Resolution says in a sentence why the row resolved; null while it is
+	// open.
+	Resolution *string             `json:"resolution"`
+	ExpiresAt  *time.Time          `json:"expires_at"`
+	Actions    []notify.ActionView `json:"actions"`
+	Read       bool                `json:"read"`
+	Dismissed  bool                `json:"dismissed"`
 }
 
 // notificationItems renders views for the caller. Call it outside any
@@ -84,6 +87,7 @@ func notificationItems(r *http.Request, caller *notify.Caller, views []domain.No
 			SeenCount:      v.SeenCount,
 			ResolvedAt:     v.ResolvedAt,
 			ResolvedReason: nilIfEmpty(v.ResolvedReason),
+			Resolution:     nilIfEmpty(v.Resolution),
 			ExpiresAt:      v.ExpiresAt,
 			Actions:        actions,
 			Read:           v.Read,
@@ -91,6 +95,14 @@ func notificationItems(r *http.Request, caller *notify.Caller, views []domain.No
 		}
 	}
 	return out, nil
+}
+
+// notificationActionResponse is an invoke action's answer: what it did, and
+// the row as the caller now sees it, null once the row has left what they
+// may read.
+type notificationActionResponse struct {
+	Notification *notificationJSON `json:"notification"`
+	Outcome      string            `json:"outcome"`
 }
 
 // writeNotificationItem renders one view for the caller as a 200.
@@ -539,8 +551,9 @@ func (s *Server) handleNotificationMarkRead(w http.ResponseWriter, r *http.Reque
 // --------------------------------------------------------------------
 
 // handleNotificationAction runs a row's invoke action as the caller and
-// returns the row as they now see it, resolved when the action fixed the
-// condition. The route takes no body. A handler that refuses with an
+// answers what it did, with the row as they now see it: resolved when the
+// action resolved the condition, and null when the row has since left what
+// they may read. The route takes no body. A handler that refuses with an
 // *httpx.Fault, as one writing through a route's own gate does, is answered
 // with it; any other error from the handler is a 500.
 //
@@ -582,7 +595,8 @@ func (s *Server) handleNotificationAction(w http.ResponseWriter, r *http.Request
 	}
 
 	caller := notify.NewCaller(s.az, orgID, userID)
-	switch err := caller.RunAction(r.Context(), view.Notification, r.PathValue("action_id")); {
+	res, err := caller.RunAction(r.Context(), view.Notification, r.PathValue("action_id"))
+	switch {
 	case errors.Is(err, notify.ErrNoSuchAction):
 		notFound(w, "notification action")
 		return
@@ -603,13 +617,18 @@ func (s *Server) handleNotificationAction(w http.ResponseWriter, r *http.Request
 		internalError(w, "notifications", err)
 		return
 	}
-	if view == nil {
-		// The action ran, and the row has since left what the caller may
-		// read: retention deleted it, or their access changed.
-		w.WriteHeader(http.StatusNoContent)
-		return
+	out := notificationActionResponse{Outcome: res.Outcome}
+	// A nil view is a row that has left what the caller may read since the
+	// action ran: retention deleted it, or their access changed.
+	if view != nil {
+		items, err := notificationItems(r, caller, []domain.NotificationView{*view})
+		if err != nil {
+			internalError(w, "notifications", err)
+			return
+		}
+		out.Notification = &items[0]
 	}
-	writeNotificationItem(w, r, caller, *view)
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) registerNotificationRoutes() {

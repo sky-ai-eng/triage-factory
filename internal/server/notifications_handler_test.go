@@ -9,9 +9,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/zalando/go-keyring"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/notify"
 	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -29,6 +32,10 @@ func notificationTestKey(p notificationTestParams) string { return p.ID }
 
 func notificationTestTeam(p notificationTestParams) string { return p.TeamID }
 
+func notificationTestResolved(p notificationTestParams, r notify.Resolution) string {
+	return p.ID + " resolved: " + string(r.Reason) + "."
+}
+
 var (
 	// fixableCondition carries a link and the "fix" invoke action, which the
 	// tests below register handlers for.
@@ -38,10 +45,11 @@ var (
 		Render: func(p notificationTestParams, _ notify.Recipient) notify.Content {
 			return notify.Content{Title: "fixable " + p.ID, Body: "body " + p.ID, Actions: []notify.Action{
 				notify.Link("Open settings", notify.Routes.OrgSettings()),
-				notify.Invoke("fix", "Fix it", notify.RequiresOrgAdmin, notify.Confirm("Fix it now?")),
+				notify.Invoke("fix", "Fix it", "Fixing…", notify.RequiresOrgAdmin, notify.Confirm("Fix it now?")),
 			}}
 		},
-		Example: notificationTestParams{ID: "x"},
+		Resolved: notificationTestResolved,
+		Example:  notificationTestParams{ID: "x"},
 	})
 	// requiredCondition is not dismissible, and its one action has no handler
 	// in any process.
@@ -50,10 +58,11 @@ var (
 		Key: notificationTestKey, Audience: notify.OrgAdmins(),
 		Render: func(p notificationTestParams, _ notify.Recipient) notify.Content {
 			return notify.Content{Title: "required " + p.ID, Actions: []notify.Action{
-				notify.Invoke("unhandled", "Do it", notify.RequiresOrgAdmin),
+				notify.Invoke("unhandled", "Do it", "Doing…", notify.RequiresOrgAdmin),
 			}}
 		},
-		Example: notificationTestParams{ID: "x"},
+		Resolved: notificationTestResolved,
+		Example:  notificationTestParams{ID: "x"},
 	})
 	// teamCondition is for the org's admins and the admins of the team its
 	// params name; only the team's rows carry "untrack".
@@ -63,11 +72,12 @@ var (
 		Render: func(p notificationTestParams, to notify.Recipient) notify.Content {
 			c := notify.Content{Title: "team " + p.ID}
 			if to.TeamID != "" {
-				c.Actions = []notify.Action{notify.Invoke("untrack", "Stop tracking", notify.RequiresTeamAdmin)}
+				c.Actions = []notify.Action{notify.Invoke("untrack", "Stop tracking", "Stopping…", notify.RequiresTeamAdmin)}
 			}
 			return c
 		},
-		Example: notificationTestParams{ID: "x", TeamID: "00000000-0000-0000-0000-0000000000aa"},
+		Resolved: notificationTestResolved,
+		Example:  notificationTestParams{ID: "x", TeamID: "00000000-0000-0000-0000-0000000000aa"},
 	})
 )
 
@@ -133,17 +143,34 @@ type notificationItemWire struct {
 	SeenCount      int     `json:"seen_count"`
 	ResolvedAt     *string `json:"resolved_at"`
 	ResolvedReason *string `json:"resolved_reason"`
+	Resolution     *string `json:"resolution"`
 	ExpiresAt      *string `json:"expires_at"`
 	Actions        []struct {
-		ID      string `json:"id"`
-		Type    string `json:"type"`
-		Label   string `json:"label"`
-		Href    string `json:"href"`
-		Confirm string `json:"confirm"`
-		Allowed *bool  `json:"allowed"`
+		ID           string `json:"id"`
+		Type         string `json:"type"`
+		Label        string `json:"label"`
+		RunningLabel string `json:"running_label"`
+		Href         string `json:"href"`
+		Confirm      string `json:"confirm"`
+		Allowed      *bool  `json:"allowed"`
 	} `json:"actions"`
 	Read      bool `json:"read"`
 	Dismissed bool `json:"dismissed"`
+}
+
+// notificationActionWire is an invoke action's answer as a client decodes it.
+type notificationActionWire struct {
+	Notification *notificationItemWire `json:"notification"`
+	Outcome      string                `json:"outcome"`
+}
+
+func decodeNotificationAction(t *testing.T, body []byte) notificationActionWire {
+	t.Helper()
+	var out notificationActionWire
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("decode action answer: %v (%s)", err, body)
+	}
+	return out
 }
 
 func decodeNotificationItem(t *testing.T, body []byte) notificationItemWire {
@@ -474,15 +501,16 @@ func TestNotificationMarkRead(t *testing.T) {
 }
 
 // TestNotificationAction runs an invoke action through the dispatcher: the
-// handler's effect, the row resolving when it reports the condition fixed, a
-// handler's own refusal, and the route's 404s, 409 and body check.
+// handler's effect and outcome, the row resolving when it reports the
+// condition resolved, the answer once the row is gone, a handler's own
+// refusal, and the route's 404s, 409 and body check.
 func TestNotificationAction(t *testing.T) {
 	s, _ := newNotificationsServer(t)
 	var calls []notify.ActionCall[notificationTestParams]
-	resolve, refusal := false, error(nil)
-	fixableCondition.HandleAction("fix", func(_ context.Context, call notify.ActionCall[notificationTestParams]) (bool, error) {
+	result, refusal := notify.ActionResult{Outcome: "Retrying."}, error(nil)
+	fixableCondition.HandleAction("fix", func(_ context.Context, call notify.ActionCall[notificationTestParams]) (notify.ActionResult, error) {
 		calls = append(calls, call)
-		return resolve, refusal
+		return result, refusal
 	})
 	id := localNotification(t, s, "a")
 	invoke := func(id, action string, body any) (int, []byte) {
@@ -499,8 +527,11 @@ func TestNotificationAction(t *testing.T) {
 	if len(calls) != 1 || calls[0].Params.ID != "a" || calls[0].OrgID != runmode.LocalDefaultOrgID || calls[0].UserID != runmode.LocalDefaultUserID {
 		t.Errorf("handler calls = %+v", calls)
 	}
-	if it := decodeNotificationItem(t, body); it.ResolvedAt != nil || it.Actions[1].Allowed == nil || !*it.Actions[1].Allowed {
-		t.Errorf("after an unfixed invoke: %+v", it)
+	ans := decodeNotificationAction(t, body)
+	if ans.Outcome != "Retrying." || ans.Notification == nil || ans.Notification.ResolvedAt != nil ||
+		ans.Notification.Actions[1].Allowed == nil || !*ans.Notification.Actions[1].Allowed ||
+		ans.Notification.Actions[1].RunningLabel != "Fixing…" {
+		t.Errorf("after an unfixed invoke: %+v", ans)
 	}
 
 	// An empty object is no body; a handler's error is a 500.
@@ -522,15 +553,21 @@ func TestNotificationAction(t *testing.T) {
 		t.Error("a refused body ran the handler")
 	}
 
-	// Fixed: the row resolves, and its action is no longer offered.
-	resolve = true
+	// Fixed: the row resolves for the handler's reason, says why, and its
+	// action is no longer offered.
+	result = notify.ActionResult{Outcome: "Fixed.", Resolved: domain.NotificationResolvedCleared}
 	code, body = invoke(id, "fix", nil)
 	if code != http.StatusOK {
 		t.Fatalf("fixing invoke = %d: %s", code, body)
 	}
-	it := decodeNotificationItem(t, body)
-	if it.ResolvedAt == nil || it.ResolvedReason == nil || *it.ResolvedReason != "cleared" {
-		t.Errorf("after a fixing invoke: resolved %v/%v", it.ResolvedAt, it.ResolvedReason)
+	ans = decodeNotificationAction(t, body)
+	if ans.Outcome != "Fixed." || ans.Notification == nil {
+		t.Fatalf("fixing invoke answered %+v", ans)
+	}
+	it := *ans.Notification
+	if it.ResolvedAt == nil || it.ResolvedReason == nil || *it.ResolvedReason != "cleared" ||
+		it.Resolution == nil || *it.Resolution != "a resolved: cleared." {
+		t.Errorf("after a fixing invoke: resolved %v/%v, resolution %v", it.ResolvedAt, it.ResolvedReason, it.Resolution)
 	}
 	if a := it.Actions[1]; a.Allowed == nil || *a.Allowed {
 		t.Errorf("a resolved row's invoke allowed = %v, want false", a.Allowed)
@@ -542,6 +579,21 @@ func TestNotificationAction(t *testing.T) {
 	// The link is an action, but not one the route runs.
 	assertFault(t, doJSON(t, s, http.MethodPost, meNotifications+"/"+open+"/actions/org_settings", nil), http.StatusNotFound, httpx.ReasonNotFound)
 	assertFault(t, doJSON(t, s, http.MethodPost, meNotifications+"/"+fixtureUUID("nope")+"/actions/fix", nil), http.StatusNotFound, httpx.ReasonNotFound)
+
+	// Gone: the row left what the caller may read while the action ran, so
+	// the outcome is the whole answer.
+	gone := localNotification(t, s, "g")
+	fixableCondition.HandleAction("fix", func(ctx context.Context, call notify.ActionCall[notificationTestParams]) (notify.ActionResult, error) {
+		fixableCondition.Set(ctx, call.OrgID, call.Params, false)
+		if _, err := s.allStores.Notifications.DeleteRetiredSystem(ctx, time.Now().Add(db.NotificationResolvedRetention+time.Hour)); err != nil {
+			return notify.ActionResult{}, err
+		}
+		return notify.ActionResult{Outcome: "Fixed, and gone."}, nil
+	})
+	code, body = invoke(gone, "fix", nil)
+	if ans := decodeNotificationAction(t, body); code != http.StatusOK || ans.Outcome != "Fixed, and gone." || ans.Notification != nil {
+		t.Errorf("invoke on a row that leaves = %d %+v; want 200 with the outcome and no row", code, ans)
+	}
 
 	// An action no process handles is not offered, and not run.
 	requiredCondition.Set(context.Background(), runmode.LocalDefaultOrgID, notificationTestParams{ID: "r"}, true)

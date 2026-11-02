@@ -6,12 +6,14 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"slices"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/notify"
-	_ "github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
+	"github.com/sky-ai-eng/triage-factory/internal/notify/kinds"
 	"github.com/sky-ai-eng/triage-factory/internal/notify/notifytest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
@@ -28,11 +30,13 @@ var bootCondition = notify.Condition(notify.ConditionSpec[bootParams]{
 	Key:      func(p bootParams) string { return p.ID },
 	Audience: notify.OrgAdmins(),
 	Render:   func(p bootParams, _ notify.Recipient) notify.Content { return notify.Content{Title: "boot " + p.ID} },
+	Resolved: func(p bootParams, _ notify.Resolution) string { return "boot " + p.ID + " is fine." },
 	Example:  bootParams{ID: "x"},
 })
 
 // TestBuildNotify_InstallsTheVerbs: after the server's notify step, a verb
-// writes through the server's own stores.
+// writes through the server's own stores, and an event row resolves saying
+// why in the event rendering's words.
 func TestBuildNotify_InstallsTheVerbs(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	conn, err := sql.Open("sqlite", db.TestDSNMemory)
@@ -63,6 +67,50 @@ func TestBuildNotify_InstallsTheVerbs(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].Kind != bootCondition.Name() || items[0].Title != "boot a" {
 		t.Fatalf("inbox after Set = %+v; want the one row the verb wrote", items)
+	}
+
+	if _, err := conn.Exec(`INSERT INTO org_event_sources (org_id, kind, base_url) VALUES (?, 'github', 'https://github.com')`, org); err != nil {
+		t.Fatalf("seed github host: %v", err)
+	}
+	entity, _, err := stores.Entities.FindOrCreateSystem(ctx, org, domain.ProviderGitHub, "https://github.com", "acme/widgets#18", "", "pr",
+		"Retry the webhook", "https://github.com/acme/widgets/pull/18")
+	if err != nil {
+		t.Fatalf("create entity: %v", err)
+	}
+	kinds.Event.Raise(ctx, org, notify.EventRaise{EventType: domain.EventGitHubPRCICheckFailed, Source: "github", Entity: *entity, Condition: true,
+		Rules: []notify.EventRule{{HandlerID: "h1", TeamID: runmode.LocalDefaultTeamID, Name: "Mine", Audience: domain.NotifyAudienceCreator, CreatorUserID: user}}})
+	targets, err := notify.OpenEventConditions(ctx, org, entity.ID, []string{domain.EventGitHubPRCICheckFailed})
+	if err != nil || len(targets) != 1 {
+		t.Fatalf("OpenEventConditions = %+v, %v; want the CI condition", targets, err)
+	}
+	notify.ResolveEvents(ctx, org, entity.ID, domain.EventGitHubPRCICheckPassed, targets)
+	resolved, _, err := stores.Notifications.ListForViewer(ctx, org, user, db.NotificationListFilter{Status: domain.NotificationResolved}, db.ListOpts{Limit: 50})
+	if err != nil {
+		t.Fatalf("ListForViewer: %v", err)
+	}
+	if len(resolved) != 1 || resolved[0].Resolution != "CI Check Passed on acme/widgets#18." {
+		t.Errorf("resolved rows = %+v; want the event row, resolved in the event rendering's words", resolved)
+	}
+
+	// An event of the row's own type closing it (a reassignment, in the
+	// catalog's close relations) is told apart from the one that raised it.
+	kinds.Event.Raise(ctx, org, notify.EventRaise{EventType: domain.EventGitHubPRCICheckFailed, Source: "github", Entity: *entity, Condition: true,
+		Rules: []notify.EventRule{{HandlerID: "h1", TeamID: runmode.LocalDefaultTeamID, Name: "Mine", Audience: domain.NotifyAudienceCreator, CreatorUserID: user}}})
+	targets, err = notify.OpenEventConditions(ctx, org, entity.ID, []string{domain.EventGitHubPRCICheckFailed})
+	if err != nil || len(targets) != 1 {
+		t.Fatalf("OpenEventConditions = %+v, %v; want the second CI condition", targets, err)
+	}
+	notify.ResolveEvents(ctx, org, entity.ID, domain.EventGitHubPRCICheckFailed, targets)
+	resolved, _, err = stores.Notifications.ListForViewer(ctx, org, user, db.NotificationListFilter{Status: domain.NotificationResolved}, db.ListOpts{Limit: 50})
+	if err != nil {
+		t.Fatalf("ListForViewer: %v", err)
+	}
+	var again []string
+	for _, n := range resolved {
+		again = append(again, n.Resolution)
+	}
+	if !slices.Contains(again, "CI Check Failed again on acme/widgets#18.") {
+		t.Errorf("resolutions = %q; want the second row closed by its own type", again)
 	}
 }
 

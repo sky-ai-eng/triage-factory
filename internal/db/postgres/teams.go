@@ -202,6 +202,41 @@ func (s *teamsStore) ListForUser(ctx context.Context, orgID string, opts db.List
 	return teams, total, err
 }
 
+// ListForOrg is ListForUser's read with the membership join made LEFT: a team
+// the caller is not on comes back with no role rather than not at all.
+func (s *teamsStore) ListForOrg(ctx context.Context, orgID string, opts db.ListOpts) ([]domain.Team, int, error) {
+	var total int
+	if err := s.app.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM teams WHERE org_id = $1 AND deleted_at IS NULL
+	`, orgID).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count teams for org: %w", err)
+	}
+	if opts.CountOnly {
+		return []domain.Team{}, total, nil
+	}
+
+	query := `
+		SELECT t.id::text, t.org_id::text, t.slug, t.name, COALESCE(t.description, ''), t.created_at,
+		       COALESCE(m.role::text, '')
+		FROM teams t
+		LEFT JOIN memberships m ON m.team_id = t.id AND m.user_id = tf.current_user_id()
+		WHERE t.org_id = $1 AND t.deleted_at IS NULL
+		ORDER BY t.created_at ASC, t.id ASC`
+	args := []any{orgID}
+	if opts.Limit > 0 {
+		query += `
+		LIMIT $2 OFFSET $3`
+		args = append(args, opts.Limit, opts.Offset)
+	}
+	rows, err := s.app.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list teams for org: %w", err)
+	}
+	defer rows.Close()
+	teams, err := scanTeams(rows)
+	return teams, total, err
+}
+
 // Get reads under the caller's claims: teams_select gates on org access, so a
 // team in the caller's org resolves whether or not they are on it, and the
 // LEFT JOIN reports their role as empty when they are not. A cross-org id is

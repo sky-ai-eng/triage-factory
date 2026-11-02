@@ -19,7 +19,8 @@ var jiraSourceCondition = notify.Condition(notify.ConditionSpec[notificationTest
 	Render: func(p notificationTestParams, _ notify.Recipient) notify.Content {
 		return notify.Content{Title: "jira " + p.ID}
 	},
-	Example: notificationTestParams{ID: "x"},
+	Resolved: notificationTestResolved,
+	Example:  notificationTestParams{ID: "x"},
 })
 
 // raiseSourceConditions opens one Linear and one Jira condition in the test org.

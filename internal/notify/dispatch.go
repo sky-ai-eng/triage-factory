@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -33,17 +34,32 @@ type ActionCall[P any] struct {
 	Params    P
 }
 
+// ActionResult is what an invoke action's handler reports of a call that
+// succeeded.
+type ActionResult struct {
+	// Outcome tells the caller what the action did, in a sentence. Required:
+	// it is the call's whole answer when the row has since left what the
+	// caller may read.
+	Outcome string
+	// Resolved is set when the action's effect resolved the condition, to
+	// why: cleared when it fixed what was wrong, audience_removed when it took
+	// the row's audience out of the condition's reach. Empty leaves the row
+	// open, as an action whose effect the producer's next evaluation decides
+	// does.
+	Resolved domain.NotificationResolvedReason
+}
+
 // handler is a registered handler with its params type erased.
-type handler func(ctx context.Context, n domain.Notification, userID string) (resolved bool, err error)
+type handler func(ctx context.Context, n domain.Notification, userID string) (ActionResult, error)
 
 // HandleAction registers fn as what the kind's invoke action id does. Register
 // it once at boot, from the code that owns the operation, so the action's
 // validation and authorization are that code's; registering id again replaces
-// the handler, as a second server built in one process must. fn reports
-// whether its effect resolved the condition, and if so the row the action was
-// invoked on resolves at once; any other audience's row of the occurrence
-// stays until the producer's next evaluation.
-func (c *ConditionKind[P]) HandleAction(id string, fn func(ctx context.Context, call ActionCall[P]) (resolved bool, err error)) {
+// the handler, as a second server built in one process must. When fn reports
+// the condition resolved, the row the action was invoked on resolves at once;
+// any other audience's row of the occurrence stays until the producer's next
+// evaluation.
+func (c *ConditionKind[P]) HandleAction(id string, fn func(ctx context.Context, call ActionCall[P]) (ActionResult, error)) {
 	k := c.k
 	if !actionIDPattern.MatchString(id) {
 		refuse(k.name, "action id %q is not lowercase letters, digits and underscores", id)
@@ -56,10 +72,10 @@ func (c *ConditionKind[P]) HandleAction(id string, fn func(ctx context.Context, 
 	if k.handlers == nil {
 		k.handlers = map[string]handler{}
 	}
-	k.handlers[id] = func(ctx context.Context, n domain.Notification, userID string) (bool, error) {
+	k.handlers[id] = func(ctx context.Context, n domain.Notification, userID string) (ActionResult, error) {
 		var p P
 		if err := json.Unmarshal(n.Params, &p); err != nil {
-			return false, fmt.Errorf("decode %s params: %w", k.name, err)
+			return ActionResult{}, fmt.Errorf("decode %s params: %w", k.name, err)
 		}
 		return fn(ctx, ActionCall[P]{OrgID: n.OrgID, UserID: userID, Recipient: n.Audience, Params: p})
 	}
@@ -73,13 +89,11 @@ func (k *kind) handler(id string) handler {
 
 // handlerFor is the handler for kind name's action id, or nil.
 func handlerFor(name, id string) handler {
-	registry.mu.Lock()
-	kd, ok := registry.byName[name]
-	registry.mu.Unlock()
-	if !ok {
+	k := kindNamed(name)
+	if k == nil {
 		return nil
 	}
-	return kd.core().handler(id)
+	return k.handler(id)
 }
 
 // UnhandledActions lists, as "kind/action", every invoke action a registered
@@ -157,11 +171,14 @@ func (c *Caller) may(ctx context.Context, p Permission, to Recipient) (bool, err
 
 // ActionView is one of a row's actions as a client reads it.
 type ActionView struct {
-	ID      string `json:"id"`
-	Type    string `json:"type"`
-	Label   string `json:"label"`
-	Href    string `json:"href,omitempty"`
-	Confirm string `json:"confirm,omitempty"`
+	ID    string `json:"id"`
+	Type  string `json:"type"`
+	Label string `json:"label"`
+	// RunningLabel is set on an invoke action: what to show in Label's place
+	// while the call is out.
+	RunningLabel string `json:"running_label,omitempty"`
+	Href         string `json:"href,omitempty"`
+	Confirm      string `json:"confirm,omitempty"`
 	// Allowed is set on an invoke action: whether this caller may run it here
 	// and now.
 	Allowed *bool `json:"allowed,omitempty"`
@@ -181,7 +198,7 @@ func (c *Caller) Actions(ctx context.Context, n domain.Notification) ([]ActionVi
 	}
 	out := make([]ActionView, len(stored))
 	for i, a := range stored {
-		v := ActionView{ID: a.ID, Type: string(a.Type), Label: a.Label, Href: a.Href, Confirm: a.Confirm}
+		v := ActionView{ID: a.ID, Type: string(a.Type), Label: a.Label, RunningLabel: a.RunningLabel, Href: a.Href, Confirm: a.Confirm}
 		if a.Type == invokeAction {
 			ok := n.ResolvedAt == nil && handlerFor(n.Kind, a.ID) != nil
 			if ok {
@@ -198,55 +215,65 @@ func (c *Caller) Actions(ctx context.Context, n domain.Notification) ([]ActionVi
 
 // RunAction runs n's invoke action actionID as the caller: it checks the
 // permission the action declares, hands the kind's handler the row's params,
-// and resolves n when the handler reports the condition fixed. n is a row the
-// caller may read, read under their claims, and ctx carries those claims to
-// the handler. The handler's error is returned unchanged.
+// and resolves n when the handler reports the condition resolved. n is a row
+// the caller may read, read under their claims, and ctx carries those claims
+// to the handler. The handler's error is returned unchanged; a result with no
+// outcome, or a resolution reason other than cleared or audience_removed, is
+// the handler's bug and an error: a source turned off resolves its rows
+// through ClearSource, not through an action.
 //
-// A failed resolve is logged and counted as a verb's write is, and returns
-// nil: the effect happened, and the producer's next evaluation resolves the
-// row. Call it outside any transaction, as a verb is called.
-func (c *Caller) RunAction(ctx context.Context, n domain.Notification, actionID string) error {
+// A failed resolve is logged and counted as a verb's write is, and the result
+// is still returned: the effect happened, and the producer's next evaluation
+// resolves the row. Call it outside any transaction, as a verb is called.
+func (c *Caller) RunAction(ctx context.Context, n domain.Notification, actionID string) (ActionResult, error) {
 	if n.OrgID != c.orgID {
-		return ErrNoSuchAction
+		return ActionResult{}, ErrNoSuchAction
 	}
 	stored, err := decodeActions(n.Actions)
 	if err != nil {
-		return err
+		return ActionResult{}, err
 	}
 	i := slices.IndexFunc(stored, func(a storedAction) bool { return a.Type == invokeAction && a.ID == actionID })
 	h := handlerFor(n.Kind, actionID)
 	if i < 0 || h == nil {
-		return ErrNoSuchAction
+		return ActionResult{}, ErrNoSuchAction
 	}
 	ok, err := c.may(ctx, stored[i].Requires, n.Audience)
 	if err != nil {
-		return err
+		return ActionResult{}, err
 	}
 	if !ok {
-		return ErrActionForbidden
+		return ActionResult{}, ErrActionForbidden
 	}
 	if n.ResolvedAt != nil {
-		return ErrConditionResolved
+		return ActionResult{}, ErrConditionResolved
 	}
-	resolved, err := h(ctx, n, c.userID)
+	res, err := h(ctx, n, c.userID)
 	if err != nil {
-		return err
+		return ActionResult{}, err
 	}
-	if resolved {
-		resolveRow(context.WithoutCancel(ctx), n)
+	if strings.TrimSpace(res.Outcome) == "" {
+		return ActionResult{}, fmt.Errorf("%s action %q reported no outcome", n.Kind, actionID)
 	}
-	return nil
+	switch res.Resolved {
+	case "":
+	case domain.NotificationResolvedCleared, domain.NotificationResolvedAudienceRemoved:
+		resolveRow(context.WithoutCancel(ctx), n, res.Resolved)
+	default:
+		return ActionResult{}, fmt.Errorf("%s action %q resolved for reason %q, which is not one an action reports", n.Kind, actionID, res.Resolved)
+	}
+	return res, nil
 }
 
-// resolveRow resolves n through the installed engine, which pings the users
-// it is sent to. Before Install it does nothing.
-func resolveRow(ctx context.Context, n domain.Notification) {
+// resolveRow resolves n for reason through the installed engine, which says
+// why and pings the users it is sent to. Before Install it does nothing.
+func resolveRow(ctx context.Context, n domain.Notification, reason domain.NotificationResolvedReason) {
 	e, ok := sink.Load().(*engine)
 	if !ok {
 		return
 	}
 	e.commit(ctx, n.Kind, n.OrgID, func(tx db.NotificationStore) ([]domain.Notification, error) {
-		got, err := tx.ResolveIDSystem(ctx, n.OrgID, n.ID)
+		got, err := tx.ResolveIDSystem(ctx, n.OrgID, n.ID, reason)
 		if err != nil || got == nil {
 			return nil, err
 		}

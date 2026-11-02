@@ -198,6 +198,11 @@ func (s *teamsStore) ListForUser(ctx context.Context, orgID string, opts db.List
 	return out, total, rows.Err()
 }
 
+// ListForOrg is ListForUser: N=1, so the org's teams are the sole user's.
+func (s *teamsStore) ListForOrg(ctx context.Context, orgID string, opts db.ListOpts) ([]domain.Team, int, error) {
+	return s.ListForUser(ctx, orgID, opts)
+}
+
 // Get is the canonical single read. Local is N=1, so the sole user admins
 // every team — the constant role matches ListForUser's.
 // teamRowColumns is the canonical projection of a teams ROW, in the order

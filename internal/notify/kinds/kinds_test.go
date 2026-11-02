@@ -1,6 +1,7 @@
 package kinds_test
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -13,7 +14,7 @@ import (
 // names need no check here: a duplicate panics at init, before any test runs.
 // The action checks are the write's own (Example.Err): at most two actions, a
 // notice carries one, and every Link route has a page in the recipient's
-// mode.
+// mode. A condition says why it resolved, for every way it can.
 func TestKindsConformance(t *testing.T) {
 	for _, k := range notify.Kinds() {
 		for _, ex := range notify.Examples(k) {
@@ -26,6 +27,21 @@ func TestKindsConformance(t *testing.T) {
 			if ex.Err != nil {
 				t.Errorf("%s: for %+v (local %v), a write would be refused: %v", k.Name(), ex.Recipient, ex.Local, ex.Err)
 			}
+			checkResolutions(t, k.Name(), ex)
+		}
+	}
+}
+
+// checkResolutions holds a rendering's resolution sentences to being
+// sentences: present, and ending as one.
+func checkResolutions(t *testing.T, name string, ex notify.Example) {
+	t.Helper()
+	for _, r := range ex.Resolutions {
+		switch {
+		case r.Err != nil:
+			t.Errorf("%s: Resolved for %+v: %v", name, r.Resolution, r.Err)
+		case strings.TrimSpace(r.Text) == "" || !strings.HasSuffix(r.Text, "."):
+			t.Errorf("%s: Resolved for %+v = %q; want a sentence", name, r.Resolution, r.Text)
 		}
 	}
 }
@@ -50,6 +66,21 @@ func TestEventConformance(t *testing.T) {
 	for _, ex := range exs {
 		if n := len(ex.Content.Actions); n != 2 {
 			t.Errorf("%+v row has %d actions; want the entity link and the rule link", ex.Recipient, n)
+		}
+		checkResolutions(t, "event", ex)
+		// A close relation's event is named; the sweep's resolution names
+		// none.
+		var got []string
+		for _, r := range ex.Resolutions {
+			got = append(got, r.Text)
+		}
+		want := []string{
+			"CI Check Passed on acme/widgets#18.",
+			"acme/widgets#18 is no longer open.",
+			"GitHub was turned off or disconnected, so Triage Factory stopped checking this.",
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("%+v row resolutions = %q; want %q", ex.Recipient, got, want)
 		}
 	}
 }

@@ -81,6 +81,16 @@ func (l *localRig) list(t *testing.T, body map[string]any) *httptest.ResponseRec
 	return rec
 }
 
+// orgList is POST /api/orgs/{org_id}/teams/list with body.
+func (l *localRig) orgList(t *testing.T, orgID string, body map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	req := localRequest(t, http.MethodPost, "/api/orgs/"+orgID+"/teams/list", body)
+	req.SetPathValue("org_id", orgID)
+	rec := httptest.NewRecorder()
+	l.th.handleOrgTeamsList(rec, req)
+	return rec
+}
+
 // get is GET /api/teams/{team_id} with addr as the path segment.
 func (l *localRig) get(t *testing.T, addr string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -141,6 +151,36 @@ func TestTeamsList_TwoTeams(t *testing.T) {
 		map[string]any{"page_size": 1, "page_token": first.NextPageToken}))
 	if len(next.Items) != 1 || next.Items[0].ID == first.Items[0].ID {
 		t.Errorf("page 2 = %+v, want the other team (pages must partition the set)", next.Items)
+	}
+}
+
+// TestOrgTeamsList_Local: the org's list is the local user's at N=1, pages
+// partition it, and its page tokens are its own.
+func TestOrgTeamsList_Local(t *testing.T) {
+	l := newLocalRig(t)
+	second := l.seedTeam(t, "second")
+
+	page := httpxtest.DecodeList[teamJSON](t, l.orgList(t, runmode.LocalDefaultOrgID, map[string]any{}))
+	if len(page.Items) != 2 || page.Total() != 2 || page.Items[0].ID != runmode.LocalDefaultTeamID ||
+		page.Items[1].ID != second || page.Items[0].Role != "admin" {
+		t.Fatalf("org teams = %+v (total %d); want the local team then %s, the local user their admin", page.Items, page.Total(), second)
+	}
+
+	first := httpxtest.DecodeList[teamJSON](t, l.orgList(t, runmode.LocalDefaultOrgID, map[string]any{"page_size": 1}))
+	next := httpxtest.DecodeList[teamJSON](t, l.orgList(t, runmode.LocalDefaultOrgID,
+		map[string]any{"page_size": 1, "page_token": first.NextPageToken}))
+	if len(first.Items) != 1 || len(next.Items) != 1 || next.Items[0].ID == first.Items[0].ID {
+		t.Errorf("pages = %+v then %+v; want the two teams, one each", first.Items, next.Items)
+	}
+
+	// A token from the caller's own list names another list.
+	own := httpxtest.DecodeList[teamJSON](t, l.list(t, map[string]any{"page_size": 1}))
+	if rec := l.orgList(t, runmode.LocalDefaultOrgID, map[string]any{"page_size": 1, "page_token": own.NextPageToken}); rec.Code != http.StatusBadRequest {
+		t.Errorf("own list's token on the org list = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	// A path segment that names no org is not found.
+	if rec := l.orgList(t, "not-an-org", map[string]any{}); rec.Code != http.StatusNotFound {
+		t.Errorf("a malformed org = %d, want 404; body=%s", rec.Code, rec.Body.String())
 	}
 }
 

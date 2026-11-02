@@ -23,10 +23,7 @@ var GitHubAppUnusable = notify.Condition(notify.ConditionSpec[GitHubApp]{
 	Key:         func(a GitHubApp) string { return a.AppID },
 	Audience:    notify.OrgAdmins(),
 	Render: func(a GitHubApp, _ notify.Recipient) notify.Content {
-		app := "organization's GitHub App"
-		if a.Slug != "" {
-			app = a.Slug + " App"
-		}
+		app := a.name()
 		c := notify.Content{
 			Title: "GitHub no longer accepts the " + app,
 			Body: "Nothing is being polled and agents can't reach GitHub. " +
@@ -46,5 +43,24 @@ var GitHubAppUnusable = notify.Condition(notify.ConditionSpec[GitHubApp]{
 		}
 		return c
 	},
+	// The occurrence is keyed by the App, so it also resolves when the
+	// organization stops using that App.
+	Resolved: func(a GitHubApp, r notify.Resolution) string {
+		switch r.Reason {
+		case domain.NotificationResolvedSourceOff:
+			return sourceOff(domain.ProviderGitHub)
+		case domain.NotificationResolvedAudienceRemoved:
+			return noLongerApplies(r.Recipient)
+		}
+		return "GitHub accepts the " + a.name() + " again, or the organization no longer uses it."
+	},
 	Example: GitHubApp{AppID: "123456", Slug: "acme-triage", Reason: domain.GitHubAppMissing},
 })
+
+// name is how copy names the App.
+func (a GitHubApp) name() string {
+	if a.Slug != "" {
+		return a.Slug + " App"
+	}
+	return "organization's GitHub App"
+}
