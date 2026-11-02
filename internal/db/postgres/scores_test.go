@@ -41,6 +41,12 @@ func TestScoreStore_Postgres(t *testing.T) {
 				t.Helper()
 				return seedPgTasks(t, h.AdminDB, orgID, userID, n)
 			},
+			SetStatus: func(t *testing.T, taskID, status string) {
+				t.Helper()
+				if _, err := h.AdminDB.Exec(`UPDATE tasks SET status = $1 WHERE id = $2`, status, taskID); err != nil {
+					t.Fatalf("set status of %s to %s: %v", taskID, status, err)
+				}
+			},
 			ReDerive: stores.TaskReDerive,
 			ScoreRevision: func(t *testing.T, taskID string) int64 {
 				t.Helper()

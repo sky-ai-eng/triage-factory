@@ -40,6 +40,10 @@ type ScoreFixture struct {
 	Store db.ScoreStore
 	OrgID string
 	Seed  ScoreSeeder
+	// SetStatus writes tasks.status for one task, so the suite can move a
+	// seeded task out of the queue without the lifecycle verbs' side
+	// effects.
+	SetStatus func(t *testing.T, taskID, status string)
 	// ReDerive is the re-evaluation queue the score write admits into, so
 	// the suite can drive a row through leased, parked and done and watch
 	// what the next score write does to it.
@@ -108,22 +112,39 @@ func RunScoreStoreConformance(t *testing.T, mk ScoreStoreFactory) {
 		return batch.Items[0]
 	}
 
-	t.Run("UnscoredTasks_returns_only_pending_queued", func(t *testing.T) {
+	t.Run("UnscoredTasks_returns_pending_open_tasks", func(t *testing.T) {
 		f := mk(t)
-		ids := f.Seed(t, 3)
+		statuses := []string{"queued", "in_progress", "snoozed", "done", "dismissed"}
+		open := map[string]bool{"queued": true, "in_progress": true, "snoozed": true}
+		ids := f.Seed(t, len(statuses))
+		statusOf := map[string]string{}
+		for i, id := range ids {
+			if statuses[i] != "queued" {
+				f.SetStatus(t, id, statuses[i])
+			}
+			statusOf[id] = statuses[i]
+		}
+
 		tasks, err := f.Store.UnscoredTasks(ctx, f.OrgID)
 		if err != nil {
 			t.Fatalf("UnscoredTasks: %v", err)
 		}
-		if len(tasks) != len(ids) {
-			t.Fatalf("UnscoredTasks: got %d rows, want %d", len(tasks), len(ids))
-		}
+		got := map[string]bool{}
 		for _, task := range tasks {
+			got[task.ID] = true
 			if task.ScoringStatus != "pending" {
 				t.Errorf("task %s: scoring_status=%q, want pending", task.ID, task.ScoringStatus)
 			}
-			if task.Status != "queued" {
-				t.Errorf("task %s: status=%q, want queued", task.ID, task.Status)
+			if task.Status != statusOf[task.ID] {
+				t.Errorf("task %s: status=%q, want %q", task.ID, task.Status, statusOf[task.ID])
+			}
+		}
+		for id, status := range statusOf {
+			if open[status] && !got[id] {
+				t.Errorf("pending %s task %s missing from UnscoredTasks", status, id)
+			}
+			if !open[status] && got[id] {
+				t.Errorf("pending %s task %s returned by UnscoredTasks, want a closed task never scored", status, id)
 			}
 		}
 		// Quick guard: every method accepts a ctx with a deadline and

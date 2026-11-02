@@ -86,9 +86,17 @@ type ScoreStore interface {
 	// is no single row to hand back.
 	UpdateTaskScores(ctx context.Context, orgID string, updates []domain.TaskScoreUpdate) error
 
-	// UnscoredTasks returns queued tasks that haven't been scored
-	// yet (status='queued' AND scoring_status='pending'), joined to
-	// their entity. Used by the runner to discover work per cycle.
+	// UnscoredTasks returns open tasks that haven't been scored yet
+	// (status queued, in_progress or snoozed, and scoring_status
+	// 'pending'), joined to their entity. Used by the runner to discover
+	// work per cycle.
+	//
+	// It reads past queued because a task can leave the queue before the
+	// next cycle reaches it (a delegation by hand, or a trigger firing
+	// first), and its card waits on the summary for as long as it is
+	// open. Scoring a task that isn't queued fires nothing: the re-derive
+	// plan matches handlers only for a queued task. A closed task (done
+	// or dismissed) is never scored.
 	UnscoredTasks(ctx context.Context, orgID string) ([]domain.Task, error)
 }
 

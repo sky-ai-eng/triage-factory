@@ -198,6 +198,27 @@ describe('deriveCard lifecycle', () => {
     expect(m.summary).toBeUndefined()
   })
 
+  it('marks the summary pending on an in-progress task the scorer has not reached', () => {
+    const m = deriveCard(
+      task({ status: 'in_progress', ai_summary: undefined, scoring_status: 'pending' }),
+      conversation(),
+      undefined,
+      NOW,
+    )
+    expect(m.summaryPending).toBe(true)
+  })
+
+  it('shows no summary placeholder on a closed task, which is never scored', () => {
+    const m = deriveCard(
+      task({ status: 'done', ai_summary: undefined, scoring_status: 'pending' }),
+      conversation({ Status: 'open', CompletedAt: '2026-09-13T11:50:00Z' }),
+      undefined,
+      NOW,
+    )
+    expect(m.summaryPending).toBe(false)
+    expect(m.summary).toBeUndefined()
+  })
+
   it('derives the event that made the task, and keeps it on every card', () => {
     // A known type in the vocabulary EventTag already reads, with its tone.
     const m = deriveCard(

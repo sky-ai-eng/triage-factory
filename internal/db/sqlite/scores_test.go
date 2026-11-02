@@ -40,9 +40,15 @@ func TestScoreStore_SQLite(t *testing.T) {
 
 		stores := sqlitestore.New(conn)
 		return dbtest.ScoreFixture{
-			Store:    stores.Scores,
-			OrgID:    runmode.LocalDefaultOrgID,
-			Seed:     func(t *testing.T, n int) []string { t.Helper(); return seedSQLiteTasks(t, conn, n) },
+			Store: stores.Scores,
+			OrgID: runmode.LocalDefaultOrgID,
+			Seed:  func(t *testing.T, n int) []string { t.Helper(); return seedSQLiteTasks(t, conn, n) },
+			SetStatus: func(t *testing.T, taskID, status string) {
+				t.Helper()
+				if _, err := conn.Exec(`UPDATE tasks SET status = ? WHERE id = ?`, status, taskID); err != nil {
+					t.Fatalf("set status of %s to %s: %v", taskID, status, err)
+				}
+			},
 			ReDerive: stores.TaskReDerive,
 			ScoreRevision: func(t *testing.T, taskID string) int64 {
 				t.Helper()
