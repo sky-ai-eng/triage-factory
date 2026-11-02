@@ -25,6 +25,7 @@ import Marketplace from './pages/Marketplace'
 import Repos from './pages/Repos'
 import Factory from './pages/Factory'
 import Knowledge from './pages/knowledge/Knowledge'
+import Notifications from './pages/notifications/Notifications'
 import Fleet from './pages/Fleet'
 import Usage from './pages/Usage'
 import Overview from './pages/Overview'
@@ -183,6 +184,7 @@ function LocalRoutes() {
         <Route path="/prompts" element={<Prompts />} />
         <Route path="/repos" element={<Repos />} />
         <Route path="/usage" element={<Usage />} />
+        <Route path="/notifications" element={<Notifications />} />
         {/* Fleet console (TFAC-589) — mounted in both modes; the page itself
             gates on operator + FeatureFleet and bounces home when absent. */}
         <Route path="/fleet" element={<Fleet />} />
@@ -305,6 +307,7 @@ function MultiRoutes() {
               <Route path="prompts" element={<Prompts />} />
               <Route path="repos" element={<Repos />} />
               <Route path="usage" element={<Usage />} />
+              <Route path="notifications" element={<Notifications />} />
               {/* Org surface (TFAC-417) — multi-mode only; mounted under the
                   /orgs/:org_id parent. Non-admins reaching it directly get a
                   read-only roster (OrgPage gates management on org role). */}

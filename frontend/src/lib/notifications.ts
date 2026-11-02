@@ -95,10 +95,10 @@ export function listOrgNotifications(
   filter: NotificationFilter,
   pageSize: number,
 ): Promise<ListPage<NotificationItem>> {
-  return apiList<NotificationItem>(
-    `/api/orgs/${encodeURIComponent(orgID)}/notifications/list`,
-    { ...filter, page_size: pageSize },
-  )
+  return apiList<NotificationItem>(`/api/orgs/${encodeURIComponent(orgID)}/notifications/list`, {
+    ...filter,
+    page_size: pageSize,
+  })
 }
 
 /** One item this viewer may read. A 404 is an HttpError: gone, or not theirs. */

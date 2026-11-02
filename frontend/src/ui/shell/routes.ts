@@ -21,8 +21,8 @@ export type Flags = {
    */
   governance?: boolean
   /**
-   * The notifications band above the queue. Off until the /notifications page
-   * exists, since the band links to it.
+   * The notifications band above the queue. It links to the notifications
+   * page, so a host without that page leaves it off.
    */
   notifications?: boolean
 }
