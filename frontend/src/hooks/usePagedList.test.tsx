@@ -137,6 +137,31 @@ describe('usePagedList', () => {
     expect(bodies).toHaveLength(5)
   })
 
+  it('reads another path from its first page, whatever the filters', async () => {
+    const { bodies } = stubPages([
+      { items: [{ id: 'a' }], next_page_token: 'tok-1', total_count: 3 },
+      { items: [{ id: 'b' }], next_page_token: 'tok-2', total_count: 3 },
+      { items: [{ id: 'z' }], next_page_token: 'tok-3', total_count: 3 },
+    ])
+    const { result, rerender } = renderHook(
+      ({ path }) => usePagedList<Row>(path, 'Could not load.'),
+      { initialProps: { path: '/api/me/notifications/list' } },
+    )
+    await act(async () => {
+      await result.current.load({ status: 'open' })
+    })
+    await act(async () => {
+      await result.current.loadMore()
+    })
+
+    rerender({ path: '/api/orgs/o/notifications/list' })
+    await act(async () => {
+      await result.current.load({ status: 'open' }, { keepDepth: true })
+    })
+    expect(bodies).toHaveLength(3)
+    expect(result.current.items.map((r) => r.id)).toEqual(['z'])
+  })
+
   it('does not page past the last page', async () => {
     const { fetchMock } = stubPages([{ items: [{ id: 'a' }], total_count: 1 }])
     const { result } = renderHook(() => usePagedList<Row>('/api/tasks/list', 'Could not load.'))

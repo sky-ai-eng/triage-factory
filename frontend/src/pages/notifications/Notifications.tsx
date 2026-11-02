@@ -125,8 +125,14 @@ function useNow(everyMs: number): number {
   return now
 }
 
+/** The route stays mounted across an org switch; the page is keyed by org so
+ *  nothing read or chosen in one org is shown in the next. */
 export default function Notifications() {
   const org = useApiOrgId() ?? ''
+  return <OrgNotifications key={org} org={org} />
+}
+
+function OrgNotifications({ org }: { org: string }) {
   const auth = useOptionalAuth()
   const orgName = auth?.orgs?.find((o) => o.id === org)?.name ?? ''
   const { isAdmin: orgAdmin } = useOrgRole()
@@ -173,22 +179,24 @@ export default function Notifications() {
     let live = true
     const read = () => {
       const n = ++reads.current
+      const latest = () => live && n === reads.current
       // A reread keeps the depth "load more" reached.
-      void loadPage(
+      const listed = loadPage(
         { ...tabFilter(tab, showDismissed), page_size: PAGE },
         { keepDepth: true },
-      ).then(() => {
-        if (live && n === reads.current) setLoadedKey(key)
-      })
+      )
       const count = (f: NotificationFilter) =>
         list === 'all' ? listOrgNotifications(org, f, 0) : listNotifications(f, 0)
-      Promise.all([count(OPEN_COUNT), count(OPEN_ANY)])
-        .then(([open, any]) => {
-          if (open.total_count !== null && any.total_count !== null) {
-            setOpenCount({ path, n: open.total_count, any: any.total_count })
-          }
-        })
-        .catch(() => {})
+      const counted = Promise.all([count(OPEN_COUNT), count(OPEN_ANY)]).then(([open, any]) => {
+        if (latest() && open.total_count !== null && any.total_count !== null) {
+          setOpenCount({ path, n: open.total_count, any: any.total_count })
+        }
+      })
+      // Loaded once both have answered: with nothing undismissed open, the
+      // counts are what say whether anything is.
+      void Promise.allSettled([listed, counted]).then(() => {
+        if (latest()) setLoadedKey(key)
+      })
     }
     reload.current = read
     read()
@@ -644,9 +652,12 @@ export default function Notifications() {
       ? 'Nothing matches these filters.'
       : tab === 'resolved'
         ? 'Nothing has resolved in the last 30 days.'
-        : showDismissed
+        : showDismissed || counts?.any === 0
           ? 'Nothing is open.'
-          : 'Everything open here is dismissed.'
+          : counts
+            ? 'Everything open here is dismissed.'
+            : // The counts did not answer: claim nothing about dismissed rows.
+              'Nothing open to show.'
 
   // The last thing that resolved, for the empty state: read only when it
   // shows, from the same list.

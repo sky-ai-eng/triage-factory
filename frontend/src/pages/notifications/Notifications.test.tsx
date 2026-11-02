@@ -27,7 +27,8 @@ const viewer = vi.hoisted(() => ({ orgAdmin: false }))
 vi.mock('../../hooks/useOrgRole', () => ({
   useOrgRole: () => ({ role: null, isAdmin: viewer.orgAdmin, loading: false }),
 }))
-vi.mock('../../hooks/useApiOrgId', () => ({ useApiOrgId: () => 'org-1' }))
+const orgId = vi.hoisted(() => ({ v: 'org-1' }))
+vi.mock('../../hooks/useApiOrgId', () => ({ useApiOrgId: () => orgId.v }))
 vi.mock('../../hooks/useOrgHref', () => ({ useOrgHref: () => (p: string) => '/orgs/org-1' + p }))
 vi.mock('../../hooks/useTeams', () => ({
   useTeams: () => ({ teams: [{ id: 'infra', name: 'Infra', slug: 'infra', role: 'admin' }] }),
@@ -104,6 +105,9 @@ let actionGate: Promise<void>
 let openGates: Array<Promise<void>>
 // Holds a single read of one notification, by id.
 let getGates: Record<string, Promise<void>>
+// Holds every count-only read, or fails it.
+let countGate: Promise<void>
+let countFails: boolean
 let markReadFails: boolean
 type Call = { url: string; method: string; body: Record<string, unknown> | null }
 let calls: Call[]
@@ -127,6 +131,10 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
   })
   if (url === '/api/me/notifications/list' || url === '/api/orgs/org-1/notifications/list') {
     if (body.status === 'open' && body.page_size !== 0) await openGates.shift()
+    if (body.page_size === 0) {
+      await countGate
+      if (countFails) return ok({ errors: [{ reason: 'INTERNAL', message: 'it broke' }] }, 500)
+    }
     const from = url.startsWith('/api/orgs') ? orgRows : rows
     const items = from.filter((n) => matches(n, body))
     return ok({
@@ -195,15 +203,17 @@ function Nav() {
 }
 
 async function mount(path = '/notifications') {
-  render(
+  const page = () => (
     <MemoryRouter initialEntries={[path]}>
       <Notifications />
       <NotificationConfirm />
       <Nav />
-    </MemoryRouter>,
+    </MemoryRouter>
   )
+  const { rerender } = render(page())
   await settle()
   await settle()
+  return { rerender: () => rerender(page()) }
 }
 
 function rowOf(title: string): HTMLElement {
@@ -223,6 +233,9 @@ beforeEach(() => {
   actionGate = Promise.resolve()
   openGates = []
   getGates = {}
+  countGate = Promise.resolve()
+  countFails = false
+  orgId.v = 'org-1'
   markReadFails = false
   ws.dispatch = null
   actionAnswer = () => ({ status: 200, body: { notification: null, outcome: 'Done.' } })
@@ -528,6 +541,32 @@ describe('switching views', () => {
   })
 })
 
+describe('switching orgs', () => {
+  it('shows nothing read or chosen in the org it left', async () => {
+    rows = [
+      note('a', { audience: { scope: 'team', role: 'members', team_id: 'infra', user_id: null } }),
+    ]
+    const { rerender } = await mount()
+    fireEvent.click(
+      within(screen.getByRole('group', { name: 'For' })).getByRole('button', { name: /Infra/ }),
+    )
+
+    rows = [note('b')]
+    let open!: () => void
+    openGates = [new Promise((r) => (open = r))]
+    orgId.v = 'org-2'
+    rerender()
+    await settle()
+    expect(screen.queryByText('title a')).toBeNull()
+    expect(screen.getByText('Loading…')).toBeInTheDocument()
+
+    await act(async () => open())
+    await settle()
+    expect(screen.getByText('title b')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'clear filters' })).toBeNull()
+  })
+})
+
 describe('rereads', () => {
   it('does not call a view loaded on a read a later one replaced', async () => {
     let first!: () => void
@@ -603,6 +642,25 @@ describe('nothing open', () => {
     fireEvent.click(screen.getByRole('checkbox', { name: 'Show dismissed' }))
     await settle()
     expect(screen.getByText('title d')).toBeInTheDocument()
+  })
+
+  it('says what nothing open means only once the counts have answered', async () => {
+    let counted!: () => void
+    countGate = new Promise((r) => (counted = r))
+    await mount()
+    expect(screen.queryByText('Everything open here is dismissed.')).toBeNull()
+    expect(screen.getByText('Loading…')).toBeInTheDocument()
+
+    await act(async () => counted())
+    await settle()
+    expect(screen.getByText('Nothing needs you')).toBeInTheDocument()
+  })
+
+  it('claims no dismissed rows when the counts do not answer', async () => {
+    countFails = true
+    await mount()
+    expect(screen.queryByText('Everything open here is dismissed.')).toBeNull()
+    expect(screen.getByText('Nothing open to show.')).toBeInTheDocument()
   })
 
   it('says nothing needs the viewer, and names the last thing that resolved', async () => {

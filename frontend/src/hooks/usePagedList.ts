@@ -40,11 +40,11 @@ export interface PagedList<T> {
    *  `load` before it resolved — a caller must not read the resolved page's
    *  data directly, since a superseded page was never applied to state.
    *
-   *  `keepDepth` is a reread of the same query: when `filters` are the ones
-   *  already held, it reads as many pages as it takes to hold as many items
-   *  again, and replaces them all at once, so a refetch on a websocket ping
-   *  does not drop what `loadMore` added. Under other filters it is a first
-   *  page like any load. */
+   *  `keepDepth` is a reread of the same query: when the path and `filters`
+   *  are the ones the held items came from, it reads as many pages as it takes
+   *  to hold as many items again, and replaces them all at once, so a refetch
+   *  on a websocket ping does not drop what `loadMore` added. Under another
+   *  path or other filters it is a first page like any load. */
   load: (filters: ListRequest, opts?: { keepDepth?: boolean }) => Promise<ListPage<T> | null>
   /** Fetch the next page and append it. A no-op when there is no next page or
    *  a request is already in flight. */
@@ -96,8 +96,10 @@ export function usePagedList<T>(
   const filtersRef = useRef<ListRequest>({})
   const tokenRef = useRef('')
   const inFlight = useRef(false)
-  // How many items are held, for a reread that keeps its depth.
+  // How many items are held, and the path they were read from, for a reread
+  // that keeps its depth.
   const heldRef = useRef(0)
+  const heldPathRef = useRef('')
   useEffect(() => {
     heldRef.current = items.length
   }, [items])
@@ -120,7 +122,9 @@ export function usePagedList<T>(
       inFlight.current = true
       setLoading(true)
       const want =
-        keepDepth && JSON.stringify(filters) === JSON.stringify(filtersRef.current)
+        keepDepth &&
+        path === heldPathRef.current &&
+        JSON.stringify(filters) === JSON.stringify(filtersRef.current)
           ? heldRef.current
           : 0
       try {
@@ -137,6 +141,7 @@ export function usePagedList<T>(
         setTotal(page.total_count)
         setNextToken(page.next_page_token)
         filtersRef.current = filters
+        heldPathRef.current = path
         tokenRef.current = page.next_page_token
         setError('')
         return page
