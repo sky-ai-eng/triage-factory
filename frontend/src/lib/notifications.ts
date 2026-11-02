@@ -60,7 +60,32 @@ export interface NotificationFilter {
   scope_in?: NotificationScope[]
 }
 
-const LIST_PATH = '/api/me/notifications/list'
+/** The viewer's inbox. */
+export const NOTIFICATIONS_LIST_PATH = '/api/me/notifications/list'
+
+/** Every notification in an org, team rows included: an org admin's All
+ *  teams view. */
+export function orgNotificationsListPath(orgID: string): string {
+  return `/api/orgs/${encodeURIComponent(orgID)}/notifications/list`
+}
+
+/** The actions this viewer can use, in the row's order: a link with somewhere
+ *  to go, or an invoke they may run. One they may not is left out rather than
+ *  offered and refused. */
+export function usableActions(n: NotificationItem): NotificationAction[] {
+  return n.actions.filter((a) => (a.type === 'link' ? !!a.href : a.allowed === true))
+}
+
+/** Go where a link action points. An external destination (a GitHub or Jira
+ *  page) opens beside the app rather than in place of it. */
+export function followNotificationLink(href: string, navigate: (to: string) => void): void {
+  if (isExternalHref(href)) window.open(href, '_blank', 'noopener')
+  else navigate(href)
+}
+
+export function isExternalHref(href: string): boolean {
+  return /^https?:\/\//i.test(href)
+}
 
 function itemPath(id: string): string {
   return `/api/me/notifications/${encodeURIComponent(id)}`
@@ -77,7 +102,7 @@ export function listNotifications(
   filter: NotificationFilter,
   pageSize: number,
 ): Promise<ListPage<NotificationItem>> {
-  return apiList<NotificationItem>(LIST_PATH, { ...filter, page_size: pageSize })
+  return apiList<NotificationItem>(NOTIFICATIONS_LIST_PATH, { ...filter, page_size: pageSize })
 }
 
 /** One page of the inbox, with the server's clock when it answered. */
@@ -85,7 +110,7 @@ export function listNotificationsAt(
   filter: NotificationFilter,
   pageSize: number,
 ): Promise<{ page: ListPage<NotificationItem>; at: number }> {
-  return apiListAt<NotificationItem>(LIST_PATH, { ...filter, page_size: pageSize })
+  return apiListAt<NotificationItem>(NOTIFICATIONS_LIST_PATH, { ...filter, page_size: pageSize })
 }
 
 /** Every notification in the org this org admin may read, team rows
@@ -95,7 +120,7 @@ export function listOrgNotifications(
   filter: NotificationFilter,
   pageSize: number,
 ): Promise<ListPage<NotificationItem>> {
-  return apiList<NotificationItem>(`/api/orgs/${encodeURIComponent(orgID)}/notifications/list`, {
+  return apiList<NotificationItem>(orgNotificationsListPath(orgID), {
     ...filter,
     page_size: pageSize,
   })

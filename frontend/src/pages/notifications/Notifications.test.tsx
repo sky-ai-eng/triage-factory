@@ -1,6 +1,8 @@
+import { useEffect } from 'react'
 import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { MemoryRouter } from 'react-router'
+import { MemoryRouter, useNavigate } from 'react-router'
+import type { WSEvent } from '../../types'
 import Notifications from './Notifications'
 import { NotificationConfirm } from '../../components/ShellNotifications'
 import { cancelInvoke } from '../../hooks/useNotificationActions'
@@ -30,8 +32,11 @@ vi.mock('../../hooks/useOrgHref', () => ({ useOrgHref: () => (p: string) => '/or
 vi.mock('../../hooks/useTeams', () => ({
   useTeams: () => ({ teams: [{ id: 'infra', name: 'Infra', slug: 'infra', role: 'admin' }] }),
 }))
+const ws = vi.hoisted(() => ({ dispatch: null as ((e: WSEvent) => void) | null }))
 vi.mock('../../hooks/useWebSocket', () => ({
-  useWebSocket: () => {},
+  useWebSocket: (handler: (e: WSEvent) => void) => {
+    ws.dispatch = handler
+  },
   useWsConnected: () => true,
 }))
 
@@ -95,8 +100,11 @@ let rows: NotificationItem[]
 let orgRows: NotificationItem[]
 let actionAnswer: () => { status: number; body: unknown }
 let actionGate: Promise<void>
-// Holds the open list's reads, for a read still in flight.
-let openGate: Promise<void>
+// Holds the open list's reads in turn, for a read still in flight.
+let openGates: Array<Promise<void>>
+// Holds a single read of one notification, by id.
+let getGates: Record<string, Promise<void>>
+let markReadFails: boolean
 type Call = { url: string; method: string; body: Record<string, unknown> | null }
 let calls: Call[]
 
@@ -118,7 +126,7 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
     ...jsonBody(b),
   })
   if (url === '/api/me/notifications/list' || url === '/api/orgs/org-1/notifications/list') {
-    if (body.status === 'open' && body.page_size !== 0) await openGate
+    if (body.status === 'open' && body.page_size !== 0) await openGates.shift()
     const from = url.startsWith('/api/orgs') ? orgRows : rows
     const items = from.filter((n) => matches(n, body))
     return ok({
@@ -137,7 +145,17 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       total_count: 2,
     })
   }
-  if (url === '/api/me/notifications/mark-read') return ok({ ids: body.ids })
+  if (url === '/api/teams/archived/list') {
+    return ok({
+      items: [{ id: 'gone', name: 'Old', slug: 'old', archived_at: '2026-10-01T00:00:00Z' }],
+      next_page_token: '',
+      total_count: 1,
+    })
+  }
+  if (url === '/api/me/notifications/mark-read') {
+    if (markReadFails) return ok({ errors: [{ reason: 'INTERNAL', message: 'it broke' }] }, 500)
+    return ok({ ids: body.ids })
+  }
   const m = /^\/api\/me\/notifications\/([^/]+)(\/actions\/(.+))?$/.exec(url)
   if (m) {
     const n = [...rows, ...orgRows].find((r) => r.id === m[1])
@@ -148,6 +166,7 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       return ok(a.body, a.status)
     }
     if (method === 'PATCH') Object.assign(n, body)
+    else await getGates[n.id]
     return ok(n)
   }
   return ok({ errors: [{ reason: 'NOT_FOUND', message: 'not mocked' }] }, 404)
@@ -165,11 +184,22 @@ async function settle(ms = 0) {
   })
 }
 
+// The router's navigate, for a test that opens a second link.
+const nav: { go: (to: string) => void } = { go: () => {} }
+function Nav() {
+  const navigate = useNavigate()
+  useEffect(() => {
+    nav.go = navigate
+  }, [navigate])
+  return null
+}
+
 async function mount(path = '/notifications') {
   render(
     <MemoryRouter initialEntries={[path]}>
       <Notifications />
       <NotificationConfirm />
+      <Nav />
     </MemoryRouter>,
   )
   await settle()
@@ -191,7 +221,10 @@ beforeEach(() => {
   orgRows = []
   viewer.orgAdmin = false
   actionGate = Promise.resolve()
-  openGate = Promise.resolve()
+  openGates = []
+  getGates = {}
+  markReadFails = false
+  ws.dispatch = null
   actionAnswer = () => ({ status: 200, body: { notification: null, outcome: 'Done.' } })
   for (const t of Object.values(toasts)) t.mockClear()
 })
@@ -336,7 +369,7 @@ describe('invoke actions', () => {
     ]
     actionAnswer = () => ({
       status: 200,
-      body: { notification: rows[0], outcome: 'Still failing.' },
+      body: { notification: rows[0], outcome: 'Retrying now.' },
     })
     await mount()
 
@@ -344,7 +377,7 @@ describe('invoke actions', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retry now' }))
     await settle()
     expect(screen.queryByText('Retry now?')).toBeNull()
-    expect(toasts.warning).toHaveBeenCalledWith('Still failing.')
+    expect(toasts.info).toHaveBeenCalledWith('Retrying now.')
   })
 })
 
@@ -385,6 +418,10 @@ describe('filters', () => {
         sent: false,
         audience: { scope: 'team', role: 'admins', team_id: 'platform', user_id: null },
       }),
+      note('old', {
+        sent: false,
+        audience: { scope: 'team', role: 'members', team_id: 'gone', user_id: null },
+      }),
     ]
     await mount()
     expect(screen.queryByText('not sent to you')).toBeNull()
@@ -396,6 +433,8 @@ describe('filters', () => {
     expect(within(rowOf('title mine')).queryByText('not sent to you')).toBeNull()
     expect(screen.getByText('Other teams · visible as org admin')).toBeInTheDocument()
     expect(within(rowOf('title theirs')).getByText('Platform admins')).toBeInTheDocument()
+    // An archived team's open rows are named too.
+    expect(within(rowOf('title old')).getByText('Old')).toBeInTheDocument()
   })
 
   it('leaves dismissed rows out until asked for them', async () => {
@@ -474,22 +513,98 @@ describe('switching views', () => {
   it('settles on the view it switched to, whatever the one it left answers late', async () => {
     rows = [note('a')]
     let open!: () => void
-    openGate = new Promise((r) => (open = r))
+    openGates = [new Promise((r) => (open = r))]
     await mount()
 
     // Resolved holds nothing, which reads as loaded only once it has answered.
     fireEvent.click(screen.getByRole('tab', { name: /Resolved/ }))
     await settle()
-    expect(screen.getByText('Nothing matches these filters.')).toBeInTheDocument()
+    expect(screen.getByText('Nothing has resolved in the last 30 days.')).toBeInTheDocument()
     // The Open read, superseded, answers late.
     await act(async () => open())
     await settle()
-    expect(screen.getByText('Nothing matches these filters.')).toBeInTheDocument()
+    expect(screen.getByText('Nothing has resolved in the last 30 days.')).toBeInTheDocument()
     expect(screen.queryByText('Loading…')).toBeNull()
   })
 })
 
+describe('rereads', () => {
+  it('does not call a view loaded on a read a later one replaced', async () => {
+    let first!: () => void
+    let second!: () => void
+    openGates = [new Promise((r) => (first = r)), new Promise((r) => (second = r))]
+    await mount()
+    // A ping lands while the first read is out, and its read goes out too.
+    act(() => ws.dispatch?.({ type: 'notifications_updated', data: {} } as WSEvent))
+    await settle(300)
+
+    await act(async () => first())
+    await settle()
+    expect(screen.queryByText('Nothing needs you')).toBeNull()
+    expect(screen.getByText('Loading…')).toBeInTheDocument()
+
+    await act(async () => second())
+    await settle()
+    expect(screen.getByText('Nothing needs you')).toBeInTheDocument()
+  })
+})
+
+describe('marks that do not land', () => {
+  it('puts a read back, and says so, when the server refuses it', async () => {
+    rows = [note('a')]
+    markReadFails = true
+    await mount()
+    const dot = () => rowOf('title a').querySelector('.tb-mark')
+
+    onScreen('a')
+    await settle(2500)
+    expect(dot()).not.toHaveAttribute('data-on')
+    await settle(2000)
+    expect(toasts.error).toHaveBeenCalledWith('it broke')
+    expect(dot()).toHaveAttribute('data-on')
+  })
+})
+
+describe('a second link', () => {
+  it('keeps the page on the link opened last, however the first answers', async () => {
+    rows = [note('x', { resolved_at: new Date().toISOString() }), note('y')]
+    let slow!: () => void
+    getGates = { x: new Promise((r) => (slow = r)) }
+    await mount('/notifications?id=x')
+
+    act(() => nav.go('/notifications?id=y'))
+    await settle(50)
+    expect(screen.getByRole('tab', { name: /Open/ })).toHaveAttribute('aria-selected', 'true')
+
+    await act(async () => slow())
+    await settle(50)
+    expect(screen.getByRole('tab', { name: /Open/ })).toHaveAttribute('aria-selected', 'true')
+    expect(rowOf('title y').style.getPropertyValue('--tb-row-bg')).toBe('var(--color-warm-1)')
+  })
+})
+
+describe('copy link', () => {
+  it('says it could not copy where there is no clipboard', async () => {
+    rows = [note('a')]
+    await mount()
+    expect(navigator.clipboard).toBeUndefined()
+    fireEvent.click(within(rowOf('title a')).getByRole('button', { name: 'More actions' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy link' }))
+    expect(toasts.error).toHaveBeenCalledWith('Could not copy the link.')
+  })
+})
+
 describe('nothing open', () => {
+  it('keeps the table, and the way to show them, while dismissed rows are open', async () => {
+    rows = [note('d', { dismissed: true })]
+    await mount()
+    expect(screen.queryByText('Nothing needs you')).toBeNull()
+    expect(screen.getByText('Everything open here is dismissed.')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Show dismissed' }))
+    await settle()
+    expect(screen.getByText('title d')).toBeInTheDocument()
+  })
+
   it('says nothing needs the viewer, and names the last thing that resolved', async () => {
     const day = 24 * 3600_000
     rows = [

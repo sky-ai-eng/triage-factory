@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef } from 'react'
 import type { KeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
 
@@ -12,6 +12,10 @@ export type RowMenuEntry =
   | { kind: 'rule' }
 
 const WIDTH = 200
+/** The space between the button and the menu. */
+const GAP = 4
+/** The least room left between the menu and the window's edge. */
+const EDGE = 8
 
 export function RowMenu({
   anchor,
@@ -31,6 +35,19 @@ export function RowMenu({
   useEffect(() => {
     close.current = onClose
   })
+
+  // Below the button, unless the window has no room for it there and has
+  // room above: a menu that runs off the bottom cannot be scrolled to, since
+  // a scroll closes it.
+  useLayoutEffect(() => {
+    const el = box.current
+    if (!el) return
+    const b = anchor.getBoundingClientRect()
+    const h = el.offsetHeight
+    if (b.bottom + GAP + h > window.innerHeight - EDGE && b.top - GAP - h >= EDGE) {
+      el.style.top = `${b.top - GAP - h}px`
+    }
+  }, [anchor])
 
   useEffect(() => {
     box.current?.querySelector<HTMLElement>('[role="menuitem"]:not([aria-disabled])')?.focus()
@@ -79,7 +96,7 @@ export function RowMenu({
       className="nt-menu"
       role="menu"
       aria-label="Notification actions"
-      style={{ left: Math.max(8, r.right - WIDTH), top: r.bottom + 4, width: WIDTH }}
+      style={{ left: Math.max(EDGE, r.right - WIDTH), top: r.bottom + GAP, width: WIDTH }}
       onKeyDown={onKeyDown}
     >
       {entries.map((e, i) =>

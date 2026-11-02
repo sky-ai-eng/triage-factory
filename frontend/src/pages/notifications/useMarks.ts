@@ -52,9 +52,10 @@ function prune(marks: ReadonlyMap<string, Mark>, served: NotificationItem[]): Ma
   return out
 }
 
-function sendRead(ids: string[], keepalive: boolean, onFail: () => void) {
+function sendRead(ids: string[], keepalive: boolean, onFail: (ids: string[], e: unknown) => void) {
   for (let i = 0; i < ids.length; i += MARK_READ_MAX) {
-    markNotificationsRead(ids.slice(i, i + MARK_READ_MAX), { keepalive }).catch(onFail)
+    const chunk = ids.slice(i, i + MARK_READ_MAX)
+    markNotificationsRead(chunk, { keepalive }).catch((e) => onFail(chunk, e))
   }
 }
 
@@ -86,12 +87,25 @@ export function useMarks(served: NotificationItem[], reload: () => void): Marks 
   useEffect(() => {
     reloadRef.current = reload
   })
-  const queue = useRef(new Set<string>())
-  const flush = useCallback((keepalive = false) => {
-    const ids = [...queue.current]
-    queue.current.clear()
-    sendRead(ids, keepalive, () => reloadRef.current())
+  // A read that did not land is put back as it was, and said.
+  const readFailed = useCallback((ids: string[], e: unknown) => {
+    setMarks((prev) => {
+      const next = new Map(prev)
+      for (const id of ids) next.delete(id)
+      return next
+    })
+    toast.error(httpErrorMessage(e, 'Could not mark those notifications read.'))
+    reloadRef.current()
   }, [])
+  const queue = useRef(new Set<string>())
+  const flush = useCallback(
+    (keepalive = false) => {
+      const ids = [...queue.current]
+      queue.current.clear()
+      sendRead(ids, keepalive, readFailed)
+    },
+    [readFailed],
+  )
   useEffect(() => {
     const t = setInterval(() => {
       if (queue.current.size) flush()
@@ -145,9 +159,9 @@ export function useMarks(served: NotificationItem[], reload: () => void): Marks 
   const commitRead = useCallback(
     (ids: string[], keepalive: boolean) => {
       mark(ids, { read: true })
-      sendRead(ids, keepalive, () => reloadRef.current())
+      sendRead(ids, keepalive, readFailed)
     },
-    [mark],
+    [mark, readFailed],
   )
 
   const commitDismissed = useCallback(

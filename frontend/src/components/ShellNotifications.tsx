@@ -12,7 +12,7 @@ import {
   useNotificationActions,
 } from '../hooks/useNotificationActions'
 import { useApiOrgId } from '../hooks/useApiOrgId'
-import type { NotificationItem } from '../lib/notifications'
+import { usableActions, type NotificationItem } from '../lib/notifications'
 
 // The notification feed drawn in the shell: NotifyStrip in the banner slot,
 // and the confirmation an invoke action may ask for, wherever it was asked.
@@ -41,9 +41,7 @@ function stripItem(
   act: NotificationFeed['act'],
   running: ReadonlyMap<string, string>,
 ): StripItem {
-  // The first action this viewer can take: a link, or an invoke they may run.
-  // One they may not is left out rather than offered and refused.
-  const action = n.actions.find((a) => (a.type === 'link' ? !!a.href : a.allowed === true))
+  const action = usableActions(n)[0]
   // An invoke of this row already out, from here or from the page, holds
   // every invoke the row offers.
   const out = action?.type === 'invoke' ? runningAction(n, running) : undefined

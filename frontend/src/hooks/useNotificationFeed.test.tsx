@@ -216,9 +216,8 @@ describe('useNotificationFeed', () => {
     await act(async () => confirmInvoke())
     expect(result.current.actions.pending).toBeNull()
     await waitFor(() => expect(ran()).toBe(true))
-    // The outcome is the action's own words, as a warning while the row it
-    // left open is still a condition that holds.
-    await waitFor(() => expect(toastWarning).toHaveBeenCalledWith('Retrying.'))
+    // The outcome is the action's own words.
+    await waitFor(() => expect(toastInfo).toHaveBeenCalledWith('Retrying.'))
   })
 
   it("tells the viewer an action's outcome, as a success once it resolved the row", async () => {

@@ -79,10 +79,10 @@ async function run(item: NotificationItem, action: NotificationAction, then?: In
   try {
     const { notification, outcome } = await runNotificationAction(item.id, action.id)
     settled = notification
-    // A row still open after its action is a condition that still holds.
-    if (!notification) toast.info(outcome)
-    else if (notification.resolved_at) toast.success(outcome)
-    else toast.warning(outcome)
+    // A row that stayed open is not a failure: an action can leave its
+    // condition to resolve once its effect lands, as a retry does.
+    if (notification?.resolved_at) toast.success(outcome)
+    else toast.info(outcome)
   } catch (e) {
     const message = httpErrorMessage(e, 'Could not run that action.')
     // 409 is a condition that resolved before the action reached it: news,

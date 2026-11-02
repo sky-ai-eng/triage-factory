@@ -5,6 +5,7 @@ import {
   listNotificationsAt,
   markNotificationRead,
   notificationPath,
+  followNotificationLink,
   type NotificationAction,
   type NotificationFilter,
   type NotificationItem,
@@ -216,10 +217,7 @@ export function useNotificationFeed(): NotificationFeed {
       if (action.type === 'link') {
         if (!action.href) return
         markRead(item.id)
-        // An external destination (a GitHub or Jira settings page) opens beside
-        // the app rather than in place of it.
-        if (/^https?:\/\//i.test(action.href)) window.open(action.href, '_blank', 'noopener')
-        else navigate(action.href)
+        followNotificationLink(action.href, navigate)
         return
       }
       requestInvoke(orgRef.current, item, action, (notification) => {

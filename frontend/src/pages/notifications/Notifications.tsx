@@ -23,16 +23,22 @@ import {
 import { toast } from '../../components/Toast/toastStore'
 import { HttpError, httpErrorMessage } from '../../lib/apiClient'
 import {
+  NOTIFICATIONS_LIST_PATH,
+  followNotificationLink,
   getNotification,
+  isExternalHref,
   listNotifications,
   listOrgNotifications,
   notificationPath,
+  orgNotificationsListPath,
+  usableActions,
   type NotificationAction,
   type NotificationFilter,
   type NotificationItem,
   type NotificationPriority,
 } from '../../lib/notifications'
 import { listOrgTeams } from '../../lib/orgTeams'
+import { fetchArchivedTeams } from '../../lib/teamLifecycle'
 import type { WSEvent } from '../../types'
 import { RowMenu, type RowMenuEntry } from './RowMenu'
 import { useDwellRead } from './useDwellRead'
@@ -65,10 +71,8 @@ const PRIORITY_LABEL: Record<NotificationPriority, string> = {
 }
 const PRIORITIES: NotificationPriority[] = ['urgent', 'high', 'low']
 
-const INBOX_PATH = '/api/me/notifications/list'
-
 function listPath(list: List, org: string): string {
-  return list === 'all' ? `/api/orgs/${encodeURIComponent(org)}/notifications/list` : INBOX_PATH
+  return list === 'all' ? orgNotificationsListPath(org) : NOTIFICATIONS_LIST_PATH
 }
 
 /** What a tab reads. Dismissed rows are left out of Open unless asked for;
@@ -82,17 +86,11 @@ function viewKey(path: string, tab: Tab, showDismissed: boolean): string {
   return `${path}|${tab}|${tab === 'open' && showDismissed}`
 }
 
+/** The Open tab's count: what is open and not dismissed. */
 const OPEN_COUNT: NotificationFilter = { status: 'open', dismissed: false }
-
-/** The actions a viewer can use, in the row's order: a link with somewhere to
- *  go, or an invoke they may run. One they may not is absent, not refused. */
-function usable(n: NotificationItem): NotificationAction[] {
-  return n.actions.filter((a) => (a.type === 'link' ? !!a.href : a.allowed === true))
-}
-
-function isExternal(href: string): boolean {
-  return /^https?:\/\//i.test(href)
-}
+/** Whether anything is open at all, dismissed rows included: with nothing
+ *  undismissed but dismissed rows left, the page still offers to show them. */
+const OPEN_ANY: NotificationFilter = { status: 'open' }
 
 /** Minutes between an ISO time and `now`, past or future. */
 function minutes(at: string | null, now: number): number {
@@ -164,21 +162,32 @@ export default function Notifications() {
   const loadPage = paged.load
   const key = viewKey(path, tab, showDismissed)
   const [loadedKey, setLoadedKey] = useState('')
-  const [openCount, setOpenCount] = useState<{ path: string; n: number } | null>(null)
+  const [openCount, setOpenCount] = useState<{ path: string; n: number; any: number } | null>(null)
   const reload = useRef<() => void>(() => {})
+  const reads = useRef(0)
 
   useEffect(() => {
     if (!org) return
-    // A view left before its read answered is not the one that loaded.
+    // A view left before its read answered is not the one that loaded, and
+    // neither is a read a later one replaced: only the latest says so.
     let live = true
     const read = () => {
-      void loadPage({ ...tabFilter(tab, showDismissed), page_size: PAGE }).then(() => {
-        if (live) setLoadedKey(key)
+      const n = ++reads.current
+      // A reread keeps the depth "load more" reached.
+      void loadPage(
+        { ...tabFilter(tab, showDismissed), page_size: PAGE },
+        { keepDepth: true },
+      ).then(() => {
+        if (live && n === reads.current) setLoadedKey(key)
       })
-      const count =
-        list === 'all' ? listOrgNotifications(org, OPEN_COUNT, 0) : listNotifications(OPEN_COUNT, 0)
-      count
-        .then((p) => p.total_count !== null && setOpenCount({ path, n: p.total_count }))
+      const count = (f: NotificationFilter) =>
+        list === 'all' ? listOrgNotifications(org, f, 0) : listNotifications(f, 0)
+      Promise.all([count(OPEN_COUNT), count(OPEN_ANY)])
+        .then(([open, any]) => {
+          if (open.total_count !== null && any.total_count !== null) {
+            setOpenCount({ path, n: open.total_count, any: any.total_count })
+          }
+        })
         .catch(() => {})
     }
     reload.current = read
@@ -213,15 +222,24 @@ export default function Notifications() {
   }, [connected])
 
   // Names for the teams the viewer's own list leaves out, read only when the
-  // All teams view needs them.
+  // All teams view needs them. An archived team's rows can still be open, so
+  // its name is read too; the view is an org admin's, as that list is.
   const [orgTeams, setOrgTeams] = useState<{ org: string; teams: Team[] } | null>(null)
   useEffect(() => {
     if (list !== 'all' || !org || orgTeams?.org === org) return
-    listOrgTeams(org)
-      .then((ts) =>
-        setOrgTeams({ org, teams: ts.map((t) => ({ id: t.id, name: t.name, mine: !!t.role })) }),
-      )
-      .catch(() => {})
+    void Promise.allSettled([listOrgTeams(org), fetchArchivedTeams()]).then(
+      ([active, archived]) => {
+        const ts = [
+          ...(active.status === 'fulfilled'
+            ? active.value.map((t) => ({ id: t.id, name: t.name, mine: !!t.role }))
+            : []),
+          ...(archived.status === 'fulfilled'
+            ? archived.value.map((t) => ({ id: t.id, name: t.name, mine: false }))
+            : []),
+        ]
+        setOrgTeams({ org, teams: ts })
+      },
+    )
   }, [list, org, orgTeams])
   const teams = useMemo<Team[]>(() => {
     const mine = myTeams.map((t) => ({ id: t.id, name: t.name, mine: true }))
@@ -274,8 +292,10 @@ export default function Notifications() {
     linkView.current = { list, tab, showDismissed, orgAdmin, org, markRead }
   })
   // The link being opened, so a second run of the effect for the same one (a
-  // development double-mount) does not open it twice.
+  // development double-mount) does not open it twice; and the last one asked
+  // for, so an earlier link answering late does not take the page from it.
   const opening = useRef<string | null>(null)
+  const latestLink = useRef<string | null>(null)
   useEffect(() => {
     if (!linkId) {
       opening.current = null
@@ -283,6 +303,7 @@ export default function Notifications() {
     }
     if (opening.current === linkId) return
     opening.current = linkId
+    latestLink.current = linkId
     // The id is consumed, so the same link opened again is a new open.
     setParams(
       (p) => {
@@ -293,7 +314,7 @@ export default function Notifications() {
     )
     getNotification(linkId)
       .then((n) => {
-        if (!mounted.current) return
+        if (!mounted.current || latestLink.current !== linkId) return
         const v = linkView.current
         // A row the viewer is not sent is only on an org admin's All teams.
         const nextList: List = !n.sent && v.orgAdmin ? 'all' : n.sent ? v.list : 'sent'
@@ -309,7 +330,7 @@ export default function Notifications() {
         v.markRead([n.id], true)
       })
       .catch((e) => {
-        if (!mounted.current) return
+        if (!mounted.current || latestLink.current !== linkId) return
         toast.error(
           e instanceof HttpError && e.status === 404
             ? 'That notification is gone or not yours to read.'
@@ -346,14 +367,22 @@ export default function Notifications() {
   const follow = (n: NotificationItem, a: NotificationAction) => {
     if (!a.href) return
     markRead([n.id])
-    if (isExternal(a.href)) window.open(a.href, '_blank', 'noopener')
-    else navigate(a.href)
+    followNotificationLink(a.href, navigate)
   }
-  const invoke = (n: NotificationItem, a: NotificationAction) =>
-    requestInvoke(org, n, a, () => reload.current())
+  const invoke = useCallback(
+    (n: NotificationItem, a: NotificationAction) =>
+      requestInvoke(org, n, a, () => reload.current()),
+    [org],
+  )
 
   const copyLink = (id: string) => {
     const url = new URL(orgHref(notificationPath(id)), window.location.origin).toString()
+    // The clipboard is absent outside a secure context, such as a local
+    // install served over plain http to another host.
+    if (!navigator.clipboard) {
+      toast.error('Could not copy the link.')
+      return
+    }
     navigator.clipboard
       .writeText(url)
       .then(() => toast.info('Link copied.'))
@@ -362,7 +391,7 @@ export default function Notifications() {
 
   // The menu is data; what an entry does is decided when it is picked.
   const menuEntries = (n: NotificationItem): RowMenuEntry[] => {
-    const rest = usable(n).slice(1)
+    const rest = usableActions(n).slice(1)
     const out = runningAction(n, running)
     const entries: RowMenuEntry[] = rest.map((a) =>
       a.type === 'invoke' && out
@@ -468,114 +497,120 @@ export default function Notifications() {
   // ---- the table ----------------------------------------------------
 
   const resolvedTab = tab === 'resolved'
-  const columns: TableColumn[] = [
-    {
-      key: 'pri',
-      label: 'PRIORITY',
-      width: '84px',
-      sortValue: (r) => r.rank,
-      render: (r) => (
-        <span
-          className="nt-pri"
-          data-tone={resolvedTab ? 'past' : r.item.priority === 'low' ? 'low' : 'warm'}
-          data-unread={r.unread || undefined}
-        >
-          {r.item.priority.toUpperCase()}
-          {r.unread ? <span className="nt-sr"> · unread</span> : null}
-        </span>
-      ),
-    },
-    {
-      key: 'note',
-      label: 'NOTIFICATION',
-      floor: 320,
-      sortValue: (r) => r.item.title,
-      render: (r) => (
-        <NoteCell
-          n={r.item}
-          first={usable(r.item)[0]}
-          running={running}
-          observe={dwell.observe(r.item.id)}
-          onOpened={(n) => markRead([n.id])}
-          onInvoke={invoke}
-        />
-      ),
-    },
-    {
-      key: 'who',
-      label: 'FOR',
-      mono: false,
-      width: '112px',
-      drop: 2,
-      color: () => 'var(--color-ink-3)',
-    },
-    {
-      key: 'age',
-      label: resolvedTab ? 'RESOLVED' : 'TRUE FOR',
-      width: '76px',
-      align: 'end',
-      sortValue: (r) => minutes(resolvedTab ? r.item.resolved_at : r.item.first_seen_at, now),
-      render: (r) =>
-        resolvedTab
-          ? `${ago(minutes(r.item.resolved_at, now))} ago`
-          : ago(minutes(r.item.first_seen_at, now)),
-    },
-    resolvedTab
-      ? {
-          key: 'why',
-          label: 'WHY',
-          width: '240px',
-          align: 'end',
-          drop: 1,
-          color: () => 'var(--color-ink-4)',
-          sortValue: (r) => r.item.resolution ?? '',
-          // A row whose sentence could not be written says nothing rather
-          // than something the API did not say.
-          render: (r) => r.item.resolution ?? '—',
-        }
-      : {
-          key: 'last',
-          label: 'LAST SEEN',
-          width: '92px',
-          align: 'end',
-          drop: 1,
-          color: () => 'var(--color-ink-4)',
-          sortValue: (r) =>
-            r.item.lifecycle === 'notice' && r.item.expires_at
-              ? -minutes(r.item.expires_at, now)
-              : minutes(r.item.last_seen_at, now),
-          // A notice is not seen again; what it has left is time.
-          render: (r) =>
-            r.item.lifecycle === 'notice' && r.item.expires_at
-              ? `in ${ago(minutes(r.item.expires_at, now))}`
-              : `${ago(minutes(r.item.last_seen_at, now))} ago`,
-        },
-    {
-      key: 'more',
-      label: '',
-      width: '28px',
-      align: 'end',
-      sortable: false,
-      render: (r) => (
-        <button
-          type="button"
-          className="nt-more"
-          data-nt-more=""
-          aria-label="More actions"
-          aria-haspopup="menu"
-          aria-expanded={menu?.id === r.id}
-          data-open={menu?.id === r.id || undefined}
-          onClick={(e: MouseEvent<HTMLButtonElement>) => {
-            e.stopPropagation()
-            const anchor = e.currentTarget
-            setMenu((m) => (m?.id === r.id ? null : { id: String(r.id), anchor }))
-          }}
-        >
-          ⋯
-        </button>
-      ),
-    },
-  ]
+  // Built once per change to what a cell draws, not per render: the table
+  // re-measures its columns whenever their identity changes.
+  const observe = dwell.observe
+  const columns = useMemo<TableColumn[]>(
+    () => [
+      {
+        key: 'pri',
+        label: 'PRIORITY',
+        width: '84px',
+        sortValue: (r) => r.rank,
+        render: (r) => (
+          <span
+            className="nt-pri"
+            data-tone={resolvedTab ? 'past' : r.item.priority === 'low' ? 'low' : 'warm'}
+            data-unread={r.unread || undefined}
+          >
+            {r.item.priority.toUpperCase()}
+            {r.unread ? <span className="nt-sr"> · unread</span> : null}
+          </span>
+        ),
+      },
+      {
+        key: 'note',
+        label: 'NOTIFICATION',
+        floor: 320,
+        sortValue: (r) => r.item.title,
+        render: (r) => (
+          <NoteCell
+            n={r.item}
+            first={usableActions(r.item)[0]}
+            running={running}
+            observe={observe(r.item.id)}
+            onOpened={(n) => markRead([n.id])}
+            onInvoke={invoke}
+          />
+        ),
+      },
+      {
+        key: 'who',
+        label: 'FOR',
+        mono: false,
+        width: '112px',
+        drop: 2,
+        color: () => 'var(--color-ink-3)',
+      },
+      {
+        key: 'age',
+        label: resolvedTab ? 'RESOLVED' : 'TRUE FOR',
+        width: '76px',
+        align: 'end',
+        sortValue: (r) => minutes(resolvedTab ? r.item.resolved_at : r.item.first_seen_at, now),
+        render: (r) =>
+          resolvedTab
+            ? `${ago(minutes(r.item.resolved_at, now))} ago`
+            : ago(minutes(r.item.first_seen_at, now)),
+      },
+      resolvedTab
+        ? {
+            key: 'why',
+            label: 'WHY',
+            width: '240px',
+            align: 'end',
+            drop: 1,
+            color: () => 'var(--color-ink-4)',
+            sortValue: (r) => r.item.resolution ?? '',
+            // A row whose sentence could not be written says nothing rather
+            // than something the API did not say.
+            render: (r) => r.item.resolution ?? '—',
+          }
+        : {
+            key: 'last',
+            label: 'LAST SEEN',
+            width: '92px',
+            align: 'end',
+            drop: 1,
+            color: () => 'var(--color-ink-4)',
+            sortValue: (r) =>
+              r.item.lifecycle === 'notice' && r.item.expires_at
+                ? -minutes(r.item.expires_at, now)
+                : minutes(r.item.last_seen_at, now),
+            // A notice is not seen again; what it has left is time.
+            render: (r) =>
+              r.item.lifecycle === 'notice' && r.item.expires_at
+                ? `in ${ago(minutes(r.item.expires_at, now))}`
+                : `${ago(minutes(r.item.last_seen_at, now))} ago`,
+          },
+      {
+        key: 'more',
+        label: '',
+        width: '28px',
+        align: 'end',
+        sortable: false,
+        render: (r) => (
+          <button
+            type="button"
+            className="nt-more"
+            data-nt-more=""
+            aria-label="More actions"
+            aria-haspopup="menu"
+            aria-expanded={menu?.id === r.id}
+            data-open={menu?.id === r.id || undefined}
+            onClick={(e: MouseEvent<HTMLButtonElement>) => {
+              e.stopPropagation()
+              const anchor = e.currentTarget
+              setMenu((m) => (m?.id === r.id ? null : { id: String(r.id), anchor }))
+            }}
+          >
+            ⋯
+          </button>
+        ),
+      },
+    ],
+    [resolvedTab, now, running, menu, observe, markRead, invoke],
+  )
 
   const onCommit = (
     actionId: string,
@@ -590,10 +625,28 @@ export default function Notifications() {
   // ---- the page -----------------------------------------------------
 
   const loaded = loadedKey === key
-  const isEmpty = loaded && tab === 'open' && !showDismissed && pool.length === 0 && !paged.error
-  const count = openCount?.path === path ? openCount.n : null
+  const counts = openCount?.path === path ? openCount : null
+  const count = counts ? counts.n : null
+  // Nothing open at all. With dismissed rows left, the table stays, and so
+  // does the control that shows them.
+  const isEmpty =
+    loaded &&
+    tab === 'open' &&
+    !showDismissed &&
+    pool.length === 0 &&
+    counts?.any === 0 &&
+    !paged.error
   const unreadIds = tab === 'open' ? pool.filter((n) => !n.read).map((n) => n.id) : []
   const filtering = !!(fPri || fWho || q)
+  const emptyLabel = !loaded
+    ? 'Loading…'
+    : filtering
+      ? 'Nothing matches these filters.'
+      : tab === 'resolved'
+        ? 'Nothing has resolved in the last 30 days.'
+        : showDismissed
+          ? 'Nothing is open.'
+          : 'Everything open here is dismissed.'
 
   // The last thing that resolved, for the empty state: read only when it
   // shows, from the same list.
@@ -811,7 +864,7 @@ export default function Notifications() {
                 return r
               }}
               onCommit={onCommit}
-              emptyLabel={loaded ? 'Nothing matches these filters.' : 'Loading…'}
+              emptyLabel={emptyLabel}
               rowBg={(r) => (r.id === tint ? 'var(--color-warm-1)' : null)}
             />
             {paged.hasMore ? (
@@ -886,7 +939,7 @@ function NoteCell({
         {first.label}
       </button>
     )
-  } else if (first?.href && isExternal(first.href)) {
+  } else if (first?.href && isExternalHref(first.href)) {
     action = (
       <a
         className="nt-act"

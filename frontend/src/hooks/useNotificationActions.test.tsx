@@ -115,7 +115,7 @@ describe('the invoke runner', () => {
       { notification: note('a', { resolved_at: 'now' }), outcome: 'Fixed.' },
       'success',
     ],
-    ['left it open', { notification: note('a'), outcome: 'Still failing.' }, 'warning'],
+    ['left it open', { notification: note('a'), outcome: 'Retrying now.' }, 'info'],
     ['took it out of reach', { notification: null, outcome: 'Done.' }, 'info'],
   ] as const)('tells the outcome in the action’s words when it %s', async (_, body, level) => {
     answer = () => ({ status: 200, body })

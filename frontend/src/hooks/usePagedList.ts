@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { apiList, httpErrorMessage, HttpError } from '../lib/apiClient'
 import type { ListPage, ListRequest } from '../lib/apiClient'
 
@@ -38,8 +38,14 @@ export interface PagedList<T> {
   /** Fetch the first page for `filters`, replacing whatever is held. Resolves
    *  to the page, or null if the request failed or was superseded by a later
    *  `load` before it resolved — a caller must not read the resolved page's
-   *  data directly, since a superseded page was never applied to state. */
-  load: (filters: ListRequest) => Promise<ListPage<T> | null>
+   *  data directly, since a superseded page was never applied to state.
+   *
+   *  `keepDepth` is a reread of the same query: when `filters` are the ones
+   *  already held, it reads as many pages as it takes to hold as many items
+   *  again, and replaces them all at once, so a refetch on a websocket ping
+   *  does not drop what `loadMore` added. Under other filters it is a first
+   *  page like any load. */
+  load: (filters: ListRequest, opts?: { keepDepth?: boolean }) => Promise<ListPage<T> | null>
   /** Fetch the next page and append it. A no-op when there is no next page or
    *  a request is already in flight. */
   loadMore: () => Promise<void>
@@ -90,6 +96,11 @@ export function usePagedList<T>(
   const filtersRef = useRef<ListRequest>({})
   const tokenRef = useRef('')
   const inFlight = useRef(false)
+  // How many items are held, for a reread that keeps its depth.
+  const heldRef = useRef(0)
+  useEffect(() => {
+    heldRef.current = items.length
+  }, [items])
 
   // Bumped on every load/loadMore call. A response applies its state only if
   // it is still the most recent call when it resolves — otherwise a caller
@@ -101,13 +112,27 @@ export function usePagedList<T>(
   const requestIdRef = useRef(0)
 
   const load = useCallback(
-    async (filters: ListRequest): Promise<ListPage<T> | null> => {
+    async (
+      filters: ListRequest,
+      { keepDepth = false }: { keepDepth?: boolean } = {},
+    ): Promise<ListPage<T> | null> => {
       const requestId = ++requestIdRef.current
       inFlight.current = true
       setLoading(true)
+      const want =
+        keepDepth && JSON.stringify(filters) === JSON.stringify(filtersRef.current)
+          ? heldRef.current
+          : 0
       try {
-        const page = await apiList<T>(path, filters)
+        let page = await apiList<T>(path, filters)
+        let held = page.items
+        while (page.next_page_token && held.length < want) {
+          if (requestId !== requestIdRef.current) return null
+          page = await apiList<T>(path, { ...filters, page_token: page.next_page_token })
+          held = appendPage(held, page.items, opts.keyOf)
+        }
         if (requestId !== requestIdRef.current) return null
+        page = { ...page, items: held }
         setItems(page.items)
         setTotal(page.total_count)
         setNextToken(page.next_page_token)
@@ -136,7 +161,7 @@ export function usePagedList<T>(
         }
       }
     },
-    [path, fallbackError, opts.emptyOnStatus],
+    [path, fallbackError, opts.emptyOnStatus, opts.keyOf],
   )
 
   const loadMore = useCallback(async () => {
