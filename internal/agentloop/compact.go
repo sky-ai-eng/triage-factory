@@ -420,11 +420,11 @@ func unansweredCompactionRequest(rows []domain.Message) *domain.Message {
 // standing request with nothing queued, and buildRequest builds that over the
 // same rows a warm attempt would use, so it is a warm attempt and committing
 // its summary is correct.
-// Stop-notes are not skipped between the request and the reply: one
-// engagement writes both around one call, and a stop during that call
-// persists no reply. Any other shape is not this state, and the caller
-// re-summarizes, which is the safe answer when the summary might not cover
-// what follows it.
+// Stop-notes are not skipped between the request and the reply. A stop writes
+// its note before it cancels, so a note lands there only when the summarize
+// call finished in the moment between the two; that case, and any other shape,
+// falls through, and the caller re-summarizes, which is the safe answer when
+// the summary might not cover what follows it.
 //
 // The summary comes from the stored content. sanitizeForStore removes only
 // NUL bytes, which composeResultRow removes anyway, so the result row is the

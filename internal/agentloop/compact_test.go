@@ -921,8 +921,8 @@ func TestCompactionReentry_ACommitCancelledMidwayIsCommittedByTheNextEngagement(
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	// The summarize call's prompt is the whole full window, so the reply it
-	// leaves reads as over the threshold: the trip is what engagement 2 used
-	// to reach a second warm attempt through.
+	// leaves reads as over the threshold and engagement 2 claims with
+	// compaction due.
 	warm := summaryReply("first summary")
 	warm.usage = inference.Usage{PromptTokens: overThreshold, OutputTokens: 500, CacheReadTokens: overThreshold - 20000, CacheCreationTokens: 10000}
 	first := &scriptedProvider{turns: []scriptedTurn{warm}}
@@ -951,7 +951,7 @@ func TestCompactionReentry_ACommitCancelledMidwayIsCommittedByTheNextEngagement(
 		t.Fatal(err)
 	}
 	if !warmCacheLive(rows) || !newTestEngine(tr, nil, nil).compactionDue(testParams(), rows) {
-		t.Fatal("engagement 2 must claim on a live cache with compaction due, the re-entry that used to make a second warm attempt")
+		t.Fatal("engagement 2 must claim on a live cache with compaction due: that is the re-entry under test")
 	}
 	second := &scriptedProvider{turns: []scriptedTurn{
 		{text: "done", usage: inference.Usage{PromptTokens: 2000, OutputTokens: 300}},
