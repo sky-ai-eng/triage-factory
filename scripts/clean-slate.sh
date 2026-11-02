@@ -109,9 +109,32 @@ fi
 
 # Keychain — sweep the keys assembled at the top of this script (static list
 # mirrors integrations.AllLocalSweepKeys(), plus any enumerated github_app_<id>_*
-# keys). macOS `security` only; on Linux this loop is a harmless no-op.
-for key in "${keychain_keys[@]}"; do
-  security delete-generic-password -s triagefactory -a "$key" 2>/dev/null && echo "  removed keychain: $key" || true
-done
+# keys). The keychain is the macOS keychain, or on Linux the Secret Service,
+# where go-keyring files each key under service=triagefactory username=<key>.
+# Left in place, these outlive the database: the next boot reads the old
+# install's credentials as if they belonged to the fresh one.
+case "$(uname -s)" in
+  Darwin)
+    for key in "${keychain_keys[@]}"; do
+      security delete-generic-password -s triagefactory -a "$key" 2>/dev/null && echo "  removed keychain: $key" || true
+    done
+    ;;
+  Linux)
+    if command -v secret-tool >/dev/null 2>&1; then
+      for key in "${keychain_keys[@]}"; do
+        # `secret-tool clear` succeeds whether or not anything matched, so
+        # look the key up first to report only what was there.
+        secret-tool lookup service triagefactory username "$key" >/dev/null 2>&1 || continue
+        if secret-tool clear service triagefactory username "$key"; then
+          echo "  removed keychain: $key"
+        else
+          echo "  warn: could not remove keychain: $key"
+        fi
+      done
+    else
+      echo "  note: secret-tool not found; keychain entries were not removed (install libsecret-tools, or run 'triagefactory uninstall')"
+    fi
+    ;;
+esac
 
 echo "Done. Restart the server for a fresh setup."
