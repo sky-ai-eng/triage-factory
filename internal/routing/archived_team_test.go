@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"sync/atomic"
 	"testing"
 
+	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -207,6 +209,86 @@ func TestArchivedTeam_RequestedGitHubTeamSkipsIt(t *testing.T) {
 	}
 	if vis := visTeamsOf(t, database, active[0].ID); len(vis) != 1 || vis[0] != teamA {
 		t.Errorf("visibility = %v, want only %q", vis, teamA)
+	}
+}
+
+// TestArchivedTeam_RegisteredSourceOwnerIsNoAnswer: a registered source's owner
+// hook names archived team B (as Slack's does for a channel whose primary
+// tracker was archived). B owns nothing: the task is unowned and reaches A
+// only through A's watch rule.
+func TestArchivedTeam_RegisteredSourceOwnerIsNoAnswer(t *testing.T) {
+	database := newTestDB(t)
+	seedHandlerFKTargets(t, database)
+	seedFakeEventCatalog(t, database)
+
+	teamA := seedTeam(t, database, "team-a")
+	teamB := seedTeam(t, database, "team-b")
+	t.Cleanup(ResetSources)
+	RegisterSource("fake", fakeSourceHooks(teamB, true))
+	if _, err := database.Exec(`
+		INSERT INTO event_handlers
+			(id, org_id, team_id, creator_user_id, kind, event_type,
+			 scope_predicate_json, enabled, source, applies_to_unowned, name, default_priority, sort_order,
+			 created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'rule', ?, NULL, 1, 'user', 1, 'fake watch', 0.6, 100, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+	`, "fake-watch-"+teamA[:8], runmode.LocalDefaultOrgID, teamA, runmode.LocalDefaultUserID, fakeEventType); err != nil {
+		t.Fatalf("seed watch rule: %v", err)
+	}
+	archiveTeam(t, database, teamB)
+
+	entityID := fakeEntity(t, database, "fake/thing#archived-owner")
+	mustHandle(t, fakeSourceRouter(database), fakeEvent(entityID))
+
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
+	if err != nil || len(active) != 1 {
+		t.Fatalf("expected 1 task, got %d (err=%v)", len(active), err)
+	}
+	if owner := teamIDValue(&active[0]); owner != "" {
+		t.Errorf("owner = %q, want none (the hook's team is archived)", owner)
+	}
+	if vis := visTeamsOf(t, database, active[0].ID); len(vis) != 1 || vis[0] != teamA {
+		t.Errorf("visibility = %v, want only the watcher %q", vis, teamA)
+	}
+}
+
+// failingTeamReads is a Teams store whose by-id read is down.
+type failingTeamReads struct{ dbpkg.TeamsStore }
+
+func (failingTeamReads) GetSystem(context.Context, string, string) (*domain.Team, error) {
+	return nil, errors.New("teams store down")
+}
+
+// TestArchivedTeam_FailedTeamReadIsALadderError: tier 1 names a team and the
+// read of whether it is archived fails. The event errors, to be retried, and
+// no task is minted on whatever the next tier would have answered.
+func TestArchivedTeam_FailedTeamReadIsALadderError(t *testing.T) {
+	database := newTestDB(t)
+	seedHandlerFKTargets(t, database)
+	setReviewHost(t, database)
+
+	teamA := seedTeam(t, database, "owner-team")
+	teamB := seedTeam(t, database, "author-team")
+	seedUserOnTeam(t, database, teamB, "aidan")
+	seedSystemCIRule(t, database, teamA)
+	seedSystemCIRule(t, database, teamB)
+
+	entityID := reviewEntity(t, database, "owner/repo#team-read-down")
+	if stamped, err := sqlitestore.New(database).Entities.StampOwningTeamIfUnsetSystem(
+		context.Background(), runmode.LocalDefaultOrgID, entityID, teamA); err != nil || !stamped {
+		t.Fatalf("stamp owning team: stamped=%v err=%v", stamped, err)
+	}
+
+	deps := testRouterDeps(database)
+	deps.Teams = failingTeamReads{deps.Teams}
+	if err := newTestRouter(deps).HandleEvent(t.Context(), ciFailedEvent(entityID, "aidan")); err == nil {
+		t.Fatal("HandleEvent succeeded; want the failed team read to fail the event")
+	}
+	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
+	if err != nil {
+		t.Fatalf("list active: %v", err)
+	}
+	if len(active) != 0 {
+		t.Errorf("tasks = %d, want 0 (a failed tier must not fall through to the author's team)", len(active))
 	}
 }
 

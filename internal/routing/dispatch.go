@@ -629,6 +629,14 @@ func (r *Router) resolveOwnedRouting(ctx context.Context, orgID string, evt doma
 	var err error
 	if hooks, ok := sourceHooksFor(evt.EventType); ok {
 		owner, ownerSet, err = resolveSourceOwner(ctx, hooks, eventSourcePrefix(evt.EventType), orgID, evt, entityID)
+		// The hook answers for the whole ladder, so an archived team it names
+		// is taken out here, where the built-in ladders take it out per tier.
+		if err == nil {
+			owner, err = r.liveTeam(ctx, orgID, owner, scopeCache)
+		}
+		if err == nil {
+			ownerSet, err = r.liveTeams(ctx, orgID, ownerSet, scopeCache)
+		}
 	} else if isAuthorCentricGitHubEvent(evt.EventType) {
 		owner, ownerSet, err = r.authorCentricOwner(ctx, orgID, evt, entityID, scopeCache)
 	} else if eventSourcePrefix(evt.EventType) == "linear" {
@@ -673,18 +681,11 @@ func (r *Router) resolveRequestedPartyRouting(ctx context.Context, orgID string,
 	if !scoped {
 		return resolvePoolRouting(matchedRules, matchedTriggers), true, nil
 	}
-	live := reqTeams[:0]
-	for _, teamID := range reqTeams {
-		t, err := r.liveTeam(ctx, orgID, teamID, scopeCache)
-		if err != nil {
-			routerLog.Error("requested party: team read failed", "event_type", evt.EventType, "team_id", teamID, "error", err)
-			return eventRouting{}, false, err
-		}
-		if t != "" {
-			live = append(live, t)
-		}
+	reqTeams, err = r.liveTeams(ctx, orgID, reqTeams, scopeCache)
+	if err != nil {
+		routerLog.Error("requested party: team read failed", "event_type", evt.EventType, "error", err)
+		return eventRouting{}, false, err
 	}
-	reqTeams = live
 	if len(reqTeams) == 0 {
 		routerLog.Warn("requested party maps to no tf team, recording event but no task", "event_type", evt.EventType, "entity_id", entityID)
 		return eventRouting{}, false, nil

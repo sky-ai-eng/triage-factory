@@ -128,6 +128,22 @@ func (r *Router) liveTeam(ctx context.Context, orgID, teamID string, cache teamS
 	return teamID, nil
 }
 
+// liveTeams is teams in order with every archived team taken out. A failed
+// team read is returned, as liveTeam's is.
+func (r *Router) liveTeams(ctx context.Context, orgID string, teams []string, cache teamScopeCache) ([]string, error) {
+	out := make([]string, 0, len(teams))
+	for _, teamID := range teams {
+		t, err := r.liveTeam(ctx, orgID, teamID, cache)
+		if err != nil {
+			return nil, err
+		}
+		if t != "" {
+			out = append(out, t)
+		}
+	}
+	return out, nil
+}
+
 // teamTracksEventScopeCached is the open answer through cache.
 func (r *Router) teamTracksEventScopeCached(ctx context.Context, evt domain.Event, teamID string, cache teamScopeCache) bool {
 	return r.teamScopeCached(ctx, evt, teamID, cache).open
